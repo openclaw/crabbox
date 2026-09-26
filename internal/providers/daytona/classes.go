@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	api "github.com/daytonaio/daytona/libs/api-client-go"
+	api "github.com/daytona/clients/api-client-go"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
@@ -108,8 +108,10 @@ func validateClassSandbox(sandbox *api.Sandbox, snapshot *api.SnapshotDto) error
 	}
 	// Native creation resolves target names and enforces snapshot availability.
 	// The returned target and snapshot regions both carry region IDs.
-	if sandbox.GetCpu() != snapshot.GetCpu() || sandbox.GetMemory() != snapshot.GetMem() ||
-		sandbox.GetDisk() != snapshot.GetDisk() || sandbox.GetGpu() != snapshot.GetGpu() ||
+	// The API uses integers for sandboxes but floats for snapshots. Widen both
+	// sides so comparison cannot truncate a fractional snapshot or round an integer.
+	if float64(sandbox.GetCpu()) != float64(snapshot.GetCpu()) || float64(sandbox.GetMemory()) != float64(snapshot.GetMem()) ||
+		float64(sandbox.GetDisk()) != float64(snapshot.GetDisk()) || float64(sandbox.GetGpu()) != float64(snapshot.GetGpu()) ||
 		(sandbox.HasSandboxClass() && sandbox.GetSandboxClass() != snapshot.GetSandboxClass()) ||
 		(sandbox.GetSnapshot() != snapshot.GetId() && sandbox.GetSnapshot() != snapshot.GetName()) ||
 		!slices.Contains(snapshot.GetRegionIds(), sandbox.GetTarget()) {

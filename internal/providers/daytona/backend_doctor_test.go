@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	apidaytona "github.com/daytonaio/daytona/libs/api-client-go"
+	apidaytona "github.com/daytona/clients/api-client-go"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 

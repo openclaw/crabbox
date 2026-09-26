@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	apidaytona "github.com/daytonaio/daytona/libs/api-client-go"
-	sdkdaytona "github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
-	sdkoptions "github.com/daytonaio/daytona/libs/sdk-go/pkg/options"
-	sdktypes "github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
+	apidaytona "github.com/daytona/clients/api-client-go"
+	sdkdaytona "github.com/daytona/clients/sdk-go/pkg/daytona"
+	sdkoptions "github.com/daytona/clients/sdk-go/pkg/options"
+	sdktypes "github.com/daytona/clients/sdk-go/pkg/types"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )

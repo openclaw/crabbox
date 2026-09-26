@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Move direct Daytona integration to the maintained Go clients, use typed organization and lifetime metadata, and reconcile fixed cleanup through exact sandbox lookup.
+
 - Exclude temporary SSH command environments left by interrupted cleanup from workspace checkpoint archives.
 - Reject NUL-containing SSH command environment values before upload, reporting only the variable name instead of silently corrupting an unsupported value.
 - Retain fixed Proxmox clone claims after proxy-generated or ambiguous authorization responses instead of treating every HTTP 401/403 as proof that no VM was allocated.

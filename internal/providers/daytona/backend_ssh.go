@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	daytona "github.com/daytonaio/daytona/libs/api-client-go"
+	daytona "github.com/daytona/clients/api-client-go"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )

@@ -18,7 +18,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	api "github.com/daytonaio/daytona/libs/api-client-go"
+	api "github.com/daytona/clients/api-client-go"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
@@ -107,16 +107,6 @@ func newDaytonaLifecycleFixtureWithServer(t *testing.T, newServer func(*testing.
 				t.Errorf("unexpected snapshot selection %q", selected)
 			}
 			_ = json.NewEncoder(w).Encode(f.classSnapshot)
-		case r.Method == "GET" && r.URL.Path == "/sandbox/paginated":
-			if r.URL.Query().Get("labels") != "" || r.URL.Query().Get("states") != "" || r.URL.Query().Get("id") == "" ||
-				r.URL.Query().Get("includeErroredDeleted") != "true" || r.URL.Query().Get("page") != "1" || r.URL.Query().Get("limit") != "100" {
-				t.Errorf("unexpected database deletion query: %s", r.URL.RawQuery)
-			}
-			items := []*api.Sandbox{}
-			if f.sandbox != nil && f.sandbox.GetState() != api.SANDBOXSTATE_DESTROYED {
-				items = append(items, f.sandbox)
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "total": len(items), "page": 1, "totalPages": len(items)})
 		case r.Method == "GET" && r.URL.Path == "/sandbox":
 			if r.URL.Query().Get("id") != "" || r.URL.Query().Get("includeErroredDeleted") == "true" {
 				t.Error("fixed deletion used the search index")
@@ -160,10 +150,10 @@ func newDaytonaLifecycleFixtureWithServer(t *testing.T, newServer func(*testing.
 			f.sandbox.SetTarget(core.Blank(f.responseTarget, core.Blank(f.create.GetTarget(), "us")))
 			if f.classSnapshot != nil {
 				f.sandbox.SetSnapshot(f.classSnapshot.GetId())
-				f.sandbox.SetCpu(f.classSnapshot.GetCpu())
-				f.sandbox.SetMemory(f.classSnapshot.GetMem())
-				f.sandbox.SetDisk(f.classSnapshot.GetDisk())
-				f.sandbox.SetGpu(f.classSnapshot.GetGpu())
+				f.sandbox.SetCpu(int32(f.classSnapshot.GetCpu()))
+				f.sandbox.SetMemory(int32(f.classSnapshot.GetMem()))
+				f.sandbox.SetDisk(int32(f.classSnapshot.GetDisk()))
+				f.sandbox.SetGpu(int32(f.classSnapshot.GetGpu()))
 				f.sandbox.SetSandboxClass("container")
 				switch f.responseMismatch {
 				case "response":
@@ -190,7 +180,7 @@ func newDaytonaLifecycleFixtureWithServer(t *testing.T, newServer func(*testing.
 			}
 			_ = json.NewEncoder(w).Encode(f.sandbox)
 		case r.Method == "GET" && r.URL.Path == "/sandbox/sandbox-test":
-			if f.identityOrganization != "" && hiddenDaytonaDeletion(f.sandbox) {
+			if f.identityOrganization != "" && (f.sandbox == nil || f.sandbox.GetState() == api.SANDBOXSTATE_DESTROYED) {
 				w.WriteHeader(http.StatusNotFound)
 				_, _ = io.WriteString(w, `{"message":"resource access could not be established"}`)
 				return
@@ -337,7 +327,7 @@ func TestDaytonaCreationIsPrivateAndHasNativeTTL(t *testing.T) {
 	if sandbox.Public || f.create.GetPublic() {
 		t.Fatal("sandbox previews must remain private")
 	}
-	if got := f.create.AdditionalProperties["ttlMinutes"]; got != float64(90) {
+	if got := f.create.GetTtlMinutes(); got != 90 {
 		t.Fatalf("ttlMinutes=%v", got)
 	}
 	if f.create.GetAutoStopInterval() != 30 {
@@ -888,7 +878,7 @@ func TestDaytonaClientSendsOrganizationHeaderOnce(t *testing.T) {
 			if _, err := client.GetSandbox(t.Context(), "identity-sandbox"); err != nil {
 				t.Fatal(err)
 			}
-			if _, organization, err := fixedDaytonaContext(t.Context(), client); err != nil || organization != "org-test" {
+			if _, organization, err := daytonaAccountContext(t.Context(), client); err != nil || organization != "org-test" {
 				t.Fatalf("organization identity failed: %q %v", organization, err)
 			}
 		})

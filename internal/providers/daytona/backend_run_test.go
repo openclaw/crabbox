@@ -20,10 +20,10 @@ import (
 	"testing/synctest"
 	"time"
 
-	apidaytona "github.com/daytonaio/daytona/libs/api-client-go"
-	sdkdaytona "github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
-	sdktypes "github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
-	toolbox "github.com/daytonaio/daytona/libs/toolbox-api-client-go"
+	apidaytona "github.com/daytona/clients/api-client-go"
+	sdkdaytona "github.com/daytona/clients/sdk-go/pkg/daytona"
+	sdktypes "github.com/daytona/clients/sdk-go/pkg/types"
+	toolbox "github.com/daytona/clients/toolbox-api-client-go"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
 )

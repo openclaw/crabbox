@@ -3,7 +3,7 @@ package daytona
 import (
 	"context"
 
-	api "github.com/daytonaio/daytona/libs/api-client-go"
+	api "github.com/daytona/clients/api-client-go"
 )
 
 type daytonaSnapshotAPI interface {

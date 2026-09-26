@@ -9,9 +9,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-
-	daytona "github.com/daytonaio/daytona/libs/api-client-go"
 	"strings"
+
+	daytona "github.com/daytona/clients/api-client-go"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -27,7 +27,7 @@ func (b *daytonaLeaseBackend) VerifyResourceAbsent(ctx context.Context, claim co
 	if err != nil {
 		return core.AbsenceEvidence{}, err
 	}
-	scope, organization, err := daytonaAccountContext(ctx, client, false)
+	scope, organization, err := daytonaAccountContext(ctx, client)
 	if err != nil {
 		return core.AbsenceEvidence{}, err
 	}
@@ -48,24 +48,39 @@ func (b *daytonaLeaseBackend) VerifyResourceAbsent(ctx context.Context, claim co
 }
 
 func (c *daytonaSDKClient) resourceAbsent(ctx context.Context, id, organization string) (bool, error) {
+	item, err := c.getSandboxForCleanup(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	if item != nil {
+		if item.GetOrganizationId() != organization {
+			return false, core.Exit(4, "Daytona exact lookup returned a different organization")
+		}
+		return false, nil
+	}
+	return c.inventoryOmitsResource(ctx, id, organization)
+}
+
+// Cleanup needs an exact database lookup and a structured provider 404; a
+// proxy error or malformed success must never retire the local ownership claim.
+func (c *daytonaSDKClient) getSandboxForCleanup(ctx context.Context, id string) (*daytona.Sandbox, error) {
 	req := c.api.SandboxAPI.GetSandbox(c.ctx(ctx), id).Verbose(true)
 	if c.orgID != "" {
 		req = req.XDaytonaOrganizationID(c.orgID)
 	}
 	item, response, err := req.Execute()
 	if err == nil {
-		if item == nil || item.GetId() != id || item.GetOrganizationId() != organization {
-			return false, core.Exit(4, "Daytona exact lookup returned a different resource or organization")
+		if item == nil || item.GetId() != id {
+			return nil, core.Exit(4, "Daytona exact lookup returned a different or missing resource")
 		}
-		return false, nil
+		return item, nil
 	}
 	if response == nil || response.StatusCode != http.StatusNotFound || !daytonaIsNotFoundError(err) {
-		return false, c.redactError(err)
+		return nil, c.redactError(err)
 	}
 	var body interface{ Body() []byte }
-	// A malformed gateway response is not a provider not-found receipt.
 	if !errors.As(err, &body) {
-		return false, core.Exit(4, "Daytona not-found response has no structured body")
+		return nil, core.Exit(4, "Daytona not-found response has no structured body")
 	}
 	var missing struct {
 		Message    string `json:"message"`
@@ -73,9 +88,9 @@ func (c *daytonaSDKClient) resourceAbsent(ctx context.Context, id, organization 
 	}
 	duplicate, decodeErr := core.JSONHasDuplicateKeys(json.NewDecoder(bytes.NewReader(body.Body())))
 	if decodeErr != nil || duplicate || json.Unmarshal(body.Body(), &missing) != nil || missing.Message == "" || missing.StatusCode != nil && *missing.StatusCode != http.StatusNotFound {
-		return false, core.Exit(4, "Daytona not-found response is malformed; retaining claim")
+		return nil, core.Exit(4, "Daytona not-found response is malformed; retaining claim")
 	}
-	return c.inventoryOmitsResource(ctx, id, organization)
+	return nil, nil
 }
 
 // Unlike discovery, absence proof must include sandboxes whose labels changed.

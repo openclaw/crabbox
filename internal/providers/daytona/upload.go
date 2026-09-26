@@ -11,8 +11,8 @@ import (
 	"path"
 	"strings"
 
-	apidaytona "github.com/daytonaio/daytona/libs/api-client-go"
-	sdkdaytona "github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
+	apidaytona "github.com/daytona/clients/api-client-go"
+	sdkdaytona "github.com/daytona/clients/sdk-go/pkg/daytona"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 

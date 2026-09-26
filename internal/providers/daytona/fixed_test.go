@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	api "github.com/daytonaio/daytona/libs/api-client-go"
+	api "github.com/daytona/clients/api-client-go"
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
@@ -227,15 +227,11 @@ func TestDaytonaFixedAPIKeyScopeAdmission(t *testing.T) {
 				}
 				f.hideIdentitySandbox = scenario == "legacy empty inventory"
 			}
-			if scenario == "empty inventory" || scenario == "legacy identity" {
+			if scenario == "empty inventory" {
 				if _, err := b.Acquire(t.Context(), req); err != nil || f.sandboxCreates != 1 {
 					t.Fatalf("authenticated empty organization could not allocate: %v", err)
 				}
-				if scenario == "legacy identity" {
-					if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err == nil || !strings.Contains(err.Error(), "does not expose organizationId") || f.deletes != 0 {
-						t.Fatalf("legacy resource admission incorrectly authorized absence: %v", err)
-					}
-				}
+
 				return
 			}
 			if _, err := b.Acquire(t.Context(), req); err == nil || f.sandboxCreates != 0 {
@@ -262,7 +258,7 @@ func TestDaytonaFixedPreparedIntentRecoveryBeforeSubmission(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			scope, organization, err := fixedDaytonaContext(t.Context(), client)
+			scope, organization, err := daytonaAccountContext(t.Context(), client)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -308,8 +304,8 @@ func TestDaytonaFixedPreparedIntentRecoveryBeforeSubmission(t *testing.T) {
 				if err != nil || f.sandboxCreates != 1 || after.FixedCreateIntent.CreatedAt != before.FixedCreateIntent.CreatedAt {
 					t.Fatalf("unsubmitted recovery failed or reset deadline: %v", err)
 				}
-				minutes, ok := f.create.AdditionalProperties["ttlMinutes"].(float64)
-				if !ok || minutes <= 0 || minutes > 20 {
+				minutes := f.create.GetTtlMinutes()
+				if minutes <= 0 || minutes > 20 {
 					t.Fatalf("native TTL reset on recovery: %v", minutes)
 				}
 			} else {
@@ -410,10 +406,7 @@ func interruptDaytonaFixedCleanup(t *testing.T, f *daytonaLifecycleFixture, leas
 	original := f.server.Config.Handler
 	f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		original.ServeHTTP(w, r)
-		f.mu.Lock()
-		visibleDetail := r.URL.Path == "/sandbox/sandbox-test" && !hiddenDaytonaDeletion(f.sandbox)
-		f.mu.Unlock()
-		if r.Method == http.MethodGet && (visibleDetail || r.URL.Path == "/sandbox/paginated") {
+		if r.Method == http.MethodGet && r.URL.Path == "/sandbox/sandbox-test" {
 			claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
 			if err == nil && exists && claim.FixedCreateIntent != nil && claim.FixedCreateIntent.Attempt["deletion_acknowledged_id"] == claim.CloudID {
 				observations++
@@ -616,159 +609,95 @@ func TestDaytonaFixedNativeDeletionRetiresOnlyAcquiredLease(t *testing.T) {
 	}
 }
 
-func TestDaytonaFixedCleanupFailureInclusiveInventory(t *testing.T) {
-	for _, nativeExpiry := range []bool{false, true} {
-		for _, scenario := range []string{"absent", "prefix neighbor", "stale", "error", "build failed", "later page error", "later page absent", "repeated resource", "page failure", "wrong page", "changed total", "missing items", "null items", "missing total", "null total", "fractional total", "negative total", "null page", "null total pages", "inconsistent total pages", "short page", "wrong nonce", "changed organization"} {
-			t.Run(fmt.Sprintf("native-expiry=%t/%s", nativeExpiry, scenario), func(t *testing.T) {
+func TestDaytonaFixedCleanupExactLookup(t *testing.T) {
+	for _, absenceOnly := range []bool{false, true} {
+		for _, scenario := range []string{"absent", "destroyed", "pending", "error", "build failed", "different UUID", "wrong nonce", "wrong organization", "changed account", "null success", "forbidden", "unavailable", "HTML not found", "empty not found", "duplicate not found", "conflicting not found"} {
+			t.Run(fmt.Sprintf("absence-only=%t/%s", absenceOnly, scenario), func(t *testing.T) {
 				f, b, req := newFixedDaytonaFixture(t)
 				lease, err := b.Acquire(t.Context(), req)
 				if err != nil {
 					t.Fatal(err)
 				}
 				wantDeletes := 0
-				if !nativeExpiry {
+				if !absenceOnly {
 					wantDeletes = 1
 					f.deletionPending = true
-					err = interruptDaytonaFixedCleanup(t, f, req.RequestedLeaseID, func(ctx context.Context) error {
+					if err := interruptDaytonaFixedCleanup(t, f, req.RequestedLeaseID, func(ctx context.Context) error {
 						return b.ReleaseLease(ctx, core.ReleaseLeaseRequest{Lease: lease})
-					})
-					if err == nil || f.deletes != 1 {
+					}); err == nil || f.deletes != 1 {
 						t.Fatalf("missing interrupted deletion: %v", err)
 					}
 				}
-				f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
-				if scenario == "changed organization" {
+				item := *f.sandbox
+				item.SetDesiredState(api.SANDBOXDESIREDSTATE_DESTROYED)
+				switch scenario {
+				case "destroyed":
+					item.SetState(api.SANDBOXSTATE_DESTROYED)
+				case "error":
+					item.SetState(api.SANDBOXSTATE_ERROR)
+				case "build failed":
+					item.SetState(api.SANDBOXSTATE_BUILD_FAILED)
+				case "different UUID":
+					item.SetId(item.GetId() + "-neighbor")
+				case "wrong nonce":
+					item.Labels = map[string]string{}
+				case "wrong organization":
+					item.SetOrganizationId("other-org")
+				case "changed account":
 					f.identityOrganization = "other-org"
 				}
-				item := *f.sandbox
-				item.SetState(api.SANDBOXSTATE_ERROR)
-				if scenario == "build failed" {
-					item.SetState(api.SANDBOXSTATE_BUILD_FAILED)
-				}
-				if scenario == "stale" {
-					item.SetState(api.SANDBOXSTATE_STARTED)
-				}
-				if scenario == "prefix neighbor" {
-					item.SetId(item.GetId() + "-neighbor")
-				}
-				if scenario == "wrong nonce" {
-					item.Labels = map[string]string{}
-				}
 				original := f.server.Config.Handler
-				pages := 0
 				f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.Method != http.MethodGet || r.URL.Path != "/sandbox/paginated" {
+					if r.Method != http.MethodGet || r.URL.Path != "/sandbox/sandbox-test" {
 						original.ServeHTTP(w, r)
 						return
 					}
-					pages++
-					if r.URL.Query().Get("states") != "" || r.URL.Query().Get("labels") != "" || r.URL.Query().Get("includeErroredDeleted") != "true" || r.URL.Query().Get("id") != lease.Server.CloudID {
-						t.Errorf("unsupported or unscoped database inventory: %s", r.URL.RawQuery)
-					}
 					w.Header().Set("Content-Type", "application/json")
-					body := map[string]any{"items": []api.Sandbox{item}, "total": 1, "page": 1, "totalPages": 1}
 					switch scenario {
-					case "absent", "missing items", "null items", "missing total", "null total", "fractional total", "negative total", "null page", "null total pages", "inconsistent total pages", "short page":
-						body = map[string]any{"items": []api.Sandbox{}, "total": 0, "page": 1, "totalPages": 0}
+					case "absent", "HTML not found", "empty not found", "duplicate not found", "conflicting not found":
+						w.WriteHeader(http.StatusNotFound)
+						body := `{"message":"sandbox not found","statusCode":404}`
 						switch scenario {
-						case "missing items":
-							delete(body, "items")
-						case "null items":
-							body["items"] = nil
-						case "missing total":
-							delete(body, "total")
-						case "null total":
-							body["total"] = nil
-						case "fractional total":
-							body["total"] = 0.5
-						case "negative total":
-							body["total"] = -1
-						case "null page":
-							body["page"] = nil
-						case "null total pages":
-							body["totalPages"] = nil
-						case "inconsistent total pages":
-							body["totalPages"] = 1
-						case "short page":
-							body["total"], body["totalPages"] = 1, 1
+						case "HTML not found":
+							body = "<html>proxy not found</html>"
+						case "empty not found":
+							body = `{}`
+						case "duplicate not found":
+							body = `{"message":"missing","message":"duplicate"}`
+						case "conflicting not found":
+							body = `{"message":"denied","statusCode":403}`
 						}
-					case "later page error", "later page absent", "repeated resource", "page failure", "wrong page", "changed total":
-						if r.URL.Query().Get("page") == "1" {
-							neighbors := make([]api.Sandbox, 100)
-							for i := range neighbors {
-								neighbors[i] = item
-								neighbors[i].SetId(fmt.Sprintf("%s-neighbor-%d", item.GetId(), i))
-							}
-							body = map[string]any{"items": neighbors, "total": 101, "page": 1, "totalPages": 2}
-						} else {
-							if scenario == "page failure" {
-								w.WriteHeader(http.StatusServiceUnavailable)
-								return
-							}
-							body["total"], body["page"], body["totalPages"] = 101, 2, 2
-							if scenario == "later page absent" || scenario == "repeated resource" {
-								neighbor := item
-								neighbor.SetId(item.GetId() + "-neighbor-final")
-								if scenario == "repeated resource" {
-									neighbor.SetId(item.GetId() + "-neighbor-0")
-								}
-								body["items"] = []api.Sandbox{neighbor}
-							}
-							if scenario == "wrong page" {
-								body["page"] = 1
-							}
-							if scenario == "changed total" {
-								body["total"] = 102
-							}
-						}
+						_, _ = fmt.Fprint(w, body)
+					case "null success":
+						_, _ = fmt.Fprint(w, "null")
+					case "forbidden":
+						w.WriteHeader(http.StatusForbidden)
+					case "unavailable":
+						w.WriteHeader(http.StatusServiceUnavailable)
+					default:
+						_ = json.NewEncoder(w).Encode(item)
 					}
-					_ = json.NewEncoder(w).Encode(body)
 				})
-				if nativeExpiry {
-					var view core.StatusView
-					view, err = b.Status(t.Context(), core.StatusRequest{ID: req.RequestedLeaseID})
-					if err == nil && (view.State != "released" || view.Ready) {
-						t.Fatalf("expiry observation reported usable lease: %+v", view)
-					}
-				} else if scenario == "stale" {
-					err = interruptDaytonaFixedCleanup(t, f, req.RequestedLeaseID, func(ctx context.Context) error { return b.Stop(ctx, core.StopRequest{ID: req.RequestedLeaseID}) })
+				claim, _, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if absenceOnly {
+					err = b.releaseFixed(t.Context(), claim, "", true, req.Repo.Root)
+				} else if scenario == "pending" {
+					err = interruptDaytonaFixedCleanup(t, f, req.RequestedLeaseID, func(ctx context.Context) error {
+						return b.Stop(ctx, core.StopRequest{ID: req.RequestedLeaseID})
+					})
 				} else {
 					err = b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID})
 				}
 				claim, exists, readErr := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
-				wantReleased := scenario == "absent" || scenario == "prefix neighbor" || scenario == "later page absent"
+				wantReleased := scenario == "absent" || scenario == "destroyed"
 				if readErr != nil || !exists || (err == nil) != wantReleased || (claim.FixedCreateIntent.State == "released") != wantReleased || f.deletes != wantDeletes {
 					t.Fatalf("incorrect deletion reconciliation: err=%v read=%v state=%s deletes=%d", err, readErr, claim.FixedCreateIntent.State, f.deletes)
 				}
-				if (scenario == "later page error" || scenario == "later page absent" || scenario == "repeated resource" || scenario == "page failure" || scenario == "wrong page" || scenario == "changed total") && pages != 2 {
-					t.Fatalf("incomplete pagination: pages=%d", pages)
-				}
 			})
 		}
-	}
-}
-
-func TestDaytonaFixedCleanupRequiresDatabaseIdentity(t *testing.T) {
-	f, b, req := newFixedDaytonaFixture(t)
-	lease, err := b.Acquire(t.Context(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	original := f.server.Config.Handler
-	f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/sandbox/paginated" {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprint(w, `{"items":[],"total":0,"page":1,"totalPages":0}`)
-			return
-		}
-		original.ServeHTTP(w, r)
-	})
-	if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || f.deletes != 0 {
-		t.Fatalf("unobserved child reached deletion: %v", err)
-	}
-	f.server.Config.Handler = original
-	if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err != nil || f.deletes != 1 {
-		t.Fatalf("database-visible child failed cleanup: %v", err)
 	}
 }
 
@@ -961,5 +890,30 @@ func TestDaytonaFixedScopeAndResourceDriftPreserveClaim(t *testing.T) {
 				t.Fatal("deleted after ownership drift")
 			}
 		})
+	}
+}
+
+func TestDaytonaFixedCleanupWithoutPaginatedEndpoint(t *testing.T) {
+	f, b, req := newFixedDaytonaFixture(t)
+	lease, err := b.Acquire(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := f.server.Config.Handler
+	f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && (r.URL.Path == "/sandbox/paginated" || r.URL.Path == "/sandbox") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusGone)
+			_, _ = fmt.Fprint(w, `{"message":"list endpoints unavailable"}`)
+			return
+		}
+		original.ServeHTTP(w, r)
+	})
+	if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+	if err != nil || !exists || claim.FixedCreateIntent.State != "released" || f.deletes != 1 {
+		t.Fatalf("exact cleanup failed: err=%v exists=%v deletes=%d", err, exists, f.deletes)
 	}
 }

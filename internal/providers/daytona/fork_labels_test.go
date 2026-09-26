@@ -40,10 +40,10 @@ func TestDaytonaForkOmitsUnverifiedClass(t *testing.T) {
 				}
 				for source, labels := range map[string]map[string]string{"create": f.create.GetLabels(), "sandbox": f.sandbox.GetLabels(), "claim": claim.Labels} {
 					if value, exists := labels["class"]; exists {
-						t.Errorf("%s class=%q misrepresents snapshot CPU=%g memory=%g GiB", source, value, f.sandbox.GetCpu(), f.sandbox.GetMemory())
+						t.Errorf("%s class=%q misrepresents snapshot CPU=%d memory=%d GiB", source, value, f.sandbox.GetCpu(), f.sandbox.GetMemory())
 					}
 				}
-				t.Logf("snapshot CPU=%g memory=%g GiB; create/sandbox/claim class=%q", f.sandbox.GetCpu(), f.sandbox.GetMemory(), claim.Labels["class"])
+				t.Logf("snapshot CPU=%d memory=%d GiB; create/sandbox/claim class=%q", f.sandbox.GetCpu(), f.sandbox.GetMemory(), claim.Labels["class"])
 				if fixed {
 					fingerprint, nonce := claim.FixedCreateIntent.Fingerprint, claim.FixedCreateIntent.Attempt["nonce"]
 					replayed, err := b.Acquire(t.Context(), req)

@@ -215,46 +215,38 @@ acquired children can replay after their source snapshot is retired.
 Fixed acquisition must establish the organization before allocation. OAuth uses
 the selected organization from the existing CLI profile. API-key mode reads the
 authenticated `organizationId` from `/api-keys/current`, including empty accounts.
-The deployed API returns this field although the pinned Go SDK retains it only
-as an additional property. Invalid or conflicting identity is rejected.
-Older servers matching the public Daytona 0.190.0 contract omit this field;
-acquisition retains their existing child, private-checkpoint, or visible-sandbox
-identity path. That compatibility path remains until those servers are no longer
-supported, and never authorizes cleanup of an absent resource. API-key cleanup
-requires the current-key organization field; older servers require an OAuth
-organization profile instead. Ordinary warmup without a fixed ID retains its
-existing API-key behavior. No credentials or token-derived identifiers are stored
-in fixed claims.
+The maintained Daytona Go client exposes this field directly. Missing, invalid,
+or conflicting identity is rejected; an API deployment without current-key
+organization metadata requires an OAuth organization profile. No credentials or
+token-derived identifiers are stored in fixed claims.
 
 Fixed claims use a distinct provider marker so older clients cannot treat them
 as ordinary Daytona claims and erase terminal replay protection. Failed or
 uncertain cleanup retains the claim. An unqualified 404 is not deletion proof:
 the provider's resource-access layer can also use that response for failed access.
-Fixed cleanup durably binds the native UUID, verifies that UUID through the
-existing `/sandbox/paginated` database-backed inventory, and records an
-identity-validated deletion acknowledgment before reconciling removal. The query
-uses only the UUID and `includeErroredDeleted`, without mutable label filters;
-it reads the sandbox table directly rather than the ordinary search index.
+Fixed cleanup durably binds the native UUID, verifies it through
+`GET /sandbox/{id}`, and records an identity-validated deletion acknowledgment
+before reconciling removal. The exact lookup reads the database rather than the
+ordinary cursor-list search index. Cleanup requires the endpoint to expose
+failed-deletion records until destruction completes.
 
 Once cleanup durably records its entry before DELETE, replay and execution are
 blocked even if the DELETE response is lost and the sandbox still appears ready;
 retry `stop` to reconcile it. Acknowledgment only means destruction was requested.
-Cleanup then requires an exact UUID lookup returning 404, fresh authenticated
-access to the original organization, and complete database inventory showing no
-exact UUID. Required pagination metadata must be present, integral, and
-consistent; failed-deletion rows, malformed responses, and incomplete pages
-retain custody. No timed sampling or search-index fallback establishes absence.
-This confirms that the provider has no remaining nonterminal record for that
-resource, including failed destruction, not independent proof of physical storage
-reclamation.
+Cleanup then requires a structured exact-UUID not-found response and fresh
+access to the original authenticated organization, or an identity-validated
+`destroyed` record. Failed deletions, conflicting identities, and malformed
+responses retain custody. The exact lookup can expose destroyed spot-preemption
+records for 24 hours; those terminal records do not keep a fixed claim pending.
+This confirms the provider-visible terminal outcome, not independent proof of
+physical storage reclamation.
 
 This works after deletion of the last live sandbox and accommodates the native
 rename during deletion. The durable acknowledgment survives interruption and
 same-organization credential rotation. Native TTL or external deletion can remove
 a successfully acquired sandbox before Crabbox requests deletion. In that case,
 `stop`, `inspect`, and `status` reconcile the recorded exact UUID against fresh
-authenticated organization identity and complete failure-inclusive database
-absence, then persist the same terminal claim. Inspection never issues DELETE.
+authenticated organization identity and exact database absence, then persist the same terminal claim. Inspection never issues DELETE.
 Neither a bare 404 nor an elapsed deadline establishes removal. Incomplete creates
 without a deletion witness, including attempts whose UUID was never observed,
 remain explicit operator reconciliation obligations. No second create is submitted.
@@ -282,7 +274,9 @@ If native TTL or external deletion removes such a sandbox, use
 `crabbox stop --force --provider daytona --id <canonical-cbx-id>`. Crabbox verifies
 the current endpoint/organization against the original binding, an exact
 structured not-found, and complete inventory without a Crabbox label filter.
-Inventory is bounded to 100 pages of 100 sandboxes and 8 MiB per response;
+The cursor inventory may briefly lag the exact lookup; a stale entry retains the
+claim until a later retry. Inventory is bounded to 100 pages of 100 sandboxes and
+8 MiB per response;
 malformed, null, repeated, oversized, or failed pages retain the claim. Recovery
 has a three-minute total budget and reports `forgotten locally (resource absent)`
 without sending a delete. Ordinary `stop` and fixed-ID replay keep their existing

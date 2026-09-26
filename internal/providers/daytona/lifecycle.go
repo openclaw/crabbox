@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	daytona "github.com/daytonaio/daytona/libs/api-client-go"
+	daytona "github.com/daytona/clients/api-client-go"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
@@ -42,8 +42,7 @@ func daytonaCreateBody(cfg core.Config, leaseID, slug string, keep bool, now tim
 	body.SetPublic(false)
 	body.SetAutoStopInterval(int32(core.DurationMinutesCeil(cfg.IdleTimeout)))
 	body.SetAutoDeleteInterval(-1)
-	// The pinned generated client preserves newer API fields in AdditionalProperties.
-	body.AdditionalProperties = map[string]interface{}{"ttlMinutes": core.DurationMinutesCeil(cfg.TTL)}
+	body.SetTtlMinutes(int32(core.DurationMinutesCeil(cfg.TTL)))
 	if target := strings.TrimSpace(cfg.Daytona.Target); target != "" {
 		body.SetTarget(target)
 	}
@@ -74,7 +73,7 @@ func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo cor
 			return nil, "", "", err
 		}
 	}
-	scope, organization, err := daytonaAccountContext(ctx, client, false)
+	scope, organization, err := daytonaAccountContext(ctx, client)
 	if err != nil {
 		return nil, "", "", err
 	}

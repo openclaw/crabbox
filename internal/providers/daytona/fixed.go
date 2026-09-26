@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	api "github.com/daytonaio/daytona/libs/api-client-go"
+	api "github.com/daytona/clients/api-client-go"
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
@@ -28,18 +28,14 @@ func (b *daytonaLeaseBackend) SupportsRequestedCheckpointID() bool {
 	return b.SupportsRequestedLeaseID()
 }
 
-func fixedDaytonaContext(ctx context.Context, client daytonaAPI) (string, string, error) {
-	return daytonaAccountContext(ctx, client, true)
-}
-
-func daytonaAccountContext(ctx context.Context, client daytonaAPI, allowResourceIdentity bool) (string, string, error) {
+func daytonaAccountContext(ctx context.Context, client daytonaAPI) (string, string, error) {
 	identity, ok := client.(interface {
-		fixedOrganization(context.Context, bool) (string, string, error)
+		fixedOrganization(context.Context) (string, string, error)
 	})
 	if !ok {
 		return "", "", core.Exit(4, "Daytona client has no organization identity contract")
 	}
-	endpoint, organization, err := identity.fixedOrganization(ctx, allowResourceIdentity)
+	endpoint, organization, err := identity.fixedOrganization(ctx)
 	if err != nil {
 		return "", "", err
 	}
@@ -121,7 +117,7 @@ func (b *daytonaLeaseBackend) acquireFixed(ctx context.Context, req core.Acquire
 				scope, organization, err = fixedDaytonaResourceContext(client, snapshot.GetOrganizationId())
 			}
 		default:
-			scope, organization, err = fixedDaytonaContext(ctx, client)
+			scope, organization, err = daytonaAccountContext(ctx, client)
 		}
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
@@ -214,7 +210,7 @@ func (b *daytonaLeaseBackend) acquireFixed(ctx context.Context, req core.Acquire
 		cfg.Daytona.Snapshot = snapshot.GetId()
 		body.SetSnapshot(cfg.Daytona.Snapshot)
 		// Replay retains the original lease deadline, including native TTL.
-		body.AdditionalProperties["ttlMinutes"] = core.DurationMinutesCeil(remaining)
+		body.SetTtlMinutes(int32(core.DurationMinutesCeil(remaining)))
 		createBody = body
 		return core.FixedAttemptPlan{NonceKey: "nonce", OwnerLabel: "fixed_claim_provider", Labels: body.GetLabels(), FingerprintLabel: "fixed_intent_sha256", NonceLabel: "fixed_attempt",
 			Values: map[string]string{"name": body.GetName(), "snapshot": snapshot.GetName(), "snapshot_id": snapshot.GetId(), "user": daytonaUser(cfg), "target": cfg.Daytona.Target, "organization": organization},
@@ -389,7 +385,7 @@ func (b *daytonaLeaseBackend) reclaimFixed(ctx context.Context, claim core.Lease
 type fixedDaytonaDeletionAPI interface {
 	daytonaAPI
 	fixedSelection() (endpoint, organization string)
-	findPendingDeletion(context.Context, string) (*api.Sandbox, error)
+	getSandboxForCleanup(context.Context, string) (*api.Sandbox, error)
 	attestDeletionOrganization(context.Context, string) error
 	requestSandboxDeletion(context.Context, string) (*api.Sandbox, error)
 }
@@ -441,44 +437,33 @@ func deleteFixedDaytonaSandbox(ctx context.Context, client fixedDaytonaDeletionA
 		return err
 	}
 	if absenceOnly || intent.Attempt["deletion_acknowledged_id"] == "" {
-		sandbox, err := client.GetSandbox(ctx, claim.CloudID)
+		sandbox, err := client.getSandboxForCleanup(ctx, claim.CloudID)
 		if err != nil {
+			return err
+		}
+		if sandbox == nil {
 			// Native TTL or external deletion can finish without our DELETE witness.
-			// Only a completed exact acquisition plus current scoped database absence
-			// can retire that claim. A clock deadline or GET alone proves neither.
-			if daytonaIsNotFoundError(err) && intent.State == "acquired" && claim.CloudImmutableID == claim.CloudID &&
+			// Only a completed exact acquisition can retire from authenticated absence.
+			if intent.State == "acquired" && claim.CloudImmutableID == claim.CloudID &&
 				claim.Labels["fixed_claim_provider"] == core.FixedDaytonaClaimProvider &&
 				claim.Labels["lease"] == claim.LeaseID && claim.Labels["fixed_intent_sha256"] == intent.Fingerprint &&
 				claim.Labels["fixed_attempt"] == intent.Attempt["nonce"] {
-				pending, lookupErr := client.findPendingDeletion(ctx, claim.CloudID)
-				if lookupErr != nil {
-					return lookupErr
-				}
-				if pending == nil {
-					return nil
-				}
-				return core.Exit(4, "Daytona fixed resource remains in database inventory; retain its claim")
+				return nil
 			}
-			return fmt.Errorf("Daytona fixed deletion has no acknowledged outcome; retain lease %s: %w", claim.LeaseID, err)
-		}
-		if absenceOnly {
-			return core.Exit(4, "Daytona fixed resource is still present; inspection cannot delete it")
+			return core.Exit(4, "Daytona fixed deletion has no acknowledged outcome; retain lease %s", claim.LeaseID)
 		}
 		if err := validateFixedDaytonaDeletionIdentity(client, *claim, sandbox); err != nil {
 			return err
 		}
-		// Keep the existing durable cleanup-entry marker, now attested against
-		// the database inventory before DELETE rather than the search index.
-		indexed, err := client.findPendingDeletion(ctx, claim.CloudID)
-		if err != nil {
-			return err
+		// Spot preemption can leave an exact DESTROYED tombstone visible for 24h.
+		if sandbox.GetState() == api.SANDBOXSTATE_DESTROYED {
+			return nil
 		}
-		if indexed == nil {
-			return core.Exit(4, "Daytona fixed resource is missing from database inventory; retain its claim and retry stop")
+		if absenceOnly {
+			return core.Exit(4, "Daytona fixed resource is still present; inspection cannot delete it")
 		}
-		if err := validateFixedDaytonaDeletionIdentity(client, *claim, indexed); err != nil {
-			return err
-		}
+		// Retain the persisted cleanup-entry key for existing claims. Its identity
+		// now comes from the exact database lookup, before admitting DELETE.
 		if err := core.RecordFixedWitness(claim, "deletion_indexed_id", claim.CloudID, persist); err != nil {
 			return err
 		}
@@ -505,31 +490,29 @@ func deleteFixedDaytonaSandbox(ctx context.Context, client fixedDaytonaDeletionA
 		return core.Exit(4, "Daytona fixed deletion has no prior inventory identity; retain its claim")
 	}
 	for {
-		sandbox, err := client.GetSandbox(ctx, claim.CloudID)
-		if err != nil && !daytonaIsNotFoundError(err) {
+		sandbox, err := client.getSandboxForCleanup(ctx, claim.CloudID)
+		if err != nil {
 			return err
 		}
-		if err == nil {
-			if err := validateFixedDaytonaDeletionIdentity(client, *claim, sandbox); err != nil {
-				return err
-			}
-		} else {
-			// GET also hides failed deletions. Freshly attest the original account
-			// and inspect failure-inclusive inventory before accepting API-visible
-			// removal; this is not a positive physical-destruction observation.
+		if sandbox == nil {
+			// Reattest the original account, then reread the exact resource so a
+			// stale credential context cannot convert inaccessible state to absence.
 			if err := client.attestDeletionOrganization(ctx, intent.Attempt["organization"]); err != nil {
 				return err
 			}
-			sandbox, err = client.findPendingDeletion(ctx, claim.CloudID)
+			sandbox, err = client.getSandboxForCleanup(ctx, claim.CloudID)
 			if err != nil {
 				return err
 			}
 			if sandbox == nil {
 				return nil
 			}
-			if err := validateFixedDaytonaDeletionIdentity(client, *claim, sandbox); err != nil {
-				return err
-			}
+		}
+		if err := validateFixedDaytonaDeletionIdentity(client, *claim, sandbox); err != nil {
+			return err
+		}
+		if sandbox.GetState() == api.SANDBOXSTATE_DESTROYED {
+			return nil
 		}
 		if sandbox.GetState() == api.SANDBOXSTATE_ERROR || sandbox.GetState() == api.SANDBOXSTATE_BUILD_FAILED {
 			return core.Exit(4, "Daytona fixed deletion failed with state=%s; retain lease %s for reconciliation", sandbox.GetState(), claim.LeaseID)
@@ -575,7 +558,7 @@ func (b *daytonaLeaseBackend) AuthorizeStatusTouchClaim(ctx context.Context, lea
 		if err != nil {
 			return err
 		}
-		scope, _, err := daytonaAccountContext(ctx, client, false)
+		scope, _, err := daytonaAccountContext(ctx, client)
 		if err != nil {
 			return err
 		}
