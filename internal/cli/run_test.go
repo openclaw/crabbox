@@ -785,13 +785,16 @@ type runEnvProfileTestBackend struct {
 	spec ProviderSpec
 }
 
-func (b runEnvProfileTestBackend) AcquireIsExclusiveOneShot() bool { return true }
+func (b runEnvProfileTestBackend) AcquireIsExclusiveOneShot() bool {
+	return !runEnvProfileTestCloseBeforeRelease
+}
 
 var runEnvProfileTestReleaseErr error
 var runEnvProfileTestReleaseHook func() error
 var runEnvProfileTestReleaseRequestHook func(ReleaseLeaseRequest) error
 var runEnvProfileTestConnectionCleanupSafe = true
 var runEnvProfileTestPreservesSSHWorkspace bool
+var runEnvProfileTestCloseBeforeRelease bool
 var runEnvProfileTestRetainsLease bool
 var runEnvProfileTestTerminalReleaseError bool
 var runEnvProfileTestAcquireHook func(AcquireRequest)
@@ -1033,6 +1036,10 @@ func TestRunCommandCleanupRejectsClaimReplacedAfterRegistration(t *testing.T) {
 }
 func (b runEnvProfileTestBackend) ReleaseLeaseConnectionCleanupSafe() bool {
 	return runEnvProfileTestConnectionCleanupSafe
+}
+
+func (b runEnvProfileTestBackend) RequiresSSHWorkspaceCloseBeforeRelease() bool {
+	return runEnvProfileTestCloseBeforeRelease
 }
 
 func (b runEnvProfileTestBackend) PreservesSSHWorkspaceAfterRelease() bool {
@@ -10238,5 +10245,37 @@ func TestDelegatedFixedWarmupAndReleaseRouting(t *testing.T) {
 	want := ProviderIdentityExpectation{LeaseID: id, AttemptLeaseID: id, Slug: "fixed-route", ResourceID: "claim-uid"}
 	if b.stop.ID != id || b.stop.ExpectedProviderIdentity != want {
 		t.Fatalf("release identity=%#v", b.stop)
+	}
+}
+
+func TestRunClosesWorkspaceBeforeProviderRelease(t *testing.T) {
+	dir, _ := setupLocalContainerRunSessionTest(t, "")
+	logPath := installRecordingSSH(t, dir)
+	runEnvProfileTestCloseBeforeRelease = true
+	runEnvProfileTestPreservesSSHWorkspace = true
+	t.Cleanup(func() { runEnvProfileTestCloseBeforeRelease = false; runEnvProfileTestPreservesSSHWorkspace = false })
+	released := false
+	runEnvProfileTestReleaseHook = func() error {
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(string(data), "protocol_action='release'") {
+			return errors.New("provider release ran before workspace authority closed")
+		}
+		released = true
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{"--provider", "run-env-profile-test", "--no-sync", "--no-hydrate", "--", "true"})
+	if err != nil || !released {
+		t.Fatalf("released=%v err=%v stderr=%s", released, err, stderr.String())
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(data), "protocol_action='release'"); n != 1 {
+		t.Fatalf("workspace released %d times", n)
 	}
 }

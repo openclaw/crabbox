@@ -1446,6 +1446,25 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				return
 			}
 		}
+		if closer, ok := sshBackend.(ReleaseLeaseWorkspaceCloser); ok && closer.RequiresSSHWorkspaceCloseBeforeRelease() {
+			closeCtx := context.WithoutCancel(ownerParentCtx)
+			var closeErr error
+			if lifecycleOwner != nil {
+				boundedCtx, cancel := context.WithTimeout(closeCtx, lifecycleOwner.quiesceTimeout())
+				closeErr = lifecycleOwner.Close(boundedCtx)
+				cancel()
+				if closeErr == nil {
+					lifecycleOwner = nil
+				}
+			}
+			closeErr = errors.Join(closeErr, runtimeScope.finalizeLease(closeCtx, leaseID, false, closeErr))
+			if closeErr != nil {
+				cleanup.Err = closeErr
+				runFailure = recordRunFailure(&runFailure, closeErr)
+				err = errors.Join(err, closeErr)
+				return
+			}
+		}
 		releaseApp := a
 		if *timingJSON {
 			releaseApp.Stderr = io.Discard

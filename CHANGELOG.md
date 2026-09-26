@@ -30,6 +30,10 @@
 
 - Azure `ephemeral` OS disks now use GA full caching through the SDK and coordinator; replace removed `ephemeral-preview` values in flags, config, and environment with `ephemeral`, choose a supported VM family with at least 8 active vCPUs (Fsv2 no longer qualifies), or use `--azure-os-disk managed`. [PR 2565](https://github.com/openclaw/crabbox/pull/2565). Thanks @jwmoss.
 
+### Added
+
+- Power dedicated static SSH hosts on and off around durable host lease references, with retryable shutdown and joined hook cancellation. [Issue 2544](https://github.com/openclaw/crabbox/issues/2544). Thanks @altaywtf.
+
 ## 0.66.0 - 2026-09-24
 
 ### Highlights

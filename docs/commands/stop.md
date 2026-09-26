@@ -4,7 +4,7 @@
 providers it releases or deletes the backing machine; for delegated runners it
 tears down the underlying sandbox; for static `provider=ssh` hosts it attempts
 connection cleanup and removes the local claim without stopping or deleting
-the machine.
+the machine unless [power hooks](../providers/ssh.md#power-hooks) are configured.
 
 ```sh
 crabbox stop swift-crab
@@ -289,6 +289,7 @@ for marker paths, Linux egress process-matching scope, and Tailscale limits.
 --static-user <user>        static SSH user (provider=ssh)
 --static-port <port>        static SSH port (provider=ssh)
 --static-work-root <path>   static target work root (provider=ssh)
+--static-stop-command <json-argv>  local argv run after the last local lease on the host (provider=ssh)
 ```
 
 `--force` is a targeted recovery operation, not an ownership bypass. It always
@@ -413,3 +414,12 @@ and Morph URL userinfo; existing claim keys are not rewritten.
 - [`admin`](admin.md) — coordinator-side `release` and `delete` for operators.
 - [Lifecycle & cleanup](../features/lifecycle-cleanup.md) — how leases expire
   and get reclaimed.
+
+## Static host power recovery
+
+With a trusted dedicated-host power contract, stop releases one durable host
+reference and runs the stop hook only for the last reference. Failed or canceled
+hooks keep pending-stop custody; retry ordinary stop after fixing the dependency.
+`--force --static-power-acknowledge-stop` explicitly acknowledges retrying the
+host hook for an exact retained `--id`; it never drops custody without successful
+cleanup. Use the original config. See [Power hooks](../providers/ssh.md#power-hooks).
