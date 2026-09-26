@@ -436,7 +436,27 @@ does not fall back to another sync method. An already-blocked filesystem
 operation must return before cancellation can be observed. Cleanup failures
 retain their diagnostic path and error cause.
 Both operations read regular files within their observed sizes and verify that
-the file identity and metadata still match. Stable fingerprint encoding is unchanged.
+the file identity and metadata still match.
+
+On Linux and macOS, snapshot preparation hashes each source file while copying
+it and reuses that digest for subsequent checks only when a fresh stat matches
+the device/inode identity, size, mode, nanosecond mtime and ctime. The temporary
+copy is hashed independently, and final acceptance always rereads the live file
+contents without using the cache. This matters for already-dirty memory mappings,
+which can change bytes without advancing either timestamp. A size-preserving edit with a
+restored mtime, inode replacement, or mode change invalidates the cached digest.
+Other controller platforms retain content reads at each verification step.
+The digest cache is private to one snapshot operation, lives only in memory,
+and disappears when preparation ends; there is no on-disk cache to clear.
+Cancellation and retries still validate the complete manifest, index, exclusions,
+and source state. Snapshot parent checks cover the current write's ancestry and
+recheck all retained directories before accepting the snapshot.
+
+Local-seed and overlay fingerprint formats are versioned to incorporate file
+digests; the first sync after upgrading refreshes their remote fingerprint.
+Ordinary origin/file sync retains its existing fingerprint format and transfer
+behavior. A workload can modify remote files, so the complete ordinary manifest
+is still sent to rsync on the next run, even when the local dirty set is small.
 
 The bundle contains the complete selected HEAD and base histories, plus locally
 present tags that peel to those histories. An explicit `sync.baseRef` must resolve

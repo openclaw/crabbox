@@ -882,7 +882,7 @@ func syncFingerprintForManifest(ctx context.Context, repo Repo, cfg Config, mani
 	}
 	h := sha256.New()
 	if cfg.Sync.GitOverlay {
-		fmt.Fprintf(h, "v1-overlay\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
+		fmt.Fprintf(h, "v2-overlay\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
 		fmt.Fprintf(h, "delete=%t\nchecksum=%t\ngitOverlay=true\n", cfg.Sync.Delete, cfg.Sync.Checksum)
 	} else {
 		fmt.Fprintf(h, "v6\nremote=%s\nbranch=%s\nhead=%s\ntree=%s\n", plan.RemoteURL, plan.Branch, plan.Target, plan.Tree)
@@ -893,13 +893,17 @@ func syncFingerprintForManifest(ctx context.Context, repo Repo, cfg Config, mani
 	for _, exclude := range excludes.rules {
 		fmt.Fprintf(h, "exclude=%d:%s\n", exclude.origin, exclude.pattern)
 	}
-	if err := syncFingerprintPaths(ctx, h, repo.Root, manifest.Changed, false); err != nil {
+	if err := syncFingerprintPathsWithDigests(ctx, h, repo.Root, manifest.Changed, false, cfg.Sync.GitOverlay); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func syncFingerprintPaths(ctx context.Context, h hash.Hash, root string, paths []string, requirePresent bool) error {
+	return syncFingerprintPathsWithDigests(ctx, h, root, paths, requirePresent, false)
+}
+
+func syncFingerprintPathsWithDigests(ctx context.Context, h hash.Hash, root string, paths []string, requirePresent, digests bool) error {
 	for _, rel := range paths {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -927,8 +931,14 @@ func syncFingerprintPaths(ctx context.Context, h hash.Hash, root string, paths [
 			h.Write([]byte{0})
 			continue
 		}
-		if _, err := copyObservedSourceFileBytes(ctx, h, full, info); err != nil {
-			return err
+		if digests {
+			if err := writeSyncFileDigest(ctx, h, full, info); err != nil {
+				return err
+			}
+		} else {
+			if _, err := copyObservedSourceFileBytes(ctx, h, full, info); err != nil {
+				return err
+			}
 		}
 		h.Write([]byte{0})
 	}

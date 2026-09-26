@@ -118,13 +118,14 @@ func prepareGitOverlaySnapshotWithCleanup(
 	hook sourceSnapshotHook,
 	cleanup func(*gitOverlaySnapshot) error,
 ) (gitOverlaySnapshot, error) {
+	ctx = withSyncDigests(ctx)
 	policy := gitSnapshotPolicy{
 		target:   plan.Target,
 		checkout: captureGitOverlayCheckoutState,
 		manifest: syncManifestFilteredRules,
 		validate: validateGitOverlayManifestAtState,
 		files:    func(manifest SyncManifest) []string { return manifest.OverlayFiles },
-		fingerprint: func(repo Repo, manifest SyncManifest, excludes SyncExcludeRules, _ gitOverlayCheckoutState) (string, error) {
+		fingerprint: func(ctx context.Context, repo Repo, manifest SyncManifest, excludes SyncExcludeRules, _ gitOverlayCheckoutState) (string, error) {
 			return syncFingerprintForManifest(ctx, repo, cfg, manifest, excludes, plan)
 		},
 	}
@@ -137,7 +138,7 @@ type gitSnapshotPolicy struct {
 	manifest    func(string, SyncExcludeRules, []string) (SyncManifest, error)
 	validate    func(Repo, SyncManifest, gitOverlayCheckoutState) error
 	files       func(SyncManifest) []string
-	fingerprint func(Repo, SyncManifest, SyncExcludeRules, gitOverlayCheckoutState) (string, error)
+	fingerprint func(context.Context, Repo, SyncManifest, SyncExcludeRules, gitOverlayCheckoutState) (string, error)
 }
 
 func prepareGitSnapshotWithCleanup(
@@ -221,7 +222,7 @@ func prepareGitSnapshotWithCleanup(
 		}
 		snapshotRepo := repo
 		snapshotRepo.Root = snapshot.Root
-		snapshot.Fingerprint, err = policy.fingerprint(snapshotRepo, manifest, excludes, checkout)
+		snapshot.Fingerprint, err = policy.fingerprint(ctx, snapshotRepo, manifest, excludes, checkout)
 		if err != nil {
 			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
 		}
@@ -253,7 +254,7 @@ func prepareGitSnapshotWithCleanup(
 		if hook != nil {
 			hook("before_live_fingerprint", attempt, snapshot.Root)
 		}
-		liveFingerprint, err := policy.fingerprint(repo, refreshed, refreshedExcludes, checkout)
+		liveFingerprint, err := policy.fingerprint(ctx, repo, refreshed, refreshedExcludes, checkout)
 		if err != nil {
 			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
 		}
@@ -288,7 +289,10 @@ func prepareGitSnapshotWithCleanup(
 		if err != nil {
 			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
 		}
-		acceptedFingerprint, err := policy.fingerprint(repo, acceptedManifest, acceptedExcludes, finalCheckout)
+		// Dirty mmap pages can change bytes without advancing mtime or ctime.
+		// Stat-validated digests are an intermediate hint, never acceptance proof.
+		acceptanceContext := context.WithValue(ctx, syncDigestContextKey{}, (*syncDigestCache)(nil))
+		acceptedFingerprint, err := policy.fingerprint(acceptanceContext, repo, acceptedManifest, acceptedExcludes, finalCheckout)
 		if err != nil {
 			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
 		}

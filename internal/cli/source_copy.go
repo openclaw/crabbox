@@ -4,15 +4,28 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
+	"sync/atomic"
 )
 
 var errSourceCopyLimit = errors.New("source exceeds accepted byte limit")
+
+// Optional per-operation logical I/O accounting, including filesystem-cache hits.
+type sourceReadCounterKey struct{}
+type sourceReadCounter struct {
+	bytes  atomic.Int64
+	hashes atomic.Int64
+}
 
 // A negative-one limit is unbounded. A bounded copy may read one extra byte to
 // detect growth, but never writes beyond the limit. Context cannot interrupt an
 // already-blocked filesystem read or write.
 func copySourceBytes(ctx context.Context, dst io.Writer, src io.Reader, limit int64) (written int64, err error) {
+	counter, _ := ctx.Value(sourceReadCounterKey{}).(*sourceReadCounter)
+	if _, hashing := dst.(hash.Hash); hashing && counter != nil {
+		counter.hashes.Add(1)
+	}
 	if limit < -1 {
 		return 0, fmt.Errorf("invalid source copy limit")
 	}
@@ -30,6 +43,9 @@ func copySourceBytes(ctx context.Context, dst io.Writer, src io.Reader, limit in
 			readBuf = buf[:int(limit-written)+1]
 		}
 		n, readErr := src.Read(readBuf)
+		if counter != nil {
+			counter.bytes.Add(int64(n))
+		}
 		if err := ctx.Err(); err != nil {
 			return written, err
 		}

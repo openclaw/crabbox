@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -134,7 +135,7 @@ func copySourceSnapshotContentsWithThaw(ctx context.Context, sourceRoot, snapsho
 		if err := verifySourceSnapshotParents(identities); err != nil {
 			return fmt.Errorf("verify overlay snapshot parent for %q: %w", rel, err)
 		}
-		if err := parents.verifyDestinations(false); err != nil {
+		if err := parents.verifyDestinationAncestors(snapshotRoot, filepath.Dir(rel)); err != nil {
 			return fmt.Errorf("verify overlay snapshot destination parent for %q: %w", rel, err)
 		}
 	}
@@ -285,6 +286,22 @@ func (parents *sourceSnapshotParents) verifyDestinations(final bool) error {
 	return nil
 }
 
+// Check the write's ancestry now; restore still checks every retained directory
+// before accepting the snapshot. Scanning all prior siblings per file is quadratic.
+func (parents *sourceSnapshotParents) verifyDestinationAncestors(snapshotRoot, relative string) error {
+	for relative != "." && relative != "" {
+		parent := parents.byPath[filepath.Join(snapshotRoot, relative)]
+		if parent == nil {
+			return fmt.Errorf("missing overlay snapshot destination parent %q", relative)
+		}
+		if err := verifySourceSnapshotDestination(parent, parent.tempMode, true, false); err != nil {
+			return err
+		}
+		relative = filepath.Dir(relative)
+	}
+	return nil
+}
+
 func verifySourceSnapshotDestination(parent *sourceSnapshotParent, wantMode os.FileMode, checkMode, checkMTime bool) error {
 	opened, err := parent.handle.Stat()
 	if err != nil {
@@ -361,7 +378,17 @@ func copySourceSnapshotFile(ctx context.Context, source, destination string, inf
 		return err
 	}
 	defer func() { result = errors.Join(result, output.Close()) }()
-	if _, err := copyObservedSourceFileBytes(ctx, output, source, info); err != nil {
+	var destinationWriter io.Writer = output
+	cache := syncDigests(ctx)
+	if _, supported := syncDigestChangeTime(info); !supported {
+		cache = nil
+	}
+	digestWriter := sha256.New()
+	if cache != nil {
+		destinationWriter = io.MultiWriter(output, digestWriter)
+	}
+	written, err := copyObservedSourceFileBytes(ctx, destinationWriter, source, info)
+	if err != nil {
 		return err
 	}
 	if err := verifySourceSnapshotFileDestination(output, destination, 0, time.Time{}, false); err != nil {
@@ -375,7 +402,18 @@ func copySourceSnapshotFile(ctx context.Context, source, destination string, inf
 	if err := output.Chmod(finalMode); err != nil {
 		return err
 	}
-	return verifySourceSnapshotFileDestination(output, destination, finalMode, finalMTime, true)
+	if err := verifySourceSnapshotFileDestination(output, destination, finalMode, finalMTime, true); err != nil {
+		return err
+	}
+	if cache != nil {
+		digest := [sha256.Size]byte(digestWriter.Sum(nil))
+		if counter, _ := ctx.Value(sourceReadCounterKey{}).(*sourceReadCounter); counter != nil {
+			counter.hashes.Add(1)
+		}
+		cache.recordHash(written)
+		cache.put(source, info, digest)
+	}
+	return nil
 }
 
 // Both content hashing and staging consume the same observed, bounded file.
@@ -392,7 +430,7 @@ func copyObservedSourceFileBytes(ctx context.Context, dst io.Writer, source stri
 	if err != nil {
 		return 0, err
 	}
-	if !openedInfo.Mode().IsRegular() || !sameSourceSnapshotIdentity(info, openedInfo) {
+	if !openedInfo.Mode().IsRegular() || !sameSourceSnapshotIdentity(info, openedInfo) || !sameSyncDigestChangeTime(info, openedInfo) {
 		return 0, fmt.Errorf("%w: source changed before reading", errSourceSnapshotDrift)
 	}
 	written, err = copySourceBytes(ctx, dst, input, openedInfo.Size())
@@ -410,7 +448,8 @@ func copyObservedSourceFileBytes(ctx context.Context, dst io.Writer, source stri
 	if err != nil {
 		return written, classifySourceSnapshotError(source, info, err)
 	}
-	if !sameSourceSnapshotIdentity(openedInfo, postCopyInfo) || !sameSourceSnapshotIdentity(postCopyInfo, finalPathInfo) || written != openedInfo.Size() {
+	if !sameSourceSnapshotIdentity(openedInfo, postCopyInfo) || !sameSourceSnapshotIdentity(postCopyInfo, finalPathInfo) ||
+		!sameSyncDigestChangeTime(openedInfo, postCopyInfo) || !sameSyncDigestChangeTime(postCopyInfo, finalPathInfo) || written != openedInfo.Size() {
 		return written, fmt.Errorf("%w: source changed while reading", errSourceSnapshotDrift)
 	}
 	return written, nil

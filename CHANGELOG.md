@@ -5,6 +5,7 @@
 - Settle coordinator Azure leases after definite VM rejections and verified companion cleanup, preserve uncertainty across mixed fallback failures, and explain scheduled cleanup retries in `stop`.
 - Support BusyBox `flock` for SSH workspace locks without mistaking its unsupported timed-wait option for workspace contention.
 - Close Blacksmith native SSH connections when runs return by disabling detached control masters for sync and artifact transfers, including failed and canceled runs.
+- Reduce local Git seed and overlay snapshot I/O with per-operation, stat-validated content digests and avoid repeated scans of unrelated snapshot parent directories.
 - Enable Proxmox fixed-ID Linux workspaces under `adapter serve` with immutable routing and token-identity scopes, secret rotation, and exact registered cleanup receipts. [Issue 2558](https://github.com/openclaw/crabbox/issues/2558), [PR 2560](https://github.com/openclaw/crabbox/pull/2560). Thanks @ahkohd.
 - Move direct Daytona integration to the maintained Go clients, use typed organization and lifetime metadata, and reconcile fixed cleanup through exact sandbox lookup. [PR 2574](https://github.com/openclaw/crabbox/pull/2574).
 - Exclude temporary SSH command environments left by interrupted cleanup from workspace checkpoint archives.
