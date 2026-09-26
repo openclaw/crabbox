@@ -44,6 +44,11 @@ func (k FixedLeaseKind) TerminalClaim(claim LeaseClaim, now time.Time) LeaseClai
 		ClaimedAt:         claim.ClaimedAt,
 		LastUsedAt:        now.Format(time.RFC3339),
 		FixedCreateIntent: &intent,
+		// A registered adapter completes coordinator deletion after release and
+		// needs the lease's registration binding and generation to do so.
+		CoordinatorRegistrationURL:          claim.CoordinatorRegistrationURL,
+		RuntimeAdapterRegistrationID:        claim.RuntimeAdapterRegistrationID,
+		RuntimeAdapterPendingRegistrationID: claim.RuntimeAdapterPendingRegistrationID,
 	}
 	if len(k.TerminalIdentityLabels) != 0 {
 		terminal.CloudID = claim.CloudID
@@ -113,6 +118,11 @@ func (k FixedLeaseKind) ValidateTerminalClaim(claim, previous LeaseClaim, leaseI
 				!maps.Equal(claim.Labels, expected.Labels) {
 				return Exit(4, "lease_id_conflict: fixed %s lease %s terminal tombstone changed resource identity", k.Label, leaseID)
 			}
+		}
+		if claim.CoordinatorRegistrationURL != previous.CoordinatorRegistrationURL ||
+			claim.RuntimeAdapterRegistrationID != previous.RuntimeAdapterRegistrationID ||
+			claim.RuntimeAdapterPendingRegistrationID != previous.RuntimeAdapterPendingRegistrationID {
+			return Exit(4, "lease_id_conflict: fixed %s lease %s terminal tombstone changed coordinator registration", k.Label, leaseID)
 		}
 		if previous.LeaseID != leaseID ||
 			previousIntent.Version != intent.Version ||
