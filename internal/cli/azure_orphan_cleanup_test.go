@@ -3,8 +3,10 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -32,8 +34,12 @@ type azureOrphanFixture struct {
 	server     Server
 	objects    map[string]map[string]any
 	deletes    []string
-	failDelete string
+	beforeRead func(string)
+	readErr    error
+	reads      []string
 	failRead   string
+	failStatus int
+	failCode   string
 	mu         sync.Mutex
 }
 
@@ -49,41 +55,35 @@ func newAzureOrphanFixture(t *testing.T) *azureOrphanFixture {
 	for suffix, kind := range map[string]string{"-nic": "Microsoft.Network/networkInterfaces", "-pip": "Microsoft.Network/publicIPAddresses", "-osdisk": "Microsoft.Compute/disks", "-q-nsg": "Microsoft.Network/networkSecurityGroups"} {
 		f.objects[name+suffix] = map[string]any{"id": prefix + kind + "/" + name + suffix, "name": name + suffix, "tags": azureTagsFromLabels(f.server.Labels), "properties": map[string]any{"resourceGuid": suffix + "-guid", "uniqueId": suffix + "-guid", "diskState": "Unattached"}}
 	}
-	nicID := f.objects[name+"-nic"]["id"].(string)
-	f.properties("-nic")["ipConfigurations"] = []any{map[string]any{"id": nicID + "/ipConfigurations/ipconfig", "properties": map[string]any{"publicIPAddress": map[string]any{"id": f.objects[name+"-pip"]["id"]}}}}
-	f.properties("-pip")["ipConfiguration"] = map[string]any{"id": nicID + "/ipConfigurations/ipconfig"}
-	f.properties("-q-nsg")["networkInterfaces"] = []any{map[string]any{"id": nicID}}
 	transport := azureOrphanTransport(func(req *http.Request) (*http.Response, error) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		name := req.URL.Path[strings.LastIndex(req.URL.Path, "/")+1:]
+		f.reads = append(f.reads, name)
+		if f.beforeRead != nil {
+			f.beforeRead(name)
+		}
+		if f.readErr != nil {
+			return nil, f.readErr
+		}
 		object, exists := f.objects[name]
 		status, body := http.StatusOK, any(object)
 		if !exists {
 			status, body = http.StatusNotFound, map[string]any{"error": map[string]any{"code": "ResourceNotFound", "message": "absent"}}
 		}
 		if req.Method == http.MethodGet && name == f.failRead {
-			status, body = http.StatusForbidden, map[string]any{"error": map[string]any{"code": "AuthorizationFailed", "message": "simulated read failure"}}
-		}
-		if req.Method == http.MethodDelete {
-			f.deletes = append(f.deletes, name)
-			if name == f.failDelete {
-				status, body = http.StatusForbidden, map[string]any{"error": map[string]any{"code": "AuthorizationFailed", "message": "simulated failure"}}
-			} else {
-				delete(f.objects, name)
-				if strings.HasSuffix(name, "-nic") {
-					if nsg := f.objects[f.server.CloudID+"-q-nsg"]; nsg != nil {
-						delete(nsg["properties"].(map[string]any), "networkInterfaces")
-					}
-					if ip := f.objects[f.server.CloudID+"-pip"]; ip != nil {
-						delete(ip["properties"].(map[string]any), "ipConfiguration")
-					}
-				}
-				status, body = http.StatusOK, map[string]any{}
+			status, code := f.failStatus, f.failCode
+			if status == 0 {
+				status, code = http.StatusForbidden, "AuthorizationFailed"
 			}
-		} else if req.Method != http.MethodGet {
-			t.Errorf("unexpected request: %s %s", req.Method, req.URL)
+			data, _ := json.Marshal(map[string]any{"error": map[string]any{"code": code, "message": "simulated read failure"}})
+			return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(data))), Request: req}, nil
 		}
+		if req.Method != http.MethodGet {
+			f.deletes = append(f.deletes, name)
+			t.Errorf("recovery attempted mutation: %s %s", req.Method, req.URL.Path)
+		}
+
 		data, _ := json.Marshal(body)
 		return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(data))), Request: req}, nil
 	})
@@ -100,138 +100,151 @@ func newAzureOrphanFixture(t *testing.T) *azureOrphanFixture {
 	return f
 }
 
-func (f *azureOrphanFixture) properties(suffix string) map[string]any {
-	return f.objects[f.server.CloudID+suffix]["properties"].(map[string]any)
-}
-
-func TestAzureOrphanCleanup(t *testing.T) {
-	for _, missing := range []string{"none", "disk", "nsg", "all"} {
-		t.Run(missing, func(t *testing.T) {
-			f := newAzureOrphanFixture(t)
-			if missing == "disk" {
-				delete(f.objects, f.server.CloudID+"-osdisk")
-			}
-			if missing == "nsg" {
-				delete(f.objects, f.server.CloudID+"-q-nsg")
-			}
-			if missing == "all" {
-				clear(f.objects)
-			}
-			wantDeletes := len(f.objects)
-			prepared, err := f.client.PrepareOwnedServer(t.Context(), f.server)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if prepared.Labels[AzureCleanupBindingLabel] != azureOrphanCleanupBindingVersion || len(f.deletes) != 0 {
-				t.Fatal("missing read-only orphan attestation")
-			}
-			if err := f.client.DeleteOwnedServer(t.Context(), prepared); err != nil {
-				t.Fatal(err)
-			}
-			if len(f.deletes) != wantDeletes || len(f.objects) != 0 {
-				t.Fatalf("deletes=%v remaining=%v", f.deletes, f.objects)
-			}
-			if wantDeletes > 0 && f.deletes[0] != f.server.CloudID+"-nic" {
-				t.Fatal("NIC must be deleted before its public IP")
-			}
-			if err := f.client.DeleteOwnedServer(t.Context(), prepared); err != nil {
-				t.Fatalf("absent retry: %v", err)
-			}
-		})
-	}
-}
-
-func TestAzureOrphanCleanupRejectsUnsafeResources(t *testing.T) {
-	cases := map[string]func(*azureOrphanFixture){
-		"read failure": func(f *azureOrphanFixture) { f.failRead = f.server.CloudID + "-nic" },
-		"foreign NSG attachment": func(f *azureOrphanFixture) {
-			f.properties("-q-nsg")["networkInterfaces"] = []any{map[string]any{"id": "other"}}
-		},
-		"subnet NSG attachment": func(f *azureOrphanFixture) { f.properties("-q-nsg")["subnets"] = []any{map[string]any{"id": "other"}} },
-		"foreign lease": func(f *azureOrphanFixture) {
-			f.objects[f.server.CloudID+"-nic"]["tags"].(map[string]string)["lease"] = "cbx_abcdef123456"
-		},
-		"foreign attempt": func(f *azureOrphanFixture) {
-			f.objects[f.server.CloudID+"-pip"]["tags"].(map[string]string)["fixed_attempt"] = "other"
-		},
-		"foreign intent": func(f *azureOrphanFixture) {
-			f.objects[f.server.CloudID+"-osdisk"]["tags"].(map[string]string)["fixed_intent_sha256"] = strings.Repeat("b", 64)
-		},
-		"untagged disk": func(f *azureOrphanFixture) { delete(f.objects[f.server.CloudID+"-osdisk"], "tags") },
-		"cross scope": func(f *azureOrphanFixture) {
-			f.objects[f.server.CloudID+"-nic"]["id"] = "/subscriptions/other/resourceGroups/rg/providers/Microsoft.Network/networkInterfaces/" + f.server.CloudID + "-nic"
-		},
-		"attached NIC":         func(f *azureOrphanFixture) { f.properties("-nic")["virtualMachine"] = map[string]any{"id": "other"} },
-		"private endpoint":     func(f *azureOrphanFixture) { f.properties("-nic")["privateEndpoint"] = map[string]any{"id": "other"} },
-		"foreign IP reference": func(f *azureOrphanFixture) { f.properties("-pip")["ipConfiguration"] = map[string]any{"id": "other"} },
-		"NAT IP":               func(f *azureOrphanFixture) { f.properties("-pip")["natGateway"] = map[string]any{"id": "other"} },
-		"attached disk":        func(f *azureOrphanFixture) { f.objects[f.server.CloudID+"-osdisk"]["managedBy"] = "other" },
-		"shared disk": func(f *azureOrphanFixture) {
-			f.objects[f.server.CloudID+"-osdisk"]["managedByExtended"] = []string{"other"}
-		},
-		"unknown disk state": func(f *azureOrphanFixture) { delete(f.properties("-osdisk"), "diskState") },
-		"missing identity":   func(f *azureOrphanFixture) { delete(f.properties("-nic"), "resourceGuid") },
-		"missing properties": func(f *azureOrphanFixture) { delete(f.objects[f.server.CloudID+"-nic"], "properties") },
-		"VM reappeared":      func(f *azureOrphanFixture) { f.objects[f.server.CloudID] = map[string]any{"name": f.server.CloudID} },
-	}
-	for name, mutate := range cases {
-		t.Run(name, func(t *testing.T) {
-			f := newAzureOrphanFixture(t)
-			prepared, err := f.client.PrepareOwnedServer(t.Context(), f.server)
-			if err != nil {
-				t.Fatal(err)
-			}
-			mutate(f)
-			if err := f.client.DeleteOwnedServer(t.Context(), prepared); err == nil {
-				t.Fatal("unsafe deletion accepted")
-			}
-			if len(f.deletes) != 0 {
-				t.Fatalf("unsafe deletes: %v", f.deletes)
-			}
-		})
-	}
-}
-
-func TestAzureOrphanCleanupPartialFailureRetainsIdentity(t *testing.T) {
+func TestAzureOrphanCleanupAbsent(t *testing.T) {
 	f := newAzureOrphanFixture(t)
+	clear(f.objects)
 	prepared, err := f.client.PrepareOwnedServer(t.Context(), f.server)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.failDelete = f.server.CloudID + "-pip"
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-	if err := f.client.DeleteOwnedServer(ctx, prepared); err == nil {
-		t.Fatal("expected partial failure")
+	if !reflect.DeepEqual(prepared, f.server) {
+		t.Fatal("absence recovery changed claim format")
 	}
-	if len(f.objects) != 1 {
-		t.Fatalf("remaining resources=%v", f.objects)
+	for range 2 {
+		if err := f.client.DeleteOwnedServer(t.Context(), prepared); err != nil {
+			t.Fatal(err)
+		}
 	}
-	f.properties("-pip")["resourceGuid"] = "replacement"
-	before := len(f.deletes)
-	if err := f.client.DeleteOwnedServer(t.Context(), prepared); err == nil || len(f.deletes) != before {
-		t.Fatal("replacement resource accepted on retry")
+	for _, suffix := range []string{"", "-nic", "-pip", "-osdisk", "-q-nsg"} {
+		found := false
+		for _, name := range f.reads {
+			if name == f.server.CloudID+suffix {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("did not verify %s absence", suffix)
+		}
 	}
-	f.properties("-pip")["resourceGuid"] = "-pip-guid"
-	f.failDelete = ""
-	if err := f.client.DeleteOwnedServer(t.Context(), prepared); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestAzureOrphanCleanupDoesNotRecaptureAbsentResources(t *testing.T) {
-	f := newAzureOrphanFixture(t)
-	disk := f.objects[f.server.CloudID+"-osdisk"]
-	delete(f.objects, f.server.CloudID+"-osdisk")
-	prepared, err := f.client.PrepareOwnedServer(t.Context(), f.server)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.objects[f.server.CloudID+"-osdisk"] = disk
-	if err := f.client.DeleteOwnedServer(t.Context(), prepared); err == nil || len(f.deletes) != 0 {
-		t.Fatal("new companion accepted")
+	if len(f.deletes) != 0 {
+		t.Fatal("absence recovery mutated Azure")
 	}
 	if _, err := f.client.PrepareCleanupServer(t.Context(), f.server, time.Now()); err == nil {
-		t.Fatal("automatic cleanup captured orphan binding")
+		t.Fatal("automatic cleanup initiated recovery")
+	}
+}
+
+func TestAzureOrphanCleanupRejectsRemainingResources(t *testing.T) {
+	for _, suffix := range []string{"", "-nic", "-pip", "-osdisk", "-q-nsg"} {
+		for _, tags := range []string{"owned", "foreign", "untagged"} {
+			t.Run(suffix+"/"+tags, func(t *testing.T) {
+				f := newAzureOrphanFixture(t)
+				object := f.objects[f.server.CloudID+suffix]
+				if object == nil {
+					object = map[string]any{"name": f.server.CloudID}
+				}
+				if tags == "foreign" {
+					object["tags"] = map[string]string{"lease": "cbx_abcdef123456"}
+				}
+				if tags == "untagged" {
+					delete(object, "tags")
+				}
+				clear(f.objects)
+				prepared, err := f.client.PrepareOwnedServer(t.Context(), f.server)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.objects[f.server.CloudID+suffix] = object
+				if err := f.client.DeleteOwnedServer(t.Context(), prepared); err == nil {
+					t.Fatal("replacement accepted")
+				}
+				if _, err := f.client.PrepareOwnedServer(t.Context(), f.server); err == nil {
+					t.Fatal("remaining resource accepted")
+				}
+				if len(f.deletes) != 0 || len(f.objects) != 1 {
+					t.Fatal("remaining resource mutated")
+				}
+			})
+		}
+	}
+}
+
+func TestAzureOrphanCleanupReadFailuresRetainClaim(t *testing.T) {
+	for _, suffix := range []string{"", "-nic", "-pip", "-osdisk", "-q-nsg"} {
+		t.Run(suffix, func(t *testing.T) {
+			f := newAzureOrphanFixture(t)
+			clear(f.objects)
+			f.failRead = f.server.CloudID + suffix
+			if _, err := f.client.PrepareOwnedServer(t.Context(), f.server); err == nil {
+				t.Fatal("failed read accepted")
+			}
+			if err := f.client.DeleteOwnedServer(t.Context(), f.server); err == nil {
+				t.Fatal("failed final read accepted")
+			}
+			f.failRead = ""
+			if err := f.client.DeleteOwnedServer(t.Context(), f.server); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	f := newAzureOrphanFixture(t)
+	clear(f.objects)
+	f.readErr = errors.New("transport failure mentioning ResourceNotFound")
+	if err := f.client.DeleteOwnedServer(t.Context(), f.server); err == nil {
+		t.Fatal("text-only not-found accepted")
+	}
+}
+
+func TestAzureOrphanCleanupVMReappearsDuringVerification(t *testing.T) {
+	f := newAzureOrphanFixture(t)
+	clear(f.objects)
+	f.beforeRead = func(name string) {
+		if strings.HasSuffix(name, "-q-nsg") {
+			f.objects[f.server.CloudID] = map[string]any{"name": f.server.CloudID}
+		}
+	}
+	if _, err := f.client.PrepareOwnedServer(t.Context(), f.server); err == nil {
+		t.Fatal("reappearing VM accepted")
+	}
+	if len(f.deletes) != 0 {
+		t.Fatal("reappearing VM mutated")
+	}
+}
+
+func TestAzureOrphanCleanupRequiresFixedIdentity(t *testing.T) {
+	for _, key := range []string{"lease", "slug", "provider_key", "fixed_attempt", "fixed_intent_sha256"} {
+		t.Run(key, func(t *testing.T) {
+			f := newAzureOrphanFixture(t)
+			clear(f.objects)
+			delete(f.server.Labels, key)
+			if err := f.client.DeleteOwnedServer(t.Context(), f.server); err == nil {
+				t.Fatal("incomplete claim accepted")
+			}
+			if len(f.reads) != 0 {
+				t.Fatal("invalid identity reached Azure")
+			}
+		})
+	}
+}
+
+func TestAzureOrphanCleanupRequiresNativeAbsence(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		code   string
+		absent bool
+	}{
+		{http.StatusNotFound, "ResourceNotFound", true},
+		{http.StatusNotFound, "ResourceGroupNotFound", true},
+		{http.StatusNotFound, "SubscriptionNotFound", false},
+		{http.StatusForbidden, "ResourceNotFound", false},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			f := newAzureOrphanFixture(t)
+			clear(f.objects)
+			f.failRead, f.failStatus, f.failCode = f.server.CloudID+"-nic", tc.status, tc.code
+			if err := f.client.DeleteOwnedServer(t.Context(), f.server); (err == nil) != tc.absent {
+				t.Fatalf("absence=%t: %v", tc.absent, err)
+			}
+		})
 	}
 }

@@ -315,14 +315,15 @@ completed recovery retains the single-use terminal receipt, and retries are
 idempotent.
 
 If the fixed Azure claim still exists but the VM and its original cleanup
-binding are missing, the same command can recover tagged orphan companions.
-Every remaining NIC, public IP, managed OS disk, and quarantine security group
-must match the exact lease and fixed create attempt in the configured account.
-Recovery rejects attached or foreign resources, untagged disks, and a reappearing
-VM. It persists the verified orphan identities before deletion and retains the
-claim on partial failure; retry with a version supporting orphan recovery.
-The terminal receipt is written only after all verified companions are deleted
-or confirmed absent. Automatic cleanup does not initiate this recovery.
+binding are missing, the same command can finish the claim after external
+cleanup. It verifies that the VM, NIC, public IP, managed OS disk, and quarantine
+security group are all absent in the configured account. Any remaining resource
+(including an untagged disk), failed read, or reappearing VM blocks recovery and
+retains the claim. Inspect and clean up remaining resources in Azure before
+retrying. This recovery only reads Azure; it never deletes orphan companions.
+It uses the existing claim format and terminal receipt, so interrupted attempts
+can be retried without a claim migration. Automatic cleanup does not initiate
+this recovery.
 
 For direct Daytona and ASCII Box/Boat claims, `stop --force --provider <provider>
 --id <canonical-cbx-id>` can also forget a resource that the provider has already
