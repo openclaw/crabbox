@@ -43,7 +43,7 @@ func TestSSHCommandEnvDeliveryAndCleanup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX SSH fixture")
 	}
-	for _, outcome := range []string{"success", "failure", "cancel", "upload-failure"} {
+	for _, outcome := range []string{"success", "failure", "cancel", "upload-failure", "large"} {
 		t.Run(outcome, func(t *testing.T) {
 			isolateTestUserDirs(t)
 			dir := t.TempDir()
@@ -67,6 +67,9 @@ exit "$code"
 			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			const canary = "allowlisted-env-canary-2535"
 			value := canary + " '\" $literal `literal`\nsecond\rline ☃ "
+			if outcome == "large" {
+				value += strings.Repeat("long value\n", 8192)
+			}
 			values := map[string]string{"TEST_VALUE": value, "TEST_EMPTY": "", "INVALID-NAME": "ignored"}
 			target := SSHTarget{Host: "fixture.invalid", User: "fixture", Port: "22", TargetOS: targetLinux}
 			ctx, cancel := context.WithCancel(t.Context())

@@ -103,6 +103,11 @@ cleanup emits a warning. If workspace ownership is lost, cleanup is refused;
 the private file remains until the lease is cleaned up with verified ownership.
 Preflight and `cache warm` use the same transport.
 
+Values containing a NUL byte are rejected before temporary command-env upload,
+because native process environments cannot represent them. The error names the
+variable without printing its value. Other values still obey the target OS's
+environment-size limits.
+
 These temporary values remain separate from reusable `--env-helper` profiles
 and are never retained by helper mode. Forwarding summaries report names and
 presence, with lengths for secret-shaped names. Crabbox does not add the

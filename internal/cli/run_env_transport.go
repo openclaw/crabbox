@@ -22,6 +22,9 @@ func stageSSHCommandEnv(ctx context.Context, target SSHTarget, workdir string, e
 		if !ValidShellEnvName(name) {
 			continue
 		}
+		if strings.ContainsRune(value, 0) {
+			return prepared, Exit(2, "environment variable %s contains a NUL byte", name)
+		}
 		private[name] = value
 	}
 	if len(private) == 0 {
