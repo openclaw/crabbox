@@ -24,6 +24,8 @@ type flagValues struct {
 	OSDisk      *string
 	SnapshotSKU *string
 	OSDiskSKU   *string
+
+	UserAssignedIdentityResourceID *string
 }
 
 var classProfiles = buildClassProfiles()
@@ -52,10 +54,11 @@ func (Provider) Spec() core.ProviderSpec {
 }
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
-		Backend:     fs.String("azure-backend", defaults.Azure.Backend, "Azure backend: vm or dynamic-sessions"),
-		OSDisk:      fs.String("azure-os-disk", defaults.Azure.OSDisk, "Azure OS disk mode: managed, ephemeral, ephemeral-preview, or auto"),
-		SnapshotSKU: fs.String("azure-snapshot-sku", defaults.Azure.SnapshotSKU, "Azure checkpoint snapshot storage SKU"),
-		OSDiskSKU:   fs.String("azure-os-disk-sku", defaults.Azure.OSDiskSKU, "Azure managed OS disk storage SKU"),
+		Backend:                        fs.String("azure-backend", defaults.Azure.Backend, "Azure backend: vm or dynamic-sessions"),
+		OSDisk:                         fs.String("azure-os-disk", defaults.Azure.OSDisk, "Azure OS disk mode: managed, ephemeral, ephemeral-preview, or auto"),
+		SnapshotSKU:                    fs.String("azure-snapshot-sku", defaults.Azure.SnapshotSKU, "Azure checkpoint snapshot storage SKU"),
+		OSDiskSKU:                      fs.String("azure-os-disk-sku", defaults.Azure.OSDiskSKU, "Azure managed OS disk storage SKU"),
+		UserAssignedIdentityResourceID: fs.String("azure-user-assigned-identity-resource-id", defaults.Azure.UserAssignedIdentityResourceID, "ARM resource ID of the user-assigned identity to attach to Azure VMs"),
 	}
 }
 
@@ -94,6 +97,10 @@ func (p Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) err
 		return nil
 	}
 	flags, _ := values.(flagValues)
+	if core.FlagWasSet(fs, "azure-user-assigned-identity-resource-id") && flags.UserAssignedIdentityResourceID != nil {
+		cfg.Azure.UserAssignedIdentityResourceID = *flags.UserAssignedIdentityResourceID
+		core.RecordProviderFlagInputs(cfg, true, "azure")
+	}
 	if core.FlagWasSet(fs, "azure-os-disk") && flags.OSDisk != nil {
 		mode, err := core.NormalizeAzureOSDiskMode(*flags.OSDisk)
 		if err != nil {

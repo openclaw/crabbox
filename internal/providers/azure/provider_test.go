@@ -13,7 +13,7 @@ func TestAzureFlatInputTracking(t *testing.T) {
 	for _, tc := range []struct {
 		name, raw     string
 		accepted, bad bool
-	}{{"azure-backend", "vm", true, false}, {"azure-backend", "dynamic-sessions", true, false}, {"azure-backend", "invalid", false, true}, {"azure-os-disk", "managed", true, false}, {"azure-os-disk", "invalid", false, true}, {"azure-snapshot-sku", "Standard_LRS", true, false}, {"azure-snapshot-sku", "invalid", true, true}, {"azure-os-disk-sku", "Standard_LRS", true, false}, {"azure-os-disk-sku", "invalid", true, true}} {
+	}{{"azure-backend", "vm", true, false}, {"azure-backend", "dynamic-sessions", true, false}, {"azure-backend", "invalid", false, true}, {"azure-os-disk", "managed", true, false}, {"azure-os-disk", "invalid", false, true}, {"azure-snapshot-sku", "Standard_LRS", true, false}, {"azure-snapshot-sku", "invalid", true, true}, {"azure-os-disk-sku", "Standard_LRS", true, false}, {"azure-os-disk-sku", "invalid", true, true}, {"azure-user-assigned-identity-resource-id", "/subscriptions/sub/resourceGroups/identities/providers/Microsoft.ManagedIdentity/userAssignedIdentities/worker", true, false}} {
 		t.Run(tc.name+"/"+tc.raw, func(t *testing.T) {
 			cfg := core.Config{Provider: "azure", Azure: core.AzureConfig{Backend: "vm"}}
 			fs := flag.NewFlagSet("metadata", flag.ContinueOnError)
@@ -41,6 +41,8 @@ func TestAzureFlatInputTracking(t *testing.T) {
 					want.Azure.SnapshotSKU = tc.raw
 				case "azure-os-disk-sku":
 					want.Azure.OSDiskSKU = tc.raw
+				case "azure-user-assigned-identity-resource-id":
+					want.Azure.UserAssignedIdentityResourceID = tc.raw
 				}
 			}
 			if !reflect.DeepEqual(cfg, want) {

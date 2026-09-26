@@ -87,7 +87,51 @@ type AzureClient struct {
 
 type azureImageRef struct{ Publisher, Offer, SKU, Version string }
 
+func validateAzureUserAssignedIdentityResourceID(id string) error {
+	if id == "" {
+		return nil
+	}
+	parts := strings.Split(id, "/")
+	if len(parts) != 9 || parts[0] != "" ||
+		!strings.EqualFold(parts[1], "subscriptions") || parts[2] == "" ||
+		!strings.EqualFold(parts[3], "resourceGroups") || parts[4] == "" ||
+		!strings.EqualFold(parts[5], "providers") ||
+		!strings.EqualFold(parts[6], "Microsoft.ManagedIdentity") ||
+		!strings.EqualFold(parts[7], "userAssignedIdentities") || parts[8] == "" ||
+		strings.TrimSpace(id) != id {
+		return Exit(2, "azure user-assigned identity must be a complete ARM resource ID")
+	}
+	return nil
+}
+
+// ValidateAzureVMUserAssignedIdentity checks the ARM VM identity field, not a
+// user-controlled tag or a stale lease claim.
+func ValidateAzureVMUserAssignedIdentity(server Server, id string) error {
+	if id == "" {
+		return nil
+	}
+	for _, assigned := range server.AzureUserAssignedIdentityIDs {
+		if strings.EqualFold(assigned, id) {
+			return nil
+		}
+	}
+	return Exit(4, "Azure VM %s is missing required user-assigned identity", server.DisplayID())
+}
+
+func azureVMUserAssignedIdentity(id string) *armcompute.VirtualMachineIdentity {
+	if id == "" {
+		return nil
+	}
+	return &armcompute.VirtualMachineIdentity{
+		Type:                   to.Ptr(armcompute.ResourceIdentityTypeUserAssigned),
+		UserAssignedIdentities: map[string]*armcompute.UserAssignedIdentitiesValue{id: {}},
+	}
+}
+
 func NewAzureClient(ctx context.Context, cfg Config) (*AzureClient, error) {
+	if err := validateAzureUserAssignedIdentityResourceID(cfg.Azure.UserAssignedIdentityResourceID); err != nil {
+		return nil, err
+	}
 	if cfg.Azure.Subscription == "" {
 		info, err := azAccountShow(ctx, "")
 		if err != nil {
@@ -1044,6 +1088,7 @@ func (c *AzureClient) createServerStepsWithLabels(ctx context.Context, cfg Confi
 		Location:   to.Ptr(c.Location),
 		Tags:       tags,
 		Properties: vmProperties,
+		Identity:   azureVMUserAssignedIdentity(cfg.Azure.UserAssignedIdentityResourceID),
 	}
 	var createdVM armcompute.VirtualMachine
 	if azureOSDiskUsesFullCaching(osDiskMode) {
@@ -2638,6 +2683,11 @@ func azureVMToServer(vm armcompute.VirtualMachine, ip, privateIP string) Server 
 	}
 	if vm.Properties != nil && vm.Properties.VMID != nil {
 		s.ImmutableID = strings.TrimSpace(*vm.Properties.VMID)
+	}
+	if vm.Identity != nil {
+		for id := range vm.Identity.UserAssignedIdentities {
+			s.AzureUserAssignedIdentityIDs = append(s.AzureUserAssignedIdentityIDs, id)
+		}
 	}
 	if vm.Properties != nil && vm.Properties.HardwareProfile != nil && vm.Properties.HardwareProfile.VMSize != nil {
 		s.ServerType.Name = string(*vm.Properties.HardwareProfile.VMSize)

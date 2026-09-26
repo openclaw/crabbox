@@ -36,6 +36,61 @@ func TestAzureLinuxCloudInitInstallsPinnedTruffleHog(t *testing.T) {
 	}
 }
 
+func TestAzureVMUserAssignedIdentityAttachment(t *testing.T) {
+	id := "/subscriptions/sub/resourceGroups/identities/providers/Microsoft.ManagedIdentity/userAssignedIdentities/worker"
+	for _, bad := range []string{"worker", id + "/", "/subscriptions/sub/resourceGroups/identities/providers/Microsoft.Compute/virtualMachines/worker"} {
+		if err := validateAzureUserAssignedIdentityResourceID(bad); err == nil {
+			t.Fatalf("accepted invalid identity resource ID %q", bad)
+		}
+	}
+	if err := validateAzureUserAssignedIdentityResourceID(id); err != nil {
+		t.Fatal(err)
+	}
+	vm := armcompute.VirtualMachine{Identity: azureVMUserAssignedIdentity(id)}
+	data, err := json.Marshal(vm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Identity struct {
+			Type                   string         `json:"type"`
+			UserAssignedIdentities map[string]any `json:"userAssignedIdentities"`
+		} `json:"identity"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Identity.Type != "UserAssigned" || len(body.Identity.UserAssignedIdentities) != 1 {
+		t.Fatalf("unexpected VM identity request: %+v", body.Identity)
+	}
+	if _, ok := body.Identity.UserAssignedIdentities[id]; !ok {
+		t.Fatal("VM request lost the requested identity resource ID")
+	}
+	server := azureVMToServer(vm, "", "")
+	if err := ValidateAzureVMUserAssignedIdentity(server, strings.ToUpper(id)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAzureVMUserAssignedIdentity(Server{}, id); err == nil {
+		t.Fatal("accepted a VM with no identity attachment")
+	}
+	if err := ValidateAzureVMUserAssignedIdentity(server, id+"-other"); err == nil {
+		t.Fatal("accepted a different identity attachment")
+	}
+	if azureVMUserAssignedIdentity("") != nil {
+		t.Fatal("default VM creation unexpectedly attaches an identity")
+	}
+}
+
+func TestAzureUserAssignedIdentityEnvironment(t *testing.T) {
+	const id = "/subscriptions/sub/resourceGroups/identities/providers/Microsoft.ManagedIdentity/userAssignedIdentities/worker"
+	t.Setenv("CRABBOX_AZURE_USER_ASSIGNED_IDENTITY_RESOURCE_ID", id)
+	cfg := baseConfig()
+	cfg.applyAzureEnvironment()
+	if cfg.Azure.UserAssignedIdentityResourceID != id {
+		t.Fatalf("configured identity=%q", cfg.Azure.UserAssignedIdentityResourceID)
+	}
+}
+
 func TestParseAzureImageRef(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

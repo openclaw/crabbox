@@ -281,6 +281,26 @@ func TestAzureAcquireCleansUpCreatedServerOnIPFailure(t *testing.T) {
 	}
 }
 
+func TestAzureAcquireRejectsVMWithoutRequiredIdentityAtReadiness(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeAzureClient{}
+	oldClient := newAzureClient
+	newAzureClient = func(context.Context, core.Config) (azureClient, error) { return fake, nil }
+	t.Cleanup(func() { newAzureClient = oldClient })
+	cfg := azureAcquireTestConfig()
+	cfg.Azure.UserAssignedIdentityResourceID = "/subscriptions/sub/resourceGroups/identities/providers/Microsoft.ManagedIdentity/userAssignedIdentities/worker"
+	backend := NewAzureLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
+	_, err := backend.acquireOnce(t.Context(), false, "")
+	if err == nil || !strings.Contains(err.Error(), "missing required user-assigned identity") {
+		t.Fatalf("readiness error=%v", err)
+	}
+	if len(fake.deleted) != 1 {
+		t.Fatalf("identity-less VM cleanup=%v, want one owned rollback", fake.deleted)
+	}
+}
+
 func TestAzureAcquireValidatesSSHCIDRsBeforeClient(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

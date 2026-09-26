@@ -43,6 +43,8 @@ type AzureConfig struct {
 	NSG            string
 	SSHCIDRs       []string
 	Network        string
+
+	UserAssignedIdentityResourceID string
 }
 
 func initialAzureConfig(image string) AzureConfig {
@@ -92,6 +94,8 @@ type fileAzureConfig struct {
 	NSG            string   `yaml:"nsg,omitempty"`
 	SSHCIDRs       []string `yaml:"sshCIDRs,omitempty"`
 	Network        string   `yaml:"network,omitempty"`
+
+	UserAssignedIdentityResourceID string `yaml:"userAssignedIdentityResourceId,omitempty"`
 }
 
 func (cfg *Config) applyAzureFileConfig(file *fileAzureConfig, inputSource configInputSource) {
@@ -108,6 +112,7 @@ func (cfg *Config) applyAzureFileConfig(file *fileAzureConfig, inputSource confi
 			recordConfigInput(cfg, "azure-dynamic-sessions", inputSource, true)
 		}
 		configInputFileString(cfg, "azure", inputSource, &cfg.Azure.ClientID, file.ClientID)
+		configInputFileString(cfg, "azure", inputSource, &cfg.Azure.UserAssignedIdentityResourceID, file.UserAssignedIdentityResourceID)
 		configInputFileString(cfg, "azure", inputSource, &cfg.Azure.Location, file.Location)
 		configInputFileString(cfg, "azure", inputSource, &cfg.Azure.ResourceGroup, file.ResourceGroup)
 		if file.Image != "" {
@@ -145,6 +150,7 @@ func (cfg *Config) applyAzureEnvironment() {
 		recordConfigInput(cfg, "azure-dynamic-sessions", configInputEnvironment, true)
 	}
 	cfg.Azure.ClientID = configInputEnvString(cfg, "azure", cfg.Azure.ClientID, "CRABBOX_AZURE_CLIENT_ID", "AZURE_CLIENT_ID")
+	cfg.Azure.UserAssignedIdentityResourceID = configInputEnvString(cfg, "azure", cfg.Azure.UserAssignedIdentityResourceID, "CRABBOX_AZURE_USER_ASSIGNED_IDENTITY_RESOURCE_ID")
 	cfg.Azure.Backend = configInputEnvString(cfg, "azure", cfg.Azure.Backend, "CRABBOX_AZURE_BACKEND")
 	cfg.Azure.Location = configInputEnvString(cfg, "azure", cfg.Azure.Location, "CRABBOX_AZURE_LOCATION")
 	cfg.Azure.ResourceGroup = configInputEnvString(cfg, "azure", cfg.Azure.ResourceGroup, "CRABBOX_AZURE_RESOURCE_GROUP")

@@ -13,6 +13,7 @@ func (Provider) ConfigShowSection(cfg core.Config) core.ProviderConfigShowSectio
 		Fields: []core.ProviderConfigShowField{
 			{JSONName: "location", JSONValue: cfg.Azure.Location, TextName: "location", TextValue: cfg.Azure.Location},
 			{JSONName: "resourceGroup", JSONValue: cfg.Azure.ResourceGroup, TextName: "resource_group", TextValue: cfg.Azure.ResourceGroup},
+			{JSONName: "userAssignedIdentityResourceId", JSONValue: cfg.Azure.UserAssignedIdentityResourceID, TextName: "user_assigned_identity_resource_id", TextValue: core.Blank(cfg.Azure.UserAssignedIdentityResourceID, "-")},
 			{JSONName: "image", JSONValue: cfg.Azure.Image},
 			{JSONName: "osDisk", JSONValue: cfg.Azure.OSDisk, TextName: "os_disk", TextValue: cfg.Azure.OSDisk},
 			{JSONName: "snapshotSKU", JSONValue: cfg.Azure.SnapshotSKU, TextName: "snapshot_sku", TextValue: core.Blank(cfg.Azure.SnapshotSKU, "-")},

@@ -127,6 +127,8 @@ type Server struct {
 	ServerType ServerTypeInfo      `json:"server_type"`
 	Location   *ServerLocationInfo `json:"location,omitempty"`
 	Image      *ServerImageInfo    `json:"image,omitempty"`
+
+	AzureUserAssignedIdentityIDs []string `json:"-"` // Observed VM attachments, never inferred from tags.
 }
 
 type HetznerImage struct {

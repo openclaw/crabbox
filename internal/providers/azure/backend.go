@@ -121,6 +121,9 @@ func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requeste
 		rollback = false
 		return core.LeaseTarget{}, shared.JoinAcquireCleanupError(fmt.Errorf("azure readiness rejected: %w", err), errors.New("Azure cleanup withheld after readiness identity loss"))
 	}
+	if err := core.ValidateAzureVMUserAssignedIdentity(server, cfg.Azure.UserAssignedIdentityResourceID); err != nil {
+		return core.LeaseTarget{}, fmt.Errorf("azure readiness rejected: %w", err)
+	}
 	target := core.SSHTargetFromConfig(cfg, core.AzureServerHost(server, cfg.Azure.Network))
 	if err := bootstrapManagedWindowsDesktop(ctx, cfg, &target, publicKey, b.RT.Stderr); err != nil {
 		return core.LeaseTarget{}, err
