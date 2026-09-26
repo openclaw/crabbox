@@ -4301,8 +4301,6 @@ export class FleetCoordinator {
         await retainLeaseWake(storage, Date.parse(record.expiresAt));
         return { record, slug };
       };
-      // Provider preparation stays outside retried transactions. The winning
-      // attempt, canonical lease, checkpoint fence and wake commit together.
       const committed = await commitLeaseAdmission(this.state, persist, async (storage) => {
         const lease = await storage.get<LeaseRecord>(leaseKey(leaseID), { noCache: true });
         const attempt = await storage.get<CreateAttemptRecord>(createAttemptKey(leaseID), {
@@ -4740,9 +4738,7 @@ export class FleetCoordinator {
     record.estimatedHourlyUSD = finalCost.hourlyUSD;
     record.maxEstimatedUSD = finalCost.maxUSD;
     const finalization = await this.state.runExclusive(async () => {
-      type Publication =
-        | { committed: false; current: LeaseRecord | undefined }
-        | { committed: true; record: LeaseRecord };
+      type Publication = { committed: false } | { committed: true; record: LeaseRecord };
       let published: LeaseRecord | undefined;
       const result = await commitLeaseAdmission<Publication>(
         this.state,
@@ -4759,7 +4755,7 @@ export class FleetCoordinator {
                 attempt.state !== "pending" ||
                 !createAttemptMatchesLease(attempt, latest)))
           ) {
-            return { committed: false, current: latest };
+            return { committed: false };
           }
           const committedRecord = applyLeaseRecordChanges(latest, finalizationBase, record);
           await storage.put(leaseKey(committedRecord.id), committedRecord);
@@ -4787,8 +4783,6 @@ export class FleetCoordinator {
             noCache: true,
           });
           const wake = await storage.get<number | null>(legacyAlarmKey, { noCache: true });
-          // A matching active lease alone is insufficient: the attempt must also
-          // attest this cloud ID. Canceled/rebound records never acknowledge success.
           if (
             published &&
             lease?.state === "active" &&

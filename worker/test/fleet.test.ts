@@ -53370,10 +53370,35 @@ describe("atomic legacy lease admission", () => {
   const transient = () =>
     Object.assign(new Error("synthetic transient storage failure"), { retryable: true });
 
+  function lostAcknowledgement(phase: "admission" | "publication", unreadable = false) {
+    const storage = new MemoryStorage();
+    const creates = vi.fn<() => void>();
+    const provider = fakeProvider(creates);
+    const fault = vi.fn<() => never>(() => {
+      if (unreadable) {
+        storage.beforeGet = async (key) => {
+          if (key === leaseKey) throw transient();
+        };
+        throw transient();
+      }
+      throw new Error("synthetic lost commit acknowledgement");
+    });
+    storage.afterCommit = async (keys) => {
+      if (!keys.has(attemptKey) || !keys.has(leaseKey)) return;
+      if (
+        storage.value<LeaseRecord>(leaseKey)?.state !==
+        (phase === "admission" ? "provisioning" : "active")
+      )
+        return;
+      storage.afterCommit = undefined;
+      fault();
+    };
+    return { storage, creates, fault, fleet: () => testFleet(storage, { hetzner: provider }) };
+  }
+
   it.each(["admission", "publication"] as const)(
     "atomically rolls back every %s write and retries without reallocating",
     async (phase) => {
-      // Each table entry fails after earlier writes have reached the transaction snapshot.
       /* oxlint-disable eslint/no-await-in-loop -- exercise fault points sequentially */
       for (const fault of [attemptKey, leaseKey, legacyAlarmKey, "alarm", "commit"]) {
         const storage = new MemoryStorage();
@@ -53427,28 +53452,13 @@ describe("atomic legacy lease admission", () => {
   it.each(["admission", "publication"] as const)(
     "resolves a lost %s acknowledgement by exact reread",
     async (phase) => {
-      const storage = new MemoryStorage();
-      let creates = 0;
-      let failures = 0;
-      storage.afterCommit = async (keys) => {
-        if (failures || !keys.has(attemptKey) || !keys.has(leaseKey)) return;
-        if (
-          storage.value<LeaseRecord>(leaseKey)?.state !==
-          (phase === "admission" ? "provisioning" : "active")
-        )
-          return;
-        failures++;
-        throw new Error("synthetic lost commit acknowledgement");
-      };
-      const provider = fakeProvider(() => {
-        creates++;
-      });
-      const response = await create(testFleet(storage, { hetzner: provider }));
+      const { storage, creates, fault, fleet } = lostAcknowledgement(phase);
+      const response = await create(fleet());
       expect(response.status).toBe(201);
-      expect(failures).toBe(1);
-      const reconstructed = testFleet(storage, { hetzner: provider });
+      expect(fault).toHaveBeenCalledTimes(1);
+      const reconstructed = fleet();
       expect((await create(reconstructed)).status).toBe(200);
-      expect(creates).toBe(1);
+      expect(creates).toHaveBeenCalledTimes(1);
       expect((await canceled(reconstructed)).status).toBe(200);
       expect(storage.value<LeaseRecord>(leaseKey)).toMatchObject({
         state: "released",
@@ -53461,33 +53471,15 @@ describe("atomic legacy lease admission", () => {
   it.each(["admission", "publication"] as const)(
     "retains uncertainty when %s commits but its authoritative reread fails",
     async (phase) => {
-      const storage = new MemoryStorage();
-      let creates = 0;
-      let failed = false;
-      storage.afterCommit = async (keys) => {
-        if (failed || !keys.has(attemptKey) || !keys.has(leaseKey)) return;
-        if (
-          storage.value<LeaseRecord>(leaseKey)?.state !==
-          (phase === "admission" ? "provisioning" : "active")
-        )
-          return;
-        failed = true;
-        storage.beforeGet = async (key) => {
-          if (key === leaseKey) throw transient();
-        };
-        throw transient();
-      };
-      const provider = fakeProvider(() => {
-        creates++;
-      });
-      expect((await create(testFleet(storage, { hetzner: provider }))).status).toBe(500);
+      const { storage, creates, fleet } = lostAcknowledgement(phase, true);
+      expect((await create(fleet())).status).toBe(500);
       storage.beforeGet = undefined;
       const count = phase === "admission" ? 0 : 1;
-      expect(creates).toBe(count);
-      const reconstructed = testFleet(storage, { hetzner: provider });
+      expect(creates).toHaveBeenCalledTimes(count);
+      const reconstructed = fleet();
       const replay = await create(reconstructed);
       expect(replay.status).toBe(200);
-      expect(creates).toBe(count);
+      expect(creates).toHaveBeenCalledTimes(count);
       expect(storage.value(attemptKey)).toMatchObject({ canonicalLeaseID: leaseID });
       expect(storage.alarm()).toBeDefined();
       expect((await canceled(reconstructed)).status).toBe(200);
@@ -53497,6 +53489,8 @@ describe("atomic legacy lease admission", () => {
   it.each(["owner", "org", "token", "generation", "state"] as const)(
     "does not acknowledge publication after attempt %s changes during lost acknowledgement",
     async (field) => {
+      const changed =
+        field === "state" ? "canceled" : field === "org" ? orgKeyForLabel("changed") : "changed";
       const storage = new MemoryStorage();
       let creates = 0;
       storage.afterCommit = async (keys) => {
@@ -53505,12 +53499,7 @@ describe("atomic legacy lease admission", () => {
         storage.afterCommit = undefined;
         storage.seed(attemptKey, {
           ...storage.value<object>(attemptKey),
-          [field]:
-            field === "state"
-              ? "canceled"
-              : field === "org"
-                ? orgKeyForLabel("changed")
-                : "changed",
+          [field]: changed,
         });
         throw new Error("lost acknowledgement with changed binding");
       };
@@ -53524,10 +53513,7 @@ describe("atomic legacy lease admission", () => {
       expect(response.status).toBe(500);
       expect(creates).toBe(1);
       expect(storage.value<LeaseRecord>(leaseKey)?.cloudID).toBe("123");
-      expect(storage.value(attemptKey)).toMatchObject({
-        [field]:
-          field === "state" ? "canceled" : field === "org" ? orgKeyForLabel("changed") : "changed",
-      });
+      expect(storage.value(attemptKey)).toMatchObject({ [field]: changed });
     },
   );
 

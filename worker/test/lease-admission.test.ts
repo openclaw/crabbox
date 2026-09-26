@@ -30,29 +30,12 @@ describe("legacy admission retry boundaries", () => {
     },
   );
 
-  it("does not extend the retry budget after a slow transaction", async () => {
-    vi.useFakeTimers();
-    try {
-      const runtime = new ProvisioningTestRuntime(new ProvisioningTestStorage());
-      const commit = vi.fn<() => Promise<never>>(async () => {
-        vi.setSystemTime(Date.now() + 500);
-        throw Object.assign(new Error("transient"), { retryable: true });
-      });
-      await expect(commitLeaseAdmission(runtime, commit, async () => undefined)).rejects.toThrow(
-        "transient",
-      );
-      expect(commit).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("does not start a retry when the backoff timer resumes after its budget", async () => {
-    const now = vi
-      .spyOn(Date, "now")
-      .mockReturnValueOnce(0)
-      .mockReturnValueOnce(0)
-      .mockReturnValue(600);
+  it.each([
+    { phase: "slow transaction", times: [0], elapsed: 500 },
+    { phase: "late backoff timer", times: [0, 0], elapsed: 600 },
+  ])("does not start a retry after a $phase exhausts the budget", async ({ times, elapsed }) => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(elapsed);
+    for (const time of times) now.mockReturnValueOnce(time);
     try {
       const runtime = new ProvisioningTestRuntime(new ProvisioningTestStorage());
       const commit = vi.fn<() => Promise<never>>(async () => {
@@ -89,13 +72,13 @@ describe("legacy admission retry boundaries", () => {
     ["POST", "/v1/leases/from-checkpoint", body],
     ["PUT", `/v1/leases/${body.leaseID}`, body],
     ["GET", `/v1/leases/${body.leaseID}`, body],
-  ])("does not expand replay contracts for %s %s", async (method, path, input) => {
+  ] as const)("does not expand replay contracts for %s %s", async (method, path, input) => {
     const fetch = vi.fn<() => Promise<never>>(async () => {
       throw reset();
     });
-    await expect(
-      fetchReplayableLeaseCreate(request(method as string, path as string, input), fetch),
-    ).rejects.toThrow("reset");
+    await expect(fetchReplayableLeaseCreate(request(method, path, input), fetch)).rejects.toThrow(
+      "reset",
+    );
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 

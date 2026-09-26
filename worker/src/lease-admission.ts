@@ -5,12 +5,11 @@ import {
   type CoordinatorStorageView,
 } from "./coordinator-runtime";
 
-export function isCoordinatorReset(error: unknown): boolean {
+function isCoordinatorReset(error: unknown): boolean {
   return error instanceof Error && /Durable Object.*reset/i.test(error.message);
 }
 
-// Only admission/publication call this. Both callbacks must be storage-only;
-// a failed readback retains uncertainty and must never authorize provider dispatch.
+// Callbacks must be storage-only; failed rereads cannot authorize provider dispatch.
 export async function commitLeaseAdmission<T>(
   runtime: CoordinatorRuntime,
   commit: (storage: CoordinatorStorageView) => Promise<T>,
@@ -48,8 +47,6 @@ export async function retainLeaseWake(
   await setLegacyWake(storage, current == null ? deadline : Math.min(current, deadline));
 }
 
-// The outer Worker can acquire a fresh stub after a reset. Never retry an
-// unbound POST, arbitrary mutation, provider error, or returned HTTP 5xx here.
 export async function fetchReplayableLeaseCreate(
   request: Request,
   fetch: (request: Request) => Promise<Response>,
