@@ -519,8 +519,11 @@ if (path.basename(process.argv[1]) === "curl") {
     if (process.env.FIXTURE_FAILURE === "readiness") process.exit(9);
     console.log("readiness-ok");
   } else {
-    assert.ok(args.at(-1).endsWith("echo devtools-smoke-ok"));
-    assert.ok(args.at(-1).includes("rust-archive-probe"));
+    assert.ok(args.includes("--script-stdin"));
+    assert.ok(!args.includes("--shell"));
+    const smoke = fs.readFileSync(0, "utf8");
+    assert.ok(smoke.endsWith("echo devtools-smoke-ok"));
+    assert.ok(smoke.includes("rust-archive-probe"));
     event("full-smoke"); console.log("devtools-smoke-ok");
   }
 } else if (args[0] === "stop") {
@@ -701,48 +704,105 @@ if (promotion && failure === "receipt-write") process.exit(28);
   });
 }
 
-test("retained adapter ignores readiness and injects only after the complete smoke", () => {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-retained-adapter-"));
-  try {
+for (const route of ["shell", "script-stdin"]) {
+  test(`retained adapter preserves ${route} and injects only after the complete smoke`, () => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-retained-adapter-"));
+    try {
+      const cli = path.join(temp, "cli");
+      fs.writeFileSync(
+        cli,
+        '#!/usr/bin/env bash\nif [[ "$*" == *--script-stdin* ]]; then cat >"$FIXTURE_UPLOAD"; fi\nexit "${FIXTURE_EXIT:-0}"\n',
+        { mode: 0o700 },
+      );
+      const env = {
+        ...process.env,
+        QUALIFICATION_MODE: "retained",
+        QUALIFICATION_REAL_CRABBOX: cli,
+        QUALIFICATION_ADAPTER_STATE: path.join(temp, "state"),
+        FIXTURE_UPLOAD: path.join(temp, "upload"),
+      };
+      fs.mkdirSync(env.QUALIFICATION_ADAPTER_STATE);
+      fs.writeFileSync(
+        path.join(env.QUALIFICATION_ADAPTER_STATE, "promotion-receipt.json"),
+        JSON.stringify({
+          image: { id: "ami-11111111", revision: "candidate" },
+          previous: { state: "absent", aliases: [{ alias: "regional", state: "absent" }] },
+        }),
+      );
+      const invoke = (args, extra = {}, input) =>
+        spawnSync(path.join(root, "scripts/image-qualification-crabbox-adapter.sh"), args, {
+          env: { ...env, ...extra },
+          encoding: "utf8",
+          input,
+        });
+      const smoke = (payload, extra = {}) =>
+        route === "shell"
+          ? invoke(["run", "--shell", "--", payload], extra)
+          : invoke(["run", "--script-stdin"], extra, payload);
+      assert.equal(invoke(["warmup"]).status, 0);
+      for (const args of [
+        ["run"],
+        ["run", "--script", "readiness.sh", "--", "--verify", "linux-builder"],
+        ["run", "--shell", "--", "echo readiness-ok"],
+        ["run", "--shell", "--", "echo devtools-smoke-ok\necho not-finished"],
+      ])
+        assert.equal(invoke(args).status, 0);
+      assert.equal(smoke("echo devtools-smoke-ok\necho not-finished\n").status, 0);
+      if (route === "script-stdin") {
+        const bytes = "printf '%s' 'quoted payload'\n\n\n";
+        assert.equal(smoke(bytes).status, 0);
+        assert.equal(fs.readFileSync(env.FIXTURE_UPLOAD, "utf8"), bytes);
+      }
+      assert.equal(smoke("echo devtools-smoke-ok", { FIXTURE_EXIT: "7" }).status, 7);
+      const payload = "set -e\necho devtools-smoke-ok\n";
+      assert.equal(smoke(payload).status, 86);
+      if (route === "script-stdin") {
+        assert.equal(fs.readFileSync(env.FIXTURE_UPLOAD, "utf8"), payload);
+        assert.deepEqual(
+          fs
+            .readdirSync(env.QUALIFICATION_ADAPTER_STATE)
+            .filter((name) => name.startsWith("smoke-stdin.")),
+          [],
+        );
+      }
+      assert.equal(smoke("echo devtools-smoke-ok").status, 0);
+    } finally {
+      fs.rmSync(temp, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const tool of ["mktemp", "cat"]) {
+  test(`retained adapter stops before the CLI when stdin ${tool} fails`, (t) => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-adapter-stdin-"));
+    t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+    const bin = path.join(temp, "bin");
+    const state = path.join(temp, "state");
+    fs.mkdirSync(bin);
+    const marker = path.join(temp, "cli-ran");
+    fs.writeFileSync(path.join(bin, tool), "#!/bin/sh\nexit 71\n", { mode: 0o700 });
     const cli = path.join(temp, "cli");
-    fs.writeFileSync(cli, '#!/usr/bin/env bash\nexit "${FIXTURE_EXIT:-0}"\n', { mode: 0o700 });
-    const env = {
-      ...process.env,
-      QUALIFICATION_MODE: "retained",
-      QUALIFICATION_REAL_CRABBOX: cli,
-      QUALIFICATION_ADAPTER_STATE: path.join(temp, "state"),
-    };
-    fs.mkdirSync(env.QUALIFICATION_ADAPTER_STATE);
-    fs.writeFileSync(
-      path.join(env.QUALIFICATION_ADAPTER_STATE, "promotion-receipt.json"),
-      JSON.stringify({
-        image: { id: "ami-11111111", revision: "candidate" },
-        previous: { state: "absent", aliases: [{ alias: "regional", state: "absent" }] },
-      }),
-    );
-    const invoke = (args, extra = {}) =>
-      spawnSync(path.join(root, "scripts/image-qualification-crabbox-adapter.sh"), args, {
-        env: { ...env, ...extra },
+    fs.writeFileSync(cli, '#!/bin/sh\nprintf called >"$FIXTURE_MARKER"\n', { mode: 0o700 });
+    const result = spawnSync(
+      "/bin/bash",
+      [path.join(root, "scripts/image-qualification-crabbox-adapter.sh"), "run", "--script-stdin"],
+      {
+        env: {
+          PATH: `${bin}:/usr/bin:/bin`,
+          QUALIFICATION_REAL_CRABBOX: cli,
+          QUALIFICATION_ADAPTER_STATE: state,
+          FIXTURE_MARKER: marker,
+        },
+        input: "echo devtools-smoke-ok\n",
         encoding: "utf8",
-      });
-    assert.equal(invoke(["warmup"]).status, 0);
-    for (const args of [
-      ["run"],
-      ["run", "--script", "readiness.sh", "--", "--verify", "linux-builder"],
-      ["run", "--shell", "--", "echo readiness-ok"],
-      ["run", "--shell", "--", "echo devtools-smoke-ok\necho not-finished"],
-    ])
-      assert.equal(invoke(args).status, 0);
-    assert.equal(
-      invoke(["run", "--shell", "--", "echo devtools-smoke-ok"], { FIXTURE_EXIT: "7" }).status,
-      7,
+        timeout: 5_000,
+      },
     );
-    assert.equal(invoke(["run", "--shell", "--", "set -e\necho devtools-smoke-ok\n"]).status, 86);
-    assert.equal(invoke(["run", "--shell", "--", "echo devtools-smoke-ok"]).status, 0);
-  } finally {
-    fs.rmSync(temp, { recursive: true, force: true });
-  }
-});
+    assert.equal(result.status, 71, result.stderr);
+    assert.equal(fs.existsSync(marker), false);
+    assert.deepEqual(fs.readdirSync(state), []);
+  });
+}
 
 test("retained adapter refuses warmup without a usable receipt and never records a launch", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-retained-receipt-"));

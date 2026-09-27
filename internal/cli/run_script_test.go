@@ -67,6 +67,56 @@ func TestRemoteRunScriptCommandUsesUploadedFile(t *testing.T) {
 	}
 }
 
+func TestRemoteRunScriptPreservesSmokeExitWithoutLogoutHooks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell execution")
+	}
+	smoke, err := os.ReadFile("../../scripts/devtools-image-smoke-linux.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(smoke)
+	start, end := strings.Index(source, "cleanup_smoke() {"), strings.Index(source, "export TMPDIR=\"$smoke_dir\"")
+	if start < 0 || end <= start {
+		t.Fatal("smoke cleanup owner not found")
+	}
+	for _, scenario := range []struct {
+		name, body string
+		code       int
+	}{
+		{"success", "echo devtools-smoke-ok", 0},
+		{"body failure", "exit 7", 7},
+		{"cleanup failure", "rm() { return 23; }; echo devtools-smoke-ok", 1},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			home := t.TempDir()
+			mustWriteTestFile(t, filepath.Join(home, ".bash_profile"), ":\n")
+			mustWriteTestFile(t, filepath.Join(home, ".bash_logout"), "printf logout >\"$HOME/logout-ran\"\nfalse\n")
+			data := "set -euo pipefail\nsmoke_dir=\"$HOME/smoke\"\nmkdir \"$smoke_dir\"\ncache_probe=\"\"\n" + source[start:end] + scenario.body + "\n"
+			spec, err := loadRunScript("", true, strings.NewReader(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(home, filepath.FromSlash(spec.RemotePath))
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			mustWriteTestFile(t, path, data)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", remoteRunScriptCommandWithEnvFiles(home, nil, nil, spec, nil))
+			cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "SHLVL=0", "BASH_ENV=/dev/null", "ENV=/dev/null"}
+			out, err := cmd.CombinedOutput()
+			if got := exitCode(err); got != scenario.code {
+				t.Fatalf("exit=%d want=%d err=%v output=%q", got, scenario.code, err, out)
+			}
+			if _, err := os.Stat(filepath.Join(home, "logout-ran")); !os.IsNotExist(err) {
+				t.Fatalf("smoke ran login logout hook: %v", err)
+			}
+		})
+	}
+}
+
 func TestRemoteRunScriptCommandUsesWorkdirAndUploadedScriptIdentity(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell execution")

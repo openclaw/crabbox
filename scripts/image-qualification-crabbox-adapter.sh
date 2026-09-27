@@ -39,6 +39,20 @@ try {
 }
 
 command_name="${1:-}"
+stdin_script=""
+if [[ "$command_name" == run ]]; then
+  for argument in "$@"; do
+    [[ "$argument" != -- ]] || break
+    if [[ "$argument" == --script-stdin ]]; then
+      # Retain exact upload bytes for execution; command substitution would
+      # discard trailing newlines before the real CLI receives them.
+      stdin_script=$(mktemp "$QUALIFICATION_ADAPTER_STATE/smoke-stdin.XXXXXXXX")
+      trap 'status=$?; rm -f -- "$stdin_script" || { [[ "$status" != 0 ]] || status=1; }; exit "$status"' EXIT
+      cat >"$stdin_script"
+      break
+    fi
+  done
+fi
 if [[ "$command_name" == warmup ]]; then
   if [[ "${QUALIFICATION_MODE:-mint}" == retained ]]; then
     validate_receipt "$QUALIFICATION_ADAPTER_STATE/promotion-receipt.json" promotion
@@ -82,6 +96,8 @@ if [[ -n "$receipt" ]]; then
   chmod 600 "$pending_receipt"
   validate_receipt "$pending_receipt" "$receipt_kind"
   mv "$pending_receipt" "$receipt"
+elif [[ -n "$stdin_script" ]]; then
+  "$QUALIFICATION_REAL_CRABBOX" "$@" <"$stdin_script" || status=$?
 else
   "$QUALIFICATION_REAL_CRABBOX" "$@" || status=$?
 fi
@@ -93,7 +109,10 @@ count=0
 expected_count=3
 [[ "${QUALIFICATION_MODE:-mint}" != retained ]] || expected_count=1
 full_smoke=0
-if [[ "$command_name" == run && "$#" -ge 4 ]]; then
+if [[ -n "$stdin_script" ]]; then
+  payload=$(cat "$stdin_script")
+  [[ "${payload##*$'\n'}" != 'echo devtools-smoke-ok' ]] || full_smoke=1
+elif [[ "$command_name" == run && "$#" -ge 4 ]]; then
   args=("$@")
   last=$(($# - 1))
   if [[ "${args[$((last - 2))]}" == --shell && "${args[$((last - 1))]}" == -- ]]; then

@@ -820,7 +820,14 @@ smoke() {
   local lease="$1"
   verify_linux_image_readiness "$lease" || return $?
   smoke_script || return $?
-  run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --shell -- "$smoke_script_value"
+  if [[ "$target" == linux ]]; then
+    # Keep the smoke's EXIT cleanup outside the login shell: logout hooks can
+    # replace its exit status, including turning a successful proof into failure.
+    printf '%s' "$smoke_script_value" |
+      run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --script-stdin
+  else
+    run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --shell -- "$smoke_script_value"
+  fi
 }
 
 run_prep() {

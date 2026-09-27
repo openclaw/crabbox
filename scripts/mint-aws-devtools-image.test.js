@@ -61,6 +61,11 @@ case "$1" in
     fi
     ;;
   run)
+    run_script="\${@: -1}"
+    if [[ " $* " == *" --script-stdin "* ]]; then
+      run_script="$(cat)"
+      printf 'stdin script %s\\n' "$run_script" >>"\${CRABBOX_FAKE_LOG}"
+    fi
     if [[ " $* " == *" --allow-env CRABBOX_LINUX_NODE_MAJOR,CRABBOX_LINUX_PNPM_VERSION "* ]]; then
       printf 'builder overrides node=%s pnpm=%s\\n' "\${CRABBOX_LINUX_NODE_MAJOR:-}" "\${CRABBOX_LINUX_PNPM_VERSION:-}" >>"\${CRABBOX_FAKE_LOG}"
       [[ "\${CRABBOX_FAKE_PREP_EXIT:-0}" == "0" ]] || exit "$CRABBOX_FAKE_PREP_EXIT"
@@ -84,11 +89,11 @@ case "$1" in
       fi
       exit "\${CRABBOX_FAKE_CAPTURE_EXIT:-0}"
     fi
-    if [[ -n "\${CRABBOX_FAKE_PNPM_RUNNER:-}" && "\${@: -1}" == *"docker_probe="* ]]; then
-      "$CRABBOX_FAKE_PNPM_RUNNER" "$lease" "\${@: -1}" || exit $?
+    if [[ -n "\${CRABBOX_FAKE_PNPM_RUNNER:-}" && "$run_script" == *"docker_probe="* ]]; then
+      "$CRABBOX_FAKE_PNPM_RUNNER" "$lease" "$run_script" || exit $?
       exit 0
     fi
-    if [[ -n "\${CRABBOX_FAKE_SMOKE_FAIL_LEASE:-}" && " $* " == *" --id \${CRABBOX_FAKE_SMOKE_FAIL_LEASE} "* && "\${@: -1}" == *"docker_probe="* ]]; then
+    if [[ -n "\${CRABBOX_FAKE_SMOKE_FAIL_LEASE:-}" && " $* " == *" --id \${CRABBOX_FAKE_SMOKE_FAIL_LEASE} "* && "$run_script" == *"docker_probe="* ]]; then
       printf 'offline artifact smoke failed\\n' >&2
       exit 73
     fi
@@ -101,19 +106,19 @@ case "$1" in
       exit 74
     fi
     if [[ -n "\${CRABBOX_FAKE_CAPTURE_RUN_SCRIPT:-}" ]]; then
-      last_arg="\${@: -1}"
+      last_arg="$run_script"
       if [[ "$last_arg" == *"docker_probe="* ]]; then
         printf '%s\\n' "$last_arg" >"\${CRABBOX_FAKE_CAPTURE_RUN_SCRIPT}"
       fi
     fi
-    if [[ -n "\${CRABBOX_FAKE_NODE_CHECK_RUNNER:-}" && "\${@: -1}" == *"docker_probe="* ]]; then
+    if [[ -n "\${CRABBOX_FAKE_NODE_CHECK_RUNNER:-}" && "$run_script" == *"docker_probe="* ]]; then
       lease=""
       previous=""
       for arg in "$@"; do
         if [[ "$previous" == "--id" ]]; then lease="$arg"; break; fi
         previous="$arg"
       done
-      "\${CRABBOX_FAKE_NODE_CHECK_RUNNER}" "$lease" "\${@: -1}" || exit $?
+      "\${CRABBOX_FAKE_NODE_CHECK_RUNNER}" "$lease" "$run_script" || exit $?
     fi
     if [[ "$*" == *"Test-Path 'C:\\ProgramData\\crabbox\\image-prep-reboot-required'"* ]]; then
       if [[ "\${CRABBOX_FAKE_WINDOWS_REBOOT:-0}" == "1" && ! -f "\${CRABBOX_FAKE_LOG}.rebooted" ]]; then
@@ -417,7 +422,7 @@ test("qualification bundle runs the bundled installer and all three Linux smokes
   assert.ok(log.includes(`--script ${path.dirname(fake.script)}/install-linux-developer-tools.sh`));
   assert.equal((log.match(/docker_probe=/g) ?? []).length, 3);
   for (const lease of ["cbx_source", "cbx_candidate", "cbx_promoted"]) {
-    assert.match(log, new RegExp(`run .*--id ${lease} --no-sync --shell -- set -euo pipefail`));
+    assert.match(log, new RegExp(`run .*--id ${lease} --no-sync --script-stdin\\n`));
     assert.match(log, new RegExp(`stop --provider aws --target linux ${lease}`));
   }
   assert.match(log, /checkpoint create/);
@@ -554,7 +559,7 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
   );
   assert.match(
     log,
-    /run --provider aws --target linux --id cbx_source --no-sync --shell -- set -euo pipefail/,
+    /run --provider aws --target linux --id cbx_source --no-sync --script-stdin\n/,
   );
   assert.equal((log.match(/corepack --version/g) ?? []).length, 3);
   assert.equal(

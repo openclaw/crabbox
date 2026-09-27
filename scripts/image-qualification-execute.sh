@@ -217,7 +217,9 @@ uv_smoke_script
 ' _ "$QUALIFICATION_ARTIFACT_DIR/candidate/scripts/install-linux-developer-tools.sh")
   printf -v smoke_value 'set -euo pipefail\nexport CRABBOX_LINUX_DESKTOP_TOOLS=1 CRABBOX_LINUX_BROWSER=1\nexpected_node_major=24\nexpected_pnpm_version=11.1.0\ndeveloper_archive_probe() {\n%s\n}\n%s' \
     "$archive_probe" "$(cat "$QUALIFICATION_ARTIFACT_DIR/candidate/scripts/devtools-image-smoke-linux.sh")"
-  "$CRABBOX_BIN" run --provider aws --target linux --id "$lease" --no-sync --shell -- "$smoke_value"
+  # The smoke owns its EXIT status; do not run its cleanup inside a login shell.
+  printf '%s' "$smoke_value" |
+    "$CRABBOX_BIN" run --provider aws --target linux --id "$lease" --no-sync --script-stdin
 )
 
 mint_status=0
