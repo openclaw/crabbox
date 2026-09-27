@@ -591,6 +591,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -611,6 +612,12 @@ jobs:
 
       - name: Check generated bootstrap and OS catalog
         run: node scripts/generate-bootstrap.mjs --check
+
+      - name: Prove pinned Rust and uv offline execution
+        timeout-minutes: 5
+        env:
+          CRABBOX_TEST_RUST_UV_DOWNLOAD: "1"
+        run: node --test --test-name-pattern='^reviewed Linux Rust and uv archives' scripts/linux-rust-uv.test.js
 
       - name: Test
         run: node --test scripts/*.test.js scripts/*.test.mjs

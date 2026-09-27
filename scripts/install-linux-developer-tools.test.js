@@ -1097,6 +1097,11 @@ test("linux developer image reports TruffleHog from the configured install direc
 		"corepack",
 		"pnpm",
 		"bun",
+		"rustc",
+		"cargo",
+		"rustdoc",
+		"uv",
+		"uvx",
 		"docker",
 	]) {
 		writeExecutable(
@@ -1136,6 +1141,9 @@ test("linux developer image reports TruffleHog from the configured install direc
 	assert.equal(result.status, 0, result.stderr || result.stdout);
 	assert.match(result.stdout, /go version go1\.27\.0 linux\/amd64/);
 	assert.match(result.stdout, /bun test-version/);
+	for (const command of ["rustc", "cargo", "rustdoc", "uv", "uvx"]) {
+		assert.match(result.stdout, new RegExp(`${command} test-version`));
+	}
 	assert.match(result.stdout, new RegExp(`${fixture.bin}/bunx`));
 	assert.match(result.stdout, /trufflehog 3\.95\.9/);
 });
@@ -1162,6 +1170,7 @@ install_requested_node() { echo requested-node; }
 node() { printf 'v%s.0.0\\n' "$node_major"; }
 npm() { echo npm-version; }
 corepack() { printf 'corepack=%s\\n' "$*"; }
+install_rust_uv_toolchain() { echo unexpected-rust-uv; return 93; }
 main --node-only
 main --node-only
 `], { cwd: repoRoot, env: { PATH: process.env.PATH, CRABBOX_LINUX_NODE_MAJOR: major }, encoding: "utf8" });
@@ -1174,7 +1183,7 @@ main --node-only
     } else {
       assert.equal(result.stdout.split("requested-node").length - 1, 2);
     }
-    assert.doesNotMatch(result.stdout, /pnpm-.*tgz|corepack=prepare|docker|chrome|go1\./);
+    assert.doesNotMatch(result.stdout, /pnpm-.*tgz|corepack=prepare|docker|chrome|go1\.|unexpected-rust-uv/);
     assert.match(result.stderr, /Node baseline installed in \d+s/);
   });
 }

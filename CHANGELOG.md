@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Images: include checksum-pinned Rust/Cargo and uv/uvx in Linux x86_64 developer images, with nonroot offline build and Python-tool smoke checks.
+
 ## 0.67.0 - 2026-09-26
 
 ### Highlights

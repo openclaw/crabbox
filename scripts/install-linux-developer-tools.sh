@@ -31,6 +31,11 @@ pinned_go_version="1.27.0"
 bun_bin_dir="/usr/local/bin"
 bun_toolchain_root="/opt/crabbox/toolchains/bun"
 pinned_bun_version="1.4.0"
+rust_toolchain_root="/opt/crabbox/toolchains/rust"
+uv_toolchain_root="/opt/crabbox/toolchains/uv"
+developer_bin_dir="/usr/local/bin"
+pinned_rust_version="1.98.1"
+pinned_uv_version="0.12.19"
 
 log() {
   printf 'linux-tools: %s\n' "$*" >&2
@@ -244,6 +249,10 @@ EOF
 toolchain_archive_spec() {
   # Digests bind upstream bytes, not a mutable installation or Corepack metadata.
   case "$1" in
+    rust-1.98.1-x86_64-unknown-linux-gnu.tar.xz)
+      printf '%s\n' "sha256 5326b36c53de11d148c8f8dab6553a3d1006c2cfd32123683073fad3c302605b https://static.rust-lang.org/dist/$1" ;;
+    uv-0.12.19-x86_64-unknown-linux-gnu.tar.gz)
+      printf '%s\n' "sha256 23bf5552d220e0842b65c862097b2ebaeba0064b74eda5e565e77fd25969d8c8 https://github.com/astral-sh/uv/releases/download/0.12.19/uv-x86_64-unknown-linux-gnu.tar.gz" ;;
     go1.27.0.linux-amd64.tar.gz)
       printf '%s\n' "sha256 675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685 https://go.dev/dl/$1" ;;
     node-v24.19.0-linux-x64.tar.xz)
@@ -871,6 +880,206 @@ bun_smoke_script() {
   printf '%s\n' 'if pinned_bun_supported; then' '  offline_bun_probe' 'fi'
 }
 
+pinned_rust_uv_supported() {
+  linux_x64_supported && [[ "$(getconf GNU_LIBC_VERSION 2>/dev/null)" == glibc\ * ]]
+}
+
+check_developer_toolchain_destination() {
+  local directory="$1"
+  # The image owns this slot, never an operator's symlinked toolchain or home.
+  while [[ "$directory" != "/" ]]; do
+    [[ ! -L "$directory" ]] || { log "symlinked developer toolchain directory: $directory"; return 1; }
+    directory="$(dirname "$directory")" || return $?
+  done
+}
+
+stage_rust_uv_archive() {
+  local name="$1" staging="$2" allow_download="${3:-0}"
+  case "$name" in
+    "rust-$pinned_rust_version-x86_64-unknown-linux-gnu.tar.xz"|"uv-$pinned_uv_version-x86_64-unknown-linux-gnu.tar.gz") ;;
+    *) log "unsupported Rust or uv archive: $name"; return 1 ;;
+  esac
+  if [[ -L "$public_toolchain_archive_dir" ]]; then
+    log "symlinked public toolchain archive directory"
+    return 1
+  fi
+  if [[ -e "$public_toolchain_archive_dir/$name" || -L "$public_toolchain_archive_dir/$name" ]]; then
+    [[ -f "$public_toolchain_archive_dir/$name" && ! -L "$public_toolchain_archive_dir/$name" ]] || {
+      log "malformed Rust or uv archive: $name"
+      return 1
+    }
+    allow_download=0
+  fi
+  stage_toolchain_archive "$name" "$staging" "$allow_download"
+}
+
+extract_rust_toolchain() {
+  local staging="$1" package="rust-$pinned_rust_version-x86_64-unknown-linux-gnu"
+  stage_rust_uv_archive "$package.tar.xz" "$staging" || return $?
+  # Select only the offline host toolchain, not bundled docs or optional components.
+  tar --no-same-owner -xJf "$staging/$package.tar.xz" -C "$staging" \
+    "$package/install.sh" "$package/components" "$package/rust-installer-version" \
+    "$package/rustc" "$package/cargo" "$package/rust-std-x86_64-unknown-linux-gnu" || return $?
+  /bin/sh "$staging/$package/install.sh" --prefix="$staging/toolchain" \
+    --components=rustc,cargo,rust-std-x86_64-unknown-linux-gnu --disable-ldconfig || return $?
+}
+
+check_rust_toolchain() (
+  set -euo pipefail
+  local bin="$1" scratch="$2" rustc cargo rustdoc version
+  rustc="$(command -v "${bin:+$bin/}rustc")" || return $?
+  cargo="$(command -v "${bin:+$bin/}cargo")" || return $?
+  rustdoc="$(command -v "${bin:+$bin/}rustdoc")" || return $?
+  mkdir -p "$scratch/home" "$scratch/cargo" "$scratch/src" || return $?
+  local -a clean=(env -i "HOME=$scratch/home" "PATH=$PATH" "TMPDIR=$scratch"
+    "CARGO_HOME=$scratch/cargo" CARGO_NET_OFFLINE=true "RUSTC=$rustc" "RUSTDOC=$rustdoc")
+  version="$("${clean[@]}" "$rustc" --version --verbose)" || return $?
+  [[ "$version" == "rustc $pinned_rust_version ("* ]] || return 1
+  grep -qx 'host: x86_64-unknown-linux-gnu' <<<"$version" || return $?
+  [[ "$("${clean[@]}" "$cargo" --version)" == "cargo $pinned_rust_version ("* ]] || return 1
+  [[ "$("${clean[@]}" "$rustdoc" --version)" == "rustdoc $pinned_rust_version ("* ]] || return 1
+  printf '[package]\nname = "crabbox-rust-smoke"\nversion = "0.1.0"\nedition = "2024"\n' >"$scratch/Cargo.toml" || return $?
+  {
+    cat >"$scratch/src/main.rs" <<'RUST'
+/// ```
+/// assert_eq!(6 * 7, 42);
+/// ```
+fn answer() -> i32 { 42 }
+fn main() { println!("{}", answer()); }
+#[test]
+fn computes_answer() { assert_eq!(answer(), 42); }
+RUST
+  } || return $?
+  cd "$scratch" || return $?
+  "${clean[@]}" "$cargo" test --offline || return $?
+  [[ "$("${clean[@]}" "$cargo" run --offline --quiet)" == 42 ]] || return 1
+  "${clean[@]}" "$rustdoc" --test src/main.rs || return $?
+)
+
+check_uv_toolchain() (
+  set -euo pipefail
+  local bin="$1" scratch="$2" uv uvx python version
+  uv="$(command -v "${bin:+$bin/}uv")" || return $?
+  uvx="$(command -v "${bin:+$bin/}uvx")" || return $?
+  python="$(command -v python3)" || return $?
+  mkdir -p "$scratch/home" || return $?
+  local -a clean=(env -i "HOME=$scratch/home" "PATH=$PATH" "TMPDIR=$scratch"
+    "UV_CACHE_DIR=$scratch/cache" "UV_TOOL_DIR=$scratch/tools"
+    UV_OFFLINE=1 UV_NO_CONFIG=1 UV_PYTHON_DOWNLOADS=never UV_NO_PROGRESS=1)
+  version="$("${clean[@]}" "$uv" --version)" || return $?
+  [[ "$version" == "uv $pinned_uv_version" || "$version" == "uv $pinned_uv_version ("* ]] || return 1
+  version="$("${clean[@]}" "$uvx" --version)" || return $?
+  [[ "$version" == "uvx $pinned_uv_version" || "$version" == "uvx $pinned_uv_version ("* ]] || return 1
+  # A stdlib-built wheel exercises both consumers without fetching a build backend.
+  {
+    "$python" - "$scratch" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+root = pathlib.Path(sys.argv[1])
+metadata = "crabbox_uv_smoke-0.1.0.dist-info/"
+files = {
+    "crabbox_uv_smoke.py": "ANSWER = 42\ndef main():\n    print(ANSWER)\n",
+    metadata + "METADATA": "Metadata-Version: 2.1\nName: crabbox-uv-smoke\nVersion: 0.1.0\n",
+    metadata + "WHEEL": "Wheel-Version: 1.0\nGenerator: crabbox\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    metadata + "entry_points.txt": "[console_scripts]\ncrabbox-uv-smoke = crabbox_uv_smoke:main\n",
+}
+files[metadata + "RECORD"] = "".join(name + ",,\n" for name in [*files, metadata + "RECORD"])
+with zipfile.ZipFile(root / "crabbox_uv_smoke-0.1.0-py3-none-any.whl", "w") as wheel:
+    for name, contents in files.items():
+        wheel.writestr(name, contents)
+PY
+  } || return $?
+  cd "$scratch" || return $?
+  "${clean[@]}" "$uv" venv --python "$python" "$scratch/venv" || return $?
+  "${clean[@]}" "$uv" pip install --python "$scratch/venv/bin/python" "$scratch/crabbox_uv_smoke-0.1.0-py3-none-any.whl" || return $?
+  "${clean[@]}" "$scratch/venv/bin/python" -c 'import crabbox_uv_smoke; assert crabbox_uv_smoke.ANSWER == 42' || return $?
+  [[ "$("${clean[@]}" "$uvx" --python "$python" --from "$scratch/crabbox_uv_smoke-0.1.0-py3-none-any.whl" crabbox-uv-smoke)" == 42 ]]
+)
+
+install_rust_uv_toolchain() (
+  set -euo pipefail
+  umask 022
+  pinned_rust_uv_supported || return 0
+  local tool="$1" destination name staging pending
+  local -a commands
+  case "$tool" in
+    rust) destination="$rust_toolchain_root/$pinned_rust_version"; name="rust-$pinned_rust_version-x86_64-unknown-linux-gnu.tar.xz"; commands=(rustc cargo rustdoc) ;;
+    uv) destination="$uv_toolchain_root/$pinned_uv_version"; name="uv-$pinned_uv_version-x86_64-unknown-linux-gnu.tar.gz"; commands=(uv uvx) ;;
+    *) return 2 ;;
+  esac
+  public_tool_links check "$developer_bin_dir" "$destination/bin" "${commands[@]}" || return $?
+  check_developer_toolchain_destination "$destination" || return $?
+  prepare_public_toolchain_archive_dir || return $?
+  staging="$(mktemp -d)" || return $?
+  # shellcheck disable=SC2064
+  trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
+  stage_rust_uv_archive "$name" "$staging" 1 || return $?
+  pending="$(mktemp "$public_toolchain_archive_dir/.archive.XXXXXX")" || return $?
+  # shellcheck disable=SC2064
+  trap "$(printf 'rm -rf -- %q %q' "$staging" "$pending")" EXIT
+  install -m 0644 "$staging/$name" "$pending" || return $?
+  python3 - "$pending" "$public_toolchain_archive_dir/$name" <<'PY' || return $?
+import os
+import sys
+os.replace(sys.argv[1], sys.argv[2])
+PY
+  if [[ "$tool" == rust ]]; then
+    extract_rust_toolchain "$staging" || return $?
+  else
+    mkdir -p "$staging/toolchain/bin" || return $?
+    tar --no-same-owner -xzf "$staging/$name" -C "$staging/toolchain/bin" --strip-components=1 \
+      uv-x86_64-unknown-linux-gnu/uv uv-x86_64-unknown-linux-gnu/uvx || return $?
+  fi
+  "check_${tool}_toolchain" "$staging/toolchain/bin" "$staging/check" || return $?
+  public_tool_links check "$developer_bin_dir" "$destination/bin" "${commands[@]}" || return $?
+  check_developer_toolchain_destination "$destination" || return $?
+  install -d -m 0755 "$(dirname "$destination")" "$developer_bin_dir" || return $?
+  rm -rf -- "$destination" || return $?
+  mv "$staging/toolchain" "$destination" || return $?
+  public_tool_links publish "$developer_bin_dir" "$destination/bin" "${commands[@]}" || return $?
+)
+
+offline_rust_probe() (
+  set -euo pipefail
+  umask 077
+  [[ "$(id -u)" -ne 0 ]] || { log "offline Rust smoke must run as a nonroot user"; return 1; }
+  local staging
+  staging="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
+  extract_rust_toolchain "$staging"
+  check_rust_toolchain "" "$staging/installed"
+  check_rust_toolchain "$staging/toolchain/bin" "$staging/extracted"
+)
+
+offline_uv_probe() (
+  set -euo pipefail
+  umask 077
+  [[ "$(id -u)" -ne 0 ]] || { log "offline uv smoke must run as a nonroot user"; return 1; }
+  local staging
+  staging="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
+  stage_rust_uv_archive "uv-$pinned_uv_version-x86_64-unknown-linux-gnu.tar.gz" "$staging"
+  tar --no-same-owner -xzf "$staging/uv-$pinned_uv_version-x86_64-unknown-linux-gnu.tar.gz" -C "$staging"
+  check_uv_toolchain "" "$staging/installed"
+  check_uv_toolchain "$staging/uv-x86_64-unknown-linux-gnu" "$staging/extracted"
+)
+
+rust_smoke_script() {
+  printf 'public_toolchain_archive_dir=%q\npinned_rust_version=%q\npinned_uv_version=%q\n' "$public_toolchain_archive_dir" "$pinned_rust_version" "$pinned_uv_version"
+  declare -f log linux_x64_supported pinned_rust_uv_supported toolchain_archive_spec verify_toolchain_archive stage_toolchain_archive stage_rust_uv_archive extract_rust_toolchain check_rust_toolchain offline_rust_probe
+  printf '%s\n' 'if pinned_rust_uv_supported; then' '  offline_rust_probe' 'fi'
+}
+
+uv_smoke_script() {
+  printf 'public_toolchain_archive_dir=%q\npinned_rust_version=%q\npinned_uv_version=%q\n' "$public_toolchain_archive_dir" "$pinned_rust_version" "$pinned_uv_version"
+  declare -f log linux_x64_supported pinned_rust_uv_supported toolchain_archive_spec verify_toolchain_archive stage_toolchain_archive stage_rust_uv_archive check_uv_toolchain offline_uv_probe
+  printf '%s\n' 'if pinned_rust_uv_supported; then' '  offline_uv_probe' 'fi'
+}
+
 trufflehog_sha256_for_arch() {
   case "$1" in
     amd64) printf '%s\n' "f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e" ;;
@@ -1048,6 +1257,13 @@ print_versions() {
     bun --version
     command -v bunx
   fi
+  if pinned_rust_uv_supported; then
+    rustc --version
+    cargo --version
+    rustdoc --version
+    uv --version
+    uvx --version
+  fi
   "$trufflehog_bin_dir/trufflehog" --no-update --version
   docker --version
   docker compose version
@@ -1135,6 +1351,8 @@ APT
   fi
   install_node_pnpm || return $?
   install_go_toolchain || return $?
+  install_rust_uv_toolchain rust || return $?
+  install_rust_uv_toolchain uv || return $?
   install_bun
   install_trufflehog
   install_docker

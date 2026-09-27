@@ -565,7 +565,13 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
     (log.match(/\n  offline_go_probe\nfi\npublic_toolchain_archive_dir=/g) ?? []).length,
     3,
   );
-  assert.equal((log.match(/\n  offline_bun_probe\nfi\n}/g) ?? []).length, 3);
+  for (const probe of ["bun", "rust"]) {
+    assert.equal(
+      (log.match(new RegExp(`\\n  offline_${probe}_probe\\nfi\\npublic_toolchain_archive_dir=`, "g")) ?? []).length,
+      3,
+    );
+  }
+  assert.equal((log.match(/\n  offline_uv_probe\nfi\n}/g) ?? []).length, 3);
   assert.equal((log.match(/\ndeveloper_archive_probe\necho devtools-smoke-ok/g) ?? []).length, 3);
   assert.match(log, /docker image inspect hello-world ubuntu:24\.04 node:24-bookworm/);
   assert.match(
@@ -899,13 +905,17 @@ test("generated Linux smoke emits success only after nonroot, tool, and offline 
     generated
       .replace(/\n[ \t]*offline_node_pnpm_probe\n/, "\nprintf 'node-proof-done\\n'\n")
       .replace(/\n[ \t]*offline_go_probe\n/, "\nprintf 'go-proof-done\\n'\n")
-      .replace(/\n[ \t]*offline_bun_probe\n/, "\nprintf 'bun-proof-done\\n'\n"),
+      .replace(/\n[ \t]*offline_bun_probe\n/, "\nprintf 'bun-proof-done\\n'\n")
+      .replace(/\n[ \t]*offline_rust_probe\n/, "\nprintf 'rust-proof-done\\n'\n")
+      .replace(/\n[ \t]*offline_uv_probe\n/, "\nprintf 'uv-proof-done\\n'\n"),
   );
   assert.equal(successful.status, 0, successful.stderr);
   const orderedMarkers = [
     "node-proof-done\n",
     "go-proof-done\n",
     "bun-proof-done\n",
+    "rust-proof-done\n",
+    "uv-proof-done\n",
     "devtools-smoke-ok\n",
   ].map((marker) => successful.stdout.indexOf(marker));
   assert.ok(orderedMarkers.every((index) => index >= 0), successful.stdout);
@@ -1590,6 +1600,8 @@ for (const failure of [
   "Node archive probe rendering",
   "Go archive probe rendering",
   "Bun archive probe rendering",
+  "Rust archive probe rendering",
+  "uv archive probe rendering",
 ]) {
   test(`AWS mint stops before capture when ${failure} fails`, async (t) => {
     const fake = await measuredFixture(t);
@@ -1603,6 +1615,10 @@ for (const failure of [
         "Go archive probe rendering": "go_smoke_script() { echo partial-go-probe; return 48; }",
         "Bun archive probe rendering":
           "bun_smoke_script() { echo partial-bun-probe; return 49; }",
+        "Rust archive probe rendering":
+          "rust_smoke_script() { echo partial-rust-probe; return 50; }",
+        "uv archive probe rendering":
+          "uv_smoke_script() { echo partial-uv-probe; return 51; }",
       }[failure];
       await writeFile(
         installer,
@@ -1615,13 +1631,15 @@ for (const failure of [
       "Node archive probe rendering": 47,
       "Go archive probe rendering": 48,
       "Bun archive probe rendering": 49,
+      "Rust archive probe rendering": 50,
+      "uv archive probe rendering": 51,
     }[failure];
     assert.equal(result.code, expected, result.stderr);
     const log = await readFile(fake.log, "utf8");
     assert.match(log, /stop --provider aws --target linux cbx_source/);
     assert.doesNotMatch(
       log,
-      /checkpoint create|image promote|docker_probe=|partial-(?:node|go|bun)-probe/,
+      /checkpoint create|image promote|docker_probe=|partial-(?:node|go|bun|rust|uv)-probe/,
     );
   });
 }

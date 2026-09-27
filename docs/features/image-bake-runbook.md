@@ -403,7 +403,8 @@ scripts/mint-aws-devtools-image.sh \
 ### What the prep scripts install
 
 - **Linux** (`scripts/install-linux-developer-tools.sh`): common CLI/build
-  tooling, GitHub CLI, Node 24.19.0, Go 1.27.0, and Bun 1.4.0 on x86_64,
+  tooling, GitHub CLI, Node 24.19.0, Go 1.27.0, Bun 1.4.0, Rust/Cargo 1.98.1,
+  and uv/uvx 0.12.19 on x86_64,
   corepack/pnpm, TruffleHog 3.95.9, Chrome or
   Chromium for browser lanes, desktop/VNC helpers, Docker Engine, Compose,
   buildx, and a small default Docker image set. TruffleHog archives are pinned
@@ -421,7 +422,7 @@ scripts/mint-aws-devtools-image.sh \
   virtual environment, before atomically emitting the strongest supported profile.
 - **Managed WSL2 distro bootstrap**: the Linux installer's `--node-only` entrypoint
   provides the same Node/npm baseline (checksum-pinned Node 24.19.0 on amd64).
-  It skips image-only Docker, Go, browser/desktop setup, pnpm activation, and the
+  It skips image-only Docker, Go, Rust, uv, browser/desktop setup, pnpm activation, and the
   offline pnpm archives; see [AWS targets](../providers/aws.md#targets).
 - **Windows** (`scripts/install-windows-developer-tools.ps1`): common CLI/build
   tooling, GitHub CLI, Node 24, corepack/pnpm, TruffleHog 3.95.9, and Windows
@@ -493,8 +494,10 @@ Public archives are retained under `/opt/crabbox/toolchain-archives`:
 | `go1.27.0.linux-amd64.tar.gz` | Complete Go 1.27.0 distribution |
 | `bun-v1.4.0-linux-x64-baseline.zip` | Original Bun 1.4.0 baseline Linux glibc ZIP |
 | `bun-v1.4.0-linux-x64.zip` | Original Bun 1.4.0 optimized Linux glibc ZIP |
+| `rust-1.98.1-x86_64-unknown-linux-gnu.tar.xz` | Official standalone Rust/Cargo host distribution |
+| `uv-0.12.19-x86_64-unknown-linux-gnu.tar.gz` | Original uv/uvx Linux glibc release archive |
 
-The SHA-256 Node/Go/Bun pins and SHA-512 pnpm pins live in the installer's
+The SHA-256 Node/Go/Bun/Rust/uv pins and SHA-512 pnpm pins live in the installer's
 `toolchain_archive_spec`. Consumers must carry independently reviewed pins,
 copy archives into private staging, validate those exact bytes, and extract
 fresh trees. Do not authenticate a cached installation by running `--version`,
@@ -537,7 +540,39 @@ have independent Linux `amd64` contracts, including when the Node major is
 overridden. Bun additionally requires glibc. ARM guests and custom prep scripts
 retain the existing normal-tool smoke; their success does not qualify the
 x86_64 archive recipe. Missing or corrupt archives cannot disable any required
-probe for the supported builder.
+probe for the supported builder. Rust and uv also require glibc Linux `amd64`
+and are independent of Node selection.
+
+Rust and uv install under `/opt/crabbox/toolchains/{rust,uv}/<version>/bin`,
+with public `rustc`, `cargo`, `rustdoc`, `uv`, and `uvx` links under
+`/usr/local/bin`. Existing files or links to other destinations stop preparation
+before the tool's cache or installation changes. Rebakes rebuild only their
+exact image-owned slots from authenticated bytes. User `.cargo`, `.rustup`,
+shell profiles, and existing package-manager installations are not adopted or
+rewritten. Rustup, additional Rust targets, and Python downloads are not included.
+
+Rust uses the [official standalone distribution](https://forge.rust-lang.org/infra/other-installation-methods.html),
+with only the compiler, Cargo, and host standard-library components installed;
+its SHA-256 is pinned from the matching Rust distribution checksum. uv uses the
+[official release archive](https://github.com/astral-sh/uv/releases/tag/0.12.19)
+and its SHA-256 release-asset digest. The versioned uv cache filename preserves
+the original upstream bytes. No mutable installer script runs from the network.
+
+Source, candidate, and promoted smokes check both ordinary runtime PATH and a
+fresh extraction of each authenticated archive as a nonroot user. Rust compiles,
+tests, and runs a dependency-free Cargo crate offline, then runs a rustdoc test.
+uv creates a virtual environment using the existing Python, installs and imports
+a local wheel, and executes its console script through `uvx`. These probes use
+fresh private homes/caches with package-network access and Python downloads
+disabled, and remove their scratch on success or failure. Generic
+`linux-minimal`/`linux-builder` readiness and node-only bootstrap are unchanged.
+
+The Scripts CI job repeats this Rust/uv installation and offline smoke in
+temporary nonroot-owned tool slots, without changing runner installations or
+passing credentials to the tools. Its opt-in test downloads approximately
+225 MB of pinned public archives and has a four-minute execution limit inside
+a five-minute step. Ordinary local script tests use fixtures and skip this
+download; the isolated tool proof does not replace a baked-image smoke.
 
 Go 1.27.0 installs at `/opt/hostedtoolcache/go/1.27.0/x64`, with image-owned
 `/usr/local/bin/go` and `gofmt` links. The installer authenticates a private
