@@ -4342,6 +4342,7 @@ func TestRunMissingOriginReplacementLeaseStaysPlainManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	remoteRoot := filepath.Join(testRoot, "remote")
+	replacementReady := filepath.Join(testRoot, "replacement-ready")
 	var leaseIDs [2]string
 	providerName := runReadyPoolPreflightTestProvider{}.Spec().Name
 	var (
@@ -4405,6 +4406,12 @@ func TestRunMissingOriginReplacementLeaseStaysPlainManifest(t *testing.T) {
 				http.Error(w, "unexpected acquisition", http.StatusInternalServerError)
 				return
 			}
+			if index == 1 {
+				if err := os.WriteFile(replacementReady, nil, 0o600); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
 			mu.Lock()
 			leaseIDs[index] = body.ID
 			mu.Unlock()
@@ -4438,14 +4445,12 @@ func TestRunMissingOriginReplacementLeaseStaysPlainManifest(t *testing.T) {
 	}
 	sshLog := filepath.Join(testRoot, "ssh.log")
 	transferred := filepath.Join(testRoot, "transferred")
-	failedReady := filepath.Join(testRoot, "failed-ready")
 	installWorkspaceOwnerAwareSSH(t, filepath.Join(binDir, "ssh"), `#!/bin/sh
 cmd="$1"
 printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd" in
   *crabbox-ready*)
-    if [ -e "$CRABBOX_FAKE_TRANSFERRED" ] && [ ! -e "$CRABBOX_FAKE_FAILED_READY" ]; then
-      : > "$CRABBOX_FAKE_FAILED_READY"
+    if [ -e "$CRABBOX_FAKE_TRANSFERRED" ] && [ ! -e "$CRABBOX_FAKE_REPLACEMENT_READY" ]; then
       exit 1
     fi
     exit 0
@@ -4470,8 +4475,8 @@ done <"$tmp"
 		t.Fatal(err)
 	}
 	previousTimeout := runBeforeCommandSSHReadyTimeout
-	// Stay below the ten-second readiness retry interval so the first forced
-	// failure still replaces the lease, while healthy probes have time to start.
+	// Keep the first lease unready after sync until replacement, independently
+	// of retry cadence, while allowing healthy probes time to start.
 	runBeforeCommandSSHReadyTimeout = 5 * time.Second
 	t.Cleanup(func() { runBeforeCommandSSHReadyTimeout = previousTimeout })
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -4479,7 +4484,7 @@ done <"$tmp"
 	t.Setenv("CRABBOX_FAKE_SSH_LOG", sshLog)
 	t.Setenv("CRABBOX_FAKE_REPO_ROOT", fixture.root)
 	t.Setenv("CRABBOX_FAKE_TRANSFERRED", transferred)
-	t.Setenv("CRABBOX_FAKE_FAILED_READY", failedReady)
+	t.Setenv("CRABBOX_FAKE_REPLACEMENT_READY", replacementReady)
 	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
 	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
 
