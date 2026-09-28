@@ -5,6 +5,7 @@ import {
   workspaceProviderKeyPrefix,
   type LeaseConfig,
 } from "./config";
+import { creationEvent, observedRunning } from "./creation-events";
 import {
   leaseIDForProviderKey,
   providerKeyForLease,
@@ -400,6 +401,7 @@ export class HetznerClient {
   toMachine(server: HetznerServer): ProviderMachine {
     return {
       provider: "hetzner",
+      ...(server.creationEvents ? { creationEvents: server.creationEvents } : {}),
       id: server.id,
       cloudID: String(server.id),
       name: server.name,
@@ -420,6 +422,7 @@ export class HetznerClient {
     const now = new Date();
     const name = leaseProviderName(leaseID, slug);
     const labels = leaseProviderLabels(config, leaseID, slug, owner, "hetzner", now);
+    const requested = creationEvent("provider_create_request");
     let response: HetznerServerResponse;
     try {
       response = await this.request<HetznerServerResponse>("POST", "/servers", {
@@ -445,14 +448,19 @@ export class HetznerClient {
         transientHetznerError(message) || isRetryableProvisioningError(message),
       );
     }
+    const events = [requested, creationEvent("provider_create_response")];
     if (
       response.server.public_net.ipv4.ip &&
       (!requireRunning || response.server.status === "running")
     ) {
-      return response.server;
+      return {
+        ...response.server,
+        creationEvents: [...events, ...observedRunning(response.server.status)],
+      };
     }
     try {
-      return await this.waitForServerIP(response.server.id, requireRunning);
+      const server = await this.waitForServerIP(response.server.id, requireRunning);
+      return { ...server, creationEvents: [...events, ...observedRunning(server.status)] };
     } catch (error) {
       const message = errorText(error);
       try {

@@ -202,11 +202,12 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	if *timingJSON {
 		total := time.Since(started)
 		if err := writeTimingJSON(a.Stderr, timingReport{
-			Provider: cfg.Provider,
-			LeaseID:  leaseID,
-			Slug:     ServerSlug(server),
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
+			CreationEvents: creationTimingEvents(lease.runnerTiming),
+			Provider:       cfg.Provider,
+			LeaseID:        leaseID,
+			Slug:           ServerSlug(server),
+			TotalMs:        total.Milliseconds(),
+			ExitCode:       0,
 		}); err != nil {
 			return err
 		}

@@ -85,6 +85,9 @@ func (d *sshReadinessDiagnostic) hostKeyRejected() bool {
 func runSSHReadinessProbe(ctx context.Context, target SSHTarget, remote, connectTimeout, attempts string) error {
 	var diagnostic sshReadinessDiagnostic
 	err := executeSSH(ctx, &target, remote, nil, 0, 0, connectTimeout, attempts, io.Discard, &diagnostic)
+	if err == nil {
+		recordCreationObservation(ctx, "ssh_authenticated")
+	}
 	return sshReadinessProbeError(ctx, err, diagnostic.hostKeyRejected())
 }
 

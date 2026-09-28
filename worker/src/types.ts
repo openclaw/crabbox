@@ -455,6 +455,7 @@ export interface HetznerCleanupEvidence {
 export type ProviderCleanupEvidence = HetznerCleanupEvidence;
 
 export interface LeaseRecord {
+  creationEvents?: CreationEvent[];
   portablePoolAccess?: true;
   id: string;
   slug?: string;
@@ -784,6 +785,21 @@ export type ProviderAccessTimingObserver = (
   step: "ingress_wait" | "lifecycle_wait" | "access_snapshot",
   durationMs: number,
 ) => void;
+
+export interface CreationEvent {
+  phase:
+    | "admission_started"
+    | "admission_complete"
+    | "provider_create_request"
+    | "provider_create_response"
+    | "instance_running"
+    | "ssh_tcp_accept"
+    | "ssh_authenticated"
+    | "bootstrap_complete"
+    | "workspace_ready";
+  at: string;
+  source: "coordinator" | "provider_observation" | "client" | "guest";
+}
 
 export interface LeaseProvisioningTiming {
   requestMs: number;
@@ -1199,6 +1215,7 @@ export interface TestFailure {
 }
 
 export interface HetznerServer {
+  creationEvents?: CreationEvent[];
   id: number;
   name: string;
   status: string;
@@ -1234,6 +1251,7 @@ export interface MachineView {
 }
 
 export interface ProviderMachine {
+  creationEvents?: CreationEvent[];
   provider: Provider;
   id: number;
   providerResourceID?: string;

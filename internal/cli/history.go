@@ -129,6 +129,24 @@ func (a App) events(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if strings.HasPrefix(*runID, "cbx_") {
+		if *after != 0 || *limit != 500 || *eventType != "" || *phase != "" {
+			return Exit(2, "lease creation events do not support run filters or pagination")
+		}
+		var response struct {
+			Events []CreationEvent `json:"events"`
+		}
+		if err := coord.do(ctx, "GET", "/v1/leases/"+*runID+"/events", nil, &response); err != nil {
+			return err
+		}
+		if *jsonOut {
+			return json.NewEncoder(a.Stdout).Encode(response.Events)
+		}
+		for _, event := range response.Events {
+			fmt.Fprintf(a.Stdout, "%s %s source=%s\n", event.At, event.Phase, event.Source)
+		}
+		return nil
+	}
 	eventTypeFilter := strings.TrimSpace(*eventType)
 	phaseFilter := strings.TrimSpace(*phase)
 	events, err := fetchFilteredRunEvents(ctx, coord, *runID, *after, *limit, eventTypeFilter, phaseFilter)

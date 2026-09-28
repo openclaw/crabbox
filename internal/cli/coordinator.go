@@ -83,6 +83,7 @@ func coordinatorResponseErrorCode(err error, status int) string {
 }
 
 type CoordinatorLease struct {
+	CreationEvents               []CreationEvent                `json:"creationEvents,omitempty"`
 	ID                           string                         `json:"id"`
 	Slug                         string                         `json:"slug,omitempty"`
 	Provider                     string                         `json:"provider"`

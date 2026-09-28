@@ -9,6 +9,7 @@ import (
 )
 
 type TimingReport struct {
+	CreationEvents     []CreationEvent          `json:"creationEvents,omitempty"`
 	Provider           string                   `json:"provider"`
 	LeaseID            string                   `json:"leaseId,omitempty"`
 	Slug               string                   `json:"slug,omitempty"`
@@ -78,6 +79,7 @@ type RunnerPhase struct {
 }
 
 type runnerProviderTiming struct {
+	Events  []CreationEvent
 	TotalMs int64
 	Phases  []RunnerPhase
 }
@@ -153,6 +155,7 @@ func DurationMinutesCeil(duration time.Duration) int {
 
 func timingReportFromRun(provider, leaseID, slug string, timings runTimings, total time.Duration, exitCode int) timingReport {
 	report := timingReport{
+		CreationEvents:     creationTimingEvents(timings.providerTiming),
 		Provider:           provider,
 		LeaseID:            leaseID,
 		Slug:               slug,

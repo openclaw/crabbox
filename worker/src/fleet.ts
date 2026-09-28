@@ -193,6 +193,7 @@ import {
   type CoordinatorStorage,
   type CoordinatorStorageView,
 } from "./coordinator-runtime";
+import { creationEvent, mergeClientCreationEvents } from "./creation-events";
 import {
   DaytonaClient,
   daytonaAccessNeedsRefresh,
@@ -3757,6 +3758,7 @@ export class FleetCoordinator {
     fixedLeaseID?: string,
     checkpointAuthorization?: CheckpointLeaseAuthorization,
   ): Promise<Response> {
+    const admissionStarted = creationEvent("admission_started");
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const input = await readJson<LeaseRequest>(request);
@@ -4228,6 +4230,7 @@ export class FleetCoordinator {
         maxEstimatedUSD: cost.maxUSD,
         state: "provisioning",
         provisioningResourceMayExist: false,
+        creationEvents: [admissionStarted],
         createdAt: now.toISOString(),
         updatedAt: now.toISOString(),
         lastTouchedAt: now.toISOString(),
@@ -4502,6 +4505,7 @@ export class FleetCoordinator {
           return { started: false as const, current, workspace };
         }
       }
+      (current.creationEvents ??= []).push(creationEvent("admission_complete"));
       current.provisioningRequestStartedAt = new Date().toISOString();
       delete current.provisioningResourceMayExist;
       delete current.provisioningRequestSettledAt;
@@ -4718,6 +4722,13 @@ export class FleetCoordinator {
     if (provisioningTiming) {
       record.provisioningTiming = provisioningTiming;
     }
+    record.creationEvents = [
+      ...(record.creationEvents ?? []),
+      ...(server.creationEvents ?? []),
+    ].filter(
+      (event, index, events) =>
+        events.findIndex((candidate) => candidate.phase === event.phase) === index,
+    );
     record.serverID = server.id;
     if (server.providerResourceID) {
       record.providerResourceID = server.providerResourceID;
@@ -7520,6 +7531,10 @@ export class FleetCoordinator {
         lease: providerMetadata ? { ...visible, providerMetadata } : visible,
       });
     }
+    if (method === "GET" && action === "events") {
+      const lease = await this.resolveLease(leaseID, request, false);
+      return lease ? json({ events: lease.creationEvents ?? [] }) : notFound();
+    }
     if (method === "POST" && action === "heartbeat") {
       return this.heartbeatLease(request, leaseID);
     }
@@ -7842,6 +7857,7 @@ export class FleetCoordinator {
 
   private async heartbeatLease(request: Request, leaseID: string): Promise<Response> {
     const input = await optionalJson<{
+      creationEvents?: unknown;
       expectedProvider?: unknown;
       idleTimeoutSeconds?: number;
       telemetry?: Partial<LeaseTelemetry>;
@@ -8000,11 +8016,13 @@ export class FleetCoordinator {
   private async applyLeaseHeartbeatState(
     lease: LeaseRecord,
     input: {
+      creationEvents?: unknown;
       idleTimeoutSeconds?: number;
       telemetry?: Partial<LeaseTelemetry>;
     },
   ): Promise<LeaseRecord> {
     const now = new Date();
+    mergeClientCreationEvents(lease, input.creationEvents, now.getTime());
     const requestedIdleTimeoutSeconds = input.idleTimeoutSeconds;
     if (
       Number.isFinite(requestedIdleTimeoutSeconds) &&
@@ -29728,7 +29746,18 @@ export class AWSProvider implements CloudProvider {
             image?: LeaseImageIdentity;
             provisioningTiming?: LeaseProvisioningTiming;
           } = {
-            server: { ...readyServer, region },
+            server: {
+              ...readyServer,
+              region,
+              ...(server.creationEvents || readyServer.creationEvents
+                ? {
+                    creationEvents: [
+                      ...(server.creationEvents ?? []),
+                      ...(readyServer.creationEvents ?? []),
+                    ],
+                  }
+                : {}),
+            },
             serverType,
             image: awsLeaseImageIdentity(config, imageID, region),
             provisioningTiming: withProvisioningPhases({

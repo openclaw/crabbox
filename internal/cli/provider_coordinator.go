@@ -314,6 +314,10 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 	for _, line := range coordinatorCapacityHintLines(lease) {
 		fmt.Fprintf(b.rt.Stderr, "capacity hint %s\n", line)
 	}
+	observations := &creationObservations{}
+	if cfg.TargetOS == targetLinux {
+		ctx = context.WithValue(ctx, creationObservationsKey{}, observations)
+	}
 	waitCtx, cancelWait := context.WithCancelCause(ctx)
 	defer cancelWait(nil)
 	stopHeartbeat, err := startCoordinatorHeartbeat(waitCtx, b.coord, leaseID, cfg.Provider, cfg.IdleTimeout, nil, leaseTelemetryCollectorForTarget(target), b.rt.Stderr)
@@ -332,12 +336,25 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 		}
 		return LeaseTarget{}, err
 	}
+	timing := coordinatorRunnerTiming(lease)
+	if timing == nil {
+		timing = &runnerProviderTiming{}
+	}
+	timing.Events = append([]CreationEvent(nil), lease.CreationEvents...)
+	if cfg.TargetOS == targetLinux {
+		recordCreationObservation(ctx, "workspace_ready")
+		if marker := readBootstrapComplete(ctx, target); marker != nil {
+			observations.events = append(observations.events, *marker)
+		}
+		timing.Events = append(timing.Events, observations.events...)
+		b.coord.recordCreationEvents(ctx, leaseID, cfg.Provider, observations.events)
+	}
 	return LeaseTarget{
 		Server:       server,
 		SSH:          target,
 		LeaseID:      leaseID,
 		Coordinator:  b.coord,
-		runnerTiming: coordinatorRunnerTiming(lease),
+		runnerTiming: timing,
 	}, nil
 }
 

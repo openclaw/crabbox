@@ -4,6 +4,7 @@
 
 - SSH: detect newly ready guests sooner with short initial readiness retries and a bounded five-second backoff, preserving host trust, authentication, cancellation, and bootstrap checks.
 - Azure: preflight brokered VM SKU eligibility before allocating network fragments and reduce create polling delays while honoring per-response Retry-After and preserving exact cleanup.
+- Expose brokered creation observations in lease events and Linux timing JSON, with clock provenance for admission, provider requests, SSH, and current-boot readiness.
 - Images: preserve Linux smoke and cleanup exit status when login-shell logout hooks fail during minting or retained-image qualification.
 - Detect brokered AWS and GCP network addresses sooner with bounded exponential polling, retaining provider error handling and existing deadlines.
 - Images: include checksum-pinned Rust/Cargo and uv/uvx in Linux x86_64 developer images, with nonroot offline build and Python-tool smoke checks.

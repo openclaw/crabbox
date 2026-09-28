@@ -6,6 +6,7 @@ import {
   validatedCIDRs,
   type LeaseConfig,
 } from "./config";
+import { creationEvent, observedRunning } from "./creation-events";
 import { base64URL } from "./encoding";
 import { ExpiringTokenCache, type ExpiringToken } from "./expiring-token-cache";
 import { redactDiagnosticSecrets } from "./http";
@@ -24,6 +25,7 @@ import {
 import { ProvisioningAttemptHistory } from "./provisioning-attempts";
 import { leaseProviderName } from "./slug";
 import type {
+  CreationEvent,
   Env,
   LeaseImageIdentity,
   LeaseRecord,
@@ -644,9 +646,10 @@ export class GCPClient {
       region: this.zone,
       providerProject: project,
     };
+    const creationEvents: CreationEvent[] = [];
     let recoveredCollision: ProviderMachine | undefined;
     try {
-      await this.insertInstanceAndWait(path, instance, claim);
+      await this.insertInstanceAndWait(path, instance, claim, creationEvents);
     } catch (error) {
       if (provisioning?.onResourceCreated) {
         if (error instanceof GCPOperationError) {
@@ -721,7 +724,10 @@ export class GCPClient {
             `GCP instance ${name} numeric resource id changed after creation`,
           );
         }
-        return machine;
+        return {
+          ...machine,
+          creationEvents: [...creationEvents, ...observedRunning(machine.status)],
+        };
       } catch (error) {
         if (error instanceof ProviderResourceUnresolvedError) throw error;
         throw new ProviderProvisioningCleanupError(
@@ -733,7 +739,11 @@ export class GCPClient {
     }
     try {
       const created = await this.gcp<GCPInstance>("GET", `/zones/${this.zone}/instances/${name}`);
-      return toMachine(created, this.zone);
+      const machine = toMachine(created, this.zone);
+      return {
+        ...machine,
+        creationEvents: [...creationEvents, ...observedRunning(machine.status)],
+      };
     } catch (error) {
       await this.rollbackDirectCreate(name, leaseID, slug, owner, claim, error);
       throw error;
@@ -775,10 +785,13 @@ export class GCPClient {
     path: string,
     instance: Record<string, unknown>,
     claim: ProviderProvisioningCleanupClaim,
+    creationEvents: CreationEvent[],
   ): Promise<void> {
     let operation: GCPOperation;
     try {
+      creationEvents.push(creationEvent("provider_create_request"));
       operation = await this.gcp<GCPOperation>("POST", path, instance);
+      creationEvents.push(creationEvent("provider_create_response"));
       if (!operation.name) {
         throw new Error("GCP instance insert returned no operation name");
       }

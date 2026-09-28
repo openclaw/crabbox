@@ -410,6 +410,7 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 					continue
 				}
 				_ = conn.Close()
+				recordCreationObservation(probeCtx, "ssh_tcp_accept")
 				if reachablePort == "" {
 					reachablePort = probe.Port
 				}

@@ -34,6 +34,7 @@ import {
   workspaceProviderKeyPrefix,
   type LeaseConfig,
 } from "./config";
+import { creationEvent, observedRunning } from "./creation-events";
 import { hasImageRequirements } from "./image-capabilities";
 import { osImageSpec } from "./os-image";
 import {
@@ -1761,7 +1762,7 @@ export class EC2SpotClient {
       if (Date.now() >= deadline) break;
       const address = server?.host || (allowPrivateAddress ? server?.privateHost : "");
       if (server && address) {
-        return { ...server, host: address };
+        return { ...server, host: address, creationEvents: observedRunning(server.status) };
       }
       // Request-layer retries and throttle errors remain authoritative.
       await sleep(Math.min(interval, Math.max(0, deadline - Date.now())));
@@ -2749,6 +2750,7 @@ export class EC2SpotClient {
         }
       }
       let root: Record<string, unknown>;
+      const requested = creationEvent("provider_create_request");
       try {
         root = await this.ec2("RunInstances", params, { capacityHandoff });
       } catch (error) {
@@ -2758,6 +2760,7 @@ export class EC2SpotClient {
         }
         throw new Error(`${awsRunInstancesOutcomeUncertain}: ${message}`, { cause: error });
       }
+      const responded = creationEvent("provider_create_response");
       const instance = items(record(root["instancesSet"])["item"])[0];
       if (!instance) {
         const message = "aws returned no instances";
@@ -2766,7 +2769,11 @@ export class EC2SpotClient {
         }
         throw new Error(message);
       }
-      return this.withRegion(instanceToMachine(instance));
+      const machine = this.withRegion(instanceToMachine(instance));
+      return {
+        ...machine,
+        creationEvents: [requested, responded, ...observedRunning(machine.status)],
+      };
     };
     try {
       return await run(configuredMacHostID);

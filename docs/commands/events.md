@@ -98,3 +98,33 @@ without replaying the whole event log.
 - [attach](attach.md)
 - [results](results.md)
 - [History and logs](../features/history-logs.md)
+
+## Creation timeline
+
+`crabbox events cbx_abcdef123456 --json` reads the lease's creation observations.
+The same `creationEvents` array is additive in lease JSON and in brokered Linux
+`run --timing-json` and `warmup --timing-json`. Older clients ignore these fields;
+new clients work with older brokers, retaining locally observed readiness events.
+Run event pagination and filters apply only to run IDs, not lease timelines.
+
+Each event has `phase`, RFC 3339 `at`, and `source`. Admission start/completion
+belong to the coordinator; AWS, GCP and Hetzner adapters record successful create
+request/response and `instance_running` when an existing provider read observes
+running. The latter is the first observation, not the provider's boot transition.
+Unobserved phases and failed provider attempts are absent, never zero durations.
+
+The creating Linux client reports `ssh_tcp_accept`, `ssh_authenticated`, and
+`workspace_ready` through the existing owner-authorized heartbeat. These are the
+first successful probes, not exact server transition times. Proxied connections
+may omit TCP observations. `bootstrap_complete` uses the guest's current-boot
+`/run/crabbox/workspace-ready` marker after cloud-final and readiness checks;
+images without that marker omit it. One bounded SSH metadata read and a best-effort
+heartbeat add at most two seconds each. Reporting failure never fails creation.
+`workspace_ready` means bootstrap readiness, before repository sync/hydration.
+
+Sources are `coordinator`, `provider_observation`, `client`, or `guest`. Compare
+intervals only on the same clock; cross-host skew and one-second marker precision
+prevent exact subtraction across sources. The coordinator bounds submitted
+observations to the lease lifetime with one minute of skew, keeps the first value
+per client phase, and never uses these untrusted observations for authorization,
+readiness, expiry, or cleanup. Existing duration fields retain their semantics.

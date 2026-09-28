@@ -15409,6 +15409,41 @@ describe("fleet lease identity and idle", () => {
     expect(storage.alarm()).toBe(Date.parse(expiresAt));
   });
 
+  it("persists creation events through owner heartbeat and exposes the lease timeline", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const at = new Date().toISOString();
+    storage.seed(
+      "lease:cbx_000000000001",
+      testLease({
+        id: "cbx_000000000001",
+        owner: "alice@example.com",
+        org: "example-org",
+        createdAt: at,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const events = [{ phase: "ssh_authenticated", at, source: "client" }];
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases/cbx_000000000001/heartbeat", {
+        headers,
+        body: { creationEvents: events },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const read = await fleet.fetch(
+      request("GET", "/v1/leases/cbx_000000000001/events", { headers }),
+    );
+    expect(await read.json()).toEqual({ events });
+    const forbidden = await fleet.fetch(
+      request("GET", "/v1/leases/cbx_000000000001/events", {
+        headers: { ...headers, "x-crabbox-owner": "someone@example.com" },
+      }),
+    );
+    expect(forbidden.status).toBe(404);
+  });
+
   it("clears cleanup retry metadata when an active lease heartbeats", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);
