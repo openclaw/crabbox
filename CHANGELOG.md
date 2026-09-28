@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Shorten brokered pre-create setup by overlapping independent AWS image, ingress, quota, and type reads, skipping unchanged GCP firewall writes after fresh policy verification, and deferring Hetzner full key inventory until a per-lease key collision.
+
 - Linux: start minimal lease bootstrap before multi-user.target, avoid SSH restarts when configured listeners are already active, and retain readiness checks and optional setup gates.
 - Start managed lease idle expiry at activation across providers, preserving the admission-based TTL cap so slow provisioning cannot consume the idle window.
 - Route ordinary brokered Azure capacity fallback across regions after one capacity failure per market, cache confirmed rejections for five minutes, expose attempt durations, and bound legacy creation to 25 minutes with a 31-minute broker client wait.

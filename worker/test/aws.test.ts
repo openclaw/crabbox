@@ -246,6 +246,57 @@ describe("aws provider", () => {
     },
   );
 
+  it.each([false, true])(
+    "joins image and ingress preparation before launch or failure (imageFails=%s)",
+    async (imageFails) => {
+      const { client, config, markets } = awsMarketFallbackHarness("");
+      const imageGate = Promise.withResolvers<void>();
+      const ingressGate = Promise.withResolvers<void>();
+      const entered = new Set<string>();
+      const failure = new Error("image lookup failed");
+      const imageClient = client as unknown as { resolveAMI: () => Promise<string> };
+      imageClient.resolveAMI = async () => {
+        entered.add("image");
+        await imageGate.promise;
+        if (imageFails) throw failure;
+        return "ami-test";
+      };
+      let settled = false;
+      const creating = client
+        .createServerWithFallback(config, "cbx_abcdef123456", "violet-prawn", "alice@example.com", {
+          withIngress: async (apply) => {
+            entered.add("ingress");
+            await ingressGate.promise;
+            return apply(["198.51.100.1/32"]);
+          },
+        })
+        .then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        )
+        .finally(() => {
+          settled = true;
+        });
+      try {
+        await vi.waitFor(() => expect(entered).toEqual(new Set(["image", "ingress"])));
+        imageGate.resolve();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).toBe(false);
+        expect(markets).toEqual([]);
+        ingressGate.resolve();
+        const result = await creating;
+        expect("error" in result ? result.error : result.value.server.cloudID).toBe(
+          imageFails ? failure : "i-fallback",
+        );
+        expect(markets).toEqual(imageFails ? [] : ["spot"]);
+      } finally {
+        imageGate.resolve();
+        ingressGate.resolve();
+        await creating;
+      }
+    },
+  );
+
   it.each([
     { first: "quota", ingressFails: false },
     { first: "ingress", ingressFails: false },

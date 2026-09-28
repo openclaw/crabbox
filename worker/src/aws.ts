@@ -1302,16 +1302,6 @@ export class EC2SpotClient {
         );
       }
       const capabilityImageRequired = hasImageRequirements(config.imageRequirements);
-      const defaultImageID = await diagnostics.measure("image", async () =>
-        config.awsSnapshot
-          ? await (async () => {
-              transientImageID = await this.registerSnapshotImage(config.awsSnapshot, leaseID);
-              return this.waitForImageAvailable(transientImageID);
-            })()
-          : config.target === "macos" || capabilityImageRequired
-            ? ""
-            : await this.resolveAMI(config),
-      );
       const quotaCache = new Map<string, Promise<number | undefined>>();
       const quotaForMarket = (market: LeaseConfig["capacityMarket"]) => {
         const code = awsQuotaCodeForMarket(market);
@@ -1322,9 +1312,22 @@ export class EC2SpotClient {
         }
         return quota;
       };
-      // Quota reads do not own ingress. Join both preparations before launch or
-      // transient-image cleanup so a failed branch cannot leave work running.
-      const [securityGroup, initialQuota] = await Promise.allSettled([
+      const prepareImage = () =>
+        diagnostics.measure("image", async () =>
+          config.awsSnapshot
+            ? await (async () => {
+                transientImageID = await this.registerSnapshotImage(config.awsSnapshot, leaseID);
+                return this.waitForImageAvailable(transientImageID);
+              })()
+            : config.target === "macos" || capabilityImageRequired
+              ? ""
+              : await this.resolveAMI(config),
+        );
+      // Snapshot registration mutates provider state; retain its existing cleanup ordering.
+      const snapshotImage = config.awsSnapshot ? await prepareImage() : undefined;
+      // Join independent reads and ingress before launch or returning a failure.
+      const [image, securityGroup, initialQuota, instanceTypes] = await Promise.allSettled([
+        snapshotImage !== undefined ? Promise.resolve(snapshotImage) : prepareImage(),
         options.withIngress
           ? options.withIngress(
               (cidrs) =>
@@ -1335,9 +1338,15 @@ export class EC2SpotClient {
             )
           : diagnostics.measure("security_group", () => this.ensureSecurityGroup(config, options)),
         quotaForMarket(config.capacityMarket),
+        config.target === "macos" || config.awsSnapshot
+          ? Promise.resolve(new Map<string, number>())
+          : this.instanceTypeVCPUs(awsLaunchCandidates(config)),
       ]);
+      if (image.status === "rejected") throw image.reason;
       if (securityGroup.status === "rejected") throw securityGroup.reason;
       if (initialQuota.status === "rejected") throw initialQuota.reason;
+      if (instanceTypes.status === "rejected") throw instanceTypes.reason;
+      const defaultImageID = image.value;
       const securityGroupID = securityGroup.value;
       const pinnedMacHostID = config.target === "macos" ? config.hostID || config.awsMacHostID : "";
       // An explicit Mac host is tied to one hardware family. Resolve that family once so a
@@ -1356,9 +1365,9 @@ export class EC2SpotClient {
       }
       const candidates = pinnedMacHostType ? [pinnedMacHostType] : awsLaunchCandidates(config);
       const vcpus =
-        config.target === "macos"
-          ? new Map<string, number>()
-          : await this.instanceTypeVCPUs(candidates);
+        config.awsSnapshot && config.target !== "macos"
+          ? await this.instanceTypeVCPUs(candidates)
+          : instanceTypes.value;
       const allowCapacityHandoff =
         !config.awsPrivate && !config.serverTypeExplicit && config.target !== "macos";
       const hasQuotaEligibleCandidate = (

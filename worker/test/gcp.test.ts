@@ -1728,6 +1728,75 @@ describe("gcp provider", () => {
     expect(calls.some((call) => call.startsWith("DELETE "))).toBe(false);
   });
 
+  it("skips unchanged firewall writes but rereads and repairs drift on the next create", async () => {
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    const config = leaseConfig({ provider: "gcp", sshPublicKey: "ssh-ed25519 test" });
+    let drift = false;
+    const methods: string[] = [];
+    client.fetcher = async (_input, init) => {
+      const method = init?.method ?? "GET";
+      methods.push(method);
+      return Response.json(
+        method === "GET"
+          ? {
+              name: "crabbox-ssh",
+              description: "Crabbox-managed SSH ingress",
+              network:
+                "https://www.googleapis.com/compute/v1/projects/default-project/global/networks/default",
+              direction: "INGRESS",
+              priority: 1000,
+              disabled: false,
+              sourceRanges: ["0.0.0.0/0"],
+              targetTags: ["crabbox-ssh"],
+              allowed: [{ IPProtocol: "tcp", ports: drift ? ["22"] : ["2222", "22"] }],
+            }
+          : { name: "update", status: "DONE" },
+      );
+    };
+    await client.ensureFirewall(config);
+    expect(methods).toEqual(["GET"]);
+    drift = true;
+    await client.ensureFirewall(config);
+    expect(methods).toEqual(["GET", "GET", "PUT", "POST"]);
+  });
+
+  it.each([
+    { disabled: true },
+    { priority: 900 },
+    { direction: "EGRESS" },
+    { sourceTags: ["unexpected"] },
+    { sourceServiceAccounts: ["other@example.com"] },
+    { targetServiceAccounts: ["other@example.com"] },
+    { destinationRanges: ["0.0.0.0/0"] },
+    { denied: [{ IPProtocol: "tcp", ports: ["22"] }] },
+    { allowed: [{ IPProtocol: "tcp", ports: ["22", "2222", "80"] }] },
+    { network: "projects/other/global/networks/default" },
+  ])("repairs effective firewall policy drift %j", async (drift) => {
+    const client = new GCPClient(env);
+    primeAccessToken(client);
+    const methods: string[] = [];
+    client.fetcher = async (_input, init) => {
+      const method = init?.method ?? "GET";
+      methods.push(method);
+      return Response.json(
+        method === "GET"
+          ? {
+              description: "Crabbox-managed SSH ingress",
+              network: "projects/default-project/global/networks/default",
+              direction: "INGRESS",
+              sourceRanges: ["0.0.0.0/0"],
+              targetTags: ["crabbox-ssh"],
+              allowed: [{ IPProtocol: "tcp", ports: ["22", "2222"] }],
+              ...drift,
+            }
+          : { name: "update", status: "DONE" },
+      );
+    };
+    await client.ensureFirewall(leaseConfig({ provider: "gcp", sshPublicKey: "ssh-ed25519 test" }));
+    expect(methods).toEqual(["GET", "PUT", "POST"]);
+  });
+
   it("recovers when another create wins the shared firewall race", async () => {
     const client = new GCPClient(env);
     primeAccessToken(client, "test-token");
