@@ -1273,6 +1273,9 @@ func TestCloudInitReadinessWithoutBash(t *testing.T) {
 }
 
 func TestCloudInitEarlyBootstrapComposition(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture")
+	}
 	for _, optional := range []bool{false, true} {
 		t.Run(map[bool]string{false: "minimal", true: "browser"}[optional], func(t *testing.T) {
 			cfg := baseConfig()
