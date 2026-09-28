@@ -15408,8 +15408,28 @@ export class FleetCoordinator {
         return { kind: "committed" as const, run: next, event };
       });
     } catch (error) {
-      await this.deleteStoragePrefix(terminalLogPrefix).catch(() => undefined);
-      throw error;
+      // A rejected acknowledgement can follow a successful commit. Never erase
+      // its logs unless a fresh read proves this attempt's prefix is unreferenced.
+      const current = await this.state.storage
+        .transaction((storage) => storage.get<RunRecord>(runKey(runID), { noCache: true }))
+        .catch(() => {
+          throw error;
+        });
+      if (current?.terminalLogPrefix !== terminalLogPrefix) {
+        await this.deleteStoragePrefix(terminalLogPrefix).catch(() => undefined);
+        throw error;
+      }
+      if (
+        current.state === "running" ||
+        current.id !== runID ||
+        current.owner !== run.owner ||
+        current.org !== run.org ||
+        current.terminalFinishSHA256 !== requestedFingerprint ||
+        !sameTerminalRunBinding(current, run)
+      ) {
+        throw error;
+      }
+      committed = { kind: "duplicate", run: current };
     }
     if (
       committed.kind !== "committed" &&

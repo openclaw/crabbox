@@ -47206,6 +47206,92 @@ describe("fleet run history", () => {
     expect(await logs.text()).toBe(log);
   });
 
+  it.each([
+    { signed: true, rereadFails: false },
+    { signed: false, rereadFails: false },
+    { signed: true, rereadFails: true },
+    { signed: false, rereadFails: true },
+  ])(
+    "preserves terminal logs after an ambiguous finish commit (signed: $signed, reread fails: $rereadFails)",
+    async ({ signed, rereadFails }) => {
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage);
+      const headers = {
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+      };
+      const create = await fleet.fetch(
+        request("POST", "/v1/runs", { headers, body: { command: ["echo", "done"] } }),
+      );
+      const { run } = (await create.json()) as { run: RunRecord };
+      const log = rereadFails ? "done\n".repeat(20_000) : "done\n";
+      const receipt = signed
+        ? await testTerminalReceipt({ run, exitCode: 0, syncMs: 0, commandMs: 1, log })
+        : undefined;
+      const body = { exitCode: 0, commandMs: 1, log, receipt };
+      storage.afterCommit = async (keys) => {
+        if (!keys.has(`run:${run.id}`)) return;
+        storage.afterCommit = undefined;
+        if (rereadFails) {
+          storage.beforeGet = async (key) => {
+            if (key === `run:${run.id}`) throw new Error("injected reread failure");
+          };
+        }
+        throw new Error("injected lost terminal commit acknowledgement");
+      };
+      const first = await fleet.fetch(
+        request("POST", `/v1/runs/${run.id}/finish`, { headers, body }),
+      );
+      storage.beforeGet = undefined;
+      const committed = structuredClone(storage.value<RunRecord>(`run:${run.id}`));
+      expect(committed).toMatchObject({ state: "succeeded", eventCount: 2 });
+
+      const replay = await fleet.fetch(
+        request("POST", `/v1/runs/${run.id}/finish`, { headers, body }),
+      );
+      expect(replay.status).toBe(200);
+      expect(storage.value(`run:${run.id}`)).toEqual(committed);
+      const logs = await fleet.fetch(request("GET", `/v1/runs/${run.id}/logs`, { headers }));
+      expect(await logs.text()).toBe(log);
+      const recovered = await fleet.fetch(
+        request("GET", `/v1/runs/${run.id}/receipt`, { headers }),
+      );
+      expect(await recovered.json()).toEqual(
+        signed ? { receipt } : { error: "receipt_unavailable" },
+      );
+      expect(first.status).toBe(rereadFails ? 500 : 200);
+    },
+  );
+
+  it.each(["owner", "org", "slug", "terminalFinishSHA256"] as const)(
+    "does not acknowledge an ambiguous finish after its %s changes",
+    async (field) => {
+      const changed = field === "org" ? orgKeyForLabel("changed") : "changed";
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage);
+      const create = await fleet.fetch(
+        request("POST", "/v1/runs", { body: { command: ["echo", "done"] } }),
+      );
+      const { run } = (await create.json()) as { run: RunRecord };
+      storage.afterCommit = async (keys) => {
+        if (!keys.has(`run:${run.id}`)) return;
+        storage.afterCommit = undefined;
+        storage.seed(`run:${run.id}`, {
+          ...storage.value<RunRecord>(`run:${run.id}`),
+          [field]: changed,
+        });
+        throw new Error("injected lost acknowledgement with changed binding");
+      };
+      const response = await fleet.fetch(
+        request("POST", `/v1/runs/${run.id}/finish`, { body: { exitCode: 0, log: "done\n" } }),
+      );
+      expect(response.status).toBe(500);
+      expect(storage.value<RunRecord>(`run:${run.id}`)).toMatchObject({ [field]: changed });
+      const prefix = storage.value<RunRecord>(`run:${run.id}`)!.terminalLogPrefix!;
+      expect((await storage.list({ prefix })).size).toBeGreaterThan(0);
+    },
+  );
+
   it("rejects a finish if its run binding changes before the terminal transaction", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);

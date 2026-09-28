@@ -320,6 +320,18 @@ missing receipt endpoint makes the new CLI fail visibly. Legacy CLIs may still
 finish without receipts. Roll out the coordinator before distributing a
 receipt-bearing CLI.
 
+Run-history finish retries transient HTTP 5xx, HTTP 429, and transport failures
+up to three times, with 250 ms between attempts within one 60-second budget.
+Each attempt sends the same terminal payload; the coordinator fingerprints it,
+returns the existing result on an identical replay, and rejects conflicting
+finishes with HTTP 409. The terminal record, receipt, log reference, and final
+event commit together. If the commit acknowledgement fails, an uncached
+transactional reread can confirm that exact finish without adding another event.
+Referenced logs are preserved; an unreadable result retains staged logs and
+returns the original error for client recovery. Exhausting the retry budget
+still reports terminal recording failure with the run ID and receipt recovery
+command. A successful lease release alone does not confirm run-history finish.
+
 Legacy create admission commits the bound attempt, canonical provisioning lease,
 and recovery wake together. Publication likewise commits the active lease,
 attempt's cloud identity, access bookkeeping, and wake in one storage transaction.
