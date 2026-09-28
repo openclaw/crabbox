@@ -5862,6 +5862,7 @@ describe("fleet lease identity and idle", () => {
     const requests: Array<{ method: string; path: string }> = [];
     const responses = [
       jsonResponse({ ssh_keys: [] }),
+      jsonResponse({ ssh_keys: [] }),
       jsonResponse({
         ssh_key: {
           id: 7,
@@ -5998,6 +5999,7 @@ describe("fleet lease identity and idle", () => {
   it("treats already-absent partial Hetzner server and SSH key cleanup as complete", async () => {
     const requests: Array<{ method: string; path: string }> = [];
     const responses = [
+      jsonResponse({ ssh_keys: [] }),
       jsonResponse({ ssh_keys: [] }),
       jsonResponse({
         ssh_key: {
@@ -6298,6 +6300,7 @@ describe("fleet lease identity and idle", () => {
     const requests: Array<{ method: string; path: string }> = [];
     const responses = [
       jsonResponse({ ssh_keys: [] }),
+      jsonResponse({ ssh_keys: [] }),
       jsonResponse({
         ssh_key: {
           id: 7,
@@ -6493,6 +6496,7 @@ describe("fleet lease identity and idle", () => {
   it("rejects a canonical Hetzner uniqueness race without lease ownership", async () => {
     const responses = [
       jsonResponse({ ssh_keys: [] }),
+      jsonResponse({ ssh_keys: [] }),
       jsonResponse({ error: { code: "uniqueness_error" } }, 409),
       jsonResponse({
         ssh_keys: [
@@ -6636,7 +6640,6 @@ describe("fleet lease identity and idle", () => {
     }));
     const responses = [
       jsonResponse({ ssh_keys: [] }),
-      jsonResponse({ error: { code: "uniqueness_error" } }, 409),
       jsonResponse({ ssh_keys: firstPage }),
       jsonResponse({ ssh_keys: [existing] }),
     ];

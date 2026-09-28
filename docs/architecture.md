@@ -187,8 +187,6 @@ One logical `FleetCoordinator` (`worker/src/fleet.ts`) owns:
   through hooks such as `prepareLeaseCreate`,
   `createServerWithFallback`, `finalizeLeaseCreate`, and `hourlyPriceUSD`.
 
-See [brokered pre-create latency](features/brokered-precreate.md) for the awaited provider setup calls, parallel preparation, and freshness boundaries.
-
 Azure and GCP share an instance-scoped expiring-token cache. Concurrent requests
 on one client join the same refresh; failures clear the pending refresh so a
 later request can retry. Token acquisition, refresh margins, expiry calculation,
