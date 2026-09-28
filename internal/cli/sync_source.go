@@ -72,6 +72,9 @@ func validateDirectorySyncProvider(spec ProviderSpec) error {
 }
 
 func syncManifestForSource(ctx context.Context, repo Repo, cfg Config, excludes SyncExcludeRules) (SyncManifest, error) {
+	if err := validateSyncCompression(cfg); err != nil {
+		return SyncManifest{}, err
+	}
 	if err := validateSyncSource(cfg); err != nil {
 		return SyncManifest{}, err
 	}

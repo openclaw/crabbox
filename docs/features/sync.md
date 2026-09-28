@@ -335,6 +335,23 @@ Actions hydration invalidates reusable fingerprints before setup and does not
 write a new one during its sync finalizer: setup can still change the workspace.
 A later ordinary sync must verify and certify its own completed transfer.
 
+## Rsync compression
+
+`sync.compression` selects `auto` (the default), `always`, or `never` for
+workspace rsync, including local Actions hydration. `CRABBOX_SYNC_COMPRESSION`
+overrides the configuration. Automatic mode omits compression for a direct
+literal loopback address or `localhost`; other destinations retain compression.
+Private IP ranges and hostnames are not assumed to be fast local links.
+Proxy and SSH-config routes retain compression even when their displayed host
+is loopback. Use `always` for a loopback port forwarded over a slower link, or
+`never` for a known fast LAN connection. Native Windows uses its existing gzip
+archive transport.
+
+```yaml
+sync:
+  compression: auto
+```
+
 ## Fingerprints and Git seeding
 
 When `sync.fingerprint` is enabled (the default), Crabbox derives a fingerprint

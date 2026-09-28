@@ -779,6 +779,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if err := validateGitSeedSource(cfg); err != nil {
 			return err
 		}
+		if err := validateSyncCompression(cfg); err != nil {
+			return err
+		}
 	}
 	localGitSeed := !*noSync && effectiveGitSeedSource(cfg) == "local"
 	if localGitSeed && (strings.TrimSpace(*freshPRValue) != "" || *applyLocalPatch || strings.TrimSpace(*readyPool) != "" || shouldAutoHydrateActions(cfg, *noHydrate, false, FreshPRSpec{}, *syncOnly)) {
@@ -2613,7 +2616,7 @@ retrySync:
 		if !overlayDecision.Enabled || len(transferData) != 0 {
 			stepStart = time.Now()
 			// The explicit file list also prevents rsync from applying snapshot-root metadata to the workspace.
-			if err := rsync(ctx, target, syncSourceRoot, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: transferData, NoTimes: localContainerDockerSocketSync(cfg, server), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
+			if err := rsync(ctx, target, syncSourceRoot, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Compression: effectiveSyncCompression(cfg), Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: transferData, NoTimes: localContainerDockerSocketSync(cfg, server), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
 				return recordFailure(Exit(6, "rsync failed: %v", err))
 			}
 			timings.syncSteps.rsync = time.Since(stepStart)

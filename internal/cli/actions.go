@@ -749,7 +749,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		}
 	}
 	fmt.Fprintf(a.Stderr, "syncing %s -> %s:%s for local actions hydrate\n", repo.Root, target.Host, workdir)
-	if err := rsync(ctx, target, repo.Root, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: manifestData, NoTimes: localContainerDockerSocketConfig(cfg), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
+	if err := rsync(ctx, target, repo.Root, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Compression: effectiveSyncCompression(cfg), Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: manifestData, NoTimes: localContainerDockerSocketConfig(cfg), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
 		return plainManifest, Exit(6, "rsync failed: %v", err)
 	}
 	// Actions setup mutates this tree; finalize without certifying reusable content.

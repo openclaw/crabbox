@@ -291,6 +291,7 @@ func providerSelectionSourceForConfigPath(trust configPathTrust) providerSelecti
 
 type SyncConfig struct {
 	Source        string
+	Compression   string
 	Excludes      []string
 	Includes      []string
 	Delete        bool
@@ -1886,6 +1887,7 @@ type fileSSHConfig struct {
 
 type fileSyncConfig struct {
 	Source        string   `yaml:"source,omitempty"`
+	Compression   string   `yaml:"compression,omitempty"`
 	Exclude       []string `yaml:"exclude,omitempty"`
 	Excludes      []string `yaml:"excludes,omitempty"`
 	Include       []string `yaml:"include,omitempty"`
@@ -2874,6 +2876,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	}
 	if file.Sync != nil {
 		configInputFileString(cfg, configInputGeneric, inputSource, &cfg.Sync.Source, file.Sync.Source)
+		configInputFileString(cfg, configInputGeneric, inputSource, &cfg.Sync.Compression, file.Sync.Compression)
 		{
 			var accepted bool
 			cfg.Sync.Excludes, accepted = appendOrderedStringsAccepted(cfg.Sync.Excludes, file.Sync.Exclude...)
@@ -4823,6 +4826,7 @@ func applyEnv(cfg *Config) error {
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
 	}
 	cfg.Sync.Source = configInputEnvString(cfg, configInputGeneric, cfg.Sync.Source, "CRABBOX_SYNC_SOURCE")
+	cfg.Sync.Compression = configInputEnvString(cfg, configInputGeneric, cfg.Sync.Compression, "CRABBOX_SYNC_COMPRESSION")
 	if value, ok := getenvBool("CRABBOX_SYNC_CHECKSUM"); ok {
 		cfg.Sync.Checksum = value
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)

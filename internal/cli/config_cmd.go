@@ -163,6 +163,7 @@ func configShowView(cfg Config) map[string]any {
 			"include":       syncIncludes(cfg),
 			"delete":        cfg.Sync.Delete,
 			"checksum":      cfg.Sync.Checksum,
+			"compression":   effectiveSyncCompression(cfg),
 			"gitSeed":       cfg.Sync.GitSeed,
 			"gitSeedSource": effectiveGitSeedSource(cfg),
 			"gitOverlay":    cfg.Sync.GitOverlay,
@@ -553,7 +554,7 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	fmt.Fprintf(w, "access_auth=%s\n", accessAuthState(cfg.Access))
 	fmt.Fprintf(w, "ssh=%s@<host>:%s fallback_ports=%s key=%s\n", cfg.SSHUser, cfg.SSHPort, blank(strings.Join(cfg.SSHFallbackPorts, ","), "-"), cfg.SSHKey)
 	fmt.Fprintf(w, "sync source=%s\n", effectiveSyncSource(cfg))
-	fmt.Fprintf(w, "sync delete=%t checksum=%t git_seed=%t git_seed_source=%s git_overlay=%t fingerprint=%t base_ref=%s excludes=%d includes=%d timeout=%s\n", cfg.Sync.Delete, cfg.Sync.Checksum, cfg.Sync.GitSeed, effectiveGitSeedSource(cfg), cfg.Sync.GitOverlay, cfg.Sync.Fingerprint, blank(cfg.Sync.BaseRef, "-"), len(configuredExcludes(cfg).rules), len(syncIncludes(cfg)), cfg.Sync.Timeout)
+	fmt.Fprintf(w, "sync compression=%s delete=%t checksum=%t git_seed=%t git_seed_source=%s git_overlay=%t fingerprint=%t base_ref=%s excludes=%d includes=%d timeout=%s\n", effectiveSyncCompression(cfg), cfg.Sync.Delete, cfg.Sync.Checksum, cfg.Sync.GitSeed, effectiveGitSeedSource(cfg), cfg.Sync.GitOverlay, cfg.Sync.Fingerprint, blank(cfg.Sync.BaseRef, "-"), len(configuredExcludes(cfg).rules), len(syncIncludes(cfg)), cfg.Sync.Timeout)
 	fmt.Fprintf(w, "env allow=%s\n", strings.Join(cfg.EnvAllow, ","))
 	fmt.Fprintf(w, "run preflight_tools=%s\n", blank(strings.Join(cfg.Run.PreflightTools, ","), "-"))
 	fmt.Fprintf(w, "warmup keep=%t\n", cfg.WarmupKeep)

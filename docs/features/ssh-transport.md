@@ -13,6 +13,9 @@ SSH rules.
 
 ## File copy
 
+Workspace rsync uses the [sync compression policy](sync.md#rsync-compression).
+Explicit file-copy transfers keep their existing compression defaults.
+
 `crabbox cp` preserves provider-native copy when available. If the backend has
 no native copy capability but does expose a managed SSH lease, Crabbox maps the
 single `SANDBOX:PATH` operand to the remote side and transfers over the resolved

@@ -1490,6 +1490,7 @@ func sshControlPath(target SSHTarget) string {
 }
 
 type rsyncOptions struct {
+	Compression       string
 	Debug             bool
 	Delete            bool
 	Checksum          bool
@@ -1520,8 +1521,12 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 		return err
 	}
 	defer func() { err = errors.Join(err, session.Close()) }()
+	archiveMode := "-az"
+	if !syncCompressionEnabled(opts.Compression, target) {
+		archiveMode = "-a"
+	}
 	args := []string{
-		"-az",
+		archiveMode,
 		"-e", session.rsyncRemoteShellWithOptions("10", "3"),
 	}
 	if opts.NoTimes {
