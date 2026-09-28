@@ -23,7 +23,10 @@ func TestActionsWorkspaceConsumers(t *testing.T) {
 			t.Run(consumer+"/"+state, func(t *testing.T) {
 				clearConfigEnv(t)
 				isolateRunTestUserDirs(t, t.TempDir())
-				root := t.TempDir()
+				root, err := filepath.EvalSymlinks(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
 				runGit(t, root, "init", "-q")
 				const origin = "https://git.example.test/group/project.git"
 				runGit(t, root, "remote", "add", "origin", origin)
@@ -77,7 +80,6 @@ esac`)
 						t.Fatal(err)
 					}
 				}
-				var err error
 				var stdout, stderr bytes.Buffer
 				app := App{Stdout: &stdout, Stderr: &stderr}
 				switch consumer {

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Verify retained Actions workspace identity before run, sync, cache warm, or editor handoff; preserve custom paths and explicit cross-repository hydration with claim-bound consent. [PR 2564](https://github.com/openclaw/crabbox/pull/2564).
+- Verify retained Actions workspace identity before run, sync, cache warm, or editor handoff; preserve custom paths and explicit cross-repository hydration with claim-bound consent. [PR 2564](https://github.com/openclaw/crabbox/pull/2564). Thanks @vincentkoc.
 
 ## 0.68.0 - 2026-09-28
 

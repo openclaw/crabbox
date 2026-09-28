@@ -1573,7 +1573,10 @@ func TestRunActionsWorkspaceRealFinalEffects(t *testing.T) {
 	for _, kind := range []string{"matching-custom", "configured", "bound", "foreign", "foreign-no-sync", "foreign-full-resync", "reassigned", "competing-owner"} {
 		t.Run(kind, func(t *testing.T) {
 			clearConfigEnv(t)
-			root := t.TempDir()
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
 			isolateRunTestUserDirs(t, root)
 			source, remoteRoot, transport := filepath.Join(root, "source"), filepath.Join(root, "remote"), filepath.Join(root, "transport")
 			workspace := filepath.Join(remoteRoot, "custom workspace")
@@ -1700,7 +1703,7 @@ func TestRunActionsWorkspaceRealFinalEffects(t *testing.T) {
 				return err
 			}
 			before := snapshot()
-			err := run()
+			err = run()
 			reject := strings.HasPrefix(kind, "foreign") || kind == "competing-owner"
 			if (err != nil) != reject {
 				t.Fatalf("run error=%v, want rejection=%t", err, reject)
