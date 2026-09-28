@@ -27,6 +27,11 @@
       "parameters": {}
     },
     {
+      "name": "linuxBootstrapActivate",
+      "file": "linuxBootstrapActivate.sh",
+      "parameters": {}
+    },
+    {
       "name": "linuxBootstrapPrelude",
       "file": "linuxBootstrapPrelude.sh",
       "parameters": {}

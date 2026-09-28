@@ -81,6 +81,11 @@ export function sharedGnomeDesktopTheme(): string {
 }
 
 // prettier-ignore
+export function sharedLinuxBootstrapActivate(): string {
+  return "# Enabling an already-enabled SysV-backed SSH service runs slow compatibility\n# helpers. Batch the new unit's reload instead of reloading for each enable.\nsystemctl is-enabled --quiet ssh || systemctl enable --no-reload ssh || true\nsystemctl enable --no-reload crabbox-workspace-ready.service\nsystemctl daemon-reload\nsystemctl start --no-block crabbox-workspace-ready.service\n";
+}
+
+// prettier-ignore
 export function sharedLinuxBootstrapPrelude(): string {
   return "export DEBIAN_FRONTEND=noninteractive\nretry() {\n  n=1\n  until \"$@\"; do\n    if [ \"$n\" -ge 8 ]; then\n      return 1\n    fi\n    sleep $((n * 5))\n    n=$((n + 1))\n  done\n}\n";
 }

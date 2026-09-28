@@ -63,6 +63,8 @@ it reloads systemd and restarts the active `ssh.socket`, or the SSH service on
 images without socket activation. Matching listeners avoid a restart, including
 on prepared images that skip package installation. Socket activation must be
 reconciled at the socket because service restarts inherit its listening ports.
+Already-enabled SSH services skip repeated enablement, and workspace-unit
+enablement shares one explicit systemd reload.
 
 Bootstrap installs only a small base set with `--no-install-recommends`:
 

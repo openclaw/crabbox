@@ -61,11 +61,10 @@ func cloudInitWithExtras(cfg Config, publicKey, additionalConfig, additionalBoot
 ` + indentCloudInitRuncmd(sharedLinuxBootstrapPrelude()) + indentCloudInitRuncmd(sharedLinuxSSHRestart()) + indentCloudInitRuncmd(linuxMinimalReadinessBootstrap) + "\n" + fmt.Sprintf(`    mkdir -p %[1]s /var/cache/crabbox/pnpm /var/cache/crabbox/npm
     chown -R %[2]s:%[2]s %[1]s /var/cache/crabbox
     install -d /var/lib/crabbox
-    systemctl enable ssh || true
 `, shellWorkRoot, shellSSHUser) + indentCloudInitRuncmd(sharedLinuxSSHRestart()) + cloudInitEarlyBootstrap(cfg) + "\n"
 	final := "    systemctl start crabbox-bootstrap.service\n"
 	workspaceAfter := "crabbox-bootstrap.service cloud-config.service"
-	core += "    systemctl daemon-reload\n    systemctl enable crabbox-workspace-ready.service\n    systemctl start --no-block crabbox-workspace-ready.service\n"
+	core += indentCloudInitRuncmd(sharedLinuxBootstrapActivate())
 	if bootstrap == "" {
 		core += finish
 	} else {

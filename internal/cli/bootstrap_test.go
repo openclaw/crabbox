@@ -53,7 +53,7 @@ func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 		"test -f /var/lib/crabbox/bootstrapped",
 		"test -w '/work/crabbox'",
 		"      Port 2222\n      Port 22",
-		"systemctl enable ssh || true",
+		"systemctl is-enabled --quiet ssh || systemctl enable --no-reload ssh || true",
 		"touch /var/lib/crabbox/bootstrapped",
 	} {
 		if !strings.Contains(got, want) {

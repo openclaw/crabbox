@@ -1,6 +1,7 @@
 import {
   sharedLinuxSSHRestart,
   sharedLinuxBootstrapStart,
+  sharedLinuxBootstrapActivate,
   sharedLinuxBootstrapPrelude,
   sharedLinuxOptionalPackages,
   sharedLinuxNodeInstall,
@@ -97,12 +98,10 @@ ${indentRuncmdScript(sharedLinuxBootstrapPrelude())}${sshRestart}${indentRuncmdS
     mkdir -p ${config.workRoot} /var/cache/crabbox/pnpm /var/cache/crabbox/npm
     chown -R ${config.sshUser}:${config.sshUser} ${config.workRoot} /var/cache/crabbox
     install -d /var/lib/crabbox
-    systemctl enable ssh || true
 ${sshRestart}`;
   let final = "    systemctl start crabbox-bootstrap.service\n";
   let workspaceAfter = "crabbox-bootstrap.service cloud-config.service";
-  core +=
-    "    systemctl daemon-reload\n    systemctl enable crabbox-workspace-ready.service\n    systemctl start --no-block crabbox-workspace-ready.service\n";
+  core += indentRuncmdScript(sharedLinuxBootstrapActivate());
   if (bootstrap === "") {
     core += finish;
   } else {

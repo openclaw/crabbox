@@ -89,3 +89,23 @@ timeout() { [ "$1" = 30s ] || return 98; shift; "$@"; }
 		})
 	}
 }
+
+func TestCloudInitBatchesServiceEnablement(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		wantEnable := ""
+		enabledResult := "0"
+		if !enabled {
+			enabledResult = "1"
+			wantEnable = "enable --no-reload ssh\n"
+		}
+		prelude := "set -eu\nsystemctl() {\nif [ \"$*\" = 'is-enabled --quiet ssh' ]; then return " + enabledResult + "; fi\nprintf '%s\\n' \"$*\"\n}\n"
+		out, err := exec.Command("bash", "-c", prelude+sharedLinuxBootstrapActivate()).CombinedOutput()
+		if err != nil {
+			t.Fatalf("activation: %v: %s", err, out)
+		}
+		want := wantEnable + "enable --no-reload crabbox-workspace-ready.service\ndaemon-reload\nstart --no-block crabbox-workspace-ready.service\n"
+		if string(out) != want {
+			t.Fatalf("enabled=%v: got %s; want %s", enabled, out, want)
+		}
+	}
+}

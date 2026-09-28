@@ -362,7 +362,9 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("test -f /var/lib/crabbox/bootstrapped");
     expect(got).toContain("test -w /work/crabbox");
     expect(got).toContain("      Port 2222\n      Port 22");
-    expect(got).toContain("systemctl enable ssh || true");
+    expect(got).toContain(
+      "systemctl is-enabled --quiet ssh || systemctl enable --no-reload ssh || true",
+    );
     expect(got).toContain("touch /var/lib/crabbox/bootstrapped");
     expect(got).toContain("After=crabbox-bootstrap.service cloud-config.service");
     expect(got).toContain("Before=cloud-final.service");
@@ -374,7 +376,7 @@ describe("cloud-init bootstrap", () => {
       got.indexOf("ExecStart=/usr/bin/touch /run/crabbox/workspace-ready"),
     );
     expect(got).toContain("ExecStart=/usr/bin/touch /run/crabbox/workspace-ready");
-    expect(got).toContain("systemctl enable crabbox-workspace-ready.service");
+    expect(got).toContain("systemctl enable --no-reload crabbox-workspace-ready.service");
     expect(got).toContain("systemctl start --no-block crabbox-workspace-ready.service");
     expect(got).not.toContain("\npackages:\n");
     expect(got).not.toContain("systemctl enable --now ssh");
