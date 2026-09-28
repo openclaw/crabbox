@@ -15,6 +15,10 @@ SSH rules.
 
 Workspace rsync uses the [sync compression policy](sync.md#rsync-compression).
 Explicit file-copy transfers keep their existing compression defaults.
+Empty POSIX workspaces can use a streamed tar channel under the same workspace
+owner. The SSH child and archive producer finish before temporary transport
+configuration is removed; cancellation joins both. See [sync](sync.md#sync-flow)
+for eligibility and the receiver's emptiness recheck.
 
 `crabbox cp` preserves provider-native copy when available. If the backend has
 no native copy capability but does expose a managed SSH lease, Crabbox maps the

@@ -320,6 +320,23 @@ Once ownership is established, sync runs these steps:
 10. Finalize: git-hydrate the worktree against the configured base ref, run the
     mass-deletion sanity check, and record the new fingerprint.
 
+For a new or empty POSIX workspace, the manifest-writing command also checks
+whether the target has GNU tar or bsdtar and gzip. Eligible first transfers use
+one streamed tar SSH channel instead of rsync. The receiver rechecks that only
+the current transaction's pending metadata is present before extracting; any
+other content selects the ordinary rsync path. No local archive is spooled.
+The stream contains the selected manifest files and their parent-directory
+metadata, preserves symlinks without following their targets, and leaves the
+workspace root's permissions intact. Pruning and finalization use their existing
+paths, and producer or transport failure prevents finalization.
+
+Nonempty and Git-seeded workspaces, local Git snapshots, Git overlays,
+Windows/WSL2 targets, Windows controllers, and Docker socket-mode transfers use
+their existing transport. A source path with a symlink ancestor also retains
+rsync, as do manifests containing special files. Timing output identifies a cold transfer with `syncMode: "tar"` and a
+`tar` phase. `sync.compression: never` selects an uncompressed tar stream;
+the default uses gzip at its fast compression level.
+
 The remote prune in step 8 only removes paths Crabbox previously synced. It does
 not touch workflow-created state, package caches, `.git`, or any other runner
 file outside the managed list. The mass-deletion guard in step 10 aborts a sync
@@ -338,7 +355,7 @@ A later ordinary sync must verify and certify its own completed transfer.
 ## Rsync compression
 
 `sync.compression` selects `always` (the default) or `never` for
-workspace rsync, including local Actions hydration. `CRABBOX_SYNC_COMPRESSION`
+POSIX workspace transfers, including workspace rsync during local Actions hydration. `CRABBOX_SYNC_COMPRESSION`
 overrides the configuration. Compression stays enabled on loopback and LAN
 targets too: reducing bytes can outweigh compression CPU even on a fast link.
 Rsync negotiates its compression algorithm and retains its built-in handling

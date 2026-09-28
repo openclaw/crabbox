@@ -208,6 +208,7 @@ func syncTimingPhases(steps syncStepTimings) []timingPhase {
 	appendDuration("manifest_write", steps.manifestWrite)
 	appendDuration("prune", steps.prune)
 	appendDuration("rsync", steps.rsync)
+	appendDuration("tar", steps.tar)
 	appendDuration("manifest_apply", steps.manifestApply)
 	appendDuration("sanity", steps.sanity)
 	appendDuration("git_hydrate", steps.gitHydrate)

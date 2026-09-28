@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"errors"
@@ -2580,7 +2581,17 @@ retrySync:
 		} else if plainManifestMode {
 			manifestCommand = remoteWriteSyncManifestsNewForTargetMode(target, workdir, finalizeToken, true)
 		}
-		manifestErr := runSSHInput(manifestCtx, target, manifestCommand, strings.NewReader(manifestInput), io.Discard, a.Stderr)
+		coldCandidate := coldSyncSupported(target) && !manifest.hasSpecialFiles && !localGitSeed && !overlayDecision.Enabled && !localContainerDockerSocketSync(cfg, server)
+		if coldCandidate {
+			metadata := remoteSyncMetaDirScript()
+			if plainManifestMode {
+				metadata = remotePlainManifestGitFunction() + remotePlainManifestSyncMetaDirScript()
+			}
+			manifestCommand = remoteWriteSyncManifestsNewWithMetadataMode(workdir, finalizeToken, metadata, plainManifestMode, true)
+		}
+		var manifestOutput bytes.Buffer
+		manifestErr := runSSHInput(manifestCtx, target, manifestCommand, strings.NewReader(manifestInput), &manifestOutput, a.Stderr)
+		coldCandidate = coldCandidate && manifestOutput.String() == coldSyncReady
 		stopManifestHeartbeat()
 		if cancelManifest != nil {
 			cancelManifest()
@@ -2615,11 +2626,24 @@ retrySync:
 		}
 		if !overlayDecision.Enabled || len(transferData) != 0 {
 			stepStart = time.Now()
-			// The explicit file list also prevents rsync from applying snapshot-root metadata to the workspace.
-			if err := rsync(ctx, target, syncSourceRoot, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Compression: effectiveSyncCompression(cfg), Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: transferData, NoTimes: localContainerDockerSocketSync(cfg, server), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
-				return recordFailure(Exit(6, "rsync failed: %v", err))
+			usedTar := false
+			if coldCandidate {
+				usedTar, err = streamColdSync(ctx, target, syncSourceRoot, workdir, finalizeToken, manifest.Files, effectiveSyncCompression(cfg), cfg.Sync.Timeout, a.Stderr)
+				if err != nil {
+					return recordFailure(Exit(6, "cold tar sync failed: %v", err))
+				}
 			}
-			timings.syncSteps.rsync = time.Since(stepStart)
+			// The explicit file list also prevents rsync from applying snapshot-root metadata to the workspace.
+			if !usedTar {
+				if err := rsync(ctx, target, syncSourceRoot, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Compression: effectiveSyncCompression(cfg), Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: transferData, NoTimes: localContainerDockerSocketSync(cfg, server), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
+					return recordFailure(Exit(6, "rsync failed: %v", err))
+				}
+				timings.syncSteps.rsync = time.Since(stepStart)
+			} else {
+				timings.syncSteps.tar = time.Since(stepStart)
+				timings.syncMode = "tar"
+				timings.syncTransferFiles, timings.syncTransferBytes = len(manifest.Files), manifest.Bytes
+			}
 		}
 		if cleanupErr := overlaySnapshot.cleanup(); cleanupErr != nil {
 			return recordFailure(Exit(6, "clean up immutable git overlay snapshot: %v", cleanupErr))
@@ -3686,6 +3710,7 @@ type syncStepTimings struct {
 	manifestWrite        time.Duration
 	prune                time.Duration
 	rsync                time.Duration
+	tar                  time.Duration
 	manifestApply        time.Duration
 	sanity               time.Duration
 	gitHydrate           time.Duration
@@ -3745,6 +3770,7 @@ func formatSyncStepTimings(steps syncStepTimings) string {
 	appendStep("manifest_write", steps.manifestWrite)
 	appendStep("prune", steps.prune)
 	appendStep("rsync", steps.rsync)
+	appendStep("tar", steps.tar)
 	appendStep("manifest_apply", steps.manifestApply)
 	appendStep("sanity", steps.sanity)
 	if steps.gitHydrateSkipped {

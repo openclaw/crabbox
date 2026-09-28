@@ -952,6 +952,7 @@ func syncFingerprintPathsAndSize(ctx context.Context, h hash.Hash, root string, 
 }
 
 type SyncManifest struct {
+	hasSpecialFiles          bool
 	Files                    []string
 	Deleted                  []string
 	Changed                  []string
@@ -1147,6 +1148,7 @@ func projectSyncManifest(root string, excludes SyncExcludeRules, includes, paths
 		seen[rel] = true
 		manifest.Files = append(manifest.Files, rel)
 		manifest.Bytes += info.Size()
+		manifest.hasSpecialFiles = manifest.hasSpecialFiles || (!info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0)
 		if protectedPattern != "" {
 			manifest.ProtectedTrackedExcludes = append(manifest.ProtectedTrackedExcludes, SyncProtectedTrackedExclude{
 				Path:    rel,

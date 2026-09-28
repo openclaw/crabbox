@@ -2490,13 +2490,17 @@ func remoteWriteSyncManifestsNewWithMetadata(workdir, finalizeToken, metadataScr
 	return remoteWriteSyncManifestsNewWithMetadataMode(workdir, finalizeToken, metadataScript, true)
 }
 
-func remoteWriteSyncManifestsNewWithMetadataMode(workdir, finalizeToken, metadataScript string, hermetic bool) string {
+func remoteWriteSyncManifestsNewWithMetadataMode(workdir, finalizeToken, metadataScript string, hermetic bool, coldProbe ...bool) string {
 	manifestName := remoteSyncPendingManifestName(finalizeToken)
 	deletedName := remoteSyncPendingDeletedName(finalizeToken)
 	if hermetic {
 		metadataScript = gitOverlayHermeticFunctions() + metadataScript
 	}
-	script := "set -e\nmkdir -p " + shellPathQuote(workdir) + "\ncd " + shellPathQuote(workdir) + "\n" + metadataScript + `mkdir -p "$meta_dir"
+	probe := ""
+	if len(coldProbe) != 0 && coldProbe[0] {
+		probe = remoteColdSyncProbe(workdir)
+	}
+	script := "set -e\n" + probe + "mkdir -p " + shellPathQuote(workdir) + "\ncd " + shellPathQuote(workdir) + "\n" + metadataScript + `mkdir -p "$meta_dir"
 ` + remoteSyncAbandonedMetadataCleanup() + `
 if ! IFS= read -r manifest_len; then
   echo "invalid sync manifest length" >&2
@@ -2528,6 +2532,9 @@ if [ "$deleted_size" != "$deleted_len" ]; then
   exit 1
 fi
 `
+	if probe != "" {
+		script += "\nif [ \"$cold_sync\" = 1 ]; then printf '" + coldSyncReady + "'; fi\n"
+	}
 	if hermetic {
 		return remoteHermeticPOSIXControlCommand(script)
 	}
