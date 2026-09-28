@@ -1110,6 +1110,9 @@ func TestCoordinatorAcquireRetainsCurrentProvisioningTiming(t *testing.T) {
 	lease := CoordinatorLease{
 		ID: "cbx_abcdef123468", Slug: "current-timing", Provider: "aws", TargetOS: targetLinux,
 		State: "active", CloudID: "i-current", Host: host, SSHUser: "crabbox", SSHPort: port, WorkRoot: defaultPOSIXWorkRoot,
+		CreationEvents: []CreationEvent{
+			{Phase: "admission_started", At: "2026-01-01T00:00:00Z", Source: "coordinator"},
+		},
 		ProvisioningTiming: &CoordinatorProvisioningTiming{
 			RequestMs: 2,
 			TotalMs:   5,
@@ -1140,15 +1143,43 @@ func TestCoordinatorAcquireRetainsCurrentProvisioningTiming(t *testing.T) {
 	cfg.CoordToken = "user-token"
 	coord := mustNewCoordinatorClient(t, cfg)
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: io.Discard}}
+	started := time.Now()
 	acquired, err := backend.Acquire(context.Background(), AcquireRequest{
 		Keep: true, RequestedLeaseID: lease.ID, RequestedSlug: lease.Slug,
 	})
+	finished := time.Now()
 	if err != nil {
 		t.Fatal(err)
 	}
+	if acquired.runnerTiming == nil {
+		t.Fatal("missing current provisioning timing")
+	}
+	// Creation observations are additive; every provider duration field stays exact.
+	providerTiming := *acquired.runnerTiming
+	providerTiming.Events = nil
 	want := coordinatorRunnerTiming(lease)
-	if !reflect.DeepEqual(acquired.runnerTiming, want) {
-		t.Fatalf("runner timing=%#v want current provisioning timing %#v", acquired.runnerTiming, want)
+	if !reflect.DeepEqual(&providerTiming, want) {
+		t.Fatalf("provider timing=%#v want current provisioning timing %#v", &providerTiming, want)
+	}
+	events := acquired.runnerTiming.Events
+	clientPhases := []string{"ssh_tcp_accept", "ssh_authenticated", "workspace_ready"}
+	if len(events) != len(lease.CreationEvents)+len(clientPhases) {
+		t.Fatalf("creation events=%#v want coordinator events and exactly %v", events, clientPhases)
+	}
+	if !reflect.DeepEqual(events[:len(lease.CreationEvents)], lease.CreationEvents) {
+		t.Fatalf("coordinator events changed: got %#v want %#v", events, lease.CreationEvents)
+	}
+	previous := started
+	for i, phase := range clientPhases {
+		event := events[len(lease.CreationEvents)+i]
+		if event.Phase != phase || event.Source != "client" {
+			t.Fatalf("client event %d=%#v want phase=%s source=client", i, event, phase)
+		}
+		at, err := time.Parse(time.RFC3339Nano, event.At)
+		if err != nil || at.Before(previous) || at.After(finished) {
+			t.Fatalf("client event %d timestamp=%q outside ordered acquisition interval [%s, %s]: %v", i, event.At, previous, finished, err)
+		}
+		previous = at
 	}
 }
 
