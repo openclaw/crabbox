@@ -102,7 +102,7 @@ consumers; each consumer still runs its own probes. This does not add `--verify`
 to older installed scripts. Preparation and publication must use the updated
 standalone script from the same trusted source as the installer and publisher.
 
-Bootstrap skips baseline APT only when the exact canonical manifest bytes,
+Bootstrap skips baseline APT on prepared images when the exact canonical manifest bytes,
 root-owned non-symlink path, root group, `0644` file mode, bounded file size,
 non-writable parent directories, and every declared profile probe are verified.
 Named probe commands use only the sanitized system PATH
@@ -121,6 +121,17 @@ and renamed into the legacy directory without following the destination. If the
 legacy directory does not exist yet, the marker writer first verifies its
 ancestors and creates it root-owned with mode `0755`; existing safe directories
 owned by the runtime user remain valid.
+A stock image with neither a readiness manifest nor a legacy marker also skips
+baseline APT when every minimal capability probe passes. This check runs at the
+start of the baseline package stage, before any refresh or install, uses the same
+sanitized system PATH and real command probes, and writes the canonical readiness
+manifest and compatibility marker only after success. It does not invoke dpkg or
+trust package names alone. An existing invalid manifest or legacy marker still
+takes the repair/install path; it cannot select this stock-image shortcut.
+`package_update` and `package_upgrade` remain false in cloud-init. Missing tools
+still run the existing explicit APT refresh/install with retries; stock images
+missing even one baseline tool should not be expected to boot faster.
+
 Missing tools are installed normally or fail visibly if installation is
 unavailable. Optional browser, desktop, and Tailscale installation remains
 independent.

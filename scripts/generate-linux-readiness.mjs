@@ -606,6 +606,14 @@ elif test ! -e "$crabbox_readiness_manifest_path" &&
   crabbox_legacy_image_marker_trusted && crabbox_minimal_readiness_probes; then
   crabbox_write_readiness_manifest "$crabbox_minimal_manifest_payload"
   echo 'crabbox legacy image readiness migrated without package-manager work'
+elif test ! -e "$crabbox_readiness_manifest_path" &&
+  test ! -L "$crabbox_readiness_manifest_path" &&
+  test ! -e "$crabbox_legacy_image_marker_path" &&
+  test ! -L "$crabbox_legacy_image_marker_path" &&
+  crabbox_minimal_readiness_probes; then
+  crabbox_write_readiness_manifest "$crabbox_minimal_manifest_payload"
+  crabbox_write_legacy_image_marker
+  echo 'crabbox stock image tools verified; skipping apt bootstrap'
 else
   cat >${shellQuote(options.aptConfigPath)} <<'CRABBOX_APT'
 Acquire::Retries "8";

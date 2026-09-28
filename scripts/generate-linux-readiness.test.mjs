@@ -545,6 +545,7 @@ test("a valid authoritative manifest does not depend on its compatibility marker
 
 test("truly clean bootstrap creates both trusted parents and atomically writes canonical minimal evidence", async (t) => {
   const fixture = await createFixture(t);
+  await writeFile(join(fixture.root, "disabled-tmux"), "1");
   await rm(fixture.readiness, { recursive: true });
   await rm(fixture.state, { recursive: true });
   const result = fixture.run(fixture.shell, { CRABBOX_APT_SUCCESS: "1" });
@@ -608,6 +609,7 @@ test("missing legacy parent is never created beneath untrusted, writable, or sym
       const parent = join(ancestor, "crabbox");
       const marker = join(parent, "image-ready");
       const environment = await prepare(fixture, ancestor);
+      await writeFile(join(fixture.root, "disabled-tmux"), "1");
       const source = minimalBootstrap(fixture.minimal, fixture.builder, { ...fixture.options, legacyMarkerPath: marker });
       const result = fixture.run(source, { ...environment, CRABBOX_APT_SUCCESS: "1" });
       assert.notEqual(result.status, 0, result.stderr || result.stdout);
@@ -992,6 +994,7 @@ test("actual generated Go and Worker bootstrap fragments make identical decision
     ["builder", async (fixture) => fixture.writeManifest("linux-builder"), {}],
     ["legacy", async (fixture) => fixture.writeMarker(), {}],
     ["cold", async (fixture) => {
+      await writeFile(join(fixture.root, "disabled-tmux"), "1");
       await rm(fixture.readiness, { recursive: true });
       await rm(fixture.state, { recursive: true });
     }, { CRABBOX_APT_SUCCESS: "1" }],
@@ -1012,5 +1015,28 @@ test("actual generated Go and Worker bootstrap fragments make identical decision
       assert.equal(JSON.parse(await readFile(fixture.manifest, "utf8")).profile, profile);
       assert.equal((await fixture.packageCalls()).length, scenario === "cold" ? 2 : 0);
     });
+  }
+});
+
+test("generated stock bootstrap skips packages only when every baseline tool works", async (t) => {
+  for (const [runtime, path] of [
+    ["CLI", "internal/cli/linux_readiness_generated.go"],
+    ["coordinator", "worker/src/linux-readiness.generated.ts"],
+  ]) {
+    const source = await readFile(resolve(repoRoot, path), "utf8");
+    const fragment = JSON.parse(source.match(/linuxMinimalReadinessBootstrap\s*=\s*("(?:\\.|[^"\\])*")/u)[1]);
+    for (const missing of [null, "curl", "git", "rsync", "jq", "tmux", "flock"]) {
+      await t.test(`${runtime}: ${missing ?? "all tools present"}`, async (subtest) => {
+        const fixture = await createFixture(subtest);
+        if (missing) await writeFile(join(fixture.root, `disabled-${missing}`), "1");
+        const result = fixture.run(fixture.actualGenerated(fragment), missing ? { CRABBOX_APT_SUCCESS: "1" } : {});
+        assert.equal(result.status, 0, result.stderr || result.stdout);
+        assert.deepEqual(await fixture.packageCalls(), missing ? [minimalUpdateCommand,
+          `apt-get install -y --no-install-recommends ${fixture.minimal.aptPackages.join(" ")}`,
+        ] : []);
+        assert.equal(await readFile(fixture.manifest, "utf8"), `${canonicalJSON(manifestFor("linux-minimal", digest(fixture.minimal)))}\n`);
+        assert.equal(await readFile(fixture.marker, "utf8"), "crabbox-devtools-v1\n");
+      });
+    }
   }
 });

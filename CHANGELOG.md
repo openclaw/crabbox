@@ -6,6 +6,7 @@
 - Azure: preflight brokered VM SKU eligibility before allocating network fragments and reduce create polling delays while honoring per-response Retry-After and preserving exact cleanup.
 - Images: preserve Linux smoke and cleanup exit status when login-shell logout hooks fail during minting or retained-image qualification.
 - Images: include checksum-pinned Rust/Cargo and uv/uvx in Linux x86_64 developer images, with nonroot offline build and Python-tool smoke checks.
+- Skip baseline APT work on stock Linux images only when every required tool passes existing capability probes; retain package installation, readiness repair, and per-lease SSH setup when needed.
 
 ## 0.67.0 - 2026-09-26
 
