@@ -1,22 +1,44 @@
 # Changelog
 
-## Unreleased
+## 0.68.0 - 2026-09-28
 
-- Hetzner: map the default `ubuntu:26.04` selector to the publicly available `ubuntu-26.04` image, preserving explicit Ubuntu 24.04 and custom image choices.
-- SSH: detect Linux bootstrap completion within one authenticated session with bounded guest-side readiness polling; require AWS's per-boot workspace-ready marker on new guests while retaining cloud-init waits for legacy guests and optional setup gates. [PR 2600](https://github.com/openclaw/crabbox/pull/2600).
-- Linux: start minimal lease bootstrap before multi-user.target, avoid SSH restarts when configured listeners are already active, and retain readiness checks and optional setup gates.
-- Start managed lease idle expiry at activation across providers, preserving the admission-based TTL cap so slow provisioning cannot consume the idle window.
-- Route ordinary brokered Azure capacity fallback across regions after one capacity failure per market, cache confirmed rejections for five minutes, expose attempt durations, and bound legacy creation to 25 minutes with a 31-minute broker client wait.
-- SSH: detect newly ready guests sooner with short initial readiness retries and a bounded five-second backoff, preserving host trust, authentication, cancellation, and bootstrap checks.
-- Azure: preflight brokered VM SKU eligibility before allocating network fragments and reduce create polling delays while honoring per-response Retry-After and preserving exact cleanup.
-- Expose brokered creation observations in lease events and Linux timing JSON, with clock provenance for admission, provider requests, SSH, and current-boot readiness.
-- Sync: reuse a private foreground SSH connection for direct POSIX workspace ownership checks, with complete stdin-frame validation and joined cleanup after acquisition failure, cancellation, and release.
-- Sync: stream the first transfer into an empty POSIX workspace over one tar SSH channel when Git seeding and overlays are disabled, retaining manifest scope, metadata, ownership checks, pruning, and finalization; nonempty workspaces and Git fallback paths keep rsync.
-- Sync: allow explicit `sync.compression` and `CRABBOX_SYNC_COMPRESSION` overrides while retaining compression by default on every link.
-- Images: preserve Linux smoke and cleanup exit status when login-shell logout hooks fail during minting or retained-image qualification.
-- Detect brokered AWS and GCP network addresses sooner with bounded exponential polling, retaining provider error handling and existing deadlines.
-- Images: include checksum-pinned Rust/Cargo and uv/uvx in Linux x86_64 developer images, with nonroot offline build and Python-tool smoke checks.
-- Skip baseline APT work on stock Linux images only when every required tool passes existing capability probes; retain package installation, readiness repair, and per-lease SSH setup when needed.
+### Highlights
+
+- **Reach a usable Linux workspace sooner.** Minimal bootstrap can finish before unrelated services reach multi-user.target. In two guest-boot replay samples per variant, median readiness fell from 19.0 to 12.7 seconds on AWS, 28.3 to 15.8 seconds on GCP, and 32.2 to 28.7 seconds on Hetzner; these measure guest boot, not end-to-end creation. [PR 2595](https://github.com/openclaw/crabbox/pull/2595).
+- **Detect readiness without repeated SSH sessions.** Bounded guest-side polling and AWS's current-boot marker reduced median AWS readiness lag from 10.4 to 2.1 seconds and command wall time from 70.7 to 61.6 seconds across three interleaved pairs. Legacy guests and optional setup retain their completion gates. [PR 2600](https://github.com/openclaw/crabbox/pull/2600).
+- **Spend less time synchronizing cloud workspaces.** Reusing the workspace-owner SSH connection improved all 12 cloud repository sync pairs; the unchanged-repository median fell from 10.9 to 7.5 seconds. For an empty workspace with Git seeding and overlays disabled, streaming tar reduced the 20,002-file cold-sync median from 18.7 to 13.2 seconds across three pairs on one AWS lease. [PR 2593](https://github.com/openclaw/crabbox/pull/2593), [PR 2592](https://github.com/openclaw/crabbox/pull/2592).
+- **Keep the idle window after a slow create and reach Azure capacity sooner.** Managed idle expiry starts when the lease becomes active, while the hard TTL still starts at admission. Azure checks SKU eligibility before network allocation and reaches other configured regions after one capacity failure per market. [PR 2596](https://github.com/openclaw/crabbox/pull/2596), [PR 2587](https://github.com/openclaw/crabbox/pull/2587).
+- **See where creation time goes and control sync compression.** Lease events and Linux timing JSON expose creation milestones with clock provenance; explicit compression overrides support link-specific tuning while keeping the compressed default. [PR 2588](https://github.com/openclaw/crabbox/pull/2588), [PR 2591](https://github.com/openclaw/crabbox/pull/2591).
+- **Build Rust and Python-tool projects from prepared Linux images.** The x86_64 developer-image recipe includes checksum-pinned Rust/Cargo and uv/uvx with nonroot offline functional checks; image qualification also preserves smoke results when login-shell logout hooks fail. [PR 2584](https://github.com/openclaw/crabbox/pull/2584), [PR 2585](https://github.com/openclaw/crabbox/pull/2585). Thanks @vincentkoc.
+
+### Upgrade notes
+
+- Hetzner's default `ubuntu:26.04` selector now selects the published Ubuntu 26.04 image instead of Ubuntu 24.04. Choose `ubuntu:24.04` explicitly to retain the older OS; custom image choices remain unchanged. Brokered defaults require the updated coordinator, and direct selection requires the updated CLI. [PR 2599](https://github.com/openclaw/crabbox/pull/2599).
+- The broker client create wait is now 31 minutes, including Azure Linux requests that previously used a ten-minute wait. Caller cancellation and earlier deadlines still win; lease TTL remains admission-based even though idle expiry starts at activation. [PR 2596](https://github.com/openclaw/crabbox/pull/2596).
+
+### Added
+
+- Expose brokered creation observations in lease events and Linux timing JSON, with clock provenance for admission, provider requests, SSH, and current-boot readiness. [PR 2588](https://github.com/openclaw/crabbox/pull/2588).
+- Allow explicit `sync.compression` and `CRABBOX_SYNC_COMPRESSION` overrides while retaining compression by default on every link. [PR 2591](https://github.com/openclaw/crabbox/pull/2591).
+- Include checksum-pinned Rust/Cargo and uv/uvx in Linux x86_64 developer images, with nonroot offline build and Python-tool smoke checks. [PR 2584](https://github.com/openclaw/crabbox/pull/2584). Thanks @vincentkoc.
+
+### Changed
+
+- Detect Linux bootstrap completion within one authenticated SSH session with bounded guest-side readiness polling; require AWS's per-boot workspace-ready marker on new guests while retaining cloud-init waits for legacy guests and optional setup gates. [PR 2600](https://github.com/openclaw/crabbox/pull/2600).
+- Start minimal Linux lease bootstrap before multi-user.target, avoid SSH restarts when configured listeners are already active, and retain readiness checks and optional setup gates. [PR 2595](https://github.com/openclaw/crabbox/pull/2595).
+- Route ordinary brokered Azure capacity fallback across regions after one capacity failure per market, cache confirmed rejections for five minutes, expose attempt durations, and bound legacy creation to 25 minutes with a 31-minute broker client wait. [PR 2596](https://github.com/openclaw/crabbox/pull/2596).
+- Detect newly ready guests sooner with short initial SSH readiness retries and a bounded five-second backoff, preserving host trust, authentication, cancellation, and bootstrap checks. [PR 2586](https://github.com/openclaw/crabbox/pull/2586).
+- Preflight brokered Azure VM SKU eligibility before allocating network fragments and reduce create polling delays while honoring per-response Retry-After and preserving exact cleanup. [PR 2587](https://github.com/openclaw/crabbox/pull/2587).
+- Reuse a private foreground SSH connection for direct POSIX workspace ownership checks, with complete stdin-frame validation and joined cleanup after acquisition failure, cancellation, and release. [PR 2593](https://github.com/openclaw/crabbox/pull/2593).
+- Stream the first transfer into an empty POSIX workspace over one tar SSH channel when Git seeding and overlays are disabled, retaining manifest scope, metadata, ownership checks, pruning, and finalization; nonempty workspaces and Git fallback paths keep rsync. [PR 2592](https://github.com/openclaw/crabbox/pull/2592).
+- Detect brokered AWS and GCP network addresses sooner with bounded exponential polling, retaining provider error handling and existing deadlines. [PR 2590](https://github.com/openclaw/crabbox/pull/2590).
+- Skip baseline APT work on stock Linux images only when every required tool passes existing capability probes; retain package installation, readiness repair, and per-lease SSH setup when needed. [PR 2589](https://github.com/openclaw/crabbox/pull/2589).
+
+### Fixes
+
+- Map Hetzner's default `ubuntu:26.04` selector to the publicly available `ubuntu-26.04` image, preserving explicit Ubuntu 24.04 and custom image choices. [PR 2599](https://github.com/openclaw/crabbox/pull/2599).
+- Start managed lease idle expiry at activation across providers, preserving the admission-based TTL cap so slow provisioning cannot consume the idle window. [PR 2596](https://github.com/openclaw/crabbox/pull/2596).
+- Preserve Linux smoke and cleanup exit status when login-shell logout hooks fail during image minting or retained-image qualification. [PR 2585](https://github.com/openclaw/crabbox/pull/2585). Thanks @vincentkoc.
 
 ## 0.67.0 - 2026-09-26
 
