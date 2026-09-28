@@ -120,6 +120,30 @@ func TestWorkspaceOwnerControlPreservesUnsupportedRoutes(t *testing.T) {
 	}
 }
 
+func TestWorkspaceOwnerControlSupportsOlderSSH(t *testing.T) {
+	ssh, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip(err)
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\nfor arg do\n case \"$arg\" in ForkAfterAuthentication=*) exit 255;; esac\ndone\nexec " + shellQuote(ssh) + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	server := newForwardSSHServer(t, "fixture")
+	close(server.release)
+	target := SSHTarget{Host: "127.0.0.1", Port: strconv.Itoa(server.port()), User: "fixture", TargetOS: targetLinux,
+		FallbackPorts: []string{}, DisableHostKeyChecking: true}
+	_, closeControl, err := startWorkspaceOwnerControl(t.Context(), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closeControl(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWorkspaceOwnerControlCanceledStartup(t *testing.T) {
 	server := newForwardSSHServer(t, "fixture")
 	// Withhold authentication until after startup is canceled.

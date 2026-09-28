@@ -34,7 +34,7 @@ func startWorkspaceOwnerControl(ctx context.Context, target SSHTarget) (SSHTarge
 	}
 	controlPath := filepath.Join(dir, "control")
 	masterCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	args := []string{"-o", "ControlMaster=yes", "-o", "ControlPersist=no", "-o", "ForkAfterAuthentication=no", "-S", controlPath, "-N"}
+	args := []string{"-o", "ControlMaster=yes", "-o", "ControlPersist=no", "-S", controlPath, "-N"}
 	args = append(args, session.commandPrefixWithOptions(workspaceOwnerSSHConnectTimeoutOption, workspaceOwnerSSHConnectionAttemptsOption)...)
 	args = append(args, session.host())
 	master := pondMeshExecCommand(masterCtx, target, directSSHExecutable(), args...)
