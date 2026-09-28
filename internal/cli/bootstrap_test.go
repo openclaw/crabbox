@@ -161,6 +161,11 @@ func TestCloudInitGCPInstallsExpiryGuard(t *testing.T) {
 			t.Fatalf("cloudInit(gcp) missing %q", want)
 		}
 	}
+	early, final, found := strings.Cut(got, "\nruncmd:")
+	if !found || !strings.Contains(early, "touch /var/lib/crabbox/bootstrapped") || strings.Contains(final, "crabbox-gcp-expiry-guard.timer") {
+		t.Fatal("default GCP expiry guard must be armed before early readiness")
+	}
+
 }
 
 func TestCloudInitStartsSSHBeforeOptionalDesktopBootstrap(t *testing.T) {

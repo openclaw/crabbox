@@ -50,7 +50,8 @@ waiting for `multi-user.target` or cloud-final. An ordinary reboot does not reru
 the instance bootstrap. Output remains available in the systemd journal and
 `/var/log/cloud-init-output.log`; cloud-final also observes the unit's result.
 
-Desktop, browser, Tailscale, and other optional setup retains cloud-final
+The direct GCP expiry timer is armed in the early unit. Desktop, browser,
+Tailscale, and other optional setup retains cloud-final
 ordering. The `bootstrapped` marker is published only after every required phase
 and capability check succeeds. `crabbox-ready` still requires this marker and
 reruns the same checks. The per-boot workspace observation follows the early

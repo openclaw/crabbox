@@ -62,7 +62,7 @@ func cloudInitWithExtras(cfg Config, publicKey, additionalConfig, additionalBoot
     chown -R %[2]s:%[2]s %[1]s /var/cache/crabbox
     install -d /var/lib/crabbox
     systemctl enable ssh || true
-`, shellWorkRoot, shellSSHUser) + indentCloudInitRuncmd(sharedLinuxSSHRestart())
+`, shellWorkRoot, shellSSHUser) + indentCloudInitRuncmd(sharedLinuxSSHRestart()) + cloudInitEarlyBootstrap(cfg) + "\n"
 	final := "    systemctl start crabbox-bootstrap.service\n"
 	workspaceAfter := "crabbox-bootstrap.service cloud-config.service"
 	core += "    systemctl daemon-reload\n    systemctl enable crabbox-workspace-ready.service\n    systemctl start --no-block crabbox-workspace-ready.service\n"
@@ -670,6 +670,14 @@ func cloudInitWaylandDesktopWriteFiles(desktopEnv string) string {
 `
 }
 
+func cloudInitEarlyBootstrap(cfg Config) string {
+	// The expiry timer needs only networking; it must not defer default GCP readiness.
+	if cfg.Provider == "gcp" {
+		return cloudInitGCPExpiryGuardBootstrap()
+	}
+	return ""
+}
+
 func cloudInitOptionalBootstrap(cfg Config) string {
 	var parts []string
 	if cfg.Desktop || cfg.Browser {
@@ -785,9 +793,6 @@ chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
     systemctl disable --now crabbox-wayvnc.service crabbox-x11vnc.service 2>/dev/null || true
     systemctl enable crabbox-xvfb.service crabbox-desktop.service
     systemctl restart crabbox-xvfb.service crabbox-desktop.service`)
-	}
-	if cfg.Provider == "gcp" {
-		parts = append(parts, cloudInitGCPExpiryGuardBootstrap())
 	}
 	if cfg.Browser {
 		parts = append(parts, `    crabbox_install_packages gnupg build-essential python3
