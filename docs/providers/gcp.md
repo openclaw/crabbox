@@ -562,3 +562,14 @@ temporary `CRABBOX_CONFIG` without broker settings for direct cleanup.
 - [Tailscale](../features/tailscale.md)
 - [Checkpoints](../features/checkpoints.md)
 - [Lifecycle and cleanup](../features/lifecycle-cleanup.md)
+
+## Brokered address readiness
+
+The coordinator checks the instance address immediately, then waits 250 ms,
+500 ms, 1 s, 2 s, 4 s, and at most 5 s between reads. The existing two-minute
+address deadline is unchanged; the last wait is clipped and no new read starts
+at the deadline. A response arriving after the deadline is not accepted as ready.
+In-flight calls retain the provider client's existing transport/retry behavior.
+Provider errors, including exhausted throttling responses, propagate unchanged;
+the polling loop does not add rapid retries or override provider backoff.
+This reduces the observation delay for an early address, not the VM's boot time.

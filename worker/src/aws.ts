@@ -1752,16 +1752,20 @@ export class EC2SpotClient {
     checkReadiness?: AWSReadinessCheck,
   ): Promise<ProviderMachine> {
     const deadline = Date.now() + 600_000;
+    let interval = 250;
     /* oxlint-disable eslint/no-await-in-loop -- Polling serially revalidates lease authority around each provider read. */
     while (Date.now() < deadline) {
       await checkReadiness?.();
       const server = await this.findServer(instanceID);
       await checkReadiness?.();
+      if (Date.now() >= deadline) break;
       const address = server?.host || (allowPrivateAddress ? server?.privateHost : "");
       if (server && address) {
         return { ...server, host: address };
       }
-      await sleep(5_000);
+      // Request-layer retries and throttle errors remain authoritative.
+      await sleep(Math.min(interval, Math.max(0, deadline - Date.now())));
+      interval = Math.min(interval * 2, 5_000);
     }
     /* oxlint-enable eslint/no-await-in-loop */
     throw new Error(`timed out waiting for AWS instance network address: ${instanceID}`);

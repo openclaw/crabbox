@@ -887,14 +887,18 @@ export class GCPClient {
 
   async waitForServerIP(name: string): Promise<ProviderMachine> {
     const deadline = Date.now() + 120_000;
-    for (;;) {
+    let interval = 250;
+    while (Date.now() < deadline) {
+      // Provider errors, including throttling, propagate without a new polling retry.
       // oxlint-disable-next-line eslint/no-await-in-loop -- polling waits for eventual public IP.
       const server = await this.getServer(name);
+      if (Date.now() >= deadline) break;
       if (server.host) return server;
-      if (Date.now() > deadline) throw new Error(`timeout waiting for gcp public ip on ${name}`);
-      // oxlint-disable-next-line eslint/no-await-in-loop -- polling interval.
-      await sleep(5000);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- polling interval, bounded by the existing deadline.
+      await sleep(Math.min(interval, Math.max(0, deadline - Date.now())));
+      interval = Math.min(interval * 2, 5_000);
     }
+    throw new Error(`timeout waiting for gcp public ip on ${name}`);
   }
 
   async deleteServer(name: string): Promise<void> {
