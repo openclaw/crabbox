@@ -577,6 +577,10 @@ func (o *workspaceOwner) QuiesceForLeaseRelease(ctx context.Context) error {
 		return err
 	}
 	o.stopRenewal()
+	// Destructive release may discard this owner without calling Close.
+	if o.closeTransport != nil {
+		return errors.Join(o.Err(), o.closeTransport())
+	}
 	return o.Err()
 }
 

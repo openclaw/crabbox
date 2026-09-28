@@ -157,3 +157,24 @@ func TestWorkspaceOwnerCloseJoinsControlAfterReleaseFailure(t *testing.T) {
 		t.Fatalf("release failure must still close control: err=%v closed=%t", err, closed)
 	}
 }
+
+func TestWorkspaceOwnerQuiesceClosesControlBeforeDestructiveRelease(t *testing.T) {
+	closed := false
+	owner, err := acquireWorkspaceOwnerWithTransport(t.Context(), SSHTarget{}, "fixture", io.Discard,
+		workspaceOwnerTransportFunc(func(_ context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+			if req.Action == workspaceOwnerAcquire {
+				return "ACQUIRED", nil
+			}
+			return "OWNED", nil
+		}), time.Second, time.Minute, time.Minute/2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner.closeTransport = func() error { closed = true; return nil }
+	if err := owner.QuiesceForLeaseRelease(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !closed {
+		t.Fatal("destructive release can discard the owner with its control connection still open")
+	}
+}
