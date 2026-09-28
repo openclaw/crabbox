@@ -68,7 +68,7 @@ func TestParallelsAcquireRejectsLinkedBeforeProvisioning(t *testing.T) {
 type parallelsAppleSiliconRunner struct{ core.CommandRunner }
 
 func (r parallelsAppleSiliconRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-	if req.Name == "/usr/sbin/sysctl" && strings.Join(req.Args, " ") == "-n hw.optional.arm64" {
+	if req.Name == "/usr/sbin/sysctl" && strings.Join(req.Args, " ") == "-n -i hw.optional.arm64" {
 		return core.LocalCommandResult{Stdout: "1\n"}, nil
 	}
 	return r.CommandRunner.Run(ctx, req)

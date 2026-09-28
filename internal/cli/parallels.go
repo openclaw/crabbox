@@ -398,7 +398,9 @@ func (c *ParallelsClient) ResolveCloneMode(ctx context.Context) error {
 		return Exit(2, "parallels.cloneMode must be linked, full, or unlink")
 	}
 	if c.Cfg.TargetOS == targetMacOS {
-		result, err := c.hostCommand(ctx, nil, "/usr/sbin/sysctl", "-n", "hw.optional.arm64")
+		// Optional feature OIDs may be absent on Intel. -i accepts only that
+		// absence; transport and other command failures still fail closed.
+		result, err := c.hostCommand(ctx, nil, "/usr/sbin/sysctl", "-n", "-i", "hw.optional.arm64")
 		if err != nil {
 			return commandOutputError("detect Parallels host architecture", result, err)
 		}
@@ -408,9 +410,9 @@ func (c *ParallelsClient) ResolveCloneMode(ctx context.Context) error {
 				return Exit(2, "Crabbox refuses linked clones of macOS guests on Apple silicon: affected templates start without guest IP or Parallels Tools; use --parallels-clone-mode full and clear snapshot selectors with --parallels-source-snapshot= --parallels-source-snapshot-id= (full clones use the source VM's current state)")
 			}
 			mode = "full"
-		case "0":
+		case "", "0":
 		default:
-			return Exit(4, "detect Parallels host architecture: expected hw.optional.arm64 to be 0 or 1")
+			return Exit(4, "detect Parallels host architecture: expected hw.optional.arm64 to be absent, 0, or 1")
 		}
 	}
 	if mode == "" {

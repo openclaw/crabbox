@@ -18,6 +18,7 @@ func TestParallelsCloneModeByHostAndTarget(t *testing.T) {
 		{name: "macOS Apple silicon default", target: targetMacOS, arm64: "1", wantMode: "full"},
 		{name: "remote Apple silicon default", target: targetMacOS, arm64: "1", remote: true, wantMode: "full"},
 		{name: "macOS Intel default", target: targetMacOS, arm64: "0", snapshot: "snap", wantMode: "linked"},
+		{name: "Intel absent ARM feature", target: targetMacOS, snapshot: "snap", wantMode: "linked"},
 		{name: "remote Intel default", target: targetMacOS, arm64: "0", remote: true, snapshot: "snap", wantMode: "linked"},
 		{name: "Linux default", target: targetLinux, arm64: "1", snapshot: "snap", wantMode: "linked"},
 		{name: "Windows default", target: targetWindows, arm64: "1", snapshot: "snap", wantMode: "linked"},
@@ -92,7 +93,7 @@ func (r *parallelsCloneModeRunner) Run(_ context.Context, req LocalCommandReques
 		parts := strings.Fields(strings.ReplaceAll(command, "'", ""))
 		name, args = parts[0], parts[1:]
 	}
-	if name == "/usr/sbin/sysctl" && slices.Equal(args, []string{"-n", "hw.optional.arm64"}) {
+	if name == "/usr/sbin/sysctl" && slices.Equal(args, []string{"-n", "-i", "hw.optional.arm64"}) {
 		if r.arm64 == "error" {
 			return LocalCommandResult{}, errors.New("synthetic host failure")
 		}
