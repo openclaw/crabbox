@@ -31,7 +31,7 @@ describe("portable OS catalog", () => {
       expect(spec.awsArm64Name).toContain("arm64-server");
       expect(spec.azureImage).toContain(":server:latest");
       expect(spec.azureArm64Image).toContain(":server-arm64:latest");
-      expect(spec.hetznerImage).toBe("ubuntu-24.04");
+      expect(spec.hetznerImage).toBe(selector.replace(":", "-"));
     }
   });
 });

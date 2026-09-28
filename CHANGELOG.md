@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Shorten brokered pre-create setup by overlapping independent AWS image, ingress, quota, and type reads, skipping unchanged GCP firewall writes after fresh policy verification, and deferring Hetzner full key inventory until a per-lease key collision.
+- Hetzner: map the default `ubuntu:26.04` selector to the publicly available `ubuntu-26.04` image, preserving explicit Ubuntu 24.04 and custom image choices.
 
 - Linux: start minimal lease bootstrap before multi-user.target, avoid SSH restarts when configured listeners are already active, and retain readiness checks and optional setup gates.
 - Start managed lease idle expiry at activation across providers, preserving the admission-based TTL cap so slow provisioning cannot consume the idle window.

@@ -75,12 +75,15 @@ on the client.
 
 ## OS selector
 
-Crabbox accepts the portable Linux selector `--os` (default `ubuntu:26.04`, also
-`ubuntu:24.04`). Hetzner's public image catalog does not expose an Ubuntu 26.04
-slug yet, so **both** `ubuntu:26.04` and `ubuntu:24.04` currently resolve to the
-Hetzner image `ubuntu-24.04`. If proof must actually run on Ubuntu 26.04, use
-AWS, GCP, Azure, or a container provider, whose image maps already point at a
-26.04 image.
+Crabbox accepts the portable Linux selector `--os`: the default `ubuntu:26.04`
+resolves to Hetzner's `ubuntu-26.04`, and `ubuntu:24.04` resolves to
+`ubuntu-24.04`. Explicit provider image overrides still win over the selector.
+
+Hetzner [announced Ubuntu 26.04 on May 18, 2026](https://docs.hetzner.cloud/changelog#2026-05-18-fedora-44-and-ubuntu-2604-now-available),
+with the `ubuntu-26.04` slug for both x86 and Arm. The generated Go and Worker
+catalogs use that published slug directly. Bootstrap still checks required tools
+and installs missing packages; image availability alone does not prove that a
+particular image includes `jq`.
 
 ## Lifecycle
 

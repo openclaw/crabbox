@@ -1515,6 +1515,16 @@ describe("lease config", () => {
     expect(config.gcpRootGB).toBe(0);
   });
 
+  it("uses Hetzner Ubuntu 26.04 by default while preserving explicit images", () => {
+    const input = { provider: "hetzner" as const, sshPublicKey: "ssh-ed25519 test" };
+    expect(leaseConfig(input).image).toBe("ubuntu-26.04");
+    expect(leaseConfig({ ...input, os: "ubuntu:26.04" }).image).toBe("ubuntu-26.04");
+    expect(leaseConfig({ ...input, os: "ubuntu:24.04" }).image).toBe("ubuntu-24.04");
+    expect(leaseConfig({ ...input, os: "ubuntu:26.04", image: "custom-image" }).image).toBe(
+      "custom-image",
+    );
+  });
+
   it("maps explicit portable OS selectors", () => {
     const config = leaseConfig({
       provider: "aws",

@@ -38,6 +38,18 @@ func TestUbuntu2604AppleVMImageSourceContract(t *testing.T) {
 	}
 }
 
+func TestHetznerPortableOSImages(t *testing.T) {
+	t.Parallel()
+	for selector, want := range map[string]string{"ubuntu:26.04": "ubuntu-26.04", "ubuntu:24.04": "ubuntu-24.04"} {
+		for _, arch := range []string{ArchitectureAMD64, ArchitectureARM64} {
+			got, _, _, _, _, _, err := osImageDefaultProviderImagesForArchitecture(selector, arch)
+			if err != nil || got != want {
+				t.Errorf("Hetzner %s/%s: image=%q err=%v, want %q", selector, arch, got, err, want)
+			}
+		}
+	}
+}
+
 func TestNormalizeOSImage(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{

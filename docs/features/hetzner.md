@@ -54,9 +54,10 @@ types (the `ccx*` family) are the most likely to hit account quota.
 
 ## Image and location
 
-The OS image follows `--os` (default `ubuntu:26.04`), mapped to the Hetzner
-image name. Both `ubuntu:26.04` and `ubuntu:24.04` resolve to the
-`ubuntu-24.04` Hetzner image today. The default location is `fsn1`.
+The OS image follows `--os`: the default `ubuntu:26.04` maps to
+`ubuntu-26.04`, and `ubuntu:24.04` maps to `ubuntu-24.04`. See the
+[provider image catalog](../providers/hetzner.md#os-selector) for Hetzner's
+availability announcement. The default location is `fsn1`.
 
 Override the image, location, or a preexisting Hetzner SSH key via config or
 environment variables (see below). Crabbox otherwise generates and uploads a

@@ -52,7 +52,7 @@ var osImageSpecs = map[string]osImageSpec{
 		AzureImage:      "Canonical:ubuntu-26_04-lts:server:latest",
 		AzureArm64Image: "Canonical:ubuntu-26_04-lts:server-arm64:latest",
 		GCPImage:        "projects/ubuntu-os-cloud/global/images/family/ubuntu-2604-lts-amd64",
-		HetznerImage:    "ubuntu-24.04",
+		HetznerImage:    "ubuntu-26.04",
 		LinodeImage:     "",
 		DockerImage:     "docker.io/library/ubuntu:26.04",
 		ContainerName:   "docker.io/library/ubuntu@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b",
