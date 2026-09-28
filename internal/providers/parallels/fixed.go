@@ -192,6 +192,14 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 			if err != nil {
 				return core.FixedLeaseBinding{}, err
 			}
+			// Existing leases may replay an explicitly selected legacy mode;
+			// new submissions still pass the clone-mode preflight.
+			if !exists || strings.TrimSpace(cfg.Parallels.CloneMode) == "" {
+				if err := client.ResolveCloneMode(ctx); err != nil {
+					return core.FixedLeaseBinding{}, err
+				}
+				cfg.Parallels.CloneMode = client.Cfg.Parallels.CloneMode
+			}
 			identity, err := client.ServerIdentity(ctx)
 			if err != nil {
 				return core.FixedLeaseBinding{}, err

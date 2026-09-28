@@ -9,8 +9,8 @@ Read this when you:
 
 Parallels is a direct SSH-lease provider (it never goes through the broker). To
 acquire a box, Crabbox asks `prlctl` to create a clone from a configured source
-VM and snapshot, starts the clone, discovers the guest IP, injects the per-lease
-SSH key, and then uses the normal Crabbox SSH sync/run/checkpoint path. Parallels
+VM (and, for linked mode, a snapshot), starts the clone, discovers the guest IP,
+injects the per-lease SSH key, and then uses the normal Crabbox SSH sync/run/checkpoint path. Parallels
 Tools is the default discovery and key-install path. macOS guests can opt into a
 host-side DHCP/SSH fallback when Parallels Tools guest execution is unavailable.
 
@@ -41,7 +41,7 @@ crabbox warmup \
   --provider parallels \
   --target macos \
   --parallels-source "macOS Tahoe" \
-  --parallels-source-snapshot fresh \
+  --parallels-clone-mode full \
   --parallels-user alice \
   --ssh-port 22
 
@@ -55,7 +55,6 @@ With a template alias:
 
 ```sh
 crabbox checkpoint list --provider parallels --parallels-template tahoe-latest
-crabbox checkpoint fork --provider parallels --parallels-template tahoe-latest --slug tahoe-test
 crabbox run --provider parallels --parallels-template tahoe-latest -- xcodebuild -version
 ```
 
@@ -84,6 +83,36 @@ template VM. Use `cloneMode: full` or `cloneMode: unlink` only when you
 intentionally want to clone the current source VM state without a snapshot.
 Parallels also refuses to clone from a busy source VM, so keep template VMs shut
 down when they serve as local fleet bases.
+
+### macOS guests on Apple silicon
+
+When clone mode is unset, Crabbox selects `full` for a `macos` target on an
+Apple silicon Parallels host and `linked` elsewhere. Detection runs on the
+selected host, including remote and fleet hosts, and checks hardware support
+rather than the architecture of the Crabbox process. An explicit `linked`
+request for a new macOS clone on Apple silicon fails before cloning, with
+instructions to use `--parallels-clone-mode full`.
+
+This is a Crabbox guard against the boot failure reported in
+[issue 2398](https://github.com/openclaw/crabbox/issues/2398): an affected linked
+clone reports `running` but never supplies an IP or Tools session, while a full
+clone of the same template works. It is not a claim that all Parallels versions
+or templates have this defect. Parallels' [Apple silicon macOS limitations](https://kb.parallels.com/128867)
+explain that these guests use Apple's Virtualization framework and that
+**snapshots are supported starting with Desktop 20**. Its
+[clone command reference](https://docs.parallels.com/landing/parallels-desktop-developers-guide/command-line-interface-utility/manage-virtual-machines-from-cli/general-virtual-machine-management/clone-a-virtual-machine)
+documents `--linked` and snapshot selection via `-i`; neither reference
+establishes a universal linked-clone prohibition for these guests.
+
+Full clones use the source VM's **current state**, require additional disk
+space, and cannot select a snapshot. Crabbox never silently discards a snapshot
+selector: clear both `parallels.sourceSnapshot` and `parallels.sourceSnapshotId`
+(including template/environment overrides) with
+`--parallels-source-snapshot= --parallels-source-snapshot-id=` when choosing
+current-state cloning. Native snapshot creation and restore remain available;
+snapshot-based linked forks of macOS guests on Apple silicon are rejected.
+
+### IP discovery failures
 
 Some templates run as full clones but never boot as linked clones: Parallels
 reports the clone as `running`, yet the guest never gets a Tools session or a
@@ -124,9 +153,8 @@ not by itself prove that the guest OS failed to boot. Compare with
 overrides. Explicit empty flags clear both selectors for a retry:
 `--parallels-source-snapshot= --parallels-source-snapshot-id=`.
 Full clones use the source VM's current state; alternatively,
-investigate the template snapshot. Crabbox keeps `linked` as the default because
-full clones cannot select `parallels.sourceSnapshot`; missing Tools on one template
-does not establish an Apple silicon limitation. When resolving an existing VM, the
+investigate the template snapshot on a host/guest combination that supports
+linked acquisition. When resolving an existing VM, the
 clone mode is reported as unknown rather than inferred from current configuration,
 and the capture hint targets that existing VM instead of a new acquisition.
 
@@ -223,8 +251,7 @@ ssh:
   port: "22"
 parallels:
   source: macOS Tahoe
-  sourceSnapshot: fresh
-  cloneMode: linked
+  cloneMode: full
   bootstrapKey: /Users/alice/.ssh/crabbox-bootstrap
   user: alice
   workRoot: /Users/alice/crabbox
@@ -246,7 +273,6 @@ parallels:
     tahoe-latest:
       target: macos
       source: macOS Tahoe
-      sourceSnapshot: macOS 26.3.1 LATEST
       user: alice
       workRoot: /Users/alice/crabbox
     ubuntu-fast:
@@ -256,6 +282,9 @@ parallels:
       user: alice
       workRoot: /work/crabbox
 ```
+
+The macOS alias uses current-state cloning by default on Apple silicon. On an
+Intel host, select a power-off snapshot for linked cloning or set `cloneMode: full`.
 
 A template may set `source`, `sourceId`, `sourceSnapshot`, `sourceSnapshotId`,
 `target`, `windowsMode`, `cloneMode`, `host`, `hostUser`, `hostKey`, `vmRoot`,

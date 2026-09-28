@@ -1640,7 +1640,6 @@ func baseConfig() Config {
 		Firecracker: initialFirecrackerConfig(),
 		XCPNg:       initialXCPNgConfig(),
 		Parallels: ParallelsConfig{
-			CloneMode:      "linked",
 			User:           "crabbox",
 			StartupTimeout: 15 * time.Minute,
 		},

@@ -70,6 +70,10 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	defer releaseCapacityOnce()
 	cfg = selected
 	client := core.NewParallelsClient(cfg, b.RT.Exec)
+	if err := client.ResolveCloneMode(ctx); err != nil {
+		return core.LeaseTarget{}, err
+	}
+	cfg.Parallels.CloneMode = client.Cfg.Parallels.CloneMode
 	if err := client.ValidateMacOSBootstrapKey(ctx); err != nil {
 		return core.LeaseTarget{}, err
 	}

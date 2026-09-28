@@ -3110,7 +3110,7 @@ func TestApplyNativeCheckpointForkConfigPreservesDesktopCapability(t *testing.T)
 	}
 }
 
-func TestApplyNativeCheckpointForkConfigForParallelsPreservesLinkedCloneMode(t *testing.T) {
+func TestApplyNativeCheckpointForkConfigForParallelsPreservesCloneModeSelection(t *testing.T) {
 	fs := newFlagSet("checkpoint fork", io.Discard)
 	_ = fs.String("type", "", "provider type")
 	_ = fs.String("parallels-clone-mode", "", "Parallels clone mode")
@@ -3128,8 +3128,8 @@ func TestApplyNativeCheckpointForkConfigForParallelsPreservesLinkedCloneMode(t *
 	if cfg.Provider != "parallels" || cfg.Parallels.SourceID != "vm1" || cfg.Parallels.SourceSnapshotID != "{snap1}" || cfg.Parallels.Host != "mac-host" {
 		t.Fatalf("parallels config not applied: %#v", cfg)
 	}
-	if cfg.Parallels.CloneMode != "linked" {
-		t.Fatalf("snapshot forks should preserve linked clone mode, got %q", cfg.Parallels.CloneMode)
+	if cfg.Parallels.CloneMode != "" {
+		t.Fatalf("snapshot forks should defer the default until host selection, got %q", cfg.Parallels.CloneMode)
 	}
 
 	cfg = baseConfig()

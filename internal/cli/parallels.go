@@ -385,6 +385,41 @@ func (c *ParallelsClient) GetVM(ctx context.Context, id string) (ParallelsVM, er
 	return vms[0], nil
 }
 
+// ResolveCloneMode defers the default until the execution host is selected.
+// Query hardware on that host, including when its shell runs under Rosetta.
+func (c *ParallelsClient) ResolveCloneMode(ctx context.Context) error {
+	mode := strings.ToLower(strings.TrimSpace(c.Cfg.Parallels.CloneMode))
+	switch mode {
+	case "full", "unlink":
+		c.Cfg.Parallels.CloneMode = mode
+		return nil
+	case "", "linked":
+	default:
+		return Exit(2, "parallels.cloneMode must be linked, full, or unlink")
+	}
+	if c.Cfg.TargetOS == targetMacOS {
+		result, err := c.hostCommand(ctx, nil, "/usr/sbin/sysctl", "-n", "hw.optional.arm64")
+		if err != nil {
+			return commandOutputError("detect Parallels host architecture", result, err)
+		}
+		switch strings.TrimSpace(result.Stdout) {
+		case "1":
+			if mode == "linked" {
+				return Exit(2, "Crabbox refuses linked clones of macOS guests on Apple silicon: affected templates start without guest IP or Parallels Tools; use --parallels-clone-mode full and clear snapshot selectors with --parallels-source-snapshot= --parallels-source-snapshot-id= (full clones use the source VM's current state)")
+			}
+			mode = "full"
+		case "0":
+		default:
+			return Exit(4, "detect Parallels host architecture: expected hw.optional.arm64 to be 0 or 1")
+		}
+	}
+	if mode == "" {
+		mode = "linked"
+	}
+	c.Cfg.Parallels.CloneMode = mode
+	return nil
+}
+
 // SubmitClone validates the request, calls beforeSubmit immediately before
 // `prlctl clone`, and leaves resource discovery to the caller. A mutable-name
 // lookup cannot attest which incarnation the clone produced.
@@ -411,6 +446,9 @@ func (c *ParallelsClient) submitClone(ctx context.Context, source, snapshotID, l
 	if strings.TrimSpace(source) == "" {
 		return nil, Exit(2, "parallels.source or parallels.sourceId is required")
 	}
+	if err := c.ResolveCloneMode(ctx); err != nil {
+		return nil, err
+	}
 	name := parallelsLeaseVMName(leaseID, slug)
 	args := []string{"clone", source, "--name", name}
 	if dst := strings.TrimSpace(c.Cfg.Parallels.VMRoot); dst != "" {
@@ -436,7 +474,7 @@ func (c *ParallelsClient) submitClone(ctx context.Context, source, snapshotID, l
 		args = append(args, "--linked")
 	case "full":
 		if snapshotID != "" {
-			return nil, Exit(2, "Parallels snapshot forks require cloneMode=linked; prlctl selects snapshots only for linked clones")
+			return nil, Exit(2, "Parallels clone_mode=full cannot select a snapshot; prlctl selects snapshots only for linked clones; to clone the source VM's current state, clear snapshot selectors with --parallels-source-snapshot= --parallels-source-snapshot-id=")
 		}
 	case "unlink":
 		if snapshotID != "" {

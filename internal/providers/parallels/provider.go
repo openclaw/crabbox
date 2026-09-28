@@ -70,7 +70,7 @@ func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 		SourceID:         fs.String("parallels-source-id", defaults.Parallels.SourceID, "Parallels source VM UUID"),
 		SourceSnapshot:   fs.String("parallels-source-snapshot", defaults.Parallels.SourceSnapshot, "Parallels source snapshot name"),
 		SourceSnapshotID: fs.String("parallels-source-snapshot-id", defaults.Parallels.SourceSnapshotID, "Parallels source snapshot ID"),
-		CloneMode:        fs.String("parallels-clone-mode", defaults.Parallels.CloneMode, "Parallels clone mode: linked, full, or unlink"),
+		CloneMode:        fs.String("parallels-clone-mode", defaults.Parallels.CloneMode, "Parallels clone mode: linked, full, or unlink (default: full for macOS on Apple silicon, linked otherwise)"),
 		Host:             fs.String("parallels-host", defaults.Parallels.Host, "remote Mac host running Parallels"),
 		HostUser:         fs.String("parallels-host-user", defaults.Parallels.HostUser, "remote Mac SSH user"),
 		HostKey:          fs.String("parallels-host-key", defaults.Parallels.HostKey, "remote Mac SSH key"),
