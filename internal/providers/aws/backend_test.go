@@ -438,7 +438,7 @@ func TestAWSFixedAcquireReplaysSameLeaseAndRejectsIntentDrift(t *testing.T) {
 		}
 	}
 	for _, acquired := range []core.LeaseTarget{lease, replayed} {
-		for _, want := range []string{"timeout 5s cloud-init status --format=json", "/usr/local/bin/crabbox-ready"} {
+		for _, want := range []string{"systemctl cat crabbox-workspace-ready.service", "test -f /run/crabbox/workspace-ready", "timeout 20m cloud-init status --wait", "/usr/local/bin/crabbox-ready"} {
 			if !strings.Contains(acquired.SSH.ReadyCheck, want) {
 				t.Fatalf("fixed AWS acquisition/replay ready check=%q, missing %q", acquired.SSH.ReadyCheck, want)
 			}
@@ -1447,7 +1447,7 @@ func TestAWSAcquireBindsImmutableProviderKeyID(t *testing.T) {
 	if detections != 1 || len(fake.createCfg.AWSSSHCIDRs) != 1 || fake.createCfg.AWSSSHCIDRs[0] != "198.51.100.7/32" {
 		t.Fatalf("direct AWS outbound CIDR detections=%d provisioned CIDRs=%v, want one detection and [198.51.100.7/32]", detections, fake.createCfg.AWSSSHCIDRs)
 	}
-	for _, want := range []string{"timeout 5s cloud-init status --format=json", "/usr/local/bin/crabbox-ready"} {
+	for _, want := range []string{"systemctl cat crabbox-workspace-ready.service", "test -f /run/crabbox/workspace-ready", "timeout 20m cloud-init status --wait", "/usr/local/bin/crabbox-ready"} {
 		if !strings.Contains(lease.SSH.ReadyCheck, want) {
 			t.Fatalf("direct AWS acquisition ready check=%q, missing %q", lease.SSH.ReadyCheck, want)
 		}

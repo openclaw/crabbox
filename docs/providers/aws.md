@@ -461,12 +461,13 @@ timeout budgets are unchanged.
 6. Hand off to core for sync and command execution over SSH.
 7. Terminate on release, cleanup, or broker expiry.
 
-Linux readiness also checks current-boot cloud-init status. Each check is
-nonblocking and bounded to five seconds; cloud-init must report `done` (or be
-disabled) without errors before `crabbox-ready` can pass. The shared SSH
-readiness loop owns waiting and progress reporting, including its bounded
-guest-side polling session. A marker inherited from an image does not bypass
-a running or failed cloud-init boot.
+Linux guests with `crabbox-workspace-ready.service` must have the per-boot
+`/run/crabbox/workspace-ready` marker and pass `crabbox-ready`. The marker lives
+in tmpfs and is written after bootstrap, so an image's stale bootstrapped marker
+cannot satisfy readiness. Minimal leases can become ready before cloud-final;
+desktop, browser, and other optional setup keeps workspace-ready ordered after
+cloud-final. Guests without the unit retain the existing bounded
+`cloud-init status --wait` check before `crabbox-ready`.
 
 Brokered cleanup is owned by the Worker (lease expiry plus an AWS orphan
 sweep). Direct cleanup is best-effort via provider labels and

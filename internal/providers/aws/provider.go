@@ -71,9 +71,9 @@ func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
 
 func (Provider) ConfigureSSHTarget(target *core.SSHTarget, readyCommand string) {
 	if target.TargetOS == core.TargetLinux {
-		// Let the shared readiness loop wait, so cloud-init cannot hide SSH
-		// authentication or progress inside a twenty-minute blocking probe.
-		target.ReadyCheck = "timeout 5s cloud-init status --format=json >/tmp/crabbox-cloud-init.log 2>&1 && jq -e '.status == \"done\" or .status == \"disabled\"' /tmp/crabbox-cloud-init.log >/dev/null && " + readyCommand
+		// The tmpfs marker proves this boot completed bootstrap, including any
+		// optional cloud-final setup. Older guests retain their cloud-init gate.
+		target.ReadyCheck = "if systemctl cat crabbox-workspace-ready.service >/dev/null 2>&1; then test -f /run/crabbox/workspace-ready; else timeout 20m cloud-init status --wait >/tmp/crabbox-cloud-init.log 2>&1; fi && " + readyCommand
 	}
 }
 
