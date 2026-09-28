@@ -141,7 +141,7 @@ func TestCoordinatorPrepareResolveSharesControlBudget(t *testing.T) {
 			t.Setenv("CRABBOX_OWNER", "alice@example.test")
 			synctest.Test(t, func(t *testing.T) {
 				coord := mustNewCoordinatorClient(t, Config{Coordinator: "https://broker.example.test"})
-				if coord.Client.Timeout != 30*time.Minute {
+				if coord.Client.Timeout != 31*time.Minute {
 					t.Fatalf("production HTTP timeout=%v", coord.Client.Timeout)
 				}
 				if noHTTPTimeout {

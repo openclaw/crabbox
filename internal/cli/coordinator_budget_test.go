@@ -40,23 +40,23 @@ func TestCoordinatorOperationBudgets(t *testing.T) {
 			_, err := c.ProviderReadiness(ctx, cfg)
 			return err
 		}},
-		{"heartbeat", 30 * time.Minute, func(ctx context.Context, c *CoordinatorClient) error {
+		{"heartbeat", 31 * time.Minute, func(ctx context.Context, c *CoordinatorClient) error {
 			_, err := c.TouchLeaseForProvider(ctx, "cbx_budget", "aws")
 			return err
 		}},
-		{"idle timeout", 30 * time.Minute, func(ctx context.Context, c *CoordinatorClient) error {
+		{"idle timeout", 31 * time.Minute, func(ctx context.Context, c *CoordinatorClient) error {
 			_, err := c.UpdateLeaseIdleTimeoutForProvider(ctx, "cbx_budget", "aws", time.Minute)
 			return err
 		}},
-		{"create", 30 * time.Minute, func(ctx context.Context, c *CoordinatorClient) error {
+		{"create", 31 * time.Minute, func(ctx context.Context, c *CoordinatorClient) error {
 			_, err := c.CreateLease(ctx, cfg, "synthetic-public-key", false, "cbx_budget", "")
 			return err
 		}},
-		{"fixed create", 30 * time.Minute, func(ctx context.Context, c *CoordinatorClient) error {
+		{"fixed create", 31 * time.Minute, func(ctx context.Context, c *CoordinatorClient) error {
 			_, err := c.EnsureLease(ctx, cfg, "synthetic-public-key", false, "cbx_budget", "")
 			return err
 		}},
-		{"image", 30 * time.Minute, func(ctx context.Context, c *CoordinatorClient) error {
+		{"image", 31 * time.Minute, func(ctx context.Context, c *CoordinatorClient) error {
 			_, err := c.CreateImage(ctx, "cbx_budget", "budget-image", true)
 			return err
 		}},
