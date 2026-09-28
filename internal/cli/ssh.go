@@ -310,6 +310,7 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 	// reachability and authentication. Recording that keeps a readiness-only
 	// failure from being reported as an unknown-authentication timeout.
 	authenticated := false
+	retryDelay := 250 * time.Millisecond
 	check := func(probeErr error) error {
 		if stopped := sshReadinessProbeContextError(ctx, lastProbe); stopped != nil {
 			return stopped.cause
@@ -465,9 +466,12 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 		if err := check(nil); err != nil {
 			return err
 		}
-		if err := sleepContext(probeCtx, 10*time.Second); err != nil {
+		// Newly booted guests often become ready just after the first probe.
+		// Back off for longer boots without delaying the first retries.
+		if err := sleepContext(probeCtx, retryDelay); err != nil {
 			return check(err)
 		}
+		retryDelay = min(2*retryDelay, 5*time.Second)
 	}
 }
 

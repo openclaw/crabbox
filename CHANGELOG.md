@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- SSH: detect newly ready guests sooner with short initial readiness retries and a bounded five-second backoff, preserving host trust, authentication, cancellation, and bootstrap checks.
 - Images: preserve Linux smoke and cleanup exit status when login-shell logout hooks fail during minting or retained-image qualification.
 - Images: include checksum-pinned Rust/Cargo and uv/uvx in Linux x86_64 developer images, with nonroot offline build and Python-tool smoke checks.
 

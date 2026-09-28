@@ -16,6 +16,13 @@ crabbox pool ensure example/app/main/linux --min-ready 2 --max-ready 4 --compati
 
 ## Ready Pools
 
+Ordinary `run` and `warmup` do not automatically borrow matching pool entries.
+Use `prewarm --pool <key>` to prepare and register capacity, then explicitly
+select it with `run --pool <key>`. Legacy and ordinary typed pools require the
+creation SSH key on the borrowing client; a matching entry alone does not grant
+access. Cross-client access requires the separately enabled portable protocol
+described below.
+
 Ready pools are broker records for already hydrated leases. The CLI registers a
 lease after `prewarm` or `actions hydrate` has prepared it. Borrow marks one
 ready entry busy. Return either makes it ready again or drains and releases it.

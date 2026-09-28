@@ -435,6 +435,12 @@ entries do not record or prove image capabilities.
 
 ## SSH keys
 
+SSH readiness is checked immediately, then retried after 250 ms, 500 ms, 1 s,
+2 s, 4 s, and at most 5 s between later attempts. Each attempt must still pass
+SSH host trust, authentication, and the provider's readiness command. The delay
+is in addition to connection/probe time; cancellation and the overall readiness
+deadline also interrupt pending probes and retry waits.
+
 New leases use per-lease SSH keys under the user config directory (RSA for
 AWS/Azure Windows, ed25519 otherwise):
 
