@@ -89,17 +89,26 @@ func TestAWSLinuxReadinessPollsCurrentBootCloudInit(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
 			invoked := filepath.Join(dir, "ready-invoked")
-			cloudInit := "#!/bin/sh\n[ \"$*\" = 'status --format=json' ] || exit 99\nprintf '%s\\n' '{\"status\":\"" + test.status + "\"}'\nexit " + strconv.Itoa(test.code) + "\n"
+			cloudInit := "#!/bin/sh\n[ \"$1\" = status ] || exit 99\nstate='" + test.status + "'\n" + `
+case " $* " in
+  *" --wait "*)
+    case "$state" in
+      running|'not started') sleep 1; state=done ;;
+    esac
+    ;;
+esac
+printf '{"status":"%s"}\n' "$state"
+` + "exit " + strconv.Itoa(test.code) + "\n"
 			if err := os.WriteFile(filepath.Join(dir, "cloud-init"), []byte(cloudInit), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(dir, "timeout"), []byte("#!/bin/sh\n[ \"$1\" = 5s ] || exit 99\nshift\nexec \"$@\"\n"), 0o755); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, "timeout"), []byte("#!/bin/sh\nshift\nexec \"$@\"\n"), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			target := core.SSHTarget{TargetOS: core.TargetLinux}
 			(Provider{}).ConfigureSSHTarget(&target, "touch '"+invoked+"'")
 			command := strings.ReplaceAll(target.ReadyCheck, "/tmp/crabbox-cloud-init.log", filepath.Join(dir, "cloud-init.log"))
-			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, "sh", "-c", command)
 			cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
