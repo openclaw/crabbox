@@ -15468,6 +15468,47 @@ describe("fleet lease identity and idle", () => {
     expect(storage.alarm()).toBe(Date.parse(expiresAt));
   });
 
+  it("exposes coordinator admission step timings on the persisted lease timeline", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, { hetzner: fakeProvider() });
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers,
+        body: { provider: "hetzner", class: "tiny", sshPublicKey: "ssh-ed25519 synthetic" },
+      }),
+    );
+    expect(response.status).toBe(201);
+    const { lease } = (await response.json()) as { lease: LeaseRecord };
+    const read = await fleet.fetch(request("GET", `/v1/leases/${lease.id}/events`, { headers }));
+    const { events } = (await read.json()) as {
+      events: NonNullable<LeaseRecord["creationEvents"]>;
+    };
+    expect(events).toEqual(lease.creationEvents);
+    for (const step of [
+      "admission.lock_wait",
+      "admission.usage_count",
+      "admission.limit_check",
+      "admission.record_publication",
+      "admission.provider_prepare",
+      "admission.pricing",
+      "admission.ready_pool_check",
+    ]) {
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          phase: "coordinator_step",
+          source: "coordinator",
+          step,
+          durationMs: expect.any(Number),
+          count: expect.any(Number),
+          errors: 0,
+        }),
+      );
+    }
+    expect(events.filter((event) => event.phase === "admission_complete")).toHaveLength(1);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.state).toBe("active");
+  });
+
   it("persists creation events through owner heartbeat and exposes the lease timeline", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);

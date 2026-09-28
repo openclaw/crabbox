@@ -12,9 +12,13 @@ import (
 // CreationEvent is an observation, never authority for readiness or ownership.
 // At belongs to Source's clock; events must not be subtracted across clocks.
 type CreationEvent struct {
-	Phase  string `json:"phase"`
-	At     string `json:"at"`
-	Source string `json:"source"`
+	Phase      string   `json:"phase"`
+	At         string   `json:"at"`
+	Source     string   `json:"source"`
+	Step       string   `json:"step,omitempty"`
+	DurationMs *float64 `json:"durationMs,omitempty"`
+	Count      int64    `json:"count,omitempty"`
+	Errors     *int64   `json:"errors,omitempty"`
 }
 
 type creationObservations struct{ events []CreationEvent }
@@ -27,7 +31,7 @@ func recordCreationObservation(ctx context.Context, phase string) {
 				return
 			}
 		}
-		observations.events = append(observations.events, CreationEvent{phase, time.Now().UTC().Format(time.RFC3339Nano), "client"})
+		observations.events = append(observations.events, CreationEvent{Phase: phase, At: time.Now().UTC().Format(time.RFC3339Nano), Source: "client"})
 	}
 }
 
@@ -54,7 +58,7 @@ func readBootstrapComplete(ctx context.Context, target SSHTarget) *CreationEvent
 	if err != nil || seconds <= 0 || seconds > time.Now().Add(time.Minute).Unix() {
 		return nil
 	}
-	return &CreationEvent{"bootstrap_complete", time.Unix(seconds, 0).UTC().Format(time.RFC3339), "guest"}
+	return &CreationEvent{Phase: "bootstrap_complete", At: time.Unix(seconds, 0).UTC().Format(time.RFC3339), Source: "guest"}
 }
 
 func creationTimingEvents(timing *runnerProviderTiming) []CreationEvent {

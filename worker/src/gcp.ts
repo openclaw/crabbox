@@ -6,7 +6,12 @@ import {
   validatedCIDRs,
   type LeaseConfig,
 } from "./config";
-import { creationEvent, observedRunning } from "./creation-events";
+import {
+  creationEvent,
+  observedRunning,
+  measureCreationStep,
+  measureCreationStepSync,
+} from "./creation-events";
 import { base64URL } from "./encoding";
 import { ExpiringTokenCache, type ExpiringToken } from "./expiring-token-cache";
 import { redactDiagnosticSecrets } from "./http";
@@ -448,9 +453,13 @@ export class GCPClient {
     attempts?: ProvisioningAttempt[];
   }> {
     const candidates = gcpProvisioningCandidatesForConfig(config);
-    const zones = prependUnique(
-      config.gcpZone || this.zone,
-      config.capacityAvailabilityZones.length > 0 ? config.capacityAvailabilityZones : [this.zone],
+    const zones = measureCreationStepSync("gcp.zone_selection", () =>
+      prependUnique(
+        config.gcpZone || this.zone,
+        config.capacityAvailabilityZones.length > 0
+          ? config.capacityAvailabilityZones
+          : [this.zone],
+      ),
     );
     const history = new ProvisioningAttemptHistory();
     const project = config.gcpProject || this.project;
@@ -588,7 +597,10 @@ export class GCPClient {
         items: [
           { key: "enable-oslogin", value: "FALSE" },
           { key: "ssh-keys", value: `${config.sshUser}:${config.sshPublicKey}` },
-          { key: "user-data", value: cloudInit(config) },
+          {
+            key: "user-data",
+            value: measureCreationStepSync("gcp.user_data_render", () => cloudInit(config)),
+          },
         ],
       },
       networkInterfaces: [
@@ -603,7 +615,10 @@ export class GCPClient {
       const initializeParams: Record<string, unknown> = config.gcpSnapshot
         ? { sourceSnapshot: gcpSnapshotRef(config.gcpSnapshot, project) }
         : {
-            sourceImage: config.gcpImage || this.image,
+            sourceImage: measureCreationStepSync(
+              "gcp.image_selection",
+              () => config.gcpImage || this.image,
+            ),
             diskSizeGb: config.gcpRootGB || this.rootGB,
           };
       if (config.gcpSnapshot && config.gcpRootGB > 0) {
@@ -812,7 +827,9 @@ export class GCPClient {
       claim.providerResourceID = providerResourceID;
     }
     try {
-      const completed = await this.waitZoneOperation(operation);
+      const completed = await measureCreationStep("gcp.instance_operation_wait", () =>
+        this.waitZoneOperation(operation),
+      );
       if (completed.targetId !== undefined) {
         const providerResourceID = canonicalNumericResourceID(completed.targetId);
         if (
@@ -1098,12 +1115,12 @@ export class GCPClient {
         throw new Error(`gcp firewall ${name} exists but is not Crabbox-managed`);
       }
       const op = await this.gcp<GCPOperation>("PUT", `/global/firewalls/${name}`, firewall);
-      await this.waitGlobalOperation(op);
+      await measureCreationStep("gcp.firewall_operation_wait", () => this.waitGlobalOperation(op));
       return;
     }
     try {
       const op = await this.gcp<GCPOperation>("POST", "/global/firewalls", firewall);
-      await this.waitGlobalOperation(op);
+      await measureCreationStep("gcp.firewall_operation_wait", () => this.waitGlobalOperation(op));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (!message.toLowerCase().includes("http 409")) {
@@ -1143,7 +1160,9 @@ export class GCPClient {
         // oxlint-disable-next-line eslint/no-await-in-loop -- a conflicting insert may still be finishing.
         const op = await this.gcp<GCPOperation>("PUT", `/global/firewalls/${name}`, firewall);
         // oxlint-disable-next-line eslint/no-await-in-loop -- the raced policy must finish before this caller proceeds.
-        await this.waitGlobalOperation(op);
+        await measureCreationStep("gcp.firewall_operation_wait", () =>
+          this.waitGlobalOperation(op),
+        );
         return;
       } catch (error) {
         const message = error instanceof Error ? error.message.toLowerCase() : String(error);
@@ -1156,6 +1175,23 @@ export class GCPClient {
   }
 
   private async gcp<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const step = path.startsWith("/global/firewalls")
+      ? method === "GET"
+        ? "gcp.firewall_get"
+        : method === "PUT"
+          ? "gcp.firewall_put"
+          : method === "POST"
+            ? "gcp.firewall_insert"
+            : undefined
+      : method === "POST" && /^\/zones\/[^/]+\/instances(?:\?|$)/.test(path)
+        ? "gcp.disk_instance_insert"
+        : undefined;
+    return step
+      ? measureCreationStep(step, () => this.gcpRequest<T>(method, path, body))
+      : this.gcpRequest<T>(method, path, body);
+  }
+
+  private async gcpRequest<T>(method: string, path: string, body?: unknown): Promise<T> {
     const token = await this.accessToken();
     const init: RequestInit = {
       method,
@@ -1185,9 +1221,11 @@ export class GCPClient {
         ? metadataTokenRefreshSkewSeconds
         : serviceAccountTokenRefreshSkewSeconds;
     return this.tokenCache.get(now + refreshSkewSeconds, () =>
-      credentialSource === "metadata"
-        ? this.metadataAccessToken()
-        : this.serviceAccountAccessToken(now),
+      measureCreationStep("gcp.token_mint", () =>
+        credentialSource === "metadata"
+          ? this.metadataAccessToken()
+          : this.serviceAccountAccessToken(now),
+      ),
     );
   }
 

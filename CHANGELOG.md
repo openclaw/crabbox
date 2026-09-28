@@ -5,6 +5,8 @@
 - Verify retained Actions workspace identity before run, sync, cache warm, or editor handoff; preserve custom paths and explicit cross-repository hydration with claim-bound consent. [PR 2564](https://github.com/openclaw/crabbox/pull/2564). Thanks @vincentkoc.
 ### Fixed
 - Preserve run-history logs after an ambiguous terminal commit, confirming the exact stored finish before acknowledging recovery and retaining evidence when rereads fail. [Issue 1561](https://github.com/openclaw/crabbox/issues/1561).
+### Added
+- Expose bounded coordinator admission and provider preparation step durations in lease creation events and timing JSON, including repeated-call and failure counts without provider payloads.
 
 ## 0.68.0 - 2026-09-28
 

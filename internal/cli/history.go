@@ -143,7 +143,15 @@ func (a App) events(ctx context.Context, args []string) error {
 			return json.NewEncoder(a.Stdout).Encode(response.Events)
 		}
 		for _, event := range response.Events {
-			fmt.Fprintf(a.Stdout, "%s %s source=%s\n", event.At, event.Phase, event.Source)
+			fmt.Fprintf(a.Stdout, "%s %s source=%s", event.At, event.Phase, event.Source)
+			if event.Step != "" && event.DurationMs != nil {
+				var errors int64
+				if event.Errors != nil {
+					errors = *event.Errors
+				}
+				fmt.Fprintf(a.Stdout, " step=%s durationMs=%g count=%d errors=%d", event.Step, *event.DurationMs, event.Count, errors)
+			}
+			fmt.Fprintln(a.Stdout)
 		}
 		return nil
 	}

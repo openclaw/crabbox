@@ -789,6 +789,7 @@ export type ProviderAccessTimingObserver = (
 
 export interface CreationEvent {
   phase:
+    | "coordinator_step"
     | "admission_started"
     | "admission_complete"
     | "provider_create_request"
@@ -800,6 +801,10 @@ export interface CreationEvent {
     | "workspace_ready";
   at: string;
   source: "coordinator" | "provider_observation" | "client" | "guest";
+  step?: string;
+  durationMs?: number;
+  count?: number;
+  errors?: number;
 }
 
 export interface LeaseProvisioningTiming {

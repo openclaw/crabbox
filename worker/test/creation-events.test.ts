@@ -1,6 +1,14 @@
 import { afterEach, expect, it, vi } from "vitest";
 
-import { creationEvent, mergeClientCreationEvents, observedRunning } from "../src/creation-events";
+import {
+  appendCreationSteps,
+  withCreationSteps,
+  measureCreationStep,
+  recordCreationStep,
+  creationEvent,
+  mergeClientCreationEvents,
+  observedRunning,
+} from "../src/creation-events";
 import type { LeaseRecord } from "../src/types";
 
 afterEach(() => vi.useRealTimers());
@@ -47,4 +55,83 @@ it("accepts bounded client/guest events once and cannot replace coordinator fact
   ])
     mergeClientCreationEvents(lease, [item], now);
   expect(lease.creationEvents).toHaveLength(3);
+});
+
+it("aggregates bounded coordinator steps without exposing results or errors", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(0);
+  await withCreationSteps(async () => {
+    const secret = new Error("synthetic-private-error");
+    await expect(
+      measureCreationStep("test.step", async () => {
+        vi.advanceTimersByTime(25);
+        throw secret;
+      }),
+    ).rejects.toBe(secret);
+    const result = await measureCreationStep("test.step", async () => {
+      vi.advanceTimersByTime(75);
+      return "synthetic-private-result";
+    });
+    expect(result).toBe("synthetic-private-result");
+    const lease: Pick<LeaseRecord, "creationEvents"> = {};
+    appendCreationSteps(lease);
+    expect(lease.creationEvents).toEqual([
+      {
+        phase: "coordinator_step",
+        source: "coordinator",
+        at: new Date(100).toISOString(),
+        step: "test.step",
+        durationMs: 100,
+        count: 2,
+        errors: 1,
+      },
+    ]);
+    recordCreationStep("test.step", 0);
+    expect(lease.creationEvents?.[0]?.count).toBe(2);
+    for (let i = 0; i < 1000; i++) recordCreationStep(`test.step${i}`, 1);
+    appendCreationSteps(lease);
+    expect(lease.creationEvents).toHaveLength(64);
+    expect(JSON.stringify(lease)).not.toContain("synthetic-private");
+    expect(JSON.stringify(lease).length).toBeLessThan(16384);
+  });
+});
+
+it("isolates concurrent request timings and ignores out-of-scope measurements", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const first = withCreationSteps(async () => {
+    await measureCreationStep("test.first", () => gate);
+    const lease: Pick<LeaseRecord, "creationEvents"> = {};
+    appendCreationSteps(lease);
+    return lease;
+  });
+  const second = await withCreationSteps(async () => {
+    await measureCreationStep("test.second", async () => {});
+    const lease: Pick<LeaseRecord, "creationEvents"> = {};
+    appendCreationSteps(lease);
+    return lease;
+  });
+  release();
+  expect((await first).creationEvents?.map((e) => e.step)).toEqual(["test.first"]);
+  expect(second.creationEvents?.map((e) => e.step)).toEqual(["test.second"]);
+  recordCreationStep("test.outside", 10);
+  const outside = {};
+  appendCreationSteps(outside);
+  expect(outside).toEqual({});
+});
+
+it("rejects forged coordinator steps and strips timing payloads from client observations", () => {
+  const at = new Date().toISOString();
+  const lease = { createdAt: at } as LeaseRecord;
+  mergeClientCreationEvents(
+    lease,
+    [
+      { phase: "coordinator_step", source: "coordinator", at, step: "aws.image", durationMs: 123 },
+      { phase: "workspace_ready", source: "client", at, step: "aws.image", durationMs: 123 },
+    ],
+    Date.now(),
+  );
+  expect(lease.creationEvents).toEqual([{ phase: "workspace_ready", source: "client", at }]);
 });

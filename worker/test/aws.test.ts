@@ -32,6 +32,8 @@ import {
   leaseConfig,
   type LeaseConfig,
 } from "../src/config";
+import { appendCreationSteps, withCreationSteps } from "../src/creation-events";
+import type { LeaseRecord } from "../src/types";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -40,6 +42,38 @@ afterEach(() => {
 });
 
 describe("aws provider", () => {
+  it("projects existing AWS preparation measurements into coordinator steps", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    const { client, config } = awsMarketFallbackHarness("");
+    await withCreationSteps(async () => {
+      await client.createServerWithFallback(
+        config,
+        "cbx_abcdef123456",
+        "test",
+        "alice@example.com",
+      );
+      const lease: Pick<LeaseRecord, "creationEvents"> = {};
+      appendCreationSteps(lease);
+      const steps = lease.creationEvents?.map((event) => event.step);
+      expect(steps).toEqual(
+        expect.arrayContaining([
+          "aws.key_pair",
+          "aws.image",
+          "aws.security_group",
+          "aws.quota",
+          "aws.instance_types",
+          "aws.user_data_render",
+          "aws.instance_create",
+        ]),
+      );
+      expect(
+        lease.creationEvents?.every(
+          (event) => event.source === "coordinator" && event.durationMs! >= 0,
+        ),
+      ).toBe(true);
+    });
+  });
+
   it("bounds repeated diagnostic buckets and records failures without error payloads", async () => {
     const log = vi.spyOn(console, "info").mockImplementation(() => {});
     const diagnostics = createAWSProvisioningDiagnostics("x".repeat(10_000), "r".repeat(10_000));

@@ -5,7 +5,12 @@ import {
   workspaceProviderKeyPrefix,
   type LeaseConfig,
 } from "./config";
-import { creationEvent, observedRunning } from "./creation-events";
+import {
+  creationEvent,
+  observedRunning,
+  measureCreationStep,
+  measureCreationStepSync,
+} from "./creation-events";
 import {
   leaseIDForProviderKey,
   providerKeyForLease,
@@ -304,10 +309,8 @@ export class HetznerClient {
     const requireRunning = config.providerKey.startsWith(workspaceProviderKeyPrefix);
     let ensuredKey: EnsuredHetznerSSHKey;
     try {
-      ensuredKey = await this.ensureSSHKeyForProvisioning(
-        config.providerKey,
-        config.sshPublicKey,
-        leaseID,
+      ensuredKey = await measureCreationStep("hetzner.ssh_key_registration", () =>
+        this.ensureSSHKeyForProvisioning(config.providerKey, config.sshPublicKey, leaseID),
       );
     } catch (error) {
       const message = errorText(error);
@@ -425,20 +428,22 @@ export class HetznerClient {
     const requested = creationEvent("provider_create_request");
     let response: HetznerServerResponse;
     try {
-      response = await this.request<HetznerServerResponse>("POST", "/servers", {
-        name,
-        server_type: config.serverType,
-        image: config.image,
-        location: config.location,
-        labels,
-        ssh_keys: [config.providerKey],
-        user_data: cloudInit(config),
-        start_after_create: true,
-        public_net: {
-          enable_ipv4: true,
-          enable_ipv6: false,
-        },
-      });
+      response = await measureCreationStep("hetzner.server_create", () =>
+        this.request<HetznerServerResponse>("POST", "/servers", {
+          name,
+          server_type: config.serverType,
+          image: measureCreationStepSync("hetzner.image_selection", () => config.image),
+          location: config.location,
+          labels,
+          ssh_keys: [config.providerKey],
+          user_data: measureCreationStepSync("hetzner.user_data_render", () => cloudInit(config)),
+          start_after_create: true,
+          public_net: {
+            enable_ipv4: true,
+            enable_ipv6: false,
+          },
+        }),
+      );
     } catch (error) {
       const message = errorText(error);
       const status = /hetzner POST \/servers: http (\d{3})/.exec(message)?.[1];
