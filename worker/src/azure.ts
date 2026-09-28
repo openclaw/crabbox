@@ -1,3 +1,4 @@
+import { AzureSKUAvailability } from "./azure-skus";
 import { azureWindowsBootstrapPowerShell, cloudInit } from "./bootstrap";
 import {
   azureFullCachingSeriesEligible,
@@ -405,6 +406,7 @@ interface AzureSharedInfraNames {
 
 interface AzureARMOptions {
   lroTimeoutMs?: number;
+  pollIntervalMs?: number;
   terminalResourceState?: { path: string; apiVersion: string };
   headers?: Record<string, string>;
 }
@@ -485,6 +487,7 @@ export class AzureClient {
   readonly defaultLocation: string;
   private readonly tokenCache = new ExpiringTokenCache();
   private ephemeralOSSupport?: Map<string, boolean>;
+  private skuAvailability = new AzureSKUAvailability();
   private readonly deferredCleanup:
     | ((request: AzureDeferredCleanupRequest) => Promise<void>)
     | undefined;
@@ -808,7 +811,10 @@ export class AzureClient {
     if (this.ownedDeleteClaimStorage) {
       options.ownedDeleteClaimStorage = this.ownedDeleteClaimStorage;
     }
-    return new AzureClient(this.env, options);
+    const client = new AzureClient(this.env, options);
+    client.fetcher = this.fetcher;
+    client.skuAvailability = this.skuAvailability;
+    return client;
   }
 
   private async createServerWithFallbackInLocation(
@@ -823,7 +829,24 @@ export class AzureClient {
     market: string;
     attempts?: ProvisioningAttempt[];
   }> {
-    const candidates = azureProvisioningCandidatesForConfig(config);
+    if (!config.azureSnapshot) normalizeAzureOSDiskMode(config.azureOSDisk);
+    const availability = await this.skuAvailability.get(
+      this.subscription,
+      location,
+      () => this.token(),
+      this.fetcher,
+    );
+    const rank = (size: string) => {
+      const available = availability.get(size.toLowerCase());
+      return available === true ? 0 : available === undefined ? 1 : 2;
+    };
+    const candidates = azureProvisioningCandidatesForConfig(config).toSorted(
+      (a, b) => rank(a) - rank(b),
+    );
+    const validateAvailability = (vmSize: string) => {
+      if (availability.get(vmSize.toLowerCase()) === false)
+        throw new Error(`NotAvailableForSubscription: ${vmSize} is restricted in ${location}`);
+    };
     const history = new ProvisioningAttemptHistory();
     let allRejected = true;
     let infra: AzureSharedInfraNames | undefined;
@@ -836,6 +859,7 @@ export class AzureClient {
         await this.validateOSDiskMode(nextConfig, location);
       }
       try {
+        validateAvailability(vmSize);
         if (!infra) {
           // oxlint-disable-next-line eslint/no-await-in-loop -- shared infra is created once, after config validation.
           infra = await this.ensureSharedInfra(location, config);
@@ -881,6 +905,7 @@ export class AzureClient {
           await this.validateOSDiskMode(nextConfig, location);
         }
         try {
+          validateAvailability(vmSize);
           if (!infra) {
             // oxlint-disable-next-line eslint/no-await-in-loop -- shared infra is created once, after config validation.
             infra = await this.ensureSharedInfra(location, config);
@@ -2522,7 +2547,7 @@ export class AzureClient {
         tags,
         properties: { securityRules: rules },
       },
-      { lroTimeoutMs: DEFAULT_AZURE_NETWORK_LRO_TIMEOUT_MS },
+      { lroTimeoutMs: DEFAULT_AZURE_NETWORK_LRO_TIMEOUT_MS, pollIntervalMs: 5_000 },
     );
     return infra;
   }
@@ -2673,7 +2698,7 @@ export class AzureClient {
         sku: { name: "Standard" },
         properties: { publicIPAllocationMethod: "Static" },
       },
-      { lroTimeoutMs: DEFAULT_AZURE_NETWORK_LRO_TIMEOUT_MS },
+      { lroTimeoutMs: DEFAULT_AZURE_NETWORK_LRO_TIMEOUT_MS, pollIntervalMs: 5_000 },
     );
     const subnetID = `/subscriptions/${this.subscription}/resourceGroups/${this.resourceGroup}/providers/Microsoft.Network/virtualNetworks/${infra.vnet}/subnets/${this.subnet}`;
     const nsgID = `/subscriptions/${this.subscription}/resourceGroups/${this.resourceGroup}/providers/Microsoft.Network/networkSecurityGroups/${infra.nsg}`;
@@ -2700,7 +2725,7 @@ export class AzureClient {
           networkSecurityGroup: { id: nsgID },
         },
       },
-      { lroTimeoutMs: DEFAULT_AZURE_NETWORK_LRO_TIMEOUT_MS },
+      { lroTimeoutMs: DEFAULT_AZURE_NETWORK_LRO_TIMEOUT_MS, pollIntervalMs: 5_000 },
     );
     const customData = btoa(
       config.target === "windows"
@@ -2760,7 +2785,7 @@ export class AzureClient {
         tags,
         properties: vmProperties,
       },
-      vmLROTimeoutMs === undefined ? undefined : { lroTimeoutMs: vmLROTimeoutMs },
+      { lroTimeoutMs: vmLROTimeoutMs, pollIntervalMs: 5_000 },
     );
     const configuredOSDisk = storageProfile["osDisk"] as
       | { diffDiskSettings?: { option?: string } }
@@ -3200,7 +3225,9 @@ export class AzureClient {
     const asyncOperationURL = response.headers.get("azure-asyncoperation");
     const asyncURL = asyncOperationURL ?? response.headers.get("location");
     if (!asyncURL) return;
-    const interval = azureLROPollIntervalMS(response.headers.get("retry-after"));
+    const pollInterval = (reply: Response) =>
+      azureLROPollIntervalMS(reply.headers.get("retry-after"), opts?.pollIntervalMs);
+    let interval = pollInterval(response);
     const timeoutMs = opts?.lroTimeoutMs;
     const lroTimeoutMs = timeoutMs && timeoutMs > 0 ? timeoutMs : 20 * 60_000;
     const deadline = Date.now() + lroTimeoutMs;
@@ -3221,6 +3248,7 @@ export class AzureClient {
       }
       // oxlint-disable-next-line eslint/no-await-in-loop -- reading the LRO status payload is part of polling.
       const text = await poll.text();
+      interval = pollInterval(poll);
       const body = text
         ? (JSON.parse(text) as {
             status?: string;
@@ -4730,10 +4758,14 @@ function nextNSGPriority(used: Set<number>): number {
   throw new Error("azure nsg: no available security rule priorities");
 }
 
-export function azureLROPollIntervalMS(retryAfter: string | null): number {
-  const seconds = Number.parseInt(retryAfter ?? "", 10);
-  if (!Number.isFinite(seconds) || seconds <= 0) return MIN_LRO_POLL_INTERVAL_MS;
-  return Math.max(seconds * 1000, MIN_LRO_POLL_INTERVAL_MS);
+export function azureLROPollIntervalMS(
+  retryAfter: string | null,
+  minimumMS = MIN_LRO_POLL_INTERVAL_MS,
+): number {
+  if (!retryAfter?.trim()) return minimumMS;
+  const value = retryAfter.trim();
+  const delay = /^\d+$/.test(value) ? Number(value) * 1000 : Date.parse(value) - Date.now();
+  return Number.isFinite(delay) ? Math.max(delay, minimumMS) : minimumMS;
 }
 
 export function azureProvisioningCandidatesForConfig(

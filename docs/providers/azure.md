@@ -307,6 +307,26 @@ global `CRABBOX_AZURE_IMAGE` fallback used by existing custom-image leases.
 Set `CRABBOX_AZURE_REGIONS` on the coordinator for Azure-specific capacity fallback;
 `CRABBOX_CAPACITY_REGIONS` remains the AWS region fallback list.
 
+For ordinary brokered VM creates, the coordinator checks Resource SKUs before
+allocating network resources. Within each region it prefers SKUs advertised as
+available and skips explicit subscription location restrictions. The lookup has
+a five-second budget and caches complete results for five minutes per client,
+subscription, and region. Missing entries, missing read permission, and failed
+lookups leave availability unknown and retain ordinary ARM fallback. These VMs
+are unzoned, so zone-only restrictions do not exclude a regional SKU. The
+catalogue describes subscription eligibility, not live capacity or proof that
+a VM allocation was rejected.
+
+Region preference remains unchanged: each region tries the selected market's
+SKU chain, then the enabled on-demand chain, before the next region. Explicit
+`--type` requests retain that exact SKU. VM create polls default to five seconds
+and honor longer `Retry-After` delays from each response. PIP and NIC creates
+use the same cadence and remain sequential because NIC references PIP and VM
+references NIC. VM attempt budgets remain 120 seconds for default Spot fallback
+and 180 seconds for on-demand; network LROs remain bounded at 60 seconds each.
+These are per-operation budgets, not a total lease-create deadline. Native
+Windows durable provisioning uses its separately journaled continuation path.
+
 Run `crabbox doctor --provider azure --target windows` before leasing through the
 broker. The coordinator readiness check reports missing coordinator secret names
 without exposing values, and lease creation fails with `provider_not_configured`
