@@ -292,6 +292,12 @@ large     c4-standard-96, c3-standard-88, n2-standard-80, n2d-standard-96, c4-st
 beast     c4-standard-192, c4-standard-96, c3-standard-176, c3-standard-88, n2d-standard-224, n2-standard-128
 ```
 
+Boot disks use Hyperdisk Balanced (`hyperdisk-balanced`) for the Hyperdisk-only
+families C4, C4A, C4D, N4, N4A, N4D, H4D, M4, X4, A4, A4X, G4, and Z4D.
+Other families use Balanced Persistent Disk (`pd-balanced`), including C3, N2,
+and N2D. N2 and N2D cannot use Hyperdisk Balanced, so the disk type follows each
+candidate rather than the initially selected class type.
+
 `capacity.market: spot` maps to GCP Spot VMs. If `capacity.fallback` starts with
 `on-demand`, Crabbox retries the same zone and type candidates as on-demand after
 retryable Spot capacity or quota failures.
@@ -304,6 +310,13 @@ returns a quota, capacity, rate-limit, or unavailable-type error. See
 The coordinator classifies retry eligibility from complete API error evidence;
 displayed diagnostics remain bounded and redacted. Shortening a diagnostic does
 not change which configured zone or market candidates may be attempted.
+
+Disk-type/machine-type incompatibility also permits candidate fallback. For any
+provider, a create the coordinator records as failed with no possible provider
+resource returns HTTP 422 `provisioning_failed` with the diagnostic message.
+Uncertain outcomes and failures requiring resource cleanup retain their existing
+responses. An identical fixed-ID replay returns `409 fixed_lease_terminal`
+without provider work.
 
 ## Networking
 
@@ -479,12 +492,19 @@ remain valid checkpoint sources but cannot join typed ready-pool cohorts.
 
 Brokered Linux GCP leases support native [checkpoints](../features/checkpoints.md):
 
-- `--strategy image` captures a GCP machine image (`gcp-machine-image`).
+- `--strategy image` captures a GCP machine image (`gcp-machine-image`) for leases
+  whose boot disks use Persistent Disk. It is unavailable for Hyperdisk-booted
+  leases; use the default disk-snapshot strategy instead.
 - The default strategy captures a disk snapshot (`gcp-disk-snapshot`).
 
 `checkpoint fork` and `checkpoint restore` rehydrate from either kind in the
 recorded project and zone. Native checkpoints require a coordinator and a known
 cloud instance ID; they are not available for direct-only leases.
+
+Machine-image restore preserves the image's disk type without overriding its
+disks. An incompatible candidate (such as C4 with a `pd-balanced` machine image)
+falls through to the next configured candidate. Disk-snapshot restore selects
+the boot disk type for the destination machine family and supports Hyperdisk.
 
 New brokered GCP checkpoints are owned by the coordinator and manually retained
 unless creation or `checkpoint policy` explicitly sets

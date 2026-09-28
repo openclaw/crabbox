@@ -136,6 +136,97 @@ describe("gcp provider", () => {
     CRABBOX_GCP_ZONE: "us-central1-a",
   };
 
+  const diskIncompatibility =
+    "pd-balanced disk type cannot be used by c4-standard-32 machine type.";
+
+  it.each([
+    { machineType: "c4-standard-32", diskType: "hyperdisk-balanced" },
+    { machineType: "c3-standard-22", diskType: "pd-balanced" },
+    { machineType: "n2-standard-32", diskType: "pd-balanced" },
+    { machineType: "n2d-standard-32", diskType: "pd-balanced" },
+  ])(
+    "selects $diskType for image and snapshot boots on $machineType",
+    async ({ machineType, diskType }) => {
+      const client = new GCPClient(env);
+      primeAccessToken(client);
+      vi.spyOn(
+        client as unknown as { ensureFirewall(): Promise<void> },
+        "ensureFirewall",
+      ).mockResolvedValue();
+      const inserts: Record<string, unknown>[] = [];
+      client.fetcher = async (input, init) => {
+        const path = new URL(String(input)).pathname;
+        if (path.endsWith("/instances") && init?.method === "POST") {
+          inserts.push(JSON.parse(String(init.body)));
+          return Response.json({ name: "insert-op", targetId: "123" });
+        }
+        if (path.endsWith("/wait"))
+          return Response.json({ name: "insert-op", status: "DONE", targetId: "123" });
+        return Response.json({
+          id: "123",
+          name: "runner",
+          status: "RUNNING",
+          machineType,
+          networkInterfaces: [{ accessConfigs: [{ natIP: "192.0.2.10" }] }],
+        });
+      };
+      const config = leaseConfig({
+        provider: "gcp",
+        serverType: machineType,
+        sshPublicKey: "ssh-ed25519 test",
+      });
+      await client.createServer(config, "cbx_abcdef123456", "runner", "alice@example.com");
+      await client.createServer(
+        { ...config, gcpSnapshot: "checkpoint" },
+        "cbx_abcdef123456",
+        "runner",
+        "alice@example.com",
+      );
+      expect(inserts).toHaveLength(2);
+      for (const insert of inserts) {
+        expect(insert).toMatchObject({
+          disks: [{ initializeParams: { diskType: `zones/us-central1-a/diskTypes/${diskType}` } }],
+        });
+      }
+      expect(inserts[0]).toMatchObject({
+        disks: [{ initializeParams: { sourceImage: expect.any(String) } }],
+      });
+      expect(inserts[1]).toMatchObject({
+        disks: [
+          {
+            initializeParams: {
+              sourceSnapshot: "projects/default-project/global/snapshots/checkpoint",
+            },
+          },
+        ],
+      });
+    },
+  );
+
+  it.each([
+    { message: diskIncompatibility, fallback: true },
+    {
+      message: "disk type pd-balanced is not supported for machine type c4-standard-32",
+      fallback: true,
+    },
+    {
+      message: "diskTypes/pd-balanced is unsupported by machineTypes/c4-standard-32",
+      fallback: true,
+    },
+    {
+      message: "machine type c4-standard-32 does not support diskType pd-balanced",
+      fallback: true,
+    },
+    { message: "invalid source image", fallback: false },
+    { message: "invalid network", fallback: false },
+    { message: "invalid metadata", fallback: false },
+    { message: "diskType pd-balanced is invalid", fallback: false },
+  ])("classifies disk compatibility fallback: $message", ({ message, fallback }) => {
+    expect(
+      isFallbackProvisioningError(new Error(`gcp POST /zones/z/instances: http 400: ${message}`)),
+    ).toBe(fallback);
+  });
+
   it("waits until operations report DONE", () => {
     expect(operationDone({ name: "operation-1", status: "RUNNING" })).toBe(false);
     expect(operationDone({ name: "operation-1", status: "PENDING" })).toBe(false);

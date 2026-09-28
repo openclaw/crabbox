@@ -10,6 +10,7 @@ import { AzureClient, azureOwnedDeleteClaimKey } from "../src/azure";
 import { codeOriginForLease } from "../src/code-origin";
 import {
   awsPromotedAMIConfigKey,
+  gcpMachineTypeCandidatesForClass,
   leaseConfig,
   workspaceProviderKeyPrefix,
   type LeaseConfig,
@@ -52,7 +53,7 @@ import {
   workspaceTerminalOriginAllowed,
   type WebVNCBuffer,
 } from "../src/fleet";
-import { gcpProviderLabelValue } from "../src/gcp";
+import { GCPClient, gcpProviderLabelValue } from "../src/gcp";
 import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
 import { errorMessage } from "../src/http";
 import {
@@ -7509,7 +7510,7 @@ describe("fleet lease identity and idle", () => {
           },
         }),
       );
-      expect(create.status).toBe(500);
+      expect(create.status).toBe(retention === "during create" ? 500 : 422);
       expect(keyDeletes).toBe(1);
       const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
       expect(failed).toMatchObject({
@@ -11152,6 +11153,190 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  async function fixedGCPCreateFixture(outcome: "rejected" | "fallback" | "operation unavailable") {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const zone = "europe-west2-a";
+    const env = {
+      CRABBOX_GCP_PROJECT: "example-project",
+      CRABBOX_GCP_ZONE: zone,
+      GCP_CLIENT_EMAIL: "test@example.iam.gserviceaccount.com",
+      GCP_PRIVATE_KEY: "test-key",
+    };
+    const client = new GCPClient(env as Env);
+    Reflect.set(Reflect.get(client, "tokenCache"), "cached", {
+      token: "test-token",
+      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
+    });
+    vi.spyOn(
+      client as unknown as { ensureFirewall(): Promise<void> },
+      "ensureFirewall",
+    ).mockResolvedValue();
+    const provider = new GCPProvider(env as Env);
+    Reflect.set(provider, "clientValue", client);
+    const inserts: Array<{
+      machineType: string;
+      name: string;
+      labels: Record<string, string>;
+      disks?: unknown;
+    }> = [];
+    const sources: (string | null)[] = [];
+    const message = "pd-balanced disk type cannot be used by c4-standard-32 machine type.";
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/instances") && init?.method === "POST") {
+        inserts.push(JSON.parse(String(init.body)));
+        sources.push(url.searchParams.get("sourceMachineImage"));
+        if (outcome === "rejected" || (outcome === "fallback" && inserts.length === 1)) {
+          return Response.json(
+            { error: { message, errors: [{ reason: "badRequest" }] } },
+            { status: 400 },
+          );
+        }
+        return Response.json({ name: "insert-op", targetId: "123" });
+      }
+      if (url.pathname.endsWith("/wait")) {
+        if (outcome === "operation unavailable")
+          return new Response("operation unavailable", { status: 503 });
+        return Response.json({ name: "insert-op", status: "DONE", targetId: "123" });
+      }
+      if (init?.method === "GET" && url.pathname.includes("/instances/")) {
+        return Response.json({
+          ...inserts.at(-1),
+          id: "123",
+          status: "RUNNING",
+          zone: `projects/example-project/zones/${zone}`,
+          networkInterfaces: [{ accessConfigs: [{ natIP: "192.0.2.10" }] }],
+        });
+      }
+      throw new Error(`unexpected GCP request ${init?.method} ${url.pathname}`);
+    };
+    const fleet = testFleet(storage, { gcp: provider }, env);
+    const create = () =>
+      fleet.fetch(
+        request("PUT", `/v1/leases/${leaseID}`, {
+          headers: {
+            "x-crabbox-owner": "alice@example.com",
+            "x-crabbox-org": "example-org",
+            "x-crabbox-admin": "true",
+          },
+          body: {
+            provider: "gcp",
+            class: "standard",
+            gcpZone: zone,
+            capacity: { market: "on-demand" },
+            sshPublicKey: "ssh-ed25519 test",
+            ...(outcome === "fallback" ? { gcpMachineImage: "checkpoint" } : {}),
+          },
+        }),
+      );
+    const response = await create();
+    const body = (await response.json()) as {
+      error?: string;
+      message?: string;
+      lease?: LeaseRecord;
+    };
+    const stored = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+    return { response, body, stored, inserts, create, zone, sources, message };
+  }
+
+  it("falls back from incompatible machine-image restore to an active C3 lease", async () => {
+    const { response, stored, inserts, sources, message } = await fixedGCPCreateFixture("fallback");
+    expect(response.status).toBe(201);
+    expect(stored).toMatchObject({
+      state: "active",
+      serverType: "c3-standard-22",
+      provisioningAttempts: [
+        {
+          serverType: "c4-standard-32",
+          category: "capacity",
+          message: expect.stringContaining(message),
+        },
+      ],
+    });
+    expect(inserts.map(({ machineType }) => machineType)).toEqual([
+      "zones/europe-west2-a/machineTypes/c4-standard-32",
+      "zones/europe-west2-a/machineTypes/c3-standard-22",
+    ]);
+    for (const insert of inserts) expect(insert).not.toHaveProperty("disks");
+    expect(sources).toEqual(
+      Array(2).fill("projects/example-project/global/machineImages/checkpoint"),
+    );
+  });
+
+  it("returns 422 after all fixed-ID GCP candidates are rejected and never reinserts on replay", async () => {
+    const { response, body, stored, inserts, create, zone } =
+      await fixedGCPCreateFixture("rejected");
+    expect(response.status).toBe(422);
+    expect(body).toEqual({ error: "provisioning_failed", message: expect.any(String) });
+    const candidates = gcpMachineTypeCandidatesForClass("standard");
+    expect(inserts.map(({ machineType }) => machineType)).toEqual(
+      candidates.map((type) => `zones/${zone}/machineTypes/${type}`),
+    );
+    for (const type of candidates) expect(body.message).toContain(`${zone}/${type}`);
+    expect(stored).toMatchObject({ state: "failed", provisioningResourceMayExist: false });
+    const replay = await create();
+    expect(replay.status).toBe(409);
+    expect(await replay.json()).toMatchObject({ error: "fixed_lease_terminal" });
+    expect(inserts).toHaveLength(candidates.length);
+  });
+
+  it("retains 500 and cleanup custody when a fixed-ID GCP operation becomes unobservable", async () => {
+    const { response, body, stored, inserts } =
+      await fixedGCPCreateFixture("operation unavailable");
+    expect(response.status).toBe(500);
+    expect(body.error).toContain("outcome is uncertain");
+    expect(stored).toMatchObject({
+      state: "failed",
+      provisioningResourceMayExist: true,
+      cloudID: inserts[0]!.name,
+    });
+    expect(inserts).toHaveLength(1);
+  });
+
+  it.each(["createLeaseImage", "createCheckpointImage"] as const)(
+    "guards Hyperdisk machine-image capture in %s without provider requests",
+    async (method) => {
+      const provider = new GCPProvider({} as Env);
+      const client = new GCPClient({
+        CRABBOX_GCP_PROJECT: "example-project",
+        CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+      } as Env);
+      Reflect.set(provider, "clientValue", client);
+      const image = {
+        id: "checkpoint",
+        name: "checkpoint",
+        provider: "gcp",
+        kind: "gcp-machine-image",
+      } as ProviderImage;
+      const capture = vi.spyOn(client, "createImage").mockResolvedValue(image);
+      const snapshot = vi.spyOn(client, "createDiskSnapshot").mockResolvedValue(image);
+      vi.spyOn(client, "getImage").mockResolvedValue(image);
+      const lease = testLease({ provider: "gcp", serverType: "c4-standard-32" });
+      const ownership = {
+        checkpointID: "checkpoint",
+        tokenHash: "synthetic-hash",
+        sourceLeaseID: lease.id,
+      };
+      const run = (source: LeaseRecord, strategy: "image" | "disk-snapshot") =>
+        method === "createLeaseImage"
+          ? provider.createLeaseImage(source, "checkpoint", false, strategy)
+          : provider.createCheckpointImage(source, "checkpoint", false, strategy, ownership, {
+              project: "example-project",
+              region: "europe-west2-a",
+            });
+      await expect(run(lease, "image")).rejects.toThrow(
+        "GCP machine images cannot capture Hyperdisk volumes (c4-standard-32 boots from hyperdisk-balanced); use the default disk-snapshot checkpoint strategy",
+      );
+      expect(capture).not.toHaveBeenCalled();
+      expect(snapshot).not.toHaveBeenCalled();
+      await run(lease, "disk-snapshot");
+      expect(snapshot).toHaveBeenCalledOnce();
+      await run({ ...lease, serverType: "n2-standard-32" }, "image");
+      expect(capture).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each([
     gcpBillingBody,
     JSON.stringify({ ...gcpBillingError, detail: "x".repeat(3000) }, null, 2),
@@ -11192,19 +11377,21 @@ describe("fleet lease identity and idle", () => {
       }),
     );
 
-    expect(response.status).toBe(500);
-    const failure = (await response.json()) as { error: string };
-    expect(failure.error).toContain(gcpBillingMessage);
-    expect(failure.error).toContain('"reason": "forbidden"');
-    expect(failure.error.length).toBeLessThanOrEqual(2048);
+    expect(response.status).toBe(422);
+    const failure = (await response.json()) as { error: string; message: string };
+    expect(failure.error).toBe("provisioning_failed");
+    expect(failure.message).toContain(gcpBillingMessage);
+    expect(failure.message).toContain('"reason": "forbidden"');
+    expect(failure.message.length).toBeLessThanOrEqual(2048);
     expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
       state: "failed",
-      failureError: failure.error,
+      provisioningResourceMayExist: false,
+      failureError: failure.message,
     });
     const inspected = await fleet.fetch(request("GET", `/v1/leases/${leaseID}`));
     expect(inspected.status).toBe(200);
     await expect(inspected.json()).resolves.toMatchObject({
-      lease: { failureError: failure.error },
+      lease: { failureError: failure.message },
     });
   });
 
@@ -11299,7 +11486,7 @@ describe("fleet lease identity and idle", () => {
       }),
     );
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(422);
     expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
       state: "failed",
       region: "us-central1-b",
@@ -12347,7 +12534,7 @@ describe("fleet lease identity and idle", () => {
       }),
     );
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(422);
     expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
       state: "failed",
       cloudID: "",
@@ -22215,7 +22402,7 @@ describe("fleet lease identity and idle", () => {
           body: { leaseID, provider: "aws", sshPublicKey: "ssh-ed25519 retry-policy" },
         }),
       );
-      expect(response.status).toBe(500);
+      expect(response.status).toBe(resourceMayExist ? 500 : 422);
       expect(classify).toHaveBeenCalledTimes(1);
       const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
       expect(failed.provisioningResourceMayExist).toBe(resourceMayExist);
@@ -22590,7 +22777,7 @@ describe("fleet lease identity and idle", () => {
           const first = await fleet.fetch(
             request("PUT", `/v1/leases/${leaseID}`, { headers, body }),
           );
-          expect(first.status).toBe(500);
+          expect(first.status).toBe(status === 412 ? 422 : 500);
           const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
           expect(failed).toMatchObject({
             state: "failed",
@@ -22868,7 +23055,7 @@ describe("fleet lease identity and idle", () => {
       }),
     );
 
-    expect(create.status).toBe(500);
+    expect(create.status).toBe(422);
     const lease = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
     expect(lease).toMatchObject({
       id: "cbx_abcdef123456",
@@ -22922,7 +23109,7 @@ describe("fleet lease identity and idle", () => {
       }),
     );
 
-    expect(create.status).toBe(500);
+    expect(create.status).toBe(422);
     const stored = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
     expect(stored?.cleanupError).toContain("[redacted]");
     expect(stored?.failureError).toContain("[redacted]");
@@ -28801,7 +28988,7 @@ describe("fleet lease identity and idle", () => {
       capacity: { market: "on-demand", fallback: "none", regions: ["us-east-1"] },
     });
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(422);
     expect(await response.text()).toContain(
       "AWS provider scope conflicts with authenticated account",
     );
@@ -28914,6 +29101,7 @@ describe("fleet lease identity and idle", () => {
       deleteStatus: 200,
       expectedError: "ownership does not match lease",
       retryable: false,
+      expectedHTTPStatus: 500,
     },
     {
       name: "key deletion is temporarily unavailable",
@@ -28921,10 +29109,11 @@ describe("fleet lease identity and idle", () => {
       deleteStatus: 0,
       expectedError: "failed to clean AWS SSH key",
       retryable: true,
+      expectedHTTPStatus: 422,
     },
   ])(
     "does not enter another AWS Region when $name",
-    async ({ keyLeaseID, deleteStatus, expectedError, retryable }) => {
+    async ({ keyLeaseID, deleteStatus, expectedError, retryable, expectedHTTPStatus }) => {
       const leaseID = "cbx_abcdef123457";
       const keyName = providerKeyForLease(leaseID);
       const importedKeyRegions = new Set<string>();
@@ -28968,7 +29157,7 @@ describe("fleet lease identity and idle", () => {
         capacity: { market: "on-demand", fallback: "none", regions: ["eu-west-1", "us-east-1"] },
       });
 
-      expect(response.status).toBe(500);
+      expect(response.status).toBe(expectedHTTPStatus);
       expect(await response.text()).toContain(expectedError);
       expect(
         fixture.requests.filter(
@@ -29264,7 +29453,7 @@ describe("fleet lease identity and idle", () => {
       }),
     );
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(422);
     expect(providerMutations).toBe(0);
   });
 
@@ -29757,7 +29946,7 @@ describe("fleet lease identity and idle", () => {
         }),
       );
 
-    expect((await create("cbx_abcdef123456", "eu-west-1", "sg-west")).status).toBe(500);
+    expect((await create("cbx_abcdef123456", "eu-west-1", "sg-west")).status).toBe(422);
     expect((await create("cbx_abcdef123457", "us-east-1", "sg-east")).status).toBe(201);
     expect(
       storage.value<{ targets: Array<{ anchor: LeaseRecord }> }>("aws-ingress-reconcile:pending")
@@ -29823,7 +30012,7 @@ describe("fleet lease identity and idle", () => {
         }),
       );
 
-    expect((await create("cbx_abcdef123456", "runner-a")).status).toBe(500);
+    expect((await create("cbx_abcdef123456", "runner-a")).status).toBe(422);
     expect((await create("cbx_abcdef123457", "runner-b")).status).toBe(201);
     expect(
       storage
@@ -29900,7 +30089,7 @@ describe("fleet lease identity and idle", () => {
       }),
     );
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(422);
     expect(
       storage
         .value<{ targets: Array<{ anchor: LeaseRecord }> }>("aws-ingress-reconcile:pending")

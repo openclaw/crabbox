@@ -881,6 +881,29 @@ function candidatesForClass(
   return [...(table[machineClass] ?? [])];
 }
 
+// Mirror internal/cli/gcp.go; config.test.ts checks the canonical family set.
+export const gcpHyperdiskOnlyFamilies: ReadonlySet<string> = new Set([
+  "c4",
+  "c4a",
+  "c4d",
+  "n4",
+  "n4a",
+  "n4d",
+  "h4d",
+  "m4",
+  "x4",
+  "a4",
+  "a4x",
+  "g4",
+  "z4d",
+]);
+
+export function gcpBootDiskTypeForMachineType(machineType: string): string {
+  const name = machineType.slice(machineType.lastIndexOf("/") + 1);
+  const family = name.toLowerCase().split("-")[0] ?? "";
+  return gcpHyperdiskOnlyFamilies.has(family) ? "hyperdisk-balanced" : "pd-balanced";
+}
+
 const gcpMachineTypeCandidates: Readonly<Record<string, readonly string[]>> = {
   tiny: ["c4-standard-4", "c3-standard-4", "n2-standard-4", "n2d-standard-4"],
   small: ["c4-standard-8", "c3-standard-8", "n2-standard-8", "n2d-standard-8", "c4-standard-4"],

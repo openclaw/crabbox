@@ -360,6 +360,13 @@ request return `lease_id_conflict`. Neither terminal response invokes the
 provider. CLIs using `--lease-id` poll a provisioning replay until it becomes
 active or terminal. Coordinators that predate this route return not found before
 any create side effect.
+When the coordinator records a create as failed with no possible provider
+resource, creation returns HTTP 422 `provisioning_failed` with a diagnostic
+`message`, regardless of provider. This is a definite failure, so clients need
+not replay an uncertain create. An identical fixed-ID
+PUT after that failure returns `409 fixed_lease_terminal` without provider work.
+Uncertain outcomes and failures requiring resource cleanup retain their existing
+error responses.
 If the PUT response is ambiguous, the CLI repeats the full identical PUT until
 the coordinator atomically confirms the same stored intent or returns a
 conflict/definite error. Public GET is used only after that PUT confirmation,

@@ -21,6 +21,106 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+func TestGCPBootDiskType(t *testing.T) {
+	for _, test := range []struct{ machineType, want string }{
+		{"c4-standard-32", "hyperdisk-balanced"},
+		{"C4A-highcpu-8", "hyperdisk-balanced"},
+		{"zones/z/machineTypes/c4-standard-4", "hyperdisk-balanced"},
+		{"n4d-standard-8", "hyperdisk-balanced"},
+		{"h4d-standard-192", "hyperdisk-balanced"},
+		{"a4x-highgpu-4g", "hyperdisk-balanced"},
+		{"n2d-standard-4", "pd-balanced"},
+		{"n2-standard-4", "pd-balanced"},
+		{"c3-standard-4", "pd-balanced"},
+		{"c4unknown-standard-4", "pd-balanced"},
+		{"", "pd-balanced"},
+	} {
+		t.Run(test.machineType, func(t *testing.T) {
+			if got := gcpBootDiskType(test.machineType); got != test.want {
+				t.Fatalf("gcpBootDiskType(%q)=%q, want %q", test.machineType, got, test.want)
+			}
+		})
+	}
+}
+
+func TestGCPCreateServerBootDiskType(t *testing.T) {
+	for _, test := range []struct{ machineType, diskType string }{
+		{"c4-standard-32", "hyperdisk-balanced"},
+		{"c3-standard-22", "pd-balanced"},
+		{"n2-standard-32", "pd-balanced"},
+		{"n2d-standard-32", "pd-balanced"},
+	} {
+		t.Run(test.machineType, func(t *testing.T) {
+			var inserted struct {
+				Disks []struct {
+					InitializeParams struct{ DiskType string }
+				}
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case strings.Contains(r.URL.Path, "/firewalls"):
+					if r.Method == http.MethodGet {
+						w.WriteHeader(http.StatusNotFound)
+						_, _ = io.WriteString(w, `{"error":{"code":404}}`)
+						return
+					}
+					_, _ = io.WriteString(w, `{"name":"firewall-op","status":"DONE"}`)
+				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/instances"):
+					if err := json.NewDecoder(r.Body).Decode(&inserted); err != nil {
+						t.Error(err)
+					}
+					_, _ = io.WriteString(w, `{"name":"insert-op","status":"DONE"}`)
+				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/operations/firewall-op"):
+					_, _ = io.WriteString(w, `{"name":"firewall-op","status":"DONE"}`)
+				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/operations/insert-op"):
+					_, _ = io.WriteString(w, `{"name":"insert-op","status":"DONE"}`)
+				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/instances/"):
+					_, _ = io.WriteString(w, `{"id":"123","name":"runner","status":"RUNNING","networkInterfaces":[{"accessConfigs":[{"natIP":"192.0.2.10"}]}]}`)
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusBadRequest)
+				}
+			}))
+			defer server.Close()
+			cfg := Config{TargetOS: targetLinux, ServerType: test.machineType, SSHUser: "ubuntu", GCP: GCPConfig{Project: "project", Zone: "europe-west2-a"}}
+			client, err := newGCPClientWithOptions(context.Background(), cfg, option.WithoutAuthentication(), option.WithEndpoint(server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.instances.Close()
+			defer client.firewalls.Close()
+			if _, err := client.createServer(context.Background(), cfg, "ssh-ed25519 test", "cbx_abcdef123456", "runner", false); err != nil {
+				t.Fatal(err)
+			}
+			want := "zones/europe-west2-a/diskTypes/" + test.diskType
+			if len(inserted.Disks) != 1 || inserted.Disks[0].InitializeParams.DiskType != want {
+				t.Fatalf("inserted disks=%+v, want %s", inserted.Disks, want)
+			}
+		})
+	}
+}
+
+func TestGCPDiskMachineIncompatibilityFallback(t *testing.T) {
+	for _, test := range []struct {
+		message string
+		want    bool
+	}{
+		{"pd-balanced disk type cannot be used by c4-standard-32 machine type.", true},
+		{"disk type pd-balanced is not supported for machine type c4-standard-32", true},
+		{"diskTypes/pd-balanced is unsupported by machineTypes/c4-standard-32", true},
+		{"machine type c4-standard-32 does not support diskType pd-balanced", true},
+		{"invalid source image", false},
+		{"invalid network", false},
+		{"invalid metadata", false},
+		{"diskType pd-balanced is invalid", false},
+	} {
+		if got := isGCPFallbackProvisioningError(&googleapi.Error{Code: 400, Message: test.message}); got != test.want {
+			t.Errorf("fallback(%q)=%v, want %v", test.message, got, test.want)
+		}
+	}
+}
+
 func TestGCPLabelsAreGoogleSafe(t *testing.T) {
 	got := gcpLabels(map[string]string{
 		"crabbox":      "true",

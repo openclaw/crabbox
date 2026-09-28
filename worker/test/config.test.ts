@@ -17,6 +17,8 @@ import {
   azureVMSizeCandidatesForClass,
   azureVMSizeCandidatesForTargetClass,
   gcpMachineTypeCandidatesForClass,
+  gcpBootDiskTypeForMachineType,
+  gcpHyperdiskOnlyFamilies,
   leaseConfig,
   parseTarget,
   serverTypeCandidatesForClass,
@@ -506,6 +508,51 @@ describe("machine class config", () => {
           architecture: "arm64",
         }),
       ).toEqual([machineClass]);
+    }
+  });
+
+  it("matches the Go boot disk family set and machine class disk compatibility", () => {
+    const source = readFileSync(new URL("../../internal/cli/gcp.go", import.meta.url), "utf8");
+    const familySet = source.match(
+      /var gcpHyperdiskOnlyFamilies = map\[string\]struct\{\}\{([\s\S]*?)\n\}/,
+    );
+    expect(familySet).not.toBeNull();
+    const families = [...familySet![1]!.matchAll(/"([a-z0-9]+)":/g)].map((match) => match[1]!);
+    expect([...gcpHyperdiskOnlyFamilies].toSorted()).toEqual(families.toSorted());
+    for (const family of families) {
+      expect(
+        gcpBootDiskTypeForMachineType(`zones/z/machineTypes/${family.toUpperCase()}-standard-4`),
+      ).toBe("hyperdisk-balanced");
+    }
+    for (const family of [
+      "c3",
+      "c3d",
+      "h3",
+      "m1",
+      "m2",
+      "m3",
+      "z3",
+      "n2",
+      "n2d",
+      "e2",
+      "n1",
+      "t2a",
+      "t2d",
+      "c2",
+      "c2d",
+      "a2",
+      "g2",
+      "unknown",
+    ]) {
+      expect(gcpBootDiskTypeForMachineType(`${family}-standard-4`)).toBe("pd-balanced");
+    }
+    for (const name of ["tiny", "small", "standard", "fast", "large", "beast"]) {
+      for (const candidate of gcpMachineTypeCandidatesForClass(name)) {
+        expect(candidate).toMatch(/^(c4|c3|n2|n2d)-/);
+        expect(gcpBootDiskTypeForMachineType(candidate)).toBe(
+          candidate.startsWith("c4-") ? "hyperdisk-balanced" : "pd-balanced",
+        );
+      }
     }
   });
 

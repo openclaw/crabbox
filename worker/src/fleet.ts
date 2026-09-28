@@ -166,6 +166,7 @@ import {
   assertAzureWindowsARM64Image,
   awsPromotedAMIConfigKey,
   azureLocationFor,
+  gcpBootDiskTypeForMachineType,
   leaseConfig,
   InvalidAzureOSDiskModeError,
   normalizeArchitecture,
@@ -4640,7 +4641,7 @@ export class FleetCoordinator {
           );
         }
         const cleanupClaim = validatedProviderProvisioningCleanupClaim(error, config.provider);
-        await this.state.runExclusive(async () => {
+        const resourceDefinitelyAbsent = await this.state.runExclusive(async () => {
           if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
             await this.deleteProviderAccess(record.id);
           }
@@ -4677,8 +4678,15 @@ export class FleetCoordinator {
           await this.putLease(record);
           await this.markAWSIngressReconcilePending(record);
           await this.scheduleAlarm();
+          return providerResourceDefinitelyAbsent(record);
         });
         if (error instanceof CreateAttemptCanceledError) return createCanceledResponse();
+        if (resourceDefinitelyAbsent) {
+          return json(
+            { error: "provisioning_failed", message: coordinatorErrorMessage(this.env, error) },
+            { status: 422 },
+          );
+        }
         throw error;
       });
     if (provisioned instanceof Response) return provisioned;
@@ -5773,7 +5781,7 @@ export class FleetCoordinator {
       }
       return;
     }
-    if (lease?.state === "failed" && lease.provisioningResourceMayExist === false) {
+    if (lease && providerResourceDefinitelyAbsent(lease)) {
       if (workspace.releaseRequestedAt) {
         await this.finalizeAbsentWorkspaceLease(workspace, lease);
       } else if (lease.provisioningFailureRetryable) {
@@ -5968,8 +5976,7 @@ export class FleetCoordinator {
     workspace: WorkspaceRecord,
     lease: LeaseRecord,
   ): Promise<LeaseRecord> {
-    const providerResourceDefinitelyAbsent =
-      lease.state === "failed" && lease.provisioningResourceMayExist === false;
+    const resourceDefinitelyAbsent = providerResourceDefinitelyAbsent(lease);
     const claimExpiresAt = Date.parse(workspace.provisionClaimExpiresAt ?? "");
     const now = Date.now();
     const recoveryDeadline = workspaceProvisionRecoveryDeadline(workspace, lease);
@@ -6221,7 +6228,7 @@ export class FleetCoordinator {
       }
       return recovered;
     }
-    if (!providerResourceDefinitelyAbsent && recoveryDeadline > now) {
+    if (!resourceDefinitelyAbsent && recoveryDeadline > now) {
       await this.recordWorkspaceRecoveryMiss(workspace, recoveryDeadline);
       return lease;
     }
@@ -7156,8 +7163,7 @@ export class FleetCoordinator {
         !workspaceOwnsLease(currentWorkspace, currentLease) ||
         !(
           (currentLease.state === "provisioning" && !currentLease.provisioningRequestStartedAt) ||
-          (currentLease.state === "failed" &&
-            currentLease.provisioningResourceMayExist === false &&
+          (providerResourceDefinitelyAbsent(currentLease) &&
             currentLease.provisioningFailureRetryable)
         )
       ) {
@@ -25949,6 +25955,10 @@ function leaseHasCurrentCleanupOrFinalRelease(lease: LeaseRecord): boolean {
   );
 }
 
+function providerResourceDefinitelyAbsent(lease: LeaseRecord): boolean {
+  return lease.state === "failed" && lease.provisioningResourceMayExist === false;
+}
+
 function mergeProvisioningFailureMetadata(
   lease: LeaseRecord,
   provider: CloudProvider,
@@ -28259,6 +28269,21 @@ export class GCPProvider implements CloudProvider {
     return undefined;
   }
 
+  private createMachineImage(
+    lease: LeaseRecord,
+    name: string,
+    ownership?: ProviderCheckpointOwnership,
+  ): Promise<ProviderImage> {
+    // https://docs.cloud.google.com/compute/docs/machine-images/create-machine-images
+    // Machine images cannot capture Hyperdisk; disk snapshots support it.
+    if (gcpBootDiskTypeForMachineType(lease.serverType) === "hyperdisk-balanced") {
+      throw new Error(
+        `GCP machine images cannot capture Hyperdisk volumes (${lease.serverType} boots from hyperdisk-balanced); use the default disk-snapshot checkpoint strategy`,
+      );
+    }
+    return this.client.createImage(lease.cloudID, name, ownership);
+  }
+
   async createLeaseImage(
     lease: LeaseRecord,
     name: string,
@@ -28267,10 +28292,7 @@ export class GCPProvider implements CloudProvider {
   ): Promise<ProviderImage> {
     const image =
       strategy === "image"
-        ? await this.client.createImage(
-            lease.cloudID,
-            providerImageResourceName("gcp", name, lease.id),
-          )
+        ? await this.createMachineImage(lease, providerImageResourceName("gcp", name, lease.id))
         : await this.client.createDiskSnapshot(
             lease.cloudID,
             providerImageResourceName("gcp", name, lease.id),
@@ -28380,7 +28402,7 @@ export class GCPProvider implements CloudProvider {
   ): Promise<ProviderImage> {
     const created =
       strategy === "image"
-        ? await this.client.createImage(lease.cloudID, name, ownership)
+        ? await this.createMachineImage(lease, name, ownership)
         : await this.client.createDiskSnapshot(lease.cloudID, name, ownership);
     const image = await this.client.getImage(created.id, created.kind);
     const enriched: ProviderImage = {

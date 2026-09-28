@@ -1,5 +1,6 @@
 import { cloudInit } from "./bootstrap";
 import {
+  gcpBootDiskTypeForMachineType,
   gcpMachineTypeCandidatesForClass,
   implicitProviderMachineCandidates,
   sshPorts,
@@ -616,7 +617,7 @@ export class GCPClient {
           type: "PERSISTENT",
           initializeParams: {
             ...initializeParams,
-            diskType: `zones/${this.zone}/diskTypes/pd-balanced`,
+            diskType: `zones/${this.zone}/diskTypes/${gcpBootDiskTypeForMachineType(config.serverType)}`,
           },
         },
       ];
@@ -1521,12 +1522,19 @@ export function isFallbackProvisioningError(error: unknown): boolean {
     value.includes("resource_pool_exhausted") ||
     value.includes("does not have enough resources") ||
     isUnavailableMachineTypeError(value) ||
+    isDiskMachineIncompatibilityError(value) ||
     value.includes("rate limit") ||
     value.includes("try again") ||
     value.includes("http 409") ||
     value.includes("http 429") ||
     value.includes("http 5")
   );
+}
+
+function isDiskMachineIncompatibilityError(value: string): boolean {
+  const disk = /disk type|disktype|disktypes\//.test(value);
+  const machine = /machine type|machinetype/.test(value);
+  return disk && machine && /cannot be used|not supported|unsupported|does not support/.test(value);
 }
 
 function isUnavailableMachineTypeError(value: string): boolean {
