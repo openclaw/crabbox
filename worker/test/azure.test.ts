@@ -5574,7 +5574,10 @@ describe("azure provider", () => {
         };
       });
     try {
-      const result = await new AzureClient(baseEnv).createServerWithFallback(
+      const client = new AzureClient(baseEnv);
+      client.fetcher = async () =>
+        Response.json({ access_token: "synthetic", expires_in: 3600, value: [] });
+      const result = await client.createServerWithFallback(
         config,
         "cbx_abcdef123456",
         "fixture",
