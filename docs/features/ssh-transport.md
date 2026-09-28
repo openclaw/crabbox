@@ -141,6 +141,17 @@ redirected-file stream behavior. No SSH service setting or client timeout change
 
 ## Workspace-owner setup failures
 
+On direct POSIX routes, workspace-owner acquire, inspect, renew, and release
+requests share a private foreground SSH connection for that owner. This
+connection is independent of workload and file-transfer connections. It uses
+`ControlPersist=no`; acquisition failure and owner release terminate and join
+the owned process tree before removing its temporary configuration and socket.
+Cancellation still allows ownership cleanup before the connection closes.
+Owner scripts travel as complete, length-checked stdin frames so long scripts
+do not exceed the macOS OpenSSH multiplexing message limit. Windows/WSL2,
+proxy/config-backed routes, provider-owned authoritative known-host files, and
+explicitly disabled multiplexing retain separate connections.
+
 Linux, macOS, and native Windows readiness checks execute the ready command
 without a separate successful-login probe. A failed direct readiness check
 still probes transport to distinguish authentication from toolchain startup.

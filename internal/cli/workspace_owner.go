@@ -117,6 +117,12 @@ func (t sshWorkspaceOwnerTransport) Do(ctx context.Context, req workspaceOwnerRe
 		script := remoteWorkspaceOwnerWindows(req)
 		input = []byte(script)
 		remote = windowsPowerShellStdinScriptCommand(len([]byte(script)))
+	} else if t.target.ownerControlPath != "" {
+		// Large argv envelopes exceed Darwin's mux descriptor-message limit.
+		// Consume and verify the entire frame before executing the same script.
+		script := remoteWorkspaceOwnerPOSIX(req)
+		input = []byte(base64.StdEncoding.EncodeToString([]byte(script)))
+		remote = remoteWorkspaceOwnerPOSIXInputLauncher(req.Key, req.Token, len(script))
 	}
 	limit := workspaceOwnerCommandLimit(t.target, req.Action)
 	for attempt := 0; ; attempt++ {
@@ -151,16 +157,17 @@ func runWorkspaceOwnerSSHProtocol(ctx context.Context, target SSHTarget, remote 
 }
 
 type workspaceOwner struct {
-	target    SSHTarget
-	transport workspaceOwnerTransport
-	key       string
-	token     string
-	ttl       time.Duration
-	ctx       context.Context
-	cancel    context.CancelFunc
-	stop      chan struct{}
-	done      chan struct{}
-	closeOnce sync.Once
+	target         SSHTarget
+	transport      workspaceOwnerTransport
+	key            string
+	token          string
+	ttl            time.Duration
+	ctx            context.Context
+	cancel         context.CancelFunc
+	stop           chan struct{}
+	done           chan struct{}
+	closeOnce      sync.Once
+	closeTransport func() error
 
 	mu       sync.Mutex
 	renewErr error
@@ -313,11 +320,20 @@ func acquiredRunMayRetainLease(keep, keepOnFailure bool, stopAfter string) bool 
 }
 
 func acquireWorkspaceOwner(ctx context.Context, target SSHTarget, leaseID string, stderr io.Writer) (*workspaceOwner, error) {
-	transport := sshWorkspaceOwnerTransport{target: target}
+	controlTarget, closeTransport, err := startWorkspaceOwnerControl(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	transport := sshWorkspaceOwnerTransport{target: controlTarget}
 	call := workspaceOwnerTransportCallBudget(transport)
 	ttl := workspaceOwnerRenewInterval + call + workspaceOwnerRenewMargin
 	wait := ttl + workspaceOwnerPollInterval + call + workspaceOwnerRenewMargin
-	return acquireWorkspaceOwnerWithTransport(ctx, target, leaseID, stderr, transport, wait, ttl, workspaceOwnerRenewInterval)
+	owner, err := acquireWorkspaceOwnerWithTransport(ctx, target, leaseID, stderr, transport, wait, ttl, workspaceOwnerRenewInterval)
+	if err != nil {
+		return nil, errors.Join(err, closeTransport())
+	}
+	owner.closeTransport = closeTransport
+	return owner, nil
 }
 
 func acquireWorkspaceOwnerWithTransport(ctx context.Context, target SSHTarget, leaseID string, stderr io.Writer, transport workspaceOwnerTransport, waitTimeout, ttl, renewInterval time.Duration) (*workspaceOwner, error) {
@@ -534,11 +550,14 @@ func (o *workspaceOwner) rsyncPrepareCommand() string {
 	return `rm -f "$HOME/` + path + `"`
 }
 
-func (o *workspaceOwner) Close(ctx context.Context) error {
+func (o *workspaceOwner) Close(ctx context.Context) (err error) {
 	if o == nil {
 		return nil
 	}
 	o.stopRenewal()
+	if o.closeTransport != nil {
+		defer func() { err = errors.Join(err, o.closeTransport()) }()
+	}
 	renewErr := o.Err()
 	response, releaseErr := callWorkspaceOwnerTransport(ctx, o.callTimeout(), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerRelease, Key: o.key, Token: o.token, TTL: o.ttl})
 	if releaseErr != nil {
@@ -925,8 +944,18 @@ func remoteWorkspaceOwnerPOSIXLauncher(key, token, script string, setupMarker ..
 }
 
 func remoteWorkspaceOwnerPOSIXEncodedLauncher(key, token, encoded string, decodedSize int, setupMarker ...string) string {
+	return remoteWorkspaceOwnerPOSIXPayloadLauncher(key, token, `"`+encoded+`"`, decodedSize, setupMarker...)
+}
+
+func remoteWorkspaceOwnerPOSIXInputLauncher(key, token string, decodedSize int) string {
+	// Check encoded length too: permissive decoders can accept missing padding.
+	payload := "$(cat) || { cleanup_launcher; exit 74; }; [ \"${#payload_b64}\" -eq " + strconv.Itoa(base64.StdEncoding.EncodedLen(decodedSize)) + " ]"
+	return remoteWorkspaceOwnerPOSIXPayloadLauncher(key, token, payload, decodedSize)
+}
+
+func remoteWorkspaceOwnerPOSIXPayloadLauncher(key, token, payload string, decodedSize int, setupMarker ...string) string {
 	// Private staging must not impose its creation policy on the launched script.
-	launcher := `set -u; command_umask=$(umask); umask 077; root="$HOME/.crabbox/workspace-owners"; run_dir="$root/` + key + `.launcher.` + token + `.$$"; script="$run_dir/script"; cleanup_launcher() { rm -f "$script" 2>/dev/null; rmdir "$run_dir" 2>/dev/null || true; }; decoded_size_ok() { set -- $(wc -c <"$script"); [ "$#" -eq 1 ] && [ "$1" = ` + strconv.Itoa(decodedSize) + ` ]; }; mkdir -p "$root" 2>/dev/null || exit 74; chmod 700 "$HOME/.crabbox" "$root" 2>/dev/null || true; mkdir -m 700 "$run_dir" 2>/dev/null || exit 74; payload_b64="` + encoded + `"; decoded=; if command -v base64 >/dev/null 2>&1; then if printf %s "$payload_b64" | base64 --decode 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -d 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -D 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ] && command -v openssl >/dev/null 2>&1; then if printf %s "$payload_b64" | openssl base64 -d -A 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ]; then cleanup_launcher; exit 74; fi; umask "$command_umask"; /bin/sh "$script"; code=$?; cleanup_launcher; exit "$code"`
+	launcher := `set -u; command_umask=$(umask); umask 077; root="$HOME/.crabbox/workspace-owners"; run_dir="$root/` + key + `.launcher.` + token + `.$$"; script="$run_dir/script"; cleanup_launcher() { rm -f "$script" 2>/dev/null; rmdir "$run_dir" 2>/dev/null || true; }; decoded_size_ok() { set -- $(wc -c <"$script"); [ "$#" -eq 1 ] && [ "$1" = ` + strconv.Itoa(decodedSize) + ` ]; }; mkdir -p "$root" 2>/dev/null || exit 74; chmod 700 "$HOME/.crabbox" "$root" 2>/dev/null || true; mkdir -m 700 "$run_dir" 2>/dev/null || exit 74; payload_b64=` + payload + ` || { cleanup_launcher; exit 74; }; decoded=; if command -v base64 >/dev/null 2>&1; then if printf %s "$payload_b64" | base64 --decode 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -d 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -D 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ] && command -v openssl >/dev/null 2>&1; then if printf %s "$payload_b64" | openssl base64 -d -A 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ]; then cleanup_launcher; exit 74; fi; umask "$command_umask"; /bin/sh "$script"; code=$?; cleanup_launcher; exit "$code"`
 	if len(setupMarker) > 0 && setupMarker[0] != "" {
 		launcher = remoteWorkspaceOwnerPOSIXSetupDiagnostic(setupMarker[0]) + strings.ReplaceAll(launcher, "exit 74", "setup_failed staging")
 	}

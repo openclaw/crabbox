@@ -44,6 +44,7 @@ type SSHTarget struct {
 	ReadyCheck              string
 	AuthSecret              bool
 	NoControlMaster         bool
+	ownerControlPath        string // Private, foreground master owned by the workspace owner.
 	DisableHostKeyChecking  bool
 	NetworkKind             NetworkMode
 	SSHConfigProxy          bool
@@ -927,11 +928,12 @@ func (p *sshTransportPreparation) run(ctx context.Context, target *SSHTarget, co
 	if err := resolveSSHPortNoInput(ctx, target, connectTimeout, connectionAttempts, stderr); err != nil {
 		return err
 	}
-	multiplexed := runtime.GOOS != "windows" && !target.AuthSecret && !target.NoControlMaster && !target.AuthoritativeKnownHosts && target.SSHConfigFile == ""
+	multiplexed := target.ownerControlPath != "" || runtime.GOOS != "windows" && !target.AuthSecret && !target.NoControlMaster && !target.AuthoritativeKnownHosts && target.SSHConfigFile == ""
 	for attempt := 0; ; attempt++ {
 		probe := *target
 		if attempt == 2 {
 			probe.NoControlMaster = true
+			probe.ownerControlPath = ""
 		}
 		muxFailure, err := p.runOnce(ctx, probe, connectTimeout, connectionAttempts, stdout, stderr, multiplexed && attempt < 2)
 		if err == nil || ctx.Err() != nil || exitCode(err) != 255 || !muxFailure || attempt == 2 {
@@ -1362,7 +1364,9 @@ func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts
 			"-o", "RemoteCommand=none", "-o", "RequestTTY=auto", "-o", "ClearAllForwardings=yes")
 	}
 	args = append(args, sshHostKeyVerificationArgs(target)...)
-	if target.AuthSecret || target.NoControlMaster || target.AuthoritativeKnownHosts || target.SSHConfigFile != "" {
+	if target.ownerControlPath != "" {
+		args = append(args, "-o", "ControlMaster=no", "-o", "ControlPersist=no", "-o", "ControlPath="+target.ownerControlPath)
+	} else if target.AuthSecret || target.NoControlMaster || target.AuthoritativeKnownHosts || target.SSHConfigFile != "" {
 		args = append(args,
 			"-o", "ControlMaster=no",
 			"-o", "ControlPath=none",
