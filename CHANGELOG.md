@@ -10,7 +10,7 @@
 - Azure: preflight brokered VM SKU eligibility before allocating network fragments and reduce create polling delays while honoring per-response Retry-After and preserving exact cleanup.
 - Expose brokered creation observations in lease events and Linux timing JSON, with clock provenance for admission, provider requests, SSH, and current-boot readiness.
 - Sync: reuse a private foreground SSH connection for direct POSIX workspace ownership checks, with complete stdin-frame validation and joined cleanup after acquisition failure, cancellation, and release.
-- Sync: stream the first transfer into an empty POSIX workspace over one tar SSH channel, retaining manifest scope, directory metadata, ownership checks, pruning, and finalization; nonempty workspaces keep rsync.
+- Sync: stream the first transfer into an empty POSIX workspace over one tar SSH channel when Git seeding and overlays are disabled, retaining manifest scope, metadata, ownership checks, pruning, and finalization; nonempty workspaces and Git fallback paths keep rsync.
 
 - Sync: allow explicit `sync.compression` and `CRABBOX_SYNC_COMPRESSION` overrides while retaining compression by default on every link.
 

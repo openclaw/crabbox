@@ -2581,7 +2581,8 @@ retrySync:
 		} else if plainManifestMode {
 			manifestCommand = remoteWriteSyncManifestsNewForTargetMode(target, workdir, finalizeToken, true)
 		}
-		coldCandidate := coldSyncSupported(target) && !manifest.hasSpecialFiles && !localGitSeed && !overlayDecision.Enabled && !localContainerDockerSocketSync(cfg, server)
+		// Git fallback paths retain rsync's validation and replacement-lease behavior.
+		coldCandidate := coldSyncSupported(target) && !cfg.Sync.GitSeed && !overlayDecision.Requested && !manifest.hasSpecialFiles && !localGitSeed && !localContainerDockerSocketSync(cfg, server)
 		if coldCandidate {
 			metadata := remoteSyncMetaDirScript()
 			if plainManifestMode {

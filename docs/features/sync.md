@@ -320,7 +320,8 @@ Once ownership is established, sync runs these steps:
 10. Finalize: git-hydrate the worktree against the configured base ref, run the
     mass-deletion sanity check, and record the new fingerprint.
 
-For a new or empty POSIX workspace, the manifest-writing command also checks
+For a new or empty POSIX workspace with Git seeding disabled (`sync.gitSeed:
+false`) and no requested Git overlay, the manifest-writing command also checks
 whether the target has GNU tar or bsdtar and gzip. Eligible first transfers use
 one streamed tar SSH channel instead of rsync. The receiver rechecks that only
 the current transaction's pending metadata is present before extracting; any
@@ -330,7 +331,8 @@ metadata, preserves symlinks without following their targets, and leaves the
 workspace root's permissions intact. Pruning and finalization use their existing
 paths, and producer or transport failure prevents finalization.
 
-Nonempty and Git-seeded workspaces, local Git snapshots, Git overlays,
+Nonempty workspaces, enabled Git seeding and requested Git overlays (including
+their plain-manifest fallback paths), local Git snapshots,
 Windows/WSL2 targets, Windows controllers, and Docker socket-mode transfers use
 their existing transport. A source path with a symlink ancestor also retains
 rsync, as do manifests containing special files. Timing output identifies a cold transfer with `syncMode: "tar"` and a
