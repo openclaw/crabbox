@@ -1522,7 +1522,7 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	}
 	defer func() { err = errors.Join(err, session.Close()) }()
 	archiveMode := "-az"
-	if !syncCompressionEnabled(opts.Compression, target) {
+	if !syncCompressionEnabled(opts.Compression) {
 		archiveMode = "-a"
 	}
 	args := []string{

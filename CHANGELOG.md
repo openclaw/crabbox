@@ -8,7 +8,7 @@
 - Azure: preflight brokered VM SKU eligibility before allocating network fragments and reduce create polling delays while honoring per-response Retry-After and preserving exact cleanup.
 - Expose brokered creation observations in lease events and Linux timing JSON, with clock provenance for admission, provider requests, SSH, and current-boot readiness.
 - Sync: reuse a private foreground SSH connection for direct POSIX workspace ownership checks, with complete stdin-frame validation and joined cleanup after acquisition failure, cancellation, and release.
-- Sync: skip rsync compression on direct loopback targets in automatic mode, with `sync.compression` and `CRABBOX_SYNC_COMPRESSION` overrides for known links.
+- Sync: allow explicit `sync.compression` and `CRABBOX_SYNC_COMPRESSION` overrides while retaining compression by default on every link.
 
 - Images: preserve Linux smoke and cleanup exit status when login-shell logout hooks fail during minting or retained-image qualification.
 - Detect brokered AWS and GCP network addresses sooner with bounded exponential polling, retaining provider error handling and existing deadlines.

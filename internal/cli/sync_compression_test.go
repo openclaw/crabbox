@@ -11,38 +11,20 @@ import (
 
 func TestSyncCompressionPolicy(t *testing.T) {
 	for _, tc := range []struct {
-		name, mode string
-		target     SSHTarget
-		want       bool
-	}{
-		{"IPv4 loopback", "auto", SSHTarget{Host: "127.0.0.1"}, false},
-		{"IPv6 loopback", "auto", SSHTarget{Host: "::1"}, false},
-		{"localhost", "auto", SSHTarget{Host: "localhost"}, false},
-		{"public", "auto", SSHTarget{Host: "203.0.113.10"}, true},
-		{"private may be remote", "auto", SSHTarget{Host: "10.0.0.1"}, true},
-		{"hostname may be remote", "auto", SSHTarget{Host: "build.example.test"}, true},
-		{"proxy", "auto", SSHTarget{Host: "127.0.0.1", ProxyCommand: "proxy"}, true},
-		{"config alias", "auto", SSHTarget{Host: "localhost", SSHConfigProxy: true}, true},
-		{"provider config", "auto", SSHTarget{Host: "localhost", SSHConfigFile: "/provider/config"}, true},
-		{"captured config", "auto", SSHTarget{Host: "localhost", SSHConfigData: []byte("Host localhost")}, true},
-		{"secret route", "auto", SSHTarget{Host: "localhost", AuthSecret: true}, true},
-		{"force local compression", "always", SSHTarget{Host: "127.0.0.1"}, true},
-		{"force remote plain", "never", SSHTarget{Host: "203.0.113.10"}, false},
-		{"non-sync default", "", SSHTarget{Host: "127.0.0.1"}, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := syncCompressionEnabled(tc.mode, tc.target); got != tc.want {
-				t.Fatalf("compression=%t, want %t", got, tc.want)
-			}
-		})
+		mode string
+		want bool
+	}{{"", true}, {"always", true}, {"never", false}} {
+		if got := syncCompressionEnabled(tc.mode); got != tc.want {
+			t.Fatalf("mode=%q: compression=%t, want %t", tc.mode, got, tc.want)
+		}
 	}
 }
 
 func TestSyncCompressionConfiguration(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
-	if effectiveSyncCompression(cfg) != "auto" {
-		t.Fatal("default is not auto")
+	if effectiveSyncCompression(cfg) != "always" {
+		t.Fatal("default is not always")
 	}
 	if err := applyFileConfig(&cfg, fileConfig{Sync: &fileSyncConfig{Compression: "never"}}); err != nil {
 		t.Fatal(err)
@@ -57,7 +39,7 @@ func TestSyncCompressionConfiguration(t *testing.T) {
 	if effectiveSyncCompression(cfg) != "always" {
 		t.Fatal("environment did not override file")
 	}
-	for _, mode := range []string{"", "auto", "always", "never", "invalid"} {
+	for _, mode := range []string{"", "always", "never", "invalid"} {
 		cfg.Sync.Compression = mode
 		if err := validateSyncCompression(cfg); (err != nil) != (mode == "invalid") {
 			t.Fatalf("mode=%q: %v", mode, err)
@@ -77,7 +59,7 @@ func TestRsyncWorkspaceCompressionPreservesManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	for _, tc := range []struct{ mode, archive string }{{"auto", "-a"}, {"always", "-az"}, {"never", "-a"}} {
+	for _, tc := range []struct{ mode, archive string }{{"", "-az"}, {"always", "-az"}, {"never", "-a"}} {
 		t.Run(tc.mode, func(t *testing.T) {
 			files := []byte("dir/space name\x00dir/newline\nname\x00")
 			err := rsync(t.Context(), SSHTarget{Host: "127.0.0.1", User: "runner", Port: "22"}, dir, "/work", []string{"dir"}, io.Discard, io.Discard,
