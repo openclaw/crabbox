@@ -12618,7 +12618,7 @@ os: ubuntu:24.04
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.OSImage != "ubuntu:26.04" || cfg.Image != "ubuntu-24.04" || cfg.Azure.Image != defaultAzureLinuxImage {
+	if cfg.OSImage != "ubuntu:26.04" || cfg.Image != "ubuntu-26.04" || cfg.Azure.Image != defaultAzureLinuxImage {
 		t.Fatalf("higher precedence os did not override provider defaults: os=%q image=%q azure=%q", cfg.OSImage, cfg.Image, cfg.Azure.Image)
 	}
 }
