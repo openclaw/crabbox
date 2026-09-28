@@ -280,27 +280,37 @@ describe("cloud-init bootstrap", () => {
           awsPrivate,
           workRoot: fixture,
         });
-        const lines = generated
-          .split("  - path: /usr/local/bin/crabbox-ready\n")[1]
-          .split("    content: |\n")[1]
-          .split("\n");
-        const end = lines.findIndex((line) => line !== "" && !line.startsWith("      "));
-        const script = lines
-          .slice(0, end)
-          .map((line) => line.slice(6))
-          .join("\n")
-          .replaceAll("/var/lib/crabbox/bootstrapped", join(fixture, "bootstrapped"))
-          .replaceAll(fixture + "/workspaces", fixture);
-        expect(script).toMatch(/^#!\/bin\/sh\nset -eu\n/);
-        writeFileSync(join(fixture, "bootstrapped"), "");
-        if (failure === "marker") rmSync(join(fixture, "bootstrapped"));
-        const candidate =
+        const extract = (path: string) => {
+          const lines = generated
+            .split(`  - path: ${path}\n`)[1]!
+            .split("    content: |\n")[1]!
+            .split("\n");
+          const end = lines.findIndex((line) => line !== "" && !line.startsWith("      "));
+          return lines
+            .slice(0, end)
+            .map((line) => line.slice(6))
+            .join("\n")
+            .replaceAll("/var/lib/crabbox/bootstrapped", join(fixture, "bootstrapped"))
+            .replaceAll(fixture + "/workspaces", fixture);
+        };
+        const failWorkroot = (script: string) =>
           failure === "workroot"
             ? script.replace(
                 "test " + (awsPrivate ? "-d " : "-w ") + fixture,
                 "test -d " + fixture + "/missing",
               )
             : script;
+        let candidate = failWorkroot(extract("/usr/local/bin/crabbox-ready"));
+        expect(candidate).toMatch(/^#!\/bin\/sh\nset -eu\n/);
+        if (!awsPrivate) {
+          const checks = join(fixture, "ready-checks");
+          writeFileSync(checks, failWorkroot(extract("/usr/local/lib/crabbox-ready-checks")), {
+            mode: 0o755,
+          });
+          candidate = candidate.replaceAll("/usr/local/lib/crabbox-ready-checks", checks);
+        }
+        writeFileSync(join(fixture, "bootstrapped"), "");
+        if (failure === "marker") rmSync(join(fixture, "bootstrapped"));
         const result = spawnSync("/bin/sh", ["-c", candidate], {
           env: {
             PATH: fixture,
@@ -317,7 +327,7 @@ describe("cloud-init bootstrap", () => {
     },
   );
 
-  it("uses retrying package installation in runcmd", () => {
+  it("uses retrying package installation before cloud-final", () => {
     const got = cloudInit(config);
     const minimalUpdate = "retry apt-get -o Acquire::Languages=none";
     expect(got).toContain("package_update: false");
@@ -354,8 +364,12 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("      Port 2222\n      Port 22");
     expect(got).toContain("systemctl enable ssh || true");
     expect(got).toContain("touch /var/lib/crabbox/bootstrapped");
-    expect(got).toContain("After=cloud-final.service");
-    expect(got).toContain("WantedBy=cloud-final.service");
+    expect(got).toContain("After=crabbox-bootstrap.service cloud-config.service");
+    expect(got).toContain("Before=cloud-final.service");
+    expect(got).toContain("After=cloud-config.service network-online.target");
+    expect(got).toContain("cloud-init-per instance crabbox-bootstrap-start");
+    expect(got).not.toContain("multi-user.target");
+    expect(got).toContain("WantedBy=cloud-init.target");
     expect(got.indexOf("ExecStart=/usr/local/bin/crabbox-ready")).toBeLessThan(
       got.indexOf("ExecStart=/usr/bin/touch /run/crabbox/workspace-ready"),
     );
@@ -376,11 +390,34 @@ describe("cloud-init bootstrap", () => {
     expect(got).not.toContain("corepack");
   });
 
+  it("holds readiness until optional cloud-final setup has completed", () => {
+    for (const options of [
+      { browser: true },
+      { desktop: true },
+      { code: true },
+      { tailscale: true, tailscaleAuthKey: "fixture" },
+    ]) {
+      const got = cloudInit({ ...config, ...options });
+      const [early, final] = got.split("\nruncmd:");
+      expect(early).toContain(
+        "After=crabbox-bootstrap.service cloud-config.service cloud-final.service",
+      );
+      expect(early).not.toContain("touch /var/lib/crabbox/bootstrapped");
+      expect(final).toContain("systemctl start crabbox-bootstrap.service");
+      expect(final).toContain("retry /usr/local/lib/crabbox-ready-checks");
+      expect(final!.indexOf("retry /usr/local/lib/crabbox-ready-checks")).toBeLessThan(
+        final!.indexOf("touch /var/lib/crabbox/bootstrapped"),
+      );
+      expect(final).not.toContain("crabbox_readiness_packages=");
+    }
+  });
+
   it("embeds the complete generated Linux readiness fragment before bootstrap completes", () => {
     const got = cloudInit(config);
     const embedded = linuxMinimalReadinessBootstrap
+      .trimEnd()
       .split("\n")
-      .map((line) => `    ${line}`)
+      .map((line) => `      ${line}`)
       .join("\n");
     expect(got).toContain(embedded);
     expect(got.indexOf(embedded)).toBeLessThan(got.indexOf("touch /var/lib/crabbox/bootstrapped"));

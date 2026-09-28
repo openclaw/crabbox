@@ -11,64 +11,80 @@ import (
 )
 
 func TestCloudInitReloadsSSHListenerWithoutPackageInstallation(t *testing.T) {
-	// Readiness may skip APT on prepared images, so SSH cannot depend on the
-	// openssh-server postinst to reload and restart the socket for new ports.
-	script := cloudInit(baseConfig(), "ssh-ed25519 fixture")
-	_, activation, found := strings.Cut(script, "    systemctl enable ssh || true\n")
-	if !found {
-		t.Fatal("missing SSH activation after baseline readiness")
-	}
-	activation, _, found = strings.Cut(activation, "    touch /var/lib/crabbox/bootstrapped")
-	if !found {
-		t.Fatal("missing bootstrap completion after SSH activation")
-	}
 	for _, tc := range []struct {
-		name       string
-		socket     string
-		failure    string
-		wantListen string
+		name, socket, failure, initial, wantListen string
+		restart                                    bool
 	}{
-		{"active socket", "active", "", "2222 22"},
-		{"service only", "inactive", "", "2222 22"},
-		{"socket restart fails", "active", "restart", "22"},
-		{"service restart fails", "inactive", "restart", "22"},
-		{"non-systemd host", "inactive", "unavailable", "22"},
+		{"active socket", "active", "", "22", "2222 22", true},
+		{"service only", "inactive", "", "22", "2222 22", true},
+		{"socket already listening", "active", "", "2222 22", "2222 22", false},
+		{"service already listening", "inactive", "", "2222 22", "2222 22", false},
+		{"missing fallback", "active", "", "2222", "2222 22", true},
+		{"extra listener", "active", "", "2222 22 2200", "2222 22 2200", false},
+		{"unrelated listener", "active", "unrelated", "2222 22", "2222 22", true},
+		{"listener probe fails", "active", "ss", "2222 22", "2222 22", true},
+		{"config probe fails", "active", "sshd", "2222 22", "2222 22", true},
+		{"socket restart fails", "active", "restart", "22", "22", true},
+		{"service restart fails", "inactive", "restart", "22", "22", true},
+		{"non-systemd host", "inactive", "unavailable", "22", "22", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// Ubuntu's generator changes the loaded socket on daemon-reload;
-			// service restarts inherit live descriptors until the socket restarts.
 			prelude := `set -eu
 configured_ports='2222 22'
 generated_ports=22
-listening_ports=22
+listening_ports="$INITIAL"
+restarted=false
+sshd() {
+ [ "$FAILURE" != sshd ] || return 1
+ for port in $configured_ports; do printf 'port %s\n' "$port"; done
+}
+ss() {
+ [ "$FAILURE" != ss ] || return 1
+ owner=sshd
+ [ "$SOCKET" != active ] || owner=systemd
+ [ "$FAILURE" != unrelated ] || owner=httpd
+ for port in $listening_ports; do
+  printf 'LISTEN 0 128 [::]:%s [::]:* users:(("%s",pid=1,fd=3))\n' "$port" "$owner"
+ done
+}
 systemctl() {
-  printf 'systemctl %s\n' "$*" >&2
-  [ "$FAILURE" != unavailable ] || return 127
-  case "$*" in
-    daemon-reload) generated_ports="$configured_ports" ;;
-    'is-active --quiet ssh.socket') [ "$SOCKET" = active ] ;;
-    'restart ssh.socket')
-      [ "$FAILURE" != restart ] || return 1
-      listening_ports="$generated_ports" ;;
-    'restart ssh'|'restart ssh.service')
-      [ "$FAILURE" != restart ] || return 1
-      if [ "$SOCKET" != active ]; then listening_ports="$configured_ports"; fi ;;
-    *) return 99 ;;
-  esac
+ printf 'systemctl %s\n' "$*" >&2
+ [ "$FAILURE" != unavailable ] || return 127
+ case "$*" in
+  daemon-reload) generated_ports="$configured_ports" ;;
+  'is-active --quiet ssh.socket') [ "$SOCKET" = active ] ;;
+  'restart ssh.socket')
+   restarted=true
+   [ "$FAILURE" != restart ] || return 1
+   listening_ports="$generated_ports" ;;
+  'restart ssh'|'restart ssh.service')
+   restarted=true
+   [ "$FAILURE" != restart ] || return 1
+   if [ "$SOCKET" != active ]; then listening_ports="$configured_ports"; fi ;;
+  *) return 99 ;;
+ esac
 }
 timeout() { [ "$1" = 30s ] || return 98; shift; "$@"; }
 `
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, "bash", "-c", prelude+activation+"\nprintf '%s\\n' \"$listening_ports\"\n")
-			cmd.Env = []string{"PATH=/usr/bin:/bin", "SOCKET=" + tc.socket, "FAILURE=" + tc.failure}
+			activation := strings.ReplaceAll(sharedLinuxSSHRestart(), "/usr/sbin/sshd", "sshd")
+			cmd := exec.CommandContext(ctx, "bash", "-c", prelude+activation+"\nprintf '%s|%s\\n' \"$listening_ports\" \"$restarted\"\n")
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "SOCKET=" + tc.socket, "FAILURE=" + tc.failure, "INITIAL=" + tc.initial}
 			cmd.WaitDelay = time.Second
 			output, err := cmd.CombinedOutput()
 			if err != nil {
 				t.Fatalf("SSH activation failed: %v\n%s", err, output)
 			}
-			if !strings.HasSuffix(string(output), tc.wantListen+"\n") {
-				t.Fatalf("listening ports must be %q after activation:\n%s", tc.wantListen, output)
+			restart := "false"
+			if tc.restart {
+				restart = "true"
+			}
+			if !strings.HasSuffix(string(output), tc.wantListen+"|"+restart+"\n") {
+				t.Fatalf("want listening %q, restart %s:\n%s", tc.wantListen, restart, output)
+			}
+			if !tc.restart && tc.failure == "" && strings.Contains(string(output), "systemctl") {
+				t.Fatalf("matching listeners must not reload or restart systemd:\n%s", output)
 			}
 		})
 	}

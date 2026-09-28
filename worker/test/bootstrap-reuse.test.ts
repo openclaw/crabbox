@@ -14,7 +14,10 @@ it.skipIf(process.platform === "win32")(
     const script = cloudInit(
       leaseConfig({ provider: "aws", browser: true, sshPublicKey: "ssh-ed25519 fixture" }),
     );
-    const start = script.indexOf("    systemctl enable ssh || true\n");
+    const start = script.indexOf(
+      "    export DEBIAN_FRONTEND=noninteractive\n",
+      script.indexOf("\nruncmd:"),
+    );
     const end = script.indexOf('    if [ -n "$browser_path" ]; then\n', start);
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);

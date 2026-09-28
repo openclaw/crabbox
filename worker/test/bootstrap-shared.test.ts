@@ -109,7 +109,7 @@ describe("shared bootstrap composition fixtures", () => {
           sharedLinuxSSHRestart()
             .trimEnd()
             .split("\n")
-            .map((line) => `    ${line}`)
+            .map((line) => `      ${line}`)
             .join("\n"),
         );
         if (config.code) fragments.push(sharedCodeServerInstall());

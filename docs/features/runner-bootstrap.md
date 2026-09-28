@@ -43,10 +43,25 @@ Bootstrap creates:
 - shared package cache directories `/var/cache/crabbox/pnpm` and
   `/var/cache/crabbox/npm`.
 
-After writing the SSH port configuration, bootstrap reloads systemd and restarts
-the active `ssh.socket`, or the SSH service on images without socket activation.
-This also runs on prepared images that skip package installation: restarting only
-the service would keep the socket's previous listening ports.
+The minimal bootstrap runs in `crabbox-bootstrap.service`, after cloud-config
+has written files, created users, and configured APT, and after networking is
+online. Cloud-init's early `bootcmd` queues this unit once per instance without
+waiting for `multi-user.target` or cloud-final. An ordinary reboot does not rerun
+the instance bootstrap. Output remains available in the systemd journal and
+`/var/log/cloud-init-output.log`; cloud-final also observes the unit's result.
+
+Desktop, browser, Tailscale, and other optional setup retains cloud-final
+ordering. The `bootstrapped` marker is published only after every required phase
+and capability check succeeds. `crabbox-ready` still requires this marker and
+reruns the same checks. The per-boot workspace observation follows the early
+unit, plus cloud-final when optional setup is required.
+
+Bootstrap compares the configured SSH ports with the live SSH listeners before
+changing services. When a required listener is missing or cannot be inspected,
+it reloads systemd and restarts the active `ssh.socket`, or the SSH service on
+images without socket activation. Matching listeners avoid a restart, including
+on prepared images that skip package installation. Socket activation must be
+reconciled at the socket because service restarts inherit its listening ports.
 
 Bootstrap installs only a small base set with `--no-install-recommends`:
 

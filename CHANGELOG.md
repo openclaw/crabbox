@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Linux: start minimal lease bootstrap before multi-user.target, avoid SSH restarts when configured listeners are already active, and retain readiness checks and optional setup gates.
+
 - SSH: detect newly ready guests sooner with short initial readiness retries and a bounded five-second backoff, preserving host trust, authentication, cancellation, and bootstrap checks.
 - Azure: preflight brokered VM SKU eligibility before allocating network fragments and reduce create polling delays while honoring per-response Retry-After and preserving exact cleanup.
 - Expose brokered creation observations in lease events and Linux timing JSON, with clock provenance for admission, provider requests, SSH, and current-boot readiness.

@@ -27,6 +27,17 @@
       "parameters": {}
     },
     {
+      "name": "linuxBootstrapPrelude",
+      "file": "linuxBootstrapPrelude.sh",
+      "parameters": {}
+    },
+    {
+      "name": "linuxBootstrapStart",
+      "file": "linuxBootstrapStart.sh",
+      "literal": true,
+      "parameters": {}
+    },
+    {
       "name": "linuxSSHRestart",
       "file": "linuxSSHRestart.sh",
       "parameters": {}

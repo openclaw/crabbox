@@ -68,7 +68,7 @@ func TestSharedBootstrapFixtures(t *testing.T) {
 			case targetMacOS:
 				fragments["macos"] = sharedMacOS(cfg.SSHUser, fixture.PublicKey, cfg.WorkRoot, fixture.Ports)
 			default:
-				fragments["ssh"] = indentCloudInitRuncmd(sharedLinuxSSHRestart())
+				fragments["ssh"] = indentCloudInitScriptFile(indentCloudInitRuncmd(sharedLinuxSSHRestart()))
 				if cfg.Code {
 					fragments["code"] = sharedCodeServerInstall()
 				}

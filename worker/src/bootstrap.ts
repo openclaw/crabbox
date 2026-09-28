@@ -1,5 +1,7 @@
 import {
   sharedLinuxSSHRestart,
+  sharedLinuxBootstrapStart,
+  sharedLinuxBootstrapPrelude,
   sharedLinuxOptionalPackages,
   sharedLinuxNodeInstall,
   sharedGnomeDesktopTheme,
@@ -86,8 +88,27 @@ export function cloudInit(
   const sshHostKeys = optionalSSHHostKeys(config);
   const writeFiles = optionalWriteFiles(config);
   const bootstrap = [optionalBootstrap(config), additionalBootstrap].filter(Boolean).join("\n");
-  const readinessBootstrap = indentRuncmdScript(linuxMinimalReadinessBootstrap);
+  const finish =
+    "    retry /usr/local/lib/crabbox-ready-checks\n    touch /var/lib/crabbox/bootstrapped\n";
   const sshRestart = indentRuncmdScript(sharedLinuxSSHRestart());
+  let core = `    #!/bin/bash
+    exec > >(tee -a /var/log/cloud-init-output.log) 2>&1
+${indentRuncmdScript(sharedLinuxBootstrapPrelude())}${sshRestart}${indentRuncmdScript(linuxMinimalReadinessBootstrap)}
+    mkdir -p ${config.workRoot} /var/cache/crabbox/pnpm /var/cache/crabbox/npm
+    chown -R ${config.sshUser}:${config.sshUser} ${config.workRoot} /var/cache/crabbox
+    install -d /var/lib/crabbox
+    systemctl enable ssh || true
+${sshRestart}`;
+  let final = "    systemctl start crabbox-bootstrap.service\n";
+  let workspaceAfter = "crabbox-bootstrap.service cloud-config.service";
+  core +=
+    "    systemctl daemon-reload\n    systemctl enable crabbox-workspace-ready.service\n    systemctl start --no-block crabbox-workspace-ready.service\n";
+  if (bootstrap === "") {
+    core += finish;
+  } else {
+    final += indentRuncmdScript(sharedLinuxBootstrapPrelude()) + bootstrap + "\n" + finish;
+    workspaceAfter += " cloud-final.service";
+  }
   return `#cloud-config
 package_update: false
 package_upgrade: false
@@ -99,6 +120,9 @@ ${additionalCloudConfig}users:
     ssh_authorized_keys:
       - ${config.sshPublicKey}
 ${sshHostKeys}
+bootcmd:
+  - |
+${indentRuncmdScript(sharedLinuxBootstrapStart())}
 write_files:
   - path: /etc/ssh/sshd_config.d/99-crabbox-port.conf
     permissions: '0644'
@@ -110,7 +134,7 @@ ${portLines}
     content: |
       [Unit]
       Description=Crabbox workspace per-boot readiness
-      After=cloud-final.service
+      After=${workspaceAfter}
       ConditionPathExists=/var/lib/crabbox/bootstrapped
 
       [Service]
@@ -120,8 +144,15 @@ ${portLines}
       ExecStart=/usr/bin/touch /run/crabbox/workspace-ready
 
       [Install]
-      WantedBy=cloud-final.service
+      WantedBy=cloud-init.target
   - path: /usr/local/bin/crabbox-ready
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      set -eu
+      test -f /var/lib/crabbox/bootstrapped
+      exec /usr/local/lib/crabbox-ready-checks
+  - path: /usr/local/lib/crabbox-ready-checks
     permissions: '0755'
     content: |
       #!/bin/sh
@@ -132,37 +163,21 @@ ${portLines}
       jq --version >/dev/null
       tmux -V >/dev/null
       flock --version >/dev/null
-      test -f /var/lib/crabbox/bootstrapped
       test -w ${config.workRoot}
 ${readyChecks}
 ${writeFiles}
+  - path: /usr/local/lib/crabbox-bootstrap.sh
+    permissions: '0700'
+    content: |
+${core
+  .trimEnd()
+  .split("\n")
+  .map((line) => `  ${line}`)
+  .join("\n")}
 runcmd:
   - |
     bash -euxo pipefail <<'BOOT'
-    export DEBIAN_FRONTEND=noninteractive
-${sshRestart}
-    retry() {
-      n=1
-      until "$@"; do
-        if [ "$n" -ge 8 ]; then
-          return 1
-        fi
-        sleep $((n * 5))
-        n=$((n + 1))
-      done
-    }
-${readinessBootstrap}
-    mkdir -p ${config.workRoot} /var/cache/crabbox/pnpm /var/cache/crabbox/npm
-    chown -R ${config.sshUser}:${config.sshUser} ${config.workRoot} /var/cache/crabbox
-    install -d /var/lib/crabbox
-    systemctl enable ssh || true
-${sshRestart}
-${bootstrap}
-    systemctl daemon-reload
-    systemctl enable crabbox-workspace-ready.service
-    systemctl start --no-block crabbox-workspace-ready.service
-    touch /var/lib/crabbox/bootstrapped
-    retry crabbox-ready
+${final}
     BOOT
 `;
 }

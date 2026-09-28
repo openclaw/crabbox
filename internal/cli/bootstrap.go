@@ -54,7 +54,24 @@ func cloudInitWithExtras(cfg Config, publicKey, additionalConfig, additionalBoot
 	yamlPublicKey := yamlInlineString(publicKey)
 	shellSSHUser := shellQuote(cfg.SSHUser)
 	shellWorkRoot := shellQuote(cfg.WorkRoot)
-	readinessBootstrap := indentCloudInitRuncmd(linuxMinimalReadinessBootstrap)
+	// Optional services retain cloud-final ordering; the minimal path finishes early.
+	finish := "    retry /usr/local/lib/crabbox-ready-checks\n    touch /var/lib/crabbox/bootstrapped\n"
+	core := `    #!/bin/bash
+    exec > >(tee -a /var/log/cloud-init-output.log) 2>&1
+` + indentCloudInitRuncmd(sharedLinuxBootstrapPrelude()) + indentCloudInitRuncmd(sharedLinuxSSHRestart()) + indentCloudInitRuncmd(linuxMinimalReadinessBootstrap) + "\n" + fmt.Sprintf(`    mkdir -p %[1]s /var/cache/crabbox/pnpm /var/cache/crabbox/npm
+    chown -R %[2]s:%[2]s %[1]s /var/cache/crabbox
+    install -d /var/lib/crabbox
+    systemctl enable ssh || true
+`, shellWorkRoot, shellSSHUser) + indentCloudInitRuncmd(sharedLinuxSSHRestart())
+	final := "    systemctl start crabbox-bootstrap.service\n"
+	workspaceAfter := "crabbox-bootstrap.service cloud-config.service"
+	core += "    systemctl daemon-reload\n    systemctl enable crabbox-workspace-ready.service\n    systemctl start --no-block crabbox-workspace-ready.service\n"
+	if bootstrap == "" {
+		core += finish
+	} else {
+		final += indentCloudInitRuncmd(sharedLinuxBootstrapPrelude()) + bootstrap + "\n" + finish
+		workspaceAfter += " cloud-final.service"
+	}
 	return fmt.Sprintf(`#cloud-config
 package_update: false
 package_upgrade: false
@@ -65,6 +82,9 @@ package_upgrade: false
     sudo: ['ALL=(ALL) NOPASSWD:ALL']
     ssh_authorized_keys:
       - %[2]s
+bootcmd:
+  - |
+%[10]s
 write_files:
   - path: /etc/ssh/sshd_config.d/99-crabbox-port.conf
     permissions: '0644'
@@ -76,41 +96,53 @@ write_files:
     content: |
       #!/bin/sh
       set -eu
+      test -f /var/lib/crabbox/bootstrapped
+      exec /usr/local/lib/crabbox-ready-checks
+  - path: /usr/local/lib/crabbox-ready-checks
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      set -eu
       git --version
       rsync --version >/dev/null
       curl --version >/dev/null
       jq --version >/dev/null
       tmux -V >/dev/null
       flock --version >/dev/null
-      test -f /var/lib/crabbox/bootstrapped
       test -w %[3]s
 %[5]s
+  - path: /etc/systemd/system/crabbox-workspace-ready.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Crabbox workspace per-boot readiness
+      After=%[12]s
+      ConditionPathExists=/var/lib/crabbox/bootstrapped
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/crabbox-ready
+      ExecStart=/usr/bin/install -d /run/crabbox
+      ExecStart=/usr/bin/touch /run/crabbox/workspace-ready
+
+      [Install]
+      WantedBy=cloud-init.target
 %[6]s
+  - path: /usr/local/lib/crabbox-bootstrap.sh
+    permissions: '0700'
+    content: |
+%[9]s
 runcmd:
   - |
     bash -euxo pipefail <<'BOOT'
-    export DEBIAN_FRONTEND=noninteractive
-    retry() {
-      n=1
-      until "$@"; do
-        if [ "$n" -ge 8 ]; then
-          return 1
-        fi
-        sleep $((n * 5))
-        n=$((n + 1))
-      done
-    }
-%[9]s
-    mkdir -p %[3]s /var/cache/crabbox/pnpm /var/cache/crabbox/npm
-    chown -R %[7]s:%[7]s %[3]s /var/cache/crabbox
-    install -d /var/lib/crabbox
-    systemctl enable ssh || true
-%[10]s
 %[8]s
-    touch /var/lib/crabbox/bootstrapped
-    retry crabbox-ready
     BOOT
-`, yamlSSHUser, yamlPublicKey, shellWorkRoot, portLines, readyChecks, writeFiles, shellSSHUser, bootstrap, readinessBootstrap, indentCloudInitRuncmd(sharedLinuxSSHRestart()), additionalConfig)
+`, yamlSSHUser, yamlPublicKey, shellWorkRoot, portLines, readyChecks, writeFiles, shellSSHUser, final, indentCloudInitScriptFile(core), indentCloudInitRuncmd(sharedLinuxBootstrapStart()), additionalConfig, workspaceAfter)
+
+}
+
+func indentCloudInitScriptFile(script string) string {
+	return "  " + strings.ReplaceAll(strings.TrimRight(script, "\n"), "\n", "\n  ") + "\n"
 }
 
 func CloudInitUserData(cfg Config, publicKey string) string {

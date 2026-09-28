@@ -81,8 +81,18 @@ export function sharedGnomeDesktopTheme(): string {
 }
 
 // prettier-ignore
+export function sharedLinuxBootstrapPrelude(): string {
+  return "export DEBIAN_FRONTEND=noninteractive\nretry() {\n  n=1\n  until \"$@\"; do\n    if [ \"$n\" -ge 8 ]; then\n      return 1\n    fi\n    sleep $((n * 5))\n    n=$((n + 1))\n  done\n}\n";
+}
+
+// prettier-ignore
+export function sharedLinuxBootstrapStart(): string {
+  return "# bootcmd precedes write_files. Queue the unit without waiting for cloud-config,\n# which supplies the script, users, SSH keys, and APT configuration it needs.\ncloud-init-per instance crabbox-bootstrap-start sh -eu <<'CRABBOX_EARLY'\nrm -f /var/lib/crabbox/bootstrapped\ncat >/etc/systemd/system/crabbox-bootstrap.service <<'UNIT'\n[Unit]\nDescription=Crabbox instance bootstrap\nRequires=cloud-config.service\nWants=network-online.target\nAfter=cloud-config.service network-online.target\nBefore=cloud-final.service\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/bash -euxo pipefail /usr/local/lib/crabbox-bootstrap.sh\nTimeoutStartSec=0\nStandardOutput=journal+console\nStandardError=journal+console\nUNIT\nsystemctl daemon-reload\nsystemctl start --no-block crabbox-bootstrap.service\nCRABBOX_EARLY\n";
+}
+
+// prettier-ignore
 export function sharedLinuxSSHRestart(): string {
-  return "# Socket-activated sshd inherits listening descriptors. Reload the port generator\n# before restarting the socket, including when readiness skips package postinst.\nsystemctl daemon-reload || true\nif systemctl is-active --quiet ssh.socket; then\n  timeout 30s systemctl restart ssh.socket || true\nelse\n  timeout 30s systemctl restart ssh || true\nfi\n";
+  return "# Package postinst or a prepared image may already have the requested listeners.\n# Socket-activated sshd inherits descriptors, so restart the socket on mismatch.\ncrabbox_ssh_listeners_match() {\n  local configured listening port\n  configured=$(/usr/sbin/sshd -T) || return 1\n  configured=$(printf '%s\\n' \"$configured\" | awk '$1 == \"port\" {print $2}')\n  [ -n \"$configured\" ] || return 1\n  listening=$(ss -H -ltnp) || return 1\n  listening=$(printf '%s\\n' \"$listening\" | awk '/\"sshd\"|\"systemd\"/ {n=split($4, address, \":\"); print address[n]}')\n  for port in $configured; do\n    printf '%s\\n' \"$listening\" | grep -Fxq \"$port\" || return 1\n  done\n}\nif ! crabbox_ssh_listeners_match; then\n  systemctl daemon-reload || true\n  if systemctl is-active --quiet ssh.socket; then\n    timeout 30s systemctl restart ssh.socket || true\n  else\n    timeout 30s systemctl restart ssh || true\n  fi\nfi\n";
 }
 
 // prettier-ignore

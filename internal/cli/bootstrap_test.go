@@ -73,9 +73,28 @@ func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 	}
 }
 
+func TestCloudInitStartsBootstrapBeforeCloudFinal(t *testing.T) {
+	got := cloudInit(baseConfig(), "ssh-ed25519 fixture")
+	for _, want := range []string{
+		"bootcmd:",
+		"cloud-init-per instance crabbox-bootstrap-start",
+		"After=cloud-config.service network-online.target",
+		"Before=cloud-final.service",
+		"systemctl start --no-block crabbox-bootstrap.service",
+		"/usr/local/lib/crabbox-bootstrap.sh",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing early bootstrap contract %q", want)
+		}
+	}
+	if strings.Contains(got, "multi-user.target") {
+		t.Fatal("minimal bootstrap must not wait for multi-user.target")
+	}
+}
+
 func TestLinuxReadinessGeneratedContract(t *testing.T) {
 	got := cloudInit(baseConfig(), "ssh-ed25519 test")
-	embedded := indentCloudInitRuncmd(linuxMinimalReadinessBootstrap)
+	embedded := indentCloudInitScriptFile(indentCloudInitRuncmd(linuxMinimalReadinessBootstrap))
 	if !strings.Contains(got, embedded) {
 		t.Fatal("cloudInit() must embed the complete generated Linux readiness fragment")
 	}
@@ -273,7 +292,7 @@ func TestCloudInitWaylandDesktopProfile(t *testing.T) {
 	cfg.Browser = true
 	cfg.DesktopEnv = "wayland"
 	got := cloudInit(cfg, "ssh-ed25519 test")
-	if !strings.Contains(got, "    retry crabbox-ready\n") {
+	if !strings.Contains(got, "    retry /usr/local/lib/crabbox-ready-checks\n") {
 		t.Fatal("Wayland bootstrap must wait for the compositor and VNC listener")
 	}
 	for _, want := range []string{
@@ -1183,10 +1202,13 @@ func TestCloudInitReadinessWithoutBash(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(cloudInit(cfg, "ssh-ed25519 fixture")), &document); err != nil {
 		t.Fatal(err)
 	}
-	var script string
+	var script, checks string
 	for _, file := range document.Files {
 		if file.Path == "/usr/local/bin/crabbox-ready" {
 			script = file.Content
+		}
+		if file.Path == "/usr/local/lib/crabbox-ready-checks" {
+			checks = file.Content
 		}
 	}
 	if !strings.HasPrefix(script, "#!/bin/sh\nset -eu\n") {
@@ -1218,14 +1240,20 @@ func TestCloudInitReadinessWithoutBash(t *testing.T) {
 				t.Fatal(err)
 			}
 			candidate := script
+			candidateChecks := checks
 			if failure == "marker" {
 				if err := os.Remove(marker); err != nil {
 					t.Fatal(err)
 				}
 			}
 			if failure == "workroot" {
-				candidate = strings.ReplaceAll(candidate, cfg.WorkRoot, filepath.Join(fixture, "missing"))
+				candidateChecks = strings.ReplaceAll(candidateChecks, cfg.WorkRoot, filepath.Join(fixture, "missing"))
 			}
+			checksPath := filepath.Join(fixture, "ready-checks")
+			if err := os.WriteFile(checksPath, []byte(candidateChecks), 0755); err != nil {
+				t.Fatal(err)
+			}
+			candidate = strings.ReplaceAll(candidate, "/usr/local/lib/crabbox-ready-checks", shellQuote(checksPath))
 			cmd := exec.Command("/bin/sh", "-c", candidate)
 			cmd.Env = []string{"PATH=" + fixture, "FAIL_TOOL=" + failure}
 			if failure == "socket" {
@@ -1234,6 +1262,80 @@ func TestCloudInitReadinessWithoutBash(t *testing.T) {
 			out, err := cmd.CombinedOutput()
 			if (err == nil) != (failure == "") {
 				t.Fatalf("readiness result: %v; %s", err, out)
+			}
+		})
+	}
+}
+
+func TestCloudInitEarlyBootstrapComposition(t *testing.T) {
+	for _, optional := range []bool{false, true} {
+		t.Run(map[bool]string{false: "minimal", true: "browser"}[optional], func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Browser = optional
+			var doc struct {
+				Bootcmd []string                         `yaml:"bootcmd"`
+				Runcmd  []string                         `yaml:"runcmd"`
+				Files   []struct{ Path, Content string } `yaml:"write_files"`
+			}
+			if err := yaml.Unmarshal([]byte(cloudInit(cfg, "ssh-ed25519 fixture")), &doc); err != nil {
+				t.Fatal(err)
+			}
+			files := map[string]string{}
+			for _, file := range doc.Files {
+				files[file.Path] = file.Content
+			}
+			core := files["/usr/local/lib/crabbox-bootstrap.sh"]
+			final := strings.Join(doc.Runcmd, "\n")
+			if !strings.Contains(core, "retry apt-get") || strings.Contains(final, "crabbox_readiness_packages=") {
+				t.Fatal("baseline packages must run in the early unit")
+			}
+			if !strings.Contains(final, "systemctl start crabbox-bootstrap.service") {
+				t.Fatal("cloud-final must observe bootstrap failure")
+			}
+			completion := "touch /var/lib/crabbox/bootstrapped"
+			if strings.Contains(core, completion) == optional || strings.Contains(final, completion) != optional {
+				t.Fatal("only the last required phase may publish readiness")
+			}
+			workspace := files["/etc/systemd/system/crabbox-workspace-ready.service"]
+			if strings.Contains(workspace, " cloud-final.service") != optional {
+				t.Fatal("workspace observation must wait for required optional setup")
+			}
+			if !strings.Contains(files["/usr/local/bin/crabbox-ready"], "test -f /var/lib/crabbox/bootstrapped") {
+				t.Fatal("readiness must retain marker requirement")
+			}
+			for name, script := range map[string]string{"bootcmd": strings.Join(doc.Bootcmd, "\n"), "core": core, "final": final, "checks": files["/usr/local/lib/crabbox-ready-checks"]} {
+				cmd := exec.Command("bash", "-n")
+				cmd.Stdin = strings.NewReader(script)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("%s syntax: %v: %s", name, err, out)
+				}
+			}
+			publisher := core
+			if optional {
+				publisher = final
+			}
+			start := strings.Index(publisher, "retry /usr/local/lib/crabbox-ready-checks")
+			end := strings.Index(publisher[start:], completion) + start + len(completion)
+			for _, fails := range []bool{false, true} {
+				marker := filepath.Join(t.TempDir(), "bootstrapped")
+				checks := filepath.Join(t.TempDir(), "checks")
+				code := "0"
+				if fails {
+					code = "1"
+				}
+				if err := os.WriteFile(checks, []byte("#!/bin/sh\nexit "+code+"\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				script := strings.ReplaceAll(publisher[start:end], "/usr/local/lib/crabbox-ready-checks", shellQuote(checks))
+				script = strings.ReplaceAll(script, "/var/lib/crabbox/bootstrapped", shellQuote(marker))
+				out, err := exec.Command("bash", "-euc", "retry() { \"$@\"; }\n"+script).CombinedOutput()
+				if (err != nil) != fails {
+					t.Fatalf("checks fails=%v: %v %s", fails, err, out)
+				}
+				_, statErr := os.Stat(marker)
+				if (statErr == nil) == fails {
+					t.Fatalf("checks fails=%v: marker must exist only after success", fails)
+				}
 			}
 		})
 	}
