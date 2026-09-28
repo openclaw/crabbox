@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -89,6 +90,45 @@ func runSSHReadinessProbe(ctx context.Context, target SSHTarget, remote, connect
 		recordCreationObservation(ctx, "ssh_authenticated")
 	}
 	return sshReadinessProbeError(ctx, err, diagnostic.hostKeyRejected())
+}
+
+func canWaitForLinuxReadiness(target SSHTarget) bool {
+	return target.TargetOS == targetLinux && !target.SSHConfigProxy && target.SSHConfigFile == "" && target.ProxyCommand == ""
+}
+
+func linuxReadinessWaitCommand(target SSHTarget, timeout time.Duration) string {
+	// A separate shell preserves custom predicates' exit and errexit behavior;
+	// a subshell used as an && condition would suppress their set -e failures.
+	loop := "while :; do\nsh -c " + shellQuote(sshReadyCommand(target)) + " && exit 0\nsleep 0.25 || exit 1\ndone"
+	return "timeout " + strconv.FormatFloat(timeout.Seconds(), 'f', -1, 64) + "s sh -c " + shellQuote(loop)
+}
+
+func waitForLinuxReadiness(ctx context.Context, target SSHTarget, profile sshReadinessProfile, timeout time.Duration, progress func()) error {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	// Do not leave a new persistent master holding probe pipes on cancellation.
+	// An existing workspace-owned master retains its explicit lifetime owner.
+	target.NoControlMaster = true
+	// The remote timeout also bounds the loop if the client disappears. Hosts
+	// without timeout simply fail this optimization and retry the usual probe.
+	done := make(chan error, 1)
+	go func() {
+		done <- runSSHReadinessProbe(waitCtx, target, linuxReadinessWaitCommand(target, timeout), profile.connectTimeout, profile.connectionAttempts)
+	}()
+	progress()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			if waitCtx.Err() != nil {
+				return context.Cause(waitCtx)
+			}
+			return err
+		case <-ticker.C:
+			progress()
+		}
+	}
 }
 
 func runWSLReadinessTransport(ctx context.Context, target SSHTarget, command, connectTimeout, attempts string) error {

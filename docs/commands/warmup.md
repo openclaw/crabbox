@@ -449,6 +449,12 @@ SSH host trust, authentication, and the provider's readiness command. The delay
 is in addition to connection/probe time; cancellation and the overall readiness
 deadline also interrupt pending probes and retry waits.
 
+Once a direct Linux target authenticates, an unready guest is checked inside a
+single SSH session every 250 ms for up to 30 seconds. The session uses the same
+`crabbox-ready` or custom readiness command, reports progress every five seconds,
+and returns to ordinary probing on failure or timeout. Windows, WSL2, macOS,
+and provider proxy routes retain their existing probes.
+
 New leases use per-lease SSH keys under the user config directory (RSA for
 AWS/Azure Windows, ed25519 otherwise):
 

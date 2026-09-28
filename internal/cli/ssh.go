@@ -458,6 +458,30 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 				authenticated = true
 				lastProbe = "readiness"
 				probes = append(probes, port+":ready")
+				if canWaitForLinuxReadiness(probe) {
+					lastPorts = strings.Join(probes, ",")
+					err := waitForLinuxReadiness(probeCtx, probe, profile, 30*time.Second, func() {
+						fmt.Fprintln(stderr, sshWaitProgressMessage(target, phase, reachablePort, transportPort, lastPorts, time.Since(start), time.Until(deadline)))
+					})
+					if stopped := check(err); stopped != nil {
+						return stopped
+					}
+					if err == nil {
+						if target.Port != probe.Port {
+							fmt.Fprintf(stderr, "using ssh port %s for %s (configured %s not ready)\n", probe.Port, target.Host, target.Port)
+						}
+						target.recordPreparedEndpoint(probe.Port)
+						return nil
+					}
+					if setupErr := sshReadinessError(err, phase); setupErr != nil {
+						return setupErr
+					}
+					if errors.Is(err, context.DeadlineExceeded) || exitCode(err) == 124 {
+						// A full guest wait already paced this retry. Do not add
+						// the boot-time backoff just as the marker may appear.
+						retryDelay = 250 * time.Millisecond
+					}
+				}
 			}
 			lastPorts = strings.Join(probes, ",")
 			if transportPort != "" {
