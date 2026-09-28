@@ -39,8 +39,8 @@ function fixture(catalogue: unknown[] = [], networkLRO = false) {
   const events: { method: string; path: string; at: number }[] = [];
   const polls = vi.fn<() => Response>(() => Response.json({ status: "Succeeded" }));
   const vmSizes: string[] = [];
-  const cleanup = vi.spyOn(client, "deleteOwnedServer").mockResolvedValue();
-  const infra = vi.spyOn(client, "ensureSharedInfra").mockResolvedValue({
+  const cleanup = vi.spyOn(AzureClient.prototype, "deleteOwnedServer").mockResolvedValue();
+  const infra = vi.spyOn(AzureClient.prototype, "ensureSharedInfra").mockResolvedValue({
     vnet: "crabbox-vnet",
     nsg: "crabbox-nsg",
   });
@@ -212,4 +212,25 @@ it("bounds SKU preflight including authentication to five seconds", async () => 
   await vi.advanceTimersByTimeAsync(5_000);
   expect((await result).size).toBe(0);
   expect(fetcher).not.toHaveBeenCalled();
+});
+
+it("bounds a long VM poll by the total create budget without treating timeout as rejection", async () => {
+  const f = fixture();
+  f.polls.mockImplementation(() =>
+    Response.json({ status: "InProgress" }, { headers: { "retry-after": "2000" } }),
+  );
+  const result = f
+    .run({
+      ...config(),
+      capacityMarket: "spot",
+      capacityFallback: "on-demand-after-30m",
+    })
+    .catch((error: unknown) => error);
+  await vi.advanceTimersByTimeAsync(25 * 60_000);
+  const failure = await result;
+  expect(String(failure)).toContain("deadline exceeded after 25m");
+  expect(failure).not.toBeInstanceOf(AzureProvisioningRejectedError);
+  expect(f.vmSizes).toEqual([first]);
+  expect(f.cleanup).toHaveBeenCalledTimes(1);
+  expect(Date.now()).toBe(25 * 60_000);
 });

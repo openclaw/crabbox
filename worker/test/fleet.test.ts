@@ -11208,6 +11208,65 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it.each(["aws", "azure", "gcp", "hetzner", "daytona"] as const)(
+    "starts %s idle expiry at activation after slow provisioning",
+    async (provider) => {
+      vi.useFakeTimers();
+      const admitted = Date.parse("2026-09-28T08:00:00Z");
+      const readyAt = admitted + 11 * 60_000;
+      vi.setSystemTime(admitted);
+      const storage = new MemoryStorage();
+      const leaseID = "cbx_abcdef123456";
+      let fleet: FleetDurableObject;
+      const deleted = vi.fn<() => Promise<void>>();
+      fleet = testFleet(storage, {
+        [provider]: fakeProvider(
+          async () => {
+            vi.setSystemTime(readyAt);
+            await fleet.alarm();
+            expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe("provisioning");
+          },
+          { provider },
+          deleted,
+        ),
+      });
+      try {
+        const response = await fleet.fetch(
+          request("POST", "/v1/leases", {
+            body: {
+              leaseID,
+              provider,
+              target: "linux",
+              sshPublicKey: "ssh-ed25519 test",
+              ttlSeconds: 1800,
+              idleTimeoutSeconds: 600,
+              keep: true,
+            },
+          }),
+        );
+        expect(response.status).toBe(201);
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+          state: "active",
+          createdAt: new Date(admitted).toISOString(),
+          lastTouchedAt: new Date(readyAt).toISOString(),
+          expiresAt: new Date(readyAt + 600_000).toISOString(),
+        });
+        vi.setSystemTime(readyAt + 4_000);
+        await fleet.alarm();
+        expect(deleted).not.toHaveBeenCalled();
+        const heartbeat = await fleet.fetch(
+          request("POST", `/v1/leases/${leaseID}/heartbeat`, { body: {} }),
+        );
+        expect(heartbeat.status).toBe(200);
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.expiresAt).toBe(
+          new Date(readyAt + 604_000).toISOString(),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("persists the active GCP fallback zone before provider mutation", async () => {
     const storage = new MemoryStorage();
     const leaseID = "cbx_abcdef123456";
@@ -24658,9 +24717,13 @@ describe("fleet lease identity and idle", () => {
       state: "active",
       cloudID: "vm-cbx-abcdef123456",
       idleTimeoutSeconds: 300,
-      lastTouchedAt: heartbeatLease.lastTouchedAt,
-      expiresAt: heartbeatLease.expiresAt,
     });
+    expect(Date.parse(createdLease.lastTouchedAt!)).toBeGreaterThanOrEqual(
+      Date.parse(heartbeatLease.lastTouchedAt!),
+    );
+    expect(Date.parse(createdLease.expiresAt)).toBe(
+      Date.parse(createdLease.lastTouchedAt!) + 300_000,
+    );
     expect(createdLease.createAttemptID).toBeUndefined();
     expect(createdLease.createAttemptGeneration).toBeUndefined();
     expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({

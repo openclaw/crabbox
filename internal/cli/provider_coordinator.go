@@ -825,10 +825,7 @@ func coordinatorCreateLeaseErrorCanReplay(err error) bool {
 		coordinatorResponseErrorCode(err, http.StatusBadGateway) != "tailscale_unavailable"
 }
 
-func defaultCoordinatorCreateLeaseTimeoutForConfig(cfg Config) time.Duration {
-	if cfg.Provider == "azure" && cfg.TargetOS == targetLinux {
-		return 10 * time.Minute
-	}
+func defaultCoordinatorCreateLeaseTimeoutForConfig(Config) time.Duration {
 	return coordinatorHTTPTimeout
 }
 

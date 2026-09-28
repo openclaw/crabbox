@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Linux: start minimal lease bootstrap before multi-user.target, avoid SSH restarts when configured listeners are already active, and retain readiness checks and optional setup gates.
+- Start managed lease idle expiry at activation across providers, preserving the admission-based TTL cap so slow provisioning cannot consume the idle window.
+- Route ordinary brokered Azure capacity fallback across regions after one capacity failure per market, cache confirmed rejections for five minutes, expose attempt durations, and bound legacy creation to 25 minutes with a 31-minute broker client wait.
 
 - SSH: detect newly ready guests sooner with short initial readiness retries and a bounded five-second backoff, preserving host trust, authentication, cancellation, and bootstrap checks.
 - Azure: preflight brokered VM SKU eligibility before allocating network fragments and reduce create polling delays while honoring per-response Retry-After and preserving exact cleanup.

@@ -317,15 +317,27 @@ are unzoned, so zone-only restrictions do not exclude a regional SKU. The
 catalogue describes subscription eligibility, not live capacity or proof that
 a VM allocation was rejected.
 
-Region preference remains unchanged: each region tries the selected market's
-SKU chain, then the enabled on-demand chain, before the next region. Explicit
-`--type` requests retain that exact SKU. VM create polls default to five seconds
-and honor longer `Retry-After` delays from each response. PIP and NIC creates
-use the same cadence and remain sequential because NIC references PIP and VM
-references NIC. VM attempt budgets remain 120 seconds for default Spot fallback
-and 180 seconds for on-demand; network LROs remain bounded at 60 seconds each.
-These are per-operation budgets, not a total lease-create deadline. Native
-Windows durable provisioning uses its separately journaled continuation path.
+Ordinary brokered creates retain region preference, trying the selected market
+then enabled on-demand fallback in each region. With multiple regions configured,
+the first capacity failure in each region/market ends that SKU chain so another
+region is reached sooner. Single-region requests retain the full SKU chain;
+explicit `--type` requests retain that exact SKU. Confirmed capacity rejections
+with verified companion cleanup are cached in coordinator state for five minutes,
+scoped by subscription/resource group, region, SKU, and market. Later creates skip
+those combinations; timeouts, ambiguous allocation, and pending cleanup never
+populate the cache. Cached skips confer no allocation or cleanup authority.
+Failed attempts expose `durationMs`, including network setup and checked cleanup.
+
+VM create polls default to five seconds and honor longer `Retry-After` delays
+within the remaining budget. PIP and NIC creates remain sequential because NIC
+references PIP and VM references NIC. VM attempt budgets remain 120 seconds for
+default Spot fallback and 180 seconds for on-demand; network LROs remain bounded
+at 60 seconds each. Ordinary brokered Azure creation has a 25-minute total API
+and polling budget across all candidates. Expiry stops new attempts and retains
+unresolved cleanup claims; it never establishes that an allocation was rejected.
+Native Windows durable provisioning retains its frozen candidate plan and
+30-minute continuation budget. Brokered clients wait up to 31 minutes, including
+a response margin; an earlier caller deadline or cancellation still wins.
 
 Run `crabbox doctor --provider azure --target windows` before leasing through the
 broker. The coordinator readiness check reports missing coordinator secret names

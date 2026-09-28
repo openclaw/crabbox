@@ -1225,6 +1225,7 @@ export class FleetCoordinator {
           ...(result.server.region ? { region: result.server.region } : {}),
           ...(result.image ? { image: result.image } : {}),
         };
+        startLeaseIdleClock(completed, new Date(now));
         clearProvisioningRecoveryMetadata(completed);
         delete completed.provisioningResourceMayExist;
         delete completed.provisioningFailureRetryable;
@@ -4234,12 +4235,7 @@ export class FleetCoordinator {
         createdAt: now.toISOString(),
         updatedAt: now.toISOString(),
         lastTouchedAt: now.toISOString(),
-        expiresAt: leaseExpiresAt(
-          now,
-          now,
-          config.ttlSeconds,
-          config.idleTimeoutSeconds,
-        ).toISOString(),
+        expiresAt: leaseExpiresAt(now, now, config.ttlSeconds, config.ttlSeconds).toISOString(),
       };
       if (providerProject) {
         record.providerProject = providerProject;
@@ -4775,6 +4771,7 @@ export class FleetCoordinator {
             return { committed: false };
           }
           const committedRecord = applyLeaseRecordChanges(latest, finalizationBase, record);
+          startLeaseIdleClock(committedRecord, new Date());
           await storage.put(leaseKey(committedRecord.id), committedRecord);
           if (createAttempt && attempt) {
             await storage.put(createAttemptKey(leaseID), {
@@ -4968,12 +4965,7 @@ export class FleetCoordinator {
         createdAt: now.toISOString(),
         updatedAt: now.toISOString(),
         lastTouchedAt: now.toISOString(),
-        expiresAt: leaseExpiresAt(
-          now,
-          now,
-          config.ttlSeconds,
-          config.idleTimeoutSeconds,
-        ).toISOString(),
+        expiresAt: leaseExpiresAt(now, now, config.ttlSeconds, config.ttlSeconds).toISOString(),
         createAttemptGeneration: generation,
         ...(attempt ? { createAttemptID: attempt.token } : {}),
         ...(fixedCreate
@@ -6162,6 +6154,7 @@ export class FleetCoordinator {
             : recoveredServer.status === "running" && recoveredServer.host.trim()
         ) {
           current.state = "active";
+          startLeaseIdleClock(current, new Date(recoveredAt));
           clearLeaseCleanupCompletion(current);
           current.host = workspaceCapability
             ? workspaceCapability.recoveredHost(recoveredServer)
@@ -25410,6 +25403,12 @@ function leaseIdleTimeoutSeconds(lease: LeaseRecord): number {
   return leaseTTLSeconds(lease);
 }
 
+function startLeaseIdleClock(lease: LeaseRecord, readyAt: Date): void {
+  lease.updatedAt = readyAt.toISOString();
+  lease.lastTouchedAt = readyAt.toISOString();
+  lease.expiresAt = recomputeLeaseExpiresAt(lease, readyAt).toISOString();
+}
+
 function recomputeLeaseExpiresAt(lease: LeaseRecord, fallbackNow: Date): Date {
   if (isRegisteredLease(lease)) {
     const touchedAt = parseLeaseDate(lease.lastTouchedAt, fallbackNow);
@@ -25420,6 +25419,10 @@ function recomputeLeaseExpiresAt(lease: LeaseRecord, fallbackNow: Date): Date {
     );
   }
   const createdAt = parseLeaseDate(lease.createdAt, fallbackNow);
+  // Provisioning consumes the hard TTL, but cannot consume an idle window.
+  if (lease.state === "provisioning") {
+    return new Date(createdAt.getTime() + leaseTTLSeconds(lease) * 1000);
+  }
   const touchedAt = parseLeaseDate(lease.lastTouchedAt, createdAt);
   return leaseExpiresAt(
     createdAt,

@@ -428,6 +428,35 @@ async function publicLease(storage: ProvisioningTestStorage, azure: AzureFixture
 }
 
 describe("durable Azure admission and reconstruction", () => {
+  it("starts durable idle expiry only when slow provisioning is published", async () => {
+    vi.useFakeTimers();
+    const admitted = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(admitted);
+    const storage = new ProvisioningTestStorage();
+    const azure = new AzureFixture();
+    const response = await fleet(storage, azure).coordinator.fetch(
+      request("POST", "/v1/leases", {
+        ...input(),
+        ttlSeconds: 1800,
+        idleTimeoutSeconds: 600,
+      }),
+    );
+    expect(response.status).toBe(202);
+    vi.setSystemTime(admitted + 11 * 60_000);
+    for (let n = 0; n < 40; n++) {
+      await step(storage, azure);
+      if ((await storage.get<LeaseRecord>(`lease:${id}`))?.state === "active") break;
+    }
+    const lease = await storage.get<LeaseRecord>(`lease:${id}`);
+    expect(lease?.state).toBe("active");
+    expect(Date.parse(lease!.lastTouchedAt!)).toBeGreaterThanOrEqual(admitted + 11 * 60_000);
+    expect(Date.parse(lease!.expiresAt)).toBe(Date.parse(lease!.lastTouchedAt!) + 600_000);
+    const heartbeat = await fleet(storage, azure).coordinator.fetch(
+      request("POST", `/v1/leases/${id}/heartbeat`, {}),
+    );
+    expect(heartbeat.status).toBe(200);
+  });
+
   it("persists the requested market with the initial provisioning lease", async () => {
     const storage = new ProvisioningTestStorage();
     const azure = new AzureFixture();

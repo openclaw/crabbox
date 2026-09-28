@@ -210,7 +210,7 @@ func TestCoordinatorAsyncReplayReadinessOutlivesRebindBudget(t *testing.T) {
 				if err != nil || lease.ID != f.canonical || lease.State != "active" {
 					t.Fatalf("lease=%#v err=%v", lease, err)
 				}
-				if f.creates != 2 || f.cancels != 0 || f.gets < 2 || time.Since(f.started) != 13*time.Minute || f.deadline.Sub(f.started) != 30*time.Minute {
+				if f.creates != 2 || f.cancels != 0 || f.gets < 2 || time.Since(f.started) != 13*time.Minute || f.deadline.Sub(f.started) != coordinatorHTTPTimeout {
 					t.Fatalf("creates=%d cancels=%d gets=%d elapsed=%s budget=%s", f.creates, f.cancels, f.gets, time.Since(f.started), f.deadline.Sub(f.started))
 				}
 				if !strings.Contains(f.stderr.String(), "elapsed=12m0s") {
@@ -219,6 +219,25 @@ func TestCoordinatorAsyncReplayReadinessOutlivesRebindBudget(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestCoordinatorAzureLinuxProvisioningBeyondTenMinutes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newCoordinatorAsyncFixture(t, false)
+		f.cfg.TargetOS, f.backend.cfg.TargetOS = targetLinux, targetLinux
+		f.onCreate = func(r *http.Request) (*http.Response, error) {
+			select {
+			case <-time.After(11 * time.Minute):
+				return f.reply(f.lease("active"))
+			case <-r.Context().Done():
+				return nil, r.Context().Err()
+			}
+		}
+		lease, err := f.acquire(context.Background())
+		if err != nil || lease.State != "active" || f.cancels != 0 {
+			t.Fatalf("lease=%#v err=%v cancels=%d", lease, err, f.cancels)
+		}
+	})
 }
 
 func TestCoordinatorAsyncOriginalDeadlineExhaustion(t *testing.T) {
@@ -234,7 +253,7 @@ func TestCoordinatorAsyncOriginalDeadlineExhaustion(t *testing.T) {
 							return nil, r.Context().Err()
 						}
 						if f.creates == 1 {
-							time.Sleep(9*time.Minute + 30*time.Second)
+							time.Sleep(coordinatorHTTPTimeout - 30*time.Second)
 							return coordinatorAsyncResponse(http.StatusInternalServerError, "error code: 1101")
 						}
 						return f.reply(f.lease("provisioning"))
@@ -251,7 +270,7 @@ func TestCoordinatorAsyncOriginalDeadlineExhaustion(t *testing.T) {
 					if fixed {
 						wantCancels = 0
 					}
-					if !errors.Is(err, context.DeadlineExceeded) || lease.ID != "" || time.Since(f.started) != 10*time.Minute || f.creates != wantCreates || f.cancels != wantCancels {
+					if !errors.Is(err, context.DeadlineExceeded) || lease.ID != "" || time.Since(f.started) != coordinatorHTTPTimeout || f.creates != wantCreates || f.cancels != wantCancels {
 						t.Fatalf("lease=%#v err=%v elapsed=%s creates=%d cancels=%d", lease, err, time.Since(f.started), f.creates, f.cancels)
 					}
 				})

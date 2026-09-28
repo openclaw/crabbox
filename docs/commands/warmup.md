@@ -86,6 +86,14 @@ This setting applies only to `warmup`; it does not change `run --keep`.
 `lease.idleTimeout` (or top-level `idleTimeout`) configures the idle window;
 `CRABBOX_IDLE_TIMEOUT` overrides config and `--idle-timeout` overrides both.
 
+For managed coordinator leases, TTL counts from admission and remains a hard
+wall-clock cap. Provisioning does not consume idle time: `lastTouchedAt` and the
+idle deadline start when the coordinator publishes the active lease. Expiry is
+then the earlier of admission plus TTL and activation plus idle timeout; later
+heartbeats extend only the idle deadline. Choose a TTL that covers provisioning
+and intended use. A TTL exhausted during provisioning still triggers cleanup.
+The CLI's lease labels reflect these authoritative coordinator timestamps.
+
 Managed coordinator leases expire automatically regardless of keep. New direct
 GCP VMs also honor recorded expiry through their guest-side expiry guard when
 the attached service account can delete the VM. The expiry is the earlier of

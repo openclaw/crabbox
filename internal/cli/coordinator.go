@@ -48,7 +48,8 @@ func (c *CoordinatorClient) hasConfiguredAuth() bool {
 	return c != nil && (strings.TrimSpace(c.Token) != "" || len(c.TokenCommand) > 0)
 }
 
-const coordinatorHTTPTimeout = 30 * time.Minute
+// Allow the coordinator's 30-minute provisioning budget plus a response margin.
+const coordinatorHTTPTimeout = 31 * time.Minute
 const coordinatorControlTimeout = 30 * time.Second
 const coordinatorTokenCommandTimeout = 15 * time.Second
 const maxCoordinatorTokenBytes = 16 * 1024
@@ -314,6 +315,7 @@ type CoordinatorShare struct {
 }
 
 type ProvisioningAttempt struct {
+	DurationMS int64  `json:"durationMs,omitempty"`
 	Region     string `json:"region,omitempty"`
 	ServerType string `json:"serverType"`
 	Market     string `json:"market,omitempty"`

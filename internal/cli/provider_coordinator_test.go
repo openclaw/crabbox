@@ -2561,7 +2561,7 @@ func TestCoordinatorRecoveredProvisioningKeepsCreationLifetime(t *testing.T) {
 			wantErr       error
 		}{
 			{name: "activation beyond recovery window", createDelay: 2 * time.Minute, readyAfter: 4 * time.Minute, wantElapsed: 4 * time.Minute},
-			{name: "original creation deadline", createDelay: 29 * time.Minute, readyAfter: 31 * time.Minute, wantElapsed: 30 * time.Minute, wantErr: context.DeadlineExceeded},
+			{name: "original creation deadline", createDelay: 29 * time.Minute, readyAfter: coordinatorHTTPTimeout + time.Minute, wantElapsed: coordinatorHTTPTimeout, wantErr: context.DeadlineExceeded},
 			{name: "caller cancellation", createDelay: 2 * time.Minute, readyAfter: 4 * time.Minute, cancelAfter: 3 * time.Minute, wantElapsed: 3 * time.Minute, wantErr: context.Canceled},
 			{name: "earlier caller deadline", createDelay: 2 * time.Minute, readyAfter: 4 * time.Minute, callerTimeout: 3 * time.Minute, wantElapsed: 3 * time.Minute, wantErr: context.DeadlineExceeded},
 		} {

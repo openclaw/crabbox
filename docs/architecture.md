@@ -95,8 +95,10 @@ adapter's `Spec()`; the type definitions live in
    and enforces cost/spend caps.
 5. `FleetCoordinator` provisions the machine through the provider adapter (with
    region/market fallback) and persists the lease record through its runtime.
-6. The broker returns the lease ID, slug, host, SSH user/port, work root, and
-   expiry.
+6. On publication of an active lease, the coordinator starts its idle clock and
+   computes expiry from that idle deadline and the hard TTL measured from admission.
+   Provisioning records use only the TTL deadline. The broker returns the lease ID,
+   slug, host, SSH user/port, work root, and expiry.
 7. The CLI waits for the `crabbox-ready` bootstrap marker.
 8. The CLI seeds the remote Git tree when possible, compares sync fingerprints,
    and rsyncs changed files (see [Sync](#sync-and-hydration)).

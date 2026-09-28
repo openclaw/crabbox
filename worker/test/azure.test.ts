@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   AzureClient,
+  AzureProvisioningRejectedError,
   azureCleanupRecoveryAuditKey,
   azureLinuxCloudInit,
   azureLabelsFromTags,
@@ -25,7 +26,10 @@ import {
 } from "../src/azure";
 import type { LeaseConfig } from "../src/config";
 import { sha256Hex } from "../src/encoding";
-import { providerProvisioningCleanupClaim } from "../src/provider-provisioning";
+import {
+  ProviderProvisioningCleanupError,
+  providerProvisioningCleanupClaim,
+} from "../src/provider-provisioning";
 import type { Env, LeaseRecord, ProviderMachine } from "../src/types";
 
 const baseEnv: Env = {
@@ -5535,6 +5539,152 @@ describe("azure provider", () => {
     ).toBeUndefined();
   });
 
+  it("routes after one capacity failure per region and market and caches exact rejections", async () => {
+    vi.useFakeTimers();
+    const started = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(started);
+    const store = memoryAzureDeleteClaimStorage();
+    const config = testLeaseConfig({
+      class: "tiny",
+      serverTypeExplicit: false,
+      capacityRegions: ["eastus2"],
+    });
+    const events: string[] = [];
+    const infra = vi
+      .spyOn(AzureClient.prototype, "ensureSharedInfra")
+      .mockResolvedValue({ vnet: "vnet", nsg: "nsg" });
+    const internal = AzureClient.prototype as unknown as {
+      createVM(config: LeaseConfig, location: string): Promise<ProviderMachine>;
+    };
+    const create = vi.spyOn(internal, "createVM").mockImplementation(async (candidate, region) => {
+      events.push(`${region}/${candidate.capacityMarket}/${candidate.serverType}`);
+      vi.setSystemTime(Date.now() + 15_000);
+      if (region === "eastus")
+        throw new AzureProvisioningRejectedError(new Error("SkuNotAvailable"));
+      return {
+        provider: "azure",
+        id: 1,
+        cloudID: "fixture",
+        name: "fixture",
+        status: "running",
+        labels: {},
+      };
+    });
+    const acquire = async () => {
+      const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: store.storage });
+      client.fetcher = async () =>
+        Response.json({ access_token: "synthetic", expires_in: 3600, value: [] });
+      return client.createServerWithFallback(
+        config,
+        "cbx_abcdef123456",
+        "fixture",
+        "alice@example.com",
+      );
+    };
+    try {
+      const result = await acquire();
+      expect(events).toEqual([
+        "eastus/spot/Standard_D2ads_v6",
+        "eastus/on-demand/Standard_D2ads_v6",
+        "eastus2/spot/Standard_D2ads_v6",
+      ]);
+      expect(result.attempts).toHaveLength(2);
+      expect(result.attempts?.[0]).toMatchObject({ category: "capacity", durationMs: 15_000 });
+      events.length = 0;
+      await acquire();
+      expect(events).toEqual([
+        "eastus/spot/Standard_D2ds_v6",
+        "eastus/on-demand/Standard_D2ds_v6",
+        "eastus2/spot/Standard_D2ads_v6",
+      ]);
+      vi.setSystemTime(started + 6 * 60_000);
+      events.length = 0;
+      await acquire();
+      expect(events[0]).toBe("eastus/spot/Standard_D2ads_v6");
+    } finally {
+      infra.mockRestore();
+      create.mockRestore();
+    }
+  });
+
+  it.each(["uncertain", "cleanup-pending"])(
+    "does not cache %s capacity failures",
+    async (failure) => {
+      const store = memoryAzureDeleteClaimStorage();
+      const infra = vi
+        .spyOn(AzureClient.prototype, "ensureSharedInfra")
+        .mockResolvedValue({ vnet: "vnet", nsg: "nsg" });
+      const internal = AzureClient.prototype as unknown as {
+        createVM(config: LeaseConfig, location: string): Promise<ProviderMachine>;
+      };
+      const cause =
+        failure === "uncertain"
+          ? new Error("SkuNotAvailable")
+          : new ProviderProvisioningCleanupError("SkuNotAvailable; cleanup pending", {
+              provider: "azure",
+              cloudID: "pending-vm",
+              region: "eastus",
+              providerScope: "/subscriptions/sub/resourceGroups/crabbox-leases",
+            });
+      const create = vi.spyOn(internal, "createVM").mockRejectedValue(cause);
+      try {
+        const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: store.storage });
+        client.fetcher = async () => Response.json({ access_token: "synthetic", value: [] });
+        const result = client.createServerWithFallback(
+          testLeaseConfig({ capacityRegions: ["eastus2"] }),
+          "cbx_abcdef123456",
+          "fixture",
+          "alice@example.com",
+        );
+        await expect(result).rejects.toThrow("SkuNotAvailable");
+        expect(
+          [...store.records.keys()].filter((key) => key.startsWith("azure-capacity:")),
+        ).toEqual([]);
+        expect(create).toHaveBeenCalledTimes(failure === "cleanup-pending" ? 1 : 4);
+      } finally {
+        infra.mockRestore();
+        create.mockRestore();
+      }
+    },
+  );
+
+  it("stops admitting Azure fallback attempts at the total create deadline", async () => {
+    vi.useFakeTimers();
+    const started = Date.now();
+    const infra = vi
+      .spyOn(AzureClient.prototype, "ensureSharedInfra")
+      .mockResolvedValue({ vnet: "vnet", nsg: "nsg" });
+    const internal = AzureClient.prototype as unknown as {
+      createVM(config: LeaseConfig, location: string): Promise<ProviderMachine>;
+    };
+    const create = vi.spyOn(internal, "createVM").mockImplementation(async () => {
+      vi.setSystemTime(started + 25 * 60_000);
+      throw new Error("azure long-running operation timed out");
+    });
+    try {
+      const client = new AzureClient(baseEnv);
+      client.fetcher = async () => Response.json({ access_token: "synthetic", value: [] });
+      let failure: unknown;
+      try {
+        await client.createServerWithFallback(
+          testLeaseConfig({ serverTypeExplicit: false, capacityRegions: ["eastus2"] }),
+          "cbx_abcdef123456",
+          "fixture",
+          "alice@example.com",
+        );
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(Error);
+      expect(String(failure)).toContain("deadline exceeded after 25m");
+      expect(failure).not.toBeInstanceOf(AzureProvisioningRejectedError);
+      expect(create).toHaveBeenCalledTimes(1);
+    } finally {
+      infra.mockRestore();
+      create.mockRestore();
+    }
+  });
+
   it("retains Azure market failures across a region fallback", async () => {
     const config = testLeaseConfig({
       serverTypeExplicit: true,
@@ -5597,6 +5747,7 @@ describe("azure provider", () => {
           serverType: config.serverType,
           market: "spot",
           category: "capacity",
+          durationMs: expect.any(Number),
           message: "SkuNotAvailable",
         },
         {
@@ -5604,6 +5755,7 @@ describe("azure provider", () => {
           serverType: config.serverType,
           market: "on-demand",
           category: "quota",
+          durationMs: expect.any(Number),
           message: "QuotaExceeded",
         },
       ]);
@@ -5940,7 +6092,7 @@ describe("azure provider", () => {
           firstAttemptClearedBeforeNextNetwork =
             !resources.has(firstNIC) &&
             !resources.has(firstPIP) &&
-            records.size === 0 &&
+            [...records.keys()].every((key) => key.startsWith("azure-capacity:")) &&
             deleted.length === 2;
         }
         let diskID: string | undefined;
@@ -6052,7 +6204,7 @@ describe("azure provider", () => {
     expect(resources.has(secondDisk)).toBe(true);
     expect(resources.has(unrelatedNIC)).toBe(true);
     expect(result.server.cloudID).toBe(secondName);
-    expect(records.size).toBe(0);
+    expect([...records.keys()]).toEqual([expect.stringMatching(/^azure-capacity:/)]);
 
     await client.deleteOwnedServer({
       id: "cbx_123456789abc",
@@ -6065,7 +6217,7 @@ describe("azure provider", () => {
 
     expect(deleted).toEqual([firstNIC, firstPIP, secondVM, secondNIC, secondPIP, secondDisk]);
     expect([...resources.keys()]).toEqual([unrelatedNIC, sharedNSG]);
-    expect(records.size).toBe(0);
+    expect([...records.keys()]).toEqual([expect.stringMatching(/^azure-capacity:/)]);
   });
 
   it("drops crabbox-ssh-* rules and preserves operator rules", () => {

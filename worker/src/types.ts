@@ -755,6 +755,7 @@ export interface TailscaleMetadata {
 }
 
 export interface ProvisioningAttempt {
+  durationMs?: number;
   region?: string;
   serverType: string;
   market?: string;

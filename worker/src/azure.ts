@@ -48,6 +48,7 @@ const DELETE_RETRY_DELAY_MS = 15_000;
 const MIN_LRO_POLL_INTERVAL_MS = 15_000;
 const DEFAULT_AZURE_NETWORK_LRO_TIMEOUT_MS = 60_000;
 const DEFAULT_AZURE_VM_CREATE_TIMEOUT_MS = 180_000;
+const AZURE_CREATE_BUDGET_MS = 25 * 60_000;
 const DEFAULT_AZURE_SPOT_FALLBACK_MS = 120_000;
 const DEFAULT_AZURE_LINUX_IMAGE = "Canonical:ubuntu-26_04-lts:server:latest";
 const DEFAULT_AZURE_LINUX_ARM64_IMAGE = "Canonical:ubuntu-26_04-lts:server-arm64:latest";
@@ -485,9 +486,10 @@ export class AzureClient {
   readonly image: string;
   readonly sshCIDRs: string[];
   readonly defaultLocation: string;
-  private readonly tokenCache = new ExpiringTokenCache();
+  private tokenCache = new ExpiringTokenCache();
   private ephemeralOSSupport?: Map<string, boolean>;
   private skuAvailability = new AzureSKUAvailability();
+  private createDeadline: number | undefined;
   private readonly deferredCleanup:
     | ((request: AzureDeferredCleanupRequest) => Promise<void>)
     | undefined;
@@ -747,10 +749,11 @@ export class AzureClient {
   }> {
     const locations = azureRegionCandidates(config, this.env, this.defaultLocation);
     const multiRegion = locations.length > 1;
+    const deadline = Date.now() + AZURE_CREATE_BUDGET_MS;
     const history = new ProvisioningAttemptHistory();
     let allRejected = true;
     for (const location of locations) {
-      const client = this.clientForLocation(location, multiRegion);
+      const client = this.clientForLocation(location, multiRegion, deadline);
       try {
         // oxlint-disable-next-line eslint/no-await-in-loop -- region fallback must preserve operator preference order.
         const result = await client.createServerWithFallbackInLocation(
@@ -759,6 +762,7 @@ export class AzureClient {
           leaseID,
           slug,
           owner,
+          multiRegion,
         );
         const server = {
           ...result.server,
@@ -788,8 +792,12 @@ export class AzureClient {
     throw allRejected ? new AzureProvisioningRejectedError(failure) : failure;
   }
 
-  private clientForLocation(location: string, multiRegion: boolean): AzureClient {
-    if (location === this.defaultLocation && !multiRegion) return this;
+  private clientForLocation(
+    location: string,
+    multiRegion: boolean,
+    deadline?: number,
+  ): AzureClient {
+    if (location === this.defaultLocation && !multiRegion && deadline === undefined) return this;
     const options: {
       location: string;
       vnet: string;
@@ -812,7 +820,18 @@ export class AzureClient {
       options.ownedDeleteClaimStorage = this.ownedDeleteClaimStorage;
     }
     const client = new AzureClient(this.env, options);
-    client.fetcher = this.fetcher;
+    client.tokenCache = this.tokenCache;
+    client.createDeadline = deadline;
+    client.fetcher =
+      deadline === undefined
+        ? this.fetcher
+        : async (input, init) => {
+            if (Date.now() >= deadline)
+              throw new Error("Azure provisioning deadline exceeded after 25m");
+            const budget = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
+            const signal = init?.signal ? AbortSignal.any([init.signal, budget]) : budget;
+            return this.fetcher(input, { ...init, signal });
+          };
     client.skuAvailability = this.skuAvailability;
     return client;
   }
@@ -823,6 +842,7 @@ export class AzureClient {
     leaseID: string,
     slug: string,
     owner: string,
+    multiRegion: boolean,
   ): Promise<{
     server: ProviderMachine;
     serverType: string;
@@ -843,74 +863,53 @@ export class AzureClient {
     const candidates = azureProvisioningCandidatesForConfig(config).toSorted(
       (a, b) => rank(a) - rank(b),
     );
-    const validateAvailability = (vmSize: string) => {
-      if (availability.get(vmSize.toLowerCase()) === false)
-        throw new Error(`NotAvailableForSubscription: ${vmSize} is restricted in ${location}`);
-    };
+    const markets = [config.capacityMarket];
+    if (config.capacityMarket === "spot" && config.capacityFallback.startsWith("on-demand"))
+      markets.push("on-demand");
     const history = new ProvisioningAttemptHistory();
     let allRejected = true;
     let infra: AzureSharedInfraNames | undefined;
-    for (let index = 0; index < candidates.length; index += 1) {
-      const vmSize = candidates[index] ?? config.serverType;
-      const nextConfig = { ...config, serverType: vmSize };
-      if (!nextConfig.azureSnapshot) {
-        // Validate preview-only OS disk requirements before allocating network resources.
-        // oxlint-disable-next-line eslint/no-await-in-loop -- SKU fallback must stay sequential.
-        await this.validateOSDiskMode(nextConfig, location);
-      }
-      try {
-        validateAvailability(vmSize);
-        if (!infra) {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- shared infra is created once, after config validation.
-          infra = await this.ensureSharedInfra(location, config);
-        }
-        // oxlint-disable-next-line eslint/no-await-in-loop -- SKU fallback must stay sequential.
-        const server = await this.createVM(
-          nextConfig,
-          location,
-          leaseID,
-          slug,
-          owner,
-          infra,
-          azureAttemptNameSeed(leaseID, location, config.capacityMarket, index),
-        );
-        return { server, serverType: vmSize, market: config.capacityMarket, ...history.result() };
-      } catch (error) {
-        if (providerProvisioningCleanupClaim(error)) throw error;
-        allRejected &&= error instanceof AzureProvisioningRejectedError;
-        const message = error instanceof Error ? error.message : String(error);
-        history.record(
-          {
-            region: location,
-            serverType: vmSize,
-            market: config.capacityMarket,
-            category: azureProvisioningErrorCategory(message) || "fatal",
-            message: conciseAzureProvisioningMessage(message),
-          },
-          `${vmSize}: ${message}`,
-        );
-        if (!isRetryableProvisioningError(message)) break;
-      }
-    }
-    if (config.capacityMarket === "spot" && config.capacityFallback.startsWith("on-demand")) {
+    for (const market of markets) {
       for (let index = 0; index < candidates.length; index += 1) {
         const vmSize = candidates[index] ?? config.serverType;
-        const nextConfig: LeaseConfig = {
-          ...config,
-          capacityMarket: "on-demand",
-          serverType: vmSize,
-        };
+        if (this.createDeadline !== undefined && Date.now() >= this.createDeadline) {
+          // Preserve previous ambiguous failures; elapsed time is never rejection evidence.
+          const failure = history.error("Azure provisioning deadline exceeded after 25m; ");
+          throw allRejected ? new AzureProvisioningRejectedError(failure) : failure;
+        }
+        const nextConfig = { ...config, capacityMarket: market, serverType: vmSize };
+        const cacheKey = `azure-capacity:${encodeURIComponent(this.providerScope().toLowerCase())}:${location.toLowerCase()}:${vmSize.toLowerCase()}:${market}`;
+        // Capacity hints never establish allocation or cleanup facts for this request.
+        // oxlint-disable-next-line eslint/no-await-in-loop -- persisted hints are read before each ordered attempt.
+        const cachedUntil = await this.ownedDeleteClaimStorage
+          ?.get<number>(cacheKey)
+          .catch(() => undefined);
+        if (typeof cachedUntil === "number" && cachedUntil > Date.now()) {
+          history.record(
+            {
+              region: location,
+              serverType: vmSize,
+              market,
+              category: "capacity-cache",
+              message: "SkuNotAvailable: skipping recently rejected capacity",
+            },
+            `${vmSize}: cached SkuNotAvailable`,
+          );
+          continue;
+        }
         if (!nextConfig.azureSnapshot) {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- market fallback must preserve ordered capacity preference.
+          // oxlint-disable-next-line eslint/no-await-in-loop -- validate before allocating network resources.
           await this.validateOSDiskMode(nextConfig, location);
         }
+        const startedAt = Date.now();
         try {
-          validateAvailability(vmSize);
+          if (availability.get(vmSize.toLowerCase()) === false)
+            throw new Error(`NotAvailableForSubscription: ${vmSize} is restricted in ${location}`);
           if (!infra) {
-            // oxlint-disable-next-line eslint/no-await-in-loop -- shared infra is created once, after config validation.
+            // oxlint-disable-next-line eslint/no-await-in-loop -- shared infra is created once after validation.
             infra = await this.ensureSharedInfra(location, config);
           }
-          // oxlint-disable-next-line eslint/no-await-in-loop -- market fallback must preserve ordered capacity preference.
+          // oxlint-disable-next-line eslint/no-await-in-loop -- no next attempt before this attempt settles.
           const server = await this.createVM(
             nextConfig,
             location,
@@ -918,24 +917,34 @@ export class AzureClient {
             slug,
             owner,
             infra,
-            azureAttemptNameSeed(leaseID, location, "on-demand", index),
+            azureAttemptNameSeed(leaseID, location, market, index),
           );
-          return { server, serverType: vmSize, market: "on-demand", ...history.result() };
+          return { server, serverType: vmSize, market, ...history.result() };
         } catch (error) {
           if (providerProvisioningCleanupClaim(error)) throw error;
           allRejected &&= error instanceof AzureProvisioningRejectedError;
           const message = error instanceof Error ? error.message : String(error);
+          const category = azureProvisioningErrorCategory(message) || "fatal";
           history.record(
             {
               region: location,
               serverType: vmSize,
-              market: "on-demand",
-              category: azureProvisioningErrorCategory(message) || "fatal",
+              market,
+              category,
               message: conciseAzureProvisioningMessage(message),
+              durationMs: Date.now() - startedAt,
             },
-            `on-demand ${vmSize}: ${message}`,
+            `${market} ${vmSize}: ${message}`,
           );
-          if (!isRetryableProvisioningError(message)) break;
+          if (category === "capacity" && error instanceof AzureProvisioningRejectedError) {
+            // Only definite rejection plus verified cleanup can populate this hint.
+            // oxlint-disable-next-line eslint/no-await-in-loop -- publish the hint before moving to another candidate.
+            await this.ownedDeleteClaimStorage
+              ?.put(cacheKey, Date.now() + 5 * 60_000)
+              .catch(() => undefined);
+          }
+          if (!isRetryableProvisioningError(message) || (multiRegion && category === "capacity"))
+            break;
         }
       }
     }
@@ -3230,7 +3239,7 @@ export class AzureClient {
     let interval = pollInterval(response);
     const timeoutMs = opts?.lroTimeoutMs;
     const lroTimeoutMs = timeoutMs && timeoutMs > 0 ? timeoutMs : 20 * 60_000;
-    const deadline = Date.now() + lroTimeoutMs;
+    const deadline = Math.min(Date.now() + lroTimeoutMs, this.createDeadline ?? Infinity);
     for (;;) {
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) break;
@@ -3283,6 +3292,9 @@ export class AzureClient {
           throw new Error(`azure resource reached ${resourceState}`);
         }
       }
+    }
+    if (this.createDeadline !== undefined && Date.now() >= this.createDeadline) {
+      throw new Error("Azure provisioning deadline exceeded after 25m");
     }
     throw new Error(
       timeoutMs && timeoutMs > 0
