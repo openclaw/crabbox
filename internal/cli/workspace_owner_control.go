@@ -52,6 +52,7 @@ func startWorkspaceOwnerControl(ctx context.Context, target SSHTarget) (SSHTarge
 	}()
 	var once sync.Once
 	var closeErr error
+	var cleanupErr error
 	closeMaster := func() error {
 		once.Do(func() {
 			cancel()
@@ -59,7 +60,8 @@ func startWorkspaceOwnerControl(ctx context.Context, target SSHTarget) (SSHTarge
 			if !master.WasTerminatedByOurCancel() {
 				closeErr = waitErr
 			}
-			closeErr = errors.Join(closeErr, session.Close(), os.RemoveAll(dir))
+			cleanupErr = errors.Join(session.Close(), os.RemoveAll(dir))
+			closeErr = errors.Join(closeErr, cleanupErr)
 		})
 		return closeErr
 	}
@@ -68,7 +70,14 @@ func startWorkspaceOwnerControl(ctx context.Context, target SSHTarget) (SSHTarge
 	for {
 		select {
 		case <-done:
-			return target, noop, errors.Join(fmt.Errorf("workspace owner SSH control connection exited: %s", redactSSHTransportDiagnostic(target, diagnostic.String())), closeMaster())
+			_ = closeMaster()
+			if ctx.Err() == nil && cleanupErr == nil {
+				// Some SSH wrappers support commands but cannot keep a master alive.
+				// No owner request ran yet; use direct control only after joining cleanup.
+				target.NoControlMaster = true
+				return target, noop, nil
+			}
+			return target, noop, errors.Join(fmt.Errorf("workspace owner SSH control connection exited: %s", redactSSHTransportDiagnostic(target, diagnostic.String())), closeErr, ctx.Err())
 		default:
 		}
 		// OpenSSH publishes its control socket only after authenticating. Clients

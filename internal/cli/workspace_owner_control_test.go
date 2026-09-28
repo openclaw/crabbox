@@ -144,6 +144,49 @@ func TestWorkspaceOwnerControlSupportsOlderSSH(t *testing.T) {
 	}
 }
 
+func TestWorkspaceOwnerControlFallsBackAfterEarlyExit(t *testing.T) {
+	ssh, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip(err)
+	}
+	for _, code := range []string{"0", "127"} {
+		t.Run(code, func(t *testing.T) {
+			dir := t.TempDir()
+			controlLog := filepath.Join(dir, "control-path")
+			script := "#!/bin/sh\nmaster=; previous=\nfor arg do\n" +
+				" if [ \"$previous\" = -S ]; then printf %s \"$arg\" > " + shellQuote(controlLog) + "; fi\n" +
+				" [ \"$arg\" != -N ] || master=1\n previous=$arg\ndone\n" +
+				"[ -z \"$master\" ] || exit " + code + "\nexec " + shellQuote(ssh) + " \"$@\"\n"
+			if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			server := newForwardSSHServer(t, "fixture")
+			close(server.release)
+			server.enableReadinessSessions(t, t.TempDir(), true)
+			target := SSHTarget{Host: "127.0.0.1", Port: strconv.Itoa(server.port()), User: "fixture", TargetOS: targetLinux,
+				FallbackPorts: []string{}, DisableHostKeyChecking: true}
+			got, closeControl, err := startWorkspaceOwnerControl(t.Context(), target)
+			if err != nil || got.ownerControlPath != "" || !got.NoControlMaster {
+				t.Fatalf("direct fallback: target=%+v err=%v", got, err)
+			}
+			if err := runSSHQuiet(t.Context(), got, "exit 0"); err != nil {
+				t.Fatal(err)
+			}
+			if err := closeControl(); err != nil {
+				t.Fatal(err)
+			}
+			path, err := os.ReadFile(controlLog)
+			if err != nil || len(path) == 0 {
+				t.Fatalf("control path: %q, %v", path, err)
+			}
+			if _, err := os.Lstat(filepath.Dir(string(path))); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("failed master left its directory: %v", err)
+			}
+		})
+	}
+}
+
 func TestWorkspaceOwnerControlCanceledStartup(t *testing.T) {
 	server := newForwardSSHServer(t, "fixture")
 	// Withhold authentication until after startup is canceled.

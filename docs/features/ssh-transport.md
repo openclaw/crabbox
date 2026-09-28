@@ -147,6 +147,9 @@ connection is independent of workload and file-transfer connections. It uses
 `ControlPersist=no`; acquisition failure and owner release terminate and join
 the owned process tree before removing its temporary configuration and socket.
 Cancellation still allows ownership cleanup before the connection closes.
+If an SSH wrapper exits before keeping the master alive, startup joins and cleans
+it before falling back to direct owner-control connections with multiplexing
+disabled. Cancellation and cleanup failures still stop acquisition.
 Owner scripts travel as complete, length-checked stdin frames so long scripts
 do not exceed the macOS OpenSSH multiplexing message limit. Windows/WSL2,
 proxy/config-backed routes, provider-owned authoritative known-host files, and
