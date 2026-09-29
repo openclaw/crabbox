@@ -114,14 +114,11 @@ it.each(["additive", "authoritative"] as const)(
 it("joins a full batch before one compaction and retries every rule rejected before it", async () => {
   const gate = Promise.withResolvers<void>();
   let entered = 0;
-  const { client, config, calls } = harness(
-    async (_, index) => {
-      entered++;
-      if (index === 3) await gate.promise;
-      return index < 2 ? awsError("RulesPerSecurityGroupLimitExceeded") : xml();
-    },
-    "<item><ipProtocol>tcp</ipProtocol><fromPort>2222</fromPort><toPort>2222</toPort><ipRanges><item><cidrIp>203.0.113.1/32</cidrIp></item></ipRanges></item>",
-  );
+  const { client, config, calls } = harness(async (_, index) => {
+    entered++;
+    if (index === 3) await gate.promise;
+    return index < 2 ? awsError("RulesPerSecurityGroupLimitExceeded") : xml();
+  }, "<item><ipProtocol>tcp</ipProtocol><fromPort>2222</fromPort><toPort>2222</toPort><ipRanges><item><cidrIp>203.0.113.1/32</cidrIp></item></ipRanges></item>");
   const refresh = client.refreshSSHIngress({ ...config, sshFallbackPorts: [] });
   try {
     await vi.waitFor(() => expect(entered).toBe(4));
