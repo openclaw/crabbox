@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Avoid full Hetzner SSH-key inventory reads for fresh lease keys and cache successful coordinator AWS Spot/Hetzner price estimates for five minutes without blocking admission on quote failures.
+
 - Verify retained Actions workspace identity before run, sync, cache warm, or editor handoff; preserve custom paths and explicit cross-repository hydration with claim-bound consent. [PR 2564](https://github.com/openclaw/crabbox/pull/2564). Thanks @vincentkoc.
 ### Fixed
 - Preserve run-history logs after an ambiguous terminal commit, confirming the exact stored finish before acknowledging recovery and retaining evidence when rereads fail. [Issue 1561](https://github.com/openclaw/crabbox/issues/1561).

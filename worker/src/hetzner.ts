@@ -206,14 +206,11 @@ export class HetznerClient {
       }
     }
 
-    const existingIdentity = reusableHetznerSSHKey(
-      await this.listSSHKeys(),
-      name,
-      identity,
-      leaseOwned ? leaseID : undefined,
-    );
-    if (existingIdentity) {
-      return { key: existingIdentity, created: false };
+    // Fresh per-lease keys normally cannot collide. Let the uniqueness response
+    // trigger the full inventory read; shared/custom keys retain eager reuse.
+    if (!leaseOwned) {
+      const existingIdentity = reusableHetznerSSHKey(await this.listSSHKeys(), name, identity);
+      if (existingIdentity) return { key: existingIdentity, created: false };
     }
 
     try {

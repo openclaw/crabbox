@@ -75,7 +75,7 @@ Pricing precedence (highest first):
 
 ```text
 1. CRABBOX_COST_RATES_JSON explicit override, keyed "<provider>:<serverType>".
-2. Provider live pricing:
+2. Provider pricing (successful quotes cached for up to five minutes):
    - AWS EC2 spot price history.
    - Hetzner Cloud server-type hourly prices.
 3. Built-in static fallback rate for the "<provider>:<serverType>" pair.
@@ -86,6 +86,11 @@ Pricing precedence (highest first):
 hourly USD number; non-positive or non-numeric entries are ignored. Hetzner live prices
 are quoted in EUR and converted to USD by multiplying with `CRABBOX_EUR_TO_USD`
 (default `1.08`).
+
+Successful quotes are cached in coordinator memory by provider, server type, region
+or location, and market; Hetzner also includes the EUR/USD setting. Each coordinator
+environment retains at most 256 quotes. Missing, failed, invalid, or expired quotes
+use the normal lookup/fallback path; on-demand AWS estimates never use Spot quotes.
 
 Each optional AWS or Hetzner quote has a five-second waiting budget, including
 credentials, identity checks, qualification RPCs, and response-body reads. Timeout

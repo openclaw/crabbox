@@ -185,3 +185,21 @@ owned key ID without a server receipt. See [cleanup confirmation](../features/li
 - [Provider backends](../provider-backends.md)
 - [Linux VNC](../features/vnc-linux.md)
 - [AWS](aws.md), [GCP](gcp.md), [Azure](azure.md)
+
+## Coordinator preparation reuse
+
+Fresh canonical per-lease SSH keys still receive a name lookup and ownership
+check. The coordinator then attempts registration directly, reading the full
+SSH-key inventory only after a uniqueness conflict. Shared or custom keys keep
+their existing eager identity lookup. Conflict recovery still verifies exact
+key identity and lease ownership before reusing a canonical key; differently
+named shared keys remain retained during cleanup. Inventory failures fail closed.
+
+The coordinator caches successful hourly pricing estimates in memory for five
+minutes by provider, server type, and location (including the EUR/USD conversion
+setting for Hetzner). AWS Spot estimates use the same bounded cache, with region
+and market kept separate; on-demand estimates retain their existing fallback.
+Each coordinator environment keeps at most 256 cached quotes. Failed or missing
+quotes are not cached and use the existing fallback estimate. Cold lookups keep
+the existing five-second deadline, so unavailable pricing cannot reject admission
+or leave it waiting indefinitely. These estimates are not billing guarantees.

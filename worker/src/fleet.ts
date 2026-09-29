@@ -3,6 +3,7 @@ import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 import { AsyncMutex, KeyedAsyncMutex } from "./async-mutex";
 import { AWSPoolAccess } from "./aws-pool-access";
 import { commitLeaseAdmission, retainLeaseWake } from "./lease-admission";
+import { cachedProviderPrice } from "./provider-pricing";
 import {
   ReadyPoolAccess,
   portablePoolPrefix,
@@ -27437,7 +27438,11 @@ export class HetznerProvider implements CloudProvider {
     serverType: string,
     config: ReturnType<typeof leaseConfig>,
   ): Promise<number | undefined> {
-    return this.client.hourlyPriceUSD(serverType, config.location);
+    return cachedProviderPrice(
+      this.env,
+      ["hetzner", serverType, config.location, this.env.CRABBOX_EUR_TO_USD ?? ""],
+      () => this.client.hourlyPriceUSD(serverType, config.location),
+    );
   }
 }
 
@@ -31113,7 +31118,9 @@ export class AWSProvider implements CloudProvider {
     if (config.capacityMarket === "on-demand") return Promise.resolve(undefined);
     const region = config.awsRegion || this.region;
     const client = region === this.region ? this.client : new EC2SpotClient(this.env, region);
-    return client.hourlySpotPriceUSD(serverType);
+    return cachedProviderPrice(this.env, ["aws", serverType, region, "spot"], () =>
+      client.hourlySpotPriceUSD(serverType),
+    );
   }
 
   private async promotedImage(config: {
