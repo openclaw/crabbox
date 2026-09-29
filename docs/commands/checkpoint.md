@@ -159,13 +159,50 @@ such result. Coordinator-managed captures, lost replies, interrupted commands,
 and failures after submission retain their existing recovery behavior. Never
 infer non-submission from an empty image ID, a missing checkpoint, or error text.
 
+A valid native mode that capability resolution rejects exits 2 with a diagnostic
+identifying the requested mode, any explicitly supplied strategy, resolved
+provider, and target OS. When a coordinator is configured, the diagnostic also
+identifies its origin (without credentials, path, query, or fragment) and explains
+that the provider does not offer native checkpoints for coordinator-brokered
+leases with that mode and strategy. It recommends `--mode archive` or a provider
+configuration that offers native checkpoints. With `--json`, stdout contains
+exactly this seven-key failure variant, while the diagnostic goes to stderr:
+
+```json
+{
+  "schema": "crabbox.checkpoint.create.failure.v1",
+  "outcome": "not_submitted",
+  "reason": "native_unsupported",
+  "provider": "hetzner",
+  "leaseId": "cbx_abcdef012345",
+  "localReservation": "none",
+  "message": "checkpoint create --mode native is unsupported for provider=hetzner target=linux through coordinator https://coordinator.example: the provider does not offer native checkpoints for coordinator-brokered leases with this mode and strategy; use --mode archive or a provider configuration that offers native checkpoints"
+}
+```
+
+The message is the same diagnostic, bounded to 1024 UTF-8 bytes without splitting
+a rune. This variant has no `checkpointId`; the six-key `removed` variant above
+has no `reason` or `message` and is unchanged.
+
+A `native_unsupported` receipt is emitted only when capability resolution refuses
+before any checkpoint reservation, source preparation, or provider/coordinator
+checkpoint create request. It also precedes checkpoint create's own lease claim
+registration and `--expire-unused-after`
+coordinator probe. Lease resolution retains its existing behavior, including any
+claim/adoption it performs with `--reclaim`. Consumers may treat this receipt as
+proof that no checkpoint exists or will be created for that invocation and that
+the source was not prepared or modified for capture. Invalid mode strings are
+usage errors (exit 2), rejected before lease resolution or provider/coordinator
+calls, and emit no receipt.
+
 `--mode` also accepts the aliases `provider-native`/`vm` (native),
 `ami`/`image` (image), `snapshot`/`disk`/`disk-snapshot` (disk snapshot),
 `workspace`/`workspace-archive` (archive), and `recipe`. `--strategy auto`
 resolves to a disk snapshot where the provider supports one.
 Retention defaults to manual. Explicit expiry rejects direct, archive, recipe,
-and unsupported checkpoints before any resource mutation; an older coordinator
-returns an upgrade diagnostic instead of silently creating an unmanaged image.
+and unsupported checkpoints before any checkpoint resource mutation; an older
+coordinator returns an upgrade diagnostic instead of silently creating an unmanaged
+image.
 
 For brokered native checkpoints, `--wait` also follows a coordinator-retained
 capture while its provider result is being recovered. It observes the same

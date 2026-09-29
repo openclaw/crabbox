@@ -310,6 +310,29 @@ credential handling are provider-specific; see the provider notes above.
 Archive checkpoints tar the workdir over SSH (excluding `.crabbox/env` and
 `.crabbox/scripts`), download it, and save the record.
 
+With `--json`, a native operation that proves image submission was never attempted
+can emit a `crabbox.checkpoint.create.failure.v1` receipt with
+`outcome: not_submitted`. The existing six-key variant includes `schema`, `outcome`,
+`provider`, `leaseId`, `checkpointId`, and `localReservation: removed`; it is emitted
+only after the exact local reservation is removed and its absence verified. It
+does not attest successful source rollback or readiness.
+
+The seven-key `native_unsupported` variant includes `schema`, `outcome`, `reason`,
+`provider`, `leaseId`, `localReservation: none`, and `message`. It is emitted only
+when capability resolution refuses before any checkpoint reservation, source
+preparation, or provider/coordinator checkpoint create request. The refusal precedes checkpoint create's own lease
+claim registration and unused-expiry coordinator probe. Lease resolution keeps
+its existing behavior, including claim/adoption with `--reclaim`. This receipt
+proves no checkpoint exists or will be created for that invocation and the source
+was not prepared or modified for capture.
+
+Unsupported native requests exit 2 with a diagnostic naming the mode, any explicit
+strategy, provider, target OS, and sanitized coordinator origin when configured.
+The same message appears in the receipt, bounded to 1024 bytes on a UTF-8 rune
+boundary. Invalid modes fail before lease resolution and emit no receipt. See the
+[checkpoint command reference](../commands/checkpoint.md#create) for both exact
+receipt shapes; neither an absent receipt nor error text proves non-submission.
+
 ### list and inspect
 
 `list` prints local checkpoint records; `inspect <id>` prints one record's

@@ -19,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -129,6 +130,9 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
+	if !validCheckpointCreateMode(*mode) {
+		return Exit(2, "checkpoint mode must be auto, native, or archive")
+	}
 	ctx = withCheckpointAdmin(ctx, *admin)
 	operationApp := a
 	if *jsonOut {
@@ -183,6 +187,22 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 		return err
 	}
 	createKind := checkpointCreateMode(*mode, *strategy, cfg, server, target, *recipeOnly)
+	if createKind == "unsupported" {
+		message := checkpointNativeUnsupportedMessage(*mode, *strategy, flagWasSet(fs, "strategy"), cfg, server, target)
+		failure := Exit(2, "%s", message)
+		if *jsonOut {
+			return errors.Join(failure, json.NewEncoder(a.Stdout).Encode(struct {
+				Schema           string `json:"schema"`
+				Outcome          string `json:"outcome"`
+				Reason           string `json:"reason"`
+				Provider         string `json:"provider"`
+				LeaseID          string `json:"leaseId"`
+				LocalReservation string `json:"localReservation"`
+				Message          string `json:"message"`
+			}{"crabbox.checkpoint.create.failure.v1", "not_submitted", "native_unsupported", firstNonBlank(server.Provider, cfg.Provider), leaseID, "none", message}))
+		}
+		return failure
+	}
 	if retentionDuration > 0 {
 		driver, supported := nativeCheckpointCreateDriver(cfg, server, target, *strategy)
 		_, coordinatorDriver := driver.(coordinatorCheckpointDriver)
@@ -2538,6 +2558,41 @@ func newCheckpointID() (string, error) {
 		return "", Exit(2, "generate checkpoint id: %v", err)
 	}
 	return checkpointIDPrefix + hex.EncodeToString(raw[:]), nil
+}
+
+func validCheckpointCreateMode(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "auto", "native", "provider-native", "vm", "ami", "image", "snapshot", "disk-snapshot", "disk", "archive", "workspace", "workspace-archive", "recipe":
+		return true
+	default:
+		return false
+	}
+}
+
+func checkpointNativeUnsupportedMessage(mode, strategy string, strategyExplicit bool, cfg Config, server Server, target SSHTarget) string {
+	message := "checkpoint create --mode " + strings.TrimSpace(mode)
+	if strategyExplicit {
+		message += " --strategy " + blank(strings.TrimSpace(strategy), `""`)
+	}
+	message += fmt.Sprintf(" is unsupported for provider=%s target=%s", firstNonBlank(server.Provider, cfg.Provider), firstNonBlank(target.TargetOS, cfg.TargetOS))
+	suffix := "; use --mode archive or a provider configuration that offers native checkpoints"
+	if strings.TrimSpace(cfg.Coordinator) != "" {
+		message += " through coordinator"
+		if origin, err := url.Parse(checkpointCoordinatorOrigin(cfg.Coordinator)); err == nil && origin.Host != "" {
+			// Ownership origins retain deployment paths; diagnostics expose only the origin.
+			message += " " + origin.Scheme + "://" + origin.Host
+		}
+		suffix = ": the provider does not offer native checkpoints for coordinator-brokered leases with this mode and strategy" + suffix
+	}
+	// Bound both the receipt and stderr diagnostic, retaining the actionable next step.
+	if limit := 1024 - len(suffix); len(message) > limit {
+		end := limit - len("...")
+		for !utf8.RuneStart(message[end]) {
+			end--
+		}
+		message = message[:end] + "..."
+	}
+	return message + suffix
 }
 
 func checkpointCreateMode(mode, strategy string, cfg Config, server Server, target SSHTarget, recipeOnly bool) string {
