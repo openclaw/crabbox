@@ -49,6 +49,10 @@ const (
 type ParallelsClient struct {
 	Cfg    Config
 	Runner CommandRunner
+	// WarnClone receives advisory output immediately before clone submission.
+	WarnClone func(string)
+
+	linkedMacOSOnAppleSilicon bool
 }
 
 type ParallelsVM struct {
@@ -388,6 +392,7 @@ func (c *ParallelsClient) GetVM(ctx context.Context, id string) (ParallelsVM, er
 // ResolveCloneMode defers the default until the execution host is selected.
 // Query hardware on that host, including when its shell runs under Rosetta.
 func (c *ParallelsClient) ResolveCloneMode(ctx context.Context) error {
+	c.linkedMacOSOnAppleSilicon = false
 	mode := strings.ToLower(strings.TrimSpace(c.Cfg.Parallels.CloneMode))
 	switch mode {
 	case "full", "unlink":
@@ -407,9 +412,10 @@ func (c *ParallelsClient) ResolveCloneMode(ctx context.Context) error {
 		switch strings.TrimSpace(result.Stdout) {
 		case "1":
 			if mode == "linked" {
-				return Exit(2, "Crabbox refuses linked clones of macOS guests on Apple silicon: affected templates start without guest IP or Parallels Tools; use --parallels-clone-mode full and clear snapshot selectors with --parallels-source-snapshot= --parallels-source-snapshot-id= (full clones use the source VM's current state)")
+				c.linkedMacOSOnAppleSilicon = true
+			} else {
+				mode = "full"
 			}
-			mode = "full"
 		case "", "0":
 		default:
 			return Exit(4, "detect Parallels host architecture: expected hw.optional.arm64 to be absent, 0, or 1")
@@ -493,6 +499,13 @@ func (c *ParallelsClient) submitClone(ctx context.Context, source, snapshotID, l
 		if err := beforeSubmit(); err != nil {
 			return nil, err
 		}
+	}
+	if c.linkedMacOSOnAppleSilicon && c.WarnClone != nil {
+		warning := "warning: linked clones of macOS guests on Apple silicon have been observed to start without guest IP or Parallels Tools; if IP discovery times out, use --parallels-clone-mode full"
+		if snapshotID != "" {
+			warning += " and clear snapshot selectors with --parallels-source-snapshot= --parallels-source-snapshot-id="
+		}
+		c.WarnClone(warning)
 	}
 	result, err := c.prlctl(ctx, nil, args...)
 	if err != nil {

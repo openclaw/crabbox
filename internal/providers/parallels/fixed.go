@@ -151,7 +151,7 @@ func validateParallelsFixedVM(claim core.LeaseClaim, intent *core.FixedCreateInt
 	return nil
 }
 
-func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest, warnClone func(string)) (core.LeaseTarget, error) {
 	leaseID := req.RequestedLeaseID
 	source := shared.FirstNonBlankTrimmed(b.Cfg.Parallels.SourceID, b.Cfg.Parallels.Source)
 	if source == "" {
@@ -192,8 +192,8 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 			if err != nil {
 				return core.FixedLeaseBinding{}, err
 			}
-			// Existing leases may replay an explicitly selected legacy mode;
-			// new submissions still pass the clone-mode preflight.
+			// Resolve defaults before fingerprinting. Explicit replay needs no
+			// architecture probe; warnings belong only to clone submission.
 			if !exists || strings.TrimSpace(cfg.Parallels.CloneMode) == "" {
 				if err := client.ResolveCloneMode(ctx); err != nil {
 					return core.FixedLeaseBinding{}, err
@@ -338,7 +338,9 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 			// resulting bundle inside this attempt's directory.
 			cloneCfg := cfg
 			cloneCfg.Parallels.VMRoot = createDir
-			cloneErr := core.NewParallelsClient(cloneCfg, b.RT.Exec).SubmitClone(ctx, sourceID, snapshotID, leaseID, intent.Slug, req.Keep, tx.Admit)
+			cloneClient := core.NewParallelsClient(cloneCfg, b.RT.Exec)
+			cloneClient.WarnClone = warnClone
+			cloneErr := cloneClient.SubmitClone(ctx, sourceID, snapshotID, leaseID, intent.Slug, req.Keep, tx.Admit)
 			// Whatever the reply said, a submitted clone may already count
 			// against maxVMs, and the reservation has done its job either way:
 			// the rest of bring-up need not keep other forks waiting.

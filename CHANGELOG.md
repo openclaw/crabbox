@@ -15,7 +15,7 @@
 
 ### Fixes
 
-- Default Parallels macOS guests on Apple silicon to full clones and reject new linked clones with actionable snapshot-clearing guidance, while retaining linked defaults elsewhere. [Issue 2398](https://github.com/openclaw/crabbox/issues/2398). Thanks @saariuslystoned.
+- Default Parallels macOS guests on Apple silicon to full clones, warn before explicitly selected linked clones about observed IP/Tools failures, and clarify snapshot-clearing guidance while retaining linked defaults elsewhere. [PR 2606](https://github.com/openclaw/crabbox/pull/2606), [Issue 2398](https://github.com/openclaw/crabbox/issues/2398). Thanks @saariuslystoned.
 
 ## 0.68.0 - 2026-09-28
 

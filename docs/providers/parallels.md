@@ -89,11 +89,14 @@ down when they serve as local fleet bases.
 When clone mode is unset, Crabbox selects `full` for a `macos` target on an
 Apple silicon Parallels host and `linked` elsewhere. Detection runs on the
 selected host, including remote and fleet hosts, and checks hardware support
-rather than the architecture of the Crabbox process. An explicit `linked`
-request for a new macOS clone on Apple silicon fails before cloning, with
-instructions to use `--parallels-clone-mode full`.
+rather than the architecture of the Crabbox process. To opt back into linked
+cloning, select `--parallels-clone-mode linked` (or `parallels.cloneMode: linked`)
+and a power-off snapshot. Crabbox proceeds with linked mode and prints one
+warning to stderr before cloning, with full-clone recovery guidance if IP
+discovery times out. Replaying an existing fixed lease does not clone or repeat
+the warning; changing its clone mode still conflicts with its recorded intent.
 
-This is a Crabbox guard against the boot failure reported in
+The full default avoids the known boot issue reported in
 [issue 2398](https://github.com/openclaw/crabbox/issues/2398): an affected linked
 clone reports `running` but never supplies an IP or Tools session, while a full
 clone of the same template works. It is not a claim that all Parallels versions
@@ -109,8 +112,8 @@ space, and cannot select a snapshot. Crabbox never silently discards a snapshot
 selector: clear both `parallels.sourceSnapshot` and `parallels.sourceSnapshotId`
 (including template/environment overrides) with
 `--parallels-source-snapshot= --parallels-source-snapshot-id=` when choosing
-current-state cloning. Native snapshot creation and restore remain available;
-snapshot-based linked forks of macOS guests on Apple silicon are rejected.
+current-state cloning. Native snapshot creation, restore, and explicitly selected
+snapshot-based linked forks remain available on supported Parallels versions.
 
 ### IP discovery failures
 

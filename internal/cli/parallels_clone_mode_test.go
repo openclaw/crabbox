@@ -14,6 +14,7 @@ func TestParallelsCloneModeByHostAndTarget(t *testing.T) {
 	for _, tc := range []struct {
 		name, target, arm64, mode, snapshot, wantMode, wantErr string
 		remote                                                 bool
+		wantWarning                                            bool
 	}{
 		{name: "macOS Apple silicon default", target: targetMacOS, arm64: "1", wantMode: "full"},
 		{name: "remote Apple silicon default", target: targetMacOS, arm64: "1", remote: true, wantMode: "full"},
@@ -22,8 +23,11 @@ func TestParallelsCloneModeByHostAndTarget(t *testing.T) {
 		{name: "remote Intel default", target: targetMacOS, arm64: "0", remote: true, snapshot: "snap", wantMode: "linked"},
 		{name: "Linux default", target: targetLinux, arm64: "1", snapshot: "snap", wantMode: "linked"},
 		{name: "Windows default", target: targetWindows, arm64: "1", snapshot: "snap", wantMode: "linked"},
-		{name: "explicit linked rejected", target: targetMacOS, arm64: "1", mode: "linked", snapshot: "snap", wantErr: "--parallels-clone-mode full"},
+		{name: "explicit linked warns", target: targetMacOS, arm64: "1", mode: "linked", snapshot: "snap", wantMode: "linked", wantWarning: true},
+		{name: "remote explicit linked warns", target: targetMacOS, arm64: "1", remote: true, mode: "linked", snapshot: "snap", wantMode: "linked", wantWarning: true},
+		{name: "explicit linked still requires snapshot", target: targetMacOS, arm64: "1", mode: "linked", wantErr: "linked clones require --parallels-source-snapshot"},
 		{name: "explicit full", target: targetMacOS, arm64: "1", mode: "full", wantMode: "full"},
+		{name: "explicit unlink", target: targetMacOS, arm64: "1", mode: "unlink", wantMode: "unlink"},
 		{name: "Intel explicit linked", target: targetMacOS, arm64: "0", mode: "linked", snapshot: "snap", wantMode: "linked"},
 		{name: "default does not drop snapshot", target: targetMacOS, arm64: "1", snapshot: "snap", wantErr: "--parallels-source-snapshot= --parallels-source-snapshot-id="},
 		{name: "host detection fails closed", target: targetMacOS, arm64: "error", wantErr: "Parallels host architecture"},
@@ -41,7 +45,22 @@ func TestParallelsCloneModeByHostAndTarget(t *testing.T) {
 				cfg.Parallels.HostUser = "build"
 			}
 			runner := &parallelsCloneModeRunner{t: t, arm64: tc.arm64, remote: tc.remote}
-			_, err := NewParallelsClient(cfg, runner).Clone(context.Background(), "source", tc.snapshot, "cbx_abcdef123456", "mode", false)
+			client := NewParallelsClient(cfg, runner)
+			var warnings []string
+			client.WarnClone = func(message string) {
+				if len(runner.cloneArgs) != 0 {
+					t.Fatal("warning must precede clone submission")
+				}
+				warnings = append(warnings, message)
+			}
+			_, err := client.Clone(context.Background(), "source", tc.snapshot, "cbx_abcdef123456", "mode", false)
+			if tc.wantWarning {
+				if len(warnings) != 1 || !strings.Contains(warnings[0], "have been observed") || !strings.Contains(warnings[0], "--parallels-clone-mode full") || !strings.Contains(warnings[0], "--parallels-source-snapshot= --parallels-source-snapshot-id=") {
+					t.Fatalf("missing linked-clone warning and recovery guidance: %v", warnings)
+				}
+			} else if len(warnings) != 0 {
+				t.Fatalf("unexpected warning: %v", warnings)
+			}
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || len(runner.cloneArgs) != 0 {
 					t.Fatalf("err=%v clone=%v; want %q before clone", err, runner.cloneArgs, tc.wantErr)
@@ -53,6 +72,9 @@ func TestParallelsCloneModeByHostAndTarget(t *testing.T) {
 			}
 			if len(runner.cloneArgs) == 0 || slices.Contains(runner.cloneArgs, "--linked") != (tc.wantMode == "linked") {
 				t.Fatalf("clone args=%v, want mode=%s", runner.cloneArgs, tc.wantMode)
+			}
+			if tc.snapshot != "" && !slices.Contains(runner.cloneArgs, tc.snapshot) {
+				t.Fatalf("clone lost snapshot selector: %v", runner.cloneArgs)
 			}
 		})
 	}

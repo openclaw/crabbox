@@ -37,18 +37,25 @@ func NewBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 }
 
 func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	warned := false
+	warnClone := func(message string) {
+		if !warned {
+			fmt.Fprintln(b.RT.Stderr, message)
+			warned = true
+		}
+	}
 	// A caller-supplied lease ID is a single create identity. Retrying it with a
 	// fresh lease would defeat the replay contract, so it never enters the
 	// generated-ID bootstrap retry loop.
 	if strings.TrimSpace(req.RequestedLeaseID) != "" {
-		return b.acquireFixed(ctx, req)
+		return b.acquireFixed(ctx, req, warnClone)
 	}
 	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
-		return b.acquireOnce(ctx, req.Keep, req.RequestedSlug)
+		return b.acquireOnce(ctx, req.Keep, req.RequestedSlug, warnClone)
 	})
 }
 
-func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (core.LeaseTarget, error) {
+func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string, warnClone func(string)) (core.LeaseTarget, error) {
 	cfg := b.Cfg
 	source := strings.TrimSpace(shared.FirstNonBlankTrimmed(cfg.Parallels.SourceID, cfg.Parallels.Source))
 	if source == "" {
@@ -70,6 +77,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	defer releaseCapacityOnce()
 	cfg = selected
 	client := core.NewParallelsClient(cfg, b.RT.Exec)
+	client.WarnClone = warnClone
 	if err := client.ResolveCloneMode(ctx); err != nil {
 		return core.LeaseTarget{}, err
 	}
