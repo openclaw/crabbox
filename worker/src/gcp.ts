@@ -147,6 +147,49 @@ interface GCPImageObservation {
   labels?: Record<string, string>;
 }
 
+interface GCPFirewall {
+  description?: string;
+  network?: string;
+  direction?: string;
+  priority?: number;
+  disabled?: boolean;
+  sourceRanges?: string[];
+  targetTags?: string[];
+  sourceTags?: string[];
+  sourceServiceAccounts?: string[];
+  targetServiceAccounts?: string[];
+  destinationRanges?: string[];
+  allowed?: { IPProtocol?: string; ports?: string[] }[];
+  denied?: unknown[];
+}
+
+function gcpFirewallMatches(observed: GCPFirewall, desired: GCPFirewall): boolean {
+  const sameSet = (a: string[] | undefined, b: string[] | undefined) =>
+    Array.isArray(a) &&
+    Array.isArray(b) &&
+    JSON.stringify([...new Set(a)].toSorted()) === JSON.stringify([...new Set(b)].toSorted());
+  const network = (value: string | undefined) =>
+    value?.replace(/^https:\/\/www\.googleapis\.com\/compute\/v1\//, "");
+  return (
+    network(observed.network) === network(desired.network) &&
+    observed.direction === desired.direction &&
+    (observed.priority ?? 1000) === 1000 &&
+    (observed.disabled ?? false) === false &&
+    sameSet(observed.sourceRanges, desired.sourceRanges) &&
+    sameSet(observed.targetTags, desired.targetTags) &&
+    [
+      observed.sourceTags,
+      observed.sourceServiceAccounts,
+      observed.targetServiceAccounts,
+      observed.destinationRanges,
+      observed.denied,
+    ].every((value) => value === undefined || (Array.isArray(value) && value.length === 0)) &&
+    observed.allowed?.length === 1 &&
+    observed.allowed[0]?.IPProtocol === "tcp" &&
+    sameSet(observed.allowed[0]?.ports, desired.allowed?.[0]?.ports)
+  );
+}
+
 interface GCPDisk {
   id?: string;
   selfLink?: string;
@@ -168,13 +211,15 @@ export class GCPClient {
   readonly rootGB: number;
   readonly serviceAccount: string;
   fetcher: typeof fetch = (input, init) => fetch(input, init);
-  private tokenCache = new ExpiringTokenCache();
+  private tokenCache: ExpiringTokenCache;
 
   constructor(
     private readonly env: Env,
     zone?: string,
     project?: string,
+    private readonly sharedTokenCache?: ExpiringTokenCache,
   ) {
+    this.tokenCache = sharedTokenCache ?? new ExpiringTokenCache();
     this.project =
       project?.trim() || env.CRABBOX_GCP_PROJECT?.trim() || env.GCP_PROJECT_ID?.trim() || "";
     this.zone = zone || env.CRABBOX_GCP_ZONE?.trim() || "europe-west2-a";
@@ -225,9 +270,9 @@ export class GCPClient {
     if (scopedZone === this.zone && scopedProject === this.project) {
       return this;
     }
-    const client = new GCPClient(this.env, scopedZone, scopedProject);
+    const client = new GCPClient(this.env, scopedZone, scopedProject, this.sharedTokenCache);
     client.fetcher = this.fetcher;
-    client.tokenCache = this.tokenCache.clone();
+    client.tokenCache = this.sharedTokenCache ?? this.tokenCache.clone();
     return client;
   }
 
@@ -1104,17 +1149,18 @@ export class GCPClient {
       targetTags,
       allowed: [{ IPProtocol: "tcp", ports }],
     };
-    const existing = await this.gcp<{ description?: string }>(
-      "GET",
-      `/global/firewalls/${name}`,
-    ).catch((error) => {
-      if (isNotFound(error)) return undefined;
-      throw error;
-    });
+    const existing = await this.gcp<GCPFirewall>("GET", `/global/firewalls/${name}`).catch(
+      (error) => {
+        if (isNotFound(error)) return undefined;
+        throw error;
+      },
+    );
     if (existing) {
       if (!existing.description?.includes("Crabbox-managed")) {
         throw new Error(`gcp firewall ${name} exists but is not Crabbox-managed`);
       }
+      // A fresh complete policy match avoids an unnecessary global operation.
+      if (gcpFirewallMatches(existing, firewall)) return;
       const op = await this.gcp<GCPOperation>("PUT", `/global/firewalls/${name}`, firewall);
       await measureCreationStep("gcp.firewall_operation_wait", () => this.waitGlobalOperation(op));
       return;

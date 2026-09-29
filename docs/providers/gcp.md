@@ -596,3 +596,21 @@ In-flight calls retain the provider client's existing transport/retry behavior.
 Provider errors, including exhausted throttling responses, propagate unchanged;
 the polling loop does not add rapid retries or override provider backoff.
 This reduces the observation delay for an early address, not the VM's boot time.
+
+## Coordinator preparation reuse
+
+The coordinator still fetches the named firewall for each create. It skips the
+update and global-operation wait only when a Crabbox-managed firewall exactly
+matches the desired network, ingress direction, priority, enabled state,
+source CIDRs, target tags, and TCP ports, with no additional selectors or deny
+rules. Drift follows the existing update-and-wait path; unmanaged rules remain
+an error.
+
+OAuth tokens are reused in memory across provider instances belonging to the
+same coordinator environment and credential generation. Service-account tokens
+refresh one minute before expiry; metadata tokens refresh five minutes before
+expiry. Credential changes discard the shared cache, concurrent misses share
+one exchange, and failed exchanges are never cached. Tokens are not persisted.
+Previously, each new provider instance started with an empty client cache, so
+`gcp.token_mint` could recur on successive creates. Cold coordinator instances
+and token expiry still incur that step.
