@@ -262,3 +262,31 @@ func mustJSON(t *testing.T, value any) []byte {
 	}
 	return data
 }
+
+func TestEventsCommandPrintsCoordinatorSteps(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/leases/cbx_abcdef123456/events" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"events":[{"phase":"coordinator_step","at":"2026-01-01T00:00:00Z","source":"coordinator","step":"aws.image","durationMs":0,"count":2,"errors":1}]}`))
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
+	for _, jsonOutput := range []bool{false, true} {
+		var stdout, stderr bytes.Buffer
+		app := App{Stdout: &stdout, Stderr: &stderr}
+		args := []string{"cbx_abcdef123456"}
+		want := "step=aws.image durationMs=0 count=2 errors=1"
+		if jsonOutput {
+			args = append(args, "--json")
+			want = `"durationMs":0`
+		}
+		if err := app.events(t.Context(), args); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(stdout.Bytes(), []byte(want)) {
+			t.Fatalf("output=%s", stdout.String())
+		}
+	}
+}

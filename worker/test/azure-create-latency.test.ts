@@ -3,6 +3,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import { AzureClient, AzureProvisioningRejectedError } from "../src/azure";
 import { AzureSKUAvailability } from "../src/azure-skus";
 import { leaseConfig } from "../src/config";
+import { appendCreationSteps, withCreationSteps } from "../src/creation-events";
+import type { LeaseRecord } from "../src/types";
 import type { Env } from "../src/types";
 
 afterEach(() => {
@@ -233,4 +235,25 @@ it("bounds a long VM poll by the total create budget without treating timeout as
   expect(f.vmSizes).toEqual([first]);
   expect(f.cleanup).toHaveBeenCalledTimes(1);
   expect(Date.now()).toBe(25 * 60_000);
+});
+
+it("exposes the existing Azure attempt duration without changing LRO order", async () => {
+  const f = fixture([], true);
+  await withCreationSteps(async () => {
+    const result = f.run();
+    await vi.runAllTimersAsync();
+    await result;
+    const lease: Pick<LeaseRecord, "creationEvents"> = {};
+    appendCreationSteps(lease);
+    expect(lease.creationEvents).toContainEqual(
+      expect.objectContaining({
+        step: "azure.attempt",
+        durationMs: 15_000,
+        count: 1,
+        errors: 0,
+        source: "coordinator",
+      }),
+    );
+    expect(f.events.filter((e) => e.method === "PUT").map((e) => e.at)).toEqual([0, 5000, 10000]);
+  });
 });

@@ -194,7 +194,15 @@ import {
   type CoordinatorStorage,
   type CoordinatorStorageView,
 } from "./coordinator-runtime";
-import { creationEvent, mergeClientCreationEvents } from "./creation-events";
+import {
+  appendCreationSteps,
+  creationEvent,
+  mergeClientCreationEvents,
+  measureCreationStep,
+  measureCreationStepSync,
+  recordCreationStep,
+  withCreationSteps,
+} from "./creation-events";
 import {
   DaytonaClient,
   daytonaAccessNeedsRefresh,
@@ -3760,7 +3768,34 @@ export class FleetCoordinator {
     fixedLeaseID?: string,
     checkpointAuthorization?: CheckpointLeaseAuthorization,
   ): Promise<Response> {
+    return withCreationSteps(() =>
+      this.createLeaseObserved(
+        request,
+        reservationGuard,
+        workspaceID,
+        workspaceCapability,
+        fixedLeaseID,
+        checkpointAuthorization,
+      ),
+    );
+  }
+
+  private async createLeaseObserved(
+    request: Request,
+    reservationGuard?: () => Promise<Response | undefined>,
+    workspaceID?: string,
+    workspaceCapability?: ProviderWorkspaceCapability,
+    fixedLeaseID?: string,
+    checkpointAuthorization?: CheckpointLeaseAuthorization,
+  ): Promise<Response> {
     const admissionStarted = creationEvent("admission_started");
+    const runAdmissionExclusive = <T>(operation: () => Promise<T>): Promise<T> => {
+      const queuedAt = Date.now();
+      return this.state.runExclusive(() => {
+        recordCreationStep("admission.lock_wait", Date.now() - queuedAt);
+        return operation();
+      });
+    };
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const input = await readJson<LeaseRequest>(request);
@@ -3895,7 +3930,7 @@ export class FleetCoordinator {
         ),
         provider: config.provider,
       };
-      const replay = await this.state.runExclusive(async () => {
+      const replay = await runAdmissionExclusive(async () => {
         return this.fixedLeaseReplayResponse(
           fixedLeaseID,
           owner,
@@ -4007,13 +4042,15 @@ export class FleetCoordinator {
     let createAttempt: CreateAttemptRecord | undefined;
     const attemptSource = fixedCreate ?? (ordinaryCreate ? input.createAttemptID : undefined);
     if (attemptSource !== undefined) {
-      const reserved = await this.reserveCreateAttempt(
-        leaseID,
-        attemptSource,
-        owner,
-        org,
-        fixedCreate ? undefined : checkpointAuthorization?.checkpoint.id,
-        fixedCreate ? undefined : checkpointAuthorization?.tokenHash,
+      const reserved = await measureCreationStep("admission.attempt_reservation", () =>
+        this.reserveCreateAttempt(
+          leaseID,
+          attemptSource,
+          owner,
+          org,
+          fixedCreate ? undefined : checkpointAuthorization?.checkpoint.id,
+          fixedCreate ? undefined : checkpointAuthorization?.tokenHash,
+        ),
       );
       if (reserved instanceof Response) {
         return this.preferredCreateReplay(request, leaseID, reserved);
@@ -4021,7 +4058,7 @@ export class FleetCoordinator {
       createAttempt = reserved.attempt;
       if (reserved.replayLease) {
         const replay = fixedCreate
-          ? await this.state.runExclusive(
+          ? await runAdmissionExclusive(
               async () =>
                 (await this.fixedLeaseReplayResponse(
                   leaseID,
@@ -4039,7 +4076,10 @@ export class FleetCoordinator {
       await this.validateCheckpointLeaseSource(checkpointAuthorization.checkpoint);
     }
     try {
-      config = (await configProvider.prepareLeaseConfig?.(config)) ?? config;
+      config =
+        (await measureCreationStep("admission.config_prepare", async () =>
+          configProvider.prepareLeaseConfig?.(config),
+        )) ?? config;
     } catch (error) {
       if (error instanceof ImageCapabilityMismatchError) {
         return json(
@@ -4062,11 +4102,13 @@ export class FleetCoordinator {
     );
     const injectsSSHHostKey = !workspaceCapability && provider.supportsSSHHostKeyInjection(config);
     if (injectsSSHHostKey) {
-      config = withSSHHostKey(config, `crabbox-${leaseID}`);
+      config = measureCreationStepSync("admission.host_key", () =>
+        withSSHHostKey(config, `crabbox-${leaseID}`),
+      );
     }
-    const providerHourlyUSD = await provider
-      .hourlyPriceUSD(config.serverType, config)
-      .catch(() => undefined);
+    const providerHourlyUSD = await measureCreationStep("admission.pricing", () =>
+      provider.hourlyPriceUSD(config.serverType, config),
+    ).catch(() => undefined);
     if (
       createAttempt &&
       !(await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org))
@@ -4112,7 +4154,7 @@ export class FleetCoordinator {
         fixedCreate,
       );
     }
-    const reservation = await this.state.runExclusive(async () => {
+    const reservation = await runAdmissionExclusive(async () => {
       const reservedAttempt = await this.getCreateAttempt(leaseID);
       const currentAttempt = createAttempt
         ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
@@ -4168,7 +4210,9 @@ export class FleetCoordinator {
       if (reservationHostError) return reservationHostError;
       const now = new Date();
       const createAttemptGeneration = currentAttempt ? newCreateAttemptGeneration() : undefined;
-      const admission = await this.leaseAdmissionState({ owner, org }, now);
+      const admission = await measureCreationStep("admission.usage_count", () =>
+        this.leaseAdmissionState({ owner, org }, now),
+      );
       const slug = allocateLeaseSlug(
         requestedSlug || leaseSlugFromID(leaseID),
         leaseID,
@@ -4262,7 +4306,9 @@ export class FleetCoordinator {
           state: "requested",
         };
       }
-      const limitError = enforceCostLimitUsage(admission.costUsage, record, costLimits(this.env));
+      const limitError = measureCreationStepSync("admission.limit_check", () =>
+        enforceCostLimitUsage(admission.costUsage, record, costLimits(this.env)),
+      );
       if (limitError) {
         return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
       }
@@ -4306,21 +4352,23 @@ export class FleetCoordinator {
         await retainLeaseWake(storage, Date.parse(record.expiresAt));
         return { record, slug };
       };
-      const committed = await commitLeaseAdmission(this.state, persist, async (storage) => {
-        const lease = await storage.get<LeaseRecord>(leaseKey(leaseID), { noCache: true });
-        const attempt = await storage.get<CreateAttemptRecord>(createAttemptKey(leaseID), {
-          noCache: true,
-        });
-        const wake = await storage.get<number | null>(legacyAlarmKey, { noCache: true });
-        return lease &&
-          sameLeaseRecord(lease, record) &&
-          wake != null &&
-          wake <= Date.parse(record.expiresAt) &&
-          (!currentAttempt ||
-            (attempt?.state === "pending" && createAttemptMatchesLease(attempt, lease)))
-          ? { record: lease, slug }
-          : undefined;
-      });
+      const committed = await measureCreationStep("admission.record_publication", () =>
+        commitLeaseAdmission(this.state, persist, async (storage) => {
+          const lease = await storage.get<LeaseRecord>(leaseKey(leaseID), { noCache: true });
+          const attempt = await storage.get<CreateAttemptRecord>(createAttemptKey(leaseID), {
+            noCache: true,
+          });
+          const wake = await storage.get<number | null>(legacyAlarmKey, { noCache: true });
+          return lease &&
+            sameLeaseRecord(lease, record) &&
+            wake != null &&
+            wake <= Date.parse(record.expiresAt) &&
+            (!currentAttempt ||
+              (attempt?.state === "pending" && createAttemptMatchesLease(attempt, lease)))
+            ? { record: lease, slug }
+            : undefined;
+        }),
+      );
       if (!this.state.provisioning) await this.scheduleAlarm();
       return committed;
     });
@@ -4355,7 +4403,7 @@ export class FleetCoordinator {
           record: LeaseRecord;
         };
     try {
-      const preparationInput = await this.state.runExclusive(async () => {
+      const preparationInput = await runAdmissionExclusive(async () => {
         const latest = await this.getLease(record.id);
         const currentAttempt = createAttempt
           ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
@@ -4363,7 +4411,9 @@ export class FleetCoordinator {
         if (!latest || latest.state !== "provisioning" || (createAttempt && !currentAttempt)) {
           return { ready: false as const, current: latest };
         }
-        const accessLeases = await this.providerAccessLeaseRecords();
+        const accessLeases = await measureCreationStep("admission.access_snapshot", () =>
+          this.providerAccessLeaseRecords(),
+        );
         return {
           ready: true as const,
           latest,
@@ -4373,14 +4423,12 @@ export class FleetCoordinator {
       if (!preparationInput.ready) {
         preparation = { committed: false, current: preparationInput.current };
       } else {
-        const prepared = await provider.prepareLeaseCreate?.(
-          config,
-          record,
-          preparationInput.accessContext,
+        const prepared = await measureCreationStep("admission.provider_prepare", async () =>
+          provider.prepareLeaseCreate?.(config, record, preparationInput.accessContext),
         );
         const preparedConfig = prepared?.config ?? config;
         const preparedRecord = prepared?.lease ?? record;
-        preparation = await this.state.runExclusive(async () => {
+        preparation = await runAdmissionExclusive(async () => {
           const latest = await this.getLease(record.id);
           const currentAttempt = createAttempt
             ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
@@ -4396,7 +4444,9 @@ export class FleetCoordinator {
           if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
             await this.putProviderAccess(providerAccessReservation(committedRecord, new Date()));
           }
-          await this.putLease(committedRecord);
+          await measureCreationStep("admission.record_publication", () =>
+            this.putLease(committedRecord),
+          );
           if (
             committedRecord.provider === "aws" &&
             prepared?.provisioning?.sshIngressReconcile === "additive"
@@ -4458,7 +4508,7 @@ export class FleetCoordinator {
             if (!region) {
               return;
             }
-            await this.state.runExclusive(async () => {
+            await runAdmissionExclusive(async () => {
               const current = await this.getLease(record.id);
               const currentAttempt = createAttempt
                 ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
@@ -4483,7 +4533,7 @@ export class FleetCoordinator {
           },
         }
       : undefined;
-    const provisioningStart = await this.state.runExclusive(async () => {
+    const provisioningStart = await runAdmissionExclusive(async () => {
       const current = await this.getLease(record.id);
       const currentAttempt = createAttempt
         ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
@@ -4502,13 +4552,14 @@ export class FleetCoordinator {
           return { started: false as const, current, workspace };
         }
       }
+      appendCreationSteps(current);
       (current.creationEvents ??= []).push(creationEvent("admission_complete"));
       current.provisioningRequestStartedAt = new Date().toISOString();
       delete current.provisioningResourceMayExist;
       delete current.provisioningRequestSettledAt;
       current.provisioningCoordinatorVersion = this.coordinatorGeneration;
       current.updatedAt = current.provisioningRequestStartedAt;
-      await this.putLease(current);
+      await measureCreationStep("admission.record_publication", () => this.putLease(current));
       return { started: true as const, current };
     });
     if (!provisioningStart.started) {
@@ -4662,6 +4713,7 @@ export class FleetCoordinator {
           if (!current || current.state === "provisioning") {
             record.state = "failed";
             record.endedAt = failedAt;
+            appendCreationSteps(record);
           }
           mergeProvisioningFailureMetadata(
             record,
@@ -4733,6 +4785,7 @@ export class FleetCoordinator {
       (event, index, events) =>
         events.findIndex((candidate) => candidate.phase === event.phase) === index,
     );
+    appendCreationSteps(record);
     record.serverID = server.id;
     if (server.providerResourceID) {
       record.providerResourceID = server.providerResourceID;
@@ -17546,43 +17599,56 @@ export class FleetCoordinator {
     for (const viewerAlarm of await this.webVNCPortalViewerAlarmTimes(now)) {
       retainAlarm(viewerAlarm);
     }
-    await this.visitStorageRecords<ReadyPoolEntry>(readyPoolPrefix, async (entry) => {
-      if (entry.state === "busy") {
-        const borrowDeadline = readyPoolBorrowDeadline(entry);
-        if (borrowDeadline !== undefined) {
-          retainAlarm(Math.max(now + 1, borrowDeadline));
+    await measureCreationStep("admission.ready_pool_check", async () => {
+      await this.visitStorageRecords<ReadyPoolEntry>(readyPoolPrefix, async (entry) => {
+        if (entry.state === "busy") {
+          const borrowDeadline = readyPoolBorrowDeadline(entry);
+          if (borrowDeadline !== undefined) {
+            retainAlarm(Math.max(now + 1, borrowDeadline));
+          }
         }
-      }
-      if (entry.state === "stale" || entry.state === "quarantined" || entry.state === "draining") {
-        const pruneAt = Date.parse(entry.updatedAt) + readyPoolTerminalRetentionMs;
-        if (Number.isFinite(pruneAt)) {
-          retainAlarm(Math.max(now + 1, pruneAt));
+        if (
+          entry.state === "stale" ||
+          entry.state === "quarantined" ||
+          entry.state === "draining"
+        ) {
+          const pruneAt = Date.parse(entry.updatedAt) + readyPoolTerminalRetentionMs;
+          if (Number.isFinite(pruneAt)) {
+            retainAlarm(Math.max(now + 1, pruneAt));
+          }
         }
-      }
+      });
+      await this.visitStorageRecords<ReadyPoolFillClaim>(
+        readyPoolFillClaimPrefix,
+        async (claim) => {
+          const expiresAt = Date.parse(claim.expiresAt);
+          if (Number.isFinite(expiresAt)) {
+            retainAlarm(Math.max(now + 1, expiresAt));
+          }
+        },
+      );
+      await this.visitStorageRecords<ReadyPoolEntry>(typedReadyPoolPrefix, async (entry) => {
+        if (entry.state === "busy") {
+          const deadline = readyPoolBorrowDeadline(entry);
+          if (deadline !== undefined) retainAlarm(Math.max(now + 1, deadline));
+        }
+        if (
+          entry.state === "stale" ||
+          entry.state === "quarantined" ||
+          entry.state === "draining"
+        ) {
+          const pruneAt = Date.parse(entry.updatedAt) + readyPoolTerminalRetentionMs;
+          if (Number.isFinite(pruneAt)) retainAlarm(Math.max(now + 1, pruneAt));
+        }
+      });
+      await this.visitStorageRecords<ReadyPoolFillClaim>(
+        typedReadyPoolFillClaimPrefix,
+        async (claim) => {
+          const expiresAt = Date.parse(claim.expiresAt);
+          if (Number.isFinite(expiresAt)) retainAlarm(Math.max(now + 1, expiresAt));
+        },
+      );
     });
-    await this.visitStorageRecords<ReadyPoolFillClaim>(readyPoolFillClaimPrefix, async (claim) => {
-      const expiresAt = Date.parse(claim.expiresAt);
-      if (Number.isFinite(expiresAt)) {
-        retainAlarm(Math.max(now + 1, expiresAt));
-      }
-    });
-    await this.visitStorageRecords<ReadyPoolEntry>(typedReadyPoolPrefix, async (entry) => {
-      if (entry.state === "busy") {
-        const deadline = readyPoolBorrowDeadline(entry);
-        if (deadline !== undefined) retainAlarm(Math.max(now + 1, deadline));
-      }
-      if (entry.state === "stale" || entry.state === "quarantined" || entry.state === "draining") {
-        const pruneAt = Date.parse(entry.updatedAt) + readyPoolTerminalRetentionMs;
-        if (Number.isFinite(pruneAt)) retainAlarm(Math.max(now + 1, pruneAt));
-      }
-    });
-    await this.visitStorageRecords<ReadyPoolFillClaim>(
-      typedReadyPoolFillClaimPrefix,
-      async (claim) => {
-        const expiresAt = Date.parse(claim.expiresAt);
-        if (Number.isFinite(expiresAt)) retainAlarm(Math.max(now + 1, expiresAt));
-      },
-    );
     const orphanSweepAlarm = await this.nextOrphanSweepAlarmTime(
       "aws",
       this.awsOrphanSweepConfig(),

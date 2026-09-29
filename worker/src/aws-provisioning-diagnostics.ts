@@ -1,6 +1,8 @@
 /// <reference types="node/async_hooks" />
 import { AsyncLocalStorage } from "node:async_hooks";
 
+import { recordCreationStep } from "./creation-events";
+
 export type AWSTransportObservation = {
   requests: number;
   credentialsMs: number;
@@ -36,6 +38,7 @@ const stepNames = [
   "authorize_duplicate",
   "compact_ingress",
   "quota",
+  "instance_types",
   "instance_create",
   "image_cleanup",
 ] as const;
@@ -44,7 +47,7 @@ type Step = (typeof stepNames)[number];
 export type AWSProvisioningDiagnostics = ReturnType<typeof createAWSProvisioningDiagnostics>;
 
 // Fixed buckets keep repeated permission calls bounded without losing their count.
-// These observations are logs, never lease state or permission decisions.
+// Log and timeline observations never participate in permission decisions.
 export function createAWSProvisioningDiagnostics(leaseId: string, region: string) {
   const startedAt = Date.now();
   const steps = new Map<
@@ -63,6 +66,7 @@ export function createAWSProvisioningDiagnostics(leaseId: string, region: string
     step.count += 1;
     step.totalMs += Math.max(0, durationMs);
     step.errors += Number(failed);
+    recordCreationStep(`aws.${name}`, durationMs, failed);
   };
   return {
     record,

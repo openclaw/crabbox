@@ -111,7 +111,8 @@ Each event has `phase`, RFC 3339 `at`, and `source`. Admission start/completion
 belong to the coordinator; AWS, GCP and Hetzner adapters record successful create
 request/response and `instance_running` when an existing provider read observes
 running. The latter is the first observation, not the provider's boot transition.
-Unobserved phases and failed provider attempts are absent, never zero durations.
+Unobserved milestones and failed provider request/response milestones are absent,
+never inferred from a duration.
 
 The creating Linux client reports `ssh_tcp_accept`, `ssh_authenticated`, and
 `workspace_ready` through the existing owner-authorized heartbeat. These are the
@@ -128,3 +129,49 @@ prevent exact subtraction across sources. The coordinator bounds submitted
 observations to the lease lifetime with one minute of skew, keeps the first value
 per client phase, and never uses these untrusted observations for authorization,
 readiness, expiry, or cleanup. Existing duration fields retain their semantics.
+
+
+### Coordinator step durations
+
+Ordinary brokered creates also emit `coordinator_step` events. Both
+`crabbox events <lease>` and `--json` show these; Linux `--timing-json` preserves
+them in `creationEvents`. Each has a static `step` name, `durationMs`, `count`,
+and `errors`, with `source: "coordinator"`. For example:
+
+```json
+{"phase":"coordinator_step","at":"2026-09-28T12:00:03.000Z","source":"coordinator","step":"aws.image","durationMs":420,"count":2,"errors":0}
+```
+
+`durationMs` sums measured elapsed milliseconds for that step; `count` counts
+completed measurements, including failures, and `errors` counts thrown errors.
+A measured step can take zero milliseconds. An unexecuted step is absent.
+`at` is the last measurement's completion on the coordinator's clock. Nested
+steps and parallel preparations overlap, so **do not sum the buckets to compute
+total creation time**. These are coordinator observations of calls, including
+network latency and existing retries, not provider-side execution durations.
+
+| Prefix | Measured boundaries |
+| --- | --- |
+| `admission` | Lifecycle lock wait, configuration preparation, pricing, usage counting, limit checks, access snapshot, provider preparation, ready-pool inventory reads when executed, and reservation/preparation record publication |
+| `aws` | Existing diagnostic buckets for key pair, image, ingress/lifecycle waits, security group and ingress operations, quota, instance types, instance create and image cleanup; plus user-data/request rendering |
+| `gcp` | Token mint on cache miss, image and zone selection, firewall GET/PUT/insert and operation wait, user-data rendering, combined boot-disk/instance insert and instance operation wait |
+| `hetzner` | SSH key registration, image selection, user-data rendering and server create |
+| `azure` | SKU availability and existing attempt duration, including network setup and checked cleanup for failed attempts |
+
+GCP validates quota during insertion and creates the boot disk with the instance;
+there is no separate quota lookup or disk-insert request in this path. GCP and
+Hetzner image selection can be a local choice of an already configured reference.
+A ready-pool bucket is absent when admission does not read ready-pool inventory.
+Azure attempt timings retain their existing boundary and do not include capacity
+cache skips. Durable provisioning continuations are outside this request-local
+step timeline.
+
+A request keeps at most 64 step buckets, aggregating repeated calls and fallback
+attempts without recording resource identifiers, request/response bodies, or
+error messages. Snapshots ride existing admission and settlement writes; reads
+while provisioning can show only the last saved snapshot. Failures retain steps
+when the normal failure path saves the same lease incarnation. An admission
+rejection before a lease is recorded has no lease timeline. No extra provider
+calls or storage writes are issued for diagnostics. Client heartbeat submissions
+cannot add or replace coordinator steps. These measurements never decide
+admission, provider selection, readiness, ownership, expiry, retries, or cleanup.

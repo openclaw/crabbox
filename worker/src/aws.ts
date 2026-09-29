@@ -34,7 +34,7 @@ import {
   workspaceProviderKeyPrefix,
   type LeaseConfig,
 } from "./config";
-import { creationEvent, observedRunning } from "./creation-events";
+import { creationEvent, observedRunning, measureCreationStep } from "./creation-events";
 import { hasImageRequirements } from "./image-capabilities";
 import { osImageSpec } from "./os-image";
 import {
@@ -1358,7 +1358,7 @@ export class EC2SpotClient {
       const vcpus =
         config.target === "macos"
           ? new Map<string, number>()
-          : await this.instanceTypeVCPUs(candidates);
+          : await diagnostics.measure("instance_types", () => this.instanceTypeVCPUs(candidates));
       const allowCapacityHandoff =
         !config.awsPrivate && !config.serverTypeExplicit && config.target !== "macos";
       const hasQuotaEligibleCandidate = (
@@ -2721,20 +2721,22 @@ export class EC2SpotClient {
         : "";
     let lastMacHostID = "";
     const run = async (macHostID: string): Promise<ProviderMachine> => {
-      const params = await awsRunInstancesParams({
-        config: launchConfig,
-        leaseID,
-        imageID,
-        securityGroupID,
-        rootGB,
-        instanceProfile,
-        subnetID,
-        labels: {
-          ...labels,
-          ...(config.awsPrivate ? { crabbox_workspace: "true", access_mode: "ssm" } : {}),
-          Name: name,
-        },
-      });
+      const params = await measureCreationStep("aws.user_data_render", () =>
+        awsRunInstancesParams({
+          config: launchConfig,
+          leaseID,
+          imageID,
+          securityGroupID,
+          rootGB,
+          instanceProfile,
+          subnetID,
+          labels: {
+            ...labels,
+            ...(config.awsPrivate ? { crabbox_workspace: "true", access_mode: "ssm" } : {}),
+            Name: name,
+          },
+        }),
+      );
       applyAWSRunInstanceTargetOptions(params, config);
       if (config.target === "macos") {
         const hostID =

@@ -13,6 +13,7 @@ import {
   validatedCIDRs,
   type LeaseConfig,
 } from "./config";
+import { measureCreationStep, recordCreationStep } from "./creation-events";
 import { sha256Hex } from "./encoding";
 import { ExpiringTokenCache, type ExpiringToken } from "./expiring-token-cache";
 import { leaseProviderLabels, providerLabelsOwnedByLease } from "./provider-labels";
@@ -850,11 +851,8 @@ export class AzureClient {
     attempts?: ProvisioningAttempt[];
   }> {
     if (!config.azureSnapshot) normalizeAzureOSDiskMode(config.azureOSDisk);
-    const availability = await this.skuAvailability.get(
-      this.subscription,
-      location,
-      () => this.token(),
-      this.fetcher,
+    const availability = await measureCreationStep("azure.sku_availability", () =>
+      this.skuAvailability.get(this.subscription, location, () => this.token(), this.fetcher),
     );
     const rank = (size: string) => {
       const available = availability.get(size.toLowerCase());
@@ -919,8 +917,11 @@ export class AzureClient {
             infra,
             azureAttemptNameSeed(leaseID, location, market, index),
           );
+          recordCreationStep("azure.attempt", Date.now() - startedAt);
           return { server, serverType: vmSize, market, ...history.result() };
         } catch (error) {
+          const durationMs = Date.now() - startedAt;
+          recordCreationStep("azure.attempt", durationMs, true);
           if (providerProvisioningCleanupClaim(error)) throw error;
           allRejected &&= error instanceof AzureProvisioningRejectedError;
           const message = error instanceof Error ? error.message : String(error);
@@ -932,7 +933,7 @@ export class AzureClient {
               market,
               category,
               message: conciseAzureProvisioningMessage(message),
-              durationMs: Date.now() - startedAt,
+              durationMs,
             },
             `${market} ${vmSize}: ${message}`,
           );

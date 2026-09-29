@@ -40,3 +40,27 @@ func TestCreationObservationsRetainFirstSuccess(t *testing.T) {
 	}
 	recordCreationObservation(t.Context(), "workspace_ready")
 }
+
+func TestCreationStepTimingJSONPreservesZeroDurationAndCounts(t *testing.T) {
+	var lease CoordinatorLease
+	if err := json.Unmarshal([]byte(`{"creationEvents":[{"phase":"coordinator_step","at":"2026-01-01T00:00:00Z","source":"coordinator","step":"aws.image","durationMs":0,"count":2,"errors":0}],"provisioningTiming":{"requestMs":250,"totalMs":250}}`), &lease); err != nil {
+		t.Fatal(err)
+	}
+	timing := coordinatorRunnerTiming(lease)
+	timing.Events = lease.CreationEvents
+	report := timingReportFromRun("aws", "cbx_test", "test", runTimings{providerTiming: timing}, time.Second, 0)
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		CreationEvents []map[string]any `json:"creationEvents"`
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	event := decoded.CreationEvents[0]
+	if event["step"] != "aws.image" || event["durationMs"] != float64(0) || event["count"] != float64(2) || event["errors"] != float64(0) {
+		t.Fatalf("step timing lost from timing JSON: %s", encoded)
+	}
+}
