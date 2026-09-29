@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Avoid full Hetzner SSH-key inventory reads for fresh lease keys and cache successful coordinator AWS Spot/Hetzner price estimates for five minutes without blocking admission on quote failures.
+- Skip redundant brokered AWS SSH ingress mutations and cache account/region-scoped VPC discovery while preserving fresh policy checks and legacy world-rule cleanup.
 
 - Verify retained Actions workspace identity before run, sync, cache warm, or editor handoff; preserve custom paths and explicit cross-repository hydration with claim-bound consent. [PR 2564](https://github.com/openclaw/crabbox/pull/2564). Thanks @vincentkoc.
 ### Fixed

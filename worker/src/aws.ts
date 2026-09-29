@@ -21,6 +21,7 @@ import type {
   AWSQualificationTransportBinding,
 } from "./aws-qualification-contract";
 import { requireAWSRegion, sanitizeAWSRegion } from "./aws-region";
+import type { AWSVPCCache } from "./aws-vpc-cache";
 import { awsRunInstancesUserData } from "./bootstrap";
 import {
   awsPromotedAMIConfigKey,
@@ -723,6 +724,7 @@ export type AWSIngressConfig = Pick<
 >;
 
 interface AWSIngressOptions {
+  vpcCache?: AWSVPCCache;
   reconcile?: "authoritative" | "additive";
   allowEmpty?: boolean;
   onOwnedKeyCleanupRequired?: (existingKey: boolean) => Promise<void>;
@@ -2859,6 +2861,27 @@ export class EC2SpotClient {
     config: AWSIngressConfig,
     options: AWSIngressOptions = {},
   ): Promise<string> {
+    try {
+      return await this.reconcileSecurityGroup(config, options);
+    } catch (error) {
+      if (
+        error instanceof AWSQueryError &&
+        ["InvalidVpcID.NotFound", "InvalidGroup.NotFound", "InvalidSubnetID.NotFound"].includes(
+          error.code,
+        )
+      ) {
+        await options.vpcCache?.invalidate(
+          config.awsSubnetID || this.env.CRABBOX_AWS_SUBNET_ID || "",
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async reconcileSecurityGroup(
+    config: AWSIngressConfig,
+    options: AWSIngressOptions,
+  ): Promise<string> {
     const measure = <T>(
       name: Parameters<AWSProvisioningDiagnostics["measure"]>[0],
       operation: () => Promise<T>,
@@ -2907,7 +2930,12 @@ export class EC2SpotClient {
         this.env.CRABBOX_AWS_SUBNET_ID ||
         this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT,
       );
-      const vpc = measure("security_group_vpc", () => this.securityGroupVPC(config));
+      const subnetID = config.awsSubnetID || this.env.CRABBOX_AWS_SUBNET_ID || "";
+      const vpc = measure("security_group_vpc", () =>
+        options.vpcCache
+          ? options.vpcCache.resolve(subnetID, () => this.securityGroupVPC(config))
+          : this.securityGroupVPC(config),
+      );
       const lookup = (params: Record<string, string>) =>
         measure("security_group_lookup", () => this.ec2("DescribeSecurityGroups", params));
       // EC2 GroupName selects only the default VPC. Subnet-scoped queries still
@@ -2949,9 +2977,11 @@ export class EC2SpotClient {
           asString(record(group)["groupName"]) !== name ||
           asString(record(group)["vpcId"]) !== vpcID)
       ) {
+        await options.vpcCache?.invalidate(subnetID);
         throw new Error("AWS default VPC security group lookup returned an unexpected group");
       }
       if (!groupID) {
+        await options.vpcCache?.invalidate(subnetID);
         try {
           const created = await measure("security_group_create", () =>
             this.ec2("CreateSecurityGroup", createSecurityGroupParams(name, vpcID)),
@@ -2980,11 +3010,24 @@ export class EC2SpotClient {
             this.pruneStaleSSHIngress(groupID, group, ports, cidrs),
           );
         }
+        // Authoritative pruning has already removed stale labelled rules.
+        const existingRules = sshIngressRules(group, ports).filter(
+          (rule) =>
+            options.reconcile === "additive" ||
+            rule.description !== awsSSHIngressDescription ||
+            cidrs.includes(rule.cidr),
+        );
         let compactedAfterRuleLimit = false;
         for (const port of ports) {
-          if (!cidrs.includes("0.0.0.0/0")) {
+          const worldRules = existingRules.filter(
+            (rule) =>
+              rule.port === port &&
+              (rule.cidr === "0.0.0.0/0" || rule.cidr === "::/0") &&
+              !cidrs.includes(rule.cidr),
+          );
+          for (const rule of worldRules) {
             // oxlint-disable-next-line eslint/no-await-in-loop -- cleanup is per port.
-            await measure("revoke_world", () => this.revokeWorldTCP(groupID, port)).catch(
+            await measure("revoke_world", () => this.revokeTCP(groupID, rule)).catch(
               (error: unknown) => {
                 const message = error instanceof Error ? error.message : String(error);
                 if (!message.includes("InvalidPermission.NotFound")) {
@@ -2994,8 +3037,11 @@ export class EC2SpotClient {
               },
             );
           }
-          for (let offset = 0; offset < cidrs.length; offset += awsIngressBatchSize) {
-            const batch = cidrs.slice(offset, offset + awsIngressBatchSize);
+          const missing = cidrs.filter(
+            (cidr) => !existingRules.some((rule) => rule.port === port && rule.cidr === cidr),
+          );
+          for (let offset = 0; offset < missing.length; offset += awsIngressBatchSize) {
+            const batch = missing.slice(offset, offset + awsIngressBatchSize);
             const canCompact = options.reconcile !== "additive" && !compactedAfterRuleLimit;
             // Join every request before compaction, propagation retry or releasing
             // the ingress owner. One failed request must not leave writes running.
@@ -3051,6 +3097,10 @@ export class EC2SpotClient {
         if (delay === undefined || !message.includes("InvalidGroup.NotFound")) {
           throw error;
         }
+        // oxlint-disable-next-line eslint/no-await-in-loop -- discard routing hints before retrying propagation.
+        await options.vpcCache?.invalidate(
+          config.awsSubnetID || this.env.CRABBOX_AWS_SUBNET_ID || "",
+        );
         // oxlint-disable-next-line eslint/no-await-in-loop -- EC2 group propagation is eventually consistent.
         await sleep(delay);
         group = undefined;
@@ -3278,16 +3328,6 @@ export class EC2SpotClient {
     };
     assignSSHIngressRange(params, cidr, true);
     await this.ec2("AuthorizeSecurityGroupIngress", params);
-  }
-
-  private async revokeWorldTCP(groupID: string, port: string): Promise<void> {
-    await this.ec2("RevokeSecurityGroupIngress", {
-      GroupId: groupID,
-      "IpPermissions.1.FromPort": port,
-      "IpPermissions.1.IpProtocol": "tcp",
-      "IpPermissions.1.IpRanges.1.CidrIp": "0.0.0.0/0",
-      "IpPermissions.1.ToPort": port,
-    });
   }
 
   private async revokeTCP(groupID: string, rule: SSHIngressRule): Promise<void> {

@@ -2,6 +2,7 @@ import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 
 import { AsyncMutex, KeyedAsyncMutex } from "./async-mutex";
 import { AWSPoolAccess } from "./aws-pool-access";
+import { AWSVPCCache } from "./aws-vpc-cache";
 import { commitLeaseAdmission, retainLeaseWake } from "./lease-admission";
 import { cachedProviderPrice } from "./provider-pricing";
 import {
@@ -29708,6 +29709,7 @@ export class AWSProvider implements CloudProvider {
               owner,
               {
                 ...ingressOptions,
+                vpcCache: new AWSVPCCache(this.storage, authenticatedAccount, region),
                 onOwnedKeyCleanupRequired: async (existingKey: boolean) => {
                   await provisioning.onProviderKeyCleanupPending?.(existingKey);
                   ownedKeyRequiresCleanup = true;

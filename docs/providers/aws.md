@@ -562,3 +562,20 @@ In-flight calls retain the provider client's existing transport/retry behavior.
 Provider errors, including exhausted throttling responses, propagate unchanged;
 the polling loop does not add rapid retries or override provider backoff.
 This reduces the observation delay for an early address, not the VM's boot time.
+
+## Coordinator preparation timings
+
+`aws.ingress_wait` measures waiting for the coordinator's ingress-operation
+lock, including queued create and access-refresh work. The lock covers a fresh
+lease-access snapshot and security-group reconciliation; it does not cover
+image lookup, instance creation, or address readiness. Reconciliation reads the
+current permissions, revokes observed legacy world SSH rules in either address
+family unless explicitly desired, and authorizes only missing exact port/CIDR
+pairs. Duplicate-rule responses still handle external races. Pinned CIDRs and
+the detected IPv4 plus authenticated request-source policy are unchanged.
+
+The coordinator caches VPC discovery for five minutes by verified AWS account,
+region, and subnet (or default VPC). Each create still reads the security group;
+missing VPC, subnet, or group responses invalidate the hint, as does a default
+VPC/group mismatch. This removes redundant preparation calls without expanding
+the ingress lock or parallelizing additional AWS work.

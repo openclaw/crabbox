@@ -20,7 +20,7 @@ const cidrs = [
 
 function harness(
   authorize: (params: URLSearchParams, index: number) => Promise<Response>,
-  permissions = "",
+  permissions = ["2222", "22"].map((port) => permission(port, "0.0.0.0/0", "")).join(""),
 ) {
   const calls: URLSearchParams[] = [];
   let index = 0;
@@ -114,23 +114,25 @@ it.each(["additive", "authoritative"] as const)(
 it("joins a full batch before one compaction and retries every rule rejected before it", async () => {
   const gate = Promise.withResolvers<void>();
   let entered = 0;
-  const { client, config, calls } = harness(async (_, index) => {
-    entered++;
-    if (index === 3) await gate.promise;
-    return index < 2 ? awsError("RulesPerSecurityGroupLimitExceeded") : xml();
-  }, "<item><ipProtocol>tcp</ipProtocol><fromPort>2222</fromPort><toPort>2222</toPort><ipRanges><item><cidrIp>203.0.113.1/32</cidrIp></item></ipRanges></item>");
+  const { client, config, calls } = harness(
+    async (_, index) => {
+      entered++;
+      if (index === 3) await gate.promise;
+      return index < 2 ? awsError("RulesPerSecurityGroupLimitExceeded") : xml();
+    },
+    "<item><ipProtocol>tcp</ipProtocol><fromPort>2222</fromPort><toPort>2222</toPort><ipRanges><item><cidrIp>203.0.113.1/32</cidrIp></item></ipRanges></item>",
+  );
   const refresh = client.refreshSSHIngress({ ...config, sshFallbackPorts: [] });
   try {
     await vi.waitFor(() => expect(entered).toBe(4));
     expect(calls.filter((p) => p.get("Action") === "DescribeSecurityGroups")).toHaveLength(1);
-    expect(calls.filter((p) => p.get("Action") === "RevokeSecurityGroupIngress")).toHaveLength(1);
+    expect(calls.filter((p) => p.get("Action") === "RevokeSecurityGroupIngress")).toHaveLength(0);
     gate.resolve();
     await refresh;
     expect(entered).toBe(7);
     expect(calls.filter((p) => p.get("Action") === "DescribeSecurityGroups")).toHaveLength(2);
     const revoked = calls.filter((p) => p.get("Action") === "RevokeSecurityGroupIngress");
     expect(revoked.map((p) => p.get("IpPermissions.1.IpRanges.1.CidrIp"))).toEqual([
-      "0.0.0.0/0",
       "203.0.113.1/32",
     ]);
     const authorized = calls.filter((p) => p.get("Action") === "AuthorizeSecurityGroupIngress");
@@ -240,3 +242,54 @@ it.each([
     }
   },
 );
+
+function permission(port: string, cidr: string, description = "Crabbox SSH"): string {
+  const ipv6 = cidr.includes(":");
+  const ranges = ipv6 ? "ipv6Ranges" : "ipRanges";
+  const field = ipv6 ? "cidrIpv6" : "cidrIp";
+  return `<item><ipProtocol>tcp</ipProtocol><fromPort>${port}</fromPort><toPort>${port}</toPort><${ranges}><item><${field}>${cidr}</${field}><description>${description}</description></item></${ranges}></item>`;
+}
+
+it.each(["additive", "authoritative"] as const)(
+  "skips all mutations for an already matching IPv4 and IPv6 policy in %s mode",
+  async (reconcile) => {
+    const { client, config, calls } = harness(
+      async () => xml(),
+      ["2222", "22"].flatMap((port) => cidrs.map((cidr) => permission(port, cidr))).join(""),
+    );
+    await client.refreshSSHIngress(config, { reconcile });
+    expect(calls.map((p) => p.get("Action"))).toEqual(["DescribeSecurityGroups"]);
+  },
+);
+
+it.each(["additive", "authoritative"] as const)(
+  "revokes observed legacy world rules in both families before adding missing sources in %s mode",
+  async (reconcile) => {
+    const permissions = ["0.0.0.0/0", "::/0"].map((cidr) => permission("2222", cidr, "")).join("");
+    const { client, config, calls } = harness(async () => xml(), permissions);
+    await client.refreshSSHIngress({ ...config, sshFallbackPorts: [] }, { reconcile });
+    const revoked = calls.filter((p) => p.get("Action") === "RevokeSecurityGroupIngress");
+    expect(
+      revoked.map(
+        (p) =>
+          p.get("IpPermissions.1.IpRanges.1.CidrIp") ??
+          p.get("IpPermissions.1.Ipv6Ranges.1.CidrIpv6"),
+      ),
+    ).toEqual(["0.0.0.0/0", "::/0"]);
+    expect(calls.slice(1, 3).every((p) => p.get("Action") === "RevokeSecurityGroupIngress")).toBe(
+      true,
+    );
+  },
+);
+
+it("adds only missing exact port/source pairs and retains the duplicate race fallback", async () => {
+  const { client, config, calls } = harness(
+    async () => awsError("InvalidPermission.Duplicate"),
+    cidrs.map((cidr) => permission("2222", cidr)).join(""),
+  );
+  await client.refreshSSHIngress(config, { reconcile: "additive" });
+  const writes = calls.filter((p) => p.get("Action") === "AuthorizeSecurityGroupIngress");
+  expect(writes).toHaveLength(cidrs.length);
+  expect(writes.every((p) => p.get("IpPermissions.1.FromPort") === "22")).toBe(true);
+  expect(calls.filter((p) => p.get("Action") === "RevokeSecurityGroupIngress")).toEqual([]);
+});

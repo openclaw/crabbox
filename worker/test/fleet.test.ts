@@ -26740,9 +26740,8 @@ describe("fleet lease identity and idle", () => {
 
       expect(revokedRules.includes("sg-runners:198.51.100.10/32")).toBe(namedMetadata);
       expect(revokedRules).not.toContain("sg-runners:198.51.100.20/32");
-      expect(new Set(authorizedRules)).toEqual(
-        new Set(["sg-runners:198.51.100.20/32", "sg-workspaces:0.0.0.0/0"]),
-      );
+      // The runner source already exists; only the missing workspace rule needs a write.
+      expect(new Set(authorizedRules)).toEqual(new Set(["sg-workspaces:0.0.0.0/0"]));
     },
   );
 

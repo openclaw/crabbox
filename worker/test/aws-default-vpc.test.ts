@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 
 import { EC2SpotClient } from "../src/aws";
+import { AWSVPCCache } from "../src/aws-vpc-cache";
 import { leaseConfig } from "../src/config";
 import type { Env } from "../src/types";
 
@@ -231,3 +232,72 @@ it.each(["config", "environment"])(
     }
   },
 );
+
+it("reuses VPC discovery across client instances but always reads the current group", async () => {
+  const values = new Map<string, unknown>();
+  const storage = {
+    get: async <T>(key: string) => values.get(key) as T | undefined,
+    put: async <T>(key: string, value: T) => {
+      values.set(key, value);
+    },
+    delete: async (key: string) => values.delete(key),
+  };
+  const options = () => ({ vpcCache: new AWSVPCCache(storage, "123456789012", "eu-west-1") });
+  const first = harness();
+  await first.client.refreshSSHIngress(first.config, options());
+  const second = harness();
+  await second.client.refreshSSHIngress(second.config, options());
+  expect(second.calls.filter((p) => p.get("Action") === "DescribeVpcs")).toHaveLength(0);
+  expect(second.calls.filter((p) => p.get("Action") === "DescribeSecurityGroups")).toHaveLength(1);
+});
+
+it.each(["InvalidVpcID.NotFound", "InvalidGroup.NotFound", "InvalidSubnetID.NotFound"])(
+  "invalidates a cached VPC after %s",
+  async (code) => {
+    const values = new Map<string, unknown>();
+    const storage = {
+      get: async <T>(key: string) => values.get(key) as T | undefined,
+      put: async <T>(key: string, value: T) => {
+        values.set(key, value);
+      },
+      delete: async (key: string) => values.delete(key),
+    };
+    const vpcCache = new AWSVPCCache(storage, "123456789012", "eu-west-1");
+    const first = harness();
+    await first.client.refreshSSHIngress(first.config, { vpcCache });
+    const failing = harness(async (p) =>
+      p.get("Action") === "DescribeSecurityGroups"
+        ? xml(`<Response><Errors><Error><Code>${code}</Code></Error></Errors></Response>`, 400)
+        : response(p),
+    );
+    await failing.client.refreshSSHIngress(failing.config, { vpcCache }).catch(() => {});
+    const next = harness();
+    await next.client.refreshSSHIngress(next.config, { vpcCache });
+    expect(next.calls.filter((p) => p.get("Action") === "DescribeVpcs")).toHaveLength(1);
+  },
+);
+
+it("scopes cached VPCs by account, region and subnet and expires them after five minutes", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  const values = new Map<string, unknown>();
+  const storage = {
+    get: async <T>(key: string) => values.get(key) as T | undefined,
+    put: async <T>(key: string, value: T) => {
+      values.set(key, value);
+    },
+    delete: async (key: string) => values.delete(key),
+  };
+  const load = vi.fn<() => Promise<string>>(async () => "vpc-default");
+  const cache = new AWSVPCCache(storage, "123456789012", "eu-west-1");
+  await cache.resolve("", load);
+  await cache.resolve("", load);
+  expect(load).toHaveBeenCalledTimes(1);
+  await new AWSVPCCache(storage, "999999999999", "eu-west-1").resolve("", load);
+  await new AWSVPCCache(storage, "123456789012", "eu-west-2").resolve("", load);
+  await cache.resolve("subnet-custom", load);
+  expect(load).toHaveBeenCalledTimes(4);
+  vi.setSystemTime(Date.now() + 5 * 60_000);
+  await cache.resolve("", load);
+  expect(load).toHaveBeenCalledTimes(5);
+  vi.useRealTimers();
+});

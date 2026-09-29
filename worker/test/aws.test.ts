@@ -180,6 +180,11 @@ describe("aws provider", () => {
           ]);
         }
         if (action) actions.push(action);
+        if (action === "DescribeSecurityGroups") {
+          return ec2XMLResponse(
+            `<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-fixture</groupId><ipPermissions>${["22", "443"].map((port) => `<item><ipProtocol>tcp</ipProtocol><fromPort>${port}</fromPort><toPort>${port}</toPort><ipRanges><item><cidrIp>0.0.0.0/0</cidrIp></item></ipRanges></item>`).join("")}</ipPermissions></item></securityGroupInfo></DescribeSecurityGroupsResponse>`,
+          );
+        }
         if (action === "AuthorizeSecurityGroupIngress" || action === "RevokeSecurityGroupIngress") {
           const authorize = action === "AuthorizeSecurityGroupIngress";
           if (authorize) {
