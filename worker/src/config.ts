@@ -905,7 +905,8 @@ export const gcpHyperdiskOnlyFamilies: ReadonlySet<string> = new Set([
 export function gcpBootDiskTypeForMachineType(machineType: string): string {
   const name = machineType.slice(machineType.lastIndexOf("/") + 1);
   const [family = "", variant = ""] = name.toLowerCase().split("-", 2);
-  return gcpHyperdiskOnlyFamilies.has(family) || gcpHyperdiskOnlyFamilies.has(`${family}-${variant}`)
+  return gcpHyperdiskOnlyFamilies.has(family) ||
+    gcpHyperdiskOnlyFamilies.has(`${family}-${variant}`)
     ? "hyperdisk-balanced"
     : "pd-balanced";
 }
