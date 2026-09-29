@@ -91,18 +91,23 @@ func newGCPClientWithOptions(ctx context.Context, cfg Config, opts ...option.Cli
 // Hyperdisk-only series: https://docs.cloud.google.com/compute/docs/general-purpose-machines
 // https://docs.cloud.google.com/compute/docs/compute-optimized-machines
 // https://docs.cloud.google.com/compute/docs/memory-optimized-machines
+// https://docs.cloud.google.com/compute/docs/network-optimized-machines
 // https://docs.cloud.google.com/compute/docs/accelerator-optimized-machines
 // https://docs.cloud.google.com/compute/docs/storage-optimized-machines
 // Keep worker/src/config.ts in sync; its parity test reads this canonical set.
 var gcpHyperdiskOnlyFamilies = map[string]struct{}{
-	"c4": {}, "c4a": {}, "c4d": {}, "n4": {}, "n4a": {}, "n4d": {},
-	"h4d": {}, "m4": {}, "x4": {}, "a4": {}, "a4x": {}, "g4": {}, "z4d": {},
+	"a3-ultragpu": {}, "a4": {}, "a4x": {}, "c4": {}, "c4a": {}, "c4d": {}, "c4n": {},
+	"g4": {}, "h4d": {}, "m4": {}, "m4n": {}, "n4": {}, "n4a": {}, "n4d": {},
+	"x4": {}, "x5": {}, "z4d": {},
 }
 
 func gcpBootDiskType(machineType string) string {
 	name := machineType[strings.LastIndex(machineType, "/")+1:]
-	family, _, _ := strings.Cut(strings.ToLower(name), "-")
-	if _, ok := gcpHyperdiskOnlyFamilies[family]; ok {
+	family, rest, _ := strings.Cut(strings.ToLower(name), "-")
+	variant, _, _ := strings.Cut(rest, "-")
+	_, familyOnly := gcpHyperdiskOnlyFamilies[family]
+	_, variantOnly := gcpHyperdiskOnlyFamilies[family+"-"+variant]
+	if familyOnly || variantOnly {
 		return "hyperdisk-balanced"
 	}
 	return "pd-balanced"

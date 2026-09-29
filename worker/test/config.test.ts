@@ -517,12 +517,23 @@ describe("machine class config", () => {
       /var gcpHyperdiskOnlyFamilies = map\[string\]struct\{\}\{([\s\S]*?)\n\}/,
     );
     expect(familySet).not.toBeNull();
-    const families = [...familySet![1]!.matchAll(/"([a-z0-9]+)":/g)].map((match) => match[1]!);
+    const families = [...familySet![1]!.matchAll(/"([a-z0-9-]+)":/g)].map((match) => match[1]!);
     expect([...gcpHyperdiskOnlyFamilies].toSorted()).toEqual(families.toSorted());
     for (const family of families) {
       expect(
         gcpBootDiskTypeForMachineType(`zones/z/machineTypes/${family.toUpperCase()}-standard-4`),
       ).toBe("hyperdisk-balanced");
+    }
+    for (const machineType of [
+      "c4n-standard-4",
+      "m4n-megamem-28",
+      "x5-688-12t-metal",
+      "a3-ultragpu-8g",
+    ]) {
+      expect(gcpBootDiskTypeForMachineType(machineType)).toBe("hyperdisk-balanced");
+    }
+    for (const machineType of ["a3-megagpu-8g", "a3-highgpu-8g", "a3-edgegpu-8g"]) {
+      expect(gcpBootDiskTypeForMachineType(machineType)).toBe("pd-balanced");
     }
     for (const family of [
       "c3",

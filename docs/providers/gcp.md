@@ -293,7 +293,8 @@ beast     c4-standard-192, c4-standard-96, c3-standard-176, c3-standard-88, n2d-
 ```
 
 Boot disks use Hyperdisk Balanced (`hyperdisk-balanced`) for the Hyperdisk-only
-families C4, C4A, C4D, N4, N4A, N4D, H4D, M4, X4, A4, A4X, G4, and Z4D.
+families A4, A4X, C4, C4A, C4D, C4N, G4, H4D, M4, M4N, N4, N4A, N4D, X4,
+X5, and Z4D, plus the A3 Ultra (`a3-ultragpu`) variant.
 Other families use Balanced Persistent Disk (`pd-balanced`), including C3, N2,
 and N2D. N2 and N2D cannot use Hyperdisk Balanced, so the disk type follows each
 candidate rather than the initially selected class type.
