@@ -493,9 +493,11 @@ remain valid checkpoint sources but cannot join typed ready-pool cohorts.
 
 Brokered Linux GCP leases support native [checkpoints](../features/checkpoints.md):
 
-- `--strategy image` captures a GCP machine image (`gcp-machine-image`) for leases
-  whose boot disks use Persistent Disk. It is unavailable for Hyperdisk-booted
-  leases; use the default disk-snapshot strategy instead.
+- `--strategy image` captures a GCP machine image (`gcp-machine-image`). GCP
+  [refuses machine images](https://docs.cloud.google.com/compute/docs/machine-images/create-machine-images)
+  for instances with any Hyperdisk attached (Crabbox rejects Hyperdisk-booted
+  leases before calling GCP) and for C3D, H3, A3, and most Z3 machine types even
+  with a Persistent Disk boot; use the default disk-snapshot strategy for those.
 - The default strategy captures a disk snapshot (`gcp-disk-snapshot`).
 
 `checkpoint fork` and `checkpoint restore` rehydrate from either kind in the
