@@ -124,7 +124,8 @@ Agent Sandbox delegated leases, managed coordinator leases, and explicitly capab
 external providers accept it. Replaying the same normalized create intent
 returns or joins the same live lease, including after the creating process loses
 its response. A managed coordinator reports `fixed_lease_terminal` when that
-same intent has already ended. Reusing the ID with a different provider, slug
+same intent has already ended, or `422 provisioning_failed` with the original
+diagnostics when it failed with no possible provider machine. Reusing the ID with a different provider, slug
 request, SSH key, machine or container shape, capabilities, lifetime, or other
 immutable create input fails with `lease_id_conflict` before another provider
 create. Slugs remain display aliases and are never used as the idempotency key.

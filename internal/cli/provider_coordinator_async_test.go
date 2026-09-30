@@ -66,6 +66,52 @@ func coordinatorAsyncResponse(code int, body any) (*http.Response, error) {
 	return &http.Response{StatusCode: code, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(data))}, nil
 }
 
+func TestCoordinatorDefiniteProvisioningFailureStopsRecovery(t *testing.T) {
+	for _, provider := range []string{"aws", "gcp", "hetzner", "azure"} {
+		for _, fixed := range []bool{false, true} {
+			for _, priorUncertainty := range []bool{false, true} {
+				for _, canceled := range []bool{false, true} {
+					t.Run(fmt.Sprintf("%s/fixed=%v/replay=%v/canceled=%v", provider, fixed, priorUncertainty, canceled), func(t *testing.T) {
+						synctest.Test(t, func(t *testing.T) {
+							f := newCoordinatorAsyncFixture(t, fixed)
+							f.cfg.Provider, f.backend.cfg.Provider = provider, provider
+							ctx, cancel := context.WithCancel(context.Background())
+							defer cancel()
+							const message = "requested exact instance type failed; remove --type to allow class fallback"
+							f.onCreate = func(*http.Request) (*http.Response, error) {
+								if priorUncertainty && f.creates == 1 {
+									return coordinatorAsyncResponse(http.StatusInternalServerError, "response lost")
+								}
+								if canceled {
+									cancel()
+								}
+								return coordinatorAsyncResponse(http.StatusUnprocessableEntity, map[string]string{"error": "provisioning_failed", "message": message})
+							}
+							lease, err := f.acquire(ctx)
+							wantCreates := 1
+							if priorUncertainty {
+								wantCreates++
+							}
+							if lease.ID != "" || err == nil || !strings.Contains(err.Error(), message) {
+								t.Fatalf("lease=%#v err=%v, want actionable failure", lease, err)
+							}
+							if f.creates != wantCreates || f.gets != 0 || f.cancels != 0 || time.Since(f.started) != 0 {
+								t.Fatalf("creates=%d gets=%d cancels=%d elapsed=%s", f.creates, f.gets, f.cancels, time.Since(f.started))
+							}
+							if strings.Contains(f.stderr.String(), "cancellation") || (!priorUncertainty && strings.Contains(f.stderr.String(), "uncertain result")) {
+								t.Fatalf("unexpected recovery: %s", f.stderr.String())
+							}
+							if errors.Is(err, context.Canceled) != canceled {
+								t.Fatalf("cancellation cause: %v", err)
+							}
+						})
+					})
+				}
+			}
+		}
+	}
+}
+
 func (f *coordinatorAsyncFixture) lease(state string) CoordinatorLease {
 	lease := CoordinatorLease{
 		ID: f.canonical, Provider: f.cfg.Provider, TargetOS: f.cfg.TargetOS,

@@ -6,7 +6,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { adminGrantVersion, issueUserToken } from "../src/auth";
 import { EC2SpotClient, AWSLeaseAuthorityError, awsLeaseImageIdentity } from "../src/aws";
-import { AzureClient, azureOwnedDeleteClaimKey } from "../src/azure";
+import {
+  AzureClient,
+  AzureProvisioningRejectedError,
+  azureOwnedDeleteClaimKey,
+} from "../src/azure";
 import { codeOriginForLease } from "../src/code-origin";
 import {
   awsPromotedAMIConfigKey,
@@ -11273,8 +11277,8 @@ describe("fleet lease identity and idle", () => {
     for (const type of candidates) expect(body.message).toContain(`${zone}/${type}`);
     expect(stored).toMatchObject({ state: "failed", provisioningResourceMayExist: false });
     const replay = await create();
-    expect(replay.status).toBe(409);
-    expect(await replay.json()).toMatchObject({ error: "fixed_lease_terminal" });
+    expect(replay.status).toBe(422);
+    expect(await replay.json()).toEqual(body);
     expect(inserts).toHaveLength(candidates.length);
   });
 
@@ -22451,23 +22455,26 @@ describe("fleet lease identity and idle", () => {
   );
 
   it.each([
-    { name: "public uncertainty marker" },
+    { name: "public uncertainty marker", uncertain: true },
     { name: "private uncertainty marker", private: true, uncertain: true },
     {
       name: "owned key without pending cleanup",
       lease: { providerKeyCleanupPending: false },
       ownedPending: false,
+      uncertain: true,
     },
-    { name: "observed allocation", lease: { cloudID: "i-0123456789abcdef0" } },
+    { name: "observed allocation", lease: { cloudID: "i-0123456789abcdef0" }, uncertain: true },
     {
       name: "unowned canonical key",
       lease: { providerKeyCleanupOwned: false },
       ownedPending: false,
+      uncertain: true,
     },
     {
       name: "shared key",
       lease: { providerKey: "shared-fixture-key" },
       ownedPending: false,
+      uncertain: true,
     },
     {
       name: "foreign Hetzner key failure",
@@ -22842,12 +22849,12 @@ describe("fleet lease identity and idle", () => {
             status === 412
               ? await fleet.fetch(request("PUT", `/v1/leases/${leaseID}`, { headers, body }))
               : undefined;
-          expect(replay?.status).toBe(status === 412 ? 409 : undefined);
+          expect(replay?.status).toBe(status === 412 ? 422 : undefined);
           expect(await replay?.json()).toEqual(
             status === 412
               ? {
-                  error: "fixed_lease_terminal",
-                  message: "lease id is bound to a terminal result for this create intent",
+                  error: "provisioning_failed",
+                  message: failed.failureError,
                 }
               : undefined,
           );
@@ -28967,6 +28974,156 @@ describe("fleet lease identity and idle", () => {
     expect(
       authorized.filter(({ region }) => region === "us-east-1").map(({ cidr }) => cidr),
     ).toEqual(["198.51.100.20/32"]);
+  });
+
+  it.each(["InsufficientInstanceCapacity", "Unsupported"])(
+    "preserves definite exact-type AWS rejection on token-bound replay (%s)",
+    async (code) => {
+      const fixture = awsIngressTestFleet(async (action) => {
+        if (action === "RunInstances") {
+          return ec2XMLResponse(
+            `<Response><Errors><Error><Code>${code}</Code></Error></Errors></Response>`,
+            400,
+          );
+        }
+        return undefined;
+      });
+      const response = await fixture.create();
+      const body = await response.json();
+      expect(response.status).toBe(422);
+      expect(body).toEqual({
+        error: "provisioning_failed",
+        message: expect.stringContaining(
+          "requested exact AWS instance type t3.small failed; remove --type",
+        ),
+      });
+      expect(fixture.storage.value<LeaseRecord>(`lease:${fixture.creatingID}`)).toMatchObject({
+        state: "failed",
+        provisioningResourceMayExist: false,
+        cloudID: "",
+      });
+      const requestCount = fixture.requests.length;
+      const replay = await fixture.create();
+      expect(replay.status).toBe(422);
+      expect(await replay.json()).toEqual(body);
+      expect(fixture.requests).toHaveLength(requestCount);
+      expect(fixture.requests.filter(({ action }) => action === "RunInstances")).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    "transport",
+    "server error",
+    "malformed capacity error",
+    "missing instance",
+    "missing instance id",
+  ])("keeps unknown public AWS allocation outcomes ambiguous (%s)", async (outcome) => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fixture = awsIngressTestFleet(async (action) => {
+      if (action !== "RunInstances") return undefined;
+      if (outcome === "transport") throw new Error("capacity response lost after dispatch");
+      if (outcome === "malformed capacity error")
+        return ec2XMLResponse(
+          "<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code>",
+          503,
+        );
+      if (outcome === "missing instance id")
+        return ec2XMLResponse(
+          "<RunInstancesResponse><instancesSet><item><instanceType>t3.small</instanceType></item></instancesSet></RunInstancesResponse>",
+        );
+      return outcome === "server error"
+        ? ec2XMLResponse(
+            "<Response><Errors><Error><Code>InternalError</Code></Error></Errors></Response>",
+            500,
+          )
+        : ec2XMLResponse("<RunInstancesResponse />");
+    });
+    const input: Partial<LeaseRequest> = {
+      capacity: { market: "on-demand", fallback: "none", regions: ["eu-west-1", "us-east-1"] },
+    };
+    const response = await fixture.create(input);
+    expect(response.status).toBe(500);
+    expect(await response.text()).toContain("crabbox_aws_run_instances_outcome_uncertain");
+    expect(fixture.storage.value<LeaseRecord>(`lease:${fixture.creatingID}`)).toMatchObject({
+      state: "failed",
+      provisioningResourceMayExist: true,
+      cloudID: "",
+    });
+    const requestCount = fixture.requests.length;
+    const replay = await fixture.create(input);
+    expect(replay.status).toBe(409);
+    expect(await replay.json()).toMatchObject({ error: "lease_state_changed" });
+    expect(fixture.requests).toHaveLength(requestCount);
+    expect(
+      fixture.requests
+        .filter(({ action }) => action === "RunInstances")
+        .every(({ region }) => region === "eu-west-1"),
+    ).toBe(true);
+  });
+
+  it.each(["azure", "hetzner"] as const)(
+    "preserves provider-confirmed %s rejection on token-bound replay",
+    async (providerName) => {
+      const storage = new MemoryStorage();
+      const message = "exact machine type has no capacity";
+      const failure =
+        providerName === "azure"
+          ? new AzureProvisioningRejectedError(new Error(message))
+          : new HetznerProvisioningError(message, false, false);
+      const provider = fakeProvider(
+        () => {
+          throw failure;
+        },
+        { provider: providerName },
+      );
+      provider.provisioningFailureEvidence =
+        providerName === "azure"
+          ? AzureProvider.prototype.provisioningFailureEvidence
+          : HetznerProvider.prototype.provisioningFailureEvidence;
+      const provision = vi.spyOn(provider, "createServerWithFallback");
+      const fleet = testFleet(storage, { [providerName]: provider });
+      const create = () =>
+        fleet.fetch(
+          request("POST", "/v1/leases", {
+            body: {
+              provider: providerName,
+              leaseID: "cbx_abcdef123456",
+              createAttemptID: "cat_00000000000000000000000000000179",
+              sshPublicKey: "ssh-ed25519 test",
+            },
+          }),
+        );
+      const first = await create();
+      expect(first.status).toBe(422);
+      expect(await first.json()).toEqual({ error: "provisioning_failed", message });
+      const replay = await create();
+      expect(replay.status).toBe(422);
+      expect(await replay.json()).toEqual({ error: "provisioning_failed", message });
+      expect(provision).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("keeps a definite provider rejection ambiguous when the failed lease cannot be persisted", async () => {
+    const fixture = awsIngressTestFleet(async (action) => {
+      if (action === "RunInstances") {
+        return ec2XMLResponse(
+          "<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code></Error></Errors></Response>",
+          400,
+        );
+      }
+      return undefined;
+    });
+    fixture.storage.beforePut = async (key, value) => {
+      if (key === `lease:${fixture.creatingID}` && (value as LeaseRecord).state === "failed") {
+        throw new Error("failed lease storage unavailable");
+      }
+    };
+    const response = await fixture.create();
+    expect(response.status).toBe(500);
+    expect(await response.text()).toContain("failed lease storage unavailable");
+    expect(fixture.storage.value<LeaseRecord>(`lease:${fixture.creatingID}`)?.state).toBe(
+      "provisioning",
+    );
   });
 
   it("persists each AWS fallback region before RunInstances", async () => {

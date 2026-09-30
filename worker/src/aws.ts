@@ -2759,7 +2759,11 @@ export class EC2SpotClient {
         root = await this.ec2("RunInstances", params, { capacityHandoff });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (!config.awsPrivate || message.includes("aws RunInstances: http 4")) {
+        if (
+          error instanceof AWSQueryError &&
+          ((error.status >= 400 && error.status < 500) ||
+            error.code === "InsufficientInstanceCapacity")
+        ) {
           throw error;
         }
         throw new Error(`${awsRunInstancesOutcomeUncertain}: ${message}`, { cause: error });
@@ -2767,13 +2771,12 @@ export class EC2SpotClient {
       const responded = creationEvent("provider_create_response");
       const instance = items(record(root["instancesSet"])["item"])[0];
       if (!instance) {
-        const message = "aws returned no instances";
-        if (config.awsPrivate) {
-          throw new Error(`${awsRunInstancesOutcomeUncertain}: ${message}`);
-        }
-        throw new Error(message);
+        throw new Error(`${awsRunInstancesOutcomeUncertain}: aws returned no instances`);
       }
       const machine = this.withRegion(instanceToMachine(instance));
+      if (!machine.cloudID.trim()) {
+        throw new Error(`${awsRunInstancesOutcomeUncertain}: aws returned no instance id`);
+      }
       return {
         ...machine,
         creationEvents: [requested, responded, ...observedRunning(machine.status)],
@@ -3491,7 +3494,12 @@ export class EC2SpotClient {
       detail = "";
       code = "";
     }
-    return new AWSQueryError(action, status, code, detail || trimBody(text).replace(/\s+/g, " "));
+    return new AWSQueryError(
+      action,
+      status,
+      XMLValidator.validate(text) === true ? code : "",
+      detail || trimBody(text).replace(/\s+/g, " "),
+    );
   }
 
   private async appliedServiceQuota(quotaCode: string): Promise<number | undefined> {
@@ -4432,6 +4440,7 @@ function finiteNumber(value: unknown): number | undefined {
 const opaqueAWSHTTP400XMLDeclaration = '<?xml version="1.0" encoding="UTF-8"?>';
 
 export function awsProvisioningErrorCategory(message: string): string {
+  if (isAWSRunInstancesOutcomeUncertain(message)) return "";
   if (message.includes("no available EC2 Mac Dedicated Host")) {
     return "capacity";
   }

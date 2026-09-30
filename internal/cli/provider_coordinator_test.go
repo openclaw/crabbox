@@ -1911,6 +1911,7 @@ func TestCoordinatorCreateLeaseTreatsAllServerErrorsAsAmbiguous(t *testing.T) {
 		}
 	}
 	for _, body := range []string{
+		`{"error":"provisioning_failed","message":"capacity unavailable"}`,
 		`{"error":"provider_failure","message":"tailscale_unavailable"}`,
 		`{"error":"tailscale_unavailable"`,
 		`tailscale_unavailable`,

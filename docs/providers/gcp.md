@@ -316,8 +316,8 @@ Disk-type/machine-type incompatibility also permits candidate fallback. For any
 provider, a create the coordinator records as failed with no possible provider
 resource returns HTTP 422 `provisioning_failed` with the diagnostic message.
 Uncertain outcomes and failures requiring resource cleanup retain their existing
-responses. An identical fixed-ID replay returns `409 fixed_lease_terminal`
-without provider work.
+responses. An identical fixed-ID replay returns the same `422 provisioning_failed`
+diagnostics without provider work or client cancellation.
 
 ## Networking
 

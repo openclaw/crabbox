@@ -5235,6 +5235,9 @@ export class FleetCoordinator {
       );
     }
     if (!leaseIsLive(existing)) {
+      if (providerResourceDefinitelyAbsent(existing)) {
+        return provisioningFailedResponse(existing);
+      }
       return json(
         {
           error: "fixed_lease_terminal",
@@ -21844,6 +21847,9 @@ function createAttemptReplayResponse(lease: LeaseRecord): Response {
   if (leaseIsLive(lease)) {
     return json({ lease: publicLeaseRecord(lease) }, { status: 200 });
   }
+  if (providerResourceDefinitelyAbsent(lease)) {
+    return provisioningFailedResponse(lease);
+  }
   return json(
     {
       error: "lease_state_changed",
@@ -21851,6 +21857,16 @@ function createAttemptReplayResponse(lease: LeaseRecord): Response {
       lease: publicLeaseRecord(lease),
     },
     { status: 409 },
+  );
+}
+
+function provisioningFailedResponse(lease: LeaseRecord): Response {
+  return json(
+    {
+      error: "provisioning_failed",
+      message: lease.failureError || lease.cleanupError || "provider provisioning failed",
+    },
+    { status: 422 },
   );
 }
 
@@ -28895,7 +28911,7 @@ export class AWSProvider implements CloudProvider {
   }: ProviderProvisioningFailureContext): ProviderProvisioningFailureEvidence {
     if (config.provider !== "aws") return {};
     return {
-      allocationUncertain: Boolean(config.awsPrivate && isAWSRunInstancesOutcomeUncertain(message)),
+      allocationUncertain: isAWSRunInstancesOutcomeUncertain(message),
       ownedKeyCleanupPending: Boolean(
         lease.providerKeyCleanupPending && leaseUsesCanonicalProviderKey(lease),
       ),
@@ -31340,9 +31356,10 @@ function mergeImageCapabilityInventory(
 
 function isRetryableAWSRegionProvisioningError(message: string): boolean {
   return (
-    isRetryableAWSProvisioningError(message) ||
-    message.includes("quota ") ||
-    message.includes("capacity")
+    !isAWSRunInstancesOutcomeUncertain(message) &&
+    (isRetryableAWSProvisioningError(message) ||
+      message.includes("quota ") ||
+      message.includes("capacity"))
   );
 }
 

@@ -63,7 +63,9 @@ leases, that ID is an
 immutable create identity: an identical semantic replay returns the same
 live lease, while intent drift returns `lease_id_conflict`.
 Managed coordinator replay of the same terminal intent returns
-`fixed_lease_terminal`. External providers also accept requested IDs when their
+`fixed_lease_terminal`, except definite provisioning failures with no possible
+machine, which preserve `422 provisioning_failed` and the original diagnostics.
+External providers also accept requested IDs when their
 protocol explicitly advertises
 idempotent lease identity support. The coordinator durably stores a versioned
 normalized request hash. Direct AWS durably stores the intent and current

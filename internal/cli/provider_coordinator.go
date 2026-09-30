@@ -545,6 +545,13 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 			lease = CoordinatorLease{}
 			return
 		}
+		if coordinatorResponseErrorCode(err, http.StatusUnprocessableEntity) == "provisioning_failed" {
+			// A bound replay can resolve an earlier ambiguous response. The coordinator
+			// has persisted terminal failure with no possible allocation to cancel.
+			lease = CoordinatorLease{}
+			err = errors.Join(ctx.Err(), err)
+			return
+		}
 		if ctx.Err() != nil {
 			lease = CoordinatorLease{}
 			err = b.canceledCoordinatorLeaseCreateError(ctx, leaseID, slug, createAttemptID, fixed, err)
@@ -736,6 +743,9 @@ func (b *coordinatorLeaseBackend) recoverCoordinatorLeaseAfterCreateError(
 	defer ticker.Stop()
 	for {
 		lease, err := create(recoverCtx)
+		if coordinatorResponseErrorCode(err, http.StatusUnprocessableEntity) == "provisioning_failed" {
+			return CoordinatorLease{}, err
+		}
 		if recoverCtx.Err() != nil {
 			return CoordinatorLease{}, errors.Join(createErr, recoverCtx.Err(), definitiveCoordinatorCreateError(err))
 		}
