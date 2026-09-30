@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Release a pressed macOS VNC key when `desktop type` or `desktop paste` is cancelled between its key-down and key-up; Screen Sharing otherwise kept it held after disconnect. [Issue 2627](https://github.com/openclaw/crabbox/issues/2627), [PR 2628](https://github.com/openclaw/crabbox/pull/2628). Thanks @saariuslystoned for the report.
+
 ## 0.69.0 - 2026-09-29
 
 ### Highlights
