@@ -582,11 +582,15 @@ function execEventStream(
         controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
       };
       emit({ type: "start" });
+      if (canceled) {
+        controller.close();
+        return;
+      }
       heartbeat = setInterval(() => emit({ type: "heartbeat" }), heartbeatIntervalMs);
 
+      const scriptPath = `/tmp/crabbox-command-${crypto.randomUUID()}.sh`;
       void (async () => {
         try {
-          const scriptPath = `/tmp/crabbox-command-${crypto.randomUUID()}.sh`;
           const writer = await container.exec(
             [
               "/bin/sh",
@@ -606,6 +610,8 @@ function execEventStream(
             throw new Error(`prepare command: ${writeErr.trim() || `exit ${writeExit}`}`);
           }
           if (canceled) {
+            // The script deletes itself only once it runs; it may hold secrets.
+            await removeFile(container, scriptPath);
             controller.close();
             return;
           }
@@ -625,6 +631,7 @@ function execEventStream(
           process = await container.exec(argv, options);
           if (canceled) {
             process.kill(15);
+            await removeFile(container, scriptPath);
             controller.close();
             return;
           }
@@ -635,6 +642,7 @@ function execEventStream(
         } catch (error) {
           emit({ type: "error", error: errorMessage(error) });
           finish();
+          await removeFile(container, scriptPath);
           controller.close();
         }
       })();
@@ -724,6 +732,18 @@ async function copyToStdin(
   }
   await writer.close().catch(() => undefined);
   return undefined;
+}
+
+async function removeFile(container: Container, path: string): Promise<void> {
+  try {
+    const remover = await container.exec(["rm", "-f", "--", path], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    await remover.exitCode;
+  } catch {
+    // Best effort: the container may already be gone.
+  }
 }
 
 function textStream(text: string): ReadableStream<Uint8Array> {

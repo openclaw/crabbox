@@ -74,6 +74,7 @@ class MockContainer {
   failStart = false;
   failCommand: Error | undefined;
   hangingProbes = 0;
+  scriptGate: Promise<void> | undefined;
   command: CommandScript = { stdout: ["hi\n"], exitCode: 0 };
   uploadExitCode = 0;
   uploadGate: Promise<void> | undefined;
@@ -113,8 +114,13 @@ class MockContainer {
       }
       return process(0);
     }
+    if (cmd[0] === "rm") {
+      this.files.delete(cmd[3] ?? "");
+      return process(0);
+    }
     if (cmd[0] === "/bin/sh" && options?.stdin instanceof ReadableStream) {
       this.files.set(cmd[4] ?? "", await new Response(options.stdin).text());
+      await this.scriptGate;
       return process(0, null, streamOf([]));
     }
     if (cmd[0] === "/bin/sh" && options?.stdin === "pipe") {
@@ -716,6 +722,49 @@ describe("Cloudflare runner lifecycle", () => {
 
     await eventually(async () => expect(await activeExecutions(storage)).toBeUndefined());
     expect(container.calls.some((call) => call.cmd[0] === "timeout")).toBe(false);
+  });
+
+  it("removes the command script when a cancel lands before the command runs", async () => {
+    const { sandbox, container } = harness();
+    await createLease(sandbox);
+    const gate = deferred<void>();
+    container.scriptGate = gate.promise;
+    const abort = new AbortController();
+
+    const response = await sandbox.fetch(
+      new Request("http://crabbox.internal/__crabbox/exec-stream", {
+        method: "POST",
+        body: JSON.stringify({ command: "echo s3cr3t", cwd: "/workspace/repo" }),
+        signal: abort.signal,
+      }),
+    );
+    await eventually(async () => expect(container.files.size).toBe(1));
+    abort.abort();
+    gate.resolve();
+    await response.text();
+
+    await eventually(async () => expect(container.files.size).toBe(0));
+    expect(container.calls.some((call) => call.cmd[0] === "timeout")).toBe(false);
+  });
+
+  it("starts no heartbeat for a command canceled before its stream starts", async () => {
+    const { sandbox, container } = harness();
+    await createLease(sandbox);
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    const abort = new AbortController();
+    abort.abort();
+
+    const response = await sandbox.fetch(
+      new Request("http://crabbox.internal/__crabbox/exec-stream", {
+        method: "POST",
+        body: JSON.stringify({ command: "sleep 30", cwd: "/workspace/repo" }),
+        signal: abort.signal,
+      }),
+    );
+    await response.text();
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(container.files.size).toBe(0);
   });
 
   it("stops a command whose request is canceled before exec returns", async () => {
