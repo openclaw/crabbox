@@ -7,7 +7,7 @@
 - Point generated `actions.workflow` at the custom `init --workflow` path. [PR 2624](https://github.com/openclaw/crabbox/pull/2624). Thanks @KrasimirKralev.
 - Print empty JSON inventories as `[]` (or `{}` for object-shaped provider lists) instead of `null` across lease lists, events, history, ready pools, cache volumes, provider sizes, ports, and admin inventories. [PR 2631](https://github.com/openclaw/crabbox/pull/2631).
 - Release a pressed macOS VNC key when `desktop type` or `desktop paste` is cancelled between its key-down and key-up; Screen Sharing otherwise kept it held after disconnect. [Issue 2627](https://github.com/openclaw/crabbox/issues/2627), [PR 2628](https://github.com/openclaw/crabbox/pull/2628). Thanks @altaywtf for the fix and @saariuslystoned for the report.
-- Scale automatic AWS/GCP root disks by lease class (40/80/150/150/250/400 GB), raised to the source image or snapshot minimum; set `aws.rootGB: 400` / `gcp.rootGB: 400` or the corresponding `CRABBOX_*_ROOT_GB=400` to retain 400 GB.
+- Scale automatic AWS/GCP root disks by lease class (40/80/150/150/250/400 GB), raised to the source image or snapshot minimum; set `aws.rootGB: 400` / `gcp.rootGB: 400` or the corresponding `CRABBOX_*_ROOT_GB=400` to retain 400 GB. [PR 2632](https://github.com/openclaw/crabbox/pull/2632).
 
 ## 0.69.0 - 2026-09-29
 
