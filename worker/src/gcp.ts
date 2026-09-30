@@ -15,6 +15,7 @@ import {
 } from "./creation-events";
 import { base64URL } from "./encoding";
 import { ExpiringTokenCache, type ExpiringToken } from "./expiring-token-cache";
+import type { GCPFirewallCache } from "./gcp-firewall-cache";
 import { redactDiagnosticSecrets } from "./http";
 import {
   leaseProviderLabels,
@@ -218,6 +219,7 @@ export class GCPClient {
     zone?: string,
     project?: string,
     private readonly sharedTokenCache?: ExpiringTokenCache,
+    private readonly firewallCache?: GCPFirewallCache,
   ) {
     this.tokenCache = sharedTokenCache ?? new ExpiringTokenCache();
     this.project =
@@ -270,7 +272,13 @@ export class GCPClient {
     if (scopedZone === this.zone && scopedProject === this.project) {
       return this;
     }
-    const client = new GCPClient(this.env, scopedZone, scopedProject, this.sharedTokenCache);
+    const client = new GCPClient(
+      this.env,
+      scopedZone,
+      scopedProject,
+      this.sharedTokenCache,
+      this.firewallCache,
+    );
     client.fetcher = this.fetcher;
     client.tokenCache = this.sharedTokenCache ?? this.tokenCache.clone();
     return client;
@@ -974,6 +982,7 @@ export class GCPClient {
       await sleep(Math.min(interval, Math.max(0, deadline - Date.now())));
       interval = Math.min(interval * 2, 5_000);
     }
+    this.firewallCache?.invalidate();
     throw new Error(`timeout waiting for gcp public ip on ${name}`);
   }
 
@@ -1149,6 +1158,22 @@ export class GCPClient {
       targetTags,
       allowed: [{ IPProtocol: "tcp", ports }],
     };
+    if (this.firewallCache) {
+      const fingerprint = JSON.stringify({
+        ...firewall,
+        sourceRanges: sourceRanges.toSorted(),
+        targetTags: targetTags.toSorted(),
+        allowed: [{ IPProtocol: "tcp", ports: ports.toSorted() }],
+      });
+      await this.firewallCache.ensure(JSON.stringify([this.project, name]), fingerprint, () =>
+        this.verifyFirewall(name, firewall),
+      );
+    } else {
+      await this.verifyFirewall(name, firewall);
+    }
+  }
+
+  private async verifyFirewall(name: string, firewall: GCPFirewall): Promise<boolean> {
     const existing = await this.gcp<GCPFirewall>("GET", `/global/firewalls/${name}`).catch(
       (error) => {
         if (isNotFound(error)) return undefined;
@@ -1160,10 +1185,10 @@ export class GCPClient {
         throw new Error(`gcp firewall ${name} exists but is not Crabbox-managed`);
       }
       // A fresh complete policy match avoids an unnecessary global operation.
-      if (gcpFirewallMatches(existing, firewall)) return;
+      if (gcpFirewallMatches(existing, firewall)) return true;
       const op = await this.gcp<GCPOperation>("PUT", `/global/firewalls/${name}`, firewall);
       await measureCreationStep("gcp.firewall_operation_wait", () => this.waitGlobalOperation(op));
-      return;
+      return false;
     }
     try {
       const op = await this.gcp<GCPOperation>("POST", "/global/firewalls", firewall);
@@ -1175,11 +1200,12 @@ export class GCPClient {
       }
       await this.reconcileRacedFirewall(name, firewall, error);
     }
+    return false;
   }
 
   private async reconcileRacedFirewall(
     name: string,
-    firewall: Record<string, unknown>,
+    firewall: GCPFirewall,
     conflictError: unknown,
   ): Promise<void> {
     for (const delay of [0, ...firewallVisibilityBackoffMs]) {
@@ -1233,13 +1259,24 @@ export class GCPClient {
       : method === "POST" && /^\/zones\/[^/]+\/instances(?:\?|$)/.test(path)
         ? "gcp.disk_instance_insert"
         : undefined;
-    return step
-      ? measureCreationStep(step, () => this.gcpRequest<T>(method, path, body))
-      : this.gcpRequest<T>(method, path, body);
+    try {
+      // Token minting has its own step; API timings measure only the Compute request.
+      const token = await this.accessToken();
+      return await (step
+        ? measureCreationStep(step, () => this.gcpRequest<T>(method, path, token, body))
+        : this.gcpRequest<T>(method, path, token, body));
+    } catch (error) {
+      this.firewallCache?.invalidate();
+      throw error;
+    }
   }
 
-  private async gcpRequest<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const token = await this.accessToken();
+  private async gcpRequest<T>(
+    method: string,
+    path: string,
+    token: string,
+    body?: unknown,
+  ): Promise<T> {
     const init: RequestInit = {
       method,
       headers: {
@@ -1410,7 +1447,7 @@ export class GCPClient {
         "POST",
         `/zones/${this.zone}/operations/${op.name}/wait`,
       );
-      operationError(done);
+      this.checkOperation(done);
       if (operationDone(done)) return done;
       // oxlint-disable-next-line eslint/no-await-in-loop -- polling interval.
       await sleep(2000);
@@ -1422,10 +1459,19 @@ export class GCPClient {
     for (;;) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- operation polling is sequential.
       const done = await this.gcp<GCPOperation>("POST", `/global/operations/${op.name}/wait`);
-      operationError(done);
+      this.checkOperation(done);
       if (operationDone(done)) return;
       // oxlint-disable-next-line eslint/no-await-in-loop -- polling interval.
       await sleep(2000);
+    }
+  }
+
+  private checkOperation(op: GCPOperation): void {
+    try {
+      operationError(op);
+    } catch (error) {
+      this.firewallCache?.invalidate();
+      throw error;
     }
   }
 

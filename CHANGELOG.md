@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reuse exact coordinator GCP firewall verifications for five minutes with policy/credential isolation and error invalidation, and separate Compute request timings from token acquisition.
 - Avoid full Hetzner SSH-key inventory reads for fresh lease keys and cache successful coordinator AWS Spot/Hetzner price estimates for five minutes without blocking admission on quote failures.
 - Skip redundant brokered AWS SSH ingress mutations and cache account/region-scoped VPC discovery while preserving fresh policy checks and legacy world-rule cleanup.
 - Skip unchanged brokered GCP firewall updates and reuse coordinator OAuth tokens until their existing refresh margin, preserving drift reconciliation and credential isolation.

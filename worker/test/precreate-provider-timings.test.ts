@@ -61,7 +61,7 @@ it("measures GCP token, firewall, disk/instance, and operation boundaries withou
     appendCreationSteps(lease);
     for (const [step, durationMs] of Object.entries({
       "gcp.token_mint": 10,
-      "gcp.firewall_get": 20,
+      "gcp.firewall_get": 10,
       "gcp.firewall_put": 10,
       "gcp.firewall_operation_wait": 10,
       "gcp.disk_instance_insert": 10,

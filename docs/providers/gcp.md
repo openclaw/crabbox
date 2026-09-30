@@ -599,12 +599,34 @@ This reduces the observation delay for an early address, not the VM's boot time.
 
 ## Coordinator preparation reuse
 
-The coordinator still fetches the named firewall for each create. It skips the
-update and global-operation wait only when a Crabbox-managed firewall exactly
-matches the desired network, ingress direction, priority, enabled state,
-source CIDRs, target tags, and TCP ports, with no additional selectors or deny
-rules. Drift follows the existing update-and-wait path; unmanaged rules remain
-an error.
+The coordinator caches an exact firewall verification in memory for up to five
+minutes, scoped to its environment, credential generation, project, firewall
+name, network, and desired policy. Creates with the same policy during that
+window skip the firewall GET. Cache hits do not extend the window, and cold
+coordinator instances always fetch. The cache is bounded to 128 policies and
+contains no credentials or durable ownership claims.
+
+Only a successful GET of a Crabbox-managed firewall can populate the cache. It
+must exactly match the desired network, ingress direction, priority, enabled
+state, source CIDRs, target tags, and TCP ports, with no additional selectors or
+deny rules. Updates and inserts require a subsequent exact GET before reuse.
+Changed policies and credentials require fresh verification. GCP request errors
+(including authentication, missing resources, transport, and malformed responses),
+operation errors, and address-readiness timeouts discard cached verifications;
+an in-flight older read cannot refill an invalidated entry.
+
+This introduces a bounded drift window: external firewall edits or deletion can
+remain undetected for up to five minutes after verification starts. A cache hit
+does not change or widen access; it proves only that the exact desired policy
+recently existed, not that it is still unchanged. External widening can therefore
+persist until the next uncached create reconciles it; external narrowing or
+deletion can interrupt SSH. After expiry, the next create reads the firewall and
+reconciles drift as before. Cleanup and instance ownership checks never use this
+cache.
+
+On a cache miss, an exact match still skips the update and global-operation
+wait. Drift follows the existing update-and-wait path; unmanaged rules remain an
+error.
 
 OAuth tokens are reused in memory across provider instances belonging to the
 same coordinator environment and credential generation. Service-account tokens
@@ -614,3 +636,10 @@ one exchange, and failed exchanges are never cached. Tokens are not persisted.
 Previously, each new provider instance started with an empty client cache, so
 `gcp.token_mint` could recur on successive creates. Cold coordinator instances
 and token expiry still incur that step.
+
+`gcp.firewall_get`, `gcp.firewall_put`, `gcp.firewall_insert`, and
+`gcp.disk_instance_insert` timings measure the Compute HTTP request and response
+processing after token acquisition. Older coordinator versions included token
+acquisition in these steps as well as in `gcp.token_mint`, so those durations
+overlapped; they were not independent network-latency measurements. A firewall
+cache hit emits no `gcp.firewall_get` step because no GET was sent.

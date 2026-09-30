@@ -3,7 +3,7 @@ import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 import { AsyncMutex, KeyedAsyncMutex } from "./async-mutex";
 import { AWSPoolAccess } from "./aws-pool-access";
 import { AWSVPCCache } from "./aws-vpc-cache";
-import { coordinatorGCPTokenCache } from "./gcp-token-cache";
+import { coordinatorGCPFirewallCache, coordinatorGCPTokenCache } from "./gcp-token-cache";
 import { commitLeaseAdmission, retainLeaseWake } from "./lease-admission";
 import { cachedProviderPrice } from "./provider-pricing";
 import {
@@ -28175,6 +28175,7 @@ export class GCPProvider implements CloudProvider {
       this.zone,
       this.project,
       coordinatorGCPTokenCache(this.env),
+      coordinatorGCPFirewallCache(this.env),
     );
     return this.clientValue;
   }
