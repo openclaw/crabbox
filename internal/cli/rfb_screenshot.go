@@ -28,6 +28,9 @@ const (
 	rfbSecurityARD   = 30
 	rfbEncodingRaw   = 0
 	rfbKeyEventDelay = 5 * time.Millisecond
+	// rfbKeyReleaseTimeout bounds the key-up sent after typing is cancelled
+	// between a key's down and up events.
+	rfbKeyReleaseTimeout = 500 * time.Millisecond
 
 	// defaultRFBInputReadySettle is a documented delay, not a protocol
 	// handshake. RFB 3.8 and Apple ARD type 30 finish ServerInit and can
@@ -304,7 +307,7 @@ func typeRFBTextFromConn(ctx context.Context, conn net.Conn, creds rfbCredential
 			return err
 		}
 		if err := waitRFBKeyEventDelay(ctx); err != nil {
-			return err
+			return releaseRFBKeyAfterError(conn, key, err)
 		}
 		if err := writeRFBKeyEvent(conn, false, key); err != nil {
 			return err
@@ -317,6 +320,21 @@ func typeRFBTextFromConn(ctx context.Context, conn net.Conn, creds rfbCredential
 		return fmt.Errorf("drain RFB session after typing: %w", err)
 	}
 	return nil
+}
+
+// releaseRFBKeyAfterError sends a best-effort key-up for a key whose key-down
+// was already written; macOS Screen Sharing keeps the key held even after the
+// client disconnects. The connection deadline follows the caller context and
+// may already have passed, so the release gets its own. A broken transport
+// cannot deliver it.
+func releaseRFBKeyAfterError(conn net.Conn, key uint32, cause error) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(rfbKeyReleaseTimeout)); err != nil {
+		return fmt.Errorf("%w; release RFB key: %w", cause, err)
+	}
+	if err := writeRFBKeyEvent(conn, false, key); err != nil {
+		return fmt.Errorf("%w; release RFB key: %w", cause, err)
+	}
+	return cause
 }
 
 func rfbKeysymForRune(r rune) (uint32, error) {
