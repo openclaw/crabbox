@@ -137,3 +137,33 @@ func (r *parallelsAppleSiliconRunner) Run(ctx context.Context, req core.LocalCom
 	}
 	return r.CommandRunner.Run(ctx, req)
 }
+
+func TestParallelsSnapshotSelectorDefaultsToLinked(t *testing.T) {
+	for _, selector := range []string{"name", "id"} {
+		for _, fixed := range []bool{false, true} {
+			t.Run(selector+map[bool]string{false: " generated", true: " fixed"}[fixed], func(t *testing.T) {
+				backend, runner, req := fixedParallelsFixture(t)
+				runner.snapshotsJSON = `{"snap":{"name":"ready","state":"poweroff"}}`
+				backend.Cfg.TargetOS = core.TargetMacOS
+				backend.Cfg.Parallels.CloneMode = ""
+				if selector == "name" {
+					backend.Cfg.Parallels.SourceSnapshot = "ready"
+				} else {
+					backend.Cfg.Parallels.SourceSnapshotID = "snap"
+				}
+				hostRunner := &parallelsAppleSiliconRunner{CommandRunner: runner}
+				backend.RT.Exec = hostRunner
+				var output bytes.Buffer
+				backend.RT.Stderr = &output
+				runner.cloneErr = errors.New("synthetic clone stop")
+				if !fixed {
+					req.RequestedLeaseID = ""
+				}
+				_, err := backend.Acquire(context.Background(), req)
+				if err == nil || !strings.Contains(err.Error(), "synthetic clone stop") || len(hostRunner.cloneArgs) != 1 || !slices.Contains(hostRunner.cloneArgs[0], "--linked") || strings.Count(output.String(), "warning: linked clones") != 1 {
+					t.Fatalf("err=%v clones=%v output=%s", err, hostRunner.cloneArgs, output.String())
+				}
+			})
+		}
+	}
+}

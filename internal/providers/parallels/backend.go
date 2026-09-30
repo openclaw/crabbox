@@ -7,6 +7,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -132,15 +133,18 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 		cleanupVM(server.CloudID)
 		return core.LeaseTarget{}, err
 	}
-	vm, err := client.WaitForIP(ctx, server.CloudID, cfg.Parallels.StartupTimeout, core.ParallelsIPWaitAcquisition)
+	startupCtx, cancelStartup := core.ParallelsStartupContext(ctx, cfg)
+	defer cancelStartup()
+	vm, err := client.WaitForIP(startupCtx, server.CloudID, cfg.Parallels.StartupTimeout, core.ParallelsIPWaitAcquisition)
 	if err != nil {
 		cleanupVM(server.CloudID)
 		return core.LeaseTarget{}, err
 	}
-	if err := b.prepareGuest(ctx, client, server.CloudID, vm, cfg, publicKey); err != nil {
+	if err := b.prepareGuest(startupCtx, client, server.CloudID, vm, cfg, publicKey); err != nil {
 		cleanupVM(server.CloudID)
 		return core.LeaseTarget{}, err
 	}
+	cancelStartup()
 	server.PublicNet.IPv4.IP = vm.IP
 	if vm.IPSource != "" {
 		server.Labels["ip_source"] = vm.IPSource
@@ -151,7 +155,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	}
 	if err := waitForSSHReady(ctx, &target, b.RT.Stderr, "bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
 		cleanupVM(server.CloudID)
-		return core.LeaseTarget{}, err
+		return core.LeaseTarget{}, parallelsBootstrapWaitError(err, runtime.GOOS)
 	}
 	server.Status = "ready"
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", time.Now().UTC())
@@ -165,32 +169,62 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 }
 
 func (b *leaseBackend) prepareGuest(ctx context.Context, client *core.ParallelsClient, vmID string, vm core.ParallelsVM, cfg core.Config, publicKey string) error {
-	if vm.IPSource == "dhcp-mac" {
-		fmt.Fprintf(b.RT.Stderr, "parallels macOS fallback vm=%s ip=%s discovery=dhcp-mac bootstrap=ssh\n", vmID, vm.IP)
+	ctx, cancel := core.ParallelsStartupContext(ctx, cfg)
+	defer cancel()
+	fallback := func() error {
+		fmt.Fprintf(b.RT.Stderr, "parallels macOS fallback vm=%s ip=%s discovery=%s bootstrap=ssh\n", vmID, vm.IP, vm.IPSource)
 		return client.BootstrapMacOSOverSSH(ctx, vm.IP, cfg, publicKey)
+	}
+	if vm.IPSource == "dhcp-mac" {
+		return fallback()
 	}
 	if err := client.WaitForGuestExec(ctx, vmID, cfg, cfg.Parallels.StartupTimeout); err != nil {
 		if parallelsMacOSBootstrapFallbackAllowed(cfg, err) {
-			fmt.Fprintf(b.RT.Stderr, "parallels macOS fallback vm=%s ip=%s discovery=tools bootstrap=ssh\n", vmID, vm.IP)
-			return client.BootstrapMacOSOverSSH(ctx, vm.IP, cfg, publicKey)
+			return fallback()
 		}
 		return err
 	}
-	if err := client.InstallSSHKey(ctx, vmID, cfg, publicKey); err != nil {
-		if parallelsMacOSBootstrapFallbackAllowed(cfg, err) {
-			fmt.Fprintf(b.RT.Stderr, "parallels macOS fallback vm=%s ip=%s discovery=tools bootstrap=ssh\n", vmID, vm.IP)
-			return client.BootstrapMacOSOverSSH(ctx, vm.IP, cfg, publicKey)
+	for _, prepare := range []func() error{
+		func() error { return client.InstallSSHKey(ctx, vmID, cfg, publicKey) },
+		func() error { return client.EnsureGuestReady(ctx, vmID, cfg) },
+	} {
+		for {
+			if ctx.Err() != nil {
+				return context.Cause(ctx)
+			}
+			err := prepare()
+			if ctx.Err() != nil {
+				return context.Cause(ctx)
+			}
+			if err == nil {
+				break
+			}
+			if parallelsMacOSBootstrapFallbackAllowed(cfg, err) {
+				return fallback()
+			}
+			if cfg.TargetOS != core.TargetMacOS || !core.ParallelsGuestToolsUnavailable(err) {
+				return err
+			}
+			// The macOS scripts converge on the same key and readiness baseline, even
+			// after partial execution. Retry only the failed step, after a fresh probe.
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("Parallels guest preparation timed out or canceled after %v: %w", err, context.Cause(ctx))
+			case <-time.After(core.ParallelsGuestExecProbeInterval):
+			}
+			if probeErr := client.WaitForGuestExec(ctx, vmID, cfg, cfg.Parallels.StartupTimeout); probeErr != nil {
+				return probeErr
+			}
 		}
-		return err
-	}
-	if err := client.EnsureGuestReady(ctx, vmID, cfg); err != nil {
-		if parallelsMacOSBootstrapFallbackAllowed(cfg, err) {
-			fmt.Fprintf(b.RT.Stderr, "parallels macOS fallback vm=%s ip=%s discovery=tools bootstrap=ssh\n", vmID, vm.IP)
-			return client.BootstrapMacOSOverSSH(ctx, vm.IP, cfg, publicKey)
-		}
-		return err
 	}
 	return nil
+}
+
+func parallelsBootstrapWaitError(err error, hostOS string) error {
+	if err != nil && hostOS == "darwin" && (strings.Contains(strings.ToLower(err.Error()), "no route to host") || strings.Contains(err.Error(), "no-route-to-host")) {
+		return fmt.Errorf("%w; hint: macOS Local Network privacy may block access to the guest IP; check System Settings > Privacy & Security > Local Network and code signing; compare Terminal and SSH launch contexts, and prefer a signed Crabbox release over an unsigned local build", err)
+	}
+	return err
 }
 
 func parallelsMacOSBootstrapFallbackAllowed(cfg core.Config, err error) bool {

@@ -411,6 +411,9 @@ func (c *ParallelsClient) ResolveCloneMode(ctx context.Context) error {
 		}
 		switch strings.TrimSpace(result.Stdout) {
 		case "1":
+			if mode == "" && (strings.TrimSpace(c.Cfg.Parallels.SourceSnapshot) != "" || strings.TrimSpace(c.Cfg.Parallels.SourceSnapshotID) != "") {
+				mode = "linked"
+			}
 			if mode == "linked" {
 				c.linkedMacOSOnAppleSilicon = true
 			} else {
@@ -453,6 +456,9 @@ func (c *ParallelsClient) Clone(ctx context.Context, source, snapshotID, leaseID
 func (c *ParallelsClient) submitClone(ctx context.Context, source, snapshotID, leaseID, slug string, keep bool, beforeSubmit func() error) (map[string]string, error) {
 	if strings.TrimSpace(source) == "" {
 		return nil, Exit(2, "parallels.source or parallels.sourceId is required")
+	}
+	if strings.TrimSpace(c.Cfg.Parallels.CloneMode) == "" && strings.TrimSpace(snapshotID) != "" {
+		c.Cfg.Parallels.CloneMode = "linked"
 	}
 	if err := c.ResolveCloneMode(ctx); err != nil {
 		return nil, err
@@ -920,28 +926,63 @@ func parallelsIPTimeoutHint(cfg Config, last ParallelsVM, vmObserved, dhcpFallba
 	return "hint: " + strings.Join(parts, "; ")
 }
 
+// ParallelsStartupContext shares one startup budget across IP discovery and preparation.
+func ParallelsStartupContext(ctx context.Context, cfg Config) (context.Context, context.CancelFunc) {
+	timeout := cfg.Parallels.StartupTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Minute
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+const ParallelsGuestExecProbeInterval = 5 * time.Second
+
 func (c *ParallelsClient) WaitForGuestExec(ctx context.Context, id string, cfg Config, timeout time.Duration) error {
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
 	}
-	deadline := time.Now().Add(timeout)
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	var lastErr error
+	waitError := func() error {
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		return Exit(5, "timed out waiting for Parallels guest exec in %s: %v", id, lastErr)
+	}
 	for {
-		err := c.probeGuestExec(ctx, id, cfg)
-		if err == nil {
+		if waitCtx.Err() != nil {
+			return waitError()
+		}
+		probeCtx, cancelProbe := context.WithTimeout(waitCtx, parallelsIPProbeTimeout)
+		err := c.probeGuestExec(probeCtx, id, cfg)
+		probeErr := probeCtx.Err()
+		cancelProbe()
+		if err != nil {
+			lastErr = err
+		}
+		if waitCtx.Err() != nil {
+			return waitError()
+		}
+		if err == nil && probeErr == nil {
 			return nil
 		}
-		lastErr = err
-		if c.Cfg.TargetOS == targetMacOS && strings.TrimSpace(c.Cfg.Parallels.BootstrapKey) != "" && ParallelsGuestToolsUnavailable(lastErr) {
-			return lastErr
+		if err == nil {
+			err = probeErr
 		}
-		if time.Now().After(deadline) {
-			return Exit(5, "timed out waiting for Parallels guest exec in %s: %v", id, lastErr)
+		lastErr = err
+		unavailable := ParallelsGuestToolsUnavailable(err)
+		if unavailable && cfg.TargetOS == targetMacOS && strings.TrimSpace(cfg.Parallels.BootstrapKey) != "" {
+			return err
+		}
+		// A timed-out probe proves neither readiness nor a terminal guest failure.
+		if !unavailable && probeErr == nil {
+			return err
 		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(5 * time.Second):
+		case <-waitCtx.Done():
+			return waitError()
+		case <-time.After(ParallelsGuestExecProbeInterval):
 		}
 	}
 }
@@ -964,6 +1005,8 @@ func ParallelsGuestToolsUnavailable(err error) bool {
 	message := strings.ToLower(err.Error())
 	return errors.Is(err, errParallelsGuestToolsUnavailable) ||
 		strings.Contains(message, "prl_err_vm_exec_guest_tool_not_available") ||
+		strings.Contains(message, "prljob_getresult: invalid argument") ||
+		strings.Contains(message, "prljob_getretcode: invalid argument") ||
 		strings.Contains(message, "guest tools are not available") ||
 		strings.Contains(message, "guest tools not available") ||
 		(strings.Contains(message, "unable to open new session in this virtual machine.") &&

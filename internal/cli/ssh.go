@@ -407,7 +407,7 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 					if stopped := check(err); stopped != nil {
 						return stopped
 					}
-					probes = append(probes, port+":closed")
+					probes = append(probes, port+":"+sshDialFailureStatus(err))
 					continue
 				}
 				_ = conn.Close()
@@ -499,6 +499,13 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 		}
 		retryDelay = min(2*retryDelay, 5*time.Second)
 	}
+}
+
+func sshDialFailureStatus(err error) string {
+	if errors.Is(err, syscall.EHOSTUNREACH) {
+		return "no-route-to-host"
+	}
+	return "closed"
 }
 
 func WaitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {

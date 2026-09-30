@@ -70,7 +70,7 @@ func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 		SourceID:         fs.String("parallels-source-id", defaults.Parallels.SourceID, "Parallels source VM UUID"),
 		SourceSnapshot:   fs.String("parallels-source-snapshot", defaults.Parallels.SourceSnapshot, "Parallels source snapshot name"),
 		SourceSnapshotID: fs.String("parallels-source-snapshot-id", defaults.Parallels.SourceSnapshotID, "Parallels source snapshot ID"),
-		CloneMode:        fs.String("parallels-clone-mode", defaults.Parallels.CloneMode, "Parallels clone mode: linked, full, or unlink (default: full for macOS on Apple silicon, linked otherwise)"),
+		CloneMode:        fs.String("parallels-clone-mode", defaults.Parallels.CloneMode, "Parallels clone mode: linked, full, or unlink (default: linked with a snapshot selector; otherwise full for macOS on Apple silicon, linked elsewhere)"),
 		Host:             fs.String("parallels-host", defaults.Parallels.Host, "remote Mac host running Parallels"),
 		HostUser:         fs.String("parallels-host-user", defaults.Parallels.HostUser, "remote Mac SSH user"),
 		HostKey:          fs.String("parallels-host-key", defaults.Parallels.HostKey, "remote Mac SSH key"),
@@ -78,7 +78,7 @@ func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 		VMRoot:           fs.String("parallels-vm-root", defaults.Parallels.VMRoot, "destination directory for cloned VM bundles"),
 		User:             fs.String("parallels-user", defaults.Parallels.User, "guest SSH user"),
 		WorkRoot:         fs.String("parallels-work-root", defaults.Parallels.WorkRoot, "remote work root inside Parallels guests"),
-		StartupTimeout:   fs.String("parallels-startup-timeout", defaults.Parallels.StartupTimeout.String(), "Parallels VM startup timeout"),
+		StartupTimeout:   fs.String("parallels-startup-timeout", defaults.Parallels.StartupTimeout.String(), "Parallels IP discovery and guest preparation timeout"),
 	}
 }
 

@@ -265,7 +265,9 @@ success|always|failure|never` to make lease cleanup explicit. Without it, a
 newly acquired one-shot lease is released after the command and an existing
 `--id` lease is left alone. The run details always print the exact `crabbox
 stop ...` command. Use `--keep-on-failure` to keep a newly acquired lease alive
-for debugging when the remote command exits non-zero; Crabbox then prints
+for debugging when the remote command exits non-zero; it does not retain a
+failed acquisition (for example, a Parallels clone that fails guest preparation).
+Crabbox then prints
 inspect/SSH/stop commands for the exact failed box. Add `--lease-output <file>`
 with `--keep` to write a small JSON lease handle for orchestrators on providers
 that advertise `run-session`. Delegated providers return their own handle.

@@ -19,6 +19,8 @@
 
 ### Fixes
 
+- Bound Parallels guest-exec readiness and macOS preparation retries, preserve linked clones for unset mode with snapshot selectors, diagnose macOS host network access, and clarify acquisition cleanup. [Issue 2612](https://github.com/openclaw/crabbox/issues/2612). Thanks @saariuslystoned.
+
 - Default Parallels macOS guests on Apple silicon to full clones, warn before explicitly selected linked clones about observed IP/Tools failures, and clarify snapshot-clearing guidance while retaining linked defaults elsewhere. [PR 2606](https://github.com/openclaw/crabbox/pull/2606), [Issue 2398](https://github.com/openclaw/crabbox/issues/2398). Thanks @saariuslystoned.
 - Return precise diagnostics and `native_unsupported` JSON receipts when checkpoint capability resolution refuses capture, and reject invalid modes before lease resolution. [PR 2613](https://github.com/openclaw/crabbox/pull/2613).
 

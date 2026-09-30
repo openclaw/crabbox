@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"runtime"
 	"strings"
 	"time"
 
@@ -380,7 +381,9 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 				}
 			}
 			// Fixed acquisitions retain failed VMs, so use existing-lease guidance.
-			ready, err := client.WaitForIP(ctx, vm.ID, cfg.Parallels.StartupTimeout, core.ParallelsIPWaitExisting)
+			startupCtx, cancelStartup := core.ParallelsStartupContext(ctx, cfg)
+			defer cancelStartup()
+			ready, err := client.WaitForIP(startupCtx, vm.ID, cfg.Parallels.StartupTimeout, core.ParallelsIPWaitExisting)
 			if err != nil {
 				return core.LeaseTarget{}, err
 			}
@@ -391,10 +394,11 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 			// that need not be available just because the lease is still valid.
 			// SSH readiness below still re-proves the lease is usable.
 			if intent.State != "acquired" {
-				if err := b.prepareGuest(ctx, client, vm.ID, ready, cfg, publicKey); err != nil {
+				if err := b.prepareGuest(startupCtx, client, vm.ID, ready, cfg, publicKey); err != nil {
 					return core.LeaseTarget{}, err
 				}
 			}
+			cancelStartup()
 			server := core.Server{CloudID: vm.ID, Provider: parallelsProviderName, Name: vm.Name, Status: "ready", Labels: maps.Clone(claim.Labels)}
 			server.ImmutableID = vm.ID
 			server.ServerType.Name = core.ServerTypeForProviderClass(parallelsProviderName, cfg.Class)
@@ -407,7 +411,7 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 				target.ReadyCheck = core.PowershellCommand(`$PSVersionTable.PSVersion | Out-Null`)
 			}
 			if err := waitForSSHReady(ctx, &target, b.RT.Stderr, "bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
-				return core.LeaseTarget{}, err
+				return core.LeaseTarget{}, parallelsBootstrapWaitError(err, runtime.GOOS)
 			}
 			server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", time.Now().UTC())
 			client.SetLeaseLabels(leaseID, server.Labels)

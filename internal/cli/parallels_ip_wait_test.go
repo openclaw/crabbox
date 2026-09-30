@@ -79,12 +79,12 @@ func TestParallelsWaitForIPToolsRecovery(t *testing.T) {
 }
 
 func TestParallelsGuestToolsUnavailableSessionError(t *testing.T) {
-	for _, message := range []string{parallelsSessionUnavailable, "PRL_ERR_VM_EXEC_GUEST_TOOL_NOT_AVAILABLE", "guest tools are not available", "guest tools not available"} {
+	for _, message := range []string{parallelsSessionUnavailable, "PRL_ERR_VM_EXEC_GUEST_TOOL_NOT_AVAILABLE", "guest tools are not available", "guest tools not available", "PrlJob_GetResult: Invalid argument", "PrlJob_GetRetCode: Invalid argument"} {
 		if !ParallelsGuestToolsUnavailable(errors.New(message)) {
 			t.Errorf("did not recognize %q", message)
 		}
 	}
-	for _, message := range []string{"PrlJob_GetRetCode: Invalid argument", "Unable to open new session in this virtual machine", "Parallels Tools update failed"} {
+	for _, message := range []string{"Invalid argument", "PrlJob_GetResult: permission denied", "PrlJob_GetRetCode: access denied", "Unable to open new session in this virtual machine", "Parallels Tools update failed"} {
 		if ParallelsGuestToolsUnavailable(errors.New(message)) {
 			t.Errorf("misclassified %q", message)
 		}

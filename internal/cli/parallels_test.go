@@ -325,7 +325,12 @@ func TestParallelsWaitForGuestExecShortCircuitsOnlyForConfiguredMacOSFallback(t 
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
-			runner := &parallelsGuestExecUnavailableRunner{cancel: cancel}
+			defer cancel()
+			runner := &parallelsGuestExecUnavailableRunner{cancel: func() {
+				if !test.wantTools {
+					cancel()
+				}
+			}}
 			cfg := Config{TargetOS: test.target, Parallels: ParallelsConfig{BootstrapKey: test.bootstrap}}
 			err := NewParallelsClient(cfg, runner).WaitForGuestExec(ctx, "vm1", cfg, time.Minute)
 			if test.wantTools {

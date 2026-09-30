@@ -29,7 +29,8 @@ func TestParallelsCloneModeByHostAndTarget(t *testing.T) {
 		{name: "explicit full", target: targetMacOS, arm64: "1", mode: "full", wantMode: "full"},
 		{name: "explicit unlink", target: targetMacOS, arm64: "1", mode: "unlink", wantMode: "unlink"},
 		{name: "Intel explicit linked", target: targetMacOS, arm64: "0", mode: "linked", snapshot: "snap", wantMode: "linked"},
-		{name: "default does not drop snapshot", target: targetMacOS, arm64: "1", snapshot: "snap", wantErr: "--parallels-source-snapshot= --parallels-source-snapshot-id="},
+		{name: "default with snapshot", target: targetMacOS, arm64: "1", snapshot: "snap", wantMode: "linked", wantWarning: true},
+		{name: "remote default with snapshot", target: targetMacOS, arm64: "1", remote: true, snapshot: "snap", wantMode: "linked", wantWarning: true},
 		{name: "host detection fails closed", target: targetMacOS, arm64: "error", wantErr: "Parallels host architecture"},
 		{name: "malformed architecture fails closed", target: targetMacOS, arm64: "unknown", wantErr: "Parallels host architecture"},
 	} {
@@ -37,6 +38,7 @@ func TestParallelsCloneModeByHostAndTarget(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			cfg := BaseConfig()
 			cfg.TargetOS = tc.target
+			cfg.Parallels.SourceSnapshotID = tc.snapshot
 			if tc.mode != "" {
 				cfg.Parallels.CloneMode = tc.mode
 			}

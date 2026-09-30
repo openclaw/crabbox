@@ -20,9 +20,12 @@ another Mac over SSH.
 
 Linux and macOS guest preparation streams its scripts over stdin through
 `prlctl exec`, including when the Parallels host is reached over SSH. Required
-preparation steps fail immediately on error; a later successful readiness check
-cannot hide an earlier failure. Commands intended to be best-effort, such as
-starting SSH services, retain their existing handling.
+preparation steps fail immediately on ordinary script errors; a later successful
+readiness check cannot hide an earlier failure. For macOS guests, recognized
+Tools-session readiness errors retry the failed, repeatable preparation step
+after another successful guest-exec probe, within the startup deadline. Commands
+intended to be best-effort, such as starting SSH services, retain their existing
+handling.
 
 **Targets:** Linux, macOS, and Windows (`--windows-mode normal` or
 `--windows-mode wsl2`).
@@ -86,12 +89,14 @@ down when they serve as local fleet bases.
 
 ### macOS guests on Apple silicon
 
-When clone mode is unset, Crabbox selects `full` for a `macos` target on an
-Apple silicon Parallels host and `linked` elsewhere. Detection runs on the
-selected host, including remote and fleet hosts, and checks hardware support
+When clone mode is unset, a configured `parallels.sourceSnapshot` or
+`parallels.sourceSnapshotId` (including flags and template overrides) selects
+`linked`. Without a snapshot selector, Crabbox selects `full` for a `macos`
+target on an Apple silicon Parallels host and `linked` elsewhere. Detection runs
+on the selected host, including remote and fleet hosts, and checks hardware support
 rather than the architecture of the Crabbox process. To opt back into linked
 cloning, select `--parallels-clone-mode linked` (or `parallels.cloneMode: linked`)
-and a power-off snapshot. Crabbox proceeds with linked mode and prints one
+and a power-off snapshot. Both explicit and snapshot-selected linked mode print one
 warning to stderr before cloning, with full-clone recovery guidance if IP
 discovery times out. Replaying an existing fixed lease does not clone or repeat
 the warning; changing its clone mode still conflicts with its recorded intent.
@@ -117,6 +122,15 @@ snapshot-based linked forks remain available on supported Parallels versions.
 
 ### IP discovery failures
 
+A Tools-reported IP does not prove that guest execution is usable. Before key
+installation, Crabbox requires a successful guest-exec probe, retrying recognized
+Tools-not-ready errors (including `PrlJob_GetResult: Invalid argument` and
+`PrlJob_GetRetCode: Invalid argument`) every five seconds. Each probe is bounded
+to ten seconds; IP discovery and guest preparation share the overall
+`--parallels-startup-timeout`. These errors never count as successful execution.
+Unrelated terminal errors fail immediately. The configured macOS SSH bootstrap
+fallback remains available when Tools cannot execute commands.
+
 Some templates run as full clones but never boot as linked clones: Parallels
 reports the clone as `running`, yet the guest never gets a Tools session or a
 DHCP lease. While waiting for an IP, Crabbox allows a two-minute boot grace
@@ -141,7 +155,11 @@ last VM query fails, the timeout includes that query's error and reports the
 Tools IP as unknown. State and MACs are explicitly identified as the last
 successful observation, if any; older DHCP or clone-mode advice is suppressed
 until inventory access works again. Failed
-acquisitions clean up their clone before returning the error. To investigate,
+acquisitions with generated lease IDs clean up their clone before returning the
+error. `run --keep-on-failure` takes effect only after acquisition; it does not
+retain a clone that fails IP discovery, key installation, guest preparation, or
+SSH bootstrap. Fixed lease IDs retain failed acquisitions under their existing
+replay/cleanup contract. To investigate a generated-ID acquisition,
 retry and capture the new clone's console on the Parallels host while IP
 discovery is still waiting. Use `prlctl list -a` there to identify the new VM:
 
@@ -202,6 +220,20 @@ existing runtime is preserved rather than replaced, so a template does not start
 depending on `nodejs.org` to stay ready. Only case 3 reaches the network, and a
 failure there stops preparation with the installer's own error rather than
 leaving the lease to time out at readiness.
+
+### Host-side Local Network access
+
+If the guest reports an IP and has an SSH listener but bootstrap reports
+`no-route-to-host`, check the host's routing and System Settings > Privacy &
+Security > Local Network. macOS privacy or code-identity problems can prevent a
+particular binary from connecting even when another tool reaches the same IP.
+Prefer signed release builds to unsigned or ad hoc signed local builds, and
+compare the actual Terminal and SSH-launched contexts when reproducing a failure.
+Apple's [Local Network privacy guidance](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
+says command-line tools launched from Terminal or SSH are normally allowed, and
+recommends an Apple-issued code-signing identity for reliable privacy tracking.
+A signature alone does not prove access is granted; a routing failure alone does
+not prove privacy is the cause.
 
 ### macOS desktop credentials
 

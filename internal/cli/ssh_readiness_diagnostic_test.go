@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -177,5 +178,20 @@ func TestWaitForSSHReadyProxyTransportProbeFollowsDirectContract(t *testing.T) {
 				t.Fatalf("error should not contain %q: %s", tc.notErr, got)
 			}
 		})
+	}
+}
+
+func TestSSHDialFailureStatusPreservesNoRoute(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{&net.OpError{Op: "dial", Net: "tcp", Err: syscall.EHOSTUNREACH}, "no-route-to-host"},
+		{syscall.ECONNREFUSED, "closed"},
+		{context.DeadlineExceeded, "closed"},
+	} {
+		if got := sshDialFailureStatus(tc.err); got != tc.want {
+			t.Errorf("%v: got %s want %s", tc.err, got, tc.want)
+		}
 	}
 }
