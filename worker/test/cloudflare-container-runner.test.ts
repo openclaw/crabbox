@@ -410,6 +410,26 @@ describe("Cloudflare runner routing", () => {
     expect(new URL(capture.requests.at(-1)?.url ?? "").pathname).toBe("/__crabbox/exec-stream");
   });
 
+  it("forwards the caller abort signal to the durable object request", async () => {
+    const capture: CapturedInternalRequest = { names: [], requests: [] };
+    const abort = new AbortController();
+    await worker.fetch(
+      new Request("https://runner.example/v1/sandboxes/cbx_test/exec-stream", {
+        method: "POST",
+        headers: { Authorization: "Bearer runner-token" },
+        body: JSON.stringify({ command: "sleep 30", cwd: "/workspace/repo" }),
+        signal: abort.signal,
+      }),
+      envWithCapture(capture),
+    );
+    const forwarded = capture.requests.at(-1);
+    expect(forwarded?.signal.aborted).toBe(false);
+
+    abort.abort();
+
+    expect(forwarded?.signal.aborted).toBe(true);
+  });
+
   it("returns a controlled 400 response for invalid create JSON", async () => {
     const capture: CapturedInternalRequest = { names: [], requests: [] };
     const response = await worker.fetch(
