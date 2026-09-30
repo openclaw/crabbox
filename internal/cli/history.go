@@ -36,7 +36,7 @@ func (a App) history(ctx context.Context, args []string) error {
 		return err
 	}
 	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(runs)
+		return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(runs))
 	}
 	for _, run := range runs {
 		telemetry := runTelemetryStatusSummary(run.Telemetry)
@@ -140,7 +140,7 @@ func (a App) events(ctx context.Context, args []string) error {
 			return err
 		}
 		if *jsonOut {
-			return json.NewEncoder(a.Stdout).Encode(response.Events)
+			return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(response.Events))
 		}
 		for _, event := range response.Events {
 			fmt.Fprintf(a.Stdout, "%s %s source=%s", event.At, event.Phase, event.Source)
@@ -162,7 +162,7 @@ func (a App) events(ctx context.Context, args []string) error {
 		return err
 	}
 	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(events)
+		return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(events))
 	}
 	for _, event := range events {
 		text := event.Message

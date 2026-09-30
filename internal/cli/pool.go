@@ -63,7 +63,7 @@ func (a App) list(ctx context.Context, args []string) error {
 			if pondName != "" {
 				view = filterJSONListViewByPond(view, pondName)
 			}
-			return json.NewEncoder(a.Stdout).Encode(view)
+			return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(view))
 		}
 	}
 	var servers []Server
@@ -83,7 +83,7 @@ func (a App) list(ctx context.Context, args []string) error {
 		servers = filterServersByPond(servers, pondName)
 	}
 	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(servers)
+		return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(servers))
 	}
 	renderServerList(a.Stdout, servers)
 	return nil

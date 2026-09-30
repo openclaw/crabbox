@@ -59,7 +59,7 @@ func (a App) readyPoolList(ctx context.Context, args []string) error {
 		return err
 	}
 	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(entries)
+		return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(entries))
 	}
 	renderReadyPoolEntries(a.Stdout, entries)
 	return nil
@@ -560,7 +560,7 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 				}
 				if ready < *minReady {
 					if *jsonOut {
-						if encodeErr := json.NewEncoder(a.Stdout).Encode(map[string]any{"key": key, "ready": ready, "minReady": *minReady, "entries": entries}); encodeErr != nil {
+						if encodeErr := json.NewEncoder(a.Stdout).Encode(map[string]any{"key": key, "ready": ready, "minReady": *minReady, "entries": nonNullJSONCollection(entries)}); encodeErr != nil {
 							return encodeErr
 						}
 					}
@@ -645,7 +645,7 @@ func renderReadyPoolLegacyResult(
 ) error {
 	if jsonOut {
 		return json.NewEncoder(w).Encode(map[string]any{
-			"key": key, "ready": ready, "minReady": minReady, "entries": entries,
+			"key": key, "ready": ready, "minReady": minReady, "entries": nonNullJSONCollection(entries),
 		})
 	}
 	fmt.Fprintf(w, "pool=%s ready=%d min_ready=%d\n", key, ready, minReady)

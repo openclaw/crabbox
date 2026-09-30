@@ -71,6 +71,9 @@ func (a App) providerSizes(ctx context.Context, args []string) error {
 		sizes = filtered
 	}
 	if *jsonOut {
+		if sizes == nil {
+			sizes = []ProviderSize{}
+		}
 		if *withContext {
 			return json.NewEncoder(a.Stdout).Encode(struct {
 				Sizes     []ProviderSize        `json:"sizes"`

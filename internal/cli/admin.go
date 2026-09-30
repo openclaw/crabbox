@@ -26,7 +26,7 @@ func (a App) adminLeases(ctx context.Context, args []string) error {
 		return err
 	}
 	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(leases)
+		return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(leases))
 	}
 	for _, lease := range leases {
 		fmt.Fprintf(a.Stdout, "%-16s %-16s %-8s %-10s %-14s %-24s owner=%s org=%s idle=%s expires=%s\n",
@@ -56,7 +56,7 @@ func (a App) adminLeaseAudit(ctx context.Context, args []string) error {
 		return err
 	}
 	if *jsonOut {
-		if err := json.NewEncoder(a.Stdout).Encode(audits); err != nil {
+		if err := json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(audits)); err != nil {
 			return err
 		}
 	} else {
@@ -412,7 +412,7 @@ func (a App) adminMacHostsList(ctx context.Context, args []string) error {
 		return err
 	}
 	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(hosts)
+		return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(hosts))
 	}
 	for _, host := range hosts {
 		fmt.Fprintf(a.Stdout, "%-18s %-12s %-14s %-12s %-10s auto=%s allocated=%s\n",
@@ -443,7 +443,7 @@ func (a App) adminMacHostOfferings(ctx context.Context, args []string) error {
 		return err
 	}
 	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(offerings)
+		return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(offerings))
 	}
 	for _, offering := range offerings {
 		fmt.Fprintf(a.Stdout, "%-12s %-14s %-12s\n",
@@ -473,7 +473,7 @@ func (a App) adminMacHostQuota(ctx context.Context, args []string) error {
 		return err
 	}
 	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(quotas)
+		return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(quotas))
 	}
 	if len(quotas) == 0 {
 		fmt.Fprintf(a.Stdout, "no EC2 Mac Dedicated Host quota found for type=%s region=%s\n", *serverType, blank(*region, "-"))
@@ -527,7 +527,7 @@ func (a App) adminMacHostsAllocate(ctx context.Context, args []string) error {
 		}
 		checks = sanitizeMacHostDryRunChecks(checks)
 		if *jsonOut {
-			return json.NewEncoder(a.Stdout).Encode(checks)
+			return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(checks))
 		}
 		for _, check := range checks {
 			status := "blocked"
@@ -544,7 +544,7 @@ func (a App) adminMacHostsAllocate(ctx context.Context, args []string) error {
 		return err
 	}
 	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(hosts)
+		return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(hosts))
 	}
 	for _, host := range hosts {
 		fmt.Fprintf(a.Stdout, "allocated host=%s region=%s az=%s type=%s state=%s\n",
@@ -645,7 +645,7 @@ func (a App) adminMacHostsRelease(ctx context.Context, args []string) error {
 		return err
 	}
 	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(released)
+		return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(released))
 	}
 	fmt.Fprintf(a.Stdout, "released host=%s region=%s released=%s\n", *id, blank(*region, "-"), strings.Join(released, ","))
 	return nil

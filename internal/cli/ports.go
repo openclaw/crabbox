@@ -62,7 +62,7 @@ func (a App) ports(ctx context.Context, args []string) error {
 		}
 		enc := json.NewEncoder(a.Stdout)
 		enc.SetEscapeHTML(false)
-		return enc.Encode(value)
+		return enc.Encode(nonNullJSONCollection(value))
 	}
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)

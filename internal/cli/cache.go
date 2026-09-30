@@ -27,7 +27,7 @@ func (a App) cacheVolumes(ctx context.Context, args []string) error {
 		return err
 	}
 	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(cfg.Cache.Volumes)
+		return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(cfg.Cache.Volumes))
 	}
 	if len(cfg.Cache.Volumes) == 0 {
 		fmt.Fprintln(a.Stdout, "no cache volumes configured")
