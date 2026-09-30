@@ -66,6 +66,12 @@ func newCloudflareClient(cfg core.Config, rt core.Runtime) (*cloudflareClient, e
 	if err != nil {
 		return nil, err
 	}
+	if instanceType == "basic" {
+		if rt.Stderr != nil {
+			fmt.Fprintln(rt.Stderr, basicInstanceTypeWarning)
+		}
+		instanceType = "standard-1"
+	}
 	parsed, err := url.Parse(apiURL)
 	if err != nil {
 		return nil, core.Exit(2, "%s url %q is invalid", providerName, apiURL)
@@ -99,7 +105,7 @@ func newCloudflareClient(cfg core.Config, rt core.Runtime) (*cloudflareClient, e
 }
 
 func (c *cloudflareClient) useInstanceType(instanceType string) {
-	if normalized, ok := normalizeContainerInstanceType(instanceType); ok {
+	if normalized, ok := normalizeContainerInstanceType(instanceType); ok && normalized != "basic" {
 		c.instanceType = normalized
 	}
 }

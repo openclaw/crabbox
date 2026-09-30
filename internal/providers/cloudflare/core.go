@@ -31,9 +31,11 @@ func isBasicInstanceType(value string) bool {
 	return strings.EqualFold(strings.TrimSpace(value), "basic")
 }
 
+// normalizeContainerInstanceType keeps basic as a configured value so the
+// client can warn once when it substitutes standard-1.
 func normalizeContainerInstanceType(value string) (string, bool) {
 	if isBasicInstanceType(value) {
-		return "standard-1", true
+		return "basic", true
 	}
 	trimmed := strings.ToLower(strings.TrimSpace(value))
 	for _, instanceType := range containerInstanceTypes() {
