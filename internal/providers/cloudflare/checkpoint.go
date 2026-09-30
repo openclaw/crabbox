@@ -57,6 +57,9 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	if err != nil {
 		return result, core.NativeCheckpointNotSubmittedError{Cause: err}
 	}
+	if err := requireResolvedCheckpointClaim(claim, req.Server); err != nil {
+		return result, core.NativeCheckpointNotSubmittedError{Cause: err}
+	}
 	client, err := newCloudflareClient(req.Config, core.RuntimeForProviderOperation(nil))
 	if err != nil {
 		return result, core.NativeCheckpointNotSubmittedError{Cause: err}
@@ -162,7 +165,28 @@ func (b *cloudflareBackend) ResolveCheckpointSource(ctx context.Context, req cor
 	}
 	server := sandboxToServer(claim.LeaseID, claim.Slug, sandbox)
 	server.Labels["workdir"] = sandbox.Workdir
+	server.Labels[checkpointClaimRevisionLabel] = claim.Revision
+	server.Labels[checkpointClaimRepoLabel] = claim.RepoRoot
 	return core.LeaseTarget{Server: server, LeaseID: claim.LeaseID}, nil
+}
+
+// Source resolution authorizes one claim for this repository. Capture re-reads
+// the claim and only proceeds while it is that exact revision, so a lease
+// reclaimed by another repository in between is never snapshotted.
+const (
+	checkpointClaimRevisionLabel = "checkpoint_claim_revision"
+	checkpointClaimRepoLabel     = "checkpoint_claim_repo"
+)
+
+func requireResolvedCheckpointClaim(claim core.LeaseClaim, server core.Server) error {
+	revision, resolved := server.Labels[checkpointClaimRevisionLabel]
+	if !resolved {
+		return core.Exit(2, "%s checkpoint source %s was not resolved for this repository", providerName, claim.LeaseID)
+	}
+	if claim.Revision != revision || claim.RepoRoot != server.Labels[checkpointClaimRepoLabel] {
+		return core.Exit(2, "%s lease %s claim changed after it was resolved; rerun crabbox checkpoint create", providerName, claim.LeaseID)
+	}
+	return nil
 }
 
 func (b *cloudflareBackend) ForkNativeCheckpoint(ctx context.Context, req core.DelegatedCheckpointForkRequest) (core.DelegatedCheckpointFork, error) {
