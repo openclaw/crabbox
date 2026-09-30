@@ -1449,7 +1449,7 @@ func withCloudflareCleanupTimeout(t *testing.T, timeout time.Duration) {
 func TestCloudflareResolveClaimRequiresReclaimForOtherRepo(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repoA, repoB := t.TempDir(), t.TempDir()
-	captured, err := core.ClaimLeaseForRepoProviderScopePondWithLabels("cbx_claimed", "blue-lobster", providerName, "runner-scope", "original-pond", repoA, time.Hour, map[string]string{"instance_type": "basic"})
+	captured, err := core.ClaimLeaseForRepoProviderScopePondWithLabels("cbx_claimed", "blue-lobster", providerName, "runner-scope", "original-pond", repoA, time.Hour, map[string]string{"instance_type": "standard-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1464,7 +1464,7 @@ func TestCloudflareResolveClaimRequiresReclaimForOtherRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.RepoRoot != repoB || updated.ProviderScope != captured.ProviderScope || updated.Pond != captured.Pond || updated.IdleTimeoutSeconds != captured.IdleTimeoutSeconds || updated.Labels["instance_type"] != "basic" {
+	if updated.RepoRoot != repoB || updated.ProviderScope != captured.ProviderScope || updated.Pond != captured.Pond || updated.IdleTimeoutSeconds != captured.IdleTimeoutSeconds || updated.Labels["instance_type"] != "standard-1" {
 		t.Fatalf("admission lost claim identity: %+v", updated)
 	}
 	if err := core.VerifyLeaseClaimUnchanged(updated.LeaseID, updated); err != nil {
