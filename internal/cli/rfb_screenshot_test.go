@@ -874,7 +874,29 @@ func TestTypeRFBTextReleasesPressedKeyWhenInterrupted(t *testing.T) {
 			wantEvents: []string{"down a", "up a", "frame"},
 		},
 		{
-			name: "key up write failure is not retried",
+			name: "complete key down write with error is released",
+			afterKeyEvent: func(_ net.Conn, _ context.CancelFunc, down bool) error {
+				if down {
+					return errInjected
+				}
+				return nil
+			},
+			wantErr:    errInjected,
+			wantEvents: []string{"down a", "up a", "frame"},
+		},
+		{
+			name: "canceled after key up confirms without double release",
+			afterKeyEvent: func(_ net.Conn, cancel context.CancelFunc, down bool) error {
+				if !down {
+					cancel()
+				}
+				return nil
+			},
+			wantErr:    context.Canceled,
+			wantEvents: []string{"down a", "up a", "frame"},
+		},
+		{
+			name: "complete key up write with error confirms without double release",
 			afterKeyEvent: func(_ net.Conn, _ context.CancelFunc, down bool) error {
 				if !down {
 					return errInjected
@@ -882,7 +904,7 @@ func TestTypeRFBTextReleasesPressedKeyWhenInterrupted(t *testing.T) {
 				return nil
 			},
 			wantErr:    errInjected,
-			wantEvents: []string{"down a", "up a"},
+			wantEvents: []string{"down a", "up a", "frame"},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -926,6 +948,92 @@ func TestTypeRFBTextReleasesPressedKeyWhenInterrupted(t *testing.T) {
 			}
 			if !slices.Equal(result.events, tt.wantEvents) {
 				t.Fatalf("client input=%q, want %q", result.events, tt.wantEvents)
+			}
+		})
+	}
+}
+
+func TestTypeRFBTextCompletesPartialKeyRelease(t *testing.T) {
+	for _, written := range []int{0, 1, 4, 7} {
+		t.Run(fmt.Sprintf("written=%d", written), func(t *testing.T) {
+			useRFBInputReadySettle(t, 0)
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+			type serverResult struct {
+				events []string
+				err    error
+			}
+			serverDone := make(chan serverResult, 1)
+			go func() {
+				events, err := serveTestTypeRFBRecordingInput(server, "ec2-user", "example-pass")
+				serverDone <- serverResult{events, err}
+			}()
+			conn := &rfbPartialKeyUpConn{Conn: client, written: written}
+			err := typeRFBTextFromConn(context.Background(), conn, rfbCredentials{
+				Username: "ec2-user", Password: "example-pass",
+			}, localWebVNCAuthARD, "ab")
+			_ = client.Close()
+			if !errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("error=%v, want deadline exceeded", err)
+			}
+			result := <-serverDone
+			if result.err != nil {
+				t.Fatalf("fake RFB server: %v (events=%q)", result.err, result.events)
+			}
+			if want := []string{"down a", "up a", "frame"}; !slices.Equal(result.events, want) {
+				t.Fatalf("client input=%q, want %q", result.events, want)
+			}
+		})
+	}
+}
+
+type rfbPartialKeyUpConn struct {
+	net.Conn
+	written int
+	failed  bool
+}
+
+func (c *rfbPartialKeyUpConn) Write(p []byte) (int, error) {
+	if !c.failed && len(p) == 8 && p[0] == 4 && p[1] == 0 {
+		c.failed = true
+		if c.written > 0 {
+			if n, err := c.Conn.Write(p[:c.written]); err != nil {
+				return n, err
+			}
+		}
+		_ = c.Conn.SetWriteDeadline(time.Now())
+		return c.written, os.ErrDeadlineExceeded
+	}
+	return c.Conn.Write(p)
+}
+
+func TestReleaseRFBKeyAfterErrorBoundsCleanup(t *testing.T) {
+	for _, acceptRelease := range []bool{false, true} {
+		t.Run(fmt.Sprintf("acceptRelease=%t", acceptRelease), func(t *testing.T) {
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+			if acceptRelease {
+				go func() {
+					// Accept the release and framebuffer request, but never reply.
+					_, _ = io.ReadFull(server, make([]byte, 8+10))
+				}()
+			}
+			started := time.Now()
+			err := releaseRFBKeyAfterError(client, 'a', 0, 2, 1, context.Canceled)
+			if !errors.Is(err, context.Canceled) || !errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("error=%v, want cancellation and cleanup timeout", err)
+			}
+			if elapsed := time.Since(started); elapsed > rfbKeyReleaseTimeout+time.Second {
+				t.Fatalf("cleanup took %s, want bounded release", elapsed)
+			}
+			want := "release RFB key"
+			if acceptRelease {
+				want = "confirm RFB key release"
+			}
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error=%v, want %q", err, want)
 			}
 		})
 	}

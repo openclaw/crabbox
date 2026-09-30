@@ -7,7 +7,6 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -287,7 +286,7 @@ func preflightRFBAuthenticationForSecurityType(conn net.Conn, creds rfbCredentia
 	return readRFBSecurityResult(conn)
 }
 
-func typeRFBTextFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode, text string) error {
+func typeRFBTextFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode, text string) (resultErr error) {
 	if !utf8.ValidString(text) {
 		return fmt.Errorf("RFB text is not valid UTF-8")
 	}
@@ -315,32 +314,42 @@ func typeRFBTextFromConn(ctx context.Context, conn net.Conn, creds rfbCredential
 	if err := waitRFBInputReady(ctx); err != nil {
 		return err
 	}
+	var key uint32
+	var downWritten, upWritten int
+	defer func() {
+		// This connection has one writer. Only a complete key-down can press
+		// a key; resume a partial key-up without replaying its sent prefix.
+		if resultErr != nil && downWritten == 8 {
+			resultErr = releaseRFBKeyAfterError(conn, key, upWritten, width, height, resultErr)
+		}
+	}()
 	for _, r := range text {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		key, err := rfbKeysymForRune(r)
+		nextKey, err := rfbKeysymForRune(r)
 		if err != nil {
 			return err
 		}
-		if _, err := writeRFBKeyEvent(conn, true, key); err != nil {
+		key, upWritten = nextKey, 0
+		downWritten, err = writeRFBKeyEvent(conn, true, key)
+		if err != nil {
 			return err
 		}
 		if err := waitRFBKeyEventDelay(ctx); err != nil {
-			return releaseRFBKeyAfterError(conn, key, width, height, err)
+			return err
 		}
-		if n, err := writeRFBKeyEvent(conn, false, key); err != nil {
-			// The caller deadline can expire before the key-up leaves. Retrying
-			// after a partial event would corrupt the stream.
-			if n == 0 && errors.Is(err, os.ErrDeadlineExceeded) {
-				return releaseRFBKeyAfterError(conn, key, width, height, err)
-			}
+		upWritten, err = writeRFBKeyEvent(conn, false, key)
+		if err != nil {
 			return err
 		}
 		if err := waitRFBKeyEventDelay(ctx); err != nil {
 			return err
 		}
 	}
+	// All key-ups are complete. The normal drain owns confirmation now;
+	// retrying its request after a partial write could corrupt the stream.
+	downWritten = 0
 	if _, err := requestAndReadRFBFramebuffer(conn, width, height); err != nil {
 		return fmt.Errorf("drain RFB session after typing: %w", err)
 	}
@@ -353,12 +362,19 @@ func typeRFBTextFromConn(ctx context.Context, conn net.Conn, creds rfbCredential
 // may already have passed, so the release gets its own. The server handles
 // messages in order, so a framebuffer reply confirms the key-up arrived before
 // the caller closes the tunnel. A broken transport cannot deliver it.
-func releaseRFBKeyAfterError(conn net.Conn, key uint32, width, height uint16, cause error) error {
+func releaseRFBKeyAfterError(conn net.Conn, key uint32, upWritten int, width, height uint16, cause error) error {
 	if err := conn.SetDeadline(time.Now().Add(rfbKeyReleaseTimeout)); err != nil {
 		return fmt.Errorf("%w; release RFB key: %w", cause, err)
 	}
-	if _, err := writeRFBKeyEvent(conn, false, key); err != nil {
-		return fmt.Errorf("%w; release RFB key: %w", cause, err)
+	message := rfbKeyEventMessage(false, key)
+	if upWritten < len(message) {
+		n, err := conn.Write(message[upWritten:])
+		if err == nil && n != len(message)-upWritten {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
+			return fmt.Errorf("%w; release RFB key: %w", cause, err)
+		}
 	}
 	if _, err := requestAndReadRFBFramebuffer(conn, width, height); err != nil {
 		return fmt.Errorf("%w; confirm RFB key release: %w", cause, err)
@@ -546,14 +562,22 @@ func writeRFBPointerEvent(conn net.Conn, buttonMask byte, x, y int) error {
 	return nil
 }
 
-func writeRFBKeyEvent(conn net.Conn, down bool, key uint32) (int, error) {
-	message := make([]byte, 8)
+func rfbKeyEventMessage(down bool, key uint32) [8]byte {
+	var message [8]byte
 	message[0] = 4
 	if down {
 		message[1] = 1
 	}
 	binary.BigEndian.PutUint32(message[4:8], key)
-	n, err := conn.Write(message)
+	return message
+}
+
+func writeRFBKeyEvent(conn net.Conn, down bool, key uint32) (int, error) {
+	message := rfbKeyEventMessage(down, key)
+	n, err := conn.Write(message[:])
+	if err == nil && n != len(message) {
+		err = io.ErrShortWrite
+	}
 	if err != nil {
 		return n, fmt.Errorf("write RFB key event: %w", err)
 	}

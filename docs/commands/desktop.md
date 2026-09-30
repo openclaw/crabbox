@@ -220,13 +220,19 @@ them instead of hand-written input snippets.
   through `xdotool type` (or `wtype` on Wayland); text containing emails,
   passwords, symbols such as `@` or `+`, URLs, whitespace, or longer payloads is
   routed through the clipboard/paste path so keyboard layouts cannot corrupt
-  special characters. Linux only.
+  special characters. On macOS, see the VNC typing behavior below.
 - `desktop paste` pastes text from `--text` or stdin via the remote clipboard.
-  Linux only. Crabbox verifies clipboard ownership before Ctrl+V and propagates
+  On Linux, Crabbox verifies clipboard ownership before Ctrl+V and propagates
   supported helper delivery failures; helper failure makes the command fail
   without printing `pasted:`.
 - `desktop key` sends an `xdotool` key sequence (or a single modifier+key
   combination on Wayland). Linux only.
+
+On macOS, both `desktop type` and `desktop paste` send key events through the
+SSH-tunneled Screen Sharing connection. Cancellation or timeout allows up to
+two extra seconds for best-effort key release and a confirming framebuffer
+reply. The original error is preserved; failed cleanup is reported with it.
+A broken connection or a forcibly killed client cannot guarantee key release.
 
 `desktop key` accepts either `--id <lease> <keys>` or the positional lease form
 `<lease> <keys>`; the key sequence is parsed after lease flags, so
