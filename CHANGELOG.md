@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- Point generated `actions.workflow` at the custom `init --workflow` path. [PR 2624](https://github.com/openclaw/crabbox/pull/2624). Thanks @KrasimirKralev.
+
 ## 0.69.0 - 2026-09-29
 
 ### Highlights
