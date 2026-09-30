@@ -9,6 +9,8 @@ const instanceTypes = ["lite", "standard-1", "standard-2", "standard-3", "standa
 
 const readyTimeoutMs = 120_000;
 const readyPollMs = 250;
+// A probe can stay pending while a container is still starting.
+const readyProbeTimeoutMs = 10_000;
 // Platform maximum; lease TTL and idle expiry are enforced by the Durable Object alarm.
 const containerInactivityTimeoutMs = 6 * 60 * 60 * 1000;
 const heartbeatIntervalMs = 15_000;
@@ -466,10 +468,10 @@ async function waitForExec(
   let lastError: unknown;
   for (;;) {
     try {
+      const budget = Math.max(Math.min(readyProbeTimeoutMs, deadline - performance.now()), 1);
       // oxlint-disable-next-line eslint/no-await-in-loop -- readiness is a sequential probe.
-      const probe = await container.exec(["true"], { stdout: "ignore", stderr: "ignore" });
-      // oxlint-disable-next-line eslint/no-await-in-loop -- see above.
-      if ((await probe.exitCode) === 0) return;
+      const exitCode = await withTimeout(probeExec(container), budget, "readiness probe");
+      if (exitCode === 0) return;
       lastError = new Error("readiness probe exited non-zero");
     } catch (error) {
       lastError = error;
@@ -671,6 +673,23 @@ function textStream(text: string): ReadableStream<Uint8Array> {
 async function readText(stream: ReadableStream | null): Promise<string> {
   if (!stream) return "";
   return new Response(stream).text();
+}
+
+async function probeExec(container: Container): Promise<number> {
+  const probe = await container.exec(["true"], { stdout: "ignore", stderr: "ignore" });
+  return probe.exitCode;
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 function sleep(ms: number): Promise<void> {
