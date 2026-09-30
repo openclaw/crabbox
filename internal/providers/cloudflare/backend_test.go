@@ -2316,21 +2316,26 @@ func TestCloudflareInstanceTypeCanonicalSizes(t *testing.T) {
 	if _, err := resolveInstanceType("lite", "unused-fallback", true); err == nil || !strings.Contains(err.Error(), "lite cannot start the bundled runner image; use standard-1") {
 		t.Fatalf("lite error = %v", err)
 	}
-	if got, ok := normalizeContainerInstanceType(" BASIC "); !ok || got != "standard-1" {
-		t.Fatalf("basic normalized = (%q,%t), want (standard-1,true)", got, ok)
+	if got, ok := normalizeContainerInstanceType(" BASIC "); !ok || got != "basic" {
+		t.Fatalf("basic normalized = (%q,%t), want (basic,true)", got, ok)
 	}
 }
 
 func TestCloudflareBasicTypeWarnsAboutStandardOne(t *testing.T) {
 	cfg := core.Config{Provider: providerName, ServerType: "basic", ServerTypeExplicit: true}
-	var stderr strings.Builder
+	cfg.Cloudflare.APIURL = "https://runner.example.com"
+	cfg.Cloudflare.Token = "token"
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	fs.SetOutput(&stderr)
 	if err := ApplyCloudflareProviderFlags(&cfg, fs, struct{}{}); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ServerType != "standard-1" || !strings.Contains(stderr.String(), "--type basic is deprecated; using standard-1") {
-		t.Fatalf("type=%q stderr=%q", cfg.ServerType, stderr.String())
+	var stderr strings.Builder
+	client, err := newCloudflareClient(cfg, core.Runtime{Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.instanceType != "standard-1" || !strings.Contains(stderr.String(), "--type basic is deprecated; using standard-1") {
+		t.Fatalf("type=%q stderr=%q", client.instanceType, stderr.String())
 	}
 }
 
