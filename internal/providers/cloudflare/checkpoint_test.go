@@ -96,7 +96,7 @@ func TestCloudflareCheckpointCreateAndForkThroughCLI(t *testing.T) {
 	if err := app.Run(t.Context(), []string{"checkpoint", "create", "--provider", "cloudflare", "--id", source.LeaseID, "--reclaim"}); err == nil || !strings.Contains(err.Error(), "--reclaim is not supported") {
 		t.Fatalf("create --reclaim error = %v", err)
 	}
-	if err := app.Run(t.Context(), []string{"checkpoint", "create", "--provider", "cloudflare", "--id", source.LeaseID, "--mode", "native", "--json"}); err != nil {
+	if err := app.Run(t.Context(), []string{"checkpoint", "create", "--provider", "cloudflare", "--id", source.LeaseID, "--json"}); err != nil {
 		t.Fatalf("create: %v %s", err, stderr.String())
 	}
 	var record struct {
@@ -161,5 +161,37 @@ func TestCloudflareCheckpointForkRejectsAnotherRunner(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "captured on runner https://runner-a.example.com") {
 		t.Fatalf("fork config error = %v", err)
+	}
+}
+
+func TestCloudflareCheckpointRejectsClaimReassignedAfterResolve(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	runner := newFakeSnapshotRunner(t)
+	repo := checkpointTestRepo(t)
+	source, err := core.ClaimLeaseForRepoProviderScopePondWithLabels("cbx_0123456789ab", "blue-lobster", providerName, "", "", repo, time.Hour, map[string]string{"instance_type": "standard-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := core.Config{Provider: providerName, TargetOS: core.TargetLinux}
+	cfg.Cloudflare.APIURL = runner.server.URL
+	cfg.Cloudflare.Token = "runner-token"
+	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, core.Runtime{HTTP: runner.server.Client()}).(*cloudflareBackend)
+	lease, err := backend.ResolveCheckpointSource(t.Context(), core.ResolveRequest{Repo: core.Repo{Root: repo}, ID: source.LeaseID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.ClaimLeaseForRepoProvider(source.LeaseID, source.Slug, providerName, t.TempDir(), time.Hour, true); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = (Provider{}).CreateNativeCheckpoint(t.Context(), core.NativeCheckpointCreateRequest{
+		Config: cfg, Server: lease.Server, LeaseID: source.LeaseID, CheckpointID: "chk_0123456789abcdef",
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "claim changed after it was resolved") {
+		t.Fatalf("create error = %v", err)
+	}
+	if len(runner.snapshots) != 0 {
+		t.Fatalf("snapshot requests = %v, want none", runner.snapshots)
 	}
 }
