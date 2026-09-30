@@ -72,6 +72,7 @@ class MockContainer {
   destroyed = 0;
   failStart = false;
   failCommand: Error | undefined;
+  hangingProbes = 0;
   command: CommandScript = { stdout: ["hi\n"], exitCode: 0 };
   uploadExitCode = 0;
   uploadGate: Promise<void> | undefined;
@@ -99,7 +100,13 @@ class MockContainer {
     this.calls.push({ cmd, options });
     if (!this.running)
       throw new Error("exec() cannot be called on a container that is not running.");
-    if (cmd[0] === "true") return process(0);
+    if (cmd[0] === "true") {
+      if (this.hangingProbes > 0) {
+        this.hangingProbes -= 1;
+        return new Promise<never>(() => undefined);
+      }
+      return process(0);
+    }
     if (cmd[0] === "/bin/sh" && options?.stdin instanceof ReadableStream) {
       this.files.set(cmd[4] ?? "", await new Response(options.stdin).text());
       return process(0, null, streamOf([]));
@@ -445,6 +452,18 @@ describe("Cloudflare runner lifecycle", () => {
       { image: container.images.default, instance: "standard-2", enableInternet: true },
     ]);
     expect(storage.alarm).toBe(Date.parse("2026-05-13T18:10:00Z"));
+  });
+
+  it("retries a readiness probe that never settles", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
+    const { sandbox, container } = harness();
+    container.hangingProbes = 1;
+
+    const response = createLease(sandbox);
+    await vi.advanceTimersByTimeAsync(10_500);
+
+    expect((await response).status).toBe(200);
+    expect(container.calls.filter((call) => call.cmd[0] === "true")).toHaveLength(2);
   });
 
   it("rejects images that are not configured", async () => {
