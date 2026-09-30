@@ -131,3 +131,12 @@ test("static verifier extracts VMD bytes before its candidate execution boundary
   assert.ok(extractor >= 0 && staticExit > extractor && helperExecution > staticExit);
   assert.doesNotMatch(verifier, /vmd-export/);
 });
+
+test("release verifiers never pipe git archive into tar", () => {
+  // bsdtar can exit at the end-of-archive marker and SIGPIPE git under pipefail.
+  for (const file of ["scripts/verify-go-install.sh", "scripts/verify-release.sh"]) {
+    for (const line of read(file).split("\n")) {
+      assert.doesNotMatch(line, /\bgit\b.*\barchive\b.*\|\s*tar\b/, `${file}: ${line.trim()}`);
+    }
+  }
+});

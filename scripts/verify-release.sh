@@ -150,7 +150,10 @@ if [[ "$runtime_pack_enabled" == true ]] &&
   runtime_pack_enabled=filesystem
   # Hash frozen source data with protected tooling; never execute tagged code.
   mkdir -m 700 "$WORK/source"
-  git -C "$ROOT" archive "$TAG_COMMIT" internal/runner | tar -xf - -C "$WORK/source"
+  # Extract from a file: bsdtar may close a pipe before git finishes writing.
+  git -C "$ROOT" archive --output="$WORK/runner-source.tar" "$TAG_COMMIT" internal/runner
+  tar -xf "$WORK/runner-source.tar" -C "$WORK/source"
+  rm -f "$WORK/runner-source.tar"
   filesystem_build_id=$("$runtime_tool" source-id --source-directory "$WORK/source")
   [[ "$filesystem_build_id" =~ ^[0-9a-f]{64}$ ]]
   filesystem_identity_args=(--filesystem-build-id "$filesystem_build_id")

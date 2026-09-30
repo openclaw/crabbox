@@ -37,7 +37,11 @@ SEED_MODCACHE="$WORK/seed-modcache"
 SEED_GOCACHE="$WORK/seed-gocache"
 SEED_TMP="$WORK/seed-tmp"
 mkdir -m 700 "$SOURCE" "$PROXY" "$SEED_HOME" "$SEED_MODCACHE" "$SEED_GOCACHE" "$SEED_TMP"
-git -C "$ROOT" archive "$SOURCE_COMMIT" | tar -xf - -C "$SOURCE"
+# bsdtar can stop at the end-of-archive marker and close the pipe before git
+# writes its trailing padding; extract from a file so pipefail sees no SIGPIPE.
+git -C "$ROOT" archive --output="$WORK/source.tar" "$SOURCE_COMMIT"
+tar -xf "$WORK/source.tar" -C "$SOURCE"
+rm -f "$WORK/source.tar"
 
 VERIFY_GO="$WORK/verify.go"
 cat >"$VERIFY_GO" <<'EOF'
