@@ -288,7 +288,7 @@ external:
 	if err != nil {
 		t.Fatalf("list error=%v stderr=%q", err, stderr.String())
 	}
-	if strings.TrimSpace(stdout.String()) != "null" {
+	if strings.TrimSpace(stdout.String()) != "[]" {
 		t.Fatalf("list output=%q", stdout.String())
 	}
 }

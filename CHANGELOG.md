@@ -5,7 +5,7 @@
 ### Fixes
 
 - Point generated `actions.workflow` at the custom `init --workflow` path. [PR 2624](https://github.com/openclaw/crabbox/pull/2624). Thanks @KrasimirKralev.
-- Print empty JSON inventories as `[]` (or `{}` for object-shaped provider lists) instead of `null` across lease lists, events, history, ready pools, cache volumes, provider sizes, ports, and admin inventories.
+- Print empty JSON inventories as `[]` (or `{}` for object-shaped provider lists) instead of `null` across lease lists, events, history, ready pools, cache volumes, provider sizes, ports, and admin inventories. [PR 2631](https://github.com/openclaw/crabbox/pull/2631).
 
 ## 0.69.0 - 2026-09-29
 
