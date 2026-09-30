@@ -119,7 +119,7 @@ func TestCloudflareFlagNormalizationPrecedesValues(t *testing.T) {
 			}
 			err := ApplyCloudflareProviderFlags(&cfg, fs, struct{}{})
 			if tc.fail {
-				if err == nil || err.Error() != "cloudflare --type must be one of lite, standard-1, standard-2, standard-3, standard-4" {
+				if err == nil || err.Error() != "cloudflare --type must be one of standard-1, standard-2, standard-3, standard-4" {
 					t.Fatalf("type normalization=%v", err)
 				}
 				continue
@@ -705,7 +705,7 @@ func TestCloudflareListRefreshChecksClaimState(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/sandboxes/cbx_live":
-			_, _ = io.WriteString(w, `{"id":"cbx_live","state":"healthy","instanceType":"lite","labels":{"slug":"blue-lobster"}}`)
+			_, _ = io.WriteString(w, `{"id":"cbx_live","state":"healthy","instanceType":"standard-2","labels":{"slug":"blue-lobster"}}`)
 		case "/v1/sandboxes/cbx_missing":
 			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		default:
@@ -717,7 +717,7 @@ func TestCloudflareListRefreshChecksClaimState(t *testing.T) {
 	cfg := core.Config{}
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = "token"
-	cfg.ServerType = "lite"
+	cfg.ServerType = "standard-2"
 	backend := cloudflareBackend{cfg: cfg, rt: core.Runtime{HTTP: server.Client(), Stderr: io.Discard}}
 	servers, err := backend.List(context.Background(), core.ListRequest{Refresh: true})
 	if err != nil {
@@ -734,17 +734,17 @@ func TestCloudflareListRefreshChecksClaimState(t *testing.T) {
 
 func TestCloudflareStatusUsesClaimedInstanceType(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if _, err := core.ClaimLeaseForRepoProviderScopePondWithLabels("cbx_lite", "blue-lobster", providerName, "", "", t.TempDir(), time.Hour, map[string]string{"instance_type": "lite"}); err != nil {
+	if _, err := core.ClaimLeaseForRepoProviderScopePondWithLabels("cbx_small", "blue-lobster", providerName, "", "", t.TempDir(), time.Hour, map[string]string{"instance_type": "standard-2"}); err != nil {
 		t.Fatal(err)
 	}
 	var gotInstanceType string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/sandboxes/cbx_lite" {
+		if r.URL.Path != "/v1/sandboxes/cbx_small" {
 			http.NotFound(w, r)
 			return
 		}
 		gotInstanceType = r.URL.Query().Get("instanceType")
-		_, _ = fmt.Fprint(w, `{"id":"cbx_lite","state":"healthy","workdir":"/workspace/repo","instanceType":"lite"}`)
+		_, _ = fmt.Fprint(w, `{"id":"cbx_small","state":"healthy","workdir":"/workspace/repo","instanceType":"standard-2"}`)
 	}))
 	defer server.Close()
 
@@ -756,8 +756,8 @@ func TestCloudflareStatusUsesClaimedInstanceType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.ID != "cbx_lite" || gotInstanceType != "lite" {
-		t.Fatalf("view=%#v instanceType=%q, want claimed lite sandbox", view, gotInstanceType)
+	if view.ID != "cbx_small" || gotInstanceType != "standard-2" {
+		t.Fatalf("view=%#v instanceType=%q, want claimed standard-2 sandbox", view, gotInstanceType)
 	}
 }
 
@@ -1954,13 +1954,13 @@ func TestCloudflareFreshRunRequiresRecoveryOwnerAndCommand(t *testing.T) {
 
 func TestCloudflareDestroyClaimFenceSpansNativeDelete(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	claim, err := core.ClaimLeaseForRepoProviderScopePondWithLabels("cbx_fenced", "fenced", providerName, "", "", t.TempDir(), time.Hour, map[string]string{"instance_type": "lite"})
+	claim, err := core.ClaimLeaseForRepoProviderScopePondWithLabels("cbx_fenced", "fenced", providerName, "", "", t.TempDir(), time.Hour, map[string]string{"instance_type": "standard-2"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete || r.URL.Query().Get("instanceType") != "lite" {
+		if r.Method != http.MethodDelete || r.URL.Query().Get("instanceType") != "standard-2" {
 			t.Errorf("unexpected request %s %s", r.Method, r.URL)
 		}
 		close(entered)
@@ -2230,7 +2230,7 @@ func TestJSONRequestAdoptionConcreteEnvelope(t *testing.T) {
 }
 
 func TestCloudflareInstanceTypeResolutionPhases(t *testing.T) {
-	const invalidType = "cloudflare --type must be one of lite, standard-1, standard-2, standard-3, standard-4"
+	const invalidType = "cloudflare --type must be one of standard-1, standard-2, standard-3, standard-4"
 	for _, tc := range []struct {
 		name, stored, class, target, architecture string
 		explicit, visited                         bool
@@ -2296,7 +2296,7 @@ func TestCloudflareInstanceTypeResolutionPhases(t *testing.T) {
 }
 
 func TestCloudflareInstanceTypeCanonicalSizes(t *testing.T) {
-	for _, size := range []string{"lite", "standard-1", "standard-2", "standard-3", "standard-4"} {
+	for _, size := range []string{"standard-1", "standard-2", "standard-3", "standard-4"} {
 		t.Run(size, func(t *testing.T) {
 			input := " " + strings.ToUpper(size) + " "
 			if got, ok := normalizeContainerInstanceType(input); !ok || got != size {
@@ -2308,10 +2308,29 @@ func TestCloudflareInstanceTypeCanonicalSizes(t *testing.T) {
 			}
 		})
 	}
-	for _, unsupported := range []string{"ccx63", "basic"} {
+	for _, unsupported := range []string{"ccx63", "lite"} {
 		if got, ok := normalizeContainerInstanceType(unsupported); ok || got != "" {
 			t.Fatalf("normalized unsupported type %q = (%q,%t), want (empty,false)", unsupported, got, ok)
 		}
+	}
+	if _, err := resolveInstanceType("lite", "unused-fallback", true); err == nil || !strings.Contains(err.Error(), "lite cannot start the bundled runner image; use standard-1") {
+		t.Fatalf("lite error = %v", err)
+	}
+	if got, ok := normalizeContainerInstanceType(" BASIC "); !ok || got != "standard-1" {
+		t.Fatalf("basic normalized = (%q,%t), want (standard-1,true)", got, ok)
+	}
+}
+
+func TestCloudflareBasicTypeWarnsAboutStandardOne(t *testing.T) {
+	cfg := core.Config{Provider: providerName, ServerType: "basic", ServerTypeExplicit: true}
+	var stderr strings.Builder
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(&stderr)
+	if err := ApplyCloudflareProviderFlags(&cfg, fs, struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServerType != "standard-1" || !strings.Contains(stderr.String(), "--type basic is deprecated; using standard-1") {
+		t.Fatalf("type=%q stderr=%q", cfg.ServerType, stderr.String())
 	}
 }
 
@@ -2327,7 +2346,7 @@ func TestCloudflareContainerInstanceTypeMapping(t *testing.T) {
 		{class: "fast", want: "standard-4"},
 		{class: "large", want: "standard-4"},
 		{class: "beast", want: "standard-4"},
-		{class: "lite", want: "lite"},
+		{class: "standard-2", want: "standard-2"},
 		{class: "standard-1", want: "standard-1"},
 		{class: "standard-3", want: "standard-3"},
 	} {

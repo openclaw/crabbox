@@ -5,14 +5,18 @@ import { authorize, isRecord, json, stringField } from "./runner-http";
 const leaseMetaKey = "crabbox:lease";
 const defaultInstanceType = "standard-4";
 const defaultImage = "default";
-const instanceTypes = ["lite", "standard-1", "standard-2", "standard-3", "standard-4"] as const;
+const instanceTypes = ["standard-1", "standard-2", "standard-3", "standard-4"] as const;
 
-const readyTimeoutMs = 120_000;
+// A cache miss on a new image took about 2.5 minutes to pull live.
+const readyTimeoutMs = 300_000;
 const readyPollMs = 250;
 // A probe can stay pending while a container is still starting.
 const readyProbeTimeoutMs = 10_000;
-// Platform maximum; lease TTL and idle expiry are enforced by the Durable Object alarm.
+// Platform maximum; lease TTL and idle expiry are enforced by the Durable Object
+// alarm. A Durable Object restart resets the timeout, so the alarm renews it at
+// least every keepAliveIntervalMs while the lease runs.
 const containerInactivityTimeoutMs = 6 * 60 * 60 * 1000;
+const keepAliveIntervalMs = 60 * 60 * 1000;
 const heartbeatIntervalMs = 15_000;
 const timeoutKillAfter = "5s";
 
@@ -45,8 +49,10 @@ type LeaseMetadata = {
   ttlSeconds?: number;
   idleTimeoutSeconds?: number;
   activeExecutions?: number;
+  containerStarted?: boolean;
   expiredAt?: string;
   stoppedAt?: string;
+  stopReason?: string;
 };
 
 type ExecRequest = {
@@ -88,6 +94,13 @@ export class CrabboxSandbox extends DurableObject<Env> {
     const now = Date.now();
     const expiresAt = leaseExpiresAtMs(meta);
     if (expiresAt === undefined || expiresAt > now) {
+      const container = this.container();
+      if (container.running) {
+        await container.setInactivityTimeout(containerInactivityTimeoutMs);
+      } else if (meta.containerStarted) {
+        await this.markWorkspaceLost(meta);
+        return;
+      }
       await this.scheduleCleanup(meta);
       return;
     }
@@ -114,7 +127,7 @@ export class CrabboxSandbox extends DurableObject<Env> {
     const instanceType = cleanInstanceType(
       stringField(body, "instanceType") ?? defaultInstanceType,
     );
-    if (!instanceType) return json({ error: "instanceType is not supported" }, 400);
+    if (!instanceType) return instanceTypeError(stringField(body, "instanceType"));
 
     const image = cleanImageName(stringField(body, "image") ?? defaultImage);
     if (!image) return json({ error: "image must be a configured image name" }, 400);
@@ -157,8 +170,10 @@ export class CrabboxSandbox extends DurableObject<Env> {
       await this.destroyContainer();
       return json({ error: errorMessage(error), ...leaseResponse(stopped) }, 503);
     }
+    const started: LeaseMetadata = { ...meta, containerStarted: true };
+    await this.ctx.storage.put(leaseMetaKey, started);
 
-    return json(leaseResponse(meta, "running"));
+    return json(leaseResponse(started, "running"));
   }
 
   private async leaseStatus(): Promise<Response> {
@@ -169,7 +184,11 @@ export class CrabboxSandbox extends DurableObject<Env> {
     if (expired.state !== "running") {
       return json(leaseResponse(expired));
     }
-    return json(leaseResponse(expired, this.container().running ? "running" : "stopped"));
+    const container = this.container();
+    if (!container.running && expired.containerStarted) {
+      return json(leaseResponse(await this.markWorkspaceLost(expired)));
+    }
+    return json(leaseResponse(expired, container.running ? "running" : "stopped"));
   }
 
   private async destroyLease(): Promise<Response> {
@@ -212,7 +231,7 @@ export class CrabboxSandbox extends DurableObject<Env> {
       }
       return json({ ok: true, path: remotePath });
     } catch (error) {
-      return json({ error: errorMessage(error) }, 503);
+      return this.startFailureResponse(meta, error);
     } finally {
       await this.finishExecution();
     }
@@ -240,11 +259,12 @@ export class CrabboxSandbox extends DurableObject<Env> {
       container = await this.ensureRunning(meta);
     } catch (error) {
       await this.finishExecution();
-      return json({ error: errorMessage(error) }, 503);
+      return this.startFailureResponse(meta, error);
     }
     const stream = execEventStream(
       container,
       { command, cwd, env: sanitizeEnv(body["env"]), timeoutMs },
+      request.signal,
       () => this.ctx.waitUntil(this.finishExecution()),
     );
     return new Response(stream, {
@@ -315,12 +335,35 @@ export class CrabboxSandbox extends DurableObject<Env> {
   }
 
   private async scheduleCleanup(meta: LeaseMetadata): Promise<void> {
-    const expiresAt = meta.state === "running" ? leaseExpiresAtMs(meta) : undefined;
-    if (expiresAt === undefined) {
+    if (meta.state !== "running") {
       await this.ctx.storage.deleteAlarm();
       return;
     }
-    await this.ctx.storage.setAlarm(expiresAt);
+    const keepAlive = Date.now() + keepAliveIntervalMs;
+    await this.ctx.storage.setAlarm(Math.min(leaseExpiresAtMs(meta) ?? keepAlive, keepAlive));
+  }
+
+  // A stopped container lost its filesystem; restarting it would hand the next
+  // command an empty workspace, so the lease ends instead.
+  private async markWorkspaceLost(meta: LeaseMetadata): Promise<LeaseMetadata> {
+    const stopped: LeaseMetadata = {
+      ...meta,
+      state: "stopped",
+      stoppedAt: new Date().toISOString(),
+      stopReason: "container stopped; its workspace is gone",
+    };
+    delete stopped.activeExecutions;
+    await this.ctx.storage.put(leaseMetaKey, stopped);
+    await this.ctx.storage.deleteAlarm();
+    return stopped;
+  }
+
+  private async startFailureResponse(meta: LeaseMetadata, error: unknown): Promise<Response> {
+    if (error instanceof WorkspaceLostError) {
+      const stopped = await this.markWorkspaceLost(meta);
+      return json({ error: error.message, ...leaseResponse(stopped) }, 410);
+    }
+    return json({ error: errorMessage(error) }, 503);
   }
 
   private container(): Container {
@@ -333,6 +376,9 @@ export class CrabboxSandbox extends DurableObject<Env> {
 
   private async ensureRunning(meta: LeaseMetadata): Promise<Container> {
     const container = this.container();
+    if (!container.running && meta.containerStarted) {
+      throw new WorkspaceLostError();
+    }
     if (!container.running) {
       const image = container.images[meta.image];
       if (!image) throw new Error(`image ${meta.image} is not configured`);
@@ -418,7 +464,7 @@ async function createSandbox(request: Request, env: Env): Promise<Response> {
   if (!workdir) return json({ error: "workdir must be an absolute path" }, 400);
 
   const instanceType = cleanInstanceType(stringField(body, "instanceType") ?? defaultInstanceType);
-  if (!instanceType) return json({ error: "instanceType is not supported" }, 400);
+  if (!instanceType) return instanceTypeError(stringField(body, "instanceType"));
 
   const sanitizedBody = { ...body, id: sandboxID, workdir, instanceType };
   return sandboxStub(env, sandboxID).fetch(
@@ -502,18 +548,29 @@ function timeoutArgument(timeoutMs: number | undefined): string {
 function execEventStream(
   container: Container,
   request: ExecRequest,
+  signal: AbortSignal,
   onFinish: () => void,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   let process: ExecProcess | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let finished = false;
+  let canceled = false;
   const finish = () => {
     if (finished) return;
     finished = true;
     if (heartbeat !== undefined) clearInterval(heartbeat);
     onFinish();
   };
+  // Cloudflare does not stop an exec when its caller goes away. SIGTERM reaches
+  // `timeout`, which signals the whole command process group.
+  const cancel = () => {
+    canceled = true;
+    process?.kill(15);
+    finish();
+  };
+  if (signal.aborted) canceled = true;
+  signal.addEventListener("abort", cancel, { once: true });
 
   return new ReadableStream<Uint8Array>({
     start: (controller) => {
@@ -545,6 +602,7 @@ function execEventStream(
           if (writeExit !== 0) {
             throw new Error(`prepare command: ${writeErr.trim() || `exit ${writeExit}`}`);
           }
+          if (canceled) return;
 
           // GNU timeout puts the command in its own process group and signals the
           // whole group, so descendants die with it; it exits 124 on timeout.
@@ -559,6 +617,10 @@ function execEventStream(
           const options: ContainerExecOptions = { cwd: request.cwd };
           if (request.env) options.env = request.env;
           process = await container.exec(argv, options);
+          if (canceled) {
+            process.kill(15);
+            return;
+          }
           const exitCode = await pumpOutput(process, emit);
           emit({ type: "complete", exitCode });
           finish();
@@ -570,10 +632,7 @@ function execEventStream(
         }
       })();
     },
-    cancel: () => {
-      process?.kill(15);
-      finish();
-    },
+    cancel,
   });
 }
 
@@ -733,8 +792,26 @@ function cleanSandboxID(value: string): string {
   return trimmed;
 }
 
+class WorkspaceLostError extends Error {
+  constructor() {
+    super("container stopped; its workspace is gone");
+  }
+}
+
+function instanceTypeError(requested: string | undefined): Response {
+  if (requested?.trim().toLowerCase() === "lite") {
+    return json(
+      { error: "instanceType lite cannot start the bundled runner image; use standard-1" },
+      400,
+    );
+  }
+  return json({ error: "instanceType is not supported" }, 400);
+}
+
 function cleanInstanceType(value: string): InstanceType | "" {
-  const trimmed = value.trim().toLowerCase();
+  // The durable_object policy has no basic type; standard-1 is the closest one.
+  const trimmed =
+    value.trim().toLowerCase() === "basic" ? "standard-1" : value.trim().toLowerCase();
   for (const instanceType of instanceTypes) {
     if (trimmed === instanceType) return instanceType;
   }
@@ -826,6 +903,7 @@ function leaseResponse(meta: LeaseMetadata, containerState?: string): Record<str
     expiresAt: isoTime(leaseExpiresAtMs(meta)),
     expiredAt: meta.expiredAt,
     stoppedAt: meta.stoppedAt,
+    stopReason: meta.stopReason,
   };
 }
 

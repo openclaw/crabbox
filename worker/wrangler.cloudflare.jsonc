@@ -3,7 +3,7 @@
   "name": "crabbox-cloudflare-container-runner",
   "main": "src/cloudflare-container-runner.ts",
   "compatibility_date": "2026-09-29",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
   "workers_dev": true,
   "preview_urls": false,
   "containers": [
