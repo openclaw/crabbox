@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Node coordinator image: pin the current AWS RDS global CA bundle; AWS updated the published bundle, so image builds failed with a checksum mismatch.
 - Reuse exact coordinator GCP firewall verifications for five minutes with policy/credential isolation and error invalidation, and separate Compute request timings from token acquisition.
 - Avoid full Hetzner SSH-key inventory reads for fresh lease keys and cache successful coordinator AWS Spot/Hetzner price estimates for five minutes without blocking admission on quote failures.
 - Skip redundant brokered AWS SSH ingress mutations and cache account/region-scoped VPC discovery while preserving fresh policy checks and legacy world-rule cleanup.

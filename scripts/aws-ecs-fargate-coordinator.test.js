@@ -59,7 +59,7 @@ function resourceNames() {
 test("Node coordinator image pins the PostgreSQL-scoped AWS RDS trust bundle", () => {
   assert.match(
     nodeDockerfile,
-    /ADD --checksum=sha256:e5bb2084ccf45087bda1c9bffdea0eb15ee67f0b91646106e466714f9de3c7e3 https:\/\/truststore\.pki\.rds\.amazonaws\.com\/global\/global-bundle\.pem \/etc\/ssl\/certs\/aws-rds-global-bundle\.pem/,
+    /ADD --checksum=sha256:fe45bbebf92ad3e27a583bbb2ddd1553c521ed4d49af5514dc0a40372ea5395c https:\/\/truststore\.pki\.rds\.amazonaws\.com\/global\/global-bundle\.pem \/etc\/ssl\/certs\/aws-rds-global-bundle\.pem/,
   );
   assert.doesNotMatch(nodeDockerfile, /NODE_EXTRA_CA_CERTS/);
 });
