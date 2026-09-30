@@ -313,7 +313,7 @@ filesystem as a Cloudflare container snapshot (kind
 `crabbox checkpoint fork <checkpoint>` starts new leases from it:
 
 ```sh
-crabbox warmup --provider cloudflare --type standard-1
+crabbox warmup --provider cloudflare --type standard-1 --slug blue-crab
 crabbox run --provider cloudflare --id blue-crab --shell -- 'pnpm install'
 crabbox checkpoint create --provider cloudflare --id blue-crab --name deps
 crabbox checkpoint fork chk_0123456789abcdef --count 4 --type standard-2 -- pnpm test
