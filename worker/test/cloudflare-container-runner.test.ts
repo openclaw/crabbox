@@ -658,6 +658,11 @@ describe("Cloudflare runner lifecycle", () => {
     expect(storage.alarm).toBeNull();
     const status = await sandbox.fetch(crabboxRequest("/__crabbox/status"));
     await expect(status.json()).resolves.toMatchObject({ state: "stopped" });
+    const again = await execLease(sandbox);
+    expect(again.status).toBe(410);
+    await expect(again.json()).resolves.toMatchObject({
+      error: "container stopped; its workspace is gone",
+    });
   });
 
   it("renews the container inactivity timeout from the keep-alive alarm", async () => {

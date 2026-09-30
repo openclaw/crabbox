@@ -908,7 +908,7 @@ function leaseResponse(meta: LeaseMetadata, containerState?: string): Record<str
 }
 
 function expiredResponse(meta: LeaseMetadata): Response {
-  return json({ error: "sandbox expired", ...leaseResponse(meta) }, 410);
+  return json({ error: meta.stopReason ?? "sandbox expired", ...leaseResponse(meta) }, 410);
 }
 
 function emptyLeaseMeta(state: LeaseState = "stopped"): LeaseMetadata {
