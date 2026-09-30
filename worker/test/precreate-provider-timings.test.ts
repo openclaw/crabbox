@@ -52,7 +52,10 @@ it("measures GCP token, firewall, disk/instance, and operation boundaries withou
   });
   await withCreationSteps(async () => {
     await client.createServerWithFallback(
-      leaseConfig({ provider: "gcp", class: "tiny", sshPublicKey: "ssh-ed25519 synthetic" }, env),
+      leaseConfig(
+        { gcpRootGB: 400, provider: "gcp", class: "tiny", sshPublicKey: "ssh-ed25519 synthetic" },
+        env,
+      ),
       "cbx_abcdef123456",
       "test",
       "alice@example.com",

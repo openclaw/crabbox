@@ -47,6 +47,7 @@ import {
 import { leaseProviderLabels } from "./provider-labels";
 import { withPricingDeadline } from "./provider-pricing";
 import { ProvisioningAttemptHistory } from "./provisioning-attempts";
+import { defaultRootGB } from "./root-disk";
 import { leaseProviderName } from "./slug";
 import type {
   AWSCredentialProvider,
@@ -2708,7 +2709,27 @@ export class EC2SpotClient {
     const labels = leaseProviderLabels(launchConfig, leaseID, slug, owner, "aws", now, {
       market: config.capacityMarket,
     });
-    const rootGB = config.awsRootGB || positiveInt(this.env.CRABBOX_AWS_ROOT_GB) || 400;
+    let rootGB = config.awsRootGB || positiveInt(this.env.CRABBOX_AWS_ROOT_GB);
+    let rootDevice = "/dev/sda1";
+    if (!rootGB) {
+      const root = await this.ec2("DescribeImages", { "ImageId.1": imageID });
+      const images = items(record(root["imagesSet"])["item"]).map(record);
+      if (images.length !== 1) {
+        throw new Error(`resolve AWS root disk minimum: expected one AMI ${imageID}`);
+      }
+      const image = images[0]!;
+      rootDevice = asString(image["rootDeviceName"]);
+      const mapping = items(record(image["blockDeviceMapping"])["item"])
+        .map(record)
+        .find((item) => asString(item["deviceName"]) === rootDevice);
+      const minimum = positiveInt(asString(record(mapping?.["ebs"])["volumeSize"]));
+      if (!rootDevice || !minimum) {
+        throw new Error(
+          `resolve AWS root disk minimum: AMI ${imageID} has no root EBS volume size`,
+        );
+      }
+      rootGB = Math.max(defaultRootGB(config.class), minimum);
+    }
     const instanceProfile = config.awsProfile || this.env.CRABBOX_AWS_INSTANCE_PROFILE || "";
     const subnetID = config.awsSubnetID || this.env.CRABBOX_AWS_SUBNET_ID || "";
     const configuredMacHostID =
@@ -2740,6 +2761,7 @@ export class EC2SpotClient {
         }),
       );
       applyAWSRunInstanceTargetOptions(params, config);
+      params["BlockDeviceMapping.1.DeviceName"] = rootDevice;
       if (config.target === "macos") {
         const hostID =
           macHostID ||

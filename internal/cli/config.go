@@ -1531,7 +1531,7 @@ func baseConfig() Config {
 		Location:                "fsn1",
 		Image:                   hetznerImage,
 		AWSRegion:               "eu-west-1",
-		AWSRootGB:               400,
+		AWSRootGB:               0,
 		AWSLambdaMicroVM:        defaultAWSLambdaMicroVMConfig(),
 		Azure:                   initialAzureConfig(azureImage),
 		AzureDynamicSessions:    defaultAzureDynamicSessionsConfig(),

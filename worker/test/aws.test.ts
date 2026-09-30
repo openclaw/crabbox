@@ -572,6 +572,7 @@ describe("aws provider", () => {
 
   it("uses the launched fallback AMI for provider image labels", () => {
     const config = leaseConfig({
+      awsRootGB: 400,
       provider: "aws",
       sshPublicKey: "ssh-ed25519 test",
     });
@@ -774,6 +775,7 @@ describe("aws provider", () => {
     await expect(
       client.createServerWithFallback(
         leaseConfig({
+          awsRootGB: 400,
           provider: "aws",
           providerKey: "crabbox-cbx-abcdef123456",
           sshPublicKey: "ssh-ed25519 requested-key",
@@ -863,6 +865,7 @@ describe("aws provider", () => {
 
     await client.refreshSSHIngress(
       leaseConfig({
+        awsRootGB: 400,
         provider: "aws",
         providerKey: "crabbox-workspace-0123456789ab",
         awsSSHCIDRs: ["0.0.0.0/0"],
@@ -923,6 +926,7 @@ describe("aws provider", () => {
 
     await client.refreshSSHIngress(
       leaseConfig({
+        awsRootGB: 400,
         provider: "aws",
         awsSSHCIDRs: ["198.51.100.77/32"],
         sshPublicKey: "ssh-ed25519 test",
@@ -986,6 +990,7 @@ describe("aws provider", () => {
 
     await client.refreshSSHIngress(
       leaseConfig({
+        awsRootGB: 400,
         provider: "aws",
         awsSSHCIDRs: ["198.51.100.77/32"],
         sshPublicKey: "ssh-ed25519 test",
@@ -1328,6 +1333,7 @@ describe("aws provider", () => {
       await expect(
         client.refreshSSHIngress(
           leaseConfig({
+            awsRootGB: 400,
             provider: "aws",
             sshPublicKey: "ssh-ed25519 test",
           }),
@@ -1597,6 +1603,7 @@ describe("aws provider", () => {
 
     await client.refreshSSHIngress(
       leaseConfig({
+        awsRootGB: 400,
         provider: "aws",
         target: "windows",
         awsSSHCIDRs: ["198.51.100.77/32"],
@@ -1672,6 +1679,7 @@ describe("aws provider", () => {
 
     await client.refreshSSHIngress(
       leaseConfig({
+        awsRootGB: 400,
         provider: "aws",
         target: "windows",
         awsSSHCIDRs: ["198.51.100.77/32"],
@@ -1751,6 +1759,7 @@ describe("aws provider", () => {
 
     await client.refreshSSHIngress(
       leaseConfig({
+        awsRootGB: 400,
         provider: "aws",
         target: "linux",
         awsSSHCIDRs: ["198.51.100.77/32"],
@@ -1829,6 +1838,7 @@ describe("aws provider", () => {
     await expect(
       client.refreshSSHIngress(
         leaseConfig({
+          awsRootGB: 400,
           provider: "aws",
           target: "linux",
           awsSSHCIDRs: ["198.51.100.77/32"],
@@ -2526,6 +2536,7 @@ describe("aws provider", () => {
       await client.createServerWithFallback(
         {
           ...leaseConfig({
+            awsRootGB: 400,
             provider: "aws",
             target: "linux",
             class: "standard",
@@ -2615,6 +2626,7 @@ describe("aws provider", () => {
       "eu-west-1",
     );
     const config = leaseConfig({
+      awsRootGB: 400,
       provider: "aws",
       target: "linux",
       serverType: "t3.small",
@@ -2745,6 +2757,7 @@ describe("aws provider", () => {
     );
     const creating = client.createServerWithFallback(
       leaseConfig({
+        awsRootGB: 400,
         provider: "aws",
         target: "macos",
         capacity: { market: "on-demand" },
@@ -2892,6 +2905,7 @@ describe("aws provider", () => {
     );
     const result = await client.createServerWithFallback(
       leaseConfig({
+        awsRootGB: 400,
         provider: "aws",
         target: "macos",
         capacity: { market: "on-demand" },
@@ -2982,6 +2996,7 @@ describe("aws provider", () => {
     await expect(
       client.createServerWithFallback(
         leaseConfig({
+          awsRootGB: 400,
           provider: "aws",
           target: "macos",
           capacity: { market: "on-demand" },
@@ -3078,6 +3093,7 @@ describe("aws provider", () => {
     );
     const result = await client.createServerWithFallback(
       leaseConfig({
+        awsRootGB: 400,
         provider: "aws",
         target: "macos",
         capacity: { market: "on-demand" },
@@ -3184,6 +3200,7 @@ describe("aws provider", () => {
     );
     const result = await client.createServerWithFallback(
       leaseConfig({
+        awsRootGB: 400,
         provider: "aws",
         target: "macos",
         capacity: { market: "on-demand" },
@@ -3286,6 +3303,7 @@ describe("aws provider", () => {
       "eu-west-1",
     );
     const config = leaseConfig({
+      awsRootGB: 400,
       provider: "aws",
       target: "macos",
       capacity: { market: "on-demand" },
@@ -3373,6 +3391,7 @@ describe("aws provider", () => {
       "us-west-2",
     );
     const config = leaseConfig({
+      awsRootGB: 400,
       provider: "aws",
       target: "macos",
       capacity: { market: "on-demand" },
@@ -3494,6 +3513,7 @@ describe("aws provider", () => {
     );
     const result = await client.createServerWithFallback(
       leaseConfig({
+        awsRootGB: 400,
         provider: "aws",
         target: "macos",
         capacity: { market: "on-demand" },
@@ -3584,6 +3604,7 @@ describe("aws provider", () => {
 
     await client.createServerWithFallback(
       leaseConfig({
+        awsRootGB: 400,
         provider: "aws",
         serverType: "t3.small",
         serverTypeExplicit: true,
@@ -3638,6 +3659,7 @@ describe("aws provider", () => {
     await expect(
       client.createServerWithFallback(
         leaseConfig({
+          awsRootGB: 400,
           provider: "aws",
           serverType: "t3.small",
           serverTypeExplicit: true,
@@ -4061,6 +4083,7 @@ function awsMarketFallbackHarness(
       "eu-west-1",
     ),
     config: leaseConfig({
+      awsRootGB: 400,
       provider: "aws",
       serverType: instanceTypes[0] ?? "t3.small",
       serverTypeExplicit: instanceTypes.length === 1,

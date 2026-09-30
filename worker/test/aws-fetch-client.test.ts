@@ -478,6 +478,7 @@ async function capacityTransport(options: {
     "eu-west-1",
   );
   const config = leaseConfig({
+    awsRootGB: 400,
     provider: "aws",
     serverType: "t3.small",
     serverTypeExplicit: false,

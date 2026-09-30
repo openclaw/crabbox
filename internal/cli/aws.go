@@ -27,6 +27,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/servicequotas"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
+	"github.com/openclaw/crabbox/internal/rootdisk"
 )
 
 const (
@@ -706,11 +707,28 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 		return Server{}, err
 	}
 	rootGB := cfg.AWSRootGB
+	rootDevice := "/dev/sda1"
 	if rootGB <= 0 {
-		rootGB = 400
+		image, err := c.ec2.DescribeImages(ctx, &ec2.DescribeImagesInput{ImageIds: []string{imageID}})
+		if err != nil {
+			return Server{}, fmt.Errorf("resolve AWS root disk minimum: %w", err)
+		}
+		if len(image.Images) != 1 {
+			return Server{}, fmt.Errorf("resolve AWS root disk minimum: expected one AMI %s", imageID)
+		}
+		rootDevice = aws.ToString(image.Images[0].RootDeviceName)
+		var minimum int32
+		for _, mapping := range image.Images[0].BlockDeviceMappings {
+			if aws.ToString(mapping.DeviceName) == rootDevice && mapping.Ebs != nil {
+				minimum = aws.ToInt32(mapping.Ebs.VolumeSize)
+			}
+		}
+		if rootDevice == "" || minimum <= 0 {
+			return Server{}, fmt.Errorf("resolve AWS root disk minimum: AMI %s has no root EBS volume size", imageID)
+		}
+		rootGB = max(int32(rootdisk.DefaultGB(cfg.Class)), minimum)
 	}
 	one := int32(1)
-	rootDevice := "/dev/sda1"
 	clientToken := leaseID
 	if control != nil {
 		clientToken = awsFixedAttemptClientToken(leaseID, cfg, imageID, securityGroupID, spot)

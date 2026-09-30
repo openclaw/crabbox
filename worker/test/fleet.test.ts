@@ -240,7 +240,10 @@ class FleetDurableObject extends ProductionFleetDurableObject {
   private readonly tasks: Set<Promise<unknown>>;
 
   constructor(...args: ConstructorParameters<typeof ProductionFleetDurableObject>) {
-    const [state, ...rest] = args;
+    const [state, env, ...rest] = args;
+    // Lifecycle fixtures pin disk size; automatic sizing has provider request tests.
+    env.CRABBOX_AWS_ROOT_GB ??= "400";
+    env.CRABBOX_GCP_ROOT_GB ??= "400";
     const initializers: Promise<unknown>[] = [];
     const tasks = new Set<Promise<unknown>>();
     super(
@@ -259,6 +262,7 @@ class FleetDurableObject extends ProductionFleetDurableObject {
           );
         },
       } as DurableObjectState,
+      env,
       ...rest,
     );
     this.initialized = Promise.all(initializers);
@@ -11160,6 +11164,7 @@ describe("fleet lease identity and idle", () => {
     const zone = "europe-west2-a";
     const env = {
       CRABBOX_GCP_PROJECT: "example-project",
+      CRABBOX_GCP_ROOT_GB: "400",
       CRABBOX_GCP_ZONE: zone,
       GCP_CLIENT_EMAIL: "test@example.iam.gserviceaccount.com",
       GCP_PRIVATE_KEY: "test-key",

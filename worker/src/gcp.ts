@@ -30,6 +30,7 @@ import {
   type ProviderProvisioningCleanupClaim,
 } from "./provider-provisioning";
 import { ProvisioningAttemptHistory } from "./provisioning-attempts";
+import { defaultRootGB } from "./root-disk";
 import { leaseProviderName } from "./slug";
 import type {
   CreationEvent,
@@ -234,7 +235,7 @@ export class GCPClient {
       "CRABBOX_GCP_SSH_CIDRS",
     );
     if (this.sshCIDRs.length === 0) this.sshCIDRs.push("0.0.0.0/0");
-    this.rootGB = numberFromEnv(env.CRABBOX_GCP_ROOT_GB, 400);
+    this.rootGB = numberFromEnv(env.CRABBOX_GCP_ROOT_GB, 0);
     this.serviceAccount = env.CRABBOX_GCP_SERVICE_ACCOUNT?.trim() || "";
     if (!this.project) throw new Error("GCP_PROJECT_ID or CRABBOX_GCP_PROJECT secret is required");
     if (hasPartialServiceAccountCredential(env)) {
@@ -666,6 +667,7 @@ export class GCPClient {
       ],
     };
     if (!config.gcpMachineImage) {
+      const explicitRootGB = config.gcpRootGB || this.rootGB;
       const initializeParams: Record<string, unknown> = config.gcpSnapshot
         ? { sourceSnapshot: gcpSnapshotRef(config.gcpSnapshot, project) }
         : {
@@ -673,10 +675,16 @@ export class GCPClient {
               "gcp.image_selection",
               () => config.gcpImage || this.image,
             ),
-            diskSizeGb: config.gcpRootGB || this.rootGB,
           };
-      if (config.gcpSnapshot && config.gcpRootGB > 0) {
-        initializeParams["diskSizeGb"] = config.gcpRootGB;
+      if (explicitRootGB > 0) {
+        initializeParams["diskSizeGb"] = explicitRootGB;
+      } else {
+        const sourceKey = config.gcpSnapshot ? "sourceSnapshot" : "sourceImage";
+        const source = String(initializeParams[sourceKey]);
+        const image = await this.rootDiskSource(source);
+        initializeParams["diskSizeGb"] = Math.max(defaultRootGB(config.class), image.diskSizeGb);
+        // Family aliases must launch the exact image we inspected.
+        initializeParams[sourceKey] = image.source;
       }
       instance["disks"] = [
         {
@@ -1245,6 +1253,27 @@ export class GCPClient {
       }
     }
     throw conflictError;
+  }
+
+  private async rootDiskSource(source: string): Promise<{ source: string; diskSizeGb: number }> {
+    const match =
+      /^(?:https:\/\/(?:compute|www)\.googleapis\.com\/compute\/v1\/)?projects\/([^/]+)\/global\/(images|snapshots)\/(?:family\/)?([^/]+)$/.exec(
+        source,
+      );
+    if (!match) throw new Error(`resolve GCP root disk minimum: invalid source ${source}`);
+    const [, project, kind, name] = match;
+    const family = source.includes("/images/family/");
+    const client = new GCPClient(this.env, this.zone, project, this.tokenCache);
+    client.fetcher = this.fetcher;
+    const image = await client.gcp<{ name?: string; diskSizeGb?: string | number }>(
+      "GET",
+      `/global/${kind}/${family ? "family/" : ""}${name}`,
+    );
+    const minimum = Number(image.diskSizeGb);
+    if (!Number.isSafeInteger(minimum) || minimum <= 0 || !image.name) {
+      throw new Error(`resolve GCP root disk minimum: source ${source} has no name or disk size`);
+    }
+    return { source: `projects/${project}/global/${kind}/${image.name}`, diskSizeGb: minimum };
   }
 
   private async gcp<T>(method: string, path: string, body?: unknown): Promise<T> {

@@ -12,6 +12,7 @@ import (
 
 	gcpcompute "cloud.google.com/go/compute/apiv1"
 	"cloud.google.com/go/compute/apiv1/computepb"
+	"github.com/openclaw/crabbox/internal/rootdisk"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -38,8 +39,9 @@ type GCPClient struct {
 	SSHPort        string
 	FallbackPorts  []string
 
-	instances *gcpcompute.InstancesClient
-	firewalls *gcpcompute.FirewallsClient
+	instances     *gcpcompute.InstancesClient
+	firewalls     *gcpcompute.FirewallsClient
+	clientOptions []option.ClientOption
 }
 
 func NewGCPClient(ctx context.Context, cfg Config) (*GCPClient, error) {
@@ -85,6 +87,7 @@ func newGCPClientWithOptions(ctx context.Context, cfg Config, opts ...option.Cli
 		FallbackPorts:  cfg.SSHFallbackPorts,
 		instances:      instances,
 		firewalls:      firewalls,
+		clientOptions:  opts,
 	}, nil
 }
 
@@ -194,6 +197,10 @@ func (c *GCPClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 	if cfg.TargetOS != targetLinux {
 		return Server{}, Exit(2, "gcp provider currently supports target=linux only")
 	}
+	image, rootGB, err := c.resolveRootDisk(ctx, cfg.Class)
+	if err != nil {
+		return Server{}, err
+	}
 	if err := c.EnsureFirewall(ctx); err != nil {
 		return Server{}, err
 	}
@@ -220,8 +227,8 @@ func (c *GCPClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 			AutoDelete: proto.Bool(true),
 			Type:       proto.String("PERSISTENT"),
 			InitializeParams: &computepb.AttachedDiskInitializeParams{
-				SourceImage: proto.String(c.Image),
-				DiskSizeGb:  proto.Int64(c.RootGB),
+				SourceImage: proto.String(image),
+				DiskSizeGb:  proto.Int64(rootGB),
 				DiskType:    proto.String(fmt.Sprintf("zones/%s/diskTypes/%s", c.Zone, gcpBootDiskType(cfg.ServerType))),
 			},
 		}},
@@ -250,6 +257,36 @@ func (c *GCPClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 		return Server{}, err
 	}
 	return c.GetServer(ctx, name)
+}
+
+func (c *GCPClient) resolveRootDisk(ctx context.Context, class string) (string, int64, error) {
+	if c.RootGB > 0 {
+		return c.Image, c.RootGB, nil
+	}
+	ref := strings.TrimPrefix(strings.TrimPrefix(c.Image, "https://www.googleapis.com/compute/v1/"), "https://compute.googleapis.com/compute/v1/")
+	parts := strings.Split(ref, "/")
+	if len(parts) < 5 || parts[0] != "projects" || parts[2] != "global" || parts[3] != "images" || (len(parts) != 5 && (len(parts) != 6 || parts[4] != "family")) {
+		return "", 0, fmt.Errorf("resolve GCP root disk minimum: invalid image reference %q", c.Image)
+	}
+	images, err := gcpcompute.NewImagesRESTClient(ctx, c.clientOptions...)
+	if err != nil {
+		return "", 0, fmt.Errorf("gcp images client: %w", err)
+	}
+	defer images.Close()
+	var image *computepb.Image
+	if len(parts) == 6 {
+		image, err = images.GetFromFamily(ctx, &computepb.GetFromFamilyImageRequest{Project: parts[1], Family: parts[5]})
+	} else {
+		image, err = images.Get(ctx, &computepb.GetImageRequest{Project: parts[1], Image: parts[4]})
+	}
+	if err != nil {
+		return "", 0, fmt.Errorf("resolve GCP root disk minimum: %w", err)
+	}
+	if image.GetDiskSizeGb() <= 0 || image.GetName() == "" {
+		return "", 0, fmt.Errorf("resolve GCP root disk minimum: image %s has no name or disk size", c.Image)
+	}
+	// Pin family resolution to the image whose minimum we inspected.
+	return fmt.Sprintf("projects/%s/global/images/%s", parts[1], image.GetName()), max(rootdisk.DefaultGB(class), image.GetDiskSizeGb()), nil
 }
 
 func gcpScheduling(cfg Config) *computepb.Scheduling {

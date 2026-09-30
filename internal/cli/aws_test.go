@@ -181,6 +181,7 @@ func TestAWSFixedPinnedAttemptNeverResubmitsRunInstances(t *testing.T) {
 	defer server.Close()
 
 	cfg := baseConfig()
+	cfg.AWSRootGB = 400
 	cfg.Provider = "aws"
 	cfg.TargetOS = targetLinux
 	cfg.AWSRegion = "eu-west-1"
@@ -280,6 +281,7 @@ func TestAWSFixedTerminalRunInstancesRejectionCleansKeyBeforeClearingAttempt(t *
 	}
 	control := newControl()
 	cfg := baseConfig()
+	cfg.AWSRootGB = 400
 	cfg.Provider = "aws"
 	cfg.ProviderKey = "crabbox-test"
 	cfg.AWSAMI = "ami-fixed"
@@ -353,6 +355,7 @@ func TestAWSOrdinaryRunInstancesOmitsFixedAttemptTags(t *testing.T) {
 	defer server.Close()
 
 	cfg := baseConfig()
+	cfg.AWSRootGB = 400
 	cfg.Provider = "aws"
 	cfg.TargetOS = targetLinux
 	cfg.AWSRegion = "eu-west-1"
@@ -388,6 +391,7 @@ func TestAWSRunInstancesUserDataPreservesOSTransportBoundary(t *testing.T) {
 			defer server.Close()
 
 			cfg := baseConfig()
+			cfg.AWSRootGB = 400
 			cfg.Provider = "aws"
 			cfg.TargetOS = target
 			cfg.ServerType = "m7i.large"
@@ -1548,6 +1552,7 @@ func TestAWSMacOSFallbackResolvesAMIForEachInstanceType(t *testing.T) {
 		region: "eu-west-1",
 	}
 	cfg := Config{
+		AWSRootGB:   400,
 		Provider:    "aws",
 		TargetOS:    targetMacOS,
 		ServerType:  "mac2.metal",

@@ -332,7 +332,16 @@ aws:
 hostId: h-0123456789abcdef0
 ```
 
-The default region is `eu-west-1` and the default root volume is `400` GB.
+The default region is `eu-west-1`. For AWS and GCP, an unset or zero root size
+means automatic sizing: `tiny` 40 GB, `small` 80 GB, `standard`/`fast` 150 GB,
+`large` 250 GB, `beast` 400 GB, raised to the source image/snapshot minimum.
+The `rootGB: 400` examples explicitly retain the previous size. Positive user
+sizes and coordinator `CRABBOX_AWS_ROOT_GB` / `CRABBOX_GCP_ROOT_GB` overrides
+remain explicit, so undersized requests still fail. Config output keeps zero
+for automatic sizing; it cannot know the image minimum offline. Older AWS
+clients still sending 400 continue to request 400. See the
+[AWS](../providers/aws.md) and [GCP](../providers/gcp.md) references for fixed-ID,
+ready-pool, and machine-image restore behavior.
 `aws.macHostId` is the AWS-specific allocated EC2 Mac Dedicated Host and
 seeds the generic `hostId` when that is unset. Direct `target: macos` requires
 one of `hostId`, `aws.macHostId`, `CRABBOX_HOST_ID`, or

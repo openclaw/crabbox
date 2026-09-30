@@ -171,6 +171,7 @@ describe("gcp provider", () => {
         });
       };
       const config = leaseConfig({
+        gcpRootGB: 400,
         provider: "gcp",
         serverType: machineType,
         sshPublicKey: "ssh-ed25519 test",
@@ -328,6 +329,7 @@ describe("gcp provider", () => {
     const fetcher = vi.fn<typeof fetch>(async () => new Response(body, { status: 403 }));
     client.fetcher = fetcher;
     const config = leaseConfig({
+      gcpRootGB: 400,
       provider: "gcp",
       gcpZone: "us-central1-a",
       serverType: "e2-micro",
@@ -734,6 +736,7 @@ describe("gcp provider", () => {
     const error = await client
       .createServerWithFallback(
         leaseConfig({
+          gcpRootGB: 400,
           provider: "gcp",
           gcpZone: "us-central1-a",
           capacity: { availabilityZones: ["us-central1-b"] },
@@ -787,6 +790,7 @@ describe("gcp provider", () => {
     const gcp = vi.spyOn(internal, "gcp").mockRejectedValue(new TypeError("socket closed"));
     const targets: string[] = [];
     const config = leaseConfig({
+      gcpRootGB: 400,
       provider: "gcp",
       gcpZone: "us-central1-a",
       capacity: { availabilityZones: ["us-central1-b"] },
@@ -831,6 +835,7 @@ describe("gcp provider", () => {
       };
       const targets: string[] = [];
       const config = leaseConfig({
+        gcpRootGB: 400,
         provider: "gcp",
         gcpZone: "us-central1-a",
         capacity: { availabilityZones: ["us-central1-b"] },
@@ -880,6 +885,7 @@ describe("gcp provider", () => {
     });
     const targets: string[] = [];
     const config = leaseConfig({
+      gcpRootGB: 400,
       provider: "gcp",
       gcpZone: "us-central1-a",
       capacity: { availabilityZones: ["us-central1-b"] },
@@ -955,6 +961,7 @@ describe("gcp provider", () => {
     const error = await client
       .createServerWithFallback(
         leaseConfig({
+          gcpRootGB: 400,
           provider: "gcp",
           gcpZone: "us-central1-a",
           capacity: { availabilityZones: ["us-central1-b"] },
@@ -1007,6 +1014,7 @@ describe("gcp provider", () => {
     const error = await client
       .createServer(
         leaseConfig({
+          gcpRootGB: 400,
           provider: "gcp",
           serverType: "e2-micro",
           sshPublicKey: "ssh-ed25519 test",
@@ -1054,6 +1062,7 @@ describe("gcp provider", () => {
 
     const server = await client.createServer(
       leaseConfig({
+        gcpRootGB: 400,
         provider: "gcp",
         serverType: "e2-micro",
         sshPublicKey: "ssh-ed25519 test",
@@ -1117,6 +1126,7 @@ describe("gcp provider", () => {
     await expect(
       client.createServer(
         leaseConfig({
+          gcpRootGB: 400,
           provider: "gcp",
           serverType: "e2-micro",
           sshPublicKey: "ssh-ed25519 test",
@@ -1168,6 +1178,7 @@ describe("gcp provider", () => {
     const error = await client
       .createServer(
         leaseConfig({
+          gcpRootGB: 400,
           provider: "gcp",
           serverType: "e2-micro",
           sshPublicKey: "ssh-ed25519 test",
@@ -1215,6 +1226,7 @@ describe("gcp provider", () => {
       throw new Error(`unexpected GCP request ${method} ${path}`);
     });
     const config = leaseConfig({
+      gcpRootGB: 400,
       provider: "gcp",
       serverType: "e2-micro",
       sshPublicKey: "ssh-ed25519 test",
@@ -1797,6 +1809,7 @@ describe("gcp provider", () => {
     const error = await client
       .createServer(
         leaseConfig({
+          gcpRootGB: 400,
           provider: "gcp",
           serverType: "e2-micro",
           gcpProject: "default-project",
@@ -1844,6 +1857,7 @@ describe("gcp provider", () => {
       client as unknown as { ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void> }
     ).ensureFirewall(
       leaseConfig({
+        gcpRootGB: 400,
         provider: "gcp",
         gcpSSHCIDRs: ["198.51.100.77/32"],
         sshPublicKey: "ssh-ed25519 test",
@@ -1891,6 +1905,7 @@ describe("gcp provider", () => {
       client as unknown as { ensureFirewall(config: ReturnType<typeof leaseConfig>): Promise<void> }
     ).ensureFirewall(
       leaseConfig({
+        gcpRootGB: 400,
         provider: "gcp",
         gcpSSHCIDRs: ["198.51.100.77/32"],
         sshPublicKey: "ssh-ed25519 test",
@@ -2407,6 +2422,7 @@ describe("gcp provider", () => {
     });
 
     const config = leaseConfig({
+      gcpRootGB: 400,
       provider: "gcp",
       gcpZone: "us-central1-a",
       capacity: { availabilityZones: ["us-central1-b"] },
@@ -2696,6 +2712,7 @@ describe("gcp provider", () => {
     };
 
     const config = leaseConfig({
+      gcpRootGB: 400,
       provider: "gcp",
       serverType: "e2-micro",
       gcpMachineImage: "checkpoint-gcp",
@@ -2795,6 +2812,7 @@ describe("gcp provider", () => {
     };
     const result = await client.createServerWithFallback(
       leaseConfig({
+        gcpRootGB: 400,
         provider: "gcp",
         gcpZone: "us-central1-a",
         serverType: "e2-micro",
@@ -2867,6 +2885,7 @@ describe("gcp provider", () => {
     try {
       const client = new GCPClient(env, "us-central1-a");
       const config = leaseConfig({
+        gcpRootGB: 400,
         provider: "gcp",
         serverType: "c4-standard-32",
         serverTypeExplicit: true,

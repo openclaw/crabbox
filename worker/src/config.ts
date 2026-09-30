@@ -348,7 +348,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     awsSGName: "",
     awsSubnetID: input.awsSubnetID ?? "",
     awsProfile: input.awsProfile ?? "",
-    awsRootGB: input.awsRootGB ?? 400,
+    awsRootGB: input.awsRootGB ?? 0,
     awsInstanceTypes,
     awsPrivate,
     awsRequireSSM,

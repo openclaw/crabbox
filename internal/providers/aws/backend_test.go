@@ -2603,3 +2603,33 @@ func TestAWSConfigShowCompletePassiveSection(t *testing.T) {
 		}
 	}
 }
+
+func TestAWSFixedAcquirePreservesLegacyRootDefault(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	fake := &fakeAWSClient{}
+	restore := installFixedAWSTestClient(t, fake)
+	defer restore()
+	cfg := fixedAWSTestConfig()
+	cfg.Class = "tiny"
+	cfg.AWSRootGB = 400
+	req := core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true, RequestedLeaseID: "cbx_abcdef123456", RequestedSlug: "fixed-root"}
+	first := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	lease, err := first.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.AWSRootGB = 0
+	replay := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	replayed, err := replay.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Server.CloudID != lease.Server.CloudID || fake.createCalls != 1 {
+		t.Fatalf("legacy root replay allocated: calls=%d", fake.createCalls)
+	}
+	cfg.AWSRootGB = 40
+	drift := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	if _, err := drift.Acquire(context.Background(), req); err == nil || !strings.Contains(err.Error(), "lease_id_conflict") {
+		t.Fatalf("explicit root drift: %v", err)
+	}
+}

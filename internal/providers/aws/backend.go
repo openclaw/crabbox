@@ -168,7 +168,7 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 		WindowsMode:  cfg.WindowsMode,
 		TTL:          cfg.TTL,
 		IdleTimeout:  cfg.IdleTimeout,
-	}, core.FixedLeaseOperations[core.Server]{PlanDuringSubmit: true, Admission: &core.FixedAdmission{}, DeferredAdmission: true, DescribeIntent: func(ctx context.Context, _ *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
+	}, core.FixedLeaseOperations[core.Server]{PlanDuringSubmit: true, Admission: &core.FixedAdmission{}, DeferredAdmission: true, DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		var err error
 		client, err = newAWSClient(ctx, cfg)
 		if err != nil {
@@ -186,9 +186,23 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 		cfg.AWSSSHCIDRsPinned = len(cfg.AWSSSHCIDRs) > 0
 		ensureAWSSSHCIDRs(ctx, &cfg)
 		requestedSlug := core.NormalizeLeaseSlug(req.RequestedSlug)
-		fingerprint, err = core.FixedAWSCreateIntentFingerprint(cfg, core.FixedAWSCreateIntentRequest{
+		intentRequest := core.FixedAWSCreateIntentRequest{
 			AccountID: accountID, RequestedSlug: requestedSlug, SSHPublicKey: publicKey, Keep: req.Keep,
-		})
+		}
+		// Old clients bound the implicit 400 GB value. Only recover that default
+		// when the complete persisted fingerprint matches; never rewrite intent.
+		if exists && claim.FixedCreateIntent != nil && cfg.AWSRootGB == 0 {
+			legacy := cfg
+			legacy.AWSRootGB = 400
+			legacyFingerprint, fingerprintErr := core.FixedAWSCreateIntentFingerprint(legacy, intentRequest)
+			if fingerprintErr != nil {
+				return core.FixedLeaseBinding{}, fingerprintErr
+			}
+			if legacyFingerprint == claim.FixedCreateIntent.Fingerprint {
+				cfg = legacy
+			}
+		}
+		fingerprint, err = core.FixedAWSCreateIntentFingerprint(cfg, intentRequest)
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
 		}

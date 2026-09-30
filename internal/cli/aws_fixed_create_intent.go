@@ -114,10 +114,6 @@ func fixedAWSCreateIntentForConfig(cfg Config, req FixedAWSCreateIntentRequest) 
 		return fixedAWSCreateIntent{}, err
 	}
 	publicKeyHash := sha256.Sum256([]byte(strings.TrimSpace(req.SSHPublicKey)))
-	rootGB := cfg.AWSRootGB
-	if rootGB <= 0 {
-		rootGB = 400
-	}
 	hostID := strings.TrimSpace(cfg.HostID)
 	if hostID == "" {
 		hostID = strings.TrimSpace(cfg.AWSMacHostID)
@@ -146,7 +142,7 @@ func fixedAWSCreateIntentForConfig(cfg Config, req FixedAWSCreateIntentRequest) 
 			Snapshot:           strings.TrimSpace(cfg.AWSSnapshot),
 			SubnetID:           strings.TrimSpace(cfg.AWSSubnetID),
 			InstanceProfile:    strings.TrimSpace(cfg.AWSProfile),
-			RootGB:             rootGB,
+			RootGB:             cfg.AWSRootGB,
 		},
 		Capabilities: fixedCreateIntentFeatures{
 			Desktop:           cfg.Desktop,

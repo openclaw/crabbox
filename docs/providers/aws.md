@@ -270,10 +270,33 @@ aws:
   securityGroupId: ""      # reuse an existing security group
   subnetId: ""             # pin a subnet (and its VPC)
   instanceProfile: ""      # IAM instance profile name to attach
-  rootGB: 400              # default 400
+  rootGB: 0                # automatic: class default, at least the AMI minimum
   sshCIDRs: []             # allowed SSH source ranges
   macHostId: ""            # pin an EC2 Mac Dedicated Host
 ```
+
+Root volumes default to 40 GB (`tiny`), 80 GB (`small`), 150 GB (`standard`
+and `fast`), 250 GB (`large`), or 400 GB (`beast`). An unset or zero `aws.rootGB`
+selects this policy in both direct and brokered creates. Crabbox reads the AMI's
+root block-device mapping and raises only the automatic default to its minimum,
+including AMIs registered from checkpoint snapshots. A promoted 400 GB image
+therefore still needs a 400 GB disk even for `tiny`.
+
+Set `aws.rootGB: 400` or `CRABBOX_AWS_ROOT_GB=400` to retain the previous size.
+Positive explicit requests win and EC2 rejects requests below the source minimum;
+Crabbox does not silently increase them. The coordinator's
+`CRABBOX_AWS_ROOT_GB` remains an operator override when the client leaves the
+size unset. Older clients that send `awsRootGB=400` continue receiving 400 GB.
+Upgrade both client and coordinator to use automatic class sizing. Config output
+reports `rootGB: 0` for automatic sizing, since the image minimum is resolved
+only during provisioning. The independent private-workspace root policy is unchanged.
+
+Fixed AWS intents retain their size binding. Direct retries recognize the old
+implicit 400 GB fingerprint only when the complete intent matches. Brokered
+fixed-ID retries must repeat the original request (including an explicit 400 GB
+size for requests made by older clients); mismatches fail closed. Ready-pool
+borrows reuse the existing disk, and newly provisioned pool members follow this
+same sizing policy.
 
 Set `architecture: arm64` or pass `--arch arm64` for Linux Graviton leases.
 Crabbox switches class fallback to C7g/M7g/R7g families and resolves Canonical

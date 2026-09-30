@@ -40,7 +40,7 @@ type fileGCPConfig struct {
 }
 
 func initialGCPConfig(image string) GCPConfig {
-	return GCPConfig{Zone: "europe-west2-a", Image: image, Network: "default", Tags: []string{"crabbox-ssh"}, RootGB: 400}
+	return GCPConfig{Zone: "europe-west2-a", Image: image, Network: "default", Tags: []string{"crabbox-ssh"}}
 }
 
 func (cfg *GCPConfig) applyOSImageDefault(image, baseImage string, force, wasOSDefault bool) {

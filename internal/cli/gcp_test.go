@@ -90,7 +90,7 @@ func TestGCPCreateServerBootDiskType(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			cfg := Config{TargetOS: targetLinux, ServerType: test.machineType, SSHUser: "ubuntu", GCP: GCPConfig{Project: "project", Zone: "europe-west2-a"}}
+			cfg := Config{TargetOS: targetLinux, ServerType: test.machineType, SSHUser: "ubuntu", GCP: GCPConfig{Project: "project", Zone: "europe-west2-a", RootGB: 400}}
 			client, err := newGCPClientWithOptions(context.Background(), cfg, option.WithoutAuthentication(), option.WithEndpoint(server.URL))
 			if err != nil {
 				t.Fatal(err)
