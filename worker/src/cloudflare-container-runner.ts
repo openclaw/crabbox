@@ -567,6 +567,7 @@ function execEventStream(
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let finished = false;
   let canceled = false;
+  let exited = false;
   const finish = () => {
     if (finished) return;
     finished = true;
@@ -574,10 +575,19 @@ function execEventStream(
     onFinish();
   };
   // Cloudflare does not stop an exec when its caller goes away. SIGTERM reaches
-  // `timeout`, which signals the whole command process group.
+  // `timeout`, which signals the whole command process group. Signaling a
+  // process that already exited throws an uncaught Durable Object error.
+  const stopProcess = () => {
+    if (!process || exited) return;
+    try {
+      process.kill(15);
+    } catch {
+      // The process exited between the check and the signal.
+    }
+  };
   const cancel = () => {
     canceled = true;
-    process?.kill(15);
+    stopProcess();
     finish();
   };
   if (signal.aborted) {
@@ -640,8 +650,17 @@ function execEventStream(
           const options: ContainerExecOptions = { cwd: request.cwd };
           if (request.env) options.env = request.env;
           process = await container.exec(argv, options);
+          const running = process;
+          void (async () => {
+            try {
+              await running.exitCode;
+            } catch {
+              // pumpOutput reports exit failures; this only tracks liveness.
+            }
+            exited = true;
+          })();
           if (canceled) {
-            process.kill(15);
+            stopProcess();
             await removeFile(container, scriptPath);
             controller.close();
             return;
