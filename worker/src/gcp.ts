@@ -681,7 +681,7 @@ export class GCPClient {
       } else {
         const sourceKey = config.gcpSnapshot ? "sourceSnapshot" : "sourceImage";
         const source = String(initializeParams[sourceKey]);
-        const image = await this.rootDiskSource(source);
+        const image = await this.rootDiskSource(source, project);
         initializeParams["diskSizeGb"] = Math.max(defaultRootGB(config.class), image.diskSizeGb);
         // Family aliases must launch the exact image we inspected.
         initializeParams[sourceKey] = image.source;
@@ -1255,7 +1255,11 @@ export class GCPClient {
     throw conflictError;
   }
 
-  private async rootDiskSource(source: string): Promise<{ source: string; diskSizeGb: number }> {
+  private async rootDiskSource(
+    source: string,
+    selectedProject: string,
+  ): Promise<{ source: string; diskSizeGb: number }> {
+    if (source.startsWith("global/")) source = `projects/${selectedProject}/${source}`;
     const match =
       /^(?:https:\/\/(?:compute|www)\.googleapis\.com\/compute\/v1\/)?projects\/([^/]+)\/global\/(images|snapshots)\/(?:family\/)?([^/]+)$/.exec(
         source,

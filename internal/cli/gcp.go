@@ -264,6 +264,9 @@ func (c *GCPClient) resolveRootDisk(ctx context.Context, class string) (string, 
 		return c.Image, c.RootGB, nil
 	}
 	ref := strings.TrimPrefix(strings.TrimPrefix(c.Image, "https://www.googleapis.com/compute/v1/"), "https://compute.googleapis.com/compute/v1/")
+	if strings.HasPrefix(ref, "global/") {
+		ref = "projects/" + c.Project + "/" + ref
+	}
 	parts := strings.Split(ref, "/")
 	if len(parts) < 5 || parts[0] != "projects" || parts[2] != "global" || parts[3] != "images" || (len(parts) != 5 && (len(parts) != 6 || parts[4] != "family")) {
 		return "", 0, fmt.Errorf("resolve GCP root disk minimum: invalid image reference %q", c.Image)

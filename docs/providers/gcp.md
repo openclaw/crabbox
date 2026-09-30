@@ -99,7 +99,8 @@ Automatic boot disks are 40 GB for `tiny`, 80 GB for `small`, 150 GB for
 `standard` and `fast`, 250 GB for `large`, and 400 GB for `beast`. Unset or zero
 `gcp.rootGB` selects this policy. Direct and brokered creates read the source
 image's disk size and raise the automatic default when necessary. Family aliases
-are resolved to the exact inspected image. Brokered disk-snapshot restores use
+are resolved to the exact inspected image. Project-relative references such as
+`global/images/my-image` resolve in the selected project. Brokered disk-snapshot restores use
 the same policy with the snapshot's size as the minimum. Provider credentials
 need image read access (and snapshot read access for snapshot restores).
 

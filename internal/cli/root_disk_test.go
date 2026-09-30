@@ -112,3 +112,26 @@ func TestCoordinatorAWSRootSizeIntent(t *testing.T) {
 		})
 	}
 }
+
+func TestGCPRootDiskProjectRelativeImage(t *testing.T) {
+	for _, source := range []string{"global/images/test", "global/images/family/test"} {
+		t.Run(source, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/compute/v1/projects/selected/"+source {
+					t.Errorf("unexpected source lookup: %s", r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"name":"resolved","diskSizeGb":"100"}`)
+			}))
+			defer server.Close()
+			client := &GCPClient{Project: "selected", Image: source, clientOptions: []option.ClientOption{option.WithoutAuthentication(), option.WithEndpoint(server.URL)}}
+			image, size, err := client.resolveRootDisk(context.Background(), "tiny")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if image != "projects/selected/global/images/resolved" || size != 100 {
+				t.Fatalf("image=%s root=%d", image, size)
+			}
+		})
+	}
+}

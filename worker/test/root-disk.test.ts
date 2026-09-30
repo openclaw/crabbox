@@ -305,3 +305,56 @@ it("refuses an automatic GCP launch when source size lookup fails", async () => 
   ).rejects.toThrow("no name or disk size");
   expect(insert).not.toHaveBeenCalled();
 });
+
+it.each(["global/images/test", "global/images/family/test", "global/snapshots/test"])(
+  "sizes project-relative GCP source %s in the selected project",
+  async (source) => {
+    const client = new GCPClient({
+      CRABBOX_GCP_PROJECT: "selected",
+      CRABBOX_GCP_CREDENTIAL_SOURCE: "metadata",
+    } as Env);
+    Reflect.set(client, "ensureFirewall", async () => {});
+    Reflect.set(Reflect.get(client, "tokenCache"), "cached", {
+      token: "test",
+      expiresAt: Math.trunc(Date.now() / 1000) + 3600,
+    });
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      Response.json({ name: "resolved", diskSizeGb: "100" }),
+    );
+    client.fetcher = fetcher;
+    const insert = vi.fn<() => Promise<never>>(async () => {
+      throw new Error("captured insert");
+    });
+    Reflect.set(client, "insertInstanceAndWait", insert);
+    Reflect.set(client, "rollbackDirectCreate", async () => {});
+    const snapshot = source.includes("snapshots");
+    const config = leaseConfig({
+      provider: "gcp",
+      class: "tiny",
+      sshPublicKey: "ssh-ed25519 test",
+      ...(snapshot ? { gcpSnapshot: source } : { gcpImage: source }),
+    });
+    await expect(
+      client.createServer(config, "cbx_abcdef123456", "test", "alice@example.com"),
+    ).rejects.toThrow("captured insert");
+    expect(fetcher.mock.calls[0]?.[0]).toBe(
+      `https://compute.googleapis.com/compute/v1/projects/selected/${source}`,
+    );
+    expect(insert).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        disks: [
+          expect.objectContaining({
+            initializeParams: expect.objectContaining({
+              diskSizeGb: 100,
+              [snapshot ? "sourceSnapshot" : "sourceImage"]:
+                `projects/selected/global/${snapshot ? "snapshots" : "images"}/resolved`,
+            }),
+          }),
+        ],
+      }),
+      expect.anything(),
+      expect.anything(),
+    );
+  },
+);
