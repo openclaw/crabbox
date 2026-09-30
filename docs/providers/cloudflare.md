@@ -189,6 +189,18 @@ containers; Cloudflare does not move them to the new class.
 2. Deploy the new runner with `npm run deploy:cloudflare --prefix worker`.
 3. Run `crabbox cleanup --provider cloudflare`. Claims for leases you did not
    stop now return 404, and cleanup retires them; their workspaces are gone.
+4. Delete the six legacy container applications. The migration removes their
+   Durable Object classes but leaves the applications, which keep reporting
+   active instances:
+
+   ```sh
+   npx wrangler containers list --config worker/wrangler.cloudflare.jsonc
+   npx wrangler containers delete <application-id> \
+     --config worker/wrangler.cloudflare.jsonc
+   ```
+
+   Delete each `<worker-name>-sandbox*` application and keep
+   `<worker-name>-crabboxsandbox`.
 
 For a repeatable local gate, deploy, and live smoke in one step, use:
 
