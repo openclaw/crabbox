@@ -7,8 +7,12 @@ renders the command, and streams timing output, while the Worker runner creates
 the container, receives the upload, executes the command, and tears the
 container down. There is no SSH lease.
 
-Cloudflare Containers run behind container-enabled Durable Objects, which makes
-this provider a good fit for short Linux test jobs and warm repeated commands.
+The runner uses the Containers `durable_object` scheduling policy: one
+`CrabboxSandbox` Durable Object per lease starts its container through
+`ctx.container`, picks the image and instance type per lease, and runs commands
+through native `exec()`. Cached-image cold starts take about 1–2 seconds, which
+makes this provider a good fit for short Linux test jobs and warm repeated
+commands.
 It is not suitable for SSH-oriented or interactive desktop workflows.
 
 For Worker-runtime JavaScript or TypeScript module execution, use the separate
@@ -44,8 +48,17 @@ ports; they run module source through the Cloudflare Workers runtime.
 - CLI-side `CRABBOX_CLOUDFLARE_RUNNER_URL` and `CRABBOX_CLOUDFLARE_RUNNER_TOKEN`.
 
 The Worker entrypoint is `worker/src/cloudflare-container-runner.ts`. The
-container image is built from `worker/cloudflare-container.Dockerfile` and runs
-the Go HTTP runner in `worker/cloudflare-container-runner`.
+container image is built from `worker/cloudflare-container.Dockerfile`; its
+entrypoint only keeps the container alive (`tini -- sleep infinity`), and the
+Durable Object runs uploads and commands through `ctx.container.exec()`.
+
+Commands run as `timeout --kill-after=5s <ttl> /bin/bash -l <script>`, so a
+timeout signals the whole process group and exits 124. `exec()` does not inherit
+the image `ENV`; login-shell defaults such as `NPM_CONFIG_CACHE` live in
+`/etc/profile.d/crabbox.sh`. A background process that keeps stdout or stderr
+open (`sleep 30 & echo done`) does not hold the command open: after the command
+exits, output keeps streaming until 300 ms pass without new bytes, for at most
+5 seconds.
 
 ## Runner toolchain and pnpm upgrades
 
@@ -79,14 +92,20 @@ cloudflare:
   workdir: /workspace/crabbox
 ```
 
-Config keys map to the typed `cloudflare` section: `apiUrl`, `token`, and
-`workdir`. The corresponding environment variables and flags are:
+Config keys map to the typed `cloudflare` section: `apiUrl`, `token`, `image`,
+and `workdir`. The corresponding environment variables and flags are:
 
 | Setting    | Config key | Environment variable             | Flag                  |
 | ---------- | ---------- | -------------------------------- | --------------------- |
 | Runner URL | `apiUrl`   | `CRABBOX_CLOUDFLARE_RUNNER_URL`  | `--cloudflare-url`    |
+| Image      | `image`    | `CRABBOX_CLOUDFLARE_IMAGE`       | `--cloudflare-image`  |
 | Workdir    | `workdir`  | `CRABBOX_CLOUDFLARE_WORKDIR`     | `--cloudflare-workdir`|
 | Token      | `token`    | `CRABBOX_CLOUDFLARE_RUNNER_TOKEN`| _(none, by design)_   |
+
+`image` names an entry in the runner's Wrangler `containers[].images` map and
+defaults to `default`. Add more named images there (for example a Python
+toolchain) and select one per lease; a name the deployed runner does not know
+fails creation with the list of configured names.
 
 Keep the bearer token in a shell secret, credential manager, or user-level
 config:
@@ -99,7 +118,7 @@ export CRABBOX_CLOUDFLARE_RUNNER_TOKEN=...
 The token is intentionally **not** exposed as a command-line flag, because
 command-line arguments can be captured in shell history and process listings.
 
-All three bindings share one typed declaration. The loader retains its existing
+All four bindings share one typed declaration. The loader retains its existing
 user/repository YAML handling, including nonempty `token` input; this does not
 change the advice to keep tokens out of repository files. Omitted, null, and empty
 YAML strings preserve earlier values, while whitespace is accepted for later
@@ -153,15 +172,16 @@ Deploy the Worker and container image together:
 npm run deploy:cloudflare --prefix worker
 ```
 
-The `deploy:cloudflare` script passes `--containers-rollout=immediate` so Worker
-and container changes roll out together. If you call Wrangler directly, include
-that flag:
+Each Worker version carries its image map. Running containers keep the image
+they started with; new leases start on the newly deployed image. Right after a
+deploy, creation can briefly fail with `image default is not configured` until
+the new version's images are available; retry after a few seconds.
 
-```sh
-npx wrangler deploy \
-  --config worker/wrangler.cloudflare.jsonc \
-  --containers-rollout=immediate
-```
+Upgrading from a runner deployed before the `durable_object` policy runs the
+`cloudflare-container-v3` migration, which deletes the six per-instance-type
+classes and their Durable Object state. Stop kept leases on the old runner
+first; their local claims fail with 404 afterwards and `crabbox cleanup
+--provider cloudflare` retires them.
 
 For a repeatable local gate, deploy, and live smoke in one step, use:
 
@@ -184,8 +204,9 @@ npx wrangler containers info <container-application-id> \
 
 ## Instance types and capacity
 
-`worker/wrangler.cloudflare.jsonc` defines one Durable Object class per
-predefined Cloudflare instance type. Crabbox maps every generic class to
+`worker/wrangler.cloudflare.jsonc` defines one `CrabboxSandbox` class; each
+lease passes its instance type to `ctx.container.start()`. Crabbox maps every
+generic class to
 `standard-4`, because the smaller Cloudflare tiers are far smaller than the
 default Linux classes on other providers.
 
@@ -199,20 +220,22 @@ default Linux classes on other providers.
 ```
 
 Pick a smaller container explicitly with
-`--type lite|basic|standard-1|standard-2|standard-3|standard-4` for smoke tests
-or quota control. `--type` accepts only these six values; anything else fails.
+`--type lite|standard-1|standard-2|standard-3|standard-4` for smoke tests or
+quota control. `--type` accepts only these five values; anything else fails.
+The `durable_object` policy has no `basic` type; use `standard-1` instead.
 
-- `lite` suits no-sync and quick command smoke tests.
-- `basic` or a `standard-*` type is the right choice for archive sync.
-- Prefer `standard-*` for dependency-heavy builds or tests; large module
-  downloads can exhaust the smaller container disks before the command starts.
+- `standard-1` (1/2 vCPU, 4 GiB, 8 GB disk) is the smallest type that runs the
+  bundled image. On 2026-09-30, `lite` (1/16 vCPU, 256 MiB, 2 GB disk) failed to
+  start the bundled image with a platform internal error, while Cloudflare's
+  `cloudflare/debian-trixie` image started on it; the runner reports the startup
+  error instead of waiting for readiness.
+- Prefer `standard-*` types with more disk for dependency-heavy builds or tests;
+  large module downloads can exhaust the smaller disks before the command starts.
 
-Cloudflare's current predefined types range from `lite` to `standard-4`;
-`standard-4` is 4 vCPU, 12 GiB memory, and 20 GB disk. Each class is capped at
-`max_instances: 4` in `worker/wrangler.cloudflare.jsonc`; change that value when
-the account should allow more or fewer concurrent containers. For current
-instance and account limits, see the Cloudflare Containers limits docs:
-<https://developers.cloudflare.com/containers/platform-details/limits/>
+`standard-4` is 4 vCPU, 12 GiB memory, and 20 GB disk. The `durable_object`
+policy has no `max_instances` cap: running containers count against the
+account's Containers limits. For current instance and account limits, see
+<https://developers.cloudflare.com/containers/platform/limits/>
 
 ## Live smoke
 
@@ -249,7 +272,7 @@ Then run a sync smoke from a checkout:
 ```sh
 crabbox run \
   --provider cloudflare \
-  --type basic \
+  --type standard-1 \
   --timing-json \
   --shell \
   -- 'test -f go.mod && rg -n "stopped_with_code" internal/providers/cloudflare'
@@ -269,7 +292,13 @@ crabbox run \
   and the extracted checkout, and fails early with a sizing hint if the selected
   type is too small. This check does not remove the old checkout to free space.
 - `warmup` starts a container and leaves it alive until `crabbox stop` or the
-  configured TTL/idle deadline expires.
+  configured TTL/idle deadline expires. The runner sets the container
+  inactivity timeout to the platform maximum of 6 hours; the Durable Object
+  alarm enforces the lease deadline.
+- The first lease after deploying a new image waits for Cloudflare to pull it,
+  which took about 2.5 minutes for the bundled image; creation, upload, and
+  exec wait up to 120 seconds for readiness and the CLI waits up to 150 seconds
+  for response headers. Retry creation if the first attempt times out.
 - Reuse, `status`, and `stop` resolve local Crabbox claims before calling the
   runner and reject raw sandbox IDs without a matching claim.
 - Reuse and cleanup keep the captured local claim revision: another caller
@@ -290,9 +319,12 @@ crabbox run \
   (`NPM_CONFIG_CACHE=/var/cache/crabbox/npm`, pnpm store
   `/var/cache/crabbox/pnpm`), and the container filesystem persists while the
   lease is active.
-- The runner stores lease metadata in Durable Object storage and schedules
-  cleanup at the earlier of `--ttl` or `--idle-timeout`. Uploads and command
-  execution extend the idle deadline.
+- The runner stores lease metadata in Durable Object storage and sets a Durable
+  Object alarm at the earlier of `--ttl` or `--idle-timeout`. Uploads and
+  command execution extend the idle deadline.
+- If a lease's container stops before its deadline, `status` reports `stopped`
+  and the next upload or command starts a fresh container from the lease image
+  with an empty filesystem.
 - `status` reports expired or stopped metadata without retiring the local claim:
   the runner may have stored that state before native destruction failed.
   `crabbox cleanup --provider cloudflare` checks local claims and confirms or
@@ -301,9 +333,8 @@ crabbox run \
   `--dry-run` sends no DELETE requests and does not remove local claims; the
   runner's expiry policy still applies during status reads.
 
-Cloudflare Containers can also reach Worker bindings through outbound handlers.
-Crabbox does not wire those by default, but custom runner images can add them:
-<https://developers.cloudflare.com/containers/platform-details/workers-connections/>
+Containers run with Internet access. Crabbox does not install
+`ctx.container.interceptOutboundHttp(s)` handlers by default.
 
 ## Limitations
 
@@ -316,8 +347,9 @@ Crabbox does not wire those by default, but custom runner images can add them:
 - The provider does not advertise a pond transport; `pond peers` reports
   Cloudflare members as `transport=none` rather than fabricating an endpoint.
 - Cleanup cannot discover containers that have no local Crabbox claim.
-- Container capacity is bounded by the checked-in Wrangler bindings
-  (`max_instances`) and the target account's Cloudflare Containers limits.
+- Container capacity is bounded by the target account's Cloudflare Containers
+  limits.
+- The `durable_object` scheduling policy is in public beta.
 
 If a command stream ends before its completion event while the caller context is
 canceled, Crabbox reports cancellation rather than a missing-completion error.

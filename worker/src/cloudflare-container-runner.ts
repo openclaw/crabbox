@@ -1,24 +1,60 @@
-import { Container, getContainer } from "@cloudflare/containers";
+import { DurableObject } from "cloudflare:workers";
 
 import { authorize, isRecord, json, stringField } from "./runner-http";
 
 const leaseMetaKey = "crabbox:lease";
-const cleanupCallback = "expireIfIdle";
 const defaultInstanceType = "standard-4";
-const instanceTypes = [
-  "lite",
-  "basic",
-  "standard-1",
-  "standard-2",
-  "standard-3",
-  "standard-4",
-] as const;
+const defaultImage = "default";
+const instanceTypes = ["lite", "standard-1", "standard-2", "standard-3", "standard-4"] as const;
 
-class SandboxBase extends Container {
-  override defaultPort = 8787;
-  override sleepAfter = "30m";
-  override enableInternet = true;
+const readyTimeoutMs = 120_000;
+const readyPollMs = 250;
+// Platform maximum; lease TTL and idle expiry are enforced by the Durable Object alarm.
+const containerInactivityTimeoutMs = 6 * 60 * 60 * 1000;
+const heartbeatIntervalMs = 15_000;
+const timeoutKillAfter = "5s";
 
+// A background descendant (`sleep 30 & echo done`) can keep stdout/stderr open
+// after the command exits. Once the exit code is known, keep reading while
+// output keeps arriving, stop after drainIdleMs without new bytes, and never
+// wait longer than drainGraceMs in total.
+const drainIdleMs = 300;
+const drainPollMs = 100;
+const drainGraceMs = 5_000;
+
+type Env = {
+  CrabboxSandbox: DurableObjectNamespace<CrabboxSandbox>;
+  CRABBOX_RUNNER_TOKEN?: string;
+};
+
+type InstanceType = (typeof instanceTypes)[number];
+
+type LeaseState = "running" | "expired" | "stopped";
+
+type LeaseMetadata = {
+  id: string;
+  state: LeaseState;
+  workdir: string;
+  instanceType: string;
+  image: string;
+  labels: Record<string, string>;
+  createdAt: string;
+  lastTouchedAt: string;
+  ttlSeconds?: number;
+  idleTimeoutSeconds?: number;
+  activeExecutions?: number;
+  expiredAt?: string;
+  stoppedAt?: string;
+};
+
+type ExecRequest = {
+  command: string;
+  cwd: string;
+  env: Record<string, string> | undefined;
+  timeoutMs: number | undefined;
+};
+
+export class CrabboxSandbox extends DurableObject<Env> {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/__crabbox/create" && request.method === "POST") {
@@ -36,21 +72,11 @@ class SandboxBase extends Container {
     if (url.pathname === "/__crabbox/exec-stream" && request.method === "POST") {
       return this.execLeaseStream(request);
     }
-    return super.fetch(request);
+    return json({ error: "not found" }, 404);
   }
 
-  override async onActivityExpired(): Promise<void> {
-    const meta = await this.leaseMeta();
-    if (!meta || meta.state !== "running") {
-      await this.stop();
-      return;
-    }
-
-    const expired = await this.expireIfNeeded(meta);
-    if (expired.state !== "running") return;
-
-    await this.scheduleCleanup(expired);
-    this.renewActivityTimeout();
+  override async alarm(): Promise<void> {
+    await this.expireIfIdle();
   }
 
   async expireIfIdle(): Promise<void> {
@@ -70,8 +96,8 @@ class SandboxBase extends Container {
       expiredAt: new Date(now).toISOString(),
     };
     await this.ctx.storage.put(leaseMetaKey, expired);
-    this.deleteSchedules(cleanupCallback);
-    await this.destroy();
+    await this.ctx.storage.deleteAlarm();
+    await this.destroyContainer();
   }
 
   private async createLease(request: Request): Promise<Response> {
@@ -83,19 +109,31 @@ class SandboxBase extends Container {
     const workdir = cleanAbsolutePath(stringField(body, "workdir") ?? "/workspace/crabbox");
     if (!workdir) return json({ error: "workdir must be an absolute path" }, 400);
 
-    const now = new Date();
-    const existing = await this.leaseMeta();
-    const ttlSeconds = positiveIntegerField(body, "ttlSeconds");
-    const idleTimeoutSeconds = positiveIntegerField(body, "idleTimeoutSeconds");
     const instanceType = cleanInstanceType(
       stringField(body, "instanceType") ?? defaultInstanceType,
     );
     if (!instanceType) return json({ error: "instanceType is not supported" }, 400);
+
+    const image = cleanImageName(stringField(body, "image") ?? defaultImage);
+    if (!image) return json({ error: "image must be a configured image name" }, 400);
+    const container = this.container();
+    if (!(image in container.images)) {
+      return json(
+        { error: `image ${image} is not configured`, images: imageNames(container) },
+        400,
+      );
+    }
+
+    const now = new Date();
+    const existing = await this.leaseMeta();
+    const ttlSeconds = positiveIntegerField(body, "ttlSeconds");
+    const idleTimeoutSeconds = positiveIntegerField(body, "idleTimeoutSeconds");
     const meta: LeaseMetadata = {
       id,
       state: "running",
       workdir,
       instanceType,
+      image,
       labels: sanitizeLabels(body["labels"]),
       createdAt: existing?.createdAt ?? now.toISOString(),
       lastTouchedAt: now.toISOString(),
@@ -105,7 +143,7 @@ class SandboxBase extends Container {
     await this.ctx.storage.put(leaseMetaKey, meta);
     await this.scheduleCleanup(meta);
     try {
-      await this.ensureReady();
+      await this.ensureRunning(meta);
     } catch (error) {
       const stopped: LeaseMetadata = {
         ...meta,
@@ -113,12 +151,12 @@ class SandboxBase extends Container {
         stoppedAt: new Date().toISOString(),
       };
       await this.ctx.storage.put(leaseMetaKey, stopped);
-      this.deleteSchedules(cleanupCallback);
-      await this.destroy();
-      throw error;
+      await this.ctx.storage.deleteAlarm();
+      await this.destroyContainer();
+      return json({ error: errorMessage(error), ...leaseResponse(stopped) }, 503);
     }
 
-    return json(leaseResponse(meta));
+    return json(leaseResponse(meta, "running"));
   }
 
   private async leaseStatus(): Promise<Response> {
@@ -126,12 +164,10 @@ class SandboxBase extends Container {
     if (!meta) return json({ error: "not found" }, 404);
 
     const expired = await this.expireIfNeeded(meta);
-    if (expired.state === "expired") {
+    if (expired.state !== "running") {
       return json(leaseResponse(expired));
     }
-
-    const state = await this.getState();
-    return json(leaseResponse(expired, state.status));
+    return json(leaseResponse(expired, this.container().running ? "running" : "stopped"));
   }
 
   private async destroyLease(): Promise<Response> {
@@ -142,8 +178,8 @@ class SandboxBase extends Container {
       stoppedAt: new Date().toISOString(),
     };
     await this.ctx.storage.put(leaseMetaKey, stopped);
-    this.deleteSchedules(cleanupCallback);
-    await this.destroy();
+    await this.ctx.storage.deleteAlarm();
+    await this.destroyContainer();
     return json(leaseResponse(stopped));
   }
 
@@ -156,16 +192,25 @@ class SandboxBase extends Container {
     if (meta.state !== "running") return expiredResponse(meta);
 
     try {
-      await this.ensureReady();
-      const uploadURL = new URL("http://container/v1/files");
-      uploadURL.searchParams.set("path", remotePath);
-      return await this.containerFetch(uploadURL, {
-        method: "POST",
-        body: request.body,
-        headers: {
-          "Content-Type": "application/octet-stream",
-        },
-      });
+      const container = await this.ensureRunning(meta);
+      const process = await container.exec(
+        ["/bin/sh", "-c", 'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"', "sh", remotePath],
+        { stdin: "pipe", stdout: "ignore", stderr: "pipe" },
+      );
+      const [written, exitCode, stderr] = await Promise.all([
+        copyToStdin(request.body, process.stdin),
+        process.exitCode,
+        readText(process.stderr),
+      ]);
+      if (written instanceof Error) {
+        return json({ error: `write ${remotePath}: ${written.message}` }, 500);
+      }
+      if (exitCode !== 0) {
+        return json({ error: `write ${remotePath}: ${stderr.trim() || `exit ${exitCode}`}` }, 500);
+      }
+      return json({ ok: true, path: remotePath });
+    } catch (error) {
+      return json({ error: errorMessage(error) }, 503);
     } finally {
       await this.finishExecution();
     }
@@ -180,22 +225,29 @@ class SandboxBase extends Container {
     const cwd = cleanAbsolutePath(stringField(body, "cwd") ?? "/workspace/crabbox");
     if (!cwd) return json({ error: "cwd must be an absolute path" }, 400);
 
+    const timeoutMs = numberField(body, "timeoutMs");
+    if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs < 0)) {
+      return json({ error: "timeoutMs must be a non-negative number" }, 400);
+    }
+
     const meta = await this.beginExecution();
     if (meta.state !== "running") return expiredResponse(meta);
 
+    let container: Container;
     try {
-      await this.ensureReady();
-      const response = await this.execContainer({
-        command,
-        cwd,
-        env: sanitizeEnv(body["env"]),
-        timeoutMs: numberField(body, "timeoutMs"),
-      });
-      return this.finishExecutionWhenStreamCloses(response);
+      container = await this.ensureRunning(meta);
     } catch (error) {
       await this.finishExecution();
-      throw error;
+      return json({ error: errorMessage(error) }, 503);
     }
+    const stream = execEventStream(
+      container,
+      { command, cwd, env: sanitizeEnv(body["env"]), timeoutMs },
+      () => this.ctx.waitUntil(this.finishExecution()),
+    );
+    return new Response(stream, {
+      headers: { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" },
+    });
   }
 
   private async beginExecution(): Promise<LeaseMetadata> {
@@ -238,23 +290,6 @@ class SandboxBase extends Container {
     });
   }
 
-  private async touchLease(): Promise<LeaseMetadata> {
-    const meta = await this.leaseMeta();
-    if (!meta) {
-      return emptyLeaseMeta("expired");
-    }
-    const expired = await this.expireIfNeeded(meta);
-    if (expired.state !== "running") return expired;
-
-    const touched: LeaseMetadata = {
-      ...expired,
-      lastTouchedAt: new Date().toISOString(),
-    };
-    await this.ctx.storage.put(leaseMetaKey, touched);
-    await this.scheduleCleanup(touched);
-    return touched;
-  }
-
   private async expireIfNeeded(meta: LeaseMetadata): Promise<LeaseMetadata> {
     if (meta.state !== "running") return meta;
     const expiresAt = leaseExpiresAtMs(meta);
@@ -266,144 +301,63 @@ class SandboxBase extends Container {
       expiredAt: new Date().toISOString(),
     };
     await this.ctx.storage.put(leaseMetaKey, expired);
-    this.deleteSchedules(cleanupCallback);
-    await this.destroy();
+    await this.ctx.storage.deleteAlarm();
+    await this.destroyContainer();
     return expired;
   }
 
   private async leaseMeta(): Promise<LeaseMetadata | undefined> {
-    return this.ctx.storage.get<LeaseMetadata>(leaseMetaKey);
+    const meta = await this.ctx.storage.get<LeaseMetadata>(leaseMetaKey);
+    if (meta && meta.image === undefined) return { ...meta, image: defaultImage };
+    return meta;
   }
 
   private async scheduleCleanup(meta: LeaseMetadata): Promise<void> {
-    this.deleteSchedules(cleanupCallback);
-    if (meta.state !== "running") return;
-    const expiresAt = leaseExpiresAtMs(meta);
-    if (expiresAt === undefined) return;
-    await this.schedule(new Date(expiresAt), cleanupCallback);
-  }
-
-  private async ensureReady(): Promise<void> {
-    await this.startAndWaitForPorts({
-      ports: 8787,
-      cancellationOptions: {
-        instanceGetTimeoutMS: 120_000,
-        portReadyTimeoutMS: 120_000,
-        waitInterval: 1_000,
-      },
-    });
-  }
-
-  private async execContainer(payload: Record<string, unknown>): Promise<Response> {
-    return this.containerFetch("http://container/v1/exec", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-  }
-
-  private finishExecutionWhenStreamCloses(response: Response): Response {
-    if (!response.body) {
-      this.finishExecutionAfterResponse();
-      return response;
+    const expiresAt = meta.state === "running" ? leaseExpiresAtMs(meta) : undefined;
+    if (expiresAt === undefined) {
+      await this.ctx.storage.deleteAlarm();
+      return;
     }
-    const reader = response.body.getReader();
-    const clientBody = new ReadableStream<Uint8Array>({
-      pull: async (controller) => {
-        let next: ReadableStreamReadResult<Uint8Array>;
-        try {
-          next = await reader.read();
-        } catch (error) {
-          this.finishExecutionAfterResponse();
-          controller.error(error);
-          return;
-        }
-        if (next.done) {
-          controller.close();
-          this.finishExecutionAfterResponse();
-          return;
-        }
-        controller.enqueue(next.value);
-      },
-      cancel: async (reason) => {
-        try {
-          await reader.cancel(reason);
-        } finally {
-          this.finishExecutionAfterResponse();
-        }
-      },
-    });
-    return new Response(clientBody, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers,
-    });
+    await this.ctx.storage.setAlarm(expiresAt);
   }
 
-  private finishExecutionAfterResponse(): void {
-    this.ctx.waitUntil(this.finishExecution());
+  private container(): Container {
+    const container = this.ctx.container;
+    if (!container) {
+      throw new Error("Durable Object has no container; check the containers config");
+    }
+    return container;
+  }
+
+  private async ensureRunning(meta: LeaseMetadata): Promise<Container> {
+    const container = this.container();
+    if (!container.running) {
+      const image = container.images[meta.image];
+      if (!image) throw new Error(`image ${meta.image} is not configured`);
+      const instance = cleanInstanceType(meta.instanceType) || defaultInstanceType;
+      container.start({ image, instance, enableInternet: true });
+      const exit: { error?: Error } = {};
+      void (async () => {
+        try {
+          await container.monitor();
+          exit.error = new Error("container exited during startup");
+        } catch (error) {
+          exit.error = new Error(`container failed to start: ${errorMessage(error)}`);
+        }
+      })();
+      await waitForExec(container, () => exit.error);
+    } else {
+      await waitForExec(container, () => undefined);
+    }
+    await container.setInactivityTimeout(containerInactivityTimeoutMs);
+    return container;
+  }
+
+  private async destroyContainer(): Promise<void> {
+    const container = this.container();
+    if (container.running) await container.destroy();
   }
 }
-
-export class Sandbox extends SandboxBase {}
-export class SandboxLite extends SandboxBase {}
-export class SandboxBasic extends SandboxBase {}
-export class SandboxStandard1 extends SandboxBase {}
-export class SandboxStandard2 extends SandboxBase {}
-export class SandboxStandard3 extends SandboxBase {}
-
-type Env = {
-  Sandbox: DurableObjectNamespace<Sandbox>;
-  SandboxLite: DurableObjectNamespace<SandboxLite>;
-  SandboxBasic: DurableObjectNamespace<SandboxBasic>;
-  SandboxStandard1: DurableObjectNamespace<SandboxStandard1>;
-  SandboxStandard2: DurableObjectNamespace<SandboxStandard2>;
-  SandboxStandard3: DurableObjectNamespace<SandboxStandard3>;
-  CRABBOX_RUNNER_TOKEN?: string;
-};
-
-type InstanceType = (typeof instanceTypes)[number];
-
-type SandboxNamespace =
-  | DurableObjectNamespace<Sandbox>
-  | DurableObjectNamespace<SandboxLite>
-  | DurableObjectNamespace<SandboxBasic>
-  | DurableObjectNamespace<SandboxStandard1>
-  | DurableObjectNamespace<SandboxStandard2>
-  | DurableObjectNamespace<SandboxStandard3>;
-
-type SandboxBindingName =
-  | "Sandbox"
-  | "SandboxLite"
-  | "SandboxBasic"
-  | "SandboxStandard1"
-  | "SandboxStandard2"
-  | "SandboxStandard3";
-
-type ResolvedSandbox = {
-  container: DurableObjectStub<SandboxBase>;
-  status: Response;
-  instanceType: InstanceType;
-};
-
-type LeaseState = "running" | "expired" | "stopped";
-
-type LeaseMetadata = {
-  id: string;
-  state: LeaseState;
-  workdir: string;
-  instanceType: string;
-  labels: Record<string, string>;
-  createdAt: string;
-  lastTouchedAt: string;
-  ttlSeconds?: number;
-  idleTimeoutSeconds?: number;
-  activeExecutions?: number;
-  expiredAt?: string;
-  stoppedAt?: string;
-};
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -425,20 +379,27 @@ export default {
     const match = url.pathname.match(/^\/v1\/sandboxes\/([^/]+)(?:\/([^/]+))?$/);
     if (!match) return json({ error: "not found" }, 404);
 
-    const sandboxID = decodeURIComponent(match[1] ?? "");
+    const sandboxID = cleanSandboxID(decodeURIComponent(match[1] ?? ""));
+    if (!sandboxID) return json({ error: "id is required" }, 400);
     const action = match[2] ?? "";
 
     if (request.method === "GET" && action === "") {
-      return getSandboxStatus(env, sandboxID, url);
+      return sandboxStub(env, sandboxID).fetch(internalRequest("/__crabbox/status"));
     }
     if (request.method === "DELETE" && action === "") {
-      return destroySandbox(env, sandboxID, url);
+      return withExistingLease(env, sandboxID, (stub) =>
+        stub.fetch(internalRequest("/__crabbox/destroy", undefined, { method: "DELETE" })),
+      );
     }
     if (request.method === "POST" && action === "files") {
-      return uploadFile(request, env, sandboxID, url);
+      return withExistingLease(env, sandboxID, (stub) =>
+        stub.fetch(internalRequest(`/__crabbox/files${url.search}`, request, { method: "POST" })),
+      );
     }
     if (request.method === "POST" && action === "exec-stream") {
-      return execStream(request, env, sandboxID, url);
+      return withExistingLease(env, sandboxID, (stub) =>
+        stub.fetch(internalRequest("/__crabbox/exec-stream", request, { method: "POST" })),
+      );
     }
 
     return json({ error: "not found" }, 404);
@@ -457,9 +418,8 @@ async function createSandbox(request: Request, env: Env): Promise<Response> {
   const instanceType = cleanInstanceType(stringField(body, "instanceType") ?? defaultInstanceType);
   if (!instanceType) return json({ error: "instanceType is not supported" }, 400);
 
-  const container = getContainer(namespaceForInstanceType(env, instanceType), sandboxID);
   const sanitizedBody = { ...body, id: sandboxID, workdir, instanceType };
-  return container.fetch(
+  return sandboxStub(env, sandboxID).fetch(
     internalRequest("/__crabbox/create", undefined, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -468,94 +428,29 @@ async function createSandbox(request: Request, env: Env): Promise<Response> {
   );
 }
 
-async function getSandboxStatus(env: Env, sandboxID: string, url: URL): Promise<Response> {
-  const id = cleanSandboxID(sandboxID);
-  if (!id) return json({ error: "id is required" }, 400);
-  const requested = requestedInstanceType(url);
-  if (requested instanceof Response) return requested;
-  const resolved = await resolveSandbox(env, id, requested);
-  if (resolved instanceof Response) return resolved;
-  return resolved.status;
-}
-
-async function destroySandbox(env: Env, sandboxID: string, url: URL): Promise<Response> {
-  const id = cleanSandboxID(sandboxID);
-  if (!id) return json({ error: "id is required" }, 400);
-  const requested = requestedInstanceType(url);
-  if (requested instanceof Response) return requested;
-  const resolved = await resolveSandbox(env, id, requested);
-  if (resolved instanceof Response) return resolved;
-  return resolved.container.fetch(
-    internalRequest("/__crabbox/destroy", undefined, { method: "DELETE" }),
-  );
-}
-
-async function uploadFile(
-  request: Request,
+async function withExistingLease(
   env: Env,
   sandboxID: string,
-  url: URL,
+  next: (stub: DurableObjectStub<CrabboxSandbox>) => Promise<Response>,
 ): Promise<Response> {
-  const id = cleanSandboxID(sandboxID);
-  if (!id) return json({ error: "id is required" }, 400);
-
-  const requested = requestedInstanceType(url);
-  if (requested instanceof Response) return requested;
-  const resolved = await resolveSandbox(env, id, requested);
-  if (resolved instanceof Response) return resolved;
-  return resolved.container.fetch(
-    internalRequest(`/__crabbox/files${url.search}`, request, {
-      method: "POST",
-    }),
-  );
+  const stub = sandboxStub(env, sandboxID);
+  const status = await stub.fetch(internalRequest("/__crabbox/status"));
+  if (status.status === 404) return status;
+  return next(stub);
 }
 
-async function execStream(
-  request: Request,
-  env: Env,
-  sandboxID: string,
-  url?: URL,
-): Promise<Response> {
-  const id = cleanSandboxID(sandboxID);
-  if (!id) return json({ error: "id is required" }, 400);
-
-  const requested = url ? requestedInstanceType(url) : undefined;
-  if (requested instanceof Response) return requested;
-  const resolved = await resolveSandbox(env, id, requested);
-  if (resolved instanceof Response) return resolved;
-  return resolved.container.fetch(
-    internalRequest("/__crabbox/exec-stream", request, {
-      method: "POST",
-    }),
-  );
-}
-
-async function resolveSandbox(
-  env: Env,
-  sandboxID: string,
-  requested?: InstanceType,
-): Promise<ResolvedSandbox | Response> {
-  const candidates = requested
-    ? [requested, ...instanceTypes.filter((instanceType) => instanceType !== requested)]
-    : instanceTypes;
-  for (const instanceType of candidates) {
-    const container = getContainer(namespaceForInstanceType(env, instanceType), sandboxID);
-    // oxlint-disable-next-line eslint/no-await-in-loop -- stop at the first binding that owns this lease.
-    const status = await container.fetch(internalRequest("/__crabbox/status"));
-    if (status.status !== 404) return { container, status, instanceType };
-  }
-  return json({ error: "not found" }, 404);
+function sandboxStub(env: Env, sandboxID: string): DurableObjectStub<CrabboxSandbox> {
+  return env.CrabboxSandbox.get(env.CrabboxSandbox.idFromName(sandboxID));
 }
 
 function runnerReadiness(env: Env): Response {
-  const missing = missingContainerBindings(env);
-  if (missing.length > 0) {
+  if ((env.CrabboxSandbox as unknown) === undefined || (env.CrabboxSandbox as unknown) === null) {
     return json(
       {
         ok: false,
         runner: "cloudflare",
-        error: `missing container bindings: ${missing.join(", ")}`,
-        missing,
+        error: "missing container binding: CrabboxSandbox",
+        missing: ["CrabboxSandbox"],
       },
       503,
     );
@@ -563,43 +458,231 @@ function runnerReadiness(env: Env): Response {
   return json({ ok: true, runner: "cloudflare", instanceTypes });
 }
 
-function missingContainerBindings(env: Env): string[] {
-  const missing: string[] = [];
-  for (const instanceType of instanceTypes) {
-    const name = namespaceBindingNameForInstanceType(instanceType);
-    if ((env[name] as unknown) === undefined || (env[name] as unknown) === null) {
-      missing.push(name);
+async function waitForExec(
+  container: Container,
+  startupError: () => Error | undefined,
+): Promise<void> {
+  const deadline = performance.now() + readyTimeoutMs;
+  let lastError: unknown;
+  for (;;) {
+    try {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- readiness is a sequential probe.
+      const probe = await container.exec(["true"], { stdout: "ignore", stderr: "ignore" });
+      // oxlint-disable-next-line eslint/no-await-in-loop -- see above.
+      if ((await probe.exitCode) === 0) return;
+      lastError = new Error("readiness probe exited non-zero");
+    } catch (error) {
+      lastError = error;
     }
-  }
-  return missing;
-}
-
-function namespaceBindingNameForInstanceType(instanceType: InstanceType): SandboxBindingName {
-  switch (instanceType) {
-    case "lite":
-      return "SandboxLite";
-    case "basic":
-      return "SandboxBasic";
-    case "standard-1":
-      return "SandboxStandard1";
-    case "standard-2":
-      return "SandboxStandard2";
-    case "standard-3":
-      return "SandboxStandard3";
-    case "standard-4":
-      return "Sandbox";
+    const failed = startupError();
+    if (failed) throw failed;
+    if (performance.now() >= deadline) {
+      throw new Error(
+        `container did not accept exec within ${readyTimeoutMs}ms: ${errorMessage(lastError)}`,
+        { cause: lastError },
+      );
+    }
+    // oxlint-disable-next-line eslint/no-await-in-loop -- see above.
+    await sleep(readyPollMs);
   }
 }
 
-function namespaceForInstanceType(env: Env, instanceType: InstanceType): SandboxNamespace {
-  return env[namespaceBindingNameForInstanceType(instanceType)];
+// commandScript deletes itself on first line so aborted commands do not leak scripts.
+function commandScript(command: string): string {
+  return `rm -f -- "$0"\n${command}\n`;
 }
 
-function requestedInstanceType(url: URL): InstanceType | Response | undefined {
-  const raw = url.searchParams.get("instanceType") ?? url.searchParams.get("serverType");
-  if (raw === null) return undefined;
-  const instanceType = cleanInstanceType(raw);
-  return instanceType || json({ error: "instanceType is not supported" }, 400);
+function timeoutArgument(timeoutMs: number | undefined): string {
+  if (timeoutMs === undefined || timeoutMs <= 0) return "0";
+  return `${Math.max(Math.ceil(timeoutMs / 1000), 1)}s`;
+}
+
+function execEventStream(
+  container: Container,
+  request: ExecRequest,
+  onFinish: () => void,
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  let process: ExecProcess | undefined;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    if (heartbeat !== undefined) clearInterval(heartbeat);
+    onFinish();
+  };
+
+  return new ReadableStream<Uint8Array>({
+    start: (controller) => {
+      const emit = (event: Record<string, unknown>) => {
+        if (finished) return;
+        controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      };
+      emit({ type: "start" });
+      heartbeat = setInterval(() => emit({ type: "heartbeat" }), heartbeatIntervalMs);
+
+      void (async () => {
+        try {
+          const scriptPath = `/tmp/crabbox-command-${crypto.randomUUID()}.sh`;
+          const writer = await container.exec(
+            [
+              "/bin/sh",
+              "-c",
+              'mkdir -p -- "$2" && umask 077 && cat > "$1"',
+              "sh",
+              scriptPath,
+              request.cwd,
+            ],
+            { stdin: textStream(commandScript(request.command)), stdout: "ignore", stderr: "pipe" },
+          );
+          const [writeExit, writeErr] = await Promise.all([
+            writer.exitCode,
+            readText(writer.stderr),
+          ]);
+          if (writeExit !== 0) {
+            throw new Error(`prepare command: ${writeErr.trim() || `exit ${writeExit}`}`);
+          }
+
+          // GNU timeout puts the command in its own process group and signals the
+          // whole group, so descendants die with it; it exits 124 on timeout.
+          const argv = [
+            "timeout",
+            `--kill-after=${timeoutKillAfter}`,
+            timeoutArgument(request.timeoutMs),
+            "/bin/bash",
+            "-l",
+            scriptPath,
+          ];
+          const options: ContainerExecOptions = { cwd: request.cwd };
+          if (request.env) options.env = request.env;
+          process = await container.exec(argv, options);
+          const exitCode = await pumpOutput(process, emit);
+          emit({ type: "complete", exitCode });
+          finish();
+          controller.close();
+        } catch (error) {
+          emit({ type: "error", error: errorMessage(error) });
+          finish();
+          controller.close();
+        }
+      })();
+    },
+    cancel: () => {
+      process?.kill(15);
+      finish();
+    },
+  });
+}
+
+async function pumpOutput(
+  process: ExecProcess,
+  emit: (event: Record<string, unknown>) => void,
+): Promise<number> {
+  let lastProgress = performance.now();
+  const readers: Array<ReadableStreamDefaultReader<Uint8Array>> = [];
+  const pump = async (stream: ReadableStream | null, type: "stdout" | "stderr") => {
+    if (!stream) return;
+    const reader = (stream as ReadableStream<Uint8Array>).getReader();
+    readers.push(reader);
+    const decoder = new TextDecoder();
+    for (;;) {
+      let next: ReadableStreamReadResult<Uint8Array>;
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- stream reads are sequential.
+        next = await reader.read();
+      } catch {
+        break;
+      }
+      if (next.done) break;
+      lastProgress = performance.now();
+      const data = decoder.decode(next.value, { stream: true });
+      if (data) emit({ type, data });
+    }
+    const tail = decoder.decode();
+    if (tail) emit({ type, data: tail });
+  };
+
+  const pumps = Promise.all([pump(process.stdout, "stdout"), pump(process.stderr, "stderr")]);
+  const exitCode = await process.exitCode;
+
+  const drain = { done: false };
+  void (async () => {
+    await pumps;
+    drain.done = true;
+  })();
+  const drainDeadline = performance.now() + drainGraceMs;
+  lastProgress = Math.max(lastProgress, performance.now());
+  while (
+    !drain.done &&
+    performance.now() < drainDeadline &&
+    performance.now() - lastProgress < drainIdleMs
+  ) {
+    // oxlint-disable-next-line eslint/no-await-in-loop -- polling the drain state.
+    await sleep(drainPollMs);
+  }
+  if (!drain.done) {
+    await Promise.all(readers.map((reader) => reader.cancel().catch(() => undefined)));
+  }
+  await pumps;
+  return exitCode;
+}
+
+// Passing a forwarded request body as exec `stdin` never resolved the exit code live, and
+// closing a piped stdin can reject with "Network connection lost" after the
+// process has read everything; the exit code is the source of truth then.
+async function copyToStdin(
+  source: ReadableStream<Uint8Array>,
+  stdin: WritableStream | null,
+): Promise<Error | undefined> {
+  if (!stdin) {
+    await source.cancel();
+    return new Error("exec stdin is not available");
+  }
+  const writer = stdin.getWriter();
+  const reader = source.getReader();
+  try {
+    for (;;) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- stream copy is sequential.
+      const next = await reader.read();
+      if (next.done) break;
+      // oxlint-disable-next-line eslint/no-await-in-loop -- see above.
+      await writer.write(next.value);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined);
+    await writer.abort(error).catch(() => undefined);
+    return error instanceof Error ? error : new Error(String(error));
+  }
+  await writer.close().catch(() => undefined);
+  return undefined;
+}
+
+function textStream(text: string): ReadableStream<Uint8Array> {
+  const bytes = new TextEncoder().encode(text);
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+}
+
+async function readText(stream: ReadableStream | null): Promise<string> {
+  if (!stream) return "";
+  return new Response(stream).text();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function imageNames(container: Container): string[] {
+  return Object.keys(container.images).toSorted();
 }
 
 async function readObject(request: Request): Promise<Record<string, unknown> | Response> {
@@ -637,6 +720,11 @@ function cleanInstanceType(value: string): InstanceType | "" {
     if (trimmed === instanceType) return instanceType;
   }
   return "";
+}
+
+function cleanImageName(value: string): string {
+  const trimmed = value.trim();
+  return /^[A-Za-z0-9_.-]{1,128}$/.test(trimmed) ? trimmed : "";
 }
 
 function cleanAbsolutePath(value: string): string {
@@ -710,6 +798,7 @@ function leaseResponse(meta: LeaseMetadata, containerState?: string): Record<str
     state: meta.state === "running" ? (containerState ?? "running") : meta.state,
     workdir: meta.workdir,
     instanceType: meta.instanceType,
+    image: meta.image,
     labels: meta.labels,
     createdAt: meta.createdAt,
     lastTouchedAt: meta.lastTouchedAt,
@@ -732,6 +821,7 @@ function emptyLeaseMeta(state: LeaseState = "stopped"): LeaseMetadata {
     state,
     workdir: "/workspace",
     instanceType: defaultInstanceType,
+    image: defaultImage,
     labels: {},
     createdAt: now,
     lastTouchedAt: now,

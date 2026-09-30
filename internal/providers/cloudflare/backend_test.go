@@ -79,8 +79,11 @@ func TestCloudflareHealthyStateIsReady(t *testing.T) {
 	if !cloudflareReady("healthy") {
 		t.Fatal("healthy state should be ready")
 	}
-	if cloudflareReady("running") {
-		t.Fatal("running state should not be ready")
+	if !cloudflareReady("running") {
+		t.Fatal("running state should be ready")
+	}
+	if cloudflareReady("stopped") {
+		t.Fatal("stopped state should not be ready")
 	}
 }
 
@@ -116,7 +119,7 @@ func TestCloudflareFlagNormalizationPrecedesValues(t *testing.T) {
 			}
 			err := ApplyCloudflareProviderFlags(&cfg, fs, struct{}{})
 			if tc.fail {
-				if err == nil || err.Error() != "cloudflare --type must be one of lite, basic, standard-1, standard-2, standard-3, standard-4" {
+				if err == nil || err.Error() != "cloudflare --type must be one of lite, standard-1, standard-2, standard-3, standard-4" {
 					t.Fatalf("type normalization=%v", err)
 				}
 				continue
@@ -2227,7 +2230,7 @@ func TestJSONRequestAdoptionConcreteEnvelope(t *testing.T) {
 }
 
 func TestCloudflareInstanceTypeResolutionPhases(t *testing.T) {
-	const invalidType = "cloudflare --type must be one of lite, basic, standard-1, standard-2, standard-3, standard-4"
+	const invalidType = "cloudflare --type must be one of lite, standard-1, standard-2, standard-3, standard-4"
 	for _, tc := range []struct {
 		name, stored, class, target, architecture string
 		explicit, visited                         bool
@@ -2293,7 +2296,7 @@ func TestCloudflareInstanceTypeResolutionPhases(t *testing.T) {
 }
 
 func TestCloudflareInstanceTypeCanonicalSizes(t *testing.T) {
-	for _, size := range []string{"lite", "basic", "standard-1", "standard-2", "standard-3", "standard-4"} {
+	for _, size := range []string{"lite", "standard-1", "standard-2", "standard-3", "standard-4"} {
 		t.Run(size, func(t *testing.T) {
 			input := " " + strings.ToUpper(size) + " "
 			if got, ok := normalizeContainerInstanceType(input); !ok || got != size {
@@ -2305,8 +2308,10 @@ func TestCloudflareInstanceTypeCanonicalSizes(t *testing.T) {
 			}
 		})
 	}
-	if got, ok := normalizeContainerInstanceType("ccx63"); ok || got != "" {
-		t.Fatalf("normalized unsupported type = (%q,%t), want (empty,false)", got, ok)
+	for _, unsupported := range []string{"ccx63", "basic"} {
+		if got, ok := normalizeContainerInstanceType(unsupported); ok || got != "" {
+			t.Fatalf("normalized unsupported type %q = (%q,%t), want (empty,false)", unsupported, got, ok)
+		}
 	}
 }
 
@@ -2323,7 +2328,7 @@ func TestCloudflareContainerInstanceTypeMapping(t *testing.T) {
 		{class: "large", want: "standard-4"},
 		{class: "beast", want: "standard-4"},
 		{class: "lite", want: "lite"},
-		{class: "basic", want: "basic"},
+		{class: "standard-1", want: "standard-1"},
 		{class: "standard-3", want: "standard-3"},
 	} {
 		if got := cloudflareContainerInstanceTypeForClass(tc.class); got != tc.want {
