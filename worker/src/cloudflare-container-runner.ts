@@ -569,8 +569,11 @@ function execEventStream(
     process?.kill(15);
     finish();
   };
-  if (signal.aborted) canceled = true;
-  signal.addEventListener("abort", cancel, { once: true });
+  if (signal.aborted) {
+    cancel();
+  } else {
+    signal.addEventListener("abort", cancel, { once: true });
+  }
 
   return new ReadableStream<Uint8Array>({
     start: (controller) => {
@@ -602,7 +605,10 @@ function execEventStream(
           if (writeExit !== 0) {
             throw new Error(`prepare command: ${writeErr.trim() || `exit ${writeExit}`}`);
           }
-          if (canceled) return;
+          if (canceled) {
+            controller.close();
+            return;
+          }
 
           // GNU timeout puts the command in its own process group and signals the
           // whole group, so descendants die with it; it exits 124 on timeout.
@@ -619,6 +625,7 @@ function execEventStream(
           process = await container.exec(argv, options);
           if (canceled) {
             process.kill(15);
+            controller.close();
             return;
           }
           const exitCode = await pumpOutput(process, emit);

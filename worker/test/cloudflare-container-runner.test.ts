@@ -699,6 +699,25 @@ describe("Cloudflare runner lifecycle", () => {
     expect(storage.alarm).toBe(Date.parse("2026-05-13T20:00:00Z"));
   });
 
+  it("finishes a command whose caller aborted while the container was starting", async () => {
+    const { sandbox, storage, container } = harness();
+    await createLease(sandbox, { idleTimeoutSeconds: 600 });
+    const abort = new AbortController();
+    abort.abort();
+
+    const response = await sandbox.fetch(
+      new Request("http://crabbox.internal/__crabbox/exec-stream", {
+        method: "POST",
+        body: JSON.stringify({ command: "sleep 30", cwd: "/workspace/repo" }),
+        signal: abort.signal,
+      }),
+    );
+    await response.text();
+
+    await eventually(async () => expect(await activeExecutions(storage)).toBeUndefined());
+    expect(container.calls.some((call) => call.cmd[0] === "timeout")).toBe(false);
+  });
+
   it("stops a command whose request is canceled before exec returns", async () => {
     const { sandbox, container } = harness();
     await createLease(sandbox);
