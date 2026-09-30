@@ -15,6 +15,8 @@ import (
 	"math/big"
 	"math/bits"
 	"net"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -833,7 +835,7 @@ func TestTypeRFBTextReleasesPressedKeyWhenInterrupted(t *testing.T) {
 		afterKeyEvent func(client net.Conn, cancel context.CancelFunc, down bool) error
 		wantErr       error
 		wantRelease   string
-		wantEvents    []testRFBKeyEvent
+		wantEvents    []string
 	}{
 		{
 			name: "canceled after key down with expired deadline",
@@ -845,7 +847,7 @@ func TestTypeRFBTextReleasesPressedKeyWhenInterrupted(t *testing.T) {
 				return nil
 			},
 			wantErr:    context.Canceled,
-			wantEvents: []testRFBKeyEvent{{down: true, key: 'a'}, {down: false, key: 'a'}},
+			wantEvents: []string{"down a", "up a", "frame"},
 		},
 		{
 			name: "canceled after key down with closed transport",
@@ -858,7 +860,18 @@ func TestTypeRFBTextReleasesPressedKeyWhenInterrupted(t *testing.T) {
 			},
 			wantErr:     context.Canceled,
 			wantRelease: "release RFB key",
-			wantEvents:  []testRFBKeyEvent{{down: true, key: 'a'}},
+			wantEvents:  []string{"down a"},
+		},
+		{
+			name: "deadline expires before key up",
+			afterKeyEvent: func(client net.Conn, _ context.CancelFunc, down bool) error {
+				if down {
+					_ = client.SetWriteDeadline(time.Now())
+				}
+				return nil
+			},
+			wantErr:    os.ErrDeadlineExceeded,
+			wantEvents: []string{"down a", "up a", "frame"},
 		},
 		{
 			name: "key up write failure is not retried",
@@ -869,7 +882,7 @@ func TestTypeRFBTextReleasesPressedKeyWhenInterrupted(t *testing.T) {
 				return nil
 			},
 			wantErr:    errInjected,
-			wantEvents: []testRFBKeyEvent{{down: true, key: 'a'}, {down: false, key: 'a'}},
+			wantEvents: []string{"down a", "up a"},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -879,12 +892,12 @@ func TestTypeRFBTextReleasesPressedKeyWhenInterrupted(t *testing.T) {
 			defer server.Close()
 
 			type serverResult struct {
-				events []testRFBKeyEvent
+				events []string
 				err    error
 			}
 			serverDone := make(chan serverResult, 1)
 			go func() {
-				events, err := serveTestTypeRFBRecordingKeys(server, "ec2-user", "example-pass")
+				events, err := serveTestTypeRFBRecordingInput(server, "ec2-user", "example-pass")
 				serverDone <- serverResult{events: events, err: err}
 			}()
 
@@ -901,7 +914,7 @@ func TestTypeRFBTextReleasesPressedKeyWhenInterrupted(t *testing.T) {
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("error=%v, want %v", err, tt.wantErr)
 			}
-			if tt.wantRelease == "" && strings.Contains(err.Error(), "release RFB key") {
+			if tt.wantRelease == "" && strings.Contains(err.Error(), "release") {
 				t.Fatalf("error=%v, want no release failure", err)
 			}
 			if tt.wantRelease != "" && !strings.Contains(err.Error(), tt.wantRelease) {
@@ -911,10 +924,47 @@ func TestTypeRFBTextReleasesPressedKeyWhenInterrupted(t *testing.T) {
 			if result.err != nil {
 				t.Fatalf("fake RFB server: %v", result.err)
 			}
-			if fmt.Sprint(result.events) != fmt.Sprint(tt.wantEvents) {
-				t.Fatalf("key events=%v, want %v", result.events, tt.wantEvents)
+			if !slices.Equal(result.events, tt.wantEvents) {
+				t.Fatalf("client input=%q, want %q", result.events, tt.wantEvents)
 			}
 		})
+	}
+}
+
+func TestRFBKeyReleaseTunnelContextOutlivesCancellationByGrace(t *testing.T) {
+	const grace = 100 * time.Millisecond
+	cause := errors.New("caller stopped")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	tunnelCtx, stopTunnel := rfbKeyReleaseTunnelContext(ctx, grace)
+	defer stopTunnel()
+
+	started := time.Now()
+	cancel(cause)
+	select {
+	case <-tunnelCtx.Done():
+		t.Fatal("tunnel context ended with the caller context")
+	case <-time.After(grace / 2):
+	}
+	select {
+	case <-tunnelCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("tunnel context outlived its grace")
+	}
+	if elapsed := time.Since(started); elapsed < grace {
+		t.Fatalf("tunnel context ended after %s, want >= %s", elapsed, grace)
+	}
+	if !errors.Is(context.Cause(tunnelCtx), cause) {
+		t.Fatalf("tunnel cause=%v, want %v", context.Cause(tunnelCtx), cause)
+	}
+}
+
+func TestRFBKeyReleaseTunnelContextStopsImmediately(t *testing.T) {
+	tunnelCtx, stopTunnel := rfbKeyReleaseTunnelContext(context.Background(), time.Hour)
+	stopTunnel()
+	select {
+	case <-tunnelCtx.Done():
+	default:
+		t.Fatal("stopped tunnel context is still live")
 	}
 }
 
@@ -1248,34 +1298,48 @@ func serveTestTypeRFBInit(conn net.Conn, username, password string) error {
 	return readTestRFBReadySetup(conn)
 }
 
-type testRFBKeyEvent struct {
-	down bool
-	key  uint32
-}
-
-// serveTestTypeRFBRecordingKeys serves a ready typing session and records key
-// events until the client disconnects.
-func serveTestTypeRFBRecordingKeys(conn net.Conn, username, password string) ([]testRFBKeyEvent, error) {
+// serveTestTypeRFBRecordingInput serves a ready typing session and records
+// key events and answered framebuffer requests until the client disconnects.
+func serveTestTypeRFBRecordingInput(conn net.Conn, username, password string) ([]string, error) {
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 	if err := serveTestTypeRFBInit(conn, username, password); err != nil {
 		return nil, err
 	}
-	if err := writeTestRFBRawFrame(conn, testTypeRFBWidth, testTypeRFBHeight, []byte{0, 0, 255, 255, 0, 255, 0, 255}); err != nil {
+	frame := []byte{0, 0, 255, 255, 0, 255, 0, 255}
+	if err := writeTestRFBRawFrame(conn, testTypeRFBWidth, testTypeRFBHeight, frame); err != nil {
 		return nil, err
 	}
-	var events []testRFBKeyEvent
+	var events []string
 	for {
-		event := make([]byte, 8)
-		if _, err := io.ReadFull(conn, event); err != nil {
+		messageType := []byte{0}
+		if _, err := io.ReadFull(conn, messageType); err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
 				return events, nil
 			}
 			return events, err
 		}
-		if event[0] != 4 || !bytes.Equal(event[2:4], []byte{0, 0}) {
-			return events, errUnexpectedTestBytes("key event", event)
+		switch messageType[0] {
+		case 4:
+			event := make([]byte, 7)
+			if _, err := io.ReadFull(conn, event); err != nil {
+				return events, err
+			}
+			direction := "up"
+			if event[0] == 1 {
+				direction = "down"
+			}
+			events = append(events, fmt.Sprintf("%s %c", direction, rune(binary.BigEndian.Uint32(event[3:7]))))
+		case 3:
+			if _, err := io.ReadFull(conn, make([]byte, 9)); err != nil {
+				return events, err
+			}
+			if err := writeTestRFBRawFrame(conn, testTypeRFBWidth, testTypeRFBHeight, frame); err != nil {
+				return events, err
+			}
+			events = append(events, "frame")
+		default:
+			return events, errUnexpectedTestBytes("client message", messageType)
 		}
-		events = append(events, testRFBKeyEvent{down: event[1] == 1, key: binary.BigEndian.Uint32(event[4:8])})
 	}
 }
 
