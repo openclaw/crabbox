@@ -38,7 +38,10 @@ checkpoint without creating any artifact.
 
 > Both kinds may contain secrets. Native checkpoints capture the full root
 > volume (caches, logs, credentials); archives capture build outputs and
-> generated files. Delete checkpoints when you no longer need them.
+> generated files. Delete checkpoints when you no longer need them. Cloudflare
+> container snapshots cannot be deleted: a captured credential stays in
+> Cloudflare's snapshot until it expires 30 days after creation or last restore,
+> so rotate any secret a Cloudflare checkpoint may have captured.
 
 ## Quick start
 

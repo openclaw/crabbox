@@ -93,9 +93,10 @@ or restored.
 
 `--mode auto` produces a native checkpoint when the resolved lease supports one
 for the chosen strategy, otherwise it falls back to an archive. With the default
-`--strategy auto`, direct (non-brokered) providers other than Parallels only get
-a native checkpoint when you explicitly ask for `--mode native`; `auto` keeps the
-archive fallback for them.
+`--strategy auto`, direct (non-brokered) providers other than Parallels and
+Cloudflare only get a native checkpoint when you explicitly ask for
+`--mode native`; `auto` keeps the archive fallback for them. Cloudflare has no
+archive path, so `auto` selects its container snapshot.
 
 ## Native strategies
 
