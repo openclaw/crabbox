@@ -15,7 +15,7 @@
 
 ### Changed
 
-- **Cloudflare containers start in about 1–2 seconds.** The `cloudflare` runner moves to the Containers `durable_object` scheduling policy: one Durable Object class starts each lease's image and instance type through `ctx.container`, commands and uploads use native `exec()`, and the in-container Go runner, six per-type classes, and `max_instances: 4` cap are gone. `--type basic` is no longer accepted (use `standard-1`), `--cloudflare-image` selects a named runner image, and redeploying deletes the old classes' Durable Object state.
+- **Cloudflare containers start in about 1–2 seconds.** The `cloudflare` runner moves to the Containers `durable_object` scheduling policy: one Durable Object class starts each lease's image and instance type through `ctx.container`, commands and uploads use native `exec()`, and the in-container Go runner, six per-type classes, and `max_instances: 4` cap are gone. `--type basic` is no longer accepted (use `standard-1`), `--cloudflare-image` selects a named runner image, and redeploying deletes the old classes' Durable Object state. [PR 2625](https://github.com/openclaw/crabbox/pull/2625).
 
 ### Fixes
 
