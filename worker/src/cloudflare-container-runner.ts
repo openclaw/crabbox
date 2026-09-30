@@ -10,6 +10,8 @@ const instanceTypes = ["standard-1", "standard-2", "standard-3", "standard-4"] a
 // A cache miss on a new image took about 2.5 minutes to pull live.
 const readyTimeoutMs = 300_000;
 const readyPollMs = 250;
+const snapshotStartAttempts = 6;
+const snapshotStartRetryDelayMs = 3_000;
 // A probe can stay pending while a container is still starting.
 const readyProbeTimeoutMs = 10_000;
 // Platform maximum; lease TTL and idle expiry are enforced by the Durable Object
@@ -48,6 +50,7 @@ type LeaseMetadata = {
   workdir: string;
   instanceType: string;
   image: string;
+  snapshotId?: string;
   labels: Record<string, string>;
   createdAt: string;
   lastTouchedAt: string;
@@ -95,6 +98,9 @@ export class CrabboxSandbox extends DurableObject<Env> {
     }
     if (url.pathname === "/__crabbox/exec-stream" && request.method === "POST") {
       return this.execLeaseStream(request);
+    }
+    if (url.pathname === "/__crabbox/snapshot" && request.method === "POST") {
+      return this.snapshotLease(request);
     }
     return json({ error: "not found" }, 404);
   }
@@ -147,8 +153,11 @@ export class CrabboxSandbox extends DurableObject<Env> {
 
     const image = cleanImageName(stringField(body, "image") ?? defaultImage);
     if (!image) return json({ error: "image must be a configured image name" }, 400);
+    const rawSnapshotId = stringField(body, "snapshotId");
+    const snapshotId = rawSnapshotId === undefined ? undefined : cleanSnapshotID(rawSnapshotId);
+    if (snapshotId === "") return json({ error: "snapshotId is invalid" }, 400);
     const container = this.container();
-    if (!(image in container.images)) {
+    if (snapshotId === undefined && !(image in container.images)) {
       return json(
         { error: `image ${image} is not configured`, images: imageNames(container) },
         400,
@@ -171,6 +180,7 @@ export class CrabboxSandbox extends DurableObject<Env> {
     };
     if (ttlSeconds !== undefined) meta.ttlSeconds = ttlSeconds;
     if (idleTimeoutSeconds !== undefined) meta.idleTimeoutSeconds = idleTimeoutSeconds;
+    if (snapshotId !== undefined) meta.snapshotId = snapshotId;
     await this.ctx.storage.put(leaseMetaKey, meta);
     await this.scheduleCleanup(meta);
     try {
@@ -288,6 +298,37 @@ export class CrabboxSandbox extends DurableObject<Env> {
     });
   }
 
+  private async snapshotLease(request: Request): Promise<Response> {
+    const body = await readObject(request);
+    if (body instanceof Response) return body;
+    const rawName = stringField(body, "name");
+    const name = rawName === undefined ? undefined : cleanSnapshotName(rawName);
+    if (name === "") return json({ error: "name is invalid" }, 400);
+
+    const meta = await this.beginExecution();
+    if (meta.state !== "running") return expiredResponse(meta);
+    try {
+      const container = await this.ensureRunning(meta);
+      const snapshot = await container.snapshotContainer(name === undefined ? {} : { name });
+      const result: Record<string, unknown> = {
+        id: snapshot.id,
+        size: snapshot.size,
+        leaseId: meta.id,
+        image: meta.image,
+        instanceType: meta.instanceType,
+        workdir: meta.workdir,
+        createdAt: new Date().toISOString(),
+      };
+      if (snapshot.name !== undefined) result["name"] = snapshot.name;
+      if (meta.snapshotId !== undefined) result["parentSnapshotId"] = meta.snapshotId;
+      return json(result);
+    } catch (error) {
+      return json({ error: errorMessage(error) }, 503);
+    } finally {
+      await this.finishExecution();
+    }
+  }
+
   private async beginExecution(): Promise<LeaseMetadata> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const meta = await this.leaseMeta();
@@ -395,11 +436,34 @@ export class CrabboxSandbox extends DurableObject<Env> {
     if (!container.running && meta.containerStarted) {
       throw new WorkspaceLostError();
     }
-    if (!container.running) {
-      const image = container.images[meta.image];
-      if (!image) throw new Error(`image ${meta.image} is not configured`);
-      const instance = cleanInstanceType(meta.instanceType) || defaultInstanceType;
-      container.start({ image, instance, enableInternet: true });
+    const deadline = performance.now() + readyTimeoutMs;
+    if (container.running) {
+      await waitForExec(container, deadline, () => undefined);
+    } else {
+      await this.startContainer(container, meta, deadline);
+    }
+    await container.setInactivityTimeout(containerInactivityTimeoutMs);
+    return container;
+  }
+
+  private async startContainer(
+    container: Container,
+    meta: LeaseMetadata,
+    deadline: number,
+  ): Promise<void> {
+    const instance = cleanInstanceType(meta.instanceType) || defaultInstanceType;
+    for (let attempt = 1; ; attempt += 1) {
+      if (meta.snapshotId === undefined) {
+        const image = container.images[meta.image];
+        if (!image) throw new Error(`image ${meta.image} is not configured`);
+        container.start({ image, instance, enableInternet: true });
+      } else {
+        container.start({
+          containerSnapshot: { id: meta.snapshotId },
+          instance,
+          enableInternet: true,
+        });
+      }
       const exit: { error?: Error } = {};
       void (async () => {
         try {
@@ -409,12 +473,24 @@ export class CrabboxSandbox extends DurableObject<Env> {
           exit.error = new Error(`container failed to start: ${errorMessage(error)}`);
         }
       })();
-      await waitForExec(container, () => exit.error);
-    } else {
-      await waitForExec(container, () => undefined);
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- start attempts are sequential.
+        await waitForExec(container, deadline, () => exit.error);
+        return;
+      } catch (error) {
+        // A snapshot can fail to restore on another Durable Object for several
+        // seconds after capture; image starts are not retried.
+        const retry =
+          meta.snapshotId !== undefined &&
+          exit.error !== undefined &&
+          !container.running &&
+          attempt < snapshotStartAttempts &&
+          performance.now() + snapshotStartRetryDelayMs < deadline;
+        if (!retry) throw error;
+      }
+      // oxlint-disable-next-line eslint/no-await-in-loop -- see above.
+      await sleep(snapshotStartRetryDelayMs);
     }
-    await container.setInactivityTimeout(containerInactivityTimeoutMs);
-    return container;
   }
 
   private async destroyContainer(): Promise<void> {
@@ -458,6 +534,11 @@ export default {
     if (request.method === "POST" && action === "files") {
       return withExistingLease(env, sandboxID, (stub) =>
         stub.fetch(internalRequest(`/__crabbox/files${url.search}`, request, { method: "POST" })),
+      );
+    }
+    if (request.method === "POST" && action === "snapshots") {
+      return withExistingLease(env, sandboxID, (stub) =>
+        stub.fetch(internalRequest("/__crabbox/snapshot", request, { method: "POST" })),
       );
     }
     if (request.method === "POST" && action === "exec-stream") {
@@ -524,9 +605,9 @@ function runnerReadiness(env: Env): Response {
 
 async function waitForExec(
   container: Container,
+  deadline: number,
   startupError: () => Error | undefined,
 ): Promise<void> {
-  const deadline = performance.now() + readyTimeoutMs;
   let lastError: unknown;
   for (;;) {
     try {
@@ -978,6 +1059,16 @@ function cleanInstanceType(value: string): InstanceType | "" {
   return "";
 }
 
+function cleanSnapshotID(value: string): string {
+  const trimmed = value.trim();
+  return /^[A-Za-z0-9_.:-]{1,256}$/.test(trimmed) ? trimmed : "";
+}
+
+function cleanSnapshotName(value: string): string {
+  const trimmed = value.trim();
+  return /^[A-Za-z0-9_.-]{1,128}$/.test(trimmed) ? trimmed : "";
+}
+
 function cleanImageName(value: string): string {
   const trimmed = value.trim();
   return /^[A-Za-z0-9_.-]{1,128}$/.test(trimmed) ? trimmed : "";
@@ -1055,6 +1146,7 @@ function leaseResponse(meta: LeaseMetadata, containerState?: string): Record<str
     workdir: meta.workdir,
     instanceType: meta.instanceType,
     image: meta.image,
+    snapshotId: meta.snapshotId,
     labels: meta.labels,
     createdAt: meta.createdAt,
     lastTouchedAt: meta.lastTouchedAt,

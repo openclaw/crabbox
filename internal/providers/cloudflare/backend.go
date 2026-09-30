@@ -63,7 +63,7 @@ func (b *cloudflareBackend) Warmup(ctx context.Context, req core.WarmupRequest) 
 	if err != nil {
 		return err
 	}
-	claim, sandbox, err := b.createSandbox(ctx, client, req.Repo, req.RequestedSlug)
+	claim, sandbox, err := b.createSandbox(ctx, client, req.Repo, req.RequestedSlug, sandboxSource{})
 	if err != nil {
 		return err
 	}
@@ -118,7 +118,7 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 			}
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
-			claim, _, err = b.createSandbox(ctx, client, req.Repo, req.RequestedSlug)
+			claim, _, err = b.createSandbox(ctx, client, req.Repo, req.RequestedSlug, sandboxSource{})
 			if err != nil {
 				return shared.DelegatedSandbox{}, err
 			}
@@ -310,7 +310,13 @@ func cloudflareCleanupCommand(leaseID string) string {
 	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, core.ShellQuote(leaseID))
 }
 
-func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflareClient, repo core.Repo, requestedSlug string) (core.LeaseClaim, cloudflareContainer, error) {
+// sandboxSource starts a lease from a container snapshot instead of an image.
+type sandboxSource struct {
+	snapshotID string
+	workdir    string
+}
+
+func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflareClient, repo core.Repo, requestedSlug string, source sandboxSource) (core.LeaseClaim, cloudflareContainer, error) {
 	if strings.TrimSpace(repo.Root) == "" {
 		return core.LeaseClaim{}, cloudflareContainer{}, core.Exit(2, "cloudflare creation requires a repository root for the recovery claim")
 	}
@@ -319,13 +325,17 @@ func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflar
 	if err != nil {
 		return core.LeaseClaim{}, cloudflareContainer{}, err
 	}
-	workdir, err := cloudflareWorkdir(b.cfg)
+	workdirCfg := b.cfg
+	if source.workdir != "" {
+		workdirCfg.Cloudflare.Workdir = source.workdir
+	}
+	workdir, err := cloudflareWorkdir(workdirCfg)
 	if err != nil {
 		return core.LeaseClaim{}, cloudflareContainer{}, err
 	}
 	labels := map[string]string{"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": slug, "repo": repo.Name, "instance_type": client.instanceType}
 	sandbox, err := client.createSandbox(ctx, createSandboxRequest{
-		ID: leaseID, LeaseID: leaseID, Slug: slug, Repo: repo.Name, Workdir: workdir,
+		ID: leaseID, LeaseID: leaseID, Slug: slug, Repo: repo.Name, Workdir: workdir, SnapshotID: source.snapshotID,
 		InstanceType: client.instanceType, Image: strings.TrimSpace(b.cfg.Cloudflare.Image), TTLSeconds: durationSecondsCeil(b.cfg.TTL), IdleTimeoutSeconds: durationSecondsCeil(b.cfg.IdleTimeout), Labels: labels,
 	})
 	if err != nil {
