@@ -725,6 +725,30 @@ type NativeCheckpointForkProvider interface {
 	ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error
 }
 
+// DelegatedCheckpointBackend lets a delegated-run backend, which exposes no SSH
+// target, create and fork native checkpoints. Its provider still implements
+// NativeCheckpointProvider and NativeCheckpointLifecycleProvider.
+type DelegatedCheckpointBackend interface {
+	DelegatedRunBackend
+	// ResolveCheckpointSource resolves a lease the current repository already
+	// claims; it never adopts or reclaims one.
+	ResolveCheckpointSource(ctx context.Context, req ResolveRequest) (LeaseTarget, error)
+	// ForkNativeCheckpoint creates and claims one lease started from the record.
+	ForkNativeCheckpoint(ctx context.Context, req DelegatedCheckpointForkRequest) (DelegatedCheckpointFork, error)
+}
+
+type DelegatedCheckpointForkRequest struct {
+	Repo          Repo
+	RequestedSlug string
+	Record        NativeCheckpointForkRecord
+	Workdir       string
+}
+
+type DelegatedCheckpointFork struct {
+	Lease   LeaseTarget
+	Workdir string
+}
+
 type NativeCheckpointForkFlagProvider interface {
 	ApplyNativeCheckpointForkFlags(cfg *Config, fs *flag.FlagSet, values any) error
 }

@@ -677,7 +677,7 @@ func TestCloudflareCreateSandboxSendsInstanceType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, _, err := backend.createSandbox(context.Background(), client, core.Repo{Name: "my-app", Root: t.TempDir()}, "")
+	created, _, err := backend.createSandbox(context.Background(), client, core.Repo{Name: "my-app", Root: t.TempDir()}, "", sandboxSource{})
 	leaseID, slug := created.LeaseID, created.Slug
 	if err != nil {
 		t.Fatal(err)

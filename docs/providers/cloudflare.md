@@ -29,6 +29,9 @@ ports; they run module source through the Cloudflare Workers runtime.
 - **Run sessions:** `run --keep --lease-output <path>` writes a reusable lease
   handle with an exact cleanup command.
 - **Sync:** archive upload/extract (gzipped tar), not rsync.
+- **Checkpoints:** native container filesystem snapshots through
+  `crabbox checkpoint create` and `checkpoint fork`; see
+  [Container snapshots](#container-snapshots).
 - **Coordinator:** never brokered — this provider always runs direct from the
   CLI against its own Worker runner, independent of any `CRABBOX_COORDINATOR`
   broker.
@@ -301,6 +304,41 @@ crabbox run \
   --shell \
   -- 'test -f go.mod && rg -n "stopped_with_code" internal/providers/cloudflare'
 ```
+
+## Container snapshots
+
+`crabbox checkpoint create --id <lease>` captures the running container's whole
+filesystem as a Cloudflare container snapshot (kind
+`cloudflare-container-snapshot`) without stopping it, and
+`crabbox checkpoint fork <checkpoint>` starts new leases from it:
+
+```sh
+crabbox warmup --provider cloudflare --type standard-1
+crabbox run --provider cloudflare --id blue-crab --shell -- 'pnpm install'
+crabbox checkpoint create --provider cloudflare --id blue-crab --name deps
+crabbox checkpoint fork chk_0123456789abcdef --count 4 --type standard-2 -- pnpm test
+```
+
+- Capture took about 8 seconds for a small change set; forks start in about
+  1–5 seconds once the snapshot has propagated. For several seconds after
+  capture, restoring on another Durable Object can fail with a platform
+  internal error; the runner retries snapshot starts up to six times, 3
+  seconds apart, within the 120-second readiness window.
+- A fork keeps the checkpoint's workdir and may pick another instance type with
+  `--type`. A fork command runs like `crabbox run` and syncs the checkout,
+  which replaces the workdir; state outside it, such as the npm and pnpm caches
+  under `/var/cache/crabbox`, carries over. Like any lease, a fork whose
+  container stops ends instead of restarting from the snapshot.
+- Snapshots belong to the runner that captured them. Forking with another
+  runner URL fails, and snapshots do not survive a new runner image: rebuild
+  checkpoints after deploying an image change.
+- Cloudflare has no snapshot lookup or delete API. `checkpoint inspect
+  --verify` reports `unverified_ref`, snapshots expire 30 days after creation
+  or their last restore, and `crabbox checkpoint delete --local-only` removes
+  the local record. Snapshot storage pricing is not published yet.
+- Checkpoints need a lease this repository already claims; `--reclaim`,
+  `--lease-id`, `--workdir`, and `--keep=false` are not supported, and there is
+  no archive checkpoint mode.
 
 ## Behavior
 

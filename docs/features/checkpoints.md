@@ -113,6 +113,7 @@ Native checkpoints use one of two provider primitives, selected with
 | Hetzner Linux (direct only) | `hetzner-snapshot` |
 | Parallels | `parallels-snapshot` |
 | Incus Linux containers (direct, root disk only) | `incus-image` (private image published from a stateless disk snapshot) |
+| Cloudflare containers | `cloudflare-container-snapshot` (full container filesystem, captured while running) |
 
 Disk snapshots are faster to create and (on AWS and GCP) boot with fresh
 per-lease SSH keys via injected user-data.
