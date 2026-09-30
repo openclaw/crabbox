@@ -340,7 +340,11 @@ fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify(call) + "\\n");
 function unexpected() { console.error("unexpected inert fixture command", tool, args); process.exit(99); }
 if (tool === "git") {
   if (args[2] === "rev-parse") console.log("a".repeat(40));
-  else if (args[2] === "archive") process.stdout.write(fs.readFileSync(${JSON.stringify(archive)}));
+  else if (args[2] === "archive") {
+    const output = args.find((arg) => arg.startsWith("--output="));
+    if (output) fs.writeFileSync(output.slice("--output=".length), fs.readFileSync(${JSON.stringify(archive)}));
+    else process.stdout.write(fs.readFileSync(${JSON.stringify(archive)}));
+  }
   else if (args[2] === "show") console.log("2026-09-01T00:00:00Z");
   else unexpected();
 } else if (tool === "sleep") {
