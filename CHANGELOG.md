@@ -6,6 +6,7 @@
 
 - Point generated `actions.workflow` at the custom `init --workflow` path. [PR 2624](https://github.com/openclaw/crabbox/pull/2624). Thanks @KrasimirKralev.
 - Print empty JSON inventories as `[]` (or `{}` for object-shaped provider lists) instead of `null` across lease lists, events, history, ready pools, cache volumes, provider sizes, ports, and admin inventories. [PR 2631](https://github.com/openclaw/crabbox/pull/2631).
+- Release a pressed macOS VNC key when `desktop type` or `desktop paste` is cancelled between its key-down and key-up; Screen Sharing otherwise kept it held after disconnect. [Issue 2627](https://github.com/openclaw/crabbox/issues/2627), [PR 2628](https://github.com/openclaw/crabbox/pull/2628). Thanks @saariuslystoned for the report.
 
 ## 0.69.0 - 2026-09-29
 
