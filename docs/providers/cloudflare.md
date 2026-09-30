@@ -177,11 +177,18 @@ they started with; new leases start on the newly deployed image. Right after a
 deploy, creation can briefly fail with `image default is not configured` until
 the new version's images are available; retry after a few seconds.
 
-Upgrading from a runner deployed before the `durable_object` policy runs the
-`cloudflare-container-v3` migration, which deletes the six per-instance-type
-classes and their Durable Object state. Stop kept leases on the old runner
-first; their local claims fail with 404 afterwards and `crabbox cleanup
---provider cloudflare` retires them.
+### Upgrading an existing runner
+
+Upgrading from a runner deployed before the `durable_object` policy is a
+one-time cutover. The `cloudflare-container-v3` migration deletes the six
+per-instance-type classes, their Durable Object state, and their running
+containers; Cloudflare does not move them to the new class.
+
+1. Stop kept leases on the old runner: `crabbox list --provider cloudflare`,
+   then `crabbox stop --provider cloudflare <lease>` for each.
+2. Deploy the new runner with `npm run deploy:cloudflare --prefix worker`.
+3. Run `crabbox cleanup --provider cloudflare`. Claims for leases you did not
+   stop now return 404, and cleanup retires them; their workspaces are gone.
 
 For a repeatable local gate, deploy, and live smoke in one step, use:
 
@@ -220,15 +227,17 @@ default Linux classes on other providers.
 ```
 
 Pick a smaller container explicitly with
-`--type lite|standard-1|standard-2|standard-3|standard-4` for smoke tests or
-quota control. `--type` accepts only these five values; anything else fails.
-The `durable_object` policy has no `basic` type; use `standard-1` instead.
+`--type standard-1|standard-2|standard-3|standard-4` for smoke tests or quota
+control; anything else fails.
 
 - `standard-1` (1/2 vCPU, 4 GiB, 8 GB disk) is the smallest type that runs the
-  bundled image. On 2026-09-30, `lite` (1/16 vCPU, 256 MiB, 2 GB disk) failed to
-  start the bundled image with a platform internal error, while Cloudflare's
-  `cloudflare/debian-trixie` image started on it; the runner reports the startup
-  error instead of waiting for readiness.
+  bundled image.
+- `--type basic` still works but prints a deprecation warning and uses
+  `standard-1`: the `durable_object` policy has no `basic` type (1/4 vCPU,
+  1 GiB, 4 GB disk), and `standard-1` costs more per second.
+- `--type lite` fails up front. On 2026-09-30, `lite` (1/16 vCPU, 256 MiB, 2 GB
+  disk) failed to start the bundled image with a platform internal error, while
+  Cloudflare's `cloudflare/debian-trixie` image started on it.
 - Prefer `standard-*` types with more disk for dependency-heavy builds or tests;
   large module downloads can exhaust the smaller disks before the command starts.
 
@@ -293,12 +302,16 @@ crabbox run \
   type is too small. This check does not remove the old checkout to free space.
 - `warmup` starts a container and leaves it alive until `crabbox stop` or the
   configured TTL/idle deadline expires. The runner sets the container
-  inactivity timeout to the platform maximum of 6 hours; the Durable Object
-  alarm enforces the lease deadline.
+  inactivity timeout to the platform maximum of 6 hours and renews it from a
+  Durable Object alarm at least hourly, including after a Durable Object
+  restart; the same alarm enforces the lease deadline.
 - The first lease after deploying a new image waits for Cloudflare to pull it,
-  which took about 2.5 minutes for the bundled image; creation, upload, and
-  exec wait up to 120 seconds for readiness and the CLI waits up to 150 seconds
-  for response headers. Retry creation if the first attempt times out.
+  which took about 2.5 minutes for the bundled image. Creation, upload, and exec
+  wait up to 300 seconds for readiness, and the CLI waits up to 330 seconds for
+  response headers. A container that fails to start is reported immediately.
+- Canceling a command (Ctrl-C, or a dropped connection) sends SIGTERM to the
+  command's process group, followed by SIGKILL after 5 seconds, even when the
+  cancel arrives before the command has started.
 - Reuse, `status`, and `stop` resolve local Crabbox claims before calling the
   runner and reject raw sandbox IDs without a matching claim.
 - Reuse and cleanup keep the captured local claim revision: another caller
@@ -322,9 +335,10 @@ crabbox run \
 - The runner stores lease metadata in Durable Object storage and sets a Durable
   Object alarm at the earlier of `--ttl` or `--idle-timeout`. Uploads and
   command execution extend the idle deadline.
-- If a lease's container stops before its deadline, `status` reports `stopped`
-  and the next upload or command starts a fresh container from the lease image
-  with an empty filesystem.
+- If a lease's container stops before its deadline, the lease ends: `status`
+  reports `stopped` with `stopReason`, and uploads and commands fail with HTTP
+  410 instead of silently continuing in an empty workspace. `crabbox cleanup
+  --provider cloudflare` retires the claim.
 - `status` reports expired or stopped metadata without retiring the local claim:
   the runner may have stored that state before native destruction failed.
   `crabbox cleanup --provider cloudflare` checks local claims and confirms or

@@ -49,6 +49,7 @@ function process(
   stdout: ReadableStream | null = null,
   stderr: ReadableStream | null = null,
   stdin: WritableStream | null = null,
+  kill: (signal?: number) => void = () => undefined,
 ): ExecProcess {
   return {
     stdin,
@@ -58,7 +59,7 @@ function process(
     isPty: false,
     exitCode: Promise.resolve(exitCode),
     output: async () => ({ stdout: new ArrayBuffer(0), stderr: new ArrayBuffer(0), exitCode: 0 }),
-    kill: () => undefined,
+    kill,
     resize: () => undefined,
   };
 }
@@ -94,7 +95,12 @@ class MockContainer {
     this.running = false;
   }
 
-  async setInactivityTimeout(): Promise<void> {}
+  readonly kills: number[] = [];
+  inactivityTimeouts = 0;
+
+  async setInactivityTimeout(): Promise<void> {
+    this.inactivityTimeouts += 1;
+  }
 
   async exec(cmd: string[], options?: ContainerExecOptions): Promise<ExecProcess> {
     this.calls.push({ cmd, options });
@@ -144,6 +150,8 @@ class MockContainer {
         script.exitCode ?? 0,
         streamOf(script.stdout ?? [], script.holdStdoutOpen),
         streamOf(script.stderr ?? []),
+        null,
+        (signal) => this.kills.push(signal ?? 0),
       );
     }
     throw new Error(`unexpected exec ${cmd.join(" ")}`);
@@ -297,7 +305,7 @@ describe("Cloudflare runner routing", () => {
     await expect(response.json()).resolves.toEqual({
       ok: true,
       runner: "cloudflare",
-      instanceTypes: ["lite", "standard-1", "standard-2", "standard-3", "standard-4"],
+      instanceTypes: ["standard-1", "standard-2", "standard-3", "standard-4"],
     });
     expect(capture.requests).toHaveLength(0);
   });
@@ -356,19 +364,28 @@ describe("Cloudflare runner routing", () => {
     });
   });
 
-  it("rejects instance types the durable_object policy does not support", async () => {
-    const capture: CapturedInternalRequest = { names: [], requests: [] };
-    const response = await worker.fetch(
-      new Request("https://runner.example/v1/sandboxes", {
-        method: "POST",
-        headers: { Authorization: "Bearer runner-token" },
-        body: JSON.stringify({ id: "cbx_test", instanceType: "basic" }),
-      }),
-      envWithCapture(capture),
-    );
+  it("rejects lite and maps basic to standard-1", async () => {
+    const create = (instanceType: string, capture: CapturedInternalRequest) =>
+      worker.fetch(
+        new Request("https://runner.example/v1/sandboxes", {
+          method: "POST",
+          headers: { Authorization: "Bearer runner-token" },
+          body: JSON.stringify({ id: "cbx_test", instanceType }),
+        }),
+        envWithCapture(capture),
+      );
 
-    expect(response.status).toBe(400);
-    expect(capture.requests).toHaveLength(0);
+    const lite: CapturedInternalRequest = { names: [], requests: [] };
+    const rejected = await create("lite", lite);
+    expect(rejected.status).toBe(400);
+    await expect(rejected.json()).resolves.toEqual({
+      error: "instanceType lite cannot start the bundled runner image; use standard-1",
+    });
+    expect(lite.requests).toHaveLength(0);
+
+    const basic: CapturedInternalRequest = { names: [], requests: [] };
+    expect((await create("basic", basic)).status).toBe(200);
+    await expect(basic.requests[0]?.json()).resolves.toMatchObject({ instanceType: "standard-1" });
   });
 
   it("does not forward edge auth headers to durable object proxy requests", async () => {
@@ -624,19 +641,61 @@ describe("Cloudflare runner lifecycle", () => {
     await eventually(async () => expect(await activeExecutions(storage)).toBeUndefined());
   });
 
-  it("returns 503 and clears active executions when a restart fails", async () => {
+  it("ends the lease instead of restarting a stopped container with an empty workspace", async () => {
     const { sandbox, storage, container } = harness();
     await createLease(sandbox, { idleTimeoutSeconds: 600 });
     await container.destroy();
-    container.failStart = true;
 
     const response = await execLease(sandbox);
 
-    expect(response.status).toBe(503);
-    await expect(response.json()).resolves.toEqual({
-      error: "container failed to start: internal error",
+    expect(response.status).toBe(410);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "container stopped; its workspace is gone",
+      state: "stopped",
     });
+    expect(container.started).toHaveLength(1);
     expect(await activeExecutions(storage)).toBeUndefined();
+    expect(storage.alarm).toBeNull();
+    const status = await sandbox.fetch(crabboxRequest("/__crabbox/status"));
+    await expect(status.json()).resolves.toMatchObject({ state: "stopped" });
+  });
+
+  it("renews the container inactivity timeout from the keep-alive alarm", async () => {
+    const { sandbox, storage, container } = harness();
+    await createLease(sandbox, { ttlSeconds: 24 * 3600 });
+    expect(storage.alarm).toBe(Date.parse("2026-05-13T19:00:00Z"));
+    const renewed = container.inactivityTimeouts;
+
+    vi.setSystemTime(new Date("2026-05-13T19:00:00Z"));
+    await sandbox.alarm();
+
+    expect(container.inactivityTimeouts).toBe(renewed + 1);
+    expect(container.destroyed).toBe(0);
+    expect(storage.alarm).toBe(Date.parse("2026-05-13T20:00:00Z"));
+  });
+
+  it("stops a command whose request is canceled before exec returns", async () => {
+    const { sandbox, container } = harness();
+    await createLease(sandbox);
+    const gate = deferred<void>();
+    container.command = { stdout: ["never\n"], exitCode: 0, gate: gate.promise };
+    const abort = new AbortController();
+
+    const response = await sandbox.fetch(
+      new Request("http://crabbox.internal/__crabbox/exec-stream", {
+        method: "POST",
+        body: JSON.stringify({ command: "sleep 30", cwd: "/workspace/repo" }),
+        signal: abort.signal,
+      }),
+    );
+    await eventually(async () =>
+      expect(container.calls.some((call) => call.cmd[0] === "timeout")).toBe(true),
+    );
+    abort.abort();
+    gate.resolve();
+
+    await eventually(async () => expect(container.kills).toEqual([15]));
+    await response.body?.cancel();
   });
 
   it("marks create startup failures stopped and destroys the container", async () => {

@@ -46,8 +46,8 @@ type createSandboxRequest struct {
 }
 
 // Create, upload, and exec respond after the runner has a started container,
-// which can take the runner's full 120s readiness window on an image cache miss.
-const cloudflareDefaultResponseHeaderTimeout = 150 * time.Second
+// which can take the runner's full 300s readiness window on an image cache miss.
+const cloudflareDefaultResponseHeaderTimeout = 330 * time.Second
 
 var cloudflareCleanupTimeout = 15 * time.Second
 

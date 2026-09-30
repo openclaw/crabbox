@@ -2,6 +2,7 @@ package cloudflare
 
 import (
 	"flag"
+	"fmt"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -20,6 +21,9 @@ func ApplyCloudflareProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any
 		normalized, err := resolveInstanceType(instanceType, cloudflareContainerInstanceTypeForClass(cfg.Class), core.FlagWasSet(fs, "type") || cfg.ServerTypeExplicit)
 		if err != nil {
 			return err
+		}
+		if isBasicInstanceType(instanceType) {
+			fmt.Fprintln(fs.Output(), basicInstanceTypeWarning)
 		}
 		cfg.ServerType = normalized
 		cfg.ServerTypeExplicit = core.FlagWasSet(fs, "type") || cfg.ServerTypeExplicit

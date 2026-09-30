@@ -936,7 +936,8 @@ Keep `CRABBOX_CLOUDFLARE_RUNNER_TOKEN` in the shell or credential manager.
 Repo config should select the runner URL and workdir, not hold bearer tokens.
 `crabbox config show` reports the runner URL, image, workdir, and token state as
 `cloudflare.auth` without printing the token. `--type` selects the Cloudflare
-instance type for each lease (`lite` or `standard-1` through `standard-4`), and
+instance type for each lease (`standard-1` through `standard-4`; `basic` maps to
+`standard-1` with a warning), and
 `image` (`CRABBOX_CLOUDFLARE_IMAGE`, `--cloudflare-image`) selects a named image
 from the runner's `containers[].images` map; update
 `worker/wrangler.cloudflare.jsonc` and redeploy to add images.
