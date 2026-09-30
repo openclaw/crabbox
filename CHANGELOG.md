@@ -11,7 +11,7 @@
 - Preserve run-history logs after an ambiguous terminal commit, confirming the exact stored finish before acknowledging recovery and retaining evidence when rereads fail. [Issue 1561](https://github.com/openclaw/crabbox/issues/1561).
 - GCP: leases failed on every machine class because C4 candidates requested an unsupported `pd-balanced` boot disk; boot disks now follow the machine family (Hyperdisk Balanced for C4, N4, and other Hyperdisk-only families), disk/machine incompatibilities fall through to the next candidate, and `--strategy image` checkpoints of Hyperdisk leases fail fast with a pointer to the default disk-snapshot strategy. [PR 2608](https://github.com/openclaw/crabbox/pull/2608).
 - Coordinator: a create that definitively failed with no possible provider resource now answers `422 provisioning_failed` with the attempt diagnostics instead of an HTTP 500 that clients replayed as an uncertain outcome. [PR 2608](https://github.com/openclaw/crabbox/pull/2608).
-- Node coordinator image: pin the current AWS RDS global CA bundle, which now includes the me-west-1 root CAs; the stale checksum broke every Node runtime image build.
+- Node coordinator image: pin the current AWS RDS global CA bundle, which now includes the me-west-1 root CAs; the stale checksum broke every Node runtime image build. [PR 2618](https://github.com/openclaw/crabbox/pull/2618).
 ### Added
 - Expose bounded coordinator admission and provider preparation step durations in lease creation events and timing JSON, including repeated-call and failure counts without provider payloads.
 
