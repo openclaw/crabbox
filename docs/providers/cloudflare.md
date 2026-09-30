@@ -314,9 +314,9 @@ crabbox run \
   type is too small. This check does not remove the old checkout to free space.
 - `warmup` starts a container and leaves it alive until `crabbox stop` or the
   configured TTL/idle deadline expires. The runner sets the container
-  inactivity timeout to the platform maximum of 6 hours and renews it from a
-  Durable Object alarm at least hourly, including after a Durable Object
-  restart; the same alarm enforces the lease deadline.
+  inactivity timeout to the platform maximum of 6 hours, restores it as soon as
+  a restarted Durable Object starts, and renews it from a Durable Object alarm
+  at least hourly; the same alarm enforces the lease deadline.
 - The first lease after deploying a new image waits for Cloudflare to pull it,
   which took about 2.5 minutes for the bundled image. Creation, upload, and exec
   wait up to 300 seconds for readiness, and the CLI waits up to 330 seconds for

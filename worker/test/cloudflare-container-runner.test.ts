@@ -170,9 +170,10 @@ type Harness = {
   container: MockContainer;
 };
 
-function harness(): Harness {
+function harness(running = false): Harness {
   const storage = new MemoryStorage();
   const container = new MockContainer();
+  container.running = running;
   let queue: Promise<void> = Promise.resolve();
   const ctx = {
     storage,
@@ -689,6 +690,15 @@ describe("Cloudflare runner lifecycle", () => {
     await expect(again.json()).resolves.toMatchObject({
       error: "container stopped; its workspace is gone",
     });
+  });
+
+  it("restores the inactivity timeout when a Durable Object restarts with a running container", async () => {
+    const restarted = harness(true);
+    await eventually(async () => expect(restarted.container.inactivityTimeouts).toBe(1));
+
+    const fresh = harness();
+    await Promise.resolve();
+    expect(fresh.container.inactivityTimeouts).toBe(0);
   });
 
   it("renews the container inactivity timeout from the keep-alive alarm", async () => {

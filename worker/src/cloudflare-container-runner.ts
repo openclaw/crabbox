@@ -63,6 +63,17 @@ type ExecRequest = {
 };
 
 export class CrabboxSandbox extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    // A restarted Durable Object drops the container's inactivity timeout;
+    // restore it before any request or alarm runs.
+    void ctx.blockConcurrencyWhile(async () => {
+      if (ctx.container?.running) {
+        await ctx.container.setInactivityTimeout(containerInactivityTimeoutMs);
+      }
+    });
+  }
+
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/__crabbox/create" && request.method === "POST") {
