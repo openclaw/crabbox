@@ -1,28 +1,44 @@
 # Changelog
 
-## Unreleased
+## 0.69.0 - 2026-09-29
 
-- Reuse exact coordinator GCP firewall verifications for five minutes with policy/credential isolation and error invalidation, and separate Compute request timings from token acquisition.
-- Avoid full Hetzner SSH-key inventory reads for fresh lease keys and cache successful coordinator AWS Spot/Hetzner price estimates for five minutes without blocking admission on quote failures.
-- Skip redundant brokered AWS SSH ingress mutations and cache account/region-scoped VPC discovery while preserving fresh policy checks and legacy world-rule cleanup.
-- Skip unchanged brokered GCP firewall updates and reuse coordinator OAuth tokens until their existing refresh margin, preserving drift reconciliation and credential isolation.
+### Highlights
 
-- Verify retained Actions workspace identity before run, sync, cache warm, or editor handoff; preserve custom paths and explicit cross-repository hydration with claim-bound consent. [PR 2564](https://github.com/openclaw/crabbox/pull/2564). Thanks @vincentkoc.
-### Fixed
-- Stop: best-effort guest cleanup (Actions hydration stop marker, egress client cleanup) now connects with the lease's own key and pinned host key instead of the default key and global known_hosts, so coordinator leases no longer print two exit-255 warnings and skip cleanup on every stop. [PR 2617](https://github.com/openclaw/crabbox/pull/2617).
-- Preserve definite provider rejection diagnostics on coordinator create replays and stop client recovery without cancellation; keep unknown public AWS allocation outcomes uncertain.
-- Preserve run-history logs after an ambiguous terminal commit, confirming the exact stored finish before acknowledging recovery and retaining evidence when rereads fail. [Issue 1561](https://github.com/openclaw/crabbox/issues/1561).
-- GCP: leases failed on every machine class because C4 candidates requested an unsupported `pd-balanced` boot disk; boot disks now follow the machine family (Hyperdisk Balanced for C4, N4, and other Hyperdisk-only families), disk/machine incompatibilities fall through to the next candidate, and `--strategy image` checkpoints of Hyperdisk leases fail fast with a pointer to the default disk-snapshot strategy. [PR 2608](https://github.com/openclaw/crabbox/pull/2608).
-- Coordinator: a create that definitively failed with no possible provider resource now answers `422 provisioning_failed` with the attempt diagnostics instead of an HTTP 500 that clients replayed as an uncertain outcome. [PR 2608](https://github.com/openclaw/crabbox/pull/2608).
-- Node coordinator image: pin the current AWS RDS global CA bundle, which now includes the me-west-1 root CAs; the stale checksum broke every Node runtime image build. [PR 2618](https://github.com/openclaw/crabbox/pull/2618).
+- **Keep commands and files in the intended repository.** Retained Actions workspaces must prove their Git root and origin before reuse, closing cross-repository command execution and file transfer even with `--no-sync --no-hydrate`. Explicit cross-repository hydration keeps claim-bound consent. [PR 2605](https://github.com/openclaw/crabbox/pull/2605), [PR 2564](https://github.com/openclaw/crabbox/pull/2564). Thanks @vincentkoc.
+- **Spend less time preparing brokered cloud leases.** GCP skips unchanged firewall updates, shares OAuth tokens, and reuses exact firewall checks for five minutes; AWS skips redundant SSH ingress mutations and caches VPC discovery. Fresh Hetzner lease keys avoid full key inventories, and successful AWS Spot/Hetzner price quotes are cached for five minutes. [PR 2610](https://github.com/openclaw/crabbox/pull/2610), [PR 2614](https://github.com/openclaw/crabbox/pull/2614), [PR 2609](https://github.com/openclaw/crabbox/pull/2609), [PR 2611](https://github.com/openclaw/crabbox/pull/2611).
+- **Get clear failures without losing cleanup or logs.** Definite capacity rejections stop recovery and cancellation, ambiguous AWS allocations retain cleanup custody, completed runs keep logs after lost commit acknowledgements, and coordinator stop cleanup uses the lease's SSH identity. [PR 2616](https://github.com/openclaw/crabbox/pull/2616), [PR 2604](https://github.com/openclaw/crabbox/pull/2604), [Issue 1561](https://github.com/openclaw/crabbox/issues/1561), [PR 2617](https://github.com/openclaw/crabbox/pull/2617).
+- **Start Parallels macOS guests more reliably.** Apple silicon defaults to full clones unless a snapshot selects linked mode, and guest preparation waits for a working Tools execution session within the startup deadline. Linked-clone warnings and Local Network diagnostics explain common failure paths. [PR 2606](https://github.com/openclaw/crabbox/pull/2606), [PR 2615](https://github.com/openclaw/crabbox/pull/2615), [Issue 2398](https://github.com/openclaw/crabbox/issues/2398), [Issue 2612](https://github.com/openclaw/crabbox/issues/2612). Thanks @saariuslystoned.
+- **See where lease creation time goes.** Lease events and timing JSON now expose bounded coordinator admission and provider-preparation step durations, repeated calls, and failures without provider payloads. [PR 2607](https://github.com/openclaw/crabbox/pull/2607).
+- **Use compatible GCP boot disks and build the Node coordinator again.** GCP chooses the boot disk type for each machine family and falls back on disk incompatibility; the Node image pins the updated AWS RDS CA bundle, including me-west-1 roots. [PR 2608](https://github.com/openclaw/crabbox/pull/2608), [PR 2618](https://github.com/openclaw/crabbox/pull/2618).
+
+### Upgrade notes
+
+- Parallels macOS guests on Apple silicon now default to `full` clones when no snapshot is selected. To keep linked cloning, use `--parallels-clone-mode linked` or `parallels.cloneMode: linked`; an existing snapshot name or ID also preserves the linked default. Full clones use the source VM's current state and require snapshot selectors to be cleared. [PR 2606](https://github.com/openclaw/crabbox/pull/2606), [PR 2615](https://github.com/openclaw/crabbox/pull/2615), [Issue 2398](https://github.com/openclaw/crabbox/issues/2398), [Issue 2612](https://github.com/openclaw/crabbox/issues/2612). Thanks @saariuslystoned.
+- The coordinator caches exact GCP managed-firewall verification for up to five minutes. External firewall drift can go unnoticed during that window; the next uncached create reconciles it. Policy changes, credential rotation, and relevant provider errors invalidate reuse. [PR 2614](https://github.com/openclaw/crabbox/pull/2614).
+- Definite coordinator create failures with no possible provider resource return `422 provisioning_failed`, including matching bound replays. Clients should treat that exact status/code as terminal; ambiguous allocation outcomes retain recovery and cleanup custody. [PR 2608](https://github.com/openclaw/crabbox/pull/2608), [PR 2616](https://github.com/openclaw/crabbox/pull/2616).
+
 ### Added
-- Expose bounded coordinator admission and provider preparation step durations in lease creation events and timing JSON, including repeated-call and failure counts without provider payloads.
+
+- Expose bounded coordinator admission and provider preparation step durations in lease creation events and timing JSON, including repeated-call and failure counts without provider payloads. [PR 2607](https://github.com/openclaw/crabbox/pull/2607).
+
+### Changed
+
+- Reuse exact coordinator GCP firewall verifications for five minutes with policy/credential isolation and error invalidation, and separate Compute request timings from token acquisition. [PR 2614](https://github.com/openclaw/crabbox/pull/2614).
+- Avoid full Hetzner SSH-key inventory reads for fresh lease keys and cache successful coordinator AWS Spot/Hetzner price estimates for five minutes without blocking admission on quote failures. [PR 2611](https://github.com/openclaw/crabbox/pull/2611).
+- Skip redundant brokered AWS SSH ingress mutations and cache account/region-scoped VPC discovery while preserving fresh policy checks and legacy world-rule cleanup. [PR 2609](https://github.com/openclaw/crabbox/pull/2609).
+- Skip unchanged brokered GCP firewall updates and reuse coordinator OAuth tokens until their existing refresh margin, preserving drift reconciliation and credential isolation. [PR 2610](https://github.com/openclaw/crabbox/pull/2610).
 
 ### Fixes
 
-- Bound Parallels guest-exec readiness and macOS preparation retries, preserve linked clones for unset mode with snapshot selectors, diagnose macOS host network access, and clarify acquisition cleanup. [Issue 2612](https://github.com/openclaw/crabbox/issues/2612). Thanks @saariuslystoned.
-
-- Default Parallels macOS guests on Apple silicon to full clones, warn before explicitly selected linked clones about observed IP/Tools failures, and clarify snapshot-clearing guidance while retaining linked defaults elsewhere. [PR 2606](https://github.com/openclaw/crabbox/pull/2606), [Issue 2398](https://github.com/openclaw/crabbox/issues/2398). Thanks @saariuslystoned.
+- Verify retained Actions workspace identity before run, sync, cache warm, or editor handoff; preserve custom paths and explicit cross-repository hydration with claim-bound consent. [PR 2605](https://github.com/openclaw/crabbox/pull/2605), [PR 2564](https://github.com/openclaw/crabbox/pull/2564). Thanks @vincentkoc.
+- Prepare the lease's SSH key and authoritative host-key pin before best-effort coordinator stop cleanup, so the Actions hydration stop marker and egress client cleanup no longer fail host verification; preparation failures warn without blocking provider release. [PR 2617](https://github.com/openclaw/crabbox/pull/2617).
+- Preserve definite provider rejection diagnostics on coordinator create replays and stop client recovery without cancellation; ambiguous public AWS allocations retain cleanup custody and cannot fall back to another candidate or region. [PR 2616](https://github.com/openclaw/crabbox/pull/2616).
+- Preserve run-history logs after an ambiguous terminal commit, confirming the exact stored finish before acknowledging recovery and retaining evidence when rereads fail. [PR 2604](https://github.com/openclaw/crabbox/pull/2604), [Issue 1561](https://github.com/openclaw/crabbox/issues/1561).
+- Select GCP boot disks by machine family, using Hyperdisk Balanced for Hyperdisk-only families and `pd-balanced` elsewhere; fall back on disk/machine incompatibilities and reject image-strategy checkpoints of Hyperdisk leases with guidance to use disk snapshots. [PR 2608](https://github.com/openclaw/crabbox/pull/2608).
+- Return `422 provisioning_failed` with attempt diagnostics when a coordinator create definitively failed with no possible provider resource, instead of an HTTP 500 that clients replayed as uncertain. [PR 2608](https://github.com/openclaw/crabbox/pull/2608).
+- Pin the current AWS RDS global CA bundle in the Node coordinator image, including the me-west-1 root CAs, fixing image builds broken by the stale checksum. [PR 2618](https://github.com/openclaw/crabbox/pull/2618).
+- Bound Parallels guest-exec readiness and macOS preparation retries, preserve linked clones for unset mode with snapshot selectors, and diagnose macOS host network access. Clarify the existing retention contract: `--keep-on-failure` starts after acquisition; generated-ID acquisition failures roll back, while fixed IDs retain their replay/cleanup contract. [PR 2615](https://github.com/openclaw/crabbox/pull/2615), [Issue 2612](https://github.com/openclaw/crabbox/issues/2612). Thanks @saariuslystoned.
+- Default Parallels macOS guests on Apple silicon to full clones without snapshot selectors, warn before linked macOS clones about observed IP/Tools failures, and clarify snapshot-clearing guidance while retaining linked defaults elsewhere. [PR 2606](https://github.com/openclaw/crabbox/pull/2606), [PR 2615](https://github.com/openclaw/crabbox/pull/2615), [Issue 2398](https://github.com/openclaw/crabbox/issues/2398). Thanks @saariuslystoned.
 - Return precise diagnostics and `native_unsupported` JSON receipts when checkpoint capability resolution refuses capture, and reject invalid modes before lease resolution. [PR 2613](https://github.com/openclaw/crabbox/pull/2613).
 
 ## 0.68.0 - 2026-09-28
