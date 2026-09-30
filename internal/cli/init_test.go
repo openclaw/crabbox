@@ -218,6 +218,38 @@ func TestInitProjectWritesRepeatedSkillPaths(t *testing.T) {
 	}
 }
 
+func TestInitProjectPointsActionsAtCustomWorkflowPath(t *testing.T) {
+	dir := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldwd)
+	})
+
+	workflowPath := ".github/workflows/crabbox-test.yml"
+	app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+	if err := app.Run(context.Background(), []string{"init", "--workflow", "./" + workflowPath}); err != nil {
+		t.Fatalf("init --workflow error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, workflowPath)); err != nil {
+		t.Fatalf("expected %s: %v", workflowPath, err)
+	}
+	fileCfg, err := readFileConfig(filepath.Join(dir, ".crabbox.yaml"))
+	if err != nil {
+		t.Fatalf("generated config should parse: %v", err)
+	}
+	loaded := baseConfig()
+	applyFileConfig(&loaded, fileCfg)
+	if loaded.Actions.Workflow != workflowPath {
+		t.Fatalf("actions.workflow=%q, want %q", loaded.Actions.Workflow, workflowPath)
+	}
+}
+
 func TestInitProjectPreflightsEveryTargetBeforeWriting(t *testing.T) {
 	dir := t.TempDir()
 	oldwd, err := os.Getwd()

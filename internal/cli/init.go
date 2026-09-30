@@ -30,9 +30,14 @@ func (a App) initProject(_ context.Context, args []string) error {
 	if *detect {
 		detected = detectInitProject(repo.Root)
 	}
+	workflowPath := filepath.Join(repo.Root, *workflow)
+	workflowRel, err := filepath.Rel(repo.Root, workflowPath)
+	if err != nil {
+		return Exit(2, "resolve --workflow %s: %v", *workflow, err)
+	}
 	files := []initGeneratedFile{
-		{Path: filepath.Join(repo.Root, *config), Content: projectConfigTemplate(repo.Name, detected)},
-		{Path: filepath.Join(repo.Root, *workflow), Content: workflowTemplate()},
+		{Path: filepath.Join(repo.Root, *config), Content: projectConfigTemplate(repo.Name, filepath.ToSlash(workflowRel), detected)},
+		{Path: workflowPath, Content: workflowTemplate()},
 	}
 	for _, skillPath := range skillPaths {
 		clean, err := normalizeInitSkillPath(skillPath)
@@ -151,7 +156,7 @@ type initProjectDetection struct {
 	EnvAllow       []string
 }
 
-func projectConfigTemplate(repoName string, detected initProjectDetection) string {
+func projectConfigTemplate(repoName, workflow string, detected initProjectDetection) string {
 	syncExcludes := appendUniqueStrings([]string{
 		".cache",
 		".turbo",
@@ -168,7 +173,7 @@ capacity:
   strategy: most-available
   fallback: on-demand-after-120s
 actions:
-  workflow: .github/workflows/crabbox.yml
+  workflow: %s
   job: hydrate
   runnerLabels:
     - crabbox
@@ -186,7 +191,7 @@ sync:
   failFiles: 150000
   failBytes: 21474836480
   exclude:
-`, repoName)
+`, repoName, yamlScalar(workflow))
 	writeYAMLList(&b, syncExcludes, 4)
 	if len(detected.PreflightTools) > 0 {
 		b.WriteString("run:\n")
