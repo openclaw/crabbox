@@ -96,6 +96,13 @@ func TestCloudflareCheckpointCreateAndForkThroughCLI(t *testing.T) {
 	if err := app.Run(t.Context(), []string{"checkpoint", "create", "--provider", "cloudflare", "--id", source.LeaseID, "--reclaim"}); err == nil || !strings.Contains(err.Error(), "--reclaim is not supported") {
 		t.Fatalf("create --reclaim error = %v", err)
 	}
+	for _, args := range [][]string{{"--strategy", "image"}, {"--mode", "image"}} {
+		err := app.Run(t.Context(), append([]string{"checkpoint", "create", "--provider", "cloudflare", "--id", source.LeaseID}, args...))
+		if err == nil || !strings.Contains(err.Error(), "unsupported") || len(runner.snapshots) != 0 {
+			t.Fatalf("create %v error = %v snapshots=%v", args, err, runner.snapshots)
+		}
+	}
+	stdout.Reset()
 	if err := app.Run(t.Context(), []string{"checkpoint", "create", "--provider", "cloudflare", "--id", source.LeaseID, "--json"}); err != nil {
 		t.Fatalf("create: %v %s", err, stderr.String())
 	}

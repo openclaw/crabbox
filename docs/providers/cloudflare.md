@@ -323,7 +323,7 @@ crabbox checkpoint fork chk_0123456789abcdef --count 4 --type standard-2 -- pnpm
   1–5 seconds once the snapshot has propagated. For several seconds after
   capture, restoring on another Durable Object can fail with a platform
   internal error; the runner retries snapshot starts up to six times, 3
-  seconds apart, within the 120-second readiness window.
+  seconds apart, within the 300-second readiness window.
 - A fork keeps the checkpoint's workdir and may pick another instance type with
   `--type`. A fork command runs like `crabbox run` and syncs the checkout,
   which replaces the workdir; state outside it, such as the npm and pnpm caches
@@ -336,6 +336,11 @@ crabbox checkpoint fork chk_0123456789abcdef --count 4 --type standard-2 -- pnpm
   --verify` reports `unverified_ref`, snapshots expire 30 days after creation
   or their last restore, and `crabbox checkpoint delete --local-only` removes
   the local record. Snapshot storage pricing is not published yet.
+- A snapshot holds everything on the container's filesystem, including tokens
+  or credentials written there, until it expires. Keep secrets out of the
+  filesystem before capture, or rotate them afterwards.
+- `--strategy image` and `--mode image` are rejected; a container snapshot is a
+  filesystem snapshot.
 - Checkpoints need a lease this repository already claims; `--reclaim`,
   `--lease-id`, `--workdir`, and `--keep=false` are not supported, and there is
   no archive checkpoint mode.

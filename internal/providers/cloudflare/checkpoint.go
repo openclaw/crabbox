@@ -26,6 +26,10 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	if req.Server.CloudID == "" {
 		return core.NativeCheckpointCapability{}, false
 	}
+	// A container snapshot is a filesystem snapshot; there is no image strategy.
+	if strings.EqualFold(strings.TrimSpace(req.Strategy), core.CheckpointStrategyImage) {
+		return core.NativeCheckpointCapability{}, false
+	}
 	return core.NativeCheckpointCapability{Kind: core.CheckpointKindCloudflare, Direct: true}, true
 }
 
