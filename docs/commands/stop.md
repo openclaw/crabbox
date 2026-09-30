@@ -65,6 +65,11 @@ release; `--force` still requires successful inspection. Canceling the command
 does not start a release fallback. Cleanup must still be confirmed before local
 claim and SSH artifacts are removed.
 
+Coordinator guest cleanup uses the same stored lease SSH key and authoritative
+host-key pin as `ssh`, `connect`, and `run`. If the lease key is absent locally,
+cleanup attempts the configured identity with the pinned host key. SSH
+preparation or connection failures warn and do not block provider release.
+
 If a fixed-ID create was admitted by the coordinator but never allocated a
 machine, `stop` cancels that intent and confirms the cancellation even when
 the preliminary lease lookup returns 404. This includes a create rejected by

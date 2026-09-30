@@ -146,10 +146,7 @@ func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease Coordina
 		// platform metadata for local cleanup without recreating SSH trust.
 		target = SSHTarget{TargetOS: target.TargetOS, WindowsMode: target.WindowsMode}
 	} else if !releaseOnly {
-		if err := useCoordinatorStoredSSHKey(&target, server.Provider, leaseID); err != nil {
-			return LeaseTarget{}, err
-		}
-		if err := prepareLeaseSSHTrust(&target, leaseID); err != nil {
+		if err := prepareCoordinatorLeaseSSH(&target, server.Provider, leaseID); err != nil {
 			return LeaseTarget{}, err
 		}
 	}
@@ -163,6 +160,13 @@ func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease Coordina
 		result.providerRelease = &leaseReleaseConfirmation{backend: b, leaseID: leaseID}
 	}
 	return result, nil
+}
+
+func prepareCoordinatorLeaseSSH(target *SSHTarget, provider, leaseID string) error {
+	if err := useCoordinatorStoredSSHKey(target, provider, leaseID); err != nil {
+		return err
+	}
+	return prepareLeaseSSHTrust(target, leaseID)
 }
 
 func useCoordinatorStoredSSHKey(target *SSHTarget, provider, leaseID string) error {
@@ -1208,17 +1212,23 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 				return finish()
 			}
 			if fresh.SSH.Host != "" {
-				// Route probes are guest cleanup too; they must not consume the
-				// provider-release budget or replace a tailnet route with the public host.
-				cleanupCtx, cancel := context.WithTimeout(ctx, remoteConnectionCleanupTimeout)
-				resolved, routeErr := resolveNetworkTarget(cleanupCtx, b.cfg, fresh.Server, fresh.SSH)
-				if routeErr != nil {
-					fmt.Fprintf(b.rt.Stderr, "warning: could not resolve guest network before release: %v\n", routeErr)
+				// Release-only resolution defers SSH preparation so local trust
+				// failures cannot block deletion. Prepare the freshly fenced target.
+				if err := prepareCoordinatorLeaseSSH(&fresh.SSH, fresh.Server.Provider, fresh.LeaseID); err != nil {
+					fmt.Fprintf(b.rt.Stderr, "warning: could not prepare guest SSH before release for %s: %v\n", fresh.LeaseID, err)
 				} else {
-					fresh.SSH = resolved.Target
-					req.GuardedRemoteCleanup(cleanupCtx, fresh)
+					// Route probes are guest cleanup too; they must not consume the
+					// provider-release budget or replace a tailnet route with the public host.
+					cleanupCtx, cancel := context.WithTimeout(ctx, remoteConnectionCleanupTimeout)
+					resolved, routeErr := resolveNetworkTarget(cleanupCtx, b.cfg, fresh.Server, fresh.SSH)
+					if routeErr != nil {
+						fmt.Fprintf(b.rt.Stderr, "warning: could not resolve guest network before release: %v\n", routeErr)
+					} else {
+						fresh.SSH = resolved.Target
+						req.GuardedRemoteCleanup(cleanupCtx, fresh)
+					}
+					cancel()
 				}
-				cancel()
 			}
 		}
 	}
