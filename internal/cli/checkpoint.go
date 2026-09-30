@@ -198,7 +198,12 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	createKind := checkpointCreateMode(*mode, *strategy, cfg, server, target, *recipeOnly)
+	createMode := *mode
+	if delegatedSource && isAutoCheckpointMode(createMode) {
+		// Delegated backends have no archive path, so auto means native.
+		createMode = "native"
+	}
+	createKind := checkpointCreateMode(createMode, *strategy, cfg, server, target, *recipeOnly)
 	if createKind == "unsupported" {
 		message := checkpointNativeUnsupportedMessage(*mode, *strategy, flagWasSet(fs, "strategy"), cfg, server, target)
 		failure := Exit(2, "%s", message)
@@ -1790,6 +1795,11 @@ func (a App) checkpointForkDelegatedOnce(ctx context.Context, cfg Config, backen
 		fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s image=%s workdir=%s\n", record.ID, leaseID, blank(slug, "-"), record.nativeResourceID(), blank(fork.Workdir, "-"))
 	}
 	return a.runCheckpointForkCommand(ctx, leaseID, slug, runOpts)
+}
+
+func isAutoCheckpointMode(mode string) bool {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	return mode == "" || mode == "auto"
 }
 
 // delegatedCheckpointBackend reports whether cfg selects a delegated-run backend
