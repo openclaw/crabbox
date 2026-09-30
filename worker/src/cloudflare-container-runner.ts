@@ -783,6 +783,8 @@ function internalRequest(path: string, source?: Request, init: RequestInit = {})
     next.body = body;
     if (body instanceof ReadableStream) next.duplex = "half";
   }
+  // Forward caller aborts so the Durable Object can stop a pending command.
+  if (source) next.signal = source.signal;
   return new Request(`http://crabbox.internal${path}`, next);
 }
 
