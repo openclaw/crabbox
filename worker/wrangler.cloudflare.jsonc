@@ -2,73 +2,24 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "crabbox-cloudflare-container-runner",
   "main": "src/cloudflare-container-runner.ts",
-  "compatibility_date": "2026-05-13",
+  "compatibility_date": "2026-09-29",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "preview_urls": false,
   "containers": [
     {
-      "class_name": "SandboxLite",
-      "image": "./cloudflare-container.Dockerfile",
-      "instance_type": "lite",
-      "max_instances": 4,
-    },
-    {
-      "class_name": "SandboxBasic",
-      "image": "./cloudflare-container.Dockerfile",
-      "instance_type": "basic",
-      "max_instances": 4,
-    },
-    {
-      "class_name": "SandboxStandard1",
-      "image": "./cloudflare-container.Dockerfile",
-      "instance_type": "standard-1",
-      "max_instances": 4,
-    },
-    {
-      "class_name": "SandboxStandard2",
-      "image": "./cloudflare-container.Dockerfile",
-      "instance_type": "standard-2",
-      "max_instances": 4,
-    },
-    {
-      "class_name": "SandboxStandard3",
-      "image": "./cloudflare-container.Dockerfile",
-      "instance_type": "standard-3",
-      "max_instances": 4,
-    },
-    {
-      "class_name": "Sandbox",
-      "image": "./cloudflare-container.Dockerfile",
-      "instance_type": "standard-4",
-      "max_instances": 4,
+      "class_name": "CrabboxSandbox",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "default": { "dockerfile": "./cloudflare-container.Dockerfile" },
+      },
     },
   ],
   "durable_objects": {
     "bindings": [
       {
-        "name": "Sandbox",
-        "class_name": "Sandbox",
-      },
-      {
-        "name": "SandboxLite",
-        "class_name": "SandboxLite",
-      },
-      {
-        "name": "SandboxBasic",
-        "class_name": "SandboxBasic",
-      },
-      {
-        "name": "SandboxStandard1",
-        "class_name": "SandboxStandard1",
-      },
-      {
-        "name": "SandboxStandard2",
-        "class_name": "SandboxStandard2",
-      },
-      {
-        "name": "SandboxStandard3",
-        "class_name": "SandboxStandard3",
+        "name": "CrabboxSandbox",
+        "class_name": "CrabboxSandbox",
       },
     ],
   },
@@ -87,8 +38,17 @@
         "SandboxStandard3",
       ],
     },
+    {
+      "tag": "cloudflare-container-v3",
+      "new_sqlite_classes": ["CrabboxSandbox"],
+      "deleted_classes": [
+        "Sandbox",
+        "SandboxLite",
+        "SandboxBasic",
+        "SandboxStandard1",
+        "SandboxStandard2",
+        "SandboxStandard3",
+      ],
+    },
   ],
-  "vars": {
-    "SANDBOX_TRANSPORT": "rpc",
-  },
 }

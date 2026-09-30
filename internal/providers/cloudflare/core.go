@@ -17,7 +17,7 @@ func resolveInstanceType(candidate, fallback string, explicit bool) (string, err
 }
 
 func containerInstanceTypes() []string {
-	return []string{"lite", "basic", "standard-1", "standard-2", "standard-3", "standard-4"}
+	return []string{"lite", "standard-1", "standard-2", "standard-3", "standard-4"}
 }
 
 func normalizeContainerInstanceType(value string) (string, bool) {

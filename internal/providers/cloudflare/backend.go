@@ -326,7 +326,7 @@ func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflar
 	labels := map[string]string{"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": slug, "repo": repo.Name, "instance_type": client.instanceType}
 	sandbox, err := client.createSandbox(ctx, createSandboxRequest{
 		ID: leaseID, LeaseID: leaseID, Slug: slug, Repo: repo.Name, Workdir: workdir,
-		InstanceType: client.instanceType, TTLSeconds: durationSecondsCeil(b.cfg.TTL), IdleTimeoutSeconds: durationSecondsCeil(b.cfg.IdleTimeout), Labels: labels,
+		InstanceType: client.instanceType, Image: strings.TrimSpace(b.cfg.Cloudflare.Image), TTLSeconds: durationSecondsCeil(b.cfg.TTL), IdleTimeoutSeconds: durationSecondsCeil(b.cfg.IdleTimeout), Labels: labels,
 	})
 	if err != nil {
 		return core.LeaseClaim{}, cloudflareContainer{}, err
@@ -455,7 +455,7 @@ func claimToServer(claim core.LeaseClaim, state string) core.Server {
 
 func cloudflareReady(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "ready", "started", "active", "healthy":
+	case "ready", "started", "active", "healthy", "running":
 		return true
 	default:
 		return false

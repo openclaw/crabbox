@@ -39,12 +39,15 @@ type createSandboxRequest struct {
 	Repo               string            `json:"repo,omitempty"`
 	Workdir            string            `json:"workdir"`
 	InstanceType       string            `json:"instanceType,omitempty"`
+	Image              string            `json:"image,omitempty"`
 	TTLSeconds         int               `json:"ttlSeconds,omitempty"`
 	IdleTimeoutSeconds int               `json:"idleTimeoutSeconds,omitempty"`
 	Labels             map[string]string `json:"labels,omitempty"`
 }
 
-const cloudflareDefaultResponseHeaderTimeout = 30 * time.Second
+// Create, upload, and exec respond after the runner has a started container,
+// which can take the runner's full 120s readiness window on an image cache miss.
+const cloudflareDefaultResponseHeaderTimeout = 150 * time.Second
 
 var cloudflareCleanupTimeout = 15 * time.Second
 

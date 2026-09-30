@@ -927,17 +927,19 @@ workdir only; tokens do not belong in YAML or command-line flags.
 provider: cloudflare
 cloudflare:
   apiUrl: https://crabbox-cloudflare-container-runner.example.workers.dev
+  image: default
   workdir: /workspace/crabbox
 ```
 
 Keep `CRABBOX_CLOUDFLARE_RUNNER_TOKEN` in the shell or credential manager.
 `CRABBOX_CLOUDFLARE_RUNNER_URL` can supply the runner URL from the environment.
 Repo config should select the runner URL and workdir, not hold bearer tokens.
-`crabbox config show` reports the runner URL, workdir, and token state as
-`cloudflare.auth` without printing the token. `--type` selects one of the
-instance types wired into the deployed runner; update
-`worker/wrangler.cloudflare.jsonc` and redeploy when changing the available
-`instance_type` bindings or `max_instances`.
+`crabbox config show` reports the runner URL, image, workdir, and token state as
+`cloudflare.auth` without printing the token. `--type` selects the Cloudflare
+instance type for each lease (`lite` or `standard-1` through `standard-4`), and
+`image` (`CRABBOX_CLOUDFLARE_IMAGE`, `--cloudflare-image`) selects a named image
+from the runner's `containers[].images` map; update
+`worker/wrangler.cloudflare.jsonc` and redeploy to add images.
 
 Use `cloudflare-dynamic-workers` instead when the target is Worker-runtime module
 source rather than Linux command execution.
