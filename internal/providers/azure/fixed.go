@@ -166,6 +166,9 @@ func (b *azureLeaseBackend) resolveFixed(ctx context.Context, client azureClient
 	if !exists || claim.FixedCreateIntent == nil {
 		return core.LeaseTarget{}, false, nil
 	}
+	if claim.RecoveryHold != nil {
+		return core.LeaseTarget{}, true, core.Exit(4, "recovery_required: Azure lease %s is held for salvage", claim.LeaseID)
+	}
 	if claim.ProviderScope != client.LeaseClaimScope() {
 		return core.LeaseTarget{}, true, core.Exit(4, "Azure fixed lease account scope changed")
 	}

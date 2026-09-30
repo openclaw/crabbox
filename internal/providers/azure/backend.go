@@ -242,6 +242,9 @@ func (b *azureLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLe
 	if err != nil {
 		return err
 	}
+	if claim.RecoveryHold != nil {
+		return core.Exit(4, "recovery_required: Azure lease %s is held for salvage", claim.LeaseID)
+	}
 	if fixedAzureLeaseKind.IsFixedClaim(claim) {
 		err := core.DeleteFixedResource(ctx, fixedAzureLeaseKind, claim, core.FixedLeaseOperations[core.Server]{
 			ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[core.Server], error) {
@@ -381,6 +384,9 @@ func (b *azureLeaseBackend) resumeAzureCleanupClaims(ctx context.Context, client
 		return err
 	}
 	for _, claim := range claims {
+		if claim.RecoveryHold != nil {
+			continue
+		}
 		if claim.Provider != "azure" || claim.ProviderScope != client.LeaseClaimScope() || seen[claim.CloudID] || !core.HasAzureCleanupBinding(claim.Labels) {
 			continue
 		}

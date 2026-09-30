@@ -18,6 +18,7 @@ import (
 )
 
 type leaseClaim struct {
+	RecoveryHold      *LeaseRecoveryHold        `json:"recoveryHold,omitempty"`
 	ImageEvidence     *ImageEvidence            `json:"imageEvidence,omitempty"`
 	LeaseID           string                    `json:"leaseID"`
 	Revision          string                    `json:"revision,omitempty"`
@@ -939,6 +940,11 @@ func UpdateLeaseClaimLabelsIfUnchangedAfter(leaseID string, expected leaseClaim,
 }
 
 func cloneLeaseClaim(claim leaseClaim) leaseClaim {
+	if claim.RecoveryHold != nil {
+		hold := *claim.RecoveryHold
+		hold.Resources = append([]LeaseHeldResource(nil), hold.Resources...)
+		claim.RecoveryHold = &hold
+	}
 	claim.ImageEvidence = CloneImageEvidence(claim.ImageEvidence)
 	if claim.CheckpointCapture != nil {
 		binding := *claim.CheckpointCapture

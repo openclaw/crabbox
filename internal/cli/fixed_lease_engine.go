@@ -418,6 +418,9 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 		return fmt.Errorf("fixed lease engine requires observation and exact deletion")
 	}
 	return WithDurableLeaseClaimLockContext(ctx, expected.LeaseID, func(claim *LeaseClaim, exists bool, persist func() error) error {
+		if claim.RecoveryHold != nil {
+			return Exit(4, "recovery_required: lease %s is held for salvage", claim.LeaseID)
+		}
 		if !exists || !reflect.DeepEqual(*claim, expected) {
 			return Exit(4, "lease_id_conflict: fixed claim changed before release; retry")
 		}

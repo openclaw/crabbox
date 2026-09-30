@@ -134,6 +134,69 @@ func TestAzureOrphanCleanupAbsent(t *testing.T) {
 	}
 }
 
+func TestAzureFailedLeaseHoldRetainsCompanionsWithoutMutation(t *testing.T) {
+	f := newAzureOrphanFixture(t)
+	receipt, err := f.client.InspectFailedLeaseHold(t.Context(), f.server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Schema != "crabbox.lease-hold.v1" || receipt.LeaseID != f.server.Labels["lease"] || receipt.Status != "held" || receipt.UnacceptedChanges != "unknown" {
+		t.Fatalf("unexpected hold receipt: %+v", receipt)
+	}
+	if len(receipt.Resources) != 5 {
+		t.Fatalf("resource inventory: %+v", receipt.Resources)
+	}
+	for _, resource := range receipt.Resources {
+		if resource.Kind == "vm" {
+			if resource.State != "absent" {
+				t.Fatal("VM absence was not proved")
+			}
+		} else if resource.State != "retained" || resource.ImmutableID == "" {
+			t.Fatalf("companion was not retained: %+v", resource)
+		}
+	}
+	if len(f.deletes) != 0 || len(f.objects) != 4 {
+		t.Fatal("hold changed Azure resources")
+	}
+}
+
+func TestAzureFailedLeaseHoldRefusesUnprovenOwnership(t *testing.T) {
+	for _, failure := range []string{"foreign tags", "fixed attempt", "attached disk", "public IP NAT", "read denied", "VM reappears"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newAzureOrphanFixture(t)
+			disk := f.objects[f.server.CloudID+"-osdisk"]
+			switch failure {
+			case "foreign tags":
+				disk["tags"] = map[string]string{}
+			case "fixed attempt":
+				disk["tags"].(map[string]string)[azureLabelToTagKey("fixed_attempt")] = "other"
+			case "attached disk":
+				disk["managedBy"] = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/other"
+			case "public IP NAT":
+				f.objects[f.server.CloudID+"-pip"]["properties"].(map[string]any)["natGateway"] = map[string]any{"id": "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/natGateways/shared"}
+			case "read denied":
+				f.failRead = f.server.CloudID + "-nic"
+			case "VM reappears":
+				reads := 0
+				f.beforeRead = func(name string) {
+					if name == f.server.CloudID {
+						reads++
+						if reads == 2 {
+							f.objects[name] = map[string]any{"name": name}
+						}
+					}
+				}
+			}
+			if _, err := f.client.InspectFailedLeaseHold(t.Context(), f.server); err == nil {
+				t.Fatal("unproven hold accepted")
+			}
+			if len(f.deletes) != 0 {
+				t.Fatal("failed hold changed Azure")
+			}
+		})
+	}
+}
+
 func TestAzureOrphanCleanupRejectsRemainingResources(t *testing.T) {
 	for _, suffix := range []string{"", "-nic", "-pip", "-osdisk", "-q-nsg"} {
 		for _, tags := range []string{"owned", "foreign", "untagged"} {

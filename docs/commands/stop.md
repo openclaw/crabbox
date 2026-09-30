@@ -19,6 +19,10 @@ crabbox stop --provider ssh --static-host mac-studio.local mac-studio.local
 
 ## Repeating a stop
 
+An exact failed Azure lease can instead be retained with [hold](hold.md).
+Held claims refuse ordinary and forced stop, reuse, and automatic cleanup;
+the retained disk and companions require a separate salvage decision.
+
 A repeated stop can exit 0 when the provider validates a retained terminal
 receipt for the exact canonical lease ID, as Incus does. Keep that receipt and
 the original provider configuration; a slug may now identify another live lease.
