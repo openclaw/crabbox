@@ -74,6 +74,7 @@ class MockContainer {
   failStart = false;
   failCommand: Error | undefined;
   hangingProbes = 0;
+  killThrowsAfterExit = false;
   scriptGate: Promise<void> | undefined;
   command: CommandScript = { stdout: ["hi\n"], exitCode: 0 };
   uploadExitCode = 0;
@@ -157,7 +158,10 @@ class MockContainer {
         streamOf(script.stdout ?? [], script.holdStdoutOpen),
         streamOf(script.stderr ?? []),
         null,
-        (signal) => this.kills.push(signal ?? 0),
+        (signal) => {
+          if (this.killThrowsAfterExit) throw new Error("process already exited");
+          this.kills.push(signal ?? 0);
+        },
       );
     }
     throw new Error(`unexpected exec ${cmd.join(" ")}`);
@@ -775,6 +779,35 @@ describe("Cloudflare runner lifecycle", () => {
 
     expect(vi.getTimerCount()).toBe(0);
     expect(container.files.size).toBe(0);
+  });
+
+  it("does not signal a command that exited while its output drains", async () => {
+    const { sandbox, container } = harness();
+    await createLease(sandbox);
+    container.command = { stdout: ["done\n"], exitCode: 0, holdStdoutOpen: true };
+    container.killThrowsAfterExit = true;
+    const abort = new AbortController();
+
+    const response = await sandbox.fetch(
+      new Request("http://crabbox.internal/__crabbox/exec-stream", {
+        method: "POST",
+        body: JSON.stringify({ command: "sleep 30 & echo done", cwd: "/workspace/repo" }),
+        signal: abort.signal,
+      }),
+    );
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let seen = "";
+    while (!seen.includes("done")) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- reading the stream in order.
+      const next = await reader.read();
+      if (next.done) break;
+      seen += decoder.decode(next.value);
+    }
+
+    expect(() => abort.abort()).not.toThrow();
+    await reader.cancel();
+    expect(container.kills).toEqual([]);
   });
 
   it("stops a command whose request is canceled before exec returns", async () => {
