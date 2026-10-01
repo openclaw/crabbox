@@ -29,6 +29,7 @@ type CommandScript = {
   exitCode?: number | Promise<number>;
   // Keeps stdout open after exit, like a background descendant holding the pipe.
   holdStdoutOpen?: boolean;
+  stdoutStream?: ReadableStream<Uint8Array>;
   gate?: Promise<void>;
 };
 
@@ -50,12 +51,13 @@ function process(
   stderr: ReadableStream | null = null,
   stdin: WritableStream | null = null,
   kill: (signal?: number) => void = () => undefined,
+  pid = 100,
 ): ExecProcess {
   return {
     stdin,
     stdout,
     stderr,
-    pid: 1,
+    pid,
     isPty: false,
     exitCode: Promise.resolve(exitCode),
     output: async () => ({ stdout: new ArrayBuffer(0), stderr: new ArrayBuffer(0), exitCode: 0 }),
@@ -98,6 +100,8 @@ class MockContainer {
   }
 
   readonly kills: number[] = [];
+  // Process groups signaled by the stop helper.
+  readonly stoppedGroups: string[] = [];
   inactivityTimeouts = 0;
 
   async setInactivityTimeout(): Promise<void> {
@@ -113,6 +117,10 @@ class MockContainer {
         this.hangingProbes -= 1;
         return new Promise<never>(() => undefined);
       }
+      return process(0);
+    }
+    if (cmd[0] === "/bin/bash" && cmd[3] === "crabbox-stop") {
+      this.stoppedGroups.push(cmd[4] ?? "");
       return process(0);
     }
     if (cmd[0] === "rm") {
@@ -155,18 +163,21 @@ class MockContainer {
       await script.gate;
       return process(
         script.exitCode ?? 0,
-        streamOf(script.stdout ?? [], script.holdStdoutOpen),
+        script.stdoutStream ?? streamOf(script.stdout ?? [], script.holdStdoutOpen),
         streamOf(script.stderr ?? []),
         null,
         (signal) => {
           if (this.killThrowsAfterExit) throw new Error("process already exited");
           this.kills.push(signal ?? 0);
         },
+        commandPid,
       );
     }
     throw new Error(`unexpected exec ${cmd.join(" ")}`);
   }
 }
+
+const commandPid = 4242;
 
 type Harness = {
   sandbox: InstanceType<typeof CrabboxSandbox>;
@@ -808,6 +819,7 @@ describe("Cloudflare runner lifecycle", () => {
     expect(() => abort.abort()).not.toThrow();
     await reader.cancel();
     expect(container.kills).toEqual([]);
+    expect(container.stoppedGroups).toEqual([]);
   });
 
   it("stops a command whose request is canceled before exec returns", async () => {
@@ -830,8 +842,109 @@ describe("Cloudflare runner lifecycle", () => {
     abort.abort();
     gate.resolve();
 
-    await eventually(async () => expect(container.kills).toEqual([15]));
+    await eventually(async () => expect(container.stoppedGroups).toEqual([String(commandPid)]));
     await response.body?.cancel();
+  });
+
+  it("reads command output only as fast as the caller reads the stream", async () => {
+    const { sandbox, container } = harness();
+    await createLease(sandbox);
+    const chunk = new Uint8Array(4096).fill(120);
+    let pulled = 0;
+    container.command = {
+      exitCode: 0,
+      stdoutStream: new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulled += 1;
+          if (pulled > 1000) controller.close();
+          else controller.enqueue(chunk);
+        },
+      }),
+    };
+
+    const response = await execLease(sandbox, { command: "yes x | head -c 4096000" });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    expect(pulled).toBeLessThan(100);
+    const got = await events(response);
+    const stdout = got.filter((event) => event.type === "stdout").map((event) => event.data);
+    expect(stdout.join("").length).toBe(4_096_000);
+    expect(got.at(-1)).toEqual({ type: "complete", exitCode: 0 });
+  });
+
+  it("reports a failed output transport instead of a successful completion", async () => {
+    const { sandbox, container } = harness();
+    await createLease(sandbox);
+    container.command = {
+      exitCode: 0,
+      stdoutStream: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("partial\n"));
+          controller.error(new Error("Network connection lost."));
+        },
+      }),
+    };
+
+    const got = await events(await execLease(sandbox));
+
+    expect(got.at(-1)).toEqual({ type: "error", error: "read stdout: Network connection lost." });
+    expect(got.some((event) => event.type === "complete")).toBe(false);
+  });
+
+  it("closes cleanly when the caller cancels the response stream", async () => {
+    const { sandbox, storage, container } = harness();
+    await createLease(sandbox, { idleTimeoutSeconds: 600 });
+    const exit = deferred<number>();
+    container.command = { stdout: ["started\n"], exitCode: exit.promise, holdStdoutOpen: true };
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    globalThis.process.on("unhandledRejection", onRejection);
+    try {
+      const response = await execLease(sandbox, { command: "sleep 30" });
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let seen = "";
+      while (!seen.includes("started")) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- reading the stream in order.
+        const next = await reader.read();
+        if (next.done) break;
+        seen += decoder.decode(next.value);
+      }
+      await reader.cancel();
+      await eventually(async () => expect(container.stoppedGroups).toEqual([String(commandPid)]));
+      exit.resolve(143);
+      await eventually(async () => expect(await activeExecutions(storage)).toBeUndefined());
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      globalThis.process.off("unhandledRejection", onRejection);
+    }
+    expect(rejections).toEqual([]);
+  });
+
+  it("stops descendants that outlive a timed-out command", async () => {
+    const { sandbox, container } = harness();
+    await createLease(sandbox);
+    const exit = deferred<number>();
+    container.command = { stdout: [], exitCode: exit.promise };
+
+    const response = execLease(sandbox, { command: "sleep 30", timeoutMs: 1000 });
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    exit.resolve(124);
+    const got = await events(await response);
+
+    expect(got.at(-1)).toEqual({ type: "complete", exitCode: 124 });
+    await eventually(async () => expect(container.stoppedGroups).toEqual([String(commandPid)]));
+  });
+
+  it("leaves background descendants of a command that exits on its own", async () => {
+    const { sandbox, container } = harness();
+    await createLease(sandbox);
+    container.command = { stdout: ["done\n"], exitCode: 124, holdStdoutOpen: true };
+
+    const got = await events(await execLease(sandbox, { command: "sleep 30 & exit 124" }));
+
+    expect(got.at(-1)).toEqual({ type: "complete", exitCode: 124 });
+    expect(container.stoppedGroups).toEqual([]);
   });
 
   it("marks create startup failures stopped and destroys the container", async () => {

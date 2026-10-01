@@ -18,15 +18,20 @@ const readyProbeTimeoutMs = 10_000;
 const containerInactivityTimeoutMs = 6 * 60 * 60 * 1000;
 const keepAliveIntervalMs = 60 * 60 * 1000;
 const heartbeatIntervalMs = 15_000;
-const timeoutKillAfter = "5s";
+const killGraceSeconds = 5;
+// Bounds the queued response bytes; output is read only as the caller reads.
+const outputHighWaterMarkBytes = 256 * 1024;
 
 // A background descendant (`sleep 30 & echo done`) can keep stdout/stderr open
 // after the command exits. Once the exit code is known, keep reading while
 // output keeps arriving, stop after drainIdleMs without new bytes, and never
-// wait longer than drainGraceMs in total.
+// read for longer than drainGraceMs in total. Time spent waiting for a slow
+// caller counts toward neither, so buffered foreground output still arrives;
+// drainMaxMs bounds the whole drain.
 const drainIdleMs = 300;
 const drainPollMs = 100;
 const drainGraceMs = 5_000;
+const drainMaxMs = 60_000;
 
 type Env = {
   CrabboxSandbox: DurableObjectNamespace<CrabboxSandbox>;
@@ -551,10 +556,53 @@ function commandScript(command: string): string {
   return `rm -f -- "$0"\n${command}\n`;
 }
 
-function timeoutArgument(timeoutMs: number | undefined): string {
-  if (timeoutMs === undefined || timeoutMs <= 0) return "0";
-  return `${Math.max(Math.ceil(timeoutMs / 1000), 1)}s`;
+function timeoutSeconds(timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined || timeoutMs <= 0) return 0;
+  return Math.max(Math.ceil(timeoutMs / 1000), 1);
 }
+
+// GNU timeout makes its own process the group leader, so the command's
+// descendants share its PID as their process group. Its --kill-after timer
+// dies with it when the command's shell exits on TERM, so a separate exec
+// escalates TERM to KILL for whatever is left in the group.
+const stopGroupScript = `pg=$1
+kill -TERM -- "-$pg" 2>/dev/null || kill -TERM "$pg" 2>/dev/null || exit 0
+for _ in $(seq ${killGraceSeconds * 10}); do
+  sleep 0.1
+  kill -0 -- "-$pg" 2>/dev/null || exit 0
+done
+kill -KILL -- "-$pg" 2>/dev/null
+exit 0
+`;
+
+async function stopProcessGroup(container: Container, process: ExecProcess): Promise<void> {
+  // PID 1 is the container's init; never signal its group.
+  if (!Number.isSafeInteger(process.pid) || process.pid <= 1) {
+    try {
+      process.kill(15);
+    } catch {
+      // The process already exited.
+    }
+    return;
+  }
+  try {
+    const stopper = await container.exec(
+      ["/bin/bash", "-c", stopGroupScript, "crabbox-stop", String(process.pid)],
+      { stdout: "ignore", stderr: "ignore" },
+    );
+    await stopper.exitCode;
+  } catch {
+    // Best effort: the container may already be gone.
+  }
+}
+
+type EventSink = {
+  // Resolves once the event is queued, waiting while the reader is behind;
+  // false once the stream has ended.
+  emit: (event: Record<string, unknown>) => Promise<boolean>;
+  waitingForReader: () => boolean;
+  ended: () => boolean;
+};
 
 function execEventStream(
   container: Container,
@@ -563,129 +611,165 @@ function execEventStream(
   onFinish: () => void,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
+  const line = (event: Record<string, unknown>) => encoder.encode(`${JSON.stringify(event)}\n`);
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
   let process: ExecProcess | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let finished = false;
+  let closed = false;
   let canceled = false;
   let exited = false;
+  let stopping = false;
+  const waiters: Array<() => void> = [];
+  const wakeProducers = () => {
+    for (const wake of waiters.splice(0)) wake();
+  };
   const finish = () => {
     if (finished) return;
     finished = true;
     if (heartbeat !== undefined) clearInterval(heartbeat);
+    wakeProducers();
     onFinish();
   };
-  // Cloudflare does not stop an exec when its caller goes away. SIGTERM reaches
-  // `timeout`, which signals the whole command process group. Signaling a
-  // process that already exited throws an uncaught Durable Object error.
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    controller.close();
+  };
+  // Cloudflare does not stop an exec when its caller goes away. A command that
+  // already exited keeps its background descendants, as with the old runner.
   const stopProcess = () => {
-    if (!process || exited) return;
-    try {
-      process.kill(15);
-    } catch {
-      // The process exited between the check and the signal.
-    }
+    if (!process || exited || stopping) return;
+    stopping = true;
+    void stopProcessGroup(container, process);
   };
   const cancel = () => {
     canceled = true;
     stopProcess();
     finish();
   };
+  const sink: EventSink = {
+    emit: async (event) => {
+      for (;;) {
+        if (finished) return false;
+        if ((controller.desiredSize ?? 0) > 0) break;
+        // oxlint-disable-next-line eslint/no-await-in-loop -- waits for reader demand.
+        await new Promise<void>((resolve) => waiters.push(resolve));
+      }
+      controller.enqueue(line(event));
+      return true;
+    },
+    waitingForReader: () => waiters.length > 0,
+    ended: () => finished,
+  };
+
+  const run = async () => {
+    const scriptPath = `/tmp/crabbox-command-${crypto.randomUUID()}.sh`;
+    try {
+      const writer = await container.exec(
+        [
+          "/bin/sh",
+          "-c",
+          'mkdir -p -- "$2" && umask 077 && cat > "$1"',
+          "sh",
+          scriptPath,
+          request.cwd,
+        ],
+        { stdin: textStream(commandScript(request.command)), stdout: "ignore", stderr: "pipe" },
+      );
+      const [writeExit, writeErr] = await Promise.all([writer.exitCode, readText(writer.stderr)]);
+      if (writeExit !== 0) {
+        throw new Error(`prepare command: ${writeErr.trim() || `exit ${writeExit}`}`);
+      }
+      if (canceled) {
+        // The script deletes itself only once it runs; it may hold secrets.
+        await removeFile(container, scriptPath);
+        return;
+      }
+
+      // GNU timeout signals the whole command process group and exits 124 on timeout.
+      const limitSeconds = timeoutSeconds(request.timeoutMs);
+      const argv = [
+        "timeout",
+        `--kill-after=${killGraceSeconds}s`,
+        limitSeconds > 0 ? `${limitSeconds}s` : "0",
+        "/bin/bash",
+        "-l",
+        scriptPath,
+      ];
+      const options: ContainerExecOptions = { cwd: request.cwd };
+      if (request.env) options.env = request.env;
+      const startedAt = performance.now();
+      process = await container.exec(argv, options);
+      const running = process;
+      void (async () => {
+        let exitCode: number | undefined;
+        try {
+          exitCode = await running.exitCode;
+        } catch {
+          // pumpOutput reports exit failures; this only tracks liveness.
+        }
+        exited = true;
+        const timedOut = limitSeconds > 0 && performance.now() - startedAt >= limitSeconds * 1000;
+        if (timedOut && (exitCode === 124 || exitCode === 137)) {
+          // Descendants that ignored timeout's TERM outlive it.
+          await stopProcessGroup(container, running);
+        }
+      })();
+      if (canceled) {
+        stopProcess();
+        await removeFile(container, scriptPath);
+        return;
+      }
+      const exitCode = await pumpOutput(running, sink);
+      await sink.emit({ type: "complete", exitCode });
+    } catch (error) {
+      stopProcess();
+      await sink.emit({ type: "error", error: errorMessage(error) });
+      await removeFile(container, scriptPath);
+    }
+  };
+
   if (signal.aborted) {
-    cancel();
+    canceled = true;
   } else {
     signal.addEventListener("abort", cancel, { once: true });
   }
-
-  return new ReadableStream<Uint8Array>({
-    start: (controller) => {
-      const emit = (event: Record<string, unknown>) => {
-        if (finished) return;
-        controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
-      };
-      emit({ type: "start" });
-      if (canceled) {
-        controller.close();
-        return;
-      }
-      heartbeat = setInterval(() => emit({ type: "heartbeat" }), heartbeatIntervalMs);
-
-      const scriptPath = `/tmp/crabbox-command-${crypto.randomUUID()}.sh`;
-      void (async () => {
-        try {
-          const writer = await container.exec(
-            [
-              "/bin/sh",
-              "-c",
-              'mkdir -p -- "$2" && umask 077 && cat > "$1"',
-              "sh",
-              scriptPath,
-              request.cwd,
-            ],
-            { stdin: textStream(commandScript(request.command)), stdout: "ignore", stderr: "pipe" },
-          );
-          const [writeExit, writeErr] = await Promise.all([
-            writer.exitCode,
-            readText(writer.stderr),
-          ]);
-          if (writeExit !== 0) {
-            throw new Error(`prepare command: ${writeErr.trim() || `exit ${writeExit}`}`);
-          }
-          if (canceled) {
-            // The script deletes itself only once it runs; it may hold secrets.
-            await removeFile(container, scriptPath);
-            controller.close();
-            return;
-          }
-
-          // GNU timeout puts the command in its own process group and signals the
-          // whole group, so descendants die with it; it exits 124 on timeout.
-          const argv = [
-            "timeout",
-            `--kill-after=${timeoutKillAfter}`,
-            timeoutArgument(request.timeoutMs),
-            "/bin/bash",
-            "-l",
-            scriptPath,
-          ];
-          const options: ContainerExecOptions = { cwd: request.cwd };
-          if (request.env) options.env = request.env;
-          process = await container.exec(argv, options);
-          const running = process;
-          void (async () => {
-            try {
-              await running.exitCode;
-            } catch {
-              // pumpOutput reports exit failures; this only tracks liveness.
-            }
-            exited = true;
-          })();
-          if (canceled) {
-            stopProcess();
-            await removeFile(container, scriptPath);
-            controller.close();
-            return;
-          }
-          const exitCode = await pumpOutput(process, emit);
-          emit({ type: "complete", exitCode });
+  return new ReadableStream<Uint8Array>(
+    {
+      start: (streamController) => {
+        controller = streamController;
+        controller.enqueue(line({ type: "start" }));
+        if (canceled) {
           finish();
-          controller.close();
-        } catch (error) {
-          emit({ type: "error", error: errorMessage(error) });
-          finish();
-          await removeFile(container, scriptPath);
-          controller.close();
+          close();
+          return;
         }
-      })();
+        heartbeat = setInterval(() => {
+          // A reader that is behind already has queued events to read.
+          if (!finished && (controller.desiredSize ?? 0) > 0) {
+            controller.enqueue(line({ type: "heartbeat" }));
+          }
+        }, heartbeatIntervalMs);
+        void (async () => {
+          await run().catch(() => undefined);
+          finish();
+          close();
+        })();
+      },
+      pull: wakeProducers,
+      cancel: () => {
+        closed = true;
+        cancel();
+      },
     },
-    cancel,
-  });
+    { highWaterMark: outputHighWaterMarkBytes, size: (chunk) => chunk.byteLength },
+  );
 }
 
-async function pumpOutput(
-  process: ExecProcess,
-  emit: (event: Record<string, unknown>) => void,
-): Promise<number> {
-  let lastProgress = performance.now();
+async function pumpOutput(process: ExecProcess, sink: EventSink): Promise<number> {
+  let lastRead = performance.now();
+  let draining = false;
   const readers: Array<ReadableStreamDefaultReader<Uint8Array>> = [];
   const pump = async (stream: ReadableStream | null, type: "stdout" | "stderr") => {
     if (!stream) return;
@@ -697,37 +781,59 @@ async function pumpOutput(
       try {
         // oxlint-disable-next-line eslint/no-await-in-loop -- stream reads are sequential.
         next = await reader.read();
-      } catch {
-        break;
+      } catch (error) {
+        // Ending the drain or the response stream cancels reads on purpose.
+        if (draining || sink.ended()) return;
+        throw new Error(`read ${type}: ${errorMessage(error)}`, { cause: error });
       }
       if (next.done) break;
-      lastProgress = performance.now();
+      lastRead = performance.now();
       const data = decoder.decode(next.value, { stream: true });
-      if (data) emit({ type, data });
+      // oxlint-disable-next-line eslint/no-await-in-loop -- output stays in order.
+      if (data && !(await sink.emit({ type, data }))) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- the loop ends here.
+        await reader.cancel().catch(() => undefined);
+        return;
+      }
     }
     const tail = decoder.decode();
-    if (tail) emit({ type, data: tail });
+    if (tail) await sink.emit({ type, data: tail });
   };
 
   const pumps = Promise.all([pump(process.stdout, "stdout"), pump(process.stderr, "stderr")]);
-  const exitCode = await process.exitCode;
-
   const drain = { done: false };
   void (async () => {
-    await pumps;
+    await pumps.catch(() => undefined);
     drain.done = true;
   })();
-  const drainDeadline = performance.now() + drainGraceMs;
-  lastProgress = Math.max(lastProgress, performance.now());
-  while (
-    !drain.done &&
-    performance.now() < drainDeadline &&
-    performance.now() - lastProgress < drainIdleMs
-  ) {
+  // A failed output transport fails the command instead of waiting for its exit.
+  const exitCode = await Promise.race([process.exitCode, pumps.then(() => process.exitCode)]);
+
+  const drainStart = performance.now();
+  let previous = drainStart;
+  let active = Math.max(lastRead, drainStart);
+  let producerMs = 0;
+  while (!drain.done) {
     // oxlint-disable-next-line eslint/no-await-in-loop -- polling the drain state.
     await sleep(drainPollMs);
+    const now = performance.now();
+    if (sink.waitingForReader()) {
+      active = now;
+    } else {
+      producerMs += now - previous;
+    }
+    previous = now;
+    active = Math.max(active, lastRead);
+    if (
+      now - active >= drainIdleMs ||
+      producerMs >= drainGraceMs ||
+      now - drainStart >= drainMaxMs
+    ) {
+      break;
+    }
   }
   if (!drain.done) {
+    draining = true;
     await Promise.all(readers.map((reader) => reader.cancel().catch(() => undefined)));
   }
   await pumps;
