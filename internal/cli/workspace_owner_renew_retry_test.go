@@ -65,14 +65,24 @@ func acquireBudgetedOwner(t *testing.T, transport *budgetedOwnerTransport, ttl, 
 // the retry can still finish inside the ownership the last confirmed renewal proved.
 // Before this, one lost renewal call killed a healthy long-running job (exit 7).
 func TestWorkspaceOwnerRenewalSurvivesOneTransportFailure(t *testing.T) {
+	continued := make(chan struct{})
 	transport := &budgetedOwnerTransport{budget: 100 * time.Millisecond, renew: func(attempt int) (string, error) {
 		if attempt == 1 {
 			return "", errors.New("ssh: connect to host: Operation timed out")
 		}
+		if attempt == 3 {
+			close(continued)
+		}
 		return "RENEWED", nil
 	}}
 	owner := acquireBudgetedOwner(t, transport, 3*time.Second, 50*time.Millisecond)
-	time.Sleep(600 * time.Millisecond)
+	select {
+	case <-continued:
+	case <-owner.done:
+		t.Fatalf("renewal stopped before recovery: %v", owner.Err())
+	case <-time.After(5 * time.Second):
+		t.Fatal("renewal did not continue after a transient transport failure")
+	}
 	if err := owner.Err(); err != nil {
 		t.Fatalf("one transport failure inside the ownership window failed the owner: %v", err)
 	}
@@ -86,7 +96,7 @@ func TestWorkspaceOwnerRenewalSurvivesOneTransportFailure(t *testing.T) {
 
 // When every renewal call fails, the owner still fails closed, and no retry starts
 // that could finish after the last confirmed ownership lapses.
-func TestWorkspaceOwnerRenewalFailsClosedWhenTheWindowCloses(t *testing.T) {
+func TestWorkspaceOwnerRenewalStopsAfterTwoRetries(t *testing.T) {
 	const (
 		ttl    = 3 * time.Second
 		budget = 200 * time.Millisecond
@@ -109,8 +119,8 @@ func TestWorkspaceOwnerRenewalFailsClosedWhenTheWindowCloses(t *testing.T) {
 		t.Fatalf("job context=%v; want canceled", owner.Context().Err())
 	}
 	acquired, renewals := transport.snapshot()
-	if len(renewals) < 2 {
-		t.Fatalf("the transport failure was not retried: %d calls", len(renewals))
+	if len(renewals) != 3 {
+		t.Fatalf("got %d calls; want one initial call and two retries", len(renewals))
 	}
 	confirmedUntil := acquired.Add(ttl - workspaceOwnerRenewMargin)
 	if last := renewals[len(renewals)-1]; last.Add(budget).After(confirmedUntil) {

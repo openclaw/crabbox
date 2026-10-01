@@ -19,6 +19,7 @@
 - Cache GCP root-disk source minimums in coordinator memory for up to 30 minutes and expose lookup time as `gcp.image_minimum`, removing repeated image reads before warm creates while preserving explicit-size bypass.
 - Invalidate cached GCP firewall verification when root-image or snapshot metadata requests fail, so the next create rechecks the managed ingress policy.
 - Prefer IPv4 for AWS coordinator connections so heartbeats refresh the source used by public SSH, while preserving IPv6 fallback and configured proxies. [PR 2651](https://github.com/openclaw/crabbox/pull/2651).
+- Keep long runs alive across bounded workspace-owner renewal transport failures while preserving fail-closed token and expiry checks. [PR 2641](https://github.com/openclaw/crabbox/pull/2641). Thanks @youssef-tharwat.
 
 ## 0.69.0 - 2026-09-29
 

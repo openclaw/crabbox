@@ -382,7 +382,7 @@ redirected file stream before upload, sync, or user commands read it.
 
 Ownership is fenced with a random token and renewed while the lifecycle is
 active. If the local client disappears, Crabbox recovers an expired owner only
-after verifying that its witnessed remote child is no longer alive. Ambiguous
+after verifying that its witnessed remote child is no longer alive. Unconfirmed
 renewal, release, token, or child state fails closed instead of risking a
 concurrent checkout. POSIX, WSL2, and native Windows targets implement the same
 protocol; the small sync-finalization lock remains nested inside it.
@@ -394,18 +394,27 @@ Owner-call errors identify canceled or expired call contexts without printing
 caller-provided cancellation causes; the original transport error is preserved.
 Workspace-owner protocol calls disable SSH connection multiplexing. Sync and
 command transport keep their existing connection policy.
+A renewal transport failure with no protocol response is retried at most twice,
+after 250 ms and 500 ms backoffs, while a complete retry call still fits before
+the last acknowledged ownership expires. The window is measured from when that
+acknowledged acquire or renewal was sent, with a safety margin for the remote
+clock's whole-second expiry. Any nonempty response other than error-free
+`RENEWED` remains terminal, including recognized denials and unknown output.
+The owner TTL includes two additional transport-call budgets, so reclaiming a
+crashed client's workspace can take longer. Calls use the same fencing token;
+retries never acquire ownership or revive an expired owner.
 WSL2 renewal uses a compact marker-only helper with a 60-second execution
 allowance for CPU and disk contention. It retries confirmed lock contention at
 most twice within the original bounded call deadline; that deadline is included
-in the owner expiry window. A transport failure or rejected/ambiguous owner
-state is never retried. Collection and cleanup remain blocked after ownership
-fails closed. Owner authority checks and renewal deadlines are unchanged.
+in the owner expiry window. The outer renewal loop applies the same bounded
+transport retry policy as on other SSH targets. Collection and cleanup remain
+blocked after ownership fails closed. Owner authority checks are unchanged.
 
 Native Windows stages owner scripts and witnessed command input with exact byte
 counts and asynchronous pipe reads. Empty frames complete without initializing
 stdin; nonempty frames leave any following bytes available. Incomplete input
-fails before the staged script or command runs. A transport failure during
-renewal still fails closed.
+fails before the staged script or command runs. Unconfirmed renewal after the
+bounded transport retries still fails closed.
 
 Use `--full-resync` (alias `--fresh-sync`) when a warm lease smells stale:
 Crabbox deletes the remote workdir, skips the fingerprint fast path, reseeds Git
