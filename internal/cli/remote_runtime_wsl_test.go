@@ -190,19 +190,21 @@ func TestNativeWSLMetadataPowerShellProcess(t *testing.T) {
 	literalArgs := []string{"plain", "two words", `single'quote`, `double"quote`, `one\"quote`, `trailing\`, "", "é 🦞", "$literal;(&)"}
 	args := append([]string{"-test.run=^TestNativeWSLMetadataOwnedHelper$", "--", "--native-metadata-fixture", "echo"}, literalArgs...)
 	script := nativeRuntimeMetadataProcessScript(executable, quoteWindowsCommandArgs(args), 5*time.Second)
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	// Allow PowerShell startup and shutdown under CI load outside the child's five-second budget.
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, pwsh, "-NoProfile", "-NonInteractive", "-Command", wslStagePowerShellCommand(script, wslStagePowerShell))
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
+	started := time.Now()
 	err = command.Run()
 	want, marshalErr := json.Marshal(literalArgs)
 	if marshalErr != nil {
 		t.Fatal(marshalErr)
 	}
 	want = append(want, 0, 255, 13, 10)
-	if exitCode(err) != 23 || !bytes.Equal(stdout.Bytes(), want) || !bytes.Equal(stderr.Bytes(), []byte{'e', 0, 254, 10}) {
-		t.Fatalf("owned metadata process: exit=%d stdout=%x stderr=%x err=%v", exitCode(err), stdout.Bytes(), stderr.Bytes(), err)
+	if ctx.Err() != nil || exitCode(err) != 23 || !bytes.Equal(stdout.Bytes(), want) || !bytes.Equal(stderr.Bytes(), []byte{'e', 0, 254, 10}) {
+		t.Fatalf("owned metadata process: elapsed=%s context=%v exit=%d stdout=%x stderr=%x err=%v", time.Since(started), ctx.Err(), exitCode(err), stdout.Bytes(), stderr.Bytes(), err)
 	}
 }
 
@@ -216,14 +218,16 @@ func TestNativeWSLMetadataPowerShellTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := []string{"-test.run=^TestNativeWSLMetadataOwnedHelper$", "--", "--native-metadata-fixture", "wait"}
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	// The generated launcher's 100ms child timeout is independent of PowerShell startup and shutdown.
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	script := nativeRuntimeMetadataProcessScript(executable, quoteWindowsCommandArgs(args), 100*time.Millisecond)
 	command := exec.CommandContext(ctx, pwsh, "-NoProfile", "-NonInteractive", "-Command", wslStagePowerShellCommand(script, wslStagePowerShell))
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
+	started := time.Now()
 	err = command.Run()
 	if ctx.Err() != nil || exitCode(err) != 124 || stdout.Len() != 0 || strings.TrimSpace(stderr.String()) != "WSL metadata launcher timed out" {
-		t.Fatalf("owned launcher timeout: exit=%d stdout=%q stderr=%q err=%v", exitCode(err), stdout.String(), stderr.String(), err)
+		t.Fatalf("owned launcher timeout: elapsed=%s context=%v exit=%d stdout=%q stderr=%q err=%v", time.Since(started), ctx.Err(), exitCode(err), stdout.String(), stderr.String(), err)
 	}
 }
