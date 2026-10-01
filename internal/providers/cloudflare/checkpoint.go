@@ -2,6 +2,7 @@ package cloudflare
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -16,6 +17,7 @@ var (
 	_ core.NativeCheckpointProvider          = Provider{}
 	_ core.NativeCheckpointLifecycleProvider = Provider{}
 	_ core.NativeCheckpointForkProvider      = Provider{}
+	_ core.NativeCheckpointForkFlagProvider  = Provider{}
 	_ core.DelegatedCheckpointBackend        = (*cloudflareBackend)(nil)
 )
 
@@ -64,7 +66,7 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	if err := requireResolvedCheckpointClaim(claim, req.Server); err != nil {
 		return result, core.NativeCheckpointNotSubmittedError{Cause: err}
 	}
-	client, err := newCloudflareClient(req.Config, core.RuntimeForProviderOperation(nil))
+	client, err := newCloudflareClient(leaseConfig(req.Config, claim), core.RuntimeForProviderOperation(nil))
 	if err != nil {
 		return result, core.NativeCheckpointNotSubmittedError{Cause: err}
 	}
@@ -113,14 +115,20 @@ func (Provider) DeleteNativeCheckpoint(_ context.Context, req core.NativeCheckpo
 	return core.Exit(2, "%s has no snapshot delete API; snapshot %s expires 30 days after creation or last restore. Remove the local record with crabbox checkpoint delete --local-only", providerName, req.Image.ID)
 }
 
+// ApplyNativeCheckpointForkConfig leaves the runner check to
+// ForkNativeCheckpoint: fork selects this provider from the record after
+// flags such as --cloudflare-url were applied for the configured provider, so
+// they only take effect in ApplyNativeCheckpointForkFlags.
 func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkRequest) error {
-	image := core.NativeCheckpointImage{ID: req.Record.ImageID, Name: req.Record.Name, Provider: providerName, Kind: req.Record.Kind, Direct: req.Record.Direct}
-	cfg, err := cloudflareCheckpointConfig(func() (core.Config, error) { return *req.Config, nil }, image, req.Record.Metadata)
-	if err != nil {
-		return err
+	if req.Record.Kind != core.CheckpointKindCloudflare || strings.TrimSpace(req.Record.ImageID) == "" {
+		return core.Exit(2, "%s checkpoint record is not a container snapshot", providerName)
 	}
-	*req.Config = cfg
 	return nil
+}
+
+func (Provider) ApplyNativeCheckpointForkFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
+	_, err := core.ApplyProviderConfigFlags[core.CloudflareConfigFlagValues](cfg, fs, values, &cfg.Cloudflare, providerName)
+	return err
 }
 
 // cloudflareCheckpointConfig binds a checkpoint to the runner that captured it;
@@ -141,10 +149,17 @@ func cloudflareCheckpointConfig(load func() (core.Config, error), image core.Nat
 	if err != nil {
 		return core.Config{}, err
 	}
-	if recorded := strings.TrimSpace(metadata["api_url"]); recorded != client.baseURL {
-		return core.Config{}, core.Exit(2, "%s checkpoint was captured on runner %s, but the configured runner is %s", providerName, core.Blank(recorded, "-"), client.baseURL)
+	if err := requireCheckpointRunner(metadata, client.baseURL); err != nil {
+		return core.Config{}, err
 	}
 	return cfg, nil
+}
+
+func requireCheckpointRunner(metadata map[string]string, runner string) error {
+	if recorded := strings.TrimSpace(metadata["api_url"]); recorded != runner {
+		return core.Exit(2, "%s checkpoint was captured on runner %s, but the configured runner is %s", providerName, core.Blank(recorded, "-"), runner)
+	}
+	return nil
 }
 
 func (b *cloudflareBackend) ResolveCheckpointSource(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
@@ -155,11 +170,10 @@ func (b *cloudflareBackend) ResolveCheckpointSource(ctx context.Context, req cor
 	if req.Repo.Root != "" && claim.RepoRoot != req.Repo.Root {
 		return core.LeaseTarget{}, core.Exit(2, "%s lease %s is claimed by %s, not this repository", providerName, claim.LeaseID, core.Blank(claim.RepoRoot, "another repository"))
 	}
-	client, err := newCloudflareClient(b.cfg, b.rt)
+	client, err := b.leaseClient(claim)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	client.useInstanceType(cloudflareClaimInstanceType(claim))
 	sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -199,6 +213,9 @@ func (b *cloudflareBackend) ForkNativeCheckpoint(ctx context.Context, req core.D
 	}
 	client, err := newCloudflareClient(b.cfg, b.rt)
 	if err != nil {
+		return core.DelegatedCheckpointFork{}, err
+	}
+	if err := requireCheckpointRunner(req.Record.Metadata, client.baseURL); err != nil {
 		return core.DelegatedCheckpointFork{}, err
 	}
 	claim, sandbox, err := b.createSandbox(ctx, client, req.Repo, req.RequestedSlug, sandboxSource{

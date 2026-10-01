@@ -81,7 +81,8 @@ func (b *cloudflareBackend) Warmup(ctx context.Context, req core.WarmupRequest) 
 }
 
 func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
-	workdir, err := b.runWorkdir(req.ID)
+	cfg := b.runConfig(req.ID)
+	workdir, err := cloudflareWorkdir(cfg)
 	if err != nil {
 		return core.RunResult{}, err
 	}
@@ -105,7 +106,7 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 				}
 				command = intent.ShellScript()
 			}
-			client, err = newCloudflareClient(b.cfg, b.rt)
+			client, err = newCloudflareClient(cfg, b.rt)
 			return err
 		},
 		Workspace: func() shared.SandboxWorkspace {
@@ -168,15 +169,12 @@ func (b *cloudflareBackend) List(ctx context.Context, req core.ListRequest) ([]c
 }
 
 func (b *cloudflareBackend) listRefreshed(ctx context.Context, claims []core.LeaseClaim) ([]core.LeaseView, error) {
-	client, err := newCloudflareClient(b.cfg, b.rt)
-	if err != nil {
-		return nil, err
-	}
 	servers := make([]core.Server, 0, len(claims))
-	defaultInstanceType := client.instanceType
 	for _, claim := range claims {
-		client.instanceType = defaultInstanceType
-		client.useInstanceType(cloudflareClaimInstanceType(claim))
+		client, err := b.leaseClient(claim)
+		if err != nil {
+			return nil, err
+		}
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 		if err != nil {
 			if cloudflareNotFoundError(err) {
@@ -193,15 +191,14 @@ func (b *cloudflareBackend) listRefreshed(ctx context.Context, claims []core.Lea
 }
 
 func (b *cloudflareBackend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
-	client, err := newCloudflareClient(b.cfg, b.rt)
-	if err != nil {
-		return core.StatusView{}, err
-	}
 	claim, err := resolveCloudflareClaim(req.ID)
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	client.useInstanceType(cloudflareClaimInstanceType(claim))
+	client, err := b.leaseClient(claim)
+	if err != nil {
+		return core.StatusView{}, err
+	}
 	return shared.PollStatus(ctx, req, func() time.Time { return core.ClockNow(b.rt.Clock) }, func(ctx context.Context) (core.StatusView, bool, error) {
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 		if err != nil {
@@ -215,11 +212,11 @@ func (b *cloudflareBackend) Status(ctx context.Context, req core.StatusRequest) 
 }
 
 func (b *cloudflareBackend) Stop(ctx context.Context, req core.StopRequest) error {
-	client, err := newCloudflareClient(b.cfg, b.rt)
+	claim, err := resolveCloudflareClaim(req.ID)
 	if err != nil {
 		return err
 	}
-	claim, err := resolveCloudflareClaim(req.ID)
+	client, err := b.leaseClient(claim)
 	if err != nil {
 		return err
 	}
@@ -252,19 +249,16 @@ func destroyClaimedSandbox(ctx context.Context, client *cloudflareClient, claim 
 }
 
 func (b *cloudflareBackend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
-	client, err := newCloudflareClient(b.cfg, b.rt)
-	if err != nil {
-		return err
-	}
 	claims, err := localCloudflareClaims()
 	if err != nil {
 		return err
 	}
 	removed := 0
-	defaultInstanceType := client.instanceType
 	for _, claim := range claims {
-		client.instanceType = defaultInstanceType
-		client.useInstanceType(cloudflareClaimInstanceType(claim))
+		client, err := b.leaseClient(claim)
+		if err != nil {
+			return err
+		}
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 		if err != nil {
 			if cloudflareNotFoundError(err) {
@@ -333,7 +327,7 @@ func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflar
 	if err != nil {
 		return core.LeaseClaim{}, cloudflareContainer{}, err
 	}
-	labels := map[string]string{"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": slug, "repo": repo.Name, "instance_type": client.instanceType, "workdir": workdir}
+	labels := map[string]string{"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": slug, "repo": repo.Name, "instance_type": client.instanceType, "workdir": workdir, runnerURLLabel: client.baseURL}
 	sandbox, err := client.createSandbox(ctx, createSandboxRequest{
 		ID: leaseID, LeaseID: leaseID, Slug: slug, Repo: repo.Name, Workdir: workdir, SnapshotID: source.snapshotID,
 		InstanceType: client.instanceType, Image: strings.TrimSpace(b.cfg.Cloudflare.Image), TTLSeconds: durationSecondsCeil(b.cfg.TTL), IdleTimeoutSeconds: durationSecondsCeil(b.cfg.IdleTimeout), Labels: labels,
@@ -391,19 +385,41 @@ func rejectCloudflareSyncOptions(req core.RunRequest) error {
 	return nil
 }
 
-// runWorkdir keeps a claimed lease in the workdir it was created with, such as
-// a checkpoint fork's captured workdir; new leases use the configured one.
-// Resolve reports claim lookup failures for the run.
-func (b *cloudflareBackend) runWorkdir(id string) (string, error) {
-	cfg := b.cfg
+// runnerURLLabel records the runner that created a lease. Sandboxes exist only
+// on that runner, so lease commands keep using it even when the current
+// configuration, such as a fork command's nested run, selects another one.
+const runnerURLLabel = "runner_url"
+
+// leaseConfig keeps a claimed lease on the runner and workdir it was created
+// with, such as a checkpoint fork's captured workdir.
+func leaseConfig(cfg core.Config, claim core.LeaseClaim) core.Config {
+	if runner := strings.TrimSpace(claim.Labels[runnerURLLabel]); runner != "" {
+		cfg.Cloudflare.APIURL = runner
+	}
+	if workdir := strings.TrimSpace(claim.Labels["workdir"]); workdir != "" {
+		cfg.Cloudflare.Workdir = workdir
+	}
+	return cfg
+}
+
+func (b *cloudflareBackend) leaseClient(claim core.LeaseClaim) (*cloudflareClient, error) {
+	client, err := newCloudflareClient(leaseConfig(b.cfg, claim), b.rt)
+	if err != nil {
+		return nil, err
+	}
+	client.useInstanceType(cloudflareClaimInstanceType(claim))
+	return client, nil
+}
+
+// runConfig applies a claimed lease's runner and workdir; new leases use the
+// configured ones. Resolve reports claim lookup failures for the run.
+func (b *cloudflareBackend) runConfig(id string) core.Config {
 	if strings.TrimSpace(id) != "" {
 		if claim, ok, err := core.ResolveLeaseClaimForProvider(id, providerName); err == nil && ok {
-			if workdir := strings.TrimSpace(claim.Labels["workdir"]); workdir != "" {
-				cfg.Cloudflare.Workdir = workdir
-			}
+			return leaseConfig(b.cfg, claim)
 		}
 	}
-	return cloudflareWorkdir(cfg)
+	return b.cfg
 }
 
 func cloudflareWorkdir(cfg core.Config) (string, error) {

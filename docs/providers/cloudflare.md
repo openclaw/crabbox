@@ -140,9 +140,11 @@ bearer-shaped credentials before they reach CLI diagnostics.
 
 The workdir defaults to `/workspace/crabbox` and must resolve to an absolute
 path. Broad system paths (`/`, `/workspace`, `/usr`, `/var`, and similar) are
-rejected; pick a dedicated subdirectory. A lease keeps the workdir it was
-created with: `run --id` uses the workdir recorded in the lease's claim, not
-the current configuration.
+rejected; pick a dedicated subdirectory. A lease keeps the runner and workdir
+it was created with: `run --id`, `status`, `stop`, `list --refresh`, `cleanup`,
+and `checkpoint create` use the runner URL and workdir recorded in the lease's
+claim, with the configured token, not the current configuration. Claims from
+older CLIs carry no runner URL and use the configured one.
 
 The CLI's configured workdir and runtime fallback share that default. The bundled
 Worker keeps a separate HTTP-protocol fallback for requests that omit workdir;
@@ -332,8 +334,10 @@ crabbox checkpoint fork chk_0123456789abcdef --count 4 --type standard-2 -- pnpm
   under `/var/cache/crabbox`, carries over. Like any lease, a fork whose
   container stops ends instead of restarting from the snapshot.
 - Snapshots belong to the runner that captured them. Forking with another
-  runner URL fails, and snapshots do not survive a new runner image: rebuild
-  checkpoints after deploying an image change.
+  runner URL fails. A fork created with `--cloudflare-url` runs its command,
+  and later lease commands, on that runner without repeating the flag.
+  Snapshots do not survive a new runner image: rebuild checkpoints after
+  deploying an image change.
 - Cloudflare has no snapshot lookup or delete API. `checkpoint inspect
   --verify` reports `unverified_ref`, snapshots expire 30 days after creation
   or their last restore, and `crabbox checkpoint delete --local-only` removes
