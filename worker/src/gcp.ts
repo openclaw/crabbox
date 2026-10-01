@@ -16,6 +16,7 @@ import {
 import { base64URL } from "./encoding";
 import { ExpiringTokenCache, type ExpiringToken } from "./expiring-token-cache";
 import type { GCPFirewallCache } from "./gcp-firewall-cache";
+import type { GCPImageMinimumCache, GCPImageMinimum } from "./gcp-image-minimum-cache";
 import { redactDiagnosticSecrets } from "./http";
 import {
   leaseProviderLabels,
@@ -221,6 +222,7 @@ export class GCPClient {
     project?: string,
     private readonly sharedTokenCache?: ExpiringTokenCache,
     private readonly firewallCache?: GCPFirewallCache,
+    private readonly imageMinimumCache?: GCPImageMinimumCache,
   ) {
     this.tokenCache = sharedTokenCache ?? new ExpiringTokenCache();
     this.project =
@@ -279,6 +281,7 @@ export class GCPClient {
       scopedProject,
       this.sharedTokenCache,
       this.firewallCache,
+      this.imageMinimumCache,
     );
     client.fetcher = this.fetcher;
     client.tokenCache = this.sharedTokenCache ?? this.tokenCache.clone();
@@ -1255,10 +1258,7 @@ export class GCPClient {
     throw conflictError;
   }
 
-  private async rootDiskSource(
-    source: string,
-    selectedProject: string,
-  ): Promise<{ source: string; diskSizeGb: number }> {
+  private async rootDiskSource(source: string, selectedProject: string): Promise<GCPImageMinimum> {
     if (source.startsWith("global/")) source = `projects/${selectedProject}/${source}`;
     const match =
       /^(?:https:\/\/(?:compute|www)\.googleapis\.com\/compute\/v1\/)?projects\/([^/]+)\/global\/(images|snapshots)\/(?:family\/)?([^/]+)$/.exec(
@@ -1267,17 +1267,43 @@ export class GCPClient {
     if (!match) throw new Error(`resolve GCP root disk minimum: invalid source ${source}`);
     const [, project, kind, name] = match;
     const family = source.includes("/images/family/");
-    const client = new GCPClient(this.env, this.zone, project, this.tokenCache);
-    client.fetcher = this.fetcher;
-    const image = await client.gcp<{ name?: string; diskSizeGb?: string | number }>(
-      "GET",
-      `/global/${kind}/${family ? "family/" : ""}${name}`,
-    );
-    const minimum = Number(image.diskSizeGb);
-    if (!Number.isSafeInteger(minimum) || minimum <= 0 || !image.name) {
-      throw new Error(`resolve GCP root disk minimum: source ${source} has no name or disk size`);
+    const path = `/global/${kind}/${family ? "family/" : ""}${name}`;
+    const resolve = () =>
+      measureCreationStep("gcp.image_minimum", async () => {
+        const client = new GCPClient(
+          this.env,
+          this.zone,
+          project,
+          this.tokenCache,
+          undefined,
+          this.imageMinimumCache,
+        );
+        client.fetcher = this.fetcher;
+        const image = await client.gcp<{ name?: string; diskSizeGb?: string | number }>(
+          "GET",
+          path,
+        );
+        const minimum = Number(image.diskSizeGb);
+        if (!Number.isSafeInteger(minimum) || minimum <= 0 || !image.name) {
+          throw new Error(
+            `resolve GCP root disk minimum: source ${source} has no name or disk size`,
+          );
+        }
+        return { source: `projects/${project}/global/${kind}/${image.name}`, diskSizeGb: minimum };
+      });
+    return this.imageMinimumCache
+      ? this.imageMinimumCache.get(JSON.stringify([selectedProject, project, path]), resolve)
+      : resolve();
+  }
+
+  private invalidateImageMinimumOnError(error: unknown): void {
+    const detail = error instanceof GCPHTTPError ? error.body : errorMessage(error);
+    if (
+      (error instanceof GCPHTTPError && error.status === 404) ||
+      /image|snapshot|disk|not[\s_-]*found/i.test(detail)
+    ) {
+      this.imageMinimumCache?.invalidate();
     }
-    return { source: `projects/${project}/global/${kind}/${image.name}`, diskSizeGb: minimum };
   }
 
   private async gcp<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -1300,6 +1326,7 @@ export class GCPClient {
         : this.gcpRequest<T>(method, path, token, body));
     } catch (error) {
       this.firewallCache?.invalidate();
+      this.invalidateImageMinimumOnError(error);
       throw error;
     }
   }
@@ -1504,6 +1531,7 @@ export class GCPClient {
       operationError(op);
     } catch (error) {
       this.firewallCache?.invalidate();
+      this.invalidateImageMinimumOnError(error);
       throw error;
     }
   }

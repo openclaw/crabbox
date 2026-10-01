@@ -621,6 +621,22 @@ This reduces the observation delay for an early address, not the VM's boot time.
 
 ## Coordinator preparation reuse
 
+For automatic root sizing, the coordinator caches the resolved image or snapshot
+path and minimum disk size for up to 30 minutes from lookup start. The cache is
+memory-only, bounded to 128 references, and isolated by coordinator environment,
+credential generation, execution project, and source project/reference. Zones and
+machine classes share source metadata, but each create still applies its class
+default. Family aliases stay pinned to the inspected image during that window;
+new family members appear on the next uncached lookup. Cache hits do not extend
+the window. Cold coordinators and credential rotation require fresh metadata.
+
+Image, snapshot, disk, and not-found provider errors discard these hints, including
+asynchronous operation errors; failed lookups are never cached. In-flight reads
+cannot refill invalidated entries. Explicit request or operator root sizes skip
+the lookup entirely, as do machine-image restores. Ownership and cleanup never
+use this cache. `gcp.image_minimum` measures an uncached lookup, including source
+metadata validation and any token acquisition; warm cache hits emit no lookup step.
+
 The coordinator caches an exact firewall verification in memory for up to five
 minutes, scoped to its environment, credential generation, project, firewall
 name, network, and desired policy. Creates with the same policy during that

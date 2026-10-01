@@ -154,7 +154,7 @@ network latency and existing retries, not provider-side execution durations.
 | --- | --- |
 | `admission` | Lifecycle lock wait, configuration preparation, pricing, usage counting, limit checks, access snapshot, provider preparation, ready-pool inventory reads when executed, and reservation/preparation record publication |
 | `aws` | Existing diagnostic buckets for key pair, image, ingress/lifecycle waits, security group and ingress operations, quota, instance types, instance create and image cleanup; plus user-data/request rendering |
-| `gcp` | Token mint on cache miss, image and zone selection, firewall GET/PUT/insert and operation wait, user-data rendering, combined boot-disk/instance insert and instance operation wait |
+| `gcp` | Token mint on cache miss, image and zone selection, root-disk image/snapshot minimum lookup on cache miss (`gcp.image_minimum`), firewall GET/PUT/insert and operation wait, user-data rendering, combined boot-disk/instance insert and instance operation wait |
 | `hetzner` | SSH key registration, image selection, user-data rendering and server create |
 | `azure` | SKU availability and existing attempt duration, including network setup and checked cleanup for failed attempts |
 
