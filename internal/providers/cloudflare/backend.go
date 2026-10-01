@@ -81,7 +81,7 @@ func (b *cloudflareBackend) Warmup(ctx context.Context, req core.WarmupRequest) 
 }
 
 func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
-	workdir, err := cloudflareWorkdir(b.cfg)
+	workdir, err := b.runWorkdir(req.ID)
 	if err != nil {
 		return core.RunResult{}, err
 	}
@@ -333,7 +333,7 @@ func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflar
 	if err != nil {
 		return core.LeaseClaim{}, cloudflareContainer{}, err
 	}
-	labels := map[string]string{"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": slug, "repo": repo.Name, "instance_type": client.instanceType}
+	labels := map[string]string{"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": slug, "repo": repo.Name, "instance_type": client.instanceType, "workdir": workdir}
 	sandbox, err := client.createSandbox(ctx, createSandboxRequest{
 		ID: leaseID, LeaseID: leaseID, Slug: slug, Repo: repo.Name, Workdir: workdir, SnapshotID: source.snapshotID,
 		InstanceType: client.instanceType, Image: strings.TrimSpace(b.cfg.Cloudflare.Image), TTLSeconds: durationSecondsCeil(b.cfg.TTL), IdleTimeoutSeconds: durationSecondsCeil(b.cfg.IdleTimeout), Labels: labels,
@@ -389,6 +389,21 @@ func rejectCloudflareSyncOptions(req core.RunRequest) error {
 		return core.Exit(2, "%s uses archive sync; --checksum is not supported", providerName)
 	}
 	return nil
+}
+
+// runWorkdir keeps a claimed lease in the workdir it was created with, such as
+// a checkpoint fork's captured workdir; new leases use the configured one.
+// Resolve reports claim lookup failures for the run.
+func (b *cloudflareBackend) runWorkdir(id string) (string, error) {
+	cfg := b.cfg
+	if strings.TrimSpace(id) != "" {
+		if claim, ok, err := core.ResolveLeaseClaimForProvider(id, providerName); err == nil && ok {
+			if workdir := strings.TrimSpace(claim.Labels["workdir"]); workdir != "" {
+				cfg.Cloudflare.Workdir = workdir
+			}
+		}
+	}
+	return cloudflareWorkdir(cfg)
 }
 
 func cloudflareWorkdir(cfg core.Config) (string, error) {

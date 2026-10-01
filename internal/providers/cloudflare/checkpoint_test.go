@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -23,6 +25,7 @@ type fakeSnapshotRunner struct {
 	server    *httptest.Server
 	creates   []createSandboxRequest
 	snapshots []string
+	execs     []shared.CommandStreamRequest
 }
 
 func newFakeSnapshotRunner(t *testing.T) *fakeSnapshotRunner {
@@ -42,6 +45,20 @@ func newFakeSnapshotRunner(t *testing.T) *fakeSnapshotRunner {
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/sandboxes/"):
 			id := strings.TrimPrefix(r.URL.Path, "/v1/sandboxes/")
 			_, _ = fmt.Fprintf(w, `{"id":%q,"state":"running","workdir":"/workspace/app","instanceType":"standard-1"}`, id)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/exec-stream"):
+			var req shared.CommandStreamRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Errorf("decode exec: %v", err)
+			}
+			f.execs = append(f.execs, req)
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			if strings.Contains(req.Command, "df -B1") {
+				_, _ = io.WriteString(w, `{"type":"stdout","data":"10737418240 /tmp\n10737418240 /workspace/app\n"}`+"\n")
+			}
+			_, _ = io.WriteString(w, `{"type":"complete","exitCode":0}`+"\n")
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/files"):
+			_, _ = io.Copy(io.Discard, r.Body)
+			_, _ = io.WriteString(w, `{}`)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/snapshots"):
 			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/sandboxes/"), "/snapshots")
 			var body struct{ Name string }
@@ -145,6 +162,23 @@ func TestCloudflareCheckpointCreateAndForkThroughCLI(t *testing.T) {
 	claim, ok, err := core.ResolveLeaseClaimForProvider(fork.ID, providerName)
 	if err != nil || !ok || claim.RepoRoot != repo {
 		t.Fatalf("fork claim = %+v ok=%t err=%v", claim, ok, err)
+	}
+
+	// The attached command runs as a separate `run --id` that reloads the
+	// default config, so the fork's captured workdir must come from its claim.
+	if err := app.Run(t.Context(), []string{"checkpoint", "fork", record.ID, "--", "pwd"}); err != nil {
+		t.Fatalf("fork with command: %v %s", err, stderr.String())
+	}
+	if len(runner.execs) == 0 {
+		t.Fatal("fork command did not run")
+	}
+	for _, exec := range runner.execs {
+		if strings.Contains(exec.Cwd+exec.Command, core.CloudflareConfigDefaultWorkdir) {
+			t.Fatalf("fork command exec = %+v used the default workdir", exec)
+		}
+	}
+	if last := runner.execs[len(runner.execs)-1]; last.Command != "'pwd'" || last.Cwd != "/workspace/app" {
+		t.Fatalf("fork command exec = %+v, want pwd in /workspace/app", last)
 	}
 
 	if err := app.Run(t.Context(), []string{"checkpoint", "delete", record.ID}); err == nil || !strings.Contains(err.Error(), "--local-only") {
