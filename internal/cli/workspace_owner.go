@@ -22,9 +22,13 @@ const (
 	workspaceOwnerPollInterval, workspaceOwnerSSHConnectTimeoutOption, workspaceOwnerSSHConnectionAttemptsOption = time.Second, "10", "3"
 )
 
+// A renewal call that got no protocol answer is retried up to this many times, the
+// first after this backoff; the owner TTL leaves room for that many more calls.
+const workspaceOwnerRenewRetries, workspaceOwnerRenewBackoff = 2, 250 * time.Millisecond
+
 var (
 	workspaceOwnerCallTimeout         = sshTransportCallBudget(SSHTarget{}, sshControlMetadataLimit, sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true})
-	workspaceOwnerTTL                 = workspaceOwnerRenewInterval + workspaceOwnerCallTimeout + workspaceOwnerRenewMargin
+	workspaceOwnerTTL                 = workspaceOwnerRenewInterval + (1+workspaceOwnerRenewRetries)*workspaceOwnerCallTimeout + workspaceOwnerRenewMargin
 	workspaceOwnerCloseQuiesceTimeout = 2*workspaceOwnerCallTimeout + workspaceOwnerRenewMargin
 	workspaceOwnerWaitTimeout         = workspaceOwnerTTL + workspaceOwnerPollInterval + workspaceOwnerCallTimeout + workspaceOwnerRenewMargin
 )
@@ -168,6 +172,10 @@ type workspaceOwner struct {
 	done           chan struct{}
 	closeOnce      sync.Once
 	closeTransport func() error
+
+	// confirmed is when the last acknowledged acquire or renewal was sent: the remote
+	// state cannot expire before confirmed + ttl. Only the renewal goroutine updates it.
+	confirmed time.Time
 
 	mu       sync.Mutex
 	renewErr error
@@ -326,7 +334,7 @@ func acquireWorkspaceOwner(ctx context.Context, target SSHTarget, leaseID string
 	}
 	transport := sshWorkspaceOwnerTransport{target: controlTarget}
 	call := workspaceOwnerTransportCallBudget(transport)
-	ttl := workspaceOwnerRenewInterval + call + workspaceOwnerRenewMargin
+	ttl := workspaceOwnerRenewInterval + (1+workspaceOwnerRenewRetries)*call + workspaceOwnerRenewMargin
 	wait := ttl + workspaceOwnerPollInterval + call + workspaceOwnerRenewMargin
 	owner, err := acquireWorkspaceOwnerWithTransport(ctx, target, leaseID, stderr, transport, wait, ttl, workspaceOwnerRenewInterval)
 	if err != nil {
@@ -367,12 +375,14 @@ func acquireWorkspaceOwnerWithTransport(ctx context.Context, target SSHTarget, l
 	started := time.Now()
 	nextProgress := workspaceOwnerProgressEvery
 	for {
+		sent := time.Now()
 		response, callErr := callWorkspaceOwnerTransport(waitCtx, owner.callTimeout(), transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: owner.key, Token: owner.token, TTL: ttl})
 		if callErr != nil {
 			return nil, Exit(7, "acquire remote workspace owner: ambiguous remote state: %v", callErr)
 		}
 		switch response {
 		case "ACQUIRED", "RECOVERED":
+			owner.confirmed = sent
 			owner.ctx, owner.cancel = context.WithCancel(ctx)
 			go owner.renewLoop(renewInterval)
 			fmt.Fprintf(stderr, "workspace owner acquired wait=%s recovered=%t\n", time.Since(started).Round(time.Millisecond), response == "RECOVERED")
@@ -423,20 +433,59 @@ func (o *workspaceOwner) renewLoopWithTicks(ticks <-chan time.Time, callTimeout 
 		case <-o.ctx.Done():
 			return
 		case <-ticks:
-			response, err := callWorkspaceOwnerTransport(context.WithoutCancel(o.ctx), callTimeout, o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerRenew, Key: o.key, Token: o.token, TTL: o.ttl})
-			if err == nil && response == "RENEWED" {
+			err := o.renewWithinOwnership(callTimeout)
+			if err == nil {
 				continue
 			}
-			if err == nil {
-				err = errors.New("unexpected protocol response")
+			if errors.Is(err, errWorkspaceOwnerRenewStopped) {
+				return
 			}
-			err = workspaceOwnerProtocolError(response, err)
 			o.mu.Lock()
 			o.renewErr = Exit(7, "remote workspace owner renewal failed closed: %v", err)
 			o.mu.Unlock()
 			o.cancel()
 			return
 		}
+	}
+}
+
+var errWorkspaceOwnerRenewStopped = errors.New("workspace owner renewal stopped")
+
+// renewWithinOwnership renews once. A call that got no protocol answer (the transport
+// itself failed) is retried, with backoff, while the retry can still finish before the
+// ownership the last acknowledged request proved can lapse; past that point a second
+// owner could be admitted, so it fails closed. A protocol answer other than RENEWED is
+// final and is never retried. An owner with no confirmed time never retries.
+func (o *workspaceOwner) renewWithinOwnership(callTimeout time.Duration) error {
+	confirmedUntil := o.confirmed.Add(o.ttl - workspaceOwnerRenewMargin)
+	backoff := workspaceOwnerRenewBackoff
+	for attempt := 0; ; attempt++ {
+		sent := time.Now()
+		response, err := callWorkspaceOwnerTransport(context.WithoutCancel(o.ctx), callTimeout, o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerRenew, Key: o.key, Token: o.token, TTL: o.ttl})
+		if err == nil && response == "RENEWED" {
+			o.confirmed = sent
+			return nil
+		}
+		if err == nil {
+			err = errors.New("unexpected protocol response")
+		}
+		if response != "" || attempt == workspaceOwnerRenewRetries || o.confirmed.IsZero() {
+			return workspaceOwnerProtocolError(response, err)
+		}
+		if time.Now().Add(backoff + callTimeout).After(confirmedUntil) {
+			return workspaceOwnerProtocolError(response, fmt.Errorf("no retry fits before the confirmed ownership lapses: %w", err))
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-o.stop:
+			timer.Stop()
+			return errWorkspaceOwnerRenewStopped
+		case <-o.ctx.Done():
+			timer.Stop()
+			return errWorkspaceOwnerRenewStopped
+		case <-timer.C:
+		}
+		backoff *= 2
 	}
 }
 
