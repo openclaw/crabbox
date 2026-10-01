@@ -76,8 +76,8 @@ The `wayland` and `gnome` profiles need a resize-capable WayVNC and a headless
 compositor output. Actual Ubuntu 26.04 packages include WayVNC 0.9.1; Ubuntu
 24.04's WayVNC 0.7.2 does not support client-requested resizing. Check the
 guest's actual `wayvnc --version` and `/etc/os-release`: the OS selector alone
-is not proof. In particular, Hetzner's `ubuntu:26.04` selector currently maps
-to an Ubuntu 24.04 image.
+is not proof. Crabbox clients before 0.68.0 mapped Hetzner's `ubuntu:26.04`
+selector to an Ubuntu 24.04 image.
 
 WayVNC gives layout ownership to the first client that requests a resize,
 until that client disconnects. Changing to Fit, becoming an observer, or

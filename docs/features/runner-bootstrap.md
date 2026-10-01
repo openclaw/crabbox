@@ -396,7 +396,7 @@ Edit `recipes/bootstrap/v1/` rather than the generated Go or TypeScript files:
   aliases after case/separator normalization, and image metadata. Provider
   adapters still choose images and architecture-specific behavior; the catalog
   does not choose providers or change fallback policy. For example, Ubuntu
-  26.04 retains its existing Hetzner 24.04 mapping.
+  26.04 maps to Hetzner's published `ubuntu-26.04` image.
 - `artifacts.json` defines pinned URLs, versions, SHA-256 digests, and the browser
   signing-key fingerprint. The generator produces constants for both runtimes,
   including the existing Tailscale default exports. Runtime override lookup and
