@@ -142,7 +142,7 @@ crabbox run --provider local-container --id dev-box -- uname -a
 crabbox run --provider local-container --id dev-box -- uname -a
 
 # Open a shell, or release the box when finished.
-crabbox ssh --provider local-container --id dev-box
+crabbox connect --provider local-container --id dev-box
 crabbox stop --provider local-container dev-box
 ```
 
@@ -150,6 +150,9 @@ Replace `uname -a` with your test command once the box is prepared. `warmup`
 creates a reusable lease; `prewarm` additionally performs Actions hydration.
 A lease has both a stable `cbx_...` ID and a friendly slug; either works with
 `--id`.
+
+`connect` opens the shell directly. Use `crabbox ssh --id <box>` when you
+only need to print the SSH command for your own tooling.
 
 For a complete repository setup, see [Getting started](docs/getting-started.md)
 and [Local Container](docs/providers/local-container.md).
@@ -178,7 +181,7 @@ Cloud runs use your infrastructure and may incur charges.
 | `crabbox run --shell '<script>'` | The same, for a multi-step shell command. |
 | `crabbox warmup` / `crabbox prewarm` | Create a reusable box; `prewarm` also runs Actions hydration. |
 | `crabbox run --id <box> -- <cmd>` | Reuse a warm box, syncing only what changed. |
-| `crabbox ssh --id <box>` | Open an interactive shell on the box. |
+| `crabbox connect --id <box>` | Open an interactive shell on the box. |
 | `crabbox job run <name>` | Run a named workflow defined in `.crabbox.yaml`. |
 | `crabbox list` / `crabbox stop <box>` | See active boxes, and release one when finished. |
 
@@ -191,7 +194,7 @@ the [CLI reference](docs/cli.md) lists all flags and environment variables.
 | Situation | Try this |
 | --- | --- |
 | The run never reaches the box | `crabbox doctor --provider <name>` for prerequisites and reachability. |
-| You need to inspect the failure | Add `--keep-on-failure`, then `crabbox ssh --id <box>` into the exact box that failed. |
+| You need to inspect the failure | Add `--keep-on-failure`, then `crabbox connect --id <box>` into the exact box that failed. |
 | A warm box behaves as if stale | Add `--full-resync` to reset the remote workdir before syncing. |
 | Output is binary or terminal-hostile | `--capture-stdout <path>`, and `--capture-stderr <path>`. |
 | You need a file the run produced | `--download remote=local`, repeatable for several files. |

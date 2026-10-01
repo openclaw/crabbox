@@ -219,7 +219,7 @@ explicit `--allow` allowlist.
 The remote helper failed to come up. Inspect its log on the box:
 
 ```sh
-crabbox ssh --id blue-lobster
+crabbox connect --id blue-lobster
 cat /tmp/crabbox-egress-client.log
 ```
 
