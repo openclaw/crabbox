@@ -148,6 +148,11 @@ file. Remote archive entries are confined to the bundle subtree; unsafe links
 and special files are omitted. `--capture-on-fail` is still accepted as a compatibility alias; failure
 bundles are saved automatically on non-zero exit regardless.
 
+Remote archive staging uses the output filesystem under the workspace's
+`.crabbox` directory, so a small memory-backed `/tmp` does not block capture
+when the workspace disk has room. Disk-reserve and archive-size limits still
+apply; temporary staging files are removed after success or failure.
+
 If the project capture destination is unwritable (permission denied or a
 read-only filesystem), Crabbox saves the bundle under its per-user state
 directory instead: `$XDG_STATE_HOME/crabbox/captures/` when `XDG_STATE_HOME` is

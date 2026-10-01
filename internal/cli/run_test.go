@@ -8703,7 +8703,7 @@ exec ` + shellQuote(realTar) + ` "$@"
 	}
 	lines := strings.Split(strings.TrimSpace(string(dfCalls)), "\n")
 	if len(lines) != 4 ||
-		!strings.Contains(lines[0], tempRoot) || lines[2] != lines[0] ||
+		!strings.HasPrefix(lines[0], "-Pk .crabbox/crabbox-failure-capture.") || lines[2] != lines[0] ||
 		lines[1] != "-Pk .crabbox" || lines[3] != lines[1] {
 		t.Fatalf("disk admission calls=%q", lines)
 	}
@@ -8715,6 +8715,43 @@ exec ` + shellQuote(realTar) + ` "$@"
 	}
 	if entries, err := os.ReadDir(tempRoot); err != nil || len(entries) != 0 {
 		t.Fatalf("failure capture scratch retained: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestRemoteFailureCaptureUsesOutputDiskWhenTempIsSmall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX capture command")
+	}
+	workdir, tempRoot, binDir := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("TMPDIR", tempRoot)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// Tiny Linux guests can have a small /tmp tmpfs despite ample workspace disk.
+	dfScript := `#!/bin/sh
+available=9999999
+case "$2" in "$TMPDIR"/*) available=1000000 ;; esac
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf 'fake 9999999 0 %s 0%% /\n' "$available"
+`
+	if err := os.WriteFile(filepath.Join(binDir, "df"), []byte(dfScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "failure.log"), []byte("synthetic failure evidence"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := remoteFailureCaptureCommand(workdir, ".crabbox/capture.tar.gz", "")
+	command = strings.Replace(command, "bash -lc ", "bash --noprofile --norc -c ", 1)
+	if out, err := exec.Command("/bin/sh", "-c", command).CombinedOutput(); err != nil {
+		t.Fatalf("capture with ample output disk failed: %v\n%s", err, out)
+	}
+	archive := filepath.Join(workdir, ".crabbox", "capture.tar.gz")
+	if got := string(readTarGzContents(t, archive)["failure.log"]); got != "synthetic failure evidence" {
+		t.Fatalf("captured log=%q", got)
+	}
+	if entries, err := os.ReadDir(filepath.Join(workdir, ".crabbox")); err != nil || len(entries) != 1 || entries[0].Name() != "capture.tar.gz" {
+		t.Fatalf("capture scratch retained beside output: entries=%v err=%v", entries, err)
+	}
+	if entries, err := os.ReadDir(tempRoot); err != nil || len(entries) != 0 {
+		t.Fatalf("capture scratch retained in temp: entries=%v err=%v", entries, err)
 	}
 }
 
@@ -8913,6 +8950,9 @@ func assertRemoteFailureCaptureFilesRemoved(t *testing.T, workdir, tempRoot stri
 	}
 	if entries, err := os.ReadDir(tempRoot); err != nil || len(entries) != 0 {
 		t.Fatalf("failure capture scratch retained: entries=%v err=%v", entries, err)
+	}
+	if paths, err := filepath.Glob(filepath.Join(workdir, ".crabbox", "crabbox-failure-capture.*")); err != nil || len(paths) != 0 {
+		t.Fatalf("failure capture scratch retained beside output: paths=%v err=%v", paths, err)
 	}
 }
 

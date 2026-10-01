@@ -1351,7 +1351,9 @@ if [ "$capture_max_bytes" -le 0 ] || [ $((capture_max_bytes % 1024)) -ne 0 ] || 
   printf 'invalid failure capture limits: max=%s reserve=%s\n' "$capture_max_bytes" "$capture_reserve_bytes" >&2
   exit 7
 fi
-scratch=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-failure-capture.XXXXXX")
+out_dir=$(dirname "$out")
+# Stage on the output disk; /tmp may be a small memory-backed filesystem.
+scratch=$(mktemp -d "$out_dir/crabbox-failure-capture.XXXXXX")
 cleanup_capture_scratch() {
   status=$?
   trap - EXIT HUP INT TERM
@@ -1436,7 +1438,6 @@ capture_apply_file_limit() {
   esac
   ulimit -f "$capture_file_blocks"
 }
-out_dir=$(dirname "$out")
 capture_require_space scratch "$scratch"
 capture_require_space output "$out_dir"
 mkdir -p "$scratch/.crabbox"
