@@ -56,7 +56,7 @@ Commands run as `timeout --kill-after=5s <ttl> /bin/bash -l <script>`, so a
 timeout signals the whole process group and exits 124; group members that
 ignore SIGTERM are killed 5 seconds later. `exec()` does not inherit the image
 `ENV`; login-shell defaults such as `NPM_CONFIG_CACHE` live in
-`/etc/profile.d/crabbox.sh`. A background process that keeps stdout or stderr
+`/etc/profile.d/crabbox.sh` and apply only when the variable is not forwarded. A background process that keeps stdout or stderr
 open (`sleep 30 & echo done`) does not hold the command open: after the command
 exits, output keeps streaming until 300 ms pass without new bytes, for at most
 5 seconds of reading. Output is read only as fast as the CLI reads the

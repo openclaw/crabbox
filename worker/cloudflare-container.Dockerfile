@@ -30,10 +30,11 @@ RUN apt-get update \
 
 COPY --from=go-runtime /usr/local/go /usr/local/go
 # Commands run through the Worker's native exec() as `bash -l`; the profile
-# carries image defaults because exec() does not inherit the image ENV.
+# carries image defaults because exec() does not inherit the image ENV. A
+# forwarded NPM_CONFIG_CACHE, even an empty one, keeps its value.
 RUN ln -sf /usr/local/go/bin/go /usr/local/bin/go \
   && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
-  && printf '%s\n' 'export NPM_CONFIG_CACHE=/var/cache/crabbox/npm' 'export PATH=/usr/local/go/bin:$PATH' > /etc/profile.d/crabbox.sh
+  && printf '%s\n' 'export NPM_CONFIG_CACHE="${NPM_CONFIG_CACHE-/var/cache/crabbox/npm}"' 'export PATH=/usr/local/go/bin:$PATH' > /etc/profile.d/crabbox.sh
 
 WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "--", "sleep", "infinity"]
