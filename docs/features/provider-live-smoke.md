@@ -155,13 +155,13 @@ hermetic lifecycle tests, `scripts/live-smoke.sh`, dedicated live runners, and
 `//go:build smoke` tests. Regenerate it with
 `node scripts/generate-provider-matrix.mjs`; docs CI rejects drift.
 
-Current coverage: 81 providers; 10 with convention-named hermetic lifecycle tests, 61 with a live runner, 8 with tagged Go smoke tests, and 18 with none of those lifecycle surfaces.
+Current coverage: 81 providers; 11 with convention-named hermetic lifecycle tests, 61 with a live runner, 8 with tagged Go smoke tests, and 18 with none of those lifecycle surfaces.
 
 | Provider | Hermetic lifecycle | Live runner | Tagged Go smoke |
 | --- | --- | --- | --- |
 | [agent-sandbox](../providers/agent-sandbox.md) | — | dedicated + matrix | — |
 | [anthropic-sandbox-runtime](../providers/anthropic-sandbox-runtime.md) | — | dedicated + matrix | — |
-| [apple-container](../providers/apple-container.md) | — | matrix | yes |
+| [apple-container](../providers/apple-container.md) | yes (`applecontainer`) | matrix | yes |
 | [apple-machine](../providers/apple-machine.md) | — | — | — |
 | [apple-vm](../providers/apple-vm.md) | — | matrix | yes |
 | [ascii-box](../providers/ascii-box.md) | — | — | — |
