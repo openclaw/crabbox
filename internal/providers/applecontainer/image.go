@@ -114,6 +114,8 @@ func (b *backend) createPinnedContainer(ctx context.Context, cfg core.Config, ar
 			}
 			return b.startVerifiedPinnedContainer(ctx, cfg, observed, leaseID, slug)
 		})
+	}, func(observed imageContainerObservation) error {
+		return b.rollbackImageContainer(cfg, observed, leaseID, slug)
 	})
 }
 
@@ -123,10 +125,10 @@ func (b *backend) createPinnedContainer(ctx context.Context, cfg core.Config, ar
 func (b *backend) createPinnedContainerUnderLeaseLock(ctx context.Context, cfg core.Config, args []string, name, leaseID, slug, digest string) (string, error) {
 	return b.createPinnedContainerWithStart(ctx, cfg, args, name, leaseID, slug, digest, func(observed imageContainerObservation) error {
 		return b.startVerifiedPinnedContainer(ctx, cfg, observed, leaseID, slug)
-	})
+	}, nil)
 }
 
-func (b *backend) createPinnedContainerWithStart(ctx context.Context, cfg core.Config, args []string, name, leaseID, slug, digest string, start func(imageContainerObservation) error) (string, error) {
+func (b *backend) createPinnedContainerWithStart(ctx context.Context, cfg core.Config, args []string, name, leaseID, slug, digest string, start, rollback func(imageContainerObservation) error) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -149,7 +151,12 @@ func (b *backend) createPinnedContainerWithStart(ctx context.Context, cfg core.C
 	}
 	if observed.container.Configuration.Image.Descriptor.Digest != digest {
 		cause := core.Exit(5, "Apple Container created image digest differs from the reviewed default; bootstrap refused")
-		if err := b.rollbackImageContainer(cfg, observed, leaseID, slug); err != nil {
+		// Fixed acquisition owns the claim lock and a durable attempt. Keep the
+		// unverified target instead of reentering ordinary unclaimed rollback.
+		if rollback == nil {
+			return retained(cause)
+		}
+		if err := rollback(observed); err != nil {
 			return retained(errors.Join(cause, err))
 		}
 		return "", cause

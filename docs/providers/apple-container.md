@@ -184,6 +184,38 @@ variable consumed by the bootstrap script.
    and exactly claimed running non-`keep` containers whose local claim is stale
    past the idle timeout plus a safety grace period, and prunes orphaned claims.
 
+## Fixed lease IDs
+
+Use `--lease-id cbx_<12 lowercase hex>` to retry an allocation with the same
+durable identity:
+
+```sh
+crabbox warmup --provider apple-container --lease-id cbx_abcdef123456 --slug build-worker
+```
+
+Keep the same local Crabbox state directory and creation settings on retries.
+The provider binds the ID to a deterministic container name and a fingerprint
+of the CLI path, image, SSH public key, user, work root, resource limits,
+extra arguments, cache volumes, explicit architecture, slug request, pond,
+keep setting, TTL, and idle timeout. Changed intent, duplicate candidates,
+missing bound containers, and mismatched identity or image evidence fail with
+`lease_id_conflict`. An identical replay reuses the verified container without
+another create or start when it is already running.
+
+If creation left a stopped container before acquisition completed, retry verifies
+its exact identity and image, rechecks its unchanged configuration, and resumes
+startup. It never restarts a stopped lease that was already acquired. A recorded
+create attempt with no visible resource remains unresolved; retries do not submit
+another create. For a reviewed-image digest mismatch, the fixed attempt, target,
+and SSH key are retained for the manual native inspection described above.
+
+Release rechecks the exact claimed container and confirms its absence in native
+inventory before retaining a terminal tombstone. Missing-resource cleanup does
+the same for acquired leases; unresolved pending attempts retain their recovery
+records even when an earlier inventory did not show a container.
+Released IDs cannot create another container; choose a new ID for a later lease.
+Acquisitions without `--lease-id` keep their existing behavior.
+
 ## Limits and caveats
 
 - macOS on Apple silicon only; the provider is gated to `darwin/arm64`.

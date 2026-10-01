@@ -22,6 +22,10 @@
 - Prefer IPv4 for AWS coordinator connections so heartbeats refresh the source used by public SSH, while preserving IPv6 fallback and configured proxies. [PR 2651](https://github.com/openclaw/crabbox/pull/2651).
 - Keep long runs alive across bounded workspace-owner renewal transport failures while preserving fail-closed token and expiry checks. [PR 2641](https://github.com/openclaw/crabbox/pull/2641). Thanks @youssef-tharwat.
 
+### Added
+
+- Support caller-supplied Apple Container lease IDs with verified replay, recovery of interrupted startup, and terminal release receipts. [PR 2644](https://github.com/openclaw/crabbox/pull/2644). Thanks @genaro23.
+
 ## 0.69.0 - 2026-09-29
 
 ### Highlights

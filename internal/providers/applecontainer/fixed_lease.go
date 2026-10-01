@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -128,7 +130,6 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		if intent.Attempt != nil && intent.Attempt["container_name"] != name {
 			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed apple-container lease %s has an invalid durable create attempt", leaseID)
 		}
-		var container inspectContainer
 		if len(matches) == 0 {
 			if intent.State == "acquired" || claim.CloudID != "" {
 				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: acquired fixed apple-container lease %s is missing its bound container", leaseID)
@@ -145,22 +146,22 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			if err != nil {
 				return core.LeaseTarget{}, err
 			}
-			container, err = b.inspectContainer(ctx, containerID)
-			if err != nil {
-				return core.LeaseTarget{}, err
-			}
-			claim.CloudID = container.id()
-			intent.Attempt["container_id"] = container.id()
-			claim.Labels = b.serverFromContainer(container, cfg).Labels
-			if err := persist(); err != nil {
-				return core.LeaseTarget{}, err
+			if containerID != name {
+				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed apple-container create returned an unexpected container identity")
 			}
 		} else {
-			container = matches[0]
 			if intent.Attempt == nil {
 				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed apple-container lease %s has no durable create attempt", leaseID)
 			}
+			if matches[0].id() != name {
+				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed apple-container lease %s has an unexpected container identity", leaseID)
+			}
 		}
+		observed, err := b.inspectImageContainer(ctx, cfg, name)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		container := observed.container
 		if claim.CloudID != "" && claim.CloudID != container.id() {
 			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed apple-container lease %s does not match its bound container", leaseID)
 		}
@@ -178,9 +179,28 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 				return core.LeaseTarget{}, err
 			}
 		}
+		if !container.running() {
+			if intent.State != "prepared" || (container.status() != "created" && container.status() != "stopped") {
+				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed apple-container lease %s is not a pending stopped container", leaseID)
+			}
+			if err := b.startFixedAppleContainer(ctx, cfg, observed, leaseID, intent.Slug, fingerprint); err != nil {
+				return core.LeaseTarget{}, err
+			}
+			observed, err = b.inspectImageContainer(ctx, cfg, name)
+			if err != nil {
+				return core.LeaseTarget{}, err
+			}
+			container = observed.container
+		}
 		container, err = b.waitForNetworkAddress(ctx, container.id(), container, core.BootstrapWaitTimeout(cfg))
 		if err != nil {
 			return core.LeaseTarget{}, err
+		}
+		if err := validateFixedAppleContainer(container, cfg, leaseID, intent.Slug, fingerprint); err != nil {
+			return core.LeaseTarget{}, err
+		}
+		if !container.running() {
+			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed apple-container lease %s is not running", leaseID)
 		}
 		return b.prepareLease(ctx, cfg, container, leaseID, intent.Slug, true)
 	}, ctx)
@@ -198,6 +218,11 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 
 func validateFixedAppleContainer(container inspectContainer, cfg core.Config, leaseID, slug, fingerprint string) error {
 	labels := container.labels()
+	for key, value := range container.Labels {
+		if configured, ok := container.Configuration.Labels[key]; ok && configured != value {
+			return core.Exit(4, "lease_id_conflict: Apple container for lease %s has conflicting labels", leaseID)
+		}
+	}
 	if labels["crabbox"] != "true" || labels["provider"] != providerName ||
 		labels["lease"] != leaseID || core.NormalizeLeaseSlug(labels["slug"]) != slug ||
 		labels["pond"] != core.NormalizePondName(cfg.Pond) ||
@@ -207,7 +232,27 @@ func validateFixedAppleContainer(container inspectContainer, cfg core.Config, le
 		container.id() != core.LeaseProviderName(leaseID, slug) {
 		return core.Exit(4, "lease_id_conflict: Apple container for lease %s does not match its fixed create intent", leaseID)
 	}
+	if digest, pinned := core.DefaultContainerImageDigest(cfg.AppleContainer.Image); pinned &&
+		(digest == "" || container.Configuration.Image.Descriptor.Digest != digest) {
+		return core.Exit(4, "lease_id_conflict: Apple container for lease %s does not match its reviewed image digest", leaseID)
+	}
 	return nil
+}
+
+// The caller holds the durable claim lock and has verified the pending attempt.
+func (b *backend) startFixedAppleContainer(ctx context.Context, cfg core.Config, observed imageContainerObservation, leaseID, slug, fingerprint string) error {
+	fresh, err := b.inspectImageContainer(ctx, cfg, observed.container.id())
+	if err != nil {
+		return err
+	}
+	if err := validateFixedAppleContainer(fresh.container, cfg, leaseID, slug, fingerprint); err != nil {
+		return err
+	}
+	if (fresh.container.status() != "created" && fresh.container.status() != "stopped") || !reflect.DeepEqual(fresh.configuration, observed.configuration) {
+		return core.Exit(4, "lease_id_conflict: Apple container configuration changed before fixed lease startup")
+	}
+	_, err = b.imageControl(ctx, cfg, []string{"start", fresh.container.id()}, 2*time.Minute)
+	return err
 }
 
 func (b *backend) RetainLeaseClaimAfterReleaseWithClaim(lease core.LeaseTarget, previous core.LeaseClaim) (bool, error) {

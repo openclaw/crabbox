@@ -18,14 +18,15 @@ import (
 )
 
 type backend struct {
-	spec core.ProviderSpec
-	cfg  core.Config
-	rt   core.Runtime
+	spec       core.ProviderSpec
+	cfg        core.Config
+	rt         core.Runtime
+	waitForSSH func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error
 }
 
 func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	applyDefaults(&cfg)
-	return &backend{spec: spec, cfg: cfg, rt: rt}
+	return &backend{spec: spec, cfg: cfg, rt: rt, waitForSSH: core.WaitForSSHReady}
 }
 
 func applyDefaults(cfg *core.Config) {
@@ -277,7 +278,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		return core.Exit(4, "lease_id_conflict: refusing to release fixed apple-container lease %s without its durable create intent", lease.LeaseID)
 	}
 	return fixedAppleContainerLeaseKind.FinalizeAfterCleanup(claim, func() error {
-		if err := b.removeContainer(ctx, id); err != nil {
+		if err := b.removeClaimedContainer(ctx, id, claim); err != nil {
 			return err
 		}
 		core.RemoveStoredTestboxKey(lease.LeaseID)
@@ -384,7 +385,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		}
 		fmt.Fprintf(b.rt.Stdout, "remove container id=%s name=%s lease=%s reason=%s\n", server.DisplayID(), server.Name, core.Blank(leaseID, "-"), reason)
 		remove := func() error {
-			if err := b.removeContainer(ctx, c.id()); err != nil {
+			if err := b.removeClaimedContainer(ctx, c.id(), claim); err != nil {
 				return err
 			}
 			if leaseID != "" {
@@ -409,6 +410,12 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		if isReleasedFixedAppleContainerClaim(claim) {
 			continue
 		}
+		if fixedAppleContainerLeaseKind.IsFixedClaim(claim) && claim.FixedCreateIntent.State != "acquired" {
+			// A native create can finish after the inventory snapshot without
+			// updating its pending claim when startup fails. Keep its recovery path.
+			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=pending-fixed-acquisition\n", claim.LeaseID)
+			continue
+		}
 		if _, ok := liveLeases[claim.LeaseID]; ok {
 			continue
 		}
@@ -427,7 +434,11 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		// reuses it before publishing its claim, outside this claim CAS. Until keys
 		// have their own generation/ownership fence, deleting one here can break the
 		// concurrent live lease; fail closed by retaining inert local key material.
-		if err := fixedAppleContainerLeaseKind.FinalizeAfterCleanup(claim, nil); err != nil {
+		var confirmAbsent func() error
+		if fixedAppleContainerLeaseKind.IsFixedClaim(claim) {
+			confirmAbsent = func() error { return b.confirmFixedContainerAbsent(ctx, claim) }
+		}
+		if err := fixedAppleContainerLeaseKind.FinalizeAfterCleanup(claim, confirmAbsent); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, err)
 			continue
 		}
@@ -793,7 +804,7 @@ func (b *backend) waitForSSHReady(ctx context.Context, id string, target *core.S
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- core.WaitForSSHReady(waitCtx, target, b.rt.Stderr, "apple container ssh", timeout)
+		done <- b.waitForSSH(waitCtx, target, b.rt.Stderr, "apple container ssh", timeout)
 	}()
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
