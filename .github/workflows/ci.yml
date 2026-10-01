@@ -228,6 +228,23 @@ jobs:
 
   windows-pond-mesh-cancellation:
     name: Windows Pond Mesh Cancellation
+    needs: [windows-native-contracts, windows-powershell-architecture]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all native Windows contracts
+        shell: bash
+        env:
+          CONTRACTS_RESULT: ${{ needs['windows-native-contracts'].result }}
+          ARCHITECTURE_RESULT: ${{ needs['windows-powershell-architecture'].result }}
+        run: |
+          printf 'Windows contracts: %s\nPowerShell architecture: %s\n' \
+            "${CONTRACTS_RESULT:-missing}" "${ARCHITECTURE_RESULT:-missing}"
+          [[ "${CONTRACTS_RESULT:-}" == success && "${ARCHITECTURE_RESULT:-}" == success ]]
+
+  windows-powershell-architecture:
+    name: Windows PowerShell 5.1 architecture
     runs-on: windows-latest
     timeout-minutes: 20
 
@@ -236,14 +253,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        id: windows_go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: false
-
-      - name: Test native Windows local Git manifest handoff
-        run: go test ./internal/cli/ -run '^TestGitLocalReceiverWindowsManifestHandoff$' -count=1 -v
+          cache: true
+          cache-dependency-path: '**/go.sum'
 
       - name: Test static SSH architecture in Windows PowerShell 5.1
         shell: pwsh
@@ -257,6 +271,26 @@ jobs:
           $events | ForEach-Object { Write-Host $_ }
           if ($code -ne 0) { exit $code }
           & ./scripts/verify-go-test-events.ps1 -Events $events -RequiredTests @($name) -Label 'Windows PowerShell 5.1 architecture probe'
+
+  windows-native-contracts:
+    name: Native Windows contracts
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        id: windows_go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: '**/go.sum'
+
+      - name: Test native Windows local Git manifest handoff
+        run: go test ./internal/cli/ -run '^TestGitLocalReceiverWindowsManifestHandoff$' -count=1 -v
 
       - name: Require native Windows external slug reservation recovery and reuse
         if: ${{ !cancelled() && steps.windows_go.outcome == 'success' }}
