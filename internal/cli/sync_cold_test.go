@@ -166,6 +166,52 @@ func TestColdSyncRoundTripAndFinalize(t *testing.T) {
 	}
 }
 
+func TestColdSyncPreservesNonUTF8Paths(t *testing.T) {
+	for _, kind := range []string{"filename", "symlink-target"} {
+		for _, compressed := range []bool{false, true} {
+			t.Run(kind+"/gzip="+strconv.FormatBool(compressed), func(t *testing.T) {
+				root, workdir := t.TempDir(), filepath.Join(t.TempDir(), "workspace")
+				name, linkname := "legacy-\xff.txt", ""
+				if kind == "symlink-target" {
+					name, linkname = "link", name
+					if err := os.Symlink(linkname, filepath.Join(root, name)); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(filepath.Join(root, name), []byte("contents"), 0o751); err != nil {
+					if errors.Is(err, syscall.EILSEQ) {
+						t.Skip("source filesystem requires UTF-8 filenames")
+					}
+					t.Fatal(err)
+				}
+				files := []string{name}
+				if got := prepareColdTestManifest(t, workdir, files); got != coldSyncReady {
+					t.Fatalf("probe=%q", got)
+				}
+				var archive bytes.Buffer
+				if err := writeColdSyncArchive(t.Context(), &archive, root, files, nil, compressed); err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.CommandContext(t.Context(), "sh", "-c", remoteColdSyncExtract(workdir, coldTestToken, compressed))
+				cmd.Stdin = &archive
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("extract: %v: %s", err, out)
+				}
+				if linkname != "" {
+					got, err := os.Readlink(filepath.Join(workdir, name))
+					if err != nil || got != linkname {
+						t.Fatalf("link=%q, want %q: %v", got, linkname, err)
+					}
+				} else {
+					got, err := os.ReadFile(filepath.Join(workdir, name))
+					if err != nil || string(got) != "contents" {
+						t.Fatalf("contents=%q: %v", got, err)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestColdSyncDirectoryRestorationOrder(t *testing.T) {
 	root := t.TempDir()
 	stamp := time.Unix(1700000000, 123456789)

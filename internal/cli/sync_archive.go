@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 func CreateSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, tempPattern string) (*os.File, error) {
@@ -107,6 +108,10 @@ func appendSyncArchiveMemberWithFormat(ctx context.Context, tw *tar.Writer, root
 	header.Format = format
 	if format == tar.FormatPAX {
 		header.AccessTime, header.ChangeTime = time.Time{}, time.Time{}
+		// POSIX paths can contain arbitrary bytes; PAX otherwise declares UTF-8.
+		if !utf8.ValidString(header.Name) || !utf8.ValidString(header.Linkname) {
+			header.PAXRecords = map[string]string{"hdrcharset": "BINARY"}
+		}
 	}
 	if err := tw.WriteHeader(header); err != nil {
 		return fmt.Errorf("archive header %s: %w", rel, err)

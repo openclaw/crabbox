@@ -4,6 +4,7 @@
 
 ### Fixes
 
+- Preserve non-UTF-8 POSIX filenames and symlink targets during cold tar sync instead of failing extraction on bsdtar targets.
 - Point generated `actions.workflow` at the custom `init --workflow` path. [PR 2624](https://github.com/openclaw/crabbox/pull/2624). Thanks @KrasimirKralev.
 - Print empty JSON inventories as `[]` (or `{}` for object-shaped provider lists) instead of `null` across lease lists, events, history, ready pools, cache volumes, provider sizes, ports, and admin inventories. [PR 2631](https://github.com/openclaw/crabbox/pull/2631).
 - Release a pressed macOS VNC key when `desktop type` or `desktop paste` is cancelled between its key-down and key-up; Screen Sharing otherwise kept it held after disconnect. [Issue 2627](https://github.com/openclaw/crabbox/issues/2627), [PR 2628](https://github.com/openclaw/crabbox/pull/2628). Thanks @altaywtf for the fix and @saariuslystoned for the report.

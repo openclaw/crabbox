@@ -330,6 +330,8 @@ The stream contains the selected manifest files and their parent-directory
 metadata, preserves symlinks without following their targets, and leaves the
 workspace root's permissions intact. Pruning and finalization use their existing
 paths, and producer or transport failure prevents finalization.
+Non-UTF-8 POSIX filenames and symlink targets retain their exact bytes when the
+destination filesystem supports them.
 
 Nonempty workspaces, enabled Git seeding and requested Git overlays (including
 their plain-manifest fallback paths), local Git snapshots,
