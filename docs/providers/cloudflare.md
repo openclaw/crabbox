@@ -53,12 +53,15 @@ entrypoint only keeps the container alive (`tini -- sleep infinity`), and the
 Durable Object runs uploads and commands through `ctx.container.exec()`.
 
 Commands run as `timeout --kill-after=5s <ttl> /bin/bash -l <script>`, so a
-timeout signals the whole process group and exits 124. `exec()` does not inherit
-the image `ENV`; login-shell defaults such as `NPM_CONFIG_CACHE` live in
+timeout signals the whole process group and exits 124; group members that
+ignore SIGTERM are killed 5 seconds later. `exec()` does not inherit the image
+`ENV`; login-shell defaults such as `NPM_CONFIG_CACHE` live in
 `/etc/profile.d/crabbox.sh`. A background process that keeps stdout or stderr
 open (`sleep 30 & echo done`) does not hold the command open: after the command
 exits, output keeps streaming until 300 ms pass without new bytes, for at most
-5 seconds.
+5 seconds of reading. Output is read only as fast as the CLI reads the
+response, with at most 256 KiB queued in the runner; time spent waiting for a
+slow CLI does not count toward those limits.
 
 ## Runner toolchain and pnpm upgrades
 
@@ -323,7 +326,9 @@ crabbox run \
   response headers. A container that fails to start is reported immediately.
 - Canceling a command (Ctrl-C, or a dropped connection) sends SIGTERM to the
   command's process group, followed by SIGKILL after 5 seconds, even when the
-  cancel arrives before the command has started.
+  cancel arrives before the command has started or the shell exits on SIGTERM.
+- A failed stdout or stderr transport ends the command with an error instead of
+  a completion with missing output.
 - Reuse, `status`, and `stop` resolve local Crabbox claims before calling the
   runner and reject raw sandbox IDs without a matching claim.
 - Reuse and cleanup keep the captured local claim revision: another caller
