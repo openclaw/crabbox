@@ -166,6 +166,12 @@ when Hetzner reports a capacity or quota error.
 
 ## Gotchas
 
+Hetzner limits user-data to 32 KiB. Crabbox sends larger cloud-init configurations
+(including desktop/browser setup) as a base64-encoded gzip MIME message that
+cloud-init decodes before processing. The decoded configuration and bootstrap
+ordering are unchanged. Configurations that still exceed the limit after
+compression fail before the server create request.
+
 Brokered release acknowledgement queues cleanup. A durable journal records
 validated delete-action success plus exact server absence before owned key
 cleanup, or a distinct already-absent observation before any known dispatch.

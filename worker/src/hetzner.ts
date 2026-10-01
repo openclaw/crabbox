@@ -1,4 +1,5 @@
 import { cloudInit } from "./bootstrap";
+import { hetznerUserData } from "./hetzner-user-data";
 import {
   implicitProviderMachineCandidates,
   serverTypeCandidatesForClass,
@@ -422,6 +423,9 @@ export class HetznerClient {
     const now = new Date();
     const name = leaseProviderName(leaseID, slug);
     const labels = leaseProviderLabels(config, leaseID, slug, owner, "hetzner", now);
+    const userData = await measureCreationStep("hetzner.user_data_render", () =>
+      hetznerUserData(cloudInit(config)),
+    );
     const requested = creationEvent("provider_create_request");
     let response: HetznerServerResponse;
     try {
@@ -433,7 +437,7 @@ export class HetznerClient {
           location: config.location,
           labels,
           ssh_keys: [config.providerKey],
-          user_data: measureCreationStepSync("hetzner.user_data_render", () => cloudInit(config)),
+          user_data: userData,
           start_after_create: true,
           public_net: {
             enable_ipv4: true,
