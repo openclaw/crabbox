@@ -719,6 +719,9 @@ func doctorErrorClass(err error) string {
 	switch {
 	case strings.Contains(message, "timed out") || strings.Contains(message, "timeout") || strings.Contains(message, "deadline"):
 		return "timeout"
+	case strings.Contains(message, "dial unix ") && strings.Contains(message, "no such file"):
+		// A missing daemon socket is an endpoint failure, not a missing CLI.
+		return "network"
 	case strings.Contains(message, "executable file not found") || strings.Contains(message, "not found in $path") || strings.Contains(message, "no such file"):
 		return "tool"
 	case strings.Contains(message, "missing") || strings.Contains(message, "required") || strings.Contains(message, "not configured") || strings.Contains(message, "empty config"):

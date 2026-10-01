@@ -144,6 +144,9 @@ remediation `hint`:
 failed  provider provider=gcp class=auth hint=check_gcp_project_credentials_and_compute_instances_list ...
 ```
 
+An absent Unix daemon socket is a `network` failure: check the configured
+endpoint and start the daemon. A missing provider executable is a `tool` failure.
+
 ### SSH key
 
 When `CRABBOX_SSH_KEY` is set, doctor validates the private key and its matching
