@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/dns/dnsmessage"
 	"nhooyr.io/websocket"
 )
 
@@ -118,6 +119,9 @@ func TestAWSCoordinatorHeartbeatPreservesIPv6AndProxy(t *testing.T) {
 				if r.Header.Get("Authorization") != "Bearer fixture-token" {
 					t.Error("lost owner authentication")
 				}
+				if host, _, err := net.SplitHostPort(r.RemoteAddr); err != nil || host != "::1" {
+					t.Errorf("heartbeat source=%s, want IPv6 loopback", r.RemoteAddr)
+				}
 				if test.proxy && r.URL.Host != "coordinator.example.test" {
 					t.Errorf("proxy target=%s", r.URL)
 				}
@@ -137,7 +141,7 @@ func TestAWSCoordinatorHeartbeatPreservesIPv6AndProxy(t *testing.T) {
 			}
 			if test.slowIPv4 {
 				_, port, _ := net.SplitHostPort(listener.Addr().String())
-				endpoint = "http://localhost:" + port
+				endpoint = "http://dualstack.example.test.:" + port
 			}
 			client, _, err := newCoordinatorClient(Config{Coordinator: endpoint, Provider: "aws", CoordToken: "fixture-token"})
 			if err != nil {
@@ -153,15 +157,20 @@ func TestAWSCoordinatorHeartbeatPreservesIPv6AndProxy(t *testing.T) {
 			}
 			var preferredTimedOut atomic.Bool
 			if test.slowIPv4 {
-				dialer := &net.Dialer{Timeout: 5 * time.Second, ControlContext: func(ctx context.Context, network, address string, conn syscall.RawConn) error {
+				dialer := &net.Dialer{Timeout: 5 * time.Second, Resolver: coordinatorLoopbackResolver(t), ControlContext: func(ctx context.Context, network, address string, conn syscall.RawConn) error {
 					if network == "tcp4" {
 						<-ctx.Done()
-						preferredTimedOut.Store(errors.Is(ctx.Err(), context.DeadlineExceeded))
+						// The fallback's canceled IPv4 attempt must not erase the preferred deadline.
+						if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+							preferredTimedOut.Store(true)
+						}
 						return ctx.Err()
 					}
 					return nil
 				}}
-				client.Client.Transport.(*http.Transport).DialContext = coordinatorIPv4FirstDialer(dialer)
+				transport := client.Client.Transport.(*http.Transport)
+				transport.Proxy = nil
+				transport.DialContext = coordinatorIPv4FirstDialer(dialer)
 			}
 			started := time.Now()
 			if _, err := client.TouchLeaseForProvider(t.Context(), "cbx_fixture", "aws"); err != nil {
@@ -176,6 +185,71 @@ func TestAWSCoordinatorHeartbeatPreservesIPv6AndProxy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Supply both loopback families without consulting the host's localhost records or DNS.
+func coordinatorLoopbackResolver(t *testing.T) *net.Resolver {
+	t.Helper()
+	server, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		server.Close()
+		<-done
+	})
+	go func() {
+		defer close(done)
+		buffer := make([]byte, 4096)
+		for {
+			n, peer, err := server.ReadFrom(buffer)
+			if err != nil {
+				if !errors.Is(err, net.ErrClosed) {
+					t.Error(err)
+				}
+				return
+			}
+			var query dnsmessage.Message
+			if err := query.Unpack(buffer[:n]); err != nil {
+				t.Error(err)
+				return
+			}
+			response := dnsmessage.Message{
+				Header:    dnsmessage.Header{ID: query.ID, Response: true, RecursionDesired: query.RecursionDesired, RecursionAvailable: true},
+				Questions: query.Questions,
+			}
+			for _, question := range query.Questions {
+				if question.Name.String() != "dualstack.example.test." {
+					t.Errorf("unexpected DNS question: %s", question.Name)
+					response.RCode = dnsmessage.RCodeNameError
+					continue
+				}
+				answer := dnsmessage.Resource{Header: dnsmessage.ResourceHeader{Name: question.Name, Type: question.Type, Class: dnsmessage.ClassINET}}
+				switch question.Type {
+				case dnsmessage.TypeA:
+					answer.Body = &dnsmessage.AResource{A: [4]byte{127, 0, 0, 1}}
+				case dnsmessage.TypeAAAA:
+					answer.Body = &dnsmessage.AAAAResource{AAAA: [16]byte{15: 1}}
+				default:
+					continue
+				}
+				response.Answers = append(response.Answers, answer)
+			}
+			packet, err := response.Pack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if _, err := server.WriteTo(packet, peer); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	return &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "udp4", server.LocalAddr().String())
+	}}
 }
 
 func TestAWSCoordinatorDialHonorsCancellation(t *testing.T) {
