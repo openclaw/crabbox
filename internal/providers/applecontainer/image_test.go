@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
@@ -94,6 +95,66 @@ func TestPinnedDefaultVerifiesCreatedImageBeforeStart(t *testing.T) {
 	}
 	if len(r.calls[0].Args) > 1 && r.calls[0].Args[1] == "-d" {
 		t.Fatal("run-only detach passed to create")
+	}
+}
+
+func TestPinnedDefaultStartsWhenFixedAcquireAlreadyHoldsLeaseLock(t *testing.T) {
+	b, r, cfg := pinnedFixture(t)
+	const leaseID = "cbx_123456789abc"
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	var id string
+	err := core.WithDurableLeaseClaimLock(leaseID, func(_ *core.LeaseClaim, _ bool, _ func() error) error {
+		var err error
+		id, err = b.createContainerWithFixedIntentUnderLeaseLock(ctx, cfg, "crabbox-fixed", leaseID, "fixed", "public-fixture", false, "")
+		return err
+	})
+	if err != nil || id != "crabbox-fixed" {
+		t.Fatalf("fixed locked create id=%q err=%v", id, err)
+	}
+	var verbs []string
+	for _, call := range r.calls {
+		verbs = append(verbs, call.Args[0])
+	}
+	if strings.Join(verbs, ",") != "create,inspect,inspect,start" {
+		t.Fatalf("fixed locked command sequence=%v", verbs)
+	}
+	if r.state != "running" {
+		t.Fatal("fixed locked verified container not started")
+	}
+}
+
+func TestPinnedDefaultFixedLockedFailureScenarios(t *testing.T) {
+	for _, kind := range []string{"changed-config", "start-failure"} {
+		t.Run(kind, func(t *testing.T) {
+			b, r, cfg := pinnedFixture(t)
+			const leaseID = "cbx_123456789abc"
+			r.hook = func(r *pinnedImageRunner, req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+				if req.Args[0] == "inspect" && kind == "changed-config" && r.inspects == 1 {
+					r.configuration["hostname"] = "replacement"
+				}
+				if req.Args[0] == "start" && kind == "start-failure" {
+					return core.LocalCommandResult{ExitCode: 1}, nil, true
+				}
+				return core.LocalCommandResult{}, nil, false
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			err := core.WithDurableLeaseClaimLock(leaseID, func(_ *core.LeaseClaim, _ bool, _ func() error) error {
+				_, err := b.createContainerWithFixedIntentUnderLeaseLock(ctx, cfg, "crabbox-fixed", leaseID, "fixed", "public-fixture", false, "")
+				return err
+			})
+			if err == nil || errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("fixed locked %s error=%v", kind, err)
+			}
+			var retained *retainedImageContainerError
+			if !errors.As(err, &retained) {
+				t.Fatalf("fixed locked %s did not retain target: %v", kind, err)
+			}
+			if commandWasCalled(r.calls, "start") != (kind == "start-failure") {
+				t.Fatalf("fixed locked %s start calls=%v", kind, r.calls)
+			}
+		})
 	}
 }
 

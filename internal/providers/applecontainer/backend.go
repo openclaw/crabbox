@@ -66,6 +66,8 @@ func isDefaultWorkRoot(value string) bool {
 
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
+func (b *backend) SupportsRequestedLeaseID() bool { return true }
+
 func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
 	return core.UseStoredTestboxKey(&target.SSH, leaseID)
 }
@@ -91,6 +93,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	cfg := b.configForRun()
 	if err := requireMacOS(); err != nil {
 		return core.LeaseTarget{}, err
+	}
+	if strings.TrimSpace(req.RequestedLeaseID) != "" {
+		return b.acquireFixed(ctx, req, cfg)
 	}
 	leaseID := core.NewLeaseID()
 	containers, err := b.listContainers(ctx)
@@ -264,24 +269,28 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if id == "" {
 		return core.Exit(2, "provider=%s release requires a container id", providerName)
 	}
-	if err := requireExactAppleContainerClaim(lease.LeaseID, id); err != nil {
+	claim, err := readExactAppleContainerClaim(lease.LeaseID, id)
+	if err != nil {
 		return err
 	}
-	if err := b.removeContainer(ctx, id); err != nil {
-		return err
+	if strings.TrimSpace(lease.Server.Labels["fixed_intent_sha256"]) != "" && !fixedAppleContainerLeaseKind.IsFixedClaim(claim) {
+		return core.Exit(4, "lease_id_conflict: refusing to release fixed apple-container lease %s without its durable create intent", lease.LeaseID)
 	}
-	core.RemoveLeaseClaim(lease.LeaseID)
-	core.RemoveStoredTestboxKey(lease.LeaseID)
-	return nil
+	return fixedAppleContainerLeaseKind.FinalizeAfterCleanup(claim, func() error {
+		if err := b.removeContainer(ctx, id); err != nil {
+			return err
+		}
+		core.RemoveStoredTestboxKey(lease.LeaseID)
+		return nil
+	})
 }
 
 func appleContainerClaimStatus(leaseID, containerID string) (owned, conflict bool, err error) {
-	leaseID = strings.TrimSpace(leaseID)
-	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(leaseID, providerName)
+	claim, ok, err := exactAppleContainerClaim(leaseID)
 	if err != nil {
 		return false, false, err
 	}
-	if !ok || !exact || claim.LeaseID != leaseID {
+	if !ok {
 		return false, false, nil
 	}
 	boundID := strings.TrimSpace(claim.CloudID)
@@ -298,15 +307,29 @@ func appleContainerOwnershipError(leaseID, containerID string) error {
 	return core.Exit(4, "apple-container lease %q has no exact local claim bound to container %q; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(leaseID), strings.TrimSpace(containerID))
 }
 
-func requireExactAppleContainerClaim(leaseID, containerID string) error {
-	owned, _, err := appleContainerClaimStatus(leaseID, containerID)
+func exactAppleContainerClaim(leaseID string) (core.LeaseClaim, bool, error) {
+	leaseID = strings.TrimSpace(leaseID)
+	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(leaseID, providerName)
+	if err != nil || !ok || !exact || claim.LeaseID != leaseID {
+		return core.LeaseClaim{}, false, err
+	}
+	return claim, true, nil
+}
+
+func readExactAppleContainerClaim(leaseID, containerID string) (core.LeaseClaim, error) {
+	claim, ok, err := exactAppleContainerClaim(leaseID)
 	if err != nil {
-		return err
+		return core.LeaseClaim{}, err
 	}
-	if !owned {
-		return appleContainerOwnershipError(leaseID, containerID)
+	if !ok || strings.TrimSpace(claim.CloudID) != strings.TrimSpace(containerID) {
+		return core.LeaseClaim{}, appleContainerOwnershipError(leaseID, containerID)
 	}
-	return nil
+	return claim, nil
+}
+
+func requireExactAppleContainerClaim(leaseID, containerID string) error {
+	_, err := readExactAppleContainerClaim(leaseID, containerID)
+	return err
 }
 
 func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
@@ -360,18 +383,30 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			continue
 		}
 		fmt.Fprintf(b.rt.Stdout, "remove container id=%s name=%s lease=%s reason=%s\n", server.DisplayID(), server.Name, core.Blank(leaseID, "-"), reason)
-		if err := b.removeContainer(ctx, c.id()); err != nil {
-			return err
+		remove := func() error {
+			if err := b.removeContainer(ctx, c.id()); err != nil {
+				return err
+			}
+			if leaseID != "" {
+				core.RemoveStoredTestboxKey(leaseID)
+			}
+			return nil
 		}
-		if leaseID != "" {
-			core.RemoveLeaseClaim(leaseID)
-			core.RemoveStoredTestboxKey(leaseID)
+		if claim, ok := claimsByLease[leaseID]; ok {
+			if err := fixedAppleContainerLeaseKind.FinalizeAfterCleanup(claim, remove); err != nil {
+				return err
+			}
+		} else if err := remove(); err != nil {
+			return err
 		}
 		removed++
 	}
 	claimsRemoved := 0
 	for _, claim := range orphanCandidates {
 		if claim.Provider != providerName || claim.LeaseID == "" {
+			continue
+		}
+		if isReleasedFixedAppleContainerClaim(claim) {
 			continue
 		}
 		if _, ok := liveLeases[claim.LeaseID]; ok {
@@ -392,7 +427,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		// reuses it before publishing its claim, outside this claim CAS. Until keys
 		// have their own generation/ownership fence, deleting one here can break the
 		// concurrent live lease; fail closed by retaining inert local key material.
-		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		if err := fixedAppleContainerLeaseKind.FinalizeAfterCleanup(claim, nil); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, err)
 			continue
 		}
@@ -412,11 +447,28 @@ func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, 
 }
 
 func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey string, keep bool) (string, error) {
+	return b.createContainerWithFixedIntent(ctx, cfg, name, leaseID, slug, publicKey, keep, "")
+}
+
+func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey string, keep bool, fingerprint string) (string, error) {
+	return b.createContainerWithFixedIntentLockState(ctx, cfg, name, leaseID, slug, publicKey, keep, fingerprint, false)
+}
+
+// createContainerWithFixedIntentUnderLeaseLock is only for callers that already
+// hold leaseID's durable claim lock for the entire create/verify/start sequence.
+func (b *backend) createContainerWithFixedIntentUnderLeaseLock(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey string, keep bool, fingerprint string) (string, error) {
+	return b.createContainerWithFixedIntentLockState(ctx, cfg, name, leaseID, slug, publicKey, keep, fingerprint, true)
+}
+
+func (b *backend) createContainerWithFixedIntentLockState(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey string, keep bool, fingerprint string, leaseLockHeld bool) (string, error) {
 	digest, reviewedDefault := core.DefaultContainerImageDigest(cfg.AppleContainer.Image)
 	if reviewedDefault && digest == "" {
 		return "", core.Exit(2, "compiled container image is missing its reviewed digest")
 	}
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
+	if fingerprint = strings.TrimSpace(fingerprint); fingerprint != "" {
+		labels["fixed_intent_sha256"] = fingerprint
+	}
 	labels["image"] = cfg.AppleContainer.Image
 	if reviewedDefault {
 		labels["image_digest"] = digest
@@ -472,6 +524,9 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 	args = append(args, cfg.AppleContainer.ExtraRunArgs...)
 	args = append(args, cfg.AppleContainer.Image, "/bin/sh", "-lc", bootstrapScript)
 	if reviewedDefault {
+		if leaseLockHeld {
+			return b.createPinnedContainerUnderLeaseLock(ctx, cfg, append([]string{"create"}, args[2:]...), name, leaseID, slug, digest)
+		}
 		return b.createPinnedContainer(ctx, cfg, append([]string{"create"}, args[2:]...), name, leaseID, slug, digest)
 	}
 
