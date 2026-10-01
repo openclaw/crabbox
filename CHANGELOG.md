@@ -16,6 +16,7 @@
 - Scale automatic AWS/GCP root disks by lease class (40/80/150/150/250/400 GB), raised to the source image or snapshot minimum; set `aws.rootGB: 400` / `gcp.rootGB: 400` or the corresponding `CRABBOX_*_ROOT_GB=400` to retain 400 GB. [PR 2632](https://github.com/openclaw/crabbox/pull/2632).
 - Cache GCP root-disk source minimums in coordinator memory for up to 30 minutes and expose lookup time as `gcp.image_minimum`, removing repeated image reads before warm creates while preserving explicit-size bypass.
 - Invalidate cached GCP firewall verification when root-image or snapshot metadata requests fail, so the next create rechecks the managed ingress policy.
+- Prefer IPv4 for AWS coordinator connections so heartbeats refresh the source used by public SSH, while preserving IPv6 fallback and configured proxies. [PR 2651](https://github.com/openclaw/crabbox/pull/2651).
 
 ## 0.69.0 - 2026-09-29
 
