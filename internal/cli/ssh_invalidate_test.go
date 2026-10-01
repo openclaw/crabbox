@@ -104,6 +104,20 @@ func TestRemoteInvalidateSyncFingerprintWorkspace(t *testing.T) {
 	}
 }
 
+func TestRemoteInvalidateSyncFingerprintMissingWorkspaceIgnoresLogout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell")
+	}
+	workdir := filepath.Join(t.TempDir(), "lease", "repo")
+	command := remoteInvalidateSyncFingerprintForTarget(SSHTarget{TargetOS: targetLinux}, workdir, false)
+	if out, err := runGitControlWithShellHook(t, "logout", command); err != nil {
+		t.Fatalf("missing workspace invalidation failed: %v\n%s", err, out)
+	}
+	if _, err := os.Lstat(filepath.Dir(workdir)); !os.IsNotExist(err) {
+		t.Fatalf("invalidation created the missing workspace: %v", err)
+	}
+}
+
 func TestRemoteInvalidateSyncFingerprintAncestors(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("requires a POSIX shell")

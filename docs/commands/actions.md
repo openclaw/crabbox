@@ -45,6 +45,9 @@ routing flags used to create the lease.
 Populates a lease's workspace from the configured workflow. Requires `--id` and
 either `--workflow` or `actions.workflow`.
 
+An empty warmup workspace can be hydrated directly; a preliminary `run` or
+sync is not required.
+
 ```sh
 crabbox warmup
 crabbox actions hydrate --id blue-lobster

@@ -2399,11 +2399,11 @@ if [ ! -d "$1" ]; then
   done
   (cd -- "$parent")
   /bin/rm -f -- "$1/.crabbox/sync-fingerprint"
-  exit
-fi
+else
 cd -- "$1"
 ` + metadataScript + `
-/bin/rm -f -- "$meta_dir/sync-fingerprint"`
+/bin/rm -f -- "$meta_dir/sync-fingerprint"
+fi`
 	return shellCommand(script)
 }
 
