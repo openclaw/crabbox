@@ -140,7 +140,9 @@ bearer-shaped credentials before they reach CLI diagnostics.
 
 The workdir defaults to `/workspace/crabbox` and must resolve to an absolute
 path. Broad system paths (`/`, `/workspace`, `/usr`, `/var`, and similar) are
-rejected; pick a dedicated subdirectory.
+rejected; pick a dedicated subdirectory. A lease keeps the workdir it was
+created with: `run --id` uses the workdir recorded in the lease's claim, not
+the current configuration.
 
 The CLI's configured workdir and runtime fallback share that default. The bundled
 Worker keeps a separate HTTP-protocol fallback for requests that omit workdir;
@@ -325,8 +327,8 @@ crabbox checkpoint fork chk_0123456789abcdef --count 4 --type standard-2 -- pnpm
   internal error; the runner retries snapshot starts up to six times, 3
   seconds apart, within the 300-second readiness window.
 - A fork keeps the checkpoint's workdir and may pick another instance type with
-  `--type`. A fork command runs like `crabbox run` and syncs the checkout,
-  which replaces the workdir; state outside it, such as the npm and pnpm caches
+  `--type`. A fork command runs like `crabbox run` in that workdir and syncs the
+  checkout, which replaces the workdir; state outside it, such as the npm and pnpm caches
   under `/var/cache/crabbox`, carries over. Like any lease, a fork whose
   container stops ends instead of restarting from the snapshot.
 - Snapshots belong to the runner that captured them. Forking with another
