@@ -4,6 +4,7 @@
 
 ### Fixes
 
+- Seed public GitHub SSH origins through anonymous HTTPS before local Actions hydration, preventing cold workspace Git-root adoption failures. [Issue 2649](https://github.com/openclaw/crabbox/issues/2649).
 - Prevent bootstrap package hooks from restarting cloud-init between stages, which leaves Hetzner Ubuntu 26.04 desktop and browser leases waiting indefinitely for readiness.
 - Preserve non-UTF-8 POSIX filenames and symlink targets during cold tar sync instead of failing extraction on bsdtar targets.
 - Stage remote failure archives on the workspace disk so small `/tmp` filesystems on tiny Linux boxes do not prevent collecting failure evidence.

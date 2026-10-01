@@ -21,14 +21,15 @@ func TestRunDetachedGitSeedPreservesManifestAuthority(t *testing.T) {
 		t.Skip("rsync unavailable")
 	}
 	for _, tc := range []struct {
-		name                                    string
-		published, checksum, delete, missingGit bool
+		name                                               string
+		published, checksum, delete, missingGit, githubSSH bool
 	}{
-		{"published-checksum", true, true, true, false},
-		{"published-delta", true, false, true, false},
-		{"unpublished", false, false, true, false},
-		{"delete-disabled", true, false, false, false},
-		{"missing-git", true, false, true, true},
+		{"published-checksum", true, true, true, false, false},
+		{"published-delta", true, false, true, false, false},
+		{"github-ssh-origin", true, false, true, false, true},
+		{"unpublished", false, false, true, false, false},
+		{"delete-disabled", true, false, false, false, false},
+		{"missing-git", true, false, true, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearConfigEnv(t)
@@ -41,6 +42,9 @@ func TestRunDetachedGitSeedPreservesManifestAuthority(t *testing.T) {
 			head := gitOutput(f.source, "rev-parse", "HEAD")
 			if tc.published {
 				runGit(t, f.source, "push", "--quiet", "origin", "HEAD:refs/pull/12/merge")
+			}
+			if tc.githubSSH {
+				runGit(t, f.source, "remote", "set-url", "origin", "git@github.com:example-org/project.git")
 			}
 			if refs := gitOutput(f.source, "for-each-ref", "--contains="+head, "refs/remotes/origin"); refs != "" {
 				t.Fatalf("detached fixture has a containing tracking ref: %s", refs)
@@ -67,14 +71,17 @@ func TestRunDetachedGitSeedPreservesManifestAuthority(t *testing.T) {
 			if err := os.Mkdir(binDir, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			installWorkspaceOwnerAwareSSH(t, filepath.Join(binDir, "ssh"), `#!/bin/sh
+			installWorkspaceOwnerAwareSSH(t, filepath.Join(binDir, "ssh"), `#!/bin/bash
 case "$1" in *crabbox-ready*) exit 0 ;; esac
 if [ "$CRABBOX_SEED_MISSING_GIT" = true ]; then
   case "$1" in
     *"crabbox-git-seed phase=prerequisite"*) exec /usr/bin/env PATH=/nonexistent /bin/bash --noprofile --norc -c "$1" ;;
   esac
 fi
-exec /bin/bash --noprofile --norc -c "$1"
+# Substitute only the public network destination with the fixture's Git mirror.
+# Planning, seed publication, file transfer and the Git-root guard execute normally.
+remote="${1//https:\/\/github.com\/example-org\/project.git/$CRABBOX_SEED_ORIGIN}"
+exec /bin/bash --noprofile --norc -c "$remote"
 `)
 			// Only the SSH destination is adapted; real rsync consumes the production
 			// manifest, checksum settings, and seeded files.
@@ -96,6 +103,7 @@ exec ` + shellQuote(realRsync) + ` "${args[@]}"
 			beforeRsync := filepath.Join(root, "seed-before-rsync")
 			t.Setenv("CRABBOX_SEED_BEFORE_RSYNC", beforeRsync)
 			t.Setenv("CRABBOX_SEED_MISSING_GIT", fmt.Sprint(tc.missingGit))
+			t.Setenv("CRABBOX_SEED_ORIGIN", f.origin)
 			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
 			t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
@@ -121,6 +129,14 @@ exec ` + shellQuote(realRsync) + ` "${args[@]}"
 					t.Fatalf("detached commit was not seeded before rsync: %q", seeded)
 				}
 				requireGitOutput(t, workdir, head, "rev-parse", "HEAD")
+				if tc.githubSSH {
+					// Hydration may adopt the cold workspace only after sync supplies
+					// an exact Git root with the authorized origin.
+					target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetLinux, SSHConfigProxy: true}
+					if err := verifyActionsWorkspace(t.Context(), target, Repo{RemoteURL: f.origin}, actionsHydrationState{Workspace: workdir}); err != nil {
+						t.Fatalf("cold sync did not prepare an adoptable Actions workspace: %v", err)
+					}
+				}
 				// Openrsync and rsync label unmatched bytes differently; tiny
 				// unchanged files may be sent literally in ordinary delta mode.
 				data := regexp.MustCompile(`(?m)^(?:Literal|Unmatched) data: ([0-9,]+) (?:bytes|B)$`).FindStringSubmatch(stdout.String())

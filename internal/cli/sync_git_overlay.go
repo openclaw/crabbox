@@ -545,6 +545,9 @@ func classifyGitOrigin(remoteURL string) gitOriginDisposition {
 	if gitRemoteURLHasCredentials(raw) || strings.ContainsAny(raw, "?#") {
 		return gitOriginNonForwardable
 	}
+	// Classify the same anonymous URL that Git seeding uses. A GitHub SCP
+	// spelling must not disable its supported HTTPS seed before hydration.
+	raw = normalizeGitRemoteURL(raw)
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.Opaque != "" {
 		return gitOriginNonForwardable

@@ -90,6 +90,10 @@ letting you test uncommitted local edits.
 Filesystem Git origins are resolved on the runner during Git seeding and must
 be readable from that runner; otherwise Crabbox falls back to a full manifest sync.
 
+GitHub origins written as `git@github.com:owner/repo.git` use anonymous HTTPS
+for seeding, including before local Actions hydration. No local SSH credentials
+are forwarded. Other SSH origins remain ineligible for remote origin seeding.
+
 ### Explicit directory source
 
 Use `sync.source: directory` to sync an include-only working set from a directory
