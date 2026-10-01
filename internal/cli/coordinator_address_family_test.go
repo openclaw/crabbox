@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -97,8 +98,16 @@ func TestAWSCoordinatorHeartbeatUsesIPv4(t *testing.T) {
 }
 
 func TestAWSCoordinatorHeartbeatPreservesIPv6AndProxy(t *testing.T) {
-	for _, proxy := range []bool{false, true} {
-		t.Run(fmt.Sprintf("proxy=%t", proxy), func(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		proxy    bool
+		slowIPv4 bool
+	}{
+		{name: "IPv6-only coordinator"},
+		{name: "IPv6-only proxy", proxy: true},
+		{name: "slow IPv4", slowIPv4: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			listener, err := net.Listen("tcp6", "[::1]:0")
 			if err != nil {
 				t.Skipf("IPv6 loopback unavailable: %v", err)
@@ -109,7 +118,7 @@ func TestAWSCoordinatorHeartbeatPreservesIPv6AndProxy(t *testing.T) {
 				if r.Header.Get("Authorization") != "Bearer fixture-token" {
 					t.Error("lost owner authentication")
 				}
-				if proxy && r.URL.Host != "coordinator.example.test" {
+				if test.proxy && r.URL.Host != "coordinator.example.test" {
 					t.Errorf("proxy target=%s", r.URL)
 				}
 				var body map[string]any
@@ -123,24 +132,45 @@ func TestAWSCoordinatorHeartbeatPreservesIPv6AndProxy(t *testing.T) {
 			server.Start()
 			defer server.Close()
 			endpoint := server.URL
-			if proxy {
+			if test.proxy {
 				endpoint = "http://coordinator.example.test"
+			}
+			if test.slowIPv4 {
+				_, port, _ := net.SplitHostPort(listener.Addr().String())
+				endpoint = "http://localhost:" + port
 			}
 			client, _, err := newCoordinatorClient(Config{Coordinator: endpoint, Provider: "aws", CoordToken: "fixture-token"})
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer client.Client.CloseIdleConnections()
-			if proxy {
+			if test.proxy {
 				proxyURL, err := url.Parse(server.URL)
 				if err != nil {
 					t.Fatal(err)
 				}
 				client.Client.Transport.(*http.Transport).Proxy = http.ProxyURL(proxyURL)
 			}
+			var preferredTimedOut atomic.Bool
+			if test.slowIPv4 {
+				dialer := &net.Dialer{Timeout: 5 * time.Second, ControlContext: func(ctx context.Context, network, address string, conn syscall.RawConn) error {
+					if network == "tcp4" {
+						<-ctx.Done()
+						preferredTimedOut.Store(errors.Is(ctx.Err(), context.DeadlineExceeded))
+						return ctx.Err()
+					}
+					return nil
+				}}
+				client.Client.Transport.(*http.Transport).DialContext = coordinatorIPv4FirstDialer(dialer)
+			}
+			started := time.Now()
 			if _, err := client.TouchLeaseForProvider(t.Context(), "cbx_fixture", "aws"); err != nil {
 				t.Fatal(err)
 			}
+			if test.slowIPv4 && !preferredTimedOut.Load() {
+				t.Fatal("did not exercise the IPv4 connection deadline")
+			}
+			t.Logf("heartbeat completed in %s with %d HTTP request(s)", time.Since(started), requests.Load())
 			if requests.Load() != 1 {
 				t.Fatalf("requests=%d, want one heartbeat", requests.Load())
 			}

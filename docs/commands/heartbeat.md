@@ -38,6 +38,8 @@ Crabbox falls back to ordinary dual-stack dialing before sending the request;
 IPv6-only coordinators and configured proxies remain supported. A proxy still
 determines the source address observed by the coordinator. This does not bypass
 pinned source ranges or grant access to an address supplied by the caller.
+An IPv6 fallback can renew the lease while leaving its IPv4 SSH source unchanged;
+the bounded IPv4 preference is not a guarantee that every renewal restores SSH.
 
 HTTP heartbeats use the existing 30-minute mutation budget so a slow access
 refresh can finish. An earlier caller deadline or cancellation still wins;
