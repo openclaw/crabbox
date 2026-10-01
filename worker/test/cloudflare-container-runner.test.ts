@@ -872,6 +872,41 @@ describe("Cloudflare runner lifecycle", () => {
     expect(got.at(-1)).toEqual({ type: "complete", exitCode: 0 });
   });
 
+  it("keeps buffered output when the caller stalls long after the command exits", async () => {
+    const { sandbox, container } = harness();
+    await createLease(sandbox);
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
+    const chunk = new Uint8Array(4096).fill(120);
+    let pulled = 0;
+    container.command = {
+      exitCode: 0,
+      stdoutStream: new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulled += 1;
+          if (pulled > 1000) controller.close();
+          else controller.enqueue(chunk);
+        },
+      }),
+    };
+
+    const response = await execLease(sandbox, { command: "yes x | head -c 4096000" });
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    const read = events(response);
+    const state = { settled: false };
+    void read.finally(() => {
+      state.settled = true;
+    });
+    while (!state.settled) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- drives the drain poll while reading.
+      await vi.advanceTimersByTimeAsync(100);
+    }
+
+    const got = await read;
+    const stdout = got.filter((event) => event.type === "stdout").map((event) => event.data);
+    expect(stdout.join("").length).toBe(4_096_000);
+    expect(got.at(-1)).toEqual({ type: "complete", exitCode: 0 });
+  });
+
   it("reports a failed output transport instead of a successful completion", async () => {
     const { sandbox, container } = harness();
     await createLease(sandbox);

@@ -26,12 +26,12 @@ const outputHighWaterMarkBytes = 256 * 1024;
 // after the command exits. Once the exit code is known, keep reading while
 // output keeps arriving, stop after drainIdleMs without new bytes, and never
 // read for longer than drainGraceMs in total. Time spent waiting for a slow
-// caller counts toward neither, so buffered foreground output still arrives;
-// drainMaxMs bounds the whole drain.
+// caller counts toward neither, so buffered foreground output always arrives;
+// a caller slower than a still-writing descendant keeps receiving its output
+// until it catches up or disconnects.
 const drainIdleMs = 300;
 const drainPollMs = 100;
 const drainGraceMs = 5_000;
-const drainMaxMs = 60_000;
 
 type Env = {
   CrabboxSandbox: DurableObjectNamespace<CrabboxSandbox>;
@@ -809,9 +809,8 @@ async function pumpOutput(process: ExecProcess, sink: EventSink): Promise<number
   // A failed output transport fails the command instead of waiting for its exit.
   const exitCode = await Promise.race([process.exitCode, pumps.then(() => process.exitCode)]);
 
-  const drainStart = performance.now();
-  let previous = drainStart;
-  let active = Math.max(lastRead, drainStart);
+  let previous = performance.now();
+  let active = Math.max(lastRead, previous);
   let producerMs = 0;
   while (!drain.done) {
     // oxlint-disable-next-line eslint/no-await-in-loop -- polling the drain state.
@@ -824,13 +823,7 @@ async function pumpOutput(process: ExecProcess, sink: EventSink): Promise<number
     }
     previous = now;
     active = Math.max(active, lastRead);
-    if (
-      now - active >= drainIdleMs ||
-      producerMs >= drainGraceMs ||
-      now - drainStart >= drainMaxMs
-    ) {
-      break;
-    }
+    if (now - active >= drainIdleMs || producerMs >= drainGraceMs) break;
   }
   if (!drain.done) {
     draining = true;
