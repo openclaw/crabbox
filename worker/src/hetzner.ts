@@ -1,5 +1,4 @@
 import { cloudInit } from "./bootstrap";
-import { hetznerUserData } from "./hetzner-user-data";
 import {
   implicitProviderMachineCandidates,
   serverTypeCandidatesForClass,
@@ -12,6 +11,7 @@ import {
   measureCreationStep,
   measureCreationStepSync,
 } from "./creation-events";
+import { hetznerUserData } from "./hetzner-user-data";
 import {
   leaseIDForProviderKey,
   providerKeyForLease,
