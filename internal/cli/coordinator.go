@@ -1043,6 +1043,13 @@ func newCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
 		return nil, true, Exit(2, "CRABBOX_COORDINATOR must be an absolute URL")
 	}
 	base.Path = strings.TrimRight(base.Path, "/")
+	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
+	dialContext := dialer.DialContext
+	if cfg.Provider == "aws" {
+		// Public AWS SSH uses IPv4. Let the broker observe that source family
+		// for HTTP and WebSocket access refreshes without changing its CIDR policy.
+		dialContext = coordinatorIPv4FirstDialer(dialer)
+	}
 	return &CoordinatorClient{
 		BaseURL:          strings.TrimRight(base.String(), "/"),
 		Token:            cfg.CoordToken,
@@ -1052,11 +1059,8 @@ func newCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
 		Client: &http.Client{
 			Timeout: coordinatorHTTPTimeout,
 			Transport: &http.Transport{
-				Proxy: http.ProxyFromEnvironment,
-				DialContext: (&net.Dialer{
-					Timeout:   5 * time.Second,
-					KeepAlive: 30 * time.Second,
-				}).DialContext,
+				Proxy:               http.ProxyFromEnvironment,
+				DialContext:         dialContext,
 				TLSHandshakeTimeout: 10 * time.Second,
 				// Custom dialing otherwise disables HTTP/2 and its independent streams.
 				ForceAttemptHTTP2:     true,
@@ -1065,6 +1069,25 @@ func newCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
 			},
 		},
 	}, true, nil
+}
+
+func coordinatorIPv4FirstDialer(dialer *net.Dialer) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		if network != "tcp" {
+			return dialer.DialContext(ctx, network, address)
+		}
+		ctx, cancel := context.WithTimeout(ctx, dialer.Timeout)
+		defer cancel()
+		// Match net.Dialer's default fallback delay; IPv6-only coordinators and
+		// proxies remain reachable. No HTTP request is sent until dialing succeeds.
+		preferredCtx, preferredCancel := context.WithTimeout(ctx, 300*time.Millisecond)
+		conn, err := dialer.DialContext(preferredCtx, "tcp4", address)
+		preferredCancel()
+		if err == nil {
+			return conn, nil
+		}
+		return dialer.DialContext(ctx, network, address)
+	}
 }
 
 func (c *CoordinatorClient) CreateLease(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug string) (CoordinatorLease, error) {

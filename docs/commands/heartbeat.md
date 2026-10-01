@@ -32,6 +32,13 @@ ingress maintenance. It does not wait for AWS security-group reconciliation. Cha
 incomplete source policy retains the normal access-refresh attempt before the
 response; pinned source ranges remain authoritative.
 
+AWS coordinator connections prefer IPv4 so manual and automatic heartbeats
+refresh the source family used by public AWS SSH. If IPv4 cannot connect,
+Crabbox falls back to ordinary dual-stack dialing before sending the request;
+IPv6-only coordinators and configured proxies remain supported. A proxy still
+determines the source address observed by the coordinator. This does not bypass
+pinned source ranges or grant access to an address supplied by the caller.
+
 HTTP heartbeats use the existing 30-minute mutation budget so a slow access
 refresh can finish. An earlier caller deadline or cancellation still wins;
 a timeout leaves the outcome uncertain and does not replay the request.
