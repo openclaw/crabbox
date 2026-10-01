@@ -976,8 +976,8 @@ func TestPrivateSSHTransportProbeKeepsSecretsOutOfArgvAndEnvironment(t *testing.
 		ProxyCommand:     "provider proxy --session session-123 %h %p",
 		ChildEnvDenylist: []string{"CRABBOX_TEST_DENIED"},
 	}
-	if !probePrivateSSHTransport(t.Context(), &target, 5*time.Second) {
-		t.Fatal("private SSH transport probe failed")
+	if err := probePrivateSSHTransport(t.Context(), &target, 5*time.Second); err != nil {
+		t.Fatalf("private SSH transport probe failed: %v", err)
 	}
 	data, err := os.ReadFile(capture)
 	if err != nil {
@@ -1019,8 +1019,8 @@ exit 0
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CRABBOX_TEST_SSH_ATTEMPTS", attempts)
 	target := SSHTarget{User: "alice", Host: "example.test", Port: "2201", FallbackPorts: []string{"2202"}}
-	if !probePrivateSSHTransport(t.Context(), &target, 5*time.Second) {
-		t.Fatal("fallback SSH transport probe failed")
+	if err := probePrivateSSHTransport(t.Context(), &target, 5*time.Second); err != nil {
+		t.Fatalf("fallback SSH transport probe failed: %v", err)
 	}
 	if target.Port != "2202" {
 		t.Fatalf("selected port=%q", target.Port)

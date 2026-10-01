@@ -1135,7 +1135,13 @@ func (a App) probeSSHTransportLeaseAfterClaim(ctx context.Context, cfg Config, l
 		return nil
 	}
 	configuredPort := lease.SSH.Port
-	_ = probePrivateSSHTransport(ctx, &lease.SSH, 4*time.Second)
+	if err := probePrivateSSHTransport(ctx, &lease.SSH, 4*time.Second); err != nil {
+		// Not fatal: the operation still tries the configured port with its own
+		// deadlines. But the reason the endpoint was not re-resolved is reported, so a
+		// later "connection refused" on the configured port is explained.
+		writeSSHTransportDiagnostic(a.Stderr, lease.SSH, fmt.Sprintf("warning: ssh endpoint probe for %s kept the configured port %s: %v", lease.LeaseID, configuredPort, err))
+		return nil
+	}
 	if lease.SSH.Port == configuredPort {
 		return nil
 	}
@@ -1152,34 +1158,44 @@ func (a App) probeSSHTransportLeaseAfterClaim(ctx context.Context, cfg Config, l
 	return nil
 }
 
-func probePrivateSSHTransport(ctx context.Context, target *SSHTarget, timeout time.Duration) bool {
+// probePrivateSSHTransport selects the first candidate port that answers. A candidate
+// whose private session cannot be created, or that does not answer within timeout, is
+// skipped rather than ending the probe; when none answers, the error names every
+// candidate and why it failed.
+func probePrivateSSHTransport(ctx context.Context, target *SSHTarget, timeout time.Duration) error {
 	if target == nil || target.Host == "" {
-		return false
+		return errors.New("no SSH host to probe")
 	}
+	var failures []error
 	for _, port := range sshPortCandidates(target.Port, target.FallbackPorts) {
-		if context.Cause(ctx) != nil {
-			return false
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
 		}
-		probeCtx, cancel := context.WithTimeout(ctx, timeout)
-		probe := *target
-		probe.Port = port
-		probe.FallbackPorts = nil
-		session, err := newSSHTransportSession(probeCtx, probe, false)
-		if err != nil {
-			cancel()
-			return false
+		if err := probeSSHTransportPort(ctx, *target, port, timeout); err != nil {
+			failures = append(failures, fmt.Errorf("port %q: %w", port, err))
+			continue
 		}
-		args := append(session.commandPrefix(), "-n", session.host(), wrapRemoteForTarget(probe, sshTransportProbeCommand(probe)))
-		runErr := runOwnedSSHTransportCommand(probeCtx, probe, args, io.Discard, io.Discard)
-		closeErr := session.Close()
-		cancel()
-		if runErr == nil && closeErr == nil {
-			target.Port = port
-			return true
-		}
-		if context.Cause(ctx) != nil {
-			return false
-		}
+		target.Port = port
+		return nil
 	}
-	return false
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	return fmt.Errorf("no candidate answered: %w", errors.Join(failures...))
+}
+
+// probeSSHTransportPort runs the transport probe command against one candidate port.
+func probeSSHTransportPort(ctx context.Context, target SSHTarget, port string, timeout time.Duration) error {
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	probe := target
+	probe.Port = port
+	probe.FallbackPorts = nil
+	session, err := newSSHTransportSession(probeCtx, probe, false)
+	if err != nil {
+		return err
+	}
+	args := append(session.commandPrefix(), "-n", session.host(), wrapRemoteForTarget(probe, sshTransportProbeCommand(probe)))
+	runErr := runOwnedSSHTransportCommand(probeCtx, probe, args, io.Discard, io.Discard)
+	return errors.Join(runErr, session.Close())
 }
