@@ -87,7 +87,7 @@ export function sharedLinuxBootstrapActivate(): string {
 
 // prettier-ignore
 export function sharedLinuxBootstrapPrelude(): string {
-  return "export DEBIAN_FRONTEND=noninteractive\nretry() {\n  n=1\n  until \"$@\"; do\n    if [ \"$n\" -ge 8 ]; then\n      return 1\n    fi\n    sleep $((n * 5))\n    n=$((n + 1))\n  done\n}\n";
+  return "export DEBIAN_FRONTEND=noninteractive\n# APT must not restart cloud-init's single process between boot stages.\n# Bootstrap explicitly starts its required services; only report other restarts.\nexport NEEDRESTART_MODE=l\nretry() {\n  n=1\n  until \"$@\"; do\n    if [ \"$n\" -ge 8 ]; then\n      return 1\n    fi\n    sleep $((n * 5))\n    n=$((n + 1))\n  done\n}\n";
 }
 
 // prettier-ignore

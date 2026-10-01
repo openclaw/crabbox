@@ -4,6 +4,7 @@
 
 ### Fixes
 
+- Prevent bootstrap package hooks from restarting cloud-init between stages, which leaves Hetzner Ubuntu 26.04 desktop and browser leases waiting indefinitely for readiness.
 - Preserve non-UTF-8 POSIX filenames and symlink targets during cold tar sync instead of failing extraction on bsdtar targets.
 - Stage remote failure archives on the workspace disk so small `/tmp` filesystems on tiny Linux boxes do not prevent collecting failure evidence.
 - Compress oversized Hetzner cloud-init into a gzip MIME envelope so desktop and browser leases fit the provider's 32 KiB user-data limit without changing bootstrap ordering. [PR 2637](https://github.com/openclaw/crabbox/pull/2637).

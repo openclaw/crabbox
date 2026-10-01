@@ -172,6 +172,11 @@ cloud-init decodes before processing. The decoded configuration and bootstrap
 ordering are unchanged. Configurations that still exceed the limit after
 compression fail before the server create request.
 
+On Ubuntu 26.04, bootstrap package hooks report pending service restarts without
+performing them. Restarting `cloud-init-main.service` between stages leaves
+cloud-final waiting indefinitely, so desktop and browser leases never publish
+readiness. See [runner bootstrap](../features/runner-bootstrap.md).
+
 Brokered release acknowledgement queues cleanup. A durable journal records
 validated delete-action success plus exact server absence before owned key
 cleanup, or a distinct already-absent observation before any known dispatch.

@@ -80,6 +80,13 @@ Bootstrap installs only a small base set with `--no-install-recommends`:
 `apt-get` runs are wrapped in a retry loop (8 attempts, increasing backoff) so a
 transient mirror failure does not fail the whole boot.
 
+Both bootstrap phases run package hooks with `NEEDRESTART_MODE=l`: pending
+service restarts are reported, while Crabbox explicitly starts its required
+services. Automatically restarting Ubuntu 26.04's `cloud-init-main.service`
+between stages strands cloud-final and prevents optional desktop/browser setup
+from running. This setting is scoped to the bootstrap processes; later operator
+package operations keep the image's normal restart policy.
+
 The minimal bootstrap's APT refresh skips translation, AppStream DEP-11, and
 command-not-found indexes through command-local APT options. These auxiliary
 indexes are not needed to install the baseline packages. Package indexes,

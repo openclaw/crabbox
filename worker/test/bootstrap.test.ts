@@ -13,6 +13,7 @@ import {
   windowsBootstrapPowerShell,
 } from "../src/bootstrap";
 import {
+  sharedLinuxBootstrapPrelude,
   sharedGnomeDesktopTheme,
   sharedWindowsRuntime,
   sharedWindowsRuntimeGate,
@@ -331,6 +332,13 @@ describe("cloud-init bootstrap", () => {
     const got = cloudInit(config);
     const minimalUpdate = "retry apt-get -o Acquire::Languages=none";
     expect(got).toContain("package_update: false");
+    expect(got).toContain(
+      sharedLinuxBootstrapPrelude()
+        .trimEnd()
+        .split("\n")
+        .map((line) => `      ${line}`)
+        .join("\n"),
+    );
     expect(got).toContain("bash -euxo pipefail <<'BOOT'");
     expect(got).toContain('Acquire::Retries "8";');
     expect(got).toContain(
@@ -406,6 +414,13 @@ describe("cloud-init bootstrap", () => {
       );
       expect(early).not.toContain("touch /var/lib/crabbox/bootstrapped");
       expect(final).toContain("systemctl start crabbox-bootstrap.service");
+      expect(final).toContain(
+        sharedLinuxBootstrapPrelude()
+          .trimEnd()
+          .split("\n")
+          .map((line) => `    ${line}`)
+          .join("\n"),
+      );
       expect(final).toContain("retry /usr/local/lib/crabbox-ready-checks");
       expect(final!.indexOf("retry /usr/local/lib/crabbox-ready-checks")).toBeLessThan(
         final!.indexOf("touch /var/lib/crabbox/bootstrapped"),

@@ -1294,6 +1294,12 @@ func TestCloudInitEarlyBootstrapComposition(t *testing.T) {
 			}
 			core := files["/usr/local/lib/crabbox-bootstrap.sh"]
 			final := strings.Join(doc.Runcmd, "\n")
+			if !strings.Contains(core, sharedLinuxBootstrapPrelude()) {
+				t.Fatal("early package hooks must inherit the restart policy")
+			}
+			if optional && !strings.Contains(final, sharedLinuxBootstrapPrelude()) {
+				t.Fatal("cloud-final package hooks must inherit the restart policy")
+			}
 			if !strings.Contains(core, "retry apt-get") || strings.Contains(final, "crabbox_readiness_packages=") {
 				t.Fatal("baseline packages must run in the early unit")
 			}
