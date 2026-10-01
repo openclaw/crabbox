@@ -451,6 +451,10 @@ func (o *workspaceOwner) renewLoopWithTicks(ticks <-chan time.Time, callTimeout 
 
 var errWorkspaceOwnerRenewStopped = errors.New("workspace owner renewal stopped")
 
+// workspaceOwnerRenewAfterBackoffHook runs after a retry backoff wait; tests use it to
+// simulate a late wake (scheduling delay or host suspension). It is nil in production.
+var workspaceOwnerRenewAfterBackoffHook func()
+
 // renewWithinOwnership renews once. A call that got no protocol answer (the transport
 // itself failed) is retried, with backoff, while the retry can still finish before the
 // ownership the last acknowledged request proved can lapse; past that point a second
@@ -484,6 +488,16 @@ func (o *workspaceOwner) renewWithinOwnership(callTimeout time.Duration) error {
 			timer.Stop()
 			return errWorkspaceOwnerRenewStopped
 		case <-timer.C:
+		}
+		if workspaceOwnerRenewAfterBackoffHook != nil {
+			workspaceOwnerRenewAfterBackoffHook()
+		}
+		// Rechecked after the wait: a late wake (scheduling delay, host suspension)
+		// must not dispatch a retry that could finish after the confirmed ownership
+		// lapses. Each call is bounded by callTimeout, so a retry dispatched here
+		// always ends before confirmedUntil.
+		if time.Now().Add(callTimeout).After(confirmedUntil) {
+			return workspaceOwnerProtocolError(response, fmt.Errorf("the confirmed ownership lapsed while waiting to retry: %w", err))
 		}
 		backoff *= 2
 	}

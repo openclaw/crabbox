@@ -139,3 +139,27 @@ func TestWorkspaceOwnerRenewalProtocolAnswerIsNotRetried(t *testing.T) {
 		t.Fatalf("an EXPIRED answer was retried: %d calls", len(renewals))
 	}
 }
+
+// A late wake from the backoff wait (scheduling delay, host suspension) must not
+// dispatch a retry that could finish after the confirmed ownership lapses: the window
+// is rechecked after the wait, and the owner fails closed without another call.
+func TestWorkspaceOwnerRenewalRechecksTheWindowAfterALateWake(t *testing.T) {
+	const ttl = 3 * time.Second
+	transport := &budgetedOwnerTransport{budget: 200 * time.Millisecond, renew: func(int) (string, error) {
+		return "", errors.New("ssh: connect to host: Operation timed out")
+	}}
+	workspaceOwnerRenewAfterBackoffHook = func() { time.Sleep(ttl) }
+	t.Cleanup(func() { workspaceOwnerRenewAfterBackoffHook = nil })
+	owner := acquireBudgetedOwner(t, transport, ttl, 50*time.Millisecond)
+	select {
+	case <-owner.done:
+	case <-time.After(3 * ttl):
+		t.Fatal("renewal never failed closed")
+	}
+	if err := owner.Err(); err == nil || !strings.Contains(err.Error(), "lapsed while waiting to retry") {
+		t.Fatalf("err=%v; want fail-closed after a late wake", err)
+	}
+	if _, renewals := transport.snapshot(); len(renewals) != 1 {
+		t.Fatalf("a retry was dispatched after the window lapsed: %d renewal calls", len(renewals))
+	}
+}
