@@ -1275,7 +1275,7 @@ export class GCPClient {
           this.zone,
           project,
           this.tokenCache,
-          undefined,
+          this.firewallCache,
           this.imageMinimumCache,
         );
         client.fetcher = this.fetcher;

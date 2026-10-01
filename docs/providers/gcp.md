@@ -650,7 +650,8 @@ state, source CIDRs, target tags, and TCP ports, with no additional selectors or
 deny rules. Updates and inserts require a subsequent exact GET before reuse.
 Changed policies and credentials require fresh verification. GCP request errors
 (including authentication, missing resources, transport, and malformed responses),
-operation errors, and address-readiness timeouts discard cached verifications;
+operation errors, root-image or snapshot metadata request failures (including
+cross-project lookups), and address-readiness timeouts discard cached verifications;
 an in-flight older read cannot refill an invalidated entry.
 
 This introduces a bounded drift window: external firewall edits or deletion can

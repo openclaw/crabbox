@@ -153,6 +153,24 @@ it("invalidates on asynchronous GCP operation errors", async () => {
   expect(compute).toHaveBeenCalledTimes(4);
 });
 
+it.each([403, 404, "network", "json"])(
+  "invalidates after root image metadata lookup errors: %s",
+  async (failure) => {
+    const env = environment();
+    const { compute, requests } = fixture();
+    await client(env).ensureFirewall(config());
+    if (failure === "network") compute.mockRejectedValueOnce(new Error("network"));
+    else if (failure === "json") compute.mockResolvedValueOnce(new Response("{"));
+    else compute.mockResolvedValueOnce(new Response("error", { status: failure }));
+    await expect(
+      client(env).createServer(config(), "cbx_abcdef123456", "fixture", "alice@example.com"),
+    ).rejects.toThrow(/network|JSON|http/);
+    expect(requests[1]).toContain("/projects/ubuntu-os-cloud/global/images/family/");
+    await client(env).ensureFirewall(config());
+    expect(requests.filter((request) => request.includes("/global/firewalls/"))).toHaveLength(2);
+  },
+);
+
 it("does not let an in-flight verification repopulate an invalidated cache", async () => {
   const env = environment();
   const { compute } = fixture();

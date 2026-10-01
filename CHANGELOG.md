@@ -9,6 +9,7 @@
 - Release a pressed macOS VNC key when `desktop type` or `desktop paste` is cancelled between its key-down and key-up; Screen Sharing otherwise kept it held after disconnect. [Issue 2627](https://github.com/openclaw/crabbox/issues/2627), [PR 2628](https://github.com/openclaw/crabbox/pull/2628). Thanks @altaywtf for the fix and @saariuslystoned for the report.
 - Scale automatic AWS/GCP root disks by lease class (40/80/150/150/250/400 GB), raised to the source image or snapshot minimum; set `aws.rootGB: 400` / `gcp.rootGB: 400` or the corresponding `CRABBOX_*_ROOT_GB=400` to retain 400 GB. [PR 2632](https://github.com/openclaw/crabbox/pull/2632).
 - Cache GCP root-disk source minimums in coordinator memory for up to 30 minutes and expose lookup time as `gcp.image_minimum`, removing repeated image reads before warm creates while preserving explicit-size bypass.
+- Invalidate cached GCP firewall verification when root-image or snapshot metadata requests fail, so the next create rechecks the managed ingress policy.
 
 ## 0.69.0 - 2026-09-29
 
