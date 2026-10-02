@@ -2635,8 +2635,25 @@ func TestAWSFixedAcquirePreservesLegacyRootDefault(t *testing.T) {
 }
 
 func TestAWSStockImageRequiresBroker(t *testing.T) {
-	_, err := (Provider{}).Configure(core.Config{AWSStockImage: true}, core.Runtime{})
-	if err == nil || !strings.Contains(err.Error(), "requires brokered AWS") {
-		t.Fatalf("stock source must not silently use direct image selection: %v", err)
+	for _, tc := range []struct {
+		name        string
+		coordinator string
+		mode        core.BrokerMode
+		allowed     bool
+	}{
+		{"direct", "", core.BrokerModeManaged, false},
+		{"managed", "https://coordinator.example", core.BrokerModeManaged, true},
+		{"registered direct", "https://coordinator.example", core.BrokerModeRegistered, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := (Provider{}).Configure(core.Config{AWSStockImage: true, Coordinator: tc.coordinator, BrokerMode: tc.mode}, core.Runtime{})
+			if tc.allowed {
+				if err != nil {
+					t.Fatalf("brokered stock source rejected: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "requires brokered AWS") {
+				t.Fatalf("stock source must not silently use direct image selection: %v", err)
+			}
+		})
 	}
 }

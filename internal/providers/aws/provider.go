@@ -287,7 +287,7 @@ func awsMacOSInstanceTypeCandidates() []string {
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
-	if cfg.AWSStockImage {
+	if cfg.AWSStockImage && !core.ShouldUseCoordinator(cfg, p.Spec()) {
 		return nil, core.Exit(2, "aws.stockImage requires brokered AWS leases")
 	}
 	return NewAWSLeaseBackend(p.Spec(), cfg, rt), nil
