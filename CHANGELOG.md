@@ -4,6 +4,7 @@
 
 ### Fixes
 
+- Let `cp` and `tunnel` try every candidate SSH port when the post-claim endpoint probe cannot create a session for the first one, and warn with each candidate's failure when none answers. [PR 2642](https://github.com/openclaw/crabbox/pull/2642). Thanks @youssef-tharwat.
 - Seed public GitHub SSH origins through anonymous HTTPS before local Actions hydration, preventing cold workspace Git-root adoption failures. [Issue 2649](https://github.com/openclaw/crabbox/issues/2649).
 - Classify missing Unix daemon sockets as network failures in `doctor`, preserving endpoint guidance instead of incorrectly recommending CLI installation.
 - Prevent bootstrap package hooks from restarting cloud-init between stages, which leaves Hetzner Ubuntu 26.04 desktop and browser leases waiting indefinitely for readiness.
