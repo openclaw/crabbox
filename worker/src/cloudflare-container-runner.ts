@@ -703,11 +703,13 @@ function execEventStream(
       process = await container.exec(argv, options);
       const running = process;
       void (async () => {
-        let exitCode: number | undefined;
+        let exitCode: number;
         try {
           exitCode = await running.exitCode;
         } catch {
-          // pumpOutput reports exit failures; this only tracks liveness.
+          // A lost exit status does not mean the command ended, so it stays
+          // stoppable; pumpOutput reports the failure.
+          return;
         }
         exited = true;
         const timedOut = limitSeconds > 0 && performance.now() - startedAt >= limitSeconds * 1000;
