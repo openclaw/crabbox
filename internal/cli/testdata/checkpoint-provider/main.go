@@ -2,7 +2,7 @@
 
 // This secretless executable models only the native CLI commands used by the
 // killed-process contract test. Keeping it independent of the CLI test binary
-// avoids initializing unrelated provider packages within the 300ms kill grace.
+// avoids initializing unrelated provider packages for each native command.
 package main
 
 import (

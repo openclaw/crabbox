@@ -86,9 +86,9 @@ func runCheckpointCaptureRollbackContract(t *testing.T, repo, binary string) {
 		if err := p.signalGroup(syscall.SIGTERM); err != nil {
 			t.Fatal(err)
 		}
-		grace := time.NewTimer(300 * time.Millisecond)
-		defer grace.Stop()
-		<-grace.C
+		// The fixture persists STARTING before this event and withholds the
+		// response, so killing rollback cannot interrupt its provider.json write.
+		f.waitEvent(p, "started")
 		f.kill(p)
 		if p.err == nil {
 			t.Fatal("killed ordinary capture unexpectedly succeeded")
