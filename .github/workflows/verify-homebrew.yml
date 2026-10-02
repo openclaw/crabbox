@@ -126,7 +126,7 @@ jobs:
           assets_dir="$RUNNER_TEMP/release-assets"
           mkdir -m 700 "$assets_dir"
           for asset in "${assets[@]}"; do
-            curl --disable --fail --location --retry 3 --silent --show-error \
+            curl --disable --fail --location --retry 3 --retry-all-errors --silent --show-error \
               --output "$assets_dir/$asset" \
               "https://github.com/openclaw/crabbox/releases/download/$RELEASE_TAG/$asset"
           done

@@ -272,10 +272,15 @@ test("public download mode hashes fixed canonical assets without native approval
 set -eu
 [[ "$*" != *Authorization* && -z "\${GH_TOKEN:-}" && "$1" == --disable ]] || exit 97
 url=\${!#}
+out=/dev/stdout
+args=("$@")
+for ((i = 0; i < \${#args[@]}; i++)); do [[ "\${args[i]}" != --output ]] || out=\${args[i + 1]}; done
 printf '%s\\n' "$url" >>${quote(calls)}
 case "$url" in
   https://api.github.com/repos/openclaw/crabbox/releases/123) cat ${quote(metadata)} ;;
-  ${names.map((name) => `https://github.com/openclaw/crabbox/releases/download/v1.2.3/${name}`).join("|")}) cat ${quote(payload)} ;;
+  ${names.map((name) => `https://github.com/openclaw/crabbox/releases/download/v1.2.3/${name}`).join("|")})
+    [[ "$out" != /dev/stdout && " $* " == *" --retry-all-errors "* ]] || exit 95
+    cat ${quote(payload)} >"$out" ;;
   *) echo unexpected-endpoint >&2; exit 96 ;;
 esac
 `);
