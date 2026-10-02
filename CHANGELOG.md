@@ -5,7 +5,9 @@
 ### Credits
 
 - Thanks @shakkernerd for [PR 2650](https://github.com/openclaw/crabbox/pull/2650) (cold Actions hydration from GitHub SSH checkouts) and [PR 2651](https://github.com/openclaw/crabbox/pull/2651) (AWS SSH access refresh over IPv4), which shipped in 0.70.0 without the thanks in its notes.
+
 ### Fixes
+
 - Authenticate hosted Homebrew verifier metadata reads with the workflow's read-only token to avoid anonymous GitHub API rate limits while keeping installation credential-free.
 
 ## 0.70.0 - 2026-10-01
