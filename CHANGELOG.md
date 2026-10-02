@@ -1,30 +1,49 @@
 # Changelog
 
-## Unreleased
+## 0.70.0 - 2026-10-01
+
+### Highlights
+
+- **Use less storage for small cloud leases.** Automatic AWS/GCP root disks now scale from 40 GB for `tiny` to 400 GB for `beast`, raised to the image or snapshot minimum. Explicit sizes still win; the current promoted AWS AMI still requires 400 GB. [PR 2632](https://github.com/openclaw/crabbox/pull/2632).
+- **Skip repeated GCP image lookups.** The coordinator caches image and snapshot minimums for up to 30 minutes, removing that metadata round trip from warm creates and invalidating cached ingress verification when metadata requests fail. [PR 2633](https://github.com/openclaw/crabbox/pull/2633), [PR 2634](https://github.com/openclaw/crabbox/pull/2634).
+- **Start Hetzner desktops and browsers again.** Oversized bootstrap configurations fit the provider's 32 KiB limit, and package hooks no longer restart cloud-init midway through Ubuntu 26.04 setup. [PR 2637](https://github.com/openclaw/crabbox/pull/2637), [PR 2647](https://github.com/openclaw/crabbox/pull/2647).
+- **Keep long runs alive through a lost renewal response.** Bounded workspace-owner retries prevent a single transport failure from ending a healthy run with exit 7, while explicit ownership denials still stop it. File copies and tunnels also try every candidate SSH port. [PR 2653](https://github.com/openclaw/crabbox/pull/2653), [PR 2641](https://github.com/openclaw/crabbox/pull/2641), [PR 2642](https://github.com/openclaw/crabbox/pull/2642), [Issue 1712](https://github.com/openclaw/crabbox/issues/1712). Thanks @youssef-tharwat.
+- **Retry Apple Container allocations with the same lease ID.** Caller-supplied IDs support verified replay, interrupted-start recovery, and terminal release receipts. [PR 2654](https://github.com/openclaw/crabbox/pull/2654), [PR 2644](https://github.com/openclaw/crabbox/pull/2644), [Issue 2643](https://github.com/openclaw/crabbox/issues/2643). Thanks @genaro23.
+
+### Upgrade notes
+
+- Automatic AWS/GCP root disks are now 40/80/150/150/250/400 GB for `tiny`/`small`/`standard`/`fast`/`large`/`beast`, raised to the source minimum. Set `aws.rootGB: 400` or `CRABBOX_AWS_ROOT_GB=400`, and `gcp.rootGB: 400` or `CRABBOX_GCP_ROOT_GB=400`, to retain 400 GB. Automatic sizing requires image or snapshot metadata access and fails if that lookup fails; positive explicit sizes bypass it. Older clients still request 400 GB, ready-pool leases retain their disks, and GCP machine-image restores inherit their original disks. [PR 2632](https://github.com/openclaw/crabbox/pull/2632).
+- GCP image-family aliases can retain the inspected image for the coordinator cache's 30-minute window. Relevant provider errors invalidate the cached source hints. [PR 2633](https://github.com/openclaw/crabbox/pull/2633).
+- Workspace-owner transport retries extend the ownership TTL by two transport-call budgets, so recovery of an abandoned workspace can take longer. Explicit denial responses and exhausted ownership windows remain terminal. [PR 2653](https://github.com/openclaw/crabbox/pull/2653), [PR 2641](https://github.com/openclaw/crabbox/pull/2641). Thanks @youssef-tharwat.
+
+### Added
+
+- Support caller-supplied Apple Container lease IDs with verified replay, recovery of interrupted startup, and terminal release receipts. [PR 2654](https://github.com/openclaw/crabbox/pull/2654), [PR 2644](https://github.com/openclaw/crabbox/pull/2644), [Issue 2643](https://github.com/openclaw/crabbox/issues/2643). Thanks @genaro23.
+
+### Changed
+
+- Scale automatic AWS/GCP root disks by lease class (40/80/150/150/250/400 GB), raised to the source image or snapshot minimum; explicit sizes retain their existing behavior. [PR 2632](https://github.com/openclaw/crabbox/pull/2632).
+- Cache GCP root-disk source minimums in coordinator memory for up to 30 minutes and expose lookup time as `gcp.image_minimum`, removing repeated image reads before warm creates while preserving explicit-size bypass. [PR 2633](https://github.com/openclaw/crabbox/pull/2633).
 
 ### Fixes
 
 - Let `cp` and `tunnel` try every candidate SSH port when the post-claim endpoint probe cannot create a session for the first one, and warn with each candidate's failure when none answers. [PR 2642](https://github.com/openclaw/crabbox/pull/2642). Thanks @youssef-tharwat.
-- Seed public GitHub SSH origins through anonymous HTTPS before local Actions hydration, preventing cold workspace Git-root adoption failures. [Issue 2649](https://github.com/openclaw/crabbox/issues/2649).
-- Classify missing Unix daemon sockets as network failures in `doctor`, preserving endpoint guidance instead of incorrectly recommending CLI installation.
-- Prevent bootstrap package hooks from restarting cloud-init between stages, which leaves Hetzner Ubuntu 26.04 desktop and browser leases waiting indefinitely for readiness.
-- Preserve non-UTF-8 POSIX filenames and symlink targets during cold tar sync instead of failing extraction on bsdtar targets.
-- Stage remote failure archives on the workspace disk so small `/tmp` filesystems on tiny Linux boxes do not prevent collecting failure evidence.
+- Seed public GitHub SSH origins through anonymous HTTPS before local Actions hydration, preventing cold workspace Git-root adoption failures. [PR 2650](https://github.com/openclaw/crabbox/pull/2650), [Issue 2649](https://github.com/openclaw/crabbox/issues/2649).
+- Classify missing Unix daemon sockets as network failures in `doctor`, preserving endpoint guidance instead of incorrectly recommending CLI installation. [PR 2652](https://github.com/openclaw/crabbox/pull/2652).
+- Prevent bootstrap package hooks from restarting cloud-init between stages, which leaves Hetzner Ubuntu 26.04 desktop and browser leases waiting indefinitely for readiness. [PR 2647](https://github.com/openclaw/crabbox/pull/2647).
+- Preserve non-UTF-8 POSIX filenames and symlink targets during cold tar sync instead of failing extraction on bsdtar targets. [PR 2636](https://github.com/openclaw/crabbox/pull/2636).
+- Stage remote failure archives on the workspace disk so small `/tmp` filesystems on tiny Linux boxes do not prevent collecting failure evidence. [PR 2638](https://github.com/openclaw/crabbox/pull/2638).
 - Compress oversized Hetzner cloud-init into a gzip MIME envelope so desktop and browser leases fit the provider's 32 KiB user-data limit without changing bootstrap ordering. [PR 2637](https://github.com/openclaw/crabbox/pull/2637).
-- Use `connect` in interactive-shell quickstart and troubleshooting examples so copied commands open the box instead of only printing an SSH command.
-- Let Actions hydration start directly after warmup even when the guest's Bash logout hook fails; missing-workspace fingerprint cleanup no longer invokes that hook.
+- Use `connect` in interactive-shell quickstart and troubleshooting examples so copied commands open the box instead of only printing an SSH command. [PR 2635](https://github.com/openclaw/crabbox/pull/2635).
+- Let Actions hydration start directly after warmup even when the guest's Bash logout hook fails; missing-workspace fingerprint cleanup no longer invokes that hook. [PR 2639](https://github.com/openclaw/crabbox/pull/2639).
 - Point generated `actions.workflow` at the custom `init --workflow` path. [PR 2624](https://github.com/openclaw/crabbox/pull/2624). Thanks @KrasimirKralev.
 - Print empty JSON inventories as `[]` (or `{}` for object-shaped provider lists) instead of `null` across lease lists, events, history, ready pools, cache volumes, provider sizes, ports, and admin inventories. [PR 2631](https://github.com/openclaw/crabbox/pull/2631).
-- Release a pressed macOS VNC key when `desktop type` or `desktop paste` is cancelled between its key-down and key-up; Screen Sharing otherwise kept it held after disconnect. [Issue 2627](https://github.com/openclaw/crabbox/issues/2627), [PR 2628](https://github.com/openclaw/crabbox/pull/2628). Thanks @altaywtf for the fix and @saariuslystoned for the report.
-- Scale automatic AWS/GCP root disks by lease class (40/80/150/150/250/400 GB), raised to the source image or snapshot minimum; set `aws.rootGB: 400` / `gcp.rootGB: 400` or the corresponding `CRABBOX_*_ROOT_GB=400` to retain 400 GB. [PR 2632](https://github.com/openclaw/crabbox/pull/2632).
-- Cache GCP root-disk source minimums in coordinator memory for up to 30 minutes and expose lookup time as `gcp.image_minimum`, removing repeated image reads before warm creates while preserving explicit-size bypass.
-- Invalidate cached GCP firewall verification when root-image or snapshot metadata requests fail, so the next create rechecks the managed ingress policy.
-- Prefer IPv4 for AWS coordinator connections so heartbeats refresh the source used by public SSH, while preserving IPv6 fallback and configured proxies. [PR 2651](https://github.com/openclaw/crabbox/pull/2651).
-- Keep long runs alive across bounded workspace-owner renewal transport failures while preserving fail-closed token and expiry checks. [PR 2641](https://github.com/openclaw/crabbox/pull/2641). Thanks @youssef-tharwat.
-
-### Added
-
-- Support caller-supplied Apple Container lease IDs with verified replay, recovery of interrupted startup, and terminal release receipts. [PR 2644](https://github.com/openclaw/crabbox/pull/2644). Thanks @genaro23.
+- Release a pressed macOS VNC key when `desktop type` or `desktop paste` is cancelled between its key-down and key-up; Screen Sharing otherwise kept it held after disconnect. [PR 2630](https://github.com/openclaw/crabbox/pull/2630), [PR 2628](https://github.com/openclaw/crabbox/pull/2628), [Issue 2627](https://github.com/openclaw/crabbox/issues/2627). Thanks @altaywtf for the fix and @saariuslystoned for the report.
+- Invalidate cached GCP firewall verification when root-image or snapshot metadata requests fail, so the next create rechecks the managed ingress policy. [PR 2634](https://github.com/openclaw/crabbox/pull/2634).
+- Prefer IPv4 for AWS coordinator connections so heartbeats refresh the source used by public SSH, while preserving IPv6 fallback and configured proxies. [PR 2651](https://github.com/openclaw/crabbox/pull/2651), [Issue 2648](https://github.com/openclaw/crabbox/issues/2648).
+- Keep long runs alive across bounded workspace-owner renewal transport failures while preserving fail-closed token and expiry checks. [PR 2653](https://github.com/openclaw/crabbox/pull/2653), [PR 2641](https://github.com/openclaw/crabbox/pull/2641), [Issue 1712](https://github.com/openclaw/crabbox/issues/1712). Thanks @youssef-tharwat.
+- Correct the Hetzner provider documentation to describe the existing Ubuntu 26.04 image mapping. [PR 2640](https://github.com/openclaw/crabbox/pull/2640).
+- Extract release-verifier source archives from files so bsdtar closing its input early cannot interrupt verification with a broken pipe. [PR 2622](https://github.com/openclaw/crabbox/pull/2622).
 
 ## 0.69.0 - 2026-09-29
 
