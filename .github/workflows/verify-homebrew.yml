@@ -131,6 +131,17 @@ jobs:
               "https://github.com/openclaw/crabbox/releases/download/$RELEASE_TAG/$asset"
           done
 
+      - name: Read public release metadata with read-only token
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]] || exit 1
+          gh api --method GET "repos/openclaw/crabbox/releases/$RELEASE_ID" \
+            >"$RUNNER_TEMP/public-release.json"
+
       - name: Verify public Homebrew install without credentials
         shell: bash
         env:
@@ -145,6 +156,7 @@ jobs:
           unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN
           unset HOMEBREW_GITHUB_API_TOKEN HOMEBREW_TAP_GITHUB_TOKEN
           CRABBOX_VERIFY_TOOLING_COMMIT="$WORKFLOW_COMMIT" \
+            CRABBOX_HOMEBREW_RELEASE_METADATA="$RUNNER_TEMP/public-release.json" \
             scripts/verify-homebrew-release.sh \
             "$RELEASE_TAG" "$RUNNER_TEMP/release-assets" \
             "$TAG_OBJECT" "$SOURCE_COMMIT" "$VERIFIER_COMMIT" \

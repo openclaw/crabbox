@@ -228,13 +228,20 @@ freeze_public_release() {
     cp "$asset_dir/$name" "$frozen/$name"
   done <"$expected_names"
 
-  public_api_get() {
+  # Hosted workflows fetch metadata in a separate read-only authenticated step.
+  # Only the response enters this verifier; validation below is identical.
+  if [[ -n "${CRABBOX_HOMEBREW_RELEASE_METADATA+x}" ]]; then
+    [[ -f "$CRABBOX_HOMEBREW_RELEASE_METADATA" && ! -L "$CRABBOX_HOMEBREW_RELEASE_METADATA" ]] || {
+      echo "public release metadata must be a regular file, not a symlink" >&2
+      return 1
+    }
+    cp "$CRABBOX_HOMEBREW_RELEASE_METADATA" "$work/public-release.json"
+  else
     curl --disable --fail --silent --show-error --location --retry 3 \
       --header 'Accept: application/vnd.github+json' \
       --header 'X-GitHub-Api-Version: 2026-03-10' \
-      "https://api.github.com/$1"
-  }
-  public_api_get "repos/$repository/releases/$release_id" >"$work/public-release.json"
+      "https://api.github.com/repos/$repository/releases/$release_id" >"$work/public-release.json"
+  fi
   env -i \
     CRABBOX_PUBLISH_REPOSITORY="$repository" \
     CRABBOX_PUBLISH_RELEASE_ID="$release_id" \
