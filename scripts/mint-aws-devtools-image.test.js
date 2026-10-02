@@ -1073,7 +1073,11 @@ test("AWS devtools mint wrapper isolates warmup logs from explicit image names",
     assert.equal(result.code, 0, result.stderr);
   }
 
-  const files = (await readdir(logDir)).filter((name) => name.startsWith("image-mint-"));
+  const artifacts = (await readdir(logDir)).filter((name) => name.startsWith("image-mint-"));
+  const receipts = artifacts.filter((name) => name.endsWith("-source.json"));
+  assert.equal(receipts.length, 2);
+  assert.equal(new Set(receipts).size, 2);
+  const files = artifacts.filter((name) => name.includes(".log."));
   assert.equal(files.length, 4);
   assert.equal(new Set(files).size, 4);
   for (const file of files) {

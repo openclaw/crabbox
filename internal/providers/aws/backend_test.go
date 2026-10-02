@@ -2574,7 +2574,7 @@ func TestAWSConfigShowCompletePassiveSection(t *testing.T) {
 				if section.JSONKey != "aws" || section.TextLabel != "aws" || !reflect.DeepEqual(section.Providers, []string{"aws"}) {
 					t.Fatalf("section metadata=%#v", section)
 				}
-				wantOrder := []string{"region", "ami", "securityGroupId", "subnetId", "instanceProfile", "rootGB", "sshCIDRs"}
+				wantOrder := []string{"region", "ami", "stockImage", "securityGroupId", "subnetId", "instanceProfile", "rootGB", "sshCIDRs"}
 				if len(section.Fields) != len(wantOrder) {
 					t.Fatalf("field count=%d want %d", len(section.Fields), len(wantOrder))
 				}
