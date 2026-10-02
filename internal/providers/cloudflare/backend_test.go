@@ -1741,8 +1741,11 @@ func TestCloudflareFreshPublicationDoesNotReclaimCompetingClaim(t *testing.T) {
 		}
 		var req createSandboxRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		var err error
-		competing, err = core.ClaimLeaseForRepoProviderScopePondWithLabels(req.ID, req.Slug, providerName, "", "other-pond", repo, time.Minute, map[string]string{"owner": "successor"})
+		pending, ok, err := core.ResolveLeaseClaimForProvider(req.ID, providerName)
+		if err != nil || !ok {
+			t.Errorf("pending claim ok=%v err=%v", ok, err)
+		}
+		competing, err = core.UpdateLeaseClaimLabelsIfUnchanged(req.ID, pending, map[string]string{"owner": "successor"})
 		if err != nil {
 			t.Error(err)
 		}
@@ -1756,6 +1759,48 @@ func TestCloudflareFreshPublicationDoesNotReclaimCompetingClaim(t *testing.T) {
 	}
 	if err := core.VerifyLeaseClaimUnchanged(competing.LeaseID, competing); err != nil {
 		t.Fatalf("competing claim changed: %v", err)
+	}
+}
+
+func TestCloudflareRejectedCreateReleasesItsClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"image missing is not configured"}`)
+	}))
+	defer server.Close()
+	backend := cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+	err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, Keep: true})
+	if err == nil || strings.Contains(err.Error(), "may have allocated") {
+		t.Fatalf("warmup error = %v, want the runner's rejection", err)
+	}
+	if claims, err := localCloudflareClaims(); err != nil || len(claims) != 0 {
+		t.Fatalf("claims = %+v err=%v, want the rejected create's claim released", claims, err)
+	}
+}
+
+func TestCloudflareCleanupKeepsAClaimWhoseCreateMayBeInFlight(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		until time.Duration
+		kept  bool
+	}{{"in flight", time.Minute, true}, {"expired", -time.Minute, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			labels := map[string]string{createPendingUntilLabel: core.LeaseLabelTime(time.Now().Add(tc.until))}
+			if _, err := core.ClaimLeaseForRepoProviderScopePondWithLabels("cbx_pending", "pending", providerName, "", "", t.TempDir(), time.Hour, labels); err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(http.NotFound))
+			defer server.Close()
+			backend := cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+			if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok, err := core.ResolveLeaseClaimForProvider("cbx_pending", providerName); err != nil || ok != tc.kept {
+				t.Fatalf("claim kept=%v err=%v, want kept=%v", ok, err, tc.kept)
+			}
+		})
 	}
 }
 
