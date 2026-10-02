@@ -30,6 +30,8 @@ type fakeSnapshotRunner struct {
 	execs     []shared.CommandStreamRequest
 	deletes   []string
 	requests  int
+	// dropCreates records an allocation, then closes the connection unanswered.
+	dropCreates bool
 }
 
 func newFakeSnapshotRunner(t *testing.T) *fakeSnapshotRunner {
@@ -46,6 +48,15 @@ func newFakeSnapshotRunner(t *testing.T) *fakeSnapshotRunner {
 				t.Errorf("decode create: %v", err)
 			}
 			f.creates = append(f.creates, req)
+			if f.dropCreates {
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					t.Errorf("hijack create: %v", err)
+					return
+				}
+				_ = conn.Close()
+				return
+			}
 			_, _ = fmt.Fprintf(w, `{"id":%q,"state":"running","workdir":%q,"instanceType":%q,"snapshotId":%q}`, req.ID, req.Workdir, req.InstanceType, req.SnapshotID)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/sandboxes/"):
 			id := strings.TrimPrefix(r.URL.Path, "/v1/sandboxes/")
@@ -250,6 +261,70 @@ func TestCloudflareLeaseCommandsUseTheRunnerThatCreatedTheLease(t *testing.T) {
 	}
 	if configured.requests != 0 {
 		t.Fatalf("configured runner received %d requests for a lease created on another runner", configured.requests)
+	}
+}
+
+func TestCloudflareForkKeepsCustodyWhenTheCreateResponseIsLost(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	runner := newFakeSnapshotRunner(t)
+	repo := checkpointTestRepo(t)
+	t.Chdir(repo)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	config := fmt.Sprintf("provider: cloudflare\ncloudflare:\n  apiUrl: %s\n", runner.server.URL)
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	t.Setenv("CRABBOX_CLOUDFLARE_RUNNER_TOKEN", "runner-token")
+	source, err := core.ClaimLeaseForRepoProviderScopePondWithLabels("cbx_0123456789ab", "blue-lobster", providerName, "", "", repo, time.Hour, map[string]string{"instance_type": "standard-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	app := core.App{Stdout: &stdout, Stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"checkpoint", "create", "--id", source.LeaseID, "--json"}); err != nil {
+		t.Fatalf("create: %v %s", err, stderr.String())
+	}
+	var record struct{ ID string }
+	if err := json.Unmarshal(stdout.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+
+	runner.mu.Lock()
+	runner.dropCreates = true
+	runner.mu.Unlock()
+	err = app.Run(t.Context(), []string{"checkpoint", "fork", record.ID})
+	// The client sees the closed connection before the handler returns.
+	runner.mu.Lock()
+	creates, deletes := append([]createSandboxRequest(nil), runner.creates...), len(runner.deletes)
+	runner.mu.Unlock()
+	if len(creates) != 1 {
+		t.Fatalf("runner creates = %d, want the fork", len(creates))
+	}
+	fork := creates[0].ID
+	if err == nil || !strings.Contains(err.Error(), "may have allocated a sandbox") || !strings.Contains(err.Error(), fork) {
+		t.Fatalf("fork error = %v, want the ambiguous lease %s named", err, fork)
+	}
+	if deletes != 0 {
+		t.Fatalf("runner deletes = %d, want the ambiguous sandbox left alone", deletes)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider(fork, providerName)
+	if err != nil || !ok || claim.Labels[runnerURLLabel] != runner.server.URL || claim.Labels["workdir"] != "/workspace/app" {
+		t.Fatalf("fork claim = %+v ok=%v err=%v, want the runner and workdir kept", claim, ok, err)
+	}
+
+	stdout.Reset()
+	if err := app.Run(t.Context(), []string{"status", "--id", fork}); err != nil || !strings.Contains(stdout.String(), "running") {
+		t.Fatalf("status: %v %s", err, stdout.String())
+	}
+	if err := app.Run(t.Context(), []string{"stop", fork}); err != nil {
+		t.Fatalf("stop: %v %s", err, stderr.String())
+	}
+	if len(runner.deletes) != 1 || runner.deletes[0] != fork {
+		t.Fatalf("runner deletes = %v, want %s", runner.deletes, fork)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider(fork, providerName); err != nil || ok {
+		t.Fatalf("fork claim after stop ok=%v err=%v, want released", ok, err)
 	}
 }
 

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -262,6 +264,9 @@ func (b *cloudflareBackend) Cleanup(ctx context.Context, req core.CleanupRequest
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 		if err != nil {
 			if cloudflareNotFoundError(err) {
+				if createPending(claim, core.ClockNow(b.rt.Clock)) {
+					continue
+				}
 				if req.DryRun {
 					fmt.Fprintf(b.rt.Stdout, "would remove stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"))
 					continue
@@ -328,27 +333,53 @@ func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflar
 		return core.LeaseClaim{}, cloudflareContainer{}, err
 	}
 	labels := map[string]string{"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": slug, "repo": repo.Name, "instance_type": client.instanceType, "workdir": workdir, runnerURLLabel: client.baseURL}
+	// The runner may allocate the sandbox even when its response is lost, so
+	// the claim exists before the request and outlives an ambiguous failure.
+	pendingLabels := maps.Clone(labels)
+	pendingLabels[createPendingUntilLabel] = core.LeaseLabelTime(core.ClockNow(b.rt.Clock).Add(createPendingWindow))
+	claim, err := core.ClaimLeaseForRepoProviderScopePondWithLabels(leaseID, slug, providerName, "", b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, pendingLabels)
+	if err != nil {
+		return core.LeaseClaim{}, cloudflareContainer{}, err
+	}
 	sandbox, err := client.createSandbox(ctx, createSandboxRequest{
 		ID: leaseID, LeaseID: leaseID, Slug: slug, Repo: repo.Name, Workdir: workdir, SnapshotID: source.snapshotID,
 		InstanceType: client.instanceType, Image: strings.TrimSpace(b.cfg.Cloudflare.Image), TTLSeconds: durationSecondsCeil(b.cfg.TTL), IdleTimeoutSeconds: durationSecondsCeil(b.cfg.IdleTimeout), Labels: labels,
 	})
-	if err != nil {
-		return core.LeaseClaim{}, cloudflareContainer{}, err
+	if err == nil && sandbox.ID != leaseID {
+		err = fmt.Errorf("cloudflare creation returned unexpected sandbox %q for requested %q", sandbox.ID, leaseID)
 	}
-	if sandbox.ID != leaseID {
-		return core.LeaseClaim{}, cloudflareContainer{}, fmt.Errorf("cloudflare creation returned unexpected sandbox %q for requested %q; inspect the runner before recovery", sandbox.ID, leaseID)
-	}
-	claim, err := core.ClaimLeaseForRepoProviderScopePondWithLabels(leaseID, slug, providerName, "", b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, labels)
 	if err != nil {
-		cleanupCtx, cancel := cloudflareCleanupContext()
-		defer cancel()
-		cleanupErr := core.CleanupLeaseClaimIfUnchangedAfterContext(cleanupCtx, leaseID, core.LeaseClaim{}, false, func() error { return client.destroySandbox(cleanupCtx, leaseID) })
-		if cleanupErr != nil {
-			err = errors.Join(err, fmt.Errorf("cleanup failed for cloudflare sandbox %s; inspect its claim and runner before recovery: %w", leaseID, cleanupErr))
+		if cloudflareRejectedError(err) {
+			if releaseErr := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); releaseErr != nil {
+				err = errors.Join(err, fmt.Errorf("release %s claim %s: %w", providerName, leaseID, releaseErr))
+			}
+			return core.LeaseClaim{}, cloudflareContainer{}, err
 		}
-		return core.LeaseClaim{}, cloudflareContainer{}, err
+		return core.LeaseClaim{}, cloudflareContainer{}, fmt.Errorf("%s create of %s failed and may have allocated a sandbox; its claim is kept: check it with `crabbox status --provider %s --id %s` or destroy it with `%s`: %w", providerName, leaseID, providerName, leaseID, cloudflareCleanupCommand(leaseID), err)
+	}
+	claim, err = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels)
+	if err != nil {
+		return core.LeaseClaim{}, cloudflareContainer{}, fmt.Errorf("%s sandbox %s was created but its claim changed; inspect it with `crabbox status --provider %s --id %s`: %w", providerName, leaseID, providerName, leaseID, err)
 	}
 	return claim, sandbox, nil
+}
+
+// createPendingUntilLabel marks a claim whose create request may still be in
+// flight, so cleanup does not drop it before the runner records the sandbox.
+const createPendingUntilLabel = "create_pending_until"
+
+const createPendingWindow = cloudflareDefaultResponseHeaderTimeout + time.Minute
+
+func createPending(claim core.LeaseClaim, now time.Time) bool {
+	seconds, err := strconv.ParseInt(strings.TrimSpace(claim.Labels[createPendingUntilLabel]), 10, 64)
+	return err == nil && now.Before(time.Unix(seconds, 0))
+}
+
+// A 4xx create response means the runner rejected the request before it
+// allocated anything.
+func cloudflareRejectedError(err error) bool {
+	var responseErr *cloudflareResponseError
+	return errors.As(err, &responseErr) && responseErr.statusCode >= 400 && responseErr.statusCode < 500
 }
 
 func resolveCloudflareClaim(identifier string) (core.LeaseClaim, error) {

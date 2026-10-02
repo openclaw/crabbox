@@ -373,6 +373,13 @@ crabbox checkpoint fork chk_0123456789abcdef --count 4 --type standard-2 -- pnpm
   which took about 2.5 minutes for the bundled image. Creation, upload, and exec
   wait up to 300 seconds for readiness, and the CLI waits up to 330 seconds for
   response headers. A container that fails to start is reported immediately.
+- Creation and forks claim the lease before calling the runner. If the runner
+  rejects the request with a 4xx response, the claim is released. Any other
+  failure, such as a lost response or timeout, may still have allocated the
+  container, so the claim stays and the error names the lease: check it with
+  `crabbox status --provider cloudflare --id <lease>` or destroy it with
+  `crabbox stop --provider cloudflare --id <lease>`. `cleanup` leaves such a
+  claim alone for 6.5 minutes in case the request is still in flight.
 - Canceling a command (Ctrl-C, or a dropped connection) sends SIGTERM to the
   command's process group, followed by SIGKILL after 5 seconds, even when the
   cancel arrives before the command has started or the shell exits on SIGTERM.
