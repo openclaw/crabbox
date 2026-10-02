@@ -300,12 +300,18 @@ async function eventually(check: () => Promise<void>): Promise<void> {
   }
 }
 
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: Error) => void;
+} {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((next, fail) => {
     resolve = next;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 async function activeExecutions(storage: MemoryStorage): Promise<number | undefined> {
@@ -924,6 +930,23 @@ describe("Cloudflare runner lifecycle", () => {
 
     expect(got.at(-1)).toEqual({ type: "error", error: "read stdout: Network connection lost." });
     expect(got.some((event) => event.type === "complete")).toBe(false);
+  });
+
+  it("stops a command whose exit status is lost", async () => {
+    const { sandbox, container } = harness();
+    await createLease(sandbox);
+    const exit = deferred<number>();
+    container.command = { stdout: [], exitCode: exit.promise, holdStdoutOpen: true };
+
+    const response = execLease(sandbox);
+    await eventually(async () =>
+      expect(container.calls.some((call) => call.cmd[0] === "timeout")).toBe(true),
+    );
+    exit.reject(new Error("exit status transport lost"));
+    const got = await events(await response);
+
+    expect(got.at(-1)).toEqual({ type: "error", error: "exit status transport lost" });
+    await eventually(async () => expect(container.stoppedGroups).toEqual([String(commandPid)]));
   });
 
   it("closes cleanly when the caller cancels the response stream", async () => {
