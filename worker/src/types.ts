@@ -219,6 +219,7 @@ export interface LeaseRequest {
   image?: string;
   awsRegion?: string;
   awsAMI?: string;
+  awsUseStockImage?: boolean;
   awsSnapshot?: string;
   awsSGID?: string;
   awsSubnetID?: string;

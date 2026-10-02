@@ -570,6 +570,30 @@ describe("aws provider", () => {
     expect(submitted?.get("TagSpecification.2.Tag.5.Value")).toBe("cbx_abcdef123456");
   });
 
+  it("records a stock AMI honestly even when stale promoted identity is present", () => {
+    const config = leaseConfig({
+      provider: "aws",
+      awsUseStockImage: true,
+      sshPublicKey: "ssh-ed25519 test",
+    });
+    config.selectedImage = {
+      id: "ami-stock",
+      source: "promoted",
+      provider: "aws",
+      kind: "aws-ami",
+      region: "eu-west-1",
+      revision: "stale",
+    };
+    config.awsPromotedAMIs.stale = "ami-stock";
+    expect(awsLeaseImageIdentity(config, "ami-stock", "eu-west-1")).toEqual({
+      id: "ami-stock",
+      source: "stock",
+      provider: "aws",
+      kind: "aws-ami",
+      region: "eu-west-1",
+    });
+  });
+
   it("uses the launched fallback AMI for provider image labels", () => {
     const config = leaseConfig({
       awsRootGB: 400,

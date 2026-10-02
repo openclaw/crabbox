@@ -72,6 +72,7 @@ type Config struct {
 	Image                         string
 	imageExplicit                 bool
 	AWSRegion                     string
+	AWSStockImage                 bool
 	AWSAMI                        string
 	AWSSnapshot                   string
 	AWSSGID                       string
@@ -1821,6 +1822,7 @@ type fileHetznerConfig struct {
 type fileAWSConfig struct {
 	Region          string   `yaml:"region,omitempty"`
 	AMI             string   `yaml:"ami,omitempty"`
+	StockImage      *bool    `yaml:"stockImage,omitempty"`
 	SecurityGroupID string   `yaml:"securityGroupId,omitempty"`
 	SubnetID        string   `yaml:"subnetId,omitempty"`
 	InstanceProfile string   `yaml:"instanceProfile,omitempty"`
@@ -2686,6 +2688,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.AWSRegion = file.AWS.Region
 			recordConfigInput(cfg, "aws", inputSource, true)
 			recordConfigInput(cfg, "aws-lambda-microvm", inputSource, true)
+		}
+		if file.AWS.StockImage != nil {
+			cfg.AWSStockImage = *file.AWS.StockImage
+			recordConfigInput(cfg, "aws", inputSource, true)
 		}
 		configInputFileString(cfg, "aws", inputSource, &cfg.AWSAMI, file.AWS.AMI)
 		configInputFileString(cfg, "aws", inputSource, &cfg.AWSSGID, file.AWS.SecurityGroupID)
@@ -3960,6 +3966,10 @@ func applyEnv(cfg *Config) error {
 		cfg.AWSRegion = region
 		recordConfigInput(cfg, "aws", configInputEnvironment, true)
 		recordConfigInput(cfg, "aws-lambda-microvm", configInputEnvironment, true)
+	}
+	if value, ok := getenvBool("CRABBOX_AWS_STOCK_IMAGE"); ok {
+		cfg.AWSStockImage = value
+		recordConfigInput(cfg, "aws", configInputEnvironment, true)
 	}
 	cfg.AWSAMI = configInputEnvString(cfg, "aws", cfg.AWSAMI, "CRABBOX_AWS_AMI")
 	cfg.AWSSGID = configInputEnvString(cfg, "aws", cfg.AWSSGID, "CRABBOX_AWS_SECURITY_GROUP_ID")

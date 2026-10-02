@@ -39,6 +39,25 @@ Hetzner project and are selected through `image`/`CRABBOX_HETZNER_IMAGE`;
 Crabbox has no Hetzner create/promote lifecycle commands. Direct native
 checkpoints own the supported Hetzner snapshot creation and fork path.
 
+## Stock AWS source leases
+
+For a brokered AWS image source, set `aws.stockImage: true` in config or
+`CRABBOX_AWS_STOCK_IMAGE=1`. This skips promoted and coordinator-configured AMIs
+and resolves an owner-verified stock image for the selected OS. It requires
+coordinator admin auth, just like `aws.ami`; explicit AMIs, snapshots, and image
+capability requirements cannot be combined with it. The input is sent only for
+AWS brokered leases; direct AWS rejects it. Set the environment value to `0` to
+override a file setting.
+
+```sh
+CRABBOX_AWS_STOCK_IMAGE=1 CRABBOX_AWS_ROOT_GB=40 \
+  crabbox warmup --provider aws --class tiny --type t3.small --ttl 20m --idle-timeout 10m
+```
+
+Use the [image bake runbook](../features/image-bake-runbook.md#bake-a-smaller-linux-root-disk-from-stock-ubuntu)
+for the guarded publisher's source-only `--stock-source --root-gb N` flags.
+Rebuilding from a promoted AMI cannot shrink its root snapshot minimum.
+
 ## create
 
 Create a provider image from an active brokered lease.

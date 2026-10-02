@@ -203,7 +203,7 @@ func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 		}
 	}
 	classify("coordinator transport or credential", `
-		Coordinator BrokerMode BrokerLoginRedirectOrigins BrokerAutoWebVNC
+		Coordinator BrokerMode BrokerLoginRedirectOrigins BrokerAutoWebVNC AWSStockImage
 		CoordToken CoordTokenCommand CoordAdminToken Access SSHKey
 	`)
 	classify("non-AWS provider selection", `

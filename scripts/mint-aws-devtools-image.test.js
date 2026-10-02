@@ -34,6 +34,7 @@ async function setupFakeCrabbox() {
     `#!/usr/bin/env bash
 set -euo pipefail
 printf 'env CRABBOX_AWS_REGION=%s AWS_REGION=%s CRABBOX_AWS_AMI=%s args %s\\n' "\${CRABBOX_AWS_REGION:-}" "\${AWS_REGION:-}" "\${CRABBOX_AWS_AMI:-}" "$*" >>"\${CRABBOX_FAKE_LOG:?}"
+printf 'source-options stock=%s root=%s command=%s\\n' "\${CRABBOX_AWS_STOCK_IMAGE-unset}" "\${CRABBOX_AWS_ROOT_GB-unset}" "$1" >>"\${CRABBOX_FAKE_LOG}"
 printf 'selection os=%s ami=%s command=%s\\n' "\${CRABBOX_OS-unset}" "\${CRABBOX_AWS_AMI-unset}" "$1" >>"\${CRABBOX_FAKE_LOG}"
 case "$1" in
   warmup)
@@ -44,7 +45,11 @@ case "$1" in
     printf '%s\\n' "$count" >"$count_file"
     case "$count" in
       1)
-        printf 'image selected id=ami-previous source=promoted kind=aws-ami region=%s promoted_at=2026-09-01T00:00:00Z\\n' "\${CRABBOX_AWS_REGION:-eu-west-1}"
+        if [[ "\${CRABBOX_AWS_STOCK_IMAGE:-0}" == 1 && "\${CRABBOX_FAKE_STOCK_SOURCE_IGNORED:-0}" != 1 ]]; then
+          printf 'image selected id=ami-stock source=stock kind=aws-ami region=%s\\n' "\${CRABBOX_AWS_REGION:-eu-west-1}"
+        else
+          printf 'image selected id=ami-previous source=promoted kind=aws-ami region=%s promoted_at=2026-09-01T00:00:00Z\\n' "\${CRABBOX_AWS_REGION:-eu-west-1}"
+        fi
         printf '{"leaseId":"cbx_source"}\\n'
         ;;
       2)
@@ -491,12 +496,14 @@ test("AWS developer image smoke executes package managers and requires TruffleHo
     "utf8",
   );
   assert.match(windowsSmoke, /pnpm --version\ntrufflehog --no-update --version\ndocker --version/);
-  assert.match(windowsSmoke, /docker image inspect .*\nif \(\$LASTEXITCODE -ne 0\).*throw.*\nWrite-Output "devtools-smoke-ok"\n$/);
+  assert.match(
+    windowsSmoke,
+    /docker image inspect .*\nif \(\$LASTEXITCODE -ne 0\).*throw.*\nWrite-Output "devtools-smoke-ok"\n$/,
+  );
   assert.match(text, /trap 'exit 130' INT\ntrap 'exit 143' TERM/);
   assert.match(text, /rollback_pending=1\nrun_json_tee "\$promotion_log"/);
   assert.doesNotMatch(text, /\bBASHPID\b/);
 });
-
 
 test("AWS Linux image capture refuses a failed minimal readiness proof", async () => {
   const fake = await setupFakeCrabbox();
@@ -557,10 +564,7 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
     log,
     /run --provider aws --target linux --id cbx_source --no-sync --script .*linux-readiness\.generated\.sh -- --verify linux-builder/,
   );
-  assert.match(
-    log,
-    /run --provider aws --target linux --id cbx_source --no-sync --script-stdin\n/,
-  );
+  assert.match(log, /run --provider aws --target linux --id cbx_source --no-sync --script-stdin\n/);
   assert.equal((log.match(/corepack --version/g) ?? []).length, 3);
   assert.equal(
     (log.match(/\n  offline_node_pnpm_probe\nfi\npublic_toolchain_archive_dir=/g) ?? []).length,
@@ -572,7 +576,11 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
   );
   for (const probe of ["bun", "rust"]) {
     assert.equal(
-      (log.match(new RegExp(`\\n  offline_${probe}_probe\\nfi\\npublic_toolchain_archive_dir=`, "g")) ?? []).length,
+      (
+        log.match(
+          new RegExp(`\\n  offline_${probe}_probe\\nfi\\npublic_toolchain_archive_dir=`, "g"),
+        ) ?? []
+      ).length,
       3,
     );
   }
@@ -817,8 +825,11 @@ async function linuxSmokeFixture(t, { major = "24", pnpm = "11.1.0", customPrep 
   const args = ["--target", "linux", "--run", "--no-promote"];
   if (customPrep) args.push("--prep-script", fake.linuxPrep);
   const result = await runScript(args, {
-    CRABBOX_BIN: fake.fake, CRABBOX_FAKE_LOG: fake.log, CRABBOX_FAKE_CAPTURE_RUN_SCRIPT: captured,
-    CRABBOX_LINUX_NODE_MAJOR: major, CRABBOX_LINUX_PNPM_VERSION: pnpm,
+    CRABBOX_BIN: fake.fake,
+    CRABBOX_FAKE_LOG: fake.log,
+    CRABBOX_FAKE_CAPTURE_RUN_SCRIPT: captured,
+    CRABBOX_LINUX_NODE_MAJOR: major,
+    CRABBOX_LINUX_PNPM_VERSION: pnpm,
     CRABBOX_FAKE_RESOLVED_PNPM: pnpm,
   });
   assert.equal(result.code, 0, result.stderr);
@@ -857,7 +868,10 @@ async function linuxSmokeFixture(t, { major = "24", pnpm = "11.1.0", customPrep 
     '[[ "${FIXTURE_TOOL_EXIT:-0}" == "0" ]] || exit "$FIXTURE_TOOL_EXIT"\nprintf "%s\\n" "$FIXTURE_RESOLVED_PNPM"',
   );
   await writeTool("id", 'printf "%s\\n" "$FIXTURE_UID"');
-  await writeTool("dpkg", '[[ "$*" == "--print-architecture" ]] || exit 65\nprintf "%s\\n" "$FIXTURE_ARCH"');
+  await writeTool(
+    "dpkg",
+    '[[ "$*" == "--print-architecture" ]] || exit 65\nprintf "%s\\n" "$FIXTURE_ARCH"',
+  );
   await writeTool(
     "pnpm",
     '[[ "$*" == "--version" ]] || exit 65\nprintf "%s\\n" "$HOME" >>"$HOME/normal-pnpm.called"\nprintf "%s\\n" "$FIXTURE_RESOLVED_PNPM"\nexit "${FIXTURE_PNPM_EXIT:-0}"',
@@ -870,16 +884,22 @@ async function linuxSmokeFixture(t, { major = "24", pnpm = "11.1.0", customPrep 
       /^public_toolchain_archive_dir=.*$/gm,
       'public_toolchain_archive_dir="$HOME/missing-archives"',
     );
-  const execute = (env = {}, source = generated) => spawnSync("bash", ["-c", source], {
-    cwd: fake.dir,
-    env: {
-      PATH: `${bin}${path.delimiter}${process.env.PATH}`, HOME: fake.dir, TMPDIR: tmp,
-      FIXTURE_RESOLVED_PNPM: pnpm,
-      FIXTURE_UID: "1000", FIXTURE_ARCH: "amd64", FIXTURE_NODE_VERSION: `${major}.0.0`, ...env,
-    },
-    encoding: "utf8",
-    timeout: 10_000,
-  });
+  const execute = (env = {}, source = generated) =>
+    spawnSync("bash", ["-c", source], {
+      cwd: fake.dir,
+      env: {
+        PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+        HOME: fake.dir,
+        TMPDIR: tmp,
+        FIXTURE_RESOLVED_PNPM: pnpm,
+        FIXTURE_UID: "1000",
+        FIXTURE_ARCH: "amd64",
+        FIXTURE_NODE_VERSION: `${major}.0.0`,
+        ...env,
+      },
+      encoding: "utf8",
+      timeout: 10_000,
+    });
   return { fake, tmp, generated, execute };
 }
 
@@ -897,7 +917,10 @@ test("generated Linux smoke emits success only after nonroot, tool, and offline 
     assert.deepEqual(await readdir(tmp), [], "failed smoke must remove private staging");
   }
   await mkdir(path.join(fake.dir, "missing-archives"));
-  await writeFile(path.join(fake.dir, "missing-archives", "node-v24.19.0-linux-x64.tar.xz"), "corrupt");
+  await writeFile(
+    path.join(fake.dir, "missing-archives", "node-v24.19.0-linux-x64.tar.xz"),
+    "corrupt",
+  );
   await writeFile(path.join(fake.dir, "missing-archives", "x64.complete"), "");
   const corrupt = execute({ CRABBOX_LINUX_NODE_MAJOR: "26" });
   assert.notEqual(corrupt.status, 0);
@@ -923,8 +946,14 @@ test("generated Linux smoke emits success only after nonroot, tool, and offline 
     "uv-proof-done\n",
     "devtools-smoke-ok\n",
   ].map((marker) => successful.stdout.indexOf(marker));
-  assert.ok(orderedMarkers.every((index) => index >= 0), successful.stdout);
-  assert.deepEqual(orderedMarkers, [...orderedMarkers].sort((left, right) => left - right));
+  assert.ok(
+    orderedMarkers.every((index) => index >= 0),
+    successful.stdout,
+  );
+  assert.deepEqual(
+    orderedMarkers,
+    [...orderedMarkers].sort((left, right) => left - right),
+  );
 });
 
 for (const route of [
@@ -937,7 +966,10 @@ for (const route of [
     const result = execute({ FIXTURE_ARCH: route.arch, CRABBOX_LINUX_NODE_MAJOR: "24" });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /devtools-smoke-ok/);
-    assert.equal((await readFile(path.join(fake.dir, "normal-pnpm.called"), "utf8")).trim(), fake.dir);
+    assert.equal(
+      (await readFile(path.join(fake.dir, "normal-pnpm.called"), "utf8")).trim(),
+      fake.dir,
+    );
   });
 }
 
@@ -996,7 +1028,10 @@ test("generated Linux smoke requires the normal nonroot pnpm command even when p
   );
   assert.equal(result.status, 48, result.stderr);
   assert.doesNotMatch(result.stdout, /devtools-smoke-ok/);
-  assert.equal((await readFile(path.join(fake.dir, "normal-pnpm.called"), "utf8")).trim(), fake.dir);
+  assert.equal(
+    (await readFile(path.join(fake.dir, "normal-pnpm.called"), "utf8")).trim(),
+    fake.dir,
+  );
 });
 
 test("generated Linux smoke keeps required x64 archives under a pnpm override", async (t) => {
@@ -1181,7 +1216,7 @@ test("AWS devtools mint wrapper uses sg for first docker group member", async ()
   );
   await writeTool(
     "id",
-    '#!/usr/bin/env bash\ncase "$*" in -nG) printf \'users\\n\';; -u) printf \'1000\\n\';; esac\n',
+    "#!/usr/bin/env bash\ncase \"$*\" in -nG) printf 'users\\n';; -u) printf '1000\\n';; esac\n",
   );
   await writeTool("whoami", "#!/usr/bin/env bash\nprintf 'alice\\n'\n");
   await writeTool(
@@ -1471,6 +1506,10 @@ const saveLease = (phase, sample, leaseId, index) => {
     selection.source = process.env.CRABBOX_FAKE_BASELINE_SOURCE ||
       (process.env.CRABBOX_FAKE_PREVIOUS_ABSENT === "1" ? "stock" : "promoted");
   }
+  if (process.env.CRABBOX_AWS_STOCK_IMAGE === "1") {
+    selection.id = "ami-stock";
+    selection.source = "stock";
+  }
   const mode = process.env.CRABBOX_FAKE_SELECTION_MODE;
   if (phase === "baseline" && sample === 2 && mode === "baseline-image") selection.id = "ami-other";
   if (phase === "baseline" && sample === 2 && mode === "baseline-source") selection.source = "stock";
@@ -1618,19 +1657,18 @@ for (const failure of [
         "Node archive probe rendering":
           "node_pnpm_smoke_script() { echo partial-node-probe; return 47; }",
         "Go archive probe rendering": "go_smoke_script() { echo partial-go-probe; return 48; }",
-        "Bun archive probe rendering":
-          "bun_smoke_script() { echo partial-bun-probe; return 49; }",
+        "Bun archive probe rendering": "bun_smoke_script() { echo partial-bun-probe; return 49; }",
         "Rust archive probe rendering":
           "rust_smoke_script() { echo partial-rust-probe; return 50; }",
-        "uv archive probe rendering":
-          "uv_smoke_script() { echo partial-uv-probe; return 51; }",
+        "uv archive probe rendering": "uv_smoke_script() { echo partial-uv-probe; return 51; }",
       }[failure];
-      await writeFile(
-        installer,
-        `${await readFile(installer, "utf8")}\n${renderer}\n`,
-      );
+      await writeFile(installer, `${await readFile(installer, "utf8")}\n${renderer}\n`);
     }
-    const result = await runScript(["--target", "linux", "--run", "--no-promote"], fake.env, fake.script);
+    const result = await runScript(
+      ["--target", "linux", "--run", "--no-promote"],
+      fake.env,
+      fake.script,
+    );
     const expected = {
       "missing smoke owner": 1,
       "Node archive probe rendering": 47,
@@ -1791,10 +1829,7 @@ test("measured incomplete or mixed cohorts block promotion", async (t) => {
       assert.equal(outcome.status, "failed");
       assert.equal(outcome.stage, "candidate_measure");
       assert.equal(outcome.cleanupStatus, "succeeded");
-      assert.doesNotMatch(
-        JSON.stringify(outcome),
-        /ami-|cbx_|m7i|us-west|PRIVATE_|diagnostics/,
-      );
+      assert.doesNotMatch(JSON.stringify(outcome), /ami-|cbx_|m7i|us-west|PRIVATE_|diagnostics/);
     });
   }
 });
@@ -2136,9 +2171,15 @@ test("measured post-promotion failures preserve the original publisher status", 
       assert.equal(result.code, mode === "outcome" ? 66 : 37, result.stderr);
       const log = await readFile(fake.log, "utf8");
       if (mode === "outcome") {
-        assert.match(log, /image promote --json --target linux .*--restore-receipt \S+ ami-devtools/);
+        assert.match(
+          log,
+          /image promote --json --target linux .*--restore-receipt \S+ ami-devtools/,
+        );
       } else {
-        assert.match(log, /image promote --json --target linux .*--restore-receipt \S+ ami-devtools/);
+        assert.match(
+          log,
+          /image promote --json --target linux .*--restore-receipt \S+ ami-devtools/,
+        );
       }
       if (mode === "rollback") assert.match(result.stderr, /newer default was not overwritten/);
       assert.doesNotMatch(result.stdout, /public measurement proof:/);
@@ -2154,8 +2195,14 @@ test("AWS Linux image verification uses trusted source bytes instead of the inst
     (source.match(/--script "\$ROOT\/scripts\/linux-readiness\.generated\.sh"/g) ?? []).length,
     2,
   );
-  assert.match(source, /--script "\$ROOT\/scripts\/linux-readiness\.generated\.sh" -- --verify linux-builder/);
-  assert.doesNotMatch(source, /--shell -- \/usr\/local\/libexec\/crabbox\/linux-readiness\.generated\.sh/);
+  assert.match(
+    source,
+    /--script "\$ROOT\/scripts\/linux-readiness\.generated\.sh" -- --verify linux-builder/,
+  );
+  assert.doesNotMatch(
+    source,
+    /--shell -- \/usr\/local\/libexec\/crabbox\/linux-readiness\.generated\.sh/,
+  );
   assert.doesNotMatch(smoke, /test -f \/var\/lib\/crabbox.*(?:linux\.json|image-ready)/);
   assert.doesNotMatch(source, /sudo tee \/var\/lib\/crabbox\/image-ready/);
   assert.doesNotMatch(source, /printf 'crabbox-devtools-v1/);
@@ -2166,12 +2213,15 @@ test("publisher checks the builder profile in every Linux lifecycle phase", asyn
     await t.test(phase, async (subtest) => {
       const fake = await setupFakeCrabbox();
       subtest.after(() => rm(fake.dir, { recursive: true, force: true }));
-      const result = await runScript(["--target", "linux", "--run", "--prep-script", fake.linuxPrep], {
-        CRABBOX_BIN: fake.fake,
-        CRABBOX_FAKE_LOG: fake.log,
-        CRABBOX_IMAGE_LOG_DIR: path.join(fake.dir, "logs"),
-        CRABBOX_FAKE_READINESS_FAIL_LEASE: `cbx_${phase}`,
-      });
+      const result = await runScript(
+        ["--target", "linux", "--run", "--prep-script", fake.linuxPrep],
+        {
+          CRABBOX_BIN: fake.fake,
+          CRABBOX_FAKE_LOG: fake.log,
+          CRABBOX_IMAGE_LOG_DIR: path.join(fake.dir, "logs"),
+          CRABBOX_FAKE_READINESS_FAIL_LEASE: `cbx_${phase}`,
+        },
+      );
       assert.equal(result.code, 74, result.stderr);
       const log = await readFile(fake.log, "utf8");
       assert.match(log, new RegExp(`stop --provider aws --target linux cbx_${phase}`));
@@ -2189,25 +2239,34 @@ async function runLinuxSmoke(t, options = {}) {
   const scratch = path.join(root, "scratch");
   const caches = path.join(root, "caches");
   const events = path.join(root, "events");
-  for (const directory of [bin, scratch, ...["pnpm", "npm", "corepack", "docker"].map((name) => path.join(caches, name))]) {
+  for (const directory of [
+    bin,
+    scratch,
+    ...["pnpm", "npm", "corepack", "docker"].map((name) => path.join(caches, name)),
+  ]) {
     await mkdir(directory, { recursive: true });
   }
   if (options.fail === "cache") await rm(path.join(caches, "pnpm"), { recursive: true });
   const writeTool = async (name, body) => {
     const file = path.join(bin, name);
-    await writeFile(file, `#!/usr/bin/env bash
+    await writeFile(
+      file,
+      `#!/usr/bin/env bash
 set -eu
 printf '%s %s\\n' '${name}' "$*" >>${JSON.stringify(events)}
 [[ "\${CRABBOX_SMOKE_FAIL:-}" != '${name}' ]] || exit 37
 ${body}
-`);
+`,
+    );
     await chmod(file, 0o755);
   };
   for (const name of ["git", "gh", "jq", "rg", "fd", "trufflehog"]) {
     await writeTool(name, "exit 0");
   }
   for (const name of ["npm", "corepack", "pnpm"]) {
-    await writeTool(name, `if [[ "${name}" == corepack && "$*" == "pnpm --version" ]]; then
+    await writeTool(
+      name,
+      `if [[ "${name}" == corepack && "$*" == "pnpm --version" ]]; then
   [[ "$COREPACK_ENABLE_NETWORK" == 0 && "$PWD" == / ]]
   echo 11.1.0
 elif [[ "$*" == --version ]]; then
@@ -2219,44 +2278,65 @@ elif [[ "$*" == --version ]]; then
   fi
 else
   [[ "$COREPACK_ENABLE_NETWORK" == 0 && "$npm_config_offline" == true ]]
-fi`);
+fi`,
+    );
   }
   await writeTool("node", `exec ${JSON.stringify(process.execPath)} "$@"`);
   await writeTool("python3", '[[ "$1" != - && "$1" != -c ]] || exec /usr/bin/python3 "$@"');
-  await writeTool("cc", `[[ "$2" == -o ]]
+  await writeTool(
+    "cc",
+    `[[ "$2" == -o ]]
 printf '#!/bin/sh\\nexit 0\\n' >"$3"
-chmod +x "$3"`);
+chmod +x "$3"`,
+  );
   await writeTool("id", 'case "$*" in -u) echo 1000 ;; -nG) echo users ;; esac');
   await writeTool("whoami", "echo alice");
-  await writeTool("getent", `[[ "\${CRABBOX_SMOKE_FAIL:-}" != access ]] || exit 1
-echo 'docker:x:999:alice,bob'`);
-  await writeTool("docker", `if [[ "$1" == version && "\${CRABBOX_SMOKE_REFRESH:-0}" == 1 && "\${CRABBOX_FAKE_IN_SG:-0}" != 1 ]]; then exit 1; fi
+  await writeTool(
+    "getent",
+    `[[ "\${CRABBOX_SMOKE_FAIL:-}" != access ]] || exit 1
+echo 'docker:x:999:alice,bob'`,
+  );
+  await writeTool(
+    "docker",
+    `if [[ "$1" == version && "\${CRABBOX_SMOKE_REFRESH:-0}" == 1 && "\${CRABBOX_FAKE_IN_SG:-0}" != 1 ]]; then exit 1; fi
 if [[ "\${CRABBOX_SMOKE_FAIL:-}" == access && "$1" == version ]]; then exit 1; fi
 if [[ "\${CRABBOX_SMOKE_FAIL:-}" == buildx && "$1 \${2:-}" == "buildx build" ]]; then exit 37; fi
 if [[ "\${CRABBOX_SMOKE_FAIL:-}" == compose && "$*" == *" run --rm "* ]]; then exit 37; fi
-exit 0`);
+exit 0`,
+  );
   await writeTool("sg", '[[ "$1 $2" == "docker -c" ]]\nCRABBOX_FAKE_IN_SG=1 sh -c "$3"');
   await writeTool("sudo", "exit 80");
   const smoke = path.join(root, "smoke.sh");
   const source = await readFile(path.join(scriptDir, "devtools-image-smoke-linux.sh"), "utf8");
   // Archive authentication is covered by the renderer fixtures; this fixture owns runtime capabilities.
-  await writeFile(smoke, `developer_archive_probe() { :; }\n${source.replaceAll("/var/cache/crabbox", caches)}`);
-  const result = await runScript([], {
-    PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
-    TMPDIR: scratch,
-    DISPLAY: ":99",
-    expected_node_major: "",
-    expected_pnpm_version: "11.1.0",
-    COREPACK_ENABLE_NETWORK: "1",
-    npm_config_offline: "false",
-    CRABBOX_SMOKE_EVENTS: events,
-    CRABBOX_SMOKE_FAIL: options.fail ?? "",
-    CRABBOX_SMOKE_SECRET: "fixture-only-not-a-credential",
-    CRABBOX_SMOKE_REFRESH: options.refresh ? "1" : "0",
-  }, smoke);
+  await writeFile(
+    smoke,
+    `developer_archive_probe() { :; }\n${source.replaceAll("/var/cache/crabbox", caches)}`,
+  );
+  const result = await runScript(
+    [],
+    {
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      TMPDIR: scratch,
+      DISPLAY: ":99",
+      expected_node_major: "",
+      expected_pnpm_version: "11.1.0",
+      COREPACK_ENABLE_NETWORK: "1",
+      npm_config_offline: "false",
+      CRABBOX_SMOKE_EVENTS: events,
+      CRABBOX_SMOKE_FAIL: options.fail ?? "",
+      CRABBOX_SMOKE_SECRET: "fixture-only-not-a-credential",
+      CRABBOX_SMOKE_REFRESH: options.refresh ? "1" : "0",
+    },
+    smoke,
+  );
   assert.deepEqual(await readdir(scratch), [], "smoke must remove all disposable fixtures");
   for (const cache of await readdir(caches)) {
-    assert.deepEqual(await readdir(path.join(caches, cache)), [], "cache write probes must be removed");
+    assert.deepEqual(
+      await readdir(path.join(caches, cache)),
+      [],
+      "cache write probes must be removed",
+    );
   }
   return { ...result, events: await readFile(events, "utf8") };
 }
@@ -2290,3 +2370,107 @@ for (const fail of ["cc", "npm", "pnpm", "cache", "access", "docker", "buildx", 
     assert.doesNotMatch(result.events, /sudo /);
   });
 }
+
+for (const root of ["16", "40", "400"]) {
+  test(`stock-source plan accepts root ${root}`, async () => {
+    const result = await runScript(["--target", "linux", "--stock-source", "--root-gb", root], {
+      CRABBOX_BIN: "/usr/bin/true",
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, new RegExp(`source: stock=1 root_gb=${root}`));
+    assert.match(result.stdout, /dry plan only/);
+  });
+}
+for (const [args, message] of [
+  [["--root-gb", "40"], /requires --stock-source/],
+  [["--stock-source", "--root-gb", ""], /integer.*16.*400/],
+  [["--stock-source", "--root-gb", "15"], /integer.*16.*400/],
+  [["--stock-source", "--root-gb", "401"], /integer.*16.*400/],
+  [["--stock-source", "--root-gb", "040"], /integer.*16.*400/],
+  [["--stock-source", "--root-gb", "1.5"], /integer.*16.*400/],
+  [["--stock-source", "--root-gb", "99999999999999999999999"], /integer.*16.*400/],
+  [["--target", "windows", "--stock-source"], /Linux-only/],
+]) {
+  test(`stock-source validation rejects ${args.join(" ")}`, async (t) => {
+    const fake = await setupFakeCrabbox();
+    t.after(() => rm(fake.dir, { recursive: true, force: true }));
+    const result = await runScript([...args, "--run"], {
+      CRABBOX_BIN: fake.fake,
+      CRABBOX_FAKE_LOG: fake.log,
+    });
+    assert.equal(result.code, 2, result.stderr);
+    assert.match(result.stderr, message);
+    assert.equal(await readFile(fake.log, "utf8").catch(() => ""), "");
+  });
+}
+test("stock-source overrides only the source lease and records requested source metadata", async (t) => {
+  const fake = await setupFakeCrabbox();
+  t.after(() => rm(fake.dir, { recursive: true, force: true }));
+  const result = await runScript(["--stock-source", "--root-gb", "40", "--run"], {
+    CRABBOX_BIN: fake.fake,
+    CRABBOX_FAKE_LOG: fake.log,
+    CRABBOX_IMAGE_LOG_DIR: fake.dir,
+    CRABBOX_AWS_STOCK_IMAGE: "1",
+    CRABBOX_AWS_ROOT_GB: "400",
+  });
+  assert.equal(result.code, 0, result.stderr);
+  const log = await readFile(fake.log, "utf8");
+  assert.deepEqual(
+    log
+      .split("\n")
+      .filter((line) => line.startsWith("source-options") && line.endsWith("command=warmup")),
+    [
+      "source-options stock=1 root=40 command=warmup",
+      "source-options stock=0 root=0 command=warmup",
+      "source-options stock=0 root=0 command=warmup",
+    ],
+  );
+  const sourceFile = (await readdir(fake.dir)).find((name) => name.endsWith("-source.json"));
+  assert.ok(sourceFile);
+  assert.deepEqual(JSON.parse(await readFile(path.join(fake.dir, sourceFile), "utf8")), {
+    stockSource: true,
+    rootGB: 40,
+    leaseId: "cbx_source",
+  });
+});
+
+test("measured stock-source keeps baseline selection and all proof sizing normal", async (t) => {
+  const fake = await measuredFixture(t);
+  const result = await runScript(
+    [...fake.args, "--stock-source", "--root-gb", "40"],
+    {
+      ...fake.env,
+      CRABBOX_AWS_STOCK_IMAGE: "1",
+      CRABBOX_AWS_ROOT_GB: "400",
+    },
+    fake.script,
+  );
+  assert.equal(result.code, 0, result.stderr);
+  const log = await readFile(fake.log, "utf8");
+  const requests = log.split("\n").filter((line) => line.startsWith("source-options"));
+  assert.equal(requests.filter((line) => line.includes("stock=1")).length, 1);
+  assert.equal(requests.filter((line) => line.includes("root=40 ")).length, 1);
+  assert.equal(requests.filter((line) => line.endsWith("command=warmup")).length, 3);
+  assert.doesNotMatch(requests.join("\n"), /root=400/);
+  const manifest = JSON.parse(await readFile(fake.outcome, "utf8"));
+  assert.equal(manifest.status, "passed");
+  assert.deepEqual(manifest.source, { stockSource: true, rootGB: 40 });
+  assert.equal(manifest.candidateSelection, "explicit");
+  assert.equal(manifest.promotedSelection, "promoted");
+});
+
+test("stock-source refuses an ignored stock request before image capture", async (t) => {
+  const fake = await setupFakeCrabbox();
+  t.after(() => rm(fake.dir, { recursive: true, force: true }));
+  const result = await runScript(["--stock-source", "--root-gb", "40", "--run"], {
+    CRABBOX_BIN: fake.fake,
+    CRABBOX_FAKE_LOG: fake.log,
+    CRABBOX_IMAGE_LOG_DIR: fake.dir,
+    CRABBOX_FAKE_STOCK_SOURCE_IGNORED: "1",
+  });
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stderr, /did not prove stock image selection/);
+  const log = await readFile(fake.log, "utf8");
+  assert.doesNotMatch(log, /checkpoint create|image promote/);
+  assert.match(log, /stop --provider aws --target linux cbx_source/);
+});

@@ -339,6 +339,44 @@ than overwriting it. Publisher rollback explicitly authorizes retiring the
 exact failed catalog revision so capability-aware leases cannot select it;
 generic stale compare-and-swap requests leave the catalog unchanged.
 
+### Bake a smaller Linux root disk from stock Ubuntu
+
+A rebuild from the promoted AMI inherits its root snapshot minimum. Even if
+only 8 GB is used, a 400 GB snapshot cannot boot on a 40 GB disk. To lower that
+minimum, start the source lease from owner-verified stock Ubuntu and install
+the developer tools again:
+
+```bash
+scripts/mint-aws-devtools-image.sh --target linux --stock-source --root-gb 40
+# Review the plan, then add --run to perform the paid bake and promotion.
+```
+
+For the protected publisher workflow, set the optional `linux_root_gb` input to
+`40` (or another integer from 16 through 400). This passes `--stock-source
+--root-gb 40` to the Linux wrapper. An empty input keeps the promoted-source
+rebuild; Windows and macOS reject a nonempty value. Deploy the coordinator
+version supporting stock requests before running the publisher.
+
+`--stock-source` is Linux-only. For Linux, `--root-gb` requires
+`--stock-source`; Windows may set a source root size without that flag. Invalid
+sizes fail before any paid work. Without `--root-gb`, a stock source uses normal
+class sizing. Pick enough space for the installer and its temporary files;
+16 GB is an accepted input, not a guarantee that the full developer recipe fits.
+The source uses the selected `CRABBOX_OS` / `linux_os` Ubuntu version. Stock
+selection requires the same coordinator admin authorization as an explicit AMI
+and cannot be combined with an explicit AMI, snapshot, or image capability
+requirements.
+
+Only the source lease gets these overrides. Candidate and promoted proof
+leases, plus all `--measured` baseline/candidate/promoted cohorts, use normal
+root sizing. Baseline measurements retain normal image selection. The wrapper
+clears ambient `CRABBOX_AWS_STOCK_IMAGE` / `CRABBOX_AWS_ROOT_GB` settings for
+proofs, including file-config values via explicit false/zero inputs. A configured
+coordinator root override still applies to normal sizing. Source settings and
+lease ID are written to the source JSON receipt beside the diagnostic logs;
+measured public proof includes the allowlisted requested source settings.
+Promotion and rollback receipts still bind the original baseline default.
+
 ## Developer-image wrappers
 
 For generic AWS Linux and Windows developer AMIs, use the guarded wrapper

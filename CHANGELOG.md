@@ -8,6 +8,8 @@
 
 ### Fixes
 
+- Let the guarded AWS Linux image publisher bake a smaller root snapshot from stock Ubuntu with `linux_root_gb`, keeping candidate, baseline, and promoted proofs on normal sizing.
+
 - Authenticate hosted Homebrew verifier metadata reads with the workflow's read-only token to avoid anonymous GitHub API rate limits while keeping installation credential-free.
 - Retry dropped connections in release asset downloads during public release and Homebrew verification instead of failing on one transient network error.
 

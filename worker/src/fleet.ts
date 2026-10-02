@@ -169,6 +169,7 @@ import {
   codeProxyRequestBodyBytes,
   isIsolatedCodeRequest,
 } from "./code-origin";
+import { InvalidAWSImageSourceError } from "./config";
 import {
   assertAzureWindowsARM64Image,
   awsPromotedAMIConfigKey,
@@ -3873,6 +3874,9 @@ export class FleetCoordinator {
     } catch (error) {
       if (error instanceof InvalidAzureOSDiskModeError) {
         return json({ error: "invalid_azure_os_disk", message: error.message }, { status: 400 });
+      }
+      if (error instanceof InvalidAWSImageSourceError) {
+        return json({ error: "invalid_aws_image_source", message: error.message }, { status: 400 });
       }
       if (error instanceof InvalidAWSRegionError) {
         return json({ error: "invalid_region", message: error.message }, { status: 400 });
@@ -29003,6 +29007,7 @@ export class AWSProvider implements CloudProvider {
   restrictedLeaseRequestFields(input: LeaseRequest): string[] {
     return [
       input.awsAMI ? "awsAMI" : "",
+      input.awsUseStockImage ? "awsUseStockImage" : "",
       input.awsSGID ? "awsSGID" : "",
       input.awsSubnetID ? "awsSubnetID" : "",
       input.awsProfile ? "awsProfile" : "",
@@ -29321,7 +29326,9 @@ export class AWSProvider implements CloudProvider {
         );
       }
       const selectedImage = awsConfiguredImageIdentity(config, this.env);
-      return { ...config, ...(selectedImage ? { selectedImage } : {}) };
+      // Stock identity is known only after the owner-verified AMI lookup at launch.
+      const { selectedImage: _previousImage, ...sourceConfig } = config;
+      return { ...sourceConfig, awsPromotedAMIs: {}, ...(selectedImage ? { selectedImage } : {}) };
     }
     if (config.target === "macos") {
       const awsPromotedAMIs = await this.promotedImagesForFallback(config);

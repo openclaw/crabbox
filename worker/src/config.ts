@@ -1,5 +1,5 @@
 import { requireAWSRegion } from "./aws-region";
-import { normalizeImageRequirements } from "./image-capabilities";
+import { hasImageRequirements, normalizeImageRequirements } from "./image-capabilities";
 import { normalizeOSImage, osImageSpec } from "./os-image";
 import type {
   ImageRequirements,
@@ -128,6 +128,8 @@ const maxRequestedPondNameLength = 41;
 const maxExposedPort = 65_535;
 const maxExposedPortsPerLease = 10;
 
+export class InvalidAWSImageSourceError extends Error {}
+
 export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults = {}): LeaseConfig {
   const provider = input.provider ?? "hetzner";
   if (
@@ -138,6 +140,26 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     provider !== "daytona"
   ) {
     throw new Error(`unsupported provider: ${String(provider)}`);
+  }
+  if (input.awsUseStockImage !== undefined && typeof input.awsUseStockImage !== "boolean") {
+    throw new InvalidAWSImageSourceError("awsUseStockImage must be a boolean");
+  }
+  const awsUseStockImage = input.awsUseStockImage ?? false;
+  const imageRequirements = normalizeImageRequirements(input.imageRequirements);
+  if (awsUseStockImage) {
+    if (provider !== "aws") {
+      throw new InvalidAWSImageSourceError("awsUseStockImage requires provider=aws");
+    }
+    if (input.awsAMI || input.awsSnapshot) {
+      throw new InvalidAWSImageSourceError(
+        "awsUseStockImage cannot be combined with awsAMI or awsSnapshot",
+      );
+    }
+    if (hasImageRequirements(imageRequirements)) {
+      throw new InvalidAWSImageSourceError(
+        "awsUseStockImage cannot be combined with image capability requirements",
+      );
+    }
   }
   const target = normalizeTarget(input.target ?? input.targetOS ?? "linux");
   const requestedArchitecture = normalizeArchitecture(input.architecture);
@@ -321,7 +343,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     desktop: input.desktop ?? false,
     desktopEnv,
     browser: input.browser ?? false,
-    imageRequirements: normalizeImageRequirements(input.imageRequirements),
+    imageRequirements,
     code: input.code ?? false,
     tailscale: input.tailscale ?? false,
     tailscaleTags: normalizeTailscaleTags(input.tailscaleTags ?? ["tag:crabbox"]),
@@ -341,7 +363,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     image: input.image ?? linuxOSImage?.hetznerImage ?? "ubuntu-24.04",
     awsRegion,
     awsAMI: input.awsAMI ?? "",
-    awsUseStockImage: false,
+    awsUseStockImage,
     awsPromotedAMIs: {},
     awsSnapshot: input.awsSnapshot ?? "",
     awsSGID: input.awsSGID ?? "",

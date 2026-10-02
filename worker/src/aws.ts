@@ -3615,6 +3615,9 @@ export function awsLeaseImageIdentity(
   imageID: string,
   region: string,
 ): LeaseImageIdentity {
+  if (config.awsUseStockImage) {
+    return { id: imageID, source: "stock", provider: "aws", kind: "aws-ami", region };
+  }
   if (config.awsSnapshot) {
     return {
       id: imageID,

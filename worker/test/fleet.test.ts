@@ -559,6 +559,7 @@ class BoundedObservedMemoryStorage extends ObservedMemoryStorage {
 }
 
 const restrictedBrokerSelectorCases = [
+  { provider: "aws" as const, field: "awsUseStockImage", value: true },
   { provider: "aws" as const, field: "awsAMI", value: "ami-000000000001" },
   { provider: "aws" as const, field: "awsSGID", value: "sg-000000000001" },
   { provider: "aws" as const, field: "awsSubnetID", value: "subnet-000000000001" },
@@ -43630,6 +43631,61 @@ describe("fleet lease identity and idle", () => {
       error: "image_capability_mismatch",
     });
     expect(await storage.list({ prefix: "lease:" })).toHaveLength(0);
+  });
+
+  it.each([
+    [{ awsUseStockImage: "true" }, "must be a boolean"],
+    [{ awsUseStockImage: true, awsAMI: "ami-explicit" }, "cannot be combined"],
+    [{ awsUseStockImage: true, awsSnapshot: "snap-explicit" }, "cannot be combined"],
+    [
+      { awsUseStockImage: true, imageRequirements: { browser: true } },
+      "image capability requirements",
+    ],
+    [{ awsUseStockImage: true, provider: "gcp" }, "requires provider=aws"],
+  ])("rejects invalid AWS stock image requests before paid work: %j", async (input, message) => {
+    const storage = new MemoryStorage();
+    const providerFetch = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", providerFetch);
+    const fleet = testFleet(storage);
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { provider: "aws", sshPublicKey: "ssh-ed25519 test", ...input },
+      }),
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ message: expect.stringContaining(message) });
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect((await storage.list()).size).toBe(0);
+  });
+
+  it("stock image requests never consult promoted images or retain their identity", async () => {
+    const storage = new MemoryStorage();
+    const get = vi.spyOn(storage, "get");
+    const list = vi.spyOn(storage, "list");
+    const provider = new AWSProvider(
+      { CRABBOX_AWS_AMI: "ami-operator" } as Env,
+      "eu-west-1",
+      storage,
+    );
+    const config = leaseConfig({ provider: "aws", sshPublicKey: "ssh-ed25519 test" });
+    const prepared = await provider.prepareLeaseConfig({
+      ...config,
+      awsUseStockImage: true,
+      awsPromotedAMIs: { stale: "ami-stale" },
+      selectedImage: {
+        id: "ami-stale",
+        provider: "aws",
+        source: "promoted",
+        kind: "aws-ami",
+        region: "eu-west-1",
+      },
+    });
+    expect(prepared.awsUseStockImage).toBe(true);
+    expect(prepared.selectedImage).toBeUndefined();
+    expect(prepared.awsPromotedAMIs).toEqual({});
+    expect(get).not.toHaveBeenCalled();
+    expect(list).not.toHaveBeenCalled();
   });
 
   it("rejects capability selection when an operator AMI override is configured", async () => {

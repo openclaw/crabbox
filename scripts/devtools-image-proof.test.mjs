@@ -207,9 +207,7 @@ test("cohorts accept measured zero-duration sync but reject missing, mixed, or r
   ]) {
     const candidate = cohort(3);
     mutate(candidate);
-    assert.throws(() =>
-      validateCohort(policy, "candidate", candidate, [input], "ami-candidate"),
-    );
+    assert.throws(() => validateCohort(policy, "candidate", candidate, [input], "ami-candidate"));
   }
   assert.throws(() => validateCohort(policy, "baseline", input, [input]), /reused/);
   const mixed = cohort(3);
@@ -376,7 +374,11 @@ test("public proof is an allowlisted projection, not raw reports or arbitrary st
   assert.throws(() => projectManifest(policy, inputs.slice(0, 2)));
   assert.throws(() => validateCohort(policy, poison, cohort()));
   assert.throws(() =>
-    projectManifest(policy, inputs.map((input) => ({ ...input, poison })), receipt),
+    projectManifest(
+      policy,
+      inputs.map((input) => ({ ...input, poison })),
+      receipt,
+    ),
   );
   assert.throws(() => validateOutcome({ ...manifest, poison }));
   assert.throws(() =>
@@ -424,7 +426,9 @@ test("failed outcomes retain only validated partial cohorts", () => {
   assert.equal(outcome.comparison.candidateP95RunnerTotalMs, null);
   assert.throws(() => validateOutcome({ ...outcome, stage: "unknown" }));
   assert.throws(() => validateOutcome({ ...outcome, rollbackStatus: "maybe" }));
-  assert.throws(() => validateOutcome({ ...outcome, promotionBindingDigest: fingerprint("early") }));
+  assert.throws(() =>
+    validateOutcome({ ...outcome, promotionBindingDigest: fingerprint("early") }),
+  );
   assert.throws(() => validateOutcome({ ...outcome, cleanupStatus: "not_started" }));
   assert.throws(() =>
     validateOutcome({
@@ -479,4 +483,20 @@ test("promotion-stage failures retain bound rollback outcomes", () => {
   assert.equal(receiptUnavailable.promotionBindingDigest, null);
   assert.throws(() => validateOutcome({ ...receiptUnavailable, stage: "promoted_smoke" }));
   assert.throws(() => validateOutcome({ ...receiptUnavailable, status: "passed", exitCode: 0 }));
+});
+
+test("source settings are allowlisted in policy and public proof", () => {
+  const source = { stockSource: true, rootGB: 40 };
+  const stockPolicy = measurementPolicy({ ...policy, source });
+  assert.deepEqual(projectOutcome(stockPolicy).source, source);
+  for (const invalid of [
+    { stockSource: "true", rootGB: 40 },
+    { stockSource: false, rootGB: 40 },
+    { stockSource: true, rootGB: 15 },
+    { stockSource: true, rootGB: 401 },
+    { ...source, token: "private" },
+  ]) {
+    assert.throws(() => measurementPolicy({ ...policy, source: invalid }));
+    assert.throws(() => validateOutcome({ ...projectOutcome(stockPolicy), source: invalid }));
+  }
 });

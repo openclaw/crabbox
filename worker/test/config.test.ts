@@ -31,6 +31,16 @@ import { gcpProvisioningCandidatesForConfig } from "../src/gcp";
 import { hetznerProvisioningCandidatesForConfig } from "../src/hetzner";
 
 describe("machine class config", () => {
+  it("parses an AWS stock image source", () => {
+    expect(
+      leaseConfig({
+        provider: "aws",
+        sshPublicKey: "ssh-ed25519 test",
+        awsUseStockImage: true,
+      }).awsUseStockImage,
+    ).toBe(true);
+  });
+
   it("uses active vCPUs for constrained Azure full-caching sizes", () => {
     expect(azureFullCachingSeriesEligible("Standard_E8-4ds_v5")).toBe(false);
     expect(azureFullCachingSeriesEligible("Standard_E16-8ds_v5")).toBe(true);

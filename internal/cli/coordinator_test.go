@@ -2789,3 +2789,51 @@ func curlConfigValueForTest(t *testing.T, config, key string) string {
 	t.Fatalf("config key %q missing:\n%s", key, config)
 	return ""
 }
+
+func TestCoordinatorAWSStockImageInput(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, file, env string
+		want                      bool
+	}{
+		{"environment", "aws", "", "1", true},
+		{"file", "aws", "aws:\n  stockImage: true\n", "", true},
+		{"environment overrides file", "aws", "aws:\n  stockImage: true\n", "0", false},
+		{"other provider", "gcp", "aws:\n  stockImage: true\n", "1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+			configPath := filepath.Join(home, "crabbox.yaml")
+			t.Setenv("CRABBOX_CONFIG", configPath)
+			t.Setenv("CRABBOX_AWS_STOCK_IMAGE", tc.env)
+			if err := os.WriteFile(configPath, []byte("provider: "+tc.provider+"\n"+tc.file), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var body map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123"}}`))
+			}))
+			defer server.Close()
+			client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+			if _, err := client.CreateLease(context.Background(), cfg, "ssh-ed25519 test", false, "cbx_123", "blue-crab"); err != nil {
+				t.Fatal(err)
+			}
+			value, present := body["awsUseStockImage"]
+			if tc.want && value != true {
+				t.Fatalf("awsUseStockImage=%v, want true", value)
+			}
+			if !tc.want && present {
+				t.Fatalf("stock image request must be omitted: %v", value)
+			}
+		})
+	}
+}

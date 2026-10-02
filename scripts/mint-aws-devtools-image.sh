@@ -30,6 +30,8 @@ prep_script="${CRABBOX_IMAGE_PREP_SCRIPT:-}"
 linux_node_major="${CRABBOX_LINUX_NODE_MAJOR:-24}"
 linux_pnpm_version="${CRABBOX_LINUX_PNPM_VERSION:-11.1.0}"
 linux_pnpm_default=""
+stock_source=0
+source_root_gb=""
 measured=0
 max_p95_runner_total_ms=""
 measurement_dir=""
@@ -53,6 +55,8 @@ Flags:
   --region REGION       AWS region
   --class CLASS         Crabbox machine class, default standard
   --type TYPE           AWS instance type
+  --stock-source        Linux only: build the source lease from stock Ubuntu
+  --root-gb N           source root size, integer 16..400; Linux requires --stock-source
   --name NAME           image name
   --run                 allow paid lease/image work
   --measured            Linux only: nine fresh measurements plus three lifecycle leases
@@ -109,6 +113,16 @@ while [[ "$#" -gt 0 ]]; do
     --class)
       [[ "$#" -ge 2 ]] || { printf '%s requires a value\n' "$1" >&2; exit 2; }
       server_class="$2"
+      shift 2
+      ;;
+    --stock-source)
+      stock_source=1
+      shift
+      ;;
+    --root-gb)
+      [[ "$#" -ge 2 ]] || { printf '%s requires a value\n' "$1" >&2; exit 2; }
+      [[ -n "$2" ]] || { printf '%s\n' '--root-gb must be an integer from 16 to 400' >&2; exit 2; }
+      source_root_gb="$2"
       shift 2
       ;;
     --name)
@@ -192,6 +206,19 @@ case "$target" in
     ;;
 esac
 
+if [[ "$stock_source" == 1 ]]; then
+  [[ "$target" == linux ]] || { printf 'stock source is Linux-only\n' >&2; exit 2; }
+fi
+if [[ -n "$source_root_gb" ]]; then
+  [[ "$source_root_gb" =~ ^[1-9][0-9]{1,2}$ ]] && (( source_root_gb >= 16 && source_root_gb <= 400 )) || {
+    printf '%s\n' '--root-gb must be an integer from 16 to 400' >&2; exit 2;
+  }
+  [[ "$target" != linux || "$stock_source" == 1 ]] || { printf '%s\n' '--root-gb requires --stock-source; a promoted source cannot shrink' >&2; exit 2; }
+fi
+
+# Clear ambient/file overrides for proof leases; the source opts in below.
+export CRABBOX_AWS_STOCK_IMAGE=0 CRABBOX_AWS_ROOT_GB=0
+
 invocation_id="$(date -u +%Y%m%d-%H%M%S)-$$-${RANDOM}"
 log_id="$(printf '%s' "$invocation_id" | tr -c 'A-Za-z0-9_.-' '_')"
 if [[ -z "$image_name" ]]; then
@@ -241,7 +268,7 @@ if [[ "$measured" == "1" ]]; then
   }
   measurement_policy="$(node "$ROOT/scripts/devtools-image-proof.mjs" preflight \
     "$prep_script" "$region" "$server_type" "$server_class" "$max_p95_runner_total_ms" \
-    "$desktop" "$browser" "$promote" "$keep_lease" "$fast_snapshot_restore" "$ttl" "$idle_timeout")"
+    "$desktop" "$browser" "$promote" "$keep_lease" "$fast_snapshot_restore" "$ttl" "$idle_timeout" "$stock_source" "${source_root_gb:-0}")"
   # Candidate selection is explicit below; baseline and promoted proof use normal selection.
   unset CRABBOX_AWS_AMI
   umask 077
@@ -641,6 +668,9 @@ warmup() {
   while IFS= read -r -d '' arg; do args+=("$arg"); done < <(warmup_args)
   local -a env_args=()
   [[ -n "$region" ]] && env_args+=(CRABBOX_AWS_REGION="$region" AWS_REGION="$region")
+  if [[ "$label" == "source" ]]; then
+    env_args+=(CRABBOX_AWS_STOCK_IMAGE="$stock_source" CRABBOX_AWS_ROOT_GB="${source_root_gb:-0}")
+  fi
   [[ "$label" == "candidate" ]] && env_args+=(CRABBOX_AWS_AMI="$2")
   printf 'warming %s lease log=%s\n' "$label" "$log" >&2
   local warmup_status=0
@@ -671,7 +701,7 @@ warmup() {
     local phase="$label"
     local selection_status=0
     local selection="$measurement_dir/$label.selection.json"
-    [[ "$phase" == "source" ]] && phase=baseline
+    [[ "$phase" == "source" && "$stock_source" != 1 ]] && phase=baseline
     capture_selection "$lease" "$selection" || selection_status=$?
     if [[ "$selection_status" == "0" ]]; then
       node "$ROOT/scripts/devtools-image-proof.mjs" selection \
@@ -685,6 +715,11 @@ warmup() {
         clear_warmup_handle "$label"
       fi
       return "$selection_status"
+    fi
+  elif [[ "$label" == "source" && "$stock_source" == 1 ]]; then
+    if ! grep -Eq 'image selected id=ami-[^[:space:]]+ source=stock' "$log"; then
+      printf 'source warmup did not prove stock image selection; log=%s\n' "$log" >&2
+      return 1
     fi
   elif [[ "$label" == "candidate" ]]; then
     assert_selected_image "$log" "$2" explicit || return 1
@@ -957,6 +992,7 @@ AWS devtools image mint
   region: ${region:-auto}
   class:  $server_class
   type:   ${server_type:-auto}
+  source: stock=$stock_source root_gb=${source_root_gb:-auto}
   prep:   $prep_script
   proof:  desktop=$desktop browser=$browser promote=$promote
   fsr:    enabled=$fast_snapshot_restore azs=${fast_snapshot_restore_azs:-auto}
@@ -992,6 +1028,9 @@ fi
 
 outcome_stage="source_prepare"
 source_lease="$(warmup source)"
+jq -n --argjson stock "$stock_source" --argjson root "${source_root_gb:-0}" --arg lease "$source_lease" \
+  '{stockSource: ($stock == 1), rootGB: $root, leaseId: $lease}' \
+  >"$log_dir/image-mint-${log_image_name}-${log_id}-source.json"
 stage_linux_readiness_producer "$source_lease"
 run_prep "$source_lease"
 reboot_windows_source_if_needed "$source_lease"
