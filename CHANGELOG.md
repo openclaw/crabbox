@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Advertise backend-derived `fixed-lease-id` support in the provider catalog so fixed-lease orchestrators can preflight caller-supplied lease IDs. [PR 2674](https://github.com/openclaw/crabbox/pull/2674).
+
 ### Credits
 
 - Thanks @shakkernerd for [PR 2650](https://github.com/openclaw/crabbox/pull/2650) (cold Actions hydration from GitHub SSH checkouts) and [PR 2651](https://github.com/openclaw/crabbox/pull/2651) (AWS SSH access refresh over IPv4), which shipped in 0.70.0 without the thanks in its notes.
@@ -9,6 +13,7 @@
 ### Fixes
 
 - Refresh Tenki SSH gateway certificates before new connections so long-running commands retain workspace-owner renewal, collection, and cleanup access; report credential expiry when refresh fails. [PR 2675](https://github.com/openclaw/crabbox/pull/2675).
+- Allow heartbeat and `status --wait` to renew owned direct fixed leases on DigitalOcean and Azure by validating the acquired account scope and exact resource identity. [PR 2673](https://github.com/openclaw/crabbox/pull/2673).
 - Page coordinator CLI lists with compact summaries, bound slug lookup and durable admission memory, keep identity/list reads out of the lifecycle queue, and arm cleanup recovery before provider I/O; preserve legacy list and full inspect responses.
 - Bound coordinator lease-list memory as retained history grows, preserving visibility, filters, and result ordering. [PR 2671](https://github.com/openclaw/crabbox/pull/2671). Thanks @shakkernerd.
 - Retain Blacksmith Testbox claims and keys until the exact associated GitHub work settles, and report exact native queue and terminal status. [PR 2670](https://github.com/openclaw/crabbox/pull/2670). Thanks @shakkernerd.

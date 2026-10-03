@@ -158,7 +158,7 @@ func TestTenkiFixedAcquireReplay(t *testing.T) {
 		t.Fatalf("calls=%v", f.calls)
 	}
 	claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
-	if err != nil || !exists || claim.FixedCreateIntent == nil || claim.CloudID != first.Server.CloudID {
+	if err != nil || !exists || claim.FixedCreateIntent == nil || claim.CloudID == "" || claim.CloudID != first.Server.CloudID || claim.ProviderScope != core.ProviderClaimScope(tenkiProvider, b.configForRun()) {
 		t.Fatalf("claim=%+v exists=%t err=%v", claim, exists, err)
 	}
 }

@@ -12,6 +12,58 @@ import (
 	"testing"
 )
 
+func TestProviderMatrixFixedLeaseIDCapabilities(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		backend     Backend
+		coordinator CoordinatorMode
+		want        bool
+	}{
+		{"supported", catalogFixedLeaseBackend{supported: true}, CoordinatorNever, true},
+		{"unsupported", catalogFixedLeaseBackend{}, CoordinatorNever, false},
+		{"missing interface", catalogCapabilityProvider{}, CoordinatorNever, false},
+		{"missing backend", nil, CoordinatorNever, false},
+		{"brokered", catalogFixedLeaseBackend{}, CoordinatorSupported, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			features := make(FeatureSet, 2, 3)
+			features[0], features[1] = FeatureSSH, FeatureCleanup
+			provider := catalogCapabilityProvider{
+				spec: ProviderSpec{Name: "catalog-fixture", Kind: ProviderKindSSHLease,
+					Features: features, Coordinator: tc.coordinator},
+				backend: tc.backend,
+			}
+			want := FeatureSet{FeatureSSH, FeatureCleanup}
+			if tc.want {
+				want = append(want, Feature("fixed-lease-id"))
+			}
+			for range 2 {
+				entry := providerMatrixEntryFor(provider)
+				if !reflect.DeepEqual(FeatureSet(entry.Features), want) {
+					t.Fatalf("features=%v, want %v", entry.Features, want)
+				}
+			}
+			if features[:cap(features)][2] != "" {
+				t.Fatal("catalog mutated the provider's feature storage")
+			}
+		})
+	}
+}
+
+type catalogCapabilityProvider struct {
+	Provider
+	spec    ProviderSpec
+	backend Backend
+}
+
+func (p catalogCapabilityProvider) Spec() ProviderSpec           { return p.spec }
+func (p catalogCapabilityProvider) BackendCapabilities() Backend { return p.backend }
+
+type catalogFixedLeaseBackend struct{ supported bool }
+
+func (catalogFixedLeaseBackend) Spec() ProviderSpec               { return ProviderSpec{} }
+func (b catalogFixedLeaseBackend) SupportsRequestedLeaseID() bool { return b.supported }
+
 func TestProviderStaticStatusProjection(t *testing.T) {
 	spec := ProviderSpec{Authentication: ProviderAuthentication{
 		{Route: "direct", Methods: []ProviderAuthenticationMethod{ProviderAuthenticationCLI, ProviderAuthenticationAPIKey}, Description: "Possible direct interfaces"},
