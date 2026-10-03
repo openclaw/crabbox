@@ -14362,9 +14362,7 @@ export class FleetCoordinator {
 
   private async listLeases(request: Request): Promise<Response> {
     const admin = isAdminRequest(request);
-    const leases = admin
-      ? this.filterLeases(await this.leaseRecords(), request)
-      : this.filterLeasesForRequest(await this.leaseRecords(), request);
+    const leases = await this.recentLeases(request, admin);
     if (requestAuthType(request) === "device") {
       return json({ leases: leases.map((lease) => this.deviceLeaseRecord(lease)) });
     }
@@ -14373,10 +14371,23 @@ export class FleetCoordinator {
 
   private async adminLeases(request: Request): Promise<Response> {
     return json({
-      leases: this.filterLeases(await this.leaseRecords(), request).map((lease) =>
+      leases: (await this.recentLeases(request, true)).map((lease) =>
         this.leaseForListRequest(lease, request, true),
       ),
     });
+  }
+
+  private async recentLeases(request: Request, admin: boolean): Promise<LeaseRecord[]> {
+    const limit = clampLimit(new URL(request.url).searchParams.get("limit"), 100);
+    const matches = this.leaseListFilter(request);
+    const leases: LeaseRecord[] = [];
+    if (limit === 0) return leases;
+    await this.visitLeaseRecords((lease) => {
+      if ((admin || this.leaseVisibleToRequest(lease, request, false)) && matches(lease)) {
+        retainRecentLease(leases, lease, limit);
+      }
+    });
+    return leases;
   }
 
   private async adminLeaseAudit(request: Request): Promise<Response> {
@@ -15048,26 +15059,28 @@ export class FleetCoordinator {
   }
 
   private filterLeasesWithoutLimit(leases: LeaseRecord[], request: Request): LeaseRecord[] {
+    return leases
+      .filter(this.leaseListFilter(request))
+      .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  private leaseListFilter(request: Request): (lease: LeaseRecord) => boolean {
     const url = new URL(request.url);
     const state = url.searchParams.get("state") ?? "";
     const current = url.searchParams.get("view") === "current";
     const provider = url.searchParams.get("provider") ?? "";
     const owner = url.searchParams.get("owner") ?? "";
     const org = orgFilterKey(url);
-    if (org === null) return [];
-    return leases
-      .filter(
-        (lease) =>
-          !current ||
-          leaseIsLive(lease) ||
-          ((lease.keep || lease.releaseDeletesServer === false) &&
-            !leaseProviderCleanupConfirmed(lease)),
-      )
-      .filter((lease) => !state || lease.state === state)
-      .filter((lease) => !provider || lease.provider === provider)
-      .filter((lease) => !owner || lease.owner === owner)
-      .filter((lease) => !org || orgMatchesForFilter(lease.org, org))
-      .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
+    if (org === null) return () => false;
+    return (lease) =>
+      (!current ||
+        leaseIsLive(lease) ||
+        ((lease.keep || lease.releaseDeletesServer === false) &&
+          !leaseProviderCleanupConfirmed(lease))) &&
+      (!state || lease.state === state) &&
+      (!provider || lease.provider === provider) &&
+      (!owner || lease.owner === owner) &&
+      (!org || orgMatchesForFilter(lease.org, org));
   }
 
   private async createRun(request: Request, requestedRunID?: string): Promise<Response> {
@@ -18959,13 +18972,6 @@ export class FleetCoordinator {
       .toSorted((a, b) => a.seq - b.seq)
       .filter((event) => event.seq > after)
       .slice(0, limit);
-  }
-
-  private filterLeasesForRequest(leases: LeaseRecord[], request: Request): LeaseRecord[] {
-    return this.filterLeases(
-      leases.filter((lease) => this.leaseVisibleToRequest(lease, request, false)),
-      request,
-    );
   }
 
   private leaseVisibleToRequest(lease: LeaseRecord, request: Request, admin: boolean): boolean {
@@ -24158,6 +24164,21 @@ function providerKeyCleanupBlocksProvisioningRecovery(lease: LeaseRecord): boole
 
 function validExternalRunnerID(value: string | undefined): value is string {
   return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{2,128}$/.test(value);
+}
+
+function retainRecentLease(leases: LeaseRecord[], lease: LeaseRecord, limit: number): void {
+  let low = 0;
+  let high = leases.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (leases[middle]!.createdAt.localeCompare(lease.createdAt) < 0) {
+      high = middle;
+    } else {
+      low = middle + 1;
+    }
+  }
+  leases.splice(low, 0, lease);
+  if (leases.length > limit) leases.pop();
 }
 
 function retainRecentRun(runs: RunRecord[], run: RunRecord, limit: number): void {

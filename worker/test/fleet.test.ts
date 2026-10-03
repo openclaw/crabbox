@@ -31596,7 +31596,23 @@ describe("fleet lease identity and idle", () => {
   );
 
   it("lists visible retained leases before applying the current-view limit", async () => {
-    const storage = new MemoryStorage();
+    const storage = new BoundedObservedMemoryStorage();
+    for (let index = 0; index < 300; index++) {
+      const id = `cbx_${(index + 1000).toString(16).padStart(12, "0")}`;
+      storage.seed(
+        `lease:${id}`,
+        testLease({
+          id,
+          provider: "aws",
+          owner: "alice@example.com",
+          org: "example-org",
+          state: "released",
+          keep: false,
+          cleanupStatus: "complete",
+          cleanupCompletedAt: "2026-05-01T00:00:00Z",
+        }),
+      );
+    }
     const kept = testLease({
       id: "cbx_000000000150",
       provider: "aws",
@@ -31641,7 +31657,85 @@ describe("fleet lease identity and idle", () => {
     expect(response.status).toBe(200);
     const { leases } = (await response.json()) as { leases: LeaseRecord[] };
     expect(leases.map((lease) => lease.id)).toEqual([kept.id]);
+    expect(storage.listOptions.filter((options) => options.prefix === "lease:")).toHaveLength(3);
   });
+
+  it.each([
+    { path: "/v1/leases", admin: false },
+    { path: "/v1/leases", admin: true },
+    { path: "/v1/admin/leases", admin: true },
+  ])(
+    "bounds history reads and preserves lease list selection: $path admin=$admin",
+    async ({ path, admin }) => {
+      const storage = new BoundedObservedMemoryStorage();
+      const fleet = testFleet(storage);
+      await fleet.ready();
+      const idFor = (index: number) => `cbx_${index.toString(16).padStart(12, "0")}`;
+      for (let index = 0; index < 520; index++) {
+        const id = idFor(index);
+        storage.seed(
+          `lease:${id}`,
+          testLease({
+            id,
+            provider: index === 518 ? "azure" : "aws",
+            owner: index === 516 ? "bob@example.com" : "alice@example.com",
+            org: index === 515 ? "other-org" : "example-org",
+            state: index === 517 ? "released" : "active",
+            createdAt:
+              index === 0 || index === 519
+                ? "2026-06-01T00:00:00.000Z"
+                : new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+          }),
+        );
+      }
+      const hidden = idFor(600);
+      storage.seed(
+        `lease:${hidden}`,
+        testLease({
+          id: hidden,
+          owner: "bob@example.com",
+          org: "example-org",
+          createdAt: "2026-06-02T00:00:00.000Z",
+        }),
+      );
+      const headers = {
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+        ...(admin ? { "x-crabbox-admin": "true" } : {}),
+      };
+      const response = await fleet.fetch(
+        request(
+          "GET",
+          `${path}?limit=3&provider=aws&owner=alice%40example.com&state=active&org=example-org`,
+          { headers },
+        ),
+      );
+      expect(response.status).toBe(200);
+      const { leases } = (await response.json()) as { leases: LeaseRecord[] };
+      expect(leases.map((lease) => lease.id)).toEqual([idFor(0), idFor(519), idFor(514)]);
+      const reads = storage.listOptions.filter((options) => options.prefix === "lease:");
+      expect(reads).toHaveLength(5);
+      expect(reads.every((options) => options.limit === 128 && options.noCache === true)).toBe(
+        true,
+      );
+
+      const visible = await fleet.fetch(request("GET", `${path}?limit=1`, { headers }));
+      await expect(visible.json()).resolves.toMatchObject({
+        leases: [{ id: admin ? hidden : idFor(0) }],
+      });
+      for (const [query, count] of [
+        ["", 100],
+        ["?limit=999", 500],
+        ["?limit=0.5", 0],
+      ] as const) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- compare each existing limit contract on the same frozen history.
+        const limited = await fleet.fetch(request("GET", `${path}${query}`, { headers }));
+        // oxlint-disable-next-line eslint/no-await-in-loop -- consume this response before checking the next limit.
+        const body = (await limited.json()) as { leases: LeaseRecord[] };
+        expect(body.leases).toHaveLength(count);
+      }
+    },
+  );
 
   it("persists a cancel-before-create tombstone and rejects the later create without provisioning", async () => {
     const storage = new MemoryStorage();
