@@ -13,6 +13,8 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) BackendCapabilities() core.Backend { return &leaseBackend{} }
+
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.Proxmox.TemplateID > 0 {
 		return "template-" + strconv.Itoa(cfg.Proxmox.TemplateID)

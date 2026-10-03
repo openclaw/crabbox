@@ -756,6 +756,13 @@ type IdempotentLeaseIDBackend interface {
 	SupportsRequestedLeaseID() bool
 }
 
+// ProviderBackendCapabilitySource exposes a metadata-only backend without
+// configuration, credentials, clients, or side effects. Catalogs inspect its
+// capability interfaces; they must not invoke lifecycle methods.
+type ProviderBackendCapabilitySource interface {
+	BackendCapabilities() Backend
+}
+
 type CheckpointLeaseIDBackend interface {
 	SupportsRequestedCheckpointID() bool
 }
@@ -829,6 +836,8 @@ const (
 	// FeatureClaimExec requires ExecLeaseClaimResolver, private POSIX SSH execution,
 	// and provider-owned idle activity that does not require exclusive claim writes.
 	FeatureClaimExec Feature = "claim-exec"
+	// FeatureFixedLeaseID advertises caller-supplied idempotent lease IDs.
+	FeatureFixedLeaseID Feature = "fixed-lease-id"
 	// FeatureFixedCurrentRepoStop requires RepositoryScopedStopBackend for fixed IDs.
 	FeatureFixedCurrentRepoStop Feature = "fixed-current-repo-stop"
 	FeaturePauseResume          Feature = "pause-resume"
