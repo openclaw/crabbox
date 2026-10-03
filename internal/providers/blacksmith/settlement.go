@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -13,6 +14,38 @@ import (
 // Native status supplies the association. Never discover a run by listing,
 // timestamps, workflow names, or the caller's current repository.
 var blacksmithActionsURL = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9_-]+)/([A-Za-z0-9_.-]+)/actions/runs/([1-9][0-9]*)$`)
+
+const blacksmithStatusReadTimeout = 10 * time.Second
+
+// Status is observational: it needs no claim and never finalizes local custody.
+// A terminal run is useful evidence only while its native association is stable.
+func (b *blacksmithBackend) statusSettlement(ctx context.Context, identity blacksmithIdentity) map[string]any {
+	metadata := map[string]any{"remoteSettlement": "unknown"}
+	runURL := ""
+	if blacksmithObserveRunURL(&runURL, identity.RunURL) != nil || runURL == "" {
+		return metadata
+	}
+	metadata["runURL"] = runURL
+	if !identity.terminal() {
+		metadata["remoteSettlement"] = "pending"
+		return metadata
+	}
+	conclusion, err := b.githubRunConclusion(ctx, runURL)
+	if err != nil {
+		return metadata
+	}
+	if conclusion == "" {
+		metadata["remoteSettlement"] = "pending"
+		return metadata
+	}
+	confirmed, err := b.inspectTestbox(ctx, identity.ID)
+	if err != nil || confirmed != identity {
+		return metadata
+	}
+	metadata["remoteSettlement"] = "complete"
+	metadata["runConclusion"] = conclusion
+	return metadata
+}
 
 func blacksmithObserveRunURL(previous *string, current string) error {
 	if *previous != "" && *previous != current {

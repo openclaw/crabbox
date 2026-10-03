@@ -388,3 +388,7 @@ Related docs:
 - [ssh](ssh.md)
 - [Identifiers](../features/identifiers.md)
 - [Network and reachability](../features/network.md)
+
+Blacksmith `inspect --json` returns the same bounded, read-only
+[remote settlement metadata](../providers/blacksmith-testbox.md#read-only-remote-settlement)
+as `status --json`, including when the exact native ID has no local claim.
