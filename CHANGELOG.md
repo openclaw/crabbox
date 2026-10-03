@@ -9,6 +9,7 @@
 ### Fixes
 
 - Validate OS selector compatibility after lease flags resolve the provider and target, so a configured or environment Windows Server selector accepts `--target windows` while incompatible final selections still fail.
+- Persist genuine Azure fixed-lease companion identities before readiness so cleanup can resume after an externally removed VM without adopting replacement resources.
 - Add a non-delete Azure failed-lease hold with durable resource identity receipts and refusal of release, reuse, and cleanup while uncertain files await salvage.
 - Cloudflare: retain cleanup alarms after container destruction fails and retry terminal leases before reporting stopped or expired status.
 - Windows: preserve embedded quotes, empty arguments, backslashes, and Unicode when running native executables or passing arguments to uploaded PowerShell scripts. [PR 2736](https://github.com/openclaw/crabbox/pull/2736).

@@ -86,7 +86,9 @@ func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRe
 	}, ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[core.Server], error) {
 		claim := tx.Claim
 		var result core.FixedObservation[core.Server]
-		if core.HasAzureCleanupBinding(claim.Labels) {
+		// Legacy cleanup snapshots predate the journal. New preparation snapshots
+		// remain replayable; the engine denies deleting/released journal phases.
+		if core.HasAzureCleanupBinding(claim.Labels) && claim.FixedCreateIntent.Journal == nil {
 			return result, core.Exit(4, "Azure fixed lease has entered cleanup; retry stop")
 		}
 		name := core.LeaseProviderName(claim.LeaseID, claim.Slug)
@@ -120,7 +122,19 @@ func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRe
 		if err := tx.Bind(core.FixedResourceBinding{CloudID: server.CloudID, ImmutableID: server.ImmutableID}); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		server, err := client.WaitForServerIP(ctx, name)
+		// Capture genuine companion identities while the VM still proves their
+		// links, before any readiness publication or interruptible access wait.
+		prepared, err := client.PrepareOwnedServer(ctx, fixedAzureCleanupServer(server, *claim))
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		if !core.HasAzureCleanupBinding(prepared.Labels) {
+			return core.LeaseTarget{}, core.Exit(4, "Azure fixed preparation did not capture cleanup identities")
+		}
+		if err := tx.Bind(core.FixedResourceBinding{Labels: prepared.Labels}); err != nil {
+			return core.LeaseTarget{}, err
+		}
+		server, err = client.WaitForServerIP(ctx, name)
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}
@@ -138,12 +152,27 @@ func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRe
 		if err := client.SetTags(ctx, name, server.Labels); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		return core.LeaseTarget{Server: server, SSH: target, LeaseID: claim.LeaseID}, nil
+		return core.LeaseTarget{Server: fixedAzureCleanupServer(server, *claim), SSH: target, LeaseID: claim.LeaseID}, nil
 	}})
 	if err == nil && req.OnAcquired != nil {
 		err = req.OnAcquired(lease)
 	}
 	return lease, err
+}
+
+// Cleanup identities are local claim facts, not Azure tags. Always reuse the
+// original capture rather than adopting replacement companions on replay.
+func fixedAzureCleanupServer(server core.Server, claim core.LeaseClaim) core.Server {
+	server.Labels = maps.Clone(server.Labels)
+	if server.Labels == nil {
+		server.Labels = make(map[string]string)
+	}
+	for key, value := range claim.Labels {
+		if strings.HasPrefix(key, "_crabbox_azure_cleanup_") {
+			server.Labels[key] = value
+		}
+	}
+	return server
 }
 
 func validateFixedAzureServer(claim core.LeaseClaim, server core.Server) error {

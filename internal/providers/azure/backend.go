@@ -248,7 +248,7 @@ func (b *azureLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLe
 	if fixedAzureLeaseKind.IsFixedClaim(claim) {
 		err := core.DeleteFixedResource(ctx, fixedAzureLeaseKind, claim, core.FixedLeaseOperations[core.Server]{
 			ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[core.Server], error) {
-				prepared, err := client.PrepareOwnedServer(ctx, req.Lease.Server)
+				prepared, err := client.PrepareOwnedServer(ctx, fixedAzureCleanupServer(req.Lease.Server, *tx.Claim))
 				if err != nil {
 					return core.FixedObservation[core.Server]{}, err
 				}

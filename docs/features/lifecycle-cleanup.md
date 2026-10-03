@@ -560,6 +560,17 @@ cleanup failure preserves the original acquisition error and prevents a fresh
 bootstrap retry. This in-process rollback has no persisted recovery claim and
 does not provide crash-resumable companion cleanup.
 
+Fixed-ID Azure preparation additionally persists the genuine companion snapshot
+in the exact claim under its acquisition fence before access waits and ready
+publication. The snapshot stays local; it is not published in VM tags. Replay
+checks the original companion identities, and release projects that retained
+binding into the ordinary owned deletion path, including when only the VM has
+subsequently disappeared. The deletion journal, not the presence of a preparation
+snapshot, records cleanup admission. A failed or incomplete capture leaves the
+claim unresolved and cannot publish readiness. Legacy claims with no snapshot
+still require all exact resources absent; surviving companions are not adopted
+after VM loss.
+
 These are observed-identity checks, not an atomic generation-conditional Azure
 DELETE. Inner create-failure rollback and Windows setup performed during create,
 intermediate hidden readiness polls, and replacement races after the final

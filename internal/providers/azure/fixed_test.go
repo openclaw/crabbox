@@ -28,6 +28,16 @@ func (c *fakeAzureClient) CreateFixedServer(ctx context.Context, cfg core.Config
 func fixedAzureTestBackend(t *testing.T, client *fakeAzureClient) *azureLeaseBackend {
 	t.Helper()
 	testutil.IsolateUserDirs(t)
+	if client.prepareFunc == nil {
+		client.prepareFunc = func(server core.Server) core.Server {
+			// The real client obtains these from live companion GUIDs/uniqueId.
+			if !core.HasAzureCleanupBinding(server.Labels) {
+				server.Labels = maps.Clone(server.Labels)
+				maps.Copy(server.Labels, fixedAzureTestCleanupLabels())
+			}
+			return server
+		}
+	}
 	oldClient, oldCIDRs, oldBootstrap := newAzureClient, validateAzureSSHCIDRsForAcquire, bootstrapManagedWindowsDesktop
 	t.Cleanup(func() {
 		newAzureClient, validateAzureSSHCIDRsForAcquire, bootstrapManagedWindowsDesktop = oldClient, oldCIDRs, oldBootstrap
@@ -39,6 +49,15 @@ func fixedAzureTestBackend(t *testing.T, client *fakeAzureClient) *azureLeaseBac
 	cfg.Provider, cfg.Azure.Subscription, cfg.Azure.ResourceGroup = "azure", "test-sub", "rg"
 	cfg.Azure.Location, cfg.TargetOS = "eastus", core.TargetLinux
 	return NewAzureLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
+}
+
+func fixedAzureTestCleanupLabels() map[string]string {
+	return map[string]string{
+		core.AzureCleanupBindingLabel:         "v1",
+		"_crabbox_azure_cleanup_nic_id":       "original-nic",
+		"_crabbox_azure_cleanup_public_ip_id": "original-ip",
+		"_crabbox_azure_cleanup_disk_id":      "original-disk",
+	}
 }
 
 func TestFixedAzureLifecycle(t *testing.T) {
@@ -119,6 +138,10 @@ func TestFixedAzureReadinessRecoveryAndIdentity(t *testing.T) {
 	}
 	if len(client.deleted) != 0 {
 		t.Fatal("ambiguous resource rolled back")
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || !core.HasAzureCleanupBinding(claim.Labels) || len(client.tagged) != 0 {
+		t.Fatalf("access interruption lost capture or published ready: %v", err)
 	}
 	client.waitErr = nil
 	if _, err := b.Acquire(t.Context(), req); err != nil {
@@ -412,7 +435,19 @@ func TestFixedAzureExplicitRecoveryAbsentWithoutBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.servers = nil // External cleanup removed the VM; no binding was captured.
+	if err := core.WithDurableLeaseClaimLockContext(t.Context(), req.RequestedLeaseID, func(claim *core.LeaseClaim, _ bool, persist func() error) error {
+		// Represent an installed legacy claim created before preparation capture.
+		for key := range claim.Labels {
+			if strings.HasPrefix(key, "_crabbox_azure_cleanup_") {
+				delete(claim.Labels, key)
+			}
+		}
+		return persist()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client.prepareFunc = nil
+	client.servers = nil // Legacy external cleanup removed the VM without a binding.
 	t.Chdir(req.Repo.Root)
 	t.Setenv("CRABBOX_CONFIG", "")
 	t.Setenv("CRABBOX_PROVIDER", "azure")
@@ -464,6 +499,7 @@ func TestFixedAzureExplicitRecoveryCancellationWhileClaimLocked(t *testing.T) {
 	if err := core.RemoveLeaseClaimIfUnchanged(req.RequestedLeaseID, claim); err != nil {
 		t.Fatal(err)
 	}
+	client.prepareOwned = nil // Observe only the canceled recovery.
 	held, release, lockDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 	go func() {
 		lockDone <- core.WithDurableLeaseClaimLockContext(t.Context(), req.RequestedLeaseID, func(*core.LeaseClaim, bool, func() error) error {
@@ -532,5 +568,106 @@ func TestFixedAzureExplicitRecoveryRejectsIncompleteRemoteIdentity(t *testing.T)
 	}
 	if len(client.deleted) != 0 {
 		t.Fatalf("deleted=%v", client.deleted)
+	}
+}
+
+func TestFixedAzurePreparationPersistsCleanupBeforeReady(t *testing.T) {
+	client := &fakeAzureClient{tagErr: errors.New("ready reply lost")}
+	b := fixedAzureTestBackend(t, client)
+	req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123470", RequestedSlug: "prepared", Repo: core.Repo{Root: t.TempDir()}}
+	acquired := 0
+	req.OnAcquired = func(core.LeaseTarget) error { acquired++; return nil }
+	client.setTagsFunc = func() {
+		claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+		if err != nil || claim.FixedCreateIntent.Journal.Phase != "bound" {
+			t.Fatalf("cleanup was not durably bound before ready: %v", err)
+		}
+		for key, value := range fixedAzureTestCleanupLabels() {
+			if claim.Labels[key] != value || client.taggedLabels[len(client.taggedLabels)-1][key] != "" {
+				t.Fatalf("identity %s missing from claim or published as cloud tag", key)
+			}
+		}
+	}
+	if _, err := b.Acquire(t.Context(), req); !errors.Is(err, client.tagErr) || acquired != 0 {
+		t.Fatalf("failed ready publication: err=%v acquired=%d", err, acquired)
+	}
+	client.tagErr = nil
+	lease, err := b.Acquire(t.Context(), req)
+	if err != nil || acquired != 1 || len(client.createLeaseIDs) != 1 {
+		t.Fatalf("prepared replay: err=%v acquired=%d creates=%d", err, acquired, len(client.createLeaseIDs))
+	}
+	for key, value := range fixedAzureTestCleanupLabels() {
+		if lease.Server.Labels[key] != value || client.prepareOwned[1].Labels[key] != value {
+			t.Fatalf("replay did not preserve original %s", key)
+		}
+	}
+	client.servers = nil // Guest/provider removed only the VM, after genuine capture.
+	missing, err := b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.prepareFunc = nil // Release must use the retained original binding.
+	if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: missing}); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || claim.FixedCreateIntent.State != "released" || len(client.ownedExpected) != 1 {
+		t.Fatalf("missing finalization: err=%v deletes=%d", err, len(client.ownedExpected))
+	}
+	for key, value := range fixedAzureTestCleanupLabels() {
+		if client.ownedExpected[0].Labels[key] != value {
+			t.Fatalf("release lost %s", key)
+		}
+	}
+}
+
+func TestFixedAzurePreparationFailureRetainsUnreadyClaim(t *testing.T) {
+	for _, failure := range []string{"read", "binding"} {
+		t.Run(failure, func(t *testing.T) {
+			client := &fakeAzureClient{}
+			b := fixedAzureTestBackend(t, client)
+			if failure == "read" {
+				client.prepareErr = errors.New("companion identity unavailable")
+			} else {
+				client.prepareFunc = func(server core.Server) core.Server { return server }
+			}
+			req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123471", RequestedSlug: "unready", Repo: core.Repo{Root: t.TempDir()}}
+			acquired := false
+			req.OnAcquired = func(core.LeaseTarget) error { acquired = true; return nil }
+			if _, err := b.Acquire(t.Context(), req); err == nil {
+				t.Fatal("capture failure accepted")
+			}
+			claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil || claim.CloudImmutableID == "" || core.HasAzureCleanupBinding(claim.Labels) || acquired || len(client.tagged) != 0 || len(client.deleted) != 0 {
+				t.Fatalf("unknown capture published ready/deleted/lost claim: %v", err)
+			}
+		})
+	}
+}
+
+func TestFixedAzureReleaseUsesClaimBindingWithLiveVM(t *testing.T) {
+	client := &fakeAzureClient{}
+	b := fixedAzureTestBackend(t, client)
+	req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123472", RequestedSlug: "projection", Repo: core.Repo{Root: t.TempDir()}}
+	if _, err := b.Acquire(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if core.HasAzureCleanupBinding(lease.Server.Labels) {
+		t.Fatal("live projection unexpectedly contains private binding")
+	}
+	client.prepareFunc = func(server core.Server) core.Server {
+		for key, value := range fixedAzureTestCleanupLabels() {
+			if server.Labels[key] != value {
+				t.Fatalf("release recaptured instead of checking original %s", key)
+			}
+		}
+		return server
+	}
+	if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
 	}
 }
