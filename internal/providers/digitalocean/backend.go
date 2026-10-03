@@ -802,9 +802,21 @@ func (b *digitalOceanLeaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) s
 	return fmt.Sprintf("deleted lease=%s droplet=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 }
 
-func (b *digitalOceanLeaseBackend) StatusTouchClaimMatches(lease core.LeaseTarget, claim core.LeaseClaim) bool {
-	expected := strings.TrimSpace(claim.Labels[digitalOceanAccountLabel])
-	return expected != "" && expected == strings.TrimSpace(lease.Server.Labels[digitalOceanAccountLabel])
+func (b *digitalOceanLeaseBackend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+	// Fixed claims bind the API account, which is not available in config scope.
+	// An unfinished create without an exact resource binding cannot renew a lease.
+	if claim.LeaseID != lease.LeaseID || claim.CloudID == "" || claim.CloudID != lease.Server.CloudID || claim.CloudID != dropletIDString(lease.Server.ID) {
+		return core.Exit(4, "digitalocean lease %s resource differs from its exact claim; refusing touch", lease.LeaseID)
+	}
+	client, err := b.clientFactory(b.RT)
+	if err != nil {
+		return err
+	}
+	accountID, err := client.AccountID(ctx)
+	if err != nil {
+		return err
+	}
+	return validateDigitalOceanCleanupClaim(lease.Server, claim, accountID)
 }
 
 func (b *digitalOceanLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
