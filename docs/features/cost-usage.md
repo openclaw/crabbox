@@ -17,12 +17,14 @@ accounted for.
 
 ## Reading `crabbox usage`
 
-For a self-owner admission snapshot across all months and organizations, use
-[`crabbox capacity`](../commands/capacity.md). It reports only resolved owner,
-existing admission count, effective owner limit, and observation time. It does
-not add a candidate lease or expose capacity-admin membership. A successful
-snapshot is not a reservation or approval to allocate: fleet, org, budget, and
-provider gates may still reject. Monthly usage below keeps its existing scope.
+For an active-lease admission snapshot across all months, use
+[`crabbox capacity`](../commands/capacity.md). It reports fleet, authenticated org,
+and owner counts and limits, observation time, and whether one additional lease
+fits those caps. Owner counts span organizations. Fleet or org exhaustion caused
+by other owners is reported as an aggregate count only, without their identities
+or lease IDs. The snapshot does not expose capacity-admin membership and is not
+a reservation or approval to allocate: counts can change, and budget or provider
+gates may still reject. Monthly usage below keeps its existing scope.
 
 `crabbox usage` requires a configured coordinator and prints the current month by default.
 
@@ -106,6 +108,15 @@ budgets default to `off` when their environment variable is unset or non-positiv
 Active limits keep counting a live managed lease after its heartbeat deadline until
 cleanup commits a terminal state, because its provider resource may still exist. The
 usage summary's active count uses the same definition.
+
+Active-lease checks run in fleet → owner → org order, before monthly budgets.
+The capacity response's `admissible` and `blockedBy` use that same order, with
+`blockedBy: null` when all three caps have headroom. New fleet/org limit fields
+use `null` for unlimited; the existing owner `effectiveLimit` retains numeric `0`.
+An allocation refused by the fleet cap says `fleet active lease limit exceeded`;
+owner and org refusals say `active lease limit for owner exceeded` and
+`active lease limit for org exceeded`. Allocation errors include the candidate
+lease in their count; capacity reports existing leases only.
 
 ```text
 CRABBOX_MAX_ACTIVE_LEASES            fleet-wide active lease cap
