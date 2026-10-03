@@ -4,6 +4,7 @@
 
 ### Added
 
+- Support fixed idempotent Scaleway lease IDs with replay, journaled SSH-key and root-volume recovery, and terminal release receipts for fixed-lease orchestrators.
 - Advertise backend-derived `fixed-lease-id` support in the provider catalog so fixed-lease orchestrators can preflight caller-supplied lease IDs. [PR 2674](https://github.com/openclaw/crabbox/pull/2674).
 
 ### Credits

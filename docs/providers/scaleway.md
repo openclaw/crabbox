@@ -43,6 +43,19 @@ crabbox stop --provider scaleway my-app
 crabbox cleanup --provider scaleway --dry-run
 ```
 
+Fixed-lease orchestrators can pass `--lease-id cbx_abcdef123456` to `warmup`
+or `run`. Repeating the same request from the same local state reuses the
+original allocation; changes to the project, repository owner, or creation
+settings conflict. Fixed acquisition creates and journals a tagged root volume
+from the image's single root snapshot before submitting the Instance, preserving
+disk ownership even if a create response is lost. Interrupted key and volume
+creation reconcile their original identities without allocating replacements.
+If a submitted resource is not yet observable, retry the same lease ID later;
+empty inventory does not authorize another create. `status`, `stop`, and normal
+lease commands accept that ID. Successful stop retains a terminal claim so the
+ID cannot allocate another machine. Keep the local claim and stored SSH key
+through recovery; images with additional volumes are rejected for fixed leases.
+
 Those commands create, inspect, resolve, touch, release, and clean up Scaleway
 Instances through the local Scaleway SDK profile. They are cost-bearing when
 they create live Instances, so use `doctor` and `cleanup --dry-run` before

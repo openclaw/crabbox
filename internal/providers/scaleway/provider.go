@@ -132,6 +132,9 @@ func (b *Backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 }
 
 func (b *Backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	if req.RequestedLeaseID != "" {
+		return b.acquireFixed(ctx, req)
+	}
 	return shared.AcquireAttemptsRetry(b.rt, req.Keep, func() (core.LeaseTarget, error) {
 		return b.acquireOnce(ctx, req)
 	})
@@ -415,6 +418,9 @@ func (b *Backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if lease, handled, err := b.resolveFixed(ctx, client, req); handled {
+		return lease, err
+	}
 	servers, err := b.listScalewayServers(ctx, client)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -468,6 +474,9 @@ func (b *Backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if err != nil {
 		return err
 	}
+	if claim, exists, _ := core.ServerLeaseClaimSnapshot(req.Lease.Server); exists && fixedLeaseKind.IsFixedClaim(claim) {
+		return b.releaseFixed(ctx, client, claim)
+	}
 	return b.deleteServer(ctx, client, req.Lease.Server)
 }
 
@@ -475,21 +484,21 @@ func (b *Backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	return fmt.Sprintf("deleted lease=%s scaleway_server=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 }
 
-func (b *Backend) StatusTouchClaimMatches(lease core.LeaseTarget, claim core.LeaseClaim) bool {
-	if validateRootVolumeIdentity(claim, lease.Server, false) != nil {
-		return false
+func (b *Backend) AuthorizeStatusTouchClaim(_ context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+	scope := core.ProviderClaimScope(providerName, b.cfg)
+	if fixedLeaseKind.IsFixedClaim(claim) {
+		scope = lease.Server.Labels["scaleway_project"]
 	}
-	for _, key := range []string{"scaleway_project", "scaleway_zone"} {
+	if claim.ProviderScope != scope || claim.CloudID == "" || claim.CloudID != lease.Server.CloudID || validateRootVolumeIdentity(claim, lease.Server, false) != nil {
+		return core.Exit(4, "Scaleway heartbeat requires an exact resource and scope claim")
+	}
+	for _, key := range []string{"scaleway_project", "scaleway_zone", "scaleway_organization"} {
 		expected := strings.TrimSpace(claim.Labels[key])
-		if expected == "" || expected != strings.TrimSpace(lease.Server.Labels[key]) {
-			return false
+		if key != "scaleway_organization" && expected == "" || expected != "" && expected != strings.TrimSpace(lease.Server.Labels[key]) {
+			return core.Exit(4, "Scaleway heartbeat %s differs from the local claim", key)
 		}
 	}
-	if organization := strings.TrimSpace(claim.Labels["scaleway_organization"]); organization != "" &&
-		organization != strings.TrimSpace(lease.Server.Labels["scaleway_organization"]) {
-		return false
-	}
-	return true
+	return nil
 }
 
 func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
@@ -730,6 +739,14 @@ func (b *Backend) targetFromServer(ctx context.Context, client Client, item *ins
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if fixedLeaseKind.IsFixedClaim(claim) {
+		req.ID = leaseID
+		lease, _, err := b.resolveFixed(ctx, client, req)
+		return lease, err
+	}
+	if server.Labels["fixed_attempt"] != "" {
+		return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Scaleway fixed server has no create intent")
+	}
 	if exists && !req.IsReadOnlyStatus() {
 		if err := validateScalewayClaimIdentity(claim, server, req.ReleaseOnly); err != nil {
 			return core.LeaseTarget{}, err
@@ -837,6 +854,9 @@ func (b *Backend) deleteServer(ctx context.Context, client Client, server core.S
 	claim, err := b.cleanupClaim(client, server)
 	if err != nil {
 		return err
+	}
+	if fixedLeaseKind.IsFixedClaim(claim) {
+		return b.releaseFixed(ctx, client, claim)
 	}
 	claim, err = b.bindPendingRecoveryServer(ctx, client, server, claim)
 	if err != nil {
@@ -1180,6 +1200,13 @@ func validateScalewayLabels(labels map[string]string) error {
 func validateScalewayClaimIdentity(claim core.LeaseClaim, server core.Server, cleanup bool) error {
 	leaseID := server.Labels["lease"]
 	slug := server.Labels["slug"]
+	if fixedLeaseKind.IsFixedClaim(claim) {
+		intent := claim.FixedCreateIntent
+		if intent.State != "acquired" || intent.Attempt["nonce"] == "" || server.Labels["fixed_attempt"] != intent.Attempt["nonce"] ||
+			server.Labels["fixed_intent_sha256"] != intent.Fingerprint || claim.ProviderScope != server.Labels["scaleway_project"] {
+			return core.Exit(4, "lease_id_conflict: Scaleway fixed ownership changed")
+		}
+	}
 	if claim.LeaseID != leaseID ||
 		claim.Provider != providerName ||
 		claim.Slug == "" ||
