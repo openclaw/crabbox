@@ -195,7 +195,7 @@ func (f *coordinatorAsyncFixture) roundTrip(r *http.Request) (*http.Response, er
 			f.t.Fatal("cancellation did not bind the original attempt")
 		}
 		deadline, ok := r.Context().Deadline()
-		if !ok || time.Until(deadline) != 10*time.Second || r.Context().Err() != nil {
+		if !ok || time.Until(deadline) != 30*time.Second || r.Context().Err() != nil {
 			f.t.Fatalf("cancel context budget=%s err=%v", time.Until(deadline), r.Context().Err())
 		}
 		if f.onCancel != nil {
@@ -377,7 +377,7 @@ func TestCoordinatorAsyncCallerDeadlineAndFinalCancellationAttempt(t *testing.T)
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		lease, err := f.acquire(ctx)
-		if !errors.Is(err, context.DeadlineExceeded) || lease.ID != "" || f.creates != 1 || f.cancels != 2 || time.Since(f.started) != 30*time.Second || f.deadline.Sub(f.started) != 20*time.Second {
+		if !errors.Is(err, context.DeadlineExceeded) || lease.ID != "" || f.creates != 1 || f.cancels != 2 || time.Since(f.started) != 50*time.Second || f.deadline.Sub(f.started) != 20*time.Second {
 			t.Fatalf("lease=%#v err=%v creates=%d cancels=%d elapsed=%s budget=%s", lease, err, f.creates, f.cancels, time.Since(f.started), f.deadline.Sub(f.started))
 		}
 	})

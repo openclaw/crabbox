@@ -619,3 +619,25 @@ func TestBlacksmithRejectsHydrationFailedReuse(t *testing.T) {
 		t.Fatalf("hydration failure admitted or changed claim: err=%v read=%v claim=%+v", err, readErr, after)
 	}
 }
+
+func TestBlacksmithStopRejectsAmbiguousSlugBeforeProviderCalls(t *testing.T) {
+	isolateBlacksmithOwnership(t)
+	first := testOwnedBlacksmithClaim(t, "tbx_alias_first", "same-slug", "/repo")
+	second := testOwnedBlacksmithClaim(t, "tbx_alias_second", "same-slug", "/repo")
+	calls := 0
+	cfg := core.BaseConfig()
+	cfg.Blacksmith.Org = "example-org"
+	b := newTestBlacksmithBackend(cfg, ownershipRunner(func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		calls++
+		return core.LocalCommandResult{}, nil
+	}))
+	err := b.Stop(t.Context(), core.StopRequest{ID: "SAME SLUG"})
+	if err == nil || !strings.Contains(err.Error(), "multiple") || calls != 0 {
+		t.Fatalf("err=%v provider calls=%d", err, calls)
+	}
+	for _, c := range []core.LeaseClaim{first, second} {
+		if actual, exists, err := core.ReadLeaseClaimWithPresence(c.LeaseID); err != nil || !exists || actual.Revision != c.Revision {
+			t.Fatalf("claim changed: %+v %v %v", actual, exists, err)
+		}
+	}
+}

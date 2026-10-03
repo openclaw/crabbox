@@ -768,6 +768,11 @@ type CheckpointLeaseIDBackend interface {
 }
 
 type ProviderSpec struct {
+	// ClaimExpiryBound is the provider-enforced maximum lifetime after use.
+	// Zero means that age alone cannot authorize local claim pruning. Only
+	// opt in when expiry needs no running CLI and any settlement the claim
+	// guards is itself bounded by the same duration.
+	ClaimExpiryBound time.Duration
 	Authentication   ProviderAuthentication
 	Name             string
 	Aliases          []string

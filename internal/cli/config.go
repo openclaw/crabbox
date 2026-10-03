@@ -132,6 +132,7 @@ type Config struct {
 	TTL                           time.Duration
 	IdleTimeout                   time.Duration
 	WarmupKeep                    bool
+	ClaimsAutoPrune               bool
 	Sync                          SyncConfig
 	Run                           RunConfig
 	EnvAllow                      []string
@@ -1556,6 +1557,7 @@ func baseConfig() Config {
 		TTL:                     90 * time.Minute,
 		IdleTimeout:             30 * time.Minute,
 		WarmupKeep:              true,
+		ClaimsAutoPrune:         true,
 		Sync: SyncConfig{
 			Source:        "git",
 			Delete:        true,
@@ -1671,6 +1673,7 @@ func baseConfig() Config {
 }
 
 type fileConfig struct {
+	Claims                   *fileClaimsConfig                   `yaml:"claims,omitempty"`
 	History                  *fileLocalHistoryPolicy             `yaml:"history,omitempty"`
 	Profile                  string                              `yaml:"profile,omitempty"`
 	Provider                 string                              `yaml:"provider,omitempty"`
@@ -2877,6 +2880,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	}
 	if file.Warmup != nil && file.Warmup.Keep != nil {
 		cfg.WarmupKeep = *file.Warmup.Keep
+		recordConfigInput(cfg, configInputGeneric, inputSource, true)
+	}
+	if file.Claims != nil && file.Claims.AutoPrune != nil {
+		cfg.ClaimsAutoPrune = *file.Claims.AutoPrune
 		recordConfigInput(cfg, configInputGeneric, inputSource, true)
 	}
 	if file.Sync != nil {
@@ -4188,6 +4195,10 @@ func applyEnv(cfg *Config) error {
 	}
 	if keep, ok := getenvBool("CRABBOX_WARMUP_KEEP"); ok {
 		cfg.WarmupKeep = keep
+		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
+	}
+	if prune, ok := getenvBool("CRABBOX_CLAIMS_AUTO_PRUNE"); ok {
+		cfg.ClaimsAutoPrune = prune
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
 	}
 	if market := os.Getenv("CRABBOX_CAPACITY_MARKET"); market != "" {

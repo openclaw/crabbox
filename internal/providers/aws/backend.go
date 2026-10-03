@@ -67,7 +67,7 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	slug, err := core.AllocateDirectLeaseSlug(leaseID, requestedSlug, servers)
+	slug, err := core.AllocateDirectLeaseSlugContext(ctx, leaseID, requestedSlug, servers)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -212,7 +212,7 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 			if err != nil {
 				return core.FixedLeaseBinding{}, err
 			}
-			slug, err := core.AllocateDirectLeaseSlug(leaseID, requestedSlug, servers)
+			slug, err := core.AllocateDirectLeaseSlugContext(ctx, leaseID, requestedSlug, servers)
 			if err != nil {
 				return core.FixedLeaseBinding{}, err
 			}
@@ -921,7 +921,7 @@ func isAWSTerminalServer(server core.Server) bool {
 }
 
 func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun bool) error {
-	claims, err := core.ListLeaseClaims()
+	claims, err := core.ListLeaseClaimsContext(ctx)
 	if err != nil {
 		return err
 	}

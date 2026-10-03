@@ -157,6 +157,7 @@ func configShowView(cfg Config) map[string]any {
 		"ttl":                        cfg.TTL.String(),
 		"idleTimeout":                cfg.IdleTimeout.String(),
 		"warmup":                     map[string]any{"keep": cfg.WarmupKeep},
+		"claims":                     map[string]any{"autoPrune": cfg.ClaimsAutoPrune},
 		"sync": map[string]any{
 			"source":        effectiveSyncSource(cfg),
 			"exclude":       configuredExcludes(cfg).patterns(),
@@ -558,6 +559,7 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	fmt.Fprintf(w, "env allow=%s\n", strings.Join(cfg.EnvAllow, ","))
 	fmt.Fprintf(w, "run preflight_tools=%s\n", blank(strings.Join(cfg.Run.PreflightTools, ","), "-"))
 	fmt.Fprintf(w, "warmup keep=%t\n", cfg.WarmupKeep)
+	fmt.Fprintf(w, "claims auto_prune=%t\n", cfg.ClaimsAutoPrune)
 	fmt.Fprintf(w, "capacity market=%s strategy=%s fallback=%s regions=%s hints=%t\n", cfg.Capacity.Market, cfg.Capacity.Strategy, cfg.Capacity.Fallback, blank(strings.Join(cfg.Capacity.Regions, ","), "-"), cfg.Capacity.Hints)
 	fmt.Fprintf(w, "actions repo=%s workflow=%s job=%s ref=%s runner_version=%s ephemeral=%t labels=%s\n", blank(cfg.Actions.Repo, "-"), blank(cfg.Actions.Workflow, "-"), blank(cfg.Actions.Job, "-"), blank(cfg.Actions.Ref, "-"), cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, blank(strings.Join(cfg.Actions.RunnerLabels, ","), "-"))
 	if err := layout.writeSlot(w, "blacksmith"); err != nil {

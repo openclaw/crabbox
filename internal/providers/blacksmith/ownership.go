@@ -84,19 +84,19 @@ func blacksmithClaimBinding(claim core.LeaseClaim) (blacksmithRoute, shared.Clai
 	return route, want, shared.ValidateClaimBinding(claim, want)
 }
 
-func resolveOwnedBlacksmithClaim(id string) (core.LeaseClaim, error) {
+func resolveOwnedBlacksmithClaim(ctx context.Context, id string) (core.LeaseClaim, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return core.LeaseClaim{}, core.Exit(2, "Blacksmith requires a claimed Testbox ID or slug")
 	}
-	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(id, blacksmithTestboxProvider)
+	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExactContext(ctx, id, blacksmithTestboxProvider)
 	if err != nil {
 		return claim, err
 	}
 	if !ok || ((strings.HasPrefix(id, "tbx_") || core.IsCanonicalLeaseID(id)) && (!exact || claim.LeaseID != id)) {
 		return claim, core.Exit(4, "Blacksmith resource %q has no exact local ownership claim; use read-only status/list and native Blacksmith cleanup", id)
 	}
-	claims, err := core.ListLeaseClaims()
+	claims, err := core.ListLeaseClaimsContext(ctx)
 	if err != nil {
 		return claim, err
 	}
@@ -251,7 +251,7 @@ func (b *blacksmithBackend) verifyTestbox(ctx context.Context, claim core.LeaseC
 }
 
 func (b *blacksmithBackend) ownedTestbox(ctx context.Context, id, repoRoot string, reclaim bool) (*blacksmithBackend, core.LeaseClaim, error) {
-	claim, err := resolveOwnedBlacksmithClaim(id)
+	claim, err := resolveOwnedBlacksmithClaim(ctx, id)
 	if err != nil {
 		return nil, claim, err
 	}

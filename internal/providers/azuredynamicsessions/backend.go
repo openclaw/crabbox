@@ -323,20 +323,34 @@ func (b *azureDynamicSessionsBackend) claimScope() (string, error) {
 }
 
 func resolveAzureDynamicSessionsClaim(identifier, scope string) (core.LeaseClaim, bool, error) {
+	exact, exists, err := core.ReadLeaseClaimWithPresence(identifier)
+	if err != nil {
+		return core.LeaseClaim{}, false, err
+	}
+	if exists && exact.LeaseID == identifier && exact.Provider == providerName && strings.TrimSpace(exact.ProviderScope) == scope {
+		return exact, true, nil
+	}
+	if core.IsCanonicalLeaseID(identifier) {
+		return core.LeaseClaim{}, false, nil
+	}
 	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return core.LeaseClaim{}, false, err
 	}
+	var matched core.LeaseClaim
 	slug := core.NormalizeLeaseSlug(identifier)
 	for _, claim := range claims {
 		if claim.Provider != providerName || strings.TrimSpace(claim.ProviderScope) != scope {
 			continue
 		}
 		if claim.LeaseID == identifier || (slug != "" && core.NormalizeLeaseSlug(claim.Slug) == slug) {
-			return claim, true, nil
+			if matched.LeaseID != "" {
+				return core.LeaseClaim{}, false, core.Exit(2, "multiple provider=%s claims match identifier %s", providerName, identifier)
+			}
+			matched = claim
 		}
 	}
-	return core.LeaseClaim{}, false, nil
+	return matched, matched.LeaseID != "", nil
 }
 
 type coreLeaseClaim struct {

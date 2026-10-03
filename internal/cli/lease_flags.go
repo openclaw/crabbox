@@ -104,17 +104,25 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 }
 
 func autoRouteClaimLeaseProvider(cfg *Config, fs *flag.FlagSet, identifier string) error {
+	return autoRouteClaimLeaseProviderContext(context.Background(), cfg, fs, identifier)
+}
+
+func autoRouteClaimLeaseProviderContext(ctx context.Context, cfg *Config, fs *flag.FlagSet, identifier string) error {
 	if flagWasSet(fs, "provider") {
 		return nil
 	}
-	return autoRouteClaimLeaseProviderForIdentifier(cfg, identifier)
+	return autoRouteClaimLeaseProviderForIdentifierContext(ctx, cfg, identifier)
 }
 
 func autoRouteClaimLeaseProviderForIdentifier(cfg *Config, identifier string) error {
+	return autoRouteClaimLeaseProviderForIdentifierContext(context.Background(), cfg, identifier)
+}
+
+func autoRouteClaimLeaseProviderForIdentifierContext(ctx context.Context, cfg *Config, identifier string) error {
 	if ProviderSelectionIsAuthoritativeRoute(*cfg) {
 		return nil
 	}
-	provider, ok, err := claimProviderForIdentifier(identifier)
+	provider, ok, err := claimProviderForIdentifierContext(ctx, identifier)
 	if err != nil {
 		return err
 	}
@@ -125,13 +133,17 @@ func autoRouteClaimLeaseProviderForIdentifier(cfg *Config, identifier string) er
 }
 
 func autoRouteLeaseProviderForIdentifier(cfg *Config, fs *flag.FlagSet, identifier string) error {
-	if err := autoRouteClaimLeaseProvider(cfg, fs, identifier); err != nil {
+	return autoRouteLeaseProviderForIdentifierContext(context.Background(), cfg, fs, identifier)
+}
+
+func autoRouteLeaseProviderForIdentifierContext(ctx context.Context, cfg *Config, fs *flag.FlagSet, identifier string) error {
+	if err := autoRouteClaimLeaseProviderContext(ctx, cfg, fs, identifier); err != nil {
 		return err
 	}
-	if err := autoRouteStaticLease(cfg, fs, identifier); err != nil {
+	if err := autoRouteStaticLeaseContext(ctx, cfg, fs, identifier); err != nil {
 		return err
 	}
-	return autoRouteExternalLease(cfg, fs, identifier)
+	return autoRouteExternalLeaseContext(ctx, cfg, fs, identifier)
 }
 
 func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values leaseCreateFlagValues, existingLeaseID string, mutateExternal bool) error {
@@ -480,6 +492,10 @@ type leaseTargetConfigOptions struct {
 }
 
 func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags targetFlagValues, networkFlags networkModeFlagValues, opts leaseTargetConfigOptions) (Config, error) {
+	return loadLeaseTargetConfigContext(context.Background(), fs, provider, targetFlags, networkFlags, opts)
+}
+
+func loadLeaseTargetConfigContext(ctx context.Context, fs *flag.FlagSet, provider string, targetFlags targetFlagValues, networkFlags networkModeFlagValues, opts leaseTargetConfigOptions) (Config, error) {
 	cfg, err := loadConfig()
 	if err != nil {
 		return Config{}, err
@@ -498,7 +514,7 @@ func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags target
 		return Config{}, err
 	}
 	if !opts.ProviderResourceID {
-		if err := autoRouteLeaseProviderForIdentifier(&cfg, fs, opts.LeaseID); err != nil {
+		if err := autoRouteLeaseProviderForIdentifierContext(ctx, &cfg, fs, opts.LeaseID); err != nil {
 			return Config{}, err
 		}
 	}

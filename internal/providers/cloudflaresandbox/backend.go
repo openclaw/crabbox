@@ -525,6 +525,19 @@ func (b *backend) resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout 
 }
 
 func (b *backend) resolveCloudflareSandboxLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
+	exact, exists, err := core.ReadLeaseClaimWithPresence(identifier)
+	if err != nil {
+		return core.LeaseClaim{}, false, err
+	}
+	if exists && exact.LeaseID == identifier && exact.Provider == providerName {
+		if err := b.validateClaimScope(exact); err != nil {
+			return core.LeaseClaim{}, false, err
+		}
+		return exact, true, nil
+	}
+	if core.IsCanonicalLeaseID(identifier) {
+		return core.LeaseClaim{}, false, nil
+	}
 	claims, err := listCloudflareSandboxLeaseClaims()
 	if err != nil {
 		return core.LeaseClaim{}, false, err
@@ -537,16 +550,20 @@ func (b *backend) resolveCloudflareSandboxLeaseClaim(identifier string) (core.Le
 			return claim, true, nil
 		}
 	}
+	var matched core.LeaseClaim
 	slug := core.NormalizeLeaseSlug(identifier)
 	if slug != "" {
 		for _, claim := range claims {
 			if claim.Provider != providerName || core.NormalizeLeaseSlug(claim.Slug) != slug || !b.claimMatchesActiveScope(claim) {
 				continue
 			}
-			return claim, true, nil
+			if matched.LeaseID != "" {
+				return core.LeaseClaim{}, false, core.Exit(2, "multiple provider=%s claims match identifier %s", providerName, identifier)
+			}
+			matched = claim
 		}
 	}
-	return core.LeaseClaim{}, false, nil
+	return matched, matched.LeaseID != "", nil
 }
 
 func (b *backend) finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration) (string, string, string, error) {

@@ -4956,7 +4956,7 @@ func FindServerByAlias(servers []Server, id string) (Server, string, error) {
 	return findServerByAlias(servers, id)
 }
 
-func (a App) stop(ctx context.Context, args []string) error {
+func (a App) stop(ctx context.Context, args []string) (stopErr error) {
 	defaults := defaultConfig()
 	fs := newFlagSet("stop", a.Stderr)
 	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
@@ -5045,6 +5045,14 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Capture the command context before the coordinator narrows/cancels its
+	// release budget; successful maintenance gets its own bounded child context.
+	maintenanceCtx := ctx
+	defer func() {
+		if stopErr == nil {
+			a.autoPruneClaims(maintenanceCtx, cfg)
+		}
+	}()
 	if err := prepareProviderSelection(&cfg, *provider); err != nil {
 		return err
 	}
@@ -5068,13 +5076,13 @@ func (a App) stop(ctx context.Context, args []string) error {
 			}
 		}
 	}
-	if err := autoRouteClaimLeaseProvider(&cfg, fs, *id); err != nil {
+	if err := autoRouteClaimLeaseProviderContext(ctx, &cfg, fs, *id); err != nil {
 		return err
 	}
-	if err := autoRouteStaticLease(&cfg, fs, *id); err != nil {
+	if err := autoRouteStaticLeaseContext(ctx, &cfg, fs, *id); err != nil {
 		return err
 	}
-	if err := autoRouteExternalLease(&cfg, fs, *id); err != nil {
+	if err := autoRouteExternalLeaseContext(ctx, &cfg, fs, *id); err != nil {
 		return err
 	}
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {

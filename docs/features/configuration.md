@@ -1260,11 +1260,17 @@ CRABBOX_DEFAULT_CLASS           default machine class
 CRABBOX_SERVER_TYPE             explicit provider type
 CRABBOX_IDLE_TIMEOUT            idle timeout
 CRABBOX_WARMUP_KEEP             warmup retention default (true | false)
+CRABBOX_CLAIMS_AUTO_PRUNE        prune eligible old local claims after successful stop/release (true | false; default true)
 CRABBOX_TTL                     lease TTL
 CRABBOX_NETWORK                 network mode
 CRABBOX_OWNER                   usage owner override
 CRABBOX_ORG                     usage org override
 ```
+
+`claims.autoPrune: false` disables automatic local-claim maintenance in YAML;
+`CRABBOX_CLAIMS_AUTO_PRUNE` overrides it. Maintenance runs only after successful
+explicit stop/release, with a five-second budget and a daily completion stamp.
+See [`claims prune`](../commands/claims.md#prune) for eligibility and manual use.
 
 Provider credentials live outside the Crabbox env namespace where the provider
 SDK or CLI already defines them:

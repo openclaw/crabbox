@@ -2,6 +2,7 @@ package blacksmith
 
 import (
 	"flag"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -9,6 +10,10 @@ import (
 func init() {
 	core.RegisterProvider(Provider{})
 }
+
+// GitHub cancels any workflow run after 35 days, so a Testbox claim unused for
+// longer has necessarily settled and no stop retry can still need it.
+const blacksmithClaimExpiryBound = 36 * 24 * time.Hour
 
 type Provider struct{}
 
@@ -29,6 +34,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Features:         core.FeatureSet{core.FeatureCacheVolume, core.FeatureRunProof, core.FeatureRunSession, core.FeatureRunArtifacts, core.FeaturePreparedArtifactWorkspace},
 		Coordinator:      core.CoordinatorNever,
 		ClassDisposition: core.ProviderClassDispositionUnmapped,
+		ClaimExpiryBound: blacksmithClaimExpiryBound,
 	}
 }
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {

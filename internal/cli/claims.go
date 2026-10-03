@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -44,7 +45,7 @@ type localClaimProblem struct {
 	Message string `json:"message"`
 }
 
-func (a App) claimsList(args []string) error {
+func (a App) claimsList(ctx context.Context, args []string) error {
 	fs := newFlagSet("claims list", a.Stderr)
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := parseFlags(fs, args); err != nil {
@@ -54,8 +55,11 @@ func (a App) claimsList(args []string) error {
 		return Exit(2, "claims list does not accept positional arguments")
 	}
 
-	snapshot, err := snapshotLeaseClaimsReadOnly()
+	snapshot, err := snapshotLeaseClaimsReadOnlyContext(ctx, readLeaseClaimSnapshotWithPresence)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return err
 	}
 	output := projectLocalClaims(snapshot)
@@ -158,6 +162,10 @@ func localClaimProblemMessage(code string) string {
 		return "claim filename and payload leaseId do not match"
 	case "read_error":
 		return "claim file could not be read"
+	case "invalid_timestamp":
+		return "claim has no valid last-used or claimed timestamp"
+	case "claim_not_removed":
+		return "claim changed concurrently or removal could not be confirmed"
 	case "non_regular_file":
 		return "claim path is not a regular file"
 	default:

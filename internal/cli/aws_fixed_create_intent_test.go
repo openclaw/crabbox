@@ -219,8 +219,8 @@ func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 		Smolvm AsciiBox Cloudflare CloudflareDynamicWorkers Semaphore Sprites LocalContainer
 		AppleContainer AppleVM MXC Multipass Machine0 Tart Lume HyperV WindowsSandbox Static
 	`)
-	classify("post-acquisition command, transport, or reporting behavior", `
-		Sync Run EnvAllow Actions Results Shard Profiles Presets ProofTemplates Jobs RecordLocal
+	classify("post-acquisition command, transport, reporting, or local maintenance behavior", `
+		Sync Run EnvAllow Actions Results Shard Profiles Presets ProofTemplates Jobs RecordLocal ClaimsAutoPrune
 	`)
 	classify("command default resolved into the explicit create request Keep field", `WarmupKeep`)
 

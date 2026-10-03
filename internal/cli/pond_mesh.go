@@ -440,7 +440,7 @@ func (a App) pondDisconnect(_ context.Context, args []string) error {
 // provider — the caller passes this through from `--provider X` for users
 // who want an explicit single-provider filter.
 func collectPondMembersAcrossProviders(ctx context.Context, rt Runtime, cfg Config, pond, providerFilter string) ([]pondMember, []string, error) {
-	claims, err := ListLeaseClaims()
+	claims, err := ListLeaseClaimsContext(ctx)
 	if err != nil {
 		return nil, nil, err
 	}

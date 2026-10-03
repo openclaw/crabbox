@@ -657,7 +657,7 @@ func (b *blacksmithBackend) Status(ctx context.Context, req core.StatusRequest) 
 }
 
 func (b *blacksmithBackend) Stop(ctx context.Context, req core.StopRequest) error {
-	claim, err := resolveOwnedBlacksmithClaim(req.ID)
+	claim, err := resolveOwnedBlacksmithClaim(ctx, req.ID)
 	if err != nil {
 		return err
 	}
@@ -748,7 +748,7 @@ func (b *blacksmithBackend) warmupLease(ctx context.Context, repo core.Repo, rec
 		b.rollbackTestbox(leaseID, pendingID, repo.Root)
 		return core.LeaseClaim{}, core.Exit(failureCode, "blacksmith testbox warmup failed: %v; inspect the exact receipt %s or use another provider", warmupErr, leaseID)
 	}
-	slug, err := core.AllocateClaimLeaseSlug(leaseID, requestedSlug)
+	slug, err := core.AllocateClaimLeaseSlugContext(ctx, leaseID, requestedSlug)
 	if err != nil {
 		b.rollbackTestbox(leaseID, pendingID, repo.Root)
 		return core.LeaseClaim{}, err

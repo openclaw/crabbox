@@ -19,7 +19,7 @@ func (a App) inspect(ctx context.Context, args []string) error {
 		return err
 	}
 	setIDFromFirstArg(fs, id)
-	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
+	cfg, err := loadLeaseTargetConfigContext(ctx, fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
 	if err != nil {
 		return err
 	}

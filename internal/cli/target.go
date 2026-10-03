@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"os"
 	"path"
@@ -318,6 +319,10 @@ const staticLeaseIDPrefix = "static_"
 // and restores the original static host from the local claim when the caller
 // did not already pass --static-host.
 func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
+	return autoRouteStaticLeaseContext(context.Background(), cfg, fs, id)
+}
+
+func autoRouteStaticLeaseContext(ctx context.Context, cfg *Config, fs *flag.FlagSet, id string) error {
 	id = strings.TrimSpace(id)
 	suffix, hasStaticPrefix := strings.CutPrefix(id, staticLeaseIDPrefix)
 	if flagWasSet(fs, "provider") && !isStaticProvider(cfg.Provider) {
@@ -327,7 +332,7 @@ func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
 	if authoritative && !isStaticProvider(cfg.Provider) {
 		return nil
 	}
-	claim, hasClaim, err := staticLeaseClaim(id)
+	claim, hasClaim, err := staticLeaseClaimContext(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -353,6 +358,10 @@ func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
 // external lease was acquired. This keeps existing leases addressable after
 // the user's current external configuration changes.
 func autoRouteExternalLease(cfg *Config, fs *flag.FlagSet, id string) error {
+	return autoRouteExternalLeaseContext(context.Background(), cfg, fs, id)
+}
+
+func autoRouteExternalLeaseContext(ctx context.Context, cfg *Config, fs *flag.FlagSet, id string) error {
 	providerExplicit := flagWasSet(fs, "provider")
 	if providerExplicit {
 		cfg.providerExplicit = true
@@ -363,8 +372,8 @@ func autoRouteExternalLease(cfg *Config, fs *flag.FlagSet, id string) error {
 	if flagWasSet(fs, "windows-mode") {
 		cfg.windowsModeFlagExplicit = true
 	}
-	return autoRouteExternalLeaseWithHints(
-		cfg,
+	return autoRouteExternalLeaseWithHintsContext(
+		ctx, cfg,
 		id,
 		flagWasSet(fs, "external-routing-file"),
 		IsExternalDesktopTargetExplicit(cfg),
@@ -393,6 +402,10 @@ func routeExternalLeaseClaim(cfg *Config, leaseID string) error {
 }
 
 func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, targetExplicit, windowsModeExplicit bool) error {
+	return autoRouteExternalLeaseWithHintsContext(context.Background(), cfg, id, routingExplicit, targetExplicit, windowsModeExplicit)
+}
+
+func autoRouteExternalLeaseWithHintsContext(ctx context.Context, cfg *Config, id string, routingExplicit, targetExplicit, windowsModeExplicit bool) error {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return nil
@@ -422,7 +435,7 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 		}
 		return restoreExternalLeaseTarget(cfg, targetExplicit, windowsModeExplicit)
 	}
-	claim, ok, err := uniqueExternalLeaseClaim(id, providerSelected)
+	claim, ok, err := uniqueExternalLeaseClaimContext(ctx, id, providerSelected)
 	if err != nil || !ok {
 		return err
 	}
@@ -521,6 +534,10 @@ func restoreExternalLeaseTarget(cfg *Config, targetExplicit, windowsModeExplicit
 }
 
 func uniqueExternalLeaseClaim(identifier string, providerSelected bool) (leaseClaim, bool, error) {
+	return uniqueExternalLeaseClaimContext(context.Background(), identifier, providerSelected)
+}
+
+func uniqueExternalLeaseClaimContext(ctx context.Context, identifier string, providerSelected bool) (leaseClaim, bool, error) {
 	exact, exists, err := ReadLeaseClaimWithPresence(identifier)
 	if err != nil {
 		return leaseClaim{}, false, err
@@ -531,7 +548,7 @@ func uniqueExternalLeaseClaim(identifier string, providerSelected bool) (leaseCl
 		}
 		return exact, true, nil
 	}
-	claims, err := ListLeaseClaims()
+	claims, err := ListLeaseClaimsContext(ctx)
 	if err != nil {
 		return leaseClaim{}, false, err
 	}
@@ -568,7 +585,11 @@ func uniqueExternalLeaseClaim(identifier string, providerSelected bool) (leaseCl
 }
 
 func staticLeaseClaim(id string) (leaseClaim, bool, error) {
-	claim, ok, err := ResolveLeaseClaim(id)
+	return staticLeaseClaimContext(context.Background(), id)
+}
+
+func staticLeaseClaimContext(ctx context.Context, id string) (leaseClaim, bool, error) {
+	claim, ok, err := ResolveLeaseClaimContext(ctx, id)
 	if err != nil || !ok || !isStaticProvider(claim.Provider) {
 		return leaseClaim{}, false, err
 	}

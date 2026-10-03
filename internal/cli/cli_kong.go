@@ -249,7 +249,11 @@ type heartbeatKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type claimsKongCmd struct {
-	List claimsListKongCmd `cmd:"" passthrough:"" help:"List unverified local lease claims without loading providers."`
+	Prune claimsPruneKongCmd `cmd:"" passthrough:"" help:"Prune old local claims for remotely bounded leases."`
+	List  claimsListKongCmd  `cmd:"" passthrough:"" help:"List unverified local lease claims without loading providers."`
+}
+type claimsPruneKongCmd struct {
+	Args []string `arg:"" optional:""`
 }
 type claimsListKongCmd struct {
 	Args []string `arg:"" optional:""`
@@ -702,8 +706,11 @@ func (c *cpKongCmd) Run(ctx context.Context, app App) error        { return app.
 func (c *tunnelKongCmd) Run(ctx context.Context, app App) error    { return app.tunnel(ctx, c.Args) }
 func (c *statusKongCmd) Run(ctx context.Context, app App) error    { return app.status(ctx, c.Args) }
 func (c *heartbeatKongCmd) Run(ctx context.Context, app App) error { return app.heartbeat(ctx, c.Args) }
-func (c *claimsListKongCmd) Run(_ context.Context, app App) error {
-	return app.claimsList(stripKongCommandPath(c.Args, "claims", "list"))
+func (c *claimsPruneKongCmd) Run(ctx context.Context, app App) error {
+	return app.claimsPrune(ctx, stripKongCommandPath(c.Args, "claims", "prune"))
+}
+func (c *claimsListKongCmd) Run(ctx context.Context, app App) error {
+	return app.claimsList(ctx, stripKongCommandPath(c.Args, "claims", "list"))
 }
 func (c *listKongCmd) Run(ctx context.Context, app App) error     { return app.list(ctx, c.Args) }
 func (c *shareKongCmd) Run(ctx context.Context, app App) error    { return app.share(ctx, c.Args) }

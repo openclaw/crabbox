@@ -17,8 +17,8 @@ var (
 	coordinatorCreateLeaseTimeoutForConfig   = defaultCoordinatorCreateLeaseTimeoutForConfig
 	coordinatorCreateLeaseRecoveryTimeout    = 90 * time.Second
 	coordinatorCreateLeaseRecoveryInterval   = 5 * time.Second
-	coordinatorCanceledCreateRecoveryTimeout = 10 * time.Second
-	coordinatorCanceledCreateFinalTimeout    = 10 * time.Second
+	coordinatorCanceledCreateRecoveryTimeout = 30 * time.Second
+	coordinatorCanceledCreateFinalTimeout    = 30 * time.Second
 	coordinatorCreateAttemptID               = newCreateAttemptID
 )
 
@@ -253,7 +253,7 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 			slug = NewLeaseSlug(leaseID)
 		}
 	} else {
-		slug, err = AllocateClaimLeaseSlug(leaseID, requestedSlug)
+		slug, err = AllocateClaimLeaseSlugContext(ctx, leaseID, requestedSlug)
 		if err != nil {
 			return LeaseTarget{}, err
 		}

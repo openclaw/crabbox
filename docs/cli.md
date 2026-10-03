@@ -49,6 +49,7 @@ crabbox status --id <id>                     show lease state (--wait to block)
 crabbox heartbeat --id <id>                  refresh the lease idle deadline
 crabbox inspect --id <id>                     print lease/provider details
 crabbox claims list [--json]                  list unverified local claims without provider access
+crabbox claims prune [--older-than 7d] [--dry-run] [--json]  prune eligible stale local claims
 crabbox list                                  list machines (alias: crabbox pool list)
 crabbox share --id <id> [--user|--org]        grant access to a lease
 crabbox unshare --id <id> [--user|--org|--all]
@@ -495,6 +496,7 @@ CRABBOX_DEFAULT_CLASS              default machine class
 CRABBOX_ARCH                       default CPU architecture (amd64|arm64)
 CRABBOX_SERVER_TYPE                provider server/instance type override
 CRABBOX_IDLE_TIMEOUT               idle expiry
+CRABBOX_CLAIMS_AUTO_PRUNE          daily local claim pruning after stop/release (default true; false disables)
 CRABBOX_TTL                        max lease lifetime
 CRABBOX_WORK_ROOT                  remote work root
 ```

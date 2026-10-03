@@ -441,6 +441,19 @@ func (b *backend) resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout 
 }
 
 func (b *backend) resolveVercelSandboxLeaseClaim(identifier string) (core.LeaseClaim, bool, error) {
+	exact, exists, err := core.ReadLeaseClaimWithPresence(identifier)
+	if err != nil {
+		return core.LeaseClaim{}, false, err
+	}
+	if exists && exact.LeaseID == identifier && exact.Provider == providerName {
+		if err := b.validateClaimScope(exact); err != nil {
+			return core.LeaseClaim{}, false, err
+		}
+		return exact, true, nil
+	}
+	if core.IsCanonicalLeaseID(identifier) {
+		return core.LeaseClaim{}, false, nil
+	}
 	claims, err := listVercelSandboxLeaseClaims()
 	if err != nil {
 		return core.LeaseClaim{}, false, err
@@ -454,21 +467,19 @@ func (b *backend) resolveVercelSandboxLeaseClaim(identifier string) (core.LeaseC
 		}
 	}
 	slug := core.NormalizeLeaseSlug(identifier)
+	var matched core.LeaseClaim
 	if slug != "" {
-		for _, legacy := range []bool{false, true} {
-			for _, claim := range claims {
-				if claim.Provider != providerName || core.NormalizeLeaseSlug(claim.Slug) != slug {
-					continue
-				}
-				isLegacy := !claimMatchesScope(claim, b.providerScopeBase())
-				if isLegacy != legacy || !b.claimMatchesActiveScope(claim) {
-					continue
-				}
-				return claim, true, nil
+		for _, claim := range claims {
+			if claim.Provider != providerName || core.NormalizeLeaseSlug(claim.Slug) != slug || !b.claimMatchesActiveScope(claim) {
+				continue
 			}
+			if matched.LeaseID != "" {
+				return core.LeaseClaim{}, false, core.Exit(2, "multiple provider=%s claims match identifier %s", providerName, identifier)
+			}
+			matched = claim
 		}
 	}
-	return core.LeaseClaim{}, false, nil
+	return matched, matched.LeaseID != "", nil
 }
 
 func (b *backend) finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration) (string, string, string, error) {

@@ -145,7 +145,7 @@ func statusLeaseExactClaim(ctx context.Context, backend Backend, lease LeaseTarg
 	if lease.LeaseID == "" || provider == "" {
 		return leaseClaim{}, false, nil
 	}
-	claim, claimed, exact, err := ResolveLeaseClaimForProviderWithExact(lease.LeaseID, provider)
+	claim, claimed, exact, err := ResolveLeaseClaimForProviderWithExactContext(ctx, lease.LeaseID, provider)
 	if err != nil {
 		return leaseClaim{}, false, fmt.Errorf("read exact %s lease claim: %w", provider, err)
 	}
@@ -430,7 +430,7 @@ func (a App) resolveSSHLeaseWithRequestConfig(ctx context.Context, cfg *Config, 
 }
 
 func resolveSSHLeaseTarget(ctx context.Context, backend SSHLoginBackend, req ResolveRequest) (LeaseTarget, error) {
-	claimsBefore, err := snapshotLeaseClaims()
+	claimsBefore, err := snapshotLeaseClaimsContext(ctx)
 	if err != nil {
 		return LeaseTarget{}, err
 	}

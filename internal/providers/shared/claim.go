@@ -214,18 +214,28 @@ func ResolveScopedLeaseClaim(identifier, provider string, listClaims func() ([]c
 			return claim, true, nil
 		}
 	}
+	if core.IsCanonicalLeaseID(identifier) {
+		return core.LeaseClaim{}, false, nil
+	}
+	var found core.LeaseClaim
 	slug := core.NormalizeLeaseSlug(identifier)
 	if slug != "" {
 		for _, claim := range claims {
 			if claim.Provider == provider && core.NormalizeLeaseSlug(claim.Slug) == slug {
-				if err := validate(claim); err != nil {
-					return core.LeaseClaim{}, false, err
+				if found.LeaseID != "" {
+					return core.LeaseClaim{}, false, core.Exit(2, "multiple provider=%s claims match identifier %s", provider, identifier)
 				}
-				return claim, true, nil
+				found = claim
 			}
 		}
 	}
-	return core.LeaseClaim{}, false, nil
+	if found.LeaseID == "" {
+		return core.LeaseClaim{}, false, nil
+	}
+	if err := validate(found); err != nil {
+		return core.LeaseClaim{}, false, err
+	}
+	return found, true, nil
 }
 
 func FinishScopedLease(claim core.LeaseClaim, opts ScopedLeaseFinishOptions) (string, string, string, error) {
