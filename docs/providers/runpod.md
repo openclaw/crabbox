@@ -46,6 +46,28 @@ installs that key for SSH; a custom image must honor `PUBLIC_KEY` and start SSH.
 Provide an existing key with `ssh.key` in config or `CRABBOX_SSH_KEY`; the default is
 `~/.ssh/id_ed25519`. A matching public-key file must exist alongside it.
 
+### Fixed lease IDs
+
+Fixed-lease orchestrators can use
+`crabbox warmup --provider runpod --lease-id cbx_abcdef123456 --keep=true`.
+The local claim binds the ID to the repository, RunPod account, API endpoint,
+pod settings, lifecycle policy, and a stored per-lease SSH key. Repeating the
+same intent returns the same pod; changing its intent or account exits with
+`lease_id_conflict`. API-key rotation within the same account is allowed.
+
+Crabbox journals the attempt before submitting one create request. The pod name
+and its `CRABBOX_LEASE_ID`, `CRABBOX_FIXED_ATTEMPT`, and
+`CRABBOX_FIXED_INTENT` environment markers identify the pod after a lost
+response. These are provider metadata, not local configuration variables.
+An unresolved attempt never submits another create, even if inventory is empty.
+Preserve the local state directory and SSH key for recovery.
+
+Inspect/status, heartbeat, and stop resolve the durable claim and recheck the
+account and pod identity. Inspection does not prepare SSH or renew the claim.
+Stop retains a terminal receipt, so a released ID cannot create another pod.
+Fixed creation sends the configured GPU candidates in one native request;
+ordinary creation retains its existing sequential capacity fallback.
+
 ### Lifecycle
 
 - **Acquire** — deploys a pod named `crabbox-<slug>-<leaseSuffix>`, then waits
@@ -131,6 +153,13 @@ Crabbox sends the identical `Authorization: Bearer $RUNPOD_API_KEY` header to
 the REST pod endpoints. Cross-origin redirects are rejected before credentials
 or pod-create bodies can be replayed to another destination.
 
+Account identity uses GraphQL `myself { id }` at
+`https://api.runpod.io/graphql`, using the same Bearer authorization header as
+REST; credentials never enter the query string. Transport errors redact the key. Custom REST endpoints use
+`/graphql` under the configured base with a trailing `/v1` removed.
+Doctor and fixed leases require this identity query as well as REST pod access.
+RunPod currently documents GraphQL retirement in early 2027.
+
 ## Config
 
 ```yaml
@@ -212,7 +241,7 @@ it directly in RunPod.
 ## Gotchas
 
 - A funded RunPod account is required. `crabbox doctor --provider runpod`
-  succeeds on a zero-balance account because it only reads the pod list — the
+  succeeds on a zero-balance account because it only reads identity and pods — the
   balance shortfall only surfaces when an `Acquire` runs.
 - The pod's public SSH port is allocated at runtime and changes between pods;
   never hard-code `--ssh-port`.

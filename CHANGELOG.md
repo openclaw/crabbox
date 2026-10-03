@@ -2,12 +2,17 @@
 
 ## Unreleased
 
+### Features
+
+- Support fixed idempotent RunPod lease IDs with account-bound replay, lost-create recovery, and durable stop receipts for fixed-lease orchestrators.
+
 ### Credits
 
 - Thanks @shakkernerd for [PR 2650](https://github.com/openclaw/crabbox/pull/2650) (cold Actions hydration from GitHub SSH checkouts) and [PR 2651](https://github.com/openclaw/crabbox/pull/2651) (AWS SSH access refresh over IPv4), which shipped in 0.70.0 without the thanks in its notes.
 
 ### Fixes
 
+- Page coordinator CLI lists with compact summaries, bound slug lookup and durable admission memory, keep identity/list reads out of the lifecycle queue, and arm cleanup recovery before provider I/O; preserve legacy list and full inspect responses.
 - Bound coordinator lease-list memory as retained history grows, preserving visibility, filters, and result ordering. [PR 2671](https://github.com/openclaw/crabbox/pull/2671). Thanks @shakkernerd.
 - Retain Blacksmith Testbox claims and keys until the exact associated GitHub work settles, and report exact native queue and terminal status. [PR 2670](https://github.com/openclaw/crabbox/pull/2670). Thanks @shakkernerd.
 - Let the guarded AWS Linux image publisher bake a smaller root snapshot from stock Ubuntu with `linux_root_gb`, keeping candidate, baseline, and promoted proofs on normal sizing.

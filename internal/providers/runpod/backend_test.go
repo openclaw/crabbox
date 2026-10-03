@@ -620,6 +620,11 @@ func TestRunpodDoctorChecksAuthAndListPods(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer test-key" {
 			t.Errorf("auth = %q, want Bearer test-key", r.Header.Get("Authorization"))
 		}
+		if r.URL.Path == "/graphql" {
+			_, _ = io.WriteString(w, "{\"data\":{\"myself\":{\"id\":\"account-one\"}}}")
+			paths = append(paths, r.URL.Path)
+			return
+		}
 		if r.Header.Get("Content-Type") != "" {
 			t.Errorf("content-type = %q", r.Header.Get("Content-Type"))
 		}
@@ -642,8 +647,11 @@ func TestRunpodDoctorChecksAuthAndListPods(t *testing.T) {
 	if result.Provider != providerName {
 		t.Fatalf("provider=%q", result.Provider)
 	}
-	if len(paths) != 2 || paths[0] != "/pods" || paths[1] != "/pods" {
-		t.Fatalf("paths=%v, want two /pods reads", paths)
+	if len(paths) != 2 || paths[0] != "/graphql" || paths[1] != "/pods" {
+		t.Fatalf("paths=%v, want GraphQL identity and /pods reads", paths)
+	}
+	if !strings.Contains(result.Message, "account=account-one") {
+		t.Fatalf("doctor did not return the account identity: %s", result.Message)
 	}
 }
 
@@ -1459,7 +1467,7 @@ func TestRunpodClientSendsBearerAndRESTRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Whoami(context.Background()); err != nil {
+	if _, err := client.ListPods(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if gotMethod != http.MethodGet {

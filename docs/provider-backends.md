@@ -260,7 +260,7 @@ type IdempotentLeaseIDBackend interface {
 ```
 
 The ASCII Box, AWS, Azure, DigitalOcean, Daytona, Incus, Machine0, local-container, Parallels,
-Proxmox, and Tenki direct backends implement this capability; coordinator-backed
+Proxmox, RunPod, and Tenki direct backends implement this capability; coordinator-backed
 leases support it through the coordinator wrapper. External
 backends support it only when their configured protocol explicitly advertises
 idempotent lease IDs. `crabbox warmup --lease-id` rejects other backends before
