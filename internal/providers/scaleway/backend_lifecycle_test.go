@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -474,7 +475,7 @@ func TestScalewayRootManifestCannotDisappearDuringMutation(t *testing.T) {
 			case "resolve":
 				_, err = backend.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, Repo: core.Repo{Root: t.TempDir()}})
 			case "status":
-				if backend.StatusTouchClaimMatches(core.LeaseTarget{Server: backend.serverFromScaleway(fake.server)}, before) {
+				if backend.AuthorizeStatusTouchClaim(t.Context(), core.LeaseTarget{Server: backend.serverFromScaleway(fake.server)}, before) == nil {
 					t.Fatal("status accepted missing allocation identity")
 				}
 				err = errors.New("status rejected")
@@ -1014,35 +1015,35 @@ func TestStatusTouchClaimRequiresMatchingProviderIdentity(t *testing.T) {
 		"scaleway_organization": "organization-a",
 		"scaleway_zone":         "fr-par-1",
 	}
-	claim := core.LeaseClaim{Labels: maps.Clone(labels)}
-	lease := core.LeaseTarget{Server: core.Server{Labels: maps.Clone(labels)}}
-	if !backend.StatusTouchClaimMatches(lease, claim) {
+	claim := core.LeaseClaim{CloudID: "srv-1", Labels: maps.Clone(labels)}
+	lease := core.LeaseTarget{Server: core.Server{CloudID: "srv-1", Labels: maps.Clone(labels)}}
+	if backend.AuthorizeStatusTouchClaim(t.Context(), lease, claim) != nil {
 		t.Fatal("matching provider identity was rejected")
 	}
 	for _, key := range []string{"scaleway_project", "scaleway_zone"} {
 		mismatched := lease
 		mismatched.Server.Labels = maps.Clone(lease.Server.Labels)
 		mismatched.Server.Labels[key] = "other"
-		if backend.StatusTouchClaimMatches(mismatched, claim) {
+		if backend.AuthorizeStatusTouchClaim(t.Context(), mismatched, claim) == nil {
 			t.Fatalf("mismatched %s was accepted", key)
 		}
 		missing := claim
 		missing.Labels = maps.Clone(claim.Labels)
 		delete(missing.Labels, key)
-		if backend.StatusTouchClaimMatches(lease, missing) {
+		if backend.AuthorizeStatusTouchClaim(t.Context(), lease, missing) == nil {
 			t.Fatalf("missing claim %s was accepted", key)
 		}
 	}
 	withoutOrganization := claim
 	withoutOrganization.Labels = maps.Clone(claim.Labels)
 	delete(withoutOrganization.Labels, "scaleway_organization")
-	if !backend.StatusTouchClaimMatches(lease, withoutOrganization) {
+	if backend.AuthorizeStatusTouchClaim(t.Context(), lease, withoutOrganization) != nil {
 		t.Fatal("optional organization was required")
 	}
 	mismatchedOrganization := lease
 	mismatchedOrganization.Server.Labels = maps.Clone(lease.Server.Labels)
 	mismatchedOrganization.Server.Labels["scaleway_organization"] = "other"
-	if backend.StatusTouchClaimMatches(mismatchedOrganization, claim) {
+	if backend.AuthorizeStatusTouchClaim(t.Context(), mismatchedOrganization, claim) == nil {
 		t.Fatal("present organization mismatch was accepted")
 	}
 }
@@ -1693,6 +1694,10 @@ type fakeScalewayClient struct {
 	createErr                   error
 	createCalls                 int
 	createKeyErr                error
+	createKeyCalls              int
+	listErr                     error
+	listEmptyReply              bool
+	beforeCreate                func()
 	getErr                      error
 	getCalls                    int
 	deleteErr                   error
@@ -1703,6 +1708,12 @@ type fakeScalewayClient struct {
 	omitRootVolume              bool
 	afterCreate                 func()
 	createResponseWithoutServer bool
+	createVolumeCalls           int
+	createVolumeReplyErr        error
+	createVolumeEmptyReply      bool
+	getVolumeErr                error
+	userDataErr                 error
+	afterVolume                 func()
 }
 
 func newFakeScalewayClient() *fakeScalewayClient {
@@ -1725,6 +1736,12 @@ type fakeInstanceAPI struct{ f *fakeScalewayClient }
 
 func (api *fakeInstanceAPI) ListServers(req *instance.ListServersRequest, opts ...scw.RequestOption) (*instance.ListServersResponse, error) {
 	api.f.lastListOptions = len(opts)
+	if api.f.listErr != nil {
+		return nil, api.f.listErr
+	}
+	if api.f.listEmptyReply {
+		return nil, nil
+	}
 	if api.f.servers != nil {
 		return &instance.ListServersResponse{Servers: api.f.servers}, nil
 	}
@@ -1748,6 +1765,9 @@ func (api *fakeInstanceAPI) GetServer(req *instance.GetServerRequest, _ ...scw.R
 }
 
 func (api *fakeInstanceAPI) CreateServer(req *instance.CreateServerRequest, _ ...scw.RequestOption) (*instance.CreateServerResponse, error) {
+	if api.f.beforeCreate != nil {
+		api.f.beforeCreate()
+	}
 	api.f.createCalls++
 	api.f.lastCreate = req
 	if api.f.createErr != nil {
@@ -1756,8 +1776,17 @@ func (api *fakeInstanceAPI) CreateServer(req *instance.CreateServerRequest, _ ..
 	api.f.server = testServer("srv-1", req.Name, req.Tags, "203.0.113.10")
 	api.f.server.CommercialType = req.CommercialType
 	rootID := "44444444-4444-4444-4444-444444444444"
+	if root := req.Volumes["0"]; root != nil {
+		if root.ID == nil || api.f.volumes[*root.ID] == nil {
+			return nil, errors.New("fixed create must attach the recorded volume")
+		}
+		rootID = *root.ID
+		api.f.volumes[rootID].Server = &instance.ServerSummary{ID: api.f.server.ID}
+		api.f.server.State = instance.ServerStateStopped
+	} else {
+		api.f.volumes = map[string]*instance.Volume{rootID: {ID: rootID, Project: api.f.ProjectID(), Zone: scw.Zone(api.f.Zone()), Server: &instance.ServerSummary{ID: api.f.server.ID}}}
+	}
 	api.f.server.Volumes = map[string]*instance.VolumeServer{"0": {ID: rootID, Project: scw.StringPtr(api.f.ProjectID()), Zone: scw.Zone(api.f.Zone()), VolumeType: instance.VolumeServerVolumeTypeLSSD, Boot: true}}
-	api.f.volumes = map[string]*instance.Volume{rootID: {ID: rootID, Project: api.f.ProjectID(), Zone: scw.Zone(api.f.Zone()), Server: &instance.ServerSummary{ID: api.f.server.ID}}}
 	if api.f.omitRootVolume {
 		api.f.server.Volumes = nil
 	}
@@ -1813,6 +1842,9 @@ func (api *fakeInstanceAPI) DeleteServer(req *instance.DeleteServerRequest, _ ..
 }
 
 func (api *fakeInstanceAPI) GetVolume(req *instance.GetVolumeRequest, _ ...scw.RequestOption) (*instance.GetVolumeResponse, error) {
+	if api.f.getVolumeErr != nil {
+		return nil, api.f.getVolumeErr
+	}
 	volume := api.f.volumes[req.VolumeID]
 	if volume == nil {
 		return nil, &scw.ResourceNotFoundError{}
@@ -1832,6 +1864,9 @@ func (api *fakeInstanceAPI) DeleteVolume(req *instance.DeleteVolumeRequest, _ ..
 }
 
 func (api *fakeInstanceAPI) SetServerUserData(req *instance.SetServerUserDataRequest, _ ...scw.RequestOption) error {
+	if api.f.userDataErr != nil {
+		return api.f.userDataErr
+	}
 	data, err := io.ReadAll(req.Content)
 	if err != nil {
 		return err
@@ -1843,6 +1878,9 @@ func (api *fakeInstanceAPI) SetServerUserData(req *instance.SetServerUserDataReq
 func (api *fakeInstanceAPI) ServerAction(req *instance.ServerActionRequest, _ ...scw.RequestOption) (*instance.ServerActionResponse, error) {
 	if req.Action == instance.ServerActionPoweron {
 		api.f.poweredOn = true
+		if api.f.server != nil {
+			api.f.server.State = instance.ServerStateRunning
+		}
 	}
 	if req.Action == instance.ServerActionPoweroff {
 		api.f.poweredOff = true
@@ -1869,6 +1907,7 @@ func (api *fakeIAMAPI) GetSSHKey(req *iam.GetSSHKeyRequest, _ ...scw.RequestOpti
 	return nil, errors.New("not found")
 }
 func (api *fakeIAMAPI) CreateSSHKey(req *iam.CreateSSHKeyRequest, _ ...scw.RequestOption) (*iam.SSHKey, error) {
+	api.f.createKeyCalls++
 	key := &iam.SSHKey{ID: "key-1", Name: req.Name, PublicKey: req.PublicKey, ProjectID: req.ProjectID}
 	api.f.keys = append(api.f.keys, key)
 	if api.f.createKeyErr != nil {
@@ -1878,7 +1917,11 @@ func (api *fakeIAMAPI) CreateSSHKey(req *iam.CreateSSHKeyRequest, _ ...scw.Reque
 }
 func (api *fakeIAMAPI) DeleteSSHKey(req *iam.DeleteSSHKeyRequest, _ ...scw.RequestOption) error {
 	api.f.deletedKey = true
-	return api.f.deleteKeyErr
+	if api.f.deleteKeyErr != nil {
+		return api.f.deleteKeyErr
+	}
+	api.f.keys = slices.DeleteFunc(api.f.keys, func(key *iam.SSHKey) bool { return key.ID == req.SSHKeyID })
+	return nil
 }
 
 type fakeMarketplaceAPI struct{}
