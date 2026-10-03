@@ -29,6 +29,9 @@ ports; they run module source through the Cloudflare Workers runtime.
 - **Run sessions:** `run --keep --lease-output <path>` writes a reusable lease
   handle with an exact cleanup command.
 - **Sync:** archive upload/extract (gzipped tar), not rsync.
+- **Checkpoints:** native container filesystem snapshots through
+  `crabbox checkpoint create` and `checkpoint fork`; see
+  [Container snapshots](#container-snapshots).
 - **Coordinator:** never brokered — this provider always runs direct from the
   CLI against its own Worker runner, independent of any `CRABBOX_COORDINATOR`
   broker.
@@ -137,7 +140,11 @@ bearer-shaped credentials before they reach CLI diagnostics.
 
 The workdir defaults to `/workspace/crabbox` and must resolve to an absolute
 path. Broad system paths (`/`, `/workspace`, `/usr`, `/var`, and similar) are
-rejected; pick a dedicated subdirectory.
+rejected; pick a dedicated subdirectory. A lease keeps the runner and workdir
+it was created with: `run --id`, `status`, `stop`, `list --refresh`, `cleanup`,
+and `checkpoint create` use the runner URL and workdir recorded in the lease's
+claim, with the configured token, not the current configuration. Claims from
+older CLIs carry no runner URL and use the configured one.
 
 The CLI's configured workdir and runtime fallback share that default. The bundled
 Worker keeps a separate HTTP-protocol fallback for requests that omit workdir;
@@ -302,6 +309,48 @@ crabbox run \
   -- 'test -f go.mod && rg -n "stopped_with_code" internal/providers/cloudflare'
 ```
 
+## Container snapshots
+
+`crabbox checkpoint create --id <lease>` captures the running container's whole
+filesystem as a Cloudflare container snapshot (kind
+`cloudflare-container-snapshot`) without stopping it, and
+`crabbox checkpoint fork <checkpoint>` starts new leases from it:
+
+```sh
+crabbox warmup --provider cloudflare --type standard-1 --slug blue-crab
+crabbox run --provider cloudflare --id blue-crab --shell -- 'pnpm install'
+crabbox checkpoint create --provider cloudflare --id blue-crab --name deps
+crabbox checkpoint fork chk_0123456789abcdef --count 4 --type standard-2 -- pnpm test
+```
+
+- Capture took about 8 seconds for a small change set; forks start in about
+  1–5 seconds once the snapshot has propagated. For several seconds after
+  capture, restoring on another Durable Object can fail with a platform
+  internal error; the runner retries snapshot starts up to six times, 3
+  seconds apart, within the 300-second readiness window.
+- A fork keeps the checkpoint's workdir and may pick another instance type with
+  `--type`. A fork command runs like `crabbox run` in that workdir and syncs the
+  checkout, which replaces the workdir; state outside it, such as the npm and pnpm caches
+  under `/var/cache/crabbox`, carries over. Like any lease, a fork whose
+  container stops ends instead of restarting from the snapshot.
+- Snapshots belong to the runner that captured them. Forking with another
+  runner URL fails. A fork created with `--cloudflare-url` runs its command,
+  and later lease commands, on that runner without repeating the flag.
+  Snapshots do not survive a new runner image: rebuild checkpoints after
+  deploying an image change.
+- Cloudflare has no snapshot lookup or delete API. `checkpoint inspect
+  --verify` reports `unverified_ref`, snapshots expire 30 days after creation
+  or their last restore, and `crabbox checkpoint delete --local-only` removes
+  the local record. Snapshot storage pricing is not published yet.
+- A snapshot holds everything on the container's filesystem, including tokens
+  or credentials written there, until it expires. Keep secrets out of the
+  filesystem before capture, or rotate them afterwards.
+- `--strategy image` and `--mode image` are rejected; a container snapshot is a
+  filesystem snapshot.
+- Checkpoints need a lease this repository already claims; `--reclaim`,
+  `--lease-id`, `--workdir`, and `--keep=false` are not supported, and there is
+  no archive checkpoint mode.
+
 ## Behavior
 
 - `run` creates or reuses a container Durable Object, uploads a gzipped archive
@@ -324,6 +373,15 @@ crabbox run \
   which took about 2.5 minutes for the bundled image. Creation, upload, and exec
   wait up to 300 seconds for readiness, and the CLI waits up to 330 seconds for
   response headers. A container that fails to start is reported immediately.
+- Creation and forks claim the lease before calling the runner. If the runner
+  rejects the request with a 4xx response, the claim is released. Any other
+  failure, such as a lost response or timeout, may still have allocated the
+  container, so the claim stays and the error names the lease: check it with
+  `crabbox status --provider cloudflare --id <lease>` or destroy it with
+  `crabbox stop --provider cloudflare --id <lease>`. `cleanup` leaves such a
+  claim alone for 6.5 minutes in case the request is still in flight.
+- A `stop` that lands while a lease's container is still starting wins: the
+  runner destroys the container, and the create or fork fails with 409.
 - Canceling a command (Ctrl-C, or a dropped connection) sends SIGTERM to the
   command's process group, followed by SIGKILL after 5 seconds, even when the
   cancel arrives before the command has started or the shell exits on SIGTERM.

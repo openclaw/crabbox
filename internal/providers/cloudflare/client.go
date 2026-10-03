@@ -28,8 +28,20 @@ type cloudflareContainer struct {
 	State        string            `json:"state"`
 	Workdir      string            `json:"workdir"`
 	InstanceType string            `json:"instanceType,omitempty"`
+	Image        string            `json:"image,omitempty"`
+	SnapshotID   string            `json:"snapshotId,omitempty"`
 	Labels       map[string]string `json:"labels,omitempty"`
 	CreatedAt    string            `json:"createdAt,omitempty"`
+}
+
+type containerSnapshot struct {
+	ID           string `json:"id"`
+	Size         int64  `json:"size"`
+	Name         string `json:"name,omitempty"`
+	LeaseID      string `json:"leaseId"`
+	Image        string `json:"image"`
+	InstanceType string `json:"instanceType"`
+	Workdir      string `json:"workdir"`
 }
 
 type createSandboxRequest struct {
@@ -40,6 +52,7 @@ type createSandboxRequest struct {
 	Workdir            string            `json:"workdir"`
 	InstanceType       string            `json:"instanceType,omitempty"`
 	Image              string            `json:"image,omitempty"`
+	SnapshotID         string            `json:"snapshotId,omitempty"`
 	TTLSeconds         int               `json:"ttlSeconds,omitempty"`
 	IdleTimeoutSeconds int               `json:"idleTimeoutSeconds,omitempty"`
 	Labels             map[string]string `json:"labels,omitempty"`
@@ -125,6 +138,12 @@ func defaultCloudflareHTTPClient() (*http.Client, error) {
 
 func cloudflareRedirectError(destination *url.URL) error {
 	return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, destination.Redacted())
+}
+
+func (c *cloudflareClient) createSnapshot(ctx context.Context, sandboxID, name string) (containerSnapshot, error) {
+	var snapshot containerSnapshot
+	err := c.doJSON(ctx, http.MethodPost, c.sandboxEndpoint(sandboxID, "/snapshots"), map[string]string{"name": name}, &snapshot)
+	return snapshot, err
 }
 
 func (c *cloudflareClient) createSandbox(ctx context.Context, req createSandboxRequest) (cloudflareContainer, error) {

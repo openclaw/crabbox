@@ -22,7 +22,8 @@ tools, caches, services. Stored in the provider account, so it incurs provider
 storage costs. Recorded as one of `aws-ami`, `aws-ebs-snapshot`,
 `azure-managed-image`, `azure-os-disk-snapshot`, `gcp-machine-image`,
 `gcp-disk-snapshot`, `hetzner-snapshot`, `machine0-image`,
-`parallels-snapshot`, `daytona-snapshot`, or `incus-image`.
+`parallels-snapshot`, `daytona-snapshot`, `incus-image`, or
+`cloudflare-container-snapshot`.
 
 **Archive (workspace tarball)** — captures only the contents of the remote
 workdir as `workspace.tar.gz`. Portable across any POSIX SSH lease, but it does
@@ -37,7 +38,10 @@ checkpoint without creating any artifact.
 
 > Both kinds may contain secrets. Native checkpoints capture the full root
 > volume (caches, logs, credentials); archives capture build outputs and
-> generated files. Delete checkpoints when you no longer need them.
+> generated files. Delete checkpoints when you no longer need them. Cloudflare
+> container snapshots cannot be deleted: a captured credential stays in
+> Cloudflare's snapshot until it expires 30 days after creation or last restore,
+> so rotate any secret a Cloudflare checkpoint may have captured.
 
 ## Quick start
 
@@ -788,6 +792,7 @@ See [Checkpoints](../features/checkpoints.md#lifecycle-and-expiry).
 | Daytona Linux (direct only) | Filesystem snapshot (`--no-reboot=false` for a running source) | Same filesystem snapshot |
 | Incus Linux containers (direct only, `--mode native`) | Private root-disk image | Same snapshot-to-image capture |
 | Parallels | VM snapshot | — |
+| Cloudflare containers | Container filesystem snapshot | Same filesystem snapshot |
 
 Brokered native checkpoints (through a configured coordinator) cover AWS
 Linux/macOS and Azure/GCP Linux leases. Azure Windows leases use the direct
@@ -807,6 +812,18 @@ after capture. Already-stopped sources remain stopped. Fork starts a new sandbox
 from the snapshot and relocates the workspace; native in-place restore and
 memory capture are not supported. See [Daytona](../providers/daytona.md#native-snapshots-and-forks)
 for ownership checks and recovery after an uncertain capture.
+
+Cloudflare container checkpoints capture the lease's whole filesystem from a
+running container without stopping it; `--mode auto` selects them because the
+provider has no archive path. Fork starts each new lease from the snapshot,
+keeps the checkpoint workdir, and does not support `--lease-id`, `--workdir`,
+`--reclaim`, or `--keep=false`. A fork command syncs the checkout like
+`crabbox run`, which replaces the workdir; state outside it, such as the
+npm and pnpm caches under `/var/cache/crabbox`, is what carries over. Cloudflare
+exposes no snapshot lookup or delete API: `inspect --verify` reports
+`unverified_ref`, snapshots expire 30 days after creation or last restore, and
+records are removed with `crabbox checkpoint delete --local-only`. See
+[Cloudflare container snapshots](../providers/cloudflare.md#container-snapshots).
 
 Incus native container checkpoints survive source deletion and support fixed-ID
 forks with fresh SSH identity before startup. They do not capture VMs, memory,
