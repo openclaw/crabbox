@@ -823,6 +823,7 @@ func TestCoordinatorInspectJSONPreservesProvisioningFailureState(t *testing.T) {
 			TargetOS:                     targetLinux,
 			State:                        "failed",
 			FailureError:                 "provider response was interrupted",
+			ProvisioningPhase:            "interrupted-recovering",
 			ProvisioningResourceMayExist: &explicitTrue,
 			ProvisioningFailureRetryable: &explicitTrue,
 		},
@@ -892,6 +893,9 @@ func TestCoordinatorInspectJSONPreservesProvisioningFailureState(t *testing.T) {
 			}
 			if got["state"] != "failed" || got["hasHost"] != false {
 				t.Fatalf("inspect JSON state=%#v hasHost=%#v, want failed hostless lease", got["state"], got["hasHost"])
+			}
+			if test.id == "cbx_true" && got["provisioningPhase"] != "interrupted-recovering" {
+				t.Fatalf("missing recovery phase: %#v", got)
 			}
 			for field, want := range map[string]*bool{
 				"provisioningResourceMayExist": test.wantMayExist,

@@ -525,6 +525,7 @@ const runtimeAdapterMaxBufferedBytes = runtimeAdapterRelayFrameLimit * 2;
 const leaseCleanupRetryDelayMs = 5 * 60 * 1000;
 const leaseCleanupClaimStaleMs = 30 * 60 * 1000;
 const leaseCleanupBatchSize = 16;
+const provisioningRecoveryPollMs = 60 * 1000;
 const interruptedProvisioningDeploySettleMs = 5 * 60 * 1000;
 const interruptedProvisioningAbsenceConfirmationMs = 30 * 60 * 1000;
 const interruptedProvisioningRecoveryBatchSize = 16;
@@ -4369,7 +4370,10 @@ export class FleetCoordinator {
           );
         }
         await storage.put(leaseKey(leaseID), record);
-        await retainLeaseWake(storage, Date.parse(record.expiresAt));
+        await retainLeaseWake(
+          storage,
+          Math.min(Date.parse(record.expiresAt), Date.now() + provisioningRecoveryPollMs),
+        );
         return { record, slug };
       };
       const committed = await measureCreationStep("admission.record_publication", () =>
@@ -17147,12 +17151,25 @@ export class FleetCoordinator {
         ) {
           return;
         }
+        if (lease.state === "provisioning") {
+          // End the caller's wait as soon as ownership is lost. Resource settlement
+          // keeps its longer window and never grants permission to allocate again.
+          lease = structuredClone(lease);
+          lease.state = "failed";
+          lease.endedAt = new Date(now).toISOString();
+          lease.updatedAt = lease.endedAt;
+          lease.provisioningResourceMayExist = true;
+          lease.provisioningFailureRetryable = true;
+          lease.failureError =
+            "provider provisioning was interrupted; recovering possible provider resource";
+          await this.putLease(lease);
+        }
         if (!Number.isFinite(Date.parse(lease.provisioningRecoveryObservedAt ?? ""))) {
           const observed = structuredClone(lease);
           observed.provisioningRecoveryObservedAt = new Date(now).toISOString();
           const retryAt = Date.parse(observed.cleanupRetryAt ?? "");
           const settleAt = now + interruptedProvisioningDeploySettleMs;
-          if (Number.isFinite(retryAt) && retryAt < settleAt) {
+          if (!Number.isFinite(retryAt) || retryAt < settleAt) {
             observed.cleanupRetryAt = new Date(settleAt).toISOString();
           }
           observed.updatedAt = observed.provisioningRecoveryObservedAt;
@@ -21943,7 +21960,7 @@ function createAttemptReplayResponse(lease: LeaseRecord): Response {
   return json(
     {
       error: "lease_state_changed",
-      message: "create attempt is already terminal",
+      message: lease.failureError || lease.cleanupError || "create attempt is already terminal",
       lease: publicLeaseRecord(lease),
     },
     { status: 409 },
@@ -26430,7 +26447,12 @@ function sameUnboundProvisioningRecoveryLease(
 
 function nextLeaseAlarmTime(lease: LeaseRecord, coordinatorGeneration: string): number | undefined {
   const now = Date.now();
-  const expiresAt = Date.parse(lease.expiresAt);
+  // A restart must be observed before the TTL/client deadline, even when this
+  // runtime still owns the request and has no recovery work on the current tick.
+  const expiresAt =
+    lease.state === "provisioning" && !lease.workspaceID
+      ? Math.min(Date.parse(lease.expiresAt), now + provisioningRecoveryPollMs)
+      : Date.parse(lease.expiresAt);
   const interruptedProvisioningAt = interruptedProvisioningRecoveryAt(lease, coordinatorGeneration);
   const includeInterruptedProvisioning = (candidate: number): number =>
     interruptedProvisioningAt === undefined
