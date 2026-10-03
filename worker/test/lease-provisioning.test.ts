@@ -274,6 +274,12 @@ it("bounds durable admission history reads while preserving monthly cost account
   const azure = new AzureFixture();
   vi.stubGlobal("fetch", azure.fetch);
   const now = new Date().toISOString();
+  const staleAccessKey = "provider-access:cbx_ffffffffffff";
+  storage.values.set(staleAccessKey, {
+    id: "cbx_ffffffffffff",
+    state: "active",
+    expiresAt: now,
+  });
   for (let index = 0; index < 300; index++) {
     const leaseID = `cbx_${index.toString(16).padStart(12, "0")}`;
     storage.values.set(`lease:${leaseID}`, {
@@ -303,6 +309,9 @@ it("bounds durable admission history reads while preserving monthly cost account
   expect(reads.length).toBeGreaterThan(6);
   expect(reads.every((options) => options?.limit === 128 && options.noCache === true)).toBe(true);
   expect(azure.mutations).toEqual([]);
+  // A concurrent admission can replace this row; unlocked preparation must never prune it.
+  expect(storage.values.has(staleAccessKey)).toBe(true);
+  expect(storage.writes).not.toContain(staleAccessKey);
 });
 
 describe("Azure definite VM rejections", () => {

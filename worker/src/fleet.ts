@@ -4990,7 +4990,12 @@ export class FleetCoordinator {
     const now = new Date();
     const generation = newCreateAttemptGeneration();
     const operationID = crypto.randomUUID();
-    const { accessLeases: leases } = await this.leaseAdmissionState({ owner, org }, now);
+    // Preparation is outside the lifecycle lock; only its final admission may mutate state.
+    const { accessLeases: leases } = await this.mergedLeaseAdmissionState(
+      { owner, org },
+      now,
+      await this.readProviderAccessRecords(now.getTime()),
+    );
     const slug = allocateLeaseSlug(
       requestedSlug || leaseSlugFromID(leaseID),
       leaseID,
