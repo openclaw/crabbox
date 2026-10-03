@@ -1779,6 +1779,29 @@ func TestCloudflareRejectedCreateReleasesItsClaim(t *testing.T) {
 	}
 }
 
+func TestCloudflareCreateStoppedMidStartReportsTheStop(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A concurrent `crabbox stop` releases the claim before the create answers.
+		var body struct{ ID string }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		claim, ok, err := core.ResolveLeaseClaimForProvider(body.ID, providerName)
+		if err != nil || !ok {
+			t.Errorf("claim for %q: ok=%v err=%v", body.ID, ok, err)
+		} else if err := core.RemoveLeaseClaimIfUnchanged(body.ID, claim); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"error":"lease was stopped while it was starting","state":"stopped"}`)
+	}))
+	defer server.Close()
+	backend := cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+	err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, Keep: true})
+	if err == nil || !strings.Contains(err.Error(), "stopped while it was starting") || strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("warmup error = %v, want only the runner's stop report", err)
+	}
+}
+
 func TestCloudflareCleanupKeepsAClaimWhoseCreateMayBeInFlight(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
