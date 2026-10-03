@@ -310,6 +310,31 @@ owners event, telemetry, or finish writes. The CLI client wraps these in
 when a user request 404s or 401s, an admin-token fallback re-resolves and
 retries as admin.
 
+Lease list clients can negotiate `pagination=keyset-v1&projection=summary` on
+`GET /v1/leases` or `GET /v1/admin/leases`. Each response scans at most `limit`
+stored rows (default and maximum 100), applies visibility and filters, and returns
+`pagination: "keyset-v1"` plus an optional opaque `nextCursor`. Pass that value as
+`cursor` with the same filters until it is absent, even when `leases` is empty.
+Pages use storage-key order, not creation-time order, and do not represent a
+snapshot. Summaries omit creation events, telemetry history, and provisioning
+attempts before redaction/serialization; detail endpoints retain those fields.
+
+The cursor encrypts the last scanned key because that row may be invisible to the
+caller. It grants no access: every page reapplies authorization. It uses the
+existing session secret, otherwise the admin/shared/proxy secret; rotating that
+secret invalidates outstanding cursors and callers must restart their listing.
+No schema migration or new credential is required. A runtime without any of
+these configured secrets returns the legacy response without the pagination
+marker. Without negotiation, `/v1` preserves its full newest-first records,
+default 100 and maximum 500 results. Summary projection is independently opt-in.
+
+List and identity reads bypass the lifecycle queue. Slug resolution streams
+history and retains at most two matches to detect ambiguity. Durable admission
+streams cost accounting inside its storage transaction, retaining only live/access
+records instead of the full lease history. These scans still do work proportional
+to retained history; paging bounds each list request rather than introducing a
+new persisted index or deleting diagnostic evidence.
+
 ## What Flows on a Run
 
 `crabbox run` (`internal/cli/run.go`). In brokered mode a run recorder mirrors

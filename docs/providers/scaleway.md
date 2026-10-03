@@ -73,6 +73,11 @@ There is no separate Scaleway size flag for the generic lease commands.
 
 ## Configuration
 
+An explicit class selects the corresponding [machine class](../commands/providers.md)
+instead of the inherited `DEV1-S` default. Explicit `scaleway.type`
+configuration or `--scaleway-type` still takes precedence over the class,
+and `--type` takes precedence over both.
+
 Local SDK/configuration failures retain their original error causes for
 diagnostics while keeping the public message redacted and exit code 3. Missing
 SDK configuration still falls back to environment-based credentials.

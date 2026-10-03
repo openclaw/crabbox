@@ -43,10 +43,15 @@ func linodeServerTypeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
 		return strings.TrimSpace(cfg.ServerType)
 	}
-	if strings.TrimSpace(cfg.Linode.Type) != "" {
+	if strings.TrimSpace(cfg.Linode.Type) != "" && linodeTypeOverridesClass(cfg) {
 		return strings.TrimSpace(cfg.Linode.Type)
 	}
 	return linodeServerTypeForClass(cfg.Class)
+}
+
+func linodeTypeOverridesClass(cfg core.Config) bool {
+	return !core.ClassWasExplicit(cfg) || core.LinodeTypeWasExplicit(cfg) ||
+		strings.TrimSpace(cfg.Linode.Type) != core.LinodeConfiguredTypeDefault
 }
 
 func linodeServerTypeForClass(class string) string {
