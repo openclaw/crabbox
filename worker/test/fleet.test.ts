@@ -23326,6 +23326,44 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("arms cleanup claim recovery and retries before the rest of maintenance completes", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const storage = new MemoryStorage();
+      const lease = testLease({
+        id: "cbx_000000000099",
+        state: "released",
+        releaseDeletesServer: true,
+        cleanupStartedAt: new Date().toISOString(),
+        cleanupClaimExpiresAt: new Date().toISOString(),
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      let attempts = 0;
+      const fleet = testFleet(storage, {
+        hetzner: fakeProvider(undefined, {}, async () => {
+          attempts++;
+          const current = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+          expect(storage.alarm()).toBe(Date.parse(current.cleanupClaimExpiresAt!));
+          if (attempts === 1) throw new Error("synthetic transient cleanup error");
+        }),
+      });
+      await fleet.ready();
+      // Exercise the cleanup owner without letting final global reconciliation arm its wake.
+      const cleanup = fleet as unknown as { expireLeases(ids: Set<string>): Promise<void> };
+      await cleanup.expireLeases(new Set([lease.id]));
+      const failed = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+      expect(failed.cleanupRetryAt).toBeDefined();
+      expect(storage.alarm()).toBe(Date.parse(failed.cleanupRetryAt!));
+      vi.setSystemTime(Date.parse(failed.cleanupRetryAt!) + 1);
+      await alarmRuntime(storage).clearAlarm();
+      await cleanup.expireLeases(new Set([lease.id]));
+      expect(attempts).toBe(2);
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupCompletedAt).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps deferred release cleanup retryable after provider failure", async () => {
     const storage = new MemoryStorage();
     const lease = testLease({
@@ -31736,6 +31774,110 @@ describe("fleet lease identity and idle", () => {
       }
     },
   );
+
+  it("bounds summary pages across large and invisible lease histories without changing detail", async () => {
+    const storage = new BoundedObservedMemoryStorage();
+    const fleet = testFleet(storage, {}, { CRABBOX_SESSION_SECRET: "synthetic-list-secret" });
+    await fleet.ready();
+    const events = Array.from({ length: 64 }, (_, index) => ({
+      phase: "coordinator_step" as const,
+      source: "coordinator" as const,
+      at: "2026-01-01T00:00:00Z",
+      step: `admission.synthetic_${index}`,
+      durationMs: 10,
+      count: 1,
+      errors: 0,
+    }));
+    for (let index = 0; index < 350; index++) {
+      const id = `cbx_${index.toString(16).padStart(12, "0")}`;
+      storage.seed(
+        `lease:${id}`,
+        testLease({
+          id,
+          owner: index < 200 ? "bob@example.com" : "alice@example.com",
+          org: "example-org",
+          creationEvents: events,
+        }),
+      );
+    }
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    let cursor = "";
+    const ids: string[] = [];
+    const counts: number[] = [];
+    do {
+      storage.resetListOptions();
+      // oxlint-disable-next-line eslint/no-await-in-loop -- consume one cursor page at a time.
+      const response = await fleet.fetch(
+        request(
+          "GET",
+          `/v1/leases?pagination=keyset-v1&projection=summary&limit=1000&cursor=${encodeURIComponent(cursor)}`,
+          { headers },
+        ),
+      );
+      expect(response.status).toBe(200);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each response provides the next cursor.
+      const body = (await response.json()) as {
+        leases: LeaseRecord[];
+        pagination: string;
+        nextCursor?: string;
+      };
+      expect(body.pagination).toBe("keyset-v1");
+      const reads = storage.listOptions.filter(({ prefix }) => prefix === "lease:");
+      expect(reads).toHaveLength(1);
+      expect(reads[0]).toMatchObject({ limit: 100, noCache: true });
+      expect(body.leases.every((lease) => lease.creationEvents === undefined)).toBe(true);
+      ids.push(...body.leases.map((lease) => lease.id));
+      counts.push(body.leases.length);
+      cursor = body.nextCursor ?? "";
+      expect(cursor).not.toContain("cbx_");
+    } while (cursor);
+    expect(counts).toEqual([0, 0, 100, 50]);
+    expect(new Set(ids).size).toBe(150);
+    const legacy = await fleet.fetch(request("GET", "/v1/leases?limit=100", { headers }));
+    const legacyText = await legacy.text();
+    expect(JSON.parse(legacyText).leases[0].creationEvents).toHaveLength(64);
+    const compact = await fleet.fetch(
+      request("GET", "/v1/leases?limit=100&projection=summary", { headers }),
+    );
+    const compactText = await compact.text();
+    expect(legacyText.length / compactText.length).toBeGreaterThan(5);
+    console.info(
+      `synthetic lease list: full=${legacyText.length} bytes summary=${compactText.length} bytes for 100 rows`,
+    );
+    const detail = await fleet.fetch(request("GET", `/v1/leases/${ids[0]}`, { headers }));
+    expect(((await detail.json()) as { lease: LeaseRecord }).lease.creationEvents).toHaveLength(64);
+    const invalid = await fleet.fetch(
+      request("GET", "/v1/leases?pagination=keyset-v1&cursor=invalid", { headers }),
+    );
+    expect(invalid.status).toBe(400);
+  });
+
+  it("resolves a slug through bounded history pages and preserves ambiguity checks", async () => {
+    const storage = new BoundedObservedMemoryStorage();
+    const fleet = testFleet(storage);
+    await fleet.ready();
+    for (let index = 0; index < 400; index++) {
+      const id = `cbx_${index.toString(16).padStart(12, "0")}`;
+      storage.seed(`lease:${id}`, testLease({ id, slug: "wanted", state: "released" }));
+    }
+    const lease = testLease({
+      id: "cbx_aaaaaaaaaaaa",
+      slug: "wanted",
+      owner: "alice@example.com",
+      org: "example-org",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const headers = { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" };
+    const result = await fleet.fetch(request("GET", "/v1/leases/wanted", { headers }));
+    expect(result.status).toBe(200);
+    expect(((await result.json()) as { lease: LeaseRecord }).lease.id).toBe(lease.id);
+    expect(storage.listOptions.filter(({ prefix }) => prefix === "lease:")).toHaveLength(4);
+    storage.seed("lease:cbx_bbbbbbbbbbbb", { ...lease, id: "cbx_bbbbbbbbbbbb" });
+    const ambiguous = await fleet.fetch(request("GET", "/v1/leases/wanted", { headers }));
+    expect(ambiguous.status).toBe(500);
+    expect(await ambiguous.text()).toContain("ambiguous slug wanted");
+  });
 
   it("persists a cancel-before-create tombstone and rejects the later create without provisioning", async () => {
     const storage = new MemoryStorage();

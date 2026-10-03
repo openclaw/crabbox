@@ -38,6 +38,14 @@ import {
   leaseProviderCleanupConfirmed,
 } from "./lease-cleanup";
 import {
+  leaseListCursorSecret,
+  leaseListPageSize,
+  leaseListPagination,
+  leaseListSummary,
+  openLeaseListCursor,
+  sealLeaseListCursor,
+} from "./lease-list";
+import {
   LeaseProvisioningController,
   cancelProvisioningOperation,
   provisioningOperationKey,
@@ -4982,7 +4990,7 @@ export class FleetCoordinator {
     const now = new Date();
     const generation = newCreateAttemptGeneration();
     const operationID = crypto.randomUUID();
-    const leases = [...(await this.state.storage.list<LeaseRecord>({ prefix: "lease:" })).values()];
+    const { accessLeases: leases } = await this.leaseAdmissionState({ owner, org }, now);
     const slug = allocateLeaseSlug(
       requestedSlug || leaseSlugFromID(leaseID),
       leaseID,
@@ -5099,9 +5107,6 @@ export class FleetCoordinator {
       if (await transaction.get(workspaceLeaseReservationKey(leaseID)))
         return workspaceManagedLeaseResponse();
       await capability.validateAdmission?.(transaction, prepared.plan, record);
-      const storedLeases = [
-        ...(await transaction.list<LeaseRecord>({ prefix: "lease:" })).values(),
-      ];
       const hostID = config.hostID || config.awsMacHostID;
       const scope: HostScope = {
         provider: config.provider,
@@ -5119,15 +5124,21 @@ export class FleetCoordinator {
       const clearedHostReservations = hostReservations.filter(
         (reservation) => reservation.staleReason,
       );
-      const providerAccess = [
-        ...(await transaction.list<LeaseRecord>({ prefix: providerAccessPrefix() })).values(),
-      ];
-      const merged = new Map(storedLeases.map((lease) => [lease.id, lease]));
-      for (const lease of providerAccess) merged.set(lease.id, lease);
+      const admissionState = await this.mergedLeaseAdmissionState(
+        record,
+        now,
+        await this.readProviderAccessRecords(Date.now(), transaction),
+        undefined,
+        transaction,
+      );
       if (
-        allocateLeaseSlug(requestedSlug || leaseSlugFromID(leaseID), leaseID, owner, org, [
-          ...merged.values(),
-        ]) !== slug
+        allocateLeaseSlug(
+          requestedSlug || leaseSlugFromID(leaseID),
+          leaseID,
+          owner,
+          org,
+          admissionState.accessLeases,
+        ) !== slug
       ) {
         return json(
           {
@@ -5137,9 +5148,7 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
-      const usage = createCostLimitUsage(record, now);
-      for (const lease of merged.values()) addLeaseToCostLimitUsage(usage, lease, now);
-      const limit = enforceCostLimitUsage(usage, record, costLimits(this.env));
+      const limit = enforceCostLimitUsage(admissionState.costUsage, record, costLimits(this.env));
       if (limit) return json({ error: "cost_limit_exceeded", message: limit }, { status: 429 });
       await clearHostReservations(transaction, clearedHostReservations);
       if (currentAttempt && attempt)
@@ -14361,30 +14370,63 @@ export class FleetCoordinator {
   }
 
   private async listLeases(request: Request): Promise<Response> {
-    const admin = isAdminRequest(request);
-    const leases = await this.recentLeases(request, admin);
-    if (requestAuthType(request) === "device") {
-      return json({ leases: leases.map((lease) => this.deviceLeaseRecord(lease)) });
-    }
-    return json({ leases: leases.map((lease) => this.leaseForListRequest(lease, request, admin)) });
+    return this.leaseListResponse(request, isAdminRequest(request));
   }
 
   private async adminLeases(request: Request): Promise<Response> {
-    return json({
-      leases: (await this.recentLeases(request, true)).map((lease) =>
-        this.leaseForListRequest(lease, request, true),
-      ),
+    return this.leaseListResponse(request, true);
+  }
+
+  private async leaseListResponse(request: Request, admin: boolean): Promise<Response> {
+    const params = new URL(request.url).searchParams;
+    const project = (lease: LeaseRecord) => {
+      const record = params.get("projection") === "summary" ? leaseListSummary(lease) : lease;
+      return requestAuthType(request) === "device"
+        ? this.deviceLeaseRecord(record)
+        : this.leaseForListRequest(record, request, admin);
+    };
+    const secret = leaseListCursorSecret(this.env);
+    if (params.get("pagination") !== leaseListPagination || !secret) {
+      // Existing /v1 clients retain newest-first full records and their limit contract.
+      return json({ leases: (await this.recentLeases(request, admin)).map(project) });
+    }
+    const cursor = params.get("cursor");
+    const startAfter = cursor ? await openLeaseListCursor(cursor, secret) : undefined;
+    if (cursor && !startAfter) return json({ error: "invalid_lease_cursor" }, { status: 400 });
+    const limit = Math.max(
+      1,
+      Math.min(clampLimit(params.get("limit"), leaseListPageSize), leaseListPageSize),
+    );
+    // One storage page per request bounds both CPU and memory even when no rows are visible.
+    const page = await this.state.storage.list<LeaseRecord>({
+      prefix: "lease:",
+      limit,
+      noCache: true,
+      ...(startAfter ? { startAfter } : {}),
     });
+    const matches = this.leaseListFilter(request);
+    const leases = [];
+    for (const lease of page.values()) {
+      if ((admin || this.leaseVisibleToRequest(lease, request, false)) && matches(lease)) {
+        leases.push(project(lease));
+      }
+    }
+    const lastKey = [...page.keys()].at(-1);
+    const nextCursor =
+      page.size === limit && lastKey ? await sealLeaseListCursor(lastKey, secret) : undefined;
+    return json({ leases, pagination: leaseListPagination, nextCursor });
   }
 
   private async recentLeases(request: Request, admin: boolean): Promise<LeaseRecord[]> {
-    const limit = clampLimit(new URL(request.url).searchParams.get("limit"), 100);
+    const params = new URL(request.url).searchParams;
+    const limit = clampLimit(params.get("limit"), 100);
+    const summary = params.get("projection") === "summary";
     const matches = this.leaseListFilter(request);
     const leases: LeaseRecord[] = [];
     if (limit === 0) return leases;
     await this.visitLeaseRecords((lease) => {
       if ((admin || this.leaseVisibleToRequest(lease, request, false)) && matches(lease)) {
-        retainRecentLease(leases, lease, limit);
+        retainRecentLease(leases, summary ? leaseListSummary(lease) : lease, limit);
       }
     });
     return leases;
@@ -17476,6 +17518,13 @@ export class FleetCoordinator {
         await this.putLease(lease, { noCache: true });
         claimed.push({ claim: nowISO, lease });
       }, leaseIDs);
+      // The current alarm has been consumed. Persist recovery before provider I/O;
+      // a reset or a later maintenance failure must not strand these claims.
+      if (claimed.length) {
+        await this.armAlarmNoLaterThan(
+          Math.min(...claimed.map(({ lease }) => cleanupClaimDeadline(lease))),
+        );
+      }
       return claimed;
     });
     await Promise.all(
@@ -17501,6 +17550,7 @@ export class FleetCoordinator {
           if (failure) {
             recordLeaseCleanupFailure(current, failure.error, failure.message, nowISO);
             await this.putLease(current);
+            await this.armAlarmNoLaterThan(nextLeaseAlarmTime(current, this.coordinatorGeneration));
             console.warn(
               `lease cleanup failed lease=${current.id} provider=${current.provider} cloud=${current.cloudID}: ${failure.message}`,
             );
@@ -18520,26 +18570,9 @@ export class FleetCoordinator {
     }
     // Canonical IDs never become aliases for another lease's normalized slug.
     if (validLeaseID(identifier)) return undefined;
-    const slug = normalizeLeaseSlug(identifier);
-    if (!slug) {
-      return undefined;
-    }
-    const now = Date.now();
-    let matches = (await this.leaseRecords()).filter(
-      (lease) =>
-        leaseIsLive(lease) &&
-        Date.parse(lease.expiresAt) > now &&
-        normalizeLeaseSlug(lease.slug) === slug,
+    return this.resolveLeaseSlug(identifier, (lease) =>
+      this.leaseVisibleToRequest(lease, request, admin),
     );
-    if (!admin) {
-      matches = matches.filter((lease) => this.leaseVisibleToRequest(lease, request, false));
-    }
-    if (matches.length > 1) {
-      throw new Error(
-        `ambiguous slug ${slug}: ${matches.map((lease) => `${lease.id}:${lease.owner}`).join(", ")}`,
-      );
-    }
-    return matches[0];
   }
 
   private async resolveLeaseForControl(
@@ -18550,18 +18583,32 @@ export class FleetCoordinator {
     if (exact) {
       return this.leaseVisibleToControl(exact, attachment) ? exact : undefined;
     }
+    if (validLeaseID(identifier)) return undefined;
+    return this.resolveLeaseSlug(identifier, (lease) =>
+      this.leaseVisibleToControl(lease, attachment),
+    );
+  }
+
+  private async resolveLeaseSlug(
+    identifier: string,
+    visible: (lease: LeaseRecord) => boolean,
+  ): Promise<LeaseRecord | undefined> {
     const slug = normalizeLeaseSlug(identifier);
     if (!slug) {
       return undefined;
     }
     const now = Date.now();
-    const matches = (await this.leaseRecords()).filter(
-      (lease) =>
+    const matches: LeaseRecord[] = [];
+    await this.visitLeaseRecords((lease) => {
+      if (
         leaseIsLive(lease) &&
         Date.parse(lease.expiresAt) > now &&
         normalizeLeaseSlug(lease.slug) === slug &&
-        this.leaseVisibleToControl(lease, attachment),
-    );
+        visible(lease)
+      )
+        matches.push(lease);
+      return matches.length < 2;
+    });
     if (matches.length > 1) {
       throw new Error(
         `ambiguous slug ${slug}: ${matches.map((lease) => `${lease.id}:${lease.owner}`).join(", ")}`,
@@ -18639,6 +18686,7 @@ export class FleetCoordinator {
     now: Date,
     providerAccessLeases: LeaseRecord[],
     excludedLeaseID?: string,
+    storage: CoordinatorStorageView = this.state.storage,
   ): Promise<{ accessLeases: LeaseRecord[]; costUsage: CostLimitUsage }> {
     const providerAccessByID = new Map(providerAccessLeases.map((lease) => [lease.id, lease]));
     const accessLeases: LeaseRecord[] = [];
@@ -18651,11 +18699,15 @@ export class FleetCoordinator {
         accessLeases.push(lease);
       }
     };
-    await this.visitLeaseRecords((lease) => {
+    for await (const [, lease] of coordinatorStorageEntries<LeaseRecord>(storage, {
+      prefix: "lease:",
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+    })) {
       if (!providerAccessByID.has(lease.id)) {
         addLease(lease);
       }
-    });
+    }
     for (const lease of providerAccessByID.values()) {
       addLease(lease);
     }
@@ -18743,11 +18795,18 @@ export class FleetCoordinator {
     }
   }
 
-  private async readProviderAccessRecords(now: number): Promise<LeaseRecord[]> {
+  private async readProviderAccessRecords(
+    now: number,
+    storage: CoordinatorStorageView = this.state.storage,
+  ): Promise<LeaseRecord[]> {
     const active: LeaseRecord[] = [];
-    await this.visitStorageRecords<LeaseRecord>(providerAccessPrefix(), (record) => {
+    for await (const [, record] of coordinatorStorageEntries<LeaseRecord>(storage, {
+      prefix: providerAccessPrefix(),
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+    })) {
       if (isActiveProviderAccessRecord(record, now)) active.push(record);
-    });
+    }
     return active;
   }
 

@@ -1481,6 +1481,46 @@ func (c *CoordinatorClient) Leases(ctx context.Context, state string, limit int)
 	return c.listLeases(ctx, state, limit, "", "")
 }
 
+// CurrentLeases negotiates bounded summary pages. Older coordinators keep their
+// existing newest-first list contract; report its actual 500-row server cap.
+func (c *CoordinatorClient) CurrentLeases(ctx context.Context, provider string) ([]CoordinatorLease, bool, error) {
+	const pagination = "keyset-v1"
+	values := url.Values{"view": {"current"}, "provider": {provider}, "limit": {"100"}, "projection": {"summary"}, "pagination": {pagination}}
+	var leases []CoordinatorLease
+	seenCursors := make(map[string]bool)
+	for {
+		var res struct {
+			Leases     []CoordinatorLease `json:"leases"`
+			Pagination string             `json:"pagination"`
+			NextCursor string             `json:"nextCursor"`
+		}
+		if err := c.doRead(ctx, "/v1/leases?"+values.Encode(), &res); err != nil {
+			return nil, false, err
+		}
+		if res.Pagination != pagination {
+			if values.Get("cursor") != "" {
+				return nil, false, fmt.Errorf("coordinator lease pagination changed during listing; retry list")
+			}
+			if len(res.Leases) < 100 {
+				return res.Leases, false, nil
+			}
+			legacy, err := c.listLeases(ctx, "", 500, "current", provider)
+			return legacy, len(legacy) >= 500, err
+		}
+		leases = append(leases, res.Leases...)
+		if res.NextCursor == "" {
+			break
+		}
+		if seenCursors[res.NextCursor] {
+			return nil, false, fmt.Errorf("coordinator lease pagination did not advance")
+		}
+		seenCursors[res.NextCursor] = true
+		values.Set("cursor", res.NextCursor)
+	}
+	slices.SortStableFunc(leases, func(a, b CoordinatorLease) int { return strings.Compare(b.CreatedAt, a.CreatedAt) })
+	return leases, false, nil
+}
+
 func (c *CoordinatorClient) listLeases(ctx context.Context, state string, limit int, view, provider string) ([]CoordinatorLease, error) {
 	var res struct {
 		Leases []CoordinatorLease `json:"leases"`
