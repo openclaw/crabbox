@@ -8,7 +8,7 @@
 
 ### Fixes
 
-- Report fleet, org, and owner lease headroom with the blocking cap in `capacity`, and identify fleet limits in allocation errors. PR link pending.
+- Report fleet, org, and owner lease headroom with the blocking cap in `capacity`, and identify fleet limits in allocation errors. [PR 2679](https://github.com/openclaw/crabbox/pull/2679).
 - Page coordinator CLI lists with compact summaries, bound slug lookup and durable admission memory, keep identity/list reads out of the lifecycle queue, and arm cleanup recovery before provider I/O; preserve legacy list and full inspect responses.
 - Bound coordinator lease-list memory as retained history grows, preserving visibility, filters, and result ordering. [PR 2671](https://github.com/openclaw/crabbox/pull/2671). Thanks @shakkernerd.
 - Retain Blacksmith Testbox claims and keys until the exact associated GitHub work settles, and report exact native queue and terminal status. [PR 2670](https://github.com/openclaw/crabbox/pull/2670). Thanks @shakkernerd.
