@@ -12,6 +12,8 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) BackendCapabilities() core.Backend { return &backend{} }
+
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		// ASCII renamed its Box product to Boat in September 2026. Keep the

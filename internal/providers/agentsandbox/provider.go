@@ -15,6 +15,8 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) BackendCapabilities() core.Backend { return &backend{} }
+
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Authentication:             core.DirectProviderAuthentication(core.ProviderAuthenticationNativeConfig),

@@ -331,6 +331,25 @@ func TestRunpodProviderSpec(t *testing.T) {
 	}
 }
 
+func TestRunpodCatalogFixedLeaseID(t *testing.T) {
+	t.Setenv("RUNPOD_API_KEY", "")
+	t.Setenv("CRABBOX_RUNPOD_API_KEY", "")
+	var out strings.Builder
+	if err := (core.App{Stdout: &out, Stderr: io.Discard}).Run(t.Context(), []string{"providers", "--json", "--feature", "fixed-lease-id"}); err != nil {
+		t.Fatal(err)
+	}
+	var entries []struct{ Provider string }
+	if err := json.Unmarshal([]byte(out.String()), &entries); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Provider == providerName {
+			return
+		}
+	}
+	t.Fatal("fixed-lease-id catalog omitted RunPod")
+}
+
 func TestRunpodClientRedactsReflectedCredential(t *testing.T) {
 	const secret = "runpod-secret-token"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
