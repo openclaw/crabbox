@@ -39,12 +39,15 @@ type createSandboxRequest struct {
 	Repo               string            `json:"repo,omitempty"`
 	Workdir            string            `json:"workdir"`
 	InstanceType       string            `json:"instanceType,omitempty"`
+	Image              string            `json:"image,omitempty"`
 	TTLSeconds         int               `json:"ttlSeconds,omitempty"`
 	IdleTimeoutSeconds int               `json:"idleTimeoutSeconds,omitempty"`
 	Labels             map[string]string `json:"labels,omitempty"`
 }
 
-const cloudflareDefaultResponseHeaderTimeout = 30 * time.Second
+// Create, upload, and exec respond after the runner has a started container,
+// which can take the runner's full 300s readiness window on an image cache miss.
+const cloudflareDefaultResponseHeaderTimeout = 330 * time.Second
 
 var cloudflareCleanupTimeout = 15 * time.Second
 
@@ -62,6 +65,12 @@ func newCloudflareClient(cfg core.Config, rt core.Runtime) (*cloudflareClient, e
 	instanceType, err := resolveInstanceType(core.Blank(cfg.ServerType, cloudflareContainerInstanceTypeForClass(cfg.Class)), cloudflareContainerInstanceTypeForClass(cfg.Class), cfg.ServerTypeExplicit)
 	if err != nil {
 		return nil, err
+	}
+	if instanceType == "basic" {
+		if rt.Stderr != nil {
+			fmt.Fprintln(rt.Stderr, basicInstanceTypeWarning)
+		}
+		instanceType = "standard-1"
 	}
 	parsed, err := url.Parse(apiURL)
 	if err != nil {
@@ -96,7 +105,7 @@ func newCloudflareClient(cfg core.Config, rt core.Runtime) (*cloudflareClient, e
 }
 
 func (c *cloudflareClient) useInstanceType(instanceType string) {
-	if normalized, ok := normalizeContainerInstanceType(instanceType); ok {
+	if normalized, ok := normalizeContainerInstanceType(instanceType); ok && normalized != "basic" {
 		c.instanceType = normalized
 	}
 }

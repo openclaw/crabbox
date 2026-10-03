@@ -9,6 +9,7 @@ import (
 type fileCloudflareConfig struct {
 	APIURL  string `yaml:"apiUrl,omitempty"`
 	Token   string `yaml:"token,omitempty"`
+	Image   string `yaml:"image,omitempty"`
 	Workdir string `yaml:"workdir,omitempty"`
 }
 
@@ -35,13 +36,14 @@ func (cfg *CloudflareConfig) applyFile(file *fileCloudflareConfig) (CloudflareCo
 
 func (cfg *CloudflareConfig) applyEnv() (CloudflareConfigApplied, error) {
 	var applied CloudflareConfigApplied
-	err := applyConfigEnvironment(cfg, &applied, 0, 3)
+	err := applyConfigEnvironment(cfg, &applied, 0, 4)
 	return applied, err
 }
 
 // CloudflareConfigFlagValues holds parsed values; only visited flags are applied.
 type CloudflareConfigFlagValues struct {
 	APIURL  *string
+	Image   *string
 	Workdir *string
 }
 

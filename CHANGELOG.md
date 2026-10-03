@@ -10,6 +10,10 @@
 
 - Thanks @shakkernerd for [PR 2650](https://github.com/openclaw/crabbox/pull/2650) (cold Actions hydration from GitHub SSH checkouts) and [PR 2651](https://github.com/openclaw/crabbox/pull/2651) (AWS SSH access refresh over IPv4), which shipped in 0.70.0 without the thanks in its notes.
 
+### Changed
+
+- **Cloudflare containers start in about 1–2 seconds.** The `cloudflare` runner moves to the Containers `durable_object` scheduling policy: one Durable Object class starts each lease's image and instance type through `ctx.container`, commands and uploads use native `exec()`, and the in-container Go runner, six per-type classes, and `max_instances: 4` cap are gone. `--type basic` now uses `standard-1` with a warning, `--type lite` is rejected because the bundled image cannot start on it, `--cloudflare-image` selects a named runner image, canceled commands stop their process group, and a lease whose container stops ends instead of continuing in an empty workspace. Upgrading is a one-time cutover: stop kept leases first, because redeploying deletes the old classes' Durable Object state. [PR 2625](https://github.com/openclaw/crabbox/pull/2625).
+
 ### Fixes
 
 - Allow heartbeat and `status --wait` to renew owned direct fixed leases on DigitalOcean and Azure by validating the acquired account scope and exact resource identity. [PR 2673](https://github.com/openclaw/crabbox/pull/2673).

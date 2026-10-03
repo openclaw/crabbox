@@ -136,7 +136,7 @@ func TestDedupD4WrongValuesSkipPostprocessing(t *testing.T) {
 				cfg := core.Config{Provider: selected}
 				// Cloudflare normalizes generic sizing before checking the values type.
 				if name == "cloudflare" {
-					cfg.ServerType = "basic"
+					cfg.ServerType = "standard-1"
 				}
 				before := cfg
 				fs := flag.NewFlagSet("test", flag.ContinueOnError)
