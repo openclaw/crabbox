@@ -36,6 +36,20 @@ crabbox cleanup --provider linode --dry-run
 numeric Linode instance id. `--type` is the exact Linode type slug; there is no
 separate Linode size flag.
 
+Fixed-lease orchestrators can use `warmup --lease-id cbx_abcdef123456 --keep=true`.
+Repeating the request with the same local state, Linode account, repository, and
+creation inputs reuses the original instance and SSH key. A changed owner or
+intent returns `lease_id_conflict` (exit 4). Fixed claims bind the account EUUID,
+creation fingerprint, and attempt nonce to the instance label and Crabbox tags.
+After a lost create response, replay reconciles that exact attempt from inventory;
+empty or ambiguous inventory retains the claim without allocating a replacement.
+Preserve the local claim and SSH key when recovering an interrupted dispatch.
+
+`inspect`, `status`, `heartbeat`, and `stop` resolve fixed leases by lease ID.
+Stopping retains a terminal receipt, so repeated stops are safe and the released
+ID cannot create another instance. A lost stored SSH key blocks acquisition
+replay; it does not block an identity-verified stop.
+
 ## Configuration
 
 ```yaml
@@ -63,6 +77,11 @@ Config keys under `linode:`:
 Acquisition trims the selected native type. A blank explicit `--type` falls back
 to `linode.type`, then the class default. The create request, lease metadata, and
 recovery records use that same resolved type.
+
+An explicit class selects the corresponding [machine class](../commands/providers.md)
+instead of the inherited `g6-standard-1` default. Explicit `linode.type`
+configuration (including `g6-standard-1`) still takes precedence over the class,
+and `--type` takes precedence over both.
 
 The portable `--os ubuntu:24.04` selector maps to `linode/ubuntu24.04`. Linode
 does not currently offer the portable default Ubuntu 26.04 image in this
