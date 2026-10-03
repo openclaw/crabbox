@@ -155,6 +155,12 @@ Both release and expiry call the same provider delete path:
   cloud server for every active lease past `expiresAt`, then sets state
   `expired`.
 
+The cleanup pass schedules claim recovery before starting provider deletion and
+arms transient-failure retries immediately after persisting them. These wakeups
+do not depend on the rest of maintenance reaching its final alarm reconciliation.
+Unresolved provider identity still requires explicit resolution; retries never
+relax ownership checks or convert uncertainty into confirmed deletion.
+
 Release and expiry publish provider-cleanup completion only after the provider
 delete path succeeds and the exact cleanup claim is revalidated. The stored
 record then clears `host`, `tailscale`, `sshHostKey`, and

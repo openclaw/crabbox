@@ -1050,12 +1050,12 @@ func (b *coordinatorLeaseBackend) ListJSON(ctx context.Context, req ListRequest)
 }
 
 func (b *coordinatorLeaseBackend) listUserLeases(ctx context.Context) ([]CoordinatorLease, error) {
-	leases, err := b.coord.listLeases(ctx, "", 1000, "current", b.cfg.Provider)
+	leases, truncated, err := b.coord.CurrentLeases(ctx, b.cfg.Provider)
 	if err != nil {
 		return nil, err
 	}
-	if len(leases) >= 1000 {
-		fmt.Fprintln(b.rt.Stderr, "warning: coordinator list reached its 1000-lease limit; older kept leases may be omitted; inspect them by exact lease ID")
+	if truncated {
+		fmt.Fprintln(b.rt.Stderr, "warning: coordinator list reached its legacy 500-lease limit; older kept leases may be omitted; update the coordinator or inspect them by exact lease ID")
 	}
 	// Older coordinators ignore view=current and return ended history too.
 	current := make([]CoordinatorLease, 0, len(leases))
