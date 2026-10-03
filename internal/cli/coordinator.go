@@ -379,6 +379,25 @@ type CoordinatorCapacityResponse struct {
 	ActiveLeases   int    `json:"activeLeases"`
 	EffectiveLimit int    `json:"effectiveLimit"`
 	ObservedAt     string `json:"observedAt"`
+	*CoordinatorCapacityAdmission
+}
+
+// A nil extension preserves the response from coordinators with owner-only capacity.
+type CoordinatorCapacityAdmission struct {
+	Fleet      CoordinatorCapacityDimension `json:"fleet"`
+	Org        CoordinatorOrgCapacity       `json:"org"`
+	Admissible bool                         `json:"admissible"`
+	BlockedBy  *string                      `json:"blockedBy"`
+}
+
+type CoordinatorCapacityDimension struct {
+	ActiveLeases int  `json:"activeLeases"`
+	Limit        *int `json:"limit"`
+}
+
+type CoordinatorOrgCapacity struct {
+	Key string `json:"key"`
+	CoordinatorCapacityDimension
 }
 
 type CoordinatorMarketplaceStatusResponse struct {
@@ -1720,6 +1739,7 @@ func (c *CoordinatorClient) Capacity(ctx context.Context) (CoordinatorCapacityRe
 		ActiveLeases   *int   `json:"activeLeases"`
 		EffectiveLimit *int   `json:"effectiveLimit"`
 		ObservedAt     string `json:"observedAt"`
+		*CoordinatorCapacityAdmission
 	}
 	if err := c.do(ctx, http.MethodGet, "/v1/capacity", nil, &payload); err != nil {
 		var httpErr CoordinatorHTTPError
@@ -1736,6 +1756,7 @@ func (c *CoordinatorClient) Capacity(ctx context.Context) (CoordinatorCapacityRe
 	return CoordinatorCapacityResponse{
 		Owner: payload.Owner, ActiveLeases: *payload.ActiveLeases,
 		EffectiveLimit: *payload.EffectiveLimit, ObservedAt: payload.ObservedAt,
+		CoordinatorCapacityAdmission: payload.CoordinatorCapacityAdmission,
 	}, nil
 }
 

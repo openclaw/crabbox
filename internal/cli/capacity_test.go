@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -72,14 +73,80 @@ func TestCapacityOutput(t *testing.T) {
 					t.Fatalf("unexpected JSON: %s", &out)
 				}
 			} else {
-				for _, want := range []string{fmt.Sprintf("self-owner admission count: owner=github:12345 activeLeases=%d", tc.count), "effective owner limit: " + formatIntLimit(tc.limit), "observed at: 2026-09-02T12:00:00.000Z", "Snapshot only; not a reservation or approval to allocate."} {
+				limit := "unlimited"
+				if tc.limit > 0 {
+					limit = fmt.Sprint(tc.limit)
+				}
+				for _, want := range []string{fmt.Sprintf("owner github:12345 %d/%s", tc.count, limit), "observed at: 2026-09-02T12:00:00.000Z", "Snapshot only; not a reservation or approval to allocate."} {
 					if !strings.Contains(out.String(), want) {
 						t.Fatalf("missing %q in %s", want, &out)
 					}
 				}
+				if strings.Contains(out.String(), "fleet") || strings.Contains(out.String(), "org ") || strings.Contains(out.String(), "admissible:") {
+					t.Fatalf("legacy response invented admission fields: %s", &out)
+				}
 			}
 			if strings.Contains(out.String(), "hidden") || strings.Contains(out.String(), "must-not-escape") {
 				t.Fatalf("extra response fields escaped: %s", &out)
+			}
+		})
+	}
+}
+
+func TestCapacityAdmissionOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields, want string
+	}{
+		{"fleet", `"fleet":{"activeLeases":21,"limit":20},"org":{"key":"example-org","activeLeases":17,"limit":20},"admissible":false,"blockedBy":"fleet"`, "fleet 21/20 (blocked)\norg example-org 17/20\nowner github:12345 17/20"},
+		{"org", `"fleet":{"activeLeases":21,"limit":30},"org":{"key":"example-org","activeLeases":20,"limit":20},"admissible":false,"blockedBy":"org"`, "fleet 21/30\norg example-org 20/20 (blocked)\nowner github:12345 17/20"},
+		{"owner", `"fleet":{"activeLeases":21,"limit":30},"org":{"key":"example-org","activeLeases":17,"limit":30},"admissible":false,"blockedBy":"owner"`, "fleet 21/30\norg example-org 17/30\nowner github:12345 20/20 (blocked)"},
+		{"unlimited", `"fleet":{"activeLeases":21,"limit":null},"org":{"key":"example-org","activeLeases":17,"limit":null},"admissible":true,"blockedBy":null`, "fleet 21/unlimited\norg example-org 17/unlimited\nowner github:12345 17/unlimited"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capacityTestConfig(t)
+			count, limit := 17, 20
+			if tc.name == "owner" {
+				count = 20
+			}
+			if tc.name == "unlimited" {
+				limit = 0
+			}
+			body := fmt.Sprintf(`{"owner":"github:12345","activeLeases":%d,"effectiveLimit":%d,"observedAt":"2026-09-02T12:00:00.000Z",%s}`, count, limit, tc.fields)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, body)
+			}))
+			defer server.Close()
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "synthetic-normal")
+			for _, jsonOut := range []bool{false, true} {
+				var out, stderr bytes.Buffer
+				args := []string{"capacity"}
+				if jsonOut {
+					args = append(args, "--json")
+				}
+				if err := (App{Stdout: &out, Stderr: &stderr}).Run(context.Background(), args); err != nil {
+					t.Fatal(err)
+				}
+				if jsonOut {
+					var got, want map[string]any
+					if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+						t.Fatal(err)
+					}
+					if err := json.Unmarshal([]byte(body), &want); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(got, want) {
+						t.Fatalf("JSON fields changed: %s", &out)
+					}
+				} else {
+					final := "admissible: no — " + tc.name + " cap reached\n"
+					if tc.name == "unlimited" {
+						final = "admissible: yes\n"
+					}
+					if !strings.HasPrefix(out.String(), tc.want+"\n") || !strings.HasSuffix(out.String(), final) {
+						t.Fatalf("unexpected output: %s", &out)
+					}
+				}
 			}
 		})
 	}

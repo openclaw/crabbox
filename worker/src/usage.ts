@@ -37,6 +37,10 @@ export interface OwnerCapacity {
   activeLeases: number;
   effectiveLimit: number;
   observedAt: string;
+  fleet: { activeLeases: number; limit: number | null };
+  org: { key: string; activeLeases: number; limit: number | null };
+  admissible: boolean;
+  blockedBy: "fleet" | "owner" | "org" | null;
 }
 
 export interface UsageFilter {
@@ -175,23 +179,39 @@ export function addLeaseToCostLimitUsage(
   }
 }
 
-export function enforceCostLimitUsage(
+export function activeLeaseLimitBlocker(
   usage: CostLimitUsage,
-  candidate: LeaseRecord,
+  owner: string,
   limits: CostLimits,
-): string {
+): OwnerCapacity["blockedBy"] {
   if (limits.maxActiveLeases > 0 && usage.activeLeases + 1 > limits.maxActiveLeases) {
-    return `active lease limit exceeded: ${usage.activeLeases + 1}/${limits.maxActiveLeases}`;
+    return "fleet";
   }
-  const ownerLimit = activeLeaseLimitForOwner(limits, candidate.owner);
+  const ownerLimit = activeLeaseLimitForOwner(limits, owner);
   if (ownerLimit > 0 && usage.ownerActiveLeases + 1 > ownerLimit) {
-    return `active lease limit for owner exceeded: ${usage.ownerActiveLeases + 1}/${ownerLimit}`;
+    return "owner";
   }
   if (
     limits.maxActiveLeasesPerOrg > 0 &&
     usage.orgActiveLeases + 1 > limits.maxActiveLeasesPerOrg
   ) {
-    return `active lease limit for org exceeded: ${usage.orgActiveLeases + 1}/${limits.maxActiveLeasesPerOrg}`;
+    return "org";
+  }
+  return null;
+}
+
+export function enforceCostLimitUsage(
+  usage: CostLimitUsage,
+  candidate: LeaseRecord,
+  limits: CostLimits,
+): string {
+  switch (activeLeaseLimitBlocker(usage, candidate.owner, limits)) {
+    case "fleet":
+      return `fleet active lease limit exceeded: ${usage.activeLeases + 1}/${limits.maxActiveLeases}`;
+    case "owner":
+      return `active lease limit for owner exceeded: ${usage.ownerActiveLeases + 1}/${activeLeaseLimitForOwner(limits, candidate.owner)}`;
+    case "org":
+      return `active lease limit for org exceeded: ${usage.orgActiveLeases + 1}/${limits.maxActiveLeasesPerOrg}`;
   }
 
   if (overBudget(usage.reservedUSD + candidate.maxEstimatedUSD, limits.maxMonthlyUSD)) {

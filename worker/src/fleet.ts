@@ -482,6 +482,7 @@ import {
   isCoordinatorProvider,
 } from "./types";
 import {
+  activeLeaseLimitBlocker,
   activeLeaseLimitForOwner,
   addLeaseToCostLimitUsage,
   costLimits,
@@ -15781,16 +15782,27 @@ export class FleetCoordinator {
     }
     const now = new Date();
     const owner = requestOwner(request);
+    const org = requestOrg(request, this.env);
     const { costUsage } = await this.mergedLeaseAdmissionState(
-      { owner, org: requestOrg(request, this.env) },
+      { owner, org },
       now,
       await this.readProviderAccessRecords(now.getTime()),
     );
+    const limits = costLimits(this.env);
+    const blockedBy = activeLeaseLimitBlocker(costUsage, owner, limits);
     const capacity: OwnerCapacity = {
       owner,
       activeLeases: costUsage.ownerActiveLeases,
-      effectiveLimit: activeLeaseLimitForOwner(costLimits(this.env), owner),
+      effectiveLimit: activeLeaseLimitForOwner(limits, owner),
       observedAt: now.toISOString(),
+      fleet: { activeLeases: costUsage.activeLeases, limit: limits.maxActiveLeases || null },
+      org: {
+        key: orgLabelForDisplay(org),
+        activeLeases: costUsage.orgActiveLeases,
+        limit: limits.maxActiveLeasesPerOrg || null,
+      },
+      admissible: blockedBy === null,
+      blockedBy,
     };
     return json(capacity);
   }

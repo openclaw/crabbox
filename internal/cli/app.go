@@ -238,7 +238,7 @@ Commands:
   unshare     Remove lease sharing
   image       Create provider images and promote brokered AWS runner images
   usage       Show cost and usage estimates by user, org, or fleet
-  capacity    Show self-owner admission count and effective owner limit
+  capacity    Show fleet, org, and owner lease headroom
   marketplace  Preview the Crabbox credits gateway and smart routing quotes
   admin       Lease admin controls for trusted operators
   actions     Hydrate boxes from repo workflows or GitHub runners
