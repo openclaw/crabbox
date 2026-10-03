@@ -12,6 +12,8 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) BackendCapabilities() core.Backend { return &runpodLeaseBackend{} }
+
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Aliases:          []string{"run-pod", "runpodio"},
