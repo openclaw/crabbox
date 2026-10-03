@@ -212,7 +212,7 @@ describe("usage accounting", () => {
           { ...costLimits({} as never), maxActiveLeases: 1 },
           now,
         ),
-      ).toContain("active lease limit exceeded: 2/1");
+      ).toContain("fleet active lease limit exceeded: 2/1");
       expect(
         enforceCostLimits(
           [existing],

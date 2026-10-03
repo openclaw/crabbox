@@ -13245,7 +13245,7 @@ describe("fleet lease identity and idle", () => {
     const failed = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
     await expect(failed.json()).resolves.toMatchObject({
       status: "failed",
-      message: expect.stringContaining("active lease limit exceeded"),
+      message: expect.stringContaining("fleet active lease limit exceeded"),
     });
     const workspace = storage.value<Record<string, unknown>>(workspaceFixtureKey("fleet-is-118"));
     expect(workspace?.["reconcileAfter"]).toBeUndefined();
@@ -31016,7 +31016,7 @@ describe("fleet lease identity and idle", () => {
     expect(create.status).toBe(429);
     await expect(create.json()).resolves.toMatchObject({
       error: "cost_limit_exceeded",
-      message: "active lease limit exceeded: 2/1",
+      message: "fleet active lease limit exceeded: 2/1",
     });
     expect(created).toBe(false);
 

@@ -49,7 +49,7 @@ type crabboxKongCLI struct {
 	Unshare        unshareKongCmd        `cmd:"" passthrough:"" help:"Remove lease sharing."`
 	Image          imageKongCmd          `cmd:"" help:"Create provider images and promote brokered AWS runner images."`
 	Usage          usageKongCmd          `cmd:"" passthrough:"" help:"Show cost and usage estimates by user, org, or fleet."`
-	Capacity       capacityKongCmd       `cmd:"" passthrough:"" help:"Show self-owner admission count and effective owner limit."`
+	Capacity       capacityKongCmd       `cmd:"" passthrough:"" help:"Show fleet, org, and owner lease headroom."`
 	Marketplace    marketplaceKongCmd    `cmd:"" help:"Preview the Crabbox credits gateway and smart routing quotes."`
 	Admin          adminKongCmd          `cmd:"" help:"Lease admin controls for trusted operators."`
 	Actions        actionsKongCmd        `cmd:"" help:"Register GitHub Actions runners or dispatch workflows."`
