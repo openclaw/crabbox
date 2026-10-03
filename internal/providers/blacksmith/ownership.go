@@ -111,6 +111,7 @@ func resolveOwnedBlacksmithClaim(id string) (core.LeaseClaim, error) {
 
 type blacksmithIdentity struct {
 	ID, State, Workflow, Job, Ref string
+	Created, RunURL               string
 }
 
 var blacksmithStatusHeader = regexp.MustCompile(`^(ID) {2,}(STATUS) {2,}(IP) {2,}(WORKFLOW) {2,}(JOB) {2,}(REF) {2,}(CREATED) {2,}(RUN URL)$`)
@@ -150,7 +151,7 @@ func parseBlacksmithIdentity(output, id string) (blacksmithIdentity, error) {
 			return identity, core.Exit(2, "Blacksmith exact status has misaligned cells")
 		}
 	}
-	identity = blacksmithIdentity{ID: values[0], State: values[1], Workflow: values[3], Job: values[4], Ref: values[5]}
+	identity = blacksmithIdentity{ID: values[0], State: values[1], Workflow: values[3], Job: values[4], Ref: values[5], Created: values[6], RunURL: values[7]}
 	if identity.ID != id || identity.Workflow == "" || identity.Job == "" || identity.Ref == "" || !identity.knownState() {
 		return identity, core.Exit(2, "Blacksmith exact status has missing or mismatched identity/state")
 	}
@@ -297,8 +298,10 @@ func (b *blacksmithBackend) withOwnedTestbox(ctx context.Context, claim core.Lea
 }
 
 type blacksmithReconciledStop struct {
-	result core.LocalCommandResult
-	err    error
+	result     core.LocalCommandResult
+	err        error
+	runURL     string
+	conclusion string
 }
 
 func (b *blacksmithBackend) printStopOutput(result core.LocalCommandResult) {
@@ -310,42 +313,81 @@ func (b *blacksmithBackend) printStopOutput(result core.LocalCommandResult) {
 	}
 }
 
-func (b *blacksmithBackend) terminateTestbox(ctx context.Context, claim core.LeaseClaim) (*blacksmithReconciledStop, error) {
+func (b *blacksmithBackend) terminateTestbox(ctx context.Context, claim core.LeaseClaim) (settled *blacksmithReconciledStop, err error) {
 	identity, err := b.verifyTestbox(ctx, claim)
-	if err != nil || identity.terminal() {
+	if err != nil {
 		return nil, err
 	}
-	result, stopErr := b.runCommand(ctx, blacksmithStopArgs(b.cfg, claim.CloudID), nil, nil)
-	if stopErr != nil {
-		statusErr := blacksmithContextError(ctx, nil)
-		if statusErr == nil {
-			var observed blacksmithIdentity
-			observed, statusErr = b.verifyTestbox(ctx, claim)
-			if statusErr == nil && observed.terminal() {
-				return &blacksmithReconciledStop{result: result, err: stopErr}, nil
-			}
-			if statusErr == nil {
-				statusErr = fmt.Errorf("Testbox state=%s is not completed", observed.State)
-			}
-		}
-		stopErr = errors.Join(stopErr, fmt.Errorf("Blacksmith stop verification failed: %w", statusErr))
+	result := &blacksmithReconciledStop{}
+	if err := blacksmithObserveRunURL(&result.runURL, identity.RunURL); err != nil {
+		return nil, blacksmithSettlementError(claim.LeaseID, err)
 	}
-	// A native error is suppressed only by fresh exact completion evidence.
-	b.printStopOutput(result)
-	if stopErr != nil {
-		return nil, stopErr
+	// A native error can be reconciled only after both the Testbox and its exact
+	// GitHub work settle. Preserve that error through every failed verification.
+	defer func() {
+		if err != nil {
+			b.printStopOutput(result.result)
+			if result.err != nil {
+				err = fmt.Errorf("Blacksmith stop verification failed: %w", err)
+			}
+			err = errors.Join(result.err, err)
+		}
+	}()
+	stop := func() {
+		attempt, stopErr := b.runCommand(ctx, blacksmithStopArgs(b.cfg, claim.CloudID), nil, nil)
+		result.result.Stdout += attempt.Stdout
+		result.result.Stderr += attempt.Stderr
+		if stopErr == nil && attempt.ExitCode != 0 {
+			stopErr = core.Exit(attempt.ExitCode, "Blacksmith native stop failed")
+		}
+		result.err = errors.Join(result.err, stopErr)
+	}
+	// Remember whether native stop had the association. A later association (or
+	// a retained completed claim) permits one further exact native stop attempt.
+	stoppedWithURL := ""
+	if !identity.terminal() {
+		stoppedWithURL = identity.RunURL
+		stop()
+		if err := blacksmithContextError(ctx, nil); err != nil {
+			return nil, err
+		}
+		identity, err = b.verifyTestbox(ctx, claim)
+		if err != nil {
+			return nil, err
+		}
 	}
 	for {
-		identity, err = b.verifyTestbox(ctx, claim)
-		if err != nil || identity.terminal() {
-			return nil, err
+		if err := blacksmithObserveRunURL(&result.runURL, identity.RunURL); err != nil {
+			return nil, blacksmithSettlementError(claim.LeaseID, err)
+		}
+		if identity.terminal() {
+			if result.runURL == "" {
+				return nil, blacksmithSettlementError(claim.LeaseID, errors.New("native completion has no GitHub run association; retry after association becomes available"))
+			}
+			result.conclusion, err = b.githubRunConclusion(ctx, result.runURL)
+			if err != nil {
+				return nil, blacksmithSettlementError(claim.LeaseID, err)
+			}
+			if result.conclusion != "" {
+				return result, nil
+			}
+			if stoppedWithURL != result.runURL {
+				stoppedWithURL = result.runURL
+				stop()
+			}
+		} else if result.err != nil {
+			return nil, fmt.Errorf("Blacksmith stop verification failed: Testbox state=%s is not completed", identity.State)
 		}
 		timer := time.NewTimer(time.Second)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, context.Cause(ctx)
+			return nil, blacksmithSettlementError(claim.LeaseID, context.Cause(ctx))
 		case <-timer.C:
+		}
+		identity, err = b.verifyTestbox(ctx, claim)
+		if err != nil {
+			return nil, err
 		}
 	}
 }

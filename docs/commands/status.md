@@ -30,7 +30,11 @@ Several delegated and direct providers resolve their own native identifiers in
 addition to the Crabbox lease ID and local slug:
 
 - `blacksmith-testbox` — accepts a `tbx_...` ID or local slug; derives a
-  normalized status view from `blacksmith testbox list --all`.
+  normalized status view from exact `blacksmith testbox status --id`, including
+  terminal rows absent from inventory. `--json` without `--wait` returns one
+  snapshot with native `state` and command-readiness `ready`; `completed` does
+  not establish GitHub settlement. Its readiness wait fails with code 5 on
+  `completed` or `hydration_failed`.
 - `blaxel` — accepts a Crabbox lease ID (`blx_<sandbox-id>`) or local slug,
   verifies the local claim against Blaxel ownership labels, and reports the
   sandbox state, endpoint, pond, and readiness.

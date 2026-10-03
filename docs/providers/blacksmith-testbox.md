@@ -191,9 +191,9 @@ Stop, reuse, delegated artifact commands, and one-shot cleanup require the
 unchanged claim. Each operation pins the selected organization and API endpoint
 with explicit native CLI flags and checks the exact Testbox status under the
 claim fence. A stop can cancel an active command without allowing claim writers
-to change its authority. After terminal confirmation, stop takes an exclusive
-fence and rechecks the original claim and native status before removing the claim
-and key. A changed claim or a command that fails to exit within the cleanup
+to change its authority. After native and exact GitHub terminal confirmation, stop takes an exclusive
+fence and rechecks the original claim, native status, run association, and GitHub
+result before removing the key and claim. A changed claim or a command that fails to exit within the cleanup
 deadline leaves local ownership intact. `hydration_failed` prevents reuse but
 still requires confirmed termination for cleanup. Missing, malformed, duplicate or mismatched status is not proof of
 termination. Uncertain cleanup retains ownership; a successful workload with
@@ -220,12 +220,17 @@ finalization failure, preserving the native exit code. Failed-query stderr is
 diagnostic only and never proves completion.
 
 A never-assigned Testbox can move directly from `queued` to `completed`, with
-empty IP and `RUN URL` cells. This permits cleanup only after a successful,
-uncanceled native status query returns the exact owned identity in a complete
-native table, with nonempty `CREATED`, aligned columns, trailing padding through
-the empty `RUN URL` cell, and the final newline. Present run URLs remain
-validated. Missing or failed status is still not completion evidence; the
-exclusive claim/status recheck and key-before-claim finalization remain required.
+empty IP and `RUN URL` cells. This is a valid native snapshot, but it does not
+prove that its dispatched GitHub work settled. Stop returns nonzero and retains
+the claim/key when the exact association or GitHub terminal result is unavailable.
+Retry the same stop after the association appears. An associated run is checked
+with the existing optional `gh` integration using existing access only; missing
+tools or access remain unresolved without automatic installation or login.
+Native stop is the only mutation. Crabbox never cancels GitHub runs directly or
+infers their identity from timing. A terminal GitHub conclusion of success or
+failure establishes settlement as well as cancellation, without claiming that
+Crabbox caused that conclusion. See [stop settlement](../features/blacksmith-testbox.md#forwarded-commands)
+for the verification and retry contract.
 
 Use the same organization/API route when reusing or stopping a lease. Workflow
 flags are still unnecessary for reuse; the provider checks stored native
@@ -247,7 +252,7 @@ blacksmith --org example-org testbox status --id tbx_EXACT_ID
 ```
 
 Verify the final status is terminal, then create a new Crabbox lease. Native stop
-also cancels the backing GitHub Actions run. Do not reconstruct claims from IDs,
+requests native termination; verify the exact associated GitHub work separately before treating recovery as settled. Do not reconstruct claims from IDs,
 inventory or copied metadata.
 
 One-shot runs stop the Testbox and remove the local claim and key after the

@@ -615,16 +615,23 @@ func (b *blacksmithBackend) Status(ctx context.Context, req core.StatusRequest) 
 	if err != nil {
 		return core.StatusView{}, err
 	}
+	bound, err := b.withRoute(ctx)
+	if err != nil {
+		return core.StatusView{}, err
+	}
 	deadline := b.rt.Clock.Now().Add(req.WaitTimeout)
 	var lastState core.StatusView
 	for {
-		state, err := b.blacksmithStatusView(ctx, leaseID)
+		state, err := bound.blacksmithStatusView(ctx, leaseID)
 		if err != nil {
 			return core.StatusView{}, err
 		}
 		lastState = state
 		if !req.Wait || state.Ready {
 			return state, nil
+		}
+		if state.State == "completed" || state.State == "hydration_failed" {
+			return core.StatusView{}, core.Exit(5, "Blacksmith Testbox %s reached state %s before ready", leaseID, state.State)
 		}
 		if b.rt.Clock.Now().After(deadline) {
 			return core.StatusView{}, core.Exit(5, "%s", blacksmithWaitTimeoutMessage(req.ID, lastState.State))
@@ -678,13 +685,11 @@ func (b *blacksmithBackend) stopClaimedTestbox(ctx context.Context, leaseID stri
 	// published in between must survive: only the original snapshot authorizes
 	// finalization, and a stuck command must not make this wait unbounded.
 	err = core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, leaseID, claim, true, func() error {
-		identity, err := bound.verifyTestbox(ctx, claim)
+		conclusion, err := bound.verifySettlement(ctx, claim, reconciled.runURL)
 		if err != nil {
 			return err
 		}
-		if !identity.terminal() {
-			return core.Exit(2, "Blacksmith termination is not confirmed; retaining claim and key")
-		}
+		reconciled.conclusion = conclusion
 		if err := core.RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
 			return fmt.Errorf("Blacksmith local connection artifacts cleanup failed; retaining claim: %w", err)
 		}
@@ -694,8 +699,10 @@ func (b *blacksmithBackend) stopClaimedTestbox(ctx context.Context, leaseID stri
 		bound.printStopOutput(reconciled.result)
 		return errors.Join(reconciled.err, err)
 	}
-	if reconciled != nil {
-		fmt.Fprintf(b.rt.Stderr, "blacksmith cleanup reconciled lease=%s state=completed: stop failed; native status confirmed completion\n", leaseID)
+	if reconciled != nil && reconciled.err != nil {
+		fmt.Fprintf(b.rt.Stderr, "blacksmith cleanup reconciled lease=%s state=completed: stop failed; native status and exact GitHub run confirmed completion conclusion=%s\n", leaseID, reconciled.conclusion)
+	} else if reconciled != nil {
+		bound.printStopOutput(reconciled.result)
 	}
 	return err
 }
@@ -1079,29 +1086,23 @@ func minBlacksmithDuration(left, right time.Duration) time.Duration {
 }
 
 func (b *blacksmithBackend) blacksmithStatusView(ctx context.Context, leaseID string) (core.StatusView, error) {
-	out, err := b.commandOutput(ctx, blacksmithListAllArgs(b.cfg))
+	identity, err := b.inspectTestbox(ctx, leaseID)
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	for _, item := range parseBlacksmithList(out) {
-		if item.ID != leaseID {
-			continue
-		}
-		server := blacksmithItemToServer(item)
-		return core.StatusView{
-			ID:          item.ID,
-			Provider:    blacksmithTestboxProvider,
-			TargetOS:    targetLinux,
-			State:       item.Status,
-			ServerID:    item.ID,
-			ServerType:  "testbox",
-			Labels:      server.Labels,
-			HasHost:     false,
-			Ready:       strings.EqualFold(item.Status, "ready") || strings.EqualFold(item.Status, "running"),
-			IdleTimeout: blacksmithIdleTimeout(b.cfg).String(),
-		}, nil
-	}
-	return core.StatusView{}, core.Exit(4, "blacksmith testbox not found: %s", leaseID)
+	item := blacksmithListItem{ID: identity.ID, Status: identity.State, Workflow: identity.Workflow, Job: identity.Job, Ref: identity.Ref, Created: identity.Created}
+	return core.StatusView{
+		ID:          identity.ID,
+		Provider:    blacksmithTestboxProvider,
+		TargetOS:    targetLinux,
+		State:       identity.State,
+		ServerID:    identity.ID,
+		ServerType:  "testbox",
+		Labels:      blacksmithItemToServer(item).Labels,
+		HasHost:     false,
+		Ready:       identity.State == "ready" || identity.State == "running" || identity.State == "in_progress",
+		IdleTimeout: blacksmithIdleTimeout(b.cfg).String(),
+	}, nil
 }
 
 func blacksmithItemToServer(item blacksmithListItem) core.Server {

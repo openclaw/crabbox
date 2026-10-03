@@ -23,6 +23,9 @@ import (
 type ownershipRunner func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error)
 
 func (f ownershipRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	if result, ok := testCompletedGitHubRead(req); ok {
+		return result, nil
+	}
 	return f(ctx, req)
 }
 
@@ -40,7 +43,7 @@ func TestParseBlacksmithIdentityNeverAssignedCompleted(t *testing.T) {
 	const output = "ID                              STATUS     IP  WORKFLOW                                  JOB  REF                                     CREATED                      RUN URL\n" +
 		"tbx_01aaaaaaaaaaaaaaaaaaaaaaaa  completed      .github/workflows/ci-testing-testbox.yml  go   fix/queue-testbox-cleanup-verification  2026-09-02T13:54:37.000000Z  \n"
 	identity, err := parseBlacksmithIdentity(output, id)
-	if err != nil || identity != (blacksmithIdentity{ID: id, State: "completed", Workflow: ".github/workflows/ci-testing-testbox.yml", Job: "go", Ref: "fix/queue-testbox-cleanup-verification"}) {
+	if err != nil || identity != (blacksmithIdentity{ID: id, State: "completed", Workflow: ".github/workflows/ci-testing-testbox.yml", Job: "go", Ref: "fix/queue-testbox-cleanup-verification", Created: "2026-09-02T13:54:37.000000Z"}) {
 		t.Fatalf("complete native row with empty IP/URL rejected: identity=%+v err=%v", identity, err)
 	}
 }

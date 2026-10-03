@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -41,6 +42,16 @@ func TestBlacksmithNeverAssignedCleanupCLI(t *testing.T) {
 	}
 }
 
+func TestBlacksmithSnapshotCLI(t *testing.T) {
+	if os.Getenv("CRABBOX_TEST_BLACKSMITH_CHILD") == "1" {
+		blacksmithCLIProcess(t, os.Getenv("CRABBOX_TEST_MODE"))
+		return
+	}
+	for _, mode := range []string{"snapshot-queued", "snapshot-completed", "snapshot-wait-completed"} {
+		t.Run(mode, func(t *testing.T) { blacksmithCLIProcess(t, mode) })
+	}
+}
+
 func blacksmithCLIProcess(t *testing.T, mode string) {
 	t.Helper()
 	if os.Getenv("CRABBOX_TEST_BLACKSMITH_CHILD") == "1" {
@@ -48,8 +59,14 @@ func blacksmithCLIProcess(t *testing.T, mode string) {
 		if mode != "run" {
 			os.Args = []string{"crabbox", "stop", "tbx_process123"}
 		}
+		if strings.HasPrefix(mode, "snapshot-") {
+			os.Args = []string{"crabbox", "status", "--id", "tbx_process123", "--json"}
+			if mode == "snapshot-wait-completed" {
+				os.Args = append(os.Args, "--wait")
+			}
+		}
 		main()
-		return
+		os.Exit(0)
 	}
 
 	dirs := testutil.IsolateUserDirs(t)
@@ -82,7 +99,7 @@ func blacksmithCLIProcess(t *testing.T, mode string) {
 		t.Fatal(err)
 	}
 	initialState := "ready    "
-	if neverAssigned {
+	if neverAssigned || mode == "snapshot-queued" {
 		initialState = "queued   "
 	}
 	if err := os.WriteFile(statusPath+".ready", []byte(strings.Replace(nativeStatus.String(), "completed", initialState, 1)), 0o600); err != nil {
@@ -116,7 +133,7 @@ case "$1 $2" in
     n=$((n + 1))
     printf '%s\n' "$n" > "$CRABBOX_TEST_STATUS.count"
     case "$CRABBOX_TEST_MODE:$n" in
-      never-assigned-completed:*) cat "$CRABBOX_TEST_STATUS"; exit 0 ;;
+      never-assigned-completed:*|snapshot-completed:*|snapshot-wait-completed:*) cat "$CRABBOX_TEST_STATUS"; exit 0 ;;
       preflight:1|lookup:2|late-status:3)
         cat "$CRABBOX_TEST_STATUS"
         printf 'Error: authentication unavailable for synthetic status query\n' >&2
@@ -130,6 +147,15 @@ case "$1 $2" in
 esac
 `
 	if err := os.WriteFile(filepath.Join(bin, "blacksmith"), []byte(fake), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gh := `#!/bin/sh
+set -eu
+[ "$1" = api ] && [ "$2" = --hostname ] && [ "$3" = github.com ] && [ "$4" = --method ] && [ "$5" = GET ] || exit 97
+[ "$6" = repos/example-org/my-app/actions/runs/123456789 ] || exit 98
+printf '%s\n' '{"id":123456789,"html_url":"https://github.com/example-org/my-app/actions/runs/123456789","status":"completed","conclusion":"cancelled"}'
+`
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(gh), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	// The child receives only synthetic configuration and test-owned user state.
@@ -196,31 +222,63 @@ esac
 	if neverAssigned {
 		testName = "TestBlacksmithNeverAssignedCleanupCLI"
 	}
+	if strings.HasPrefix(mode, "snapshot-") {
+		testName = "TestBlacksmithSnapshotCLI"
+	}
 	child := exec.CommandContext(t.Context(), binary, "-test.run=^"+testName+"$")
 	child.Env, child.Dir = childEnv, repo
 	var stdout, stderr bytes.Buffer
 	child.Stdout, child.Stderr = &stdout, &stderr
 	err = child.Run()
 	var exitErr *exec.ExitError
-	if neverAssigned {
-		if err != nil {
-			t.Fatalf("never-assigned cleanup failed: %v stdout=%s stderr=%s", err, stdout.String(), stderr.String())
+	if strings.HasPrefix(mode, "snapshot-") {
+		if mode == "snapshot-wait-completed" {
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 5 || !strings.Contains(stderr.String(), "completed before ready") {
+				t.Fatalf("terminal readiness wait: %v stderr=%s", err, stderr.String())
+			}
+		} else {
+			var view cli.StatusView
+			if err != nil || json.Unmarshal(stdout.Bytes(), &view) != nil || view.ID != id || view.State != strings.TrimPrefix(mode, "snapshot-") || view.Ready {
+				t.Fatalf("snapshot: %v stdout=%s stderr=%s", err, stdout.String(), stderr.String())
+			}
 		}
-		wantCalls := "testbox status\ntestbox stop\ntestbox status\ntestbox status\n"
+		calls, readErr := os.ReadFile(callsPath)
+		if readErr != nil || string(calls) != "testbox status\n" {
+			t.Fatalf("snapshot called inventory or mutation: %q %v", calls, readErr)
+		}
+		after, readErr := os.ReadFile(claimPath)
+		if readErr != nil || !bytes.Equal(after, originalClaim) {
+			t.Fatal("snapshot changed claim")
+		}
+		return
+	}
+	if neverAssigned {
+		wantCode := 5
+		if mode == "never-assigned-reconcile" {
+			wantCode = 1
+		}
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != wantCode || !strings.Contains(stderr.String(), "GitHub settlement unresolved") {
+			t.Fatalf("never-assigned cleanup did not report uncertainty: %v stdout=%s stderr=%s", err, stdout.String(), stderr.String())
+		}
+		wantCalls := "testbox status\ntestbox stop\ntestbox status\n"
 		if mode == "never-assigned-completed" {
-			wantCalls = "testbox status\ntestbox status\n"
+			wantCalls = "testbox status\n"
 		}
 		calls, readErr := os.ReadFile(callsPath)
 		if readErr != nil || string(calls) != wantCalls {
 			t.Errorf("unexpected native calls: %q: %v", calls, readErr)
 		}
 		for _, path := range []string{claimPath, filepath.Dir(key)} {
-			if _, err := os.Stat(path); !os.IsNotExist(err) {
-				t.Errorf("cleanup left %s: %v", path, err)
+			if _, err := os.Stat(path); err != nil {
+				t.Errorf("uncertain cleanup removed %s: %v", path, err)
 			}
 		}
-		if strings.Contains(stderr.String(), "cleanup reconciled") != (mode == "never-assigned-reconcile") || strings.Contains(stderr.String(), "Error: stop failed") {
-			t.Errorf("incorrect reconciliation diagnostic: %s", stderr.String())
+		if strings.Contains(stderr.String(), "cleanup reconciled") {
+			t.Errorf("uncertainty reported reconciliation: %s", stderr.String())
+		}
+		after, readErr := os.ReadFile(claimPath)
+		if readErr != nil || !bytes.Equal(after, originalClaim) {
+			t.Error("uncertain cleanup changed the exact claim")
 		}
 		return
 	}
