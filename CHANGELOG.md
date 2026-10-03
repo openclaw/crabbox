@@ -4,7 +4,7 @@
 
 ### Features
 
-- Support fixed idempotent RunPod lease IDs with account-bound replay, lost-create recovery, and durable stop receipts for fixed-lease orchestrators.
+- Support fixed idempotent RunPod lease IDs with account-bound replay, lost-create recovery, and durable stop receipts for fixed-lease orchestrators. [PR 2680](https://github.com/openclaw/crabbox/pull/2680).
 
 ### Credits
 
