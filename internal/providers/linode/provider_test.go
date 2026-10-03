@@ -32,7 +32,7 @@ func TestProviderServerTypeDefaults(t *testing.T) {
 	}{
 		{name: "unsupported target", cfg: core.Config{Class: "standard", TargetOS: core.TargetWindows}},
 		{name: "unsupported architecture", cfg: core.Config{Class: "standard", TargetOS: core.TargetLinux, Architecture: core.ArchitectureARM64}},
-		{name: "legacy input", cfg: core.Config{Class: " STANDARD "}, want: defaultType},
+		{name: "legacy input", cfg: core.Config{Class: " STANDARD "}, want: "g6-standard-4"},
 		{name: "native type preserves spelling", cfg: core.Config{Class: "standard", TargetOS: core.TargetWindows, Linode: core.LinodeConfig{Type: " native-type "}}, want: " native-type "},
 		{name: "explicit type precedes native", cfg: core.Config{Class: "standard", TargetOS: core.TargetWindows, ServerTypeExplicit: true, ServerType: " custom-type ", Linode: core.LinodeConfig{Type: "native-type"}}, want: " custom-type "},
 	} {
@@ -42,7 +42,7 @@ func TestProviderServerTypeDefaults(t *testing.T) {
 			}
 		})
 	}
-	if got := (Provider{}).ServerTypeForConfig(core.Config{Class: "standard"}); got != defaultType {
+	if got := (Provider{}).ServerTypeForConfig(core.Config{Class: "standard"}); got != "g6-standard-4" {
 		t.Fatalf("ServerTypeForConfig standard=%q", got)
 	}
 	if got := (Provider{}).ServerTypeForConfig(core.Config{ServerType: "g6-standard-2", ServerTypeExplicit: true}); got != "g6-standard-2" {
@@ -75,7 +75,7 @@ func TestConfigHelpers(t *testing.T) {
 	if got := linodeImageForConfig(cfg); got != "linode/ubuntu24.04" {
 		t.Fatalf("image=%q", got)
 	}
-	if got := linodeServerTypeForConfig(cfg); got != defaultType {
+	if got := linodeServerTypeForConfig(cfg); got != "g6-standard-16" {
 		t.Fatalf("type=%q", got)
 	}
 	cfg.Linode.Region = "us-sea"
@@ -143,7 +143,7 @@ func TestLinodeBindingRuntime(t *testing.T) {
 	for _, tc := range []struct {
 		cfg  core.Config
 		want string
-	}{{core.Config{}, "g6-standard-1"}, {core.Config{Class: " STANDARD "}, "g6-standard-1"}, {core.Config{ServerType: "ignored", Linode: core.LinodeConfig{Type: " g6-nanode-1 "}}, "g6-nanode-1"}, {core.Config{ServerType: " g6-standard-2 ", ServerTypeExplicit: true, Linode: core.LinodeConfig{Type: "g6-nanode-1"}}, "g6-standard-2"}} {
+	}{{core.Config{}, "g6-standard-1"}, {core.Config{Class: " STANDARD "}, "g6-standard-4"}, {core.Config{ServerType: "ignored", Linode: core.LinodeConfig{Type: " g6-nanode-1 "}}, "g6-nanode-1"}, {core.Config{ServerType: " g6-standard-2 ", ServerTypeExplicit: true, Linode: core.LinodeConfig{Type: "g6-nanode-1"}}, "g6-standard-2"}} {
 		if got := linodeServerTypeForConfig(tc.cfg); got != tc.want {
 			t.Fatalf("type=%q want=%q", got, tc.want)
 		}

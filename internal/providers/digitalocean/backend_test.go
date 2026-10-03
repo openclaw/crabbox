@@ -3875,7 +3875,7 @@ func TestApplyDigitalOceanDefaultsUseProviderDefaults(t *testing.T) {
 	if cfg.SSHUser != "root" || cfg.SSHPort != "22" || len(cfg.SSHFallbackPorts) != 0 {
 		t.Fatalf("effective ssh defaults=%s@:%s fallback=%v", cfg.SSHUser, cfg.SSHPort, cfg.SSHFallbackPorts)
 	}
-	if cfg.ServerType != "s-1vcpu-1gb" {
+	if cfg.ServerType != "g-32vcpu-128gb" {
 		t.Fatalf("ServerType=%q want digitalocean default", cfg.ServerType)
 	}
 }
