@@ -38,11 +38,18 @@ The shape of the output depends on the selected `--provider`:
 
 Providers that do not implement listing exit with an error.
 
-Coordinator listing requests the current lease view and filters ended history
-locally when talking to an older coordinator. At the 1,000-row response limit,
-the CLI warns that older kept leases may be omitted; inspect a known lease with
-`crabbox inspect --provider aws --id <lease-id>`. Updating the coordinator lets
-it filter visible current/retained leases before applying that limit.
+Coordinator listing requests the current lease view in summary pages of at most
+100 stored rows and follows continuation cursors, including empty filtered pages.
+It sorts the combined result newest first. Text and `--json` omit
+`creationEvents`, `telemetryHistory`, and `provisioningAttempts`; use
+`crabbox inspect --provider aws --id <lease-id> --json` for full diagnostics.
+Paging is a live view, so leases created or changed during a listing may require
+a refresh.
+
+With an older coordinator, the CLI falls back to its newest-first response and
+filters ended history locally. At that server's 500-row response cap it warns
+that older kept leases may be omitted; update the coordinator or inspect a known
+lease by exact ID. Older CLI versions retain their existing list API behavior.
 
 ## Refreshing provider state
 
