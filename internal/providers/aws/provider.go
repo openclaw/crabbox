@@ -14,6 +14,8 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) BackendCapabilities() core.Backend { return &awsLeaseBackend{} }
+
 var (
 	_ core.ProviderClassProfileProvider             = Provider{}
 	_ core.ProviderClassSpecProvider                = Provider{}
