@@ -4,6 +4,7 @@
 
 ### Added
 
+- Support fixed idempotent Linode lease IDs with account-bound replay, lost-create recovery, and terminal stop receipts. [PR 2678](https://github.com/openclaw/crabbox/pull/2678).
 - Advertise backend-derived `fixed-lease-id` support in the provider catalog so fixed-lease orchestrators can preflight caller-supplied lease IDs. [PR 2674](https://github.com/openclaw/crabbox/pull/2674).
 
 ### Credits
