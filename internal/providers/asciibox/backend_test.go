@@ -651,7 +651,7 @@ func TestClientPreservesObservedGenerationAfterReadinessFailure(t *testing.T) {
 		newErr:     errors.New("exit status 1"),
 		infoResponses: []string{
 			`{"box":{"id":"bx_2","state":"provisioning","createdAt":"2026-08-30T12:00:00Z"}}`,
-			`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20","createdAt":"2026-08-30T12:00:01Z"}}`,
+			`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20","createdAt":"2026-08-30T12:00:06Z"}}`,
 		},
 	}
 	c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: home, runner: runner}
@@ -662,7 +662,7 @@ func TestClientPreservesObservedGenerationAfterReadinessFailure(t *testing.T) {
 	if box.ID != "bx_2" || box.createdID != "bx_2" || boxCreationTime(box) != "2026-08-30T12:00:00Z" {
 		t.Errorf("creation failure lost its original observed generation: %+v", box)
 	}
-	replacement := &fakeAPI{box: boxData{ID: "bx_2", CreatedAt: "2026-08-30T12:00:01Z", State: "ready", IP: "203.0.113.20"}}
+	replacement := &fakeAPI{box: boxData{ID: "bx_2", CreatedAt: "2026-08-30T12:00:06Z", State: "ready", IP: "203.0.113.20"}}
 	b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
 	if err := b.rollbackBox(context.Background(), replacement, "cbx_123456789abc", box, core.LeaseClaim{}, false); err == nil || replacement.deleted {
 		t.Fatalf("unpublished rollback adopted a later generation: err=%v deleted=%t", err, replacement.deleted)

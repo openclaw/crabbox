@@ -418,7 +418,7 @@ func TestReleaseRetainsUncertainResources(t *testing.T) {
 			case "missing timestamp":
 				f.box.CreatedAt = nil
 			case "changed timestamp":
-				f.box.CreatedAt = "2026-08-30T12:00:01Z"
+				f.box.CreatedAt = "2026-08-30T12:00:06Z"
 			case "lookup 404":
 				f.getHook = func(string) (boxData, error) { return boxData{}, &boxNotFoundError{id: "bx_1"} }
 			case "lookup 404 with failed inventory":
@@ -427,7 +427,7 @@ func TestReleaseRetainsUncertainResources(t *testing.T) {
 			case "lookup 404 with replacement":
 				f.getHook = func(string) (boxData, error) { return boxData{}, &boxNotFoundError{id: "bx_1"} }
 				replacement := f.box
-				replacement.CreatedAt = "2026-08-30T12:00:01Z"
+				replacement.CreatedAt = "2026-08-30T12:00:06Z"
 				f.listHook = func() ([]boxData, error) { return []boxData{replacement}, nil }
 			case "lookup failure":
 				f.getHook = func(string) (boxData, error) { return boxData{}, fmt.Errorf("network unavailable") }
@@ -439,7 +439,7 @@ func TestReleaseRetainsUncertainResources(t *testing.T) {
 				wantDelete = true
 			case "replacement in inventory":
 				replacement := f.box
-				replacement.CreatedAt = "2026-08-30T12:00:01Z"
+				replacement.CreatedAt = "2026-08-30T12:00:06Z"
 				f.listHook = func() ([]boxData, error) { return []boxData{replacement}, nil }
 				wantDelete = true
 			case "cancelled":
@@ -628,7 +628,7 @@ func TestReleaseCompletedWitnessRetainsUncertainResource(t *testing.T) {
 				f.listHook = func() ([]boxData, error) { return []boxData{f.box}, nil }
 			case "replacement inventory":
 				replacement := f.box
-				replacement.CreatedAt = "2026-08-30T12:00:01Z"
+				replacement.CreatedAt = "2026-08-30T12:00:06Z"
 				f.listHook = func() ([]boxData, error) { return []boxData{replacement}, nil }
 			}
 			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil {
@@ -894,7 +894,7 @@ func TestRollbackRetainsChangedOrUnprovenAttempt(t *testing.T) {
 				box.CreatedAt = nil
 				f.box.CreatedAt = nil
 			case "changed generation":
-				box.CreatedAt = "2026-08-30T12:00:01Z"
+				box.CreatedAt = "2026-08-30T12:00:06Z"
 				f.box.CreatedAt = box.CreatedAt
 			case "wrong lease":
 				leaseID = "cbx_abcdef123456"

@@ -71,7 +71,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, fmt.Errorf("ascii-box created %s but could not verify its identity; resource retained: %w", box.ID, err)
 	}
-	if fresh.ID != box.ID || boxCreationTime(fresh) == "" || boxCreationTime(box) != "" && boxCreationTime(fresh) != boxCreationTime(box) {
+	if fresh.ID != box.ID || boxCreationTime(fresh) == "" || boxCreationTime(box) != "" && !boxCreationTimeMatches(fresh, boxCreationTime(box)) {
 		return core.LeaseTarget{}, core.Exit(2, "ascii-box created %s but its creation identity is missing or changed; resource retained", box.ID)
 	}
 	box = mergeBox(box, fresh)
