@@ -12230,6 +12230,7 @@ describe("fleet lease identity and idle", () => {
     storage.seed(`lease:${leaseID}`, {
       ...observed,
       provisioningRecoveryObservedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
     });
 
     await fleet.alarm();
@@ -14156,7 +14157,7 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
-  it("waits for the deployment settle window before reconciling interrupted provisioning", async () => {
+  it("ends the client wait before the deployment settle window for resource recovery", async () => {
     const storage = new MemoryStorage();
     let providerLookups = 0;
     const now = Date.now();
@@ -14202,7 +14203,7 @@ describe("fleet lease identity and idle", () => {
 
     expect(providerLookups).toBe(0);
     const stored = storage.value<LeaseRecord>("lease:cbx_000000000092");
-    expect(stored?.state).toBe("provisioning");
+    expect(stored?.state).toBe("failed");
     expect(Date.parse(stored?.provisioningRecoveryObservedAt ?? "")).toBeGreaterThanOrEqual(now);
     expect(storage.alarm()).toBe(
       Date.parse(stored?.provisioningRecoveryObservedAt ?? "") + 5 * 60_000,
@@ -14802,7 +14803,7 @@ describe("fleet lease identity and idle", () => {
 
     const uncertain = storage.value<LeaseRecord>(`lease:${leaseID}`);
     expect(uncertain).toMatchObject({
-      state: "provisioning",
+      state: "failed",
       provisioningResourceMayExist: true,
       provisioningFailureRetryable: true,
       cleanupError: "provider provisioning was interrupted; provider resource not yet visible",
@@ -15010,6 +15011,7 @@ describe("fleet lease identity and idle", () => {
           nextWake: now + 60_000,
         },
       };
+      let leaseAtTransfer: LeaseRecord | undefined;
       const fleet = testFleet(
         storage,
         {
@@ -15017,6 +15019,7 @@ describe("fleet lease identity and idle", () => {
             provider: "azure",
             onRecoverServer() {
               providerLookups += 1;
+              leaseAtTransfer = storage.value<LeaseRecord>(`lease:${leaseID}`);
               storage.seed(provisioningOperationKey(leaseID), activeOperation);
               if (outcome === "failure") {
                 throw new Error("provider recovery failed after ownership transfer");
@@ -15041,7 +15044,8 @@ describe("fleet lease identity and idle", () => {
 
       expect(providerLookups).toBe(1);
       expect(providerReleases).toBe(0);
-      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toEqual(lease);
+      expect(leaseAtTransfer?.state).toBe("failed");
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toEqual(leaseAtTransfer);
       expect(storage.value<LeaseProvisioningOperation>(provisioningOperationKey(leaseID))).toEqual(
         activeOperation,
       );
@@ -15092,7 +15096,7 @@ describe("fleet lease identity and idle", () => {
 
     const lease = storage.value<LeaseRecord>("lease:cbx_000000000094");
     expect(lease).toMatchObject({
-      state: "provisioning",
+      state: "failed",
       cleanupAttempts: 1,
       cleanupError: "interrupted provisioning recovery failed: azure inventory unavailable",
     });
@@ -15156,7 +15160,7 @@ describe("fleet lease identity and idle", () => {
 
     expect(actions).toEqual(["GetCallerIdentity", "DescribeInstances"]);
     expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
-      state: "provisioning",
+      state: "failed",
       providerScope: "aws:account:123456789012",
       provisioningResourceMayExist: true,
       provisioningFailureRetryable: true,
@@ -15246,7 +15250,7 @@ describe("fleet lease identity and idle", () => {
       ]);
       const lease = storage.value<LeaseRecord>(`lease:${leaseID}`);
       expect(lease).toMatchObject({
-        state: "provisioning",
+        state: "failed",
         cloudID: "",
         provisioningResourceMayExist: true,
         provisioningCoordinatorVersion: "old-version",
@@ -15256,8 +15260,8 @@ describe("fleet lease identity and idle", () => {
         cleanupRetryAt: expect.any(String),
       });
       expect(lease?.provisioningRecoveryMissingSince).toBe(missingSince);
-      expect(lease?.failureError).toBeUndefined();
-      expect(lease?.endedAt).toBeUndefined();
+      expect(lease?.failureError).toContain("provider provisioning was interrupted");
+      expect(lease?.endedAt).toEqual(expect.any(String));
       expect(storage.alarm()).toBeGreaterThan(Date.now());
     },
   );
@@ -29752,7 +29756,7 @@ describe("fleet lease identity and idle", () => {
 
     expect(observedRegions).toEqual(["eu-west-1"]);
     expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
-      state: "provisioning",
+      state: "failed",
       region: "us-east-1",
     });
     expect(
@@ -33385,6 +33389,207 @@ describe("fleet lease identity and idle", () => {
       expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({ state: "released" });
       expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cloudID).toBe("vm-canceled-late");
       expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cleanupStartedAt).toBeUndefined();
+    },
+  );
+
+  it("keeps owned-key cleanup behind the settle window after failing an interrupted create", async () => {
+    const storage = new MemoryStorage();
+    const now = Date.now();
+    const lease = testLease({
+      id: "cbx_ca1100000054",
+      provider: "aws",
+      state: "provisioning",
+      cloudID: "",
+      serverID: 0,
+      serverName: "",
+      host: "",
+      provisioningRequestStartedAt: new Date(now - 60_000).toISOString(),
+      provisioningCoordinatorVersion: "interrupted-runtime",
+      providerKeyCleanupOwned: true,
+      providerKeyCleanupPending: true,
+      expiresAt: new Date(now + 25 * 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    let releases = 0;
+    const fleet = testCoordinator(storage, {
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        onReleaseLease: () => {
+          releases++;
+        },
+      }),
+    });
+    await fleet.alarm();
+    const failed = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+    expect(failed.state).toBe("failed");
+    expect(failed.providerKeyCleanupPending).toBe(true);
+    expect(Date.parse(failed.cleanupRetryAt!)).toBeGreaterThanOrEqual(now + 5 * 60_000);
+    expect(releases).toBe(0);
+  });
+
+  it("ends an already-observed hostless AWS wait without waiting for its cleanup retry", async () => {
+    const storage = new MemoryStorage();
+    const now = Date.now();
+    const lease = testLease({
+      id: "cbx_ca1100000053",
+      provider: "aws",
+      state: "provisioning",
+      cloudID: "",
+      serverID: 0,
+      serverName: "",
+      host: "",
+      createdAt: new Date(now - 25 * 60_000).toISOString(),
+      lastTouchedAt: new Date(now - 25 * 60_000).toISOString(),
+      expiresAt: new Date(now + 60_000).toISOString(),
+      provisioningRequestStartedAt: new Date(now - 25 * 60_000).toISOString(),
+      provisioningCoordinatorVersion: "interrupted-runtime",
+      provisioningRecoveryObservedAt: new Date(now - 20 * 60_000).toISOString(),
+      provisioningRecoveryMissingSince: new Date(now - 15 * 60_000).toISOString(),
+      provisioningResourceMayExist: true,
+      provisioningFailureRetryable: true,
+      cleanupError: "provider provisioning was interrupted; provider resource not yet visible",
+      cleanupRetryAt: new Date(now + 5 * 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    let reads = 0;
+    const fleet = testCoordinator(storage, {
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        onRecoverServer: () => {
+          reads++;
+          return undefined;
+        },
+      }),
+    });
+    await fleet.alarm();
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+      state: "failed",
+      provisioningResourceMayExist: true,
+      provisioningFailureRetryable: true,
+      cleanupRetryAt: lease.cleanupRetryAt,
+      provisioningRecoveryMissingSince: lease.provisioningRecoveryMissingSince,
+    });
+    expect(reads).toBe(0);
+    expect(storage.alarm()).toBeLessThanOrEqual(Date.parse(lease.cleanupRetryAt!));
+  });
+
+  it.each([false, true])(
+    "terminalizes an interrupted AWS create on the first restart tick (late resource=%s)",
+    async (lateResource) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const storage = new MemoryStorage();
+      const started = deferred<void>();
+      const finish = deferred<void>();
+      const leaseID = "cbx_ca1100000052";
+      let creates = 0;
+      let visible = false;
+      const deleted: string[] = [];
+      const provider = fakeProvider(
+        async () => {
+          creates++;
+          started.resolve();
+          await finish.promise;
+          throw new Error("synthetic interrupted create");
+        },
+        {
+          provider: "aws",
+          onRecoverServer: (lease) =>
+            visible
+              ? {
+                  provider: "aws",
+                  id: 123,
+                  cloudID: "i-late",
+                  name: "crabbox-late",
+                  status: "running",
+                  serverType: "c7a.2xlarge",
+                  host: "192.0.2.44",
+                  labels: {
+                    crabbox: "true",
+                    created_by: "crabbox",
+                    lease: leaseID,
+                    owner: "alice_example.com",
+                    provider: "aws",
+                    slug: lease.slug,
+                  },
+                }
+              : undefined,
+          onReleaseLease: (lease) => {
+            deleted.push(lease.cloudID);
+          },
+        },
+      );
+      const env = {
+        CF_VERSION_METADATA: { id: "unchanged-deployment", timestamp: new Date().toISOString() },
+      };
+      provider.attachStorage(storage);
+      const runtime = () =>
+        new FleetCoordinator(new FakeCoordinatorRuntime(storage), env as Env, { aws: provider });
+      const first = runtime();
+      const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+      const create = () =>
+        request("POST", "/v1/leases", {
+          headers,
+          body: {
+            leaseID,
+            createAttemptID: "cat_52000000000000000000000000000052",
+            provider: "aws",
+            sshPublicKey: "ssh-ed25519 restart-test",
+            ttlSeconds: 1500,
+          },
+        });
+      const creating = first.fetch(create());
+      try {
+        await started.promise;
+        const original = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+        expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 60_000);
+        await first.alarm();
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe("provisioning");
+        expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 60_000);
+        const pending = await first.fetch(request("GET", `/v1/leases/${leaseID}`, { headers }));
+        expect(await pending.json()).toMatchObject({
+          lease: { provisioningPhase: "provider-request" },
+        });
+        const restarted = runtime();
+        vi.setSystemTime(Date.now() + 60_000);
+        await restarted.alarm();
+        const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+        expect(failed).toMatchObject({
+          state: "failed",
+          cloudID: "",
+          provisioningResourceMayExist: true,
+          provisioningFailureRetryable: true,
+          provisioningCoordinatorVersion: original.provisioningCoordinatorVersion,
+        });
+        expect(Date.parse(failed.endedAt!)).toBeLessThan(
+          Date.parse(original.createdAt) + 2 * 60_000,
+        );
+        expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 5 * 60_000);
+        const view = await restarted.fetch(request("GET", `/v1/leases/${leaseID}`, { headers }));
+        expect(await view.json()).toMatchObject({
+          lease: { state: "failed", provisioningPhase: "interrupted-recovering" },
+        });
+        const replay = await restarted.fetch(create());
+        expect(replay.status).toBe(409);
+        expect(await replay.json()).toMatchObject({ lease: { state: "failed" } });
+        expect(creates).toBe(1);
+        vi.setSystemTime(Date.now() + 5 * 60_000);
+        await restarted.alarm();
+        const missing = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+        expect(missing).toMatchObject({ state: "failed", provisioningResourceMayExist: true });
+        expect(missing.provisioningRecoveryMissingSince).toBeDefined();
+        visible = lateResource;
+        vi.setSystemTime(Date.now() + 31 * 60_000);
+        await restarted.alarm();
+        expect(deleted).toEqual(lateResource ? ["i-late"] : []);
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.provisioningResourceMayExist).toBe(
+          false,
+        );
+        expect(creates).toBe(1);
+      } finally {
+        finish.resolve();
+        await creating;
+        vi.useRealTimers();
+      }
     },
   );
 
