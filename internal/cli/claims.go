@@ -60,7 +60,8 @@ func (a App) claimsList(ctx context.Context, args []string) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return err
+		// Claim-store failures keep the historical exit code 1 for scripts.
+		return Exit(1, "%v", err)
 	}
 	output := projectLocalClaims(snapshot)
 	if *jsonOut {
