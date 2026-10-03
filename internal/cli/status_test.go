@@ -7,13 +7,44 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestStatusWaitCoordinatorDoesNotRequireDirectClaim(t *testing.T) {
+	var reads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_abcdef123456" {
+			t.Errorf("unexpected coordinator request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		reads.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID: "cbx_abcdef123456", Slug: "fixed-coordinator", Provider: "aws", State: "provisioning",
+		}})
+	}))
+	defer server.Close()
+	configureHeartbeatCoordinatorTest(t, server.URL)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), []string{
+		"status", "--provider", "aws", "--id", "cbx_abcdef123456", "--wait", "--wait-timeout", "100ms",
+	})
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting") || reads.Load() != 1 || stderr.Len() != 0 {
+		t.Fatalf("coordinator wait changed: reads=%d err=%v stderr=%s", reads.Load(), err, &stderr)
+	}
+	if !strings.Contains(stdout.String(), "provider=aws") || !strings.Contains(stdout.String(), "state=provisioning") {
+		t.Fatalf("coordinator snapshot=%s", &stdout)
+	}
+}
 
 func TestMemoryDiagnosticsPresentationRouting(t *testing.T) {
 	for _, mode := range []string{"inspect", "status", "plain-status", "wait", "wait-json", "helper"} {
