@@ -8,6 +8,7 @@
 
 ### Fixes
 
+- Bound coordinator lease-list memory as retained history grows, preserving visibility, filters, and result ordering. [PR 2671](https://github.com/openclaw/crabbox/pull/2671). Thanks @shakkernerd.
 - Retain Blacksmith Testbox claims and keys until the exact associated GitHub work settles, and report exact native queue and terminal status. [PR 2670](https://github.com/openclaw/crabbox/pull/2670). Thanks @shakkernerd.
 - Let the guarded AWS Linux image publisher bake a smaller root snapshot from stock Ubuntu with `linux_root_gb`, keeping candidate, baseline, and promoted proofs on normal sizing.
 - Authenticate hosted Homebrew verifier metadata reads with the workflow's read-only token to avoid anonymous GitHub API rate limits while keeping installation credential-free.
