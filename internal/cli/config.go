@@ -5462,6 +5462,10 @@ func LinodeImageWasExplicit(cfg Config) bool {
 	return cfg.linodeImageExplicit
 }
 
+func LinodeTypeWasExplicit(cfg Config) bool {
+	return cfg.linodeTypeExplicit
+}
+
 func OSImageWasExplicit(cfg Config) bool {
 	return cfg.osImageExplicit
 }

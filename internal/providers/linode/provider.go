@@ -22,7 +22,32 @@ func (Provider) NormalizeConfigForShow(cfg core.Config) core.Config {
 
 var _ core.ProviderClassProfileProvider = Provider{}
 
-var classProfiles = core.UniformLinuxAMD64ClassProfiles(core.ProviderClassMachine{Type: defaultType})
+var classProfiles = buildClassProfiles()
+
+func buildClassProfiles() []core.ProviderClassProfile {
+	// Shapes follow https://api.linode.com/v4/linode/types (memory converted from MiB).
+	machine := func(serverType string, vcpu int, memoryGiB float64) core.ProviderClassMachine {
+		return core.ProviderClassMachine{
+			Type: serverType, Architecture: core.ProviderClassArchitectureAMD64, VCPU: &vcpu,
+			Memory: &core.ProviderMemory{Value: memoryGiB, Unit: core.ProviderMemoryUnitGiB},
+		}
+	}
+	machines := map[string][]core.ProviderClassMachine{
+		"tiny":     {machine("g6-standard-1", 1, 2)},
+		"small":    {machine("g6-standard-2", 2, 4)},
+		"standard": {machine("g6-standard-4", 4, 8)},
+		"fast":     {machine("g6-standard-6", 6, 16)},
+		"large":    {machine("g6-standard-8", 8, 32)},
+		"beast":    {machine("g6-standard-16", 16, 64)},
+	}
+	profiles := make([]core.ProviderClassProfile, 0, len(core.CanonicalProviderClasses()))
+	for _, class := range core.CanonicalProviderClasses() {
+		profiles = append(profiles, core.ProviderClassProfileFromMachines(
+			class, core.TargetLinux, "", core.ProviderClassArchitectureAMD64, machines[class],
+		))
+	}
+	return profiles
+}
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
@@ -50,7 +75,7 @@ func (p Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
 		return cfg.ServerType
 	}
-	if cfg.Linode.Type != "" {
+	if cfg.Linode.Type != "" && linodeTypeOverridesClass(cfg) {
 		return cfg.Linode.Type
 	}
 	return core.ProviderClassPrimaryTypeForProfiles(classProfiles, cfg, linodeServerTypeForClass(cfg.Class))
@@ -58,7 +83,7 @@ func (p Provider) ServerTypeForConfig(cfg core.Config) string {
 
 func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
 	serverType := strings.TrimSpace(cfg.Linode.Type)
-	return serverType, serverType != ""
+	return serverType, serverType != "" && linodeTypeOverridesClass(cfg)
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {

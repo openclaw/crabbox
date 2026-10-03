@@ -64,6 +64,11 @@ Acquisition trims the selected native type. A blank explicit `--type` falls back
 to `linode.type`, then the class default. The create request, lease metadata, and
 recovery records use that same resolved type.
 
+An explicit class selects the corresponding [machine class](../commands/providers.md)
+instead of the inherited `g6-standard-1` default. Explicit `linode.type`
+configuration (including `g6-standard-1`) still takes precedence over the class,
+and `--type` takes precedence over both.
+
 The portable `--os ubuntu:24.04` selector maps to `linode/ubuntu24.04`. Linode
 does not currently offer the portable default Ubuntu 26.04 image in this
 provider, so provisioning with an explicit `--os ubuntu:26.04` is rejected

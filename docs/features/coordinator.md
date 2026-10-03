@@ -351,6 +351,23 @@ This does not enable durable provisioning admission or repair absent ownership
 records. Same-runtime unsettled creates retain the existing protection against
 age-only cleanup; reconstruction uses a fresh runtime generation.
 
+Pending legacy creates retain a maintenance wake at most one minute away. On the
+first tick that observes lost runtime ownership, a hostless interrupted create
+becomes `failed` with `provisioningFailureRetryable=true` and
+`provisioningResourceMayExist=true`. Polling clients stop waiting immediately;
+same-attempt replay returns the terminal lease and its interruption cause.
+Retryable recovery is not permission to allocate again: AWS legacy attempts do
+not retain frozen launch inputs, so recovery never reissues `RunInstances`.
+The five-minute settle and thirty-minute absence-confirmation windows apply only
+to resource recovery and cleanup. A late resource is recovered for cleanup,
+and an empty inventory read does not immediately establish absence.
+
+Lease views expose the nonsecret `provisioningPhase`: `preparing`,
+`provider-request` (the provider call has started; submission is not confirmed),
+`awaiting-instance` (a cloud identity is recorded), or `interrupted-recovering`.
+CLI status/inspect output and create progress include the latest observed phase.
+Before the first create response, progress reports `awaiting-response`.
+
 The fixed-ID `PUT` route is fail-closed and does not replace legacy `POST`.
 It atomically reserves a versioned normalized immutable request hash before
 provider work. An identical owner-scoped replay returns an active lease or the
