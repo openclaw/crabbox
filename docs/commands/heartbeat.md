@@ -69,6 +69,13 @@ tags, while holding the unchanged local claim. Renewals preserve native
 ownership tags, including the full fixed-create fingerprint.
 Waiting for the mutation lock honors request cancellation.
 
+DigitalOcean fixed leases use the account returned by its API, and Azure
+leases use the subscription and resource group resolved by the Azure client
+(including the subscription from `az login`). Heartbeat and `status --wait`
+validate that scope and the exact resource recorded during acquisition;
+incomplete claims and claims for a different account or resource cannot renew
+the lease.
+
 Direct GCP heartbeats persist the idle policy in instance labels.
 `--idle-timeout` replaces the stored window, while omission preserves it.
 The lease's original TTL cap still applies.

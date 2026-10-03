@@ -2,8 +2,8 @@
 
 `crabbox providers` prints the provider capability matrix that the CLI compiles
 in. It is a static report: it reads each registered provider's declared spec and
-does not contact any cloud, check credentials, or query quota. Use
-[`doctor`](doctor.md) when you need live readiness checks.
+offline backend capabilities. It does not contact any cloud, check credentials,
+or query quota. Use [`doctor`](doctor.md) when you need live readiness checks.
 
 ```sh
 crabbox providers
@@ -193,7 +193,7 @@ docker -> local-container
   deprecated: false
   replacement: -
   targets: linux
-  features: browser,cache-volume,cleanup,crabbox-sync,desktop,run-session,ssh,workspace-checkpoint,workspace-fork
+  features: browser,cache-volume,cleanup,crabbox-sync,desktop,fixed-lease-id,run-session,ssh,workspace-checkpoint,workspace-fork
   runtime: interactive,local-runtime,ssh-host
   reachability: ssh-tunnel
   workspace: checkpoint,fork
@@ -227,6 +227,19 @@ It describes the binary's implementation, not whether a particular lease has a
 valid binding. Consumers requiring that behavior must reject a missing feature
 or failed description rather than infer support from `run-artifacts` alone.
 
+`fixed-lease-id` advertises caller-supplied, idempotent lease IDs for
+`warmup --lease-id`. A fixed-lease orchestrator can check `features` in the
+matrix (`crabbox providers --json`) or `capabilities.features` in
+`providers describe <provider> --json` before recording an allocation attempt.
+It can also filter with `crabbox providers --feature fixed-lease-id --json`.
+The feature comes from the backend's `SupportsRequestedLeaseID()` capability;
+coordinator-brokered SSH providers use the coordinator backend's answer. For
+those providers, the flag describes brokered support, not a guarantee for
+direct mode. Configuration-dependent external-provider opt-ins are not inferred
+by this offline catalog. The warmup implementation in `internal/cli/run.go`
+still refuses `--lease-id` with exit 2 when the selected runtime backend lacks
+that capability. Catalog support does not bypass runtime validation.
+
 ### JSON schema v2
 
 Providers that opt into native size selection also include the optional
@@ -254,7 +267,7 @@ deterministic output:
   "family": "container",
   "targets": ["linux"],
   "capabilities": {
-    "features": ["browser", "cache-volume", "cleanup", "crabbox-sync", "desktop", "run-session", "ssh", "workspace-checkpoint", "workspace-fork"],
+    "features": ["browser", "cache-volume", "cleanup", "crabbox-sync", "desktop", "fixed-lease-id", "run-session", "ssh", "workspace-checkpoint", "workspace-fork"],
     "runtime": ["interactive", "local-runtime", "ssh-host"],
     "reachability": ["ssh-tunnel"],
     "workspace": ["checkpoint", "fork"],
@@ -330,7 +343,7 @@ provider filter values:
   kind: delegated-run,service-control,ssh-lease
   category: brokerable-cloud,byo-ssh,ci-proof-runner,delegated-sandbox,direct-cloud,external-provider,gpu-cloud,local-runtime,local-sandbox,local-vm,self-hosted-virtualization,service-control
   target: linux,macos,windows/normal,windows/wsl2,worker-runtime
-  feature: archive-sync,browser,cache-volume,cleanup,code,crabbox-sync,desktop,lease-heartbeat,mcp-attachments,module-run,pause-resume,provider-snapshot,run-artifacts,run-downloads,run-proof,run-session,ssh,tailscale,url-bridge,workspace-checkpoint,workspace-fork,workspace-restore
+  feature: archive-sync,browser,cache-volume,cleanup,code,crabbox-sync,desktop,fixed-lease-id,lease-heartbeat,mcp-attachments,module-run,pause-resume,provider-snapshot,run-artifacts,run-downloads,run-proof,run-session,ssh,tailscale,url-bridge,workspace-checkpoint,workspace-fork,workspace-restore
   runtime: ci-runner,delegated-command,interactive,local-runtime,local-sandbox,managed-sandbox,remote-dev,service-control,ssh-host,worker-module
   reachability: provider-url,ssh-tunnel,tailnet-egress,tailnet-peer
   workspace: checkpoint,fork,restore,snapshot-ref

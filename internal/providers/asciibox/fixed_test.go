@@ -74,6 +74,9 @@ func TestFixedBoxFreshReplayAndConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, _ := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if before.CloudID == "" || before.CloudID != first.Server.CloudID || before.ProviderScope != core.ProviderClaimScope(providerName, b.cfg) {
+		t.Fatalf("fixed acquisition lost heartbeat identity: %+v", before)
+	}
 	if view, err := b.Status(t.Context(), core.StatusRequest{ID: req.RequestedLeaseID}); err != nil || !view.Ready {
 		t.Fatalf("fixed status: %+v %v", view, err)
 	}

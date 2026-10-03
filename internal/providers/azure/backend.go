@@ -287,6 +287,15 @@ func (b *azureLeaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	return fmt.Sprintf("deleted lease=%s server=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 }
 
+func (b *azureLeaseBackend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+	// Resolve the subscription exactly as acquisition does, including az login.
+	client, err := newAzureClient(ctx, b.Cfg)
+	if err != nil {
+		return err
+	}
+	return validateExactAzureClaim(claim, lease.Server, lease.LeaseID, client.LeaseClaimScope())
+}
+
 func (b *azureLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	return b.DirectSSHBackend.Touch(ctx, req, func(ctx context.Context, server core.Server) error {
 		client, err := newAzureClient(ctx, b.Cfg)

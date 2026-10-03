@@ -14,6 +14,8 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) BackendCapabilities() core.Backend { return &azureLeaseBackend{} }
+
 var (
 	_ core.ProviderClassProfileProvider = Provider{}
 	_ core.ProviderClassSpecProvider    = Provider{}
