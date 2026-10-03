@@ -36,6 +36,20 @@ crabbox cleanup --provider linode --dry-run
 numeric Linode instance id. `--type` is the exact Linode type slug; there is no
 separate Linode size flag.
 
+Fixed-lease orchestrators can use `warmup --lease-id cbx_abcdef123456 --keep=true`.
+Repeating the request with the same local state, Linode account, repository, and
+creation inputs reuses the original instance and SSH key. A changed owner or
+intent returns `lease_id_conflict` (exit 4). Fixed claims bind the account EUUID,
+creation fingerprint, and attempt nonce to the instance label and Crabbox tags.
+After a lost create response, replay reconciles that exact attempt from inventory;
+empty or ambiguous inventory retains the claim without allocating a replacement.
+Preserve the local claim and SSH key when recovering an interrupted dispatch.
+
+`inspect`, `status`, `heartbeat`, and `stop` resolve fixed leases by lease ID.
+Stopping retains a terminal receipt, so repeated stops are safe and the released
+ID cannot create another instance. A lost stored SSH key blocks acquisition
+replay; it does not block an identity-verified stop.
+
 ## Configuration
 
 ```yaml
