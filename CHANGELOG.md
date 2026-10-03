@@ -8,6 +8,7 @@
 
 ### Fixes
 
+- Refresh Tenki SSH gateway certificates before new connections so long-running commands retain workspace-owner renewal, collection, and cleanup access; report credential expiry when refresh fails.
 - Bound coordinator lease-list memory as retained history grows, preserving visibility, filters, and result ordering. [PR 2671](https://github.com/openclaw/crabbox/pull/2671). Thanks @shakkernerd.
 - Retain Blacksmith Testbox claims and keys until the exact associated GitHub work settles, and report exact native queue and terminal status. [PR 2670](https://github.com/openclaw/crabbox/pull/2670). Thanks @shakkernerd.
 - Let the guarded AWS Linux image publisher bake a smaller root snapshot from stock Ubuntu with `linux_root_gb`, keeping candidate, baseline, and promoted proofs on normal sizing.

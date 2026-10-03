@@ -91,6 +91,7 @@ func pondMeshExecCommand(ctx context.Context, target SSHTarget, name string, arg
 	applyTargetChildEnvironment(cmd, target)
 	cmd.WaitDelay = pondMeshCancelWaitDelay
 	h := &pondMeshExecHandle{cmd: cmd}
+	h.prepare = func() error { return prepareSSHConnection(ctx, target) }
 	// Kill the owned process tree so ProxyCommand descendants cannot outlive SSH.
 	// A catchable signal could produce a nonzero exit indistinguishable from a
 	// genuine failure; platform hard-kill provenance keeps that distinction.
@@ -101,6 +102,9 @@ func pondMeshExecCommand(ctx context.Context, target SSHTarget, name string, arg
 // Exported tunnels outlive the caller, so they have no CommandContext watchdog.
 func pondMeshDaemonCommand(target SSHTarget, name string, args ...string) *exec.Cmd {
 	cmd := exec.Command(name, args...)
+	if cmd.Err == nil && target.PrepareConnection != nil {
+		cmd.Err = prepareSSHConnection(context.Background(), target)
+	}
 	applyTargetChildEnvironment(cmd, target)
 	configureDaemonCommand(cmd)
 	return cmd
@@ -108,6 +112,7 @@ func pondMeshDaemonCommand(target SSHTarget, name string, args ...string) *exec.
 
 type pondMeshExecHandle struct {
 	cmd      *exec.Cmd
+	prepare  func() error
 	platform pondMeshPlatformState
 	// Set before delivering the kill so a concurrent Wait observes provenance.
 	cancelled atomic.Bool
@@ -116,6 +121,16 @@ type pondMeshExecHandle struct {
 	cancelFailed atomic.Bool
 	cancelErrMu  sync.Mutex
 	cancelErr    error
+}
+
+func (h *pondMeshExecHandle) prepareStart() error {
+	if h.cmd.Err != nil {
+		return h.cmd.Err
+	}
+	if h.prepare != nil {
+		return h.prepare()
+	}
+	return nil
 }
 
 func (h *pondMeshExecHandle) cancelAndKill() error {

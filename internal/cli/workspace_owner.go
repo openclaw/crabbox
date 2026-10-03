@@ -378,7 +378,7 @@ func acquireWorkspaceOwnerWithTransport(ctx context.Context, target SSHTarget, l
 		sent := time.Now()
 		response, callErr := callWorkspaceOwnerTransport(waitCtx, owner.callTimeout(), transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: owner.key, Token: owner.token, TTL: ttl})
 		if callErr != nil {
-			return nil, Exit(7, "acquire remote workspace owner: ambiguous remote state: %v", callErr)
+			return nil, workspaceOwnerCallError("acquire remote workspace owner", callErr)
 		}
 		switch response {
 		case "ACQUIRED", "RECOVERED":
@@ -539,7 +539,7 @@ func (o *workspaceOwner) inspectChild(ctx context.Context) (workspaceOwnerInspec
 	response, err := callWorkspaceOwnerTransport(ctx, o.callTimeout(), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerInspect, Key: o.key, Token: o.token, TTL: o.ttl})
 	if err != nil {
 		err = workspaceOwnerProtocolError(response, err)
-		return workspaceOwnerQuiescent, Exit(7, "confirm remote workspace owner child state: ambiguous remote state: %v", err)
+		return workspaceOwnerQuiescent, workspaceOwnerCallError("confirm remote workspace owner child state", err)
 	}
 	switch response {
 	case "OWNED":
@@ -560,7 +560,7 @@ func (o *workspaceOwner) WaitForChild(ctx context.Context, timeout time.Duration
 		response, err := callWorkspaceOwnerTransport(ctx, min(o.callTimeout(), time.Until(deadline)), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerInspect, Key: o.key, Token: o.token, TTL: o.ttl})
 		if err != nil {
 			err = workspaceOwnerProtocolError(response, err)
-			return Exit(7, "confirm remote workspace phase witness: ambiguous remote state: %v", err)
+			return workspaceOwnerCallError("confirm remote workspace phase witness", err)
 		}
 		switch response {
 		case "CHILD":
@@ -625,11 +625,19 @@ func (o *workspaceOwner) Close(ctx context.Context) (err error) {
 	response, releaseErr := callWorkspaceOwnerTransport(ctx, o.callTimeout(), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerRelease, Key: o.key, Token: o.token, TTL: o.ttl})
 	if releaseErr != nil {
 		releaseErr = workspaceOwnerProtocolError(response, releaseErr)
-		releaseErr = Exit(7, "release remote workspace owner: ambiguous remote state: %v", releaseErr)
+		releaseErr = workspaceOwnerCallError("release remote workspace owner", releaseErr)
 	} else if response != "RELEASED" {
 		releaseErr = Exit(7, "release remote workspace owner failed closed: %s", strings.ToLower(firstNonBlank(response, "ambiguous")))
 	}
 	return errors.Join(renewErr, releaseErr)
+}
+
+func workspaceOwnerCallError(operation string, err error) error {
+	var preparation sshPreparationError
+	if errors.As(err, &preparation) {
+		return Exit(7, "%s: SSH connection preparation failed: %v", operation, err)
+	}
+	return Exit(7, "%s: ambiguous remote state: %v", operation, err)
 }
 
 func (o *workspaceOwner) QuiesceForLeaseRelease(ctx context.Context) error {
