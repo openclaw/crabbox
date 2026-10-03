@@ -19,6 +19,8 @@
 - Let the guarded AWS Linux image publisher bake a smaller root snapshot from stock Ubuntu with `linux_root_gb`, keeping candidate, baseline, and promoted proofs on normal sizing.
 - Authenticate hosted Homebrew verifier metadata reads with the workflow's read-only token to avoid anonymous GitHub API rate limits while keeping installation credential-free.
 - Retry dropped connections in release asset downloads during public release and Homebrew verification instead of failing on one transient network error.
+- Expose the exact Blacksmith workflow association and verified remote settlement through read-only status, including after local claim finalization. [PR 2683](https://github.com/openclaw/crabbox/pull/2683). Thanks @shakkernerd.
+
 
 ## 0.70.0 - 2026-10-01
 
