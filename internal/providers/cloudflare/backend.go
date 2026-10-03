@@ -351,7 +351,10 @@ func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflar
 	if err != nil {
 		if cloudflareRejectedError(err) {
 			if releaseErr := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); releaseErr != nil {
-				err = errors.Join(err, fmt.Errorf("release %s claim %s: %w", providerName, leaseID, releaseErr))
+				// A concurrent stop that already released the claim leaves nothing to release.
+				if _, ok, _ := core.ResolveLeaseClaimForProvider(leaseID, providerName); ok {
+					err = errors.Join(err, fmt.Errorf("release %s claim %s: %w", providerName, leaseID, releaseErr))
+				}
 			}
 			return core.LeaseClaim{}, cloudflareContainer{}, err
 		}

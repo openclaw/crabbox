@@ -186,6 +186,7 @@ export class CrabboxSandbox extends DurableObject<Env> {
     try {
       await this.ensureRunning(meta);
     } catch (error) {
+      if (error instanceof LeaseStoppedError) return this.stoppedDuringCreate();
       const stopped: LeaseMetadata = {
         ...meta,
         state: "stopped",
@@ -196,10 +197,19 @@ export class CrabboxSandbox extends DurableObject<Env> {
       await this.destroyContainer();
       return json({ error: errorMessage(error), ...leaseResponse(stopped) }, 503);
     }
+    // A stop that landed while the container started has already reported
+    // success, so the lease must not come back as running.
+    if ((await this.leaseMeta())?.state !== "running") return this.stoppedDuringCreate();
     const started: LeaseMetadata = { ...meta, containerStarted: true };
     await this.ctx.storage.put(leaseMetaKey, started);
 
     return json(leaseResponse(started, "running"));
+  }
+
+  private async stoppedDuringCreate(): Promise<Response> {
+    await this.destroyContainer();
+    const meta = (await this.leaseMeta()) ?? emptyLeaseMeta();
+    return json({ error: "lease was stopped while it was starting", ...leaseResponse(meta) }, 409);
   }
 
   private async leaseStatus(): Promise<Response> {
@@ -453,6 +463,8 @@ export class CrabboxSandbox extends DurableObject<Env> {
   ): Promise<void> {
     const instance = cleanInstanceType(meta.instanceType) || defaultInstanceType;
     for (let attempt = 1; ; attempt += 1) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- a stop can land between attempts.
+      if ((await this.leaseMeta())?.state !== "running") throw new LeaseStoppedError();
       if (meta.snapshotId === undefined) {
         const image = container.images[meta.image];
         if (!image) throw new Error(`image ${meta.image} is not configured`);
@@ -1036,6 +1048,12 @@ function cleanSandboxID(value: string): string {
 class WorkspaceLostError extends Error {
   constructor() {
     super("container stopped; its workspace is gone");
+  }
+}
+
+class LeaseStoppedError extends Error {
+  constructor() {
+    super("lease was stopped while it was starting");
   }
 }
 
