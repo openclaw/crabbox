@@ -153,6 +153,7 @@ esac
 set -eu
 [ "$1" = api ] && [ "$2" = --hostname ] && [ "$3" = github.com ] && [ "$4" = --method ] && [ "$5" = GET ] || exit 97
 [ "$6" = repos/example-org/my-app/actions/runs/123456789 ] || exit 98
+case "$CRABBOX_TEST_MODE" in snapshot-*) printf 'github read\n' >> "$CRABBOX_TEST_CALLS" ;; esac
 printf '%s\n' '{"id":123456789,"html_url":"https://github.com/example-org/my-app/actions/runs/123456789","status":"completed","conclusion":"cancelled"}'
 `
 	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(gh), 0o700); err != nil {
@@ -241,9 +242,20 @@ printf '%s\n' '{"id":123456789,"html_url":"https://github.com/example-org/my-app
 			if err != nil || json.Unmarshal(stdout.Bytes(), &view) != nil || view.ID != id || view.State != strings.TrimPrefix(mode, "snapshot-") || view.Ready {
 				t.Fatalf("snapshot: %v stdout=%s stderr=%s", err, stdout.String(), stderr.String())
 			}
+			wantSettlement := "pending"
+			if mode == "snapshot-completed" {
+				wantSettlement = "complete"
+			}
+			if view.ProviderMetadata["runURL"] != runURL || view.ProviderMetadata["remoteSettlement"] != wantSettlement || view.CleanupStatus != "" {
+				t.Fatalf("snapshot lost remote/local distinction: %+v", view)
+			}
 		}
 		calls, readErr := os.ReadFile(callsPath)
-		if readErr != nil || string(calls) != "testbox status\n" {
+		wantCalls := "testbox status\n"
+		if mode == "snapshot-completed" {
+			wantCalls += "github read\ntestbox status\n"
+		}
+		if readErr != nil || string(calls) != wantCalls {
 			t.Fatalf("snapshot called inventory or mutation: %q %v", calls, readErr)
 		}
 		after, readErr := os.ReadFile(claimPath)

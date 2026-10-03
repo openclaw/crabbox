@@ -508,6 +508,9 @@ func (b *tenkiBackend) resolveSSHTarget(ctx context.Context, cfg core.Config, se
 		return core.SSHTarget{}, err
 	}
 	target := b.sshTarget(sshCommand, knownHosts, alias)
+	if err := target.PrepareConnection(ctx); err != nil {
+		return core.SSHTarget{}, err
+	}
 	target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v python3 >/dev/null"
 	return target, nil
 }
@@ -929,10 +932,13 @@ func (b *tenkiBackend) sshTarget(output tenkiSSHCommandOutput, knownHosts, alias
 		port = strconv.Itoa(output.Port)
 	}
 	return core.SSHTarget{
-		User:                    core.Blank(strings.TrimSpace(output.User), "tenki"),
-		Host:                    core.Blank(strings.TrimSpace(output.Host), "sandbox"),
-		Key:                     output.IdentityFile,
-		CertificateFile:         output.CertificateFile,
+		User:            core.Blank(strings.TrimSpace(output.User), "tenki"),
+		Host:            core.Blank(strings.TrimSpace(output.Host), "sandbox"),
+		Key:             output.IdentityFile,
+		CertificateFile: output.CertificateFile + ".crabbox.pub",
+		PrepareConnection: func(ctx context.Context) error {
+			return b.refreshSSHCertificate(ctx, output)
+		},
 		KnownHostsFile:          knownHosts,
 		HostKeyAlias:            alias,
 		AuthoritativeKnownHosts: true,
