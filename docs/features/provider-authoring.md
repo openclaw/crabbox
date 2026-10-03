@@ -358,6 +358,16 @@ ProviderConfigShowNormalizer and require actionable provider selection.
 Pick the interface that matches the kind you declared. Both embed `Backend`,
 which only requires `Spec() ProviderSpec`.
 
+For offline backend capability discovery, implement
+`ProviderBackendCapabilitySource.BackendCapabilities()` on the provider. Return
+a metadata-only backend (usually a zero-value backend pointer) whose capability
+methods are safe without runtime configuration, clients, credentials, or side
+effects. The catalog derives `fixed-lease-id` from its
+`IdempotentLeaseIDBackend.SupportsRequestedLeaseID()` result; do not duplicate
+that feature in `Spec().Features`. Coordinator-brokered SSH providers use the
+coordinator wrapper's capability. Discovery never invokes backend lifecycle
+methods or `Configure`.
+
 ### SSH Lease Backend
 
 ```go
