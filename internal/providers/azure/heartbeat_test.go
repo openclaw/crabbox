@@ -2,11 +2,15 @@ package azure
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestFixedAzureHeartbeatAndStatusWait(t *testing.T) {
@@ -51,17 +55,24 @@ func TestFixedAzureHeartbeatAndStatusWait(t *testing.T) {
 					t.Setenv(name, "")
 				}
 				client.tagged = nil
-				args := []string{command, "--provider", "azure", "--id", lease.LeaseID, "--json"}
-				if command == "heartbeat" {
-					args = append(args, "--idle-timeout", "45m")
-				} else {
-					args = append(args, "--wait", "--wait-timeout", "100ms")
-				}
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
 				var stdout, stderr bytes.Buffer
-				err = (core.App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), args)
+				var output io.Writer = &stdout
+				args := []string{command, "--provider", "azure", "--id", lease.LeaseID}
+				if command == "heartbeat" {
+					args = append(args, "--idle-timeout", "45m", "--json")
+				} else {
+					args = append(args, "--wait", "--wait-timeout", "30s")
+					output = testutil.CancelOnWrite(&stdout, cancel)
+				}
+				err = (core.App{Stdout: output, Stderr: &stderr}).Run(ctx, args)
 				if change == "owned" {
 					if len(client.tagged) != 1 || (command == "heartbeat" && err != nil) {
 						t.Fatalf("owned lease not touched: tags=%v err=%v stderr=%s", client.tagged, err, &stderr)
+					}
+					if command == "status" && !errors.Is(err, context.Canceled) {
+						t.Fatalf("status did not finish its first poll: %v", err)
 					}
 				} else if len(client.tagged) != 0 || (command == "heartbeat" && err == nil) {
 					t.Fatalf("foreign claim touched: tags=%v err=%v", client.tagged, err)

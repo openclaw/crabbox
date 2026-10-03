@@ -2,7 +2,9 @@ package digitalocean
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,8 +12,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type heartbeatTransport func(*http.Request) (*http.Response, error)
@@ -24,6 +28,8 @@ func TestFixedDropletHeartbeatAndStatusWait(t *testing.T) {
 			t.Run(command+"/"+change, func(t *testing.T) {
 				api := &fakeDigitalOceanAPI{}
 				b := newTestBackend(t, api)
+				// Ensure renewal changes activity tags even within one wall-clock second.
+				b.RT.Clock = fixedClock{t: time.Now().Add(-time.Minute)}
 				repo := t.TempDir()
 				t.Chdir(repo)
 				req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123456", RequestedSlug: "fixed-heartbeat", Repo: core.Repo{Root: repo}, Keep: true}
@@ -107,17 +113,24 @@ func TestFixedDropletHeartbeatAndStatusWait(t *testing.T) {
 				if change == "scope" || change == "resource" {
 					identifier = claim.Slug
 				}
-				args := []string{command, "--provider", providerName, "--id", identifier, "--json"}
-				if command == "heartbeat" {
-					args = append(args, "--idle-timeout", "45m")
-				} else {
-					args = append(args, "--wait", "--wait-timeout", "100ms")
-				}
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
 				var stdout, stderr bytes.Buffer
-				err = (core.App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), args)
+				var output io.Writer = &stdout
+				args := []string{command, "--provider", providerName, "--id", identifier}
+				if command == "heartbeat" {
+					args = append(args, "--idle-timeout", "45m", "--json")
+				} else {
+					args = append(args, "--wait", "--wait-timeout", "30s")
+					output = testutil.CancelOnWrite(&stdout, cancel)
+				}
+				err = (core.App{Stdout: output, Stderr: &stderr}).Run(ctx, args)
 				if change == "owned" || change == "ordinary" {
 					if writes == 0 || (command == "heartbeat" && err != nil) {
 						t.Fatalf("owned lease not touched: writes=%d err=%v stderr=%s", writes, err, &stderr)
+					}
+					if command == "status" && !errors.Is(err, context.Canceled) {
+						t.Fatalf("status did not finish its first poll: %v", err)
 					}
 					if command == "heartbeat" {
 						var result struct {

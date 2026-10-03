@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestStatusWaitCoordinatorDoesNotRequireDirectClaim(t *testing.T) {
@@ -34,11 +36,13 @@ func TestStatusWaitCoordinatorDoesNotRequireDirectClaim(t *testing.T) {
 	defer server.Close()
 	configureHeartbeatCoordinatorTest(t, server.URL)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), []string{
-		"status", "--provider", "aws", "--id", "cbx_abcdef123456", "--wait", "--wait-timeout", "100ms",
+	err := (App{Stdout: testutil.CancelOnWrite(&stdout, cancel), Stderr: &stderr}).Run(ctx, []string{
+		"status", "--provider", "aws", "--id", "cbx_abcdef123456", "--wait", "--wait-timeout", "30s",
 	})
-	if err == nil || !strings.Contains(err.Error(), "timed out waiting") || reads.Load() != 1 || stderr.Len() != 0 {
+	if !errors.Is(err, context.Canceled) || reads.Load() != 1 || stderr.Len() != 0 {
 		t.Fatalf("coordinator wait changed: reads=%d err=%v stderr=%s", reads.Load(), err, &stderr)
 	}
 	if !strings.Contains(stdout.String(), "provider=aws") || !strings.Contains(stdout.String(), "state=provisioning") {
