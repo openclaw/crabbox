@@ -12,6 +12,8 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) BackendCapabilities() core.Backend { return &backend{} }
+
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Aliases:          []string{"apple", "applecontainer"},

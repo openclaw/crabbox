@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Advertise backend-derived `fixed-lease-id` support in the provider catalog so fixed-lease orchestrators can preflight caller-supplied lease IDs. [PR 2674](https://github.com/openclaw/crabbox/pull/2674).
+
 ### Credits
 
 - Thanks @shakkernerd for [PR 2650](https://github.com/openclaw/crabbox/pull/2650) (cold Actions hydration from GitHub SSH checkouts) and [PR 2651](https://github.com/openclaw/crabbox/pull/2651) (AWS SSH access refresh over IPv4), which shipped in 0.70.0 without the thanks in its notes.

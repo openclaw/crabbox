@@ -11,6 +11,8 @@ func init() { core.RegisterProvider(Provider{}) }
 
 type Provider struct{}
 
+func (Provider) BackendCapabilities() core.Backend { return &backend{} }
+
 var machine0ClassProfiles = buildClassProfiles()
 
 func (Provider) Spec() core.ProviderSpec {
