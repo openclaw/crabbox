@@ -1103,6 +1103,47 @@ describe("Cloudflare runner lifecycle", () => {
     });
   });
 
+  it("does not restart a snapshot lease stopped between start attempts", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
+    const { sandbox, storage, container } = harness();
+    container.failedStartsRemaining = 1;
+
+    const response = createLease(sandbox, { snapshotId: "snap-1" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const stopped = await sandbox.fetch(
+      new Request("http://crabbox.internal/__crabbox/destroy", { method: "DELETE" }),
+    );
+    expect(stopped.status).toBe(200);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const created = await response;
+    expect(created.status).toBe(409);
+    expect(container.started).toHaveLength(1);
+    expect(container.running).toBe(false);
+    await expect(storage.get("crabbox:lease")).resolves.toMatchObject({ state: "stopped" });
+  });
+
+  it("does not publish a lease stopped while its container started", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
+    const { sandbox, storage, container } = harness();
+    container.hangingProbes = 1;
+
+    const response = createLease(sandbox);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const stopped = await sandbox.fetch(
+      new Request("http://crabbox.internal/__crabbox/destroy", { method: "DELETE" }),
+    );
+    expect(stopped.status).toBe(200);
+    // The platform finishes the start the stop raced with.
+    container.start();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    const created = await response;
+    expect(created.status).toBe(409);
+    expect(container.running).toBe(false);
+    await expect(storage.get("crabbox:lease")).resolves.toMatchObject({ state: "stopped" });
+  });
+
   it("does not retry image starts", async () => {
     const { sandbox, container } = harness();
     container.failedStartsRemaining = 1;

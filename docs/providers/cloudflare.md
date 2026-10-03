@@ -380,6 +380,8 @@ crabbox checkpoint fork chk_0123456789abcdef --count 4 --type standard-2 -- pnpm
   `crabbox status --provider cloudflare --id <lease>` or destroy it with
   `crabbox stop --provider cloudflare --id <lease>`. `cleanup` leaves such a
   claim alone for 6.5 minutes in case the request is still in flight.
+- A `stop` that lands while a lease's container is still starting wins: the
+  runner destroys the container, and the create or fork fails with 409.
 - Canceling a command (Ctrl-C, or a dropped connection) sends SIGTERM to the
   command's process group, followed by SIGKILL after 5 seconds, even when the
   cancel arrives before the command has started or the shell exits on SIGTERM.
