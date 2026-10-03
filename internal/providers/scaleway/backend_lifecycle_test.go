@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1693,6 +1694,10 @@ type fakeScalewayClient struct {
 	createErr                   error
 	createCalls                 int
 	createKeyErr                error
+	createKeyCalls              int
+	listErr                     error
+	listEmptyReply              bool
+	beforeCreate                func()
 	getErr                      error
 	getCalls                    int
 	deleteErr                   error
@@ -1731,6 +1736,12 @@ type fakeInstanceAPI struct{ f *fakeScalewayClient }
 
 func (api *fakeInstanceAPI) ListServers(req *instance.ListServersRequest, opts ...scw.RequestOption) (*instance.ListServersResponse, error) {
 	api.f.lastListOptions = len(opts)
+	if api.f.listErr != nil {
+		return nil, api.f.listErr
+	}
+	if api.f.listEmptyReply {
+		return nil, nil
+	}
 	if api.f.servers != nil {
 		return &instance.ListServersResponse{Servers: api.f.servers}, nil
 	}
@@ -1754,6 +1765,9 @@ func (api *fakeInstanceAPI) GetServer(req *instance.GetServerRequest, _ ...scw.R
 }
 
 func (api *fakeInstanceAPI) CreateServer(req *instance.CreateServerRequest, _ ...scw.RequestOption) (*instance.CreateServerResponse, error) {
+	if api.f.beforeCreate != nil {
+		api.f.beforeCreate()
+	}
 	api.f.createCalls++
 	api.f.lastCreate = req
 	if api.f.createErr != nil {
@@ -1893,6 +1907,7 @@ func (api *fakeIAMAPI) GetSSHKey(req *iam.GetSSHKeyRequest, _ ...scw.RequestOpti
 	return nil, errors.New("not found")
 }
 func (api *fakeIAMAPI) CreateSSHKey(req *iam.CreateSSHKeyRequest, _ ...scw.RequestOption) (*iam.SSHKey, error) {
+	api.f.createKeyCalls++
 	key := &iam.SSHKey{ID: "key-1", Name: req.Name, PublicKey: req.PublicKey, ProjectID: req.ProjectID}
 	api.f.keys = append(api.f.keys, key)
 	if api.f.createKeyErr != nil {
@@ -1902,7 +1917,11 @@ func (api *fakeIAMAPI) CreateSSHKey(req *iam.CreateSSHKeyRequest, _ ...scw.Reque
 }
 func (api *fakeIAMAPI) DeleteSSHKey(req *iam.DeleteSSHKeyRequest, _ ...scw.RequestOption) error {
 	api.f.deletedKey = true
-	return api.f.deleteKeyErr
+	if api.f.deleteKeyErr != nil {
+		return api.f.deleteKeyErr
+	}
+	api.f.keys = slices.DeleteFunc(api.f.keys, func(key *iam.SSHKey) bool { return key.ID == req.SSHKeyID })
+	return nil
 }
 
 type fakeMarketplaceAPI struct{}

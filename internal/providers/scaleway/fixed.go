@@ -40,7 +40,9 @@ func (b *Backend) acquireFixed(ctx context.Context, req core.AcquireRequest) (co
 		Kind: fixedLeaseKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root, Reclaim: req.Reclaim,
 		TargetOS: core.TargetLinux, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout, Now: b.clockNow,
 	}, core.FixedLeaseOperations[*instance.Server]{
-		Admission: &core.FixedAdmission{PendingKey: "server", PendingValue: "pending", SubmittedValue: "submitted"}, DeferredAdmission: true,
+		// Replay attaches the same journaled root, whose ownership and detachment
+		// are checked before admission; it never allocates replacement children.
+		Admission: &core.FixedAdmission{RepeatSameIdentity: true, PendingKey: "server", PendingValue: "pending", SubmittedValue: "submitted"}, DeferredAdmission: true,
 		DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 			if exists && (!fixedLeaseKind.IsFixedClaim(*claim) || claim.ProviderScope != client.ProjectID()) {
 				return core.FixedLeaseBinding{}, core.Exit(4, "lease_id_conflict: Scaleway owner or project changed")
@@ -79,6 +81,9 @@ func (b *Backend) acquireFixed(ctx context.Context, req core.AcquireRequest) (co
 				return core.FixedObservation[*instance.Server]{CanSubmit: true}, nil
 			}
 			item, err := b.loadFixedServer(ctx, client, *claim)
+			if err == nil && item == nil {
+				return core.FixedObservation[*instance.Server]{CanSubmit: true}, nil
+			}
 			return core.FixedObservation[*instance.Server]{Candidates: []*instance.Server{item}}, err
 		},
 		Plan: func(ctx context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
@@ -203,6 +208,8 @@ func (b *Backend) validateFixedServer(client Client, claim core.LeaseClaim, item
 	return rootVolumeFromLabels(claim.Labels).validate()
 }
 
+// A nil server without error means complete inventory confirmed an unbound
+// attempt has no server; callers must still attest its children before mutation.
 func (b *Backend) loadFixedServer(ctx context.Context, client Client, claim core.LeaseClaim) (*instance.Server, error) {
 	return core.LookupFixedResource(ctx, fixedLeaseKind, claim, func(ctx context.Context, claim core.LeaseClaim) (*instance.Server, error) {
 		if claim.CloudID != "" {
@@ -215,15 +222,39 @@ func (b *Backend) loadFixedServer(ctx context.Context, client Client, claim core
 			}
 			return response.Server, b.validateFixedServer(client, claim, response.Server)
 		}
-		items, err := b.listScalewayServers(ctx, client)
+		// Read the complete project inventory so a related server with changed
+		// ownership tags cannot be mistaken for an absent submission.
+		response, err := client.Instance().ListServers(&instance.ListServersRequest{Zone: scw.Zone(client.Zone()), Project: scw.StringPtr(client.ProjectID())}, scw.WithContext(ctx), scw.WithAllPages())
 		if err != nil {
 			return nil, err
 		}
-		item, found, err := core.SelectFixedCandidate(fixedLeaseKind, claim.LeaseID, items, func(item *instance.Server) bool {
+		if response == nil {
+			return nil, core.FixedUncertainCustody(claim.LeaseID)
+		}
+		for _, item := range response.Servers {
+			if item == nil {
+				return nil, core.FixedUncertainCustody(claim.LeaseID)
+			}
+			labels := labelsFromTags(item.Tags)
+			if item.Name == core.LeaseProviderName(claim.LeaseID, claim.Slug) || labels["lease"] == claim.LeaseID ||
+				labels["fixed_attempt"] != "" && labels["fixed_attempt"] == claim.FixedCreateIntent.Attempt["nonce"] {
+				if err := b.validateFixedServer(client, claim, item); err != nil {
+					return nil, err
+				}
+			}
+		}
+		item, found, err := core.SelectFixedCandidate(fixedLeaseKind, claim.LeaseID, response.Servers, func(item *instance.Server) bool {
 			return b.validateFixedServer(client, claim, item) == nil
 		})
 		if err == nil && !found {
-			err = core.FixedUncertainCustody(claim.LeaseID)
+			// Admit is durable before the API call. Absence permits recovery only
+			// with this attempt's already-journaled children, revalidated by Submit
+			// or release before any creation or deletion.
+			attempt := claim.FixedCreateIntent.Attempt
+			if attempt["server"] != "submitted" || attempt["key_submitted"] == "" || attempt["volume_submitted"] == "" ||
+				claim.Labels["scaleway_ssh_key_id"] == "" || claim.Labels[rootVolumeLabel] == "" {
+				err = core.FixedUncertainCustody(claim.LeaseID)
+			}
 		}
 		return item, err
 	})

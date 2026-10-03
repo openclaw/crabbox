@@ -35,7 +35,7 @@ func (b *Backend) resolveFixed(ctx context.Context, client Client, req core.Reso
 			if err != nil && !(req.ReleaseOnly && claim.CloudID != "" && isScalewayNotFound(err)) {
 				return core.LeaseTarget{}, err
 			}
-			if err == nil {
+			if err == nil && item != nil {
 				server = b.serverFromScaleway(item)
 				server.ImmutableID = item.ID
 			}
@@ -77,7 +77,8 @@ func (b *Backend) releaseFixed(ctx context.Context, client Client, expected core
 				if err == nil && item != nil {
 					err = tx.Bind(core.FixedResourceBinding{CloudID: item.ID, ImmutableID: item.ID})
 				}
-			} else {
+			}
+			if err == nil && claim.CloudID == "" {
 				err = prepareFixedRoot(ctx, client, tx, false)
 			}
 			if err != nil {

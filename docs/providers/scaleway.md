@@ -50,11 +50,26 @@ settings conflict. Fixed acquisition creates and journals a tagged root volume
 from the image's single root snapshot before submitting the Instance, preserving
 disk ownership even if a create response is lost. Interrupted key and volume
 creation reconcile their original identities without allocating replacements.
-If a submitted resource is not yet observable, retry the same lease ID later;
-empty inventory does not authorize another create. `status`, `stop`, and normal
-lease commands accept that ID. Successful stop retains a terminal claim so the
-ID cannot allocate another machine. Keep the local claim and stored SSH key
-through recovery; images with additional volumes are rejected for fixed leases.
+`status`, `stop`, and normal lease commands accept that ID. Successful stop
+retains a terminal claim so the ID cannot allocate another machine. Keep the
+local claim and stored SSH key through recovery; images with additional volumes
+are rejected for fixed leases.
+
+### Fixed-Lease Recovery
+
+An interruption after server admission is journaled can happen before the server
+request is sent. With no recorded server ID, Crabbox reads the complete project
+inventory. A matching server is recovered; conflicting ownership or a failed
+inventory read blocks recovery. If the read succeeds without a matching server,
+repeating `warmup` may submit the server using the same journaled SSH key and root
+volume, after verifying their ownership and that the volume is detached. It does
+not recreate either child. Alternatively, `stop` deletes those verified children
+and records terminal release without requiring a server.
+
+This recovery requires the exact lease and attempt's journaled child identities
+and matching live ownership evidence. A bound server ID never authorizes a
+replacement server. Interrupted key or volume creation whose original resource
+is not yet observable remains unresolved; retry the same lease ID later.
 
 Those commands create, inspect, resolve, touch, release, and clean up Scaleway
 Instances through the local Scaleway SDK profile. They are cost-bearing when

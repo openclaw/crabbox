@@ -98,6 +98,124 @@ func TestFixedScalewayVolumeJournalPrecedesServer(t *testing.T) {
 	}
 }
 
+func interruptFixedBeforeServer(t *testing.T, backend *Backend, fake *fakeScalewayClient, req core.AcquireRequest) core.LeaseClaim {
+	t.Helper()
+	interrupted := errors.New("interrupted before server submission")
+	fake.beforeCreate = func() { panic(interrupted) }
+	func() {
+		defer func() {
+			if got := recover(); got != interrupted {
+				t.Fatalf("interruption: got %v, want %v", got, interrupted)
+			}
+		}()
+		_, _ = backend.Acquire(t.Context(), req)
+	}()
+	fake.beforeCreate = nil
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.Attempt["server"] != "submitted" || claim.CloudID != "" ||
+		claim.Labels[rootVolumeLabel] == "" || claim.Labels["scaleway_ssh_key_id"] == "" || fake.createCalls != 0 || fake.server != nil ||
+		fake.createVolumeCalls != 1 || fake.createKeyCalls != 1 {
+		t.Fatalf("interrupted journal: %+v err=%v", claim, err)
+	}
+	return claim
+}
+
+func TestFixedScalewayAdmittedWithoutServer(t *testing.T) {
+	for _, operation := range []string{"replay", "stop"} {
+		t.Run(operation, func(t *testing.T) {
+			backend, fake := newTestBackend(t)
+			req := fixedRequest(t)
+			before := interruptFixedBeforeServer(t, backend, fake, req)
+			volumeID, keyID := before.Labels[rootVolumeLabel], before.Labels["scaleway_ssh_key_id"]
+			if operation == "replay" {
+				for range 2 {
+					if _, err := backend.Acquire(t.Context(), req); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if fake.createCalls != 1 || fake.server.Volumes["0"].ID != volumeID || *fake.lastCreate.Volumes["0"].ID != volumeID ||
+					fake.volumes[volumeID].Server.ID != fake.server.ID || len(fake.keys) != 1 || fake.keys[0].ID != keyID {
+					t.Fatal("replay did not attach the original journaled children exactly once")
+				}
+			} else {
+				status, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, StatusOnly: true, NoLocalStateMutations: true})
+				if err != nil || status.Server.CloudID != "" {
+					t.Fatalf("incomplete status: %+v %v", status, err)
+				}
+				for range 2 {
+					lease, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := backend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				terminal, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+				if err != nil || terminal.FixedCreateIntent.State != "released" || len(fake.volumes) != 0 || len(fake.keys) != 0 ||
+					fake.server != nil || len(fake.servers) != 0 || fake.createCalls != 0 || fake.deletedServer {
+					t.Fatalf("child-only stop: %+v err=%v volumes=%v keys=%v", terminal, err, fake.volumes, fake.keys)
+				}
+				if _, err := backend.Acquire(t.Context(), req); core.ExitCodeForError(err, 1) != 4 {
+					t.Fatalf("terminal replay: %v", err)
+				}
+			}
+			if fake.createVolumeCalls != 1 || fake.createKeyCalls != 1 {
+				t.Fatal("recovery allocated replacement children")
+			}
+		})
+	}
+}
+
+func TestFixedScalewayAdmittedRecoveryRefusesUncertainOwnership(t *testing.T) {
+	for _, change := range []string{"inventory error", "empty inventory reply", "volume attempt", "attached volume", "key project", "server attempt", "server tags"} {
+		t.Run(change, func(t *testing.T) {
+			backend, fake := newTestBackend(t)
+			req := fixedRequest(t)
+			before := interruptFixedBeforeServer(t, backend, fake, req)
+			volume := fake.volumes[before.Labels[rootVolumeLabel]]
+			inventoryErr := errors.New("inventory unavailable")
+			switch change {
+			case "inventory error":
+				fake.listErr = inventoryErr
+			case "empty inventory reply":
+				fake.listEmptyReply = true
+			case "volume attempt":
+				labels := labelsFromTags(volume.Tags)
+				labels["fixed_attempt"] = "other-attempt"
+				volume.Tags = tagsFromLabels(labels)
+			case "attached volume":
+				volume.Server = &instance.ServerSummary{ID: "other-server"}
+			case "key project":
+				fake.keys[0].ProjectID = "other-project"
+			case "server attempt", "server tags":
+				labels := maps.Clone(before.Labels)
+				labels["fixed_attempt"] = "other-attempt"
+				fake.server = testServer("foreign-server", core.LeaseProviderName(before.LeaseID, before.Slug), tagsFromLabels(labels), "203.0.113.10")
+				if change == "server tags" {
+					fake.server.Tags = nil
+				}
+			}
+			_, acquireErr := backend.Acquire(t.Context(), req)
+			releaseErr := backend.releaseFixed(t.Context(), fake, before)
+			if acquireErr == nil || releaseErr == nil {
+				t.Fatalf("unproven recovery: acquire=%v release=%v", acquireErr, releaseErr)
+			}
+			if change == "inventory error" {
+				_, resolveErr := backend.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true})
+				if !errors.Is(acquireErr, inventoryErr) || !errors.Is(releaseErr, inventoryErr) || !errors.Is(resolveErr, inventoryErr) {
+					t.Fatalf("lost inventory error: acquire=%v release=%v resolve=%v", acquireErr, releaseErr, resolveErr)
+				}
+			}
+			claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil || claim.FixedCreateIntent.State == "released" || fake.createCalls != 0 || fake.createVolumeCalls != 1 ||
+				fake.createKeyCalls != 1 || len(fake.volumes) != 1 || len(fake.keys) != 1 || fake.deletedKey || fake.deletedServer {
+				t.Fatalf("refusal changed resources or released claim: %+v err=%v", claim, err)
+			}
+		})
+	}
+}
+
 func TestFixedScalewayUsesEffectiveMachineType(t *testing.T) {
 	for _, explicit := range []bool{false, true} {
 		t.Run(map[bool]string{false: "inherited default", true: "explicit override"}[explicit], func(t *testing.T) {
