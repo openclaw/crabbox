@@ -165,6 +165,12 @@ process argument. Managed targets without an explicit SSH-config route also
 exclude ambient identity files and agents. Ordinary keyed commands retain their
 multiplexing policy.
 
+Providers with expiring SSH credentials may set `SSHTarget.PrepareConnection`
+to refresh their credential files before each new SSH or file-transfer transport.
+The callback must honor cancellation, bound its own work, synchronize concurrent
+callers, and preserve the target's paths and established connections. Credential
+policy and caching remain provider-owned; callback errors prevent dispatch.
+
 `--no-sync` is validated by each adapter, not inferred from `FeatureArchiveSync`:
 some SDK/CLI transports support it without archive sync. An adapter that cannot
 skip transfer must reject it before acquisition or provider execution. Blacksmith

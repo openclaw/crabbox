@@ -55,6 +55,8 @@ type SSHTarget struct {
 	// Transport-only overrides can contain credentials; never serialize them.
 	ChildEnv          map[string]string `json:"-"`
 	DiagnosticSecrets []string          `json:"-"` // Provider credentials echoed by local authentication hooks.
+	// Refresh provider-owned credential files before a new transport starts.
+	PrepareConnection func(context.Context) error `json:"-"`
 }
 
 func isLocalMacTarget(target SSHTarget) bool {
@@ -247,6 +249,9 @@ func sshCommandContext(ctx context.Context, target SSHTarget, args ...string) *e
 	if cmd.Err == nil {
 		cmd.Err = context.Cause(ctx)
 		if cmd.Err == nil {
+			cmd.Err = prepareSSHConnection(ctx, target)
+		}
+		if cmd.Err == nil {
 			cmd.Err = ensureSSHControlDirectory(target)
 		}
 	}
@@ -256,6 +261,18 @@ func sshCommandContext(ctx context.Context, target SSHTarget, args ...string) *e
 	cmd.WaitDelay = sshCommandWaitDelay
 	applyTargetChildEnvironment(cmd, target)
 	return cmd
+}
+
+func prepareSSHConnection(ctx context.Context, target SSHTarget) error {
+	if err := context.Cause(ctx); err != nil {
+		return sshPreparationError{err}
+	}
+	if target.PrepareConnection != nil {
+		if err := target.PrepareConnection(ctx); err != nil {
+			return sshPreparationError{err}
+		}
+	}
+	return nil
 }
 
 func waitForSSH(ctx context.Context, target *SSHTarget, stderr io.Writer) error {

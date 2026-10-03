@@ -13,6 +13,8 @@
 
 ### Fixes
 
+- End interrupted coordinator provisioning waits on the first recovery tick, retain safe cleanup of uncertain cloud resources, and show the current attempt phase in lease diagnostics. [PR 2677](https://github.com/openclaw/crabbox/pull/2677).
+- Refresh Tenki SSH gateway certificates before new connections so long-running commands retain workspace-owner renewal, collection, and cleanup access; report credential expiry when refresh fails. [PR 2675](https://github.com/openclaw/crabbox/pull/2675).
 - Allow heartbeat and `status --wait` to renew owned direct fixed leases on DigitalOcean and Azure by validating the acquired account scope and exact resource identity. [PR 2673](https://github.com/openclaw/crabbox/pull/2673).
 - Page coordinator CLI lists with compact summaries, bound slug lookup and durable admission memory, keep identity/list reads out of the lifecycle queue, and arm cleanup recovery before provider I/O; preserve legacy list and full inspect responses.
 - Bound coordinator lease-list memory as retained history grows, preserving visibility, filters, and result ordering. [PR 2671](https://github.com/openclaw/crabbox/pull/2671). Thanks @shakkernerd.
@@ -20,6 +22,8 @@
 - Let the guarded AWS Linux image publisher bake a smaller root snapshot from stock Ubuntu with `linux_root_gb`, keeping candidate, baseline, and promoted proofs on normal sizing.
 - Authenticate hosted Homebrew verifier metadata reads with the workflow's read-only token to avoid anonymous GitHub API rate limits while keeping installation credential-free.
 - Retry dropped connections in release asset downloads during public release and Homebrew verification instead of failing on one transient network error.
+- Expose the exact Blacksmith workflow association and verified remote settlement through read-only status, including after local claim finalization. [PR 2683](https://github.com/openclaw/crabbox/pull/2683). Thanks @shakkernerd.
+
 
 ## 0.70.0 - 2026-10-01
 
