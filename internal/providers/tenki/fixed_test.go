@@ -117,11 +117,12 @@ func newFixedTenkiTest(t *testing.T) (*tenkiBackend, *fixedTenkiRunner, core.Acq
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	dir := t.TempDir()
 	f := &fixedTenkiRunner{sessions: map[string]tenkiSession{}, calls: map[string]int{}, key: filepath.Join(dir, "key"), cert: filepath.Join(dir, "cert"), knownHosts: filepath.Join(dir, "known_hosts")}
-	for _, path := range []string{f.key, f.cert, f.knownHosts} {
+	for _, path := range []string{f.key, f.knownHosts} {
 		if err := os.WriteFile(path, []byte("fake SSH material"), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
+	writeCredentialTestCert(t, f.cert, "session-1")
 	oldWait := waitForSSHReadyFunc
 	waitForSSHReadyFunc = func(ctx context.Context, _ *core.SSHTarget, _ io.Writer, _ string, _ time.Duration) error {
 		return ctx.Err()
@@ -141,7 +142,7 @@ func TestTenkiFixedAcquireReplay(t *testing.T) {
 	if first.LeaseID != req.RequestedLeaseID {
 		t.Fatalf("lease ID = %s, want caller ID %s", first.LeaseID, req.RequestedLeaseID)
 	}
-	if first.SSH.Key != f.key || first.SSH.CertificateFile != f.cert || first.SSH.KnownHostsFile != f.knownHosts ||
+	if first.SSH.Key != f.key || first.SSH.CertificateFile != f.cert+".crabbox.pub" || first.SSH.KnownHostsFile != f.knownHosts ||
 		!first.SSH.AuthoritativeKnownHosts || first.SSH.DisableHostKeyChecking || !first.SSH.SSHConfigProxy {
 		t.Fatalf("fixed acquisition did not preserve Tenki-managed credentials and host authority: %+v", first.SSH)
 	}

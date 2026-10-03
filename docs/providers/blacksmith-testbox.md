@@ -384,3 +384,52 @@ Related docs:
 
 - [Feature: Blacksmith Testbox](../features/blacksmith-testbox.md)
 - [Provider backends](../provider-backends.md)
+
+## Read-only remote settlement
+
+`status --json` and `inspect --json` expose native state and command readiness
+unchanged. Their `providerMetadata` adds these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `runURL` | Exact native GitHub workflow run URL, present only when its supported github.com format is valid. |
+| `remoteSettlement` | `complete` only after native `completed`, a supported terminal conclusion from the exact GitHub run, and a matching second native identity snapshot; `pending` for a valid association whose native state or GitHub run is not complete; `unknown` when evidence is missing, invalid, changed, inaccessible or unsupported. |
+| `runConclusion` | GitHub terminal conclusion, present only with verified `complete`; failure or cancellation also establishes settlement. |
+
+For example, a verified terminal snapshot includes:
+
+```json
+{
+  "state": "completed",
+  "ready": false,
+  "providerMetadata": {
+    "runURL": "https://github.com/example-org/my-app/actions/runs/123",
+    "remoteSettlement": "complete",
+    "runConclusion": "cancelled"
+  }
+}
+```
+
+This evidence describes remote settlement at observation time, not local claim
+or key finalization; it does not set `cleanupStatus`. A successful JSON command
+exits zero even for `unknown` or `pending`: callers must check the metadata.
+An initial native read/parse failure or any cancellation/deadline failure exits
+nonzero and provides no successful snapshot. A failed or mismatched confirmation
+read returns zero with `unknown`. Missing or denied existing `gh` access also
+leaves settlement `unknown` without exposing GitHub diagnostics.
+
+A non-waiting snapshot has a ten-second total provider-read budget. Ordinary
+active/ready polling makes no GitHub request. Only native `completed` with a valid
+association performs at most one exact GitHub GET, followed by at most one native
+confirmation read. There is no run search, background polling, credential
+acquisition, persisted verification, or provider/local-state mutation. Readiness
+waits retain their existing meaning and fail with code 5 on native `completed`
+or `hydration_failed`; they do not wait for settlement.
+
+After a stop succeeds but its acknowledgment is lost and the local claim is
+already finalized, read the retained exact native ID with an explicit provider
+and the original organization/API route. Compare `runURL` with any association
+you previously retained and require `remoteSettlement == "complete"`. An
+association change during verification remains `unknown`; changes between
+separate calls must be checked by the caller against its retained identity.
+The observation cannot authorize another stop or reconstruct local ownership.
