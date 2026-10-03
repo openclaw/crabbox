@@ -4,7 +4,7 @@
 
 ### Added
 
-- Support fixed idempotent Linode lease IDs with account-bound replay, lost-create recovery, and terminal stop receipts.
+- Support fixed idempotent Linode lease IDs with account-bound replay, lost-create recovery, and terminal stop receipts. [PR 2678](https://github.com/openclaw/crabbox/pull/2678).
 
 ### Credits
 
