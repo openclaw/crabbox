@@ -17,6 +17,10 @@ func (c *AzureClient) verifyAzureOrphanResourcesAbsent(ctx context.Context, expe
 	if err := ValidateAzureOwnedVM(expected, expected); err != nil {
 		return err
 	}
+	return c.verifyAzureFixedResourcesAbsent(ctx, expected)
+}
+
+func (c *AzureClient) verifyAzureFixedResourcesAbsent(ctx context.Context, expected Server) error {
 	labels, name := expected.Labels, expected.CloudID
 	if name != LeaseProviderName(labels["lease"], labels["slug"]) ||
 		labels["provider_key"] != ProviderKeyForLease(labels["lease"]) ||

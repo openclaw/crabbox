@@ -42,6 +42,9 @@ type fakeAzureClient struct {
 	createCfg         core.Config
 	createErr         error
 	fixedReplyErr     error
+	fixedCapacityErr  error
+	fixedSettleErr    error
+	fixedSettled      []core.AzureFixedCompanions
 	createFunc        func(core.Server) core.Server
 	waitFunc          func(core.Server) (core.Server, error)
 	waitCalls         int

@@ -939,17 +939,39 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 
 // CreateFixedServer submits one candidate. Its adapter persists the attempt
 // first and owns reconciliation; ambiguous failures must not trigger rollback.
-func (c *AzureClient) CreateFixedServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, labels map[string]string) (Server, error) {
+// AzureFixedCompanions is the pre-VM network custody recorded in the fixed
+// claim before the allocating VM request is sent.
+type AzureFixedCompanions struct {
+	NICGUID, PublicIPGUID string
+}
+
+type AzureFixedVMShortage struct {
+	Code string
+	Err  error
+}
+
+func (e *AzureFixedVMShortage) Error() string { return e.Err.Error() }
+func (e *AzureFixedVMShortage) Unwrap() error { return e.Err }
+
+func azureFixedVMShortage(err error, terminal bool) error {
+	var response *azcore.ResponseError
+	if terminal && errors.As(err, &response) && (response.ErrorCode == "AllocationFailed" || response.ErrorCode == "ZonalAllocationFailed") {
+		return &AzureFixedVMShortage{Code: response.ErrorCode, Err: err}
+	}
+	return err
+}
+
+func (c *AzureClient) CreateFixedServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, labels map[string]string, recordCompanions func(AzureFixedCompanions) error) (Server, error) {
 	if _, err := c.validatedAzureOSDiskMode(ctx, cfg); err != nil {
 		return Server{}, err
 	}
 	if err := c.EnsureSharedInfra(ctx); err != nil {
 		return Server{}, err
 	}
-	return c.createServerStepsWithLabels(ctx, cfg, publicKey, leaseID, slug, LeaseProviderName(leaseID, slug), false, labels)
+	return c.createServerStepsWithLabels(ctx, cfg, publicKey, leaseID, slug, LeaseProviderName(leaseID, slug), false, labels, recordCompanions)
 }
 
-func (c *AzureClient) createServerStepsWithLabels(ctx context.Context, cfg Config, publicKey, leaseID, slug, name string, keep bool, labels map[string]string) (Server, error) {
+func (c *AzureClient) createServerStepsWithLabels(ctx context.Context, cfg Config, publicKey, leaseID, slug, name string, keep bool, labels map[string]string, recordCompanions ...func(AzureFixedCompanions) error) (Server, error) {
 	pipName := name + "-pip"
 	nicName := name + "-nic"
 	diskName := name + "-osdisk"
@@ -998,6 +1020,14 @@ func (c *AzureClient) createServerStepsWithLabels(ctx context.Context, cfg Confi
 	}
 	if err != nil {
 		return Server{}, err
+	}
+	if len(recordCompanions) != 0 && recordCompanions[0] != nil {
+		if network.nicGUID == "" || network.publicIPGUID == "" {
+			return Server{}, errors.New("Azure fixed network lacks immutable companion identities")
+		}
+		if err := recordCompanions[0](AzureFixedCompanions{NICGUID: network.nicGUID, PublicIPGUID: network.publicIPGUID}); err != nil {
+			return Server{}, fmt.Errorf("record Azure fixed companion custody: %w", err)
+		}
 	}
 
 	var osProfile *armcompute.OSProfile
@@ -1077,6 +1107,12 @@ func (c *AzureClient) createServerStepsWithLabels(ctx context.Context, cfg Confi
 	}
 	vmResp, err := vmPoller.PollUntilDone(ctx, nil)
 	if err != nil {
+		// A failed polling HTTP request can carry an Azure error code
+		// without ending the allocation LRO. Only its terminal result is
+		// a definite VM rejection.
+		if labels["fixed_attempt"] != "" {
+			err = azureFixedVMShortage(err, vmPoller.Done())
+		}
 		return Server{}, fmt.Errorf("vm: %w", err)
 	}
 	createdVM := vmResp.VirtualMachine
@@ -1224,6 +1260,8 @@ type azureSnapshotPrerequisiteResult struct {
 type azureLeaseNetwork struct {
 	id               string
 	nicCreateRequest armnetwork.Interface
+	nicGUID          string
+	publicIPGUID     string
 }
 
 func runAzureSnapshotPrerequisites(
@@ -1315,7 +1353,15 @@ func (c *AzureClient) createLeaseNetwork(ctx context.Context, pipName, nicName, 
 	if nicResp.ID == nil || *nicResp.ID == "" {
 		return azureLeaseNetwork{}, errors.New("nic has no resource id")
 	}
-	return azureLeaseNetwork{id: *nicResp.ID, nicCreateRequest: nicCreateRequest}, nil
+	var pipGUID, nicGUID string
+	if pipResp.Properties != nil {
+		pipGUID = stringValue(pipResp.Properties.ResourceGUID)
+	}
+	if nicResp.Properties != nil {
+		nicGUID = stringValue(nicResp.Properties.ResourceGUID)
+	}
+	return azureLeaseNetwork{id: *nicResp.ID, nicCreateRequest: nicCreateRequest,
+		nicGUID: nicGUID, publicIPGUID: pipGUID}, nil
 }
 
 func (c *AzureClient) createManagedDiskFromSnapshot(ctx context.Context, diskName, snapshotID, sku string, tags map[string]*string) (string, error) {

@@ -30,6 +30,15 @@ type FixedCreateRejected struct{ Err error }
 func (e *FixedCreateRejected) Error() string { return e.Err.Error() }
 func (e *FixedCreateRejected) Unwrap() error { return e.Err }
 
+// CanSettleCreateRejection fences provider cleanup to this transaction's
+// first unallocated submission. Cleanup must not run for a replayed attempt.
+func (tx *FixedTransaction) CanSettleCreateRejection(kind FixedLeaseKind) bool {
+	intent := tx.Claim.FixedCreateIntent
+	return kind.IsFixedClaim(*tx.Claim) && tx.initialUnallocated &&
+		intent.State == "prepared" && tx.Claim.CloudID == "" && tx.Claim.CloudImmutableID == "" &&
+		intent.Journal != nil && (intent.Journal.Phase == "prepared" || intent.Journal.Phase == "submitting")
+}
+
 // Retire only this transaction's first, unallocated attempt under its claim
 // fence. A rejection on replay cannot disprove an earlier uncertain submission.
 func (tx *FixedTransaction) settleCreateRejection(kind FixedLeaseKind, cause error) error {
@@ -37,10 +46,7 @@ func (tx *FixedTransaction) settleCreateRejection(kind FixedLeaseKind, cause err
 	if !errors.As(cause, &rejected) {
 		return cause
 	}
-	intent := tx.Claim.FixedCreateIntent
-	if !kind.IsFixedClaim(*tx.Claim) || !tx.initialUnallocated ||
-		intent.State != "prepared" || tx.Claim.CloudImmutableID != "" || intent.Journal == nil ||
-		(intent.Journal.Phase != "prepared" && intent.Journal.Phase != "submitting") {
+	if !tx.CanSettleCreateRejection(kind) {
 		return errors.Join(cause, Exit(4, "lease_id_conflict: rejection cannot settle an earlier or bound fixed attempt; claim retained"))
 	}
 	path, err := leaseClaimPath(tx.leaseID)
@@ -55,6 +61,9 @@ func (tx *FixedTransaction) settleCreateRejection(kind FixedLeaseKind, cause err
 	}
 	if kind.RemoveKeyAfterRejection {
 		return errors.Join(cause, RemoveStoredTestboxConnectionArtifacts(tx.leaseID))
+	}
+	if outcome, ok := rejected.Err.(interface{ FixedRejectionSettled() error }); ok {
+		return outcome.FixedRejectionSettled()
 	}
 	return cause
 }

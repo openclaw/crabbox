@@ -140,6 +140,43 @@ func TestAzureOrphanCleanupAbsent(t *testing.T) {
 	}
 }
 
+func TestAzureFixedRejectedCompanionSettlement(t *testing.T) {
+	for _, scenario := range []string{"owned", "borrowed NIC", "changed attempt", "attached NIC", "borrowed public IP", "uncertain read", "remaining disk", "VM appeared"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newAzureOrphanFixture(t)
+			f.server.ImmutableID = ""
+			delete(f.objects, f.server.CloudID+"-osdisk")
+			delete(f.objects, f.server.CloudID+"-q-nsg")
+			f.allowDelete = true
+			binding := AzureFixedCompanions{NICGUID: "-nic-guid", PublicIPGUID: "-pip-guid"}
+			switch scenario {
+			case "borrowed NIC":
+				f.objects[f.server.CloudID+"-nic"]["properties"].(map[string]any)["resourceGuid"] = "replacement"
+			case "changed attempt":
+				f.objects[f.server.CloudID+"-nic"]["tags"].(map[string]string)[azureLabelToTagKey("fixed_attempt")] = "other"
+			case "attached NIC":
+				f.objects[f.server.CloudID+"-nic"]["properties"].(map[string]any)["virtualMachine"] = map[string]any{"id": "other"}
+			case "borrowed public IP":
+				f.objects[f.server.CloudID+"-pip"]["properties"].(map[string]any)["natGateway"] = map[string]any{"id": "other"}
+			case "uncertain read":
+				f.failRead = f.server.CloudID + "-nic"
+			case "remaining disk":
+				f.objects[f.server.CloudID+"-osdisk"] = map[string]any{"name": "unsettled"}
+			case "VM appeared":
+				f.objects[f.server.CloudID] = map[string]any{"name": "unexpected"}
+			}
+			err := f.client.SettleRejectedFixedCompanions(t.Context(), f.server, binding)
+			if scenario == "owned" {
+				if err != nil || len(f.deletes) != 2 || len(f.objects) != 0 {
+					t.Fatalf("settlement err=%v deletes=%v remaining=%v", err, f.deletes, f.objects)
+				}
+			} else if err == nil || len(f.deletes) != 0 {
+				t.Fatalf("uncertain custody settled: err=%v deletes=%v", err, f.deletes)
+			}
+		})
+	}
+}
+
 func TestAzureFailedLeaseHoldRetainsCompanionsWithoutMutation(t *testing.T) {
 	f := newAzureOrphanFixture(t)
 	receipt, err := f.client.InspectFailedLeaseHold(t.Context(), f.server)

@@ -2,6 +2,7 @@ package azure
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"strconv"
@@ -18,7 +19,8 @@ const fixedAzureUserAssignedIdentityAttempt = "user_assigned_identity_resource_i
 func (*azureLeaseBackend) SupportsRequestedLeaseID() bool { return true }
 
 type fixedAzureCreator interface {
-	CreateFixedServer(context.Context, core.Config, string, string, string, map[string]string) (core.Server, error)
+	CreateFixedServer(context.Context, core.Config, string, string, string, map[string]string, func(core.AzureFixedCompanions) error) (core.Server, error)
+	SettleRejectedFixedCompanions(context.Context, core.Server, core.AzureFixedCompanions) error
 }
 
 func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
@@ -108,8 +110,33 @@ func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRe
 		}, nil
 	}, Submit: func(ctx context.Context, tx *core.FixedTransaction) (core.Server, error) {
 		claim := tx.Claim
-		server, err := creator.CreateFixedServer(ctx, cfg, publicKey, claim.LeaseID, claim.Slug, tx.CreateLabels())
+		server, err := creator.CreateFixedServer(ctx, cfg, publicKey, claim.LeaseID, claim.Slug, tx.CreateLabels(), func(binding core.AzureFixedCompanions) error {
+			if binding.NICGUID == "" || binding.PublicIPGUID == "" {
+				return core.Exit(4, "Azure fixed companions lack immutable identities")
+			}
+			if err := tx.Bind(core.FixedResourceBinding{AttemptValues: map[string]string{
+				"pre_vm_nic_guid": binding.NICGUID, "pre_vm_public_ip_guid": binding.PublicIPGUID,
+			}}); err != nil {
+				return err
+			}
+			return tx.Record("submitting")
+		})
 		if err != nil {
+			var shortage *core.AzureFixedVMShortage
+			attempt := claim.FixedCreateIntent.Attempt
+			if errors.As(err, &shortage) && tx.CanSettleCreateRejection(fixedAzureLeaseKind) &&
+				attempt["pre_vm_nic_guid"] != "" && attempt["pre_vm_public_ip_guid"] != "" {
+				binding := core.AzureFixedCompanions{NICGUID: attempt["pre_vm_nic_guid"], PublicIPGUID: attempt["pre_vm_public_ip_guid"]}
+				expected := core.Server{CloudID: attempt["name"], Labels: tx.CreateLabels()}
+				if settleErr := creator.SettleRejectedFixedCompanions(ctx, expected, binding); settleErr == nil {
+					return core.Server{}, &core.FixedCreateRejected{Err: &core.AzureFixedShortagePending{
+						LeaseID: claim.LeaseID, AttemptName: attempt["name"], AttemptNonce: attempt["nonce"],
+						ProviderCode: shortage.Code, Cause: err,
+					}}
+				} else {
+					return core.Server{}, fmt.Errorf("Azure fixed shortage companions unresolved for lease %s: %w", claim.LeaseID, errors.Join(err, settleErr))
+				}
+			}
 			return core.Server{}, fmt.Errorf("Azure fixed create unresolved; replay or stop lease %s: %w", claim.LeaseID, err)
 		}
 		return server, nil

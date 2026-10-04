@@ -9,6 +9,7 @@
 ### Fixes
 
 - Validate OS selector compatibility after lease flags resolve the provider and target, so a configured or environment Windows Server selector accepts `--target windows` while incompatible final selections still fail.
+- Report settled Azure fixed-lease VM capacity rejections with a typed CLI result after exact companion cleanup.
 - Persist genuine Azure fixed-lease companion identities before readiness so cleanup can resume after an externally removed VM without adopting replacement resources.
 - Add a non-delete Azure failed-lease hold with durable resource identity receipts and refusal of release, reuse, and cleanup while uncertain files await salvage.
 - Cloudflare: retain cleanup alarms after container destruction fails and retry terminal leases before reporting stopped or expired status.

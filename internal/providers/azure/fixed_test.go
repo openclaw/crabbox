@@ -14,7 +14,14 @@ import (
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
-func (c *fakeAzureClient) CreateFixedServer(ctx context.Context, cfg core.Config, publicKey, leaseID, slug string, labels map[string]string) (core.Server, error) {
+func (c *fakeAzureClient) CreateFixedServer(ctx context.Context, cfg core.Config, publicKey, leaseID, slug string, labels map[string]string, recordCompanions func(core.AzureFixedCompanions) error) (core.Server, error) {
+	if err := recordCompanions(core.AzureFixedCompanions{NICGUID: "original-nic", PublicIPGUID: "original-ip"}); err != nil {
+		return core.Server{}, err
+	}
+	if c.fixedCapacityErr != nil {
+		c.createLeaseIDs = append(c.createLeaseIDs, leaseID)
+		return core.Server{}, c.fixedCapacityErr
+	}
 	server, _, err := c.CreateServerWithFallback(ctx, cfg, publicKey, leaseID, slug, true, nil)
 	if err == nil {
 		server.Labels = maps.Clone(labels)
@@ -23,6 +30,11 @@ func (c *fakeAzureClient) CreateFixedServer(ctx context.Context, cfg core.Config
 		err = c.fixedReplyErr
 	}
 	return server, err
+}
+
+func (c *fakeAzureClient) SettleRejectedFixedCompanions(_ context.Context, _ core.Server, binding core.AzureFixedCompanions) error {
+	c.fixedSettled = append(c.fixedSettled, binding)
+	return c.fixedSettleErr
 }
 
 func fixedAzureTestBackend(t *testing.T, client *fakeAzureClient) *azureLeaseBackend {
@@ -271,6 +283,49 @@ func TestFixedAzureAmbiguousCreateNeverResubmits(t *testing.T) {
 	}
 	if len(client.createLeaseIDs) != 1 {
 		t.Fatal("duplicate create")
+	}
+}
+
+func TestFixedAzureCapacityRequiresSettledFirstAttempt(t *testing.T) {
+	for _, scenario := range []string{"settled shortage", "companion uncertainty", "noncapacity", "prior submission"} {
+		t.Run(scenario, func(t *testing.T) {
+			client := &fakeAzureClient{}
+			b := fixedAzureTestBackend(t, client)
+			req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123477", RequestedSlug: "capacity", Repo: core.Repo{Root: t.TempDir()}}
+			shortage := &core.AzureFixedVMShortage{Code: "AllocationFailed", Err: errors.New("structured allocation failure")}
+			switch scenario {
+			case "settled shortage":
+				client.fixedCapacityErr = shortage
+			case "companion uncertainty", "prior submission":
+				client.fixedCapacityErr, client.fixedSettleErr = shortage, errors.New("companion read uncertain")
+			case "noncapacity":
+				client.fixedCapacityErr = errors.New("policy rejection")
+			}
+			_, err := b.Acquire(t.Context(), req)
+			var result *core.FixedAllocationResult
+			settled := errors.As(err, &result)
+			claim, exists, readErr := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if scenario == "settled shortage" {
+				if !settled || exists || result.LeaseID != req.RequestedLeaseID || result.AttemptNonce == "" ||
+					result.ProviderCode != "AllocationFailed" || result.Companions != "settled" || len(client.fixedSettled) != 1 {
+					t.Fatalf("settled outcome=%+v claim=%+v exists=%v", result, claim, exists)
+				}
+				return
+			}
+			if settled || !exists || claim.FixedCreateIntent.Attempt["pre_vm_nic_guid"] == "" {
+				t.Fatalf("unsettled claim=%+v result=%+v", claim, result)
+			}
+			if scenario == "prior submission" {
+				client.fixedSettleErr = nil
+				_, err = b.Acquire(t.Context(), req)
+				if errors.As(err, &result) || len(client.createLeaseIDs) != 1 || len(client.fixedSettled) != 1 {
+					t.Fatalf("prior attempt settled or resubmitted: err=%v creates=%d settles=%d", err, len(client.createLeaseIDs), len(client.fixedSettled))
+				}
+			}
+		})
 	}
 }
 
