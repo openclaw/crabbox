@@ -37,7 +37,6 @@ import {
 } from "./config";
 import { creationEvent, observedRunning, measureCreationStep } from "./creation-events";
 import { hasImageRequirements } from "./image-capabilities";
-import { observeOperation, observeOperationSync } from "./operation-probe";
 import { osImageSpec } from "./os-image";
 import {
   providerRequestSignal,
@@ -3420,23 +3419,15 @@ export class EC2SpotClient {
           }
         : undefined,
     );
-    const text = await observeOperation(
-      action === "DescribeImages" ? "aws_images_body" : "aws_ec2_body",
-      () => response.text(),
-      (value) => ({ codeUnits: value.length }),
-    );
+    const text = await response.text();
     if (!response.ok) {
       throw this.awsQueryError(action, response.status, text);
     }
     let parsed: unknown;
     try {
-      parsed = observeOperationSync(
-        action === "DescribeImages" ? "aws_images_parse" : "aws_ec2_parse",
-        () =>
-          options.exactResponseEnvelope
-            ? (this.parser.parse(text, true) as unknown)
-            : (this.parser.parse(text) as unknown),
-      );
+      parsed = options.exactResponseEnvelope
+        ? (this.parser.parse(text, true) as unknown)
+        : (this.parser.parse(text) as unknown);
     } catch (error) {
       if (options.exactResponseEnvelope) {
         throw new AWSLeaseObservationError(`malformed AWS ${action} response: invalid XML`, {
@@ -3478,15 +3469,11 @@ export class EC2SpotClient {
       headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
       body: body.toString(),
     });
-    const text = await observeOperation(
-      "aws_sts_body",
-      () => response.text(),
-      (value) => ({ codeUnits: value.length }),
-    );
+    const text = await response.text();
     if (!response.ok) {
       throw this.awsQueryError(action, response.status, text);
     }
-    const parsed = observeOperationSync("aws_sts_parse", () => this.parser.parse(text) as unknown);
+    const parsed = this.parser.parse(text) as unknown;
     const parsedRecord = record(parsed);
     const root = parsedRecord[`${action}Response`] ?? parsedRecord["Response"] ?? parsedRecord;
     return record(root);
@@ -3505,11 +3492,7 @@ export class EC2SpotClient {
       },
       body: JSON.stringify(body),
     });
-    const text = await observeOperation(
-      "aws_ssm_body",
-      () => response.text(),
-      (value) => ({ codeUnits: value.length }),
-    );
+    const text = await response.text();
     if (!response.ok) {
       let detail = trimBody(text);
       try {
@@ -3522,7 +3505,7 @@ export class EC2SpotClient {
       }
       throw new Error(`aws ${action}: http ${response.status}: ${detail}`);
     }
-    return record(observeOperationSync("aws_ssm_parse", () => (text ? JSON.parse(text) : {})));
+    return record(text ? JSON.parse(text) : {});
   }
 
   private awsQueryError(action: string, status: number, text: string): AWSQueryError {
@@ -3571,7 +3554,7 @@ export class EC2SpotClient {
       if (!response.ok) {
         return undefined;
       }
-      const parsed = record(await observeOperation("aws_quota_body", () => response.json()));
+      const parsed = record(await response.json());
       const quota = record(parsed["Quota"]);
       return positiveNumber(quota["Value"]);
     } catch {
@@ -3598,11 +3581,7 @@ export class EC2SpotClient {
         body: JSON.stringify(body),
       });
       // oxlint-disable-next-line eslint/no-await-in-loop -- response body belongs to the current page.
-      const text = await observeOperation(
-        "aws_quota_body",
-        () => response.text(),
-        (value) => ({ codeUnits: value.length }),
-      );
+      const text = await response.text();
       if (!response.ok) {
         throw new Error(`aws ListServiceQuotas: http ${response.status}: ${trimBody(text)}`);
       }
@@ -3628,11 +3607,7 @@ export class EC2SpotClient {
       },
       body: JSON.stringify({ ServiceCode: "ec2", QuotaCode: quotaCode }),
     });
-    const text = await observeOperation(
-      "aws_quota_body",
-      () => response.text(),
-      (value) => ({ codeUnits: value.length }),
-    );
+    const text = await response.text();
     if (!response.ok) {
       if (text.includes("NoSuchResourceException")) {
         return undefined;
