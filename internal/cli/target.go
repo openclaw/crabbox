@@ -533,10 +533,6 @@ func restoreExternalLeaseTarget(cfg *Config, targetExplicit, windowsModeExplicit
 	return validateTargetConfig(*cfg)
 }
 
-func uniqueExternalLeaseClaim(identifier string, providerSelected bool) (leaseClaim, bool, error) {
-	return uniqueExternalLeaseClaimContext(context.Background(), identifier, providerSelected)
-}
-
 func uniqueExternalLeaseClaimContext(ctx context.Context, identifier string, providerSelected bool) (leaseClaim, bool, error) {
 	exact, exists, err := ReadLeaseClaimWithPresence(identifier)
 	if err != nil {
@@ -582,10 +578,6 @@ func uniqueExternalLeaseClaimContext(ctx context.Context, identifier string, pro
 		return leaseClaim{}, false, Exit(2, "multiple lease claims match %q: %s; use a lease id or an explicit provider", identifier, strings.Join(ids, ", "))
 	}
 	return externalMatches[0], true, nil
-}
-
-func staticLeaseClaim(id string) (leaseClaim, bool, error) {
-	return staticLeaseClaimContext(context.Background(), id)
 }
 
 func staticLeaseClaimContext(ctx context.Context, id string) (leaseClaim, bool, error) {

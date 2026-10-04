@@ -170,17 +170,6 @@ func snapshotLeaseClaimsContext(ctx context.Context) (leaseClaimsSnapshot, error
 
 type leaseClaimSnapshotReader func(path, leaseID string, expected os.FileInfo) (leaseClaim, bool, error)
 
-// snapshotLeaseClaimsReadOnly is the public inventory reader. It intentionally
-// bounds file size and rejects files changed during the scan. Runtime paths use
-// snapshotLeaseClaims, which accepts complete atomic publications without that limit.
-func snapshotLeaseClaimsReadOnly() (leaseClaimsSnapshot, error) {
-	snapshot, err := snapshotLeaseClaimsReadOnlyWithReader(readLeaseClaimSnapshotWithPresence)
-	if err != nil {
-		return leaseClaimsSnapshot{}, Exit(1, "%v", err)
-	}
-	return snapshot, nil
-}
-
 func snapshotLeaseClaimsReadOnlyWithReader(read leaseClaimSnapshotReader) (leaseClaimsSnapshot, error) {
 	return snapshotLeaseClaimsReadOnlyContext(context.Background(), read)
 }
@@ -1395,10 +1384,6 @@ func claimLookupSlug(identifier string) string {
 		return ""
 	}
 	return NormalizeLeaseSlug(identifier)
-}
-
-func claimProviderForIdentifier(identifier string) (string, bool, error) {
-	return claimProviderForIdentifierContext(context.Background(), identifier)
 }
 
 func claimProviderForIdentifierContext(ctx context.Context, identifier string) (string, bool, error) {
