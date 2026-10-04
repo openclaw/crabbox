@@ -14,6 +14,7 @@ import {
   LeaseAdmissionFence,
   retainLeaseWake,
 } from "./lease-admission";
+import { observeOperation } from "./operation-probe";
 import { ProviderRequestTimeoutError, withProviderOperationDeadline } from "./provider-deadline";
 import { cachedProviderPrice } from "./provider-pricing";
 import {
@@ -13818,11 +13819,15 @@ export class FleetCoordinator {
             await storage.delete(legacyPolicyKey);
           }
 
-          const leases = new Map(
-            [...(await storage.list<LeaseRecord>({ prefix: "lease:" })).values()].map((lease) => [
-              lease.id,
-              lease,
-            ]),
+          const leases = await observeOperation(
+            "lease_history",
+            async () =>
+              new Map(
+                [...(await storage.list<LeaseRecord>({ prefix: "lease:" })).values()].map(
+                  (lease) => [lease.id, lease],
+                ),
+              ),
+            (rows) => ({ count: rows.size }),
           );
           const entries = (await this.readyPoolEntries(typed, storage)).filter((entry) => {
             const lease = leases.get(entry.leaseID);
@@ -14454,12 +14459,17 @@ export class FleetCoordinator {
       Math.min(clampLimit(params.get("limit"), leaseListPageSize), leaseListPageSize),
     );
     // One storage page per request bounds both CPU and memory even when no rows are visible.
-    const page = await this.state.storage.list<LeaseRecord>({
-      prefix: "lease:",
-      limit,
-      noCache: true,
-      ...(startAfter ? { startAfter } : {}),
-    });
+    const page = await observeOperation(
+      "lease_page",
+      () =>
+        this.state.storage.list<LeaseRecord>({
+          prefix: "lease:",
+          limit,
+          noCache: true,
+          ...(startAfter ? { startAfter } : {}),
+        }),
+      (rows) => ({ count: rows.size }),
+    );
     const matches = this.leaseListFilter(request);
     const leases = [];
     for (const lease of page.values()) {
@@ -18747,8 +18757,14 @@ export class FleetCoordinator {
   }
 
   private async leaseRecords(): Promise<LeaseRecord[]> {
-    const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
-    return [...leases.values()];
+    return observeOperation(
+      "lease_history",
+      async () => {
+        const leases = await this.state.storage.list<LeaseRecord>({ prefix: "lease:" });
+        return [...leases.values()];
+      },
+      (rows) => ({ count: rows.length }),
+    );
   }
 
   private async validateHostPin(
@@ -19138,10 +19154,16 @@ export class FleetCoordinator {
   }
 
   private async externalRunnerRecords(): Promise<ExternalRunnerRecord[]> {
-    const runners = await this.state.storage.list<ExternalRunnerRecord>({
-      prefix: externalRunnerPrefix(),
-    });
-    return [...runners.values()];
+    return observeOperation(
+      "runner_history",
+      async () => {
+        const runners = await this.state.storage.list<ExternalRunnerRecord>({
+          prefix: externalRunnerPrefix(),
+        });
+        return [...runners.values()];
+      },
+      (rows) => ({ count: rows.length }),
+    );
   }
 
   private async visibleExternalRunners(request: Request): Promise<ExternalRunnerRecord[]> {
@@ -19153,13 +19175,21 @@ export class FleetCoordinator {
   }
 
   private async runEvents(runID: string, after = 0, limit = 500): Promise<RunEventRecord[]> {
-    const events = await this.state.storage.list<RunEventRecord>({
-      prefix: runEventPrefix(runID),
-    });
-    return [...events.values()]
-      .toSorted((a, b) => a.seq - b.seq)
-      .filter((event) => event.seq > after)
-      .slice(0, limit);
+    let count = 0;
+    return observeOperation(
+      "run_event_history",
+      async () => {
+        const events = await this.state.storage.list<RunEventRecord>({
+          prefix: runEventPrefix(runID),
+        });
+        count = events.size;
+        return [...events.values()]
+          .toSorted((a, b) => a.seq - b.seq)
+          .filter((event) => event.seq > after)
+          .slice(0, limit);
+      },
+      () => ({ count }),
+    );
   }
 
   private leaseVisibleToRequest(lease: LeaseRecord, request: Request, admin: boolean): boolean {
@@ -19418,36 +19448,44 @@ export class FleetCoordinator {
     if (run.leaseIDs !== undefined && run.leaseOwners !== undefined) {
       return undefined;
     }
-    const events = await this.state.storage.list<RunEventRecord>({
-      prefix: runEventPrefix(run.id),
-    });
-    const leaseIDs = new Set(
-      [...events.values()]
-        .toSorted((a, b) => a.seq - b.seq)
-        .map((event) => event.leaseID)
-        .filter((leaseID): leaseID is string => Boolean(leaseID && validLeaseID(leaseID))),
+    let count = 0;
+    return observeOperation(
+      "run_event_history",
+      async () => {
+        const events = await this.state.storage.list<RunEventRecord>({
+          prefix: runEventPrefix(run.id),
+        });
+        count = events.size;
+        const leaseIDs = new Set(
+          [...events.values()]
+            .toSorted((a, b) => a.seq - b.seq)
+            .map((event) => event.leaseID)
+            .filter((leaseID): leaseID is string => Boolean(leaseID && validLeaseID(leaseID))),
+        );
+        if (validLeaseID(run.leaseID)) {
+          leaseIDs.add(run.leaseID);
+        }
+        const ids = [...leaseIDs];
+        const leases = knownLeases
+          ? ids.map((leaseID) => knownLeases.get(leaseID))
+          : await Promise.all(ids.map((leaseID) => this.getLease(leaseID)));
+        run.leaseIDs = ids;
+        run.leaseOwners = [];
+        let currentLease: LeaseRecord | undefined;
+        for (const [index, lease] of leases.entries()) {
+          if (!lease) {
+            continue;
+          }
+          this.setRunLeaseAttribution(run, lease);
+          if (ids[index] === run.leaseID) {
+            currentLease = lease;
+          }
+        }
+        await this.putRun(run);
+        return currentLease;
+      },
+      () => ({ count }),
     );
-    if (validLeaseID(run.leaseID)) {
-      leaseIDs.add(run.leaseID);
-    }
-    const ids = [...leaseIDs];
-    const leases = knownLeases
-      ? ids.map((leaseID) => knownLeases.get(leaseID))
-      : await Promise.all(ids.map((leaseID) => this.getLease(leaseID)));
-    run.leaseIDs = ids;
-    run.leaseOwners = [];
-    let currentLease: LeaseRecord | undefined;
-    for (const [index, lease] of leases.entries()) {
-      if (!lease) {
-        continue;
-      }
-      this.setRunLeaseAttribution(run, lease);
-      if (ids[index] === run.leaseID) {
-        currentLease = lease;
-      }
-    }
-    await this.putRun(run);
-    return currentLease;
   }
 
   private leaseVisibleToControl(
