@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
+import { AwsClient } from "aws4fetch";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { EC2SpotClient } from "../src/aws";
@@ -10,6 +11,10 @@ import {
 } from "../src/aws-fetch-client";
 import { createAWSProvisioningDiagnostics } from "../src/aws-provisioning-diagnostics";
 import { leaseConfig, type LeaseConfig } from "../src/config";
+import {
+  ProviderRequestTimeoutError,
+  withProviderOperationDeadline,
+} from "../src/provider-deadline";
 import type { Env } from "../src/types";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -742,4 +747,117 @@ it("attributes interleaved shared-client requests to their deepest operation and
   const count = log.mock.calls.length;
   expect(await (await client.fetch(url)).text()).toBe("fast");
   expect(log.mock.calls).toHaveLength(count);
+});
+
+it("bounds stalled credentials before signing", async () => {
+  const fetchMock = vi.fn<typeof fetch>();
+  vi.stubGlobal("fetch", fetchMock);
+  const client = new RefreshingAWSFetchClient(() => new Promise(() => {}), "ec2", "eu-west-1", 20);
+  await expect(client.fetch("https://ec2.eu-west-1.amazonaws.com")).rejects.toBeInstanceOf(
+    ProviderRequestTimeoutError,
+  );
+  expect(fetchMock).not.toHaveBeenCalled();
+});
+
+it.each([false, true])("bounds a stalled fetch with response policy=%s", async (policy) => {
+  let signal: AbortSignal | undefined;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn<typeof fetch>((input, init) => {
+      signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+      return new Promise(() => {});
+    }),
+  );
+  const client = new RefreshingAWSFetchClient(credentials, "ec2", "eu-west-1", 100);
+  await expect(
+    client.fetch(
+      "https://ec2.eu-west-1.amazonaws.com",
+      undefined,
+      policy ? async () => false : undefined,
+    ),
+  ).rejects.toMatchObject({
+    name: "ProviderRequestTimeoutError",
+    retryable: true,
+    provider: "aws",
+  });
+  expect(signal?.aborted).toBe(true);
+});
+
+it("keeps the deadline attached through a real stalled response body", async () => {
+  const url = await localTransport((_request, response) => {
+    response.writeHead(200, { "content-type": "text/plain" });
+    response.write("partial body");
+  });
+  const client = new RefreshingAWSFetchClient(credentials, "ec2", "eu-west-1", 150);
+  const response = await client.fetch(url);
+  await expect(response.text()).rejects.toBeInstanceOf(ProviderRequestTimeoutError);
+});
+
+it("retains caller cancellation and the single-attempt path", async () => {
+  const fetchMock = vi.fn<() => Promise<Response>>(
+    async () => new Response("retry", { status: 503 }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  const controller = new AbortController();
+  const client = new RefreshingAWSFetchClient(credentials, "ec2", "eu-west-1", 100);
+  const response = await client.fetch("https://ec2.eu-west-1.amazonaws.com", {
+    signal: controller.signal,
+  });
+  expect(response.status).toBe(503);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  const reason = new Error("caller canceled");
+  controller.abort(reason);
+  await expect(response.text()).rejects.toBe(reason);
+  await expect(
+    client.fetch("https://ec2.eu-west-1.amazonaws.com", { signal: controller.signal }),
+  ).rejects.toBe(reason);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+it("uses the earlier ambient deadline even through a nested scope", async () => {
+  const client = new FixedAWSFetchClient(await credentials(), "ec2", "eu-west-1", 10_000);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() => new Promise(() => {})),
+  );
+  await expect(
+    withProviderOperationDeadline(100, () =>
+      withProviderOperationDeadline(5_000, () =>
+        client.fetch("https://ec2.eu-west-1.amazonaws.com"),
+      ),
+    ),
+  ).rejects.toBeInstanceOf(ProviderRequestTimeoutError);
+});
+
+it("aborts retry backoff within the same call budget", async () => {
+  vi.spyOn(AwsClient.prototype, "sign").mockImplementation(
+    async (input, init) => new Request(input, init),
+  );
+  vi.spyOn(Math, "random").mockReturnValue(1);
+  const fetchMock = vi.fn<() => Promise<Response>>(
+    async () => new Response("retry", { status: 503 }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  const client = new RefreshingAWSFetchClient(credentials, "ec2", "eu-west-1", 30);
+  await expect(client.fetch("https://ec2.eu-west-1.amazonaws.com")).rejects.toBeInstanceOf(
+    ProviderRequestTimeoutError,
+  );
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+});
+
+it("finishes signing timeout accounting before reporting the failed request", async () => {
+  vi.spyOn(AwsClient.prototype, "sign").mockImplementation(() => new Promise(() => {}));
+  const { diagnostics, finish } = observe();
+  const client = new RefreshingAWSFetchClient(credentials, "ec2", "eu-west-1", 20);
+  await expect(
+    diagnostics.measure("key_pair", () => client.fetch("https://ec2.eu-west-1.amazonaws.com")),
+  ).rejects.toBeInstanceOf(ProviderRequestTimeoutError);
+  expect(finish("failure")).toMatchObject({
+    requests: 1,
+    credentialFailures: 0,
+    signInvocations: 1,
+    signCompletions: 0,
+    signFailures: 1,
+    requestFailures: 1,
+  });
 });

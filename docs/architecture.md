@@ -335,6 +335,20 @@ records instead of the full lease history. These scans still do work proportiona
 to retained history; paging bounds each list request rather than introducing a
 new persisted index or deleting diagnostic evidence.
 
+Existing-image promotion and deletion retain the lifecycle queue across provider
+validation and catalog publication, with a shared 120-second provider deadline.
+AWS and Azure requests default to 60 seconds, including response bodies; AWS
+credential resolution, signing, retries, and backoff share that request budget.
+Provider timeouts return HTTP 503 with `retry-after` and
+`error: "provider_request_timeout"`; a mutation may have reached the provider, so
+callers must retry against the retained ownership and publication state.
+
+Mac host deletion reads its ownership claim under the mutex, verifies provider
+identity and host tags outside it, then rereads the claim before the bounded,
+serialized release. A changed claim returns 409. Tailscale preflight reads only
+environment configuration and bypasses the lifecycle queue; its OAuth and auth-key
+requests each have a 15-second deadline and retain the existing preflight statuses.
+
 ## What Flows on a Run
 
 `crabbox run` (`internal/cli/run.go`). In brokered mode a run recorder mirrors

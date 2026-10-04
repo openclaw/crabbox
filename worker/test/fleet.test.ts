@@ -2,10 +2,12 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { Script, createContext } from "node:vm";
 
+import { AwsClient } from "aws4fetch";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { adminGrantVersion, issueUserToken } from "../src/auth";
 import { EC2SpotClient, AWSLeaseAuthorityError, awsLeaseImageIdentity } from "../src/aws";
+import { RefreshingAWSFetchClient } from "../src/aws-fetch-client";
 import {
   AzureClient,
   AzureProvisioningRejectedError,
@@ -32,6 +34,7 @@ import {
   type CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
 import { sha256Hex } from "../src/encoding";
+import { imageRouteDeadlineMs } from "../src/fleet";
 import {
   AWSProvider,
   AzureProvider,
@@ -66,6 +69,11 @@ import {
 } from "../src/lease-provisioning";
 import { MISSING_ORG_KEY, isCurrentOrgKey, orgKeyForLabel } from "../src/org-identity";
 import { portalCode, portalVNC, webVNCCredentialsFromHistoryState } from "../src/portal";
+import {
+  providerRequestSignal,
+  waitForProviderSignal,
+  withProviderOperationDeadline,
+} from "../src/provider-deadline";
 import { providerKeyForLease } from "../src/provider-key";
 import { providerLabelValue } from "../src/provider-labels";
 import {
@@ -55099,4 +55107,169 @@ describe("lease admission deadline", () => {
       vi.useRealTimers();
     }
   });
+});
+
+describe("provider deadlines and mutex ownership", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("releases the lifecycle mutex after a stalled image promotion times out", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException("timed out", "TimeoutError")), ms);
+      return controller.signal;
+    });
+    vi.spyOn(AwsClient.prototype, "sign").mockImplementation(
+      async (input, init) => new Request(input, init),
+    );
+    const storage = new MemoryStorage();
+    const aws = fakeProvider();
+    const started = Promise.withResolvers<void>();
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      expect(init?.signal ?? (input instanceof Request ? input.signal : undefined)).toBeDefined();
+      started.resolve();
+      return new Promise(() => {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const transport = new RefreshingAWSFetchClient(
+      async () => ({ accessKeyId: "fixture", secretAccessKey: "fixture" }),
+      "ec2",
+      "eu-west-1",
+      imageRouteDeadlineMs * 2,
+    );
+    let lateWrite = false;
+    vi.spyOn(aws, "promoteImage").mockImplementation(async () => {
+      await transport.fetch("https://ec2.eu-west-1.amazonaws.com");
+      lateWrite = true;
+      return { image: { id: "ami-test", name: "test", provider: "aws", state: "available" } };
+    });
+    const fleet = testFleet(storage, { aws });
+    const runtime = Reflect.get(fleet, "runtime") as CoordinatorRuntime;
+    const promotion = fleet.fetch(
+      request("POST", "/v1/images/ami-test/promote", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      }),
+    );
+    await started.promise;
+    let queuedCompleted = false;
+    const queued = runtime.runExclusive(async () => {
+      queuedCompleted = true;
+    });
+    await Promise.resolve();
+    expect(queuedCompleted).toBe(false);
+    await vi.advanceTimersByTimeAsync(imageRouteDeadlineMs - 1);
+    expect(queuedCompleted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const response = await promotion;
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("5");
+    await expect(response.json()).resolves.toMatchObject({
+      error: "provider_request_timeout",
+      message: expect.stringContaining("outcome of a mutation may be unknown"),
+    });
+    await queued;
+    expect(queuedCompleted).toBe(true);
+    expect(lateWrite).toBe(false);
+  });
+
+  it.each(["verifiedIdentity", "listMacHosts"] as const)(
+    "does not hold the mutex during stalled Mac host %s",
+    async (method) => {
+      const storage = new MemoryStorage();
+      storage.seed(
+        "lease:cbx_000000000777",
+        testLease({
+          id: "cbx_000000000777",
+          provider: "aws",
+          region: "eu-west-1",
+          hostID: "h-000000000001",
+          providerScope: "aws:account:123456789012",
+        }),
+      );
+      const fleet = testFleet(
+        storage,
+        {},
+        { AWS_ACCESS_KEY_ID: "fixture", AWS_SECRET_ACCESS_KEY: "fixture" },
+      );
+      const runtime = Reflect.get(fleet, "runtime") as CoordinatorRuntime;
+      vi.spyOn(EC2SpotClient.prototype, "verifiedIdentity").mockResolvedValue({
+        account: "123456789012",
+        arn: "arn:aws:iam::123456789012:user/test",
+        userId: "fixture",
+      });
+      const started = Promise.withResolvers<void>();
+      vi.spyOn(EC2SpotClient.prototype, method).mockImplementation(() => {
+        started.resolve();
+        return waitForProviderSignal(
+          providerRequestSignal(60_000, undefined, "aws", method),
+          () => new Promise<never>(() => {}),
+        );
+      });
+      const release = vi.spyOn(EC2SpotClient.prototype, "releaseMacHost");
+      const deletion = withProviderOperationDeadline(100, () =>
+        fleet.fetch(
+          request("DELETE", "/v1/admin/mac-hosts/h-000000000001?region=eu-west-1", {
+            headers: { "x-crabbox-admin": "true" },
+          }),
+        ),
+      );
+      await started.promise;
+      await expect(runtime.runExclusive(async () => "unblocked")).resolves.toBe("unblocked");
+      expect((await deletion).status).toBe(503);
+      expect(release).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["updatedAt", "hostID", "region", "providerScope", "createAttemptGeneration"] as const)(
+    "fences a Mac host ownership change to %s between read and release",
+    async (field) => {
+      const storage = new MemoryStorage();
+      const lease = testLease({
+        id: "cbx_000000000777",
+        provider: "aws",
+        region: "eu-west-1",
+        hostID: "h-000000000001",
+        providerScope: "aws:account:123456789012",
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      const fleet = testFleet(
+        storage,
+        {},
+        { AWS_ACCESS_KEY_ID: "fixture", AWS_SECRET_ACCESS_KEY: "fixture" },
+      );
+      const runtime = Reflect.get(fleet, "runtime") as CoordinatorRuntime;
+      vi.spyOn(EC2SpotClient.prototype, "verifiedIdentity").mockImplementation(async () => {
+        await runtime.runExclusive(async () =>
+          storage.put(`lease:${lease.id}`, {
+            ...lease,
+            [field]: field === "createAttemptGeneration" ? 2 : "changed",
+          }),
+        );
+        return {
+          account: "123456789012",
+          arn: "arn:aws:iam::123456789012:user/test",
+          userId: "fixture",
+        };
+      });
+      vi.spyOn(EC2SpotClient.prototype, "listMacHosts").mockResolvedValue([]);
+      const release = vi.spyOn(EC2SpotClient.prototype, "releaseMacHost");
+      const response = await fleet.fetch(
+        request("DELETE", "/v1/admin/mac-hosts/h-000000000001?region=eu-west-1", {
+          headers: { "x-crabbox-admin": "true" },
+        }),
+      );
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        error: "mac_host_ownership_mismatch",
+      });
+      expect(release).not.toHaveBeenCalled();
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.[field]).toBe(
+        field === "createAttemptGeneration" ? 2 : "changed",
+      );
+    },
+  );
 });

@@ -14,6 +14,7 @@ import {
   LeaseAdmissionFence,
   retainLeaseWake,
 } from "./lease-admission";
+import { ProviderRequestTimeoutError, withProviderOperationDeadline } from "./provider-deadline";
 import { cachedProviderPrice } from "./provider-pricing";
 import {
   ReadyPoolAccess,
@@ -602,6 +603,9 @@ const workspaceSSHHostPublicKeyHeader = "x-crabbox-workspace-ssh-host-public-key
 const privateAWSWorkspaceWorkRoot = "/work/crabbox";
 const adminGrantRevalidationIntervalMs = 1_000;
 const userGrantRevalidationIntervalMs = 1_000;
+
+export const imageRouteDeadlineMs = 120_000;
+export const macHostRouteDeadlineMs = 120_000;
 
 function coordinatorErrorMessage(env: Env, error: unknown): string {
   return errorMessage(error, coordinatorDiagnosticSecrets(env));
@@ -1640,6 +1644,12 @@ export class FleetCoordinator {
       }
       return json({ error: "not_found" }, { status: 404 });
     } catch (error) {
+      if (error instanceof ProviderRequestTimeoutError) {
+        return json(
+          { error: "provider_request_timeout", message: coordinatorErrorMessage(this.env, error) },
+          { status: 503, headers: { "retry-after": "5" } },
+        );
+      }
       return json({ error: coordinatorErrorMessage(this.env, error) }, { status: 500 });
     }
   }
@@ -14865,8 +14875,8 @@ export class FleetCoordinator {
       return json({ hosts }, { status: 201 });
     }
     if (method === "DELETE" && hostID) {
-      return await this.state.runExclusive(async () => {
-        let ownershipLease: LeaseRecord | undefined;
+      const ownershipLease = await this.state.runExclusive(async () => {
+        let snapshot: LeaseRecord | undefined;
         await this.visitLeaseRecords((lease) => {
           if (
             lease.provider === "aws" &&
@@ -14874,11 +14884,14 @@ export class FleetCoordinator {
             lease.region === region &&
             leaseHostID(lease) === hostID
           ) {
-            ownershipLease = lease;
+            snapshot = structuredClone(lease);
             return false;
           }
           return true;
         });
+        return snapshot;
+      });
+      return withProviderOperationDeadline(macHostRouteDeadlineMs, async () => {
         if (!ownershipLease) {
           return json(
             {
@@ -14926,12 +14939,25 @@ export class FleetCoordinator {
             { status: 409 },
           );
         }
-        const released = host ? await client.releaseMacHost(hostID) : [];
-        const releasedLease = { ...ownershipLease, updatedAt: new Date().toISOString() };
-        delete releasedLease.hostId;
-        delete releasedLease.hostID;
-        await this.putLease(releasedLease);
-        return json({ hostId: hostID, released });
+        return this.state.runExclusive(async () => {
+          const current = await this.getLease(ownershipLease.id);
+          // Fence the entire snapshot: even same-timestamp updates must not be overwritten.
+          if (JSON.stringify(current) !== JSON.stringify(ownershipLease)) {
+            return json(
+              {
+                error: "mac_host_ownership_mismatch",
+                message: `EC2 Mac host ${hostID} no longer matches its retained Crabbox ownership claim`,
+              },
+              { status: 409 },
+            );
+          }
+          const released = host ? await client.releaseMacHost(hostID) : [];
+          const releasedLease = { ...ownershipLease, updatedAt: new Date().toISOString() };
+          delete releasedLease.hostId;
+          delete releasedLease.hostID;
+          await this.putLease(releasedLease);
+          return json({ hostId: hostID, released });
+        });
       });
     }
     return json({ error: "not_found" }, { status: 404 });
@@ -16893,6 +16919,19 @@ export class FleetCoordinator {
   }
 
   private async imageRoute(request: Request, imageID: string, action?: string): Promise<Response> {
+    if (coordinatorRequestQueue(request) === "lifecycle") {
+      return withProviderOperationDeadline(imageRouteDeadlineMs, () =>
+        this.imageRouteWithDeadline(request, imageID, action),
+      );
+    }
+    return this.imageRouteWithDeadline(request, imageID, action);
+  }
+
+  private async imageRouteWithDeadline(
+    request: Request,
+    imageID: string,
+    action?: string,
+  ): Promise<Response> {
     const method = request.method.toUpperCase();
     const decodedImageID = decodeImageRouteID(imageID);
     if (!validImageRouteID(decodedImageID)) {

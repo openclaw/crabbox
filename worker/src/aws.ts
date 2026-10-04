@@ -39,6 +39,12 @@ import { creationEvent, observedRunning, measureCreationStep } from "./creation-
 import { hasImageRequirements } from "./image-capabilities";
 import { osImageSpec } from "./os-image";
 import {
+  providerRequestSignal,
+  providerRequestTimeoutMs,
+  providerSleep,
+  waitForProviderSignal,
+} from "./provider-deadline";
+import {
   leaseIDForProviderKey,
   providerKeyForLease,
   providerKeyOwnedByLease,
@@ -841,7 +847,17 @@ export class EC2SpotClient {
   async withLeaseOperation<T>(operation: (session: AWSLeaseOperation) => Promise<T>): Promise<T> {
     // One snapshot owns the full regional operation, including quota and SSM calls.
     const snapshot = this.credentialProvider
-      ? resolvedAWSCredentials(await this.credentialProvider())
+      ? resolvedAWSCredentials(
+          await waitForProviderSignal(
+            providerRequestSignal(
+              providerRequestTimeoutMs,
+              this.requestSignal,
+              "aws",
+              "credential snapshot",
+            ),
+            () => this.credentialProvider!(),
+          ),
+        )
       : undefined;
     const client = snapshot ? new EC2SpotClient(this.env, this.region, snapshot) : this;
     const ec2 = client.aws;
@@ -4609,5 +4625,5 @@ function conciseAWSMacHostDryRunMessage(message: string): string {
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return providerSleep(ms, providerRequestSignal(ms + 1_000, undefined, "aws", "poll wait"));
 }
