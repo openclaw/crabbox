@@ -378,8 +378,10 @@ crabbox checkpoint fork chk_0123456789abcdef --count 4 --type standard-2 -- pnpm
   failure, such as a lost response or timeout, may still have allocated the
   container, so the claim stays and the error names the lease: check it with
   `crabbox status --provider cloudflare --id <lease>` or destroy it with
-  `crabbox stop --provider cloudflare --id <lease>`. `cleanup` leaves such a
-  claim alone for 6.5 minutes in case the request is still in flight.
+  `crabbox stop --provider cloudflare --id <lease>`. For 6.5 minutes after
+  the request, in case it is still in flight, `cleanup` leaves such a claim
+  alone and `stop` keeps it and fails with a retry hint if the runner does not
+  know the lease yet.
 - A `stop` that lands while a lease's container is still starting wins: the
   runner destroys the container, and the create or fork fails with 409.
 - Canceling a command (Ctrl-C, or a dropped connection) sends SIGTERM to the
