@@ -15,7 +15,7 @@
 
 ### Fixes
 
-- Return a retryable 503 when coordinator lease creates cannot begin committing admission within 30 seconds instead of hanging. Related: [Issue 1561](https://github.com/openclaw/crabbox/issues/1561).
+- Return a retryable 503 when coordinator lease creates cannot begin committing admission within 30 seconds instead of hanging. [PR 2687](https://github.com/openclaw/crabbox/pull/2687); related [Issue 1561](https://github.com/openclaw/crabbox/issues/1561).
 - Tolerate up to ±5 seconds of ASCII Box (Boat) create/read timestamp skew while preserving the original fixed-lease witness, and keep failed own creates inspectable and stoppable. [PR 2681](https://github.com/openclaw/crabbox/pull/2681).
 - Report fleet, org, and owner lease headroom with the blocking cap in `capacity`, and identify fleet limits in allocation errors. [PR 2679](https://github.com/openclaw/crabbox/pull/2679).
 - Make `--class` select real machine sizes on DigitalOcean, Scaleway, and Linode, with CPU/RAM profiles and explicit type overrides preserved. The `standard` class mapping increases size and cost (DigitalOcean `s-1vcpu-1gb` → `s-4vcpu-8gb`, Scaleway `DEV1-S` → `DEV1-L`, Linode `g6-standard-1` → `g6-standard-4`); keep the old size with `--type <old type>` or `class: tiny`. [PR 2676](https://github.com/openclaw/crabbox/pull/2676).
