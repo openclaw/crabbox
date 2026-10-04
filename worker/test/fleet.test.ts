@@ -52466,6 +52466,7 @@ function testFleet(
   storage = new MemoryStorage(),
   providers = {},
   env: Partial<Env> = {},
+  admissionDeadlineMs?: number,
 ): FleetDurableObject {
   for (const provider of Object.values(providers)) {
     (
@@ -52479,6 +52480,7 @@ function testFleet(
     { CRABBOX_DEFAULT_ORG: "default-org", ...env } as Env,
     providers,
     env.CF_VERSION_METADATA?.id,
+    admissionDeadlineMs,
   );
 }
 
@@ -54904,5 +54906,197 @@ describe("atomic legacy lease admission", () => {
     await fleet.alarm();
     expect(deletes).toBe(1);
     expect(creates).toBe(1);
+  });
+});
+
+describe("lease admission deadline", () => {
+  const deadlineMs = 25;
+  const leaseID = "cbx_ad1100000001";
+  const attemptKey = `create-attempt:${leaseID}`;
+  const leaseKey = `lease:${leaseID}`;
+  const headers = {
+    "x-crabbox-owner": "alice@example.com",
+    "x-crabbox-org": "example-org",
+    prefer: "respond-async",
+  };
+  const body = {
+    leaseID,
+    createAttemptID: "cat_ad110000000000000000000000000001",
+    provider: "aws",
+    class: "standard",
+    sshPublicKey: "ssh-ed25519 test",
+  };
+  const create = (fleet: FleetCoordinator) =>
+    fleet.fetch(request("POST", "/v1/leases", { headers, body }));
+
+  it.each([
+    [1, "replay"],
+    [2, "attempt reservation"],
+    [3, "lease admission"],
+    [1, "capability-aware"],
+    [1, "fixed-ID"],
+  ] as const)(
+    "fences a stalled %s mutex acquisition (%s) and permits same-token retry",
+    async (turn, stage) => {
+      vi.useFakeTimers();
+      const storage = new MemoryStorage();
+      const creates = vi.fn<() => void>();
+      const fleet = testFleet(
+        storage,
+        { aws: fakeProvider(creates, { provider: "aws" }) },
+        {},
+        deadlineMs,
+      );
+      await fleet.ready();
+      const runtime = (fleet as unknown as { runtime: CloudflareCoordinatorRuntime }).runtime;
+      const exclusive = runtime.runExclusive.bind(runtime);
+      const queued = deferred<void>();
+      const release = deferred<void>();
+      let acquisitions = 0;
+      let holder: Promise<void> | undefined;
+      vi.spyOn(runtime, "runExclusive").mockImplementation((callback) => {
+        if (++acquisitions === turn) {
+          holder = exclusive(() => release.promise);
+          queued.resolve();
+        }
+        return exclusive(callback);
+      });
+      const createRequest = () =>
+        fleet.fetch(
+          request(
+            stage === "fixed-ID" ? "PUT" : "POST",
+            stage === "fixed-ID"
+              ? `/v1/leases/${leaseID}`
+              : stage === "capability-aware"
+                ? "/v1/leases/capability-aware"
+                : "/v1/leases",
+            {
+              headers,
+              body: stage === "fixed-ID" ? { ...body, createAttemptID: undefined } : body,
+            },
+          ),
+        );
+      let response: Response | undefined;
+      const pending = createRequest().then((result) => (response = result));
+      try {
+        await queued.promise;
+        const attemptBeforeExpiry = storage.value(attemptKey);
+        await vi.advanceTimersByTimeAsync(deadlineMs);
+        expect(response?.status).toBe(503);
+        expect(response!.headers.get("retry-after")).toBe("2");
+        expect(await response!.json()).toMatchObject({
+          error: "lease_admission_timeout",
+          retryable: true,
+          message: expect.any(String),
+        });
+        release.resolve();
+        await holder;
+        await exclusive(async () => undefined);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(storage.value(leaseKey)).toBeUndefined();
+        expect(storage.value(attemptKey)).toEqual(attemptBeforeExpiry);
+        expect(creates).not.toHaveBeenCalled();
+        expect((await createRequest()).status).toBe(201);
+        expect(storage.value<LeaseRecord>(leaseKey)).toMatchObject({ state: "active" });
+        expect(creates).toHaveBeenCalledTimes(1);
+      } finally {
+        release.resolve();
+        await holder;
+        await pending;
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["queued transaction", "transaction reads"])(
+    "fences expiry during %s before the first admission write",
+    async (stage) => {
+      vi.useFakeTimers();
+      const storage = new MemoryStorage();
+      const creates = vi.fn<() => void>();
+      const fleet = testFleet(
+        storage,
+        { aws: fakeProvider(creates, { provider: "aws" }) },
+        {},
+        deadlineMs,
+      );
+      await fleet.ready();
+      const runtime = (fleet as unknown as { runtime: CloudflareCoordinatorRuntime }).runtime;
+      const commit = runtime.commitAndWake.bind(runtime);
+      const reached = deferred<void>();
+      const release = deferred<void>();
+      const settled = deferred<void>();
+      vi.spyOn(runtime, "commitAndWake").mockImplementationOnce(async (callback) => {
+        try {
+          if (stage === "queued transaction") {
+            reached.resolve();
+            await release.promise;
+          } else {
+            storage.beforeGet = async (key) => {
+              if (key !== attemptKey) return;
+              storage.beforeGet = undefined;
+              reached.resolve();
+              await release.promise;
+            };
+          }
+          return await commit(callback);
+        } finally {
+          settled.resolve();
+        }
+      });
+      let response: Response | undefined;
+      const pending = create(fleet).then((result) => (response = result));
+      try {
+        await reached.promise;
+        const attemptBeforeExpiry = storage.value(attemptKey);
+        await vi.advanceTimersByTimeAsync(deadlineMs);
+        expect(response?.status).toBe(503);
+        release.resolve();
+        await settled.promise;
+        await runtime.runExclusive(async () => undefined);
+        expect(storage.value(leaseKey)).toBeUndefined();
+        expect(storage.value(attemptKey)).toEqual(attemptBeforeExpiry);
+        expect(creates).not.toHaveBeenCalled();
+        expect((await create(fleet)).status).toBe(201);
+        expect(creates).toHaveBeenCalledTimes(1);
+      } finally {
+        release.resolve();
+        await pending;
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("waits for an admission already committing when its deadline fires", async () => {
+    vi.useFakeTimers();
+    const storage = new MemoryStorage();
+    const committing = deferred<void>();
+    const release = deferred<void>();
+    storage.beforeCommit = async (keys) => {
+      if (!keys.has(leaseKey)) return;
+      storage.beforeCommit = undefined;
+      committing.resolve();
+      await release.promise;
+    };
+    const fleet = testFleet(
+      storage,
+      { aws: fakeProvider(undefined, { provider: "aws" }) },
+      {},
+      deadlineMs,
+    );
+    let response: Response | undefined;
+    const pending = create(fleet).then((result) => (response = result));
+    try {
+      await committing.promise;
+      await vi.advanceTimersByTimeAsync(deadlineMs);
+      expect(response).toBeUndefined();
+      release.resolve();
+      expect((await pending).status).toBe(201);
+      expect(storage.value<LeaseRecord>(leaseKey)).toMatchObject({ state: "active" });
+    } finally {
+      release.resolve();
+      await pending;
+      vi.useRealTimers();
+    }
   });
 });

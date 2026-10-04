@@ -8,7 +8,12 @@ import {
   coordinatorGCPImageMinimumCache,
   coordinatorGCPTokenCache,
 } from "./gcp-token-cache";
-import { commitLeaseAdmission, retainLeaseWake } from "./lease-admission";
+import {
+  commitLeaseAdmission,
+  leaseAdmissionDeadlineMs,
+  LeaseAdmissionFence,
+  retainLeaseWake,
+} from "./lease-admission";
 import { cachedProviderPrice } from "./provider-pricing";
 import {
   ReadyPoolAccess,
@@ -1203,6 +1208,7 @@ export class FleetCoordinator {
     private readonly testProviders: Partial<Record<Provider, CloudProvider>> = {},
     private readonly authContext: AuthRequestContext = {},
     private readonly coordinatorGeneration: string = crypto.randomUUID(),
+    private readonly admissionDeadlineMs: number = leaseAdmissionDeadlineMs,
   ) {
     this.poolAccess = new ReadyPoolAccess(state, {
       owner: requestOwner,
@@ -3318,6 +3324,7 @@ export class FleetCoordinator {
     org: string,
     checkpointID?: string,
     checkpointUseClaimHash?: string,
+    admissionFence?: LeaseAdmissionFence,
   ): Promise<{ attempt: CreateAttemptRecord; replayLease?: LeaseRecord } | Response> {
     if (
       (checkpointID !== undefined || checkpointUseClaimHash !== undefined) &&
@@ -3328,6 +3335,7 @@ export class FleetCoordinator {
       return createAttemptBindingConflictResponse();
     }
     return await this.state.runExclusive(async () => {
+      admissionFence?.assertActive();
       let existing = await this.getCreateAttempt(requestedLeaseID);
       const fixedCreate = typeof source === "string" ? undefined : source;
       // Fixed callers have no private token. Mint one only at admission; a token
@@ -3357,6 +3365,7 @@ export class FleetCoordinator {
           existing.checkpointUseClaimHash === undefined
         ) {
           try {
+            admissionFence?.assertActive();
             existing = await backfillCheckpointCreateAttempt(this.state.storage, {
               requestedLeaseID,
               token,
@@ -3398,6 +3407,7 @@ export class FleetCoordinator {
         return createAttemptIDConflictResponse();
       }
       if (existing) {
+        admissionFence?.assertActive();
         await this.archiveCanceledCreateAttempt(existing);
       }
       const now = new Date().toISOString();
@@ -3417,6 +3427,7 @@ export class FleetCoordinator {
         createdAt: now,
         updatedAt: now,
       };
+      admissionFence?.assertActive();
       await this.putCreateAttempt(attempt);
       return { attempt };
     });
@@ -3429,8 +3440,10 @@ export class FleetCoordinator {
     org: string,
     checkpointID?: string,
     checkpointUseClaimHash?: string,
+    admissionFence?: LeaseAdmissionFence,
   ): Promise<Response | undefined> {
     return await this.state.runExclusive(async () => {
+      admissionFence?.assertActive();
       const canceled = await this.getArchivedCanceledCreateAttempt(requestedLeaseID, token);
       if (canceled) {
         return canceled.owner === owner && canceled.org === org
@@ -3455,6 +3468,7 @@ export class FleetCoordinator {
         existing.checkpointUseClaimHash === undefined
       ) {
         try {
+          admissionFence?.assertActive();
           existing = await backfillCheckpointCreateAttempt(this.state.storage, {
             requestedLeaseID,
             token,
@@ -3785,21 +3799,27 @@ export class FleetCoordinator {
     workspaceCapability?: ProviderWorkspaceCapability,
     fixedLeaseID?: string,
     checkpointAuthorization?: CheckpointLeaseAuthorization,
+    admissionFence?: LeaseAdmissionFence,
   ): Promise<Response> {
-    return withCreationSteps(() =>
-      this.createLeaseObserved(
-        request,
-        reservationGuard,
-        workspaceID,
-        workspaceCapability,
-        fixedLeaseID,
-        checkpointAuthorization,
-      ),
-    );
+    const fence = admissionFence ?? new LeaseAdmissionFence();
+    const create = () =>
+      withCreationSteps(() =>
+        this.createLeaseObserved(
+          request,
+          fence,
+          reservationGuard,
+          workspaceID,
+          workspaceCapability,
+          fixedLeaseID,
+          checkpointAuthorization,
+        ),
+      );
+    return admissionFence ? create() : fence.run(create, this.admissionDeadlineMs);
   }
 
   private async createLeaseObserved(
     request: Request,
+    admissionFence: LeaseAdmissionFence,
     reservationGuard?: () => Promise<Response | undefined>,
     workspaceID?: string,
     workspaceCapability?: ProviderWorkspaceCapability,
@@ -3808,8 +3828,10 @@ export class FleetCoordinator {
   ): Promise<Response> {
     const admissionStarted = creationEvent("admission_started");
     const runAdmissionExclusive = <T>(operation: () => Promise<T>): Promise<T> => {
+      admissionFence.assertActive();
       const queuedAt = Date.now();
       return this.state.runExclusive(() => {
+        admissionFence.assertActive();
         recordCreationStep("admission.lock_wait", Date.now() - queuedAt);
         return operation();
       });
@@ -3855,6 +3877,7 @@ export class FleetCoordinator {
         org,
         checkpointAuthorization?.checkpoint.id,
         checkpointAuthorization?.tokenHash,
+        admissionFence,
       );
       if (replay) {
         return this.preferredCreateReplay(request, leaseID, replay);
@@ -4071,6 +4094,7 @@ export class FleetCoordinator {
           org,
           fixedCreate ? undefined : checkpointAuthorization?.checkpoint.id,
           fixedCreate ? undefined : checkpointAuthorization?.tokenHash,
+          admissionFence,
         ),
       );
       if (reserved instanceof Response) {
@@ -4097,10 +4121,12 @@ export class FleetCoordinator {
       await this.validateCheckpointLeaseSource(checkpointAuthorization.checkpoint);
     }
     try {
+      admissionFence.assertActive();
       config =
         (await measureCreationStep("admission.config_prepare", async () =>
           configProvider.prepareLeaseConfig?.(config),
         )) ?? config;
+      admissionFence.assertActive();
     } catch (error) {
       if (error instanceof ImageCapabilityMismatchError) {
         return json(
@@ -4130,6 +4156,7 @@ export class FleetCoordinator {
     const providerHourlyUSD = await measureCreationStep("admission.pricing", () =>
       provider.hourlyPriceUSD(config.serverType, config),
     ).catch(() => undefined);
+    admissionFence.assertActive();
     if (
       createAttempt &&
       !(await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org))
@@ -4171,6 +4198,7 @@ export class FleetCoordinator {
         org,
         cost,
         continuation,
+        admissionFence,
         createAttempt,
         fixedCreate,
       );
@@ -4334,6 +4362,7 @@ export class FleetCoordinator {
         return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
       }
       const persist = async (storage: CoordinatorStorageView) => {
+        admissionFence.assertActive();
         const admitted = await storage.get<CreateAttemptRecord>(createAttemptKey(leaseID));
         if (
           (currentAttempt
@@ -4344,6 +4373,7 @@ export class FleetCoordinator {
         ) {
           throw new CheckpointError("lease_id_conflict", "lease identity changed during admission");
         }
+        admissionFence.beginCommit();
         if (currentAttempt) {
           await storage.put(createAttemptKey(leaseID), {
             ...currentAttempt,
@@ -4378,6 +4408,7 @@ export class FleetCoordinator {
       };
       const committed = await measureCreationStep("admission.record_publication", () =>
         commitLeaseAdmission(this.state, persist, async (storage) => {
+          admissionFence.assertActive();
           const lease = await storage.get<LeaseRecord>(leaseKey(leaseID), { noCache: true });
           const attempt = await storage.get<CreateAttemptRecord>(createAttemptKey(leaseID), {
             noCache: true,
@@ -4989,6 +5020,7 @@ export class FleetCoordinator {
     org: string,
     cost: ReturnType<typeof leaseCost>,
     capability: ProviderResumableProvisioning,
+    admissionFence: LeaseAdmissionFence,
     attempt?: CreateAttemptRecord,
     fixedCreate?: FixedLeaseCreateIntent,
   ): Promise<Response> {
@@ -5070,7 +5102,9 @@ export class FleetCoordinator {
       config,
     );
     // Rendering, randomness, crypto and read-only provider discovery stay outside retried transactions.
+    admissionFence.assertActive();
     const prepared = await capability.prepare(config, record);
+    admissionFence.assertActive();
     record.providerScope = prepared.plan.scope;
     const operation: LeaseProvisioningOperation = {
       schema: 1,
@@ -5091,6 +5125,7 @@ export class FleetCoordinator {
     const sealed = await sealProvisioningMaterial(this.env, operation, prepared.material);
     validateProvisioningRecord(sealed);
     const admission = await this.state.provisioning!.commitAndWake(async (transaction) => {
+      admissionFence.assertActive();
       const currentAttempt = await transaction.get<CreateAttemptRecord>(createAttemptKey(leaseID));
       const existing = await transaction.get<LeaseRecord>(leaseKey(leaseID));
       if (attempt) {
@@ -5160,6 +5195,7 @@ export class FleetCoordinator {
       }
       const limit = enforceCostLimitUsage(admissionState.costUsage, record, costLimits(this.env));
       if (limit) return json({ error: "cost_limit_exceeded", message: limit }, { status: 429 });
+      admissionFence.beginCommit();
       await clearHostReservations(transaction, clearedHostReservations);
       if (currentAttempt && attempt)
         await transaction.put(createAttemptKey(leaseID), {
@@ -16274,6 +16310,18 @@ export class FleetCoordinator {
   }
 
   private async createCheckpointLease(request: Request, fixedLeaseID?: string): Promise<Response> {
+    const admissionFence = new LeaseAdmissionFence();
+    return admissionFence.run(
+      () => this.createCheckpointLeaseObserved(request, admissionFence, fixedLeaseID),
+      this.admissionDeadlineMs,
+    );
+  }
+
+  private async createCheckpointLeaseObserved(
+    request: Request,
+    admissionFence: LeaseAdmissionFence,
+    fixedLeaseID?: string,
+  ): Promise<Response> {
     try {
       const input = await readJson<LeaseRequest>(request);
       if (
@@ -16314,11 +16362,13 @@ export class FleetCoordinator {
           principal.org,
           checkpointID,
           checkpointUseClaimHash,
+          admissionFence,
         );
         if (existingAttemptReplay && !existingAttemptReplay.ok) return existingAttemptReplay;
       }
       // Finish surviving claims for already-active children before replay;
       // the prior create may have committed its lease but failed to record completion.
+      admissionFence.assertActive();
       await expireCheckpointClaims(this.state.storage, checkpointID);
       let checkpoint: CoordinatorCheckpointRecord = authorizedCheckpoint;
       let completedReplay: Response | undefined;
@@ -16366,6 +16416,7 @@ export class FleetCoordinator {
           principal.org,
           checkpointID,
           checkpointUseClaimHash,
+          admissionFence,
         );
         if (!completedReplay?.ok) throw error;
         checkpoint = existingCheckpoint;
@@ -16459,6 +16510,7 @@ export class FleetCoordinator {
           principal.org,
           checkpointID,
           checkpointUseClaimHash,
+          admissionFence,
         );
         if (reserved instanceof Response) return reserved;
         if (
@@ -16474,6 +16526,7 @@ export class FleetCoordinator {
           return createAttemptReplayResponse(reserved.replayLease);
         }
         const bound = await this.state.runExclusive(async () => {
+          admissionFence.assertActive();
           const current = await this.getCreateAttempt(requestedLeaseID);
           if (!current || current.token !== createAttemptID) {
             return createAttemptConflictResponse();
@@ -16485,16 +16538,18 @@ export class FleetCoordinator {
           if (!sameCreateAttempt(current, reserved.attempt)) {
             return createAttemptBindingConflictResponse();
           }
-          return await this.state.storage.transaction((transaction) =>
-            bindCheckpointUseProvisioningInTransaction(
+          return await this.state.storage.transaction((transaction) => {
+            // A bound claim cannot be reopened for same-token retry, so binding is the commit point.
+            admissionFence.beginCommit();
+            return bindCheckpointUseProvisioningInTransaction(
               transaction,
               checkpointID,
               checkpointUseClaimHash,
               principal,
               createAttemptID,
               requestedLeaseID,
-            ),
-          );
+            );
+          });
         });
         if (bound instanceof Response) return bound;
         await this.scheduleCheckpointAlarm();
@@ -16528,6 +16583,7 @@ export class FleetCoordinator {
         undefined,
         fixedLeaseID,
         { checkpoint, principal, token, tokenHash: checkpointUseClaimHash },
+        admissionFence,
       );
       if (fixedLeaseID && response.ok && response.status !== 201) {
         await this.scheduleCheckpointAlarm();
@@ -20182,9 +20238,10 @@ export class FleetDurableObject extends FleetCoordinator implements DurableObjec
     env: Env,
     testProviders: Partial<Record<Provider, CloudProvider>> = {},
     coordinatorGeneration?: string,
+    admissionDeadlineMs?: number,
   ) {
     const runtime = new CloudflareCoordinatorRuntime(state);
-    super(runtime, env, testProviders, {}, coordinatorGeneration);
+    super(runtime, env, testProviders, {}, coordinatorGeneration, admissionDeadlineMs);
     this.runtime = runtime;
   }
 

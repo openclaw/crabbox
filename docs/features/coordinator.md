@@ -343,6 +343,17 @@ changed, or unreadable evidence retains uncertainty; it never authorizes another
 provider allocation. The existing token/owner/org/generation and cancellation
 fences still apply.
 
+Lease create admission has a 30-second deadline, including time waiting for the
+coordinator lifecycle mutex and durable provider preparation. If admission has
+not begun committing by then, the coordinator returns HTTP 503
+`lease_admission_timeout` with `retryable: true` and `Retry-After: 2`. Expired
+admission work cannot later write a lease; clients can retry the same lease ID
+and create-attempt token. Once the admission commit begins, it finishes normally,
+and this deadline does not limit subsequent provider provisioning. For
+`POST /v1/leases/from-checkpoint`, binding the checkpoint use claim is the
+commit point: a bound claim cannot be reopened for a same-token retry, so the
+deadline no longer applies after it.
+
 The Cloudflare Worker retries an ordinary token-bound `POST /v1/leases` once
 against a fresh Durable Object stub after a thrown runtime-reset error. Unbound
 POSTs, other mutations, and returned HTTP 5xx responses do not receive this
