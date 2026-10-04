@@ -58,7 +58,7 @@ func (a App) claimsList(ctx context.Context, args []string) error {
 	snapshot, err := snapshotLeaseClaimsReadOnlyContext(ctx, readLeaseClaimSnapshotWithPresence)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return context.Cause(ctx)
 		}
 		// Claim-store failures keep the historical exit code 1 for scripts.
 		return Exit(1, "%v", err)

@@ -145,7 +145,9 @@ func statusLeaseExactClaim(ctx context.Context, backend Backend, lease LeaseTarg
 	if lease.LeaseID == "" || provider == "" {
 		return leaseClaim{}, false, nil
 	}
-	claim, claimed, exact, err := ResolveLeaseClaimForProviderWithExactContext(ctx, lease.LeaseID, provider)
+	// The status wait budget may already be spent; this exact-ID read is O(1)
+	// and must still observe the claim that authorizes the touch.
+	claim, claimed, exact, err := ResolveLeaseClaimForProviderWithExact(lease.LeaseID, provider)
 	if err != nil {
 		return leaseClaim{}, false, fmt.Errorf("read exact %s lease claim: %w", provider, err)
 	}

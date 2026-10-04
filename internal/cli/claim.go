@@ -126,7 +126,7 @@ func snapshotLeaseClaims() (leaseClaimsSnapshot, error) {
 }
 
 func snapshotLeaseClaimsContext(ctx context.Context) (leaseClaimsSnapshot, error) {
-	if err := ctx.Err(); err != nil {
+	if err := claimScanErr(ctx); err != nil {
 		return leaseClaimsSnapshot{}, err
 	}
 	dir, err := CrabboxStateDir()
@@ -142,7 +142,7 @@ func snapshotLeaseClaimsContext(ctx context.Context) (leaseClaimsSnapshot, error
 	}
 	snapshot := leaseClaimsSnapshot{invalid: make(map[string]error)}
 	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
+		if err := claimScanErr(ctx); err != nil {
 			return leaseClaimsSnapshot{}, err
 		}
 		if filepath.Ext(entry.Name()) != ".json" {
@@ -202,7 +202,7 @@ func snapshotLeaseClaimsReadOnlyContext(ctx context.Context, read leaseClaimSnap
 // advanced only after visiting a file, so interrupted work can safely resume.
 func walkLeaseClaimsReadOnly(ctx context.Context, after string, read leaseClaimSnapshotReader, visit func(string, leaseClaim, error) error) (cursor string, err error) {
 	cursor = after
-	if err := ctx.Err(); err != nil {
+	if err := claimScanErr(ctx); err != nil {
 		return cursor, err
 	}
 	dir, err := CrabboxStateDir()
@@ -218,7 +218,7 @@ func walkLeaseClaimsReadOnly(ctx context.Context, after string, read leaseClaimS
 		return cursor, Exit(2, "read claims directory: %v", err)
 	}
 	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
+		if err := claimScanErr(ctx); err != nil {
 			return cursor, err
 		}
 		if entry.Name() <= after || filepath.Ext(entry.Name()) != ".json" {
@@ -244,7 +244,7 @@ func walkLeaseClaimsReadOnly(ctx context.Context, after string, read leaseClaimS
 				problem = &leaseClaimFileError{code: "empty_lease_id", err: Exit(2, "claim file %s has an empty lease id", id)}
 			}
 		}
-		if err := ctx.Err(); err != nil {
+		if err := claimScanErr(ctx); err != nil {
 			return cursor, err
 		}
 		if err := visit(id, claim, problem); err != nil {
@@ -252,7 +252,7 @@ func walkLeaseClaimsReadOnly(ctx context.Context, after string, read leaseClaimS
 		}
 		cursor = entry.Name()
 	}
-	return cursor, ctx.Err()
+	return cursor, claimScanErr(ctx)
 }
 
 func claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
@@ -1453,7 +1453,7 @@ func ResolveLeaseClaim(identifier string) (leaseClaim, bool, error) {
 }
 
 func ResolveLeaseClaimContext(ctx context.Context, identifier string) (leaseClaim, bool, error) {
-	if err := ctx.Err(); err != nil {
+	if err := claimScanErr(ctx); err != nil {
 		return leaseClaim{}, false, err
 	}
 
@@ -1473,7 +1473,7 @@ func ResolveLeaseClaimForProvider(identifier, provider string) (leaseClaim, bool
 }
 
 func ResolveLeaseClaimForProviderContext(ctx context.Context, identifier, provider string) (leaseClaim, bool, error) {
-	if err := ctx.Err(); err != nil {
+	if err := claimScanErr(ctx); err != nil {
 		return leaseClaim{}, false, err
 	}
 	if provider == "" {
@@ -1504,7 +1504,7 @@ func ResolveLeaseClaimForProviderWithExact(identifier, provider string) (leaseCl
 }
 
 func ResolveLeaseClaimForProviderWithExactContext(ctx context.Context, identifier, provider string) (leaseClaim, bool, bool, error) {
-	if err := ctx.Err(); err != nil {
+	if err := claimScanErr(ctx); err != nil {
 		return leaseClaim{}, false, false, err
 	}
 
@@ -1530,7 +1530,7 @@ func ResolveLeaseClaimForProviderScopeWithExact(identifier, provider, providerSc
 }
 
 func ResolveLeaseClaimForProviderScopeWithExactContext(ctx context.Context, identifier, provider, providerScope string) (leaseClaim, bool, bool, error) {
-	if err := ctx.Err(); err != nil {
+	if err := claimScanErr(ctx); err != nil {
 		return leaseClaim{}, false, false, err
 	}
 
@@ -1562,7 +1562,7 @@ func ResolveLeaseClaimForProviderCloudIDScope(cloudID, provider, providerScope s
 }
 
 func ResolveLeaseClaimForProviderCloudIDScopeContext(ctx context.Context, cloudID, provider, providerScope string) (leaseClaim, bool, error) {
-	if err := ctx.Err(); err != nil {
+	if err := claimScanErr(ctx); err != nil {
 		return leaseClaim{}, false, err
 	}
 
@@ -1582,7 +1582,7 @@ func ResolveLeaseClaimForProviderCloudIDScopeContext(ctx context.Context, cloudI
 	}
 	var match leaseClaim
 	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
+		if err := claimScanErr(ctx); err != nil {
 			return leaseClaim{}, false, err
 		}
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
@@ -1626,7 +1626,7 @@ func findUniqueLeaseClaim(ctx context.Context, identifier string, match func(lea
 }
 
 func findMatchingLeaseClaim(ctx context.Context, identifier string, match func(leaseClaim) bool, unique bool, read func(string) (leaseClaim, bool, error)) (leaseClaim, bool, error) {
-	if err := ctx.Err(); err != nil {
+	if err := claimScanErr(ctx); err != nil {
 		return leaseClaim{}, false, err
 	}
 	if identifier == "" {
@@ -1656,9 +1656,12 @@ func findMatchingLeaseClaim(ctx context.Context, identifier string, match func(l
 		return leaseClaim{}, false, Exit(2, "read claims directory: %v", err)
 	}
 	slug := claimLookupSlug(identifier)
-	var found leaseClaim
+	// A released fixed-create receipt may keep a slug that a newer live lease
+	// reuses; only competing live claims (or competing receipts) are ambiguous.
+	var live, receipt leaseClaim
+	liveCount, receiptCount := 0, 0
 	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
+		if err := claimScanErr(ctx); err != nil {
 			return leaseClaim{}, false, err
 		}
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
@@ -1674,12 +1677,23 @@ func findMatchingLeaseClaim(ctx context.Context, identifier string, match func(l
 		if !unique {
 			return claim, true, nil
 		}
-		if found.LeaseID != "" {
+		if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == "released" {
+			receipt = claim
+			receiptCount++
+		} else if liveCount++; liveCount > 1 {
 			return leaseClaim{}, false, Exit(2, "multiple claims match identifier %s", identifier)
+		} else {
+			live = claim
 		}
-		found = claim
 	}
-	return found, found.LeaseID != "", nil
+	switch {
+	case liveCount == 0 && receiptCount > 1:
+		return leaseClaim{}, false, Exit(2, "multiple claims match identifier %s", identifier)
+	case liveCount == 1:
+		return live, true, nil
+	default:
+		return receipt, receiptCount == 1, nil
+	}
 }
 
 func RemoveLeaseClaim(leaseID string) {
@@ -1913,7 +1927,7 @@ func ListLeaseClaimsWithPrefix(prefix string) ([]leaseClaim, error) {
 }
 
 func ListLeaseClaimsWithPrefixContext(ctx context.Context, prefix string) ([]leaseClaim, error) {
-	if err := ctx.Err(); err != nil {
+	if err := claimScanErr(ctx); err != nil {
 		return nil, err
 	}
 
@@ -1930,7 +1944,7 @@ func ListLeaseClaimsWithPrefixContext(ctx context.Context, prefix string) ([]lea
 	}
 	claims := make([]leaseClaim, 0, len(entries))
 	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
+		if err := claimScanErr(ctx); err != nil {
 			return nil, err
 		}
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
@@ -2276,4 +2290,13 @@ func ServerLeaseClaimSnapshot(server Server) (LeaseClaim, bool, bool) {
 		return LeaseClaim{}, false, false
 	}
 	return cloneLeaseClaim(server.claimSnapshot), server.claimSnapshotExists, true
+}
+
+// claimScanErr reports a canceled claim scan with the caller's cancellation
+// cause, so callers can tell their own cancellation apart from a scan failure.
+func claimScanErr(ctx context.Context) error {
+	if ctx.Err() == nil {
+		return nil
+	}
+	return context.Cause(ctx)
 }

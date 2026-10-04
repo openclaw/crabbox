@@ -117,3 +117,27 @@ func TestResolveLeaseClaimRejectsAmbiguousSlugs(t *testing.T) {
 		t.Fatalf("scope filter: %+v %v %v", c, ok, err)
 	}
 }
+
+func TestClaimLookupPrefersLiveClaimOverReleasedReceipt(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	released := &FixedCreateIntent{State: "released"}
+	for _, c := range []leaseClaim{
+		{LeaseID: "cbx_000000000001", Slug: "reused", FixedCreateIntent: released},
+		{LeaseID: "cbx_000000000002", Slug: "reused"},
+		{LeaseID: "cbx_000000000003", Slug: "receipts", FixedCreateIntent: released},
+		{LeaseID: "cbx_000000000004", Slug: "receipts", FixedCreateIntent: released},
+		{LeaseID: "cbx_000000000005", Slug: "only-receipt", FixedCreateIntent: released},
+	} {
+		writeClaimsListFixture(t, c.LeaseID+".json", c)
+	}
+	any := func(leaseClaim) bool { return true }
+	if got, ok, err := findUniqueLeaseClaim(t.Context(), "reused", any); err != nil || !ok || got.LeaseID != "cbx_000000000002" {
+		t.Fatalf("live claim should win over released receipt: %q %v %v", got.LeaseID, ok, err)
+	}
+	if _, ok, err := findUniqueLeaseClaim(t.Context(), "receipts", any); err == nil || ok {
+		t.Fatalf("two released receipts must stay ambiguous: ok=%v err=%v", ok, err)
+	}
+	if got, ok, err := findUniqueLeaseClaim(t.Context(), "only-receipt", any); err != nil || !ok || got.LeaseID != "cbx_000000000005" {
+		t.Fatalf("a lone receipt still resolves: %q %v %v", got.LeaseID, ok, err)
+	}
+}
