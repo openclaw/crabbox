@@ -148,7 +148,10 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 				return client.execStream(ctx, claim.LeaseID, shared.CommandStreamRequest{Command: command, Cwd: workdir, Env: req.Env, TimeoutMS: durationMillisecondsCeil(b.cfg.TTL)}, stdout, stderr)
 			}}, nil
 		},
-		Cleanup: func(ctx context.Context) error { _, err := destroyClaimedSandbox(ctx, client, claim); return err },
+		Cleanup: func(ctx context.Context) error {
+			_, err := destroyClaimedSandbox(ctx, client, claim, b.rt.Clock)
+			return err
+		},
 	})
 }
 
@@ -222,7 +225,7 @@ func (b *cloudflareBackend) Stop(ctx context.Context, req core.StopRequest) erro
 	if err != nil {
 		return err
 	}
-	missing, err := destroyClaimedSandbox(ctx, client, claim)
+	missing, err := destroyClaimedSandbox(ctx, client, claim, b.rt.Clock)
 	if err != nil {
 		return err
 	}
@@ -236,12 +239,17 @@ func (b *cloudflareBackend) Stop(ctx context.Context, req core.StopRequest) erro
 
 // Keep the captured local authority fenced through the native effect. The
 // runner's instance type is a routing preference, not a remote generation CAS.
-func destroyClaimedSandbox(ctx context.Context, client *cloudflareClient, claim core.LeaseClaim) (bool, error) {
+func destroyClaimedSandbox(ctx context.Context, client *cloudflareClient, claim core.LeaseClaim, clock core.Clock) (bool, error) {
 	client.useInstanceType(cloudflareClaimInstanceType(claim))
 	missing := false
 	err := core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, claim.LeaseID, claim, true, func() error {
 		err := client.destroySandbox(ctx, claim.LeaseID)
 		if cloudflareNotFoundError(err) {
+			// The runner records nothing for an unknown lease, so a create still
+			// in flight could allocate it after the claim is gone.
+			if createPending(claim, core.ClockNow(clock)) {
+				return core.Exit(5, "%s lease %s is still being created; its claim is kept, retry `%s` once the create returns", providerName, claim.LeaseID, cloudflareCleanupCommand(claim.LeaseID))
+			}
 			missing = true
 			return nil
 		}
@@ -288,7 +296,7 @@ func (b *cloudflareBackend) Cleanup(ctx context.Context, req core.CleanupRequest
 			fmt.Fprintf(b.rt.Stdout, "would confirm cleanup of %s claim %s slug=%s state=%s\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"), sandbox.State)
 			continue
 		}
-		if _, err := destroyClaimedSandbox(ctx, client, claim); err != nil {
+		if _, err := destroyClaimedSandbox(ctx, client, claim, b.rt.Clock); err != nil {
 			return err
 		}
 		removed++

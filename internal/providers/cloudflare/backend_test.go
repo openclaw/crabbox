@@ -12,10 +12,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -1802,6 +1804,40 @@ func TestCloudflareCreateStoppedMidStartReportsTheStop(t *testing.T) {
 	}
 }
 
+func TestCloudflareStopKeepsAClaimWhoseCreateIsInFlight(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var backend cloudflareBackend
+	var created atomic.Bool
+	var stopErr error
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			if !created.Load() {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = fmt.Fprintf(w, `{"id":%q,"state":"running"}`, path.Base(r.URL.Path))
+			return
+		}
+		// Another CLI stops the lease before the runner records it.
+		var req createSandboxRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		stopErr = backend.Stop(context.Background(), core.StopRequest{ID: req.ID})
+		created.Store(true)
+		_, _ = fmt.Fprintf(w, `{"id":%q,"state":"running"}`, req.ID)
+	}))
+	defer server.Close()
+	backend = cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, Keep: true}); err != nil {
+		t.Fatalf("warmup: %v", err)
+	}
+	if stopErr == nil || !strings.Contains(stopErr.Error(), "still being created") {
+		t.Fatalf("stop error = %v, want a retryable pending-create failure", stopErr)
+	}
+	if claims, err := localCloudflareClaims(); err != nil || len(claims) != 1 {
+		t.Fatalf("claims = %+v err=%v, want the created lease still claimed", claims, err)
+	}
+}
+
 func TestCloudflareCleanupKeepsAClaimWhoseCreateMayBeInFlight(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -2041,7 +2077,7 @@ func TestCloudflareDestroyClaimFenceSpansNativeDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { _, err := destroyClaimedSandbox(context.Background(), client, claim); done <- err }()
+	go func() { _, err := destroyClaimedSandbox(context.Background(), client, claim, nil); done <- err }()
 	<-entered
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -2080,7 +2116,7 @@ func TestCloudflareCanceledDestroyFenceMakesNoRequest(t *testing.T) {
 	<-entered
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	_, err = destroyClaimedSandbox(ctx, client, claim)
+	_, err = destroyClaimedSandbox(ctx, client, claim, nil)
 	close(release)
 	if lockErr := <-done; lockErr != nil {
 		t.Fatal(lockErr)
