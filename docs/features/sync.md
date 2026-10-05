@@ -323,7 +323,8 @@ Once ownership is established, sync runs these steps:
    `No changes detected, skipping sync` and skip the rest.
 5. On `--full-resync` / `--fresh-sync`, reset the remote workdir first.
 6. Seed the remote Git tree from `origin` at the local `HEAD` when the runner
-   can fetch that commit, so rsync only ships the diff.
+   can fetch that commit, and record the files created by verified seeds so the
+   first prune also removes excluded tracked paths.
 7. Write the manifest (and the deletion list) to the remote workdir.
 8. When delete-sync is enabled, prune previously synced remote files that are no
    longer in the manifest.

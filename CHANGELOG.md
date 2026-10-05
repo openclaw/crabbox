@@ -8,7 +8,7 @@
 
 ### Fixes
 
-- Transfer only verified seeded-worktree deltas on POSIX SSH targets, including reverted and remote edits on reused leases, and witness rsync receivers directly so failed transfers do not strand a detached workspace guard.
+- Transfer only verified seeded-worktree deltas on POSIX SSH targets, prune exclusions from fresh verified seeds, include reverted and remote edits on reused leases, and witness rsync receivers directly so failed transfers do not strand a detached workspace guard.
 
 - Reject AWS developer-image mints outside the requested region and clean up failed unpromoted candidate checkpoints and snapshots while preserving promotion rollback.
 - Keep lease reads, heartbeats, and releases responsive during maintenance history discovery by releasing the lifecycle mutex and Cloudflare storage input gate while scanning candidates; retain fenced rereads before mutations.

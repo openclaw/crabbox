@@ -29,7 +29,6 @@ func TestSeededSyncDeltaRoundTripReusedWorkspace(t *testing.T) {
 				return out
 			}
 			run(remoteGitSeed(remote, plan), nil)
-			run(remoteSeedSyncManifestFromGit(remote), nil)
 			mustWriteTestFile(t, filepath.Join(fixture.root, "staged.txt"), "staged edit\n")
 			mustWriteTestFile(t, filepath.Join(fixture.root, "added.txt"), "added\n")
 			runGit(t, fixture.root, "add", "staged.txt", "added.txt")

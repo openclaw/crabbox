@@ -2256,6 +2256,14 @@ func remoteGitSeed(workdir string, plan gitCoherencePlan) string {
 	}
 	seed := `origin_git clone --quiet --filter=blob:none --no-checkout --single-branch --branch ` + shellQuote(plan.Branch) + ` "$expected_origin" "$tmp"`
 	prepare, seedManifest := "", ""
+	if plan.Tree != "" {
+		// A verified private seed owns its tracked files, including excluded
+		// paths that the first manifest must prune. Seed-only trees may have
+		// gitlinks, which must not become managed file deletions.
+		seedManifest = remoteSyncMetaDirScript() + `mkdir -p "$meta_dir"
+git ls-files -z > "$meta_dir/sync-manifest"
+`
+	}
 	checkoutGit := "git"
 	prerequisiteExitCode := 127
 	if plan.Branch == "" {
@@ -2265,11 +2273,6 @@ origin_git -C "$tmp" remote add origin "$expected_origin"
 `
 		seed = `origin_git -C "$tmp" fetch --quiet --filter=blob:none --no-tags origin ` + shellQuote(plan.Target)
 		checkoutGit = "origin_git"
-		// The private seed owns these files. Recording them lets the normal
-		// manifest prune excluded paths before local files are transferred.
-		seedManifest = remoteSyncMetaDirScript() + `mkdir -p "$meta_dir"
-git ls-files -z > "$meta_dir/sync-manifest"
-`
 	}
 	script := `set -e
 printf 'crabbox-git-seed phase=prerequisite\n'
