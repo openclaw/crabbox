@@ -194,6 +194,11 @@ func fixedAzureCleanupServer(server core.Server, claim core.LeaseClaim) core.Ser
 	if server.Labels == nil {
 		server.Labels = make(map[string]string)
 	}
+	for key := range server.Labels {
+		if strings.HasPrefix(key, "_crabbox_azure_cleanup_") {
+			delete(server.Labels, key)
+		}
+	}
 	for key, value := range claim.Labels {
 		if strings.HasPrefix(key, "_crabbox_azure_cleanup_") {
 			server.Labels[key] = value

@@ -176,7 +176,9 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 		return core.Server{}, core.Exit(2, "refusing to rewrite Azure lease=%s with mismatched provider_key", existing.LeaseID)
 	}
 	server.Labels = labels
-	return server, nil
+	// Cloud observations omit private companion identities. Endpoint refresh must
+	// retain the original claim binding needed after a later VM eviction.
+	return fixedAzureCleanupServer(server, existing), nil
 }
 
 func (Provider) ServerTypeForConfig(cfg core.Config) string {

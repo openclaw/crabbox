@@ -676,6 +676,100 @@ func TestFixedAzurePreparationPersistsCleanupBeforeReady(t *testing.T) {
 	}
 }
 
+func TestFixedAzureEndpointRefreshPreservesEvictedCleanup(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		failCleanup bool
+		replaceVM   bool
+	}{
+		{name: "settled"},
+		{name: "unknown cleanup", failCleanup: true},
+		{name: "replacement endpoint", replaceVM: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &fakeAzureClient{}
+			backend := fixedAzureTestBackend(t, client)
+			request := core.AcquireRequest{
+				RequestedLeaseID: "cbx_abcdef123471", RequestedSlug: "evicted",
+				Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+			}
+			lease, err := backend.Acquire(t.Context(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A normal cloud endpoint read contains public tags, not the local
+			// companion binding captured before the VM became ready.
+			observed := client.servers[0]
+			observed.Labels = maps.Clone(observed.Labels)
+			observed.Labels["state"] = "ready"
+			if test.replaceVM {
+				observed.ImmutableID = "replacement-vm"
+			}
+			refreshed, err := core.UpdateLeaseClaimEndpointIfUnchanged(
+				lease.LeaseID, claim, observed, lease.SSH,
+			)
+			if test.replaceVM {
+				retained, readErr := core.ReadLeaseClaim(lease.LeaseID)
+				if err == nil || readErr != nil || !reflect.DeepEqual(retained, claim) || len(client.deleted) != 0 {
+					t.Fatalf("replacement changed ownership: err=%v readErr=%v deleted=%v", err, readErr, client.deleted)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			for key, value := range fixedAzureTestCleanupLabels() {
+				if refreshed.Labels[key] != value {
+					t.Fatalf("endpoint refresh lost recorded companion %s", key)
+				}
+			}
+			client.servers = nil     // Spot removal leaves the originally bound companions.
+			client.prepareFunc = nil // Recovery must not recapture replacement identities.
+			uncertain := errors.New("companion deletion outcome unknown")
+			client.deleteOwnedFunc = func(server core.Server) error {
+				for key, value := range fixedAzureTestCleanupLabels() {
+					if server.Labels[key] != value {
+						t.Fatalf("eviction cleanup did not use original %s", key)
+					}
+				}
+				if test.failCleanup {
+					return uncertain
+				}
+				return nil
+			}
+			resolved, err := backend.Resolve(t.Context(), core.ResolveRequest{
+				ID: lease.LeaseID, ReleaseOnly: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = backend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: resolved})
+			retained, readErr := core.ReadLeaseClaim(lease.LeaseID)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if test.failCleanup {
+				if !errors.Is(err, uncertain) || retained.FixedCreateIntent.State == "released" || len(client.deleted) != 0 {
+					t.Fatalf("uncertain deletion released custody: err=%v claim=%+v", err, retained)
+				}
+				for key, value := range fixedAzureTestCleanupLabels() {
+					if retained.Labels[key] != value {
+						t.Fatalf("uncertain cleanup lost %s", key)
+					}
+				}
+				return
+			}
+			if err != nil || retained.FixedCreateIntent.State != "released" || len(client.deleted) != 1 {
+				t.Fatalf("evicted cleanup did not settle: err=%v claim=%+v deleted=%v", err, retained, client.deleted)
+			}
+		})
+	}
+}
+
 func TestFixedAzurePreparationFailureRetainsUnreadyClaim(t *testing.T) {
 	for _, failure := range []string{"read", "binding"} {
 		t.Run(failure, func(t *testing.T) {
