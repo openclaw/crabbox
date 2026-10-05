@@ -322,7 +322,7 @@ generatedTest("homepage presents use-case, pricing, and onboarding paths", () =>
   const providerCount = Object.keys(metadata).length;
   const builtInCount = Object.values(metadata).filter((entry) => entry.category !== "external-provider").length;
   assert.match(home, new RegExp(`<li>${builtInCount} built-in providers</li>`));
-  assert.match(home, new RegExp(`>${builtInCount} built-in providers\\.<br>One way to run\\.`));
+  assert.match(home, new RegExp(`>${builtInCount} <span class="home-nowrap">built-in</span> providers\\.<br>One way to run\\.`));
   assert.match(home, new RegExp(`Turn ${providerCount} registered providers into a focused comparison path\\.`));
   assert.match(home, /href="pricing\.html">See Pricing and Cost Boundaries/);
   assert.match(home, /There is no generic nested mode\./);
