@@ -55,9 +55,10 @@ retains a terminal claim so the ID cannot allocate another machine. Keep the
 local claim and stored SSH key through recovery; images with additional volumes
 are rejected for fixed leases.
 
-The backend supports fixed IDs, but the current offline `crabbox providers
---json` catalog does not advertise `fixed-lease-id` for Scaleway. Automation
-that requires the catalog feature cannot yet discover that support.
+The offline provider catalog advertises this support as `fixed-lease-id` in
+`crabbox providers --json` and `crabbox providers describe scaleway --json`.
+Use `crabbox providers --feature fixed-lease-id --json` to filter for providers
+that support caller-supplied lease IDs.
 
 ### Fixed-Lease Recovery
 

@@ -167,7 +167,7 @@ Access terms:
 | [proxmox](proxmox.md) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `fixed-lease-id` | `linux`; Proxmox VE QEMU clone | `self-hosted`; GPU: optional | Crabbox; VM delete | Self-hosted Linux VM fleet | Needs a prepared template, guest agent, and network; fixed lease IDs bind VMID and generation and retain uncertain attempts |
 | [railway](railway.md) (`rail`, `railwayapp`) | specialized; `service-control` · service-control | SSH not applicable; `none` · direct only; features: `url-bridge` | `linux`; Railway service | `cloud`; GPU: unknown | Railway; service stop only | Inspecting or stopping an existing Railway service | Cannot execute arbitrary Crabbox run commands |
 | [runpod](runpod.md) (`run-pod`, `runpodio`) | built-in; `ssh-lease` · gpu-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `fixed-lease-id` | `linux`; RunPod GPU pod | `cloud`; GPU: yes | RunPod; pod release | GPU-backed Linux workload over public SSH | Capacity, GPU pricing, and public SSH vary |
-| [scaleway](scaleway.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Scaleway Instance | `cloud`; GPU: optional | Crabbox; instance and managed key delete | Direct Linux VM on Scaleway Instances | Direct-only; security groups must already allow SSH |
+| [scaleway](scaleway.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale`, `fixed-lease-id` | `linux`; Scaleway Instance | `cloud`; GPU: optional | Crabbox; instance and managed key delete | Direct Linux VM on Scaleway Instances | Direct-only; security groups must already allow SSH |
 | [sealos-devbox](sealos-devbox.md) (`sealos`, `sealos-dev`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Sealos DevBox CRD | `provider-managed`; GPU: unknown | Sealos DevBox CRD; pause or DevBox delete | Sealos DevBox Linux workspace over SSHGate or NodePort | Requires kubectl, explicit context, DevBox CRD/RBAC, image, and SSHGate or NodePort route configuration |
 | [semaphore](semaphore.md) (`sem`) | built-in; `ssh-lease` · ci-proof-runner | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Semaphore CI job | `provider-managed`; GPU: optional | Semaphore; job stop | Debugging in the same image and secret plane as CI | Depends on debug SSH metadata from the job |
 | [smolvm](smolvm.md) (`smol`, `smolmachines`, `smolfleet`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; Smol Machines microVM | `provider-managed`; GPU: no | smolfleet; microVM delete | Lightweight hosted microVM execution | Delegated execution through smolfleet |
@@ -220,8 +220,6 @@ instead of a Linux shell.
 For desktop, VNC/WebVNC, browser, Code, and portal workflows, use the
 [combined access guide](../features/interactive-desktop-vnc.md). For idempotent
 automation, check `fixed-lease-id` and the provider's recovery contract.
-Scaleway currently implements fixed IDs but omits that feature from offline
-catalog output; see its [fixed-lease recovery](scaleway.md#fixed-lease-recovery).
 
 ## Notes on families and capabilities
 

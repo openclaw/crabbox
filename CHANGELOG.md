@@ -4,17 +4,16 @@
 
 ### Changes
 
+- Rewrite the README around on-demand computers for agents, with every supported provider listed.
 - Redesign the crabbox.sh home page around on-demand computers for agents, with a provider wall generated from the catalog, a new crab-in-a-box icon, and a tokenized visual system shared by the docs and Features pages.
+- Refresh the docs against the current CLI and provider catalog, including a single guide to desktop, VNC, browser and portal access.
 
 ### Fixes
 
 - Reject AWS developer-image mints outside the requested region and clean up failed unpromoted candidate checkpoints and snapshots while preserving promotion rollback.
 - Keep lease reads, heartbeats, and releases responsive during maintenance history discovery by releasing the lifecycle mutex and Cloudflare storage input gate while scanning candidates; retain fenced rereads before mutations.
 - Keep the homepage workload router's Copy button fully visible for short command snippets. [PR 2703](https://github.com/openclaw/crabbox/pull/2703). Thanks @shakkernerd.
-
-### Changes
-
-- Refresh the docs against the current CLI and provider catalog, including a single guide to desktop, VNC, browser and portal access.
+- Advertise Scaleway's existing `fixed-lease-id` support in the provider catalog and enforce capability parity across registered backends.
 
 ## 0.71.0 - 2026-10-04
 
@@ -45,11 +44,6 @@
 - Make `--class` select real machine sizes on DigitalOcean, Scaleway, and Linode, with CPU/RAM profiles and explicit type overrides preserved. The `standard` class mapping increases size and cost (DigitalOcean `s-1vcpu-1gb` → `s-4vcpu-8gb`, Scaleway `DEV1-S` → `DEV1-L`, Linode `g6-standard-1` → `g6-standard-4`); keep the old size with `--type <old type>` or `class: tiny`. [PR 2676](https://github.com/openclaw/crabbox/pull/2676).
 - Avoid the local claim-directory scan before coordinator create by giving generated slugs an eight-hex ID suffix, use O(1) exact canonical lease-ID claim lookups, and make AWS/coordinator acquisition, core claim routing, and Testbox ownership scans cancellable. [PR 2685](https://github.com/openclaw/crabbox/pull/2685).
 - Page coordinator CLI lists with compact summaries, bound slug lookup and durable admission memory, keep identity/list reads out of the lifecycle queue, and arm cleanup recovery before provider I/O; preserve legacy list and full inspect responses. [PR 2672](https://github.com/openclaw/crabbox/pull/2672).
-
-### Changes
-
-- Rewrite the README around on-demand computers for agents, with every supported provider listed.
-- Refresh the docs against the current CLI and provider catalog, including a single guide to desktop, VNC, browser and portal access.
 
 ### Fixes
 

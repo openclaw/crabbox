@@ -52,6 +52,8 @@ func TestProvidersFixedLeaseIDBuiltBinary(t *testing.T) {
 		{"proxmox", true},
 		{"external", false}, // Requires an explicit runtime contract opt-in.
 		{"linode", true},
+		{"runpod", true},
+		{"scaleway", true},
 		{"boxd", false},
 	} {
 		t.Run(tc.provider, func(t *testing.T) {
