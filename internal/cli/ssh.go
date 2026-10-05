@@ -1589,8 +1589,18 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	if opts.UseFilesFrom {
 		args = append(args, "--files-from=-", "--from0")
 	}
+	owner := workspaceOwnerFromContext(ctx)
 	if isWindowsWSL2Target(target) {
 		args = append(args, "--rsync-path", "wsl.exe rsync")
+	} else if owner != nil {
+		// openrsync removes shell quoting from --rsync-path before invoking SSH.
+		// A single private executable path works with both rsync implementations.
+		receiver, stageErr := stageRsyncWorkspaceReceiver(ctx, target, owner)
+		if stageErr != nil {
+			return stageErr
+		}
+		defer func() { err = errors.Join(err, receiver.close(ctx, target)) }()
+		args = append(args, "--rsync-path", receiver.command)
 	}
 	if !opts.UseFilesFrom {
 		for _, exclude := range excludes {
@@ -1606,9 +1616,8 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 		return err
 	}
 	cmd := handle.cmd
-	owner := workspaceOwnerFromContext(ctx)
 	guardStarted := false
-	if owner != nil && !isWindowsNativeTarget(target) {
+	if owner != nil && isWindowsWSL2Target(target) {
 		rawCtx := contextWithoutWorkspaceOwner(ctx)
 		if err := runSSHQuiet(rawCtx, target, owner.rsyncPrepareCommand()); err != nil {
 			return Exit(7, "prepare rsync workspace witness: %v", err)
@@ -1644,6 +1653,14 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 		cancel()
 		if guardErr != nil {
 			err = errors.Join(err, Exit(7, "finish rsync workspace witness: %v", guardErr))
+		}
+	}
+	if owner != nil && !isWindowsNativeTarget(target) && !isWindowsWSL2Target(target) {
+		quiesceCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), owner.quiesceTimeout())
+		quiesceErr := waitWorkspaceOwnerNoChild(quiesceCtx, owner, owner.callTimeout())
+		cancel()
+		if quiesceErr != nil {
+			err = errors.Join(err, Exit(7, "finish rsync workspace receiver: %v", quiesceErr))
 		}
 	}
 	if opts.Debug {
