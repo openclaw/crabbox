@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- Keep the homepage workload router's Copy button fully visible for short command snippets. [PR 2703](https://github.com/openclaw/crabbox/pull/2703). Thanks @shakkernerd.
+
 ## 0.71.0 - 2026-10-04
 
 ### Highlights
