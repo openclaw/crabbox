@@ -4,7 +4,7 @@
 
 ### Changes
 
-- Redesign the crabbox.sh home page around on-demand computers for agents, with a provider wall generated from the catalog.
+- Redesign the crabbox.sh home page around on-demand computers for agents, with a provider wall generated from the catalog and a new crab-in-a-box icon.
 
 ## 0.71.0 - 2026-10-04
 

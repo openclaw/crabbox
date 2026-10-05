@@ -1521,12 +1521,26 @@ if(tocLinks.length){const map=new Map();tocLinks.forEach(a=>{const id=a.getAttri
 
 function crabSvg() {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="Crabbox">
-<rect width="120" height="120" rx="24" fill="#12211f"/>
-<path d="M24 60c9-26 62-26 72 0 3 9-4 28-36 28S21 69 24 60Z" fill="#e35e46"/>
-<path d="M38 55c4-8 12-13 22-13s18 5 22 13" fill="none" stroke="#fffbf4" stroke-width="6" stroke-linecap="round"/>
-<circle cx="48" cy="62" r="5" fill="#12211f"/><circle cx="72" cy="62" r="5" fill="#12211f"/>
-<path d="M27 54 11 42m82 12 16-12M36 82 22 96m62-14 14 14M46 86l-5 17m33-17 5 17" stroke="#fffbf4" stroke-width="7" stroke-linecap="round"/>
-<path d="M20 35c-4-13 8-22 18-14-10 2-13 9-18 14Zm80 0c4-13-8-22-18-14 10 2 13 9 18 14Z" fill="#e35e46"/>
+<defs>
+<linearGradient id="cbx-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#173430"/><stop offset="1" stop-color="#0f1c1a"/></linearGradient>
+<linearGradient id="cbx-shell" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f27358"/><stop offset="1" stop-color="#d9503a"/></linearGradient>
+<linearGradient id="cbx-box" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2f9187"/><stop offset="1" stop-color="#1f6760"/></linearGradient>
+</defs>
+<rect width="120" height="120" rx="26" fill="url(#cbx-bg)"/>
+<path d="M39 64Q26 61 26 47M81 64Q94 61 94 47" fill="none" stroke="#e35e46" stroke-width="7" stroke-linecap="round"/>
+<path d="M30.1 33.6A12 12 0 1 1 20.1 34.7L25.5 45Z" fill="url(#cbx-shell)" transform="rotate(-14 25.5 45)"/>
+<path d="M89.9 33.6A12 12 0 1 0 99.9 34.7L94.5 45Z" fill="url(#cbx-shell)" transform="rotate(14 94.5 45)"/>
+<path d="M51 52 47 38M69 52l4-14" stroke="#e35e46" stroke-width="4.5" stroke-linecap="round"/>
+<ellipse cx="60" cy="70" rx="29" ry="21" fill="url(#cbx-shell)"/>
+<path d="M41 60q8-9 19-9" fill="none" stroke="#ff9b85" stroke-width="4" stroke-linecap="round" opacity=".75"/>
+<circle cx="46.5" cy="35.5" r="7" fill="#fffbf4"/><circle cx="73.5" cy="35.5" r="7" fill="#fffbf4"/>
+<circle cx="48" cy="36.5" r="3.4" fill="#12211f"/><circle cx="72" cy="36.5" r="3.4" fill="#12211f"/>
+<path d="M54.5 61.5q5.5 4 11 0" fill="none" stroke="#12211f" stroke-width="2.6" stroke-linecap="round"/>
+<rect x="18" y="72" width="84" height="34" rx="8" fill="url(#cbx-box)"/>
+<rect x="13" y="67" width="94" height="11" rx="5.5" fill="#62c7bd"/>
+<path d="M29 67.5q-2 4.5 1 8M37 67q-2 5 1 9M91 67.5q2 4.5-1 8M83 67q2 5-1 9" fill="none" stroke="#e35e46" stroke-width="3.6" stroke-linecap="round"/>
+<path d="M44 85l7 5-7 5" fill="none" stroke="#fffbf4" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M56 95h18" stroke="#fffbf4" stroke-width="3.6" stroke-linecap="round"/>
 </svg>`;
 }
 
