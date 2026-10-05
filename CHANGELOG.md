@@ -41,6 +41,10 @@
 - Avoid the local claim-directory scan before coordinator create by giving generated slugs an eight-hex ID suffix, use O(1) exact canonical lease-ID claim lookups, and make AWS/coordinator acquisition, core claim routing, and Testbox ownership scans cancellable. [PR 2685](https://github.com/openclaw/crabbox/pull/2685).
 - Page coordinator CLI lists with compact summaries, bound slug lookup and durable admission memory, keep identity/list reads out of the lifecycle queue, and arm cleanup recovery before provider I/O; preserve legacy list and full inspect responses. [PR 2672](https://github.com/openclaw/crabbox/pull/2672).
 
+### Changes
+
+- Rewrite the README around on-demand computers for agents, with every supported provider listed.
+
 ### Fixes
 
 - Bound runner synchronization history reads and pending writes while preserving complete stale responses, legacy identities, and retry behavior. [PR 2695](https://github.com/openclaw/crabbox/pull/2695), [Issue 2694](https://github.com/openclaw/crabbox/issues/2694). Thanks @shakkernerd.
