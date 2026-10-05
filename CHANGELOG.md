@@ -15,6 +15,8 @@
 
 ### Fixes
 
+- Bound runner synchronization history reads and pending writes while preserving complete stale responses, legacy identities, and retry behavior. [PR 2695](https://github.com/openclaw/crabbox/pull/2695). Thanks @shakkernerd.
+
 - Prevent queued coordinator uploads from retaining every run log in memory, page run-event reads at storage, and return structured failures for interrupted event appends instead of uncaught Worker errors.
 - Return a retryable 503 when coordinator lease creates cannot begin committing admission within 30 seconds instead of hanging. [PR 2687](https://github.com/openclaw/crabbox/pull/2687); related [Issue 1561](https://github.com/openclaw/crabbox/issues/1561).
 - Bound coordinator AWS, Azure, and Tailscale requests with retryable 503 deadlines, and verify Mac host ownership outside the coordinator lock, so stalled image or Mac host operations cannot indefinitely block queued lease creates. [PR 2689](https://github.com/openclaw/crabbox/pull/2689).
