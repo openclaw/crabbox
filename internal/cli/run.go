@@ -2554,7 +2554,7 @@ retrySync:
 			timings.syncFallbackReason = overlayDecision.Reason
 		}
 		seededDelta := false
-		if seedSucceeded && cfg.Sync.Delete && !cfg.Sync.Checksum {
+		if seedSucceeded && !overlayDecision.Requested && cfg.Sync.Delete && !cfg.Sync.Checksum {
 			stepStart = time.Now()
 			if delta, files, size, ok := seededSyncTransfer(ctx, target, repo, manifest, coherence, workdir); ok {
 				transferData, seededDelta = delta, true
