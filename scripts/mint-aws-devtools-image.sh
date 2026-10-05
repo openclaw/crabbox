@@ -218,6 +218,11 @@ fi
 
 # Clear ambient/file overrides for proof leases; the source opts in below.
 export CRABBOX_AWS_STOCK_IMAGE=0 CRABBOX_AWS_ROOT_GB=0
+if [[ -n "$region" ]]; then
+  export CRABBOX_CAPACITY_REGIONS="$region"
+  # A nonempty empty list clears file defaults; an empty env value is ignored.
+  export CRABBOX_CAPACITY_AVAILABILITY_ZONES="${CRABBOX_CAPACITY_AVAILABILITY_ZONES:-,}"
+fi
 
 invocation_id="$(date -u +%Y%m%d-%H%M%S)-$$-${RANDOM}"
 log_id="$(printf '%s' "$invocation_id" | tr -c 'A-Za-z0-9_.-' '_')"
@@ -292,6 +297,9 @@ measurement_lease=""
 measurement_handle=""
 promotion_log=""
 rollback_pending=0
+candidate_checkpoint=""
+candidate_region=""
+promotion_confirmed=0
 warmup_handle_dir="$log_dir/.image-mint-${log_image_name}-leases-${log_id}"
 
 cleanup() {
@@ -306,6 +314,11 @@ cleanup() {
   local outcome_candidate=""
   local lease handle seen_leases="|"
   local -a cleanup_leases=()
+  # A successful promotion can precede a failed receipt tee or a signal.
+  if [[ -n "$promotion_log" && -n "$candidate_checkpoint" ]] &&
+    jq -e --arg image "$ami_id" '.image.id == $image and (.image.revision | type == "string" and length > 0)' "$promotion_log" >/dev/null 2>&1; then
+    promotion_confirmed=1
+  fi
   # A signal can arrive after handle publication but before run returns or writes timing.
   if [[ -z "$measurement_lease" && -n "$measurement_handle" && -f "$measurement_handle" ]]; then
     measurement_lease="$(node "$ROOT/scripts/devtools-image-proof.mjs" handle "$measurement_handle" | jq -er .leaseId)" || {
@@ -354,6 +367,30 @@ cleanup() {
     else
       rollback_status="failed"
       finalizer_status=1
+    fi
+  fi
+  if [[ "$exit_status" != "0" && -n "$candidate_checkpoint" && "$promotion_confirmed" != "1" ]]; then
+    local delete_status=0
+    local cleanup_receipt="$log_dir/image-mint-${log_image_name}-${log_id}-candidate-cleanup.json"
+    # Only the checkpoint captured by this invocation owns the AMI and snapshots.
+    # The checkpoint API also refuses deletion if an unacknowledged promotion pinned it.
+    run_json_tee "${cleanup_receipt%.json}.log" env \
+      CRABBOX_AWS_REGION="$candidate_region" AWS_REGION="$candidate_region" \
+      "$CRABBOX_BIN" checkpoint delete "$candidate_checkpoint" --admin || delete_status=$?
+    local candidate_cleanup_status="succeeded"
+    if [[ "$delete_status" != "0" ]]; then
+      candidate_cleanup_status="failed"
+      cleanup_status="failed"
+      printf 'FAILED to delete candidate image=%s region=%s checkpoint=%s (exit %s); retry checkpoint delete --admin\n' \
+        "$ami_id" "$candidate_region" "$candidate_checkpoint" "$delete_status" >&2
+    elif [[ "$cleanup_status" != "failed" ]]; then
+      cleanup_status="succeeded"
+    fi
+    if ! jq -n --arg checkpoint "$candidate_checkpoint" --arg image "$ami_id" \
+      --arg region "$candidate_region" --arg status "$candidate_cleanup_status" --argjson code "$delete_status" \
+      '{checkpointId: $checkpoint, imageId: $image, region: $region, status: $status, exitCode: $code}' >"$cleanup_receipt"; then
+      cleanup_status="failed"
+      printf 'FAILED to record candidate image cleanup receipt: %s\n' "$cleanup_receipt" >&2
     fi
   fi
   if [[ "$measured" == "1" && -n "$measurement_dir" && -n "$public_outcome" ]]; then
@@ -651,12 +688,29 @@ assert_selected_image() {
 capture_selection() {
   local lease="$1" out="$2"
   local -a statuses
+  local -a args=(admin leases --limit 100 --json)
+  [[ -z "${CRABBOX_OWNER:-}" ]] || args+=(--owner "$CRABBOX_OWNER")
+  [[ -z "${CRABBOX_ORG:-}" ]] || args+=(--org "$CRABBOX_ORG")
   # Do not log the owner/org filter or persist the complete administrative listing.
-  "$CRABBOX_BIN" admin leases --owner "$CRABBOX_OWNER" --org "$CRABBOX_ORG" --limit 100 --json 2>"$out.error" |
+  "$CRABBOX_BIN" "${args[@]}" 2>"$out.error" |
     node "$ROOT/scripts/devtools-image-proof.mjs" select "$lease" >"$out" 2>>"$out.error" &&
     statuses=("${PIPESTATUS[@]}") || statuses=("${PIPESTATUS[@]}")
   [[ "${statuses[0]}" == "0" ]] || return "${statuses[0]}"
   return "${statuses[1]}"
+}
+
+assert_region() {
+  local log="$1" selection="$2"
+  [[ -n "$region" ]] || return 0
+  local selected_region
+  selected_region="$(sed -nE 's/^image selected id=[^[:space:]]+ source=[^[:space:]]+ kind=aws-ami region=([^[:space:]]+).*/\1/p' "$log")"
+  # Capacity regions are additive on the coordinator, not a client-side allowlist.
+  if [[ "$selected_region" != "$region" ]] ||
+    ! jq -e --arg region "$region" '.provider == "aws" and .region == $region and .image.region == $region' "$selection" >/dev/null 2>&1; then
+    printf 'mint requires image and lease region=%s (selected=%s); quota/capacity in %s; retry later or choose another region\n' \
+      "$region" "${selected_region:-unknown}" "$region" >&2
+    return 1
+  fi
 }
 
 warmup() {
@@ -697,12 +751,25 @@ warmup() {
     printf 'warmup did not return a lease id for %s\n' "$label" >&2
     return 1
   fi
+  local selection_status=0
+  local selection="$log.selection.json"
+  [[ "$measured" != "1" ]] || selection="$measurement_dir/$label.selection.json"
+  if [[ -n "$region" || "$measured" == "1" ]]; then
+    capture_selection "$lease" "$selection" || selection_status=$?
+    assert_region "$log" "$selection" || selection_status=1
+    if [[ "$selection_status" != "0" ]]; then
+      printf 'warmup region evidence failed for %s\n' "$label" >&2
+      [[ ! -s "$selection.error" ]] || cat "$selection.error" >&2
+      # A routed or unverified lease must not survive --keep-lease.
+      if run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" >&2; then
+        clear_warmup_handle "$label"
+      fi
+      return "$selection_status"
+    fi
+  fi
   if [[ "$measured" == "1" ]]; then
     local phase="$label"
-    local selection_status=0
-    local selection="$measurement_dir/$label.selection.json"
     [[ "$phase" == "source" && "$stock_source" != 1 ]] && phase=baseline
-    capture_selection "$lease" "$selection" || selection_status=$?
     if [[ "$selection_status" == "0" ]]; then
       node "$ROOT/scripts/devtools-image-proof.mjs" selection \
         "$measurement_dir/policy.json" "$selection" "$phase" "${ami_id:-}" \
@@ -769,6 +836,9 @@ measure_cohort() {
     if [[ -n "$measurement_lease" ]]; then
       if [[ "$run_status" == "0" ]]; then
         capture_selection "$measurement_lease" "$selection" || capture_status=$?
+        if [[ "$capture_status" == "0" ]]; then
+          assert_region "$log" "$selection" || capture_status=$?
+        fi
         if [[ "$capture_status" != "0" ]]; then
           printf 'could not capture exact-lease measurement evidence\n' >&2
           [[ ! -s "$selection.error" ]] || cat "$selection.error" >&2
@@ -1039,13 +1109,21 @@ smoke "$source_lease"
 image_env=(env)
 [[ -n "$region" ]] && image_env+=(CRABBOX_AWS_REGION="$region" AWS_REGION="$region")
 outcome_stage="candidate_create"
+image_status=0
 image_output="$("${image_env[@]}" "$CRABBOX_BIN" checkpoint create \
   --provider aws --target "$target" --id "$source_lease" --name "$image_name" \
-  --mode native --strategy image --no-reboot=false --wait --wait-timeout "$wait_timeout")"
+  --mode native --strategy image --no-reboot=false --wait --wait-timeout "$wait_timeout")" || image_status=$?
 printf '%s\n' "$image_output"
-ami_id="$(printf '%s\n' "$image_output" | sed -nE 's/.* resource=(ami-[^[:space:]]+).*/\1/p' | tail -n 1)"
-if [[ -z "$ami_id" ]]; then
-  printf 'checkpoint create did not return an AMI id\n' >&2
+candidate_identity="$(printf '%s\n' "$image_output" | sed -nE 's/^checkpoint created id=(chk_[a-zA-Z0-9]+) kind=aws-ami resource=(ami-[a-zA-Z0-9]+) state=[^[:space:]]+ region=([a-z0-9-]+) .*/\1 \2 \3/p')"
+if [[ -z "$candidate_identity" || "$candidate_identity" == *$'\n'* ]]; then
+  printf 'checkpoint create did not return one exact AMI/checkpoint/region identity; inspect capture output before cleanup\n' >&2
+  [[ "$image_status" != "0" ]] || image_status=1
+  exit "$image_status"
+fi
+read -r candidate_checkpoint ami_id candidate_region <<<"$candidate_identity"
+[[ "$image_status" == "0" ]] || exit "$image_status"
+if [[ -n "$region" && "$candidate_region" != "$region" ]]; then
+  printf 'captured image region=%s differs from requested region=%s; refusing candidate launch\n' "$candidate_region" "$region" >&2
   exit 1
 fi
 
@@ -1091,6 +1169,7 @@ promote_args+=("$ami_id")
 promotion_log="$(mktemp "$log_dir/image-mint-${log_image_name}-promotion-${log_id}.json.XXXXXX")"
 rollback_pending=1
 run_json_tee "$promotion_log" "$CRABBOX_BIN" "${promote_args[@]}"
+promotion_confirmed=1
 jq -e '.image.id and .image.revision and (.previous.state == "present" or .previous.state == "absent") and (.previous.aliases | length > 0)' "$promotion_log" >/dev/null
 if [[ "$measured" == "1" ]]; then
   node "$ROOT/scripts/devtools-image-proof.mjs" receipt \
