@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changes
+
+- Redesign the crabbox.sh home page around on-demand computers for agents, with a provider wall generated from the catalog.
+
 ## 0.71.0 - 2026-10-04
 
 ### Highlights
@@ -29,10 +35,6 @@
 - Make `--class` select real machine sizes on DigitalOcean, Scaleway, and Linode, with CPU/RAM profiles and explicit type overrides preserved. The `standard` class mapping increases size and cost (DigitalOcean `s-1vcpu-1gb` → `s-4vcpu-8gb`, Scaleway `DEV1-S` → `DEV1-L`, Linode `g6-standard-1` → `g6-standard-4`); keep the old size with `--type <old type>` or `class: tiny`. [PR 2676](https://github.com/openclaw/crabbox/pull/2676).
 - Avoid the local claim-directory scan before coordinator create by giving generated slugs an eight-hex ID suffix, use O(1) exact canonical lease-ID claim lookups, and make AWS/coordinator acquisition, core claim routing, and Testbox ownership scans cancellable. [PR 2685](https://github.com/openclaw/crabbox/pull/2685).
 - Page coordinator CLI lists with compact summaries, bound slug lookup and durable admission memory, keep identity/list reads out of the lifecycle queue, and arm cleanup recovery before provider I/O; preserve legacy list and full inspect responses. [PR 2672](https://github.com/openclaw/crabbox/pull/2672).
-
-### Changes
-
-- Redesign the crabbox.sh home page around on-demand computers for agents, with a provider wall generated from the catalog.
 
 ### Fixes
 
