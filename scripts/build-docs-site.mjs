@@ -902,7 +902,7 @@ function homeProviderWall(rootPrefix) {
     return order.indexOf(a) - order.indexOf(b) || a.localeCompare(b);
   });
   return `<section class="home-section home-providers" aria-labelledby="home-providers-heading">
-    <header><div><p class="eyebrow">Bring your own compute</p><h2 id="home-providers-heading">${builtInProviderCount} built-in providers.<br>One way to run.</h2></div><p>Cloud boxes, local VMs, existing hosts, and delegated sandboxes. ${Object.keys(providerMetadata).length} catalog entries, including the <a href="${rootPrefix}providers/external.html">external plugin contract</a> for your own backend. Each provider defines its capabilities and cleanup contract.</p></header>
+    <header><div><p class="eyebrow">Bring your own compute</p><h2 id="home-providers-heading">${builtInProviderCount} <span class="home-nowrap">built-in</span> providers.<br>One way to run.</h2></div><p>Cloud boxes, local VMs, existing hosts, and delegated sandboxes. ${Object.keys(providerMetadata).length} catalog entries, including the <a href="${rootPrefix}providers/external.html">external plugin contract</a> for your own backend. Each provider defines its capabilities and cleanup contract.</p></header>
     <div class="home-provider-wall">${categories.map(([category, entries]) => `<section class="home-provider-group" data-provider-category="${escapeAttr(category)}" aria-labelledby="home-category-${escapeAttr(category)}">
       <h3 id="home-category-${escapeAttr(category)}">${escapeHtml(categoryTitles[category] || titleize(category))}<span class="home-provider-count">${entries.length}<span class="sr-only"> catalog entries</span></span></h3>
       <ul>${entries.sort((a, b) => a.name.localeCompare(b.name)).map((entry) => {
@@ -1144,6 +1144,7 @@ main{min-width:0;padding:30px 48px 80px;max-width:1360px;margin:0 auto;width:100
 .home-capability-note h2{margin:0;font:600 1.75rem/1.08 Fraunces,Georgia,serif;text-wrap:balance}
 .home-capability-note>p{margin:0;color:var(--body-soft);text-wrap:pretty}
 .home-capability-note a{font-weight:700;white-space:nowrap}
+.home-nowrap{white-space:nowrap}
 .home-install{display:grid;grid-template-columns:minmax(0,1fr) minmax(380px,.85fr);align-items:center;gap:48px;margin:82px 0 0;padding:38px 40px;border:1px solid var(--line);border-radius:18px;background:var(--paper)}
 .home-install h2{font-size:clamp(2.2rem,3.6vw,3.6rem)}
 .home-install>div>p:not(.eyebrow){max-width:58ch;margin:16px 0;color:var(--body-soft)}
