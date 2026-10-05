@@ -46422,6 +46422,253 @@ describe("fleet lease identity and idle", () => {
 });
 
 describe("fleet run history", () => {
+  it.each(["http", "control", "legacy attribution"])(
+    "bounds event-history materialization for %s reads",
+    async (route) => {
+      const runID = "run_memory_history";
+      const prefix = `runevent:${runID}:`;
+      const total = 10_000;
+      const reads: number[] = [];
+      class EventHistoryStorage extends MemoryStorage {
+        override async list<T>(
+          options: Parameters<CoordinatorStorageView["list"]>[0] = {},
+        ): Promise<Map<string, T>> {
+          if (options.prefix !== prefix) return super.list<T>(options);
+          const after = Number(options.startAfter?.slice(prefix.length) ?? 0);
+          const end = Math.min(total, after + (options.limit ?? total));
+          const page = new Map<string, T>();
+          for (let seq = after + 1; seq <= end; seq++) {
+            page.set(`${prefix}${String(seq).padStart(12, "0")}`, {
+              runID,
+              seq,
+              type: "stdout",
+              data: "x".repeat(16 * 1024),
+              ...(seq === total ? { leaseID: "cbx_000000000002" } : {}),
+            } as T);
+          }
+          reads.push(page.size);
+          return page;
+        }
+      }
+      const storage = new EventHistoryStorage();
+      const fleet = testFleet(storage);
+      await fleet.ready();
+      const headers = {
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+      };
+      storage.seed(
+        `run:${runID}`,
+        testRun({
+          id: runID,
+          owner: "alice@example.com",
+          org: "example-org",
+          leaseID: "",
+          ...(route === "legacy attribution" ? {} : { leaseIDs: [], leaseOwners: [] }),
+        }),
+      );
+      storage.seed(
+        "lease:cbx_000000000002",
+        testLease({
+          id: "cbx_000000000002",
+          owner: "bob@example.com",
+          org: "example-org",
+        }),
+      );
+      let result: unknown;
+      if (route === "control") {
+        const server = new FakeWebSocket({
+          kind: "control",
+          clientID: "ctrl_memory",
+          owner: "alice@example.com",
+          org: "example-org",
+          subscriptions: {},
+        });
+        (fleet as unknown as { controlSockets: Map<string, WebSocket> }).controlSockets.set(
+          "ctrl_memory",
+          server as unknown as WebSocket,
+        );
+        await fleet.webSocketMessage(
+          server as unknown as WebSocket,
+          JSON.stringify({
+            type: "subscribe_run",
+            runID,
+            after: total - 2,
+            limit: 2,
+          }),
+        );
+        const message = server.sentJSON().at(-1) as { events: Array<{ seq: number }> };
+        result = { status: 200, sequences: message.events.map((event) => event.seq) };
+      } else {
+        const response = await fleet.fetch(
+          request(
+            "GET",
+            route === "http"
+              ? `/v1/runs/${runID}/events?after=${total - 2}&limit=2`
+              : `/v1/runs/${runID}`,
+            { headers },
+          ),
+        );
+        if (route === "http") {
+          const body = (await response.json()) as { events: Array<{ seq: number }> };
+          result = { status: response.status, sequences: body.events.map((event) => event.seq) };
+        } else {
+          const audit = await fleet.fetch(
+            request("GET", `/v1/runs/${runID}`, {
+              headers: { ...headers, "x-crabbox-owner": "bob@example.com" },
+            }),
+          );
+          result = {
+            status: response.status,
+            auditStatus: audit.status,
+            leaseIDs: storage.value<RunRecord>(`run:${runID}`)?.leaseIDs,
+          };
+        }
+      }
+      expect(result).toEqual(
+        route === "legacy attribution"
+          ? { status: 200, auditStatus: 200, leaseIDs: ["cbx_000000000002"] }
+          : { status: 200, sequences: [total - 1, total] },
+      );
+      // Count materialized payload, without requiring the test runner to exhaust its heap.
+      expect(Math.max(...reads) * 16 * 1024).toBeLessThanOrEqual(
+        (route === "legacy attribution" ? 128 : 2) * 16 * 1024,
+      );
+      expect(reads.reduce((sum, count) => sum + count, 0)).toBe(
+        route === "legacy attribution" ? total : 2,
+      );
+    },
+  );
+
+  it("does not accumulate uploaded run bodies behind a busy lifecycle queue", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    await fleet.ready();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    storage.beforeGet = async (key) => {
+      if (key === "run:run_blocked") {
+        entered.resolve();
+        await release.promise;
+      }
+    };
+    const blocker = fleet.fetch(request("GET", "/v1/runs/run_blocked"));
+    await entered.promise;
+    let consumed = 0;
+    const uploads = Array.from({ length: 32 }, (_, index) => {
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            consumed++;
+            controller.enqueue(
+              new TextEncoder().encode(JSON.stringify({ log: "x".repeat(256 * 1024) })),
+            );
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      return fleet.fetch(
+        new Request(`https://coordinator.test/v1/runs/run_${index}/finish`, {
+          method: "POST",
+          body,
+          duplex: "half",
+        } as RequestInit & { duplex: "half" }),
+      );
+    });
+    try {
+      await vi.waitFor(() => expect(consumed).toBeGreaterThan(0));
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(consumed).toBe(1);
+      const independentRead = await fleet.fetch(request("GET", "/v1/leases/cbx_000000000001"));
+      expect(independentRead.status).toBe(404);
+    } finally {
+      release.resolve();
+      await blocker;
+      const responses = await Promise.all(uploads);
+      expect(responses.every((response) => response.status === 404)).toBe(true);
+      expect(consumed).toBe(32);
+    }
+  });
+
+  it("returns a structured failure when an event request body disconnects", async () => {
+    const fleet = testFleet();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error("synthetic client disconnected"));
+      },
+    });
+    const response = await fleet.fetch(
+      new Request("https://coordinator.test/v1/runs/run_example/events", {
+        method: "POST",
+        body,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" }),
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "run_event_append_unavailable" });
+    const next = await fleet.fetch(request("POST", "/v1/runs/run_example/events", { body: {} }));
+    expect(next.status).toBe(404);
+  });
+
+  it("keeps reads, heartbeats and release available during a stalled run upload", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, { hetzner: fakeProvider() });
+    const lease = testLease({
+      id: "cbx_000000000001",
+      owner: "alice@example.com",
+      org: "example-org",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const headers = { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" };
+    const started = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    const body = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          started.resolve();
+          await finish.promise;
+          controller.enqueue(new TextEncoder().encode("{}"));
+          controller.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const upload = fleet.fetch(
+      new Request("https://coordinator.test/v1/runs/run_example/events", {
+        method: "POST",
+        headers,
+        body,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" }),
+    );
+    await started.promise;
+    try {
+      expect((await fleet.fetch(request("GET", "/v1/runs/run_example", { headers }))).status).toBe(
+        404,
+      );
+      expect(
+        (
+          await fleet.fetch(
+            request("POST", `/v1/leases/${lease.id}/heartbeat`, { headers, body: {} }),
+          )
+        ).status,
+      ).toBe(200);
+      expect(
+        (
+          await fleet.fetch(
+            request("POST", `/v1/leases/${lease.id}/release`, { headers, body: {} }),
+          )
+        ).status,
+      ).toBe(200);
+    } finally {
+      finish.resolve();
+      expect((await upload).status).toBe(404);
+    }
+  });
+
   it("pages run history and lease detail scans while retaining only the newest matches", async () => {
     const storage = new ObservedMemoryStorage();
     const fleet = testFleet(storage);

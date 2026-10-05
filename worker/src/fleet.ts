@@ -384,6 +384,7 @@ import {
   type ProviderReconciliationObservation,
   type ProviderReconciliationQuarantine,
 } from "./provider-reconciliation";
+import { runEventAppendFailureResponse } from "./run-event-errors";
 import { sameTerminalRunBinding, terminalFinishSHA256, verifyTerminalReceipt } from "./run-receipt";
 import {
   readRuntimeAdapterRelayBody,
@@ -19153,13 +19154,14 @@ export class FleetCoordinator {
   }
 
   private async runEvents(runID: string, after = 0, limit = 500): Promise<RunEventRecord[]> {
+    if (limit <= 0 || after >= Number.MAX_SAFE_INTEGER) return [];
     const events = await this.state.storage.list<RunEventRecord>({
       prefix: runEventPrefix(runID),
+      startAfter: runEventKey(runID, after),
+      limit,
+      noCache: true,
     });
-    return [...events.values()]
-      .toSorted((a, b) => a.seq - b.seq)
-      .filter((event) => event.seq > after)
-      .slice(0, limit);
+    return [...events.values()];
   }
 
   private leaseVisibleToRequest(lease: LeaseRecord, request: Request, admin: boolean): boolean {
@@ -19418,31 +19420,25 @@ export class FleetCoordinator {
     if (run.leaseIDs !== undefined && run.leaseOwners !== undefined) {
       return undefined;
     }
-    const events = await this.state.storage.list<RunEventRecord>({
-      prefix: runEventPrefix(run.id),
+    const leaseIDs = new Set<string>();
+    await this.visitStorageRecords<RunEventRecord>(runEventPrefix(run.id), (event) => {
+      if (event.leaseID && validLeaseID(event.leaseID)) leaseIDs.add(event.leaseID);
     });
-    const leaseIDs = new Set(
-      [...events.values()]
-        .toSorted((a, b) => a.seq - b.seq)
-        .map((event) => event.leaseID)
-        .filter((leaseID): leaseID is string => Boolean(leaseID && validLeaseID(leaseID))),
-    );
     if (validLeaseID(run.leaseID)) {
       leaseIDs.add(run.leaseID);
     }
     const ids = [...leaseIDs];
-    const leases = knownLeases
-      ? ids.map((leaseID) => knownLeases.get(leaseID))
-      : await Promise.all(ids.map((leaseID) => this.getLease(leaseID)));
     run.leaseIDs = ids;
     run.leaseOwners = [];
     let currentLease: LeaseRecord | undefined;
-    for (const [index, lease] of leases.entries()) {
+    for (const leaseID of ids) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- retain attribution, not every full backing lease.
+      const lease = knownLeases ? knownLeases.get(leaseID) : await this.getLease(leaseID);
       if (!lease) {
         continue;
       }
       this.setRunLeaseAttribution(run, lease);
-      if (ids[index] === run.leaseID) {
+      if (leaseID === run.leaseID) {
         currentLease = lease;
       }
     }
@@ -20271,6 +20267,7 @@ export class FleetCoordinator {
 
 export class FleetDurableObject extends FleetCoordinator implements DurableObject {
   private readonly runtime: CloudflareCoordinatorRuntime;
+  private readonly bodyRequests = new AsyncMutex();
 
   constructor(
     state: DurableObjectState,
@@ -20288,8 +20285,19 @@ export class FleetDurableObject extends FleetCoordinator implements DurableObjec
     if (coordinatorRequestQueue(request) === "direct") {
       return super.fetch(request);
     }
-    const bufferedRequest = await bufferCoordinatorRequestBody(request);
-    return this.runtime.runExclusive(() => super.fetch(bufferedRequest));
+    const execute = async () => {
+      try {
+        const bufferedRequest = await bufferCoordinatorRequestBody(request);
+        return await this.runtime.runExclusive(() => super.fetch(bufferedRequest));
+      } catch (error) {
+        const failure = runEventAppendFailureResponse(request);
+        if (failure) return failure;
+        throw error;
+      }
+    };
+    // Keep one uploaded body through its lifecycle turn. Waiting uploads retain their
+    // streams, not whole logs; a slow upload does not hold the lifecycle mutex.
+    return request.body === null ? execute() : this.bodyRequests.run(execute);
   }
 
   override alarm(): Promise<void> {

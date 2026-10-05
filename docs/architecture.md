@@ -368,6 +368,20 @@ commands can read it back:
   The coordinator computes `durationMs`, sets state `succeeded`/`failed`, and records
   classification (`blockedStage`, `retryLikely`).
 
+The Cloudflare runtime consumes one lifecycle upload at a time and retains that
+body only through its serialized state transition. Waiting uploads remain streams;
+a stalled lifecycle operation cannot accumulate whole run logs from every caller.
+Bodyless reads and direct lease create, heartbeat, and release routes bypass this
+upload queue, and reading an upload never holds the lifecycle mutex.
+
+Event polling and control subscriptions seek directly to the requested sequence
+and read at most the requested page without filling the storage cache. Legacy
+lease attribution scans events in bounded pages, retaining lease identities only.
+Neither path loads an entire run's event payload into memory. An event append whose
+upload or Durable Object dispatch throws returns HTTP 503
+`run_event_append_unavailable`; the Worker does not replay it because a reset can
+follow a committed event. Existing application error responses are preserved.
+
 Coordinator API requests negotiate HTTP/2 over TLS when the server supports it,
 so independent requests can share a connection. HTTP/1 coordinators and the
 HTTP/1 WebSocket upgrade remain supported; both use the coordinator's same-origin
