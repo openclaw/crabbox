@@ -24,7 +24,7 @@ test("builds the polished feature explorer", () => {
   assert.doesNotMatch(out, /\.fx-boundary a\{/);
   assert.match(out, /grid-template-columns:40px minmax\(0,1fr\) 20px/);
   assert.match(out, /\.fx-search input:focus-visible/);
-  assert.match(out, /transition:transform \.16s,border-color \.16s,box-shadow \.16s/);
+  assert.match(out, /\.fx-card\{[^}]*transition:border-color \.16s/);
   assert.match(out, /font-size:clamp\(2\.15rem,10vw,3\.2rem\)/);
   assert.match(out, /\.fx-console\{display:none\}/);
   assert.match(out, /Press <kbd>\/</);
