@@ -325,7 +325,7 @@ async function openHome(page) {
 }
 
 async function assertHomeShell(page, name) {
-  await assertText(page, ".hero-home h1", /Run Your Code in\s+the Right Box\./, `${name} homepage headline is intact`);
+  await assertText(page, ".hero-home h1", /On-demand computers\s+for agents\./, `${name} homepage headline is intact`);
   await assertVisible(page, ".home-capability-note", `${name} nested-capability boundary is visible`);
   const layout = await page.evaluate(() => ({
     innerWidth: window.innerWidth,
@@ -348,6 +348,10 @@ async function assertHomeShell(page, name) {
     capabilityText: document.querySelector(".home-capability-note")?.textContent.replace(/\s+/g, " ").trim() || "",
     example: document.querySelector(".home-console pre")?.textContent.trim() || "",
     registeredProviders: document.querySelector(".home-facts li:last-child")?.textContent.trim() || "",
+    providerLinks: document.querySelectorAll("[data-home-provider]").length,
+    categoryTotal: [...document.querySelectorAll(".home-provider-count")]
+      .reduce((sum, count) => sum + Number.parseInt(count.textContent, 10), 0),
+    operatingSystems: [...document.querySelectorAll(".home-os li")].map((item) => item.textContent.trim()),
   }));
   proof.interactions.home ||= {};
   proof.interactions.home[name] = layout;
@@ -365,8 +369,10 @@ async function assertHomeShell(page, name) {
   assert(layout.controlledJobResults === 6, `${name} job choices identify their result panels`, layout);
   assert(layout.finderDisclaimer.includes("Built-in guidance, not a live provider check."), `${name} homepage states the recommendation boundary`, layout);
   assert(layout.capabilityText.includes("There is no generic nested mode."), `${name} homepage states the nested boundary`, layout);
-  assert(layout.example.includes("--provider local-container"), `${name} homepage example names its provider`, layout);
-  assert(/^\d+ registered providers$/.test(layout.registeredProviders), `${name} homepage provider count is explicit`, layout);
+  assert(layout.example.includes("crabbox run -- pnpm test"), `${name} homepage example uses the configured provider`, layout);
+  assert(/^\d+ built-in providers$/.test(layout.registeredProviders), `${name} homepage provider count is explicit`, layout);
+  assert(layout.providerLinks > 0 && layout.providerLinks === layout.categoryTotal, `${name} provider wall counts match visible links`, layout);
+  assert(layout.operatingSystems.join(",") === "Linux,macOS,Windows native,WSL2", `${name} OS strip distinguishes native Windows and WSL2`, layout);
   await assertHomeJobCopyLayout(page, name);
 }
 
@@ -398,6 +404,14 @@ async function assertHomeJobCopyLayout(page, name) {
 }
 
 async function proveHomeJobFinder(page) {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(baseURL).origin });
+  const runCopy = page.getByRole("button", { name: "Copy run command", exact: true });
+  await runCopy.focus();
+  const copyTarget = await runCopy.boundingBox();
+  assert(copyTarget?.height >= 44, "hero copy button meets the minimum touch target", copyTarget);
+  await page.keyboard.press("Enter");
+  await page.locator(".home-console .copy").getByText("Copied").waitFor();
+  assert(await page.evaluate(() => navigator.clipboard.readText()) === "crabbox run -- pnpm test", "keyboard activation copies the exact hero command");
   await page.goto(`${proof.homeUrl}?job=not-a-route`, { waitUntil: "domcontentloaded" });
   await page.locator('[data-home-job-radio][value="fast-feedback"]').waitFor({ state: "attached" });
   let state = await page.evaluate(() => ({
