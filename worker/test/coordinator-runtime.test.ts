@@ -572,6 +572,8 @@ describe("coordinator runtimes", () => {
       ["GET", "/v1/leases/cbx_abcdef123456"],
       ["PUT", "/v1/leases/cbx_abcdef123456"],
       ["PUT", "/v1/leases/cbx_abcdef123456/from-checkpoint"],
+      ["PUT", "/v1/leases/cbx_abcdef123456/resource-constrained"],
+      ["POST", "/v1/leases/resource-constrained"],
       ["POST", "/v1/leases/from-checkpoint"],
       ["POST", "/v1/checkpoints"],
       ["GET", "/v1/checkpoints/chk_example"],

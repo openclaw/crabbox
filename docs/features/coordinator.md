@@ -354,8 +354,9 @@ and this deadline does not limit subsequent provider provisioning. For
 commit point: a bound claim cannot be reopened for a same-token retry, so the
 deadline no longer applies after it.
 
-The Cloudflare Worker retries an ordinary token-bound `POST /v1/leases` once
-against a fresh Durable Object stub after a thrown runtime-reset error. Unbound
+The Cloudflare Worker retries an ordinary token-bound `POST /v1/leases` or
+`POST /v1/leases/resource-constrained` once against a fresh Durable Object stub
+after a thrown runtime-reset error. Unbound
 POSTs, other mutations, and returned HTTP 5xx responses do not receive this
 boundary replay. Request/response fields and status contracts are unchanged.
 This does not enable durable provisioning admission or repair absent ownership

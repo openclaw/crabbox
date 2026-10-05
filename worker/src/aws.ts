@@ -1031,9 +1031,10 @@ export class EC2SpotClient {
       const instanceType = asString(item["instanceType"]);
       if (!requested.includes(instanceType)) continue;
       const vcpus = Number(asString(record(item["vCpuInfo"])["defaultVCpus"]));
+      const memoryMiB = Number(asString(record(item["memoryInfo"])["sizeInMiB"]));
       described.set(instanceType, {
         vcpus: Number.isSafeInteger(vcpus) && vcpus > 0 ? vcpus : 0,
-        memoryMiB: positiveInt(asString(record(item["memoryInfo"])["sizeInMiB"])),
+        memoryMiB: Number.isSafeInteger(memoryMiB) && memoryMiB > 0 ? memoryMiB : 0,
         architectures: items(
           record(record(item["processorInfo"])["supportedArchitectures"])["item"],
         ).map(asString),
@@ -1056,6 +1057,46 @@ export class EC2SpotClient {
       // Metadata is advisory for ordinary launches; private workspace caps remain strict.
       return new Map();
     }
+  }
+
+  private async resourceQualifiedCandidates(config: LeaseConfig): Promise<{
+    candidates: string[];
+    vcpus: Map<string, number>;
+  }> {
+    const requirements = config.capacityRequirements!;
+    const candidates = awsLaunchCandidates(config);
+    let described: Map<string, AWSInstanceTypeInfo>;
+    try {
+      described = await this.describeInstanceTypes(candidates);
+    } catch (error) {
+      if (error instanceof AWSLeaseAuthorityError) throw error;
+      throw new Error(
+        "AWS capacity unavailable: cannot verify requested resource minimums from DescribeInstanceTypes",
+        { cause: error },
+      );
+    }
+    const eligible = candidates.filter((candidate) => {
+      const info = described.get(candidate);
+      return (
+        info !== undefined &&
+        (!requirements.minVCPUs || info.vcpus >= requirements.minVCPUs) &&
+        (!requirements.minMemoryMiB || info.memoryMiB >= requirements.minMemoryMiB)
+      );
+    });
+    if (!eligible.length) {
+      throw new Error(
+        `AWS capacity unavailable: no candidate has verified capacity for minVCPUs=${requirements.minVCPUs ?? 0} minMemoryMiB=${requirements.minMemoryMiB ?? 0}`,
+      );
+    }
+    return {
+      candidates: eligible,
+      vcpus: new Map(
+        eligible.flatMap((name) => {
+          const count = described.get(name)!.vcpus;
+          return count > 0 ? [[name, count] as const] : [];
+        }),
+      ),
+    };
   }
 
   private async assertPrivateWorkspaceInstanceTypes(
@@ -1310,6 +1351,13 @@ export class EC2SpotClient {
     let succeeded = false;
     let transientImageID = "";
     try {
+      // Hard minimums must be verified before creating keys, images or ingress.
+      // Ordinary requests retain their advisory metadata and candidate behavior.
+      const qualified = config.capacityRequirements
+        ? await diagnostics.measure("instance_types", () =>
+            this.resourceQualifiedCandidates(config),
+          )
+        : undefined;
       if (!config.awsPrivate) {
         await diagnostics.measure("key_pair", () =>
           this.ensureSSHKey(
@@ -1373,11 +1421,14 @@ export class EC2SpotClient {
           `EC2 Mac Dedicated Host ${pinnedMacHostID} requires ${pinnedMacHostType}, not requested ${config.serverType}`,
         );
       }
-      const candidates = pinnedMacHostType ? [pinnedMacHostType] : awsLaunchCandidates(config);
+      const candidates =
+        qualified?.candidates ??
+        (pinnedMacHostType ? [pinnedMacHostType] : awsLaunchCandidates(config));
       const vcpus =
-        config.target === "macos"
+        qualified?.vcpus ??
+        (config.target === "macos"
           ? new Map<string, number>()
-          : await diagnostics.measure("instance_types", () => this.instanceTypeVCPUs(candidates));
+          : await diagnostics.measure("instance_types", () => this.instanceTypeVCPUs(candidates)));
       const allowCapacityHandoff =
         !config.awsPrivate && !config.serverTypeExplicit && config.target !== "macos";
       const hasQuotaEligibleCandidate = (
@@ -2814,6 +2865,11 @@ export class EC2SpotClient {
       const machine = this.withRegion(instanceToMachine(instance));
       if (!machine.cloudID.trim()) {
         throw new Error(`${awsRunInstancesOutcomeUncertain}: aws returned no instance id`);
+      }
+      if (config.capacityRequirements && machine.serverType !== config.serverType) {
+        throw new Error(
+          `${awsRunInstancesOutcomeUncertain}: returned instance type does not match the resource-qualified request`,
+        );
       }
       return {
         ...machine,

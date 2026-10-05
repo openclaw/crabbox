@@ -149,6 +149,9 @@ func (a App) readyPoolRegister(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if hasCapacityMinimums(cfg) {
+		return Exit(2, "resource requirements are unsupported with ready pools")
+	}
 	repo, _ := findRepo()
 	input := map[string]any{"leaseID": strings.TrimSpace(*id)}
 	if repoValue := firstNonBlank(*repoFlag, cfg.Actions.Repo, bestEffortGitHubRepoSlug(repo, cfg)); repoValue != "" {
@@ -236,6 +239,9 @@ func (a App) readyPoolBorrow(ctx context.Context, args []string) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
+	}
+	if hasCapacityMinimums(cfg) {
+		return Exit(2, "resource requirements are unsupported with ready pools")
 	}
 	var identity *CoordinatorReadyPoolIdentityV1
 	if flagWasSet(fs, "identity-file") {
@@ -466,6 +472,9 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if hasCapacityMinimums(cfg) {
+		return Exit(2, "resource requirements are unsupported with ready pools")
+	}
 	var identity *CoordinatorReadyPoolIdentityV1
 	explicitIdentityProvider := false
 	if flagWasSet(fs, "identity-file") {
@@ -675,6 +684,15 @@ func validateReadyPoolEnsurePrewarmArgs(args []string) error {
 			continue
 		}
 		switch {
+		case arg == "--min-vcpus" || arg == "--min-memory-mib" || strings.HasPrefix(arg, "--min-vcpus=") || strings.HasPrefix(arg, "--min-memory-mib="):
+			_, value, inline := strings.Cut(arg, "=")
+			if !inline && i+1 < len(args) {
+				i++
+				value = args[i]
+			}
+			if parsed, err := strconv.ParseInt(value, 0, 32); err != nil || parsed != 0 {
+				return Exit(2, "resource requirements are unsupported with ready pools")
+			}
 		case arg == "--repo" || arg == "--ref" || strings.HasPrefix(arg, "--repo=") || strings.HasPrefix(arg, "--ref="):
 			return Exit(2, "pool ensure --create does not support forwarded --repo or --ref overrides")
 		}

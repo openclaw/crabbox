@@ -188,6 +188,11 @@ export interface Env {
   CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS?: string;
 }
 
+export interface CapacityRequirements {
+  minVCPUs?: number;
+  minMemoryMiB?: number;
+}
+
 export interface LeaseRequest {
   leaseID?: string;
   createAttemptID?: string;
@@ -249,6 +254,8 @@ export interface LeaseRequest {
   gcpRootGB?: number;
   gcpServiceAccount?: string;
   capacity?: {
+    minVCPUs?: number;
+    minMemoryMiB?: number;
     market?: "spot" | "on-demand";
     strategy?: "most-available" | "price-capacity-optimized" | "capacity-optimized" | "sequential";
     fallback?: string;
@@ -456,6 +463,7 @@ export interface HetznerCleanupEvidence {
 export type ProviderCleanupEvidence = HetznerCleanupEvidence;
 
 export interface LeaseRecord {
+  capacityRequirements?: CapacityRequirements;
   creationEvents?: CreationEvent[];
   portablePoolAccess?: true;
   id: string;

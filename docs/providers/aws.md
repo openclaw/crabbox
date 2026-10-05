@@ -200,6 +200,11 @@ Windows and macOS targets use their own candidate lists (Windows WSL2 uses
 nested-virtualization families; macOS uses `mac*.metal` types). The default
 class is `beast`.
 
+Use `--min-vcpus` and `--min-memory-mib` to filter Linux class candidates by an
+explicit workload requirement. Requests without these options keep the existing
+fallback behavior. See [optional resource minimums](../features/capacity-fallback.md#optional-aws-resource-minimums)
+for metadata, coordinator compatibility and supported command semantics.
+
 For coordinator-managed public Linux and Windows runners, a complete
 `RunInstances` error with code `InsufficientInstanceCapacity` goes directly to
 the next configured instance type or permitted On-Demand fallback. The client

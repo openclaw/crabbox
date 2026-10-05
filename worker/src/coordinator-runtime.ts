@@ -103,6 +103,7 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     method === "POST" &&
     (path.join("/") === "v1/leases" ||
       path.join("/") === "v1/leases/capability-aware" ||
+      path.join("/") === "v1/leases/resource-constrained" ||
       path.join("/") === "v1/leases/from-checkpoint")
   ) {
     return "direct";
@@ -115,7 +116,8 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     path[0] === "v1" &&
     path[1] === "leases" &&
     path[2] &&
-    (path.length === 3 || (path.length === 4 && path[3] === "from-checkpoint"))
+    (path.length === 3 ||
+      (path.length === 4 && ["from-checkpoint", "resource-constrained"].includes(path[3] ?? "")))
   ) {
     return "direct";
   }

@@ -50,20 +50,23 @@ describe("legacy admission retry boundaries", () => {
     }
   });
 
-  it("replays only the original bound POST once after a runtime reset", async () => {
-    const observed: unknown[] = [];
-    const fetch = vi.fn<(request: Request) => Promise<Response>>(async (next: Request) => {
-      observed.push([next.headers.get("x-crabbox-owner"), await next.json()]);
-      if (observed.length === 1) throw reset();
-      return Response.json({ lease: { id: body.leaseID, state: "provisioning" } });
-    });
-    const response = await fetchReplayableLeaseCreate(request("POST", "/v1/leases"), fetch);
-    expect(response.status).toBe(200);
-    expect(observed).toEqual([
-      ["alice@example.com", body],
-      ["alice@example.com", body],
-    ]);
-  });
+  it.each(["/v1/leases", "/v1/leases/resource-constrained"])(
+    "replays only the original bound POST once after a runtime reset: %s",
+    async (path) => {
+      const observed: unknown[] = [];
+      const fetch = vi.fn<(request: Request) => Promise<Response>>(async (next: Request) => {
+        observed.push([next.headers.get("x-crabbox-owner"), await next.json()]);
+        if (observed.length === 1) throw reset();
+        return Response.json({ lease: { id: body.leaseID, state: "provisioning" } });
+      });
+      const response = await fetchReplayableLeaseCreate(request("POST", path), fetch);
+      expect(response.status).toBe(200);
+      expect(observed).toEqual([
+        ["alice@example.com", body],
+        ["alice@example.com", body],
+      ]);
+    },
+  );
 
   it.each([
     ["POST", "/v1/leases", { leaseID: body.leaseID }],

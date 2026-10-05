@@ -31,6 +31,38 @@ import { gcpProvisioningCandidatesForConfig } from "../src/gcp";
 import { hetznerProvisioningCandidatesForConfig } from "../src/hetzner";
 
 describe("machine class config", () => {
+  it("normalizes optional resource minimums without changing unconstrained config", () => {
+    const input = { provider: "aws" as const, sshPublicKey: "ssh-ed25519 test" };
+    expect(leaseConfig({ ...input, capacity: { minVCPUs: 0, minMemoryMiB: 0 } })).toEqual(
+      leaseConfig(input),
+    );
+    expect(
+      leaseConfig({ ...input, capacity: { minVCPUs: 4, minMemoryMiB: 15360 } })
+        .capacityRequirements,
+    ).toEqual({ minVCPUs: 4, minMemoryMiB: 15360 });
+    expect(() => leaseConfig({ ...input, provider: "azure", capacity: { minVCPUs: 4 } })).toThrow(
+      /provider=aws and target=linux/,
+    );
+    expect(() => leaseConfig({ ...input, target: "windows", capacity: { minVCPUs: 4 } })).toThrow(
+      /provider=aws and target=linux/,
+    );
+  });
+
+  it.each([-1, 1.5, NaN, Infinity, 2147483648, "4", null])(
+    "rejects invalid capacity minimum %s",
+    (value) => {
+      for (const name of ["minVCPUs", "minMemoryMiB"] as const) {
+        expect(() =>
+          leaseConfig({
+            provider: "aws",
+            sshPublicKey: "ssh-ed25519 test",
+            capacity: { [name]: value as number },
+          }),
+        ).toThrow(/must be an integer/);
+      }
+    },
+  );
+
   it("parses an AWS stock image source", () => {
     expect(
       leaseConfig({

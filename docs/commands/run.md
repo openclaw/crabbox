@@ -1164,6 +1164,8 @@ lease-acting commands):
 --os <selector>              Portable Linux OS image, e.g. ubuntu:26.04
 --type <provider-type>
 --market spot|on-demand
+--min-vcpus <count>                minimum vCPUs for new AWS Linux leases; 0 disables
+--min-memory-mib <MiB>             minimum memory for new AWS Linux leases; 0 disables
 --slug <slug>                Only when creating a fresh lease.
 --pond <name>
 --expose <port>              Repeatable; SSH-mesh TCP port; creation-only for managed leases.
@@ -1282,3 +1284,6 @@ A longer job must return and borrow again; uninterrupted renewal is deferred.
 Static power hooks require a trusted `static.power.dedicated: true` contract.
 Use a distinct `static.id` for concurrent acquisitions; same-ID acquisition and
 prepared reuse are refused while custody remains. See [Power hooks](../providers/ssh.md#power-hooks).
+
+Optional resource minimums and supported creation/reuse combinations are documented
+in [capacity fallback](../features/capacity-fallback.md#optional-aws-resource-minimums).

@@ -190,6 +190,8 @@ import {
   azureLocationFor,
   gcpBootDiskTypeForMachineType,
   leaseConfig,
+  normalizeCapacityRequirements,
+  InvalidCapacityRequirementsError,
   InvalidAzureOSDiskModeError,
   normalizeArchitecture,
   parseTarget,
@@ -437,6 +439,7 @@ import type {
   ExternalRunnerSyncRequest,
   FixedLeaseCreateIntent,
   LeaseRecord,
+  CapacityRequirements,
   ProviderCleanupEvidence,
   LeaseRegistrationRequest,
   LeaseRequest,
@@ -1467,6 +1470,19 @@ export class FleetCoordinator {
       }
       if (method === "POST" && parts.join("/") === "v1/leases/capability-aware") {
         return await this.createLease(request);
+      }
+      if (method === "POST" && parts.join("/") === "v1/leases/resource-constrained") {
+        return await this.createLease(request);
+      }
+      if (
+        method === "PUT" &&
+        parts[0] === "v1" &&
+        parts[1] === "leases" &&
+        parts[2] &&
+        parts[3] === "resource-constrained" &&
+        parts.length === 4
+      ) {
+        return await this.createLease(request, undefined, undefined, undefined, parts[2]);
       }
       if (method === "POST" && parts.join("/") === "v1/leases/from-checkpoint") {
         return await this.createCheckpointLease(request);
@@ -3453,6 +3469,7 @@ export class FleetCoordinator {
     checkpointID?: string,
     checkpointUseClaimHash?: string,
     admissionFence?: LeaseAdmissionFence,
+    capacityRequirements?: CapacityRequirements,
   ): Promise<Response | undefined> {
     return await this.state.runExclusive(async () => {
       admissionFence?.assertActive();
@@ -3507,7 +3524,8 @@ export class FleetCoordinator {
       if (
         !replayLease ||
         replayLease.checkpointID !== checkpointID ||
-        !createAttemptMatchesLease(existing, replayLease)
+        !createAttemptMatchesLease(existing, replayLease) ||
+        !sameCapacityRequirements(replayLease.capacityRequirements, capacityRequirements)
       ) {
         return createAttemptBindingConflictResponse();
       }
@@ -3851,6 +3869,18 @@ export class FleetCoordinator {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const input = await readJson<LeaseRequest>(request);
+    let capacityRequirements: CapacityRequirements | undefined;
+    try {
+      capacityRequirements = normalizeCapacityRequirements(input.capacity);
+    } catch (error) {
+      if (error instanceof InvalidCapacityRequirementsError) {
+        return json(
+          { error: "invalid_capacity_requirements", message: error.message },
+          { status: 400 },
+        );
+      }
+      throw error;
+    }
     const ordinaryCreate = !fixedLeaseID && !workspaceID;
     if (fixedLeaseID) {
       if (!validLeaseID(fixedLeaseID)) {
@@ -3890,6 +3920,7 @@ export class FleetCoordinator {
         checkpointAuthorization?.checkpoint.id,
         checkpointAuthorization?.tokenHash,
         admissionFence,
+        capacityRequirements,
       );
       if (replay) {
         return this.preferredCreateReplay(request, leaseID, replay);
@@ -3917,6 +3948,12 @@ export class FleetCoordinator {
     try {
       config = leaseConfig(input, defaults);
     } catch (error) {
+      if (error instanceof InvalidCapacityRequirementsError) {
+        return json(
+          { error: "invalid_capacity_requirements", message: error.message },
+          { status: 400 },
+        );
+      }
       if (error instanceof InvalidAzureOSDiskModeError) {
         return json({ error: "invalid_azure_os_disk", message: error.message }, { status: 400 });
       }
@@ -4114,6 +4151,11 @@ export class FleetCoordinator {
       }
       createAttempt = reserved.attempt;
       if (reserved.replayLease) {
+        if (
+          !sameCapacityRequirements(reserved.replayLease.capacityRequirements, capacityRequirements)
+        ) {
+          return createAttemptBindingConflictResponse();
+        }
         const replay = fixedCreate
           ? await runAdmissionExclusive(
               async () =>
@@ -4254,6 +4296,9 @@ export class FleetCoordinator {
         currentAttempt &&
         createAttemptMatchesLease(currentAttempt, existingLease)
       ) {
+        if (!sameCapacityRequirements(existingLease.capacityRequirements, capacityRequirements)) {
+          return createAttemptBindingConflictResponse();
+        }
         return createAttemptReplayResponse(existingLease);
       }
       if (existingLease) {
@@ -4287,6 +4332,7 @@ export class FleetCoordinator {
         : undefined;
       let record: LeaseRecord = {
         id: leaseID,
+        ...(capacityRequirements ? { capacityRequirements } : {}),
         slug,
         ...(checkpointAuthorization ? { checkpointID: checkpointAuthorization.checkpoint.id } : {}),
         ...(currentAttempt
@@ -16369,6 +16415,15 @@ export class FleetCoordinator {
   ): Promise<Response> {
     try {
       const input = await readJson<LeaseRequest>(request);
+      if (input.capacity?.minVCPUs || input.capacity?.minMemoryMiB) {
+        return json(
+          {
+            error: "capacity_requirements_unsupported",
+            message: "capacity minimums are not supported for checkpoint leases",
+          },
+          { status: 409 },
+        );
+      }
       if (
         fixedLeaseID &&
         (!validLeaseID(fixedLeaseID) ||
@@ -25957,6 +26012,16 @@ function boundedTelemetrySamples(samples: LeaseTelemetry[], max: number): LeaseT
 
 const fixedLeaseCreateIntentVersion = 2;
 
+function sameCapacityRequirements(
+  left?: CapacityRequirements,
+  right?: CapacityRequirements,
+): boolean {
+  return (
+    (left?.minVCPUs ?? 0) === (right?.minVCPUs ?? 0) &&
+    (left?.minMemoryMiB ?? 0) === (right?.minMemoryMiB ?? 0)
+  );
+}
+
 async function fixedRequestFingerprint(input: LeaseRequest): Promise<string> {
   const request = { ...input };
   // The URL already binds the ID; its optional duplicate in the body is not a new intent.
@@ -30087,6 +30152,11 @@ export class AWSProvider implements CloudProvider {
               config.awsPrivate,
               checkReadiness,
             );
+            if (config.capacityRequirements && readyServer.serverType !== serverType) {
+              throw new Error(
+                "AWS resource requirement mismatch: ready instance type differs from the qualified request",
+              );
+            }
             if (config.awsRequireSSM) {
               await operationClient.waitForSSMOnline(server.cloudID, checkReadiness);
               const bootstrapStartedAt = Date.now();

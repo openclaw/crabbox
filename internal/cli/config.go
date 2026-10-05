@@ -316,6 +316,8 @@ type RunConfig struct {
 }
 
 type CapacityConfig struct {
+	MinVCPUs          int
+	MinMemoryMiB      int
 	Market            string
 	Strategy          string
 	Fallback          string
@@ -1920,6 +1922,8 @@ type fileRunConfig struct {
 }
 
 type fileCapacityConfig struct {
+	MinVCPUs          *int     `yaml:"minVCPUs,omitempty"`
+	MinMemoryMiB      *int     `yaml:"minMemoryMiB,omitempty"`
 	Market            string   `yaml:"market,omitempty"`
 	Strategy          string   `yaml:"strategy,omitempty"`
 	Fallback          string   `yaml:"fallback,omitempty"`
@@ -2949,6 +2953,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		recordConfigInput(cfg, configInputGeneric, inputSource, true)
 	}
 	if file.Capacity != nil {
+		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Capacity.MinVCPUs, file.Capacity.MinVCPUs))
+		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Capacity.MinMemoryMiB, file.Capacity.MinMemoryMiB))
+		if err := validateCapacityMinimumValues(cfg.Capacity); err != nil {
+			return err
+		}
 		if file.Capacity.Market != "" {
 			cfg.Capacity.Market = file.Capacity.Market
 			recordConfigInput(cfg, configInputGeneric, inputSource, true)
@@ -3602,6 +3611,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Jobs = map[string]JobConfig{}
 		}
 		for name, job := range file.Jobs {
+			if job.Capacity != nil && ((job.Capacity.MinVCPUs != nil && *job.Capacity.MinVCPUs != 0) ||
+				(job.Capacity.MinMemoryMiB != nil && *job.Capacity.MinMemoryMiB != 0)) {
+				return Exit(2, "job %q: resource requirements are unsupported for composite jobs; use warmup", name)
+			}
 			name = strings.TrimSpace(name)
 			if name == "" {
 				continue

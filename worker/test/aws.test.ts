@@ -2312,6 +2312,156 @@ describe("aws provider", () => {
     ]);
   });
 
+  it.each([
+    { minimum: undefined, failures: 5, expected: "t3.small", attempts: 6 },
+    {
+      minimum: { minVCPUs: 4, minMemoryMiB: 15360 },
+      failures: 4,
+      expected: "c7a.4xlarge",
+      attempts: 5,
+    },
+    {
+      minimum: { minVCPUs: 4, minMemoryMiB: 15360 },
+      failures: 5,
+      expected: undefined,
+      attempts: 5,
+    },
+  ])(
+    "enforces opt-in minimums through standard class fallback ($expected)",
+    async ({ minimum, failures, expected, attempts }) => {
+      const types = [
+        "c7a.8xlarge",
+        "c7i.8xlarge",
+        "m7a.8xlarge",
+        "m7i.8xlarge",
+        "c7a.4xlarge",
+        "t3.small",
+      ];
+      const { client, attempted } = awsMarketFallbackHarness(
+        Array(failures).fill("VcpuLimitExceeded"),
+        "on-demand",
+        types,
+        Object.fromEntries(
+          types.map((type, index) => [type, index < 4 ? 32 : index === 4 ? 16 : 2]),
+        ),
+        Object.fromEntries(
+          types.map((type, index) => [type, index < 4 ? 65536 : index === 4 ? 32768 : 2048]),
+        ),
+      );
+      const config = leaseConfig({
+        provider: "aws",
+        target: "linux",
+        class: "standard",
+        awsRootGB: 400,
+        sshPublicKey: "ssh-ed25519 test",
+        providerKey: "test-key",
+        capacity: { market: "on-demand", ...minimum },
+      });
+      const creating = client.createServerWithFallback(
+        config,
+        "cbx_abcdef123456",
+        "capacity-test",
+        "alice@example.com",
+      );
+      const outcome = await creating.then(
+        (result) => `${result.serverType}:${result.server.serverType}`,
+        (error: unknown) => String(error),
+      );
+      expect(outcome).toMatch(
+        expected ? new RegExp(`^${expected}:${expected}$`) : /VcpuLimitExceeded/,
+      );
+      expect(attempted).toEqual(types.slice(0, attempts).map((type) => `on-demand:${type}`));
+    },
+  );
+
+  it.each([
+    { name: "missing", cpu: {}, memory: {}, minimum: { minVCPUs: 4 }, succeeds: false },
+    { name: "denied", cpu: "denied", memory: {}, minimum: { minVCPUs: 4 }, succeeds: false },
+    {
+      name: "unknown memory",
+      cpu: { "c7a.4xlarge": 16 },
+      memory: {},
+      minimum: { minMemoryMiB: 15360 },
+      succeeds: false,
+    },
+    {
+      name: "invalid memory",
+      cpu: { "c7a.4xlarge": 16 },
+      memory: { "c7a.4xlarge": "32768.5" },
+      minimum: { minMemoryMiB: 15360 },
+      succeeds: false,
+    },
+    {
+      name: "CPU only",
+      cpu: { "c7a.4xlarge": 16 },
+      memory: {},
+      minimum: { minVCPUs: 4 },
+      succeeds: true,
+    },
+    {
+      name: "memory only",
+      cpu: { "c7a.4xlarge": "unknown" },
+      memory: { "c7a.4xlarge": 32768 },
+      minimum: { minMemoryMiB: 15360 },
+      succeeds: true,
+    },
+  ])(
+    "verifies requested dimensions before provisioning: $name",
+    async ({ cpu, memory, minimum, succeeds }) => {
+      const { client, config, attempted } = awsMarketFallbackHarness(
+        "",
+        "on-demand",
+        ["c7a.4xlarge"],
+        cpu as Record<string, number | string> | "denied",
+        memory,
+      );
+      config.capacityRequirements = minimum;
+      const creating = client.createServerWithFallback(
+        config,
+        "cbx_abcdef123456",
+        "capacity-test",
+        "alice@example.com",
+      );
+      const outcome = await creating.then(
+        (result) => result.serverType,
+        (error: unknown) => String(error),
+      );
+      expect(outcome).toMatch(succeeds ? /^c7a\.4xlarge$/ : /AWS capacity unavailable/);
+      const requests = vi
+        .mocked(fetch)
+        .mock.calls.map(([input, init]) =>
+          input instanceof Request ? input : new Request(input, init),
+        );
+      const actions = await Promise.all(
+        requests.map(async (request) =>
+          new URLSearchParams(await request.clone().text()).get("Action"),
+        ),
+      );
+      // A failed capacity check must precede every resource mutation.
+      expect(!succeeds && actions.some((action) => action !== "DescribeInstanceTypes")).toBe(false);
+      expect(attempted).toHaveLength(succeeds ? 1 : 0);
+    },
+  );
+
+  it("keeps constrained market fallback within eligible candidates", async () => {
+    const { client, config, attempted } = awsMarketFallbackHarness(
+      "InsufficientInstanceCapacity",
+      "spot",
+      ["c7a.4xlarge", "t3.small"],
+      { "c7a.4xlarge": 16, "t3.small": 2 },
+    );
+    config.capacityRequirements = { minVCPUs: 4 };
+    await expect(
+      client.createServerWithFallback(
+        config,
+        "cbx_abcdef123456",
+        "capacity-test",
+        "alice@example.com",
+      ),
+    ).resolves.toMatchObject({ serverType: "c7a.4xlarge", market: "on-demand" });
+    expect(attempted).toEqual(["spot:c7a.4xlarge", "on-demand:c7a.4xlarge"]);
+  });
+
   it("adds a small policy fallback for class requests but not exact types", () => {
     expect(
       awsLaunchCandidates({
@@ -4012,6 +4162,7 @@ function ec2XMLResponse(body: string, status = 200): Response {
 function ec2InstanceTypesResponse(
   params: URLSearchParams,
   metadata: Record<string, number | string>,
+  memory: Record<string, number | string> = {},
 ): Response {
   const requested = [...params]
     .filter(([key]) => key.startsWith("InstanceType."))
@@ -4022,7 +4173,7 @@ function ec2InstanceTypesResponse(
         metadata[name] === undefined
           ? []
           : [
-              `<item><instanceType>${name}</instanceType><vCpuInfo><defaultVCpus>${metadata[name]}</defaultVCpus></vCpuInfo></item>`,
+              `<item><instanceType>${name}</instanceType><vCpuInfo><defaultVCpus>${metadata[name]}</defaultVCpus></vCpuInfo>${memory[name] === undefined ? "" : `<memoryInfo><sizeInMiB>${memory[name]}</sizeInMiB></memoryInfo>`}</item>`,
             ],
       )
       .join("")}</instanceTypeSet></DescribeInstanceTypesResponse>`,
@@ -4039,6 +4190,7 @@ function awsMarketFallbackHarness(
     "c7a.metal-48xl": 192,
     "g4dn.metal": 96,
   },
+  memory: Record<string, number | string> = {},
 ) {
   const metadataReads: string[][] = [];
   const markets: string[] = [];
@@ -4067,7 +4219,7 @@ function awsMarketFallbackHarness(
           .map(([, value]) => value);
         metadataReads.push(requested);
         if (metadata === "denied") return ec2XMLResponse("<Response />", 403);
-        return ec2InstanceTypesResponse(params, metadata);
+        return ec2InstanceTypesResponse(params, metadata, memory);
       }
       if (action === "RunInstances") {
         const market = params.has("InstanceMarketOptions.MarketType") ? "spot" : "on-demand";
@@ -4086,7 +4238,7 @@ function awsMarketFallbackHarness(
           );
         }
         return ec2XMLResponse(
-          "<RunInstancesResponse><instancesSet><item><instanceId>i-fallback</instanceId><instanceType>t3.small</instanceType><ipAddress>203.0.113.44</ipAddress><instanceState><name>pending</name></instanceState></item></instancesSet></RunInstancesResponse>",
+          `<RunInstancesResponse><instancesSet><item><instanceId>i-fallback</instanceId><instanceType>${instanceType}</instanceType><ipAddress>203.0.113.44</ipAddress><instanceState><name>pending</name></instanceState></item></instancesSet></RunInstancesResponse>`,
         );
       }
       return ec2XMLResponse(

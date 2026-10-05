@@ -106,7 +106,10 @@ export async function fetchReplayableLeaseCreate(
   request: Request,
   fetch: (request: Request) => Promise<Response>,
 ): Promise<Response> {
-  if (request.method !== "POST" || new URL(request.url).pathname !== "/v1/leases") {
+  if (
+    request.method !== "POST" ||
+    !["/v1/leases", "/v1/leases/resource-constrained"].includes(new URL(request.url).pathname)
+  ) {
     return fetch(request);
   }
   const body = (await request

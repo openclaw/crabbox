@@ -1131,10 +1131,19 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 		return CoordinatorLease{}, err
 	}
 	cfg.Provider = provider.Spec().Name
+	if err := validateResourceRequirements(cfg); err != nil {
+		return CoordinatorLease{}, err
+	}
 	if slug == "" {
 		slug = NewLeaseSlug(leaseID)
 	}
 	capacity := map[string]any{}
+	if cfg.Capacity.MinVCPUs > 0 {
+		capacity["minVCPUs"] = cfg.Capacity.MinVCPUs
+	}
+	if cfg.Capacity.MinMemoryMiB > 0 {
+		capacity["minMemoryMiB"] = cfg.Capacity.MinMemoryMiB
+	}
 	if cfg.Capacity.Market != "" && cfg.Capacity.Market != "spot" {
 		capacity["market"] = cfg.Capacity.Market
 	}
@@ -1227,6 +1236,15 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	} else if !imageRequirementsEmpty(cfg.imageRequirements) {
 		// Older coordinators do not have this route, so mixed-version use fails closed.
 		path = "/v1/leases/capability-aware"
+	}
+	if hasCapacityMinimums(cfg) {
+		if checkpointBacked {
+			return CoordinatorLease{}, Exit(2, "resource requirements are unsupported for checkpoint forks")
+		}
+		path = "/v1/leases/resource-constrained"
+		if fixed {
+			path = "/v1/leases/" + url.PathEscape(leaseID) + "/resource-constrained"
+		}
 	}
 	if checkpointBacked {
 		switch cfg.Provider {

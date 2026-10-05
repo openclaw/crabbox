@@ -2657,3 +2657,25 @@ func TestAWSStockImageRequiresBroker(t *testing.T) {
 		})
 	}
 }
+
+func TestAWSResourceConstrainedAcquireRetainsRollbackOnUnverifiedType(t *testing.T) {
+	for _, actual := range []string{"", "t3.small"} {
+		t.Run(actual, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			cfg := core.Config{Provider: "aws", TargetOS: core.TargetLinux, AWSRegion: "us-west-2", ServerType: "c7a.2xlarge", Capacity: core.CapacityConfig{MinVCPUs: 8}}
+			fake := &fakeAWSClient{created: awsTestServer("i-created", "cbx_created", "created", "us-west-2"), createCfg: cfg}
+			fake.created.ServerType.Name = actual
+			oldClient := newAWSClient
+			newAWSClient = func(context.Context, core.Config) (awsClient, error) { return fake, nil }
+			t.Cleanup(func() { newAWSClient = oldClient })
+			backend := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+			_, err := backend.acquireOnce(context.Background(), false, "")
+			if err == nil || !strings.Contains(err.Error(), "unverified instance type") {
+				t.Fatalf("err=%v", err)
+			}
+			if !slices.Equal(fake.deletedInstances, []string{"i-created"}) || len(fake.deletedKeys) != 1 {
+				t.Fatalf("cleanup instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+			}
+		})
+	}
+}

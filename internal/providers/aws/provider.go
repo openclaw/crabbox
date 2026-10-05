@@ -16,6 +16,10 @@ type Provider struct{}
 
 func (Provider) BackendCapabilities() core.Backend { return &awsLeaseBackend{} }
 
+func (Provider) SupportsResourceRequirements(cfg core.Config) bool {
+	return cfg.TargetOS == core.TargetLinux && (cfg.Architecture == "" || cfg.Architecture == core.ArchitectureAMD64 || cfg.Architecture == core.ArchitectureARM64)
+}
+
 var (
 	_ core.ProviderClassProfileProvider             = Provider{}
 	_ core.ProviderClassSpecProvider                = Provider{}

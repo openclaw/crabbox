@@ -78,6 +78,12 @@ type DesktopLeaseCapabilityProvider interface {
 // architecture tuple (including amd64), within ProviderSpec.Targets. Providers
 // without this capability retain core's managed architecture restrictions.
 // Runtime feasibility and explicit assertions are validated by the adapter.
+// ProviderResourceRequirementsCapability admits provisioned CPU/RAM constraints.
+// Providers without this capability must reject constrained acquisition.
+type ProviderResourceRequirementsCapability interface {
+	SupportsResourceRequirements(cfg Config) bool
+}
+
 type ProviderArchitectureCapability interface {
 	SupportsArchitecture(cfg Config, architecture string) bool
 }

@@ -830,6 +830,141 @@ describe("fleet cleanup inspection", () => {
   }
 
   describe("missing public IP recovery route", () => {
+    it.each(["POST", "PUT"])(
+      "binds opt-in capacity minimums on %s lease requests and replays",
+      async (method) => {
+        const storage = new MemoryStorage();
+        let creates = 0;
+        const capacities: unknown[] = [];
+        const providers = {
+          aws: fakeProvider(
+            (config) => {
+              creates += 1;
+              capacities.push(config.capacityRequirements);
+            },
+            { provider: "aws", cloudID: "i-capacity", region: "eu-west-1" },
+          ),
+        };
+        const fleet = testFleet(storage, providers);
+        const leaseID = "cbx_abcdef123456";
+        const path =
+          method === "PUT"
+            ? `/v1/leases/${leaseID}/resource-constrained`
+            : "/v1/leases/resource-constrained";
+        const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+        const body = {
+          provider: "aws",
+          target: "linux",
+          leaseID,
+          slug: "capacity-test",
+          ...(method === "POST" ? { createAttemptID: "cat_abcdef123456abcdef123456abcdef12" } : {}),
+          sshPublicKey: "ssh-ed25519 test",
+          capacity: { minVCPUs: 4, minMemoryMiB: 15360 },
+        };
+        const first = await fleet.fetch(request(method, path, { headers, body }));
+        expect(first.status).toBe(201);
+        expect(capacities).toEqual([{ minVCPUs: 4, minMemoryMiB: 15360 }]);
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.capacityRequirements).toEqual(
+          body.capacity,
+        );
+        const restarted = testFleet(storage, providers);
+        const replay = await restarted.fetch(request(method, path, { headers, body }));
+        expect(replay.status).toBe(200);
+        const changes = await Promise.all(
+          [{ minVCPUs: 8, minMemoryMiB: 15360 }, {}].map((capacity) =>
+            restarted.fetch(request(method, path, { headers, body: { ...body, capacity } })),
+          ),
+        );
+        expect(changes.map((response) => response.status)).toEqual([409, 409]);
+        expect(creates).toBe(1);
+      },
+    );
+
+    it.each([{ minVCPUs: 8 }, {}])(
+      "rejects concurrent replay that changes minimums after initial lookup: %j",
+      async (capacity) => {
+        const storage = new MemoryStorage();
+        let creates = 0;
+        const fleet = testFleet(storage, {
+          aws: fakeProvider(
+            () => {
+              creates += 1;
+            },
+            { provider: "aws", cloudID: "i-capacity", region: "eu-west-1" },
+          ),
+        });
+        const admission = fleet as unknown as {
+          reserveCreateAttempt: (...args: unknown[]) => Promise<unknown>;
+        };
+        const reserve = admission.reserveCreateAttempt.bind(fleet);
+        const firstEntered = Promise.withResolvers<void>();
+        const secondEntered = Promise.withResolvers<void>();
+        const firstGate = Promise.withResolvers<void>();
+        const secondGate = Promise.withResolvers<void>();
+        let calls = 0;
+        vi.spyOn(admission, "reserveCreateAttempt").mockImplementation(async (...args) => {
+          calls += 1;
+          if (calls === 1) {
+            firstEntered.resolve();
+            await firstGate.promise;
+          } else {
+            secondEntered.resolve();
+            await secondGate.promise;
+          }
+          return reserve(...args);
+        });
+        const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+        const body = {
+          provider: "aws",
+          target: "linux",
+          leaseID: "cbx_abcdef123456",
+          createAttemptID: "cat_abcdef123456abcdef123456abcdef12",
+          slug: "capacity-test",
+          sshPublicKey: "ssh-ed25519 test",
+          capacity: { minVCPUs: 4 },
+        };
+        const first = fleet.fetch(
+          request("POST", "/v1/leases/resource-constrained", { headers, body }),
+        );
+        await firstEntered.promise;
+        const second = fleet.fetch(
+          request("POST", "/v1/leases/resource-constrained", {
+            headers,
+            body: { ...body, capacity },
+          }),
+        );
+        try {
+          await secondEntered.promise;
+          firstGate.resolve();
+          expect((await first).status).toBe(201);
+          secondGate.resolve();
+          expect((await second).status).toBe(409);
+          expect(creates).toBe(1);
+        } finally {
+          firstGate.resolve();
+          secondGate.resolve();
+          await Promise.allSettled([first, second]);
+        }
+      },
+    );
+
+    it("keeps legacy fixed lease identity when resource minimums are omitted or zero", async () => {
+      const input = { provider: "aws" as const, sshPublicKey: "ssh-ed25519 test" };
+      const original = await fixedLeaseCreateIntentHash(leaseConfig(input), "capacity-test");
+      expect(
+        await fixedLeaseCreateIntentHash(
+          leaseConfig({ ...input, capacity: { minVCPUs: 0, minMemoryMiB: 0 } }),
+          "capacity-test",
+        ),
+      ).toBe(original);
+      expect(
+        await fixedLeaseCreateIntentHash(
+          leaseConfig({ ...input, capacity: { minVCPUs: 4 } }),
+          "capacity-test",
+        ),
+      ).not.toBe(original);
+    });
+
     it("keeps recovery provider reads outside the lifecycle queue", () => {
       expect(coordinatorRequestQueue(request("POST", "/v1/leases/cbx_abcdef123456/cleanup"))).toBe(
         "direct",
@@ -12652,6 +12787,122 @@ describe("fleet lease identity and idle", () => {
       deleted.mockRestore();
     }
   });
+
+  it("carries resource minimums from the lease HTTP request through AWS candidate selection", async () => {
+    const launched: string[] = [];
+    const types = [
+      "c7a.8xlarge",
+      "c7i.8xlarge",
+      "m7a.8xlarge",
+      "m7i.8xlarge",
+      "c7a.4xlarge",
+      "t3.small",
+    ];
+    const fixture = awsIngressTestFleet(async (action, params) => {
+      if (action === "DescribeInstanceTypes") {
+        return ec2XMLResponse(
+          `<DescribeInstanceTypesResponse><instanceTypeSet>${types.map((type, index) => `<item><instanceType>${type}</instanceType><vCpuInfo><defaultVCpus>${index < 4 ? 32 : index === 4 ? 16 : 2}</defaultVCpus></vCpuInfo><memoryInfo><sizeInMiB>${index < 4 ? 65536 : index === 4 ? 32768 : 2048}</sizeInMiB></memoryInfo></item>`).join("")}</instanceTypeSet></DescribeInstanceTypesResponse>`,
+        );
+      }
+      if (action === "RunInstances") {
+        const type = params.get("InstanceType")!;
+        launched.push(type);
+        if (type !== "c7a.4xlarge")
+          return ec2XMLResponse(
+            "<Response><Errors><Error><Code>VcpuLimitExceeded</Code><Message>quota exhausted</Message></Error></Errors></Response>",
+            400,
+          );
+        return ec2XMLResponse(
+          "<RunInstancesResponse><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>c7a.4xlarge</instanceType><instanceState><name>pending</name></instanceState></item></instancesSet></RunInstancesResponse>",
+        );
+      }
+      if (action === "DescribeInstances")
+        return ec2XMLResponse(
+          "<DescribeInstancesResponse><requestId>req-capacity</requestId><reservationSet><item><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>c7a.4xlarge</instanceType><ipAddress>192.0.2.20</ipAddress><instanceState><name>running</name></instanceState></item></instancesSet></item></reservationSet></DescribeInstancesResponse>",
+        );
+      return undefined;
+    });
+    const result = await fixture.fleet.fetch(
+      request("POST", "/v1/leases/resource-constrained", {
+        headers: {
+          ...fixture.headers,
+          "x-crabbox-admin": "true",
+          "cf-connecting-ip": "198.51.100.20",
+        },
+        body: {
+          provider: "aws",
+          target: "linux",
+          class: "standard",
+          leaseID: fixture.creatingID,
+          createAttemptID: fixture.createAttemptID,
+          awsRegion: "eu-west-1",
+          awsSGID: "sg-shared",
+          awsAMI: "ami-test",
+          sshPublicKey: "ssh-ed25519 test",
+          capacity: { market: "on-demand", fallback: "none", minVCPUs: 4, minMemoryMiB: 15360 },
+        },
+      }),
+    );
+    expect(result.status).toBe(201);
+    await expect(result.json()).resolves.toMatchObject({
+      lease: { state: "active", serverType: "c7a.4xlarge" },
+    });
+    expect(launched).toEqual(types.slice(0, 5));
+  });
+
+  it.each([undefined, "t3.small"])(
+    "cleans up constrained AWS readiness with unverified type %s",
+    async (readyType) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => awsIdentityResponse("123456789012")),
+      );
+      const machine = {
+        provider: "aws",
+        id: 42,
+        cloudID: "i-capacity",
+        name: "capacity-test",
+        status: "pending",
+        labels: {},
+        serverType: "c7a.4xlarge",
+      };
+      const created = vi
+        .spyOn(EC2SpotClient.prototype, "createServerWithFallback")
+        .mockResolvedValue({ server: machine, serverType: "c7a.4xlarge", imageID: "ami-test" });
+      vi.spyOn(EC2SpotClient.prototype, "waitForServerIP").mockResolvedValue({
+        ...machine,
+        serverType: readyType,
+        host: "203.0.113.10",
+        status: "running",
+      });
+      const deleted = vi
+        .spyOn(EC2SpotClient.prototype, "deleteServer")
+        .mockResolvedValue(undefined);
+      const provider = new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+        "eu-west-1",
+        new MemoryStorage(),
+      );
+      await expect(
+        provider.createServerWithFallback(
+          leaseConfig({
+            provider: "aws",
+            serverType: "c7a.4xlarge",
+            serverTypeExplicit: true,
+            awsRegion: "eu-west-1",
+            capacity: { market: "on-demand", fallback: "none", minVCPUs: 4 },
+            sshPublicKey: "ssh-ed25519 test",
+          }),
+          "cbx_abcdef123456",
+          "capacity-test",
+          "alice@example.com",
+          { providerScope: "aws:account:123456789012" },
+        ),
+      ).rejects.toThrow(/resource requirement mismatch/);
+      expect(created).toHaveBeenCalledTimes(1);
+      expect(deleted).toHaveBeenCalledExactlyOnceWith("i-capacity");
+    },
+  );
 
   it("returns an exact AWS cleanup claim when readiness rollback fails", async () => {
     vi.stubGlobal(

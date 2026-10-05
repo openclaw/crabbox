@@ -259,3 +259,45 @@ Related docs:
 - [Cost and usage](cost-usage.md)
 - [Orchestrator](../orchestrator.md)
 - [Operations](../operations.md)
+
+## Optional AWS resource minimums
+
+For a new Linux AWS lease, add `--min-vcpus` and/or `--min-memory-mib` to
+`warmup` or a one-shot `run`. These filter the existing class candidates;
+they do not change their order or turn the preferred type into a minimum.
+For example, a workload needing four vCPUs and 15 GiB can request:
+
+```sh
+crabbox warmup --provider aws --class standard --min-vcpus 4 --min-memory-mib 15360
+```
+
+The matching configuration keys are `capacity.minVCPUs` and
+`capacity.minMemoryMiB`. Values are whole numbers
+from 0 to 2147483647. Zero or omission disables that dimension; command flags
+can override configured values. MiB means 1,048,576 bytes.
+
+Crabbox checks the candidates against EC2 `DescribeInstanceTypes` metadata.
+Candidates below a requested minimum, or with unknown metadata for a requested
+dimension, cannot launch. Metadata lookup failure is reported as an inability
+to verify capacity. An exact `--type` must satisfy the minimum too and retains
+its exact-type behavior. Market and region fallback, quotas and lease lifetimes
+remain unchanged. Without minimums, existing requests retain their current
+candidate lists and advisory metadata behavior.
+
+Both the direct AWS CLI and a supporting coordinator enforce these minimums.
+A constrained request uses a distinct coordinator creation route, so an older
+coordinator fails instead of silently ignoring the fields. Fixed `--lease-id`
+creation binds the minimums to its original request; changing them on replay
+conflicts with that request. Updating the client alone does not add coordinator
+support.
+
+Minimums initially apply to AWS Linux creation on amd64 and arm64. Existing
+lease `--id` reuse, ready pools, checkpoint creation, jobs and prewarm do not
+accept nonzero minimums; unsupported combinations fail before allocation.
+Use creation-time flags when warming a lease for subsequent ordinary `run --id`
+commands. Those commands still require the caller's normal runtime checks.
+
+EC2 metadata describes nominal hardware. Workloads must also check effective
+process CPU and memory limits before expensive preparation or execution, and
+select a concurrency mode that fits both. These options do not guarantee runtime
+headroom, execution duration or a particular worker count.
