@@ -1592,7 +1592,7 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	owner := workspaceOwnerFromContext(ctx)
 	if isWindowsWSL2Target(target) {
 		args = append(args, "--rsync-path", "wsl.exe rsync")
-	} else if owner != nil {
+	} else if owner != nil && !isWindowsNativeTarget(target) {
 		// openrsync removes shell quoting from --rsync-path before invoking SSH.
 		// A single private executable path works with both rsync implementations.
 		receiver, stageErr := stageRsyncWorkspaceReceiver(ctx, target, owner)
