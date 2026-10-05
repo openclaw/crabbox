@@ -35498,6 +35498,203 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it.each(["cloudflare", "shared"])(
+    "bounds runner sync history and writes while preserving legacy output on %s",
+    async (runtime) => {
+      class SyncStorage extends MemoryStorage {
+        pages: number[] = [];
+        pending = 0;
+        peakPending = 0;
+        scanComplete = false;
+        override async list<T>(options: Parameters<CoordinatorStorageView["list"]>[0] = {}) {
+          const page = await super.list<T>(options);
+          if (options.prefix === "runner:") {
+            expect(options.noCache).toBe(true);
+            expect(options.limit).toBe(128);
+            this.pages.push(page.size);
+            this.scanComplete = page.size < 128;
+          }
+          return page;
+        }
+        override async put<T>(key: string, value: T, options?: { noCache?: boolean }) {
+          if (!key.startsWith("runner:")) return super.put(key, value, options);
+          expect(this.scanComplete).toBe(true);
+          expect(options?.noCache).toBe(true);
+          this.pending += 1;
+          this.peakPending = Math.max(this.peakPending, this.pending);
+          await Promise.resolve();
+          try {
+            await super.put(key, value, options);
+          } finally {
+            this.pending -= 1;
+          }
+        }
+      }
+      const storage = new SyncStorage();
+      const owner = "alice@example.com";
+      const org = orgKeyForLabel("example-org");
+      const old = "2026-01-01T00:00:00.000Z";
+      const row = (id: string): ExternalRunnerRecord => ({
+        id,
+        provider: "blacksmith-testbox",
+        owner,
+        org,
+        status: "ready",
+        firstSeenAt: old,
+        lastSeenAt: old,
+        updatedAt: old,
+      });
+      const key = (r: ExternalRunnerRecord) =>
+        `runner:${[r.provider, r.id, r.org, r.owner].map(encodeURIComponent).join(":")}`;
+      const seed = new Map<string, ExternalRunnerRecord>();
+      seed.set("runner:000-input", { ...row("input-runner"), stale: true, job: "legacy-first" });
+      seed.set("runner:001-omitted", { ...row("omitted-runner"), job: "legacy-omitted" });
+      for (let i = 0; i < 300; i++) {
+        const r = row(`runner-${String(i).padStart(4, "0")}`);
+        seed.set(key(r), r);
+      }
+      const canonicalInput = {
+        ...row("input-runner"),
+        firstSeenAt: "2026-02-01T00:00:00.000Z",
+        job: "canonical",
+      };
+      seed.set(key(canonicalInput), canonicalInput);
+      const canonicalOmitted = { ...row("omitted-runner"), job: "canonical-omitted" };
+      seed.set(key(canonicalOmitted), canonicalOmitted);
+      for (const r of [
+        { ...row("other-owner"), owner: "bob@example.com" },
+        { ...row("other-org"), org: orgKeyForLabel("other-org") },
+        { ...row("legacy-org"), org: "example-org" },
+        { ...row("other-provider"), provider: "other-provider" },
+        { ...row("already-stale"), status: "missing", stale: true },
+      ])
+        seed.set(key(r), r);
+      // Keep historical internal identities exactly as stored, without fixture normalization.
+      await Promise.all([...seed].map(([k, r]) => MemoryStorage.prototype.put.call(storage, k, r)));
+      const legacy = { ...row("legacy-org"), org: "example-org" };
+      const fleet = runtime === "cloudflare" ? testFleet(storage) : testCoordinator(storage);
+      const response = await fleet.fetch(
+        request("POST", "/v1/runners/sync", {
+          headers: { "x-crabbox-owner": owner, "x-crabbox-org": "example-org" },
+          body: {
+            provider: "blacksmith-testbox",
+            runners: [
+              { id: "input-runner", status: "READY", actionsRunURL: "https://invalid.example/run" },
+              { id: "input-runner", status: "failed", job: "duplicate" },
+              { id: "!invalid", status: "ready" },
+              { id: "new-runner", status: "READY" },
+            ],
+          },
+        }),
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        runners: ExternalRunnerRecord[];
+        stale: ExternalRunnerRecord[];
+      };
+      expect(body.runners.map((r) => r.id)).toEqual(["input-runner", "new-runner"]);
+      expect(body.runners[0]).toMatchObject({
+        firstSeenAt: old,
+        job: "legacy-first",
+        status: "ready",
+        org: "example-org",
+      });
+      expect(body.runners[0]).not.toHaveProperty("stale");
+      expect(body.runners[0]).not.toHaveProperty("actionsRunURL");
+      const expected = [...seed]
+        .toSorted(([a], [b]) => a.localeCompare(b))
+        .map(([, r]) => r)
+        .filter(
+          (r) =>
+            r.provider === "blacksmith-testbox" &&
+            r.owner === owner &&
+            r.org === org &&
+            r.id !== "input-runner" &&
+            !r.stale,
+        );
+      expect(body.stale).toEqual(
+        expected.map((r) => ({
+          ...r,
+          org: "example-org",
+          status: "missing",
+          stale: true,
+          updatedAt: body.runners[0]!.updatedAt,
+        })),
+      );
+      expect(body.stale).toHaveLength(302);
+      expect(storage.pages.length).toBeGreaterThan(2);
+      expect(Math.max(...storage.pages)).toBeLessThanOrEqual(128);
+      expect(storage.peakPending).toBe(128);
+      expect(storage.pending).toBe(0);
+      expect(storage.value<ExternalRunnerRecord>(key(canonicalOmitted))?.job).toBe(
+        "canonical-omitted",
+      );
+      expect(storage.value<ExternalRunnerRecord>(key(legacy))?.stale).toBeUndefined();
+    },
+  );
+
+  it("attempts all runner writes after a rejection and repairs the remaining row on retry", async () => {
+    const storage = new MemoryStorage();
+    const owner = "alice@example.com";
+    const org = orgKeyForLabel("example-org");
+    const old = "2026-01-01T00:00:00.000Z";
+    for (let i = 0; i < 300; i++) {
+      const id = `runner-${String(i).padStart(4, "0")}`;
+      storage.seed(
+        `runner:${["blacksmith-testbox", id, org, owner].map(encodeURIComponent).join(":")}`,
+        {
+          id,
+          provider: "blacksmith-testbox",
+          owner,
+          org,
+          status: "ready",
+          firstSeenAt: old,
+          lastSeenAt: old,
+          updatedAt: old,
+        },
+      );
+    }
+    let attempts = 0;
+    storage.beforePut = async (key) => {
+      if (!key.startsWith("runner:")) return;
+      attempts += 1;
+      if (key.includes(":runner-0000:")) throw new Error("synthetic runner write failure");
+    };
+    const fleet = testFleet(storage);
+    const sync = () =>
+      fleet.fetch(
+        request("POST", "/v1/runners/sync", {
+          headers: { "x-crabbox-owner": owner, "x-crabbox-org": "example-org" },
+          body: { provider: "blacksmith-testbox", runners: [] },
+        }),
+      );
+    expect((await sync()).status).toBe(500);
+    expect(attempts).toBe(300);
+    storage.beforePut = undefined;
+    const retry = await sync();
+    expect(retry.status).toBe(200);
+    const body = (await retry.json()) as { stale: ExternalRunnerRecord[] };
+    expect(body.stale.map((r) => r.id)).toEqual(["runner-0000"]);
+    expect(body.stale[0]?.firstSeenAt).toBe(old);
+  });
+
+  it("does not write runners after a history page read fails", async () => {
+    const storage = new MemoryStorage();
+    storage.beforeList = async (options) => {
+      if (options?.prefix === "runner:") throw new Error("synthetic history read failure");
+    };
+    const put = vi.spyOn(storage, "put");
+    const fleet = testFleet(storage);
+    const response = await fleet.fetch(
+      request("POST", "/v1/runners/sync", {
+        headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+        body: { provider: "blacksmith-testbox", runners: [{ id: "new-runner", status: "ready" }] },
+      }),
+    );
+    expect(response.status).toBe(500);
+    expect(put.mock.calls.filter(([key]) => key.startsWith("runner:"))).toHaveLength(0);
+  });
+
   it("renders external runner detail pages for visible runners", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);

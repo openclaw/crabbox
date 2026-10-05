@@ -525,6 +525,13 @@ runner leases stay visible without leaking to normal users. External runner rows
 Actions links and stale markers; clicking one opens its visibility-only detail
 page at `/portal/runners/{provider}/{runner-id}`.
 
+Runner synchronization scans historical records in uncached pages and settles bounded
+write batches before returning. It preserves the complete `runners` and newly
+`stale` response arrays, including their order and legacy record identities.
+Working memory no longer grows with unrelated or already-stale history; response
+memory still grows with the number and size of newly stale records returned.
+The scan still visits historical runner keys to preserve legacy key compatibility.
+
 The CLI's best-effort external-runner sync has a single five-second budget
 covering inventory, optional Actions enrichment, credential resolution, and the
 HTTP request/response. Earlier caller deadlines still apply. Once canceled, the

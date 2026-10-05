@@ -15781,58 +15781,69 @@ export class FleetCoordinator {
     }
     const now = new Date();
     const nowISO = now.toISOString();
-    const existing = await this.externalRunnerRecords();
-    const seenIDs = new Set<string>();
-    const synced: ExternalRunnerRecord[] = [];
-    const writes: Promise<void>[] = [];
+    const incoming = new Map<string, NonNullable<ReturnType<typeof sanitizeExternalRunner>>>();
     for (const raw of rawRunners) {
       const sanitized = sanitizeExternalRunner(raw, provider, now);
-      if (!sanitized || seenIDs.has(sanitized.id)) {
+      if (sanitized && !incoming.has(sanitized.id)) {
+        incoming.set(sanitized.id, sanitized);
+      }
+    }
+    const previous = new Map<string, ExternalRunnerRecord>();
+    const stale: ExternalRunnerRecord[] = [];
+    // Finish the read pass before writing: legacy keys can refer to a canonical
+    // key on a later page. Mutating it mid-scan would change snapshot/order semantics.
+    for await (const [, runner] of coordinatorStorageEntries<ExternalRunnerRecord>(
+      this.state.storage,
+      { prefix: externalRunnerPrefix(), limit: storageRecordScanBatchSize, noCache: true },
+    )) {
+      if (runner.provider !== provider || runner.owner !== owner || runner.org !== org) {
         continue;
       }
-      seenIDs.add(sanitized.id);
-      const previous = existing.find(
-        (runner) =>
-          runner.provider === provider &&
-          runner.id === sanitized.id &&
-          runner.owner === owner &&
-          runner.org === org,
-      );
+      if (incoming.has(runner.id)) {
+        if (!previous.has(runner.id)) previous.set(runner.id, runner);
+      } else if (!runner.stale) {
+        // The API returns every newly stale row. Only this required output, not
+        // unrelated or already-stale history, remains proportional to stored data.
+        stale.push({ ...runner, status: "missing", stale: true, updatedAt: nowISO });
+      }
+    }
+    const synced: ExternalRunnerRecord[] = [];
+    for (const sanitized of incoming.values()) {
+      const prior = previous.get(sanitized.id);
       const runner: ExternalRunnerRecord = {
-        ...previous,
+        ...prior,
         ...sanitized,
         owner,
         org,
         provider,
-        firstSeenAt: previous?.firstSeenAt || nowISO,
+        firstSeenAt: prior?.firstSeenAt || nowISO,
         lastSeenAt: nowISO,
         updatedAt: nowISO,
       };
       delete runner.stale;
-      writes.push(this.putExternalRunner(runner));
       synced.push(runner);
     }
-    const stale: ExternalRunnerRecord[] = [];
-    for (const runner of existing) {
-      if (
-        runner.provider !== provider ||
-        runner.owner !== owner ||
-        runner.org !== org ||
-        seenIDs.has(runner.id) ||
-        runner.stale
-      ) {
-        continue;
+    let failed = false;
+    let writeError: unknown;
+    for (const runners of [synced, stale]) {
+      for (let offset = 0; offset < runners.length; offset += storageRecordScanBatchSize) {
+        // Settle each bounded batch, but still attempt later rows after a failure,
+        // as the previous eager write submission did. Never return partial success.
+        // oxlint-disable-next-line eslint/no-await-in-loop -- bound pending storage writes and release each batch before continuing.
+        const results = await Promise.allSettled(
+          runners
+            .slice(offset, offset + storageRecordScanBatchSize)
+            .map((runner) => this.putExternalRunner(runner)),
+        );
+        for (const result of results) {
+          if (result.status === "rejected" && !failed) {
+            failed = true;
+            writeError = result.reason;
+          }
+        }
       }
-      const next: ExternalRunnerRecord = {
-        ...runner,
-        status: "missing",
-        stale: true,
-        updatedAt: nowISO,
-      };
-      writes.push(this.putExternalRunner(next));
-      stale.push(next);
     }
-    await Promise.all(writes);
+    if (failed) throw writeError;
     return json({
       runners: synced.map(publicExternalRunnerRecord),
       stale: stale.map(publicExternalRunnerRecord),
@@ -19547,6 +19558,7 @@ export class FleetCoordinator {
     await this.state.storage.put(
       externalRunnerKey(runner.provider, runner.id, runner.owner, runner.org),
       runner,
+      { noCache: true },
     );
   }
 
