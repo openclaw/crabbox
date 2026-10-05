@@ -11,6 +11,10 @@
 - Reject AWS developer-image mints outside the requested region and clean up failed unpromoted candidate checkpoints and snapshots while preserving promotion rollback.
 - Keep the homepage workload router's Copy button fully visible for short command snippets. [PR 2703](https://github.com/openclaw/crabbox/pull/2703). Thanks @shakkernerd.
 
+### Changes
+
+- Refresh the docs against the current CLI and provider catalog, including a single guide to desktop, VNC, browser and portal access.
+
 ## 0.71.0 - 2026-10-04
 
 ### Highlights
