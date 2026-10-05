@@ -4,6 +4,7 @@
 
 ### Changes
 
+- Add optional vCPU and memory minimums for new AWS Linux leases while preserving existing class fallback behavior. [PR 2710](https://github.com/openclaw/crabbox/pull/2710). Thanks @shakkernerd.
 - Rewrite the README around on-demand computers for agents, with every supported provider listed.
 - Redesign the crabbox.sh home page around on-demand computers for agents, with a provider wall generated from the catalog, a new crab-in-a-box icon, and a tokenized visual system shared by the docs and Features pages.
 - Refresh the docs against the current CLI and provider catalog, including a single guide to desktop, VNC, browser and portal access.
