@@ -135,6 +135,8 @@ try {
   await assertTheme(desktopDark.page, "dark");
   await assertHomeShell(desktopDark.page, "desktop dark");
   await screenshot(desktopDark.page, "home-desktop-dark.png");
+  await desktopDark.page.setViewportSize({ width: 1950, height: 1100 });
+  await assertHomeJobCopyLayout(desktopDark.page, "wide desktop dark");
   await assertNoPageErrors(desktopDark);
   await desktopDark.context.close();
   activeProofPage = undefined;
@@ -365,6 +367,34 @@ async function assertHomeShell(page, name) {
   assert(layout.capabilityText.includes("There is no generic nested mode."), `${name} homepage states the nested boundary`, layout);
   assert(layout.example.includes("--provider local-container"), `${name} homepage example names its provider`, layout);
   assert(/^\d+ registered providers$/.test(layout.registeredProviders), `${name} homepage provider count is explicit`, layout);
+  await assertHomeJobCopyLayout(page, name);
+}
+
+async function assertHomeJobCopyLayout(page, name) {
+  const scroll = await page.evaluate(() => ({ x: window.scrollX, y: window.scrollY }));
+  const selectedJob = await page.locator('[data-home-job-radio]:checked').inputValue();
+  const jobs = await page.locator('[data-home-job-radio]').evaluateAll((radios) => radios.map((radio) => radio.value));
+  for (const job of jobs) {
+    await page.locator(`label[for="home-job-${job}"]`).click();
+    const layout = await page.locator(`[data-home-job-result="${job}"] pre`).evaluate((pre) => {
+      const box = pre.getBoundingClientRect();
+      const button = pre.querySelector(".copy").getBoundingClientRect();
+      return {
+        clientHeight: pre.clientHeight,
+        scrollHeight: pre.scrollHeight,
+        buttonHeight: button.height,
+        buttonWidth: button.width,
+        contained: button.top >= box.top && button.bottom <= box.bottom && button.left >= box.left && button.right <= box.right,
+      };
+    });
+    assert(
+      layout.contained && layout.buttonHeight >= 44 && layout.buttonWidth >= 44 && layout.scrollHeight <= layout.clientHeight,
+      `${name} ${job} copy button fits without vertical scrolling`,
+      layout,
+    );
+  }
+  await page.locator(`label[for="home-job-${selectedJob}"]`).click();
+  await page.evaluate(({ x, y }) => window.scrollTo(x, y), scroll);
 }
 
 async function proveHomeJobFinder(page) {

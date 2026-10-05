@@ -1055,7 +1055,8 @@ main{min-width:0;padding:30px 48px 80px;max-width:1360px;margin:0 auto;width:100
 .home-job-command>div{display:flex;justify-content:space-between;gap:12px;padding:1px 2px 12px;border-bottom:1px solid rgba(255,255,255,.09);font-size:.66rem}
 .home-job-command>div span{color:#f0ebe2;font-weight:700}
 .home-job-command>div small{color:#7dd3c7}
-.home-job-command pre{position:relative;max-width:100%;margin:14px 0;padding:2px 58px 2px 0;overflow:auto;background:transparent;border:0;color:var(--code-fg);font:500 .72rem/1.75 "IBM Plex Mono",ui-monospace,monospace}
+/* Reserve the 44px copy target plus 8px clearance above and below it, even for short snippets. */
+.home-job-command pre{position:relative;min-height:60px;max-width:100%;margin:14px 0;padding:2px 58px 2px 0;overflow:auto;background:transparent;border:0;color:var(--code-fg);font:500 .72rem/1.75 "IBM Plex Mono",ui-monospace,monospace}
 .home-job-command pre code{display:grid;min-width:0;gap:3px;white-space:normal}
 .home-job-command-line{display:grid;min-width:0;grid-template-columns:auto minmax(0,1fr);gap:7px}
 .home-job-command-line i{color:#efc15b;font-style:normal}
