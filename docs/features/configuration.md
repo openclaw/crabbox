@@ -989,7 +989,7 @@ sync:
   gitOverlay: false
   fingerprint: true
   baseRef: main
-  timeout: 15m
+  timeout: 15m # rsync I/O inactivity; manifest/archive wall-clock limit
   warnFiles: 50000
   warnBytes: 5368709120
   failFiles: 150000

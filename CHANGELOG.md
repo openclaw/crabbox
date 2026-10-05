@@ -16,6 +16,7 @@
 ### Fixes
 
 - Prevent queued coordinator uploads from retaining every run log in memory, page run-event reads at storage, and return structured failures for interrupted event appends instead of uncaught Worker errors.
+- Buffer POSIX sync manifest writes, time out rsync only after I/O inactivity, and retain workspace-witness stop requests when interrupted transfers are still settling. [PR 2692](https://github.com/openclaw/crabbox/pull/2692).
 - Return a retryable 503 when coordinator lease creates cannot begin committing admission within 30 seconds instead of hanging. [PR 2687](https://github.com/openclaw/crabbox/pull/2687); related [Issue 1561](https://github.com/openclaw/crabbox/issues/1561).
 - Bound coordinator AWS, Azure, and Tailscale requests with retryable 503 deadlines, and verify Mac host ownership outside the coordinator lock, so stalled image or Mac host operations cannot indefinitely block queued lease creates. [PR 2689](https://github.com/openclaw/crabbox/pull/2689).
 - Tolerate up to ±5 seconds of ASCII Box (Boat) create/read timestamp skew while preserving the original fixed-lease witness, and keep failed own creates inspectable and stoppable. [PR 2681](https://github.com/openclaw/crabbox/pull/2681).

@@ -339,8 +339,9 @@ crabbox run --id cbx_... --sync-only --debug
 
 - Inspect the printed sync candidate estimate (`crabbox sync-plan`) before
   retrying.
-- Lower `sync.timeout` for quick failure in agent loops, or raise it for
-  intentionally large source transfers.
+- Lower `sync.timeout` to detect rsync I/O stalls sooner, or raise it when long
+  periods without protocol I/O are expected. Progressing rsync transfers may
+  exceed this duration; manifest staging and archive sync use wall-clock limits.
 - Tune `sync.warnFiles`, `sync.warnBytes`, `sync.failFiles`, and `sync.failBytes`
   in repo config.
 - Stop and warm a fresh lease if the remote workspace looks corrupted.

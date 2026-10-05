@@ -20,6 +20,14 @@ Windows keeps native rsync/SSH pairing or privately staged WSL credentials;
 native SSH-config routes stay on the native client. Artifact and egress uploads
 use the same private SSH configuration boundary.
 
+For rsync, `sync.timeout` (default `15m`) is an I/O inactivity limit, rounded up
+to whole seconds. Transfers may take longer while protocol I/O continues, even
+without `--debug` output. Parent cancellation still stops the transfer. Manifest
+staging and archive-based sync retain their existing wall-clock limits. Manifest
+receivers on POSIX targets buffer filesystem writes while retaining exact-length
+framing with portable `dd` operands, preserving binary filenames and rejecting
+truncated frames.
+
 `--no-sync` skips local file transfer only on providers that support it.
 Blacksmith Testbox rejects it before lease access or execution because native
 Testbox runs own sync and offer no supported bypass, including when reusing an

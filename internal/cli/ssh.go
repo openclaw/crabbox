@@ -1559,11 +1559,6 @@ func normalizeRsyncOptions(opts rsyncOptions) rsyncOptions {
 
 func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []string, stdout, stderr io.Writer, opts rsyncOptions) (err error) {
 	opts = normalizeRsyncOptions(opts)
-	if opts.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
-		defer cancel()
-	}
 	session, wslExe, mountRoot, err := newWorkspaceRsyncSession(ctx, target)
 	if err != nil {
 		return err
@@ -1576,6 +1571,11 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 	args := []string{
 		archiveMode,
 		"-e", session.rsyncRemoteShellWithOptions("10", "3"),
+	}
+	if opts.Timeout > 0 {
+		// Rsync observes protocol I/O even in quiet mode. A wall-clock context
+		// deadline kills healthy large transfers; console output is not progress.
+		args = append(args, fmt.Sprintf("--timeout=%d", (opts.Timeout-1)/time.Second+1))
 	}
 	if opts.NoTimes {
 		args = append(args, "--no-times", "--omit-dir-times")
@@ -1633,24 +1633,18 @@ func rsync(ctx context.Context, target SSHTarget, src, dst string, excludes []st
 		err = handle.Wait()
 	}
 	stopHeartbeat()
+	if ctx.Err() != nil {
+		err = errors.Join(err, ctx.Err())
+	} else if opts.Timeout > 0 && exitCode(err) == 30 {
+		err = Exit(6, "rsync stalled with no I/O progress for %s; next_action=retry with --full-resync, then use a fresh lease if sync still stalls", opts.Timeout)
+	}
 	if guardStarted {
 		guardCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), owner.quiesceTimeout())
-		rawGuardCtx := contextWithoutWorkspaceOwner(guardCtx)
-		guardErr := runSSHQuiet(rawGuardCtx, target, owner.rsyncStopCommand())
-		if guardErr == nil {
-			guardErr = waitWorkspaceOwnerNoChild(rawGuardCtx, owner, owner.callTimeout())
-		}
-		cleanupErr := runSSHQuiet(rawGuardCtx, target, owner.rsyncPrepareCommand())
+		guardErr := finishRsyncWorkspaceWitness(guardCtx, target, owner)
 		cancel()
-		if guardErr == nil {
-			guardErr = cleanupErr
+		if guardErr != nil {
+			err = errors.Join(err, Exit(7, "finish rsync workspace witness: %v", guardErr))
 		}
-		if guardErr != nil && err == nil {
-			err = Exit(7, "finish rsync workspace witness: %v", guardErr)
-		}
-	}
-	if ctx.Err() == context.DeadlineExceeded {
-		return Exit(6, "rsync timed out after %s; next_action=retry with --full-resync, then use a fresh lease if sync still stalls", opts.Timeout)
 	}
 	if opts.Debug {
 		fmt.Fprintf(stderr, "rsync elapsed=%s checksum=%t delete=%t\n", time.Since(start).Round(time.Millisecond), opts.Checksum, opts.Delete)
@@ -2568,16 +2562,31 @@ fi
 case "$deleted_len" in
   ''|*[!0-9]*|0[0-9]*) echo "invalid sync deleted length" >&2; exit 1 ;;
 esac
-# Keep this to POSIX dd operands: minimal guests commonly provide BusyBox dd,
-# which rejects GNU's progress-suppression extension. Check the output size too:
-# portable dd can exit successfully after reading fewer records than requested.
-dd bs=1 count="$manifest_len" of="$meta_dir/` + manifestName + `" 2>/dev/null
+# Full blocks plus one exact remainder preserve framing across short pipe reads.
+# Older/minimal dd keeps byte-sized input records but still buffers disk writes.
+fullblock=
+if dd iflag=fullblock count=0 </dev/null >/dev/null 2>&1; then fullblock=1; fi
+write_frame() {
+  frame_len=$1
+  if [ "$fullblock" = 1 ]; then
+    {
+      dd iflag=fullblock bs=65536 count="$((frame_len / 65536))" 2>/dev/null
+      remainder=$((frame_len % 65536))
+      if [ "$remainder" -ne 0 ]; then
+        dd iflag=fullblock bs="$remainder" count=1 2>/dev/null
+      fi
+    } > "$2"
+  else
+    dd ibs=1 obs=65536 count="$frame_len" of="$2" 2>/dev/null
+  fi
+}
+write_frame "$manifest_len" "$meta_dir/` + manifestName + `"
 manifest_size=$(wc -c < "$meta_dir/` + manifestName + `" | tr -d '[:space:]')
 if [ "$manifest_size" != "$manifest_len" ]; then
   echo "short sync manifest: got $manifest_size want $manifest_len" >&2
   exit 1
 fi
-dd bs=1 count="$deleted_len" of="$meta_dir/` + deletedName + `" 2>/dev/null
+write_frame "$deleted_len" "$meta_dir/` + deletedName + `"
 deleted_size=$(wc -c < "$meta_dir/` + deletedName + `" | tr -d '[:space:]')
 if [ "$deleted_size" != "$deleted_len" ]; then
   echo "short sync deleted manifest: got $deleted_size want $deleted_len" >&2

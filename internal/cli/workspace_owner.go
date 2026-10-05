@@ -613,6 +613,19 @@ func (o *workspaceOwner) rsyncPrepareCommand() string {
 	return `rm -f "$HOME/` + path + `"`
 }
 
+func finishRsyncWorkspaceWitness(ctx context.Context, target SSHTarget, owner *workspaceOwner) error {
+	rawCtx := contextWithoutWorkspaceOwner(ctx)
+	if err := runSSHQuiet(rawCtx, target, owner.rsyncStopCommand()); err != nil {
+		return err
+	}
+	if err := waitWorkspaceOwnerNoChild(rawCtx, owner, owner.callTimeout()); err != nil {
+		// A slow receiver can outlive local cancellation. Keep the stop request
+		// so its witness retires when the receiver exits, without waiting for TTL.
+		return err
+	}
+	return runSSHQuiet(rawCtx, target, owner.rsyncPrepareCommand())
+}
+
 func (o *workspaceOwner) Close(ctx context.Context) (err error) {
 	if o == nil {
 		return nil

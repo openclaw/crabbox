@@ -440,7 +440,9 @@ Large syncs warn or fail according to `sync.warnFiles`, `sync.warnBytes`,
 list the top source directories by file count plus a hint to update
 `.crabboxignore` or `sync.exclude`. Quiet rsync runs print a heartbeat; after
 several minutes without visible progress the heartbeat includes a concrete retry
-hint, and `sync.timeout` kills stalled syncs.
+hint. For rsync, `sync.timeout` limits I/O inactivity rather than total transfer
+time; a quiet transfer that continues exchanging protocol data may exceed it.
+Manifest staging and archive transfers retain their wall-clock limits.
 
 ### Sync alternatives
 
