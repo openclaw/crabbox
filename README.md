@@ -80,6 +80,7 @@ Dependency and build directories are excluded from normal [workspace sync](docs/
 crabbox warmup --provider local-container --slug dev-box
 crabbox run --provider local-container --id dev-box -- uname -a
 # Edit locally, then run again with the same --id.
+# Open a shell, or release the box when finished.
 crabbox connect --provider local-container --id dev-box
 crabbox stop --provider local-container dev-box
 ```
@@ -412,7 +413,7 @@ requirements in [Infrastructure](docs/infrastructure.md).
 | Situation | Next step |
 | --- | --- |
 | The box is unreachable | Run `crabbox doctor --provider <name>`. |
-| You need the failed environment | Add `--keep-on-failure`, then use `crabbox connect --id <box>`. |
+| You need to inspect the failure | Add `--keep-on-failure`, then use `crabbox connect --id <box>`. |
 | You need a fresh workspace sync | Add `--full-resync` to reset the remote workdir before syncing. |
 | You need the command's output files | Use `--download remote=local`, repeatable for several files. |
 | Output needs to go straight to a file | Use `--capture-stdout <path>` and `--capture-stderr <path>`. |
@@ -580,6 +581,19 @@ release snapshots; [.github/workflows/ci.yml](.github/workflows/ci.yml) defines
 the full gate. See [Documentation authoring](docs/README.md#about-these-docs)
 for site conventions, [Infrastructure](docs/infrastructure.md) for deployments,
 and [Release engineering](docs/RELEASING.md) for the release process.
+
+<details>
+<summary>Release authorization and safety</summary>
+
+One explicit full release/publish request authorizes the normal preparation,
+tagging, build/signing, private draft/upload, native proof, publication, Homebrew
+update, independent installation smokes, and closeout without renewed chat
+approval at each stage. Narrow requests stay narrow. The original request supplies
+authorization; GitHub events alone do not. Sequential technical gates, separate
+trust domains, and cancellation boundaries remain mandatory. Follow
+[Release engineering](docs/RELEASING.md) for the exact sequence.
+
+</details>
 
 ## License
 
