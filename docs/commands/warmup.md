@@ -37,7 +37,8 @@ warmup complete total=42.1s
 ```
 
 The canonical lease ID is `cbx_...`; the friendly `slug` is an auto-generated
-`<adjective>-<noun>` handle (or a normalized `--slug` you requested). Reuse
+`<adjective>-<noun>-<eight-hex-fingerprint>` handle (or a normalized `--slug`
+you requested). Fixed-ID replay preserves its original naming contract. Reuse
 either with later `run`, `status`, `ssh`, `inspect`, and `stop` commands.
 Scripts should prefer the canonical ID. Add `--timing-json` to emit a final
 JSON timing record (provider, lease ID, slug, total duration, exit code) on

@@ -55,6 +55,10 @@ retains a terminal claim so the ID cannot allocate another machine. Keep the
 local claim and stored SSH key through recovery; images with additional volumes
 are rejected for fixed leases.
 
+The backend supports fixed IDs, but the current offline `crabbox providers
+--json` catalog does not advertise `fixed-lease-id` for Scaleway. Automation
+that requires the catalog feature cannot yet discover that support.
+
 ### Fixed-Lease Recovery
 
 An interruption after server admission is journaled can happen before the server
@@ -106,6 +110,23 @@ instead of the inherited `DEV1-S` default. Explicit `scaleway.type`
 configuration or `--scaleway-type` still takes precedence over the class,
 and `--type` takes precedence over both.
 
+Primary Linux/amd64 sizes are:
+
+| Class | Commercial type | vCPU | RAM (GiB) |
+| --- | --- | --- | --- |
+| `tiny` | `DEV1-S` | 2 | 2 |
+| `small` | `DEV1-M` | 3 | 4 |
+| `standard` | `DEV1-L` | 4 | 8 |
+| `fast` | `PRO2-M` | 16 | 64 |
+| `large` | `PRO2-L` | 32 | 128 |
+| `beast` | `GP1-XL` | 48 | 256 |
+
+`standard` now selects `DEV1-L`, increasing size and cost from the old `DEV1-S`
+mapping. Use `--class tiny` or `--type DEV1-S` to keep the old size.
+`crabbox providers --json` also declares `PRO2-S` as a `standard` alternative;
+the backend currently creates the primary without automatically retrying that
+alternative. Omit `scaleway.type` to let the class select capacity.
+
 Local SDK/configuration failures retain their original error causes for
 diagnostics while keeping the public message redacted and exit code 3. Missing
 SDK configuration still falls back to environment-based credentials.
@@ -118,7 +139,7 @@ scaleway:
   region: fr-par
   zone: fr-par-1
   image: ubuntu_noble
-  type: DEV1-S
+  # type: DEV1-S # optional exact override; takes precedence over class
   projectId: "<scaleway-project-id>"
   organizationId: "<scaleway-organization-id>"
   securityGroup: ""

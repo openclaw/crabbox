@@ -6,13 +6,20 @@ Read when:
 - debugging provider-specific provisioning, sync, or command execution;
 - changing provider registration, flags, config, or backend behavior.
 
+Crabbox's catalog contains **80 built-in providers plus the `external` plugin
+contract** (81 entries). The compiled target lists include Linux, macOS, native
+Windows, WSL2, and a Worker-module runtime. Support varies by provider: a catalog
+entry is not a promise of credentials, capacity, desktop access, or arbitrary
+shell execution. Start with `crabbox providers recommend`, then inspect the
+selected provider's page.
+
 ## Provider model
 
 Every provider registers a backend with one of three kinds:
 
-- **SSH lease** — Crabbox provisions or connects to an SSH-reachable box and owns
-  the full lease lifecycle (warmup, sync, run, ssh, cleanup). Core does the
-  rsync/command execution directly to the box over SSH.
+- **SSH lease** — Crabbox provisions or connects to an SSH-reachable box and
+  drives sync and commands over SSH (rsync on POSIX, tar on native Windows).
+  The provider defines lifecycle and cleanup; static hosts remain host-owned.
 - **Delegated run** — a sandbox or proof runner. The provider owns sync and
   command execution end to end; there is no SSH lease and no local rsync.
 - **Service control** — Crabbox can inspect or stop a provider-owned service,
@@ -29,7 +36,8 @@ Providers also differ by control plane and reachability:
   cloud providers that never broker (e.g. `digitalocean`, `linode`, `vultr`,
   `proxmox`, `hostinger`, `runpod`, `namespace-devbox`, `namespace-instance`,
   `semaphore`, `sprites`, `exe-dev`, `morph`). The CLI talks to the
-  provider API itself and cleans up best-effort via provider labels.
+  provider API itself. Cleanup requires verified provider/resource/claim
+  ownership; names and labels alone do not authorize deletion.
 - **Static SSH** — `ssh` connects to a preexisting machine you supply; no
   provisioning, no cleanup.
 - **Local runtime** — `local-container` starts a labeled Linux container through
@@ -180,6 +188,40 @@ Access terms:
 | [xcp-ng](xcp-ng.md) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; XCP-ng VM clone | `self-hosted`; GPU: optional | Crabbox; VM delete | Self-hosted Linux VM pool over XAPI | Normal leases require prepared Linux templates |
 
 <!-- END GENERATED PROVIDER MATRIX -->
+
+## Providers By Category
+
+The groups below match `crabbox providers --json` and the checked-in
+`provider-metadata.json`. Categories describe use and hosting, while the separate
+`coordinator` field describes routing: Daytona is categorized as `direct-cloud`
+but also supports coordinator-managed leases.
+
+| Category | Entries | Providers |
+| --- | --- | --- |
+| `brokerable-cloud` | 4 | [aws](aws.md), [azure](azure.md), [gcp](gcp.md), [hetzner](hetzner.md) |
+| `byo-ssh` | 1 | [ssh](ssh.md) |
+| `ci-proof-runner` | 2 | [blacksmith-testbox](blacksmith-testbox.md), [semaphore](semaphore.md) |
+| `delegated-sandbox` | 24 | [agent-sandbox](agent-sandbox.md), [aws-lambda-microvm](aws-lambda-microvm.md), [azure-dynamic-sessions](azure-dynamic-sessions.md), [blaxel](blaxel.md), [cloud-run-sandbox](cloud-run-sandbox.md), [cloudflare](cloudflare.md), [cloudflare-dynamic-workers](cloudflare-dynamic-workers.md), [cloudflare-sandbox](cloudflare-sandbox.md), [codesandbox](codesandbox.md), [crownest](crownest.md), [cubesandbox](cubesandbox.md), [e2b](e2b.md), [freestyle](freestyle.md), [islo](islo.md), [modal](modal.md), [nomad](nomad.md), [opencomputer](opencomputer.md), [opensandbox](opensandbox.md), [orgo](orgo.md), [smolvm](smolvm.md), [superserve](superserve.md), [tensorlake](tensorlake.md), [upstash-box](upstash-box.md), [vercel-sandbox](vercel-sandbox.md) |
+| `direct-cloud` | 22 | [ascii-box](ascii-box.md), [boxd](boxd.md), [coder](coder.md), [daytona](daytona.md), [digitalocean](digitalocean.md), [exe-dev](exe-dev.md), [github-codespaces](github-codespaces.md), [hostinger](hostinger.md), [linode](linode.md), [machine0](machine0.md), [morph](morph.md), [namespace-devbox](namespace-devbox.md), [namespace-instance](namespace-instance.md), [nebius](nebius.md), [ovh](ovh.md), [phala](phala.md), [scaleway](scaleway.md), [sealos-devbox](sealos-devbox.md), [sprites](sprites.md), [tencentcloud](tencentcloud.md), [tenki](tenki.md), [vultr](vultr.md) |
+| `external-provider` | 1 | [external](external.md) |
+| `gpu-cloud` | 5 | [lambda](lambda.md), [nvidia-brev](nvidia-brev.md), [runpod](runpod.md), [vast](vast.md), [wandb](wandb.md) |
+| `local-runtime` | 2 | [apple-container](apple-container.md), [local-container](local-container.md) |
+| `local-sandbox` | 4 | [anthropic-sandbox-runtime](anthropic-sandbox-runtime.md), [docker-sandbox](docker-sandbox.md), [mxc](mxc.md), [windows-sandbox](windows-sandbox.md) |
+| `local-vm` | 7 | [apple-machine](apple-machine.md), [apple-vm](apple-vm.md), [hyperv](hyperv.md), [lume](lume.md), [multipass](multipass.md), [parallels](parallels.md), [tart](tart.md) |
+| `self-hosted-virtualization` | 5 | [firecracker](firecracker.md), [incus](incus.md), [kubevirt](kubevirt.md), [proxmox](proxmox.md), [xcp-ng](xcp-ng.md) |
+| `service-control` | 4 | [cua](cua.md), [fastapi-cloud](fastapi-cloud.md), [railway](railway.md), [unikraft-cloud](unikraft-cloud.md) |
+
+At this revision, target declarations cover Linux on 75 entries, macOS on 8,
+native Windows (`windows/normal`) on 9, and WSL2 (`windows/wsl2`) on 5. These
+overlap; they are not separate provider totals. Use `--target` filters to see
+the current binary's list. `cloudflare-dynamic-workers` supplies `worker-runtime`
+instead of a Linux shell.
+
+For desktop, VNC/WebVNC, browser, Code, and portal workflows, use the
+[combined access guide](../features/interactive-desktop-vnc.md). For idempotent
+automation, check `fixed-lease-id` and the provider's recovery contract.
+Scaleway currently implements fixed IDs but omits that feature from offline
+catalog output; see its [fixed-lease recovery](scaleway.md#fixed-lease-recovery).
 
 ## Notes on families and capabilities
 

@@ -51,8 +51,8 @@ coordinator ----------------------------------------------->  (provision)
 
 ## Execution Modes
 
-The CLI picks one of four modes per provider in `loadBackend`
-(`internal/cli/provider_backend.go`):
+Provider backends (`internal/cli/provider_backend.go`) support these execution
+and control modes:
 
 - **Brokered (coordinator) mode** — chosen when the provider declares
   `Coordinator: supported` _and_ a broker URL is configured
@@ -76,6 +76,9 @@ The CLI picks one of four modes per provider in `loadBackend`
   `e2b`, `modal`, `cloudflare`, `azure-dynamic-sessions`). The provider owns
   sync and execution end to end; the CLI calls `Warmup`/`Run` and never performs
   its own rsync. Delegated providers reject local-sync flags.
+- **Service control** — providers such as Railway, FastAPI Cloud, and Unikraft
+  Cloud expose their declared service lifecycle or inspection operations. They
+  do not supply arbitrary Crabbox shell execution or checkout sync.
 
 Provider kinds, coordinator modes, and feature sets are declared in each
 adapter's `Spec()`; the type definitions live in

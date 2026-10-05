@@ -44,6 +44,7 @@
 ### Changes
 
 - Rewrite the README around on-demand computers for agents, with every supported provider listed.
+- Refresh the docs against the current CLI and provider catalog, including a single guide to desktop, VNC, browser and portal access.
 
 ### Fixes
 

@@ -36,6 +36,26 @@ crabbox cleanup --provider digitalocean --dry-run
 numeric DigitalOcean Droplet id. `--type` is the exact DigitalOcean Droplet size
 slug; there is no separate DigitalOcean size flag.
 
+## Machine Classes
+
+An explicit `--class` selects real Linux/amd64 capacity. Primary sizes are:
+
+| Class | Droplet size | vCPU | RAM (GiB) |
+| --- | --- | --- | --- |
+| `tiny` | `s-1vcpu-1gb` | 1 | 1 |
+| `small` | `s-2vcpu-4gb` | 2 | 4 |
+| `standard` | `s-4vcpu-8gb` | 4 | 8 |
+| `fast` | `s-8vcpu-16gb` | 8 | 16 |
+| `large` | `g-16vcpu-64gb` | 16 | 64 |
+| `beast` | `g-32vcpu-128gb` | 32 | 128 |
+
+`standard` no longer selects the smallest Droplet. Use `--class tiny` or
+`--type s-1vcpu-1gb` to retain that size and cost. An explicit `--type` overrides
+the class. `crabbox providers --json` exposes these profiles under `classCatalog`,
+including declared alternatives; this backend currently creates the primary
+without automatic retry across those alternatives. See the
+[class catalog](../commands/providers.md) for the full contract.
+
 ## Configuration
 
 ```yaml

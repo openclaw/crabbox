@@ -45,7 +45,7 @@ lifecycle call. Auth failures stop a lease before it reaches a provider.
 ```sh
 crabbox config show
 printenv CRABBOX_COORDINATOR
-printenv CRABBOX_COORDINATOR_TOKEN
+test -n "${CRABBOX_COORDINATOR_TOKEN:-}" && echo 'coordinator token is set' || echo 'coordinator token is unset'
 printenv CRABBOX_PUBLIC_URL
 ```
 
@@ -58,7 +58,9 @@ printenv CRABBOX_PUBLIC_URL
 - Configure the final coordinator origin directly. The Go transport permits
   same-origin redirects, but cross-origin redirects are rejected and the curl
   fallback intentionally follows no redirects.
-- Ensure `CRABBOX_COORDINATOR_TOKEN` matches the coordinator's `CRABBOX_SHARED_TOKEN`.
+- For shared-token automation, check that the configured token matches the
+  operator's current shared token without printing either value. For GitHub
+  login, run `crabbox whoami` and sign in again if the session is rejected.
 - For self-hosted GitHub browser login, create a GitHub OAuth app and set its
   callback URL to `https://<your-coordinator-host>/v1/auth/github/callback`.
 - Ensure the coordinator's `CRABBOX_PUBLIC_URL` uses the same public origin as that
