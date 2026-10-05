@@ -3281,23 +3281,24 @@ export class FleetCoordinator {
     }
     await this.reconcileScheduledAdminGrants(forwardedAdminGrantVersion, preserveForwardedVersion);
     await this.quarantineLegacyWorkspaces();
-    // Retain only candidate IDs while provider I/O yields. Each phase reads them anew;
-    // final scheduling still discovers work admitted during the pass.
-    const leaseIDs = await this.state.runExclusive(async () => {
-      const candidates = await this.leaseBridgeOwners();
-      const now = Date.now();
-      await this.visitLeaseRecords((lease) => {
+    // Discovery is not authority: each phase rereads candidates under its own fence.
+    // Leave both the lifecycle mutex and Cloudflare input gate open while scanning history.
+    const leaseIDs = await this.leaseBridgeOwners({ allowConcurrency: true });
+    const now = Date.now();
+    await this.visitStorageRecords<LeaseRecord>(
+      "lease:",
+      (lease) => {
         if (
           leaseIsLive(lease) ||
           leaseNeedsCleanup(lease, now) ||
           leaseMayNeedInterruptedProvisioningRecovery(lease) ||
           lease.runtimeAdapterDeleteRequestedAt
         ) {
-          candidates.add(lease.id);
+          leaseIDs.add(lease.id);
         }
-      });
-      return candidates;
-    });
+      },
+      { allowConcurrency: true },
+    );
     await this.reconcileInterruptedLeaseProvisioning(leaseIDs);
     await this.poolAccess.maintain();
     await this.expireLeases(leaseIDs);
@@ -5808,17 +5809,23 @@ export class FleetCoordinator {
   }
 
   private async quarantineLegacyWorkspaces(): Promise<void> {
-    await this.state.runExclusive(async () => {
-      const now = new Date().toISOString();
-      await this.visitStorageRecords<WorkspaceRecord>("workspace:", async (workspace, key) => {
+    await this.visitStorageRecords<WorkspaceRecord>(
+      "workspace:",
+      async (workspace, key) => {
         if (!isLegacyOrgKey(workspace.org) || workspace.releaseRequestedAt) {
           return;
         }
-        const quarantined = { ...workspace, releaseRequestedAt: now, updatedAt: now };
-        delete quarantined.reconcileAfter;
-        await this.state.storage.put(key, quarantined, { noCache: true });
-      });
-    });
+        await this.state.runExclusive(async () => {
+          const current = await this.state.storage.get<WorkspaceRecord>(key, { noCache: true });
+          if (!current || !isLegacyOrgKey(current.org) || current.releaseRequestedAt) return;
+          const now = new Date().toISOString();
+          const quarantined = { ...current, releaseRequestedAt: now, updatedAt: now };
+          delete quarantined.reconcileAfter;
+          await this.state.storage.put(key, quarantined, { noCache: true });
+        });
+      },
+      { allowConcurrency: true },
+    );
   }
 
   private async allocateWorkspaceLeaseID(): Promise<string> {
@@ -17540,7 +17547,9 @@ export class FleetCoordinator {
     return Boolean(attempt && sameCreateAttempt(attempt, fence.attempt));
   }
 
-  private async leaseBridgeOwners(): Promise<Set<string>> {
+  private async leaseBridgeOwners(
+    options: { allowConcurrency?: boolean } = {},
+  ): Promise<Set<string>> {
     const owners = new Set([
       ...this.egressSessions.keys(),
       ...this.replacedEgressSessions.keys(),
@@ -17553,9 +17562,13 @@ export class FleetCoordinator {
     }
     for (const prefix of [activeEgressSessionPrefix, replacedEgressSessionsPrefix]) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- bounded pages find persisted egress owners after a restart.
-      await this.visitStorageRecords<unknown>(prefix, (_value, key) => {
-        owners.add(key.slice(prefix.length));
-      });
+      await this.visitStorageRecords<unknown>(
+        prefix,
+        (_value, key) => {
+          owners.add(key.slice(prefix.length));
+        },
+        options,
+      );
     }
     return owners;
   }
@@ -18924,11 +18937,13 @@ export class FleetCoordinator {
   private async visitStorageRecords<T>(
     prefix: string,
     visitor: (record: T, key: string) => Promise<boolean | void> | boolean | void,
+    options: { allowConcurrency?: boolean } = {},
   ): Promise<void> {
     for await (const [key, record] of coordinatorStorageEntries<T>(this.state.storage, {
       prefix,
       limit: storageRecordScanBatchSize,
       noCache: true,
+      ...options,
     })) {
       if ((await visitor(record, key)) === false) {
         return;

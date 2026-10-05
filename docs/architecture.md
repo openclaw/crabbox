@@ -335,6 +335,15 @@ records instead of the full lease history. These scans still do work proportiona
 to retained history; paging bounds each list request rather than introducing a
 new persisted index or deleting diagnostic evidence.
 
+Maintenance discovers workspace, bridge, and lease candidates without holding
+the lifecycle mutex. These paged discovery reads also opt out of Cloudflare's
+storage input gate, allowing incoming lease reads and mutations to proceed
+while a history page is pending. Discovery grants no authority: workspace
+quarantine rereads each candidate under the mutex, and lease recovery and cleanup
+retain their existing state and ownership fences. Full alarm reconciliation
+remains serialized with deadline changes so a concurrent heartbeat or release
+cannot lose its wakeup.
+
 Existing-image promotion and deletion retain the lifecycle queue across provider
 validation and catalog publication, with a shared 120-second provider deadline.
 AWS and Azure requests default to 60 seconds, including response bodies; AWS

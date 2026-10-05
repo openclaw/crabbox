@@ -51389,6 +51389,106 @@ describe("synthetic acknowledgement reliability", () => {
     return socket;
   }
 
+  it.each(["workspace:", "active-egress-session:", "replaced-egress-sessions:", "lease:"])(
+    "serves lease reads and mutations while maintenance discovery waits on %s history",
+    async (prefix) => {
+      const storage = new MemoryStorage();
+      seedLease(storage);
+      seedLease(storage, releaseID);
+      const fleet = testFleet(storage, { hetzner: fakeProvider() });
+      await fleet.ready();
+      const entered = deferred<void>();
+      const resume = deferred<void>();
+      let inputGateClosed = false;
+      let paused = false;
+      storage.beforeList = async (options) => {
+        if (options?.prefix !== prefix || paused) return;
+        paused = true;
+        // Cloudflare defers incoming events during storage I/O unless the read opts out.
+        inputGateClosed = !(options as { allowConcurrency?: boolean }).allowConcurrency;
+        entered.resolve();
+        await resume.promise;
+        inputGateClosed = false;
+      };
+      const maintenance = fleet.alarm();
+      const pending: Promise<Response>[] = [];
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await entered.promise;
+        const dispatch = async (incoming: Request) => {
+          if (inputGateClosed) await resume.promise;
+          return fleet.fetch(incoming);
+        };
+        pending.push(
+          dispatch(request("GET", `/v1/leases/${leaseID}`, { headers })),
+          dispatch(request("POST", `/v1/leases/${leaseID}/heartbeat`, { headers })),
+          dispatch(request("POST", `/v1/leases/${releaseID}/release`, { headers })),
+        );
+        const outcome = await Promise.race([
+          Promise.all(pending).then((responses) => responses.map((response) => response.status)),
+          new Promise<string>((resolve) => {
+            timer = setTimeout(() => resolve("blocked behind discovery"), 1000);
+          }),
+        ]);
+        expect(outcome).toEqual([200, 200, 200]);
+        expect(storage.value<LeaseRecord>(`lease:${releaseID}`)?.state).toBe("released");
+        expect(storage.alarm()).toBeLessThanOrEqual(Date.now());
+      } finally {
+        clearTimeout(timer);
+        resume.resolve();
+        await Promise.allSettled([maintenance, ...pending]);
+      }
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe("active");
+      expect(storage.value<LeaseRecord>(`lease:${releaseID}`)?.cleanupCompletedAt).toBeDefined();
+    },
+  );
+
+  it.each(["deleted", "current-org", "already-released", "updated"])(
+    "rereads a %s workspace before quarantining a discovered legacy record",
+    async (change) => {
+      const storage = new MemoryStorage();
+      const key = "workspace:synthetic-legacy";
+      const original = { id: "synthetic-legacy", org: "legacy-org", updatedAt: "before" };
+      await storage.put(key, original);
+      const fleet = testFleet(storage);
+      await fleet.ready();
+      const list = storage.list.bind(storage);
+      const entered = deferred<void>();
+      const resume = deferred<void>();
+      vi.spyOn(storage, "list").mockImplementation(async (options) => {
+        const snapshot = await list(options);
+        if (options?.prefix === "workspace:") {
+          entered.resolve();
+          await resume.promise;
+        }
+        return snapshot;
+      });
+      const maintenance = (
+        fleet as unknown as { quarantineLegacyWorkspaces(): Promise<void> }
+      ).quarantineLegacyWorkspaces();
+      await entered.promise;
+      const current = {
+        ...original,
+        updatedAt: "after",
+        marker: "newer metadata",
+        ...(change === "current-org" ? { org: orgKeyForLabel("example-org") } : {}),
+        ...(change === "already-released" ? { releaseRequestedAt: "already requested" } : {}),
+      };
+      if (change === "deleted") await storage.delete(key);
+      else await storage.put(key, current);
+      resume.resolve();
+      await maintenance;
+      const timestamp = expect.any(String);
+      const expected =
+        change === "deleted"
+          ? undefined
+          : change === "updated"
+            ? { ...current, updatedAt: timestamp, releaseRequestedAt: timestamp }
+            : current;
+      expect(storage.value(key)).toEqual(expected);
+    },
+  );
+
   it.each(["callback", "alarm"])(
     "publishes neither transaction state nor an alarm job after a %s failure",
     async (failure) => {
