@@ -12,6 +12,10 @@ const customDomain = "crabbox.sh";
 const providerMetadata = JSON.parse(
   fs.readFileSync(path.join(docsDir, "providers", "provider-metadata.json"), "utf8"),
 );
+// Specialized service-control adapters are built in too; external is the plugin contract.
+const builtInProviderCount = Object.values(providerMetadata).filter(
+  (entry) => entry.category !== "external-provider",
+).length;
 const providerMetadataByDocs = new Map(
   Object.entries(providerMetadata).map(([name, metadata]) => [metadata.docs, { name, metadata }]),
 );
@@ -593,10 +597,10 @@ function layout({ page, html, toc, prev, next, sectionName }) {
   const isHome = page.rel === "README.md";
   const isProviderIndex = page.rel === "providers/README.md";
   const documentTitle = isHome
-    ? "Crabbox — Run Any Repository Command in the Right Box"
+    ? "Crabbox — On-demand Computers for Agents"
     : `${page.title} - Crabbox Docs`;
   const metaDescription = isHome
-    ? "Run repository commands in local sandboxes, cloud VMs, SSH hosts, Windows and WSL2, macOS, or hosted agent sandboxes through one CLI."
+    ? "Give coding agents on-demand computers for tests and builds. Keep editing locally, run on Linux, macOS, Windows or WSL2, and stream results back."
     : `${page.title} documentation for Crabbox remote execution.`;
   const canonicalUrl = pageUrl(docsOrigin(), page.outRel);
   const prevNext = !isHome && (prev || next) ? pageNavHtml(prev, next, rootPrefix) : "";
@@ -779,69 +783,62 @@ function landingHero(rootPrefix) {
         </article>`;
     })
     .join("");
-  const paths = [
-    [
-      "Local",
-      "Stay on this machine",
-      "Containers, full VMs, and policy sandboxes for fast checks without cloud credentials.",
-      "use-cases.html#run-locally-without-cloud-credentials",
-      "See Local Paths",
-    ],
-    [
-      "Your Accounts and Infrastructure",
-      "Use capacity you control",
-      "Cloud accounts, SSH hosts, and self-hosted virtualization such as Proxmox or Firecracker.",
-      "use-cases.html#use-infrastructure-you-already-own",
-      "Use Your Infrastructure",
-    ],
-    [
-      "Provider-Managed",
-      "Delegate the runtime",
-      "Hosted sandboxes, devboxes, CI proof runners, browser sessions, and GPU jobs.",
-      "providers/index.html?q=provider-managed",
-      "Browse Managed Providers",
-    ],
-  ];
-  const pathCards = paths
-    .map(
-      ([eyebrow, title, body, href, label], index) =>
-        `<article class="home-path"><span>${String(index + 1).padStart(2, "0")}</span><p>${escapeHtml(eyebrow)}</p><h3>${escapeHtml(title)}</h3><div>${escapeHtml(body)}</div><a href="${rootPrefix}${href}">${escapeHtml(label)} <i aria-hidden="true">→</i></a></article>`,
-    )
-    .join("");
   const providerCount = Object.keys(providerMetadata).length;
   return `<header class="hero hero-home">
         <div class="home-hero-copy">
           <div class="home-title">
             <img src="${rootPrefix}crabbox.svg" alt="" width="56" height="56" fetchpriority="high">
-            <div><strong>Crabbox</strong><small>Remote Execution Control Plane</small></div>
+            <div><strong>Crabbox</strong><small>Your checkout. More compute.</small></div>
           </div>
-          <p class="eyebrow">One CLI. Many Runtimes.</p>
-          <h1>Run Your Code in <em>the Right Box.</em></h1>
-          <p class="lede">Keep editing locally. Crabbox runs the working tree you have on the machine it needs—a local runtime, cloud VM, SSH host, or managed sandbox—then streams the result back. No bespoke CI job for every iteration.</p>
+          <p class="eyebrow">Keep editing. Keep agents moving.</p>
+          <h1>On-demand computers <em>for agents.</em></h1>
+          <p class="lede">Run tests and builds on remote boxes while your coding agents keep editing locally.</p>
           <div class="cta">
-            <a class="cta-primary" href="${rootPrefix}getting-started.html">Run Your First Command</a>
-            <a class="cta-secondary" href="#home-use-cases-heading">Route Your Workload</a>
+            <a class="cta-primary" href="${rootPrefix}getting-started.html">Get started <span aria-hidden="true">→</span></a>
+            <a class="cta-secondary" href="${rootPrefix}providers/index.html">Providers</a>
+            <a class="cta-secondary" href="https://github.com/openclaw/crabbox">GitHub</a>
           </div>
           <ul class="home-facts" aria-label="Crabbox product facts">
+            <li>For agents and humans</li>
             <li>MIT licensed</li>
-            <li>Linux, Windows, and macOS</li>
-            <li>${providerCount} registered providers</li>
+            <li>${builtInProviderCount} built-in providers</li>
           </ul>
         </div>
-        <div class="home-console" role="group" aria-label="Example Crabbox run">
-          <div class="home-console-bar"><span aria-hidden="true">● ● ●</span><strong>crabbox / run</strong><small>ready</small></div>
-          <pre><code><span>$</span> crabbox run --provider local-container -- pnpm test</code></pre>
+        <div class="home-console" role="group" aria-label="Illustrative successful Crabbox run">
+          <div class="home-console-bar"><span aria-hidden="true">● ● ●</span><strong>your checkout → a box</strong><small>example run</small></div>
+          <pre data-copyable data-copy-text="crabbox run -- pnpm test" data-copy-label="Copy run command"><code><span aria-hidden="true">$ </span>crabbox run -- pnpm test</code></pre>
+          <p class="home-console-note">Use your configured provider and your repo’s test command.</p>
           <ol>
-            <li><b>01</b><div><strong>Lease</strong><small>blue-lobster · local-container</small></div><i aria-hidden="true">✓</i></li>
-            <li><b>02</b><div><strong>Sync</strong><small>tracked + nonignored files</small></div><i aria-hidden="true">✓</i></li>
-            <li><b>03</b><div><strong>Run</strong><small>pnpm test · live output</small></div><i aria-hidden="true">✓</i></li>
-            <li><b>04</b><div><strong>Release</strong><small>owned container removed</small></div><i aria-hidden="true">✓</i></li>
+            <li><b>01</b><div><strong>Lease a box</strong><small>Compute for this run</small></div><i aria-hidden="true">✓</i></li>
+            <li><b>02</b><div><strong>Sync your working tree</strong><small>Uncommitted changes included</small></div><i aria-hidden="true">✓</i></li>
+            <li><b>03</b><div><strong>Run and stream output</strong><small>The command you already use</small></div><i aria-hidden="true">✓</i></li>
           </ol>
-          <div class="home-console-result"><i aria-hidden="true">✓</i><div><strong>Result returned</strong><small>temporary container cleaned up</small></div></div>
+          <div class="home-console-result"><i aria-hidden="true">↳</i><div><strong>Exit code back. Box released.</strong><small>Keep a warm box when you want another run.</small></div></div>
         </div>
       </header>
+      <section class="home-loop" aria-labelledby="home-loop-heading">
+        <h2 id="home-loop-heading">Local edits. Remote execution.</h2>
+        <ol>${["Edit locally", "Lease a box", "Sync", "Run", "Stream + exit code", "Cleanup"].map((step, i) => `<li><span>${String(i + 1).padStart(2, "0")}</span><strong>${step}</strong></li>`).join("")}</ol>
+        <p>The standard remote loop. Sync, reuse, and cleanup follow each provider’s contract. <a href="${rootPrefix}how-it-works.html">How it works →</a></p>
+      </section>
+      <section class="home-section home-benefits" id="home-paths-heading" aria-labelledby="home-benefits-heading">
+        <header><div><p class="eyebrow">Room to work</p><h2 id="home-benefits-heading">More agents.<br>Less waiting.</h2></div><p>Your laptop is where you edit. Give the heavy work its own compute, without rebuilding your workflow around a CI queue.</p></header>
+        <div class="home-benefit-grid">
+          <article><span class="home-card-number" aria-hidden="true">01 / PARALLEL</span><h3>Let agents work in parallel.</h3><p>Run tests and builds on separate boxes, so agents don’t compete for your laptop’s CPU, RAM, and ports.</p><a href="${rootPrefix}use-cases.html#fan-out-parallel-experiments">Explore parallel runs →</a></article>
+          <article><span class="home-card-number" aria-hidden="true">02 / WARM</span><h3>Keep the next run close.</h3><p>Reuse warm boxes and prepared environments. Spend the next iteration running your changes instead of provisioning again.</p><a href="${rootPrefix}commands/warmup.html">Warm a box →</a></article>
+          <article><span class="home-card-number" aria-hidden="true">03 / CROSS-PLATFORM</span><h3>Test where it needs to work.</h3><p>Choose Linux, macOS, native Windows, or WSL2 targets. Catch platform differences from the same local checkout.</p><a href="${rootPrefix}use-cases.html#validate-linux-windows-wsl2-or-macos">Explore OS targets →</a></article>
+          <article class="home-benefit-wide"><span class="home-card-number" aria-hidden="true">04 / INTERACTIVE</span><h3>See it. Drive it. Take over.</h3><p>Open supported desktops with VNC or WebVNC, request a browser, or use VS Code in the browser with <code>--code</code> on managed Linux.</p><p>The authenticated coordinator portal shows leases and run logs. Its WebVNC viewer lets you watch a desktop or take control while the local bridge runs.</p><div class="home-card-links"><a href="${rootPrefix}features/interactive-desktop-vnc.html">Desktop &amp; browser →</a><a href="${rootPrefix}features/portal.html">Explore the portal →</a></div></article>
+          <article class="home-benefit-wide"><span class="home-card-number" aria-hidden="true">05 / SHARED CAPACITY</span><h3>A fleet for the whole team.</h3><p>An optional coordinator owns cloud credentials and shares capacity across trusted teammates. Lease expiry and configured spend caps bound brokered usage.</p><p>Self-host on Cloudflare or Node.js with PostgreSQL. You choose the infrastructure; Crabbox manages the leases.</p><a href="${rootPrefix}architecture.html">How the coordinator works →</a></article>
+        </div>
+      </section>
+      <section class="home-os" aria-labelledby="home-os-heading">
+        <div><p class="eyebrow">One CLI. Across operating systems.</p><h2 id="home-os-heading">Same checkout. Different OS.</h2></div>
+        <ul aria-label="Supported target operating systems"><li>Linux</li><li>macOS</li><li>Windows <small>native</small></li><li>WSL2</li></ul>
+        <p>Target and desktop support vary by provider. <a href="${rootPrefix}providers/index.html">Compare capabilities →</a></p>
+      </section>
+      ${homeProviderWall(rootPrefix)}
       <section class="home-section home-use-cases" aria-labelledby="home-use-cases-heading">
-        <header><div><p class="eyebrow">Interactive Workload Router</p><h2 id="home-use-cases-heading">Pick the Job. Get the Starting Commands.</h2></div><p>Turn ${providerCount} registered providers into a focused comparison path. Choose a workload, run the matching built-in recommendations, then verify the provider you select with <code>crabbox doctor</code>.</p></header>
+        <header><div><p class="eyebrow">Choose your starting point</p><h2 id="home-use-cases-heading">Find a box for your next job.</h2></div><p>Turn ${providerCount} registered providers into a focused comparison path. Choose a workload, run the matching built-in recommendations, then verify the provider you select with <code>crabbox doctor</code>.</p></header>
         <form class="home-job-finder" data-home-job-finder>
           <fieldset>
             <legend class="sr-only">Choose the job Crabbox should help with</legend>
@@ -854,12 +851,8 @@ function landingHero(rootPrefix) {
         </form>
         <a class="home-section-link" href="${rootPrefix}use-cases.html">See All Recommendation Paths <span aria-hidden="true">→</span></a>
       </section>
-      <section class="home-section home-paths" aria-labelledby="home-paths-heading">
-        <header><div><p class="eyebrow">Choose by Ownership</p><h2 id="home-paths-heading">Run Here, There, or Managed.</h2></div><p>The loop stays the same. Only the runtime owner, isolation boundary, and billing relationship change.</p></header>
-        <div class="home-path-grid">${pathCards}</div>
-      </section>
       <section class="home-section home-pricing" aria-labelledby="home-pricing-heading">
-        <header><div><p class="eyebrow">Current Cost Model</p><h2 id="home-pricing-heading">Crabbox Software Is Free. Compute Isn’t.</h2></div><p>No opaque “box credit” is needed to understand today’s product. Crabbox separates its software from the infrastructure that runs the work.</p></header>
+        <header><div><p class="eyebrow">Current Cost Model</p><h2 id="home-pricing-heading">Crabbox Software Is Free. Compute Isn’t.</h2></div><p>The CLI and coordinator are MIT-licensed. You pay your provider for compute and your own coordinator infrastructure.</p></header>
         <div class="home-price-grid">
           <article><span>Crabbox Software</span><strong>$0 license fee</strong><p>MIT-licensed CLI and coordinator.</p></article>
           <article><span>Compute</span><strong>Provider rate</strong><p>Cloud, sandbox, GPU, or local runtime bills remain external.</p></article>
@@ -879,9 +872,47 @@ function landingHero(rootPrefix) {
 <span>$</span> crabbox run -- pnpm test</code></pre>
       </section>
       <aside class="home-trust" aria-labelledby="home-trust-heading">
-        <div><p class="eyebrow">Trust Boundary</p><h2 id="home-trust-heading">Choose Isolation Deliberately.</h2></div>
-        <p>Crabbox is a developer execution tool, not one uniform hostile multi-tenant sandbox. Isolation, network policy, secrets, and host access depend on the selected runtime. <a href="${rootPrefix}security.html">Read the security model</a> before running unfamiliar code.</p>
+        <div><p class="eyebrow">Trust Boundary</p><h2 id="home-trust-heading">Trusted repos. Clear ownership.</h2></div>
+        <p>Run trusted repositories with trusted teammates. Isolation depends on the provider. Reuse and destructive cleanup require verified ownership; ambiguous ownership fails closed. <a href="${rootPrefix}security.html">Read the security model</a> before running unfamiliar code.</p>
       </aside>`;
+}
+
+function homeProviderWall(rootPrefix) {
+  const groups = new Map();
+  for (const [name, metadata] of Object.entries(providerMetadata)) {
+    if (!groups.has(metadata.category)) groups.set(metadata.category, []);
+    groups.get(metadata.category).push({ name, ...metadata });
+  }
+  const categoryTitles = {
+    "brokerable-cloud": "Coordinator-brokered clouds",
+    "direct-cloud": "Direct clouds",
+    "delegated-sandbox": "Delegated sandboxes",
+    "local-vm": "Local virtual machines",
+    "self-hosted-virtualization": "Self-hosted virtualization",
+    "gpu-cloud": "GPU clouds",
+    "local-sandbox": "Local sandboxes",
+    "service-control": "Service control",
+    "local-runtime": "Local runtimes",
+    "ci-proof-runner": "CI proof runners",
+    "byo-ssh": "Bring your own SSH host",
+    "external-provider": "External plugin contract",
+  };
+  const categories = [...groups].sort(([a], [b]) => {
+    const order = Object.keys(categoryTitles);
+    return order.indexOf(a) - order.indexOf(b) || a.localeCompare(b);
+  });
+  return `<section class="home-section home-providers" aria-labelledby="home-providers-heading">
+    <header><div><p class="eyebrow">Bring your own compute</p><h2 id="home-providers-heading">${builtInProviderCount} built-in providers.<br>One way to run.</h2></div><p>Cloud boxes, local VMs, existing hosts, and delegated sandboxes. ${Object.keys(providerMetadata).length} catalog entries, including the <a href="${rootPrefix}providers/external.html">external plugin contract</a> for your own backend. Each provider defines its capabilities and cleanup contract.</p></header>
+    <div class="home-provider-wall">${categories.map(([category, entries]) => `<section class="home-provider-group" data-provider-category="${escapeAttr(category)}" aria-labelledby="home-category-${escapeAttr(category)}">
+      <h3 id="home-category-${escapeAttr(category)}">${escapeHtml(categoryTitles[category] || titleize(category))}<span class="home-provider-count">${entries.length}<span class="sr-only"> catalog entries</span></span></h3>
+      <ul>${entries.sort((a, b) => a.name.localeCompare(b.name)).map((entry) => {
+        const page = pageMap.get(`providers/${entry.docs}`);
+        if (!page) throw new Error(`Missing provider page for ${entry.name}: ${entry.docs}`);
+        return `<li><a data-home-provider="${escapeAttr(entry.name)}" href="${rootPrefix}${escapeAttr(page.outRel)}">${escapeHtml(page.title.replace(/ provider$/i, ""))}</a></li>`;
+      }).join("")}</ul>
+    </section>`).join("")}</div>
+    <a class="home-section-link" href="${rootPrefix}providers/index.html">Compare targets, capabilities, and requirements <span aria-hidden="true">→</span></a>
+  </section>`;
 }
 
 function pageNavHtml(prev, next, rootPrefix) {
@@ -987,7 +1018,7 @@ main{min-width:0;padding:30px 48px 80px;max-width:1360px;margin:0 auto;width:100
 
 /* landing hero */
 .home main{max-width:1500px}
-.hero-home{display:grid;grid-template-columns:minmax(0,1.08fr) minmax(380px,.92fr);align-items:center;gap:44px;padding:48px;border:1px solid var(--line);border-radius:24px;background:radial-gradient(circle at 6% 8%,color-mix(in srgb,var(--coral) 13%,transparent),transparent 28%),radial-gradient(circle at 93% 92%,color-mix(in srgb,var(--reef) 15%,transparent),transparent 31%),var(--paper);overflow:hidden}
+.hero-home{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(340px,.9fr);align-items:center;gap:36px;padding:38px;border:1px solid var(--line);border-radius:24px;background:linear-gradient(135deg,var(--paper) 55%,color-mix(in srgb,var(--reef) 6%,var(--paper)));overflow:hidden}
 .hero-home:after{display:none}
 .home-hero-copy{min-width:0}
 .home-title{display:flex;align-items:center;gap:12px;margin-bottom:34px}
@@ -995,11 +1026,11 @@ main{min-width:0;padding:30px 48px 80px;max-width:1360px;margin:0 auto;width:100
 .home-title strong,.home-title small{display:block}
 .home-title strong{font:700 1.42rem/1 Fraunces,Georgia,serif}
 .home-title small{margin-top:5px;color:var(--muted);font-size:.68rem;font-weight:700;letter-spacing:.02em;text-transform:uppercase}
-.hero-home h1{max-width:760px;font-size:clamp(3.45rem,5.7vw,6.2rem);line-height:.88;letter-spacing:-.045em;font-weight:700;margin:0;text-wrap:balance}
+.hero-home h1{max-width:760px;font-size:clamp(3.1rem,4.3vw,4.9rem);line-height:1.01;letter-spacing:-.045em;font-weight:700;margin:0;text-wrap:balance}
 .hero-home h1 em{display:block;color:var(--coral);font-style:normal}
 .lede{margin:24px 0 26px;color:var(--body-soft);font-size:1.08rem;line-height:1.58;max-width:62ch;text-wrap:pretty}
-.cta{display:flex;gap:10px;flex-wrap:wrap}
-.cta-primary,.cta-secondary{display:inline-flex;align-items:center;border-radius:6px;padding:10px 16px;font-weight:600;font-size:.93rem;text-decoration:none;touch-action:manipulation;transition:transform .15s,box-shadow .15s,background-color .15s,border-color .15s,color .15s}
+.cta{display:flex;gap:8px;flex-wrap:wrap}
+.cta-primary,.cta-secondary{display:inline-flex;align-items:center;gap:12px;min-height:44px;border-radius:6px;padding:10px 16px;font-weight:600;font-size:.93rem;text-decoration:none;touch-action:manipulation;transition:transform .15s,box-shadow .15s,background-color .15s,border-color .15s,color .15s}
 .cta-primary{background:var(--ink);color:var(--paper);border:1px solid var(--ink)}
 .cta-primary:hover{background:var(--reef);border-color:var(--reef);color:var(--paper);transform:translateY(-1px);box-shadow:0 8px 20px color-mix(in srgb,var(--reef) 22%,transparent)}
 .cta-secondary{border:1px solid var(--ink);color:var(--ink);background:transparent}
@@ -1011,9 +1042,10 @@ main{min-width:0;padding:30px 48px 80px;max-width:1360px;margin:0 auto;width:100
 .home-console-bar{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:3px 3px 14px;border-bottom:1px solid rgba(255,255,255,.1);font-size:.72rem}
 .home-console-bar span{color:var(--coral);letter-spacing:.12em}
 .home-console-bar small{text-align:right;color:#7dd3c7}
-.home-console pre{max-width:100%;margin:13px 0;padding:14px;overflow:auto;border:1px solid rgba(255,255,255,.09);border-radius:9px;background:#0d0f10;font:500 .76rem/1.55 "IBM Plex Mono",ui-monospace,monospace}
-.home-console pre code{white-space:pre}
-.home-console pre span{color:#efc15b}
+.home-console pre{position:relative;max-width:100%;margin:13px 0;padding:16px 14px 58px;overflow:auto;border:1px solid rgba(255,255,255,.09);border-radius:9px;background:#0d0f10;font:500 .76rem/1.55 "IBM Plex Mono",ui-monospace,monospace}
+.home-console pre code{white-space:pre-wrap;overflow-wrap:anywhere}
+.home-console-note{margin:0 3px 16px;color:var(--code-comment);font-size:.75rem;line-height:1.5}
+.home-console pre code>span{color:#efc15b}
 .home-console ol{display:grid;gap:8px;padding:0;margin:0;list-style:none}
 .home-console li{display:grid;grid-template-columns:42px minmax(0,1fr) 22px;align-items:center;gap:10px;padding:12px;border:1px solid rgba(255,255,255,.09);border-radius:10px;background:rgba(255,255,255,.035)}
 .home-console li b{display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.1);font:700 .66rem/1 "IBM Plex Mono",monospace}
@@ -1048,7 +1080,7 @@ main{min-width:0;padding:30px 48px 80px;max-width:1360px;margin:0 auto;width:100
 .home-job-finder:has(#home-job-fanout-testing:checked) [data-home-job-result="fanout-testing"],
 .home-job-finder:has(#home-job-gpu:checked) [data-home-job-result="gpu"]{display:grid}
 .home-job-result-copy{display:flex;min-width:0;flex-direction:column}
-.home-job-result-copy .eyebrow{margin-bottom:12px}
+.home-job-result-copy .eyebrow{margin-bottom:12px;color:#ff8a78}
 .home-job-result h3{margin:0;color:var(--code-fg);font:600 2rem/1.05 Fraunces,Georgia,serif;text-wrap:balance}
 .home-job-result-copy>p:not(.eyebrow){margin:16px 0;color:var(--code-comment);font-size:.9rem;text-wrap:pretty}
 .home-job-command{display:flex;min-width:0;flex-direction:column;padding:14px;border:1px solid rgba(255,255,255,.1);border-radius:12px;background:#0d0f10}
@@ -1069,16 +1101,38 @@ main{min-width:0;padding:30px 48px 80px;max-width:1360px;margin:0 auto;width:100
 .home-section-link{display:inline-flex;align-items:center;gap:10px;margin-top:22px;color:var(--ink);font-weight:700;text-decoration:none}
 .home-section-link span{transition:transform .16s}
 .home-section-link:hover span{transform:translateX(3px)}
-.home-path-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid var(--line);border-radius:16px;background:var(--paper);overflow:hidden}
-.home-path{display:flex;min-height:280px;flex-direction:column;padding:26px}
-.home-path+.home-path{border-left:1px solid var(--line)}
-.home-path>span{color:var(--coral);font:700 .7rem/1 "IBM Plex Mono",monospace}
-.home-path>p{margin:38px 0 5px;color:var(--muted);font-size:.68rem;font-weight:700;text-transform:uppercase}
-.home-path h3{margin:0 0 12px;font:600 1.55rem/1.1 Fraunces,Georgia,serif;text-wrap:balance}
-.home-path>div{color:var(--body-soft);font-size:.91rem}
-.home-path a{display:inline-flex;gap:8px;align-items:center;margin-top:auto;padding-top:25px;font-weight:700;text-decoration:none}
-.home-path a i{font-style:normal;transition:transform .16s}
-.home-path a:hover i{transform:translateX(3px)}
+/* Home sections use the same palette and focus treatment as the docs. */
+.home-loop{padding:28px 0 32px;border-bottom:1px solid var(--line)}
+.home-loop h2{margin:0 0 20px;font-size:.85rem;color:var(--muted);font-weight:600}
+.home-loop ol{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;padding:0;margin:0;list-style:none}
+.home-loop li{position:relative;display:flex;flex-direction:column;gap:8px;border-top:2px solid var(--line);padding-top:12px}
+.home-loop li:before{content:"";position:absolute;top:-4px;left:0;width:6px;height:6px;background:var(--reef)}
+.home-loop li span,.home-card-number{font:600 .68rem/1.5 "IBM Plex Mono",monospace;color:var(--reef)}
+.home-loop li strong{font-size:.85rem;line-height:1.4}
+.home-loop p,.home-os>p{margin:20px 0 0;color:var(--muted);font-size:.8rem}
+.home-benefit-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:14px}
+.home-benefit-grid article{display:flex;flex-direction:column;grid-column:span 2;min-width:0;padding:26px;border:1px solid var(--line);border-radius:12px;background:var(--paper)}
+.home-benefit-grid .home-benefit-wide{grid-column:span 3}
+.home-benefit-grid h3{margin:25px 0 12px;font:600 1.65rem/1.12 Fraunces,Georgia,serif;text-wrap:balance}
+.home-benefit-grid p{margin:0 0 18px;color:var(--body-soft);font-size:.94rem}
+.home-benefit-grid a{font-size:.85rem;font-weight:600;text-decoration:none}
+.home-benefit-grid article>a,.home-card-links{margin-top:auto}
+.home-card-links{display:flex;flex-wrap:wrap;gap:12px 24px}
+.home-benefit-grid code{font:500 .85em "IBM Plex Mono",monospace}
+.home-os{padding:32px 0;border-bottom:1px solid var(--line)}
+.home-os h2{margin:0;font:600 1.65rem/1.2 Fraunces,Georgia,serif}
+.home-os ul{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));list-style:none;padding:0;margin:24px 0 0;border:1px solid var(--line);border-radius:10px;background:var(--paper)}
+.home-os li{padding:18px;text-align:center;font:600 1.35rem/1.4 "IBM Plex Sans",sans-serif}
+.home-os li+li{border-left:1px solid var(--line)}
+.home-os small{display:block;font:500 .65rem/1.4 "IBM Plex Mono",monospace;color:var(--muted)}
+.home-provider-wall{border-top:1px solid var(--line)}
+.home-provider-group{display:grid;grid-template-columns:minmax(180px,.4fr) minmax(0,1fr);gap:22px;padding:24px 0;border-bottom:1px solid var(--line)}
+.home-provider-group h3{display:flex;align-items:baseline;gap:10px;justify-content:space-between;margin:10px 0;font-size:.95rem;line-height:1.4}
+.home-provider-count{flex:0 0 auto;color:var(--muted);font:500 .75rem "IBM Plex Mono",monospace}
+.home-provider-group ul{display:flex;flex-wrap:wrap;align-content:start;gap:8px;list-style:none;padding:0;margin:0}
+.home-provider-group li{min-width:0;max-width:100%}
+.home-provider-group a{display:flex;align-items:center;min-height:44px;max-width:100%;padding:9px 13px;border:1px solid var(--line);border-radius:6px;background:var(--paper);color:var(--body-soft);font-size:.82rem;font-weight:500;line-height:1.4;text-decoration:none;overflow-wrap:anywhere}
+.home-provider-group a:hover{border-color:var(--reef);color:var(--reef);background:var(--quote-bg)}
 .home-price-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
 .home-price-grid article{min-width:0;padding:22px;border:1px solid var(--line);border-radius:12px;background:var(--paper)}
 .home-price-grid span,.home-price-grid strong{display:block}
@@ -1129,6 +1183,7 @@ main{min-width:0;padding:30px 48px 80px;max-width:1360px;margin:0 auto;width:100
 :is(.doc pre,[data-copyable]) .copy:hover{background:rgba(255,251,244,.14)}
 :is(.doc pre,[data-copyable]) .copy.copied{background:var(--coral);border-color:var(--coral);opacity:1}
 .home-job-command [data-copyable] .copy{min-width:44px;min-height:44px;opacity:1}
+.home-console [data-copyable] .copy{top:auto;bottom:8px;min-height:44px;min-width:64px;opacity:1}
 .doc blockquote{margin:1.4em 0;padding:12px 16px;border-left:3px solid var(--coral);background:var(--quote-bg);border-radius:0 8px 8px 0;color:var(--ink)}
 .doc blockquote p:last-child{margin-bottom:0}
 .table-scroll{width:100%;max-width:100%;overflow-x:auto;overscroll-behavior-inline:contain;margin:1.2em 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);scrollbar-width:thin;scrollbar-color:var(--code-scroll) transparent}
@@ -1210,9 +1265,12 @@ main{min-width:0;padding:30px 48px 80px;max-width:1360px;margin:0 auto;width:100
   .home-section>header{grid-template-columns:1fr;gap:16px}
   .home-job-layout{grid-template-columns:1fr}
   .home-job-choices{grid-template-columns:repeat(3,minmax(0,1fr))}
-  .home-path-grid{grid-template-columns:1fr}
-  .home-path{min-height:230px}
-  .home-path+.home-path{border-top:1px solid var(--line);border-left:0}
+  .home-benefit-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .home-benefit-grid article,.home-benefit-grid .home-benefit-wide{grid-column:auto}
+  .home-benefit-grid article:last-child{grid-column:1/-1}
+  .home-provider-group{grid-template-columns:1fr;gap:12px}
+  .home-provider-group h3{justify-content:flex-start;margin:0}
+  .home-loop ol{grid-template-columns:repeat(3,minmax(0,1fr));gap:22px 12px}
   .home-capability-note{grid-template-columns:1fr;gap:12px}
   .home-install{grid-template-columns:1fr;margin-top:64px}
   .home-trust{grid-template-columns:1fr;gap:16px}
@@ -1226,18 +1284,25 @@ main{min-width:0;padding:30px 48px 80px;max-width:1360px;margin:0 auto;width:100
   .home-title img{width:48px;height:48px;flex-basis:48px}
   .home-title strong{font-size:1.24rem}
   .home-title small{font-size:.58rem}
-  .hero-home h1{font-size:clamp(2.85rem,15vw,4rem)}
+  .hero-home h1{font-size:clamp(2.5rem,11vw,3.3rem);letter-spacing:-.04em}
   .lede{font-size:1rem}
-  .cta-primary,.cta-secondary{width:100%;justify-content:center}
+  .cta-primary,.cta-secondary{justify-content:center}
+  .cta-primary{width:100%}
+  .cta-secondary{flex:1}
   .home-facts{display:grid;gap:7px}
   .home-console{margin-top:4px;padding:11px;border-radius:13px}
   .home-console-bar{grid-template-columns:1fr auto}
   .home-console-bar strong{display:none}
-  .home-console pre{font-size:.68rem}
+  .home-console pre{font-size:.75rem}
   .home-console li{grid-template-columns:36px minmax(0,1fr) 18px;padding:10px}
   .home-console li b{width:29px;height:29px}
   .home-price-grid{grid-template-columns:1fr}
-  .home-section{padding:54px 0}
+  .home-section{padding:48px 0}
+  .home-benefit-grid{grid-template-columns:1fr}
+  .home-benefit-grid article{padding:24px}
+  .home-os ul{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .home-os li:nth-child(3){border-left:0}
+  .home-os li:nth-child(n+3){border-top:1px solid var(--line)}
   .home-section>header h2,.home-install h2{font-size:2.45rem}
   .home-job-finder{margin:0 -2px;padding:10px;border-radius:16px}
   .home-job-choices{grid-template-columns:repeat(2,minmax(0,1fr))}
