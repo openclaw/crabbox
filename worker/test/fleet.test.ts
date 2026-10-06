@@ -53204,6 +53204,165 @@ describe("synthetic acknowledgement reliability", () => {
     },
   );
 
+  it.each([
+    {
+      source: "aws-ingress",
+      key: "aws-ingress-reconcile:pending",
+      owner: "reconcileAWSIngressIfIdle",
+    },
+    { source: "azure-cleanup", key: "azure-cleanup:synthetic", owner: "runAzureDeferredCleanups" },
+    { source: "lease", key: `lease:${leaseID}`, owner: "reconcileRuntimeAdapterDeletes" },
+    { source: "run-prune", key: "maintenance:run-prune-cursor", owner: "pruneTerminalRuns" },
+  ])(
+    "backs off clamped overdue $source work without delaying future wakes",
+    async ({ source, key, owner }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const storage = new MemoryStorage();
+        const lease = seedLease(storage);
+        const past = new Date(Date.now() - 60_000).toISOString();
+        const records: Record<string, unknown> = {
+          "aws-ingress": {
+            targets: [
+              {
+                anchor: { ...lease, provider: "aws" },
+                attempts: 0,
+                generation: "synthetic-generation",
+                updatedAt: past,
+                retryAt: past,
+              },
+            ],
+          },
+          "azure-cleanup": {
+            name: "synthetic-vm",
+            location: "westeurope",
+            subscription: "synthetic-subscription",
+            resourceGroup: "synthetic-group",
+            leaseID,
+            slug: lease.slug,
+            owner: lease.owner,
+            createdAt: past,
+            updatedAt: past,
+            attempts: 0,
+            retryAt: past,
+          },
+          lease: {
+            ...lease,
+            lifecycle: "registered",
+            provider: "external",
+            runtimeAdapterID: "synthetic-adapter",
+            runtimeAdapterWorkspaceID: "synthetic-workspace",
+            runtimeAdapterDeleteRequestedAt: past,
+            runtimeAdapterDeleteRetryAt: past,
+          },
+          "run-prune": "run:run_000000000001",
+        };
+        storage.seed(key, records[source]);
+        const fleet = testFleet(storage);
+        // Leave one owner unable to advance its record while running the full maintenance pass.
+        vi.spyOn(fleet as unknown as Record<string, () => Promise<void>>, owner).mockResolvedValue(
+          undefined,
+        );
+        for (const delay of [1000, 1000, 2000, 4000]) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- each delivery observes the same unconsumed raw deadline.
+          await fleet.alarm();
+          expect(storage.alarm()! - Date.now()).toBe(delay);
+          vi.setSystemTime(storage.alarm()!);
+        }
+        const future = seedLease(storage, releaseID);
+        storage.seed(`lease:${releaseID}`, {
+          ...future,
+          expiresAt: new Date(Date.now() + 500).toISOString(),
+        });
+        await fleet.alarm();
+        expect(storage.alarm()).toBe(Date.now() + 500);
+        await storage.delete(`lease:${releaseID}`);
+        await fleet.alarm();
+        expect(storage.alarm()).toBe(Date.now() + 16000);
+      } finally {
+        warn.mockRestore();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    { retryMs: undefined, dispatchMs: undefined, scheduledMs: 1000 },
+    { retryMs: -1000, dispatchMs: undefined, scheduledMs: 1000 },
+    { retryMs: 500, dispatchMs: undefined, scheduledMs: 1000 },
+    { retryMs: -1000, dispatchMs: 5000, scheduledMs: 5000 },
+  ])(
+    "preserves heartbeat delete deadlines ($retryMs retry, $dispatchMs dispatch)",
+    async ({ retryMs, dispatchMs, scheduledMs }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const storage = new MemoryStorage();
+        const lease = seedLease(storage);
+        storage.seed(`lease:${leaseID}`, {
+          ...lease,
+          lifecycle: "registered",
+          provider: "external",
+          runtimeAdapterDeleteRequestedAt: new Date(Date.now() - 60_000).toISOString(),
+          ...(retryMs === undefined
+            ? {}
+            : { runtimeAdapterDeleteRetryAt: new Date(Date.now() + retryMs).toISOString() }),
+          ...(dispatchMs === undefined
+            ? {}
+            : {
+                runtimeAdapterDeleteDispatchUntil: new Date(Date.now() + dispatchMs).toISOString(),
+              }),
+        });
+        const response = await testFleet(storage).fetch(
+          request("POST", `/v1/leases/${leaseID}/heartbeat`, { headers }),
+        );
+        expect(response.status).toBe(200);
+        expect(storage.alarm()).toBe(Date.now() + scheduledMs);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("does not back off advancing run-prune batches", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const storage = new MemoryStorage();
+      const expiredAt = new Date(Date.now() - 31 * 24 * 60 * 60_000).toISOString();
+      for (let index = 0; index < 49; index++) {
+        const id = `run_${index.toString().padStart(12, "0")}`;
+        storage.seed(
+          `run:${id}`,
+          testRun({
+            id,
+            owner: "alice@example.com",
+            org: "example-org",
+            state: "succeeded",
+            startedAt: expiredAt,
+            endedAt: expiredAt,
+          }),
+        );
+      }
+      const fleet = testFleet(storage);
+      for (const remaining of [33, 17, 1]) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- each pass must advance its cursor without escalating.
+        await fleet.alarm();
+        // oxlint-disable-next-line eslint/no-await-in-loop -- verify the actual batch before delivering another alarm.
+        expect(await storage.list({ prefix: "run:" })).toHaveLength(remaining);
+        expect(storage.alarm()).toBe(Date.now() + 1000);
+        vi.setSystemTime(storage.alarm()!);
+      }
+      await fleet.alarm();
+      expect(await storage.list({ prefix: "run:" })).toHaveLength(0);
+      expect(storage.alarm()).toBeUndefined();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps request arms and provisioning wakes immediate during an alarm backoff streak", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

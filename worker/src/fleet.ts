@@ -17819,12 +17819,17 @@ export class FleetCoordinator {
   private async scheduleAlarm(maintenanceArmRevision?: number): Promise<void> {
     if (maintenanceArmRevision === undefined) this.alarmArmRevision += 1;
     const now = Date.now();
-    const candidates: Array<{ time: number; source: string; key: string }> = [];
-    const retainAlarm = (candidate: number | undefined, source: string, key: string) => {
+    const candidates: Array<{ time: number; dueAt: number; source: string; key: string }> = [];
+    const retainAlarm = (
+      candidate: number | undefined,
+      source: string,
+      key: string,
+      dueAt?: number,
+    ) => {
       if (candidate === undefined || !Number.isFinite(candidate)) {
         return;
       }
-      candidates.push({ time: candidate, source, key });
+      candidates.push({ time: candidate, dueAt: dueAt ?? candidate, source, key });
     };
     const prewarmEnabled = this.workspacePrewarmTarget() > 0;
     const activeWorkspaceShapes = new Set<string>();
@@ -17901,10 +17906,12 @@ export class FleetCoordinator {
       ) {
         // Match expireLeases: the durable controller owns both progress and its wake.
         if (await provisioningOwnsLease(this.state.storage, lease.id)) return;
+        const leaseAlarm = nextLeaseAlarmTime(lease, this.coordinatorGeneration);
         retainAlarm(
-          nextLeaseAlarmTime(lease, this.coordinatorGeneration),
+          leaseAlarm,
           "lease",
           leaseKey(lease.id),
+          Math.min(leaseAlarm ?? Infinity, runtimeAdapterDeleteDueAt(lease, now) ?? Infinity),
         );
       }
     });
@@ -17978,9 +17985,20 @@ export class FleetCoordinator {
     retainAlarm(azureOrphanSweepAlarm, "orphan-sweep", azureOrphanSweepRecordKey);
     const azureCleanupAlarm = await this.nextAzureDeferredCleanupAlarmTime();
     if (azureCleanupAlarm)
-      retainAlarm(azureCleanupAlarm.time, "azure-cleanup", azureCleanupAlarm.key);
+      retainAlarm(
+        azureCleanupAlarm.time,
+        "azure-cleanup",
+        azureCleanupAlarm.key,
+        azureCleanupAlarm.dueAt,
+      );
     const awsIngressAlarm = await this.nextAWSIngressReconcileAlarmTime();
-    retainAlarm(awsIngressAlarm, "aws-ingress", awsIngressReconcileRecordKey);
+    if (awsIngressAlarm)
+      retainAlarm(
+        awsIngressAlarm.time,
+        "aws-ingress",
+        awsIngressReconcileRecordKey,
+        awsIngressAlarm.dueAt,
+      );
     const nextCheckpoint = await this.state.storage.list<CoordinatorCheckpointDueIndex>({
       prefix: checkpointDuePrefix,
       limit: 1,
@@ -18000,39 +18018,50 @@ export class FleetCoordinator {
     }
     const runPruneCursor = await this.state.storage.get<string>(runPruneCursorKey);
     if (runPruneCursor !== undefined) {
-      retainAlarm(now + 1000, "run-prune", runPruneCursor);
+      retainAlarm(now + 1000, "run-prune", runPruneCursor, now);
     }
     const finishedAt = Date.now();
     const dueThrough = finishedAt + maintenanceAlarmDueEpsilonMs;
     let earliest: (typeof candidates)[number] | undefined;
+    let earliestOverdue: (typeof candidates)[number] | undefined;
     let earliestFutureTime = Infinity;
     for (const candidate of candidates) {
       if (!earliest || candidate.time < earliest.time) earliest = candidate;
-      if (candidate.time > dueThrough) {
+      if (candidate.dueAt <= dueThrough) {
+        if (!earliestOverdue || candidate.time < earliestOverdue.time) earliestOverdue = candidate;
+      } else {
         earliestFutureTime = Math.min(earliestFutureTime, candidate.time);
       }
     }
     let alarmTime = earliest?.time;
     if (maintenanceArmRevision !== undefined) {
-      if (!earliest || earliest.time > dueThrough) {
+      if (!earliestOverdue) {
         this.maintenanceAlarmStreak = undefined;
       } else if (this.alarmArmRevision === maintenanceArmRevision) {
         // An admitted arm bypasses this pass's backoff without erasing overdue debt.
         const previous = this.maintenanceAlarmStreak;
-        const same = previous?.source === earliest.source && previous.key === earliest.key;
+        const same =
+          previous?.source === earliestOverdue.source && previous.key === earliestOverdue.key;
         const delayMs = same
           ? Math.min(
               maintenanceAlarmBackoffMaxMs,
               previous.delayMs === 0 ? maintenanceAlarmBackoffInitialMs : previous.delayMs * 2,
             )
           : 0;
-        this.maintenanceAlarmStreak = { source: earliest.source, key: earliest.key, delayMs };
+        this.maintenanceAlarmStreak = {
+          source: earliestOverdue.source,
+          key: earliestOverdue.key,
+          delayMs,
+        };
         if (delayMs > 0) {
-          alarmTime = Math.min(Math.max(earliest.time, finishedAt + delayMs), earliestFutureTime);
+          alarmTime = Math.min(
+            Math.max(earliestOverdue.time, finishedAt + delayMs),
+            earliestFutureTime,
+          );
           if (delayMs !== previous?.delayMs) {
-            const opaqueKey = (await sha256Hex(earliest.key)).slice(0, 16);
+            const opaqueKey = (await sha256Hex(earliestOverdue.key)).slice(0, 16);
             console.warn(
-              `maintenance alarm made no progress source=${earliest.source} key=${opaqueKey} delayMs=${delayMs}`,
+              `maintenance alarm made no progress source=${earliestOverdue.source} key=${opaqueKey} delayMs=${delayMs}`,
             );
           }
         }
@@ -18045,16 +18074,18 @@ export class FleetCoordinator {
     await this.state.scheduleAlarm(alarmTime);
   }
 
-  private async nextAWSIngressReconcileAlarmTime(): Promise<number | undefined> {
+  private async nextAWSIngressReconcileAlarmTime(): Promise<
+    { time: number; dueAt: number } | undefined
+  > {
     const record = await this.state.storage.get<StoredAWSIngressReconcileRecord>(
       awsIngressReconcileRecordKey,
     );
     const retryTimes = awsIngressReconcileTargets(record)
       .map((target) => Date.parse(target.retryAt))
       .filter((time) => Number.isFinite(time));
-    return retryTimes.length > 0
-      ? Math.max(Date.now() + awsIngressReconcileMinDelayMs, Math.min(...retryTimes))
-      : undefined;
+    if (retryTimes.length === 0) return undefined;
+    const dueAt = Math.min(...retryTimes);
+    return { time: Math.max(Date.now() + awsIngressReconcileMinDelayMs, dueAt), dueAt };
   }
 
   private async markAWSIngressReconcilePending(
@@ -18220,7 +18251,7 @@ export class FleetCoordinator {
   }
 
   private async nextAzureDeferredCleanupAlarmTime(): Promise<
-    { key: string; time: number } | undefined
+    { key: string; time: number; dueAt: number } | undefined
   > {
     const records = await this.state.storage.list<AzureDeferredCleanupRecord>({
       prefix: azureDeferredCleanupPrefix,
@@ -18230,7 +18261,13 @@ export class FleetCoordinator {
       .map(([key, record]) => ({ key, time: Date.parse(record.retryAt) }))
       .filter(({ time }) => Number.isFinite(time))
       .toSorted((a, b) => a.time - b.time)[0];
-    return earliest && { ...earliest, time: Math.max(Date.now() + 1000, earliest.time) };
+    return (
+      earliest && {
+        ...earliest,
+        dueAt: earliest.time,
+        time: Math.max(Date.now() + 1000, earliest.time),
+      }
+    );
   }
 
   private async runAzureDeferredCleanups(): Promise<void> {
@@ -26721,6 +26758,16 @@ function sameUnboundProvisioningRecoveryLease(
   return JSON.stringify(current) === JSON.stringify(expected);
 }
 
+function runtimeAdapterDeleteDueAt(lease: LeaseRecord, now: number): number | undefined {
+  if (!lease.runtimeAdapterDeleteRequestedAt) return undefined;
+  const retryAt = Date.parse(lease.runtimeAdapterDeleteRetryAt ?? "");
+  const dispatchUntil = Date.parse(lease.runtimeAdapterDeleteDispatchUntil ?? "");
+  const dueAt = Number.isFinite(retryAt) ? retryAt : now;
+  return Number.isFinite(dispatchUntil) && dispatchUntil > now
+    ? Math.max(dueAt, dispatchUntil)
+    : dueAt;
+}
+
 function nextLeaseAlarmTime(lease: LeaseRecord, coordinatorGeneration: string): number | undefined {
   const now = Date.now();
   // A restart must be observed before the TTL/client deadline, even when this
@@ -26734,20 +26781,9 @@ function nextLeaseAlarmTime(lease: LeaseRecord, coordinatorGeneration: string): 
     interruptedProvisioningAt === undefined
       ? candidate
       : Math.min(candidate, interruptedProvisioningAt);
-  const runtimeAdapterDeleteRetryAt = Date.parse(lease.runtimeAdapterDeleteRetryAt ?? "");
-  const runtimeAdapterDeleteDispatchUntil = Date.parse(
-    lease.runtimeAdapterDeleteDispatchUntil ?? "",
-  );
-  if (lease.runtimeAdapterDeleteRequestedAt) {
-    let deleteAlarm = Number.isFinite(runtimeAdapterDeleteRetryAt)
-      ? Math.max(now + 1000, runtimeAdapterDeleteRetryAt)
-      : now + 1000;
-    if (
-      Number.isFinite(runtimeAdapterDeleteDispatchUntil) &&
-      runtimeAdapterDeleteDispatchUntil > now
-    ) {
-      deleteAlarm = Math.max(deleteAlarm, runtimeAdapterDeleteDispatchUntil);
-    }
+  const deleteDueAt = runtimeAdapterDeleteDueAt(lease, now);
+  if (deleteDueAt !== undefined) {
+    const deleteAlarm = Math.max(now + 1000, deleteDueAt);
     return includeInterruptedProvisioning(
       leaseIsLive(lease) && Number.isFinite(expiresAt)
         ? Math.min(expiresAt, deleteAlarm)
