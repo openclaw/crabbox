@@ -8,7 +8,6 @@ import (
 	"maps"
 	"net/http"
 	"path"
-	"strconv"
 	"strings"
 	"time"
 
@@ -149,7 +148,7 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 			}}, nil
 		},
 		Cleanup: func(ctx context.Context) error {
-			_, err := destroyClaimedSandbox(ctx, client, claim, b.rt.Clock)
+			_, err := destroyClaimedSandbox(ctx, client, claim)
 			return err
 		},
 	})
@@ -225,7 +224,7 @@ func (b *cloudflareBackend) Stop(ctx context.Context, req core.StopRequest) erro
 	if err != nil {
 		return err
 	}
-	missing, err := destroyClaimedSandbox(ctx, client, claim, b.rt.Clock)
+	missing, err := destroyClaimedSandbox(ctx, client, claim)
 	if err != nil {
 		return err
 	}
@@ -239,7 +238,7 @@ func (b *cloudflareBackend) Stop(ctx context.Context, req core.StopRequest) erro
 
 // Keep the captured local authority fenced through the native effect. The
 // runner's instance type is a routing preference, not a remote generation CAS.
-func destroyClaimedSandbox(ctx context.Context, client *cloudflareClient, claim core.LeaseClaim, clock core.Clock) (bool, error) {
+func destroyClaimedSandbox(ctx context.Context, client *cloudflareClient, claim core.LeaseClaim) (bool, error) {
 	client.useInstanceType(cloudflareClaimInstanceType(claim))
 	missing := false
 	err := core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, claim.LeaseID, claim, true, func() error {
@@ -247,8 +246,8 @@ func destroyClaimedSandbox(ctx context.Context, client *cloudflareClient, claim 
 		if cloudflareNotFoundError(err) {
 			// The runner records nothing for an unknown lease, so a create still
 			// in flight could allocate it after the claim is gone.
-			if createPending(claim, core.ClockNow(clock)) {
-				return core.Exit(5, "%s lease %s is still being created; its claim is kept, retry `%s` once the create returns", providerName, claim.LeaseID, cloudflareCleanupCommand(claim.LeaseID))
+			if createPending(claim) {
+				return core.Exit(5, "%s lease %s creation is unresolved; its claim is kept, check the runner and retry `%s`", providerName, claim.LeaseID, cloudflareCleanupCommand(claim.LeaseID))
 			}
 			missing = true
 			return nil
@@ -265,6 +264,11 @@ func (b *cloudflareBackend) Cleanup(ctx context.Context, req core.CleanupRequest
 	}
 	removed := 0
 	for _, claim := range claims {
+		// A snapshot retry gap can look stopped even while creation continues.
+		// Only explicit stop may destroy a lease whose create is unresolved.
+		if createPending(claim) {
+			continue
+		}
 		client, err := b.leaseClient(claim)
 		if err != nil {
 			return err
@@ -272,9 +276,6 @@ func (b *cloudflareBackend) Cleanup(ctx context.Context, req core.CleanupRequest
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 		if err != nil {
 			if cloudflareNotFoundError(err) {
-				if createPending(claim, core.ClockNow(b.rt.Clock)) {
-					continue
-				}
 				if req.DryRun {
 					fmt.Fprintf(b.rt.Stdout, "would remove stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"))
 					continue
@@ -296,7 +297,7 @@ func (b *cloudflareBackend) Cleanup(ctx context.Context, req core.CleanupRequest
 			fmt.Fprintf(b.rt.Stdout, "would confirm cleanup of %s claim %s slug=%s state=%s\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"), sandbox.State)
 			continue
 		}
-		if _, err := destroyClaimedSandbox(ctx, client, claim, b.rt.Clock); err != nil {
+		if _, err := destroyClaimedSandbox(ctx, client, claim); err != nil {
 			return err
 		}
 		removed++
@@ -344,7 +345,7 @@ func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflar
 	// The runner may allocate the sandbox even when its response is lost, so
 	// the claim exists before the request and outlives an ambiguous failure.
 	pendingLabels := maps.Clone(labels)
-	pendingLabels[createPendingUntilLabel] = core.LeaseLabelTime(core.ClockNow(b.rt.Clock).Add(createPendingWindow))
+	pendingLabels[createPendingLabel] = "true"
 	claim, err := core.ClaimLeaseForRepoProviderScopePondWithLabels(leaseID, slug, providerName, "", b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, pendingLabels)
 	if err != nil {
 		return core.LeaseClaim{}, cloudflareContainer{}, err
@@ -375,15 +376,13 @@ func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflar
 	return claim, sandbox, nil
 }
 
-// createPendingUntilLabel marks a claim whose create request may still be in
-// flight, so cleanup does not drop it before the runner records the sandbox.
-const createPendingUntilLabel = "create_pending_until"
+// A client deadline cannot prove that a submitted request will never arrive.
+// Keep custody until the runner confirms the outcome, regardless of elapsed time.
+const createPendingLabel = "create_pending"
 
-const createPendingWindow = cloudflareDefaultResponseHeaderTimeout + time.Minute
-
-func createPending(claim core.LeaseClaim, now time.Time) bool {
-	seconds, err := strconv.ParseInt(strings.TrimSpace(claim.Labels[createPendingUntilLabel]), 10, 64)
-	return err == nil && now.Before(time.Unix(seconds, 0))
+func createPending(claim core.LeaseClaim) bool {
+	_, pending := claim.Labels[createPendingLabel]
+	return pending
 }
 
 // A 4xx create response means the runner rejected the request before it

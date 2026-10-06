@@ -1830,7 +1830,7 @@ func TestCloudflareStopKeepsAClaimWhoseCreateIsInFlight(t *testing.T) {
 	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, Keep: true}); err != nil {
 		t.Fatalf("warmup: %v", err)
 	}
-	if stopErr == nil || !strings.Contains(stopErr.Error(), "still being created") {
+	if stopErr == nil || !strings.Contains(stopErr.Error(), "creation is unresolved") {
 		t.Fatalf("stop error = %v, want a retryable pending-create failure", stopErr)
 	}
 	if claims, err := localCloudflareClaims(); err != nil || len(claims) != 1 {
@@ -1838,26 +1838,71 @@ func TestCloudflareStopKeepsAClaimWhoseCreateIsInFlight(t *testing.T) {
 	}
 }
 
-func TestCloudflareCleanupKeepsAClaimWhoseCreateMayBeInFlight(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		until time.Duration
-		kept  bool
-	}{{"in flight", time.Minute, true}, {"expired", -time.Minute, false}} {
-		t.Run(tc.name, func(t *testing.T) {
+type pendingCreateClock struct{ seconds atomic.Int64 }
+
+func (c *pendingCreateClock) Now() time.Time { return time.Unix(c.seconds.Load(), 0) }
+
+func TestCloudflarePendingCreateSurvivesReconciliation(t *testing.T) {
+	for _, action := range []string{"stop-not-found", "cleanup-not-found", "cleanup-stopped"} {
+		t.Run(action, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			labels := map[string]string{createPendingUntilLabel: core.LeaseLabelTime(time.Now().Add(tc.until))}
-			if _, err := core.ClaimLeaseForRepoProviderScopePondWithLabels("cbx_pending", "pending", providerName, "", "", t.TempDir(), time.Hour, labels); err != nil {
-				t.Fatal(err)
-			}
-			server := httptest.NewServer(http.HandlerFunc(http.NotFound))
+			clock := &pendingCreateClock{}
+			clock.seconds.Store(time.Now().Unix())
+			var backend cloudflareBackend
+			var created atomic.Bool
+			var deletes atomic.Int64
+			var leaseID string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost {
+					if r.Method == http.MethodDelete {
+						deletes.Add(1)
+					}
+					if !created.Load() && action != "cleanup-stopped" {
+						http.NotFound(w, r)
+						return
+					}
+					// A snapshot propagation retry can temporarily report stopped.
+					_, _ = fmt.Fprintf(w, `{"id":%q,"state":"stopped"}`, path.Base(r.URL.Path))
+					return
+				}
+				var req createSandboxRequest
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				leaseID = req.ID
+				// A delayed submission or a wall-clock jump outlasts the old grace period.
+				clock.seconds.Add(600)
+				if action == "stop-not-found" {
+					if err := backend.Stop(t.Context(), core.StopRequest{ID: req.ID}); err == nil {
+						t.Error("stop retired an unresolved create")
+					}
+				} else if err := backend.Cleanup(t.Context(), core.CleanupRequest{}); err != nil {
+					t.Errorf("cleanup: %v", err)
+				}
+				if claim, ok, err := core.ResolveLeaseClaimForProvider(req.ID, providerName); err != nil || !ok || claim.Labels[runnerURLLabel] != backend.cfg.Cloudflare.APIURL || claim.Labels["workdir"] != "/workspace/app" {
+					t.Errorf("lost create custody: claim=%+v ok=%v err=%v", claim, ok, err)
+				}
+				created.Store(true)
+				_, _ = fmt.Fprintf(w, `{"id":%q,"state":"running"}`, req.ID)
+			}))
 			defer server.Close()
-			backend := cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
-			if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
-				t.Fatal(err)
+			backend = cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token", Workdir: "/workspace/app"}}, rt: core.Runtime{Clock: clock, HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+			if err := backend.Warmup(t.Context(), core.WarmupRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, Keep: true}); err != nil {
+				t.Fatalf("warmup: %v", err)
 			}
-			if _, ok, err := core.ResolveLeaseClaimForProvider("cbx_pending", providerName); err != nil || ok != tc.kept {
-				t.Fatalf("claim kept=%v err=%v, want kept=%v", ok, err, tc.kept)
+			wantDeletes := int64(0)
+			if action == "stop-not-found" {
+				wantDeletes = 1
+			}
+			if deletes.Load() != wantDeletes {
+				t.Fatalf("delete requests=%d, want %d", deletes.Load(), wantDeletes)
+			}
+			if err := backend.Stop(t.Context(), core.StopRequest{ID: leaseID}); err != nil {
+				t.Fatalf("stop after create completed: %v", err)
+			}
+			if deletes.Load() != wantDeletes+1 {
+				t.Fatalf("completed lease was not destroyed: deletes=%d", deletes.Load())
+			}
+			if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
+				t.Fatalf("claim remains after confirmed stop: ok=%v err=%v", ok, err)
 			}
 		})
 	}
@@ -2077,7 +2122,7 @@ func TestCloudflareDestroyClaimFenceSpansNativeDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { _, err := destroyClaimedSandbox(context.Background(), client, claim, nil); done <- err }()
+	go func() { _, err := destroyClaimedSandbox(context.Background(), client, claim); done <- err }()
 	<-entered
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -2116,7 +2161,7 @@ func TestCloudflareCanceledDestroyFenceMakesNoRequest(t *testing.T) {
 	<-entered
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	_, err = destroyClaimedSandbox(ctx, client, claim, nil)
+	_, err = destroyClaimedSandbox(ctx, client, claim)
 	close(release)
 	if lockErr := <-done; lockErr != nil {
 		t.Fatal(lockErr)

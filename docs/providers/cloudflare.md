@@ -378,10 +378,13 @@ crabbox checkpoint fork chk_0123456789abcdef --count 4 --type standard-2 -- pnpm
   failure, such as a lost response or timeout, may still have allocated the
   container, so the claim stays and the error names the lease: check it with
   `crabbox status --provider cloudflare --id <lease>` or destroy it with
-  `crabbox stop --provider cloudflare --id <lease>`. For 6.5 minutes after
-  the request, in case it is still in flight, `cleanup` leaves such a claim
-  alone and `stop` keeps it and fails with a retry hint if the runner does not
-  know the lease yet.
+  `crabbox stop --provider cloudflare --id <lease>`. An unresolved create has
+  no automatic claim expiry: elapsed time does not prove the request cannot
+  still arrive. `cleanup` leaves the claim alone, including when the runner
+  temporarily reports stopped between snapshot retries. Explicit `stop` keeps
+  the claim and fails with a retry hint if the runner does not know the lease
+  yet; check the runner before retrying. Even if the create never arrived,
+  a 404 alone does not resolve its claim.
 - A `stop` that lands while a lease's container is still starting wins: the
   runner destroys the container, and the create or fork fails with 409.
 - Canceling a command (Ctrl-C, or a dropped connection) sends SIGTERM to the
