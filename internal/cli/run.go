@@ -5099,10 +5099,7 @@ func (a App) stop(ctx context.Context, args []string) (stopErr error) {
 	if err := autoRouteExternalLeaseContext(ctx, &cfg, fs, *id); err != nil {
 		return err
 	}
-	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
-		return err
-	}
-	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
+	if err := applyTargetAndProviderFlags(&cfg, fs, targetFlags, providerFlags); err != nil {
 		return err
 	}
 	if err := finalizeProviderSelection(&cfg); err != nil {

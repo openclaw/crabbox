@@ -35,6 +35,12 @@ Lowest precedence is applied first: defaults, then user config, then repo
 config, then env vars, then flags. Each layer only overrides fields that are
 explicitly set; unset fields fall through to the layer below.
 
+Lifecycle commands apply explicit `--provider` and `--target` selections before
+provider target validation. For example, `stop --provider tart --target macos
+--id <lease>` overrides `provider: proxmox` and `target: linux` in configuration.
+The selected target must still be supported by the provider, and ordinary lease
+identity and ownership checks still apply.
+
 For the replacement lists `env.allow`, `results.junit`, and
 `run.preflightTools`, omitting the key inherits the lower layer, `[]` clears
 it, and a nonempty list replaces it. This applies to user config and each

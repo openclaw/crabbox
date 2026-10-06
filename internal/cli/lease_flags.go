@@ -523,6 +523,15 @@ type leaseTargetConfigOptions struct {
 	ProviderResourceID bool
 }
 
+func applyTargetAndProviderFlags(cfg *Config, fs *flag.FlagSet, target targetFlagValues, provider providerFlagValues) error {
+	// Provider flag handlers may validate the target, so resolve explicit target
+	// overrides before they see inherited configuration.
+	if err := applyTargetFlagOverrides(cfg, fs, target); err != nil {
+		return err
+	}
+	return applyProviderFlags(cfg, fs, provider)
+}
+
 func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags targetFlagValues, networkFlags networkModeFlagValues, opts leaseTargetConfigOptions) (Config, error) {
 	return loadLeaseTargetConfigContext(context.Background(), fs, provider, targetFlags, networkFlags, opts)
 }
