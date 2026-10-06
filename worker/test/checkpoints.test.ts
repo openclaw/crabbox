@@ -6315,6 +6315,42 @@ describe("coordinator-managed checkpoints", () => {
     expect(await storage.list({ prefix: `checkpoint-event:${checkpointID}:` })).toHaveLength(0);
   }, 20_000);
 
+  it("does not back off checkpoint tombstone batches that advance their audit cursor", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { coordinator, storage, runtime } = await checkpointFixture();
+    const checkpointID = "chk_alarm_prune_progress";
+    await createCheckpoint(coordinator, checkpointID);
+    expect(
+      (await coordinator.fetch(checkpointRequest("DELETE", `/v1/checkpoints/${checkpointID}`)))
+        .status,
+    ).toBe(200);
+    await storage.delete(`lease:${leaseID}`);
+    const record = (await storage.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)))!;
+    await Promise.all(
+      Array.from({ length: 192 }, (_, index) =>
+        storage.put(checkpointEventKey(checkpointID, index + 1), {
+          checkpointID,
+          sequence: index + 1,
+          type: "checkpoint.audit.pruned",
+        }),
+      ),
+    );
+    await storage.put(checkpointKey(checkpointID), { ...record, eventSequence: 192 });
+    vi.setSystemTime(Date.now() + checkpointAuditRetentionMS + 1);
+    for (const remaining of [128, 64, 0]) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each pass prunes one bounded audit batch.
+      await coordinator.alarm();
+      // oxlint-disable-next-line eslint/no-await-in-loop -- observe actual progress before the next delivery.
+      expect(await storage.list({ prefix: `checkpoint-event:${checkpointID}:` })).toHaveLength(
+        remaining,
+      );
+      expect(runtime.alarmTime).toBe(Date.now() + 1);
+    }
+    await coordinator.alarm();
+    expect(await storage.get(checkpointKey(checkpointID))).toBeUndefined();
+    expect(runtime.alarmTime).toBeUndefined();
+  });
+
   it("converges historical excess checkpoint audit events in bounded prune batches", async () => {
     const { coordinator, storage } = await checkpointFixture();
     const checkpointID = "chk_audit_converges";

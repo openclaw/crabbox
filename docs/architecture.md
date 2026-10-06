@@ -229,6 +229,16 @@ Each maintenance pass collects candidate lease IDs once, then rereads their
 current records at the owning phase. Final alarm selection still scans current
 state so work admitted during provider I/O keeps its wakeup.
 
+Alarm selection follows the maintenance owner's eligibility: elapsed prewarm
+failure history does not remain a retry deadline, and durable provisioning owns
+the wake for its leases. At the end of maintenance only, the same earliest overdue
+source and record on consecutive passes receives a one-second backoff, doubling
+to a 60-second cap. Deadlines within 10 milliseconds count as due. A different
+record or a future deadline resets the streak; run and checkpoint audit pruning
+include their advancing cursors in the identity. Arms admitted during a pass
+also bypass its backoff. This in-memory guard resets on eviction. Request-path
+alarms and the independently merged provisioning due index remain immediate.
+
 ## Coordinator HTTP API
 
 Lease lifecycle:
