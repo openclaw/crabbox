@@ -323,12 +323,14 @@ Once ownership is established, sync runs these steps:
    `No changes detected, skipping sync` and skip the rest.
 5. On `--full-resync` / `--fresh-sync`, reset the remote workdir first.
 6. Seed the remote Git tree from `origin` at the local `HEAD` when the runner
-   can fetch that commit, so rsync only ships the diff.
+   can fetch that commit, and record the files created by verified seeds so the
+   first prune also removes excluded tracked paths.
 7. Write the manifest (and the deletion list) to the remote workdir.
 8. When delete-sync is enabled, prune previously synced remote files that are no
    longer in the manifest.
-9. rsync the working set with `--files-from=- --from0` (the manifest drives the
-   transfer).
+9. rsync the selected files with `--files-from=- --from0`. A verified POSIX
+   seed uses the local delta plus tracked remote edits; other workspaces use
+   the full manifest.
 10. Finalize: git-hydrate the worktree against the configured base ref, run the
     mass-deletion sanity check, and record the new fingerprint.
 
@@ -397,6 +399,32 @@ ignores the remote fingerprint and forces a clean transfer.
 
 Git seeding (`sync.gitSeed`, default on) clones or fetches the base tree on the
 runner before rsync, so only your diff travels over the wire.
+On POSIX targets, a verified exact-commit seed selects `seeded-delta` transfer
+mode automatically. Only local additions, edits, untracked files, and tracked
+remote edits enter rsync's file list; the full manifest still controls deletions,
+excludes, and finalization. Reused workspaces include previous edits that have
+since been reverted locally and files changed by remote commands. Delta files
+use checksums so same-size edits with unchanged timestamps are repaired. Clean
+seeded files retain their checkout timestamps instead of being read by rsync
+solely because the local timestamps differ. Nonstandard file permissions also
+enter the delta. Ordinary `text=auto eol=lf` repositories are supported. Working files whose
+sizes differ from their Git blobs also enter the delta, including CRLF bytes
+that Git considers clean after normalization. Blob-size metadata avoids reading
+every working file to classify its line endings.
+
+This optimization requires matching remote HEAD and index trees, ordinary Git
+checkout semantics, and readable, unambiguous metadata. Sparse/hidden index
+entries, filters/encodings/ident attributes or transforming configuration, changed remote
+attributes, explicit `sync.checksum: true`, unsupported targets, and failed
+verification retain full-manifest sync. It does not reset the remote checkout or remove unmanaged build caches.
+Timing output reports `syncMode: "seeded-delta"`, `syncTransferFiles`, and
+`syncTransferBytes`.
+
+POSIX rsync receivers register directly with the workspace owner before
+receiving files. Their witnessed lifetime ends with the receiver, including
+failed transfers, so an unrelated rsync process cannot keep a detached guard
+alive and block the next run. WSL2 retains its platform-specific phase guard.
+
 Origin seeding only installs a clone into an absent or empty destination. A
 non-empty directory without Git metadata keeps its files and uses plain manifest
 sync, with Git coherence and reusable fingerprints disabled for that transfer.
