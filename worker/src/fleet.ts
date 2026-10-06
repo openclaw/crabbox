@@ -17819,12 +17819,12 @@ export class FleetCoordinator {
   private async scheduleAlarm(maintenanceArmRevision?: number): Promise<void> {
     if (maintenanceArmRevision === undefined) this.alarmArmRevision += 1;
     const now = Date.now();
-    let earliest: { time: number; source: string; key: string } | undefined;
+    const candidates: Array<{ time: number; source: string; key: string }> = [];
     const retainAlarm = (candidate: number | undefined, source: string, key: string) => {
       if (candidate === undefined || !Number.isFinite(candidate)) {
         return;
       }
-      if (!earliest || candidate < earliest.time) earliest = { time: candidate, source, key };
+      candidates.push({ time: candidate, source, key });
     };
     const prewarmEnabled = this.workspacePrewarmTarget() > 0;
     const activeWorkspaceShapes = new Set<string>();
@@ -18002,10 +18002,19 @@ export class FleetCoordinator {
     if (runPruneCursor !== undefined) {
       retainAlarm(now + 1000, "run-prune", runPruneCursor);
     }
+    const finishedAt = Date.now();
+    const dueThrough = finishedAt + maintenanceAlarmDueEpsilonMs;
+    let earliest: (typeof candidates)[number] | undefined;
+    let earliestFutureTime = Infinity;
+    for (const candidate of candidates) {
+      if (!earliest || candidate.time < earliest.time) earliest = candidate;
+      if (candidate.time > dueThrough) {
+        earliestFutureTime = Math.min(earliestFutureTime, candidate.time);
+      }
+    }
     let alarmTime = earliest?.time;
     if (maintenanceArmRevision !== undefined) {
-      const finishedAt = Date.now();
-      if (!earliest || earliest.time > finishedAt + maintenanceAlarmDueEpsilonMs) {
+      if (!earliest || earliest.time > dueThrough) {
         this.maintenanceAlarmStreak = undefined;
       } else if (this.alarmArmRevision === maintenanceArmRevision) {
         // An admitted arm bypasses this pass's backoff without erasing overdue debt.
@@ -18019,7 +18028,7 @@ export class FleetCoordinator {
           : 0;
         this.maintenanceAlarmStreak = { source: earliest.source, key: earliest.key, delayMs };
         if (delayMs > 0) {
-          alarmTime = Math.max(earliest.time, finishedAt + delayMs);
+          alarmTime = Math.min(Math.max(earliest.time, finishedAt + delayMs), earliestFutureTime);
           if (delayMs !== previous?.delayMs) {
             const opaqueKey = (await sha256Hex(earliest.key)).slice(0, 16);
             console.warn(

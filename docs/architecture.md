@@ -233,7 +233,9 @@ Alarm selection follows the maintenance owner's eligibility: elapsed prewarm
 failure history does not remain a retry deadline, and durable provisioning owns
 the wake for its leases. At the end of maintenance only, the same earliest overdue
 source and record on consecutive passes receives a one-second backoff, doubling
-to a 60-second cap. Deadlines within 10 milliseconds count as due. A different
+to a 60-second cap. Deadlines within 10 milliseconds count as due. All overdue
+candidates share that backoff floor, capped by the earliest genuinely future
+deadline so backoff never postpones another candidate's future wake. A different
 record or a future deadline resets the streak; run and checkpoint audit pruning
 include their advancing cursors in the identity. While the earliest item remains
 overdue, arms admitted during a pass bypass its backoff but preserve the existing

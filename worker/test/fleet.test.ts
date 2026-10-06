@@ -53146,6 +53146,64 @@ describe("synthetic acknowledgement reliability", () => {
     }
   });
 
+  it.each([
+    { scanMs: 0, expectedDelay: 5000 },
+    { scanMs: 6000, expectedDelay: 60000 },
+  ])(
+    "keeps future alarm deadlines during overdue backoff ($scanMs ms scan)",
+    async ({ scanMs, expectedDelay }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const storage = new MemoryStorage();
+        const first = seedLease(storage);
+        const second = seedLease(storage, releaseID);
+        storage.seed(`lease:${leaseID}`, {
+          ...first,
+          expiresAt: new Date(Date.now() - 2000).toISOString(),
+        });
+        storage.seed(`lease:${releaseID}`, {
+          ...second,
+          expiresAt: new Date(Date.now() - 1000).toISOString(),
+        });
+        const fleet = testFleet(storage);
+        vi.spyOn(
+          fleet as unknown as { expireLeases(): Promise<void> },
+          "expireLeases",
+        ).mockResolvedValue(undefined);
+        for (const delay of [0, 1000, 2000, 4000, 8000, 16000, 32000, 60000]) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- both overdue items must share the advancing backoff.
+          await fleet.alarm();
+          expect(Math.max(0, storage.alarm()! - Date.now())).toBe(delay);
+          vi.setSystemTime(Math.max(Date.now() + 1, storage.alarm()!));
+        }
+        const futureID = "cbx_aacc00000003";
+        const future = seedLease(storage, futureID);
+        const scanStartedAt = Date.now();
+        storage.seed(`lease:${futureID}`, {
+          ...future,
+          expiresAt: new Date(scanStartedAt + 5000).toISOString(),
+        });
+        storage.beforeList = async (options) => {
+          // This read follows lease candidate collection in the final alarm scan.
+          if (options?.prefix === "checkpoint-due:" && options.limit === 1) {
+            vi.setSystemTime(scanStartedAt + scanMs);
+          }
+        };
+        await fleet.alarm();
+        expect(storage.alarm()! - Date.now()).toBe(expectedDelay);
+
+        storage.beforeList = async () => {};
+        await storage.delete(`lease:${futureID}`);
+        await fleet.alarm();
+        expect(storage.alarm()).toBe(Date.now() + 60000);
+      } finally {
+        warn.mockRestore();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("keeps request arms and provisioning wakes immediate during an alarm backoff streak", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
