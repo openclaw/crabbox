@@ -205,6 +205,10 @@ func statusSSHReadinessTimeout(target SSHTarget) time.Duration {
 func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarget) (statusView, error) {
 	server := lease.Server
 	target := lease.SSH
+	// Recorded lease labels decide the platform. Resolve them before the
+	// readiness probe so a lease found under configuration defaults is probed
+	// with its own platform's readiness command rather than the default one.
+	applyResolvedLeaseConfig(&cfg, server, &target)
 	hasHost := server.PublicNet.IPv4.IP != ""
 	if target.NetworkKind == NetworkPublic && target.Host != "" {
 		hasHost = true

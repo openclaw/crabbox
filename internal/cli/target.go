@@ -645,12 +645,34 @@ func applyResolvedLeaseConfig(cfg *Config, server Server, target *SSHTarget) {
 	if workRoot != "" {
 		cfg.WorkRoot = workRoot
 	}
+	previous := *target
 	target.TargetOS = cfg.TargetOS
 	target.WindowsMode = cfg.WindowsMode
+	refreshProviderReadyCheck(*cfg, previous, target)
 	ApplyTargetChildEnvironmentBoundary(*cfg, target)
 	if target.User == "" || target.User == configuredSSHUser {
 		target.User = cfg.SSHUser
 	}
+}
+
+// refreshProviderReadyCheck replaces a readiness check the provider installed
+// for the target's previous platform once recorded lease labels select a
+// different one. A target resolved under configuration defaults otherwise
+// keeps probing a Windows lease with its Linux bootstrap gate. Readiness
+// commands that are not the provider default for the previous platform are
+// operator or provider choices for this host and stay untouched, as does a
+// target whose platform did not change.
+func refreshProviderReadyCheck(cfg Config, previous SSHTarget, target *SSHTarget) {
+	if target == nil {
+		return
+	}
+	if previous.TargetOS == target.TargetOS && previous.WindowsMode == target.WindowsMode {
+		return
+	}
+	if target.ReadyCheck != "" && target.ReadyCheck != providerReadyCheck(cfg, previous) {
+		return
+	}
+	target.ReadyCheck = providerReadyCheck(cfg, *target)
 }
 
 func applyStoredLeaseClaimConfig(cfg *Config, claim leaseClaim) {

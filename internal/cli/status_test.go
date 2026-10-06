@@ -259,6 +259,58 @@ func TestStatusViewKeepsFourSecondWindowsSSHProbe(t *testing.T) {
 	assertSSHOption(t, args, "ConnectionAttempts", "3")
 }
 
+func TestStatusViewProbesRecordedWindowsPlatform(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	logPath := installSSHArgsRecorder(t)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	host, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.Network = NetworkPublic
+	// The resolver builds the target from configuration defaults before the
+	// lease labels are read, so it carries the Linux bootstrap gate.
+	target := sshTargetForLease(cfg, host, "", port)
+	target.NetworkKind = NetworkPublic
+	if !strings.Contains(target.ReadyCheck, "cloud-init status --wait") {
+		t.Fatalf("initial ready check=%q, want the provider Linux bootstrap gate", target.ReadyCheck)
+	}
+
+	view, err := statusViewFromLeaseTarget(context.Background(), cfg, LeaseTarget{
+		LeaseID: "cbx_status_recorded_windows",
+		Server: Server{
+			Provider: "aws",
+			Status:   "active",
+			Labels:   map[string]string{"target": targetWindows, "windows_mode": windowsModeNormal},
+		},
+		SSH: target,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.Ready {
+		t.Fatal("status Ready=false, want the recorded Windows readiness probe to succeed")
+	}
+	if view.TargetOS != targetWindows || view.WindowsMode != windowsModeNormal {
+		t.Fatalf("status target=%q mode=%q, want the recorded Windows platform", view.TargetOS, view.WindowsMode)
+	}
+	recorded := strings.Join(readSSHArgsRecorder(t, logPath), "\n")
+	if strings.Contains(recorded, "cloud-init") {
+		t.Fatalf("status probe still ran the Linux bootstrap gate: %q", recorded)
+	}
+	if want := sshReadyCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}); !strings.Contains(recorded, want) {
+		t.Fatalf("status probe args=%q, want the native Windows readiness command", recorded)
+	}
+}
+
 func TestStatusWSL2ReadinessAllowsCompleteProbe(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
