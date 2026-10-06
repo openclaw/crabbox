@@ -465,6 +465,12 @@ export class CrabboxSandbox extends DurableObject<Env> {
     for (let attempt = 1; ; attempt += 1) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- a stop can land between attempts.
       if ((await this.leaseMeta())?.state !== "running") throw new LeaseStoppedError();
+      // Another request may have started the container during the retry delay.
+      if (container.running) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- reuse the concurrent start.
+        await waitForExec(container, deadline, () => undefined);
+        return;
+      }
       if (meta.snapshotId === undefined) {
         const image = container.images[meta.image];
         if (!image) throw new Error(`image ${meta.image} is not configured`);

@@ -792,7 +792,7 @@ See [Checkpoints](../features/checkpoints.md#lifecycle-and-expiry).
 | Daytona Linux (direct only) | Filesystem snapshot (`--no-reboot=false` for a running source) | Same filesystem snapshot |
 | Incus Linux containers (direct only, `--mode native`) | Private root-disk image | Same snapshot-to-image capture |
 | Parallels | VM snapshot | — |
-| Cloudflare containers | Container filesystem snapshot | Same filesystem snapshot |
+| Cloudflare containers | Container filesystem snapshot | not supported |
 
 Brokered native checkpoints (through a configured coordinator) cover AWS
 Linux/macOS and Azure/GCP Linux leases. Azure Windows leases use the direct

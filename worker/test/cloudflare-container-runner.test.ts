@@ -88,6 +88,7 @@ class MockContainer {
   readonly calls: ExecCall[] = [];
 
   start(options?: ContainerStartupOptions): void {
+    if (this.running) throw new Error("container is already running");
     if (options) this.started.push(options);
     this.lastStartFailed = this.failStart || this.failedStartsRemaining > 0;
     if (this.failedStartsRemaining > 0) this.failedStartsRemaining -= 1;
@@ -1100,6 +1101,29 @@ describe("Cloudflare runner lifecycle", () => {
       containerSnapshot: { id: "snap-1" },
       instance: "standard-2",
       enableInternet: true,
+    });
+  });
+
+  it("reuses a snapshot container started by another request during retry", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
+    const { sandbox, storage, container } = harness();
+    container.failedStartsRemaining = 1;
+
+    const response = createLease(sandbox, { snapshotId: "snap-1" });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const snapshot = await sandbox.fetch(
+      crabboxRequest("/__crabbox/snapshot", { name: "during-start" }),
+    );
+    expect(snapshot.status).toBe(200);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect((await response).status).toBe(200);
+    expect(container.started).toHaveLength(2);
+    expect(container.running).toBe(true);
+    expect(container.destroyed).toBe(0);
+    await expect(storage.get("crabbox:lease")).resolves.toMatchObject({
+      state: "running",
+      containerStarted: true,
     });
   });
 
