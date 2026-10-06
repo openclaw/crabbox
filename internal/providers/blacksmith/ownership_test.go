@@ -37,6 +37,96 @@ func isolateBlacksmithOwnership(t *testing.T) {
 	t.Setenv("CRABBOX_ENV_ALLOW", "")
 }
 
+func TestResolveOwnedBlacksmithClaimExactReadsOnly(t *testing.T) {
+	isolateBlacksmithOwnership(t)
+	ctx := t.Context()
+	const id = "tbx_exact_owned"
+	owned := testOwnedBlacksmithClaim(t, id, "owned", "/repo")
+	for i := 1; i <= 21; i++ {
+		decoy := owned
+		decoy.LeaseID = fmt.Sprintf("cbx_%012x", i)
+		decoy.Slug = fmt.Sprintf("decoy-%d", i)
+		decoy.Labels = maps.Clone(owned.Labels)
+		if i > 1 {
+			decoy.Provider = fmt.Sprintf("other-provider-%d", i)
+		}
+		decoy.Labels["provider"] = decoy.Provider
+		decoy.Labels["lease"] = decoy.LeaseID
+		decoy.Labels["slug"] = decoy.Slug
+		if err := core.WithDurableLeaseClaimLock(decoy.LeaseID, func(current *core.LeaseClaim, exists bool, save func() error) error {
+			if exists {
+				t.Fatal("fixture claim exists")
+			}
+			*current = decoy
+			return save()
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := resolveOwnedBlacksmithClaim(ctx, "cbx_000000000001"); err == nil {
+		t.Fatal("decoy authorized another claim's Testbox")
+	}
+
+	poisonPath, err := testBlacksmithClaimPath("cbx_00000000dead")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(poisonPath, []byte("invalid JSON"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.ListLeaseClaimsContext(ctx); err == nil {
+		t.Fatal("poison fixture did not reject a full claim-directory scan")
+	}
+
+	originalRead, originalResolve := readBlacksmithClaim, resolveBlacksmithClaimAlias
+	t.Cleanup(func() {
+		readBlacksmithClaim, resolveBlacksmithClaimAlias = originalRead, originalResolve
+	})
+	reads := 0
+	readBlacksmithClaim = func(id string) (core.LeaseClaim, bool, error) {
+		reads++
+		return originalRead(id)
+	}
+	resolveBlacksmithClaimAlias = func(context.Context, string, string) (core.LeaseClaim, bool, bool, error) {
+		t.Fatal("exact ID used alias resolution")
+		return core.LeaseClaim{}, false, false, nil
+	}
+
+	claim, err := resolveOwnedBlacksmithClaim(ctx, id)
+	if err != nil || claim.LeaseID != id || reads != 1 {
+		t.Fatalf("owned exact claim: id=%q reads=%d err=%v", claim.LeaseID, reads, err)
+	}
+	reads = 0
+	_, err = resolveOwnedBlacksmithClaim(ctx, "tbx_missing")
+	var exitErr core.ExitError
+	if !core.AsExitError(err, &exitErr) || exitErr.Code != 4 || reads != 1 {
+		t.Fatalf("missing exact claim: reads=%d err=%v; want exit 4 and one read", reads, err)
+	}
+}
+
+func TestResolveOwnedBlacksmithClaimExactHonorsCancellation(t *testing.T) {
+	originalRead, originalResolve := readBlacksmithClaim, resolveBlacksmithClaimAlias
+	t.Cleanup(func() {
+		readBlacksmithClaim, resolveBlacksmithClaimAlias = originalRead, originalResolve
+	})
+	readBlacksmithClaim = func(string) (core.LeaseClaim, bool, error) {
+		t.Fatal("canceled resolution read a claim")
+		return core.LeaseClaim{}, false, nil
+	}
+	resolveBlacksmithClaimAlias = func(context.Context, string, string) (core.LeaseClaim, bool, bool, error) {
+		t.Fatal("canceled exact resolution used alias resolution")
+		return core.LeaseClaim{}, false, false, nil
+	}
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cause := errors.New("caller canceled ownership resolution")
+	cancel(cause)
+	for _, id := range []string{"tbx_exact_owned", "cbx_000000000001"} {
+		if _, err := resolveOwnedBlacksmithClaim(ctx, id); !errors.Is(err, cause) {
+			t.Fatalf("%s: got %v, want caller's cancellation cause", id, err)
+		}
+	}
+}
+
 func TestParseBlacksmithIdentityNeverAssignedCompleted(t *testing.T) {
 	const id = "tbx_01aaaaaaaaaaaaaaaaaaaaaaaa"
 	// Synthetic identities, retaining the observed native 0.4.57 table framing.
@@ -64,6 +154,7 @@ func TestBlacksmithStopRejectsUnownedIdentity(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			isolateBlacksmithOwnership(t)
 			const id = "tbx_guard123"
+			stopID := id
 			if kind != "missing" {
 				original := testOwnedBlacksmithClaim(t, id, "jade-krill", "/repo")
 				changed := original
@@ -92,6 +183,7 @@ func TestBlacksmithStopRejectsUnownedIdentity(t *testing.T) {
 					if err := core.ReplaceLeaseClaimIfUnchanged(other.LeaseID, other, duplicate); err != nil {
 						t.Fatal(err)
 					}
+					stopID = other.LeaseID
 				}
 				// Revision-only absence needs a literal fixture edit; normal claim writes
 				// intentionally mint a new revision rather than accepting an empty one.
@@ -121,7 +213,7 @@ func TestBlacksmithStopRejectsUnownedIdentity(t *testing.T) {
 				calls++
 				return core.LocalCommandResult{}, nil
 			}))
-			if err := backend.Stop(t.Context(), core.StopRequest{ID: id}); err == nil {
+			if err := backend.Stop(t.Context(), core.StopRequest{ID: stopID}); err == nil {
 				t.Fatal("unowned stop succeeded")
 			}
 			if calls != 0 {

@@ -84,27 +84,38 @@ func blacksmithClaimBinding(claim core.LeaseClaim) (blacksmithRoute, shared.Clai
 	return route, want, shared.ValidateClaimBinding(claim, want)
 }
 
+// Tests count claim-file reads through these seams.
+var (
+	readBlacksmithClaim         = core.ReadLeaseClaimWithPresence
+	resolveBlacksmithClaimAlias = core.ResolveLeaseClaimForProviderWithExactContext
+)
+
 func resolveOwnedBlacksmithClaim(ctx context.Context, id string) (core.LeaseClaim, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return core.LeaseClaim{}, core.Exit(2, "Blacksmith requires a claimed Testbox ID or slug")
 	}
-	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExactContext(ctx, id, blacksmithTestboxProvider)
+	var claim core.LeaseClaim
+	var ok bool
+	var err error
+	if strings.HasPrefix(id, "tbx_") || core.IsCanonicalLeaseID(id) {
+		if ctx.Err() != nil {
+			return claim, context.Cause(ctx)
+		}
+		claim, ok, err = readBlacksmithClaim(id)
+		ok = ok && claim.LeaseID == id && claim.Provider == blacksmithTestboxProvider
+	} else {
+		claim, ok, _, err = resolveBlacksmithClaimAlias(ctx, id, blacksmithTestboxProvider)
+	}
 	if err != nil {
 		return claim, err
 	}
-	if !ok || ((strings.HasPrefix(id, "tbx_") || core.IsCanonicalLeaseID(id)) && (!exact || claim.LeaseID != id)) {
+	if !ok {
 		return claim, core.Exit(4, "Blacksmith resource %q has no exact local ownership claim; use read-only status/list and native Blacksmith cleanup", id)
 	}
-	claims, err := core.ListLeaseClaimsContext(ctx)
-	if err != nil {
-		return claim, err
-	}
-	for _, other := range claims {
-		if other.LeaseID != claim.LeaseID && other.CloudID == claim.CloudID && claim.CloudID != "" {
-			return claim, core.Exit(2, "Blacksmith Testbox has conflicting local claims")
-		}
-	}
+	// Only claims/<tbx id>.json can pass blacksmithClaimBinding for that resource,
+	// fenced by its per-lease lock. Other CloudID matches are inert: their binding
+	// fails or they belong to another provider's namespace.
 	_, _, err = blacksmithClaimBinding(claim)
 	return claim, err
 }

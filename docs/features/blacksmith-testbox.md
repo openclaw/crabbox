@@ -243,8 +243,9 @@ markers. If the CLI starts syncing but does not print a completion marker within
 
 Stop, reuse, command execution and artifact retrieval require an exact local
 claim binding the provider, Testbox ID, slug, repository owner, organization/API
-route and native workflow/job/ref. Native status checks and actions share the
-unchanged-claim fence. Stop can cancel an active command, then rechecks the
+route and native workflow/job/ref. Exact Testbox IDs resolve by reading only that
+ID's claim file; only slug lookups scan local claims. Native status checks and
+actions share the unchanged-claim fence. Stop can cancel an active command, then rechecks the
 original claim under an exclusive fence before removing the claim and key.
 Terminal status must be confirmed; a changed claim or cleanup deadline retains
 local state. Uncertainty marks the session kept. A successful
