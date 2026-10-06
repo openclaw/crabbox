@@ -166,12 +166,15 @@ passes that proxy to Chrome.
 - installs the binary at `/usr/local/bin/code-server` (standalone install,
   `--prefix=/usr/local`);
 - binds it to a loopback port (default `8080`);
-- relies on coordinator state for the access token.
+- starts with code-server auth disabled on that loopback listener; coordinator
+  authentication and the ticketed CLI bridge control browser access.
 
 `crabbox code --id ...` and the portal open a code-server tab through the
 authenticated portal bridge at `/portal/leases/{id-or-slug}/code/`. The bridge
-proxies HTTP and WebSocket traffic to the loopback port and injects the auth
-token, so you never handle it directly. There is no public code-server port.
+proxies HTTP and WebSocket traffic through the local CLI's SSH tunnel to the
+loopback port. Keep the CLI bridge running while using the editor. The
+coordinator must have an isolated `CRABBOX_CODE_ORIGIN_TEMPLATE` configured;
+see [Portal](portal.md). There is no public code-server port.
 
 Code is managed-Linux-only because the bridge depends on the lease shape and
 the cloud-init that installs the binary. Windows, macOS, and static SSH are

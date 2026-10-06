@@ -28,6 +28,8 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) BackendCapabilities() core.Backend { return &Backend{} }
+
 func (Provider) NormalizeConfigForShow(cfg core.Config) core.Config {
 	core.ApplyConfigShowSSHDefaults(&cfg, "root")
 	return cfg
@@ -35,7 +37,32 @@ func (Provider) NormalizeConfigForShow(cfg core.Config) core.Config {
 
 var _ core.ProviderClassProfileProvider = Provider{}
 
-var classProfiles = core.UniformLinuxAMD64ClassProfiles(core.ProviderClassMachine{Type: "DEV1-S"})
+var classProfiles = buildClassProfiles()
+
+func buildClassProfiles() []core.ProviderClassProfile {
+	// Shapes follow the Instance products/servers catalog for the default fr-par-1 zone.
+	machine := func(serverType string, vcpu int, memoryGiB float64) core.ProviderClassMachine {
+		return core.ProviderClassMachine{
+			Type: serverType, Architecture: core.ProviderClassArchitectureAMD64, VCPU: &vcpu,
+			Memory: &core.ProviderMemory{Value: memoryGiB, Unit: core.ProviderMemoryUnitGiB},
+		}
+	}
+	machines := map[string][]core.ProviderClassMachine{
+		"tiny":     {machine("DEV1-S", 2, 2)},
+		"small":    {machine("DEV1-M", 3, 4)},
+		"standard": {machine("DEV1-L", 4, 8), machine("PRO2-S", 8, 32)},
+		"fast":     {machine("PRO2-M", 16, 64)},
+		"large":    {machine("PRO2-L", 32, 128)},
+		"beast":    {machine("GP1-XL", 48, 256)},
+	}
+	profiles := make([]core.ProviderClassProfile, 0, len(core.CanonicalProviderClasses()))
+	for _, class := range core.CanonicalProviderClasses() {
+		profiles = append(profiles, core.ProviderClassProfileFromMachines(
+			class, core.TargetLinux, "", core.ProviderClassArchitectureAMD64, machines[class],
+		))
+	}
+	return profiles
+}
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
@@ -77,7 +104,7 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
 		return cfg.ServerType
 	}
-	if cfg.Scaleway.Type != "" {
+	if cfg.Scaleway.Type != "" && scalewayTypeOverridesClass(cfg) {
 		return cfg.Scaleway.Type
 	}
 	return core.ProviderClassPrimaryTypeForProfiles(classProfiles, cfg, scalewayServerTypeForClass(cfg.Class))
@@ -85,7 +112,7 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 
 func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
 	serverType := strings.TrimSpace(cfg.Scaleway.Type)
-	return serverType, serverType != ""
+	return serverType, serverType != "" && scalewayTypeOverridesClass(cfg)
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
@@ -132,6 +159,9 @@ func (b *Backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 }
 
 func (b *Backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	if req.RequestedLeaseID != "" {
+		return b.acquireFixed(ctx, req)
+	}
 	return shared.AcquireAttemptsRetry(b.rt, req.Keep, func() (core.LeaseTarget, error) {
 		return b.acquireOnce(ctx, req)
 	})
@@ -415,6 +445,9 @@ func (b *Backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if lease, handled, err := b.resolveFixed(ctx, client, req); handled {
+		return lease, err
+	}
 	servers, err := b.listScalewayServers(ctx, client)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -468,6 +501,9 @@ func (b *Backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if err != nil {
 		return err
 	}
+	if claim, exists, _ := core.ServerLeaseClaimSnapshot(req.Lease.Server); exists && fixedLeaseKind.IsFixedClaim(claim) {
+		return b.releaseFixed(ctx, client, claim)
+	}
 	return b.deleteServer(ctx, client, req.Lease.Server)
 }
 
@@ -475,21 +511,21 @@ func (b *Backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	return fmt.Sprintf("deleted lease=%s scaleway_server=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 }
 
-func (b *Backend) StatusTouchClaimMatches(lease core.LeaseTarget, claim core.LeaseClaim) bool {
-	if validateRootVolumeIdentity(claim, lease.Server, false) != nil {
-		return false
+func (b *Backend) AuthorizeStatusTouchClaim(_ context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+	scope := core.ProviderClaimScope(providerName, b.cfg)
+	if fixedLeaseKind.IsFixedClaim(claim) {
+		scope = lease.Server.Labels["scaleway_project"]
 	}
-	for _, key := range []string{"scaleway_project", "scaleway_zone"} {
+	if claim.ProviderScope != scope || claim.CloudID == "" || claim.CloudID != lease.Server.CloudID || validateRootVolumeIdentity(claim, lease.Server, false) != nil {
+		return core.Exit(4, "Scaleway heartbeat requires an exact resource and scope claim")
+	}
+	for _, key := range []string{"scaleway_project", "scaleway_zone", "scaleway_organization"} {
 		expected := strings.TrimSpace(claim.Labels[key])
-		if expected == "" || expected != strings.TrimSpace(lease.Server.Labels[key]) {
-			return false
+		if key != "scaleway_organization" && expected == "" || expected != "" && expected != strings.TrimSpace(lease.Server.Labels[key]) {
+			return core.Exit(4, "Scaleway heartbeat %s differs from the local claim", key)
 		}
 	}
-	if organization := strings.TrimSpace(claim.Labels["scaleway_organization"]); organization != "" &&
-		organization != strings.TrimSpace(lease.Server.Labels["scaleway_organization"]) {
-		return false
-	}
-	return true
+	return nil
 }
 
 func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
@@ -730,6 +766,14 @@ func (b *Backend) targetFromServer(ctx context.Context, client Client, item *ins
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if fixedLeaseKind.IsFixedClaim(claim) {
+		req.ID = leaseID
+		lease, _, err := b.resolveFixed(ctx, client, req)
+		return lease, err
+	}
+	if server.Labels["fixed_attempt"] != "" {
+		return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Scaleway fixed server has no create intent")
+	}
 	if exists && !req.IsReadOnlyStatus() {
 		if err := validateScalewayClaimIdentity(claim, server, req.ReleaseOnly); err != nil {
 			return core.LeaseTarget{}, err
@@ -837,6 +881,9 @@ func (b *Backend) deleteServer(ctx context.Context, client Client, server core.S
 	claim, err := b.cleanupClaim(client, server)
 	if err != nil {
 		return err
+	}
+	if fixedLeaseKind.IsFixedClaim(claim) {
+		return b.releaseFixed(ctx, client, claim)
 	}
 	claim, err = b.bindPendingRecoveryServer(ctx, client, server, claim)
 	if err != nil {
@@ -1180,6 +1227,13 @@ func validateScalewayLabels(labels map[string]string) error {
 func validateScalewayClaimIdentity(claim core.LeaseClaim, server core.Server, cleanup bool) error {
 	leaseID := server.Labels["lease"]
 	slug := server.Labels["slug"]
+	if fixedLeaseKind.IsFixedClaim(claim) {
+		intent := claim.FixedCreateIntent
+		if intent.State != "acquired" || intent.Attempt["nonce"] == "" || server.Labels["fixed_attempt"] != intent.Attempt["nonce"] ||
+			server.Labels["fixed_intent_sha256"] != intent.Fingerprint || claim.ProviderScope != server.Labels["scaleway_project"] {
+			return core.Exit(4, "lease_id_conflict: Scaleway fixed ownership changed")
+		}
+	}
 	if claim.LeaseID != leaseID ||
 		claim.Provider != providerName ||
 		claim.Slug == "" ||

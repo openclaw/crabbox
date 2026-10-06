@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"path"
 	"strings"
@@ -63,7 +64,7 @@ func (b *cloudflareBackend) Warmup(ctx context.Context, req core.WarmupRequest) 
 	if err != nil {
 		return err
 	}
-	claim, sandbox, err := b.createSandbox(ctx, client, req.Repo, req.RequestedSlug)
+	claim, sandbox, err := b.createSandbox(ctx, client, req.Repo, req.RequestedSlug, sandboxSource{})
 	if err != nil {
 		return err
 	}
@@ -81,7 +82,8 @@ func (b *cloudflareBackend) Warmup(ctx context.Context, req core.WarmupRequest) 
 }
 
 func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
-	workdir, err := cloudflareWorkdir(b.cfg)
+	cfg := b.runConfig(req.ID)
+	workdir, err := cloudflareWorkdir(cfg)
 	if err != nil {
 		return core.RunResult{}, err
 	}
@@ -105,7 +107,7 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 				}
 				command = intent.ShellScript()
 			}
-			client, err = newCloudflareClient(b.cfg, b.rt)
+			client, err = newCloudflareClient(cfg, b.rt)
 			return err
 		},
 		Workspace: func() shared.SandboxWorkspace {
@@ -118,7 +120,7 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 			}
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
-			claim, _, err = b.createSandbox(ctx, client, req.Repo, req.RequestedSlug)
+			claim, _, err = b.createSandbox(ctx, client, req.Repo, req.RequestedSlug, sandboxSource{})
 			if err != nil {
 				return shared.DelegatedSandbox{}, err
 			}
@@ -145,7 +147,10 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 				return client.execStream(ctx, claim.LeaseID, shared.CommandStreamRequest{Command: command, Cwd: workdir, Env: req.Env, TimeoutMS: durationMillisecondsCeil(b.cfg.TTL)}, stdout, stderr)
 			}}, nil
 		},
-		Cleanup: func(ctx context.Context) error { _, err := destroyClaimedSandbox(ctx, client, claim); return err },
+		Cleanup: func(ctx context.Context) error {
+			_, err := destroyClaimedSandbox(ctx, client, claim)
+			return err
+		},
 	})
 }
 
@@ -168,15 +173,12 @@ func (b *cloudflareBackend) List(ctx context.Context, req core.ListRequest) ([]c
 }
 
 func (b *cloudflareBackend) listRefreshed(ctx context.Context, claims []core.LeaseClaim) ([]core.LeaseView, error) {
-	client, err := newCloudflareClient(b.cfg, b.rt)
-	if err != nil {
-		return nil, err
-	}
 	servers := make([]core.Server, 0, len(claims))
-	defaultInstanceType := client.instanceType
 	for _, claim := range claims {
-		client.instanceType = defaultInstanceType
-		client.useInstanceType(cloudflareClaimInstanceType(claim))
+		client, err := b.leaseClient(claim)
+		if err != nil {
+			return nil, err
+		}
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 		if err != nil {
 			if cloudflareNotFoundError(err) {
@@ -193,15 +195,14 @@ func (b *cloudflareBackend) listRefreshed(ctx context.Context, claims []core.Lea
 }
 
 func (b *cloudflareBackend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
-	client, err := newCloudflareClient(b.cfg, b.rt)
-	if err != nil {
-		return core.StatusView{}, err
-	}
 	claim, err := resolveCloudflareClaim(req.ID)
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	client.useInstanceType(cloudflareClaimInstanceType(claim))
+	client, err := b.leaseClient(claim)
+	if err != nil {
+		return core.StatusView{}, err
+	}
 	return shared.PollStatus(ctx, req, func() time.Time { return core.ClockNow(b.rt.Clock) }, func(ctx context.Context) (core.StatusView, bool, error) {
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 		if err != nil {
@@ -215,11 +216,11 @@ func (b *cloudflareBackend) Status(ctx context.Context, req core.StatusRequest) 
 }
 
 func (b *cloudflareBackend) Stop(ctx context.Context, req core.StopRequest) error {
-	client, err := newCloudflareClient(b.cfg, b.rt)
+	claim, err := resolveCloudflareClaim(req.ID)
 	if err != nil {
 		return err
 	}
-	claim, err := resolveCloudflareClaim(req.ID)
+	client, err := b.leaseClient(claim)
 	if err != nil {
 		return err
 	}
@@ -243,6 +244,11 @@ func destroyClaimedSandbox(ctx context.Context, client *cloudflareClient, claim 
 	err := core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, claim.LeaseID, claim, true, func() error {
 		err := client.destroySandbox(ctx, claim.LeaseID)
 		if cloudflareNotFoundError(err) {
+			// The runner records nothing for an unknown lease, so a create still
+			// in flight could allocate it after the claim is gone.
+			if createPending(claim) {
+				return core.Exit(5, "%s lease %s creation is unresolved; its claim is kept, check the runner and retry `%s`", providerName, claim.LeaseID, cloudflareCleanupCommand(claim.LeaseID))
+			}
 			missing = true
 			return nil
 		}
@@ -252,19 +258,21 @@ func destroyClaimedSandbox(ctx context.Context, client *cloudflareClient, claim 
 }
 
 func (b *cloudflareBackend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
-	client, err := newCloudflareClient(b.cfg, b.rt)
-	if err != nil {
-		return err
-	}
 	claims, err := localCloudflareClaims()
 	if err != nil {
 		return err
 	}
 	removed := 0
-	defaultInstanceType := client.instanceType
 	for _, claim := range claims {
-		client.instanceType = defaultInstanceType
-		client.useInstanceType(cloudflareClaimInstanceType(claim))
+		// A snapshot retry gap can look stopped even while creation continues.
+		// Only explicit stop may destroy a lease whose create is unresolved.
+		if createPending(claim) {
+			continue
+		}
+		client, err := b.leaseClient(claim)
+		if err != nil {
+			return err
+		}
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 		if err != nil {
 			if cloudflareNotFoundError(err) {
@@ -310,7 +318,13 @@ func cloudflareCleanupCommand(leaseID string) string {
 	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, core.ShellQuote(leaseID))
 }
 
-func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflareClient, repo core.Repo, requestedSlug string) (core.LeaseClaim, cloudflareContainer, error) {
+// sandboxSource starts a lease from a container snapshot instead of an image.
+type sandboxSource struct {
+	snapshotID string
+	workdir    string
+}
+
+func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflareClient, repo core.Repo, requestedSlug string, source sandboxSource) (core.LeaseClaim, cloudflareContainer, error) {
 	if strings.TrimSpace(repo.Root) == "" {
 		return core.LeaseClaim{}, cloudflareContainer{}, core.Exit(2, "cloudflare creation requires a repository root for the recovery claim")
 	}
@@ -319,32 +333,63 @@ func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflar
 	if err != nil {
 		return core.LeaseClaim{}, cloudflareContainer{}, err
 	}
-	workdir, err := cloudflareWorkdir(b.cfg)
+	workdirCfg := b.cfg
+	if source.workdir != "" {
+		workdirCfg.Cloudflare.Workdir = source.workdir
+	}
+	workdir, err := cloudflareWorkdir(workdirCfg)
 	if err != nil {
 		return core.LeaseClaim{}, cloudflareContainer{}, err
 	}
-	labels := map[string]string{"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": slug, "repo": repo.Name, "instance_type": client.instanceType}
+	labels := map[string]string{"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": slug, "repo": repo.Name, "instance_type": client.instanceType, "workdir": workdir, runnerURLLabel: client.baseURL}
+	// The runner may allocate the sandbox even when its response is lost, so
+	// the claim exists before the request and outlives an ambiguous failure.
+	pendingLabels := maps.Clone(labels)
+	pendingLabels[createPendingLabel] = "true"
+	claim, err := core.ClaimLeaseForRepoProviderScopePondWithLabels(leaseID, slug, providerName, "", b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, pendingLabels)
+	if err != nil {
+		return core.LeaseClaim{}, cloudflareContainer{}, err
+	}
 	sandbox, err := client.createSandbox(ctx, createSandboxRequest{
-		ID: leaseID, LeaseID: leaseID, Slug: slug, Repo: repo.Name, Workdir: workdir,
-		InstanceType: client.instanceType, TTLSeconds: durationSecondsCeil(b.cfg.TTL), IdleTimeoutSeconds: durationSecondsCeil(b.cfg.IdleTimeout), Labels: labels,
+		ID: leaseID, LeaseID: leaseID, Slug: slug, Repo: repo.Name, Workdir: workdir, SnapshotID: source.snapshotID,
+		InstanceType: client.instanceType, Image: strings.TrimSpace(b.cfg.Cloudflare.Image), TTLSeconds: durationSecondsCeil(b.cfg.TTL), IdleTimeoutSeconds: durationSecondsCeil(b.cfg.IdleTimeout), Labels: labels,
 	})
-	if err != nil {
-		return core.LeaseClaim{}, cloudflareContainer{}, err
+	if err == nil && sandbox.ID != leaseID {
+		err = fmt.Errorf("cloudflare creation returned unexpected sandbox %q for requested %q", sandbox.ID, leaseID)
 	}
-	if sandbox.ID != leaseID {
-		return core.LeaseClaim{}, cloudflareContainer{}, fmt.Errorf("cloudflare creation returned unexpected sandbox %q for requested %q; inspect the runner before recovery", sandbox.ID, leaseID)
-	}
-	claim, err := core.ClaimLeaseForRepoProviderScopePondWithLabels(leaseID, slug, providerName, "", b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, labels)
 	if err != nil {
-		cleanupCtx, cancel := cloudflareCleanupContext()
-		defer cancel()
-		cleanupErr := core.CleanupLeaseClaimIfUnchangedAfterContext(cleanupCtx, leaseID, core.LeaseClaim{}, false, func() error { return client.destroySandbox(cleanupCtx, leaseID) })
-		if cleanupErr != nil {
-			err = errors.Join(err, fmt.Errorf("cleanup failed for cloudflare sandbox %s; inspect its claim and runner before recovery: %w", leaseID, cleanupErr))
+		if cloudflareRejectedError(err) {
+			if releaseErr := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); releaseErr != nil {
+				// A concurrent stop that already released the claim leaves nothing to release.
+				if _, ok, _ := core.ResolveLeaseClaimForProvider(leaseID, providerName); ok {
+					err = errors.Join(err, fmt.Errorf("release %s claim %s: %w", providerName, leaseID, releaseErr))
+				}
+			}
+			return core.LeaseClaim{}, cloudflareContainer{}, err
 		}
-		return core.LeaseClaim{}, cloudflareContainer{}, err
+		return core.LeaseClaim{}, cloudflareContainer{}, fmt.Errorf("%s create of %s failed and may have allocated a sandbox; its claim is kept: check it with `crabbox status --provider %s --id %s` or destroy it with `%s`: %w", providerName, leaseID, providerName, leaseID, cloudflareCleanupCommand(leaseID), err)
+	}
+	claim, err = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels)
+	if err != nil {
+		return core.LeaseClaim{}, cloudflareContainer{}, fmt.Errorf("%s sandbox %s was created but its claim changed; inspect it with `crabbox status --provider %s --id %s`: %w", providerName, leaseID, providerName, leaseID, err)
 	}
 	return claim, sandbox, nil
+}
+
+// A client deadline cannot prove that a submitted request will never arrive.
+// Keep custody until the runner confirms the outcome, regardless of elapsed time.
+const createPendingLabel = "create_pending"
+
+func createPending(claim core.LeaseClaim) bool {
+	_, pending := claim.Labels[createPendingLabel]
+	return pending
+}
+
+// A 4xx create response means the runner rejected the request before it
+// allocated anything.
+func cloudflareRejectedError(err error) bool {
+	var responseErr *cloudflareResponseError
+	return errors.As(err, &responseErr) && responseErr.statusCode >= 400 && responseErr.statusCode < 500
 }
 
 func resolveCloudflareClaim(identifier string) (core.LeaseClaim, error) {
@@ -379,6 +424,43 @@ func rejectCloudflareSyncOptions(req core.RunRequest) error {
 		return core.Exit(2, "%s uses archive sync; --checksum is not supported", providerName)
 	}
 	return nil
+}
+
+// runnerURLLabel records the runner that created a lease. Sandboxes exist only
+// on that runner, so lease commands keep using it even when the current
+// configuration, such as a fork command's nested run, selects another one.
+const runnerURLLabel = "runner_url"
+
+// leaseConfig keeps a claimed lease on the runner and workdir it was created
+// with, such as a checkpoint fork's captured workdir.
+func leaseConfig(cfg core.Config, claim core.LeaseClaim) core.Config {
+	if runner := strings.TrimSpace(claim.Labels[runnerURLLabel]); runner != "" {
+		cfg.Cloudflare.APIURL = runner
+	}
+	if workdir := strings.TrimSpace(claim.Labels["workdir"]); workdir != "" {
+		cfg.Cloudflare.Workdir = workdir
+	}
+	return cfg
+}
+
+func (b *cloudflareBackend) leaseClient(claim core.LeaseClaim) (*cloudflareClient, error) {
+	client, err := newCloudflareClient(leaseConfig(b.cfg, claim), b.rt)
+	if err != nil {
+		return nil, err
+	}
+	client.useInstanceType(cloudflareClaimInstanceType(claim))
+	return client, nil
+}
+
+// runConfig applies a claimed lease's runner and workdir; new leases use the
+// configured ones. Resolve reports claim lookup failures for the run.
+func (b *cloudflareBackend) runConfig(id string) core.Config {
+	if strings.TrimSpace(id) != "" {
+		if claim, ok, err := core.ResolveLeaseClaimForProvider(id, providerName); err == nil && ok {
+			return leaseConfig(b.cfg, claim)
+		}
+	}
+	return b.cfg
 }
 
 func cloudflareWorkdir(cfg core.Config) (string, error) {
@@ -455,7 +537,7 @@ func claimToServer(claim core.LeaseClaim, state string) core.Server {
 
 func cloudflareReady(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "ready", "started", "active", "healthy":
+	case "ready", "started", "active", "healthy", "running":
 		return true
 	default:
 		return false

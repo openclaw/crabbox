@@ -76,6 +76,8 @@ type fixedAWSCreateIntentTailscale struct {
 }
 
 type fixedAWSCreateIntentCapacity struct {
+	MinVCPUs          int      `json:"minVCPUs,omitempty"`
+	MinMemoryMiB      int      `json:"minMemoryMiB,omitempty"`
 	Market            string   `json:"market"`
 	Strategy          string   `json:"strategy"`
 	Fallback          string   `json:"fallback"`
@@ -97,6 +99,9 @@ func FixedAWSCreateIntentFingerprint(cfg Config, req FixedAWSCreateIntentRequest
 }
 
 func fixedAWSCreateIntentForConfig(cfg Config, req FixedAWSCreateIntentRequest) (fixedAWSCreateIntent, error) {
+	if err := validateCapacityMinimumValues(cfg.Capacity); err != nil {
+		return fixedAWSCreateIntent{}, err
+	}
 	network, err := parseNetworkMode(string(cfg.Network))
 	if err != nil {
 		return fixedAWSCreateIntent{}, err
@@ -173,6 +178,8 @@ func fixedAWSCreateIntentForConfig(cfg Config, req FixedAWSCreateIntentRequest) 
 			},
 		},
 		Capacity: fixedAWSCreateIntentCapacity{
+			MinVCPUs:          cfg.Capacity.MinVCPUs,
+			MinMemoryMiB:      cfg.Capacity.MinMemoryMiB,
 			Market:            strings.TrimSpace(cfg.Capacity.Market),
 			Strategy:          strings.TrimSpace(cfg.Capacity.Strategy),
 			Fallback:          strings.TrimSpace(cfg.Capacity.Fallback),

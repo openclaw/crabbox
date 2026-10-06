@@ -57,8 +57,19 @@ func concreteBoxID(id string) bool {
 	return true
 }
 
+func boxCreationTimeMatches(box boxData, expected string) bool {
+	created, err := time.Parse(time.RFC3339Nano, boxCreationTime(box))
+	if err != nil {
+		return false
+	}
+	witness, err := time.Parse(time.RFC3339Nano, expected)
+	// Boat's create/read clocks differ. A random Box ID reused within five
+	// seconds is not a realistic reuse scenario; larger age changes still conflict.
+	return err == nil && created.Sub(witness).Abs() <= 5*time.Second
+}
+
 func validateBoxIdentity(actual, expected boxData) error {
-	if !concreteBoxID(expected.ID) || actual.ID != expected.ID || boxCreationTime(expected) == "" || boxCreationTime(actual) != boxCreationTime(expected) {
+	if !concreteBoxID(expected.ID) || actual.ID != expected.ID || !expected.allowIDOnlyRelease && !boxCreationTimeMatches(actual, core.Blank(expected.claimCreatedAt, boxCreationTime(expected))) {
 		return core.Exit(2, "ascii-box %q identity is missing or changed; retaining resource and claim", expected.ID)
 	}
 	return nil
@@ -353,6 +364,8 @@ func exactBoxForRelease(ctx context.Context, client api, expected boxData) (boxD
 		if expected.deletionCompleted {
 			return boxData{}, core.Exit(2, "ascii-box %s is still observable after recorded deletion completion; retaining claim", expected.ID)
 		}
+		fresh.allowIDOnlyRelease = expected.allowIDOnlyRelease
+		fresh.claimCreatedAt = expected.claimCreatedAt
 		return fresh, nil
 	}
 	return boxData{}, fmt.Errorf("ascii-box ownership lookup; retaining claim: %w", err)

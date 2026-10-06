@@ -2515,6 +2515,7 @@ retrySync:
 			}
 			fmt.Fprintf(a.Stderr, "git origin fallback reason=%s; using plain manifest sync\n", reason)
 		}
+		seedSucceeded := false
 		if !overlayDecision.Enabled && !plainManifestMode && coherence.seedEnabled() {
 			stepStart = time.Now()
 			if out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
@@ -2526,6 +2527,8 @@ retrySync:
 				} else {
 					warnRemoteGitSeedFailure(a.Stderr, out, err)
 				}
+			} else {
+				seedSucceeded = true
 			}
 			timings.syncSteps.gitSeed += time.Since(stepStart)
 		}
@@ -2549,6 +2552,17 @@ retrySync:
 			timings.syncTransferFiles = len(manifest.Files)
 			timings.syncTransferBytes = manifest.Bytes
 			timings.syncFallbackReason = overlayDecision.Reason
+		}
+		seededDelta := false
+		if seedSucceeded && !overlayDecision.Requested && cfg.Sync.Delete && !cfg.Sync.Checksum {
+			stepStart = time.Now()
+			if delta, files, size, ok := seededSyncTransfer(ctx, target, repo, manifest, coherence, workdir); ok {
+				transferData, seededDelta = delta, true
+				timings.syncMode = "seeded-delta"
+				timings.syncTransferFiles, timings.syncTransferBytes = files, size
+				fmt.Fprintf(a.Stderr, "seeded sync delta: %d files, %s\n", files, humanBytes(size))
+			}
+			timings.syncSteps.gitSeed += time.Since(stepStart)
 		}
 		finalizeToken, err := randomHex(16)
 		if err != nil {
@@ -2637,7 +2651,7 @@ retrySync:
 			}
 			timings.syncSteps.prune = time.Since(stepStart)
 		}
-		if !overlayDecision.Enabled || len(transferData) != 0 {
+		if !overlayDecision.Enabled && !seededDelta || len(transferData) != 0 {
 			stepStart = time.Now()
 			usedTar := false
 			if coldCandidate {
@@ -2648,7 +2662,7 @@ retrySync:
 			}
 			// The explicit file list also prevents rsync from applying snapshot-root metadata to the workspace.
 			if !usedTar {
-				if err := rsync(ctx, target, syncSourceRoot, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Compression: effectiveSyncCompression(cfg), Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: transferData, NoTimes: localContainerDockerSocketSync(cfg, server), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
+				if err := rsync(ctx, target, syncSourceRoot, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Compression: effectiveSyncCompression(cfg), Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum || seededDelta, UseFilesFrom: true, FilesFrom: transferData, NoTimes: localContainerDockerSocketSync(cfg, server), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
 					return recordFailure(Exit(6, "rsync failed: %v", err))
 				}
 				timings.syncSteps.rsync = time.Since(stepStart)
@@ -4956,7 +4970,7 @@ func FindServerByAlias(servers []Server, id string) (Server, string, error) {
 	return findServerByAlias(servers, id)
 }
 
-func (a App) stop(ctx context.Context, args []string) error {
+func (a App) stop(ctx context.Context, args []string) (stopErr error) {
 	defaults := defaultConfig()
 	fs := newFlagSet("stop", a.Stderr)
 	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
@@ -5045,6 +5059,14 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Capture the command context before the coordinator narrows/cancels its
+	// release budget; successful maintenance gets its own bounded child context.
+	maintenanceCtx := ctx
+	defer func() {
+		if stopErr == nil {
+			a.autoPruneClaims(maintenanceCtx, cfg)
+		}
+	}()
 	if err := prepareProviderSelection(&cfg, *provider); err != nil {
 		return err
 	}
@@ -5068,19 +5090,16 @@ func (a App) stop(ctx context.Context, args []string) error {
 			}
 		}
 	}
-	if err := autoRouteClaimLeaseProvider(&cfg, fs, *id); err != nil {
+	if err := autoRouteClaimLeaseProviderContext(ctx, &cfg, fs, *id); err != nil {
 		return err
 	}
-	if err := autoRouteStaticLease(&cfg, fs, *id); err != nil {
+	if err := autoRouteStaticLeaseContext(ctx, &cfg, fs, *id); err != nil {
 		return err
 	}
-	if err := autoRouteExternalLease(&cfg, fs, *id); err != nil {
+	if err := autoRouteExternalLeaseContext(ctx, &cfg, fs, *id); err != nil {
 		return err
 	}
-	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
-		return err
-	}
-	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
+	if err := applyTargetAndProviderFlags(&cfg, fs, targetFlags, providerFlags); err != nil {
 		return err
 	}
 	if err := finalizeProviderSelection(&cfg); err != nil {

@@ -703,14 +703,21 @@ func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration
 	if err != nil {
 		return "", "", "", err
 	}
+	var matched core.LeaseClaim
 	slug := core.NormalizeLeaseSlug(id)
 	for _, claim := range claims {
 		if claim.Provider != providerName {
 			continue
 		}
 		if claim.LeaseID == id || core.NormalizeLeaseSlug(claim.Slug) == slug {
-			return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, scope)
+			if matched.LeaseID != "" {
+				return "", "", "", core.Exit(2, "multiple provider=%s claims match identifier %s", providerName, id)
+			}
+			matched = claim
 		}
+	}
+	if matched.LeaseID != "" {
+		return finishResolvedLease(matched, repoRoot, reclaim, idleTimeout, scope)
 	}
 	return "", "", "", core.Exit(4, "crownest sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", id, leasePrefix)
 }

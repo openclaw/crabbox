@@ -479,9 +479,7 @@ func TestTenkiResolveReadyProbePreparesSSH(t *testing.T) {
 	if err := os.WriteFile(keyPath, []byte("key"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(certPath, []byte("cert"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeCredentialTestCert(t, certPath, "session-1")
 	runner := &fakeRunner{}
 	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		runner.calls = append(runner.calls, req)
@@ -583,9 +581,7 @@ func TestTenkiResolveReclaimPersistsSessionEndpoint(t *testing.T) {
 	if err := os.WriteFile(keyPath, []byte("key"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(certPath, []byte("cert"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeCredentialTestCert(t, certPath, "session-1")
 	oldWait := waitForSSHReadyFunc
 	waitForSSHReadyFunc = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 		return nil
@@ -888,7 +884,7 @@ func TestTenkiSSHTargetUsesPreparedAuthority(t *testing.T) {
 			if target.KnownHostsFile != "/tmp/authority" || target.HostKeyAlias != alias || !target.AuthoritativeKnownHosts || target.DisableHostKeyChecking {
 				t.Fatalf("prepared authority changed: %#v", target)
 			}
-			if target.Key != output.IdentityFile || target.CertificateFile != output.CertificateFile || target.SSHHostKey != "" {
+			if target.Key != output.IdentityFile || target.CertificateFile != output.CertificateFile+".crabbox.pub" || target.SSHHostKey != "" {
 				t.Fatal("native credentials were replaced")
 			}
 		})
@@ -910,7 +906,7 @@ func TestTenkiSSHTargetUsesProxyCommand(t *testing.T) {
 		CertificateFile: "/tmp/session-cert.pub",
 		ProxyCommand:    "'/opt/Tenki CLI/tenki' sandbox ssh-proxy --session 00000000-0000-0000-0000-000000000001 --endpoint https://api.tenki.test --gateway wss://gateway.tenki.test",
 	}, "/tmp/tenki-authority", "")
-	if !target.SSHConfigProxy || target.Host != "sandbox" || target.User != "tenki" || target.Key != "/tmp/id_ed25519" || target.CertificateFile != "/tmp/session-cert.pub" {
+	if !target.SSHConfigProxy || target.Host != "sandbox" || target.User != "tenki" || target.Key != "/tmp/id_ed25519" || target.CertificateFile != "/tmp/session-cert.pub.crabbox.pub" {
 		t.Fatalf("unexpected target: %#v", target)
 	}
 	if target.NoControlMaster || target.DisableHostKeyChecking {
@@ -1157,9 +1153,7 @@ func TestTenkiWaitForSSHCommandUsesStructuredOutput(t *testing.T) {
 	if err := os.WriteFile(keyPath, []byte("key"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(certPath, []byte("cert"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeCredentialTestCert(t, certPath, "session-1")
 	runner := &fakeRunner{}
 	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		runner.calls = append(runner.calls, req)

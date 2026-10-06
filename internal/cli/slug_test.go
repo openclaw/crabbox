@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,7 +58,7 @@ func TestSlugWithCollisionSuffix(t *testing.T) {
 
 func TestAllocateDirectLeaseSlugAddsSuffixOnCollision(t *testing.T) {
 	leaseID := "cbx_000000000001"
-	base := NewLeaseSlug(leaseID)
+	base := generatedLeaseSlug(leaseID)
 	got, err := AllocateDirectLeaseSlug(leaseID, "", []Server{
 		{Labels: map[string]string{"lease": "cbx_000000000000", "slug": base}},
 	})
@@ -124,7 +125,7 @@ func TestAllocateDirectLeaseSlugAvoidsLocalClaimCollisionForRequestedSlug(t *tes
 	}
 }
 
-func TestAllocateDirectLeaseSlugAvoidsLocalClaimCollisionForGeneratedSlug(t *testing.T) {
+func TestAllocateDirectLeaseSlugGeneratedHasIDHash(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_000000000001"
 	base := NewLeaseSlug(leaseID)
@@ -138,8 +139,8 @@ func TestAllocateDirectLeaseSlugAvoidsLocalClaimCollisionForGeneratedSlug(t *tes
 	if got == base {
 		t.Fatalf("claim collision was not repaired: %q", got)
 	}
-	if !strings.HasPrefix(got, base+"-") || len(got) != len(base+"-0000") {
-		t.Fatalf("collision slug=%q want four-hex suffix", got)
+	if !strings.HasPrefix(got, base+"-") || len(got) != len(base+"-00000000") {
+		t.Fatalf("collision slug=%q want 32-bit fingerprint", got)
 	}
 }
 
@@ -160,7 +161,7 @@ func TestAllocateDirectLeaseSlugGeneratedIgnoresCorruptUnrelatedClaim(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != NewLeaseSlug(leaseID) {
+	if got != generatedLeaseSlug(leaseID) {
 		t.Fatalf("slug=%q", got)
 	}
 }
@@ -198,7 +199,7 @@ func TestAllocateClaimLeaseSlugGeneratedIgnoresCorruptUnrelatedClaim(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != NewLeaseSlug("cbx_000000000001") {
+	if got != generatedLeaseSlug("cbx_000000000001") {
 		t.Fatalf("slug=%q", got)
 	}
 }
@@ -353,5 +354,73 @@ func TestFindServerByAliasAmbiguousSlugFails(t *testing.T) {
 func TestServerSlugHandlesMissingLabels(t *testing.T) {
 	if got := ServerSlug(Server{}); got != "" {
 		t.Fatalf("serverSlug without labels=%q", got)
+	}
+}
+
+func TestGeneratedLeaseSlugNeverReadsClaims(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const id = "cbx_123456abcdef"
+	generated := generatedLeaseSlug(id)
+	reads := 0
+	readClaims := func(context.Context, string, string) (bool, error) {
+		reads++
+		return false, fmt.Errorf("claims must not be read")
+	}
+	for _, servers := range [][]Server{nil, {{Labels: map[string]string{"slug": generated}}}} {
+		got, err := allocateDirectLeaseSlug(t.Context(), id, "", servers, readClaims)
+		if err != nil || got == "" || reads != 0 {
+			t.Fatalf("slug=%q reads=%d err=%v", got, reads, err)
+		}
+		if len(servers) > 0 && got == generated {
+			t.Fatal("provider collision ignored")
+		}
+	}
+	if _, err := allocateDirectLeaseSlug(t.Context(), id, "requested", nil, readClaims); err == nil || reads != 1 {
+		t.Fatalf("requested slug must strictly check claims: reads=%d err=%v", reads, err)
+	}
+	// Also exercise the production entry point with a claims path that cannot
+	// be listed. Success cannot come from merely ignoring individual bad files.
+	dir, err := CrabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "claims"), []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := AllocateClaimLeaseSlug(id, ""); err != nil || got != generated {
+		t.Fatalf("got=%q err=%v", got, err)
+	}
+}
+
+func TestGeneratedLeaseSlugFingerprintAndProviderNameBudget(t *testing.T) {
+	const id = "cbx_abcdef123456"
+	got := generatedLeaseSlug(id)
+	if got != "blue-prawn-f1876f78" {
+		t.Fatalf("generated slug=%q", got)
+	}
+	if len(got) > maxRequestedLeaseSlugLength || len(LeaseProviderName(id, got)) > 63 {
+		t.Fatalf("generated name exceeds provider budget: %q", got)
+	}
+}
+
+func TestGeneratedLeaseSlugDoesNotReuseFourHexCollision(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const firstID, secondID = "cbx_0000000002ba", "cbx_0000000016c9"
+	if SlugWithCollisionSuffix(NewLeaseSlug(firstID), firstID) != SlugWithCollisionSuffix(NewLeaseSlug(secondID), secondID) {
+		t.Fatal("fixture must collide under the four-hex naming scheme")
+	}
+	first, err := AllocateClaimLeaseSlug(firstID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := AllocateClaimLeaseSlug(secondID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("generated IDs share slug %q without a local collision scan", first)
 	}
 }

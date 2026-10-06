@@ -23,6 +23,9 @@ import (
 type ownershipRunner func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error)
 
 func (f ownershipRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	if result, ok := testCompletedGitHubRead(req); ok {
+		return result, nil
+	}
 	return f(ctx, req)
 }
 
@@ -40,7 +43,7 @@ func TestParseBlacksmithIdentityNeverAssignedCompleted(t *testing.T) {
 	const output = "ID                              STATUS     IP  WORKFLOW                                  JOB  REF                                     CREATED                      RUN URL\n" +
 		"tbx_01aaaaaaaaaaaaaaaaaaaaaaaa  completed      .github/workflows/ci-testing-testbox.yml  go   fix/queue-testbox-cleanup-verification  2026-09-02T13:54:37.000000Z  \n"
 	identity, err := parseBlacksmithIdentity(output, id)
-	if err != nil || identity != (blacksmithIdentity{ID: id, State: "completed", Workflow: ".github/workflows/ci-testing-testbox.yml", Job: "go", Ref: "fix/queue-testbox-cleanup-verification"}) {
+	if err != nil || identity != (blacksmithIdentity{ID: id, State: "completed", Workflow: ".github/workflows/ci-testing-testbox.yml", Job: "go", Ref: "fix/queue-testbox-cleanup-verification", Created: "2026-09-02T13:54:37.000000Z"}) {
 		t.Fatalf("complete native row with empty IP/URL rejected: identity=%+v err=%v", identity, err)
 	}
 }
@@ -614,5 +617,27 @@ func TestBlacksmithRejectsHydrationFailedReuse(t *testing.T) {
 	after, readErr := core.ReadLeaseClaim(id)
 	if err == nil || !strings.Contains(err.Error(), "hydration failed") || readErr != nil || after.Revision != claim.Revision {
 		t.Fatalf("hydration failure admitted or changed claim: err=%v read=%v claim=%+v", err, readErr, after)
+	}
+}
+
+func TestBlacksmithStopRejectsAmbiguousSlugBeforeProviderCalls(t *testing.T) {
+	isolateBlacksmithOwnership(t)
+	first := testOwnedBlacksmithClaim(t, "tbx_alias_first", "same-slug", "/repo")
+	second := testOwnedBlacksmithClaim(t, "tbx_alias_second", "same-slug", "/repo")
+	calls := 0
+	cfg := core.BaseConfig()
+	cfg.Blacksmith.Org = "example-org"
+	b := newTestBlacksmithBackend(cfg, ownershipRunner(func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		calls++
+		return core.LocalCommandResult{}, nil
+	}))
+	err := b.Stop(t.Context(), core.StopRequest{ID: "SAME SLUG"})
+	if err == nil || !strings.Contains(err.Error(), "multiple") || calls != 0 {
+		t.Fatalf("err=%v provider calls=%d", err, calls)
+	}
+	for _, c := range []core.LeaseClaim{first, second} {
+		if actual, exists, err := core.ReadLeaseClaimWithPresence(c.LeaseID); err != nil || !exists || actual.Revision != c.Revision {
+			t.Fatalf("claim changed: %+v %v %v", actual, exists, err)
+		}
 	}
 }

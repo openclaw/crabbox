@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,8 +17,8 @@ var (
 	coordinatorCreateLeaseTimeoutForConfig   = defaultCoordinatorCreateLeaseTimeoutForConfig
 	coordinatorCreateLeaseRecoveryTimeout    = 90 * time.Second
 	coordinatorCreateLeaseRecoveryInterval   = 5 * time.Second
-	coordinatorCanceledCreateRecoveryTimeout = 10 * time.Second
-	coordinatorCanceledCreateFinalTimeout    = 10 * time.Second
+	coordinatorCanceledCreateRecoveryTimeout = 30 * time.Second
+	coordinatorCanceledCreateFinalTimeout    = 30 * time.Second
 	coordinatorCreateAttemptID               = newCreateAttemptID
 )
 
@@ -252,7 +253,7 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 			slug = NewLeaseSlug(leaseID)
 		}
 	} else {
-		slug, err = AllocateClaimLeaseSlug(leaseID, requestedSlug)
+		slug, err = AllocateClaimLeaseSlugContext(ctx, leaseID, requestedSlug)
 		if err != nil {
 			return LeaseTarget{}, err
 		}
@@ -523,6 +524,11 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 	b = &progressBackend
 	progressCtx, stopProgress := context.WithCancel(createCtx)
 	progressDone := make(chan struct{})
+	var phase atomic.Value
+	phase.Store("awaiting-response")
+	observe := func(lease CoordinatorLease) {
+		phase.Store(blank(lease.ProvisioningPhase, lease.State))
+	}
 	go func() {
 		defer close(progressDone)
 		ticker := time.NewTicker(coordinatorCreateLeaseProgressInterval)
@@ -530,7 +536,7 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 		for {
 			select {
 			case <-ticker.C:
-				fmt.Fprintf(b.rt.Stderr, "waiting for coordinator lease provider=%s slug=%s elapsed=%s timeout=%s\n", cfg.Provider, slug, time.Since(started).Round(time.Second), timeout)
+				fmt.Fprintf(b.rt.Stderr, "waiting for coordinator lease provider=%s slug=%s elapsed=%s timeout=%s phase=%q\n", cfg.Provider, slug, time.Since(started).Round(time.Second), timeout, phase.Load())
 			case <-progressCtx.Done():
 				return
 			}
@@ -571,11 +577,16 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 		}
 	}()
 
-	create := func(requestCtx context.Context) (CoordinatorLease, error) {
+	create := func(requestCtx context.Context) (created CoordinatorLease, createErr error) {
 		if fixed {
-			return b.coord.EnsureLease(requestCtx, cfg, publicKey, keep, leaseID, slug)
+			created, createErr = b.coord.EnsureLease(requestCtx, cfg, publicKey, keep, leaseID, slug)
+		} else {
+			created, createErr = b.coord.CreateLeaseWithAttempt(requestCtx, cfg, publicKey, keep, leaseID, slug, createAttemptID)
 		}
-		return b.coord.CreateLeaseWithAttempt(requestCtx, cfg, publicKey, keep, leaseID, slug, createAttemptID)
+		if createErr == nil {
+			observe(created)
+		}
+		return created, createErr
 	}
 	rebound := false
 	lease, err = create(createCtx)
@@ -603,7 +614,7 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 	}
 	if lease.State == "provisioning" {
 		// Rebinding only confirms the operation. Readiness uses the original deadline.
-		lease, err = b.waitForCoordinatorLeaseActivation(createCtx, cfg, lease.ID, lease)
+		lease, err = b.waitForCoordinatorLeaseActivation(createCtx, cfg, lease.ID, lease, observe)
 		identityMismatch = isCoordinatorLeaseIDConflict(err)
 		return lease, err
 	}
@@ -763,7 +774,7 @@ func (b *coordinatorLeaseBackend) recoverCoordinatorLeaseAfterCreateError(
 	}
 }
 
-func (b *coordinatorLeaseBackend) waitForCoordinatorLeaseActivation(ctx context.Context, cfg Config, leaseID string, current CoordinatorLease) (CoordinatorLease, error) {
+func (b *coordinatorLeaseBackend) waitForCoordinatorLeaseActivation(ctx context.Context, cfg Config, leaseID string, current CoordinatorLease, observe func(CoordinatorLease)) (CoordinatorLease, error) {
 	ticker := time.NewTicker(coordinatorCreateLeaseRecoveryInterval)
 	defer ticker.Stop()
 	for {
@@ -790,6 +801,7 @@ func (b *coordinatorLeaseBackend) waitForCoordinatorLeaseActivation(ctx context.
 				return CoordinatorLease{}, err
 			}
 			current = lease
+			observe(current)
 		case <-ctx.Done():
 			return CoordinatorLease{}, ctx.Err()
 		}
@@ -1005,6 +1017,7 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		CleanupRetryAt:               lease.CleanupRetryAt,
 		ReleaseDeletesServer:         lease.ReleaseDeletesServer,
 		FailureError:                 lease.FailureError,
+		ProvisioningPhase:            lease.ProvisioningPhase,
 		ProvisioningResourceMayExist: lease.ProvisioningResourceMayExist,
 		ProvisioningFailureRetryable: lease.ProvisioningFailureRetryable,
 		Labels:                       cloneStringMap(server.Labels),
@@ -1050,12 +1063,12 @@ func (b *coordinatorLeaseBackend) ListJSON(ctx context.Context, req ListRequest)
 }
 
 func (b *coordinatorLeaseBackend) listUserLeases(ctx context.Context) ([]CoordinatorLease, error) {
-	leases, err := b.coord.listLeases(ctx, "", 1000, "current", b.cfg.Provider)
+	leases, truncated, err := b.coord.CurrentLeases(ctx, b.cfg.Provider)
 	if err != nil {
 		return nil, err
 	}
-	if len(leases) >= 1000 {
-		fmt.Fprintln(b.rt.Stderr, "warning: coordinator list reached its 1000-lease limit; older kept leases may be omitted; inspect them by exact lease ID")
+	if truncated {
+		fmt.Fprintln(b.rt.Stderr, "warning: coordinator list reached its legacy 500-lease limit; older kept leases may be omitted; update the coordinator or inspect them by exact lease ID")
 	}
 	// Older coordinators ignore view=current and return ended history too.
 	current := make([]CoordinatorLease, 0, len(leases))

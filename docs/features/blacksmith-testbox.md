@@ -148,36 +148,49 @@ blacksmith [--org <org>] testbox status --id <tbx_id>
 
 The wrapper is deliberately thin for warmup, run, and stop. `crabbox list` and `crabbox status`
 normalize Blacksmith output into Crabbox's common list/status views so rendering stays
-core-owned across providers. Both `list` and `status` read `blacksmith testbox list --all` and
-parse its table output.
+core-owned across providers. `list` reads the native inventory. `status` reads the exact ID through
+`blacksmith testbox status --id`, including completed Testboxes absent from inventory.
+Use `status --json` without `--wait` for one queue snapshot: `state` is the native
+Testbox state, and `ready` indicates command readiness. A `completed` snapshot does
+not establish GitHub settlement. `--wait` waits for readiness and fails immediately
+if the Testbox reaches `completed` or `hydration_failed`.
 
 `crabbox list --provider blacksmith-testbox --json` parses that table into compatibility JSON rows
 with the fields Crabbox can see (id, status, repo, workflow, job, ref, created). The parser is a
 compatibility layer, not a Blacksmith API contract; if the CLI gains native JSON output, Crabbox
 should switch to it and drop table parsing.
 
-For a Testbox with an exact local `blacksmith-testbox` claim, a failed stop triggers one fresh native
-`blacksmith testbox status --id <same-id>` query in the same organization and
-cleanup context, while the existing local claim lock remains held. Cleanup is
-acknowledged only when that query succeeds without cancellation and its stdout
-contains the native table header and one complete, unambiguous row identifying
-the **exact requested ID** with state **`completed`**. The IP cell may be empty
-after native stop clears it. A Testbox stopped before leaving the queue may
-complete without ever receiving an IP or GitHub Actions run URL. Empty IP and
-`RUN URL` cells are allowed only in the complete native table: workflow/job/ref
-must match the exact claim, `CREATED` must be nonempty, and the row must retain
-its column alignment, padding through the `RUN URL` column, and final newline.
-A present run URL must be a valid GitHub Actions run URL. Successful stops also
-require terminal confirmation.
-Raw IDs without exact local ownership never reach native stop.
+Stop requires an exact local `blacksmith-testbox` claim and the same organization/API
+route. Native status must return one complete, unambiguous row with the exact ID
+and matching workflow/job/ref. Missing inventory, error prose, malformed tables,
+and canceled or failed queries never establish completion.
 
-Only `completed` establishes terminal status for this reconciliation. A 409 or
-“already stopped” error, stderr text, missing inventory/404, malformed or duplicate
-rows, other states, and failed or canceled status queries do not authorize local
-removal. Without confirmation, Crabbox preserves the original stop error and
-diagnostics and retains the unchanged claim and stored key for retry. Confirmed
-completion permits an exclusive recheck of the original claim and native status;
-only successful local finalization prints a cleanup reconciliation note.
+Native `completed` is only the Testbox result. Before removing its claim or key,
+Crabbox also reads the exact associated GitHub run using the existing optional
+`gh` integration. The association comes exclusively from the native status row's
+`RUN URL`; Crabbox never selects a run by timestamp, workflow name, or inventory.
+The GitHub response must match that URL and run ID and report `completed` with a
+recognized conclusion. Success, failure, and cancellation all establish terminal
+settlement; completion is not described as proof of cancellation.
+
+Missing `gh`, unavailable existing authentication or repository access, an absent
+or invalid run URL, a changed association, or a nonterminal GitHub run leaves
+settlement unresolved. Stop returns nonzero and retains the unchanged claim and
+key. Crabbox neither installs tools nor acquires credentials. Native stop remains
+the only mutation; GitHub reads never cancel a workflow or another job.
+
+A queued Testbox may report native completion before its run URL appears. That
+stop reports unresolved settlement promptly. Retry the same stop after association
+becomes available. A retained completed Testbox with a still-active associated run,
+or an association first observed after native stop, permits one further exact
+native stop attempt within the cleanup deadline. Pending GitHub completion is
+polled within that existing deadline. Failed native stop errors remain visible
+unless both native and GitHub completion are verified and local cleanup succeeds.
+
+Finalization takes the existing exclusive claim fence and rechecks the original
+claim, exact native completion, unchanged run URL, and GitHub terminal result
+before removing connection artifacts and then the claim. Failed finalization
+retains recovery ownership and never prints successful reconciliation.
 
 Reconciliation applies to explicit stop and automatic one-shot cleanup. It
 preserves an earlier workload failure; unconfirmed cleanup after a successful
@@ -189,7 +202,9 @@ runs retain their existing cleanup policy.
 If `blacksmith testbox list --all` and `crabbox status` both work but new warmups stay `queued`
 with no IP, treat it as Blacksmith service, queue, org-limit, or billing pressure rather than a
 Crabbox provisioning bug. Stop queued IDs you created and switch to another provider until the
-Blacksmith account or service recovers. A `warmup` failure prints a hint suggesting a
+Blacksmith account or service recovers. If stop reports unresolved settlement,
+retain its recovery ownership and do not assume the previous GitHub work was
+cancelled before replacing it. A `warmup` failure prints a hint suggesting a
 coordinator-backed provider (for example `--provider aws`) and can roll back only the unique Testbox receipt from that invocation while its local claim is absent. It never infers ownership from newly listed resources.
 
 ### Portal visibility

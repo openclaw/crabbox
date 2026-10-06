@@ -214,7 +214,7 @@
     "lifecycle": "Cloudflare Worker",
     "cleanup": "container delete",
     "bestFit": "Fast delegated Linux container execution",
-    "caveat": "Requires Worker deployment and container availability",
+    "caveat": "Requires Worker deployment and container availability; container snapshots cannot be deleted and expire after 30 days",
     "auth": "Runner bearer token via CRABBOX_CLOUDFLARE_RUNNER_TOKEN plus runner URL; delegated remote container",
     "docs": "cloudflare.md"
   },

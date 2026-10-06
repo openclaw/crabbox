@@ -37,7 +37,8 @@ warmup complete total=42.1s
 ```
 
 The canonical lease ID is `cbx_...`; the friendly `slug` is an auto-generated
-`<adjective>-<noun>` handle (or a normalized `--slug` you requested). Reuse
+`<adjective>-<noun>-<eight-hex-fingerprint>` handle (or a normalized `--slug`
+you requested). Fixed-ID replay preserves its original naming contract. Reuse
 either with later `run`, `status`, `ssh`, `inspect`, and `stop` commands.
 Scripts should prefer the canonical ID. Add `--timing-json` to emit a final
 JSON timing record (provider, lease ID, slug, total duration, exit code) on
@@ -119,7 +120,7 @@ it and may append a short suffix if an active lease already uses that slug.
 
 `--lease-id cbx_<12 lowercase hex>` is the automation idempotency contract for
 providers that explicitly support fixed identities. Direct AWS, Azure, DigitalOcean,
-Machine0, Daytona, Incus, Tenki, Parallels, Proxmox, Boat, Apple Container, and local-container leases,
+Machine0, Daytona, Incus, Tenki, RunPod, Parallels, Proxmox, Boat, Apple Container, and local-container leases,
 Agent Sandbox delegated leases, managed coordinator leases, and explicitly capable
 external providers accept it. Replaying the same normalized create intent
 returns or joins the same live lease, including after the creating process loses
@@ -159,7 +160,7 @@ honors caller cancellation. Fixed-ID leases remain available for explicit recove
 or stop; ordinary creates keep their token-bound cancellation cleanup.
 
 A fixed lease ID is single-use. Direct AWS, Azure, DigitalOcean, Machine0, Daytona,
-Incus, Tenki, Parallels, Proxmox, Boat, Apple Container, and local-container
+Incus, Tenki, RunPod, Parallels, Proxmox, Boat, Apple Container, and local-container
 acquisitions fail closed if their bound resource later disappears. Successful
 stop and missing-resource cleanup replace the live local claim with a compact
 terminal tombstone, so the ID remains rejected after release. Use a new
@@ -388,6 +389,8 @@ bootstrap, key migration, or failure cleanup.
 --os ubuntu:26.04|ubuntu:24.04     portable Linux OS image selector
 --type <provider-type>             provider server/instance type
 --market spot|on-demand            capacity market (AWS)
+--min-vcpus <count>                minimum vCPUs for new AWS Linux leases; 0 disables
+--min-memory-mib <MiB>             minimum memory for new AWS Linux leases; 0 disables
 --slug <slug>                      request a friendly slug for a new lease
 --lease-id cbx_<12 lowercase hex> fixed lease ID for idempotent automation
 --pond <name>                      tag this lease into a pond
@@ -469,3 +472,6 @@ or `~/.config/crabbox/...` respectively.
 Static power hooks require a trusted `static.power.dedicated: true` contract.
 Use a distinct `static.id` for concurrent acquisitions; same-ID acquisition and
 prepared reuse are refused while custody remains. See [Power hooks](../providers/ssh.md#power-hooks).
+
+Optional resource minimums and supported creation/reuse combinations are documented
+in [capacity fallback](../features/capacity-fallback.md#optional-aws-resource-minimums).

@@ -1,14 +1,15 @@
 # Crabbox
 
-**Run any repository command in the right box.**
+**On-demand computers for agents.**
 
 ## What Crabbox Is
 
-Crabbox keeps the edit-and-run loop on your laptop while moving execution to a
-local sandbox, cloud VM, existing SSH host, managed developer environment, or
-hosted agent sandbox. Depending on the selected provider, it syncs the checkout
-or hands the workload to a provider-owned execution contract, returns available
-output and evidence, and releases owned capacity when cleanup is supported.
+Crabbox gives coding agents and humans on-demand computers for tests and builds.
+Keep editing locally while a remote box runs your working tree, including
+uncommitted changes. Crabbox streams output, returns the command’s exit code,
+and cleans up the lease according to the provider’s contract.
+
+With a provider configured, run the test command your repository already uses:
 
 ```sh
 crabbox run -- pnpm test
@@ -16,20 +17,43 @@ crabbox run -- pnpm test
 
 ## One Loop, Many Kinds of Box
 
-Every run follows the same basic path:
+The standard remote execution loop:
 
-1. **Choose** a provider directly or ask Crabbox to recommend one for the job.
-2. **Lease or reuse** a short-lived box, sandbox, VM, or host.
-3. **Sync or hand off** the workload according to the provider's execution
-   contract.
-4. **Run** the command and stream its output.
-5. **Collect available proof and apply cleanup** according to the provider's
-   capabilities and the run policy.
+1. **Edit locally** in your existing checkout.
+2. **Lease a box** or reuse warm capacity.
+3. **Sync** the working tree, including uncommitted changes.
+4. **Run** your command on the box.
+5. **Stream output and return the exit code** to the caller.
+6. **Clean up** owned capacity, or keep it warm for the next run.
+
+Delegated providers can own the execution and sync path. Reuse, evidence, and
+cleanup follow the selected provider’s capabilities and the run policy.
 
 The execution substrate can change without turning the workflow into a
 provider-specific script. Start with [Use Cases](use-cases.md) when you know the
 job but not the provider, or browse the [Provider Reference](providers/README.md)
 when you already know where the work should run.
+
+## More Agents, Less Waiting
+
+- **Agents in parallel:** put tests and builds on separate boxes instead of
+  competing for one laptop’s CPU, RAM, and ports.
+- **Warm boxes:** reuse prepared environments to keep the edit-run loop short.
+- **Cross-platform tests:** target Linux, macOS, native Windows, or WSL2 from
+  the same local checkout. Availability depends on the provider.
+- **See and drive the box:** use [VNC or WebVNC](features/interactive-desktop-vnc.md)
+  on supported desktops, request a browser, or use VS Code in the browser with
+  `--code` on managed Linux. The authenticated [portal](features/portal.md)
+  shows leases and run logs; WebVNC supports watching or taking control while
+  the local bridge runs.
+- **Shared team capacity:** an optional coordinator owns cloud credentials,
+  shares leases, and enforces expiry and configured spend caps for brokered
+  providers.
+
+The [provider catalog](providers/README.md) covers clouds, local VMs, SSH hosts,
+and delegated sandboxes. The [external plugin contract](providers/external.md)
+lets you connect your own backend. The website generates its provider wall and
+category counts from the catalog metadata.
 
 ## Start Here
 
@@ -60,15 +84,14 @@ the exact boundary.
 
 ## Trust Boundary
 
-Crabbox is a developer execution tool, not one uniform security sandbox.
-Isolation depends on the selected runtime. A local container with the host
-Docker socket, a managed microVM, a shared team VM, and a provider-owned sandbox
-have different boundaries.
+Run trusted repositories with trusted teammates. Crabbox is a developer
+execution tool; isolation depends on the selected runtime. Reuse and destructive
+cleanup require verified ownership of the exact resource and claim. Ambiguous
+ownership fails closed.
 
 Use [Provider Selection](features/provider-selection.md) to route a workload,
-then read that provider's documentation before running unfamiliar or untrusted
-code. The recommendation command is workflow guidance, not a security
-certification.
+then read that provider’s documentation and the [security model](security.md).
+The recommendation command is workflow guidance, not a security certification.
 
 ## Go Deeper
 

@@ -1,7 +1,15 @@
 # Use Cases
 
-Read this when you know what needs to happen but do not yet know which Crabbox
-provider or execution model fits.
+Give each coding agent an on-demand computer for its tests and builds. Agents
+keep editing their local checkouts while Crabbox syncs uncommitted work, runs
+commands remotely, and returns output and exit codes. Separate remote leases
+keep parallel work from competing for one laptop's CPU, memory, and ports.
+
+Choose Linux, macOS, native Windows, or WSL2 when platform behavior matters.
+Use a warm box for repeated runs, and open a desktop or browser editor when you
+need to inspect the result. The
+[desktop, VNC, browser, Code, and portal guide](features/interactive-desktop-vnc.md)
+explains interactive access and handoffs.
 
 Start with the workload, not the vendor:
 
@@ -33,9 +41,21 @@ VM and SSH semantics matter.
 
 ## Give a Coding Agent a Disposable Environment
 
-Use a delegated or local sandbox when an agent needs to execute generated code,
-install dependencies, or inspect a repository away from the main checkout—or,
-with a remote provider, away from the workstation.
+Use a remote SSH lease or delegated sandbox when an agent needs to execute
+repository commands away from the workstation. A local sandbox gives it a
+separate workspace but still uses the laptop's resources. Crabbox handles
+execution and cleanup; the calling agent or harness owns orchestration.
+
+For independent agents, create a separate lease from each agent's checkout:
+
+```sh
+crabbox warmup --provider hetzner --class standard --slug agent-tests
+crabbox run --id agent-tests -- pnpm test
+crabbox stop agent-tests
+```
+
+Use a distinct slug for each lease. Warm leases preserve setup between commands;
+review repo configuration and install its tools/dependencies before testing.
 
 ```sh
 crabbox providers recommend agent-sandbox
@@ -49,9 +69,10 @@ These are three different questions:
 - `disposable-execution` requires a cleanup-capable temporary runtime;
 - `isolated-execution` favors delegated and local sandbox boundaries.
 
-The last recommendation is routing guidance, not a provider security
-certification. Read the selected provider's trust and network model before
-running hostile code or attaching secrets.
+The last recommendation is routing guidance, not a security certification.
+Crabbox expects trusted operators, repository config, and workloads; a disposable
+box does not make hostile code safe. Read the selected provider's trust and
+network model before forwarding secrets.
 
 ## Validate Linux, Windows, WSL2, or macOS
 
@@ -77,9 +98,15 @@ or a handoff to a teammate:
 
 ```sh
 crabbox providers recommend desktop
-crabbox warmup --provider azure --target windows --desktop
-crabbox webvnc --id blue-lobster
+crabbox warmup --provider azure --target windows --windows-mode normal --desktop --slug ui-check
+crabbox webvnc --id ui-check --open --take-control
 ```
+
+WebVNC lets an authorized teammate observe the desktop and take control. Native
+VNC uses an SSH tunnel; `crabbox code` opens a code-server editor on supported
+Linux leases. The coordinator portal shows leases, bridge health, and retained
+run evidence. Keep the local bridge alive while using the browser. See the
+[combined access guide](features/interactive-desktop-vnc.md) for prerequisites.
 
 Pair it with evidence routing when the result must survive after the box:
 
@@ -175,7 +202,10 @@ crabbox usage --scope user
 ```
 
 The coordinator is a control plane. The CLI still connects directly to normal
-SSH runners for sync and command execution.
+SSH runners for sync and command execution, while recording run evidence with
+the coordinator. Browse `/portal` on that coordinator for lease inventory and
+links to desktops, editors, and run details. Direct-provider registrations add
+portal visibility without transferring provider credentials or cleanup ownership.
 
 ## Need a More Specific Route?
 

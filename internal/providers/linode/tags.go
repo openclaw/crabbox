@@ -20,7 +20,9 @@ const (
 	tagChunkHeaderLength      = 5
 )
 
-var tagSchema = shared.LeaseTagSchema(shared.TailscaleTagFields()...)
+var tagSchema = shared.LeaseTagSchema(append(shared.TailscaleTagFields(),
+	shared.TagLabelField{Key: "fixed_intent_sha256", Exact: true}, shared.TagLabelField{Key: "fixed_attempt", Exact: true},
+)...)
 
 func leaseTags(cfg core.Config, leaseID, slug, state string, keep bool, now time.Time) []string {
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, now)

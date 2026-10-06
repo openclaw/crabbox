@@ -110,22 +110,76 @@ func TestAWSAndAzureClassProfileVariantCoverage(t *testing.T) {
 	}
 }
 
+func TestExplicitClassPreservesConfiguredNativeTypes(t *testing.T) {
+	for _, tc := range []struct {
+		provider, typeEnv, nativeDefault, beast string
+	}{
+		{"linode", "CRABBOX_LINODE_TYPE", "g6-standard-1", "g6-standard-16"},
+		{"scaleway", "CRABBOX_SCALEWAY_TYPE", "DEV1-S", "GP1-XL"},
+	} {
+		t.Run(tc.provider, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			t.Chdir(t.TempDir())
+			t.Setenv("CRABBOX_PROVIDER", tc.provider)
+			t.Setenv("CRABBOX_DEFAULT_CLASS", "")
+			t.Setenv(tc.typeEnv, "")
+			inherited, err := core.LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_DEFAULT_CLASS", "beast")
+			provider, err := core.ProviderFor(tc.provider)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := provider.(core.ProviderServerTypeProvider).ServerTypeForConfig(inherited); got != tc.nativeDefault {
+				t.Fatalf("inherited default=%q want=%q", got, tc.nativeDefault)
+			}
+			for _, nativeType := range []string{"", tc.nativeDefault, "custom-type"} {
+				t.Run("native="+nativeType, func(t *testing.T) {
+					t.Setenv(tc.typeEnv, nativeType)
+					cfg, err := core.LoadConfig()
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := tc.beast
+					if nativeType != "" {
+						want = nativeType
+					}
+					typer := provider.(core.ProviderServerTypeProvider)
+					if got := typer.ServerTypeForConfig(cfg); got != want {
+						t.Fatalf("type=%q want=%q", got, want)
+					}
+					_, overridden := provider.(core.ProviderServerTypeOverrideProvider).ServerTypeOverrideForConfig(cfg)
+					if overridden != (nativeType != "") {
+						t.Fatalf("native override=%t type=%q", overridden, nativeType)
+					}
+					cfg.ServerType, cfg.ServerTypeExplicit = "exact-type", true
+					if got := typer.ServerTypeForConfig(cfg); got != "exact-type" {
+						t.Fatalf("explicit type=%q", got)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestTinyAndSmallProfilePrimariesForMappedProviders(t *testing.T) {
 	want := map[string]map[string]string{
 		"aws":                {"tiny": "m7a.large", "small": "c7a.2xlarge"},
 		"azure":              {"tiny": "Standard_D2ads_v6", "small": "Standard_D8ads_v6"},
 		"cloudflare":         {"tiny": "standard-4", "small": "standard-4"},
 		"daytona":            {"tiny": "daytona-small", "small": "daytona-small"},
-		"digitalocean":       {"tiny": "s-1vcpu-1gb", "small": "s-1vcpu-1gb"},
+		"digitalocean":       {"tiny": "s-1vcpu-1gb", "small": "s-2vcpu-4gb"},
 		"gcp":                {"tiny": "c4-standard-4", "small": "c4-standard-8"},
 		"hetzner":            {"tiny": "ccx13", "small": "ccx23"},
-		"linode":             {"tiny": "g6-standard-1", "small": "g6-standard-1"},
+		"linode":             {"tiny": "g6-standard-1", "small": "g6-standard-2"},
 		"machine0":           {"tiny": "large", "small": "xl"},
 		"namespace-devbox":   {"tiny": "S", "small": "S"},
 		"namespace-instance": {"tiny": "1x2", "small": "2x4"},
 		"ovh":                {"tiny": "b3-8", "small": "b3-8"},
 		"phala":              {"tiny": "tdx.small", "small": "tdx.small"},
-		"scaleway":           {"tiny": "DEV1-S", "small": "DEV1-S"},
+		"scaleway":           {"tiny": "DEV1-S", "small": "DEV1-M"},
 		"tencentcloud":       {"tiny": "SA5.MEDIUM2", "small": "SA5.MEDIUM2"},
 		"vultr":              {"tiny": "vc2-1c-1gb", "small": "vc2-1c-1gb"},
 	}

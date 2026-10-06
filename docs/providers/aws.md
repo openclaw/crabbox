@@ -200,6 +200,11 @@ Windows and macOS targets use their own candidate lists (Windows WSL2 uses
 nested-virtualization families; macOS uses `mac*.metal` types). The default
 class is `beast`.
 
+Use `--min-vcpus` and `--min-memory-mib` to filter Linux class candidates by an
+explicit workload requirement. Requests without these options keep the existing
+fallback behavior. See [optional resource minimums](../features/capacity-fallback.md#optional-aws-resource-minimums)
+for metadata, coordinator compatibility and supported command semantics.
+
 For coordinator-managed public Linux and Windows runners, a complete
 `RunInstances` error with code `InsufficientInstanceCapacity` goes directly to
 the next configured instance type or permitted On-Demand fallback. The client
@@ -279,8 +284,13 @@ Root volumes default to 40 GB (`tiny`), 80 GB (`small`), 150 GB (`standard`
 and `fast`), 250 GB (`large`), or 400 GB (`beast`). An unset or zero `aws.rootGB`
 selects this policy in both direct and brokered creates. Crabbox reads the AMI's
 root block-device mapping and raises only the automatic default to its minimum,
-including AMIs registered from checkpoint snapshots. A promoted 400 GB image
-therefore still needs a 400 GB disk even for `tiny`.
+including AMIs registered from checkpoint snapshots. The promoted Linux
+developer image has a 32 GB root, so brokered leases get the class sizes above
+(a `tiny` lease has about 38 GB of usable root filesystem). An image with a
+larger root snapshot raises every class to that size, and rebuilding from such
+an image cannot shrink it. The guarded publisher bakes small-root images from
+stock Ubuntu with `--stock-source --root-gb N` (workflow input `linux_root_gb`); see the
+[small-root image bake](../features/image-bake-runbook.md#bake-a-smaller-linux-root-disk-from-stock-ubuntu).
 
 Set `aws.rootGB: 400` or `CRABBOX_AWS_ROOT_GB=400` to retain the previous size.
 Positive explicit requests win and EC2 rejects requests below the source minimum;
@@ -340,6 +350,7 @@ AWS_SESSION_TOKEN
 AWS_REGION
 CRABBOX_AWS_REGION                  # overrides AWS_REGION / aws.region
 CRABBOX_AWS_AMI
+CRABBOX_AWS_STOCK_IMAGE             # aws.stockImage; brokered AWS, admin-only
 CRABBOX_AWS_SECURITY_GROUP_ID
 CRABBOX_AWS_SUBNET_ID
 CRABBOX_AWS_INSTANCE_PROFILE

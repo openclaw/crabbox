@@ -102,9 +102,9 @@ func (a App) recoverAbsentStopClaim(ctx context.Context, backend Backend, id str
 		}
 		return false, false, Exit(2, "absence recovery requires an exact canonical claim --id")
 	}
-	claim, exists, err := ResolveLeaseClaimForProvider(id, backend.Spec().Name)
+	claim, exists, err := ResolveLeaseClaimForProviderContext(ctx, id, backend.Spec().Name)
 	if err == nil && !exists && !force && !IsCanonicalLeaseID(id) {
-		claim, exists, err = ResolveLeaseClaimForProviderCloudID(id, backend.Spec().Name)
+		claim, exists, err = ResolveLeaseClaimForProviderCloudIDScopeContext(ctx, id, backend.Spec().Name, "")
 	}
 	if err != nil || !exists {
 		if err == nil && force {

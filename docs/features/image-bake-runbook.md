@@ -339,6 +339,44 @@ than overwriting it. Publisher rollback explicitly authorizes retiring the
 exact failed catalog revision so capability-aware leases cannot select it;
 generic stale compare-and-swap requests leave the catalog unchanged.
 
+### Bake a smaller Linux root disk from stock Ubuntu
+
+A rebuild from the promoted AMI inherits its root snapshot minimum. Even if
+only 8 GB is used, a 400 GB snapshot cannot boot on a 40 GB disk. To lower that
+minimum, start the source lease from owner-verified stock Ubuntu and install
+the developer tools again:
+
+```bash
+scripts/mint-aws-devtools-image.sh --target linux --stock-source --root-gb 40
+# Review the plan, then add --run to perform the paid bake and promotion.
+```
+
+For the protected publisher workflow, set the optional `linux_root_gb` input to
+`40` (or another integer from 16 through 400). This passes `--stock-source
+--root-gb 40` to the Linux wrapper. An empty input keeps the promoted-source
+rebuild; Windows and macOS reject a nonempty value. Deploy the coordinator
+version supporting stock requests before running the publisher.
+
+`--stock-source` is Linux-only. For Linux, `--root-gb` requires
+`--stock-source`; Windows may set a source root size without that flag. Invalid
+sizes fail before any paid work. Without `--root-gb`, a stock source uses normal
+class sizing. Pick enough space for the installer and its temporary files;
+16 GB is an accepted input, not a guarantee that the full developer recipe fits.
+The source uses the selected `CRABBOX_OS` / `linux_os` Ubuntu version. Stock
+selection requires the same coordinator admin authorization as an explicit AMI
+and cannot be combined with an explicit AMI, snapshot, or image capability
+requirements.
+
+Only the source lease gets these overrides. Candidate and promoted proof
+leases, plus all `--measured` baseline/candidate/promoted cohorts, use normal
+root sizing. Baseline measurements retain normal image selection. The wrapper
+clears ambient `CRABBOX_AWS_STOCK_IMAGE` / `CRABBOX_AWS_ROOT_GB` settings for
+proofs, including file-config values via explicit false/zero inputs. A configured
+coordinator root override still applies to normal sizing. Source settings and
+lease ID are written to the source JSON receipt beside the diagnostic logs;
+measured public proof includes the allowlisted requested source settings.
+Promotion and rollback receipts still bind the original baseline default.
+
 ## Developer-image wrappers
 
 For generic AWS Linux and Windows developer AMIs, use the guarded wrapper
@@ -385,6 +423,31 @@ The wrapper captures its candidate through `crabbox checkpoint create`, so the
 same source/candidate proof works with direct AWS credentials and with an
 admin-authenticated broker. Promotion updates broker-managed image defaults;
 use `--no-promote` when validating a direct-only AWS configuration.
+
+An explicit region (including `CRABBOX_IMAGE_REGION` or `CRABBOX_AWS_REGION`)
+sets `CRABBOX_CAPACITY_REGIONS` to that single region for all lifecycle and
+measurement leases. The wrapper clears configured capacity AZ defaults unless
+`CRABBOX_CAPACITY_AVAILABILITY_ZONES` is explicitly nonempty. These client hints
+cannot disable the broker's additional fallback regions: the coordinator merges
+its own region list. Region-checked minting therefore requires coordinator admin
+auth to verify the exact lease's recorded region as well as the selected-image
+line. Missing or mismatched evidence stops the lease immediately, even with
+`--keep-lease`, before preparation, capture, or smoke. Retry when quota/capacity
+is available in the requested region, or choose another region explicitly.
+Measured runs apply the same check to each retained sample before acceptance.
+
+The captured checkpoint's region must also match before a candidate boots.
+On failure before promotion, EXIT cleanup deletes only the checkpoint created
+by this invocation using `crabbox checkpoint delete <checkpoint-id> --admin`.
+This deregisters its AMI and deletes its backing snapshots through the existing
+ownership and use-claim checks; generic `image delete` refuses managed
+checkpoint resources. The private `*-candidate-cleanup.json` receipt records
+the exact checkpoint, AMI, region, status, and deletion exit code. Deletion
+failures are printed prominently and mark measured `cleanupStatus` as failed
+without replacing the original mint error. Retry the recorded checkpoint
+deletion after resolving the failure. A successful `--no-promote` run retains
+its candidate; a promoted image retains the existing receipt-based rollback
+and investigation semantics and is never deleted by this cleanup.
 
 Enable FSR for hot lanes that need lower first-boot variance, in the AZs you
 actually launch from:

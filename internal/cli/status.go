@@ -112,6 +112,9 @@ func (a App) status(ctx context.Context, args []string) error {
 			if telemetry != "" {
 				telemetry = " " + telemetry
 			}
+			if state.ProvisioningPhase != "" {
+				telemetry += fmt.Sprintf(" provisioning_phase=%q", state.ProvisioningPhase)
+			}
 			fmt.Fprintf(a.Stdout, "%s slug=%s provider=%s target=%s windows_mode=%s state=%s type=%s host=%s pond=%s network=%s%s ready=%t has_host=%t idle_for=%s idle_timeout=%s expires=%s%s\n", state.ID, blank(state.Slug, "-"), state.Provider, state.TargetOS, blank(state.WindowsMode, "-"), state.State, state.ServerType, state.Host, blank(state.Pond, "-"), state.Network, tailscale, state.Ready, state.HasHost, blank(state.IdleFor, "-"), blank(state.IdleTimeout, "-"), blank(state.ExpiresAt, "-"), telemetry)
 		}
 		if *wait {
@@ -142,6 +145,8 @@ func statusLeaseExactClaim(ctx context.Context, backend Backend, lease LeaseTarg
 	if lease.LeaseID == "" || provider == "" {
 		return leaseClaim{}, false, nil
 	}
+	// The status wait budget may already be spent; this exact-ID read is O(1)
+	// and must still observe the claim that authorizes the touch.
 	claim, claimed, exact, err := ResolveLeaseClaimForProviderWithExact(lease.LeaseID, provider)
 	if err != nil {
 		return leaseClaim{}, false, fmt.Errorf("read exact %s lease claim: %w", provider, err)
@@ -318,6 +323,7 @@ type StatusView struct {
 	CleanupRetryAt               string                   `json:"cleanupRetryAt,omitempty"`
 	ReleaseDeletesServer         *bool                    `json:"releaseDeletesServer,omitempty"`
 	FailureError                 string                   `json:"failureError,omitempty"`
+	ProvisioningPhase            string                   `json:"provisioningPhase,omitempty"`
 	ProvisioningResourceMayExist *bool                    `json:"provisioningResourceMayExist,omitempty"`
 	ProvisioningFailureRetryable *bool                    `json:"provisioningFailureRetryable,omitempty"`
 	Labels                       map[string]string        `json:"labels,omitempty"`
@@ -426,7 +432,7 @@ func (a App) resolveSSHLeaseWithRequestConfig(ctx context.Context, cfg *Config, 
 }
 
 func resolveSSHLeaseTarget(ctx context.Context, backend SSHLoginBackend, req ResolveRequest) (LeaseTarget, error) {
-	claimsBefore, err := snapshotLeaseClaims()
+	claimsBefore, err := snapshotLeaseClaimsContext(ctx)
 	if err != nil {
 		return LeaseTarget{}, err
 	}

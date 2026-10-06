@@ -177,7 +177,9 @@ func (b *coderLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest
 	workspace, leaseID, slug, err := b.resolveWorkspace(req.ID, workspaces, claims, nameCounts)
 	if err != nil {
 		if req.ReleaseOnly {
-			if claim, ok := coderClaimForIdentifier(claims, req.ID); ok {
+			if claim, ok, claimErr := coderClaimForIdentifier(claims, req.ID); claimErr != nil {
+				return core.LeaseTarget{}, claimErr
+			} else if ok {
 				return coderStaleClaimLeaseTarget(b.cfg, claim), nil
 			}
 		}
@@ -658,25 +660,28 @@ func coderClaimByLeaseID(claims map[string]core.LeaseClaim, leaseID string) (cor
 	return core.LeaseClaim{}, false
 }
 
-func coderClaimForIdentifier(claims map[string]core.LeaseClaim, identifier string) (core.LeaseClaim, bool) {
+func coderClaimForIdentifier(claims map[string]core.LeaseClaim, identifier string) (core.LeaseClaim, bool, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
-		return core.LeaseClaim{}, false
+		return core.LeaseClaim{}, false, nil
 	}
 	if claim, ok := coderClaimByLeaseID(claims, identifier); ok {
-		return claim, true
+		return claim, true, nil
 	}
 	normalized := normalizeCoderWorkspaceIdentifier(identifier)
 	normalizedSlug := core.NormalizeLeaseSlug(identifier)
+	var matched core.LeaseClaim
 	for _, claim := range claims {
-		if normalizeCoderWorkspaceIdentifier(coderClaimWorkspaceRef(claim)) == normalized {
-			return claim, true
+		if normalizeCoderWorkspaceIdentifier(coderClaimWorkspaceRef(claim)) != normalized &&
+			(normalizedSlug == "" || core.NormalizeLeaseSlug(claim.Slug) != normalizedSlug) {
+			continue
 		}
-		if normalizedSlug != "" && core.NormalizeLeaseSlug(claim.Slug) == normalizedSlug {
-			return claim, true
+		if matched.LeaseID != "" {
+			return core.LeaseClaim{}, false, core.Exit(2, "multiple provider=coder claims match identifier %s", identifier)
 		}
+		matched = claim
 	}
-	return core.LeaseClaim{}, false
+	return matched, matched.LeaseID != "", nil
 }
 
 func coderStaleClaimLeaseTarget(cfg core.Config, claim core.LeaseClaim) core.LeaseTarget {

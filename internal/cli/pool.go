@@ -36,10 +36,7 @@ func (a App) list(ctx context.Context, args []string) error {
 	if err := prepareProviderSelection(&cfg, *provider); err != nil {
 		return err
 	}
-	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
-		return err
-	}
-	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
+	if err := applyTargetAndProviderFlags(&cfg, fs, targetFlags, providerFlags); err != nil {
 		return err
 	}
 	if err := finalizeProviderSelection(&cfg); err != nil {
@@ -542,10 +539,7 @@ func (a App) cleanup(ctx context.Context, args []string) error {
 	if err := prepareProviderSelection(&cfg, *provider); err != nil {
 		return err
 	}
-	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
-		return err
-	}
-	if err := applyTargetFlagOverrides(&cfg, fs, targetFlags); err != nil {
+	if err := applyTargetAndProviderFlags(&cfg, fs, targetFlags, providerFlags); err != nil {
 		return err
 	}
 	if err := finalizeProviderSelection(&cfg); err != nil {

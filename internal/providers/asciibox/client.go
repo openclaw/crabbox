@@ -66,6 +66,8 @@ func (e *boxIdentityError) Error() string {
 
 type boxData struct {
 	createdID           string
+	claimCreatedAt      string
+	allowIDOnlyRelease  bool
 	deletionCompleted   bool
 	deletionOperationID string
 	ID                  string `json:"id"`
@@ -672,7 +674,7 @@ func (c *client) waitForBoxReady(ctx context.Context, box boxData) (boxData, err
 				lastErr = fetchErr
 				return false, nil
 			}
-			if refreshed.ID != box.ID || boxCreationTime(latest) != "" && boxCreationTime(refreshed) != boxCreationTime(latest) {
+			if refreshed.ID != box.ID || boxCreationTime(latest) != "" && !boxCreationTimeMatches(refreshed, core.Blank(latest.claimCreatedAt, boxCreationTime(latest))) {
 				return false, fmt.Errorf("ascii-box identity changed during readiness")
 			}
 			latest = mergeBox(latest, refreshed)
@@ -798,7 +800,7 @@ func decodeNewBox(output string) (boxData, error) {
 		if box.ID != "" && box.ID != latest.createdID {
 			return latest, fmt.Errorf("ascii-box CLI new changed its created Box ID")
 		}
-		if boxCreationTime(latest) != "" && box.CreatedAt != nil && boxCreationTime(latest) != boxCreationTime(box) {
+		if boxCreationTime(latest) != "" && box.CreatedAt != nil && !boxCreationTimeMatches(box, core.Blank(latest.claimCreatedAt, boxCreationTime(latest))) {
 			return latest, fmt.Errorf("ascii-box CLI new changed its creation timestamp")
 		}
 		if box.ID != "" && event.Event != "error" {
@@ -818,6 +820,9 @@ func decodeNewBox(output string) (boxData, error) {
 }
 
 func mergeBox(base, update boxData) boxData {
+	if base.claimCreatedAt == "" {
+		base.claimCreatedAt = core.Blank(boxCreationTime(base), boxCreationTime(update))
+	}
 	if update.ID != "" {
 		base.ID = update.ID
 	}

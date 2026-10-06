@@ -235,6 +235,7 @@ function fleet(
   storage: ProvisioningTestStorage,
   fixture: AzureFixture,
   overrides: Partial<Env> = {},
+  admissionDeadlineMs?: number,
 ) {
   const currentEnv = { ...env, ...overrides };
   const provider = new AzureProvider(currentEnv);
@@ -245,7 +246,14 @@ function fleet(
   };
   const runtime = new ProvisioningTestRuntime(storage);
   return {
-    coordinator: new FleetCoordinator(runtime, currentEnv, { azure: provider }),
+    coordinator: new FleetCoordinator(
+      runtime,
+      currentEnv,
+      { azure: provider },
+      {},
+      undefined,
+      admissionDeadlineMs,
+    ),
     runtime,
     provider,
   };
@@ -267,6 +275,51 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+it("bounds durable admission history reads while preserving monthly cost accounting", async () => {
+  const storage = new ProvisioningTestStorage();
+  const azure = new AzureFixture();
+  vi.stubGlobal("fetch", azure.fetch);
+  const now = new Date().toISOString();
+  const staleAccessKey = "provider-access:cbx_ffffffffffff";
+  storage.values.set(staleAccessKey, {
+    id: "cbx_ffffffffffff",
+    state: "active",
+    expiresAt: now,
+  });
+  for (let index = 0; index < 300; index++) {
+    const leaseID = `cbx_${index.toString(16).padStart(12, "0")}`;
+    storage.values.set(`lease:${leaseID}`, {
+      id: leaseID,
+      owner: "alice@example.com",
+      org,
+      provider: "azure",
+      state: "released",
+      createdAt: now,
+      updatedAt: now,
+      endedAt: now,
+      expiresAt: now,
+      estimatedHourlyUSD: 1,
+      maxEstimatedUSD: 1,
+      ttlSeconds: 3600,
+    });
+  }
+  const rejected = await fleet(storage, azure, {
+    CRABBOX_MAX_MONTHLY_USD: "200",
+  }).coordinator.fetch(request("POST", "/v1/leases", input()));
+  expect(rejected.status).toBe(429);
+  const accepted = await fleet(storage, azure, {
+    CRABBOX_MAX_MONTHLY_USD: "1000",
+  }).coordinator.fetch(request("POST", "/v1/leases", input()));
+  expect(accepted.status).toBe(202);
+  const reads = storage.listOptions.filter((options) => options?.prefix === "lease:");
+  expect(reads.length).toBeGreaterThan(6);
+  expect(reads.every((options) => options?.limit === 128 && options.noCache === true)).toBe(true);
+  expect(azure.mutations).toEqual([]);
+  // A concurrent admission can replace this row; unlocked preparation must never prune it.
+  expect(storage.values.has(staleAccessKey)).toBe(true);
+  expect(storage.writes).not.toContain(staleAccessKey);
 });
 
 describe("Azure definite VM rejections", () => {
@@ -1728,5 +1781,103 @@ describe("protected material", () => {
         ciphertext: `AAAA${sealed.ciphertext.slice(4)}`,
       }),
     ).rejects.toThrow("unavailable");
+  });
+});
+
+describe("durable lease admission deadline", () => {
+  it.each(["prepare", "prepare rejection", "commit callback"])(
+    "fences pending admission but preserves committing admission at %s",
+    async (stage) => {
+      vi.useFakeTimers();
+      const storage = new ProvisioningTestStorage();
+      const azure = new AzureFixture();
+      vi.stubGlobal("fetch", azure.fetch);
+      const deadlineMs = 25;
+      const { coordinator, runtime, provider } = fleet(storage, azure, {}, deadlineMs);
+      const reached = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const settled = Promise.withResolvers<void>();
+      if (stage.startsWith("prepare")) {
+        const continuation = new AzureResumableProvisioning(env, azure.fetch, storage);
+        provider.resumableProvisioning = () => continuation;
+        const prepare = continuation.prepare.bind(continuation);
+        vi.spyOn(continuation, "prepare").mockImplementationOnce(async (...args) => {
+          try {
+            reached.resolve();
+            await release.promise;
+            if (stage === "prepare rejection") throw new Error("synthetic late discovery failure");
+            return await prepare(...args);
+          } finally {
+            settled.resolve();
+          }
+        });
+      } else {
+        const commit = runtime.commitAndWake.bind(runtime);
+        vi.spyOn(runtime, "commitAndWake").mockImplementationOnce(async (callback) => {
+          try {
+            reached.resolve();
+            await release.promise;
+            return await commit(callback);
+          } finally {
+            settled.resolve();
+          }
+        });
+      }
+      let response: Response | undefined;
+      const create = () => coordinator.fetch(request("POST", "/v1/leases", input()));
+      const pending = create().then((result) => (response = result));
+      try {
+        await reached.promise;
+        await vi.advanceTimersByTimeAsync(deadlineMs);
+        expect(response?.status).toBe(503);
+        expect(response!.headers.get("retry-after")).toBe("2");
+        expect(await response!.json()).toMatchObject({
+          error: "lease_admission_timeout",
+          retryable: true,
+        });
+        release.resolve();
+        await settled.promise;
+        await vi.advanceTimersByTimeAsync(0);
+        expect(await storage.get(`lease:${id}`)).toBeUndefined();
+        expect(await storage.get(provisioningOperationKey(id))).toBeUndefined();
+        expect(azure.mutations).toHaveLength(0);
+        expect((await create()).status).toBe(202);
+      } finally {
+        release.resolve();
+        await pending;
+      }
+    },
+  );
+  it("waits for durable admission commit acknowledgement past the deadline", async () => {
+    vi.useFakeTimers();
+    const storage = new ProvisioningTestStorage();
+    const azure = new AzureFixture();
+    vi.stubGlobal("fetch", azure.fetch);
+    const deadlineMs = 25;
+    const { coordinator, runtime } = fleet(storage, azure, {}, deadlineMs);
+    const reached = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const commit = runtime.commitAndWake.bind(runtime);
+    vi.spyOn(runtime, "commitAndWake").mockImplementationOnce(async (callback) => {
+      const result = await commit(callback);
+      reached.resolve();
+      await release.promise;
+      return result;
+    });
+    let response: Response | undefined;
+    const pending = coordinator
+      .fetch(request("POST", "/v1/leases", input()))
+      .then((result) => (response = result));
+    try {
+      await reached.promise;
+      await vi.advanceTimersByTimeAsync(deadlineMs);
+      expect(response).toBeUndefined();
+      expect(await storage.get(`lease:${id}`)).toBeDefined();
+      release.resolve();
+      expect((await pending).status).toBe(202);
+    } finally {
+      release.resolve();
+      await pending;
+    }
   });
 });

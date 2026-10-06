@@ -823,6 +823,7 @@ func TestCoordinatorInspectJSONPreservesProvisioningFailureState(t *testing.T) {
 			TargetOS:                     targetLinux,
 			State:                        "failed",
 			FailureError:                 "provider response was interrupted",
+			ProvisioningPhase:            "interrupted-recovering",
 			ProvisioningResourceMayExist: &explicitTrue,
 			ProvisioningFailureRetryable: &explicitTrue,
 		},
@@ -892,6 +893,9 @@ func TestCoordinatorInspectJSONPreservesProvisioningFailureState(t *testing.T) {
 			}
 			if got["state"] != "failed" || got["hasHost"] != false {
 				t.Fatalf("inspect JSON state=%#v hasHost=%#v, want failed hostless lease", got["state"], got["hasHost"])
+			}
+			if test.id == "cbx_true" && got["provisioningPhase"] != "interrupted-recovering" {
+				t.Fatalf("missing recovery phase: %#v", got)
 			}
 			for field, want := range map[string]*bool{
 				"provisioningResourceMayExist": test.wantMayExist,
@@ -3873,4 +3877,43 @@ func TestCoordinatorInspectJSONPreservesProviderCleanupReceipt(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCoordinatorCancelCreateDefaultBudgets(t *testing.T) {
+	if coordinatorCanceledCreateRecoveryTimeout != 30*time.Second || coordinatorCanceledCreateFinalTimeout != 30*time.Second {
+		t.Fatalf("cancel-create budgets recovery=%s final=%s", coordinatorCanceledCreateRecoveryTimeout, coordinatorCanceledCreateFinalTimeout)
+	}
+	if coordinatorCreateLeaseRecoveryInterval != 5*time.Second {
+		t.Fatalf("retry interval=%s", coordinatorCreateLeaseRecoveryInterval)
+	}
+}
+
+func TestCanceledCoordinatorCreateSlowRetryFitsRecoveryWindow(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		attempts := 0
+		var firstBudget time.Duration
+		coord := &CoordinatorClient{BaseURL: "http://coordinator.test", Token: "fixture-token", Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			deadline, ok := req.Context().Deadline()
+			if !ok {
+				return nil, errors.New("missing deadline")
+			}
+			if attempts == 1 {
+				firstBudget = deadline.Sub(time.Now())
+				time.Sleep(12 * time.Second)
+				if err := req.Context().Err(); err != nil {
+					return nil, fmt.Errorf("recovery expired before slow response: %w", err)
+				}
+				return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":"temporarily_unavailable"}`)), Request: req}, nil
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"canceledCreate":{"version":1,"requestedLeaseID":"cbx_slow_retry","createAttemptID":"cat_11111111111111111111111111111111","state":"canceled"}}`)), Request: req}, nil
+		})}}
+		b := &coordinatorLeaseBackend{coord: coord, rt: Runtime{Stderr: io.Discard}}
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		err := b.canceledCoordinatorLeaseCreateError(ctx, "cbx_slow_retry", "slow-retry", "cat_11111111111111111111111111111111", false, context.Canceled)
+		if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "cancel coordinator lease") || attempts != 2 || firstBudget != 30*time.Second {
+			t.Fatalf("attempts=%d budget=%s err=%v", attempts, firstBudget, err)
+		}
+	})
 }

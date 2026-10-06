@@ -96,8 +96,13 @@ Crabbox lease ID and local slug:
   or ordinary non-fixed lookups. See [AWS fixed-ID replay](../providers/aws.md#fixed-id-replay).
 - `blacksmith-testbox` — accepts a Testbox ID or slug only with an exact local
   organization/API-scoped claim and matching native workflow identity. It stops
-  the Testbox (also cancelling its backing Actions run) and removes the claim/key
-  only after fresh native stdout confirms the exact ID in state `completed`.
+  the Testbox through the native CLI and removes the claim/key only after fresh
+  native status confirms the exact ID in state `completed` and an optional
+  `gh` read confirms its exact associated GitHub run is terminal. A missing run
+  association or unavailable GitHub read returns nonzero and retains recovery
+  ownership; retry the same stop after association or access becomes available.
+  Native completion alone never proves GitHub cancellation. GitHub reads use
+  existing access only, and Crabbox does not mutate GitHub runs.
   Failed native stops can reconcile through the same confirmation; ambiguous,
   failed or cancelled queries retain the original stop error and local state.
   Verification and local artifact cleanup failures remain visible alongside the

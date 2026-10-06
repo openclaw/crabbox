@@ -39,6 +39,11 @@ on:
         description: Required positive millisecond cap for every measured cohort
         required: false
         type: string
+      linux_root_gb:
+        description: "Linux only - build from stock Ubuntu with this root size in GB (16-400); empty keeps the promoted-source rebuild"
+        required: false
+        default: ""
+        type: string
       windows_type:
         description: Windows source instance type
         required: true
@@ -95,6 +100,7 @@ jobs:
           REGION: ${{ inputs.region }}
           LINUX_TYPE: ${{ inputs.linux_type }}
           LINUX_OS: ${{ inputs.linux_os }}
+          LINUX_ROOT_GB: ${{ inputs.linux_root_gb }}
           WINDOWS_TYPE: ${{ inputs.windows_type }}
           MACOS_TYPE: ${{ inputs.macos_type }}
           MACOS_HOST: ${{ inputs.macos_host }}
@@ -109,6 +115,13 @@ jobs:
             printf '%s\n' 'linux_os must be ubuntu:26.04 or ubuntu:24.04' >&2
             exit 2
           }
+          if [[ -n "$LINUX_ROOT_GB" ]]; then
+            [[ "$TARGET" == linux && "$LINUX_ROOT_GB" =~ ^[1-9][0-9]{1,2}$ ]] &&
+              (( LINUX_ROOT_GB >= 16 && LINUX_ROOT_GB <= 400 )) || {
+                printf '%s\n' 'linux_root_gb is Linux only and must be an integer from 16-400' >&2
+                exit 2
+              }
+          fi
           [[ "$WINDOWS_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
           [[ "$MACOS_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
           [[ "$MACOS_HOST" =~ ^(use-existing|allocate)$ ]]
@@ -138,6 +151,7 @@ jobs:
       REGION: ${{ inputs.region }}
       LINUX_TYPE: ${{ inputs.linux_type }}
       LINUX_OS: ${{ inputs.linux_os }}
+      LINUX_ROOT_GB: ${{ inputs.linux_root_gb }}
       WINDOWS_TYPE: ${{ inputs.windows_type }}
       MACOS_TYPE: ${{ inputs.macos_type }}
       MACOS_HOST: ${{ inputs.macos_host }}
@@ -161,7 +175,7 @@ jobs:
             "$public_outcome" \
             scripts/install-linux-developer-tools.sh \
             "$REGION" "$LINUX_TYPE" standard "$MAX_P95_RUNNER_TOTAL_MS" \
-            1 1 1 0 0 2h 30m
+            1 1 1 0 0 2h 30m "$([[ -n "$LINUX_ROOT_GB" ]] && echo 1 || echo 0)" "${LINUX_ROOT_GB:-0}"
 
       - name: Verify publisher configuration
         shell: bash
@@ -205,6 +219,9 @@ jobs:
                 --type "$LINUX_TYPE"
                 --run
               )
+              if [[ -n "$LINUX_ROOT_GB" ]]; then
+                command+=(--stock-source --root-gb "$LINUX_ROOT_GB")
+              fi
               if [[ "$MEASURED" == true ]]; then
                 command+=(--measured --max-p95-runner-total-ms "$MAX_P95_RUNNER_TOTAL_MS")
               fi

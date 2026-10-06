@@ -148,6 +148,7 @@ type CoordinatorLease struct {
 	CleanupRetryAt               string                         `json:"cleanupRetryAt,omitempty"`
 	ReleaseDeletesServer         *bool                          `json:"releaseDeletesServer,omitempty"`
 	FailureError                 string                         `json:"failureError,omitempty"`
+	ProvisioningPhase            string                         `json:"provisioningPhase,omitempty"`
 	ProvisioningResourceMayExist *bool                          `json:"provisioningResourceMayExist,omitempty"`
 	ProvisioningFailureRetryable *bool                          `json:"provisioningFailureRetryable,omitempty"`
 	ProviderMetadata             map[string]any                 `json:"providerMetadata,omitempty"`
@@ -378,6 +379,25 @@ type CoordinatorCapacityResponse struct {
 	ActiveLeases   int    `json:"activeLeases"`
 	EffectiveLimit int    `json:"effectiveLimit"`
 	ObservedAt     string `json:"observedAt"`
+	*CoordinatorCapacityAdmission
+}
+
+// A nil extension preserves the response from coordinators with owner-only capacity.
+type CoordinatorCapacityAdmission struct {
+	Fleet      CoordinatorCapacityDimension `json:"fleet"`
+	Org        CoordinatorOrgCapacity       `json:"org"`
+	Admissible bool                         `json:"admissible"`
+	BlockedBy  *string                      `json:"blockedBy"`
+}
+
+type CoordinatorCapacityDimension struct {
+	ActiveLeases int  `json:"activeLeases"`
+	Limit        *int `json:"limit"`
+}
+
+type CoordinatorOrgCapacity struct {
+	Key string `json:"key"`
+	CoordinatorCapacityDimension
 }
 
 type CoordinatorMarketplaceStatusResponse struct {
@@ -1111,10 +1131,19 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 		return CoordinatorLease{}, err
 	}
 	cfg.Provider = provider.Spec().Name
+	if err := validateResourceRequirements(cfg); err != nil {
+		return CoordinatorLease{}, err
+	}
 	if slug == "" {
 		slug = NewLeaseSlug(leaseID)
 	}
 	capacity := map[string]any{}
+	if cfg.Capacity.MinVCPUs > 0 {
+		capacity["minVCPUs"] = cfg.Capacity.MinVCPUs
+	}
+	if cfg.Capacity.MinMemoryMiB > 0 {
+		capacity["minMemoryMiB"] = cfg.Capacity.MinMemoryMiB
+	}
 	if cfg.Capacity.Market != "" && cfg.Capacity.Market != "spot" {
 		capacity["market"] = cfg.Capacity.Market
 	}
@@ -1193,6 +1222,9 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	if cfg.osImageExplicit {
 		req["os"] = cfg.OSImage
 	}
+	if cfg.Provider == "aws" && cfg.AWSStockImage {
+		req["awsUseStockImage"] = true
+	}
 	addCoordinatorAzureFields(req, cfg)
 	addCoordinatorGCPFields(req, cfg)
 	method := http.MethodPost
@@ -1204,6 +1236,15 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	} else if !imageRequirementsEmpty(cfg.imageRequirements) {
 		// Older coordinators do not have this route, so mixed-version use fails closed.
 		path = "/v1/leases/capability-aware"
+	}
+	if hasCapacityMinimums(cfg) {
+		if checkpointBacked {
+			return CoordinatorLease{}, Exit(2, "resource requirements are unsupported for checkpoint forks")
+		}
+		path = "/v1/leases/resource-constrained"
+		if fixed {
+			path = "/v1/leases/" + url.PathEscape(leaseID) + "/resource-constrained"
+		}
 	}
 	if checkpointBacked {
 		switch cfg.Provider {
@@ -1478,6 +1519,46 @@ func (c *CoordinatorClient) Leases(ctx context.Context, state string, limit int)
 	return c.listLeases(ctx, state, limit, "", "")
 }
 
+// CurrentLeases negotiates bounded summary pages. Older coordinators keep their
+// existing newest-first list contract; report its actual 500-row server cap.
+func (c *CoordinatorClient) CurrentLeases(ctx context.Context, provider string) ([]CoordinatorLease, bool, error) {
+	const pagination = "keyset-v1"
+	values := url.Values{"view": {"current"}, "provider": {provider}, "limit": {"100"}, "projection": {"summary"}, "pagination": {pagination}}
+	var leases []CoordinatorLease
+	seenCursors := make(map[string]bool)
+	for {
+		var res struct {
+			Leases     []CoordinatorLease `json:"leases"`
+			Pagination string             `json:"pagination"`
+			NextCursor string             `json:"nextCursor"`
+		}
+		if err := c.doRead(ctx, "/v1/leases?"+values.Encode(), &res); err != nil {
+			return nil, false, err
+		}
+		if res.Pagination != pagination {
+			if values.Get("cursor") != "" {
+				return nil, false, fmt.Errorf("coordinator lease pagination changed during listing; retry list")
+			}
+			if len(res.Leases) < 100 {
+				return res.Leases, false, nil
+			}
+			legacy, err := c.listLeases(ctx, "", 500, "current", provider)
+			return legacy, len(legacy) >= 500, err
+		}
+		leases = append(leases, res.Leases...)
+		if res.NextCursor == "" {
+			break
+		}
+		if seenCursors[res.NextCursor] {
+			return nil, false, fmt.Errorf("coordinator lease pagination did not advance")
+		}
+		seenCursors[res.NextCursor] = true
+		values.Set("cursor", res.NextCursor)
+	}
+	slices.SortStableFunc(leases, func(a, b CoordinatorLease) int { return strings.Compare(b.CreatedAt, a.CreatedAt) })
+	return leases, false, nil
+}
+
 func (c *CoordinatorClient) listLeases(ctx context.Context, state string, limit int, view, provider string) ([]CoordinatorLease, error) {
 	var res struct {
 		Leases []CoordinatorLease `json:"leases"`
@@ -1676,6 +1757,7 @@ func (c *CoordinatorClient) Capacity(ctx context.Context) (CoordinatorCapacityRe
 		ActiveLeases   *int   `json:"activeLeases"`
 		EffectiveLimit *int   `json:"effectiveLimit"`
 		ObservedAt     string `json:"observedAt"`
+		*CoordinatorCapacityAdmission
 	}
 	if err := c.do(ctx, http.MethodGet, "/v1/capacity", nil, &payload); err != nil {
 		var httpErr CoordinatorHTTPError
@@ -1692,6 +1774,7 @@ func (c *CoordinatorClient) Capacity(ctx context.Context) (CoordinatorCapacityRe
 	return CoordinatorCapacityResponse{
 		Owner: payload.Owner, ActiveLeases: *payload.ActiveLeases,
 		EffectiveLimit: *payload.EffectiveLimit, ObservedAt: payload.ObservedAt,
+		CoordinatorCapacityAdmission: payload.CoordinatorCapacityAdmission,
 	}, nil
 }
 

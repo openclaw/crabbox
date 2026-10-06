@@ -1,7 +1,8 @@
 import { requireAWSRegion } from "./aws-region";
-import { normalizeImageRequirements } from "./image-capabilities";
+import { hasImageRequirements, normalizeImageRequirements } from "./image-capabilities";
 import { normalizeOSImage, osImageSpec } from "./os-image";
 import type {
+  CapacityRequirements,
   ImageRequirements,
   LeaseImageIdentity,
   LeaseRequest,
@@ -90,6 +91,7 @@ export interface LeaseConfig {
   gcpRootGB: number;
   gcpServiceAccount: string;
   capacityMarket: "spot" | "on-demand";
+  capacityRequirements?: CapacityRequirements;
   capacityStrategy:
     | "most-available"
     | "price-capacity-optimized"
@@ -117,6 +119,25 @@ export interface LeaseConfig {
 export type AzureOSDiskMode = "managed" | "ephemeral";
 export type Architecture = "amd64" | "arm64";
 
+export class InvalidCapacityRequirementsError extends Error {}
+
+export function normalizeCapacityRequirements(
+  input: CapacityRequirements | undefined,
+): CapacityRequirements | undefined {
+  const normalized: CapacityRequirements = {};
+  for (const name of ["minVCPUs", "minMemoryMiB"] as const) {
+    const value = input?.[name];
+    if (value === undefined) continue;
+    if (!Number.isInteger(value) || value < 0 || value > 2147483647) {
+      throw new InvalidCapacityRequirementsError(
+        `capacity.${name} must be an integer from 0 to 2147483647`,
+      );
+    }
+    if (value > 0) normalized[name] = value;
+  }
+  return Object.keys(normalized).length ? normalized : undefined;
+}
+
 export interface LeaseConfigDefaults {
   azureOSDisk?: string;
   azureImage?: string;
@@ -128,6 +149,8 @@ const maxRequestedPondNameLength = 41;
 const maxExposedPort = 65_535;
 const maxExposedPortsPerLease = 10;
 
+export class InvalidAWSImageSourceError extends Error {}
+
 export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults = {}): LeaseConfig {
   const provider = input.provider ?? "hetzner";
   if (
@@ -138,6 +161,26 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     provider !== "daytona"
   ) {
     throw new Error(`unsupported provider: ${String(provider)}`);
+  }
+  if (input.awsUseStockImage !== undefined && typeof input.awsUseStockImage !== "boolean") {
+    throw new InvalidAWSImageSourceError("awsUseStockImage must be a boolean");
+  }
+  const awsUseStockImage = input.awsUseStockImage ?? false;
+  const imageRequirements = normalizeImageRequirements(input.imageRequirements);
+  if (awsUseStockImage) {
+    if (provider !== "aws") {
+      throw new InvalidAWSImageSourceError("awsUseStockImage requires provider=aws");
+    }
+    if (input.awsAMI || input.awsSnapshot) {
+      throw new InvalidAWSImageSourceError(
+        "awsUseStockImage cannot be combined with awsAMI or awsSnapshot",
+      );
+    }
+    if (hasImageRequirements(imageRequirements)) {
+      throw new InvalidAWSImageSourceError(
+        "awsUseStockImage cannot be combined with image capability requirements",
+      );
+    }
   }
   const target = normalizeTarget(input.target ?? input.targetOS ?? "linux");
   const requestedArchitecture = normalizeArchitecture(input.architecture);
@@ -276,6 +319,12 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
       ? validatedCIDRs(input.awsSSHCIDRs ?? [], "awsSSHCIDRs")
       : validCIDRs(input.awsSSHCIDRs ?? []);
   const awsInstanceTypes = validatedAWSInstanceTypes(input.awsInstanceTypes ?? []);
+  const capacityRequirements = normalizeCapacityRequirements(input.capacity);
+  if (capacityRequirements && (provider !== "aws" || target !== "linux")) {
+    throw new InvalidCapacityRequirementsError(
+      "capacity minimums currently require provider=aws and target=linux",
+    );
+  }
   const awsPrivate = input.awsPrivate ?? false;
   const awsRequireSSM = input.awsRequireSSM ?? false;
   if ((awsPrivate || awsRequireSSM || awsInstanceTypes.length > 0) && provider !== "aws") {
@@ -321,7 +370,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     desktop: input.desktop ?? false,
     desktopEnv,
     browser: input.browser ?? false,
-    imageRequirements: normalizeImageRequirements(input.imageRequirements),
+    imageRequirements,
     code: input.code ?? false,
     tailscale: input.tailscale ?? false,
     tailscaleTags: normalizeTailscaleTags(input.tailscaleTags ?? ["tag:crabbox"]),
@@ -341,7 +390,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     image: input.image ?? linuxOSImage?.hetznerImage ?? "ubuntu-24.04",
     awsRegion,
     awsAMI: input.awsAMI ?? "",
-    awsUseStockImage: false,
+    awsUseStockImage,
     awsPromotedAMIs: {},
     awsSnapshot: input.awsSnapshot ?? "",
     awsSGID: input.awsSGID ?? "",
@@ -374,6 +423,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     gcpRootGB: input.gcpRootGB ?? 0,
     gcpServiceAccount: input.gcpServiceAccount ?? "",
     capacityMarket: input.capacity?.market ?? "spot",
+    ...(capacityRequirements ? { capacityRequirements } : {}),
     capacityStrategy: input.capacity?.strategy ?? "most-available",
     capacityFallback: input.capacity?.fallback ?? "on-demand-after-120s",
     capacityRegions,

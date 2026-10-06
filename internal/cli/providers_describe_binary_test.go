@@ -12,9 +12,73 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestProvidersFixedLeaseIDBuiltBinary(t *testing.T) {
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	env := []string{"CRABBOX_CONFIG=" + filepath.Join(root, "missing.yaml")}
+	stdout, stderr, code := runDescribeTestBinary(binary, root, env, "providers", "--json")
+	if code != 0 {
+		t.Fatalf("providers --json exit=%d stderr=%s", code, stderr)
+	}
+	var entries []providerMatrixEntry
+	if err := json.Unmarshal(stdout, &entries); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		provider string
+		want     bool
+	}{
+		{"digitalocean", true},
+		{"tenki", true},
+		{"gcp", true},           // Fixed IDs are supported by the coordinator wrapper.
+		{"agent-sandbox", true}, // Runtime routing settings are not needed for discovery.
+		{"apple-container", true},
+		{"ascii-box", true},
+		{"aws", true},
+		{"azure", true},
+		{"daytona", true},
+		{"incus", true},
+		{"local-container", true},
+		{"machine0", true},
+		{"parallels", true},
+		{"proxmox", true},
+		{"external", false}, // Requires an explicit runtime contract opt-in.
+		{"linode", true},
+		{"runpod", true},
+		{"scaleway", true},
+		{"boxd", false},
+	} {
+		t.Run(tc.provider, func(t *testing.T) {
+			index := slices.IndexFunc(entries, func(entry providerMatrixEntry) bool { return entry.Provider == tc.provider })
+			if index < 0 {
+				t.Fatalf("provider %s missing from matrix", tc.provider)
+			}
+			if got := slices.Contains(entries[index].Features, FeatureFixedLeaseID); got != tc.want {
+				t.Errorf("matrix fixed-lease-id=%t, want %t", got, tc.want)
+			}
+			stdout, stderr, code := runDescribeTestBinary(binary, root, env, "providers", "describe", tc.provider, "--json")
+			if code != 0 {
+				t.Fatalf("describe exit=%d stderr=%s", code, stderr)
+			}
+			var description providerDescription
+			if err := json.Unmarshal(stdout, &description); err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Contains(description.Capabilities.Features, "fixed-lease-id"); got != tc.want {
+				t.Errorf("describe fixed-lease-id=%t, want %t", got, tc.want)
+			}
+			assertSortedStrings(t, "features", description.Capabilities.Features)
+		})
+	}
+}
 
 func TestAzureConfigShowBuiltBinaryMigration(t *testing.T) {
 	binary, err := builtCLITestBinary()
@@ -232,8 +296,8 @@ func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 		t.Fatalf("run --help exit=%d stdout=%q stderr=%q", helpCode, helpStdout, helpStderr)
 	}
 	digest := sha256.Sum256(helpStderr)
-	const baselineSHA256 = "050bd4aba7f71003141ae4544a29c8b76e17722960cb9599eb4d36ceedb68079"
-	const baselineBytes = 63274
+	const baselineSHA256 = "9420060f31eeb97096eabc8d6a112d526ad6de3f8b14d2bed81ab31e1eacdf12"
+	const baselineBytes = 63522
 	if got := hex.EncodeToString(digest[:]); got != baselineSHA256 || len(helpStderr) != baselineBytes {
 		t.Fatalf("run --help changed: sha256=%s bytes=%d, want sha256=%s bytes=%d", got, len(helpStderr), baselineSHA256, baselineBytes)
 	}

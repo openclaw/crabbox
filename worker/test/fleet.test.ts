@@ -2,10 +2,12 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { Script, createContext } from "node:vm";
 
+import { AwsClient } from "aws4fetch";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { adminGrantVersion, issueUserToken } from "../src/auth";
 import { EC2SpotClient, AWSLeaseAuthorityError, awsLeaseImageIdentity } from "../src/aws";
+import { RefreshingAWSFetchClient } from "../src/aws-fetch-client";
 import {
   AzureClient,
   AzureProvisioningRejectedError,
@@ -32,6 +34,7 @@ import {
   type CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
 import { sha256Hex } from "../src/encoding";
+import { imageRouteDeadlineMs } from "../src/fleet";
 import {
   AWSProvider,
   AzureProvider,
@@ -62,10 +65,16 @@ import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
 import { errorMessage } from "../src/http";
 import {
   provisioningOperationKey,
+  putProvisioningOperation,
   type LeaseProvisioningOperation,
 } from "../src/lease-provisioning";
 import { MISSING_ORG_KEY, isCurrentOrgKey, orgKeyForLabel } from "../src/org-identity";
 import { portalCode, portalVNC, webVNCCredentialsFromHistoryState } from "../src/portal";
+import {
+  providerRequestSignal,
+  waitForProviderSignal,
+  withProviderOperationDeadline,
+} from "../src/provider-deadline";
 import { providerKeyForLease } from "../src/provider-key";
 import { providerLabelValue } from "../src/provider-labels";
 import {
@@ -559,6 +568,7 @@ class BoundedObservedMemoryStorage extends ObservedMemoryStorage {
 }
 
 const restrictedBrokerSelectorCases = [
+  { provider: "aws" as const, field: "awsUseStockImage", value: true },
   { provider: "aws" as const, field: "awsAMI", value: "ami-000000000001" },
   { provider: "aws" as const, field: "awsSGID", value: "sg-000000000001" },
   { provider: "aws" as const, field: "awsSubnetID", value: "subnet-000000000001" },
@@ -821,6 +831,141 @@ describe("fleet cleanup inspection", () => {
   }
 
   describe("missing public IP recovery route", () => {
+    it.each(["POST", "PUT"])(
+      "binds opt-in capacity minimums on %s lease requests and replays",
+      async (method) => {
+        const storage = new MemoryStorage();
+        let creates = 0;
+        const capacities: unknown[] = [];
+        const providers = {
+          aws: fakeProvider(
+            (config) => {
+              creates += 1;
+              capacities.push(config.capacityRequirements);
+            },
+            { provider: "aws", cloudID: "i-capacity", region: "eu-west-1" },
+          ),
+        };
+        const fleet = testFleet(storage, providers);
+        const leaseID = "cbx_abcdef123456";
+        const path =
+          method === "PUT"
+            ? `/v1/leases/${leaseID}/resource-constrained`
+            : "/v1/leases/resource-constrained";
+        const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+        const body = {
+          provider: "aws",
+          target: "linux",
+          leaseID,
+          slug: "capacity-test",
+          ...(method === "POST" ? { createAttemptID: "cat_abcdef123456abcdef123456abcdef12" } : {}),
+          sshPublicKey: "ssh-ed25519 test",
+          capacity: { minVCPUs: 4, minMemoryMiB: 15360 },
+        };
+        const first = await fleet.fetch(request(method, path, { headers, body }));
+        expect(first.status).toBe(201);
+        expect(capacities).toEqual([{ minVCPUs: 4, minMemoryMiB: 15360 }]);
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.capacityRequirements).toEqual(
+          body.capacity,
+        );
+        const restarted = testFleet(storage, providers);
+        const replay = await restarted.fetch(request(method, path, { headers, body }));
+        expect(replay.status).toBe(200);
+        const changes = await Promise.all(
+          [{ minVCPUs: 8, minMemoryMiB: 15360 }, {}].map((capacity) =>
+            restarted.fetch(request(method, path, { headers, body: { ...body, capacity } })),
+          ),
+        );
+        expect(changes.map((response) => response.status)).toEqual([409, 409]);
+        expect(creates).toBe(1);
+      },
+    );
+
+    it.each([{ minVCPUs: 8 }, {}])(
+      "rejects concurrent replay that changes minimums after initial lookup: %j",
+      async (capacity) => {
+        const storage = new MemoryStorage();
+        let creates = 0;
+        const fleet = testFleet(storage, {
+          aws: fakeProvider(
+            () => {
+              creates += 1;
+            },
+            { provider: "aws", cloudID: "i-capacity", region: "eu-west-1" },
+          ),
+        });
+        const admission = fleet as unknown as {
+          reserveCreateAttempt: (...args: unknown[]) => Promise<unknown>;
+        };
+        const reserve = admission.reserveCreateAttempt.bind(fleet);
+        const firstEntered = Promise.withResolvers<void>();
+        const secondEntered = Promise.withResolvers<void>();
+        const firstGate = Promise.withResolvers<void>();
+        const secondGate = Promise.withResolvers<void>();
+        let calls = 0;
+        vi.spyOn(admission, "reserveCreateAttempt").mockImplementation(async (...args) => {
+          calls += 1;
+          if (calls === 1) {
+            firstEntered.resolve();
+            await firstGate.promise;
+          } else {
+            secondEntered.resolve();
+            await secondGate.promise;
+          }
+          return reserve(...args);
+        });
+        const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+        const body = {
+          provider: "aws",
+          target: "linux",
+          leaseID: "cbx_abcdef123456",
+          createAttemptID: "cat_abcdef123456abcdef123456abcdef12",
+          slug: "capacity-test",
+          sshPublicKey: "ssh-ed25519 test",
+          capacity: { minVCPUs: 4 },
+        };
+        const first = fleet.fetch(
+          request("POST", "/v1/leases/resource-constrained", { headers, body }),
+        );
+        await firstEntered.promise;
+        const second = fleet.fetch(
+          request("POST", "/v1/leases/resource-constrained", {
+            headers,
+            body: { ...body, capacity },
+          }),
+        );
+        try {
+          await secondEntered.promise;
+          firstGate.resolve();
+          expect((await first).status).toBe(201);
+          secondGate.resolve();
+          expect((await second).status).toBe(409);
+          expect(creates).toBe(1);
+        } finally {
+          firstGate.resolve();
+          secondGate.resolve();
+          await Promise.allSettled([first, second]);
+        }
+      },
+    );
+
+    it("keeps legacy fixed lease identity when resource minimums are omitted or zero", async () => {
+      const input = { provider: "aws" as const, sshPublicKey: "ssh-ed25519 test" };
+      const original = await fixedLeaseCreateIntentHash(leaseConfig(input), "capacity-test");
+      expect(
+        await fixedLeaseCreateIntentHash(
+          leaseConfig({ ...input, capacity: { minVCPUs: 0, minMemoryMiB: 0 } }),
+          "capacity-test",
+        ),
+      ).toBe(original);
+      expect(
+        await fixedLeaseCreateIntentHash(
+          leaseConfig({ ...input, capacity: { minVCPUs: 4 } }),
+          "capacity-test",
+        ),
+      ).not.toBe(original);
+    });
+
     it("keeps recovery provider reads outside the lifecycle queue", () => {
       expect(coordinatorRequestQueue(request("POST", "/v1/leases/cbx_abcdef123456/cleanup"))).toBe(
         "direct",
@@ -2892,7 +3037,7 @@ describe("runtime adapter relay", () => {
     const fleet = testFleet(storage);
     const internal = fleet as unknown as {
       cleanupExpiredWebVNCPortalViewerAuth(now: number): Promise<void>;
-      webVNCPortalViewerAlarmTimes(now: number): Promise<number[]>;
+      webVNCPortalViewerAlarms(now: number): Promise<Array<{ key: string; time: number }>>;
     };
 
     await internal.cleanupExpiredWebVNCPortalViewerAuth(now);
@@ -2911,10 +3056,11 @@ describe("runtime adapter relay", () => {
       const suffix = index.toString().padStart(3, "0");
       storage.seed(`webvnc-viewer-ticket:webvnc_view_${suffix}`, { expiresAt: futureAt });
     }
-    const alarmTimes = await internal.webVNCPortalViewerAlarmTimes(now);
+    const alarms = await internal.webVNCPortalViewerAlarms(now);
 
-    expect(alarmTimes).toHaveLength(130);
-    expect(alarmTimes.every((time) => time === Date.parse(futureAt))).toBe(true);
+    expect(alarms).toHaveLength(130);
+    expect(alarms.every(({ time }) => time === Date.parse(futureAt))).toBe(true);
+    expect(new Set(alarms.map(({ key }) => key)).size).toBe(130);
     expect(
       storage.listOptions.some(
         (options) => options.prefix === "webvnc-viewer-ticket:" && options.startAfter !== undefined,
@@ -12229,6 +12375,7 @@ describe("fleet lease identity and idle", () => {
     storage.seed(`lease:${leaseID}`, {
       ...observed,
       provisioningRecoveryObservedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+      cleanupRetryAt: new Date(Date.now() - 1_000).toISOString(),
     });
 
     await fleet.alarm();
@@ -12642,6 +12789,122 @@ describe("fleet lease identity and idle", () => {
       deleted.mockRestore();
     }
   });
+
+  it("carries resource minimums from the lease HTTP request through AWS candidate selection", async () => {
+    const launched: string[] = [];
+    const types = [
+      "c7a.8xlarge",
+      "c7i.8xlarge",
+      "m7a.8xlarge",
+      "m7i.8xlarge",
+      "c7a.4xlarge",
+      "t3.small",
+    ];
+    const fixture = awsIngressTestFleet(async (action, params) => {
+      if (action === "DescribeInstanceTypes") {
+        return ec2XMLResponse(
+          `<DescribeInstanceTypesResponse><instanceTypeSet>${types.map((type, index) => `<item><instanceType>${type}</instanceType><vCpuInfo><defaultVCpus>${index < 4 ? 32 : index === 4 ? 16 : 2}</defaultVCpus></vCpuInfo><memoryInfo><sizeInMiB>${index < 4 ? 65536 : index === 4 ? 32768 : 2048}</sizeInMiB></memoryInfo></item>`).join("")}</instanceTypeSet></DescribeInstanceTypesResponse>`,
+        );
+      }
+      if (action === "RunInstances") {
+        const type = params.get("InstanceType")!;
+        launched.push(type);
+        if (type !== "c7a.4xlarge")
+          return ec2XMLResponse(
+            "<Response><Errors><Error><Code>VcpuLimitExceeded</Code><Message>quota exhausted</Message></Error></Errors></Response>",
+            400,
+          );
+        return ec2XMLResponse(
+          "<RunInstancesResponse><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>c7a.4xlarge</instanceType><instanceState><name>pending</name></instanceState></item></instancesSet></RunInstancesResponse>",
+        );
+      }
+      if (action === "DescribeInstances")
+        return ec2XMLResponse(
+          "<DescribeInstancesResponse><requestId>req-capacity</requestId><reservationSet><item><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>c7a.4xlarge</instanceType><ipAddress>192.0.2.20</ipAddress><instanceState><name>running</name></instanceState></item></instancesSet></item></reservationSet></DescribeInstancesResponse>",
+        );
+      return undefined;
+    });
+    const result = await fixture.fleet.fetch(
+      request("POST", "/v1/leases/resource-constrained", {
+        headers: {
+          ...fixture.headers,
+          "x-crabbox-admin": "true",
+          "cf-connecting-ip": "198.51.100.20",
+        },
+        body: {
+          provider: "aws",
+          target: "linux",
+          class: "standard",
+          leaseID: fixture.creatingID,
+          createAttemptID: fixture.createAttemptID,
+          awsRegion: "eu-west-1",
+          awsSGID: "sg-shared",
+          awsAMI: "ami-test",
+          sshPublicKey: "ssh-ed25519 test",
+          capacity: { market: "on-demand", fallback: "none", minVCPUs: 4, minMemoryMiB: 15360 },
+        },
+      }),
+    );
+    expect(result.status).toBe(201);
+    await expect(result.json()).resolves.toMatchObject({
+      lease: { state: "active", serverType: "c7a.4xlarge" },
+    });
+    expect(launched).toEqual(types.slice(0, 5));
+  });
+
+  it.each([undefined, "t3.small"])(
+    "cleans up constrained AWS readiness with unverified type %s",
+    async (readyType) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => awsIdentityResponse("123456789012")),
+      );
+      const machine = {
+        provider: "aws",
+        id: 42,
+        cloudID: "i-capacity",
+        name: "capacity-test",
+        status: "pending",
+        labels: {},
+        serverType: "c7a.4xlarge",
+      };
+      const created = vi
+        .spyOn(EC2SpotClient.prototype, "createServerWithFallback")
+        .mockResolvedValue({ server: machine, serverType: "c7a.4xlarge", imageID: "ami-test" });
+      vi.spyOn(EC2SpotClient.prototype, "waitForServerIP").mockResolvedValue({
+        ...machine,
+        serverType: readyType,
+        host: "203.0.113.10",
+        status: "running",
+      });
+      const deleted = vi
+        .spyOn(EC2SpotClient.prototype, "deleteServer")
+        .mockResolvedValue(undefined);
+      const provider = new AWSProvider(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+        "eu-west-1",
+        new MemoryStorage(),
+      );
+      await expect(
+        provider.createServerWithFallback(
+          leaseConfig({
+            provider: "aws",
+            serverType: "c7a.4xlarge",
+            serverTypeExplicit: true,
+            awsRegion: "eu-west-1",
+            capacity: { market: "on-demand", fallback: "none", minVCPUs: 4 },
+            sshPublicKey: "ssh-ed25519 test",
+          }),
+          "cbx_abcdef123456",
+          "capacity-test",
+          "alice@example.com",
+          { providerScope: "aws:account:123456789012" },
+        ),
+      ).rejects.toThrow(/resource requirement mismatch/);
+      expect(created).toHaveBeenCalledTimes(1);
+      expect(deleted).toHaveBeenCalledExactlyOnceWith("i-capacity");
+    },
+  );
 
   it("returns an exact AWS cleanup claim when readiness rollback fails", async () => {
     vi.stubGlobal(
@@ -13244,7 +13507,7 @@ describe("fleet lease identity and idle", () => {
     const failed = await fleet.fetch(request("GET", `/v1/workspaces/${body.id}`, { headers }));
     await expect(failed.json()).resolves.toMatchObject({
       status: "failed",
-      message: expect.stringContaining("active lease limit exceeded"),
+      message: expect.stringContaining("fleet active lease limit exceeded"),
     });
     const workspace = storage.value<Record<string, unknown>>(workspaceFixtureKey("fleet-is-118"));
     expect(workspace?.["reconcileAfter"]).toBeUndefined();
@@ -14155,7 +14418,7 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
-  it("waits for the deployment settle window before reconciling interrupted provisioning", async () => {
+  it("ends the client wait before the deployment settle window for resource recovery", async () => {
     const storage = new MemoryStorage();
     let providerLookups = 0;
     const now = Date.now();
@@ -14201,7 +14464,7 @@ describe("fleet lease identity and idle", () => {
 
     expect(providerLookups).toBe(0);
     const stored = storage.value<LeaseRecord>("lease:cbx_000000000092");
-    expect(stored?.state).toBe("provisioning");
+    expect(stored?.state).toBe("failed");
     expect(Date.parse(stored?.provisioningRecoveryObservedAt ?? "")).toBeGreaterThanOrEqual(now);
     expect(storage.alarm()).toBe(
       Date.parse(stored?.provisioningRecoveryObservedAt ?? "") + 5 * 60_000,
@@ -14801,7 +15064,7 @@ describe("fleet lease identity and idle", () => {
 
     const uncertain = storage.value<LeaseRecord>(`lease:${leaseID}`);
     expect(uncertain).toMatchObject({
-      state: "provisioning",
+      state: "failed",
       provisioningResourceMayExist: true,
       provisioningFailureRetryable: true,
       cleanupError: "provider provisioning was interrupted; provider resource not yet visible",
@@ -15009,6 +15272,7 @@ describe("fleet lease identity and idle", () => {
           nextWake: now + 60_000,
         },
       };
+      let leaseAtTransfer: LeaseRecord | undefined;
       const fleet = testFleet(
         storage,
         {
@@ -15016,6 +15280,7 @@ describe("fleet lease identity and idle", () => {
             provider: "azure",
             onRecoverServer() {
               providerLookups += 1;
+              leaseAtTransfer = storage.value<LeaseRecord>(`lease:${leaseID}`);
               storage.seed(provisioningOperationKey(leaseID), activeOperation);
               if (outcome === "failure") {
                 throw new Error("provider recovery failed after ownership transfer");
@@ -15040,7 +15305,8 @@ describe("fleet lease identity and idle", () => {
 
       expect(providerLookups).toBe(1);
       expect(providerReleases).toBe(0);
-      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toEqual(lease);
+      expect(leaseAtTransfer?.state).toBe("failed");
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toEqual(leaseAtTransfer);
       expect(storage.value<LeaseProvisioningOperation>(provisioningOperationKey(leaseID))).toEqual(
         activeOperation,
       );
@@ -15091,7 +15357,7 @@ describe("fleet lease identity and idle", () => {
 
     const lease = storage.value<LeaseRecord>("lease:cbx_000000000094");
     expect(lease).toMatchObject({
-      state: "provisioning",
+      state: "failed",
       cleanupAttempts: 1,
       cleanupError: "interrupted provisioning recovery failed: azure inventory unavailable",
     });
@@ -15155,7 +15421,7 @@ describe("fleet lease identity and idle", () => {
 
     expect(actions).toEqual(["GetCallerIdentity", "DescribeInstances"]);
     expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
-      state: "provisioning",
+      state: "failed",
       providerScope: "aws:account:123456789012",
       provisioningResourceMayExist: true,
       provisioningFailureRetryable: true,
@@ -15245,7 +15511,7 @@ describe("fleet lease identity and idle", () => {
       ]);
       const lease = storage.value<LeaseRecord>(`lease:${leaseID}`);
       expect(lease).toMatchObject({
-        state: "provisioning",
+        state: "failed",
         cloudID: "",
         provisioningResourceMayExist: true,
         provisioningCoordinatorVersion: "old-version",
@@ -15255,8 +15521,8 @@ describe("fleet lease identity and idle", () => {
         cleanupRetryAt: expect.any(String),
       });
       expect(lease?.provisioningRecoveryMissingSince).toBe(missingSince);
-      expect(lease?.failureError).toBeUndefined();
-      expect(lease?.endedAt).toBeUndefined();
+      expect(lease?.failureError).toContain("provider provisioning was interrupted");
+      expect(lease?.endedAt).toEqual(expect.any(String));
       expect(storage.alarm()).toBeGreaterThan(Date.now());
     },
   );
@@ -23325,6 +23591,44 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it("arms cleanup claim recovery and retries before the rest of maintenance completes", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const storage = new MemoryStorage();
+      const lease = testLease({
+        id: "cbx_000000000099",
+        state: "released",
+        releaseDeletesServer: true,
+        cleanupStartedAt: new Date().toISOString(),
+        cleanupClaimExpiresAt: new Date().toISOString(),
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      let attempts = 0;
+      const fleet = testFleet(storage, {
+        hetzner: fakeProvider(undefined, {}, async () => {
+          attempts++;
+          const current = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+          expect(storage.alarm()).toBe(Date.parse(current.cleanupClaimExpiresAt!));
+          if (attempts === 1) throw new Error("synthetic transient cleanup error");
+        }),
+      });
+      await fleet.ready();
+      // Exercise the cleanup owner without letting final global reconciliation arm its wake.
+      const cleanup = fleet as unknown as { expireLeases(ids: Set<string>): Promise<void> };
+      await cleanup.expireLeases(new Set([lease.id]));
+      const failed = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+      expect(failed.cleanupRetryAt).toBeDefined();
+      expect(storage.alarm()).toBe(Date.parse(failed.cleanupRetryAt!));
+      vi.setSystemTime(Date.parse(failed.cleanupRetryAt!) + 1);
+      await alarmRuntime(storage).clearAlarm();
+      await cleanup.expireLeases(new Set([lease.id]));
+      expect(attempts).toBe(2);
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.cleanupCompletedAt).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps deferred release cleanup retryable after provider failure", async () => {
     const storage = new MemoryStorage();
     const lease = testLease({
@@ -29713,7 +30017,7 @@ describe("fleet lease identity and idle", () => {
 
     expect(observedRegions).toEqual(["eu-west-1"]);
     expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
-      state: "provisioning",
+      state: "failed",
       region: "us-east-1",
     });
     expect(
@@ -30977,7 +31281,7 @@ describe("fleet lease identity and idle", () => {
     expect(create.status).toBe(429);
     await expect(create.json()).resolves.toMatchObject({
       error: "cost_limit_exceeded",
-      message: "active lease limit exceeded: 2/1",
+      message: "fleet active lease limit exceeded: 2/1",
     });
     expect(created).toBe(false);
 
@@ -31595,7 +31899,23 @@ describe("fleet lease identity and idle", () => {
   );
 
   it("lists visible retained leases before applying the current-view limit", async () => {
-    const storage = new MemoryStorage();
+    const storage = new BoundedObservedMemoryStorage();
+    for (let index = 0; index < 300; index++) {
+      const id = `cbx_${(index + 1000).toString(16).padStart(12, "0")}`;
+      storage.seed(
+        `lease:${id}`,
+        testLease({
+          id,
+          provider: "aws",
+          owner: "alice@example.com",
+          org: "example-org",
+          state: "released",
+          keep: false,
+          cleanupStatus: "complete",
+          cleanupCompletedAt: "2026-05-01T00:00:00Z",
+        }),
+      );
+    }
     const kept = testLease({
       id: "cbx_000000000150",
       provider: "aws",
@@ -31640,6 +31960,188 @@ describe("fleet lease identity and idle", () => {
     expect(response.status).toBe(200);
     const { leases } = (await response.json()) as { leases: LeaseRecord[] };
     expect(leases.map((lease) => lease.id)).toEqual([kept.id]);
+    expect(storage.listOptions.filter((options) => options.prefix === "lease:")).toHaveLength(3);
+  });
+
+  it.each([
+    { path: "/v1/leases", admin: false },
+    { path: "/v1/leases", admin: true },
+    { path: "/v1/admin/leases", admin: true },
+  ])(
+    "bounds history reads and preserves lease list selection: $path admin=$admin",
+    async ({ path, admin }) => {
+      const storage = new BoundedObservedMemoryStorage();
+      const fleet = testFleet(storage);
+      await fleet.ready();
+      const idFor = (index: number) => `cbx_${index.toString(16).padStart(12, "0")}`;
+      for (let index = 0; index < 520; index++) {
+        const id = idFor(index);
+        storage.seed(
+          `lease:${id}`,
+          testLease({
+            id,
+            provider: index === 518 ? "azure" : "aws",
+            owner: index === 516 ? "bob@example.com" : "alice@example.com",
+            org: index === 515 ? "other-org" : "example-org",
+            state: index === 517 ? "released" : "active",
+            createdAt:
+              index === 0 || index === 519
+                ? "2026-06-01T00:00:00.000Z"
+                : new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+          }),
+        );
+      }
+      const hidden = idFor(600);
+      storage.seed(
+        `lease:${hidden}`,
+        testLease({
+          id: hidden,
+          owner: "bob@example.com",
+          org: "example-org",
+          createdAt: "2026-06-02T00:00:00.000Z",
+        }),
+      );
+      const headers = {
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+        ...(admin ? { "x-crabbox-admin": "true" } : {}),
+      };
+      const response = await fleet.fetch(
+        request(
+          "GET",
+          `${path}?limit=3&provider=aws&owner=alice%40example.com&state=active&org=example-org`,
+          { headers },
+        ),
+      );
+      expect(response.status).toBe(200);
+      const { leases } = (await response.json()) as { leases: LeaseRecord[] };
+      expect(leases.map((lease) => lease.id)).toEqual([idFor(0), idFor(519), idFor(514)]);
+      const reads = storage.listOptions.filter((options) => options.prefix === "lease:");
+      expect(reads).toHaveLength(5);
+      expect(reads.every((options) => options.limit === 128 && options.noCache === true)).toBe(
+        true,
+      );
+
+      const visible = await fleet.fetch(request("GET", `${path}?limit=1`, { headers }));
+      await expect(visible.json()).resolves.toMatchObject({
+        leases: [{ id: admin ? hidden : idFor(0) }],
+      });
+      for (const [query, count] of [
+        ["", 100],
+        ["?limit=999", 500],
+        ["?limit=0.5", 0],
+      ] as const) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- compare each existing limit contract on the same frozen history.
+        const limited = await fleet.fetch(request("GET", `${path}${query}`, { headers }));
+        // oxlint-disable-next-line eslint/no-await-in-loop -- consume this response before checking the next limit.
+        const body = (await limited.json()) as { leases: LeaseRecord[] };
+        expect(body.leases).toHaveLength(count);
+      }
+    },
+  );
+
+  it("bounds summary pages across large and invisible lease histories without changing detail", async () => {
+    const storage = new BoundedObservedMemoryStorage();
+    const fleet = testFleet(storage, {}, { CRABBOX_SESSION_SECRET: "synthetic-list-secret" });
+    await fleet.ready();
+    const events = Array.from({ length: 64 }, (_, index) => ({
+      phase: "coordinator_step" as const,
+      source: "coordinator" as const,
+      at: "2026-01-01T00:00:00Z",
+      step: `admission.synthetic_${index}`,
+      durationMs: 10,
+      count: 1,
+      errors: 0,
+    }));
+    for (let index = 0; index < 350; index++) {
+      const id = `cbx_${index.toString(16).padStart(12, "0")}`;
+      storage.seed(
+        `lease:${id}`,
+        testLease({
+          id,
+          owner: index < 200 ? "bob@example.com" : "alice@example.com",
+          org: "example-org",
+          creationEvents: events,
+        }),
+      );
+    }
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    let cursor = "";
+    const ids: string[] = [];
+    const counts: number[] = [];
+    do {
+      storage.resetListOptions();
+      // oxlint-disable-next-line eslint/no-await-in-loop -- consume one cursor page at a time.
+      const response = await fleet.fetch(
+        request(
+          "GET",
+          `/v1/leases?pagination=keyset-v1&projection=summary&limit=1000&cursor=${encodeURIComponent(cursor)}`,
+          { headers },
+        ),
+      );
+      expect(response.status).toBe(200);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each response provides the next cursor.
+      const body = (await response.json()) as {
+        leases: LeaseRecord[];
+        pagination: string;
+        nextCursor?: string;
+      };
+      expect(body.pagination).toBe("keyset-v1");
+      const reads = storage.listOptions.filter(({ prefix }) => prefix === "lease:");
+      expect(reads).toHaveLength(1);
+      expect(reads[0]).toMatchObject({ limit: 100, noCache: true });
+      expect(body.leases.every((lease) => lease.creationEvents === undefined)).toBe(true);
+      ids.push(...body.leases.map((lease) => lease.id));
+      counts.push(body.leases.length);
+      cursor = body.nextCursor ?? "";
+      expect(cursor).not.toContain("cbx_");
+    } while (cursor);
+    expect(counts).toEqual([0, 0, 100, 50]);
+    expect(new Set(ids).size).toBe(150);
+    const legacy = await fleet.fetch(request("GET", "/v1/leases?limit=100", { headers }));
+    const legacyText = await legacy.text();
+    expect(JSON.parse(legacyText).leases[0].creationEvents).toHaveLength(64);
+    const compact = await fleet.fetch(
+      request("GET", "/v1/leases?limit=100&projection=summary", { headers }),
+    );
+    const compactText = await compact.text();
+    expect(legacyText.length / compactText.length).toBeGreaterThan(5);
+    console.info(
+      `synthetic lease list: full=${legacyText.length} bytes summary=${compactText.length} bytes for 100 rows`,
+    );
+    const detail = await fleet.fetch(request("GET", `/v1/leases/${ids[0]}`, { headers }));
+    expect(((await detail.json()) as { lease: LeaseRecord }).lease.creationEvents).toHaveLength(64);
+    const invalid = await fleet.fetch(
+      request("GET", "/v1/leases?pagination=keyset-v1&cursor=invalid", { headers }),
+    );
+    expect(invalid.status).toBe(400);
+  });
+
+  it("resolves a slug through bounded history pages and preserves ambiguity checks", async () => {
+    const storage = new BoundedObservedMemoryStorage();
+    const fleet = testFleet(storage);
+    await fleet.ready();
+    for (let index = 0; index < 400; index++) {
+      const id = `cbx_${index.toString(16).padStart(12, "0")}`;
+      storage.seed(`lease:${id}`, testLease({ id, slug: "wanted", state: "released" }));
+    }
+    const lease = testLease({
+      id: "cbx_aaaaaaaaaaaa",
+      slug: "wanted",
+      owner: "alice@example.com",
+      org: "example-org",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const headers = { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" };
+    const result = await fleet.fetch(request("GET", "/v1/leases/wanted", { headers }));
+    expect(result.status).toBe(200);
+    expect(((await result.json()) as { lease: LeaseRecord }).lease.id).toBe(lease.id);
+    expect(storage.listOptions.filter(({ prefix }) => prefix === "lease:")).toHaveLength(4);
+    storage.seed("lease:cbx_bbbbbbbbbbbb", { ...lease, id: "cbx_bbbbbbbbbbbb" });
+    const ambiguous = await fleet.fetch(request("GET", "/v1/leases/wanted", { headers }));
+    expect(ambiguous.status).toBe(500);
+    expect(await ambiguous.text()).toContain("ambiguous slug wanted");
   });
 
   it("persists a cancel-before-create tombstone and rejects the later create without provisioning", async () => {
@@ -33148,6 +33650,207 @@ describe("fleet lease identity and idle", () => {
       expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({ state: "released" });
       expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cloudID).toBe("vm-canceled-late");
       expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cleanupStartedAt).toBeUndefined();
+    },
+  );
+
+  it("keeps owned-key cleanup behind the settle window after failing an interrupted create", async () => {
+    const storage = new MemoryStorage();
+    const now = Date.now();
+    const lease = testLease({
+      id: "cbx_ca1100000054",
+      provider: "aws",
+      state: "provisioning",
+      cloudID: "",
+      serverID: 0,
+      serverName: "",
+      host: "",
+      provisioningRequestStartedAt: new Date(now - 60_000).toISOString(),
+      provisioningCoordinatorVersion: "interrupted-runtime",
+      providerKeyCleanupOwned: true,
+      providerKeyCleanupPending: true,
+      expiresAt: new Date(now + 25 * 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    let releases = 0;
+    const fleet = testCoordinator(storage, {
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        onReleaseLease: () => {
+          releases++;
+        },
+      }),
+    });
+    await fleet.alarm();
+    const failed = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+    expect(failed.state).toBe("failed");
+    expect(failed.providerKeyCleanupPending).toBe(true);
+    expect(Date.parse(failed.cleanupRetryAt!)).toBeGreaterThanOrEqual(now + 5 * 60_000);
+    expect(releases).toBe(0);
+  });
+
+  it("ends an already-observed hostless AWS wait without waiting for its cleanup retry", async () => {
+    const storage = new MemoryStorage();
+    const now = Date.now();
+    const lease = testLease({
+      id: "cbx_ca1100000053",
+      provider: "aws",
+      state: "provisioning",
+      cloudID: "",
+      serverID: 0,
+      serverName: "",
+      host: "",
+      createdAt: new Date(now - 25 * 60_000).toISOString(),
+      lastTouchedAt: new Date(now - 25 * 60_000).toISOString(),
+      expiresAt: new Date(now + 60_000).toISOString(),
+      provisioningRequestStartedAt: new Date(now - 25 * 60_000).toISOString(),
+      provisioningCoordinatorVersion: "interrupted-runtime",
+      provisioningRecoveryObservedAt: new Date(now - 20 * 60_000).toISOString(),
+      provisioningRecoveryMissingSince: new Date(now - 15 * 60_000).toISOString(),
+      provisioningResourceMayExist: true,
+      provisioningFailureRetryable: true,
+      cleanupError: "provider provisioning was interrupted; provider resource not yet visible",
+      cleanupRetryAt: new Date(now + 5 * 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    let reads = 0;
+    const fleet = testCoordinator(storage, {
+      aws: fakeProvider(undefined, {
+        provider: "aws",
+        onRecoverServer: () => {
+          reads++;
+          return undefined;
+        },
+      }),
+    });
+    await fleet.alarm();
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+      state: "failed",
+      provisioningResourceMayExist: true,
+      provisioningFailureRetryable: true,
+      cleanupRetryAt: lease.cleanupRetryAt,
+      provisioningRecoveryMissingSince: lease.provisioningRecoveryMissingSince,
+    });
+    expect(reads).toBe(0);
+    expect(storage.alarm()).toBeLessThanOrEqual(Date.parse(lease.cleanupRetryAt!));
+  });
+
+  it.each([false, true])(
+    "terminalizes an interrupted AWS create on the first restart tick (late resource=%s)",
+    async (lateResource) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const storage = new MemoryStorage();
+      const started = deferred<void>();
+      const finish = deferred<void>();
+      const leaseID = "cbx_ca1100000052";
+      let creates = 0;
+      let visible = false;
+      const deleted: string[] = [];
+      const provider = fakeProvider(
+        async () => {
+          creates++;
+          started.resolve();
+          await finish.promise;
+          throw new Error("synthetic interrupted create");
+        },
+        {
+          provider: "aws",
+          onRecoverServer: (lease) =>
+            visible
+              ? {
+                  provider: "aws",
+                  id: 123,
+                  cloudID: "i-late",
+                  name: "crabbox-late",
+                  status: "running",
+                  serverType: "c7a.2xlarge",
+                  host: "192.0.2.44",
+                  labels: {
+                    crabbox: "true",
+                    created_by: "crabbox",
+                    lease: leaseID,
+                    owner: "alice_example.com",
+                    provider: "aws",
+                    slug: lease.slug,
+                  },
+                }
+              : undefined,
+          onReleaseLease: (lease) => {
+            deleted.push(lease.cloudID);
+          },
+        },
+      );
+      const env = {
+        CF_VERSION_METADATA: { id: "unchanged-deployment", timestamp: new Date().toISOString() },
+      };
+      provider.attachStorage(storage);
+      const runtime = () =>
+        new FleetCoordinator(new FakeCoordinatorRuntime(storage), env as Env, { aws: provider });
+      const first = runtime();
+      const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+      const create = () =>
+        request("POST", "/v1/leases", {
+          headers,
+          body: {
+            leaseID,
+            createAttemptID: "cat_52000000000000000000000000000052",
+            provider: "aws",
+            sshPublicKey: "ssh-ed25519 restart-test",
+            ttlSeconds: 1500,
+          },
+        });
+      const creating = first.fetch(create());
+      try {
+        await started.promise;
+        const original = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+        expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 60_000);
+        await first.alarm();
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe("provisioning");
+        expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 60_000);
+        const pending = await first.fetch(request("GET", `/v1/leases/${leaseID}`, { headers }));
+        expect(await pending.json()).toMatchObject({
+          lease: { provisioningPhase: "provider-request" },
+        });
+        const restarted = runtime();
+        vi.setSystemTime(Date.now() + 60_000);
+        await restarted.alarm();
+        const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+        expect(failed).toMatchObject({
+          state: "failed",
+          cloudID: "",
+          provisioningResourceMayExist: true,
+          provisioningFailureRetryable: true,
+          provisioningCoordinatorVersion: original.provisioningCoordinatorVersion,
+        });
+        expect(Date.parse(failed.endedAt!)).toBeLessThan(
+          Date.parse(original.createdAt) + 2 * 60_000,
+        );
+        expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 5 * 60_000);
+        const view = await restarted.fetch(request("GET", `/v1/leases/${leaseID}`, { headers }));
+        expect(await view.json()).toMatchObject({
+          lease: { state: "failed", provisioningPhase: "interrupted-recovering" },
+        });
+        const replay = await restarted.fetch(create());
+        expect(replay.status).toBe(409);
+        expect(await replay.json()).toMatchObject({ lease: { state: "failed" } });
+        expect(creates).toBe(1);
+        vi.setSystemTime(Date.now() + 5 * 60_000);
+        await restarted.alarm();
+        const missing = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+        expect(missing).toMatchObject({ state: "failed", provisioningResourceMayExist: true });
+        expect(missing.provisioningRecoveryMissingSince).toBeDefined();
+        visible = lateResource;
+        vi.setSystemTime(Date.now() + 31 * 60_000);
+        await restarted.alarm();
+        expect(deleted).toEqual(lateResource ? ["i-late"] : []);
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.provisioningResourceMayExist).toBe(
+          false,
+        );
+        expect(creates).toBe(1);
+      } finally {
+        finish.resolve();
+        await creating;
+        vi.useRealTimers();
+      }
     },
   );
 
@@ -35046,6 +35749,203 @@ describe("fleet lease identity and idle", () => {
       status: "missing",
       stale: true,
     });
+  });
+
+  it.each(["cloudflare", "shared"])(
+    "bounds runner sync history and writes while preserving legacy output on %s",
+    async (runtime) => {
+      class SyncStorage extends MemoryStorage {
+        pages: number[] = [];
+        pending = 0;
+        peakPending = 0;
+        scanComplete = false;
+        override async list<T>(options: Parameters<CoordinatorStorageView["list"]>[0] = {}) {
+          const page = await super.list<T>(options);
+          if (options.prefix === "runner:") {
+            expect(options.noCache).toBe(true);
+            expect(options.limit).toBe(128);
+            this.pages.push(page.size);
+            this.scanComplete = page.size < 128;
+          }
+          return page;
+        }
+        override async put<T>(key: string, value: T, options?: { noCache?: boolean }) {
+          if (!key.startsWith("runner:")) return super.put(key, value, options);
+          expect(this.scanComplete).toBe(true);
+          expect(options?.noCache).toBe(true);
+          this.pending += 1;
+          this.peakPending = Math.max(this.peakPending, this.pending);
+          await Promise.resolve();
+          try {
+            await super.put(key, value, options);
+          } finally {
+            this.pending -= 1;
+          }
+        }
+      }
+      const storage = new SyncStorage();
+      const owner = "alice@example.com";
+      const org = orgKeyForLabel("example-org");
+      const old = "2026-01-01T00:00:00.000Z";
+      const row = (id: string): ExternalRunnerRecord => ({
+        id,
+        provider: "blacksmith-testbox",
+        owner,
+        org,
+        status: "ready",
+        firstSeenAt: old,
+        lastSeenAt: old,
+        updatedAt: old,
+      });
+      const key = (r: ExternalRunnerRecord) =>
+        `runner:${[r.provider, r.id, r.org, r.owner].map(encodeURIComponent).join(":")}`;
+      const seed = new Map<string, ExternalRunnerRecord>();
+      seed.set("runner:000-input", { ...row("input-runner"), stale: true, job: "legacy-first" });
+      seed.set("runner:001-omitted", { ...row("omitted-runner"), job: "legacy-omitted" });
+      for (let i = 0; i < 300; i++) {
+        const r = row(`runner-${String(i).padStart(4, "0")}`);
+        seed.set(key(r), r);
+      }
+      const canonicalInput = {
+        ...row("input-runner"),
+        firstSeenAt: "2026-02-01T00:00:00.000Z",
+        job: "canonical",
+      };
+      seed.set(key(canonicalInput), canonicalInput);
+      const canonicalOmitted = { ...row("omitted-runner"), job: "canonical-omitted" };
+      seed.set(key(canonicalOmitted), canonicalOmitted);
+      for (const r of [
+        { ...row("other-owner"), owner: "bob@example.com" },
+        { ...row("other-org"), org: orgKeyForLabel("other-org") },
+        { ...row("legacy-org"), org: "example-org" },
+        { ...row("other-provider"), provider: "other-provider" },
+        { ...row("already-stale"), status: "missing", stale: true },
+      ])
+        seed.set(key(r), r);
+      // Keep historical internal identities exactly as stored, without fixture normalization.
+      await Promise.all([...seed].map(([k, r]) => MemoryStorage.prototype.put.call(storage, k, r)));
+      const legacy = { ...row("legacy-org"), org: "example-org" };
+      const fleet = runtime === "cloudflare" ? testFleet(storage) : testCoordinator(storage);
+      const response = await fleet.fetch(
+        request("POST", "/v1/runners/sync", {
+          headers: { "x-crabbox-owner": owner, "x-crabbox-org": "example-org" },
+          body: {
+            provider: "blacksmith-testbox",
+            runners: [
+              { id: "input-runner", status: "READY", actionsRunURL: "https://invalid.example/run" },
+              { id: "input-runner", status: "failed", job: "duplicate" },
+              { id: "!invalid", status: "ready" },
+              { id: "new-runner", status: "READY" },
+            ],
+          },
+        }),
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        runners: ExternalRunnerRecord[];
+        stale: ExternalRunnerRecord[];
+      };
+      expect(body.runners.map((r) => r.id)).toEqual(["input-runner", "new-runner"]);
+      expect(body.runners[0]).toMatchObject({
+        firstSeenAt: old,
+        job: "legacy-first",
+        status: "ready",
+        org: "example-org",
+      });
+      expect(body.runners[0]).not.toHaveProperty("stale");
+      expect(body.runners[0]).not.toHaveProperty("actionsRunURL");
+      const expected = [...seed]
+        .toSorted(([a], [b]) => a.localeCompare(b))
+        .map(([, r]) => r)
+        .filter(
+          (r) =>
+            r.provider === "blacksmith-testbox" &&
+            r.owner === owner &&
+            r.org === org &&
+            r.id !== "input-runner" &&
+            !r.stale,
+        );
+      expect(body.stale).toEqual(
+        expected.map((r) => ({
+          ...r,
+          org: "example-org",
+          status: "missing",
+          stale: true,
+          updatedAt: body.runners[0]!.updatedAt,
+        })),
+      );
+      expect(body.stale).toHaveLength(302);
+      expect(storage.pages.length).toBeGreaterThan(2);
+      expect(Math.max(...storage.pages)).toBeLessThanOrEqual(128);
+      expect(storage.peakPending).toBe(128);
+      expect(storage.pending).toBe(0);
+      expect(storage.value<ExternalRunnerRecord>(key(canonicalOmitted))?.job).toBe(
+        "canonical-omitted",
+      );
+      expect(storage.value<ExternalRunnerRecord>(key(legacy))?.stale).toBeUndefined();
+    },
+  );
+
+  it("attempts all runner writes after a rejection and repairs the remaining row on retry", async () => {
+    const storage = new MemoryStorage();
+    const owner = "alice@example.com";
+    const org = orgKeyForLabel("example-org");
+    const old = "2026-01-01T00:00:00.000Z";
+    for (let i = 0; i < 300; i++) {
+      const id = `runner-${String(i).padStart(4, "0")}`;
+      storage.seed(
+        `runner:${["blacksmith-testbox", id, org, owner].map(encodeURIComponent).join(":")}`,
+        {
+          id,
+          provider: "blacksmith-testbox",
+          owner,
+          org,
+          status: "ready",
+          firstSeenAt: old,
+          lastSeenAt: old,
+          updatedAt: old,
+        },
+      );
+    }
+    let attempts = 0;
+    storage.beforePut = async (key) => {
+      if (!key.startsWith("runner:")) return;
+      attempts += 1;
+      if (key.includes(":runner-0000:")) throw new Error("synthetic runner write failure");
+    };
+    const fleet = testFleet(storage);
+    const sync = () =>
+      fleet.fetch(
+        request("POST", "/v1/runners/sync", {
+          headers: { "x-crabbox-owner": owner, "x-crabbox-org": "example-org" },
+          body: { provider: "blacksmith-testbox", runners: [] },
+        }),
+      );
+    expect((await sync()).status).toBe(500);
+    expect(attempts).toBe(300);
+    storage.beforePut = undefined;
+    const retry = await sync();
+    expect(retry.status).toBe(200);
+    const body = (await retry.json()) as { stale: ExternalRunnerRecord[] };
+    expect(body.stale.map((r) => r.id)).toEqual(["runner-0000"]);
+    expect(body.stale[0]?.firstSeenAt).toBe(old);
+  });
+
+  it("does not write runners after a history page read fails", async () => {
+    const storage = new MemoryStorage();
+    storage.beforeList = async (options) => {
+      if (options?.prefix === "runner:") throw new Error("synthetic history read failure");
+    };
+    const put = vi.spyOn(storage, "put");
+    const fleet = testFleet(storage);
+    const response = await fleet.fetch(
+      request("POST", "/v1/runners/sync", {
+        headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+        body: { provider: "blacksmith-testbox", runners: [{ id: "new-runner", status: "ready" }] },
+      }),
+    );
+    expect(response.status).toBe(500);
+    expect(put.mock.calls.filter(([key]) => key.startsWith("runner:"))).toHaveLength(0);
   });
 
   it("renders external runner detail pages for visible runners", async () => {
@@ -43632,6 +44532,61 @@ describe("fleet lease identity and idle", () => {
     expect(await storage.list({ prefix: "lease:" })).toHaveLength(0);
   });
 
+  it.each([
+    [{ awsUseStockImage: "true" }, "must be a boolean"],
+    [{ awsUseStockImage: true, awsAMI: "ami-explicit" }, "cannot be combined"],
+    [{ awsUseStockImage: true, awsSnapshot: "snap-explicit" }, "cannot be combined"],
+    [
+      { awsUseStockImage: true, imageRequirements: { browser: true } },
+      "image capability requirements",
+    ],
+    [{ awsUseStockImage: true, provider: "gcp" }, "requires provider=aws"],
+  ])("rejects invalid AWS stock image requests before paid work: %j", async (input, message) => {
+    const storage = new MemoryStorage();
+    const providerFetch = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", providerFetch);
+    const fleet = testFleet(storage);
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: { "x-crabbox-admin": "true" },
+        body: { provider: "aws", sshPublicKey: "ssh-ed25519 test", ...input },
+      }),
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ message: expect.stringContaining(message) });
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect((await storage.list()).size).toBe(0);
+  });
+
+  it("stock image requests never consult promoted images or retain their identity", async () => {
+    const storage = new MemoryStorage();
+    const get = vi.spyOn(storage, "get");
+    const list = vi.spyOn(storage, "list");
+    const provider = new AWSProvider(
+      { CRABBOX_AWS_AMI: "ami-operator" } as Env,
+      "eu-west-1",
+      storage,
+    );
+    const config = leaseConfig({ provider: "aws", sshPublicKey: "ssh-ed25519 test" });
+    const prepared = await provider.prepareLeaseConfig({
+      ...config,
+      awsUseStockImage: true,
+      awsPromotedAMIs: { stale: "ami-stale" },
+      selectedImage: {
+        id: "ami-stale",
+        provider: "aws",
+        source: "promoted",
+        kind: "aws-ami",
+        region: "eu-west-1",
+      },
+    });
+    expect(prepared.awsUseStockImage).toBe(true);
+    expect(prepared.selectedImage).toBeUndefined();
+    expect(prepared.awsPromotedAMIs).toEqual({});
+    expect(get).not.toHaveBeenCalled();
+    expect(list).not.toHaveBeenCalled();
+  });
+
   it("rejects capability selection when an operator AMI override is configured", async () => {
     const storage = new MemoryStorage();
     storage.seed("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-capable", {
@@ -45917,6 +46872,253 @@ describe("fleet lease identity and idle", () => {
 });
 
 describe("fleet run history", () => {
+  it.each(["http", "control", "legacy attribution"])(
+    "bounds event-history materialization for %s reads",
+    async (route) => {
+      const runID = "run_memory_history";
+      const prefix = `runevent:${runID}:`;
+      const total = 10_000;
+      const reads: number[] = [];
+      class EventHistoryStorage extends MemoryStorage {
+        override async list<T>(
+          options: Parameters<CoordinatorStorageView["list"]>[0] = {},
+        ): Promise<Map<string, T>> {
+          if (options.prefix !== prefix) return super.list<T>(options);
+          const after = Number(options.startAfter?.slice(prefix.length) ?? 0);
+          const end = Math.min(total, after + (options.limit ?? total));
+          const page = new Map<string, T>();
+          for (let seq = after + 1; seq <= end; seq++) {
+            page.set(`${prefix}${String(seq).padStart(12, "0")}`, {
+              runID,
+              seq,
+              type: "stdout",
+              data: "x".repeat(16 * 1024),
+              ...(seq === total ? { leaseID: "cbx_000000000002" } : {}),
+            } as T);
+          }
+          reads.push(page.size);
+          return page;
+        }
+      }
+      const storage = new EventHistoryStorage();
+      const fleet = testFleet(storage);
+      await fleet.ready();
+      const headers = {
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+      };
+      storage.seed(
+        `run:${runID}`,
+        testRun({
+          id: runID,
+          owner: "alice@example.com",
+          org: "example-org",
+          leaseID: "",
+          ...(route === "legacy attribution" ? {} : { leaseIDs: [], leaseOwners: [] }),
+        }),
+      );
+      storage.seed(
+        "lease:cbx_000000000002",
+        testLease({
+          id: "cbx_000000000002",
+          owner: "bob@example.com",
+          org: "example-org",
+        }),
+      );
+      let result: unknown;
+      if (route === "control") {
+        const server = new FakeWebSocket({
+          kind: "control",
+          clientID: "ctrl_memory",
+          owner: "alice@example.com",
+          org: "example-org",
+          subscriptions: {},
+        });
+        (fleet as unknown as { controlSockets: Map<string, WebSocket> }).controlSockets.set(
+          "ctrl_memory",
+          server as unknown as WebSocket,
+        );
+        await fleet.webSocketMessage(
+          server as unknown as WebSocket,
+          JSON.stringify({
+            type: "subscribe_run",
+            runID,
+            after: total - 2,
+            limit: 2,
+          }),
+        );
+        const message = server.sentJSON().at(-1) as { events: Array<{ seq: number }> };
+        result = { status: 200, sequences: message.events.map((event) => event.seq) };
+      } else {
+        const response = await fleet.fetch(
+          request(
+            "GET",
+            route === "http"
+              ? `/v1/runs/${runID}/events?after=${total - 2}&limit=2`
+              : `/v1/runs/${runID}`,
+            { headers },
+          ),
+        );
+        if (route === "http") {
+          const body = (await response.json()) as { events: Array<{ seq: number }> };
+          result = { status: response.status, sequences: body.events.map((event) => event.seq) };
+        } else {
+          const audit = await fleet.fetch(
+            request("GET", `/v1/runs/${runID}`, {
+              headers: { ...headers, "x-crabbox-owner": "bob@example.com" },
+            }),
+          );
+          result = {
+            status: response.status,
+            auditStatus: audit.status,
+            leaseIDs: storage.value<RunRecord>(`run:${runID}`)?.leaseIDs,
+          };
+        }
+      }
+      expect(result).toEqual(
+        route === "legacy attribution"
+          ? { status: 200, auditStatus: 200, leaseIDs: ["cbx_000000000002"] }
+          : { status: 200, sequences: [total - 1, total] },
+      );
+      // Count materialized payload, without requiring the test runner to exhaust its heap.
+      expect(Math.max(...reads) * 16 * 1024).toBeLessThanOrEqual(
+        (route === "legacy attribution" ? 128 : 2) * 16 * 1024,
+      );
+      expect(reads.reduce((sum, count) => sum + count, 0)).toBe(
+        route === "legacy attribution" ? total : 2,
+      );
+    },
+  );
+
+  it("does not accumulate uploaded run bodies behind a busy lifecycle queue", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    await fleet.ready();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    storage.beforeGet = async (key) => {
+      if (key === "run:run_blocked") {
+        entered.resolve();
+        await release.promise;
+      }
+    };
+    const blocker = fleet.fetch(request("GET", "/v1/runs/run_blocked"));
+    await entered.promise;
+    let consumed = 0;
+    const uploads = Array.from({ length: 32 }, (_, index) => {
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            consumed++;
+            controller.enqueue(
+              new TextEncoder().encode(JSON.stringify({ log: "x".repeat(256 * 1024) })),
+            );
+            controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      return fleet.fetch(
+        new Request(`https://coordinator.test/v1/runs/run_${index}/finish`, {
+          method: "POST",
+          body,
+          duplex: "half",
+        } as RequestInit & { duplex: "half" }),
+      );
+    });
+    try {
+      await vi.waitFor(() => expect(consumed).toBeGreaterThan(0));
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(consumed).toBe(1);
+      const independentRead = await fleet.fetch(request("GET", "/v1/leases/cbx_000000000001"));
+      expect(independentRead.status).toBe(404);
+    } finally {
+      release.resolve();
+      await blocker;
+      const responses = await Promise.all(uploads);
+      expect(responses.every((response) => response.status === 404)).toBe(true);
+      expect(consumed).toBe(32);
+    }
+  });
+
+  it("returns a structured failure when an event request body disconnects", async () => {
+    const fleet = testFleet();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error("synthetic client disconnected"));
+      },
+    });
+    const response = await fleet.fetch(
+      new Request("https://coordinator.test/v1/runs/run_example/events", {
+        method: "POST",
+        body,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" }),
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "run_event_append_unavailable" });
+    const next = await fleet.fetch(request("POST", "/v1/runs/run_example/events", { body: {} }));
+    expect(next.status).toBe(404);
+  });
+
+  it("keeps reads, heartbeats and release available during a stalled run upload", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, { hetzner: fakeProvider() });
+    const lease = testLease({
+      id: "cbx_000000000001",
+      owner: "alice@example.com",
+      org: "example-org",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const headers = { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" };
+    const started = Promise.withResolvers<void>();
+    const finish = Promise.withResolvers<void>();
+    const body = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          started.resolve();
+          await finish.promise;
+          controller.enqueue(new TextEncoder().encode("{}"));
+          controller.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    const upload = fleet.fetch(
+      new Request("https://coordinator.test/v1/runs/run_example/events", {
+        method: "POST",
+        headers,
+        body,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" }),
+    );
+    await started.promise;
+    try {
+      expect((await fleet.fetch(request("GET", "/v1/runs/run_example", { headers }))).status).toBe(
+        404,
+      );
+      expect(
+        (
+          await fleet.fetch(
+            request("POST", `/v1/leases/${lease.id}/heartbeat`, { headers, body: {} }),
+          )
+        ).status,
+      ).toBe(200);
+      expect(
+        (
+          await fleet.fetch(
+            request("POST", `/v1/leases/${lease.id}/release`, { headers, body: {} }),
+          )
+        ).status,
+      ).toBe(200);
+    } finally {
+      finish.resolve();
+      expect((await upload).status).toBe(404);
+    }
+  });
+
   it("pages run history and lease detail scans while retaining only the newest matches", async () => {
     const storage = new ObservedMemoryStorage();
     const fleet = testFleet(storage);
@@ -50440,6 +51642,106 @@ describe("synthetic acknowledgement reliability", () => {
     return socket;
   }
 
+  it.each(["workspace:", "active-egress-session:", "replaced-egress-sessions:", "lease:"])(
+    "serves lease reads and mutations while maintenance discovery waits on %s history",
+    async (prefix) => {
+      const storage = new MemoryStorage();
+      seedLease(storage);
+      seedLease(storage, releaseID);
+      const fleet = testFleet(storage, { hetzner: fakeProvider() });
+      await fleet.ready();
+      const entered = deferred<void>();
+      const resume = deferred<void>();
+      let inputGateClosed = false;
+      let paused = false;
+      storage.beforeList = async (options) => {
+        if (options?.prefix !== prefix || paused) return;
+        paused = true;
+        // Cloudflare defers incoming events during storage I/O unless the read opts out.
+        inputGateClosed = !(options as { allowConcurrency?: boolean }).allowConcurrency;
+        entered.resolve();
+        await resume.promise;
+        inputGateClosed = false;
+      };
+      const maintenance = fleet.alarm();
+      const pending: Promise<Response>[] = [];
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await entered.promise;
+        const dispatch = async (incoming: Request) => {
+          if (inputGateClosed) await resume.promise;
+          return fleet.fetch(incoming);
+        };
+        pending.push(
+          dispatch(request("GET", `/v1/leases/${leaseID}`, { headers })),
+          dispatch(request("POST", `/v1/leases/${leaseID}/heartbeat`, { headers })),
+          dispatch(request("POST", `/v1/leases/${releaseID}/release`, { headers })),
+        );
+        const outcome = await Promise.race([
+          Promise.all(pending).then((responses) => responses.map((response) => response.status)),
+          new Promise<string>((resolve) => {
+            timer = setTimeout(() => resolve("blocked behind discovery"), 1000);
+          }),
+        ]);
+        expect(outcome).toEqual([200, 200, 200]);
+        expect(storage.value<LeaseRecord>(`lease:${releaseID}`)?.state).toBe("released");
+        expect(storage.alarm()).toBeLessThanOrEqual(Date.now());
+      } finally {
+        clearTimeout(timer);
+        resume.resolve();
+        await Promise.allSettled([maintenance, ...pending]);
+      }
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe("active");
+      expect(storage.value<LeaseRecord>(`lease:${releaseID}`)?.cleanupCompletedAt).toBeDefined();
+    },
+  );
+
+  it.each(["deleted", "current-org", "already-released", "updated"])(
+    "rereads a %s workspace before quarantining a discovered legacy record",
+    async (change) => {
+      const storage = new MemoryStorage();
+      const key = "workspace:synthetic-legacy";
+      const original = { id: "synthetic-legacy", org: "legacy-org", updatedAt: "before" };
+      await storage.put(key, original);
+      const fleet = testFleet(storage);
+      await fleet.ready();
+      const list = storage.list.bind(storage);
+      const entered = deferred<void>();
+      const resume = deferred<void>();
+      vi.spyOn(storage, "list").mockImplementation(async (options) => {
+        const snapshot = await list(options);
+        if (options?.prefix === "workspace:") {
+          entered.resolve();
+          await resume.promise;
+        }
+        return snapshot;
+      });
+      const maintenance = (
+        fleet as unknown as { quarantineLegacyWorkspaces(): Promise<void> }
+      ).quarantineLegacyWorkspaces();
+      await entered.promise;
+      const current = {
+        ...original,
+        updatedAt: "after",
+        marker: "newer metadata",
+        ...(change === "current-org" ? { org: orgKeyForLabel("example-org") } : {}),
+        ...(change === "already-released" ? { releaseRequestedAt: "already requested" } : {}),
+      };
+      if (change === "deleted") await storage.delete(key);
+      else await storage.put(key, current);
+      resume.resolve();
+      await maintenance;
+      const timestamp = expect.any(String);
+      const expected =
+        change === "deleted"
+          ? undefined
+          : change === "updated"
+            ? { ...current, updatedAt: timestamp, releaseRequestedAt: timestamp }
+            : current;
+      expect(storage.value(key)).toEqual(expected);
+    },
+  );
+
   it.each(["callback", "alarm"])(
     "publishes neither transaction state nor an alarm job after a %s failure",
     async (failure) => {
@@ -51691,6 +52993,533 @@ describe("synthetic acknowledgement reliability", () => {
     expect(storage.alarm()).toBe(Date.parse(debt.cleanupClaimExpiresAt!));
   });
 
+  it("does not rearm elapsed prewarm retry history after a full maintenance pass", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const storage = new MemoryStorage();
+      const lease = seedLease(storage);
+      const workspace = {
+        id: "active-workspace",
+        leaseID,
+        owner: lease.owner,
+        org: lease.org,
+        profile: "default",
+        provider: "hetzner",
+        class: "standard",
+        desktop: false,
+        ttlSeconds: 3600,
+        idleTimeoutSeconds: 1800,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      storage.seed(workspaceFixtureKey(workspace.id), workspace);
+      storage.seed(`lease:${leaseID}`, { ...lease, workspaceID: workspace.id });
+      const spareID = "cbx_aacc00000003";
+      storage.seed(workspaceFixtureKey("healthy-spare"), {
+        ...workspace,
+        id: "healthy-spare",
+        leaseID: spareID,
+        prewarm: true,
+      });
+      storage.seed(`lease:${spareID}`, { ...lease, id: spareID, workspaceID: "healthy-spare" });
+      const failedKey = workspaceFixtureKey("failed-spare");
+      storage.seed(failedKey, {
+        ...workspace,
+        id: "failed-spare",
+        leaseID: "cbx_aacc00000004",
+        prewarm: true,
+        error: "synthetic provisioning failure",
+        releaseRequestedAt: new Date(Date.now() - 600_000).toISOString(),
+        updatedAt: new Date(Date.now() - 600_000).toISOString(),
+      });
+      await testFleet(storage, {}, { CRABBOX_WORKSPACE_PREWARM_COUNT: "1" }).alarm();
+      expect(storage.value(failedKey)).toBeDefined(); // Retention is independent of retry eligibility.
+      expect(storage.alarm()).toBe(Date.parse(lease.expiresAt) - 300_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses the durable provisioning wake for an expired controller-owned lease", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const storage = new MemoryStorage();
+      const lease = seedLease(storage);
+      storage.seed(`lease:${leaseID}`, {
+        ...lease,
+        state: "provisioning",
+        expiresAt: new Date(Date.now() - 1).toISOString(),
+      });
+      const nextWake = Date.now() + 45_000;
+      await putProvisioningOperation(storage, {
+        schema: 1,
+        leaseID,
+        operationID: leaseID,
+        generation: "synthetic-generation",
+        owner: lease.owner,
+        org: lease.org,
+        provider: lease.provider,
+        scope: "synthetic-scope",
+        revision: 1,
+        createdAt: Date.now() - 60_000,
+        deadline: Date.now() - 1,
+        step: { phase: "blocked", attempt: 0, nextWake, state: {} },
+      });
+      await testFleet(storage).alarm();
+      expect(storage.alarm()).toBe(nextWake);
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe("provisioning");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("defers a pool wake whose owner records are missing without dropping its evidence", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const storage = new MemoryStorage();
+      await setPoolWake(storage, leaseID, Date.now() - 1);
+      await testFleet(storage).alarm();
+      expect(storage.alarm()).toBe(Date.now() + 15_000);
+      expect(storage.value(`portable-ready-pool-v1-wake:${leaseID}`)).toEqual({
+        at: Date.now() + 15_000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([null, false, 0, { kind: "pool-access", operationID: "synthetic-invalid" }])(
+    "consumes a malformed provisioning due value %j",
+    async (value) => {
+      const storage = new MemoryStorage();
+      const key = "provisioning-due:0000000000000000:synthetic-invalid";
+      storage.seed(key, value);
+      await testFleet(storage).alarm();
+      expect(storage.value(key)).toBeUndefined();
+      expect(storage.alarm()).toBeUndefined();
+    },
+  );
+
+  it("backs off only the same overdue alarm candidate and resets on future work", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const storage = new MemoryStorage();
+      const lease = seedLease(storage);
+      const overdue = { ...lease, expiresAt: new Date(Date.now() - 1).toISOString() };
+      storage.seed(`lease:${leaseID}`, overdue);
+      const fleet = testFleet(storage);
+      // Simulate an owner that cannot advance, independently of the repaired owner bugs.
+      vi.spyOn(
+        fleet as unknown as { expireLeases(): Promise<void> },
+        "expireLeases",
+      ).mockResolvedValue(undefined);
+      for (const delay of [0, 1000, 2000, 4000, 8000, 16000, 32000, 60000, 60000]) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- each delivery observes the preceding no-progress streak.
+        await fleet.alarm();
+        expect(Math.max(0, storage.alarm()! - Date.now())).toBe(delay);
+        vi.setSystemTime(Math.max(Date.now() + 1, storage.alarm()!));
+      }
+      expect(warn).toHaveBeenCalledTimes(7);
+      expect(warn.mock.calls[0]?.[0]).toMatch(/source=lease key=[a-f0-9]{16} delayMs=1000$/);
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(lease.owner);
+
+      storage.seed(`lease:${leaseID}`, {
+        ...lease,
+        expiresAt: new Date(Date.now() + 90_000).toISOString(),
+      });
+      await fleet.alarm();
+      expect(storage.alarm()).toBe(Date.now() + 90_000);
+      storage.seed(`lease:${leaseID}`, overdue);
+      await fleet.alarm();
+      expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1);
+      await fleet.alarm();
+      expect(storage.alarm()).toBe(Date.now() + 1000);
+
+      await storage.delete(`lease:${leaseID}`);
+      storage.seed(`lease:${releaseID}`, { ...overdue, id: releaseID });
+      await fleet.alarm();
+      expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    { scanMs: 0, expectedDelay: 5000 },
+    { scanMs: 6000, expectedDelay: 60000 },
+  ])(
+    "keeps future alarm deadlines during overdue backoff ($scanMs ms scan)",
+    async ({ scanMs, expectedDelay }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const storage = new MemoryStorage();
+        const first = seedLease(storage);
+        const second = seedLease(storage, releaseID);
+        storage.seed(`lease:${leaseID}`, {
+          ...first,
+          expiresAt: new Date(Date.now() - 2000).toISOString(),
+        });
+        storage.seed(`lease:${releaseID}`, {
+          ...second,
+          expiresAt: new Date(Date.now() - 1000).toISOString(),
+        });
+        const fleet = testFleet(storage);
+        vi.spyOn(
+          fleet as unknown as { expireLeases(): Promise<void> },
+          "expireLeases",
+        ).mockResolvedValue(undefined);
+        for (const delay of [0, 1000, 2000, 4000, 8000, 16000, 32000, 60000]) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- both overdue items must share the advancing backoff.
+          await fleet.alarm();
+          expect(Math.max(0, storage.alarm()! - Date.now())).toBe(delay);
+          vi.setSystemTime(Math.max(Date.now() + 1, storage.alarm()!));
+        }
+        const futureID = "cbx_aacc00000003";
+        const future = seedLease(storage, futureID);
+        const scanStartedAt = Date.now();
+        storage.seed(`lease:${futureID}`, {
+          ...future,
+          expiresAt: new Date(scanStartedAt + 5000).toISOString(),
+        });
+        storage.beforeList = async (options) => {
+          // This read follows lease candidate collection in the final alarm scan.
+          if (options?.prefix === "checkpoint-due:" && options.limit === 1) {
+            vi.setSystemTime(scanStartedAt + scanMs);
+          }
+        };
+        await fleet.alarm();
+        expect(storage.alarm()! - Date.now()).toBe(expectedDelay);
+
+        storage.beforeList = async () => {};
+        await storage.delete(`lease:${futureID}`);
+        await fleet.alarm();
+        expect(storage.alarm()).toBe(Date.now() + 60000);
+      } finally {
+        warn.mockRestore();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    {
+      source: "aws-ingress",
+      key: "aws-ingress-reconcile:pending",
+      owner: "reconcileAWSIngressIfIdle",
+    },
+    { source: "azure-cleanup", key: "azure-cleanup:synthetic", owner: "runAzureDeferredCleanups" },
+    { source: "lease", key: `lease:${leaseID}`, owner: "reconcileRuntimeAdapterDeletes" },
+    { source: "run-prune", key: "maintenance:run-prune-cursor", owner: "pruneTerminalRuns" },
+  ])(
+    "backs off clamped overdue $source work without delaying future wakes",
+    async ({ source, key, owner }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const storage = new MemoryStorage();
+        const lease = seedLease(storage);
+        const past = new Date(Date.now() - 60_000).toISOString();
+        const records: Record<string, unknown> = {
+          "aws-ingress": {
+            targets: [
+              {
+                anchor: { ...lease, provider: "aws" },
+                attempts: 0,
+                generation: "synthetic-generation",
+                updatedAt: past,
+                retryAt: past,
+              },
+            ],
+          },
+          "azure-cleanup": {
+            name: "synthetic-vm",
+            location: "westeurope",
+            subscription: "synthetic-subscription",
+            resourceGroup: "synthetic-group",
+            leaseID,
+            slug: lease.slug,
+            owner: lease.owner,
+            createdAt: past,
+            updatedAt: past,
+            attempts: 0,
+            retryAt: past,
+          },
+          lease: {
+            ...lease,
+            lifecycle: "registered",
+            provider: "external",
+            runtimeAdapterID: "synthetic-adapter",
+            runtimeAdapterWorkspaceID: "synthetic-workspace",
+            runtimeAdapterDeleteRequestedAt: past,
+            runtimeAdapterDeleteRetryAt: past,
+          },
+          "run-prune": "run:run_000000000001",
+        };
+        storage.seed(key, records[source]);
+        const fleet = testFleet(storage);
+        // Leave one owner unable to advance its record while running the full maintenance pass.
+        vi.spyOn(fleet as unknown as Record<string, () => Promise<void>>, owner).mockResolvedValue(
+          undefined,
+        );
+        for (const delay of [1000, 1000, 2000, 4000]) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- each delivery observes the same unconsumed raw deadline.
+          await fleet.alarm();
+          expect(storage.alarm()! - Date.now()).toBe(delay);
+          vi.setSystemTime(storage.alarm()!);
+        }
+        const future = seedLease(storage, releaseID);
+        storage.seed(`lease:${releaseID}`, {
+          ...future,
+          expiresAt: new Date(Date.now() + 500).toISOString(),
+        });
+        await fleet.alarm();
+        expect(storage.alarm()).toBe(Date.now() + 500);
+        await storage.delete(`lease:${releaseID}`);
+        await fleet.alarm();
+        expect(storage.alarm()).toBe(Date.now() + 16000);
+      } finally {
+        warn.mockRestore();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([
+    { retryMs: undefined, dispatchMs: undefined, scheduledMs: 1000 },
+    { retryMs: -1000, dispatchMs: undefined, scheduledMs: 1000 },
+    { retryMs: 500, dispatchMs: undefined, scheduledMs: 1000 },
+    { retryMs: -1000, dispatchMs: 5000, scheduledMs: 5000 },
+  ])(
+    "preserves heartbeat delete deadlines ($retryMs retry, $dispatchMs dispatch)",
+    async ({ retryMs, dispatchMs, scheduledMs }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const storage = new MemoryStorage();
+        const lease = seedLease(storage);
+        storage.seed(`lease:${leaseID}`, {
+          ...lease,
+          lifecycle: "registered",
+          provider: "external",
+          runtimeAdapterDeleteRequestedAt: new Date(Date.now() - 60_000).toISOString(),
+          ...(retryMs === undefined
+            ? {}
+            : { runtimeAdapterDeleteRetryAt: new Date(Date.now() + retryMs).toISOString() }),
+          ...(dispatchMs === undefined
+            ? {}
+            : {
+                runtimeAdapterDeleteDispatchUntil: new Date(Date.now() + dispatchMs).toISOString(),
+              }),
+        });
+        const response = await testFleet(storage).fetch(
+          request("POST", `/v1/leases/${leaseID}/heartbeat`, { headers }),
+        );
+        expect(response.status).toBe(200);
+        expect(storage.alarm()).toBe(Date.now() + scheduledMs);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("does not back off advancing run-prune batches", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const storage = new MemoryStorage();
+      const expiredAt = new Date(Date.now() - 31 * 24 * 60 * 60_000).toISOString();
+      for (let index = 0; index < 49; index++) {
+        const id = `run_${index.toString().padStart(12, "0")}`;
+        storage.seed(
+          `run:${id}`,
+          testRun({
+            id,
+            owner: "alice@example.com",
+            org: "example-org",
+            state: "succeeded",
+            startedAt: expiredAt,
+            endedAt: expiredAt,
+          }),
+        );
+      }
+      const fleet = testFleet(storage);
+      for (const remaining of [33, 17, 1]) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- each pass must advance its cursor without escalating.
+        await fleet.alarm();
+        // oxlint-disable-next-line eslint/no-await-in-loop -- verify the actual batch before delivering another alarm.
+        expect(await storage.list({ prefix: "run:" })).toHaveLength(remaining);
+        expect(storage.alarm()).toBe(Date.now() + 1000);
+        vi.setSystemTime(storage.alarm()!);
+      }
+      await fleet.alarm();
+      expect(await storage.list({ prefix: "run:" })).toHaveLength(0);
+      expect(storage.alarm()).toBeUndefined();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps request arms and provisioning wakes immediate during an alarm backoff streak", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const storage = new MemoryStorage();
+      const lease = seedLease(storage);
+      seedLease(storage, releaseID);
+      storage.seed(`lease:${leaseID}`, {
+        ...lease,
+        expiresAt: new Date(Date.now() - 1).toISOString(),
+      });
+      const fleet = testFleet(storage);
+      vi.spyOn(
+        fleet as unknown as { expireLeases(): Promise<void> },
+        "expireLeases",
+      ).mockResolvedValue(undefined);
+      await fleet.alarm();
+      await fleet.alarm();
+      expect(storage.alarm()).toBe(Date.now() + 1000);
+      await setPoolWake(storage, "synthetic-future-pool", Date.now() + 25);
+      await fleet.alarm();
+      expect(storage.value(legacyAlarmKey)).toBe(Date.now() + 2000);
+      expect(storage.alarm()).toBe(Date.now() + 25);
+      const release = await fleet.fetch(
+        request("POST", `/v1/leases/${releaseID}/release`, {
+          headers,
+          body: { delete: true },
+        }),
+      );
+      expect(release.status).toBe(200);
+      expect(storage.alarm()).toBeLessThanOrEqual(Date.now());
+      // Registration is an explicit request-path full scheduleAlarm() call.
+      const registration = await fleet.fetch(
+        request("PUT", "/v1/leases/cbx_aacc00000003/registration", {
+          headers,
+          body: { provider: "external", target: "linux", host: "192.0.2.30", ttlSeconds: 3600 },
+        }),
+      );
+      expect(registration.status).toBe(201);
+      expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves a request wake admitted during a maintenance backoff pass", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const entered = deferred<void>();
+    const resume = deferred<void>();
+    let maintenance: Promise<void> | undefined;
+    try {
+      const storage = new MemoryStorage();
+      const lease = seedLease(storage);
+      seedLease(storage, releaseID);
+      storage.seed(`lease:${leaseID}`, {
+        ...lease,
+        expiresAt: new Date(Date.now() - 1).toISOString(),
+      });
+      const fleet = testFleet(storage);
+      vi.spyOn(
+        fleet as unknown as { expireLeases(): Promise<void> },
+        "expireLeases",
+      ).mockResolvedValue(undefined);
+      await fleet.alarm();
+      await fleet.alarm();
+      expect(storage.alarm()).toBe(Date.now() + 1000);
+      vi.setSystemTime(storage.alarm()!);
+      let blocked = false;
+      storage.beforeList = async (options) => {
+        if (options?.prefix === "workspace:" && !blocked) {
+          blocked = true;
+          entered.resolve();
+          await resume.promise;
+        }
+      };
+      maintenance = fleet.alarm();
+      await entered.promise;
+      expect(
+        (
+          await fleet.fetch(
+            request("POST", `/v1/leases/${releaseID}/release`, {
+              headers,
+              body: { delete: true },
+            }),
+          )
+        ).status,
+      ).toBe(200);
+      expect(storage.alarm()).toBeLessThanOrEqual(Date.now());
+      resume.resolve();
+      await maintenance;
+      expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1);
+    } finally {
+      resume.resolve();
+      await maintenance;
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves the overdue streak across a heartbeat admitted during maintenance", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const entered = deferred<void>();
+    const resume = deferred<void>();
+    let maintenance: Promise<void> | undefined;
+    try {
+      const storage = new MemoryStorage();
+      const lease = seedLease(storage);
+      seedLease(storage, releaseID);
+      storage.seed(`lease:${leaseID}`, {
+        ...lease,
+        expiresAt: new Date(Date.now() - 1).toISOString(),
+      });
+      const fleet = testFleet(storage);
+      vi.spyOn(
+        fleet as unknown as { expireLeases(): Promise<void> },
+        "expireLeases",
+      ).mockResolvedValue(undefined);
+      await fleet.alarm();
+      await fleet.alarm();
+      expect(storage.alarm()).toBe(Date.now() + 1000);
+      expect(warn).toHaveBeenCalledTimes(1);
+      vi.setSystemTime(storage.alarm()!);
+      let blocked = false;
+      storage.beforeList = async (options) => {
+        if (options?.prefix === "workspace:" && !blocked) {
+          blocked = true;
+          entered.resolve();
+          await resume.promise;
+        }
+      };
+      maintenance = fleet.alarm();
+      await entered.promise;
+      expect(storage.alarm()).toBeUndefined();
+      const heartbeat = await fleet.fetch(
+        request("POST", `/v1/leases/${releaseID}/heartbeat`, { headers }),
+      );
+      expect(heartbeat.status).toBe(200);
+      expect(storage.alarm()).toBeDefined();
+      resume.resolve();
+      await maintenance;
+      expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1);
+      expect(warn).toHaveBeenCalledTimes(1);
+
+      await fleet.alarm();
+      expect(storage.alarm()).toBe(Date.now() + 2000);
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      resume.resolve();
+      await maintenance;
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("reconstructs queued AWS deletion and ingress reconciliation from durable intent", async () => {
     const storage = new ObservedMemoryStorage();
     const lease = {
@@ -51969,6 +53798,7 @@ function testFleet(
   storage = new MemoryStorage(),
   providers = {},
   env: Partial<Env> = {},
+  admissionDeadlineMs?: number,
 ): FleetDurableObject {
   for (const provider of Object.values(providers)) {
     (
@@ -51982,6 +53812,7 @@ function testFleet(
     { CRABBOX_DEFAULT_ORG: "default-org", ...env } as Env,
     providers,
     env.CF_VERSION_METADATA?.id,
+    admissionDeadlineMs,
   );
 }
 
@@ -53827,6 +55658,40 @@ describe("portable bounded ready-pool access", () => {
     };
   }
 
+  it("advances an obsolete ready-pool wake to the backing lease rotation deadline", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const f = await fixture();
+      expect((await f.register()).status).toBe(200);
+      await setPoolWake(f.storage, f.lease.id, Date.now() - 1);
+      await f.fleet.alarm();
+      expect(f.storage.alarm()).toBe(Date.parse(f.lease.expiresAt) - 60_000);
+      expect(f.storage.value(`portable-ready-pool-v1-wake:${f.lease.id}`)).toEqual({
+        at: Date.parse(f.lease.expiresAt) - 60_000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("advances an obsolete active pool-grant wake without revoking valid access", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const f = await fixture();
+      const { receipt } = await f.issue();
+      expect((await f.post("ack-access", receipt)).status).toBe(200);
+      const nextWake = f.storage.value<{ at: number }>(
+        `portable-ready-pool-v1-wake:${f.lease.id}`,
+      )!.at;
+      await setPoolWake(f.storage, f.lease.id, Date.now() - 1);
+      await f.fleet.alarm();
+      expect(f.storage.alarm()).toBe(nextWake);
+      expect(f.capability.revoke).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("issues hashed pending authority, acknowledges once, and never renews through heartbeat", async () => {
     const f = await fixture();
     const { body, receipt } = await f.issue();
@@ -54408,4 +56273,361 @@ describe("atomic legacy lease admission", () => {
     expect(deletes).toBe(1);
     expect(creates).toBe(1);
   });
+});
+
+describe("lease admission deadline", () => {
+  const deadlineMs = 25;
+  const leaseID = "cbx_ad1100000001";
+  const attemptKey = `create-attempt:${leaseID}`;
+  const leaseKey = `lease:${leaseID}`;
+  const headers = {
+    "x-crabbox-owner": "alice@example.com",
+    "x-crabbox-org": "example-org",
+    prefer: "respond-async",
+  };
+  const body = {
+    leaseID,
+    createAttemptID: "cat_ad110000000000000000000000000001",
+    provider: "aws",
+    class: "standard",
+    sshPublicKey: "ssh-ed25519 test",
+  };
+  const create = (fleet: FleetCoordinator) =>
+    fleet.fetch(request("POST", "/v1/leases", { headers, body }));
+
+  it.each([
+    [1, "replay"],
+    [2, "attempt reservation"],
+    [3, "lease admission"],
+    [1, "capability-aware"],
+    [1, "fixed-ID"],
+  ] as const)(
+    "fences a stalled %s mutex acquisition (%s) and permits same-token retry",
+    async (turn, stage) => {
+      vi.useFakeTimers();
+      const storage = new MemoryStorage();
+      const creates = vi.fn<() => void>();
+      const fleet = testFleet(
+        storage,
+        { aws: fakeProvider(creates, { provider: "aws" }) },
+        {},
+        deadlineMs,
+      );
+      await fleet.ready();
+      const runtime = (fleet as unknown as { runtime: CloudflareCoordinatorRuntime }).runtime;
+      const exclusive = runtime.runExclusive.bind(runtime);
+      const queued = deferred<void>();
+      const release = deferred<void>();
+      let acquisitions = 0;
+      let holder: Promise<void> | undefined;
+      vi.spyOn(runtime, "runExclusive").mockImplementation((callback) => {
+        if (++acquisitions === turn) {
+          holder = exclusive(() => release.promise);
+          queued.resolve();
+        }
+        return exclusive(callback);
+      });
+      const createRequest = () =>
+        fleet.fetch(
+          request(
+            stage === "fixed-ID" ? "PUT" : "POST",
+            stage === "fixed-ID"
+              ? `/v1/leases/${leaseID}`
+              : stage === "capability-aware"
+                ? "/v1/leases/capability-aware"
+                : "/v1/leases",
+            {
+              headers,
+              body: stage === "fixed-ID" ? { ...body, createAttemptID: undefined } : body,
+            },
+          ),
+        );
+      let response: Response | undefined;
+      const pending = createRequest().then((result) => (response = result));
+      try {
+        await queued.promise;
+        const attemptBeforeExpiry = storage.value(attemptKey);
+        await vi.advanceTimersByTimeAsync(deadlineMs);
+        expect(response?.status).toBe(503);
+        expect(response!.headers.get("retry-after")).toBe("2");
+        expect(await response!.json()).toMatchObject({
+          error: "lease_admission_timeout",
+          retryable: true,
+          message: expect.any(String),
+        });
+        release.resolve();
+        await holder;
+        await exclusive(async () => undefined);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(storage.value(leaseKey)).toBeUndefined();
+        expect(storage.value(attemptKey)).toEqual(attemptBeforeExpiry);
+        expect(creates).not.toHaveBeenCalled();
+        expect((await createRequest()).status).toBe(201);
+        expect(storage.value<LeaseRecord>(leaseKey)).toMatchObject({ state: "active" });
+        expect(creates).toHaveBeenCalledTimes(1);
+      } finally {
+        release.resolve();
+        await holder;
+        await pending;
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["queued transaction", "transaction reads"])(
+    "fences expiry during %s before the first admission write",
+    async (stage) => {
+      vi.useFakeTimers();
+      const storage = new MemoryStorage();
+      const creates = vi.fn<() => void>();
+      const fleet = testFleet(
+        storage,
+        { aws: fakeProvider(creates, { provider: "aws" }) },
+        {},
+        deadlineMs,
+      );
+      await fleet.ready();
+      const runtime = (fleet as unknown as { runtime: CloudflareCoordinatorRuntime }).runtime;
+      const commit = runtime.commitAndWake.bind(runtime);
+      const reached = deferred<void>();
+      const release = deferred<void>();
+      const settled = deferred<void>();
+      vi.spyOn(runtime, "commitAndWake").mockImplementationOnce(async (callback) => {
+        try {
+          if (stage === "queued transaction") {
+            reached.resolve();
+            await release.promise;
+          } else {
+            storage.beforeGet = async (key) => {
+              if (key !== attemptKey) return;
+              storage.beforeGet = undefined;
+              reached.resolve();
+              await release.promise;
+            };
+          }
+          return await commit(callback);
+        } finally {
+          settled.resolve();
+        }
+      });
+      let response: Response | undefined;
+      const pending = create(fleet).then((result) => (response = result));
+      try {
+        await reached.promise;
+        const attemptBeforeExpiry = storage.value(attemptKey);
+        await vi.advanceTimersByTimeAsync(deadlineMs);
+        expect(response?.status).toBe(503);
+        release.resolve();
+        await settled.promise;
+        await runtime.runExclusive(async () => undefined);
+        expect(storage.value(leaseKey)).toBeUndefined();
+        expect(storage.value(attemptKey)).toEqual(attemptBeforeExpiry);
+        expect(creates).not.toHaveBeenCalled();
+        expect((await create(fleet)).status).toBe(201);
+        expect(creates).toHaveBeenCalledTimes(1);
+      } finally {
+        release.resolve();
+        await pending;
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("waits for an admission already committing when its deadline fires", async () => {
+    vi.useFakeTimers();
+    const storage = new MemoryStorage();
+    const committing = deferred<void>();
+    const release = deferred<void>();
+    storage.beforeCommit = async (keys) => {
+      if (!keys.has(leaseKey)) return;
+      storage.beforeCommit = undefined;
+      committing.resolve();
+      await release.promise;
+    };
+    const fleet = testFleet(
+      storage,
+      { aws: fakeProvider(undefined, { provider: "aws" }) },
+      {},
+      deadlineMs,
+    );
+    let response: Response | undefined;
+    const pending = create(fleet).then((result) => (response = result));
+    try {
+      await committing.promise;
+      await vi.advanceTimersByTimeAsync(deadlineMs);
+      expect(response).toBeUndefined();
+      release.resolve();
+      expect((await pending).status).toBe(201);
+      expect(storage.value<LeaseRecord>(leaseKey)).toMatchObject({ state: "active" });
+    } finally {
+      release.resolve();
+      await pending;
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("provider deadlines and mutex ownership", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("releases the lifecycle mutex after a stalled image promotion times out", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException("timed out", "TimeoutError")), ms);
+      return controller.signal;
+    });
+    vi.spyOn(AwsClient.prototype, "sign").mockImplementation(
+      async (input, init) => new Request(input, init),
+    );
+    const storage = new MemoryStorage();
+    const aws = fakeProvider();
+    const started = Promise.withResolvers<void>();
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      expect(init?.signal ?? (input instanceof Request ? input.signal : undefined)).toBeDefined();
+      started.resolve();
+      return new Promise(() => {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const transport = new RefreshingAWSFetchClient(
+      async () => ({ accessKeyId: "fixture", secretAccessKey: "fixture" }),
+      "ec2",
+      "eu-west-1",
+      imageRouteDeadlineMs * 2,
+    );
+    let lateWrite = false;
+    vi.spyOn(aws, "promoteImage").mockImplementation(async () => {
+      await transport.fetch("https://ec2.eu-west-1.amazonaws.com");
+      lateWrite = true;
+      return { image: { id: "ami-test", name: "test", provider: "aws", state: "available" } };
+    });
+    const fleet = testFleet(storage, { aws });
+    const runtime = Reflect.get(fleet, "runtime") as CoordinatorRuntime;
+    const promotion = fleet.fetch(
+      request("POST", "/v1/images/ami-test/promote", {
+        headers: { "x-crabbox-admin": "true" },
+        body: {},
+      }),
+    );
+    await started.promise;
+    let queuedCompleted = false;
+    const queued = runtime.runExclusive(async () => {
+      queuedCompleted = true;
+    });
+    await Promise.resolve();
+    expect(queuedCompleted).toBe(false);
+    await vi.advanceTimersByTimeAsync(imageRouteDeadlineMs - 1);
+    expect(queuedCompleted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const response = await promotion;
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("5");
+    await expect(response.json()).resolves.toMatchObject({
+      error: "provider_request_timeout",
+      message: expect.stringContaining("outcome of a mutation may be unknown"),
+    });
+    await queued;
+    expect(queuedCompleted).toBe(true);
+    expect(lateWrite).toBe(false);
+  });
+
+  it.each(["verifiedIdentity", "listMacHosts"] as const)(
+    "does not hold the mutex during stalled Mac host %s",
+    async (method) => {
+      const storage = new MemoryStorage();
+      storage.seed(
+        "lease:cbx_000000000777",
+        testLease({
+          id: "cbx_000000000777",
+          provider: "aws",
+          region: "eu-west-1",
+          hostID: "h-000000000001",
+          providerScope: "aws:account:123456789012",
+        }),
+      );
+      const fleet = testFleet(
+        storage,
+        {},
+        { AWS_ACCESS_KEY_ID: "fixture", AWS_SECRET_ACCESS_KEY: "fixture" },
+      );
+      const runtime = Reflect.get(fleet, "runtime") as CoordinatorRuntime;
+      vi.spyOn(EC2SpotClient.prototype, "verifiedIdentity").mockResolvedValue({
+        account: "123456789012",
+        arn: "arn:aws:iam::123456789012:user/test",
+        userId: "fixture",
+      });
+      const started = Promise.withResolvers<void>();
+      vi.spyOn(EC2SpotClient.prototype, method).mockImplementation(() => {
+        started.resolve();
+        return waitForProviderSignal(
+          providerRequestSignal(60_000, undefined, "aws", method),
+          () => new Promise<never>(() => {}),
+        );
+      });
+      const release = vi.spyOn(EC2SpotClient.prototype, "releaseMacHost");
+      const deletion = withProviderOperationDeadline(100, () =>
+        fleet.fetch(
+          request("DELETE", "/v1/admin/mac-hosts/h-000000000001?region=eu-west-1", {
+            headers: { "x-crabbox-admin": "true" },
+          }),
+        ),
+      );
+      await started.promise;
+      await expect(runtime.runExclusive(async () => "unblocked")).resolves.toBe("unblocked");
+      expect((await deletion).status).toBe(503);
+      expect(release).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["updatedAt", "hostID", "region", "providerScope", "createAttemptGeneration"] as const)(
+    "fences a Mac host ownership change to %s between read and release",
+    async (field) => {
+      const storage = new MemoryStorage();
+      const lease = testLease({
+        id: "cbx_000000000777",
+        provider: "aws",
+        region: "eu-west-1",
+        hostID: "h-000000000001",
+        providerScope: "aws:account:123456789012",
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      const fleet = testFleet(
+        storage,
+        {},
+        { AWS_ACCESS_KEY_ID: "fixture", AWS_SECRET_ACCESS_KEY: "fixture" },
+      );
+      const runtime = Reflect.get(fleet, "runtime") as CoordinatorRuntime;
+      vi.spyOn(EC2SpotClient.prototype, "verifiedIdentity").mockImplementation(async () => {
+        await runtime.runExclusive(async () =>
+          storage.put(`lease:${lease.id}`, {
+            ...lease,
+            [field]: field === "createAttemptGeneration" ? 2 : "changed",
+          }),
+        );
+        return {
+          account: "123456789012",
+          arn: "arn:aws:iam::123456789012:user/test",
+          userId: "fixture",
+        };
+      });
+      vi.spyOn(EC2SpotClient.prototype, "listMacHosts").mockResolvedValue([]);
+      const release = vi.spyOn(EC2SpotClient.prototype, "releaseMacHost");
+      const response = await fleet.fetch(
+        request("DELETE", "/v1/admin/mac-hosts/h-000000000001?region=eu-west-1", {
+          headers: { "x-crabbox-admin": "true" },
+        }),
+      );
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        error: "mac_host_ownership_mismatch",
+      });
+      expect(release).not.toHaveBeenCalled();
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.[field]).toBe(
+        field === "createAttemptGeneration" ? 2 : "changed",
+      );
+    },
+  );
 });

@@ -13,6 +13,8 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) BackendCapabilities() core.Backend { return &digitalOceanLeaseBackend{} }
+
 func (Provider) NormalizeConfigForShow(cfg core.Config) core.Config {
 	core.ApplyConfigShowSSHDefaults(&cfg, "root")
 	return cfg
@@ -20,7 +22,32 @@ func (Provider) NormalizeConfigForShow(cfg core.Config) core.Config {
 
 var _ core.ProviderClassProfileProvider = Provider{}
 
-var classProfiles = core.UniformLinuxAMD64ClassProfiles(core.ProviderClassMachine{Type: "s-1vcpu-1gb"})
+var classProfiles = buildClassProfiles()
+
+func buildClassProfiles() []core.ProviderClassProfile {
+	// DigitalOcean size slugs and memory are published at https://slugs.do-api.dev/.
+	machine := func(serverType string, vcpu int, memoryGiB float64) core.ProviderClassMachine {
+		return core.ProviderClassMachine{
+			Type: serverType, Architecture: core.ProviderClassArchitectureAMD64, VCPU: &vcpu,
+			Memory: &core.ProviderMemory{Value: memoryGiB, Unit: core.ProviderMemoryUnitGiB},
+		}
+	}
+	machines := map[string][]core.ProviderClassMachine{
+		"tiny":     {machine("s-1vcpu-1gb", 1, 1)},
+		"small":    {machine("s-2vcpu-4gb", 2, 4)},
+		"standard": {machine("s-4vcpu-8gb", 4, 8)},
+		"fast":     {machine("s-8vcpu-16gb", 8, 16), machine("c-8", 8, 16)},
+		"large":    {machine("g-16vcpu-64gb", 16, 64), machine("c-16", 16, 32)},
+		"beast":    {machine("g-32vcpu-128gb", 32, 128), machine("c-32", 32, 64)},
+	}
+	profiles := make([]core.ProviderClassProfile, 0, len(core.CanonicalProviderClasses()))
+	for _, class := range core.CanonicalProviderClasses() {
+		profiles = append(profiles, core.ProviderClassProfileFromMachines(
+			class, core.TargetLinux, "", core.ProviderClassArchitectureAMD64, machines[class],
+		))
+	}
+	return profiles
+}
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{

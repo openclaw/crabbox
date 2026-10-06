@@ -35,6 +35,12 @@ Lowest precedence is applied first: defaults, then user config, then repo
 config, then env vars, then flags. Each layer only overrides fields that are
 explicitly set; unset fields fall through to the layer below.
 
+Lifecycle commands apply explicit `--provider` and `--target` selections before
+provider target validation. For example, `stop --provider tart --target macos
+--id <lease>` overrides `provider: proxmox` and `target: linux` in configuration.
+The selected target must still be supported by the provider, and ordinary lease
+identity and ownership checks still apply.
+
 For the replacement lists `env.allow`, `results.junit`, and
 `run.preflightTools`, omitting the key inherits the lower layer, `[]` clears
 it, and a nonempty list replaces it. This applies to user config and each
@@ -927,17 +933,20 @@ workdir only; tokens do not belong in YAML or command-line flags.
 provider: cloudflare
 cloudflare:
   apiUrl: https://crabbox-cloudflare-container-runner.example.workers.dev
+  image: default
   workdir: /workspace/crabbox
 ```
 
 Keep `CRABBOX_CLOUDFLARE_RUNNER_TOKEN` in the shell or credential manager.
 `CRABBOX_CLOUDFLARE_RUNNER_URL` can supply the runner URL from the environment.
 Repo config should select the runner URL and workdir, not hold bearer tokens.
-`crabbox config show` reports the runner URL, workdir, and token state as
-`cloudflare.auth` without printing the token. `--type` selects one of the
-instance types wired into the deployed runner; update
-`worker/wrangler.cloudflare.jsonc` and redeploy when changing the available
-`instance_type` bindings or `max_instances`.
+`crabbox config show` reports the runner URL, image, workdir, and token state as
+`cloudflare.auth` without printing the token. `--type` selects the Cloudflare
+instance type for each lease (`standard-1` through `standard-4`; `basic` maps to
+`standard-1` with a warning), and
+`image` (`CRABBOX_CLOUDFLARE_IMAGE`, `--cloudflare-image`) selects a named image
+from the runner's `containers[].images` map; update
+`worker/wrangler.cloudflare.jsonc` and redeploy to add images.
 
 Use `cloudflare-dynamic-workers` instead when the target is Worker-runtime module
 source rather than Linux command execution.
@@ -989,7 +998,7 @@ sync:
   gitOverlay: false
   fingerprint: true
   baseRef: main
-  timeout: 15m
+  timeout: 15m # rsync I/O inactivity; manifest/archive wall-clock limit
   warnFiles: 50000
   warnBytes: 5368709120
   failFiles: 150000
@@ -1260,11 +1269,17 @@ CRABBOX_DEFAULT_CLASS           default machine class
 CRABBOX_SERVER_TYPE             explicit provider type
 CRABBOX_IDLE_TIMEOUT            idle timeout
 CRABBOX_WARMUP_KEEP             warmup retention default (true | false)
+CRABBOX_CLAIMS_AUTO_PRUNE        prune eligible old local claims after successful stop/release (true | false; default true)
 CRABBOX_TTL                     lease TTL
 CRABBOX_NETWORK                 network mode
 CRABBOX_OWNER                   usage owner override
 CRABBOX_ORG                     usage org override
 ```
+
+`claims.autoPrune: false` disables automatic local-claim maintenance in YAML;
+`CRABBOX_CLAIMS_AUTO_PRUNE` overrides it. Maintenance runs only after successful
+explicit stop/release, with a five-second budget and a daily completion stamp.
+See [`claims prune`](../commands/claims.md#prune) for eligibility and manual use.
 
 Provider credentials live outside the Crabbox env namespace where the provider
 SDK or CLI already defines them:

@@ -358,6 +358,16 @@ ProviderConfigShowNormalizer and require actionable provider selection.
 Pick the interface that matches the kind you declared. Both embed `Backend`,
 which only requires `Spec() ProviderSpec`.
 
+For offline backend capability discovery, implement
+`ProviderBackendCapabilitySource.BackendCapabilities()` on the provider. Return
+a metadata-only backend (usually a zero-value backend pointer) whose capability
+methods are safe without runtime configuration, clients, credentials, or side
+effects. The catalog derives `fixed-lease-id` from its
+`IdempotentLeaseIDBackend.SupportsRequestedLeaseID()` result; do not duplicate
+that feature in `Spec().Features`. Coordinator-brokered SSH providers use the
+coordinator wrapper's capability. Discovery never invokes backend lifecycle
+methods or `Configure`.
+
 ### SSH Lease Backend
 
 ```go
@@ -833,3 +843,17 @@ outages and guest reboot. AWS uses SSM, root-owned generation tombstones,
 persistent expiry timers, and observed boot-ID changes. Whole-instance reboot
 cannot preserve a replacement grant's sessions, so v1 has no in-place renewal.
 Unsupported adapters must leave this capability absent.
+
+### Local claim retention
+
+`ProviderSpec.ClaimExpiryBound` optionally declares a remotely enforced maximum
+lease lifetime after use. Zero (the default) disables age-only local claim
+pruning. Opt in only when expiry needs no running client and no separate
+settlement or recovery receipt. Coordinator support alone is insufficient: the
+stored claim must establish which lifecycle owns the resource. Core checks claim
+age, protected bindings, and this bound, then removes only an unchanged local
+claim under its existing operation lock. See [`claims prune`](../commands/claims.md#prune).
+
+Use the `Context` variants of claim lookup, listing, and slug allocation helpers
+when an operation has a context. The existing context-free provider extension
+APIs remain available, but cannot cancel fallback slug/resource scans.

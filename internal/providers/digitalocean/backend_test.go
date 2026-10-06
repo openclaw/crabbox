@@ -1542,23 +1542,6 @@ func TestResolveReadOnlyIgnoresStaleDropletClaim(t *testing.T) {
 	}
 }
 
-func TestStatusTouchClaimRequiresMatchingAccount(t *testing.T) {
-	backend := &digitalOceanLeaseBackend{}
-	claim := core.LeaseClaim{Labels: map[string]string{digitalOceanAccountLabel: "team:account-a"}}
-	lease := core.LeaseTarget{Server: core.Server{Labels: map[string]string{digitalOceanAccountLabel: "team:account-a"}}}
-	if !backend.StatusTouchClaimMatches(lease, claim) {
-		t.Fatal("matching account identity was rejected")
-	}
-	lease.Server.Labels[digitalOceanAccountLabel] = "team:account-b"
-	if backend.StatusTouchClaimMatches(lease, claim) {
-		t.Fatal("mismatched account identity was accepted")
-	}
-	delete(claim.Labels, digitalOceanAccountLabel)
-	if backend.StatusTouchClaimMatches(lease, claim) {
-		t.Fatal("missing claim account identity was accepted")
-	}
-}
-
 func TestResolveNumericIdentifierPrefersDropletIDOverSlug(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -3892,7 +3875,7 @@ func TestApplyDigitalOceanDefaultsUseProviderDefaults(t *testing.T) {
 	if cfg.SSHUser != "root" || cfg.SSHPort != "22" || len(cfg.SSHFallbackPorts) != 0 {
 		t.Fatalf("effective ssh defaults=%s@:%s fallback=%v", cfg.SSHUser, cfg.SSHPort, cfg.SSHFallbackPorts)
 	}
-	if cfg.ServerType != "s-1vcpu-1gb" {
+	if cfg.ServerType != "g-32vcpu-128gb" {
 		t.Fatalf("ServerType=%q want digitalocean default", cfg.ServerType)
 	}
 }

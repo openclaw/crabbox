@@ -174,9 +174,16 @@ function workflowShell(step) {
   return body.split("\n").map((line) => line.replace(/^          /, "")).join("\n");
 }
 
-test("Homebrew smoke uses protected native tooling and only anonymous fixed-repository assets", () => {
+test("Homebrew smoke authenticates only metadata reads and keeps installation credential-free", () => {
   const workflow = read(".github/workflows/verify-homebrew.yml");
-  assert.doesNotMatch(workflow, /public_verifier_run_id|proof ZIP|witness|postflight|actions\/(?:runs|workflows)|GH_TOKEN:|contents: write|curl_bin|update-formula/);
+  assert.doesNotMatch(workflow, /public_verifier_run_id|proof ZIP|witness|postflight|actions\/(?:runs|workflows)|contents: write|curl_bin|update-formula|secrets\./);
+  assert.equal((workflow.match(/permissions:/g) ?? []).length, 1);
+  assert.match(workflow, /permissions:\n  contents: read\n\njobs:/);
+  assert.equal((workflow.match(/GH_TOKEN:/g) ?? []).length, 1);
+  const metadata = workflowStep(workflow, "Read public release metadata with read-only token");
+  assert.match(metadata, /GH_TOKEN: \$\{\{ github.token \}\}/);
+  assert.match(metadata, /gh api --method GET "repos\/openclaw\/crabbox\/releases\/\$RELEASE_ID"/);
+  assert.doesNotMatch(metadata, /brew |scripts\/verify-/);
   assert.match(workflow, /expected_workflow_ref="\$GITHUB_REPOSITORY\/\.github\/workflows\/verify-homebrew.yml@\$expected_ref"/);
   assert.match(workflow, /\[\[ "\$REF_PROTECTED" == true \]\]/);
   assert.match(workflow, /\[\[ "\$WORKFLOW_SHA" == "\$RUN_SHA" \]\]/);
@@ -189,9 +196,40 @@ test("Homebrew smoke uses protected native tooling and only anonymous fixed-repo
   assert.match(workflow, /assets_dir="\$RUNNER_TEMP\/release-assets"/);
   assert.match(workflow, /https:\/\/github.com\/openclaw\/crabbox\/releases\/download\/\$RELEASE_TAG\/\$asset/);
   const verify = workflowStep(workflow, "Verify public Homebrew install without credentials");
+  assert.ok(workflow.indexOf(metadata) < workflow.indexOf(verify));
+  assert.doesNotMatch(verify, /github.token|GH_TOKEN:|GITHUB_TOKEN:/);
+  assert.match(verify, /CRABBOX_HOMEBREW_RELEASE_METADATA="\$RUNNER_TEMP\/public-release.json"/);
   assert.match(verify, /unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN/);
   assert.match(verify, /"\$TAG_OBJECT" "\$SOURCE_COMMIT" "\$VERIFIER_COMMIT" \\\n\s+"\$RELEASE_ID"/);
   assert.doesNotMatch(verify, /brew tap/); // Formula evaluation is inside the clean launcher.
+});
+
+test("Homebrew metadata step makes one authenticated GET and fails closed on API errors", () => {
+  const step = workflowStep(read(".github/workflows/verify-homebrew.yml"), "Read public release metadata with read-only token");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-homebrew-metadata-"));
+  try {
+    const gh = path.join(root, "gh");
+    fs.writeFileSync(gh, `#!/bin/bash
+set -eu
+[[ "$*" == 'api --method GET repos/openclaw/crabbox/releases/123' ]] || exit 98
+[[ "\${GH_TOKEN:-}" == synthetic-read-only-token ]] || exit 97
+[[ "\${FAIL_API:-}" != 1 ]] || exit 22
+printf '{"id":123}\\n'
+`, { mode: 0o755 });
+    const run = (overrides = {}) => spawnSync("/bin/bash", ["-c", workflowShell(step)], {
+      encoding: "utf8",
+      env: { PATH: `${root}:/usr/bin:/bin`, RUNNER_TEMP: root, RELEASE_ID: "123", GH_TOKEN: "synthetic-read-only-token", ...overrides },
+    });
+    const valid = run();
+    assert.equal(valid.status, 0, valid.stderr);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "public-release.json"), "utf8")), { id: 123 });
+    assert.doesNotMatch(valid.stdout + valid.stderr, /synthetic-read-only-token/);
+    assert.notEqual(run({ GH_TOKEN: "" }).status, 0);
+    assert.notEqual(run({ FAIL_API: "1" }).status, 0);
+    assert.notEqual(run({ RELEASE_ID: "123/../456" }).status, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("public download mode hashes fixed canonical assets without native approval artifacts", () => {
@@ -234,10 +272,15 @@ test("public download mode hashes fixed canonical assets without native approval
 set -eu
 [[ "$*" != *Authorization* && -z "\${GH_TOKEN:-}" && "$1" == --disable ]] || exit 97
 url=\${!#}
+out=/dev/stdout
+args=("$@")
+for ((i = 0; i < \${#args[@]}; i++)); do [[ "\${args[i]}" != --output ]] || out=\${args[i + 1]}; done
 printf '%s\\n' "$url" >>${quote(calls)}
 case "$url" in
   https://api.github.com/repos/openclaw/crabbox/releases/123) cat ${quote(metadata)} ;;
-  ${names.map((name) => `https://github.com/openclaw/crabbox/releases/download/v1.2.3/${name}`).join("|")}) cat ${quote(payload)} ;;
+  ${names.map((name) => `https://github.com/openclaw/crabbox/releases/download/v1.2.3/${name}`).join("|")})
+    [[ "$out" != /dev/stdout && " $* " == *" --retry-all-errors "* ]] || exit 95
+    cat ${quote(payload)} >"$out" ;;
   *) echo unexpected-endpoint >&2; exit 96 ;;
 esac
 `);

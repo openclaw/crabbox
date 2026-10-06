@@ -78,6 +78,12 @@ type DesktopLeaseCapabilityProvider interface {
 // architecture tuple (including amd64), within ProviderSpec.Targets. Providers
 // without this capability retain core's managed architecture restrictions.
 // Runtime feasibility and explicit assertions are validated by the adapter.
+// ProviderResourceRequirementsCapability admits provisioned CPU/RAM constraints.
+// Providers without this capability must reject constrained acquisition.
+type ProviderResourceRequirementsCapability interface {
+	SupportsResourceRequirements(cfg Config) bool
+}
+
 type ProviderArchitectureCapability interface {
 	SupportsArchitecture(cfg Config, architecture string) bool
 }
@@ -719,6 +725,30 @@ type NativeCheckpointForkProvider interface {
 	ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error
 }
 
+// DelegatedCheckpointBackend lets a delegated-run backend, which exposes no SSH
+// target, create and fork native checkpoints. Its provider still implements
+// NativeCheckpointProvider and NativeCheckpointLifecycleProvider.
+type DelegatedCheckpointBackend interface {
+	DelegatedRunBackend
+	// ResolveCheckpointSource resolves a lease the current repository already
+	// claims; it never adopts or reclaims one.
+	ResolveCheckpointSource(ctx context.Context, req ResolveRequest) (LeaseTarget, error)
+	// ForkNativeCheckpoint creates and claims one lease started from the record.
+	ForkNativeCheckpoint(ctx context.Context, req DelegatedCheckpointForkRequest) (DelegatedCheckpointFork, error)
+}
+
+type DelegatedCheckpointForkRequest struct {
+	Repo          Repo
+	RequestedSlug string
+	Record        NativeCheckpointForkRecord
+	Workdir       string
+}
+
+type DelegatedCheckpointFork struct {
+	Lease   LeaseTarget
+	Workdir string
+}
+
 type NativeCheckpointForkFlagProvider interface {
 	ApplyNativeCheckpointForkFlags(cfg *Config, fs *flag.FlagSet, values any) error
 }
@@ -756,11 +786,23 @@ type IdempotentLeaseIDBackend interface {
 	SupportsRequestedLeaseID() bool
 }
 
+// ProviderBackendCapabilitySource exposes a metadata-only backend without
+// configuration, credentials, clients, or side effects. Catalogs inspect its
+// capability interfaces; they must not invoke lifecycle methods.
+type ProviderBackendCapabilitySource interface {
+	BackendCapabilities() Backend
+}
+
 type CheckpointLeaseIDBackend interface {
 	SupportsRequestedCheckpointID() bool
 }
 
 type ProviderSpec struct {
+	// ClaimExpiryBound is the provider-enforced maximum lifetime after use.
+	// Zero means that age alone cannot authorize local claim pruning. Only
+	// opt in when expiry needs no running CLI and any settlement the claim
+	// guards is itself bounded by the same duration.
+	ClaimExpiryBound time.Duration
 	Authentication   ProviderAuthentication
 	Name             string
 	Aliases          []string
@@ -829,6 +871,8 @@ const (
 	// FeatureClaimExec requires ExecLeaseClaimResolver, private POSIX SSH execution,
 	// and provider-owned idle activity that does not require exclusive claim writes.
 	FeatureClaimExec Feature = "claim-exec"
+	// FeatureFixedLeaseID advertises caller-supplied idempotent lease IDs.
+	FeatureFixedLeaseID Feature = "fixed-lease-id"
 	// FeatureFixedCurrentRepoStop requires RepositoryScopedStopBackend for fixed IDs.
 	FeatureFixedCurrentRepoStop Feature = "fixed-current-repo-stop"
 	FeaturePauseResume          Feature = "pause-resume"

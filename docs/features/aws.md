@@ -136,9 +136,10 @@ also bake and promote trusted AWS images with `crabbox image` (see the
 
 Crabbox imports or reuses an EC2 key pair, creates or reuses the
 `crabbox-runners` security group when none is supplied, and opens only the SSH
-ports to the configured CIDRs or the detected request source. The default root
-volume is 400 GB gp3, encrypted; override with `CRABBOX_AWS_ROOT_GB` /
-`aws.rootGB`. VNC stays behind the SSH tunnel.
+ports to the configured CIDRs or the detected request source. Root volumes are
+encrypted gp3, sized by machine class (40 GB for `tiny` up to 400 GB for `beast`)
+and raised to the image's root snapshot minimum; override with
+`CRABBOX_AWS_ROOT_GB` / `aws.rootGB`. VNC stays behind the SSH tunnel.
 
 Supplying `CRABBOX_AWS_SECURITY_GROUP_ID` makes ingress policy your
 responsibility. Set `CRABBOX_AWS_SUBNET_ID` to launch into a non-default VPC.

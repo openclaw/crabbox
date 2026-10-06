@@ -331,6 +331,25 @@ func TestRunpodProviderSpec(t *testing.T) {
 	}
 }
 
+func TestRunpodCatalogFixedLeaseID(t *testing.T) {
+	t.Setenv("RUNPOD_API_KEY", "")
+	t.Setenv("CRABBOX_RUNPOD_API_KEY", "")
+	var out strings.Builder
+	if err := (core.App{Stdout: &out, Stderr: io.Discard}).Run(t.Context(), []string{"providers", "--json", "--feature", "fixed-lease-id"}); err != nil {
+		t.Fatal(err)
+	}
+	var entries []struct{ Provider string }
+	if err := json.Unmarshal([]byte(out.String()), &entries); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Provider == providerName {
+			return
+		}
+	}
+	t.Fatal("fixed-lease-id catalog omitted RunPod")
+}
+
 func TestRunpodClientRedactsReflectedCredential(t *testing.T) {
 	const secret = "runpod-secret-token"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -620,6 +639,11 @@ func TestRunpodDoctorChecksAuthAndListPods(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer test-key" {
 			t.Errorf("auth = %q, want Bearer test-key", r.Header.Get("Authorization"))
 		}
+		if r.URL.Path == "/graphql" {
+			_, _ = io.WriteString(w, "{\"data\":{\"myself\":{\"id\":\"account-one\"}}}")
+			paths = append(paths, r.URL.Path)
+			return
+		}
 		if r.Header.Get("Content-Type") != "" {
 			t.Errorf("content-type = %q", r.Header.Get("Content-Type"))
 		}
@@ -642,8 +666,11 @@ func TestRunpodDoctorChecksAuthAndListPods(t *testing.T) {
 	if result.Provider != providerName {
 		t.Fatalf("provider=%q", result.Provider)
 	}
-	if len(paths) != 2 || paths[0] != "/pods" || paths[1] != "/pods" {
-		t.Fatalf("paths=%v, want two /pods reads", paths)
+	if len(paths) != 2 || paths[0] != "/graphql" || paths[1] != "/pods" {
+		t.Fatalf("paths=%v, want GraphQL identity and /pods reads", paths)
+	}
+	if !strings.Contains(result.Message, "account=account-one") {
+		t.Fatalf("doctor did not return the account identity: %s", result.Message)
 	}
 }
 
@@ -1459,7 +1486,7 @@ func TestRunpodClientSendsBearerAndRESTRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Whoami(context.Background()); err != nil {
+	if _, err := client.ListPods(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if gotMethod != http.MethodGet {

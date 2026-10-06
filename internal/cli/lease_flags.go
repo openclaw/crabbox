@@ -19,6 +19,8 @@ type leaseCreateFlagValues struct {
 	ServerType    *string
 	SSHPort       *string
 	Market        *string
+	MinVCPUs      *int
+	MinMemoryMiB  *int
 	Slug          *string
 	Pond          *string
 	Expose        *stringListFlag
@@ -73,6 +75,8 @@ func registerLeaseCreateFlagsWithOptions(fs *flag.FlagSet, defaults Config, opti
 		ServerType:    fs.String("type", options.serverTypeDefault, "provider server/instance type"),
 		SSHPort:       fs.String("ssh-port", defaults.SSHPort, "SSH port for the leased target"),
 		Market:        fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand"),
+		MinVCPUs:      fs.Int("min-vcpus", defaults.Capacity.MinVCPUs, "minimum provisioned vCPUs (AWS Linux; 0 = unconstrained)"),
+		MinMemoryMiB:  fs.Int("min-memory-mib", defaults.Capacity.MinMemoryMiB, "minimum provisioned memory in MiB (AWS Linux; 0 = unconstrained)"),
 		Slug:          fs.String("slug", "", "request a friendly slug for a new lease"),
 		Pond:          fs.String("pond", defaults.Pond, "tag this lease with a pond name so peers can be selected with --pond"),
 		Expose:        &expose,
@@ -104,17 +108,25 @@ func applyLeaseCreateFlagsForLease(cfg *Config, fs *flag.FlagSet, values leaseCr
 }
 
 func autoRouteClaimLeaseProvider(cfg *Config, fs *flag.FlagSet, identifier string) error {
+	return autoRouteClaimLeaseProviderContext(context.Background(), cfg, fs, identifier)
+}
+
+func autoRouteClaimLeaseProviderContext(ctx context.Context, cfg *Config, fs *flag.FlagSet, identifier string) error {
 	if flagWasSet(fs, "provider") {
 		return nil
 	}
-	return autoRouteClaimLeaseProviderForIdentifier(cfg, identifier)
+	return autoRouteClaimLeaseProviderForIdentifierContext(ctx, cfg, identifier)
 }
 
 func autoRouteClaimLeaseProviderForIdentifier(cfg *Config, identifier string) error {
+	return autoRouteClaimLeaseProviderForIdentifierContext(context.Background(), cfg, identifier)
+}
+
+func autoRouteClaimLeaseProviderForIdentifierContext(ctx context.Context, cfg *Config, identifier string) error {
 	if ProviderSelectionIsAuthoritativeRoute(*cfg) {
 		return nil
 	}
-	provider, ok, err := claimProviderForIdentifier(identifier)
+	provider, ok, err := claimProviderForIdentifierContext(ctx, identifier)
 	if err != nil {
 		return err
 	}
@@ -125,13 +137,17 @@ func autoRouteClaimLeaseProviderForIdentifier(cfg *Config, identifier string) er
 }
 
 func autoRouteLeaseProviderForIdentifier(cfg *Config, fs *flag.FlagSet, identifier string) error {
-	if err := autoRouteClaimLeaseProvider(cfg, fs, identifier); err != nil {
+	return autoRouteLeaseProviderForIdentifierContext(context.Background(), cfg, fs, identifier)
+}
+
+func autoRouteLeaseProviderForIdentifierContext(ctx context.Context, cfg *Config, fs *flag.FlagSet, identifier string) error {
+	if err := autoRouteClaimLeaseProviderContext(ctx, cfg, fs, identifier); err != nil {
 		return err
 	}
-	if err := autoRouteStaticLease(cfg, fs, identifier); err != nil {
+	if err := autoRouteStaticLeaseContext(ctx, cfg, fs, identifier); err != nil {
 		return err
 	}
-	return autoRouteExternalLease(cfg, fs, identifier)
+	return autoRouteExternalLeaseContext(ctx, cfg, fs, identifier)
 }
 
 func applyLeaseCreateFlagsForLeaseMode(cfg *Config, fs *flag.FlagSet, values leaseCreateFlagValues, existingLeaseID string, mutateExternal bool) error {
@@ -151,6 +167,31 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 	prepareProviderDefaults(cfg)
 	cfg.Profile = *values.Profile
 	recordConfigInput(cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "profile"))
+	if flagWasSet(fs, "min-vcpus") {
+		cfg.Capacity.MinVCPUs = *values.MinVCPUs
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
+	}
+	if flagWasSet(fs, "min-memory-mib") {
+		cfg.Capacity.MinMemoryMiB = *values.MinMemoryMiB
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
+	}
+	if err := validateCapacityMinimumValues(cfg.Capacity); err != nil {
+		return err
+	}
+	if hasCapacityMinimums(*cfg) {
+		if target.Reuse {
+			return Exit(2, "resource requirements are unsupported with existing lease reuse (--id)")
+		}
+		if fs.Name() == "prewarm" {
+			return Exit(2, "resource requirements are unsupported for composite prewarm; use warmup")
+		}
+		if fs.Name() == "checkpoint fork" {
+			return Exit(2, "resource requirements are unsupported for checkpoint forks")
+		}
+		if pool := fs.Lookup("pool"); pool != nil && strings.TrimSpace(pool.Value.String()) != "" {
+			return Exit(2, "resource requirements are unsupported with ready pools")
+		}
+	}
 	cfg.Class = *values.Class
 	recordConfigInput(cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "class"))
 	if flagWasSet(fs, "ssh-port") {
@@ -282,6 +323,9 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 		return err
 	}
 	if err := validateProviderTarget(*cfg); err != nil {
+		return err
+	}
+	if err := validateResourceRequirements(*cfg); err != nil {
 		return err
 	}
 	if err := validateImageRequirementsForLease(*cfg, target.Reuse); err != nil {
@@ -479,7 +523,20 @@ type leaseTargetConfigOptions struct {
 	ProviderResourceID bool
 }
 
+func applyTargetAndProviderFlags(cfg *Config, fs *flag.FlagSet, target targetFlagValues, provider providerFlagValues) error {
+	// Provider flag handlers may validate the target, so resolve explicit target
+	// overrides before they see inherited configuration.
+	if err := applyTargetFlagOverrides(cfg, fs, target); err != nil {
+		return err
+	}
+	return applyProviderFlags(cfg, fs, provider)
+}
+
 func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags targetFlagValues, networkFlags networkModeFlagValues, opts leaseTargetConfigOptions) (Config, error) {
+	return loadLeaseTargetConfigContext(context.Background(), fs, provider, targetFlags, networkFlags, opts)
+}
+
+func loadLeaseTargetConfigContext(ctx context.Context, fs *flag.FlagSet, provider string, targetFlags targetFlagValues, networkFlags networkModeFlagValues, opts leaseTargetConfigOptions) (Config, error) {
 	cfg, err := loadConfig()
 	if err != nil {
 		return Config{}, err
@@ -498,7 +555,7 @@ func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags target
 		return Config{}, err
 	}
 	if !opts.ProviderResourceID {
-		if err := autoRouteLeaseProviderForIdentifier(&cfg, fs, opts.LeaseID); err != nil {
+		if err := autoRouteLeaseProviderForIdentifierContext(ctx, &cfg, fs, opts.LeaseID); err != nil {
 			return Config{}, err
 		}
 	}

@@ -9,7 +9,14 @@ import type { ExternalRunnerRecord, LeaseRecord, ReadyPoolEntry, RunRecord } fro
 
 export type PortalOrgKind = "missing" | "legacy" | "unsupported";
 type LeaseCleanupStatus = "pending" | "failed" | "complete" | "retained";
-export type PublicLeaseRecord = LeaseRecord & { cleanupStatus?: LeaseCleanupStatus };
+export type PublicLeaseRecord = LeaseRecord & {
+  cleanupStatus?: LeaseCleanupStatus;
+  provisioningPhase?:
+    | "preparing"
+    | "provider-request"
+    | "awaiting-instance"
+    | "interrupted-recovering";
+};
 export type PortalLeaseRecord = PublicLeaseRecord & { portalOrgKind?: PortalOrgKind };
 export type PortalExternalRunnerRecord = ExternalRunnerRecord & {
   portalOrgKind?: PortalOrgKind;
@@ -20,6 +27,15 @@ export function publicLeaseRecord(record: LeaseRecord): PublicLeaseRecord {
     ...record,
     org: orgLabelForDisplay(record.org),
   };
+  if (record.provisioningRecoveryObservedAt || record.provisioningRecoveryMissingSince) {
+    publicRecord.provisioningPhase = "interrupted-recovering";
+  } else if (record.state === "provisioning") {
+    publicRecord.provisioningPhase = record.cloudID
+      ? "awaiting-instance"
+      : record.provisioningRequestStartedAt
+        ? "provider-request"
+        : "preparing";
+  }
   if (record.state === "released") {
     publicRecord.cleanupStatus = releaseCleanupStatus(record);
     if (leaseProviderCleanupCompleted(record)) {

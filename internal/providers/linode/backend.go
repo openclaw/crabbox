@@ -76,6 +76,9 @@ func newLinodeLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runt
 }
 
 func (b *linodeLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	if req.RequestedLeaseID != "" {
+		return b.acquireFixed(ctx, req)
+	}
 	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
 		return b.acquireOnce(ctx, req)
 	})
@@ -280,6 +283,11 @@ func (b *linodeLeaseBackend) Resolve(ctx context.Context, req core.ResolveReques
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if core.IsCanonicalLeaseID(req.ID) {
+		if lease, handled, err := b.resolveFixed(ctx, client, req, accountID); handled {
+			return lease, err
+		}
+	}
 	linodes, err := client.ListLinodes(ctx)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -315,6 +323,9 @@ func (b *linodeLeaseBackend) Resolve(ctx context.Context, req core.ResolveReques
 		return b.targetFromLinode(item, req, appendLinodeIfMissing(linodes, item), accountID)
 	}
 	if req.ReleaseOnly {
+		if lease, handled, err := b.resolveFixed(ctx, client, req, accountID); handled {
+			return lease, err
+		}
 		return b.releaseTargetFromClaim(ctx, client, req.ID, accountID)
 	}
 	return core.LeaseTarget{}, core.Exit(4, "lease/linode not found: %s", req.ID)
@@ -456,6 +467,17 @@ func (b *linodeLeaseBackend) targetFromLinode(item linodeInstance, req core.Reso
 	if claimErr != nil {
 		return core.LeaseTarget{}, fmt.Errorf("read linode lease claim: %w", claimErr)
 	}
+	if claimExists && claim.FixedCreateIntent != nil {
+		if claim.ProviderScope != accountID {
+			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Linode account changed")
+		}
+		if err := validateFixedLinode(claim, item); err != nil {
+			return core.LeaseTarget{}, err
+		}
+	}
+	if !claimExists && server.Labels["fixed_attempt"] != "" {
+		return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Linode fixed lease has no create intent")
+	}
 	if claimExists && !req.IsReadOnlyStatus() {
 		if claim.Provider != providerName {
 			return core.LeaseTarget{}, core.Exit(2, "lease=%s is claimed by provider=%s; refusing linode claim rewrite", leaseID, claim.Provider)
@@ -557,6 +579,11 @@ func (b *linodeLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (
 }
 
 func (b *linodeLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	if req.Lease.Server.CloudID == "" && req.Lease.Server.Name == "" {
+		if terminal, err := fixedLeaseKind.ReadTerminal(req.Lease.LeaseID); terminal {
+			return err
+		}
+	}
 	return b.deleteServer(ctx, b.Cfg, req.Lease.Server)
 }
 
@@ -587,7 +614,7 @@ func (b *linodeLeaseBackend) updateFencedLinodeMetadata(ctx context.Context, lea
 		return core.Server{}, err
 	}
 	if lease.LeaseID != expected.LeaseID || server.Provider != providerName || server.ID <= 0 ||
-		expected.ProviderScope != core.ProviderClaimScope(providerName, b.Cfg) ||
+		(!fixedLeaseKind.IsFixedClaim(expected) && expected.ProviderScope != core.ProviderClaimScope(providerName, b.Cfg)) ||
 		server.CloudID != strconv.FormatInt(server.ID, 10) || expected.CloudID != server.CloudID ||
 		(expected.CloudNumericID != 0 && expected.CloudNumericID != server.ID) || expected.Labels["recovery"] != "" ||
 		strings.TrimSpace(server.Labels[linodeAccountLabel]) != strings.TrimSpace(expected.Labels[linodeAccountLabel]) {
@@ -808,6 +835,25 @@ func (b *linodeLeaseBackend) deleteServer(ctx context.Context, _ core.Config, se
 		}
 		return client.DeleteLinode(ctx, item.ID)
 	}
+	if fixedLeaseKind.IsFixedClaim(expectedClaim) {
+		return core.DeleteClaimedEvidence(ctx, fixedLeaseKind, expectedClaim, func() (linodeInstance, error) {
+			live, err := client.GetLinode(ctx, server.ID)
+			if isLinodeNotFound(err) {
+				return linodeInstance{}, nil
+			}
+			if err == nil {
+				err = validateFixedLinode(expectedClaim, live)
+			}
+			return live, err
+		}, func(live linodeInstance) error {
+			if live.ID != 0 {
+				if err := client.DeleteLinode(ctx, live.ID); err != nil && !isLinodeNotFound(err) {
+					return err
+				}
+			}
+			return core.RemoveStoredTestboxConnectionArtifacts(expectedClaim.LeaseID)
+		})
+	}
 	if err := shared.RemoveSSHLeaseClaimAfter(ctx, expectedClaim, action); err != nil {
 		return fmt.Errorf("finalize linode cleanup claim: %w", err)
 	}
@@ -815,6 +861,11 @@ func (b *linodeLeaseBackend) deleteServer(ctx context.Context, _ core.Config, se
 }
 
 func validateCleanupClaim(server core.Server, claim core.LeaseClaim, liveLinodeVerified bool) error {
+	if claim.FixedCreateIntent != nil && claim.CloudID != "" {
+		if err := validateFixedLinode(claim, linodeInstance{ID: server.ID, Label: server.Name, Tags: tagsFromLabels(server.Labels)}); err != nil {
+			return err
+		}
+	}
 	leaseID := server.Labels["lease"]
 	if claim.LeaseID != leaseID || claim.Provider == "" {
 		return core.Exit(2, "linode lease claim is incomplete for lease=%s", leaseID)
@@ -875,6 +926,9 @@ func isPendingRecoveryClaim(claim core.LeaseClaim, leaseID string) bool {
 
 func validateLinodeClaimIdentity(claim core.LeaseClaim, leaseID, slug string) error {
 	binding := shared.ClaimBinding{Provider: providerName, LeaseID: leaseID, Slug: slug}
+	if fixedLeaseKind.IsFixedClaim(claim) && (claim.ProviderScope == "" || claim.ProviderScope != claim.Labels[linodeAccountLabel] || claim.ProviderScope != claim.FixedCreateIntent.ProviderScope) {
+		return core.Exit(4, "lease_id_conflict: Linode account scope changed")
+	}
 	if claim.Slug == "" || shared.ValidateClaimBinding(claim, binding) != nil {
 		return core.Exit(2, "linode lease claim identity does not match lease=%s slug=%s", leaseID, slug)
 	}

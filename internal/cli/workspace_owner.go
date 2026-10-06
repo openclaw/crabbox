@@ -378,7 +378,7 @@ func acquireWorkspaceOwnerWithTransport(ctx context.Context, target SSHTarget, l
 		sent := time.Now()
 		response, callErr := callWorkspaceOwnerTransport(waitCtx, owner.callTimeout(), transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: owner.key, Token: owner.token, TTL: ttl})
 		if callErr != nil {
-			return nil, Exit(7, "acquire remote workspace owner: ambiguous remote state: %v", callErr)
+			return nil, workspaceOwnerCallError("acquire remote workspace owner", callErr)
 		}
 		switch response {
 		case "ACQUIRED", "RECOVERED":
@@ -539,7 +539,7 @@ func (o *workspaceOwner) inspectChild(ctx context.Context) (workspaceOwnerInspec
 	response, err := callWorkspaceOwnerTransport(ctx, o.callTimeout(), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerInspect, Key: o.key, Token: o.token, TTL: o.ttl})
 	if err != nil {
 		err = workspaceOwnerProtocolError(response, err)
-		return workspaceOwnerQuiescent, Exit(7, "confirm remote workspace owner child state: ambiguous remote state: %v", err)
+		return workspaceOwnerQuiescent, workspaceOwnerCallError("confirm remote workspace owner child state", err)
 	}
 	switch response {
 	case "OWNED":
@@ -560,7 +560,7 @@ func (o *workspaceOwner) WaitForChild(ctx context.Context, timeout time.Duration
 		response, err := callWorkspaceOwnerTransport(ctx, min(o.callTimeout(), time.Until(deadline)), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerInspect, Key: o.key, Token: o.token, TTL: o.ttl})
 		if err != nil {
 			err = workspaceOwnerProtocolError(response, err)
-			return Exit(7, "confirm remote workspace phase witness: ambiguous remote state: %v", err)
+			return workspaceOwnerCallError("confirm remote workspace phase witness", err)
 		}
 		switch response {
 		case "CHILD":
@@ -582,6 +582,35 @@ func (o *workspaceOwner) WaitForChild(ctx context.Context, timeout time.Duration
 		case <-timer.C:
 		}
 	}
+}
+
+// Stage a single-word rsync entry point: openrsync tokenizes --rsync-path and
+// discards its shell quoting, unlike GNU rsync. Never put a shell program there.
+func stageRsyncWorkspaceReceiver(ctx context.Context, target SSHTarget, owner *workspaceOwner) (workspaceOwnerRemotePreparation, error) {
+	nonce, err := randomHex(16)
+	if err != nil {
+		return workspaceOwnerRemotePreparation{}, err
+	}
+	name := owner.key + ".rsync." + owner.token + "." + nonce
+	path := `"$HOME/.crabbox/workspace-owners/` + name + `"`
+	script := "#!/bin/sh\n" + `trap 'rm -f -- "$0"' 0` + "\n" + remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, `exec rsync "$@"`, "")
+	prepared := workspaceOwnerRemotePreparation{
+		command: "~/.crabbox/workspace-owners/" + name,
+		cleanup: "rm -f -- " + path,
+	}
+	stage := `set -eu
+umask 077
+root="$HOME/.crabbox/workspace-owners"
+[ -d "$root" ] && [ ! -L "$root" ]
+[ "$(sed -n '2p' "$root/` + owner.key + `.owner")" = ` + shellQuote(owner.token) + ` ]
+[ "$(sed -n '3p' "$root/` + owner.key + `.owner")" -gt "$(date +%s)" ]
+(set -C; cat > ` + path + `)
+[ "$(wc -c < ` + path + ` | tr -d '[:space:]')" = ` + strconv.Itoa(len(script)) + ` ]
+chmod 700 ` + path
+	if err := runSSHInput(contextWithoutWorkspaceOwner(ctx), target, stage, strings.NewReader(script), io.Discard, io.Discard); err != nil {
+		return workspaceOwnerRemotePreparation{}, errors.Join(err, prepared.close(ctx, target))
+	}
+	return prepared, nil
 }
 
 func (o *workspaceOwner) rsyncGuardPayload(destination string) string {
@@ -613,6 +642,19 @@ func (o *workspaceOwner) rsyncPrepareCommand() string {
 	return `rm -f "$HOME/` + path + `"`
 }
 
+func finishRsyncWorkspaceWitness(ctx context.Context, target SSHTarget, owner *workspaceOwner) error {
+	rawCtx := contextWithoutWorkspaceOwner(ctx)
+	if err := runSSHQuiet(rawCtx, target, owner.rsyncStopCommand()); err != nil {
+		return err
+	}
+	if err := waitWorkspaceOwnerNoChild(rawCtx, owner, owner.callTimeout()); err != nil {
+		// A slow receiver can outlive local cancellation. Keep the stop request
+		// so its witness retires when the receiver exits, without waiting for TTL.
+		return err
+	}
+	return runSSHQuiet(rawCtx, target, owner.rsyncPrepareCommand())
+}
+
 func (o *workspaceOwner) Close(ctx context.Context) (err error) {
 	if o == nil {
 		return nil
@@ -625,11 +667,19 @@ func (o *workspaceOwner) Close(ctx context.Context) (err error) {
 	response, releaseErr := callWorkspaceOwnerTransport(ctx, o.callTimeout(), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerRelease, Key: o.key, Token: o.token, TTL: o.ttl})
 	if releaseErr != nil {
 		releaseErr = workspaceOwnerProtocolError(response, releaseErr)
-		releaseErr = Exit(7, "release remote workspace owner: ambiguous remote state: %v", releaseErr)
+		releaseErr = workspaceOwnerCallError("release remote workspace owner", releaseErr)
 	} else if response != "RELEASED" {
 		releaseErr = Exit(7, "release remote workspace owner failed closed: %s", strings.ToLower(firstNonBlank(response, "ambiguous")))
 	}
 	return errors.Join(renewErr, releaseErr)
+}
+
+func workspaceOwnerCallError(operation string, err error) error {
+	var preparation sshPreparationError
+	if errors.As(err, &preparation) {
+		return Exit(7, "%s: SSH connection preparation failed: %v", operation, err)
+	}
+	return Exit(7, "%s: ambiguous remote state: %v", operation, err)
 }
 
 func (o *workspaceOwner) QuiesceForLeaseRelease(ctx context.Context) error {
@@ -1022,11 +1072,11 @@ func remoteWorkspaceOwnerPOSIXInputLauncher(key, token string, decodedSize int) 
 
 func remoteWorkspaceOwnerPOSIXPayloadLauncher(key, token, payload string, decodedSize int, setupMarker ...string) string {
 	// Private staging must not impose its creation policy on the launched script.
-	launcher := `set -u; command_umask=$(umask); umask 077; root="$HOME/.crabbox/workspace-owners"; run_dir="$root/` + key + `.launcher.` + token + `.$$"; script="$run_dir/script"; cleanup_launcher() { rm -f "$script" 2>/dev/null; rmdir "$run_dir" 2>/dev/null || true; }; decoded_size_ok() { set -- $(wc -c <"$script"); [ "$#" -eq 1 ] && [ "$1" = ` + strconv.Itoa(decodedSize) + ` ]; }; mkdir -p "$root" 2>/dev/null || exit 74; chmod 700 "$HOME/.crabbox" "$root" 2>/dev/null || true; mkdir -m 700 "$run_dir" 2>/dev/null || exit 74; payload_b64=` + payload + `; decoded=; if command -v base64 >/dev/null 2>&1; then if printf %s "$payload_b64" | base64 --decode 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -d 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -D 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ] && command -v openssl >/dev/null 2>&1; then if printf %s "$payload_b64" | openssl base64 -d -A 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ]; then cleanup_launcher; exit 74; fi; umask "$command_umask"; /bin/sh "$script"; code=$?; cleanup_launcher; exit "$code"`
+	launcher := `set -u; command_umask=$(umask); umask 077; root="$HOME/.crabbox/workspace-owners"; run_dir="$root/` + key + `.launcher.` + token + `.$$"; script="$run_dir/script"; cleanup_launcher() { rm -f "$script" 2>/dev/null; rmdir "$run_dir" 2>/dev/null || true; }; decoded_size_ok() { set -- $(wc -c <"$script"); [ "$#" -eq 1 ] && [ "$1" = ` + strconv.Itoa(decodedSize) + ` ]; }; mkdir -p "$root" 2>/dev/null || exit 74; chmod 700 "$HOME/.crabbox" "$root" 2>/dev/null || true; mkdir -m 700 "$run_dir" 2>/dev/null || exit 74; payload_b64=` + payload + `; decoded=; if command -v base64 >/dev/null 2>&1; then if printf %s "$payload_b64" | base64 --decode 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -d 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; elif printf %s "$payload_b64" | base64 -D 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ] && command -v openssl >/dev/null 2>&1; then if printf %s "$payload_b64" | openssl base64 -d -A 2>/dev/null >"$script" && decoded_size_ok; then decoded=1; fi; fi; if [ -z "$decoded" ]; then cleanup_launcher; exit 74; fi; umask "$command_umask"; /bin/sh "$script" "$@"; code=$?; cleanup_launcher; exit "$code"`
 	if len(setupMarker) > 0 && setupMarker[0] != "" {
 		launcher = remoteWorkspaceOwnerPOSIXSetupDiagnostic(setupMarker[0]) + strings.ReplaceAll(launcher, "exit 74", "setup_failed staging")
 	}
-	return "exec /bin/sh -c " + shellQuote(launcher)
+	return "exec /bin/sh -c " + shellQuote(launcher) + " cbx"
 }
 
 func remoteWorkspaceOwnerPOSIXWitness(key, token, remote string, preserveInput ...bool) string {
@@ -1102,7 +1152,8 @@ rm -f "$child"`
     case "$owner_fd" in ""|*[!0-9]*|0|1|2) continue ;; esac
     eval "exec $owner_fd>&-"
   done
-  exec /bin/sh -c "$1"' owner-command "$owner_command"` + inputRedirect + `
+  owner_command=$1; shift
+  exec /bin/sh -c "$owner_command" cbx "$@"' cbx "$owner_command" "$@"` + inputRedirect + `
 fi
 `
 	registrar := diagnostic + `set -u
@@ -1120,7 +1171,7 @@ printf '%s\n%s\n' "$child_pid" "$child_identity" >&3 || setup_failed handoff
 exec 3>&-
 umask "$command_umask"
 ` + started + `owner_command=` + shellQuote(remote) + `
-` + macExec + `exec sh -c "$owner_command"` + inputRedirect + `
+` + macExec + `exec sh -c "$owner_command" cbx "$@"` + inputRedirect + `
 `
 	return diagnostic + `set -u
 command_umask=$(umask)
@@ -1139,7 +1190,7 @@ mkdir -m 700 "$run_dir" 2>/dev/null || setup_failed staging
 exec 4>&1
 trap : INT QUIT
 set +e
-identity=$(exec /bin/sh -c ` + shellQuote(registrar) + ` 3>&1 1>&4 4>&-)
+identity=$(exec /bin/sh -c ` + shellQuote(registrar) + ` cbx "$@" 3>&1 1>&4 4>&-)
 code=$?
 trap - INT QUIT
 exec 4>&-

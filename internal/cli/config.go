@@ -72,6 +72,7 @@ type Config struct {
 	Image                         string
 	imageExplicit                 bool
 	AWSRegion                     string
+	AWSStockImage                 bool
 	AWSAMI                        string
 	AWSSnapshot                   string
 	AWSSGID                       string
@@ -131,6 +132,7 @@ type Config struct {
 	TTL                           time.Duration
 	IdleTimeout                   time.Duration
 	WarmupKeep                    bool
+	ClaimsAutoPrune               bool
 	Sync                          SyncConfig
 	Run                           RunConfig
 	EnvAllow                      []string
@@ -314,6 +316,8 @@ type RunConfig struct {
 }
 
 type CapacityConfig struct {
+	MinVCPUs          int
+	MinMemoryMiB      int
 	Market            string
 	Strategy          string
 	Fallback          string
@@ -1555,6 +1559,7 @@ func baseConfig() Config {
 		TTL:                     90 * time.Minute,
 		IdleTimeout:             30 * time.Minute,
 		WarmupKeep:              true,
+		ClaimsAutoPrune:         true,
 		Sync: SyncConfig{
 			Source:        "git",
 			Delete:        true,
@@ -1670,6 +1675,7 @@ func baseConfig() Config {
 }
 
 type fileConfig struct {
+	Claims                   *fileClaimsConfig                   `yaml:"claims,omitempty"`
 	History                  *fileLocalHistoryPolicy             `yaml:"history,omitempty"`
 	Profile                  string                              `yaml:"profile,omitempty"`
 	Provider                 string                              `yaml:"provider,omitempty"`
@@ -1821,6 +1827,7 @@ type fileHetznerConfig struct {
 type fileAWSConfig struct {
 	Region          string   `yaml:"region,omitempty"`
 	AMI             string   `yaml:"ami,omitempty"`
+	StockImage      *bool    `yaml:"stockImage,omitempty"`
 	SecurityGroupID string   `yaml:"securityGroupId,omitempty"`
 	SubnetID        string   `yaml:"subnetId,omitempty"`
 	InstanceProfile string   `yaml:"instanceProfile,omitempty"`
@@ -1915,6 +1922,8 @@ type fileRunConfig struct {
 }
 
 type fileCapacityConfig struct {
+	MinVCPUs          *int     `yaml:"minVCPUs,omitempty"`
+	MinMemoryMiB      *int     `yaml:"minMemoryMiB,omitempty"`
 	Market            string   `yaml:"market,omitempty"`
 	Strategy          string   `yaml:"strategy,omitempty"`
 	Fallback          string   `yaml:"fallback,omitempty"`
@@ -2687,6 +2696,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, "aws", inputSource, true)
 			recordConfigInput(cfg, "aws-lambda-microvm", inputSource, true)
 		}
+		if file.AWS.StockImage != nil {
+			cfg.AWSStockImage = *file.AWS.StockImage
+			recordConfigInput(cfg, "aws", inputSource, true)
+		}
 		configInputFileString(cfg, "aws", inputSource, &cfg.AWSAMI, file.AWS.AMI)
 		configInputFileString(cfg, "aws", inputSource, &cfg.AWSSGID, file.AWS.SecurityGroupID)
 		configInputFileString(cfg, "aws", inputSource, &cfg.AWSSubnetID, file.AWS.SubnetID)
@@ -2873,6 +2886,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		cfg.WarmupKeep = *file.Warmup.Keep
 		recordConfigInput(cfg, configInputGeneric, inputSource, true)
 	}
+	if file.Claims != nil && file.Claims.AutoPrune != nil {
+		cfg.ClaimsAutoPrune = *file.Claims.AutoPrune
+		recordConfigInput(cfg, configInputGeneric, inputSource, true)
+	}
 	if file.Sync != nil {
 		configInputFileString(cfg, configInputGeneric, inputSource, &cfg.Sync.Source, file.Sync.Source)
 		configInputFileString(cfg, configInputGeneric, inputSource, &cfg.Sync.Compression, file.Sync.Compression)
@@ -2936,6 +2953,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		recordConfigInput(cfg, configInputGeneric, inputSource, true)
 	}
 	if file.Capacity != nil {
+		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Capacity.MinVCPUs, file.Capacity.MinVCPUs))
+		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Capacity.MinMemoryMiB, file.Capacity.MinMemoryMiB))
+		if err := validateCapacityMinimumValues(cfg.Capacity); err != nil {
+			return err
+		}
 		if file.Capacity.Market != "" {
 			cfg.Capacity.Market = file.Capacity.Market
 			recordConfigInput(cfg, configInputGeneric, inputSource, true)
@@ -3589,6 +3611,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Jobs = map[string]JobConfig{}
 		}
 		for name, job := range file.Jobs {
+			if job.Capacity != nil && ((job.Capacity.MinVCPUs != nil && *job.Capacity.MinVCPUs != 0) ||
+				(job.Capacity.MinMemoryMiB != nil && *job.Capacity.MinMemoryMiB != 0)) {
+				return Exit(2, "job %q: resource requirements are unsupported for composite jobs; use warmup", name)
+			}
 			name = strings.TrimSpace(name)
 			if name == "" {
 				continue
@@ -3961,6 +3987,10 @@ func applyEnv(cfg *Config) error {
 		recordConfigInput(cfg, "aws", configInputEnvironment, true)
 		recordConfigInput(cfg, "aws-lambda-microvm", configInputEnvironment, true)
 	}
+	if value, ok := getenvBool("CRABBOX_AWS_STOCK_IMAGE"); ok {
+		cfg.AWSStockImage = value
+		recordConfigInput(cfg, "aws", configInputEnvironment, true)
+	}
 	cfg.AWSAMI = configInputEnvString(cfg, "aws", cfg.AWSAMI, "CRABBOX_AWS_AMI")
 	cfg.AWSSGID = configInputEnvString(cfg, "aws", cfg.AWSSGID, "CRABBOX_AWS_SECURITY_GROUP_ID")
 	cfg.AWSSubnetID = configInputEnvString(cfg, "aws", cfg.AWSSubnetID, "CRABBOX_AWS_SUBNET_ID")
@@ -4178,6 +4208,10 @@ func applyEnv(cfg *Config) error {
 	}
 	if keep, ok := getenvBool("CRABBOX_WARMUP_KEEP"); ok {
 		cfg.WarmupKeep = keep
+		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
+	}
+	if prune, ok := getenvBool("CRABBOX_CLAIMS_AUTO_PRUNE"); ok {
+		cfg.ClaimsAutoPrune = prune
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
 	}
 	if market := os.Getenv("CRABBOX_CAPACITY_MARKET"); market != "" {
@@ -5450,6 +5484,10 @@ func DigitalOceanImageWasExplicit(cfg Config) bool {
 
 func LinodeImageWasExplicit(cfg Config) bool {
 	return cfg.linodeImageExplicit
+}
+
+func LinodeTypeWasExplicit(cfg Config) bool {
+	return cfg.linodeTypeExplicit
 }
 
 func OSImageWasExplicit(cfg Config) bool {

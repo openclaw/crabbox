@@ -283,10 +283,14 @@ func (b *backend) resolveClaim(identifier string) (core.LeaseClaim, bool, error)
 	} else if claim.LeaseID != "" && strings.HasPrefix(identifier, "cbx_") {
 		return core.LeaseClaim{}, false, nil
 	}
+	if core.IsCanonicalLeaseID(identifier) {
+		return core.LeaseClaim{}, false, nil
+	}
 	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return core.LeaseClaim{}, false, err
 	}
+	var matched core.LeaseClaim
 	slug := core.NormalizeLeaseSlug(identifier)
 	for _, claim := range claims {
 		if !b.claimMatchesScope(claim) {
@@ -296,10 +300,13 @@ func (b *backend) resolveClaim(identifier string) (core.LeaseClaim, bool, error)
 			(slug != "" && core.NormalizeLeaseSlug(claim.Slug) == slug) ||
 			claim.CloudID == identifier ||
 			devboxNameFromClaim(claim, b.cfg) == identifier {
-			return claim, true, nil
+			if matched.LeaseID != "" {
+				return core.LeaseClaim{}, false, core.Exit(2, "multiple provider=%s claims match identifier %s", providerName, identifier)
+			}
+			matched = claim
 		}
 	}
-	return core.LeaseClaim{}, false, nil
+	return matched, matched.LeaseID != "", nil
 }
 
 func (b *backend) itemMatchesScope(item devboxItem) bool {

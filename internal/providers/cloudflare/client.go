@@ -28,8 +28,20 @@ type cloudflareContainer struct {
 	State        string            `json:"state"`
 	Workdir      string            `json:"workdir"`
 	InstanceType string            `json:"instanceType,omitempty"`
+	Image        string            `json:"image,omitempty"`
+	SnapshotID   string            `json:"snapshotId,omitempty"`
 	Labels       map[string]string `json:"labels,omitempty"`
 	CreatedAt    string            `json:"createdAt,omitempty"`
+}
+
+type containerSnapshot struct {
+	ID           string `json:"id"`
+	Size         int64  `json:"size"`
+	Name         string `json:"name,omitempty"`
+	LeaseID      string `json:"leaseId"`
+	Image        string `json:"image"`
+	InstanceType string `json:"instanceType"`
+	Workdir      string `json:"workdir"`
 }
 
 type createSandboxRequest struct {
@@ -39,12 +51,16 @@ type createSandboxRequest struct {
 	Repo               string            `json:"repo,omitempty"`
 	Workdir            string            `json:"workdir"`
 	InstanceType       string            `json:"instanceType,omitempty"`
+	Image              string            `json:"image,omitempty"`
+	SnapshotID         string            `json:"snapshotId,omitempty"`
 	TTLSeconds         int               `json:"ttlSeconds,omitempty"`
 	IdleTimeoutSeconds int               `json:"idleTimeoutSeconds,omitempty"`
 	Labels             map[string]string `json:"labels,omitempty"`
 }
 
-const cloudflareDefaultResponseHeaderTimeout = 30 * time.Second
+// Create, upload, and exec respond after the runner has a started container,
+// which can take the runner's full 300s readiness window on an image cache miss.
+const cloudflareDefaultResponseHeaderTimeout = 330 * time.Second
 
 var cloudflareCleanupTimeout = 15 * time.Second
 
@@ -62,6 +78,12 @@ func newCloudflareClient(cfg core.Config, rt core.Runtime) (*cloudflareClient, e
 	instanceType, err := resolveInstanceType(core.Blank(cfg.ServerType, cloudflareContainerInstanceTypeForClass(cfg.Class)), cloudflareContainerInstanceTypeForClass(cfg.Class), cfg.ServerTypeExplicit)
 	if err != nil {
 		return nil, err
+	}
+	if instanceType == "basic" {
+		if rt.Stderr != nil {
+			fmt.Fprintln(rt.Stderr, basicInstanceTypeWarning)
+		}
+		instanceType = "standard-1"
 	}
 	parsed, err := url.Parse(apiURL)
 	if err != nil {
@@ -96,7 +118,7 @@ func newCloudflareClient(cfg core.Config, rt core.Runtime) (*cloudflareClient, e
 }
 
 func (c *cloudflareClient) useInstanceType(instanceType string) {
-	if normalized, ok := normalizeContainerInstanceType(instanceType); ok {
+	if normalized, ok := normalizeContainerInstanceType(instanceType); ok && normalized != "basic" {
 		c.instanceType = normalized
 	}
 }
@@ -116,6 +138,12 @@ func defaultCloudflareHTTPClient() (*http.Client, error) {
 
 func cloudflareRedirectError(destination *url.URL) error {
 	return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, destination.Redacted())
+}
+
+func (c *cloudflareClient) createSnapshot(ctx context.Context, sandboxID, name string) (containerSnapshot, error) {
+	var snapshot containerSnapshot
+	err := c.doJSON(ctx, http.MethodPost, c.sandboxEndpoint(sandboxID, "/snapshots"), map[string]string{"name": name}, &snapshot)
+	return snapshot, err
 }
 
 func (c *cloudflareClient) createSandbox(ctx context.Context, req createSandboxRequest) (cloudflareContainer, error) {

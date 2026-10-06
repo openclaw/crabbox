@@ -565,10 +565,15 @@ describe("coordinator runtimes", () => {
       ["GET", "/v1/workspaces/fleet-is-101"],
       ["DELETE", "/v1/workspaces/fleet-is-101"],
       ["GET", "/v1/control"],
+      ["GET", "/v1/whoami"],
+      ["GET", "/v1/leases"],
+      ["GET", "/v1/admin/leases"],
       ["GET", "/v1/native-vnc/handoff"],
       ["GET", "/v1/leases/cbx_abcdef123456"],
       ["PUT", "/v1/leases/cbx_abcdef123456"],
       ["PUT", "/v1/leases/cbx_abcdef123456/from-checkpoint"],
+      ["PUT", "/v1/leases/cbx_abcdef123456/resource-constrained"],
+      ["POST", "/v1/leases/resource-constrained"],
       ["POST", "/v1/leases/from-checkpoint"],
       ["POST", "/v1/checkpoints"],
       ["GET", "/v1/checkpoints/chk_example"],
@@ -576,6 +581,7 @@ describe("coordinator runtimes", () => {
       ["POST", "/v1/checkpoints/chk_example/use"],
       ["DELETE", "/v1/checkpoints/chk_example"],
       ["POST", "/v1/leases/cbx_abcdef123456/tailscale"],
+      ["POST", "/v1/admin/tailscale-preflight"],
       ["GET", "/v1/adapters/applied-alice"],
       ["POST", "/v1/adapters/applied-alice/proxy/v1/workspaces"],
     ]) {
@@ -612,6 +618,7 @@ describe("coordinator runtimes", () => {
       ["POST", "/v1/images/ami-1/promote-catalog"],
       ["DELETE", "/v1/images/ami-1"],
       ["DELETE", "/v1/images/ami-1/promote-catalog"],
+      ["DELETE", "/v1/images/ami-1/promote"],
     ]) {
       expect(
         coordinatorRequestQueue(new Request(`https://coordinator.test${path}`, { method })),

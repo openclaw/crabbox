@@ -8,6 +8,7 @@ export interface CoordinatorStorageView {
     limit?: number;
     startAfter?: string;
     noCache?: boolean;
+    allowConcurrency?: boolean;
   }): Promise<Map<string, T>>;
 }
 
@@ -76,6 +77,12 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   const url = new URL(request.url);
   const path = url.pathname.split("/").filter(Boolean);
   const method = request.method.toUpperCase();
+  if (method === "POST" && path.join("/") === "v1/admin/tailscale-preflight") {
+    return "direct";
+  }
+  if (method === "GET" && ["v1/whoami", "v1/leases", "v1/admin/leases"].includes(path.join("/"))) {
+    return "direct";
+  }
   if (
     (method === "POST" && path.join("/") === "v1/auth/github/start") ||
     (method === "GET" && path.join("/") === "portal/login")
@@ -96,6 +103,7 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     method === "POST" &&
     (path.join("/") === "v1/leases" ||
       path.join("/") === "v1/leases/capability-aware" ||
+      path.join("/") === "v1/leases/resource-constrained" ||
       path.join("/") === "v1/leases/from-checkpoint")
   ) {
     return "direct";
@@ -108,7 +116,8 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     path[0] === "v1" &&
     path[1] === "leases" &&
     path[2] &&
-    (path.length === 3 || (path.length === 4 && path[3] === "from-checkpoint"))
+    (path.length === 3 ||
+      (path.length === 4 && ["from-checkpoint", "resource-constrained"].includes(path[3] ?? "")))
   ) {
     return "direct";
   }

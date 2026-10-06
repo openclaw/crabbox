@@ -288,6 +288,7 @@ function providerImage(
 async function checkpointFixture(
   providerName: CoordinatorCheckpointProvider = "aws",
   overrides: Partial<Env> = {},
+  admissionDeadlineMs?: number,
 ) {
   const storage = new CheckpointMemoryStorage();
   const runtime = new CheckpointRuntime(storage);
@@ -306,7 +307,14 @@ async function checkpointFixture(
       providerImage(providerName, name, strategy, ownership),
   );
   const deleteImage = vi.spyOn(provider, "deleteCheckpointImage").mockResolvedValue(undefined);
-  const coordinator = new FleetCoordinator(runtime, env, { [providerName]: provider });
+  const coordinator = new FleetCoordinator(
+    runtime,
+    env,
+    { [providerName]: provider },
+    {},
+    undefined,
+    admissionDeadlineMs,
+  );
   await storage.put(`lease:${leaseID}`, checkpointLease(providerName));
   return { storage, runtime, coordinator, provider, deleteImage, env };
 }
@@ -448,8 +456,11 @@ describe("coordinator-managed checkpoints", () => {
     },
   );
 
-  async function fixedForkFixture(providerName: CoordinatorCheckpointProvider = "aws") {
-    const fixture = await checkpointFixture(providerName);
+  async function fixedForkFixture(
+    providerName: CoordinatorCheckpointProvider = "aws",
+    admissionDeadlineMs?: number,
+  ) {
+    const fixture = await checkpointFixture(providerName, {}, admissionDeadlineMs);
     const { coordinator, provider } = fixture;
     const checkpointID = "chk_fixed_fork";
     expect((await createCheckpoint(coordinator, checkpointID)).status).toBe(201);
@@ -513,6 +524,121 @@ describe("coordinator-managed checkpoints", () => {
     };
     return { ...fixture, checkpointID, body, begin, fork, create };
   }
+
+  it.each([
+    ["POST", 1],
+    ["POST", 3],
+    ["PUT", 1],
+    ["PUT", 3],
+  ] as const)(
+    "lease admission deadline covers checkpoint %s mutex wait %s",
+    async (method, turn) => {
+      vi.useFakeTimers();
+      const deadlineMs = 25;
+      const { coordinator, runtime, storage, body, begin, create } = await fixedForkFixture(
+        "aws",
+        deadlineMs,
+      );
+      const claim = await begin();
+      const path =
+        method === "POST"
+          ? "/v1/leases/from-checkpoint"
+          : `/v1/leases/${body.leaseID}/from-checkpoint`;
+      const createRequest = () =>
+        coordinator.fetch(
+          checkpointRequest(method, path, {
+            ...body,
+            checkpointUseClaim: claim,
+            ...(method === "POST" ? { createAttemptID: `cat_${"a".repeat(32)}` } : {}),
+          }),
+        );
+      const queued = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const exclusive = runtime.runExclusive.bind(runtime);
+      let acquisitions = 0;
+      let holder: Promise<void> | undefined;
+      vi.spyOn(runtime, "runExclusive").mockImplementation((callback) => {
+        if (++acquisitions === turn) {
+          holder = exclusive(() => release.promise);
+          queued.resolve();
+        }
+        return exclusive(callback);
+      });
+      let response: Response | undefined;
+      const pending = createRequest().then((result) => (response = result));
+      try {
+        await queued.promise;
+        const attemptBeforeExpiry = await storage.get(`create-attempt:${body.leaseID}`);
+        await vi.advanceTimersByTimeAsync(deadlineMs);
+        expect(response?.status).toBe(503);
+        expect(await response!.json()).toMatchObject({
+          error: "lease_admission_timeout",
+          retryable: true,
+        });
+        release.resolve();
+        await holder;
+        await exclusive(async () => undefined);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(await storage.get(`lease:${body.leaseID}`)).toBeUndefined();
+        expect(await storage.get(`create-attempt:${body.leaseID}`)).toEqual(attemptBeforeExpiry);
+        expect(create).not.toHaveBeenCalled();
+        expect((await createRequest()).status).toBe(201);
+        expect(create).toHaveBeenCalledOnce();
+      } finally {
+        release.resolve();
+        await holder;
+        await pending;
+      }
+    },
+  );
+
+  it("treats a bound checkpoint POST claim as committed admission", async () => {
+    vi.useFakeTimers();
+    const deadlineMs = 25;
+    const { coordinator, runtime, storage, body, begin, create } = await fixedForkFixture(
+      "aws",
+      deadlineMs,
+    );
+    const claim = await begin();
+    const queued = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const exclusive = runtime.runExclusive.bind(runtime);
+    let acquisitions = 0;
+    let holder: Promise<void> | undefined;
+    // The sixth acquisition is lease admission, after the checkpoint claim is bound.
+    vi.spyOn(runtime, "runExclusive").mockImplementation((callback) => {
+      if (++acquisitions === 6) {
+        holder = exclusive(() => release.promise);
+        queued.resolve();
+      }
+      return exclusive(callback);
+    });
+    let response: Response | undefined;
+    const pending = coordinator
+      .fetch(
+        checkpointRequest("POST", "/v1/leases/from-checkpoint", {
+          ...body,
+          checkpointUseClaim: claim,
+          createAttemptID: `cat_${"a".repeat(32)}`,
+        }),
+      )
+      .then((result) => (response = result));
+    try {
+      await queued.promise;
+      await vi.advanceTimersByTimeAsync(deadlineMs * 4);
+      expect(response).toBeUndefined();
+      release.resolve();
+      await holder;
+      await pending;
+      expect(response?.status).toBe(201);
+      expect(await storage.get(`lease:${body.leaseID}`)).toBeDefined();
+      expect(create).toHaveBeenCalledOnce();
+    } finally {
+      release.resolve();
+      await holder;
+      await pending;
+    }
+  });
 
   it.each(
     [
@@ -6188,6 +6314,42 @@ describe("coordinator-managed checkpoints", () => {
     expect(await storage.get(checkpointKey(checkpointID))).toBeUndefined();
     expect(await storage.list({ prefix: `checkpoint-event:${checkpointID}:` })).toHaveLength(0);
   }, 20_000);
+
+  it("does not back off checkpoint tombstone batches that advance their audit cursor", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { coordinator, storage, runtime } = await checkpointFixture();
+    const checkpointID = "chk_alarm_prune_progress";
+    await createCheckpoint(coordinator, checkpointID);
+    expect(
+      (await coordinator.fetch(checkpointRequest("DELETE", `/v1/checkpoints/${checkpointID}`)))
+        .status,
+    ).toBe(200);
+    await storage.delete(`lease:${leaseID}`);
+    const record = (await storage.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)))!;
+    await Promise.all(
+      Array.from({ length: 192 }, (_, index) =>
+        storage.put(checkpointEventKey(checkpointID, index + 1), {
+          checkpointID,
+          sequence: index + 1,
+          type: "checkpoint.audit.pruned",
+        }),
+      ),
+    );
+    await storage.put(checkpointKey(checkpointID), { ...record, eventSequence: 192 });
+    vi.setSystemTime(Date.now() + checkpointAuditRetentionMS + 1);
+    for (const remaining of [128, 64, 0]) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each pass prunes one bounded audit batch.
+      await coordinator.alarm();
+      // oxlint-disable-next-line eslint/no-await-in-loop -- observe actual progress before the next delivery.
+      expect(await storage.list({ prefix: `checkpoint-event:${checkpointID}:` })).toHaveLength(
+        remaining,
+      );
+      expect(runtime.alarmTime).toBe(Date.now() + 1);
+    }
+    await coordinator.alarm();
+    expect(await storage.get(checkpointKey(checkpointID))).toBeUndefined();
+    expect(runtime.alarmTime).toBeUndefined();
+  });
 
   it("converges historical excess checkpoint audit events in bounded prune batches", async () => {
     const { coordinator, storage } = await checkpointFixture();
