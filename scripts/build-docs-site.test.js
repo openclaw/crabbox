@@ -223,6 +223,47 @@ generatedTest("generated AWS page is active in Providers navigation and pager", 
   assert.match(pager, new RegExp(escapeRegExp(`href="../providers/${next}"`)));
 });
 
+generatedTest("homepage provider wall groups every catalog entry with accurate counts and working links", () => {
+  const metadata = JSON.parse(fs.readFileSync(path.join(providersDir, "provider-metadata.json"), "utf8"));
+  const home = readGenerated("index.html");
+  const links = [...home.matchAll(/data-home-provider="([^"]+)" href="([^"]+)"/g)];
+  assert.equal(links.length, Object.keys(metadata).length);
+  assert.deepEqual(links.map(([, name]) => name).sort(), Object.keys(metadata).sort());
+  for (const [, name, href] of links) {
+    assert.equal(href, `providers/${metadata[name].docs.replace(/\.md$/, ".html")}`);
+    assert.ok(fs.existsSync(path.join(siteDir, href)), `${name} must link to a generated page`);
+  }
+  const groups = [...home.matchAll(/<section class="home-provider-group" data-provider-category="([^"]+)"[\s\S]*?<\/section>/g)];
+  assert.deepEqual(groups.map(([, category]) => category).sort(), [...new Set(Object.values(metadata).map((entry) => entry.category))].sort());
+  for (const [html, category] of groups) {
+    const expected = Object.entries(metadata).filter(([, entry]) => entry.category === category).map(([name]) => name).sort();
+    assert.match(html, new RegExp(`class="home-provider-count">${expected.length}<`));
+    assert.deepEqual([...html.matchAll(/data-home-provider="([^"]+)"/g)].map(([, name]) => name).sort(), expected);
+  }
+});
+
+generatedTest("homepage explains the remote loop and links every section to existing documentation", () => {
+  const main = readGenerated("index.html").match(/<main\b[^>]*>([\s\S]*?)<\/main>/)[1];
+  assert.match(main, /On-demand computers <em>for agents\.<\/em>/);
+  assert.match(main, /Uncommitted changes included/);
+  assert.match(main, /Stream \+ exit code/);
+  assert.match(main, /Linux<\/li><li>macOS<\/li><li>Windows <small>native<\/small><\/li><li>WSL2/);
+  assert.match(main, /VNC or WebVNC/);
+  assert.match(main, /<code>--code<\/code> on managed Linux/);
+  assert.match(main, /configured spend caps/);
+  assert.match(main, /ambiguous ownership fails closed/);
+  assert.equal(occurrences(main.match(/<section class="home-loop"[\s\S]*?<\/section>/)[0], "<li>"), 6);
+  for (const [, href] of main.matchAll(/href="([^"]+)"/g)) {
+    if (/^https?:/.test(href)) continue;
+    const [file, anchor] = href.split("#");
+    const target = file ? readGenerated(file.split("?")[0]) : main;
+    if (anchor) assert.match(target, new RegExp(`id="${escapeRegExp(anchor)}"`), `${href} must resolve`);
+  }
+  for (const id of ["home-use-cases-heading", "home-paths-heading", "home-pricing-heading", "home-nested-heading", "home-install-heading", "home-trust-heading"]) {
+    assert.match(main, new RegExp(`id="${id}"`), "preserve existing home section links");
+  }
+});
+
 generatedTest("homepage presents use-case, pricing, and onboarding paths", () => {
   const home = readGenerated("index.html");
   const startNav = navSection(home, "Start");
@@ -232,27 +273,27 @@ generatedTest("homepage presents use-case, pricing, and onboarding paths", () =>
 
   assert.match(
     home,
-    /<title>Crabbox — Run Any Repository Command in the Right Box<\/title>/,
+    /<title>Crabbox — On-demand Computers for Agents<\/title>/,
   );
   assert.match(home, /<meta name="description" content="[^"]+">/);
   assert.match(home, /<link rel="canonical" href="https:\/\/crabbox\.sh\/">/);
-  assert.match(home, /<meta property="og:title" content="Crabbox — Run Any Repository Command in the Right Box">/);
+  assert.match(home, /<meta property="og:title" content="Crabbox — On-demand Computers for Agents">/);
   assert.match(home, /navParams\.get\('docs'\)/);
   assert.match(home, /next\.searchParams\.set\('docs',value\)/);
   assert.match(
     home,
-    /<a class="cta-primary" href="getting-started\.html">Run Your First Command<\/a>/,
+    /<a class="cta-primary" href="getting-started\.html">Get started <span aria-hidden="true">→<\/span><\/a>/,
   );
   assert.match(
     home,
-    /<a class="cta-secondary" href="#home-use-cases-heading">Route Your Workload<\/a>/,
+    /<a class="cta-secondary" href="providers\/index\.html">Providers<\/a>/,
   );
   assert.match(home, /<form class="home-job-finder" data-home-job-finder>/);
   assert.equal(occurrences(home, 'class="home-job-radio sr-only"'), 6, "homepage should expose six job choices");
   assert.equal(occurrences(home, 'class="home-job-result"'), 6, "every job choice should have a result");
   assert.equal(occurrences(home, 'data-home-job-radio checked'), 1, "job finder should have one default route");
   assert.equal(occurrences(home, 'aria-controls="home-job-result-'), 6, "every job choice should identify its result");
-  assert.equal(occurrences(home, "data-copy-text="), 6, "every job result should expose a runnable copy target");
+  assert.equal(occurrences(home, "data-copy-text="), 7, "the run example and every job result should expose a runnable copy target");
   assert.doesNotMatch(home, /data-copy-text="[^"]*\$/);
   assert.doesNotMatch(home, /data-copy-text="[^"]*&lt;name&gt;/);
   assert.match(home, /homeJobParams\.get\('job'\)/);
@@ -277,10 +318,11 @@ generatedTest("homepage presents use-case, pricing, and onboarding paths", () =>
     [],
     "job finder recommendations should stay on the canonical CLI surface",
   );
-  const providerCount = Object.keys(
-    JSON.parse(fs.readFileSync(path.join(providersDir, "provider-metadata.json"), "utf8")),
-  ).length;
-  assert.match(home, new RegExp(`<li>${providerCount} registered providers</li>`));
+  const metadata = JSON.parse(fs.readFileSync(path.join(providersDir, "provider-metadata.json"), "utf8"));
+  const providerCount = Object.keys(metadata).length;
+  const builtInCount = Object.values(metadata).filter((entry) => entry.category !== "external-provider").length;
+  assert.match(home, new RegExp(`<li>${builtInCount} built-in providers</li>`));
+  assert.match(home, new RegExp(`>${builtInCount} <span class="home-nowrap">built-in</span> providers\\.<br>One way to run\\.`));
   assert.match(home, new RegExp(`Turn ${providerCount} registered providers into a focused comparison path\\.`));
   assert.match(home, /href="pricing\.html">See Pricing and Cost Boundaries/);
   assert.match(home, /There is no generic nested mode\./);

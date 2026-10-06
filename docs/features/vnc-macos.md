@@ -8,10 +8,13 @@ Read this when you:
 - debug Screen Sharing credentials, adapter preflight, or EC2 Mac Dedicated
   Host requirements.
 
-Crabbox reaches macOS desktops three ways:
+Crabbox reaches macOS desktops through:
 
 - **managed AWS EC2 Mac** leases, provisioned onto an operator-allocated
   Dedicated Host;
+- **Tart and Parallels clones**, using their prepared macOS guest and Screen
+  Sharing setup; see [Tart](../providers/tart.md) and
+  [Parallels](../providers/parallels.md);
 - **External provider** leases whose adapter owns lifecycle and SSH discovery
   while the operator owns the host's macOS account and Screen Sharing
   credential;

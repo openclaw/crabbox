@@ -19,6 +19,8 @@ type leaseCreateFlagValues struct {
 	ServerType    *string
 	SSHPort       *string
 	Market        *string
+	MinVCPUs      *int
+	MinMemoryMiB  *int
 	Slug          *string
 	Pond          *string
 	Expose        *stringListFlag
@@ -73,6 +75,8 @@ func registerLeaseCreateFlagsWithOptions(fs *flag.FlagSet, defaults Config, opti
 		ServerType:    fs.String("type", options.serverTypeDefault, "provider server/instance type"),
 		SSHPort:       fs.String("ssh-port", defaults.SSHPort, "SSH port for the leased target"),
 		Market:        fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand"),
+		MinVCPUs:      fs.Int("min-vcpus", defaults.Capacity.MinVCPUs, "minimum provisioned vCPUs (AWS Linux; 0 = unconstrained)"),
+		MinMemoryMiB:  fs.Int("min-memory-mib", defaults.Capacity.MinMemoryMiB, "minimum provisioned memory in MiB (AWS Linux; 0 = unconstrained)"),
 		Slug:          fs.String("slug", "", "request a friendly slug for a new lease"),
 		Pond:          fs.String("pond", defaults.Pond, "tag this lease with a pond name so peers can be selected with --pond"),
 		Expose:        &expose,
@@ -163,6 +167,31 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 	prepareProviderDefaults(cfg)
 	cfg.Profile = *values.Profile
 	recordConfigInput(cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "profile"))
+	if flagWasSet(fs, "min-vcpus") {
+		cfg.Capacity.MinVCPUs = *values.MinVCPUs
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
+	}
+	if flagWasSet(fs, "min-memory-mib") {
+		cfg.Capacity.MinMemoryMiB = *values.MinMemoryMiB
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
+	}
+	if err := validateCapacityMinimumValues(cfg.Capacity); err != nil {
+		return err
+	}
+	if hasCapacityMinimums(*cfg) {
+		if target.Reuse {
+			return Exit(2, "resource requirements are unsupported with existing lease reuse (--id)")
+		}
+		if fs.Name() == "prewarm" {
+			return Exit(2, "resource requirements are unsupported for composite prewarm; use warmup")
+		}
+		if fs.Name() == "checkpoint fork" {
+			return Exit(2, "resource requirements are unsupported for checkpoint forks")
+		}
+		if pool := fs.Lookup("pool"); pool != nil && strings.TrimSpace(pool.Value.String()) != "" {
+			return Exit(2, "resource requirements are unsupported with ready pools")
+		}
+	}
 	cfg.Class = *values.Class
 	recordConfigInput(cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "class"))
 	if flagWasSet(fs, "ssh-port") {
@@ -294,6 +323,9 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 		return err
 	}
 	if err := validateProviderTarget(*cfg); err != nil {
+		return err
+	}
+	if err := validateResourceRequirements(*cfg); err != nil {
 		return err
 	}
 	if err := validateImageRequirementsForLease(*cfg, target.Reuse); err != nil {

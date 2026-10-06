@@ -128,7 +128,7 @@ func configShowView(cfg Config) map[string]any {
 		provider = ""
 		serverType = ""
 	}
-	return map[string]any{
+	view := map[string]any{
 		"providerStatus":             providerConfigStatus(cfg),
 		"profile":                    cfg.Profile,
 		"provider":                   provider,
@@ -528,6 +528,14 @@ func configShowView(cfg Config) map[string]any {
 			"insecureTLS":  cfg.XCPNg.InsecureTLS,
 		},
 	}
+	capacity := view["capacity"].(map[string]any)
+	if cfg.Capacity.MinVCPUs > 0 {
+		capacity["minVCPUs"] = cfg.Capacity.MinVCPUs
+	}
+	if cfg.Capacity.MinMemoryMiB > 0 {
+		capacity["minMemoryMiB"] = cfg.Capacity.MinMemoryMiB
+	}
+	return view
 }
 
 func writeConfigShowText(w io.Writer, cfg Config) error {
@@ -562,6 +570,9 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	fmt.Fprintf(w, "warmup keep=%t\n", cfg.WarmupKeep)
 	fmt.Fprintf(w, "claims auto_prune=%t\n", cfg.ClaimsAutoPrune)
 	fmt.Fprintf(w, "capacity market=%s strategy=%s fallback=%s regions=%s hints=%t\n", cfg.Capacity.Market, cfg.Capacity.Strategy, cfg.Capacity.Fallback, blank(strings.Join(cfg.Capacity.Regions, ","), "-"), cfg.Capacity.Hints)
+	if hasCapacityMinimums(cfg) {
+		fmt.Fprintf(w, "capacity min_vcpus=%d min_memory_mib=%d\n", cfg.Capacity.MinVCPUs, cfg.Capacity.MinMemoryMiB)
+	}
 	fmt.Fprintf(w, "actions repo=%s workflow=%s job=%s ref=%s runner_version=%s ephemeral=%t labels=%s\n", blank(cfg.Actions.Repo, "-"), blank(cfg.Actions.Workflow, "-"), blank(cfg.Actions.Job, "-"), blank(cfg.Actions.Ref, "-"), cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, blank(strings.Join(cfg.Actions.RunnerLabels, ","), "-"))
 	if err := layout.writeSlot(w, "blacksmith"); err != nil {
 		return err

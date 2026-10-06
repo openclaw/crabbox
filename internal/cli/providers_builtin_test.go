@@ -467,6 +467,10 @@ func (testGCPProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkR
 
 type testAWSProvider struct{}
 
+func (testAWSProvider) SupportsResourceRequirements(cfg Config) bool {
+	return cfg.TargetOS == targetLinux && (cfg.Architecture == "" || cfg.Architecture == ArchitectureAMD64 || cfg.Architecture == ArchitectureARM64)
+}
+
 var testAWSBackendOverride SSHLeaseBackend
 
 func (testAWSProvider) Spec() ProviderSpec {

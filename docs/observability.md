@@ -113,8 +113,9 @@ completion still uses the separate signed-receipt finish path.
   8 MiB cap, so very long output is truncated.
 - **`events <run-id>`** prints the ordered phase and output events for a run.
   Filter with `--type`, `--phase`, `--after N`, and `--limit` (default 500).
-- **`attach <run-id>`** follows events for a still-active run, polling every
-  `--poll` interval (default 1s), so you can watch a run another CLI started.
+- **`attach <run-id>`** follows events through the coordinator control WebSocket,
+  falling back to HTTP at the `--poll` interval (default 1s), so you can watch a
+  run another CLI started.
 - **`results <run-id>`** prints structured test-result summaries. See
   [Test results](features/test-results.md).
 
@@ -530,4 +531,6 @@ Crabbox observability is sufficient for maintainer operations but is not yet a
 full analytics product. Notably missing:
 
 - alerting on budget or failure-rate thresholds;
-- a dashboard UI.
+- a general analytics dashboard. The existing [portal](features/portal.md)
+  already shows lease inventory, run logs, events, results, and bounded resource
+  trends; it does not provide a full analytics or alerting system.

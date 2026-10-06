@@ -74,10 +74,10 @@ export class WebVNCCredentialHandoffs {
     );
   }
 
-  async alarmTimes(now = Date.now()): Promise<number[]> {
-    return [...(await this.records()).values()]
-      .map((handoff) => Date.parse(handoff.expiresAt))
-      .filter((time) => Number.isFinite(time) && time > now);
+  async alarms(now = Date.now()): Promise<Array<{ key: string; time: number }>> {
+    return [...(await this.records())]
+      .map(([key, handoff]) => ({ key, time: Date.parse(handoff.expiresAt) }))
+      .filter(({ time }) => Number.isFinite(time) && time > now);
   }
 
   private records(): Promise<Map<string, WebVNCCredentialHandoffRecord>> {

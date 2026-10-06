@@ -115,7 +115,15 @@ done
 case "$CRABBOX_TRANSFER_MODE" in
   success) /bin/cat > "$CRABBOX_TRANSFER_PROBE/stdin"; exit 0 ;;
   failure) exit 23 ;;
-  *) sleep 30 & child=$!; printf '%s' "$child" > "$CRABBOX_TRANSFER_PROBE/child-pid"; wait "$child" ;;
+  *)
+    sleep 30 & child=$!; printf '%s' "$child" > "$CRABBOX_TRANSFER_PROBE/child-pid"
+    if [ "$CRABBOX_TRANSFER_MODE" = timeout ] && [ "${0##*/}" = rsync ]; then
+      # Report rsync's I/O timeout after the test inspects the live session.
+      while [ ! -f "$CRABBOX_TRANSFER_PROBE/stall" ]; do sleep 0.01; done
+      exit 30
+    fi
+    wait "$child"
+    ;;
 esac
 `
 				if err := os.WriteFile(filepath.Join(dir, transfer), []byte(script), 0o700); err != nil {
@@ -164,6 +172,10 @@ esac
 					}
 					if mode == "cancel" {
 						cancel()
+					} else if transfer == "rsync" {
+						if err := os.WriteFile(filepath.Join(dir, "stall"), nil, 0o600); err != nil {
+							t.Fatal(err)
+						}
 					}
 				}
 				var runErr error
@@ -178,7 +190,7 @@ esac
 				if transfer == "rsync" && mode == "timeout" {
 					var exitErr ExitError
 					if !errors.As(runErr, &exitErr) || exitErr.Code != 6 {
-						t.Fatalf("sync deadline lost exit code 6: %v", runErr)
+						t.Fatalf("sync I/O timeout lost exit code 6: %v", runErr)
 					}
 				}
 				if pid != 0 {
@@ -187,6 +199,9 @@ esac
 				args, err := os.ReadFile(filepath.Join(dir, "argv"))
 				if err != nil {
 					t.Fatal(err)
+				}
+				if transfer == "rsync" && mode == "timeout" && !strings.Contains(string(args), "--timeout=1\n") {
+					t.Fatal("rsync fixture did not receive the native I/O timeout")
 				}
 				for _, secret := range []string{target.User, target.Host, target.Key, target.CertificateFile} {
 					if strings.Contains(string(args), secret) {

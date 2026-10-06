@@ -6100,15 +6100,15 @@ func TestRemoteWriteSyncManifestsNewForTargetUsesInterpretedWriterForWSL2(t *tes
 	}
 
 	plain := remoteWriteSyncManifestsNewForTarget(SSHTarget{TargetOS: targetLinux}, "/work/repo", "0123456789abcdef0123456789abcdef")
-	if !strings.Contains(plain, "dd bs=1") {
-		t.Fatalf("non-WSL2 manifest writer should keep portable dd fallback: %q", plain)
+	if strings.Contains(plain, "dd bs=1") {
+		t.Fatalf("non-WSL2 manifest writer must not copy byte at a time: %q", plain)
 	}
 	if strings.Contains(plain, "status=none") {
 		t.Fatalf("non-WSL2 manifest writer should not require GNU dd extensions: %q", plain)
 	}
 	// The portable wrapper includes one writer in each shell branch.
 	for _, length := range []string{"manifest_len", "deleted_len"} {
-		if strings.Count(plain, `dd bs=1 count="$`+length+`"`) != 2 {
+		if strings.Count(plain, `write_frame "$`+length+`"`) != 2 {
 			t.Fatalf("non-WSL2 manifest writer should exact-read %s in both shell branches: %q", length, plain)
 		}
 	}
@@ -6354,8 +6354,12 @@ func TestRemoteWriteSyncManifestsNewPython(t *testing.T) {
 func TestRemoteWriteSyncManifestsNewReadsChunkedInput(t *testing.T) {
 	const finalizeToken = "0123456789abcdef0123456789abcdef"
 	workdir := t.TempDir()
-	manifest := strings.Repeat("manifest-entry\x00", 4096)
-	deleted := "old.txt\x00"
+	var paths strings.Builder
+	for i := range 50000 {
+		fmt.Fprintf(&paths, "packages/package-%04d/src/file-%05d.test.ts\x00", i/100, i)
+	}
+	manifest := paths.String() + "binary\xff\x00newline\nname\x00"
+	deleted := "old.txt\x00gone\xfe\x00"
 
 	bashPath, err := exec.LookPath("bash")
 	if err != nil {

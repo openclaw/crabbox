@@ -404,6 +404,15 @@ retry scheduling. Node tracks and drains that task during shutdown. Manual
 admin sweep endpoints still await their actual operation. `waitUntil` and
 pg-boss do not replace the durable operation/claim records.
 
+Repeated overdue maintenance records produce a `maintenance alarm made no
+progress` warning when their backoff starts or increases, up to 60 seconds. The
+warning includes a source label, a truncated SHA-256 of the storage key, and the
+delay; it omits record contents. Use these labels to locate the maintenance owner
+when investigating unexpectedly frequent alarms. New request wakes and durable
+provisioning deadlines bypass this maintenance-tail guard. Pool maintenance
+persists a 15-second retry before checking its owner records so missing bindings
+or interrupted work cannot leave its shared provisioning wake immediately due.
+
 Keep `CRABBOX_DURABLE_PROVISIONING_ADMISSION` unset or `false` until the
 journal-aware version and a stable existing `CRABBOX_SESSION_SECRET` are ready.
 Setting the gate to `false` stops new admissions but resumes existing journals.

@@ -343,8 +343,20 @@ changed, or unreadable evidence retains uncertainty; it never authorizes another
 provider allocation. The existing token/owner/org/generation and cancellation
 fences still apply.
 
-The Cloudflare Worker retries an ordinary token-bound `POST /v1/leases` once
-against a fresh Durable Object stub after a thrown runtime-reset error. Unbound
+Lease create admission has a 30-second deadline, including time waiting for the
+coordinator lifecycle mutex and durable provider preparation. If admission has
+not begun committing by then, the coordinator returns HTTP 503
+`lease_admission_timeout` with `retryable: true` and `Retry-After: 2`. Expired
+admission work cannot later write a lease; clients can retry the same lease ID
+and create-attempt token. Once the admission commit begins, it finishes normally,
+and this deadline does not limit subsequent provider provisioning. For
+`POST /v1/leases/from-checkpoint`, binding the checkpoint use claim is the
+commit point: a bound claim cannot be reopened for a same-token retry, so the
+deadline no longer applies after it.
+
+The Cloudflare Worker retries an ordinary token-bound `POST /v1/leases` or
+`POST /v1/leases/resource-constrained` once against a fresh Durable Object stub
+after a thrown runtime-reset error. Unbound
 POSTs, other mutations, and returned HTTP 5xx responses do not receive this
 boundary replay. Request/response fields and status contracts are unchanged.
 This does not enable durable provisioning admission or repair absent ownership
@@ -513,6 +525,13 @@ runner leases stay visible without leaking to normal users. External runner rows
 (synced via `POST /v1/runners/sync`) render as muted rows with inferred GitHub
 Actions links and stale markers; clicking one opens its visibility-only detail
 page at `/portal/runners/{provider}/{runner-id}`.
+
+Runner synchronization scans historical records in uncached pages and settles bounded
+write batches before returning. It preserves the complete `runners` and newly
+`stale` response arrays, including their order and legacy record identities.
+Working memory no longer grows with unrelated or already-stale history; response
+memory still grows with the number and size of newly stale records returned.
+The scan still visits historical runner keys to preserve legacy key compatibility.
 
 The CLI's best-effort external-runner sync has a single five-second budget
 covering inventory, optional Actions enrichment, credential resolution, and the

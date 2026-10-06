@@ -60,10 +60,13 @@ After caller cancellation, the CLI gives cancel-create recovery 30 seconds,
 retrying transient errors at the existing five-second interval. If that window
 expires, one final cancel-create request has its own 30-second budget.
 
-Automation may instead supply the canonical ID with `warmup --lease-id`. For
-direct AWS, Azure, DigitalOcean, Daytona, Incus, Machine0, local-container,
-Parallels, Proxmox, Tenki, Boat, delegated Agent Sandbox, and managed coordinator
-leases, that ID is an
+Automation may instead supply the canonical ID with `warmup --lease-id` on
+supported backends. Check `fixed-lease-id` in `crabbox providers --json` and the
+provider's recovery contract. These include direct AWS, Azure, DigitalOcean,
+Daytona, Incus, Linode, Machine0, local-container, Parallels, Proxmox, RunPod,
+Scaleway, Tenki, Boat, delegated Agent Sandbox, and managed coordinator leases.
+Scaleway implements fixed IDs but currently omits the offline catalog feature.
+That ID is an
 immutable create identity: an identical semantic replay returns the same
 live lease, while intent drift returns `lease_id_conflict`.
 Managed coordinator replay of the same terminal intent returns
@@ -76,6 +79,13 @@ normalized request hash. Direct AWS durably stores the intent and current
 resolved EC2 attempt in the normal lease claim before `RunInstances`, then uses
 a deterministic regional/zonal client token. No path uses the slug to decide
 replay ownership.
+
+Direct [RunPod](../providers/runpod.md), [Scaleway](../providers/scaleway.md), and
+[Linode](../providers/linode.md) bind replay and cleanup to the original provider
+scope and recorded resource identities. Preserve the local claims and key
+material through recovery; successful stop retains a terminal receipt so the
+same ID cannot create another machine. The catalog capability is a preflight
+signal, not permission to adopt a resource by name or ID alone.
 
 Tenki records its exact session and recovery attempt before reuse. See
 [Tenki fixed lease IDs](../providers/tenki.md#fixed-lease-ids-for-orchestration)
@@ -439,9 +449,10 @@ provider name         derived from final lease ID + slug
 run ID                minted per invocation by the CLI; legacy coordinators mint POST-created IDs
 ```
 
-Slugs are not reserved after a lease ends. The next lease that happens to hash
-to the same base slug will reuse it; the small vocabulary makes that possible
-but uncommon in practice.
+Slugs are not permanent identities. The wordlist pair can recur, while new
+generated names include the ID fingerprint and allocation checks for active
+collisions. Automation should retain the canonical lease ID, especially for
+fixed-ID replay and cleanup.
 
 Related docs:
 

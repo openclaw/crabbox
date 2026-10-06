@@ -2,6 +2,7 @@ import { requireAWSRegion } from "./aws-region";
 import { hasImageRequirements, normalizeImageRequirements } from "./image-capabilities";
 import { normalizeOSImage, osImageSpec } from "./os-image";
 import type {
+  CapacityRequirements,
   ImageRequirements,
   LeaseImageIdentity,
   LeaseRequest,
@@ -90,6 +91,7 @@ export interface LeaseConfig {
   gcpRootGB: number;
   gcpServiceAccount: string;
   capacityMarket: "spot" | "on-demand";
+  capacityRequirements?: CapacityRequirements;
   capacityStrategy:
     | "most-available"
     | "price-capacity-optimized"
@@ -116,6 +118,25 @@ export interface LeaseConfig {
 
 export type AzureOSDiskMode = "managed" | "ephemeral";
 export type Architecture = "amd64" | "arm64";
+
+export class InvalidCapacityRequirementsError extends Error {}
+
+export function normalizeCapacityRequirements(
+  input: CapacityRequirements | undefined,
+): CapacityRequirements | undefined {
+  const normalized: CapacityRequirements = {};
+  for (const name of ["minVCPUs", "minMemoryMiB"] as const) {
+    const value = input?.[name];
+    if (value === undefined) continue;
+    if (!Number.isInteger(value) || value < 0 || value > 2147483647) {
+      throw new InvalidCapacityRequirementsError(
+        `capacity.${name} must be an integer from 0 to 2147483647`,
+      );
+    }
+    if (value > 0) normalized[name] = value;
+  }
+  return Object.keys(normalized).length ? normalized : undefined;
+}
 
 export interface LeaseConfigDefaults {
   azureOSDisk?: string;
@@ -298,6 +319,12 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
       ? validatedCIDRs(input.awsSSHCIDRs ?? [], "awsSSHCIDRs")
       : validCIDRs(input.awsSSHCIDRs ?? []);
   const awsInstanceTypes = validatedAWSInstanceTypes(input.awsInstanceTypes ?? []);
+  const capacityRequirements = normalizeCapacityRequirements(input.capacity);
+  if (capacityRequirements && (provider !== "aws" || target !== "linux")) {
+    throw new InvalidCapacityRequirementsError(
+      "capacity minimums currently require provider=aws and target=linux",
+    );
+  }
   const awsPrivate = input.awsPrivate ?? false;
   const awsRequireSSM = input.awsRequireSSM ?? false;
   if ((awsPrivate || awsRequireSSM || awsInstanceTypes.length > 0) && provider !== "aws") {
@@ -396,6 +423,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     gcpRootGB: input.gcpRootGB ?? 0,
     gcpServiceAccount: input.gcpServiceAccount ?? "",
     capacityMarket: input.capacity?.market ?? "spot",
+    ...(capacityRequirements ? { capacityRequirements } : {}),
     capacityStrategy: input.capacity?.strategy ?? "most-available",
     capacityFallback: input.capacity?.fallback ?? "on-demand-after-120s",
     capacityRegions,

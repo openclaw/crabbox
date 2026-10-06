@@ -156,6 +156,9 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	if hasCapacityMinimums(cfg) {
+		return Exit(2, "resource requirements are unsupported for checkpoint creation")
+	}
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
