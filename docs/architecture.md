@@ -235,8 +235,10 @@ the wake for its leases. At the end of maintenance only, the same earliest overd
 source and record on consecutive passes receives a one-second backoff, doubling
 to a 60-second cap. Deadlines within 10 milliseconds count as due. A different
 record or a future deadline resets the streak; run and checkpoint audit pruning
-include their advancing cursors in the identity. Arms admitted during a pass
-also bypass its backoff. This in-memory guard resets on eviction. Request-path
+include their advancing cursors in the identity. While the earliest item remains
+overdue, arms admitted during a pass bypass its backoff but preserve the existing
+streak without escalating or resetting it. No remaining candidate clears the
+streak. This in-memory guard resets on eviction. Request-path
 alarms and the independently merged provisioning due index remain immediate.
 
 ## Coordinator HTTP API

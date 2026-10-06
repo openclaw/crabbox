@@ -53247,6 +53247,62 @@ describe("synthetic acknowledgement reliability", () => {
     }
   });
 
+  it("preserves the overdue streak across a heartbeat admitted during maintenance", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const entered = deferred<void>();
+    const resume = deferred<void>();
+    let maintenance: Promise<void> | undefined;
+    try {
+      const storage = new MemoryStorage();
+      const lease = seedLease(storage);
+      seedLease(storage, releaseID);
+      storage.seed(`lease:${leaseID}`, {
+        ...lease,
+        expiresAt: new Date(Date.now() - 1).toISOString(),
+      });
+      const fleet = testFleet(storage);
+      vi.spyOn(
+        fleet as unknown as { expireLeases(): Promise<void> },
+        "expireLeases",
+      ).mockResolvedValue(undefined);
+      await fleet.alarm();
+      await fleet.alarm();
+      expect(storage.alarm()).toBe(Date.now() + 1000);
+      expect(warn).toHaveBeenCalledTimes(1);
+      vi.setSystemTime(storage.alarm()!);
+      let blocked = false;
+      storage.beforeList = async (options) => {
+        if (options?.prefix === "workspace:" && !blocked) {
+          blocked = true;
+          entered.resolve();
+          await resume.promise;
+        }
+      };
+      maintenance = fleet.alarm();
+      await entered.promise;
+      expect(storage.alarm()).toBeUndefined();
+      const heartbeat = await fleet.fetch(
+        request("POST", `/v1/leases/${releaseID}/heartbeat`, { headers }),
+      );
+      expect(heartbeat.status).toBe(200);
+      expect(storage.alarm()).toBeDefined();
+      resume.resolve();
+      await maintenance;
+      expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1);
+      expect(warn).toHaveBeenCalledTimes(1);
+
+      await fleet.alarm();
+      expect(storage.alarm()).toBe(Date.now() + 2000);
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      resume.resolve();
+      await maintenance;
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("reconstructs queued AWS deletion and ingress reconciliation from durable intent", async () => {
     const storage = new ObservedMemoryStorage();
     const lease = {

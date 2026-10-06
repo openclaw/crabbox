@@ -18005,12 +18005,10 @@ export class FleetCoordinator {
     let alarmTime = earliest?.time;
     if (maintenanceArmRevision !== undefined) {
       const finishedAt = Date.now();
-      // An arm admitted during this pass must not be postponed by old maintenance debt.
-      if (
-        this.alarmArmRevision === maintenanceArmRevision &&
-        earliest &&
-        earliest.time <= finishedAt + maintenanceAlarmDueEpsilonMs
-      ) {
+      if (!earliest || earliest.time > finishedAt + maintenanceAlarmDueEpsilonMs) {
+        this.maintenanceAlarmStreak = undefined;
+      } else if (this.alarmArmRevision === maintenanceArmRevision) {
+        // An admitted arm bypasses this pass's backoff without erasing overdue debt.
         const previous = this.maintenanceAlarmStreak;
         const same = previous?.source === earliest.source && previous.key === earliest.key;
         const delayMs = same
@@ -18029,8 +18027,6 @@ export class FleetCoordinator {
             );
           }
         }
-      } else {
-        this.maintenanceAlarmStreak = undefined;
       }
     }
     if (alarmTime === undefined) {
