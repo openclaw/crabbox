@@ -28,6 +28,8 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) BackendCapabilities() core.Backend { return &Backend{} }
+
 func (Provider) NormalizeConfigForShow(cfg core.Config) core.Config {
 	core.ApplyConfigShowSSHDefaults(&cfg, "root")
 	return cfg

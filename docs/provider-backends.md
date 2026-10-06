@@ -428,7 +428,12 @@ type DoctorProvider interface {
 ```
 
 Native checkpoint and fork support follow the same pattern through
-`NativeCheckpointProvider` and `NativeCheckpointForkProvider`. Future
+`NativeCheckpointProvider` and `NativeCheckpointForkProvider`. A delegated-run
+backend has no SSH target for core to resolve or relocate, so it also
+implements `DelegatedCheckpointBackend`: `ResolveCheckpointSource` returns a
+lease the current repository already claims, and `ForkNativeCheckpoint` creates
+and claims one lease from the checkpoint record. Core then skips SSH lease
+claims, archive checkpoints, and workdir relocation for that provider. Future
 provider-specific capability areas should add similarly narrow interfaces
 rather than widening the base backend. Live provider-owned machine catalogs use
 `ProviderSizeCatalogBackend`; core exposes them through `crabbox providers sizes

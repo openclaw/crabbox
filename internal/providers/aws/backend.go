@@ -97,6 +97,9 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		defer cancel()
 		retErr = shared.JoinAcquireCleanupError(retErr, cleanupAWSCreatedResources(cleanupCtx, b.RT.Stderr, cfg, rollbackCloudID, rollbackKeyID))
 	}()
+	if err := validateResourceConstrainedAWSServer(cfg, server); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	client, err = newAWSClient(ctx, cfg)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -104,6 +107,9 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s type=%s\n", leaseID, server.DisplayID(), cfg.ServerType)
 	server, err = client.WaitForServerIP(ctx, server.CloudID)
 	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if err := validateResourceConstrainedAWSServer(cfg, server); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	server = annotateAWSServerRegion(server, cfg.AWSRegion)
@@ -1145,4 +1151,16 @@ func isAWSResolveNotFound(err error) bool {
 	message := err.Error()
 	return strings.Contains(message, "InvalidInstanceID.NotFound") ||
 		strings.Contains(message, "aws instance not found")
+}
+
+// Keep post-create validation inside the ordinary acquisition rollback owner.
+// Fixed acquisitions already bind and validate the exact attempt's instance type.
+func validateResourceConstrainedAWSServer(cfg core.Config, server core.Server) error {
+	if cfg.Capacity.MinVCPUs == 0 && cfg.Capacity.MinMemoryMiB == 0 {
+		return nil
+	}
+	if server.ServerType.Name == "" || server.ServerType.Name != cfg.ServerType {
+		return core.Exit(5, "AWS resource-constrained acquisition returned unverified instance type %q for requested %q", server.ServerType.Name, cfg.ServerType)
+	}
+	return nil
 }

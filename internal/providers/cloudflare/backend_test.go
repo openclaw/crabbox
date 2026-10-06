@@ -12,10 +12,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -79,8 +81,11 @@ func TestCloudflareHealthyStateIsReady(t *testing.T) {
 	if !cloudflareReady("healthy") {
 		t.Fatal("healthy state should be ready")
 	}
-	if cloudflareReady("running") {
-		t.Fatal("running state should not be ready")
+	if !cloudflareReady("running") {
+		t.Fatal("running state should be ready")
+	}
+	if cloudflareReady("stopped") {
+		t.Fatal("stopped state should not be ready")
 	}
 }
 
@@ -116,7 +121,7 @@ func TestCloudflareFlagNormalizationPrecedesValues(t *testing.T) {
 			}
 			err := ApplyCloudflareProviderFlags(&cfg, fs, struct{}{})
 			if tc.fail {
-				if err == nil || err.Error() != "cloudflare --type must be one of lite, basic, standard-1, standard-2, standard-3, standard-4" {
+				if err == nil || err.Error() != "cloudflare --type must be one of standard-1, standard-2, standard-3, standard-4" {
 					t.Fatalf("type normalization=%v", err)
 				}
 				continue
@@ -674,7 +679,7 @@ func TestCloudflareCreateSandboxSendsInstanceType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, _, err := backend.createSandbox(context.Background(), client, core.Repo{Name: "my-app", Root: t.TempDir()}, "")
+	created, _, err := backend.createSandbox(context.Background(), client, core.Repo{Name: "my-app", Root: t.TempDir()}, "", sandboxSource{})
 	leaseID, slug := created.LeaseID, created.Slug
 	if err != nil {
 		t.Fatal(err)
@@ -702,7 +707,7 @@ func TestCloudflareListRefreshChecksClaimState(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/sandboxes/cbx_live":
-			_, _ = io.WriteString(w, `{"id":"cbx_live","state":"healthy","instanceType":"lite","labels":{"slug":"blue-lobster"}}`)
+			_, _ = io.WriteString(w, `{"id":"cbx_live","state":"healthy","instanceType":"standard-2","labels":{"slug":"blue-lobster"}}`)
 		case "/v1/sandboxes/cbx_missing":
 			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		default:
@@ -714,7 +719,7 @@ func TestCloudflareListRefreshChecksClaimState(t *testing.T) {
 	cfg := core.Config{}
 	cfg.Cloudflare.APIURL = server.URL
 	cfg.Cloudflare.Token = "token"
-	cfg.ServerType = "lite"
+	cfg.ServerType = "standard-2"
 	backend := cloudflareBackend{cfg: cfg, rt: core.Runtime{HTTP: server.Client(), Stderr: io.Discard}}
 	servers, err := backend.List(context.Background(), core.ListRequest{Refresh: true})
 	if err != nil {
@@ -731,17 +736,17 @@ func TestCloudflareListRefreshChecksClaimState(t *testing.T) {
 
 func TestCloudflareStatusUsesClaimedInstanceType(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if _, err := core.ClaimLeaseForRepoProviderScopePondWithLabels("cbx_lite", "blue-lobster", providerName, "", "", t.TempDir(), time.Hour, map[string]string{"instance_type": "lite"}); err != nil {
+	if _, err := core.ClaimLeaseForRepoProviderScopePondWithLabels("cbx_small", "blue-lobster", providerName, "", "", t.TempDir(), time.Hour, map[string]string{"instance_type": "standard-2"}); err != nil {
 		t.Fatal(err)
 	}
 	var gotInstanceType string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/sandboxes/cbx_lite" {
+		if r.URL.Path != "/v1/sandboxes/cbx_small" {
 			http.NotFound(w, r)
 			return
 		}
 		gotInstanceType = r.URL.Query().Get("instanceType")
-		_, _ = fmt.Fprint(w, `{"id":"cbx_lite","state":"healthy","workdir":"/workspace/repo","instanceType":"lite"}`)
+		_, _ = fmt.Fprint(w, `{"id":"cbx_small","state":"healthy","workdir":"/workspace/repo","instanceType":"standard-2"}`)
 	}))
 	defer server.Close()
 
@@ -753,8 +758,8 @@ func TestCloudflareStatusUsesClaimedInstanceType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.ID != "cbx_lite" || gotInstanceType != "lite" {
-		t.Fatalf("view=%#v instanceType=%q, want claimed lite sandbox", view, gotInstanceType)
+	if view.ID != "cbx_small" || gotInstanceType != "standard-2" {
+		t.Fatalf("view=%#v instanceType=%q, want claimed standard-2 sandbox", view, gotInstanceType)
 	}
 }
 
@@ -1446,7 +1451,7 @@ func withCloudflareCleanupTimeout(t *testing.T, timeout time.Duration) {
 func TestCloudflareResolveClaimRequiresReclaimForOtherRepo(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repoA, repoB := t.TempDir(), t.TempDir()
-	captured, err := core.ClaimLeaseForRepoProviderScopePondWithLabels("cbx_claimed", "blue-lobster", providerName, "runner-scope", "original-pond", repoA, time.Hour, map[string]string{"instance_type": "basic"})
+	captured, err := core.ClaimLeaseForRepoProviderScopePondWithLabels("cbx_claimed", "blue-lobster", providerName, "runner-scope", "original-pond", repoA, time.Hour, map[string]string{"instance_type": "standard-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1461,7 +1466,7 @@ func TestCloudflareResolveClaimRequiresReclaimForOtherRepo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.RepoRoot != repoB || updated.ProviderScope != captured.ProviderScope || updated.Pond != captured.Pond || updated.IdleTimeoutSeconds != captured.IdleTimeoutSeconds || updated.Labels["instance_type"] != "basic" {
+	if updated.RepoRoot != repoB || updated.ProviderScope != captured.ProviderScope || updated.Pond != captured.Pond || updated.IdleTimeoutSeconds != captured.IdleTimeoutSeconds || updated.Labels["instance_type"] != "standard-1" {
 		t.Fatalf("admission lost claim identity: %+v", updated)
 	}
 	if err := core.VerifyLeaseClaimUnchanged(updated.LeaseID, updated); err != nil {
@@ -1738,8 +1743,11 @@ func TestCloudflareFreshPublicationDoesNotReclaimCompetingClaim(t *testing.T) {
 		}
 		var req createSandboxRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		var err error
-		competing, err = core.ClaimLeaseForRepoProviderScopePondWithLabels(req.ID, req.Slug, providerName, "", "other-pond", repo, time.Minute, map[string]string{"owner": "successor"})
+		pending, ok, err := core.ResolveLeaseClaimForProvider(req.ID, providerName)
+		if err != nil || !ok {
+			t.Errorf("pending claim ok=%v err=%v", ok, err)
+		}
+		competing, err = core.UpdateLeaseClaimLabelsIfUnchanged(req.ID, pending, map[string]string{"owner": "successor"})
 		if err != nil {
 			t.Error(err)
 		}
@@ -1753,6 +1761,150 @@ func TestCloudflareFreshPublicationDoesNotReclaimCompetingClaim(t *testing.T) {
 	}
 	if err := core.VerifyLeaseClaimUnchanged(competing.LeaseID, competing); err != nil {
 		t.Fatalf("competing claim changed: %v", err)
+	}
+}
+
+func TestCloudflareRejectedCreateReleasesItsClaim(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"image missing is not configured"}`)
+	}))
+	defer server.Close()
+	backend := cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+	err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, Keep: true})
+	if err == nil || strings.Contains(err.Error(), "may have allocated") {
+		t.Fatalf("warmup error = %v, want the runner's rejection", err)
+	}
+	if claims, err := localCloudflareClaims(); err != nil || len(claims) != 0 {
+		t.Fatalf("claims = %+v err=%v, want the rejected create's claim released", claims, err)
+	}
+}
+
+func TestCloudflareCreateStoppedMidStartReportsTheStop(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A concurrent `crabbox stop` releases the claim before the create answers.
+		var body struct{ ID string }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		claim, ok, err := core.ResolveLeaseClaimForProvider(body.ID, providerName)
+		if err != nil || !ok {
+			t.Errorf("claim for %q: ok=%v err=%v", body.ID, ok, err)
+		} else if err := core.RemoveLeaseClaimIfUnchanged(body.ID, claim); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"error":"lease was stopped while it was starting","state":"stopped"}`)
+	}))
+	defer server.Close()
+	backend := cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+	err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, Keep: true})
+	if err == nil || !strings.Contains(err.Error(), "stopped while it was starting") || strings.Contains(err.Error(), "claim changed") {
+		t.Fatalf("warmup error = %v, want only the runner's stop report", err)
+	}
+}
+
+func TestCloudflareStopKeepsAClaimWhoseCreateIsInFlight(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var backend cloudflareBackend
+	var created atomic.Bool
+	var stopErr error
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			if !created.Load() {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = fmt.Fprintf(w, `{"id":%q,"state":"running"}`, path.Base(r.URL.Path))
+			return
+		}
+		// Another CLI stops the lease before the runner records it.
+		var req createSandboxRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		stopErr = backend.Stop(context.Background(), core.StopRequest{ID: req.ID})
+		created.Store(true)
+		_, _ = fmt.Fprintf(w, `{"id":%q,"state":"running"}`, req.ID)
+	}))
+	defer server.Close()
+	backend = cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token"}}, rt: core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, Keep: true}); err != nil {
+		t.Fatalf("warmup: %v", err)
+	}
+	if stopErr == nil || !strings.Contains(stopErr.Error(), "creation is unresolved") {
+		t.Fatalf("stop error = %v, want a retryable pending-create failure", stopErr)
+	}
+	if claims, err := localCloudflareClaims(); err != nil || len(claims) != 1 {
+		t.Fatalf("claims = %+v err=%v, want the created lease still claimed", claims, err)
+	}
+}
+
+type pendingCreateClock struct{ seconds atomic.Int64 }
+
+func (c *pendingCreateClock) Now() time.Time { return time.Unix(c.seconds.Load(), 0) }
+
+func TestCloudflarePendingCreateSurvivesReconciliation(t *testing.T) {
+	for _, action := range []string{"stop-not-found", "cleanup-not-found", "cleanup-stopped"} {
+		t.Run(action, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			clock := &pendingCreateClock{}
+			clock.seconds.Store(time.Now().Unix())
+			var backend cloudflareBackend
+			var created atomic.Bool
+			var deletes atomic.Int64
+			var leaseID string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost {
+					if r.Method == http.MethodDelete {
+						deletes.Add(1)
+					}
+					if !created.Load() && action != "cleanup-stopped" {
+						http.NotFound(w, r)
+						return
+					}
+					// A snapshot propagation retry can temporarily report stopped.
+					_, _ = fmt.Fprintf(w, `{"id":%q,"state":"stopped"}`, path.Base(r.URL.Path))
+					return
+				}
+				var req createSandboxRequest
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				leaseID = req.ID
+				// A delayed submission or a wall-clock jump outlasts the old grace period.
+				clock.seconds.Add(600)
+				if action == "stop-not-found" {
+					if err := backend.Stop(t.Context(), core.StopRequest{ID: req.ID}); err == nil {
+						t.Error("stop retired an unresolved create")
+					}
+				} else if err := backend.Cleanup(t.Context(), core.CleanupRequest{}); err != nil {
+					t.Errorf("cleanup: %v", err)
+				}
+				if claim, ok, err := core.ResolveLeaseClaimForProvider(req.ID, providerName); err != nil || !ok || claim.Labels[runnerURLLabel] != backend.cfg.Cloudflare.APIURL || claim.Labels["workdir"] != "/workspace/app" {
+					t.Errorf("lost create custody: claim=%+v ok=%v err=%v", claim, ok, err)
+				}
+				created.Store(true)
+				_, _ = fmt.Fprintf(w, `{"id":%q,"state":"running"}`, req.ID)
+			}))
+			defer server.Close()
+			backend = cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: server.URL, Token: "synthetic-token", Workdir: "/workspace/app"}}, rt: core.Runtime{Clock: clock, HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+			if err := backend.Warmup(t.Context(), core.WarmupRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, Keep: true}); err != nil {
+				t.Fatalf("warmup: %v", err)
+			}
+			wantDeletes := int64(0)
+			if action == "stop-not-found" {
+				wantDeletes = 1
+			}
+			if deletes.Load() != wantDeletes {
+				t.Fatalf("delete requests=%d, want %d", deletes.Load(), wantDeletes)
+			}
+			if err := backend.Stop(t.Context(), core.StopRequest{ID: leaseID}); err != nil {
+				t.Fatalf("stop after create completed: %v", err)
+			}
+			if deletes.Load() != wantDeletes+1 {
+				t.Fatalf("completed lease was not destroyed: deletes=%d", deletes.Load())
+			}
+			if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
+				t.Fatalf("claim remains after confirmed stop: ok=%v err=%v", ok, err)
+			}
+		})
 	}
 }
 
@@ -1951,13 +2103,13 @@ func TestCloudflareFreshRunRequiresRecoveryOwnerAndCommand(t *testing.T) {
 
 func TestCloudflareDestroyClaimFenceSpansNativeDelete(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	claim, err := core.ClaimLeaseForRepoProviderScopePondWithLabels("cbx_fenced", "fenced", providerName, "", "", t.TempDir(), time.Hour, map[string]string{"instance_type": "lite"})
+	claim, err := core.ClaimLeaseForRepoProviderScopePondWithLabels("cbx_fenced", "fenced", providerName, "", "", t.TempDir(), time.Hour, map[string]string{"instance_type": "standard-2"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete || r.URL.Query().Get("instanceType") != "lite" {
+		if r.Method != http.MethodDelete || r.URL.Query().Get("instanceType") != "standard-2" {
 			t.Errorf("unexpected request %s %s", r.Method, r.URL)
 		}
 		close(entered)
@@ -2227,7 +2379,7 @@ func TestJSONRequestAdoptionConcreteEnvelope(t *testing.T) {
 }
 
 func TestCloudflareInstanceTypeResolutionPhases(t *testing.T) {
-	const invalidType = "cloudflare --type must be one of lite, basic, standard-1, standard-2, standard-3, standard-4"
+	const invalidType = "cloudflare --type must be one of standard-1, standard-2, standard-3, standard-4"
 	for _, tc := range []struct {
 		name, stored, class, target, architecture string
 		explicit, visited                         bool
@@ -2293,7 +2445,7 @@ func TestCloudflareInstanceTypeResolutionPhases(t *testing.T) {
 }
 
 func TestCloudflareInstanceTypeCanonicalSizes(t *testing.T) {
-	for _, size := range []string{"lite", "basic", "standard-1", "standard-2", "standard-3", "standard-4"} {
+	for _, size := range []string{"standard-1", "standard-2", "standard-3", "standard-4"} {
 		t.Run(size, func(t *testing.T) {
 			input := " " + strings.ToUpper(size) + " "
 			if got, ok := normalizeContainerInstanceType(input); !ok || got != size {
@@ -2305,8 +2457,34 @@ func TestCloudflareInstanceTypeCanonicalSizes(t *testing.T) {
 			}
 		})
 	}
-	if got, ok := normalizeContainerInstanceType("ccx63"); ok || got != "" {
-		t.Fatalf("normalized unsupported type = (%q,%t), want (empty,false)", got, ok)
+	for _, unsupported := range []string{"ccx63", "lite"} {
+		if got, ok := normalizeContainerInstanceType(unsupported); ok || got != "" {
+			t.Fatalf("normalized unsupported type %q = (%q,%t), want (empty,false)", unsupported, got, ok)
+		}
+	}
+	if _, err := resolveInstanceType("lite", "unused-fallback", true); err == nil || !strings.Contains(err.Error(), "lite cannot start the bundled runner image; use standard-1") {
+		t.Fatalf("lite error = %v", err)
+	}
+	if got, ok := normalizeContainerInstanceType(" BASIC "); !ok || got != "basic" {
+		t.Fatalf("basic normalized = (%q,%t), want (basic,true)", got, ok)
+	}
+}
+
+func TestCloudflareBasicTypeWarnsAboutStandardOne(t *testing.T) {
+	cfg := core.Config{Provider: providerName, ServerType: "basic", ServerTypeExplicit: true}
+	cfg.Cloudflare.APIURL = "https://runner.example.com"
+	cfg.Cloudflare.Token = "token"
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	if err := ApplyCloudflareProviderFlags(&cfg, fs, struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	client, err := newCloudflareClient(cfg, core.Runtime{Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.instanceType != "standard-1" || !strings.Contains(stderr.String(), "--type basic is deprecated; using standard-1") {
+		t.Fatalf("type=%q stderr=%q", client.instanceType, stderr.String())
 	}
 }
 
@@ -2322,8 +2500,8 @@ func TestCloudflareContainerInstanceTypeMapping(t *testing.T) {
 		{class: "fast", want: "standard-4"},
 		{class: "large", want: "standard-4"},
 		{class: "beast", want: "standard-4"},
-		{class: "lite", want: "lite"},
-		{class: "basic", want: "basic"},
+		{class: "standard-2", want: "standard-2"},
+		{class: "standard-1", want: "standard-1"},
 		{class: "standard-3", want: "standard-3"},
 	} {
 		if got := cloudflareContainerInstanceTypeForClass(tc.class); got != tc.want {

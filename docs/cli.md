@@ -604,7 +604,7 @@ CRABBOX_ARTIFACTS_EXPIRES
 ```
 
 Provider-specific (read by individual adapters; see each provider page under
-[features/](features/README.md)):
+[providers/](providers/README.md)):
 
 ```text
 CRABBOX_BLACKSMITH_*               Blacksmith Testbox

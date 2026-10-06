@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  ProviderRequestTimeoutError,
+  withProviderOperationDeadline,
+} from "../src/provider-deadline";
+import {
   createTailscaleAuthKey,
   renderTailscaleHostname,
   tailscaleInstallConfig,
@@ -257,5 +261,41 @@ describe("tailscale preflight", () => {
       }).mode,
     ).toBe("package");
     expect(tailscaleInstallConfig({}).mode).toBe("package");
+  });
+});
+
+describe("Tailscale request deadlines", () => {
+  const env = {
+    CRABBOX_TAILSCALE_CLIENT_ID: "fixture-client",
+    CRABBOX_TAILSCALE_CLIENT_SECRET: "fixture-secret",
+  };
+  it.each(["oauth", "key", "body"])("bounds stalled %s preflight I/O", async (stage) => {
+    const fetchMock = vi.fn<typeof fetch>((_input, init) => {
+      expect(init?.signal).toBeDefined();
+      if (stage !== "oauth" && fetchMock.mock.calls.length === 1)
+        return Promise.resolve(Response.json({ access_token: "fixture-token" }));
+      if (stage === "body") return Promise.resolve(new Response(new ReadableStream()));
+      return new Promise(() => {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await withProviderOperationDeadline(30, () => tailscalePreflight(env));
+    expect(result.status).toBe(stage === "oauth" ? "oauth_token_failed" : "auth_key_mint_failed");
+    expect(result.message).toContain("timed out");
+    expect(result.message).not.toContain("fixture-secret");
+  });
+  it("preserves the timeout type for lease provisioning callers", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise(() => {})),
+    );
+    await expect(
+      withProviderOperationDeadline(20, () =>
+        createTailscaleAuthKey(env, {
+          hostname: "test",
+          tags: ["tag:crabbox"],
+          description: "test",
+        }),
+      ),
+    ).rejects.toBeInstanceOf(ProviderRequestTimeoutError);
   });
 });

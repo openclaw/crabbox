@@ -5,8 +5,9 @@ need to know which component owns a behavior before you change code.
 
 ## TL;DR
 
-Crabbox is a remote software testing and execution control plane built around
-short-lived testboxes and sandboxes. Two sides cooperate:
+Crabbox gives agents and humans on-demand computers. Keep editing locally while
+tests and builds run on separate boxes, including Linux, macOS, native Windows,
+and WSL2 targets. In a shared fleet, two sides cooperate:
 
 - The **CLI** (`cmd/crabbox`, `internal/cli`) keeps the developer story simple:
   lease a box, sync your dirty checkout, run a command, stream output, clean up.
@@ -15,9 +16,10 @@ short-lived testboxes and sandboxes. Two sides cooperate:
   and cost guardrails. It runs on Cloudflare Workers with a Durable Object or
   as a Node.js service with PostgreSQL and pg-boss.
 
-The leased machines are vanilla runners that hold no broker secrets. They are
-leaves: provisioned, used, deleted. Durable evidence — run records, logs,
-telemetry, screenshots, artifacts — stays with Crabbox, not on the box.
+Managed runners hold no broker secrets. The repo owns its setup, dependencies,
+and workload. Coordinator-backed runs retain records, logs, and telemetry;
+download or publish screenshots and other artifacts before releasing the box.
+Direct providers can also run without a coordinator.
 
 ## The pieces
 
@@ -40,8 +42,10 @@ telemetry, screenshots, artifacts — stays with Crabbox, not on the box.
 For normal CLI leases, the CLI talks to the coordinator over HTTPS, then talks
 **directly** to the leased runner over SSH and rsync. The runner never calls the
 coordinator for ordinary command execution; that path stays one-way. The
-coordinator manages leases, not that data plane — your files, commands, and
-output never traverse it. The dedicated
+coordinator manages leases rather than transporting the checkout or executing
+commands. The CLI separately uploads run metadata, output previews, retained
+logs, and results for observability; interactive portal bridges also carry
+traffic through it. The dedicated
 [private AWS workspace service](features/aws-private-workspaces.md) is a
 separate SSM-only API-managed path with no SSH data plane.
 
@@ -62,7 +66,8 @@ CLIs and coordinators still interoperate.
 
 ## What `crabbox run` does
 
-A single `crabbox run` walks through five phases.
+A normal coordinator-backed SSH run walks through five phases. Direct providers
+own their lifecycle locally; delegated providers own their execution transport.
 
 **1. Plan.** Load config in precedence order (flags → env → repo config → user
 config → defaults). Mint a temporary lease ID (`cbx_` + 12 hex chars) and a
@@ -89,8 +94,10 @@ checks and hydrate the configured base ref where supported.
 SSH and stream stdout/stderr back. When brokered, mirror progress to the broker
 as a run record with phased events.
 
-**5. Release.** Release the lease unless `--keep` is set. The broker deletes the
-runner and frees provider-side state. If bootstrap never reached SSH readiness on
+**5. Release.** By default, release a newly acquired lease unless `--keep` is
+set; leave an explicitly reused `--id` lease available. `--stop-after` can
+override this policy. The provider applies its cleanup contract, and the broker
+frees reserved cost. If bootstrap never reached SSH readiness on
 a fresh, non-kept lease, `crabbox run` replaces the machine once and retries; it
 never duplicates the command on kept or explicitly reused leases.
 
@@ -100,15 +107,16 @@ never duplicates the command on kept or explicitly reused leases.
 for later use instead of running a command. Reuse is explicit, by slug or ID:
 
 ```sh
-crabbox warmup --profile project-check
+crabbox warmup --profile project-check --slug blue-lobster
 crabbox run --id blue-lobster -- pnpm test:changed
 crabbox ssh --id blue-lobster
 crabbox stop blue-lobster
 ```
 
-Every lease gets a friendly slug (an `<adjective>-<noun>` pair derived from the
-lease ID, e.g. `blue-lobster` or `swift-crab`) alongside its canonical `cbx_…`
-ID; most commands accept either via `--id`. While the CLI is using a lease it
+Every lease gets a friendly slug alongside its canonical `cbx_…` ID. New
+generated slugs include an eight-hex ID fingerprint (for example
+`blue-lobster-1f3a9c2b`); `--slug` requests a custom name. Most commands accept
+either via `--id`. While the CLI is using a lease it
 sends heartbeats, and the coordinator updates `lastTouchedAt` and recomputes
 idle expiry. If a warm lease goes untouched past its idle timeout, the runtime's
 durable scheduler releases it.
@@ -167,7 +175,8 @@ X-Crabbox-Owner: <email>
 X-Crabbox-Org: <org>
 ```
 
-For `crabbox login` users, the owner is resolved from the signed GitHub token. In
+For `crabbox login` users, the owner is the immutable `github:<numeric-id>`
+identity from the signed GitHub token. In
 shared-token mode the owner comes from `CRABBOX_OWNER`, the Git email env, or
 `git config user.email`, and `CRABBOX_ORG` sets the org. Raw Cloudflare Access
 identity headers are ignored; only a verified Access JWT email can become the

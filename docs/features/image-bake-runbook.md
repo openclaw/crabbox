@@ -424,6 +424,31 @@ same source/candidate proof works with direct AWS credentials and with an
 admin-authenticated broker. Promotion updates broker-managed image defaults;
 use `--no-promote` when validating a direct-only AWS configuration.
 
+An explicit region (including `CRABBOX_IMAGE_REGION` or `CRABBOX_AWS_REGION`)
+sets `CRABBOX_CAPACITY_REGIONS` to that single region for all lifecycle and
+measurement leases. The wrapper clears configured capacity AZ defaults unless
+`CRABBOX_CAPACITY_AVAILABILITY_ZONES` is explicitly nonempty. These client hints
+cannot disable the broker's additional fallback regions: the coordinator merges
+its own region list. Region-checked minting therefore requires coordinator admin
+auth to verify the exact lease's recorded region as well as the selected-image
+line. Missing or mismatched evidence stops the lease immediately, even with
+`--keep-lease`, before preparation, capture, or smoke. Retry when quota/capacity
+is available in the requested region, or choose another region explicitly.
+Measured runs apply the same check to each retained sample before acceptance.
+
+The captured checkpoint's region must also match before a candidate boots.
+On failure before promotion, EXIT cleanup deletes only the checkpoint created
+by this invocation using `crabbox checkpoint delete <checkpoint-id> --admin`.
+This deregisters its AMI and deletes its backing snapshots through the existing
+ownership and use-claim checks; generic `image delete` refuses managed
+checkpoint resources. The private `*-candidate-cleanup.json` receipt records
+the exact checkpoint, AMI, region, status, and deletion exit code. Deletion
+failures are printed prominently and mark measured `cleanupStatus` as failed
+without replacing the original mint error. Retry the recorded checkpoint
+deletion after resolving the failure. A successful `--no-promote` run retains
+its candidate; a promoted image retains the existing receipt-based rollback
+and investigation semantics and is never deleted by this cleanup.
+
 Enable FSR for hot lanes that need lower first-boot variance, in the AZs you
 actually launch from:
 
@@ -470,8 +495,8 @@ scripts/mint-aws-devtools-image.sh \
   TruffleHog archive, and Docker Engine archive are pinned to reviewed SHA-256
   digests and verified before privileged installation or extraction.
 - **Windows WSL2**: the shared Windows bootstrap installs the checksum-pinned
-  Linux TruffleHog 3.95.9 binary inside the managed WSL distro. This happens
-  during environment setup and does not require autoreview-time installation.
+  Linux TruffleHog 3.95.9 binary inside the managed WSL distro during environment
+  setup.
 
 Linux preparation retains `cloud-init clean --logs --seed` while preserving
 the running source's completed initialization. Using the distro's isolated

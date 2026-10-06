@@ -36,6 +36,7 @@ set -euo pipefail
 printf 'env CRABBOX_AWS_REGION=%s AWS_REGION=%s CRABBOX_AWS_AMI=%s args %s\\n' "\${CRABBOX_AWS_REGION:-}" "\${AWS_REGION:-}" "\${CRABBOX_AWS_AMI:-}" "$*" >>"\${CRABBOX_FAKE_LOG:?}"
 printf 'source-options stock=%s root=%s command=%s\\n' "\${CRABBOX_AWS_STOCK_IMAGE-unset}" "\${CRABBOX_AWS_ROOT_GB-unset}" "$1" >>"\${CRABBOX_FAKE_LOG}"
 printf 'selection os=%s ami=%s command=%s\\n' "\${CRABBOX_OS-unset}" "\${CRABBOX_AWS_AMI-unset}" "$1" >>"\${CRABBOX_FAKE_LOG}"
+printf 'capacity regions=%s zones=%s command=%s\\n' "\${CRABBOX_CAPACITY_REGIONS-unset}" "\${CRABBOX_CAPACITY_AVAILABILITY_ZONES-unset}" "$1" >>"\${CRABBOX_FAKE_LOG}"
 case "$1" in
   warmup)
     count_file="\${CRABBOX_FAKE_LOG}.count"
@@ -43,12 +44,16 @@ case "$1" in
     [[ -f "$count_file" ]] && count="$(cat "$count_file")"
     count="$((count + 1))"
     printf '%s\\n' "$count" >"$count_file"
+    printf '%s\\n' "\${CRABBOX_AWS_REGION:-eu-west-1}" >"\${CRABBOX_FAKE_LOG}.region"
+    if [[ "$count" == "\${CRABBOX_FAKE_ROUTED_WARMUP:-1}" ]]; then
+      CRABBOX_AWS_REGION="\${CRABBOX_FAKE_IMAGE_REGION-\${CRABBOX_AWS_REGION:-eu-west-1}}"
+    fi
     case "$count" in
       1)
         if [[ "\${CRABBOX_AWS_STOCK_IMAGE:-0}" == 1 && "\${CRABBOX_FAKE_STOCK_SOURCE_IGNORED:-0}" != 1 ]]; then
-          printf 'image selected id=ami-stock source=stock kind=aws-ami region=%s\\n' "\${CRABBOX_AWS_REGION:-eu-west-1}"
+          printf 'image selected id=ami-stock source=stock kind=aws-ami region=%s\\n' "\${CRABBOX_AWS_REGION-eu-west-1}"
         else
-          printf 'image selected id=ami-previous source=promoted kind=aws-ami region=%s promoted_at=2026-09-01T00:00:00Z\\n' "\${CRABBOX_AWS_REGION:-eu-west-1}"
+          printf 'image selected id=ami-previous source=promoted kind=aws-ami region=%s promoted_at=2026-09-01T00:00:00Z\\n' "\${CRABBOX_AWS_REGION-eu-west-1}"
         fi
         printf '{"leaseId":"cbx_source"}\\n'
         ;;
@@ -61,9 +66,17 @@ case "$1" in
         printf '{"leaseId":"cbx_promoted"}\\n'
         ;;
     esac
-    if [[ "\${CRABBOX_FAKE_WARMUP_FAIL_AFTER_LEASE:-0}" == "1" ]]; then
+    if [[ "\${CRABBOX_FAKE_WARMUP_FAIL_AFTER_LEASE:-0}" == "1" || "$count" == "\${CRABBOX_FAKE_WARMUP_FAIL_NUMBER:-0}" ]]; then
       exit 23
     fi
+    ;;
+  admin)
+    count="$(cat "\${CRABBOX_FAKE_LOG}.count")"
+    observed_region="$(cat "\${CRABBOX_FAKE_LOG}.region")"
+    lease=cbx_source
+    [[ "$count" != 2 ]] || lease=cbx_candidate
+    [[ "$count" != 3 ]] || lease=cbx_promoted
+    printf '[{"id":"%s","provider":"aws","target":"linux","region":"%s","serverType":"m7i.large","cloudID":"i-fixture","image":{"id":"ami-fixture","source":"stock","kind":"aws-ami","region":"%s"}}]\\n' "$lease" "\${CRABBOX_FAKE_LEASE_REGION-$observed_region}" "$observed_region"
     ;;
   run)
     run_script="\${@: -1}"
@@ -155,7 +168,9 @@ case "$1" in
     ;;
   checkpoint)
     if [[ "$2" == "create" ]]; then
-      printf 'checkpoint created id=chk_devtools kind=aws-ami resource=ami-devtools state=available region=us-west-2 workdir=-\\n'
+      printf 'checkpoint created id=chk_devtools kind=aws-ami resource=ami-devtools state=available region=%s workdir=-\\n' "\${CRABBOX_FAKE_CAPTURE_REGION-\${CRABBOX_AWS_REGION:-eu-west-1}}"
+    elif [[ "$2" == "delete" ]]; then
+      exit "\${CRABBOX_FAKE_DELETE_EXIT:-0}"
     fi
     ;;
   image)
@@ -1432,6 +1447,139 @@ test("AWS devtools mint wrapper retries windows prep upload disconnects", async 
   );
 });
 
+test("AWS mint rejects routed or unproven source regions before prep, even with keep-lease", async (t) => {
+  for (const evidence of ["IMAGE", "LEASE"]) {
+    for (const observed of ["eu-west-2", ""]) {
+      await t.test(`${evidence}=${observed || "missing"}`, async (t) => {
+        const fake = await setupFakeCrabbox();
+        t.after(() => rm(fake.dir, { recursive: true, force: true }));
+        const result = await runScript(
+          ["--region", "eu-west-1", "--stock-source", "--run", "--keep-lease"],
+          {
+            CRABBOX_BIN: fake.fake,
+            CRABBOX_FAKE_LOG: fake.log,
+            CRABBOX_IMAGE_LOG_DIR: path.join(fake.dir, "logs"),
+            [`CRABBOX_FAKE_${evidence}_REGION`]: observed,
+          },
+        );
+        assert.notEqual(result.code, 0, result.stdout + result.stderr);
+        assert.match(result.stderr, /quota\/capacity in eu-west-1; retry later or choose another region/);
+        const log = await readFile(fake.log, "utf8");
+        assert.match(log, /args stop --provider aws --target linux cbx_source/);
+        assert.doesNotMatch(log, /args (run|checkpoint|image) /);
+      });
+    }
+  }
+});
+
+test("AWS mint deletes only its captured checkpoint after candidate failure and preserves the exit code", async (t) => {
+  for (const deleteExit of [0, 29]) {
+    await t.test(`delete exit ${deleteExit}`, async (t) => {
+      const fake = await setupFakeCrabbox();
+      t.after(() => rm(fake.dir, { recursive: true, force: true }));
+      const logs = path.join(fake.dir, "logs");
+      const result = await runScript(["--region", "eu-west-1", "--run"], {
+        CRABBOX_BIN: fake.fake,
+        CRABBOX_FAKE_LOG: fake.log,
+        CRABBOX_IMAGE_LOG_DIR: logs,
+        CRABBOX_FAKE_WARMUP_FAIL_NUMBER: "2",
+        CRABBOX_FAKE_DELETE_EXIT: String(deleteExit),
+      });
+      assert.equal(result.code, 23, result.stderr);
+      const log = await readFile(fake.log, "utf8");
+      assert.match(log, /env CRABBOX_AWS_REGION=eu-west-1 AWS_REGION=eu-west-1 CRABBOX_AWS_AMI= args checkpoint delete chk_devtools --admin/);
+      assert.doesNotMatch(log, /args image (delete|promote)/);
+      assert.ok(log.indexOf("args stop --provider aws --target linux cbx_candidate") < log.indexOf("args checkpoint delete"));
+      const receiptName = (await readdir(logs)).find((name) => name.endsWith("-candidate-cleanup.json"));
+      assert.ok(receiptName);
+      const receipt = JSON.parse(await readFile(path.join(logs, receiptName), "utf8"));
+      assert.deepEqual(receipt, {
+        checkpointId: "chk_devtools", imageId: "ami-devtools", region: "eu-west-1",
+        status: deleteExit === 0 ? "succeeded" : "failed", exitCode: deleteExit,
+      });
+      if (deleteExit) assert.match(result.stderr, /FAILED.*candidate.*ami-devtools.*eu-west-1/);
+    });
+  }
+});
+
+test("AWS mint rejects a captured image in another region and deletes that exact checkpoint", async (t) => {
+  const fake = await setupFakeCrabbox();
+  t.after(() => rm(fake.dir, { recursive: true, force: true }));
+  const result = await runScript(["--region", "eu-west-1", "--run"], {
+    CRABBOX_BIN: fake.fake, CRABBOX_FAKE_LOG: fake.log,
+    CRABBOX_IMAGE_LOG_DIR: path.join(fake.dir, "logs"),
+    CRABBOX_FAKE_CAPTURE_REGION: "eu-west-2",
+  });
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /captured image region.*eu-west-2.*eu-west-1/);
+  const log = await readFile(fake.log, "utf8");
+  assert.equal((log.match(/args warmup /g) ?? []).length, 1);
+  assert.match(log, /env CRABBOX_AWS_REGION=eu-west-2 AWS_REGION=eu-west-2 CRABBOX_AWS_AMI= args checkpoint delete chk_devtools --admin/);
+});
+
+test("AWS mint preserves promoted images on success and receipt rollback, and successful no-promote candidates", async (t) => {
+  for (const mode of ["success", "rollback", "no-promote"]) {
+    await t.test(mode, async (t) => {
+      const fake = await setupFakeCrabbox();
+      t.after(() => rm(fake.dir, { recursive: true, force: true }));
+      const result = await runScript(
+        ["--region", "eu-west-1", "--run", ...(mode === "no-promote" ? ["--no-promote"] : [])],
+        {
+          CRABBOX_BIN: fake.fake, CRABBOX_FAKE_LOG: fake.log,
+          CRABBOX_IMAGE_LOG_DIR: path.join(fake.dir, "logs"),
+          CRABBOX_FAKE_SMOKE_FAIL_LEASE: mode === "rollback" ? "cbx_promoted" : "",
+        },
+      );
+      assert.equal(result.code, mode === "rollback" ? 73 : 0, result.stderr);
+      const log = await readFile(fake.log, "utf8");
+      assert.doesNotMatch(log, /args (checkpoint|image) delete/);
+      if (mode === "rollback") assert.match(log, /--restore-receipt/);
+    });
+  }
+});
+
+test("AWS mint limits client capacity hints and retains explicit AZ choices", async (t) => {
+  for (const zones of ["", "eu-west-1a"]) {
+    await t.test(zones || "clear defaults", async (t) => {
+      const fake = await setupFakeCrabbox();
+      t.after(() => rm(fake.dir, { recursive: true, force: true }));
+      const result = await runScript(["--region", "eu-west-1", "--run"], {
+        CRABBOX_BIN: fake.fake, CRABBOX_FAKE_LOG: fake.log,
+        CRABBOX_IMAGE_LOG_DIR: path.join(fake.dir, "logs"),
+        CRABBOX_CAPACITY_REGIONS: "eu-west-2,us-east-1",
+        CRABBOX_CAPACITY_AVAILABILITY_ZONES: zones,
+      });
+      assert.equal(result.code, 0, result.stderr);
+      const hints = (await readFile(fake.log, "utf8")).split("\n").filter((line) => line.startsWith("capacity ") && line.endsWith("command=warmup"));
+      assert.deepEqual(hints, Array(3).fill(`capacity regions=eu-west-1 zones=${zones || ","} command=warmup`));
+    });
+  }
+});
+
+test("AWS mint rejects routed candidate and promoted warmups before smoke", async (t) => {
+  for (const count of [2, 3]) {
+    await t.test(`warmup ${count}`, async (t) => {
+      const fake = await setupFakeCrabbox();
+      t.after(() => rm(fake.dir, { recursive: true, force: true }));
+      const result = await runScript(["--region", "eu-west-1", "--run"], {
+        CRABBOX_BIN: fake.fake, CRABBOX_FAKE_LOG: fake.log,
+        CRABBOX_IMAGE_LOG_DIR: path.join(fake.dir, "logs"),
+        CRABBOX_FAKE_ROUTED_WARMUP: String(count), CRABBOX_FAKE_IMAGE_REGION: "eu-west-2",
+      });
+      assert.notEqual(result.code, 0);
+      const log = await readFile(fake.log, "utf8");
+      const lease = count === 2 ? "cbx_candidate" : "cbx_promoted";
+      assert.match(log, new RegExp(`args stop --provider aws --target linux ${lease}`));
+      assert.doesNotMatch(log, new RegExp(`args run .*--id ${lease} `));
+      if (count === 2) assert.match(log, /args checkpoint delete chk_devtools --admin/);
+      else {
+        assert.match(log, /--restore-receipt/);
+        assert.doesNotMatch(log, /args checkpoint delete/);
+      }
+    });
+  }
+});
+
 test("AWS devtools mint wrapper cleans up lease when warmup fails after allocation", async () => {
   const fake = await setupFakeCrabbox();
   const result = await runScript(["--target", "linux", "--run", "--prep-script", fake.linuxPrep], {
@@ -1695,7 +1843,11 @@ test("measured Linux publication runs nine fresh samples and publishes only allo
   const fake = await measuredFixture(t);
   const result = await runScript(
     fake.args,
-    { ...fake.env, CRABBOX_AWS_AMI: "ami-ambient" },
+    {
+      ...fake.env, CRABBOX_AWS_AMI: "ami-ambient",
+      CRABBOX_CAPACITY_REGIONS: "eu-west-2,us-east-1",
+      CRABBOX_CAPACITY_AVAILABILITY_ZONES: "",
+    },
     fake.script,
   );
   assert.equal(result.code, 0, result.stderr);
@@ -1710,6 +1862,10 @@ test("measured Linux publication runs nine fresh samples and publishes only allo
   );
   assert.match(log, /--full-resync --no-hydrate --keep --stop-after never --lease-output/);
   assert.doesNotMatch(log, /CRABBOX_AWS_AMI=ami-ambient/);
+  const hints = log.split("\n").filter((line) => line.startsWith("capacity "));
+  assert.ok(hints.length >= 12);
+  assert.ok(hints.every((line) => line.startsWith("capacity regions=us-west-2 zones=, ")));
+  assert.doesNotMatch(log, /args (checkpoint|image) delete/);
   const manifestPath = result.stdout.match(/public measurement proof: (.+)/)?.[1];
   assert.equal(manifestPath, fake.outcome);
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
@@ -1733,6 +1889,21 @@ test("measured Linux publication runs nine fresh samples and publishes only allo
       );
     }
   }
+});
+
+test("measured candidate deletion failure is recorded without masking the boot failure", async (t) => {
+  const fake = await measuredFixture(t);
+  const result = await runScript(fake.args, {
+    ...fake.env, CRABBOX_FAKE_WARMUP_FAIL_NUMBER: "2", CRABBOX_FAKE_DELETE_EXIT: "29",
+  }, fake.script);
+  assert.equal(result.code, 23, result.stderr);
+  const manifest = JSON.parse(await readFile(fake.outcome, "utf8"));
+  assert.equal(manifest.cleanupStatus, "failed");
+  assert.equal(manifest.exitCode, 23);
+  assert.match(result.stderr, /FAILED to delete candidate/);
+  const log = await readFile(fake.log, "utf8");
+  assert.match(log, /args checkpoint delete chk_devtools --admin/);
+  assert.doesNotMatch(log, /args image promote/);
 });
 
 test("measured baseline is descriptive while candidate and promoted cohorts enforce policy", async (t) => {

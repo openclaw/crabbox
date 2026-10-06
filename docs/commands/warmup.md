@@ -37,7 +37,8 @@ warmup complete total=42.1s
 ```
 
 The canonical lease ID is `cbx_...`; the friendly `slug` is an auto-generated
-`<adjective>-<noun>` handle (or a normalized `--slug` you requested). Reuse
+`<adjective>-<noun>-<eight-hex-fingerprint>` handle (or a normalized `--slug`
+you requested). Fixed-ID replay preserves its original naming contract. Reuse
 either with later `run`, `status`, `ssh`, `inspect`, and `stop` commands.
 Scripts should prefer the canonical ID. Add `--timing-json` to emit a final
 JSON timing record (provider, lease ID, slug, total duration, exit code) on
@@ -388,6 +389,8 @@ bootstrap, key migration, or failure cleanup.
 --os ubuntu:26.04|ubuntu:24.04     portable Linux OS image selector
 --type <provider-type>             provider server/instance type
 --market spot|on-demand            capacity market (AWS)
+--min-vcpus <count>                minimum vCPUs for new AWS Linux leases; 0 disables
+--min-memory-mib <MiB>             minimum memory for new AWS Linux leases; 0 disables
 --slug <slug>                      request a friendly slug for a new lease
 --lease-id cbx_<12 lowercase hex> fixed lease ID for idempotent automation
 --pond <name>                      tag this lease into a pond
@@ -469,3 +472,6 @@ or `~/.config/crabbox/...` respectively.
 Static power hooks require a trusted `static.power.dedicated: true` contract.
 Use a distinct `static.id` for concurrent acquisitions; same-ID acquisition and
 prepared reuse are refused while custody remains. See [Power hooks](../providers/ssh.md#power-hooks).
+
+Optional resource minimums and supported creation/reuse combinations are documented
+in [capacity fallback](../features/capacity-fallback.md#optional-aws-resource-minimums).

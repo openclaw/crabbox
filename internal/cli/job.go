@@ -127,6 +127,9 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 }
 
 func validateJobRunOptions(cfg Config, job JobConfig, leaseID string) error {
+	if hasCapacityMinimums(cfg) {
+		return Exit(2, "resource requirements are unsupported for composite jobs; use warmup")
+	}
 	markSynthesizedFlagInputs(&cfg, true)
 	if !job.NoSync {
 		return nil

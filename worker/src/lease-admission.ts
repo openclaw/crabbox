@@ -4,6 +4,59 @@ import {
   type CoordinatorRuntime,
   type CoordinatorStorageView,
 } from "./coordinator-runtime";
+import { json } from "./http";
+
+export const leaseAdmissionDeadlineMs = 30_000;
+
+export class LeaseAdmissionExpiredError extends Error {
+  constructor() {
+    super(
+      "lease admission did not begin committing before its deadline; retry the same create attempt",
+    );
+  }
+}
+
+export class LeaseAdmissionFence {
+  private state: "pending" | "committing" | "expired" = "pending";
+
+  assertActive(): void {
+    if (this.state === "expired") throw new LeaseAdmissionExpiredError();
+  }
+
+  beginCommit(): void {
+    this.assertActive();
+    this.state = "committing";
+  }
+
+  async run(
+    operation: () => Promise<Response>,
+    deadlineMs = leaseAdmissionDeadlineMs,
+  ): Promise<Response> {
+    let timer!: ReturnType<typeof setTimeout>;
+    const expired = new Promise<Response>((resolve) => {
+      timer = setTimeout(() => {
+        if (this.state !== "pending") return;
+        this.state = "expired";
+        resolve(
+          json(
+            {
+              error: "lease_admission_timeout",
+              message: new LeaseAdmissionExpiredError().message,
+              retryable: true,
+            },
+            { status: 503, headers: { "retry-after": "2" } },
+          ),
+        );
+      }, deadlineMs);
+    });
+    try {
+      // The race owns rejection handling even after expired admission resumes in the background.
+      return await Promise.race([operation(), expired]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
 
 function isCoordinatorReset(error: unknown): boolean {
   return error instanceof Error && /Durable Object.*reset/i.test(error.message);
@@ -23,6 +76,8 @@ export async function commitLeaseAdmission<T>(
         ? runtime.provisioning.commitAndWake(commit)
         : runtime.storage.transaction(commit));
     } catch (error) {
+      // Expired work never committed and must not adopt another request's later admission.
+      if (error instanceof LeaseAdmissionExpiredError) throw error;
       const resolved = await runtime.storage.transaction(reread);
       if (resolved !== undefined) return resolved;
       const transient =
@@ -51,7 +106,10 @@ export async function fetchReplayableLeaseCreate(
   request: Request,
   fetch: (request: Request) => Promise<Response>,
 ): Promise<Response> {
-  if (request.method !== "POST" || new URL(request.url).pathname !== "/v1/leases") {
+  if (
+    request.method !== "POST" ||
+    !["/v1/leases", "/v1/leases/resource-constrained"].includes(new URL(request.url).pathname)
+  ) {
     return fetch(request);
   }
   const body = (await request

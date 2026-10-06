@@ -51,8 +51,8 @@ coordinator ----------------------------------------------->  (provision)
 
 ## Execution Modes
 
-The CLI picks one of four modes per provider in `loadBackend`
-(`internal/cli/provider_backend.go`):
+Provider backends (`internal/cli/provider_backend.go`) support these execution
+and control modes:
 
 - **Brokered (coordinator) mode** — chosen when the provider declares
   `Coordinator: supported` _and_ a broker URL is configured
@@ -76,6 +76,9 @@ The CLI picks one of four modes per provider in `loadBackend`
   `e2b`, `modal`, `cloudflare`, `azure-dynamic-sessions`). The provider owns
   sync and execution end to end; the CLI calls `Warmup`/`Run` and never performs
   its own rsync. Delegated providers reject local-sync flags.
+- **Service control** — providers such as Railway, FastAPI Cloud, and Unikraft
+  Cloud expose their declared service lifecycle or inspection operations. They
+  do not supply arbitrary Crabbox shell execution or checkout sync.
 
 Provider kinds, coordinator modes, and feature sets are declared in each
 adapter's `Spec()`; the type definitions live in
@@ -226,6 +229,23 @@ Each maintenance pass collects candidate lease IDs once, then rereads their
 current records at the owning phase. Final alarm selection still scans current
 state so work admitted during provider I/O keeps its wakeup.
 
+Alarm selection follows the maintenance owner's eligibility: elapsed prewarm
+failure history does not remain a retry deadline, and durable provisioning owns
+the wake for its leases. At the end of maintenance only, the same earliest overdue
+source and record on consecutive passes receives a one-second backoff, doubling
+to a 60-second cap. Deadlines within 10 milliseconds count as due. Classification
+uses the underlying deadline even when a minimum delay clamps the scheduled wake
+forward; pending run pruning is due work. All overdue
+candidates share that backoff floor, capped by the earliest genuinely future
+deadline so backoff never postpones another candidate's future wake. The streak
+clears when no overdue candidates remain; a different earliest overdue record
+starts a new streak. Run and checkpoint audit pruning
+include their advancing cursors in the identity. While the earliest item remains
+overdue, arms admitted during a pass bypass its backoff but preserve the existing
+streak without escalating or resetting it. This in-memory guard resets on
+eviction. Request-path
+alarms and the independently merged provisioning due index remain immediate.
+
 ## Coordinator HTTP API
 
 Lease lifecycle:
@@ -234,6 +254,8 @@ Lease lifecycle:
 GET  /v1/leases
 GET  /v1/leases/{id-or-slug}
 POST /v1/leases
+POST /v1/leases/resource-constrained
+PUT  /v1/leases/{canonical-id}/resource-constrained
 POST /v1/leases/from-checkpoint
 PUT  /v1/leases/{canonical-id}/from-checkpoint
 POST /v1/leases/{requested-id}/cancel-create
@@ -335,6 +357,29 @@ records instead of the full lease history. These scans still do work proportiona
 to retained history; paging bounds each list request rather than introducing a
 new persisted index or deleting diagnostic evidence.
 
+Maintenance discovers workspace, bridge, and lease candidates without holding
+the lifecycle mutex. These paged discovery reads also opt out of Cloudflare's
+storage input gate, allowing incoming lease reads and mutations to proceed
+while a history page is pending. Discovery grants no authority: workspace
+quarantine rereads each candidate under the mutex, and lease recovery and cleanup
+retain their existing state and ownership fences. Full alarm reconciliation
+remains serialized with deadline changes so a concurrent heartbeat or release
+cannot lose its wakeup.
+
+Existing-image promotion and deletion retain the lifecycle queue across provider
+validation and catalog publication, with a shared 120-second provider deadline.
+AWS and Azure requests default to 60 seconds, including response bodies; AWS
+credential resolution, signing, retries, and backoff share that request budget.
+Provider timeouts return HTTP 503 with `retry-after` and
+`error: "provider_request_timeout"`; a mutation may have reached the provider, so
+callers must retry against the retained ownership and publication state.
+
+Mac host deletion reads its ownership claim under the mutex, verifies provider
+identity and host tags outside it, then rereads the claim before the bounded,
+serialized release. A changed claim returns 409. Tailscale preflight reads only
+environment configuration and bypasses the lifecycle queue; its OAuth and auth-key
+requests each have a 15-second deadline and retain the existing preflight statuses.
+
 ## What Flows on a Run
 
 `crabbox run` (`internal/cli/run.go`). In brokered mode a run recorder mirrors
@@ -353,6 +398,20 @@ commands can read it back:
   (chunked at 64 KiB, capped at 8 MiB), and parsed [results](features/test-results.md).
   The coordinator computes `durationMs`, sets state `succeeded`/`failed`, and records
   classification (`blockedStage`, `retryLikely`).
+
+The Cloudflare runtime consumes one lifecycle upload at a time and retains that
+body only through its serialized state transition. Waiting uploads remain streams;
+a stalled lifecycle operation cannot accumulate whole run logs from every caller.
+Bodyless reads and direct lease create, heartbeat, and release routes bypass this
+upload queue, and reading an upload never holds the lifecycle mutex.
+
+Event polling and control subscriptions seek directly to the requested sequence
+and read at most the requested page without filling the storage cache. Legacy
+lease attribution scans events in bounded pages, retaining lease identities only.
+Neither path loads an entire run's event payload into memory. An event append whose
+upload or Durable Object dispatch throws returns HTTP 503
+`run_event_append_unavailable`; the Worker does not replay it because a reset can
+follow a committed event. Existing application error responses are preserved.
 
 Coordinator API requests negotiate HTTP/2 over TLS when the server supports it,
 so independent requests can share a connection. HTTP/1 coordinators and the

@@ -40,6 +40,7 @@ const (
 	checkpointKindDockerCommit = "docker-commit"
 	checkpointKindDaytona      = "daytona-snapshot"
 	checkpointKindIncus        = "incus-image"
+	checkpointKindCloudflare   = "cloudflare-container-snapshot"
 
 	checkpointStrategyAuto         = "auto"
 	checkpointStrategyImage        = "image"
@@ -156,6 +157,9 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	if hasCapacityMinimums(cfg) {
+		return Exit(2, "resource requirements are unsupported for checkpoint creation")
+	}
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
@@ -178,7 +182,18 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	selected, _ := ProviderFor(cfg.Provider)
 	policy, apiSource := selected.(NativeCheckpointSourcePolicyProvider)
 	requestedKind := checkpointCreateMode(*mode, *strategy, cfg, Server{Provider: cfg.Provider, CloudID: *id}, SSHTarget{TargetOS: cfg.TargetOS}, *recipeOnly)
-	if apiSource && policy.NativeCheckpointSourceStatusOnly(cfg) && isNativeCheckpointKind(requestedKind) {
+	delegated, delegatedSource, err := delegatedCheckpointBackend(cfg, operationApp)
+	if err != nil {
+		return err
+	}
+	if delegatedSource {
+		if *reclaim {
+			return Exit(2, "provider=%s checkpoints require a lease this repository already claims; --reclaim is not supported", delegated.Spec().Name)
+		}
+		var lease LeaseTarget
+		lease, err = delegated.ResolveCheckpointSource(ctx, ResolveRequest{Repo: repo, ID: *id})
+		server, target, leaseID = lease.Server, SSHTarget{TargetOS: cfg.TargetOS}, lease.LeaseID
+	} else if apiSource && policy.NativeCheckpointSourceStatusOnly(cfg) && isNativeCheckpointKind(requestedKind) {
 		server, target, leaseID, err = operationApp.resolveLeaseTargetWithRequestConfig(ctx, &cfg, ResolveRequest{Repo: repo, ID: *id, Reclaim: *reclaim, StatusOnly: true})
 	} else {
 		server, target, leaseID, err = operationApp.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, *id, true, *reclaim)
@@ -186,7 +201,12 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	createKind := checkpointCreateMode(*mode, *strategy, cfg, server, target, *recipeOnly)
+	createMode := *mode
+	if delegatedSource && isAutoCheckpointMode(createMode) {
+		// Delegated backends have no archive path, so auto means native.
+		createMode = "native"
+	}
+	createKind := checkpointCreateMode(createMode, *strategy, cfg, server, target, *recipeOnly)
 	if createKind == "unsupported" {
 		message := checkpointNativeUnsupportedMessage(*mode, *strategy, flagWasSet(fs, "strategy"), cfg, server, target)
 		failure := Exit(2, "%s", message)
@@ -220,8 +240,13 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 			return probeErr
 		}
 	}
-	if err := operationApp.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
-		return err
+	if delegatedSource && !isNativeCheckpointKind(createKind) && createKind != checkpointKindRecipe {
+		return Exit(2, "provider=%s supports only native checkpoints; use --mode native", delegated.Spec().Name)
+	}
+	if !delegatedSource {
+		if err := operationApp.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
+			return err
+		}
 	}
 	workdir := strings.TrimSpace(*workdirOverride)
 	if workdir == "" {
@@ -245,7 +270,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 		return err
 	}
 	switch createKind {
-	case checkpointKindRecipe, checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindIncus, checkpointKindArchive:
+	case checkpointKindRecipe, checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindIncus, checkpointKindCloudflare, checkpointKindArchive:
 		record.Kind = createKind
 	default:
 		return Exit(2, "checkpoint mode must be auto, native, or archive")
@@ -295,7 +320,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 		}()
 		switch createKind {
 		case checkpointKindRecipe:
-		case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindIncus:
+		case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindIncus, checkpointKindCloudflare:
 			createStrategy := checkpointCreateStrategy(*mode, *strategy, createKind)
 			retention := checkpointRetentionFromDuration(retentionDuration)
 			createContext := withCheckpointCreateContext(ctx, record, retention, func(managed bool) error {
@@ -1312,6 +1337,35 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 			return Exit(2, "provider=%s does not support --lease-id fork", backend.Spec().Name)
 		}
 	}
+	if delegated, ok := backend.(DelegatedCheckpointBackend); ok && nativeCheckpoint {
+		switch {
+		case fixedLeaseID != "":
+			return Exit(2, "provider=%s does not support --lease-id fork", backend.Spec().Name)
+		case !*keep:
+			return Exit(2, "provider=%s checkpoint forks are kept; stop them with crabbox stop", backend.Spec().Name)
+		case *reclaim:
+			return Exit(2, "provider=%s checkpoint forks are claimed by this repository; --reclaim is not supported", backend.Spec().Name)
+		case strings.TrimSpace(*workdirOverride) != "":
+			return Exit(2, "provider=%s checkpoint forks keep the checkpoint workdir; --workdir is not supported", backend.Spec().Name)
+		}
+		results := make([]checkpointForkResult, 0, *count)
+		for i := 1; i <= *count; i++ {
+			slug := checkpointForkFanoutSlug(requestedSlug, i, *count)
+			runOpts := checkpointForkRunOptions{Command: runArgs, Index: i, Total: *count, JSON: *jsonOut, Results: &results}
+			if err := operationApp.checkpointForkDelegatedOnce(ctx, cfg, delegated, repo, store, &record, slug, runOpts); err != nil {
+				if *jsonOut && len(results) != 0 {
+					if outputErr := writeCheckpointForkResults(a.Stdout, results, *count); outputErr != nil {
+						return fmt.Errorf("%v (failed to report acquired checkpoint forks: %w)", err, outputErr)
+					}
+				}
+				return err
+			}
+		}
+		if *jsonOut {
+			return writeCheckpointForkResults(a.Stdout, results, *count)
+		}
+		return nil
+	}
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok {
 		return Exit(2, "provider=%s does not support checkpoint fork", backend.Spec().Name)
@@ -1717,6 +1771,53 @@ func (a App) checkpointForkRecordOnce(ctx context.Context, cfg Config, backend B
 		fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s workdir=%s\n", record.ID, leaseID, blank(slug, "-"), provision.Workdir)
 	}
 	return a.runCheckpointForkCommand(ctx, leaseID, slug, runOpts)
+}
+
+func (a App) checkpointForkDelegatedOnce(ctx context.Context, cfg Config, backend DelegatedCheckpointBackend, repo Repo, store checkpointStore, record *checkpointRecord, requestedSlug string, runOpts checkpointForkRunOptions) error {
+	fork, err := backend.ForkNativeCheckpoint(ctx, DelegatedCheckpointForkRequest{
+		Repo: repo, RequestedSlug: requestedSlug, Record: nativeCheckpointForkRecord(*record), Workdir: record.Workdir,
+	})
+	if err != nil {
+		return err
+	}
+	leaseID := fork.Lease.LeaseID
+	slug := ServerSlug(fork.Lease.Server)
+	if runOpts.Results != nil {
+		*runOpts.Results = append(*runOpts.Results, checkpointForkResult{
+			CheckpointID: record.ID,
+			LeaseID:      leaseID,
+			Slug:         slug,
+			Provider:     firstNonBlank(fork.Lease.Server.Provider, cfg.Provider),
+			Workdir:      fork.Workdir,
+		})
+	}
+	if err := recordCheckpointUse(store, record); err != nil {
+		return fmt.Errorf("checkpoint %s forked lease %s but recording its use failed: %w", record.ID, leaseID, err)
+	}
+	if !runOpts.JSON {
+		fmt.Fprintf(a.Stdout, "checkpoint forked id=%s lease=%s slug=%s image=%s workdir=%s\n", record.ID, leaseID, blank(slug, "-"), record.nativeResourceID(), blank(fork.Workdir, "-"))
+	}
+	return a.runCheckpointForkCommand(ctx, leaseID, slug, runOpts)
+}
+
+func isAutoCheckpointMode(mode string) bool {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	return mode == "" || mode == "auto"
+}
+
+// delegatedCheckpointBackend reports whether cfg selects a delegated-run backend
+// that owns checkpoint source resolution instead of an SSH lease lookup.
+func delegatedCheckpointBackend(cfg Config, a App) (DelegatedCheckpointBackend, bool, error) {
+	selected, err := ProviderFor(cfg.Provider)
+	if err != nil || selected.Spec().Kind != ProviderKindDelegatedRun {
+		return nil, false, nil
+	}
+	backend, err := loadBackend(cfg, runtimeForApp(a))
+	if err != nil {
+		return nil, false, err
+	}
+	delegated, ok := backend.(DelegatedCheckpointBackend)
+	return delegated, ok, nil
 }
 
 func (a App) runCheckpointForkCommand(ctx context.Context, leaseID, slug string, opts checkpointForkRunOptions) error {
@@ -2711,7 +2812,7 @@ func nativeCheckpointForkWorkdir(cfg Config, leaseID, repoName, override string)
 }
 
 func isNativeCheckpointKind(kind string) bool {
-	return kind == checkpointKindAWSAMI || kind == checkpointKindAWSEBS || kind == checkpointKindAzure || kind == checkpointKindAzureOS || kind == checkpointKindGCP || kind == checkpointKindGCPDisk || kind == checkpointKindHetzner || kind == checkpointKindMachine0 || kind == checkpointKindParallels || kind == checkpointKindDockerCommit || kind == checkpointKindDaytona || kind == checkpointKindIncus
+	return kind == checkpointKindAWSAMI || kind == checkpointKindAWSEBS || kind == checkpointKindAzure || kind == checkpointKindAzureOS || kind == checkpointKindGCP || kind == checkpointKindGCPDisk || kind == checkpointKindHetzner || kind == checkpointKindMachine0 || kind == checkpointKindParallels || kind == checkpointKindDockerCommit || kind == checkpointKindDaytona || kind == checkpointKindIncus || kind == checkpointKindCloudflare
 }
 
 func checkpointProviderForKind(kind string) string {
@@ -2734,6 +2835,8 @@ func checkpointProviderForKind(kind string) string {
 		return "daytona"
 	case checkpointKindIncus:
 		return "incus"
+	case checkpointKindCloudflare:
+		return "cloudflare"
 	default:
 		return ""
 	}
@@ -2945,6 +3048,7 @@ const (
 	CheckpointKindDockerCommit     = checkpointKindDockerCommit
 	CheckpointKindDaytona          = checkpointKindDaytona
 	CheckpointKindIncus            = checkpointKindIncus
+	CheckpointKindCloudflare       = checkpointKindCloudflare
 	CheckpointStrategyImage        = checkpointStrategyImage
 	CheckpointStrategyDiskSnapshot = checkpointStrategyDiskSnapshot
 )

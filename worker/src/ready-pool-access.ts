@@ -612,7 +612,20 @@ export class ReadyPoolAccess {
     });
     const ids: string[] = [];
     for (const [indexKey, record] of due) {
-      if (record.kind !== "pool-access" || record.at > Date.now()) continue;
+      if (record?.kind !== "pool-access") continue;
+      if (
+        typeof record.operationID !== "string" ||
+        !record.operationID ||
+        typeof record.at !== "number" ||
+        !Number.isFinite(record.at)
+      ) {
+        await this.transaction(async (storage) => {
+          const current = await storage.get(indexKey);
+          if (JSON.stringify(current) === JSON.stringify(record)) await storage.delete(indexKey);
+        });
+        continue;
+      }
+      if (record.at > Date.now()) continue;
       const accepted = await this.transaction(async (storage) => {
         const pointer = await storage.get<{ at: number }>(
           `${portablePoolWakePrefix}${record.operationID}`,
@@ -630,6 +643,8 @@ export class ReadyPoolAccess {
           } else await setPoolWake(storage, record.operationID, Date.parse(claim.expiresAt));
           return false;
         }
+        // Claim a bounded retry before owner checks or provider I/O can leave this wake unconsumed.
+        await setPoolWake(storage, record.operationID, Date.now() + retryMs);
         return true;
       });
       if (accepted) ids.push(record.operationID);
@@ -664,11 +679,13 @@ export class ReadyPoolAccess {
           await this.hooks.counters(storage, entry, { ttlRotations: 1 });
           return lease;
         }
-        if (entry.state === "ready" && lease && entry.expiresAt !== lease.expiresAt) {
-          await storage.put(`${portablePoolPrefix}${reservation.key}:${id}`, {
-            ...entry,
-            expiresAt: lease.expiresAt,
-          });
+        if (entry.state === "ready" && lease) {
+          if (entry.expiresAt !== lease.expiresAt) {
+            await storage.put(`${portablePoolPrefix}${reservation.key}:${id}`, {
+              ...entry,
+              expiresAt: lease.expiresAt,
+            });
+          }
           await setPoolWake(storage, id, Date.parse(lease.expiresAt) - ttlMarginMs);
         }
         if (entry.state === "draining" && lease?.state === "active") return lease;
@@ -718,6 +735,8 @@ export class ReadyPoolAccess {
         ) {
           await this.invalidate(storage, current, entry, "borrow expired or abandoned", "drain");
           await this.hooks.counters(storage, entry, { grantsExpired: 1 });
+        } else {
+          await this.save(storage, current, entry);
         }
       });
       await this.cleanup(grant.leaseID);

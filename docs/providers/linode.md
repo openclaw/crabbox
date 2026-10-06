@@ -52,6 +52,21 @@ replay; it does not block an identity-verified stop.
 
 ## Configuration
 
+An explicit class selects these Linux/amd64 primary sizes:
+
+| Class | Instance type | vCPU | RAM (GiB) |
+| --- | --- | --- | --- |
+| `tiny` | `g6-standard-1` | 1 | 2 |
+| `small` | `g6-standard-2` | 2 | 4 |
+| `standard` | `g6-standard-4` | 4 | 8 |
+| `fast` | `g6-standard-6` | 6 | 16 |
+| `large` | `g6-standard-8` | 8 | 32 |
+| `beast` | `g6-standard-16` | 16 | 64 |
+
+`standard` now selects `g6-standard-4`, increasing size and cost from the old
+`g6-standard-1` mapping. Use `--class tiny` or `--type g6-standard-1` to keep
+the old size. Omit `linode.type` when you want `class` to choose the machine:
+
 ```yaml
 provider: linode
 target: linux
@@ -59,7 +74,7 @@ class: standard
 linode:
   region: us-ord
   image: linode/ubuntu24.04
-  type: g6-standard-1
+  # type: g6-standard-1 # optional exact override; takes precedence over class
   firewall: ""
   sshCIDRs: []
 ```
