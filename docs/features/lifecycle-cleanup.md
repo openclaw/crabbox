@@ -567,7 +567,11 @@ checks the original companion identities, and release projects that retained
 binding into the ordinary owned deletion path, including when only the VM has
 subsequently disappeared. The deletion journal, not the presence of a preparation
 snapshot, records cleanup admission. Automatic cleanup validates the original
-binding and durably journals deletion before sending DELETEs. After VM loss it
+binding and durably journals deletion before sending DELETEs. Initial admission
+requires a live VM during preparation; only already-admitted recovery accepts
+VM absence. The first full snapshot must also match any network identities
+recorded before VM creation. Lease touches omit these private bindings from
+Azure tags without discarding the local record. After VM loss cleanup
 resumes only admitted cleanup, not preparation snapshots, even if the lease has
 expired; use an explicit stop or hold for those resources. Both stop and automatic
 cleanup verify all companion slots are absent before publishing completion.

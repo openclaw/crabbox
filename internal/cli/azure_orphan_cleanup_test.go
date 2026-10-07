@@ -648,3 +648,68 @@ func TestAzureAutomaticCleanupRejectsReplacementCompanions(t *testing.T) {
 		})
 	}
 }
+
+func TestAzureCleanupPreparationRequiresLiveVM(t *testing.T) {
+	f := newAzureOrphanFixture(t)
+	f.addPreparationVM()
+	prepared, err := f.client.PrepareOwnedServer(t.Context(), f.server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(f.objects, f.server.CloudID)
+	if _, err := f.client.PrepareCleanupServer(t.Context(), prepared, time.Now()); err == nil {
+		t.Fatal("initial cleanup admitted after external VM loss")
+	}
+	if _, err := f.client.PrepareCleanupRecoveryServer(t.Context(), prepared, time.Now()); err != nil {
+		t.Fatalf("already-admitted cleanup cannot resume: %v", err)
+	}
+	if len(f.deletes) != 0 {
+		t.Fatal("preparation deleted resources")
+	}
+}
+
+func TestAzureTagsFromLabelsKeepsCleanupPrivate(t *testing.T) {
+	labels := map[string]string{"lease": "cbx_123456abcdef", "state": "running", AzureCleanupBindingLabel: "v1", azureCleanupNICIdentityLabel: "original-nic", azureCleanupPublicIPIdentityLabel: "original-ip", azureCleanupDiskIdentityLabel: "original-disk"}
+	tags := azureTagsFromLabels(labels)
+	for key := range tags {
+		if strings.HasPrefix(key, "_crabbox_azure_cleanup_") {
+			t.Errorf("private cleanup label emitted as Azure tag: %s", key)
+		}
+	}
+	if labels[azureCleanupNICIdentityLabel] != "original-nic" || tags["lease"] != labels["lease"] || tags["state"] != "running" {
+		t.Fatal("tag projection changed local custody or public tags")
+	}
+}
+
+func TestAzureUnboundHoldUsesOriginalAttemptWithoutDeleteAuthority(t *testing.T) {
+	for _, scenario := range []string{"owned", "untagged disk", "changed attempt", "changed network", "live VM", "denied read"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newAzureOrphanFixture(t)
+			f.server.ImmutableID = ""
+			binding := AzureFixedCompanions{NICGUID: "-nic-guid", PublicIPGUID: "-pip-guid"}
+			switch scenario {
+			case "untagged disk":
+				delete(f.objects[f.server.CloudID+"-osdisk"], "tags")
+			case "changed attempt":
+				f.objects[f.server.CloudID+"-nic"]["tags"].(map[string]string)["fixed_attempt"] = "another-attempt"
+			case "changed network":
+				f.objects[f.server.CloudID+"-pip"]["properties"].(map[string]any)["resourceGuid"] = "replacement"
+			case "live VM":
+				f.objects[f.server.CloudID] = map[string]any{"name": f.server.CloudID}
+			case "denied read":
+				f.failRead = f.server.CloudID + "-nic"
+			}
+			receipt, err := f.client.InspectUnboundFailedLeaseHold(t.Context(), f.server, binding)
+			wantOK := scenario == "owned" || scenario == "untagged disk"
+			if (err == nil) != wantOK {
+				t.Fatalf("hold error=%v", err)
+			}
+			if wantOK && (receipt.Status != "held" || receipt.Resources[0].ImmutableID != "" || HasAzureCleanupBinding(f.server.Labels)) {
+				t.Fatal("observation invented original VM or disk custody")
+			}
+			if len(f.deletes) != 0 {
+				t.Fatal("unbound hold mutated Azure")
+			}
+		})
+	}
+}

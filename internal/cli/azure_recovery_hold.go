@@ -34,6 +34,40 @@ func (c *AzureClient) InspectClaimlessFailedLeaseHold(ctx context.Context, lease
 	return c.inspectAzureFailedLeaseHold(ctx, expected, true)
 }
 
+// An unbound failed attempt can be retained without fabricating a VM identity
+// or a disk cleanup binding. Require the original attempt tags where present.
+func (c *AzureClient) InspectUnboundFailedLeaseHold(ctx context.Context, expected Server, original AzureFixedCompanions) (LeaseRecoveryHold, error) {
+	labels := expected.Labels
+	if expected.ImmutableID != "" || labels["crabbox"] != "true" || labels["created_by"] != "crabbox" || labels["provider"] != "azure" ||
+		!IsCanonicalLeaseID(labels["lease"]) || labels["slug"] == "" || labels["provider_key"] != ProviderKeyForLease(labels["lease"]) ||
+		labels["fixed_attempt"] == "" || !FixedSHA256(labels["fixed_intent_sha256"]) ||
+		strings.TrimSpace(c.SubscriptionID) == "" || strings.TrimSpace(c.ResourceGroup) == "" {
+		return LeaseRecoveryHold{}, errors.New("Azure unbound hold requires the original fixed attempt and account scope")
+	}
+	// Observation mode also inventories VMs and permits an untagged disk to be
+	// recorded without claiming that its identity was bound during allocation.
+	receipt, err := c.inspectAzureFailedLeaseHold(ctx, expected, true)
+	if err != nil {
+		return receipt, err
+	}
+	for _, resource := range receipt.Resources {
+		if resource.State != "retained" {
+			continue
+		}
+		identity := ""
+		switch resource.Kind {
+		case "nic":
+			identity = original.NICGUID
+		case "public-ip":
+			identity = original.PublicIPGUID
+		}
+		if identity != "" && resource.ImmutableID != identity {
+			return LeaseRecoveryHold{}, errors.New("Azure unbound hold companion differs from its original pre-VM identity")
+		}
+	}
+	return receipt, nil
+}
+
 func (c *AzureClient) inspectAzureFailedLeaseHold(ctx context.Context, expected Server, claimless bool) (LeaseRecoveryHold, error) {
 	receipt := LeaseRecoveryHold{Schema: "crabbox.lease-hold.v1", Provider: "azure", LeaseID: expected.Labels["lease"], Status: "held", UnacceptedChanges: "unknown"}
 	name := expected.CloudID
@@ -97,7 +131,7 @@ func (c *AzureClient) inspectAzureFailedLeaseHold(ctx context.Context, expected 
 			if stringValue(tags[azureLabelToTagKey("provider_key")]) != expected.Labels["provider_key"] {
 				return fmt.Errorf("Azure held %s provider key changed", kind)
 			}
-			if claimless {
+			if claimless && expected.Labels["fixed_attempt"] == "" {
 				attempt := stringValue(tags[azureLabelToTagKey("fixed_attempt")])
 				fingerprint := stringValue(tags[azureLabelToTagKey("fixed_intent_sha256")])
 				if attempt == "" || !FixedSHA256(fingerprint) ||

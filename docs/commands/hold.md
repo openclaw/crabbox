@@ -16,6 +16,12 @@ Image-created managed OS disks can lack tags; an untagged disk must match the
 original immutable disk identity in the claim's durable cleanup binding.
 Failed reads and conflicting ownership refuse the hold without cloud mutation.
 
+A failed attempt that never bound a VM can also be held using its existing
+claim. Inspection uses the original attempt name and tags, checks any recorded
+pre-VM network identities, and inventories VMs before publishing the receipt.
+Retained disks are observations, not newly reconstructed cleanup bindings; the
+original attempt remains intact and no VM identity is invented.
+
 If the local claim was lost after allocation, supply the original fixed slug
 from the allocation record:
 

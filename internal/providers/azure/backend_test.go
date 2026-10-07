@@ -149,6 +149,10 @@ func (c *fakeAzureClient) PrepareCleanupServer(_ context.Context, server core.Se
 	return server, nil
 }
 
+func (c *fakeAzureClient) PrepareCleanupRecoveryServer(ctx context.Context, server core.Server, now time.Time) (core.Server, error) {
+	return c.PrepareCleanupServer(ctx, server, now)
+}
+
 func (c *fakeAzureClient) DeleteOwnedServer(_ context.Context, server core.Server) error {
 	c.ownedExpected = append(c.ownedExpected, server)
 	if c.deleteOwnedFunc != nil {

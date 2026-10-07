@@ -154,3 +154,46 @@ func TestFixedAzureCleanupResumesLegacyCleanupSnapshot(t *testing.T) {
 		t.Fatalf("legacy cleanup did not resume: err=%v deletes=%d", err, len(client.cleanupExpected))
 	}
 }
+
+func TestFixedAzurePreparationRejectsPreVMReplacement(t *testing.T) {
+	for _, replay := range []bool{false, true} {
+		t.Run(map[bool]string{false: "fresh", true: "replay"}[replay], func(t *testing.T) {
+			client := &fakeAzureClient{}
+			backend := fixedAzureTestBackend(t, client)
+			request := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123484", RequestedSlug: "pre-vm", Repo: core.Repo{Root: t.TempDir()}}
+			if replay {
+				client.fixedReplyErr = errors.New("create reply lost")
+				if _, err := backend.Acquire(t.Context(), request); err == nil {
+					t.Fatal("lost reply unexpectedly succeeded")
+				}
+				client.fixedReplyErr = nil
+			}
+			client.prepareFunc = func(server core.Server) core.Server {
+				server.Labels = maps.Clone(server.Labels)
+				maps.Copy(server.Labels, fixedAzureTestCleanupLabels())
+				server.Labels["_crabbox_azure_cleanup_public_ip_id"] = "replacement-ip"
+				return server
+			}
+			if _, err := backend.Acquire(t.Context(), request); err == nil {
+				t.Error("prepared a replacement for the original pre-VM public IP")
+			}
+			claim, err := core.ReadLeaseClaim(request.RequestedLeaseID)
+			if err != nil || core.HasAzureCleanupBinding(claim.Labels) || len(client.tagged) != 0 {
+				t.Fatalf("replacement published ready or custody: %v", err)
+			}
+			lease, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: request.RequestedLeaseID, ReleaseOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := backend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || len(client.ownedExpected) != 0 {
+				t.Error("explicit cleanup adopted a replacement after failed preparation")
+			}
+			client.servers[0].Labels = maps.Clone(client.servers[0].Labels)
+			client.servers[0].Labels["state"] = "ready"
+			client.servers[0].Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+			if err := backend.Cleanup(t.Context(), core.CleanupRequest{}); err == nil || len(client.cleanupExpected) != 0 {
+				t.Error("automatic cleanup adopted a replacement after failed preparation")
+			}
+		})
+	}
+}

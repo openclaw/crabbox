@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -131,5 +132,33 @@ func TestAzureFailedLeaseHoldCommandPersistsAcrossRestartAndRefusesRelease(t *te
 	after, err := core.ReadLeaseClaim(id)
 	if err != nil || !reflect.DeepEqual(stored, after) {
 		t.Fatal("held claim changed during refused cleanup")
+	}
+}
+
+func (c *fakeAzureClient) InspectUnboundFailedLeaseHold(ctx context.Context, expected core.Server, _ core.AzureFixedCompanions) (core.LeaseRecoveryHold, error) {
+	return c.InspectFailedLeaseHold(ctx, expected)
+}
+
+func TestAzureHoldUnboundAttemptPreservesOriginalIntent(t *testing.T) {
+	client := &fakeAzureClient{fixedCapacityErr: &core.AzureFixedVMShortage{Code: "AllocationFailed", Err: fmt.Errorf("capacity unavailable")}, fixedSettleErr: fmt.Errorf("cleanup uncertain")}
+	backend := fixedAzureTestBackend(t, client)
+	request := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123485", RequestedSlug: "unbound", Repo: core.Repo{Root: t.TempDir()}}
+	if _, err := backend.Acquire(t.Context(), request); err == nil {
+		t.Fatal("unsettled rejection unexpectedly succeeded")
+	}
+	before, err := core.ReadLeaseClaim(request.RequestedLeaseID)
+	if err != nil || before.CloudID != "" || before.CloudImmutableID != "" {
+		t.Fatalf("expected an unbound attempt: %v", err)
+	}
+	receipt, err := backend.HoldFailedLease(t.Context(), request.RequestedLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := core.ReadLeaseClaim(request.RequestedLeaseID)
+	if err != nil || after.RecoveryHold == nil || receipt.Status != "held" || after.CloudID != "" || after.CloudImmutableID != "" || !reflect.DeepEqual(before.FixedCreateIntent.Attempt, after.FixedCreateIntent.Attempt) {
+		t.Fatalf("unbound hold lost original attempt or invented VM custody: %v", err)
+	}
+	if err := backend.ReclaimAndStop(t.Context(), core.StopRequest{ID: request.RequestedLeaseID}); err == nil {
+		t.Fatal("held attempt allowed force stop")
 	}
 }

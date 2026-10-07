@@ -158,6 +158,9 @@ func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRe
 		if !core.HasAzureCleanupBinding(prepared.Labels) {
 			return core.LeaseTarget{}, core.Exit(4, "Azure fixed preparation did not capture cleanup identities")
 		}
+		if err := validateFixedAzureCompanions(*claim, prepared); err != nil {
+			return core.LeaseTarget{}, err
+		}
 		if err := tx.Bind(core.FixedResourceBinding{Labels: prepared.Labels}); err != nil {
 			return core.LeaseTarget{}, err
 		}
@@ -205,6 +208,18 @@ func fixedAzureCleanupServer(server core.Server, claim core.LeaseClaim) core.Ser
 		}
 	}
 	return server
+}
+
+func validateFixedAzureCompanions(claim core.LeaseClaim, server core.Server) error {
+	// Owned cleanup may return no snapshot after proving every slot absent;
+	// that path adopts no resources. Acquisition requires a snapshot first.
+	if claim.FixedCreateIntent == nil || !core.HasAzureCleanupBinding(server.Labels) {
+		return nil
+	}
+	return core.ValidateAzureFixedCompanionBinding(server, core.AzureFixedCompanions{
+		NICGUID:      claim.FixedCreateIntent.Attempt["pre_vm_nic_guid"],
+		PublicIPGUID: claim.FixedCreateIntent.Attempt["pre_vm_public_ip_guid"],
+	})
 }
 
 func validateFixedAzureServer(claim core.LeaseClaim, server core.Server) error {

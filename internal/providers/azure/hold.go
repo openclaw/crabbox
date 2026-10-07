@@ -78,10 +78,32 @@ func (b *azureLeaseBackend) holdFailedLease(ctx context.Context, id, slug string
 			return core.Exit(4, "Azure hold requires the exact fixed claim and account scope")
 		}
 		expected := azureServerFromClaim(*claim)
-		if err := validateExactAzureClaim(*claim, expected, id, client.LeaseClaimScope()); err != nil {
-			return err
+		var observed core.LeaseRecoveryHold
+		if claim.CloudID == "" && claim.CloudImmutableID == "" {
+			intent := claim.FixedCreateIntent
+			if !fixedAzureLeaseKind.IsFixedClaim(*claim) || intent.Version != fixedAzureLeaseKind.IntentVersion ||
+				intent.State != "prepared" || intent.ProviderScope != claim.ProviderScope || intent.Slug != claim.Slug ||
+				claim.LeaseID != id || claim.Labels["lease"] != id || claim.Labels["slug"] != claim.Slug ||
+				claim.Labels["fixed_attempt"] != intent.Attempt["nonce"] || claim.Labels["fixed_intent_sha256"] != intent.Fingerprint ||
+				intent.Attempt["name"] != core.LeaseProviderName(id, claim.Slug) {
+				return core.Exit(4, "Azure hold requires the original unbound fixed attempt")
+			}
+			observer, ok := client.(interface {
+				InspectUnboundFailedLeaseHold(context.Context, core.Server, core.AzureFixedCompanions) (core.LeaseRecoveryHold, error)
+			})
+			if !ok {
+				return core.Exit(2, "Azure client cannot attest an unbound failed lease hold")
+			}
+			expected.CloudID, expected.Name = intent.Attempt["name"], intent.Attempt["name"]
+			observed, err = observer.InspectUnboundFailedLeaseHold(ctx, expected, core.AzureFixedCompanions{
+				NICGUID: intent.Attempt["pre_vm_nic_guid"], PublicIPGUID: intent.Attempt["pre_vm_public_ip_guid"],
+			})
+		} else {
+			if err := validateExactAzureClaim(*claim, expected, id, client.LeaseClaimScope()); err != nil {
+				return err
+			}
+			observed, err = inspector.InspectFailedLeaseHold(ctx, expected)
 		}
-		observed, err := inspector.InspectFailedLeaseHold(ctx, expected)
 		if err != nil {
 			return err
 		}

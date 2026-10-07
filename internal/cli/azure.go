@@ -945,6 +945,20 @@ type AzureFixedCompanions struct {
 	NICGUID, PublicIPGUID string
 }
 
+// ValidateAzureFixedCompanionBinding preserves any identities recorded before
+// VM submission. Older attempts without those fields can capture them once.
+func ValidateAzureFixedCompanionBinding(server Server, original AzureFixedCompanions) error {
+	for key, expected := range map[string]string{
+		azureCleanupNICIdentityLabel:      original.NICGUID,
+		azureCleanupPublicIPIdentityLabel: original.PublicIPGUID,
+	} {
+		if expected != "" && server.Labels[key] != expected {
+			return errors.New("Azure fixed companion differs from its original pre-VM identity")
+		}
+	}
+	return nil
+}
+
 type AzureFixedVMShortage struct {
 	Code string
 	Err  error
@@ -1750,6 +1764,14 @@ func (c *AzureClient) PrepareCleanupServer(ctx context.Context, expected Server,
 	})
 }
 
+// PrepareCleanupRecoveryServer resumes deletion already admitted by a durable
+// claim. Unlike initial cleanup, it may observe that the VM was deleted earlier.
+func (c *AzureClient) PrepareCleanupRecoveryServer(ctx context.Context, expected Server, now time.Time) (Server, error) {
+	return c.prepareAzureDeleteServer(ctx, expected, true, func(expected, live Server) error {
+		return validateAzureCleanupVM(expected, live, now)
+	})
+}
+
 func (c *AzureClient) prepareAzureDeleteServer(ctx context.Context, expected Server, recoverAbsent bool, validateVM func(Server, Server) error) (Server, error) {
 	name := strings.TrimSpace(expected.CloudID)
 	if name == "" {
@@ -1758,7 +1780,10 @@ func (c *AzureClient) prepareAzureDeleteServer(ctx context.Context, expected Ser
 	vmResponse, err := c.vmc.Get(ctx, c.ResourceGroup, name, nil)
 	if err != nil {
 		if isAzureNotFoundError(err) {
-			if recoverAbsent && expected.Labels[AzureCleanupBindingLabel] == "" {
+			if !recoverAbsent {
+				return Server{}, fmt.Errorf("initial Azure cleanup requires a live VM: %w", err)
+			}
+			if expected.Labels[AzureCleanupBindingLabel] == "" {
 				if err := c.verifyAzureOrphanResourcesAbsent(ctx, expected); err != nil {
 					return Server{}, err
 				}
@@ -2552,6 +2577,10 @@ func azureLabelsToTags(labels map[string]string) map[string]*string {
 func azureTagsFromLabels(labels map[string]string) map[string]string {
 	out := make(map[string]string, len(labels))
 	for k, v := range labels {
+		// Cleanup custody is local authority, never public provider metadata.
+		if strings.HasPrefix(k, "_crabbox_azure_cleanup_") {
+			continue
+		}
 		out[azureLabelToTagKey(k)] = v
 	}
 	return out

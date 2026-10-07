@@ -26,6 +26,7 @@ type azureClient interface {
 	DeleteServer(context.Context, string) error
 	PrepareOwnedServer(context.Context, core.Server) (core.Server, error)
 	PrepareCleanupServer(context.Context, core.Server, time.Time) (core.Server, error)
+	PrepareCleanupRecoveryServer(context.Context, core.Server, time.Time) (core.Server, error)
 	DeleteOwnedServer(context.Context, core.Server) error
 	DeleteCleanupServer(context.Context, core.Server, time.Time) error
 	SetTags(context.Context, string, map[string]string) error
@@ -255,6 +256,9 @@ func (b *azureLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLe
 				if err := validateExactAzureClaim(*tx.Claim, prepared, req.Lease.LeaseID, client.LeaseClaimScope()); err != nil {
 					return core.FixedObservation[core.Server]{}, err
 				}
+				if err := validateFixedAzureCompanions(*tx.Claim, prepared); err != nil {
+					return core.FixedObservation[core.Server]{}, err
+				}
 				return core.FixedObservation[core.Server]{Candidates: []core.Server{prepared}, Binding: &core.FixedResourceBinding{Labels: prepared.Labels}}, nil
 			},
 			DeleteExact: func(ctx context.Context, _ *core.FixedTransaction, prepared core.Server) error {
@@ -393,7 +397,7 @@ func (b *azureLeaseBackend) resumeAzureCleanupClaims(ctx context.Context, client
 		// Preparation captures identities without admitting deletion. Only an
 		// interrupted delete may resume after VM loss. Pre-journal snapshots
 		// were written exclusively by cleanup and retain that legacy meaning.
-		if intent := claim.FixedCreateIntent; intent != nil && intent.Journal != nil && intent.Journal.Phase != "deleting" {
+		if !azureCleanupAdmitted(claim) {
 			fmt.Fprintf(b.RT.Stderr, "skip recovery server id=%s reason=cleanup not admitted; use stop or hold\n", claim.CloudID)
 			continue
 		}
@@ -435,11 +439,14 @@ func (b *azureLeaseBackend) applyAzureCleanup(ctx context.Context, client azureC
 		if fixedAzureLeaseKind.IsFixedClaim(claim) {
 			return core.DeleteFixedResource(ctx, fixedAzureLeaseKind, claim, core.FixedLeaseOperations[core.Server]{
 				ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[core.Server], error) {
-					prepared, err := client.PrepareCleanupServer(ctx, fixedAzureCleanupServer(server, *tx.Claim), now)
+					prepared, err := prepareAzureCleanup(ctx, client, server, *tx.Claim, now)
 					if err != nil {
 						return core.FixedObservation[core.Server]{}, err
 					}
 					if err := validateExactAzureClaim(*tx.Claim, prepared, claim.LeaseID, client.LeaseClaimScope()); err != nil {
+						return core.FixedObservation[core.Server]{}, err
+					}
+					if err := validateFixedAzureCompanions(*tx.Claim, prepared); err != nil {
 						return core.FixedObservation[core.Server]{}, err
 					}
 					return core.FixedObservation[core.Server]{Candidates: []core.Server{prepared}, Binding: &core.FixedResourceBinding{Labels: prepared.Labels}}, nil
@@ -450,7 +457,7 @@ func (b *azureLeaseBackend) applyAzureCleanup(ctx context.Context, client azureC
 				},
 			})
 		}
-		prepared, err := client.PrepareCleanupServer(ctx, fixedAzureCleanupServer(server, claim), now)
+		prepared, err := prepareAzureCleanup(ctx, client, server, claim, now)
 		if err != nil {
 			return err
 		}
@@ -476,6 +483,23 @@ func (b *azureLeaseBackend) applyAzureCleanup(ctx context.Context, client azureC
 	}
 	core.RemoveStoredTestboxKey(claim.LeaseID)
 	return nil
+}
+
+// A custody snapshot only witnesses deletion admission for legacy writers.
+func azureCleanupAdmitted(claim core.LeaseClaim) bool {
+	if claim.RecoveryHold != nil || !core.HasAzureCleanupBinding(claim.Labels) {
+		return false
+	}
+	intent := claim.FixedCreateIntent
+	return intent == nil || intent.Journal == nil || intent.Journal.Phase == "deleting"
+}
+
+func prepareAzureCleanup(ctx context.Context, client azureClient, server core.Server, claim core.LeaseClaim, now time.Time) (core.Server, error) {
+	server = fixedAzureCleanupServer(server, claim)
+	if azureCleanupAdmitted(claim) {
+		return client.PrepareCleanupRecoveryServer(ctx, server, now)
+	}
+	return client.PrepareCleanupServer(ctx, server, now)
 }
 
 func azureServerFromClaim(claim core.LeaseClaim) core.Server {
