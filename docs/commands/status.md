@@ -68,6 +68,12 @@ addition to the Crabbox lease ID and local slug:
 
 ## Waiting for readiness
 
+For SSH leases, readiness uses the recorded target OS and Windows mode, even
+when the current configuration defaults to a different platform. You do not
+need to repeat the allocation's `--target` or `--windows-mode` flags. Explicit
+flags that contradict the recorded platform are rejected before guest probes.
+Linux leases retain their provider's bootstrap readiness gate.
+
 Plain status never modifies the lease. With `--wait`, status polls every five
 seconds until the box is ready or reaches a terminal state
 (`expired`, `failed`, `released`, `stopped`, `stopped_with_code`,

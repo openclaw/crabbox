@@ -1562,6 +1562,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		runIdleTimeoutOverride = &requested
 	}
 	prepareResolvedLease := func(lease *LeaseTarget) error {
+		if err := validateResolvedLeasePlatform(cfg, lease.Server); err != nil {
+			return err
+		}
 		server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
 		ctx = context.WithValue(ctx, nativeRuntimeLeaseKey{}, leaseID)
 		if lease.Coordinator != nil {

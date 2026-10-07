@@ -627,6 +627,24 @@ func isWindowsWSL2Target(target SSHTarget) bool {
 	return target.TargetOS == targetWindows && target.WindowsMode == windowsModeWSL2
 }
 
+// Validate explicit platform assertions before lease labels replace defaults.
+func validateResolvedLeasePlatform(cfg Config, server Server) error {
+	targetOS := strings.TrimSpace(server.Labels["target"])
+	if cfg.targetFlagExplicit && targetOS != "" && normalizeTargetOS(targetOS) != normalizeTargetOS(cfg.TargetOS) {
+		return Exit(2, "lease target mismatch: requested=%s recorded=%s; remove --target to use the recorded platform", cfg.TargetOS, targetOS)
+	}
+	if cfg.windowsModeFlagExplicit {
+		if targetOS != "" && normalizeTargetOS(targetOS) != targetWindows {
+			return Exit(2, "lease Windows mode mismatch: --windows-mode requires a Windows lease, recorded target=%s", targetOS)
+		}
+		mode := strings.TrimSpace(server.Labels["windows_mode"])
+		if mode != "" && normalizeWindowsMode(mode) != normalizeWindowsMode(cfg.WindowsMode) {
+			return Exit(2, "lease Windows mode mismatch: requested=%s recorded=%s; remove --windows-mode to use the recorded mode", cfg.WindowsMode, mode)
+		}
+	}
+	return nil
+}
+
 func applyResolvedLeaseConfig(cfg *Config, server Server, target *SSHTarget) {
 	if cfg == nil || target == nil {
 		return
@@ -645,12 +663,34 @@ func applyResolvedLeaseConfig(cfg *Config, server Server, target *SSHTarget) {
 	if workRoot != "" {
 		cfg.WorkRoot = workRoot
 	}
+	previous := *target
 	target.TargetOS = cfg.TargetOS
 	target.WindowsMode = cfg.WindowsMode
+	refreshProviderReadyCheck(*cfg, previous, target)
 	ApplyTargetChildEnvironmentBoundary(*cfg, target)
 	if target.User == "" || target.User == configuredSSHUser {
 		target.User = cfg.SSHUser
 	}
+}
+
+// refreshProviderReadyCheck replaces a readiness check the provider installed
+// for the target's previous platform once recorded lease labels select a
+// different one. A target resolved under configuration defaults otherwise
+// keeps probing a Windows lease with its Linux bootstrap gate. Readiness
+// commands that are not the provider default for the previous platform are
+// operator or provider choices for this host and stay untouched, as does a
+// target whose platform did not change.
+func refreshProviderReadyCheck(cfg Config, previous SSHTarget, target *SSHTarget) {
+	if target == nil {
+		return
+	}
+	if previous.TargetOS == target.TargetOS && previous.WindowsMode == target.WindowsMode {
+		return
+	}
+	if target.ReadyCheck != "" && target.ReadyCheck != providerReadyCheck(cfg, previous) {
+		return
+	}
+	target.ReadyCheck = providerReadyCheck(cfg, *target)
 }
 
 func applyStoredLeaseClaimConfig(cfg *Config, claim leaseClaim) {
