@@ -1173,7 +1173,7 @@ func (c *AWSClient) resolveAMI(ctx context.Context, cfg Config) (string, error) 
 			return "", err
 		}
 		if spec.Target != targetWindows {
-			spec = osImageSpecs["windows-server:2022"]
+			spec = osImageSpecs["windows-server:2025"]
 		}
 		return c.resolveLatestAmazonAMI(ctx, spec.AWSName, "x86_64")
 	}

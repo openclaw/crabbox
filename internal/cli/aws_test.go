@@ -1714,9 +1714,9 @@ func TestAWSWindowsOSSelectorAMI(t *testing.T) {
 			if err != nil || image != "ami-latest" {
 				t.Fatalf("image=%q err=%v", image, err)
 			}
-			year := "2022"
-			if selector == "windows-server:2025" {
-				year = "2025"
+			year := "2025"
+			if selector == "windows-server:2022" {
+				year = "2022"
 			}
 			if gotName != "Windows_Server-"+year+"-English-Full-Base-*" || gotOwner != "amazon" || gotArch != "x86_64" {
 				t.Fatalf("unexpected query: name=%q owner=%q arch=%q", gotName, gotOwner, gotArch)

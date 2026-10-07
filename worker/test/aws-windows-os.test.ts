@@ -36,7 +36,7 @@ describe("AWS Windows OS selector", () => {
       expect(queries[0]!.get("Owner.1")).toBe("amazon");
       expect(queries[0]!.get("Filter.1.Value.1")).toBe("x86_64");
       expect(queries[0]!.get("Filter.2.Value.1")).toBe(
-        `Windows_Server-${os === "windows-server:2025" ? "2025" : "2022"}-English-Full-Base-*`,
+        `Windows_Server-${os === "windows-server:2022" ? "2022" : "2025"}-English-Full-Base-*`,
       );
       expect(await client.resolveAMI({ ...config, awsAMI: "ami-pinned" })).toBe("ami-pinned");
       env.CRABBOX_AWS_AMI = "ami-operator";

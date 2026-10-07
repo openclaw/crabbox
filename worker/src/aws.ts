@@ -2949,7 +2949,7 @@ export class EC2SpotClient {
     }
     if (config.target === "windows") {
       const os = osImageSpec(config.os);
-      const windows = os.target === "windows" ? os : osImageSpec("windows-server:2022");
+      const windows = os.target === "windows" ? os : osImageSpec("windows-server:2025");
       return this.resolveLatestAmazonAMI(windows.awsName, "x86_64");
     }
     if (config.target === "macos") {

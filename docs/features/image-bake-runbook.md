@@ -415,8 +415,10 @@ OS-version key. Explicit Windows OS selectors deliberately bypass those
 unversioned promotions: `--os windows-server:2022` still selects stock 2022
 after a 2025 image is promoted. The default workflow input is a legacy rebuild
 mode, not a promise to downgrade a promoted 2025 image to 2022; use the stock
-wrapper command with the 2022 selector for that. The stock fallback remains
-2022 until a separate default-switch change lands after live 2025 proof.
+wrapper command with the 2022 selector for that. The stock fallback is Server
+2025; unversioned promoted images still take precedence without an explicit
+Windows selector. Roll out this fallback change only after live 2025 image
+promotion, guest proof, and cleanup have succeeded.
 
 ## Developer-image wrappers
 

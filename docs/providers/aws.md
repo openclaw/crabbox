@@ -274,7 +274,7 @@ a nested-virtualization instance type. These selectors require AWS and an amd64
 Windows target, and work in both direct and brokered mode. Upgrade both the CLI
 and coordinator for brokered selection.
 
-The default remains Windows Server 2022. Without a Windows selector, a promoted
+The stock fallback defaults to Windows Server 2025. Without a Windows selector, a promoted
 Windows AMI still wins in brokered mode. An explicit Windows selector bypasses
 unversioned promoted Windows images and selects the stock Amazon image instead;
 image capability requirements cannot be combined with that stock selection.
