@@ -1695,6 +1695,7 @@ type fakeScalewayClient struct {
 	createCalls                 int
 	createKeyErr                error
 	createKeyCalls              int
+	normalizeKey                bool
 	listErr                     error
 	listEmptyReply              bool
 	beforeCreate                func()
@@ -1909,6 +1910,9 @@ func (api *fakeIAMAPI) GetSSHKey(req *iam.GetSSHKeyRequest, _ ...scw.RequestOpti
 func (api *fakeIAMAPI) CreateSSHKey(req *iam.CreateSSHKeyRequest, _ ...scw.RequestOption) (*iam.SSHKey, error) {
 	api.f.createKeyCalls++
 	key := &iam.SSHKey{ID: "key-1", Name: req.Name, PublicKey: req.PublicKey, ProjectID: req.ProjectID}
+	if api.f.normalizeKey {
+		key.PublicKey = strings.Join(strings.Fields(req.PublicKey)[:2], " ")
+	}
 	api.f.keys = append(api.f.keys, key)
 	if api.f.createKeyErr != nil {
 		return nil, api.f.createKeyErr

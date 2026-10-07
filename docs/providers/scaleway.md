@@ -50,6 +50,10 @@ settings conflict. Fixed acquisition creates and journals a tagged root volume
 from the image's single root snapshot before submitting the Instance, preserving
 disk ownership even if a create response is lost. Interrupted key and volume
 creation reconcile their original identities without allocating replacements.
+SSH key identity uses the parsed public key, so Scaleway's removal of the
+optional key comment does not change ownership. A failed acquisition that only
+created the IAM key can be stopped using the same local claim and stored key;
+stop reconciles that attempt's key and any journaled root volume before cleanup.
 `status`, `stop`, and normal lease commands accept that ID. Successful stop
 retains a terminal claim so the ID cannot allocate another machine. Keep the
 local claim and stored SSH key through recovery; images with additional volumes
