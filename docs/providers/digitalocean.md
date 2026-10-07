@@ -82,6 +82,18 @@ These are effective runtime defaults; the raw provider configuration starts
 empty/nil. DigitalOcean adds no provider-specific flags. Configure these settings
 through YAML or the environment; generic command flags remain separate.
 
+Size availability depends on the account and can change over time, including in
+the default `nyc3` region. Before creating a Droplet or account SSH key, Crabbox
+checks the selected size against DigitalOcean's paginated `/v2/sizes` catalog.
+`digitalocean_size_unavailable_in_region` lists the available regions when the
+size cannot be used in the selected region. Choose one explicitly with
+`digitalocean.region` or `CRABBOX_DIGITALOCEAN_REGION`; Crabbox never changes the
+region automatically. For example:
+
+```sh
+CRABBOX_DIGITALOCEAN_REGION=sfo2 crabbox warmup --provider digitalocean --class small
+```
+
 The portable `--os ubuntu:24.04` selector maps to `ubuntu-24-04-x64`.
 DigitalOcean does not currently offer the portable default Ubuntu 26.04 image,
 so provisioning with an explicit `--os ubuntu:26.04` is rejected unless
@@ -204,7 +216,14 @@ Droplet ID. Changed inputs, account changes, and replacement Droplets are
 rejected. No coordinator is needed.
 
 DigitalOcean has no create idempotency key: Crabbox records admission before
-the POST and never repeats it on replay. An unresolved attempt retains its
+the POST and never repeats an unresolved attempt on replay. A definite create
+rejection (HTTP 4xx except 408, 409, and 429), after successful SSH-key rollback,
+records the attempt as failed with no resource created. A later `warmup` with
+the same lease ID and inputs can submit a new attempt, or `stop` can release the
+claim locally without contacting DigitalOcean. A size/region preflight failure
+has the same retry/stop behavior. Transport failures, timeouts, HTTP 5xx, 408,
+409, and 429 retain unresolved custody, as do SSH-key rollback failures.
+An unresolved attempt retains its
 claim and key, even when inventory is empty. Retry later when the original
 Droplet becomes visible. `stop` uses the existing account-, Droplet-, and
 SSH-key-bound cleanup checks. Successful cleanup retains a terminal tombstone,
