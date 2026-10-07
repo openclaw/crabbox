@@ -30,7 +30,7 @@ type api interface {
 	GetBox(context.Context, string) (boxData, error)
 	ListBoxes(context.Context, bool) ([]boxData, error)
 	GetDeletionOperation(context.Context, string, string) (boxDeletionOperation, error)
-	ReleaseBox(context.Context, string, func(context.Context) error) error
+	ReleaseBox(context.Context, string, func(context.Context) error) (boxDeletionOperation, error)
 }
 
 type client struct {
@@ -227,7 +227,8 @@ func (c *client) GetBox(ctx context.Context, id string) (boxData, error) {
 }
 
 func nativeBoxNotFound(result core.LocalCommandResult) bool {
-	message := strings.TrimSpace(core.Blank(result.Stderr, result.Stdout))
+	// The JSON response is authoritative; the legacy alias warns on stderr.
+	message := strings.TrimSpace(core.Blank(result.Stdout, result.Stderr))
 	if strings.HasPrefix(message, "{") {
 		duplicate, err := core.JSONHasDuplicateKeys(json.NewDecoder(strings.NewReader(message)))
 		if err != nil || duplicate {
@@ -253,28 +254,28 @@ func (c *client) ListBoxes(ctx context.Context, requireComplete bool) ([]boxData
 	return decodeBoxes([]byte(result.Stdout), requireComplete)
 }
 
-func (c *client) ReleaseBox(ctx context.Context, id string, validate func(context.Context) error) error {
+func (c *client) ReleaseBox(ctx context.Context, id string, validate func(context.Context) error) (boxDeletionOperation, error) {
 	if !concreteBoxID(id) || validate == nil {
-		return fmt.Errorf("ascii-box release requires a concrete ID and ownership validator")
+		return boxDeletionOperation{}, fmt.Errorf("ascii-box release requires a concrete ID and ownership validator")
 	}
 	ctx, cancel := context.WithTimeout(ctx, boxReleaseTimeout)
 	defer cancel()
 	if err := c.ensureConfig(ctx); err != nil {
-		return fmt.Errorf("prepare ascii-box CLI release: %w", err)
+		return boxDeletionOperation{}, fmt.Errorf("prepare ascii-box CLI release: %w", err)
 	}
 	if err := validate(ctx); err != nil {
-		return err
+		return boxDeletionOperation{}, err
 	}
 	stopResult, stopErr := c.runPrepared(ctx, "stop", id)
 	if err := validate(ctx); err != nil {
-		return err
+		return boxDeletionOperation{}, err
 	}
 	deleteResult, deleteErr := c.runPrepared(ctx, "delete", id, "--yes")
 	if deleteErr == nil {
 		return c.waitForDeletion(ctx, id, deleteResult.Stdout)
 	}
 	if !c.snapshotGuardConflict(deleteResult, deleteErr) {
-		return c.releaseError(stopResult, stopErr, deleteResult, deleteErr, "")
+		return boxDeletionOperation{}, c.releaseError(stopResult, stopErr, deleteResult, deleteErr, "")
 	}
 	return c.releaseAfterSnapshotGuard(ctx, id, stopResult, stopErr, deleteResult, deleteErr, validate)
 }
@@ -287,9 +288,9 @@ func (c *client) releaseAfterSnapshotGuard(
 	deleteResult core.LocalCommandResult,
 	deleteErr error,
 	validate func(context.Context) error,
-) error {
+) (boxDeletionOperation, error) {
 	if err := ctx.Err(); err != nil {
-		return c.releaseError(
+		return boxDeletionOperation{}, c.releaseError(
 			stopResult,
 			stopErr,
 			deleteResult,
@@ -302,11 +303,11 @@ func (c *client) releaseAfterSnapshotGuard(
 	recoveryCtx = boxCleanupPhaseContext(recoveryCtx, "snapshot-recovery")
 
 	if err := validate(recoveryCtx); err != nil {
-		return err
+		return boxDeletionOperation{}, err
 	}
 	extendResult, extendErr := c.runPrepared(recoveryCtx, "extend", id, "--ttl", "1")
 	if extendErr != nil {
-		return c.releaseError(
+		return boxDeletionOperation{}, c.releaseError(
 			stopResult,
 			stopErr,
 			deleteResult,
@@ -324,7 +325,7 @@ func (c *client) releaseAfterSnapshotGuard(
 	for {
 		select {
 		case <-recoveryCtx.Done():
-			return c.releaseError(
+			return boxDeletionOperation{}, c.releaseError(
 				stopResult,
 				stopErr,
 				deleteResult,
@@ -334,7 +335,7 @@ func (c *client) releaseAfterSnapshotGuard(
 		case <-ticker.C:
 			infoResult, infoErr := c.runPrepared(recoveryCtx, "info", id)
 			if infoErr != nil {
-				return c.releaseError(
+				return boxDeletionOperation{}, c.releaseError(
 					stopResult,
 					stopErr,
 					deleteResult,
@@ -344,7 +345,7 @@ func (c *client) releaseAfterSnapshotGuard(
 			}
 			box, err := decodeBox([]byte(infoResult.Stdout))
 			if err != nil {
-				return c.releaseError(
+				return boxDeletionOperation{}, c.releaseError(
 					stopResult,
 					stopErr,
 					deleteResult,
@@ -356,7 +357,7 @@ func (c *client) releaseAfterSnapshotGuard(
 				continue
 			}
 			if err := validate(recoveryCtx); err != nil {
-				return err
+				return boxDeletionOperation{}, err
 			}
 			retryResult, retryErr := c.runPrepared(recoveryCtx, "delete", id, "--yes")
 			if retryErr == nil {
@@ -365,7 +366,7 @@ func (c *client) releaseAfterSnapshotGuard(
 			if c.snapshotGuardConflict(retryResult, retryErr) {
 				continue
 			}
-			return c.releaseError(
+			return boxDeletionOperation{}, c.releaseError(
 				stopResult,
 				stopErr,
 				deleteResult,
@@ -453,10 +454,10 @@ func (c *client) GetDeletionOperation(ctx context.Context, targetID, operationID
 	return decodeBoxDeletionOperation(result.Stdout, targetID, operationID)
 }
 
-func (c *client) waitForDeletion(ctx context.Context, targetID, output string) (resultErr error) {
+func (c *client) waitForDeletion(ctx context.Context, targetID, output string) (receipt boxDeletionOperation, resultErr error) {
 	operation, err := decodeBoxDeletionOperation(output, targetID, "")
 	if err != nil {
-		return err
+		return operation, err
 	}
 	accepted := operation
 	defer func() {
@@ -476,24 +477,31 @@ func (c *client) waitForDeletion(ctx context.Context, targetID, output string) (
 	defer ticker.Stop()
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return operation, err
 		}
 		if operation.Status == "completed" {
-			return nil
+			return operation, nil
+		}
+		// Purge completion is independent of resource absence (Boat's stage contract).
+		absent, err := boxAbsentAfterDeletion(ctx, c, boxData{ID: targetID})
+		if err != nil {
+			return operation, err
+		}
+		if absent {
+			return operation, nil
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return operation, ctx.Err()
 		case <-ticker.C:
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return operation, err
 		}
-		// Accepted deletion hides normal Box reads, so poll only its exact
-		// operation. Native exit zero alone can still mean pending or blocked.
+		// An observable Box still needs its exact operation checked.
 		nextOperation, err := c.GetDeletionOperation(ctx, targetID, operationID)
 		if err != nil {
-			return err
+			return operation, err
 		}
 		operation = nextOperation
 	}

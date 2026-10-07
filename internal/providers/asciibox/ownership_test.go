@@ -131,7 +131,7 @@ func TestReleaseAcceptedNativeDeletionDoesNotRecordCompletion(t *testing.T) {
 			defer cancel()
 			info := commandOutcome{result: core.LocalCommandResult{Stdout: fmt.Sprintf(`{"box":{"id":%q,"createdAt":%q}}`, claim.CloudID, claim.Labels[boxCreationLabel])}}
 			runner := &releaseCommandRunner{configPath: t.TempDir() + "/config.json", outcomes: map[string][]commandOutcome{
-				"info": {info, info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}},
+				"info": {info, info, info, info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}},
 				"delete":   {deletionOutcome(testDeletionID, claim.CloudID, "box", "pending")},
 				"deletion": {test.poll},
 				"list":     {{result: core.LocalCommandResult{Stderr: "confirmation unavailable"}, err: errors.New("exit status 1")}},
@@ -150,10 +150,11 @@ func TestReleaseAcceptedNativeDeletionDoesNotRecordCompletion(t *testing.T) {
 }
 
 func TestReleaseCompletedNativeDeletionRetainsWitnessUntilConfirmation(t *testing.T) {
+	nativeExit := boxNativeExit(t)
 	_, _, claim, _ := ownedFixture(t)
 	info := commandOutcome{result: core.LocalCommandResult{Stdout: fmt.Sprintf(`{"box":{"id":%q,"createdAt":%q}}`, claim.CloudID, claim.Labels[boxCreationLabel])}}
 	runner := &releaseCommandRunner{configPath: t.TempDir() + "/config.json", outcomes: map[string][]commandOutcome{
-		"info": {info, info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}},
+		"info": {info, info, info, info, info, info, info, {result: core.LocalCommandResult{ExitCode: 1, Stderr: "box not found (404)"}, err: nativeExit}}, "stop": {{result: core.LocalCommandResult{}}},
 		"delete":   {deletionOutcome(testDeletionID, claim.CloudID, "box", "pending")},
 		"deletion": {deletionOutcome(testDeletionID, claim.CloudID, "box", "blocked"), deletionOutcome(testDeletionID, claim.CloudID, "box", "completed")},
 		"list":     {{result: core.LocalCommandResult{Stderr: "confirmation unavailable"}, err: errors.New("exit status 1")}},
@@ -163,7 +164,6 @@ func TestReleaseCompletedNativeDeletionRetainsWitnessUntilConfirmation(t *testin
 		t.Fatalf("release err=%v, want inventory confirmation failure", err)
 	}
 	completed := assertCompletedDeletionRetained(t, claim)
-	nativeExit := boxNativeExit(t)
 	runner.outcomes["info"] = []commandOutcome{{result: core.LocalCommandResult{ExitCode: 1, Stderr: "box not found (404)"}, err: nativeExit}}
 	runner.outcomes["list"] = []commandOutcome{{result: core.LocalCommandResult{Stdout: `{"boxes":[]}`}}}
 	commandCount := len(runner.commands)
@@ -305,7 +305,7 @@ func TestReleasePendingDeletionSurvivesTimeoutAndRetries(t *testing.T) {
 		b, _, claim, _ := ownedFixture(t)
 		info := commandOutcome{result: core.LocalCommandResult{Stdout: fmt.Sprintf(`{"box":{"id":%q,"createdAt":%q}}`, claim.CloudID, claim.Labels[boxCreationLabel])}}
 		runner := &releaseCommandRunner{configPath: t.TempDir() + "/config.json", outcomes: map[string][]commandOutcome{
-			"info": {info, info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}},
+			"info": {info, info, info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}},
 			"delete": {deletionOutcome(testDeletionID, claim.CloudID, "box", "pending")},
 		}}
 		c := &client{apiKey: "box_test", apiURL: "https://ascii.dev", home: t.TempDir(), cliPath: "box", runner: runner, releasePollInterval: time.Hour}
@@ -957,7 +957,7 @@ func TestReleaseRevalidatesEveryMutation(t *testing.T) {
 			}}
 			c := &client{apiKey: "box_test", apiURL: "https://ascii.dev", home: t.TempDir(), cliPath: "box", runner: runner, releasePollInterval: time.Nanosecond}
 			calls := 0
-			err := c.ReleaseBox(context.Background(), "bx_guard", func(context.Context) error {
+			_, err := c.ReleaseBox(context.Background(), "bx_guard", func(context.Context) error {
 				calls++
 				if calls == blocked {
 					return errors.New("ownership changed")

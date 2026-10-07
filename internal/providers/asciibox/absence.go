@@ -10,6 +10,40 @@ import (
 
 func (*backend) ReconcileAbsenceOnOrdinaryStop() bool { return true }
 
+// Acceptance or purge state alone never proves that the resource is absent.
+func boxAbsentAfterDeletion(ctx context.Context, client api, expected boxData) (bool, error) {
+	box, err := client.GetBox(ctx, expected.ID)
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	if err == nil {
+		if boxCreationTime(expected) != "" || expected.claimCreatedAt != "" {
+			return false, validateBoxIdentity(box, expected)
+		}
+		return false, nil
+	}
+	var missing *boxNotFoundError
+	if !errors.As(err, &missing) || missing.id != expected.ID {
+		return false, err
+	}
+	boxes, err := client.ListBoxes(ctx, true)
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	if err != nil {
+		return false, err
+	}
+	for _, box := range boxes {
+		if box.ID == expected.ID {
+			if boxCreationTime(expected) != "" || expected.claimCreatedAt != "" {
+				return false, validateBoxIdentity(box, expected)
+			}
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func (b *backend) VerifyResourceAbsent(ctx context.Context, claim core.LeaseClaim) (core.AbsenceEvidence, error) {
 	cfg, err := b.configForRun()
 	if err != nil {

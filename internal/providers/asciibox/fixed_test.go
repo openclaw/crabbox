@@ -405,6 +405,9 @@ func TestFixedBoxCreatedAtSkew(t *testing.T) {
 	f.box = testBox()
 	f.box.CreatedAt = "2026-10-03T18:51:06.063Z"
 	f.getHook = func(string) (boxData, error) {
+		if f.deleted {
+			return boxData{}, &boxNotFoundError{id: f.box.ID}
+		}
 		read := f.box
 		read.CreatedAt = "2026-10-03T18:51:06.052Z"
 		return read, nil

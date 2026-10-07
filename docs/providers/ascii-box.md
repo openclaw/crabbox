@@ -142,9 +142,11 @@ readiness. Complete inventory has no idempotency-key attribution, so Crabbox
 does not adopt a Box from its name or a coincidental inventory match. Preserve
 local Crabbox state and inspect unresolved resources with the provider tools.
 
-Release uses the existing exact-ID deletion-operation checks and complete
-inventory confirmation. The engine retains a single-use terminal tombstone;
-repeating `stop` is safe, and the lease ID can never allocate another Box. Use a
+Release validates the exact-ID deletion operation and proves the Box absent
+with a native 404 and complete inventory confirmation. Background data purge
+may still be pending or blocked; the fixed terminal receipt preserves its
+operation ID as informational metadata. The engine retains a single-use terminal
+tombstone. Repeating `stop` is safe, and the lease ID can never allocate another Box. Use a
 new lease ID for later work. Native 404 plus complete inventory absence can
 finalize a known Box; an uncertain attempt without a returned ID stays retained.
 
@@ -210,20 +212,32 @@ engine described above and retain terminal records instead of removing claims.
    native identity before remote teardown or each native mutation. It releases
    the sandbox with `box stop --json`, requests deletion with
    `box delete --json --yes`, and validates the returned deletion operation's ID,
-   kind, and exact Box target. Crabbox polls
-   `box deletion status <operation-id>` while the operation is pending,
-   processing, or blocked. It removes the claim only after that exact operation
-   reports `completed` with a valid completion timestamp and complete
-   `box list --all` inventory confirms absence. A successful native process exit
-   alone does not prove deletion completion. The claim stays locked through
+   kind, and exact Box target. It releases the claim once an exact native 404
+   and complete `box list --all` inventory prove the Box absent, even if the
+   background data purge remains pending, processing, or blocked. While the Box
+   is still observable, Crabbox continues checking its deletion operation and
+   retains the claim. A successful native process exit alone does not prove
+   resource absence or data purge completion. The claim stays locked through
    teardown, deletion, retries, confirmation, and local removal. If the service
    temporarily refuses deletion until a recent snapshot exists, Crabbox shortens
    the sandbox TTL, waits for its managed stop transition, and retries deletion
    for up to two minutes, within a three-minute overall release budget that also
    honors caller cancellation, including deletion-operation polling. Missing,
-   malformed, or changed operation evidence, failed operation lookups, and
+   malformed, or changed operation evidence, failed absence checks, and
    cancellation retain the claim without recording completion. The shared native
    CLI SSH key is retained.
+
+The [Boat API deletion-operation schema](https://docs.boat.dev/openapi/box-v1.yaml)
+distinguishes resource removal from background data purge. Once an operation
+exists, its target is unavailable to list, restore, and fork. Purge stages can
+wait for upload URLs to expire, retained dependent snapshots, active restores,
+or automatic retries. These waits do not extend Crabbox's release budget:
+Crabbox proves resource absence independently and does not claim that stored
+data has finished purging. Fixed terminal receipts retain
+`ascii_box_deletion_operation` for subsequent provider-side inspection.
+When the legacy `box` executable also prints a rename notice on stderr, the
+structured JSON response on stdout remains authoritative for exact not-found
+evidence.
 
 Cleanup reports its current native-call phase and elapsed time at roughly
 ten-second intervals, including while a native command is blocked. A remaining
@@ -243,7 +257,7 @@ connection with the new client; Crabbox does not copy or remove pins from the
 old provider-wide file.
 
 If this release observes a valid native deletion acceptance but cannot finish
-waiting because of a timeout, cancellation, or operation lookup failure, it
+proving absence because of a timeout, cancellation, or lookup failure, it
 durably records the exact operation ID and its claim binding before returning
 the error. The binding covers the original provider scope, Box ID, creation
 timestamp, and repository owner. This records acceptance, not completion. A later
@@ -259,7 +273,7 @@ deletion. Crabbox repeats these checks inside the actual release fence before
 removing the claim; an earlier lookup during lease resolution does not authorize
 finalization.
 
-If Crabbox finishes waiting for native deletion but final inventory confirmation
+If the data purge reports completion but final absence confirmation
 fails or is canceled, it durably records that completed deletion in the
 still-locked claim before returning the error. The record is bound to the
 original claim, including its provider scope, Box ID, creation timestamp, and
