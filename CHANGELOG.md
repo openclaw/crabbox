@@ -4,6 +4,7 @@
 
 ### Fixes
 
+- Warmup: report definitive coordinator quota rejection in timing output while preserving recovery for interrupted or ambiguous creation. [PR 2732](https://github.com/openclaw/crabbox/pull/2732). Thanks @shakkernerd.
 - Scaleway: create fixed leases from public images without snapshot access, recover the exact server after lost responses, and revalidate root-disk attempt ownership before cleanup. [PR 2728](https://github.com/openclaw/crabbox/pull/2728).
 
 ## 0.72.0 - 2026-10-06

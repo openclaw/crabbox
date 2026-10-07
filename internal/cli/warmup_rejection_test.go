@@ -127,11 +127,11 @@ func TestWarmupCreationRejectedTiming(t *testing.T) {
 			}
 			args = append(args, tc.flags...)
 			var stdout, stderr bytes.Buffer
-			var timingSink io.Writer = &stderr
+			var timingSink io.Writer = &stdout
 			if tc.partialOutput {
-				timingSink = partialRejectionTimingWriter{&stderr}
+				timingSink = partialRejectionTimingWriter{&stdout}
 			}
-			err := (App{Stdout: &stdout, Stderr: timingSink}).warmup(context.Background(), args)
+			err := (App{Stdout: timingSink, Stderr: &stderr}).warmup(context.Background(), args)
 			var response CoordinatorHTTPError
 			wantMessage := body
 			if len(wantMessage) > 600 {
@@ -151,13 +151,13 @@ func TestWarmupCreationRejectedTiming(t *testing.T) {
 				t.Fatalf("redirects=%d", redirects.Load())
 			}
 			if tc.partialOutput {
-				if !errors.Is(err, io.ErrClosedPipe) || strings.HasSuffix(stderr.String(), "\n") {
-					t.Fatalf("partial write lost sink error or completed record: %v; %s", err, stderr.String())
+				if !errors.Is(err, io.ErrClosedPipe) || strings.HasSuffix(stdout.String(), "\n") {
+					t.Fatalf("partial write lost sink error or completed record: %v; %s", err, stdout.String())
 				}
 				return
 			}
 			records := 0
-			for _, line := range strings.Split(stderr.String(), "\n") {
+			for _, line := range strings.Split(stdout.String(), "\n") {
 				if !strings.HasPrefix(line, "{") {
 					continue
 				}
@@ -187,7 +187,7 @@ func TestWarmupCreationRejectedTiming(t *testing.T) {
 					t.Fatal("timing record leaked response or credential material")
 				}
 			}
-			if (records == 1) != tc.wantRejected || records > 1 || stdout.Len() != 0 {
+			if (records == 1) != tc.wantRejected || records > 1 || (!tc.wantRejected && stdout.Len() != 0) || strings.Contains(stderr.String(), `"creationRejected"`) {
 				t.Fatalf("records=%d wantRejected=%t stdout=%s stderr=%s", records, tc.wantRejected, stdout.String(), stderr.String())
 			}
 		})
@@ -202,6 +202,17 @@ func (w partialRejectionTimingWriter) Write(data []byte) (int, error) {
 		return n, io.ErrClosedPipe
 	}
 	return w.Buffer.Write(data)
+}
+
+func TestCoordinatorHTTPErrorBodyKeepsDiagnosticReadLimit(t *testing.T) {
+	const message = `{"error":"cost_limit_exceeded"}`
+	beyondLimit := &countingReader{}
+	body := io.MultiReader(strings.NewReader(message+strings.Repeat(" ", 600-len(message))), beyondLimit)
+	err := decodeCoordinatorResponse(http.MethodPut, "/v1/leases/cbx_0123456789ab", http.StatusTooManyRequests, body, nil)
+	var response CoordinatorHTTPError
+	if !errors.As(err, &response) || response.Message != message || response.responseComplete || beyondLimit.reads != 0 {
+		t.Fatalf("cap-sized response must stay diagnostic-only without another read: %+v, extra reads=%d", response, beyondLimit.reads)
+	}
 }
 
 func TestCoordinatorCreationRejectionExcludesExpiredContexts(t *testing.T) {

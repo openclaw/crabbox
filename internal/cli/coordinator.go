@@ -2927,13 +2927,10 @@ func splitCurlResponse(data []byte) ([]byte, int, error) {
 
 func decodeCoordinatorResponse(method, path string, statusCode int, body io.Reader, out any) error {
 	if statusCode < 200 || statusCode >= 300 {
-		// Keep the existing diagnostic limit, reading one extra byte to establish
-		// whether the whole response is available for authoritative qualification.
-		data, readErr := io.ReadAll(io.LimitReader(body, 601))
-		complete := readErr == nil && len(data) <= 600
-		if len(data) > 600 {
-			data = data[:600]
-		}
+		// Do not wait beyond the existing diagnostic cap. Reaching it cannot
+		// establish EOF, so cap-sized bodies remain diagnostic-only.
+		data, readErr := io.ReadAll(io.LimitReader(body, 600))
+		complete := readErr == nil && len(data) < 600
 		msg := strings.TrimSpace(string(data))
 		return CoordinatorHTTPError{
 			Method:           method,
