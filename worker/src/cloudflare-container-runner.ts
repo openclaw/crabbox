@@ -19,6 +19,7 @@ const readyProbeTimeoutMs = 10_000;
 // least every keepAliveIntervalMs while the lease runs.
 const containerInactivityTimeoutMs = 6 * 60 * 60 * 1000;
 const keepAliveIntervalMs = 60 * 60 * 1000;
+const cleanupRetryMs = 15_000;
 const heartbeatIntervalMs = 15_000;
 const killGraceSeconds = 5;
 // Bounds the queued response bytes; output is read only as the caller reads.
@@ -111,7 +112,11 @@ export class CrabboxSandbox extends DurableObject<Env> {
 
   async expireIfIdle(): Promise<void> {
     const meta = await this.leaseMeta();
-    if (!meta || meta.state !== "running") return;
+    if (!meta) return;
+    if (meta.state !== "running") {
+      await this.destroyContainer();
+      return;
+    }
 
     const now = Date.now();
     const expiresAt = leaseExpiresAtMs(meta);
@@ -133,7 +138,6 @@ export class CrabboxSandbox extends DurableObject<Env> {
       expiredAt: new Date(now).toISOString(),
     };
     await this.ctx.storage.put(leaseMetaKey, expired);
-    await this.ctx.storage.deleteAlarm();
     await this.destroyContainer();
   }
 
@@ -193,7 +197,6 @@ export class CrabboxSandbox extends DurableObject<Env> {
         stoppedAt: new Date().toISOString(),
       };
       await this.ctx.storage.put(leaseMetaKey, stopped);
-      await this.ctx.storage.deleteAlarm();
       await this.destroyContainer();
       return json({ error: errorMessage(error), ...leaseResponse(stopped) }, 503);
     }
@@ -235,7 +238,6 @@ export class CrabboxSandbox extends DurableObject<Env> {
       stoppedAt: new Date().toISOString(),
     };
     await this.ctx.storage.put(leaseMetaKey, stopped);
-    await this.ctx.storage.deleteAlarm();
     await this.destroyContainer();
     return json(leaseResponse(stopped));
   }
@@ -380,7 +382,10 @@ export class CrabboxSandbox extends DurableObject<Env> {
   }
 
   private async expireIfNeeded(meta: LeaseMetadata): Promise<LeaseMetadata> {
-    if (meta.state !== "running") return meta;
+    if (meta.state !== "running") {
+      await this.destroyContainer();
+      return meta;
+    }
     const expiresAt = leaseExpiresAtMs(meta);
     if (expiresAt === undefined || expiresAt > Date.now()) return meta;
 
@@ -390,7 +395,6 @@ export class CrabboxSandbox extends DurableObject<Env> {
       expiredAt: new Date().toISOString(),
     };
     await this.ctx.storage.put(leaseMetaKey, expired);
-    await this.ctx.storage.deleteAlarm();
     await this.destroyContainer();
     return expired;
   }
@@ -512,8 +516,11 @@ export class CrabboxSandbox extends DurableObject<Env> {
   }
 
   private async destroyContainer(): Promise<void> {
+    // Terminal metadata stops new work; only successful destruction retires cleanup.
+    await this.ctx.storage.setAlarm(Date.now() + cleanupRetryMs);
     const container = this.container();
     if (container.running) await container.destroy();
+    await this.ctx.storage.deleteAlarm();
   }
 }
 

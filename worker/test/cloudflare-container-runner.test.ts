@@ -1054,6 +1054,52 @@ describe("Cloudflare runner lifecycle", () => {
     });
   });
 
+  it("retries container destruction after an expiry cleanup failure", async () => {
+    const { sandbox, storage, container } = harness();
+    await createLease(sandbox, { idleTimeoutSeconds: 10 });
+    vi.spyOn(container, "destroy").mockRejectedValueOnce(new Error("cleanup unavailable"));
+
+    vi.setSystemTime(new Date("2026-05-13T18:00:11Z"));
+    await expect(sandbox.alarm()).rejects.toThrow("cleanup unavailable");
+    expect(container.running).toBe(true);
+    expect(storage.alarm).toBeGreaterThan(Date.now());
+
+    // Cloudflare retries a failed alarm; a terminal lease must still own cleanup.
+    await sandbox.alarm();
+
+    expect(container.running).toBe(false);
+    expect(container.destroyed).toBe(1);
+    expect(storage.alarm).toBeNull();
+    await expect(storage.get("crabbox:lease")).resolves.toMatchObject({ state: "expired" });
+  });
+
+  it("keeps failed stop cleanup scheduled and does not report it complete through status", async () => {
+    const { sandbox, storage, container } = harness();
+    await createLease(sandbox);
+    const destroy = vi
+      .spyOn(container, "destroy")
+      .mockRejectedValueOnce(new Error("cleanup unavailable"))
+      .mockRejectedValueOnce(new Error("cleanup still unavailable"));
+
+    await expect(
+      sandbox.fetch(new Request("http://crabbox.internal/__crabbox/destroy", { method: "DELETE" })),
+    ).rejects.toThrow("cleanup unavailable");
+    expect(storage.alarm).toBeGreaterThan(Date.now());
+    await expect(sandbox.fetch(crabboxRequest("/__crabbox/status"))).rejects.toThrow(
+      "cleanup still unavailable",
+    );
+    expect(container.running).toBe(true);
+    expect(storage.alarm).toBeGreaterThan(Date.now());
+
+    await sandbox.alarm();
+
+    expect(destroy).toHaveBeenCalledTimes(3);
+    expect(container.running).toBe(false);
+    expect(storage.alarm).toBeNull();
+    const response = await sandbox.fetch(crabboxRequest("/__crabbox/status"));
+    await expect(response.json()).resolves.toMatchObject({ state: "stopped" });
+  });
+
   it("reports a lease whose container stopped as stopped", async () => {
     const { sandbox, container } = harness();
     await createLease(sandbox, { idleTimeoutSeconds: 600 });

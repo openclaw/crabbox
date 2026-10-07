@@ -414,13 +414,16 @@ crabbox checkpoint fork chk_0123456789abcdef --count 4 --type standard-2 -- pnpm
   lease is active.
 - The runner stores lease metadata in Durable Object storage and sets a Durable
   Object alarm at the earlier of `--ttl` or `--idle-timeout`. Uploads and
-  command execution extend the idle deadline.
+  command execution extend the idle deadline. Failed container destruction
+  retains a cleanup alarm with a 15-second retry deadline, including after the
+  lease is marked stopped or expired; successful destruction clears it.
 - If a lease's container stops before its deadline, the lease ends: `status`
   reports `stopped` with `stopReason`, and uploads and commands fail with HTTP
   410 instead of silently continuing in an empty workspace. `crabbox cleanup
   --provider cloudflare` retires the claim.
 - `status` reports expired or stopped metadata without retiring the local claim:
-  the runner may have stored that state before native destruction failed.
+  the runner retries any unfinished native destruction before returning terminal
+  status and reports an error if cleanup still fails.
   `crabbox cleanup --provider cloudflare` checks local claims and confirms or
   retries native deletion for terminal containers before removing their claims.
   An HTTP 404 can retire the exact unchanged claim; other errors preserve it.
