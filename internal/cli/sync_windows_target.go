@@ -410,14 +410,39 @@ func windowsRemoteCommandWithEnvFiles(workdir string, env map[string]string, env
 	if len(command) == 0 {
 		b.WriteString("exit 0\n")
 	} else {
-		b.WriteString("& " + psQuote(command[0]))
-		for _, arg := range command[1:] {
-			b.WriteByte(' ')
-			b.WriteString(psQuote(arg))
-		}
-		b.WriteString("\nexit $LASTEXITCODE\n")
+		writeWindowsCommandInvocation(&b, command)
 	}
 	return PowershellCommand(b.String())
+}
+
+func writeWindowsCommandInvocation(b *bytes.Buffer, command []string) {
+	// PowerShell 5.1's native binder drops empty args and embedded quotes. Give
+	// CreateProcess the quoted command line directly, inheriting the SSH streams.
+	b.WriteString(`$__crabboxCommand = $ExecutionContext.InvokeCommand.GetCommand(` + psQuote(command[0]) + `, [System.Management.Automation.CommandTypes]::All)
+if ($null -eq $__crabboxCommand) { throw 'Command not found' }
+while ($__crabboxCommand -is [System.Management.Automation.AliasInfo]) { $__crabboxCommand = $__crabboxCommand.ResolvedCommand }
+if ($__crabboxCommand.CommandType -eq 'Application' -and [IO.Path]::GetExtension($__crabboxCommand.Path) -in @('.exe', '.com') -and [IO.Path]::GetFileName($__crabboxCommand.Path) -ine 'cmd.exe') {
+    $__crabboxStart = New-Object System.Diagnostics.ProcessStartInfo
+    $__crabboxStart.FileName = $__crabboxCommand.Path
+`)
+	b.WriteString("$__crabboxStart.Arguments = " + psQuote(quoteWindowsCommandArgs(command[1:])) + "\n")
+	b.WriteString(`    $__crabboxStart.WorkingDirectory = (Get-Location).ProviderPath
+    $__crabboxStart.UseShellExecute = $false
+    $__crabboxProcess = [System.Diagnostics.Process]::Start($__crabboxStart)
+    try {
+        $__crabboxProcess.WaitForExit()
+        exit $__crabboxProcess.ExitCode
+    } finally { $__crabboxProcess.Dispose() }
+}
+`)
+	// Keep PowerShell binding for scripts/cmdlets and file associations. cmd.exe
+	// and batch files parse shell source rather than the standard Windows argv.
+	b.WriteString("& " + psQuote(command[0]))
+	for _, arg := range command[1:] {
+		b.WriteByte(' ')
+		b.WriteString(psQuote(arg))
+	}
+	b.WriteString("\nexit $LASTEXITCODE\n")
 }
 
 func windowsRemoteShellCommandWithEnvFile(workdir string, env map[string]string, envFile, script string) string {

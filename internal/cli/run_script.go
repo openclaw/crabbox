@@ -174,17 +174,8 @@ func remoteRunScriptCommandWithEnvFiles(workdir string, env map[string]string, e
 func windowsRemoteRunScriptCommandWithEnvFiles(workdir string, env map[string]string, envFiles []string, script *RunScriptSpec, args []string) string {
 	var b bytes.Buffer
 	writeWindowsRemotePrefix(&b, workdir, env, envFiles)
-	b.WriteString("$__crabboxScript = " + psQuote(script.RemotePath) + "\n")
-	b.WriteString("$__crabboxArgs = @(")
-	for i, arg := range args {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString(psQuote(arg))
-	}
-	b.WriteString(")\n")
-	b.WriteString("& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $__crabboxScript @__crabboxArgs\n")
-	b.WriteString("exit $LASTEXITCODE\n")
+	command := []string{"powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script.RemotePath}
+	writeWindowsCommandInvocation(&b, append(command, args...))
 	return PowershellCommand(b.String())
 }
 

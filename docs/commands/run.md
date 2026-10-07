@@ -536,6 +536,23 @@ writes uploaded Windows scripts as UTF-8 with a BOM when the input has none, so
 Windows PowerShell 5.1 does not treat non-ASCII source as the system ANSI code
 page.
 
+Native executables receive a Windows command line quoted with the standard
+`CommandLineToArgvW`/C-runtime rules, preserving empty arguments, embedded double
+quotes, backslashes, whitespace, and Unicode. Literal `%VAR%`, `^`, `&`, `|`,
+and `$` are not expanded by Crabbox. The PowerShell transport starts the process
+directly with inherited input/output streams, the remote working directory, and
+its actual exit status. Arguments to `--script` use the same transport to
+Windows PowerShell's `-File` entrypoint.
+
+An explicitly selected interpreter still owns its syntax: `cmd /c` and `.cmd`/
+`.bat` launchers use cmd's expansion and quoting rules, and `powershell -Command`
+parses its command as PowerShell source. PowerShell scripts and cmdlets retain
+PowerShell parameter binding. Inside `--shell` or a `.ps1` script, Windows
+PowerShell 5.1's own native-command binding can still discard empty strings and
+embedded quotes when the script calls another executable. Use plain argv for
+that executable; use `--shell '...PowerShell source...'` or `--script file.ps1`
+for PowerShell expressions rather than nesting another `powershell -Command`.
+
 ### Native Windows background processes
 
 Managed native Windows leases install Node 24.19.0 and npm when either runtime

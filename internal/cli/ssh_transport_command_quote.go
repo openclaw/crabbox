@@ -10,6 +10,8 @@ func quoteWindowsCommandArgs(args []string) string {
 	return strings.Join(quoted, " ")
 }
 
+// quoteWindowsCommandArg quotes one CreateProcess argument for the standard
+// Windows argv parser. It is not an escape function for cmd or PowerShell source.
 func quoteWindowsCommandArg(arg string) string {
 	var quoted strings.Builder
 	quoted.WriteByte('"')
