@@ -24,6 +24,7 @@ type awsClient interface {
 	CreateServerWithFallback(context.Context, core.Config, string, string, string, bool, func(string, ...any)) (core.Server, core.Config, error)
 	CreateServerWithFallbackControl(context.Context, core.Config, string, string, string, bool, func(string, ...any), *core.AWSFixedCreateControl) (core.Server, core.Config, error)
 	WaitForServerIP(context.Context, string) (core.Server, error)
+	CheckAcquireState(context.Context, string) error
 	GetServer(context.Context, string) (core.Server, error)
 	DeleteServer(context.Context, string) error
 	DeleteSSHKey(context.Context, string) error
@@ -125,7 +126,11 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
 	target := sshTargetForBootstrap(cfg, server.PublicNet.IPv4.IP, leaseID, slug)
-	if err := bootstrapAWSWindowsDesktop(ctx, cfg, &target, publicKey, b.RT.Stderr); err != nil {
+	if err := waitAWSAcquireReady(ctx, func(ctx context.Context) error {
+		return client.CheckAcquireState(ctx, server.CloudID)
+	}, func(ctx context.Context) error {
+		return bootstrapAWSWindowsDesktop(ctx, cfg, &target, publicKey, b.RT.Stderr)
+	}); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	server.Labels["state"] = "ready"
@@ -324,7 +329,11 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 				return core.LeaseTarget{}, err
 			}
 			target := sshTargetForBootstrap(resolvedCfg, server.PublicNet.IPv4.IP, leaseID, intent.Slug)
-			if err := bootstrapAWSWindowsDesktop(ctx, resolvedCfg, &target, publicKey, b.RT.Stderr); err != nil {
+			if err := waitAWSAcquireReady(ctx, func(ctx context.Context) error {
+				return serverClient.CheckAcquireState(ctx, server.CloudID)
+			}, func(ctx context.Context) error {
+				return bootstrapAWSWindowsDesktop(ctx, resolvedCfg, &target, publicKey, b.RT.Stderr)
+			}); err != nil {
 				return core.LeaseTarget{}, err
 			}
 			server.Labels["state"] = "ready"

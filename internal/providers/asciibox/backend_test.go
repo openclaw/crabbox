@@ -105,7 +105,7 @@ func TestClientUsesOfficialAsciiBoxCLI(t *testing.T) {
 	if boxes, err := client.ListBoxes(context.Background(), false); err != nil || len(boxes) != 1 {
 		t.Fatalf("boxes=%#v err=%v", boxes, err)
 	}
-	if err := client.ReleaseBox(context.Background(), "bx_1", func(context.Context) error { return nil }); err != nil {
+	if _, err := client.ReleaseBox(context.Background(), "bx_1", func(context.Context) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -156,6 +156,7 @@ func TestReleaseBoxRecoversFromRecentSnapshotGuard(t *testing.T) {
 			"info": {
 				{result: core.LocalCommandResult{Stdout: `{"box":{"id":"bx_guard","state":"idle"}}`}},
 				{result: core.LocalCommandResult{Stdout: `{"box":{"id":"bx_guard","state":"idle","status":"stopping"}}`}},
+				{result: core.LocalCommandResult{Stdout: `{"box":{"id":"bx_guard","state":"stopped"}}`}},
 			},
 		},
 	}
@@ -168,7 +169,7 @@ func TestReleaseBoxRecoversFromRecentSnapshotGuard(t *testing.T) {
 		releasePollInterval: time.Nanosecond,
 	}
 
-	if err := client.ReleaseBox(context.Background(), "bx_guard", func(context.Context) error { return nil }); err != nil {
+	if _, err := client.ReleaseBox(context.Background(), "bx_guard", func(context.Context) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{
@@ -179,6 +180,8 @@ func TestReleaseBoxRecoversFromRecentSnapshotGuard(t *testing.T) {
 		"box --no-update --json --org personal --api-url https://ascii.dev info bx_guard",
 		"box --no-update --json --org personal --api-url https://ascii.dev info bx_guard",
 		"box --no-update --json --org personal --api-url https://ascii.dev delete bx_guard --yes",
+		"box --no-update --json --org personal --api-url https://ascii.dev status",
+		"box --no-update --json --org personal --api-url https://ascii.dev info bx_guard",
 		"box --no-update --json --org personal --api-url https://ascii.dev status",
 		"box --no-update --json --org personal --api-url https://ascii.dev deletion status " + testDeletionID,
 	}
@@ -197,7 +200,7 @@ func TestReleaseBoxDoesNotRecoverUnrelatedDeleteFailure(t *testing.T) {
 	}
 	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner}
 
-	err := client.ReleaseBox(context.Background(), "bx_guard", func(context.Context) error { return nil })
+	_, err := client.ReleaseBox(context.Background(), "bx_guard", func(context.Context) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "permission denied") {
 		t.Fatalf("ReleaseBox err=%v", err)
 	}
@@ -217,7 +220,7 @@ func TestReleaseBoxReportsSnapshotRecoveryExtendFailure(t *testing.T) {
 	}
 	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner}
 
-	err := client.ReleaseBox(context.Background(), "bx_guard", func(context.Context) error { return nil })
+	_, err := client.ReleaseBox(context.Background(), "bx_guard", func(context.Context) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "snapshot recovery extend: extend throttled") {
 		t.Fatalf("ReleaseBox err=%v", err)
 	}
@@ -239,7 +242,7 @@ func TestReleaseBoxSkipsSnapshotRecoveryAfterCancellation(t *testing.T) {
 	}
 	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner}
 
-	err := client.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
+	_, err := client.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "snapshot recovery: context canceled") {
 		t.Fatalf("ReleaseBox err=%v", err)
 	}
@@ -258,7 +261,7 @@ func deletionOutcome(id, target, kind, state string) commandOutcome {
 	return commandOutcome{result: core.LocalCommandResult{Stdout: fmt.Sprintf(`{"operation":{"id":%q,"targetId":%q,"kind":%q,"status":%q,"completedAt":%s}}`, id, target, kind, state, completedAt)}}
 }
 
-func TestReleaseBoxRequiresCompletedDeletionOperation(t *testing.T) {
+func TestReleaseBoxValidatesDeletionOperationWhileObservable(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		initial  commandOutcome
@@ -296,8 +299,11 @@ func TestReleaseBoxRequiresCompletedDeletionOperation(t *testing.T) {
 					cancel()
 				}
 			}}
+			for range len(test.polls) + 1 {
+				runner.outcomes["info"] = append(runner.outcomes["info"], commandOutcome{result: core.LocalCommandResult{Stdout: `{"box":{"id":"bx_guard"}}`}})
+			}
 			c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner, releasePollInterval: time.Nanosecond}
-			err := c.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
+			_, err := c.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
 			if (err != nil) != test.wantErr {
 				t.Fatalf("ReleaseBox error=%v wantErr=%t", err, test.wantErr)
 			}
@@ -320,11 +326,12 @@ func TestReleaseBoxPendingOperationHonorsDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		runner := &releaseCommandRunner{configPath: filepath.Join(t.TempDir(), "config.json"), outcomes: map[string][]commandOutcome{
 			"stop": {{result: core.LocalCommandResult{}}}, "delete": {deletionOutcome(testDeletionID, "bx_guard", "box", "blocked")},
+			"info": {{result: core.LocalCommandResult{Stdout: `{"box":{"id":"bx_guard"}}`}}},
 		}}
 		c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner, releasePollInterval: time.Hour}
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
-		err := c.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
+		_, err := c.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
 		if !errors.Is(err, context.DeadlineExceeded) || !containsCommand(runner.commands, "box --no-update --json --org personal --api-url https://ascii.dev delete bx_guard --yes") {
 			t.Fatalf("pending deletion err=%v commands=%v", err, runner.commands)
 		}
@@ -340,6 +347,7 @@ func TestReleaseBoxReportsLastDeletionStatusWhenNativeLookupTimesOut(t *testing.
 			"stop":     {{result: core.LocalCommandResult{}}},
 			"delete":   {deletionOutcome(testDeletionID, "bx_guard", "box", "pending")},
 			"deletion": {deletionOutcome(testDeletionID, "bx_guard", "box", "blocked")},
+			"info":     {{result: core.LocalCommandResult{Stdout: `{"box":{"id":"bx_guard"}}`}}, {result: core.LocalCommandResult{Stdout: `{"box":{"id":"bx_guard"}}`}}},
 		}}
 		native := boxCommandRunnerFunc(func(commandCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 			if boxCLIAction(req.Args) == "deletion" {
@@ -355,7 +363,7 @@ func TestReleaseBoxReportsLastDeletionStatusWhenNativeLookupTimesOut(t *testing.
 		})
 		c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: native, releasePollInterval: 100 * time.Millisecond}
 		started := time.Now()
-		err := c.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
+		_, err := c.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("lost deadline cause: %v", err)
 		}
@@ -1478,18 +1486,18 @@ func (f *fakeAPI) ListBoxes(context.Context, bool) ([]boxData, error) {
 	return []boxData{f.box}, nil
 }
 
-func (f *fakeAPI) ReleaseBox(ctx context.Context, id string, validate func(context.Context) error) error {
+func (f *fakeAPI) ReleaseBox(ctx context.Context, id string, validate func(context.Context) error) (boxDeletionOperation, error) {
 	if err := validate(ctx); err != nil {
-		return err
+		return boxDeletionOperation{}, err
 	}
 	if f.releaseHook != nil {
 		if err := f.releaseHook(id); err != nil {
-			return err
+			return boxDeletionOperation{}, err
 		}
 	}
 	f.deletedIDs = append(f.deletedIDs, id)
 	f.deleted = true
-	return nil
+	return boxDeletionOperation{ID: testDeletionID, TargetID: id, Kind: "box", Status: "completed", CompletedAt: "2026-09-02T09:00:00Z"}, nil
 }
 
 func (f *fakeAPI) GetDeletionOperation(_ context.Context, targetID, operationID string) (boxDeletionOperation, error) {

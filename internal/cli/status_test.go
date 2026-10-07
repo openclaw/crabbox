@@ -150,7 +150,7 @@ func TestStatusWaitTerminalErrorFailsNonReadyTerminalState(t *testing.T) {
 }
 
 func TestLeaseStatusStateCanBeReadyRejectsTerminalStates(t *testing.T) {
-	for _, state := range []string{"dead", "deleting", "exited", "stopped", "released", "terminated"} {
+	for _, state := range []string{"dead", "deleting", "exited", "shutting-down", "stopped", "released", "terminated"} {
 		if leaseStatusStateCanBeReady(LeaseTarget{}, state) {
 			t.Fatalf("leaseStatusStateCanBeReady(%q) = true, want false", state)
 		}
