@@ -30,18 +30,19 @@ type azureOrphanTransport func(*http.Request) (*http.Response, error)
 func (f azureOrphanTransport) Do(req *http.Request) (*http.Response, error) { return f(req) }
 
 type azureOrphanFixture struct {
-	client      *AzureClient
-	server      Server
-	objects     map[string]map[string]any
-	allowDelete bool
-	deletes     []string
-	beforeRead  func(string)
-	readErr     error
-	reads       []string
-	failRead    string
-	failStatus  int
-	failCode    string
-	mu          sync.Mutex
+	client       *AzureClient
+	server       Server
+	objects      map[string]map[string]any
+	allowDelete  bool
+	deletes      []string
+	beforeRead   func(string)
+	readErr      error
+	reads        []string
+	failRead     string
+	failStatus   int
+	failCode     string
+	inventoryVMs []any
+	mu           sync.Mutex
 }
 
 func newAzureOrphanFixture(t *testing.T) *azureOrphanFixture {
@@ -79,6 +80,9 @@ func newAzureOrphanFixture(t *testing.T) *azureOrphanFixture {
 			}
 			data, _ := json.Marshal(map[string]any{"error": map[string]any{"code": code, "message": "simulated read failure"}})
 			return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(data))), Request: req}, nil
+		}
+		if req.Method == http.MethodGet && name == "virtualMachines" {
+			status, body = http.StatusOK, map[string]any{"value": f.inventoryVMs}
 		}
 		if req.Method == http.MethodDelete && f.allowDelete {
 			f.deletes = append(f.deletes, name)
@@ -235,6 +239,74 @@ func TestAzureFailedLeaseHoldRefusesUnprovenOwnership(t *testing.T) {
 			}
 			if len(f.deletes) != 0 {
 				t.Fatal("failed hold changed Azure")
+			}
+		})
+	}
+}
+
+func TestAzureClaimlessHoldObservesDiskWithoutGrantingDelete(t *testing.T) {
+	f := newAzureOrphanFixture(t)
+	name := f.server.CloudID
+	disk := f.objects[name+"-osdisk"]
+	disk["tags"] = map[string]string{} // Image-created disks need not inherit VM tags.
+	clear(f.objects)
+	f.objects[name+"-osdisk"] = disk
+	receipt, err := f.client.InspectClaimlessFailedLeaseHold(t.Context(), f.server.Labels["lease"], f.server.Labels["slug"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipt.Resources) != 5 || receipt.Resources[0].State != "absent" || receipt.Resources[3].Kind != "disk" ||
+		receipt.Resources[3].State != "retained" || receipt.Resources[3].ImmutableID != "-osdisk-guid" {
+		t.Fatalf("claimless hold did not preserve observed resource facts: %+v", receipt.Resources)
+	}
+	if len(f.deletes) != 0 || f.objects[name+"-osdisk"] == nil {
+		t.Fatal("claimless hold mutated the retained disk")
+	}
+}
+
+func TestAzureClaimlessHoldRefusesUnprovenVMOrInventory(t *testing.T) {
+	for _, scenario := range []string{"VM present", "VM reappears", "same lease elsewhere", "foreign NIC", "attached disk", "wrong scope", "read denied", "inventory denied", "inventory missing", "nothing retained"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newAzureOrphanFixture(t)
+			name := f.server.CloudID
+			disk := f.objects[name+"-osdisk"]
+			clear(f.objects)
+			f.objects[name+"-osdisk"] = disk
+			switch scenario {
+			case "VM present":
+				f.objects[name] = map[string]any{"name": name}
+			case "VM reappears":
+				reads := 0
+				f.beforeRead = func(resource string) {
+					if resource == name {
+						reads++
+						if reads == 2 {
+							f.objects[name] = map[string]any{"name": name}
+						}
+					}
+				}
+			case "same lease elsewhere":
+				f.inventoryVMs = []any{map[string]any{"id": "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/other", "name": "other", "tags": azureTagsFromLabels(f.server.Labels)}}
+			case "foreign NIC":
+				f.objects[name+"-nic"] = map[string]any{"id": "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/networkInterfaces/" + name + "-nic", "name": name + "-nic", "tags": map[string]string{"lease": "other"}, "properties": map[string]any{"resourceGuid": "foreign"}}
+			case "attached disk":
+				disk["managedBy"] = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/other"
+			case "wrong scope":
+				f.client.ResourceGroup = "other"
+			case "read denied":
+				f.failRead = name + "-osdisk"
+			case "inventory denied":
+				f.failRead = "virtualMachines"
+			case "inventory missing":
+				f.failRead, f.failStatus, f.failCode = "virtualMachines", http.StatusNotFound, "ResourceGroupNotFound"
+			case "nothing retained":
+				clear(f.objects)
+			}
+			if _, err := f.client.InspectClaimlessFailedLeaseHold(t.Context(), f.server.Labels["lease"], f.server.Labels["slug"]); err == nil {
+				t.Fatal("unproven claimless hold was accepted")
+			}
+			if len(f.deletes) != 0 {
+				t.Fatal("failed claimless hold mutated Azure")
 			}
 		})
 	}
@@ -399,6 +471,35 @@ func TestAzurePreparedOrphanCleanup(t *testing.T) {
 	}
 	if len(f.deletes) != 4 {
 		t.Fatal("absence replay issued duplicate deletion")
+	}
+}
+
+func TestAzureDeleteRequiresAbsentUnboundCompanionSlot(t *testing.T) {
+	for _, scenario := range []string{"retained disk", "unknown disk read", "absent disk"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newAzureOrphanFixture(t)
+			f.addPreparationVM()
+			prepared, err := f.client.PrepareOwnedServer(t.Context(), f.server)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A prior writer may have persisted NIC/PIP custody without the
+			// managed disk identity. That omission must not settle a full stop.
+			delete(prepared.Labels, azureCleanupDiskIdentityLabel)
+			delete(f.objects, f.server.CloudID)
+			f.allowDelete = true
+			if scenario == "unknown disk read" {
+				f.failRead = f.server.CloudID + "-osdisk"
+			} else if scenario == "absent disk" {
+				delete(f.objects, f.server.CloudID+"-osdisk")
+			}
+			if err := f.client.DeleteOwnedServer(t.Context(), prepared); (err == nil) != (scenario == "absent disk") {
+				t.Fatalf("unexpected unbound disk settlement: %v", err)
+			}
+			if scenario != "absent disk" && f.objects[f.server.CloudID+"-osdisk"] == nil {
+				t.Fatal("unbound disk was deleted")
+			}
+		})
 	}
 }
 

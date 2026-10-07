@@ -414,6 +414,30 @@ func TestFixedAzureExplicitRecoveryStopsAfterLocalClaimLoss(t *testing.T) {
 	}
 }
 
+func TestFixedAzureMissingClaimAndVMRetainsCompanionCustody(t *testing.T) {
+	client := &fakeAzureClient{}
+	b := fixedAzureTestBackend(t, client)
+	req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123462", RequestedSlug: "lost-worker", Repo: core.Repo{Root: t.TempDir()}}
+	_, err := b.Acquire(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.RemoveLeaseClaimIfUnchanged(req.RequestedLeaseID, claim); err != nil {
+		t.Fatal(err)
+	}
+	client.servers = nil // Azure already removed the VM; companions may remain.
+	if err := b.ReclaimAndStop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err == nil {
+		t.Fatal("missing claim and VM were accepted as full cleanup")
+	}
+	if len(client.deleted) != 0 || len(client.ownedExpected) != 0 {
+		t.Fatalf("claimless recovery mutated Azure: deleted=%v owned=%v", client.deleted, client.ownedExpected)
+	}
+}
+
 func TestFixedAzureExplicitRecoveryResumesInterruptedCleanup(t *testing.T) {
 	client := &fakeAzureClient{}
 	b := fixedAzureTestBackend(t, client)

@@ -27,6 +27,21 @@ func (c *AzureClient) verifyAzureFixedResourcesAbsent(ctx context.Context, expec
 		labels["fixed_attempt"] == "" || !FixedSHA256(labels["fixed_intent_sha256"]) {
 		return errors.New("Azure orphan recovery requires an exact fixed lease identity")
 	}
+	return c.verifyAzureResourceNamesAbsent(ctx, expected)
+}
+
+// A completed delete must also prove absence of companion slots that were not
+// present when the durable binding was captured. In particular, a missing disk
+// binding cannot silently turn a retained managed disk into stop success.
+func (c *AzureClient) verifyAzureResourceNamesAbsent(ctx context.Context, expected Server) error {
+	labels, name := expected.Labels, expected.CloudID
+	if err := ValidateAzureOwnedVM(expected, expected); err != nil {
+		return err
+	}
+	if name != LeaseProviderName(labels["lease"], labels["slug"]) ||
+		labels["provider_key"] != ProviderKeyForLease(labels["lease"]) {
+		return errors.New("Azure cleanup requires an exact lease identity")
+	}
 	checks := []struct {
 		kind string
 		get  func() error

@@ -12,12 +12,33 @@ import (
 
 // Inspection never attaches, snapshots, retags, or deletes a retained disk.
 func (c *AzureClient) InspectFailedLeaseHold(ctx context.Context, expected Server) (LeaseRecoveryHold, error) {
-	receipt := LeaseRecoveryHold{Schema: "crabbox.lease-hold.v1", Provider: "azure", LeaseID: expected.Labels["lease"], Status: "held", UnacceptedChanges: "unknown"}
 	if err := ValidateAzureOwnedVM(expected, expected); err != nil {
-		return receipt, err
+		return LeaseRecoveryHold{}, err
 	}
+	return c.inspectAzureFailedLeaseHold(ctx, expected, false)
+}
+
+// Claimless inspection records current resources at the original fixed name.
+// The observed immutable IDs are custody facts, never original delete grants.
+func (c *AzureClient) InspectClaimlessFailedLeaseHold(ctx context.Context, leaseID, slug string) (LeaseRecoveryHold, error) {
+	if !IsCanonicalLeaseID(leaseID) || slug == "" || slug != NormalizeLeaseSlug(slug) {
+		return LeaseRecoveryHold{}, errors.New("claimless Azure hold requires an exact lease id and original slug")
+	}
+	if strings.TrimSpace(c.SubscriptionID) == "" || strings.TrimSpace(c.ResourceGroup) == "" {
+		return LeaseRecoveryHold{}, errors.New("claimless Azure hold requires an exact subscription and resource group")
+	}
+	expected := Server{CloudID: LeaseProviderName(leaseID, slug), Labels: map[string]string{
+		"crabbox": "true", "created_by": "crabbox", "provider": "azure",
+		"lease": leaseID, "slug": slug, "provider_key": ProviderKeyForLease(leaseID),
+	}}
+	return c.inspectAzureFailedLeaseHold(ctx, expected, true)
+}
+
+func (c *AzureClient) inspectAzureFailedLeaseHold(ctx context.Context, expected Server, claimless bool) (LeaseRecoveryHold, error) {
+	receipt := LeaseRecoveryHold{Schema: "crabbox.lease-hold.v1", Provider: "azure", LeaseID: expected.Labels["lease"], Status: "held", UnacceptedChanges: "unknown"}
 	name := expected.CloudID
-	if name != LeaseProviderName(receipt.LeaseID, expected.Labels["slug"]) || expected.Labels["fixed_attempt"] == "" || !FixedSHA256(expected.Labels["fixed_intent_sha256"]) {
+	if name != LeaseProviderName(receipt.LeaseID, expected.Labels["slug"]) ||
+		(!claimless && (expected.Labels["fixed_attempt"] == "" || !FixedSHA256(expected.Labels["fixed_intent_sha256"]))) {
 		return receipt, errors.New("Azure recovery hold requires an exact fixed lease identity")
 	}
 	absent := func(err error) bool {
@@ -25,16 +46,42 @@ func (c *AzureClient) InspectFailedLeaseHold(ctx context.Context, expected Serve
 		return errors.As(err, &response) && response.StatusCode == http.StatusNotFound &&
 			(response.ErrorCode == "ResourceNotFound" || response.ErrorCode == "ResourceGroupNotFound")
 	}
-	if _, err := c.vmc.Get(ctx, c.ResourceGroup, name, nil); !absent(err) {
-		if err == nil {
-			err = errors.New("VM still exists")
+	checkVMAbsent := func() error {
+		if _, err := c.vmc.Get(ctx, c.ResourceGroup, name, nil); !absent(err) {
+			if err == nil {
+				err = errors.New("VM still exists")
+			}
+			return fmt.Errorf("Azure failed-lease hold requires proven VM absence: %w", err)
 		}
-		return receipt, fmt.Errorf("Azure failed-lease hold requires proven VM absence: %w", err)
+		if claimless {
+			pager := c.vmc.NewListPager(c.ResourceGroup, nil)
+			for pager.More() {
+				page, err := pager.NextPage(ctx)
+				if err != nil {
+					return fmt.Errorf("list Azure VMs before claimless hold: %w", err)
+				}
+				for _, vm := range page.Value {
+					if vm == nil || vm.Name == nil || vm.ID == nil {
+						return errors.New("Azure claimless hold VM inventory is incomplete")
+					}
+					if strings.EqualFold(*vm.Name, name) ||
+						stringValue(vm.Tags[azureLabelToTagKey("lease")]) == receipt.LeaseID ||
+						stringValue(vm.Tags[azureLabelToTagKey("provider_key")]) == expected.Labels["provider_key"] {
+						return errors.New("Azure claimless hold found a live VM for the original lease")
+					}
+				}
+			}
+		}
+		return nil
+	}
+	if err := checkVMAbsent(); err != nil {
+		return receipt, err
 	}
 	resourceID := func(namespace, kind, resource string) string {
 		return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/%s/%s/%s", c.SubscriptionID, c.ResourceGroup, namespace, kind, resource)
 	}
 	receipt.Resources = append(receipt.Resources, LeaseHeldResource{Kind: "vm", ID: resourceID("Microsoft.Compute", "virtualMachines", name), ImmutableID: expected.ImmutableID, State: "absent"})
+	var observedAttempt, observedFingerprint string
 	retain := func(kind, resource, id, immutable string, tags map[string]*string, err error) error {
 		if absent(err) {
 			receipt.Resources = append(receipt.Resources, LeaseHeldResource{Kind: kind, ID: id, State: "absent"})
@@ -43,11 +90,23 @@ func (c *AzureClient) InspectFailedLeaseHold(ctx context.Context, expected Serve
 		if err != nil {
 			return fmt.Errorf("inspect held Azure %s: %w", kind, err)
 		}
-		if err := validateAzureCleanupResourceTags(kind, resource, tags, expected.Labels); err != nil {
-			return err
-		}
-		for _, key := range []string{"fixed_attempt", "fixed_intent_sha256", "provider_key"} {
-			if stringValue(tags[azureLabelToTagKey(key)]) != expected.Labels[key] {
+		if !claimless || kind != "disk" || len(tags) != 0 {
+			if err := validateAzureCleanupResourceTags(kind, resource, tags, expected.Labels); err != nil {
+				return err
+			}
+			if stringValue(tags[azureLabelToTagKey("provider_key")]) != expected.Labels["provider_key"] {
+				return fmt.Errorf("Azure held %s provider key changed", kind)
+			}
+			if claimless {
+				attempt := stringValue(tags[azureLabelToTagKey("fixed_attempt")])
+				fingerprint := stringValue(tags[azureLabelToTagKey("fixed_intent_sha256")])
+				if attempt == "" || !FixedSHA256(fingerprint) ||
+					(observedAttempt != "" && (observedAttempt != attempt || observedFingerprint != fingerprint)) {
+					return fmt.Errorf("Azure held %s has conflicting fixed identity", kind)
+				}
+				observedAttempt, observedFingerprint = attempt, fingerprint
+			} else if stringValue(tags[azureLabelToTagKey("fixed_attempt")]) != expected.Labels["fixed_attempt"] ||
+				stringValue(tags[azureLabelToTagKey("fixed_intent_sha256")]) != expected.Labels["fixed_intent_sha256"] {
 				return fmt.Errorf("Azure held %s fixed identity changed", kind)
 			}
 		}
@@ -129,11 +188,17 @@ func (c *AzureClient) InspectFailedLeaseHold(ctx context.Context, expected Serve
 		return receipt, err
 	}
 	// A resource can reappear during the reads; a second VM observation never deletes it.
-	if _, err := c.vmc.Get(ctx, c.ResourceGroup, name, nil); !absent(err) {
-		if err == nil {
-			err = errors.New("VM reappeared")
+	if err := checkVMAbsent(); err != nil {
+		return receipt, err
+	}
+	if claimless {
+		retained := false
+		for _, resource := range receipt.Resources[1:] {
+			retained = retained || resource.State == "retained"
 		}
-		return receipt, fmt.Errorf("Azure failed-lease hold lost VM absence: %w", err)
+		if !retained {
+			return receipt, errors.New("Azure claimless hold has no remaining resource to retain")
+		}
 	}
 	return receipt, nil
 }

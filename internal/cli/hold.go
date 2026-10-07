@@ -27,11 +27,16 @@ type FailedLeaseHoldBackend interface {
 	HoldFailedLease(context.Context, string) (LeaseRecoveryHold, error)
 }
 
+type failedLeaseHoldWithSlugBackend interface {
+	HoldFailedLeaseWithSlug(context.Context, string, string) (LeaseRecoveryHold, error)
+}
+
 func (a App) hold(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("hold", a.Stderr)
 	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	id := fs.String("id", "", "exact failed lease id")
+	slug := fs.String("slug", "", "original fixed lease slug for claimless Azure observation")
 	asJSON := fs.Bool("json", false, "print the durable recovery hold")
 	providerFlags := registerProviderFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
@@ -61,7 +66,16 @@ func (a App) hold(ctx context.Context, args []string) error {
 	if !ok {
 		return Exit(2, "provider=%s does not support failed-lease holds", backend.Spec().Name)
 	}
-	receipt, err := holder.HoldFailedLease(ctx, *id)
+	var receipt LeaseRecoveryHold
+	if flagWasSet(fs, "slug") {
+		withSlug, ok := backend.(failedLeaseHoldWithSlugBackend)
+		if !ok {
+			return Exit(2, "provider=%s does not support claimless hold slug input", backend.Spec().Name)
+		}
+		receipt, err = withSlug.HoldFailedLeaseWithSlug(ctx, *id, *slug)
+	} else {
+		receipt, err = holder.HoldFailedLease(ctx, *id)
+	}
 	if err != nil {
 		return err
 	}

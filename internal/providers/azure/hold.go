@@ -2,10 +2,23 @@ package azure
 
 import (
 	"context"
+	"strings"
+
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func (b *azureLeaseBackend) HoldFailedLease(ctx context.Context, id string) (receipt core.LeaseRecoveryHold, err error) {
+	return b.holdFailedLease(ctx, id, "")
+}
+
+func (b *azureLeaseBackend) HoldFailedLeaseWithSlug(ctx context.Context, id, slug string) (receipt core.LeaseRecoveryHold, err error) {
+	if slug == "" || slug != core.NormalizeLeaseSlug(slug) {
+		return receipt, core.Exit(2, "Azure claimless hold requires the original exact lease slug")
+	}
+	return b.holdFailedLease(ctx, id, slug)
+}
+
+func (b *azureLeaseBackend) holdFailedLease(ctx context.Context, id, slug string) (receipt core.LeaseRecoveryHold, err error) {
 	if !core.IsCanonicalLeaseID(id) {
 		return receipt, core.Exit(2, "Azure hold requires an exact canonical lease id")
 	}
@@ -20,15 +33,49 @@ func (b *azureLeaseBackend) HoldFailedLease(ctx context.Context, id string) (rec
 		return receipt, core.Exit(2, "Azure client cannot attest a failed lease hold")
 	}
 	err = core.WithDurableLeaseClaimLockContext(ctx, id, func(claim *core.LeaseClaim, exists bool, persist func() error) error {
-		if !exists || claim.ProviderScope != client.LeaseClaimScope() || claim.FixedCreateIntent == nil {
-			return core.Exit(4, "Azure hold requires the exact fixed claim and account scope")
-		}
-		if claim.RecoveryHold != nil {
+		if exists && claim.RecoveryHold != nil {
+			if claim.ProviderScope != client.LeaseClaimScope() || (slug != "" && claim.Slug != slug) {
+				return core.Exit(4, "Azure held claim account or slug changed")
+			}
 			if claim.Provider != "azure-recovery-held-v1" || claim.RecoveryHold.LeaseID != id || claim.RecoveryHold.Provider != "azure" {
 				return core.Exit(4, "Azure held claim identity changed")
 			}
 			receipt = *claim.RecoveryHold
 			return nil
+		}
+		if !exists {
+			if slug == "" || strings.TrimSpace(client.LeaseClaimScope()) == "" {
+				return core.Exit(4, "Azure claimless hold requires an original slug and account scope")
+			}
+			observer, ok := client.(interface {
+				InspectClaimlessFailedLeaseHold(context.Context, string, string) (core.LeaseRecoveryHold, error)
+			})
+			if !ok {
+				return core.Exit(2, "Azure client cannot attest a claimless failed lease hold")
+			}
+			name := core.LeaseProviderName(id, slug)
+			candidate := core.LeaseClaim{LeaseID: id, Slug: slug, Provider: "azure-recovery-held-v1",
+				ProviderScope: client.LeaseClaimScope(), CloudID: name}
+			if err := core.ValidateFixedLocalClaimUniqueness(fixedAzureLeaseKind, candidate, "azure", "azure-recovery-held-v1"); err != nil {
+				return err
+			}
+			observed, err := observer.InspectClaimlessFailedLeaseHold(ctx, id, slug)
+			if err != nil {
+				return err
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			candidate.RecoveryHold = &observed
+			*claim = candidate
+			if err := persist(); err != nil {
+				return err
+			}
+			receipt = observed
+			return nil
+		}
+		if claim.ProviderScope != client.LeaseClaimScope() || claim.FixedCreateIntent == nil || (slug != "" && claim.Slug != slug) {
+			return core.Exit(4, "Azure hold requires the exact fixed claim and account scope")
 		}
 		expected := azureServerFromClaim(*claim)
 		if err := validateExactAzureClaim(*claim, expected, id, client.LeaseClaimScope()); err != nil {

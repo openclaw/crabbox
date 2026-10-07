@@ -1807,7 +1807,10 @@ func (c *AzureClient) DeleteOwnedServer(ctx context.Context, expected Server) er
 	if err != nil {
 		return err
 	}
-	return c.deleteAzureValidatedResourcesWithRetry(ctx, expected, resources, ValidateAzureOwnedVM)
+	if err := c.deleteAzureValidatedResourcesWithRetry(ctx, expected, resources, ValidateAzureOwnedVM); err != nil {
+		return err
+	}
+	return c.verifyAzureResourceNamesAbsent(ctx, expected)
 }
 
 type azureCleanupSkipError struct{ err error }
