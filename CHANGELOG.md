@@ -16,7 +16,7 @@
 
 ### Fixes
 
-- Boat (ASCII Box): release absent sandboxes without waiting for blocked background data purges, while preserving the purge operation ID in fixed-lease terminal receipts. PR link pending.
+- Boat (ASCII Box): release absent sandboxes without waiting for blocked background data purges, while preserving the purge operation ID in fixed-lease terminal receipts. [PR 2726](https://github.com/openclaw/crabbox/pull/2726).
 
 - Blacksmith Testbox: `run --id tbx_...` and stop read only the exact claim file instead of scanning every local claim. [PR 2719](https://github.com/openclaw/crabbox/pull/2719).
 - Apply explicit lifecycle target flags before provider validation so Linux defaults cannot block macOS stop/release, pause/resume, list, or cleanup. [Issue 2706](https://github.com/openclaw/crabbox/issues/2706). Thanks @coygeek.
