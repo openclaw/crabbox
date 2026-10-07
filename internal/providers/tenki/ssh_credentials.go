@@ -44,8 +44,8 @@ func parseTenkiSSHCertificate(data []byte) (*ssh.Certificate, error) {
 }
 
 func validTenkiSSHCertificate(cert *ssh.Certificate, key ssh.PublicKey, session string, now time.Time) error {
-	var identity struct{ Session string }
-	if !bytes.Equal(cert.Key.Marshal(), key.Marshal()) || ssh.Unmarshal([]byte(cert.Extensions["tenki-session-id@tenki.cloud"]), &identity) != nil || identity.Session != session {
+	// The SSH parser has already decoded the extension's string value.
+	if !bytes.Equal(cert.Key.Marshal(), key.Marshal()) || session == "" || cert.Extensions["tenki-session-id@tenki.cloud"] != session {
 		return errors.New("Tenki SSH certificate does not match the session and native key")
 	}
 	principal := ""

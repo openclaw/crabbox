@@ -228,6 +228,10 @@ The cert-backed gateway selects the sandbox from the signed SSH certificate.
 Changing the proxy's session URL alone does not grant access to another sandbox:
 a certificate for session A still selects A. Crabbox obtains the certificate and
 proxy command together for the requested session.
+It checks the certificate's `tenki-session-id@tenki.cloud` extension against
+the session UUID. The SSH parser already decodes the extension's string value;
+no additional SSH decoding is needed. Refreshed certificates must also match
+the native certificate's public key and pass signature and validity checks.
 
 An issued SSH certificate is an access credential until it expires. Expired
 certificates are rejected on new connections, but Crabbox does not guarantee
@@ -235,9 +239,10 @@ that revoking an API key immediately invalidates a cached SSH certificate or
 closes an existing SSH connection. Do not treat an API-key authentication error
 as proof that earlier SSH access has ended.
 
-Current gateway credentials last about 10 minutes; observed signed validity
-windows span 10 minutes 30 seconds, including clock tolerance. This is a
-server-controlled certificate lifetime, not a maximum command duration.
+Native CLI certificates have been observed with signed validity windows of
+10 minutes 30 seconds, including clock tolerance. API refresh can return a
+different lifetime; a live refresh returned 12 hours 30 seconds. These are
+server-controlled certificate lifetimes, not a maximum command duration.
 Crabbox checks the signed expiry before each new SSH transport, including
 workspace-owner renewal, collection, cleanup, and fixed-lease retries. Within
 30 seconds of expiry it requests a new certificate for the same session and
