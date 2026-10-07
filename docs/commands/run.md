@@ -247,6 +247,9 @@ not trigger this multiplexing recovery.
 
 Crabbox records a local repo claim for each reused lease. If a lease is already
 claimed by another repo, pass `--reclaim` to move the claim intentionally.
+For SSH leases, `run --id` uses the recorded target OS and Windows mode for
+readiness and execution. Allocation-time platform flags do not need to be
+repeated; explicit flags that contradict the recorded platform are rejected.
 For already-bound canonical IDs on native AWS, Machine0, and Daytona, run
 admission holds that claim through provider preparation and endpoint publication.
 A concurrent heartbeat cannot invalidate the command between those steps.

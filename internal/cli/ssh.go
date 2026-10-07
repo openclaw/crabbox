@@ -105,12 +105,31 @@ func sshTargetForLease(cfg Config, host, user, port string) SSHTarget {
 		WindowsMode:      cfg.WindowsMode,
 		ChildEnvDenylist: externalDesktopChildEnvDenylist(cfg, cfg.TargetOS),
 	}
+	configureProviderSSHTarget(cfg, &target)
+	return target
+}
+
+// configureProviderSSHTarget lets the configured provider adjust a target for
+// its platform, such as installing a bootstrap gate ahead of the default
+// readiness command. Providers without the hook leave the target unchanged.
+func configureProviderSSHTarget(cfg Config, target *SSHTarget) {
+	if target == nil {
+		return
+	}
 	if provider, err := ProviderFor(cfg.Provider); err == nil {
 		if configurer, ok := provider.(ProviderSSHTargetConfigurer); ok {
-			configurer.ConfigureSSHTarget(&target, sshReadyCommand(target))
+			configurer.ConfigureSSHTarget(target, sshReadyCommand(*target))
 		}
 	}
-	return target
+}
+
+// providerReadyCheck reports the readiness check the configured provider
+// installs for a target of the given platform, or "" when the provider keeps
+// the platform default.
+func providerReadyCheck(cfg Config, target SSHTarget) string {
+	probe := SSHTarget{TargetOS: target.TargetOS, WindowsMode: target.WindowsMode}
+	configureProviderSSHTarget(cfg, &probe)
+	return probe.ReadyCheck
 }
 
 // PreserveExternalDesktopChildEnvironmentBoundary records a valid, trusted or

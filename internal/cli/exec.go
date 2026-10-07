@@ -108,6 +108,9 @@ func (a App) execCommand(ctx context.Context, args []string) error {
 			!resolvedLeaseClaimIdentityCompatible(claim, lease.Server) {
 			return Exit(2, "lease %s resolved outside its original claim", *id)
 		}
+		if err := validateResolvedLeasePlatform(cfg, lease.Server); err != nil {
+			return err
+		}
 		applyResolvedLeaseConfig(&cfg, lease.Server, &lease.SSH)
 		if lease.SSH.TargetOS != targetLinux && lease.SSH.TargetOS != targetMacOS {
 			return Exit(2, "exec currently requires a Linux or macOS SSH target")

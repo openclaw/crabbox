@@ -10325,6 +10325,128 @@ func TestApplyResolvedLeaseConfigPrefersStoredLabelsAndUpdatesTarget(t *testing.
 	}
 }
 
+func TestApplyResolvedLeaseConfigRefreshesProviderReadinessForRecordedPlatform(t *testing.T) {
+	linuxGate := func(t *testing.T, readyCheck string) {
+		t.Helper()
+		if !strings.Contains(readyCheck, "cloud-init status --wait") {
+			t.Fatalf("ready check=%q, want the provider Linux bootstrap gate", readyCheck)
+		}
+	}
+	for _, test := range []struct {
+		name            string
+		configTargetOS  string
+		configMode      string
+		labels          map[string]string
+		wantReadyCheck  func(*testing.T, string)
+		wantProbeNative bool
+	}{
+		{
+			name:           "Linux defaults resolve a native Windows lease",
+			configTargetOS: targetLinux,
+			labels:         map[string]string{"target": targetWindows, "windows_mode": windowsModeNormal},
+			wantReadyCheck: func(t *testing.T, readyCheck string) {
+				t.Helper()
+				if readyCheck != "" {
+					t.Fatalf("ready check=%q, want the platform default for native Windows", readyCheck)
+				}
+			},
+			wantProbeNative: true,
+		},
+		{
+			name:           "Linux defaults resolve a WSL2 lease",
+			configTargetOS: targetLinux,
+			labels:         map[string]string{"target": targetWindows, "windows_mode": windowsModeWSL2},
+			wantReadyCheck: func(t *testing.T, readyCheck string) {
+				t.Helper()
+				if readyCheck != "" {
+					t.Fatalf("ready check=%q, want the platform default for WSL2", readyCheck)
+				}
+			},
+		},
+		{
+			name:           "Linux defaults resolve a Linux lease",
+			configTargetOS: targetLinux,
+			labels:         map[string]string{"target": targetLinux},
+			wantReadyCheck: linuxGate,
+		},
+		{
+			name:           "Windows defaults resolve a Linux lease",
+			configTargetOS: targetWindows,
+			configMode:     windowsModeNormal,
+			labels:         map[string]string{"target": targetLinux},
+			wantReadyCheck: linuxGate,
+		},
+		{
+			name:           "Linux defaults resolve a macOS lease",
+			configTargetOS: targetLinux,
+			labels:         map[string]string{"target": targetMacOS},
+			wantReadyCheck: func(t *testing.T, readyCheck string) {
+				t.Helper()
+				if readyCheck != "" {
+					t.Fatalf("ready check=%q, want the platform default for macOS", readyCheck)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.Provider = "aws"
+			cfg.TargetOS = test.configTargetOS
+			cfg.WindowsMode = test.configMode
+			normalizeTargetConfig(&cfg)
+			target := sshTargetForLease(cfg, "203.0.113.5", "", "")
+			if test.configTargetOS == targetLinux {
+				linuxGate(t, target.ReadyCheck)
+			} else if target.ReadyCheck != "" {
+				t.Fatalf("initial ready check=%q, want platform default", target.ReadyCheck)
+			}
+
+			applyResolvedLeaseConfig(&cfg, Server{Labels: test.labels}, &target)
+
+			if target.TargetOS != test.labels["target"] {
+				t.Fatalf("resolved target=%#v, want platform from lease labels", target)
+			}
+			test.wantReadyCheck(t, target.ReadyCheck)
+			command := sshReadyCommand(target)
+			if strings.Contains(command, "cloud-init") && test.labels["target"] != targetLinux {
+				t.Fatalf("readiness command=%q still carries the Linux bootstrap gate", command)
+			}
+			if test.wantProbeNative && command != sshReadyCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}) {
+				t.Fatalf("readiness command=%q, want the native Windows readiness probe", command)
+			}
+		})
+	}
+}
+
+func TestApplyResolvedLeaseConfigKeepsCustomReadinessAcrossPlatformChange(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	target := sshTargetForLease(cfg, "203.0.113.5", "", "")
+	target.ReadyCheck = "test -f /opt/custom-ready"
+
+	applyResolvedLeaseConfig(&cfg, Server{Labels: map[string]string{"target": targetWindows, "windows_mode": windowsModeNormal}}, &target)
+
+	if target.TargetOS != targetWindows || target.ReadyCheck != "test -f /opt/custom-ready" {
+		t.Fatalf("resolved target=%#v, want the custom readiness command preserved", target)
+	}
+}
+
+func TestApplyResolvedLeaseConfigKeepsReadinessWhenPlatformUnchanged(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider = "aws"
+	target := sshTargetForLease(cfg, "203.0.113.5", "", "")
+	before := target.ReadyCheck
+	if !strings.Contains(before, "cloud-init status --wait") {
+		t.Fatalf("initial ready check=%q, want the provider Linux bootstrap gate", before)
+	}
+
+	applyResolvedLeaseConfig(&cfg, Server{Labels: map[string]string{"work_root": "/srv/crabbox"}}, &target)
+
+	if target.ReadyCheck != before || cfg.WorkRoot != "/srv/crabbox" {
+		t.Fatalf("resolved target=%#v config work root=%q, want unchanged readiness", target, cfg.WorkRoot)
+	}
+}
+
 func TestApplyResolvedLeaseConfigPreservesProviderTargetUser(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Provider = "aws"

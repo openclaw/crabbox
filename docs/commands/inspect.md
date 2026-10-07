@@ -26,6 +26,10 @@ slug selects its recorded provider before provider initialization. An explicit
 lease ID or `--provider`, while missing claims keep the configured-provider
 fallback.
 
+SSH readiness follows the lease's recorded target OS and Windows mode, as in
+[`status`](status.md#waiting-for-readiness); allocation-time platform flags do
+not need to be repeated.
+
 For an acquired fixed Daytona lease removed by native TTL or external deletion,
 inspection can persist its terminal tombstone after verifying the original
 organization and complete provider database absence. It reports `released` and

@@ -141,6 +141,11 @@ func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease Coordina
 		return LeaseTarget{}, err
 	}
 	server, target, leaseID := leaseToServerTarget(lease, cfg)
+	if !releaseOnly {
+		if err := validateResolvedLeasePlatform(cfg, server); err != nil {
+			return LeaseTarget{}, err
+		}
+	}
 	released := coordinatorProviderReleaseConfirmed(lease)
 	if released {
 		// Confirmed deletion retires guest access, not the release operation. Keep
@@ -966,6 +971,9 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		return statusView{}, err
 	}
 	server, target, leaseID := leaseToServerTarget(lease, b.cfg)
+	if err := validateResolvedLeasePlatform(b.cfg, server); err != nil {
+		return statusView{}, err
+	}
 	if !coordinatorProviderReleaseConfirmed(lease) {
 		if err := useCoordinatorStoredSSHKey(&target, server.Provider, leaseID); err != nil {
 			return statusView{}, err
