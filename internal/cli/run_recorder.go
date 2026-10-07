@@ -160,7 +160,7 @@ func (r *runRecorder) appendEvent(kind string, input CoordinatorRunEventInput) {
 		r.publisher = newRunEventPublisher(r.handleRunEventAppendError)
 	}
 	if r.finished {
-		if err := postRunEvent(context.Background(), r.coord, r.runID, input); err != nil {
+		if err := r.publisher.postEvent(context.Background(), r.coord, r.runID, input); err != nil {
 			r.handleRunEventAppendError(kind, err)
 		}
 		return
@@ -270,6 +270,7 @@ func (r *runRecorder) attachRun(run CoordinatorRun) {
 	r.createPending = false
 	r.historyUnavailable = false
 	r.publisher = newRunEventPublisher(r.handleRunEventAppendError)
+	r.publisher.idempotent = run.EventAppendIdempotent
 	fmt.Fprintf(r.stderr, "recording run %s\n", run.ID)
 }
 
@@ -285,7 +286,7 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 		return nil
 	}
 	r.terminalAttempted = true
-	r.waitForEvents(runEventOutputPostWait)
+	r.waitForEvents(r.publisher.drainTimeout())
 	r.CaptureTelemetryEnd(ctx, target)
 	telemetry := runTelemetrySummary(r.telemetryStart, r.telemetryEnd, r.telemetrySnapshot())
 	ctx, cancel := context.WithTimeout(context.Background(), runRecorderFinishTimeout)
@@ -352,7 +353,7 @@ func (r *runRecorder) Failed(err error) {
 	if r == nil {
 		return
 	}
-	r.waitForEvents(runEventOutputPostWait)
+	r.waitForEvents(r.publisher.drainTimeout())
 	r.stopTelemetrySampler()
 	if r.finished || err == nil || r.terminalAttempted {
 		return

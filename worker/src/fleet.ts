@@ -15428,20 +15428,8 @@ export class FleetCoordinator {
       const limit = clampLimit(url.searchParams.get("limit"), 500);
       return json({ events: await this.runEvents(runID, after, limit) });
     }
-    if (method === "POST" && action === "events") {
-      const run = await this.getRun(runID);
-      if (!run || !this.runWritableByRequest(run, request)) {
-        return notFound();
-      }
-      const input = await readJson<RunEventRequest>(request);
-      if (input.leaseID && input.leaseID !== run.leaseID) {
-        const lease = validLeaseID(input.leaseID) ? await this.getLease(input.leaseID) : undefined;
-        if (!lease || !this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
-          return notFound();
-        }
-      }
-      const event = await this.appendRunEventRecord(run, input);
-      return json({ event }, { status: 201 });
+    if ((method === "POST" || method === "PUT") && action === "events") {
+      return this.appendRunEvent(request, runID);
     }
     if (method === "POST" && action === "telemetry") {
       return this.appendRunTelemetry(request, runID);
@@ -19323,6 +19311,7 @@ export class FleetCoordinator {
         return;
       }
       await this.deleteStoragePrefix(runEventPrefix(runID));
+      await this.deleteStoragePrefix(`runevent-id:${runID}:`);
       if (current.terminalLogPrefix?.startsWith(runTerminalLogRoot(runID))) {
         await this.deleteStoragePrefix(current.terminalLogPrefix);
       }
@@ -19749,30 +19738,63 @@ export class FleetCoordinator {
     );
   }
 
-  private async appendRunEventRecord(
-    run: RunRecord,
-    input: RunEventRequest,
-  ): Promise<RunEventRecord> {
-    const now = new Date().toISOString();
-    const seq = (run.eventCount ?? 0) + 1;
-    const event = boundedRunEvent(run.id, seq, now, input);
-    const previousLeaseID = run.leaseID;
-    applyRunEventSummary(run, event);
-    if (
-      validLeaseID(run.leaseID) &&
-      (run.leaseID !== previousLeaseID || !run.leaseIDs?.includes(run.leaseID))
-    ) {
-      const lease = await this.getLease(run.leaseID);
-      if (lease) {
-        this.setRunLeaseAttribution(run, lease);
-      }
+  private async appendRunEvent(request: Request, runID: string): Promise<Response> {
+    const input = await readJson<RunEventRequest>(request);
+    // PUT is a distinct protocol: an older coordinator rejects it instead of
+    // silently accepting an unknown idempotency field and duplicating a retry.
+    const id = request.method === "PUT" ? input.id : undefined;
+    if (request.method === "PUT" && (typeof id !== "string" || !/^[a-f0-9]{32}$/.test(id))) {
+      return json({ error: "invalid_run_event_id" }, { status: 400 });
     }
-    run.eventCount = seq;
-    run.lastEventAt = now;
-    await this.state.storage.put(runEventKey(run.id, seq), event);
-    await this.putRun(run);
-    await this.broadcastRunEvent(run, event);
-    return event;
+    const fingerprint = id
+      ? await sha256Hex(JSON.stringify(boundedRunEvent(runID, 0, "", input)))
+      : undefined;
+    const now = new Date().toISOString();
+    const committed = await this.state.storage.transaction(async (storage) => {
+      const run = await storage.get<RunRecord>(runKey(runID));
+      if (!run || !this.runWritableByRequest(run, request)) return { kind: "missing" as const };
+      const identityKey = id ? `runevent-id:${runID}:${id}` : undefined;
+      if (identityKey) {
+        const retained = await storage.get<{ seq: number; fingerprint: string }>(identityKey);
+        if (retained) {
+          if (retained.fingerprint !== fingerprint) return { kind: "conflict" as const };
+          const event = await storage.get<RunEventRecord>(runEventKey(runID, retained.seq));
+          if (!event) throw new Error("idempotent run event is missing");
+          return { kind: "duplicate" as const, run, event };
+        }
+      }
+      if (input.leaseID && input.leaseID !== run.leaseID) {
+        const lease = validLeaseID(input.leaseID)
+          ? await storage.get<LeaseRecord>(leaseKey(input.leaseID))
+          : undefined;
+        if (!lease || !this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
+          return { kind: "missing" as const };
+        }
+      }
+      const seq = (run.eventCount ?? 0) + 1;
+      const event = boundedRunEvent(runID, seq, now, input);
+      const previousLeaseID = run.leaseID;
+      applyRunEventSummary(run, event);
+      if (
+        validLeaseID(run.leaseID) &&
+        (run.leaseID !== previousLeaseID || !run.leaseIDs?.includes(run.leaseID))
+      ) {
+        const lease = await storage.get<LeaseRecord>(leaseKey(run.leaseID));
+        if (lease) this.setRunLeaseAttribution(run, lease);
+      }
+      run.eventCount = seq;
+      run.lastEventAt = now;
+      await storage.put(runEventKey(runID, seq), event);
+      await storage.put(runKey(runID), run);
+      if (identityKey) await storage.put(identityKey, { seq, fingerprint });
+      return { kind: "committed" as const, run, event };
+    });
+    if (committed.kind === "missing") return notFound();
+    if (committed.kind === "conflict")
+      return json({ error: "run_event_id_conflict" }, { status: 409 });
+    if (committed.kind === "committed")
+      await this.broadcastRunEvent(committed.run, committed.event);
+    return json({ event: committed.event }, { status: committed.kind === "committed" ? 201 : 200 });
   }
 
   private async listProviderMachinesSafe(provider: Provider): Promise<ProviderMachine[]> {

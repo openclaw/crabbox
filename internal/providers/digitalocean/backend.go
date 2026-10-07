@@ -15,6 +15,7 @@ import (
 
 type digitalOceanAPI interface {
 	AccountID(context.Context) (string, error)
+	ValidateSizeRegion(context.Context, core.Config) error
 	ListCrabboxDroplets(context.Context) ([]droplet, error)
 	GetDroplet(context.Context, int64) (droplet, error)
 	CreateDroplet(context.Context, core.Config, string, string, string, bool, time.Time) (droplet, error)
@@ -90,6 +91,9 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 	}
 	accountID, err := client.AccountID(ctx)
 	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if err := client.ValidateSizeRegion(ctx, cfg); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	leaseID := core.NewLeaseID()
@@ -322,6 +326,11 @@ func (b *digitalOceanLeaseBackend) persistAcquireCleanupClaim(
 }
 
 func (b *digitalOceanLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
+	if req.ReleaseOnly {
+		if lease, handled, err := resolveRejectedFixed(req.ID); handled || err != nil {
+			return lease, err
+		}
+	}
 	client, err := b.clientFactory(b.RT)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -785,6 +794,11 @@ func (b *digitalOceanLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequ
 }
 
 func (b *digitalOceanLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	if claim, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server); set && exists && isRejectedFixed(claim) {
+		return fixedLeaseKind.FinalizeAfterCleanup(claim, func() error {
+			return core.RemoveStoredTestboxConnectionArtifacts(claim.LeaseID)
+		})
+	}
 	if req.Lease.Server.CloudID != "" || req.Lease.Server.Name != "" {
 		return b.deleteServer(ctx, b.Cfg, req.Lease.Server)
 	}
@@ -799,6 +813,9 @@ func (b *digitalOceanLeaseBackend) ReleaseLease(ctx context.Context, req core.Re
 }
 
 func (b *digitalOceanLeaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
+	if claim, exists, _ := core.ServerLeaseClaimSnapshot(lease.Server); exists && isRejectedFixed(claim) {
+		return fmt.Sprintf("released lease=%s (no resource created)", lease.LeaseID)
+	}
 	return fmt.Sprintf("deleted lease=%s droplet=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 }
 

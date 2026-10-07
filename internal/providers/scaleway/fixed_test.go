@@ -215,6 +215,49 @@ func TestFixedScalewayUsesEffectiveMachineType(t *testing.T) {
 	}
 }
 
+func TestFixedScalewayLostResponseRefusesMismatchedIdentity(t *testing.T) {
+	for _, field := range []string{"fixed_attempt", "scaleway_ssh_key_id"} {
+		t.Run(field, func(t *testing.T) {
+			backend, fake := newTestBackend(t)
+			req := fixedRequest(t)
+			fake.createResponseWithoutServer = true
+			if _, err := backend.Acquire(t.Context(), req); err == nil {
+				t.Fatal("expected lost create response")
+			}
+			before, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil || before.CloudID != "" || before.Labels[rootVolumeLabel] != "" {
+				t.Fatalf("expected unbound attempt: %v", err)
+			}
+
+			// Replace the vanished server with a candidate copying its name and tags,
+			// but with one mismatched identity field and its own co-created root.
+			candidate := *fake.server
+			candidate.ID = "replacement-server"
+			createdAt := candidate.CreationDate.Add(time.Minute)
+			candidate.CreationDate = &createdAt
+			root := *fake.volumes[candidate.Volumes["0"].ID]
+			root.ID, root.CreationDate = "55555555-5555-4555-8555-555555555555", &createdAt
+			root.Server = &instance.ServerSummary{ID: candidate.ID}
+			candidate.Volumes = map[string]*instance.VolumeServer{"0": {ID: root.ID}}
+			labels := labelsFromTags(candidate.Tags)
+			labels[field] = "another-attempt"
+			candidate.Tags = tagsFromLabels(labels)
+			fake.server, fake.volumes = &candidate, map[string]*instance.Volume{root.ID: &root}
+
+			if _, err := backend.Acquire(t.Context(), req); core.ExitCodeForError(err, 1) != 4 {
+				t.Fatalf("replay accepted mismatched %s: %v", field, err)
+			}
+			if err := backend.releaseFixed(t.Context(), fake, before); core.ExitCodeForError(err, 1) != 4 {
+				t.Fatalf("stop accepted mismatched %s: %v", field, err)
+			}
+			after, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil || !reflect.DeepEqual(before, after) || fake.createCalls != 1 || fake.updateCalls != 0 || fake.deletedServer || fake.deletedKey || len(fake.volumes) != 1 || len(root.Tags) != 0 {
+				t.Fatalf("refusal changed the claim or resources: %v", err)
+			}
+		})
+	}
+}
+
 func TestFixedScalewayIntentConflicts(t *testing.T) {
 	for _, field := range []string{"repository", "keep", "slug", "type", "image", "security group", "SSH user", "work root", "idle timeout", "hostname template"} {
 		t.Run(field, func(t *testing.T) {

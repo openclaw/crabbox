@@ -17,11 +17,12 @@
 ### Fixes
 
 - Scaleway: create fixed leases from public images without snapshot access, recover the exact server after lost responses, and revalidate root-disk attempt ownership before cleanup. [PR 2728](https://github.com/openclaw/crabbox/pull/2728).
-
+- DigitalOcean: check size availability before creating resources and retain definite fixed-lease rejections as retryable, locally releasable attempts. [PR 2725](https://github.com/openclaw/crabbox/pull/2725).
 - Scaleway: accept the same SSH public key after API comment normalization, allowing first fixed-lease acquisition and safe cleanup of stranded key-only attempts. [PR 2724](https://github.com/openclaw/crabbox/pull/2724).
 - Boat (ASCII Box): release absent sandboxes without waiting for blocked background data purges, while preserving the purge operation ID in fixed-lease terminal receipts. [PR 2726](https://github.com/openclaw/crabbox/pull/2726).
 - Probe resolved SSH leases with their recorded platform, preserve Linux bootstrap gates, and reject contradictory explicit target flags. [Issue 2715](https://github.com/openclaw/crabbox/issues/2715), [PR 2718](https://github.com/openclaw/crabbox/pull/2718). Thanks @saftall.
 - Fail AWS acquire promptly when EC2 terminates an instance or closes its Spot request during network, SSH, Windows, or coordinator SSM readiness, preserving the reclaim reason and existing cleanup ownership. [Issue 2716](https://github.com/openclaw/crabbox/issues/2716). Thanks @saftall.
+- Retry transient run-event append failures with stable IDs, atomic sequence updates, and bounded publication deadlines while preserving ordered output and capped queues. [Issue 1561](https://github.com/openclaw/crabbox/issues/1561).
 - Blacksmith Testbox: `run --id tbx_...` and stop read only the exact claim file instead of scanning every local claim. [PR 2719](https://github.com/openclaw/crabbox/pull/2719).
 - Apply explicit lifecycle target flags before provider validation so Linux defaults cannot block macOS stop/release, pause/resume, list, or cleanup. [Issue 2706](https://github.com/openclaw/crabbox/issues/2706). Thanks @coygeek.
 - Stop coordinator alarm rearm loops from stale prewarm retries, clamped overdue work, and controller-owned wakes, with diagnostics and bounded backoff that survives concurrent heartbeats without postponing future deadlines. [PR 2711](https://github.com/openclaw/crabbox/pull/2711).

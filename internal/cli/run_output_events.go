@@ -13,6 +13,9 @@ const (
 	runEventOutputMaxBytes   = 64 * 1024
 	runEventOutputQueueSize  = 32
 	runEventOutputPostWait   = 2 * time.Second
+	runEventAppendBudget     = 30 * time.Second
+	runEventAppendAttempts   = 3
+	runEventAppendRetry      = 250 * time.Millisecond
 )
 
 type runEventPublication struct {
@@ -21,6 +24,7 @@ type runEventPublication struct {
 }
 
 type runEventPublisher struct {
+	idempotent      bool
 	onError         func(string, error) bool
 	outputMu        sync.Mutex
 	outputBytes     int
@@ -129,8 +133,8 @@ func (q *runEventPublisher) append(coord *CoordinatorClient, runID string, input
 // A binding owns admission, so queued diagnostics cannot consume its capacity
 // or HTTP budget. Drain and join before posting, then resume the same publisher.
 func (q *runEventPublisher) Bind(ctx context.Context, coord *CoordinatorClient, runID string, input CoordinatorRunEventInput) error {
-	q.CloseAndWait(runEventOutputPostWait)
-	if err := postRunEvent(ctx, coord, runID, input); err != nil {
+	q.CloseAndWait(q.drainTimeout())
+	if err := q.postEvent(ctx, coord, runID, input); err != nil {
 		return err
 	}
 	q.queueMu.Lock()
@@ -140,14 +144,50 @@ func (q *runEventPublisher) Bind(ctx context.Context, coord *CoordinatorClient, 
 	return nil
 }
 
-func postRunEvent(ctx context.Context, coord *CoordinatorClient, runID string, input CoordinatorRunEventInput) error {
-	timeout := runRecorderRequestTimeout
-	if input.Stream != "" || input.Type == "output.truncated" {
-		timeout = runEventOutputPostWait
+func (q *runEventPublisher) drainTimeout() time.Duration {
+	if q != nil && q.idempotent {
+		return runEventAppendBudget
 	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	return runEventOutputPostWait
+}
+
+func (q *runEventPublisher) postEvent(ctx context.Context, coord *CoordinatorClient, runID string, input CoordinatorRunEventInput) error {
+	if q.idempotent {
+		id, err := newRunID()
+		if err != nil {
+			return err
+		}
+		input.ID = strings.TrimPrefix(id, "run_")
+	}
+	return postRunEvent(ctx, coord, runID, input)
+}
+
+func postRunEvent(ctx context.Context, coord *CoordinatorClient, runID string, input CoordinatorRunEventInput) error {
+	ctx, cancel := context.WithTimeout(ctx, runEventAppendBudget)
 	defer cancel()
-	_, err := coord.AppendRunEvent(ctx, runID, input)
+	attempts := 1
+	if input.ID != "" {
+		attempts = runEventAppendAttempts
+	}
+	var err error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		requestCtx, requestCancel := context.WithTimeout(ctx, runRecorderRequestTimeout)
+		_, err = coord.AppendRunEvent(requestCtx, runID, input)
+		requestCancel()
+		if err == nil || !runRecorderFinishRetryable(err) || attempt+1 == attempts {
+			return err
+		}
+		timer := time.NewTimer(runEventAppendRetry << attempt)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 	return err
 }
 
@@ -160,7 +200,7 @@ func (q *runEventPublisher) post(ctx context.Context, runID string) {
 			err = stopped
 		}
 		if err == nil {
-			err = postRunEvent(ctx, publication.coord, runID, publication.input)
+			err = q.postEvent(ctx, publication.coord, runID, publication.input)
 		}
 		if err != nil && ctx.Err() == nil && stopped == nil && q.onError != nil && !q.onError(publication.input.Type, err) {
 			stopped = err

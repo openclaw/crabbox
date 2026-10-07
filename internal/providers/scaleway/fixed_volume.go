@@ -44,6 +44,8 @@ func (b *Backend) bindFixedRoot(ctx context.Context, client Client, tx *core.Fix
 	if createdAt != "" {
 		binding.AttemptValues = map[string]string{"root_created_at": createdAt}
 	}
+	// Project tag writers are inside the operator trust boundary: like other fixed
+	// providers, recovery assumes they preserve the journaled attempt's tags.
 	if err := tx.Bind(binding); err != nil {
 		return err
 	}
