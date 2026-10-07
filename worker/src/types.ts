@@ -1030,6 +1030,7 @@ export interface PromotedImageRecord extends ProviderImage {
 }
 
 export interface RunRecord {
+  eventAppendIdempotent?: boolean;
   id: string;
   leaseID: string;
   leaseIDs?: string[];
@@ -1192,6 +1193,7 @@ export interface RunEventRecord {
 }
 
 export interface RunEventRequest {
+  id?: string;
   type?: string;
   phase?: string;
   stream?: "stdout" | "stderr";

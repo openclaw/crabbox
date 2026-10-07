@@ -5,9 +5,11 @@ import type { Env } from "../src/types";
 
 describe("run-event Worker boundary", () => {
   it.each([
-    "Durable Object's isolate exceeded its memory limit and was reset.",
-    "synthetic body stream disconnected",
-  ])("returns a structured failure without replay after %s", async (message) => {
+    ["POST", "Durable Object's isolate exceeded its memory limit and was reset."],
+    ["PUT", "Durable Object's isolate exceeded its memory limit and was reset."],
+    ["POST", "synthetic body stream disconnected"],
+    ["PUT", "synthetic body stream disconnected"],
+  ])("returns a structured %s failure without replay after %s", async (method, message) => {
     const fetch = vi.fn<() => Promise<Response>>(async () => {
       throw new Error(message);
     });
@@ -19,8 +21,9 @@ describe("run-event Worker boundary", () => {
     } as unknown as Env;
     const response = await worker.fetch(
       new Request("https://coordinator.test/v1/runs/run_example/events", {
-        method: "POST",
+        method,
         headers: { authorization: "Bearer test-shared", "content-type": "application/json" },
+        // oxlint-disable-next-line unicorn/no-invalid-fetch-options -- the matrix contains only POST and PUT.
         body: JSON.stringify({ type: "stdout", data: "test output" }),
       }),
       env,
