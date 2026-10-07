@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -549,6 +550,7 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 	}()
 	cancelOnError := false
 	identityMismatch := false
+	var rejected *coordinatorCreationRejectedError
 	defer func() {
 		stopProgress()
 		<-progressDone
@@ -579,6 +581,9 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 				err = b.abandonUnrecoveredCoordinatorLeaseCreate(ctx, leaseID, slug, createAttemptID, err)
 				err = errors.Join(ctx.Err(), err)
 			}
+			if rejected != nil && createCtx.Err() == nil {
+				err = *rejected
+			}
 		}
 	}()
 
@@ -596,6 +601,11 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 	rebound := false
 	lease, err = create(createCtx)
 	if err != nil {
+		if fixed {
+			// Only the first response can establish rejection. Recovery can return
+			// the same HTTP error after an earlier create may have committed.
+			rejected = qualifyCoordinatorCreationRejection(cfg, leaseID, err)
+		}
 		cancelOnError = coordinatorCreateLeaseErrorMayHaveCommitted(err) ||
 			(isCoordinatorStaleInstanceError(err) && !isCoordinatorStaleInstanceCleanedSignal(err))
 		if coordinatorCreateLeaseErrorCanReplay(err) && createCtx.Err() == nil {
@@ -627,6 +637,52 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 		return CoordinatorLease{}, fmt.Errorf("coordinator replay returned active lease %s without an endpoint", lease.ID)
 	}
 	return lease, coordinatorLeaseProvisioningError(lease)
+}
+
+// This marker is attached only after the original fixed create is definitively
+// rejected and its acquisition context is still live. Preserve the diagnostic.
+type coordinatorCreationRejectedError struct {
+	cause            error
+	provider         string
+	requestedLeaseID string
+}
+
+func (e coordinatorCreationRejectedError) Error() string { return e.cause.Error() }
+func (e coordinatorCreationRejectedError) Unwrap() error { return e.cause }
+
+func qualifyCoordinatorCreationRejection(cfg Config, leaseID string, err error) *coordinatorCreationRejectedError {
+	// Require the original typed response, not one cause of a joined transport,
+	// cancellation, or other ambiguous failure.
+	response, ok := err.(CoordinatorHTTPError)
+	if !ok || !response.responseComplete || !response.responseUnredirected ||
+		!canonicalLeaseIDPattern.MatchString(leaseID) || response.Method != http.MethodPut ||
+		response.StatusCode != http.StatusTooManyRequests {
+		return nil
+	}
+	path := "/v1/leases/" + leaseID
+	if hasCapacityMinimums(cfg) {
+		path += "/resource-constrained"
+	}
+	if response.Path != path {
+		return nil
+	}
+	duplicate, decodeErr := JSONHasDuplicateKeys(json.NewDecoder(strings.NewReader(response.Message)))
+	if duplicate || decodeErr != nil {
+		return nil
+	}
+	var body map[string]json.RawMessage
+	if json.Unmarshal([]byte(response.Message), &body) != nil {
+		return nil
+	}
+	var code string
+	if json.Unmarshal(body["error"], &code) != nil || code != "cost_limit_exceeded" {
+		return nil
+	}
+	provider, providerErr := canonicalProviderName(cfg.Provider)
+	if providerErr != nil {
+		return nil
+	}
+	return &coordinatorCreationRejectedError{cause: err, provider: provider, requestedLeaseID: leaseID}
 }
 
 type coordinatorLeaseIDConflict struct{ err error }

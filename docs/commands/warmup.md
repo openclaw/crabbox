@@ -44,6 +44,36 @@ Scripts should prefer the canonical ID. Add `--timing-json` to emit a final
 JSON timing record (provider, lease ID, slug, total duration, exit code) on
 stderr.
 
+For a fixed-ID coordinator request rejected by a quota before lease admission,
+`--timing-json` also emits a failure record. Its optional `creationRejected`
+object has this shape (shown with the relevant existing timing fields):
+
+```json
+{"provider":"aws","exitCode":1,"creationRejected":{"version":1,"requestedLeaseId":"cbx_0123456789ab","code":"cost_limit_exceeded"}}
+```
+
+The top-level provider is the canonical requested provider. `requestedLeaseId`
+identifies the request; `leaseId` and `slug` are absent because no allocated
+identity is reported. The original error diagnostic and nonzero exit remain.
+This applies to ordinary and minimum-resource fixed-create requests through the
+coordinator. It does not change successful output or commands without
+`--timing-json`.
+
+Version 1 qualifies only the original typed HTTP 429 `cost_limit_exceeded`
+response for that exact create request. Cancellation, deadlines, an earlier
+uncertain response followed by replay, errors after acceptance, other error
+codes, direct-provider creation, and checkpoint forks do not produce this
+result. A nonzero exit alone never proves rejection or completed cleanup.
+
+Consumers must require one complete newline-terminated timing record from the
+invocation's stderr, the supported version and code, the matching requested
+provider and ID, and a failed invocation without interruption. Missing,
+malformed, duplicate, unknown, or mismatched results remain inconclusive,
+including partial output or a signal before complete evidence. Older clients
+without this result retain the existing recovery path. The result describes
+creation rejection; it does not confirm removal of local request state or
+authorize cleanup of another request.
+
 For Blacksmith Testbox with a configured coordinator, the lease summary appears
 as soon as the ready Testbox is retained. Final completion and timing follow the
 optional portal inventory sync, and the total includes that bookkeeping. The

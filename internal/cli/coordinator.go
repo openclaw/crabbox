@@ -60,6 +60,9 @@ type CoordinatorHTTPError struct {
 	StatusCode int
 	Message    string
 	retryAfter time.Duration
+	// Diagnostics alone cannot authorize creation-rejection output.
+	responseComplete     bool
+	responseUnredirected bool
 }
 
 func (e CoordinatorHTTPError) Error() string {
@@ -2665,7 +2668,14 @@ func (c *CoordinatorClient) doHTTPWithHeaders(ctx context.Context, method, path 
 	if err := c.addRequestHeaders(ctx, req.Header); err != nil {
 		return err
 	}
-	resp, err := c.secureHTTPClient().Do(req)
+	client := c.secureHTTPClient()
+	redirected := false
+	checkRedirect := client.CheckRedirect
+	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		redirected = true
+		return checkRedirect(next, via)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -2674,6 +2684,7 @@ func (c *CoordinatorClient) doHTTPWithHeaders(ctx context.Context, method, path 
 	var response CoordinatorHTTPError
 	if errors.As(err, &response) {
 		response.retryAfter = coordinatorReadRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		response.responseUnredirected = !redirected
 		return response
 	}
 	return err
@@ -2916,13 +2927,20 @@ func splitCurlResponse(data []byte) ([]byte, int, error) {
 
 func decodeCoordinatorResponse(method, path string, statusCode int, body io.Reader, out any) error {
 	if statusCode < 200 || statusCode >= 300 {
-		data, _ := io.ReadAll(io.LimitReader(body, 600))
+		// Keep the existing diagnostic limit, reading one extra byte to establish
+		// whether the whole response is available for authoritative qualification.
+		data, readErr := io.ReadAll(io.LimitReader(body, 601))
+		complete := readErr == nil && len(data) <= 600
+		if len(data) > 600 {
+			data = data[:600]
+		}
 		msg := strings.TrimSpace(string(data))
 		return CoordinatorHTTPError{
-			Method:     method,
-			Path:       path,
-			StatusCode: statusCode,
-			Message:    msg,
+			Method:           method,
+			Path:             path,
+			StatusCode:       statusCode,
+			Message:          msg,
+			responseComplete: complete,
 		}
 	}
 	if out != nil {
