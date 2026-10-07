@@ -300,7 +300,7 @@ func (b *Backend) fixedKey(ctx context.Context, client Client, tx *core.FixedTra
 	if key == nil || key.ID == "" {
 		return nil, core.FixedUncertainCustody(claim.LeaseID)
 	}
-	if key.Name != name || key.ProjectID != client.ProjectID() || id != "" && id != key.ID || publicKey != "" && strings.TrimSpace(key.PublicKey) != strings.TrimSpace(publicKey) {
+	if key.Name != name || key.ProjectID != client.ProjectID() || id != "" && id != key.ID || publicKey != "" && !sameSSHPublicKey(key.PublicKey, publicKey) {
 		return nil, core.Exit(4, "lease_id_conflict: Scaleway SSH key identity changed")
 	}
 	labels["scaleway_ssh_key_id"] = key.ID

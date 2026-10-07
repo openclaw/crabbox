@@ -651,6 +651,7 @@ type CoordinatorRunLeaseOwner struct {
 }
 
 type CoordinatorRun struct {
+	EventAppendIdempotent     bool                       `json:"eventAppendIdempotent,omitempty"`
 	AdmissionFailedBeforeWork bool                       `json:"admissionFailedBeforeWork,omitempty"`
 	ID                        string                     `json:"id"`
 	LeaseID                   string                     `json:"leaseID"`
@@ -843,6 +844,7 @@ type CoordinatorRunEvent struct {
 }
 
 type CoordinatorRunEventInput struct {
+	ID          string `json:"id,omitempty"`
 	Type        string `json:"type,omitempty"`
 	Phase       string `json:"phase,omitempty"`
 	Stream      string `json:"stream,omitempty"`
@@ -2510,7 +2512,11 @@ func (c *CoordinatorClient) AppendRunTelemetry(ctx context.Context, runID string
 
 func (c *CoordinatorClient) AppendRunEvent(ctx context.Context, runID string, input CoordinatorRunEventInput) (CoordinatorRunEvent, error) {
 	var res CoordinatorRunEventResponse
-	err := c.do(ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/events", input, &res)
+	method := http.MethodPost
+	if input.ID != "" {
+		method = http.MethodPut
+	}
+	err := c.do(ctx, method, "/v1/runs/"+url.PathEscape(runID)+"/events", input, &res)
 	return res.Event, err
 }
 

@@ -98,6 +98,7 @@ function releaseCleanupStatus(record: LeaseRecord): LeaseCleanupStatus {
 export function publicRunRecord(record: RunRecord): RunRecord {
   const publicRecord = {
     ...record,
+    eventAppendIdempotent: true,
     org: orgLabelForDisplay(record.org),
   };
   delete publicRecord.terminalReceipt;

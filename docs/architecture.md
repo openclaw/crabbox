@@ -286,6 +286,7 @@ PUT  /v1/runs/{run-id}
 GET  /v1/runs/{run-id}
 GET  /v1/runs/{run-id}/logs
 POST /v1/runs/{run-id}/events
+PUT  /v1/runs/{run-id}/events
 POST /v1/runs/{run-id}/telemetry
 POST /v1/runs/{run-id}/finish
 ```
@@ -389,7 +390,7 @@ commands can read it back:
 - `PUT /v1/runs/{id}` atomically admits a caller-known run and its first event,
   or returns the retained record for the same caller and original request.
   Legacy `POST /v1/runs` creates a coordinator-issued `RunRecord` in state `running`.
-- `POST /v1/runs/{id}/events` streams phase-tagged events: `run.started`,
+- `PUT /v1/runs/{id}/events` (legacy clients use `POST`) streams phase-tagged events: `run.started`,
   `leasing.started`, `bootstrap.waiting`, `sync.started`/`finished`,
   `actions.hydrate.*`, `command.started`, stdout/stderr chunks,
   `command.finished`, `lease.released`.

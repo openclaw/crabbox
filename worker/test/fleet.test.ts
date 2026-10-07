@@ -46872,6 +46872,112 @@ describe("fleet lease identity and idle", () => {
 });
 
 describe("fleet run history", () => {
+  it("replays an idempotent event after a lost commit acknowledgement without duplicating output", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const created = await fleet.fetch(request("POST", "/v1/runs", { body: { command: ["true"] } }));
+    const { run } = (await created.json()) as { run: RunRecord };
+    const path = `/v1/runs/${run.id}/events`;
+    const body = { id: "a".repeat(32), type: "stdout", stream: "stdout", data: "hello" };
+    let fault = true;
+    storage.afterCommit = async (keys) => {
+      if (fault && keys.has(`run:${run.id}`)) {
+        fault = false;
+        throw new Error("commit acknowledgement lost");
+      }
+    };
+    const first = await fleet.fetch(request("PUT", path, { body }));
+    expect(first.status).toBe(500);
+    const retry = await fleet.fetch(request("PUT", path, { body }));
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({ event: { seq: 2, data: "hello" } });
+    const conflict = await fleet.fetch(
+      request("PUT", path, { body: { ...body, data: "different" } }),
+    );
+    expect(conflict.status).toBe(409);
+    expect(storage.value<RunRecord>(`run:${run.id}`)?.eventCount).toBe(2);
+    const events = await fleet.fetch(request("GET", path));
+    expect(((await events.json()) as { events: unknown[] }).events).toHaveLength(2);
+    expect(run).toMatchObject({ eventAppendIdempotent: true });
+  });
+
+  it("rolls back an event together with its sequence counter on storage failure", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const created = await fleet.fetch(request("POST", "/v1/runs", { body: { command: ["true"] } }));
+    const { run } = (await created.json()) as { run: RunRecord };
+    storage.beforePut = async (key) => {
+      if (key === `run:${run.id}`) throw new Error("storage unavailable");
+    };
+    const result = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/events`, {
+        body: { id: "b".repeat(32), type: "stdout", data: "hello" },
+      }),
+    );
+    expect(result.status).toBe(500);
+    expect((await storage.list({ prefix: `runevent:${run.id}:` })).size).toBe(1);
+    expect(storage.value<RunRecord>(`run:${run.id}`)?.eventCount).toBe(1);
+  });
+
+  it("keeps event retries actor-bound and stable across later appends and terminal finish", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const created = await fleet.fetch(request("POST", "/v1/runs", { body: { command: ["true"] } }));
+    const { run } = (await created.json()) as { run: RunRecord };
+    const path = `/v1/runs/${run.id}/events`;
+    const body = { id: "c".repeat(32), type: "command.started", phase: "command" };
+    const first = await fleet.fetch(request("PUT", path, { body }));
+    const accepted = await first.json();
+    const second = await fleet.fetch(
+      request("PUT", path, {
+        body: { ...body, id: "d".repeat(32), type: "stdout", data: "hello" },
+      }),
+    );
+    expect(second.status).toBe(201);
+    const finished = await fleet.fetch(
+      request("POST", `/v1/runs/${run.id}/finish`, { body: { exitCode: 0, log: "hello" } }),
+    );
+    expect(finished.status).toBe(200);
+    const before = structuredClone(storage.value<RunRecord>(`run:${run.id}`));
+    const retry = await fleet.fetch(request("PUT", path, { body }));
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toEqual(accepted);
+    expect(storage.value<RunRecord>(`run:${run.id}`)).toEqual(before);
+    const outsider = await fleet.fetch(
+      request("PUT", path, { headers: { "x-crabbox-owner": "outsider@example.com" }, body }),
+    );
+    expect(outsider.status).toBe(404);
+  });
+
+  it("validates idempotent event IDs and preserves legacy append behavior", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const created = await fleet.fetch(request("POST", "/v1/runs", { body: { command: ["true"] } }));
+    const { run } = (await created.json()) as { run: RunRecord };
+    const path = `/v1/runs/${run.id}/events`;
+    for (const id of [undefined, null, "", "../bad", "a".repeat(33)]) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each independent invalid request must leave the sequence unchanged.
+      const response = await fleet.fetch(request("PUT", path, { body: { id, type: "stdout" } }));
+      expect(response.status).toBe(400);
+    }
+    const results = await Promise.all(
+      Array.from({ length: 4 }, (_, i) =>
+        fleet.fetch(
+          request("PUT", path, {
+            body: { id: String(i).repeat(32), type: "stdout", data: String(i) },
+          }),
+        ),
+      ),
+    );
+    expect(results.map((response) => response.status)).toEqual([201, 201, 201, 201]);
+    expect(storage.value<RunRecord>(`run:${run.id}`)?.eventCount).toBe(5);
+    expect((await storage.list({ prefix: `runevent:${run.id}:` })).size).toBe(5);
+    const legacy = { type: "stdout", data: "legacy" };
+    await fleet.fetch(request("POST", path, { body: legacy }));
+    await fleet.fetch(request("POST", path, { body: legacy }));
+    expect(storage.value<RunRecord>(`run:${run.id}`)?.eventCount).toBe(7);
+  });
+
   it.each(["http", "control", "legacy attribution"])(
     "bounds event-history materialization for %s reads",
     async (route) => {
@@ -47219,6 +47325,7 @@ describe("fleet run history", () => {
     storage.seed("runlog:run_000000000000", "legacy log");
     storage.seed("runlog:run_000000000000:chunk:000000", "chunk");
     storage.seed("runevent:run_000000000000:000000000001", { seq: 1 });
+    storage.seed("runevent-id:run_000000000000:abc", { seq: 1, fingerprint: "test" });
 
     storage.resetListOptions();
     await fleet.alarm();
@@ -47232,6 +47339,7 @@ describe("fleet run history", () => {
     expect(storage.value("runlog:run_000000000000")).toBeUndefined();
     expect(storage.value("runlog:run_000000000000:chunk:000000")).toBeUndefined();
     expect(storage.value("runevent:run_000000000000:000000000001")).toBeUndefined();
+    expect(storage.value("runevent-id:run_000000000000:abc")).toBeUndefined();
     expect(storage.value("maintenance:run-prune-cursor")).toBe("run:run_000000000015");
     expect(storage.alarm()).toBeGreaterThan(Date.now());
     expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1500);

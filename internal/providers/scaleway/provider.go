@@ -715,7 +715,7 @@ func (b *Backend) reconcileSSHKey(ctx context.Context, client Client, name, publ
 	var matches []*iam.SSHKey
 	if resp != nil {
 		for _, key := range resp.SSHKeys {
-			if key != nil && key.Name == name && key.ProjectID == client.ProjectID() && strings.TrimSpace(key.PublicKey) == strings.TrimSpace(publicKey) {
+			if key != nil && key.Name == name && key.ProjectID == client.ProjectID() && sameSSHPublicKey(key.PublicKey, publicKey) {
 				matches = append(matches, key)
 			}
 		}
