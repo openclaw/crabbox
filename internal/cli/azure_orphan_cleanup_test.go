@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"reflect"
@@ -517,31 +518,39 @@ func TestAzurePreparedOrphanCleanup(t *testing.T) {
 }
 
 func TestAzureDeleteRequiresAbsentUnboundCompanionSlot(t *testing.T) {
-	for _, scenario := range []string{"retained disk", "unknown disk read", "absent disk"} {
-		t.Run(scenario, func(t *testing.T) {
-			f := newAzureOrphanFixture(t)
-			f.addPreparationVM()
-			prepared, err := f.client.PrepareOwnedServer(t.Context(), f.server)
-			if err != nil {
-				t.Fatal(err)
-			}
-			// A prior writer may have persisted NIC/PIP custody without the
-			// managed disk identity. That omission must not settle a full stop.
-			delete(prepared.Labels, azureCleanupDiskIdentityLabel)
-			delete(f.objects, f.server.CloudID)
-			f.allowDelete = true
-			if scenario == "unknown disk read" {
-				f.failRead = f.server.CloudID + "-osdisk"
-			} else if scenario == "absent disk" {
-				delete(f.objects, f.server.CloudID+"-osdisk")
-			}
-			if err := f.client.DeleteOwnedServer(t.Context(), prepared); (err == nil) != (scenario == "absent disk") {
-				t.Fatalf("unexpected unbound disk settlement: %v", err)
-			}
-			if scenario != "absent disk" && f.objects[f.server.CloudID+"-osdisk"] == nil {
-				t.Fatal("unbound disk was deleted")
-			}
-		})
+	for _, automatic := range []bool{false, true} {
+		for _, scenario := range []string{"retained disk", "unknown disk read", "absent disk"} {
+			t.Run(fmt.Sprintf("automatic=%t/%s", automatic, scenario), func(t *testing.T) {
+				f := newAzureOrphanFixture(t)
+				f.addPreparationVM()
+				prepared, err := f.client.PrepareOwnedServer(t.Context(), f.server)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// A prior writer may have persisted NIC/PIP custody without the
+				// managed disk identity. That omission must not settle a full stop.
+				delete(prepared.Labels, azureCleanupDiskIdentityLabel)
+				delete(f.objects, f.server.CloudID)
+				f.allowDelete = true
+				if scenario == "unknown disk read" {
+					f.failRead = f.server.CloudID + "-osdisk"
+				} else if scenario == "absent disk" {
+					delete(f.objects, f.server.CloudID+"-osdisk")
+				}
+				var deleteErr error
+				if automatic {
+					deleteErr = f.client.DeleteCleanupServer(t.Context(), prepared, time.Now())
+				} else {
+					deleteErr = f.client.DeleteOwnedServer(t.Context(), prepared)
+				}
+				if err := deleteErr; (err == nil) != (scenario == "absent disk") {
+					t.Fatalf("unexpected unbound disk settlement: %v", err)
+				}
+				if scenario != "absent disk" && f.objects[f.server.CloudID+"-osdisk"] == nil {
+					t.Fatal("unbound disk was deleted")
+				}
+			})
+		}
 	}
 }
 
@@ -608,6 +617,33 @@ func TestAzurePreparationRejectsUnknownIdentityAndForeignLink(t *testing.T) {
 			}
 			if _, err := f.client.PrepareOwnedServer(t.Context(), f.server); err == nil || len(f.deletes) != 0 {
 				t.Fatalf("unknown/foreign capture accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestAzureAutomaticCleanupRejectsReplacementCompanions(t *testing.T) {
+	for _, suffix := range []string{"-nic", "-pip", "-osdisk", "-q-nsg"} {
+		t.Run(suffix, func(t *testing.T) {
+			f := newAzureOrphanFixture(t)
+			f.server.Labels["state"] = "ready"
+			f.server.Labels["expires_at"] = LeaseLabelTime(time.Now().Add(-time.Hour))
+			f.addPreparationVM()
+			prepared, err := f.client.PrepareOwnedServer(t.Context(), f.server)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identityKey := "resourceGuid"
+			if suffix == "-osdisk" {
+				identityKey = "uniqueId"
+			}
+			f.objects[f.server.CloudID+suffix]["properties"].(map[string]any)[identityKey] = "replacement"
+			f.allowDelete = true
+			if _, err := f.client.PrepareCleanupServer(t.Context(), prepared, time.Now()); err == nil {
+				t.Fatal("automatic cleanup recaptured a replacement")
+			}
+			if err := f.client.DeleteCleanupServer(t.Context(), prepared, time.Now()); err == nil || len(f.deletes) != 0 {
+				t.Fatalf("replacement reached DELETE: err=%v deletes=%v", err, f.deletes)
 			}
 		})
 	}

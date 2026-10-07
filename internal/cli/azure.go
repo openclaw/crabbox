@@ -1837,7 +1837,10 @@ func (c *AzureClient) DeleteCleanupServer(ctx context.Context, expected Server, 
 	if err != nil {
 		return err
 	}
-	return c.deleteAzureCleanupResourcesWithRetry(ctx, expected, resources, now)
+	if err := c.deleteAzureCleanupResourcesWithRetry(ctx, expected, resources, now); err != nil {
+		return err
+	}
+	return c.verifyAzureResourceNamesAbsent(ctx, expected)
 }
 
 func (c *AzureClient) CreateOSDiskSnapshot(ctx context.Context, vmName, snapshotName, sku string) (image NativeCheckpointImage, err error) {

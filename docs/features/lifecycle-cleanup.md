@@ -566,8 +566,13 @@ publication. The snapshot stays local; it is not published in VM tags. Replay
 checks the original companion identities, and release projects that retained
 binding into the ordinary owned deletion path, including when only the VM has
 subsequently disappeared. The deletion journal, not the presence of a preparation
-snapshot, records cleanup admission. A failed or incomplete capture leaves the
-claim unresolved and cannot publish readiness. Legacy claims with no snapshot
+snapshot, records cleanup admission. Automatic cleanup validates the original
+binding and durably journals deletion before sending DELETEs. After VM loss it
+resumes only admitted cleanup, not preparation snapshots, even if the lease has
+expired; use an explicit stop or hold for those resources. Both stop and automatic
+cleanup verify all companion slots are absent before publishing completion.
+A failed or incomplete capture leaves the claim unresolved and cannot publish
+readiness. Legacy claims with no snapshot
 still require all exact resources absent; surviving companions are not adopted
 after VM loss.
 
