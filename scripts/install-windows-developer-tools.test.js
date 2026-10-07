@@ -1,8 +1,50 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
 
 const script = await readFile("scripts/install-windows-developer-tools.ps1", "utf8");
+
+for (const [build, expected, succeeds] of [[20348, 20348, true], [26100, 26100, true], [20348, 26100, false]]) {
+  test(`Windows smoke checks guest build ${build} against requested ${expected}`, async (t) => {
+    const text = await readFile("scripts/devtools-image-smoke-windows.ps1", "utf8");
+    const prelude = text.split("Get-ComputerInfo")[0];
+    const result = spawnSync(process.platform === "win32" ? "powershell.exe" : "pwsh", [
+      "-NoProfile", "-NonInteractive", "-Command",
+      `$ExpectedWindowsBuild = '${expected}'; function Get-CimInstance { @{ BuildNumber = '${build}' } }; ${prelude}; Write-Output 'guest-version-ok'`,
+    ], { encoding: "utf8", timeout: 30000 });
+    if (result.error?.code === "ENOENT") return t.skip("PowerShell is not installed");
+    assert.equal(result.status === 0, succeeds, result.stderr);
+    if (succeeds) assert.match(result.stdout, /guest-version-ok/);
+    else {
+      assert.match(result.stderr, /Windows image OS mismatch/);
+      assert.doesNotMatch(result.stdout, /guest-version-ok/);
+    }
+  });
+}
+
+for (const file of ["install-windows-developer-tools.ps1", "devtools-image-smoke-windows.ps1"]) {
+  for (const [build, tag] of [[20348, "ltsc2022"], [26100, "ltsc2025"], [17763, undefined]]) {
+    test(`${file} chooses a host-compatible Server Core image for build ${build}`, async (t) => {
+      const text = await readFile(`scripts/${file}`, "utf8");
+      const selection = text.match(/\$WindowsBuild = [\s\S]*?\n\}/)?.[0];
+      assert.ok(selection, "missing host build selection");
+      const shell = process.platform === "win32" ? "powershell.exe" : "pwsh";
+      const result = spawnSync(shell, ["-NoProfile", "-NonInteractive", "-Command",
+        `$ErrorActionPreference = 'Stop'; function Get-CimInstance { @{ BuildNumber = '${build}' } }; ${selection}; Write-Output $ServerCoreTag`],
+        { encoding: "utf8", timeout: 30000 });
+      if (result.error?.code === "ENOENT") return t.skip("PowerShell is not installed");
+      if (tag) {
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(result.stdout.trim(), tag);
+      } else {
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, /Unsupported Windows Server build/);
+      }
+      assert.match(text, /mcr\.microsoft\.com\/windows\/servercore:\$ServerCoreTag/);
+    });
+  }
+}
 
 test("Windows developer tools prep verifies a versioned Chocolatey package before installation", () => {
   assert.match(script, /CRABBOX_WINDOWS_CHOCO_PACKAGE_URL/);

@@ -278,6 +278,12 @@ The default remains Windows Server 2022. Without a Windows selector, a promoted
 Windows AMI still wins in brokered mode. An explicit Windows selector bypasses
 unversioned promoted Windows images and selects the stock Amazon image instead;
 image capability requirements cannot be combined with that stock selection.
+Windows promotions use target/architecture/region keys, so an explicit 2022
+request keeps selecting stock 2022 even after the default promotion is 2025.
+The guarded developer-image publisher accepts `windows_os=windows-server:2025`
+to bake a fresh stock 2025 source, prove the captured candidate, and prove
+normal promoted selection. Its default 2022 input preserves the existing
+promoted-source rebuild. See the [Windows 2025 bake runbook](../features/image-bake-runbook.md#bake-windows-server-2025-from-stock).
 Explicit `aws.ami` / `CRABBOX_AWS_AMI` overrides (including coordinator overrides)
 still win over `--os`. Remove a global AMI override before using different OS
 selectors for Linux and Windows runs.

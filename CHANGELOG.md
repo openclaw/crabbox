@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changes
+
+- AWS Windows images: enable guarded Server 2025 bakes from stock with source-only OS selection, guest-version proof, and matching Server Core containers; explicit Server 2022 leases retain stock selection. [Issue 2717](https://github.com/openclaw/crabbox/issues/2717). Thanks @saftall.
+
 ### Fixes
 
 - Cloudflare: retain cleanup alarms after container destruction fails and retry terminal leases before reporting stopped or expired status.

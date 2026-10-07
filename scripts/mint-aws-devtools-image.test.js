@@ -2564,7 +2564,7 @@ for (const [args, message] of [
   [["--stock-source", "--root-gb", "040"], /integer.*16.*400/],
   [["--stock-source", "--root-gb", "1.5"], /integer.*16.*400/],
   [["--stock-source", "--root-gb", "99999999999999999999999"], /integer.*16.*400/],
-  [["--target", "windows", "--stock-source"], /Linux-only/],
+  [["--target", "windows", "--stock-source"], /requires CRABBOX_OS=windows-server:2022 or windows-server:2025/],
 ]) {
   test(`stock-source validation rejects ${args.join(" ")}`, async (t) => {
     const fake = await setupFakeCrabbox();
@@ -2578,6 +2578,39 @@ for (const [args, message] of [
     assert.equal(await readFile(fake.log, "utf8").catch(() => ""), "");
   });
 }
+for (const year of ["2022", "2025"]) {
+  test(`Windows ${year} stock-source scopes the selector to source and proves normal promotion`, async (t) => {
+    const fake = await setupFakeCrabbox();
+    t.after(() => rm(fake.dir, { recursive: true, force: true }));
+    const result = await runScript(["--target", "windows", "--stock-source", "--region", "eu-west-1", "--prep-script", fake.windowsPrep, "--run"], {
+      CRABBOX_BIN: fake.fake,
+      CRABBOX_FAKE_LOG: fake.log,
+      CRABBOX_IMAGE_LOG_DIR: fake.dir,
+      CRABBOX_OS: `windows-server:${year}`,
+      CRABBOX_AWS_AMI: undefined,
+      CRABBOX_IMAGE_WINDOWS_WARMUP_SETTLE_SECONDS: "0",
+    });
+    assert.equal(result.code, 0, result.stderr);
+    const log = await readFile(fake.log, "utf8");
+    assert.deepEqual(log.split("\n").filter((line) => /^selection .* command=warmup$/.test(line)), [
+      `selection os=windows-server:${year} ami=unset command=warmup`,
+      "selection os=unset ami=ami-devtools command=warmup",
+      "selection os=unset ami=unset command=warmup",
+    ]);
+    assert.deepEqual(log.split("\n").filter((line) => /^source-options .* command=warmup$/.test(line)), [
+      "source-options stock=1 root=0 command=warmup",
+      "source-options stock=0 root=0 command=warmup",
+      "source-options stock=0 root=0 command=warmup",
+    ]);
+    assert.match(log, new RegExp(`ExpectedWindowsBuild = '${year === "2025" ? "26100" : "20348"}'`));
+    assert.doesNotMatch(log, /image promote .*--os windows/);
+    for (const lease of ["source", "candidate", "promoted"]) {
+      assert.match(log, new RegExp(`stop --provider aws --target windows cbx_${lease}`));
+    }
+    assert.match(result.stdout, /promoted image selection proved: ami-devtools/);
+  });
+}
+
 test("stock-source overrides only the source lease and records requested source metadata", async (t) => {
   const fake = await setupFakeCrabbox();
   t.after(() => rm(fake.dir, { recursive: true, force: true }));

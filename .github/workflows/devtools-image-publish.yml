@@ -49,6 +49,14 @@ on:
         required: true
         default: m7i.large
         type: string
+      windows_os:
+        description: "Windows source OS (2025 starts from stock; 2022 retains promoted-source rebuild)"
+        required: true
+        default: windows-server:2022
+        type: choice
+        options:
+          - windows-server:2022
+          - windows-server:2025
       macos_type:
         description: macOS source instance type
         required: true
@@ -102,6 +110,7 @@ jobs:
           LINUX_OS: ${{ inputs.linux_os }}
           LINUX_ROOT_GB: ${{ inputs.linux_root_gb }}
           WINDOWS_TYPE: ${{ inputs.windows_type }}
+          WINDOWS_OS: ${{ inputs.windows_os }}
           MACOS_TYPE: ${{ inputs.macos_type }}
           MACOS_HOST: ${{ inputs.macos_host }}
           MEASURED: ${{ inputs.measured }}
@@ -123,6 +132,10 @@ jobs:
               }
           fi
           [[ "$WINDOWS_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$WINDOWS_OS" == windows-server:2022 || "$WINDOWS_OS" == windows-server:2025 ]] || {
+            printf '%s\n' 'windows_os must be windows-server:2022 or windows-server:2025' >&2
+            exit 2
+          }
           [[ "$MACOS_TYPE" =~ ^[A-Za-z0-9.-]+$ ]]
           [[ "$MACOS_HOST" =~ ^(use-existing|allocate)$ ]]
           if [[ "$MEASURED" == true ]]; then
@@ -153,6 +166,7 @@ jobs:
       LINUX_OS: ${{ inputs.linux_os }}
       LINUX_ROOT_GB: ${{ inputs.linux_root_gb }}
       WINDOWS_TYPE: ${{ inputs.windows_type }}
+      WINDOWS_OS: ${{ inputs.windows_os }}
       MACOS_TYPE: ${{ inputs.macos_type }}
       MACOS_HOST: ${{ inputs.macos_host }}
       MEASURED: ${{ inputs.measured }}
@@ -236,6 +250,9 @@ jobs:
                 --windows-mode normal
                 --run
               )
+              if [[ "$WINDOWS_OS" == windows-server:2025 ]]; then
+                command=(env CRABBOX_OS="$WINDOWS_OS" "${command[@]}" --stock-source)
+              fi
               ;;
             macos)
               command=(

@@ -44420,12 +44420,13 @@ describe("fleet lease identity and idle", () => {
     async (os) => {
       const storage = new MemoryStorage();
       storage.seed("image:aws:promoted:windows:x86_64:eu-west-1", {
-        id: "ami-promoted-windows",
+        id: "ami-promoted-windows-2025",
         state: "available",
         provider: "aws",
         target: "windows",
         region: "eu-west-1",
         architecture: "x86_64",
+        capabilities: { osVersion: "10.0.26100", desktop: true },
         promotedAt: "2026-09-03T00:00:00Z",
       });
       const provider = new AWSProvider({} as Env, "eu-west-1", storage);
@@ -44438,7 +44439,7 @@ describe("fleet lease identity and idle", () => {
       });
       const prepared = await provider.prepareLeaseConfig(config);
       const stock = os?.startsWith("windows-server:");
-      expect(prepared.awsAMI).toBe(stock ? "" : "ami-promoted-windows");
+      expect(prepared.awsAMI).toBe(stock ? "" : "ami-promoted-windows-2025");
       expect(prepared.awsPromotedAMIs).toEqual({});
       expect(prepared.selectedImage?.source).toBe(stock ? undefined : "promoted");
       await expect(
@@ -44447,6 +44448,33 @@ describe("fleet lease identity and idle", () => {
         awsAMI: "ami-pinned",
         selectedImage: { source: "explicit" },
       });
+    },
+  );
+
+  it.each(["windows-server:2022", "windows-server:2025"])(
+    "clears stale promoted Windows 2025 selection for explicit %s",
+    async (os) => {
+      const provider = new AWSProvider({} as Env, "eu-west-1", new MemoryStorage());
+      const prepared = await provider.prepareLeaseConfig({
+        ...leaseConfig({
+          provider: "aws",
+          target: "windows",
+          os,
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+        awsPromotedAMIs: { "eu-west-1": "ami-promoted-windows-2025" },
+        selectedImage: {
+          id: "ami-promoted-windows-2025",
+          source: "promoted",
+          provider: "aws",
+          kind: "aws-ami",
+          region: "eu-west-1",
+        },
+      });
+      expect(prepared.awsAMI).toBe("");
+      expect(prepared.awsPromotedAMIs).toEqual({});
+      expect(prepared.selectedImage).toBeUndefined();
+      expect(prepared.os).toBe(os);
     },
   );
 

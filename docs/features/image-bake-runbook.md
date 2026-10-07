@@ -357,7 +357,7 @@ For the protected publisher workflow, set the optional `linux_root_gb` input to
 rebuild; Windows and macOS reject a nonempty value. Deploy the coordinator
 version supporting stock requests before running the publisher.
 
-`--stock-source` is Linux-only. For Linux, `--root-gb` requires
+`--stock-source` supports Linux and Windows. For Linux, `--root-gb` requires
 `--stock-source`; Windows may set a source root size without that flag. Invalid
 sizes fail before any paid work. Without `--root-gb`, a stock source uses normal
 class sizing. Pick enough space for the installer and its temporary files;
@@ -376,6 +376,47 @@ coordinator root override still applies to normal sizing. Source settings and
 lease ID are written to the source JSON receipt beside the diagnostic logs;
 measured public proof includes the allowlisted requested source settings.
 Promotion and rollback receipts still bind the original baseline default.
+
+### Bake Windows Server 2025 from stock
+
+The protected workflow defaults to `windows_os=windows-server:2022`, preserving
+the existing promoted-source rebuild. Select 2025 to start the source lease
+from Amazon's stock Windows Server 2025 English Full Base AMI:
+
+```bash
+gh workflow run devtools-image-publish.yml \
+  --ref main \
+  -f target=windows \
+  -f windows_os=windows-server:2025 \
+  -f region=eu-west-1
+```
+
+The equivalent wrapper plan is:
+
+```bash
+CRABBOX_OS=windows-server:2025 scripts/mint-aws-devtools-image.sh \
+  --target windows --stock-source --region eu-west-1 --windows-mode normal
+# Review the plan, then add --run to perform the paid bake and promotion.
+```
+
+Windows `--stock-source` requires `CRABBOX_OS=windows-server:2022` or
+`windows-server:2025`. Only the source receives that selector and
+`CRABBOX_AWS_STOCK_IMAGE=1`. The candidate uses the captured AMI explicitly;
+the promoted proof uses normal image selection without the source selector.
+Do not configure a separate Windows OS selector or AMI override in the
+publisher's file config: the final proof must select the promoted image.
+All three smokes verify the requested guest build (20348 for 2022, 26100 for
+2025), and prep/smoke select the matching `ltsc2022` or `ltsc2025` Server Core
+container image. The region guard, exact failed-candidate checkpoint cleanup,
+and transactional promotion rollback apply to Windows too.
+
+Windows promotions are scoped by target, architecture, and region, without an
+OS-version key. Explicit Windows OS selectors deliberately bypass those
+unversioned promotions: `--os windows-server:2022` still selects stock 2022
+after a 2025 image is promoted. The default workflow input is a legacy rebuild
+mode, not a promise to downgrade a promoted 2025 image to 2022; use the stock
+wrapper command with the 2022 selector for that. The stock fallback remains
+2022 until a separate default-switch change lands after live 2025 proof.
 
 ## Developer-image wrappers
 

@@ -31,6 +31,8 @@ linux_node_major="${CRABBOX_LINUX_NODE_MAJOR:-24}"
 linux_pnpm_version="${CRABBOX_LINUX_PNPM_VERSION:-11.1.0}"
 linux_pnpm_default=""
 stock_source=0
+windows_source_os=""
+windows_source_build=""
 source_root_gb=""
 measured=0
 max_p95_runner_total_ms=""
@@ -55,7 +57,7 @@ Flags:
   --region REGION       AWS region
   --class CLASS         Crabbox machine class, default standard
   --type TYPE           AWS instance type
-  --stock-source        Linux only: build the source lease from stock Ubuntu
+  --stock-source        build from stock Ubuntu or Windows (Windows requires CRABBOX_OS)
   --root-gb N           source root size, integer 16..400; Linux requires --stock-source
   --name NAME           image name
   --run                 allow paid lease/image work
@@ -76,7 +78,7 @@ Flags:
 
 Useful env:
   CRABBOX_BIN
-  CRABBOX_OS            Linux selector for leases, promotion, and receipt rollback
+  CRABBOX_OS            Linux selector for all phases; Windows stock-source selector only
   CRABBOX_IMAGE_RUN
   CRABBOX_IMAGE_PROMOTE
   CRABBOX_IMAGE_KEEP_LEASE
@@ -206,8 +208,16 @@ case "$target" in
     ;;
 esac
 
-if [[ "$stock_source" == 1 ]]; then
-  [[ "$target" == linux ]] || { printf 'stock source is Linux-only\n' >&2; exit 2; }
+if [[ "$target" == windows && "$stock_source" == 1 ]]; then
+  case "${CRABBOX_OS:-}" in
+    windows-server:2022) windows_source_build=20348 ;;
+    windows-server:2025) windows_source_build=26100 ;;
+    *) printf 'Windows stock source requires CRABBOX_OS=windows-server:2022 or windows-server:2025\n' >&2; exit 2 ;;
+  esac
+  windows_source_os="$CRABBOX_OS"
+  # Explicit Windows selectors bypass promotions. Only the source gets one;
+  # candidate and promoted proofs must exercise their normal image paths.
+  unset CRABBOX_OS
 fi
 if [[ -n "$source_root_gb" ]]; then
   [[ "$source_root_gb" =~ ^[1-9][0-9]{1,2}$ ]] && (( source_root_gb >= 16 && source_root_gb <= 400 )) || {
@@ -724,6 +734,7 @@ warmup() {
   [[ -n "$region" ]] && env_args+=(CRABBOX_AWS_REGION="$region" AWS_REGION="$region")
   if [[ "$label" == "source" ]]; then
     env_args+=(CRABBOX_AWS_STOCK_IMAGE="$stock_source" CRABBOX_AWS_ROOT_GB="${source_root_gb:-0}")
+    [[ -z "$windows_source_os" ]] || env_args+=(CRABBOX_OS="$windows_source_os")
   fi
   [[ "$label" == "candidate" ]] && env_args+=(CRABBOX_AWS_AMI="$2")
   printf 'warming %s lease log=%s\n' "$label" "$log" >&2
@@ -892,6 +903,9 @@ smoke_script() {
   fi
   smoke_script_value=""
   IFS= read -r -d '' smoke_script_value <"$smoke_script_path" || [[ -n "$smoke_script_value" ]] || return 1
+  if [[ -n "$windows_source_build" ]]; then
+    printf -v smoke_script_value '$ExpectedWindowsBuild = '\''%s'\''\n%s' "$windows_source_build" "$smoke_script_value"
+  fi
   if [[ "$target" == "linux" ]]; then
     local expected_node_major="" archive_probe=":"
     if [[ "$linux_developer_builder" == "1" ]]; then
@@ -1062,7 +1076,7 @@ AWS devtools image mint
   region: ${region:-auto}
   class:  $server_class
   type:   ${server_type:-auto}
-  source: stock=$stock_source root_gb=${source_root_gb:-auto}
+  source: stock=$stock_source root_gb=${source_root_gb:-auto} windows_os=${windows_source_os:-normal}
   prep:   $prep_script
   proof:  desktop=$desktop browser=$browser promote=$promote
   fsr:    enabled=$fast_snapshot_restore azs=${fast_snapshot_restore_azs:-auto}

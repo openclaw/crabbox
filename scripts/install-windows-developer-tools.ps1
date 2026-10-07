@@ -37,7 +37,13 @@ if ($InstallDocker -eq "1") {
   }
 }
 $DockerImages = $env:CRABBOX_WINDOWS_DOCKER_IMAGES
-if (-not $DockerImages) { $DockerImages = "mcr.microsoft.com/windows/servercore:ltsc2022" }
+$WindowsBuild = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
+$ServerCoreTag = switch ($WindowsBuild) {
+  20348 { "ltsc2022" }
+  26100 { "ltsc2025" }
+  default { throw "Unsupported Windows Server build: $WindowsBuild" }
+}
+if (-not $DockerImages) { $DockerImages = "mcr.microsoft.com/windows/servercore:$ServerCoreTag" }
 $RebootMarker = "C:\ProgramData\crabbox\image-prep-reboot-required"
 $ChocolateyPackageURL = $env:CRABBOX_WINDOWS_CHOCO_PACKAGE_URL
 if (-not $ChocolateyPackageURL) { $ChocolateyPackageURL = "https://community.chocolatey.org/api/v2/package/chocolatey/2.7.3" }
