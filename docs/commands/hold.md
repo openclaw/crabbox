@@ -12,6 +12,8 @@ The ordinary command requires the existing exact fixed claim and its account sco
 GETs must prove that the VM is absent. Remaining NIC, public IP, OS disk, and
 quarantine NSG resources must have the matching lease, fixed attempt, and
 create-intent tags, identifiable immutable IDs, and no foreign attachments.
+Image-created managed OS disks can lack tags; an untagged disk must match the
+original immutable disk identity in the claim's durable cleanup binding.
 Failed reads and conflicting ownership refuse the hold without cloud mutation.
 
 If the local claim was lost after allocation, supply the original fixed slug

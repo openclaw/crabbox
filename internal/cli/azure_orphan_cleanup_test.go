@@ -207,6 +207,48 @@ func TestAzureFailedLeaseHoldRetainsCompanionsWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestAzureFailedLeaseHoldUntaggedDiskRequiresOriginalBinding(t *testing.T) {
+	for _, scenario := range []string{"original disk", "replacement disk", "missing binding", "incomplete binding", "unbound disk", "conflicting tags", "attached disk"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newAzureOrphanFixture(t)
+			f.server.Labels = azureDeleteResourcesToLabels(f.server.Labels, azureVMDeleteResources{
+				nicID: "-nic-guid", publicIPID: "-pip-guid", diskID: "-osdisk-guid",
+			})
+			disk := f.objects[f.server.CloudID+"-osdisk"]
+			delete(disk, "tags") // Azure image-created disks do not inherit VM tags.
+			switch scenario {
+			case "replacement disk":
+				disk["properties"].(map[string]any)["uniqueId"] = "replacement"
+			case "missing binding":
+				delete(f.server.Labels, AzureCleanupBindingLabel)
+			case "incomplete binding":
+				delete(f.server.Labels, azureCleanupNICIdentityLabel)
+			case "unbound disk":
+				delete(f.server.Labels, azureCleanupDiskIdentityLabel)
+			case "conflicting tags":
+				disk["tags"] = azureTagsFromLabels(f.server.Labels)
+				disk["tags"].(map[string]string)[azureLabelToTagKey("lease")] = "cbx_abcdef123456"
+			case "attached disk":
+				disk["managedBy"] = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/other"
+			}
+			receipt, err := f.client.InspectFailedLeaseHold(t.Context(), f.server)
+			if scenario == "original disk" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(receipt.Resources) != 5 || receipt.Resources[3].State != "retained" || receipt.Resources[3].ImmutableID != "-osdisk-guid" {
+					t.Fatalf("original untagged disk was not retained: %+v", receipt.Resources)
+				}
+			} else if err == nil {
+				t.Fatal("unproven disk hold accepted")
+			}
+			if len(f.deletes) != 0 || len(f.objects) != 4 {
+				t.Fatal("hold mutated Azure resources")
+			}
+		})
+	}
+}
+
 func TestAzureFailedLeaseHoldRefusesUnprovenOwnership(t *testing.T) {
 	for _, failure := range []string{"foreign tags", "fixed attempt", "attached disk", "public IP NAT", "read denied", "VM reappears"} {
 		t.Run(failure, func(t *testing.T) {

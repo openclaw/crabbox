@@ -90,7 +90,7 @@ func (c *AzureClient) inspectAzureFailedLeaseHold(ctx context.Context, expected 
 		if err != nil {
 			return fmt.Errorf("inspect held Azure %s: %w", kind, err)
 		}
-		if !claimless || kind != "disk" || len(tags) != 0 {
+		if kind != "disk" || len(tags) != 0 {
 			if err := validateAzureCleanupResourceTags(kind, resource, tags, expected.Labels); err != nil {
 				return err
 			}
@@ -163,6 +163,17 @@ func (c *AzureClient) inspectAzureFailedLeaseHold(ctx context.Context, expected 
 			return receipt, err
 		}
 		diskGUID = stringValue(disk.Properties.UniqueID)
+		if !claimless && len(disk.Tags) == 0 {
+			// Image-created OS disks do not inherit VM tags. The original
+			// durable binding must prove this is the retained disk instead.
+			binding, err := azureDeleteResourcesFromLabels(expected)
+			if err != nil {
+				return receipt, fmt.Errorf("Azure held untagged disk requires its original cleanup binding: %w", err)
+			}
+			if binding.disk != diskName || binding.diskID == "" || binding.diskID != diskGUID {
+				return receipt, errors.New("Azure held untagged disk identity does not match its original cleanup binding")
+			}
+		}
 	}
 	if err := retain("disk", diskName, diskID, diskGUID, disk.Tags, diskErr); err != nil {
 		return receipt, err

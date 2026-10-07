@@ -35,10 +35,11 @@ func (c *AzureClient) verifyAzureFixedResourcesAbsent(ctx context.Context, expec
 // binding cannot silently turn a retained managed disk into stop success.
 func (c *AzureClient) verifyAzureResourceNamesAbsent(ctx context.Context, expected Server) error {
 	labels, name := expected.Labels, expected.CloudID
-	if err := ValidateAzureOwnedVM(expected, expected); err != nil {
-		return err
-	}
-	if name != LeaseProviderName(labels["lease"], labels["slug"]) ||
+	// Absence also settles a rejected allocation, which has no VM identity.
+	// The callers that delete an owned VM validate its immutable ID separately.
+	if labels["crabbox"] != "true" || labels["created_by"] != "crabbox" || labels["provider"] != "azure" ||
+		!IsCanonicalLeaseID(labels["lease"]) || labels["slug"] == "" ||
+		name != LeaseProviderName(labels["lease"], labels["slug"]) ||
 		labels["provider_key"] != ProviderKeyForLease(labels["lease"]) {
 		return errors.New("Azure cleanup requires an exact lease identity")
 	}
