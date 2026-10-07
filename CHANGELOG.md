@@ -4,7 +4,7 @@
 
 ### Changes
 
-- AWS Windows leases accept `--os windows-server:2022` or `windows-server:2025` (also `os` / `CRABBOX_OS`) in direct and brokered mode; the default remains Server 2022 and promoted Windows AMIs still win without a Windows selector. [Issue 2717](https://github.com/openclaw/crabbox/issues/2717). Thanks @saftall.
+- AWS Windows leases accept `--os windows-server:2022` or `windows-server:2025` (also `os` / `CRABBOX_OS`) in direct and brokered mode; the default remains Server 2022 and promoted Windows AMIs still win without a Windows selector. [PR 2720](https://github.com/openclaw/crabbox/pull/2720). Thanks @saftall.
 - Use one shared autoreview installation from `openclaw/agent-skills`; repository entrypoints receive upstream fixes without copied helpers or tests. [PR 2663](https://github.com/openclaw/crabbox/pull/2663). Thanks @vincentkoc.
 
 - AWS Linux leases now get their class root-disk size (40 GB for `tiny` instead of 400 GB): the promoted eu-west-1 developer image was rebaked from stock Ubuntu with a 32 GB root.
