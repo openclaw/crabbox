@@ -17,7 +17,7 @@
 ### Fixes
 
 - Probe resolved SSH leases with their recorded platform, preserve Linux bootstrap gates, and reject contradictory explicit target flags. [Issue 2715](https://github.com/openclaw/crabbox/issues/2715), [PR 2718](https://github.com/openclaw/crabbox/pull/2718). Thanks @saftall.
-- DigitalOcean: check size availability before creating resources and retain definite fixed-lease rejections as retryable, locally releasable attempts. PR link pending.
+- DigitalOcean: check size availability before creating resources and retain definite fixed-lease rejections as retryable, locally releasable attempts. [PR 2725](https://github.com/openclaw/crabbox/pull/2725).
 - Blacksmith Testbox: `run --id tbx_...` and stop read only the exact claim file instead of scanning every local claim. [PR 2719](https://github.com/openclaw/crabbox/pull/2719).
 - Apply explicit lifecycle target flags before provider validation so Linux defaults cannot block macOS stop/release, pause/resume, list, or cleanup. [Issue 2706](https://github.com/openclaw/crabbox/issues/2706). Thanks @coygeek.
 - Stop coordinator alarm rearm loops from stale prewarm retries, clamped overdue work, and controller-owned wakes, with diagnostics and bounded backoff that survives concurrent heartbeats without postponing future deadlines. [PR 2711](https://github.com/openclaw/crabbox/pull/2711).
