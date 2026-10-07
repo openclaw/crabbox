@@ -140,3 +140,21 @@ func TestReleaseNativeAbsenceEvidence(t *testing.T) {
 		})
 	}
 }
+
+func TestNativeBoxNotFoundPrefersJSONResponse(t *testing.T) {
+	for _, test := range []struct {
+		name, stdout, stderr string
+		absent               bool
+	}{
+		{"rename notice", `{"status":404,"error":"not found"}`, "\x1b[38;5;245mBox is now Boat. This `box` binary keeps working but no longer updates itself\x1b[0m", true},
+		{"authoritative non-404", `{"status":403}`, "box not found (404)", false},
+		{"duplicate response", `{"status":403,"status":404}`, "box not found (404)", false},
+		{"malformed response", `{"status":404`, "box not found (404)", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := nativeBoxNotFound(core.LocalCommandResult{Stdout: test.stdout, Stderr: test.stderr}); got != test.absent {
+				t.Fatalf("nativeBoxNotFound=%t want %t", got, test.absent)
+			}
+		})
+	}
+}

@@ -10,7 +10,7 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-var fixedBoxKind = core.FixedLeaseKind{ClaimProvider: providerName, IntentVersion: 1, Label: providerName, DeletionState: "deleting"}
+var fixedBoxKind = core.FixedLeaseKind{ClaimProvider: providerName, IntentVersion: 1, Label: providerName, DeletionState: "deleting", TerminalIdentityLabels: []string{boxDeletionOperationLabel}}
 
 func (*backend) SupportsRequestedLeaseID() bool { return true }
 
@@ -116,6 +116,14 @@ func fixedBoxObserver(cfg core.Config, client api) func(context.Context, *core.F
 		var result core.FixedObservation[boxData]
 		if err := validateFixedBoxClaim(cfg, claim); err != nil {
 			return result, err
+		}
+		if mode == core.FixedObserveDelete {
+			if operationID := claim.FixedCreateIntent.Attempt["deletion_operation_id"]; boxDeletionIDRE.MatchString(operationID) && claim.Labels[boxDeletionOperationLabel] != operationID {
+				tx.Claim.Labels[boxDeletionOperationLabel] = operationID
+				if err := tx.PersistDeletionEvidence(); err != nil {
+					return result, err
+				}
+			}
 		}
 		if claim.CloudID == "" {
 			result.CanSubmit = true
@@ -255,11 +263,16 @@ func (b *backend) releaseFixed(ctx context.Context, cfg core.Config, client api,
 		ObserveExact: fixedBoxObserver(cfg, client),
 		DeleteExact: func(ctx context.Context, tx *core.FixedTransaction, box boxData) error {
 			var witnessErr error
-			err := releaseExactBox(ctx, client, box, beforeRelease, func() {
-				witnessErr = core.RecordFixedWitness(tx.Claim, "deletion_completed", "true", tx.PersistDeletionEvidence)
+			err := releaseExactBox(ctx, client, box, beforeRelease, func(operation boxDeletionOperation) {
+				tx.Claim.Labels[boxDeletionOperationLabel] = operation.ID
+				witnessErr = core.RecordFixedWitness(tx.Claim, "deletion_operation_id", operation.ID, tx.PersistDeletionEvidence)
+				if witnessErr == nil && operation.Status == "completed" {
+					witnessErr = core.RecordFixedWitness(tx.Claim, "deletion_completed", "true", tx.PersistDeletionEvidence)
+				}
 			})
 			var incomplete *boxDeletionIncompleteError
 			if errors.As(err, &incomplete) && validateBoxDeletionOperation(incomplete.operation, box.ID, "") == nil {
+				tx.Claim.Labels[boxDeletionOperationLabel] = incomplete.operation.ID
 				return errors.Join(err, core.RecordFixedWitness(tx.Claim, "deletion_operation_id", incomplete.operation.ID, tx.PersistDeletionEvidence))
 			}
 			return errors.Join(err, witnessErr)
@@ -269,7 +282,19 @@ func (b *backend) releaseFixed(ctx context.Context, cfg core.Config, client api,
 }
 
 func (*backend) RetainLeaseClaimAfterReleaseWithClaim(lease core.LeaseTarget, previous core.LeaseClaim) (bool, error) {
-	return fixedBoxKind.RetainClaimAfterRelease(lease.LeaseID, previous, false, nil, nil)
+	return fixedBoxKind.RetainClaimAfterRelease(lease.LeaseID, core.LeaseClaim{}, fixedBoxKind.IsFixedClaim(previous), func(receipt core.LeaseClaim) error {
+		// The purge ID is learned during deletion, not immutable resource identity.
+		operationID := receipt.Labels[boxDeletionOperationLabel]
+		if operationID != "" && !boxDeletionIDRE.MatchString(operationID) {
+			return core.Exit(4, "lease_id_conflict: ascii-box terminal purge operation is malformed")
+		}
+		previous.Labels = shared.CloneLabels(previous.Labels)
+		delete(previous.Labels, boxDeletionOperationLabel)
+		if operationID != "" {
+			previous.Labels[boxDeletionOperationLabel] = operationID
+		}
+		return fixedBoxKind.ValidateTerminalClaim(receipt, previous, lease.LeaseID, nil)
+	}, nil)
 }
 
 func (b *backend) statusFixed(ctx context.Context, cfg core.Config, client api, claim core.LeaseClaim, req core.StatusRequest) (core.StatusView, error) {
