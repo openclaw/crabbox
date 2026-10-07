@@ -547,7 +547,9 @@ Windows PowerShell's `-File` entrypoint.
 An explicitly selected interpreter still owns its syntax: `cmd /c` and `.cmd`/
 `.bat` launchers use cmd's expansion and quoting rules, and `powershell -Command`
 parses its command as PowerShell source. PowerShell scripts and cmdlets retain
-PowerShell parameter binding. Inside `--shell` or a `.ps1` script, Windows
+PowerShell parameter binding. Windows utilities with nonstandard parsers
+(`cscript.exe`, `find.exe`, `sqlcmd.exe`, and `wscript.exe`) also retain
+PowerShell's legacy argument binding. Inside `--shell` or a `.ps1` script, Windows
 PowerShell 5.1's own native-command binding can still discard empty strings and
 embedded quotes when the script calls another executable. Use plain argv for
 that executable; use `--shell '...PowerShell source...'` or `--script file.ps1`

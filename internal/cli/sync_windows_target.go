@@ -421,7 +421,7 @@ func writeWindowsCommandInvocation(b *bytes.Buffer, command []string) {
 	b.WriteString(`$__crabboxCommand = $ExecutionContext.InvokeCommand.GetCommand(` + psQuote(command[0]) + `, [System.Management.Automation.CommandTypes]::All)
 if ($null -eq $__crabboxCommand) { throw 'Command not found' }
 while ($__crabboxCommand -is [System.Management.Automation.AliasInfo]) { $__crabboxCommand = $__crabboxCommand.ResolvedCommand }
-if ($__crabboxCommand.CommandType -eq 'Application' -and [IO.Path]::GetExtension($__crabboxCommand.Path) -in @('.exe', '.com') -and [IO.Path]::GetFileName($__crabboxCommand.Path) -ine 'cmd.exe') {
+if ($__crabboxCommand.CommandType -eq 'Application' -and [IO.Path]::GetExtension($__crabboxCommand.Path) -in @('.exe', '.com') -and [IO.Path]::GetFileName($__crabboxCommand.Path) -notin @('cmd.exe', 'cscript.exe', 'find.exe', 'sqlcmd.exe', 'wscript.exe')) {
     $__crabboxStart = New-Object System.Diagnostics.ProcessStartInfo
     $__crabboxStart.FileName = $__crabboxCommand.Path
 `)
@@ -435,8 +435,8 @@ if ($__crabboxCommand.CommandType -eq 'Application' -and [IO.Path]::GetExtension
     } finally { $__crabboxProcess.Dispose() }
 }
 `)
-	// Keep PowerShell binding for scripts/cmdlets and file associations. cmd.exe
-	// and batch files parse shell source rather than the standard Windows argv.
+	// Keep PowerShell binding for scripts, associations, and the nonstandard
+	// parsers excluded by PowerShell's own Windows argument-passing mode.
 	b.WriteString("& " + psQuote(command[0]))
 	for _, arg := range command[1:] {
 		b.WriteByte(' ')

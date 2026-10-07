@@ -121,6 +121,7 @@ func TestWindowsNativeRemoteCommandInterpreterPaths(t *testing.T) {
 	commands := [][]string{{"Write-Output", "interpreter-ok"}}
 	if runtime.GOOS == "windows" {
 		commands = append(commands, []string{"cmd.exe", "/d", "/c", "echo interpreter-ok"})
+		commands = append(commands, []string{"find.exe", `"interpreter-ok"`})
 		path := filepath.Join(workdir, "script with spaces.cmd")
 		if err := os.WriteFile(path, []byte("@echo interpreter-ok\r\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -130,7 +131,9 @@ func TestWindowsNativeRemoteCommandInterpreterPaths(t *testing.T) {
 	for _, command := range commands {
 		t.Run(command[0], func(t *testing.T) {
 			encoded := windowsRemoteCommandWithEnvFiles(workdir, nil, nil, command)
-			output, err := argvTestPowerShell(t, encoded).CombinedOutput()
+			cmd := argvTestPowerShell(t, encoded)
+			cmd.Stdin = strings.NewReader("interpreter-ok\n")
+			output, err := cmd.CombinedOutput()
 			if err != nil || strings.TrimSpace(string(output)) != "interpreter-ok" {
 				t.Fatalf("output=%q err=%v", output, err)
 			}
