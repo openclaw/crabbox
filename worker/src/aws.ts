@@ -2948,7 +2948,9 @@ export class EC2SpotClient {
       return config.awsAMI || this.env.CRABBOX_AWS_AMI || "";
     }
     if (config.target === "windows") {
-      return this.resolveLatestAmazonAMI("Windows_Server-2022-English-Full-Base-*", "x86_64");
+      const os = osImageSpec(config.os);
+      const windows = os.target === "windows" ? os : osImageSpec("windows-server:2022");
+      return this.resolveLatestAmazonAMI(windows.awsName, "x86_64");
     }
     if (config.target === "macos") {
       const query = awsMacOSAMIQuery(config.serverType);

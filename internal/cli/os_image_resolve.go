@@ -7,7 +7,7 @@ import "strings"
 // trusted custom override and silently launch it.
 func DefaultContainerImageDigest(image string) (digest string, known bool) {
 	for _, spec := range osImageSpecs {
-		if image != spec.ContainerName {
+		if spec.ContainerName == "" || image != spec.ContainerName {
 			continue
 		}
 		_, digest, ok := strings.Cut(image, "@")
@@ -33,6 +33,9 @@ func normalizeOSImage(value string) (string, error) {
 	normalized := strings.ToLower(strings.TrimSpace(value))
 	if normalized == "" {
 		normalized = defaultOSImage
+	}
+	if _, ok := osImageSpecs[normalized]; ok {
+		return normalized, nil
 	}
 	normalized = strings.ReplaceAll(normalized, "_", ".")
 	normalized = strings.ReplaceAll(normalized, "-", ":")

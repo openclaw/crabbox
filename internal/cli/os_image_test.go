@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/url"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -166,5 +169,56 @@ func TestContainerDefaultsUseReviewedMultiPlatformReferences(t *testing.T) {
 		if _, known := DefaultContainerImageDigest(custom); known {
 			t.Fatal("custom image classified as a reviewed default")
 		}
+	}
+}
+
+func TestWindowsOSSelectorConfig(t *testing.T) {
+	for _, provider := range []string{"aws", "azure", "ssh", "local-container"} {
+		for _, target := range []string{targetLinux, targetWindows, targetMacOS} {
+			cfg := baseConfig()
+			cfg.Provider, cfg.TargetOS, cfg.OSImage = provider, target, "windows-server:2025"
+			cfg.osImageExplicit = true
+			err := applyProviderConfigDefaults(&cfg)
+			if provider == "aws" && target == targetWindows {
+				if err != nil {
+					t.Fatalf("AWS Windows selector: %v", err)
+				}
+			} else if err == nil {
+				t.Fatalf("accepted Windows selector for %s/%s", provider, target)
+			}
+		}
+	}
+}
+
+func TestWindowsOSSelectorSources(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	cfg.Provider, cfg.TargetOS = "aws", targetWindows
+	if err := applyFileConfig(&cfg, fileConfig{OSImage: "windows-server:2022"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OSImage != "windows-server:2022" || !cfg.osImageExplicit {
+		t.Fatal("YAML selector was not retained")
+	}
+	t.Setenv("CRABBOX_OS", "windows-server:2025")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyProviderConfigDefaults(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OSImage != "windows-server:2025" || !cfg.osImageExplicit {
+		t.Fatal("environment selector did not override YAML")
+	}
+}
+
+func TestWindowsOSSelectorRejectedForLinuxImagePromotion(t *testing.T) {
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	err := app.imagePromote(context.Background(), []string{"ami-test", "--os", "windows-server:2025"})
+	if err == nil || !strings.Contains(err.Error(), "requires a Linux selector") {
+		t.Fatalf("err=%v", err)
 	}
 }

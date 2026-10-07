@@ -187,6 +187,12 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
   const architectureExplicit = Boolean(input.architecture?.trim());
   const os = normalizeOSImage(input.os);
   const osExplicit = Boolean(input.os?.trim());
+  const selectedOS = osImageSpec(os);
+  if (selectedOS.provider && (provider !== selectedOS.provider || target !== selectedOS.target)) {
+    throw new Error(
+      `os ${os} requires provider=${selectedOS.provider} target=${selectedOS.target}`,
+    );
+  }
   const linuxOSImage = target === "linux" ? osImageSpec(os) : undefined;
   const windowsMode = normalizeWindowsMode(input.windowsMode ?? "normal");
   const architecture = architectureExplicit

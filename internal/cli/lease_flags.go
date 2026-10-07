@@ -71,7 +71,7 @@ func registerLeaseCreateFlagsWithOptions(fs *flag.FlagSet, defaults Config, opti
 		Profile:       fs.String("profile", defaults.Profile, "profile"),
 		Class:         fs.String("class", defaults.Class, "machine class"),
 		Architecture:  fs.String("arch", defaults.Architecture, "CPU architecture: amd64 or arm64"),
-		OSImage:       fs.String("os", defaults.OSImage, "portable Linux OS image selector, for example ubuntu:26.04"),
+		OSImage:       fs.String("os", defaults.OSImage, "OS image selector, for example ubuntu:26.04 or windows-server:2025 (AWS Windows)"),
 		ServerType:    fs.String("type", options.serverTypeDefault, "provider server/instance type"),
 		SSHPort:       fs.String("ssh-port", defaults.SSHPort, "SSH port for the leased target"),
 		Market:        fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand"),

@@ -309,7 +309,7 @@ import {
   portalExternalRunnerRecord,
   portalLeaseRecord,
 } from "./org-records";
-import { defaultOSImage, normalizeOSImage } from "./os-image";
+import { defaultOSImage, normalizeLinuxOSImage, osImageSpec } from "./os-image";
 import {
   coordinatorOriginStatus,
   deviceOwnerIndexKey,
@@ -28567,8 +28567,8 @@ export class AzureProvider implements CloudProvider {
     if (target === "linux") {
       try {
         const requestedOSValue = input.os ?? url.searchParams.get("os") ?? undefined;
-        const requestedOS = requestedOSValue ? normalizeOSImage(requestedOSValue) : undefined;
-        const imageOS = image.os ? normalizeOSImage(image.os) : undefined;
+        const requestedOS = requestedOSValue ? normalizeLinuxOSImage(requestedOSValue) : undefined;
+        const imageOS = image.os ? normalizeLinuxOSImage(image.os) : undefined;
         if (requestedOS && imageOS && requestedOS !== imageOS) {
           return azureImageScopeMismatch("os", requestedOS, imageOS);
         }
@@ -29771,6 +29771,7 @@ export class AWSProvider implements CloudProvider {
       this.env.CRABBOX_AWS_AMI?.trim() ||
       config.awsSnapshot ||
       config.awsUseStockImage ||
+      osImageSpec(config.os).target === "windows" ||
       config.providerKey.startsWith(workspaceProviderKeyPrefix)
     ) {
       if (hasImageRequirements(config.imageRequirements)) {
@@ -31181,7 +31182,7 @@ export class AWSProvider implements CloudProvider {
       const requestedOS = input.os ?? url.searchParams.get("os");
       const fallbackOS = prior ? (prior.os ?? "ubuntu:24.04") : defaultOSImage;
       try {
-        imageOS = normalizeOSImage(requestedOS ?? fallbackOS);
+        imageOS = normalizeLinuxOSImage(requestedOS ?? fallbackOS);
       } catch (error) {
         return json(
           { error: "invalid_os", message: coordinatorErrorMessage(this.env, error) },

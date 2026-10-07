@@ -40,6 +40,7 @@ crabbox run --provider aws --class fast -- pnpm test
 crabbox run --provider aws --market on-demand -- pnpm check
 crabbox run --provider aws --id cbx_abcdef123456 --lease-output run.json -- pnpm test
 crabbox warmup --provider aws --target windows --desktop
+crabbox warmup --provider aws --target windows --os windows-server:2025
 crabbox warmup --provider aws --target windows --windows-mode wsl2
 crabbox warmup --provider aws --target macos --desktop --market on-demand
 crabbox warmup --provider aws --lease-id cbx_abcdef123456 --slug operation-display
@@ -262,6 +263,34 @@ timings validate attribution, not deployed CPU cost. Invocation, completion and
 failure counters remain observations independent of this timer limitation.
 
 ## Configuration
+
+### Windows images
+
+Use `--target windows --os windows-server:2022` or
+`--target windows --os windows-server:2025` to select Amazon's latest English
+Full Base Windows Server AMI for that release in the requested region. The same
+selector works with native Windows and `--windows-mode wsl2`; WSL2 still requires
+a nested-virtualization instance type. These selectors require AWS and an amd64
+Windows target, and work in both direct and brokered mode. Upgrade both the CLI
+and coordinator for brokered selection.
+
+The default remains Windows Server 2022. Without a Windows selector, a promoted
+Windows AMI still wins in brokered mode. An explicit Windows selector bypasses
+unversioned promoted Windows images and selects the stock Amazon image instead;
+image capability requirements cannot be combined with that stock selection.
+Explicit `aws.ami` / `CRABBOX_AWS_AMI` overrides (including coordinator overrides)
+still win over `--os`. Remove a global AMI override before using different OS
+selectors for Linux and Windows runs.
+
+Set the top-level `os: windows-server:2025` or `CRABBOX_OS=windows-server:2025`
+alongside `target: windows`, or select the OS for each command:
+
+```sh
+crabbox run --provider aws --target linux --os ubuntu:26.04 -- uname -a
+crabbox run --provider aws --target windows --os windows-server:2025 -- cmd /c ver
+```
+
+### Provider settings
 
 ```yaml
 provider: aws
