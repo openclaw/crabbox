@@ -44415,6 +44415,56 @@ describe("fleet lease identity and idle", () => {
     expect(enable).not.toHaveBeenCalled();
   });
 
+  it.each([undefined, "ubuntu:26.04", "windows-server:2022", "windows-server:2025"])(
+    "resolves promoted Windows images according to the Windows OS selector: %s",
+    async (os) => {
+      const storage = new MemoryStorage();
+      storage.seed("image:aws:promoted:windows:x86_64:eu-west-1", {
+        id: "ami-promoted-windows",
+        state: "available",
+        provider: "aws",
+        target: "windows",
+        region: "eu-west-1",
+        architecture: "x86_64",
+        promotedAt: "2026-09-03T00:00:00Z",
+      });
+      const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+      const config = leaseConfig({
+        provider: "aws",
+        target: "windows",
+        awsRegion: "eu-west-1",
+        sshPublicKey: "ssh-ed25519 test",
+        os,
+      });
+      const prepared = await provider.prepareLeaseConfig(config);
+      const stock = os?.startsWith("windows-server:");
+      expect(prepared.awsAMI).toBe(stock ? "" : "ami-promoted-windows");
+      expect(prepared.awsPromotedAMIs).toEqual({});
+      expect(prepared.selectedImage?.source).toBe(stock ? undefined : "promoted");
+      await expect(
+        provider.prepareLeaseConfig({ ...config, awsAMI: "ami-pinned" }),
+      ).resolves.toMatchObject({
+        awsAMI: "ami-pinned",
+        selectedImage: { source: "explicit" },
+      });
+    },
+  );
+
+  it.each(["windows-server:2022", "windows-server:2025"])(
+    "rejects image capability requirements with stock Windows selector %s",
+    async (os) => {
+      const provider = new AWSProvider({} as Env, "eu-west-1", new MemoryStorage());
+      const config = leaseConfig({
+        provider: "aws",
+        target: "windows",
+        os,
+        sshPublicKey: "ssh-ed25519 test",
+        imageRequirements: { desktop: true },
+      });
+      await expect(provider.prepareLeaseConfig(config)).rejects.toThrow("cannot be verified");
+    },
+  );
+
   it("selects the newest promoted AWS image satisfying every requirement", async () => {
     const storage = new MemoryStorage();
     storage.seed("image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:ami-node22", {

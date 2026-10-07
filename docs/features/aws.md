@@ -140,7 +140,12 @@ from the C8i/M8i/M8i-flex/R8i families; Crabbox rejects unsupported families
   architecture. Pass `--arch arm64` for Graviton/ARM64 capacity and
   `--os ubuntu:24.04` for the previous LTS. Supported selectors:
   `ubuntu:26.04` and `ubuntu:24.04`.
-- **Windows** resolves the latest Windows Server 2022 English Full Base AMI.
+- **Windows** defaults to the latest Windows Server 2022 English Full Base AMI.
+  Pass `--target windows --os windows-server:2025` for Server 2025, or
+  `--os windows-server:2022` to select stock Server 2022 explicitly. Both work
+  with native Windows and WSL2. Without a Windows selector, brokered promoted
+  Windows images still win; an explicit selector bypasses unversioned promotions.
+  See [Windows images](../providers/aws.md#windows-images) for precedence.
 - **macOS** resolves the matching Amazon EC2 macOS AMI for the chosen instance
   family (arm64 for Apple silicon, x86_64 for `mac1.metal`).
 

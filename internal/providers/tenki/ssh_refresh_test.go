@@ -23,13 +23,72 @@ func (c *credentialTestClock) Now() time.Time { return time.Unix(c.unix.Load(), 
 
 func credentialTestCert(t *testing.T, ca ssh.Signer, key ssh.PublicKey, session string, now time.Time) []byte {
 	t.Helper()
-	cert := &ssh.Certificate{Key: key, CertType: ssh.UserCert, ValidPrincipals: []string{"tenki"},
-		ValidAfter: uint64(now.Add(-30 * time.Second).Unix()), ValidBefore: uint64(now.Add(10 * time.Minute).Unix()),
-		Permissions: ssh.Permissions{Extensions: map[string]string{"tenki-session-id@tenki.cloud": string(ssh.Marshal(struct{ Session string }{session}))}}}
+	// Match the native CLI certificate: Marshal encodes extension strings once.
+	const principal = "11111111-1111-4111-8111-111111111111"
+	const nonce = "22222222-2222-4222-8222-222222222222"
+	cert := &ssh.Certificate{Key: key, CertType: ssh.UserCert, KeyId: principal + ":" + session + ":" + nonce,
+		ValidPrincipals: []string{"session:" + session, "user:" + principal, "tenki"},
+		ValidAfter:      uint64(now.Add(-30 * time.Second).Unix()), ValidBefore: uint64(now.Add(10 * time.Minute).Unix()),
+		Permissions: ssh.Permissions{Extensions: map[string]string{
+			"permit-agent-forwarding": "", "permit-port-forwarding": "", "permit-pty": "",
+			"tenki-api-key-id@tenki.cloud":      "33333333-3333-4333-8333-333333333333",
+			"tenki-issuer@tenki.cloud":          "sandbox-engine-example",
+			"tenki-nonce@tenki.cloud":           nonce,
+			"tenki-principal-id@tenki.cloud":    principal,
+			"tenki-principal-type@tenki.cloud":  "WORKSPACE",
+			"tenki-runtime-secrets@tenki.cloud": "false",
+			"tenki-session-id@tenki.cloud":      session,
+			"tenki-user-id@tenki.cloud":         principal,
+			"tenki-workspace-id@tenki.cloud":    principal,
+		}}}
 	if err := cert.SignCert(rand.Reader, ca); err != nil {
 		t.Fatal(err)
 	}
 	return ssh.MarshalAuthorizedKey(cert)
+}
+
+func TestTenkiSSHCertificateSessionBinding(t *testing.T) {
+	const session = "44444444-4444-4444-8444-444444444444"
+	ca, key := authorityTestSigner(t), authorityTestSigner(t).PublicKey()
+	now := time.Now()
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*ssh.Certificate)
+		wantErr bool
+	}{
+		{name: "native CLI shape"},
+		{name: "different session", wantErr: true, mutate: func(c *ssh.Certificate) {
+			c.Extensions["tenki-session-id@tenki.cloud"] = "55555555-5555-4555-8555-555555555555"
+		}},
+		{name: "missing session", wantErr: true, mutate: func(c *ssh.Certificate) {
+			delete(c.Extensions, "tenki-session-id@tenki.cloud")
+		}},
+		{name: "empty session", wantErr: true, mutate: func(c *ssh.Certificate) {
+			c.Extensions["tenki-session-id@tenki.cloud"] = ""
+		}},
+		{name: "nested SSH string", wantErr: true, mutate: func(c *ssh.Certificate) {
+			c.Extensions["tenki-session-id@tenki.cloud"] = string(ssh.Marshal(struct{ Session string }{session}))
+		}},
+		{name: "different key", wantErr: true, mutate: func(c *ssh.Certificate) {
+			c.Key = authorityTestSigner(t).PublicKey()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cert, err := parseTenkiSSHCertificate(credentialTestCert(t, ca, key, session, now))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.mutate != nil {
+				tc.mutate(cert)
+				if err := cert.SignCert(rand.Reader, ca); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := validTenkiSSHCertificate(cert, key, session, now); (err != nil) != tc.wantErr {
+				t.Fatalf("validTenkiSSHCertificate() = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
 }
 
 func writeCredentialTestCert(t *testing.T, name, session string) {

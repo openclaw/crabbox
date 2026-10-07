@@ -864,6 +864,10 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		cfg.OSImage = normalized
 	}
 	applySingleProviderTargetDefault(cfg)
+	if spec := osImageSpecs[cfg.OSImage]; spec.Provider != "" &&
+		(cfg.Provider != spec.Provider || normalizeTargetOS(cfg.TargetOS) != spec.Target) {
+		return Exit(2, "os %s requires provider=%s target=%s", spec.Selector, spec.Provider, spec.Target)
+	}
 	applyOSImageProviderDefaults(cfg, false)
 	if provider, err := ProviderFor(cfg.Provider); err == nil {
 		if defaulter, ok := provider.(ProviderConfigDefaulter); ok {

@@ -1164,7 +1164,7 @@ lease-acting commands):
 --profile <name>
 --class <name>
 --arch amd64|arm64           CPU architecture; cloud/Apple select capacity, while local-container asserts selected-daemon native architecture.
---os <selector>              Portable Linux OS image, e.g. ubuntu:26.04
+--os <selector>              OS image, e.g. ubuntu:26.04 or windows-server:2025 (AWS Windows)
 --type <provider-type>
 --market spot|on-demand
 --min-vcpus <count>                minimum vCPUs for new AWS Linux leases; 0 disables

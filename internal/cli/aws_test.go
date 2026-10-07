@@ -1694,3 +1694,38 @@ func writeEC2Error(w http.ResponseWriter, code, message string, status int) {
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Response><Errors><Error><Code>` + code + `</Code><Message>` + message + `</Message></Error></Errors></Response>`))
 }
+
+func TestAWSWindowsOSSelectorAMI(t *testing.T) {
+	for _, selector := range []string{"", "ubuntu:26.04", "windows-server:2022", "windows-server:2025"} {
+		t.Run(selector, func(t *testing.T) {
+			var gotName, gotOwner, gotArch string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := r.ParseForm(); err != nil {
+					t.Error(err)
+					return
+				}
+				gotName, gotOwner, gotArch = r.Form.Get("Filter.2.Value.1"), r.Form.Get("Owner.1"), r.Form.Get("Filter.1.Value.1")
+				writeEC2XML(w, `<DescribeImagesResponse><imagesSet><item><imageId>ami-old</imageId><creationDate>2026-01-01</creationDate></item><item><imageId>ami-latest</imageId><creationDate>2026-09-01</creationDate></item></imagesSet></DescribeImagesResponse>`)
+			}))
+			defer server.Close()
+			cfg := baseConfig()
+			cfg.TargetOS, cfg.OSImage = targetWindows, selector
+			image, err := testAWSClient(server.URL).resolveAMI(context.Background(), cfg)
+			if err != nil || image != "ami-latest" {
+				t.Fatalf("image=%q err=%v", image, err)
+			}
+			year := "2022"
+			if selector == "windows-server:2025" {
+				year = "2025"
+			}
+			if gotName != "Windows_Server-"+year+"-English-Full-Base-*" || gotOwner != "amazon" || gotArch != "x86_64" {
+				t.Fatalf("unexpected query: name=%q owner=%q arch=%q", gotName, gotOwner, gotArch)
+			}
+			cfg.AWSAMI = "ami-pinned"
+			image, err = testAWSClient(server.URL).resolveAMI(context.Background(), cfg)
+			if err != nil || image != "ami-pinned" {
+				t.Fatalf("override: image=%q err=%v", image, err)
+			}
+		})
+	}
+}

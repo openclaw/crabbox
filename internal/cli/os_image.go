@@ -3,9 +3,11 @@
 package cli
 
 const defaultOSImage = "ubuntu:26.04"
-const supportedOSImages = "ubuntu:26.04, ubuntu:24.04"
+const supportedOSImages = "ubuntu:26.04, ubuntu:24.04, windows-server:2022, windows-server:2025"
 
 type osImageSpec struct {
+	Target          string
+	Provider        string
 	Selector        string
 	AWSName         string
 	AWSArm64Name    string
@@ -43,6 +45,8 @@ var osImageSpecs = map[string]osImageSpec{
 		ContainerName:   "docker.io/library/ubuntu@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517",
 		AppleVMImage:    "https://cloud-images.ubuntu.com/releases/noble/release-20260518/ubuntu-24.04-server-cloudimg-arm64.img",
 		AppleVMSHA256:   "6a61b967ba4a27dd1966f835a67643073ed55c2860ce3dc1cb0517282e6b8bec",
+		Target:          "linux",
+		Provider:        "",
 	},
 	"ubuntu:26.04": {
 		Selector:        "ubuntu:26.04",
@@ -58,5 +62,41 @@ var osImageSpecs = map[string]osImageSpec{
 		ContainerName:   "docker.io/library/ubuntu@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b",
 		AppleVMImage:    "https://cloud-images.ubuntu.com/releases/resolute/release-20260731/ubuntu-26.04-server-cloudimg-arm64.img",
 		AppleVMSHA256:   "3e113fdd41f39e13729375173bb2ae793f87dc6db4294e5251ff2476971788ba",
+		Target:          "linux",
+		Provider:        "",
+	},
+	"windows-server:2022": {
+		Selector:        "windows-server:2022",
+		AWSName:         "Windows_Server-2022-English-Full-Base-*",
+		AWSArm64Name:    "",
+		AWSLabel:        "Windows Server 2022",
+		AzureImage:      "",
+		AzureArm64Image: "",
+		GCPImage:        "",
+		HetznerImage:    "",
+		LinodeImage:     "",
+		DockerImage:     "",
+		ContainerName:   "",
+		AppleVMImage:    "",
+		AppleVMSHA256:   "",
+		Target:          "windows",
+		Provider:        "aws",
+	},
+	"windows-server:2025": {
+		Selector:        "windows-server:2025",
+		AWSName:         "Windows_Server-2025-English-Full-Base-*",
+		AWSArm64Name:    "",
+		AWSLabel:        "Windows Server 2025",
+		AzureImage:      "",
+		AzureArm64Image: "",
+		GCPImage:        "",
+		HetznerImage:    "",
+		LinodeImage:     "",
+		DockerImage:     "",
+		ContainerName:   "",
+		AppleVMImage:    "",
+		AppleVMSHA256:   "",
+		Target:          "windows",
+		Provider:        "aws",
 	},
 }

@@ -2837,3 +2837,37 @@ func TestCoordinatorAWSStockImageInput(t *testing.T) {
 		})
 	}
 }
+
+func TestCoordinatorWindowsOSSelectorRequest(t *testing.T) {
+	for _, selector := range []string{"", "windows-server:2022", "windows-server:2025"} {
+		t.Run(selector, func(t *testing.T) {
+			var body map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","provider":"aws","state":"active","host":"192.0.2.10"}}`))
+			}))
+			defer server.Close()
+			cfg := baseConfig()
+			cfg.Provider, cfg.TargetOS = "aws", targetWindows
+			if selector != "" {
+				cfg.OSImage, cfg.osImageExplicit = selector, true
+			}
+			client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+			_, err := client.CreateLease(context.Background(), cfg, "ssh-ed25519 test", false, "cbx_123", "blue-crab")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if selector == "" {
+				if _, present := body["os"]; present {
+					t.Fatal("implicit OS must remain omitted for promoted Windows images")
+				}
+			} else if body["os"] != selector {
+				t.Fatalf("os=%v, want %s", body["os"], selector)
+			}
+		})
+	}
+}

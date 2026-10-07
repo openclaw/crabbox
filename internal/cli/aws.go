@@ -1168,7 +1168,14 @@ func (c *AWSClient) resolveAMI(ctx context.Context, cfg Config) (string, error) 
 		return cfg.AWSAMI, nil
 	}
 	if cfg.TargetOS == targetWindows {
-		return c.resolveLatestAmazonAMI(ctx, "Windows_Server-2022-English-Full-Base-*", "x86_64")
+		spec, err := osImageSpecFor(cfg.OSImage)
+		if err != nil {
+			return "", err
+		}
+		if spec.Target != targetWindows {
+			spec = osImageSpecs["windows-server:2022"]
+		}
+		return c.resolveLatestAmazonAMI(ctx, spec.AWSName, "x86_64")
 	}
 	if cfg.TargetOS == targetMacOS {
 		name, architecture := awsMacOSAMIQueryForInstanceType(cfg.ServerType)

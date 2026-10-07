@@ -106,6 +106,10 @@ test("artifact and catalog schemas reject malformed or ambiguous data", () => {
     (d) => { d.supported = [d.default, d.default]; },
     (d) => { d.aliases.test = "missing"; },
     (d) => { d.aliases[d.default] = d.default; },
+    (d) => { d.images.find((image) => image.Target === "windows").Provider = "azure"; },
+    (d) => { d.images.find((image) => image.Target === "windows").ContainerName = d.images[0].ContainerName; },
+    (d) => { d.images.find((image) => image.Target === "windows").AWSName = ""; },
+
   ]) {
     const document = structuredClone(sources.catalog); mutate(document);
     assert.throws(() => validateCatalog(document));

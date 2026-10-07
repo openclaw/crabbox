@@ -210,7 +210,13 @@ Reusing a lease later requires matching capability labels.
 
 ## OS image
 
-`--os` selects a portable Linux OS image; `ubuntu:26.04` is the default.
+`--os` selects an OS image. Linux supports `ubuntu:26.04` (the default) and
+`ubuntu:24.04`. AWS Windows supports `windows-server:2022` and
+`windows-server:2025` with `--target windows`, including WSL2 mode. Without a
+Windows selector, brokered promoted Windows images still win and stock Windows
+Server 2022 remains the fallback. A Windows selector requests the stock image
+for that release instead of an unversioned promoted image; see
+[AWS Windows images](../providers/aws.md#windows-images).
 Explicit provider image flags and config values still win for exact AMIs, URNs,
 image families, or provider image names.
 
@@ -386,7 +392,7 @@ bootstrap, key migration, or failure cleanup.
 --profile <name>                   configuration profile
 --class <name>                     machine class; default beast
 --arch amd64|arm64                 CPU architecture; arm64 supports Linux on AWS/Azure/Apple Container and native Windows on Azure
---os ubuntu:26.04|ubuntu:24.04     portable Linux OS image selector
+--os <selector>                   Ubuntu or AWS Windows Server OS image selector
 --type <provider-type>             provider server/instance type
 --market spot|on-demand            capacity market (AWS)
 --min-vcpus <count>                minimum vCPUs for new AWS Linux leases; 0 disables
