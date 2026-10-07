@@ -70,8 +70,7 @@ type Client interface {
 
 type InstanceAPI interface {
 	GetImage(*instance.GetImageRequest, ...scw.RequestOption) (*instance.GetImageResponse, error)
-	CreateVolume(*instance.CreateVolumeRequest, ...scw.RequestOption) (*instance.CreateVolumeResponse, error)
-	ListVolumes(*instance.ListVolumesRequest, ...scw.RequestOption) (*instance.ListVolumesResponse, error)
+	UpdateVolume(*instance.UpdateVolumeRequest, ...scw.RequestOption) (*instance.UpdateVolumeResponse, error)
 	ListServers(req *instance.ListServersRequest, opts ...scw.RequestOption) (*instance.ListServersResponse, error)
 	GetServer(req *instance.GetServerRequest, opts ...scw.RequestOption) (*instance.GetServerResponse, error)
 	CreateServer(req *instance.CreateServerRequest, opts ...scw.RequestOption) (*instance.CreateServerResponse, error)

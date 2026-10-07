@@ -46,14 +46,15 @@ crabbox cleanup --provider scaleway --dry-run
 Fixed-lease orchestrators can pass `--lease-id cbx_abcdef123456` to `warmup`
 or `run`. Repeating the same request from the same local state reuses the
 original allocation; changes to the project, repository owner, or creation
-settings conflict. Fixed acquisition creates and journals a tagged root volume
-from the image's single root snapshot before submitting the Instance, preserving
-disk ownership even if a create response is lost. Interrupted key and volume
-creation reconcile their original identities without allocating replacements.
+settings conflict. Fixed acquisition creates the Instance directly from the image,
+including the default public `ubuntu_noble` image, without reading or cloning its
+root snapshot. After attesting the Instance's lease and attempt tags, Crabbox
+requires the root's immutable creation time to equal the Instance's creation
+time, journals that evidence and the root ID, and publishes matching ownership tags on the disk
+and Instance. Interrupted tag publication resumes using that recorded disk ID.
 SSH key identity uses the parsed public key, so Scaleway's removal of the
 optional key comment does not change ownership. A failed acquisition that only
-created the IAM key can be stopped using the same local claim and stored key;
-stop reconciles that attempt's key and any journaled root volume before cleanup.
+created the IAM key can be stopped using the same local claim and stored key.
 `status`, `stop`, and normal lease commands accept that ID. Successful stop
 retains a terminal claim so the ID cannot allocate another machine. Keep the
 local claim and stored SSH key through recovery; images with additional volumes
@@ -66,19 +67,27 @@ that support caller-supplied lease IDs.
 
 ### Fixed-Lease Recovery
 
-An interruption after server admission is journaled can happen before the server
-request is sent. With no recorded server ID, Crabbox reads the complete project
-inventory. A matching server is recovered; conflicting ownership or a failed
-inventory read blocks recovery. If the read succeeds without a matching server,
-repeating `warmup` may submit the server using the same journaled SSH key and root
-volume, after verifying their ownership and that the volume is detached. It does
-not recreate either child. Alternatively, `stop` deletes those verified children
-and records terminal release without requiring a server.
+After server submission is journaled, replay searches the complete project
+inventory for the exact lease and attempt. A matching Instance recovers its
+root-volume identity even if the create response was lost. Foreign or conflicting
+ownership, multiple matching Instances, and failed inventory reads block recovery.
+Once the root ID is journaled, later attachments cannot replace it. Stop checks
+the recorded disk's project, zone, attachment, recorded creation time, and attempt
+tags before deletion,
+including retries after the Instance is gone.
 
-This recovery requires the exact lease and attempt's journaled child identities
-and matching live ownership evidence. A bound server ID never authorizes a
-replacement server. Interrupted key or volume creation whose original resource
-is not yet observable remains unresolved; retry the same lease ID later.
+Scaleway has no server-create idempotency token. If a submitted request has no
+observable Instance, both replay and stop retain the unresolved claim and key;
+retry later. An empty inventory does not authorize a second create or terminal
+cleanup because the first request might still be in flight. This also applies
+to an interruption between durable admission and sending the request. A bound
+server ID never authorizes a replacement.
+
+Older fixed claims with a separately pre-created root remain releasable when its
+ID is recorded and the server is bound or has not been submitted. They cannot
+submit a new Instance using that disk. An older
+interrupted volume create with no recorded ID remains unresolved; finish recovery
+with the original CLI before upgrading. New acquisitions never pre-create disks.
 
 Those commands create, inspect, resolve, touch, release, and clean up Scaleway
 Instances through the local Scaleway SDK profile. They are cost-bearing when
@@ -274,6 +283,7 @@ The provider implements a direct Linux SSH lease over Scaleway Instances:
    exact project-, zone-, and server-bound local claim.
 
 New leases also record the root disk returned by the original Instance creation
+(or recovered from the exact fixed attempt before its initial disk binding)
 in their local recovery claim and Instance tags. `stop` deletes only this recorded
 disk after verifying its project, zone, identity, and detachment. Disks attached
 later are not adopted or deleted. A disk moved to another Instance, changed
@@ -282,8 +292,9 @@ If the Instance is already gone, retry `stop <lease-or-slug>` to finish recorded
 disk cleanup; bulk `cleanup` scans Instances, not orphaned disks.
 
 The allocation contract is marked before creation and journaled locally before
-tag publication or destructive rollback. An interrupted create with no recorded
-root identity stays unresolved rather than being mistaken for a legacy lease.
+tag publication or destructive rollback. Outside the fixed-lease recovery path
+described above, an interrupted create with no recorded root identity stays
+unresolved rather than being mistaken for a legacy lease.
 An interrupted tag publication has a cleanup-only recovery path; it cannot
 authorize normal reuse or metadata updates. A crash between confirmed tag
 publication and its local acknowledgment can retain that pending state.

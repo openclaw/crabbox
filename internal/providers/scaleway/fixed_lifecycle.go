@@ -75,11 +75,11 @@ func (b *Backend) releaseFixed(ctx context.Context, client Client, expected core
 					err = nil
 				}
 				if err == nil && item != nil {
-					err = tx.Bind(core.FixedResourceBinding{CloudID: item.ID, ImmutableID: item.ID})
+					err = b.bindFixedRoot(ctx, client, tx, item)
 				}
 			}
-			if err == nil && claim.CloudID == "" {
-				err = prepareFixedRoot(ctx, client, tx, false)
+			if err == nil && claim.CloudID == "" && claim.FixedCreateIntent.Attempt["volume_submitted"] != "" && claim.Labels[rootVolumeLabel] == "" {
+				err = core.FixedUncertainCustody(claim.LeaseID)
 			}
 			if err != nil {
 				return core.FixedObservation[*instance.Server]{}, err
@@ -93,14 +93,22 @@ func (b *Backend) releaseFixed(ctx context.Context, client Client, expected core
 				return err
 			}
 			labels := claim.Labels
+			pending := rootVolumeFromLabels(labels).pending
+			if _, err := inspectFixedRoot(ctx, client, *claim, pending); err != nil {
+				return err
+			}
 			if err := tx.Record("deleting"); err != nil {
 				return err
 			}
 			if claim.CloudID != "" {
-				if err := b.deleteAllocationResources(ctx, client, claim.CloudID, rootVolumeFromLabels(labels)); err != nil {
+				if err := b.deleteServerResource(ctx, client, claim.CloudID); err != nil {
 					return err
 				}
-			} else if labels[rootVolumeLabel] != "" {
+			}
+			if labels[rootVolumeLabel] != "" {
+				if _, err := inspectFixedRoot(ctx, client, *claim, pending); err != nil {
+					return err
+				}
 				if err := deleteRootVolume(ctx, client, rootVolumeFromLabels(labels), ""); err != nil {
 					return err
 				}

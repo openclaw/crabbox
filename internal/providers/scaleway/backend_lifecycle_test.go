@@ -1711,10 +1711,10 @@ type fakeScalewayClient struct {
 	createResponseWithoutServer bool
 	createVolumeCalls           int
 	createVolumeReplyErr        error
-	createVolumeEmptyReply      bool
+	updateVolumeErr             error
+	getImageErr                 error
 	getVolumeErr                error
 	userDataErr                 error
-	afterVolume                 func()
 }
 
 func newFakeScalewayClient() *fakeScalewayClient {
@@ -1775,18 +1775,11 @@ func (api *fakeInstanceAPI) CreateServer(req *instance.CreateServerRequest, _ ..
 		return nil, api.f.createErr
 	}
 	api.f.server = testServer("srv-1", req.Name, req.Tags, "203.0.113.10")
+	createdAt := time.Unix(1_700_000_123, 456_000).UTC()
+	api.f.server.CreationDate = &createdAt
 	api.f.server.CommercialType = req.CommercialType
 	rootID := "44444444-4444-4444-4444-444444444444"
-	if root := req.Volumes["0"]; root != nil {
-		if root.ID == nil || api.f.volumes[*root.ID] == nil {
-			return nil, errors.New("fixed create must attach the recorded volume")
-		}
-		rootID = *root.ID
-		api.f.volumes[rootID].Server = &instance.ServerSummary{ID: api.f.server.ID}
-		api.f.server.State = instance.ServerStateStopped
-	} else {
-		api.f.volumes = map[string]*instance.Volume{rootID: {ID: rootID, Project: api.f.ProjectID(), Zone: scw.Zone(api.f.Zone()), Server: &instance.ServerSummary{ID: api.f.server.ID}}}
-	}
+	api.f.volumes = map[string]*instance.Volume{rootID: {ID: rootID, CreationDate: &createdAt, Project: api.f.ProjectID(), Zone: scw.Zone(api.f.Zone()), Server: &instance.ServerSummary{ID: api.f.server.ID}}}
 	api.f.server.Volumes = map[string]*instance.VolumeServer{"0": {ID: rootID, Project: scw.StringPtr(api.f.ProjectID()), Zone: scw.Zone(api.f.Zone()), VolumeType: instance.VolumeServerVolumeTypeLSSD, Boot: true}}
 	if api.f.omitRootVolume {
 		api.f.server.Volumes = nil

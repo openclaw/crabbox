@@ -20,13 +20,13 @@ func TestFixedScalewayNormalizedKeyAcquireReplay(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if fake.createKeyCalls != 1 || fake.createVolumeCalls != 1 || fake.createCalls != 1 {
+	if fake.createKeyCalls != 1 || fake.createVolumeCalls != 0 || fake.createCalls != 1 {
 		t.Fatalf("duplicate allocation: keys=%d volumes=%d servers=%d", fake.createKeyCalls, fake.createVolumeCalls, fake.createCalls)
 	}
 }
 
 func TestFixedScalewayNormalizedKeyStrandedStop(t *testing.T) {
-	for _, stage := range []string{"key", "volume"} {
+	for _, stage := range []string{"key", "image"} {
 		t.Run(stage, func(t *testing.T) {
 			backend, fake := newTestBackend(t)
 			fake.normalizeKey = true
@@ -34,7 +34,7 @@ func TestFixedScalewayNormalizedKeyStrandedStop(t *testing.T) {
 			if stage == "key" {
 				fake.createKeyErr = errors.New("lost key response")
 			} else {
-				fake.createVolumeReplyErr = errors.New("lost volume response")
+				fake.getImageErr = errors.New("image lookup failed")
 			}
 			if _, err := backend.Acquire(t.Context(), req); err == nil {
 				t.Fatal("expected interrupted acquisition")

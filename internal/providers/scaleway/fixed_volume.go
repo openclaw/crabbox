@@ -3,89 +3,95 @@ package scaleway
 import (
 	"context"
 	"maps"
+	"time"
 
 	instance "github.com/scaleway/scaleway-sdk-go/api/instance/v1"
 	"github.com/scaleway/scaleway-sdk-go/scw"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-// Journal the allocation-created root before server creation so inventory
-// recovery never has to infer disk ownership from the server's attachments.
-func prepareFixedRoot(ctx context.Context, client Client, tx *core.FixedTransaction, create bool) error {
-	api := client.Instance()
+// Only an attested attempt can supply the initial root identity. Persist it before
+// publishing disk/server tags so a lost response never selects a different disk.
+func (b *Backend) bindFixedRoot(ctx context.Context, client Client, tx *core.FixedTransaction, item *instance.Server) error {
 	claim := tx.Claim
-	zone := scw.Zone(client.Zone())
-	labels := maps.Clone(claim.Labels)
-	name := "crabbox-root-" + claim.FixedCreateIntent.Attempt["nonce"]
-	validate := func(volume *instance.Volume) bool {
-		if volume == nil || volume.ID == "" || labels[rootVolumeLabel] != "" && volume.ID != labels[rootVolumeLabel] || volume.Project != client.ProjectID() || volume.Zone != zone || volume.Name != name || volume.Server != nil {
-			return false
-		}
-		got := labelsFromTags(volume.Tags)
-		for _, key := range []string{"crabbox", "lease", "slug", "provider", "target", "fixed_attempt", "fixed_intent_sha256", volumeContractLabel} {
-			if got[key] != labels[key] || got[key] == "" || got[ownershipTagConflictLabel] != "" {
-				return false
-			}
-		}
-		return true
-	}
-	var volume *instance.Volume
-	if id := labels[rootVolumeLabel]; id != "" {
-		response, err := client.Instance().GetVolume(&instance.GetVolumeRequest{Zone: zone, VolumeID: id}, scw.WithContext(ctx))
-		if !create && isScalewayNotFound(err) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if response != nil {
-			volume = response.Volume
-		}
-	} else if claim.FixedCreateIntent.Attempt["volume_submitted"] != "" {
-		response, err := api.ListVolumes(&instance.ListVolumesRequest{Zone: zone, Project: scw.StringPtr(client.ProjectID()), Name: scw.StringPtr(name)}, scw.WithContext(ctx), scw.WithAllPages())
-		if err != nil {
-			return err
-		}
-		if response != nil {
-			var found bool
-			volume, found, err = core.SelectFixedCandidate(fixedLeaseKind, claim.LeaseID, response.Volumes, validate)
-			if err != nil {
-				return err
-			}
-			if !found {
-				return core.FixedUncertainCustody(claim.LeaseID)
-			}
-		}
-	} else {
-		if !create {
-			return nil
-		}
-		image, err := api.GetImage(&instance.GetImageRequest{Zone: zone, ImageID: claim.FixedCreateIntent.Attempt["image"]}, scw.WithContext(ctx))
-		if err != nil {
-			return err
-		}
-		if image == nil || image.Image == nil || image.Image.RootVolume == nil || image.Image.RootVolume.ID == "" || len(image.Image.ExtraVolumes) != 0 {
-			return core.Exit(4, "Scaleway fixed image requires one identifiable root snapshot")
-		}
-		if err := tx.Observe(core.FixedResourceBinding{AttemptValues: map[string]string{"volume_submitted": "true", "root_snapshot": image.Image.RootVolume.ID}}); err != nil {
-			return err
-		}
-		response, err := api.CreateVolume(&instance.CreateVolumeRequest{Zone: zone, Name: name, Project: scw.StringPtr(client.ProjectID()),
-			Tags: tagsFromLabels(labels), VolumeType: image.Image.RootVolume.VolumeType, BaseSnapshot: scw.StringPtr(image.Image.RootVolume.ID)}, scw.WithContext(ctx))
-		if err != nil {
-			return err
-		}
-		if response != nil {
-			volume = response.Volume
-		}
-	}
-	if !validate(volume) {
-		return core.Exit(4, "lease_id_conflict: Scaleway fixed root volume has no matching allocation evidence")
-	}
-	labels[rootVolumeLabel] = volume.ID
-	if err := rootVolumeFromLabels(labels).validate(); err != nil {
+	if err := b.validateFixedServer(client, *claim, item); err != nil {
 		return err
 	}
+	labels := maps.Clone(claim.Labels)
+	createdAt := claim.FixedCreateIntent.Attempt["root_created_at"]
+	if labels[rootVolumeLabel] == "" {
+		root := item.Volumes["0"]
+		// Image-created local roots occupy slot 0 but Scaleway reports boot=false.
+		if len(item.Volumes) != 1 || root == nil || item.CreationDate == nil || item.CreationDate.IsZero() {
+			return core.FixedUncertainCustody(claim.LeaseID)
+		}
+		labels[rootVolumeLabel], labels[volumePendingLabel] = root.ID, "true"
+		createdAt = item.CreationDate.UTC().Format(time.RFC3339Nano)
+	}
+	candidate := core.CloneLeaseClaim(*claim)
+	candidate.Labels, candidate.CloudID = labels, item.ID
+	candidate.FixedCreateIntent.Attempt["root_created_at"] = createdAt
+	volume, err := inspectFixedRoot(ctx, client, candidate, labels[volumePendingLabel] == "true")
+	if err != nil {
+		return err
+	}
+	if labels[volumePendingLabel] == "true" && (volume == nil || volume.Server == nil || volume.Server.ID != item.ID || item.Volumes["0"] == nil || item.Volumes["0"].ID != labels[rootVolumeLabel]) {
+		return core.FixedUncertainCustody(claim.LeaseID)
+	}
+	binding := core.FixedResourceBinding{CloudID: item.ID, ImmutableID: item.ID, Labels: labels}
+	if createdAt != "" {
+		binding.AttemptValues = map[string]string{"root_created_at": createdAt}
+	}
+	if err := tx.Bind(binding); err != nil {
+		return err
+	}
+	if labels[volumePendingLabel] != "true" {
+		return nil
+	}
+	delete(labels, volumePendingLabel)
+	if _, err := client.Instance().UpdateVolume(&instance.UpdateVolumeRequest{Zone: scw.Zone(client.Zone()), VolumeID: labels[rootVolumeLabel],
+		Tags: ptrTags(shared.ReplaceCrabboxTags(volume.Tags, tagsFromLabels(labels)))}, scw.WithContext(ctx)); err != nil {
+		return err
+	}
+	tags := shared.ReplaceCrabboxTags(item.Tags, tagsFromLabels(labels))
+	if _, err := client.Instance().UpdateServer(&instance.UpdateServerRequest{Zone: scw.Zone(client.Zone()), ServerID: item.ID, Tags: &tags}, scw.WithContext(ctx)); err != nil {
+		return err
+	}
+	item.Tags = tags
 	return tx.Observe(core.FixedResourceBinding{Labels: labels})
+}
+
+func inspectFixedRoot(ctx context.Context, client Client, claim core.LeaseClaim, allowUntagged bool) (*instance.Volume, error) {
+	if claim.Labels[rootVolumeLabel] == "" {
+		if claim.CloudID != "" {
+			return nil, core.FixedUncertainCustody(claim.LeaseID)
+		}
+		return nil, nil // A key-only attempt has no disk to delete.
+	}
+	volume, err := inspectRootVolume(ctx, client, rootVolumeFromLabels(claim.Labels), claim.CloudID, false)
+	if err != nil || volume == nil {
+		return volume, err
+	}
+	// Image-created disks and their server share an immutable creation instant.
+	// A later attachment alone cannot attest the allocation's original root.
+	if createdAt := claim.FixedCreateIntent.Attempt["root_created_at"]; createdAt != "" {
+		created, err := time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil || volume.CreationDate == nil || !volume.CreationDate.Equal(created) {
+			return nil, core.Exit(4, "lease_id_conflict: Scaleway root volume creation differs from its server allocation")
+		}
+	} else if claim.FixedCreateIntent.Attempt["volume_submitted"] == "" || claim.FixedCreateIntent.Attempt["nonce"] == "" || volume.Name != "crabbox-root-"+claim.FixedCreateIntent.Attempt["nonce"] {
+		return nil, core.Exit(4, "lease_id_conflict: Scaleway root volume has no allocation evidence")
+	}
+	got := labelsFromTags(volume.Tags)
+	if allowUntagged && len(got) == 0 {
+		return volume, nil
+	}
+	for _, key := range []string{"crabbox", "lease", "slug", "provider", "target", "fixed_attempt", "fixed_intent_sha256", volumeContractLabel} {
+		if got[key] == "" || got[key] != claim.Labels[key] || got[ownershipTagConflictLabel] != "" {
+			return nil, core.Exit(4, "lease_id_conflict: Scaleway root volume does not match fixed create intent")
+		}
+	}
+	return volume, nil
 }

@@ -40,9 +40,8 @@ func (b *Backend) acquireFixed(ctx context.Context, req core.AcquireRequest) (co
 		Kind: fixedLeaseKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root, Reclaim: req.Reclaim,
 		TargetOS: core.TargetLinux, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout, Now: b.clockNow,
 	}, core.FixedLeaseOperations[*instance.Server]{
-		// Replay attaches the same journaled root, whose ownership and detachment
-		// are checked before admission; it never allocates replacement children.
-		Admission: &core.FixedAdmission{RepeatSameIdentity: true, PendingKey: "server", PendingValue: "pending", SubmittedValue: "submitted"}, DeferredAdmission: true,
+		// A submitted request may still be in flight even when inventory is empty.
+		Admission: &core.FixedAdmission{PendingKey: "server", PendingValue: "pending", SubmittedValue: "submitted"}, DeferredAdmission: true,
 		DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 			if exists && (!fixedLeaseKind.IsFixedClaim(*claim) || claim.ProviderScope != client.ProjectID()) {
 				return core.FixedLeaseBinding{}, core.Exit(4, "lease_id_conflict: Scaleway owner or project changed")
@@ -81,9 +80,6 @@ func (b *Backend) acquireFixed(ctx context.Context, req core.AcquireRequest) (co
 				return core.FixedObservation[*instance.Server]{CanSubmit: true}, nil
 			}
 			item, err := b.loadFixedServer(ctx, client, *claim)
-			if err == nil && item == nil {
-				return core.FixedObservation[*instance.Server]{CanSubmit: true}, nil
-			}
 			return core.FixedObservation[*instance.Server]{Candidates: []*instance.Server{item}}, err
 		},
 		Plan: func(ctx context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
@@ -111,8 +107,16 @@ func (b *Backend) submitFixedServer(ctx context.Context, client Client, cfg core
 	if _, err := b.fixedKey(ctx, client, tx, publicKey, true); err != nil {
 		return nil, err
 	}
-	if err := prepareFixedRoot(ctx, client, tx, true); err != nil {
+	// Older attempts may already own a separately allocated disk. Never replace it.
+	if claim.FixedCreateIntent.Attempt["volume_submitted"] != "" {
+		return nil, core.FixedUncertainCustody(claim.LeaseID)
+	}
+	image, err := client.Instance().GetImage(&instance.GetImageRequest{Zone: scw.Zone(client.Zone()), ImageID: claim.FixedCreateIntent.Attempt["image"]}, scw.WithContext(ctx))
+	if err != nil {
 		return nil, err
+	}
+	if image == nil || image.Image == nil || image.Image.RootVolume == nil || image.Image.RootVolume.ID == "" || len(image.Image.ExtraVolumes) != 0 {
+		return nil, core.Exit(4, "Scaleway fixed image requires one identifiable root snapshot")
 	}
 	labels := maps.Clone(claim.Labels)
 	if err := tx.Admit(); err != nil {
@@ -120,8 +124,7 @@ func (b *Backend) submitFixedServer(ctx context.Context, client Client, cfg core
 	}
 	request := &instance.CreateServerRequest{Zone: scw.Zone(client.Zone()), Name: core.LeaseProviderName(claim.LeaseID, claim.Slug),
 		DynamicIPRequired: scw.BoolPtr(true), CommercialType: cfg.ServerType, Image: scw.StringPtr(claim.FixedCreateIntent.Attempt["image"]),
-		Project: scw.StringPtr(client.ProjectID()), Tags: tagsFromLabels(labels),
-		Volumes: map[string]*instance.VolumeServerTemplate{"0": {ID: scw.StringPtr(labels[rootVolumeLabel]), Boot: scw.BoolPtr(true)}}}
+		Project: scw.StringPtr(client.ProjectID()), Tags: tagsFromLabels(labels)}
 	if sg := strings.TrimSpace(cfg.Scaleway.SecurityGroup); sg != "" {
 		request.SecurityGroup = scw.StringPtr(sg)
 	}
@@ -132,19 +135,12 @@ func (b *Backend) submitFixedServer(ctx context.Context, client Client, cfg core
 	if response == nil || response.Server == nil || response.Server.ID == "" {
 		return nil, core.FixedUncertainCustody(claim.LeaseID)
 	}
-	item := response.Server
-	if err := tx.Bind(core.FixedResourceBinding{CloudID: item.ID, ImmutableID: item.ID, Labels: labels}); err != nil {
-		return nil, err
-	}
-	return item, rootVolumeFromLabels(labels).validate()
+	return response.Server, nil
 }
 
 func (b *Backend) prepareFixedServer(ctx context.Context, client Client, cfg core.Config, publicKey string, tx *core.FixedTransaction, item *instance.Server) (core.LeaseTarget, error) {
 	claim := tx.Claim
-	if err := b.validateFixedServer(client, *claim, item); err != nil {
-		return core.LeaseTarget{}, err
-	}
-	if err := tx.Bind(core.FixedResourceBinding{CloudID: item.ID, ImmutableID: item.ID}); err != nil {
+	if err := b.bindFixedRoot(ctx, client, tx, item); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	labels := maps.Clone(claim.Labels)
@@ -202,14 +198,17 @@ func (b *Backend) validateFixedServer(client Client, claim core.LeaseClaim, item
 		labels["scaleway_ssh_key_id"] != claim.Labels["scaleway_ssh_key_id"] || claim.CloudID != "" && claim.CloudID != item.ID {
 		return core.Exit(4, "lease_id_conflict: Scaleway server does not match fixed create intent")
 	}
-	if labels[rootVolumeLabel] != claim.Labels[rootVolumeLabel] || labels[volumeContractLabel] != rootVolumeContract {
+	root := rootVolumeFromLabels(claim.Labels)
+	if labels[volumeContractLabel] != rootVolumeContract || (labels[rootVolumeLabel] != root.id && !(root.pending && labels[rootVolumeLabel] == "")) {
 		return core.Exit(4, "lease_id_conflict: Scaleway root-volume identity changed")
 	}
-	return rootVolumeFromLabels(claim.Labels).validate()
+	if root.id == "" && intent.State != "acquired" && claim.CloudID == "" {
+		return nil // The exact attempt's server is attested before its root is bound.
+	}
+	return root.validate()
 }
 
-// A nil server without error means complete inventory confirmed an unbound
-// attempt has no server; callers must still attest its children before mutation.
+// Unbound submissions require a unique attested server in complete inventory.
 func (b *Backend) loadFixedServer(ctx context.Context, client Client, claim core.LeaseClaim) (*instance.Server, error) {
 	return core.LookupFixedResource(ctx, fixedLeaseKind, claim, func(ctx context.Context, claim core.LeaseClaim) (*instance.Server, error) {
 		if claim.CloudID != "" {
@@ -247,14 +246,9 @@ func (b *Backend) loadFixedServer(ctx context.Context, client Client, claim core
 			return b.validateFixedServer(client, claim, item) == nil
 		})
 		if err == nil && !found {
-			// Admit is durable before the API call. Absence permits recovery only
-			// with this attempt's already-journaled children, revalidated by Submit
-			// or release before any creation or deletion.
-			attempt := claim.FixedCreateIntent.Attempt
-			if attempt["server"] != "submitted" || attempt["key_submitted"] == "" || attempt["volume_submitted"] == "" ||
-				claim.Labels["scaleway_ssh_key_id"] == "" || claim.Labels[rootVolumeLabel] == "" {
-				err = core.FixedUncertainCustody(claim.LeaseID)
-			}
+			// Scaleway has no create idempotency token. Never turn temporary
+			// inventory absence into another server (and another image-created disk).
+			err = core.FixedUncertainCustody(claim.LeaseID)
 		}
 		return item, err
 	})
