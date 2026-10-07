@@ -16,7 +16,7 @@
 
 ### Fixes
 
-- Scaleway: create fixed leases from public images without snapshot access, recover the exact server after lost responses, and revalidate root-disk attempt ownership before cleanup. PR link pending.
+- Scaleway: create fixed leases from public images without snapshot access, recover the exact server after lost responses, and revalidate root-disk attempt ownership before cleanup. [PR 2728](https://github.com/openclaw/crabbox/pull/2728).
 
 - Scaleway: accept the same SSH public key after API comment normalization, allowing first fixed-lease acquisition and safe cleanup of stranded key-only attempts. [PR 2724](https://github.com/openclaw/crabbox/pull/2724).
 - Boat (ASCII Box): release absent sandboxes without waiting for blocked background data purges, while preserving the purge operation ID in fixed-lease terminal receipts. [PR 2726](https://github.com/openclaw/crabbox/pull/2726).
