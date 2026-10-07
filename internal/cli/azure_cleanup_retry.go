@@ -113,6 +113,11 @@ func azureCleanupResourcesEmpty(resources azureVMDeleteResources) bool {
 func (c *AzureClient) revalidateAzureDeleteResources(ctx context.Context, expected Server, resources azureVMDeleteResources, validateVM func(Server, Server) error) (azureVMDeleteResources, error) {
 	name := strings.TrimSpace(expected.CloudID)
 	labels := expected.Labels
+	vmID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/virtualMachines/%s", c.SubscriptionID, c.ResourceGroup, name)
+	nicID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/networkInterfaces/%s-nic", c.SubscriptionID, c.ResourceGroup, name)
+	pipID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/publicIPAddresses/%s-pip", c.SubscriptionID, c.ResourceGroup, name)
+	type vmAttachment struct{ kind, name, id string }
+	var attachments []vmAttachment
 	if resources.nic != "" {
 		response, err := c.nicc.Get(ctx, c.ResourceGroup, resources.nic, nil)
 		if err != nil {
@@ -125,12 +130,20 @@ func (c *AzureClient) revalidateAzureDeleteResources(ctx context.Context, expect
 			if err := validateAzureCleanupResourceTags("NIC", resources.nic, response.Tags, labels); err != nil {
 				return resources, &azureCleanupSkipError{err: err}
 			}
-			if expected.ImmutableID == "" && (!azureFixedAttemptTagsMatch(response.Tags, labels) ||
-				response.Properties == nil || response.Properties.VirtualMachine != nil) {
-				return resources, &azureCleanupSkipError{err: errors.New("rejected Azure NIC changed fixed ownership or is attached")}
+			if expected.ImmutableID == "" && !azureFixedAttemptTagsMatch(response.Tags, labels) {
+				return resources, &azureCleanupSkipError{err: errors.New("rejected Azure NIC changed fixed ownership")}
 			}
 			if response.Properties == nil {
 				return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup NIC %s has no properties", resources.nic)}
+			}
+			if response.Properties.VirtualMachine != nil {
+				attachments = append(attachments, vmAttachment{"NIC", resources.nic, stringValue(response.Properties.VirtualMachine.ID)})
+			}
+			for _, config := range response.Properties.IPConfigurations {
+				if config != nil && config.Properties != nil && config.Properties.PublicIPAddress != nil &&
+					!strings.EqualFold(strings.TrimSpace(stringValue(config.Properties.PublicIPAddress.ID)), pipID) {
+					return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup NIC %s references another public IP", resources.nic)}
+				}
 			}
 			if err := requireAzureCleanupIdentity("NIC", resources.nic, stringValue(response.Properties.ResourceGUID), resources.nicID); err != nil {
 				return resources, &azureCleanupSkipError{err: err}
@@ -150,14 +163,21 @@ func (c *AzureClient) revalidateAzureDeleteResources(ctx context.Context, expect
 			if err := validateAzureCleanupResourceTags("public IP", resources.publicIP, response.Tags, labels); err != nil {
 				return resources, &azureCleanupSkipError{err: err}
 			}
-			if expected.ImmutableID == "" && (!azureFixedAttemptTagsMatch(response.Tags, labels) ||
-				response.Properties == nil || response.Properties.NatGateway != nil ||
-				(response.Properties.IPConfiguration != nil && !strings.HasPrefix(strings.ToLower(stringValue(response.Properties.IPConfiguration.ID)),
-					strings.ToLower(fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/networkInterfaces/%s-nic/ipConfigurations/", c.SubscriptionID, c.ResourceGroup, name))))) {
-				return resources, &azureCleanupSkipError{err: errors.New("rejected Azure public IP changed fixed ownership or association")}
+			if expected.ImmutableID == "" && !azureFixedAttemptTagsMatch(response.Tags, labels) {
+				return resources, &azureCleanupSkipError{err: errors.New("rejected Azure public IP changed fixed ownership")}
 			}
 			if response.Properties == nil {
 				return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup public IP %s has no properties", resources.publicIP)}
+			}
+			if response.Properties.NatGateway != nil {
+				return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup public IP %s is attached to a NAT gateway", resources.publicIP)}
+			}
+			if config := response.Properties.IPConfiguration; config != nil {
+				prefix := strings.ToLower(nicID) + "/ipconfigurations/"
+				id := strings.ToLower(strings.TrimSpace(stringValue(config.ID)))
+				if resources.nic == "" || !strings.HasPrefix(id, prefix) || strings.TrimPrefix(id, prefix) == "" || strings.Contains(strings.TrimPrefix(id, prefix), "/") {
+					return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup public IP %s has an unproven or foreign NIC association", resources.publicIP)}
+				}
 			}
 			if err := requireAzureCleanupIdentity("public IP", resources.publicIP, stringValue(response.Properties.ResourceGUID), resources.publicIPID); err != nil {
 				return resources, &azureCleanupSkipError{err: err}
@@ -176,6 +196,16 @@ func (c *AzureClient) revalidateAzureDeleteResources(ctx context.Context, expect
 		} else {
 			if response.Properties == nil {
 				return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup disk %s has no properties", resources.disk)}
+			}
+			if response.ManagedBy != nil {
+				attachments = append(attachments, vmAttachment{"disk", resources.disk, stringValue(response.ManagedBy)})
+			}
+			for _, id := range response.ManagedByExtended {
+				attachments = append(attachments, vmAttachment{"disk", resources.disk, stringValue(id)})
+			}
+			if response.Properties.DiskState == nil ||
+				(string(*response.Properties.DiskState) != "Unattached" && response.ManagedBy == nil && len(response.ManagedByExtended) == 0) {
+				return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup disk %s attachment state is unproven", resources.disk)}
 			}
 			if err := requireAzureCleanupIdentity("disk", resources.disk, stringValue(response.Properties.UniqueID), resources.diskID); err != nil {
 				return resources, &azureCleanupSkipError{err: err}
@@ -197,6 +227,14 @@ func (c *AzureClient) revalidateAzureDeleteResources(ctx context.Context, expect
 			}
 			if response.Properties == nil {
 				return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup quarantine NSG %s has no properties", resources.quarantineNSG)}
+			}
+			if len(response.Properties.Subnets) != 0 {
+				return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup quarantine NSG %s is attached to a subnet", resources.quarantineNSG)}
+			}
+			for _, nic := range response.Properties.NetworkInterfaces {
+				if nic == nil || resources.nic == "" || !strings.EqualFold(strings.TrimSpace(stringValue(nic.ID)), nicID) {
+					return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup quarantine NSG %s has an unproven or foreign NIC association", resources.quarantineNSG)}
+				}
 			}
 			if err := requireAzureCleanupIdentity("quarantine NSG", resources.quarantineNSG, stringValue(response.Properties.ResourceGUID), resources.quarantineID); err != nil {
 				return resources, &azureCleanupSkipError{err: err}
@@ -225,6 +263,13 @@ func (c *AzureClient) revalidateAzureDeleteResources(ctx context.Context, expect
 			if err := requireAzureCleanupIdentity("VM", name, stringValue(response.VirtualMachine.Properties.VMID), resources.vmID); err != nil {
 				return resources, &azureCleanupSkipError{err: err}
 			}
+		}
+	}
+	// Immutable IDs identify the original objects, not their current users.
+	// Validate all VM attachments after the final VM read, before any DELETE.
+	for _, attachment := range attachments {
+		if !resources.vm || !strings.EqualFold(strings.TrimSpace(attachment.id), vmID) {
+			return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup %s %s is attached to an absent or different VM", attachment.kind, attachment.name)}
 		}
 	}
 	return resources, nil

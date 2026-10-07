@@ -604,6 +604,104 @@ func TestAzurePreparedOrphanRejectsReplacementAndForeign(t *testing.T) {
 	}
 }
 
+func TestAzureCleanupAllowsOriginalLiveAttachmentsAndDetachedRecovery(t *testing.T) {
+	f := newAzureOrphanFixture(t)
+	f.addPreparationVM()
+	prepared, err := f.client.PrepareOwnedServer(t.Context(), f.server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vmID := f.objects[f.server.CloudID]["id"]
+	nicID := f.objects[f.server.CloudID+"-nic"]["id"].(string)
+	nic := f.objects[f.server.CloudID+"-nic"]["properties"].(map[string]any)
+	pip := f.objects[f.server.CloudID+"-pip"]["properties"].(map[string]any)
+	disk := f.objects[f.server.CloudID+"-osdisk"]
+	nsg := f.objects[f.server.CloudID+"-q-nsg"]["properties"].(map[string]any)
+	nic["virtualMachine"] = map[string]any{"id": vmID}
+	pip["ipConfiguration"] = map[string]any{"id": nicID + "/ipConfigurations/primary"}
+	disk["managedBy"] = vmID
+	disk["properties"].(map[string]any)["diskState"] = "Attached"
+	nsg["networkInterfaces"] = []any{map[string]any{"id": nicID}}
+	resources, err := azureDeleteResourcesFromLabels(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.client.revalidateAzureDeleteResources(t.Context(), prepared, resources, ValidateAzureOwnedVM); err != nil {
+		t.Fatalf("original live attachments refused: %v", err)
+	}
+	delete(f.objects, f.server.CloudID)
+	if _, err := f.client.revalidateAzureDeleteResources(t.Context(), prepared, resources, ValidateAzureOwnedVM); err == nil {
+		t.Fatal("VM absence authorized deletion while attachments were still present")
+	}
+	delete(nic, "virtualMachine")
+	delete(disk, "managedBy")
+	disk["properties"].(map[string]any)["diskState"] = "Unattached"
+	validated, err := f.client.revalidateAzureDeleteResources(t.Context(), prepared, resources, ValidateAzureOwnedVM)
+	if err != nil || validated.vm {
+		t.Fatalf("detached original recovery refused: vm=%t err=%v", validated.vm, err)
+	}
+}
+
+func TestAzureBoundCleanupRejectsReassignedCompanionsBeforeAnyDelete(t *testing.T) {
+	for _, mode := range []string{"owned", "automatic"} {
+		for _, vmPresent := range []bool{true, false} {
+			for _, changed := range []string{"NIC VM", "NIC public IP", "public IP NIC", "public IP NAT", "disk VM", "disk shared VM", "disk state", "NSG NIC", "NSG subnet"} {
+				t.Run(fmt.Sprintf("%s/vm=%t/%s", mode, vmPresent, changed), func(t *testing.T) {
+					f := newAzureOrphanFixture(t)
+					f.server.Labels["state"] = "ready"
+					f.server.Labels["expires_at"] = LeaseLabelTime(time.Now().Add(-time.Hour))
+					f.addPreparationVM()
+					prepared, err := f.client.PrepareOwnedServer(t.Context(), f.server)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !vmPresent {
+						delete(f.objects, f.server.CloudID)
+					}
+					prefix := "/subscriptions/sub/resourceGroups/rg/providers/"
+					nic := f.objects[f.server.CloudID+"-nic"]["properties"].(map[string]any)
+					pip := f.objects[f.server.CloudID+"-pip"]["properties"].(map[string]any)
+					disk := f.objects[f.server.CloudID+"-osdisk"]
+					nsg := f.objects[f.server.CloudID+"-q-nsg"]["properties"].(map[string]any)
+					switch changed {
+					case "NIC VM":
+						nic["virtualMachine"] = map[string]any{"id": prefix + "Microsoft.Compute/virtualMachines/another-vm"}
+					case "NIC public IP":
+						nic["ipConfigurations"].([]any)[0].(map[string]any)["properties"].(map[string]any)["publicIPAddress"] = map[string]any{"id": prefix + "Microsoft.Network/publicIPAddresses/another-ip"}
+					case "public IP NIC":
+						pip["ipConfiguration"] = map[string]any{"id": prefix + "Microsoft.Network/networkInterfaces/another-nic/ipConfigurations/primary"}
+					case "public IP NAT":
+						pip["natGateway"] = map[string]any{"id": prefix + "Microsoft.Network/natGateways/another-gateway"}
+					case "disk VM":
+						disk["managedBy"] = prefix + "Microsoft.Compute/virtualMachines/another-vm"
+						disk["properties"].(map[string]any)["diskState"] = "Attached"
+					case "disk shared VM":
+						disk["managedByExtended"] = []any{prefix + "Microsoft.Compute/virtualMachines/another-vm"}
+						disk["properties"].(map[string]any)["diskState"] = "Attached"
+					case "disk state":
+						delete(disk["properties"].(map[string]any), "diskState")
+					case "NSG NIC":
+						nsg["networkInterfaces"] = []any{map[string]any{"id": prefix + "Microsoft.Network/networkInterfaces/another-nic"}}
+					case "NSG subnet":
+						nsg["subnets"] = []any{map[string]any{"id": prefix + "Microsoft.Network/virtualNetworks/another-vnet/subnets/shared"}}
+					}
+					f.allowDelete = true
+					before, _ := json.Marshal(f.objects)
+					if mode == "owned" {
+						err = f.client.DeleteOwnedServer(t.Context(), prepared)
+					} else {
+						err = f.client.DeleteCleanupServer(t.Context(), prepared, time.Now())
+					}
+					after, _ := json.Marshal(f.objects)
+					if err == nil || !IsAzureCleanupSkipError(err) || len(f.deletes) != 0 || string(before) != string(after) {
+						t.Fatalf("reassigned companion reached mutation: err=%v deletes=%v changed=%t", err, f.deletes, string(before) != string(after))
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestAzurePreparationRejectsUnknownIdentityAndForeignLink(t *testing.T) {
 	for _, failure := range []string{"identity", "link"} {
 		t.Run(failure, func(t *testing.T) {

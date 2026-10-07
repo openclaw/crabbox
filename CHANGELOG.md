@@ -10,7 +10,7 @@
 
 - Validate OS selector compatibility after lease flags resolve the provider and target, so a configured or environment Windows Server selector accepts `--target windows` while incompatible final selections still fail.
 - Windows: preserve embedded quotes, empty arguments, backslashes, and Unicode when running native executables or passing arguments to uploaded PowerShell scripts. [PR 2736](https://github.com/openclaw/crabbox/pull/2736).
-- Azure: preserve original fixed-lease companion identities before readiness and across endpoint refresh, and resume automatic cleanup only after durable deletion admission; reject replacement resources and verify every resource slot before completion. [PR 2733](https://github.com/openclaw/crabbox/pull/2733). Thanks @galiniliev.
+- Azure: preserve original fixed-lease companion identities before readiness and across endpoint refresh, resume automatic cleanup only after durable deletion admission, and validate current attachments across the full companion set before deletion; reject reassigned or replacement resources and verify every resource slot before completion. [PR 2733](https://github.com/openclaw/crabbox/pull/2733). Thanks @galiniliev.
 - Azure: retain failed leases for salvage with durable holds that block reuse and deletion, including observation-only holds when the original local claim is lost. [PR 2733](https://github.com/openclaw/crabbox/pull/2733). Thanks @galiniliev.
 - Azure: report fixed-lease capacity rejections as settled only after exact companion cleanup and local claim removal. [PR 2733](https://github.com/openclaw/crabbox/pull/2733). Thanks @galiniliev.
 - Cloudflare: retain cleanup alarms after container destruction fails and retry terminal leases before reporting stopped or expired status.
