@@ -914,7 +914,7 @@ func (c *AWSClient) waitForServerIP(ctx context.Context, id string) (Server, err
 	ctx, cancel := context.WithTimeoutCause(ctx, 10*time.Minute, Exit(5, "timed out waiting for AWS instance public IP"))
 	defer cancel()
 	for {
-		server, err := c.GetServer(ctx, id)
+		server, err := c.getServerForAcquire(ctx, id)
 		if ctx.Err() != nil {
 			return Server{}, context.Cause(ctx)
 		}
@@ -1507,6 +1507,15 @@ func awsInstanceToServer(instance types.Instance) Server {
 	}
 	server.PublicNet.IPv4.IP = aws.ToString(instance.PublicIpAddress)
 	server.ServerType.Name = string(instance.InstanceType)
+	server.ProviderMetadata["spotInstanceRequestID"] = aws.ToString(instance.SpotInstanceRequestId)
+	if instance.StateReason != nil {
+		server.ProviderMetadata["stateReasonCode"] = aws.ToString(instance.StateReason.Code)
+		server.ProviderMetadata["stateReasonMessage"] = aws.ToString(instance.StateReason.Message)
+	}
+	// A persisted readiness tag cannot override EC2's terminal state.
+	if server.Status == "shutting-down" || server.Status == "terminated" {
+		server.Labels["state"] = server.Status
+	}
 	return server
 }
 
