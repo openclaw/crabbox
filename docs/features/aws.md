@@ -49,6 +49,22 @@ Spot is blocked or when an account only has On-Demand quota. Set
 `capacity.fallback: on-demand` (or `CRABBOX_CAPACITY_FALLBACK=on-demand`) to fall
 back to On-Demand automatically after Spot capacity/quota rejections.
 
+During acquisition, Crabbox stops waiting when EC2 reports `shutting-down` or
+`terminated`, or a closed Spot request reports `instance-terminated-*`. The
+error includes the instance ID and AWS reason, such as
+`Server.SpotInstanceTermination` or `instance-terminated-no-capacity`. Direct
+SSH/Windows bootstrap and coordinator SSM waits recheck EC2 every 15 seconds;
+address waits check on every poll. Spot-request diagnostics use
+`ec2:DescribeSpotInstanceRequests` when allowed; terminal EC2 state still ends
+the wait if that optional read is denied.
+
+Post-launch failure follows existing cleanup ownership: ordinary direct
+acquisitions roll back their created instance and key, fixed-ID acquisitions
+retain their bound claim for `stop`, and brokered acquisitions leave cleanup
+with the coordinator. The existing candidate/market fallback handles launch
+rejections; it does not replace an already-bound instance during readiness.
+Use `--market on-demand` for a new acquisition after a Spot reclaim when needed.
+
 Crabbox tries an ordered list of instance candidates for the requested class
 (below). An explicit `--type` is exact: if EC2 rejects it, Crabbox fails clearly
 instead of silently picking another type. During capacity incidents, prefer

@@ -1280,6 +1280,9 @@ export interface ProviderMachine {
   privateHost?: string;
   awsIPv6Addresses?: string[];
   awsKeyName?: string;
+  awsSpotInstanceRequestID?: string;
+  awsStateReasonCode?: string;
+  awsStateReasonMessage?: string;
   awsSubnetID?: string;
   awsSecurityGroupIDs?: string[];
   awsInstanceProfileAttached?: boolean;

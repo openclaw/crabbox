@@ -32,6 +32,7 @@ type fakeAWSClient struct {
 	createCfg        core.Config
 	createErr        error
 	waitErr          error
+	acquireStateErr  error
 	get              map[string]core.Server
 	getErrs          map[string]error
 	getErr           error
@@ -111,6 +112,10 @@ func (c *fakeAWSClient) WaitForServerIP(context.Context, string) (core.Server, e
 		return core.Server{}, c.waitErr
 	}
 	return c.created, nil
+}
+
+func (c *fakeAWSClient) CheckAcquireState(context.Context, string) error {
+	return c.acquireStateErr
 }
 
 func (c *fakeAWSClient) GetServer(_ context.Context, id string) (core.Server, error) {
@@ -297,7 +302,7 @@ func TestAWSAcquireCleansUpCreatedServerAndKeyOnIPFailure(t *testing.T) {
 }
 
 func TestAWSFixedAcquireAllowsReleaseAfterReadinessFailure(t *testing.T) {
-	for _, phase := range []string{"public IP", "SSH bootstrap"} {
+	for _, phase := range []string{"public IP", "SSH bootstrap", "EC2 terminal"} {
 		t.Run(phase, func(t *testing.T) {
 			testutil.IsolateUserDirs(t)
 			fake := &fakeAWSClient{}
@@ -310,6 +315,10 @@ func TestAWSFixedAcquireAllowsReleaseAfterReadinessFailure(t *testing.T) {
 			}
 			if phase == "public IP" {
 				fake.waitErr = readinessErr
+			}
+			if phase == "EC2 terminal" {
+				readinessErr = &core.AWSAcquireStateError{InstanceID: "i-created", State: "terminated", Reason: "Server.SpotInstanceTermination"}
+				fake.acquireStateErr = readinessErr
 			}
 			cfg := fixedAWSTestConfig()
 			req := core.AcquireRequest{

@@ -1828,6 +1828,7 @@ export class EC2SpotClient {
     while (Date.now() < deadline) {
       await checkReadiness?.();
       const server = await this.findServer(instanceID);
+      if (server) await this.assertAcquireState(server);
       await checkReadiness?.();
       if (Date.now() >= deadline) break;
       const address = server?.host || (allowPrivateAddress ? server?.privateHost : "");
@@ -1844,9 +1845,11 @@ export class EC2SpotClient {
 
   async waitForSSMOnline(instanceID: string, checkReadiness?: AWSReadinessCheck): Promise<void> {
     const deadline = Date.now() + 10 * 60_000;
+    const checkInstance = this.acquireStatePoll(instanceID);
     /* oxlint-disable eslint/no-await-in-loop -- Polling serially revalidates lease authority around each provider read. */
     while (Date.now() < deadline) {
       await checkReadiness?.();
+      await checkInstance();
       let result: Record<string, unknown>;
       try {
         result = await this.ssm("DescribeInstanceInformation", {
@@ -1875,6 +1878,48 @@ export class EC2SpotClient {
     }
     /* oxlint-enable eslint/no-await-in-loop */
     throw new Error(`timed out waiting for AWS SSM managed-node readiness: ${instanceID}`);
+  }
+
+  private acquireStatePoll(instanceID: string): AWSReadinessCheck {
+    let nextCheck = Date.now() + 15_000;
+    return async () => {
+      if (Date.now() < nextCheck) return;
+      const server = await this.findServer(instanceID);
+      if (server) await this.assertAcquireState(server);
+      nextCheck = Date.now() + 15_000;
+    };
+  }
+
+  private async assertAcquireState(server: ProviderMachine): Promise<void> {
+    let terminal = server.status === "shutting-down" || server.status === "terminated";
+    let reason = server.awsStateReasonCode ?? "";
+    let message = server.awsStateReasonMessage ?? "";
+    if (server.awsSpotInstanceRequestID) {
+      // Preserve terminal evidence even when an older IAM policy cannot read Spot diagnostics.
+      const root = await this.ec2("DescribeSpotInstanceRequests", {
+        "SpotInstanceRequestId.1": server.awsSpotInstanceRequestID,
+      }).catch(() => undefined);
+      for (const value of items(record(root?.["spotInstanceRequestSet"])["item"])) {
+        const request = record(value);
+        const status = record(request["status"]);
+        const code = asString(status["code"]);
+        if (
+          asString(request["spotInstanceRequestId"]) === server.awsSpotInstanceRequestID &&
+          asString(request["instanceId"]) === server.cloudID &&
+          asString(request["state"]) === "closed" &&
+          code.startsWith("instance-terminated-")
+        ) {
+          terminal = true;
+          reason = code;
+          message = asString(status["message"]);
+        }
+      }
+    }
+    if (terminal) {
+      throw new Error(
+        `AWS instance ${server.cloudID} cannot finish acquiring: state=${server.status}; ${reason} ${message}`.trim(),
+      );
+    }
   }
 
   async assertPrivateWorkspaceRootVolume(
@@ -1941,9 +1986,11 @@ export class EC2SpotClient {
       throw new Error("AWS SSM SendCommand returned no command ID");
     }
     const deadline = Date.now() + 17 * 60_000;
+    const checkInstance = this.acquireStatePoll(instanceID);
     /* oxlint-disable eslint/no-await-in-loop -- Polling serially revalidates lease authority around each provider read. */
     while (Date.now() < deadline) {
       await checkReadiness?.();
+      await checkInstance();
       try {
         const invocation = await this.ssm("GetCommandInvocation", {
           CommandId: commandID,
@@ -3762,6 +3809,15 @@ function instanceToMachine(input: unknown): ProviderMachine {
     cloudID,
     name: tags["Name"] || cloudID,
     status: asString(record(instance["instanceState"])["name"]),
+    ...(asString(instance["spotInstanceRequestId"])
+      ? { awsSpotInstanceRequestID: asString(instance["spotInstanceRequestId"]) }
+      : {}),
+    ...(asString(record(instance["stateReason"])["code"])
+      ? { awsStateReasonCode: asString(record(instance["stateReason"])["code"]) }
+      : {}),
+    ...(asString(record(instance["stateReason"])["message"])
+      ? { awsStateReasonMessage: asString(record(instance["stateReason"])["message"]) }
+      : {}),
     serverType: asString(instance["instanceType"]),
     hostID: asString(record(instance["placement"])["hostId"]),
     host: asString(instance["ipAddress"]),
