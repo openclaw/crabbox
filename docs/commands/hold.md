@@ -57,5 +57,43 @@ Held claims cannot be acquired, reused, stopped, force-stopped, or swept by
 automatic cleanup. There is no automatic expiry or deletion of uncertain data.
 The controller must retain bounded, accounted references to these resources;
 a hold does not grant spare capacity. Salvage and any later resource removal
-require a separate operator decision. This command does not clear a hold or
-authorize deletion after salvage.
+require a separate operator decision. Creating a hold does not authorize
+deletion after salvage.
+
+## Finalizing after salvage and external disposal
+
+First salvage any needed files using a separately authorized recovery workflow.
+Then, only after an explicit operator decision, dispose of the retained resources
+externally in Azure. To close the recorded hold after disposal:
+
+```sh
+crabbox hold --provider azure --id cbx_012345abcdef --finalize --json
+```
+
+`--finalize` requires an existing exact held claim and the original Azure
+subscription/resource-group configuration. It uses the stored original slug;
+`--slug` cannot be combined with `--finalize`. Bound, unbound, and claimless-origin
+holds use the same finalization path. An unknown ID or missing/invalid claim
+cannot be finalized, and unsupported providers refuse the operation. Do not
+manually edit or remove the claim to bypass a hold.
+
+Under the durable claim lock, read-only verification must prove that **all five
+resource slots** are absent: VM, NIC, public IP, managed OS disk, and quarantine
+NSG. Any surviving resource (including an untagged disk), wrong account scope,
+failed or ambiguous read, invalid receipt, cancellation before publication, or
+failed persistence refuses finalization and preserves the protective hold.
+Finalization never attaches, snapshots, retags, or deletes cloud resources.
+
+Success durably records a `crabbox.lease-hold.v1` receipt with
+`status: "finalized"`, the ordered resources all `absent`, and
+`unacceptedChanges: "unknown"`. Absence is **not** proof that files were recovered
+or accepted. Keep separate salvage evidence. The claim and held-provider marker
+remain as a single-use tombstone: finalization does not free this ID for reuse,
+make `stop` delete anything, or allow older writers to reinterpret the claim.
+
+Repeating `--finalize`, including from a fresh process, returns the identical
+terminal receipt in the original account without recreating the hold or
+rechecking Azure. Ordinary `hold` also returns that terminal receipt. These are
+point-in-time absence observations, not a cloud-side lock on external writers.
+If a resource is recreated later, inspect and dispose of it separately; replay
+does not certify its current absence. No hold expires automatically.
