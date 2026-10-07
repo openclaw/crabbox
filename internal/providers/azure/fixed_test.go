@@ -292,7 +292,7 @@ func TestFixedAzureCapacityRequiresSettledFirstAttempt(t *testing.T) {
 			client := &fakeAzureClient{}
 			b := fixedAzureTestBackend(t, client)
 			req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123477", RequestedSlug: "capacity", Repo: core.Repo{Root: t.TempDir()}}
-			shortage := &core.AzureFixedVMShortage{Code: "AllocationFailed", Err: errors.New("structured allocation failure")}
+			shortage := &azureFixedVMShortage{Code: "AllocationFailed", Err: errors.New("structured allocation failure")}
 			switch scenario {
 			case "settled shortage":
 				client.fixedCapacityErr = shortage
@@ -309,7 +309,9 @@ func TestFixedAzureCapacityRequiresSettledFirstAttempt(t *testing.T) {
 				t.Fatal(readErr)
 			}
 			if scenario == "settled shortage" {
-				if !settled || exists || result.LeaseID != req.RequestedLeaseID || result.AttemptNonce == "" ||
+				if !settled || exists || result.Schema != "crabbox.fixed-allocation-result.v1" || result.Capability != "azure-fixed-vm-capacity-v1" ||
+					result.Provider != "azure" || result.Category != "capacity_shortage" || result.Allocation != "settled_nonallocation" ||
+					result.LeaseID != req.RequestedLeaseID || result.AttemptNonce == "" ||
 					result.ProviderCode != "AllocationFailed" || result.Companions != "settled" || len(client.fixedSettled) != 1 {
 					t.Fatalf("settled outcome=%+v claim=%+v exists=%v", result, claim, exists)
 				}

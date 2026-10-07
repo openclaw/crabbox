@@ -527,7 +527,11 @@ func listOwnedAzureServers(ctx context.Context, client azureClient) ([]core.Serv
 }
 
 var newAzureClient = func(ctx context.Context, cfg core.Config) (azureClient, error) {
-	return core.NewAzureClient(ctx, cfg)
+	client, err := core.NewAzureClient(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return newNativeAzureClient(client), nil
 }
 
 var validateAzureSSHCIDRsForAcquire = core.ValidateAzureSSHCIDRsForAcquire

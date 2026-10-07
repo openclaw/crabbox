@@ -1265,31 +1265,6 @@ func TestStringMapToPtrMap(t *testing.T) {
 	}
 }
 
-func TestAzureFixedVMShortageRequiresStructuredCapacityCode(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"allocation failed", &azcore.ResponseError{ErrorCode: "AllocationFailed"}, true},
-		{"zonal allocation failed", &azcore.ResponseError{ErrorCode: "ZonalAllocationFailed"}, true},
-		{"policy", &azcore.ResponseError{ErrorCode: "OperationNotAllowed"}, false},
-		{"quota", &azcore.ResponseError{ErrorCode: "QuotaExceeded"}, false},
-		{"missing", &azcore.ResponseError{ErrorCode: "ResourceNotFound"}, false},
-		{"human prose", errors.New("AllocationFailed: out of capacity"), false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var shortage *AzureFixedVMShortage
-			if got := errors.As(azureFixedVMShortage(tc.err, true), &shortage); got != tc.want {
-				t.Fatalf("typed shortage=%v want=%v", got, tc.want)
-			}
-			if errors.As(azureFixedVMShortage(tc.err, false), &shortage) {
-				t.Fatal("nonterminal polling failure became a definitive rejection")
-			}
-		})
-	}
-}
-
 func TestIsAzureRetryableProvisioningError(t *testing.T) {
 	t.Parallel()
 	cases := map[string]bool{

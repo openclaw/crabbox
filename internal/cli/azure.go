@@ -945,36 +945,6 @@ type AzureFixedCompanions struct {
 	NICGUID, PublicIPGUID string
 }
 
-// ValidateAzureFixedCompanionBinding preserves any identities recorded before
-// VM submission. Older attempts without those fields can capture them once.
-func ValidateAzureFixedCompanionBinding(server Server, original AzureFixedCompanions) error {
-	for key, expected := range map[string]string{
-		azureCleanupNICIdentityLabel:      original.NICGUID,
-		azureCleanupPublicIPIdentityLabel: original.PublicIPGUID,
-	} {
-		if expected != "" && server.Labels[key] != expected {
-			return errors.New("Azure fixed companion differs from its original pre-VM identity")
-		}
-	}
-	return nil
-}
-
-type AzureFixedVMShortage struct {
-	Code string
-	Err  error
-}
-
-func (e *AzureFixedVMShortage) Error() string { return e.Err.Error() }
-func (e *AzureFixedVMShortage) Unwrap() error { return e.Err }
-
-func azureFixedVMShortage(err error, terminal bool) error {
-	var response *azcore.ResponseError
-	if terminal && errors.As(err, &response) && (response.ErrorCode == "AllocationFailed" || response.ErrorCode == "ZonalAllocationFailed") {
-		return &AzureFixedVMShortage{Code: response.ErrorCode, Err: err}
-	}
-	return err
-}
-
 func (c *AzureClient) CreateFixedServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, labels map[string]string, recordCompanions func(AzureFixedCompanions) error) (Server, error) {
 	if _, err := c.validatedAzureOSDiskMode(ctx, cfg); err != nil {
 		return Server{}, err
@@ -1125,7 +1095,7 @@ func (c *AzureClient) createServerStepsWithLabels(ctx context.Context, cfg Confi
 		// without ending the allocation LRO. Only its terminal result is
 		// a definite VM rejection.
 		if labels["fixed_attempt"] != "" {
-			err = azureFixedVMShortage(err, vmPoller.Done())
+			err = &AzureVMCreateError{Terminal: vmPoller.Done(), Err: err}
 		}
 		return Server{}, fmt.Errorf("vm: %w", err)
 	}

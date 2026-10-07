@@ -19,20 +19,3 @@ type FixedAllocationResult struct {
 
 func (r *FixedAllocationResult) Error() string { return r.Cause.Error() }
 func (r *FixedAllocationResult) Unwrap() error { return r.Cause }
-
-type AzureFixedShortagePending struct {
-	LeaseID, AttemptName, AttemptNonce, ProviderCode string
-	Cause                                            error
-}
-
-func (r *AzureFixedShortagePending) Error() string { return r.Cause.Error() }
-func (r *AzureFixedShortagePending) Unwrap() error { return r.Cause }
-
-func (r *AzureFixedShortagePending) FixedRejectionSettled() error {
-	return &FixedAllocationResult{
-		Schema: "crabbox.fixed-allocation-result.v1", Capability: "azure-fixed-vm-capacity-v1",
-		Provider: "azure", LeaseID: r.LeaseID, AttemptName: r.AttemptName, AttemptNonce: r.AttemptNonce,
-		Category: "capacity_shortage", ProviderCode: r.ProviderCode,
-		Allocation: "settled_nonallocation", Companions: "settled", Cause: r.Cause,
-	}
-}

@@ -140,7 +140,7 @@ func (c *fakeAzureClient) InspectUnboundFailedLeaseHold(ctx context.Context, exp
 }
 
 func TestAzureHoldUnboundAttemptPreservesOriginalIntent(t *testing.T) {
-	client := &fakeAzureClient{fixedCapacityErr: &core.AzureFixedVMShortage{Code: "AllocationFailed", Err: fmt.Errorf("capacity unavailable")}, fixedSettleErr: fmt.Errorf("cleanup uncertain")}
+	client := &fakeAzureClient{fixedCapacityErr: &azureFixedVMShortage{Code: "AllocationFailed", Err: fmt.Errorf("capacity unavailable")}, fixedSettleErr: fmt.Errorf("cleanup uncertain")}
 	backend := fixedAzureTestBackend(t, client)
 	request := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123485", RequestedSlug: "unbound", Repo: core.Repo{Root: t.TempDir()}}
 	if _, err := backend.Acquire(t.Context(), request); err == nil {

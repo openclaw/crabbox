@@ -81,7 +81,7 @@ func finalizeTestBackend(t *testing.T, kind string) (*azureLeaseBackend, *finali
 		return backend, client
 	}
 	if kind == "unbound" {
-		client.fixedCapacityErr = &core.AzureFixedVMShortage{Code: "AllocationFailed", Err: errors.New("capacity unavailable")}
+		client.fixedCapacityErr = &azureFixedVMShortage{Code: "AllocationFailed", Err: errors.New("capacity unavailable")}
 		client.fixedSettleErr = errors.New("cleanup uncertain")
 	}
 	_, err := backend.Acquire(t.Context(), core.AcquireRequest{RequestedLeaseID: finalizeTestID, RequestedSlug: finalizeTestSlug, Repo: core.Repo{Root: t.TempDir()}})

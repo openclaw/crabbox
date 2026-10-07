@@ -130,9 +130,7 @@ func (c *AzureClient) revalidateAzureDeleteResources(ctx context.Context, expect
 			if err := validateAzureCleanupResourceTags("NIC", resources.nic, response.Tags, labels); err != nil {
 				return resources, &azureCleanupSkipError{err: err}
 			}
-			if expected.ImmutableID == "" && !azureFixedAttemptTagsMatch(response.Tags, labels) {
-				return resources, &azureCleanupSkipError{err: errors.New("rejected Azure NIC changed fixed ownership")}
-			}
+
 			if response.Properties == nil {
 				return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup NIC %s has no properties", resources.nic)}
 			}
@@ -163,9 +161,7 @@ func (c *AzureClient) revalidateAzureDeleteResources(ctx context.Context, expect
 			if err := validateAzureCleanupResourceTags("public IP", resources.publicIP, response.Tags, labels); err != nil {
 				return resources, &azureCleanupSkipError{err: err}
 			}
-			if expected.ImmutableID == "" && !azureFixedAttemptTagsMatch(response.Tags, labels) {
-				return resources, &azureCleanupSkipError{err: errors.New("rejected Azure public IP changed fixed ownership")}
-			}
+
 			if response.Properties == nil {
 				return resources, &azureCleanupSkipError{err: fmt.Errorf("Azure cleanup public IP %s has no properties", resources.publicIP)}
 			}
@@ -273,13 +269,4 @@ func (c *AzureClient) revalidateAzureDeleteResources(ctx context.Context, expect
 		}
 	}
 	return resources, nil
-}
-
-func azureFixedAttemptTagsMatch(tags map[string]*string, labels map[string]string) bool {
-	for _, key := range []string{"fixed_attempt", "fixed_intent_sha256", "provider_key"} {
-		if labels[key] == "" || stringValue(tags[azureLabelToTagKey(key)]) != labels[key] {
-			return false
-		}
-	}
-	return true
 }

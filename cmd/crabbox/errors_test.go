@@ -53,19 +53,20 @@ func TestPrintErrorPreservesJoinedCauses(t *testing.T) {
 }
 
 func TestPrintFixedAllocationResultRequiresSettledType(t *testing.T) {
-	pending := &cli.AzureFixedShortagePending{LeaseID: "cbx_abcdef123456", AttemptName: "vm", AttemptNonce: "nonce", ProviderCode: "AllocationFailed", Cause: errors.New("shortage")}
+	pending := errors.New("allocation pending")
 	var output bytes.Buffer
 	printFixedAllocationResult(&output, pending)
 	if output.Len() != 0 {
 		t.Fatalf("pending rejection projected: %q", output.String())
 	}
-	printFixedAllocationResult(&output, pending.FixedRejectionSettled())
+	settled := &cli.FixedAllocationResult{Schema: "crabbox.fixed-allocation-result.v1", Capability: "fixture-capacity-v1", Provider: "fixture", LeaseID: "cbx_abcdef123456", AttemptNonce: "nonce", Category: "capacity_shortage", Allocation: "settled_nonallocation", Companions: "settled", Cause: pending}
+	printFixedAllocationResult(&output, settled)
 	const prefix = "crabbox-allocation-result "
 	var result cli.FixedAllocationResult
 	if !bytes.HasPrefix(output.Bytes(), []byte(prefix)) ||
 		json.Unmarshal(bytes.TrimSpace(output.Bytes()[len(prefix):]), &result) != nil ||
-		result.Schema != "crabbox.fixed-allocation-result.v1" || result.Capability != "azure-fixed-vm-capacity-v1" ||
-		result.LeaseID != pending.LeaseID || result.AttemptNonce != pending.AttemptNonce ||
+		result.Schema != "crabbox.fixed-allocation-result.v1" || result.Capability != settled.Capability ||
+		result.LeaseID != settled.LeaseID || result.AttemptNonce != settled.AttemptNonce ||
 		result.Category != "capacity_shortage" || result.Allocation != "settled_nonallocation" || result.Companions != "settled" {
 		t.Fatalf("unexpected typed projection: %q", output.String())
 	}

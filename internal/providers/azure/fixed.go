@@ -122,14 +122,14 @@ func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRe
 			return tx.Record("submitting")
 		})
 		if err != nil {
-			var shortage *core.AzureFixedVMShortage
+			var shortage *azureFixedVMShortage
 			attempt := claim.FixedCreateIntent.Attempt
 			if errors.As(err, &shortage) && tx.CanSettleCreateRejection(fixedAzureLeaseKind) && claim.CloudID == "" &&
 				attempt["pre_vm_nic_guid"] != "" && attempt["pre_vm_public_ip_guid"] != "" {
 				binding := core.AzureFixedCompanions{NICGUID: attempt["pre_vm_nic_guid"], PublicIPGUID: attempt["pre_vm_public_ip_guid"]}
 				expected := core.Server{CloudID: attempt["name"], Labels: tx.CreateLabels()}
 				if settleErr := creator.SettleRejectedFixedCompanions(ctx, expected, binding); settleErr == nil {
-					return core.Server{}, &core.FixedCreateRejected{Err: &core.AzureFixedShortagePending{
+					return core.Server{}, &core.FixedCreateRejected{Err: &azureFixedShortagePending{
 						LeaseID: claim.LeaseID, AttemptName: attempt["name"], AttemptNonce: attempt["nonce"],
 						ProviderCode: shortage.Code, Cause: err,
 					}}
@@ -216,10 +216,15 @@ func validateFixedAzureCompanions(claim core.LeaseClaim, server core.Server) err
 	if claim.FixedCreateIntent == nil || !core.HasAzureCleanupBinding(server.Labels) {
 		return nil
 	}
-	return core.ValidateAzureFixedCompanionBinding(server, core.AzureFixedCompanions{
-		NICGUID:      claim.FixedCreateIntent.Attempt["pre_vm_nic_guid"],
-		PublicIPGUID: claim.FixedCreateIntent.Attempt["pre_vm_public_ip_guid"],
-	})
+	for key, expected := range map[string]string{
+		azureCleanupNICIdentityLabel:      claim.FixedCreateIntent.Attempt["pre_vm_nic_guid"],
+		azureCleanupPublicIPIdentityLabel: claim.FixedCreateIntent.Attempt["pre_vm_public_ip_guid"],
+	} {
+		if expected != "" && server.Labels[key] != expected {
+			return errors.New("Azure fixed companion differs from its original pre-VM identity")
+		}
+	}
+	return nil
 }
 
 func validateFixedAzureServer(claim core.LeaseClaim, server core.Server) error {
