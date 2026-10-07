@@ -17,6 +17,7 @@
 ### Fixes
 
 - Accept native Tenki SSH certificates on the first connection and during refresh by comparing the decoded session extension directly, while retaining key, signature, and expiry checks. [PR 2727](https://github.com/openclaw/crabbox/pull/2727).
+- DigitalOcean: check size availability before creating resources and retain definite fixed-lease rejections as retryable, locally releasable attempts. [PR 2725](https://github.com/openclaw/crabbox/pull/2725).
 - Scaleway: accept the same SSH public key after API comment normalization, allowing first fixed-lease acquisition and safe cleanup of stranded key-only attempts. [PR 2724](https://github.com/openclaw/crabbox/pull/2724).
 - Boat (ASCII Box): release absent sandboxes without waiting for blocked background data purges, while preserving the purge operation ID in fixed-lease terminal receipts. [PR 2726](https://github.com/openclaw/crabbox/pull/2726).
 - Probe resolved SSH leases with their recorded platform, preserve Linux bootstrap gates, and reject contradictory explicit target flags. [Issue 2715](https://github.com/openclaw/crabbox/issues/2715), [PR 2718](https://github.com/openclaw/crabbox/pull/2718). Thanks @saftall.
