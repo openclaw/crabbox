@@ -12,7 +12,7 @@
 - Windows: preserve embedded quotes, empty arguments, backslashes, and Unicode when running native executables or passing arguments to uploaded PowerShell scripts. [PR 2736](https://github.com/openclaw/crabbox/pull/2736).
 - Allow a claimless Azure failed-lease hold with the original fixed slug to record VM absence and observed retained companions without granting deletion; require all companion slots absent before a completed owned stop.
 - Preserve Azure leases' original private companion cleanup identities during endpoint refresh so later VM eviction can use the existing exact-resource finalizer.
-- Report settled Azure fixed-lease VM capacity rejections with a typed CLI result after exact companion cleanup.
+- Report settled Azure fixed-lease VM capacity rejections with a typed CLI result after exact companion cleanup, preserving definite rejection cleanup for other providers' reserved resource names.
 - Persist genuine Azure fixed-lease companion identities before readiness so cleanup can resume after an externally removed VM without adopting replacement resources.
 - Add a non-delete Azure failed-lease hold with durable resource identity receipts and refusal of release, reuse, and cleanup while uncertain files await salvage.
 - Cloudflare: retain cleanup alarms after container destruction fails and retry terminal leases before reporting stopped or expired status.

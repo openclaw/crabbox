@@ -124,7 +124,7 @@ func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRe
 		if err != nil {
 			var shortage *core.AzureFixedVMShortage
 			attempt := claim.FixedCreateIntent.Attempt
-			if errors.As(err, &shortage) && tx.CanSettleCreateRejection(fixedAzureLeaseKind) &&
+			if errors.As(err, &shortage) && tx.CanSettleCreateRejection(fixedAzureLeaseKind) && claim.CloudID == "" &&
 				attempt["pre_vm_nic_guid"] != "" && attempt["pre_vm_public_ip_guid"] != "" {
 				binding := core.AzureFixedCompanions{NICGUID: attempt["pre_vm_nic_guid"], PublicIPGUID: attempt["pre_vm_public_ip_guid"]}
 				expected := core.Server{CloudID: attempt["name"], Labels: tx.CreateLabels()}

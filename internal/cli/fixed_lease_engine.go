@@ -30,12 +30,13 @@ type FixedCreateRejected struct{ Err error }
 func (e *FixedCreateRejected) Error() string { return e.Err.Error() }
 func (e *FixedCreateRejected) Unwrap() error { return e.Err }
 
-// CanSettleCreateRejection fences provider cleanup to this transaction's
-// first unallocated submission. Cleanup must not run for a replayed attempt.
+// CanSettleCreateRejection fences rejection settlement to this transaction's
+// first unallocated submission. CloudID can be a name reserved by the plan;
+// the bound journal phase, rather than that name, records allocation custody.
 func (tx *FixedTransaction) CanSettleCreateRejection(kind FixedLeaseKind) bool {
 	intent := tx.Claim.FixedCreateIntent
 	return kind.IsFixedClaim(*tx.Claim) && tx.initialUnallocated &&
-		intent.State == "prepared" && tx.Claim.CloudID == "" && tx.Claim.CloudImmutableID == "" &&
+		intent.State == "prepared" && tx.Claim.CloudImmutableID == "" &&
 		intent.Journal != nil && (intent.Journal.Phase == "prepared" || intent.Journal.Phase == "submitting")
 }
 
