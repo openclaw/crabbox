@@ -16,69 +16,80 @@ import (
 )
 
 func TestCoordinatorStopObservesExpiryCleanup(t *testing.T) {
-	clearConfigEnv(t)
-	configureCoordinatorReleaseTestTiming(t, time.Second, 0)
-	const id = "cbx_abcdef123456"
-	keyPath, claimPath := managedStopLocalState(t, id)
-	claimBefore, err := os.ReadFile(claimPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var posts, observations atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		lease := CoordinatorLease{
-			ID: id, Provider: "aws", TargetOS: targetLinux, State: "active", CloudID: "i-original",
-			CleanupStartedAt: "2026-10-08T00:00:00Z",
-		}
-		if r.URL.Path != "/v1/leases/"+id && r.URL.Path != "/v1/leases/"+id+"/release" {
-			http.NotFound(w, r)
-			return
-		}
-		if r.Method == http.MethodPost {
-			var body map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["delete"] != true || body["expectedProvider"] != "aws" {
-				t.Errorf("release body=%v error=%v", body, err)
+	for _, name := range []string{"first attempt", "retry with historical failure"} {
+		t.Run(name, func(t *testing.T) {
+			clearConfigEnv(t)
+			configureCoordinatorReleaseTestTiming(t, time.Second, 0)
+			const id = "cbx_abcdef123456"
+			keyPath, claimPath := managedStopLocalState(t, id)
+			claimBefore, err := os.ReadFile(claimPath)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if posts.Add(1) > 1 {
-				if observations.Load() < 2 {
-					t.Error("repeated release before expiry cleanup completed")
+			var posts, observations atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				lease := CoordinatorLease{
+					ID: id, Provider: "aws", TargetOS: targetLinux, State: "active", CloudID: "i-original",
+					CleanupStartedAt: "2026-10-08T00:00:00Z",
 				}
-				lease = confirmedCoordinatorRelease(id, "aws")
-				lease.CloudID = "i-original"
+				if name == "retry with historical failure" {
+					lease.CleanupError = "previous cleanup failed"
+					lease.CleanupRetryAt = "2026-10-07T23:59:00Z"
+					lease.CleanupFailedAt = "2026-10-07T23:58:00Z"
+					lease.CleanupAttempts = 1
+				}
+				if r.URL.Path != "/v1/leases/"+id && r.URL.Path != "/v1/leases/"+id+"/release" {
+					http.NotFound(w, r)
+					return
+				}
+				if r.Method == http.MethodPost {
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["delete"] != true || body["expectedProvider"] != "aws" {
+						t.Errorf("release body=%v error=%v", body, err)
+					}
+					if posts.Add(1) > 1 {
+						if observations.Load() < 2 {
+							t.Error("repeated release before expiry cleanup completed")
+						}
+						lease = confirmedCoordinatorRelease(id, "aws")
+						lease.CloudID = "i-original"
+					}
+				} else if r.Method == http.MethodGet && posts.Load() > 0 {
+					if observations.Add(1) >= 2 {
+						lease.State = "expired"
+						lease.CleanupStartedAt = ""
+						lease.CleanupCompletedAt = "2026-10-08T00:01:00Z"
+						lease.CleanupError, lease.CleanupRetryAt, lease.CleanupFailedAt, lease.CleanupAttempts = "", "", "", 0
+					}
+				}
+				if after, err := os.ReadFile(claimPath); err != nil || !bytes.Equal(after, claimBefore) {
+					t.Errorf("claim changed before confirmed release: %v", err)
+				}
+				if key, err := os.ReadFile(keyPath); err != nil || string(key) != "private" {
+					t.Errorf("SSH artifact changed before confirmed release: %v", err)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+			}))
+			defer server.Close()
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "synthetic-stop-token")
+			var stderr bytes.Buffer
+			err = (App{Stdout: io.Discard, Stderr: &stderr}).stop(t.Context(), []string{"--provider", "aws", "--id", id})
+			if err != nil {
+				t.Fatalf("stop: %v\n%s", err, &stderr)
 			}
-		} else if r.Method == http.MethodGet && posts.Load() > 0 {
-			if observations.Add(1) >= 2 {
-				lease.State = "expired"
-				lease.CleanupStartedAt = ""
-				lease.CleanupCompletedAt = "2026-10-08T00:01:00Z"
+			if posts.Load() != 2 || observations.Load() != 2 {
+				t.Fatalf("release requests=%d observations=%d; want pending observation then one completed reconciliation", posts.Load(), observations.Load())
 			}
-		}
-		if after, err := os.ReadFile(claimPath); err != nil || !bytes.Equal(after, claimBefore) {
-			t.Errorf("claim changed before confirmed release: %v", err)
-		}
-		if key, err := os.ReadFile(keyPath); err != nil || string(key) != "private" {
-			t.Errorf("SSH artifact changed before confirmed release: %v", err)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
-	}))
-	defer server.Close()
-	t.Setenv("CRABBOX_COORDINATOR", server.URL)
-	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "synthetic-stop-token")
-	var stderr bytes.Buffer
-	err = (App{Stdout: io.Discard, Stderr: &stderr}).stop(t.Context(), []string{"--provider", "aws", "--id", id})
-	if err != nil {
-		t.Fatalf("stop: %v\n%s", err, &stderr)
-	}
-	if posts.Load() != 2 || observations.Load() != 2 {
-		t.Fatalf("release requests=%d observations=%d; want pending observation then one completed reconciliation", posts.Load(), observations.Load())
-	}
-	for _, path := range []string{keyPath, claimPath} {
-		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("confirmed stop retained %s: %v", path, err)
-		}
-	}
-	if strings.Contains(stderr.String(), "unexpected non-final") {
-		t.Errorf("expiry cleanup was rejected: %s", &stderr)
+			for _, path := range []string{keyPath, claimPath} {
+				if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("confirmed stop retained %s: %v", path, err)
+				}
+			}
+			if strings.Contains(stderr.String(), "unexpected non-final") {
+				t.Errorf("expiry cleanup was rejected: %s", &stderr)
+			}
+		})
 	}
 }
 
@@ -101,6 +112,10 @@ func TestCoordinatorStopExpiryCleanupPreservesCustody(t *testing.T) {
 		{name: "cleanup claim replaced", change: func(l *CoordinatorLease) { l.State = "active"; l.CleanupStartedAt = "2026-10-08T00:00:30Z" }},
 		{name: "active without cleanup claim", change: func(l *CoordinatorLease) { l.State = "active" }},
 		{name: "scheduled retry", change: func(l *CoordinatorLease) {
+			l.State = "active"
+			l.CleanupCompletedAt = ""
+			l.CleanupFailedAt = "2026-10-08T00:01:00Z"
+			l.CleanupAttempts = 2
 			l.CleanupRetryAt = "2026-10-08T00:05:00Z"
 			l.CleanupError = "cleanup failed"
 		}},
@@ -170,6 +185,9 @@ func TestCoordinatorStopExpiryCleanupPreservesCustody(t *testing.T) {
 			err = (App{Stdout: io.Discard, Stderr: io.Discard}).stop(ctx, []string{"--provider", "aws", "--id", id})
 			if err == nil {
 				t.Fatal("unconfirmed expiry cleanup succeeded")
+			}
+			if tc.name == "scheduled retry" && !strings.Contains(err.Error(), "reported a cleanup failure or scheduled retry") {
+				t.Errorf("a failed attempt with its claim cleared must report failure: %v", err)
 			}
 			if tc.cancel && !errors.Is(err, context.Canceled) {
 				t.Errorf("cancellation lost: %v", err)

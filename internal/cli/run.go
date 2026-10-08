@@ -4665,12 +4665,18 @@ func coordinatorReleaseCleanupFailed(lease CoordinatorLease) bool {
 	if lease.CleanupStatus != "" {
 		return lease.CleanupStatus != "pending" && lease.CleanupStatus != "complete" && lease.CleanupStatus != "retained"
 	}
+	// Active expiry retries have no cleanupStatus. Their current claim, like a
+	// released record's pending status, supersedes the prior attempt's diagnostics.
+	if lease.State == "active" && coordinatorReleaseCleanupPending(lease) {
+		return false
+	}
 	// Older brokers do not distinguish pending creation from cleanup failure.
 	return lease.CleanupError != "" || lease.CleanupRetryAt != ""
 }
 
 func coordinatorReleaseCleanupPending(lease CoordinatorLease) bool {
-	return (lease.State == "released" || lease.State == "active" && lease.CleanupStartedAt != "") &&
+	_, claimErr := time.Parse(time.RFC3339, lease.CleanupStartedAt)
+	return (lease.State == "released" || lease.State == "active" && claimErr == nil) &&
 		(lease.ReleaseDeletesServer == nil || *lease.ReleaseDeletesServer) &&
 		(lease.CleanupStatus == "pending" || lease.CleanupStatus == "" && lease.CleanupStartedAt != "")
 }

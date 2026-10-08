@@ -281,7 +281,9 @@ will retry automatically. Repeat `stop` after `cleanupStatus` becomes `complete`
 to remove the retained local artifacts.
 
 If automatic expiry already owns cleanup, explicit stop observes that operation
-even while the lease remains `active`. It preserves the local claim and SSH
+even while the lease remains `active`. A current retry claim takes precedence over
+diagnostics from the previous failed attempt; a new failure that clears the claim
+still returns an error. Stop preserves the local claim and SSH
 artifacts until the same resource has confirmed cleanup. When expiry finishes as
 `expired` with `cleanupCompletedAt` and retired access, stop uses the coordinator's
 idempotent release endpoint to finalize the release without another provider
