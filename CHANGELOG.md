@@ -9,6 +9,7 @@
 
 ### Fixes
 
+- Windows developer images: reboot through validated SSH without racing workspace ownership release, require bounded SSH down/up transitions before resuming prep, and fail on rejected shutdown commands.
 - Windows developer images: retry and verify container pulls and native package downloads, report the failing prep step, exception and longer log tail, and distinguish accepted release from unconfirmed cleanup after prep failure.
 - AWS developer images: wait up to `CRABBOX_IMAGE_CAPACITY_WAIT` (default 45 minutes per acquisition) for fleet, owner, or org active-lease capacity, preserving cleanup and excluding rejected attempts from measured timings.
 - Windows developer images: keep staged TruffleHog binaries executable on stock Server 2025 and report validation exit codes, stdout, stderr, and launch errors before atomic installation.

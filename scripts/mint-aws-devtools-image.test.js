@@ -81,6 +81,12 @@ async function setupFakeCrabbox() {
   const fake = path.join(dir, "crabbox");
   const linuxPrep = path.join(dir, "linux.sh");
   const windowsPrep = path.join(dir, "windows.ps1");
+  const bin = path.join(dir, "maintenance-bin");
+  await mkdir(bin);
+  await writeFile(path.join(bin, "sleep"), "#!/usr/bin/env bash\nexit 0\n");
+  await chmod(path.join(bin, "sleep"), 0o755);
+  await writeFile(path.join(bin, "ssh"), '#!/usr/bin/env bash\nexec "$(dirname "$0")/../crabbox" maintenance-ssh "$@"\n');
+  await chmod(path.join(bin, "ssh"), 0o755);
   await writeFile(linuxPrep, "#!/usr/bin/env bash\nexit 0\n");
   await chmod(linuxPrep, 0o755);
   await writeFile(windowsPrep, "exit 0\n");
@@ -93,6 +99,40 @@ printf 'source-options stock=%s root=%s command=%s\\n' "\${CRABBOX_AWS_STOCK_IMA
 printf 'selection os=%s ami=%s command=%s\\n' "\${CRABBOX_OS-unset}" "\${CRABBOX_AWS_AMI-unset}" "$1" >>"\${CRABBOX_FAKE_LOG}"
 printf 'capacity regions=%s zones=%s command=%s\\n' "\${CRABBOX_CAPACITY_REGIONS-unset}" "\${CRABBOX_CAPACITY_AVAILABILITY_ZONES-unset}" "$1" >>"\${CRABBOX_FAKE_LOG}"
 case "$1" in
+  ssh)
+    [[ "\${CRABBOX_FAKE_SSH_RESOLVE_FAIL:-0}" == 0 ]] || exit 41
+    printf '%q -i %q -p 2222 fixture@windows\\n' "$(dirname "$0")/maintenance-bin/ssh" "fixture key with spaces"
+    ;;
+  maintenance-ssh)
+    previous=""
+    for arg in "$@"; do
+      [[ "$previous" != -i || "$arg" == "fixture key with spaces" ]] || exit 43
+      previous="$arg"
+    done
+    remote="\${@: -1}"
+    command="$(node -e 'process.stdout.write(Buffer.from(process.argv[1], "base64").toString("utf16le"))' "\${remote##* }")"
+    printf 'maintenance command %s\\n' "$command" >>"\${CRABBOX_FAKE_LOG}"
+    if [[ "$command" == *"shutdown /r"* ]]; then
+      [[ "\${CRABBOX_FAKE_REBOOT_FAIL:-0}" == 0 ]] || exit 42
+      touch "\${CRABBOX_FAKE_LOG}.reboot-pending"
+      printf 'reboot scheduled\\n'
+    elif [[ -f "\${CRABBOX_FAKE_LOG}.reboot-pending" ]]; then
+      if [[ "\${CRABBOX_FAKE_REBOOT_NEVER_DOWN:-0}" == 1 ]]; then exit 0; fi
+      if [[ ! -f "\${CRABBOX_FAKE_LOG}.reboot-probed" ]]; then
+        touch "\${CRABBOX_FAKE_LOG}.reboot-probed"
+        printf 'transition still-up\\n' >>"\${CRABBOX_FAKE_LOG}"
+        exit 0
+      fi
+      rm "\${CRABBOX_FAKE_LOG}.reboot-pending"
+      touch "\${CRABBOX_FAKE_LOG}.rebooted"
+      printf 'transition down\\n' >>"\${CRABBOX_FAKE_LOG}"
+      exit 255
+    elif [[ "\${CRABBOX_FAKE_REBOOT_NEVER_UP:-0}" == 1 ]]; then
+      exit 255
+    else
+      printf 'transition ready\\n' >>"\${CRABBOX_FAKE_LOG}"
+    fi
+    ;;
   warmup)
     count_file="\${CRABBOX_FAKE_LOG}.count"
     count=0
@@ -204,6 +244,10 @@ case "$1" in
     if [[ "$*" == *"shutdown /r"* ]]; then
       touch "\${CRABBOX_FAKE_LOG}.rebooted"
       printf 'reboot scheduled\\n'
+      if [[ "\${CRABBOX_FAKE_REBOOT_OWNER_RACE:-0}" == 1 ]]; then
+        printf 'warning: workspace owner release failed: ambiguous remote state: ssh: port 2222: Connection refused\\n' >&2
+        exit 7
+      fi
       exit 0
     fi
     if [[ "$*" == *"FromBase64String"* && "\${CRABBOX_FAKE_WINDOWS_PREP_DISCONNECT:-0}" == "1" && ! -f "\${CRABBOX_FAKE_LOG}.prep-disconnected" ]]; then
@@ -270,7 +314,7 @@ esac
 `,
   );
   await chmod(fake, 0o755);
-  return { dir, fake, log, linuxPrep, windowsPrep };
+  return { dir, fake, log, linuxPrep, windowsPrep, bin };
 }
 
 function runScript(args, env, scriptPath = script, onOutput) {
@@ -1450,8 +1494,9 @@ test("AWS devtools mint wrapper maps windows flags", async () => {
   assert.doesNotMatch(log, /image promote/);
 });
 
-test("AWS devtools mint wrapper reboots windows source when prep requires it", async () => {
+test("AWS devtools mint wrapper reboots windows without racing workspace owner release", async (t) => {
   const fake = await setupFakeCrabbox();
+  t.after(() => rm(fake.dir, { recursive: true, force: true }));
   const result = await runScript(
     [
       "--target",
@@ -1469,6 +1514,9 @@ test("AWS devtools mint wrapper reboots windows source when prep requires it", a
       CRABBOX_BIN: fake.fake,
       CRABBOX_FAKE_LOG: fake.log,
       CRABBOX_FAKE_WINDOWS_REBOOT: "1",
+      CRABBOX_FAKE_REBOOT_OWNER_RACE: "1",
+      CRABBOX_IMAGE_LOG_DIR: fake.dir,
+      PATH: `${fake.bin}${path.delimiter}${process.env.PATH}`,
       CRABBOX_IMAGE_REBOOT_SETTLE_SECONDS: "0",
       CRABBOX_IMAGE_REBOOT_READY_SETTLE_SECONDS: "0",
       CRABBOX_IMAGE_WINDOWS_WARMUP_SETTLE_SECONDS: "0",
@@ -1483,8 +1531,12 @@ test("AWS devtools mint wrapper reboots windows source when prep requires it", a
   );
   assert.match(
     log,
-    /run --provider aws --target windows --id cbx_source --no-sync --shell -- shutdown \/r \/t 5 \/f/,
+    /ssh --provider aws --target windows --id cbx_source/,
   );
+  assert.doesNotMatch(log, /args run .*shutdown \/r/);
+  assert.match(log, /maintenance command .*shutdown \/r/);
+  assert.match(log, /maintenance-ssh .* -i fixture key with spaces -p 2222 fixture@windows/);
+  assert.match(log, /transition still-up[\s\S]*transition down[\s\S]*transition ready[\s\S]*args run .*Set-Content/);
   assert.match(
     log,
     /run --provider aws --target windows --id cbx_source --no-sync --shell -- Write-Output "windows-ssh-ready"/,
@@ -1494,6 +1546,56 @@ test("AWS devtools mint wrapper reboots windows source when prep requires it", a
     /run --provider aws --target windows --id cbx_source --no-sync --shell -- Set-Content/,
   );
   assert.match(log, /FromBase64String/);
+});
+
+for (const [mode, exitCode, message] of [
+  ["SSH_RESOLVE_FAIL", 41, null],
+  ["REBOOT_FAIL", 42, null],
+  ["REBOOT_NEVER_DOWN", 1, /Windows reboot SSH did not become down within 0s/],
+  ["REBOOT_NEVER_UP", 1, /Windows reboot SSH did not become ready within 0s/],
+]) {
+  test(`Windows reboot fails closed for ${mode} and cleans up before capture`, async (t) => {
+    const fake = await setupFakeCrabbox();
+    t.after(() => rm(fake.dir, { recursive: true, force: true }));
+    const result = await runScript(
+      ["--target", "windows", "--run", "--prep-script", fake.windowsPrep],
+      {
+        CRABBOX_BIN: fake.fake,
+        CRABBOX_FAKE_LOG: fake.log,
+        CRABBOX_IMAGE_LOG_DIR: fake.dir,
+        CRABBOX_FAKE_WINDOWS_REBOOT: "1",
+        [`CRABBOX_FAKE_${mode}`]: "1",
+        PATH: `${fake.bin}${path.delimiter}${process.env.PATH}`,
+        CRABBOX_IMAGE_REBOOT_DOWN_TIMEOUT: mode === "REBOOT_NEVER_DOWN" ? "0s" : "5s",
+        CRABBOX_IMAGE_REBOOT_WAIT_TIMEOUT: "0s",
+        CRABBOX_IMAGE_REBOOT_SETTLE_SECONDS: "0",
+        CRABBOX_IMAGE_REBOOT_READY_SETTLE_SECONDS: "0",
+        CRABBOX_IMAGE_WINDOWS_WARMUP_SETTLE_SECONDS: "0",
+      },
+    );
+    assert.equal(result.code, exitCode, result.stderr);
+    if (message) assert.match(result.stderr, message);
+    const log = await readFile(fake.log, "utf8");
+    assert.match(log, /stop --provider aws --target windows cbx_source/);
+    assert.doesNotMatch(log, /checkpoint create|image promote/);
+    assert.equal((log.match(/args run .*-- Set-Content/g) ?? []).length, 1, "prep must not resume after reboot failure");
+    if (mode === "REBOOT_FAIL") assert.doesNotMatch(log, /transition /);
+  });
+}
+
+test("Windows reboot command preserves shutdown failure instead of printing success", async (t) => {
+  const text = await readFile(script, "utf8");
+  const command = text.match(/windows_maintenance_ssh "\$ssh_command" '(shutdown [^\n]+)'/)[1];
+  for (const exitCode of [0, 42]) {
+    const result = spawnSync(process.platform === "win32" ? "powershell.exe" : "pwsh", [
+      "-NoProfile", "-NonInteractive", "-Command",
+      `function shutdown { $global:LASTEXITCODE = ${exitCode} }; ${command}`,
+    ], { encoding: "utf8", timeout: 30000 });
+    if (result.error?.code === "ENOENT") return t.skip("PowerShell is not installed");
+    assert.equal(result.status, exitCode, result.stderr);
+    if (exitCode === 0) assert.match(result.stdout, /reboot scheduled/);
+    else assert.doesNotMatch(result.stdout, /reboot scheduled/);
+  }
 });
 
 test("AWS devtools mint wrapper retries windows prep upload disconnects", async () => {
@@ -1516,6 +1618,7 @@ test("AWS devtools mint wrapper retries windows prep upload disconnects", async 
       CRABBOX_FAKE_LOG: fake.log,
       CRABBOX_FAKE_WINDOWS_PREP_DISCONNECT: "1",
       CRABBOX_FAKE_WINDOWS_REBOOT: "1",
+      PATH: `${fake.bin}${path.delimiter}${process.env.PATH}`,
       CRABBOX_IMAGE_REBOOT_SETTLE_SECONDS: "0",
       CRABBOX_IMAGE_REBOOT_READY_SETTLE_SECONDS: "0",
       CRABBOX_IMAGE_WINDOWS_WARMUP_SETTLE_SECONDS: "0",
@@ -1535,7 +1638,7 @@ test("AWS devtools mint wrapper retries windows prep upload disconnects", async 
   );
   assert.match(
     log,
-    /run --provider aws --target windows --id cbx_source --no-sync --shell -- shutdown \/r \/t 5 \/f/,
+    /maintenance command .*shutdown \/r/,
   );
   assert.match(
     log,

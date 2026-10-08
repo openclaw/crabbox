@@ -15,6 +15,7 @@ wait_timeout="${CRABBOX_IMAGE_WAIT_TIMEOUT:-60m}"
 capacity_wait="${CRABBOX_IMAGE_CAPACITY_WAIT:-45m}"
 prep_wait_timeout="${CRABBOX_IMAGE_PREP_WAIT_TIMEOUT:-90m}"
 reboot_wait_timeout="${CRABBOX_IMAGE_REBOOT_WAIT_TIMEOUT:-25m}"
+reboot_down_timeout="${CRABBOX_IMAGE_REBOOT_DOWN_TIMEOUT:-2m}"
 reboot_settle_seconds="${CRABBOX_IMAGE_REBOOT_SETTLE_SECONDS:-30}"
 reboot_ready_settle_seconds="${CRABBOX_IMAGE_REBOOT_READY_SETTLE_SECONDS:-180}"
 windows_warmup_wait_timeout="${CRABBOX_IMAGE_WINDOWS_WARMUP_WAIT_TIMEOUT:-15m}"
@@ -88,6 +89,7 @@ Useful env:
   CRABBOX_IMAGE_CAPACITY_WAIT  active-lease admission retry budget per acquisition, default 45m (0 disables)
   CRABBOX_IMAGE_PREP_WAIT_TIMEOUT
   CRABBOX_IMAGE_REBOOT_WAIT_TIMEOUT
+  CRABBOX_IMAGE_REBOOT_DOWN_TIMEOUT
   CRABBOX_IMAGE_REBOOT_SETTLE_SECONDS
   CRABBOX_IMAGE_REBOOT_READY_SETTLE_SECONDS
   CRABBOX_IMAGE_WINDOWS_WARMUP_WAIT_TIMEOUT
@@ -544,13 +546,50 @@ wait_windows_ssh_probe() {
   done
 }
 
+windows_maintenance_ssh() {
+  local ssh_command="$1" command="$2" encoded
+  local -a ssh_args
+  # Parse only Crabbox's shell-quoted AWS SSH command, preserving keys and host trust.
+  eval "ssh_args=($ssh_command)" || return
+  encoded="$(node -e 'process.stdout.write(Buffer.from(process.argv[1], "utf16le").toString("base64"))' "$command")" || return
+  # Fresh transports observe reboot transitions without creating a workspace owner.
+  run_cmd "${ssh_args[0]}" -n -T -o ControlMaster=no -o ControlPath=none -o ControlPersist=no \
+    -o ConnectTimeout=10 -o ConnectionAttempts=1 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
+    "${ssh_args[@]:1}" "powershell.exe -NoProfile -NonInteractive -EncodedCommand $encoded"
+}
+
+wait_windows_reboot_ssh_state() {
+  local ssh_command="$1" state="$2" timeout_value="$3" deadline probe_status
+  deadline=$((SECONDS + $(duration_seconds "$timeout_value")))
+  while true; do
+    probe_status=0
+    windows_maintenance_ssh "$ssh_command" 'exit 0' >&2 || probe_status=$?
+    if [[ "$state" == down && "$probe_status" == 255 ]] ||
+      [[ "$state" == ready && "$probe_status" == 0 ]]; then
+      printf 'Windows reboot SSH transition: %s\n' "$state" >&2
+      return 0
+    fi
+    if ((probe_status != 0 && probe_status != 255)); then
+      printf 'Windows reboot SSH probe failed with exit %s\n' "$probe_status" >&2
+      return "$probe_status"
+    fi
+    if ((SECONDS >= deadline)); then
+      printf 'Windows reboot SSH did not become %s within %s\n' "$state" "$timeout_value" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
 wait_windows_reboot_ready() {
-  local lease="$1"
-  wait_windows_ssh_probe "$lease" "$reboot_wait_timeout"
+  local ssh_command="$1"
+  wait_windows_reboot_ssh_state "$ssh_command" down "$reboot_down_timeout"
+  sleep "$reboot_settle_seconds"
+  wait_windows_reboot_ssh_state "$ssh_command" ready "$reboot_wait_timeout"
   if ((reboot_ready_settle_seconds > 0)); then
     printf 'Windows SSH responded after reboot; settling for %ss before continuing\n' "$reboot_ready_settle_seconds" >&2
     sleep "$reboot_ready_settle_seconds"
-    wait_windows_ssh_probe "$lease" "$reboot_wait_timeout"
+    wait_windows_reboot_ssh_state "$ssh_command" ready "$reboot_wait_timeout"
   fi
 }
 
@@ -1172,15 +1211,15 @@ recover_windows_prep_disconnect() {
 }
 
 reboot_windows_source_if_needed() {
-  local lease="$1"
+  local lease="$1" ssh_command
   [[ "$target" == "windows" ]] || return 0
   if ! windows_reboot_required "$lease"; then
     return 0
   fi
   printf 'Windows source lease requires reboot before Docker image pull/proof\n' >&2
-  run_cmd "$CRABBOX_BIN" run --provider aws --target windows --id "$lease" --no-sync --shell -- 'shutdown /r /t 5 /f; Write-Output "reboot scheduled"'
-  sleep "$reboot_settle_seconds"
-  wait_windows_reboot_ready "$lease"
+  ssh_command="$("$CRABBOX_BIN" ssh --provider aws --target windows --id "$lease")"
+  windows_maintenance_ssh "$ssh_command" 'shutdown /r /t 5 /f; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; Write-Output "reboot scheduled"'
+  wait_windows_reboot_ready "$ssh_command"
   run_prep "$lease"
   if windows_reboot_required "$lease"; then
     printf 'Windows prep still requires reboot after one reboot cycle\n' >&2

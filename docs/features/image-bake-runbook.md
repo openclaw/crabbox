@@ -558,10 +558,16 @@ unchanged.
 Windows developer bakes are headless by default for faster boot and fewer
 desktop-bootstrap moving parts. Pass `--desktop` only when the image must back
 interactive desktop leases. Windows container support can require one reboot
-before Docker starts; the wrapper detects the prep script's reboot marker,
-reboots the source lease, waits for Crabbox readiness, reruns the prep script to
-pull the configured Docker images, and only then runs the source smoke and AMI
-capture.
+before Docker starts; the wrapper detects the prep script's reboot marker and
+reboots the source through the validated command from `crabbox ssh`. This
+maintenance connection does not acquire a workspace owner, so reboot cannot
+interrupt `crabbox run`'s ownership release. A failed `shutdown` command stops
+the bake. Fresh SSH probes must observe the source go down (within
+`CRABBOX_IMAGE_REBOOT_DOWN_TIMEOUT`, default 2m) and return (within
+`CRABBOX_IMAGE_REBOOT_WAIT_TIMEOUT`, default 25m). The wrapper then settles for
+`CRABBOX_IMAGE_REBOOT_READY_SETTLE_SECONDS` (default 180), probes again, and
+reruns prep to pull the configured Docker images before source smoke and AMI
+capture. Missing either reboot transition fails the bake and triggers cleanup.
 
 Windows prep retries downloads, Chocolatey package installation, pnpm preparation,
 and each Docker image pull up to four times, with 30-, 60-, and 120-second waits.
