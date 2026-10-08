@@ -42,6 +42,17 @@ the explicit GitHub-runner hydration command with `--repo`, or configure the
 intended `actions.repo`. `--reclaim` alone does not authorize a foreign workspace.
 Automatic local hydration still must produce the invoking repository.
 
+On native Windows, GitHub-runner hydration launches the ephemeral runner as the
+selected guest user through a Scheduled Task so it survives the OpenSSH
+registration session closing. Managed AWS/Azure bootstrap and fresh Hyper-V
+Windows acquisition provide
+`C:\ProgramData\crabbox\windows.password`; Crabbox reads its exact UTF-8 bytes
+without trimming. Hyper-V protects the file with a non-inherited ACL limited to
+the selected user, Builtin Administrators, and LocalSystem. The credential is
+not stored in Crabbox claims or logs. Older retained Hyper-V Windows leases do
+not receive this escrow during resolve or hydration and must be released and
+recreated before `--github-runner` hydration.
+
 ## Supported targets
 
 | Path | Targets |
@@ -93,6 +104,47 @@ remote workspace, and renders its setup script before invalidating markers or
 sync fingerprints. Invalid or unsupported selected steps therefore fail before
 those mutations; source edits during workspace resolution do not change the
 prepared setup.
+
+## GitHub-runner lifecycle and timeout
+
+GitHub-runner hydration uses a single bounded lifecycle:
+
+1. Crabbox claims the lease and keeps both coordinator-backed and direct SSH
+   leases alive while hydration is active.
+2. It obtains a short-lived repository runner token and installs the official
+   runner while reporting secret-free stages: release metadata, archive
+   download, checksum verification, extraction, configuration, and
+   service/Scheduled Task startup.
+3. It polls the repository runners API for the exact generated runner name.
+   Workflow dispatch is blocked until GitHub reports that runner `online` and idle.
+4. It clears the old marker, validates supported workflow inputs, dispatches the
+   workflow, and waits for the new hydration marker.
+
+`--wait-timeout` defaults to 20 minutes and must be positive. For
+`--github-runner`, it is one total budget shared by all four steps rather than a
+marker-only timeout. `actions register` uses the same timeout contract for
+runner setup and online-and-idle readiness.
+
+A setup or online-readiness timeout occurs before workflow dispatch and reports
+the last setup stage or runner status. A post-dispatch timeout reports the last
+SSH marker-probe error when one is available. Crabbox retains bounded setup and
+runner diagnostics under `$HOME/actions-runner` (including `crabbox-config.log`
+and `_diag` logs); native Windows diagnostics also report Scheduled Task and
+runner-process state.
+
+Registration tokens and Windows guest passwords are never written to progress
+output. Diagnostic text is bounded and redacts the short-lived registration
+token before it is returned to the host.
+
+On native Windows the runner install script is copied to the guest and executed
+from that file rather than streamed over SSH stdin. Windows OpenSSH
+intermittently wedges its per-connection event loop while forwarding a payload
+of this size, which strands setup before the guest reports its first stage and
+leaves no guest logs to collect. Only the four short base64 credential lines
+still cross stdin, so the short-lived registration token is not embedded in the
+copied script or SSH/SCP arguments. The guest passes it to the official runner's
+configuration command. The copied script is removed on both the success and
+failure paths.
 
 ## Local hydration details
 

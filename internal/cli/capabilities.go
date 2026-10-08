@@ -57,7 +57,7 @@ func validateRequestedCapabilities(cfg Config) error {
 	if cfg.Browser && !features.Has(FeatureBrowser) {
 		return Exit(2, "browser provisioning is not supported for provider=%s", spec.Name)
 	}
-	if cfg.Code && !spec.Features.Has(FeatureCode) {
+	if cfg.Code && !features.Has(FeatureCode) {
 		return Exit(2, "web code is not supported for provider=%s", spec.Name)
 	}
 	if cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 && cfg.Desktop {
@@ -318,6 +318,10 @@ $path = $paths | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-O
 if (-not $path) { exit 1 }
 Write-Output ("BROWSER=" + $path)
 Write-Output ("CHROME_BIN=" + $path)`
+}
+
+func WindowsBrowserProbePowerShell() string {
+	return windowsBrowserProbeScript()
 }
 
 func parseEnvLines(input string) map[string]string {

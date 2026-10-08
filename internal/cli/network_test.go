@@ -119,6 +119,7 @@ func TestBootstrapNetworkPrefersTailscaleForExitNode(t *testing.T) {
 			"tailscale":           "true",
 			"tailscale_hostname":  "crabbox-blue-lobster",
 			"tailscale_exit_node": "100.123.224.76",
+			"tailscale_state":     "ready",
 		},
 	}
 	server.PublicNet.IPv4.IP = "203.0.113.10"
@@ -126,6 +127,34 @@ func TestBootstrapNetworkPrefersTailscaleForExitNode(t *testing.T) {
 	got := bootstrapNetworkTarget(cfg, server, target)
 	if got.Host != "crabbox-blue-lobster" || got.NetworkKind != NetworkTailscale {
 		t.Fatalf("bootstrap target = host=%s network=%s", got.Host, got.NetworkKind)
+	}
+}
+
+func TestBootstrapNetworkWaitsForReadyTailscaleMetadata(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Network = NetworkTailscale
+	server := Server{Labels: map[string]string{
+		"tailscale":          "true",
+		"tailscale_hostname": "crabbox-blue-lobster",
+		"tailscale_state":    "requested",
+	}}
+	target := SSHTarget{Host: "203.0.113.10", Port: "2222"}
+	got := bootstrapNetworkTarget(cfg, server, target)
+	if got.Host != target.Host || got.NetworkKind != "" {
+		t.Fatalf("bootstrap target = host=%s network=%s", got.Host, got.NetworkKind)
+	}
+}
+
+func TestBootstrapNetworkAcceptsLegacyTailscaleMetadataWithoutState(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Network = NetworkTailscale
+	server := Server{Labels: map[string]string{
+		"tailscale":          "true",
+		"tailscale_hostname": "crabbox-legacy",
+	}}
+	got := bootstrapNetworkTarget(cfg, server, SSHTarget{Host: "203.0.113.10", Port: "2222"})
+	if got.Host != "crabbox-legacy" || got.NetworkKind != NetworkTailscale {
+		t.Fatalf("legacy bootstrap target=%#v", got)
 	}
 }
 
@@ -162,6 +191,109 @@ func TestTailscaleExitNodeEgressCheckFailsClosed(t *testing.T) {
 	}
 }
 
+func TestTailscaleExitNodeConfigurationIsTargetAware(t *testing.T) {
+	meta := TailscaleMetadata{ExitNode: "exit.example.ts.net", ExitNodeAllowLANAccess: false}
+	linux := tailscaleExitNodeConfigureScript(SSHTarget{TargetOS: TargetLinux}, meta)
+	if !strings.Contains(linux, "sudo -n tailscale set") ||
+		!strings.Contains(linux, "--exit-node-allow-lan-access='false'") {
+		t.Fatalf("Linux exit-node script=%s", linux)
+	}
+	windows := tailscaleExitNodeConfigureScript(SSHTarget{TargetOS: TargetWindows, WindowsMode: WindowsModeNormal}, meta)
+	if !strings.Contains(windows, "Get-Command tailscale.exe") ||
+		!strings.Contains(windows, "'--exit-node-allow-lan-access=false'") {
+		t.Fatalf("Windows exit-node script=%s", windows)
+	}
+}
+
+func TestTailscaleMetadataParsingForWindowsAndLinux(t *testing.T) {
+	output := "100.64.1.9\ncrabbox-blue\ncrabbox-blue.example.ts.net\n100.64.0.1\ntrue\n1.98.4\ndevice-123"
+	for _, target := range []SSHTarget{
+		{TargetOS: TargetLinux},
+		{TargetOS: TargetWindows, WindowsMode: WindowsModeNormal},
+	} {
+		meta, err := parseTailscaleMetadataOutput(output)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if meta.IPv4 != "100.64.1.9" || meta.FQDN != "crabbox-blue.example.ts.net" || meta.DeviceID != "device-123" ||
+			meta.State != "ready" || !meta.ExitNodeAllowLANAccess {
+			t.Fatalf("target=%s metadata=%#v", target.TargetOS, meta)
+		}
+		script := tailscaleMetadataReadScript(target)
+		if target.TargetOS == TargetWindows {
+			if !strings.Contains(script, `C:\ProgramData\crabbox\tailscale`) || strings.Contains(script, "/var/lib/crabbox") {
+				t.Fatalf("Windows metadata script=%s", script)
+			}
+		} else if !strings.Contains(script, "/var/lib/crabbox/tailscale-ipv4") || strings.Contains(script, `C:\ProgramData`) {
+			t.Fatalf("Linux metadata script=%s", script)
+		} else if strings.Count(script, "tr -d '\\r\\n'") != 7 {
+			t.Fatalf("Linux metadata script does not emit one trimmed record per field: %s", script)
+		}
+		if _, err := parseTailscaleMetadataOutput("not-an-ip\nhost\nfqdn\n\nfalse\n1.98.4\ndevice"); err == nil {
+			t.Fatal("expected invalid Tailscale IPv4 metadata to fail")
+		}
+	}
+}
+
+func TestTailscaleLifecycleScriptsAreTargetAware(t *testing.T) {
+	windows := SSHTarget{TargetOS: TargetWindows, WindowsMode: WindowsModeNormal}
+	if script := tailscaleLogoutScript(windows); !strings.Contains(script, "Get-Command tailscale.exe") || strings.Contains(script, "command -v") {
+		t.Fatalf("Windows logout script=%s", script)
+	}
+	if script := tailscaleLogoutScript(SSHTarget{TargetOS: TargetLinux}); !strings.Contains(script, "tailscale logout") || strings.Contains(script, "Get-Command") {
+		t.Fatalf("Linux logout script=%s", script)
+	}
+	windowsReset := TailscaleIdentityResetScript(TargetWindows, WindowsModeNormal)
+	if !strings.Contains(windowsReset, `C:\ProgramData\Tailscale\tailscaled.state`) ||
+		!strings.Contains(windowsReset, `C:\ProgramData\crabbox\tailscale`) {
+		t.Fatalf("Windows reset script=%s", windowsReset)
+	}
+	if !strings.Contains(windowsReset, "ErrorAction Stop") ||
+		!strings.Contains(windowsReset, "identity state remains") {
+		t.Fatalf("Windows reset script does not fail closed: %s", windowsReset)
+	}
+	linuxReset := TailscaleIdentityResetScript(TargetLinux, "")
+	if !strings.Contains(linuxReset, "/var/lib/tailscale/tailscaled.state") ||
+		!strings.Contains(linuxReset, "'/var/lib/crabbox'/tailscale-*") {
+		t.Fatalf("Linux reset script=%s", linuxReset)
+	}
+	if !strings.Contains(linuxReset, "systemctl cat tailscaled.service") {
+		t.Fatalf("Linux reset script does not tolerate a missing service: %s", linuxReset)
+	}
+}
+
+func TestTailscaleSSHBootstrapKeepsAuthKeyOutOfRemoteScript(t *testing.T) {
+	cfg := baseConfig()
+	cfg.TargetOS = TargetLinux
+	cfg.Tailscale.Enabled = true
+	cfg.Tailscale.AuthKey = "invalid-tailscale-auth-fixture"
+	cfg.Tailscale.Hostname = "crabbox-fork"
+	cfg.Tailscale.ScrubCloudInitSecrets = true
+
+	remote, input, err := tailscaleSSHBootstrapPayload(cfg, SSHTarget{TargetOS: TargetLinux})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(remote, cfg.Tailscale.AuthKey) {
+		t.Fatal("Tailscale auth key leaked into the SSH remote command")
+	}
+	keyLine, script, ok := strings.Cut(input, "\n")
+	if !ok || keyLine != cfg.Tailscale.AuthKey {
+		t.Fatalf("stdin auth framing=%q", input)
+	}
+	if strings.Contains(script, cfg.Tailscale.AuthKey) {
+		t.Fatal("Tailscale auth key leaked into the remote bootstrap script")
+	}
+	if !strings.Contains(script, `: "${TS_AUTHKEY:?}"`) ||
+		!strings.Contains(script, "tailscale up --auth-key=file:/dev/stdin") {
+		t.Fatalf("direct Tailscale bootstrap script=%s", script)
+	}
+	if strings.Contains(script, "crabbox-cloud-init-secret-cleanup") ||
+		strings.Contains(script, "/etc/cloud/cloud-init.disabled") {
+		t.Fatalf("direct Tailscale bootstrap mutated fresh cloud-init state: %s", script)
+	}
+}
+
 func TestRenderTailscaleHostname(t *testing.T) {
 	got := RenderTailscaleHostname("CBX-{slug}-{provider}-{id}", "cbx_abcdef123456", "Blue Lobster", "aws")
 	if got != "cbx-blue-lobster-aws-cbx-abcdef123456" {
@@ -188,5 +320,16 @@ func TestValidateNetworkConfigRejectsStaticProvisioning(t *testing.T) {
 	cfg.Tailscale.Enabled = true
 	if err := validateNetworkConfig(cfg); err == nil {
 		t.Fatal("expected --tailscale static provider validation failure")
+	}
+}
+
+func TestValidateNetworkConfigAllowsHyperVWindowsTailscale(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "hyperv"
+	cfg.TargetOS = targetWindows
+	cfg.WindowsMode = WindowsModeNormal
+	cfg.Tailscale.Enabled = true
+	if err := validateNetworkConfig(cfg); err != nil {
+		t.Fatalf("validate Hyper-V Windows Tailscale: %v", err)
 	}
 }

@@ -536,9 +536,9 @@
     "sync": "crabbox-sync",
     "gpu": "no",
     "lifecycle": "Crabbox",
-    "cleanup": "VM delete",
-    "bestFit": "Local native Windows VM",
-    "caveat": "Windows host with Hyper-V required",
+    "cleanup": "Exact-claim VM delete; cache VHDXs persist",
+    "bestFit": "Local Linux or native Windows Generation 2 VM",
+    "caveat": "Windows Hyper-V host, VM-management permissions, and target-ready VHDX required",
     "docs": "hyperv.md"
   },
   "incus": {

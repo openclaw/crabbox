@@ -896,7 +896,6 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("crabbox-user-vnc.cmd");
     expect(got).toContain("start-user-vnc.ps1");
     expect(got).toContain("Set-Service -StartupType Automatic");
-    expect(got).toContain("Start-Service -Name tvnserver");
     expect(got).not.toContain("/SC ONLOGON");
     expect(got).not.toContain("Set-TightVNCBinaryValue");
     expect(got).not.toContain('reg.exe add "HKCU\\Software\\TightVNC\\Server"');

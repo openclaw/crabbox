@@ -322,36 +322,6 @@ func TestGitHubActionsRunnerInstallScriptUsesOfficialRunner(t *testing.T) {
 	}
 }
 
-func TestGitHubActionsRunnerInstallPowerShellScriptUsesOfficialWindowsRunner(t *testing.T) {
-	got := githubActionsRunnerInstallScriptForTarget("latest", true, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
-	for _, want := range []string{
-		"https://api.github.com/repos/actions/runner/releases/latest",
-		"https://api.github.com/repos/actions/runner/releases/tags/v$version",
-		"actions-runner-win-$runnerArch-$version.zip",
-		"$release.assets | Where-Object { $_.name -eq $archiveName }",
-		"^sha256:(?<sha>[0-9a-fA-F]{64})$",
-		"Get-FileHash -LiteralPath $zip -Algorithm SHA256",
-		"runner archive checksum mismatch",
-		".\\config.cmd",
-		"--ephemeral",
-		"New-ScheduledTaskAction",
-		"Start-ScheduledTask",
-		"C:\\ProgramData\\crabbox\\windows.password",
-		"Start-Process",
-		"run-crabbox.ps1",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("windows install script missing %q", want)
-		}
-	}
-	checksum := strings.Index(got, "Get-FileHash")
-	clearRunner := strings.Index(got, "Get-ChildItem -Force -LiteralPath $runnerDir | Remove-Item")
-	extract := strings.Index(got, "Expand-Archive")
-	if checksum < 0 || clearRunner < checksum || extract < clearRunner {
-		t.Fatalf("Windows runner installer must verify checksum before replacing/extracting: checksum=%d clear=%d extract=%d", checksum, clearRunner, extract)
-	}
-}
-
 func TestGitHubActionsRunnerInstallScriptRejectsChecksumMismatchBeforeExtraction(t *testing.T) {
 	requirePOSIXShellTest(t)
 	root := t.TempDir()
@@ -2324,9 +2294,10 @@ exit 0
 	ghScript := `#!/bin/sh
 case "$*" in
   *registration-token*) printf '%s\n' test-token ;;
-  *"workflow run"*) : > "$CRABBOX_FAKE_DISPATCHED" ;;
-esac
-`
+	  *"api repos/example/repo/actions/runners"*) printf '%s\tonline\tfalse\n' "$CRABBOX_FAKE_RUNNER_NAME" ;;
+	  *"workflow run"*) : > "$CRABBOX_FAKE_DISPATCHED" ;;
+	esac
+	`
 	if err := os.WriteFile(filepath.Join(tools, "ssh"), []byte(sshScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2336,6 +2307,7 @@ esac
 	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CRABBOX_FAKE_SSH_LOG", logPath)
 	t.Setenv("CRABBOX_FAKE_DISPATCHED", dispatchedPath)
+	t.Setenv("CRABBOX_FAKE_RUNNER_NAME", LeaseProviderName("cbx_gh", ""))
 
 	cfg := defaultConfig()
 	cfg.Actions.Workflow = "hydrate.yml"

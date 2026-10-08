@@ -40,7 +40,7 @@ func TestHyperVConfigShowSection(t *testing.T) {
 		} {
 			t.Run(selected+"/"+tc.name, func(t *testing.T) {
 				cfg := core.Config{Provider: selected, HyperV: core.HyperVConfig{
-					Image: tc.raw, User: tc.raw, WorkRoot: tc.raw, Switch: tc.raw,
+					Image: tc.raw, User: tc.raw, WorkRoot: tc.raw, Switch: tc.raw, SecureBoot: tc.raw,
 					CPUs: tc.cpus, Memory: tc.memory, InitPassword: tc.initPassword,
 					GuestPassword: "synthetic-omission-marker",
 				}}
@@ -52,9 +52,9 @@ func TestHyperVConfigShowSection(t *testing.T) {
 					got[field.JSONName] = field.JSONValue
 					text = append(text, field.TextName+"="+field.TextValue)
 				}
-				want := map[string]any{"image": tc.raw, "user": tc.raw, "workRoot": tc.raw, "cpus": tc.cpus, "memory": tc.memory, "switch": tc.raw, "initPassword": tc.initPassword}
-				wantText := fmt.Sprintf("image=%s user=%s work_root=%s cpus=%d memory=%d switch=%s init_password=%t", tc.raw, tc.raw, tc.raw, tc.cpus, tc.memory, tc.raw, tc.initPassword)
-				if section.JSONKey != "hyperv" || section.TextLabel != "hyperv" || !reflect.DeepEqual(section.Providers, []string{"hyperv"}) || len(section.Fields) != 7 || !reflect.DeepEqual(got, want) || strings.Join(text, " ") != wantText {
+				want := map[string]any{"image": tc.raw, "user": tc.raw, "workRoot": tc.raw, "secureBoot": tc.raw, "cpus": tc.cpus, "memory": tc.memory, "switch": tc.raw, "initPassword": tc.initPassword}
+				wantText := fmt.Sprintf("image=%s user=%s work_root=%s secure_boot=%s cpus=%d memory=%d switch=%s init_password=%t", tc.raw, tc.raw, tc.raw, tc.raw, tc.cpus, tc.memory, tc.raw, tc.initPassword)
+				if section.JSONKey != "hyperv" || section.TextLabel != "hyperv" || !reflect.DeepEqual(section.Providers, []string{"hyperv"}) || len(section.Fields) != 8 || !reflect.DeepEqual(got, want) || strings.Join(text, " ") != wantText {
 					t.Fatal("unexpected Hyper-V projection roster, types, or values")
 				}
 				encoded, err := json.Marshal(section)
@@ -121,6 +121,7 @@ func commandKey(args []string) string {
 func testBackend(runner *recordingRunner) *backend {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetWindows
 	cfg.HyperV = core.HyperVConfig{
 		Image:         `C:\Images\windows.vhdx`,
 		User:          "crabbox",
@@ -138,20 +139,76 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	if p.Spec().Name != providerName {
 		t.Fatalf("Name=%q want %s", p.Spec().Name, providerName)
 	}
-	spec := p.Spec()
-	if spec.Kind != core.ProviderKindSSHLease || spec.Family != "local-vm" {
-		t.Fatalf("unexpected spec: %#v", spec)
+	want := core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationLocalContext),
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
+		Name:             providerName,
+		Family:           "local-vm",
+		Kind:             core.ProviderKindSSHLease,
+		Targets: []core.TargetSpec{
+			{OS: core.TargetLinux},
+			{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
+		},
+		TargetFeatures: map[string]core.FeatureSet{
+			core.TargetLinux: append(providerFeatures(), core.FeatureCode),
+			core.TargetWindows + "/" + core.WindowsModeNormal: providerFeatures(),
+		},
+		Features: core.FeatureSet{
+			core.FeatureSSH,
+			core.FeatureCrabboxSync,
+			core.FeatureDesktop,
+			core.FeatureBrowser,
+			core.FeatureCleanup,
+			core.FeaturePauseResume,
+			core.FeatureTailscale,
+			core.FeatureCacheVolume,
+			core.FeatureCheckpoint,
+			core.FeatureFork,
+			core.FeatureRestore,
+			core.FeatureSnapshot,
+		},
+		Coordinator: core.CoordinatorNever,
 	}
-	if spec.Coordinator != core.CoordinatorNever {
-		t.Fatalf("coordinator=%s want never", spec.Coordinator)
+	if spec := p.Spec(); !reflect.DeepEqual(spec, want) {
+		t.Fatalf("Spec()=%#v want %#v", spec, want)
 	}
-	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup} {
-		if !spec.Features.Has(feature) {
-			t.Fatalf("features=%v missing %s", spec.Features, feature)
+}
+
+func TestProviderFeaturesAreTargetAware(t *testing.T) {
+	spec := (Provider{}).Spec()
+	linux := spec.FeaturesForTarget(core.TargetLinux, "")
+	windows := spec.FeaturesForTarget(core.TargetWindows, core.WindowsModeNormal)
+
+	for _, feature := range []core.Feature{
+		core.FeatureSSH,
+		core.FeatureCrabboxSync,
+		core.FeatureDesktop,
+		core.FeatureBrowser,
+		core.FeatureCleanup,
+		core.FeaturePauseResume,
+		core.FeatureTailscale,
+		core.FeatureCacheVolume,
+		core.FeatureCode,
+	} {
+		if !linux.Has(feature) {
+			t.Fatalf("feature %s missing from linux=%v", feature, linux)
+		}
+		if feature != core.FeatureCode && !windows.Has(feature) {
+			t.Fatalf("feature %s missing from windows=%v", feature, windows)
 		}
 	}
-	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetWindows || spec.Targets[0].WindowsMode != core.WindowsModeNormal {
-		t.Fatalf("unexpected targets: %#v", spec.Targets)
+	if windows.Has(core.FeatureCode) {
+		t.Fatalf("windows unexpectedly advertises code: %v", windows)
+	}
+	for _, feature := range []core.Feature{
+		core.FeatureCheckpoint,
+		core.FeatureFork,
+		core.FeatureRestore,
+		core.FeatureSnapshot,
+	} {
+		if !linux.Has(feature) || !windows.Has(feature) {
+			t.Fatalf("feature %s missing from linux=%v or windows=%v", feature, linux, windows)
+		}
 	}
 }
 
@@ -167,12 +224,23 @@ func TestProviderAliasesResolve(t *testing.T) {
 	}
 }
 
-func TestConfigureRejectsLinux(t *testing.T) {
+func TestConfigureAcceptsLinux(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetLinux
-	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
-		t.Fatal("Configure accepted linux target")
+	if _, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}); err != nil {
+		t.Fatalf("Configure rejected linux target: %v", err)
+	}
+}
+
+func TestConfigureAcceptsLinuxDesktopAndBrowser(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetLinux
+	cfg.Desktop = true
+	cfg.Browser = true
+	if _, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}); err != nil {
+		t.Fatalf("Configure rejected Linux desktop/browser: %v", err)
 	}
 }
 
@@ -185,12 +253,21 @@ func TestConfigureRejectsMacOS(t *testing.T) {
 	}
 }
 
-func TestConfigureRejectsTailscale(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.Tailscale.Enabled = true
-	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
-		t.Fatal("Configure accepted tailscale")
+func TestConfigureAcceptsTailscaleForLinuxAndWindows(t *testing.T) {
+	for _, target := range []string{core.TargetLinux, core.TargetWindows} {
+		t.Run(target, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.TargetOS = target
+			if target == core.TargetWindows {
+				cfg.WindowsMode = core.WindowsModeNormal
+			}
+			cfg.Tailscale.Enabled = true
+			cfg.Tailscale.AuthKey = "fixture-only-invalid-value"
+			if _, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}); err != nil {
+				t.Fatalf("Configure rejected target=%s Tailscale: %v", target, err)
+			}
+		})
 	}
 }
 
@@ -201,6 +278,21 @@ func TestConfigureAcceptsWindows(t *testing.T) {
 	cfg.WindowsMode = core.WindowsModeNormal
 	if _, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}); err != nil {
 		t.Fatalf("Configure rejected windows target: %v", err)
+	}
+}
+
+func TestConfigureAcceptsWindowsDesktopAndBrowser(t *testing.T) {
+	for _, feature := range []string{"desktop", "browser"} {
+		t.Run(feature, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.TargetOS = core.TargetWindows
+			cfg.Desktop = feature == "desktop"
+			cfg.Browser = feature == "browser"
+			if _, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}); err != nil {
+				t.Fatalf("Configure rejected Windows %s: %v", feature, err)
+			}
+		})
 	}
 }
 
@@ -417,6 +509,20 @@ func TestHypervState(t *testing.T) {
 	}
 }
 
+func TestHypervLeaseStateNormalizesSavedAndPaused(t *testing.T) {
+	tests := map[int]string{
+		2: "running",
+		3: "stopped",
+		6: "paused",
+		9: "paused",
+	}
+	for state, want := range tests {
+		if got := hypervLeaseState(state); got != want {
+			t.Fatalf("hypervLeaseState(%d)=%q want %q", state, got, want)
+		}
+	}
+}
+
 func TestInstanceScopeRoundTrip(t *testing.T) {
 	name := "crabbox-blue-1234abcd"
 	if got := instanceNameFromScope(instanceScope(name)); got != name {
@@ -573,6 +679,18 @@ func TestServerFromInstanceOverridesStaleReadyState(t *testing.T) {
 	}
 }
 
+func TestServerFromInstanceNormalizesSavedStateAndRetainsRawState(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	server := b.serverFromInstance(
+		hypervVM{Name: "crabbox-blue-1234", State: hypervStateSaved},
+		core.LeaseClaim{Labels: map[string]string{"state": "ready"}},
+		b.configForRun(),
+	)
+	if server.Status != "paused" || server.Labels["state"] != "paused" || server.Labels["hyperv_state"] != "saved" {
+		t.Fatalf("status=%q state=%q hyperv_state=%q", server.Status, server.Labels["state"], server.Labels["hyperv_state"])
+	}
+}
+
 func TestCreateVMUsesDifferencingDisk(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
@@ -588,7 +706,7 @@ func TestCreateVMUsesDifferencingDisk(t *testing.T) {
 		t.Fatalf("createVM: %v", err)
 	}
 
-	var foundDiff, foundNewVM, foundStart, foundConnect, foundInject bool
+	var foundDiff, foundNewVM, foundStart, foundConnect, foundInject, foundWindowsFirmware bool
 	for _, call := range runner.calls {
 		script := call.Args[len(call.Args)-1]
 		if strings.Contains(script, "New-VHD") && strings.Contains(script, "-Differencing") &&
@@ -610,6 +728,9 @@ func TestCreateVMUsesDifferencingDisk(t *testing.T) {
 		if strings.Contains(script, "Invoke-Command") && strings.Contains(script, "authorized_keys") {
 			foundInject = true
 		}
+		if strings.Contains(script, "Set-VMFirmware") && strings.Contains(script, "MicrosoftWindows") {
+			foundWindowsFirmware = true
+		}
 	}
 	if !foundDiff {
 		t.Error("createVM should back the lease with a differencing disk over the template")
@@ -619,6 +740,9 @@ func TestCreateVMUsesDifferencingDisk(t *testing.T) {
 	}
 	if !foundStart {
 		t.Error("createVM did not start the VM")
+	}
+	if !foundWindowsFirmware {
+		t.Error("createVM did not preserve the Windows secure boot template")
 	}
 	if foundConnect || foundInject {
 		t.Error("createVM must leave the VM disconnected and defer guest SSH configuration to Acquire")
@@ -1018,7 +1142,8 @@ func TestPersistLeaseWritesClaimAndEndpointAtomically(t *testing.T) {
 
 	req := core.AcquireRequest{}
 	req.Repo.Root = t.TempDir()
-	if err := persistLease("cbx_atomic123456", "atomslug", "crabbox-atom-1234", cfg, req, &lease); err != nil {
+	cacheVolumes := []string{`nuget-cache:C:\crabbox-cache\nuget`}
+	if err := persistLease("cbx_atomic123456", "atomslug", "crabbox-atom-1234", cfg, req, &lease, cacheVolumes); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
 	t.Cleanup(func() { core.RemoveLeaseClaim("cbx_atomic123456") })
@@ -1039,12 +1164,15 @@ func TestPersistLeaseWritesClaimAndEndpointAtomically(t *testing.T) {
 	if found.SSHHost != "172.20.0.9" {
 		t.Fatalf("claim SSHHost=%q want 172.20.0.9 (endpoint must be in the same write as the claim)", found.SSHHost)
 	}
+	if !reflect.DeepEqual(found.CacheVolumes, cacheVolumes) {
+		t.Fatalf("claim CacheVolumes=%#v want %#v", found.CacheVolumes, cacheVolumes)
+	}
 	snapshot, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
 	if !exists || !set || !reflect.DeepEqual(snapshot, *found) {
 		t.Fatal("initial persistence did not return its committed snapshot")
 	}
 	lease.Server.Labels["state"] = "ready"
-	if err := persistLease("cbx_atomic123456", "atomslug", "crabbox-atom-1234", cfg, req, &lease); err != nil {
+	if err := persistLease("cbx_atomic123456", "atomslug", "crabbox-atom-1234", cfg, req, &lease, nil); err != nil {
 		t.Fatal(err)
 	}
 	final, err := core.ReadLeaseClaim(lease.LeaseID)
@@ -1080,7 +1208,7 @@ func TestPersistLeaseFailureLeavesNoStaleClaim(t *testing.T) {
 
 	req := core.AcquireRequest{}
 	req.Repo.Root = t.TempDir()
-	if err := persistLease("cbx_atomfail12345", "atomfail", "crabbox-atom-fail", cfg, req, &lease); err == nil {
+	if err := persistLease("cbx_atomfail12345", "atomfail", "crabbox-atom-fail", cfg, req, &lease, nil); err == nil {
 		t.Fatal("persistLease should fail when the state directory is unwritable")
 	}
 	info, err := os.Stat(blocker)
@@ -1110,7 +1238,7 @@ func TestResolveStatusOnlyAllowsRetainedLeaseWithoutIP(t *testing.T) {
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: claim.LeaseID,
 	}
-	if err := persistLease(claim.LeaseID, claim.Slug, name, cfg, req, &lease); err != nil {
+	if err := persistLease(claim.LeaseID, claim.Slug, name, cfg, req, &lease, nil); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
 	t.Cleanup(func() { core.RemoveLeaseClaim(claim.LeaseID) })
@@ -1124,7 +1252,7 @@ func TestResolveStatusOnlyAllowsRetainedLeaseWithoutIP(t *testing.T) {
 	}
 }
 
-func TestAcquireRejectsISO(t *testing.T) {
+func TestAcquireDispatchesWindowsTarget(t *testing.T) {
 	b := testBackend(&recordingRunner{})
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
@@ -1134,6 +1262,20 @@ func TestAcquireRejectsISO(t *testing.T) {
 	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
 	if err == nil || !strings.Contains(err.Error(), "does not support ISO") {
 		t.Fatalf("Acquire should reject ISO images, got: %v", err)
+	}
+}
+
+func TestAcquireDispatchesLinuxTarget(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	b.cfg.TargetOS = core.TargetLinux
+	b.cfg.HyperV.Image = `C:\Images\debian.qcow2`
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
+	if err == nil || !strings.Contains(err.Error(), "generalized cloud VHDX") {
+		t.Fatalf("Acquire should dispatch Linux image validation, got: %v", err)
 	}
 }
 
@@ -1187,14 +1329,14 @@ func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 		Slug:          "missing-vm",
 		Provider:      providerName,
 		ProviderScope: instanceScope(name),
-		Labels:        map[string]string{"instance": name, "lease": leaseID},
+		Labels:        map[string]string{"instance": name, "lease": leaseID, "desktop": "true", "browser": "true"},
 	}
 	lease := core.LeaseTarget{
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: leaseID,
 	}
 	req := core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}
-	if err := persistLease(leaseID, claim.Slug, name, cfg, req, &lease); err != nil {
+	if err := persistLease(leaseID, claim.Slug, name, cfg, req, &lease, nil); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
 	baseVHD := filepath.Join(hypervVHDDir(), name+".vhdx")
@@ -1282,22 +1424,27 @@ func TestCleanupMissingClaimRemovesDeterministicStorage(t *testing.T) {
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: leaseID,
 	}
-	if err := persistLease(leaseID, claim.Slug, name, cfg, core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}, &lease); err != nil {
+	if err := persistLease(leaseID, claim.Slug, name, cfg, core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}, &lease, nil); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
 	baseVHD := filepath.Join(hypervVHDDir(), name+".vhdx")
+	seedVHD := cloudInitSeedPath(name)
 	if err := os.MkdirAll(filepath.Dir(baseVHD), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(baseVHD, []byte("disk"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, path := range []string{baseVHD, seedVHD} {
+		if err := os.WriteFile(path, []byte("disk"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
-	if _, err := os.Stat(baseVHD); !os.IsNotExist(err) {
-		t.Fatalf("cleanup left deterministic disk %s: %v", baseVHD, err)
+	for _, path := range []string{baseVHD, seedVHD} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("cleanup left deterministic disk %s: %v", path, err)
+		}
 	}
 	if claims, err := core.ListLeaseClaims(); err != nil || len(claims) != 0 {
 		t.Fatalf("claims after cleanup=%#v err=%v", claims, err)
@@ -1334,7 +1481,7 @@ func TestCleanupMissingKeepClaimPreservesStorage(t *testing.T) {
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: leaseID,
 	}
-	if err := persistLease(leaseID, claim.Slug, name, cfg, core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true}, &lease); err != nil {
+	if err := persistLease(leaseID, claim.Slug, name, cfg, core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true}, &lease, nil); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
 	baseVHD := filepath.Join(hypervVHDDir(), name+".vhdx")
@@ -1871,8 +2018,8 @@ func TestApplyFlagsDefersTargetValidation(t *testing.T) {
 	if cfg.TargetOS != core.TargetLinux {
 		t.Fatalf("applyFlags rewrote explicit target to %s", cfg.TargetOS)
 	}
-	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
-		t.Fatal("central provider configuration should reject target=linux")
+	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err != nil {
+		t.Fatalf("central provider configuration should accept target=linux: %v", err)
 	}
 }
 
@@ -2208,6 +2355,7 @@ func TestInheritedWorkRootCallerContract(t *testing.T) {
 			want.HyperV.CPUs = 4
 			want.HyperV.Memory = 8192
 			want.HyperV.Switch = "Default Switch"
+			want.HyperV.SecureBoot = secureBootAuto
 			want.SSHPort = "22"
 			want.SSHFallbackPorts = []string{}
 			applyDefaults(&cfg)
@@ -2369,6 +2517,7 @@ func TestHyperVBindingFlagPhases(t *testing.T) {
 				want.HyperV.InitPassword = false
 				core.RecordProviderFlagInputs(&want, true, providerName)
 				if provider != "unselected" {
+					want.HyperV.SecureBoot = secureBootAuto
 					want.Provider = "hyperv"
 					if targetMode == "implicit" {
 						want.TargetOS = core.TargetWindows
@@ -2410,7 +2559,7 @@ func TestHyperVBindingFlagPhases(t *testing.T) {
 }
 
 func TestHyperVBindingFlagRegistration(t *testing.T) {
-	order := []string{"image", "user", "work-root", "cpu", "memory", "switch", "init-password"}
+	order := []string{"image", "user", "work-root", "secure-boot", "cpu", "memory", "switch", "init-password"}
 	for i, duplicate := range order {
 		fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)

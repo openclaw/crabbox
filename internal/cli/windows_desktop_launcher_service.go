@@ -67,6 +67,8 @@ public sealed class CrabboxDesktopLauncherService : ServiceBase {
 
     [DllImport("wtsapi32.dll", SetLastError = true)]
     private static extern bool WTSEnumerateSessions(IntPtr server, int reserved, int version, out IntPtr sessions, out int count);
+    [DllImport("wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool WTSQuerySessionInformation(IntPtr server, int sessionId, int infoClass, out IntPtr buffer, out int bytes);
     [DllImport("wtsapi32.dll")]
     private static extern void WTSFreeMemory(IntPtr memory);
     [DllImport("kernel32.dll")]
@@ -116,14 +118,16 @@ public sealed class CrabboxDesktopLauncherService : ServiceBase {
         string resultPath = null;
         try {
             string[] lines = File.ReadAllLines(requestPath);
-            if (lines.Length != 2) throw new InvalidDataException("invalid desktop launch request");
+            if (lines.Length != 3) throw new InvalidDataException("invalid desktop launch request");
             string scriptPath = ValidatedLaunchPath(lines[0], ".ps1");
             resultPath = ValidatedLaunchPath(lines[1], ".result");
+            string user = lines[2].Trim();
+            if (user.Length == 0) throw new InvalidDataException("desktop launch request user is empty");
             string requestID = Path.GetFileNameWithoutExtension(requestPath);
             if (Path.GetFileNameWithoutExtension(scriptPath) != requestID || Path.GetFileNameWithoutExtension(resultPath) != requestID) {
                 throw new InvalidDataException("desktop launch request paths do not share one identity");
             }
-            LaunchInteractive(scriptPath, resultPath);
+            LaunchInteractive(scriptPath, resultPath, user);
         } catch (Exception error) {
             if (resultPath != null) WriteError(resultPath, error.Message);
         } finally {
@@ -143,7 +147,18 @@ public sealed class CrabboxDesktopLauncherService : ServiceBase {
         return full;
     }
 
-    private static int ActiveSessionId() {
+    private static string SessionUserName(int sessionId) {
+        IntPtr buffer;
+        int bytes;
+        if (!WTSQuerySessionInformation(IntPtr.Zero, sessionId, 5, out buffer, out bytes)) return "";
+        try {
+            return Marshal.PtrToStringUni(buffer) ?? "";
+        } finally {
+            WTSFreeMemory(buffer);
+        }
+    }
+
+    private static int ActiveSessionId(string expectedUser) {
         uint console = WTSGetActiveConsoleSessionId();
         int fallback = -1;
         IntPtr sessions;
@@ -156,6 +171,7 @@ public sealed class CrabboxDesktopLauncherService : ServiceBase {
             for (int index = 0; index < count; index++) {
                 WTS_SESSION_INFO session = (WTS_SESSION_INFO)Marshal.PtrToStructure(IntPtr.Add(sessions, index * size), typeof(WTS_SESSION_INFO));
                 if (session.State != WTSActive) continue;
+                if (!string.Equals(SessionUserName(session.SessionID), expectedUser, StringComparison.OrdinalIgnoreCase)) continue;
                 if (session.SessionID == (int)console) return session.SessionID;
                 if (fallback < 0) fallback = session.SessionID;
             }
@@ -163,11 +179,11 @@ public sealed class CrabboxDesktopLauncherService : ServiceBase {
             WTSFreeMemory(sessions);
         }
         if (fallback >= 0) return fallback;
-        throw new InvalidOperationException("no active interactive Windows session");
+        throw new InvalidOperationException("no active interactive Windows session for requested user");
     }
 
-    private static void LaunchInteractive(string scriptPath, string resultPath) {
-        int sessionId = ActiveSessionId();
+    private static void LaunchInteractive(string scriptPath, string resultPath, string user) {
+        int sessionId = ActiveSessionId(user);
         IntPtr sessionToken = IntPtr.Zero;
         IntPtr primaryToken = IntPtr.Zero;
         IntPtr environment = IntPtr.Zero;

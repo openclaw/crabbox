@@ -94,12 +94,27 @@ func TestScreenshotRemoteCommandSupportsWindowsAndMacOS(t *testing.T) {
 	for _, want := range []string{
 		"System.Windows.Forms",
 		"ImageFormat]::Png",
-		"& schtasks.exe @createArgs",
-		"/IT",
 		"windows.password",
+		"New-ScheduledTaskPrincipal",
+		"-LogonType Interactive",
+		"Register-ScheduledTask",
+		"Start-ScheduledTask",
+		"Unregister-ScheduledTask",
+		"Register-CrabboxInteractiveTask",
+		"Remove-CrabboxInteractiveTask",
+		"Protect-CrabboxInteractiveDirectory",
+		"/inheritance:r",
+		"(OI)(CI)F",
+		"$taskRoot",
+		"finally",
 	} {
 		if !strings.Contains(windows, want) {
 			t.Fatalf("windows screenshot command missing %q:\n%s", want, windows)
+		}
+	}
+	for _, forbidden := range []string{"Get-Content -Raw", "GetString($credentialBytes).Trim", `"/RP"`, "InteractiveOrPassword"} {
+		if strings.Contains(windows, forbidden) {
+			t.Fatalf("windows screenshot command contains forbidden credential handling %q:\n%s", forbidden, windows)
 		}
 	}
 	mac := screenshotRemoteCommand(SSHTarget{TargetOS: targetMacOS})

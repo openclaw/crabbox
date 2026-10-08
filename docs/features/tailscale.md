@@ -14,13 +14,17 @@ work against a lease.
 ## Scope
 
 - Managed Linux leases can join a tailnet at creation time with `--tailscale`.
-  Tailscale provisioning is offered by the providers that declare the capability:
-  Hetzner, AWS, Azure, and Google Cloud.
+  Tailscale provisioning is offered by providers that declare the capability,
+  including Hetzner, AWS, Azure, Google Cloud, and Hyper-V.
+- Hyper-V also supports native Windows guests. It installs a pinned,
+  SHA-256-verified official MSI when needed and passes the auth key through
+  PowerShell Direct without placing it in host argv or lease metadata.
 - Static (`provider=ssh`) hosts are not joined by Crabbox; point `static.host` at a
   MagicDNS name or `100.x` address and assert reachability with `--network tailscale`.
-- `--tailscale` is rejected for non-Linux targets, for Blacksmith Testbox (Blacksmith
-  owns connectivity), for static hosts, and for sandbox providers such as Sprites that
-  expose SSH through their own proxy.
+- `--tailscale` is rejected for targets whose provider does not advertise the
+  capability, for Blacksmith Testbox (Blacksmith owns connectivity), for static
+  hosts, and for sandbox providers such as Sprites that expose SSH through their
+  own proxy.
 
 ## Commands
 
@@ -72,8 +76,8 @@ tailscale:
 ```
 
 `tailscale.enabled` (or `--tailscale`) requests a tailnet join for newly created
-managed Linux leases. `tailscale.network` is an alias that sets the top-level
-`network` mode used for target resolution on SSH-backed commands. Hostname templates
+managed leases whose target advertises Tailscale. `tailscale.network` is an alias
+that sets the top-level `network` mode used for target resolution on SSH-backed commands. Hostname templates
 support `{id}`, `{slug}`, and `{provider}`; the rendered value is sanitized to a DNS
 label. When `enabled` is set, `tags` must contain at least one valid `tag:` value and
 `hostnameTemplate` must be non-empty.
@@ -125,6 +129,8 @@ node can reach the public internet. If that check fails, the run stops and repor
 exit-node egress failure (`tailscale exit node … joined but remote internet egress
 failed`), which usually means the exit node is not approved, the policy does not grant
 `autogroup:internet` to the lease tag, or the exit-node machine is not forwarding.
+Hyper-V defers an exit node with LAN access disabled until the ready tailnet SSH
+endpoint has been selected, so first-boot DHCP readiness remains reachable.
 
 ## Brokered mode
 

@@ -610,11 +610,33 @@ func validateCacheVolume(volume CacheVolumeConfig) error {
 	if strings.TrimSpace(volume.Path) == "" {
 		return Exit(2, "cache volume path is required")
 	}
-	if !strings.HasPrefix(volume.Path, "/") {
+	if !strings.HasPrefix(volume.Path, "/") && !isWindowsDriveAbsolutePath(volume.Path) {
 		return Exit(2, "cache volume path %q must be absolute", volume.Path)
 	}
 	if volume.SizeGB < 0 {
 		return Exit(2, "cache volume sizeGB must be non-negative")
+	}
+	return nil
+}
+
+func isWindowsDriveAbsolutePath(path string) bool {
+	return len(path) >= 3 && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
+		path[1] == ':' && (path[2] == '\\' || path[2] == '/')
+}
+
+func validateCacheVolumeForTarget(volume CacheVolumeConfig, targetOS string) error {
+	if err := validateCacheVolume(volume); err != nil {
+		return err
+	}
+	switch targetOS {
+	case targetWindows:
+		if !isWindowsDriveAbsolutePath(volume.Path) {
+			return Exit(2, "cache volume path %q must be a Windows drive-rooted absolute path for target=windows", volume.Path)
+		}
+	case targetLinux, targetMacOS:
+		if !strings.HasPrefix(volume.Path, "/") {
+			return Exit(2, "cache volume path %q must be a POSIX absolute path for target=%s", volume.Path, targetOS)
+		}
 	}
 	return nil
 }
@@ -628,7 +650,12 @@ func ValidateCacheVolumesForProvider(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	if provider.Spec().Features.Has(FeatureCacheVolume) {
+	if provider.Spec().FeaturesForTarget(cfg.TargetOS, cfg.WindowsMode).Has(FeatureCacheVolume) {
+		for _, volume := range cfg.Cache.Volumes {
+			if err := validateCacheVolumeForTarget(volume, cfg.TargetOS); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	for _, volume := range cfg.Cache.Volumes {

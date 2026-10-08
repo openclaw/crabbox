@@ -21,9 +21,11 @@ A cache volume has:
 - `required`: whether Crabbox must fail instead of silently ignoring the volume.
 
 Put provider cache paths outside the synced source tree. Prefer
-`/var/cache/crabbox/<kind>` for package-manager stores and other dependency
-caches. Do not store secrets, checkout state, build artifacts that are the
-result under test, proof bundles, screenshots, or logs in cache volumes.
+`/var/cache/crabbox/<kind>` on Linux and a dedicated directory such as
+`C:\crabbox-cache\<kind>` on Windows. Paths must be POSIX absolute paths for
+Linux/macOS targets or drive-rooted absolute paths for Windows targets. Do not
+store secrets, checkout state, workspace checkpoint state, build artifacts that
+are the result under test, proof bundles, screenshots, or logs in cache volumes.
 
 Choose a key that changes whenever the cached bytes become incompatible. Include
 the repository, target OS, architecture, runtime, package manager, lockfile hash,
@@ -41,6 +43,18 @@ cache:
       path: /var/cache/crabbox/pnpm
       sizeGB: 80
       required: false
+```
+
+Windows targets use the same schema with a drive-rooted path:
+
+```yaml
+cache:
+  volumes:
+    - name: nuget-packages
+      key: my-app-windows-amd64-net10-nuget-lockhash
+      path: 'C:\crabbox-cache\nuget'
+      sizeGB: 80
+      required: true
 ```
 
 An explicit empty list clears inherited volumes from lower-precedence config:
@@ -88,6 +102,22 @@ Docker volume name is derived from the cache key. Apple Container implements it
 with host cache directories under the local user cache directory mounted with
 Apple's `--volume` flag.
 
+Hyper-V implements cache volumes for Linux and Windows normal targets with
+provider-owned dynamic VHDXs. A cache key is single-writer while attached:
+
+- a required volume that is attached to another live VM fails acquisition;
+- an optional busy volume prints a warning and is skipped;
+- a short host lock serializes create, format, and attach operations, while live
+  Hyper-V disk attachments are the authoritative lease-lifetime ownership check.
+
+Hyper-V initializes a new disk once as ext4 on Linux or NTFS on Windows. Linux
+mounts by filesystem UUID after cloud-init/SSH readiness. Windows identifies the
+disk by its persistent disk ID and mounts it at the requested directory without
+assigning a drive letter. The requested directory must be on a drive that already
+exists in the guest; `C:\crabbox-cache\<kind>` is the portable default for
+single-disk templates. Reuse is idempotent, and provider metadata rejects a key
+previously initialized for a different target/filesystem.
+
 Providers that do not advertise `cache-volume` ignore non-required configured
 volumes. Required volumes fail early when the selected provider cannot honor
 them.
@@ -106,3 +136,9 @@ Use cache volumes for rebuildable, mutable speed state such as package-manager
 stores. Use provider images for stable machine setup, tools, runtimes, and OS
 packages. Use workspace checkpoints for reusable source/workspace state that
 should be restored or forked intentionally.
+
+Hyper-V removes cache mount points and detaches cache disks before exporting a
+Windows workspace checkpoint, then reattaches them even when checkpoint creation
+fails. Exported checkpoints therefore exclude cache contents. A fork attaches
+only the new lease's requested cache volumes; it does not inherit the source
+lease's cache disks.

@@ -378,6 +378,63 @@ func TestCheckpointRestoreDryRunDoesNotResolveLease(t *testing.T) {
 	assertCheckpointLastUsedAt(t, store, record.ID, lastUsedAt)
 }
 
+func TestCheckpointNativeRestoreDryRunResolvesSlug(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	const leaseID = "cbx_checkpoint_restore"
+	const slug = "checkpoint-source"
+	if err := ClaimLeaseForRepoProvider(leaseID, slug, "hyperv", t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := checkpointRecord{ID: "chk_restore_slug", Kind: checkpointKindHyperV, TargetOS: targetWindows}
+	record.Native.Provider = "hyperv"
+	record.Native.ImageID = "snapshot"
+	record.Native.Direct = true
+	if _, _, err := store.Reserve(record); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	err = (App{Stdout: &stdout, Stderr: io.Discard}).checkpointRestore(context.Background(), []string{record.ID, "--id", slug, "--dry-run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "lease="+leaseID+" ") {
+		t.Fatalf("restore output = %q", stdout.String())
+	}
+}
+
+func TestCheckpointRestoreRejectsPendingNativeRecord(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := checkpointRecord{
+		ID:        "chk_restore_pending_native",
+		Kind:      checkpointKindHyperV,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	pending.Native.Provider = "hyperv"
+	record, _, err := store.Reserve(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = (App{Stdout: io.Discard, Stderr: io.Discard}).checkpointRestore(
+		context.Background(),
+		[]string{record.ID, "--id", "cbx_missing", "--dry-run"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "capture is unresolved; reconcile it before fork or restore") {
+		t.Fatalf("restore error=%v", err)
+	}
+}
+
 func TestCheckpointRestoreDryRunUsesStoredLeaseTarget(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
@@ -1992,14 +2049,27 @@ func TestCheckpointDockerCommitUsesImageStrategy(t *testing.T) {
 	}
 }
 
+func TestCheckpointHyperVKindUsesNativeDiskSnapshotStrategy(t *testing.T) {
+	if got := checkpointStrategyForKind(checkpointKindHyperV); got != checkpointStrategyDiskSnapshot {
+		t.Fatalf("strategy=%q, want %q", got, checkpointStrategyDiskSnapshot)
+	}
+	if !isNativeCheckpointKind(checkpointKindHyperV) {
+		t.Fatal("Hyper-V checkpoint kind is not native")
+	}
+	if got := checkpointProviderForKind(checkpointKindHyperV); got != "hyperv" {
+		t.Fatalf("provider=%q, want hyperv", got)
+	}
+}
+
 func TestNativeCheckpointForkRecordCarriesNameAndMetadata(t *testing.T) {
 	metadata := map[string]string{"runtime": "docker"}
 	record := checkpointRecord{Kind: checkpointKindDockerCommit, Desktop: true}
 	record.Native.ImageID = "sha256:123"
 	record.Native.Name = "crabbox-checkpoint-demo-123"
 	record.Native.Metadata = metadata
+	record.artifactDir = `C:\checkpoints\chk_demo`
 	got := nativeCheckpointForkRecord(record)
-	if got.Name != "crabbox-checkpoint-demo-123" || got.Metadata["runtime"] != "docker" || !got.Desktop {
+	if got.Name != "crabbox-checkpoint-demo-123" || got.ArtifactDir != `C:\checkpoints\chk_demo` || got.Metadata["runtime"] != "docker" || !got.Desktop {
 		t.Fatalf("fork record=%#v", got)
 	}
 }

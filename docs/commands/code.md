@@ -1,8 +1,9 @@
 # code
 
-`crabbox code` bridges a Linux lease's `code-server` workspace into the
-authenticated coordinator [portal](../features/portal.md), so you can edit the
-synced checkout in a browser VS Code without exposing the runner directly.
+`crabbox code` opens a Linux lease's `code-server` workspace in browser VS Code
+without exposing the runner directly. Coordinator-backed providers use the
+authenticated [portal](../features/portal.md). Coordinator-free managed SSH
+providers use a local loopback URL forwarded through SSH.
 
 ```sh
 crabbox warmup --code --slug swift-crab
@@ -13,35 +14,43 @@ crabbox code --id swift-crab --open
 
 ## Prerequisites
 
-- A configured coordinator login. The command refuses to run without one:
-  `crabbox login --url broker.example.com` first.
-- A valid coordinator `CRABBOX_CODE_ORIGIN_TEMPLATE` backed by wildcard TLS and
-  WebSocket ingress. Browser Code fails closed when the template is absent or
-  invalid.
 - A lease created with the `code` capability (`crabbox warmup --code`). The
   Linux bootstrap installs `code-server` only for leases that request it, and
   reusing a lease checks for the matching `code=true` label.
-- A coordinator-backed Linux lease on a provider that advertises the `code`
-  capability (`hetzner`, `aws`, `azure`). Static SSH hosts, Blacksmith Testbox,
-  Windows, and macOS leases are rejected.
+- A managed Linux SSH lease on a provider that advertises `code`. Static SSH
+  hosts remain host-managed and are rejected. Windows, macOS, and delegated-run
+  providers are also rejected.
+- Coordinator-backed providers require a configured login
+  (`crabbox login --url broker.example.com`) and a valid
+  `CRABBOX_CODE_ORIGIN_TEMPLATE` backed by wildcard TLS and WebSocket ingress.
+  Coordinator-free managed providers, including Hyper-V Linux, do not require
+  a coordinator login.
 
 ## How it works
 
 `crabbox code` resolves the lease, ensures `code-server` is running on the
-runner's loopback interface (`127.0.0.1:8080`), opens an SSH tunnel to it, mints
-a short-lived bridge ticket from the coordinator, and registers a local bridge
-process. Keep the process running while you use the editor.
+runner's loopback interface (`127.0.0.1:8080`), and opens an SSH tunnel to it.
+Keep the process running while you use the editor.
 
 `code` does not sync local files. Run `run --sync-only` first, or open an
 already synced or Actions-hydrated workspace.
 
-The data path is:
+For coordinator-backed providers, the data path is:
 
 ```text
 browser
   <-> coordinator /portal/leases/<lease-id>/code/
   <-> local crabbox code process (bridge)
   <-> SSH tunnel
+  <-> runner 127.0.0.1:8080 (code-server)
+```
+
+For coordinator-free managed providers, the CLI prints a local URL such as
+`http://127.0.0.1:43123` and `--open` opens that URL directly:
+
+```text
+browser 127.0.0.1:<local-port>
+  <-> local crabbox code SSH tunnel
   <-> runner 127.0.0.1:8080 (code-server)
 ```
 
@@ -56,6 +65,12 @@ need a temporary legacy rollout window can set
 `CRABBOX_ALLOW_QUERY_BRIDGE_TICKETS=1`; remove that setting after affected
 clients upgrade. Because the trusted boundary is the portal plus the bridge
 ticket, `code-server` runs with auth disabled on the runner side.
+
+Direct mode also runs `code-server` with `--auth none`, but both ends are
+loopback-only: code-server binds only to guest `127.0.0.1:8080`, the SSH
+forward binds only to local `127.0.0.1:<port>`, and no public listener is
+created. The unauthenticated HTTP service is reachable only through the local
+SSH session.
 
 The portal URL is lease-scoped:
 
@@ -82,10 +97,11 @@ leases open the hydration workspace instead of the default
 
 ### Resilience
 
-Managed `code-server` starts with `Default Dark Modern` as its theme. The bridge
-chunks large HTTP responses and websocket frames so VS Code assets and
-extension-host traffic stay under coordinator websocket frame limits, and it
-reconnects automatically on transient bridge errors.
+Managed `code-server` starts with `Default Dark Modern` as its theme.
+Coordinator mode chunks large HTTP responses and websocket frames so VS Code
+assets and extension-host traffic stay under coordinator websocket frame
+limits, and it reconnects automatically on transient bridge errors. Direct mode
+keeps the SSH tunnel alive until the command is canceled.
 
 Ctrl+C interrupts both the code-server readiness wait and the reconnect delay;
 it does not wait for the next retry. The local bridge and SSH tunnel close,
@@ -95,15 +111,15 @@ while the lease remains available for reuse.
 
 ```text
 --id <lease-id-or-slug>     Lease to bridge (also accepted as a positional arg).
---provider hetzner|aws|azure  Provider for the lease (default from config).
+--provider <provider>        Managed SSH provider for the lease (default from config).
 --target linux              Lease target OS (code requires linux).
 --network auto|tailscale|public  Network mode used to reach the runner.
---local-port <port>         Local code-server tunnel port (auto-selected 8081-8180 if unset).
---open                      Open the portal Code page in a browser.
+--local-port <port>         Local loopback tunnel port (automatically selected if unset).
+--open                      Open the portal or direct local URL in a browser.
 --reclaim                   Claim this lease for the current repo checkout.
 ```
 
-Set `CRABBOX_CODE_DEBUG=1` to print bridge trace output to stderr.
+Set `CRABBOX_CODE_DEBUG=1` to print coordinator bridge trace output to stderr.
 
 ## Troubleshooting
 
@@ -119,6 +135,13 @@ crabbox warmup --code
 ```sh
 crabbox login --url broker.example.com
 ```
+
+This error applies only to coordinator-backed providers. A direct managed
+provider with coordinator policy `never` uses the local SSH tunnel instead.
+
+**`code requires a managed SSH lease`** — the provider is host-managed or does
+not advertise managed cleanup. Static SSH intentionally does not provision
+code-server; use a managed Linux provider and create the lease with `--code`.
 
 **The portal shows a bridge command** — the browser reached the coordinator but
 no local bridge is registered. Run the command the portal shows (or

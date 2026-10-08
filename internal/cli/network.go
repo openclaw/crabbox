@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -25,6 +28,9 @@ type TailscaleConfig struct {
 	AuthKey                string
 	ExitNode               string
 	ExitNodeAllowLANAccess bool
+	DeferExitNode          bool
+	ScrubCloudInitSecrets  bool
+	ResetIdentityBeforeUp  bool
 }
 
 type TailscaleMetadata struct {
@@ -39,6 +45,48 @@ type TailscaleMetadata struct {
 	DeviceID               string   `json:"deviceID,omitempty"`
 	ExitNode               string   `json:"exitNode,omitempty"`
 	ExitNodeAllowLANAccess bool     `json:"exitNodeAllowLanAccess,omitempty"`
+}
+
+type TailscaleMetadataPaths struct {
+	Directory              string
+	IPv4                   string
+	Hostname               string
+	FQDN                   string
+	ExitNode               string
+	ExitNodeAllowLANAccess string
+	Version                string
+	DeviceID               string
+}
+
+func TailscaleGuestMetadataPaths(targetOS, windowsMode string) TailscaleMetadataPaths {
+	if targetOS == targetWindows && windowsMode != WindowsModeWSL2 {
+		const dir = `C:\ProgramData\crabbox\tailscale`
+		return TailscaleMetadataPaths{
+			Directory:              dir,
+			IPv4:                   dir + `\ipv4`,
+			Hostname:               dir + `\hostname`,
+			FQDN:                   dir + `\fqdn`,
+			ExitNode:               dir + `\exit-node`,
+			ExitNodeAllowLANAccess: dir + `\exit-node-allow-lan-access`,
+			Version:                dir + `\version`,
+			DeviceID:               dir + `\device-id`,
+		}
+	}
+	const dir = "/var/lib/crabbox"
+	return TailscaleMetadataPaths{
+		Directory:              dir,
+		IPv4:                   dir + "/tailscale-ipv4",
+		Hostname:               dir + "/tailscale-hostname",
+		FQDN:                   dir + "/tailscale-fqdn",
+		ExitNode:               dir + "/tailscale-exit-node",
+		ExitNodeAllowLANAccess: dir + "/tailscale-exit-node-allow-lan-access",
+		Version:                dir + "/tailscale-version",
+		DeviceID:               dir + "/tailscale-device-id",
+	}
+}
+
+func escapePowerShellSingleQuoted(value string) string {
+	return strings.ReplaceAll(value, "'", "''")
 }
 
 type networkFlagValues struct {
@@ -164,7 +212,14 @@ func validateNetworkConfig(cfg Config) error {
 			return Exit(2, "tailscale.exitNodeAllowLanAccess requires tailscale.exitNode")
 		}
 		if cfg.TargetOS != targetLinux {
-			return Exit(2, "--tailscale managed provisioning currently supports target=linux only")
+			provider, err := ProviderFor(cfg.Provider)
+			if err != nil {
+				return err
+			}
+			features := provider.Spec().TargetFeatures[providerTargetKey(cfg.TargetOS, cfg.WindowsMode)]
+			if !features.Has(FeatureTailscale) {
+				return Exit(2, "--tailscale managed provisioning currently supports target=linux only")
+			}
 		}
 		if isBlacksmithProvider(cfg.Provider) {
 			return Exit(2, "--tailscale is not supported for provider=%s; Blacksmith owns machine connectivity", cfg.Provider)
@@ -287,6 +342,10 @@ func preferTailscaleBootstrap(cfg Config, server Server) bool {
 }
 
 func tailscaleTargetHost(meta TailscaleMetadata) string {
+	state := strings.TrimSpace(meta.State)
+	if !meta.Enabled || (state != "" && !strings.EqualFold(state, "ready")) {
+		return ""
+	}
 	return firstNonEmpty(meta.FQDN, meta.IPv4, meta.Hostname)
 }
 
@@ -349,6 +408,10 @@ func applyTailscaleMetadataToServer(server *Server, meta TailscaleMetadata) {
 	}
 }
 
+func ApplyTailscaleMetadataToServer(server *Server, meta TailscaleMetadata) {
+	applyTailscaleMetadataToServer(server, meta)
+}
+
 func (a App) refreshTailscaleMetadata(ctx context.Context, cfg Config, backend Backend, coord *CoordinatorClient, useCoordinator bool, server *Server, target SSHTarget, leaseID string) {
 	if server == nil || !serverTailscaleMetadata(*server).Enabled {
 		return
@@ -403,22 +466,50 @@ func coordinatorTailscaleResponseServer(cfg Config, previous Server, lease Coord
 }
 
 func readRemoteTailscaleMetadata(ctx context.Context, target SSHTarget) (TailscaleMetadata, error) {
-	out, err := runSSHOutput(ctx, target, `if [ -f /var/lib/crabbox/tailscale-ipv4 ]; then cat /var/lib/crabbox/tailscale-ipv4; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-hostname ]; then cat /var/lib/crabbox/tailscale-hostname; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-fqdn ]; then cat /var/lib/crabbox/tailscale-fqdn; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-exit-node ]; then cat /var/lib/crabbox/tailscale-exit-node; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-exit-node-allow-lan-access ]; then cat /var/lib/crabbox/tailscale-exit-node-allow-lan-access; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-version ]; then cat /var/lib/crabbox/tailscale-version; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-device-id ]; then cat /var/lib/crabbox/tailscale-device-id; fi`)
+	out, err := runSSHOutput(ctx, target, tailscaleMetadataReadScript(target))
 	if err != nil {
 		return TailscaleMetadata{}, err
 	}
+	return parseTailscaleMetadataOutput(out)
+}
+
+func tailscaleMetadataReadScript(target SSHTarget) string {
+	paths := TailscaleGuestMetadataPaths(target.TargetOS, target.WindowsMode)
+	if isWindowsNativeTarget(target) {
+		return fmt.Sprintf(`$paths = @('%s','%s','%s','%s','%s','%s','%s')
+foreach ($path in $paths) {
+  if (Test-Path -LiteralPath $path) {
+    [Console]::Out.Write(([System.IO.File]::ReadAllText($path)).Trim())
+  }
+  [Console]::Out.Write([Environment]::NewLine)
+}`, escapePowerShellSingleQuoted(paths.IPv4), escapePowerShellSingleQuoted(paths.Hostname),
+			escapePowerShellSingleQuoted(paths.FQDN), escapePowerShellSingleQuoted(paths.ExitNode),
+			escapePowerShellSingleQuoted(paths.ExitNodeAllowLANAccess), escapePowerShellSingleQuoted(paths.Version),
+			escapePowerShellSingleQuoted(paths.DeviceID))
+	}
+	return fmt.Sprintf(`if [ -f %s ]; then head -n1 %s | tr -d '\r\n'; fi
+printf '\n'
+if [ -f %s ]; then head -n1 %s | tr -d '\r\n'; fi
+printf '\n'
+if [ -f %s ]; then head -n1 %s | tr -d '\r\n'; fi
+printf '\n'
+if [ -f %s ]; then head -n1 %s | tr -d '\r\n'; fi
+printf '\n'
+if [ -f %s ]; then head -n1 %s | tr -d '\r\n'; fi
+printf '\n'
+if [ -f %s ]; then head -n1 %s | tr -d '\r\n'; fi
+printf '\n'
+if [ -f %s ]; then head -n1 %s | tr -d '\r\n'; fi`,
+		shellQuote(paths.IPv4), shellQuote(paths.IPv4),
+		shellQuote(paths.Hostname), shellQuote(paths.Hostname),
+		shellQuote(paths.FQDN), shellQuote(paths.FQDN),
+		shellQuote(paths.ExitNode), shellQuote(paths.ExitNode),
+		shellQuote(paths.ExitNodeAllowLANAccess), shellQuote(paths.ExitNodeAllowLANAccess),
+		shellQuote(paths.Version), shellQuote(paths.Version),
+		shellQuote(paths.DeviceID), shellQuote(paths.DeviceID))
+}
+
+func parseTailscaleMetadataOutput(out string) (TailscaleMetadata, error) {
 	lines := strings.Split(out, "\n")
 	meta := TailscaleMetadata{Enabled: true, State: "ready"}
 	if len(lines) > 0 {
@@ -445,6 +536,9 @@ if [ -f /var/lib/crabbox/tailscale-device-id ]; then cat /var/lib/crabbox/tailsc
 	if meta.IPv4 == "" {
 		return TailscaleMetadata{}, fmt.Errorf("remote tailscale metadata missing ipv4")
 	}
+	if parsed := net.ParseIP(meta.IPv4); parsed == nil || parsed.To4() == nil {
+		return TailscaleMetadata{}, fmt.Errorf("remote tailscale metadata has invalid ipv4 %q", meta.IPv4)
+	}
 	return meta, nil
 }
 
@@ -454,7 +548,7 @@ func (a App) logoutRemoteTailscaleBestEffort(ctx context.Context, lease LeaseTar
 	}
 	logoutCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	if out, err := runSSHCombinedOutput(logoutCtx, lease.SSH, `if command -v tailscale >/dev/null 2>&1; then tailscale logout >/dev/null 2>&1 || exit $?; fi`); err != nil {
+	if out, err := LogoutTailscaleTarget(logoutCtx, lease.SSH); err != nil {
 		detail := strings.TrimSpace(out)
 		if detail == "" {
 			detail = err.Error()
@@ -465,12 +559,134 @@ func (a App) logoutRemoteTailscaleBestEffort(ctx context.Context, lease LeaseTar
 	fmt.Fprintf(a.Stderr, "tailscale logout attempted for %s\n", lease.LeaseID)
 }
 
+func LogoutTailscaleTarget(ctx context.Context, target SSHTarget) (string, error) {
+	return runSSHCombinedOutput(ctx, target, tailscaleLogoutScript(target))
+}
+
+func BootstrapTailscaleTarget(ctx context.Context, cfg Config, target SSHTarget) (string, error) {
+	if !cfg.Tailscale.Enabled {
+		return "", nil
+	}
+	remote, input, err := tailscaleSSHBootstrapPayload(cfg, target)
+	if err != nil {
+		return "", err
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runSSHInput(ctx, target, remote, strings.NewReader(input), &stdout, &stderr); err != nil {
+		return strings.TrimSpace(stdout.String()), fmt.Errorf("bootstrap Tailscale over SSH: %w", err)
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+func tailscaleSSHBootstrapPayload(cfg Config, target SSHTarget) (string, string, error) {
+	if !cfg.Tailscale.Enabled {
+		return "", "", nil
+	}
+	targetOS := strings.TrimSpace(target.TargetOS)
+	if targetOS == "" {
+		targetOS = strings.TrimSpace(cfg.TargetOS)
+	}
+	if targetOS != targetLinux {
+		return "", "", fmt.Errorf("direct Tailscale SSH bootstrap requires target=linux")
+	}
+	authKey := strings.TrimSpace(cfg.Tailscale.AuthKey)
+	if authKey == "" {
+		return "", "", fmt.Errorf("Tailscale auth key is required")
+	}
+	if strings.ContainsAny(authKey, "\r\n") {
+		return "", "", fmt.Errorf("Tailscale auth key must not contain newlines")
+	}
+
+	const authKeyMarker = "crabbox-tailscale-auth-key-from-stdin"
+	scriptCfg := cfg
+	scriptCfg.Tailscale.AuthKey = authKeyMarker
+	scriptCfg.Tailscale.ScrubCloudInitSecrets = false
+	bootstrap := cloudInitTailscaleBootstrap(scriptCfg)
+	assignment := "TS_AUTHKEY=" + shellQuote(authKeyMarker)
+	if !strings.Contains(bootstrap, assignment) {
+		return "", "", fmt.Errorf("build direct Tailscale bootstrap payload")
+	}
+	bootstrap = strings.Replace(bootstrap, assignment, `: "${TS_AUTHKEY:?}"`, 1)
+	if strings.Contains(bootstrap, authKeyMarker) {
+		return "", "", fmt.Errorf("direct Tailscale bootstrap payload retained its auth marker")
+	}
+	script := `set -euo pipefail
+retry() {
+  n=1
+  until "$@"; do
+    if [ "$n" -ge 8 ]; then
+      return 1
+    fi
+    sleep $((n * 5))
+    n=$((n + 1))
+  done
+}
+` + bootstrap + "\n"
+	remote := `sudo -n sh -c 'IFS= read -r TS_AUTHKEY; export TS_AUTHKEY; exec bash -s'`
+	return remote, authKey + "\n" + script, nil
+}
+
+func tailscaleLogoutScript(target SSHTarget) string {
+	return TailscaleLogoutScript(target.TargetOS, target.WindowsMode)
+}
+
+func TailscaleLogoutScript(targetOS, windowsMode string) string {
+	if targetOS == targetWindows && windowsMode != WindowsModeWSL2 {
+		return `$tailscalePath = $null
+$tailscale = Get-Command tailscale.exe -ErrorAction SilentlyContinue
+if ($tailscale) { $tailscalePath = $tailscale.Source }
+if (-not $tailscalePath) {
+  $candidate = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+  if (Test-Path -LiteralPath $candidate) { $tailscalePath = $candidate }
+}
+if ($tailscalePath) {
+  & $tailscalePath logout *> $null
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}`
+	}
+	return `if command -v tailscale >/dev/null 2>&1; then tailscale logout >/dev/null 2>&1 || exit $?; fi`
+}
+
+func TailscaleIdentityResetScript(targetOS, windowsMode string) string {
+	paths := TailscaleGuestMetadataPaths(targetOS, windowsMode)
+	if targetOS == targetWindows && windowsMode != WindowsModeWSL2 {
+		return fmt.Sprintf(`$tailscaleService=Get-Service -Name Tailscale -ErrorAction SilentlyContinue; `+
+			`if ($tailscaleService -and $tailscaleService.Status -ne 'Stopped') { Stop-Service -Name Tailscale -Force -ErrorAction Stop; $tailscaleService.WaitForStatus('Stopped',[TimeSpan]::FromSeconds(30)) }; `+
+			`foreach ($statePath in @('C:\ProgramData\Tailscale\tailscaled.state','C:\ProgramData\Tailscale\server-state.conf','C:\Windows\System32\config\systemprofile\AppData\Local\Tailscale\tailscaled.state')) { `+
+			`if (Test-Path -LiteralPath $statePath) { Remove-Item -LiteralPath $statePath -Force -ErrorAction Stop }; `+
+			`if (Test-Path -LiteralPath $statePath) { throw "Tailscale identity state remains at $statePath" } }; `+
+			`$metadataPath='%s'; if (Test-Path -LiteralPath $metadataPath) { Remove-Item -LiteralPath $metadataPath -Recurse -Force -ErrorAction Stop }; `+
+			`if (Test-Path -LiteralPath $metadataPath) { throw "Tailscale metadata remains at $metadataPath" }; `,
+			escapePowerShellSingleQuoted(paths.Directory))
+	}
+	return fmt.Sprintf(`if command -v systemctl >/dev/null 2>&1 && systemctl cat tailscaled.service >/dev/null 2>&1; then
+  systemctl stop tailscaled
+elif command -v service >/dev/null 2>&1 && service tailscaled status >/dev/null 2>&1; then
+  service tailscaled stop
+fi
+rm -f /var/lib/tailscale/tailscaled.state /var/lib/tailscale/server-state.conf
+test ! -e /var/lib/tailscale/tailscaled.state
+test ! -e /var/lib/tailscale/server-state.conf
+rm -f %s/tailscale-*
+if find %s -maxdepth 1 -type f -name 'tailscale-*' -print -quit | grep -q .; then
+  echo "Tailscale metadata remains after identity reset" >&2
+  exit 1
+fi`,
+		shellQuote(paths.Directory),
+		shellQuote(paths.Directory))
+}
+
 func validateTailscaleExitNodeEgress(ctx context.Context, server Server, target SSHTarget) error {
 	meta := serverTailscaleMetadata(server)
 	if strings.TrimSpace(meta.ExitNode) == "" {
 		return nil
 	}
-	command := tailscaleExitNodeEgressCheckScript()
+	if labelBool(server.Labels["tailscale_exit_node_deferred"]) {
+		if err := configureTailscaleExitNode(ctx, target, meta); err != nil {
+			return err
+		}
+	}
+	command := tailscaleExitNodeEgressCheckScriptForTarget(target)
 	if out, err := runSSHCombinedOutput(ctx, target, command); err != nil {
 		detail := strings.TrimSpace(out)
 		if detail == "" {
@@ -479,6 +695,46 @@ func validateTailscaleExitNodeEgress(ctx context.Context, server Server, target 
 		return Exit(5, "tailscale exit node %s joined but remote internet egress failed; verify the exit node is approved and forwarding internet traffic: %s", meta.ExitNode, detail)
 	}
 	return nil
+}
+
+func configureTailscaleExitNode(ctx context.Context, target SSHTarget, meta TailscaleMetadata) error {
+	if !meta.ExitNodeAllowLANAccess && target.NetworkKind != NetworkTailscale {
+		return Exit(5, "tailscale exit node %s requires the tailnet SSH endpoint before LAN access can be disabled", meta.ExitNode)
+	}
+	command := tailscaleExitNodeConfigureScript(target, meta)
+	if out, err := runSSHCombinedOutput(ctx, target, command); err != nil {
+		detail := strings.TrimSpace(out)
+		if detail == "" {
+			detail = err.Error()
+		}
+		return Exit(5, "configure tailscale exit node %s: %s", meta.ExitNode, detail)
+	}
+	return nil
+}
+
+func tailscaleExitNodeConfigureScript(target SSHTarget, meta TailscaleMetadata) string {
+	allowLAN := strings.ToLower(strconv.FormatBool(meta.ExitNodeAllowLANAccess))
+	if isWindowsNativeTarget(target) {
+		return fmt.Sprintf(`$tailscalePath = $null
+$tailscale = Get-Command tailscale.exe -ErrorAction SilentlyContinue
+if ($tailscale) { $tailscalePath = $tailscale.Source }
+if (-not $tailscalePath) {
+  $candidate = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+  if (Test-Path -LiteralPath $candidate) { $tailscalePath = $candidate }
+}
+if (-not $tailscalePath) { throw 'tailscale is not installed for exit-node configuration' }
+& $tailscalePath set '%s' '%s'
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`,
+			escapePowerShellSingleQuoted("--exit-node="+meta.ExitNode),
+			escapePowerShellSingleQuoted("--exit-node-allow-lan-access="+allowLAN))
+	}
+	return fmt.Sprintf(`if command -v sudo >/dev/null 2>&1; then
+  sudo -n tailscale set --exit-node=%s --exit-node-allow-lan-access=%s
+else
+  tailscale set --exit-node=%s --exit-node-allow-lan-access=%s
+fi`,
+		shellQuote(meta.ExitNode), shellQuote(allowLAN),
+		shellQuote(meta.ExitNode), shellQuote(allowLAN))
 }
 
 func tailscaleExitNodeEgressCheckScript() string {
@@ -511,4 +767,25 @@ else
 fi
 test -s /tmp/crabbox-exit-node-ip
 `
+}
+
+func tailscaleExitNodeEgressCheckScriptForTarget(target SSHTarget) string {
+	if !isWindowsNativeTarget(target) {
+		return tailscaleExitNodeEgressCheckScript()
+	}
+	return `$tailscalePath = $null
+$tailscale = Get-Command tailscale.exe -ErrorAction SilentlyContinue
+if ($tailscale) { $tailscalePath = $tailscale.Source }
+if (-not $tailscalePath) {
+  $candidate = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+  if (Test-Path -LiteralPath $candidate) { $tailscalePath = $candidate }
+}
+if (-not $tailscalePath) { throw 'tailscale is not installed for exit-node egress check' }
+$prefs = & $tailscalePath debug prefs 2>&1
+if ($LASTEXITCODE -ne 0) { throw 'tailscale prefs unavailable for exit-node egress check' }
+$prefsText = [string]::Join([Environment]::NewLine, [string[]]$prefs)
+if ($prefsText -notmatch '"ExitNodeID"\s*:') { throw 'tailscale prefs did not include ExitNodeID' }
+if ($prefsText -match '"ExitNodeID"\s*:\s*""') { throw 'exit node is not selected in tailscale prefs' }
+$response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 12 -Uri 'https://ifconfig.me/ip'
+if ([string]::IsNullOrWhiteSpace($response.Content)) { throw 'exit-node egress response was empty' }`
 }

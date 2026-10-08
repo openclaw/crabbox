@@ -204,16 +204,15 @@ Native Windows targets use PowerShell and tar-based manifest sync. Prefer plain
 argv for one executable such as `dotnet test`; use `--shell` for multi-statement
 PowerShell and `--script <file.ps1>` for longer scripts.
 
-### Hyper-V Windows leases
+### Hyper-V leases
 
-`hyperv` needs a Generation 2 VHDX, DHCP, and a known local administrator
-password in trusted config or `CRABBOX_HYPERV_GUEST_PASSWORD`. It installs
-pinned, verified OpenSSH and MinGit packages when missing, using PowerShell
-Direct. See `docs/providers/hyperv.md` for template and lifecycle details.
+`hyperv` is a direct Windows-hosted `ssh-lease`/`local-vm` provider for Linux and native Windows Generation 2 VHDXs; both targets support SSH/sync, desktop/browser, pause/resume, Tailscale, cache volumes, production checkpoints, fork/restore/snapshot, while `code` is Linux-only and Windows `--browser` only probes a preinstalled Edge/Chrome. See `docs/providers/hyperv.md`.
 
-For provider testing, prefer an elevated headless runner; early PowerShell
-Direct failures can show credential UI. Keep passwords out of arguments and
-logs, and verify the lease becomes ready, runs over SSH, and releases.
+Windows needs DHCP plus a known local administrator password from trusted user config or `CRABBOX_HYPERV_GUEST_PASSWORD` (never argv/repo/logs); Windows-only PowerShell Direct bootstraps OpenSSH/MinGit and optional capabilities. Linux needs a generalized Debian/Ubuntu cloud VHDX, NoCloud cloud-init, DHCP/internet, `hv_kvp_daemon` for IP discovery, and `hv_vss_daemon` plus VSS integration for checkpoints; it uses key-only SSH and never PowerShell Direct. `--hyperv-secure-boot auto` chooses the Windows or Microsoft UEFI CA template; override with `windows|linux|off`. Run with Hyper-V VM/storage permissions as the invoking interactive user, never as `LocalSystem`; local `Hyper-V Administrators` membership suffices without elevation. Host session 0 is only an unattended-host convenience against PowerShell Direct credential UI, is unrelated to the guest desktop session the proof needs, and diverges profile, `PATH`, and SSH known-hosts. Doctor is non-mutating inventory/feature proof only: it does not boot the image or validate credentials, KVP/VSS, or browsers. Pause uses `Save-VM`; checkpoints are production-only; restore requires the original exact claim. Linux fork performs offline NoCloud identity rotation and Tailscale reset before network rejoin. Cache VHDXs are target-specific, persistent, single-writer, detached around checkpoints, excluded from exports, and preserved by release/cleanup. Tailscale stays on DHCP until ready, logs out on release, and resets on fork. Windows VNC and Linux code-server are loopback-only through SSH tunnels.
+
+Windows proof: `crabbox doctor --provider hyperv --target windows --hyperv-image 'C:\Images\windows-template.vhdx'`, then `crabbox warmup --provider hyperv --target windows --hyperv-image 'C:\Images\windows-template.vhdx' --slug hyperv-win-smoke --timing-json`, `crabbox status --provider hyperv --id hyperv-win-smoke --wait`, a no-sync command, and `crabbox stop --provider hyperv hyperv-win-smoke`.
+Linux proof: `crabbox warmup --provider hyperv --target linux --hyperv-image 'C:\Images\ubuntu-cloud.vhdx' --slug hyperv-linux-smoke --code --cache-volume build-cache:/var/cache/build --timing-json`, then status, no-sync `uname -a`, optional `crabbox code`, and stop.
+Exercise `pause`/`resume`, `checkpoint create --mode native --wait`, `checkpoint fork`, source-only `checkpoint restore`, and `cleanup --dry-run`. Expected blockers: host permissions, wrong image/generation, bad Windows credentials, DHCP/internet, KVP/VSS, missing Windows browser, or a busy cache VHDX. Destructive actions require an exact claim; explicitly `--reclaim` recovered VMs.
 
 ## Secrets And Environment Forwarding
 

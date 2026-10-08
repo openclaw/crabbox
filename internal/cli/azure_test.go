@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/des"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +11,7 @@ import (
 	"maps"
 	"net/http"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -658,29 +661,69 @@ func TestAzureSnapshotQuarantineCleanupRetries(t *testing.T) {
 }
 
 func TestAzureWindowsSnapshotRehydrateRotatesServiceVNCCredentials(t *testing.T) {
-	t.Parallel()
-	cfg := baseConfig()
-	cfg.TargetOS = targetWindows
-	cfg.WindowsMode = windowsModeNormal
-	cfg.Desktop = true
-	cfg.SSHUser = "crabbox"
-
-	script := azureWindowsSnapshotRehydratePowerShell(cfg, "ssh-ed25519 test")
-	for _, want := range []string{
-		"ConvertTo-CrabboxVNCPassword",
-		"0xE8, 0x4A, 0xD6, 0x60, 0xC4, 0x72, 0x1A, 0xE0",
-		`HKLM:\Software\TightVNC\Server`,
-		"-Name Password -PropertyType Binary",
-		"-Name ControlPassword -PropertyType Binary",
-		"Stop-Service -Name tvnserver",
-		"Start-Service -Name tvnserver",
-	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("snapshot rehydrate script missing %q", want)
-		}
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows PowerShell is required")
 	}
-	if strings.Index(script, "Stop-Service -Name tvnserver") > strings.Index(script, "-Name Password -PropertyType Binary") {
-		t.Fatal("snapshot rehydrate must stop TightVNC before replacing its service password")
+	t.Parallel()
+	prefix := `$ErrorActionPreference = "Stop"
+$vncPasswordPath = "fixture-password"
+$script:stopped = $false
+$script:values = @{}
+function Get-Content {
+  param([switch]$Raw, $LiteralPath)
+  if ($LiteralPath -ne "fixture-password") { throw "unexpected credential path" }
+  return "test-vnc"
+}
+function Stop-Service {
+  param($Name, [switch]$Force, $ErrorAction)
+  if ($Name -ne "tvnserver") { throw "unexpected service" }
+  $script:stopped = $true
+}
+function New-Item {
+  param([switch]$Force, $Path)
+  if (-not $script:stopped -or $Path -ne "HKLM:\Software\TightVNC\Server") { throw "unsafe registry creation" }
+}
+function New-ItemProperty {
+  param([switch]$Force, $Path, $Name, $PropertyType, $Value)
+  if (-not $script:stopped -or $Path -ne "HKLM:\Software\TightVNC\Server") { throw "unsafe credential update" }
+  if ($PropertyType -eq "Binary") { $Value = [Convert]::ToBase64String([byte[]]$Value) }
+  $script:values[$Name] = $Value
+}
+`
+	output, err := runWindowsPowerShellScript(t, prefix+azureWindowsSnapshotRotateVNCPasswordPowerShell()+`
+$script:values | ConvertTo-Json -Compress
+`)
+	if err != nil {
+		t.Fatalf("snapshot credential rotation: %v\n%s", err, output)
+	}
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(output, &values); err != nil {
+		t.Fatal(err)
+	}
+	var password, controlPassword string
+	if err := json.Unmarshal(values["Password"], &password); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(values["ControlPassword"], &controlPassword); err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := base64.StdEncoding.DecodeString(password)
+	if err != nil || len(encrypted) != des.BlockSize || controlPassword != password {
+		t.Fatalf("invalid service credentials: password=%q control=%q err=%v", password, controlPassword, err)
+	}
+	cipher, err := des.NewCipher([]byte{0xE8, 0x4A, 0xD6, 0x60, 0xC4, 0x72, 0x1A, 0xE0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := make([]byte, des.BlockSize)
+	cipher.Decrypt(plain, encrypted)
+	if string(plain) != "test-vnc" {
+		t.Fatalf("service password did not rotate to the new credential: %q", plain)
+	}
+	for name, want := range map[string]string{"UseVncAuthentication": "1", "UseControlAuthentication": "1", "AllowLoopback": "1", "AcceptHttpConnections": "0"} {
+		if string(values[name]) != want {
+			t.Errorf("%s=%s, want %s", name, values[name], want)
+		}
 	}
 }
 

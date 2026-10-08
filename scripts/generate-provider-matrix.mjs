@@ -192,14 +192,31 @@ function render(providers, metadata) {
     const profile = metadata[provider.provider];
     const aliases = provider.aliases?.length ? ` (${provider.aliases.map(code).join(", ")})` : "";
     const features = provider.features?.length ? provider.features.map(code).join(", ") : "none";
+    const targetDifferences = formatTargetFeatureDifferences(provider);
+    const featureSummary = targetDifferences ? `${features}; target differences: ${targetDifferences}` : features;
     const coordinator = provider.brokeredOnly ? "coordinator required" : provider.coordinator === "supported" ? "coordinator optional" : "direct only";
     lines.push(
-      `| [${escapeCell(provider.provider)}](${escapeLink(profile.docs)})${aliases} | ${escapeCell(profile.status)}; ${code(provider.kind)} · ${escapeCell(profile.category)} | ${sshLabel(profile.ssh)}; ${code(profile.sync)} · ${escapeCell(coordinator)}; features: ${features} | ${provider.targets.map(code).join(", ")}; ${escapeCell(profile.substrate)} | ${code(profile.location)}; GPU: ${escapeCell(profile.gpu)} | ${escapeCell(profile.lifecycle)}; ${escapeCell(profile.cleanup)} | ${escapeCell(profile.bestFit)} | ${escapeCell(profile.caveat)} |`
+      `| [${escapeCell(provider.provider)}](${escapeLink(profile.docs)})${aliases} | ${escapeCell(profile.status)}; ${code(provider.kind)} · ${escapeCell(profile.category)} | ${sshLabel(profile.ssh)}; ${code(profile.sync)} · ${escapeCell(coordinator)}; features: ${featureSummary} | ${provider.targets.map(code).join(", ")}; ${escapeCell(profile.substrate)} | ${code(profile.location)}; GPU: ${escapeCell(profile.gpu)} | ${escapeCell(profile.lifecycle)}; ${escapeCell(profile.cleanup)} | ${escapeCell(profile.bestFit)} | ${escapeCell(profile.caveat)} |`
     );
   }
 
   lines.push("", endMarker);
   return lines.join("\n");
+}
+
+function formatTargetFeatureDifferences(provider) {
+  const base = new Set(provider.features ?? []);
+  return (provider.targetFeatures ?? [])
+    .flatMap((entry) => {
+      const target = new Set(entry.features ?? []);
+      const added = [...target].filter((feature) => !base.has(feature));
+      const omitted = [...base].filter((feature) => !target.has(feature));
+      const differences = [];
+      if (added.length) differences.push(`adds ${added.map(code).join(", ")}`);
+      if (omitted.length) differences.push(`omits ${omitted.map(code).join(", ")}`);
+      return differences.length ? [`${code(entry.target)} ${differences.join("; ")}`] : [];
+    })
+    .join("; ");
 }
 
 function replaceGenerated(input, generated, startMarker, endMarker, targetPath) {

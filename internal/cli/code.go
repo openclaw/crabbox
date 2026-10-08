@@ -50,14 +50,24 @@ const (
 	codeBridgeBodyChunkDelay              = 5 * time.Millisecond
 )
 
+type codeConnectionMode uint8
+
+const (
+	codeConnectionCoordinator codeConnectionMode = iota
+	codeConnectionDirect
+)
+
+type codeLocalForwarder func(context.Context, SSHTarget, string, string, sshLocalForwardReadyFunc) error
+type codeLocalURLOpener func(string, ...string) error
+
 func (a App) webCode(ctx context.Context, args []string) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("code", a.Stderr)
-	provider := registerProviderSelectionFlag(fs, defaults, "provider: hetzner, aws, or azure")
+	provider := registerProviderSelectionFlag(fs, defaults, providerHelpSSH())
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	localPort := fs.String("local-port", "", "local code-server tunnel port")
-	openPortal := fs.Bool("open", false, "open the web portal code page")
+	openCode := fs.Bool("open", false, "open Code in the local browser")
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
@@ -77,15 +87,22 @@ func (a App) webCode(ctx context.Context, args []string) error {
 	if err := validateRequestedCapabilities(cfg); err != nil {
 		return err
 	}
-	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
-		return Exit(2, "code currently supports coordinator-backed hetzner/aws Linux leases")
-	}
-	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
+	registeredProvider, err := ProviderFor(cfg.Provider)
 	if err != nil {
 		return err
 	}
-	if !useCoordinator || !coord.hasConfiguredAuth() {
-		return Exit(2, "code requires a configured coordinator login; run crabbox login --url <broker-url> first")
+	spec := registeredProvider.Spec()
+	var coord *CoordinatorClient
+	var useCoordinator bool
+	if spec.Coordinator != CoordinatorNever {
+		coord, useCoordinator, err = newTargetCoordinatorClient(cfg)
+		if err != nil {
+			return err
+		}
+	}
+	mode, err := selectCodeConnectionMode(spec, cfg.TargetOS, cfg.WindowsMode, useCoordinator, coord != nil && coord.hasConfiguredAuth())
+	if err != nil {
+		return err
 	}
 	server, target, leaseID, err := a.resolveNetworkLeaseTargetForRepoWithConfig(ctx, &cfg, *id, true, *reclaim)
 	if err != nil {
@@ -112,8 +129,22 @@ func (a App) webCode(ctx context.Context, args []string) error {
 	if folder != workspace {
 		fmt.Fprintf(a.Stderr, "opening remote folder %s\n", folder)
 	}
+	var stopActivity func()
+	if mode == codeConnectionDirect {
+		stopActivity = a.startInteractiveSSHLeaseActivity(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID})
+		defer stopActivity()
+	}
 	if err := ensureRemoteCodeServer(ctx, target, workspace); err != nil {
 		return err
+	}
+	if mode == codeConnectionDirect {
+		requestedLocalPort, err := parseTunnelPort(*localPort, "local code-server tunnel port", true)
+		if err != nil {
+			return err
+		}
+		// Direct Code intentionally relies on SSH plus loopback-only guest and
+		// host listeners; no unauthenticated service is bound to a network interface.
+		return runDirectManagedCode(ctx, target, requestedLocalPort, *openCode, a.Stdout, runSSHLocalForwardWithReady, openLocalURLWithEnvironment)
 	}
 	if *localPort == "" {
 		*localPort = availableLocalCodePort()
@@ -133,7 +164,7 @@ func (a App) webCode(ctx context.Context, args []string) error {
 		}
 		fmt.Fprintln(a.Stdout, "bridge: connected; keep this process running while using Code")
 		fmt.Fprintf(a.Stdout, "code: %s\n", portal)
-		if *openPortal && !opened {
+		if *openCode && !opened {
 			if err := openLocalURLWithEnvironment(portal, target.ChildEnvDenylist...); err != nil {
 				bridge.Close(websocket.StatusNormalClosure, "bridge stopped")
 				return err
@@ -153,6 +184,63 @@ func (a App) webCode(ctx context.Context, args []string) error {
 			return context.Cause(ctx)
 		}
 	}
+}
+
+func selectCodeConnectionMode(spec ProviderSpec, targetOS, windowsMode string, useCoordinator, hasCoordinatorAuth bool) (codeConnectionMode, error) {
+	if spec.Kind != ProviderKindSSHLease {
+		return 0, Exit(2, "code requires an SSH lease provider")
+	}
+	features := spec.FeaturesForTarget(targetOS, windowsMode)
+	if targetOS != targetLinux || !features.Has(FeatureCode) {
+		return 0, Exit(2, "code requires a managed Linux target that advertises code support")
+	}
+	if spec.Coordinator == CoordinatorNever {
+		if !features.Has(FeatureCleanup) {
+			return 0, Exit(2, "code requires a managed SSH lease; provider=%s does not advertise managed cleanup", spec.Name)
+		}
+		return codeConnectionDirect, nil
+	}
+	if !useCoordinator || !hasCoordinatorAuth {
+		return 0, Exit(2, "code requires a configured coordinator login; run crabbox login --url <broker-url> first")
+	}
+	return codeConnectionCoordinator, nil
+}
+
+func runDirectManagedCode(
+	ctx context.Context,
+	target SSHTarget,
+	requestedLocalPort string,
+	openCode bool,
+	stdout anyWriter,
+	forward codeLocalForwarder,
+	openURL codeLocalURLOpener,
+) error {
+	return forward(ctx, target, requestedLocalPort, managedCodePort, func(localURL string) error {
+		if err := validateDirectCodeURL(localURL); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, "tunnel: connected; keep this process running while using Code")
+		fmt.Fprintf(stdout, "code: %s\n", localURL)
+		if !openCode {
+			return nil
+		}
+		if err := openURL(localURL, target.ChildEnvDenylist...); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "opened: %s\n", localURL)
+		return nil
+	})
+}
+
+func validateDirectCodeURL(rawURL string) error {
+	localURL, err := url.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+	if localURL.Scheme != "http" || localURL.Hostname() != sshTunnelLoopbackHost || localURL.Port() == "" || localURL.Path != "" || localURL.RawQuery != "" || localURL.Fragment != "" {
+		return fmt.Errorf("direct code URL must be loopback HTTP")
+	}
+	return nil
 }
 
 func ensureRemoteCodeServer(ctx context.Context, target SSHTarget, workdir string) error {

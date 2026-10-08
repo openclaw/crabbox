@@ -41,6 +41,7 @@ const (
 	checkpointKindDaytona      = "daytona-snapshot"
 	checkpointKindIncus        = "incus-image"
 	checkpointKindCloudflare   = "cloudflare-container-snapshot"
+	checkpointKindHyperV       = "hyperv-vhdx"
 
 	checkpointStrategyAuto         = "auto"
 	checkpointStrategyImage        = "image"
@@ -48,6 +49,7 @@ const (
 )
 
 type checkpointRecord struct {
+	artifactDir        string
 	CaptureEstablished bool                            `json:"captureEstablished,omitempty"`
 	Capture            *NativeCheckpointCapture        `json:"capture,omitempty"`
 	ID                 string                          `json:"id"`
@@ -323,7 +325,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 		}()
 		switch createKind {
 		case checkpointKindRecipe:
-		case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindIncus, checkpointKindCloudflare:
+		case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindIncus, checkpointKindCloudflare, checkpointKindHyperV:
 			createStrategy := checkpointCreateStrategy(*mode, *strategy, createKind)
 			retention := checkpointRetentionFromDuration(retentionDuration)
 			createContext := withCheckpointCreateContext(ctx, record, retention, func(managed bool) error {
@@ -338,6 +340,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 			})
 			image, metadata, err := operationApp.createNativeCheckpointRequest(createContext, NativeCheckpointCreateRequest{
 				Config: cfg, Server: server, Target: target, CheckpointID: record.ID,
+				Runtime: runtimeForApp(operationApp), ArtifactDir: paths.Dir,
 				LeaseID: leaseID, Name: record.Name, RepoName: repo.Name, Workdir: workdir,
 				Strategy: createStrategy, NoReboot: *noReboot, Wait: *wait,
 				WaitTimeout: *waitTimeout, Stderr: operationApp.Stderr,
@@ -1118,6 +1121,51 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 	}
 	if record.Kind != checkpointKindArchive {
 		if isNativeCheckpointKind(record.Kind) {
+			restoreProvider, err := ProviderFor(record.nativeProvider())
+			if err != nil {
+				return err
+			}
+			if restorer, ok := restoreProvider.(NativeCheckpointRestoreProvider); ok {
+				if record.nativeResourceID() == "" {
+					return Exit(2, "checkpoint %s is pending; native provider resource is not recorded yet", record.ID)
+				}
+				cfg, err := loadLeaseTargetConfig(fs, record.nativeProvider(), targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
+				if err != nil {
+					return err
+				}
+				if err := requireLeaseID(*id, "crabbox checkpoint restore <checkpoint-id> --id <lease-id-or-slug>", cfg); err != nil {
+					return err
+				}
+				leaseID := strings.TrimSpace(*id)
+				if claim, exists, err := ResolveLeaseClaimForProvider(leaseID, cfg.Provider); err != nil {
+					return err
+				} else if exists {
+					leaseID = claim.LeaseID
+				}
+				if *dryRun {
+					fmt.Fprintf(a.Stdout, "would restore checkpoint id=%s lease=%s snapshot=%s\n", record.ID, leaseID, record.nativeResourceID())
+					return nil
+				}
+				if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, providerFlags); err != nil {
+					return err
+				}
+				repo, err := findRepo()
+				if err != nil {
+					return err
+				}
+				result, err := restorer.RestoreNativeCheckpoint(ctx, NativeCheckpointRestoreRequest{
+					Config: cfg, Runtime: runtimeForApp(a), Record: nativeCheckpointForkRecord(record),
+					LeaseID: leaseID, Repo: repo, Reclaim: *reclaim,
+				})
+				if err != nil {
+					return err
+				}
+				if err := recordCheckpointUse(store, &record); err != nil {
+					return err
+				}
+				fmt.Fprintf(a.Stdout, "checkpoint restored id=%s lease=%s snapshot=%s\n", record.ID, result.Lease.LeaseID, record.nativeResourceID())
+				return nil
+			}
 			if record.Kind == checkpointKindParallels {
 				cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
 				if err != nil {
@@ -1634,6 +1682,7 @@ func (a App) provisionCheckpointForkWithoutClaim(ctx context.Context, cfg Config
 	var source *NativeCheckpointForkRecord
 	if isNativeCheckpointKind(record.Kind) {
 		native := nativeCheckpointForkRecord(record)
+		native.ArtifactDir = paths.Dir
 		source = &native
 	}
 	a.reportDirectLeasePolicyNotice(cfg)
@@ -2747,6 +2796,9 @@ func checkpointCreateMode(mode, strategy string, cfg Config, server Server, targ
 	}
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "auto":
+		if capability, ok := providerNativeCheckpointCapability(cfg, server, target, strategy); ok && capability.PreferredForAuto {
+			return capability.Kind
+		}
 		if kind, ok := nativeCheckpointKind(cfg, server, target, strategy); ok {
 			return kind
 		}
@@ -2857,7 +2909,7 @@ func nativeCheckpointForkWorkdir(cfg Config, leaseID, repoName, override string)
 }
 
 func isNativeCheckpointKind(kind string) bool {
-	return kind == checkpointKindAWSAMI || kind == checkpointKindAWSEBS || kind == checkpointKindAzure || kind == checkpointKindAzureOS || kind == checkpointKindGCP || kind == checkpointKindGCPDisk || kind == checkpointKindHetzner || kind == checkpointKindMachine0 || kind == checkpointKindParallels || kind == checkpointKindDockerCommit || kind == checkpointKindDaytona || kind == checkpointKindIncus || kind == checkpointKindCloudflare
+	return kind == checkpointKindAWSAMI || kind == checkpointKindAWSEBS || kind == checkpointKindAzure || kind == checkpointKindAzureOS || kind == checkpointKindGCP || kind == checkpointKindGCPDisk || kind == checkpointKindHetzner || kind == checkpointKindMachine0 || kind == checkpointKindParallels || kind == checkpointKindDockerCommit || kind == checkpointKindDaytona || kind == checkpointKindIncus || kind == checkpointKindCloudflare || kind == checkpointKindHyperV
 }
 
 func checkpointProviderForKind(kind string) string {
@@ -2874,6 +2926,8 @@ func checkpointProviderForKind(kind string) string {
 		return "machine0"
 	case checkpointKindParallels:
 		return "parallels"
+	case checkpointKindHyperV:
+		return "hyperv"
 	case checkpointKindDockerCommit:
 		return "local-container"
 	case checkpointKindDaytona:

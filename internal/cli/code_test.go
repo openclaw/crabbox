@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,6 +20,173 @@ import (
 
 	"nhooyr.io/websocket"
 )
+
+func TestSelectCodeConnectionMode(t *testing.T) {
+	directSpec := ProviderSpec{
+		Name:        "direct-managed",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCleanup, FeatureCode},
+		Coordinator: CoordinatorNever,
+	}
+	if got, err := selectCodeConnectionMode(directSpec, targetLinux, "", false, false); err != nil || got != codeConnectionDirect {
+		t.Fatalf("direct mode=%v err=%v", got, err)
+	}
+	targetAwareSpec := directSpec
+	targetAwareSpec.Name = "target-aware-managed"
+	targetAwareSpec.Features = FeatureSet{FeatureSSH, FeatureCleanup, FeatureCheckpoint, FeatureCacheVolume, FeatureTailscale}
+	linuxFeatures := append(FeatureSet(nil), targetAwareSpec.Features...)
+	linuxFeatures = append(linuxFeatures, FeatureCode)
+	targetAwareSpec.TargetFeatures = map[string]FeatureSet{
+		targetLinux: linuxFeatures,
+	}
+	if got, err := selectCodeConnectionMode(targetAwareSpec, targetLinux, "", false, false); err != nil || got != codeConnectionDirect {
+		t.Fatalf("target-aware Linux mode=%v err=%v", got, err)
+	}
+	if _, err := selectCodeConnectionMode(targetAwareSpec, targetWindows, WindowsModeNormal, false, false); err == nil || !strings.Contains(err.Error(), "Linux") {
+		t.Fatalf("target-aware Windows rejection error=%v", err)
+	}
+
+	coordinatorSpec := directSpec
+	coordinatorSpec.Name = "coordinator-managed"
+	coordinatorSpec.Coordinator = CoordinatorSupported
+	if got, err := selectCodeConnectionMode(coordinatorSpec, targetLinux, "", true, true); err != nil || got != codeConnectionCoordinator {
+		t.Fatalf("coordinator mode=%v err=%v", got, err)
+	}
+	if _, err := selectCodeConnectionMode(coordinatorSpec, targetLinux, "", false, false); err == nil || !strings.Contains(err.Error(), "configured coordinator login") {
+		t.Fatalf("missing coordinator login error=%v", err)
+	}
+
+	staticShape := directSpec
+	staticShape.Name = "host-managed"
+	staticShape.Features = FeatureSet{FeatureSSH, FeatureCode}
+	if _, err := selectCodeConnectionMode(staticShape, targetLinux, "", false, false); err == nil || !strings.Contains(err.Error(), "managed SSH lease") {
+		t.Fatalf("host-managed rejection error=%v", err)
+	}
+}
+
+func TestValidateRequestedCapabilitiesRejectsWindowsCodeExplicitly(t *testing.T) {
+	providerName := "code-windows-rejection-test"
+	if providerRegistry[providerName] == nil {
+		RegisterProvider(codeWindowsRejectionTestProvider{name: providerName})
+	}
+	err := validateRequestedCapabilities(Config{
+		Provider:    providerName,
+		TargetOS:    targetWindows,
+		WindowsMode: windowsModeNormal,
+		Code:        true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "managed Linux leases only") {
+		t.Fatalf("windows code rejection error=%v", err)
+	}
+}
+
+func TestRunDirectManagedCodeOpensLoopbackURLUntilCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(context.Canceled)
+	ready := make(chan struct{})
+	opened := make(chan string, 1)
+	stdout := newSynchronizedBuffer(0)
+	target := SSHTarget{ChildEnvDenylist: []string{"CRABBOX_TEST_SECRET"}}
+
+	forward := func(ctx context.Context, gotTarget SSHTarget, localPort, remotePort string, onReady sshLocalForwardReadyFunc) error {
+		if remotePort != managedCodePort || localPort != "43123" {
+			return errors.New("unexpected tunnel ports")
+		}
+		if len(gotTarget.ChildEnvDenylist) != 1 || gotTarget.ChildEnvDenylist[0] != "CRABBOX_TEST_SECRET" {
+			return errors.New("unexpected SSH target")
+		}
+		if err := onReady("http://127.0.0.1:43123"); err != nil {
+			return err
+		}
+		close(ready)
+		<-ctx.Done()
+		return context.Cause(ctx)
+	}
+	openURL := func(rawURL string, denylist ...string) error {
+		if len(denylist) != 1 || denylist[0] != "CRABBOX_TEST_SECRET" {
+			return errors.New("browser denylist was not preserved")
+		}
+		opened <- rawURL
+		return nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runDirectManagedCode(ctx, target, "43123", true, &stdout, forward, openURL)
+	}()
+	<-ready
+	select {
+	case got := <-opened:
+		if got != "http://127.0.0.1:43123" {
+			t.Fatalf("opened URL=%q", got)
+		}
+	default:
+		t.Fatal("direct code did not open the local URL")
+	}
+	for _, want := range []string{
+		"tunnel: connected; keep this process running while using Code",
+		"code: http://127.0.0.1:43123",
+		"opened: http://127.0.0.1:43123",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing %q:\n%s", want, stdout.String())
+		}
+	}
+	cancel(context.Canceled)
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("direct code cancellation error=%v", err)
+	}
+}
+
+func TestRunDirectManagedCodeRejectsNonLoopbackURL(t *testing.T) {
+	opened := false
+	err := runDirectManagedCode(
+		context.Background(),
+		SSHTarget{},
+		"43123",
+		true,
+		io.Discard,
+		func(_ context.Context, _ SSHTarget, _, _ string, onReady sshLocalForwardReadyFunc) error {
+			return onReady("http://0.0.0.0:43123")
+		},
+		func(string, ...string) error {
+			opened = true
+			return nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "loopback HTTP") {
+		t.Fatalf("non-loopback URL error=%v", err)
+	}
+	if opened {
+		t.Fatal("non-loopback URL reached browser opener")
+	}
+}
+
+type codeWindowsRejectionTestProvider struct {
+	name string
+}
+
+func (p codeWindowsRejectionTestProvider) Name() string    { return p.name }
+func (codeWindowsRejectionTestProvider) Aliases() []string { return nil }
+func (p codeWindowsRejectionTestProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        p.name,
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetWindows, WindowsMode: windowsModeNormal}},
+		Features:    FeatureSet{FeatureSSH, FeatureCleanup, FeatureCode},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (codeWindowsRejectionTestProvider) RegisterFlags(*flag.FlagSet, Config) any {
+	return NoProviderFlags()
+}
+func (codeWindowsRejectionTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p codeWindowsRejectionTestProvider) Configure(Config, Runtime) (Backend, error) {
+	return nil, errors.New("not used")
+}
 
 func TestWebCodeURLs(t *testing.T) {
 	if got := webCodeAgentURL("https://broker.example.com", "cbx_abcdef123456"); got != "wss://broker.example.com/v1/leases/cbx_abcdef123456/code/agent" {

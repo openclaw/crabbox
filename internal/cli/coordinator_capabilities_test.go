@@ -80,6 +80,28 @@ func TestEnforceManagedLeaseCapabilitiesAcceptsRequestedDesktopEnvLabel(t *testi
 	}
 }
 
+func TestEnforceManagedLeaseCapabilitiesRequiresCodeLabelForReuse(t *testing.T) {
+	err := enforceManagedLeaseCapabilities(
+		Config{Code: true},
+		Server{Labels: map[string]string{"target": targetLinux}},
+		"cbx_test",
+	)
+	if err == nil || !strings.Contains(err.Error(), "code=true") {
+		t.Fatalf("missing code label error=%v", err)
+	}
+}
+
+func TestEnforceManagedLeaseCapabilitiesAcceptsCodeLabelForReuse(t *testing.T) {
+	err := enforceManagedLeaseCapabilities(
+		Config{Code: true},
+		Server{Labels: map[string]string{"target": targetLinux, "code": "true"}},
+		"cbx_test",
+	)
+	if err != nil {
+		t.Fatalf("enforceManagedLeaseCapabilities error: %v", err)
+	}
+}
+
 func TestStaticDesktopProbeCommandRequiresWaylandEnvFile(t *testing.T) {
 	got := staticDesktopProbeCommand(Config{DesktopEnv: desktopEnvWayland}, SSHTarget{TargetOS: targetLinux})
 	for _, want := range []string{

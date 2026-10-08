@@ -166,9 +166,10 @@ type leaseClaimEndpointPolicy struct {
 }
 
 type leaseClaimTargetOptions struct {
-	context   context.Context
-	endpoint  leaseClaimEndpointMode
-	directory claimDirectoryPolicy
-	action    func() error
-	idle      claimIdlePolicy
+	cacheVolumesOverride *[]string
+	context              context.Context
+	endpoint             leaseClaimEndpointMode
+	directory            claimDirectoryPolicy
+	action               func() error
+	idle                 claimIdlePolicy
 }

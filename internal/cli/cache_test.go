@@ -124,11 +124,12 @@ func TestParseCacheVolumeSpecs(t *testing.T) {
 	volumes, err := ParseCacheVolumeSpecs([]string{
 		"pnpm=repo-linux-node24-lock:/var/cache/crabbox/pnpm",
 		"npm-cache:/var/cache/crabbox/npm",
+		`nuget=repo-windows-net10-lock:C:\crabbox-cache\nuget`,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(volumes) != 2 {
+	if len(volumes) != 3 {
 		t.Fatalf("volumes=%#v", volumes)
 	}
 	if volumes[0].Name != "pnpm" || volumes[0].Key != "repo-linux-node24-lock" || volumes[0].Path != "/var/cache/crabbox/pnpm" {
@@ -137,11 +138,59 @@ func TestParseCacheVolumeSpecs(t *testing.T) {
 	if volumes[1].Name != "npm-cache" || volumes[1].Key != "npm-cache" || volumes[1].Path != "/var/cache/crabbox/npm" {
 		t.Fatalf("second volume=%#v", volumes[1])
 	}
+	if volumes[2].Name != "nuget" || volumes[2].Key != "repo-windows-net10-lock" || volumes[2].Path != `C:\crabbox-cache\nuget` {
+		t.Fatalf("third volume=%#v", volumes[2])
+	}
 }
 
 func TestParseCacheVolumeSpecRequiresAbsolutePath(t *testing.T) {
 	_, err := ParseCacheVolumeSpec("pnpm:relative/cache")
 	if err == nil || !strings.Contains(err.Error(), "must be absolute") {
 		t.Fatalf("err=%v, want absolute path error", err)
+	}
+}
+
+func TestValidateCacheVolumeForTarget(t *testing.T) {
+	tests := []struct {
+		name     string
+		targetOS string
+		path     string
+		wantErr  string
+	}{
+		{name: "linux POSIX", targetOS: TargetLinux, path: "/var/cache/crabbox/pnpm"},
+		{name: "windows backslash", targetOS: TargetWindows, path: `C:\crabbox-cache\nuget`},
+		{name: "windows slash", targetOS: TargetWindows, path: "D:/crabbox-cache/npm"},
+		{name: "linux rejects Windows", targetOS: TargetLinux, path: `C:\crabbox-cache\nuget`, wantErr: "POSIX absolute path"},
+		{name: "windows rejects POSIX", targetOS: TargetWindows, path: "/var/cache/crabbox/pnpm", wantErr: "Windows drive-rooted absolute path"},
+		{name: "windows rejects drive relative", targetOS: TargetWindows, path: `C:crabbox-cache\nuget`, wantErr: "must be absolute"},
+		{name: "POSIX rejects leading whitespace", targetOS: TargetLinux, path: " /var/cache/crabbox/pnpm", wantErr: "must be absolute"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateCacheVolumeForTarget(CacheVolumeConfig{Key: "cache-key", Path: tt.path}, tt.targetOS)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err=%v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestOptionalCacheVolumeOnUnsupportedProviderRemainsIgnored(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.TargetOS = TargetLinux
+	cfg.Cache.Volumes = []CacheVolumeConfig{{
+		Key:  "optional-windows-cache",
+		Path: `D:\crabbox-cache\nuget`,
+	}}
+	if err := ValidateCacheVolumesForProvider(cfg); err != nil {
+		t.Fatalf("optional unsupported cache volume should remain ignored: %v", err)
 	}
 }

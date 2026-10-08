@@ -794,6 +794,15 @@ func TestProviderKindFeatureContracts(t *testing.T) {
 			!(spec.Kind == core.ProviderKindSSHLease && spec.Features.Has(core.FeatureSSH)) {
 			t.Fatalf("%s advertises %s but kind=%s features=%v", name, core.FeatureArchiveSync, spec.Kind, spec.Features)
 		}
+		// Pause/resume frees remote compute while preserving lease state. It is
+		// dispatched through the optional PausableBackend interface, which does
+		// not inspect provider kind, so SSH-lease providers backed by real VMs
+		// can implement it alongside delegated-run providers.
+		if spec.Features.Has(core.FeaturePauseResume) &&
+			spec.Kind != core.ProviderKindDelegatedRun &&
+			!(spec.Kind == core.ProviderKindSSHLease && spec.Features.Has(core.FeatureSSH)) {
+			t.Fatalf("%s advertises %s but kind=%s features=%v", name, core.FeaturePauseResume, spec.Kind, spec.Features)
+		}
 		for _, feature := range []core.Feature{
 			core.FeatureModuleRun,
 			core.FeatureShellScriptRun,

@@ -18,11 +18,44 @@ func (Provider) Spec() core.ProviderSpec {
 		Name:             providerName,
 		Family:           "local-vm",
 		Kind:             core.ProviderKindSSHLease,
-		Targets:          []core.TargetSpec{{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal}},
-		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup},
+		Targets:          providerTargets(),
+		Features:         providerFeatures(),
 		Coordinator:      core.CoordinatorNever,
 		ClassDisposition: core.ProviderClassDispositionUnmapped,
+		TargetFeatures: map[string]core.FeatureSet{
+			core.TargetLinux: append(providerFeatures(), core.FeatureCode),
+			core.TargetWindows + "/" + core.WindowsModeNormal: providerFeatures(),
+		},
 	}
+}
+
+func providerTargets() []core.TargetSpec {
+	return []core.TargetSpec{
+		{OS: core.TargetLinux},
+		{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
+	}
+}
+
+func providerCommonFeatures() core.FeatureSet {
+	return core.FeatureSet{
+		core.FeatureSSH,
+		core.FeatureCrabboxSync,
+		core.FeatureDesktop,
+		core.FeatureBrowser,
+		core.FeatureCleanup,
+		core.FeaturePauseResume,
+		core.FeatureTailscale,
+		core.FeatureCacheVolume,
+	}
+}
+
+func providerFeatures() core.FeatureSet {
+	return append(providerCommonFeatures(),
+		core.FeatureCheckpoint,
+		core.FeatureFork,
+		core.FeatureRestore,
+		core.FeatureSnapshot,
+	)
 }
 
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
@@ -34,14 +67,21 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
-	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetWindows {
-		return nil, core.Exit(2, "provider=%s supports target=windows only", providerName)
+	targetOS := cfg.TargetOS
+	if targetOS == "" {
+		targetOS = core.TargetWindows
 	}
-	if cfg.TargetOS == core.TargetWindows && cfg.WindowsMode != "" && cfg.WindowsMode != core.WindowsModeNormal {
+	if targetOS != core.TargetLinux && targetOS != core.TargetWindows {
+		return nil, core.Exit(2, "provider=%s supports target=linux or target=windows", providerName)
+	}
+	if targetOS == core.TargetWindows && cfg.WindowsMode != "" && cfg.WindowsMode != core.WindowsModeNormal {
 		return nil, core.Exit(2, "provider=%s supports windows.mode=normal only", providerName)
 	}
-	if cfg.Tailscale.Enabled || string(cfg.Network) == "tailscale" {
-		return nil, core.Exit(2, "--tailscale is not supported for provider=%s; use a remote SSH provider when tailnet reachability is required", providerName)
+	if targetOS == core.TargetLinux && cfg.HyperV.InitPassword {
+		return nil, core.Exit(2, "--hyperv-init-password is supported only for target=windows")
+	}
+	if _, err := secureBootSettings(targetOS, cfg.HyperV.SecureBoot); err != nil {
+		return nil, err
 	}
 	return newBackend(p.Spec(), cfg, rt), nil
 }
@@ -58,7 +98,7 @@ func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
 	if cfg.HyperV.User != "" {
 		cfg.SSHUser = cfg.HyperV.User
 	}
-	if cfg.HyperV.WorkRoot != "" {
+	if cfg.HyperV.WorkRoot != "" && !(cfg.TargetOS == core.TargetLinux && cfg.HyperV.WorkRoot == `C:\crabbox`) {
 		cfg.WorkRoot = cfg.HyperV.WorkRoot
 	}
 	cfg.SSHPort = "22"

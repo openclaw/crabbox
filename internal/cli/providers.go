@@ -11,24 +11,30 @@ import (
 )
 
 type providerMatrixEntry struct {
+	BrokeredOnly bool `json:"brokeredOnly,omitempty"`
 	providerStaticStatus
-	Provider      string               `json:"provider"`
-	Family        string               `json:"family"`
-	Aliases       []string             `json:"aliases,omitempty"`
-	Kind          ProviderKind         `json:"kind"`
-	Category      string               `json:"category,omitempty"`
-	Targets       []string             `json:"targets"`
-	Features      []Feature            `json:"features"`
-	Runtime       []string             `json:"runtime,omitempty"`
-	Reachability  []string             `json:"reachability,omitempty"`
-	Workspace     []string             `json:"workspace,omitempty"`
-	Evidence      []string             `json:"evidence,omitempty"`
-	Lifecycle     []string             `json:"lifecycle,omitempty"`
-	Coordinator   string               `json:"coordinator"`
-	BrokeredOnly  bool                 `json:"brokeredOnly,omitempty"`
-	Classes       []ClassSpec          `json:"classes,omitempty"`
-	ClassCatalog  ProviderClassCatalog `json:"classCatalog"`
-	SizeSelection ProviderSizeSelector `json:"sizeSelection,omitempty"`
+	Provider       string                       `json:"provider"`
+	Family         string                       `json:"family"`
+	Aliases        []string                     `json:"aliases,omitempty"`
+	Kind           ProviderKind                 `json:"kind"`
+	Category       string                       `json:"category,omitempty"`
+	Targets        []string                     `json:"targets"`
+	Features       []Feature                    `json:"features"`
+	Runtime        []string                     `json:"runtime,omitempty"`
+	Reachability   []string                     `json:"reachability,omitempty"`
+	Workspace      []string                     `json:"workspace,omitempty"`
+	Evidence       []string                     `json:"evidence,omitempty"`
+	Lifecycle      []string                     `json:"lifecycle,omitempty"`
+	Coordinator    string                       `json:"coordinator"`
+	Classes        []ClassSpec                  `json:"classes,omitempty"`
+	ClassCatalog   ProviderClassCatalog         `json:"classCatalog"`
+	SizeSelection  ProviderSizeSelector         `json:"sizeSelection,omitempty"`
+	TargetFeatures []providerTargetFeatureEntry `json:"targetFeatures,omitempty"`
+}
+
+type providerTargetFeatureEntry struct {
+	Target   string    `json:"target"`
+	Features []Feature `json:"features"`
 }
 
 type providerRecommendationEntry struct {
@@ -256,6 +262,7 @@ func providerMatrixEntryForSpec(provider Provider, spec ProviderSpec) providerMa
 		Category:             category,
 		Targets:              targets,
 		Features:             append(FeatureSet{}, spec.Features...),
+		TargetFeatures:       formatProviderTargetFeatures(spec.TargetFeatures),
 		Runtime:              runtimeCapabilitiesForProvider(name, spec.Kind, category, targets, spec.Features),
 		Reachability:         reachabilityCapabilitiesForProvider(name),
 		Workspace:            workspaceCapabilitiesForFeatures(spec.Features),
@@ -492,12 +499,63 @@ func providerEntryMatchesFilters(entry providerMatrixEntry, filters providerMatr
 	return providerFieldContainsAll([]string{string(entry.Kind)}, filters.Kinds) &&
 		providerFieldContainsAll([]string{entry.Category}, filters.Categories) &&
 		providerFieldContainsAll(entry.Targets, filters.Targets) &&
-		providerFieldContainsAll(featuresToStrings(entry.Features), filters.Features) &&
-		providerFieldContainsAll(entry.Runtime, filters.Runtimes) &&
+		providerEntryMatchesTargetFeatures(entry, filters.Targets, filters.Features) &&
+		providerEntryMatchesTargetCapabilities(entry, filters.Targets, filters.Runtimes, entry.Runtime, func(target string, features []Feature) []string {
+			return runtimeCapabilitiesForProvider(entry.Provider, entry.Kind, entry.Category, []string{target}, features)
+		}) &&
 		providerFieldContainsAll(entry.Reachability, filters.Reachability) &&
-		providerFieldContainsAll(entry.Workspace, filters.Workspaces) &&
-		providerFieldContainsAll(entry.Evidence, filters.Evidence) &&
-		providerFieldContainsAll(entry.Lifecycle, filters.Lifecycle)
+		providerEntryMatchesTargetCapabilities(entry, filters.Targets, filters.Workspaces, entry.Workspace, func(_ string, features []Feature) []string {
+			return workspaceCapabilitiesForFeatures(features)
+		}) &&
+		providerEntryMatchesTargetCapabilities(entry, filters.Targets, filters.Evidence, entry.Evidence, func(_ string, features []Feature) []string {
+			return evidenceCapabilitiesForFeatures(features)
+		}) &&
+		providerEntryMatchesTargetCapabilities(entry, filters.Targets, filters.Lifecycle, entry.Lifecycle, func(_ string, features []Feature) []string {
+			return lifecycleCapabilitiesForProvider(CoordinatorMode(entry.Coordinator), features)
+		})
+}
+
+func providerEntryMatchesTargetFeatures(entry providerMatrixEntry, targets, features []string) bool {
+	if len(features) == 0 {
+		return true
+	}
+	if len(targets) == 0 {
+		return providerFieldContainsAll(featuresToStrings(entry.Features), features)
+	}
+	for _, target := range targets {
+		if !providerFieldContainsAll(featuresToStrings(providerEntryFeaturesForTarget(entry, target)), features) {
+			return false
+		}
+	}
+	return true
+}
+
+func providerEntryMatchesTargetCapabilities(
+	entry providerMatrixEntry,
+	targets, wants, providerCapabilities []string,
+	targetCapabilities func(target string, features []Feature) []string,
+) bool {
+	if len(wants) == 0 {
+		return true
+	}
+	if len(targets) == 0 {
+		return providerFieldContainsAll(providerCapabilities, wants)
+	}
+	for _, target := range targets {
+		if !providerFieldContainsAll(targetCapabilities(target, providerEntryFeaturesForTarget(entry, target)), wants) {
+			return false
+		}
+	}
+	return true
+}
+
+func providerEntryFeaturesForTarget(entry providerMatrixEntry, target string) []Feature {
+	for _, override := range entry.TargetFeatures {
+		if strings.EqualFold(override.Target, target) {
+			return override.Features
+		}
+	}
+	return entry.Features
 }
 
 func providerFieldContainsAll(values, wants []string) bool {
@@ -1725,6 +1783,9 @@ func printProviderMatrix(out io.Writer, entries []providerMatrixEntry) {
 		fmt.Fprintf(out, "  category: %s\n", blank(entry.Category, "-"))
 		fmt.Fprintf(out, "  targets: %s\n", commaOrDash(entry.Targets))
 		fmt.Fprintf(out, "  features: %s\n", commaOrDash(featuresToStrings(entry.Features)))
+		for _, target := range entry.TargetFeatures {
+			fmt.Fprintf(out, "  target features (%s): %s\n", target.Target, commaOrDash(featuresToStrings(target.Features)))
+		}
 		if len(entry.Runtime) > 0 {
 			fmt.Fprintf(out, "  runtime: %s\n", commaOrDash(entry.Runtime))
 		}
@@ -1766,16 +1827,33 @@ func printProviderMatrix(out io.Writer, entries []providerMatrixEntry) {
 func formatProviderTargets(targets []TargetSpec) []string {
 	out := make([]string, 0, len(targets))
 	for _, target := range targets {
-		value := strings.TrimSpace(target.OS)
+		value := formatProviderTarget(target)
 		if value == "" {
 			continue
-		}
-		if strings.TrimSpace(target.WindowsMode) != "" {
-			value += "/" + strings.TrimSpace(target.WindowsMode)
 		}
 		out = append(out, value)
 	}
 	return out
+}
+
+func formatProviderTargetFeatures(targetFeatures map[string]FeatureSet) []providerTargetFeatureEntry {
+	keys := make([]string, 0, len(targetFeatures))
+	for target := range targetFeatures {
+		keys = append(keys, target)
+	}
+	sort.Strings(keys)
+	out := make([]providerTargetFeatureEntry, 0, len(keys))
+	for _, target := range keys {
+		out = append(out, providerTargetFeatureEntry{
+			Target:   target,
+			Features: append(FeatureSet(nil), targetFeatures[target]...),
+		})
+	}
+	return out
+}
+
+func formatProviderTarget(target TargetSpec) string {
+	return providerTargetKey(target.OS, target.WindowsMode)
 }
 
 func workspaceCapabilitiesForFeatures(features []Feature) []string {

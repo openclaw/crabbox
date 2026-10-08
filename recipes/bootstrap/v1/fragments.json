@@ -54,6 +54,12 @@
       "parameters": {}
     },
     {
+      "name": "windowsUtilities",
+      "file": "windowsUtilities.ps1",
+      "literal": true,
+      "parameters": {}
+    },
+    {
       "name": "windowsHeader",
       "file": "windowsHeader.ps1",
       "parameters": {

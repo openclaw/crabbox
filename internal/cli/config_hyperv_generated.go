@@ -10,6 +10,7 @@ type fileHyperVConfig struct {
 	Image         string `yaml:"image,omitempty"`
 	User          string `yaml:"user,omitempty"`
 	WorkRoot      string `yaml:"workRoot,omitempty"`
+	SecureBoot    string `yaml:"secureBoot,omitempty"`
 	CPUs          int    `yaml:"cpus,omitempty"`
 	Memory        int    `yaml:"memory,omitempty"`
 	Switch        string `yaml:"switch,omitempty"`
@@ -44,7 +45,7 @@ func (cfg *HyperVConfig) applyFile(file *fileHyperVConfig) (HyperVConfigApplied,
 
 func (cfg *HyperVConfig) applyEnv() (HyperVConfigApplied, error) {
 	var applied HyperVConfigApplied
-	err := applyConfigEnvironment(cfg, &applied, 0, 8)
+	err := applyConfigEnvironment(cfg, &applied, 0, 9)
 	return applied, err
 }
 
@@ -53,6 +54,7 @@ type HyperVConfigFlagValues struct {
 	Image        *string
 	User         *string
 	WorkRoot     *string
+	SecureBoot   *string
 	CPUs         *int
 	Memory       *int
 	Switch       *string

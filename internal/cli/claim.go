@@ -648,17 +648,25 @@ func ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slu
 	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, leaseClaimTargetOptions{endpoint: claimEndpointReplace})
 }
 
+func ClaimLeaseTargetForRepoConfigScopeReplacingEndpointCacheVolumesIfUnchanged(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected LeaseClaim, expectedExists bool, cacheVolumes []string) (LeaseClaim, error) {
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerScope, server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, leaseClaimTargetOptions{endpoint: claimEndpointReplace, cacheVolumesOverride: &cacheVolumes})
+}
+
 func claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool, options leaseClaimTargetOptions) (leaseClaim, error) {
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	if options.idle == claimIdlePreserveRecorded {
 		options.idle = claimIdlePolicyForConfig(cfg)
 	}
 	var updated leaseClaim
+	cacheVolumes := CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes)
+	if options.cacheVolumesOverride != nil {
+		cacheVolumes = *options.cacheVolumesOverride
+	}
 	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
 		idlePolicy:      options.idle,
 		context:         options.context,
 		setCacheVolumes: true,
-		cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
+		cacheVolumes:    cacheVolumes,
 		setEndpoint:     true,
 		endpointMode:    options.endpoint,
 		server:          server,

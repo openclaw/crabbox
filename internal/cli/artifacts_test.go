@@ -624,19 +624,50 @@ func TestWindowsDesktopVideoRemoteCommandCapturesInteractiveFrames(t *testing.T)
 		}
 	}
 
-	got := windowsDesktopVideoRemoteCommand(`C:\ProgramData\crabbox\cv-1.ps1`, `C:\ProgramData\crabbox\cv-1-frames`, `C:\ProgramData\crabbox\cv-1.zip`, 2*time.Second)
+	got := windowsDesktopVideoRemoteCommand(`CrabboxVideo-proof`, `C:\ProgramData\crabbox\cv-1.ps1`, `C:\ProgramData\crabbox\cv-1-frames`, `C:\ProgramData\crabbox\cv-1.zip`, 2*time.Second)
 	for _, want := range []string{
-		"CrabboxVideo-",
+		`$taskName = 'CrabboxVideo-proof'`,
 		`$outDir = 'C:\ProgramData\crabbox\cv-1-frames'`,
 		`$zip = 'C:\ProgramData\crabbox\cv-1.zip'`,
 		`$done = $zip + ".done"`,
 		`$script = 'C:\ProgramData\crabbox\cv-1.ps1'`,
-		"-File $script",
+		"Register-CrabboxInteractiveTask",
+		"Start-CrabboxInteractiveTask",
+		"Remove-CrabboxInteractiveTask",
+		"Protect-CrabboxInteractiveDirectory",
+		"/inheritance:r",
+		"(OI)(CI)F",
+		"-LogonType Interactive",
+		"finally",
 		"[Console]::OpenStandardOutput().Write",
 		"scheduled interactive video did not produce output",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("windows video command missing %q:\n%s", want, got)
+		}
+	}
+	for _, forbidden := range []string{"Get-Content -Raw -LiteralPath $logonPath", "GetString($credentialBytes).Trim", `"/RP"`, "InteractiveOrPassword"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("windows video command contains forbidden credential handling %q:\n%s", forbidden, got)
+		}
+	}
+
+	cleanup := windowsDesktopVideoCleanupRemoteCommand(
+		`CrabboxVideo-proof`,
+		`C:\ProgramData\crabbox\cv-1\capture.ps1`,
+		`C:\ProgramData\crabbox\cv-1\frames`,
+		`C:\ProgramData\crabbox\cv-1\frames.zip`,
+		`C:\ProgramData\crabbox\cv-1`,
+	)
+	for _, want := range []string{
+		`CrabboxVideo-proof`,
+		`C:\ProgramData\crabbox\cv-1\capture.ps1`,
+		`C:\ProgramData\crabbox\cv-1\frames`,
+		`C:\ProgramData\crabbox\cv-1\frames.zip`,
+		`C:\ProgramData\crabbox\cv-1`,
+	} {
+		if !strings.Contains(cleanup, want) {
+			t.Fatalf("windows video cleanup missing %q:\n%s", want, cleanup)
 		}
 	}
 }

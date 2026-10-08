@@ -586,6 +586,7 @@ type ReleaseLeaseClaimRetentionVerifier interface {
 type NativeCheckpointCapability struct {
 	Kind              string
 	Direct            bool
+	PreferredForAuto  bool
 	CreateUnsupported string
 	RetireUnsupported string
 	ReplayCapture     bool
@@ -630,6 +631,8 @@ type NativeCheckpointCreateRequest struct {
 	// Providers requiring interruption recovery must stop if persistence fails.
 	Persist      func(NativeCheckpointCreateResult) error
 	Config       Config
+	Runtime      Runtime
+	ArtifactDir  string
 	Server       Server
 	Target       SSHTarget
 	CheckpointID string
@@ -663,6 +666,7 @@ type NativeCheckpointCapture struct {
 }
 
 type NativeCheckpointCreateResult struct {
+	ArtifactDir string
 	// CaptureEstablished attests a fixed capture under the provider's own
 	// contract. False preserves success semantics and omits the JSON assertion.
 	CaptureEstablished bool `json:"-"`
@@ -689,10 +693,13 @@ type NativeCheckpointResourceRequest struct {
 	// Persist records recovered identity before deletion; absent on read-only verification.
 	Persist func(NativeCheckpointCreateResult) error
 	// LoadConfig is required only when the provider needs current CLI settings.
-	LoadConfig func() (Config, error)
-	Image      NativeCheckpointImage
-	Metadata   map[string]string
-	Capture    *NativeCheckpointCapture
+	LoadConfig  func() (Config, error)
+	Config      Config
+	Runtime     Runtime
+	ArtifactDir string
+	Image       NativeCheckpointImage
+	Metadata    map[string]string
+	Capture     *NativeCheckpointCapture
 }
 
 // NativeCheckpointAbandonProvider binds positive source-cleanup evidence without
@@ -728,6 +735,7 @@ type NativeCheckpointLifecycleProvider interface {
 }
 
 type NativeCheckpointForkRecord struct {
+	ArtifactDir  string
 	Kind         string
 	ImageID      string
 	Name         string
@@ -754,6 +762,36 @@ type NativeCheckpointForkRequest struct {
 
 type NativeCheckpointForkProvider interface {
 	ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error
+}
+
+type NativeCheckpointForkLifecycleRequest struct {
+	OnAcquired    func(LeaseTarget) error
+	Record        NativeCheckpointForkRecord
+	Repo          Repo
+	Keep          bool
+	Reclaim       bool
+	RequestedSlug string
+}
+
+type NativeCheckpointForkLifecycleProvider interface {
+	ForkNativeCheckpoint(context.Context, NativeCheckpointForkLifecycleRequest) (LeaseTarget, error)
+}
+
+type NativeCheckpointRestoreRequest struct {
+	Config  Config
+	Runtime Runtime
+	Record  NativeCheckpointForkRecord
+	LeaseID string
+	Repo    Repo
+	Reclaim bool
+}
+
+type NativeCheckpointRestoreResult struct {
+	Lease LeaseTarget
+}
+
+type NativeCheckpointRestoreProvider interface {
+	RestoreNativeCheckpoint(context.Context, NativeCheckpointRestoreRequest) (NativeCheckpointRestoreResult, error)
 }
 
 // DelegatedCheckpointBackend lets a delegated-run backend, which exposes no SSH
@@ -855,6 +893,7 @@ type ProviderSpec struct {
 	Kind             ProviderKind
 	Targets          []TargetSpec
 	Features         FeatureSet
+	TargetFeatures   map[string]FeatureSet
 	Coordinator      CoordinatorMode
 	BrokeredOnly     bool
 	ClassDisposition ProviderClassDisposition
@@ -939,6 +978,22 @@ func (s FeatureSet) Has(feature Feature) bool {
 		}
 	}
 	return false
+}
+
+func (s ProviderSpec) FeaturesForTarget(targetOS, windowsMode string) FeatureSet {
+	key := providerTargetKey(targetOS, windowsMode)
+	if features, ok := s.TargetFeatures[key]; ok {
+		return append(FeatureSet(nil), features...)
+	}
+	return append(FeatureSet(nil), s.Features...)
+}
+
+func providerTargetKey(targetOS, windowsMode string) string {
+	key := strings.TrimSpace(targetOS)
+	if mode := strings.TrimSpace(windowsMode); key != "" && mode != "" {
+		key += "/" + mode
+	}
+	return key
 }
 
 type Runtime struct {

@@ -76,7 +76,16 @@ func parseTunnelPort(value, label string, allowAuto bool) (string, error) {
 	return strconv.Itoa(port), nil
 }
 
-func runSSHLocalForward(ctx context.Context, target SSHTarget, requestedLocalPort, remotePort string, stdout anyWriter) (err error) {
+type sshLocalForwardReadyFunc func(localURL string) error
+
+func runSSHLocalForward(ctx context.Context, target SSHTarget, requestedLocalPort, remotePort string, stdout anyWriter) error {
+	return runSSHLocalForwardWithReady(ctx, target, requestedLocalPort, remotePort, func(localURL string) error {
+		fmt.Fprintln(stdout, localURL)
+		return nil
+	})
+}
+
+func runSSHLocalForwardWithReady(ctx context.Context, target SSHTarget, requestedLocalPort, remotePort string, onReady sshLocalForwardReadyFunc) (err error) {
 	terminationCtx, stopTerminationSignals := pondMeshTerminationContext(ctx)
 	defer stopTerminationSignals()
 	ctx = terminationCtx
@@ -146,7 +155,13 @@ func runSSHLocalForward(ctx context.Context, target SSHTarget, requestedLocalPor
 				continue
 			}
 			reservation.release()
-			fmt.Fprintf(stdout, "http://%s:%s\n", sshTunnelLoopbackHost, reservation.port)
+			localURL := fmt.Sprintf("http://%s:%s", sshTunnelLoopbackHost, reservation.port)
+			if onReady != nil {
+				if readyErr := onReady(localURL); readyErr != nil {
+					result := stopAndWait()
+					return errors.Join(readyErr, cancelledSSHForwardResult(result))
+				}
+			}
 			goto ready
 		}
 	}

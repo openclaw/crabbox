@@ -1580,6 +1580,38 @@ func TestValidateRequestedCapabilitiesUsesProviderSpec(t *testing.T) {
 	}
 }
 
+func TestProviderSpecFeaturesForTarget(t *testing.T) {
+	common := FeatureSet{FeatureSSH, FeatureCleanup}
+	windows := FeatureSet{FeatureSSH, FeatureCleanup, FeatureCheckpoint}
+	spec := ProviderSpec{
+		Features: common,
+		Targets: []TargetSpec{
+			{OS: TargetLinux},
+			{OS: TargetWindows, WindowsMode: WindowsModeNormal},
+		},
+		TargetFeatures: map[string]FeatureSet{
+			TargetLinux:                             common,
+			TargetWindows + "/" + WindowsModeNormal: windows,
+		},
+	}
+
+	if got := spec.FeaturesForTarget(TargetLinux, ""); !reflect.DeepEqual(got, common) {
+		t.Fatalf("linux features=%v want %v", got, common)
+	}
+	if got := spec.FeaturesForTarget(TargetWindows, WindowsModeNormal); !reflect.DeepEqual(got, windows) {
+		t.Fatalf("windows features=%v want %v", got, windows)
+	}
+	if got := spec.FeaturesForTarget(TargetMacOS, ""); !reflect.DeepEqual(got, common) {
+		t.Fatalf("unknown target features=%v want provider features %v", got, common)
+	}
+
+	got := spec.FeaturesForTarget(TargetLinux, "")
+	got[0] = FeatureBrowser
+	if spec.TargetFeatures[TargetLinux][0] != FeatureSSH {
+		t.Fatalf("FeaturesForTarget returned mutable provider metadata: %v", spec.TargetFeatures[TargetLinux])
+	}
+}
+
 func TestRejectDelegatedSyncOptionsAllowsArchiveSyncControls(t *testing.T) {
 	spec := ProviderSpec{Name: "modal", Kind: ProviderKindDelegatedRun, Features: FeatureSet{FeatureArchiveSync}}
 	if err := RejectDelegatedSyncOptionsForSpec(spec, RunRequest{SyncOnly: true}); err != nil {
