@@ -3,13 +3,17 @@ package azuresandbox
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -79,7 +83,7 @@ func newClient(region, subscription, resourceGroup, group string, credential azc
 	}, nil
 }
 
-func (c *client) request(ctx context.Context, method, path string, query url.Values, body io.Reader, contentType string, result any) error {
+func (c *client) request(ctx context.Context, operation, method, path string, query url.Values, body io.Reader, contentType string, result any) error {
 	if query == nil {
 		query = url.Values{}
 	}
@@ -104,7 +108,7 @@ func (c *client) request(ctx context.Context, method, path string, query url.Val
 	// lease journal reconciles creation before another mutation is considered.
 	response, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("ACA Sandbox request failed: %w", ctxOrTransportError(ctx))
+		return fmt.Errorf("ACA Sandbox %s request failed: %w", operation, ctxOrTransportError(ctx, err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -119,14 +123,35 @@ func (c *client) request(ctx context.Context, method, path string, query url.Val
 	return nil
 }
 
-func ctxOrTransportError(ctx context.Context) error {
+func ctxOrTransportError(ctx context.Context, cause error) error {
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return fmt.Errorf("transport outcome unknown: %w", ctx.Err())
 	}
-	return fmt.Errorf("transport outcome unknown")
+	// Do errors can contain the URL, proxy credentials, or transport-supplied
+	// text. Project only fixed categories; never retain or unwrap the cause.
+	category := "other"
+	var dns *net.DNSError
+	var certificate *tls.CertificateVerificationError
+	var record tls.RecordHeaderError
+	var network net.Error
+	switch {
+	case errors.As(cause, &dns):
+		category = "dns"
+	case errors.As(cause, &certificate), errors.As(cause, &record):
+		category = "tls"
+	case errors.As(cause, &network) && network.Timeout():
+		category = "timeout"
+	case errors.Is(cause, syscall.ECONNRESET):
+		category = "connection-reset"
+	case errors.Is(cause, syscall.ECONNREFUSED):
+		category = "connection-refused"
+	case errors.Is(cause, io.EOF), errors.Is(cause, io.ErrUnexpectedEOF), errors.Is(cause, syscall.EPIPE):
+		category = "connection-closed"
+	}
+	return fmt.Errorf("transport outcome unknown (category=%s)", category)
 }
 
-func (c *client) json(ctx context.Context, method, path string, body, result any) error {
+func (c *client) json(ctx context.Context, operation, method, path string, body, result any) error {
 	var input io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -135,7 +160,7 @@ func (c *client) json(ctx context.Context, method, path string, body, result any
 		}
 		input = bytes.NewReader(data)
 	}
-	return c.request(ctx, method, path, nil, input, "application/json", result)
+	return c.request(ctx, operation, method, path, nil, input, "application/json", result)
 }
 
 func (c *client) sandboxPath(id string) (string, error) {
@@ -147,7 +172,7 @@ func (c *client) sandboxPath(id string) (string, error) {
 
 func (c *client) Create(ctx context.Context, body createRequest) (sandbox, error) {
 	var result sandbox
-	err := c.json(ctx, http.MethodPut, c.groupPath+"/sandboxes", body, &result)
+	err := c.json(ctx, "create", http.MethodPut, c.groupPath+"/sandboxes", body, &result)
 	if err == nil && result.ID == "" {
 		err = fmt.Errorf("ACA Sandbox create returned no resource identity; outcome unknown")
 	}
@@ -160,7 +185,7 @@ func (c *client) Get(ctx context.Context, id string) (sandbox, error) {
 	if err != nil {
 		return result, err
 	}
-	err = c.json(ctx, http.MethodGet, path, nil, &result)
+	err = c.json(ctx, "inspect", http.MethodGet, path, nil, &result)
 	if err == nil && result.ID != id {
 		err = fmt.Errorf("ACA Sandbox identity changed")
 	}
@@ -174,7 +199,7 @@ func (c *client) List(ctx context.Context) ([]sandbox, error) {
 	seen := map[string]bool{}
 	for {
 		var raw json.RawMessage
-		if err := c.request(ctx, http.MethodGet, path, query, nil, "", &raw); err != nil {
+		if err := c.request(ctx, "list", http.MethodGet, path, query, nil, "", &raw); err != nil {
 			return nil, err
 		}
 		var page struct {
@@ -210,7 +235,7 @@ func (c *client) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	return c.json(ctx, http.MethodDelete, path, nil, nil)
+	return c.json(ctx, "delete", http.MethodDelete, path, nil, nil)
 }
 
 func (c *client) Resume(ctx context.Context, id string) error {
@@ -218,7 +243,7 @@ func (c *client) Resume(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	return c.json(ctx, http.MethodPost, path+"/resume", nil, nil)
+	return c.json(ctx, "resume", http.MethodPost, path+"/resume", nil, nil)
 }
 
 func (c *client) Exec(ctx context.Context, id, command, workdir string) (execResult, error) {
@@ -231,7 +256,7 @@ func (c *client) Exec(ctx context.Context, id, command, workdir string) (execRes
 	if workdir != "" {
 		body["workingDirectory"] = workdir
 	}
-	err = c.json(ctx, http.MethodPost, path+"/executeShellCommand", body, &result)
+	err = c.json(ctx, "execute", http.MethodPost, path+"/executeShellCommand", body, &result)
 	if err == nil && result.ExitCode == nil {
 		err = fmt.Errorf("ACA Sandbox command returned no exit status; outcome unknown")
 	}
@@ -246,5 +271,5 @@ func (c *client) Upload(ctx context.Context, id, destination string, input io.Re
 	if !strings.HasPrefix(destination, "/") {
 		return fmt.Errorf("ACA Sandbox upload requires an absolute path")
 	}
-	return c.request(ctx, http.MethodPut, path+"/files", url.Values{"path": {destination}, "createDirs": {"true"}}, input, "application/octet-stream", nil)
+	return c.request(ctx, "upload", http.MethodPut, path+"/files", url.Values{"path": {destination}, "createDirs": {"true"}}, input, "application/octet-stream", nil)
 }
