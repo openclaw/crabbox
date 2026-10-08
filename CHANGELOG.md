@@ -1,30 +1,45 @@
 # Changelog
 
-## Unreleased
+## 0.73.0 - 2026-10-08
+
+### Highlights
+
+- **Start AWS Windows leases on Server 2025.** The promoted eu-west-1 developer image and stock fallback now use Windows Server 2025; an explicit OS selector keeps Server 2022 available. [PR 2748](https://github.com/openclaw/crabbox/pull/2748), [PR 2734](https://github.com/openclaw/crabbox/pull/2734), [Issue 2717](https://github.com/openclaw/crabbox/issues/2717). Thanks @saftall.
+- **Run shell workloads in Azure sandboxes and recover failed Azure VMs safely.** The new Azure Container Apps Sandboxes provider supports kept Linux workloads, uploads, idle resume, and verified cleanup. Azure VM leases retain cleanup ownership after VM loss, with `crabbox hold` for salvage. [PR 2738](https://github.com/openclaw/crabbox/pull/2738), [PR 2733](https://github.com/openclaw/crabbox/pull/2733). Thanks @galiniliev.
+- **Keep Windows command arguments intact.** Native programs and uploaded PowerShell scripts receive embedded quotes, empty arguments, backslashes, and Unicode without the legacy argument binder losing or merging them. [PR 2736](https://github.com/openclaw/crabbox/pull/2736).
+- **Recover interrupted creates after a coordinator reset.** Bounded history reads, streamed log downloads, and capped caches reduce memory pressure; interrupted creates fail promptly while preserving provider cleanup ownership. [PR 2745](https://github.com/openclaw/crabbox/pull/2745).
+- **Know how to stop every retained lease.** Runs print the exact stop command and retention reason, Cloudflare retries failed container cleanup, and stop respects cleanup already owned by expiry. [PR 2741](https://github.com/openclaw/crabbox/pull/2741), [PR 2735](https://github.com/openclaw/crabbox/pull/2735), [PR 2747](https://github.com/openclaw/crabbox/pull/2747), [Issue 2740](https://github.com/openclaw/crabbox/issues/2740), [Issue 2746](https://github.com/openclaw/crabbox/issues/2746). Thanks @coygeek and @shakkernerd.
+
+### Upgrade notes
+
+- AWS Windows leases now boot Server 2025 by default. Pin `--os windows-server:2022` to keep Server 2022. [PR 2748](https://github.com/openclaw/crabbox/pull/2748), [PR 2734](https://github.com/openclaw/crabbox/pull/2734), [Issue 2717](https://github.com/openclaw/crabbox/issues/2717). Thanks @saftall.
+- After an Azure VM disappears, automatic cleanup resumes only previously admitted deletion. Otherwise choose `crabbox stop` or `crabbox hold` explicitly, even for an expired lease; retain local claims for recovery. Holds do not expire automatically and need explicit finalization after salvage and disposal. [PR 2733](https://github.com/openclaw/crabbox/pull/2733). Thanks @galiniliev.
+
+### Added
+
+- Azure Sandbox: run kept Linux shell workloads in existing Azure Container Apps Sandbox groups with fixed lease recovery, explicit uploads, idle resume, and verified cleanup that can interrupt active requests. [PR 2738](https://github.com/openclaw/crabbox/pull/2738). Thanks @galiniliev.
 
 ### Changes
 
-- Azure Sandbox: run kept Linux shell workloads in existing Azure Container Apps Sandbox groups with fixed lease recovery, explicit uploads, idle resume, and verified cleanup that can interrupt active requests. [PR 2738](https://github.com/openclaw/crabbox/pull/2738). Thanks @galiniliev.
-- AWS Windows leases: default the stock AMI fallback to Server 2025 in direct and brokered mode while preserving explicit Server 2022 selection and promoted-image precedence. [Issue 2717](https://github.com/openclaw/crabbox/issues/2717). Thanks @saftall.
-- AWS Windows images: enable guarded Server 2025 bakes from stock with source-only OS selection, guest-version proof, and matching Server Core containers; explicit Server 2022 leases retain stock selection. [Issue 2717](https://github.com/openclaw/crabbox/issues/2717). Thanks @saftall.
+- AWS Windows leases: default the stock AMI fallback to Server 2025 in direct and brokered mode while preserving explicit Server 2022 selection and promoted-image precedence. [Issue 2717](https://github.com/openclaw/crabbox/issues/2717). [PR 2748](https://github.com/openclaw/crabbox/pull/2748). Thanks @saftall.
+- AWS Windows images: enable guarded Server 2025 bakes from stock with source-only OS selection, guest-version proof, and matching Server Core containers; explicit Server 2022 leases retain stock selection. [Issue 2717](https://github.com/openclaw/crabbox/issues/2717). [PR 2734](https://github.com/openclaw/crabbox/pull/2734). Thanks @saftall.
 
 ### Fixes
 
-- Stop: observe expiry-owned cleanup and reconcile its confirmed completion without duplicate provider deletion, preserving local recovery material while pending. [PR 2747](https://github.com/openclaw/crabbox/pull/2747). Thanks @shakkernerd.
-
-- Coordinator: bound historical lease reads, log downloads, cleanup scans, and bridge history caches; fail interrupted creates promptly before dispatch or after resource-ID publication while retaining provider cleanup custody.
-- Windows developer images: reboot through validated SSH without racing workspace ownership release, require bounded SSH down/up transitions before resuming prep, and fail on rejected shutdown commands.
-- Windows developer images: retry and verify container pulls and native package downloads, report the failing prep step, exception and longer log tail, and distinguish accepted release from unconfirmed cleanup after prep failure.
-- AWS developer images: wait up to `CRABBOX_IMAGE_CAPACITY_WAIT` (default 45 minutes per acquisition) for fleet, owner, or org active-lease capacity, preserving cleanup and excluding rejected attempts from measured timings.
-- Windows developer images: keep staged TruffleHog binaries executable on stock Server 2025 and report validation exit codes, stdout, stderr, and launch errors before atomic installation.
-- Run: print the exact provider-scoped stop command and retention reason when ownership checks fail closed or automatic cleanup cannot confirm the lease stopped, including timing JSON. [Issue 2740](https://github.com/openclaw/crabbox/issues/2740). Thanks @coygeek.
-- Validate OS selector compatibility after lease flags resolve the provider and target, so a configured or environment Windows Server selector accepts `--target windows` while incompatible final selections still fail.
+- Stop: observe expiry-owned cleanup and reconcile its confirmed completion without duplicate provider deletion, preserving local recovery material while pending. [PR 2747](https://github.com/openclaw/crabbox/pull/2747). [Issue 2746](https://github.com/openclaw/crabbox/issues/2746). Thanks @shakkernerd.
+- Coordinator: bound historical lease reads, log downloads, cleanup scans, and bridge history caches; fail interrupted creates promptly before dispatch or after resource-ID publication while retaining provider cleanup custody. [PR 2745](https://github.com/openclaw/crabbox/pull/2745).
+- Windows developer images: reboot through validated SSH without racing workspace ownership release, require bounded SSH down/up transitions before resuming prep, and fail on rejected shutdown commands. [PR 2744](https://github.com/openclaw/crabbox/pull/2744).
+- Windows developer images: retry and verify container pulls and native package downloads, report the failing prep step, exception and longer log tail, and distinguish accepted release from unconfirmed cleanup after prep failure. [PR 2743](https://github.com/openclaw/crabbox/pull/2743).
+- AWS developer images: wait up to `CRABBOX_IMAGE_CAPACITY_WAIT` (default 45 minutes per acquisition) for fleet, owner, or org active-lease capacity, preserving cleanup and excluding rejected attempts from measured timings. [PR 2742](https://github.com/openclaw/crabbox/pull/2742).
+- Windows developer images: keep staged TruffleHog binaries executable on stock Server 2025 and report validation exit codes, stdout, stderr, and launch errors before atomic installation. [PR 2739](https://github.com/openclaw/crabbox/pull/2739).
+- Run: print the exact provider-scoped stop command and retention reason when ownership checks fail closed or automatic cleanup cannot confirm the lease stopped, including timing JSON. [Issue 2740](https://github.com/openclaw/crabbox/issues/2740). [PR 2741](https://github.com/openclaw/crabbox/pull/2741). Thanks @coygeek.
+- Validate OS selector compatibility after lease flags resolve the provider and target, so a configured or environment Windows Server selector accepts `--target windows` while incompatible final selections still fail. [PR 2737](https://github.com/openclaw/crabbox/pull/2737).
 - Windows: preserve embedded quotes, empty arguments, backslashes, and Unicode when running native executables or passing arguments to uploaded PowerShell scripts. [PR 2736](https://github.com/openclaw/crabbox/pull/2736).
 - Azure: preserve original fixed-lease companion identities before readiness and across endpoint refresh, resume automatic cleanup only after durable deletion admission, and validate current attachments across the full companion set before deletion; reject reassigned or replacement resources and verify every resource slot before completion. [PR 2733](https://github.com/openclaw/crabbox/pull/2733). Thanks @galiniliev.
 - Azure: retain failed leases for salvage with durable holds that block reuse and deletion, including observation-only holds when the original local claim is lost; finalize holds explicitly after read-only verification of operator cleanup. [PR 2733](https://github.com/openclaw/crabbox/pull/2733). Thanks @galiniliev.
 - Azure: report fixed-lease capacity rejections as settled only after exact companion cleanup and local claim removal. [PR 2733](https://github.com/openclaw/crabbox/pull/2733). Thanks @galiniliev.
-- Cloudflare: retain cleanup alarms after container destruction fails and retry terminal leases before reporting stopped or expired status.
-- Warmup: report definitive coordinator quota rejection in timing output while preserving recovery for interrupted or ambiguous creation. [PR 2732](https://github.com/openclaw/crabbox/pull/2732). Thanks @shakkernerd.
+- Cloudflare: retain cleanup alarms after container destruction fails and retry terminal leases before reporting stopped or expired status. [PR 2735](https://github.com/openclaw/crabbox/pull/2735).
+- Warmup: report definitive coordinator quota rejection in timing output while preserving recovery for interrupted or ambiguous creation. [PR 2732](https://github.com/openclaw/crabbox/pull/2732). [Issue 2731](https://github.com/openclaw/crabbox/issues/2731). Thanks @shakkernerd.
 - Scaleway: create fixed leases from public images without snapshot access, recover the exact server after lost responses, and revalidate root-disk attempt ownership before cleanup. [PR 2728](https://github.com/openclaw/crabbox/pull/2728).
 
 ## 0.72.0 - 2026-10-06
