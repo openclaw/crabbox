@@ -1202,6 +1202,7 @@ export class FleetCoordinator {
   private readonly userGrantValidationTimes = new WeakMap<WebSocket, number>();
   private readonly viewerSessionValidationTimes = new WeakMap<WebSocket, number>();
   private readonly deviceMembershipCache = new Map<string, DeviceMembershipCacheEntry>();
+  private readonly activeRunLogReaders = new Map<string, number>();
   private currentAdminGrantVersion: string | undefined;
   private bridgeRestoreReady: Promise<boolean> | undefined;
   private readonly readyPoolBorrowLock = new AsyncMutex();
@@ -15746,16 +15747,29 @@ export class FleetCoordinator {
   }
 
   private runLogResponse(runID: string): Response {
+    // Pin before returning the body: pruning may run before the first client pull.
+    const release = this.retainRunLogReader(runID);
     const chunks = this.runLogChunks(runID);
     const body = new ReadableStream<Uint8Array>(
       {
         async pull(controller) {
-          const next = await chunks.next();
-          if (next.done) controller.close();
-          else controller.enqueue(textEncoder.encode(next.value));
+          try {
+            const next = await chunks.next();
+            if (next.done) {
+              release();
+              controller.close();
+            } else controller.enqueue(textEncoder.encode(next.value));
+          } catch (error) {
+            release();
+            throw error;
+          }
         },
         async cancel() {
-          await chunks.return(undefined);
+          try {
+            await chunks.return(undefined);
+          } finally {
+            release();
+          }
         },
       },
       { highWaterMark: 0 },
@@ -15764,9 +15778,26 @@ export class FleetCoordinator {
   }
 
   private async readRunLogTail(runID: string, limit: number): Promise<string> {
-    let tail = "";
-    for await (const chunk of this.runLogChunks(runID)) tail = tailString(tail + chunk, limit);
-    return tail;
+    const release = this.retainRunLogReader(runID);
+    try {
+      let tail = "";
+      for await (const chunk of this.runLogChunks(runID)) tail = tailString(tail + chunk, limit);
+      return tail;
+    } finally {
+      release();
+    }
+  }
+
+  private retainRunLogReader(runID: string): () => void {
+    this.activeRunLogReaders.set(runID, (this.activeRunLogReaders.get(runID) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.activeRunLogReaders.get(runID) ?? 1) - 1;
+      if (remaining > 0) this.activeRunLogReaders.set(runID, remaining);
+      else this.activeRunLogReaders.delete(runID);
+    };
   }
 
   private async listRuns(request: Request): Promise<Response> {
@@ -19377,7 +19408,12 @@ export class FleetCoordinator {
     await this.state.runExclusive(async () => {
       const current = await this.getRun(runID);
       const terminalAt = current ? terminalRunTimestamp(current) : undefined;
-      if (!current || terminalAt === undefined || terminalAt > cutoff) {
+      if (
+        !current ||
+        terminalAt === undefined ||
+        terminalAt > cutoff ||
+        this.activeRunLogReaders.has(runID)
+      ) {
         return;
       }
       await this.deleteStoragePrefix(runEventPrefix(runID));

@@ -17527,6 +17527,51 @@ describe("fleet lease identity and idle", () => {
     expect(scans.every(({ limit, noCache }) => limit === 1 && noCache)).toBe(true);
   });
 
+  it("defers terminal run pruning until every log reader closes", async () => {
+    const storage = new MemoryStorage();
+    const id = "run_000000000001";
+    storage.seed(
+      `run:${id}`,
+      testRun({
+        id,
+        owner: "alice@example.com",
+        org: "example-org",
+        leaseIDs: [],
+        state: "failed",
+        endedAt: new Date(Date.now() - 40 * 86400_000).toISOString(),
+      }),
+    );
+    storage.seed(`runlog:${id}:chunk:000000`, "first\n");
+    storage.seed(`runlog:${id}:chunk:000001`, "second\n");
+    const fleet = testFleet(storage);
+    const prune = () =>
+      (
+        fleet as unknown as {
+          deleteTerminalRun(id: string, cutoff: number): Promise<void>;
+        }
+      ).deleteTerminalRun(id, Date.now());
+    const download = () =>
+      fleet.fetch(
+        request("GET", `/v1/runs/${id}/logs`, {
+          headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+        }),
+      );
+    const first = await download();
+    const second = await download();
+    await prune();
+    expect(storage.value(`run:${id}`)).toBeDefined();
+    const reader = first.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("first\n");
+    await second.body!.cancel();
+    await prune();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("second\n");
+    expect((await reader.read()).done).toBe(true);
+    await prune();
+    expect(storage.value(`run:${id}`)).toBeUndefined();
+    expect(storage.value(`runlog:${id}:chunk:000000`)).toBeUndefined();
+    expect(storage.value(`runlog:${id}:chunk:000001`)).toBeUndefined();
+  });
+
   it("bounds per-lease bridge history caches and reloads evicted hydration markers", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage) as unknown as {
@@ -19264,8 +19309,8 @@ describe("fleet lease identity and idle", () => {
       expect(creates).toBe(dispatched);
       const retained = snapshot!.value<LeaseRecord>(`lease:${leaseID}`)!;
       expect(retained.provisioningResourceMayExist).toBe(phase === "provider-request");
-      expect(retained.provisioningCoordinatorVersion).toEqual(
-        phase === "provider-request" ? expect.any(String) : undefined,
+      expect(typeof retained.provisioningCoordinatorVersion).toBe(
+        phase === "provider-request" ? "string" : "undefined",
       );
       expect(retained.cloudID).toBe(phase === "resource-captured" ? "i-reset" : "");
       expect(deleted).toEqual(phase === "resource-captured" ? ["i-reset"] : []);

@@ -706,7 +706,8 @@ unknown keep settlement and absence-confirmation checks. Replaying the same
 create attempt cannot allocate a replacement for that failed lease.
 
 Usage and lease-history consumers scan bounded uncached storage pages. Log
-downloads stream stored chunks and stop reading on cancellation; portal run
+downloads stream stored chunks and stop reading on cancellation; active readers
+defer retention pruning until they close. Portal run
 previews retain only their displayed tail. See the
 [fleet memory audit](../diagnostics/coordinator-memory.md) for measured scan
 bounds, remaining memory risks, and production telemetry needed for attribution.
