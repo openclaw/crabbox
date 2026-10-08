@@ -368,14 +368,15 @@ cleanup() {
         *"|$lease|"*) continue ;;
       esac
       seen_leases+="$lease|"
-      stop_code=0
-      stop_output="$("$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" 2>&1)" || stop_code=$?
-      printf '%s\n' "$stop_output" >&2
-      if [[ "$stop_code" != "0" ]]; then
-        # Only failure cleanup may defer observation; never turn a mint green or discard its handles.
-        if [[ "$target" == "windows" && "$exit_status" != "0" ]] &&
-          [[ "$stop_output" == *"coordinator accepted release for $lease, but remote cleanup observation was canceled;"* ||
-             "$stop_output" == *"coordinator accepted release for $lease, but remote cleanup is still pending"* ]]; then
+      # Only Windows failure cleanup may defer observation; preserve strict publisher cleanup below.
+      if [[ "$target" == "windows" && "$exit_status" != "0" ]]; then
+        stop_code=0
+        stop_output="$("$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" 2>&1)" || stop_code=$?
+        printf '%s\n' "$stop_output" >&2
+        if [[ "$stop_code" == "0" ]]; then
+          continue
+        elif [[ "$stop_output" == *"coordinator accepted release for $lease, but remote cleanup observation was canceled;"* ||
+                "$stop_output" == *"coordinator accepted release for $lease, but remote cleanup is still pending"* ]]; then
           [[ "$cleanup_status" == "failed" ]] || cleanup_status="pending"
           printf 'Windows failure cleanup: release accepted for %s; cleanup remains unconfirmed; preserving original mint failure (exit %s) and lease handles.\n' "$lease" "$exit_status" >&2
           printf 'Check crabbox status --provider aws --id %s --json, then retry crabbox stop --provider aws --target windows %s to verify cleanup and remove retained local artifacts.\n' "$lease" "$lease" >&2
@@ -383,6 +384,11 @@ cleanup() {
           cleanup_status="failed"
           finalizer_status=1
         fi
+        continue
+      fi
+      if ! "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease"; then
+        cleanup_status="failed"
+        finalizer_status=1
       fi
     done
   fi
