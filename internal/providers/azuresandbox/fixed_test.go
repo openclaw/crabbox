@@ -1,6 +1,7 @@
 package azuresandbox
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -155,6 +156,75 @@ func TestUncertainCreateAdoptsOriginalAndNeverResubmits(t *testing.T) {
 	}
 	if f.creates != 1 {
 		t.Fatal("adoption allocated a new resource")
+	}
+}
+
+func TestSandboxMalformedInventoryCannotCreateOrRelease(t *testing.T) {
+	f := &fixture{}
+	b, req := fixtureBackend(t, f)
+	b.api.http.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/sandboxes") {
+			return response(200, `{}`), nil
+		}
+		return f.request(t, r)
+	})
+	if _, err := b.acquire(t.Context(), req); err == nil || f.creates != 0 {
+		t.Fatalf("malformed inventory admitted creation: err=%v creates=%d", err, f.creates)
+	}
+	if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err == nil {
+		t.Fatal("malformed inventory settled absence")
+	}
+	claim, err := b.claim(req.RequestedLeaseID)
+	if err != nil || claim.FixedCreateIntent.State == "released" || f.deletes != 0 {
+		t.Fatalf("uncertain claim lost: %+v err=%v deletes=%d", claim, err, f.deletes)
+	}
+}
+
+func TestSandboxDeleteRequiresAbsenceReadback(t *testing.T) {
+	for _, readback := range []string{"unavailable", "still-present", "absent"} {
+		t.Run(readback, func(t *testing.T) {
+			f := &fixture{}
+			b, req := fixtureBackend(t, f)
+			if _, err := b.acquire(t.Context(), req); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			readsAfterDelete := 0
+			b.api.http.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodDelete {
+					f.deletes++
+					return response(202, ""), nil
+				}
+				if f.deletes > 0 {
+					readsAfterDelete++
+					switch readback {
+					case "unavailable":
+						return response(503, ""), nil
+					case "still-present":
+						cancel()
+					case "absent":
+						f.box = nil
+					}
+				}
+				return f.request(t, r)
+			})
+			err := b.Stop(ctx, core.StopRequest{ID: req.RequestedLeaseID})
+			if (err == nil) != (readback == "absent") || readsAfterDelete != 1 {
+				t.Fatalf("stop err=%v readbacks=%d", err, readsAfterDelete)
+			}
+			claim, err := b.claim(req.RequestedLeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if readback == "absent" {
+				if claim.FixedCreateIntent.State != "released" {
+					t.Fatal("verified absence did not release claim")
+				}
+			} else if claim.FixedCreateIntent.State != "acquired" || claim.FixedCreateIntent.Journal.Phase != "deleting" {
+				t.Fatal("unverified deletion did not retain its cleanup admission")
+			}
+		})
 	}
 }
 

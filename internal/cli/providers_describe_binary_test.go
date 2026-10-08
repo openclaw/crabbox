@@ -44,6 +44,7 @@ func TestProvidersFixedLeaseIDBuiltBinary(t *testing.T) {
 		{"ascii-box", true},
 		{"aws", true},
 		{"azure", true},
+		{"azure-sandbox", true},
 		{"daytona", true},
 		{"incus", true},
 		{"local-container", true},

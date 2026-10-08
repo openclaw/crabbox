@@ -197,6 +197,9 @@ Rules:
     `workspace-restore`, `provider-snapshot`).
   - `FeatureRunProof` — delegated backend can return bounded stream/timing
     proof metadata.
+  - `FeatureShellScriptRun` — delegated backend accepts shell scripts through
+    `--script` or `--script-stdin`, including trailing script arguments. The
+    adapter owns script execution; this does not advertise repository sync.
   - `FeatureRunSession` — exposes a provider-neutral run-session handle.
     Delegated backends may return a validated handle in `RunResult`. An
     explicitly opted-in SSH-lease provider that also advertises `FeatureSSH`

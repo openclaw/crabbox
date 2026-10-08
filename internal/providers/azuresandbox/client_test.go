@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -154,5 +155,22 @@ func TestInventoryPaginationStaysInGroup(t *testing.T) {
 	items, err := c.List(context.Background())
 	if err != nil || len(items) != 2 || items[1].ID != "two" {
 		t.Fatalf("inventory: %+v %v", items, err)
+	}
+}
+
+func TestSandboxInventoryRejectsMissingResourceArray(t *testing.T) {
+	for _, body := range []string{`null`, `{}`, `{"value":null}`, `{"error":{"code":"Unavailable"}}`} {
+		t.Run(body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, body)
+			}))
+			defer server.Close()
+			c := fixtureClient(t, nil)
+			c.endpoint, c.http = server.URL, server.Client()
+			if _, err := c.List(t.Context()); err == nil {
+				t.Fatal("malformed inventory was accepted as proven empty")
+			}
+		})
 	}
 }

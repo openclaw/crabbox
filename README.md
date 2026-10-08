@@ -199,7 +199,7 @@ access; discover them with `crabbox providers --feature url-bridge`.
 
 ## Providers
 
-**80 built-in providers plus the `external` plugin contract: 81 catalog entries.**
+**81 built-in providers plus the `external` plugin contract: 82 catalog entries.**
 The groups below follow the compiled catalog and link to each provider's setup
 and limitations. Some adapters delegate execution; service-control adapters do
 not run arbitrary commands. SSH, desktops, snapshots, and cleanup are not uniform.
@@ -256,6 +256,7 @@ Catalog category: `delegated-sandbox`.
 | [agent-sandbox](docs/providers/agent-sandbox.md) | Delegated Linux execution from a Kubernetes Agent Sandbox warm pool. |
 | [aws-lambda-microvm](docs/providers/aws-lambda-microvm.md) | Stateful ARM64 execution with a compatible Crabbox runner image. |
 | [azure-dynamic-sessions](docs/providers/azure-dynamic-sessions.md) | Short delegated container sessions in Azure. |
+| [azure-sandbox](docs/providers/azure-sandbox.md) | Kept Linux shell workloads in Azure Container Apps Sandbox groups with explicit file uploads. |
 | [blaxel](docs/providers/blaxel.md) | Managed delegated Linux sandbox execution. |
 | [cloud-run-sandbox](docs/providers/cloud-run-sandbox.md) | Delegated Cloud Run execution through a sandbox launcher or gateway. |
 | [cloudflare](docs/providers/cloudflare.md) | Fast delegated Linux container execution. |

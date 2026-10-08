@@ -6,8 +6,8 @@ Read when:
 - debugging provider-specific provisioning, sync, or command execution;
 - changing provider registration, flags, config, or backend behavior.
 
-Crabbox's catalog contains **80 built-in providers plus the `external` plugin
-contract** (81 entries). The compiled target lists include Linux, macOS, native
+Crabbox's catalog contains **81 built-in providers plus the `external` plugin
+contract** (82 entries). The compiled target lists include Linux, macOS, native
 Windows, WSL2, and a Worker-module runtime. Support varies by provider: a catalog
 entry is not a promise of credentials, capacity, desktop access, or arbitrary
 shell execution. Start with `crabbox providers recommend`, then inspect the
@@ -202,7 +202,7 @@ but also supports coordinator-managed leases.
 | `brokerable-cloud` | 4 | [aws](aws.md), [azure](azure.md), [gcp](gcp.md), [hetzner](hetzner.md) |
 | `byo-ssh` | 1 | [ssh](ssh.md) |
 | `ci-proof-runner` | 2 | [blacksmith-testbox](blacksmith-testbox.md), [semaphore](semaphore.md) |
-| `delegated-sandbox` | 24 | [agent-sandbox](agent-sandbox.md), [aws-lambda-microvm](aws-lambda-microvm.md), [azure-dynamic-sessions](azure-dynamic-sessions.md), [blaxel](blaxel.md), [cloud-run-sandbox](cloud-run-sandbox.md), [cloudflare](cloudflare.md), [cloudflare-dynamic-workers](cloudflare-dynamic-workers.md), [cloudflare-sandbox](cloudflare-sandbox.md), [codesandbox](codesandbox.md), [crownest](crownest.md), [cubesandbox](cubesandbox.md), [e2b](e2b.md), [freestyle](freestyle.md), [islo](islo.md), [modal](modal.md), [nomad](nomad.md), [opencomputer](opencomputer.md), [opensandbox](opensandbox.md), [orgo](orgo.md), [smolvm](smolvm.md), [superserve](superserve.md), [tensorlake](tensorlake.md), [upstash-box](upstash-box.md), [vercel-sandbox](vercel-sandbox.md) |
+| `delegated-sandbox` | 25 | [agent-sandbox](agent-sandbox.md), [aws-lambda-microvm](aws-lambda-microvm.md), [azure-dynamic-sessions](azure-dynamic-sessions.md), [azure-sandbox](azure-sandbox.md), [blaxel](blaxel.md), [cloud-run-sandbox](cloud-run-sandbox.md), [cloudflare](cloudflare.md), [cloudflare-dynamic-workers](cloudflare-dynamic-workers.md), [cloudflare-sandbox](cloudflare-sandbox.md), [codesandbox](codesandbox.md), [crownest](crownest.md), [cubesandbox](cubesandbox.md), [e2b](e2b.md), [freestyle](freestyle.md), [islo](islo.md), [modal](modal.md), [nomad](nomad.md), [opencomputer](opencomputer.md), [opensandbox](opensandbox.md), [orgo](orgo.md), [smolvm](smolvm.md), [superserve](superserve.md), [tensorlake](tensorlake.md), [upstash-box](upstash-box.md), [vercel-sandbox](vercel-sandbox.md) |
 | `direct-cloud` | 22 | [ascii-box](ascii-box.md), [boxd](boxd.md), [coder](coder.md), [daytona](daytona.md), [digitalocean](digitalocean.md), [exe-dev](exe-dev.md), [github-codespaces](github-codespaces.md), [hostinger](hostinger.md), [linode](linode.md), [machine0](machine0.md), [morph](morph.md), [namespace-devbox](namespace-devbox.md), [namespace-instance](namespace-instance.md), [nebius](nebius.md), [ovh](ovh.md), [phala](phala.md), [scaleway](scaleway.md), [sealos-devbox](sealos-devbox.md), [sprites](sprites.md), [tencentcloud](tencentcloud.md), [tenki](tenki.md), [vultr](vultr.md) |
 | `external-provider` | 1 | [external](external.md) |
 | `gpu-cloud` | 5 | [lambda](lambda.md), [nvidia-brev](nvidia-brev.md), [runpod](runpod.md), [vast](vast.md), [wandb](wandb.md) |

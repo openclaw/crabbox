@@ -188,6 +188,9 @@ func (c *client) List(ctx context.Context) ([]sandbox, error) {
 		} else if err := json.Unmarshal(raw, &page); err != nil {
 			return nil, err
 		}
+		if page.Value == nil {
+			return nil, fmt.Errorf("ACA Sandbox inventory returned no resource array; outcome unknown")
+		}
 		all = append(all, page.Value...)
 		if page.NextLink == "" {
 			return all, nil
