@@ -1010,11 +1010,58 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var target SSHTarget
 	var leaseID string
 	var borrowedPool *CoordinatorReadyPoolResponse
+	var returnedPool bool
 	var stopReadyPoolHeartbeat func()
 	var workdir string
 	var hydratedByActions bool
 	var lifecycleOwner *workspaceOwner
+	var acquired, releaseResolvedLease, keepFailedLease bool
 	ownerParentCtx := ctx
+	// Report recovery after every cleanup defer, including early setup and
+	// fail-closed owner returns, but before the final timing record is written.
+	defer func() {
+		if leaseID == "" || cleanup.Stopped || returnedPool {
+			return
+		}
+		reason := "automatic cleanup did not complete"
+		switch {
+		case cleanup.Err != nil:
+			reason += ": " + cleanup.Err.Error()
+		case borrowedPool != nil:
+			reason = "ready-pool return did not complete"
+			if err != nil {
+				reason += ": " + err.Error()
+			}
+		case !releaseResolvedLease:
+			reason = "automatic cleanup was not admitted"
+			if err != nil {
+				reason += ": " + err.Error()
+			}
+		case cleanup.Attempted:
+			reason = "provider did not confirm the lease stopped"
+		case strings.TrimSpace(*stopAfter) != "":
+			reason = "automatic cleanup skipped by --stop-after " + *stopAfter
+		case *keep:
+			reason = "automatic cleanup disabled by --keep"
+		case keepFailedLease:
+			reason = "automatic cleanup skipped by --keep-on-failure"
+		case !acquired:
+			reason = "automatic cleanup disabled for an existing lease"
+		}
+		reason = RedactDiagnosticSecrets(strings.Join(strings.Fields(reason), " "))
+		if finalTimingReport == nil {
+			// Setup can fail before workload timing exists, but the resolved
+			// lease still needs the same recovery metadata as a completed run.
+			report := TimingReportWithRunResult(timingReport{
+				Provider: cfg.Provider, LeaseID: leaseID, Slug: ServerSlug(server),
+			}, RunResult{}, err)
+			populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, nil)
+			report.Label = runLabelValue
+			finalTimingReport = &report
+		}
+		finalTimingReport.LeaseRetainedReason = reason
+		fmt.Fprintf(a.Stderr, "lease recovery provider=%s lease=%s slug=%s reason=%q stop_command=%q\n", cfg.Provider, leaseID, blank(ServerSlug(server), "-"), reason, finalTimingReport.StopCommand)
+	}()
 	defer func() {
 		if lifecycleOwner == nil && !runtimeScope.hasLease(leaseID) {
 			return
@@ -1146,6 +1193,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			}
 			return
 		}
+		returnedPool = true
 		fmt.Fprintf(a.Stderr, "returned pool=%s lease=%s result=%s\n", borrowedPool.Entry.Key, borrowedPool.Entry.LeaseID, result)
 	}()
 	leaseOutputPath := strings.TrimSpace(*leaseOutput)
@@ -1413,7 +1461,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		fmt.Fprintf(a.Stderr, "borrowed pool=%s lease=%s\n", res.Entry.Key, res.Entry.LeaseID)
 	}
 
-	acquired := false
 	useCoordinator := coord != nil
 	failureClassificationPrinted := false
 	recordFailure := func(failure error) error {
@@ -1440,8 +1487,6 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var runnerProviderTiming *runnerProviderTiming
 	leasePhase := "provider.acquire"
 	claimAdmitted := false
-	releaseResolvedLease := false
-	keepFailedLease := false
 	// A newly acquired retained lease is not safe to keep until its requested
 	// cleanup handle has been written successfully.
 	releaseUnreportedLease := false

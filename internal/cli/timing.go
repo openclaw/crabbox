@@ -54,8 +54,9 @@ type TimingReport struct {
 	SchemaValidations []SchemaValidationResult `json:"schemaValidations,omitempty"`
 	ArtifactChanges   []ArtifactChangeResult   `json:"artifactChanges,omitempty"`
 
-	LeaseStopped *bool  `json:"leaseStopped,omitempty"`
-	LeaseStopErr string `json:"leaseStopError,omitempty"`
+	LeaseStopped        *bool  `json:"leaseStopped,omitempty"`
+	LeaseStopErr        string `json:"leaseStopError,omitempty"`
+	LeaseRetainedReason string `json:"leaseRetainedReason,omitempty"`
 }
 
 // CreationRejection describes a requested fixed identity rejected before lease

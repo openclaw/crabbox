@@ -266,8 +266,14 @@ on an existing direct lease is stored in whole seconds, rounded to the nearest
 second with a minimum of one second for a positive value. Use `--stop-after
 success|always|failure|never` to make lease cleanup explicit. Without it, a
 newly acquired one-shot lease is released after the command and an existing
-`--id` lease is left alone. The run details always print the exact `crabbox
-stop ...` command. Use `--keep-on-failure` to keep a newly acquired lease alive
+`--id` lease is left alone. The run details print the exact `crabbox stop ...`
+command. If a resolved SSH lease remains after an early failure, ownership
+refusal, interrupted cleanup, or retention policy, a final `lease recovery`
+line prints the same provider-scoped `stop_command` and a one-line reason.
+With `--timing-json`, the final JSON record includes `stopCommand` and
+`leaseRetainedReason` too. Ambiguous ownership still refuses automatic cleanup;
+the recovery command does not bypass the ownership checks in `stop`.
+Use `--keep-on-failure` to keep a newly acquired lease alive
 for debugging when the remote command exits non-zero; it does not retain a
 failed acquisition (for example, a Parallels clone that fails guest preparation).
 Crabbox then prints

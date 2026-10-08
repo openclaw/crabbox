@@ -9,6 +9,7 @@
 ### Fixes
 
 - Windows developer images: keep staged TruffleHog binaries executable on stock Server 2025 and report validation exit codes, stdout, stderr, and launch errors before atomic installation.
+- Run: print the exact provider-scoped stop command and retention reason when ownership checks fail closed or automatic cleanup cannot confirm the lease stopped, including timing JSON. [Issue 2740](https://github.com/openclaw/crabbox/issues/2740). Thanks @coygeek.
 - Validate OS selector compatibility after lease flags resolve the provider and target, so a configured or environment Windows Server selector accepts `--target windows` while incompatible final selections still fail.
 - Windows: preserve embedded quotes, empty arguments, backslashes, and Unicode when running native executables or passing arguments to uploaded PowerShell scripts. [PR 2736](https://github.com/openclaw/crabbox/pull/2736).
 - Azure: preserve original fixed-lease companion identities before readiness and across endpoint refresh, resume automatic cleanup only after durable deletion admission, and validate current attachments across the full companion set before deletion; reject reassigned or replacement resources and verify every resource slot before completion. [PR 2733](https://github.com/openclaw/crabbox/pull/2733). Thanks @galiniliev.
