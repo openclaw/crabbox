@@ -12,6 +12,7 @@ log_dir="${CRABBOX_IMAGE_LOG_DIR:-.crabbox}"
 ttl="${CRABBOX_IMAGE_TTL:-2h}"
 idle_timeout="${CRABBOX_IMAGE_IDLE_TIMEOUT:-30m}"
 wait_timeout="${CRABBOX_IMAGE_WAIT_TIMEOUT:-60m}"
+capacity_wait="${CRABBOX_IMAGE_CAPACITY_WAIT:-45m}"
 prep_wait_timeout="${CRABBOX_IMAGE_PREP_WAIT_TIMEOUT:-90m}"
 reboot_wait_timeout="${CRABBOX_IMAGE_REBOOT_WAIT_TIMEOUT:-25m}"
 reboot_settle_seconds="${CRABBOX_IMAGE_REBOOT_SETTLE_SECONDS:-30}"
@@ -84,6 +85,7 @@ Useful env:
   CRABBOX_IMAGE_KEEP_LEASE
   CRABBOX_IMAGE_LOG_DIR
   CRABBOX_IMAGE_WAIT_TIMEOUT
+  CRABBOX_IMAGE_CAPACITY_WAIT  active-lease admission retry budget per acquisition, default 45m (0 disables)
   CRABBOX_IMAGE_PREP_WAIT_TIMEOUT
   CRABBOX_IMAGE_REBOOT_WAIT_TIMEOUT
   CRABBOX_IMAGE_REBOOT_SETTLE_SECONDS
@@ -207,6 +209,11 @@ case "$target" in
     exit 2
     ;;
 esac
+
+[[ "$capacity_wait" =~ ^(0|[1-9][0-9]{0,5})([smh])?$ ]] || {
+  printf 'CRABBOX_IMAGE_CAPACITY_WAIT must be whole seconds, minutes or hours (e.g. 45m, 0 disables)\n' >&2
+  exit 2
+}
 
 if [[ "$target" == windows && "$stock_source" == 1 ]]; then
   case "${CRABBOX_OS:-}" in
@@ -723,6 +730,79 @@ assert_region() {
   fi
 }
 
+capacity_rejected() {
+  node - "$@" <<'NODE'
+const fs = require("node:fs");
+const [log, handle, store, offset] = process.argv.slice(2);
+if (handle && fs.existsSync(handle)) process.exit(1);
+const text = fs.readFileSync(log, "utf8");
+const hasLease = value => value && typeof value === "object" &&
+  (value.leaseId || Object.values(value).some(hasLease));
+let rejected = false;
+for (const line of text.split("\n")) {
+  try { if (hasLease(JSON.parse(line))) process.exit(1); } catch {}
+  const match = line.match(/coordinator POST \/v1\/leases: http (\d+): (.*)$/);
+  if (!match) continue;
+  try {
+    const body = JSON.parse(match[2]);
+    // These three admission messages precede lease publication and provisioning.
+    // Monthly spending limits share the error code and must fail immediately.
+    if (match[1] !== "429" || body.error !== "cost_limit_exceeded" ||
+        !/^(fleet active lease limit exceeded|active lease limit for (owner|org) exceeded): [0-9]+\/[0-9]+$/.test(body.message)) process.exit(1);
+    rejected = true;
+  } catch { process.exit(1); }
+}
+if (!rejected) process.exit(1);
+if (store && fs.existsSync(store)) {
+  const records = fs.readFileSync(store).subarray(Number(offset)).toString("utf8");
+  for (const line of records.split("\n").filter(Boolean)) {
+    const record = JSON.parse(line);
+    if (hasLease(record) || record.timing?.exitCode === 0) process.exit(1);
+  }
+}
+NODE
+}
+
+run_with_capacity_wait() {
+  local label="$1" log="$2" handle="$3" store="$4"
+  shift 4
+  local deadline="" attempt=1 remaining delay store_size command_status
+  local -a statuses
+  while true; do
+    store_size=0
+    [[ -z "$store" || ! -f "$store" ]] || store_size="$(wc -c <"$store")"
+    run_cmd "$@" 2>&1 | tee "$log" &&
+      statuses=("${PIPESTATUS[@]}") || statuses=("${PIPESTATUS[@]}")
+    command_status="${statuses[0]}"
+    [[ "$command_status" != 0 ]] || return "${statuses[1]}"
+    # Never retry an output failure or any evidence of an allocated lease.
+    [[ "${statuses[1]}" == 0 ]] || return "$command_status"
+    capacity_rejected "$log" "$handle" "$store" "$store_size" || return "$command_status"
+    [[ -n "$deadline" ]] || deadline=$((SECONDS + $(duration_seconds "$capacity_wait")))
+    remaining=$((deadline - SECONDS))
+    if ((remaining <= 0)); then
+      printf 'capacity wait budget exhausted for %s after %s; last rejection log=%s\n' "$label" "$capacity_wait" "$log" >&2
+      return "$command_status"
+    fi
+    # Retain rejected evidence separately; only actual acquisitions are samples.
+    cp "$log" "$log.capacity-$attempt" || return "$command_status"
+    if [[ -n "$store" && -f "$store" ]]; then
+      node -e '
+const fs = require("node:fs");
+const [store, offset, out] = process.argv.slice(1);
+fs.writeFileSync(out, fs.readFileSync(store).subarray(Number(offset)));
+fs.truncateSync(store, Number(offset));
+' "$store" "$store_size" "$log.capacity-$attempt.timing.jsonl" || return "$command_status"
+    fi
+    delay=120
+    ((remaining >= delay)) || delay="$remaining"
+    printf 'active-lease capacity unavailable for %s; retrying in %ss (%ss remaining; attempt %s; log=%s.capacity-%s)\n' \
+      "$label" "$delay" "$remaining" "$attempt" "$log" "$attempt" >&2
+    sleep "$delay" || return "$command_status"
+    attempt=$((attempt + 1))
+  done
+}
+
 warmup() {
   local label="$1"
   local log
@@ -740,9 +820,9 @@ warmup() {
   printf 'warming %s lease log=%s\n' "$label" "$log" >&2
   local warmup_status=0
   if [[ "${#env_args[@]}" -gt 0 ]]; then
-    run_cmd env "${env_args[@]}" "$CRABBOX_BIN" "${args[@]}" 2>&1 | tee "$log" >&2 || warmup_status=$?
+    run_with_capacity_wait "$label" "$log" "$(warmup_handle_path "$label")" "" env "${env_args[@]}" "$CRABBOX_BIN" "${args[@]}" >&2 || warmup_status=$?
   else
-    run_cmd "$CRABBOX_BIN" "${args[@]}" 2>&1 | tee "$log" >&2 || warmup_status=$?
+    run_with_capacity_wait "$label" "$log" "$(warmup_handle_path "$label")" "" "$CRABBOX_BIN" "${args[@]}" >&2 || warmup_status=$?
   fi
   local lease
   lease="$(lease_from_log "$log" || true)"
@@ -821,7 +901,6 @@ measure_cohort() {
   local phase="$1"
   local sample log handle selection run_status recovery_status capture_status stop_status partial_status
   local store="$measurement_dir/$phase.jsonl"
-  local -a pipeline_status
   local -a env_args=(env -u CRABBOX_AWS_AMI CRABBOX_AWS_REGION="$region" AWS_REGION="$region")
   [[ "$phase" == "candidate" ]] && env_args+=(CRABBOX_AWS_AMI="$ami_id")
   for sample in 1 2 3; do
@@ -830,14 +909,13 @@ measure_cohort() {
     measurement_handle="$handle"
     selection="$measurement_dir/$phase-$sample.selection.json"
     # Fresh acquisition with a durable cleanup handle; this wrapper owns stop on every outcome.
-    run_cmd "${env_args[@]}" "$CRABBOX_BIN" run --provider aws --target linux \
+    run_status=0
+    run_with_capacity_wait "$phase-$sample" "$log" "$handle" "$store" \
+      "${env_args[@]}" "$CRABBOX_BIN" run --provider aws --target linux \
       --arch x86_64 --class "$server_class" --type "$server_type" --market on-demand \
       --ttl "$ttl" --idle-timeout "$idle_timeout" --desktop --browser \
       --full-resync --no-hydrate --keep --stop-after never --lease-output "$handle" \
-      --timing-record "$store" -- true 2>&1 | tee "$log" &&
-      pipeline_status=("${PIPESTATUS[@]}") || pipeline_status=("${PIPESTATUS[@]}")
-    run_status="${pipeline_status[0]}"
-    [[ "$run_status" != "0" ]] || run_status="${pipeline_status[1]}"
+      --timing-record "$store" -- true || run_status=$?
     recovery_status=0
     capture_status=0
     stop_status=0

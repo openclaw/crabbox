@@ -9,6 +9,7 @@
 
 ### Fixes
 
+- AWS developer images: wait up to `CRABBOX_IMAGE_CAPACITY_WAIT` (default 45 minutes per acquisition) for fleet, owner, or org active-lease capacity, preserving cleanup and excluding rejected attempts from measured timings.
 - Windows developer images: keep staged TruffleHog binaries executable on stock Server 2025 and report validation exit codes, stdout, stderr, and launch errors before atomic installation.
 - Run: print the exact provider-scoped stop command and retention reason when ownership checks fail closed or automatic cleanup cannot confirm the lease stopped, including timing JSON. [Issue 2740](https://github.com/openclaw/crabbox/issues/2740). Thanks @coygeek.
 - Validate OS selector compatibility after lease flags resolve the provider and target, so a configured or environment Windows Server selector accepts `--target windows` while incompatible final selections still fail.

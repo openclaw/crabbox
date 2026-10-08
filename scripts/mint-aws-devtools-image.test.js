@@ -1791,6 +1791,178 @@ case "$1" in`,
   };
 }
 
+const fleetCapacityError = 'coordinator POST /v1/leases: http 429: {"error":"cost_limit_exceeded","message":"fleet active lease limit exceeded: 21/20"}';
+
+async function capacityFixture(fake, failures, { realSleep = false } = {}) {
+  const wrapper = path.join(fake.dir, "capacity-crabbox.mjs");
+  const attempts = path.join(fake.dir, "capacity-attempts.json");
+  await writeFile(wrapper, `#!/usr/bin/env node
+import fs from "node:fs";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+const option = name => args[args.indexOf(name) + 1];
+let key;
+if (args[0] === "warmup") {
+  const countFile = ${JSON.stringify(fake.log + ".count")};
+  const count = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, "utf8")) : 0;
+  key = ["source", "candidate", "promoted"][count];
+} else if (args[0] === "run" && args.includes("--timing-record")) {
+  key = "measure-" + path.basename(option("--timing-record"), ".jsonl");
+}
+if (key) {
+  const file = ${JSON.stringify(attempts)};
+  const attempts = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+  (attempts[key] ??= []).push(args);
+  fs.writeFileSync(file, JSON.stringify(attempts));
+  const failure = ${JSON.stringify(failures)}[key];
+  if (failure && attempts[key].length <= (failure.count ?? 1)) {
+    console.error(failure.error ?? ${JSON.stringify(fleetCapacityError)});
+    if (failure.leaseId) console.log(JSON.stringify({leaseId: failure.leaseId}));
+    if (args.includes("--timing-record")) {
+      fs.appendFileSync(option("--timing-record"), JSON.stringify({schemaVersion: 1, source: "run",
+        timing: {exitCode: 23, runnerTotalMs: 900000, ...(failure.leaseId ? {leaseId: failure.leaseId} : {})}}) + "\\n");
+      if (failure.leaseId) fs.writeFileSync(option("--lease-output"), JSON.stringify({
+        provider: "aws", leaseId: failure.leaseId, runId: "run_retained", kept: true, reused: false,
+      }));
+    }
+    process.exit(23);
+  }
+}
+const result = spawnSync(${JSON.stringify(fake.fake)}, args, {stdio: "inherit"});
+process.exit(result.status ?? 1);
+`);
+  await chmod(wrapper, 0o755);
+  const bin = path.join(fake.dir, "capacity-bin");
+  await mkdir(bin);
+  await writeFile(path.join(bin, "sleep"), "#!/usr/bin/env bash\nprintf 'sleep %s\\n' \"$*\" >>\"$CRABBOX_FAKE_LOG\"\n");
+  await chmod(path.join(bin, "sleep"), 0o755);
+  return {
+    attempts,
+    env: {
+      CRABBOX_BIN: wrapper,
+      CRABBOX_FAKE_LOG: fake.log,
+      CRABBOX_IMAGE_LOG_DIR: path.join(fake.dir, "logs"),
+      ...(realSleep ? {} : { PATH: `${bin}:${process.env.PATH}` }),
+    },
+  };
+}
+
+test("capacity wait retries source, candidate and promoted warmups with identical arguments", async (t) => {
+  const fake = await setupFakeCrabbox();
+  t.after(() => rm(fake.dir, { recursive: true, force: true }));
+  const capacity = await capacityFixture(fake, {
+    source: {},
+    candidate: { error: fleetCapacityError.replace("fleet active lease limit exceeded: 21/20", "active lease limit for owner exceeded: 4/3") },
+    promoted: { error: fleetCapacityError.replace("fleet active lease limit exceeded: 21/20", "active lease limit for org exceeded: 7/6") },
+  });
+  const result = await runScript(["--run", "--prep-script", fake.linuxPrep], capacity.env);
+  assert.equal(result.code, 0, result.stderr);
+  const attempts = JSON.parse(await readFile(capacity.attempts, "utf8"));
+  for (const phase of ["source", "candidate", "promoted"]) {
+    assert.equal(attempts[phase].length, 2);
+    assert.deepEqual(attempts[phase][0], attempts[phase][1]);
+    assert.match(result.stderr, new RegExp(`capacity.*${phase}.*retrying in 120s`));
+  }
+  const log = await readFile(fake.log, "utf8");
+  assert.equal((log.match(/^sleep 120$/gm) ?? []).length, 3);
+  assert.equal((log.match(/args stop /g) ?? []).length, 3);
+});
+
+test("capacity wait gives up at its budget and preserves promotion rollback", async (t) => {
+  const fake = await setupFakeCrabbox();
+  t.after(() => rm(fake.dir, { recursive: true, force: true }));
+  const capacity = await capacityFixture(fake, { promoted: { count: 100 } }, { realSleep: true });
+  const result = await runScript(["--run", "--prep-script", fake.linuxPrep], {
+    ...capacity.env, CRABBOX_IMAGE_CAPACITY_WAIT: "1s",
+  });
+  assert.equal(result.code, 23, result.stderr);
+  assert.match(result.stderr, /capacity wait budget exhausted.*promoted.*1s/);
+  const attempts = JSON.parse(await readFile(capacity.attempts, "utf8"));
+  assert.equal(attempts.promoted.length, 2);
+  const log = await readFile(fake.log, "utf8");
+  assert.match(log, /--restore-receipt/);
+  assert.doesNotMatch(log, /args stop .*cbx_promoted/);
+});
+
+test("capacity wait fails immediately for spend, other HTTP errors, and allocated leases", async (t) => {
+  for (const failure of [
+    { error: fleetCapacityError.replace("fleet active lease limit exceeded: 21/20", "monthly budget exceeded: 21/20") },
+    { error: fleetCapacityError.replace("cost_limit_exceeded", "rate_limited") },
+    { error: fleetCapacityError.replace("http 429", "http 500") },
+    { error: fleetCapacityError.replace("POST /v1/leases", "POST /v1/leases/cbx_source/resume") },
+    { error: "connection reset by peer" },
+    { leaseId: "cbx_source" },
+  ]) {
+    await t.test(failure.error ?? "allocated lease", async (t) => {
+      const fake = await setupFakeCrabbox();
+      t.after(() => rm(fake.dir, { recursive: true, force: true }));
+      const capacity = await capacityFixture(fake, { source: failure });
+      const result = await runScript(["--run", "--prep-script", fake.linuxPrep], capacity.env);
+      assert.equal(result.code, 23, result.stderr);
+      const attempts = JSON.parse(await readFile(capacity.attempts, "utf8"));
+      assert.equal(attempts.source.length, 1);
+      assert.doesNotMatch(result.stderr, /retrying in/);
+      if (failure.leaseId) assert.match(await readFile(fake.log, "utf8"), /args stop .*cbx_source/);
+    });
+  }
+});
+
+test("capacity wait excludes rejected measured attempts from all three cohorts", async (t) => {
+  const fake = await measuredFixture(t);
+  const capacity = await capacityFixture(fake, {
+    "measure-baseline": {}, "measure-candidate": {}, "measure-promoted": {},
+  });
+  const result = await runScript(fake.args, { ...fake.env, ...capacity.env }, fake.script);
+  assert.equal(result.code, 0, result.stderr);
+  const attempts = JSON.parse(await readFile(capacity.attempts, "utf8"));
+  for (const phase of ["baseline", "candidate", "promoted"]) {
+    assert.equal(attempts[`measure-${phase}`].length, 4);
+    assert.deepEqual(attempts[`measure-${phase}`][0], attempts[`measure-${phase}`][1]);
+    const args = attempts[`measure-${phase}`][1];
+    const records = (await readFile(args[args.indexOf("--timing-record") + 1], "utf8")).trim().split("\n").map(JSON.parse);
+    assert.equal(records.length, 3);
+    assert.ok(records.every(record => record.timing.runnerTotalMs === 1000 && record.timing.exitCode === 0));
+  }
+  const manifest = JSON.parse(await readFile(fake.outcome, "utf8"));
+  assert.equal(manifest.status, "passed");
+  assert.ok(manifest.cohorts.every(cohort => cohort.p95RunnerTotalMs === 1000));
+});
+
+test("capacity wait validates its budget before acquisition and zero disables retries", async (t) => {
+  for (const budget of ["0", "-1", "1.5m", "garbage", "01m"]) {
+    await t.test(budget, async (t) => {
+      const fake = await setupFakeCrabbox();
+      t.after(() => rm(fake.dir, { recursive: true, force: true }));
+      const capacity = await capacityFixture(fake, { source: {} });
+      const result = await runScript(["--run", "--prep-script", fake.linuxPrep], {
+        ...capacity.env, CRABBOX_IMAGE_CAPACITY_WAIT: budget,
+      });
+      if (budget === "0") {
+        assert.equal(result.code, 23, result.stderr);
+        assert.match(result.stderr, /capacity wait budget exhausted/);
+        assert.equal(JSON.parse(await readFile(capacity.attempts, "utf8")).source.length, 1);
+      } else {
+        assert.equal(result.code, 2, result.stderr);
+        assert.match(result.stderr, /CRABBOX_IMAGE_CAPACITY_WAIT must be/);
+        await assert.rejects(readFile(capacity.attempts), { code: "ENOENT" });
+      }
+    });
+  }
+});
+
+test("capacity wait retains measured lease cleanup when a capacity diagnostic accompanies a handle", async (t) => {
+  const fake = await measuredFixture(t);
+  const capacity = await capacityFixture(fake, {
+    "measure-baseline": { leaseId: "cbx_000000000001" },
+  });
+  const result = await runScript(fake.args, { ...fake.env, ...capacity.env }, fake.script);
+  assert.equal(result.code, 23, result.stderr);
+  assert.equal(JSON.parse(await readFile(capacity.attempts, "utf8"))["measure-baseline"].length, 1);
+  assert.doesNotMatch(result.stderr, /retrying in/);
+  assert.match(await readFile(fake.log, "utf8"), /args stop --provider aws --target linux cbx_000000000001/);
+});
+
 for (const failure of [
   "missing smoke owner",
   "Node archive probe rendering",

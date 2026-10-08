@@ -814,6 +814,23 @@ boots independently rerun the declared probes under a sanitized system PATH
 before skipping baseline APT. Use the timing logs to compare provider request,
 network readiness, bootstrap, and end-to-end time before and after each bake.
 
+If coordinator admission rejects an acquisition with HTTP 429,
+`cost_limit_exceeded`, and a fleet, owner, or org **active lease count** message,
+the wrapper retries the same request every two minutes. Each source, candidate,
+promoted proof, and measured sample has its own `CRABBOX_IMAGE_CAPACITY_WAIT`
+budget (default `45m`, measured from the first rejection). Use whole seconds,
+minutes, or hours, such as `600`, `10m`, or `1h`; `0` disables waiting. The final
+sleep is shortened to the remaining budget. An accepted attempt may take its
+normal provisioning time. Each wait prints the phase, delay, remaining budget,
+and diagnostic log path; exhausted capacity preserves the failing exit code and
+normal cleanup/rollback. The surrounding workflow timeout still bounds the job.
+
+Spending limits also use `cost_limit_exceeded` but are never retried. Other
+errors, failed log writes, and any attempt with evidence of an allocated lease
+fail immediately. Active-count admission rejects before publishing a lease or
+starting provisioning, so these retries do not add live leases. Rejected logs
+are retained as `.capacity-<attempt>` beside the final attempt log.
+
 Linux developer-image acceptance runs the publisher checkout's generated script
 with `--verify linux-builder` on source, candidate, and promoted leases. It
 requires the canonical trusted manifest and working builder probes without
@@ -908,6 +925,10 @@ cleanup also fails. Interruptions recover an already-published retained handle
 without waiting for a final timing record. The original runner timing excludes the subsequent evidence
 read and cleanup wait, consistently across all cohorts. Warmup timings are not
 benchmark samples, and a `--cold` label alone is not evidence of fresh acquisition.
+Admission-capacity waits also stay outside runner totals: each retry starts a
+fresh CLI invocation. Rejected attempts without a lease are moved out of the
+cohort's timing store into `.capacity-<attempt>.timing.jsonl` diagnostics before
+retrying, so they neither count as samples nor inflate the timing distribution.
 Existing `bench report` owns all three timing distributions. `bench check`
 enforces the predeclared p95 policy only for candidate and promoted cohorts.
 Missing, mixed, reused, or insufficient observations block promotion; measured
