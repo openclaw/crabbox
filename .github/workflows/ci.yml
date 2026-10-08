@@ -363,6 +363,9 @@ jobs:
       - name: Test native Windows runtime prerequisite
         run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/test-windows-runtime.ps1
 
+      - name: Test Windows developer-image preparation in PowerShell 5.1
+        run: node --test scripts/install-windows-developer-tools.test.js
+
       - name: Test native Windows detached process launch contract
         run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/test-windows-detached-process.ps1 -AllowJobBreakawayDenied
 

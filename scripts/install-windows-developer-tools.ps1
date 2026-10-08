@@ -204,12 +204,35 @@ function Resolve-TruffleHogAsset {
 
 function Test-TruffleHogBinary {
   param([string]$Path)
-  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
-  try {
-    $output = (& $Path --no-update --version 2>$null | Out-String).Trim()
-    return $LASTEXITCODE -eq 0 -and ($output -split "\s+") -contains $TruffleHogVersion
-  } catch {
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    Write-Log "TruffleHog validation failed for ${Path}: exit code=not started; file is missing"
     return $false
+  }
+  $process = New-Object System.Diagnostics.Process
+  $process.StartInfo.FileName = $Path
+  $process.StartInfo.Arguments = "--no-update --version"
+  $process.StartInfo.UseShellExecute = $false
+  $process.StartInfo.CreateNoWindow = $true
+  $process.StartInfo.RedirectStandardOutput = $true
+  $process.StartInfo.RedirectStandardError = $true
+  $exitCode = "not started"
+  $output = ""
+  try {
+    # Read both pipes concurrently; Windows PowerShell treats native stderr as errors.
+    [void]$process.Start()
+    $stdout = $process.StandardOutput.ReadToEndAsync()
+    $stderr = $process.StandardError.ReadToEndAsync()
+    $process.WaitForExit()
+    $exitCode = $process.ExitCode
+    $output = ($stdout.Result + "`n" + $stderr.Result).Trim()
+    if ($exitCode -eq 0 -and ($output -split "\s+") -contains $TruffleHogVersion) { return $true }
+    Write-Log "TruffleHog validation failed for ${Path}: exit code=$exitCode; output=$output"
+    return $false
+  } catch {
+    Write-Log "TruffleHog validation failed for ${Path}: exit code=$exitCode; output=$output; error=$($_.Exception.Message)"
+    return $false
+  } finally {
+    $process.Dispose()
   }
 }
 
@@ -227,7 +250,8 @@ function Install-TruffleHog {
   $workDir = Join-Path $env:TEMP ("crabbox-trufflehog-" + [Guid]::NewGuid().ToString("N"))
   $archive = Join-Path $workDir $archiveName
   $extractDir = Join-Path $workDir "extract"
-  $candidate = Join-Path $TruffleHogInstallDir ("trufflehog.exe.new-" + [Guid]::NewGuid().ToString("N"))
+  # Keep .exe last so Windows PowerShell recognizes the staged file as executable.
+  $candidate = Join-Path $TruffleHogInstallDir ("trufflehog.new-" + [Guid]::NewGuid().ToString("N") + ".exe")
   Write-Log "installing TruffleHog $TruffleHogVersion"
   try {
     New-Item -ItemType Directory -Force -Path $workDir, $extractDir, $TruffleHogInstallDir | Out-Null
