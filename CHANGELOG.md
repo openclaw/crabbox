@@ -9,6 +9,8 @@
 
 ### Fixes
 
+- Stop: observe expiry-owned cleanup and reconcile its confirmed completion without duplicate provider deletion, preserving local recovery material while pending. [PR 2747](https://github.com/openclaw/crabbox/pull/2747). Thanks @shakkernerd.
+
 - Coordinator: bound historical lease reads, log downloads, cleanup scans, and bridge history caches; fail interrupted creates promptly before dispatch or after resource-ID publication while retaining provider cleanup custody.
 - Windows developer images: reboot through validated SSH without racing workspace ownership release, require bounded SSH down/up transitions before resuming prep, and fail on rejected shutdown commands.
 - Windows developer images: retry and verify container pulls and native package downloads, report the failing prep step, exception and longer log tail, and distinguish accepted release from unconfirmed cleanup after prep failure.
