@@ -289,7 +289,8 @@ still win over `--os`. Remove a global AMI override before using different OS
 selectors for Linux and Windows runs.
 
 Set the top-level `os: windows-server:2025` or `CRABBOX_OS=windows-server:2025`
-alongside `target: windows`, or select the OS for each command:
+with `target: windows` or a command's `--target windows` flag; compatibility is
+checked after all overrides. You can also select the OS for each command:
 
 ```sh
 crabbox run --provider aws --target linux --os ubuntu:26.04 -- uname -a

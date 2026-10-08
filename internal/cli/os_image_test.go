@@ -179,6 +179,9 @@ func TestWindowsOSSelectorConfig(t *testing.T) {
 			cfg.Provider, cfg.TargetOS, cfg.OSImage = provider, target, "windows-server:2025"
 			cfg.osImageExplicit = true
 			err := applyProviderConfigDefaults(&cfg)
+			if err == nil {
+				err = validateProviderTarget(cfg)
+			}
 			if provider == "aws" && target == targetWindows {
 				if err != nil {
 					t.Fatalf("AWS Windows selector: %v", err)

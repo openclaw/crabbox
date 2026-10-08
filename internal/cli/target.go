@@ -156,6 +156,12 @@ func validateTargetConfig(cfg Config) error {
 }
 
 func validateProviderTarget(cfg Config) error {
+	// Config loading also applies defaults, before lease flags resolve the target.
+	// Check selector compatibility only at this final lease admission boundary.
+	if spec := osImageSpecs[cfg.OSImage]; spec.Provider != "" &&
+		(cfg.Provider != spec.Provider || normalizeTargetOS(cfg.TargetOS) != spec.Target) {
+		return Exit(2, "os %s requires provider=%s target=%s", spec.Selector, spec.Provider, spec.Target)
+	}
 	provider, err := validateProviderTargetSupport(cfg)
 	if err != nil {
 		return err

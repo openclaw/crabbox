@@ -8,6 +8,7 @@
 
 ### Fixes
 
+- Validate OS selector compatibility after lease flags resolve the provider and target, so a configured or environment Windows Server selector accepts `--target windows` while incompatible final selections still fail.
 - Cloudflare: retain cleanup alarms after container destruction fails and retry terminal leases before reporting stopped or expired status.
 - Windows: preserve embedded quotes, empty arguments, backslashes, and Unicode when running native executables or passing arguments to uploaded PowerShell scripts. [PR 2736](https://github.com/openclaw/crabbox/pull/2736).
 - Warmup: report definitive coordinator quota rejection in timing output while preserving recovery for interrupted or ambiguous creation. [PR 2732](https://github.com/openclaw/crabbox/pull/2732). Thanks @shakkernerd.

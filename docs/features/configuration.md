@@ -35,6 +35,12 @@ Lowest precedence is applied first: defaults, then user config, then repo
 config, then env vars, then flags. Each layer only overrides fields that are
 explicitly set; unset fields fall through to the layer below.
 
+Lease-creating commands validate OS selector compatibility after resolving the
+provider, target, and Windows mode from all layers. For example,
+`CRABBOX_OS=windows-server:2025 crabbox warmup --provider aws --target windows`
+works without setting a Windows target in the configuration file. A final
+Linux target still rejects a Windows Server selector.
+
 Lifecycle commands apply explicit `--provider` and `--target` selections before
 provider target validation. For example, `stop --provider tart --target macos
 --id <lease>` overrides `provider: proxmox` and `target: linux` in configuration.
