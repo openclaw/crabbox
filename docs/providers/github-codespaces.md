@@ -184,12 +184,58 @@ manually before deciding whether either should be removed.
 If a retained Codespace is stopped, resolving it later starts it and waits for
 availability before refreshing the generated SSH config.
 
+## Fixed Lease IDs
+
+Persist a canonical lease ID before provisioning, then replay the same warmup
+request after interruption:
+
+```sh
+crabbox warmup --provider github-codespaces \
+  --github-codespaces-repo example-org/my-app \
+  --github-codespaces-ref main \
+  --type basicLinux32gb --lease-id cbx_0123456789ab
+```
+
+The fixed-lease journal binds the API endpoint, authenticated GitHub user ID,
+repository, ref, machine, devcontainer path, working directory, location,
+retention, release policy, and lease settings before create. A different intent
+returns `lease_id_conflict`. Replays require the original local state directory;
+sharing an ID across independent state directories does not share ownership.
+Existing ordinary claims cannot be upgraded to fixed acquisition intents. They
+remain resolvable and releasable through their original nonce-bound protocol.
+
+GitHub's [create API](https://docs.github.com/en/rest/codespaces/codespaces#create-a-codespace-in-a-repository)
+accepts a persistent `display_name`, but no arbitrary ownership metadata.
+[Display names are limited to 48 characters](https://docs.github.com/en/codespaces/customizing-your-codespace/renaming-a-codespace).
+Fixed leases use a 47-character `cbx_` marker containing the complete SHA-256
+digest of the lease ID, intent fingerprint, and random attempt nonce. Keep this
+display name unchanged for fixed leases. Recovery requires its exact match,
+the same account and repository, a complete permanent identity, and the
+requested machine. Similar names never establish ownership; duplicate matches,
+failed inventory reads, and incomplete identities retain the claim and fail
+closed.
+
+A submitted create is never resubmitted, even when inventory is temporarily
+empty. Replay warmup once inventory converges, or use `crabbox stop --provider
+github-codespaces <lease-id>` to recover and release the exact resource. Keep
+uncertain claims: deleting them destroys the recovery evidence. Concurrent
+same-ID calls sharing local state serialize through the durable lease locks.
+
+Stop and cleanup recheck the exact Codespace name, ID, environment ID,
+repository ID, account, and marker. Delete completion requires a confirming
+not-found response; retained stops require confirmed Shutdown. Dirty or unknown
+Git status prevents deletion. If Git status changes after cleanup has started,
+the claim stays in cleanup custody and warmup remains blocked until stop can
+finish safely. Retained leases can resume the same resource. Successful deletion
+leaves a terminal receipt, so replay cannot allocate again with the released ID.
+Use a new ID for a new lease.
+
 ## Ownership And Cleanup
 
 GitHub Codespaces does not expose custom user labels. Crabbox therefore uses a
 local claim as the ownership predicate. Release and cleanup require the claim to
 match the provider, API endpoint, repository, Codespace ID/name, environment ID,
-owner ID, and creating GitHub user ID/login. The display name is recovery-only
+owner ID, and creating GitHub user ID/login. For ordinary leases, the display name is recovery-only
 and may be renamed after creation; the Codespace ID/name, environment ID, owner
 ID, and repository are the bound resource identity.
 
@@ -290,6 +336,7 @@ the classification instead of treating the live smoke as a provider failure.
 - **Desktop / browser / code**: not advertised in this release.
 - **Tailscale**: not advertised; GitHub's SSH path is used.
 - **Cleanup**: yes, claim-owned only.
+- **Fixed lease IDs**: yes, through the local durable fixed-lease journal.
 
 ## Gotchas
 

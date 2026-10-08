@@ -105,7 +105,7 @@ func TestAcquirePersistsRecoveryClaimBeforeCreate(t *testing.T) {
 		}
 	}
 
-	lease, err := b.Acquire(context.Background(), core.AcquireRequest{
+	lease, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "durable-box",
@@ -132,7 +132,7 @@ func TestAcquireRecoversAmbiguousCreateByExactIdentity(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	callbackCalled := false
 
-	lease, err := b.Acquire(context.Background(), core.AcquireRequest{
+	lease, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: "cbx_123456789aa2",
 		RequestedSlug:    "recovered-box",
@@ -170,7 +170,7 @@ func TestAcquireRecoversIdentitylessSuccessByExactIdentity(t *testing.T) {
 	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
 	b := newTestBackend(t, fc, fg)
 
-	lease, err := b.Acquire(context.Background(), core.AcquireRequest{
+	lease, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: "cbx_123456789aa8",
 		RequestedSlug:    "identityless-box",
@@ -206,7 +206,7 @@ func TestAcquireRejectsIncompletePermanentIdentity(t *testing.T) {
 			leaseID := "cbx_123456789ab2"
 			callbackCalled := false
 
-			_, err := b.Acquire(context.Background(), core.AcquireRequest{
+			_, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 				Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 				RequestedLeaseID: leaseID,
 				RequestedSlug:    "incomplete-box",
@@ -237,7 +237,7 @@ func TestAcquireAcceptsRenamedOwnerWithSameUserID(t *testing.T) {
 	fc.createResult.Owner.Login = "alice-renamed"
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "test" + "-value"})
 
-	lease, err := b.Acquire(context.Background(), core.AcquireRequest{
+	lease, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: "cbx_123456789af1",
 		RequestedSlug:    "renamed-owner-box",
@@ -263,7 +263,7 @@ func TestAcquireRejectsAndRollsBackZeroEffectiveRetention(t *testing.T) {
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "test" + "-value"})
 	leaseID := "cbx_123456789af7"
 
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+	_, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "zero-effective-retention",
@@ -306,7 +306,7 @@ func TestAcquireRetainsClaimWhenAmbiguousCreateHasNoMatch(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789aa3"
 
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+	_, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "pending-box",
@@ -338,7 +338,7 @@ func TestAcquireRejectsDuplicateRecoveryMatches(t *testing.T) {
 	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
 	b := newTestBackend(t, fc, fg)
 
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+	_, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: "cbx_123456789aa4",
 		RequestedSlug:    "duplicate-box",
@@ -359,7 +359,7 @@ func TestAcquireDiscardsClaimAfterDefinitiveCreateRejection(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789aa5"
 
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+	_, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "rejected-box",
@@ -385,7 +385,7 @@ func TestAcquireRollsBackExactCreateWhenClaimBindingFails(t *testing.T) {
 	}
 	leaseID := "cbx_123456789aa9"
 
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+	_, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "bind-failure-box",
@@ -419,7 +419,7 @@ func TestAcquireDoesNotRollbackWhenPendingClaimRaces(t *testing.T) {
 		return expected, errors.New("claim raced")
 	}
 
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+	_, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "race-box",
@@ -444,7 +444,7 @@ func TestAcquireOnAcquiredErrorRollsBackEvenWhenKept(t *testing.T) {
 	callbackErr := errors.New("controller rejected identity")
 	called := false
 
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+	_, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "callback-box",
@@ -479,7 +479,7 @@ func TestAcquireOnAcquiredErrorRetainsPendingClaimWhenRollbackCannotConfirmResou
 	leaseID := "cbx_123456789ab0"
 	callbackErr := errors.New("controller rejected identity")
 
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+	_, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "callback-missing-box",
@@ -514,7 +514,7 @@ func TestAcquireOnAcquiredErrorRetainsClaimWhenResourceDisappearsAfterPreflight(
 	leaseID := "cbx_123456789ab4"
 	callbackErr := errors.New("controller rejected identity")
 
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+	_, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "callback-vanished-box",
@@ -577,7 +577,7 @@ func TestAcquireOnAcquiredErrorRollsBackAfterDisplayNameChanges(t *testing.T) {
 	leaseID := "cbx_123456789ab5"
 	callbackErr := errors.New("controller rejected identity")
 
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+	_, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "callback-renamed-box",
@@ -608,7 +608,7 @@ func TestAcquireRetainsClaimAndRefusesRollbackAfterReadyIdentityChanges(t *testi
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
 	leaseID := "cbx_123456789ab0"
 
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+	_, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "replacement-box",
@@ -633,7 +633,7 @@ func TestReleaseRecoversPendingCreateThenDeletesExactResource(t *testing.T) {
 	b := newTestBackend(t, fc, fg)
 	leaseID := "cbx_123456789aa6"
 
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+	_, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "later-box",
@@ -671,7 +671,7 @@ func TestAcquireKeepDoesNotOverrideDeleteOnReleasePolicy(t *testing.T) {
 	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
 	b := newTestBackend(t, fc, fg)
 
-	lease, err := b.Acquire(context.Background(), core.AcquireRequest{
+	lease, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:          core.Repo{Root: t.TempDir(), Name: "my-app"},
 		Keep:          true,
 		RequestedSlug: "warm-box",
@@ -699,7 +699,7 @@ func TestAcquireRetainsClaimWhenRollbackDeleteFails(t *testing.T) {
 	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
 	b := newTestBackend(t, fc, fg)
 
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+	_, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: "cbx_123456789abc",
 		RequestedSlug:    "rollback-box",

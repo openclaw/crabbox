@@ -6,6 +6,10 @@
 
 - Azure: refuse retained network-companion cleanup when provider-key or fixed-attempt tags conflict with the original claim, even when immutable resource IDs still match.
 
+### Added
+
+- GitHub Codespaces: support replay-safe caller-supplied lease IDs with account- and intent-bound recovery, exact-resource cleanup, and terminal receipts. [Issue 2660](https://github.com/openclaw/crabbox/issues/2660). Thanks @jcxmt125.
+
 ## 0.73.0 - 2026-10-08
 
 ### Highlights

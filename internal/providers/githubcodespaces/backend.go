@@ -105,6 +105,13 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) *backe
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	if strings.TrimSpace(req.RequestedLeaseID) != "" {
+		return b.acquireFixed(ctx, req)
+	}
+	return b.acquireOrdinary(ctx, req)
+}
+
+func (b *backend) acquireOrdinary(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	gh, api, user, err := b.controlPlane(ctx)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -316,6 +323,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return core.LeaseTarget{}, core.Exit(2, "github-codespaces identifier %s changed during resolve; retry", req.ID)
 	}
 	claim := currentCandidate
+	if fixedLeaseKind.IsFixedClaim(claim) {
+		return b.resolveFixed(ctx, gh, api, user, req, claim)
+	}
 
 	live, err = api.listCodespaces(ctx)
 	if err != nil {
@@ -552,6 +562,9 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	if strings.TrimSpace(claim.CloudID) == "" || claim.Labels[labelRecovery] == recoveryPreCreate {
 		return core.Server{}, core.Exit(4, "github-codespaces lease %s is not active", leaseID)
 	}
+	if fixedLeaseKind.IsFixedClaim(claim) && (claim.FixedCreateIntent.State == "released" || (claim.FixedCreateIntent.Journal != nil && claim.FixedCreateIntent.Journal.Phase == "deleting")) {
+		return core.Server{}, core.Exit(4, "lease_id_conflict: github-codespaces lease has entered cleanup")
+	}
 	state := strings.ToLower(strings.TrimSpace(claim.Labels[labelState]))
 	if codespaceStopped(state) || codespaceTerminal(state) || state == "paused" || state == "deleting" || state == "deleted" {
 		return core.Server{}, core.Exit(4, "github-codespaces lease %s is not active (state=%s)", leaseID, state)
@@ -606,6 +619,9 @@ func (b *backend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if !claimOK {
 		return core.Exit(2, "github-codespaces release requires a local claim for lease %s", leaseID)
 	}
+	if fixedLeaseKind.IsFixedClaim(claim) {
+		return b.releaseFixed(ctx, api, user, req, claim, outcome)
+	}
 	if strings.TrimSpace(claim.CloudID) == "" && claim.Labels[labelRecovery] == recoveryPreCreate {
 		claim, _, err = b.recoverPendingClaim(api, claim, user)
 		if err != nil {
@@ -652,6 +668,12 @@ func (b *backend) stopCodespaceAndRetain(ctx context.Context, api codespacesAPI,
 }
 
 func (b *backend) stopCodespaceAndRetainWithOutcome(ctx context.Context, api codespacesAPI, leaseID string, claim core.LeaseClaim, server core.Server, name string, outcome *core.ReleaseLeaseOutcome) error {
+	validate := func(item codespace) error {
+		if fixedLeaseKind.IsFixedClaim(claim) {
+			return validateFixedCodespace(claim, item)
+		}
+		return validateCodespaceClaimResource(claim, item)
+	}
 	server.Provider = providerName
 	server.CloudID = name
 	server.Name = name
@@ -668,7 +690,7 @@ func (b *backend) stopCodespaceAndRetainWithOutcome(ctx context.Context, api cod
 		return err
 	}
 	if err == nil {
-		if err := validateCodespaceClaimResource(claim, preflight); err != nil {
+		if err := validate(preflight); err != nil {
 			return err
 		}
 		if err := validateStopPreservesCodespace(preflight); err != nil {
@@ -686,7 +708,7 @@ func (b *backend) stopCodespaceAndRetainWithOutcome(ctx context.Context, api cod
 		if err != nil {
 			return err
 		}
-		if err := validateCodespaceClaimResource(claim, item); err != nil {
+		if err := validate(item); err != nil {
 			return err
 		}
 		if err := validateStopPreservesCodespace(item); err != nil {
@@ -694,16 +716,36 @@ func (b *backend) stopCodespaceAndRetainWithOutcome(ctx context.Context, api cod
 		}
 		err = api.stopCodespace(ctx, name)
 		if isGitHubNotFound(err) {
+			if fixedLeaseKind.IsFixedClaim(claim) {
+				_, verifyErr := api.getCodespace(ctx, name)
+				if !isGitHubNotFound(verifyErr) {
+					return errors.Join(core.Exit(4, "github-codespaces stop absence is unverified; claim retained"), verifyErr)
+				}
+			}
 			absent = true
 			outcome.Terminal = true
 			return nil
 		}
-		return err
+		if err != nil || !fixedLeaseKind.IsFixedClaim(claim) {
+			return err
+		}
+		stopCtx, cancel := context.WithTimeout(ctx, b.readyTimeout)
+		defer cancel()
+		stopped, err := b.waitForStopped(stopCtx, api, name)
+		if isGitHubNotFound(err) {
+			absent = true
+			outcome.Terminal = true
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return validate(stopped)
 	})
 	if err != nil || !absent {
 		return err
 	}
-	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, updated, func() error {
+	return fixedLeaseKind.FinalizeAfterCleanup(updated, func() error {
 		return removeStoredSSHConfig(leaseID)
 	})
 }
@@ -823,6 +865,26 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	if err != nil {
 		return err
 	}
+	fixedIDs := map[string]bool{}
+	legacyClaims := make([]core.LeaseClaim, 0, len(claims))
+	for _, claim := range claims {
+		if fixedLeaseKind.IsFixedClaim(claim) {
+			fixedIDs[claim.LeaseID] = true
+			if err := b.cleanupFixed(ctx, api, user, req, claim); err != nil {
+				return err
+			}
+		} else {
+			legacyClaims = append(legacyClaims, claim)
+		}
+	}
+	claims = legacyClaims
+	legacyServers := servers[:0]
+	for _, server := range servers {
+		if !fixedIDs[server.Labels["lease"]] {
+			legacyServers = append(legacyServers, server)
+		}
+	}
+	servers = legacyServers
 	boundOwners := make(map[string]string, len(claims))
 	for _, claim := range claims {
 		cloudID := strings.TrimSpace(claim.CloudID)
@@ -1434,6 +1496,9 @@ func (b *backend) serversFromCodespaces(items []codespace) ([]core.LeaseView, er
 		if claim.Provider != providerName {
 			continue
 		}
+		if fixedLeaseKind.IsFixedClaim(claim) && claim.FixedCreateIntent.State == "released" {
+			continue
+		}
 		cloudID := strings.TrimSpace(claim.CloudID)
 		labelName := strings.TrimSpace(claim.Labels[labelCodespaceName])
 		if cloudID == "" && labelName == "" {
@@ -1667,11 +1732,12 @@ func validateCodespaceClaimResource(claim core.LeaseClaim, item codespace) error
 
 func serverFromClaim(claim core.LeaseClaim) core.Server {
 	server := core.Server{
-		CloudID:  shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels[labelCodespaceName]),
-		Provider: providerName,
-		Name:     shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels[labelCodespaceName]),
-		Status:   claim.Labels[labelState],
-		Labels:   shared.CloneLabels(claim.Labels),
+		ImmutableID: claim.CloudImmutableID,
+		CloudID:     shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels[labelCodespaceName]),
+		Provider:    providerName,
+		Name:        shared.FirstNonBlankTrimmed(claim.CloudID, claim.Labels[labelCodespaceName]),
+		Status:      claim.Labels[labelState],
+		Labels:      shared.CloneLabels(claim.Labels),
 	}
 	server.ServerType.Name = claim.Labels[labelMachine]
 	return server
