@@ -84,7 +84,9 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest) (co
 	}, core.FixedLeaseOperations[codespace]{
 		Admission: &core.FixedAdmission{PendingKey: "submission", PendingValue: "pending", SubmittedValue: "submitted"},
 		DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
-			binding := core.FixedLeaseBinding{ProviderScope: providerClaimScope(cfg), Fingerprint: fingerprint}
+			binding := core.FixedLeaseBinding{ProviderScope: providerClaimScope(cfg), Fingerprint: fingerprint,
+				InitialLabels: b.labelsFor(req.RequestedLeaseID, req.RequestedSlug, repo, user.Login, req.Keep, release, codespace{}, "provisioning", user),
+			}
 			if exists {
 				if claim.FixedCreateIntent.Fingerprint != fingerprint || claim.ProviderScope != binding.ProviderScope {
 					return binding, core.Exit(4, "lease_id_conflict: github-codespaces account, repository, ref, machine, devcontainer or lease settings differ from the original intent")
@@ -393,7 +395,8 @@ func (b *backend) releaseFixed(ctx context.Context, api codespacesAPI, user gith
 			}
 		}
 		deleting := claim.FixedCreateIntent.Journal != nil && claim.FixedCreateIntent.Journal.Phase == "deleting"
-		if !deleting && (claim.Labels[labelRelease] == releaseStop || validateDeleteSafe(item) != nil) {
+		authoritativeLease := core.LeaseTarget{LeaseID: claim.LeaseID, Server: serverFromClaim(claim)}
+		if !deleting && (!githubCodespacesDeleteOnRelease(authoritativeLease, b.cfg) || validateDeleteSafe(item) != nil) {
 			return b.stopCodespaceAndRetainWithOutcome(ctx, api, claim.LeaseID, claim, serverFromClaim(claim), item.Name, outcome)
 		}
 	}

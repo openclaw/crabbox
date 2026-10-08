@@ -817,6 +817,9 @@ func (b *backend) deleteClaimedCodespaceWithOutcome(ctx context.Context, api cod
 }
 
 func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
+	if claim, ok, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err == nil && ok && fixedLeaseKind.IsFixedClaim(claim) && claim.FixedCreateIntent.State == "released" {
+		return fmt.Sprintf("deleted github-codespaces lease=%s codespace=%s", lease.LeaseID, claim.CloudID)
+	}
 	if githubCodespacesClaimRelease(lease.LeaseID) == releaseStop {
 		return fmt.Sprintf("stopped github-codespaces lease=%s codespace=%s retained=true", lease.LeaseID, shared.FirstNonBlankTrimmed(lease.Server.CloudID, lease.Server.Name))
 	}
@@ -1199,6 +1202,9 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 	stranded := 0
 	for _, claim := range claims {
 		if claim.Provider != providerName {
+			continue
+		}
+		if fixedLeaseKind.IsFixedClaim(claim) && claim.FixedCreateIntent.State == "released" {
 			continue
 		}
 		if err := b.validateClaimScope(claim, user); err != nil {

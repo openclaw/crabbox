@@ -228,7 +228,10 @@ Git status prevents deletion. If Git status changes after cleanup has started,
 the claim stays in cleanup custody and warmup remains blocked until stop can
 finish safely. Retained leases can resume the same resource. Successful deletion
 leaves a terminal receipt, so replay cannot allocate again with the released ID.
-Use a new ID for a new lease.
+Use a new ID for a new lease. To delete a retained fixed lease after preserving
+its work and restoring clean Git status, pass
+`--github-codespaces-delete-on-release=true` to `crabbox stop`; the explicit
+override preserves all ownership and Git safety checks.
 
 ## Ownership And Cleanup
 

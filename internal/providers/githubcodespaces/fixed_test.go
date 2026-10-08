@@ -18,6 +18,7 @@ import (
 // Exercise the real REST client, including create payloads and identity reads.
 type fixedCodespacesFixture struct {
 	stopPending, deletePending, listFails, dirtyAfterStop, identityAfterStop bool
+	failInventoryAt, inventoryCalls                                          int
 	mu                                                                       sync.Mutex
 	b                                                                        *backend
 	req                                                                      core.AcquireRequest
@@ -56,7 +57,8 @@ func (f *fixedCodespacesFixture) serveHTTP(w http.ResponseWriter, r *http.Reques
 	case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/codespaces/machines"):
 		reply(map[string]any{"machines": []map[string]string{{"name": "standardLinux32gb"}}})
 	case r.Method == "GET" && r.URL.Path == "/user/codespaces":
-		if f.listFails {
+		f.inventoryCalls++
+		if f.listFails || (f.failInventoryAt != 0 && f.inventoryCalls == f.failInventoryAt) {
 			w.WriteHeader(503)
 			reply(map[string]string{"message": "inventory unavailable"})
 			return
@@ -505,5 +507,63 @@ func TestFixedCodespacesDirtyCleanupRetryPreservesDeletion(t *testing.T) {
 	}
 	if f.claim(t).FixedCreateIntent.State != "released" || len(f.deletes) != 1 {
 		t.Fatal("clean retry did not finalize deletion")
+	}
+}
+
+func TestFixedCodespacesPrePlanFailureCanStopAfterExpiry(t *testing.T) {
+	f := newFixedCodespacesFixture(t)
+	f.b.cfg.TTL = time.Minute
+	f.req.Keep = false
+	f.failInventoryAt = 2 // Initial discovery succeeds; planning inventory fails.
+	if _, err := f.b.Acquire(t.Context(), f.req); err == nil {
+		t.Fatal("expected pre-plan failure")
+	}
+	claim := f.claim(t)
+	if claim.FixedCreateIntent.Attempt != nil || f.creates != 0 {
+		t.Fatal("unexpected native submission")
+	}
+	f.b.now = func() time.Time { return time.Now().Add(24 * time.Hour) }
+	if err := f.b.Cleanup(t.Context(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if f.claim(t).FixedCreateIntent.State != "released" || len(f.deletes)+len(f.stops) != 0 {
+		t.Fatal("pristine cleanup lost or mutated native custody")
+	}
+}
+
+func TestFixedCodespacesRetainedLeaseExplicitDeletion(t *testing.T) {
+	for _, dirty := range []bool{false, true} {
+		t.Run(fmt.Sprint(dirty), func(t *testing.T) {
+			f := newFixedCodespacesFixture(t)
+			f.b.cfg.GitHubCodespaces.DeleteOnRelease = dirty
+			lease, err := f.b.Acquire(t.Context(), f.req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.items["cs-owned"]["git_status"].(map[string]any)["has_uncommitted_changes"] = dirty
+			if err := f.b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+				t.Fatal(err)
+			}
+			if f.claim(t).Labels[labelRelease] != releaseStop {
+				t.Fatal("expected retention")
+			}
+			f.items["cs-owned"]["git_status"].(map[string]any)["has_uncommitted_changes"] = false
+			f.b.cfg.GitHubCodespaces.DeleteOnRelease = true
+			markDeleteOnReleaseExplicit(&f.b.cfg)
+			if err := f.b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+				t.Fatal(err)
+			}
+			if f.claim(t).FixedCreateIntent.State != "released" || len(f.deletes) != 1 {
+				t.Fatal("explicit deletion override ignored")
+			}
+			if !strings.HasPrefix(f.b.ReleaseLeaseMessage(lease), "deleted ") {
+				t.Fatal("deletion reported as retention")
+			}
+			result, err := f.b.Doctor(t.Context(), core.DoctorRequest{})
+			if err != nil || !strings.Contains(result.Message, "stranded=0") {
+				t.Fatalf("terminal receipt reported as stranded: %+v %v", result, err)
+			}
+
+		})
 	}
 }
