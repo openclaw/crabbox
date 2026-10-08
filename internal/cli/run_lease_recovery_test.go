@@ -52,6 +52,7 @@ func (r runRecoveryOwnerTransport) Do(ctx context.Context, req workspaceOwnerRem
 
 func TestRunLeaseRecoveryGuidance(t *testing.T) {
 	RegisterProvider(runRecoveryTestProvider{})
+	t.Cleanup(func() { delete(providerRegistry, runRecoveryTestProvider{}.Spec().Name) })
 	for _, tc := range []struct {
 		name         string
 		ownerFailure string

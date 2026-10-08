@@ -2113,6 +2113,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		oldReleaseCtx := contextWithoutWorkspaceOwner(ctx)
 		oldLeaseCleanupErr := releaseReplacementLease(oldReleaseCtx, &lifecycleOwner, &releaseResolvedLease, sshBackend, func(releaseCtx context.Context) (ReleaseLeaseOutcome, error) {
 			outcome, releaseErr := releaseApp.releaseBackendLeaseWithOutcomeBestEffort(releaseCtx, sshBackend, cfg, oldLease)
+			// A failed replacement acquisition can leave this as the final lease.
+			cleanup.Stopped = outcome.Terminal
 			return outcome, errors.Join(releaseErr, runtimeScope.afterRelease(releaseCtx, oldLeaseID, sshBackend, outcome, releaseErr))
 		})
 		if oldLeaseCleanupErr == nil {
@@ -2146,6 +2148,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			MachineType: oldMachineType,
 		}
 		server, target, leaseID = newLease.Server, newLease.SSH, newLease.LeaseID
+		cleanup.Stopped = false
 		ctx = contextWithoutNativeRuntimeAdmission(context.WithValue(ctx, nativeRuntimeLeaseKey{}, leaseID))
 		resetRunnerTimingsForReplacement(&timings, oldAttemptReport, oldLeaseCleanupDuration, replacementLeaseDuration, newLease.runnerTiming)
 		acquired = true
