@@ -228,42 +228,53 @@ export function enforceCostLimitUsage(
   return "";
 }
 
-export function usageSummary(leases: LeaseRecord[], filter: UsageFilter, now: Date): UsageSummary {
-  const selected = leases.filter(
-    (lease) => !isRegisteredLease(lease) && leaseMatchesUsageFilter(lease, filter),
-  );
+export function usageSummary(
+  leases: Iterable<LeaseRecord>,
+  filter: UsageFilter,
+  now: Date,
+): UsageSummary {
+  const accumulator = createUsageSummary(filter, now);
+  for (const lease of leases) accumulator.add(lease);
+  return accumulator.finish();
+}
+
+export function createUsageSummary(filter: UsageFilter, now: Date) {
   const total = newAccumulator();
   const byOwner = new Map<string, UsageAccumulator>();
   const byOrg = new Map<string, UsageAccumulator>();
   const byProvider = new Map<string, UsageAccumulator>();
   const byServerType = new Map<string, UsageAccumulator>();
-  for (const lease of selected) {
+  const add = (lease: LeaseRecord) => {
+    if (isRegisteredLease(lease) || !leaseMatchesUsageFilter(lease, filter)) return;
     const item = leaseUsage(lease, now);
     addUsage(total, item);
     addUsage(mapAccumulator(byOwner, lease.owner || "unknown"), item);
     addUsage(mapAccumulator(byOrg, lease.org || "unknown"), item);
     addUsage(mapAccumulator(byProvider, lease.provider), item);
     addUsage(mapAccumulator(byServerType, lease.serverType || "unknown"), item);
-  }
-  const summary: UsageSummary = {
-    month: filter.month,
-    scope: filter.scope,
-    ...finalize(total),
-    byOwner: finalizeGroups(byOwner),
-    byOrg: finalizeGroups(byOrg).map((group) => ({
-      ...group,
-      key: orgLabelForDisplay(group.key),
-    })),
-    byProvider: finalizeGroups(byProvider),
-    byServerType: finalizeGroups(byServerType),
   };
-  if (filter.owner) {
-    summary.owner = filter.owner;
-  }
-  if (filter.org) {
-    summary.org = orgLabelForDisplay(filter.org);
-  }
-  return summary;
+  const finish = (): UsageSummary => {
+    const summary: UsageSummary = {
+      month: filter.month,
+      scope: filter.scope,
+      ...finalize(total),
+      byOwner: finalizeGroups(byOwner),
+      byOrg: finalizeGroups(byOrg).map((group) => ({
+        ...group,
+        key: orgLabelForDisplay(group.key),
+      })),
+      byProvider: finalizeGroups(byProvider),
+      byServerType: finalizeGroups(byServerType),
+    };
+    if (filter.owner) {
+      summary.owner = filter.owner;
+    }
+    if (filter.org) {
+      summary.org = orgLabelForDisplay(filter.org);
+    }
+    return summary;
+  };
+  return { add, finish };
 }
 
 function hourlyRateUSD(

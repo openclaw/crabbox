@@ -1,5 +1,6 @@
 import type { AuthContext, GitHubUserGrant } from "./auth";
 import type { CoordinatorStorageView } from "./coordinator-runtime";
+import { coordinatorStorageEntries } from "./storage-scan";
 import type { LeaseRecord } from "./types";
 
 export interface CachedAdminGrant {
@@ -185,13 +186,17 @@ export class BridgeTickets {
   }
 
   private async cleanupExpired(namespace: string): Promise<void> {
-    const tickets = await this.storage.list<LeaseBridgeTicketRecord>({ prefix: namespace });
     const now = Date.now();
-    await Promise.all(
-      [...tickets.entries()]
-        .filter(([, ticket]) => Date.parse(ticket.expiresAt) <= now)
-        .map(([key]) => this.storage.delete(key)),
-    );
+    for await (const [key, ticket] of coordinatorStorageEntries<LeaseBridgeTicketRecord>(
+      this.storage,
+      {
+        prefix: namespace,
+        limit: 128,
+        noCache: true,
+      },
+    )) {
+      if (Date.parse(ticket.expiresAt) <= now) await this.storage.delete(key);
+    }
   }
 }
 import { bytesToHex } from "./encoding";

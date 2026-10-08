@@ -695,3 +695,18 @@ bake/promote, Mac-host management, identity) are invoked through admin routes.
 - [CLI](../cli.md)
 - [Browser portal](portal.md)
 - [usage command](../commands/usage.md)
+
+## Isolate reset recovery and memory
+
+Legacy lease admission records the owning runtime before provider preparation.
+If that runtime disappears, the next maintenance tick publishes an inspectable
+failure, including when a resource ID arrived before readiness. Captured
+resources keep provider-owned cleanup; requests whose allocation outcome is
+unknown keep settlement and absence-confirmation checks. Replaying the same
+create attempt cannot allocate a replacement for that failed lease.
+
+Usage and lease-history consumers scan bounded uncached storage pages. Log
+downloads stream stored chunks and stop reading on cancellation; portal run
+previews retain only their displayed tail. See the
+[fleet memory audit](../diagnostics/coordinator-memory.md) for measured scan
+bounds, remaining memory risks, and production telemetry needed for attribution.

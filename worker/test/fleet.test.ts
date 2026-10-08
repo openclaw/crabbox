@@ -14857,7 +14857,7 @@ describe("fleet lease identity and idle", () => {
         expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).not.toBe("active");
         resume.resolve();
         const response = await creating;
-        expect(response.status).toBe(phase === "readiness" ? 500 : 409);
+        expect(response.status).toBe(phase === "readiness" ? 422 : 409);
         vi.setSystemTime(now + 20 * 60_000);
         await restarted.alarm();
         const completed = storage.value<LeaseRecord>(`lease:${leaseID}`);
@@ -17463,6 +17463,93 @@ describe("fleet lease identity and idle", () => {
     expect(found.lease.slug).toBe("blue-lobster");
   });
 
+  it.each(["/v1/usage?scope=all", "/v1/ready-pools", "/v1/admin/lease-audit?provider=aws"])(
+    "bounds historical lease reads for %s",
+    async (path) => {
+      const storage = new BoundedObservedMemoryStorage();
+      const now = new Date().toISOString();
+      for (let index = 0; index < 1000; index++) {
+        const id = `cbx_${index.toString(16).padStart(12, "0")}`;
+        storage.seed(
+          `lease:${id}`,
+          testLease({
+            id,
+            state: "expired",
+            cloudID: "",
+            createdAt: now,
+            endedAt: now,
+            failureError: "historical diagnostic".repeat(2048),
+          }),
+        );
+      }
+      const fleet = testFleet(storage);
+      const response = await fleet.fetch(
+        request("GET", path, {
+          headers: { "x-crabbox-admin": "true" },
+        }),
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { usage?: { leases: number }; entries?: unknown[] };
+      expect(body.usage?.leases).toBe(path.startsWith("/v1/usage") ? 1000 : undefined);
+      const scans = storage.listOptions.filter(({ prefix }) => prefix === "lease:");
+      expect(scans.every(({ limit, noCache }) => limit === 128 && noCache)).toBe(true);
+      expect(scans.length === 0).toBe(path.startsWith("/v1/ready-pools"));
+    },
+  );
+
+  it("streams ordered run logs on demand and stops reading after cancellation", async () => {
+    const storage = new ObservedMemoryStorage();
+    const id = "run_000000000001";
+    storage.seed(
+      `run:${id}`,
+      testRun({ id, owner: "alice@example.com", org: "example-org", leaseIDs: [] }),
+    );
+    for (let index = 0; index < 128; index++) {
+      storage.seed(
+        `runlog:${id}:chunk:${String(index).padStart(6, "0")}`,
+        `${index}:` + "x".repeat(60_000),
+      );
+    }
+    const fleet = testFleet(storage);
+    const response = await fleet.fetch(
+      request("GET", `/v1/runs/${id}/logs`, {
+        headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    expect(decoder.decode((await reader.read()).value)).toBe("0:" + "x".repeat(60_000));
+    expect(decoder.decode((await reader.read()).value)).toBe("1:" + "x".repeat(60_000));
+    await reader.cancel();
+    const scans = storage.listOptions.filter(({ prefix }) => prefix === `runlog:${id}:chunk:`);
+    expect(scans).toHaveLength(2);
+    expect(scans.every(({ limit, noCache }) => limit === 1 && noCache)).toBe(true);
+  });
+
+  it("bounds per-lease bridge history caches and reloads evicted hydration markers", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage) as unknown as {
+      recordWebVNCEvent(id: string, event: string): void;
+      hydrateEgressSessionState(id: string): Promise<void>;
+      webVNCEvents: Map<string, unknown>;
+      hydratedEgressSessionState: Set<string>;
+    };
+    for (let index = 0; index < 1100; index++) {
+      const id = `cbx_${index.toString(16).padStart(12, "0")}`;
+      fleet.recordWebVNCEvent(id, "synthetic-disconnect");
+      // oxlint-disable-next-line eslint/no-await-in-loop -- simulate sequential sessions in one isolate.
+      await fleet.hydrateEgressSessionState(id);
+    }
+    expect(fleet.webVNCEvents.size).toBe(1024);
+    expect(fleet.hydratedEgressSessionState.size).toBe(1024);
+    expect(fleet.webVNCEvents.has("cbx_000000000000")).toBe(false);
+    const get = vi.spyOn(storage, "get");
+    await fleet.hydrateEgressSessionState("cbx_000000000000");
+    expect(get).toHaveBeenCalledWith("active-egress-session:cbx_000000000000");
+    expect(fleet.hydratedEgressSessionState.size).toBe(1024);
+  });
+
   it("creates leases with bounded scans after bulky terminal history", async () => {
     const storage = new BoundedObservedMemoryStorage();
     const now = new Date();
@@ -19096,6 +19183,94 @@ describe("fleet lease identity and idle", () => {
     expect(returned.status).toBe(200);
     expect(await returned.json()).toMatchObject({ entry: { state: "ready", identity } });
   });
+
+  it.each(["preparing", "provider-request", "resource-captured"] as const)(
+    "retains inspectable interrupted create custody after a reset at %s",
+    async (phase) => {
+      const storage = new MemoryStorage();
+      const paused = deferred<void>();
+      const finish = deferred<void>();
+      const leaseID = "cbx_ca1100000099";
+      let creates = 0;
+      const deleted: string[] = [];
+      const pause = async () => {
+        paused.resolve();
+        await finish.promise;
+      };
+      const provider = fakeProvider(
+        async () => {
+          creates++;
+        },
+        {
+          provider: "aws",
+          async onPrepareLeaseCreate(config, lease) {
+            if (phase === "preparing") await pause();
+            return { config, lease };
+          },
+          async onCreateProvisioning(provisioning) {
+            if (phase === "resource-captured") {
+              await provisioning?.onResourceCreated?.({
+                provider: "aws",
+                cloudID: "i-reset",
+                region: "eu-west-2",
+              });
+            }
+            if (phase !== "preparing") await pause();
+          },
+          onReleaseLease(lease) {
+            deleted.push(lease.cloudID);
+          },
+        },
+      );
+      provider.attachStorage(storage);
+      const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+      const create = () =>
+        request("POST", "/v1/leases", {
+          headers,
+          body: {
+            leaseID,
+            createAttemptID: "cat_99000000000000000000000000000099",
+            provider: "aws",
+            sshPublicKey: "ssh-ed25519 synthetic-reset",
+            ttlSeconds: 3600,
+          },
+        });
+      const first = new FleetCoordinator(new FakeCoordinatorRuntime(storage), {} as Env, {
+        aws: provider,
+      });
+      const creating = first.fetch(create());
+      let snapshot: MemoryStorage;
+      try {
+        await paused.promise;
+        await first.alarm();
+        expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe("provisioning");
+        snapshot = new MemoryStorage(structuredClone(await storage.list()));
+      } finally {
+        finish.resolve();
+        await creating;
+      }
+      const dispatched = creates;
+      provider.attachStorage(snapshot!);
+      const restarted = new FleetCoordinator(new FakeCoordinatorRuntime(snapshot!), {} as Env, {
+        aws: provider,
+      });
+      await restarted.alarm();
+      const view = await restarted.fetch(request("GET", `/v1/leases/${leaseID}`, { headers }));
+      expect(view.status).toBe(200);
+      expect(await view.json()).toMatchObject({ lease: { state: "failed" } });
+      expect((await restarted.fetch(create())).status).toBe(
+        phase === "provider-request" ? 409 : 422,
+      );
+      expect(creates).toBe(dispatched);
+      const retained = snapshot!.value<LeaseRecord>(`lease:${leaseID}`)!;
+      expect(retained.provisioningResourceMayExist).toBe(phase === "provider-request");
+      expect(retained.provisioningCoordinatorVersion).toEqual(
+        phase === "provider-request" ? expect.any(String) : undefined,
+      );
+      expect(retained.cloudID).toBe(phase === "resource-captured" ? "i-reset" : "");
+      expect(deleted).toEqual(phase === "resource-captured" ? ["i-reset"] : []);
+    },
+  );
 
   it.each([false, true])(
     "keeps borrowed leases exclusive across pool protocols (typed source: %s)",

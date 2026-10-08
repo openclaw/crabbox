@@ -1,5 +1,6 @@
 import type { CoordinatorRuntime } from "./coordinator-runtime";
 import { bytesToHex, sha256Hex } from "./encoding";
+import { coordinatorStorageEntries } from "./storage-scan";
 
 const ticketPrefix = "vnc_handoff_";
 const storagePrefix = "webvnc-credential-handoff:";
@@ -66,22 +67,24 @@ export class WebVNCCredentialHandoffs {
   }
 
   async cleanupExpired(now = Date.now()): Promise<void> {
-    const handoffs = await this.records();
-    await Promise.all(
-      [...handoffs.entries()]
-        .filter(([, handoff]) => Date.parse(handoff.expiresAt) <= now)
-        .map(([key]) => this.runtime.storage.delete(key)),
-    );
+    for await (const [key, handoff] of this.records()) {
+      if (Date.parse(handoff.expiresAt) <= now) await this.runtime.storage.delete(key);
+    }
   }
 
-  async alarms(now = Date.now()): Promise<Array<{ key: string; time: number }>> {
-    return [...(await this.records())]
-      .map(([key, handoff]) => ({ key, time: Date.parse(handoff.expiresAt) }))
-      .filter(({ time }) => Number.isFinite(time) && time > now);
+  async *alarms(now = Date.now()): AsyncGenerator<{ key: string; time: number }> {
+    for await (const [key, handoff] of this.records()) {
+      const time = Date.parse(handoff.expiresAt);
+      if (Number.isFinite(time) && time > now) yield { key, time };
+    }
   }
 
-  private records(): Promise<Map<string, WebVNCCredentialHandoffRecord>> {
-    return this.runtime.storage.list<WebVNCCredentialHandoffRecord>({ prefix: storagePrefix });
+  private records() {
+    return coordinatorStorageEntries<WebVNCCredentialHandoffRecord>(this.runtime.storage, {
+      prefix: storagePrefix,
+      limit: 128,
+      noCache: true,
+    });
   }
 }
 
