@@ -28,10 +28,15 @@ func TestCoordinatorStopGuestCleanupSSHIdentity(t *testing.T) {
 				clearConfigEnv(t)
 				dir := t.TempDir()
 				argsPath := filepath.Join(dir, "ssh-args.log")
-				installRecordingSSH(t, dir, `printf '%s\n' "$@" "$match" '---' >> "$CRABBOX_TEST_SSH_ARGS"
-if [ "$CRABBOX_TEST_SSH_FAIL" = yes ]; then exit 255; fi`)
-				t.Setenv("CRABBOX_TEST_SSH_ARGS", argsPath)
-				t.Setenv("CRABBOX_TEST_SSH_FAIL", "no")
+				exitCode := 0
+				if tc.missingKey {
+					exitCode = 255
+				}
+				binDir := installScriptedSSHExecutable(t, dir, scriptedSSHBehavior{
+					DecodePayload: true, WorkspaceOwnerProtocol: true, ExitCode: exitCode,
+				})
+				t.Setenv("PATH", binDir)
+				t.Setenv("CRABBOX_FAKE_SSH_DETAILED_LOG", argsPath)
 				t.Setenv("CRABBOX_OWNER", "test@example.com")
 				t.Setenv("CRABBOX_NETWORK", "public")
 				const id = "cbx_abcdef123456"
@@ -44,12 +49,14 @@ if [ "$CRABBOX_TEST_SSH_FAIL" = yes ]; then exit 255; fi`)
 				wantKey := keyPath
 				if tc.missingKey {
 					wantKey = defaultKey
-					t.Setenv("CRABBOX_TEST_SSH_FAIL", "yes")
 				} else {
 					if _, err := ensureTestboxLeaseDirectory(id); err != nil {
 						t.Fatal(err)
 					}
 					if err := os.WriteFile(keyPath, []byte("synthetic lease key fixture\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if err := secureSSHTransportPath(keyPath, false); err != nil {
 						t.Fatal(err)
 					}
 				}

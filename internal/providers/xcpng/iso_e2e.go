@@ -79,6 +79,7 @@ const (
 
 var (
 	isoE2ECurrentTime     = func() time.Time { return time.Now().UTC() }
+	isoE2EBuildDataISO    = buildDataISO
 	isoE2EWaitForSSHReady = func(ctx context.Context, target *core.SSHTarget, phase string, timeout time.Duration) error {
 		return core.WaitForSSHReady(ctx, target, os.Stderr, phase, timeout)
 	}
@@ -1219,11 +1220,15 @@ func writeWindowsAnswerISO(ctx context.Context, evidenceDir string, payload xcpN
 		return "", err
 	}
 	path := filepath.Join(artifactDir, fmt.Sprintf("%s-windows-answer.iso", isoE2ECurrentTime().Format("20060102t150405z")))
-	if err := buildDataISO(ctx, path, workDir, "CRABBOXWIN"); err != nil {
+	if err := isoE2EBuildDataISO(ctx, path, workDir, "CRABBOXWIN"); err != nil {
 		_ = os.RemoveAll(artifactDir)
 		return "", fmt.Errorf("build Windows answer ISO: %w", err)
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := core.SecurePrivatePath(artifactDir, true); err != nil {
+		_ = os.RemoveAll(artifactDir)
+		return "", fmt.Errorf("secure Windows answer ISO artifact directory: %w", err)
+	}
+	if err := core.SecurePrivatePath(path, false); err != nil {
 		_ = os.RemoveAll(artifactDir)
 		return "", fmt.Errorf("secure Windows answer ISO: %w", err)
 	}

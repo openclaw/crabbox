@@ -83,13 +83,16 @@ func validatePrivateSSHConfigPermissions(path string, _ os.FileInfo) error {
 	if err != nil || dacl == nil || dacl.AceCount != 2 {
 		return core.Exit(2, "github-codespaces SSH config path %q does not have a private DACL", path)
 	}
+	// Windows maps GENERIC_ALL onto FILE_ALL_ACCESS while storing the ACE, so a
+	// persisted full-control entry never carries the generic bit.
+	const fileAllAccess = windows.ACCESS_MASK(windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff)
 	seenUser, seenSystem := false, false
 	for i := uint16(0); i < dacl.AceCount; i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
 			return err
 		}
-		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask&windows.ACCESS_MASK(windows.GENERIC_ALL) == 0 {
+		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask&fileAllAccess != fileAllAccess {
 			return core.Exit(2, "github-codespaces SSH config path %q has a non-private DACL entry", path)
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))

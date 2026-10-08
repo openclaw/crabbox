@@ -17,6 +17,7 @@ import (
 
 	"github.com/containernetworking/cni/libcni"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestFirecrackerOrdinaryFlagStages(t *testing.T) {
@@ -205,8 +206,9 @@ func TestProviderSpecAndAliases(t *testing.T) {
 
 func TestApplyFlagsUpdatesFirecrackerConfig(t *testing.T) {
 	defaults := core.BaseConfig()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	// os.UserHomeDir reads USERPROFILE on Windows and HOME elsewhere, so use the
+	// shared helper that redirects every user-directory input consistently.
+	home := testutil.IsolateUserDirs(t).Home
 	cfg := defaults
 	cfg.Provider = providerName
 	fs := flag.NewFlagSet("firecracker", flag.ContinueOnError)
@@ -235,7 +237,7 @@ func TestApplyFlagsUpdatesFirecrackerConfig(t *testing.T) {
 	if err := ApplyFirecrackerProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Firecracker.Binary != home+"/bin/firecracker" || cfg.Firecracker.Jailer != home+"/bin/jailer" || cfg.Firecracker.Kernel != "/srv/firecracker/vmlinux" || cfg.Firecracker.RootFS != "/srv/firecracker/rootfs.ext4" {
+	if cfg.Firecracker.Binary != filepath.Join(home, "bin", "firecracker") || cfg.Firecracker.Jailer != filepath.Join(home, "bin", "jailer") || cfg.Firecracker.Kernel != "/srv/firecracker/vmlinux" || cfg.Firecracker.RootFS != "/srv/firecracker/rootfs.ext4" {
 		t.Fatalf("paths=%#v", cfg.Firecracker)
 	}
 	if cfg.Firecracker.User != "runner" || cfg.SSHUser != "runner" || cfg.Firecracker.WorkRoot != "/workspace/firecracker" || cfg.WorkRoot != "/workspace/firecracker" {

@@ -63,10 +63,13 @@ func deleteClaimedVM(cfg core.Config, name, expectedID string) error {
 	if err != nil {
 		return core.Exit(5, "open Lume VM %s: %v", name, err)
 	}
-	defer dir.Close()
 	dirInfo, err := dir.Stat()
 	if err != nil || !dirInfo.IsDir() {
+		_ = dir.Close()
 		return core.Exit(5, "inspect Lume VM %s: %v", name, err)
+	}
+	if err := dir.Close(); err != nil {
+		return core.Exit(5, "close Lume VM %s before deletion: %v", name, err)
 	}
 	resizeGuard, err := os.OpenFile(filepath.Join(root, "."+name+".resize.guard"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -86,7 +89,7 @@ func deleteClaimedVM(cfg core.Config, name, expectedID string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return core.Exit(5, "inspect Lume resize state %s: %v", name, err)
 	}
-	config, err := os.Open(filepath.Join(vmPath, "config.json"))
+	config, err := openLumeConfigForLock(filepath.Join(vmPath, "config.json"))
 	if err != nil {
 		return core.Exit(5, "open Lume identity %s: %v", name, err)
 	}
@@ -107,17 +110,51 @@ func deleteClaimedVM(cfg core.Config, name, expectedID string) error {
 }
 
 func quarantineDeleteVM(vmPath string, openedInfo os.FileInfo, config *os.File, openedConfigInfo os.FileInfo, expectedID, name string) error {
+	if _, err := config.Seek(0, io.SeekStart); err != nil {
+		return core.Exit(5, "seek Lume VM identity %s before deletion: %v", name, err)
+	}
+	configData, err := io.ReadAll(io.LimitReader(config, 1<<20+1))
+	if err != nil || len(configData) == 0 || len(configData) > 1<<20 {
+		return core.Exit(5, "read Lume VM identity %s before deletion", name)
+	}
 	quarantineRoot, err := os.MkdirTemp(filepath.Dir(vmPath), ".crabbox-delete-")
 	if err != nil {
 		return core.Exit(5, "create Lume delete quarantine %s: %v", name, err)
 	}
 	quarantined := filepath.Join(quarantineRoot, name)
+	if err := prepareLumeConfigForDirectoryRename(config); err != nil {
+		_ = os.Remove(quarantineRoot)
+		return core.Exit(5, "release Lume VM identity %s for quarantine: %v", name, err)
+	}
 	if err := os.Rename(vmPath, quarantined); err != nil {
 		_ = os.Remove(quarantineRoot)
 		return core.Exit(5, "quarantine Lume VM %s: %v", name, err)
 	}
+	var quarantinedConfig *os.File
+	releaseQuarantinedConfig := func() error {
+		if quarantinedConfig == nil {
+			return nil
+		}
+		unlockErr := unlockFile(quarantinedConfig)
+		closeErr := quarantinedConfig.Close()
+		quarantinedConfig = nil
+		return errors.Join(unlockErr, closeErr)
+	}
+	defer func() {
+		_ = releaseQuarantinedConfig()
+	}()
 	refuse := func(reason string) error {
+		if err := releaseQuarantinedConfig(); err != nil {
+			reason += "; release quarantined identity lock: " + err.Error()
+		}
 		return restoreQuarantinedVM(vmPath, quarantined, quarantineRoot, name, reason)
+	}
+	quarantinedConfig, locked, err := relockLumeConfigAfterDirectoryRename(filepath.Join(quarantined, "config.json"))
+	if err != nil {
+		return refuse("lock quarantined identity config: " + err.Error())
+	}
+	if !locked {
+		return refuse("VM became active during quarantine")
 	}
 	movedInfo, err := os.Lstat(quarantined)
 	if err != nil || !os.SameFile(openedInfo, movedInfo) {
@@ -143,19 +180,15 @@ func quarantineDeleteVM(vmPath string, openedInfo os.FileInfo, config *os.File, 
 		return refuse("VM directory still in use by " + foreignUse)
 	}
 	backup := filepath.Join(quarantineRoot, "config.json")
-	if _, err := config.Seek(0, io.SeekStart); err != nil {
-		return refuse("seek identity before deletion: " + err.Error())
-	}
-	data, err := io.ReadAll(io.LimitReader(config, 1<<20+1))
-	if err != nil || len(data) == 0 || len(data) > 1<<20 {
-		return refuse("read identity before deletion")
-	}
-	if err := os.WriteFile(backup, data, 0o600); err != nil {
+	if err := os.WriteFile(backup, configData, 0o600); err != nil {
 		return refuse("preserve identity before deletion: " + err.Error())
 	}
 	backupID, err := lumeVMImmutableIDAtPath(quarantineRoot, name)
 	if err != nil || backupID != expectedID {
 		return refuse("verify identity backup before deletion")
+	}
+	if err := releaseQuarantinedConfig(); err != nil {
+		return refuse("release quarantined identity lock: " + err.Error())
 	}
 	if err := removeVMDir(quarantined); err != nil {
 		if _, statErr := os.Lstat(quarantined); statErr == nil {

@@ -756,6 +756,9 @@ func TestSnapshotArtifactFilesRejectsSymlinkSwapAfterValidation(t *testing.T) {
 }
 
 func TestValidateArtifactBundleRootRejectsParentSwap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows denies renaming an open directory, preventing this parent-swap attack")
+	}
 	base := t.TempDir()
 	bundle := filepath.Join(base, "bundle")
 	replacement := filepath.Join(base, "replacement")
@@ -937,6 +940,9 @@ func TestArtifactPublishSummaryRejectsExternalAliasToSwappedBundleFile(t *testin
 }
 
 func TestArtifactPublishSummaryRejectsSymlinkDotDotSwap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows symlink traversal semantics do not support this POSIX dot-dot swap")
+	}
 	bundle := t.TempDir()
 	nested := filepath.Join(bundle, "nested")
 	mustWriteFile(t, filepath.Join(bundle, "summary.md"), "safe-summary")

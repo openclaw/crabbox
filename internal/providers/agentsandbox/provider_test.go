@@ -59,7 +59,8 @@ func TestFlagsApplyAgentSandboxConfig(t *testing.T) {
 	if err := applyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(cfg.AgentSandbox.Kubeconfig, "/.kube/as") ||
+	wantKubeconfigSuffix := string(os.PathSeparator) + filepath.Join(".kube", "as")
+	if !strings.HasSuffix(cfg.AgentSandbox.Kubeconfig, wantKubeconfigSuffix) ||
 		cfg.AgentSandbox.Context != "agent-context" ||
 		cfg.AgentSandbox.Namespace != "sandboxes" ||
 		cfg.AgentSandbox.WarmPool != "linux-pool" ||

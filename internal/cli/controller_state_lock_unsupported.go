@@ -1,4 +1,4 @@
-//go:build !linux && !darwin
+//go:build !linux && !darwin && !windows
 
 package cli
 
@@ -11,6 +11,10 @@ type controllerStateLock struct{}
 
 func acquireControllerStateLock(string) (*controllerStateLock, error) {
 	return nil, fmt.Errorf("controller state locking is supported only on Linux and macOS")
+}
+
+func secureControllerStateDirectoryPath(string) error {
+	return nil
 }
 
 func validateControllerStateDirectoryPath(dir string) error {

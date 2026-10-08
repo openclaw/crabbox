@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -153,45 +155,49 @@ func TestConfigureRequiresRuntimeExec(t *testing.T) {
 }
 
 func TestRunBuildsSRTCommandAndStreamsOutput(t *testing.T) {
-	cfg := newTestConfig()
-	cfg.AnthropicSRT.CLIPath = "/opt/srt"
-	cfg.AnthropicSRT.Settings = ".crabbox/srt-settings.json"
-	cfg.AnthropicSRT.Debug = true
-	runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-		if req.Stdout != nil {
-			_, _ = io.WriteString(req.Stdout, "ok\n")
+	synctest.Test(t, func(t *testing.T) {
+		cfg := newTestConfig()
+		cfg.AnthropicSRT.CLIPath = "/opt/srt"
+		cfg.AnthropicSRT.Settings = ".crabbox/srt-settings.json"
+		cfg.AnthropicSRT.Debug = true
+		runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+			// Advance the virtual clock so elapsed-time assertions are deterministic.
+			time.Sleep(20 * time.Millisecond)
+			if req.Stdout != nil {
+				_, _ = io.WriteString(req.Stdout, "ok\n")
+			}
+			if req.Stderr != nil {
+				_, _ = io.WriteString(req.Stderr, "srt debug\n")
+			}
+			return core.LocalCommandResult{ExitCode: 0, Stdout: "ok\n", Stderr: "srt debug\n"}, nil
+		}}
+		var stdout, stderr bytes.Buffer
+		backend := newTestBackend(cfg, runner, &stdout, &stderr)
+		result, err := backend.Run(context.Background(), core.RunRequest{
+			Repo:    core.Repo{Name: "my-app", Root: "/tmp/my-app"},
+			Command: []string{"echo", "hello world"},
+		})
+		if err != nil {
+			t.Fatalf("Run err=%v", err)
 		}
-		if req.Stderr != nil {
-			_, _ = io.WriteString(req.Stderr, "srt debug\n")
+		if result.Provider != providerName || !result.SyncDelegated || result.ExitCode != 0 || result.Command <= 0 || result.Total < result.Command {
+			t.Fatalf("result=%#v", result)
 		}
-		return core.LocalCommandResult{ExitCode: 0, Stdout: "ok\n", Stderr: "srt debug\n"}, nil
-	}}
-	var stdout, stderr bytes.Buffer
-	backend := newTestBackend(cfg, runner, &stdout, &stderr)
-	result, err := backend.Run(context.Background(), core.RunRequest{
-		Repo:    core.Repo{Name: "my-app", Root: "/tmp/my-app"},
-		Command: []string{"echo", "hello world"},
+		if result.Status != core.RunStatusSucceeded || result.ErrorKind != core.RunErrorNone {
+			t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
+		}
+		if stdout.String() != "ok\n" || !strings.Contains(stderr.String(), "sync_delegated=true") {
+			t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+		call := runner.onlyCall(t)
+		if call.Name != "/opt/srt" || call.Dir != "/tmp/my-app" {
+			t.Fatalf("call name/dir=%q/%q", call.Name, call.Dir)
+		}
+		wantArgs := []string{"--debug", "--settings", ".crabbox/srt-settings.json", "-c", "'echo' 'hello world'"}
+		if !reflect.DeepEqual(call.Args, wantArgs) {
+			t.Fatalf("args=%#v want %#v", call.Args, wantArgs)
+		}
 	})
-	if err != nil {
-		t.Fatalf("Run err=%v", err)
-	}
-	if result.Provider != providerName || !result.SyncDelegated || result.ExitCode != 0 || result.Command <= 0 || result.Total <= 0 {
-		t.Fatalf("result=%#v", result)
-	}
-	if result.Status != core.RunStatusSucceeded || result.ErrorKind != core.RunErrorNone {
-		t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
-	}
-	if stdout.String() != "ok\n" || !strings.Contains(stderr.String(), "sync_delegated=true") {
-		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
-	}
-	call := runner.onlyCall(t)
-	if call.Name != "/opt/srt" || call.Dir != "/tmp/my-app" {
-		t.Fatalf("call name/dir=%q/%q", call.Name, call.Dir)
-	}
-	wantArgs := []string{"--debug", "--settings", ".crabbox/srt-settings.json", "-c", "'echo' 'hello world'"}
-	if !reflect.DeepEqual(call.Args, wantArgs) {
-		t.Fatalf("args=%#v want %#v", call.Args, wantArgs)
-	}
 }
 
 func TestRunKeepsLiteralArgumentsInShellTransport(t *testing.T) {

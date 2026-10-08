@@ -403,10 +403,8 @@ func TestExternalRoutingRoundTripUsesPrivateHashedPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info, err := os.Stat(path); err != nil {
-		t.Fatal(err)
-	} else if info.Mode().Perm() != 0o600 {
-		t.Fatalf("mode=%o", info.Mode().Perm())
+	if got := configFilePermissionProblem(path); got != "" {
+		t.Fatalf("external routing permission problem=%q", got)
 	}
 	if path == "" || path[len(path)-5:] != ".json" {
 		t.Fatalf("path=%q", path)

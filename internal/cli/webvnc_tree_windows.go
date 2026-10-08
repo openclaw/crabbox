@@ -153,6 +153,12 @@ func windowsWebVNCDaemonSurvivors(tree []windowsWebVNCDaemonProcessIdentity) []i
 }
 
 func windowsWebVNCDaemonIdentityStillMatches(identity windowsWebVNCDaemonProcessIdentity) bool {
+	// OpenProcess and GetProcessTimes keep answering for an exited process while
+	// any handle to it stays open, so a killed daemon would otherwise report its
+	// recorded start identity forever. Gate the comparison on liveness first.
+	if _, alive := LocalProcessCommand(identity.pid); !alive {
+		return false
+	}
 	started, err := LocalProcessStartIdentity(identity.pid)
 	if err == nil {
 		return started == identity.started

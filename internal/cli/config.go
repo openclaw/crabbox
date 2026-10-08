@@ -1573,7 +1573,7 @@ func EffectiveHostingerWorkRoot(cfg Config) string {
 }
 
 func baseConfig() Config {
-	home, _ := os.UserHomeDir()
+	home := userHomeDirectory()
 	sshKey := ""
 	if home != "" {
 		sshKey = filepath.Join(home, ".ssh", "id_ed25519")
@@ -2393,7 +2393,7 @@ func configPaths() []string {
 }
 
 func userConfigPath() string {
-	dir, err := os.UserConfigDir()
+	dir, err := userConfigDirectory()
 	if err != nil {
 		return ""
 	}
@@ -2484,10 +2484,7 @@ func configFilePermissionProblem(path string) string {
 		}
 		return err.Error()
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return fmt.Sprintf("permissions %04o want 0600", info.Mode().Perm())
-	}
-	return ""
+	return configFilePermissionProblemForInfo(path, info)
 }
 
 func writableConfigPath() string {
@@ -5091,13 +5088,13 @@ func ApplyExternalDesktopEnvironmentOverrides(cfg *Config) {
 
 func expandUserPath(path string) string {
 	if path == "~" {
-		home, _ := os.UserHomeDir()
+		home := userHomeDirectory()
 		if home != "" {
 			return home
 		}
 	}
 	if strings.HasPrefix(path, "~/") {
-		home, _ := os.UserHomeDir()
+		home := userHomeDirectory()
 		if home != "" {
 			return filepath.Join(home, strings.TrimPrefix(path, "~/"))
 		}

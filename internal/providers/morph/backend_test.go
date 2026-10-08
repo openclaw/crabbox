@@ -350,21 +350,9 @@ func TestMorphAcquireStoresMetadataAndKey(t *testing.T) {
 	if strings.TrimSpace(string(keyData)) != "PRIVATE KEY" {
 		t.Fatalf("unexpected stored key: %q", string(keyData))
 	}
-	info, err := os.Stat(lease.SSH.Key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("key perms=%o want 600", info.Mode().Perm())
-	}
+	assertPrivateFile(t, lease.SSH.Key)
 	knownHostsDir := filepath.Dir(lease.SSH.KnownHostsFile)
-	info, err = os.Stat(knownHostsDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o700 {
-		t.Fatalf("known_hosts dir perms=%o want 700", info.Mode().Perm())
-	}
+	assertPrivateDir(t, knownHostsDir)
 }
 
 func TestStoreMorphSSHKeyDecryptsProtectedKey(t *testing.T) {

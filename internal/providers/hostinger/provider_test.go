@@ -26,6 +26,13 @@ import (
 func isolateHostingerTestState(t *testing.T) {
 	t.Helper()
 	testutil.IsolateUserDirs(t)
+	// Windows hosts routinely lack rsync, so preflight tool discovery must not
+	// depend on machine state that is unrelated to the behavior under test.
+	oldLookPath := hostingerLookPath
+	hostingerLookPath = func(tool string) (string, error) {
+		return filepath.Join(t.TempDir(), tool), nil
+	}
+	t.Cleanup(func() { hostingerLookPath = oldLookPath })
 }
 
 func TestProviderSpecAndFlags(t *testing.T) {
@@ -437,6 +444,7 @@ func TestAcquireRejectsInvalidGeneratedHostnameBeforePurchase(t *testing.T) {
 }
 
 func TestAcquireRequiresUsableDefaultPaymentMethod(t *testing.T) {
+	isolateHostingerTestState(t)
 	api := &fakeAPI{paymentMethods: []hostingerPaymentMethod{}}
 	cfg := core.Config{Hostinger: core.HostingerConfig{
 		APIToken:      "token",

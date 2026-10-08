@@ -18,3 +18,7 @@ const (
 	maxSandboxNameLen    = 63
 	sandboxNameSuffixLen = 6
 )
+
+var allocateClaimLeaseSlug = core.AllocateClaimLeaseSlug
+
+var claimLeaseForRepoProviderPond = core.ClaimLeaseForRepoProviderPond

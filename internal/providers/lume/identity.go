@@ -136,22 +136,6 @@ func ensureLumeStorageIdentity(root string) (string, error) {
 	return identity, nil
 }
 
-func syncLumeStorageDirectory(root string) error {
-	dir, err := os.Open(root)
-	if err != nil {
-		return core.Exit(5, "open Lume storage %q for identity sync: %v", root, err)
-	}
-	syncErr := dir.Sync()
-	closeErr := dir.Close()
-	if syncErr != nil {
-		return core.Exit(5, "sync Lume storage identity directory %q: %v", root, syncErr)
-	}
-	if closeErr != nil {
-		return core.Exit(5, "close Lume storage identity directory %q: %v", root, closeErr)
-	}
-	return nil
-}
-
 func readLumeStorageIdentity(root string) (string, error) {
 	root = filepath.Clean(root)
 	marker := filepath.Join(root, lumeStorageIdentityFile)

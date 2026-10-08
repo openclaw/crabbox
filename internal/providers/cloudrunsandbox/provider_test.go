@@ -304,13 +304,11 @@ func TestDoctorFailsWhenLocalClaimsAreUnreadable(t *testing.T) {
 	previousTransport := newTransport
 	newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return fake, nil }
 	t.Cleanup(func() { newTransport = previousTransport })
-	stateDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox")
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		t.Fatal(err)
+	previousClaims := listCloudRunSandboxLeaseClaims
+	listCloudRunSandboxLeaseClaims = func() ([]core.LeaseClaim, error) {
+		return nil, errors.New("read claims directory: access denied")
 	}
-	if err := os.WriteFile(filepath.Join(stateDir, "claims"), []byte("not a directory"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { listCloudRunSandboxLeaseClaims = previousClaims })
 	b := NewBackend(Provider{}.Spec(), core.Config{
 		CloudRunSandbox: core.CloudRunSandboxConfig{GatewayURL: "https://gw.example.run.app", CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
 	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)

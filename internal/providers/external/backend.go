@@ -1118,7 +1118,7 @@ func ensureSlugReservationDirWithSync(dir string, syncDirectory func(string) err
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return fmt.Errorf("external slug reservation path is not a directory: %s", path)
 		}
-		if err := os.Chmod(path, 0o700); err != nil {
+		if err := core.SecurePrivatePath(path, true); err != nil {
 			return fmt.Errorf("secure external slug reservation directory %s: %w", path, err)
 		}
 		// Persist each directory entry before relying on the next child in the
@@ -1130,7 +1130,7 @@ func ensureSlugReservationDirWithSync(dir string, syncDirectory func(string) err
 			return fmt.Errorf("sync external slug reservation directory %s: %w", path, err)
 		}
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := core.SecurePrivatePath(dir, true); err != nil {
 		return fmt.Errorf("secure external slug reservation dir: %w", err)
 	}
 	// Repeat the complete directory chain on every call. A prior attempt may

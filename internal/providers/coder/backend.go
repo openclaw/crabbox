@@ -886,12 +886,13 @@ func coderSSHTarget(cfg core.Config, workspaceName, workspaceID string) core.SSH
 }
 
 func coderKnownHostsFile(workspaceName, workspaceID string) string {
-	configDir, err := os.UserConfigDir()
+	configDir, err := core.UserConfigDirectory()
 	if err != nil || strings.TrimSpace(configDir) == "" {
 		configDir = filepath.Join(os.Getenv("HOME"), ".config")
 	}
 	dir := filepath.Join(configDir, "crabbox", coderProvider, "known_hosts.d")
 	_ = os.MkdirAll(dir, 0o700)
+	_ = core.SecurePrivatePath(dir, true)
 	identity := strings.TrimSpace(workspaceID)
 	if identity == "" {
 		identity = strings.TrimSpace(workspaceName)

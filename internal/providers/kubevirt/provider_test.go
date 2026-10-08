@@ -12,6 +12,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -57,11 +58,7 @@ spec:
 
 func isolateCrabboxState(t *testing.T) string {
 	t.Helper()
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
-	return home
+	return testutil.IsolateUserDirs(t).Home
 }
 
 func claimKubeVirtLease(t *testing.T, cfg core.Config, leaseID, slug, repoRoot string, idleTimeout time.Duration, reclaim bool) {
@@ -594,7 +591,7 @@ func TestWaitForVMIReadyForSSHReportsConditionsAndEvents(t *testing.T) {
 		`{"items":[{"type":"Normal","reason":"Created","message":"VirtualMachineInstance defined."}]}`,
 	}}
 	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
-	_, err := backend.waitForVMIReadyForSSH(context.Background(), "vm-stuck", time.Nanosecond)
+	_, err := backend.waitForVMIReadyForSSH(context.Background(), "vm-stuck", -time.Nanosecond)
 	if err == nil {
 		t.Fatal("expected timeout")
 	}

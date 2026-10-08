@@ -1783,20 +1783,20 @@ func excludeMatches(rel string, exclude string) bool {
 			if part == exclude {
 				return true
 			}
-			if ok, _ := filepath.Match(exclude, part); ok {
+			if ok, _ := path.Match(exclude, part); ok {
 				return true
 			}
 		}
 	}
-	if ok, _ := filepath.Match(exclude, filepath.Base(rel)); ok {
+	if ok, _ := path.Match(exclude, path.Base(rel)); ok {
 		return true
 	}
-	if ok, _ := filepath.Match(exclude, rel); ok {
+	if ok, _ := path.Match(exclude, rel); ok {
 		return true
 	}
 	for i := 1; i < len(parts); i++ {
 		prefix := strings.Join(parts[:i], "/")
-		if ok, _ := filepath.Match(exclude, prefix); ok {
+		if ok, _ := path.Match(exclude, prefix); ok {
 			return true
 		}
 	}
@@ -1820,7 +1820,7 @@ func pathIncluded(rel string, includes []string) bool {
 		if rel == include || strings.HasPrefix(rel, include+"/") {
 			return true
 		}
-		if ok, _ := filepath.Match(include, rel); ok {
+		if ok, _ := path.Match(include, rel); ok {
 			return true
 		}
 	}

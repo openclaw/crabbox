@@ -84,6 +84,9 @@ func persistDevboxKey(leaseID string, keys devboxSecretKeys) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", core.Exit(2, "create sealos-devbox key directory: %v", err)
 	}
+	if err := core.SecurePrivatePath(filepath.Dir(path), true); err != nil {
+		return "", core.Exit(2, "secure sealos-devbox key directory: %v", err)
+	}
 	publicPath := path + ".pub"
 	previousPublic, previousPublicMode, hadPublic, err := readExistingDevboxKey(publicPath)
 	if err != nil {
@@ -152,7 +155,13 @@ func writeDevboxKeyFile(path string, data []byte, mode os.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	if mode == 0o600 {
+		return core.SecurePrivatePath(path, false)
+	}
+	return nil
 }
 
 func ensureTrailingNewline(value string) string {

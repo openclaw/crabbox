@@ -160,9 +160,10 @@ func TestCoderSSHTargetUsesProxyCommand(t *testing.T) {
 	if target.KnownHostsFile == "" || !strings.Contains(target.KnownHostsFile, filepath.Join("crabbox", coderProvider, "known_hosts.d")) {
 		t.Fatalf("known_hosts file should be isolated under crabbox config dir: %q", target.KnownHostsFile)
 	}
-	if info, err := os.Stat(filepath.Dir(target.KnownHostsFile)); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+	if info, err := os.Stat(filepath.Dir(target.KnownHostsFile)); err != nil || !info.IsDir() {
 		t.Fatalf("known_hosts dir not prepared securely: info=%#v err=%v", info, err)
 	}
+	assertPrivateDir(t, filepath.Dir(target.KnownHostsFile))
 }
 
 func TestCoderSSHTargetUsesValidHostForOwnerQualifiedWorkspace(t *testing.T) {

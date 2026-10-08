@@ -429,13 +429,7 @@ func TestParseAndPersistDevboxSecretKeysRedactsMaterial(t *testing.T) {
 	if string(data) != privateKey {
 		t.Fatal("private key did not round trip")
 	}
-	info, err := os.Stat(keyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("private key mode=%04o want 0600", info.Mode().Perm())
-	}
+	assertPrivateFile(t, keyPath)
 	redacted := redactSensitive("private_key=" + strings.TrimSpace(privateKey))
 	if strings.Contains(redacted, "secret-private") {
 		t.Fatalf("redaction leaked private key: %s", redacted)

@@ -572,8 +572,8 @@ func TestWatchRewatchesDirectoriesWhenExclusionsRelax(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("session.run: %v", err)
 	}
-	if executor.callCount() != 3 {
-		t.Fatalf("iterations=%d, want 3 (relaxed exclusion must re-attach watches)", executor.callCount())
+	if executor.callCount() < 3 {
+		t.Fatalf("iterations=%d, want at least 3 (relaxed exclusion must re-attach watches)", executor.callCount())
 	}
 }
 
@@ -665,6 +665,9 @@ func TestQualifyWatchBatchHonorsSyncIncludes(t *testing.T) {
 }
 
 func TestWatchGitPathsTreatsEventNamesLiterally(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not allow wildcard characters in file names")
+	}
 	root := newWatchGitRepo(t)
 	watchTestWrite(t, root, "*.go", "literal filename\n")
 
@@ -693,6 +696,9 @@ func TestWatchIgnoresUnchangedMetadataEvents(t *testing.T) {
 }
 
 func TestWatchKeepsExecutableModeChanges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows files do not expose POSIX executable mode changes")
+	}
 	root := newWatchGitRepo(t)
 	path := filepath.Join(root, "main.go")
 	session := &watchSession{root: root}

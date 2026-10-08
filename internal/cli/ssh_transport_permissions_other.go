@@ -82,8 +82,9 @@ func verifySSHTransportPathPrivate(path string, directory bool) error {
 	if directory {
 		want = 0o700
 	}
-	if info.Mode().Perm() != want {
-		return fmt.Errorf("permissions=%o want %o", info.Mode().Perm(), want)
+	// Owner-only is the contract: a stricter owner-read-only (0400) file stays valid.
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("permissions=%o want %o or stricter without group or other access", info.Mode().Perm(), want)
 	}
 	return nil
 }

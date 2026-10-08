@@ -223,13 +223,7 @@ func TestConnectionArgsForAddressPersistsRefreshedOIDCTokens(t *testing.T) {
 	if saved.AccessToken != "refreshed-access-token" {
 		t.Fatalf("AccessToken=%q want refreshed-access-token", saved.AccessToken)
 	}
-	info, err := os.Stat(tokenPath)
-	if err != nil {
-		t.Fatalf("Stat: %v", err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("token mode=%#o want 0600", info.Mode().Perm())
-	}
+	assertPrivateFile(t, tokenPath)
 }
 
 func TestOIDCTokenCallbacksReloadLatestTokens(t *testing.T) {

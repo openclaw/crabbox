@@ -15,7 +15,7 @@ func leaseSSHRoot() (string, error) {
 		}
 		return filepath.Clean(root), nil
 	}
-	return os.UserConfigDir()
+	return userConfigDirectory()
 }
 
 func secureLeaseSSHDirectory(path string) error {

@@ -30,6 +30,6 @@ func claimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, prov
 	return core.ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, expected, true)
 }
 
-func listCloudRunSandboxLeaseClaims() ([]core.LeaseClaim, error) {
+var listCloudRunSandboxLeaseClaims = func() ([]core.LeaseClaim, error) {
 	return core.ListLeaseClaimsWithPrefix(leasePrefix)
 }

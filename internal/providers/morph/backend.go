@@ -944,6 +944,12 @@ func storeMorphSSHKey(leaseID string, sshKey morphSSHKey) (string, error) {
 	if err := core.WritePreparedLeaseSSHKeyFile(path, keyData); err != nil {
 		return "", err
 	}
+	if err := core.SecurePrivatePath(filepath.Dir(path), true); err != nil {
+		return "", err
+	}
+	if err := core.SecurePrivatePath(path, false); err != nil {
+		return "", err
+	}
 	return path, nil
 }
 
@@ -954,6 +960,9 @@ func ensureMorphKnownHostsPath() (string, error) {
 	}
 	path := filepath.Join(configDir, "crabbox", providerName, "known_hosts")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	if err := core.SecurePrivatePath(filepath.Dir(path), true); err != nil {
 		return "", err
 	}
 	return path, nil

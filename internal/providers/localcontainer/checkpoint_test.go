@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -522,6 +523,7 @@ func TestCheckpointMetadataForServerPreservesUserAndWorkRoot(t *testing.T) {
 func writeCheckpointScopeDocker(t *testing.T, endpoint, daemonID string) string {
 	t.Helper()
 	binDir := t.TempDir()
+	path := filepath.Join(binDir, "docker")
 	script := fmt.Sprintf(`#!/bin/sh
 if [ "$1" = "--context" ]; then
   shift 2
@@ -531,7 +533,11 @@ case "$1" in
   info) printf '%%s\n' '%s' ;;
 esac
 `, endpoint, daemonID)
-	if err := os.WriteFile(filepath.Join(binDir, "docker"), []byte(script), 0o755); err != nil {
+	if runtime.GOOS == "windows" {
+		path += ".cmd"
+		script = fmt.Sprintf("@echo off\r\nsetlocal\r\nif \"%%~1\"==\"--context\" (\r\n  shift\r\n  shift\r\n)\r\nif /I \"%%~1\"==\"context\" (\r\n  echo %s\r\n  exit /b 0\r\n)\r\nif /I \"%%~1\"==\"info\" (\r\n  echo %s\r\n  exit /b 0\r\n)\r\nexit /b 1\r\n", endpoint, daemonID)
+	}
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return binDir

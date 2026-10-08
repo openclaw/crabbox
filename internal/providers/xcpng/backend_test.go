@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1373,27 +1374,11 @@ func TestWriteWindowsAnswerISOEnforcesPrivatePermissions(t *testing.T) {
 	if err := os.Chmod(evidenceDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	binDir := filepath.Join(dir, "bin")
-	if err := os.Mkdir(binDir, 0o700); err != nil {
-		t.Fatal(err)
+	originalBuildDataISO := isoE2EBuildDataISO
+	isoE2EBuildDataISO = func(_ context.Context, outputISO, _ string, _ string) error {
+		return os.WriteFile(outputISO, []byte("iso"), 0o644)
 	}
-	xorriso := filepath.Join(binDir, "xorriso")
-	script := `#!/bin/sh
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-o" ]; then
-    shift
-    : > "$1"
-    chmod 0644 "$1"
-    exit 0
-  fi
-  shift
-done
-exit 1
-`
-	if err := os.WriteFile(xorriso, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	defer func() { isoE2EBuildDataISO = originalBuildDataISO }()
 	path, err := writeWindowsAnswerISO(context.Background(), evidenceDir, xcpNgWindowsAutounattendPayload{
 		AnswerXML:           "<unattend/>",
 		BootstrapPowerShell: "Write-Output ready",
@@ -1401,15 +1386,13 @@ exit 1
 	if err != nil {
 		t.Fatal(err)
 	}
-	for target, want := range map[string]os.FileMode{evidenceDir: 0o755, filepath.Dir(path): 0o700, path: 0o600} {
-		info, err := os.Stat(target)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := info.Mode().Perm(); got != want {
-			t.Fatalf("%s mode=%#o want=%#o", target, got, want)
-		}
+	if info, err := os.Stat(evidenceDir); err != nil {
+		t.Fatal(err)
+	} else if runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
+		t.Fatalf("%s mode=%#o want=%#o", evidenceDir, info.Mode().Perm(), 0o755)
 	}
+	assertPrivateDir(t, filepath.Dir(path))
+	assertPrivateFile(t, path)
 }
 
 func TestIsCrabboxLeaseRequiresXCPNgProviderLabel(t *testing.T) {

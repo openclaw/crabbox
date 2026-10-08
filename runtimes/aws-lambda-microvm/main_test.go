@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +16,9 @@ import (
 )
 
 func TestUploadAndExec(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Lambda MicroVM runtime tests execute Linux /tmp and /bin/sh semantics")
+	}
 	s := &server{execSlot: make(chan struct{}, 1)}
 	archive := "/tmp/crabbox-sync-a1b2c3.tgz"
 	t.Cleanup(func() { _ = os.Remove(archive) })
@@ -72,6 +76,9 @@ func TestUploadRejectsPathsOutsideDedicatedTempNames(t *testing.T) {
 }
 
 func TestExecKeepsScriptSeparateFromCommandStdin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Lambda MicroVM runtime tests execute Linux /bin/sh semantics")
+	}
 	s := &server{execSlot: make(chan struct{}, 1)}
 	payload, _ := json.Marshal(execRequest{
 		Command: "read line || true\nprintf after",
@@ -103,6 +110,9 @@ func TestExecKeepsScriptSeparateFromCommandStdin(t *testing.T) {
 }
 
 func TestExecPreservesBinaryOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Lambda MicroVM runtime tests execute Linux /bin/sh semantics")
+	}
 	s := &server{execSlot: make(chan struct{}, 1)}
 	payload, _ := json.Marshal(execRequest{Command: `printf '\377\000\376'`, Workdir: t.TempDir()})
 	req := httptest.NewRequest(http.MethodPost, "/v1/exec", bytes.NewReader(payload))
@@ -130,6 +140,9 @@ func TestExecPreservesBinaryOutput(t *testing.T) {
 }
 
 func TestExecDoesNotWaitForInheritedBackgroundPipe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Lambda MicroVM runtime tests execute Linux /bin/sh semantics")
+	}
 	s := &server{execSlot: make(chan struct{}, 1)}
 	workdir := t.TempDir()
 	payload, _ := json.Marshal(execRequest{Command: `sleep 60 & echo $! > child.pid`, Workdir: workdir})
@@ -160,6 +173,9 @@ func TestExecDoesNotWaitForInheritedBackgroundPipe(t *testing.T) {
 }
 
 func TestUploadReplacesSymlinkWithoutFollowingIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Lambda MicroVM runtime tests execute Linux /tmp semantics")
+	}
 	s := &server{execSlot: make(chan struct{}, 1)}
 	target := "/tmp/crabbox-sync-deadbeef.tgz"
 	victim := filepath.Join(t.TempDir(), "victim")

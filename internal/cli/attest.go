@@ -92,7 +92,7 @@ type preparedRunReceipt struct {
 }
 
 func attestKeyPath() (string, error) {
-	base, err := os.UserConfigDir()
+	base, err := userConfigDirectory()
 	if err != nil {
 		return "", err
 	}

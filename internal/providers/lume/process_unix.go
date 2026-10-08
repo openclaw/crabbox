@@ -36,3 +36,15 @@ func tryExclusiveFileLock(file *os.File) (bool, error) {
 func unlockFile(file *os.File) error {
 	return syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 }
+
+func openLumeConfigForLock(path string) (*os.File, error) {
+	return os.Open(path)
+}
+
+func prepareLumeConfigForDirectoryRename(*os.File) error {
+	return nil
+}
+
+func relockLumeConfigAfterDirectoryRename(string) (*os.File, bool, error) {
+	return nil, true, nil
+}

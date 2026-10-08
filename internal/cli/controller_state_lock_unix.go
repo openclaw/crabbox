@@ -23,6 +23,9 @@ func acquireControllerStateLock(statePath string) (*controllerStateLock, error) 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create controller state directory for lock: %w", err)
 	}
+	if err := secureControllerStateDirectoryPath(dir); err != nil {
+		return nil, err
+	}
 	dirFD, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open controller state directory for lock: %w", err)
@@ -68,6 +71,10 @@ func acquireControllerStateLock(statePath string) (*controllerStateLock, error) 
 	}
 	closeLock = false
 	return &controllerStateLock{file: lockFile}, nil
+}
+
+func secureControllerStateDirectoryPath(string) error {
+	return nil
 }
 
 func validateControllerStateDirectoryStat(stat *unix.Stat_t) error {

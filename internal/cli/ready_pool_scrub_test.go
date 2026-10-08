@@ -464,7 +464,10 @@ func TestPreflightReadyPoolRemoteRequiresAnonymousFetch(t *testing.T) {
 	if err := preflightReadyPoolRemote(context.Background(), origin, "main"); err != nil {
 		t.Fatalf("anonymous local origin rejected: %v", err)
 	}
-	runGit(t, origin, "symbolic-ref", "HEAD", "refs/heads/missing")
+	setHead := exec.Command("git", "--git-dir", origin, "symbolic-ref", "HEAD", "refs/heads/missing")
+	if out, err := setHead.CombinedOutput(); err != nil {
+		t.Fatalf("set bare origin HEAD: %v\n%s", err, out)
+	}
 	if err := preflightReadyPoolRemote(context.Background(), origin, "main"); err != nil {
 		t.Fatalf("anonymous origin without advertised HEAD rejected: %v", err)
 	}

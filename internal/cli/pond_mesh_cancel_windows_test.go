@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -21,6 +22,9 @@ import (
 const pondMeshWindowsCancelHelperEnv = "CRABBOX_POND_MESH_WINDOWS_CANCEL_HELPER"
 
 func TestMain(m *testing.M) {
+	if os.Getenv(recordingSSHWindowsHelperEnv) == "1" {
+		os.Exit(runRecordingSSHWindowsHelper())
+	}
 	if os.Getenv(pondMeshWindowsCancelHelperEnv) == "1" {
 		if err := os.WriteFile(os.Getenv("CRABBOX_POND_MESH_WINDOWS_CANCEL_READY"), []byte("ready"), 0o600); err != nil {
 			os.Exit(2)
@@ -28,7 +32,171 @@ func TestMain(m *testing.M) {
 		time.Sleep(10 * time.Minute)
 		os.Exit(0)
 	}
-	os.Exit(runCLITests(m))
+	code := runCLITests(m)
+	cleanupRecordingSSHWindowsExecutable()
+	os.Exit(code)
+}
+
+func runRecordingSSHWindowsHelper() int {
+	tool := strings.TrimSuffix(filepath.Base(os.Args[0]), filepath.Ext(os.Args[0]))
+	if name := os.Getenv(recordingToolWindowsNameEnv); name != "" && strings.EqualFold(tool, name) {
+		logPath := os.Getenv(recordingToolWindowsLogEnv)
+		if logPath == "" {
+			return 2
+		}
+		content := strings.Join(os.Args[1:], "\n") + "\n"
+		if err := os.WriteFile(logPath, []byte(content), 0o600); err != nil {
+			return 2
+		}
+		return 0
+	}
+	if !strings.EqualFold(tool, "ssh") {
+		// Tools published purely so the exercised code path finds an executable.
+		return 0
+	}
+	var behavior scriptedSSHBehavior
+	if raw := os.Getenv(scriptedSSHWindowsBehaviorEnv); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &behavior); err != nil {
+			return 2
+		}
+	}
+	return runScriptedSSHWindowsHelper(behavior)
+}
+
+func runScriptedSSHWindowsHelper(behavior scriptedSSHBehavior) int {
+	if behavior.ConfigQueryPassthrough {
+		for _, arg := range os.Args[1:] {
+			if arg != "-G" {
+				continue
+			}
+			// Configuration queries must never enter the simulated
+			// remote-command path.
+			if behavior.RealSSH == "" {
+				return scriptedSSHConfigQueryUnavailable
+			}
+			return runRealSSHConfigQuery(behavior.RealSSH)
+		}
+	}
+	command := ""
+	if len(os.Args) > 1 {
+		command = os.Args[len(os.Args)-1]
+	}
+	port := ""
+	for index := 1; index+1 < len(os.Args); index++ {
+		if os.Args[index] == "-p" {
+			port = os.Args[index+1]
+		}
+	}
+	if argsPath := os.Getenv("CRABBOX_FAKE_SSH_ARGS_LOG"); argsPath != "" {
+		if err := os.WriteFile(argsPath, []byte(strings.Join(os.Args[1:], " ")), 0o600); err != nil {
+			return 2
+		}
+	}
+	if portsPath := os.Getenv("CRABBOX_FAKE_SSH_PORTS"); portsPath != "" {
+		if err := appendScriptedSSHFile(portsPath, port+"\n"); err != nil {
+			return 2
+		}
+	}
+	if callsPath := os.Getenv("CRABBOX_FAKE_SSH_CALLS"); callsPath != "" {
+		if err := appendScriptedSSHFile(callsPath, port+":"+command+"\n"); err != nil {
+			return 2
+		}
+	}
+	stdin, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return 2
+	}
+	if path := os.Getenv("CRABBOX_FAKE_SSH_STDIN_LOG"); path != "" {
+		if err := appendScriptedSSHFile(path, string(stdin)); err != nil {
+			return 2
+		}
+	}
+	match := command
+	decoded := ""
+	if behavior.DecodePayload {
+		decoded = strings.Join(decodeScriptedSSHPayloads(command), "\n")
+		match = command + "\n" + decoded
+	}
+	if logPath := os.Getenv("CRABBOX_FAKE_SSH_LOG"); logPath != "" {
+		entry := command + "\n---\n"
+		if behavior.DecodePayload {
+			entry = command + "\n" + decoded + "\n---\n"
+		}
+		if err := appendScriptedSSHFile(logPath, entry); err != nil {
+			return 2
+		}
+	}
+	if behavior.MatchStdin {
+		match += "\n" + string(stdin)
+	}
+	if path := os.Getenv("CRABBOX_FAKE_SSH_DETAILED_LOG"); path != "" {
+		entry := strings.Join(os.Args[1:], "\n") + "\n" + match + "\n---\n"
+		if err := appendScriptedSSHFile(path, entry); err != nil {
+			return 2
+		}
+	}
+	if behavior.WorkspaceOwnerProtocol {
+		for _, action := range []struct{ marker, reply string }{
+			{"protocol_action='acquire'", "ACQUIRED"},
+			{"protocol_action='renew'", "RENEWED"},
+			{"protocol_action='inspect'", "OWNED"},
+			{"protocol_action='release'", "RELEASED"},
+		} {
+			if strings.Contains(match, action.marker) {
+				return writeScriptedSSHResult(action.reply, "", 0)
+			}
+		}
+	}
+	for _, rule := range behavior.Rules {
+		if (rule.Port == "" || rule.Port == port) && strings.Contains(match, rule.Contains) {
+			return writeScriptedSSHResult(rule.Stdout, rule.Stderr, rule.ExitCode)
+		}
+	}
+	return writeScriptedSSHResult(behavior.Stdout, behavior.Stderr, behavior.ExitCode)
+}
+
+func runRealSSHConfigQuery(realSSH string) int {
+	query := exec.Command(realSSH, os.Args[1:]...)
+	query.Stdin = os.Stdin
+	query.Stdout = os.Stdout
+	query.Stderr = os.Stderr
+	if err := query.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode()
+		}
+		return scriptedSSHConfigQueryUnavailable
+	}
+	return 0
+}
+
+func appendScriptedSSHFile(path, content string) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(file, content); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+func writeScriptedSSHResult(stdout, stderr string, exitCode int) int {
+	if exitCode < 0 || exitCode > 255 {
+		return 2
+	}
+	if stdout != "" {
+		if _, err := io.WriteString(os.Stdout, stdout); err != nil {
+			return 2
+		}
+	}
+	if stderr != "" {
+		if _, err := io.WriteString(os.Stderr, stderr); err != nil {
+			return 2
+		}
+	}
+	return exitCode
 }
 
 func TestPondMeshCancelRunForwardsReturnsNoErrorOnWindows(t *testing.T) {
@@ -50,6 +218,11 @@ func TestPondMeshCancelRunForwardsReturnsNoErrorOnWindows(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv(pondMeshWindowsCancelHelperEnv, "1")
 	t.Setenv("CRABBOX_POND_MESH_WINDOWS_CANCEL_READY", ready)
+	if resolved, err := exec.LookPath("ssh"); err != nil {
+		t.Fatal(err)
+	} else if !strings.EqualFold(resolved, fakeSSH) {
+		t.Fatalf("ssh resolved to %q, want %q", resolved, fakeSSH)
+	}
 
 	members := []pondMember{{
 		Name:  "peer-a",
@@ -75,7 +248,7 @@ func TestPondMeshCancelRunForwardsReturnsNoErrorOnWindows(t *testing.T) {
 		errCh <- runPondMeshForwards(ctx, pondConnectOptions{Stdout: io.Discard, Stderr: io.Discard}, members, summary)
 	}()
 
-	waitForPondMeshWindowsFile(t, ready, "fake ssh helper did not start")
+	waitForPondMeshWindowsReady(t, ready, errCh)
 	cancel()
 	select {
 	case err := <-errCh:
@@ -85,6 +258,23 @@ func TestPondMeshCancelRunForwardsReturnsNoErrorOnWindows(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("runPondMeshForwards did not return promptly after context cancellation")
 	}
+}
+
+func waitForPondMeshWindowsReady(t *testing.T, path string, errCh <-chan error) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		select {
+		case err := <-errCh:
+			t.Fatalf("fake ssh helper exited before startup: %v", err)
+		default:
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("fake ssh helper did not start")
 }
 
 func TestPondMeshForwardStartsSuspendedInJob(t *testing.T) {

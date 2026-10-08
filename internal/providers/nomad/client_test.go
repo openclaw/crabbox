@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -432,7 +433,7 @@ func TestNomadClientGuardsUnixSocketRedirects(t *testing.T) {
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { _ = server.Close() })
 
-	address := (&url.URL{Scheme: "unix", Path: socketPath}).String()
+	address := (&url.URL{Scheme: "unix", Path: nomadUnixURLPath(socketPath)}).String()
 	client, err := newNomadClient(nomadTestConfig(address), Runtime{})
 	if err != nil {
 		t.Fatal(err)
@@ -592,4 +593,12 @@ func TestValidateConfigRejectsRelativeUnixSocketAddress(t *testing.T) {
 	if err := validateConfig(cfg); err == nil {
 		t.Fatal("expected relative unix socket address error")
 	}
+}
+
+func nomadUnixURLPath(socketPath string) string {
+	socketPath = filepath.ToSlash(socketPath)
+	if len(socketPath) >= 2 && socketPath[1] == ':' {
+		return "/" + socketPath
+	}
+	return socketPath
 }

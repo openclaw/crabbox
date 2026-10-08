@@ -1011,21 +1011,21 @@ func prepareBootstrapTrust(name, user, publicKey string) (bootstrapTrust, error)
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return bootstrapTrust{}, core.Exit(2, "create Lume bootstrap trust directory: %v", err)
 	}
-	if err := os.Chmod(parent, 0o700); err != nil {
+	if err := secureLumePrivateDirectory(parent); err != nil {
 		return bootstrapTrust{}, core.Exit(2, "secure Lume bootstrap trust directory: %v", err)
 	}
 	safeName := strings.Trim(invalidLogName.ReplaceAllString(name, "_"), "._")
 	if safeName == "" {
 		return bootstrapTrust{}, core.Exit(2, "derive Lume bootstrap trust directory for %q", name)
 	}
-	if strings.Contains(parent, ":") {
-		return bootstrapTrust{}, core.Exit(2, "Lume bootstrap trust directory cannot contain a colon: %s", parent)
+	if err := validateLumeSharedDirectoryPath(parent); err != nil {
+		return bootstrapTrust{}, core.Exit(2, "invalid Lume bootstrap trust directory %s: %v", parent, err)
 	}
 	dir, err := os.MkdirTemp(parent, safeName+"-*")
 	if err != nil {
 		return bootstrapTrust{}, core.Exit(2, "create fresh Lume bootstrap trust directory %s: %v", dir, err)
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := secureLumePrivateDirectory(dir); err != nil {
 		_ = os.RemoveAll(dir)
 		return bootstrapTrust{}, core.Exit(2, "secure fresh Lume bootstrap trust directory %s: %v", dir, err)
 	}

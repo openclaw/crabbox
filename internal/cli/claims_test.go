@@ -354,9 +354,11 @@ func TestLeaseClaimsSnapshotBoundaryHandling(t *testing.T) {
 	}
 
 	brokenStateRoot := t.TempDir()
-	if err := os.WriteFile(filepath.Join(brokenStateRoot, "crabbox"), []byte("not a directory"), 0o600); err != nil {
+	claimsDir = filepath.Join(brokenStateRoot, "crabbox", "claims")
+	if err := os.MkdirAll(claimsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	makeTestDirectoryUnreadable(t, claimsDir)
 	t.Setenv("XDG_STATE_HOME", brokenStateRoot)
 	if _, err := snapshotLeaseClaims(); err == nil {
 		t.Fatal("runtime snapshot accepted an unreadable claims directory")

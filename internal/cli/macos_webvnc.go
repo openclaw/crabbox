@@ -289,6 +289,9 @@ func createMacOSWebVNCHandoff(webPort string, session macOSWebVNCSession, viewer
 			_ = os.Remove(path)
 		}
 	}()
+	if err := secureSSHTransportPath(path, false); err != nil {
+		return macOSWebVNCHandoff{}, Exit(5, "secure WebVNC browser handoff: %v", err)
+	}
 	rfbSource, err := fs.ReadFile(webVNCAssets(), "rfb.js")
 	if err != nil {
 		return macOSWebVNCHandoff{}, Exit(5, "read embedded WebVNC viewer: %v", err)

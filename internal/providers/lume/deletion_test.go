@@ -46,10 +46,10 @@ func newDeleteFence(t *testing.T, name, machineID string) (string, os.FileInfo, 
 	path := join(home, ".lume", name)
 	dir, err := os.Open(path)
 	must(t, err)
-	t.Cleanup(func() { _ = dir.Close() })
 	dirInfo, err := dir.Stat()
 	must(t, err)
-	config, err := os.Open(join(path, "config.json"))
+	must(t, dir.Close())
+	config, err := openLumeConfigForLock(join(path, "config.json"))
 	must(t, err)
 	t.Cleanup(func() { _ = config.Close() })
 	configInfo, err := config.Stat()
@@ -61,7 +61,8 @@ func newDeleteFence(t *testing.T, name, machineID string) (string, os.FileInfo, 
 
 func TestDeleteRespectsResize(t *testing.T) {
 	const name = "crabbox-resize-fence"
-	path, _, _, _, id := newDeleteFence(t, name, "cmVzaXplLWZlbmNl")
+	path, _, config, _, id := newDeleteFence(t, name, "cmVzaXplLWZlbmNl")
+	must(t, config.Close())
 	guard, err := os.OpenFile(join(filepath.Dir(path), "."+name+".resize.guard"), os.O_CREATE|os.O_RDWR, 0o600)
 	must(t, err)
 	locked, err := tryExclusiveFileLock(guard)
@@ -87,10 +88,14 @@ func TestDeleteKeepsReplacement(t *testing.T) {
 	const name = "crabbox-delete-race"
 	vmPath, originalInfo, config, configInfo, expectedID := newDeleteFence(t, name, "b3JpZ2luYWw=")
 	originalPath := vmPath + "-moved"
+	must(t, config.Close())
 	must(t, os.Rename(vmPath, originalPath))
 	putVMAt(t, filepath.Dir(vmPath), name, "cmVwbGFjZW1lbnQ=")
+	config, err := openLumeConfigForLock(join(originalPath, "config.json"))
+	must(t, err)
+	t.Cleanup(func() { _ = config.Close() })
 
-	err := quarantineDeleteVM(vmPath, originalInfo, config, configInfo, expectedID, name)
+	err = quarantineDeleteVM(vmPath, originalInfo, config, configInfo, expectedID, name)
 	if err == nil || !strings.Contains(err.Error(), "directory changed") {
 		t.Fatalf("raced deletion error=%v", err)
 	}

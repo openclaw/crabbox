@@ -11,6 +11,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -74,6 +77,17 @@ func newNomadClient(cfg Config, rt Runtime) (Client, error) {
 	return liveClient{client: client, cfg: cfg}, nil
 }
 
+func nomadUnixSocketPath(value *url.URL) string {
+	if value == nil {
+		return ""
+	}
+	socketPath := path.Clean(value.Path)
+	if runtime.GOOS == "windows" && len(socketPath) >= 4 && socketPath[0] == '/' && socketPath[2] == ':' && socketPath[3] == '/' {
+		socketPath = socketPath[1:]
+	}
+	return filepath.FromSlash(socketPath)
+}
+
 func configureNomadHTTPClient(apiConfig *nomadapi.Config, source *http.Client) error {
 	trusted, err := url.Parse(apiConfig.Address)
 	if err != nil {
@@ -82,7 +96,7 @@ func configureNomadHTTPClient(apiConfig *nomadapi.Config, source *http.Client) e
 	if source == nil {
 		var transport *http.Transport
 		if trusted.Scheme == "unix" {
-			socketPath := trusted.EscapedPath()
+			socketPath := nomadUnixSocketPath(trusted)
 			dialer := &net.Dialer{}
 			transport = &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {

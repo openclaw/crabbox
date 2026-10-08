@@ -3,6 +3,7 @@ package tenki
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,6 +18,15 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
 
 func TestTenkiProviderSpec(t *testing.T) {
 	spec := Provider{}.Spec()
@@ -487,7 +497,16 @@ func TestTenkiResolveReadyProbePreparesSSH(t *testing.T) {
 		case "sandbox list --output json --tags crabbox,crabbox-provider-tenki":
 			return core.LocalCommandResult{Stdout: `[{"id":"session-1","name":"crabbox-blue","state":"RUNNING","metadata":{"crabbox_provider":"tenki","crabbox_lease_id":"cbx_123","crabbox_slug":"blue"},"tags":["crabbox-provider-tenki"]}]`}, nil
 		case "sandbox ssh-command --output json --session session-1 --user tenki --batch-mode --connect-timeout 10s":
-			return core.LocalCommandResult{Stdout: `{"session_id":"session-1","user":"tenki","host":"sandbox","port":22,"identity_file":"` + keyPath + `","certificate_file":"` + certPath + `","known_hosts_file":"` + keyPath + `.known_hosts","proxy_command":"tenki sandbox ssh-proxy --session session-1"}`}, nil
+			return core.LocalCommandResult{Stdout: mustJSON(t, tenkiSSHCommandOutput{
+				SessionID:       "session-1",
+				User:            "tenki",
+				Host:            "sandbox",
+				Port:            22,
+				IdentityFile:    keyPath,
+				CertificateFile: certPath,
+				KnownHostsFile:  keyPath + ".known_hosts",
+				ProxyCommand:    "tenki sandbox ssh-proxy --session session-1",
+			})}, nil
 		default:
 			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
 		}
@@ -597,7 +616,16 @@ func TestTenkiResolveReclaimPersistsSessionEndpoint(t *testing.T) {
 		case "sandbox get --output json session-1":
 			return core.LocalCommandResult{Stdout: `{"id":"session-1","name":"unmanaged","state":"RUNNING"}`}, nil
 		case "sandbox ssh-command --output json --session session-1 --user tenki --batch-mode --connect-timeout 10s":
-			return core.LocalCommandResult{Stdout: `{"session_id":"session-1","user":"tenki","host":"sandbox","port":22,"identity_file":"` + keyPath + `","certificate_file":"` + certPath + `","known_hosts_file":"` + keyPath + `.known_hosts","proxy_command":"tenki proxy session-1"}`}, nil
+			return core.LocalCommandResult{Stdout: mustJSON(t, tenkiSSHCommandOutput{
+				SessionID:       "session-1",
+				User:            "tenki",
+				Host:            "sandbox",
+				Port:            22,
+				IdentityFile:    keyPath,
+				CertificateFile: certPath,
+				KnownHostsFile:  keyPath + ".known_hosts",
+				ProxyCommand:    "tenki proxy session-1",
+			})}, nil
 		default:
 			t.Fatalf("unexpected command: %s %s", req.Name, command)
 		}
@@ -1159,7 +1187,16 @@ func TestTenkiWaitForSSHCommandUsesStructuredOutput(t *testing.T) {
 		runner.calls = append(runner.calls, req)
 		switch strings.Join(req.Args, " ") {
 		case "sandbox ssh-command --output json --session session-1 --user tenki --batch-mode --connect-timeout 10s":
-			return core.LocalCommandResult{Stdout: `{"session_id":"session-1","user":"tenki","host":"sandbox","port":22,"identity_file":"` + keyPath + `","certificate_file":"` + certPath + `","known_hosts_file":"` + keyPath + `.known_hosts","proxy_command":"tenki sandbox ssh-proxy --session session-1"}`}, nil
+			return core.LocalCommandResult{Stdout: mustJSON(t, tenkiSSHCommandOutput{
+				SessionID:       "session-1",
+				User:            "tenki",
+				Host:            "sandbox",
+				Port:            22,
+				IdentityFile:    keyPath,
+				CertificateFile: certPath,
+				KnownHostsFile:  keyPath + ".known_hosts",
+				ProxyCommand:    "tenki sandbox ssh-proxy --session session-1",
+			})}, nil
 		default:
 			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
 		}

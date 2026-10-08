@@ -273,6 +273,9 @@ func ensureTestboxKeyWithType(leaseID, keyType string) (string, string, error) {
 		if err := inspectSelectedLeaseSSHKey(leaseID); err != nil {
 			return "", "", err
 		}
+		if err := verifySSHTransportPathPrivate(privatePath, false); err != nil {
+			return "", "", Exit(2, "testbox key is not private: %v", err)
+		}
 		publicKey, err := PublicKeyFor(privatePath)
 		return privatePath, publicKey, err
 	} else if os.Getenv("XDG_STATE_HOME") != "" && !errors.Is(err, os.ErrNotExist) {
@@ -299,6 +302,9 @@ func ensureTestboxKeyWithType(leaseID, keyType string) (string, string, error) {
 	}
 	if err := inspectSelectedLeaseSSHKey(leaseID); err != nil {
 		return "", "", err
+	}
+	if err := secureSSHTransportPath(privatePath, false); err != nil {
+		return "", "", Exit(2, "secure generated testbox key: %v", err)
 	}
 	publicKey, err := PublicKeyFor(privatePath)
 	return privatePath, publicKey, err

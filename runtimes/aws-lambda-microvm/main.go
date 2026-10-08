@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -108,8 +109,8 @@ func (s *server) upload(w http.ResponseWriter, r *http.Request) {
 }
 
 func uploadPath(value string) (string, error) {
-	clean := filepath.Clean(strings.TrimSpace(value))
-	if filepath.Dir(clean) != "/tmp" || !uploadNamePattern.MatchString(filepath.Base(clean)) {
+	clean := path.Clean(strings.TrimSpace(value))
+	if path.Dir(clean) != "/tmp" || !uploadNamePattern.MatchString(path.Base(clean)) {
 		return "", fmt.Errorf("upload path must be /tmp/crabbox-sync-<hex>.tgz")
 	}
 	return clean, nil
@@ -186,7 +187,7 @@ func validateExecRequest(req execRequest) error {
 	if req.Workdir == "" {
 		return fmt.Errorf("workdir is required")
 	}
-	if !filepath.IsAbs(req.Workdir) || filepath.Clean(req.Workdir) != req.Workdir {
+	if !path.IsAbs(req.Workdir) || path.Clean(req.Workdir) != req.Workdir {
 		return fmt.Errorf("workdir must be a clean absolute path")
 	}
 	for name, value := range req.Env {

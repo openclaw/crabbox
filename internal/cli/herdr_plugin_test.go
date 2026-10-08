@@ -271,12 +271,12 @@ func prepareHerdrPluginTestWorkspace(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	dir := t.TempDir()
 	t.Cleanup(func() {
 		if err := os.Chdir(original); err != nil {
 			t.Errorf("restore cwd: %v", err)
 		}
 	})
-	dir := t.TempDir()
 	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = resolved
 	}

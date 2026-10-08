@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestNvidiaBrevParseWorkspaceJSONShapes(t *testing.T) {
@@ -114,8 +115,7 @@ func TestNvidiaBrevClientScopesReadOnlyListByOrg(t *testing.T) {
 
 func TestNvidiaBrevClientValidatesCachedActiveOrgWithCLI(t *testing.T) {
 	isolateBrevContextFiles(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testutil.IsolateUserDirs(t).Home
 	if err := os.MkdirAll(filepath.Join(home, ".brev"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestNvidiaBrevClientValidatesCachedActiveOrgWithCLI(t *testing.T) {
 
 func TestNvidiaBrevClientFallsBackToActiveOrgJSON(t *testing.T) {
 	isolateBrevContextFiles(t)
-	t.Setenv("HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls orgs --json", stdout: `[{"name":"one","id":"org-one","is_active":false},{"name":"two","id":"org-two","is_active":true}]`},
 	}}
@@ -159,7 +159,7 @@ func TestNvidiaBrevClientFallsBackToActiveOrgJSON(t *testing.T) {
 
 func TestNvidiaBrevClientRequiresActiveOrganization(t *testing.T) {
 	isolateBrevContextFiles(t)
-	t.Setenv("HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls orgs --json", stdout: `[{"name":"default","id":"org-default","is_active":false},{"name":"other","id":"org-other","is_active":false}]`},
 	}}
@@ -175,8 +175,7 @@ func TestNvidiaBrevClientRequiresActiveOrganization(t *testing.T) {
 
 func TestNvidiaBrevClientUsesAPIKeyOrganizationWithoutCache(t *testing.T) {
 	isolateBrevContextFiles(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testutil.IsolateUserDirs(t).Home
 	if err := os.MkdirAll(filepath.Join(home, ".brev"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -198,8 +197,7 @@ func TestNvidiaBrevClientUsesAPIKeyOrganizationWithoutCache(t *testing.T) {
 
 func TestNvidiaBrevClientUsesAPIKeyOrganizationBeforeWorkspace(t *testing.T) {
 	isolateBrevContextFiles(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testutil.IsolateUserDirs(t).Home
 	if err := os.MkdirAll(filepath.Join(home, ".brev"), 0o700); err != nil {
 		t.Fatal(err)
 	}

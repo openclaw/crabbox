@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -929,7 +930,7 @@ func TestWaitForSandboxReadinessTimesOut(t *testing.T) {
 func TestKubectlClientUsesConfiguredBinaryContextAndStdinManifest(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.AgentSandbox.Kubectl = "/opt/kubectl"
-	cfg.AgentSandbox.Kubeconfig = "/tmp/cluster.yaml"
+	cfg.AgentSandbox.Kubeconfig = filepath.Join(t.TempDir(), "cluster.yaml")
 	cfg.AgentSandbox.Context = "agent-context"
 	runner := &recordingCommandRunner{
 		results: []core.LocalCommandResult{
@@ -965,7 +966,7 @@ func TestKubectlClientUsesConfiguredBinaryContextAndStdinManifest(t *testing.T) 
 		if req.MaxCapturedOutputBytes != kubectlCaptureLimitBytes {
 			t.Fatalf("capture limit=%d", req.MaxCapturedOutputBytes)
 		}
-		if got := strings.Join(req.Args[:2], " "); got != "--kubeconfig=/tmp/cluster.yaml --context=agent-context" {
+		if got := strings.Join(req.Args[:2], " "); got != "--kubeconfig="+cfg.AgentSandbox.Kubeconfig+" --context=agent-context" {
 			t.Fatalf("global args=%q", got)
 		}
 	}

@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -210,17 +212,16 @@ func TestControllerServePolicyFlagsOverrideInvalidEnvironment(t *testing.T) {
 }
 
 func TestControllerStateLockIsExclusiveAcrossProcesses(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("controller host is unsupported on Windows")
-	}
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state.json")
-	readyPath := filepath.Join(dir, "ready")
 	helper := exec.Command(os.Args[0], "-test.run=^TestControllerStateLockProcessHelper$")
 	helper.Env = append(os.Environ(),
 		"CRABBOX_TEST_CONTROLLER_LOCK_STATE="+statePath,
-		"CRABBOX_TEST_CONTROLLER_LOCK_READY="+readyPath,
 	)
+	ready, err := helper.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := helper.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -231,15 +232,9 @@ func TestControllerStateLockIsExclusiveAcrossProcesses(t *testing.T) {
 			_ = helper.Wait()
 		}
 	})
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(readyPath); err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if _, err := os.Stat(readyPath); err != nil {
-		t.Fatal("lock helper did not become ready")
+	line, err := bufio.NewReader(ready).ReadString('\n')
+	if err != nil || strings.TrimSpace(line) != "ready" {
+		t.Fatalf("lock helper did not become ready: output=%q err=%v", line, err)
 	}
 	if lock, err := acquireControllerStateLock(statePath); err == nil {
 		_ = lock.Unlock()
@@ -259,8 +254,7 @@ func TestControllerStateLockIsExclusiveAcrossProcesses(t *testing.T) {
 
 func TestControllerStateLockProcessHelper(t *testing.T) {
 	statePath := os.Getenv("CRABBOX_TEST_CONTROLLER_LOCK_STATE")
-	readyPath := os.Getenv("CRABBOX_TEST_CONTROLLER_LOCK_READY")
-	if statePath == "" || readyPath == "" {
+	if statePath == "" {
 		return
 	}
 	lock, err := acquireControllerStateLock(statePath)
@@ -268,7 +262,7 @@ func TestControllerStateLockProcessHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Unlock()
-	if err := os.WriteFile(readyPath, []byte("ready\n"), 0o600); err != nil {
+	if _, err := fmt.Fprintln(os.Stdout, "ready"); err != nil {
 		t.Fatal(err)
 	}
 	for {

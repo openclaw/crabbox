@@ -353,6 +353,7 @@ func TestGitHubActionsRunnerInstallPowerShellScriptUsesOfficialWindowsRunner(t *
 }
 
 func TestGitHubActionsRunnerInstallScriptRejectsChecksumMismatchBeforeExtraction(t *testing.T) {
+	requirePOSIXShellTest(t)
 	root := t.TempDir()
 	binDir := filepath.Join(root, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -1593,6 +1594,7 @@ func TestLocalActionsSetupNodeVerifiesArchiveBeforeExtraction(t *testing.T) {
 }
 
 func TestLocalActionsSetupNodeRejectsMissingOrMismatchedChecksum(t *testing.T) {
+	requirePOSIXShellTest(t)
 	for _, tc := range []struct {
 		name      string
 		checksums string

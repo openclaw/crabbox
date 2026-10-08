@@ -3659,13 +3659,7 @@ func TestEnsureSlugReservationDirSyncsEveryCreatedAncestor(t *testing.T) {
 			t.Fatalf("directory durability syncs=%q missing %q", synced, want)
 		}
 	}
-	info, err := os.Stat(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o700 {
-		t.Fatalf("reservation directory mode=%#o", info.Mode().Perm())
-	}
+	assertPrivateDir(t, dir)
 }
 
 func TestEnsureSlugReservationDirRetriesPreviouslyFailedAncestorSync(t *testing.T) {

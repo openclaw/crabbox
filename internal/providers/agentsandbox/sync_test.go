@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -26,6 +27,9 @@ func TestAgentSandboxMountReplaceCommandReplacesContentsNotMount(t *testing.T) {
 }
 
 func TestAgentSandboxMountReplaceCommandReplacesDotfiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture executes POSIX workspace commands on the host")
+	}
 	root := t.TempDir()
 	workdir := filepath.Join(root, "workspace")
 	stagingDir := filepath.Join(workdir, ".crabbox-sync-fixed")

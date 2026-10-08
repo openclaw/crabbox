@@ -48,7 +48,8 @@ func TestSSHConfigSelectsGeneratedGitHubCLIAliasByProxyCodespace(t *testing.T) {
 	if target.Host != "cs.sturdy-space.main" || !target.SSHConfigProxy {
 		t.Fatalf("target=%#v", target)
 	}
-	if target.ProxyCommand != "'/opt/github/bin/gh' codespace ssh -c sturdy-space --stdio" || target.ChildEnv["GH_HOST"] != "github.com" {
+	wantProxy := quoteSSHProxyExecutable("/opt/github/bin/gh") + " codespace ssh -c sturdy-space --stdio"
+	if target.ProxyCommand != wantProxy || target.ChildEnv["GH_HOST"] != "github.com" {
 		t.Fatalf("proxy=%q", target.ProxyCommand)
 	}
 }

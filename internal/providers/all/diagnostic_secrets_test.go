@@ -7,11 +7,11 @@ import (
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestRuntimeOnlyProviderDiagnosticSecrets(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testutil.IsolateUserDirs(t).Home
 	if err := os.Mkdir(filepath.Join(home, ".oc"), 0o700); err != nil {
 		t.Fatal(err)
 	}

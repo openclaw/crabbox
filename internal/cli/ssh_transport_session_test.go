@@ -664,12 +664,13 @@ func TestProxyJumpCommandPreservesMultiHopChainAndOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := proxyJumpCommand(sshTransportConfigRoute{proxyJump: "jump-a,jump-b,jump-c", jumpConfigPath: path})
-	for _, value := range []string{"/jump_config'", "'jump-c'", "'ControlMaster=no'", "'PermitLocalCommand=no'", "'BatchMode=yes'"} {
+	for _, raw := range []string{path, "jump-c", "ControlMaster=no", "PermitLocalCommand=no", "BatchMode=yes"} {
+		value := sshProxyCommandWords([]string{raw})[0]
 		if !strings.Contains(got, value) {
 			t.Fatalf("jump command missing %q: %s", value, got)
 		}
 	}
-	if strings.Contains(got, "'-J'") {
+	if strings.Contains(got, sshProxyCommandWords([]string{"-J"})[0]) {
 		t.Fatalf("jump command delegated an unsafe implicit hop: %s", got)
 	}
 	for index, hop := range []string{"", "jump-a", "jump-b"} {
@@ -728,7 +729,8 @@ func TestProxyJumpCommandPreservesFinalHopUserAndPort(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := proxyJumpCommand(sshTransportConfigRoute{proxyJump: "jump-a,alice@jump.example.test:2222", jumpConfigPath: path})
-	for _, value := range []string{"'-p' '2222'", "'alice@jump.example.test'"} {
+	for _, values := range [][]string{{"-p", "2222"}, {"alice@jump.example.test"}} {
+		value := strings.Join(sshProxyCommandWords(values), " ")
 		if !strings.Contains(got, value) {
 			t.Fatalf("jump command missing %q: %s", value, got)
 		}

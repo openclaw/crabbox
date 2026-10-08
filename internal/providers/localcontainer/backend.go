@@ -2125,17 +2125,28 @@ func localDockerSocketPath(host string) (string, bool) {
 	if host == "" {
 		return "", false
 	}
+	if windowsHostPath(host) {
+		return host, true
+	}
 	if strings.HasPrefix(host, "/") {
 		return host, true
 	}
 	if strings.HasPrefix(host, "unix://") {
-		u, err := url.Parse(host)
-		if err == nil && u.Path != "" {
-			return u.Path, true
+		raw := strings.TrimPrefix(host, "unix://")
+		if windowsHostPath(raw) {
+			if decoded, err := url.PathUnescape(raw); err == nil {
+				raw = decoded
+			}
+			return raw, true
 		}
-		path := strings.TrimPrefix(host, "unix://")
-		if strings.HasPrefix(path, "/") {
-			return path, true
+		u, err := url.Parse(host)
+		if err == nil {
+			if candidate := strings.TrimSpace(u.Host + u.Path); windowsHostPath(candidate) {
+				return candidate, true
+			}
+			if u.Path != "" {
+				return u.Path, true
+			}
 		}
 	}
 	return "", false

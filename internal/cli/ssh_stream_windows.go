@@ -22,6 +22,9 @@ import (
 const commandStreamReadBuffer = 64 * 1024
 
 var commandStreamRotateSize int64 = 64 * 1024 * 1024
+var commandStreamSuspendProcess = suspendCommandProcess
+
+var errCommandStreamSuspensionUnavailable = errors.New("command process suspension unavailable")
 
 // Windows inbox OpenSSH can hang after the remote command exits when Go
 // connects its output to pipes. Regular files preserve the client's EOF
@@ -71,6 +74,7 @@ func runCommandWithPlatformStreams(cmd *exec.Cmd, stdout, stderr io.Writer) erro
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	var suspended []windows.Handle
+	rotationEnabled := true
 	for {
 		select {
 		case waitErr := <-waitResult:
@@ -80,22 +84,28 @@ func runCommandWithPlatformStreams(cmd *exec.Cmd, stdout, stderr io.Writer) erro
 		case copyErr := <-copyResults:
 			return failCommandStreams(cmd, waitResult, done, copyResults, suspended, copyErr, copyCount-1)
 		case <-ticker.C:
-			if len(suspended) == 0 {
+			if rotationEnabled && len(suspended) == 0 {
 				rotate, err := commandStreamRotationNeeded(spools...)
 				if err != nil {
-					return failCommandStreams(cmd, waitResult, done, copyResults, nil, err, copyCount)
+					return failCommandStreams(cmd, waitResult, done, copyResults, nil, fmt.Errorf("inspect command stream spool: %w", err), copyCount)
 				}
 				if rotate {
-					suspended, err = suspendCommandProcess(uint32(cmd.Process.Pid))
+					suspended, err = commandStreamSuspendProcess(uint32(cmd.Process.Pid))
+					if errors.Is(err, errCommandStreamSuspensionUnavailable) {
+						// Rotation is an optimization. Keep streaming when Windows
+						// denies access to a transient or protected child thread.
+						rotationEnabled = false
+						continue
+					}
 					if err != nil {
-						return failCommandStreams(cmd, waitResult, done, copyResults, nil, err, copyCount)
+						return failCommandStreams(cmd, waitResult, done, copyResults, nil, fmt.Errorf("suspend command process: %w", err), copyCount)
 					}
 				}
 			}
 			if len(suspended) > 0 {
 				drained, err := commandStreamsDrained(spools...)
 				if err != nil {
-					return failCommandStreams(cmd, waitResult, done, copyResults, suspended, err, copyCount)
+					return failCommandStreams(cmd, waitResult, done, copyResults, suspended, fmt.Errorf("inspect drained command stream spool: %w", err), copyCount)
 				}
 				if drained {
 					var rotateErrs []error
@@ -296,7 +306,12 @@ func suspendCommandProcess(processID uint32) ([]windows.Handle, error) {
 	for {
 		added, err := suspendCommandThreads(processID, seen, &handles)
 		if err != nil {
-			_ = resumeCommandThreads(handles)
+			if resumeErr := resumeCommandThreads(handles); resumeErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("resume partially suspended command process: %w", resumeErr))
+			}
+			if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+				return nil, errors.Join(errCommandStreamSuspensionUnavailable, err)
+			}
 			return nil, err
 		}
 		if added == 0 {

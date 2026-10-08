@@ -579,13 +579,7 @@ func TestClientTightensExistingConfigFilePermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	info, err := os.Stat(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("config permissions=%#o, want 0600", got)
-	}
+	assertPrivateFile(t, configPath)
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatal(err)

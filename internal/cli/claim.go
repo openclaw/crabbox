@@ -2206,7 +2206,7 @@ func CrabboxStateDir() (string, error) {
 	if dir := os.Getenv("XDG_STATE_HOME"); dir != "" {
 		return filepath.Join(dir, "crabbox"), nil
 	}
-	dir, err := os.UserConfigDir()
+	dir, err := crabboxConfigStateRoot()
 	if err != nil {
 		return "", Exit(2, "user state directory is unavailable")
 	}
@@ -2217,7 +2217,7 @@ func crabboxStateRootDir() (string, error) {
 	if dir := os.Getenv("XDG_STATE_HOME"); dir != "" {
 		return filepath.Clean(dir), nil
 	}
-	dir, err := os.UserConfigDir()
+	dir, err := crabboxConfigStateRoot()
 	if err != nil {
 		return "", Exit(2, "user state directory is unavailable")
 	}
@@ -2301,4 +2301,8 @@ func claimScanErr(ctx context.Context) error {
 		return nil
 	}
 	return context.Cause(ctx)
+}
+
+func crabboxConfigStateRoot() (string, error) {
+	return userConfigDirectory()
 }

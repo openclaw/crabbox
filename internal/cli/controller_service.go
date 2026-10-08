@@ -2631,8 +2631,8 @@ func loadControllerState(path string) (controllerState, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return controllerState{}, fmt.Errorf("controller state file must be a regular file")
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return controllerState{}, fmt.Errorf("controller state file %s must not be accessible by group or others", path)
+	if err := verifySSHTransportPathPrivate(path, false); err != nil {
+		return controllerState{}, fmt.Errorf("controller state file %s must be private: %w", path, err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -2760,6 +2760,10 @@ func saveControllerStateWithDirectorySync(path string, state controllerState, sy
 		_ = file.Close()
 		return fmt.Errorf("secure controller state file: %w", err)
 	}
+	if err := secureSSHTransportPath(tmp, false); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("secure controller state file: %w", err)
+	}
 	if _, err := file.Write(data); err != nil {
 		_ = file.Close()
 		return fmt.Errorf("write controller state: %w", err)
@@ -2774,6 +2778,9 @@ func saveControllerStateWithDirectorySync(path string, state controllerState, sy
 	if err := replaceControllerFile(tmp, path); err != nil {
 		return fmt.Errorf("install controller state: %w", err)
 	}
+	if err := secureSSHTransportPath(path, false); err != nil {
+		return &controllerStateInstalledError{err: fmt.Errorf("secure installed controller state: %w", err)}
+	}
 	if err := syncDirectory(dir); err != nil {
 		return &controllerStateInstalledError{err: fmt.Errorf("sync controller state directory: %w", err)}
 	}
@@ -2787,6 +2794,9 @@ func ensureControllerStateDirectory(dir string) error {
 func ensureControllerStateDirectoryWithSync(dir string, syncDirectory func(string) error) error {
 	dir = filepath.Clean(dir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := secureControllerStateDirectoryPath(dir); err != nil {
 		return err
 	}
 	if err := validateControllerStateDirectoryPath(dir); err != nil {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,12 +204,51 @@ type bridgeSDKSpec struct {
 
 func bridgeSDKSpecFor(cfg core.CodeSandboxConfig) bridgeSDKSpec {
 	installSpec := sdkPackage(cfg)
-	importSpec, ok := npmPackageName(installSpec)
+	importSpec := normalizeBridgeImportSpec(installSpec)
+	npmImportSpec, ok := npmPackageName(installSpec)
 	if !ok {
-		return bridgeSDKSpec{InstallSpec: installSpec, ImportSpec: installSpec}
+		return bridgeSDKSpec{InstallSpec: installSpec, ImportSpec: importSpec}
 	}
-	version, _ := npmExactPackageVersion(installSpec, importSpec)
-	return bridgeSDKSpec{InstallSpec: installSpec, ImportSpec: importSpec, ExpectedVersion: version, Install: true}
+	version, _ := npmExactPackageVersion(installSpec, npmImportSpec)
+	return bridgeSDKSpec{InstallSpec: installSpec, ImportSpec: npmImportSpec, ExpectedVersion: version, Install: true}
+}
+
+func normalizeBridgeImportSpec(spec string) string {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return spec
+	}
+	if filepath.IsAbs(spec) {
+		return fileURLForLocalPath(spec)
+	}
+	if localPath, ok := localPathFromFileImportSpec(spec); ok {
+		return fileURLForLocalPath(localPath)
+	}
+	return spec
+}
+
+func localPathFromFileImportSpec(spec string) (string, bool) {
+	raw := strings.TrimSpace(spec)
+	if !strings.HasPrefix(strings.ToLower(raw), "file:") {
+		return "", false
+	}
+	raw = raw[len("file:"):]
+	raw = strings.TrimPrefix(raw, "//")
+	if decoded, err := url.PathUnescape(raw); err == nil {
+		raw = decoded
+	}
+	raw = strings.ReplaceAll(raw, "\\", "/")
+	if strings.HasPrefix(raw, "/") && len(raw) >= 3 && raw[2] == ':' {
+		raw = raw[1:]
+	}
+	if len(raw) < 2 || raw[1] != ':' {
+		return "", false
+	}
+	return filepath.Clean(filepath.FromSlash(raw)), true
+}
+
+func fileURLForLocalPath(localPath string) string {
+	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Clean(localPath))}).String()
 }
 
 func npmPackageName(spec string) (string, bool) {

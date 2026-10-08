@@ -424,11 +424,11 @@ func (b *backend) createSandbox(ctx context.Context, cli *sbxCLI, repo core.Repo
 		return "", "", "", err
 	}
 	leaseID := leasePrefix + sandboxName
-	slug, err := core.AllocateClaimLeaseSlug(leaseID, requestedSlug)
+	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return "", "", "", b.removeCreatedSandboxAfterClaimFailure(cli, sandboxName, err)
 	}
-	if err := core.ClaimLeaseForRepoProviderPond(leaseID, slug, providerName, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
+	if err := claimLeaseForRepoProviderPond(leaseID, slug, providerName, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim); err != nil {
 		return "", "", "", b.removeCreatedSandboxAfterClaimFailure(cli, sandboxName, err)
 	}
 	unqualified := func() {
@@ -609,10 +609,14 @@ func dockerSandboxAgent(cfg core.Config) string {
 func dockerSandboxWorkdir(cfg core.Config, repoRoot string) (string, error) {
 	workdir := strings.TrimSpace(cfg.DockerSandbox.Workdir)
 	if workdir == "" {
-		workdir = repoRoot
-	}
-	if workdir == "" {
-		workdir = defaultWorkdir
+		// repoRoot is a host path, but the workdir names a location inside the
+		// Linux sandbox. Only adopt it when it is already POSIX-absolute, so a
+		// Windows host path falls back to the default guest workdir.
+		if strings.HasPrefix(repoRoot, "/") {
+			workdir = repoRoot
+		} else {
+			workdir = defaultWorkdir
+		}
 	}
 	clean := path.Clean(workdir)
 	if !strings.HasPrefix(clean, "/") {

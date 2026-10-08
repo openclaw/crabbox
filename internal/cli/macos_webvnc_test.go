@@ -179,12 +179,8 @@ func TestCreateMacOSWebVNCHandoffKeepsTokenOutOfOpenURL(t *testing.T) {
 	if strings.Contains(handoff.URL, "deadbeefcafef00d") {
 		t.Fatalf("handoff URL exposes token: %s", handoff.URL)
 	}
-	info, err := os.Stat(handoff.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("handoff permissions = %o, want 600", got)
+	if err := verifySSHTransportPathPrivate(handoff.Path, false); err != nil {
+		t.Fatalf("handoff file is not private: %v", err)
 	}
 	content, err := os.ReadFile(handoff.Path)
 	if err != nil {
