@@ -1009,10 +1009,14 @@ func TestAcquireKeepPersistsClaimAndKeyBeforeBootstrap(t *testing.T) {
 	hypervHostOS = "windows"
 	t.Cleanup(func() { hypervHostOS = oldOS })
 
-	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
-	b := testBackend(runner)
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	defer cancel()
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}, onRun: func(req core.LocalCommandRequest) {
+		if strings.Contains(commandScript(req), "Get-VMNetworkAdapter") {
+			cancel()
+		}
+	}}
+	b := testBackend(runner)
 	_, err := b.Acquire(ctx, core.AcquireRequest{
 		Repo:          core.Repo{Root: t.TempDir()},
 		RequestedSlug: "retained-failure",
@@ -1053,6 +1057,8 @@ func TestAcquirePersistsProvisionalClaimThenRollsBackFailedLease(t *testing.T) {
 	t.Cleanup(func() { hypervHostOS = oldOS })
 
 	var observed core.LeaseClaim
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	runner.onRun = func(req core.LocalCommandRequest) {
 		if len(req.Args) == 0 || !strings.Contains(req.Args[len(req.Args)-1], "Get-VMNetworkAdapter") {
@@ -1062,10 +1068,9 @@ func TestAcquirePersistsProvisionalClaimThenRollsBackFailedLease(t *testing.T) {
 		if err == nil && len(claims) == 1 {
 			observed = claims[0]
 		}
+		cancel()
 	}
 	b := testBackend(runner)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 	_, err := b.Acquire(ctx, core.AcquireRequest{
 		Repo:          core.Repo{Root: t.TempDir()},
 		RequestedSlug: "rollback-failure",

@@ -737,10 +737,9 @@ func TestProviderNameSelectionContracts(t *testing.T) {
 						field = "server-type"
 						selectedValue = "standard-4"
 					case "hyperv":
-						args = []string{"--hyperv-cpu=0"}
-						field = "hyperv-cpu"
-						selectedValue = "4"
-						unselectedValue = "0"
+						args = []string{"--hyperv-switch="}
+						field = "hyperv-switch"
+						selectedValue = "Default Switch"
 					case "lume":
 						args = []string{"--lume-cli="}
 						field = "lume-cli"
@@ -794,8 +793,8 @@ func TestProviderNameSelectionContracts(t *testing.T) {
 						switch field {
 						case "server-type":
 							got = cfg.ServerType
-						case "hyperv-cpu":
-							got = fmt.Sprint(cfg.HyperV.CPUs)
+						case "hyperv-switch":
+							got = cfg.HyperV.Switch
 						case "lume-cli":
 							got = cfg.Lume.CLIPath
 						case "multipass-cli":

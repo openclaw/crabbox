@@ -73,7 +73,7 @@ func (a App) claimsList(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	if len(snapshot.invalid) > 0 {
+	if len(output.Problems) > 0 {
 		return ExitError{Code: 2}
 	}
 	return nil
@@ -81,15 +81,23 @@ func (a App) claimsList(ctx context.Context, args []string) error {
 
 func projectLocalClaims(snapshot leaseClaimsSnapshot) localClaimsListOutput {
 	claims := make([]localClaimView, 0, len(snapshot.claims))
+	problems := make([]localClaimProblem, 0, len(snapshot.invalid))
 	for _, claim := range snapshot.claims {
+		target, mode, err := localClaimTarget(claim)
+		if err != nil {
+			problems = append(problems, localClaimProblem{
+				File: localClaimProblemFile(claim.LeaseID), Code: "invalid_target", Message: err.Error(),
+			})
+			continue
+		}
 		claims = append(claims, localClaimView{
 			LeaseID:            claim.LeaseID,
 			Slug:               claim.Slug,
 			Provider:           claim.Provider,
 			RepoRoot:           claim.RepoRoot,
 			Pond:               claim.Pond,
-			TargetOS:           claim.TargetOS,
-			WindowsMode:        claim.WindowsMode,
+			TargetOS:           target,
+			WindowsMode:        mode,
 			ClaimedAt:          claim.ClaimedAt,
 			LastUsedAt:         claim.LastUsedAt,
 			IdleTimeoutSeconds: claim.IdleTimeoutSeconds,
@@ -105,13 +113,13 @@ func projectLocalClaims(snapshot leaseClaimsSnapshot) localClaimsListOutput {
 		return claims[i].Slug < claims[j].Slug
 	})
 
-	problems := make([]localClaimProblem, 0, len(snapshot.invalid))
 	for leaseID, err := range snapshot.invalid {
 		code := "invalid_claim"
 		var fileErr *leaseClaimFileError
 		if errors.As(err, &fileErr) {
 			code = fileErr.code
 		}
+
 		problems = append(problems, localClaimProblem{
 			File:    localClaimProblemFile(leaseID),
 			Code:    code,
@@ -138,6 +146,37 @@ func projectLocalClaims(snapshot leaseClaimsSnapshot) localClaimsListOutput {
 		Claims:   claims,
 		Problems: problems,
 	}
+}
+
+func localClaimTarget(claim leaseClaim) (string, string, error) {
+	target, labelTarget := strings.TrimSpace(claim.TargetOS), strings.TrimSpace(claim.Labels["target"])
+	mode, labelMode := strings.TrimSpace(claim.WindowsMode), strings.TrimSpace(claim.Labels["windows_mode"])
+	if target != "" && labelTarget != "" && target != labelTarget ||
+		mode != "" && labelMode != "" && mode != labelMode {
+		return "", "", errors.New("claim contains conflicting target identity")
+	}
+	target = firstNonBlank(labelTarget, target)
+	mode = firstNonBlank(labelMode, mode)
+	switch target {
+	case "":
+		if mode != "" {
+			return "", "", errors.New("claim contains a Windows mode without a Windows target")
+		}
+	case targetLinux, targetMacOS, targetWorkerRuntime:
+		if mode != "" && mode != windowsModeNormal {
+			return "", "", errors.New("claim contains a Windows mode without a Windows target")
+		}
+		// Config retains an inert native-mode default; it is not a public
+		// Windows mode for a Linux, macOS or worker-runtime claim.
+		mode = ""
+	case targetWindows:
+		if mode != "" && mode != windowsModeNormal && mode != windowsModeWSL2 {
+			return "", "", errors.New("claim contains an unsupported Windows mode")
+		}
+	default:
+		return "", "", errors.New("claim contains an unsupported target")
+	}
+	return target, mode, nil
 }
 
 func localClaimProblemFile(leaseID string) string {

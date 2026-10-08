@@ -342,6 +342,12 @@ Only `ssh-lease` and `delegated-run` providers are runnable. Unknown providers,
 `service-control` providers, future unsupported provider kinds, missing names,
 and extra names fail with exit 2 and produce no partial JSON.
 
+For example, `providers describe hyperv --json` advertises the implemented
+`linux` and `windows/normal` targets and the registered image/user/work-root,
+CPU, memory and switch flags. That static description does not qualify a VHDX,
+prove elevation/KVP/SSH readiness, or authorize VM creation. See the
+[Hyper-V provider contract](../providers/hyperv.md) for those prerequisites.
+
 ## `providers filters`
 
 `crabbox providers filters` prints allowed filter values from the compiled

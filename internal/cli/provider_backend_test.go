@@ -1582,6 +1582,7 @@ func TestValidateRequestedCapabilitiesUsesProviderSpec(t *testing.T) {
 
 func TestProviderSpecFeaturesForTarget(t *testing.T) {
 	common := FeatureSet{FeatureSSH, FeatureCleanup}
+	linux := FeatureSet{FeatureSSH, FeatureCleanup, FeatureCode}
 	windows := FeatureSet{FeatureSSH, FeatureCleanup, FeatureCheckpoint}
 	spec := ProviderSpec{
 		Features: common,
@@ -1590,13 +1591,15 @@ func TestProviderSpecFeaturesForTarget(t *testing.T) {
 			{OS: TargetWindows, WindowsMode: WindowsModeNormal},
 		},
 		TargetFeatures: map[string]FeatureSet{
-			TargetLinux:                             common,
+			TargetLinux:                             linux,
 			TargetWindows + "/" + WindowsModeNormal: windows,
 		},
 	}
 
-	if got := spec.FeaturesForTarget(TargetLinux, ""); !reflect.DeepEqual(got, common) {
-		t.Fatalf("linux features=%v want %v", got, common)
+	for _, mode := range []string{"", WindowsModeNormal} {
+		if got := spec.FeaturesForTarget(TargetLinux, mode); !reflect.DeepEqual(got, linux) {
+			t.Fatalf("linux mode=%q features=%v want %v", mode, got, linux)
+		}
 	}
 	if got := spec.FeaturesForTarget(TargetWindows, WindowsModeNormal); !reflect.DeepEqual(got, windows) {
 		t.Fatalf("windows features=%v want %v", got, windows)

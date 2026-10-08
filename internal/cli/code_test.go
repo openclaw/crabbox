@@ -40,8 +40,10 @@ func TestSelectCodeConnectionMode(t *testing.T) {
 	targetAwareSpec.TargetFeatures = map[string]FeatureSet{
 		targetLinux: linuxFeatures,
 	}
-	if got, err := selectCodeConnectionMode(targetAwareSpec, targetLinux, "", false, false); err != nil || got != codeConnectionDirect {
-		t.Fatalf("target-aware Linux mode=%v err=%v", got, err)
+	for _, mode := range []string{"", WindowsModeNormal} {
+		if got, err := selectCodeConnectionMode(targetAwareSpec, targetLinux, mode, false, false); err != nil || got != codeConnectionDirect {
+			t.Fatalf("target-aware Linux windows-mode=%q connection=%v err=%v", mode, got, err)
+		}
 	}
 	if _, err := selectCodeConnectionMode(targetAwareSpec, targetWindows, WindowsModeNormal, false, false); err == nil || !strings.Contains(err.Error(), "Linux") {
 		t.Fatalf("target-aware Windows rejection error=%v", err)

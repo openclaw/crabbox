@@ -36,6 +36,8 @@ reject configuration on non-Windows hosts.
   - cloud-init NoCloud support
   - current Hyper-V integration services, including a running
     `hv_kvp_daemon` KVP service so Hyper-V can report guest IPs
+    (Ubuntu requires `linux-cloud-tools-common` plus the versioned,
+    kernel-flavour-specific `linux-cloud-tools` package matching `uname -r`)
   - the enabled Hyper-V VSS/file-system-freeze integration service backed by a
     running `hv_vss_daemon` so production checkpoints can quiesce filesystems
   - DHCP networking
@@ -590,8 +592,22 @@ They atomically persist the touch timestamp and an explicit `--idle-timeout`
 override; omitting the flag preserves the recorded timeout, even when current
 configuration differs. Fresh status reads retain that policy and the original
 lease TTL cap. A stale snapshot or incomplete acquisition is not renewed.
-Ownership remains bound to the recorded VM name and instance scope, not a
-Hyper-V generation identifier.
+Ownership remains bound to the recorded VM name and instance scope. Newly
+acquired Linux leases additionally bind the immutable Hyper-V VM ID and a
+private `linux-v1` storage directory with an exact lease-owner marker. Reuse and
+release reject a changed VM ID; cleanup rejects conflicting owners or unexpected
+storage contents rather than deleting them. Existing checkpoint forks retain
+their checkpoint-specific identity and storage safeguards.
+
+Acquisition is bounded to 15 minutes, cleanup to 2 minutes, and ordinary host
+PowerShell commands to 45 seconds. NoCloud seed creation has its own 2-minute
+budget; guest PowerShell Direct keeps its separate readiness and invocation
+budgets. Cancellation before key creation does not manufacture a retained
+lease. Once ownership is persisted, failed kept Linux acquisitions preserve
+their claim for explicit recovery. They retain a non-Tailscale seed; when the
+seed contains Tailscale credentials, cleanup detaches and deletes it only after
+verifying the exact VM identity. An ambiguous creation retains ownership and
+reports the blocked cleanup instead of detaching a replacement VM's disk.
 
 ## Notes
 
@@ -608,6 +624,13 @@ Hyper-V generation identifier.
 - VHD files are stored in `%USERPROFILE%\Hyper-V\Virtual Hard Disks\` by
   default. Only deterministically named provider-owned root, checkpoint, and
   seed disks are cleaned up; unrelated attached disks are preserved.
+- New Linux leases keep `disk.vhdx`, `seed.vhdx`, and an owner marker in a private
+  directory named for the VM. NoCloud source files are private, temporary, and
+  removed after seed creation. A persisted mount-intent marker authorizes
+  recovery of an interrupted host-side seed mount; it does not authorize
+  dismounting a kept guest's attached seed. Immediately before attaching a seed,
+  Crabbox grants SYSTEM and Administrators access and checks the ACL command's
+  exit code, because mounting a VHDX can replace its file ACL.
 - The Windows ready check verifies `git`, `tar`, and the work root. The Linux
   ready check executes `/usr/local/bin/crabbox-ready`.
 - There is no `tart exec` or `prlctl exec` equivalent for Hyper-V; all guest

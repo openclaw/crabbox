@@ -438,9 +438,13 @@ printf '%s\n' "$@" > "$CRABBOX_TEST_RSYNC_ARGS"
 	}
 }
 
-func TestCopyOverResolvedSSHRejectsNativeWindows(t *testing.T) {
+func TestCopyOverResolvedSSHWindowsRequiresQualifiedTransport(t *testing.T) {
 	err := copyOverResolvedSSH(t.Context(), SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, "./a", "SANDBOX:C:/a", false, os.Stdout, os.Stderr)
-	if err == nil || !strings.Contains(err.Error(), "native Windows") {
+	want := "resolved SSH key"
+	if os.PathSeparator != '\\' {
+		want = "Windows operator"
+	}
+	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("err=%v", err)
 	}
 }

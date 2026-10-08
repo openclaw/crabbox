@@ -203,7 +203,8 @@ func walkLeaseClaimsReadOnly(ctx context.Context, after string, read leaseClaimS
 	claimsDir := filepath.Join(dir, "claims")
 	entries, err := os.ReadDir(claimsDir)
 	if errors.Is(err, os.ErrNotExist) {
-		return cursor, nil
+		_, err := nearestExistingClaimDirectory(claimsDir)
+		return cursor, err
 	}
 	if err != nil {
 		return cursor, Exit(2, "read claims directory: %v", err)
@@ -220,7 +221,7 @@ func walkLeaseClaimsReadOnly(ctx context.Context, after string, read leaseClaimS
 		var problem error
 		if !validLeaseClaimPathID(id) {
 			problem = &leaseClaimFileError{code: "invalid_filename", err: Exit(2, "claim filename is not a valid lease id")}
-		} else if info, statErr := entry.Info(); statErr != nil {
+		} else if info, statErr := fileSnapshotPathInfo(filepath.Join(claimsDir, entry.Name())); statErr != nil {
 			problem = leaseClaimSnapshotReadError(id, "inspect", statErr)
 		} else if !info.Mode().IsRegular() {
 			problem = &leaseClaimFileError{code: "non_regular_file", err: Exit(2, "claim file %s is not a regular file", id)}
@@ -2043,7 +2044,7 @@ func readLeaseClaimSnapshotWithPresence(path, leaseID string, expected os.FileIn
 	}
 	defer file.Close()
 
-	opened, err := file.Stat()
+	opened, err := fileSnapshotHandleInfo(file)
 	if err != nil {
 		return leaseClaim{}, true, leaseClaimSnapshotReadError(leaseID, "inspect opened", err)
 	}
@@ -2064,11 +2065,11 @@ func readLeaseClaimSnapshotWithPresence(path, leaseID string, expected os.FileIn
 	if tooLarge {
 		return leaseClaim{}, true, leaseClaimSnapshotTooLargeError(leaseID)
 	}
-	afterRead, err := file.Stat()
+	afterRead, err := fileSnapshotHandleInfo(file)
 	if err != nil {
 		return leaseClaim{}, true, leaseClaimSnapshotReadError(leaseID, "inspect read", err)
 	}
-	current, err := os.Lstat(path)
+	current, err := fileSnapshotPathInfo(path)
 	if err != nil {
 		return leaseClaim{}, true, leaseClaimSnapshotReadError(leaseID, "verify current", err)
 	}
@@ -2092,7 +2093,7 @@ func readLocalClaimInventoryData(r io.Reader) ([]byte, bool, error) {
 }
 
 func sameLeaseClaimSnapshotFile(a, b os.FileInfo) bool {
-	return a != nil && b != nil && os.SameFile(a, b) && a.Mode() == b.Mode() && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
+	return a != nil && b != nil && sameFileSnapshotIdentity(a, b) && a.Mode() == b.Mode() && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
 }
 
 func leaseClaimSnapshotReadError(leaseID, action string, err error) error {

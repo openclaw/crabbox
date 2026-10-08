@@ -23,6 +23,9 @@ func TestCreateNoCloudSeedUsesCidataAndCoreCloudInit(t *testing.T) {
 			if !strings.Contains(script, "NewFileSystemLabel 'cidata'") {
 				return
 			}
+			if err := os.WriteFile(powerShellSeedPath(t, script), []byte("seed"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			for _, name := range []string{"_CRABBOX_USER_DATA_PATH", "_CRABBOX_META_DATA_PATH"} {
 				path := requestEnv(req, name)
 				sourcePaths = append(sourcePaths, path)
@@ -132,6 +135,9 @@ func TestLinuxTailscaleReusesTemporaryNoCloudBootstrap(t *testing.T) {
 			script := req.Args[len(req.Args)-1]
 			if !strings.Contains(script, "NewFileSystemLabel 'cidata'") {
 				return
+			}
+			if err := os.WriteFile(powerShellSeedPath(t, script), []byte("seed"), 0o600); err != nil {
+				t.Fatal(err)
 			}
 			userDataPath = requestEnv(req, "_CRABBOX_USER_DATA_PATH")
 			data, err := os.ReadFile(userDataPath)

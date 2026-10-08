@@ -46,6 +46,12 @@ type backend struct {
 	bootstrapTailscale        func(context.Context, core.Config, core.SSHTarget) (string, error)
 	runSSHOutput              func(context.Context, core.SSHTarget, string) (string, error)
 	cacheRoot                 string
+	acquireBudget             time.Duration
+	cleanupBudget             time.Duration
+	hostCommandTimeout        time.Duration
+	now                       func() time.Time
+	sleep                     func(context.Context, time.Duration) error
+	linuxHost                 *linuxHostOperations
 }
 
 var hypervHostOS = runtime.GOOS
@@ -58,6 +64,7 @@ const (
 type hypervVM struct {
 	Name  string `json:"Name"`
 	State int    `json:"State"`
+	ID    string `json:"Id,omitempty"`
 }
 
 func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
@@ -80,6 +87,11 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 		bootstrapTailscale:     core.BootstrapTailscaleTarget,
 		runSSHOutput:           core.RunSSHOutput,
 		cacheRoot:              hypervCacheRoot(),
+		acquireBudget:          15 * time.Minute,
+		cleanupBudget:          2 * time.Minute,
+		hostCommandTimeout:     45 * time.Second,
+		now:                    time.Now,
+		sleep:                  shared.SleepContext,
 	}
 	b.waitWindowsDesktopSession = b.waitForWindowsDesktopSession
 	b.waitWindowsSSHStable = b.waitForWindowsSSHStable
@@ -142,6 +154,8 @@ func (b *backend) configForRun() core.Config {
 }
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	ctx, cancel := context.WithTimeout(ctx, b.acquireBudget)
+	defer cancel()
 	if req.RequestedLeaseID != "" || req.RequestedCheckpointID != "" {
 		return core.LeaseTarget{}, core.Exit(2, "provider=%s does not support requested fixed lease or checkpoint IDs", providerName)
 	}
@@ -226,9 +240,11 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	keyPath, publicKey, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
+	keyPath, publicKey, err := core.EnsureTestboxKeyForConfigContext(ctx, cfg, leaseID)
 	if err != nil {
-		return core.LeaseTarget{}, err
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), b.cleanupBudget)
+		defer cancel()
+		return core.LeaseTarget{}, errors.Join(err, core.RemoveStoredTestboxConnectionArtifactsContext(cleanupCtx, leaseID))
 	}
 	cleanupKey := true
 	defer func() {
@@ -261,7 +277,9 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 	cleanupKey = false
 	tailscaleJoined := false
 	if err := b.createVM(ctx, cfg, name); err != nil {
-		cleanupErr := b.removeVM(context.Background(), name)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), b.cleanupBudget)
+		defer cancel()
+		cleanupErr := b.removeVM(cleanupCtx, name)
 		if cleanupErr == nil {
 			pruneLeaseState(leaseID)
 		}
@@ -271,15 +289,16 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 		if req.Keep {
 			return nil
 		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), b.cleanupBudget)
+		defer cancel()
 		if tailscaleJoined {
-			b.logoutWindowsTailscaleBestEffort(context.Background(), name, cfg.HyperV.User)
+			b.logoutWindowsTailscaleBestEffort(cleanupCtx, name, cfg.HyperV.User)
 		}
-		if err := b.removeVM(context.Background(), name); err != nil {
+		if err := b.removeVM(cleanupCtx, name); err != nil {
 			return fmt.Errorf("remove failed hyperv lease %s: %w", leaseID, err)
 		}
 		core.RemoveLeaseClaim(leaseID)
-		core.RemoveStoredTestboxKey(leaseID)
-		return nil
+		return core.RemoveStoredTestboxConnectionArtifactsContext(cleanupCtx, leaseID)
 	}
 
 	if err := b.prepareWindowsGuestNetwork(ctx, cfg, name, publicKey); err != nil {
@@ -452,6 +471,8 @@ func (b *backend) Doctor(ctx context.Context, req core.DoctorRequest) (core.Doct
 }
 
 func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	ctx, cancel := context.WithTimeout(ctx, b.cleanupBudget)
+	defer cancel()
 	lease := req.Lease
 	if lease.LeaseID == "" {
 		lease.LeaseID = strings.TrimSpace(lease.Server.Labels["lease"])
@@ -483,6 +504,30 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		cfg.HyperV.WorkRoot = workRoot
 		cfg.WorkRoot = workRoot
 	}
+	if cfg.TargetOS == targetLinux && lease.Server.Labels["hyperv_storage_layout"] == linuxStorageLayout {
+		claim, ok, err := core.ResolveLeaseClaimForProvider(lease.LeaseID, providerName)
+		if err != nil || !ok {
+			return errors.Join(err, fmt.Errorf("Linux lease %s ownership unavailable", lease.LeaseID))
+		}
+		vm, err := b.linuxOperations().query(ctx, name)
+		if err != nil {
+			return err
+		}
+		if vm.State != hypervMissingState && (claim.CloudImmutableID == "" || !strings.EqualFold(vm.ID, claim.CloudImmutableID)) {
+			return core.Exit(4, "Hyper-V VM immutable identity changed; refusing release")
+		}
+		if vm.State == hypervMissingState {
+			lease.Server.Status = "missing"
+		}
+		lease.Server.ImmutableID = claim.CloudImmutableID
+		if _, err := os.Lstat(linuxStoragePath(name)); err == nil {
+			if err := verifyLinuxStorage(name, lease.LeaseID); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
 	var detachedCaches []hypervDetachedCacheVolume
 	var detachErr error
 	var resolvedTarget core.SSHTarget
@@ -499,6 +544,9 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	}
 	if lease.Server.Status != "missing" {
 		stopScript := fmt.Sprintf(`$vm=Get-VM -Name '%s' -ErrorAction SilentlyContinue; if ($vm -and $vm.State -ne 'Off') { Stop-VM -VM $vm -Force -Confirm:$false -ErrorAction Stop }`, escapePSString(name))
+		if cfg.TargetOS == targetLinux && lease.Server.Labels["hyperv_storage_layout"] == linuxStorageLayout {
+			stopScript = fmt.Sprintf(`$vm=Get-VM -Name '%s' -ErrorAction SilentlyContinue; if ($vm) { if ([string]$vm.Id -ne '%s') { throw 'Hyper-V VM identity changed; refusing stop' }; if ($vm.State -ne 'Off') { Stop-VM -VM $vm -Force -Confirm:$false -ErrorAction Stop } }`, escapePSString(name), escapePSString(lease.Server.ImmutableID))
+		}
 		result, err := b.powershell(ctx, stopScript)
 		if err != nil {
 			return errors.Join(shared.LocalCommandError("stop Hyper-V VM before cache detach", result, err), releaseDetachedCacheVolumeLocks(detachedCaches))
@@ -508,7 +556,17 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 			fmt.Fprintf(b.rt.Stderr, "warning: Hyper-V cache detach before release failed; VM removal will detach preserved cache disks: %v\n", detachErr)
 		}
 	}
-	removeErr := b.removeVM(ctx, name)
+	var removeErr error
+	if cfg.TargetOS == targetLinux && lease.Server.Labels["hyperv_storage_layout"] == linuxStorageLayout {
+		claim, ok, err := core.ResolveLeaseClaimForProvider(lease.LeaseID, providerName)
+		if err != nil || !ok {
+			removeErr = errors.Join(err, fmt.Errorf("Linux lease %s ownership unavailable", lease.LeaseID))
+		} else {
+			removeErr = b.releaseLinuxClaim(ctx, claim)
+		}
+	} else {
+		removeErr = b.removeVM(ctx, name)
+	}
 	lockErr := releaseDetachedCacheVolumeLocks(detachedCaches)
 	if removeErr != nil {
 		return errors.Join(removeErr, detachErr, lockErr)
@@ -559,6 +617,8 @@ func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
+	ctx, cancel := context.WithTimeout(ctx, b.cleanupBudget)
+	defer cancel()
 	cfg := b.configForRun()
 	instances, err := b.listInstances(ctx)
 	if errors.Is(err, errNotWindows) {
@@ -599,6 +659,13 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			continue
 		}
 		fmt.Fprintf(b.rt.Stdout, "remove instance name=%s lease=%s reason=%s\n", inst.Name, core.Blank(claim.LeaseID, "-"), reason)
+		if claim.Labels["target"] == targetLinux && claim.Labels["hyperv_storage_layout"] == linuxStorageLayout {
+			if err := b.releaseLinuxClaim(ctx, claim); err != nil {
+				return err
+			}
+			removed++
+			continue
+		}
 		if err := b.removeVM(ctx, inst.Name); err != nil {
 			return err
 		}
@@ -630,7 +697,13 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 				return err
 			}
 		}
-		pruneLeaseState(claim.LeaseID)
+		if claim.Labels["target"] == targetLinux && claim.Labels["hyperv_storage_layout"] == linuxStorageLayout {
+			if err := b.releaseLinuxClaim(ctx, claim); err != nil {
+				return err
+			}
+		} else {
+			pruneLeaseState(claim.LeaseID)
+		}
 		claimsRemoved++
 	}
 	if !req.DryRun {
@@ -1018,6 +1091,7 @@ func sshAccessScript(user, publicKey string, activate bool) string {
 			`if ($line -match '^\s*Match\s+') { break }; `+
 			`if ($line -match '^\s*(Port|ListenAddress|AddressFamily|HostKey|AuthenticationMethods|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|AllowUsers|AllowGroups|DenyUsers|DenyGroups|AuthorizedKeysFile|AuthorizedKeysCommand|AuthorizedKeysCommandUser|TrustedUserCAKeys|AuthorizedPrincipalsFile|Include)\s+') { continue }; `+
 			`$globalLines += $line }; `+
+			`if (-not ($globalLines | Where-Object { $_ -match '^\s*Subsystem\s+sftp\s+' })) { $globalLines += 'Subsystem sftp sftp-server.exe' }; `+
 			`$globalLines += 'Port 22'; `+
 			`$globalLines += 'AddressFamily any'; `+
 			`$globalLines += 'PubkeyAuthentication yes'; `+
@@ -1097,7 +1171,7 @@ func validHyperVSSHUser(user string) bool {
 
 // waitForIP polls Get-VMNetworkAdapter until an IPv4 address appears.
 func (b *backend) waitForIP(ctx context.Context, name string, timeout time.Duration) (string, error) {
-	deadline := time.Now().Add(timeout)
+	deadline := b.now().Add(timeout)
 	script := fmt.Sprintf(
 		`Get-VMNetworkAdapter -VMName '%s' | Select-Object -ExpandProperty IPAddresses | ConvertTo-Json`,
 		escapePSString(name),
@@ -1107,13 +1181,16 @@ func (b *backend) waitForIP(ctx context.Context, name string, timeout time.Durat
 	// while preventing Poll's preflight check from skipping that observation.
 	pollCtx := context.WithoutCancel(ctx)
 	result, err := shared.Poll(pollCtx, 0, 3*time.Second,
-		func(_ context.Context, delay time.Duration) error { return shared.SleepContext(ctx, delay) },
+		func(_ context.Context, delay time.Duration) error { return b.sleep(ctx, delay) },
 		func(context.Context) (string, error) {
-			if time.Now().After(deadline) {
+			if !b.now().Before(deadline) {
 				return "", core.Exit(5, "hyperv VM %s did not acquire an IP within %s", name, timeout)
 			}
 			result, err := b.powershell(ctx, script)
-			if err != nil || strings.TrimSpace(result.Stdout) == "" || strings.TrimSpace(result.Stdout) == "null" {
+			if err != nil {
+				return "", shared.LocalCommandError("Hyper-V IP discovery", result, err)
+			}
+			if strings.TrimSpace(result.Stdout) == "" || strings.TrimSpace(result.Stdout) == "null" {
 				return "", nil
 			}
 			return parseFirstIPv4(result.Stdout), nil
@@ -1133,7 +1210,7 @@ func (b *backend) listInstances(ctx context.Context) ([]hypervVM, error) {
 	if hypervHostOS != "windows" {
 		return nil, errNotWindows
 	}
-	script := `Get-VM | Where-Object { $_.Name -like 'crabbox-*' } | Select-Object Name, State | ConvertTo-Json -Compress`
+	script := `Get-VM | Where-Object { $_.Name -like 'crabbox-*' } | Select-Object Name, State, @{Name='Id';Expression={[string]$_.Id}} | ConvertTo-Json -Compress`
 	result, err := b.powershell(ctx, script)
 	if err != nil {
 		return nil, shared.LocalCommandError("Get-VM list", result, err)
@@ -1157,9 +1234,19 @@ func (b *backend) resolveInstance(ctx context.Context, identifier string) (hyper
 		if name == "" {
 			return hypervVM{}, core.LeaseClaim{}, core.Exit(4, "hyperv lease %s has no instance name in its claim", claim.LeaseID)
 		}
-		vm, queryErr := b.queryVM(ctx, name)
+		var vm hypervVM
+		var queryErr error
+		if claim.Labels["target"] == targetLinux && claim.Labels["hyperv_storage_layout"] == linuxStorageLayout {
+			vm, queryErr = b.linuxOperations().query(ctx, name)
+		} else {
+			vm, queryErr = b.queryVM(ctx, name)
+		}
 		if queryErr != nil {
 			return hypervVM{}, claim, core.Exit(4, "hyperv VM %s from claim %s not reachable: %v", name, claim.LeaseID, queryErr)
+		}
+		if claim.Labels["target"] == targetLinux && claim.Labels["hyperv_storage_layout"] == linuxStorageLayout &&
+			vm.State != hypervMissingState && (claim.CloudImmutableID == "" || !strings.EqualFold(vm.ID, claim.CloudImmutableID)) {
+			return hypervVM{}, claim, core.Exit(4, "Hyper-V VM immutable identity changed; refusing reuse")
 		}
 		return vm, claim, nil
 	}
@@ -1490,6 +1577,7 @@ func (b *backend) serverFromInstance(inst hypervVM, claim core.LeaseClaim, cfg c
 		labels["state"] = liveState
 	}
 	server := shared.LocalInstanceServer(providerName, inst.Name, liveState, inst.State == 2, labels)
+	server.ImmutableID = shared.FirstNonBlank(inst.ID, claim.CloudImmutableID)
 	server.ServerType.Name = "hyperv"
 	if claim.SSHHost != "" {
 		server.PublicNet.IPv4.IP = claim.SSHHost
@@ -1508,6 +1596,8 @@ func (b *backend) getIPFromClaim(claim core.LeaseClaim) string {
 }
 
 func (b *backend) powershell(ctx context.Context, script string) (core.LocalCommandResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, b.hostCommandTimeout)
+	defer cancel()
 	return b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name: "powershell",
 		Args: []string{"-NoProfile", "-NonInteractive", "-Command", script},

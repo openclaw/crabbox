@@ -46,7 +46,11 @@ func TestLinuxAcquireDoesNotRequireGuestPassword(t *testing.T) {
 
 	b := testBackend(&recordingRunner{})
 	b.cfg.TargetOS = targetLinux
-	b.cfg.HyperV.Image = `C:\Images\debian-cloud.vhdx`
+	b.cfg.HyperV.WorkRoot = "/work/crabbox"
+	b.cfg.HyperV.Image = filepath.Join(t.TempDir(), "debian-cloud.vhdx")
+	if err := os.WriteFile(b.cfg.HyperV.Image, []byte("fixture image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	b.cfg.HyperV.GuestPassword = ""
 	_, err := b.Acquire(context.Background(), core.AcquireRequest{})
 	if err == nil || !strings.Contains(err.Error(), "requires a repository root") {
@@ -96,15 +100,25 @@ func TestValidLinuxSSHUser(t *testing.T) {
 }
 
 func TestCreateLinuxVMConnectsNetworkBeforeBootWithoutPowerShellDirect(t *testing.T) {
-	runner := &recordingRunner{}
+	runner := &recordingRunner{respond: func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		if strings.Contains(req.Args[len(req.Args)-1], "New-VM") {
+			return core.LocalCommandResult{Stdout: `{"Name":"crabbox-blue-1234","State":3,"Id":"00000000-0000-0000-0000-000000000001"}`}, nil, true
+		}
+		return core.LocalCommandResult{}, nil, false
+	}}
 	b := testBackend(runner)
 	cfg := b.configForRun()
 	cfg.TargetOS = targetLinux
 	cfg.HyperV.Image = `C:\Images\debian-cloud.vhdx`
 	cfg.HyperV.SecureBoot = secureBootAuto
-	seedPath := `C:\Hyper-V\Virtual Hard Disks\crabbox-blue-1234-seed.vhdx`
-
-	if err := b.createLinuxVM(context.Background(), cfg, "crabbox-blue-1234", seedPath); err != nil {
+	vm, err := b.createOwnedLinuxVM(context.Background(), cfg, "crabbox-blue-1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.configureVMFirmware(context.Background(), cfg, vm.Name); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.startLinuxVM(context.Background(), vm.Name, vm.ID); err != nil {
 		t.Fatal(err)
 	}
 	connectIndex, startIndex := -1, -1
@@ -149,6 +163,13 @@ func TestLinuxAcquireKeepPreservesNoCloudSeedWithoutTailscale(t *testing.T) {
 	t.Cleanup(func() { hypervHostOS = oldOS })
 
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.onRun = func(req core.LocalCommandRequest) {
+		if script := commandScript(req); strings.Contains(script, "NewFileSystemLabel 'cidata'") {
+			if err := os.WriteFile(powerShellSeedPath(t, script), []byte("seed"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		script := commandScript(req)
 		switch {
@@ -156,13 +177,20 @@ func TestLinuxAcquireKeepPreservesNoCloudSeedWithoutTailscale(t *testing.T) {
 			return core.LocalCommandResult{Stdout: "null"}, nil, true
 		case strings.Contains(script, "Get-VMNetworkAdapter"):
 			return core.LocalCommandResult{Stdout: `["192.0.2.25"]`}, nil, true
+		case strings.Contains(script, "New-VM -Name"):
+			name := powershellNamedArgument(script, "New-VM -Name '")
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"Name":%q,"State":3,"Id":"00000000-0000-0000-0000-000000000001"}`, name)}, nil, true
 		default:
 			return core.LocalCommandResult{}, nil, false
 		}
 	}
 	b := testBackend(runner)
 	b.cfg.TargetOS = targetLinux
-	b.cfg.HyperV.Image = `C:\Images\debian-cloud.vhdx`
+	b.cfg.HyperV.WorkRoot = "/work/crabbox"
+	b.cfg.HyperV.Image = filepath.Join(t.TempDir(), "debian-cloud.vhdx")
+	if err := os.WriteFile(b.cfg.HyperV.Image, []byte("fixture image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	b.cfg.HyperV.GuestPassword = ""
 	b.sshReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 		return fmt.Errorf("ssh unavailable")
@@ -193,6 +221,13 @@ func TestLinuxAcquireResolveReleaseLifecycle(t *testing.T) {
 	vmExists := false
 	vmName := ""
 	runner := &recordingRunner{}
+	runner.onRun = func(req core.LocalCommandRequest) {
+		if script := commandScript(req); strings.Contains(script, "NewFileSystemLabel 'cidata'") {
+			if err := os.WriteFile(powerShellSeedPath(t, script), []byte("seed"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		script := req.Args[len(req.Args)-1]
 		switch {
@@ -200,11 +235,11 @@ func TestLinuxAcquireResolveReleaseLifecycle(t *testing.T) {
 			if !vmExists {
 				return core.LocalCommandResult{Stdout: "null"}, nil, true
 			}
-			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"Name":%q,"State":2}`, vmName)}, nil, true
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"Name":%q,"State":2,"Id":"00000000-0000-0000-0000-000000000001"}`, vmName)}, nil, true
 		case strings.Contains(script, "New-VM -Name"):
 			vmExists = true
 			vmName = powershellNamedArgument(script, "New-VM -Name '")
-			return core.LocalCommandResult{}, nil, true
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"Name":%q,"State":3,"Id":"00000000-0000-0000-0000-000000000001"}`, vmName)}, nil, true
 		case strings.Contains(script, "Get-VMNetworkAdapter"):
 			return core.LocalCommandResult{Stdout: `["192.0.2.25"]`}, nil, true
 		case strings.Contains(script, "Get-VM -ErrorAction Stop") && strings.Contains(script, "Select-Object Name, State"):
@@ -212,10 +247,10 @@ func TestLinuxAcquireResolveReleaseLifecycle(t *testing.T) {
 				return core.LocalCommandResult{Stdout: "null"}, nil, true
 			}
 			name := powershellComparedName(script)
-			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"Name":%q,"State":2}`, name)}, nil, true
+			return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"Name":%q,"State":2,"Id":"00000000-0000-0000-0000-000000000001"}`, name)}, nil, true
 		case strings.Contains(script, "Get-VMHardDiskDrive") && strings.Contains(script, "ExpandProperty Path"):
 			return core.LocalCommandResult{}, nil, true
-		case strings.Contains(script, "Remove-VM -Name"):
+		case strings.Contains(script, "Remove-VM -Name"), strings.Contains(script, "$vm | Remove-VM"):
 			vmExists = false
 			return core.LocalCommandResult{}, nil, true
 		default:
@@ -224,7 +259,11 @@ func TestLinuxAcquireResolveReleaseLifecycle(t *testing.T) {
 	}
 	b := testBackend(runner)
 	b.cfg.TargetOS = targetLinux
-	b.cfg.HyperV.Image = `C:\Images\debian-cloud.vhdx`
+	b.cfg.HyperV.WorkRoot = "/work/crabbox"
+	b.cfg.HyperV.Image = filepath.Join(t.TempDir(), "debian-cloud.vhdx")
+	if err := os.WriteFile(b.cfg.HyperV.Image, []byte("fixture image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	b.cfg.HyperV.GuestPassword = ""
 	b.cfg.Code = true
 	var readyTarget core.SSHTarget

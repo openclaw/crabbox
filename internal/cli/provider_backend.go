@@ -990,7 +990,7 @@ func (s ProviderSpec) FeaturesForTarget(targetOS, windowsMode string) FeatureSet
 
 func providerTargetKey(targetOS, windowsMode string) string {
 	key := strings.TrimSpace(targetOS)
-	if mode := strings.TrimSpace(windowsMode); key != "" && mode != "" {
+	if mode := strings.TrimSpace(windowsMode); key == targetWindows && mode != "" {
 		key += "/" + mode
 	}
 	return key
@@ -1170,6 +1170,7 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (resu
 	if env == nil {
 		env = os.Environ()
 	}
+	env = localCommandChildEnv(req.Name, env)
 	// Controller acquire acknowledgment and process-tree ownership are parent /
 	// child controls. Provider adapters must never inherit them.
 	cmd.Env = stripControllerAcquireIdentityEnv(env)
