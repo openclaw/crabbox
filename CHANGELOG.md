@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- Azure: refuse retained network-companion cleanup when provider-key or fixed-attempt tags conflict with the original claim, even when immutable resource IDs still match.
+
 ## 0.73.0 - 2026-10-08
 
 ### Highlights

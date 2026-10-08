@@ -492,6 +492,49 @@ func TestAzureBoundCleanupRejectsReassignedCompanionsBeforeAnyDelete(t *testing.
 	}
 }
 
+func TestAzureBoundCleanupRejectsChangedCompanionClaim(t *testing.T) {
+	for _, mode := range []string{"owned", "automatic"} {
+		for _, vmPresent := range []bool{true, false} {
+			for _, suffix := range []string{"-nic", "-pip", "-q-nsg"} {
+				for _, key := range []string{"provider_key", "fixed_attempt", "fixed_intent_sha256"} {
+					for _, value := range []string{"", "another-claim"} {
+						t.Run(fmt.Sprintf("%s/vm=%t/%s/%s/%s", mode, vmPresent, suffix, key, value), func(t *testing.T) {
+							f := newAzureOrphanFixture(t)
+							f.server.Labels["state"] = "ready"
+							f.server.Labels["expires_at"] = LeaseLabelTime(time.Now().Add(-time.Hour))
+							f.addPreparationVM()
+							prepared, err := f.client.PrepareOwnedServer(t.Context(), f.server)
+							if err != nil {
+								t.Fatal(err)
+							}
+							if !vmPresent {
+								delete(f.objects, f.server.CloudID)
+							}
+							tags := f.objects[f.server.CloudID+suffix]["tags"].(map[string]string)
+							if value == "" {
+								delete(tags, key)
+							} else {
+								tags[key] = value
+							}
+							f.allowDelete = true
+							before, _ := json.Marshal(f.objects)
+							if mode == "owned" {
+								err = f.client.DeleteOwnedServer(t.Context(), prepared)
+							} else {
+								err = f.client.DeleteCleanupServer(t.Context(), prepared, time.Now())
+							}
+							after, _ := json.Marshal(f.objects)
+							if err == nil || !IsAzureCleanupSkipError(err) || len(f.deletes) != 0 || string(before) != string(after) {
+								t.Fatalf("changed companion claim reached deletion: error=%v deletes=%v", err, f.deletes)
+							}
+						})
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestAzurePreparationRejectsUnknownIdentityAndForeignLink(t *testing.T) {
 	for _, failure := range []string{"identity", "link"} {
 		t.Run(failure, func(t *testing.T) {

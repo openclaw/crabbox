@@ -2094,6 +2094,12 @@ func validateAzureCleanupResourceTags(kind, name string, tags map[string]*string
 	if slug := strings.TrimSpace(labels["slug"]); slug == "" || slug != strings.TrimSpace(expected["slug"]) {
 		return fmt.Errorf("Azure cleanup %s %s slug %q does not match VM slug %q", kind, name, slug, expected["slug"])
 	}
+	// An immutable companion may still have been assigned to another claim.
+	for _, key := range []string{"provider_key", "fixed_attempt", "fixed_intent_sha256"} {
+		if labels[key] != expected[key] {
+			return fmt.Errorf("Azure cleanup %s %s %s does not match the original claim", kind, name, key)
+		}
+	}
 	return nil
 }
 

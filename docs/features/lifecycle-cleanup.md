@@ -575,6 +575,9 @@ Azure tags without discarding the local record. After VM loss cleanup
 resumes only admitted cleanup, not preparation snapshots, even if the lease has
 expired; use an explicit stop or hold for those resources. Both stop and automatic
 cleanup verify all companion slots are absent before publishing completion.
+NIC, public-IP, and quarantine-NSG cleanup also requires the original provider-key
+and fixed-attempt tags; changed or missing claim tags block every deletion even
+when the companion's immutable identity still matches.
 A failed or incomplete capture leaves the claim unresolved and cannot publish
 readiness. Legacy claims with no snapshot
 still require all exact resources absent; surviving companions are not adopted
