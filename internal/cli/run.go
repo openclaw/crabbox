@@ -4578,13 +4578,44 @@ func observeCoordinatorReleaseCompletion(
 	coord *CoordinatorClient,
 	lease CoordinatorLease,
 	leaseID, expectedProvider string,
+	reconcile func(context.Context) (CoordinatorLease, error),
 ) (CoordinatorLease, error) {
 	timeout := coordinatorReleaseCompletionTimeout
 	observeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	// Expiry owns cleanup without first changing active to released. Pin its
+	// resource and claim while observing; a replacement is not our completion.
+	expiry := lease.State == "active" && coordinatorReleaseCleanupPending(lease) || lease.State == "expired"
+	expiryLease := lease
 	for observation := 1; ; observation++ {
+		if expiry {
+			if err := validateCoordinatorProviderIdentity(expectedProvider, leaseID, lease.Provider, false); err != nil {
+				return lease, err
+			}
+			if lease.ID != leaseID || lease.CloudID != expiryLease.CloudID || lease.ServerID != expiryLease.ServerID ||
+				lease.CreatedAt != expiryLease.CreatedAt ||
+				lease.CleanupStartedAt != "" && lease.CleanupStartedAt != expiryLease.CleanupStartedAt {
+				return lease, coordinatorReleaseObservationError(leaseID, expectedProvider, "changed lease, resource, or cleanup claim during observation")
+			}
+		}
 		if retainedCoordinatorRelease(lease) || coordinatorProviderReleaseConfirmed(lease) {
 			return lease, nil
+		}
+		if coordinatorExpiryCleanupCompleted(lease) && reconcile != nil {
+			// The supported release endpoint recognizes completed expiry cleanup
+			// idempotently. It must confirm a released record before local cleanup.
+			released, err := reconcile(observeCtx)
+			if err != nil {
+				return lease, errors.Join(coordinatorReleaseObservationError(leaseID, expectedProvider, "completed expiry cleanup but release reconciliation failed"), err)
+			}
+			if err := validateCoordinatorProviderIdentity(expectedProvider, leaseID, released.Provider, false); err != nil {
+				return lease, err
+			}
+			if released.ID != leaseID || released.CloudID != lease.CloudID || released.ServerID != lease.ServerID ||
+				released.CreatedAt != lease.CreatedAt || !coordinatorProviderReleaseConfirmed(released) {
+				return lease, coordinatorReleaseObservationError(leaseID, expectedProvider, "did not confirm the same completed expiry cleanup after reconciliation")
+			}
+			return released, nil
 		}
 		if coordinatorReleaseCleanupFailed(lease) {
 			state := "reported a cleanup failure or scheduled retry"
@@ -4639,7 +4670,7 @@ func coordinatorReleaseCleanupFailed(lease CoordinatorLease) bool {
 }
 
 func coordinatorReleaseCleanupPending(lease CoordinatorLease) bool {
-	return lease.State == "released" &&
+	return (lease.State == "released" || lease.State == "active" && lease.CleanupStartedAt != "") &&
 		(lease.ReleaseDeletesServer == nil || *lease.ReleaseDeletesServer) &&
 		(lease.CleanupStatus == "pending" || lease.CleanupStatus == "" && lease.CleanupStartedAt != "")
 }
@@ -4649,17 +4680,32 @@ func coordinatorReleaseObservationError(leaseID, expectedProvider, state string)
 }
 
 func coordinatorProviderReleaseConfirmed(lease CoordinatorLease) bool {
+	return lease.State == "released" && lease.CleanupStatus == "complete" && coordinatorProviderCleanupConfirmed(lease)
+}
+
+func coordinatorExpiryCleanupCompleted(lease CoordinatorLease) bool {
+	return lease.State == "expired" &&
+		(lease.CleanupStatus == "" || lease.CleanupStatus == "complete") &&
+		coordinatorProviderCleanupConfirmed(lease)
+}
+
+func coordinatorProviderCleanupConfirmed(lease CoordinatorLease) bool {
 	_, completionErr := time.Parse(time.RFC3339, lease.CleanupCompletedAt)
-	return lease.State == "released" &&
-		lease.CleanupStatus == "complete" &&
-		completionErr == nil &&
+	return completionErr == nil &&
 		lease.Host == "" &&
 		lease.Tailscale == nil &&
 		lease.SSHHostKey == "" &&
 		lease.ProviderAccessExpiresAt == "" &&
 		lease.CleanupStartedAt == "" &&
+		lease.CleanupClaimExpiresAt == "" &&
+		lease.CleanupFailedAt == "" &&
+		lease.CleanupAttempts == 0 &&
 		lease.CleanupError == "" &&
 		lease.CleanupRetryAt == "" &&
+		!lease.ProviderKeyCleanupPending &&
+		lease.ProviderKeyCleanupID == "" &&
+		lease.ProvisioningRequestStartedAt == "" &&
+		lease.ProvisioningPhase == "" &&
 		(lease.ProvisioningResourceMayExist == nil || !*lease.ProvisioningResourceMayExist) &&
 		(lease.ProvisioningFailureRetryable == nil || !*lease.ProvisioningFailureRetryable) &&
 		(lease.ReleaseDeletesServer == nil || *lease.ReleaseDeletesServer)

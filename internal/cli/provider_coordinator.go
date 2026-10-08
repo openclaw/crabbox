@@ -1319,7 +1319,10 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 			}
 		}
 	}
-	released, err := releaseCoordinatorLeaseResult(ctx, b.coord, req.Lease.LeaseID, expectedProvider)
+	release := func(releaseCtx context.Context) (CoordinatorLease, error) {
+		return releaseCoordinatorLeaseResult(releaseCtx, b.coord, req.Lease.LeaseID, expectedProvider)
+	}
+	released, err := release(ctx)
 	observationCoord := b.coord
 	if err != nil {
 		if b.cfg.CoordAdminToken != "" && (isCoordinatorNotFoundError(err) || isCoordinatorUnauthorized(err)) {
@@ -1327,15 +1330,24 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 			if adminErr != nil {
 				return false, err
 			}
-			if released, adminErr = releaseCoordinatorLeaseMutation(ctx, req.Lease.LeaseID, expectedProvider, func(releaseCtx context.Context) (CoordinatorLease, error) {
-				return adminCoord.AdminReleaseLeaseForProvider(releaseCtx, req.Lease.LeaseID, true, expectedProvider)
-			}); adminErr != nil {
+			release = func(releaseCtx context.Context) (CoordinatorLease, error) {
+				return releaseCoordinatorLeaseMutation(releaseCtx, req.Lease.LeaseID, expectedProvider, func(mutationCtx context.Context) (CoordinatorLease, error) {
+					return adminCoord.AdminReleaseLeaseForProvider(mutationCtx, req.Lease.LeaseID, true, expectedProvider)
+				})
+			}
+			if released, adminErr = release(ctx); adminErr != nil {
 				return false, adminErr
 			}
 			observationCoord = adminCoord
 		} else {
 			return false, err
 		}
+	}
+	if (released.State == "active" || released.State == "expired") &&
+		(released.ID != req.Lease.LeaseID ||
+			req.Lease.Server.CloudID != "" && released.CloudID != req.Lease.Server.CloudID ||
+			req.Lease.Server.ID != 0 && released.ServerID != req.Lease.Server.ID) {
+		return false, coordinatorReleaseObservationError(req.Lease.LeaseID, expectedProvider, "returned a different lease or resource for expiry cleanup")
 	}
 	if req.DeferProviderCleanupObservation {
 		if retainedCoordinatorRelease(released) {
@@ -1344,13 +1356,13 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 		if coordinatorProviderReleaseConfirmed(released) {
 			return finish()
 		}
-		if coordinatorReleaseCleanupFailed(released) || coordinatorReleaseCleanupPending(released) {
+		if coordinatorReleaseCleanupFailed(released) || coordinatorReleaseCleanupPending(released) || coordinatorExpiryCleanupCompleted(released) {
 			fmt.Fprintf(b.rt.Stderr, "warning: coordinator accepted release for %s; remote cleanup remains pending and local claim/SSH artifacts were preserved\n", req.Lease.LeaseID)
 			return false, nil
 		}
 		return false, coordinatorReleaseObservationError(req.Lease.LeaseID, b.cfg.Provider, "returned an unexpected non-final state")
 	}
-	released, err = observeCoordinatorReleaseCompletion(ctx, observationCoord, released, req.Lease.LeaseID, expectedProvider)
+	released, err = observeCoordinatorReleaseCompletion(ctx, observationCoord, released, req.Lease.LeaseID, expectedProvider, release)
 	if err != nil {
 		return false, err
 	}

@@ -146,9 +146,14 @@ type CoordinatorLease struct {
 	CleanupStatus                string                         `json:"cleanupStatus,omitempty"`
 	ProviderCleanup              *ProviderCleanupEvidence       `json:"providerCleanup,omitempty"`
 	CleanupStartedAt             string                         `json:"cleanupStartedAt,omitempty"`
+	CleanupClaimExpiresAt        string                         `json:"cleanupClaimExpiresAt,omitempty"`
+	CleanupFailedAt              string                         `json:"cleanupFailedAt,omitempty"`
 	CleanupCompletedAt           string                         `json:"cleanupCompletedAt,omitempty"`
 	CleanupError                 string                         `json:"cleanupError,omitempty"`
 	CleanupRetryAt               string                         `json:"cleanupRetryAt,omitempty"`
+	ProviderKeyCleanupPending    bool                           `json:"providerKeyCleanupPending,omitempty"`
+	ProviderKeyCleanupID         string                         `json:"providerKeyCleanupID,omitempty"`
+	ProvisioningRequestStartedAt string                         `json:"provisioningRequestStartedAt,omitempty"`
 	ReleaseDeletesServer         *bool                          `json:"releaseDeletesServer,omitempty"`
 	FailureError                 string                         `json:"failureError,omitempty"`
 	ProvisioningPhase            string                         `json:"provisioningPhase,omitempty"`

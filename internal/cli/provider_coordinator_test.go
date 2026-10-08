@@ -3494,76 +3494,95 @@ func assertCoordinatorProviderIdentityError(t *testing.T, err error, returnedPro
 }
 
 func TestCoordinatorReleaseFallsBackToAdminToken(t *testing.T) {
-	isolateTestUserDirs(t)
-	configureCoordinatorReleaseTestTiming(t, time.Second, 0)
-	adminReleased := false
-	adminObservations := 0
-	var payloads []map[string]any
-	var paths []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/v1/leases/cbx_admin" {
-			if r.Header.Get("Authorization") != "Bearer admin-token" {
-				t.Fatalf("observation auth=%q, want admin token", r.Header.Get("Authorization"))
-			}
-			adminObservations++
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease": confirmedCoordinatorRelease("cbx_admin", "aws")})
-			return
-		}
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/admin/leases/cbx_admin/release" && r.URL.Path != "/v1/leases/cbx_admin/release" {
-			http.NotFound(w, r)
-			return
-		}
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatal(err)
-		}
-		payloads = append(payloads, body)
-		paths = append(paths, r.URL.Path)
-		switch r.Header.Get("Authorization") {
-		case "Bearer user-token":
-			http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
-		case "Bearer admin-token":
-			if r.URL.Path != "/v1/admin/leases/cbx_admin/release" {
-				t.Fatalf("admin release path=%s", r.URL.Path)
-			}
-			adminReleased = true
-			deleting := true
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: "cbx_admin", Provider: "aws", State: "released", CleanupStartedAt: "2026-08-19T00:00:00Z", ReleaseDeletesServer: &deleting}})
-		default:
-			t.Fatalf("unexpected auth %q", r.Header.Get("Authorization"))
-		}
-	}))
-	defer server.Close()
+	for _, expiry := range []bool{false, true} {
+		t.Run(fmt.Sprintf("expiry=%t", expiry), func(t *testing.T) {
+			isolateTestUserDirs(t)
+			configureCoordinatorReleaseTestTiming(t, time.Second, 0)
+			adminReleases := 0
+			adminObservations := 0
+			var payloads []map[string]any
+			var paths []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && r.URL.Path == "/v1/leases/cbx_admin" {
+					if r.Header.Get("Authorization") != "Bearer admin-token" {
+						t.Fatalf("observation auth=%q, want admin token", r.Header.Get("Authorization"))
+					}
+					adminObservations++
+					lease := confirmedCoordinatorRelease("cbx_admin", "aws")
+					if expiry {
+						lease.State, lease.CleanupStatus = "expired", ""
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+					return
+				}
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/admin/leases/cbx_admin/release" && r.URL.Path != "/v1/leases/cbx_admin/release" {
+					http.NotFound(w, r)
+					return
+				}
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				payloads = append(payloads, body)
+				paths = append(paths, r.URL.Path)
+				switch r.Header.Get("Authorization") {
+				case "Bearer user-token":
+					http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+				case "Bearer admin-token":
+					if r.URL.Path != "/v1/admin/leases/cbx_admin/release" {
+						t.Fatalf("admin release path=%s", r.URL.Path)
+					}
+					adminReleases++
+					deleting := true
+					lease := CoordinatorLease{ID: "cbx_admin", Provider: "aws", State: "released", CleanupStartedAt: "2026-08-19T00:00:00Z", ReleaseDeletesServer: &deleting}
+					if expiry {
+						lease.State = "active"
+					}
+					if adminReleases > 1 {
+						lease = confirmedCoordinatorRelease("cbx_admin", "aws")
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+				default:
+					t.Fatalf("unexpected auth %q", r.Header.Get("Authorization"))
+				}
+			}))
+			defer server.Close()
 
-	cfg := Config{
-		Provider:        "aws",
-		TargetOS:        targetLinux,
-		Coordinator:     server.URL,
-		CoordToken:      "user-token",
-		CoordAdminToken: "admin-token",
-	}
-	coord := mustNewCoordinatorClient(t, cfg)
-	backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
+			cfg := Config{
+				Provider:        "aws",
+				TargetOS:        targetLinux,
+				Coordinator:     server.URL,
+				CoordToken:      "user-token",
+				CoordAdminToken: "admin-token",
+			}
+			coord := mustNewCoordinatorClient(t, cfg)
+			backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
 
-	err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
-		LeaseID: "cbx_admin", Server: Server{Provider: "aws"},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !adminReleased {
-		t.Fatal("admin release was not called")
-	}
-	if adminObservations != 1 {
-		t.Fatalf("admin observations=%d want 1", adminObservations)
-	}
-	if len(payloads) != 6 || paths[len(paths)-1] != "/v1/admin/leases/cbx_admin/release" {
-		t.Fatalf("release paths=%#v payloads=%#v", paths, payloads)
-	}
-	for i, payload := range payloads {
-		if payload["expectedProvider"] != "aws" {
-			t.Fatalf("release payload %d=%#v, want expectedProvider=aws", i, payload)
-		}
+			err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{
+				LeaseID: "cbx_admin", Server: Server{Provider: "aws"},
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if adminReleases == 0 {
+				t.Fatal("admin release was not called")
+			}
+			if adminObservations != 1 {
+				t.Fatalf("admin observations=%d want 1", adminObservations)
+			}
+			wantRequests := 6
+			if expiry {
+				wantRequests++
+			}
+			if len(payloads) != wantRequests || paths[len(paths)-1] != "/v1/admin/leases/cbx_admin/release" {
+				t.Fatalf("release paths=%#v payloads=%#v", paths, payloads)
+			}
+			for i, payload := range payloads {
+				if payload["expectedProvider"] != "aws" {
+					t.Fatalf("release payload %d=%#v, want expectedProvider=aws", i, payload)
+				}
+			}
+		})
 	}
 }
 
