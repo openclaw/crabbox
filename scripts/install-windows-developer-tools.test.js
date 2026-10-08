@@ -6,6 +6,10 @@ import test from "node:test";
 import { spawnSync } from "node:child_process";
 
 const script = await readFile("scripts/install-windows-developer-tools.ps1", "utf8");
+// PowerShell 7's module path prevents Windows PowerShell 5.1 from loading its own cmdlets.
+const powerShellEnv = Object.fromEntries(Object.entries(process.env).filter(
+  ([name]) => process.platform !== "win32" || name.toLowerCase() !== "psmodulepath",
+));
 
 const truffleHogFunctions = script.slice(script.indexOf("function Test-TruffleHogBinary"), script.indexOf("function Install-StaticDockerEngine"));
 const psQuote = (value) => `'${value.replaceAll("'", "''")}'`;
@@ -47,7 +51,7 @@ ${body}
 `);
     const result = spawnSync(process.platform === "win32" ? "powershell.exe" : "pwsh", [
       "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", fixtureScript,
-    ], { encoding: "utf8", timeout: 30000 });
+    ], { encoding: "utf8", timeout: 30000, env: powerShellEnv });
     if (result.error?.code === "ENOENT") { t.skip("PowerShell is not installed"); return; }
     assert.equal(result.status, 0, result.stdout + result.stderr);
     return result;
@@ -128,7 +132,7 @@ for (const [build, expected, succeeds] of [[20348, 20348, true], [26100, 26100, 
     const result = spawnSync(process.platform === "win32" ? "powershell.exe" : "pwsh", [
       "-NoProfile", "-NonInteractive", "-Command",
       `$ExpectedWindowsBuild = '${expected}'; function Get-CimInstance { @{ BuildNumber = '${build}' } }; ${prelude}; Write-Output 'guest-version-ok'`,
-    ], { encoding: "utf8", timeout: 30000 });
+    ], { encoding: "utf8", timeout: 30000, env: powerShellEnv });
     if (result.error?.code === "ENOENT") return t.skip("PowerShell is not installed");
     assert.equal(result.status === 0, succeeds, result.stderr);
     if (succeeds) assert.match(result.stdout, /guest-version-ok/);
@@ -148,7 +152,7 @@ for (const file of ["install-windows-developer-tools.ps1", "devtools-image-smoke
       const shell = process.platform === "win32" ? "powershell.exe" : "pwsh";
       const result = spawnSync(shell, ["-NoProfile", "-NonInteractive", "-Command",
         `$ErrorActionPreference = 'Stop'; function Get-CimInstance { @{ BuildNumber = '${build}' } }; ${selection}; Write-Output $ServerCoreTag`],
-        { encoding: "utf8", timeout: 30000 });
+        { encoding: "utf8", timeout: 30000, env: powerShellEnv });
       if (result.error?.code === "ENOENT") return t.skip("PowerShell is not installed");
       if (tag) {
         assert.equal(result.status, 0, result.stderr);
