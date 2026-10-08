@@ -329,7 +329,7 @@ cleanup() {
   local proof_status=0
   local receipt_path="-"
   local outcome_candidate=""
-  local lease handle seen_leases="|"
+  local lease handle stop_output stop_code seen_leases="|"
   local -a cleanup_leases=()
   # A successful promotion can precede a failed receipt tee or a signal.
   if [[ -n "$promotion_log" && -n "$candidate_checkpoint" ]] &&
@@ -368,9 +368,21 @@ cleanup() {
         *"|$lease|"*) continue ;;
       esac
       seen_leases+="$lease|"
-      if ! "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease"; then
-        cleanup_status="failed"
-        finalizer_status=1
+      stop_code=0
+      stop_output="$("$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" 2>&1)" || stop_code=$?
+      printf '%s\n' "$stop_output" >&2
+      if [[ "$stop_code" != "0" ]]; then
+        # Only failure cleanup may defer observation; never turn a mint green or discard its handles.
+        if [[ "$target" == "windows" && "$exit_status" != "0" ]] &&
+          [[ "$stop_output" == *"coordinator accepted release for $lease, but remote cleanup observation was canceled;"* ||
+             "$stop_output" == *"coordinator accepted release for $lease, but remote cleanup is still pending"* ]]; then
+          [[ "$cleanup_status" == "failed" ]] || cleanup_status="pending"
+          printf 'Windows failure cleanup: release accepted for %s; cleanup remains unconfirmed; preserving original mint failure (exit %s) and lease handles.\n' "$lease" "$exit_status" >&2
+          printf 'Check crabbox status --provider aws --id %s --json, then retry crabbox stop --provider aws --target windows %s to verify cleanup and remove retained local artifacts.\n' "$lease" "$lease" >&2
+        else
+          cleanup_status="failed"
+          finalizer_status=1
+        fi
       fi
     done
   fi
@@ -400,7 +412,7 @@ cleanup() {
       cleanup_status="failed"
       printf 'FAILED to delete candidate image=%s region=%s checkpoint=%s (exit %s); retry checkpoint delete --admin\n' \
         "$ami_id" "$candidate_region" "$candidate_checkpoint" "$delete_status" >&2
-    elif [[ "$cleanup_status" != "failed" ]]; then
+    elif [[ "$cleanup_status" != "failed" && "$cleanup_status" != "pending" ]]; then
       cleanup_status="succeeded"
     fi
     if ! jq -n --arg checkpoint "$candidate_checkpoint" --arg image "$ami_id" \
@@ -564,7 +576,9 @@ $log = Join-Path $dir 'image-prep.log'
 $exitFile = Join-Path $dir 'image-prep.exit'
 $done = Join-Path $dir 'image-prep.done'
 $failed = Join-Path $dir 'image-prep.failed'
-Remove-Item -Force $log,$exitFile,$done,$failed -ErrorAction SilentlyContinue
+$step = Join-Path $dir 'image-prep.step'
+$errorFile = Join-Path $dir 'image-prep.error'
+Remove-Item -Force $log,$exitFile,$done,$failed,$step,$errorFile -ErrorAction SilentlyContinue
 @'
 $dir = 'C:\ProgramData\crabbox'
 $script = Join-Path $dir 'image-prep.ps1'
@@ -572,11 +586,21 @@ $log = Join-Path $dir 'image-prep.log'
 $exitFile = Join-Path $dir 'image-prep.exit'
 $done = Join-Path $dir 'image-prep.done'
 $failed = Join-Path $dir 'image-prep.failed'
+$step = Join-Path $dir 'image-prep.step'
+$errorFile = Join-Path $dir 'image-prep.error'
 $ErrorActionPreference = 'Continue'
-Remove-Item -Force $exitFile,$done,$failed -ErrorAction SilentlyContinue
-& powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script *>&1 | Tee-Object -FilePath $log
-$code = $LASTEXITCODE
-if ($null -eq $code) { $code = 0 }
+$PSNativeCommandUseErrorActionPreference = $false
+Remove-Item -Force $exitFile,$done,$failed,$errorFile -ErrorAction SilentlyContinue
+Set-Content -Path $step -Value 'starting prep PowerShell process'
+$LASTEXITCODE = $null
+try {
+  & powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script *>&1 | Tee-Object -FilePath $log -ErrorAction Stop
+  $code = $LASTEXITCODE
+  if ($null -eq $code) { throw 'prep PowerShell process did not return an exit code' }
+} catch {
+  $code = 1
+  $_ | Out-String | Set-Content -Path $errorFile
+}
 Set-Content -Path $exitFile -Value $code
 if ($code -eq 0) {
   Set-Content -Path $done -Value 'ok'
@@ -602,6 +626,8 @@ $log = Join-Path $dir 'image-prep.log'
 $exitFile = Join-Path $dir 'image-prep.exit'
 $done = Join-Path $dir 'image-prep.done'
 $failed = Join-Path $dir 'image-prep.failed'
+$step = Join-Path $dir 'image-prep.step'
+$errorFile = Join-Path $dir 'image-prep.error'
 if (Test-Path $done) {
   Write-Output 'crabbox-prep-done'
   if (Test-Path $exitFile) { Get-Content $exitFile }
@@ -610,8 +636,17 @@ if (Test-Path $done) {
 }
 if (Test-Path $failed) {
   Write-Output 'crabbox-prep-failed'
-  if (Test-Path $exitFile) { Get-Content $exitFile }
-  if (Test-Path $log) { Get-Content $log -Tail 120 }
+  if (Test-Path $step) { Write-Output ("failed during: {0}" -f (Get-Content $step -Raw).Trim()) }
+  if (Test-Path $exitFile) {
+    $code = (Get-Content $exitFile -Raw).Trim()
+    if ($code -eq '-1' -or $code -eq '4294967295') {
+      Write-Output "exit code: $code (0xFFFFFFFF); the prep PowerShell process returned a failure status, which alone does not identify the failing statement; see the step, exception and log below"
+    } else {
+      Write-Output "exit code: $code (prep PowerShell process)"
+    }
+  }
+  if (Test-Path $errorFile) { Get-Content $errorFile }
+  if (Test-Path $log) { Get-Content $log -Tail 200 }
   exit 0
 }
 $task = Get-ScheduledTask -TaskName 'CrabboxImagePrep' -ErrorAction SilentlyContinue

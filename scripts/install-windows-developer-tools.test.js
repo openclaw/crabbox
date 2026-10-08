@@ -14,6 +14,121 @@ const powerShellEnv = Object.fromEntries(Object.entries(process.env).filter(
 const truffleHogFunctions = script.slice(script.indexOf("function Test-TruffleHogBinary"), script.indexOf("function Install-StaticDockerEngine"));
 const psQuote = (value) => `'${value.replaceAll("'", "''")}'`;
 
+async function pullFixture(t, body) {
+  const dir = await mkdtemp(join(tmpdir(), "crabbox-pull-test-"));
+  try {
+    const fixture = join(dir, "fixture.ps1");
+    await writeFile(fixture, `
+$ErrorActionPreference = 'Stop'
+${script.slice(script.indexOf("function Write-Log"), script.indexOf('\nSet-PrepStep "installing Chocolatey"'))}
+$InstallDocker = '1'
+$DockerImages = 'mcr.microsoft.com/windows/servercore:ltsc2025'
+$RebootMarker = ${psQuote(join(dir, "reboot"))}
+$PrepStepFile = ${psQuote(join(dir, "image-prep.step"))}
+$script:pulls = 0
+$script:inspects = 0
+$script:delays = @()
+function Start-Sleep { param($Seconds) $script:delays += $Seconds }
+function Get-WindowsFeature { @{ Installed = $true } }
+function Install-StaticDockerEngine { }
+function Set-Service { }
+function Start-Service { }
+${body}
+`);
+    const result = spawnSync(process.platform === "win32" ? "powershell.exe" : "pwsh", [
+      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", fixture,
+    ], { encoding: "utf8", timeout: 30000, env: powerShellEnv });
+    if (result.error?.code === "ENOENT") { t.skip("PowerShell is not installed"); return; }
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    return result;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test("Windows image pull retries native failures and verifies the image after transient recovery", async (t) => {
+  await pullFixture(t, `
+function docker {
+  $global:LASTEXITCODE = 0
+  if ($args[0] -eq 'pull') {
+    $script:pulls++
+    if ($script:pulls -lt 3) { $global:LASTEXITCODE = 17 }
+  } elseif ($args[0] -eq 'image' -and $args[1] -eq 'inspect') {
+    $script:inspects++
+    if ($args[2] -ne $DockerImages) { throw 'wrong image inspected' }
+  }
+}
+Install-DockerEngine
+if ($script:pulls -ne 3 -or $script:inspects -ne 1) { throw "pulls=$script:pulls inspects=$script:inspects" }
+if (($script:delays -join ',') -ne '30,60') { throw 'unexpected retry backoff' }
+`);
+});
+
+for (const command of ["Chocolatey", "pnpm"]) {
+  test(`Windows ${command} downloads retry nonzero native exits`, async (t) => {
+    await pullFixture(t, `
+$script:attempts = 0
+$PnpmVersion = '11.1.0'
+function choco {
+  $script:attempts++
+  $global:LASTEXITCODE = 0
+  if ($script:attempts -lt 3) { $global:LASTEXITCODE = 1 }
+}
+function corepack {
+  $global:LASTEXITCODE = 0
+  if ($args[0] -eq 'prepare') {
+    $script:attempts++
+    if ($script:attempts -lt 3) { $global:LASTEXITCODE = 1 }
+  }
+}
+${command === "Chocolatey" ? "Install-ChocoPackage @('git')" : "Enable-CorepackPnpm"}
+if ($script:attempts -ne 3) { throw 'failed native download did not retry' }
+`);
+  });
+}
+
+for (const failure of ["pull", "inspect"]) {
+  test(`Windows image ${failure} persistent failure names the step and image and stops prep`, async (t) => {
+    const result = await pullFixture(t, `
+function docker {
+  $global:LASTEXITCODE = 0
+  if ($args[0] -eq 'pull') { $script:pulls++; if ('${failure}' -eq 'pull') { $global:LASTEXITCODE = 17 } }
+  if ($args[0] -eq 'image') { $script:inspects++; $global:LASTEXITCODE = 18 }
+}
+
+$failure = $null
+try { Install-DockerEngine } catch { $failure = $_.Exception.Message }
+if (-not $failure) { throw 'prep accepted a missing image' }
+if ($failure -notmatch '${failure}.*mcr.microsoft.com/windows/servercore:ltsc2025.*exit code (17|18)') { throw "missing step/image/exit: $failure" }
+if ($script:pulls -ne 4 -or ($script:delays -join ',') -ne '30,60,120') { throw 'retries were not bounded' }
+if ((Get-Content $PrepStepFile) -notmatch '${failure}.*mcr.microsoft.com/windows/servercore:ltsc2025') { throw 'missing failing step marker' }
+Write-Output $failure
+`);
+    if (result) assert.match(result.stdout, /failed after 4 attempts/);
+  });
+}
+
+test("Windows prep saves uncaught exception details beside its current step", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "crabbox-prep-error-test-"));
+  try {
+    const fixture = join(dir, "prep.ps1");
+    await writeFile(fixture, script
+      .replace('"C:\\ProgramData\\crabbox\\image-prep.step"', psQuote(join(dir, "image-prep.step")))
+      .replace('"C:\\ProgramData\\crabbox\\image-prep.error"', psQuote(join(dir, "image-prep.error"))));
+    const result = spawnSync(process.platform === "win32" ? "powershell.exe" : "pwsh", [
+      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", fixture,
+    ], { encoding: "utf8", timeout: 30000, env: { ...powerShellEnv, CRABBOX_WINDOWS_NODE_SHA256: "invalid" } });
+    if (result.error?.code === "ENOENT") return t.skip("PowerShell is not installed");
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(await readFile(join(dir, "image-prep.step"), "utf8"), /validating prep configuration/);
+    const details = await readFile(join(dir, "image-prep.error"), "utf8");
+    assert.match(details, /CRABBOX_WINDOWS_NODE_SHA256 must be a 64-character hex digest/);
+    assert.match(details, /prep.ps1.*line/i);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 async function truffleHogFixture(t, body) {
   const dir = await mkdtemp(join(tmpdir(), "crabbox-trufflehog-test-"));
   try {

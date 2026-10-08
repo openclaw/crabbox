@@ -563,6 +563,26 @@ reboots the source lease, waits for Crabbox readiness, reruns the prep script to
 pull the configured Docker images, and only then runs the source smoke and AMI
 capture.
 
+Windows prep retries downloads, Chocolatey package installation, pnpm preparation,
+and each Docker image pull up to four times, with 30-, 60-, and 120-second waits.
+Each successful pull must also pass `docker image inspect`; exhausted retries
+stop the bake before source smoke or capture. Native command exit codes are
+checked explicitly because Windows PowerShell does not throw on nonzero exits.
+The prep script records its current step in
+`C:\ProgramData\crabbox\image-prep.step` and uncaught exception details in
+`image-prep.error`. On failure the mint reports these files, the child PowerShell
+exit code, and the last 200 log lines. A process exit of `-1` (`0xFFFFFFFF`)
+does not identify a Docker error or failing statement on its own.
+
+The normal five-minute coordinator-backed stop budget also applies to mint
+cleanup. If Windows failure cleanup reports that release was accepted but
+observation timed out, the mint preserves the original failure and reports
+cleanup as unconfirmed, retaining lease handles and local recovery state.
+Use the printed `status --json` command to check progress, then repeat `stop`
+to confirm cleanup and remove retained local artifacts. An accepted release
+alone never proves termination, and pending cleanup cannot make a successful
+mint pass.
+
 ### Linux public toolchain archives
 
 The x86_64 recipe installs the checksum-pinned upstream Node 24.19.0 archive,

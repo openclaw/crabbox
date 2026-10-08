@@ -20,6 +20,61 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
 const script = path.join(scriptDir, "mint-aws-devtools-image.sh");
 
+test("Windows prep failure reports the step, exception, native exit meaning and 200 log lines", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "crabbox-prep-status-test-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const text = await readFile(script, "utf8");
+  const command = text.match(/windows_prep_status_command\(\) \{\n  cat <<'POWERSHELL'\n([\s\S]*?)\nPOWERSHELL/)[1];
+  await writeFile(path.join(dir, "image-prep.failed"), "-1");
+  await writeFile(path.join(dir, "image-prep.exit"), "-1");
+  await writeFile(path.join(dir, "image-prep.step"), "docker pull mcr.microsoft.com/windows/servercore:ltsc2025");
+  await writeFile(path.join(dir, "image-prep.error"), "registry connection reset at prep.ps1:42");
+  await writeFile(path.join(dir, "image-prep.log"), Array.from({ length: 250 }, (_, i) => `layer-line-${i + 1}`).join("\n"));
+  const fixture = path.join(dir, "status.ps1");
+  await writeFile(fixture, command.replace("$dir = 'C:\\ProgramData\\crabbox'", `$dir = '${dir.replaceAll("'", "''")}'`));
+  const env = Object.fromEntries(Object.entries(process.env).filter(
+    ([name]) => process.platform !== "win32" || name.toLowerCase() !== "psmodulepath",
+  ));
+  const result = spawnSync(process.platform === "win32" ? "powershell.exe" : "pwsh", [
+    "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", fixture,
+  ], { encoding: "utf8", timeout: 30000, env });
+  if (result.error?.code === "ENOENT") return t.skip("PowerShell is not installed");
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /crabbox-prep-failed/);
+  assert.match(result.stdout, /failed during: docker pull mcr.microsoft.com\/windows\/servercore:ltsc2025/);
+  assert.match(result.stdout, /registry connection reset at prep.ps1:42/);
+  assert.match(result.stdout, /exit code: -1 \(0xFFFFFFFF\)/);
+  assert.match(result.stdout, /does not identify the failing statement/);
+  assert.match(result.stdout, /\nlayer-line-51\r?\n/);
+  assert.doesNotMatch(result.stdout, /\nlayer-line-50\r?\n/);
+});
+
+for (const exitCode of [0, -1, null]) {
+  test(`Windows prep runner records ${exitCode ?? "missing"} process exit without false success`, async (t) => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "crabbox-prep-runner-test-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const text = await readFile(script, "utf8");
+    const runner = text.match(/\n@'\n([\s\S]*?)\n'@ \| Set-Content -Path \$runner/)[1];
+    const fixture = path.join(dir, "runner.ps1");
+    await writeFile(fixture, `
+function powershell { Write-Output 'fixture child log'; $global:LASTEXITCODE = ${exitCode === null ? "$null" : exitCode} }
+${runner.replace("$dir = 'C:\\ProgramData\\crabbox'", `$dir = '${dir.replaceAll("'", "''")}'`)}
+`);
+    const env = Object.fromEntries(Object.entries(process.env).filter(
+      ([name]) => process.platform !== "win32" || name.toLowerCase() !== "psmodulepath",
+    ));
+    const result = spawnSync(process.platform === "win32" ? "powershell.exe" : "pwsh", [
+      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", fixture,
+    ], { encoding: "utf8", timeout: 30000, env });
+    if (result.error?.code === "ENOENT") return t.skip("PowerShell is not installed");
+    const recorded = (await readFile(path.join(dir, "image-prep.exit"), "utf8")).trim();
+    assert.equal(recorded, String(exitCode ?? 1), result.stdout + result.stderr);
+    await readFile(path.join(dir, exitCode === 0 ? "image-prep.done" : "image-prep.failed"));
+    await assert.rejects(readFile(path.join(dir, exitCode === 0 ? "image-prep.failed" : "image-prep.done")));
+    if (exitCode === null) assert.match(await readFile(path.join(dir, "image-prep.error"), "utf8"), /did not return an exit code/);
+  });
+}
+
 async function setupFakeCrabbox() {
   const dir = await mkdtemp(path.join(os.tmpdir(), "crabbox-aws-image-mint-test-"));
   const log = path.join(dir, "fake.log");
@@ -161,6 +216,10 @@ case "$1" in
       exit 0
     fi
     if [[ "$*" == *"image-prep.done"* ]]; then
+      if [[ "\${CRABBOX_FAKE_WINDOWS_PREP_FAIL:-0}" == "1" ]]; then
+        printf 'crabbox-prep-failed\\nexit code: -1 (0xFFFFFFFF)\\n'
+        exit 0
+      fi
       printf 'crabbox-prep-done\\n0\\n'
       exit 0
     fi
@@ -194,6 +253,10 @@ case "$1" in
     fi
     ;;
   stop)
+    if [[ "\${CRABBOX_FAKE_STOP_PENDING:-0}" == "1" ]]; then
+      printf 'coordinator accepted release for %s, but remote cleanup observation was canceled; local claim and SSH artifacts were preserved; context deadline exceeded\\n' "\${*: -1}" >&2
+      exit 5
+    fi
     if [[ "\${CRABBOX_FAKE_STOP_FAIL_LEASE:-}" == "\${*: -1}" ]]; then
       printf 'stop failed for %s\\n' "\${*: -1}" >&2
       exit 27
@@ -232,6 +295,39 @@ function runScript(args, env, scriptPath = script, onOutput) {
     child.on("close", (code) => resolve({ code, stdout, stderr }));
   });
 }
+
+test("Windows failure cleanup preserves the prep failure and reports accepted but unconfirmed release", async (t) => {
+  const fake = await setupFakeCrabbox();
+  t.after(() => rm(fake.dir, { recursive: true, force: true }));
+  const result = await runScript(["--target", "windows", "--run", "--prep-script", fake.windowsPrep], {
+    CRABBOX_BIN: fake.fake, CRABBOX_FAKE_LOG: fake.log, CRABBOX_IMAGE_LOG_DIR: fake.dir,
+    CRABBOX_IMAGE_WINDOWS_WARMUP_SETTLE_SECONDS: "0", CRABBOX_IMAGE_REBOOT_READY_SETTLE_SECONDS: "0",
+    CRABBOX_FAKE_WINDOWS_PREP_FAIL: "1", CRABBOX_FAKE_STOP_PENDING: "1",
+  });
+  assert.equal(result.code, 1, result.stderr);
+  assert.match(result.stderr, /Windows failure cleanup: release accepted for cbx_source; cleanup remains unconfirmed/);
+  assert.match(result.stderr, /preserving original mint failure/);
+  assert.match(result.stderr, /crabbox status --provider aws --id cbx_source --json/);
+  assert.match(result.stderr, /crabbox stop --provider aws --target windows cbx_source/);
+  const log = await readFile(fake.log, "utf8");
+  assert.equal((log.match(/args stop /g) ?? []).length, 1);
+  assert.doesNotMatch(log, /checkpoint create|image promote/);
+  const handles = (await readdir(fake.dir)).filter((name) => name.startsWith(".image-mint-"));
+  assert.equal(handles.length, 1);
+  assert.equal(await readFile(path.join(fake.dir, handles[0], "source.lease"), "utf8"), "cbx_source\n");
+});
+
+test("Windows mint cannot pass with unconfirmed release after successful prep", async (t) => {
+  const fake = await setupFakeCrabbox();
+  t.after(() => rm(fake.dir, { recursive: true, force: true }));
+  const result = await runScript(["--target", "windows", "--run", "--prep-script", fake.windowsPrep], {
+    CRABBOX_BIN: fake.fake, CRABBOX_FAKE_LOG: fake.log, CRABBOX_IMAGE_LOG_DIR: fake.dir,
+    CRABBOX_IMAGE_WINDOWS_WARMUP_SETTLE_SECONDS: "0", CRABBOX_IMAGE_REBOOT_READY_SETTLE_SECONDS: "0",
+    CRABBOX_FAKE_STOP_PENDING: "1",
+  });
+  assert.equal(result.code, 5, result.stderr);
+  assert.doesNotMatch(await readFile(fake.log, "utf8"), /image promote/);
+});
 
 async function runtimePnpmFixture(t, options = {}) {
   const fake = await setupFakeCrabbox();

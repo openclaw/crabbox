@@ -1,5 +1,19 @@
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+# Native failures are checked explicitly so Windows PowerShell and PowerShell 7 agree.
+$PSNativeCommandUseErrorActionPreference = $false
+$PrepStepFile = "C:\ProgramData\crabbox\image-prep.step"
+$PrepErrorFile = "C:\ProgramData\crabbox\image-prep.error"
+trap {
+  $failure = $_
+  $details = @($failure.Exception.Message, $failure.InvocationInfo.PositionMessage, $failure.ScriptStackTrace) -join "`n"
+  Set-Content -LiteralPath $PrepErrorFile -Value $details -ErrorAction Continue
+  Write-Host "windows-tools: prep failed: $details"
+  exit 1
+}
+New-Item -ItemType Directory -Force -Path (Split-Path $PrepStepFile) | Out-Null
+Remove-Item -LiteralPath $PrepErrorFile -Force -ErrorAction SilentlyContinue
+Set-Content -LiteralPath $PrepStepFile -Value "validating prep configuration"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $DefaultNodeVersion = "24.19.0"
@@ -61,16 +75,24 @@ function Write-Log {
 }
 
 function Retry {
-  param([scriptblock]$ScriptBlock)
-  for ($i = 1; $i -le 8; $i++) {
+  param([scriptblock]$ScriptBlock, [string]$Step = "network download")
+  for ($i = 1; $i -le 4; $i++) {
     try {
       & $ScriptBlock
       return
     } catch {
-      if ($i -eq 8) { throw }
-      Start-Sleep -Seconds ($i * 5)
+      if ($i -eq 4) { throw "$Step failed after 4 attempts: $($_.Exception.Message)" }
+      $delay = [Math]::Min(120, 30 * [Math]::Pow(2, $i - 1))
+      Write-Log "$Step attempt $i/4 failed: $($_.Exception.Message); retrying in $delay seconds"
+      Start-Sleep -Seconds $delay
     }
   }
+}
+
+function Set-PrepStep {
+  param([string]$Step)
+  Set-Content -LiteralPath $PrepStepFile -Value $Step
+  Write-Log "step: $Step"
 }
 
 function Add-MachinePath {
@@ -162,7 +184,11 @@ function Install-Chocolatey {
 
 function Install-ChocoPackage {
   param([string[]]$Packages)
-  Retry { choco install -y --no-progress @Packages }
+  Retry -Step "Chocolatey package installation" {
+    & choco install -y --no-progress @Packages
+    # Chocolatey's enhanced exit codes include successful reboot requests.
+    if ($LASTEXITCODE -notin @(0, 1641, 3010)) { throw "choco install failed with exit code $LASTEXITCODE" }
+  }
 }
 
 function Install-Node {
@@ -190,7 +216,11 @@ function Install-Node {
 function Enable-CorepackPnpm {
   Write-Log "activating pnpm $PnpmVersion"
   & corepack enable
-  & corepack prepare "pnpm@$PnpmVersion" --activate
+  if ($LASTEXITCODE -ne 0) { throw "corepack enable failed with exit code $LASTEXITCODE" }
+  Retry -Step "prepare pnpm@$PnpmVersion" {
+    & corepack prepare "pnpm@$PnpmVersion" --activate
+    if ($LASTEXITCODE -ne 0) { throw "corepack prepare pnpm@$PnpmVersion failed with exit code $LASTEXITCODE" }
+  }
 }
 
 function Resolve-TruffleHogAsset {
@@ -301,6 +331,7 @@ function Install-StaticDockerEngine {
 
 function Install-DockerEngine {
   if ($InstallDocker -ne "1") { return }
+  Set-PrepStep "installing Windows container support and Docker Engine"
   Write-Log "installing Windows container support and Docker Engine"
   $restartRequired = $false
   $feature = Get-WindowsFeature -Name Containers -ErrorAction SilentlyContinue
@@ -336,10 +367,13 @@ function Install-DockerEngine {
   }
   foreach ($image in ($DockerImages -split "\s+")) {
     if (-not $image) { continue }
-    try {
-      Retry { & docker pull $image }
-    } catch {
-      Write-Log "docker pull failed for $image; continuing"
+    Retry -Step "prepare Docker image $image" {
+      Set-PrepStep "docker pull $image"
+      & docker pull $image
+      if ($LASTEXITCODE -ne 0) { throw "docker pull $image failed with exit code $LASTEXITCODE" }
+      Set-PrepStep "docker image inspect $image"
+      & docker image inspect $image | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw "docker image inspect $image failed with exit code $LASTEXITCODE" }
     }
   }
 }
@@ -389,7 +423,9 @@ function Reset-EC2LaunchForImage {
   Remove-Item -Force "C:\ProgramData\crabbox\setup-complete" -ErrorAction SilentlyContinue
 }
 
+Set-PrepStep "installing Chocolatey"
 Install-Chocolatey
+Set-PrepStep "installing Chocolatey tool packages"
 Install-ChocoPackage @(
   "git",
   "git-lfs",
@@ -406,22 +442,29 @@ Install-ChocoPackage @(
   "vcredist-all"
 )
 Refresh-SessionPath
+Set-PrepStep "installing Node $NodeVersion"
 Install-Node
 Refresh-SessionPath
+Set-PrepStep "activating pnpm $PnpmVersion"
 Enable-CorepackPnpm
+Set-PrepStep "installing TruffleHog $TruffleHogVersion"
 Install-TruffleHog
 Install-DockerEngine
+Set-PrepStep "preparing caches and machine defaults"
 Prepare-Caches
 Disable-FirstBootNoise
 Refresh-SessionPath
 
 if (Test-Path $RebootMarker) {
+  Set-PrepStep "waiting for reboot before final verification"
   Write-Log "reboot required before final verification"
   exit 0
 }
 
+Set-PrepStep "resetting EC2Launch for image boot"
 Reset-EC2LaunchForImage
 
+Set-PrepStep "verifying tool versions"
 Write-Log "versions"
 Get-ComputerInfo | Select-Object OsName, OsVersion, OsBuildNumber | Format-List
 git --version
@@ -439,4 +482,5 @@ if (Get-Command docker.exe -ErrorAction SilentlyContinue) {
   docker --version
 }
 
+Set-PrepStep "complete"
 Write-Log "complete"
