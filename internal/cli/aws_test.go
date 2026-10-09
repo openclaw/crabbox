@@ -870,6 +870,16 @@ func TestAWSCapacityDoctorUsesInstanceMetadata(t *testing.T) {
 				if check.Status != tc.wantStatus || check.Details["default_needed_vcpus"] != tc.wantNeeded {
 					t.Errorf("check=%+v, want %s with needed=%s", check, tc.wantStatus, tc.wantNeeded)
 				}
+				if tc.wantStatus == "ok" {
+					for key, want := range map[string]string{
+						"capacity": "unknown", "quota_limit": "sufficient", "usage": "unchecked",
+						"hint": "check_regional_quota_usage",
+					} {
+						if check.Details[key] != want || !strings.Contains(check.Message, key+"="+want) {
+							t.Errorf("check=%+v, want %s=%s in text and details", check, key, want)
+						}
+					}
+				}
 				if check.Details["recommended_type"] != "" {
 					t.Errorf("recommended an undescribed type: %+v", check)
 				}
@@ -990,23 +1000,6 @@ func TestAWSCapacityDoctorCheckRecommendsTinyClassForTwoVCPUQuota(t *testing.T) 
 	}
 	if check.Details["recommended_class"] != "tiny" || check.Details["recommended_type"] != "m7a.large" {
 		t.Fatalf("recommendation=(%q,%q), want tiny/m7a.large", check.Details["recommended_class"], check.Details["recommended_type"])
-	}
-}
-
-func TestAWSCapacityDoctorCheckPassesWhenQuotaCoversDefaultClass(t *testing.T) {
-	cfg := defaultConfig()
-	cfg.Provider = "aws"
-	cfg.TargetOS = targetLinux
-	cfg.Class = "beast"
-	cfg.ServerType = serverTypeForConfig(cfg)
-
-	check := awsCapacityDoctorCheckForQuota(cfg, "spot", 256, true, nil, map[string]int{cfg.ServerType: 192})
-
-	if check.Status != "ok" {
-		t.Fatalf("status=%q, want ok", check.Status)
-	}
-	if check.Details["hint"] != "quota_satisfies_default_class" {
-		t.Fatalf("hint=%q", check.Details["hint"])
 	}
 }
 

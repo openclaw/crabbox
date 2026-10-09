@@ -134,7 +134,7 @@ crabbox usage --scope org --org example-org
 - `crabbox doctor --provider azure` reports `missing=AZURE_TENANT_ID,...`;
 - the class falls back from a dedicated machine to a smaller one;
 - an AWS Spot request cannot be fulfilled;
-- AWS reports `VcpuLimitExceeded` for large On-Demand instances;
+- AWS reports `VcpuLimitExceeded` for an On-Demand instance;
 - server creation fails before SSH is reachable.
 
 **Checks**
@@ -165,6 +165,13 @@ CRABBOX_CAPACITY_REGIONS=eu-west-1,eu-west-2,eu-central-1,us-east-1,us-west-2 \
 - Raise the AWS `Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances`
   quota for the C/M/R/T/Z families, or the matching Spot quota when using Spot.
 - Raise the Hetzner dedicated-core quota when dedicated classes are required.
+
+For `VcpuLimitExceeded`, check account-wide usage in the reported region and
+quota bucket. `doctor` compares the VM size with the quota ceiling and leaves
+usage unchecked, even when that comparison reports `ok`. An owner's Crabbox
+lease count does not measure the shared AWS quota. Ask resource owners to
+release unused capacity or request a quota increase. A smaller type helps only
+if enough quota remains; C, M, and R families share the Standard quota bucket.
 
 Brokered AWS launches record provisioning attempts and use AWS Service Quotas
 when available, reporting the quota code, applied vCPU limit, requested type, and

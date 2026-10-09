@@ -29505,7 +29505,7 @@ describe("fleet lease identity and idle", () => {
     ).toEqual(["198.51.100.20/32"]);
   });
 
-  it.each(["InsufficientInstanceCapacity", "Unsupported"])(
+  it.each(["InsufficientInstanceCapacity", "Unsupported", "VcpuLimitExceeded"])(
     "preserves definite exact-type AWS rejection on token-bound replay (%s)",
     async (code) => {
       const fixture = awsIngressTestFleet(async (action) => {
@@ -29523,7 +29523,7 @@ describe("fleet lease identity and idle", () => {
       expect(body).toEqual({
         error: "provisioning_failed",
         message: expect.stringContaining(
-          "requested exact AWS instance type t3.small failed; remove --type",
+          "requested exact AWS instance type t3.small failed; remove --type to allow class fallback (regional quota limits still apply)",
         ),
       });
       expect(fixture.storage.value<LeaseRecord>(`lease:${fixture.creatingID}`)).toMatchObject({

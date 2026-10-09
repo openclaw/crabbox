@@ -4,6 +4,7 @@
 
 ### Fixes
 
+- AWS: stop reporting available capacity from quota ceilings alone; mark regional usage unchecked and clarify that class fallback still requires quota headroom.
 - Azure: refuse retained network-companion cleanup when provider-key or fixed-attempt tags conflict with the original claim, even when immutable resource IDs still match.
 
 ### Added

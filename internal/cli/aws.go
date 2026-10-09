@@ -655,7 +655,7 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 		}
 	}
 	if cfg.ServerTypeExplicit {
-		return Server{}, cfg, fmt.Errorf("requested exact AWS instance type %s failed; remove --type to allow class fallback: %w", cfg.ServerType, joinErrors(errs))
+		return Server{}, cfg, fmt.Errorf("requested exact AWS instance type %s failed; remove --type to allow class fallback (regional quota limits still apply): %w", cfg.ServerType, joinErrors(errs))
 	}
 	return Server{}, cfg, joinErrors(errs)
 }
@@ -1732,11 +1732,14 @@ func awsCapacityDoctorCheckForQuota(cfg Config, market string, quotaValue float6
 			Details: base,
 		}
 	}
-	base["hint"] = "quota_satisfies_default_class"
+	base["capacity"] = "unknown"
+	base["quota_limit"] = "sufficient"
+	base["usage"] = "unchecked"
+	base["hint"] = "check_regional_quota_usage"
 	return DoctorCheck{
 		Status:  "ok",
 		Check:   "capacity",
-		Message: awsDoctorMessage("provider=aws capacity=ready", base),
+		Message: awsDoctorMessage("provider=aws", base),
 		Details: base,
 	}
 }

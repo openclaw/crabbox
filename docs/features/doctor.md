@@ -125,7 +125,9 @@ may attach additional non-mutating checks; AWS broker readiness can include EC2
 vCPU quota checks via Service Quotas. Low quotas emit advisory `warning capacity`
 lines (quota code, applied limit, default type, required vCPUs, recommended
 class/type); if quotas cannot be inspected the capacity check is skipped rather
-than warning about unproven pressure. When the coordinator path runs, doctor
+than warning about unproven pressure. A sufficient quota ceiling reports `ok`
+with `capacity=unknown quota_limit=sufficient usage=unchecked`: regional usage
+and available headroom remain unverified. When the coordinator path runs, doctor
 returns immediately after the SSH-key check — it does not also run the direct
 provider check.
 

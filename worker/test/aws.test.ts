@@ -487,7 +487,7 @@ describe("aws provider", () => {
     },
   );
 
-  it("uses described vCPUs for readiness and omits candidates whose cost is unknown", async () => {
+  it("uses described vCPUs without claiming available capacity", async () => {
     const { client, config, metadataReads } = awsMarketFallbackHarness(
       "",
       "on-demand",
@@ -506,7 +506,17 @@ describe("aws provider", () => {
     expect(warning).toMatchObject({ status: "warning", details: { default_needed_vcpus: "192" } });
     expect(warning?.details).not.toHaveProperty("recommended_type");
     quota = 192;
-    expect(await client.capacityReadinessChecks(config)).toMatchObject([{ status: "ok" }]);
+    const [check] = await client.capacityReadinessChecks(config);
+    const details = {
+      capacity: "unknown",
+      quota_limit: "sufficient",
+      usage: "unchecked",
+      hint: "check_regional_quota_usage",
+    };
+    expect(check).toMatchObject({ status: "ok", details });
+    for (const [key, value] of Object.entries(details)) {
+      expect(check?.message).toContain(`${key}=${value}`);
+    }
     expect(metadataReads).toHaveLength(2);
   });
 

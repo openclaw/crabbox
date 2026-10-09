@@ -602,6 +602,10 @@ In brokered mode you can promote and warm AMIs:
   These checks cover Standard-instance quotas (A, C, D, H, I, M, R, T, and Z
   families). Types using separate buckets, such as GPU and HPC instances, report
   `unsupported_instance_quota` and leave launch quota enforcement to EC2.
+  A sufficient quota ceiling reports `capacity=unknown` and
+  `quota_limit=sufficient usage=unchecked`. Doctor does not measure account-wide
+  usage or available regional headroom. See
+  [quota troubleshooting](../troubleshooting.md#provider-not-configured-or-capacity-quota-fails).
 - `beast` starts at 48xlarge candidates and can consume up to 192 vCPUs per
   request. Under capacity pressure, prefer `standard` or `fast` plus several
   `CRABBOX_CAPACITY_REGIONS`.

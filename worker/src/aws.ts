@@ -1641,7 +1641,7 @@ export class EC2SpotClient {
       }
       if (config.serverTypeExplicit) {
         throw history.error(
-          `requested exact AWS instance type ${config.serverType} failed; remove --type to allow class fallback: `,
+          `requested exact AWS instance type ${config.serverType} failed; remove --type to allow class fallback (regional quota limits still apply): `,
         );
       }
       throw history.error();
@@ -4483,11 +4483,14 @@ export function awsCapacityReadinessCheckForQuota(
       details,
     };
   }
-  details["hint"] = "quota_satisfies_default_class";
+  details["capacity"] = "unknown";
+  details["quota_limit"] = "sufficient";
+  details["usage"] = "unchecked";
+  details["hint"] = "check_regional_quota_usage";
   return {
     status: "ok",
     check: "capacity",
-    message: awsCapacityReadinessMessage("provider=aws capacity=ready", details),
+    message: awsCapacityReadinessMessage("provider=aws", details),
     details,
   };
 }

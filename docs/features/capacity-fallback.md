@@ -162,8 +162,9 @@ capacity:
 
 When `hints` is enabled (the shipped default), the broker checks the applied
 Spot or On-Demand vCPU quota for each candidate type before launching it.
-Candidates that exceed the quota are recorded as a quota attempt and skipped, so
-the chain spends launch attempts only on types the account can actually run.
+Candidates that exceed the quota are recorded as a quota attempt and skipped.
+Types that fit the quota ceiling still need enough unused regional quota; the
+preflight does not measure existing usage or Capacity Reservations.
 Brokered failures also emit advisory `CapacityHint` records (for example, when a
 large class is under capacity pressure) alongside `provisioningAttempts`.
 
@@ -180,7 +181,10 @@ crabbox doctor --provider aws
 ```
 
 It reports the applied EC2 vCPU quota for the relevant market(s) and warns when
-the default class needs more vCPUs than the account is allowed.
+the default class needs more vCPUs than the account is allowed. A sufficient
+ceiling reports `capacity=unknown quota_limit=sufficient usage=unchecked`.
+Removing an exact `--type` enables class fallback but does not free quota; a
+smaller type helps only when enough quota remains for it.
 
 ## Region And Availability Zone Routing
 
