@@ -1241,7 +1241,7 @@ func TestProvidersRecommendFanoutTestingRequiresForkableWorkspaces(t *testing.T)
 	if len(recommendations) == 0 {
 		t.Fatal("expected fanout-testing recommendations")
 	}
-	if recommendations[0].Provider != "parallels" {
+	if recommendations[0].Provider != "hyperv" {
 		t.Fatalf("top fanout-testing provider=%q recommendations=%v", recommendations[0].Provider, recommendations)
 	}
 	foundLocalContainer := false
@@ -1524,7 +1524,7 @@ func TestProvidersRecommendVersionedWorkspace(t *testing.T) {
 	if len(recommendations) == 0 {
 		t.Fatal("expected versioned-workspace recommendations")
 	}
-	if recommendations[0].Provider != "parallels" {
+	if recommendations[0].Provider != "hyperv" {
 		t.Fatalf("top versioned-workspace provider=%q recommendations=%v", recommendations[0].Provider, recommendations)
 	}
 	for _, capability := range []string{"checkpoint", "fork", "restore", "snapshot-ref"} {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,6 +117,24 @@ func runScriptedSSHWindowsHelper(behavior scriptedSSHBehavior) int {
 	if behavior.DecodePayload {
 		decoded = strings.Join(decodeScriptedSSHPayloads(command), "\n")
 		match = command + "\n" + decoded
+	}
+	if behavior.ProbeURL != "" {
+		probe := command
+		payloads := decodeScriptedSSHPayloads(command)
+		if len(payloads) != 0 {
+			probe = payloads[len(payloads)-1]
+		}
+		if strings.TrimSpace(probe) == "exit 0" {
+			client := &http.Client{Timeout: 10 * time.Second}
+			response, err := client.Get(behavior.ProbeURL)
+			if err != nil {
+				return writeScriptedSSHResult("", err.Error(), 2)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusNoContent {
+				return writeScriptedSSHResult("", "probe barrier failed", 2)
+			}
+		}
 	}
 	if logPath := os.Getenv("CRABBOX_FAKE_SSH_LOG"); logPath != "" {
 		entry := command + "\n---\n"

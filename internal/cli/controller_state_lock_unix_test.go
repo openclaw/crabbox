@@ -34,6 +34,9 @@ func TestControllerStateLockRejectsSymlinkWithoutChangingTarget(t *testing.T) {
 	if err := os.WriteFile(target, []byte("do not touch\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(target, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink(target, filepath.Join(dir, "controller.json.lock")); err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +59,9 @@ func TestControllerStateLockRejectsBroadExistingFileWithoutChmod(t *testing.T) {
 	}
 	lockPath := filepath.Join(dir, "controller.json.lock")
 	if err := os.WriteFile(lockPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(lockPath, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, err := acquireControllerStateLock(filepath.Join(dir, "controller.json"))

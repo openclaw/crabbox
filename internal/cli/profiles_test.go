@@ -2052,6 +2052,7 @@ func TestRunCommandPresetProofArtifactE2E(t *testing.T) {
 	binDir := installWorkspaceOwnerScriptedSSH(t, dir, scriptedSSHBehavior{
 		MatchStdin: true,
 		Rules: []scriptedSSHRule{
+			{Contains: "MARKER_PRESENT=1"},
 			{Contains: "base64 <", Stdout: encodedRunDownloadPayload(int64(len(downloadedArtifacts)), downloadedArtifacts)},
 			{Contains: "base64 -d >", Stdout: "ok      node             v22.1.0\nok      pnpm             9.0.0\nok      docker-compose   Docker Compose version v2.27.0\n"},
 			{Contains: "artifacts.tgz", Stdout: "warning: no artifact matches\n"},

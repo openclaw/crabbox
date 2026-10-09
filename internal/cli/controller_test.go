@@ -278,6 +278,9 @@ func TestReadControllerTokenRequiresPrivateRegularFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("secret-token\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := readAdapterToken(path); err == nil {
 		t.Fatal("expected broad token permissions to be rejected")
 	}

@@ -136,8 +136,14 @@ exec /bin/bash -c "$last"
 	if err := os.Mkdir(source, 0o750); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(source, 0o750); err != nil {
+		t.Fatal(err)
+	}
 	mtime := time.Unix(1_725_000_123, 0)
 	if err := os.WriteFile(filepath.Join(source, "proof.txt"), []byte("archive-proof"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(source, "proof.txt"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chtimes(filepath.Join(source, "proof.txt"), mtime, mtime); err != nil {

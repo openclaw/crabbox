@@ -114,7 +114,7 @@ func TestLoadConfigAppliesHyperVWindowsDefaults(t *testing.T) {
 	if cfg.TargetOS != targetWindows || cfg.WindowsMode != windowsModeNormal {
 		t.Fatalf("target=%q windowsMode=%q, want windows/normal", cfg.TargetOS, cfg.WindowsMode)
 	}
-	if cfg.SSHUser != cfg.HyperV.User || cfg.SSHPort != "22" || cfg.WorkRoot != cfg.HyperV.WorkRoot {
+	if cfg.SSHUser != cfg.HyperV.User || cfg.SSHPort != "22" || cfg.WorkRoot != `C:\crabbox` {
 		t.Fatalf("Hyper-V SSH defaults not applied: user=%q port=%q root=%q", cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot)
 	}
 }

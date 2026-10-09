@@ -122,6 +122,9 @@ fi
 esac
 `)
 	}
+	if behavior.ProbeURL != "" {
+		script.WriteString("if [ \"$current\" = 'exit 0' ]; then /usr/bin/curl --fail --silent --show-error --max-time 10 " + shellQuote(behavior.ProbeURL) + " >/dev/null || exit $?; fi\n")
+	}
 	for _, rule := range behavior.Rules {
 		if rule.Port != "" {
 			script.WriteString("if [ \"$port\" = " + shellQuote(rule.Port) + " ]; then\n")

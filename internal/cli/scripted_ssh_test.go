@@ -51,7 +51,8 @@ type scriptedSSHBehavior struct {
 	// MatchStdin includes the remote command's stdin in the text rules match.
 	MatchStdin bool `json:"matchStdin,omitempty"`
 	// RealSSH is the ssh client resolved for ConfigQueryPassthrough.
-	RealSSH string `json:"realSSH,omitempty"`
+	RealSSH  string `json:"realSSH,omitempty"`
+	ProbeURL string `json:"probeURL,omitempty"`
 }
 
 // resolveRealSSHExecutable finds an ssh client outside the fixture directory so

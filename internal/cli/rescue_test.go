@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -102,7 +103,7 @@ func TestRescueCommandsCarryResolvedStaticTargetFallback(t *testing.T) {
 }
 
 func TestRescueCommandsCarryExternalPrivateRouting(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "config with spaces"))
 	const leaseID = "cbx_abcdef123456"
 	stored := ExternalConfig{Command: "provider-command", WorkRoot: "/work/crabbox"}
 	stored.Connection.Desktop = ExternalDesktopConfig{Username: "screen-user", PasswordEnv: "SCREEN_SHARING_PASSWORD"}

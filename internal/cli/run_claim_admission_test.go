@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -99,6 +102,7 @@ func TestRunClaimAdmissionSelectsRecordedIdlePolicy(t *testing.T) {
 }
 
 func TestRunClaimAdmissionCoexistsWithHeartbeat(t *testing.T) {
+	t.Setenv("GORACE", strings.TrimSpace(os.Getenv("GORACE")+" atexit_sleep_ms=0"))
 	lease, _ := setupRunClaimSnapshotTest(t)
 	RemoveLeaseClaim(lease.LeaseID)
 	lease.LeaseID = "cbx_123456789abc"
@@ -107,23 +111,31 @@ func TestRunClaimAdmissionCoexistsWithHeartbeat(t *testing.T) {
 	lease.Server.Labels = cloneStringMap(lease.Server.Labels)
 	lease.Server.Labels["provider"] = provider.Spec().Name
 	lease.Server.Labels["lease"] = lease.LeaseID
+	lease.Server.Labels["tailscale"] = "true"
 	lease.Server.Labels["tailscale_ipv4"] = "127.0.0.1"
-	sshPath := filepath.Join(filepath.Dir(os.Getenv("CRABBOX_FAKE_SSH_LOG")), "ssh")
-	ssh, err := os.ReadFile(sshPath)
+	probeEntered, probeRelease := make(chan struct{}), make(chan struct{})
+	var enterProbe, releaseProbe sync.Once
+	probeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		enterProbe.Do(func() { close(probeEntered) })
+		select {
+		case <-probeRelease:
+			w.WriteHeader(http.StatusNoContent)
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(probeServer.Close)
+	t.Cleanup(func() { releaseProbe.Do(func() { close(probeRelease) }) })
+	_, port, err := net.SplitHostPort(probeServer.Listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	probeEntered, probeRelease := sshPath+".entered", sshPath+".release"
-	t.Setenv("CRABBOX_ADMISSION_PROBE_ENTERED", probeEntered)
-	t.Setenv("CRABBOX_ADMISSION_PROBE_RELEASE", probeRelease)
-	ssh = bytes.Replace(ssh, []byte("decoded=\"\""), []byte(`if [ "$cmd" = 'exit 0' ]; then
- : > "$CRABBOX_ADMISSION_PROBE_ENTERED"
- while [ ! -f "$CRABBOX_ADMISSION_PROBE_RELEASE" ]; do /bin/sleep 0.01; done
-fi
-decoded=""`), 1)
-	if err := os.WriteFile(sshPath, ssh, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	lease.SSH.Port = port
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", port)
+	binDir := installWorkspaceOwnerScriptedSSH(t, filepath.Dir(os.Getenv("CRABBOX_FAKE_SSH_LOG")), scriptedSSHBehavior{
+		ProbeURL: probeServer.URL,
+		Rules:    []scriptedSSHRule{{Contains: "/var/lib/crabbox/tailscale-ipv4", Stdout: "127.0.0.1\n"}},
+	})
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	repo, err := findRepo()
 	if err != nil {
 		t.Fatal(err)
@@ -156,7 +168,7 @@ decoded=""`), 1)
 		cancel()
 		release.Do(func() { close(b.release) })
 		releaseHeartbeat.Do(func() { close(heartbeatGate) })
-		_ = os.WriteFile(probeRelease, nil, 0o600)
+		releaseProbe.Do(func() { close(probeRelease) })
 		if !runJoined {
 			<-runDone
 		}
@@ -167,7 +179,7 @@ decoded=""`), 1)
 	var stdout, stderr bytes.Buffer
 	go func() {
 		runDone <- (App{Stdout: &stdout, Stderr: &stderr}).runCommand(ctx, []string{
-			"--provider", provider.Spec().Name, "--id", lease.LeaseID, "--keep", "--no-sync", "--no-hydrate", "--", "claim-admission-sentinel",
+			"--provider", provider.Spec().Name, "--id", lease.LeaseID, "--network", "tailscale", "--keep", "--no-sync", "--no-hydrate", "--", "claim-admission-sentinel",
 		})
 	}()
 	select {
@@ -199,15 +211,19 @@ decoded=""`), 1)
 	// The repaired admission owns this same mutex from the original claim read.
 	waitClaimWriter(t, claimPath)
 	release.Do(func() { close(b.release) })
-	for {
-		if _, err := os.Stat(probeEntered); err == nil {
-			break
+	select {
+	case <-probeEntered:
+	case err := <-runDone:
+		runJoined = true
+		t.Fatalf("run stopped before network probe: %v; stderr=%s", err, stderr.String())
+	case <-ctx.Done():
+		log, err := os.ReadFile(os.Getenv("CRABBOX_FAKE_SSH_LOG"))
+		if err != nil {
+			t.Logf("read network probe SSH log: %v", err)
+		} else {
+			t.Logf("network probe SSH log: %s", log)
 		}
-		select {
-		case <-ctx.Done():
-			t.Fatal("network probe did not start")
-		case <-time.After(time.Millisecond):
-		}
+		t.Fatal("network probe did not start")
 	}
 	// Network selection runs after the old resolver captured its claim. An
 	// admitted heartbeat now publishes before the old registration CAS.
@@ -219,9 +235,7 @@ decoded=""`), 1)
 		heartbeatJoined = true
 	default: // The new run admission already owns the lock.
 	}
-	if err := os.WriteFile(probeRelease, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	releaseProbe.Do(func() { close(probeRelease) })
 	runErr := <-runDone
 	runJoined = true
 	if !heartbeatJoined {
