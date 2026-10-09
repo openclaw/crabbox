@@ -33,6 +33,8 @@ func TestRuntimeOnlyProviderDiagnosticSecrets(t *testing.T) {
 		"SUPERSERVE_API_KEY":           "superserve-fallback-secret",
 		"CRABBOX_CROWNEST_API_KEY":     "crownest-primary-secret",
 		"CROWNEST_API_KEY":             "crownest-fallback-secret",
+		"CRABBOX_NEEVCLOUD_API_KEY":    "neevcloud-primary-secret",
+		"NEEV_API_KEY":                 "neevcloud-fallback-secret",
 		"CRABBOX_WANDB_API_KEY":        "wandb-primary-secret",
 		"WANDB_API_KEY":                "wandb-fallback-secret",
 		"EXTERNAL_DESKTOP_PASSWORD":    "external-desktop-secret",
@@ -50,6 +52,7 @@ func TestRuntimeOnlyProviderDiagnosticSecrets(t *testing.T) {
 		{"opensandbox", []string{environment["CRABBOX_OPENSANDBOX_API_KEY"], environment["OPEN_SANDBOX_API_KEY"]}},
 		{"superserve", []string{environment["CRABBOX_SUPERSERVE_API_KEY"], environment["SUPERSERVE_API_KEY"]}},
 		{"crownest", []string{environment["CRABBOX_CROWNEST_API_KEY"], environment["CROWNEST_API_KEY"]}},
+		{"neevcloud", []string{environment["CRABBOX_NEEVCLOUD_API_KEY"], environment["NEEV_API_KEY"]}},
 		{"wandb", []string{environment["CRABBOX_WANDB_API_KEY"], "wandb-config-secret", environment["WANDB_API_KEY"], "wandb-netrc-secret"}},
 		{"external", []string{environment["EXTERNAL_DESKTOP_PASSWORD"]}},
 	}

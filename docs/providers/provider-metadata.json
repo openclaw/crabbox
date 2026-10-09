@@ -758,6 +758,21 @@
     "auth": "Nebius CLI auth and project/subnet config; direct remote cloud provider; secrets stay in CLI store",
     "docs": "nebius.md"
   },
+  "neevcloud": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "NeevCloud hosted sandbox",
+    "location": "provider-managed",
+    "ssh": "no",
+    "sync": "archive-sync",
+    "gpu": "unknown",
+    "lifecycle": "NeevCloud",
+    "cleanup": "sandbox delete",
+    "bestFit": "Hosted isolated Linux sandbox",
+    "caveat": "Requires an organization and project; exec capped at one hour",
+    "auth": "API key via CRABBOX_NEEVCLOUD_API_KEY or NEEV_API_KEY; delegated remote sandbox auth",
+    "docs": "neevcloud.md"
+  },
   "nomad": {
     "status": "built-in",
     "category": "delegated-sandbox",

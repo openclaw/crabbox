@@ -10,7 +10,7 @@ import (
 )
 
 var dedupD4Providers = []string{
-	"anthropic-sandbox-runtime", "azure-dynamic-sessions", "blaxel", "cloudflare", "cloudflare-sandbox", "cloud-run-sandbox", "codesandbox", "crownest", "cua", "docker-sandbox", "exe-dev", "fastapi-cloud", "hyperv", "lume", "modal", "mxc", "namespace-instance", "nebius", "nomad", "opencomputer", "opensandbox", "orgo", "railway", "runpod", "smolvm", "superserve", "tensorlake", "unikraft-cloud", "upstash-box", "vercel-sandbox", "wandb",
+	"anthropic-sandbox-runtime", "azure-dynamic-sessions", "blaxel", "cloudflare", "cloudflare-sandbox", "cloud-run-sandbox", "codesandbox", "crownest", "cua", "docker-sandbox", "exe-dev", "fastapi-cloud", "hyperv", "lume", "modal", "mxc", "namespace-instance", "nebius", "neevcloud", "nomad", "opencomputer", "opensandbox", "orgo", "railway", "runpod", "smolvm", "superserve", "tensorlake", "unikraft-cloud", "upstash-box", "vercel-sandbox", "wandb",
 }
 
 func dedupD4FlagField(t *testing.T, cfg *core.Config, name string) reflect.Value {

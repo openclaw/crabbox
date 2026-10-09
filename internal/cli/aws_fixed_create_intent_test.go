@@ -215,7 +215,7 @@ func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 		Phala Boxd Coder Morph Daytona E2B CubeSandbox ExeDev Railway FastAPICloud UnikraftCloud
 		Runpod Vast NvidiaBrev Hostinger Wandb Orgo Islo Freestyle Tenki Tensorlake Cua
 		OpenComputer CodeSandbox OpenSandbox Nomad Blaxel VercelSandbox CloudflareSandbox
-		Superserve Crownest DockerSandbox AnthropicSRT CloudRunSandbox Modal UpstashBox
+		Superserve Neevcloud Crownest DockerSandbox AnthropicSRT CloudRunSandbox Modal UpstashBox
 		Smolvm AsciiBox Cloudflare CloudflareDynamicWorkers Semaphore Sprites LocalContainer
 		AppleContainer AppleVM MXC Multipass Machine0 Tart Lume HyperV WindowsSandbox Static
 	`)

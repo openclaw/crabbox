@@ -55,6 +55,7 @@ var benchmarkProviderCategories = map[string]string{
 	"namespace-devbox":           "direct-cloud",
 	"namespace-instance":         "direct-cloud",
 	"nebius":                     "direct-cloud",
+	"neevcloud":                  "delegated-sandbox",
 	"nomad":                      "delegated-sandbox",
 	"nvidia-brev":                "gpu-cloud",
 	"opencomputer":               "delegated-sandbox",

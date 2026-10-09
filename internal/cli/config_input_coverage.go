@@ -56,6 +56,7 @@ var canonicalConfigInputOwners = [...]configInputOwner{
 	"namespace-devbox",
 	"namespace-instance",
 	"nebius",
+	"neevcloud",
 	"nomad",
 	"nvidia-brev",
 	"opencomputer",

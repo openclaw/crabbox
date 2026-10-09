@@ -269,6 +269,7 @@ Catalog category: `delegated-sandbox`.
 | [freestyle](docs/providers/freestyle.md) | Hosted delegated Linux VM execution. |
 | [islo](docs/providers/islo.md) | Hosted execution with keep/pause and a provider-owned SSH helper. |
 | [modal](docs/providers/modal.md) | Hosted Python or GPU-oriented delegated workloads. |
+| [neevcloud](docs/providers/neevcloud.md) | Hosted isolated delegated Linux sandbox. |
 | [nomad](docs/providers/nomad.md) | Self-hosted delegated Linux execution on an existing Nomad cluster. |
 | [opencomputer](docs/providers/opencomputer.md) | Hosted delegated Linux VM execution. |
 | [opensandbox](docs/providers/opensandbox.md) | Hosted delegated sandbox through an open SDK. |

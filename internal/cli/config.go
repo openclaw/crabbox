@@ -191,6 +191,7 @@ type Config struct {
 	VercelSandbox                 VercelSandboxConfig
 	CloudflareSandbox             CloudflareSandboxConfig
 	Superserve                    SuperserveConfig
+	Neevcloud                     NeevcloudConfig
 	Crownest                      CrownestConfig
 	DockerSandbox                 DockerSandboxConfig
 	AnthropicSRT                  AnthropicSRTConfig
@@ -1623,6 +1624,7 @@ func baseConfig() Config {
 		VercelSandbox:     defaultVercelSandboxConfig(),
 		CloudflareSandbox: defaultCloudflareSandboxConfig(),
 		Superserve:        defaultSuperserveConfig(),
+		Neevcloud:         defaultNeevcloudConfig(),
 		Crownest:          defaultCrownestConfig(),
 		DockerSandbox:     defaultDockerSandboxConfig(),
 		AnthropicSRT:      defaultAnthropicSRTConfig(),
@@ -1761,6 +1763,7 @@ type fileConfig struct {
 	VercelSandbox            *fileVercelSandboxConfig            `yaml:"vercelSandbox,omitempty"`
 	CloudflareSandbox        *fileCloudflareSandboxConfig        `yaml:"cloudflareSandbox,omitempty"`
 	Superserve               *fileSuperserveConfig               `yaml:"superserve,omitempty"`
+	Neevcloud                *fileNeevcloudConfig                `yaml:"neevcloud,omitempty"`
 	Crownest                 *fileCrownestConfig                 `yaml:"crownest,omitempty"`
 	DockerSandbox            *fileDockerSandboxConfig            `yaml:"dockerSandbox,omitempty"`
 	AnthropicSRT             *fileAnthropicSRTConfig             `yaml:"anthropicSandboxRuntime,omitempty"`
@@ -3361,6 +3364,9 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	if err := applySuperserveFileConfig(cfg, file.Superserve, trusted, inputSource); err != nil {
 		return err
 	}
+	if err := applyNeevcloudFileConfig(cfg, file.Neevcloud, trusted, inputSource); err != nil {
+		return err
+	}
 	if err := applyCrownestFileConfig(cfg, file.Crownest, trusted, inputSource); err != nil {
 		return err
 	}
@@ -4612,6 +4618,9 @@ func applyEnv(cfg *Config) error {
 		}
 	}
 	if err := applySuperserveEnvironmentConfig(cfg); err != nil {
+		return err
+	}
+	if err := applyNeevcloudEnvironmentConfig(cfg); err != nil {
 		return err
 	}
 	{

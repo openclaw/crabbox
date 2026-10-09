@@ -74,8 +74,8 @@ func TestProductionProviderClassCatalogCompleteness(t *testing.T) {
 			}
 		}
 	}
-	if counts[core.ProviderClassDispositionMapped] != 17 || counts[core.ProviderClassDispositionUnmapped] != 65 || len(counts) != 2 {
-		t.Fatalf("class disposition counts=%v want mapped=17 unmapped=65", counts)
+	if counts[core.ProviderClassDispositionMapped] != 17 || counts[core.ProviderClassDispositionUnmapped] != 66 || len(counts) != 2 {
+		t.Fatalf("class disposition counts=%v want mapped=17 unmapped=66", counts)
 	}
 }
 
@@ -404,6 +404,7 @@ var sizingFlagContracts = []struct {
 	{"firecracker", "use --firecracker-cpus, --firecracker-memory-mib, and --firecracker-disk-mib", "use explicit Firecracker kernel, rootfs, and sizing flags", true, false, nil},
 	{"modal", "", "", false, false, nil},
 	{"morph", "", "use --morph-snapshot", true, false, nil},
+	{"neevcloud", "use --neevcloud-template", "use --neevcloud-template", false, false, nil},
 	{"nvidia-brev", "use --nvidia-brev-gpu-name", "use --nvidia-brev-type", true, false, []string{"brev", "nvidia"}},
 	{"opencomputer", "use --opencomputer-cpu and --opencomputer-memory-mb", "use --opencomputer-cpu and --opencomputer-memory-mb", true, false, []string{"oc", "open-computer"}},
 	{"opensandbox", "use --opensandbox-cpu and --opensandbox-memory", "use --opensandbox-cpu and --opensandbox-memory", true, false, nil},
@@ -452,8 +453,8 @@ func assertSizingContractError(t *testing.T, err error, want string) {
 
 func TestProviderSizingGuardContracts(t *testing.T) {
 	testutil.IsolateUserDirs(t)
-	if len(sizingFlagContracts) != 31 {
-		t.Fatal("expected all 31 eligible adapters")
+	if len(sizingFlagContracts) != 32 {
+		t.Fatal("expected all 32 eligible adapters")
 	}
 	for _, tc := range sizingFlagContracts {
 		t.Run(tc.name, func(t *testing.T) {
