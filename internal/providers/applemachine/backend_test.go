@@ -170,6 +170,7 @@ func TestAppleMachineConfigFlags(t *testing.T) {
 }
 
 func TestCreateMachineArgs(t *testing.T) {
+	isolateMachineHomeMount(t)
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(runner)
 	if err := b.createMachine(t.Context(), "crabbox-test"); err != nil {
@@ -548,9 +549,18 @@ func TestRunTerminalOutcomeAndRetention(t *testing.T) {
 }
 
 func TestValidateRepoMountRejectsOutsideHome(t *testing.T) {
-	if err := validateRepoMount("/var/tmp/example"); err == nil || !strings.Contains(err.Error(), "requires the repository under") {
+	isolateMachineHomeMount(t)
+	if err := validateRepoMount(filepath.Join(t.TempDir(), "outside-home")); err == nil || !strings.Contains(err.Error(), "requires the repository under") {
 		t.Fatalf("err=%v", err)
 	}
+}
+
+func isolateMachineHomeMount(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 }
 
 func TestWriteEnvFileRejectsExplicitHostOwnedVariable(t *testing.T) {

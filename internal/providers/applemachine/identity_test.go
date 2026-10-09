@@ -288,6 +288,7 @@ func TestStandaloneControlKeepsDefaultBudget(t *testing.T) {
 }
 
 func TestNativeControlFailuresPreserveCauseAndPublicCode(t *testing.T) {
+	isolateMachineHomeMount(t)
 	for _, action := range []string{"create", "inspect", "list", "remove"} {
 		for _, deadline := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/deadline=%t", action, deadline), func(t *testing.T) {

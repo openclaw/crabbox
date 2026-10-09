@@ -1643,6 +1643,10 @@ func TestWriteArtifactBundleCredentialFilesKeepOwnerOnlyMode(t *testing.T) {
 // restricted when it actually embeds a presigned URL. A public or local bundle keeps the
 // readable mode it has always had.
 func TestPublishedArtifactsSummaryModeFollowsURLKind(t *testing.T) {
+	mask, run := isolatedArtifactTestUmask(t)
+	if !run {
+		return
+	}
 	signed := "https://bucket.s3.amazonaws.com/proof.txt?X-Amz-Signature=deadbeef&X-Amz-Expires=900"
 	for _, item := range []struct {
 		name    string
@@ -1679,9 +1683,12 @@ func TestPublishedArtifactsSummaryModeFollowsURLKind(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			restricted := info.Mode().Perm()&0o077 == 0
-			if restricted != item.private {
-				t.Fatalf("summary mode=%#o restricted=%t, want restricted=%t", info.Mode().Perm(), restricted, item.private)
+			want := os.FileMode(0o644) &^ mask
+			if item.private {
+				want = 0o600
+			}
+			if got := info.Mode().Perm(); got != want {
+				t.Fatalf("summary mode=%#o, want %#o (signed=%t, umask=%#o)", got, want, item.private, mask)
 			}
 		})
 	}
@@ -1743,6 +1750,10 @@ func TestWriteSensitiveArtifactManifestKeepsOwnerOnlyMode(t *testing.T) {
 }
 
 func TestPublicAndLocalArtifactManifestPreserveSharedModes(t *testing.T) {
+	mask, run := isolatedArtifactTestUmask(t)
+	if !run {
+		return
+	}
 	for _, item := range []struct {
 		name     string
 		url      string
@@ -1793,8 +1804,12 @@ func TestPublicAndLocalArtifactManifestPreserveSharedModes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := info.Mode().Perm(); got != item.want {
-				t.Fatalf("manifest mode=%#o, want %#o", got, item.want)
+			want := item.want
+			if item.existing == 0 {
+				want &^= mask
+			}
+			if got := info.Mode().Perm(); got != want {
+				t.Fatalf("manifest mode=%#o, want %#o (umask=%#o)", got, want, mask)
 			}
 		})
 	}
