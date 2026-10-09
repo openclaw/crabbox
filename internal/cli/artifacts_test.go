@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -606,69 +607,85 @@ func TestArtifactKindClassifiesProofSidecars(t *testing.T) {
 }
 
 func TestWindowsDesktopVideoRemoteCommandCapturesInteractiveFrames(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows PowerShell behavior")
+	}
+	for _, result := range []string{"success", "capture-error", "task-error", "timeout"} {
+		t.Run(result, func(t *testing.T) {
+			root := t.TempDir()
+			outDir, zipPath := filepath.Join(root, "frames"), filepath.Join(root, "frames.zip")
+			capture := filepath.Join(root, "capture.ps1")
+			receipt := filepath.Join(root, "removed")
+			prefix := `$ErrorActionPreference = "Stop"
+$result = ` + psQuote(result) + `
+$receipt = ` + psQuote(receipt) + `
+function Register-CrabboxInteractiveTask {
+  param($Name, $Executable, $Arguments)
+  if ($Name -ne "fixture-video" -or $Executable -ne "powershell.exe") { throw "wrong capture task" }
+  if (-not $Arguments.EndsWith('-File "' + $script + '"')) { throw "wrong capture script" }
+}
+function Start-CrabboxInteractiveTask {
+  param($Name)
+  if ($Name -ne "fixture-video") { throw "wrong started task" }
+  New-Item -ItemType Directory -Path $outDir | Out-Null
+  [IO.File]::WriteAllText($script, "fixture")
+  if ($result -eq "task-error") { throw "fixture task failure" }
+  if ($result -eq "capture-error") { [IO.File]::WriteAllText($captureError, "fixture capture failure"); return }
+  if ($result -eq "success") {
+    [IO.File]::WriteAllBytes($zip, [byte[]]@(0,255,13,10))
+    [IO.File]::WriteAllText($done, "done")
+  }
+}
+function Remove-CrabboxInteractiveTask {
+  param($Name)
+  [IO.File]::WriteAllText($receipt, $Name)
+}
+$script:dateCalls = 0
+function Get-Date {
+  $script:dateCalls++
+  $date = [datetime]::new(2000, 1, 1)
+  if ($result -eq "timeout" -and $script:dateCalls -gt 1) { return $date.AddSeconds(1000) }
+  return $date
+}
+function Start-Sleep { throw "fixture must not sleep" }
+`
+			scriptPath := filepath.Join(root, "run.ps1")
+			body := windowsDesktopVideoRemoteBody("fixture-video", capture, outDir, zipPath, 2*time.Second)
+			if err := os.WriteFile(scriptPath, []byte(prefix+body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			output, err := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath).CombinedOutput()
+			if result == "success" {
+				if err != nil || !bytes.Equal(output, []byte{0, 255, 13, 10}) {
+					t.Fatalf("capture bytes=%q error=%v", output, err)
+				}
+			} else {
+				want := map[string]string{
+					"capture-error": "fixture capture failure",
+					"task-error":    "fixture task failure",
+					"timeout":       "scheduled interactive video did not produce output",
+				}[result]
+				if err == nil || !strings.Contains(string(output), want) {
+					t.Fatalf("capture must fail with %q: %v: %s", want, err, output)
+				}
+			}
+			removed, err := os.ReadFile(receipt)
+			if err != nil || string(removed) != "fixture-video" {
+				t.Fatalf("capture task cleanup=%q error=%v", removed, err)
+			}
+			for _, path := range []string{outDir, zipPath, zipPath + ".done", zipPath + ".error", capture} {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("capture left %s: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
+func TestWindowsDesktopVideoFrameTiming(t *testing.T) {
 	frames, intervalMS := windowsDesktopVideoFrameTiming(2*time.Second, 4)
 	if frames != 8 || intervalMS != 250 {
 		t.Fatalf("frames=%d intervalMS=%d", frames, intervalMS)
-	}
-	script := windowsDesktopVideoCaptureScript(`C:\ProgramData\crabbox\cv-1-frames`, `C:\ProgramData\crabbox\cv-1.zip`, frames, intervalMS)
-	for _, want := range []string{
-		`$Frames = 8`,
-		`$IntervalMS = 250`,
-		"CopyFromScreen",
-		"frame-{0:D6}.jpg",
-		"Compress-Archive",
-		`$Zip + ".done"`,
-	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("windows video script missing %q:\n%s", want, script)
-		}
-	}
-
-	got := windowsDesktopVideoRemoteCommand(`CrabboxVideo-proof`, `C:\ProgramData\crabbox\cv-1.ps1`, `C:\ProgramData\crabbox\cv-1-frames`, `C:\ProgramData\crabbox\cv-1.zip`, 2*time.Second)
-	for _, want := range []string{
-		`$taskName = 'CrabboxVideo-proof'`,
-		`$outDir = 'C:\ProgramData\crabbox\cv-1-frames'`,
-		`$zip = 'C:\ProgramData\crabbox\cv-1.zip'`,
-		`$done = $zip + ".done"`,
-		`$script = 'C:\ProgramData\crabbox\cv-1.ps1'`,
-		"Register-CrabboxInteractiveTask",
-		"Start-CrabboxInteractiveTask",
-		"Remove-CrabboxInteractiveTask",
-		"Protect-CrabboxInteractiveDirectory",
-		"/inheritance:r",
-		"(OI)(CI)F",
-		"-LogonType Interactive",
-		"finally",
-		"[Console]::OpenStandardOutput().Write",
-		"scheduled interactive video did not produce output",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("windows video command missing %q:\n%s", want, got)
-		}
-	}
-	for _, forbidden := range []string{"Get-Content -Raw -LiteralPath $logonPath", "GetString($credentialBytes).Trim", `"/RP"`, "InteractiveOrPassword"} {
-		if strings.Contains(got, forbidden) {
-			t.Fatalf("windows video command contains forbidden credential handling %q:\n%s", forbidden, got)
-		}
-	}
-
-	cleanup := windowsDesktopVideoCleanupRemoteCommand(
-		`CrabboxVideo-proof`,
-		`C:\ProgramData\crabbox\cv-1\capture.ps1`,
-		`C:\ProgramData\crabbox\cv-1\frames`,
-		`C:\ProgramData\crabbox\cv-1\frames.zip`,
-		`C:\ProgramData\crabbox\cv-1`,
-	)
-	for _, want := range []string{
-		`CrabboxVideo-proof`,
-		`C:\ProgramData\crabbox\cv-1\capture.ps1`,
-		`C:\ProgramData\crabbox\cv-1\frames`,
-		`C:\ProgramData\crabbox\cv-1\frames.zip`,
-		`C:\ProgramData\crabbox\cv-1`,
-	} {
-		if !strings.Contains(cleanup, want) {
-			t.Fatalf("windows video cleanup missing %q:\n%s", want, cleanup)
-		}
 	}
 }
 

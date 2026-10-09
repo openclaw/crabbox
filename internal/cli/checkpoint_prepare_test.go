@@ -62,6 +62,9 @@ func TestNativeImagePreparationPreservesCurrentBootStatus(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(dataDir, file), []byte(contents), 0o644); err != nil {
 					t.Fatal(err)
 				}
+				if err := os.Chmod(filepath.Join(dataDir, file), 0o644); err != nil {
+					t.Fatal(err)
+				}
 				if err := os.Symlink(filepath.Join(dataDir, file), filepath.Join(runDir, file)); err != nil {
 					t.Fatal(err)
 				}

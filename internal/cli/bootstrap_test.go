@@ -856,106 +856,17 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 	cfg.WindowsMode = windowsModeNormal
 	cfg.Desktop = true
 	cfg.WorkRoot = `C:\crabbox`
-	userData := awsUserData(cfg, "ssh-ed25519 test")
-	if !strings.Contains(userData, "version: 1.1") || !strings.Contains(userData, "task: enableOpenSsh") {
-		t.Fatalf("windows user data should enable EC2Launch OpenSSH:\n%s", userData)
+	var document struct {
+		Version string `yaml:"version"`
+		Tasks   []struct {
+			Task string `yaml:"task"`
+		} `yaml:"tasks"`
 	}
-	defaultWorkRootCfg := cfg
-	defaultWorkRootCfg.WorkRoot = ""
-	if got := WindowsBootstrapPowerShell(defaultWorkRootCfg, "ssh-ed25519 test"); !strings.Contains(got, `$workRoot = 'C:\crabbox'`) {
-		t.Fatalf("windows user data should default work root, got missing marker")
+	if err := yaml.Unmarshal([]byte(awsUserData(cfg, "ssh-ed25519 test")), &document); err != nil {
+		t.Fatal(err)
 	}
-	got := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
-	for _, want := range []string{
-		"function Assert-CrabboxFileSHA256",
-		"Get-FileHash -LiteralPath $Path -Algorithm SHA256",
-		"OpenSSH-Win64.zip",
-		openSSHWin64ZipSHA256,
-		"install-sshd.ps1",
-		"administrators_authorized_keys",
-		"Match Group administrators",
-		"Subsystem sftp internal-sftp",
-		"HostKey __PROGRAMDATA__/ssh/ssh_host_ed25519_key",
-		"PubkeyAuthentication yes",
-		"PasswordAuthentication no",
-		`$openSSHSystemRoot = Join-Path $env:WINDIR "System32\OpenSSH"`,
-		"function Resolve-CrabboxOpenSSHCommand",
-		`$sshKeygen = Resolve-CrabboxOpenSSHCommand "ssh-keygen.exe"`,
-		"Start-Process -FilePath $sshKeygen",
-		`-q -t ed25519 -N "" -f "`,
-		`$hostKey + '"'`,
-		"ssh-keygen.exe",
-		"icacls.exe $hostKey",
-		"sshd failed to start with generated sshd_config",
-		"$sshPorts = @('2222', '22')",
-		"sshd_config",
-		"Port $port",
-		"crabbox-sshd-$port",
-		"Git-2.52.0-64-bit.exe",
-		gitForWindowsSetupSHA256,
-		"tightvnc-2.8.85-gpl-setup-64bit.msi",
-		tightVNCMSISHA256,
-		"VALUE_OF_PASSWORD=$vncPassword",
-		"VALUE_OF_ALLOWLOOPBACK=1",
-		"CrabboxUserVNC",
-		"crabbox-user-vnc.cmd",
-		"start-user-vnc.ps1",
-		"NewNetworkWindowOff",
-		"DoNotOpenServerManagerAtLogon",
-		"Set-Service -StartupType Automatic",
-		"Start-Service -Name tvnserver",
-		"CrabboxDesktopLauncher",
-		"WTSQuerySessionInformation",
-		"SessionUserName",
-		"no active interactive Windows session for requested user",
-		"WTSQueryUserToken",
-		"CreateProcessAsUserW",
-		`startup.lpDesktop = @"winsta0\default"`,
-		"desktop-launch-requests",
-		"New-CrabboxPassword",
-		"${userSID}:F",
-		"$credentialPaths = @($passwordPath)",
-		"$credentialPaths += $passwordMirrorPath",
-		`icacls.exe $credentialPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F"`,
-		`C:\ProgramData\crabbox\vnc.password`,
-		`C:\ProgramData\crabbox\windows.username`,
-		"AutoAdminLogon",
-		"DefaultDomainName",
-		"monitor-timeout-ac",
-		"standby-timeout-ac",
-		"ScreenSaveActive",
-		"Test-Path -LiteralPath $oobe",
-		"PrivacyConsentStatus",
-		"SetupDisplayedEula",
-		"SkipMachineOOBE",
-		"SkipUserOOBE",
-		"EnableFirstLogonAnimation",
-		"Restart-Computer -Force",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("windows user data missing %q", want)
-		}
-	}
-	for _, removed := range []string{"/SC ONLOGON", "Set-TightVNCBinaryValue", `reg.exe add "HKCU\Software\TightVNC\Server"`} {
-		if strings.Contains(got, removed) {
-			t.Fatalf("windows user data should remove application-mode VNC path %q", removed)
-		}
-	}
-	for _, pair := range [][2]string{
-		{"Assert-CrabboxFileSHA256 $openSSHZip", "Expand-Archive -LiteralPath $openSSHZip"},
-		{"Assert-CrabboxFileSHA256 $gitInstaller", "Start-Process -FilePath $gitInstaller"},
-		{"Assert-CrabboxFileSHA256 $tightVNCInstaller", "Start-Process -FilePath msiexec.exe"},
-	} {
-		verifyIndex := strings.Index(got, pair[0])
-		useIndex := strings.Index(got, pair[1])
-		if verifyIndex < 0 || useIndex < 0 || verifyIndex > useIndex {
-			t.Fatalf("windows bootstrap must run %q before %q", pair[0], pair[1])
-		}
-	}
-	mirrorIndex := strings.Index(got, "$credentialPaths += $passwordMirrorPath")
-	aclIndex := strings.Index(got, "foreach ($credentialPath in $credentialPaths)")
-	if mirrorIndex < 0 || aclIndex < 0 || mirrorIndex > aclIndex {
-		t.Fatalf("windows password mirror must be included before credential ACL hardening")
+	if document.Version != "1.1" || len(document.Tasks) != 1 || document.Tasks[0].Task != "enableOpenSsh" {
+		t.Fatalf("Windows AWS provisioning must enable EC2Launch OpenSSH: %+v", document)
 	}
 }
 

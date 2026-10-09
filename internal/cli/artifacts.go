@@ -1130,12 +1130,16 @@ try {
 }
 
 func windowsDesktopVideoRemoteCommand(taskName, remoteScript, remoteOutDir, remoteZip string, duration time.Duration) string {
-	return fmt.Sprintf(`$ErrorActionPreference = "Stop"
+	return `$ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $base = "C:\ProgramData\crabbox"
-%s
-%s
-$taskName = %s
+` + windowsVideoCredentialReadPowerShell(WindowsActionsRunnerCredentialPath) + "\n" +
+		windowsInteractiveScheduledTaskPowerShell() + "\n" +
+		windowsDesktopVideoRemoteBody(taskName, remoteScript, remoteOutDir, remoteZip, duration)
+}
+
+func windowsDesktopVideoRemoteBody(taskName, remoteScript, remoteOutDir, remoteZip string, duration time.Duration) string {
+	return fmt.Sprintf(`$taskName = %s
 $outDir = %s
 $zip = %s
 $done = $zip + ".done"
@@ -1174,7 +1178,7 @@ try {
   Remove-Item -Recurse -Force -LiteralPath $outDir -ErrorAction SilentlyContinue
   Remove-Item -Force -LiteralPath $zip, $done, $captureError, $script -ErrorAction SilentlyContinue
 }
-`, windowsVideoCredentialReadPowerShell(WindowsActionsRunnerCredentialPath), windowsInteractiveScheduledTaskPowerShell(), psQuote(taskName), psQuote(remoteOutDir), psQuote(remoteZip), psQuote(remoteScript), int(duration.Seconds())+120)
+`, psQuote(taskName), psQuote(remoteOutDir), psQuote(remoteZip), psQuote(remoteScript), int(duration.Seconds())+120)
 }
 
 func windowsDesktopVideoCleanupRemoteCommand(taskName, remoteScript, remoteOutDir, remoteZip, remoteRoot string) string {
