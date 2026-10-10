@@ -15,18 +15,23 @@ import (
 )
 
 type sizeValidator interface {
-	ValidateSizeRegion(context.Context, core.Config) error
+	ResolveSizeRegion(context.Context, core.Config) (string, error)
 }
 
 type checkedDigitalOceanAPI struct {
 	*fakeDigitalOceanAPI
-	validate func(context.Context, core.Config) error
+	validate func(context.Context, core.Config) (string, error)
 }
 
-func (f *checkedDigitalOceanAPI) ValidateSizeRegion(ctx context.Context, cfg core.Config) error {
+func (f *checkedDigitalOceanAPI) ResolveSizeRegion(ctx context.Context, cfg core.Config) (string, error) {
 	return f.validate(ctx, cfg)
 }
-func (f *fakeDigitalOceanAPI) ValidateSizeRegion(context.Context, core.Config) error { return nil }
+func (f *fakeDigitalOceanAPI) ResolveSizeRegion(_ context.Context, cfg core.Config) (string, error) {
+	if cfg.DigitalOcean.Region != "" {
+		return cfg.DigitalOcean.Region, nil
+	}
+	return "sfo3", nil
+}
 
 func TestSizeRegionPreflight(t *testing.T) {
 	for _, tc := range []struct {
@@ -62,7 +67,7 @@ func TestSizeRegionPreflight(t *testing.T) {
 			cfg := core.BaseConfig()
 			cfg.ServerType = "s-1vcpu-1gb"
 			cfg.DigitalOcean.Region = tc.region
-			err := validator.ValidateSizeRegion(t.Context(), cfg)
+			_, err := validator.ResolveSizeRegion(t.Context(), cfg)
 			if (err != nil) != tc.wantError {
 				t.Fatalf("err=%v", err)
 			}
@@ -88,8 +93,9 @@ func TestAcquireSizePreflightBeforeCreate(t *testing.T) {
 		t.Run(fmt.Sprint(fixed), func(t *testing.T) {
 			api := &fakeDigitalOceanAPI{}
 			b := newTestBackend(t, api)
+			b.Cfg.DigitalOcean.Region = "nyc3"
 			cause := errors.New("digitalocean_size_unavailable_in_region")
-			checked := &checkedDigitalOceanAPI{fakeDigitalOceanAPI: api, validate: func(context.Context, core.Config) error { return cause }}
+			checked := &checkedDigitalOceanAPI{fakeDigitalOceanAPI: api, validate: func(context.Context, core.Config) (string, error) { return "", cause }}
 			b.clientFactory = func(core.Runtime) (digitalOceanAPI, error) { return checked, nil }
 			req := core.AcquireRequest{RequestedSlug: "region", Repo: core.Repo{Root: t.TempDir()}}
 			if fixed {
@@ -223,12 +229,12 @@ func TestFixedReplaySkipsSizePreflight(t *testing.T) {
 	api := &fakeDigitalOceanAPI{}
 	b := newTestBackend(t, api)
 	calls := 0
-	checked := &checkedDigitalOceanAPI{fakeDigitalOceanAPI: api, validate: func(context.Context, core.Config) error {
+	checked := &checkedDigitalOceanAPI{fakeDigitalOceanAPI: api, validate: func(context.Context, core.Config) (string, error) {
 		calls++
 		if calls > 1 {
-			return errors.New("catalog changed")
+			return "", errors.New("catalog changed")
 		}
-		return nil
+		return "sfo2", nil
 	}}
 	b.clientFactory = func(core.Runtime) (digitalOceanAPI, error) { return checked, nil }
 	req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123465", RequestedSlug: "replay", Repo: core.Repo{Root: t.TempDir()}}
@@ -246,8 +252,9 @@ func TestFixedReplaySkipsSizePreflight(t *testing.T) {
 func TestSizeCatalogFailureRetiresUnsubmittedAttempt(t *testing.T) {
 	api := &fakeDigitalOceanAPI{}
 	b := newTestBackend(t, api)
+	b.Cfg.DigitalOcean.Region = "nyc3"
 	cause := &digitalOceanAPIError{Operation: "GET /sizes", Status: 503, Body: "temporarily unavailable"}
-	checked := &checkedDigitalOceanAPI{fakeDigitalOceanAPI: api, validate: func(context.Context, core.Config) error { return cause }}
+	checked := &checkedDigitalOceanAPI{fakeDigitalOceanAPI: api, validate: func(context.Context, core.Config) (string, error) { return "", cause }}
 	b.clientFactory = func(core.Runtime) (digitalOceanAPI, error) { return checked, nil }
 	req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123466", RequestedSlug: "catalog", Repo: core.Repo{Root: t.TempDir()}}
 	if _, err := b.Acquire(t.Context(), req); !errors.Is(err, cause) {

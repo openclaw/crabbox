@@ -16477,7 +16477,6 @@ func TestDigitalOceanBindingCoreDefaults(t *testing.T) {
 		}
 		region, image := raw, raw
 		if raw == "" {
-			region = "nyc3"
 			image = "ubuntu-24-04-x64"
 		}
 		if cfg.DigitalOcean.Region != region || cfg.DigitalOcean.Image != image {

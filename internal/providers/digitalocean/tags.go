@@ -18,11 +18,13 @@ const (
 
 var tagSchema = shared.LeaseTagSchema(append(shared.TailscaleTagFields(),
 	shared.TagLabelField{Key: "fixed_intent_sha256"}, shared.TagLabelField{Key: "fixed_attempt"},
+	shared.TagLabelField{Key: "region"},
 )...)
 
 func leaseTags(cfg core.Config, leaseID, slug, state string, keep bool, now time.Time) []string {
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, now)
 	labels["state"] = state
+	labels["region"] = cfg.DigitalOcean.Region
 	if cfg.Tailscale.Enabled && len(cfg.Tailscale.Tags) > 0 {
 		labels["tailscale_tags"] = strings.Join(cfg.Tailscale.Tags, ",")
 	}

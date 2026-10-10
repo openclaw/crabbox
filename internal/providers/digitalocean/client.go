@@ -264,8 +264,10 @@ func (c *digitalOceanClient) AccountID(ctx context.Context) (string, error) {
 	return "", core.Exit(3, "digitalocean account API returned no account identity")
 }
 
-func (c *digitalOceanClient) ValidateSizeRegion(ctx context.Context, cfg core.Config) error {
-	region := digitalOceanRegion(cfg)
+var preferredRegions = []string{"sfo3", "sfo2", "sfo1", "tor1", "nyc3", "nyc1", "nyc2", "lon1", "ams3", "fra1", "sgp1", "blr1", "syd1"}
+
+func (c *digitalOceanClient) ResolveSizeRegion(ctx context.Context, cfg core.Config) (string, error) {
+	region := cfg.DigitalOcean.Region
 	var regions []string
 	for page := 1; ; page++ {
 		var res struct {
@@ -281,15 +283,24 @@ func (c *digitalOceanClient) ValidateSizeRegion(ctx context.Context, cfg core.Co
 			} `json:"links"`
 		}
 		if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/sizes?page=%d&per_page=200", page), nil, &res); err != nil {
-			return err
+			return "", err
 		}
 		found := false
 		for _, size := range res.Sizes {
 			if size.Slug != cfg.ServerType {
 				continue
 			}
-			if size.Available && slices.Contains(size.Regions, region) {
-				return nil
+			if size.Available {
+				if region != "" && slices.Contains(size.Regions, region) {
+					return region, nil
+				}
+				if region == "" {
+					for _, preferred := range preferredRegions {
+						if slices.Contains(size.Regions, preferred) {
+							return preferred, nil
+						}
+					}
+				}
 			}
 			regions, found = size.Regions, true
 			break
@@ -303,7 +314,10 @@ func (c *digitalOceanClient) ValidateSizeRegion(ctx context.Context, cfg core.Co
 	if available == "" {
 		available = "none listed"
 	}
-	return core.Exit(2, "digitalocean_size_unavailable_in_region: size %q is unavailable in region %q; available regions: %s; choose digitalocean.region or CRABBOX_DIGITALOCEAN_REGION explicitly", cfg.ServerType, region, available)
+	if region == "" {
+		region = "automatic (near San Francisco)"
+	}
+	return "", core.Exit(2, "digitalocean_size_unavailable_in_region: size %q is unavailable in region %q; available regions: %s; choose digitalocean.region or CRABBOX_DIGITALOCEAN_REGION explicitly", cfg.ServerType, region, available)
 }
 
 func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config, publicKey, leaseID, slug string, keep bool, now time.Time) (droplet, error) {

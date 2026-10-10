@@ -85,7 +85,6 @@ func TestDigitalOceanBindingRuntime(t *testing.T) {
 		applyDigitalOceanDefaults(&cfg)
 		r, i := tc.provider, tc.provider
 		if r == "" {
-			r = "nyc3"
 			i = "ubuntu-24-04-x64"
 		}
 		if cfg.DigitalOcean.Region != r || cfg.DigitalOcean.Image != i || cfg.SSHUser != "alice" || cfg.SSHPort != "2222" || cfg.WorkRoot != "/srv/project" || cfg.ServerType != "s-1vcpu-1gb" || cfg.TargetOS != core.TargetLinux {

@@ -4,6 +4,7 @@
 
 ### Fixes
 
+- DigitalOcean: prefer the first available region near San Francisco when no region is configured, preserve explicit regions, and reuse the recorded region on fixed-lease replay. PR link pending.
 - Azure: refuse retained network-companion cleanup when provider-key or fixed-attempt tags conflict with the original claim, even when immutable resource IDs still match.
 
 ### Added
