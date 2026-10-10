@@ -8,6 +8,7 @@
 
 ### Added
 
+- exe.dev: start separately claimed leases from prepared VMs with `--exe-dev-from`, fresh ownership tags, and persistent work roots while preserving existing claim paths. [PR 2754](https://github.com/openclaw/crabbox/pull/2754). Thanks @salmonumbrella.
 - GitHub Codespaces: support replay-safe caller-supplied lease IDs with account- and intent-bound recovery, exact-resource cleanup, and terminal receipts. [Issue 2660](https://github.com/openclaw/crabbox/issues/2660). Thanks @jcxmt125.
 
 ## 0.73.0 - 2026-10-08

@@ -178,6 +178,17 @@ Crabbox does not promise memory or process restoration. The base and clone both
 consume account capacity until deleted. Stop the clone normally; its base stays
 available for subsequent copies.
 
+The source may be a manually prepared VM or an existing Crabbox lease; Crabbox
+does not adopt it or change its claim. An existing lease's normal expiry and
+cleanup still apply, so keep a durable base separately when it must outlive that
+lease. Source tags are not copied, including another lease's ownership tags.
+
+Source access is checked by exe.dev's authenticated `cp` command. Crabbox does
+not grant access to another account's VM or treat a VM name as authorization;
+missing or forbidden sources fail without tagging or deleting the source.
+Access to a shared VM's shell alone should not be assumed to authorize copying
+it. Use a base your current exe.dev account is authorized to copy.
+
 Clones must advertise the exact fresh ownership and generation tags before
 Crabbox connects over SSH. If copying or tagging has an uncertain outcome,
 Crabbox reports the exact destination and a manual-cleanup command. It refuses
@@ -209,6 +220,8 @@ immutable checkpoint resource, so `--mode native` is unsupported.
 - `--tailscale` is rejected — exe.dev VMs expose public SSH only.
 - No Crabbox coordinator support; auth and billing stay with your local exe.dev
   SSH account.
+- Caller-supplied `--lease-id` and fixed-ID replay are unsupported. Every new
+  acquisition gets a fresh lease ID; use `--id` to reuse a claimed lease.
 - Advertised features are SSH and Crabbox sync. Shared archive checkpoints and
   forks work over SSH. No managed desktop/VNC, browser, code-server, or native
   provider snapshots.

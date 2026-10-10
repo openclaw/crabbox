@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"slices"
 	"strings"
@@ -148,6 +149,31 @@ func TestCloneFailureDoesNotTagOrDeleteSource(t *testing.T) {
 	}
 }
 
+func TestCloneMissingOrForbiddenBaseDoesNotMutateVMs(t *testing.T) {
+	for _, message := range []string{"VM not found", "permission denied"} {
+		for _, exitCode := range []int{0, 1} {
+			t.Run(fmt.Sprintf("%s/exit-%d", message, exitCode), func(t *testing.T) {
+				cfg := cloneConfig(t, "--exe-dev-from", "base")
+				runner := &exeDevRecordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					if cmd := req.Args[len(req.Args)-1]; !strings.HasPrefix(cmd, "cp base clone ") {
+						t.Fatalf("unexpected command after rejected copy: %s", cmd)
+					}
+					out, _ := json.Marshal(map[string]string{"error": message})
+					var err error
+					if exitCode != 0 {
+						err = errors.New("control command failed")
+					}
+					return core.LocalCommandResult{Stdout: string(out), ExitCode: exitCode}, err
+				}}
+				_, created, err := newExeDevTestBackend(cfg, runner).createVM(t.Context(), cfg, "clone", "lease", "slug", "generation")
+				if err == nil || !strings.Contains(err.Error(), message) || created || len(runner.calls) != 1 {
+					t.Fatalf("created=%v err=%v calls=%d", created, err, len(runner.calls))
+				}
+			})
+		}
+	}
+}
+
 func TestCloneWorkRootAndArchiveCapabilities(t *testing.T) {
 	cfg := cloneConfig(t)
 	if cfg.WorkRoot != "/var/tmp/crabbox" {
@@ -191,10 +217,12 @@ func TestCloneAcquireFailureAndCleanup(t *testing.T) {
 	for _, tc := range []struct {
 		name                                                                        string
 		keep, tagLost, tagRejected, replacement, malformed, wrongName, readyFailure bool
+		ownedBase                                                                   bool
 		copyResponse                                                                string
 		wantError, wantDelete                                                       bool
 	}{
 		{name: "normal release", wantDelete: true},
+		{name: "Crabbox lease as base", ownedBase: true, wantDelete: true},
 		{name: "acknowledgement-only copy response", copyResponse: `{}`, wantDelete: true},
 		{name: "lost tag response", tagLost: true, wantDelete: true},
 		{name: "rejected tags", tagRejected: true, wantError: true},
@@ -210,7 +238,11 @@ func TestCloneAcquireFailureAndCleanup(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			cfg := cloneConfig(t, "--exe-dev-from", "base")
+			source := exeDevVM{VMName: "base", Tags: []string{"private-base-tag"}}
+			if tc.ownedBase {
+				source = ownedExeDevVM("cbx_222222222222", "source")
+			}
+			cfg := cloneConfig(t, "--exe-dev-from", source.Name())
 			var vm exeDevVM
 			var deleted, tagged, connected bool
 			inventoryAfterTag := 0
@@ -221,6 +253,9 @@ func TestCloneAcquireFailureAndCleanup(t *testing.T) {
 				case "whoami":
 					return core.LocalCommandResult{Stdout: `{"email":"test@example.com"}`}, nil
 				case "cp":
+					if fields[1] != source.Name() || fields[2] == source.Name() || !slices.Contains(fields, "--copy-tags=false") {
+						t.Fatalf("copy must leave source identity behind: %s", cmd)
+					}
 					vm = exeDevVM{VMName: fields[2], Status: "running"}
 					if tc.malformed {
 						return core.LocalCommandResult{Stdout: "{"}, nil
@@ -232,7 +267,7 @@ func TestCloneAcquireFailureAndCleanup(t *testing.T) {
 						return core.LocalCommandResult{Stdout: `{"vm_name":"unrelated"}`}, nil
 					}
 				case "tag":
-					if fields[2] == "base" {
+					if fields[2] == source.Name() {
 						t.Fatal("mutated source")
 					}
 					tagged = true
@@ -257,14 +292,14 @@ func TestCloneAcquireFailureAndCleanup(t *testing.T) {
 							}
 						}
 					}
-					vms := []exeDevVM{{VMName: "base", Tags: []string{"private-base-tag"}}}
+					vms := []exeDevVM{source}
 					if vm.Name() != "" && !deleted {
 						vms = append(vms, vm)
 					}
 					out, _ := json.Marshal(exeDevListResponse{VMs: vms})
 					return core.LocalCommandResult{Stdout: string(out)}, nil
 				case "rm":
-					if fields[1] != vm.Name() || fields[1] == "base" {
+					if fields[1] != vm.Name() || fields[1] == source.Name() {
 						t.Fatalf("wrong deletion: %s", cmd)
 					}
 					deleted = true
@@ -293,6 +328,9 @@ func TestCloneAcquireFailureAndCleanup(t *testing.T) {
 				t.Fatalf("err=%v wantError=%v", err, tc.wantError)
 			}
 			if err == nil {
+				if tc.ownedBase && lease.Server.Labels[exeDevClaimGenerationLabel] == "cbx_111111111111" {
+					t.Fatal("clone inherited the base claim generation")
+				}
 				if err := backend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 					t.Fatal(err)
 				}
