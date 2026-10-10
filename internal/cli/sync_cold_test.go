@@ -73,6 +73,9 @@ func TestColdSyncRoundTripAndFinalize(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(root, "target"), 0o710); err != nil {
 				t.Fatal(err)
 			}
+			if err := os.Chmod(filepath.Join(root, "target"), 0o710); err != nil {
+				t.Fatal(err)
+			}
 			writeFile(t, filepath.Join(root, "target", "keep name\n.txt"), "selected contents\n")
 			writeFile(t, filepath.Join(root, "target", "ignored"), "not selected\n")
 			writeFile(t, filepath.Join(root, "executable"), "#!/bin/sh\nexit 0\n")

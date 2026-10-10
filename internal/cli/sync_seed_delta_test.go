@@ -15,6 +15,19 @@ func TestSeededSyncDeltaRoundTripReusedWorkspace(t *testing.T) {
 	for _, exact := range []bool{false, true} {
 		t.Run(map[bool]string{false: "branch", true: "exact-commit"}[exact], func(t *testing.T) {
 			fixture := newGitOverlayFixture(t)
+			manifest, _ := fixture.manifest(t)
+			for _, name := range manifest.Files {
+				path := filepath.Join(fixture.root, name)
+				info, err := os.Lstat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if info.Mode().IsRegular() {
+					if err := os.Chmod(path, 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			plan := fixture.plan
 			if exact {
 				plan.Branch = ""
