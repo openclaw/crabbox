@@ -52,7 +52,11 @@ func (b *exeDevLeaseBackend) Acquire(ctx context.Context, req core.AcquireReques
 	cfg := b.configForRun()
 	name := core.LeaseProviderName(leaseID, slug)
 	generation := core.NewLeaseID()
-	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s name=%s image=%s cpus=%d memory=%s disk=%s keep=%v\n", providerName, leaseID, slug, name, exeDevImage(cfg), cfg.ExeDev.CPUs, cfg.ExeDev.Memory, cfg.ExeDev.Disk, req.Keep)
+	source := "image=" + exeDevImage(cfg)
+	if base := strings.TrimSpace(cfg.ExeDev.Base); base != "" {
+		source = "base=" + base
+	}
+	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s name=%s %s cpus=%d memory=%s disk=%s keep=%v\n", providerName, leaseID, slug, name, source, cfg.ExeDev.CPUs, cfg.ExeDev.Memory, cfg.ExeDev.Disk, req.Keep)
 	vm, created, err := b.createVM(ctx, cfg, name, leaseID, slug, generation)
 	if created && !req.Keep {
 		defer func() {
@@ -108,6 +112,7 @@ func (b *exeDevLeaseBackend) Resolve(ctx context.Context, req core.ResolveReques
 			if err := b.validateVMClaimBinding(ctx, vm, claim, leaseID, slug); err != nil {
 				return core.LeaseTarget{}, err
 			}
+			preserveExeDevClaimWorkRoot(&lease.Server, claim)
 		} else if !req.IsReadOnlyStatus() {
 			return core.LeaseTarget{}, core.Exit(2, "provider=%s lease %s has no exact local claim; use a repository-scoped reuse with --reclaim before operating on it", providerName, leaseID)
 		}
@@ -411,6 +416,9 @@ func currentExeDevSSHUser() string {
 }
 
 func (b *exeDevLeaseBackend) createVM(ctx context.Context, cfg core.Config, name, leaseID, slug, generation string) (vm exeDevVM, created bool, err error) {
+	if strings.TrimSpace(cfg.ExeDev.Base) != "" {
+		return b.cloneVM(ctx, cfg, name, leaseID, slug, generation)
+	}
 	args := []string{"new", "--name", name, "--json", "--tag", "crabbox", "--tag", "crabbox-lease-" + leaseID, "--tag", "crabbox-slug-" + slug, "--tag", exeDevClaimGenerationTagPrefix + generation}
 	if cfg.ExeDev.NoEmail {
 		args = append(args, "--no-email")
@@ -443,6 +451,14 @@ func (b *exeDevLeaseBackend) createVM(ctx context.Context, cfg core.Config, name
 }
 
 func (b *exeDevLeaseBackend) waitForExeDevSSHRoute(ctx context.Context, name string, timeout time.Duration) (exeDevVM, error) {
+	return b.waitForExeDevVM(ctx, name, timeout, true)
+}
+
+func (b *exeDevLeaseBackend) waitForExeDevVM(ctx context.Context, name string, timeout time.Duration, requireRoute bool) (exeDevVM, error) {
+	waitTarget, waitAction := "inventory", "appear in inventory"
+	if requireRoute {
+		waitTarget, waitAction = "SSH route", "advertise an SSH destination"
+	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	result, err := shared.Poll(waitCtx, 0, 250*time.Millisecond, shared.SleepContext,
@@ -454,14 +470,14 @@ func (b *exeDevLeaseBackend) waitForExeDevSSHRoute(ctx context.Context, name str
 			if err != nil && core.ExitCodeForError(err, 0) != 4 {
 				return false, err
 			}
-			return err == nil && vm.SSHHost() != "", nil
+			return err == nil && (!requireRoute || vm.SSHHost() != ""), nil
 		}, nil)
 	if err != nil {
 		if ctx.Err() != nil {
-			return exeDevVM{}, shared.PollTerminationError(ctx, err, core.Exit(2, "exe.dev VM %s SSH route wait canceled: %v", name, context.Cause(ctx)))
+			return exeDevVM{}, shared.PollTerminationError(ctx, err, core.Exit(2, "exe.dev VM %s %s wait canceled: %v", name, waitTarget, context.Cause(ctx)))
 		}
 		if waitCtx.Err() != nil {
-			return exeDevVM{}, shared.PollTerminationError(waitCtx, err, core.Exit(5, "timed out waiting for exe.dev VM %s to advertise an SSH destination", name))
+			return exeDevVM{}, shared.PollTerminationError(waitCtx, err, core.Exit(5, "timed out waiting for exe.dev VM %s to %s", name, waitAction))
 		}
 		return exeDevVM{}, err
 	}
@@ -508,6 +524,7 @@ func (b *exeDevLeaseBackend) claimResolvedVM(ctx context.Context, lease core.Lea
 				return core.LeaseClaim{}, err
 			}
 		}
+		preserveExeDevClaimWorkRoot(&lease.Server, previous)
 	}
 	cfg := b.configForRun()
 	providerScope, err := b.controlScope(ctx)
@@ -538,6 +555,14 @@ func (b *exeDevLeaseBackend) claimResolvedVM(ctx context.Context, lease core.Lea
 		return core.LeaseClaim{}, err
 	}
 	return claim, nil
+}
+
+func preserveExeDevClaimWorkRoot(server *core.Server, claim core.LeaseClaim) {
+	// Runtime defaults may change between creation and reuse. Keep the path
+	// in the validated claim before returning or refreshing its labels.
+	if root := claim.Labels["work_root"]; root != "" {
+		server.Labels["work_root"] = root
+	}
 }
 
 func (b *exeDevLeaseBackend) validateResolvedLeaseTarget(lease core.LeaseTarget, vm exeDevVM, leaseID, slug string) error {

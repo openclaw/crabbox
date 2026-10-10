@@ -17,9 +17,9 @@ owner and org resolved by normal authentication. The API rejects every query par
 with HTTP 400.
 
 ```text
-fleet 21/20 (blocked)
-org example-org 17/20
-owner github:12345 17/20
+fleet 51/50 (blocked)
+org example-org 17/50
+owner github:12345 17/50
 observed at: 2026-09-02T12:00:00.000Z
 Snapshot only; not a reservation or approval to allocate.
 admissible: no — fleet cap reached
@@ -32,10 +32,10 @@ an active-lease admission decision:
 {
   "owner": "github:12345",
   "activeLeases": 17,
-  "effectiveLimit": 20,
+  "effectiveLimit": 50,
   "observedAt": "2026-09-02T12:00:00.000Z",
-  "fleet": { "activeLeases": 21, "limit": 20 },
-  "org": { "key": "example-org", "activeLeases": 17, "limit": 20 },
+  "fleet": { "activeLeases": 51, "limit": 50 },
+  "org": { "key": "example-org", "activeLeases": 17, "limit": 50 },
   "admissible": false,
   "blockedBy": "fleet"
 }
@@ -47,6 +47,9 @@ owner limit for compatibility; text prints `unlimited` for every unlimited limit
 `org.key` is the authenticated org's display label. Older coordinators that omit
 the new fields still render an owner line and snapshot metadata, with no admission
 decision; their JSON remains unchanged.
+
+The example shows a capacity admin with the deployed limit of 50; ordinary
+owners retain a limit of 10.
 
 The selected limit uses the existing capacity-owner policy, independently of
 admin authentication. A positive elevated limit for a configured member selects
