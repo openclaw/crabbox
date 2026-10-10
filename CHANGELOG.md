@@ -4,6 +4,7 @@
 
 ### Fixes
 
+- Coordinator: raise fleet, org, and capacity-admin active-lease caps from 20 to 50, preserving the ordinary owner cap and monthly budgets. PR link pending.
 - Azure: refuse retained network-companion cleanup when provider-key or fixed-attempt tags conflict with the original claim, even when immutable resource IDs still match.
 
 ### Added
