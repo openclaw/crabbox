@@ -368,6 +368,14 @@ interface AWSLeaseOperation {
   waitForServerVisibility(instanceID: string): Promise<ProviderMachine>;
   findCrabboxServerByLease(leaseID: string): Promise<ProviderMachine | undefined>;
   findWorkspaceServerByLease(leaseID: string): Promise<ProviderMachine | undefined>;
+  stopRetainedServer(
+    instanceID: string,
+    leaseID: string,
+    identity: string,
+    assertOwner: () => Promise<void>,
+  ): Promise<void>;
+  retainedServerIdentity(instanceID: string, leaseID: string): Promise<string>;
+  confirmRetainedVolumeDeleted(identity: string): Promise<void>;
   terminateServerAndWait(instanceID: string): Promise<void>;
   deleteSSHKey(name: string, leaseID: string): Promise<void>;
 }
@@ -891,6 +899,24 @@ export class EC2SpotClient {
         withAccount((account) => client.findLeaseServer(leaseID, false, query(account))),
       findWorkspaceServerByLease: (leaseID) =>
         withAccount((account) => client.findLeaseServer(leaseID, true, query(account))),
+      stopRetainedServer: (instanceID, leaseID, retainedIdentity, assertOwner) =>
+        withAccount((account) =>
+          client.stopRetainedServerWith(
+            instanceID,
+            leaseID,
+            retainedIdentity,
+            assertOwner,
+            query(account),
+          ),
+        ),
+      confirmRetainedVolumeDeleted: (retainedIdentity) =>
+        withAccount((account) =>
+          client.confirmRetainedVolumeDeletedWith(retainedIdentity, query(account)),
+        ),
+      retainedServerIdentity: (instanceID, leaseID) =>
+        withAccount((account) =>
+          client.retainedServerIdentityWith(instanceID, leaseID, query(account)),
+        ),
       terminateServerAndWait: (instanceID) =>
         withAccount((account) => client.terminateServerAndWaitWith(instanceID, query(account))),
       deleteSSHKey: (name, leaseID) =>
@@ -2068,6 +2094,113 @@ export class EC2SpotClient {
       return;
     }
     await this.ec2("TerminateInstances", { "InstanceId.1": instanceID });
+  }
+
+  private async retainedServerIdentityWith(
+    instanceID: string,
+    leaseID: string,
+    options: AWSQueryOptions,
+  ): Promise<string> {
+    const root = await this.ec2("DescribeInstances", { "InstanceId.1": instanceID }, options);
+    const instances = items(record(root["reservationSet"])["item"]).flatMap((reservation) =>
+      items(record(record(reservation)["instancesSet"])["item"]).map(record),
+    );
+    if (instances.length !== 1)
+      throw new AWSLeaseObservationError("retained AWS instance is not uniquely visible");
+    const instance = instances[0]!;
+    const mappings = items(record(instance["blockDeviceMapping"])["item"]).map(record);
+    const rootName = asString(instance["rootDeviceName"]);
+    const rootMapping = mappings[0];
+    const ebs = record(rootMapping?.["ebs"]);
+    const volumeID = asString(ebs["volumeId"]);
+    const instanceType = asString(instance["instanceType"]);
+    if (
+      asString(instance["instanceId"]) !== instanceID ||
+      tagMap(instance["tagSet"])["lease"] !== leaseID ||
+      asString(instance["rootDeviceType"]) !== "ebs" ||
+      asString(instance["instanceLifecycle"]) ||
+      asString(instance["spotInstanceRequestId"]) ||
+      asString(record(instance["placement"])["hostId"]) ||
+      instanceType.startsWith("mac") ||
+      mappings.length !== 1 ||
+      asString(rootMapping?.["deviceName"]) !== rootName ||
+      !rootName ||
+      !/^vol-[a-f0-9]+$/.test(volumeID) ||
+      asString(ebs["deleteOnTermination"]) !== "true"
+    ) {
+      throw new AWSLeaseAuthorityError(
+        "lifetime retention requires an on-demand EBS-only instance with one owned root disk; Mac, Spot, and extra disks are unsupported",
+      );
+    }
+    const types = await this.ec2(
+      "DescribeInstanceTypes",
+      { "InstanceType.1": instanceType },
+      options,
+    );
+    const typeItems = items(record(types["instanceTypeSet"])["item"]).map(record);
+    if (
+      typeItems.length !== 1 ||
+      asString(typeItems[0]!["instanceType"]) !== instanceType ||
+      asString(typeItems[0]!["instanceStorageSupported"]) !== "false"
+    ) {
+      throw new AWSLeaseAuthorityError(
+        "lifetime retention cannot stop instances with local instance-store data",
+      );
+    }
+    const volumes = await this.ec2("DescribeVolumes", { "VolumeId.1": volumeID }, options);
+    const volumeItems = items(record(volumes["volumeSet"])["item"]).map(record);
+    const volume = volumeItems[0];
+    const attachments = items(record(volume?.["attachmentSet"])["item"]).map(record);
+    if (
+      volumeItems.length !== 1 ||
+      asString(volume?.["volumeId"]) !== volumeID ||
+      tagMap(volume?.["tagSet"])["lease"] !== leaseID ||
+      attachments.length !== 1 ||
+      asString(attachments[0]!["instanceId"]) !== instanceID ||
+      asString(attachments[0]!["device"]) !== rootName ||
+      asString(attachments[0]!["status"]) !== "attached"
+    ) {
+      throw new AWSLeaseAuthorityError("retained root disk ownership or attachment changed");
+    }
+    return `${instanceID}:${volumeID}:${rootName}`;
+  }
+
+  private async confirmRetainedVolumeDeletedWith(
+    identity: string,
+    options: AWSQueryOptions,
+  ): Promise<void> {
+    const match = /^i-[a-f0-9]+:(vol-[a-f0-9]+):\/dev\/[a-z0-9]+$/.exec(identity);
+    if (!match) throw new AWSLeaseAuthorityError("invalid retained AWS disk identity");
+    try {
+      await this.ec2("DescribeVolumes", { "VolumeId.1": match[1]! }, options);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("InvalidVolume.NotFound")) return;
+      throw error;
+    }
+    throw new AWSLeaseObservationError("retained root volume deletion has not been confirmed");
+  }
+
+  private async stopRetainedServerWith(
+    instanceID: string,
+    leaseID: string,
+    identity: string,
+    assertOwner: () => Promise<void>,
+    options: AWSQueryOptions,
+  ): Promise<void> {
+    if ((await this.retainedServerIdentityWith(instanceID, leaseID, options)) !== identity) {
+      throw new AWSLeaseAuthorityError("retained root disk changed before stop dispatch");
+    }
+    await assertOwner();
+    const stopped = await this.ec2("StopInstances", { "InstanceId.1": instanceID }, options);
+    const ids = items(record(stopped["instancesSet"])["item"]).map((item) =>
+      asString(record(item)["instanceId"]),
+    );
+    if (ids.length !== 1 || ids[0] !== instanceID) {
+      throw new AWSLeaseObservationError(
+        `AWS StopInstances did not confirm instance ${instanceID}`,
+      );
+    }
   }
 
   async terminateServerAndWait(instanceID: string): Promise<void> {

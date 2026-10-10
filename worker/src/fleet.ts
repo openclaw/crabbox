@@ -14,6 +14,16 @@ import {
   LeaseAdmissionFence,
   retainLeaseWake,
 } from "./lease-admission";
+import {
+  LifetimeStopRequiredError,
+  newLeaseLifetime,
+  lifetimeCandidate,
+  lifetimeDeadline,
+  lifetimeNextAlarm,
+  lifetimeRetryMs,
+  lifetimeWarningMs,
+  extendLeaseLifetime,
+} from "./lease-lifetime";
 import { ProviderRequestTimeoutError, withProviderOperationDeadline } from "./provider-deadline";
 import { cachedProviderPrice } from "./provider-pricing";
 import {
@@ -91,6 +101,7 @@ import {
 import {
   EC2SpotClient,
   AWSLeaseAuthorityError,
+  AWSLeaseObservationError,
   awsAutomaticProbesConfigured,
   awsCredentialsConfigured,
   awsConfiguredSecurityGroupID,
@@ -3326,6 +3337,7 @@ export class FleetCoordinator {
         if (
           leaseIsLive(lease) ||
           leaseNeedsCleanup(lease, now) ||
+          lifetimeCandidate(lease) ||
           leaseMayNeedInterruptedProvisioningRecovery(lease) ||
           lease.runtimeAdapterDeleteRequestedAt
         ) {
@@ -3336,6 +3348,7 @@ export class FleetCoordinator {
     );
     await this.reconcileInterruptedLeaseProvisioning(leaseIDs);
     await this.poolAccess.maintain();
+    await this.maintainLeaseLifetimes(leaseIDs);
     await this.expireLeases(leaseIDs);
     await this.webVNCCredentialHandoffs.cleanupExpired();
     await this.cleanupExpiredWebVNCPortalViewerAuth();
@@ -4396,6 +4409,11 @@ export class FleetCoordinator {
         ...(injectsSSHHostKey ? { sshHostKey: sshPublicKeyIdentity(config.sshHostPublicKey) } : {}),
         workRoot: config.workRoot,
         keep: config.keep,
+        lifetimePolicy: newLeaseLifetime(
+          this.env,
+          now,
+          Boolean(workspaceID || config.desktop || config.code),
+        ),
         ttlSeconds: config.ttlSeconds,
         idleTimeoutSeconds: config.idleTimeoutSeconds,
         estimatedHourlyUSD: cost.hourlyUSD,
@@ -5156,6 +5174,7 @@ export class FleetCoordinator {
         sshFallbackPorts: config.sshFallbackPorts,
         workRoot: config.workRoot,
         keep: config.keep,
+        lifetimePolicy: newLeaseLifetime(this.env, now, Boolean(config.desktop || config.code)),
         ttlSeconds: config.ttlSeconds,
         idleTimeoutSeconds: config.idleTimeoutSeconds,
         estimatedHourlyUSD: cost.hourlyUSD,
@@ -15215,6 +15234,9 @@ export class FleetCoordinator {
     if (request.method.toUpperCase() !== "POST") {
       return json({ error: "not_found" }, { status: 404 });
     }
+    if (action === "extend-lifetime") {
+      return this.extendLifetime(request, leaseID);
+    }
     if (action === "release") {
       return this.releaseLease(request, leaseID, true);
     }
@@ -17723,6 +17745,249 @@ export class FleetCoordinator {
     return owners;
   }
 
+  private async extendLifetime(request: Request, leaseID: string): Promise<Response> {
+    const body = (await request.json().catch(() => undefined)) as
+      | { reason?: unknown; expiresAt?: unknown }
+      | undefined;
+    if (!body || typeof body !== "object" || Array.isArray(body))
+      return json({ error: "invalid_lifetime_extension" }, { status: 400 });
+    return this.state.runExclusive(async () => {
+      const lease = await this.resolveLease(leaseID, request, true);
+      if (!lease) return notFound();
+      if (!lease.lifetimePolicy || !lifetimeCandidate(lease)) {
+        return json({ error: "lifetime_not_enrolled" }, { status: 409 });
+      }
+      if (lease.cleanupStartedAt || (await provisioningOwnsLease(this.state.storage, lease.id))) {
+        return json({ error: "cleanup_in_progress" }, { status: 409 });
+      }
+      try {
+        lease.lifetimePolicy = extendLeaseLifetime(
+          lease.lifetimePolicy,
+          requestOwner(request),
+          body.reason,
+          body.expiresAt,
+          Date.now(),
+        );
+      } catch (error) {
+        return json(
+          { error: "invalid_lifetime_extension", message: errorMessage(error) },
+          { status: 400 },
+        );
+      }
+      lease.updatedAt = new Date().toISOString();
+      await this.putLease(lease);
+      await this.scheduleAlarm();
+      return json({ lease: publicLeaseRecord(lease) });
+    });
+  }
+
+  private async maintainLeaseLifetimes(leaseIDs: ReadonlySet<string>): Promise<void> {
+    const ids: string[] = [];
+    await this.visitLeaseRecords((lease) => {
+      if (lifetimeCandidate(lease)) ids.push(lease.id);
+    }, leaseIDs);
+    let dispatched = 0;
+    for (const id of ids) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- claim exact current policy before each provider operation.
+      const claim = await this.state.runExclusive(async () => {
+        const lease = await this.getLease(id);
+        if (
+          !lease ||
+          !lifetimeCandidate(lease) ||
+          (await provisioningOwnsLease(this.state.storage, id))
+        )
+          return;
+        const policy = lease.lifetimePolicy!;
+        const now = Date.now();
+        if (lease.cleanupStartedAt && cleanupClaimDeadline(lease) > now) return;
+        const deadline = lifetimeDeadline(policy);
+        if (!policy.warnedAt && Number.isFinite(deadline) && now >= deadline - lifetimeWarningMs) {
+          policy.warnedAt = new Date(now).toISOString();
+          await this.putLease(lease);
+          console.warn(
+            `lease lifetime deadline approaching lease=${lease.id} deadline=${policy.deadlineAt}`,
+          );
+        }
+        if (
+          (Date.parse(policy.nextCheckAt ?? "") > now &&
+            !(
+              policy.status === "retained" &&
+              policy.stoppedAt &&
+              Date.parse(policy.deleteAfterAt ?? "") <= now
+            )) ||
+          (!policy.stoppedAt && now < deadline)
+        )
+          return;
+        if (lease.cleanupStartedAt && cleanupClaimDeadline(lease) > now) return;
+        const provider = managedLeaseProvider(lease);
+        const adapter = provider
+          ? this.provider(provider, lease.region, lease.providerProject)
+          : undefined;
+        policy.checkedAt = new Date(now).toISOString();
+        policy.nextCheckAt = new Date(now + lifetimeRetryMs).toISOString();
+        if (
+          !Number.isFinite(deadline) ||
+          !lease.cloudID ||
+          !lease.providerScope ||
+          lease.provisioningRequestStartedAt ||
+          lease.provisioningResourceMayExist ||
+          lease.cleanupError
+        ) {
+          policy.status = "failed";
+          policy.error =
+            "lifetime cleanup requires settled provisioning and exact retained resource scope";
+          await this.putLease(lease);
+          return;
+        }
+        if (!adapter?.retainLease) {
+          policy.status = "unsupported";
+          policy.error = "provider has no verified data-preserving stop capability";
+          await this.putLease(lease);
+          return;
+        }
+        if (policy.mode !== "enforce" || this.env.CRABBOX_LEASE_LIFETIME_MODE !== "enforce") {
+          policy.status = "due";
+          await this.putLease(lease);
+          return;
+        }
+        if (dispatched >= leaseCleanupBatchSize) return;
+        dispatched += 1;
+        const deleting = Boolean(
+          policy.stoppedAt &&
+          policy.retainedIdentity &&
+          Date.parse(policy.deleteAfterAt ?? "") <= now,
+        );
+        policy.status = deleting ? "deleting" : "stopping";
+        delete policy.error;
+        lease.cleanupStartedAt = new Date(now).toISOString();
+        lease.cleanupClaimExpiresAt = new Date(now + leaseCleanupClaimStaleMs).toISOString();
+        lease.updatedAt = new Date(now).toISOString();
+        await this.putLease(lease);
+        await this.armAlarmNoLaterThan(cleanupClaimDeadline(lease));
+        return { lease: structuredClone(lease), deleting, adapter };
+      });
+      if (!claim) continue;
+      const { lease, deleting, adapter } = claim;
+      const assertOwner = async () =>
+        this.state.runExclusive(async () => {
+          const current = await this.getLease(id);
+          if (
+            !current ||
+            !sameLeaseCleanupClaim(current, lease) ||
+            JSON.stringify(current.lifetimePolicy) !== JSON.stringify(lease.lifetimePolicy) ||
+            cleanupClaimDeadline(current) <= Date.now() ||
+            (await provisioningOwnsLease(this.state.storage, id))
+          ) {
+            throw new Error("lifetime cleanup owner, policy, or resource identity changed");
+          }
+        });
+      let retained: { stopped: boolean; identity: string } | undefined;
+      let failure: string | undefined;
+      let stopRequired = false;
+      try {
+        if (!deleting || !lease.lifetimePolicy!.deleteStartedAt) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- no lifecycle lock is held across provider I/O.
+          retained = await this.withLegacyProviderMutation(id, async () => {
+            await assertOwner();
+            return adapter.retainLease!(lease, {
+              assertOwner,
+              saveIdentity: async (identity) => {
+                await assertOwner();
+                await this.state.runExclusive(async () => {
+                  const current = await this.getLease(id);
+                  if (
+                    !current ||
+                    !sameLeaseCleanupClaim(current, lease) ||
+                    cleanupClaimDeadline(current) <= Date.now() ||
+                    !identity ||
+                    (current.lifetimePolicy!.retainedIdentity &&
+                      current.lifetimePolicy!.retainedIdentity !== identity)
+                  ) {
+                    throw new Error("retention identity or cleanup owner changed before stop");
+                  }
+                  // Persist exact disk identity before stop. Old readers understand retained release.
+                  current.lifetimePolicy!.retainedIdentity = identity;
+                  current.state = "released";
+                  current.releaseDeletesServer = false;
+                  current.releasedAt ??= new Date().toISOString();
+                  current.endedAt ??= current.releasedAt;
+                  await this.putLease(current);
+                  Object.assign(lease, structuredClone(current));
+                  await this.closeLeaseBridges(id, 1008, "maximum lease lifetime reached");
+                });
+              },
+            });
+          });
+        }
+        if (deleting && (lease.lifetimePolicy!.deleteStartedAt || retained?.stopped)) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- persist the cleanup phase before provider dispatch.
+          await this.state.runExclusive(async () => {
+            const current = await this.getLease(id);
+            if (
+              !current ||
+              !sameLeaseCleanupClaim(current, lease) ||
+              cleanupClaimDeadline(current) <= Date.now() ||
+              (await provisioningOwnsLease(this.state.storage, id))
+            ) {
+              throw new Error("lifetime deletion owner changed");
+            }
+            current.lifetimePolicy!.deleteStartedAt ??= new Date().toISOString();
+            await this.putLease(current);
+            Object.assign(lease, structuredClone(current));
+          });
+          // oxlint-disable-next-line eslint/no-await-in-loop -- reuse exact-owned deletion and its completion proof.
+          await this.deleteLeaseServer(lease);
+        }
+      } catch (error) {
+        failure = coordinatorErrorMessage(this.env, error);
+        stopRequired = error instanceof LifetimeStopRequiredError;
+      }
+      // oxlint-disable-next-line eslint/no-await-in-loop -- publish only the result belonging to this exact claim.
+      await this.state.runExclusive(async () => {
+        const current = await this.getLease(id);
+        if (
+          !current ||
+          !sameLeaseCleanupClaim(current, lease) ||
+          JSON.stringify(current.lifetimePolicy) !== JSON.stringify(lease.lifetimePolicy) ||
+          cleanupClaimDeadline(current) <= Date.now() ||
+          (await provisioningOwnsLease(this.state.storage, id))
+        )
+          return;
+        const now = new Date();
+        const policy = current.lifetimePolicy!;
+        delete current.cleanupStartedAt;
+        delete current.cleanupClaimExpiresAt;
+        current.updatedAt = now.toISOString();
+        policy.nextCheckAt = new Date(now.getTime() + lifetimeRetryMs).toISOString();
+        if (failure) {
+          policy.status = "failed";
+          policy.error = failure;
+          if (stopRequired) delete policy.deleteStartedAt;
+        } else if (deleting && policy.deleteStartedAt) {
+          policy.status = "complete";
+          current.releaseDeletesServer = true;
+          clearLeaseCleanupMetadata(current);
+          completeLeaseProviderCleanup(current, now.toISOString());
+        } else if (retained?.stopped) {
+          policy.status = "retained";
+          policy.stoppedAt ??= now.toISOString();
+          policy.deleteAfterAt ??= new Date(
+            Date.parse(policy.stoppedAt) + policy.retainSeconds * 1000,
+          ).toISOString();
+          if (policy.retainedIdentity !== retained.identity)
+            throw new Error("provider returned another retained identity");
+          current.host = "";
+          delete current.sshHostKey;
+          delete current.tailscale;
+          delete current.providerAccessExpiresAt;
+        } else {
+          policy.status = "stopping";
+        }
+        await this.putLease(current);
+      });
+    }
+  }
+
   private async expireLeases(leaseIDs: ReadonlySet<string>): Promise<void> {
     const claims = await this.state.runExclusive(async () => {
       const now = Date.now();
@@ -17968,6 +18233,7 @@ export class FleetCoordinator {
       });
     }
     await this.visitLeaseRecords(async (lease) => {
+      retainAlarm(lifetimeNextAlarm(lease, now), "lease-lifetime", leaseKey(lease.id));
       const workspace = lease.workspaceID
         ? await this.state.storage.get<WorkspaceRecord>(
             workspaceKey(lease.owner, lease.org, lease.workspaceID),
@@ -22447,6 +22713,7 @@ function sameLeaseCleanupClaim(current: LeaseRecord, claimed: LeaseRecord): bool
     current.providerKeyCleanupOwned === claimed.providerKeyCleanupOwned &&
     current.providerKeyCleanupPending === claimed.providerKeyCleanupPending &&
     current.cleanupCompletedAt === claimed.cleanupCompletedAt &&
+    JSON.stringify(current.lifetimePolicy) === JSON.stringify(claimed.lifetimePolicy) &&
     current.provisioningResourceMayExist === claimed.provisioningResourceMayExist &&
     current.provisioningRequestStartedAt === claimed.provisioningRequestStartedAt &&
     current.provisioningRequestSettledAt === claimed.provisioningRequestSettledAt &&
@@ -27720,6 +27987,13 @@ interface CloudProvider {
     server: ProviderMachine,
     attempts: ProvisioningAttempt[],
   ): Promise<ProviderLeaseCreateFinalization>;
+  retainLease?(
+    lease: LeaseRecord,
+    context: {
+      assertOwner: () => Promise<void>;
+      saveIdentity: (identity: string) => Promise<void>;
+    },
+  ): Promise<{ stopped: boolean; identity: string }>;
   releaseLease(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void>;
   deleteServer(id: string): Promise<void>;
   deleteOwnedServer?(lease: LeaseRecord): Promise<void>;
@@ -30571,7 +30845,62 @@ export class AWSProvider implements CloudProvider {
     return { config: nextConfig, lease: nextLease };
   }
 
-  async releaseLease(lease: LeaseRecord): Promise<void> {
+  async retainLease(
+    lease: LeaseRecord,
+    context: {
+      assertOwner: () => Promise<void>;
+      saveIdentity: (identity: string) => Promise<void>;
+    },
+  ): Promise<{ stopped: boolean; identity: string }> {
+    if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
+      throw new Error("lifetime stop is unsupported by the image-qualification transport");
+    }
+    return this.withLeaseOperation(async (session) => {
+      if (!(await this.verifyLeaseOperationAuthority(lease, session))) {
+        throw new ProviderResourceUnresolvedError(
+          "lifetime retention requires a persisted AWS account scope",
+        );
+      }
+      const server = await this.observeLeaseServer(
+        lease,
+        session,
+        () => session.findServer(lease.cloudID),
+        "machine",
+      );
+      if (!server || !["running", "pending", "stopping", "stopped"].includes(server.status)) {
+        throw new ProviderResourceUnresolvedError(
+          "retained AWS instance is absent or not stoppable",
+        );
+      }
+      const identity = await session.retainedServerIdentity(lease.cloudID, lease.id);
+      if (
+        lease.lifetimePolicy?.retainedIdentity &&
+        lease.lifetimePolicy.retainedIdentity !== identity
+      ) {
+        throw new ProviderResourceUnresolvedError("retained AWS root disk identity changed");
+      }
+      await context.saveIdentity(identity);
+      await context.assertOwner();
+      if (server.status === "running" || server.status === "pending") {
+        await session.stopRetainedServer(lease.cloudID, lease.id, identity, context.assertOwner);
+      }
+      const observed = await this.observeLeaseServer(
+        lease,
+        session,
+        () => session.findServer(lease.cloudID),
+        "machine",
+      );
+      if (!observed) throw new ProviderResourceUnresolvedError("AWS stop confirmation is missing");
+      if ((await session.retainedServerIdentity(lease.cloudID, lease.id)) !== identity) {
+        throw new ProviderResourceUnresolvedError(
+          "retained root disk changed during stop confirmation",
+        );
+      }
+      return { stopped: observed.status === "stopped", identity };
+    });
+  }
+
+  async releaseLease(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void> {
     await this.withLeaseOperation(async (session) => {
       const recordedAccount = await this.verifyLeaseOperationAuthority(lease, session);
       const unsettledAllocation = Boolean(
@@ -30589,8 +30918,34 @@ export class AWSProvider implements CloudProvider {
             ),
           )
         : undefined;
-      if (server) {
+      if (server && server.status !== "terminated") {
+        if (lease.lifetimePolicy?.deleteStartedAt && server.status === "shutting-down") {
+          throw new AWSLeaseObservationError(
+            "retained AWS instance termination is still in progress",
+          );
+        }
+        if (
+          lease.lifetimePolicy?.status === "deleting" &&
+          lease.releaseDeletesServer === false &&
+          server.status !== "stopped"
+        ) {
+          throw new LifetimeStopRequiredError(
+            "retained AWS instance must be confirmed stopped again before automatic deletion",
+          );
+        }
+        if (lease.lifetimePolicy?.retainedIdentity) {
+          const identity = await session.retainedServerIdentity(lease.cloudID, lease.id);
+          if (identity !== lease.lifetimePolicy.retainedIdentity) {
+            throw new ProviderResourceUnresolvedError(
+              "retained AWS root disk identity changed before deletion",
+            );
+          }
+        }
+        await context?.assertCleanupOwner?.();
         await session.terminateServerAndWait(lease.cloudID);
+      }
+      if (lease.lifetimePolicy?.retainedIdentity) {
+        await session.confirmRetainedVolumeDeleted(lease.lifetimePolicy.retainedIdentity);
       }
       if (lease.network?.awsPrivate) {
         privateAWSWorkspaceLifecycleLog("terminated", {
