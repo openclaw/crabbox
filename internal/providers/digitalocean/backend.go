@@ -15,7 +15,7 @@ import (
 
 type digitalOceanAPI interface {
 	AccountID(context.Context) (string, error)
-	ValidateSizeRegion(context.Context, core.Config) error
+	ResolveSizeRegion(context.Context, core.Config) (string, error)
 	ListCrabboxDroplets(context.Context) ([]droplet, error)
 	GetDroplet(context.Context, int64) (droplet, error)
 	CreateDroplet(context.Context, core.Config, string, string, string, bool, time.Time) (droplet, error)
@@ -93,7 +93,8 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if err := client.ValidateSizeRegion(ctx, cfg); err != nil {
+	cfg.DigitalOcean.Region, err = client.ResolveSizeRegion(ctx, cfg)
+	if err != nil {
 		return core.LeaseTarget{}, err
 	}
 	leaseID := core.NewLeaseID()
@@ -789,7 +790,7 @@ func (b *digitalOceanLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequ
 		return core.DoctorResult{}, err
 	}
 	result := core.InventoryDoctorResult(providerName, len(droplets))
-	result.Message += fmt.Sprintf(" default_type=%s region=%s image=%s", b.Cfg.ServerType, digitalOceanRegion(b.Cfg), digitalOceanImage(b.Cfg))
+	result.Message += fmt.Sprintf(" default_type=%s region=%s image=%s", b.Cfg.ServerType, shared.FirstNonBlank(b.Cfg.DigitalOcean.Region, "automatic"), digitalOceanImage(b.Cfg))
 	return result, nil
 }
 

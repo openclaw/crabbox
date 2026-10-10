@@ -11290,8 +11290,8 @@ func TestLoadConfigExeDevWorkRootDefaults(t *testing.T) {
 	}{
 		"default": {
 			body:    "provider: exe-dev\n",
-			want:    "/tmp/crabbox",
-			wantExe: "/tmp/crabbox",
+			want:    "/var/tmp/crabbox",
+			wantExe: "/var/tmp/crabbox",
 		},
 		"top-level": {
 			body:    "provider: exe-dev\nworkRoot: /custom/crabbox\n",
@@ -14727,13 +14727,14 @@ func TestExeDevConfigFileContract(t *testing.T) {
 	if got := baseConfig().ExeDev; got != wantDefaults {
 		t.Fatalf("defaults=%#v want=%#v", got, wantDefaults)
 	}
-	if reflect.TypeOf(ExeDevConfig{}).NumField() != 9 || reflect.TypeOf(fileExeDevConfig{}).NumField() != 9 {
+	if reflect.TypeOf(ExeDevConfig{}).NumField() != 10 || reflect.TypeOf(fileExeDevConfig{}).NumField() != 10 {
 		t.Fatal("config field count changed")
 	}
 	for _, trusted := range []bool{false, true} {
 		for _, mode := range []string{"omitted", "null", "empty", "equal", "whitespace", "value"} {
 			cfg := baseConfig()
 			cfg.ExeDev.Image = "prior-image"
+			cfg.ExeDev.Base = "prior-base"
 			cfg.ExeDev.Command = "prior-command"
 			cfg.ExeDev.User = "prior-user"
 			cfg.ExeDev.WorkRoot = "/prior/root"
@@ -14744,7 +14745,7 @@ func TestExeDevConfigFileContract(t *testing.T) {
 			for _, f := range []struct {
 				key string
 				v   *string
-			}{{"controlHost", &want.ControlHost}, {"image", &want.Image}, {"memory", &want.Memory}, {"disk", &want.Disk}, {"command", &want.Command}, {"user", &want.User}, {"workRoot", &want.WorkRoot}} {
+			}{{"controlHost", &want.ControlHost}, {"image", &want.Image}, {"base", &want.Base}, {"memory", &want.Memory}, {"disk", &want.Disk}, {"command", &want.Command}, {"user", &want.User}, {"workRoot", &want.WorkRoot}} {
 				if mode == "omitted" {
 					continue
 				}
@@ -14837,7 +14838,7 @@ func TestExeDevConfigEnvironmentContract(t *testing.T) {
 			for _, f := range []struct {
 				suffix, alias string
 				v             *string
-			}{{"CONTROL_HOST", "EXE_DEV_CONTROL_HOST", &want.ControlHost}, {"IMAGE", "EXE_DEV_IMAGE", &want.Image}, {"MEMORY", "EXE_DEV_MEMORY", &want.Memory}, {"DISK", "EXE_DEV_DISK", &want.Disk}, {"COMMAND", "", &want.Command}, {"USER", "", &want.User}, {"WORK_ROOT", "", &want.WorkRoot}} {
+			}{{"CONTROL_HOST", "EXE_DEV_CONTROL_HOST", &want.ControlHost}, {"IMAGE", "EXE_DEV_IMAGE", &want.Image}, {"FROM", "", &want.Base}, {"MEMORY", "EXE_DEV_MEMORY", &want.Memory}, {"DISK", "EXE_DEV_DISK", &want.Disk}, {"COMMAND", "", &want.Command}, {"USER", "", &want.User}, {"WORK_ROOT", "", &want.WorkRoot}} {
 				raw, alias := *f.v, "alias-value"
 				if mode == "empty" {
 					raw = ""
@@ -14914,7 +14915,7 @@ func TestExeDevConfigEnvironmentContract(t *testing.T) {
 }
 
 func TestExeDevConfigWorkRootFallbackContract(t *testing.T) {
-	for _, tc := range []struct{ providerRoot, generic, want string }{{"", "/work/crabbox", "/tmp/crabbox"}, {"", "/custom/root", "/custom/root"}, {"/specific/root", "/custom/root", "/specific/root"}, {"  ", "/custom/root", "  "}} {
+	for _, tc := range []struct{ providerRoot, generic, want string }{{"", "/work/crabbox", "/var/tmp/crabbox"}, {"", "/custom/root", "/custom/root"}, {"/specific/root", "/custom/root", "/specific/root"}, {"  ", "/custom/root", "  "}} {
 		cfg := baseConfig()
 		cfg.Provider = "exe-dev"
 		cfg.WorkRoot = tc.generic
@@ -14950,7 +14951,7 @@ func TestInheritedWorkRootCallerContract(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("USER", "fixture-user")
 	for _, tc := range []struct{ providerRoot, genericRoot, want string }{
-		{"", "", "/tmp/crabbox"}, {"", "/work/crabbox", "/tmp/crabbox"}, {"", "/Users/ec2-user/crabbox", "/tmp/crabbox"}, {"", `C:\crabbox`, "/tmp/crabbox"},
+		{"", "", "/var/tmp/crabbox"}, {"", "/work/crabbox", "/var/tmp/crabbox"}, {"", "/Users/ec2-user/crabbox", "/var/tmp/crabbox"}, {"", `C:\crabbox`, "/var/tmp/crabbox"},
 		{"", " /work/crabbox ", " /work/crabbox "}, {"", "/WORK/crabbox", "/WORK/crabbox"}, {"", `c:\crabbox`, `c:\crabbox`},
 		{"", "/srv/custom", "/srv/custom"}, {"", "/Users/alice/custom", "/Users/alice/custom"}, {"", `D:\custom`, `D:\custom`}, {"", "  ", "  "},
 		{" ", "/srv/custom", " "}, {"/work/crabbox", "/srv/custom", "/work/crabbox"}, {"relative", "/srv/custom", "relative"}, {"/provider/root", "/srv/custom", "/provider/root"},
@@ -16477,7 +16478,6 @@ func TestDigitalOceanBindingCoreDefaults(t *testing.T) {
 		}
 		region, image := raw, raw
 		if raw == "" {
-			region = "nyc3"
 			image = "ubuntu-24-04-x64"
 		}
 		if cfg.DigitalOcean.Region != region || cfg.DigitalOcean.Image != image {

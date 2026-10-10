@@ -115,6 +115,7 @@ func (c *AWSClient) CapacityDoctorChecks(ctx context.Context, cfg Config) []Doct
 		cfg.ServerType = serverTypeForConfig(cfg)
 	}
 	vcpus := c.capacityInstanceTypeVCPUs(ctx, cfg)
+	cfg.AWSRegion = c.region
 	checks := make([]DoctorCheck, 0, 2)
 	for _, market := range awsCapacityDoctorMarkets(cfg) {
 		limit, known, err := c.appliedEC2ServiceQuota(ctx, awsQuotaCodeForMarket(market))
@@ -1669,6 +1670,7 @@ func awsCapacityDoctorCheckForQuota(cfg Config, market string, quotaValue float6
 	needed := vcpus[serverType]
 	base := map[string]string{
 		"provider":             "aws",
+		"region":               cfg.AWSRegion,
 		"market":               market,
 		"quota_code":           quotaCode,
 		"default_class":        cfg.Class,

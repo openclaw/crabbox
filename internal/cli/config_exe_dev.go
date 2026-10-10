@@ -5,7 +5,7 @@ package cli
 // These values are runtime and presentation fallbacks, not configured defaults.
 // Empty WorkRoot permits inheritance; empty Image omits the native image option.
 const (
-	ExeDevWorkRootFallback  = "/tmp/crabbox"
+	ExeDevWorkRootFallback  = "/var/tmp/crabbox"
 	ExeDevDefaultImageLabel = "default"
 )
 
@@ -14,6 +14,7 @@ const (
 type ExeDevConfig struct {
 	ControlHost string `config:"controlHost" env:"CRABBOX_EXE_DEV_CONTROL_HOST" envAlias:"EXE_DEV_CONTROL_HOST" flag:"exe-dev-control-host" sources:"user,repo,env,flag" help:"exe.dev SSH API host" default:"exe.dev" fileIgnoreEmpty:"true" reportApplied:"true" fileStorage:"value"`
 	Image       string `config:"image" env:"CRABBOX_EXE_DEV_IMAGE" envAlias:"EXE_DEV_IMAGE" flag:"exe-dev-image" sources:"user,repo,env,flag" help:"exe.dev VM image" fileIgnoreEmpty:"true" fileStorage:"value"`
+	Base        string `config:"base" env:"CRABBOX_EXE_DEV_FROM" flag:"exe-dev-from" sources:"user,repo,env,flag" help:"clone this exe.dev base VM instead of creating a new VM" fileIgnoreEmpty:"true" fileStorage:"value"`
 	CPUs        int    `config:"cpus" env:"CRABBOX_EXE_DEV_CPUS" flag:"exe-dev-cpus" sources:"user,repo,env,flag" help:"exe.dev VM CPUs" default:"2" nonnegative:"true" fileInt:"positive" envInt:"fallback" fileStorage:"value"`
 	Memory      string `config:"memory" env:"CRABBOX_EXE_DEV_MEMORY" envAlias:"EXE_DEV_MEMORY" flag:"exe-dev-memory" sources:"user,repo,env,flag" help:"exe.dev VM memory, for example 4GB" default:"4GB" fileIgnoreEmpty:"true" fileStorage:"value"`
 	Disk        string `config:"disk" env:"CRABBOX_EXE_DEV_DISK" envAlias:"EXE_DEV_DISK" flag:"exe-dev-disk" sources:"user,repo,env,flag" help:"exe.dev VM disk, for example 10GB" default:"10GB" fileIgnoreEmpty:"true" fileStorage:"value"`

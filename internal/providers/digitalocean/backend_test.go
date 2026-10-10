@@ -3866,8 +3866,8 @@ func TestApplyDigitalOceanDefaultsUseProviderDefaults(t *testing.T) {
 
 	applyDigitalOceanDefaults(&cfg)
 
-	if cfg.DigitalOcean.Region != "nyc3" {
-		t.Fatalf("DigitalOcean.Region=%q want %q", cfg.DigitalOcean.Region, "nyc3")
+	if cfg.DigitalOcean.Region != "" {
+		t.Fatalf("DigitalOcean.Region=%q want automatic selection", cfg.DigitalOcean.Region)
 	}
 	if cfg.DigitalOcean.Image != "ubuntu-24-04-x64" {
 		t.Fatalf("DigitalOcean.Image=%q want %q", cfg.DigitalOcean.Image, "ubuntu-24-04-x64")

@@ -150,9 +150,6 @@ func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
 }
 
 func applyNativeDefaults(cfg *core.DigitalOceanConfig) {
-	if cfg.Region == "" {
-		cfg.Region = core.DigitalOceanRegionFallback
-	}
 	if cfg.Image == "" {
 		cfg.Image = core.DigitalOceanImageFallback
 	}

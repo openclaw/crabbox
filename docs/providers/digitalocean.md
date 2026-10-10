@@ -63,7 +63,7 @@ provider: digitalocean
 target: linux
 class: standard
 digitalocean:
-  region: nyc3
+  # region: sfo2 # Optional; omit to select the closest available region to San Francisco.
   image: ubuntu-24-04-x64
   vpc: ""
   sshCIDRs: []
@@ -73,7 +73,7 @@ Config keys under `digitalocean:`:
 
 | Key | Maps to | Default | Notes |
 | --- | --- | --- | --- |
-| `region` | `cfg.DigitalOcean.Region` | `nyc3` | DigitalOcean region slug. |
+| `region` | `cfg.DigitalOcean.Region` | first available near San Francisco | Optional DigitalOcean region slug; an explicit value is authoritative. |
 | `image` | `cfg.DigitalOcean.Image` | `ubuntu-24-04-x64` | Droplet image slug. |
 | `vpc` | `cfg.DigitalOcean.VPCUUID` | empty | Optional VPC UUID for Droplet placement. |
 | `sshCIDRs` | `cfg.DigitalOcean.SSHCIDRs` | empty | Reserved for firewall-aware follow-up work; Phase 1 does not create firewalls. |
@@ -82,13 +82,17 @@ These are effective runtime defaults; the raw provider configuration starts
 empty/nil. DigitalOcean adds no provider-specific flags. Configure these settings
 through YAML or the environment; generic command flags remain separate.
 
-Size availability depends on the account and can change over time, including in
-the default `nyc3` region. Before creating a Droplet or account SSH key, Crabbox
-checks the selected size against DigitalOcean's paginated `/v2/sizes` catalog.
-`digitalocean_size_unavailable_in_region` lists the available regions when the
-size cannot be used in the selected region. Choose one explicitly with
-`digitalocean.region` or `CRABBOX_DIGITALOCEAN_REGION`; Crabbox never changes the
-region automatically. For example:
+Size availability depends on the account and can change over time. Before
+creating a Droplet or account SSH key, Crabbox checks the selected size against
+DigitalOcean's paginated `/v2/sizes` catalog. When no region is configured, it
+selects the first region offering that size in this fixed preference order:
+`sfo3`, `sfo2`, `sfo1`, `tor1`, `nyc3`, `nyc1`, `nyc2`, `lon1`, `ams3`, `fra1`,
+`sgp1`, `blr1`, `syd1`. The provisioning line reports the chosen region.
+
+An explicit `digitalocean.region` or `CRABBOX_DIGITALOCEAN_REGION` is never
+changed automatically. `digitalocean_size_unavailable_in_region` lists the
+available regions when the size cannot be used in the explicit region, or
+when none of the preferred regions offers it. For example:
 
 ```sh
 CRABBOX_DIGITALOCEAN_REGION=sfo2 crabbox warmup --provider digitalocean --class small
@@ -214,6 +218,11 @@ create reply or readiness failure. The durable local intent binds the API
 account, create inputs, per-lease SSH key, allocation nonce, and observed
 Droplet ID. Changed inputs, account changes, and replacement Droplets are
 rejected. No coordinator is needed.
+
+An automatically selected region is saved with the create intent and claim.
+Replay reuses that region even if the size catalog changes; it does not select
+a new region for an existing intent. If automatic selection fails before an
+intent can be recorded, no lease or provider resources are created.
 
 DigitalOcean has no create idempotency key: Crabbox records admission before
 the POST and never repeats an unresolved attempt on replay. A definite create

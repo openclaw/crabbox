@@ -2096,7 +2096,7 @@ func TestCallerFinalizedDefaultsLoadConfig(t *testing.T) {
 		{"sandbox errors retain priority", "provider: windows-sandbox\ntarget: bogus\nwindows:\n  mode: bogus\n", "", "", "provider=windows-sandbox supports target=windows only"},
 		{"sandbox mode error", "provider: windows-sandbox\nwindows:\n  mode: wsl\n", "", "", "provider=windows-sandbox supports windows.mode=normal only"},
 		{"hyperv invalid target", "provider: hyperv\ntarget: bogus\n", "", "", "target must be"},
-		{"exe target alias", "provider: exe\ntarget: ubuntu\n", "linux", "/tmp/crabbox", ""},
+		{"exe target alias", "provider: exe\ntarget: ubuntu\n", "linux", "/var/tmp/crabbox", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearConfigEnv(t)

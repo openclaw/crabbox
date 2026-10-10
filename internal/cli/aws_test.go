@@ -811,6 +811,51 @@ func TestApplyAWSRunInstanceTargetOptionsLeavesNativeWindowsDefault(t *testing.T
 	}
 }
 
+func TestAWSExactTypeQuotaRejectionPreservesQuotaGuidance(t *testing.T) {
+	launches := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+			return
+		}
+		switch r.Form.Get("Action") {
+		case "DescribeKeyPairs":
+			writeEC2Error(w, "InvalidKeyPair.NotFound", "missing", http.StatusBadRequest)
+		case "ImportKeyPair":
+			writeEC2XML(w, `<ImportKeyPairResponse><keyName>quota-test</keyName><keyPairId>key-quota-test</keyPairId></ImportKeyPairResponse>`)
+		case "DescribeSecurityGroups":
+			writeEC2XML(w, `<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-quota-test</groupId></item></securityGroupInfo></DescribeSecurityGroupsResponse>`)
+		case "AuthorizeSecurityGroupIngress":
+			writeEC2XML(w, `<AuthorizeSecurityGroupIngressResponse />`)
+		case "RunInstances":
+			launches++
+			if r.Form.Get("InstanceType") != "t3.small" {
+				t.Errorf("unexpected fallback type: %s", r.Form.Get("InstanceType"))
+			}
+			writeEC2Error(w, "VcpuLimitExceeded", "regional quota exhausted", http.StatusBadRequest)
+		case "DeleteKeyPair":
+			writeEC2XML(w, `<DeleteKeyPairResponse><return>true</return></DeleteKeyPairResponse>`)
+		default:
+			t.Errorf("unexpected AWS action: %s", r.Form.Get("Action"))
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+	cfg := baseConfig()
+	cfg.Provider, cfg.ProviderKey, cfg.ServerType, cfg.ServerTypeExplicit = "aws", "quota-test", "t3.small", true
+	cfg.AWSAMI, cfg.AWSSGID, cfg.Capacity.Market = "ami-quota-test", "sg-quota-test", "on-demand"
+	cfg.AWSRootGB = 400
+	_, _, err := testAWSClient(server.URL).createServerWithFallbackInRegion(
+		context.Background(), cfg, testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 11)), "cbx_abcdef123456", "quota-test", false, nil, nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "remove --type to allow class fallback (regional quota limits still apply)") || !strings.Contains(err.Error(), "VcpuLimitExceeded") {
+		t.Fatalf("err=%v, want quota rejection and bounded fallback guidance", err)
+	}
+	if launches != 1 {
+		t.Fatalf("launches=%d, want one exact-type attempt", launches)
+	}
+}
+
 func TestAWSCapacityDoctorUsesInstanceMetadata(t *testing.T) {
 	for _, tc := range []struct {
 		name, vcpus, wantStatus, wantNeeded string
@@ -819,6 +864,7 @@ func TestAWSCapacityDoctorUsesInstanceMetadata(t *testing.T) {
 	}{
 		{name: "below metal quota", vcpus: "192", quota: 191, wantStatus: "warning", wantNeeded: "192"},
 		{name: "exact metal quota", vcpus: "192", quota: 192, wantStatus: "ok", wantNeeded: "192"},
+		{name: "above metal quota", vcpus: "192", quota: 256, wantStatus: "ok", wantNeeded: "192"},
 		{name: "missing metadata", quota: 192, wantStatus: "skip", wantNeeded: "unknown"},
 		{name: "zero metadata", vcpus: "0", quota: 192, wantStatus: "skip", wantNeeded: "unknown"},
 		{name: "malformed metadata", vcpus: "invalid", quota: 192, wantStatus: "skip", wantNeeded: "unknown"},
@@ -861,12 +907,16 @@ func TestAWSCapacityDoctorUsesInstanceMetadata(t *testing.T) {
 			})
 			cfg := defaultConfig()
 			cfg.Provider, cfg.TargetOS, cfg.ServerType = "aws", targetLinux, "c7a.metal-48xl"
+			cfg.AWSRegion = "us-east-1"
 			cfg.Capacity.Market, cfg.Capacity.Fallback = "spot", "on-demand-after-120s"
 			checks := client.CapacityDoctorChecks(context.Background(), cfg)
 			if len(checks) != 2 {
 				t.Fatalf("got %d checks, want both markets", len(checks))
 			}
 			for _, check := range checks {
+				if check.Details["region"] != "eu-west-1" || !strings.Contains(check.Message, "region=eu-west-1") {
+					t.Errorf("check=%+v, want the quota client's region", check)
+				}
 				if check.Status != tc.wantStatus || check.Details["default_needed_vcpus"] != tc.wantNeeded {
 					t.Errorf("check=%+v, want %s with needed=%s", check, tc.wantStatus, tc.wantNeeded)
 				}
