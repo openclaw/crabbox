@@ -355,6 +355,72 @@ known-ID cleanup before rotating credentials, or restore the original context
 and repeat explicit stop. Legacy records without scope require operator
 resolution; never backfill them from current configuration.
 
+### Maximum-age safety net for retained compute
+
+The coordinator can cap newly admitted resources that would otherwise remain
+running after a retained release. This uses its existing alarm/cron, not a
+separate cleanup service. It does not replace the shorter ordinary idle/TTL
+expiry or explicit `crabbox stop` deletion contract described above.
+
+Set `CRABBOX_LEASE_LIFETIME_MODE=report` first. Each new managed lease snapshots
+its mode, creation-time deadline and storage retention. Inspect `lifetimePolicy`
+on the lease API: `deadlineAt`, `warnedAt`, `checkedAt`, `status`, `error`,
+`stoppedAt`, and `deleteAfterAt` expose policy and progress. The coordinator logs
+one warning an hour before the deadline (or on its first overdue observation).
+Warnings are logs/API state, not email or messaging notifications.
+
+After qualifying report-only results, `CRABBOX_LEASE_LIFETIME_MODE=enforce`
+enrolls **subsequent creates** for enforcement. Previously report-only leases
+stay report-only; legacy records and registered external resources are never
+automatically enrolled. Setting the runtime mode back to `report` or `off`
+suppresses new safety-net mutations; it does not cancel already-dispatched
+provider work or the existing ordinary TTL/cleanup paths.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `CRABBOX_LEASE_LIFETIME_MODE` | `off` | `off`, `report`, or `enforce` |
+| `CRABBOX_BATCH_MAX_AGE_SECONDS` | `86400` | Creation-time cap for ordinary batch/CI leases |
+| `CRABBOX_INTERACTIVE_MAX_AGE_SECONDS` | `604800` | Cap for coordinator workspaces, desktop, and code leases |
+| `CRABBOX_STOPPED_RETENTION_SECONDS` | `604800` | Root-disk retention after the first confirmed stop |
+
+Duration settings accept integer seconds from 60 through 2678400 (31 days).
+`keep`, heartbeat activity, provider restart, and config changes cannot reset a
+persisted deadline. A plain CLI lease without workspace/desktop/code admission
+uses the batch cap even if an operator later attaches interactively.
+
+An authenticated admin can grant a bounded exception with
+`POST /v1/admin/leases/{id}/extend-lifetime` and JSON
+`{"reason":"finish debugging","expiresAt":"2026-11-01T12:00:00Z"}` (use a future
+time within seven days of the request). The API records the authenticated owner,
+reason, grant time, and expiry; it refuses non-advancing deadlines and extensions
+after stopping begins. This extends only the safety-net deadline, **not** the
+ordinary idle/TTL deadline. It cannot revive a stopped lease.
+
+Initial enforcement supports coordinator-owned, on-demand AWS Linux/Windows
+instances with exactly one owned EBS root disk, delete-on-termination enabled,
+and no instance-store storage. It requires the persisted account and Region,
+exact instance ownership, and matching disk identity/attachment. Other providers,
+Mac dedicated hosts, Spot instances, extra disks, image-qualification transports,
+and unresolved provisioning remain unsupported or failed with diagnostics. They
+are not silently terminated by this safety net. This is not a fleet-wide spend
+cap, and direct CLI allocations are outside this coordinator policy.
+
+Before stopping, the coordinator durably records the root disk identity and
+retained-release intent, then rechecks the cleanup owner immediately before
+`StopInstances`. Acceptance is not confirmation: retention starts only after an
+owned read observes `stopped`. The original disk deadline survives retries and
+manual restarts; subsequent observations stop restarted compute again. After
+retention expires, existing owned deletion verifies unchanged disk topology and
+instance termination, then separately confirms the root disk is absent. Stop
+never publishes `cleanupCompletedAt`. Errors retain retryable responsibility
+and do not publish deletion success.
+
+Stopping preserves that EBS workspace, not running processes or RAM. Storage
+continues billing during retention. Mac dedicated-host billing requires a
+separate host-release lifecycle and is deliberately not represented as stopped
+compute savings. No live deployment or legacy fleet enrollment follows merely
+from merging this feature.
+
 ### AWS orphan sweep
 
 Independent of per-lease expiry, the Worker can report AWS resources that no

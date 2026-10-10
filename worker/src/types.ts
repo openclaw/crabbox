@@ -1,4 +1,5 @@
 import type { AWSQualificationTransportBinding } from "./aws-qualification-contract";
+import type { LeaseLifetimePolicy } from "./lease-lifetime";
 
 export interface AWSCredentials {
   accessKeyId: string;
@@ -10,6 +11,10 @@ export interface AWSCredentials {
 export type AWSCredentialProvider = () => Promise<AWSCredentials>;
 
 export interface Env {
+  CRABBOX_LEASE_LIFETIME_MODE?: string;
+  CRABBOX_BATCH_MAX_AGE_SECONDS?: string;
+  CRABBOX_INTERACTIVE_MAX_AGE_SECONDS?: string;
+  CRABBOX_STOPPED_RETENTION_SECONDS?: string;
   CRABBOX_PORTABLE_POOLS_ENABLED?: string;
   FLEET: DurableObjectNamespace;
   CF_VERSION_METADATA?: {
@@ -535,6 +540,7 @@ export interface LeaseRecord {
   workRoot: string;
   keep: boolean;
   ttlSeconds: number;
+  lifetimePolicy?: LeaseLifetimePolicy | undefined;
   idleTimeoutSeconds?: number;
   estimatedHourlyUSD: number;
   maxEstimatedUSD: number;

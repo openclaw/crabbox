@@ -10,6 +10,8 @@
 
 ### Added
 
+- Coordinator: add opt-in report-only and enforced maximum-age policies for new retained leases, expiring admin exceptions, and verified stop/retention cleanup for eligible AWS EBS-root instances. [PR 2759](https://github.com/openclaw/crabbox/pull/2759).
+
 - exe.dev: start separately claimed leases from prepared VMs with `--exe-dev-from`, fresh ownership tags, and persistent work roots while preserving existing claim paths. [PR 2754](https://github.com/openclaw/crabbox/pull/2754). Thanks @salmonumbrella.
 - GitHub Codespaces: support replay-safe caller-supplied lease IDs with account- and intent-bound recovery, exact-resource cleanup, and terminal receipts. [Issue 2660](https://github.com/openclaw/crabbox/issues/2660). Thanks @jcxmt125.
 

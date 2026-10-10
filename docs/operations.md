@@ -520,6 +520,10 @@ CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY required when artifact backend is enabled
 CRABBOX_ARTIFACTS_SESSION_TOKEN   optional
 CRABBOX_ARTIFACTS_UPLOAD_EXPIRES_SECONDS optional
 CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS    optional
+CRABBOX_LEASE_LIFETIME_MODE       optional; off (default), report, or enforce for newly admitted leases
+CRABBOX_BATCH_MAX_AGE_SECONDS     optional; default 86400
+CRABBOX_INTERACTIVE_MAX_AGE_SECONDS optional; default 604800
+CRABBOX_STOPPED_RETENTION_SECONDS optional; default 604800 after confirmed stop
 CRABBOX_AWS_ORPHAN_SWEEP_ENABLED  optional; defaults on when AWS broker credentials exist
 CRABBOX_AWS_ORPHAN_SWEEP_DELETE   optional; set 1 to terminate coordinator-owned orphan EC2 instances
 CRABBOX_AWS_ORPHAN_SWEEP_INTERVAL_SECONDS optional; default 3600

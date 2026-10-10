@@ -1,3 +1,4 @@
+import { lifetimeOwnsCompute } from "./lease-lifetime";
 import { isRegisteredLease, leaseIsLive } from "./lease-state";
 import { orgLabelForDisplay, orgMatchesForAccounting, orgMatchesForFilter } from "./org-identity";
 import type { Env, LeaseRecord, Provider } from "./types";
@@ -155,7 +156,7 @@ export function addLeaseToCostLimitUsage(
   }
   // A live record still owns provider capacity after its heartbeat deadline
   // until cleanup commits a terminal state.
-  if (leaseIsLive(lease)) {
+  if (leaseIsLive(lease) || lifetimeOwnsCompute(lease)) {
     usage.activeLeases += 1;
     if (lease.owner === usage.owner) {
       usage.ownerActiveLeases += 1;
@@ -166,7 +167,10 @@ export function addLeaseToCostLimitUsage(
   }
   // A live lease still reserves provider spend in the active budget window,
   // even when its creation month has rolled over.
-  if (!leaseIsLive(lease) && monthKey(new Date(lease.createdAt)) !== usage.month) {
+  if (
+    !(leaseIsLive(lease) || lifetimeOwnsCompute(lease)) &&
+    monthKey(new Date(lease.createdAt)) !== usage.month
+  ) {
     return;
   }
   const reservedUSD = leaseUsage(lease, now).reservedUSD;
@@ -333,12 +337,13 @@ function leaseMatchesUsageFilter(lease: LeaseRecord, filter: UsageFilter): boole
 function leaseUsage(lease: LeaseRecord, now: Date): UsageAccumulator {
   const created = parseTime(lease.createdAt, now);
   const ended = parseTime(lease.endedAt || lease.releasedAt || "", now);
-  const stop = leaseIsLive(lease) ? now : ended;
+  const stopped = parseTime(lease.lifetimePolicy?.stoppedAt ?? "", ended);
+  const stop = leaseIsLive(lease) || lifetimeOwnsCompute(lease) ? now : stopped;
   const runtimeSeconds = Math.max(0, Math.trunc((stop.getTime() - created.getTime()) / 1000));
   const estimatedUSD = roundUSD((runtimeSeconds / 3600) * (lease.estimatedHourlyUSD || 0));
   return {
     leases: 1,
-    activeLeases: leaseIsLive(lease) ? 1 : 0,
+    activeLeases: leaseIsLive(lease) || lifetimeOwnsCompute(lease) ? 1 : 0,
     runtimeSeconds,
     estimatedUSD,
     reservedUSD: roundUSD(lease.maxEstimatedUSD || estimatedUSD),
