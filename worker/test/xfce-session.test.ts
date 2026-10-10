@@ -4,15 +4,22 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 
 import { cloudInit } from "../src/bootstrap";
 import { leaseConfig } from "../src/config";
 
+// Loaded hosts take over six seconds for these real shell fixtures. A test
+// can run three commands plus cleanup; its budget must contain each command's.
+const fixtureCommandTimeout = 10_000;
+vi.setConfig({ testTimeout: fixtureCommandTimeout * 4 });
+
+let bootstrapDocument: string | undefined;
+
 function installedBootstrapFile(path: string): string {
-  const document = cloudInit(
+  const document = (bootstrapDocument ??= cloudInit(
     leaseConfig({ provider: "aws", desktop: true, sshPublicKey: "ssh-ed25519 fixture" }),
-  );
+  ));
   const files = document.split(/^  - path: /m).slice(1);
   const matches = files.filter((file) => file.startsWith(`${path}\n`));
   expect(matches, `installed bootstrap file ${path}`).toHaveLength(1);
@@ -101,7 +108,8 @@ dbus-send() {
   done
   printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "\${DBUS_SESSION_BUS_ADDRESS:-}" "$destination" "$object" "$method" "$argument" >> "$FIXTURE_PANEL_CALLS"
   [ "\${DBUS_SESSION_BUS_ADDRESS:-}" = "$FIXTURE_EXPECTED_BUS" ] || return 96
-  owner="$(cat "$FIXTURE_PANEL_OWNER")"
+  # Polling this fixture must not spawn a new process for every owner read.
+  IFS= read -r owner < "$FIXTURE_PANEL_OWNER" || :
   case "$method" in
     org.freedesktop.DBus.GetNameOwner)
       [ "$destination" = org.freedesktop.DBus ] && [ "$object" = /org/freedesktop/DBus ] && [ "$argument" = string:org.xfce.Panel ] || return 97
@@ -113,7 +121,7 @@ dbus-send() {
     org.xfce.Panel.Terminate)
       [ "$destination" = "$owner" ] && [ "$object" = /org/xfce/Panel ] && [ "$argument" = boolean:true ] || return 98
       cp "$FIXTURE_HOME/.config/gtk-3.0/gtk.css" "$FIXTURE_PANEL_RESTART_CSS"
-      behavior="$(cat "$FIXTURE_PANEL_BEHAVIOR")"
+      IFS= read -r behavior < "$FIXTURE_PANEL_BEHAVIOR" || :
       case "$behavior" in
         replace) printf ':1.%s\\n' "$((\${owner##*.} + 1))" > "$FIXTURE_PANEL_OWNER" ;;
         failed-dispatch) printf ':1.41\\n' > "$FIXTURE_PANEL_OWNER"; return 1 ;;
@@ -312,7 +320,7 @@ function themeFixture(
       {
         env: environment(display, callerBus, expectedBus),
         encoding: "utf8",
-        timeout: 5000,
+        timeout: fixtureCommandTimeout,
       },
     );
     expect(result.error).toBeUndefined();
@@ -911,7 +919,7 @@ setInterval(() => {}, 1000);
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(
         () => reject(new Error("GUI launch or stream closure did not complete")),
-        3000,
+        fixtureCommandTimeout,
       );
     });
     try {
