@@ -23,7 +23,11 @@ func TestExeDevArchiveCheckpointRestoreAndFork(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 required for fake SSH surface")
 	}
-	root := t.TempDir()
+	// Git resolves macOS's /var alias; claims must use the same repository path.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	bin := filepath.Join(root, "bin")
 	if err := os.MkdirAll(bin, 0700); err != nil {
 		t.Fatal(err)
@@ -167,7 +171,7 @@ print(json.dumps(vm))
 	if len(state) != 2 || len(state["base"].Tags) != 1 || state["base"].Tags[0] != "source-private-tag" {
 		t.Fatalf("leaked fork or mutated base: %s", data)
 	}
-	err := app.Run(context.Background(), []string{"checkpoint", "create", "--provider", "exe-dev", "--id", leaseID, "--mode", "native"})
+	err = app.Run(context.Background(), []string{"checkpoint", "create", "--provider", "exe-dev", "--id", leaseID, "--mode", "native"})
 	if err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("native err=%v", err)
 	}
