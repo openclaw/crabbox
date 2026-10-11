@@ -3678,18 +3678,6 @@ func writeDelegatedRunProof(path, templateName string, cfg Config, result RunRes
 	})
 }
 
-func writeDelegatedRunReceipt(path, keyPath string, cfg Config, result RunResult, req RunRequest) (runArtifact, error) {
-	key, err := resolveAttestKey(keyPath)
-	if err != nil {
-		return runArtifact{}, Exit(2, "attest key: %v", err)
-	}
-	prepared, err := prepareDelegatedRunReceipt(path, key, cfg, result, req)
-	if err != nil {
-		return runArtifact{}, err
-	}
-	return persistPreparedRunReceipt(prepared)
-}
-
 func prepareDelegatedRunReceipt(path string, key ed25519.PrivateKey, cfg Config, result RunResult, req RunRequest) (preparedRunReceipt, error) {
 	command := strings.TrimSpace(result.CommandText)
 	if command == "" {
@@ -3734,10 +3722,6 @@ func runCommandDisplayWithLiteralArgs(command []string, shellMode bool, literalA
 		return runCommandShellStringWithLiteralArgs(command, shellMode, literalArgs)
 	}
 	return strings.Join(readableShellWords(command), " ")
-}
-
-func runCommandShellString(command []string, shellMode bool) string {
-	return runCommandShellStringWithLiteralArgs(command, shellMode, nil)
 }
 
 func runCommandShellStringWithLiteralArgs(command []string, shellMode bool, literalArgs map[int]bool) string {
@@ -4295,10 +4279,6 @@ func gitHydrateBaseSHA(repo Repo, baseRef string) string {
 	return gitOutput(repo.Root, "rev-parse", "--verify", baseRef+"^{commit}")
 }
 
-func shouldUseShell(command []string) bool {
-	return shouldUseShellWithLiteralArgs(command, nil)
-}
-
 func shouldUseShellWithLiteralArgs(command []string, literalArgs map[int]bool) bool {
 	if len(command) == 1 {
 		if literalArgs[0] {
@@ -4521,11 +4501,6 @@ func shouldReplaceLeaseAfterBeforeCommandSSHFailure(err error, acquired, useCoor
 		return false
 	}
 	return shouldReleaseRunLease(acquired, keep, keepOnFailure, stopAfter, err)
-}
-
-func releaseCoordinatorLease(ctx context.Context, coord *CoordinatorClient, leaseID, expectedProvider string) error {
-	_, err := releaseCoordinatorLeaseResult(ctx, coord, leaseID, expectedProvider)
-	return err
 }
 
 func releaseCoordinatorLeaseResult(ctx context.Context, coord *CoordinatorClient, leaseID, expectedProvider string) (CoordinatorLease, error) {
