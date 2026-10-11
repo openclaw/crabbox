@@ -1,4 +1,5 @@
 import { leaseProviderCleanupCompleted } from "./lease-cleanup";
+import { publicLifetimePolicy } from "./lease-lifetime";
 import {
   MISSING_ORG_KEY,
   isCurrentOrgKey,
@@ -27,6 +28,8 @@ export function publicLeaseRecord(record: LeaseRecord): PublicLeaseRecord {
     ...record,
     org: orgLabelForDisplay(record.org),
   };
+  if (record.lifetimePolicy)
+    publicRecord.lifetimePolicy = publicLifetimePolicy(record.lifetimePolicy);
   if (record.provisioningRecoveryObservedAt || record.provisioningRecoveryMissingSince) {
     publicRecord.provisioningPhase = "interrupted-recovering";
   } else if (record.state === "provisioning") {

@@ -201,6 +201,7 @@ export interface CapacityRequirements {
 
 export interface LeaseRequest {
   serveMachine?: string;
+  lifetimePolicy?: import("./lease-lifetime").LeaseLifetimeRequest;
   leaseID?: string;
   createAttemptID?: string;
   slug?: string;

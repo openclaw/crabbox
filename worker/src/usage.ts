@@ -1,4 +1,4 @@
-import { lifetimeOwnsCompute } from "./lease-lifetime";
+import { lifetimeOwnsCompute, lifetimeRuntimeMs } from "./lease-lifetime";
 import { isRegisteredLease, leaseIsLive } from "./lease-state";
 import { orgLabelForDisplay, orgMatchesForAccounting, orgMatchesForFilter } from "./org-identity";
 import type { Env, LeaseRecord, Provider } from "./types";
@@ -339,7 +339,12 @@ function leaseUsage(lease: LeaseRecord, now: Date): UsageAccumulator {
   const ended = parseTime(lease.endedAt || lease.releasedAt || "", now);
   const stopped = parseTime(lease.lifetimePolicy?.stoppedAt ?? "", ended);
   const stop = leaseIsLive(lease) || lifetimeOwnsCompute(lease) ? now : stopped;
-  const runtimeSeconds = Math.max(0, Math.trunc((stop.getTime() - created.getTime()) / 1000));
+  const runtimeSeconds = Math.max(
+    0,
+    Math.trunc(
+      (lifetimeRuntimeMs(lease, now.getTime()) ?? stop.getTime() - created.getTime()) / 1000,
+    ),
+  );
   const estimatedUSD = roundUSD((runtimeSeconds / 3600) * (lease.estimatedHourlyUSD || 0));
   return {
     leases: 1,

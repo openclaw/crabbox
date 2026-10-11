@@ -26,6 +26,7 @@ export const awsMacOSInstanceTypeCandidates = [
 export const workspaceProviderKeyPrefix = "crabbox-workspace-";
 
 export interface LeaseConfig {
+  lifetimePolicy?: LeaseRequest["lifetimePolicy"];
   provider: Provider;
   target: TargetOS;
   architecture: Architecture;
@@ -368,6 +369,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
         )
       : (input.capacity?.regions ?? []);
   return {
+    ...(input.lifetimePolicy ? { lifetimePolicy: input.lifetimePolicy } : {}),
     provider,
     target,
     architecture,

@@ -1,3 +1,4 @@
+import { lifetimeRuntimeMs } from "./lease-lifetime";
 import type { LeaseRecord } from "./types";
 
 export function clearLeaseCleanupCompletion(lease: LeaseRecord): void {
@@ -5,6 +6,12 @@ export function clearLeaseCleanupCompletion(lease: LeaseRecord): void {
 }
 
 export function completeLeaseProviderCleanup(lease: LeaseRecord, completedAt: string): void {
+  if (lease.lifetimePolicy?.compute) {
+    lease.lifetimePolicy.compute = {
+      state: "stopped",
+      accumulatedMs: lifetimeRuntimeMs(lease, Date.parse(completedAt))!,
+    };
+  }
   lease.cleanupCompletedAt = completedAt;
   lease.provisioningResourceMayExist = false;
   delete lease.provisioningFailureRetryable;

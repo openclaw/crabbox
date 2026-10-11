@@ -15,9 +15,13 @@ function fixture(
     localDisk?: boolean;
     wrongVolumeOwner?: boolean;
     wrongResponseID?: boolean;
+    dryRunDenied?: boolean;
+    dryRunAcceptedNormally?: boolean;
+    volumeMissing?: boolean;
   } = {},
 ) {
   const actions: string[] = [];
+  const requests: URLSearchParams[] = [];
   const xml = (text: string, status = 200) =>
     new Response(text, { status, headers: { "content-type": "text/xml" } });
   vi.stubGlobal(
@@ -27,6 +31,7 @@ function fixture(
       const params = new URLSearchParams(await request.text());
       const action = params.get("Action")!;
       actions.push(action);
+      requests.push(params);
       if (action === "GetCallerIdentity")
         return xml(
           "<GetCallerIdentityResponse><GetCallerIdentityResult><Account>123456789012</Account><Arn>arn:aws:iam::123456789012:user/test</Arn></GetCallerIdentityResult></GetCallerIdentityResponse>",
@@ -39,9 +44,23 @@ function fixture(
         return xml(
           `<DescribeInstanceTypesResponse><instanceTypeSet><item><instanceType>m7i.large</instanceType><instanceStorageSupported>${options.localDisk ? "true" : "false"}</instanceStorageSupported></item></instanceTypeSet></DescribeInstanceTypesResponse>`,
         );
+      if (action === "DescribeVolumes" && options.volumeMissing)
+        return xml(
+          "<Response><Errors><Error><Code>InvalidVolume.NotFound</Code><Message>missing</Message></Error></Errors></Response>",
+          400,
+        );
       if (action === "DescribeVolumes")
         return xml(
           `<DescribeVolumesResponse><volumeSet><item><volumeId>${volumeID}</volumeId><tagSet><item><key>lease</key><value>${options.wrongVolumeOwner ? "another-lease" : leaseID}</value></item></tagSet><attachmentSet><item><instanceId>${instanceID}</instanceId><device>/dev/sda1</device><status>attached</status></item></attachmentSet></item></volumeSet></DescribeVolumesResponse>`,
+        );
+      if (
+        action === "StopInstances" &&
+        params.get("DryRun") === "true" &&
+        !options.dryRunAcceptedNormally
+      )
+        return xml(
+          `<Response><Errors><Error><Code>${options.dryRunDenied ? "UnauthorizedOperation" : "DryRunOperation"}</Code><Message>permission check</Message></Error></Errors></Response>`,
+          412,
         );
       if (action === "StopInstances")
         return xml(
@@ -54,12 +73,53 @@ function fixture(
     { AWS_ACCESS_KEY_ID: "test-key", AWS_SECRET_ACCESS_KEY: "test-secret" } as Env,
     "eu-west-1",
   );
-  return { client, actions };
+  return { client, actions, requests };
 }
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("AWS lifetime stop", () => {
+  it("checks stop permission with a dry run against the exact owned instance", async () => {
+    const f = fixture();
+    await expect(
+      f.client.withLeaseOperation((session) =>
+        session.checkRetainedStopPermission(instanceID, leaseID),
+      ),
+    ).resolves.toBe(identity);
+    expect(f.requests.at(-1)?.get("DryRun")).toBe("true");
+    expect(f.requests.at(-1)?.get("InstanceId.1")).toBe(instanceID);
+    expect(f.actions.filter((action) => action === "StopInstances")).toHaveLength(1);
+  });
+  it.each([{ dryRunDenied: true }, { dryRunAcceptedNormally: true }, { wrongVolumeOwner: true }])(
+    "fails closed on unproved dry-run permission %j",
+    async (options) => {
+      const f = fixture(options);
+      await expect(
+        f.client.withLeaseOperation((session) =>
+          session.checkRetainedStopPermission(instanceID, leaseID),
+        ),
+      ).rejects.toThrow(/permission check|DryRunOperation|retained root disk/);
+      expect(
+        f.requests
+          .filter((params) => params.get("Action") === "StopInstances")
+          .every((params) => params.get("DryRun") === "true"),
+      ).toBe(true);
+    },
+  );
+  it("reports exact root volume presence and requires explicit not-found for absence", async () => {
+    let f = fixture();
+    await expect(
+      f.client.withLeaseOperation((session) => session.retainedVolumePresent(identity, leaseID)),
+    ).resolves.toBe(true);
+    f = fixture({ volumeMissing: true });
+    await expect(
+      f.client.withLeaseOperation((session) => session.retainedVolumePresent(identity, leaseID)),
+    ).resolves.toBe(false);
+    f = fixture({ wrongVolumeOwner: true });
+    await expect(
+      f.client.withLeaseOperation((session) => session.retainedVolumePresent(identity, leaseID)),
+    ).rejects.toThrow("ownership mismatch");
+  });
   it("uses one account-verified operation and validates the exact disk before StopInstances", async () => {
     const f = fixture();
     const assertOwner = vi.fn<() => Promise<void>>(async () => {});

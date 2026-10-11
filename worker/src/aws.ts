@@ -375,6 +375,8 @@ interface AWSLeaseOperation {
     assertOwner: () => Promise<void>,
   ): Promise<void>;
   retainedServerIdentity(instanceID: string, leaseID: string): Promise<string>;
+  checkRetainedStopPermission(instanceID: string, leaseID: string): Promise<string>;
+  retainedVolumePresent(identity: string, leaseID: string): Promise<boolean>;
   confirmRetainedVolumeDeleted(identity: string): Promise<void>;
   terminateServerAndWait(instanceID: string): Promise<void>;
   deleteSSHKey(name: string, leaseID: string): Promise<void>;
@@ -916,6 +918,14 @@ export class EC2SpotClient {
       retainedServerIdentity: (instanceID, leaseID) =>
         withAccount((account) =>
           client.retainedServerIdentityWith(instanceID, leaseID, query(account)),
+        ),
+      checkRetainedStopPermission: (instanceID, leaseID) =>
+        withAccount((account) =>
+          client.checkRetainedStopPermissionWith(instanceID, leaseID, query(account)),
+        ),
+      retainedVolumePresent: (diskIdentity, leaseID) =>
+        withAccount((account) =>
+          client.retainedVolumePresentWith(diskIdentity, leaseID, query(account)),
         ),
       terminateServerAndWait: (instanceID) =>
         withAccount((account) => client.terminateServerAndWaitWith(instanceID, query(account))),
@@ -2179,6 +2189,46 @@ export class EC2SpotClient {
       throw error;
     }
     throw new AWSLeaseObservationError("retained root volume deletion has not been confirmed");
+  }
+
+  private async retainedVolumePresentWith(
+    identity: string,
+    leaseID: string,
+    options: AWSQueryOptions,
+  ): Promise<boolean> {
+    const match = /^i-[a-f0-9]+:(vol-[a-f0-9]+):\/dev\/[a-z0-9]+$/.exec(identity);
+    if (!match) throw new AWSLeaseAuthorityError("invalid retained AWS disk identity");
+    try {
+      const result = await this.ec2("DescribeVolumes", { "VolumeId.1": match[1]! }, options);
+      const volumes = items(record(result["volumeSet"])["item"]).map(record);
+      if (
+        volumes.length !== 1 ||
+        asString(volumes[0]!["volumeId"]) !== match[1] ||
+        tagMap(volumes[0]!["tagSet"])["lease"] !== leaseID
+      )
+        throw new AWSLeaseAuthorityError("retained AWS root volume readback ownership mismatch");
+      return true;
+    } catch (error) {
+      if (error instanceof AWSQueryError && error.code === "InvalidVolume.NotFound") return false;
+      throw error;
+    }
+  }
+
+  private async checkRetainedStopPermissionWith(
+    instanceID: string,
+    leaseID: string,
+    options: AWSQueryOptions,
+  ): Promise<string> {
+    const identity = await this.retainedServerIdentityWith(instanceID, leaseID, options);
+    try {
+      await this.ec2("StopInstances", { "InstanceId.1": instanceID, DryRun: "true" }, options);
+    } catch (error) {
+      if (error instanceof AWSQueryError && error.code === "DryRunOperation") return identity;
+      throw error;
+    }
+    throw new AWSLeaseAuthorityError(
+      "AWS StopInstances permission check did not return DryRunOperation",
+    );
   }
 
   private async stopRetainedServerWith(

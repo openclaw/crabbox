@@ -55370,6 +55370,8 @@ function stubAWSLeaseOperation(
     findServer: (instanceID: string) => Promise<ProviderMachine | undefined>;
     terminateServerAndWait: (instanceID: string) => Promise<void>;
     retainedServerIdentity: (instanceID: string, leaseID: string) => Promise<string>;
+    checkRetainedStopPermission: (instanceID: string, leaseID: string) => Promise<string>;
+    retainedVolumePresent: (identity: string, leaseID: string) => Promise<boolean>;
     confirmRetainedVolumeDeleted: (identity: string) => Promise<void>;
     deleteSSHKey: (name: string, leaseID: string) => Promise<void>;
   }> = {},
@@ -55399,6 +55401,9 @@ function stubAWSLeaseOperation(
     stopRetainedServer: async () => undefined,
     retainedServerIdentity:
       overrides.retainedServerIdentity ?? (async () => "test-retained-identity"),
+    checkRetainedStopPermission:
+      overrides.checkRetainedStopPermission ?? (async () => "test-retained-identity"),
+    retainedVolumePresent: overrides.retainedVolumePresent ?? (async () => true),
     confirmRetainedVolumeDeleted: overrides.confirmRetainedVolumeDeleted ?? (async () => undefined),
     terminateServerAndWait: overrides.terminateServerAndWait ?? (async () => undefined),
     deleteSSHKey: overrides.deleteSSHKey ?? (async () => undefined),
@@ -57074,6 +57079,7 @@ describe("maximum lifetime safety net", () => {
       new Date(now - 2 * 86_400_000),
       false,
     )!;
+    policy.readiness = { status: "ready", checkedAt: new Date(now).toISOString() };
     const lease = testLease({
       provider: "aws",
       cloudID: "i-0123456789abcdef0",
@@ -57103,6 +57109,223 @@ describe("maximum lifetime safety net", () => {
     return { lease, storage, identity, retainLease, releaseLease, fleet };
   }
   afterEach(() => vi.useRealTimers());
+
+  it.each(["off", "report"] as const)(
+    "enforces an explicit admin canary with global mode %s while preserving controls",
+    async (mode) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(now);
+      const f = fixture();
+      f.lease.lifetimePolicy!.source = "admin-canary";
+      f.lease.lifetimePolicy!.retainSeconds = 60;
+      const control = { ...f.lease, id: "cbx_000000000001", lifetimePolicy: undefined };
+      const defaultCohort = {
+        ...f.lease,
+        id: "cbx_000000000002",
+        lifetimePolicy: { ...f.lease.lifetimePolicy! },
+      };
+      delete defaultCohort.lifetimePolicy.source;
+      await f.storage.put(`lease:${f.lease.id}`, f.lease);
+      await f.storage.put(`lease:${control.id}`, control);
+      await f.storage.put(`lease:${defaultCohort.id}`, defaultCohort);
+      const fleet = testFleet(
+        f.storage,
+        { aws: { retainLease: f.retainLease, releaseLease: f.releaseLease } },
+        { ...env, CRABBOX_LEASE_LIFETIME_MODE: mode },
+      );
+      await fleet.alarm();
+      expect(f.retainLease).toHaveBeenCalledOnce();
+      expect(f.storage.value<LeaseRecord>(`lease:${f.lease.id}`)?.lifetimePolicy?.status).toBe(
+        "retained",
+      );
+      expect(f.storage.value<LeaseRecord>(`lease:${control.id}`)).toEqual(control);
+      expect(
+        f.storage.value<LeaseRecord>(`lease:${defaultCohort.id}`)?.lifetimePolicy?.status,
+      ).toBe(mode === "off" ? undefined : "due");
+      vi.setSystemTime(now + 60_000);
+      await fleet.alarm();
+      expect(f.releaseLease).toHaveBeenCalledOnce();
+      expect(f.storage.value<LeaseRecord>(`lease:${f.lease.id}`)?.lifetimePolicy?.status).toBe(
+        "complete",
+      );
+    },
+  );
+
+  it("records and exposes failed readiness without stopping or revoking the lease, then retries", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const f = fixture();
+    delete f.lease.lifetimePolicy!.readiness;
+    f.lease.lifetimePolicy!.source = "admin-canary";
+    f.lease.state = "active";
+    f.lease.expiresAt = new Date(now + 3_600_000).toISOString();
+    const checkLifetimeReadiness = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new Error("UnauthorizedOperation: StopInstances denied"))
+      .mockResolvedValue(f.identity);
+    const fleet = testFleet(
+      f.storage,
+      { aws: { checkLifetimeReadiness, retainLease: f.retainLease, releaseLease: f.releaseLease } },
+      { ...env, CRABBOX_LEASE_LIFETIME_MODE: "off" },
+    );
+    await f.storage.put(`lease:${f.lease.id}`, f.lease);
+    await fleet.alarm();
+    const failed = f.storage.value<LeaseRecord>(`lease:${f.lease.id}`)!;
+    expect(failed.state).toBe("active");
+    expect(failed.lifetimePolicy?.readiness?.status).toBe("failed");
+    expect(failed.lifetimePolicy?.status).toBe("failed");
+    expect(f.retainLease).not.toHaveBeenCalled();
+    const visible = await fleet.fetch(
+      request("GET", `/v1/leases/${f.lease.id}`, {
+        headers: { "x-crabbox-owner": f.lease.owner, "x-crabbox-org": "openclaw" },
+      }),
+    );
+    expect(visible.status).toBe(200);
+    expect(
+      ((await visible.json()) as { lease: LeaseRecord }).lease.lifetimePolicy?.warnings,
+    ).toEqual(expect.arrayContaining([expect.stringContaining("StopInstances denied")]));
+    const admin = await fleet.fetch(
+      request("GET", "/v1/admin/leases", { headers: { "x-crabbox-admin": "true" } }),
+    );
+    expect(JSON.stringify(await admin.json())).toContain("StopInstances denied");
+    await fleet.alarm();
+    expect(checkLifetimeReadiness).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(now + 300_000);
+    await fleet.alarm();
+    expect(
+      f.storage.value<LeaseRecord>(`lease:${f.lease.id}`)?.lifetimePolicy?.readiness?.status,
+    ).toBe("ready");
+    expect(f.retainLease).not.toHaveBeenCalled();
+    await fleet.alarm();
+    expect(f.retainLease).toHaveBeenCalledOnce();
+  });
+
+  it("admits only admin-created, bounded on-demand AWS canaries and binds fixed replay", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const storage = new MemoryStorage();
+    const provider = fakeProvider(undefined, {
+      provider: "aws",
+      cloudID: "i-0123456789abcdef0",
+      region: "eu-west-1",
+      serverType: "t3.small",
+      market: "on-demand",
+    });
+    const fleet = testFleet(
+      storage,
+      { aws: provider, hetzner: fakeProvider() },
+      { ...env, CRABBOX_LEASE_LIFETIME_MODE: "off" },
+    );
+    const body = {
+      provider: "aws",
+      class: "tiny",
+      serverType: "t3.small",
+      awsRegion: "eu-west-1",
+      capacity: { market: "on-demand" },
+      sshPublicKey: "ssh-ed25519 test",
+      keep: true,
+      lifetimePolicy: { mode: "enforce", maxAgeSeconds: 360, retainSeconds: 300 },
+    };
+    const create = (data: unknown, admin = true) =>
+      fleet.fetch(
+        request("PUT", "/v1/leases/cbx_abcdef123456", {
+          body: data,
+          headers: admin ? { "x-crabbox-admin": "true" } : {},
+        }),
+      );
+    expect((await create(body, false)).status).toBe(403);
+    for (const lifetimePolicy of [
+      { mode: "report", maxAgeSeconds: 360, retainSeconds: 300 },
+      { mode: "enforce", maxAgeSeconds: 59, retainSeconds: 300 },
+      { mode: "enforce", maxAgeSeconds: 360, retainSeconds: 2678401 },
+      { mode: "enforce", maxAgeSeconds: 360.5, retainSeconds: 300 },
+    ])
+      // oxlint-disable-next-line eslint/no-await-in-loop -- sequential rejected admissions share one fixed lease ID.
+      expect((await create({ ...body, lifetimePolicy })).status).toBe(400);
+    expect((await create({ ...body, capacity: { market: "spot" } })).status).toBe(400);
+    expect((await create({ ...body, provider: "hetzner", serverType: "cpx22" })).status).toBe(400);
+    const response = await create(body);
+    expect(response.status).toBe(201);
+    const created = ((await response.json()) as { lease: LeaseRecord }).lease;
+    expect(created.lifetimePolicy).toMatchObject({
+      source: "admin-canary",
+      mode: "enforce",
+      retainSeconds: 300,
+      deadlineAt: new Date(now + 360_000).toISOString(),
+    });
+    expect((await create(body)).status).toBe(200);
+    expect(
+      (await create({ ...body, lifetimePolicy: { ...body.lifetimePolicy, maxAgeSeconds: 600 } }))
+        .status,
+    ).toBe(409);
+  });
+
+  it("keeps lifetime readback admin-only and uses provider observations", async () => {
+    const f = fixture();
+    const lifetimeReadback = vi
+      .fn<NonNullable<AWSProvider["lifetimeReadback"]>>()
+      .mockResolvedValue({
+        instanceId: f.lease.cloudID,
+        instanceState: "stopped",
+        rootVolumeId: "vol-0123456789abcdef0",
+        rootVolumePresent: true,
+      });
+    const fleet = testFleet(f.storage, { aws: { lifetimeReadback } }, env);
+    await f.storage.put(`lease:${f.lease.id}`, f.lease);
+    const path = `/v1/admin/leases/${f.lease.id}/lifetime-readback`;
+    expect((await fleet.fetch(request("GET", path))).status).toBe(403);
+    expect(lifetimeReadback).not.toHaveBeenCalled();
+    const response = await fleet.fetch(
+      request("GET", path, { headers: { "x-crabbox-admin": "true" } }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      leaseId: f.lease.id,
+      instanceState: "stopped",
+      rootVolumePresent: true,
+    });
+    expect(lifetimeReadback).toHaveBeenCalledWith(expect.objectContaining({ id: f.lease.id }));
+  });
+
+  it("reads the original retained volume after termination and refuses another account", async () => {
+    const f = fixture();
+    const lease = {
+      ...f.lease,
+      id: "cbx_abcdef123456",
+      lifetimePolicy: { ...f.lease.lifetimePolicy!, retainedIdentity: f.identity },
+    };
+    let instancePresent = true;
+    const operation = stubAWSLeaseOperation({
+      findServer: async (id) =>
+        instancePresent ? { ...ownedTestMachine("aws", id), status: "stopped" } : undefined,
+      retainedVolumePresent: async () => instancePresent,
+      checkRetainedStopPermission: async () => f.identity,
+    });
+    const provider = new AWSProvider(
+      { AWS_ACCESS_KEY_ID: "fixture", AWS_SECRET_ACCESS_KEY: "fixture" } as Env,
+      lease.region!,
+      f.storage,
+    );
+    try {
+      expect(await provider.checkLifetimeReadiness(lease)).toBe(f.identity);
+      expect(await provider.lifetimeReadback(lease)).toMatchObject({
+        instanceState: "stopped",
+        rootVolumeId: "vol-0123456789abcdef0",
+        rootVolumePresent: true,
+      });
+      instancePresent = false;
+      expect(await provider.lifetimeReadback(lease)).toMatchObject({
+        instanceState: "terminated",
+        rootVolumeId: "vol-0123456789abcdef0",
+        rootVolumePresent: false,
+      });
+      await expect(
+        provider.lifetimeReadback({ ...lease, providerScope: "aws:account:999999999999" }),
+      ).rejects.toThrow("does not match the authenticated account");
+    } finally {
+      operation.scope.mockRestore();
+    }
+  });
 
   it("reports without stopping and never enrolls historical resources", async () => {
     vi.useFakeTimers();
@@ -57229,6 +57452,85 @@ describe("maximum lifetime safety net", () => {
       f.storage.value<LeaseRecord>(`lease:${f.lease.id}`)!.lifetimePolicy!.warnedAt,
     ).toBeUndefined();
     expect(f.retainLease).not.toHaveBeenCalled();
+    expect(await f.storage.getAlarm()).toBeGreaterThanOrEqual(now + 60_000);
+  });
+
+  it("defers overdue lifetime alarms to the durable provisioning owner", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const f = fixture();
+    await f.storage.put(`lease:${f.lease.id}`, f.lease);
+    await putProvisioningOperation(f.storage, {
+      schema: 1,
+      leaseID: f.lease.id,
+      operationID: f.lease.id,
+      generation: "lifetime-owner",
+      owner: f.lease.owner,
+      org: f.lease.org,
+      provider: f.lease.provider,
+      scope: "test-scope",
+      revision: 1,
+      createdAt: now - 60_000,
+      deadline: now + 300_000,
+      step: { phase: "blocked", attempt: 0, nextWake: now + 45_000, state: {} },
+    });
+    await f.fleet.alarm();
+    expect(f.retainLease).not.toHaveBeenCalled();
+    expect(
+      f.storage.value<LeaseRecord>(`lease:${f.lease.id}`)?.lifetimePolicy?.warnedAt,
+    ).toBeUndefined();
+    expect(await f.storage.getAlarm()).toBe(now + 45_000);
+  });
+
+  it("rejects extension after persisted stop intent and retries a lost response", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const f = fixture();
+    f.retainLease.mockImplementationOnce(async (_lease, context) => {
+      await context.saveIdentity(f.identity);
+      throw new Error("lost stop response");
+    });
+    await f.storage.put(`lease:${f.lease.id}`, f.lease);
+    await f.fleet.alarm();
+    const response = await f.fleet.fetch(
+      new Request(`https://coordinator.example/v1/admin/leases/${f.lease.id}/extend-lifetime`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-crabbox-admin": "true",
+          "x-crabbox-owner": "alice@example.com",
+        },
+        body: JSON.stringify({
+          reason: "debugging",
+          expiresAt: new Date(now + 86_400_000).toISOString(),
+        }),
+      }),
+    );
+    expect(response.status).toBe(400);
+    vi.setSystemTime(now + 300_000);
+    await f.fleet.alarm();
+    expect(f.retainLease).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not count confirmed stopped time as compute after deletion failure", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const f = fixture();
+    f.lease.createdAt = new Date(now - 10 * 86_400_000).toISOString();
+    f.lease.lifetimePolicy = {
+      ...f.lease.lifetimePolicy!,
+      status: "retained",
+      stoppedAt: new Date(now - 8 * 86_400_000).toISOString(),
+      deleteAfterAt: new Date(now - 86_400_000).toISOString(),
+      retainedIdentity: f.identity,
+    };
+    f.releaseLease.mockRejectedValue(new Error("volume read unavailable"));
+    await f.storage.put(`lease:${f.lease.id}`, f.lease);
+    await f.fleet.alarm();
+    const current = f.storage.value<LeaseRecord>(`lease:${f.lease.id}`)!;
+    const usage = createCostLimitUsage(current, new Date(now));
+    addLeaseToCostLimitUsage(usage, current, new Date(now));
+    expect(usage.activeLeases).toBe(0);
   });
 
   it("retains recovery responsibility when a result arrives after its claim deadline", async () => {

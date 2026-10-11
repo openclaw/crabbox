@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 
+import { completeLeaseProviderCleanup } from "../src/lease-cleanup";
 import {
   extendLeaseLifetime,
   lifetimeCandidate,
   lifetimeDeadline,
   lifetimeNextAlarm,
   newLeaseLifetime,
+  observeLifetimeCompute,
+  lifetimeRuntimeMs,
+  lifetimeOwnsCompute,
+  publicLifetimePolicy,
 } from "../src/lease-lifetime";
 import type { Env, LeaseRecord } from "../src/types";
 
@@ -85,6 +90,47 @@ describe("lease lifetime safety policy", () => {
     expect(lifetimeNextAlarm(record, overdue)).toBe(overdue + 300_000);
     record.lifetimePolicy!.stoppedAt = new Date(overdue).toISOString();
     record.lifetimePolicy!.deleteAfterAt = new Date(overdue + 60_000).toISOString();
+    expect(lifetimeNextAlarm(record, overdue)).toBe(overdue + 1);
+    record.lifetimePolicy!.deletionWarnedAt = new Date(overdue).toISOString();
     expect(lifetimeNextAlarm(record, overdue)).toBe(overdue + 60_000);
+  });
+  it("counts only observed running intervals across a restart and failed cleanup", () => {
+    const record = lease({ createdAt: new Date(now).toISOString() });
+    observeLifetimeCompute(record, true, now + 60_000);
+    record.lifetimePolicy!.status = "failed";
+    expect(lifetimeOwnsCompute(record)).toBe(false);
+    expect(lifetimeRuntimeMs(record, now + 600_000)).toBe(60_000);
+    observeLifetimeCompute(record, false, now + 600_000);
+    expect(lifetimeOwnsCompute(record)).toBe(true);
+    observeLifetimeCompute(record, true, now + 660_000);
+    expect(lifetimeRuntimeMs(record, now + 1_000_000)).toBe(120_000);
+    expect(record.lifetimePolicy!.stoppedAt).toBe(new Date(now + 60_000).toISOString());
+  });
+  it("ends an uncertain running interval when explicit cleanup is confirmed", () => {
+    const record = lease({ createdAt: new Date(now).toISOString() });
+    observeLifetimeCompute(record, false, now);
+    record.lifetimePolicy!.status = "failed";
+    completeLeaseProviderCleanup(record, new Date(now + 60_000).toISOString());
+    expect(lifetimeRuntimeMs(record, now + 600_000)).toBe(60_000);
+    expect(record.lifetimePolicy!.compute?.state).toBe("stopped");
+    expect(lifetimeOwnsCompute(record)).toBe(false);
+  });
+  it("publishes effective extensions and a distinct permanent deletion warning", () => {
+    const extended = extendLeaseLifetime(
+      policy(),
+      "alice",
+      "debugging",
+      new Date(now + 2 * 86_400_000).toISOString(),
+      now,
+    );
+    expect(publicLifetimePolicy(extended, now).effectiveStopAt).toBe(extended.extension!.expiresAt);
+    const retained = {
+      ...policy(),
+      stoppedAt: new Date(now).toISOString(),
+      deleteAfterAt: new Date(now + 60_000).toISOString(),
+    };
+    expect(publicLifetimePolicy(retained, now).warnings).toEqual([
+      expect.stringContaining("DELETION:"),
+    ]);
   });
 });

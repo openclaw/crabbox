@@ -23,6 +23,9 @@ import {
   lifetimeRetryMs,
   lifetimeWarningMs,
   extendLeaseLifetime,
+  observeLifetimeCompute,
+  normalizeLifetimeRequest,
+  lifetimeEnforced,
 } from "./lease-lifetime";
 import { ProviderRequestTimeoutError, withProviderOperationDeadline } from "./provider-deadline";
 import { cachedProviderPrice } from "./provider-pricing";
@@ -3926,6 +3929,26 @@ export class FleetCoordinator {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const input = await readJson<LeaseRequest>(request);
+    if (input.lifetimePolicy !== undefined && !isAdminRequest(request)) {
+      return json(
+        { error: "forbidden", message: "lifetime canary requires admin authentication" },
+        { status: 403 },
+      );
+    }
+    try {
+      const lifetime = normalizeLifetimeRequest(input.lifetimePolicy);
+      if (lifetime) input.lifetimePolicy = lifetime;
+    } catch (error) {
+      return json(
+        { error: "invalid_lifetime_policy", message: errorMessage(error) },
+        { status: 400 },
+      );
+    }
+    if (input.lifetimePolicy && input.provider !== "aws")
+      return json(
+        { error: "invalid_lifetime_policy", message: "lifetime canary requires AWS" },
+        { status: 400 },
+      );
     if ((input.provider as string) === "serve") {
       const result = await new ServeCoordinator(this.state, this.env).create(
         request,
@@ -4058,6 +4081,23 @@ export class FleetCoordinator {
         );
       }
       throw error;
+    }
+    if (
+      config.lifetimePolicy &&
+      (config.provider !== "aws" ||
+        config.capacityMarket !== "on-demand" ||
+        config.target === "macos" ||
+        config.hostID ||
+        config.awsMacHostID)
+    ) {
+      return json(
+        {
+          error: "invalid_lifetime_policy",
+          message:
+            "lifetime canary requires a new on-demand AWS EBS-root lease; dedicated hosts and Mac are unsupported",
+        },
+        { status: 400 },
+      );
     }
     if (hasImageRequirements(config.imageRequirements) && config.provider !== "aws") {
       return json(
@@ -4469,6 +4509,7 @@ export class FleetCoordinator {
           this.env,
           now,
           Boolean(workspaceID || config.desktop || config.code),
+          config.lifetimePolicy,
         ),
         ttlSeconds: config.ttlSeconds,
         idleTimeoutSeconds: config.idleTimeoutSeconds,
@@ -5230,7 +5271,12 @@ export class FleetCoordinator {
         sshFallbackPorts: config.sshFallbackPorts,
         workRoot: config.workRoot,
         keep: config.keep,
-        lifetimePolicy: newLeaseLifetime(this.env, now, Boolean(config.desktop || config.code)),
+        lifetimePolicy: newLeaseLifetime(
+          this.env,
+          now,
+          Boolean(config.desktop || config.code),
+          config.lifetimePolicy,
+        ),
         ttlSeconds: config.ttlSeconds,
         idleTimeoutSeconds: config.idleTimeoutSeconds,
         estimatedHourlyUSD: cost.hourlyUSD,
@@ -15260,6 +15306,30 @@ export class FleetCoordinator {
     leaseID: string,
     action?: string,
   ): Promise<Response> {
+    if (request.method.toUpperCase() === "GET" && action === "lifetime-readback") {
+      const lease = await this.resolveLease(leaseID, request, true);
+      if (!lease) return notFound();
+      const provider = managedLeaseProvider(lease);
+      const adapter = provider
+        ? this.provider(provider, lease.region, lease.providerProject)
+        : undefined;
+      if (!adapter?.lifetimeReadback)
+        return json({ error: "lifetime_readback_unsupported" }, { status: 409 });
+      try {
+        return json({
+          leaseId: lease.id,
+          provider,
+          region: lease.region,
+          ...(await adapter.lifetimeReadback(lease)),
+          observedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        return json(
+          { error: "lifetime_readback_failed", message: coordinatorErrorMessage(this.env, error) },
+          { status: 409 },
+        );
+      }
+    }
     if (request.method.toUpperCase() !== "POST") {
       return json({ error: "not_found" }, { status: 404 });
     }
@@ -17777,7 +17847,7 @@ export class FleetCoordinator {
 
   private async extendLifetime(request: Request, leaseID: string): Promise<Response> {
     const body = (await request.json().catch(() => undefined)) as
-      | { reason?: unknown; expiresAt?: unknown }
+      | { owner?: unknown; reason?: unknown; expiresAt?: unknown }
       | undefined;
     if (!body || typeof body !== "object" || Array.isArray(body))
       return json({ error: "invalid_lifetime_extension" }, { status: 400 });
@@ -17791,13 +17861,19 @@ export class FleetCoordinator {
         return json({ error: "cleanup_in_progress" }, { status: 409 });
       }
       try {
+        if (
+          body.owner !== undefined &&
+          (typeof body.owner !== "string" || !body.owner.trim() || body.owner.length > 256)
+        )
+          throw new Error("an extension requires a responsible owner (1-256 characters)");
         lease.lifetimePolicy = extendLeaseLifetime(
           lease.lifetimePolicy,
-          requestOwner(request),
+          typeof body.owner === "string" ? body.owner.trim() : requestOwner(request),
           body.reason,
           body.expiresAt,
           Date.now(),
         );
+        lease.lifetimePolicy.extension!.grantedBy = requestOwner(request);
       } catch (error) {
         return json(
           { error: "invalid_lifetime_extension", message: errorMessage(error) },
@@ -17830,12 +17906,30 @@ export class FleetCoordinator {
         const policy = lease.lifetimePolicy!;
         const now = Date.now();
         if (lease.cleanupStartedAt && cleanupClaimDeadline(lease) > now) return;
+        if (
+          policy.source !== "admin-canary" &&
+          (this.env.CRABBOX_LEASE_LIFETIME_MODE ?? "off") === "off"
+        )
+          return;
+        const enforced = lifetimeEnforced(policy, this.env);
+        const readinessOnly = enforced && policy.readiness?.status !== "ready";
         const deadline = lifetimeDeadline(policy);
         if (!policy.warnedAt && Number.isFinite(deadline) && now >= deadline - lifetimeWarningMs) {
           policy.warnedAt = new Date(now).toISOString();
           await this.putLease(lease);
           console.warn(
-            `lease lifetime deadline approaching lease=${lease.id} deadline=${policy.deadlineAt}`,
+            `lease lifetime deadline approaching lease=${lease.id} deadline=${new Date(deadline).toISOString()}`,
+          );
+        }
+        if (
+          policy.deleteAfterAt &&
+          !policy.deletionWarnedAt &&
+          now >= Date.parse(policy.deleteAfterAt) - lifetimeWarningMs
+        ) {
+          policy.deletionWarnedAt = new Date(now).toISOString();
+          await this.putLease(lease);
+          console.warn(
+            `lease root disk deletion approaching lease=${lease.id} deadline=${policy.deleteAfterAt}`,
           );
         }
         if (
@@ -17845,7 +17939,11 @@ export class FleetCoordinator {
               policy.stoppedAt &&
               Date.parse(policy.deleteAfterAt ?? "") <= now
             )) ||
-          (!policy.stoppedAt && now < deadline)
+          (!readinessOnly &&
+            !policy.stopStartedAt &&
+            !policy.retainedIdentity &&
+            !policy.stoppedAt &&
+            now < deadline)
         )
           return;
         if (lease.cleanupStartedAt && cleanupClaimDeadline(lease) > now) return;
@@ -17869,13 +17967,13 @@ export class FleetCoordinator {
           await this.putLease(lease);
           return;
         }
-        if (!adapter?.retainLease) {
+        if (!adapter?.retainLease || (readinessOnly && !adapter.checkLifetimeReadiness)) {
           policy.status = "unsupported";
           policy.error = "provider has no verified data-preserving stop capability";
           await this.putLease(lease);
           return;
         }
-        if (policy.mode !== "enforce" || this.env.CRABBOX_LEASE_LIFETIME_MODE !== "enforce") {
+        if (!enforced) {
           policy.status = "due";
           await this.putLease(lease);
           return;
@@ -17887,17 +17985,17 @@ export class FleetCoordinator {
           policy.retainedIdentity &&
           Date.parse(policy.deleteAfterAt ?? "") <= now,
         );
-        policy.status = deleting ? "deleting" : "stopping";
+        if (!readinessOnly) policy.status = deleting ? "deleting" : "stopping";
         delete policy.error;
         lease.cleanupStartedAt = new Date(now).toISOString();
         lease.cleanupClaimExpiresAt = new Date(now + leaseCleanupClaimStaleMs).toISOString();
         lease.updatedAt = new Date(now).toISOString();
         await this.putLease(lease);
         await this.armAlarmNoLaterThan(cleanupClaimDeadline(lease));
-        return { lease: structuredClone(lease), deleting, adapter };
+        return { lease: structuredClone(lease), deleting, readinessOnly, adapter };
       });
       if (!claim) continue;
-      const { lease, deleting, adapter } = claim;
+      const { lease, deleting, readinessOnly, adapter } = claim;
       const assertOwner = async () =>
         this.state.runExclusive(async () => {
           const current = await this.getLease(id);
@@ -17914,13 +18012,37 @@ export class FleetCoordinator {
       let retained: { stopped: boolean; identity: string } | undefined;
       let failure: string | undefined;
       let stopRequired = false;
+      let readinessIdentity: string | undefined;
+      const observeCompute = async (stopped: boolean) => {
+        await assertOwner();
+        await this.state.runExclusive(async () => {
+          const current = await this.getLease(id);
+          if (
+            !current ||
+            !sameLeaseCleanupClaim(current, lease) ||
+            cleanupClaimDeadline(current) <= Date.now()
+          )
+            throw new Error("lifetime observation owner changed");
+          observeLifetimeCompute(current, stopped, Date.now());
+          await this.putLease(current);
+          Object.assign(lease, structuredClone(current));
+        });
+      };
       try {
-        if (!deleting || !lease.lifetimePolicy!.deleteStartedAt) {
+        if (readinessOnly) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- validate only this claimed resource without stopping it.
+          readinessIdentity = await adapter.checkLifetimeReadiness!(lease);
+          if (!readinessIdentity)
+            throw new Error("lifetime readiness did not return a retained resource identity");
+          // oxlint-disable-next-line eslint/no-await-in-loop -- stale readbacks cannot publish readiness.
+          await assertOwner();
+        } else if (!deleting || !lease.lifetimePolicy!.deleteStartedAt) {
           // oxlint-disable-next-line eslint/no-await-in-loop -- no lifecycle lock is held across provider I/O.
           retained = await this.withLegacyProviderMutation(id, async () => {
             await assertOwner();
             return adapter.retainLease!(lease, {
               assertOwner,
+              observeCompute,
               saveIdentity: async (identity) => {
                 await assertOwner();
                 await this.state.runExclusive(async () => {
@@ -17937,6 +18059,7 @@ export class FleetCoordinator {
                   }
                   // Persist exact disk identity before stop. Old readers understand retained release.
                   current.lifetimePolicy!.retainedIdentity = identity;
+                  current.lifetimePolicy!.stopStartedAt ??= new Date().toISOString();
                   current.state = "released";
                   current.releaseDeletesServer = false;
                   current.releasedAt ??= new Date().toISOString();
@@ -17948,8 +18071,15 @@ export class FleetCoordinator {
               },
             });
           });
+          // Persist the confirmed observation before a subsequent delete can fail.
+          // oxlint-disable-next-line eslint/no-await-in-loop -- each observation belongs to its claimed lease.
+          await observeCompute(retained.stopped);
         }
-        if (deleting && (lease.lifetimePolicy!.deleteStartedAt || retained?.stopped)) {
+        if (
+          !readinessOnly &&
+          deleting &&
+          (lease.lifetimePolicy!.deleteStartedAt || retained?.stopped)
+        ) {
           // oxlint-disable-next-line eslint/no-await-in-loop -- persist the cleanup phase before provider dispatch.
           await this.state.runExclusive(async () => {
             const current = await this.getLease(id);
@@ -17989,7 +18119,19 @@ export class FleetCoordinator {
         delete current.cleanupClaimExpiresAt;
         current.updatedAt = now.toISOString();
         policy.nextCheckAt = new Date(now.getTime() + lifetimeRetryMs).toISOString();
-        if (failure) {
+        if (readinessOnly) {
+          policy.readiness = failure
+            ? { status: "failed", checkedAt: now.toISOString(), error: failure }
+            : { status: "ready", checkedAt: now.toISOString(), identity: readinessIdentity! };
+          if (failure) {
+            policy.status = "failed";
+            policy.error = `Lifetime stop permission/readiness check failed: ${failure}`;
+          } else {
+            delete policy.error;
+            delete policy.status;
+            delete policy.nextCheckAt;
+          }
+        } else if (failure) {
           policy.status = "failed";
           policy.error = failure;
           if (stopRequired) delete policy.deleteStartedAt;
@@ -18264,7 +18406,29 @@ export class FleetCoordinator {
       });
     }
     await this.visitLeaseRecords(async (lease) => {
-      retainAlarm(lifetimeNextAlarm(lease, now), "lease-lifetime", leaseKey(lease.id));
+      // The durable provisioning controller schedules its own wake and owns all mutations.
+      if (await provisioningOwnsLease(this.state.storage, lease.id)) return;
+      const lifetimeEnabled =
+        lease.lifetimePolicy?.source === "admin-canary" ||
+        (this.env.CRABBOX_LEASE_LIFETIME_MODE ?? "off") !== "off";
+      const lifetimeAlarm = lifetimeEnabled ? lifetimeNextAlarm(lease, now) : undefined;
+      const readinessAlarm =
+        lease.lifetimePolicy &&
+        lifetimeCandidate(lease) &&
+        lifetimeEnforced(lease.lifetimePolicy, this.env) &&
+        lease.lifetimePolicy.readiness?.status !== "ready"
+          ? Math.max(now + 1, Date.parse(lease.lifetimePolicy.nextCheckAt ?? "") || 0)
+          : undefined;
+      retainAlarm(
+        lifetimeAlarm === undefined && readinessAlarm === undefined
+          ? undefined
+          : Math.max(
+              Math.min(lifetimeAlarm ?? Infinity, readinessAlarm ?? Infinity),
+              lease.cleanupStartedAt ? cleanupClaimDeadline(lease) : 0,
+            ),
+        "lease-lifetime",
+        leaseKey(lease.id),
+      );
       const workspace = lease.workspaceID
         ? await this.state.storage.get<WorkspaceRecord>(
             workspaceKey(lease.owner, lease.org, lease.workspaceID),
@@ -28023,8 +28187,16 @@ export interface CloudProvider {
     context: {
       assertOwner: () => Promise<void>;
       saveIdentity: (identity: string) => Promise<void>;
+      observeCompute: (stopped: boolean) => Promise<void>;
     },
   ): Promise<{ stopped: boolean; identity: string }>;
+  checkLifetimeReadiness?(lease: LeaseRecord): Promise<string>;
+  lifetimeReadback?(lease: LeaseRecord): Promise<{
+    instanceId: string;
+    instanceState: string;
+    rootVolumeId: string;
+    rootVolumePresent: boolean;
+  }>;
   releaseLease(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void>;
   deleteServer(id: string): Promise<void>;
   deleteOwnedServer?(lease: LeaseRecord): Promise<void>;
@@ -30876,11 +31048,70 @@ export class AWSProvider implements CloudProvider {
     return { config: nextConfig, lease: nextLease };
   }
 
+  async checkLifetimeReadiness(lease: LeaseRecord): Promise<string> {
+    if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT)
+      throw new Error("lifetime readiness is unsupported by the image-qualification transport");
+    return this.withLeaseOperation(async (session) => {
+      if (!(await this.verifyLeaseOperationAuthority(lease, session)))
+        throw new ProviderResourceUnresolvedError(
+          "lifetime readiness requires a persisted AWS account scope",
+        );
+      const server = await this.observeLeaseServer(
+        lease,
+        session,
+        () => session.findServer(lease.cloudID),
+        "machine",
+      );
+      if (!server || !["pending", "running", "stopping", "stopped"].includes(server.status))
+        throw new ProviderResourceUnresolvedError(
+          "lifetime readiness requires an owned stoppable AWS instance",
+        );
+      return session.checkRetainedStopPermission(lease.cloudID, lease.id);
+    });
+  }
+
+  async lifetimeReadback(lease: LeaseRecord): Promise<{
+    instanceId: string;
+    instanceState: string;
+    rootVolumeId: string;
+    rootVolumePresent: boolean;
+  }> {
+    return this.withLeaseOperation(async (session) => {
+      if (!(await this.verifyLeaseOperationAuthority(lease, session)))
+        throw new ProviderResourceUnresolvedError(
+          "lifetime readback requires a persisted AWS account scope",
+        );
+      const server = await this.observeLeaseServer(
+        lease,
+        session,
+        () => session.findServer(lease.cloudID),
+        "machine",
+      );
+      const identity =
+        lease.lifetimePolicy?.retainedIdentity ??
+        lease.lifetimePolicy?.readiness?.identity ??
+        (server && server.status !== "terminated"
+          ? await session.retainedServerIdentity(lease.cloudID, lease.id)
+          : undefined);
+      if (!identity || !identity.startsWith(`${lease.cloudID}:`))
+        throw new ProviderResourceUnresolvedError(
+          "lifetime readback requires the original root disk identity",
+        );
+      return {
+        instanceId: lease.cloudID,
+        instanceState: server?.status ?? "terminated",
+        rootVolumeId: identity.split(":")[1]!,
+        rootVolumePresent: await session.retainedVolumePresent(identity, lease.id),
+      };
+    });
+  }
+
   async retainLease(
     lease: LeaseRecord,
     context: {
       assertOwner: () => Promise<void>;
       saveIdentity: (identity: string) => Promise<void>;
+      observeCompute: (stopped: boolean) => Promise<void>;
     },
   ): Promise<{ stopped: boolean; identity: string }> {
     if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
@@ -30905,12 +31136,18 @@ export class AWSProvider implements CloudProvider {
       }
       const identity = await session.retainedServerIdentity(lease.cloudID, lease.id);
       if (
+        lease.lifetimePolicy?.readiness?.identity &&
+        lease.lifetimePolicy.readiness.identity !== identity
+      )
+        throw new ProviderResourceUnresolvedError("retained AWS root disk changed after readiness");
+      if (
         lease.lifetimePolicy?.retainedIdentity &&
         lease.lifetimePolicy.retainedIdentity !== identity
       ) {
         throw new ProviderResourceUnresolvedError("retained AWS root disk identity changed");
       }
       await context.saveIdentity(identity);
+      await context.observeCompute(server.status === "stopped");
       await context.assertOwner();
       if (server.status === "running" || server.status === "pending") {
         await session.stopRetainedServer(lease.cloudID, lease.id, identity, context.assertOwner);
@@ -30927,6 +31164,7 @@ export class AWSProvider implements CloudProvider {
           "retained root disk changed during stop confirmation",
         );
       }
+      await context.observeCompute(observed.status === "stopped");
       return { stopped: observed.status === "stopped", identity };
     });
   }
