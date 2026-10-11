@@ -1083,3 +1083,31 @@ func TestAttestKeyOverride(t *testing.T) {
 		t.Fatal("expected error for non ed25519 key")
 	}
 }
+
+func buildTerminalRunReceipt(keyPath string, in terminalRunReceiptInput) (terminalRunReceipt, error) {
+	key, err := resolveAttestKey(keyPath)
+	if err != nil {
+		return terminalRunReceipt{}, Exit(2, "attest key: %v", err)
+	}
+	return buildTerminalRunReceiptWithKey(key, in)
+}
+
+func writeTerminalRunReceipt(path string, receipt terminalRunReceipt) (runArtifact, error) {
+	prepared, err := prepareTerminalRunReceipt(path, receipt)
+	if err != nil {
+		return runArtifact{}, err
+	}
+	return persistPreparedRunReceipt(prepared)
+}
+
+func writeRunReceipt(path, keyPath string, in runReceiptInput) (runArtifact, error) {
+	key, err := resolveAttestKey(keyPath)
+	if err != nil {
+		return runArtifact{}, Exit(2, "attest key: %v", err)
+	}
+	prepared, err := prepareRunReceipt(path, key, in)
+	if err != nil {
+		return runArtifact{}, err
+	}
+	return persistPreparedRunReceipt(prepared)
+}

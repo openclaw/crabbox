@@ -314,14 +314,6 @@ func lengthPrefixedBytes(prefix string, values []string) []byte {
 	return payload.Bytes()
 }
 
-func buildTerminalRunReceipt(keyPath string, in terminalRunReceiptInput) (terminalRunReceipt, error) {
-	key, err := resolveAttestKey(keyPath)
-	if err != nil {
-		return terminalRunReceipt{}, Exit(2, "attest key: %v", err)
-	}
-	return buildTerminalRunReceiptWithKey(key, in)
-}
-
 func buildTerminalRunReceiptWithKey(key ed25519.PrivateKey, in terminalRunReceiptInput) (terminalRunReceipt, error) {
 	pub := key.Public().(ed25519.PublicKey)
 	commandDigest := commandSHA256(in.Command)
@@ -497,14 +489,6 @@ func decodeTerminalRunReceipt(data []byte) (terminalRunReceipt, error) {
 		return terminalRunReceipt{}, err
 	}
 	return receipt, nil
-}
-
-func writeTerminalRunReceipt(path string, receipt terminalRunReceipt) (runArtifact, error) {
-	prepared, err := prepareTerminalRunReceipt(path, receipt)
-	if err != nil {
-		return runArtifact{}, err
-	}
-	return persistPreparedRunReceipt(prepared)
 }
 
 func prepareTerminalRunReceipt(path string, receipt terminalRunReceipt) (preparedRunReceipt, error) {
@@ -715,18 +699,6 @@ func validSHA256Digest(value string) bool {
 	}
 	decoded, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
 	return err == nil && len(decoded) == sha256.Size
-}
-
-func writeRunReceipt(path, keyPath string, in runReceiptInput) (runArtifact, error) {
-	key, err := resolveAttestKey(keyPath)
-	if err != nil {
-		return runArtifact{}, Exit(2, "attest key: %v", err)
-	}
-	prepared, err := prepareRunReceipt(path, key, in)
-	if err != nil {
-		return runArtifact{}, err
-	}
-	return persistPreparedRunReceipt(prepared)
 }
 
 func prepareRunReceipt(path string, key ed25519.PrivateKey, in runReceiptInput) (preparedRunReceipt, error) {
