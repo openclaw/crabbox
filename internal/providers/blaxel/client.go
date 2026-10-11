@@ -713,7 +713,7 @@ func apiCreateSandboxRequest(req CreateSandboxRequest) blaxelAPISandbox {
 }
 
 func (s blaxelAPISandbox) sandbox() Sandbox {
-	status := firstNonEmpty(s.State, s.Status)
+	status := shared.FirstNonBlank(s.State, s.Status)
 	return Sandbox{
 		ID:        s.Metadata.Name,
 		Name:      s.Metadata.Name,
@@ -759,7 +759,7 @@ type blaxelAPIProcess struct {
 
 func (p blaxelAPIProcess) process() Process {
 	return Process{
-		ID:       firstNonEmpty(p.PID, p.Name),
+		ID:       shared.FirstNonBlank(p.PID, p.Name),
 		Status:   p.Status,
 		ExitCode: p.ExitCode,
 	}
@@ -792,7 +792,7 @@ func parseSandboxList(data []byte) (ListSandboxesResult, error) {
 	}
 	return ListSandboxesResult{
 		Sandboxes: apiSandboxList(envelope.Data),
-		Next:      firstNonEmpty(envelope.Meta.NextCursor, envelope.Meta.Next, envelope.Meta.Cursor),
+		Next:      shared.FirstNonBlank(envelope.Meta.NextCursor, envelope.Meta.Next, envelope.Meta.Cursor),
 	}, nil
 }
 
@@ -835,13 +835,4 @@ func redactString(value string) string {
 		}
 	}
 	return out
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }

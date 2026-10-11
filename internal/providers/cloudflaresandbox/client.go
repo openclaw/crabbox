@@ -251,7 +251,7 @@ func (c *client) parseExecSSE(body io.Reader, stdout, stderr io.Writer) (execRes
 		stream := strings.ToLower(frame.Stream)
 		switch kind {
 		case "stdout", "stderr", "output":
-			payload := firstNonEmpty(frame.Chunk, frame.Data, frame.Stdout, frame.Stderr)
+			payload := shared.FirstNonEmpty(frame.Chunk, frame.Data, frame.Stdout, frame.Stderr)
 			decoded, err := decodeSSEPayload(payload, frame.Encoding)
 			if err != nil {
 				return err
@@ -284,7 +284,7 @@ func (c *client) parseExecSSE(body io.Reader, stdout, stderr io.Writer) (execRes
 			result.ExitCode = *frame.ExitCode
 			sawExit = true
 		case "error":
-			msg := firstNonEmpty(frame.Error, frame.Message, data)
+			msg := shared.FirstNonEmpty(frame.Error, frame.Message, data)
 			return fmt.Errorf("cloudflare-sandbox exec error: %s", c.redact(msg))
 		default:
 			return fmt.Errorf("unsupported cloudflare-sandbox exec SSE event %q", kind)
@@ -340,15 +340,6 @@ func decodeSSEPayload(value, encoding string) (string, error) {
 		return "", fmt.Errorf("decode cloudflare-sandbox exec SSE base64 payload: %w", err)
 	}
 	return string(decoded), nil
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func (c *client) UploadFile(ctx context.Context, id, remotePath string, content io.Reader) error {

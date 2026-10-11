@@ -56,7 +56,7 @@ var newTransport = func(cfg core.Config, rt core.Runtime) (sandboxTransport, err
 	// operator-supplied flag or environment value can select the origin that
 	// receives the environment-only gateway credentials below.
 	gatewayURL := strings.TrimSpace(cfg.CloudRunSandbox.GatewayURL)
-	secret := firstNonEmpty(
+	secret := shared.FirstNonBlankTrimmed(
 		os.Getenv("CRABBOX_CLOUD_RUN_SANDBOX_SECRET"),
 		os.Getenv("CLOUD_RUN_SANDBOX_SECRET"),
 	)
@@ -76,7 +76,7 @@ var newTransport = func(cfg core.Config, rt core.Runtime) (sandboxTransport, err
 		return &remoteTransport{
 			baseURL:   validated,
 			secret:    secret,
-			authToken: firstNonEmpty(os.Getenv("CRABBOX_CLOUD_RUN_SANDBOX_AUTH_TOKEN"), os.Getenv("CLOUD_RUN_AUTH_TOKEN")),
+			authToken: shared.FirstNonBlankTrimmed(os.Getenv("CRABBOX_CLOUD_RUN_SANDBOX_AUTH_TOKEN"), os.Getenv("CLOUD_RUN_AUTH_TOKEN")),
 			cfg:       cfg,
 			http:      shared.SecureHTTPClient(httpClient, trusted, cloudRunSandboxRedirectError),
 		}, nil
@@ -88,15 +88,6 @@ var newTransport = func(cfg core.Config, rt core.Runtime) (sandboxTransport, err
 		cfg: cfg,
 		rt:  rt,
 	}, nil
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
 }
 
 func validateGatewayURL(raw string) (string, error) {
