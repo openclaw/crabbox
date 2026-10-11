@@ -1199,5 +1199,19 @@
     "bestFit": "Self-hosted Linux VM pool over XAPI",
     "caveat": "Normal leases require prepared Linux templates",
     "docs": "xcp-ng.md"
+  },
+  "serve": {
+    "status": "built-in",
+    "category": "self-hosted-virtualization",
+    "substrate": "Donated Docker or Podman containers",
+    "location": "self-hosted",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "no",
+    "lifecycle": "Crabbox coordinator and outbound agent",
+    "cleanup": "agent-confirmed container removal",
+    "bestFit": "Trusted owner workloads on spare machine capacity",
+    "caveat": "Brokered only; clients must reach the advertised SSH address; containers are not hostile-tenant isolation",
+    "docs": "serve.md"
   }
 }

@@ -59,8 +59,9 @@ and control modes:
   (`CRABBOX_COORDINATOR` or `config set-broker`). The provider's SSH backend is
   wrapped in a `coordinatorLeaseBackend`: lease lifecycle goes through the
   coordinator over HTTPS, but the CLI still drives SSH, rsync, and command execution
-  **directly** to the runner. The brokered set is exactly the five managed cloud
-  providers: `aws`, `azure`, `daytona`, `gcp`, `hetzner`.
+  **directly** to the runner. The brokered set is the five managed cloud
+  providers (`aws`, `azure`, `daytona`, `gcp`, `hetzner`) plus owner-donated
+  container capacity (`serve`). Serve requires the coordinator.
 - **Direct SSH mode** — the provider returns an SSH lease backend but no broker
   is configured. The CLI provisions and connects against the cloud or host API
   itself; no coordinator is involved. The five brokerable providers fall back to this
@@ -517,3 +518,18 @@ retry. Therefore:
 | Coordinator entry / auth   | `worker/src/coordinator-entry.ts`, `worker/src/index.ts`, `worker/node/server.ts`, `worker/src/auth.ts` |
 | Fleet state / endpoints    | `worker/src/fleet.ts`, `types.ts`, `config.ts`, `usage.ts`                                              |
 | Runtime adapters           | `worker/src/coordinator-runtime.ts`, `worker/node/node-runtime.ts`, `worker/node/postgres-storage.ts`   |
+
+## Donated container capacity
+
+The `serve` SSH-lease provider uses owner-scoped machines registered by the
+outbound `crabbox serve` agent. `worker/src/serve.ts` runs in both coordinator
+runtimes and owns placement, per-machine reservations, agent reports, and lost
+machine detection. Normal lease records retain the existing provisioning,
+active, released, expired, and failed states. Release is pending until an agent
+heartbeat confirms container absence; capacity stays reserved until then.
+
+The agent shares container creation and SSH bootstrap with local-container,
+but uses explicit address binding, CPU shares, resource limits, named cache
+volumes, an in-container deadline watchdog, and automatic container removal.
+Clients transfer files and execute commands directly over SSH. See
+[Serve](providers/serve.md) for the trust boundary and network requirements.

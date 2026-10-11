@@ -213,7 +213,7 @@ Rules:
     Crabbox MCP host.
 - `Coordinator` is `CoordinatorSupported` only when the shared coordinator
   provider adapter can provision your runners. Today that is `aws`, `azure`,
-  `daytona`, `gcp`, and `hetzner`. Everything else — all delegated run backends
+  `daytona`, `gcp`, `hetzner`, and `serve`. Everything else — all delegated run backends
   and Static SSH — sets `CoordinatorNever`. Even a `CoordinatorSupported`
   provider runs direct from the CLI unless a broker URL is configured (see
   [Coordinator](coordinator.md)).

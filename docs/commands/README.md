@@ -13,6 +13,7 @@ same order as the CLI help.
 - [logout](logout.md)
 - [whoami](whoami.md)
 - [doctor](doctor.md)
+- [serve](serve.md)
 - [warmup](warmup.md)
 - [prewarm](prewarm.md)
 - [run](run.md)

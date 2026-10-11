@@ -22,7 +22,7 @@ Crabbox has three implementation surfaces:
 - **Coordinator** — TypeScript, under `worker/src` and `worker/node`. Shared
   `FleetCoordinator` behavior runs either in a Cloudflare Worker plus one
   Durable Object or in Node.js backed by PostgreSQL and pg-boss. Only `aws`,
-  `azure`, `daytona`, `gcp`, and `hetzner` can transfer provider lifecycle to it;
+  `azure`, `daytona`, `gcp`, `hetzner`, and `serve` can transfer provider lifecycle to it;
   everything else runs direct or delegated from the CLI.
 
 ## CLI Surface
@@ -114,6 +114,7 @@ SSH-lease providers:
 - XCP-ng (`xcp-ng`): `internal/providers/xcpng`
 - Incus: `internal/providers/incus`
 - Static/BYO SSH host: `internal/providers/ssh`, with target mapping in `internal/cli/static.go`
+- Donated container capacity: `internal/providers/serve`, `internal/cli/serve.go`, `worker/src/serve.ts`; shared creation/bootstrap in `internal/providers/localcontainer/served.go`
 - Local Docker container: `internal/providers/localcontainer`
 - Apple `Virtualization.framework` Linux VM helper and provider:
   `internal/applevmhelper`, `internal/providers/applevm`; the Swift VM daemon

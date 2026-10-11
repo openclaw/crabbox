@@ -1097,9 +1097,10 @@ SSH-over-Linux/Windows workflow that requires an SSH lease backend, a
 
 Set `CoordinatorSupported` only when the Crabbox broker can provision that
 provider. Today that is the managed cloud set (`aws`, `azure`, `daytona`, `gcp`,
-`hetzner`). A direct-only SSH provider should use `CoordinatorNever`. Even a
-`CoordinatorSupported` provider runs direct from the CLI until a broker URL/token
-is configured.
+`hetzner`) plus owner-donated `serve` capacity. A direct-only SSH provider should
+use `CoordinatorNever`. `BrokeredOnly` declares that direct mode is unsupported;
+the provider must reject direct configuration. Other `CoordinatorSupported`
+providers run direct until a broker URL/token is configured.
 
 Checkpoint-related features are reserved for versioned workspaces:
 

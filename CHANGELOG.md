@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Serve: run `crabbox serve` on trusted machines to donate spare CPU as owner-only container leases (`--provider serve`), with outbound coordinator polling, local deadline enforcement, `--ssh-ports` pools, warm package caches, per-user service install, and opt-in capacity fallback. Coordinators enable it per owner with `CRABBOX_SERVE_ALLOWED_OWNERS` (off by default).
+
 ### Changes
 
 - Docs: consolidate provider selection, class catalogs, and lifecycle references; correct stale provider support, sizing, and transport guidance.
