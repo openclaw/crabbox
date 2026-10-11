@@ -205,3 +205,14 @@ func TestLeaseSelectorPrecedence(t *testing.T) {
 		})
 	}
 }
+
+func TestTargetFlagOverridesWithoutSelectors(t *testing.T) {
+	cfg := baseConfig()
+	fs := newFlagSet("heartbeat", io.Discard)
+	if err := applyTargetFlagOverrides(&cfg, fs, targetFlagValues{}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TargetOS != targetLinux || cfg.WindowsMode != windowsModeNormal {
+		t.Fatalf("target=%s mode=%s", cfg.TargetOS, cfg.WindowsMode)
+	}
+}

@@ -25,7 +25,14 @@ func registerTargetFlags(fs *flag.FlagSet, defaults Config) targetFlagValues {
 }
 
 func applyTargetFlagOverrides(cfg *Config, fs *flag.FlagSet, values targetFlagValues) error {
-	applyTargetSelectorFlags(cfg, fs, *values.Target, *values.WindowsMode)
+	var target, mode string
+	if values.Target != nil {
+		target = *values.Target
+	}
+	if values.WindowsMode != nil {
+		mode = *values.WindowsMode
+	}
+	applyTargetSelectorFlags(cfg, fs, target, mode)
 	applied, err := values.Static.Apply(&cfg.Static, fs)
 	recordConfigInput(cfg, "ssh", configInputFlag, applied.InputAccepted)
 	// Target validation can fail after this explicit host approval has applied.
