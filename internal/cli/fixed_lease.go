@@ -31,6 +31,9 @@ func lockFixedLeaseAcquisition(ctx context.Context, leaseID string) (func(), err
 }
 
 type FixedLeaseBinding struct {
+	// InitialLabels preserve provider ownership and cleanup metadata even if
+	// planning fails before the native attempt is published. Replays ignore them.
+	InitialLabels       map[string]string
 	AllocateSlug        bool
 	RejectExistingLease bool
 	RequestedSlug       string
@@ -149,6 +152,7 @@ func AcquireFixedIntent(
 			claim.ClaimedAt = current.Format(time.RFC3339)
 			claim.LastUsedAt = claim.ClaimedAt
 			claim.IdleTimeoutSeconds = int(opts.IdleTimeout.Seconds())
+			claim.Labels = maps.Clone(binding.InitialLabels)
 			claim.FixedCreateIntent = &FixedCreateIntent{
 				Version:       opts.Kind.IntentVersion,
 				Fingerprint:   binding.Fingerprint,

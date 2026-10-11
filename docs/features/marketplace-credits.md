@@ -6,13 +6,10 @@ Read when:
 - changing marketplace quote, routing, or credit enforcement behavior;
 - deciding whether a provider can participate in Crabbox-managed billing.
 
-This feature is a skeleton for an OpenRouter-like gateway for sandbox capacity.
-The user puts payment credentials in one place, buys or receives Crabbox credits,
-and asks Crabbox for a sandbox by intent. Crabbox then chooses among compatible
-providers using broker-owned credentials, prices, capacity hints, policy, and
-the user's credit balance.
-
-The current implementation is preview-only:
+`crabbox marketplace` previews capacity quotes and candidate routing. It does
+not collect payment credentials, sell credits, or provision a lease. The
+remaining billing and settlement sections describe design direction, not
+available product behavior. The current implementation is preview-only:
 
 ```text
 implemented: status API, quote API, CLI status, CLI quote, docs, tests

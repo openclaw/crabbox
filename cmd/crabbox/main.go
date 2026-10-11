@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,11 +32,21 @@ func main() {
 	}
 	if err != nil {
 		printError(os.Stderr, err)
+		printFixedAllocationResult(os.Stderr, err)
 		var exit cli.ExitError
 		if cli.AsExitError(err, &exit) {
 			os.Exit(exit.Code)
 		}
 		os.Exit(1)
+	}
+}
+
+func printFixedAllocationResult(w io.Writer, err error) {
+	var allocation *cli.FixedAllocationResult
+	if errors.As(err, &allocation) {
+		if encoded, marshalErr := json.Marshal(allocation); marshalErr == nil {
+			fmt.Fprintf(w, "crabbox-allocation-result %s\n", encoded)
+		}
 	}
 }
 

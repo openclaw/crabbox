@@ -258,3 +258,145 @@ func TestRunRecorderMissingBindingEndpointFailsAdmission(t *testing.T) {
 		})
 	}
 }
+
+func TestRunEventAppendRecovery(t *testing.T) {
+	for _, scenario := range []string{"slow", "503", "lost acknowledgement", "timeout", "permanent", "legacy", "exhausted", "budget", "unsupported", "429"} {
+		t.Run(scenario, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var requests []map[string]any
+				client := &CoordinatorClient{BaseURL: "https://example.test", Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					var input map[string]any
+					if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
+						t.Fatal(err)
+					}
+					requests = append(requests, input)
+					wantMethod := http.MethodPut
+					if scenario == "legacy" {
+						wantMethod = http.MethodPost
+					}
+					if req.Method != wantMethod {
+						t.Errorf("method=%s, want %s", req.Method, wantMethod)
+					}
+					if scenario == "budget" {
+						<-req.Context().Done()
+						return nil, req.Context().Err()
+					}
+					if len(requests) == 1 {
+						switch scenario {
+						case "slow":
+							select {
+							case <-time.After(3 * time.Second):
+							case <-req.Context().Done():
+								return nil, req.Context().Err()
+							}
+						case "timeout":
+							<-req.Context().Done()
+							return nil, req.Context().Err()
+						case "lost acknowledgement":
+							return nil, io.ErrUnexpectedEOF
+						}
+					}
+					code := 201
+					if scenario == "unsupported" {
+						code = 404
+					}
+					if scenario == "429" && len(requests) == 1 {
+						code = 429
+					}
+					if scenario == "exhausted" || ((scenario == "503" || scenario == "legacy") && len(requests) == 1) {
+						code = 503
+					}
+					if scenario == "permanent" {
+						code = 403
+					}
+					return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(`{"event":{"seq":2}}`)), Header: make(http.Header), Request: req}, nil
+				})}}
+				var run CoordinatorRun
+				json.Unmarshal([]byte(fmt.Sprintf(`{"id":"run_123","eventAppendIdempotent":%t}`, scenario != "legacy")), &run)
+				var diagnostics strings.Builder
+				rec := &runRecorder{coord: client, stderr: &diagnostics}
+				rec.attachRun(run)
+				startedAt := time.Now()
+				rec.publisher.Enqueue(client, rec.runID, "stdout", "hello")
+				rec.waitForEvents(40 * time.Second)
+				want := 2
+				if scenario == "slow" || scenario == "permanent" || scenario == "legacy" || scenario == "unsupported" {
+					want = 1
+				}
+				if scenario == "exhausted" || scenario == "budget" {
+					want = 3
+				}
+				if len(requests) != want {
+					t.Fatalf("requests=%d, want %d; %s", len(requests), want, diagnostics.String())
+				}
+				if scenario != "legacy" {
+					if id, ok := requests[0]["id"].(string); !ok || len(id) != 32 {
+						t.Fatalf("missing stable event ID: %v", requests[0])
+					}
+					for _, input := range requests[1:] {
+						if !reflect.DeepEqual(input, requests[0]) {
+							t.Fatal("retry changed append payload")
+						}
+					}
+				}
+				if scenario == "budget" && time.Since(startedAt) != 30*time.Second {
+					t.Fatalf("retry budget=%v", time.Since(startedAt))
+				}
+				failed := scenario == "permanent" || scenario == "legacy" || scenario == "exhausted" || scenario == "budget"
+				if strings.Contains(diagnostics.String(), "append failed") != failed {
+					t.Fatalf("unexpected diagnostics: %s", diagnostics.String())
+				}
+			})
+		})
+	}
+}
+
+func TestRunRecorderIdempotentDrainPreservesEventOrder(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var observed []string
+		var ids []string
+		started := make(chan struct{})
+		var diagnostics strings.Builder
+		client := &CoordinatorClient{BaseURL: "https://example.test", Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			kind := "finish"
+			if strings.HasSuffix(req.URL.Path, "/events") {
+				var input CoordinatorRunEventInput
+				if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
+					t.Fatal(err)
+				}
+				kind = input.Type
+				ids = append(ids, input.ID)
+			}
+			observed = append(observed, req.Method+":"+kind)
+			code := http.StatusOK
+			if len(observed) == 1 {
+				close(started)
+				select {
+				case <-time.After(3 * time.Second):
+				case <-req.Context().Done():
+					return nil, req.Context().Err()
+				}
+				code = http.StatusServiceUnavailable
+			}
+			return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(`{"run":{"id":"run_123"},"event":{"seq":2}}`)), Header: make(http.Header), Request: req}, nil
+		})}}
+		rec := &runRecorder{coord: client, stderr: &diagnostics}
+		rec.attachRun(CoordinatorRun{ID: "run_123", EventAppendIdempotent: true})
+		rec.publisher.Enqueue(client, rec.runID, "stdout", "hello")
+		<-started
+		rec.Event("command.finished", "finished", "")
+		if err := rec.Finish(context.Background(), SSHTarget{}, 0, 0, 0, "hello", false, nil, FailureClassification{}, nil); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"PUT:stdout", "PUT:stdout", "PUT:command.finished", "POST:finish"}
+		if !reflect.DeepEqual(observed, want) {
+			t.Fatalf("publication order=%v, want %v", observed, want)
+		}
+		if ids[0] == "" || ids[0] != ids[1] || ids[1] == ids[2] {
+			t.Fatalf("wrong idempotency keys: %v", ids)
+		}
+		if strings.Contains(diagnostics.String(), "warning:") {
+			t.Fatalf("recovered append warned: %s", diagnostics.String())
+		}
+	})
+}

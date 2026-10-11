@@ -60,6 +60,9 @@ func pondMeshTerminationContext(ctx context.Context) (context.Context, func()) {
 }
 
 func (h *pondMeshExecHandle) Start() error {
+	if err := h.prepareStart(); err != nil {
+		return err
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve pond mesh anchor executable: %w", err)

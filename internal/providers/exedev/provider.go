@@ -40,6 +40,9 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
+	if err := validateExeDevBase(cfg); err != nil {
+		return nil, err
+	}
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, core.Exit(2, "provider=%s managed provisioning supports target=linux only", providerName)
 	}

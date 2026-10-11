@@ -18,6 +18,7 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		ClaimExpiryBound:           e2bMaxSandboxTimeout,
 		Authentication:             core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		SyncGuardrailFullCandidate: true,
 		Name:                       e2bProvider,

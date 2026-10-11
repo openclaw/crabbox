@@ -7,13 +7,48 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/testutil"
 )
+
+func TestStatusWaitCoordinatorDoesNotRequireDirectClaim(t *testing.T) {
+	var reads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_abcdef123456" {
+			t.Errorf("unexpected coordinator request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		reads.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID: "cbx_abcdef123456", Slug: "fixed-coordinator", Provider: "aws", State: "provisioning",
+		}})
+	}))
+	defer server.Close()
+	configureHeartbeatCoordinatorTest(t, server.URL)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: testutil.CancelOnWrite(&stdout, cancel), Stderr: &stderr}).Run(ctx, []string{
+		"status", "--provider", "aws", "--id", "cbx_abcdef123456", "--wait", "--wait-timeout", "30s",
+	})
+	if !errors.Is(err, context.Canceled) || reads.Load() != 1 || stderr.Len() != 0 {
+		t.Fatalf("coordinator wait changed: reads=%d err=%v stderr=%s", reads.Load(), err, &stderr)
+	}
+	if !strings.Contains(stdout.String(), "provider=aws") || !strings.Contains(stdout.String(), "state=provisioning") {
+		t.Fatalf("coordinator snapshot=%s", &stdout)
+	}
+}
 
 func TestMemoryDiagnosticsPresentationRouting(t *testing.T) {
 	for _, mode := range []string{"inspect", "status", "plain-status", "wait", "wait-json", "helper"} {
@@ -115,7 +150,7 @@ func TestStatusWaitTerminalErrorFailsNonReadyTerminalState(t *testing.T) {
 }
 
 func TestLeaseStatusStateCanBeReadyRejectsTerminalStates(t *testing.T) {
-	for _, state := range []string{"dead", "deleting", "exited", "stopped", "released", "terminated"} {
+	for _, state := range []string{"dead", "deleting", "exited", "shutting-down", "stopped", "released", "terminated"} {
 		if leaseStatusStateCanBeReady(LeaseTarget{}, state) {
 			t.Fatalf("leaseStatusStateCanBeReady(%q) = true, want false", state)
 		}
@@ -222,6 +257,58 @@ func TestStatusViewKeepsFourSecondWindowsSSHProbe(t *testing.T) {
 	args := readSSHArgsRecorder(t, logPath)
 	assertSSHOption(t, args, "ConnectTimeout", "10")
 	assertSSHOption(t, args, "ConnectionAttempts", "3")
+}
+
+func TestStatusViewProbesRecordedWindowsPlatform(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	logPath := installSSHArgsRecorder(t)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	host, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Provider = "aws"
+	cfg.Network = NetworkPublic
+	// The resolver builds the target from configuration defaults before the
+	// lease labels are read, so it carries the Linux bootstrap gate.
+	target := sshTargetForLease(cfg, host, "", port)
+	target.NetworkKind = NetworkPublic
+	if !strings.Contains(target.ReadyCheck, "cloud-init status --wait") {
+		t.Fatalf("initial ready check=%q, want the provider Linux bootstrap gate", target.ReadyCheck)
+	}
+
+	view, err := statusViewFromLeaseTarget(context.Background(), cfg, LeaseTarget{
+		LeaseID: "cbx_status_recorded_windows",
+		Server: Server{
+			Provider: "aws",
+			Status:   "active",
+			Labels:   map[string]string{"target": targetWindows, "windows_mode": windowsModeNormal},
+		},
+		SSH: target,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.Ready {
+		t.Fatal("status Ready=false, want the recorded Windows readiness probe to succeed")
+	}
+	if view.TargetOS != targetWindows || view.WindowsMode != windowsModeNormal {
+		t.Fatalf("status target=%q mode=%q, want the recorded Windows platform", view.TargetOS, view.WindowsMode)
+	}
+	recorded := strings.Join(readSSHArgsRecorder(t, logPath), "\n")
+	if strings.Contains(recorded, "cloud-init") {
+		t.Fatalf("status probe still ran the Linux bootstrap gate: %q", recorded)
+	}
+	if want := sshReadyCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}); !strings.Contains(recorded, want) {
+		t.Fatalf("status probe args=%q, want the native Windows readiness command", recorded)
+	}
 }
 
 func TestStatusWSL2ReadinessAllowsCompleteProbe(t *testing.T) {

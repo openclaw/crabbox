@@ -4140,7 +4140,36 @@ exit 99
 			case "classified-fallback", "snapshot-prepare-fallback", "private-origin", "origin-unavailable", "missing-origin", "local-ineligible", "linked-worktree", "checkout-file-obstruction", "post-reset-cache",
 				"ordinary-private-fresh", "ordinary-private-reused", "ordinary-unavailable-fresh", "ordinary-unavailable-reused", "ordinary-disconnected-reused":
 				transfer, err := os.ReadFile(rsyncLog)
-				if err != nil || !bytes.Contains(transfer, []byte("clean.txt\x00")) {
+				seededReuse := ordinary && reused && (privateOrigin || unavailableOrigin)
+				if seededReuse {
+					// The cached exact tree is verified before the later origin fetch
+					// fails. Clean bytes need no transfer; metadata still falls back.
+					if !os.IsNotExist(err) || len(transfer) != 0 || !strings.Contains(stderr.String(), "seeded sync delta: 0 files") {
+						t.Fatalf("verified clean seed did not skip transfer: data=%q err=%v stderr=%s", transfer, err, stderr.String())
+					}
+					manifest, _ := fixture.manifest(t)
+					for _, rel := range manifest.Files {
+						local, remote := filepath.Join(repo.Root, rel), filepath.Join(workdir, rel)
+						wantInfo, localErr := os.Lstat(local)
+						gotInfo, remoteErr := os.Lstat(remote)
+						if localErr != nil || remoteErr != nil || wantInfo.Mode() != gotInfo.Mode() {
+							t.Fatalf("seeded path %q modes: %v %v", rel, localErr, remoteErr)
+						}
+						if wantInfo.Mode()&os.ModeSymlink != 0 {
+							want, _ := os.Readlink(local)
+							got, _ := os.Readlink(remote)
+							if got != want {
+								t.Fatalf("seeded symlink %q differs", rel)
+							}
+						} else {
+							want, localErr := os.ReadFile(local)
+							got, remoteErr := os.ReadFile(remote)
+							if localErr != nil || remoteErr != nil || !bytes.Equal(got, want) {
+								t.Fatalf("seeded path %q bytes differ: %v %v", rel, localErr, remoteErr)
+							}
+						}
+					}
+				} else if err != nil || !bytes.Contains(transfer, []byte("clean.txt\x00")) {
 					t.Fatalf("fallback omitted full manifest: data=%q err=%v", transfer, err)
 				}
 				wantReason := "checkout_failed"
@@ -4163,7 +4192,7 @@ exit 99
 				if ordinary {
 					warningPrefix = "git origin fallback reason="
 					manifest, _ := fixture.manifest(t)
-					if !bytes.Equal(transfer, manifest.NUL()) {
+					if !seededReuse && !bytes.Equal(transfer, manifest.NUL()) {
 						t.Fatalf("ordinary fallback transferred an incomplete manifest: got=%q want=%q", transfer, manifest.NUL())
 					}
 				}

@@ -264,3 +264,37 @@ func TestFixedEngineDefiniteRejectionRetiresOnlyUnallocatedAttempt(t *testing.T)
 		})
 	}
 }
+
+func TestFixedEnginePersistsInitialOwnershipBeforePlan(t *testing.T) {
+	isolateTestUserDirs(t)
+	kind := FixedLeaseKind{ClaimProvider: "fixture", IntentVersion: 1, Label: "fixture"}
+	labels := map[string]string{"account": "alice", "repository": "example-org/my-app"}
+	failure := errors.New("planning unavailable")
+	_, err := AcquireFixedResource(t.Context(), FixedAcquireOptions{Kind: kind, LeaseID: "cbx_0123456789ab", RepoRoot: t.TempDir()}, FixedLeaseOperations[string]{
+		Admission: &FixedAdmission{},
+		DescribeIntent: func(context.Context, *LeaseClaim, bool) (FixedLeaseBinding, error) {
+			return FixedLeaseBinding{ProviderScope: "account:alice", Fingerprint: "fixture", Slug: "box", InitialLabels: labels}, nil
+		},
+		ObserveExact: func(context.Context, *FixedTransaction, FixedObserveMode) (FixedObservation[string], error) {
+			return FixedObservation[string]{CanSubmit: true}, nil
+		},
+		Plan: func(_ context.Context, claim LeaseClaim) (FixedAttemptPlan, error) {
+			persisted, err := ReadLeaseClaim(claim.LeaseID)
+			if err != nil || !maps.Equal(persisted.Labels, labels) {
+				t.Fatalf("initial ownership not durable: %+v %v", persisted, err)
+			}
+			return FixedAttemptPlan{}, failure
+		},
+		Submit: func(context.Context, *FixedTransaction) (string, error) {
+			t.Fatal("submitted despite failed planning")
+			return "", nil
+		},
+		PrepareAccess: func(context.Context, *FixedTransaction, string) (LeaseTarget, error) {
+			t.Fatal("prepared access without resource")
+			return LeaseTarget{}, nil
+		},
+	})
+	if !errors.Is(err, failure) {
+		t.Fatalf("expected planning failure: %v", err)
+	}
+}

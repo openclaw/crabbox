@@ -38,8 +38,8 @@ Each provider maps the six class names to an ordered list of concrete
 instance types. That list *is* the fallback chain: try the first; if it is
 rejected, try the next; and so on until one succeeds or the chain is exhausted.
 
-The full per-provider class tables (including AWS Windows, Windows WSL2, and
-macOS) live in [Providers](providers.md#machine-classes).
+Inspect the compiled per-provider class catalogs (including AWS Windows,
+Windows WSL2, and macOS) as shown in [Providers](providers.md#machine-classes).
 
 ## When Class Fallback Triggers
 
@@ -162,8 +162,9 @@ capacity:
 
 When `hints` is enabled (the shipped default), the broker checks the applied
 Spot or On-Demand vCPU quota for each candidate type before launching it.
-Candidates that exceed the quota are recorded as a quota attempt and skipped, so
-the chain spends launch attempts only on types the account can actually run.
+Candidates that exceed the quota are recorded as a quota attempt and skipped.
+Types that fit the quota ceiling still need enough unused regional quota; the
+preflight does not measure existing usage or Capacity Reservations.
 Brokered failures also emit advisory `CapacityHint` records (for example, when a
 large class is under capacity pressure) alongside `provisioningAttempts`.
 
@@ -180,7 +181,10 @@ crabbox doctor --provider aws
 ```
 
 It reports the applied EC2 vCPU quota for the relevant market(s) and warns when
-the default class needs more vCPUs than the account is allowed.
+the default class needs more vCPUs than the account is allowed. A sufficient
+ceiling reports `capacity=unknown quota_limit=sufficient usage=unchecked`.
+Removing an exact `--type` enables class fallback but does not free quota; a
+smaller type helps only when enough quota remains for it.
 
 ## Region And Availability Zone Routing
 
@@ -259,3 +263,45 @@ Related docs:
 - [Cost and usage](cost-usage.md)
 - [Orchestrator](../orchestrator.md)
 - [Operations](../operations.md)
+
+## Optional AWS resource minimums
+
+For a new Linux AWS lease, add `--min-vcpus` and/or `--min-memory-mib` to
+`warmup` or a one-shot `run`. These filter the existing class candidates;
+they do not change their order or turn the preferred type into a minimum.
+For example, a workload needing four vCPUs and 15 GiB can request:
+
+```sh
+crabbox warmup --provider aws --class standard --min-vcpus 4 --min-memory-mib 15360
+```
+
+The matching configuration keys are `capacity.minVCPUs` and
+`capacity.minMemoryMiB`. Values are whole numbers
+from 0 to 2147483647. Zero or omission disables that dimension; command flags
+can override configured values. MiB means 1,048,576 bytes.
+
+Crabbox checks the candidates against EC2 `DescribeInstanceTypes` metadata.
+Candidates below a requested minimum, or with unknown metadata for a requested
+dimension, cannot launch. Metadata lookup failure is reported as an inability
+to verify capacity. An exact `--type` must satisfy the minimum too and retains
+its exact-type behavior. Market and region fallback, quotas and lease lifetimes
+remain unchanged. Without minimums, existing requests retain their current
+candidate lists and advisory metadata behavior.
+
+Both the direct AWS CLI and a supporting coordinator enforce these minimums.
+A constrained request uses a distinct coordinator creation route, so an older
+coordinator fails instead of silently ignoring the fields. Fixed `--lease-id`
+creation binds the minimums to its original request; changing them on replay
+conflicts with that request. Updating the client alone does not add coordinator
+support.
+
+Minimums initially apply to AWS Linux creation on amd64 and arm64. Existing
+lease `--id` reuse, ready pools, checkpoint creation, jobs and prewarm do not
+accept nonzero minimums; unsupported combinations fail before allocation.
+Use creation-time flags when warming a lease for subsequent ordinary `run --id`
+commands. Those commands still require the caller's normal runtime checks.
+
+EC2 metadata describes nominal hardware. Workloads must also check effective
+process CPU and memory limits before expensive preparation or execution, and
+select a concurrency mode that fits both. These options do not guarantee runtime
+headroom, execution duration or a particular worker count.

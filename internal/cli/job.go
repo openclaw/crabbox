@@ -55,7 +55,7 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 		return Exit(2, "usage: crabbox job run <name>")
 	}
 	name := fs.Arg(0)
-	cfg, err := loadConfig()
+	cfg, err := loadConfigInputs()
 	if err != nil {
 		return err
 	}
@@ -64,6 +64,20 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 		return Exit(2, "job %q is not configured", name)
 	}
 	if err := validateJobConfig(name, job); err != nil {
+		return err
+	}
+	// Jobs supply the same selectors as their generated child commands. Resolve
+	// those before validating inherited defaults, including for dry runs.
+	selectors := newFlagSet("job selectors", io.Discard)
+	registerLeaseCreateFlags(selectors, cfg)
+	if err := parseFlags(selectors, jobLeaseCreateArgsFor(cfg, job, false)); err != nil {
+		return err
+	}
+	if err := applyConfigSelectorFlags(&cfg, selectors); err != nil {
+		return err
+	}
+	cfg, err = resolveLoadedConfig(cfg, "", "")
+	if err != nil {
 		return err
 	}
 	stopPolicy := normalizeJobStopPolicy(job.Stop, *stopOverride)
@@ -127,6 +141,9 @@ func (a App) jobRun(ctx context.Context, args []string) (err error) {
 }
 
 func validateJobRunOptions(cfg Config, job JobConfig, leaseID string) error {
+	if hasCapacityMinimums(cfg) {
+		return Exit(2, "resource requirements are unsupported for composite jobs; use warmup")
+	}
 	markSynthesizedFlagInputs(&cfg, true)
 	if !job.NoSync {
 		return nil

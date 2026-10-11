@@ -339,6 +339,87 @@ than overwriting it. Publisher rollback explicitly authorizes retiring the
 exact failed catalog revision so capability-aware leases cannot select it;
 generic stale compare-and-swap requests leave the catalog unchanged.
 
+### Bake a smaller Linux root disk from stock Ubuntu
+
+A rebuild from the promoted AMI inherits its root snapshot minimum. Even if
+only 8 GB is used, a 400 GB snapshot cannot boot on a 40 GB disk. To lower that
+minimum, start the source lease from owner-verified stock Ubuntu and install
+the developer tools again:
+
+```bash
+scripts/mint-aws-devtools-image.sh --target linux --stock-source --root-gb 40
+# Review the plan, then add --run to perform the paid bake and promotion.
+```
+
+For the protected publisher workflow, set the optional `linux_root_gb` input to
+`40` (or another integer from 16 through 400). This passes `--stock-source
+--root-gb 40` to the Linux wrapper. An empty input keeps the promoted-source
+rebuild; Windows and macOS reject a nonempty value. Deploy the coordinator
+version supporting stock requests before running the publisher.
+
+`--stock-source` supports Linux and Windows. For Linux, `--root-gb` requires
+`--stock-source`; Windows may set a source root size without that flag. Invalid
+sizes fail before any paid work. Without `--root-gb`, a stock source uses normal
+class sizing. Pick enough space for the installer and its temporary files;
+16 GB is an accepted input, not a guarantee that the full developer recipe fits.
+The source uses the selected `CRABBOX_OS` / `linux_os` Ubuntu version. Stock
+selection requires the same coordinator admin authorization as an explicit AMI
+and cannot be combined with an explicit AMI, snapshot, or image capability
+requirements.
+
+Only the source lease gets these overrides. Candidate and promoted proof
+leases, plus all `--measured` baseline/candidate/promoted cohorts, use normal
+root sizing. Baseline measurements retain normal image selection. The wrapper
+clears ambient `CRABBOX_AWS_STOCK_IMAGE` / `CRABBOX_AWS_ROOT_GB` settings for
+proofs, including file-config values via explicit false/zero inputs. A configured
+coordinator root override still applies to normal sizing. Source settings and
+lease ID are written to the source JSON receipt beside the diagnostic logs;
+measured public proof includes the allowlisted requested source settings.
+Promotion and rollback receipts still bind the original baseline default.
+
+### Bake Windows Server 2025 from stock
+
+The protected workflow defaults to `windows_os=windows-server:2022`, preserving
+the existing promoted-source rebuild. Select 2025 to start the source lease
+from Amazon's stock Windows Server 2025 English Full Base AMI:
+
+```bash
+gh workflow run devtools-image-publish.yml \
+  --ref main \
+  -f target=windows \
+  -f windows_os=windows-server:2025 \
+  -f region=eu-west-1
+```
+
+The equivalent wrapper plan is:
+
+```bash
+CRABBOX_OS=windows-server:2025 scripts/mint-aws-devtools-image.sh \
+  --target windows --stock-source --region eu-west-1 --windows-mode normal
+# Review the plan, then add --run to perform the paid bake and promotion.
+```
+
+Windows `--stock-source` requires `CRABBOX_OS=windows-server:2022` or
+`windows-server:2025`. Only the source receives that selector and
+`CRABBOX_AWS_STOCK_IMAGE=1`. The candidate uses the captured AMI explicitly;
+the promoted proof uses normal image selection without the source selector.
+Do not configure a separate Windows OS selector or AMI override in the
+publisher's file config: the final proof must select the promoted image.
+All three smokes verify the requested guest build (20348 for 2022, 26100 for
+2025), and prep/smoke select the matching `ltsc2022` or `ltsc2025` Server Core
+container image. The region guard, exact failed-candidate checkpoint cleanup,
+and transactional promotion rollback apply to Windows too.
+
+Windows promotions are scoped by target, architecture, and region, without an
+OS-version key. Explicit Windows OS selectors deliberately bypass those
+unversioned promotions: `--os windows-server:2022` still selects stock 2022
+after a 2025 image is promoted. The default workflow input is a legacy rebuild
+mode, not a promise to downgrade a promoted 2025 image to 2022; use the stock
+wrapper command with the 2022 selector for that. The stock fallback is Server
+2025; unversioned promoted images still take precedence without an explicit
+Windows selector. Roll out this fallback change only after live 2025 image
+promotion, guest proof, and cleanup have succeeded.
+
 ## Developer-image wrappers
 
 For generic AWS Linux and Windows developer AMIs, use the guarded wrapper
@@ -386,6 +467,31 @@ same source/candidate proof works with direct AWS credentials and with an
 admin-authenticated broker. Promotion updates broker-managed image defaults;
 use `--no-promote` when validating a direct-only AWS configuration.
 
+An explicit region (including `CRABBOX_IMAGE_REGION` or `CRABBOX_AWS_REGION`)
+sets `CRABBOX_CAPACITY_REGIONS` to that single region for all lifecycle and
+measurement leases. The wrapper clears configured capacity AZ defaults unless
+`CRABBOX_CAPACITY_AVAILABILITY_ZONES` is explicitly nonempty. These client hints
+cannot disable the broker's additional fallback regions: the coordinator merges
+its own region list. Region-checked minting therefore requires coordinator admin
+auth to verify the exact lease's recorded region as well as the selected-image
+line. Missing or mismatched evidence stops the lease immediately, even with
+`--keep-lease`, before preparation, capture, or smoke. Retry when quota/capacity
+is available in the requested region, or choose another region explicitly.
+Measured runs apply the same check to each retained sample before acceptance.
+
+The captured checkpoint's region must also match before a candidate boots.
+On failure before promotion, EXIT cleanup deletes only the checkpoint created
+by this invocation using `crabbox checkpoint delete <checkpoint-id> --admin`.
+This deregisters its AMI and deletes its backing snapshots through the existing
+ownership and use-claim checks; generic `image delete` refuses managed
+checkpoint resources. The private `*-candidate-cleanup.json` receipt records
+the exact checkpoint, AMI, region, status, and deletion exit code. Deletion
+failures are printed prominently and mark measured `cleanupStatus` as failed
+without replacing the original mint error. Retry the recorded checkpoint
+deletion after resolving the failure. A successful `--no-promote` run retains
+its candidate; a promoted image retains the existing receipt-based rollback
+and investigation semantics and is never deleted by this cleanup.
+
 Enable FSR for hot lanes that need lower first-boot variance, in the AZs you
 actually launch from:
 
@@ -430,10 +536,14 @@ scripts/mint-aws-devtools-image.sh \
   Desktop because headless image bakes should not depend on a user-session
   desktop app or Docker Desktop licensing. The Chocolatey package, Node MSI,
   TruffleHog archive, and Docker Engine archive are pinned to reviewed SHA-256
-  digests and verified before privileged installation or extraction.
+  digests and verified before privileged installation or extraction. TruffleHog
+  is staged with an `.exe` suffix in the installation directory and moved into
+  place only after its pinned version runs successfully. Failed validation logs
+  the exit code, both output streams, and any launch error; the existing binary
+  remains untouched and the rejected candidate is removed.
 - **Windows WSL2**: the shared Windows bootstrap installs the checksum-pinned
-  Linux TruffleHog 3.95.9 binary inside the managed WSL distro. This happens
-  during environment setup and does not require autoreview-time installation.
+  Linux TruffleHog 3.95.9 binary inside the managed WSL distro during environment
+  setup.
 
 Linux preparation retains `cloud-init clean --logs --seed` while preserving
 the running source's completed initialization. Using the distro's isolated
@@ -450,10 +560,36 @@ unchanged.
 Windows developer bakes are headless by default for faster boot and fewer
 desktop-bootstrap moving parts. Pass `--desktop` only when the image must back
 interactive desktop leases. Windows container support can require one reboot
-before Docker starts; the wrapper detects the prep script's reboot marker,
-reboots the source lease, waits for Crabbox readiness, reruns the prep script to
-pull the configured Docker images, and only then runs the source smoke and AMI
-capture.
+before Docker starts; the wrapper detects the prep script's reboot marker and
+reboots the source through the validated command from `crabbox ssh`. This
+maintenance connection does not acquire a workspace owner, so reboot cannot
+interrupt `crabbox run`'s ownership release. A failed `shutdown` command stops
+the bake. Fresh SSH probes must observe the source go down (within
+`CRABBOX_IMAGE_REBOOT_DOWN_TIMEOUT`, default 2m) and return (within
+`CRABBOX_IMAGE_REBOOT_WAIT_TIMEOUT`, default 25m). The wrapper then settles for
+`CRABBOX_IMAGE_REBOOT_READY_SETTLE_SECONDS` (default 180), probes again, and
+reruns prep to pull the configured Docker images before source smoke and AMI
+capture. Missing either reboot transition fails the bake and triggers cleanup.
+
+Windows prep retries downloads, Chocolatey package installation, pnpm preparation,
+and each Docker image pull up to four times, with 30-, 60-, and 120-second waits.
+Each successful pull must also pass `docker image inspect`; exhausted retries
+stop the bake before source smoke or capture. Native command exit codes are
+checked explicitly because Windows PowerShell does not throw on nonzero exits.
+The prep script records its current step in
+`C:\ProgramData\crabbox\image-prep.step` and uncaught exception details in
+`image-prep.error`. On failure the mint reports these files, the child PowerShell
+exit code, and the last 200 log lines. A process exit of `-1` (`0xFFFFFFFF`)
+does not identify a Docker error or failing statement on its own.
+
+The normal five-minute coordinator-backed stop budget also applies to mint
+cleanup. If Windows failure cleanup reports that release was accepted but
+observation timed out, the mint preserves the original failure and reports
+cleanup as unconfirmed, retaining lease handles and local recovery state.
+Use the printed `status --json` command to check progress, then repeat `stop`
+to confirm cleanup and remove retained local artifacts. An accepted release
+alone never proves termination, and pending cleanup cannot make a successful
+mint pass.
 
 ### Linux public toolchain archives
 
@@ -706,6 +842,23 @@ boots independently rerun the declared probes under a sanitized system PATH
 before skipping baseline APT. Use the timing logs to compare provider request,
 network readiness, bootstrap, and end-to-end time before and after each bake.
 
+If coordinator admission rejects an acquisition with HTTP 429,
+`cost_limit_exceeded`, and a fleet, owner, or org **active lease count** message,
+the wrapper retries the same request every two minutes. Each source, candidate,
+promoted proof, and measured sample has its own `CRABBOX_IMAGE_CAPACITY_WAIT`
+budget (default `45m`, measured from the first rejection). Use whole seconds,
+minutes, or hours, such as `600`, `10m`, or `1h`; `0` disables waiting. The final
+sleep is shortened to the remaining budget. An accepted attempt may take its
+normal provisioning time. Each wait prints the phase, delay, remaining budget,
+and diagnostic log path; exhausted capacity preserves the failing exit code and
+normal cleanup/rollback. The surrounding workflow timeout still bounds the job.
+
+Spending limits also use `cost_limit_exceeded` but are never retried. Other
+errors, failed log writes, and any attempt with evidence of an allocated lease
+fail immediately. Active-count admission rejects before publishing a lease or
+starting provisioning, so these retries do not add live leases. Rejected logs
+are retained as `.capacity-<attempt>` beside the final attempt log.
+
 Linux developer-image acceptance runs the publisher checkout's generated script
 with `--verify linux-builder` on source, candidate, and promoted leases. It
 requires the canonical trusted manifest and working builder probes without
@@ -800,6 +953,10 @@ cleanup also fails. Interruptions recover an already-published retained handle
 without waiting for a final timing record. The original runner timing excludes the subsequent evidence
 read and cleanup wait, consistently across all cohorts. Warmup timings are not
 benchmark samples, and a `--cold` label alone is not evidence of fresh acquisition.
+Admission-capacity waits also stay outside runner totals: each retry starts a
+fresh CLI invocation. Rejected attempts without a lease are moved out of the
+cohort's timing store into `.capacity-<attempt>.timing.jsonl` diagnostics before
+retrying, so they neither count as samples nor inflate the timing distribution.
 Existing `bench report` owns all three timing distributions. `bench check`
 enforces the predeclared p95 policy only for candidate and promoted cohorts.
 Missing, mixed, reused, or insufficient observations block promotion; measured

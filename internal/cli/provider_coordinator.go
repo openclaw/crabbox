@@ -2,12 +2,14 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,8 +18,8 @@ var (
 	coordinatorCreateLeaseTimeoutForConfig   = defaultCoordinatorCreateLeaseTimeoutForConfig
 	coordinatorCreateLeaseRecoveryTimeout    = 90 * time.Second
 	coordinatorCreateLeaseRecoveryInterval   = 5 * time.Second
-	coordinatorCanceledCreateRecoveryTimeout = 10 * time.Second
-	coordinatorCanceledCreateFinalTimeout    = 10 * time.Second
+	coordinatorCanceledCreateRecoveryTimeout = 30 * time.Second
+	coordinatorCanceledCreateFinalTimeout    = 30 * time.Second
 	coordinatorCreateAttemptID               = newCreateAttemptID
 )
 
@@ -140,6 +142,11 @@ func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease Coordina
 		return LeaseTarget{}, err
 	}
 	server, target, leaseID := leaseToServerTarget(lease, cfg)
+	if !releaseOnly {
+		if err := validateResolvedLeasePlatform(cfg, server); err != nil {
+			return LeaseTarget{}, err
+		}
+	}
 	released := coordinatorProviderReleaseConfirmed(lease)
 	if released {
 		// Confirmed deletion retires guest access, not the release operation. Keep
@@ -252,7 +259,7 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 			slug = NewLeaseSlug(leaseID)
 		}
 	} else {
-		slug, err = AllocateClaimLeaseSlug(leaseID, requestedSlug)
+		slug, err = AllocateClaimLeaseSlugContext(ctx, leaseID, requestedSlug)
 		if err != nil {
 			return LeaseTarget{}, err
 		}
@@ -523,6 +530,11 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 	b = &progressBackend
 	progressCtx, stopProgress := context.WithCancel(createCtx)
 	progressDone := make(chan struct{})
+	var phase atomic.Value
+	phase.Store("awaiting-response")
+	observe := func(lease CoordinatorLease) {
+		phase.Store(blank(lease.ProvisioningPhase, lease.State))
+	}
 	go func() {
 		defer close(progressDone)
 		ticker := time.NewTicker(coordinatorCreateLeaseProgressInterval)
@@ -530,7 +542,7 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 		for {
 			select {
 			case <-ticker.C:
-				fmt.Fprintf(b.rt.Stderr, "waiting for coordinator lease provider=%s slug=%s elapsed=%s timeout=%s\n", cfg.Provider, slug, time.Since(started).Round(time.Second), timeout)
+				fmt.Fprintf(b.rt.Stderr, "waiting for coordinator lease provider=%s slug=%s elapsed=%s timeout=%s phase=%q\n", cfg.Provider, slug, time.Since(started).Round(time.Second), timeout, phase.Load())
 			case <-progressCtx.Done():
 				return
 			}
@@ -538,6 +550,7 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 	}()
 	cancelOnError := false
 	identityMismatch := false
+	var rejected *coordinatorCreationRejectedError
 	defer func() {
 		stopProgress()
 		<-progressDone
@@ -568,18 +581,31 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 				err = b.abandonUnrecoveredCoordinatorLeaseCreate(ctx, leaseID, slug, createAttemptID, err)
 				err = errors.Join(ctx.Err(), err)
 			}
+			if rejected != nil && createCtx.Err() == nil {
+				err = *rejected
+			}
 		}
 	}()
 
-	create := func(requestCtx context.Context) (CoordinatorLease, error) {
+	create := func(requestCtx context.Context) (created CoordinatorLease, createErr error) {
 		if fixed {
-			return b.coord.EnsureLease(requestCtx, cfg, publicKey, keep, leaseID, slug)
+			created, createErr = b.coord.EnsureLease(requestCtx, cfg, publicKey, keep, leaseID, slug)
+		} else {
+			created, createErr = b.coord.CreateLeaseWithAttempt(requestCtx, cfg, publicKey, keep, leaseID, slug, createAttemptID)
 		}
-		return b.coord.CreateLeaseWithAttempt(requestCtx, cfg, publicKey, keep, leaseID, slug, createAttemptID)
+		if createErr == nil {
+			observe(created)
+		}
+		return created, createErr
 	}
 	rebound := false
 	lease, err = create(createCtx)
 	if err != nil {
+		if fixed {
+			// Only the first response can establish rejection. Recovery can return
+			// the same HTTP error after an earlier create may have committed.
+			rejected = qualifyCoordinatorCreationRejection(cfg, leaseID, err)
+		}
 		cancelOnError = coordinatorCreateLeaseErrorMayHaveCommitted(err) ||
 			(isCoordinatorStaleInstanceError(err) && !isCoordinatorStaleInstanceCleanedSignal(err))
 		if coordinatorCreateLeaseErrorCanReplay(err) && createCtx.Err() == nil {
@@ -603,7 +629,7 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 	}
 	if lease.State == "provisioning" {
 		// Rebinding only confirms the operation. Readiness uses the original deadline.
-		lease, err = b.waitForCoordinatorLeaseActivation(createCtx, cfg, lease.ID, lease)
+		lease, err = b.waitForCoordinatorLeaseActivation(createCtx, cfg, lease.ID, lease, observe)
 		identityMismatch = isCoordinatorLeaseIDConflict(err)
 		return lease, err
 	}
@@ -611,6 +637,52 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 		return CoordinatorLease{}, fmt.Errorf("coordinator replay returned active lease %s without an endpoint", lease.ID)
 	}
 	return lease, coordinatorLeaseProvisioningError(lease)
+}
+
+// This marker is attached only after the original fixed create is definitively
+// rejected and its acquisition context is still live. Preserve the diagnostic.
+type coordinatorCreationRejectedError struct {
+	cause            error
+	provider         string
+	requestedLeaseID string
+}
+
+func (e coordinatorCreationRejectedError) Error() string { return e.cause.Error() }
+func (e coordinatorCreationRejectedError) Unwrap() error { return e.cause }
+
+func qualifyCoordinatorCreationRejection(cfg Config, leaseID string, err error) *coordinatorCreationRejectedError {
+	// Require the original typed response, not one cause of a joined transport,
+	// cancellation, or other ambiguous failure.
+	response, ok := err.(CoordinatorHTTPError)
+	if !ok || !response.responseComplete || !response.responseUnredirected ||
+		!canonicalLeaseIDPattern.MatchString(leaseID) || response.Method != http.MethodPut ||
+		response.StatusCode != http.StatusTooManyRequests {
+		return nil
+	}
+	path := "/v1/leases/" + leaseID
+	if hasCapacityMinimums(cfg) {
+		path += "/resource-constrained"
+	}
+	if response.Path != path {
+		return nil
+	}
+	duplicate, decodeErr := JSONHasDuplicateKeys(json.NewDecoder(strings.NewReader(response.Message)))
+	if duplicate || decodeErr != nil {
+		return nil
+	}
+	var body map[string]json.RawMessage
+	if json.Unmarshal([]byte(response.Message), &body) != nil {
+		return nil
+	}
+	var code string
+	if json.Unmarshal(body["error"], &code) != nil || code != "cost_limit_exceeded" {
+		return nil
+	}
+	provider, providerErr := canonicalProviderName(cfg.Provider)
+	if providerErr != nil {
+		return nil
+	}
+	return &coordinatorCreationRejectedError{cause: err, provider: provider, requestedLeaseID: leaseID}
 }
 
 type coordinatorLeaseIDConflict struct{ err error }
@@ -763,7 +835,7 @@ func (b *coordinatorLeaseBackend) recoverCoordinatorLeaseAfterCreateError(
 	}
 }
 
-func (b *coordinatorLeaseBackend) waitForCoordinatorLeaseActivation(ctx context.Context, cfg Config, leaseID string, current CoordinatorLease) (CoordinatorLease, error) {
+func (b *coordinatorLeaseBackend) waitForCoordinatorLeaseActivation(ctx context.Context, cfg Config, leaseID string, current CoordinatorLease, observe func(CoordinatorLease)) (CoordinatorLease, error) {
 	ticker := time.NewTicker(coordinatorCreateLeaseRecoveryInterval)
 	defer ticker.Stop()
 	for {
@@ -790,6 +862,7 @@ func (b *coordinatorLeaseBackend) waitForCoordinatorLeaseActivation(ctx context.
 				return CoordinatorLease{}, err
 			}
 			current = lease
+			observe(current)
 		case <-ctx.Done():
 			return CoordinatorLease{}, ctx.Err()
 		}
@@ -954,6 +1027,9 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		return statusView{}, err
 	}
 	server, target, leaseID := leaseToServerTarget(lease, b.cfg)
+	if err := validateResolvedLeasePlatform(b.cfg, server); err != nil {
+		return statusView{}, err
+	}
 	if !coordinatorProviderReleaseConfirmed(lease) {
 		if err := useCoordinatorStoredSSHKey(&target, server.Provider, leaseID); err != nil {
 			return statusView{}, err
@@ -1005,6 +1081,7 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		CleanupRetryAt:               lease.CleanupRetryAt,
 		ReleaseDeletesServer:         lease.ReleaseDeletesServer,
 		FailureError:                 lease.FailureError,
+		ProvisioningPhase:            lease.ProvisioningPhase,
 		ProvisioningResourceMayExist: lease.ProvisioningResourceMayExist,
 		ProvisioningFailureRetryable: lease.ProvisioningFailureRetryable,
 		Labels:                       cloneStringMap(server.Labels),
@@ -1050,12 +1127,12 @@ func (b *coordinatorLeaseBackend) ListJSON(ctx context.Context, req ListRequest)
 }
 
 func (b *coordinatorLeaseBackend) listUserLeases(ctx context.Context) ([]CoordinatorLease, error) {
-	leases, err := b.coord.listLeases(ctx, "", 1000, "current", b.cfg.Provider)
+	leases, truncated, err := b.coord.CurrentLeases(ctx, b.cfg.Provider)
 	if err != nil {
 		return nil, err
 	}
-	if len(leases) >= 1000 {
-		fmt.Fprintln(b.rt.Stderr, "warning: coordinator list reached its 1000-lease limit; older kept leases may be omitted; inspect them by exact lease ID")
+	if truncated {
+		fmt.Fprintln(b.rt.Stderr, "warning: coordinator list reached its legacy 500-lease limit; older kept leases may be omitted; update the coordinator or inspect them by exact lease ID")
 	}
 	// Older coordinators ignore view=current and return ended history too.
 	current := make([]CoordinatorLease, 0, len(leases))
@@ -1242,7 +1319,10 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 			}
 		}
 	}
-	released, err := releaseCoordinatorLeaseResult(ctx, b.coord, req.Lease.LeaseID, expectedProvider)
+	release := func(releaseCtx context.Context) (CoordinatorLease, error) {
+		return releaseCoordinatorLeaseResult(releaseCtx, b.coord, req.Lease.LeaseID, expectedProvider)
+	}
+	released, err := release(ctx)
 	observationCoord := b.coord
 	if err != nil {
 		if b.cfg.CoordAdminToken != "" && (isCoordinatorNotFoundError(err) || isCoordinatorUnauthorized(err)) {
@@ -1250,15 +1330,24 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 			if adminErr != nil {
 				return false, err
 			}
-			if released, adminErr = releaseCoordinatorLeaseMutation(ctx, req.Lease.LeaseID, expectedProvider, func(releaseCtx context.Context) (CoordinatorLease, error) {
-				return adminCoord.AdminReleaseLeaseForProvider(releaseCtx, req.Lease.LeaseID, true, expectedProvider)
-			}); adminErr != nil {
+			release = func(releaseCtx context.Context) (CoordinatorLease, error) {
+				return releaseCoordinatorLeaseMutation(releaseCtx, req.Lease.LeaseID, expectedProvider, func(mutationCtx context.Context) (CoordinatorLease, error) {
+					return adminCoord.AdminReleaseLeaseForProvider(mutationCtx, req.Lease.LeaseID, true, expectedProvider)
+				})
+			}
+			if released, adminErr = release(ctx); adminErr != nil {
 				return false, adminErr
 			}
 			observationCoord = adminCoord
 		} else {
 			return false, err
 		}
+	}
+	if (released.State == "active" || released.State == "expired") &&
+		(released.ID != req.Lease.LeaseID ||
+			req.Lease.Server.CloudID != "" && released.CloudID != req.Lease.Server.CloudID ||
+			req.Lease.Server.ID != 0 && released.ServerID != req.Lease.Server.ID) {
+		return false, coordinatorReleaseObservationError(req.Lease.LeaseID, expectedProvider, "returned a different lease or resource for expiry cleanup")
 	}
 	if req.DeferProviderCleanupObservation {
 		if retainedCoordinatorRelease(released) {
@@ -1267,13 +1356,13 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 		if coordinatorProviderReleaseConfirmed(released) {
 			return finish()
 		}
-		if coordinatorReleaseCleanupFailed(released) || coordinatorReleaseCleanupPending(released) {
+		if coordinatorReleaseCleanupFailed(released) || coordinatorReleaseCleanupPending(released) || coordinatorExpiryCleanupCompleted(released) {
 			fmt.Fprintf(b.rt.Stderr, "warning: coordinator accepted release for %s; remote cleanup remains pending and local claim/SSH artifacts were preserved\n", req.Lease.LeaseID)
 			return false, nil
 		}
 		return false, coordinatorReleaseObservationError(req.Lease.LeaseID, b.cfg.Provider, "returned an unexpected non-final state")
 	}
-	released, err = observeCoordinatorReleaseCompletion(ctx, observationCoord, released, req.Lease.LeaseID, expectedProvider)
+	released, err = observeCoordinatorReleaseCompletion(ctx, observationCoord, released, req.Lease.LeaseID, expectedProvider, release)
 	if err != nil {
 		return false, err
 	}

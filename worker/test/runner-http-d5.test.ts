@@ -1,11 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-vi.mock("@cloudflare/containers", () => ({
-  Container: class {
-    constructor(readonly ctx: unknown) {}
-  },
-  getContainer: vi.fn<() => void>(),
-}));
 const { default: container } = await import("../src/cloudflare-container-runner");
 const { default: dynamic } = await import("../src/cloudflare-dynamic-worker-runner");
 

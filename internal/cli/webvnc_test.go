@@ -3252,3 +3252,28 @@ func TestVNCForegroundTunnelHelperProcess(t *testing.T) {
 	fmt.Fprintln(os.Stderr, "intentional tunnel exit")
 	os.Exit(23)
 }
+
+func serveWebVNCLoopbackProxy(ctx context.Context, listener net.Listener, targetPort string, expectedOwnerPID ...int) <-chan error {
+	ownerPID := 0
+	if len(expectedOwnerPID) > 0 {
+		ownerPID = expectedOwnerPID[0]
+	}
+	return serveWebVNCLoopbackProxyWithEnvironment(ctx, listener, targetPort, ownerPID, nil)
+}
+
+func connectWebVNCBridge(ctx context.Context, coord *CoordinatorClient, leaseID, host, port string, target SSHTarget, credentials rfbCredentials, authMode localWebVNCAuthenticationMode, log io.Writer) (*webVNCBridge, error) {
+	return connectWebVNCBridgeWithDial(ctx, coord, leaseID, host, port, target, credentials, authMode, log, nil)
+}
+
+func isLocalContainerProvider(provider string) bool {
+	p, err := ProviderFor(provider)
+	return err == nil && p.Spec().Name == "local-container"
+}
+
+func probeDirectSSHWebVNC(ctx context.Context, localPort, password string) error {
+	return probeDirectSSHWebVNCWithSecurity(ctx, localPort, password, false)
+}
+
+func webVNCAgentURL(base, leaseID string) string {
+	return webVNCAgentURLWithCapabilities(base, leaseID, "")
+}

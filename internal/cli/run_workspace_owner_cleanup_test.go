@@ -1001,7 +1001,7 @@ exit 0
 			}
 			// Coordinator acquisitions are exclusive: failure retention requests an owner.
 			// Success closes retained B's owner; command failure destroys B.
-			err = app.runCommand(parent, []string{"--provider", provider.Spec().Name, "--no-hydrate", "--stop-after", "failure", "--", command})
+			err = app.runCommand(parent, []string{"--provider", provider.Spec().Name, "--no-hydrate", "--stop-after", "failure", "--timing-json", "--", command})
 			for _, owner := range owners {
 				owner.stopRenewal()
 				owner.cancel()
@@ -1015,6 +1015,16 @@ exit 0
 				}
 				if scenario == "caller cancellation" && !errors.Is(err, context.Canceled) {
 					t.Fatalf("cancellation error lost: %v", err)
+				}
+				if scenario == "caller cancellation" {
+					lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+					var report TimingReport
+					if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+						t.Fatal(err)
+					}
+					if strings.Contains(stderr.String(), "lease recovery ") || report.LeaseRetainedReason != "" {
+						t.Fatalf("confirmed replacement release advertised recovery: %+v\n%s", report, stderr.String())
+					}
 				}
 				if scenario == "retained release" && !strings.Contains(err.Error(), "did not confirm a terminal or preserved workspace") {
 					t.Fatalf("release error lost: %v", err)

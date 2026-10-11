@@ -176,6 +176,35 @@ func TestPrepareLeaseClaimEndpointDoesNotPromoteLegacyClaim(t *testing.T) {
 	}
 }
 
+func TestPrepareLeaseClaimEndpointDoesNotAdoptObservedCleanupBinding(t *testing.T) {
+	existing := core.LeaseClaim{
+		LeaseID: "cbx_123456abcdef", Slug: "owned",
+		CloudID: "crabbox-owned", CloudImmutableID: "vmid-owned",
+		Labels: map[string]string{"provider_key": core.ProviderKeyForLease("cbx_123456abcdef")},
+	}
+	server := core.Server{
+		CloudID: existing.CloudID, ImmutableID: existing.CloudImmutableID,
+		Labels: map[string]string{
+			"lease": existing.LeaseID, "slug": existing.Slug,
+			"provider_key":                  existing.Labels["provider_key"],
+			core.AzureCleanupBindingLabel:   "v1",
+			"_crabbox_azure_cleanup_nic_id": "observed-replacement",
+		},
+	}
+	got, err := (Provider{}).PrepareLeaseClaimEndpoint(existing, "azure", existing.Slug, server, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key := range got.Labels {
+		if strings.HasPrefix(key, "_crabbox_azure_cleanup_") {
+			t.Fatalf("unrecorded cleanup identity adopted: %s", key)
+		}
+	}
+	if server.Labels[core.AzureCleanupBindingLabel] != "v1" {
+		t.Fatal("endpoint preparation mutated the provider observation")
+	}
+}
+
 func TestIsCrabboxAzureLeaseRequiresCanonicalTags(t *testing.T) {
 	t.Parallel()
 	canonical := map[string]string{

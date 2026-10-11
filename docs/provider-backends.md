@@ -165,6 +165,12 @@ process argument. Managed targets without an explicit SSH-config route also
 exclude ambient identity files and agents. Ordinary keyed commands retain their
 multiplexing policy.
 
+Providers with expiring SSH credentials may set `SSHTarget.PrepareConnection`
+to refresh their credential files before each new SSH or file-transfer transport.
+The callback must honor cancellation, bound its own work, synchronize concurrent
+callers, and preserve the target's paths and established connections. Credential
+policy and caching remain provider-owned; callback errors prevent dispatch.
+
 `--no-sync` is validated by each adapter, not inferred from `FeatureArchiveSync`:
 some SDK/CLI transports support it without archive sync. An adapter that cannot
 skip transfer must reject it before acquisition or provider execution. Blacksmith
@@ -259,15 +265,17 @@ type IdempotentLeaseIDBackend interface {
 }
 ```
 
-The ASCII Box, AWS, Azure, DigitalOcean, Daytona, Incus, Machine0, local-container, Parallels,
-Proxmox, and Tenki direct backends implement this capability; coordinator-backed
+The ASCII Box, AWS, Azure, DigitalOcean, Daytona, GitHub Codespaces, Incus, Linode, Machine0, local-container, Parallels,
+Proxmox, RunPod, and Tenki direct backends implement this capability; coordinator-backed
 leases support it through the coordinator wrapper. External
 backends support it only when their configured protocol explicitly advertises
 idempotent lease IDs. `crabbox warmup --lease-id` rejects other backends before
 provisioning. Built-in direct adapters use `core.AcquireFixedResource` and
 `core.FixedLeaseOperations[T]`: `DescribeIntent`, `Plan`, `ObserveExact`,
 `Submit`, `PrepareAccess`, and `DeleteExact`. Plans return native input data;
-core assembles labels and nonces, persists attempts, applies binding evidence,
+`DescribeIntent` may supply `FixedLeaseBinding.InitialLabels` so the first durable
+claim retains ownership and cleanup metadata even if planning fails. Core
+assembles labels and nonces, persists attempts, applies binding evidence,
 and publishes acquired and terminal records. Adapters supply native scope,
 identity, readiness, and exact-deletion proofs. Ordered `FixedIntentFields`
 preserve existing fingerprint field order, names, omission rules, and hash domains.
@@ -422,7 +430,12 @@ type DoctorProvider interface {
 ```
 
 Native checkpoint and fork support follow the same pattern through
-`NativeCheckpointProvider` and `NativeCheckpointForkProvider`. Future
+`NativeCheckpointProvider` and `NativeCheckpointForkProvider`. A delegated-run
+backend has no SSH target for core to resolve or relocate, so it also
+implements `DelegatedCheckpointBackend`: `ResolveCheckpointSource` returns a
+lease the current repository already claims, and `ForkNativeCheckpoint` creates
+and claims one lease from the checkpoint record. Core then skips SSH lease
+claims, archive checkpoints, and workdir relocation for that provider. Future
 provider-specific capability areas should add similarly narrow interfaces
 rather than widening the base backend. Live provider-owned machine catalogs use
 `ProviderSizeCatalogBackend`; core exposes them through `crabbox providers sizes

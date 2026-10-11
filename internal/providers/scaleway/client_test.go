@@ -600,7 +600,7 @@ func TestScalewayBindingProfilePrecedence(t *testing.T) {
 		}
 		b := Backend{cfg: cfg}
 		effective := b.cfgForRun()
-		if effective.Scaleway.Image != "ubuntu_noble" || effective.Scaleway.Type != "DEV1-S" || core.ScalewayRegionWasExplicit(effective) != tc.explicit || core.ScalewayZoneWasExplicit(effective) != tc.explicit || b.cfg.Scaleway.Region != tc.region {
+		if effective.Scaleway.Image != "ubuntu_noble" || effective.Scaleway.Type != "DEV1-L" || core.ScalewayRegionWasExplicit(effective) != tc.explicit || core.ScalewayZoneWasExplicit(effective) != tc.explicit || b.cfg.Scaleway.Region != tc.region {
 			t.Fatal("effective fallback/marker/copy phase changed")
 		}
 		profile := &scw.Profile{DefaultRegion: scw.StringPtr("nl-ams"), DefaultZone: scw.StringPtr("nl-ams-1"), DefaultProjectID: scw.StringPtr("project-prior"), DefaultOrganizationID: scw.StringPtr("org-prior")}
@@ -628,7 +628,7 @@ func TestScalewayBindingProfilePrecedence(t *testing.T) {
 		}
 	}
 	p := Provider{}
-	if p.ServerTypeForConfig(core.Config{Class: "standard"}) != "DEV1-S" || p.ServerTypeForConfig(core.Config{Class: "unknown"}) != "DEV1-S" {
+	if p.ServerTypeForConfig(core.Config{Class: "standard"}) != "DEV1-L" || p.ServerTypeForConfig(core.Config{Class: "unknown"}) != "DEV1-S" {
 		t.Fatal("fixed class fallback changed")
 	}
 	for _, raw := range []string{"", "  "} {

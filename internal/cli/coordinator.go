@@ -60,6 +60,9 @@ type CoordinatorHTTPError struct {
 	StatusCode int
 	Message    string
 	retryAfter time.Duration
+	// Diagnostics alone cannot authorize creation-rejection output.
+	responseComplete     bool
+	responseUnredirected bool
 }
 
 func (e CoordinatorHTTPError) Error() string {
@@ -143,11 +146,17 @@ type CoordinatorLease struct {
 	CleanupStatus                string                         `json:"cleanupStatus,omitempty"`
 	ProviderCleanup              *ProviderCleanupEvidence       `json:"providerCleanup,omitempty"`
 	CleanupStartedAt             string                         `json:"cleanupStartedAt,omitempty"`
+	CleanupClaimExpiresAt        string                         `json:"cleanupClaimExpiresAt,omitempty"`
+	CleanupFailedAt              string                         `json:"cleanupFailedAt,omitempty"`
 	CleanupCompletedAt           string                         `json:"cleanupCompletedAt,omitempty"`
 	CleanupError                 string                         `json:"cleanupError,omitempty"`
 	CleanupRetryAt               string                         `json:"cleanupRetryAt,omitempty"`
+	ProviderKeyCleanupPending    bool                           `json:"providerKeyCleanupPending,omitempty"`
+	ProviderKeyCleanupID         string                         `json:"providerKeyCleanupID,omitempty"`
+	ProvisioningRequestStartedAt string                         `json:"provisioningRequestStartedAt,omitempty"`
 	ReleaseDeletesServer         *bool                          `json:"releaseDeletesServer,omitempty"`
 	FailureError                 string                         `json:"failureError,omitempty"`
+	ProvisioningPhase            string                         `json:"provisioningPhase,omitempty"`
 	ProvisioningResourceMayExist *bool                          `json:"provisioningResourceMayExist,omitempty"`
 	ProvisioningFailureRetryable *bool                          `json:"provisioningFailureRetryable,omitempty"`
 	ProviderMetadata             map[string]any                 `json:"providerMetadata,omitempty"`
@@ -378,6 +387,25 @@ type CoordinatorCapacityResponse struct {
 	ActiveLeases   int    `json:"activeLeases"`
 	EffectiveLimit int    `json:"effectiveLimit"`
 	ObservedAt     string `json:"observedAt"`
+	*CoordinatorCapacityAdmission
+}
+
+// A nil extension preserves the response from coordinators with owner-only capacity.
+type CoordinatorCapacityAdmission struct {
+	Fleet      CoordinatorCapacityDimension `json:"fleet"`
+	Org        CoordinatorOrgCapacity       `json:"org"`
+	Admissible bool                         `json:"admissible"`
+	BlockedBy  *string                      `json:"blockedBy"`
+}
+
+type CoordinatorCapacityDimension struct {
+	ActiveLeases int  `json:"activeLeases"`
+	Limit        *int `json:"limit"`
+}
+
+type CoordinatorOrgCapacity struct {
+	Key string `json:"key"`
+	CoordinatorCapacityDimension
 }
 
 type CoordinatorMarketplaceStatusResponse struct {
@@ -631,6 +659,7 @@ type CoordinatorRunLeaseOwner struct {
 }
 
 type CoordinatorRun struct {
+	EventAppendIdempotent     bool                       `json:"eventAppendIdempotent,omitempty"`
 	AdmissionFailedBeforeWork bool                       `json:"admissionFailedBeforeWork,omitempty"`
 	ID                        string                     `json:"id"`
 	LeaseID                   string                     `json:"leaseID"`
@@ -823,6 +852,7 @@ type CoordinatorRunEvent struct {
 }
 
 type CoordinatorRunEventInput struct {
+	ID          string `json:"id,omitempty"`
 	Type        string `json:"type,omitempty"`
 	Phase       string `json:"phase,omitempty"`
 	Stream      string `json:"stream,omitempty"`
@@ -1111,10 +1141,19 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 		return CoordinatorLease{}, err
 	}
 	cfg.Provider = provider.Spec().Name
+	if err := validateResourceRequirements(cfg); err != nil {
+		return CoordinatorLease{}, err
+	}
 	if slug == "" {
 		slug = NewLeaseSlug(leaseID)
 	}
 	capacity := map[string]any{}
+	if cfg.Capacity.MinVCPUs > 0 {
+		capacity["minVCPUs"] = cfg.Capacity.MinVCPUs
+	}
+	if cfg.Capacity.MinMemoryMiB > 0 {
+		capacity["minMemoryMiB"] = cfg.Capacity.MinMemoryMiB
+	}
 	if cfg.Capacity.Market != "" && cfg.Capacity.Market != "spot" {
 		capacity["market"] = cfg.Capacity.Market
 	}
@@ -1193,6 +1232,9 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	if cfg.osImageExplicit {
 		req["os"] = cfg.OSImage
 	}
+	if cfg.Provider == "aws" && cfg.AWSStockImage {
+		req["awsUseStockImage"] = true
+	}
 	addCoordinatorAzureFields(req, cfg)
 	addCoordinatorGCPFields(req, cfg)
 	method := http.MethodPost
@@ -1204,6 +1246,15 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	} else if !imageRequirementsEmpty(cfg.imageRequirements) {
 		// Older coordinators do not have this route, so mixed-version use fails closed.
 		path = "/v1/leases/capability-aware"
+	}
+	if hasCapacityMinimums(cfg) {
+		if checkpointBacked {
+			return CoordinatorLease{}, Exit(2, "resource requirements are unsupported for checkpoint forks")
+		}
+		path = "/v1/leases/resource-constrained"
+		if fixed {
+			path = "/v1/leases/" + url.PathEscape(leaseID) + "/resource-constrained"
+		}
 	}
 	if checkpointBacked {
 		switch cfg.Provider {
@@ -1478,6 +1529,46 @@ func (c *CoordinatorClient) Leases(ctx context.Context, state string, limit int)
 	return c.listLeases(ctx, state, limit, "", "")
 }
 
+// CurrentLeases negotiates bounded summary pages. Older coordinators keep their
+// existing newest-first list contract; report its actual 500-row server cap.
+func (c *CoordinatorClient) CurrentLeases(ctx context.Context, provider string) ([]CoordinatorLease, bool, error) {
+	const pagination = "keyset-v1"
+	values := url.Values{"view": {"current"}, "provider": {provider}, "limit": {"100"}, "projection": {"summary"}, "pagination": {pagination}}
+	var leases []CoordinatorLease
+	seenCursors := make(map[string]bool)
+	for {
+		var res struct {
+			Leases     []CoordinatorLease `json:"leases"`
+			Pagination string             `json:"pagination"`
+			NextCursor string             `json:"nextCursor"`
+		}
+		if err := c.doRead(ctx, "/v1/leases?"+values.Encode(), &res); err != nil {
+			return nil, false, err
+		}
+		if res.Pagination != pagination {
+			if values.Get("cursor") != "" {
+				return nil, false, fmt.Errorf("coordinator lease pagination changed during listing; retry list")
+			}
+			if len(res.Leases) < 100 {
+				return res.Leases, false, nil
+			}
+			legacy, err := c.listLeases(ctx, "", 500, "current", provider)
+			return legacy, len(legacy) >= 500, err
+		}
+		leases = append(leases, res.Leases...)
+		if res.NextCursor == "" {
+			break
+		}
+		if seenCursors[res.NextCursor] {
+			return nil, false, fmt.Errorf("coordinator lease pagination did not advance")
+		}
+		seenCursors[res.NextCursor] = true
+		values.Set("cursor", res.NextCursor)
+	}
+	slices.SortStableFunc(leases, func(a, b CoordinatorLease) int { return strings.Compare(b.CreatedAt, a.CreatedAt) })
+	return leases, false, nil
+}
+
 func (c *CoordinatorClient) listLeases(ctx context.Context, state string, limit int, view, provider string) ([]CoordinatorLease, error) {
 	var res struct {
 		Leases []CoordinatorLease `json:"leases"`
@@ -1676,6 +1767,7 @@ func (c *CoordinatorClient) Capacity(ctx context.Context) (CoordinatorCapacityRe
 		ActiveLeases   *int   `json:"activeLeases"`
 		EffectiveLimit *int   `json:"effectiveLimit"`
 		ObservedAt     string `json:"observedAt"`
+		*CoordinatorCapacityAdmission
 	}
 	if err := c.do(ctx, http.MethodGet, "/v1/capacity", nil, &payload); err != nil {
 		var httpErr CoordinatorHTTPError
@@ -1692,6 +1784,7 @@ func (c *CoordinatorClient) Capacity(ctx context.Context) (CoordinatorCapacityRe
 	return CoordinatorCapacityResponse{
 		Owner: payload.Owner, ActiveLeases: *payload.ActiveLeases,
 		EffectiveLimit: *payload.EffectiveLimit, ObservedAt: payload.ObservedAt,
+		CoordinatorCapacityAdmission: payload.CoordinatorCapacityAdmission,
 	}, nil
 }
 
@@ -2427,7 +2520,11 @@ func (c *CoordinatorClient) AppendRunTelemetry(ctx context.Context, runID string
 
 func (c *CoordinatorClient) AppendRunEvent(ctx context.Context, runID string, input CoordinatorRunEventInput) (CoordinatorRunEvent, error) {
 	var res CoordinatorRunEventResponse
-	err := c.do(ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/events", input, &res)
+	method := http.MethodPost
+	if input.ID != "" {
+		method = http.MethodPut
+	}
+	err := c.do(ctx, method, "/v1/runs/"+url.PathEscape(runID)+"/events", input, &res)
 	return res.Event, err
 }
 
@@ -2576,7 +2673,14 @@ func (c *CoordinatorClient) doHTTPWithHeaders(ctx context.Context, method, path 
 	if err := c.addRequestHeaders(ctx, req.Header); err != nil {
 		return err
 	}
-	resp, err := c.secureHTTPClient().Do(req)
+	client := c.secureHTTPClient()
+	redirected := false
+	checkRedirect := client.CheckRedirect
+	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		redirected = true
+		return checkRedirect(next, via)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -2585,6 +2689,7 @@ func (c *CoordinatorClient) doHTTPWithHeaders(ctx context.Context, method, path 
 	var response CoordinatorHTTPError
 	if errors.As(err, &response) {
 		response.retryAfter = coordinatorReadRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		response.responseUnredirected = !redirected
 		return response
 	}
 	return err
@@ -2827,13 +2932,17 @@ func splitCurlResponse(data []byte) ([]byte, int, error) {
 
 func decodeCoordinatorResponse(method, path string, statusCode int, body io.Reader, out any) error {
 	if statusCode < 200 || statusCode >= 300 {
-		data, _ := io.ReadAll(io.LimitReader(body, 600))
+		// Do not wait beyond the existing diagnostic cap. Reaching it cannot
+		// establish EOF, so cap-sized bodies remain diagnostic-only.
+		data, readErr := io.ReadAll(io.LimitReader(body, 600))
+		complete := readErr == nil && len(data) < 600
 		msg := strings.TrimSpace(string(data))
 		return CoordinatorHTTPError{
-			Method:     method,
-			Path:       path,
-			StatusCode: statusCode,
-			Message:    msg,
+			Method:           method,
+			Path:             path,
+			StatusCode:       statusCode,
+			Message:          msg,
+			responseComplete: complete,
 		}
 	}
 	if out != nil {

@@ -1,14 +1,17 @@
 # Concepts
 
-Read when:
+Crabbox supplies on-demand computers for agents and humans. You edit locally;
+a **lease** reserves a box, and a **run** syncs the working tree and executes a
+command there. Separate remote boxes let agents run tests and builds in parallel
+without sharing a laptop's CPU, memory, or service ports.
 
-- you encounter a Crabbox term you do not recognize;
-- you are writing docs and want to stay consistent with existing usage;
-- you need a single page that lays out the vocabulary.
+Providers supply Linux, macOS, native Windows, and WSL2 targets. A warm lease
+keeps setup available between runs. Desktop, browser, and Code capabilities add
+interactive access; the coordinator portal shows shared leases and run evidence.
+See the [access guide](features/interactive-desktop-vnc.md) for those surfaces.
 
-This page is a glossary. It defines the nouns and verbs Crabbox uses across the
-CLI, broker, providers, and docs. When two synonyms exist, the preferred form is
-in **bold**.
+This glossary defines the terms used across the CLI, coordinator, and docs.
+When two synonyms exist, the preferred form is in **bold**.
 
 ## Compute vocabulary
 
@@ -40,14 +43,16 @@ connect`/`disconnect`, and `crabbox pond release` to operate on the group. See
 lowercase hex characters (16 characters total, e.g. `cbx_abcdef123456`). Used in
 labels, logs, claims, and broker APIs. See [Identifiers](features/identifiers.md).
 
-**Slug** - the friendly name for a lease, drawn from a crustacean wordlist and
-looking like `swift-crab`. Generated from a stable hash of the lease ID;
-collisions append a 4-hex suffix. A requested `--slug` is normalized to
+**Slug** - a friendly lease name. New automatically allocated slugs combine a
+wordlist pair and an eight-hex ID fingerprint, such as `swift-crab-1f3a9c2b`;
+collision handling can append another four-hex suffix. Custom names such as
+`--slug swift-crab` remain available. A requested `--slug` is normalized to
 `[a-z0-9-]` (max 41 chars). Most commands accept either the ID or the slug via
 `--id`.
 
-**Run** - a single `crabbox run` invocation recorded by the broker. Has a `run_`
-ID, an owning lease, a command, an exit code, and a record in run history. See
+**Run** - a single `crabbox run` invocation with a `run_` ID, lease, command,
+and exit code. Coordinator-backed runs also have durable run history; direct
+runs use their IDs in local timing, proof, and failure artifacts. See
 [History and logs](features/history-logs.md).
 
 **Workspace** - the repo checkout plus runtime state inside a lease or delegated
@@ -86,8 +91,8 @@ config). Operators run `crabbox admin` commands and image bake/promote flows.
 
 **Agent** - an LLM-backed process invoking Crabbox through the CLI. Agents are
 first-class users of Crabbox; the docs are written for both humans and agents.
-Crabbox gives an agent a governed workspace with sync, logs, artifacts, sharing,
-cleanup, and review evidence.
+Crabbox supplies execution and evidence; the agent or its harness owns prompts,
+decisions, and orchestration. Repository config and workloads must be trusted.
 
 ## Modes
 
@@ -118,15 +123,20 @@ are rejected; sync timing reports `sync=delegated`.
 command runs yet; the result is a warm box awaiting work.
 
 **run** - acquire or reuse a lease, sync the checkout, run a command, stream
-output, and release unless told to keep the lease.
+output, and return the exit code. By default, newly acquired leases are released
+and explicitly reused leases stay available; `--keep` and `--stop-after` control
+that policy.
 
-**stop** / **release** - end a lease and delete its backing provider resources.
+**stop** / **release** - end a lease using the provider's cleanup contract.
+Disposable resources are normally deleted; static hosts and provider-specific
+retained resources are exceptions.
 
-**cleanup** - sweep direct-provider leftovers based on labels and local state.
-Intended for direct mode.
+**cleanup** - sweep eligible direct-provider leftovers after verifying exact
+ownership. A label, name, or ID alone never authorizes deletion.
 
 **reuse** - using `--id` (or a slug) to pick an existing lease instead of
-creating a new one. Both `warmup` and `run` accept `--id`.
+creating a new one for `run`. `warmup` creates a lease; `--lease-id` is an
+idempotent creation contract on supporting providers, not a general reuse flag.
 
 **reclaim** - move a local claim from one repo checkout to another so a lease
 created in repo A can be reused from repo B (`--reclaim`). Required because
@@ -192,9 +202,10 @@ resize-capable TigerVNC + XFCE on managed cloud Linux and new local
 containers, or Wayland/GNOME. Required for `crabbox
 vnc`, `crabbox webvnc`, and most `--browser` UI runs.
 
-**Browser** - lease capability (`--browser`) that installs Chrome/Chromium and
-exposes it through environment variables. Useful for Playwright/Vitest without a
-full QA harness.
+**Browser** - lease capability (`--browser`) that installs or discovers a
+supported browser and exports its path. It can run headless without a desktop;
+add `--desktop` for visible testing. The engine depends on the provider/image,
+and a logged-in profile is not supplied.
 
 **Code** - lease capability (`--code`) that installs code-server bound to
 loopback (port 8080). Used by `crabbox code` and the portal `/code/` bridge;
@@ -227,15 +238,18 @@ retry, and provider maintenance work.
 coordinator under `/portal/...`. Surfaces lease detail, run logs and events,
 and the live VNC/Code panes. See [Browser portal](features/portal.md).
 
-**Bridge** - a coordinator endpoint that proxies traffic to a loopback service
-on the lease over a WebSocket: WebVNC (VNC on 5900), code-server (8080), and egress.
-Bridges authenticate against the portal session, then talk to the lease over the
-SSH plane.
+**Bridge** - a connection through the coordinator to a local CLI relay. WebVNC
+and Code relays maintain SSH tunnels to runner loopback services (VNC on 5900,
+code-server on 8080); they must stay running while the browser is connected.
+Egress uses a separate ticketed relay. The coordinator authenticates access and
+does not open SSH connections itself.
 
 ## Identity
 
-**Owner** - the email address that owns a lease. Resolved from the signed GitHub
-login token, `CRABBOX_OWNER`, Git env, or `git config user.email`.
+**Owner** - the identity that owns a lease. GitHub login binds the immutable
+`github:<numeric-id>` account identity. Shared-token automation uses the
+configured owner or Git email, subject to verified identity routing; see
+[Operational security](security.md#authentication).
 
 **Org** - the GitHub-style organization namespace for a lease. Resolved from the
 signed token or `CRABBOX_ORG`. Used for usage scoping and multi-tenant cost caps.

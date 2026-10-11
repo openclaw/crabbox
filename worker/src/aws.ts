@@ -39,6 +39,12 @@ import { creationEvent, observedRunning, measureCreationStep } from "./creation-
 import { hasImageRequirements } from "./image-capabilities";
 import { osImageSpec } from "./os-image";
 import {
+  providerRequestSignal,
+  providerRequestTimeoutMs,
+  providerSleep,
+  waitForProviderSignal,
+} from "./provider-deadline";
+import {
   leaseIDForProviderKey,
   providerKeyForLease,
   providerKeyOwnedByLease,
@@ -841,7 +847,17 @@ export class EC2SpotClient {
   async withLeaseOperation<T>(operation: (session: AWSLeaseOperation) => Promise<T>): Promise<T> {
     // One snapshot owns the full regional operation, including quota and SSM calls.
     const snapshot = this.credentialProvider
-      ? resolvedAWSCredentials(await this.credentialProvider())
+      ? resolvedAWSCredentials(
+          await waitForProviderSignal(
+            providerRequestSignal(
+              providerRequestTimeoutMs,
+              this.requestSignal,
+              "aws",
+              "credential snapshot",
+            ),
+            () => this.credentialProvider!(),
+          ),
+        )
       : undefined;
     const client = snapshot ? new EC2SpotClient(this.env, this.region, snapshot) : this;
     const ec2 = client.aws;
@@ -1015,9 +1031,10 @@ export class EC2SpotClient {
       const instanceType = asString(item["instanceType"]);
       if (!requested.includes(instanceType)) continue;
       const vcpus = Number(asString(record(item["vCpuInfo"])["defaultVCpus"]));
+      const memoryMiB = Number(asString(record(item["memoryInfo"])["sizeInMiB"]));
       described.set(instanceType, {
         vcpus: Number.isSafeInteger(vcpus) && vcpus > 0 ? vcpus : 0,
-        memoryMiB: positiveInt(asString(record(item["memoryInfo"])["sizeInMiB"])),
+        memoryMiB: Number.isSafeInteger(memoryMiB) && memoryMiB > 0 ? memoryMiB : 0,
         architectures: items(
           record(record(item["processorInfo"])["supportedArchitectures"])["item"],
         ).map(asString),
@@ -1040,6 +1057,46 @@ export class EC2SpotClient {
       // Metadata is advisory for ordinary launches; private workspace caps remain strict.
       return new Map();
     }
+  }
+
+  private async resourceQualifiedCandidates(config: LeaseConfig): Promise<{
+    candidates: string[];
+    vcpus: Map<string, number>;
+  }> {
+    const requirements = config.capacityRequirements!;
+    const candidates = awsLaunchCandidates(config);
+    let described: Map<string, AWSInstanceTypeInfo>;
+    try {
+      described = await this.describeInstanceTypes(candidates);
+    } catch (error) {
+      if (error instanceof AWSLeaseAuthorityError) throw error;
+      throw new Error(
+        "AWS capacity unavailable: cannot verify requested resource minimums from DescribeInstanceTypes",
+        { cause: error },
+      );
+    }
+    const eligible = candidates.filter((candidate) => {
+      const info = described.get(candidate);
+      return (
+        info !== undefined &&
+        (!requirements.minVCPUs || info.vcpus >= requirements.minVCPUs) &&
+        (!requirements.minMemoryMiB || info.memoryMiB >= requirements.minMemoryMiB)
+      );
+    });
+    if (!eligible.length) {
+      throw new Error(
+        `AWS capacity unavailable: no candidate has verified capacity for minVCPUs=${requirements.minVCPUs ?? 0} minMemoryMiB=${requirements.minMemoryMiB ?? 0}`,
+      );
+    }
+    return {
+      candidates: eligible,
+      vcpus: new Map(
+        eligible.flatMap((name) => {
+          const count = described.get(name)!.vcpus;
+          return count > 0 ? [[name, count] as const] : [];
+        }),
+      ),
+    };
   }
 
   private async assertPrivateWorkspaceInstanceTypes(
@@ -1294,6 +1351,13 @@ export class EC2SpotClient {
     let succeeded = false;
     let transientImageID = "";
     try {
+      // Hard minimums must be verified before creating keys, images or ingress.
+      // Ordinary requests retain their advisory metadata and candidate behavior.
+      const qualified = config.capacityRequirements
+        ? await diagnostics.measure("instance_types", () =>
+            this.resourceQualifiedCandidates(config),
+          )
+        : undefined;
       if (!config.awsPrivate) {
         await diagnostics.measure("key_pair", () =>
           this.ensureSSHKey(
@@ -1357,11 +1421,14 @@ export class EC2SpotClient {
           `EC2 Mac Dedicated Host ${pinnedMacHostID} requires ${pinnedMacHostType}, not requested ${config.serverType}`,
         );
       }
-      const candidates = pinnedMacHostType ? [pinnedMacHostType] : awsLaunchCandidates(config);
+      const candidates =
+        qualified?.candidates ??
+        (pinnedMacHostType ? [pinnedMacHostType] : awsLaunchCandidates(config));
       const vcpus =
-        config.target === "macos"
+        qualified?.vcpus ??
+        (config.target === "macos"
           ? new Map<string, number>()
-          : await diagnostics.measure("instance_types", () => this.instanceTypeVCPUs(candidates));
+          : await diagnostics.measure("instance_types", () => this.instanceTypeVCPUs(candidates)));
       const allowCapacityHandoff =
         !config.awsPrivate && !config.serverTypeExplicit && config.target !== "macos";
       const hasQuotaEligibleCandidate = (
@@ -1574,7 +1641,7 @@ export class EC2SpotClient {
       }
       if (config.serverTypeExplicit) {
         throw history.error(
-          `requested exact AWS instance type ${config.serverType} failed; remove --type to allow class fallback: `,
+          `requested exact AWS instance type ${config.serverType} failed; remove --type to allow class fallback (regional quota limits still apply): `,
         );
       }
       throw history.error();
@@ -1761,6 +1828,7 @@ export class EC2SpotClient {
     while (Date.now() < deadline) {
       await checkReadiness?.();
       const server = await this.findServer(instanceID);
+      if (server) await this.assertAcquireState(server);
       await checkReadiness?.();
       if (Date.now() >= deadline) break;
       const address = server?.host || (allowPrivateAddress ? server?.privateHost : "");
@@ -1777,9 +1845,11 @@ export class EC2SpotClient {
 
   async waitForSSMOnline(instanceID: string, checkReadiness?: AWSReadinessCheck): Promise<void> {
     const deadline = Date.now() + 10 * 60_000;
+    const checkInstance = this.acquireStatePoll(instanceID);
     /* oxlint-disable eslint/no-await-in-loop -- Polling serially revalidates lease authority around each provider read. */
     while (Date.now() < deadline) {
       await checkReadiness?.();
+      await checkInstance();
       let result: Record<string, unknown>;
       try {
         result = await this.ssm("DescribeInstanceInformation", {
@@ -1808,6 +1878,48 @@ export class EC2SpotClient {
     }
     /* oxlint-enable eslint/no-await-in-loop */
     throw new Error(`timed out waiting for AWS SSM managed-node readiness: ${instanceID}`);
+  }
+
+  private acquireStatePoll(instanceID: string): AWSReadinessCheck {
+    let nextCheck = Date.now() + 15_000;
+    return async () => {
+      if (Date.now() < nextCheck) return;
+      const server = await this.findServer(instanceID);
+      if (server) await this.assertAcquireState(server);
+      nextCheck = Date.now() + 15_000;
+    };
+  }
+
+  private async assertAcquireState(server: ProviderMachine): Promise<void> {
+    let terminal = server.status === "shutting-down" || server.status === "terminated";
+    let reason = server.awsStateReasonCode ?? "";
+    let message = server.awsStateReasonMessage ?? "";
+    if (server.awsSpotInstanceRequestID) {
+      // Preserve terminal evidence even when an older IAM policy cannot read Spot diagnostics.
+      const root = await this.ec2("DescribeSpotInstanceRequests", {
+        "SpotInstanceRequestId.1": server.awsSpotInstanceRequestID,
+      }).catch(() => undefined);
+      for (const value of items(record(root?.["spotInstanceRequestSet"])["item"])) {
+        const request = record(value);
+        const status = record(request["status"]);
+        const code = asString(status["code"]);
+        if (
+          asString(request["spotInstanceRequestId"]) === server.awsSpotInstanceRequestID &&
+          asString(request["instanceId"]) === server.cloudID &&
+          asString(request["state"]) === "closed" &&
+          code.startsWith("instance-terminated-")
+        ) {
+          terminal = true;
+          reason = code;
+          message = asString(status["message"]);
+        }
+      }
+    }
+    if (terminal) {
+      throw new Error(
+        `AWS instance ${server.cloudID} cannot finish acquiring: state=${server.status}; ${reason} ${message}`.trim(),
+      );
+    }
   }
 
   async assertPrivateWorkspaceRootVolume(
@@ -1874,9 +1986,11 @@ export class EC2SpotClient {
       throw new Error("AWS SSM SendCommand returned no command ID");
     }
     const deadline = Date.now() + 17 * 60_000;
+    const checkInstance = this.acquireStatePoll(instanceID);
     /* oxlint-disable eslint/no-await-in-loop -- Polling serially revalidates lease authority around each provider read. */
     while (Date.now() < deadline) {
       await checkReadiness?.();
+      await checkInstance();
       try {
         const invocation = await this.ssm("GetCommandInvocation", {
           CommandId: commandID,
@@ -2799,6 +2913,11 @@ export class EC2SpotClient {
       if (!machine.cloudID.trim()) {
         throw new Error(`${awsRunInstancesOutcomeUncertain}: aws returned no instance id`);
       }
+      if (config.capacityRequirements && machine.serverType !== config.serverType) {
+        throw new Error(
+          `${awsRunInstancesOutcomeUncertain}: returned instance type does not match the resource-qualified request`,
+        );
+      }
       return {
         ...machine,
         creationEvents: [requested, responded, ...observedRunning(machine.status)],
@@ -2829,7 +2948,9 @@ export class EC2SpotClient {
       return config.awsAMI || this.env.CRABBOX_AWS_AMI || "";
     }
     if (config.target === "windows") {
-      return this.resolveLatestAmazonAMI("Windows_Server-2022-English-Full-Base-*", "x86_64");
+      const os = osImageSpec(config.os);
+      const windows = os.target === "windows" ? os : osImageSpec("windows-server:2025");
+      return this.resolveLatestAmazonAMI(windows.awsName, "x86_64");
     }
     if (config.target === "macos") {
       const query = awsMacOSAMIQuery(config.serverType);
@@ -3615,6 +3736,9 @@ export function awsLeaseImageIdentity(
   imageID: string,
   region: string,
 ): LeaseImageIdentity {
+  if (config.awsUseStockImage) {
+    return { id: imageID, source: "stock", provider: "aws", kind: "aws-ami", region };
+  }
   if (config.awsSnapshot) {
     return {
       id: imageID,
@@ -3687,6 +3811,15 @@ function instanceToMachine(input: unknown): ProviderMachine {
     cloudID,
     name: tags["Name"] || cloudID,
     status: asString(record(instance["instanceState"])["name"]),
+    ...(asString(instance["spotInstanceRequestId"])
+      ? { awsSpotInstanceRequestID: asString(instance["spotInstanceRequestId"]) }
+      : {}),
+    ...(asString(record(instance["stateReason"])["code"])
+      ? { awsStateReasonCode: asString(record(instance["stateReason"])["code"]) }
+      : {}),
+    ...(asString(record(instance["stateReason"])["message"])
+      ? { awsStateReasonMessage: asString(record(instance["stateReason"])["message"]) }
+      : {}),
     serverType: asString(instance["instanceType"]),
     hostID: asString(record(instance["placement"])["hostId"]),
     host: asString(instance["ipAddress"]),
@@ -4350,11 +4483,14 @@ export function awsCapacityReadinessCheckForQuota(
       details,
     };
   }
-  details["hint"] = "quota_satisfies_default_class";
+  details["capacity"] = "unknown";
+  details["quota_limit"] = "sufficient";
+  details["usage"] = "unchecked";
+  details["hint"] = "check_regional_quota_usage";
   return {
     status: "ok",
     check: "capacity",
-    message: awsCapacityReadinessMessage("provider=aws capacity=ready", details),
+    message: awsCapacityReadinessMessage("provider=aws", details),
     details,
   };
 }
@@ -4606,5 +4742,5 @@ function conciseAWSMacHostDryRunMessage(message: string): string {
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return providerSleep(ms, providerRequestSignal(ms + 1_000, undefined, "aws", "poll wait"));
 }

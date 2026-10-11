@@ -45,7 +45,7 @@ lifecycle call. Auth failures stop a lease before it reaches a provider.
 ```sh
 crabbox config show
 printenv CRABBOX_COORDINATOR
-printenv CRABBOX_COORDINATOR_TOKEN
+test -n "${CRABBOX_COORDINATOR_TOKEN:-}" && echo 'coordinator token is set' || echo 'coordinator token is unset'
 printenv CRABBOX_PUBLIC_URL
 ```
 
@@ -58,7 +58,9 @@ printenv CRABBOX_PUBLIC_URL
 - Configure the final coordinator origin directly. The Go transport permits
   same-origin redirects, but cross-origin redirects are rejected and the curl
   fallback intentionally follows no redirects.
-- Ensure `CRABBOX_COORDINATOR_TOKEN` matches the coordinator's `CRABBOX_SHARED_TOKEN`.
+- For shared-token automation, check that the configured token matches the
+  operator's current shared token without printing either value. For GitHub
+  login, run `crabbox whoami` and sign in again if the session is rejected.
 - For self-hosted GitHub browser login, create a GitHub OAuth app and set its
   callback URL to `https://<your-coordinator-host>/v1/auth/github/callback`.
 - Ensure the coordinator's `CRABBOX_PUBLIC_URL` uses the same public origin as that
@@ -132,7 +134,7 @@ crabbox usage --scope org --org example-org
 - `crabbox doctor --provider azure` reports `missing=AZURE_TENANT_ID,...`;
 - the class falls back from a dedicated machine to a smaller one;
 - an AWS Spot request cannot be fulfilled;
-- AWS reports `VcpuLimitExceeded` for large On-Demand instances;
+- AWS reports `VcpuLimitExceeded` for an On-Demand instance;
 - server creation fails before SSH is reachable.
 
 **Checks**
@@ -163,6 +165,13 @@ CRABBOX_CAPACITY_REGIONS=eu-west-1,eu-west-2,eu-central-1,us-east-1,us-west-2 \
 - Raise the AWS `Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances`
   quota for the C/M/R/T/Z families, or the matching Spot quota when using Spot.
 - Raise the Hetzner dedicated-core quota when dedicated classes are required.
+
+For `VcpuLimitExceeded`, check account-wide usage in the reported region and
+quota bucket. `doctor` compares the VM size with the quota ceiling and leaves
+usage unchecked, even when that comparison reports `ok`. An owner's Crabbox
+lease count does not measure the shared AWS quota. Ask resource owners to
+release unused capacity or request a quota increase. A smaller type helps only
+if enough quota remains; C, M, and R families share the Standard quota bucket.
 
 Brokered AWS launches record provisioning attempts and use AWS Service Quotas
 when available, reporting the quota code, applied vCPU limit, requested type, and
@@ -339,8 +348,9 @@ crabbox run --id cbx_... --sync-only --debug
 
 - Inspect the printed sync candidate estimate (`crabbox sync-plan`) before
   retrying.
-- Lower `sync.timeout` for quick failure in agent loops, or raise it for
-  intentionally large source transfers.
+- Lower `sync.timeout` to detect rsync I/O stalls sooner, or raise it when long
+  periods without protocol I/O are expected. Progressing rsync transfers may
+  exceed this duration; manifest staging and archive sync use wall-clock limits.
 - Tune `sync.warnFiles`, `sync.warnBytes`, `sync.failFiles`, and `sync.failBytes`
   in repo config.
 - Stop and warm a fresh lease if the remote workspace looks corrupted.

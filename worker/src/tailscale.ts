@@ -4,7 +4,14 @@ import {
   defaultTailscaleARM64SHA256,
 } from "./bootstrap.generated";
 import { errorMessage } from "./http";
+import {
+  ProviderRequestTimeoutError,
+  providerFetch,
+  providerRequestSignal,
+} from "./provider-deadline";
 import type { Env } from "./types";
+
+export const tailscaleRequestTimeoutMs = 15_000;
 
 export interface TailscaleKeyRequest {
   hostname: string;
@@ -152,7 +159,7 @@ export async function createTailscaleAuthKey(
   const tailnet = env.CRABBOX_TAILSCALE_TAILNET?.trim() || "-";
   let data: { key?: string };
   try {
-    const response = await fetch(
+    const response = await providerFetch(
       `https://api.tailscale.com/api/v2/tailnet/${encodeURIComponent(tailnet)}/keys`,
       {
         method: "POST",
@@ -175,6 +182,7 @@ export async function createTailscaleAuthKey(
           description: request.description,
         }),
       },
+      providerRequestSignal(tailscaleRequestTimeoutMs, undefined, "tailscale", "create auth key"),
     );
     const text = await response.text();
     if (!response.ok) {
@@ -182,7 +190,7 @@ export async function createTailscaleAuthKey(
     }
     data = JSON.parse(text) as { key?: string };
   } catch (error) {
-    if (error instanceof TailscaleAPIError) {
+    if (error instanceof TailscaleAPIError || error instanceof ProviderRequestTimeoutError) {
       throw error;
     }
     // oxlint-disable-next-line eslint/preserve-caught-error -- Upstream causes can expose OAuth credentials.
@@ -240,7 +248,8 @@ export async function tailscalePreflight(env: Env): Promise<TailscalePreflightRe
     });
   } catch (error) {
     const operation =
-      error instanceof TailscaleAPIError && error.operation === "oauth token"
+      (error instanceof TailscaleAPIError || error instanceof ProviderRequestTimeoutError) &&
+      error.operation === "oauth token"
         ? "oauth_token_failed"
         : "auth_key_mint_failed";
     return {
@@ -276,18 +285,22 @@ async function tailscaleOAuthToken(
   }
   let data: { access_token?: string };
   try {
-    const response = await fetch("https://api.tailscale.com/api/v2/oauth/token", {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body,
-    });
+    const response = await providerFetch(
+      "https://api.tailscale.com/api/v2/oauth/token",
+      {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body,
+      },
+      providerRequestSignal(tailscaleRequestTimeoutMs, undefined, "tailscale", "oauth token"),
+    );
     const text = await response.text();
     if (!response.ok) {
       throw new TailscaleAPIError("oauth token", response.status, text);
     }
     data = JSON.parse(text) as { access_token?: string };
   } catch (error) {
-    if (error instanceof TailscaleAPIError) {
+    if (error instanceof TailscaleAPIError || error instanceof ProviderRequestTimeoutError) {
       throw error;
     }
     // oxlint-disable-next-line eslint/preserve-caught-error -- Upstream causes can expose OAuth credentials.

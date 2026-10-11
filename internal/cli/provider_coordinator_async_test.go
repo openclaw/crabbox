@@ -195,7 +195,7 @@ func (f *coordinatorAsyncFixture) roundTrip(r *http.Request) (*http.Response, er
 			f.t.Fatal("cancellation did not bind the original attempt")
 		}
 		deadline, ok := r.Context().Deadline()
-		if !ok || time.Until(deadline) != 10*time.Second || r.Context().Err() != nil {
+		if !ok || time.Until(deadline) != 30*time.Second || r.Context().Err() != nil {
 			f.t.Fatalf("cancel context budget=%s err=%v", time.Until(deadline), r.Context().Err())
 		}
 		if f.onCancel != nil {
@@ -377,7 +377,7 @@ func TestCoordinatorAsyncCallerDeadlineAndFinalCancellationAttempt(t *testing.T)
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		lease, err := f.acquire(ctx)
-		if !errors.Is(err, context.DeadlineExceeded) || lease.ID != "" || f.creates != 1 || f.cancels != 2 || time.Since(f.started) != 30*time.Second || f.deadline.Sub(f.started) != 20*time.Second {
+		if !errors.Is(err, context.DeadlineExceeded) || lease.ID != "" || f.creates != 1 || f.cancels != 2 || time.Since(f.started) != 50*time.Second || f.deadline.Sub(f.started) != 20*time.Second {
 			t.Fatalf("lease=%#v err=%v creates=%d cancels=%d elapsed=%s budget=%s", lease, err, f.creates, f.cancels, time.Since(f.started), f.deadline.Sub(f.started))
 		}
 	})
@@ -530,6 +530,41 @@ func TestCoordinatorAsyncLegacyBrokerIgnoresPreference(t *testing.T) {
 				lease, err := f.acquire(context.Background())
 				if err != nil || lease.ID != f.canonical || f.creates != 1 || f.gets != 0 || f.cancels != 0 {
 					t.Fatalf("lease=%#v err=%v creates=%d gets=%d cancels=%d", lease, err, f.creates, f.gets, f.cancels)
+				}
+			})
+		})
+	}
+}
+
+func TestCoordinatorInterruptedCreateReportsPhaseAndStopsBeforeClientDeadline(t *testing.T) {
+	for _, fixed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("fixed=%v", fixed), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				f := newCoordinatorAsyncFixture(t, fixed)
+				f.cfg.Provider, f.backend.cfg.Provider = "aws", "aws"
+				pending := f.lease("provisioning")
+				pending.ProvisioningPhase = "provider-request"
+				f.onCreate = func(*http.Request) (*http.Response, error) { return f.reply(pending) }
+				f.onGet = func(*http.Request) (*http.Response, error) {
+					if time.Since(f.started) < time.Minute {
+						return f.reply(pending)
+					}
+					failed := f.lease("failed")
+					failed.ProvisioningPhase = "interrupted-recovering"
+					failed.FailureError = "provider provisioning was interrupted; recovering possible provider resource"
+					uncertain := true
+					failed.ProvisioningResourceMayExist, failed.ProvisioningFailureRetryable = &uncertain, &uncertain
+					return f.reply(failed)
+				}
+				lease, err := f.acquire(context.Background())
+				if err == nil || !strings.Contains(err.Error(), "provider provisioning was interrupted") || lease.ID != "" {
+					t.Fatalf("lease=%#v err=%v", lease, err)
+				}
+				if f.creates != 1 || time.Since(f.started) > 2*time.Minute {
+					t.Fatalf("creates=%d elapsed=%s", f.creates, time.Since(f.started))
+				}
+				if !strings.Contains(f.stderr.String(), `phase="provider-request"`) {
+					t.Fatalf("missing attempt phase: %s", f.stderr.String())
 				}
 			})
 		})

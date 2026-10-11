@@ -264,6 +264,62 @@ func (c *digitalOceanClient) AccountID(ctx context.Context) (string, error) {
 	return "", core.Exit(3, "digitalocean account API returned no account identity")
 }
 
+var preferredRegions = []string{"sfo3", "sfo2", "sfo1", "tor1", "nyc3", "nyc1", "nyc2", "lon1", "ams3", "fra1", "sgp1", "blr1", "syd1"}
+
+func (c *digitalOceanClient) ResolveSizeRegion(ctx context.Context, cfg core.Config) (string, error) {
+	region := cfg.DigitalOcean.Region
+	var regions []string
+	for page := 1; ; page++ {
+		var res struct {
+			Sizes []struct {
+				Slug      string   `json:"slug"`
+				Available bool     `json:"available"`
+				Regions   []string `json:"regions"`
+			} `json:"sizes"`
+			Links struct {
+				Pages struct {
+					Next string `json:"next"`
+				} `json:"pages"`
+			} `json:"links"`
+		}
+		if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/sizes?page=%d&per_page=200", page), nil, &res); err != nil {
+			return "", err
+		}
+		found := false
+		for _, size := range res.Sizes {
+			if size.Slug != cfg.ServerType {
+				continue
+			}
+			if size.Available {
+				if region != "" && slices.Contains(size.Regions, region) {
+					return region, nil
+				}
+				if region == "" {
+					for _, preferred := range preferredRegions {
+						if slices.Contains(size.Regions, preferred) {
+							return preferred, nil
+						}
+					}
+				}
+			}
+			regions, found = size.Regions, true
+			break
+		}
+		if found || res.Links.Pages.Next == "" {
+			break
+		}
+	}
+	slices.Sort(regions)
+	available := strings.Join(regions, ", ")
+	if available == "" {
+		available = "none listed"
+	}
+	if region == "" {
+		region = "automatic (near San Francisco)"
+	}
+	return "", core.Exit(2, "digitalocean_size_unavailable_in_region: size %q is unavailable in region %q; available regions: %s; choose digitalocean.region or CRABBOX_DIGITALOCEAN_REGION explicitly", cfg.ServerType, region, available)
+}
+
 func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config, publicKey, leaseID, slug string, keep bool, now time.Time) (droplet, error) {
 	return c.createDroplet(ctx, cfg, publicKey, leaseID, slug, keep, now, nil)
 }
@@ -288,10 +344,14 @@ func (c *digitalOceanClient) createDroplet(ctx context.Context, cfg core.Config,
 		return droplet{}, err
 	}
 	rollbackKey := func(cause error) error {
-		if !createdKey {
-			return cause
+		if createdKey {
+			cause = c.rollbackCreatedSSHKey(key, cause)
 		}
-		return c.rollbackCreatedSSHKey(key, cause)
+		var cleanup *sshKeyCleanupError
+		if !errors.As(cause, &cleanup) && !shouldReconcileMutation(cause) {
+			return &core.FixedCreateRejected{Err: cause}
+		}
+		return cause
 	}
 	withKeyIdentity := func(item droplet) droplet {
 		item.SSHKeyID = key.ID
@@ -366,7 +426,8 @@ func (c *digitalOceanClient) createDroplet(ctx context.Context, cfg core.Config,
 
 func shouldReconcileMutation(err error) bool {
 	var apiErr *digitalOceanAPIError
-	return !errors.As(err, &apiErr) || apiErr.Status >= http.StatusInternalServerError
+	return !errors.As(err, &apiErr) || apiErr.Status < 400 || apiErr.Status >= 500 ||
+		apiErr.Status == http.StatusRequestTimeout || apiErr.Status == http.StatusConflict || apiErr.Status == http.StatusTooManyRequests
 }
 
 func isDigitalOceanUnprocessable(err error) bool {

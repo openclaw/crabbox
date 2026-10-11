@@ -179,7 +179,7 @@ func (a App) pondRelease(ctx context.Context, args []string) error {
 	if pond == "" {
 		return Exit(2, "usage: crabbox pond release <name>")
 	}
-	claims, err := ListLeaseClaims()
+	claims, err := ListLeaseClaimsContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -306,7 +306,7 @@ type pondPeersJSON struct {
 // gives `crabbox pond peers --pond <name>` honest cross-provider output without
 // making the caller enumerate providers by hand.
 func resolvePondPeers(ctx context.Context, rt Runtime, pond, provider string, flags pondPeersFlags) ([]BridgePeer, error) {
-	claims, err := ListLeaseClaims()
+	claims, err := ListLeaseClaimsContext(ctx)
 	if err != nil {
 		return nil, err
 	}

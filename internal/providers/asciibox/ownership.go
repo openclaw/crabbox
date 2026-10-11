@@ -57,8 +57,19 @@ func concreteBoxID(id string) bool {
 	return true
 }
 
+func boxCreationTimeMatches(box boxData, expected string) bool {
+	created, err := time.Parse(time.RFC3339Nano, boxCreationTime(box))
+	if err != nil {
+		return false
+	}
+	witness, err := time.Parse(time.RFC3339Nano, expected)
+	// Boat's create/read clocks differ. A random Box ID reused within five
+	// seconds is not a realistic reuse scenario; larger age changes still conflict.
+	return err == nil && created.Sub(witness).Abs() <= 5*time.Second
+}
+
 func validateBoxIdentity(actual, expected boxData) error {
-	if !concreteBoxID(expected.ID) || actual.ID != expected.ID || boxCreationTime(expected) == "" || boxCreationTime(actual) != boxCreationTime(expected) {
+	if !concreteBoxID(expected.ID) || actual.ID != expected.ID || !expected.allowIDOnlyRelease && !boxCreationTimeMatches(actual, core.Blank(expected.claimCreatedAt, boxCreationTime(expected))) {
 		return core.Exit(2, "ascii-box %q identity is missing or changed; retaining resource and claim", expected.ID)
 	}
 	return nil
@@ -224,8 +235,8 @@ func releaseClaimedBoxWithOutcome(ctx context.Context, client api, claim core.Le
 	}
 	nativeCompleted := false
 	_, _, _, err = core.ResolveLeaseClaimAfterActionIfUnchanged(claim.LeaseID, claim, func() error {
-		return releaseExactBox(ctx, client, boxFromClaim(claim), beforeRelease, func() {
-			nativeCompleted = true
+		return releaseExactBox(ctx, client, boxFromClaim(claim), beforeRelease, func(operation boxDeletionOperation) {
+			nativeCompleted = operation.Status == "completed"
 		})
 	}, func(releaseErr error) (map[string]string, bool) {
 		if nativeCompleted || releaseErr == nil {
@@ -250,7 +261,7 @@ func releaseClaimedBoxWithOutcome(ctx context.Context, client api, claim core.Le
 	return core.ReleaseLeaseOutcome{Terminal: err == nil}, err
 }
 
-func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRelease func(boxData), onDeletionCompleted func()) error {
+func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRelease func(boxData), onDeletionObserved func(boxDeletionOperation)) error {
 	fresh, err := exactBoxForRelease(ctx, client, expected)
 	if err != nil {
 		return err
@@ -281,35 +292,34 @@ func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRe
 		}
 		beforeRelease(fresh)
 	}
-	if err := client.ReleaseBox(ctx, expected.ID, validate); err != nil {
+	operation, err := client.ReleaseBox(ctx, expected.ID, validate)
+	if err == nil && onDeletionObserved != nil {
+		onDeletionObserved(operation)
+	}
+	if err != nil {
 		return err
 	}
-	if onDeletionCompleted != nil {
-		onDeletionCompleted()
+	// Re-attest both absence witnesses inside the release fence.
+	err = waitForBoxAbsence(ctx, client, expected)
+	if err != nil && operation.Status != "completed" {
+		return &boxDeletionIncompleteError{operation: operation, err: err}
 	}
-	// This attempt must finish its accepted operation before confirmation.
-	// A later release uses core to reconcile exact absence.
+	return err
+}
+
+func waitForBoxAbsence(ctx context.Context, client api, expected boxData) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("ascii-box cleanup phase=inventory-confirmation; retaining claim: %w", err)
 		}
-		boxes, err := client.ListBoxes(ctx, true)
+		absent, err := boxAbsentAfterDeletion(ctx, client, expected)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return fmt.Errorf("ascii-box cleanup phase=inventory-confirmation; retaining claim: %w", ctxErr)
 		}
 		if err != nil {
 			return fmt.Errorf("ascii-box cleanup phase=inventory-confirmation; retaining claim: %w", err)
 		}
-		found := false
-		for _, box := range boxes {
-			if box.ID == expected.ID {
-				if err := validateBoxIdentity(box, expected); err != nil {
-					return err
-				}
-				found = true
-			}
-		}
-		if !found {
+		if absent {
 			return nil
 		}
 		select {
@@ -353,6 +363,8 @@ func exactBoxForRelease(ctx context.Context, client api, expected boxData) (boxD
 		if expected.deletionCompleted {
 			return boxData{}, core.Exit(2, "ascii-box %s is still observable after recorded deletion completion; retaining claim", expected.ID)
 		}
+		fresh.allowIDOnlyRelease = expected.allowIDOnlyRelease
+		fresh.claimCreatedAt = expected.claimCreatedAt
 		return fresh, nil
 	}
 	return boxData{}, fmt.Errorf("ascii-box ownership lookup; retaining claim: %w", err)

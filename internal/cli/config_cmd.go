@@ -128,7 +128,7 @@ func configShowView(cfg Config) map[string]any {
 		provider = ""
 		serverType = ""
 	}
-	return map[string]any{
+	view := map[string]any{
 		"providerStatus":             providerConfigStatus(cfg),
 		"profile":                    cfg.Profile,
 		"provider":                   provider,
@@ -157,6 +157,7 @@ func configShowView(cfg Config) map[string]any {
 		"ttl":                        cfg.TTL.String(),
 		"idleTimeout":                cfg.IdleTimeout.String(),
 		"warmup":                     map[string]any{"keep": cfg.WarmupKeep},
+		"claims":                     map[string]any{"autoPrune": cfg.ClaimsAutoPrune},
 		"sync": map[string]any{
 			"source":        effectiveSyncSource(cfg),
 			"exclude":       configuredExcludes(cfg).patterns(),
@@ -342,6 +343,7 @@ func configShowView(cfg Config) map[string]any {
 		"cloudflare": map[string]any{
 			"apiUrl":  redactedConfigURL(cfg.Cloudflare.APIURL),
 			"auth":    tokenState(cfg.Cloudflare.Token),
+			"image":   cfg.Cloudflare.Image,
 			"workdir": cfg.Cloudflare.Workdir,
 		},
 		"fastapiCloud": map[string]any{
@@ -526,6 +528,14 @@ func configShowView(cfg Config) map[string]any {
 			"insecureTLS":  cfg.XCPNg.InsecureTLS,
 		},
 	}
+	capacity := view["capacity"].(map[string]any)
+	if cfg.Capacity.MinVCPUs > 0 {
+		capacity["minVCPUs"] = cfg.Capacity.MinVCPUs
+	}
+	if cfg.Capacity.MinMemoryMiB > 0 {
+		capacity["minMemoryMiB"] = cfg.Capacity.MinMemoryMiB
+	}
+	return view
 }
 
 func writeConfigShowText(w io.Writer, cfg Config) error {
@@ -558,7 +568,11 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	fmt.Fprintf(w, "env allow=%s\n", strings.Join(cfg.EnvAllow, ","))
 	fmt.Fprintf(w, "run preflight_tools=%s\n", blank(strings.Join(cfg.Run.PreflightTools, ","), "-"))
 	fmt.Fprintf(w, "warmup keep=%t\n", cfg.WarmupKeep)
+	fmt.Fprintf(w, "claims auto_prune=%t\n", cfg.ClaimsAutoPrune)
 	fmt.Fprintf(w, "capacity market=%s strategy=%s fallback=%s regions=%s hints=%t\n", cfg.Capacity.Market, cfg.Capacity.Strategy, cfg.Capacity.Fallback, blank(strings.Join(cfg.Capacity.Regions, ","), "-"), cfg.Capacity.Hints)
+	if hasCapacityMinimums(cfg) {
+		fmt.Fprintf(w, "capacity min_vcpus=%d min_memory_mib=%d\n", cfg.Capacity.MinVCPUs, cfg.Capacity.MinMemoryMiB)
+	}
 	fmt.Fprintf(w, "actions repo=%s workflow=%s job=%s ref=%s runner_version=%s ephemeral=%t labels=%s\n", blank(cfg.Actions.Repo, "-"), blank(cfg.Actions.Workflow, "-"), blank(cfg.Actions.Job, "-"), blank(cfg.Actions.Ref, "-"), cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, blank(strings.Join(cfg.Actions.RunnerLabels, ","), "-"))
 	if err := layout.writeSlot(w, "blacksmith"); err != nil {
 		return err
@@ -604,7 +618,7 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	if err := layout.writeSlot(w, "lume"); err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "cloudflare api_url=%s workdir=%s auth=%s\n", blank(redactedConfigURL(cfg.Cloudflare.APIURL), "-"), cfg.Cloudflare.Workdir, tokenState(cfg.Cloudflare.Token))
+	fmt.Fprintf(w, "cloudflare api_url=%s workdir=%s auth=%s image=%s\n", blank(redactedConfigURL(cfg.Cloudflare.APIURL), "-"), cfg.Cloudflare.Workdir, tokenState(cfg.Cloudflare.Token), blank(cfg.Cloudflare.Image, "default"))
 	fmt.Fprintf(w, "fastapi_cloud api_url=%s app_id=%s team_id=%s auth=%s\n", blank(redactedConfigURL(cfg.FastAPICloud.APIURL), "-"), blank(cfg.FastAPICloud.AppID, "-"), blank(cfg.FastAPICloud.TeamID, "-"), tokenState(cfg.FastAPICloud.Token))
 	fmt.Fprintf(w, "cloudflare_dynamic_workers loader_url=%s compatibility_date=%s compatibility_flags=%s cache_mode=%s egress=%s cpu_ms=%d subrequests=%d timeout_secs=%d metadata=%d auth=%s\n", blank(redactedConfigURL(cfg.CloudflareDynamicWorkers.LoaderURL), "-"), blank(cfg.CloudflareDynamicWorkers.CompatibilityDate, "-"), blank(strings.Join(cfg.CloudflareDynamicWorkers.CompatibilityFlags, ","), "-"), cfg.CloudflareDynamicWorkers.CacheMode, cfg.CloudflareDynamicWorkers.Egress, cfg.CloudflareDynamicWorkers.CPUMs, cfg.CloudflareDynamicWorkers.Subrequests, cfg.CloudflareDynamicWorkers.TimeoutSecs, len(cfg.CloudflareDynamicWorkers.Metadata), tokenState(cfg.CloudflareDynamicWorkers.Token))
 	fmt.Fprintf(w, "cloudflare_sandbox url=%s workdir=%s exec_timeout_secs=%d forget_missing=%t auth=%s\n", blank(redactedConfigURL(cfg.CloudflareSandbox.BridgeURL), "-"), cfg.CloudflareSandbox.Workdir, cfg.CloudflareSandbox.ExecTimeoutSecs, cfg.CloudflareSandbox.ForgetMissing, tokenState(cfg.CloudflareSandbox.Token))

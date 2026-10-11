@@ -37,6 +37,10 @@ export interface OwnerCapacity {
   activeLeases: number;
   effectiveLimit: number;
   observedAt: string;
+  fleet: { activeLeases: number; limit: number | null };
+  org: { key: string; activeLeases: number; limit: number | null };
+  admissible: boolean;
+  blockedBy: "fleet" | "owner" | "org" | null;
 }
 
 export interface UsageFilter {
@@ -175,23 +179,39 @@ export function addLeaseToCostLimitUsage(
   }
 }
 
-export function enforceCostLimitUsage(
+export function activeLeaseLimitBlocker(
   usage: CostLimitUsage,
-  candidate: LeaseRecord,
+  owner: string,
   limits: CostLimits,
-): string {
+): OwnerCapacity["blockedBy"] {
   if (limits.maxActiveLeases > 0 && usage.activeLeases + 1 > limits.maxActiveLeases) {
-    return `active lease limit exceeded: ${usage.activeLeases + 1}/${limits.maxActiveLeases}`;
+    return "fleet";
   }
-  const ownerLimit = activeLeaseLimitForOwner(limits, candidate.owner);
+  const ownerLimit = activeLeaseLimitForOwner(limits, owner);
   if (ownerLimit > 0 && usage.ownerActiveLeases + 1 > ownerLimit) {
-    return `active lease limit for owner exceeded: ${usage.ownerActiveLeases + 1}/${ownerLimit}`;
+    return "owner";
   }
   if (
     limits.maxActiveLeasesPerOrg > 0 &&
     usage.orgActiveLeases + 1 > limits.maxActiveLeasesPerOrg
   ) {
-    return `active lease limit for org exceeded: ${usage.orgActiveLeases + 1}/${limits.maxActiveLeasesPerOrg}`;
+    return "org";
+  }
+  return null;
+}
+
+export function enforceCostLimitUsage(
+  usage: CostLimitUsage,
+  candidate: LeaseRecord,
+  limits: CostLimits,
+): string {
+  switch (activeLeaseLimitBlocker(usage, candidate.owner, limits)) {
+    case "fleet":
+      return `fleet active lease limit exceeded: ${usage.activeLeases + 1}/${limits.maxActiveLeases}`;
+    case "owner":
+      return `active lease limit for owner exceeded: ${usage.ownerActiveLeases + 1}/${activeLeaseLimitForOwner(limits, candidate.owner)}`;
+    case "org":
+      return `active lease limit for org exceeded: ${usage.orgActiveLeases + 1}/${limits.maxActiveLeasesPerOrg}`;
   }
 
   if (overBudget(usage.reservedUSD + candidate.maxEstimatedUSD, limits.maxMonthlyUSD)) {
@@ -208,42 +228,53 @@ export function enforceCostLimitUsage(
   return "";
 }
 
-export function usageSummary(leases: LeaseRecord[], filter: UsageFilter, now: Date): UsageSummary {
-  const selected = leases.filter(
-    (lease) => !isRegisteredLease(lease) && leaseMatchesUsageFilter(lease, filter),
-  );
+export function usageSummary(
+  leases: Iterable<LeaseRecord>,
+  filter: UsageFilter,
+  now: Date,
+): UsageSummary {
+  const accumulator = createUsageSummary(filter, now);
+  for (const lease of leases) accumulator.add(lease);
+  return accumulator.finish();
+}
+
+export function createUsageSummary(filter: UsageFilter, now: Date) {
   const total = newAccumulator();
   const byOwner = new Map<string, UsageAccumulator>();
   const byOrg = new Map<string, UsageAccumulator>();
   const byProvider = new Map<string, UsageAccumulator>();
   const byServerType = new Map<string, UsageAccumulator>();
-  for (const lease of selected) {
+  const add = (lease: LeaseRecord) => {
+    if (isRegisteredLease(lease) || !leaseMatchesUsageFilter(lease, filter)) return;
     const item = leaseUsage(lease, now);
     addUsage(total, item);
     addUsage(mapAccumulator(byOwner, lease.owner || "unknown"), item);
     addUsage(mapAccumulator(byOrg, lease.org || "unknown"), item);
     addUsage(mapAccumulator(byProvider, lease.provider), item);
     addUsage(mapAccumulator(byServerType, lease.serverType || "unknown"), item);
-  }
-  const summary: UsageSummary = {
-    month: filter.month,
-    scope: filter.scope,
-    ...finalize(total),
-    byOwner: finalizeGroups(byOwner),
-    byOrg: finalizeGroups(byOrg).map((group) => ({
-      ...group,
-      key: orgLabelForDisplay(group.key),
-    })),
-    byProvider: finalizeGroups(byProvider),
-    byServerType: finalizeGroups(byServerType),
   };
-  if (filter.owner) {
-    summary.owner = filter.owner;
-  }
-  if (filter.org) {
-    summary.org = orgLabelForDisplay(filter.org);
-  }
-  return summary;
+  const finish = (): UsageSummary => {
+    const summary: UsageSummary = {
+      month: filter.month,
+      scope: filter.scope,
+      ...finalize(total),
+      byOwner: finalizeGroups(byOwner),
+      byOrg: finalizeGroups(byOrg).map((group) => ({
+        ...group,
+        key: orgLabelForDisplay(group.key),
+      })),
+      byProvider: finalizeGroups(byProvider),
+      byServerType: finalizeGroups(byServerType),
+    };
+    if (filter.owner) {
+      summary.owner = filter.owner;
+    }
+    if (filter.org) {
+      summary.org = orgLabelForDisplay(filter.org);
+    }
+    return summary;
+  };
+  return { add, finish };
 }
 
 function hourlyRateUSD(

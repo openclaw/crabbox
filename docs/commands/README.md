@@ -63,6 +63,7 @@ same order as the CLI help.
 - [inspect](inspect.md)
 - [stop](stop.md)
 - [pause](pause.md)
+- [hold](hold.md)
 - [resume](resume.md)
 - [cleanup](cleanup.md)
 - [pool](pool.md)

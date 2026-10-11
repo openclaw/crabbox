@@ -237,7 +237,27 @@ func providerMatrixEntryFor(provider Provider) providerMatrixEntry {
 	if classProvider, ok := provider.(ProviderClassSpecProvider); ok {
 		entry.Classes = append([]ClassSpec(nil), classProvider.ClassSpecs()...)
 	}
+	if providerSupportsFixedLeaseID(provider) && !FeatureSet(entry.Features).Has(FeatureFixedLeaseID) {
+		entry.Features = append(entry.Features, FeatureFixedLeaseID)
+	}
 	return entry
+}
+
+func providerSupportsFixedLeaseID(provider Provider) bool {
+	spec := provider.Spec()
+	if spec.Kind != ProviderKindSSHLease && spec.Kind != ProviderKindDelegatedRun {
+		return false
+	}
+	// Brokered SSH leases use the wrapper's capability, not the direct adapter's.
+	if spec.Kind == ProviderKindSSHLease && spec.Coordinator == CoordinatorSupported {
+		return (&coordinatorLeaseBackend{}).SupportsRequestedLeaseID()
+	}
+	source, ok := provider.(ProviderBackendCapabilitySource)
+	if !ok {
+		return false
+	}
+	capable, ok := source.BackendCapabilities().(IdempotentLeaseIDBackend)
+	return ok && capable.SupportsRequestedLeaseID()
 }
 
 func registerProviderMatrixFilterFlags(fs *flag.FlagSet) *providerMatrixFilterFlagValues {

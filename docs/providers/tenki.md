@@ -16,7 +16,8 @@ If the Tenki CLI reports a `known_hosts_file`, that file is authoritative. When
 the CLI omits it, Crabbox uses the same workspace key and API endpoint as the CLI
 to retrieve the CA and discover the session's gateway identity. It writes a
 separate authority file alongside the native session certificate, without
-changing Tenki's private keys or certificates. This path requires a workspace
+changing Tenki's private keys or certificates. Authority discovery and client
+certificate refresh require a workspace
 API key from `tenki onboard` or `TENKI_API_KEY`.
 
 Gateway certificates signed by the trusted CA can rotate without enrolling
@@ -227,12 +228,34 @@ The cert-backed gateway selects the sandbox from the signed SSH certificate.
 Changing the proxy's session URL alone does not grant access to another sandbox:
 a certificate for session A still selects A. Crabbox obtains the certificate and
 proxy command together for the requested session.
+It checks the certificate's `tenki-session-id@tenki.cloud` extension against
+the session UUID. The SSH parser already decodes the extension's string value;
+no additional SSH decoding is needed. Refreshed certificates must also match
+the native certificate's public key and pass signature and validity checks.
 
 An issued SSH certificate is an access credential until it expires. Expired
 certificates are rejected on new connections, but Crabbox does not guarantee
 that revoking an API key immediately invalidates a cached SSH certificate or
 closes an existing SSH connection. Do not treat an API-key authentication error
 as proof that earlier SSH access has ended.
+
+Native CLI certificates have been observed with signed validity windows of
+10 minutes 30 seconds, including clock tolerance. API refresh can return a
+different lifetime; a live refresh returned 12 hours 30 seconds. These are
+server-controlled certificate lifetimes, not a maximum command duration.
+Crabbox checks the signed expiry before each new SSH transport, including
+workspace-owner renewal, collection, cleanup, and fixed-lease retries. Within
+30 seconds of expiry it requests a new certificate for the same session and
+native public key. Refresh is bounded to 30 seconds, serialized across local
+processes, and cached per session beside the native certificate as
+`<certificate_file>.crabbox.pub`. Atomic replacement leaves established SSH
+connections and the Tenki-managed files untouched. The workspace API key must
+remain available for refresh even when the CLI supplies its own host trust file.
+
+If an expired credential cannot be refreshed, the error names Tenki SSH
+credential expiry and the observed signed validity window. Workspace ownership
+still fails closed when renewed access cannot be established. Crabbox does not
+extend the gateway's certificate policy or restart the running command.
 
 ## Capabilities
 

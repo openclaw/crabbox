@@ -939,17 +939,23 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 
 // CreateFixedServer submits one candidate. Its adapter persists the attempt
 // first and owns reconciliation; ambiguous failures must not trigger rollback.
-func (c *AzureClient) CreateFixedServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, labels map[string]string) (Server, error) {
+// AzureFixedCompanions is the pre-VM network custody recorded in the fixed
+// claim before the allocating VM request is sent.
+type AzureFixedCompanions struct {
+	NICGUID, PublicIPGUID string
+}
+
+func (c *AzureClient) CreateFixedServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, labels map[string]string, recordCompanions func(AzureFixedCompanions) error) (Server, error) {
 	if _, err := c.validatedAzureOSDiskMode(ctx, cfg); err != nil {
 		return Server{}, err
 	}
 	if err := c.EnsureSharedInfra(ctx); err != nil {
 		return Server{}, err
 	}
-	return c.createServerStepsWithLabels(ctx, cfg, publicKey, leaseID, slug, LeaseProviderName(leaseID, slug), false, labels)
+	return c.createServerStepsWithLabels(ctx, cfg, publicKey, leaseID, slug, LeaseProviderName(leaseID, slug), false, labels, recordCompanions)
 }
 
-func (c *AzureClient) createServerStepsWithLabels(ctx context.Context, cfg Config, publicKey, leaseID, slug, name string, keep bool, labels map[string]string) (Server, error) {
+func (c *AzureClient) createServerStepsWithLabels(ctx context.Context, cfg Config, publicKey, leaseID, slug, name string, keep bool, labels map[string]string, recordCompanions ...func(AzureFixedCompanions) error) (Server, error) {
 	pipName := name + "-pip"
 	nicName := name + "-nic"
 	diskName := name + "-osdisk"
@@ -998,6 +1004,14 @@ func (c *AzureClient) createServerStepsWithLabels(ctx context.Context, cfg Confi
 	}
 	if err != nil {
 		return Server{}, err
+	}
+	if len(recordCompanions) != 0 && recordCompanions[0] != nil {
+		if network.nicGUID == "" || network.publicIPGUID == "" {
+			return Server{}, errors.New("Azure fixed network lacks immutable companion identities")
+		}
+		if err := recordCompanions[0](AzureFixedCompanions{NICGUID: network.nicGUID, PublicIPGUID: network.publicIPGUID}); err != nil {
+			return Server{}, fmt.Errorf("record Azure fixed companion custody: %w", err)
+		}
 	}
 
 	var osProfile *armcompute.OSProfile
@@ -1077,6 +1091,12 @@ func (c *AzureClient) createServerStepsWithLabels(ctx context.Context, cfg Confi
 	}
 	vmResp, err := vmPoller.PollUntilDone(ctx, nil)
 	if err != nil {
+		// A failed polling HTTP request can carry an Azure error code
+		// without ending the allocation LRO. Only its terminal result is
+		// a definite VM rejection.
+		if labels["fixed_attempt"] != "" {
+			err = &AzureVMCreateError{Terminal: vmPoller.Done(), Err: err}
+		}
 		return Server{}, fmt.Errorf("vm: %w", err)
 	}
 	createdVM := vmResp.VirtualMachine
@@ -1224,6 +1244,8 @@ type azureSnapshotPrerequisiteResult struct {
 type azureLeaseNetwork struct {
 	id               string
 	nicCreateRequest armnetwork.Interface
+	nicGUID          string
+	publicIPGUID     string
 }
 
 func runAzureSnapshotPrerequisites(
@@ -1315,7 +1337,15 @@ func (c *AzureClient) createLeaseNetwork(ctx context.Context, pipName, nicName, 
 	if nicResp.ID == nil || *nicResp.ID == "" {
 		return azureLeaseNetwork{}, errors.New("nic has no resource id")
 	}
-	return azureLeaseNetwork{id: *nicResp.ID, nicCreateRequest: nicCreateRequest}, nil
+	var pipGUID, nicGUID string
+	if pipResp.Properties != nil {
+		pipGUID = stringValue(pipResp.Properties.ResourceGUID)
+	}
+	if nicResp.Properties != nil {
+		nicGUID = stringValue(nicResp.Properties.ResourceGUID)
+	}
+	return azureLeaseNetwork{id: *nicResp.ID, nicCreateRequest: nicCreateRequest,
+		nicGUID: nicGUID, publicIPGUID: pipGUID}, nil
 }
 
 func (c *AzureClient) createManagedDiskFromSnapshot(ctx context.Context, diskName, snapshotID, sku string, tags map[string]*string) (string, error) {
@@ -1704,6 +1734,14 @@ func (c *AzureClient) PrepareCleanupServer(ctx context.Context, expected Server,
 	})
 }
 
+// PrepareCleanupRecoveryServer resumes deletion already admitted by a durable
+// claim. Unlike initial cleanup, it may observe that the VM was deleted earlier.
+func (c *AzureClient) PrepareCleanupRecoveryServer(ctx context.Context, expected Server, now time.Time) (Server, error) {
+	return c.prepareAzureDeleteServer(ctx, expected, true, func(expected, live Server) error {
+		return validateAzureCleanupVM(expected, live, now)
+	})
+}
+
 func (c *AzureClient) prepareAzureDeleteServer(ctx context.Context, expected Server, recoverAbsent bool, validateVM func(Server, Server) error) (Server, error) {
 	name := strings.TrimSpace(expected.CloudID)
 	if name == "" {
@@ -1712,7 +1750,10 @@ func (c *AzureClient) prepareAzureDeleteServer(ctx context.Context, expected Ser
 	vmResponse, err := c.vmc.Get(ctx, c.ResourceGroup, name, nil)
 	if err != nil {
 		if isAzureNotFoundError(err) {
-			if recoverAbsent && expected.Labels[AzureCleanupBindingLabel] == "" {
+			if !recoverAbsent {
+				return Server{}, fmt.Errorf("initial Azure cleanup requires a live VM: %w", err)
+			}
+			if expected.Labels[AzureCleanupBindingLabel] == "" {
 				if err := c.verifyAzureOrphanResourcesAbsent(ctx, expected); err != nil {
 					return Server{}, err
 				}
@@ -1761,7 +1802,10 @@ func (c *AzureClient) DeleteOwnedServer(ctx context.Context, expected Server) er
 	if err != nil {
 		return err
 	}
-	return c.deleteAzureValidatedResourcesWithRetry(ctx, expected, resources, ValidateAzureOwnedVM)
+	if err := c.deleteAzureValidatedResourcesWithRetry(ctx, expected, resources, ValidateAzureOwnedVM); err != nil {
+		return err
+	}
+	return c.verifyAzureResourceNamesAbsent(ctx, expected)
 }
 
 type azureCleanupSkipError struct{ err error }
@@ -1788,7 +1832,10 @@ func (c *AzureClient) DeleteCleanupServer(ctx context.Context, expected Server, 
 	if err != nil {
 		return err
 	}
-	return c.deleteAzureCleanupResourcesWithRetry(ctx, expected, resources, now)
+	if err := c.deleteAzureCleanupResourcesWithRetry(ctx, expected, resources, now); err != nil {
+		return err
+	}
+	return c.verifyAzureResourceNamesAbsent(ctx, expected)
 }
 
 func (c *AzureClient) CreateOSDiskSnapshot(ctx context.Context, vmName, snapshotName, sku string) (image NativeCheckpointImage, err error) {
@@ -2046,6 +2093,12 @@ func validateAzureCleanupResourceTags(kind, name string, tags map[string]*string
 	}
 	if slug := strings.TrimSpace(labels["slug"]); slug == "" || slug != strings.TrimSpace(expected["slug"]) {
 		return fmt.Errorf("Azure cleanup %s %s slug %q does not match VM slug %q", kind, name, slug, expected["slug"])
+	}
+	// An immutable companion may still have been assigned to another claim.
+	for _, key := range []string{"provider_key", "fixed_attempt", "fixed_intent_sha256"} {
+		if labels[key] != expected[key] {
+			return fmt.Errorf("Azure cleanup %s %s %s does not match the original claim", kind, name, key)
+		}
 	}
 	return nil
 }
@@ -2500,6 +2553,10 @@ func azureLabelsToTags(labels map[string]string) map[string]*string {
 func azureTagsFromLabels(labels map[string]string) map[string]string {
 	out := make(map[string]string, len(labels))
 	for k, v := range labels {
+		// Cleanup custody is local authority, never public provider metadata.
+		if strings.HasPrefix(k, "_crabbox_azure_cleanup_") {
+			continue
+		}
 		out[azureLabelToTagKey(k)] = v
 	}
 	return out

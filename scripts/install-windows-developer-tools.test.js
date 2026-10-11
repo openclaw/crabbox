@@ -1,8 +1,285 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
 
 const script = await readFile("scripts/install-windows-developer-tools.ps1", "utf8");
+// PowerShell 7's module path prevents Windows PowerShell 5.1 from loading its own cmdlets.
+const powerShellEnv = Object.fromEntries(Object.entries(process.env).filter(
+  ([name]) => process.platform !== "win32" || name.toLowerCase() !== "psmodulepath",
+));
+
+const truffleHogFunctions = script.slice(script.indexOf("function Test-TruffleHogBinary"), script.indexOf("function Install-StaticDockerEngine"));
+const psQuote = (value) => `'${value.replaceAll("'", "''")}'`;
+
+async function pullFixture(t, body) {
+  const dir = await mkdtemp(join(tmpdir(), "crabbox-pull-test-"));
+  try {
+    const fixture = join(dir, "fixture.ps1");
+    await writeFile(fixture, `
+$ErrorActionPreference = 'Stop'
+${script.slice(script.indexOf("function Write-Log"), script.indexOf('\nSet-PrepStep "installing Chocolatey"'))}
+$InstallDocker = '1'
+$DockerImages = 'mcr.microsoft.com/windows/servercore:ltsc2025'
+$RebootMarker = ${psQuote(join(dir, "reboot"))}
+$PrepStepFile = ${psQuote(join(dir, "image-prep.step"))}
+$script:pulls = 0
+$script:inspects = 0
+$script:delays = @()
+function Start-Sleep { param($Seconds) $script:delays += $Seconds }
+function Get-WindowsFeature { @{ Installed = $true } }
+function Install-StaticDockerEngine { }
+function Set-Service { }
+function Start-Service { }
+${body}
+`);
+    const result = spawnSync(process.platform === "win32" ? "powershell.exe" : "pwsh", [
+      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", fixture,
+    ], { encoding: "utf8", timeout: 30000, env: powerShellEnv });
+    if (result.error?.code === "ENOENT") { t.skip("PowerShell is not installed"); return; }
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    return result;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+test("Windows image pull retries native failures and verifies the image after transient recovery", async (t) => {
+  await pullFixture(t, `
+function docker {
+  $global:LASTEXITCODE = 0
+  if ($args[0] -eq 'pull') {
+    $script:pulls++
+    if ($script:pulls -lt 3) { $global:LASTEXITCODE = 17 }
+  } elseif ($args[0] -eq 'image' -and $args[1] -eq 'inspect') {
+    $script:inspects++
+    if ($args[2] -ne $DockerImages) { throw 'wrong image inspected' }
+  }
+}
+Install-DockerEngine
+if ($script:pulls -ne 3 -or $script:inspects -ne 1) { throw "pulls=$script:pulls inspects=$script:inspects" }
+if (($script:delays -join ',') -ne '30,60') { throw 'unexpected retry backoff' }
+`);
+});
+
+for (const command of ["Chocolatey", "pnpm"]) {
+  test(`Windows ${command} downloads retry nonzero native exits`, async (t) => {
+    await pullFixture(t, `
+$script:attempts = 0
+$PnpmVersion = '11.1.0'
+function choco {
+  $script:attempts++
+  $global:LASTEXITCODE = 0
+  if ($script:attempts -lt 3) { $global:LASTEXITCODE = 1 }
+}
+function corepack {
+  $global:LASTEXITCODE = 0
+  if ($args[0] -eq 'prepare') {
+    $script:attempts++
+    if ($script:attempts -lt 3) { $global:LASTEXITCODE = 1 }
+  }
+}
+${command === "Chocolatey" ? "Install-ChocoPackage @('git')" : "Enable-CorepackPnpm"}
+if ($script:attempts -ne 3) { throw 'failed native download did not retry' }
+`);
+  });
+}
+
+for (const failure of ["pull", "inspect"]) {
+  test(`Windows image ${failure} persistent failure names the step and image and stops prep`, async (t) => {
+    const result = await pullFixture(t, `
+function docker {
+  $global:LASTEXITCODE = 0
+  if ($args[0] -eq 'pull') { $script:pulls++; if ('${failure}' -eq 'pull') { $global:LASTEXITCODE = 17 } }
+  if ($args[0] -eq 'image') { $script:inspects++; $global:LASTEXITCODE = 18 }
+}
+
+$failure = $null
+try { Install-DockerEngine } catch { $failure = $_.Exception.Message }
+if (-not $failure) { throw 'prep accepted a missing image' }
+if ($failure -notmatch '${failure}.*mcr.microsoft.com/windows/servercore:ltsc2025.*exit code (17|18)') { throw "missing step/image/exit: $failure" }
+if ($script:pulls -ne 4 -or ($script:delays -join ',') -ne '30,60,120') { throw 'retries were not bounded' }
+if ((Get-Content $PrepStepFile) -notmatch '${failure}.*mcr.microsoft.com/windows/servercore:ltsc2025') { throw 'missing failing step marker' }
+Write-Output $failure
+`);
+    if (result) assert.match(result.stdout, /failed after 4 attempts/);
+  });
+}
+
+test("Windows prep saves uncaught exception details beside its current step", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "crabbox-prep-error-test-"));
+  try {
+    const fixture = join(dir, "prep.ps1");
+    await writeFile(fixture, script
+      .replace('"C:\\ProgramData\\crabbox\\image-prep.step"', psQuote(join(dir, "image-prep.step")))
+      .replace('"C:\\ProgramData\\crabbox\\image-prep.error"', psQuote(join(dir, "image-prep.error"))));
+    const result = spawnSync(process.platform === "win32" ? "powershell.exe" : "pwsh", [
+      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", fixture,
+    ], { encoding: "utf8", timeout: 30000, env: { ...powerShellEnv, CRABBOX_WINDOWS_NODE_SHA256: "invalid" } });
+    if (result.error?.code === "ENOENT") return t.skip("PowerShell is not installed");
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(await readFile(join(dir, "image-prep.step"), "utf8"), /validating prep configuration/);
+    const details = await readFile(join(dir, "image-prep.error"), "utf8");
+    assert.match(details, /CRABBOX_WINDOWS_NODE_SHA256 must be a 64-character hex digest/);
+    assert.match(details, /prep.ps1.*line/i);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+async function truffleHogFixture(t, body) {
+  const dir = await mkdtemp(join(tmpdir(), "crabbox-trufflehog-test-"));
+  try {
+    const binary = join(dir, "fixture.exe");
+    const compile = process.platform === "win32" ? `
+Add-Type -OutputAssembly $fixture -OutputType ConsoleApplication -TypeDefinition @'
+using System;
+public class Fixture {
+  public static int Main(string[] args) {
+    if (args.Length != 2 || args[0] != "--no-update" || args[1] != "--version") return 89;
+    Console.Out.WriteLine(Environment.GetEnvironmentVariable("CRABBOX_TEST_STDOUT"));
+    Console.Error.WriteLine(Environment.GetEnvironmentVariable("CRABBOX_TEST_STDERR"));
+    return int.Parse(Environment.GetEnvironmentVariable("CRABBOX_TEST_EXIT"));
+  }
+}
+'@
+` : "";
+    if (process.platform !== "win32") {
+      await writeFile(binary, '#!/bin/sh\n[ "$1" = "--no-update" ] && [ "$2" = "--version" ] || exit 89\nprintf "%s\\n" "$CRABBOX_TEST_STDOUT"\nprintf "%s\\n" "$CRABBOX_TEST_STDERR" >&2\nexit "$CRABBOX_TEST_EXIT"\n', { mode: 0o755 });
+    }
+    const fixtureScript = join(dir, "fixture.ps1");
+    await writeFile(fixtureScript, `
+$ErrorActionPreference = 'Stop'
+$env:TEMP = ${psQuote(dir)}
+$fixture = ${psQuote(binary)}
+${compile}
+$TruffleHogVersion = '3.95.9'
+$TruffleHogInstallDir = Join-Path $env:TEMP 'install with spaces'
+$env:CRABBOX_TEST_STDOUT = 'trufflehog 3.95.9'
+$env:CRABBOX_TEST_STDERR = ''
+$env:CRABBOX_TEST_EXIT = '0'
+function Write-Log { param([string]$Message) Write-Host "windows-tools: $Message" }
+${truffleHogFunctions}
+${body}
+`);
+    const result = spawnSync(process.platform === "win32" ? "powershell.exe" : "pwsh", [
+      "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", fixtureScript,
+    ], { encoding: "utf8", timeout: 30000, env: powerShellEnv });
+    if (result.error?.code === "ENOENT") { t.skip("PowerShell is not installed"); return; }
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    return result;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+const truffleHogInstallFixture = `
+function Resolve-TruffleHogAsset { @{ Name = 'amd64'; SHA256 = (Get-FileHash $fixture).Hash } }
+function Retry { param([scriptblock]$ScriptBlock) & $ScriptBlock }
+function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing) Copy-Item -LiteralPath $fixture -Destination $OutFile }
+${script.slice(script.indexOf("function Assert-FileSHA256"), script.indexOf("function Install-VerifiedChocolateyPackage"))}
+function tar.exe { param($xzf, $C, $entry) Copy-Item -LiteralPath $xzf -Destination (Join-Path $C $entry); $global:LASTEXITCODE = 0 }
+function Add-MachinePath { param($Path) $script:addedPath = $Path }
+`;
+
+test("TruffleHog installs a runnable candidate before atomic replacement and reuses the installed binary", async (t) => {
+  const result = await truffleHogFixture(t, `${truffleHogInstallFixture}
+Install-TruffleHog
+$target = Join-Path $TruffleHogInstallDir 'trufflehog.exe'
+if (-not (Test-TruffleHogBinary $target)) { throw 'installed binary did not run' }
+if ((Get-ChildItem $TruffleHogInstallDir).Count -ne 1) { throw 'candidate was not cleaned up' }
+if ($script:addedPath -ne $TruffleHogInstallDir) { throw 'installation was not added to PATH' }
+function Invoke-WebRequest { throw 'unexpected second download' }
+Install-TruffleHog
+Write-Output 'install-ok'
+`);
+  if (result) assert.match(result.stdout, /install-ok/);
+});
+
+test("TruffleHog rejects a wrong version without replacing the existing target", async (t) => {
+  await truffleHogFixture(t, `${truffleHogInstallFixture}
+New-Item -ItemType Directory -Path $TruffleHogInstallDir | Out-Null
+$target = Join-Path $TruffleHogInstallDir 'trufflehog.exe'
+Copy-Item -LiteralPath $fixture -Destination $target
+Add-Content -LiteralPath $target -Value '# existing target'
+$before = (Get-FileHash $target).Hash
+$env:CRABBOX_TEST_STDOUT = 'trufflehog 3.95.90'
+$rejected = $false
+try { Install-TruffleHog } catch { $rejected = $_.Exception.Message -match 'did not report version' }
+if (-not $rejected) { throw 'wrong version was accepted' }
+if ((Get-FileHash $target).Hash -ne $before) { throw 'existing target was replaced' }
+if ((Get-ChildItem $TruffleHogInstallDir).Count -ne 1) { throw 'failed candidate was not cleaned up' }
+`);
+});
+
+test("TruffleHog failures report the native exit code and both output streams without polluting the boolean result", async (t) => {
+  const result = await truffleHogFixture(t, `
+$env:CRABBOX_TEST_STDERR = 'fixture loader diagnostic'
+$env:CRABBOX_TEST_EXIT = '17'
+$valid = @(Test-TruffleHogBinary $fixture)
+if ($valid.Count -ne 1 -or $valid[0] -isnot [bool] -or $valid[0]) { throw 'invalid boolean result' }
+`);
+  if (result) {
+    assert.match(result.stdout, /exit code[=: ]+17/i);
+    assert.match(result.stdout, /trufflehog 3\.95\.9/);
+    assert.match(result.stdout, /fixture loader diagnostic/);
+  }
+});
+
+test("TruffleHog accepts stderr version output and diagnoses launch failures", async (t) => {
+  const result = await truffleHogFixture(t, `
+$env:CRABBOX_TEST_STDOUT = ''
+$env:CRABBOX_TEST_STDERR = 'trufflehog 3.95.9'
+if (-not (Test-TruffleHogBinary $fixture)) { throw 'stderr version was rejected' }
+$invalid = Join-Path $env:TEMP 'invalid.exe'
+Set-Content -LiteralPath $invalid -Value 'not an executable'
+if (Test-TruffleHogBinary $invalid) { throw 'invalid executable was accepted' }
+`);
+  if (result) assert.match(result.stdout, /exit code[=: ]+not started/i);
+});
+
+for (const [build, expected, succeeds] of [[20348, 20348, true], [26100, 26100, true], [20348, 26100, false]]) {
+  test(`Windows smoke checks guest build ${build} against requested ${expected}`, async (t) => {
+    const text = await readFile("scripts/devtools-image-smoke-windows.ps1", "utf8");
+    const prelude = text.split("Get-ComputerInfo")[0];
+    const result = spawnSync(process.platform === "win32" ? "powershell.exe" : "pwsh", [
+      "-NoProfile", "-NonInteractive", "-Command",
+      `$ExpectedWindowsBuild = '${expected}'; function Get-CimInstance { @{ BuildNumber = '${build}' } }; ${prelude}; Write-Output 'guest-version-ok'`,
+    ], { encoding: "utf8", timeout: 30000, env: powerShellEnv });
+    if (result.error?.code === "ENOENT") return t.skip("PowerShell is not installed");
+    assert.equal(result.status === 0, succeeds, result.stderr);
+    if (succeeds) assert.match(result.stdout, /guest-version-ok/);
+    else {
+      assert.match(result.stderr, /Windows image OS mismatch/);
+      assert.doesNotMatch(result.stdout, /guest-version-ok/);
+    }
+  });
+}
+
+for (const file of ["install-windows-developer-tools.ps1", "devtools-image-smoke-windows.ps1"]) {
+  for (const [build, tag] of [[20348, "ltsc2022"], [26100, "ltsc2025"], [17763, undefined]]) {
+    test(`${file} chooses a host-compatible Server Core image for build ${build}`, async (t) => {
+      const text = await readFile(`scripts/${file}`, "utf8");
+      const selection = text.match(/\$WindowsBuild = [\s\S]*?\n\}/)?.[0];
+      assert.ok(selection, "missing host build selection");
+      const shell = process.platform === "win32" ? "powershell.exe" : "pwsh";
+      const result = spawnSync(shell, ["-NoProfile", "-NonInteractive", "-Command",
+        `$ErrorActionPreference = 'Stop'; function Get-CimInstance { @{ BuildNumber = '${build}' } }; ${selection}; Write-Output $ServerCoreTag`],
+        { encoding: "utf8", timeout: 30000, env: powerShellEnv });
+      if (result.error?.code === "ENOENT") return t.skip("PowerShell is not installed");
+      if (tag) {
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(result.stdout.trim(), tag);
+      } else {
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, /Unsupported Windows Server build/);
+      }
+      assert.match(text, /mcr\.microsoft\.com\/windows\/servercore:\$ServerCoreTag/);
+    });
+  }
+}
 
 test("Windows developer tools prep verifies a versioned Chocolatey package before installation", () => {
   assert.match(script, /CRABBOX_WINDOWS_CHOCO_PACKAGE_URL/);
@@ -79,8 +356,6 @@ test("Windows developer tools prep verifies and atomically installs pinned Truff
   assert.match(script, /25cc731f678922c870edba49f19c324aa6c8e7190b551c4fbe49d0c4e1c5446a/);
   assert.match(script, /df982afbf72d1c1a125e4871b624b7f959b2f62caa40e4d14bf861fb93c237bb/);
   assert.match(script, /Resolve-TruffleHogAsset/);
-  assert.match(script, /catch \{\s+return \$false\s+\}/);
-  assert.match(script, /& \$Path --no-update --version/);
 
   const start = script.indexOf("function Install-TruffleHog");
   const end = script.indexOf("function Install-StaticDockerEngine");

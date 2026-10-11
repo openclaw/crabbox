@@ -1220,8 +1220,12 @@ func TestRunTimingJSONIncludesSlug(t *testing.T) {
 	if report["leaseId"] != leaseID {
 		t.Fatalf("leaseId=%v want %s in timing JSON:\n%s", report["leaseId"], leaseID, stderr.String())
 	}
-	if report["slug"] != core.NewLeaseSlug(leaseID) {
-		t.Fatalf("slug=%v want %s in timing JSON:\n%s", report["slug"], core.NewLeaseSlug(leaseID), stderr.String())
+	wantSlug, err := core.AllocateClaimLeaseSlug(leaseID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report["slug"] != wantSlug {
+		t.Fatalf("slug=%v want %s in timing JSON:\n%s", report["slug"], wantSlug, stderr.String())
 	}
 }
 

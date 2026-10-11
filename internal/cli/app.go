@@ -167,6 +167,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.stop(ctx, helpArgs), true
 	case "pause":
 		return a.pause(ctx, helpArgs), true
+	case "hold":
+		return a.hold(ctx, helpArgs), true
 	case "resume":
 		return a.resume(ctx, helpArgs), true
 	case "cleanup":
@@ -238,7 +240,7 @@ Commands:
   unshare     Remove lease sharing
   image       Create provider images and promote brokered AWS runner images
   usage       Show cost and usage estimates by user, org, or fleet
-  capacity    Show self-owner admission count and effective owner limit
+  capacity    Show fleet, org, and owner lease headroom
   marketplace  Preview the Crabbox credits gateway and smart routing quotes
   admin       Lease admin controls for trusted operators
   actions     Hydrate boxes from repo workflows or GitHub runners
@@ -259,6 +261,7 @@ Commands:
   inspect     Print lease/provider details; add --json for scripts
   stop        Release a lease or delete a direct-provider machine
   pause       Pause a lease, freeing remote compute while preserving state
+  hold        Retain an exact failed lease and its resources for salvage
   resume      Resume a previously paused lease
   cleanup     Sweep expired direct-provider machines or local provider state
   pool        Manage ready-pool leases and list machine inventory aliases

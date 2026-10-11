@@ -36,6 +36,9 @@ type blacksmithFuncRunner struct {
 }
 
 func (r *blacksmithFuncRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	if result, ok := testCompletedGitHubRead(req); ok {
+		return result, nil
+	}
 	r.calls = append(r.calls, append([]string(nil), req.Args...))
 	if r.onRequest != nil {
 		r.onRequest(ctx, req)
@@ -65,6 +68,20 @@ func (r *blacksmithFuncRunner) Run(ctx context.Context, req core.LocalCommandReq
 		return result, err
 	}
 	return core.LocalCommandResult{}, nil
+}
+
+// Native lifecycle fixtures assume a settled associated run. Settlement tests
+// use their own unwrapped runner to exercise the GitHub boundary and failures.
+func testCompletedGitHubRead(req core.LocalCommandRequest) (core.LocalCommandResult, bool) {
+	if req.Name != "gh" || len(req.Args) < 6 {
+		return core.LocalCommandResult{}, false
+	}
+	path := strings.TrimPrefix(req.Args[5], "repos/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 5 {
+		return core.LocalCommandResult{}, false
+	}
+	return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"id":%s,"html_url":"https://github.com/%s","status":"completed","conclusion":"cancelled"}`, parts[4], path)}, true
 }
 
 func testBlacksmithFlag(args []string, flag string) string {
@@ -1400,6 +1417,7 @@ func TestBlacksmithBackendUsesInjectedCommandRunnerForListAndStatus(t *testing.T
 		}, nil
 	}}
 	cfg := core.BaseConfig()
+	cfg.Blacksmith.Org = "example-org"
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	cfg.Blacksmith.Job = "test"
 	cfg.Blacksmith.Ref = "main"
@@ -1424,11 +1442,7 @@ func TestBlacksmithBackendUsesInjectedCommandRunnerForListAndStatus(t *testing.T
 }
 
 func TestBlacksmithStatusWaitTimeoutMentionsQueuedState(t *testing.T) {
-	runner := &blacksmithFuncRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
-		return core.LocalCommandResult{
-			Stdout: "tbx_123 queued openclaw .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z\n",
-		}, nil
-	}}
+	runner := &blacksmithFuncRunner{states: map[string]string{"tbx_123": "queued"}}
 	backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
 	_, err := backend.Status(context.Background(), core.StatusRequest{ID: "tbx_123", Wait: true, WaitTimeout: -time.Second})
 	if err == nil {
@@ -1448,13 +1462,10 @@ func TestBlacksmithStatusWaitReturnsOnContextCancellation(t *testing.T) {
 		t.Cleanup(func() { blacksmithStatusPollDelay = originalDelay })
 
 		ctx, cancel := context.WithCancel(context.Background())
-		runner := &blacksmithFuncRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
-			cancel()
-			return core.LocalCommandResult{
-				Stdout: "tbx_123 queued openclaw .github/workflows/testbox.yml test main 2026-05-06T00:00:00Z\n",
-			}, nil
-		}}
-		backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
+		runner := &blacksmithFuncRunner{states: map[string]string{"tbx_123": "queued"}, onRequest: func(context.Context, core.LocalCommandRequest) { cancel() }}
+		cfg := core.BaseConfig()
+		cfg.Blacksmith.Org = "example-org"
+		backend := newTestBlacksmithBackend(cfg, runner)
 		started := time.Now()
 		_, err := backend.Status(ctx, core.StatusRequest{ID: "tbx_123", Wait: true, WaitTimeout: time.Minute})
 		if !errors.Is(err, context.Canceled) {

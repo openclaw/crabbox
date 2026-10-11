@@ -12,8 +12,10 @@ log_dir="${CRABBOX_IMAGE_LOG_DIR:-.crabbox}"
 ttl="${CRABBOX_IMAGE_TTL:-2h}"
 idle_timeout="${CRABBOX_IMAGE_IDLE_TIMEOUT:-30m}"
 wait_timeout="${CRABBOX_IMAGE_WAIT_TIMEOUT:-60m}"
+capacity_wait="${CRABBOX_IMAGE_CAPACITY_WAIT:-45m}"
 prep_wait_timeout="${CRABBOX_IMAGE_PREP_WAIT_TIMEOUT:-90m}"
 reboot_wait_timeout="${CRABBOX_IMAGE_REBOOT_WAIT_TIMEOUT:-25m}"
+reboot_down_timeout="${CRABBOX_IMAGE_REBOOT_DOWN_TIMEOUT:-2m}"
 reboot_settle_seconds="${CRABBOX_IMAGE_REBOOT_SETTLE_SECONDS:-30}"
 reboot_ready_settle_seconds="${CRABBOX_IMAGE_REBOOT_READY_SETTLE_SECONDS:-180}"
 windows_warmup_wait_timeout="${CRABBOX_IMAGE_WINDOWS_WARMUP_WAIT_TIMEOUT:-15m}"
@@ -30,6 +32,10 @@ prep_script="${CRABBOX_IMAGE_PREP_SCRIPT:-}"
 linux_node_major="${CRABBOX_LINUX_NODE_MAJOR:-24}"
 linux_pnpm_version="${CRABBOX_LINUX_PNPM_VERSION:-11.1.0}"
 linux_pnpm_default=""
+stock_source=0
+windows_source_os=""
+windows_source_build=""
+source_root_gb=""
 measured=0
 max_p95_runner_total_ms=""
 measurement_dir=""
@@ -53,6 +59,8 @@ Flags:
   --region REGION       AWS region
   --class CLASS         Crabbox machine class, default standard
   --type TYPE           AWS instance type
+  --stock-source        build from stock Ubuntu or Windows (Windows requires CRABBOX_OS)
+  --root-gb N           source root size, integer 16..400; Linux requires --stock-source
   --name NAME           image name
   --run                 allow paid lease/image work
   --measured            Linux only: nine fresh measurements plus three lifecycle leases
@@ -72,14 +80,16 @@ Flags:
 
 Useful env:
   CRABBOX_BIN
-  CRABBOX_OS            Linux selector for leases, promotion, and receipt rollback
+  CRABBOX_OS            Linux selector for all phases; Windows stock-source selector only
   CRABBOX_IMAGE_RUN
   CRABBOX_IMAGE_PROMOTE
   CRABBOX_IMAGE_KEEP_LEASE
   CRABBOX_IMAGE_LOG_DIR
   CRABBOX_IMAGE_WAIT_TIMEOUT
+  CRABBOX_IMAGE_CAPACITY_WAIT  active-lease admission retry budget per acquisition, default 45m (0 disables)
   CRABBOX_IMAGE_PREP_WAIT_TIMEOUT
   CRABBOX_IMAGE_REBOOT_WAIT_TIMEOUT
+  CRABBOX_IMAGE_REBOOT_DOWN_TIMEOUT
   CRABBOX_IMAGE_REBOOT_SETTLE_SECONDS
   CRABBOX_IMAGE_REBOOT_READY_SETTLE_SECONDS
   CRABBOX_IMAGE_WINDOWS_WARMUP_WAIT_TIMEOUT
@@ -109,6 +119,16 @@ while [[ "$#" -gt 0 ]]; do
     --class)
       [[ "$#" -ge 2 ]] || { printf '%s requires a value\n' "$1" >&2; exit 2; }
       server_class="$2"
+      shift 2
+      ;;
+    --stock-source)
+      stock_source=1
+      shift
+      ;;
+    --root-gb)
+      [[ "$#" -ge 2 ]] || { printf '%s requires a value\n' "$1" >&2; exit 2; }
+      [[ -n "$2" ]] || { printf '%s\n' '--root-gb must be an integer from 16 to 400' >&2; exit 2; }
+      source_root_gb="$2"
       shift 2
       ;;
     --name)
@@ -192,6 +212,37 @@ case "$target" in
     ;;
 esac
 
+[[ "$capacity_wait" =~ ^(0|[1-9][0-9]{0,5})([smh])?$ ]] || {
+  printf 'CRABBOX_IMAGE_CAPACITY_WAIT must be whole seconds, minutes or hours (e.g. 45m, 0 disables)\n' >&2
+  exit 2
+}
+
+if [[ "$target" == windows && "$stock_source" == 1 ]]; then
+  case "${CRABBOX_OS:-}" in
+    windows-server:2022) windows_source_build=20348 ;;
+    windows-server:2025) windows_source_build=26100 ;;
+    *) printf 'Windows stock source requires CRABBOX_OS=windows-server:2022 or windows-server:2025\n' >&2; exit 2 ;;
+  esac
+  windows_source_os="$CRABBOX_OS"
+  # Explicit Windows selectors bypass promotions. Only the source gets one;
+  # candidate and promoted proofs must exercise their normal image paths.
+  unset CRABBOX_OS
+fi
+if [[ -n "$source_root_gb" ]]; then
+  [[ "$source_root_gb" =~ ^[1-9][0-9]{1,2}$ ]] && (( source_root_gb >= 16 && source_root_gb <= 400 )) || {
+    printf '%s\n' '--root-gb must be an integer from 16 to 400' >&2; exit 2;
+  }
+  [[ "$target" != linux || "$stock_source" == 1 ]] || { printf '%s\n' '--root-gb requires --stock-source; a promoted source cannot shrink' >&2; exit 2; }
+fi
+
+# Clear ambient/file overrides for proof leases; the source opts in below.
+export CRABBOX_AWS_STOCK_IMAGE=0 CRABBOX_AWS_ROOT_GB=0
+if [[ -n "$region" ]]; then
+  export CRABBOX_CAPACITY_REGIONS="$region"
+  # A nonempty empty list clears file defaults; an empty env value is ignored.
+  export CRABBOX_CAPACITY_AVAILABILITY_ZONES="${CRABBOX_CAPACITY_AVAILABILITY_ZONES:-,}"
+fi
+
 invocation_id="$(date -u +%Y%m%d-%H%M%S)-$$-${RANDOM}"
 log_id="$(printf '%s' "$invocation_id" | tr -c 'A-Za-z0-9_.-' '_')"
 if [[ -z "$image_name" ]]; then
@@ -241,7 +292,7 @@ if [[ "$measured" == "1" ]]; then
   }
   measurement_policy="$(node "$ROOT/scripts/devtools-image-proof.mjs" preflight \
     "$prep_script" "$region" "$server_type" "$server_class" "$max_p95_runner_total_ms" \
-    "$desktop" "$browser" "$promote" "$keep_lease" "$fast_snapshot_restore" "$ttl" "$idle_timeout")"
+    "$desktop" "$browser" "$promote" "$keep_lease" "$fast_snapshot_restore" "$ttl" "$idle_timeout" "$stock_source" "${source_root_gb:-0}")"
   # Candidate selection is explicit below; baseline and promoted proof use normal selection.
   unset CRABBOX_AWS_AMI
   umask 077
@@ -265,6 +316,9 @@ measurement_lease=""
 measurement_handle=""
 promotion_log=""
 rollback_pending=0
+candidate_checkpoint=""
+candidate_region=""
+promotion_confirmed=0
 warmup_handle_dir="$log_dir/.image-mint-${log_image_name}-leases-${log_id}"
 
 cleanup() {
@@ -277,8 +331,13 @@ cleanup() {
   local proof_status=0
   local receipt_path="-"
   local outcome_candidate=""
-  local lease handle seen_leases="|"
+  local lease handle stop_output stop_code seen_leases="|"
   local -a cleanup_leases=()
+  # A successful promotion can precede a failed receipt tee or a signal.
+  if [[ -n "$promotion_log" && -n "$candidate_checkpoint" ]] &&
+    jq -e --arg image "$ami_id" '.image.id == $image and (.image.revision | type == "string" and length > 0)' "$promotion_log" >/dev/null 2>&1; then
+    promotion_confirmed=1
+  fi
   # A signal can arrive after handle publication but before run returns or writes timing.
   if [[ -z "$measurement_lease" && -n "$measurement_handle" && -f "$measurement_handle" ]]; then
     measurement_lease="$(node "$ROOT/scripts/devtools-image-proof.mjs" handle "$measurement_handle" | jq -er .leaseId)" || {
@@ -311,6 +370,24 @@ cleanup() {
         *"|$lease|"*) continue ;;
       esac
       seen_leases+="$lease|"
+      # Only Windows failure cleanup may defer observation; preserve strict publisher cleanup below.
+      if [[ "$target" == "windows" && "$exit_status" != "0" ]]; then
+        stop_code=0
+        stop_output="$("$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" 2>&1)" || stop_code=$?
+        printf '%s\n' "$stop_output" >&2
+        if [[ "$stop_code" == "0" ]]; then
+          continue
+        elif [[ "$stop_output" == *"coordinator accepted release for $lease, but remote cleanup observation was canceled;"* ||
+                "$stop_output" == *"coordinator accepted release for $lease, but remote cleanup is still pending"* ]]; then
+          [[ "$cleanup_status" == "failed" ]] || cleanup_status="pending"
+          printf 'Windows failure cleanup: release accepted for %s; cleanup remains unconfirmed; preserving original mint failure (exit %s) and lease handles.\n' "$lease" "$exit_status" >&2
+          printf 'Check crabbox status --provider aws --id %s --json, then retry crabbox stop --provider aws --target windows %s to verify cleanup and remove retained local artifacts.\n' "$lease" "$lease" >&2
+        else
+          cleanup_status="failed"
+          finalizer_status=1
+        fi
+        continue
+      fi
       if ! "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease"; then
         cleanup_status="failed"
         finalizer_status=1
@@ -327,6 +404,30 @@ cleanup() {
     else
       rollback_status="failed"
       finalizer_status=1
+    fi
+  fi
+  if [[ "$exit_status" != "0" && -n "$candidate_checkpoint" && "$promotion_confirmed" != "1" ]]; then
+    local delete_status=0
+    local cleanup_receipt="$log_dir/image-mint-${log_image_name}-${log_id}-candidate-cleanup.json"
+    # Only the checkpoint captured by this invocation owns the AMI and snapshots.
+    # The checkpoint API also refuses deletion if an unacknowledged promotion pinned it.
+    run_json_tee "${cleanup_receipt%.json}.log" env \
+      CRABBOX_AWS_REGION="$candidate_region" AWS_REGION="$candidate_region" \
+      "$CRABBOX_BIN" checkpoint delete "$candidate_checkpoint" --admin || delete_status=$?
+    local candidate_cleanup_status="succeeded"
+    if [[ "$delete_status" != "0" ]]; then
+      candidate_cleanup_status="failed"
+      cleanup_status="failed"
+      printf 'FAILED to delete candidate image=%s region=%s checkpoint=%s (exit %s); retry checkpoint delete --admin\n' \
+        "$ami_id" "$candidate_region" "$candidate_checkpoint" "$delete_status" >&2
+    elif [[ "$cleanup_status" != "failed" && "$cleanup_status" != "pending" ]]; then
+      cleanup_status="succeeded"
+    fi
+    if ! jq -n --arg checkpoint "$candidate_checkpoint" --arg image "$ami_id" \
+      --arg region "$candidate_region" --arg status "$candidate_cleanup_status" --argjson code "$delete_status" \
+      '{checkpointId: $checkpoint, imageId: $image, region: $region, status: $status, exitCode: $code}' >"$cleanup_receipt"; then
+      cleanup_status="failed"
+      printf 'FAILED to record candidate image cleanup receipt: %s\n' "$cleanup_receipt" >&2
     fi
   fi
   if [[ "$measured" == "1" && -n "$measurement_dir" && -n "$public_outcome" ]]; then
@@ -445,13 +546,50 @@ wait_windows_ssh_probe() {
   done
 }
 
+windows_maintenance_ssh() {
+  local ssh_command="$1" command="$2" encoded
+  local -a ssh_args
+  # Parse only Crabbox's shell-quoted AWS SSH command, preserving keys and host trust.
+  eval "ssh_args=($ssh_command)" || return
+  encoded="$(node -e 'process.stdout.write(Buffer.from(process.argv[1], "utf16le").toString("base64"))' "$command")" || return
+  # Fresh transports observe reboot transitions without creating a workspace owner.
+  run_cmd "${ssh_args[0]}" -n -T -o ControlMaster=no -o ControlPath=none -o ControlPersist=no \
+    -o ConnectTimeout=10 -o ConnectionAttempts=1 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
+    "${ssh_args[@]:1}" "powershell.exe -NoProfile -NonInteractive -EncodedCommand $encoded"
+}
+
+wait_windows_reboot_ssh_state() {
+  local ssh_command="$1" state="$2" timeout_value="$3" deadline probe_status
+  deadline=$((SECONDS + $(duration_seconds "$timeout_value")))
+  while true; do
+    probe_status=0
+    windows_maintenance_ssh "$ssh_command" 'exit 0' >&2 || probe_status=$?
+    if [[ "$state" == down && "$probe_status" == 255 ]] ||
+      [[ "$state" == ready && "$probe_status" == 0 ]]; then
+      printf 'Windows reboot SSH transition: %s\n' "$state" >&2
+      return 0
+    fi
+    if ((probe_status != 0 && probe_status != 255)); then
+      printf 'Windows reboot SSH probe failed with exit %s\n' "$probe_status" >&2
+      return "$probe_status"
+    fi
+    if ((SECONDS >= deadline)); then
+      printf 'Windows reboot SSH did not become %s within %s\n' "$state" "$timeout_value" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+
 wait_windows_reboot_ready() {
-  local lease="$1"
-  wait_windows_ssh_probe "$lease" "$reboot_wait_timeout"
+  local ssh_command="$1"
+  wait_windows_reboot_ssh_state "$ssh_command" down "$reboot_down_timeout"
+  sleep "$reboot_settle_seconds"
+  wait_windows_reboot_ssh_state "$ssh_command" ready "$reboot_wait_timeout"
   if ((reboot_ready_settle_seconds > 0)); then
     printf 'Windows SSH responded after reboot; settling for %ss before continuing\n' "$reboot_ready_settle_seconds" >&2
     sleep "$reboot_ready_settle_seconds"
-    wait_windows_ssh_probe "$lease" "$reboot_wait_timeout"
+    wait_windows_reboot_ssh_state "$ssh_command" ready "$reboot_wait_timeout"
   fi
 }
 
@@ -483,7 +621,9 @@ $log = Join-Path $dir 'image-prep.log'
 $exitFile = Join-Path $dir 'image-prep.exit'
 $done = Join-Path $dir 'image-prep.done'
 $failed = Join-Path $dir 'image-prep.failed'
-Remove-Item -Force $log,$exitFile,$done,$failed -ErrorAction SilentlyContinue
+$step = Join-Path $dir 'image-prep.step'
+$errorFile = Join-Path $dir 'image-prep.error'
+Remove-Item -Force $log,$exitFile,$done,$failed,$step,$errorFile -ErrorAction SilentlyContinue
 @'
 $dir = 'C:\ProgramData\crabbox'
 $script = Join-Path $dir 'image-prep.ps1'
@@ -491,11 +631,21 @@ $log = Join-Path $dir 'image-prep.log'
 $exitFile = Join-Path $dir 'image-prep.exit'
 $done = Join-Path $dir 'image-prep.done'
 $failed = Join-Path $dir 'image-prep.failed'
+$step = Join-Path $dir 'image-prep.step'
+$errorFile = Join-Path $dir 'image-prep.error'
 $ErrorActionPreference = 'Continue'
-Remove-Item -Force $exitFile,$done,$failed -ErrorAction SilentlyContinue
-& powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script *>&1 | Tee-Object -FilePath $log
-$code = $LASTEXITCODE
-if ($null -eq $code) { $code = 0 }
+$PSNativeCommandUseErrorActionPreference = $false
+Remove-Item -Force $exitFile,$done,$failed,$errorFile -ErrorAction SilentlyContinue
+Set-Content -Path $step -Value 'starting prep PowerShell process'
+$LASTEXITCODE = $null
+try {
+  & powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script *>&1 | Tee-Object -FilePath $log -ErrorAction Stop
+  $code = $LASTEXITCODE
+  if ($null -eq $code) { throw 'prep PowerShell process did not return an exit code' }
+} catch {
+  $code = 1
+  $_ | Out-String | Set-Content -Path $errorFile
+}
 Set-Content -Path $exitFile -Value $code
 if ($code -eq 0) {
   Set-Content -Path $done -Value 'ok'
@@ -521,6 +671,8 @@ $log = Join-Path $dir 'image-prep.log'
 $exitFile = Join-Path $dir 'image-prep.exit'
 $done = Join-Path $dir 'image-prep.done'
 $failed = Join-Path $dir 'image-prep.failed'
+$step = Join-Path $dir 'image-prep.step'
+$errorFile = Join-Path $dir 'image-prep.error'
 if (Test-Path $done) {
   Write-Output 'crabbox-prep-done'
   if (Test-Path $exitFile) { Get-Content $exitFile }
@@ -529,8 +681,17 @@ if (Test-Path $done) {
 }
 if (Test-Path $failed) {
   Write-Output 'crabbox-prep-failed'
-  if (Test-Path $exitFile) { Get-Content $exitFile }
-  if (Test-Path $log) { Get-Content $log -Tail 120 }
+  if (Test-Path $step) { Write-Output ("failed during: {0}" -f (Get-Content $step -Raw).Trim()) }
+  if (Test-Path $exitFile) {
+    $code = (Get-Content $exitFile -Raw).Trim()
+    if ($code -eq '-1' -or $code -eq '4294967295') {
+      Write-Output "exit code: $code (0xFFFFFFFF); the prep PowerShell process returned a failure status, which alone does not identify the failing statement; see the step, exception and log below"
+    } else {
+      Write-Output "exit code: $code (prep PowerShell process)"
+    }
+  }
+  if (Test-Path $errorFile) { Get-Content $errorFile }
+  if (Test-Path $log) { Get-Content $log -Tail 200 }
   exit 0
 }
 $task = Get-ScheduledTask -TaskName 'CrabboxImagePrep' -ErrorAction SilentlyContinue
@@ -624,12 +785,102 @@ assert_selected_image() {
 capture_selection() {
   local lease="$1" out="$2"
   local -a statuses
+  local -a args=(admin leases --limit 100 --json)
+  [[ -z "${CRABBOX_OWNER:-}" ]] || args+=(--owner "$CRABBOX_OWNER")
+  [[ -z "${CRABBOX_ORG:-}" ]] || args+=(--org "$CRABBOX_ORG")
   # Do not log the owner/org filter or persist the complete administrative listing.
-  "$CRABBOX_BIN" admin leases --owner "$CRABBOX_OWNER" --org "$CRABBOX_ORG" --limit 100 --json 2>"$out.error" |
+  "$CRABBOX_BIN" "${args[@]}" 2>"$out.error" |
     node "$ROOT/scripts/devtools-image-proof.mjs" select "$lease" >"$out" 2>>"$out.error" &&
     statuses=("${PIPESTATUS[@]}") || statuses=("${PIPESTATUS[@]}")
   [[ "${statuses[0]}" == "0" ]] || return "${statuses[0]}"
   return "${statuses[1]}"
+}
+
+assert_region() {
+  local log="$1" selection="$2"
+  [[ -n "$region" ]] || return 0
+  local selected_region
+  selected_region="$(sed -nE 's/^image selected id=[^[:space:]]+ source=[^[:space:]]+ kind=aws-ami region=([^[:space:]]+).*/\1/p' "$log")"
+  # Capacity regions are additive on the coordinator, not a client-side allowlist.
+  if [[ "$selected_region" != "$region" ]] ||
+    ! jq -e --arg region "$region" '.provider == "aws" and .region == $region and .image.region == $region' "$selection" >/dev/null 2>&1; then
+    printf 'mint requires image and lease region=%s (selected=%s); quota/capacity in %s; retry later or choose another region\n' \
+      "$region" "${selected_region:-unknown}" "$region" >&2
+    return 1
+  fi
+}
+
+capacity_rejected() {
+  node - "$@" <<'NODE'
+const fs = require("node:fs");
+const [log, handle, store, offset] = process.argv.slice(2);
+if (handle && fs.existsSync(handle)) process.exit(1);
+const text = fs.readFileSync(log, "utf8");
+const hasLease = value => value && typeof value === "object" &&
+  (value.leaseId || Object.values(value).some(hasLease));
+let rejected = false;
+for (const line of text.split("\n")) {
+  try { if (hasLease(JSON.parse(line))) process.exit(1); } catch {}
+  const match = line.match(/coordinator POST \/v1\/leases: http (\d+): (.*)$/);
+  if (!match) continue;
+  try {
+    const body = JSON.parse(match[2]);
+    // These three admission messages precede lease publication and provisioning.
+    // Monthly spending limits share the error code and must fail immediately.
+    if (match[1] !== "429" || body.error !== "cost_limit_exceeded" ||
+        !/^(fleet active lease limit exceeded|active lease limit for (owner|org) exceeded): [0-9]+\/[0-9]+$/.test(body.message)) process.exit(1);
+    rejected = true;
+  } catch { process.exit(1); }
+}
+if (!rejected) process.exit(1);
+if (store && fs.existsSync(store)) {
+  const records = fs.readFileSync(store).subarray(Number(offset)).toString("utf8");
+  for (const line of records.split("\n").filter(Boolean)) {
+    const record = JSON.parse(line);
+    if (hasLease(record) || record.timing?.exitCode === 0) process.exit(1);
+  }
+}
+NODE
+}
+
+run_with_capacity_wait() {
+  local label="$1" log="$2" handle="$3" store="$4"
+  shift 4
+  local deadline="" attempt=1 remaining delay store_size command_status
+  local -a statuses
+  while true; do
+    store_size=0
+    [[ -z "$store" || ! -f "$store" ]] || store_size="$(wc -c <"$store")"
+    run_cmd "$@" 2>&1 | tee "$log" &&
+      statuses=("${PIPESTATUS[@]}") || statuses=("${PIPESTATUS[@]}")
+    command_status="${statuses[0]}"
+    [[ "$command_status" != 0 ]] || return "${statuses[1]}"
+    # Never retry an output failure or any evidence of an allocated lease.
+    [[ "${statuses[1]}" == 0 ]] || return "$command_status"
+    capacity_rejected "$log" "$handle" "$store" "$store_size" || return "$command_status"
+    [[ -n "$deadline" ]] || deadline=$((SECONDS + $(duration_seconds "$capacity_wait")))
+    remaining=$((deadline - SECONDS))
+    if ((remaining <= 0)); then
+      printf 'capacity wait budget exhausted for %s after %s; last rejection log=%s\n' "$label" "$capacity_wait" "$log" >&2
+      return "$command_status"
+    fi
+    # Retain rejected evidence separately; only actual acquisitions are samples.
+    cp "$log" "$log.capacity-$attempt" || return "$command_status"
+    if [[ -n "$store" && -f "$store" ]]; then
+      node -e '
+const fs = require("node:fs");
+const [store, offset, out] = process.argv.slice(1);
+fs.writeFileSync(out, fs.readFileSync(store).subarray(Number(offset)));
+fs.truncateSync(store, Number(offset));
+' "$store" "$store_size" "$log.capacity-$attempt.timing.jsonl" || return "$command_status"
+    fi
+    delay=120
+    ((remaining >= delay)) || delay="$remaining"
+    printf 'active-lease capacity unavailable for %s; retrying in %ss (%ss remaining; attempt %s; log=%s.capacity-%s)\n' \
+      "$label" "$delay" "$remaining" "$attempt" "$log" "$attempt" >&2
+    sleep "$delay" || return "$command_status"
+    attempt=$((attempt + 1))
+  done
 }
 
 warmup() {
@@ -641,13 +892,17 @@ warmup() {
   while IFS= read -r -d '' arg; do args+=("$arg"); done < <(warmup_args)
   local -a env_args=()
   [[ -n "$region" ]] && env_args+=(CRABBOX_AWS_REGION="$region" AWS_REGION="$region")
+  if [[ "$label" == "source" ]]; then
+    env_args+=(CRABBOX_AWS_STOCK_IMAGE="$stock_source" CRABBOX_AWS_ROOT_GB="${source_root_gb:-0}")
+    [[ -z "$windows_source_os" ]] || env_args+=(CRABBOX_OS="$windows_source_os")
+  fi
   [[ "$label" == "candidate" ]] && env_args+=(CRABBOX_AWS_AMI="$2")
   printf 'warming %s lease log=%s\n' "$label" "$log" >&2
   local warmup_status=0
   if [[ "${#env_args[@]}" -gt 0 ]]; then
-    run_cmd env "${env_args[@]}" "$CRABBOX_BIN" "${args[@]}" 2>&1 | tee "$log" >&2 || warmup_status=$?
+    run_with_capacity_wait "$label" "$log" "$(warmup_handle_path "$label")" "" env "${env_args[@]}" "$CRABBOX_BIN" "${args[@]}" >&2 || warmup_status=$?
   else
-    run_cmd "$CRABBOX_BIN" "${args[@]}" 2>&1 | tee "$log" >&2 || warmup_status=$?
+    run_with_capacity_wait "$label" "$log" "$(warmup_handle_path "$label")" "" "$CRABBOX_BIN" "${args[@]}" >&2 || warmup_status=$?
   fi
   local lease
   lease="$(lease_from_log "$log" || true)"
@@ -667,12 +922,25 @@ warmup() {
     printf 'warmup did not return a lease id for %s\n' "$label" >&2
     return 1
   fi
+  local selection_status=0
+  local selection="$log.selection.json"
+  [[ "$measured" != "1" ]] || selection="$measurement_dir/$label.selection.json"
+  if [[ -n "$region" || "$measured" == "1" ]]; then
+    capture_selection "$lease" "$selection" || selection_status=$?
+    assert_region "$log" "$selection" || selection_status=1
+    if [[ "$selection_status" != "0" ]]; then
+      printf 'warmup region evidence failed for %s\n' "$label" >&2
+      [[ ! -s "$selection.error" ]] || cat "$selection.error" >&2
+      # A routed or unverified lease must not survive --keep-lease.
+      if run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease" >&2; then
+        clear_warmup_handle "$label"
+      fi
+      return "$selection_status"
+    fi
+  fi
   if [[ "$measured" == "1" ]]; then
     local phase="$label"
-    local selection_status=0
-    local selection="$measurement_dir/$label.selection.json"
-    [[ "$phase" == "source" ]] && phase=baseline
-    capture_selection "$lease" "$selection" || selection_status=$?
+    [[ "$phase" == "source" && "$stock_source" != 1 ]] && phase=baseline
     if [[ "$selection_status" == "0" ]]; then
       node "$ROOT/scripts/devtools-image-proof.mjs" selection \
         "$measurement_dir/policy.json" "$selection" "$phase" "${ami_id:-}" \
@@ -685,6 +953,11 @@ warmup() {
         clear_warmup_handle "$label"
       fi
       return "$selection_status"
+    fi
+  elif [[ "$label" == "source" && "$stock_source" == 1 ]]; then
+    if ! grep -Eq 'image selected id=ami-[^[:space:]]+ source=stock' "$log"; then
+      printf 'source warmup did not prove stock image selection; log=%s\n' "$log" >&2
+      return 1
     fi
   elif [[ "$label" == "candidate" ]]; then
     assert_selected_image "$log" "$2" explicit || return 1
@@ -708,7 +981,6 @@ measure_cohort() {
   local phase="$1"
   local sample log handle selection run_status recovery_status capture_status stop_status partial_status
   local store="$measurement_dir/$phase.jsonl"
-  local -a pipeline_status
   local -a env_args=(env -u CRABBOX_AWS_AMI CRABBOX_AWS_REGION="$region" AWS_REGION="$region")
   [[ "$phase" == "candidate" ]] && env_args+=(CRABBOX_AWS_AMI="$ami_id")
   for sample in 1 2 3; do
@@ -717,14 +989,13 @@ measure_cohort() {
     measurement_handle="$handle"
     selection="$measurement_dir/$phase-$sample.selection.json"
     # Fresh acquisition with a durable cleanup handle; this wrapper owns stop on every outcome.
-    run_cmd "${env_args[@]}" "$CRABBOX_BIN" run --provider aws --target linux \
+    run_status=0
+    run_with_capacity_wait "$phase-$sample" "$log" "$handle" "$store" \
+      "${env_args[@]}" "$CRABBOX_BIN" run --provider aws --target linux \
       --arch x86_64 --class "$server_class" --type "$server_type" --market on-demand \
       --ttl "$ttl" --idle-timeout "$idle_timeout" --desktop --browser \
       --full-resync --no-hydrate --keep --stop-after never --lease-output "$handle" \
-      --timing-record "$store" -- true 2>&1 | tee "$log" &&
-      pipeline_status=("${PIPESTATUS[@]}") || pipeline_status=("${PIPESTATUS[@]}")
-    run_status="${pipeline_status[0]}"
-    [[ "$run_status" != "0" ]] || run_status="${pipeline_status[1]}"
+      --timing-record "$store" -- true || run_status=$?
     recovery_status=0
     capture_status=0
     stop_status=0
@@ -734,6 +1005,9 @@ measure_cohort() {
     if [[ -n "$measurement_lease" ]]; then
       if [[ "$run_status" == "0" ]]; then
         capture_selection "$measurement_lease" "$selection" || capture_status=$?
+        if [[ "$capture_status" == "0" ]]; then
+          assert_region "$log" "$selection" || capture_status=$?
+        fi
         if [[ "$capture_status" != "0" ]]; then
           printf 'could not capture exact-lease measurement evidence\n' >&2
           [[ ! -s "$selection.error" ]] || cat "$selection.error" >&2
@@ -787,6 +1061,9 @@ smoke_script() {
   fi
   smoke_script_value=""
   IFS= read -r -d '' smoke_script_value <"$smoke_script_path" || [[ -n "$smoke_script_value" ]] || return 1
+  if [[ -n "$windows_source_build" ]]; then
+    printf -v smoke_script_value '$ExpectedWindowsBuild = '\''%s'\''\n%s' "$windows_source_build" "$smoke_script_value"
+  fi
   if [[ "$target" == "linux" ]]; then
     local expected_node_major="" archive_probe=":"
     if [[ "$linux_developer_builder" == "1" ]]; then
@@ -934,15 +1211,15 @@ recover_windows_prep_disconnect() {
 }
 
 reboot_windows_source_if_needed() {
-  local lease="$1"
+  local lease="$1" ssh_command
   [[ "$target" == "windows" ]] || return 0
   if ! windows_reboot_required "$lease"; then
     return 0
   fi
   printf 'Windows source lease requires reboot before Docker image pull/proof\n' >&2
-  run_cmd "$CRABBOX_BIN" run --provider aws --target windows --id "$lease" --no-sync --shell -- 'shutdown /r /t 5 /f; Write-Output "reboot scheduled"'
-  sleep "$reboot_settle_seconds"
-  wait_windows_reboot_ready "$lease"
+  ssh_command="$("$CRABBOX_BIN" ssh --provider aws --target windows --id "$lease")"
+  windows_maintenance_ssh "$ssh_command" 'shutdown /r /t 5 /f; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; Write-Output "reboot scheduled"'
+  wait_windows_reboot_ready "$ssh_command"
   run_prep "$lease"
   if windows_reboot_required "$lease"; then
     printf 'Windows prep still requires reboot after one reboot cycle\n' >&2
@@ -957,6 +1234,7 @@ AWS devtools image mint
   region: ${region:-auto}
   class:  $server_class
   type:   ${server_type:-auto}
+  source: stock=$stock_source root_gb=${source_root_gb:-auto} windows_os=${windows_source_os:-normal}
   prep:   $prep_script
   proof:  desktop=$desktop browser=$browser promote=$promote
   fsr:    enabled=$fast_snapshot_restore azs=${fast_snapshot_restore_azs:-auto}
@@ -992,6 +1270,9 @@ fi
 
 outcome_stage="source_prepare"
 source_lease="$(warmup source)"
+jq -n --argjson stock "$stock_source" --argjson root "${source_root_gb:-0}" --arg lease "$source_lease" \
+  '{stockSource: ($stock == 1), rootGB: $root, leaseId: $lease}' \
+  >"$log_dir/image-mint-${log_image_name}-${log_id}-source.json"
 stage_linux_readiness_producer "$source_lease"
 run_prep "$source_lease"
 reboot_windows_source_if_needed "$source_lease"
@@ -1000,13 +1281,21 @@ smoke "$source_lease"
 image_env=(env)
 [[ -n "$region" ]] && image_env+=(CRABBOX_AWS_REGION="$region" AWS_REGION="$region")
 outcome_stage="candidate_create"
+image_status=0
 image_output="$("${image_env[@]}" "$CRABBOX_BIN" checkpoint create \
   --provider aws --target "$target" --id "$source_lease" --name "$image_name" \
-  --mode native --strategy image --no-reboot=false --wait --wait-timeout "$wait_timeout")"
+  --mode native --strategy image --no-reboot=false --wait --wait-timeout "$wait_timeout")" || image_status=$?
 printf '%s\n' "$image_output"
-ami_id="$(printf '%s\n' "$image_output" | sed -nE 's/.* resource=(ami-[^[:space:]]+).*/\1/p' | tail -n 1)"
-if [[ -z "$ami_id" ]]; then
-  printf 'checkpoint create did not return an AMI id\n' >&2
+candidate_identity="$(printf '%s\n' "$image_output" | sed -nE 's/^checkpoint created id=(chk_[a-zA-Z0-9]+) kind=aws-ami resource=(ami-[a-zA-Z0-9]+) state=[^[:space:]]+ region=([a-z0-9-]+) .*/\1 \2 \3/p')"
+if [[ -z "$candidate_identity" || "$candidate_identity" == *$'\n'* ]]; then
+  printf 'checkpoint create did not return one exact AMI/checkpoint/region identity; inspect capture output before cleanup\n' >&2
+  [[ "$image_status" != "0" ]] || image_status=1
+  exit "$image_status"
+fi
+read -r candidate_checkpoint ami_id candidate_region <<<"$candidate_identity"
+[[ "$image_status" == "0" ]] || exit "$image_status"
+if [[ -n "$region" && "$candidate_region" != "$region" ]]; then
+  printf 'captured image region=%s differs from requested region=%s; refusing candidate launch\n' "$candidate_region" "$region" >&2
   exit 1
 fi
 
@@ -1052,6 +1341,7 @@ promote_args+=("$ami_id")
 promotion_log="$(mktemp "$log_dir/image-mint-${log_image_name}-promotion-${log_id}.json.XXXXXX")"
 rollback_pending=1
 run_json_tee "$promotion_log" "$CRABBOX_BIN" "${promote_args[@]}"
+promotion_confirmed=1
 jq -e '.image.id and .image.revision and (.previous.state == "present" or .previous.state == "absent") and (.previous.aliases | length > 0)' "$promotion_log" >/dev/null
 if [[ "$measured" == "1" ]]; then
   node "$ROOT/scripts/devtools-image-proof.mjs" receipt \

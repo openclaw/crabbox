@@ -160,6 +160,9 @@ func (a App) imagePromote(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
+		if osImageSpecs[normalized].Target != targetLinux {
+			return Exit(2, "image promotion --os requires a Linux selector")
+		}
 		*osImage = normalized
 	}
 	coord, err := configuredAdminCoordinator()

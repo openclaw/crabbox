@@ -131,7 +131,7 @@ func TestReleaseAcceptedNativeDeletionDoesNotRecordCompletion(t *testing.T) {
 			defer cancel()
 			info := commandOutcome{result: core.LocalCommandResult{Stdout: fmt.Sprintf(`{"box":{"id":%q,"createdAt":%q}}`, claim.CloudID, claim.Labels[boxCreationLabel])}}
 			runner := &releaseCommandRunner{configPath: t.TempDir() + "/config.json", outcomes: map[string][]commandOutcome{
-				"info": {info, info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}},
+				"info": {info, info, info, info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}},
 				"delete":   {deletionOutcome(testDeletionID, claim.CloudID, "box", "pending")},
 				"deletion": {test.poll},
 				"list":     {{result: core.LocalCommandResult{Stderr: "confirmation unavailable"}, err: errors.New("exit status 1")}},
@@ -150,10 +150,11 @@ func TestReleaseAcceptedNativeDeletionDoesNotRecordCompletion(t *testing.T) {
 }
 
 func TestReleaseCompletedNativeDeletionRetainsWitnessUntilConfirmation(t *testing.T) {
+	nativeExit := boxNativeExit(t)
 	_, _, claim, _ := ownedFixture(t)
 	info := commandOutcome{result: core.LocalCommandResult{Stdout: fmt.Sprintf(`{"box":{"id":%q,"createdAt":%q}}`, claim.CloudID, claim.Labels[boxCreationLabel])}}
 	runner := &releaseCommandRunner{configPath: t.TempDir() + "/config.json", outcomes: map[string][]commandOutcome{
-		"info": {info, info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}},
+		"info": {info, info, info, info, info, info, info, {result: core.LocalCommandResult{ExitCode: 1, Stderr: "box not found (404)"}, err: nativeExit}}, "stop": {{result: core.LocalCommandResult{}}},
 		"delete":   {deletionOutcome(testDeletionID, claim.CloudID, "box", "pending")},
 		"deletion": {deletionOutcome(testDeletionID, claim.CloudID, "box", "blocked"), deletionOutcome(testDeletionID, claim.CloudID, "box", "completed")},
 		"list":     {{result: core.LocalCommandResult{Stderr: "confirmation unavailable"}, err: errors.New("exit status 1")}},
@@ -163,7 +164,6 @@ func TestReleaseCompletedNativeDeletionRetainsWitnessUntilConfirmation(t *testin
 		t.Fatalf("release err=%v, want inventory confirmation failure", err)
 	}
 	completed := assertCompletedDeletionRetained(t, claim)
-	nativeExit := boxNativeExit(t)
 	runner.outcomes["info"] = []commandOutcome{{result: core.LocalCommandResult{ExitCode: 1, Stderr: "box not found (404)"}, err: nativeExit}}
 	runner.outcomes["list"] = []commandOutcome{{result: core.LocalCommandResult{Stdout: `{"boxes":[]}`}}}
 	commandCount := len(runner.commands)
@@ -305,7 +305,7 @@ func TestReleasePendingDeletionSurvivesTimeoutAndRetries(t *testing.T) {
 		b, _, claim, _ := ownedFixture(t)
 		info := commandOutcome{result: core.LocalCommandResult{Stdout: fmt.Sprintf(`{"box":{"id":%q,"createdAt":%q}}`, claim.CloudID, claim.Labels[boxCreationLabel])}}
 		runner := &releaseCommandRunner{configPath: t.TempDir() + "/config.json", outcomes: map[string][]commandOutcome{
-			"info": {info, info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}},
+			"info": {info, info, info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}},
 			"delete": {deletionOutcome(testDeletionID, claim.CloudID, "box", "pending")},
 		}}
 		c := &client{apiKey: "box_test", apiURL: "https://ascii.dev", home: t.TempDir(), cliPath: "box", runner: runner, releasePollInterval: time.Hour}
@@ -418,7 +418,7 @@ func TestReleaseRetainsUncertainResources(t *testing.T) {
 			case "missing timestamp":
 				f.box.CreatedAt = nil
 			case "changed timestamp":
-				f.box.CreatedAt = "2026-08-30T12:00:01Z"
+				f.box.CreatedAt = "2026-08-30T12:00:06Z"
 			case "lookup 404":
 				f.getHook = func(string) (boxData, error) { return boxData{}, &boxNotFoundError{id: "bx_1"} }
 			case "lookup 404 with failed inventory":
@@ -427,7 +427,7 @@ func TestReleaseRetainsUncertainResources(t *testing.T) {
 			case "lookup 404 with replacement":
 				f.getHook = func(string) (boxData, error) { return boxData{}, &boxNotFoundError{id: "bx_1"} }
 				replacement := f.box
-				replacement.CreatedAt = "2026-08-30T12:00:01Z"
+				replacement.CreatedAt = "2026-08-30T12:00:06Z"
 				f.listHook = func() ([]boxData, error) { return []boxData{replacement}, nil }
 			case "lookup failure":
 				f.getHook = func(string) (boxData, error) { return boxData{}, fmt.Errorf("network unavailable") }
@@ -439,7 +439,7 @@ func TestReleaseRetainsUncertainResources(t *testing.T) {
 				wantDelete = true
 			case "replacement in inventory":
 				replacement := f.box
-				replacement.CreatedAt = "2026-08-30T12:00:01Z"
+				replacement.CreatedAt = "2026-08-30T12:00:06Z"
 				f.listHook = func() ([]boxData, error) { return []boxData{replacement}, nil }
 				wantDelete = true
 			case "cancelled":
@@ -628,7 +628,7 @@ func TestReleaseCompletedWitnessRetainsUncertainResource(t *testing.T) {
 				f.listHook = func() ([]boxData, error) { return []boxData{f.box}, nil }
 			case "replacement inventory":
 				replacement := f.box
-				replacement.CreatedAt = "2026-08-30T12:00:01Z"
+				replacement.CreatedAt = "2026-08-30T12:00:06Z"
 				f.listHook = func() ([]boxData, error) { return []boxData{replacement}, nil }
 			}
 			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil {
@@ -894,7 +894,7 @@ func TestRollbackRetainsChangedOrUnprovenAttempt(t *testing.T) {
 				box.CreatedAt = nil
 				f.box.CreatedAt = nil
 			case "changed generation":
-				box.CreatedAt = "2026-08-30T12:00:01Z"
+				box.CreatedAt = "2026-08-30T12:00:06Z"
 				f.box.CreatedAt = box.CreatedAt
 			case "wrong lease":
 				leaseID = "cbx_abcdef123456"
@@ -957,7 +957,7 @@ func TestReleaseRevalidatesEveryMutation(t *testing.T) {
 			}}
 			c := &client{apiKey: "box_test", apiURL: "https://ascii.dev", home: t.TempDir(), cliPath: "box", runner: runner, releasePollInterval: time.Nanosecond}
 			calls := 0
-			err := c.ReleaseBox(context.Background(), "bx_guard", func(context.Context) error {
+			_, err := c.ReleaseBox(context.Background(), "bx_guard", func(context.Context) error {
 				calls++
 				if calls == blocked {
 					return errors.New("ownership changed")

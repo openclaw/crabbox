@@ -611,8 +611,11 @@ scripts/verify-homebrew-release.sh \
 ```
 
 The six-argument verifier first fetches the immutable public release by numeric
-ID without authentication and compares its exact notes, inventory, asset IDs,
-sizes, and digests with the supplied bytes. Protected static `verify-release.sh`
+ID without authentication, or reads the JSON file supplied through
+`CRABBOX_HOMEBREW_RELEASE_METADATA`, and compares its exact notes, inventory,
+asset IDs, sizes, and digests with the supplied bytes. Supplied metadata must
+still describe the requested immutable public release; it does not bypass any
+validation. Protected static `verify-release.sh`
 validation precedes Homebrew. There is no public verifier run ID, proof ZIP,
 witness, or post-candidate API comparison.
 
@@ -635,7 +638,11 @@ verifier, before and after installation.
 The hosted `Verify Homebrew Release` workflow (`verify-homebrew.yml`) accepts
 `tag`, `tag_object`, `source_commit`, `verifier_commit`, and `release_id`. It uses
 protected-default tooling and anonymous fixed-repository downloads on both
-native architectures, then runs the same six-argument verifier. It never writes
+native architectures. A separate metadata step uses the workflow's read-only
+`GITHUB_TOKEN` to avoid shared-runner anonymous GitHub API rate limits, then
+passes only the response JSON to the same six-argument verifier. The token is
+scoped to that step; Homebrew and candidate execution remain credential-free.
+The workflow keeps `contents: read` permissions and never writes
 to the tap or supplies candidate-accessible credentials. Rerun this installation
 smoke independently after a smoke failure; do not re-enter publication.
 

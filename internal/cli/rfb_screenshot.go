@@ -246,10 +246,6 @@ func desktopCredentialsFromProvider(provider Provider, cfg Config, target SSHTar
 	}, true, nil
 }
 
-func preflightRFBAuthenticationFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials) error {
-	return preflightRFBAuthenticationFromConnWithMode(ctx, conn, creds, localWebVNCAuthAuto)
-}
-
 func preflightRFBAuthenticationFromConnWithMode(ctx context.Context, conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode) error {
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
@@ -582,10 +578,6 @@ func writeRFBKeyEvent(conn net.Conn, down bool, key uint32) (int, error) {
 		return n, fmt.Errorf("write RFB key event: %w", err)
 	}
 	return n, nil
-}
-
-func negotiateRFBSecurityType(conn net.Conn, creds rfbCredentials) (byte, error) {
-	return negotiateRFBSecurityTypeForMode(conn, creds, localWebVNCAuthAuto)
 }
 
 func negotiateRFBSecurityTypeForMode(conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode) (byte, error) {

@@ -1677,3 +1677,15 @@ func (b *notifyBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buffer.String()
 }
+
+func forceRFBARDAuthentication(ctx context.Context, browser, server net.Conn, credentials rfbCredentials) error {
+	return forceRFBARDAuthenticationWithTimeout(ctx, browser, server, credentials, localWebVNCReadTimeout)
+}
+
+func forceRFBMacOSAuthentication(ctx context.Context, browser, server net.Conn, credentials rfbCredentials, authMode localWebVNCAuthenticationMode) error {
+	return forceRFBMacOSAuthenticationWithTimeout(ctx, browser, server, credentials, authMode, localWebVNCReadTimeout)
+}
+
+func forceRFBARDAuthenticationWithTimeout(ctx context.Context, browser, server net.Conn, credentials rfbCredentials, negotiationTimeout time.Duration) error {
+	return forceRFBMacOSAuthenticationWithTimeout(ctx, browser, server, credentials, localWebVNCAuthARD, negotiationTimeout)
+}

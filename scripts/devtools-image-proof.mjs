@@ -94,13 +94,32 @@ const nullableInteger = (value, minimum = 0) => {
 };
 
 function exactKeys(value, keys, label) {
-  assert.ok(value && typeof value === "object" && !Array.isArray(value), `${label} must be an object`);
+  assert.ok(
+    value && typeof value === "object" && !Array.isArray(value),
+    `${label} must be an object`,
+  );
   assert.deepEqual(Object.keys(value).sort(), [...keys].sort(), `${label} keys changed`);
+}
+
+function sourceSettings(input) {
+  exactKeys(input, ["stockSource", "rootGB"], "source settings");
+  assert.equal(typeof input.stockSource, "boolean", "invalid stock source setting");
+  integer(input.rootGB);
+  assert.ok(
+    input.rootGB === 0 || (input.stockSource && input.rootGB >= 16 && input.rootGB <= 400),
+    "invalid source root size",
+  );
+  return { stockSource: input.stockSource, rootGB: input.rootGB };
 }
 
 export function measurementPolicy(input) {
   const isPolicy = Object.hasOwn(input, "commandFingerprint");
-  exactKeys(input, isPolicy ? policyKeys : policyInputKeys, "measurement policy");
+  const source = input.source === undefined ? undefined : sourceSettings(input.source);
+  exactKeys(
+    input,
+    [...(isPolicy ? policyKeys : policyInputKeys), ...(source ? ["source"] : [])],
+    "measurement policy",
+  );
   assert.match(input.sourceRevision, /^[0-9a-f]{40}$/);
   assert.ok(isDigest(input.recipeDigest), "invalid recipe digest");
   assert.ok(
@@ -114,6 +133,7 @@ export function measurementPolicy(input) {
   }
   const policy = {
     sourceRevision: input.sourceRevision,
+    ...(source ? { source } : {}),
     recipeDigest: input.recipeDigest,
     region: input.region,
     machineType: input.machineType,
@@ -193,14 +213,21 @@ function validateSelection(policy, phase, selection, candidateImage, baseline) {
   );
   assert.equal(selection.image.kind, "aws-ami");
   assert.match(selection.image.id, /^ami-[a-z0-9]+$/);
-  if (phase === "baseline") {
+  if (phase === "source") {
+    assert.equal(policy.source?.stockSource, true, "stock source was not requested");
+    assert.equal(selection.image.source, "stock", "source lease did not select a stock image");
+  } else if (phase === "baseline") {
     assert.ok(
       ["stock", "promoted"].includes(selection.image.source),
       "baseline must use normal image selection",
     );
     assert.deepEqual(selection.image, baseline.image, "mixed baseline image selection");
   } else {
-    assert.equal(selection.image.id, candidateImage, "selected image differs from captured candidate");
+    assert.equal(
+      selection.image.id,
+      candidateImage,
+      "selected image differs from captured candidate",
+    );
     assert.equal(
       selection.image.source,
       phase === "candidate" ? "explicit" : "promoted",
@@ -440,19 +467,21 @@ export function validateCohortSummary(cohort) {
     assert.equal(cohort.runnerTotalN, 3);
     integer(cohort.p95RunnerTotalMs, 1);
   }
-  const measures = [
-    cohort.p95RunnerTotalMs,
-    cohort.medianRunnerTotalMs,
-    cohort.medianSyncMs,
-  ];
+  const measures = [cohort.p95RunnerTotalMs, cohort.medianRunnerTotalMs, cohort.medianSyncMs];
   if (measures.some((value) => value !== null)) {
-    assert.ok(measures.every((value) => value !== null), "incomplete cohort measures");
+    assert.ok(
+      measures.every((value) => value !== null),
+      "incomplete cohort measures",
+    );
     assert.equal(cohort.observations, 3);
     assert.equal(cohort.successfulSamples, 3);
     assert.equal(cohort.runnerTotalN, 3);
   }
   if (cohort.policyPassed === false)
-    assert.ok(measures.every((value) => value === null), "failed policy exposed final measures");
+    assert.ok(
+      measures.every((value) => value === null),
+      "failed policy exposed final measures",
+    );
   return cohort;
 }
 
@@ -496,6 +525,7 @@ export function projectOutcome(policyInput, state = {}) {
     status,
     stage,
     sourceRevision: policy.sourceRevision,
+    ...(policy.source ? { source: sourceSettings(policy.source) } : {}),
     recipeDigest: policy.recipeDigest,
     policyDigest: digest(policy),
     plannedLeaseCount: policy.plannedLeaseCount,
@@ -530,7 +560,12 @@ export function projectManifest(policy, cohorts, promotionReceipt) {
 }
 
 export function validateOutcome(outcome) {
-  exactKeys(outcome, outcomeKeys, "public outcome");
+  if (outcome.source !== undefined) sourceSettings(outcome.source);
+  exactKeys(
+    outcome,
+    [...outcomeKeys, ...(outcome.source === undefined ? [] : ["source"])],
+    "public outcome",
+  );
   assert.equal(outcome.schema, "crabbox-devtools-image-proof/v2");
   assert.ok(outcomeStatuses.includes(outcome.status), "invalid outcome status");
   assert.ok(stages.includes(outcome.stage), "invalid outcome stage");
@@ -660,8 +695,11 @@ async function preflight(args) {
     fsr,
     ttl,
     idleTimeout,
+    stockSource = "0",
+    rootGB = "0",
   ] = args;
-  assert.equal(args.length, 12);
+  assert.ok(args.length === 12 || args.length === 14, "invalid preflight argument count");
+  assert.ok(stockSource === "0" || stockSource === "1");
   assert.equal(
     realpathSync(prep),
     resolve(root, recipe.execution.arguments[0]),
@@ -694,6 +732,7 @@ async function preflight(args) {
     region,
     machineType,
     serverClass,
+    source: sourceSettings({ stockSource: stockSource === "1", rootGB: Number(rootGB) }),
     maxP95RunnerTotalMs: Number(threshold),
     ttl,
     idleTimeout,
@@ -791,7 +830,7 @@ async function main([command, ...args]) {
   }
   if (command === "selection") {
     const [policyPath, selectionPath, phase, candidateImage, baselinePath] = args;
-    assert.ok(phases.includes(phase), "invalid cohort phase");
+    assert.ok(phase === "source" || phases.includes(phase), "invalid selection phase");
     validateSelection(
       measurementPolicy(await json(policyPath)),
       phase,

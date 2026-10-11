@@ -1,4 +1,13 @@
 $ErrorActionPreference = "Stop"
+$WindowsBuild = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
+$ServerCoreTag = switch ($WindowsBuild) {
+  20348 { "ltsc2022" }
+  26100 { "ltsc2025" }
+  default { throw "Unsupported Windows Server build: $WindowsBuild" }
+}
+if ($ExpectedWindowsBuild -and $WindowsBuild -ne [int]$ExpectedWindowsBuild) {
+  throw "Windows image OS mismatch: expected build $ExpectedWindowsBuild, found $WindowsBuild"
+}
 Get-ComputerInfo | Select-Object OsName, OsVersion, OsBuildNumber | Format-List
 git --version
 gh --version | Select-Object -First 1
@@ -15,6 +24,6 @@ pnpm --version
 trufflehog --no-update --version
 docker --version
 docker version
-docker image inspect mcr.microsoft.com/windows/servercore:ltsc2022 | Out-Null
+docker image inspect "mcr.microsoft.com/windows/servercore:$ServerCoreTag" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Docker image smoke failed: $LASTEXITCODE" }
 Write-Output "devtools-smoke-ok"

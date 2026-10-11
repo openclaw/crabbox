@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"net/url"
 	"os"
@@ -72,6 +73,7 @@ type Config struct {
 	Image                         string
 	imageExplicit                 bool
 	AWSRegion                     string
+	AWSStockImage                 bool
 	AWSAMI                        string
 	AWSSnapshot                   string
 	AWSSGID                       string
@@ -84,6 +86,7 @@ type Config struct {
 	AWSLambdaMicroVM              AWSLambdaMicroVMConfig
 	Azure                         AzureConfig
 	AzureDynamicSessions          AzureDynamicSessionsConfig
+	AzureSandbox                  AzureSandboxConfig
 	GCP                           GCPConfig
 	DigitalOcean                  DigitalOceanConfig
 	digitalOceanImageExplicit     bool
@@ -131,6 +134,7 @@ type Config struct {
 	TTL                           time.Duration
 	IdleTimeout                   time.Duration
 	WarmupKeep                    bool
+	ClaimsAutoPrune               bool
 	Sync                          SyncConfig
 	Run                           RunConfig
 	EnvAllow                      []string
@@ -314,6 +318,8 @@ type RunConfig struct {
 }
 
 type CapacityConfig struct {
+	MinVCPUs          int
+	MinMemoryMiB      int
 	Market            string
 	Strategy          string
 	Fallback          string
@@ -714,11 +720,17 @@ const (
 )
 
 func defaultConfig() Config {
-	cfg, err := loadConfig()
+	cfg, err := loadConfigInputs()
 	if err != nil {
 		return baseConfig()
 	}
-	return cfg
+	resolved, err := resolveLoadedConfig(cfg, "", "")
+	if err != nil {
+		// Flags may replace an invalid inherited selector. Keep the other
+		// inherited defaults instead of silently resetting the entire config.
+		return cfg
+	}
+	return resolved
 }
 
 func loadConfig() (Config, error) {
@@ -726,6 +738,29 @@ func loadConfig() (Config, error) {
 }
 
 func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
+	return loadConfigWithFlagOverrides(coordinator, provider, nil)
+}
+
+func loadConfigWithFlagOverrides(coordinator, provider string, fs *flag.FlagSet) (Config, error) {
+	cfg, err := loadConfigInputs()
+	if err != nil {
+		return Config{}, err
+	}
+	if fs != nil {
+		if err := applyConfigSelectorFlags(&cfg, fs); err != nil {
+			return Config{}, err
+		}
+	}
+	return resolveLoadedConfig(cfg, coordinator, provider)
+}
+
+// loadConfigForFlags resolves selectors before provider defaults can validate
+// them. Commands still apply their complete flag sets at their own boundary.
+func loadConfigForFlags(fs *flag.FlagSet) (Config, error) {
+	return loadConfigWithFlagOverrides("", "", fs)
+}
+
+func loadConfigInputs() (Config, error) {
 	cfg := baseConfig()
 	for _, path := range configPaths() {
 		trust := classifyConfigPath(path)
@@ -736,6 +771,10 @@ func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
 	if err := applyEnv(&cfg); err != nil {
 		return Config{}, err
 	}
+	return cfg, nil
+}
+
+func resolveLoadedConfig(cfg Config, coordinator, provider string) (Config, error) {
 	// Validate this cross-provider environment destination before provider
 	// dispatch. The selected value may itself be CRABBOX_PROVIDER, so waiting
 	// for External provider validation would let that value route around it.
@@ -848,6 +887,34 @@ func ApplyLinuxConnectionDefaults(cfg *Config, defaultSSHUser, defaultSSHPort st
 }
 
 func applyProviderConfigDefaults(cfg *Config) error {
+	target, mode := cfg.TargetOS, cfg.explicitWindowsMode
+	if err := applyProviderConfigDefaultValues(cfg); err != nil {
+		return err
+	}
+	// Templates and adapters supply defaults, not replacements for explicit
+	// platform flags. Preserve their values before target validation runs.
+	if cfg.targetFlagExplicit {
+		cfg.TargetOS = target
+		if normalizeTargetOS(target) != targetWindows {
+			cfg.WindowsMode = windowsModeNormal
+		}
+	}
+	if cfg.windowsModeFlagExplicit && mode != "" {
+		cfg.WindowsMode = normalizeWindowsMode(mode)
+	}
+	if provider, err := ProviderFor(cfg.Provider); err == nil {
+		if _, ok := provider.(ProviderConfigDefaulter); ok {
+			if phase, ok := provider.(ProviderConfigDefaultsPhase); ok && phase.ConfigDefaultsTargetFinalization() == ProviderConfigDefaultsCallerFinalizes {
+				return nil
+			}
+			normalizeTargetConfig(cfg)
+			return validateTargetConfig(*cfg)
+		}
+	}
+	return nil
+}
+
+func applyProviderConfigDefaultValues(cfg *Config) error {
 	prepareProviderDefaults(cfg)
 	if normalized, err := NormalizeArchitecture(cfg.Architecture); err != nil {
 		return err
@@ -866,11 +933,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			if err := defaulter.ApplyConfigDefaults(cfg); err != nil {
 				return err
 			}
-			if phase, ok := provider.(ProviderConfigDefaultsPhase); ok && phase.ConfigDefaultsTargetFinalization() == ProviderConfigDefaultsCallerFinalizes {
-				return nil
-			}
-			normalizeTargetConfig(cfg)
-			return validateTargetConfig(*cfg)
+			return nil
 		}
 	}
 	if cfg.Provider == "tart" || cfg.Provider == "local-tart" || cfg.Provider == "macos-vm" {
@@ -1535,6 +1598,7 @@ func baseConfig() Config {
 		AWSLambdaMicroVM:        defaultAWSLambdaMicroVMConfig(),
 		Azure:                   initialAzureConfig(azureImage),
 		AzureDynamicSessions:    defaultAzureDynamicSessionsConfig(),
+		AzureSandbox:            defaultAzureSandboxConfig(),
 		GCP:                     initialGCPConfig(gcpImage),
 		DigitalOcean:            defaultDigitalOceanConfig(),
 		Vultr:                   defaultVultrConfig(),
@@ -1555,6 +1619,7 @@ func baseConfig() Config {
 		TTL:                     90 * time.Minute,
 		IdleTimeout:             30 * time.Minute,
 		WarmupKeep:              true,
+		ClaimsAutoPrune:         true,
 		Sync: SyncConfig{
 			Source:        "git",
 			Delete:        true,
@@ -1670,6 +1735,7 @@ func baseConfig() Config {
 }
 
 type fileConfig struct {
+	Claims                   *fileClaimsConfig                   `yaml:"claims,omitempty"`
 	History                  *fileLocalHistoryPolicy             `yaml:"history,omitempty"`
 	Profile                  string                              `yaml:"profile,omitempty"`
 	Provider                 string                              `yaml:"provider,omitempty"`
@@ -1703,6 +1769,7 @@ type fileConfig struct {
 	AWSLambdaMicroVM         *fileAWSLambdaMicroVMConfig         `yaml:"awsLambdaMicroVM,omitempty"`
 	Azure                    *fileAzureConfig                    `yaml:"azure,omitempty"`
 	AzureDynamicSessions     *fileAzureDynamicSessionsConfig     `yaml:"azureDynamicSessions,omitempty"`
+	AzureSandbox             *fileAzureSandboxConfig             `yaml:"azureSandbox,omitempty"`
 	GCP                      *fileGCPConfig                      `yaml:"gcp,omitempty"`
 	Incus                    *fileIncusConfig                    `yaml:"incus,omitempty"`
 	Proxmox                  *fileProxmoxConfig                  `yaml:"proxmox,omitempty"`
@@ -1821,6 +1888,7 @@ type fileHetznerConfig struct {
 type fileAWSConfig struct {
 	Region          string   `yaml:"region,omitempty"`
 	AMI             string   `yaml:"ami,omitempty"`
+	StockImage      *bool    `yaml:"stockImage,omitempty"`
 	SecurityGroupID string   `yaml:"securityGroupId,omitempty"`
 	SubnetID        string   `yaml:"subnetId,omitempty"`
 	InstanceProfile string   `yaml:"instanceProfile,omitempty"`
@@ -1915,6 +1983,8 @@ type fileRunConfig struct {
 }
 
 type fileCapacityConfig struct {
+	MinVCPUs          *int     `yaml:"minVCPUs,omitempty"`
+	MinMemoryMiB      *int     `yaml:"minMemoryMiB,omitempty"`
 	Market            string   `yaml:"market,omitempty"`
 	Strategy          string   `yaml:"strategy,omitempty"`
 	Fallback          string   `yaml:"fallback,omitempty"`
@@ -2687,6 +2757,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, "aws", inputSource, true)
 			recordConfigInput(cfg, "aws-lambda-microvm", inputSource, true)
 		}
+		if file.AWS.StockImage != nil {
+			cfg.AWSStockImage = *file.AWS.StockImage
+			recordConfigInput(cfg, "aws", inputSource, true)
+		}
 		configInputFileString(cfg, "aws", inputSource, &cfg.AWSAMI, file.AWS.AMI)
 		configInputFileString(cfg, "aws", inputSource, &cfg.AWSSGID, file.AWS.SecurityGroupID)
 		configInputFileString(cfg, "aws", inputSource, &cfg.AWSSubnetID, file.AWS.SubnetID)
@@ -2715,6 +2789,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 	}
 	cfg.applyAzureFileConfig(file.Azure, inputSource)
+	{
+		applied, err := cfg.AzureSandbox.applyFile(file.AzureSandbox, trusted)
+		recordConfigInput(cfg, "azure-sandbox", inputSource, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
+	}
 	{
 		applied, err := cfg.AzureDynamicSessions.applyFile(file.AzureDynamicSessions)
 		recordConfigInput(cfg, "azure-dynamic-sessions", inputSource, applied.InputAccepted)
@@ -2873,6 +2954,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		cfg.WarmupKeep = *file.Warmup.Keep
 		recordConfigInput(cfg, configInputGeneric, inputSource, true)
 	}
+	if file.Claims != nil && file.Claims.AutoPrune != nil {
+		cfg.ClaimsAutoPrune = *file.Claims.AutoPrune
+		recordConfigInput(cfg, configInputGeneric, inputSource, true)
+	}
 	if file.Sync != nil {
 		configInputFileString(cfg, configInputGeneric, inputSource, &cfg.Sync.Source, file.Sync.Source)
 		configInputFileString(cfg, configInputGeneric, inputSource, &cfg.Sync.Compression, file.Sync.Compression)
@@ -2936,6 +3021,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		recordConfigInput(cfg, configInputGeneric, inputSource, true)
 	}
 	if file.Capacity != nil {
+		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Capacity.MinVCPUs, file.Capacity.MinVCPUs))
+		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Capacity.MinMemoryMiB, file.Capacity.MinMemoryMiB))
+		if err := validateCapacityMinimumValues(cfg.Capacity); err != nil {
+			return err
+		}
 		if file.Capacity.Market != "" {
 			cfg.Capacity.Market = file.Capacity.Market
 			recordConfigInput(cfg, configInputGeneric, inputSource, true)
@@ -3589,6 +3679,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Jobs = map[string]JobConfig{}
 		}
 		for name, job := range file.Jobs {
+			if job.Capacity != nil && ((job.Capacity.MinVCPUs != nil && *job.Capacity.MinVCPUs != 0) ||
+				(job.Capacity.MinMemoryMiB != nil && *job.Capacity.MinMemoryMiB != 0)) {
+				return Exit(2, "job %q: resource requirements are unsupported for composite jobs; use warmup", name)
+			}
 			name = strings.TrimSpace(name)
 			if name == "" {
 				continue
@@ -3961,6 +4055,10 @@ func applyEnv(cfg *Config) error {
 		recordConfigInput(cfg, "aws", configInputEnvironment, true)
 		recordConfigInput(cfg, "aws-lambda-microvm", configInputEnvironment, true)
 	}
+	if value, ok := getenvBool("CRABBOX_AWS_STOCK_IMAGE"); ok {
+		cfg.AWSStockImage = value
+		recordConfigInput(cfg, "aws", configInputEnvironment, true)
+	}
 	cfg.AWSAMI = configInputEnvString(cfg, "aws", cfg.AWSAMI, "CRABBOX_AWS_AMI")
 	cfg.AWSSGID = configInputEnvString(cfg, "aws", cfg.AWSSGID, "CRABBOX_AWS_SECURITY_GROUP_ID")
 	cfg.AWSSubnetID = configInputEnvString(cfg, "aws", cfg.AWSSubnetID, "CRABBOX_AWS_SUBNET_ID")
@@ -3985,6 +4083,13 @@ func applyEnv(cfg *Config) error {
 		recordConfigInput(cfg, "aws", configInputEnvironment, true)
 	}
 	cfg.applyAzureEnvironment()
+	{
+		applied, err := cfg.AzureSandbox.applyEnv()
+		recordConfigInput(cfg, "azure-sandbox", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
+	}
 	{
 		applied, err := cfg.AzureDynamicSessions.applyEnv()
 		recordConfigInput(cfg, "azure-dynamic-sessions", configInputEnvironment, applied.InputAccepted)
@@ -4178,6 +4283,10 @@ func applyEnv(cfg *Config) error {
 	}
 	if keep, ok := getenvBool("CRABBOX_WARMUP_KEEP"); ok {
 		cfg.WarmupKeep = keep
+		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
+	}
+	if prune, ok := getenvBool("CRABBOX_CLAIMS_AUTO_PRUNE"); ok {
+		cfg.ClaimsAutoPrune = prune
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
 	}
 	if market := os.Getenv("CRABBOX_CAPACITY_MARKET"); market != "" {
@@ -5450,6 +5559,10 @@ func DigitalOceanImageWasExplicit(cfg Config) bool {
 
 func LinodeImageWasExplicit(cfg Config) bool {
 	return cfg.linodeImageExplicit
+}
+
+func LinodeTypeWasExplicit(cfg Config) bool {
+	return cfg.linodeTypeExplicit
 }
 
 func OSImageWasExplicit(cfg Config) bool {

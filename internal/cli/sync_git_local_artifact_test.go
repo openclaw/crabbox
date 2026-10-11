@@ -193,6 +193,12 @@ func TestLocalGitSeedArtifactRequiresActualClosureDespiteShallowAndPartialMarker
 	if _, err := prepareLocalGitSeedArtifact(context.Background(), root, localGitSeedSelection{Head: head, Tree: tree}, 0); err == nil || !strings.Contains(err.Error(), "required local Git object") {
 		t.Fatalf("missing actual parent: %v", err)
 	}
+	if err := os.Remove(filepath.Join(root, ".git", "shallow")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepareLocalGitSeedArtifact(context.Background(), root, localGitSeedSelection{Head: head, Tree: tree}, 0); err == nil || !strings.Contains(err.Error(), "required local Git object") || strings.Contains(err.Error(), "shallow") {
+		t.Fatalf("non-shallow missing parent: %v", err)
+	}
 }
 
 func TestLocalGitSeedArtifactNamesShallowSourceCause(t *testing.T) {
@@ -208,6 +214,9 @@ func TestLocalGitSeedArtifactNamesShallowSourceCause(t *testing.T) {
 	_, err := prepareLocalGitSeedArtifact(context.Background(), clone, localGitSeedSelection{Head: head, Tree: tree}, 0)
 	if err == nil || !strings.Contains(err.Error(), "required local Git object") || !strings.Contains(err.Error(), "source repository is shallow") || !strings.Contains(err.Error(), "git fetch --unshallow") {
 		t.Fatalf("shallow source error=%v", err)
+	}
+	if !strings.Contains(err.Error(), "set sync.gitSeed=false and sync.gitSeedSource=origin for file-only sync") {
+		t.Fatalf("shallow source error lacks a complete file-only remedy: %v", err)
 	}
 	if strings.Contains(err.Error(), source) || strings.Contains(err.Error(), clone) {
 		t.Fatalf("shallow diagnostic leaked a repository path: %v", err)

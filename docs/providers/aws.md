@@ -40,6 +40,7 @@ crabbox run --provider aws --class fast -- pnpm test
 crabbox run --provider aws --market on-demand -- pnpm check
 crabbox run --provider aws --id cbx_abcdef123456 --lease-output run.json -- pnpm test
 crabbox warmup --provider aws --target windows --desktop
+crabbox warmup --provider aws --target windows --os windows-server:2025
 crabbox warmup --provider aws --target windows --windows-mode wsl2
 crabbox warmup --provider aws --target macos --desktop --market on-demand
 crabbox warmup --provider aws --lease-id cbx_abcdef123456 --slug operation-display
@@ -200,6 +201,11 @@ Windows and macOS targets use their own candidate lists (Windows WSL2 uses
 nested-virtualization families; macOS uses `mac*.metal` types). The default
 class is `beast`.
 
+Use `--min-vcpus` and `--min-memory-mib` to filter Linux class candidates by an
+explicit workload requirement. Requests without these options keep the existing
+fallback behavior. See [optional resource minimums](../features/capacity-fallback.md#optional-aws-resource-minimums)
+for metadata, coordinator compatibility and supported command semantics.
+
 For coordinator-managed public Linux and Windows runners, a complete
 `RunInstances` error with code `InsufficientInstanceCapacity` goes directly to
 the next configured instance type or permitted On-Demand fallback. The client
@@ -258,6 +264,41 @@ failure counters remain observations independent of this timer limitation.
 
 ## Configuration
 
+### Windows images
+
+Use `--target windows --os windows-server:2022` or
+`--target windows --os windows-server:2025` to select Amazon's latest English
+Full Base Windows Server AMI for that release in the requested region. The same
+selector works with native Windows and `--windows-mode wsl2`; WSL2 still requires
+a nested-virtualization instance type. These selectors require AWS and an amd64
+Windows target, and work in both direct and brokered mode. Upgrade both the CLI
+and coordinator for brokered selection.
+
+The stock fallback defaults to Windows Server 2025. Without a Windows selector, a promoted
+Windows AMI still wins in brokered mode. An explicit Windows selector bypasses
+unversioned promoted Windows images and selects the stock Amazon image instead;
+image capability requirements cannot be combined with that stock selection.
+Windows promotions use target/architecture/region keys, so an explicit 2022
+request keeps selecting stock 2022 even after the default promotion is 2025.
+The guarded developer-image publisher accepts `windows_os=windows-server:2025`
+to bake a fresh stock 2025 source, prove the captured candidate, and prove
+normal promoted selection. Its default 2022 input preserves the existing
+promoted-source rebuild. See the [Windows 2025 bake runbook](../features/image-bake-runbook.md#bake-windows-server-2025-from-stock).
+Explicit `aws.ami` / `CRABBOX_AWS_AMI` overrides (including coordinator overrides)
+still win over `--os`. Remove a global AMI override before using different OS
+selectors for Linux and Windows runs.
+
+Set the top-level `os: windows-server:2025` or `CRABBOX_OS=windows-server:2025`
+with `target: windows` or a command's `--target windows` flag; compatibility is
+checked after all overrides. You can also select the OS for each command:
+
+```sh
+crabbox run --provider aws --target linux --os ubuntu:26.04 -- uname -a
+crabbox run --provider aws --target windows --os windows-server:2025 -- cmd /c ver
+```
+
+### Provider settings
+
 ```yaml
 provider: aws
 target: linux
@@ -279,8 +320,13 @@ Root volumes default to 40 GB (`tiny`), 80 GB (`small`), 150 GB (`standard`
 and `fast`), 250 GB (`large`), or 400 GB (`beast`). An unset or zero `aws.rootGB`
 selects this policy in both direct and brokered creates. Crabbox reads the AMI's
 root block-device mapping and raises only the automatic default to its minimum,
-including AMIs registered from checkpoint snapshots. A promoted 400 GB image
-therefore still needs a 400 GB disk even for `tiny`.
+including AMIs registered from checkpoint snapshots. The promoted Linux
+developer image has a 32 GB root, so brokered leases get the class sizes above
+(a `tiny` lease has about 38 GB of usable root filesystem). An image with a
+larger root snapshot raises every class to that size, and rebuilding from such
+an image cannot shrink it. The guarded publisher bakes small-root images from
+stock Ubuntu with `--stock-source --root-gb N` (workflow input `linux_root_gb`); see the
+[small-root image bake](../features/image-bake-runbook.md#bake-a-smaller-linux-root-disk-from-stock-ubuntu).
 
 Set `aws.rootGB: 400` or `CRABBOX_AWS_ROOT_GB=400` to retain the previous size.
 Positive explicit requests win and EC2 rejects requests below the source minimum;
@@ -340,6 +386,7 @@ AWS_SESSION_TOKEN
 AWS_REGION
 CRABBOX_AWS_REGION                  # overrides AWS_REGION / aws.region
 CRABBOX_AWS_AMI
+CRABBOX_AWS_STOCK_IMAGE             # aws.stockImage; brokered AWS, admin-only
 CRABBOX_AWS_SECURITY_GROUP_ID
 CRABBOX_AWS_SUBNET_ID
 CRABBOX_AWS_INSTANCE_PROFILE
@@ -555,6 +602,10 @@ In brokered mode you can promote and warm AMIs:
   These checks cover Standard-instance quotas (A, C, D, H, I, M, R, T, and Z
   families). Types using separate buckets, such as GPU and HPC instances, report
   `unsupported_instance_quota` and leave launch quota enforcement to EC2.
+  A sufficient quota ceiling reports `capacity=unknown` and
+  `quota_limit=sufficient usage=unchecked`. Doctor does not measure account-wide
+  usage or available regional headroom. See
+  [quota troubleshooting](../troubleshooting.md#provider-not-configured-or-capacity-quota-fails).
 - `beast` starts at 48xlarge candidates and can consume up to 192 vCPUs per
   request. Under capacity pressure, prefer `standard` or `fast` plus several
   `CRABBOX_CAPACITY_REGIONS`.

@@ -262,7 +262,7 @@ export class LeaseProvisioningController {
       for (const [key, entry] of due) {
         // oxlint-disable-next-line eslint/no-await-in-loop -- bounded due reconciliation is one transaction.
         const current = await transaction.get<ProvisioningDueRecord>(key);
-        if (!current || JSON.stringify(current) !== JSON.stringify(entry)) continue;
+        if (current === undefined || JSON.stringify(current) !== JSON.stringify(entry)) continue;
         if (!entry || typeof entry !== "object") {
           // oxlint-disable-next-line eslint/no-await-in-loop -- malformed index values never grant ownership.
           await transaction.delete(key);

@@ -9,9 +9,10 @@ Read this when:
 The browser portal is a server-rendered web UI hosted by the same coordinator
 that backs the Crabbox API. It is not a separate frontend or single-page app:
 every page is HTML rendered by the coordinator, with light
-client-side JavaScript only for filtering, sorting, clipboard copy, theme
-switching, and the live VNC viewer. Because the portal and the API use the same
-`FleetCoordinator` state, the two surfaces cannot drift apart.
+client-side JavaScript for filtering, sorting, clipboard copy, theme switching,
+and the live VNC viewer. The portal and API read the same `FleetCoordinator`
+state. For an end-to-end access workflow, start with the
+[desktop, VNC, browser, and Code guide](interactive-desktop-vnc.md).
 
 ## URL map
 
@@ -120,7 +121,7 @@ Existing GitHub Portal sessions remain unchanged.
 
 ```text
 session  authenticated GitHub user (owner / org embedded in the token)
-admin    sessions whose token carries the admin role
+admin    authenticated sessions granted admin authority by coordinator policy
 ```
 
 - Lease index, lease detail, run detail: a user sees their own leases and
@@ -211,8 +212,10 @@ workspace rather than only removing coordinator metadata.
 `/portal/leases/{id-or-slug}/vnc` and `/portal/leases/{id-or-slug}/code/` are
 not ordinary pages. VNC opens a noVNC viewer that talks to the lease's desktop
 over a WebSocket; the code path proxies code-server HTTP and WebSocket traffic
-straight through. Both remove the need for a local SSH tunnel to reach the
-desktop or editor. If browser clipboard permission is unavailable, WebVNC uses
+through the CLI bridge. Browser viewers do not need their own SSH client, but
+the local `crabbox webvnc` or `crabbox code` process still maintains the SSH
+tunnel and must stay running. The coordinator does not dial the runner over SSH.
+If browser clipboard permission is unavailable, WebVNC uses
 an in-page text dialog for manual paste input. Mediated egress has no portal
 page — it is operator-driven and never opens an HTML view, so it lives under the ticketed
 `/v1/leases/{id-or-slug}/egress/...` routes instead. See

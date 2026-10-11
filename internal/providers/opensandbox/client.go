@@ -747,10 +747,6 @@ type commandLineState struct {
 	terminated bool
 }
 
-func (c *sdkOpenSandboxClient) handleCommandEvent(event commandStreamEvent) (commandEventResult, error) {
-	return c.handleCommandEventWithState(event, &commandOutputState{})
-}
-
 func (c *sdkOpenSandboxClient) handleCommandEventWithState(event commandStreamEvent, outputState *commandOutputState) (commandEventResult, error) {
 	explicitType := strings.ToLower(strings.TrimSpace(event.Event))
 	if !event.Structured {

@@ -181,7 +181,7 @@ func TestLinodeDoctorEffectiveType(t *testing.T) {
 	}{
 		{name: "native configured type", cfg: core.Config{Linode: core.LinodeConfig{Type: "g6-nanode-1"}}, want: "g6-nanode-1"},
 		{name: "explicit generic override", cfg: core.Config{ServerType: "g6-standard-2", ServerTypeExplicit: true, Linode: core.LinodeConfig{Type: "g6-nanode-1"}}, want: "g6-standard-2"},
-		{name: "class fallback", cfg: core.Config{Class: "standard"}, want: "g6-standard-1"},
+		{name: "class fallback", cfg: core.Config{Class: "standard"}, want: "g6-standard-4"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			backend := newLinodeLeaseBackend(Provider{}.Spec(), tc.cfg, core.Runtime{})
@@ -334,7 +334,7 @@ func TestAcquireRecordsConfiguredLinodeTypeInMetadata(t *testing.T) {
 		{"explicit override", "g6-standard-2", "g6-nanode-1", "g6-nanode-1"},
 		{"padded explicit override", "g6-standard-2", " g6-nanode-1 ", "g6-nanode-1"},
 		{"blank explicit uses provider type", "g6-standard-2", " \t ", "g6-standard-2"},
-		{"blank explicit uses default", "", " ", defaultType},
+		{"blank explicit uses default", "", " ", "g6-standard-16"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			api := &fakeLinodeAPI{}

@@ -2,8 +2,8 @@
 
 `crabbox providers` prints the provider capability matrix that the CLI compiles
 in. It is a static report: it reads each registered provider's declared spec and
-does not contact any cloud, check credentials, or query quota. Use
-[`doctor`](doctor.md) when you need live readiness checks.
+offline backend capabilities. It does not contact any cloud, check credentials,
+or query quota. Use [`doctor`](doctor.md) when you need live readiness checks.
 
 ```sh
 crabbox providers
@@ -193,7 +193,7 @@ docker -> local-container
   deprecated: false
   replacement: -
   targets: linux
-  features: browser,cache-volume,cleanup,crabbox-sync,desktop,run-session,ssh,workspace-checkpoint,workspace-fork
+  features: browser,cache-volume,cleanup,crabbox-sync,desktop,fixed-lease-id,run-session,ssh,workspace-checkpoint,workspace-fork
   runtime: interactive,local-runtime,ssh-host
   reachability: ssh-tunnel
   workspace: checkpoint,fork
@@ -227,6 +227,19 @@ It describes the binary's implementation, not whether a particular lease has a
 valid binding. Consumers requiring that behavior must reject a missing feature
 or failed description rather than infer support from `run-artifacts` alone.
 
+`fixed-lease-id` advertises caller-supplied, idempotent lease IDs for
+`warmup --lease-id`. A fixed-lease orchestrator can check `features` in the
+matrix (`crabbox providers --json`) or `capabilities.features` in
+`providers describe <provider> --json` before recording an allocation attempt.
+It can also filter with `crabbox providers --feature fixed-lease-id --json`.
+The feature comes from the backend's `SupportsRequestedLeaseID()` capability;
+coordinator-brokered SSH providers use the coordinator backend's answer. For
+those providers, the flag describes brokered support, not a guarantee for
+direct mode. Configuration-dependent external-provider opt-ins are not inferred
+by this offline catalog. The warmup implementation in `internal/cli/run.go`
+still refuses `--lease-id` with exit 2 when the selected runtime backend lacks
+that capability. Catalog support does not bypass runtime validation.
+
 ### JSON schema v2
 
 Providers that opt into native size selection also include the optional
@@ -254,7 +267,7 @@ deterministic output:
   "family": "container",
   "targets": ["linux"],
   "capabilities": {
-    "features": ["browser", "cache-volume", "cleanup", "crabbox-sync", "desktop", "run-session", "ssh", "workspace-checkpoint", "workspace-fork"],
+    "features": ["browser", "cache-volume", "cleanup", "crabbox-sync", "desktop", "fixed-lease-id", "run-session", "ssh", "workspace-checkpoint", "workspace-fork"],
     "runtime": ["interactive", "local-runtime", "ssh-host"],
     "reachability": ["ssh-tunnel"],
     "workspace": ["checkpoint", "fork"],
@@ -330,7 +343,7 @@ provider filter values:
   kind: delegated-run,service-control,ssh-lease
   category: brokerable-cloud,byo-ssh,ci-proof-runner,delegated-sandbox,direct-cloud,external-provider,gpu-cloud,local-runtime,local-sandbox,local-vm,self-hosted-virtualization,service-control
   target: linux,macos,windows/normal,windows/wsl2,worker-runtime
-  feature: archive-sync,browser,cache-volume,cleanup,code,crabbox-sync,desktop,lease-heartbeat,mcp-attachments,module-run,pause-resume,provider-snapshot,run-artifacts,run-downloads,run-proof,run-session,ssh,tailscale,url-bridge,workspace-checkpoint,workspace-fork,workspace-restore
+  feature: archive-sync,browser,cache-volume,cleanup,code,crabbox-sync,desktop,fixed-lease-id,lease-heartbeat,mcp-attachments,module-run,pause-resume,provider-snapshot,run-artifacts,run-downloads,run-proof,run-session,ssh,tailscale,url-bridge,workspace-checkpoint,workspace-fork,workspace-restore
   runtime: ci-runner,delegated-command,interactive,local-runtime,local-sandbox,managed-sandbox,remote-dev,service-control,ssh-host,worker-module
   reachability: provider-url,ssh-tunnel,tailnet-egress,tailnet-peer
   workspace: checkpoint,fork,restore,snapshot-ref
@@ -721,14 +734,15 @@ profile and one fallback to show the richer record shape:
     selector match fails with exit 2; it is never treated as a literal provider
     machine type. Uppercase, padded, and custom class strings retain their
     provider-specific legacy behavior.
-  - `primary` is tried first and `fallbacks` follows in declared order.
-    `fallbacks` is always an array and is never sorted.
+  - `primary` is the preferred machine and `fallbacks` lists alternatives
+    in declared order. Backends with automatic capacity retry try them in that
+    order. `fallbacks` is always an array and is never sorted.
   - Machine `architecture` is `amd64` or `arm64`. Unknown `vcpu` and `memory`
     are JSON `null`, never estimates. Non-null memory includes a numeric `value`
     and explicit provider-native unit: `MB`, `MiB`, `GB`, or `GiB`.
 
-Profile order is deterministic: canonical class order (`standard`, `fast`,
-`large`, `beast`), then target, Windows mode, and architecture. The catalog is
+Profile order is deterministic: canonical class order (`tiny`, `small`,
+`standard`, `fast`, `large`, `beast`), then target, Windows mode, and architecture. The catalog is
 compiled static data; discovery does not read config or local state, inspect
 credentials, contact a provider, or make network calls. The human-readable
 provider output prints only the compatibility `classes` summary for the same
@@ -738,6 +752,30 @@ Profiles describe explicit canonical class intent. When class is inherited
 rather than explicitly selected, provider-native defaults and overrides may
 take precedence. Blacksmith is `unmapped`: its workflow chooses capacity
 outside a supported static Crabbox class-to-machine catalog.
+
+DigitalOcean, Scaleway, and Linode map Linux/amd64 classes to these primary
+machines. Parentheses show vCPU / GiB RAM; classes are relative sizes within
+each provider, not identical hardware across clouds.
+
+| Class | DigitalOcean | Scaleway | Linode |
+| --- | --- | --- | --- |
+| `tiny` | `s-1vcpu-1gb` (1 / 1) | `DEV1-S` (2 / 2) | `g6-standard-1` (1 / 2) |
+| `small` | `s-2vcpu-4gb` (2 / 4) | `DEV1-M` (3 / 4) | `g6-standard-2` (2 / 4) |
+| `standard` | `s-4vcpu-8gb` (4 / 8) | `DEV1-L` (4 / 8) | `g6-standard-4` (4 / 8) |
+| `fast` | `s-8vcpu-16gb` (8 / 16) | `PRO2-M` (16 / 64) | `g6-standard-6` (6 / 16) |
+| `large` | `g-16vcpu-64gb` (16 / 64) | `PRO2-L` (32 / 128) | `g6-standard-8` (8 / 32) |
+| `beast` | `g-32vcpu-128gb` (32 / 128) | `GP1-XL` (48 / 256) | `g6-standard-16` (16 / 64) |
+
+DigitalOcean's catalog also declares `c-8` (8 / 16), `c-16` (16 / 32), and
+`c-32` (32 / 64) as fallback candidates for `fast`, `large`, and `beast`.
+Scaleway declares `PRO2-S` (8 / 32) for `standard`. Availability depends on
+region or zone; these three backends currently provision the primary without
+automatic retry across catalog alternatives. DigitalOcean's larger general-purpose slugs use the `g-`
+prefix; Scaleway's largest entry uses `GP1-XL` because there is no `PRO2-XL`.
+
+An explicit `--class` overrides an inherited Linode or Scaleway type default.
+An explicitly configured `linode.type` or `scaleway.type` still wins over
+class selection, even when it equals the default; `--type` wins over both.
 
 Recommendation JSON returns ranked objects:
 

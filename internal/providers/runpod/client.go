@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -15,7 +16,7 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-// runpodAPI is the minimal RunPod REST surface the provider needs. The
+// runpodAPI covers RunPod pod REST operations and GraphQL account identity. The
 // provider keeps the surface intentionally small: deploy a pod, look it up,
 // list pods, and terminate it. The pod's full SSH coordinates come back as
 // publicIp + portMappings["22"] once the pod reaches RUNNING.
@@ -72,6 +73,8 @@ type runpodRuntime struct {
 }
 
 type runpodPod struct {
+	Env map[string]string `json:"env"`
+
 	ID            string         `json:"id"`
 	Name          string         `json:"name"`
 	ImageName     string         `json:"imageName"`
@@ -105,6 +108,7 @@ func (p runpodPod) SSHEndpoint() runpodSSHEndpoint {
 }
 
 type runpodDeployInput struct {
+	Env               map[string]string
 	Name              string
 	ImageName         string
 	InstanceID        string
@@ -132,7 +136,7 @@ func newRunpodClient(cfg core.Config, rt core.Runtime) (runpodAPI, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
-	return &runpodClient{apiKey: apiKey, apiURL: apiURL, httpClient: shared.SecureHTTPClient(httpClient, parsed, runpodRedirectError)}, nil
+	return &runpodClient{apiKey: apiKey, apiURL: apiURL, httpClient: httpClient}, nil
 }
 
 func runpodRedirectError(destination *url.URL) error {
@@ -149,9 +153,9 @@ func (c *runpodClient) do(ctx context.Context, method, path string, body any, ou
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := shared.SecureHTTPClient(c.httpClient, req.URL, runpodRedirectError).Do(req)
 	if err != nil {
-		return err
+		return shared.ErrorWithMessage(shared.RedactErrorSecrets(err.Error(), c.apiKey, url.QueryEscape(c.apiKey)), err)
 	}
 	return shared.DecodeBoundedJSONResponse(resp, runpodMaxResponseBytes, out, providerName, func(code int, status, body string) error {
 		return &runpodAPIError{StatusCode: code, Status: status, Body: shared.RedactErrorSecrets(body, c.apiKey)}
@@ -172,11 +176,24 @@ func normalizeRunpodPod(pod runpodPod) runpodPod {
 }
 
 func (c *runpodClient) Whoami(ctx context.Context) (runpodMyself, error) {
-	var pods []runpodPod
-	if err := c.do(ctx, http.MethodGet, "/pods", nil, &pods); err != nil {
+	identity := *c
+	identity.apiURL = strings.TrimSuffix(c.apiURL, "/v1")
+	if c.apiURL == core.RunpodConfigDefaultAPIURL {
+		identity.apiURL = "https://api.runpod.io"
+	}
+	var result struct {
+		Data struct {
+			Myself runpodMyself `json:"myself"`
+		} `json:"data"`
+		Errors []json.RawMessage `json:"errors"`
+	}
+	if err := identity.do(ctx, http.MethodPost, "/graphql", map[string]string{"query": "query { myself { id } }"}, &result); err != nil {
 		return runpodMyself{}, err
 	}
-	return runpodMyself{ID: "authenticated"}, nil
+	if len(result.Errors) != 0 || strings.TrimSpace(result.Data.Myself.ID) == "" {
+		return runpodMyself{}, core.Exit(2, "RunPod GraphQL account identity is missing or unavailable")
+	}
+	return result.Data.Myself, nil
 }
 
 func cpuFlavorID(instanceID string) string {
@@ -214,8 +231,15 @@ func runpodDeployPayload(input runpodDeployInput) map[string]any {
 	if input.TemplateID != "" {
 		payload["templateId"] = input.TemplateID
 	}
+	env := maps.Clone(input.Env)
 	if publicKey := strings.TrimSpace(input.PublicKey); publicKey != "" {
-		payload["env"] = map[string]string{"PUBLIC_KEY": publicKey}
+		if env == nil {
+			env = map[string]string{}
+		}
+		env["PUBLIC_KEY"] = publicKey
+	}
+	if len(env) != 0 {
+		payload["env"] = env
 	}
 	instanceIDs := runpodInstanceIDs(input.InstanceID)
 	if strings.HasPrefix(strings.ToLower(instanceIDs[0]), "cpu") {
@@ -265,6 +289,11 @@ func (c *runpodClient) deployPod(ctx context.Context, input runpodDeployInput) (
 		return runpodPod{}, fmt.Errorf("create pod returned empty id")
 	}
 	return pod, nil
+}
+
+// Fixed creation submits once; an uncertain response must be reconciled first.
+func (c *runpodClient) DeployFixedPod(ctx context.Context, input runpodDeployInput) (runpodPod, error) {
+	return c.deployPod(ctx, input)
 }
 
 func isRunpodCapacityError(err error) bool {
@@ -330,6 +359,8 @@ func decodePortMappings(raw map[string]any) map[string]int {
 
 func (p *runpodPod) UnmarshalJSON(data []byte) error {
 	var aux struct {
+		Env map[string]string `json:"env"`
+
 		ID            string         `json:"id"`
 		Name          string         `json:"name"`
 		ImageName     string         `json:"imageName"`
@@ -347,6 +378,7 @@ func (p *runpodPod) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("decode runpod response: %w", err)
 	}
 	*p = runpodPod{
+		Env:           aux.Env,
 		ID:            aux.ID,
 		Name:          aux.Name,
 		ImageName:     aux.ImageName,

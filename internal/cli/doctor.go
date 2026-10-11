@@ -89,7 +89,7 @@ All flags:
 		return a.doctorAll(ctx, doctorAllOptions{Providers: splitCommaList(*providersFlag), JSON: *jsonOut, PrepareCheck: *prepareCheck})
 	}
 
-	cfg, err := loadConfig()
+	cfg, err := loadConfigForFlags(fs)
 	if err != nil {
 		return err
 	}

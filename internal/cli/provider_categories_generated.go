@@ -13,6 +13,7 @@ var benchmarkProviderCategories = map[string]string{
 	"aws-lambda-microvm":         "delegated-sandbox",
 	"azure":                      "brokerable-cloud",
 	"azure-dynamic-sessions":     "delegated-sandbox",
+	"azure-sandbox":              "delegated-sandbox",
 	"blacksmith-testbox":         "ci-proof-runner",
 	"blaxel":                     "delegated-sandbox",
 	"boxd":                       "direct-cloud",

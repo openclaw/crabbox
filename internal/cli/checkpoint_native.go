@@ -699,6 +699,8 @@ func checkpointKindForProviderImage(image CoordinatorImage) string {
 		return checkpointKindIncus
 	case checkpointKindDaytona:
 		return checkpointKindDaytona
+	case checkpointKindCloudflare:
+		return checkpointKindCloudflare
 	}
 	switch image.Provider {
 	case "azure":
@@ -722,7 +724,7 @@ func checkpointStrategyForKind(kind string) string {
 	switch kind {
 	case checkpointKindAWSAMI, checkpointKindAzure, checkpointKindGCP, checkpointKindMachine0, checkpointKindDockerCommit:
 		return checkpointStrategyImage
-	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindParallels, checkpointKindDaytona, checkpointKindIncus:
+	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindParallels, checkpointKindDaytona, checkpointKindIncus, checkpointKindCloudflare:
 		return checkpointStrategyDiskSnapshot
 	default:
 		return ""

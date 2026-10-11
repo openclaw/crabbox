@@ -554,7 +554,7 @@ func TestCoordinatorReleaseReportsScheduledCleanup(t *testing.T) {
 	_, err := observeCoordinatorReleaseCompletion(context.Background(), nil, CoordinatorLease{
 		ID: leaseID, Provider: "azure", State: "released", CleanupStatus: "failed",
 		CleanupRetryAt: "2026-09-26T21:00:00Z",
-	}, leaseID, "azure")
+	}, leaseID, "azure", nil)
 	if err == nil {
 		t.Fatal("expected pending cleanup error")
 	}

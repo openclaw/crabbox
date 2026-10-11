@@ -108,7 +108,7 @@ func TestSafetyAcquireCarriesFinalClaimSnapshot(t *testing.T) {
 	fc := newFakeCodespacesClient()
 	fc.getSeq["cs-1"] = []codespace{fakeCodespace("cs-1", "Available")}
 	b := newTestBackend(t, fc, &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"})
-	lease, err := b.Acquire(context.Background(), core.AcquireRequest{
+	lease, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: "cbx_34700000000b",
 		RequestedSlug:    "snapshot-box",

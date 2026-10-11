@@ -49,6 +49,22 @@ Spot is blocked or when an account only has On-Demand quota. Set
 `capacity.fallback: on-demand` (or `CRABBOX_CAPACITY_FALLBACK=on-demand`) to fall
 back to On-Demand automatically after Spot capacity/quota rejections.
 
+During acquisition, Crabbox stops waiting when EC2 reports `shutting-down` or
+`terminated`, or a closed Spot request reports `instance-terminated-*`. The
+error includes the instance ID and AWS reason, such as
+`Server.SpotInstanceTermination` or `instance-terminated-no-capacity`. Direct
+SSH/Windows bootstrap and coordinator SSM waits recheck EC2 every 15 seconds;
+address waits check on every poll. Spot-request diagnostics use
+`ec2:DescribeSpotInstanceRequests` when allowed; terminal EC2 state still ends
+the wait if that optional read is denied.
+
+Post-launch failure follows existing cleanup ownership: ordinary direct
+acquisitions roll back their created instance and key, fixed-ID acquisitions
+retain their bound claim for `stop`, and brokered acquisitions leave cleanup
+with the coordinator. The existing candidate/market fallback handles launch
+rejections; it does not replace an already-bound instance during readiness.
+Use `--market on-demand` for a new acquisition after a Spot reclaim when needed.
+
 Crabbox tries an ordered list of instance candidates for the requested class
 (below). An explicit `--type` is exact: if EC2 rejects it, Crabbox fails clearly
 instead of silently picking another type. During capacity incidents, prefer
@@ -124,7 +140,12 @@ from the C8i/M8i/M8i-flex/R8i families; Crabbox rejects unsupported families
   architecture. Pass `--arch arm64` for Graviton/ARM64 capacity and
   `--os ubuntu:24.04` for the previous LTS. Supported selectors:
   `ubuntu:26.04` and `ubuntu:24.04`.
-- **Windows** resolves the latest Windows Server 2022 English Full Base AMI.
+- **Windows** defaults to the latest Windows Server 2025 English Full Base AMI.
+  Pass `--target windows --os windows-server:2025` to select stock Server 2025, or
+  `--os windows-server:2022` to select stock Server 2022 explicitly. Both work
+  with native Windows and WSL2. Without a Windows selector, brokered promoted
+  Windows images still win; an explicit selector bypasses unversioned promotions.
+  See [Windows images](../providers/aws.md#windows-images) for precedence.
 - **macOS** resolves the matching Amazon EC2 macOS AMI for the chosen instance
   family (arm64 for Apple silicon, x86_64 for `mac1.metal`).
 
@@ -136,9 +157,10 @@ also bake and promote trusted AWS images with `crabbox image` (see the
 
 Crabbox imports or reuses an EC2 key pair, creates or reuses the
 `crabbox-runners` security group when none is supplied, and opens only the SSH
-ports to the configured CIDRs or the detected request source. The default root
-volume is 400 GB gp3, encrypted; override with `CRABBOX_AWS_ROOT_GB` /
-`aws.rootGB`. VNC stays behind the SSH tunnel.
+ports to the configured CIDRs or the detected request source. Root volumes are
+encrypted gp3, sized by machine class (40 GB for `tiny` up to 400 GB for `beast`)
+and raised to the image's root snapshot minimum; override with
+`CRABBOX_AWS_ROOT_GB` / `aws.rootGB`. VNC stays behind the SSH tunnel.
 
 Supplying `CRABBOX_AWS_SECURITY_GROUP_ID` makes ingress policy your
 responsibility. Set `CRABBOX_AWS_SUBNET_ID` to launch into a non-default VPC.

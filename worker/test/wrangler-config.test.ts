@@ -31,6 +31,18 @@ describe("wrangler config", () => {
     }
   });
 
+  it.each([
+    ["CRABBOX_MAX_ACTIVE_LEASES", 50],
+    ["CRABBOX_MAX_ACTIVE_LEASES_PER_ORG", 50],
+    ["CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN", 50],
+    ["CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER", 10],
+    ["CRABBOX_MAX_MONTHLY_USD", 50000],
+    ["CRABBOX_MAX_MONTHLY_USD_PER_OWNER", 25000],
+    ["CRABBOX_MAX_MONTHLY_USD_PER_ORG", 50000],
+  ])("keeps deployed and preview %s at %i", (name, limit) => {
+    expect(configValues(name)).toEqual([limit, limit]);
+  });
+
   it("keeps deployed and preview checkpoint and use-claim admission bounded", () => {
     expect(configValues("CRABBOX_MAX_CHECKPOINTS")).toEqual([100, 20]);
     expect(configValues("CRABBOX_MAX_CHECKPOINTS_PER_OWNER")).toEqual([100, 10]);

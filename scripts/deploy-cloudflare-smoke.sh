@@ -83,7 +83,7 @@ smoke_no_sync() {
     cd "$repo"
     run "$CRABBOX_BIN" cleanup --provider cloudflare
     run "$CRABBOX_BIN" list --provider cloudflare --refresh --json
-    run "$CRABBOX_BIN" run --provider cloudflare --type lite --no-sync --timing-json --shell -- \
+    run "$CRABBOX_BIN" run --provider cloudflare --type standard-1 --no-sync --timing-json --shell -- \
       'set -eu; echo CRABBOX_CF_NO_SYNC_OK; pwd; uname -s; command -v go; command -v node; command -v gh; command -v rg'
   )
 }
@@ -98,7 +98,7 @@ smoke_keep_stop() {
   local keep_status=0
   if (
     cd "$repo" || exit 2
-    "$CRABBOX_BIN" run --provider cloudflare --type lite --keep --no-sync --timing-json --shell -- \
+    "$CRABBOX_BIN" run --provider cloudflare --type standard-1 --keep --no-sync --timing-json --shell -- \
       'set -eu; echo CRABBOX_CF_KEEP_OK; sleep 1'
   ) >"$keep_out" 2>"$keep_err"; then
     keep_status=0
@@ -138,7 +138,7 @@ smoke_keep_stop() {
 smoke_sync() {
   (
     cd "$repo"
-    run "$CRABBOX_BIN" run --provider cloudflare --type basic --timing-json --shell -- \
+    run "$CRABBOX_BIN" run --provider cloudflare --type standard-1 --timing-json --shell -- \
       'set -eu; test -f go.mod; test -f internal/providers/cloudflare/backend.go; rg -n "stopped_with_code" internal/providers/cloudflare/backend.go internal/providers/cloudflare/backend_test.go; go env GOVERSION; node --version; gh --version'
     run "$CRABBOX_BIN" cleanup --provider cloudflare
     run "$CRABBOX_BIN" list --provider cloudflare --refresh --json

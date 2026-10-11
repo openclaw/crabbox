@@ -103,7 +103,7 @@ func newOCAPIClient(cfg core.Config, rt core.Runtime) (*ocAPIClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	apiKey := firstNonEmpty(
+	apiKey := shared.FirstNonBlankTrimmed(
 		os.Getenv("CRABBOX_OPENCOMPUTER_API_KEY"),
 		os.Getenv("OPENCOMPUTER_API_KEY"),
 		fileCfg.APIKey,
@@ -323,13 +323,4 @@ func readOCFileConfig() ocFileConfig {
 		return ocFileConfig{}
 	}
 	return cfg
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
-		}
-	}
-	return ""
 }

@@ -161,6 +161,8 @@ Delegated-run providers (no SSH lease):
 - Anthropic Sandbox Runtime live local enforcement smoke: `scripts/live-anthropic-sandbox-runtime-smoke.sh`
 - Azure Container Apps dynamic sessions (shares the `azure` family, but
   delegated-run): `internal/providers/azuredynamicsessions`, runner image `worker/azure-dynamic-sessions.Dockerfile`
+- Azure Container Apps Sandboxes (fixed leases, shell execution, file uploads,
+  and exact cleanup): `internal/providers/azuresandbox`
 
 Service-control providers (no SSH lease and no arbitrary command execution):
 

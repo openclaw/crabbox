@@ -12,6 +12,7 @@ export function normalizeOSImage(value: string | undefined): string {
   if (!normalized) {
     normalized = defaultOSImage;
   }
+  if (Object.hasOwn(specs, normalized)) return normalized;
   normalized = normalized.replaceAll("_", ".").replaceAll("-", ":");
   normalized = Object.hasOwn(osImageAliases, normalized) ? osImageAliases[normalized]! : normalized;
   if (!Object.hasOwn(specs, normalized)) {
@@ -26,4 +27,10 @@ export function osImageSpec(value: string | undefined): OSImageSpec {
     throw new Error(`unsupported os ${JSON.stringify(value)}; supported: ${supportedOSImages}`);
   }
   return spec;
+}
+
+export function normalizeLinuxOSImage(value: string | undefined): string {
+  const spec = osImageSpec(value);
+  if (spec.target !== "linux") throw new Error(`os ${spec.selector} requires target=windows`);
+  return spec.selector;
 }

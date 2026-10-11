@@ -36,7 +36,7 @@ live in the [Command Reference](../commands/README.md).
 - [Telemetry](telemetry.md): lightweight Linux load, memory, disk, uptime, and per-run resource samples.
 - [History and logs](history-logs.md): coordinator run records, events, and retained remote output.
 - [Cost and usage](cost-usage.md): guardrails, provider-backed pricing, and reporting.
-- [Marketplace credits gateway](marketplace-credits.md): one customer credit balance and smart routing across brokered capacity.
+- [Marketplace credits gateway](marketplace-credits.md): preview status and advisory quotes; no payment, credit reservation, or lease provisioning.
 - [Lifecycle cleanup](lifecycle-cleanup.md): release, expiry, keep mode, and direct cleanup.
 
 ## Runners and reachability
@@ -66,7 +66,7 @@ live in the [Command Reference](../commands/README.md).
 - [Capsules](capsules.md): local-first replay manifests for GitHub Actions failures.
 - [Checkpoints](checkpoints.md): save, restore, and fork reusable remote workspaces.
 - [Editor handoff](../commands/open.md): prepare a synced lease for an external editor and keep its activity alive.
-- [Interactive desktop and VNC](interactive-desktop-vnc.md): VNC hub, support matrix, tunnel model, and QA boundaries.
+- [Interactive desktop and VNC](interactive-desktop-vnc.md): one guide to desktop, VNC/WebVNC, browser, Code, and portal access, including sharing and cleanup.
 - [Artifacts](artifacts.md): screenshots, video, trimmed GIFs, logs, metadata, templates, and PR publishing.
 - [Linux VNC](vnc-linux.md): Linux desktop setup and troubleshooting.
 - [Windows VNC](vnc-windows.md): Windows desktop setup and troubleshooting.

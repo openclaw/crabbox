@@ -314,9 +314,8 @@ func TestWindowsRemoteRunScriptCommandUsesPowerShellFile(t *testing.T) {
 		`Set-Location -LiteralPath 'C:\crabbox\repo'`,
 		`Import-CrabboxEnvFile '.crabbox\env\run.env'`,
 		`$env:API_TOKEN = 'secret'`,
-		`$__crabboxScript = '.crabbox\scripts\abc-script.ps1'`,
-		`$__crabboxArgs = @('arg one')`,
-		`powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $__crabboxScript @__crabboxArgs`,
+		`$__crabboxStart.Arguments = '"-NoLogo" "-NoProfile" "-NonInteractive" "-ExecutionPolicy" "Bypass" "-File" ".crabbox\scripts\abc-script.ps1" "arg one"'`,
+		`$__crabboxStart.UseShellExecute = $false`,
 	} {
 		if !strings.Contains(decoded, want) {
 			t.Fatalf("windows script command missing %q in %q", want, decoded)

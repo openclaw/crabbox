@@ -36,6 +36,26 @@ crabbox cleanup --provider digitalocean --dry-run
 numeric DigitalOcean Droplet id. `--type` is the exact DigitalOcean Droplet size
 slug; there is no separate DigitalOcean size flag.
 
+## Machine Classes
+
+An explicit `--class` selects real Linux/amd64 capacity. Primary sizes are:
+
+| Class | Droplet size | vCPU | RAM (GiB) |
+| --- | --- | --- | --- |
+| `tiny` | `s-1vcpu-1gb` | 1 | 1 |
+| `small` | `s-2vcpu-4gb` | 2 | 4 |
+| `standard` | `s-4vcpu-8gb` | 4 | 8 |
+| `fast` | `s-8vcpu-16gb` | 8 | 16 |
+| `large` | `g-16vcpu-64gb` | 16 | 64 |
+| `beast` | `g-32vcpu-128gb` | 32 | 128 |
+
+`standard` no longer selects the smallest Droplet. Use `--class tiny` or
+`--type s-1vcpu-1gb` to retain that size and cost. An explicit `--type` overrides
+the class. `crabbox providers --json` exposes these profiles under `classCatalog`,
+including declared alternatives; this backend currently creates the primary
+without automatic retry across those alternatives. See the
+[class catalog](../commands/providers.md) for the full contract.
+
 ## Configuration
 
 ```yaml
@@ -43,7 +63,7 @@ provider: digitalocean
 target: linux
 class: standard
 digitalocean:
-  region: nyc3
+  # region: sfo2 # Optional; omit to select the closest available region to San Francisco.
   image: ubuntu-24-04-x64
   vpc: ""
   sshCIDRs: []
@@ -53,7 +73,7 @@ Config keys under `digitalocean:`:
 
 | Key | Maps to | Default | Notes |
 | --- | --- | --- | --- |
-| `region` | `cfg.DigitalOcean.Region` | `nyc3` | DigitalOcean region slug. |
+| `region` | `cfg.DigitalOcean.Region` | first available near San Francisco | Optional DigitalOcean region slug; an explicit value is authoritative. |
 | `image` | `cfg.DigitalOcean.Image` | `ubuntu-24-04-x64` | Droplet image slug. |
 | `vpc` | `cfg.DigitalOcean.VPCUUID` | empty | Optional VPC UUID for Droplet placement. |
 | `sshCIDRs` | `cfg.DigitalOcean.SSHCIDRs` | empty | Reserved for firewall-aware follow-up work; Phase 1 does not create firewalls. |
@@ -61,6 +81,22 @@ Config keys under `digitalocean:`:
 These are effective runtime defaults; the raw provider configuration starts
 empty/nil. DigitalOcean adds no provider-specific flags. Configure these settings
 through YAML or the environment; generic command flags remain separate.
+
+Size availability depends on the account and can change over time. Before
+creating a Droplet or account SSH key, Crabbox checks the selected size against
+DigitalOcean's paginated `/v2/sizes` catalog. When no region is configured, it
+selects the first region offering that size in this fixed preference order:
+`sfo3`, `sfo2`, `sfo1`, `tor1`, `nyc3`, `nyc1`, `nyc2`, `lon1`, `ams3`, `fra1`,
+`sgp1`, `blr1`, `syd1`. The provisioning line reports the chosen region.
+
+An explicit `digitalocean.region` or `CRABBOX_DIGITALOCEAN_REGION` is never
+changed automatically. `digitalocean_size_unavailable_in_region` lists the
+available regions when the size cannot be used in the explicit region, or
+when none of the preferred regions offers it. For example:
+
+```sh
+CRABBOX_DIGITALOCEAN_REGION=sfo2 crabbox warmup --provider digitalocean --class small
+```
 
 The portable `--os ubuntu:24.04` selector maps to `ubuntu-24-04-x64`.
 DigitalOcean does not currently offer the portable default Ubuntu 26.04 image,
@@ -183,8 +219,20 @@ account, create inputs, per-lease SSH key, allocation nonce, and observed
 Droplet ID. Changed inputs, account changes, and replacement Droplets are
 rejected. No coordinator is needed.
 
+An automatically selected region is saved with the create intent and claim.
+Replay reuses that region even if the size catalog changes; it does not select
+a new region for an existing intent. If automatic selection fails before an
+intent can be recorded, no lease or provider resources are created.
+
 DigitalOcean has no create idempotency key: Crabbox records admission before
-the POST and never repeats it on replay. An unresolved attempt retains its
+the POST and never repeats an unresolved attempt on replay. A definite create
+rejection (HTTP 4xx except 408, 409, and 429), after successful SSH-key rollback,
+records the attempt as failed with no resource created. A later `warmup` with
+the same lease ID and inputs can submit a new attempt, or `stop` can release the
+claim locally without contacting DigitalOcean. A size/region preflight failure
+has the same retry/stop behavior. Transport failures, timeouts, HTTP 5xx, 408,
+409, and 429 retain unresolved custody, as do SSH-key rollback failures.
+An unresolved attempt retains its
 claim and key, even when inventory is empty. Retry later when the original
 Droplet becomes visible. `stop` uses the existing account-, Droplet-, and
 SSH-key-bound cleanup checks. Successful cleanup retains a terminal tombstone,

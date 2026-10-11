@@ -251,9 +251,10 @@ jobs:
               gh api --method GET --header 'Accept: application/octet-stream' \
                 "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >"$destination"
             else
-              curl --disable --fail --silent --show-error --location --retry 3 \
-                "https://github.com/openclaw/crabbox/releases/download/$RELEASE_TAG/$asset_name" \
-                >"$destination"
+              # --output lets curl discard a partial file before --retry-all-errors retries.
+              curl --disable --fail --silent --show-error --location --retry 3 --retry-all-errors \
+                --output "$destination" \
+                "https://github.com/openclaw/crabbox/releases/download/$RELEASE_TAG/$asset_name"
             fi
             actual_size=$(wc -c <"$destination" | tr -d '[:space:]')
             actual_digest="sha256:$(shasum -a 256 "$destination" | awk '{print $1}')"

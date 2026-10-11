@@ -74,6 +74,9 @@ func NewRunpodLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runt
 func (b *runpodLeaseBackend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *runpodLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	if req.RequestedLeaseID != "" {
+		return b.acquireFixed(ctx, req)
+	}
 	client, err := b.api()
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -166,6 +169,11 @@ func (b *runpodLeaseBackend) Resolve(ctx context.Context, req core.ResolveReques
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if claim, exists, err := resolveRunpodClaim(req.ID); err != nil {
+		return core.LeaseTarget{}, err
+	} else if exists && claim.FixedCreateIntent != nil {
+		return b.resolveFixed(ctx, client, req, claim)
+	}
 	if req.ReleaseOnly {
 		claim, ok, err := resolveRunpodClaim(req.ID)
 		if err != nil {
@@ -212,6 +220,9 @@ func (b *runpodLeaseBackend) Resolve(ctx context.Context, req core.ResolveReques
 		return core.LeaseTarget{}, err
 	}
 	admit := req.Repo.Root != "" && !req.NoLocalStateMutations && !req.StatusOnly
+	if pod.Env[fixedLeaseMarker] != "" {
+		return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed RunPod pod requires its durable create claim")
+	}
 	if admit && (!claimed || !runpodClaimIsBound(claim)) && !req.Reclaim {
 		return core.LeaseTarget{}, core.Exit(2, "runpod pod %s is not bound to an exact local claim; retry with --reclaim to adopt it", pod.ID)
 	}
@@ -256,14 +267,17 @@ func (b *runpodLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (
 	if err != nil {
 		return core.DoctorResult{}, err
 	}
-	if _, err := client.Whoami(ctx); err != nil {
+	account, err := client.Whoami(ctx)
+	if err != nil {
 		return core.DoctorResult{}, core.Exit(1, "runpod auth check failed: %v", err)
 	}
 	pods, err := client.ListPods(ctx)
 	if err != nil {
 		return core.DoctorResult{}, core.Exit(1, "runpod list pods failed: %v", err)
 	}
-	return core.InventoryDoctorResult(providerName, len(pods)), nil
+	result := core.InventoryDoctorResult(providerName, len(pods))
+	result.Message += " account=" + account.ID
+	return result, nil
 }
 
 func (b *runpodLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
@@ -276,6 +290,9 @@ func (b *runpodLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseL
 	claim, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server)
 	if !set || !exists {
 		return core.Exit(4, "runpod lease=%s has no exact observed claim snapshot; refusing release", req.Lease.LeaseID)
+	}
+	if claim.FixedCreateIntent != nil {
+		return b.releaseFixed(ctx, req, claim)
 	}
 	if err := b.validateLeaseClaim(req.Lease, claim); err != nil {
 		return err
@@ -308,6 +325,9 @@ func (b *runpodLeaseBackend) AuthorizeStatusTouchClaim(ctx context.Context, leas
 	if err := b.validateLeaseClaim(lease, claim); err != nil {
 		return err
 	}
+	if intent := claim.FixedCreateIntent; intent != nil && intent.Journal != nil && intent.Journal.Phase == "deleting" {
+		return core.Exit(4, "lease_id_conflict: RunPod lease has entered cleanup; retry stop")
+	}
 	return shared.AuthorizeClaimActivity(claim)
 }
 
@@ -320,7 +340,11 @@ func (b *runpodLeaseBackend) validateLeaseClaim(lease core.LeaseTarget, claim co
 	if !runpodClaimIsBound(claim) || server.Provider != providerName || lease.LeaseID == "" || server.CloudID == "" || server.Name == "" || server.Labels["lease"] != lease.LeaseID || server.Labels["name"] != server.Name {
 		return core.Exit(4, "runpod lease=%s target does not match the exact pod claim", lease.LeaseID)
 	}
-	return shared.ValidateClaimBinding(claim, b.claimBinding(lease))
+	binding := b.claimBinding(lease)
+	if fixedLeaseKind.IsFixedClaim(claim) {
+		binding.ProviderScope = claim.ProviderScope
+	}
+	return shared.ValidateClaimBinding(claim, binding)
 }
 
 func (b *runpodLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
@@ -588,6 +612,9 @@ func runpodClaimIsBound(claim core.LeaseClaim) bool {
 }
 
 func (b *runpodLeaseBackend) resolveClaimedPod(ctx context.Context, client runpodAPI, claim core.LeaseClaim, requireBound bool) (runpodPod, error) {
+	if claim.FixedCreateIntent != nil {
+		return b.loadFixedPod(ctx, client, claim)
+	}
 	bound := runpodClaimIsBound(claim)
 	if requireBound && !bound {
 		return runpodPod{}, unclaimedRunpodError(claim.LeaseID)
@@ -731,6 +758,9 @@ func (b *runpodLeaseBackend) listServersFromClient(ctx context.Context, client r
 			continue
 		}
 		leaseID, slug := runpodLeaseIdentity(pod.Name)
+		if pod.Env[fixedLeaseMarker] != "" {
+			leaseID = pod.Env[fixedLeaseMarker]
+		}
 		server := runpodServer(pod, leaseID, slug, cfg)
 		claim, exists, err := core.ResolveLeaseClaimForProviderCloudID(pod.ID, providerName)
 		if err != nil {
@@ -797,6 +827,9 @@ func initializeRunpodLifecycle(server core.Server, cfg core.Config, keep bool, n
 }
 
 func projectRunpodClaim(server core.Server, claim core.LeaseClaim) core.Server {
+	if fixedLeaseKind.IsFixedClaim(claim) {
+		server.ImmutableID = server.CloudID
+	}
 	labels := shared.CloneLabels(server.Labels)
 	for key, value := range shared.ClaimLifecycleLabels(claim) {
 		switch key {

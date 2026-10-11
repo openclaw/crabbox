@@ -30,6 +30,16 @@ type FixedCreateRejected struct{ Err error }
 func (e *FixedCreateRejected) Error() string { return e.Err.Error() }
 func (e *FixedCreateRejected) Unwrap() error { return e.Err }
 
+// CanSettleCreateRejection fences rejection settlement to this transaction's
+// first unallocated submission. CloudID can be a name reserved by the plan;
+// the bound journal phase, rather than that name, records allocation custody.
+func (tx *FixedTransaction) CanSettleCreateRejection(kind FixedLeaseKind) bool {
+	intent := tx.Claim.FixedCreateIntent
+	return kind.IsFixedClaim(*tx.Claim) && tx.initialUnallocated &&
+		intent.State == "prepared" && tx.Claim.CloudImmutableID == "" &&
+		intent.Journal != nil && (intent.Journal.Phase == "prepared" || intent.Journal.Phase == "submitting")
+}
+
 // Retire only this transaction's first, unallocated attempt under its claim
 // fence. A rejection on replay cannot disprove an earlier uncertain submission.
 func (tx *FixedTransaction) settleCreateRejection(kind FixedLeaseKind, cause error) error {
@@ -37,10 +47,7 @@ func (tx *FixedTransaction) settleCreateRejection(kind FixedLeaseKind, cause err
 	if !errors.As(cause, &rejected) {
 		return cause
 	}
-	intent := tx.Claim.FixedCreateIntent
-	if !kind.IsFixedClaim(*tx.Claim) || !tx.initialUnallocated ||
-		intent.State != "prepared" || tx.Claim.CloudImmutableID != "" || intent.Journal == nil ||
-		(intent.Journal.Phase != "prepared" && intent.Journal.Phase != "submitting") {
+	if !tx.CanSettleCreateRejection(kind) {
 		return errors.Join(cause, Exit(4, "lease_id_conflict: rejection cannot settle an earlier or bound fixed attempt; claim retained"))
 	}
 	path, err := leaseClaimPath(tx.leaseID)
@@ -55,6 +62,9 @@ func (tx *FixedTransaction) settleCreateRejection(kind FixedLeaseKind, cause err
 	}
 	if kind.RemoveKeyAfterRejection {
 		return errors.Join(cause, RemoveStoredTestboxConnectionArtifacts(tx.leaseID))
+	}
+	if outcome, ok := rejected.Err.(interface{ FixedRejectionSettled() error }); ok {
+		return outcome.FixedRejectionSettled()
 	}
 	return cause
 }
@@ -418,6 +428,9 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 		return fmt.Errorf("fixed lease engine requires observation and exact deletion")
 	}
 	return WithDurableLeaseClaimLockContext(ctx, expected.LeaseID, func(claim *LeaseClaim, exists bool, persist func() error) error {
+		if claim.RecoveryHold != nil {
+			return Exit(4, "recovery_required: lease %s is held for salvage", claim.LeaseID)
+		}
 		if !exists || !reflect.DeepEqual(*claim, expected) {
 			return Exit(4, "lease_id_conflict: fixed claim changed before release; retry")
 		}

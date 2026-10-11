@@ -5,7 +5,8 @@ authenticated coordinator [portal](../features/portal.md), so you can edit the
 synced checkout in a browser VS Code without exposing the runner directly.
 
 ```sh
-crabbox warmup --code
+crabbox warmup --code --slug swift-crab
+crabbox run --id swift-crab --sync-only
 crabbox code --id swift-crab
 crabbox code --id swift-crab --open
 ```
@@ -30,6 +31,9 @@ crabbox code --id swift-crab --open
 runner's loopback interface (`127.0.0.1:8080`), opens an SSH tunnel to it, mints
 a short-lived bridge ticket from the coordinator, and registers a local bridge
 process. Keep the process running while you use the editor.
+
+`code` does not sync local files. Run `run --sync-only` first, or open an
+already synced or Actions-hydrated workspace.
 
 The data path is:
 
@@ -74,7 +78,7 @@ The editor opens the synced workspace by default. If you run `crabbox code` from
 a subdirectory of the local checkout, Crabbox maps that relative path onto the
 remote workspace and opens the matching folder. [Actions-hydrated](../features/actions-hydration.md)
 leases open the hydration workspace instead of the default
-`/work/crabbox/<repo>` path.
+`/work/crabbox/<lease>/<repo>` path.
 
 ### Resilience
 

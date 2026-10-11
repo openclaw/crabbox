@@ -119,11 +119,23 @@ own acknowledged request before command admission. Missing diagnostic endpoints
 do not block an already bound run; a changed binding must be accepted because
 the signed terminal receipt requires the exact lease, slug, and provider.
 Sync-only runs keep their optional-history behavior and warn when binding is
-unavailable. Before
-terminal recording, the CLI drains diagnostics for up to two seconds, cancels
-remaining publication, and joins the publisher. Queue overflow or drain expiry
-produces a warning; retained logs and verified terminal receipts remain the
-completion record.
+unavailable. Current coordinators advertise idempotent event appends. The CLI
+sends each event with a random, stable ID through `PUT /v1/runs/<run-id>/events`
+and retries transport failures, HTTP 429, and HTTP 5xx up to three times within
+30 seconds, with ten seconds per attempt and 250/500 ms backoff. Retries retain
+the same event payload and stay ahead of later events in the bounded FIFO.
+The coordinator atomically commits the event, its sequence counter, and a small
+ID-to-sequence record. Matching retries return the original event; changed
+content conflicts. These IDs are removed with the run's normal retention cleanup.
+
+Before terminal recording, the CLI drains diagnostics for up to 30 seconds on
+these coordinators, then cancels remaining publication and joins the publisher.
+Older coordinators retain single-attempt `POST` publication and a two-second
+drain; the CLI never retries an append unless idempotency was advertised. The
+separate `PUT` method prevents accidental duplicate appends if a coordinator is
+rolled back during a run. Queue overflow or exhausted retries/drain expiry
+produce a warning. Failed events are not replayed by finish: retained logs and
+verified terminal receipts remain the completion record.
 
 Each event carries a sequence number, type, phase, and stream. Streamed output
 events are capped at **64 KiB total per run**; once the cap is hit the CLI emits

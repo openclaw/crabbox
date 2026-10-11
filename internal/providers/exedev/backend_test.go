@@ -1336,7 +1336,7 @@ func TestExeDevConfigFlagContract(t *testing.T) {
 			values := RegisterExeDevProviderFlags(fs, cfg)
 			count := 0
 			fs.VisitAll(func(*flag.Flag) { count++ })
-			if count != 9 || fs.Lookup("exe-dev-work-root").DefValue != "" || fs.Lookup("exe-dev-image").DefValue != "" {
+			if count != 10 || fs.Lookup("exe-dev-work-root").DefValue != "" || fs.Lookup("exe-dev-image").DefValue != "" {
 				t.Fatal("raw flag default surface changed")
 			}
 			args := []string{"--exe-dev-control-host=", "--exe-dev-image=  ", fmt.Sprintf("--exe-dev-cpus=%d", cpu), "--exe-dev-memory=", "--exe-dev-disk=", "--exe-dev-command=command", "--exe-dev-user=fixture-user", "--exe-dev-work-root=/workspace/flag", "--exe-dev-no-email=false"}
@@ -1418,7 +1418,7 @@ func TestExeDevConfigFlagPhaseContract(t *testing.T) {
 
 func TestExeDevConfigEffectiveDefaultsContract(t *testing.T) {
 	t.Setenv("USER", "fixture-user")
-	for _, tc := range []struct{ providerRoot, generic, want string }{{"", "", "/tmp/crabbox"}, {"", "/work/crabbox", "/tmp/crabbox"}, {"", "/custom/root", "/custom/root"}, {"/specific/root", "/custom/root", "/specific/root"}, {"  ", "/custom/root", "  "}} {
+	for _, tc := range []struct{ providerRoot, generic, want string }{{"", "", "/var/tmp/crabbox"}, {"", "/work/crabbox", "/var/tmp/crabbox"}, {"", "/custom/root", "/custom/root"}, {"/specific/root", "/custom/root", "/specific/root"}, {"  ", "/custom/root", "  "}} {
 		cfg := core.Config{WorkRoot: tc.generic, ExeDev: core.ExeDevConfig{WorkRoot: tc.providerRoot, CPUs: -2}}
 		applyExeDevDefaults(&cfg)
 		if cfg.ExeDev.ControlHost != "exe.dev" || cfg.ExeDev.CPUs != 2 || cfg.ExeDev.Memory != "4GB" || cfg.ExeDev.Disk != "10GB" || cfg.ExeDev.WorkRoot != tc.want || cfg.WorkRoot != tc.want || cfg.ExeDev.NoEmail || cfg.ExeDev.Image != "" {
@@ -1493,10 +1493,10 @@ func TestInheritedWorkRootCallerContract(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("USER", "fixture-user")
 	for _, tc := range []struct{ providerRoot, genericRoot, want string }{
-		{"", "", "/tmp/crabbox"},
-		{"", "/work/crabbox", "/tmp/crabbox"},
-		{"", "/Users/ec2-user/crabbox", "/tmp/crabbox"},
-		{"", "C:\\crabbox", "/tmp/crabbox"},
+		{"", "", "/var/tmp/crabbox"},
+		{"", "/work/crabbox", "/var/tmp/crabbox"},
+		{"", "/Users/ec2-user/crabbox", "/var/tmp/crabbox"},
+		{"", "C:\\crabbox", "/var/tmp/crabbox"},
 		{"", " /work/crabbox ", " /work/crabbox "},
 		{"", "/WORK/crabbox", "/WORK/crabbox"},
 		{"", "c:\\crabbox", "c:\\crabbox"},

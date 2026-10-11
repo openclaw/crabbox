@@ -308,6 +308,9 @@ func printProviderDescription(out io.Writer, description providerDescription) {
 		fmt.Fprintln(out, identity.Canonical)
 	}
 	writeProviderStaticStatus(out, description.providerStaticStatus)
+	for _, route := range description.Authentication.Routes {
+		fmt.Fprintf(out, "  %s authentication: %s\n", route.Route, route.Description)
+	}
 	fmt.Fprintf(out, "  kind: %s\n", description.Kind)
 	fmt.Fprintf(out, "  runnable: %t\n", description.Runnable)
 	fmt.Fprintf(out, "  family: %s\n", description.Family)

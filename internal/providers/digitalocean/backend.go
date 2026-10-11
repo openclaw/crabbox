@@ -15,6 +15,7 @@ import (
 
 type digitalOceanAPI interface {
 	AccountID(context.Context) (string, error)
+	ResolveSizeRegion(context.Context, core.Config) (string, error)
 	ListCrabboxDroplets(context.Context) ([]droplet, error)
 	GetDroplet(context.Context, int64) (droplet, error)
 	CreateDroplet(context.Context, core.Config, string, string, string, bool, time.Time) (droplet, error)
@@ -89,6 +90,10 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 		return core.LeaseTarget{}, err
 	}
 	accountID, err := client.AccountID(ctx)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	cfg.DigitalOcean.Region, err = client.ResolveSizeRegion(ctx, cfg)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -322,6 +327,11 @@ func (b *digitalOceanLeaseBackend) persistAcquireCleanupClaim(
 }
 
 func (b *digitalOceanLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
+	if req.ReleaseOnly {
+		if lease, handled, err := resolveRejectedFixed(req.ID); handled || err != nil {
+			return lease, err
+		}
+	}
 	client, err := b.clientFactory(b.RT)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -780,11 +790,16 @@ func (b *digitalOceanLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequ
 		return core.DoctorResult{}, err
 	}
 	result := core.InventoryDoctorResult(providerName, len(droplets))
-	result.Message += fmt.Sprintf(" default_type=%s region=%s image=%s", b.Cfg.ServerType, digitalOceanRegion(b.Cfg), digitalOceanImage(b.Cfg))
+	result.Message += fmt.Sprintf(" default_type=%s region=%s image=%s", b.Cfg.ServerType, shared.FirstNonBlank(b.Cfg.DigitalOcean.Region, "automatic"), digitalOceanImage(b.Cfg))
 	return result, nil
 }
 
 func (b *digitalOceanLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	if claim, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server); set && exists && isRejectedFixed(claim) {
+		return fixedLeaseKind.FinalizeAfterCleanup(claim, func() error {
+			return core.RemoveStoredTestboxConnectionArtifacts(claim.LeaseID)
+		})
+	}
 	if req.Lease.Server.CloudID != "" || req.Lease.Server.Name != "" {
 		return b.deleteServer(ctx, b.Cfg, req.Lease.Server)
 	}
@@ -799,12 +814,27 @@ func (b *digitalOceanLeaseBackend) ReleaseLease(ctx context.Context, req core.Re
 }
 
 func (b *digitalOceanLeaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
+	if claim, exists, _ := core.ServerLeaseClaimSnapshot(lease.Server); exists && isRejectedFixed(claim) {
+		return fmt.Sprintf("released lease=%s (no resource created)", lease.LeaseID)
+	}
 	return fmt.Sprintf("deleted lease=%s droplet=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 }
 
-func (b *digitalOceanLeaseBackend) StatusTouchClaimMatches(lease core.LeaseTarget, claim core.LeaseClaim) bool {
-	expected := strings.TrimSpace(claim.Labels[digitalOceanAccountLabel])
-	return expected != "" && expected == strings.TrimSpace(lease.Server.Labels[digitalOceanAccountLabel])
+func (b *digitalOceanLeaseBackend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+	// Fixed claims bind the API account, which is not available in config scope.
+	// An unfinished create without an exact resource binding cannot renew a lease.
+	if claim.LeaseID != lease.LeaseID || claim.CloudID == "" || claim.CloudID != lease.Server.CloudID || claim.CloudID != dropletIDString(lease.Server.ID) {
+		return core.Exit(4, "digitalocean lease %s resource differs from its exact claim; refusing touch", lease.LeaseID)
+	}
+	client, err := b.clientFactory(b.RT)
+	if err != nil {
+		return err
+	}
+	accountID, err := client.AccountID(ctx)
+	if err != nil {
+		return err
+	}
+	return validateDigitalOceanCleanupClaim(lease.Server, claim, accountID)
 }
 
 func (b *digitalOceanLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {

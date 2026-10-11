@@ -26,7 +26,7 @@ func TestGHRunnerCodespaceSSHConfigArgv(t *testing.T) {
 		t.Fatalf("command=%q args=%q", call.Name, call.Args)
 	}
 	for _, arg := range call.Args {
-		if looksLikeGitHubToken(arg) {
+		if githubTokenPattern.MatchString(arg) {
 			t.Fatalf("token arg leaked: %#v", call.Args)
 		}
 	}

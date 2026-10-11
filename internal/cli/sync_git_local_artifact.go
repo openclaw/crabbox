@@ -317,10 +317,10 @@ func prepareLocalGitSeedArtifact(ctx context.Context, root string, selection loc
 	walkArgs = append(walkArgs, "--")
 	closure, err := localGitSeedOutput(ctx, readerRoot, false, walkArgs...)
 	if err != nil {
-		// Shallow markers never truncate the walk, so a shallow source fails here
-		// on its first missing parent. Name that cause instead of a bare exit code.
+		// Keep the full closure walk above; shallow markers alone do not imply
+		// that selected history is missing from the local object store.
 		if shallow, shallowErr := localGitSeedSourceOutput(ctx, root, "rev-parse", "--is-shallow-repository"); shallowErr == nil && shallow == "true" {
-			return artifact, fmt.Errorf("enumerate complete required local Git objects: the source repository is shallow and local seeding transfers complete history; run git fetch --unshallow, or set sync.gitSeed=false for file-only sync: %w", err)
+			return artifact, fmt.Errorf("enumerate complete required local Git objects: source repository is shallow; run git fetch --unshallow, or set sync.gitSeed=false and sync.gitSeedSource=origin for file-only sync: %w", err)
 		}
 		return artifact, fmt.Errorf("enumerate complete required local Git objects: %w", err)
 	}

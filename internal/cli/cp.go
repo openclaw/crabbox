@@ -93,7 +93,9 @@ All flags:
 	}
 	copyBackend, ok := backend.(CopyBackend)
 	if ok && !recovering {
+		boundary, _ := findRepositoryBoundary()
 		return copyBackend.Copy(ctx, CopyRequest{
+			RepoRoot:    boundary.root,
 			Options:     leaseOptionsFromConfig(cfg),
 			ID:          *id,
 			Source:      fs.Arg(0),

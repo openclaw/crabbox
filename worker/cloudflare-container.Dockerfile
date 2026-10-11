@@ -1,11 +1,3 @@
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26-bookworm@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d AS runner-build
-
-ARG TARGETOS=linux
-ARG TARGETARCH
-WORKDIR /src
-COPY cloudflare-container-runner/go.mod cloudflare-container-runner/*.go ./
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/crabbox-cloudflare-container-runner .
-
 FROM docker.io/library/golang:1.26-bookworm@sha256:a688600ca24f8a4d3ca77f95b0dd40704a9fc787c826660eb7ba0b641b8b175d AS go-runtime
 
 FROM docker.io/library/node:24-bookworm@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4
@@ -19,7 +11,7 @@ ENV NPM_CONFIG_CACHE=/var/cache/crabbox/npm \
     PATH=/usr/local/go/bin:$PATH
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl git jq ripgrep tar \
+  && apt-get install -y --no-install-recommends ca-certificates curl git jq ripgrep tar tini \
   && mkdir -p /var/cache/crabbox/npm /var/cache/crabbox/pnpm \
   && rm -rf /var/lib/apt/lists/* \
   && case "${TARGETARCH}" in \
@@ -37,10 +29,12 @@ RUN apt-get update \
   && pnpm config set store-dir /var/cache/crabbox/pnpm
 
 COPY --from=go-runtime /usr/local/go /usr/local/go
-COPY --from=runner-build /out/crabbox-cloudflare-container-runner /usr/local/bin/crabbox-cloudflare-container-runner
+# Commands run through the Worker's native exec() as `bash -l`; the profile
+# carries image defaults because exec() does not inherit the image ENV. A
+# forwarded NPM_CONFIG_CACHE, even an empty one, keeps its value.
 RUN ln -sf /usr/local/go/bin/go /usr/local/bin/go \
-  && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+  && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
+  && printf '%s\n' 'export NPM_CONFIG_CACHE="${NPM_CONFIG_CACHE-/var/cache/crabbox/npm}"' 'export PATH=/usr/local/go/bin:$PATH' > /etc/profile.d/crabbox.sh
 
 WORKDIR /workspace
-EXPOSE 8787
-ENTRYPOINT ["/usr/local/bin/crabbox-cloudflare-container-runner"]
+ENTRYPOINT ["/usr/bin/tini", "--", "sleep", "infinity"]

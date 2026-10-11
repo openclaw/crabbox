@@ -43,6 +43,52 @@ crabbox stop --provider scaleway my-app
 crabbox cleanup --provider scaleway --dry-run
 ```
 
+Fixed-lease orchestrators can pass `--lease-id cbx_abcdef123456` to `warmup`
+or `run`. Repeating the same request from the same local state reuses the
+original allocation; changes to the project, repository owner, or creation
+settings conflict. Fixed acquisition creates the Instance directly from the image,
+including the default public `ubuntu_noble` image, without reading or cloning its
+root snapshot. After attesting the Instance's lease and attempt tags, Crabbox
+requires the root's immutable creation time to equal the Instance's creation
+time, journals that evidence and the root ID, and publishes matching ownership tags on the disk
+and Instance. Interrupted tag publication resumes using that recorded disk ID.
+SSH key identity uses the parsed public key, so Scaleway's removal of the
+optional key comment does not change ownership. A failed acquisition that only
+created the IAM key can be stopped using the same local claim and stored key.
+`status`, `stop`, and normal lease commands accept that ID. Successful stop
+retains a terminal claim so the ID cannot allocate another machine. Keep the
+local claim and stored SSH key through recovery; images with additional volumes
+are rejected for fixed leases.
+
+The offline provider catalog advertises this support as `fixed-lease-id` in
+`crabbox providers --json` and `crabbox providers describe scaleway --json`.
+Use `crabbox providers --feature fixed-lease-id --json` to filter for providers
+that support caller-supplied lease IDs.
+
+### Fixed-Lease Recovery
+
+After server submission is journaled, replay searches the complete project
+inventory for the exact lease and attempt. A matching Instance recovers its
+root-volume identity even if the create response was lost. Foreign or conflicting
+ownership, multiple matching Instances, and failed inventory reads block recovery.
+Once the root ID is journaled, later attachments cannot replace it. Stop checks
+the recorded disk's project, zone, attachment, recorded creation time, and attempt
+tags before deletion,
+including retries after the Instance is gone.
+
+Scaleway has no server-create idempotency token. If a submitted request has no
+observable Instance, both replay and stop retain the unresolved claim and key;
+retry later. An empty inventory does not authorize a second create or terminal
+cleanup because the first request might still be in flight. This also applies
+to an interruption between durable admission and sending the request. A bound
+server ID never authorizes a replacement.
+
+Older fixed claims with a separately pre-created root remain releasable when its
+ID is recorded and the server is bound or has not been submitted. They cannot
+submit a new Instance using that disk. An older
+interrupted volume create with no recorded ID remains unresolved; finish recovery
+with the original CLI before upgrading. New acquisitions never pre-create disks.
+
 Those commands create, inspect, resolve, touch, release, and clean up Scaleway
 Instances through the local Scaleway SDK profile. They are cost-bearing when
 they create live Instances, so use `doctor` and `cleanup --dry-run` before
@@ -73,6 +119,28 @@ There is no separate Scaleway size flag for the generic lease commands.
 
 ## Configuration
 
+An explicit class selects the corresponding [machine class](../commands/providers.md)
+instead of the inherited `DEV1-S` default. Explicit `scaleway.type`
+configuration or `--scaleway-type` still takes precedence over the class,
+and `--type` takes precedence over both.
+
+Primary Linux/amd64 sizes are:
+
+| Class | Commercial type | vCPU | RAM (GiB) |
+| --- | --- | --- | --- |
+| `tiny` | `DEV1-S` | 2 | 2 |
+| `small` | `DEV1-M` | 3 | 4 |
+| `standard` | `DEV1-L` | 4 | 8 |
+| `fast` | `PRO2-M` | 16 | 64 |
+| `large` | `PRO2-L` | 32 | 128 |
+| `beast` | `GP1-XL` | 48 | 256 |
+
+`standard` now selects `DEV1-L`, increasing size and cost from the old `DEV1-S`
+mapping. Use `--class tiny` or `--type DEV1-S` to keep the old size.
+`crabbox providers --json` also declares `PRO2-S` as a `standard` alternative;
+the backend currently creates the primary without automatically retrying that
+alternative. Omit `scaleway.type` to let the class select capacity.
+
 Local SDK/configuration failures retain their original error causes for
 diagnostics while keeping the public message redacted and exit code 3. Missing
 SDK configuration still falls back to environment-based credentials.
@@ -85,7 +153,7 @@ scaleway:
   region: fr-par
   zone: fr-par-1
   image: ubuntu_noble
-  type: DEV1-S
+  # type: DEV1-S # optional exact override; takes precedence over class
   projectId: "<scaleway-project-id>"
   organizationId: "<scaleway-organization-id>"
   securityGroup: ""
@@ -215,6 +283,7 @@ The provider implements a direct Linux SSH lease over Scaleway Instances:
    exact project-, zone-, and server-bound local claim.
 
 New leases also record the root disk returned by the original Instance creation
+(or recovered from the exact fixed attempt before its initial disk binding)
 in their local recovery claim and Instance tags. `stop` deletes only this recorded
 disk after verifying its project, zone, identity, and detachment. Disks attached
 later are not adopted or deleted. A disk moved to another Instance, changed
@@ -223,8 +292,9 @@ If the Instance is already gone, retry `stop <lease-or-slug>` to finish recorded
 disk cleanup; bulk `cleanup` scans Instances, not orphaned disks.
 
 The allocation contract is marked before creation and journaled locally before
-tag publication or destructive rollback. An interrupted create with no recorded
-root identity stays unresolved rather than being mistaken for a legacy lease.
+tag publication or destructive rollback. Outside the fixed-lease recovery path
+described above, an interrupted create with no recorded root identity stays
+unresolved rather than being mistaken for a legacy lease.
 An interrupted tag publication has a cleanup-only recovery path; it cannot
 authorize normal reuse or metadata updates. A crash between confirmed tag
 publication and its local acknowledgment can retain that pending state.

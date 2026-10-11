@@ -932,3 +932,23 @@ func TestLegacyLabelLifecycleLabels(t *testing.T) {
 		})
 	}
 }
+
+func TestScopedClaimAmbiguity(t *testing.T) {
+	claims := []core.LeaseClaim{
+		{LeaseID: "cbx_000000000001", Provider: "sample", Slug: "same-slug"},
+		{LeaseID: "cbx_000000000002", Provider: "sample", Slug: "same-slug"},
+		{LeaseID: "cbx_000000000003", Provider: "other", Slug: "same-slug"},
+	}
+	list := func() ([]core.LeaseClaim, error) { return claims, nil }
+	validated := 0
+	validate := func(core.LeaseClaim) error { validated++; return nil }
+	if c, ok, err := ResolveScopedLeaseClaim("SAME SLUG", "sample", list, validate); err == nil || !strings.Contains(err.Error(), "multiple") || ok || c.LeaseID != "" || validated != 0 {
+		t.Fatalf("ambiguous claim: %+v %v %v validated=%d", c, ok, err, validated)
+	}
+	if c, ok, err := ResolveScopedLeaseClaim(claims[0].LeaseID, "sample", list, validate); err != nil || !ok || c.LeaseID != claims[0].LeaseID {
+		t.Fatalf("exact claim: %+v %v %v", c, ok, err)
+	}
+	if c, ok, err := ResolveScopedLeaseClaim("same-slug", "other", list, validate); err != nil || !ok || c.LeaseID != claims[2].LeaseID {
+		t.Fatalf("provider filter: %+v %v %v", c, ok, err)
+	}
+}

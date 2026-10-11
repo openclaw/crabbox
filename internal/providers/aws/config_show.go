@@ -14,6 +14,7 @@ func (Provider) ConfigShowSection(cfg core.Config) core.ProviderConfigShowSectio
 		Fields: []core.ProviderConfigShowField{
 			{JSONName: "region", JSONValue: cfg.AWSRegion, TextName: "region", TextValue: cfg.AWSRegion},
 			{JSONName: "ami", JSONValue: cfg.AWSAMI},
+			{JSONName: "stockImage", JSONValue: cfg.AWSStockImage},
 			{JSONName: "securityGroupId", JSONValue: cfg.AWSSGID},
 			{JSONName: "subnetId", JSONValue: cfg.AWSSubnetID},
 			{JSONName: "instanceProfile", JSONValue: cfg.AWSProfile},

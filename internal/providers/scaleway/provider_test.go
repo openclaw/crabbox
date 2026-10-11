@@ -17,7 +17,7 @@ func TestProviderSpecAndServerType(t *testing.T) {
 		cfg  core.Config
 		want string
 	}{
-		{name: "matched class", cfg: core.Config{Class: "standard"}, want: "DEV1-S"},
+		{name: "matched class", cfg: core.Config{Class: "standard"}, want: "DEV1-L"},
 		{name: "unsupported target", cfg: core.Config{Class: "standard", TargetOS: core.TargetWindows}},
 		{name: "unsupported architecture", cfg: core.Config{Class: "standard", TargetOS: core.TargetLinux, Architecture: core.ArchitectureARM64}},
 		{name: "legacy input", cfg: core.Config{Class: " STANDARD "}, want: "DEV1-S"},

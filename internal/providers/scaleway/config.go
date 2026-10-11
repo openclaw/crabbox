@@ -31,10 +31,15 @@ func serverTypeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
 		return strings.TrimSpace(cfg.ServerType)
 	}
-	if value := strings.TrimSpace(cfg.Scaleway.Type); value != "" {
+	if value := strings.TrimSpace(cfg.Scaleway.Type); value != "" && scalewayTypeOverridesClass(cfg) {
 		return value
 	}
 	return scalewayServerTypeForClass(cfg.Class)
+}
+
+func scalewayTypeOverridesClass(cfg core.Config) bool {
+	return !core.ClassWasExplicit(cfg) || core.ScalewayTypeWasExplicit(cfg) ||
+		strings.TrimSpace(cfg.Scaleway.Type) != core.ScalewayConfigDefaultType
 }
 
 func validateFoundationConfig(cfg core.Config) error {

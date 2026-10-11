@@ -11,6 +11,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/awslambdamicrovm"
 	_ "github.com/openclaw/crabbox/internal/providers/azure"
 	_ "github.com/openclaw/crabbox/internal/providers/azuredynamicsessions"
+	_ "github.com/openclaw/crabbox/internal/providers/azuresandbox"
 	_ "github.com/openclaw/crabbox/internal/providers/blacksmith"
 	_ "github.com/openclaw/crabbox/internal/providers/blaxel"
 	_ "github.com/openclaw/crabbox/internal/providers/boxd"

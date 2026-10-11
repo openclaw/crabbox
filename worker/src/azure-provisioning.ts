@@ -550,9 +550,9 @@ export class AzureResumableProvisioning implements ProviderResumableProvisioning
     }
     if (!input.material) throw new AzureContinuationError("forward_material_required");
     const scope = input.plan.scope;
-    const path = resourcePath(scope, plan, candidate, journal.stage);
+    const path = resourcePath(scope, candidate, journal.stage);
     if (journal.stage === "endpoint") {
-      const inventory = await this.inventory(scope, plan, candidate);
+      const inventory = await this.inventory(scope, candidate);
       inspectAzureProvisioningResources(
         input.lease,
         scope,
@@ -629,7 +629,7 @@ export class AzureResumableProvisioning implements ProviderResumableProvisioning
             "azure",
           )
         ) {
-          const inventory = await this.inventory(scope, plan, candidate);
+          const inventory = await this.inventory(scope, candidate);
           inspectAzureProvisioningResources(
             input.lease,
             scope,
@@ -661,7 +661,7 @@ export class AzureResumableProvisioning implements ProviderResumableProvisioning
       if (kind && kind !== "disk" && existing)
         throw new AzureContinuationError("resource_exists_before_dispatch");
       if (kind === "nic" || kind === "vm" || kind === "disk" || kind === "extension") {
-        const inventory = await this.inventory(scope, plan, candidate);
+        const inventory = await this.inventory(scope, candidate);
         inspectAzureProvisioningResources(
           input.lease,
           scope,
@@ -778,18 +778,14 @@ export class AzureResumableProvisioning implements ProviderResumableProvisioning
     return output("provisioning", pollInterval);
   }
 
-  private async inventory(
-    scope: string,
-    plan: AzureProvisioningPlan,
-    candidate: AzureCandidate,
-  ): Promise<AzureInventory> {
+  private async inventory(scope: string, candidate: AzureCandidate): Promise<AzureInventory> {
     const values = await Promise.all(
       (["vm", "nic", "pip", "disk"] as const).map(async (kind) => {
         const reply = await this.transport.request(
           scope,
           candidate.region,
           "GET",
-          resourcePath(scope, plan, candidate, kind),
+          resourcePath(scope, candidate, kind),
           apiFor(kind),
         );
         if (reply.status !== 200 && reply.status !== 404)
@@ -828,7 +824,7 @@ export class AzureResumableProvisioning implements ProviderResumableProvisioning
           input.plan.scope,
           candidate.region,
           "GET",
-          resourcePath(input.plan.scope, plan, candidate, journal.stage),
+          resourcePath(input.plan.scope, candidate, journal.stage),
           apiFor(journal.stage),
         );
         if (reply.status === 404 && journal.allocationRejected === journal.stage) {
@@ -839,7 +835,7 @@ export class AzureResumableProvisioning implements ProviderResumableProvisioning
           if (kind) {
             verifyResource(
               reply.resource,
-              resourcePath(input.plan.scope, plan, candidate, kind),
+              resourcePath(input.plan.scope, candidate, kind),
               kind,
               candidate,
               input.lease,
@@ -863,7 +859,7 @@ export class AzureResumableProvisioning implements ProviderResumableProvisioning
     }
     if (input.retain) return output("retained", 1);
     if (!journal.cleanupResourceIdentity) {
-      const inventory = await this.inventory(input.plan.scope, plan, candidate);
+      const inventory = await this.inventory(input.plan.scope, candidate);
       inspectAzureProvisioningResources(
         input.lease,
         input.plan.scope,
@@ -949,12 +945,7 @@ function apiFor(stage: Stage): string {
   return stage === "disk" ? diskAPI : networkAPI;
 }
 
-function resourcePath(
-  scope: string,
-  plan: AzureProvisioningPlan,
-  candidate: AzureCandidate,
-  stage: Stage,
-): string {
+function resourcePath(scope: string, candidate: AzureCandidate, stage: Stage): string {
   switch (stage) {
     case "rg":
       return scope;
@@ -1017,13 +1008,13 @@ function resourceBody(
               properties: {
                 privateIPAllocationMethod: "Dynamic",
                 subnet: {
-                  id: `${resourcePath(scope, plan, candidate, "vnet")}/subnets/${plan.subnet}`,
+                  id: `${resourcePath(scope, candidate, "vnet")}/subnets/${plan.subnet}`,
                 },
-                publicIPAddress: { id: resourcePath(scope, plan, candidate, "pip") },
+                publicIPAddress: { id: resourcePath(scope, candidate, "pip") },
               },
             },
           ],
-          networkSecurityGroup: { id: resourcePath(scope, plan, candidate, "nsg") },
+          networkSecurityGroup: { id: resourcePath(scope, candidate, "nsg") },
         },
       };
     case "vm":
@@ -1042,7 +1033,7 @@ function resourceBody(
             },
           },
           networkProfile: {
-            networkInterfaces: [{ id: resourcePath(scope, plan, candidate, "nic") }],
+            networkInterfaces: [{ id: resourcePath(scope, candidate, "nic") }],
           },
           osProfile: {
             computerName: plan.computerName,

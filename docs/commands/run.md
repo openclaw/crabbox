@@ -247,6 +247,9 @@ not trigger this multiplexing recovery.
 
 Crabbox records a local repo claim for each reused lease. If a lease is already
 claimed by another repo, pass `--reclaim` to move the claim intentionally.
+For SSH leases, `run --id` uses the recorded target OS and Windows mode for
+readiness and execution. Allocation-time platform flags do not need to be
+repeated; explicit flags that contradict the recorded platform are rejected.
 For already-bound canonical IDs on native AWS, Machine0, and Daytona, run
 admission holds that claim through provider preparation and endpoint publication.
 A concurrent heartbeat cannot invalidate the command between those steps.
@@ -263,8 +266,14 @@ on an existing direct lease is stored in whole seconds, rounded to the nearest
 second with a minimum of one second for a positive value. Use `--stop-after
 success|always|failure|never` to make lease cleanup explicit. Without it, a
 newly acquired one-shot lease is released after the command and an existing
-`--id` lease is left alone. The run details always print the exact `crabbox
-stop ...` command. Use `--keep-on-failure` to keep a newly acquired lease alive
+`--id` lease is left alone. The run details print the exact `crabbox stop ...`
+command. If a resolved SSH lease remains after an early failure, ownership
+refusal, interrupted cleanup, or retention policy, a final `lease recovery`
+line prints the same provider-scoped `stop_command` and a one-line reason.
+With `--timing-json`, the final JSON record includes `stopCommand` and
+`leaseRetainedReason` too. Ambiguous ownership still refuses automatic cleanup;
+the recovery command does not bypass the ownership checks in `stop`.
+Use `--keep-on-failure` to keep a newly acquired lease alive
 for debugging when the remote command exits non-zero; it does not retain a
 failed acquisition (for example, a Parallels clone that fails guest preparation).
 Crabbox then prints
@@ -440,7 +449,9 @@ Large syncs warn or fail according to `sync.warnFiles`, `sync.warnBytes`,
 list the top source directories by file count plus a hint to update
 `.crabboxignore` or `sync.exclude`. Quiet rsync runs print a heartbeat; after
 several minutes without visible progress the heartbeat includes a concrete retry
-hint, and `sync.timeout` kills stalled syncs.
+hint. For rsync, `sync.timeout` limits I/O inactivity rather than total transfer
+time; a quiet transfer that continues exchanging protocol data may exceed it.
+Manifest staging and archive transfers retain their wall-clock limits.
 
 ### Sync alternatives
 
@@ -530,6 +541,25 @@ PowerShell expression syntax, and `--script <file.ps1>` for longer runs. Crabbox
 writes uploaded Windows scripts as UTF-8 with a BOM when the input has none, so
 Windows PowerShell 5.1 does not treat non-ASCII source as the system ANSI code
 page.
+
+Native executables receive a Windows command line quoted with the standard
+`CommandLineToArgvW`/C-runtime rules, preserving empty arguments, embedded double
+quotes, backslashes, whitespace, and Unicode. Literal `%VAR%`, `^`, `&`, `|`,
+and `$` are not expanded by Crabbox. The PowerShell transport starts the process
+directly with inherited input/output streams, the remote working directory, and
+its actual exit status. Arguments to `--script` use the same transport to
+Windows PowerShell's `-File` entrypoint.
+
+An explicitly selected interpreter still owns its syntax: `cmd /c` and `.cmd`/
+`.bat` launchers use cmd's expansion and quoting rules, and `powershell -Command`
+parses its command as PowerShell source. PowerShell scripts and cmdlets retain
+PowerShell parameter binding. Windows utilities with nonstandard parsers
+(`cscript.exe`, `find.exe`, `sqlcmd.exe`, and `wscript.exe`) also retain
+PowerShell's legacy argument binding. Inside `--shell` or a `.ps1` script, Windows
+PowerShell 5.1's own native-command binding can still discard empty strings and
+embedded quotes when the script calls another executable. Use plain argv for
+that executable; use `--shell '...PowerShell source...'` or `--script file.ps1`
+for PowerShell expressions rather than nesting another `powershell -Command`.
 
 ### Native Windows background processes
 
@@ -1159,9 +1189,11 @@ lease-acting commands):
 --profile <name>
 --class <name>
 --arch amd64|arm64           CPU architecture; cloud/Apple select capacity, while local-container asserts selected-daemon native architecture.
---os <selector>              Portable Linux OS image, e.g. ubuntu:26.04
+--os <selector>              OS image, e.g. ubuntu:26.04 or windows-server:2025 (AWS Windows)
 --type <provider-type>
 --market spot|on-demand
+--min-vcpus <count>                minimum vCPUs for new AWS Linux leases; 0 disables
+--min-memory-mib <MiB>             minimum memory for new AWS Linux leases; 0 disables
 --slug <slug>                Only when creating a fresh lease.
 --pond <name>
 --expose <port>              Repeatable; SSH-mesh TCP port; creation-only for managed leases.
@@ -1280,3 +1312,6 @@ A longer job must return and borrow again; uninterrupted renewal is deferred.
 Static power hooks require a trusted `static.power.dedicated: true` contract.
 Use a distinct `static.id` for concurrent acquisitions; same-ID acquisition and
 prepared reuse are refused while custody remains. See [Power hooks](../providers/ssh.md#power-hooks).
+
+Optional resource minimums and supported creation/reuse combinations are documented
+in [capacity fallback](../features/capacity-fallback.md#optional-aws-resource-minimums).

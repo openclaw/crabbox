@@ -36,7 +36,7 @@ func TestAcquireFailsBeforeCreateWhenRecoveryEntropyFails(t *testing.T) {
 	b.newRecoveryNonce = func() (string, error) { return "", errors.New("entropy unavailable") }
 	leaseID := "cbx_123456789b05"
 
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+	_, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    "entropy-box",
@@ -67,7 +67,7 @@ func TestAcquireRejectsPreExistingRecoveryIdentityBeforeCreate(t *testing.T) {
 	item.Repository.FullName = "example-org/my-app"
 	fc.items[item.Name] = item
 
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{
+	_, err := b.acquireOrdinary(context.Background(), core.AcquireRequest{
 		Repo:             core.Repo{Root: t.TempDir(), Name: "my-app"},
 		RequestedLeaseID: leaseID,
 		RequestedSlug:    slug,

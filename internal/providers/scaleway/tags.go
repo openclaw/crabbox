@@ -16,6 +16,8 @@ const (
 )
 
 var tagSchema = shared.LeaseTagSchema(append(shared.TailscaleTagFields(),
+	shared.TagLabelField{Key: "fixed_attempt"},
+	shared.TagLabelField{Key: "fixed_intent_sha256"},
 	shared.TagLabelField{Key: "recovery"},
 	shared.TagLabelField{Key: "scaleway_project"},
 	shared.TagLabelField{Key: "scaleway_organization"},
@@ -82,7 +84,7 @@ func labelsFromTags(tags []string) map[string]string {
 				continue
 			}
 			switch key {
-			case "provider", "lease", "slug", "target", volumeContractLabel, rootVolumeLabel:
+			case "provider", "lease", "slug", "target", volumeContractLabel, rootVolumeLabel, "fixed_attempt", "fixed_intent_sha256":
 				if prior := labels[key]; prior != "" && prior != value {
 					ownershipConflicts[key] = true
 				}

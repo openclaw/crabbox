@@ -203,12 +203,12 @@ func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 		}
 	}
 	classify("coordinator transport or credential", `
-		Coordinator BrokerMode BrokerLoginRedirectOrigins BrokerAutoWebVNC
+		Coordinator BrokerMode BrokerLoginRedirectOrigins BrokerAutoWebVNC AWSStockImage
 		CoordToken CoordTokenCommand CoordAdminToken Access SSHKey
 	`)
 	classify("non-AWS provider selection", `
 		Location Image AWSLambdaMicroVM
-		Azure AzureDynamicSessions
+		Azure AzureDynamicSessions AzureSandbox
 		GCP DigitalOcean Vultr Linode GitHubCodespaces
 		Lambda Nebius OVH Scaleway TencentCloud Incus Proxmox Firecracker XCPNg Parallels
 		Blacksmith KubeVirt SealosDevbox AgentSandbox External Namespace NamespaceInstance
@@ -219,8 +219,8 @@ func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 		Smolvm AsciiBox Cloudflare CloudflareDynamicWorkers Semaphore Sprites LocalContainer
 		AppleContainer AppleVM MXC Multipass Machine0 Tart Lume HyperV WindowsSandbox Static
 	`)
-	classify("post-acquisition command, transport, or reporting behavior", `
-		Sync Run EnvAllow Actions Results Shard Profiles Presets ProofTemplates Jobs RecordLocal
+	classify("post-acquisition command, transport, reporting, or local maintenance behavior", `
+		Sync Run EnvAllow Actions Results Shard Profiles Presets ProofTemplates Jobs RecordLocal ClaimsAutoPrune
 	`)
 	classify("command default resolved into the explicit create request Keep field", `WarmupKeep`)
 

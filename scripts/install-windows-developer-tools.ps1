@@ -1,5 +1,19 @@
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+# Native failures are checked explicitly so Windows PowerShell and PowerShell 7 agree.
+$PSNativeCommandUseErrorActionPreference = $false
+$PrepStepFile = "C:\ProgramData\crabbox\image-prep.step"
+$PrepErrorFile = "C:\ProgramData\crabbox\image-prep.error"
+trap {
+  $failure = $_
+  $details = @($failure.Exception.Message, $failure.InvocationInfo.PositionMessage, $failure.ScriptStackTrace) -join "`n"
+  Set-Content -LiteralPath $PrepErrorFile -Value $details -ErrorAction Continue
+  Write-Host "windows-tools: prep failed: $details"
+  exit 1
+}
+New-Item -ItemType Directory -Force -Path (Split-Path $PrepStepFile) | Out-Null
+Remove-Item -LiteralPath $PrepErrorFile -Force -ErrorAction SilentlyContinue
+Set-Content -LiteralPath $PrepStepFile -Value "validating prep configuration"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $DefaultNodeVersion = "24.19.0"
@@ -37,7 +51,13 @@ if ($InstallDocker -eq "1") {
   }
 }
 $DockerImages = $env:CRABBOX_WINDOWS_DOCKER_IMAGES
-if (-not $DockerImages) { $DockerImages = "mcr.microsoft.com/windows/servercore:ltsc2022" }
+$WindowsBuild = [int](Get-CimInstance Win32_OperatingSystem).BuildNumber
+$ServerCoreTag = switch ($WindowsBuild) {
+  20348 { "ltsc2022" }
+  26100 { "ltsc2025" }
+  default { throw "Unsupported Windows Server build: $WindowsBuild" }
+}
+if (-not $DockerImages) { $DockerImages = "mcr.microsoft.com/windows/servercore:$ServerCoreTag" }
 $RebootMarker = "C:\ProgramData\crabbox\image-prep-reboot-required"
 $ChocolateyPackageURL = $env:CRABBOX_WINDOWS_CHOCO_PACKAGE_URL
 if (-not $ChocolateyPackageURL) { $ChocolateyPackageURL = "https://community.chocolatey.org/api/v2/package/chocolatey/2.7.3" }
@@ -55,16 +75,24 @@ function Write-Log {
 }
 
 function Retry {
-  param([scriptblock]$ScriptBlock)
-  for ($i = 1; $i -le 8; $i++) {
+  param([scriptblock]$ScriptBlock, [string]$Step = "network download")
+  for ($i = 1; $i -le 4; $i++) {
     try {
       & $ScriptBlock
       return
     } catch {
-      if ($i -eq 8) { throw }
-      Start-Sleep -Seconds ($i * 5)
+      if ($i -eq 4) { throw "$Step failed after 4 attempts: $($_.Exception.Message)" }
+      $delay = [Math]::Min(120, 30 * [Math]::Pow(2, $i - 1))
+      Write-Log "$Step attempt $i/4 failed: $($_.Exception.Message); retrying in $delay seconds"
+      Start-Sleep -Seconds $delay
     }
   }
+}
+
+function Set-PrepStep {
+  param([string]$Step)
+  Set-Content -LiteralPath $PrepStepFile -Value $Step
+  Write-Log "step: $Step"
 }
 
 function Add-MachinePath {
@@ -156,7 +184,11 @@ function Install-Chocolatey {
 
 function Install-ChocoPackage {
   param([string[]]$Packages)
-  Retry { choco install -y --no-progress @Packages }
+  Retry -Step "Chocolatey package installation" {
+    & choco install -y --no-progress @Packages
+    # Chocolatey's enhanced exit codes include successful reboot requests.
+    if ($LASTEXITCODE -notin @(0, 1641, 3010)) { throw "choco install failed with exit code $LASTEXITCODE" }
+  }
 }
 
 function Install-Node {
@@ -184,7 +216,11 @@ function Install-Node {
 function Enable-CorepackPnpm {
   Write-Log "activating pnpm $PnpmVersion"
   & corepack enable
-  & corepack prepare "pnpm@$PnpmVersion" --activate
+  if ($LASTEXITCODE -ne 0) { throw "corepack enable failed with exit code $LASTEXITCODE" }
+  Retry -Step "prepare pnpm@$PnpmVersion" {
+    & corepack prepare "pnpm@$PnpmVersion" --activate
+    if ($LASTEXITCODE -ne 0) { throw "corepack prepare pnpm@$PnpmVersion failed with exit code $LASTEXITCODE" }
+  }
 }
 
 function Resolve-TruffleHogAsset {
@@ -198,12 +234,35 @@ function Resolve-TruffleHogAsset {
 
 function Test-TruffleHogBinary {
   param([string]$Path)
-  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
-  try {
-    $output = (& $Path --no-update --version 2>$null | Out-String).Trim()
-    return $LASTEXITCODE -eq 0 -and ($output -split "\s+") -contains $TruffleHogVersion
-  } catch {
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    Write-Log "TruffleHog validation failed for ${Path}: exit code=not started; file is missing"
     return $false
+  }
+  $process = New-Object System.Diagnostics.Process
+  $process.StartInfo.FileName = $Path
+  $process.StartInfo.Arguments = "--no-update --version"
+  $process.StartInfo.UseShellExecute = $false
+  $process.StartInfo.CreateNoWindow = $true
+  $process.StartInfo.RedirectStandardOutput = $true
+  $process.StartInfo.RedirectStandardError = $true
+  $exitCode = "not started"
+  $output = ""
+  try {
+    # Read both pipes concurrently; Windows PowerShell treats native stderr as errors.
+    [void]$process.Start()
+    $stdout = $process.StandardOutput.ReadToEndAsync()
+    $stderr = $process.StandardError.ReadToEndAsync()
+    $process.WaitForExit()
+    $exitCode = $process.ExitCode
+    $output = ($stdout.Result + "`n" + $stderr.Result).Trim()
+    if ($exitCode -eq 0 -and ($output -split "\s+") -contains $TruffleHogVersion) { return $true }
+    Write-Log "TruffleHog validation failed for ${Path}: exit code=$exitCode; output=$output"
+    return $false
+  } catch {
+    Write-Log "TruffleHog validation failed for ${Path}: exit code=$exitCode; output=$output; error=$($_.Exception.Message)"
+    return $false
+  } finally {
+    $process.Dispose()
   }
 }
 
@@ -221,7 +280,8 @@ function Install-TruffleHog {
   $workDir = Join-Path $env:TEMP ("crabbox-trufflehog-" + [Guid]::NewGuid().ToString("N"))
   $archive = Join-Path $workDir $archiveName
   $extractDir = Join-Path $workDir "extract"
-  $candidate = Join-Path $TruffleHogInstallDir ("trufflehog.exe.new-" + [Guid]::NewGuid().ToString("N"))
+  # Keep .exe last so Windows PowerShell recognizes the staged file as executable.
+  $candidate = Join-Path $TruffleHogInstallDir ("trufflehog.new-" + [Guid]::NewGuid().ToString("N") + ".exe")
   Write-Log "installing TruffleHog $TruffleHogVersion"
   try {
     New-Item -ItemType Directory -Force -Path $workDir, $extractDir, $TruffleHogInstallDir | Out-Null
@@ -271,6 +331,7 @@ function Install-StaticDockerEngine {
 
 function Install-DockerEngine {
   if ($InstallDocker -ne "1") { return }
+  Set-PrepStep "installing Windows container support and Docker Engine"
   Write-Log "installing Windows container support and Docker Engine"
   $restartRequired = $false
   $feature = Get-WindowsFeature -Name Containers -ErrorAction SilentlyContinue
@@ -306,10 +367,13 @@ function Install-DockerEngine {
   }
   foreach ($image in ($DockerImages -split "\s+")) {
     if (-not $image) { continue }
-    try {
-      Retry { & docker pull $image }
-    } catch {
-      Write-Log "docker pull failed for $image; continuing"
+    Retry -Step "prepare Docker image $image" {
+      Set-PrepStep "docker pull $image"
+      & docker pull $image
+      if ($LASTEXITCODE -ne 0) { throw "docker pull $image failed with exit code $LASTEXITCODE" }
+      Set-PrepStep "docker image inspect $image"
+      & docker image inspect $image | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw "docker image inspect $image failed with exit code $LASTEXITCODE" }
     }
   }
 }
@@ -359,7 +423,9 @@ function Reset-EC2LaunchForImage {
   Remove-Item -Force "C:\ProgramData\crabbox\setup-complete" -ErrorAction SilentlyContinue
 }
 
+Set-PrepStep "installing Chocolatey"
 Install-Chocolatey
+Set-PrepStep "installing Chocolatey tool packages"
 Install-ChocoPackage @(
   "git",
   "git-lfs",
@@ -376,22 +442,29 @@ Install-ChocoPackage @(
   "vcredist-all"
 )
 Refresh-SessionPath
+Set-PrepStep "installing Node $NodeVersion"
 Install-Node
 Refresh-SessionPath
+Set-PrepStep "activating pnpm $PnpmVersion"
 Enable-CorepackPnpm
+Set-PrepStep "installing TruffleHog $TruffleHogVersion"
 Install-TruffleHog
 Install-DockerEngine
+Set-PrepStep "preparing caches and machine defaults"
 Prepare-Caches
 Disable-FirstBootNoise
 Refresh-SessionPath
 
 if (Test-Path $RebootMarker) {
+  Set-PrepStep "waiting for reboot before final verification"
   Write-Log "reboot required before final verification"
   exit 0
 }
 
+Set-PrepStep "resetting EC2Launch for image boot"
 Reset-EC2LaunchForImage
 
+Set-PrepStep "verifying tool versions"
 Write-Log "versions"
 Get-ComputerInfo | Select-Object OsName, OsVersion, OsBuildNumber | Format-List
 git --version
@@ -409,4 +482,5 @@ if (Get-Command docker.exe -ErrorAction SilentlyContinue) {
   docker --version
 }
 
+Set-PrepStep "complete"
 Write-Log "complete"

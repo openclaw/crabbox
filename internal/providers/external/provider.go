@@ -16,6 +16,8 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) BackendCapabilities() core.Backend { return &leaseBackend{} }
+
 func (Provider) DiagnosticSecrets(cfg core.Config) []string {
 	passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv)
 	if password, ok := core.LookupExternalDesktopPassword(cfg, passwordEnv); ok {

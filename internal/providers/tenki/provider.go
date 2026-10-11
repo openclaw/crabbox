@@ -13,6 +13,8 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) BackendCapabilities() core.Backend { return &tenkiBackend{} }
+
 func (Provider) ClaimScope(cfg core.Config) string {
 	// Workspace and project no longer select Tenki CLI inventory. Keep them in
 	// the local claim identity so older scoped leases can still be resolved and
@@ -25,8 +27,10 @@ func (Provider) ClaimScope(cfg core.Config) string {
 }
 
 func (Provider) Spec() core.ProviderSpec {
+	auth := core.DirectProviderAuthentication(core.ProviderAuthenticationCLI)
+	auth[0].Description = "Tenki SSH credentials currently expire after about 10 minutes (server policy; the signed validity window includes clock tolerance). Crabbox refreshes them before new connections; established commands can continue beyond expiry."
 	return core.ProviderSpec{
-		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),
+		Authentication:   auth,
 		Name:             tenkiProvider,
 		Family:           tenkiProvider,
 		Kind:             core.ProviderKindSSHLease,

@@ -144,6 +144,21 @@
     "auth": "Bearer token via CRABBOX_AZURE_DYNAMIC_SESSIONS_TOKEN or az account get-access-token; delegated remote sandbox",
     "docs": "azure-dynamic-sessions.md"
   },
+  "azure-sandbox": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "Azure Container Apps Sandbox",
+    "location": "cloud",
+    "ssh": "no",
+    "sync": "none",
+    "gpu": "no",
+    "lifecycle": "Crabbox fixed lease and ACA Sandbox API",
+    "cleanup": "exact owned Sandbox delete",
+    "bestFit": "Kept Linux shell workloads with explicit file uploads",
+    "caveat": "Requires an existing Sandbox group; runs require --keep --no-sync; one 2-CPU/4-GiB shape",
+    "auth": "Azure CLI credential or explicitly selected managed identity; direct delegated sandbox",
+    "docs": "azure-sandbox.md"
+  },
   "blacksmith-testbox": {
     "status": "built-in",
     "category": "ci-proof-runner",
@@ -214,7 +229,7 @@
     "lifecycle": "Cloudflare Worker",
     "cleanup": "container delete",
     "bestFit": "Fast delegated Linux container execution",
-    "caveat": "Requires Worker deployment and container availability",
+    "caveat": "Requires Worker deployment and container availability; container snapshots cannot be deleted and expire after 30 days",
     "auth": "Runner bearer token via CRABBOX_CLOUDFLARE_RUNNER_TOKEN plus runner URL; delegated remote container",
     "docs": "cloudflare.md"
   },

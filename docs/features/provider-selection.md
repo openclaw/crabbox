@@ -106,55 +106,22 @@ Use these rules before adding a new adapter:
 
 ## Related external systems
 
-External projects are useful comparison points, but they should not become
-first-class providers just because they are adjacent.
-
-| System | Crabbox stance |
-| --- | --- |
-| [Mitos](https://github.com/mitos-run/mitos) | Observe, do not support as a first-class provider yet. Its forkable microVM/Kubernetes model is interesting, but Crabbox should first harden generic snapshot, fork, workspace, and delegated-run contracts that any future adapter could use. |
-| [E2B](../providers/e2b.md) | Already supported as delegated run. Use it for hosted sandbox execution where provider-owned templates, filesystem APIs, and session handles are the contract. |
-| [Daytona](../providers/daytona.md) | Already supported as a direct sandbox/devbox provider. Use it when Daytona's sandbox lifecycle is the desired substrate and short-lived SSH is enough. |
-| [Modal](../providers/modal.md) | Already supported as delegated run. Use it for provider-owned container execution, especially Python/GPU-shaped jobs. |
-| [Morph](../providers/morph.md) | Already supported as an SSH lease. Use it when a managed Linux VM with provider-side state reuse fits better than a pure delegated sandbox. |
-| [Kubernetes Agent Sandbox](../providers/agent-sandbox.md) | Already supported as delegated run. Use it for Kubernetes-hosted SandboxClaim workflows. |
-| [Coder](../providers/coder.md) | Supported as a narrow direct SSH-lease provider. Crabbox uses the local `coder` CLI, stops claimed workspaces by default, deletes only by opt-in, and mutates cleanup-eligible workspaces only when a local Crabbox claim exists. Use `ssh` or `external` instead when you want to target an existing Coder workspace without Crabbox lifecycle ownership. |
-| [Sealos DevBox](../providers/sealos-devbox.md) | Supported as a direct SSH-lease provider for Sealos DevBox CRDs. Use it when the operator has Kubernetes DevBox RBAC plus a proven SSHGate or NodePort route; keep Tailnet and username-encoded SSHGate routing out of the contract until live proof lands. |
-| [DevPod](https://github.com/loft-sh/devpod) | Do not mirror as a first-class provider. It is already a provider-agnostic dev environment layer; use its resulting SSH/container target through `ssh`, `local-container`, or `external` when needed. |
-| [Cloudflare Sandbox SDK](https://developers.cloudflare.com/sandbox/) | Keep separate from the existing Cloudflare providers until the runtime contract maps cleanly to a Crabbox backend. Prefer the current Cloudflare providers for built-in Worker/container flows. |
+The [Provider landscape](provider-landscape.md#support-matrix) records support
+status and comparisons with adjacent systems. Provider pages document the
+implemented contracts. Prefer `ssh` or `external` for an existing host or a
+private lifecycle integration that does not need a built-in adapter.
 
 ## Mitos decision
 
-If Crabbox does not support Mitos directly, the user-facing behavior should be:
-
-- no `provider: mitos` option;
-- no Mitos-specific flags in core commands;
-- no Mitos-specific branching in provider-neutral code;
-- a clear note that Mitos is observed but unsupported;
-- reusable capability work for snapshot, fork, durable workspace, MCP, preview
-  URLs, run proof, and delegated artifacts. `crabbox providers --json` exposes
-  normalized workspace and run-evidence capability names so this stays
-  provider-neutral.
-- `crabbox checkpoint fork --count <n>` for provider-neutral fan-out from an
-  existing archive or native checkpoint, rather than a Mitos-only live-fork
-  command.
-
-That preserves optionality. If Mitos later has real demand and the contract is
-stable enough, it can arrive as either a delegated-run provider or an SSH-lease
-provider without changing the CLI surface again.
+Mitos remains unsupported. See the
+[landscape decision](provider-landscape.md#mitos-decision) for the rationale and
+provider-neutral checkpoint, fork, and evidence capabilities to develop first.
+There is no `provider: mitos` or Mitos-specific CLI mode.
 
 ## Support threshold
 
-Add a new built-in provider only when the PR can prove:
-
-- the execution model is honestly represented by `ProviderSpec.Kind`;
-- declared targets and features match real behavior;
-- credentials are read from documented env/config locations and never argv;
-- cleanup behavior is explicit for success, failure, and keep/expiry paths;
-- offline tests cover parsing, command rejection, status/list rendering, and
-  provider errors;
-- live smoke is documented and opt-in when credentials are required;
-- the provider docs say what works, what does not, and which workflow it is for.
-
-If that bar is too high for the first version, use `ssh` or `external` and
-document the manual contract instead of baking an unstable provider into
-Crabbox.
+A built-in provider needs an accurate execution kind, target and capability
+metadata, off-argv authentication, explicit ownership and cleanup, offline
+regression tests, and a documented live smoke. Follow
+[Provider authoring](provider-authoring.md) and the
+[live smoke contract](provider-live-smoke.md#lifecycle-contract).

@@ -4,7 +4,17 @@ import {
   currentAWSTransportObserver,
   type AWSTransportObservation,
 } from "./aws-provisioning-diagnostics";
+import {
+  providerFetch,
+  providerResponse,
+  providerRequestSignal,
+  providerRequestTimeoutMs,
+  providerSleep,
+  waitForProviderSignal,
+} from "./provider-deadline";
 import type { AWSCredentials, AWSCredentialProvider } from "./types";
+
+export const awsRequestTimeoutMs = providerRequestTimeoutMs;
 
 export interface ResolvedAWSCredentials {
   readonly accessKeyId: string;
@@ -40,6 +50,7 @@ export interface AWSFetchClient {
 
 class ObservedAwsClient extends AwsClient {
   #observation: AWSTransportObservation;
+  #signing: Promise<Request> | undefined;
 
   constructor(
     options: ConstructorParameters<typeof AwsClient>[0],
@@ -49,11 +60,25 @@ class ObservedAwsClient extends AwsClient {
     this.#observation = observation;
   }
 
-  override async sign(...args: Parameters<AwsClient["sign"]>): ReturnType<AwsClient["sign"]> {
+  override sign(...args: Parameters<AwsClient["sign"]>): ReturnType<AwsClient["sign"]> {
+    this.#signing = this.signObserved(...args);
+    return this.#signing;
+  }
+
+  async settleSigning(): Promise<void> {
+    await this.#signing?.catch(() => undefined);
+  }
+
+  private async signObserved(
+    ...args: Parameters<AwsClient["sign"]>
+  ): ReturnType<AwsClient["sign"]> {
     const startedAt = Date.now();
     this.#observation.signInvocations += 1;
     try {
-      const request = await super.sign(...args);
+      const signal = args[1]?.signal;
+      const request = signal
+        ? await waitForProviderSignal(signal, () => super.sign(...args))
+        : await super.sign(...args);
       this.#observation.signCompletions += 1;
       return request;
     } catch (error) {
@@ -70,6 +95,7 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
     private readonly credentials: AWSCredentialProvider,
     private readonly service: string,
     private readonly region: string,
+    private readonly timeoutMs = awsRequestTimeoutMs,
   ) {}
 
   async fetch(
@@ -78,6 +104,9 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
     stopRetrying?: StopAWSResponseRetry,
   ): Promise<Response> {
     init?.signal?.throwIfAborted();
+    const callerSignal = init?.signal;
+    const signal = providerRequestSignal(this.timeoutMs, callerSignal, "aws", this.service);
+    const boundedInit = { ...init, signal };
     const observe = currentAWSTransportObserver();
     const observation: AWSTransportObservation = {
       requests: 1,
@@ -92,9 +121,12 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
     };
     const startedAt = Date.now();
     let requestStartedAt: number | undefined;
+    let observedClient: ObservedAwsClient | undefined;
     try {
-      const credentials = resolvedAWSCredentials(await this.credentials());
-      init?.signal?.throwIfAborted();
+      const credentials = resolvedAWSCredentials(
+        await waitForProviderSignal(signal, () => this.credentials()),
+      );
+      signal.throwIfAborted();
       if (credentials.expirationMs !== undefined && credentials.expirationMs <= Date.now()) {
         throw new Error("AWS credential snapshot expired");
       }
@@ -107,31 +139,36 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
       const session = credentials.sessionToken?.trim();
       if (session) options.sessionToken = session;
       // aws4fetch 1.0.20 calls public sign() once per retry-loop invocation.
-      const client = observe ? new ObservedAwsClient(options, observation) : new AwsClient(options);
+      if (observe) observedClient = new ObservedAwsClient(options, observation);
+      const client = observedClient ?? new AwsClient(options);
       requestStartedAt = Date.now();
       observation.credentialsMs = Math.max(0, requestStartedAt - startedAt);
-      if (init?.signal) {
+      const sign = () =>
+        observe
+          ? client.sign(input, boundedInit)
+          : waitForProviderSignal(signal, () => client.sign(input, boundedInit));
+      if (callerSignal) {
         // Optional quotes own a single attempt, including signing and the body read.
-        const request = await client.sign(input, init);
-        init.signal.throwIfAborted();
-        return await fetch(request, { signal: init.signal });
+        const request = await sign();
+        return await providerFetch(request, undefined, signal);
       }
-      if (!stopRetrying) return await client.fetch(input, init);
-      // aws4fetch has no response-policy hook. Preserve its budget, jitter, signing and
-      // thrown errors while allowing the operation owner to handle a definitive rejection.
+      // Keep SDK dispatch/signing, but own its retry budget so backoff can be aborted.
+      // The response-policy path still hands definitive rejections to the operation owner.
+      const retries = client.retries;
+      client.retries = 0;
       /* oxlint-disable eslint/no-await-in-loop -- Each signed attempt and its backoff must settle before retry or handoff. */
       for (let attempt = 0; ; attempt += 1) {
-        const response = await fetch(await client.sign(input, init));
-        if (
-          attempt === client.retries ||
-          (response.status < 500 && response.status !== 429) ||
-          (await stopRetrying(response))
-        ) {
-          return response;
-        }
-        await new Promise((resolve) =>
-          setTimeout(resolve, Math.random() * client.initRetryMs * 2 ** attempt),
+        const response = await waitForProviderSignal(signal, () =>
+          client.fetch(input, boundedInit),
         );
+        if (
+          attempt === retries ||
+          (response.status < 500 && response.status !== 429) ||
+          (stopRetrying && (await waitForProviderSignal(signal, () => stopRetrying(response))))
+        ) {
+          return providerResponse(response, signal);
+        }
+        await providerSleep(Math.random() * client.initRetryMs * 2 ** attempt, signal);
       }
       /* oxlint-enable eslint/no-await-in-loop */
     } catch (error) {
@@ -139,6 +176,8 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
       else observation.requestFailures += 1;
       throw error;
     } finally {
+      // A timeout can reject SDK fetch before its bounded signer unwinds.
+      await observedClient?.settleSigning();
       if (requestStartedAt === undefined)
         observation.credentialsMs = Math.max(0, Date.now() - startedAt);
       else observation.requestMs = Math.max(0, Date.now() - requestStartedAt);
@@ -150,7 +189,12 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
 // Regional operations must retain the exact identity verified before their first mutation.
 // Reuse the transport owner so fixed credentials preserve diagnostics and response retry policy.
 export class FixedAWSFetchClient extends RefreshingAWSFetchClient {
-  constructor(credentials: ResolvedAWSCredentials, service: string, region: string) {
+  constructor(
+    credentials: ResolvedAWSCredentials,
+    service: string,
+    region: string,
+    timeoutMs = awsRequestTimeoutMs,
+  ) {
     super(
       async () => ({
         accessKeyId: credentials.accessKeyId,
@@ -162,6 +206,7 @@ export class FixedAWSFetchClient extends RefreshingAWSFetchClient {
       }),
       service,
       region,
+      timeoutMs,
     );
   }
 }

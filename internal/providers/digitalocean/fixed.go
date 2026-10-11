@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -42,6 +43,7 @@ func (b *digitalOceanLeaseBackend) acquireFixed(ctx context.Context, req core.Ac
 		return core.LeaseTarget{}, core.Exit(2, "DigitalOcean account identity is missing")
 	}
 	var publicKey string
+	regionChecked := false
 	lease, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
 		Kind: fixedLeaseKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root, Reclaim: req.Reclaim,
 		TargetOS: core.TargetLinux, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout, Now: func() time.Time { return core.ClockNow(b.RT.Clock) },
@@ -50,6 +52,21 @@ func (b *digitalOceanLeaseBackend) acquireFixed(ctx context.Context, req core.Ac
 			return core.FixedLeaseBinding{}, core.Exit(4, "lease_id_conflict: DigitalOcean owner or account changed")
 		}
 		var err error
+		if cfg.DigitalOcean.Region == "" {
+			if exists {
+				cfg.DigitalOcean.Region = claim.Labels["region"]
+				if cfg.DigitalOcean.Region == "" {
+					// Older fixed intents fingerprinted the eager nyc3 default.
+					cfg.DigitalOcean.Region = core.DigitalOceanRegionFallback
+				}
+			} else {
+				cfg.DigitalOcean.Region, err = client.ResolveSizeRegion(ctx, cfg)
+				if err != nil {
+					return core.FixedLeaseBinding{}, err
+				}
+				regionChecked = true
+			}
+		}
 		publicKey, err = core.PrepareFixedSSHKey(&cfg, req.RequestedLeaseID, core.FixedKeyPolicy{RequireExisting: exists && claim.FixedCreateIntent.Attempt != nil, UseStored: true})
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
@@ -64,7 +81,7 @@ func (b *digitalOceanLeaseBackend) acquireFixed(ctx context.Context, req core.Ac
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
 		}
-		binding := core.FixedLeaseBinding{ProviderScope: account, Fingerprint: fingerprint}
+		binding := core.FixedLeaseBinding{ProviderScope: account, Fingerprint: fingerprint, InitialLabels: map[string]string{"region": cfg.DigitalOcean.Region}}
 		if exists {
 			return binding, nil
 		}
@@ -102,9 +119,22 @@ func (b *digitalOceanLeaseBackend) acquireFixed(ctx context.Context, req core.Ac
 		}, nil
 	}, Submit: func(ctx context.Context, tx *core.FixedTransaction) (droplet, error) {
 		claim := tx.Claim
+		reject := func(cause error) (droplet, error) {
+			return droplet{}, errors.Join(cause, tx.RejectAttempt(fixedLeaseKind, claim.FixedCreateIntent.Attempt["nonce"], false))
+		}
+		if !regionChecked {
+			if _, err := client.ResolveSizeRegion(ctx, cfg); err != nil {
+				return reject(err)
+			}
+		}
 		labels := maps.Clone(claim.Labels)
+		fmt.Fprintf(b.RT.Stderr, "provisioning provider=digitalocean lease=%s slug=%s type=%s region=%s image=%s keep=%v\n", claim.LeaseID, claim.Slug, cfg.ServerType, cfg.DigitalOcean.Region, digitalOceanImage(cfg), req.Keep)
 		item, err := creator.CreateFixedDroplet(ctx, cfg, publicKey, claim.LeaseID, claim.Slug, req.Keep, core.FixedCreateTime(*claim), tx.CreateLabels())
 		if err != nil {
+			var rejected *core.FixedCreateRejected
+			if errors.As(err, &rejected) {
+				return reject(rejected.Err)
+			}
 			var ambiguous *ambiguousDropletCreateError
 			if errors.As(err, &ambiguous) {
 				setDigitalOceanKeyIdentity(labels, ambiguous.keyID, ambiguous.keyCreated, ambiguous.keyOwnershipKnown)
@@ -148,6 +178,35 @@ func (b *digitalOceanLeaseBackend) acquireFixed(ctx context.Context, req core.Ac
 		err = req.OnAcquired(lease)
 	}
 	return lease, err
+}
+
+// Only the shared rejected-attempt witness proves no resource was allocated.
+// Legacy empty inventory and an observed-but-unbound attempt remain uncertain.
+func isRejectedFixed(claim core.LeaseClaim) bool {
+	i := claim.FixedCreateIntent
+	return fixedLeaseKind.IsFixedClaim(claim) && i.Version == fixedLeaseKind.IntentVersion &&
+		i.State == "prepared" && i.Fingerprint != "" && i.ProviderScope != "" &&
+		i.ProviderScope == claim.ProviderScope && i.Slug == claim.Slug &&
+		len(i.Attempt) == 0 && claim.CloudID == "" && claim.CloudNumericID == 0 && claim.CloudImmutableID == "" &&
+		i.Journal != nil && i.Journal.Version == 1 && i.Journal.Revision > 0 && i.Journal.Phase == "prepared" &&
+		claim.Labels["fixed_attempt"] != "" && slices.Contains(i.FailedAttempts, claim.Labels["fixed_attempt"])
+}
+
+func resolveRejectedFixed(id string) (core.LeaseTarget, bool, error) {
+	var claim core.LeaseClaim
+	var exists bool
+	var err error
+	if core.IsCanonicalLeaseID(id) {
+		claim, exists, err = core.ReadLeaseClaimWithPresence(id)
+	} else {
+		claim, exists, err = core.ResolveLeaseClaimForProvider(id, providerName)
+	}
+	if err != nil || !exists || !isRejectedFixed(claim) {
+		return core.LeaseTarget{}, false, err
+	}
+	lease := core.LeaseTarget{LeaseID: claim.LeaseID, Server: core.Server{Provider: providerName}}
+	core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
+	return lease, true, nil
 }
 
 func validateFixedDroplet(claim core.LeaseClaim, item droplet) error {

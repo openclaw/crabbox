@@ -2,8 +2,8 @@ package cli
 
 //go:generate go run ../../scripts/configgen -source config_digitalocean.go -output config_digitalocean_generated.go -type DigitalOceanConfig -provider digitalocean
 
-// Runtime fallbacks do not initialize the raw provider configuration.
 const (
+	// DigitalOceanRegionFallback preserves replay of intents created before automatic region selection.
 	DigitalOceanRegionFallback = "nyc3"
 	DigitalOceanImageFallback  = "ubuntu-24-04-x64"
 )

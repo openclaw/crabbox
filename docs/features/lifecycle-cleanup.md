@@ -155,6 +155,12 @@ Both release and expiry call the same provider delete path:
   cloud server for every active lease past `expiresAt`, then sets state
   `expired`.
 
+The cleanup pass schedules claim recovery before starting provider deletion and
+arms transient-failure retries immediately after persisting them. These wakeups
+do not depend on the rest of maintenance reaching its final alarm reconciliation.
+Unresolved provider identity still requires explicit resolution; retries never
+relax ownership checks or convert uncertainty into confirmed deletion.
+
 Release and expiry publish provider-cleanup completion only after the provider
 delete path succeeds and the exact cleanup claim is revalidated. The stored
 record then clears `host`, `tailscale`, `sshHostKey`, and
@@ -553,6 +559,29 @@ revalidate them, delete the VM first, then its surviving companions. Refusal or
 cleanup failure preserves the original acquisition error and prevents a fresh
 bootstrap retry. This in-process rollback has no persisted recovery claim and
 does not provide crash-resumable companion cleanup.
+
+Fixed-ID Azure preparation additionally persists the genuine companion snapshot
+in the exact claim under its acquisition fence before access waits and ready
+publication. The snapshot stays local; it is not published in VM tags. Replay
+checks the original companion identities, and release projects that retained
+binding into the ordinary owned deletion path, including when only the VM has
+subsequently disappeared. The deletion journal, not the presence of a preparation
+snapshot, records cleanup admission. Automatic cleanup validates the original
+binding and durably journals deletion before sending DELETEs. Initial admission
+requires a live VM during preparation; only already-admitted recovery accepts
+VM absence. The first full snapshot must also match any network identities
+recorded before VM creation. Lease touches omit these private bindings from
+Azure tags without discarding the local record. After VM loss cleanup
+resumes only admitted cleanup, not preparation snapshots, even if the lease has
+expired; use an explicit stop or hold for those resources. Both stop and automatic
+cleanup verify all companion slots are absent before publishing completion.
+NIC, public-IP, and quarantine-NSG cleanup also requires the original provider-key
+and fixed-attempt tags; changed or missing claim tags block every deletion even
+when the companion's immutable identity still matches.
+A failed or incomplete capture leaves the claim unresolved and cannot publish
+readiness. Legacy claims with no snapshot
+still require all exact resources absent; surviving companions are not adopted
+after VM loss.
 
 These are observed-identity checks, not an atomic generation-conditional Azure
 DELETE. Inner create-failure rollback and Windows setup performed during create,

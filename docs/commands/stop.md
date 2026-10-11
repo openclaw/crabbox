@@ -19,6 +19,15 @@ crabbox stop --provider ssh --static-host mac-studio.local mac-studio.local
 
 ## Repeating a stop
 
+An exact failed Azure lease can instead be retained with [hold](hold.md).
+Held claims refuse ordinary and forced stop, reuse, and automatic cleanup;
+the retained disk and companions require a separate salvage decision. After
+separately authorized salvage and external disposal, use
+`hold --provider azure --id <canonical-cbx-id> --finalize` to verify every
+resource slot absent and retain a terminal hold receipt. Neither ordinary nor
+forced `stop` bypasses a hold; finalization never authorizes cloud deletion or
+reuse of the same ID.
+
 A repeated stop can exit 0 when the provider validates a retained terminal
 receipt for the exact canonical lease ID, as Incus does. Keep that receipt and
 the original provider configuration; a slug may now identify another live lease.
@@ -96,8 +105,13 @@ Crabbox lease ID and local slug:
   or ordinary non-fixed lookups. See [AWS fixed-ID replay](../providers/aws.md#fixed-id-replay).
 - `blacksmith-testbox` — accepts a Testbox ID or slug only with an exact local
   organization/API-scoped claim and matching native workflow identity. It stops
-  the Testbox (also cancelling its backing Actions run) and removes the claim/key
-  only after fresh native stdout confirms the exact ID in state `completed`.
+  the Testbox through the native CLI and removes the claim/key only after fresh
+  native status confirms the exact ID in state `completed` and an optional
+  `gh` read confirms its exact associated GitHub run is terminal. A missing run
+  association or unavailable GitHub read returns nonzero and retains recovery
+  ownership; retry the same stop after association or access becomes available.
+  Native completion alone never proves GitHub cancellation. GitHub reads use
+  existing access only, and Crabbox does not mutate GitHub runs.
   Failed native stops can reconcile through the same confirmation; ambiguous,
   failed or cancelled queries retain the original stop error and local state.
   Verification and local artifact cleanup failures remain visible alongside the
@@ -265,6 +279,19 @@ The error includes an exact `status --json` command to check cleanup progress.
 When the coordinator reports `cleanupRetryAt`, it also confirms that cleanup
 will retry automatically. Repeat `stop` after `cleanupStatus` becomes `complete`
 to remove the retained local artifacts.
+
+If automatic expiry already owns cleanup, explicit stop observes that operation
+even while the lease remains `active`. A current retry claim takes precedence over
+diagnostics from the previous failed attempt; a new failure that clears the claim
+still returns an error. Stop preserves the local claim and SSH
+artifacts until the same resource has confirmed cleanup. When expiry finishes as
+`expired` with `cleanupCompletedAt` and retired access, stop uses the coordinator's
+idempotent release endpoint to finalize the release without another provider
+deletion, then cleans up local artifacts. A changed resource or cleanup claim,
+missing completion evidence, cancellation, or the existing observation deadline
+retains local recovery material. After a pending stop, check `status --json` and
+retry once cleanup advances; expiry completion may appear before `cleanupStatus`
+becomes `complete`.
 
 After confirmed coordinator-backed deletion, SSH masters created with canonical
 lease credentials are explicitly closed and observed to exit before local

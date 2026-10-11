@@ -762,14 +762,6 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	return nil
 }
 
-func (b *backend) create(ctx context.Context, cfg core.Config, publicKeyPath string, labels map[string]string) (string, error) {
-	compose, err := composeFileForDeploy(cfg, publicKeyPath)
-	if err != nil {
-		return "", err
-	}
-	return b.createWithCompose(ctx, cfg, publicKeyPath, labels, compose)
-}
-
 func (b *backend) createWithCompose(ctx context.Context, cfg core.Config, publicKeyPath string, labels map[string]string, compose string) (string, error) {
 	leaseID := labels["lease"]
 	name := phalaCVMName(leaseID)

@@ -188,6 +188,11 @@ export interface Env {
   CRABBOX_ARTIFACTS_URL_EXPIRES_SECONDS?: string;
 }
 
+export interface CapacityRequirements {
+  minVCPUs?: number;
+  minMemoryMiB?: number;
+}
+
 export interface LeaseRequest {
   leaseID?: string;
   createAttemptID?: string;
@@ -219,6 +224,7 @@ export interface LeaseRequest {
   image?: string;
   awsRegion?: string;
   awsAMI?: string;
+  awsUseStockImage?: boolean;
   awsSnapshot?: string;
   awsSGID?: string;
   awsSubnetID?: string;
@@ -248,6 +254,8 @@ export interface LeaseRequest {
   gcpRootGB?: number;
   gcpServiceAccount?: string;
   capacity?: {
+    minVCPUs?: number;
+    minMemoryMiB?: number;
     market?: "spot" | "on-demand";
     strategy?: "most-available" | "price-capacity-optimized" | "capacity-optimized" | "sequential";
     fallback?: string;
@@ -399,7 +407,6 @@ export type Provider = CoordinatorProviderSpec["provider"];
 export const coordinatorProviders = coordinatorProviderRegistry.map(
   (spec) => spec.provider,
 ) as Provider[];
-export const providers = coordinatorProviders;
 
 export function isCoordinatorProvider(provider: string): provider is Provider {
   return coordinatorProviders.includes(provider as Provider);
@@ -455,6 +462,7 @@ export interface HetznerCleanupEvidence {
 export type ProviderCleanupEvidence = HetznerCleanupEvidence;
 
 export interface LeaseRecord {
+  capacityRequirements?: CapacityRequirements;
   creationEvents?: CreationEvent[];
   portablePoolAccess?: true;
   id: string;
@@ -1021,6 +1029,7 @@ export interface PromotedImageRecord extends ProviderImage {
 }
 
 export interface RunRecord {
+  eventAppendIdempotent?: boolean;
   id: string;
   leaseID: string;
   leaseIDs?: string[];
@@ -1183,6 +1192,7 @@ export interface RunEventRecord {
 }
 
 export interface RunEventRequest {
+  id?: string;
   type?: string;
   phase?: string;
   stream?: "stdout" | "stderr";
@@ -1244,18 +1254,6 @@ export interface HetznerSSHKey {
   labels?: Record<string, string>;
 }
 
-export interface MachineView {
-  id: string;
-  provider: Provider;
-  cloudID: string;
-  name: string;
-  status: string;
-  serverType: string;
-  hostId?: string;
-  host: string;
-  labels: Record<string, string>;
-}
-
 export interface ProviderMachine {
   creationEvents?: CreationEvent[];
   provider: Provider;
@@ -1271,6 +1269,9 @@ export interface ProviderMachine {
   privateHost?: string;
   awsIPv6Addresses?: string[];
   awsKeyName?: string;
+  awsSpotInstanceRequestID?: string;
+  awsStateReasonCode?: string;
+  awsStateReasonMessage?: string;
   awsSubnetID?: string;
   awsSecurityGroupIDs?: string[];
   awsInstanceProfileAttached?: boolean;

@@ -68,6 +68,9 @@ func (k FixedLeaseKind) TerminalClaim(claim LeaseClaim, now time.Time) LeaseClai
 }
 
 func (k FixedLeaseKind) FinalizeAfterCleanup(claim LeaseClaim, action func() error) error {
+	if claim.RecoveryHold != nil {
+		return Exit(4, "recovery_required: lease %s is held for salvage", claim.LeaseID)
+	}
 	if !k.IsFixedClaim(claim) {
 		return RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, action)
 	}

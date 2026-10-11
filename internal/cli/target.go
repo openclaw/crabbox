@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"os"
 	"path"
@@ -155,6 +156,12 @@ func validateTargetConfig(cfg Config) error {
 }
 
 func validateProviderTarget(cfg Config) error {
+	// Config loading also applies defaults, before lease flags resolve the target.
+	// Check selector compatibility only at this final lease admission boundary.
+	if spec := osImageSpecs[cfg.OSImage]; spec.Provider != "" &&
+		(cfg.Provider != spec.Provider || normalizeTargetOS(cfg.TargetOS) != spec.Target) {
+		return Exit(2, "os %s requires provider=%s target=%s", spec.Selector, spec.Provider, spec.Target)
+	}
 	provider, err := validateProviderTargetSupport(cfg)
 	if err != nil {
 		return err
@@ -318,6 +325,10 @@ const staticLeaseIDPrefix = "static_"
 // and restores the original static host from the local claim when the caller
 // did not already pass --static-host.
 func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
+	return autoRouteStaticLeaseContext(context.Background(), cfg, fs, id)
+}
+
+func autoRouteStaticLeaseContext(ctx context.Context, cfg *Config, fs *flag.FlagSet, id string) error {
 	id = strings.TrimSpace(id)
 	suffix, hasStaticPrefix := strings.CutPrefix(id, staticLeaseIDPrefix)
 	if flagWasSet(fs, "provider") && !isStaticProvider(cfg.Provider) {
@@ -327,7 +338,7 @@ func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
 	if authoritative && !isStaticProvider(cfg.Provider) {
 		return nil
 	}
-	claim, hasClaim, err := staticLeaseClaim(id)
+	claim, hasClaim, err := staticLeaseClaimContext(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -353,6 +364,10 @@ func autoRouteStaticLease(cfg *Config, fs *flag.FlagSet, id string) error {
 // external lease was acquired. This keeps existing leases addressable after
 // the user's current external configuration changes.
 func autoRouteExternalLease(cfg *Config, fs *flag.FlagSet, id string) error {
+	return autoRouteExternalLeaseContext(context.Background(), cfg, fs, id)
+}
+
+func autoRouteExternalLeaseContext(ctx context.Context, cfg *Config, fs *flag.FlagSet, id string) error {
 	providerExplicit := flagWasSet(fs, "provider")
 	if providerExplicit {
 		cfg.providerExplicit = true
@@ -363,8 +378,8 @@ func autoRouteExternalLease(cfg *Config, fs *flag.FlagSet, id string) error {
 	if flagWasSet(fs, "windows-mode") {
 		cfg.windowsModeFlagExplicit = true
 	}
-	return autoRouteExternalLeaseWithHints(
-		cfg,
+	return autoRouteExternalLeaseWithHintsContext(
+		ctx, cfg,
 		id,
 		flagWasSet(fs, "external-routing-file"),
 		IsExternalDesktopTargetExplicit(cfg),
@@ -393,6 +408,10 @@ func routeExternalLeaseClaim(cfg *Config, leaseID string) error {
 }
 
 func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, targetExplicit, windowsModeExplicit bool) error {
+	return autoRouteExternalLeaseWithHintsContext(context.Background(), cfg, id, routingExplicit, targetExplicit, windowsModeExplicit)
+}
+
+func autoRouteExternalLeaseWithHintsContext(ctx context.Context, cfg *Config, id string, routingExplicit, targetExplicit, windowsModeExplicit bool) error {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return nil
@@ -422,7 +441,7 @@ func autoRouteExternalLeaseWithHints(cfg *Config, id string, routingExplicit, ta
 		}
 		return restoreExternalLeaseTarget(cfg, targetExplicit, windowsModeExplicit)
 	}
-	claim, ok, err := uniqueExternalLeaseClaim(id, providerSelected)
+	claim, ok, err := uniqueExternalLeaseClaimContext(ctx, id, providerSelected)
 	if err != nil || !ok {
 		return err
 	}
@@ -520,7 +539,7 @@ func restoreExternalLeaseTarget(cfg *Config, targetExplicit, windowsModeExplicit
 	return validateTargetConfig(*cfg)
 }
 
-func uniqueExternalLeaseClaim(identifier string, providerSelected bool) (leaseClaim, bool, error) {
+func uniqueExternalLeaseClaimContext(ctx context.Context, identifier string, providerSelected bool) (leaseClaim, bool, error) {
 	exact, exists, err := ReadLeaseClaimWithPresence(identifier)
 	if err != nil {
 		return leaseClaim{}, false, err
@@ -531,7 +550,7 @@ func uniqueExternalLeaseClaim(identifier string, providerSelected bool) (leaseCl
 		}
 		return exact, true, nil
 	}
-	claims, err := ListLeaseClaims()
+	claims, err := ListLeaseClaimsContext(ctx)
 	if err != nil {
 		return leaseClaim{}, false, err
 	}
@@ -567,8 +586,8 @@ func uniqueExternalLeaseClaim(identifier string, providerSelected bool) (leaseCl
 	return externalMatches[0], true, nil
 }
 
-func staticLeaseClaim(id string) (leaseClaim, bool, error) {
-	claim, ok, err := ResolveLeaseClaim(id)
+func staticLeaseClaimContext(ctx context.Context, id string) (leaseClaim, bool, error) {
+	claim, ok, err := ResolveLeaseClaimContext(ctx, id)
 	if err != nil || !ok || !isStaticProvider(claim.Provider) {
 		return leaseClaim{}, false, err
 	}
@@ -614,6 +633,24 @@ func isWindowsWSL2Target(target SSHTarget) bool {
 	return target.TargetOS == targetWindows && target.WindowsMode == windowsModeWSL2
 }
 
+// Validate explicit platform assertions before lease labels replace defaults.
+func validateResolvedLeasePlatform(cfg Config, server Server) error {
+	targetOS := strings.TrimSpace(server.Labels["target"])
+	if cfg.targetFlagExplicit && targetOS != "" && normalizeTargetOS(targetOS) != normalizeTargetOS(cfg.TargetOS) {
+		return Exit(2, "lease target mismatch: requested=%s recorded=%s; remove --target to use the recorded platform", cfg.TargetOS, targetOS)
+	}
+	if cfg.windowsModeFlagExplicit {
+		if targetOS != "" && normalizeTargetOS(targetOS) != targetWindows {
+			return Exit(2, "lease Windows mode mismatch: --windows-mode requires a Windows lease, recorded target=%s", targetOS)
+		}
+		mode := strings.TrimSpace(server.Labels["windows_mode"])
+		if mode != "" && normalizeWindowsMode(mode) != normalizeWindowsMode(cfg.WindowsMode) {
+			return Exit(2, "lease Windows mode mismatch: requested=%s recorded=%s; remove --windows-mode to use the recorded mode", cfg.WindowsMode, mode)
+		}
+	}
+	return nil
+}
+
 func applyResolvedLeaseConfig(cfg *Config, server Server, target *SSHTarget) {
 	if cfg == nil || target == nil {
 		return
@@ -632,12 +669,34 @@ func applyResolvedLeaseConfig(cfg *Config, server Server, target *SSHTarget) {
 	if workRoot != "" {
 		cfg.WorkRoot = workRoot
 	}
+	previous := *target
 	target.TargetOS = cfg.TargetOS
 	target.WindowsMode = cfg.WindowsMode
+	refreshProviderReadyCheck(*cfg, previous, target)
 	ApplyTargetChildEnvironmentBoundary(*cfg, target)
 	if target.User == "" || target.User == configuredSSHUser {
 		target.User = cfg.SSHUser
 	}
+}
+
+// refreshProviderReadyCheck replaces a readiness check the provider installed
+// for the target's previous platform once recorded lease labels select a
+// different one. A target resolved under configuration defaults otherwise
+// keeps probing a Windows lease with its Linux bootstrap gate. Readiness
+// commands that are not the provider default for the previous platform are
+// operator or provider choices for this host and stay untouched, as does a
+// target whose platform did not change.
+func refreshProviderReadyCheck(cfg Config, previous SSHTarget, target *SSHTarget) {
+	if target == nil {
+		return
+	}
+	if previous.TargetOS == target.TargetOS && previous.WindowsMode == target.WindowsMode {
+		return
+	}
+	if target.ReadyCheck != "" && target.ReadyCheck != providerReadyCheck(cfg, previous) {
+		return
+	}
+	target.ReadyCheck = providerReadyCheck(cfg, *target)
 }
 
 func applyStoredLeaseClaimConfig(cfg *Config, claim leaseClaim) {

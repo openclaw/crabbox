@@ -57,6 +57,20 @@ and fixture generation during a measurement sequence.
 
 ## Full runs over SSH
 
+To isolate remote manifest writing, run the production receiver against synthetic
+1,000-, 10,000-, and 50,000-file trees. Tree creation is outside the timed region;
+each iteration includes the receiver shell, framing, metadata setup, and length
+checks, followed by untimed byte-for-byte verification of both manifests:
+
+```sh
+go test ./internal/cli -run '^$' -bench '^BenchmarkRemoteWriteSyncManifests$' -benchtime=1x -count=3
+```
+
+Build baseline and candidate test binaries with this same benchmark and run
+three interleaved pairs on the same host. This measures receiver work, excluding
+SSH latency and workspace-owner registration. Use a full SSH run below to include
+those layers. The manifest payload scales with filename bytes, not file contents.
+
 Build `scripts/benchmark-sync.Dockerfile` for a local static SSH target. Besides
 OpenSSH and rsync, it installs the GNU/util-linux tools used by the workspace
 ownership and pruning scripts. BusyBox `flock` does not implement their timeout

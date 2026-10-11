@@ -18,6 +18,7 @@ import {
 } from "./github-request";
 import { errorMessage, json, readJson } from "./http";
 import { requestOrgLabel } from "./org-identity";
+import { coordinatorStorageEntries } from "./storage-scan";
 import { timingSafeEqual } from "./timing-safe";
 import type { Env, Provider } from "./types";
 
@@ -836,14 +837,16 @@ async function cleanupExpiredPendingOAuth(
   storage: CoordinatorStorage,
   sourceHash?: string,
 ): Promise<{ total: number; forSource: number }> {
-  const entries = await storage.list<OAuthPending>({ prefix: "oauth:" });
   let total = 0;
   let forSource = 0;
   const now = Date.now();
-  const expired: OAuthPending[] = [];
-  for (const pending of entries.values()) {
+  for await (const [, pending] of coordinatorStorageEntries<OAuthPending>(storage, {
+    prefix: "oauth:",
+    limit: 128,
+    noCache: true,
+  })) {
     if (Date.parse(pending.expiresAt) <= now) {
-      expired.push(pending);
+      await deletePendingOAuth(storage, pending);
       continue;
     }
     total += 1;
@@ -851,7 +854,6 @@ async function cleanupExpiredPendingOAuth(
       forSource += 1;
     }
   }
-  await Promise.all(expired.map((pending) => deletePendingOAuth(storage, pending)));
   return { total, forSource };
 }
 

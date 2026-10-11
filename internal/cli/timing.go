@@ -9,6 +9,7 @@ import (
 )
 
 type TimingReport struct {
+	CreationRejected   *CreationRejection       `json:"creationRejected,omitempty"`
 	CreationEvents     []CreationEvent          `json:"creationEvents,omitempty"`
 	Provider           string                   `json:"provider"`
 	LeaseID            string                   `json:"leaseId,omitempty"`
@@ -53,8 +54,17 @@ type TimingReport struct {
 	SchemaValidations []SchemaValidationResult `json:"schemaValidations,omitempty"`
 	ArtifactChanges   []ArtifactChangeResult   `json:"artifactChanges,omitempty"`
 
-	LeaseStopped *bool  `json:"leaseStopped,omitempty"`
-	LeaseStopErr string `json:"leaseStopError,omitempty"`
+	LeaseStopped        *bool  `json:"leaseStopped,omitempty"`
+	LeaseStopErr        string `json:"leaseStopError,omitempty"`
+	LeaseRetainedReason string `json:"leaseRetainedReason,omitempty"`
+}
+
+// CreationRejection describes a requested fixed identity rejected before lease
+// admission. It is not an allocated lease or a cleanup confirmation.
+type CreationRejection struct {
+	Version          int    `json:"version"`
+	RequestedLeaseID string `json:"requestedLeaseId"`
+	Code             string `json:"code"`
 }
 
 type TimingPhase struct {

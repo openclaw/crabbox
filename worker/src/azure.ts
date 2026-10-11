@@ -16,6 +16,14 @@ import {
 import { measureCreationStep, recordCreationStep } from "./creation-events";
 import { sha256Hex } from "./encoding";
 import { ExpiringTokenCache, type ExpiringToken } from "./expiring-token-cache";
+import {
+  ProviderRequestTimeoutError,
+  providerFetch,
+  providerRequestSignal,
+  providerRequestTimeoutMs,
+  providerSleep,
+  waitForProviderSignal,
+} from "./provider-deadline";
 import { leaseProviderLabels, providerLabelsOwnedByLease } from "./provider-labels";
 import {
   ProviderProvisioningCleanupError,
@@ -495,7 +503,28 @@ export class AzureClient {
     | ((request: AzureDeferredCleanupRequest) => Promise<void>)
     | undefined;
   private readonly ownedDeleteClaimStorage: AzureOwnedDeleteClaimStorage | undefined;
-  fetcher: typeof fetch = (input, init) => fetch(input, init);
+  fetcher: typeof fetch = (input, init) =>
+    providerFetch(
+      input,
+      init,
+      this.requestSignal(
+        "request",
+        init?.signal ?? (input instanceof Request ? input.signal : undefined),
+      ),
+    );
+
+  private requestSignal(operation: string, callerSignal?: AbortSignal | null): AbortSignal {
+    if (this.createDeadline !== undefined) {
+      const remaining = this.createDeadline - Date.now();
+      const budget = new AbortController();
+      const expire = () =>
+        budget.abort(new Error("Azure provisioning deadline exceeded after 25m"));
+      if (remaining <= 0) expire();
+      else AbortSignal.timeout(remaining).addEventListener("abort", expire, { once: true });
+      callerSignal = callerSignal ? AbortSignal.any([callerSignal, budget.signal]) : budget.signal;
+    }
+    return providerRequestSignal(providerRequestTimeoutMs, callerSignal, "azure", operation);
+  }
 
   constructor(
     env: Env,
@@ -823,16 +852,14 @@ export class AzureClient {
     const client = new AzureClient(this.env, options);
     client.tokenCache = this.tokenCache;
     client.createDeadline = deadline;
-    client.fetcher =
-      deadline === undefined
-        ? this.fetcher
-        : async (input, init) => {
-            if (Date.now() >= deadline)
-              throw new Error("Azure provisioning deadline exceeded after 25m");
-            const budget = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
-            const signal = init?.signal ? AbortSignal.any([init.signal, budget]) : budget;
-            return this.fetcher(input, { ...init, signal });
-          };
+    client.fetcher = (input, init) => {
+      const signal = client.requestSignal(
+        "request",
+        init?.signal ?? (input instanceof Request ? input.signal : undefined),
+      );
+      signal.throwIfAborted();
+      return this.fetcher(input, { ...init, signal });
+    };
     client.skuAvailability = this.skuAvailability;
     return client;
   }
@@ -3318,7 +3345,10 @@ export class AzureClient {
   }
 
   private async token(): Promise<string> {
-    return this.tokenCache.get(Date.now() + 30_000, () => this.loadToken());
+    const signal = this.requestSignal("token acquisition");
+    return waitForProviderSignal(signal, () =>
+      this.tokenCache.get(Date.now() + 30_000, () => this.loadToken()),
+    );
   }
 
   private async loadToken(): Promise<ExpiringToken> {
@@ -4709,6 +4739,7 @@ function errorMessage(error: unknown): string {
 }
 
 export function isRetryableDeleteError(error: unknown): boolean {
+  if (error instanceof ProviderRequestTimeoutError) return true;
   const message = errorMessage(error);
   return (
     message.includes("NicReservedForAnotherVm") ||
@@ -5023,5 +5054,5 @@ function truncateAzureBody(text: string): string {
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return providerSleep(ms, providerRequestSignal(ms + 1_000, undefined, "azure", "poll wait"));
 }

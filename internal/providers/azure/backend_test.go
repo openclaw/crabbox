@@ -42,6 +42,9 @@ type fakeAzureClient struct {
 	createCfg         core.Config
 	createErr         error
 	fixedReplyErr     error
+	fixedCapacityErr  error
+	fixedSettleErr    error
+	fixedSettled      []core.AzureFixedCompanions
 	createFunc        func(core.Server) core.Server
 	waitFunc          func(core.Server) (core.Server, error)
 	waitCalls         int
@@ -144,6 +147,10 @@ func (c *fakeAzureClient) PrepareCleanupServer(_ context.Context, server core.Se
 		server = c.prepareFunc(server)
 	}
 	return server, nil
+}
+
+func (c *fakeAzureClient) PrepareCleanupRecoveryServer(ctx context.Context, server core.Server, now time.Time) (core.Server, error) {
+	return c.PrepareCleanupServer(ctx, server, now)
 }
 
 func (c *fakeAzureClient) DeleteOwnedServer(_ context.Context, server core.Server) error {

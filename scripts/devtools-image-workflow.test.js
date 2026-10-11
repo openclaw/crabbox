@@ -40,7 +40,9 @@ function publicationFixture(t) {
     REGION: "eu-west-1",
     LINUX_TYPE: "m7i.large",
     LINUX_OS: "ubuntu:26.04",
+    LINUX_ROOT_GB: "",
     WINDOWS_TYPE: "m7i.large",
+    WINDOWS_OS: "windows-server:2022",
     MACOS_TYPE: "mac-m4.metal",
     MACOS_HOST: "use-existing",
     MEASURED: "false",
@@ -175,10 +177,7 @@ test("measured Linux publication is explicit and declares its threshold and extr
     /name: Upload allowlisted measurement manifest[\s\S]*if: always\(\) && inputs\.measured/,
   );
   assert.match(workflow, /path: \$\{\{ runner\.temp \}\}\/devtools-image-proof\/manifest\.json/);
-  assert.match(
-    workflow,
-    /export CRABBOX_IMAGE_PUBLIC_OUTCOME="\$proof_dir\/manifest\.json"/,
-  );
+  assert.match(workflow, /export CRABBOX_IMAGE_PUBLIC_OUTCOME="\$proof_dir\/manifest\.json"/);
   assert.match(workflow, /public_outcome="\$RUNNER_TEMP\/devtools-image-proof\/manifest\.json"/);
   assert.match(workflow, /name: Initialize measured publication outcome/);
   assert.match(workflow, /echo '- Status: `outcome_unavailable`'/);
@@ -188,3 +187,77 @@ test("measured Linux publication is explicit and declares its threshold and extr
   assert.doesNotMatch(workflow, /run-name:.*\$\{\{ inputs\.(?:region|linux_type)/);
   assert.doesNotMatch(workflow, /sanitized.*(?:logs|diagnostics)/i);
 });
+
+test("publication inputs remain within the 25-input dispatch limit", () => {
+  const inputs = workflow.split("    inputs:\n")[1].split("\npermissions:")[0];
+  assert.equal([...inputs.matchAll(/^      [a-z0-9_]+:$/gm)].length, 11);
+  assert.match(inputs, /linux_root_gb:[\s\S]*default: ""/);
+  assert.equal(
+    (workflow.match(/LINUX_ROOT_GB: \$\{\{ inputs\.linux_root_gb \}\}/g) ?? []).length,
+    2,
+  );
+});
+
+test("Windows publication offers 2025 while retaining the 2022 default", () => {
+  const input = workflow.match(/^      windows_os:\n((?: {8}[^\n]*\n)+)/m)?.[1];
+  assert.ok(input);
+  assert.match(input, /default: windows-server:2022/);
+  assert.match(input, /type: choice/);
+  assert.deepEqual([...input.matchAll(/- (windows-server:[0-9]+)/g)].map((m) => m[1]),
+    ["windows-server:2022", "windows-server:2025"]);
+  assert.equal((workflow.match(/WINDOWS_OS: \$\{\{ inputs\.windows_os \}\}/g) ?? []).length, 2);
+});
+
+for (const target of ["linux", "windows", "macos"]) {
+  for (const year of ["2022", "2025"]) {
+    test(`Windows ${year} dispatch scopes stock selection to ${target}`, (t) => {
+      const fixture = publicationFixture(t);
+      const result = fixture.run({ TARGET: target, WINDOWS_OS: `windows-server:${year}` });
+      assert.equal(result.status, 0, result.stderr);
+      const args = fs.readFileSync(fixture.output, "utf8").split("\0").slice(0, -1);
+      const stock = target === "windows" && year === "2025";
+      assert.equal(args[0], target === "linux" ? "ubuntu:26.04" : stock ? "windows-server:2025" : "unset");
+      assert.equal(args.includes("--stock-source"), stock);
+      assert.equal(fixture.inheritedOS(), "unset");
+    });
+  }
+}
+
+for (const windowsOS of ["", "windows-server:2019", "windows-server:2025\ntrue"]) {
+  test(`publication guard rejects invalid Windows OS ${JSON.stringify(windowsOS)}`, (t) => {
+    const fixture = publicationFixture(t);
+    const result = fixture.run({ TARGET: "windows", WINDOWS_OS: windowsOS });
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, /windows_os must be windows-server:2022 or windows-server:2025/);
+    assert.equal(fs.existsSync(fixture.output), false);
+  });
+}
+for (const root of ["", "16", "40", "400"]) {
+  test(`Linux root dispatch forwards source-only flags for ${JSON.stringify(root)}`, (t) => {
+    const fixture = publicationFixture(t);
+    const result = fixture.run({ LINUX_ROOT_GB: root });
+    assert.equal(result.status, 0, result.stderr);
+    const args = fs.readFileSync(fixture.output, "utf8").split("\0").slice(0, -1);
+    assert.equal(args.includes("--stock-source"), root !== "");
+    assert.equal(args.includes("--root-gb"), root !== "");
+    if (root) assert.equal(args[args.indexOf("--root-gb") + 1], root);
+  });
+}
+for (const overrides of [
+  { LINUX_ROOT_GB: "15" },
+  { LINUX_ROOT_GB: "401" },
+  { LINUX_ROOT_GB: "040" },
+  { LINUX_ROOT_GB: "1.5" },
+  { LINUX_ROOT_GB: "999999999999999999999999" },
+  { LINUX_ROOT_GB: "40\ntrue" },
+  { LINUX_ROOT_GB: "40", TARGET: "windows" },
+  { LINUX_ROOT_GB: "40", TARGET: "macos" },
+]) {
+  test(`Linux root guard rejects ${JSON.stringify(overrides)} before mint`, (t) => {
+    const fixture = publicationFixture(t);
+    const result = fixture.run(overrides);
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, /linux_root_gb.*Linux.*16-400/);
+    assert.equal(fs.existsSync(fixture.output), false);
+  });
+}

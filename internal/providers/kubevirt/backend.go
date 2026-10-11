@@ -1057,20 +1057,27 @@ func (b *leaseBackend) resolveClaim(identifier string) (core.LeaseClaim, bool, e
 	} else if claim.LeaseID != "" && strings.HasPrefix(identifier, "cbx_") {
 		return core.LeaseClaim{}, false, nil
 	}
+	if core.IsCanonicalLeaseID(identifier) {
+		return core.LeaseClaim{}, false, nil
+	}
 	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return core.LeaseClaim{}, false, err
 	}
+	var matched core.LeaseClaim
 	slug := core.NormalizeLeaseSlug(identifier)
 	for _, claim := range claims {
 		if !b.claimMatchesScope(claim, scope) {
 			continue
 		}
 		if claim.LeaseID == identifier || (slug != "" && core.NormalizeLeaseSlug(claim.Slug) == slug) {
-			return claim, true, nil
+			if matched.LeaseID != "" {
+				return core.LeaseClaim{}, false, core.Exit(2, "multiple provider=%s claims match identifier %s", providerName, identifier)
+			}
+			matched = claim
 		}
 	}
-	return core.LeaseClaim{}, false, nil
+	return matched, matched.LeaseID != "", nil
 }
 
 func (b *leaseBackend) claimMatchesScope(claim core.LeaseClaim, scope string) bool {

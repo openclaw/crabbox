@@ -41,7 +41,7 @@ func TestProviderServerTypeDefaults(t *testing.T) {
 			}
 		})
 	}
-	if got := (Provider{}).ServerTypeForConfig(core.Config{Class: "standard"}); got != "s-1vcpu-1gb" {
+	if got := (Provider{}).ServerTypeForConfig(core.Config{Class: "standard"}); got != "s-4vcpu-8gb" {
 		t.Fatalf("ServerTypeForConfig standard=%q", got)
 	}
 	if got := (Provider{}).ServerTypeForConfig(core.Config{ServerType: "s-2vcpu-2gb", ServerTypeExplicit: true}); got != "s-2vcpu-2gb" {
@@ -85,7 +85,6 @@ func TestDigitalOceanBindingRuntime(t *testing.T) {
 		applyDigitalOceanDefaults(&cfg)
 		r, i := tc.provider, tc.provider
 		if r == "" {
-			r = "nyc3"
 			i = "ubuntu-24-04-x64"
 		}
 		if cfg.DigitalOcean.Region != r || cfg.DigitalOcean.Image != i || cfg.SSHUser != "alice" || cfg.SSHPort != "2222" || cfg.WorkRoot != "/srv/project" || cfg.ServerType != "s-1vcpu-1gb" || cfg.TargetOS != core.TargetLinux {

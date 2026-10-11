@@ -73,7 +73,9 @@ export ASCII_BOX_API_KEY=...
 legacy adapter default `https://ascii.dev`. Custom endpoints require HTTPS,
 except literal loopback hosts may use HTTP. Userinfo, queries, and fragments are
 rejected before the API key is written to CLI configuration or passed to the
-CLI.
+CLI. On 2026-10-03, authenticated list requests to both `https://ascii.dev`
+and `https://boat.dev` returned HTTP 200 directly, without redirects. The default
+therefore remains `https://ascii.dev`; keep a lease on its recorded endpoint.
 
 `BOX_ORG` selects an organization by ID or name. Without it, Crabbox explicitly
 uses `personal`; the native CLI's sticky organization selection is not inherited.
@@ -94,8 +96,33 @@ organization-or-personal scope, and an `Idempotency-Key` derived from the lease 
 and intent fingerprint before sending `POST /api/box/v1/boxes`. The API chooses
 the immutable Box ID; there is no caller-chosen native ID or create-time name.
 Crabbox stores the returned ID before readiness or SSH preparation. Identical
-replays look up that exact ID and verify its creation timestamp and recorded
-scope. Changed intent, scope, or native identity produces `lease_id_conflict`.
+replays look up that exact ID and verify its creation timestamp within the
+tolerance described below, plus its recorded scope. Changed intent, scope, or native identity produces `lease_id_conflict`.
+
+### Native identity and timestamp tolerance
+
+Identity requires an exact Box `id` match and a valid API `createdAt` within
+**±5 seconds**, inclusive, of the create-response timestamp. Fixed claims retain
+that original timestamp in `CloudImmutableID` and `ascii_box_created_at` through
+replay, readiness, and release; later reads never move the comparison window.
+Existing claims already use this format and require no migration.
+
+The timestamp witnesses possible ID reuse, rather than exact clock agreement.
+Boat generates random `bx_` IDs; a different box reusing the same ID within five
+seconds is not a realistic reuse scenario. Its create response and stored row do
+use different clocks: live create/read observations differed by 11 ms and 15 ms.
+A different ID, invalid timestamp, or timestamp outside the window remains a
+conflict. `subdomain` and `createdById` are not identity witnesses: fresh create
+responses can omit both, and the API permits renaming subdomains.
+
+An identity mismatch immediately after this claim submitted creation fails
+acquisition with `ascii_box_identity_contract`, naming the Box and its `stop`
+command. If the exact Box ID still matches and the durable submission journal
+proves the failed create (observed/submitting phase), `inspect` remains available
+and `stop` can delete that Box using the ID alone. Interrupted deletion preserves
+this authority for retry. This exception never authorizes acquisition, an
+already acquired claim whose timestamp is outside the tolerance, or a different
+Box ID. Existing scope, deletion-operation, and complete-inventory checks apply.
 
 The [public API](https://docs.boat.dev/openapi/box-v1.yaml) retains idempotency keys
 for **24 hours** (`asciiBoxIdempotencyWindow`). If the response is lost before
@@ -115,9 +142,11 @@ readiness. Complete inventory has no idempotency-key attribution, so Crabbox
 does not adopt a Box from its name or a coincidental inventory match. Preserve
 local Crabbox state and inspect unresolved resources with the provider tools.
 
-Release uses the existing exact-ID deletion-operation checks and complete
-inventory confirmation. The engine retains a single-use terminal tombstone;
-repeating `stop` is safe, and the lease ID can never allocate another Box. Use a
+Release validates the exact-ID deletion operation and proves the Box absent
+with a native 404 and complete inventory confirmation. Background data purge
+may still be pending or blocked; the fixed terminal receipt preserves its
+operation ID as informational metadata. The engine retains a single-use terminal
+tombstone. Repeating `stop` is safe, and the lease ID can never allocate another Box. Use a
 new lease ID for later work. Native 404 plus complete inventory absence can
 finalize a known Box; an uncertain attempt without a returned ID stays retained.
 
@@ -166,7 +195,8 @@ The following describes ordinary, generated lease IDs. Fixed IDs use the shared
 engine described above and retain terminal records instead of removing claims.
 
 1. `crabbox warmup --provider boat` creates a sandbox through `box new --json`,
-   verifies the original Box ID and creation timestamp through `box info`, stores
+   verifies the original Box ID and creation timestamp (within ±5 seconds) through
+   `box info`, stores
    an exact local ownership claim before preparing the SSH key with
    `box ssh <id> -- true`, waits for SSH, and keeps the sandbox until
    `crabbox stop`. The default SSH key lives in the private CLI home
@@ -174,7 +204,7 @@ engine described above and retain terminal records instead of removing claims.
 2. `crabbox run --provider boat` provisions a sandbox for one run, or reuses an
    existing claimed lease/slug/Box ID, then uses the standard SSH sync and run
    path. Reuse requires a matching endpoint, organization, Box ID, and creation
-   timestamp. `--reclaim` may transfer repository ownership of an already owned
+   timestamp within ±5 seconds. `--reclaim` may transfer repository ownership of an already owned
    lease; it does not adopt an unclaimed sandbox.
 3. `crabbox status` resolves the local lease claim or raw Box id and reads native
    state through `box info --json`.
@@ -182,20 +212,32 @@ engine described above and retain terminal records instead of removing claims.
    native identity before remote teardown or each native mutation. It releases
    the sandbox with `box stop --json`, requests deletion with
    `box delete --json --yes`, and validates the returned deletion operation's ID,
-   kind, and exact Box target. Crabbox polls
-   `box deletion status <operation-id>` while the operation is pending,
-   processing, or blocked. It removes the claim only after that exact operation
-   reports `completed` with a valid completion timestamp and complete
-   `box list --all` inventory confirms absence. A successful native process exit
-   alone does not prove deletion completion. The claim stays locked through
+   kind, and exact Box target. It releases the claim once an exact native 404
+   and complete `box list --all` inventory prove the Box absent, even if the
+   background data purge remains pending, processing, or blocked. While the Box
+   is still observable, Crabbox continues checking its deletion operation and
+   retains the claim. A successful native process exit alone does not prove
+   resource absence or data purge completion. The claim stays locked through
    teardown, deletion, retries, confirmation, and local removal. If the service
    temporarily refuses deletion until a recent snapshot exists, Crabbox shortens
    the sandbox TTL, waits for its managed stop transition, and retries deletion
    for up to two minutes, within a three-minute overall release budget that also
    honors caller cancellation, including deletion-operation polling. Missing,
-   malformed, or changed operation evidence, failed operation lookups, and
+   malformed, or changed operation evidence, failed absence checks, and
    cancellation retain the claim without recording completion. The shared native
    CLI SSH key is retained.
+
+The [Boat API deletion-operation schema](https://docs.boat.dev/openapi/box-v1.yaml)
+distinguishes resource removal from background data purge. Once an operation
+exists, its target is unavailable to list, restore, and fork. Purge stages can
+wait for upload URLs to expire, retained dependent snapshots, active restores,
+or automatic retries. These waits do not extend Crabbox's release budget:
+Crabbox proves resource absence independently and does not claim that stored
+data has finished purging. Fixed terminal receipts retain
+`ascii_box_deletion_operation` for subsequent provider-side inspection.
+When the legacy `box` executable also prints a rename notice on stderr, the
+structured JSON response on stdout remains authoritative for exact not-found
+evidence.
 
 Cleanup reports its current native-call phase and elapsed time at roughly
 ten-second intervals, including while a native command is blocked. A remaining
@@ -215,7 +257,7 @@ connection with the new client; Crabbox does not copy or remove pins from the
 old provider-wide file.
 
 If this release observes a valid native deletion acceptance but cannot finish
-waiting because of a timeout, cancellation, or operation lookup failure, it
+proving absence because of a timeout, cancellation, or lookup failure, it
 durably records the exact operation ID and its claim binding before returning
 the error. The binding covers the original provider scope, Box ID, creation
 timestamp, and repository owner. This records acceptance, not completion. A later
@@ -231,7 +273,7 @@ deletion. Crabbox repeats these checks inside the actual release fence before
 removing the claim; an earlier lookup during lease resolution does not authorize
 finalization.
 
-If Crabbox finishes waiting for native deletion but final inventory confirmation
+If the data purge reports completion but final absence confirmation
 fails or is canceled, it durably records that completed deletion in the
 still-locked claim before returning the error. The record is bound to the
 original claim, including its provider scope, Box ID, creation timestamp, and
@@ -272,8 +314,9 @@ conversion of an old claim into completed-deletion authority.
 
 Raw IDs, provider aliases, and legacy claims without the full ownership binding
 remain inspectable but cannot authorize reuse or deletion. Missing or changed
-identity, failed lookups, incomplete inventory, and uncertain deletion preserve
-the local claim. There is no implicit adoption or legacy upgrade; inspect such
+identity outside the timestamp tolerance, failed lookups, incomplete inventory,
+and uncertain deletion preserve the local claim. Apart from failed-own-create
+cleanup described above, there is no implicit adoption or legacy upgrade; inspect such
 resources with the native provider tools and manage them explicitly there after
 verifying ownership. Setup rollback likewise targets only the original confirmed
 creation attempt. If that attempt already published an exact claim, rollback

@@ -115,6 +115,7 @@ func (c *AWSClient) CapacityDoctorChecks(ctx context.Context, cfg Config) []Doct
 		cfg.ServerType = serverTypeForConfig(cfg)
 	}
 	vcpus := c.capacityInstanceTypeVCPUs(ctx, cfg)
+	cfg.AWSRegion = c.region
 	checks := make([]DoctorCheck, 0, 2)
 	for _, market := range awsCapacityDoctorMarkets(cfg) {
 		limit, known, err := c.appliedEC2ServiceQuota(ctx, awsQuotaCodeForMarket(market))
@@ -549,6 +550,10 @@ func shouldRetryAWSRegionAfterCreateError(err error, control *AWSFixedCreateCont
 }
 
 func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any), control *AWSFixedCreateControl) (result Server, resolved Config, resultErr error) {
+	candidates, err := c.resourceQualifiedLaunchCandidates(ctx, cfg)
+	if err != nil {
+		return Server{}, cfg, err
+	}
 	if cfg.ProviderKey == "" {
 		cfg.ProviderKey = "crabbox-steipete"
 	}
@@ -603,7 +608,6 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 	if err != nil {
 		return Server{}, cfg, err
 	}
-	candidates := AWSLaunchCandidates(cfg)
 	useSpot := cfg.Capacity.Market != "on-demand"
 	var marketFallbackCandidates []string
 	var errs []error
@@ -652,7 +656,7 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 		}
 	}
 	if cfg.ServerTypeExplicit {
-		return Server{}, cfg, fmt.Errorf("requested exact AWS instance type %s failed; remove --type to allow class fallback: %w", cfg.ServerType, joinErrors(errs))
+		return Server{}, cfg, fmt.Errorf("requested exact AWS instance type %s failed; remove --type to allow class fallback (regional quota limits still apply): %w", cfg.ServerType, joinErrors(errs))
 	}
 	return Server{}, cfg, joinErrors(errs)
 }
@@ -911,7 +915,7 @@ func (c *AWSClient) waitForServerIP(ctx context.Context, id string) (Server, err
 	ctx, cancel := context.WithTimeoutCause(ctx, 10*time.Minute, Exit(5, "timed out waiting for AWS instance public IP"))
 	defer cancel()
 	for {
-		server, err := c.GetServer(ctx, id)
+		server, err := c.getServerForAcquire(ctx, id)
 		if ctx.Err() != nil {
 			return Server{}, context.Cause(ctx)
 		}
@@ -1165,7 +1169,14 @@ func (c *AWSClient) resolveAMI(ctx context.Context, cfg Config) (string, error) 
 		return cfg.AWSAMI, nil
 	}
 	if cfg.TargetOS == targetWindows {
-		return c.resolveLatestAmazonAMI(ctx, "Windows_Server-2022-English-Full-Base-*", "x86_64")
+		spec, err := osImageSpecFor(cfg.OSImage)
+		if err != nil {
+			return "", err
+		}
+		if spec.Target != targetWindows {
+			spec = osImageSpecs["windows-server:2025"]
+		}
+		return c.resolveLatestAmazonAMI(ctx, spec.AWSName, "x86_64")
 	}
 	if cfg.TargetOS == targetMacOS {
 		name, architecture := awsMacOSAMIQueryForInstanceType(cfg.ServerType)
@@ -1504,6 +1515,15 @@ func awsInstanceToServer(instance types.Instance) Server {
 	}
 	server.PublicNet.IPv4.IP = aws.ToString(instance.PublicIpAddress)
 	server.ServerType.Name = string(instance.InstanceType)
+	server.ProviderMetadata["spotInstanceRequestID"] = aws.ToString(instance.SpotInstanceRequestId)
+	if instance.StateReason != nil {
+		server.ProviderMetadata["stateReasonCode"] = aws.ToString(instance.StateReason.Code)
+		server.ProviderMetadata["stateReasonMessage"] = aws.ToString(instance.StateReason.Message)
+	}
+	// A persisted readiness tag cannot override EC2's terminal state.
+	if server.Status == "shutting-down" || server.Status == "terminated" {
+		server.Labels["state"] = server.Status
+	}
 	return server
 }
 
@@ -1650,6 +1670,7 @@ func awsCapacityDoctorCheckForQuota(cfg Config, market string, quotaValue float6
 	needed := vcpus[serverType]
 	base := map[string]string{
 		"provider":             "aws",
+		"region":               cfg.AWSRegion,
 		"market":               market,
 		"quota_code":           quotaCode,
 		"default_class":        cfg.Class,
@@ -1713,11 +1734,14 @@ func awsCapacityDoctorCheckForQuota(cfg Config, market string, quotaValue float6
 			Details: base,
 		}
 	}
-	base["hint"] = "quota_satisfies_default_class"
+	base["capacity"] = "unknown"
+	base["quota_limit"] = "sufficient"
+	base["usage"] = "unchecked"
+	base["hint"] = "check_regional_quota_usage"
 	return DoctorCheck{
 		Status:  "ok",
 		Check:   "capacity",
-		Message: awsDoctorMessage("provider=aws capacity=ready", base),
+		Message: awsDoctorMessage("provider=aws", base),
 		Details: base,
 	}
 }

@@ -407,6 +407,7 @@ if [[ "\${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
         cwd: repoRoot, encoding: "utf8", env: {
           PATH: `${mockBin}:${process.env.PATH}`, TMPDIR: root,
           HOME: root, UNRELATED_SECRET: "synthetic-secret-canary",
+          CRABBOX_HOMEBREW_RELEASE_METADATA: path.join(root, "public-release.json"),
         },
       });
     }
@@ -614,14 +615,14 @@ set -eu
 /bin/cat ${shellQuote(path.join(root, "release.json"))}
 `);
     const frozen = path.join(root, "frozen");
-    const runFreeze = () => {
+    const runFreeze = (overrides = {}) => {
       fs.rmSync(frozen, { recursive: true, force: true });
       fs.mkdirSync(frozen);
       return spawnSync("/bin/bash", [
         "-c", 'source "$1"; shift; freeze_public_release "$@"', "freeze-test", verifier,
         "v1.2.3", assetDirectory, "a".repeat(40), "b".repeat(40), verifierCommit,
         "123", frozen, process.execPath,
-      ], { encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH}`, HOME: root, TMPDIR: root } });
+      ], { encoding: "utf8", env: { PATH: `${bin}:${process.env.PATH}`, HOME: root, TMPDIR: root, ...overrides } });
     };
     const frozenResult = runFreeze();
     assert.equal(frozenResult.status, 0, frozenResult.stderr);
@@ -631,11 +632,24 @@ set -eu
     assert.notEqual(extra.status, 0);
     assert.match(extra.stderr, /public asset inventory is not exact/);
     fs.unlinkSync(path.join(assetDirectory, "extra"));
+    // Hosted runners prefetch metadata with read-only auth; the verifier gets only JSON.
+    writeExecutable(path.join(bin, "curl"), "#!/bin/sh\necho unexpected-anonymous-api >&2\nexit 98\n");
+    const prefetched = { CRABBOX_HOMEBREW_RELEASE_METADATA: path.join(root, "release.json") };
+    const authenticated = runFreeze(prefetched);
+    assert.equal(authenticated.status, 0, authenticated.stderr);
+    assert.deepEqual(fs.readdirSync(path.join(frozen, "public-assets")).sort(), names);
+    assert.notEqual(runFreeze({ CRABBOX_HOMEBREW_RELEASE_METADATA: path.join(root, "missing.json") }).status, 0);
+    const metadataLink = path.join(root, "metadata-link.json");
+    fs.symlinkSync(prefetched.CRABBOX_HOMEBREW_RELEASE_METADATA, metadataLink);
+    assert.notEqual(runFreeze({ CRABBOX_HOMEBREW_RELEASE_METADATA: metadataLink }).status, 0);
     const check = (record, pattern) => {
       writeJson("release.json", record);
       const result = spawnSync(process.execPath, args, { encoding: "utf8", env });
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, pattern);
+      const prefetchedResult = runFreeze(prefetched);
+      assert.notEqual(prefetchedResult.status, 0);
+      assert.match(prefetchedResult.stderr, pattern);
     };
     for (const patch of [
       { draft: true }, { immutable: false }, { id: 124 }, { tag_name: "v1.2.4" },

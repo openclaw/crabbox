@@ -14,6 +14,12 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) BackendCapabilities() core.Backend { return &awsLeaseBackend{} }
+
+func (Provider) SupportsResourceRequirements(cfg core.Config) bool {
+	return cfg.TargetOS == core.TargetLinux && (cfg.Architecture == "" || cfg.Architecture == core.ArchitectureAMD64 || cfg.Architecture == core.ArchitectureARM64)
+}
+
 var (
 	_ core.ProviderClassProfileProvider             = Provider{}
 	_ core.ProviderClassSpecProvider                = Provider{}
@@ -287,6 +293,9 @@ func awsMacOSInstanceTypeCandidates() []string {
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
+	if cfg.AWSStockImage && !core.ShouldUseCoordinator(cfg, p.Spec()) {
+		return nil, core.Exit(2, "aws.stockImage requires brokered AWS leases")
+	}
 	return NewAWSLeaseBackend(p.Spec(), cfg, rt), nil
 }
 

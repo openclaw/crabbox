@@ -36,7 +36,36 @@ crabbox cleanup --provider linode --dry-run
 numeric Linode instance id. `--type` is the exact Linode type slug; there is no
 separate Linode size flag.
 
+Fixed-lease orchestrators can use `warmup --lease-id cbx_abcdef123456 --keep=true`.
+Repeating the request with the same local state, Linode account, repository, and
+creation inputs reuses the original instance and SSH key. A changed owner or
+intent returns `lease_id_conflict` (exit 4). Fixed claims bind the account EUUID,
+creation fingerprint, and attempt nonce to the instance label and Crabbox tags.
+After a lost create response, replay reconciles that exact attempt from inventory;
+empty or ambiguous inventory retains the claim without allocating a replacement.
+Preserve the local claim and SSH key when recovering an interrupted dispatch.
+
+`inspect`, `status`, `heartbeat`, and `stop` resolve fixed leases by lease ID.
+Stopping retains a terminal receipt, so repeated stops are safe and the released
+ID cannot create another instance. A lost stored SSH key blocks acquisition
+replay; it does not block an identity-verified stop.
+
 ## Configuration
+
+An explicit class selects these Linux/amd64 primary sizes:
+
+| Class | Instance type | vCPU | RAM (GiB) |
+| --- | --- | --- | --- |
+| `tiny` | `g6-standard-1` | 1 | 2 |
+| `small` | `g6-standard-2` | 2 | 4 |
+| `standard` | `g6-standard-4` | 4 | 8 |
+| `fast` | `g6-standard-6` | 6 | 16 |
+| `large` | `g6-standard-8` | 8 | 32 |
+| `beast` | `g6-standard-16` | 16 | 64 |
+
+`standard` now selects `g6-standard-4`, increasing size and cost from the old
+`g6-standard-1` mapping. Use `--class tiny` or `--type g6-standard-1` to keep
+the old size. Omit `linode.type` when you want `class` to choose the machine:
 
 ```yaml
 provider: linode
@@ -45,7 +74,7 @@ class: standard
 linode:
   region: us-ord
   image: linode/ubuntu24.04
-  type: g6-standard-1
+  # type: g6-standard-1 # optional exact override; takes precedence over class
   firewall: ""
   sshCIDRs: []
 ```
@@ -63,6 +92,11 @@ Config keys under `linode:`:
 Acquisition trims the selected native type. A blank explicit `--type` falls back
 to `linode.type`, then the class default. The create request, lease metadata, and
 recovery records use that same resolved type.
+
+An explicit class selects the corresponding [machine class](../commands/providers.md)
+instead of the inherited `g6-standard-1` default. Explicit `linode.type`
+configuration (including `g6-standard-1`) still takes precedence over the class,
+and `--type` takes precedence over both.
 
 The portable `--os ubuntu:24.04` selector maps to `linode/ubuntu24.04`. Linode
 does not currently offer the portable default Ubuntu 26.04 image in this

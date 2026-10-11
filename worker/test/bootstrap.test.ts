@@ -263,17 +263,17 @@ describe("cloud-init bootstrap", () => {
     ({ awsPrivate, failure }) => {
       const fixture = mkdtempSync(join(tmpdir(), "crabbox-ready-"));
       try {
-        for (const tool of ["git", "rsync", "curl", "jq", "tmux", "flock", "systemctl", "ss"]) {
-          writeFileSync(
-            join(fixture, tool),
-            "#!/bin/sh\n" +
-              (tool === "ss" ? 'printf "%s\\n" "${SOCKETS-127.0.0.1:5900}"\n' : "") +
-              '[ "${FAIL_TOOL-}" != "' +
-              tool +
-              '" ]\n',
-            { mode: 0o755 },
-          );
-        }
+        // Stub tools as shell functions and source the checks: executing
+        // freshly written files costs a per-file exec policy check on macOS,
+        // which pushed these cases past the timeout under parallel load.
+        const stubs = ["git", "rsync", "curl", "jq", "tmux", "flock", "systemctl", "ss"]
+          .map(
+            (tool) =>
+              `${tool}() { ${
+                tool === "ss" ? 'printf "%s\\n" "${SOCKETS-127.0.0.1:5900}"; ' : ""
+              }[ "\${FAIL_TOOL-}" != ${tool} ]; }\n`,
+          )
+          .join("");
         symlinkSync("/usr/bin/grep", join(fixture, "grep"));
         const generated = cloudInit({
           ...config,
@@ -303,16 +303,24 @@ describe("cloud-init bootstrap", () => {
             : script;
         let candidate = failWorkroot(extract("/usr/local/bin/crabbox-ready"));
         expect(candidate).toMatch(/^#!\/bin\/sh\nset -eu\n/);
+        expect(
+          generated.includes(
+            "  - path: /usr/local/lib/crabbox-ready-checks\n" +
+              "    permissions: '0755'\n    content: |\n      #!/bin/sh\n      set -eu\n",
+          ),
+        ).toBe(!awsPrivate);
         if (!awsPrivate) {
           const checks = join(fixture, "ready-checks");
-          writeFileSync(checks, failWorkroot(extract("/usr/local/lib/crabbox-ready-checks")), {
-            mode: 0o755,
-          });
-          candidate = candidate.replaceAll("/usr/local/lib/crabbox-ready-checks", checks);
+          writeFileSync(checks, failWorkroot(extract("/usr/local/lib/crabbox-ready-checks")));
+          candidate = candidate.replace(
+            "\nexec /usr/local/lib/crabbox-ready-checks",
+            `\n. ${checks}`,
+          );
         }
+        expect(candidate).not.toContain("/usr/local/lib/crabbox-ready-checks");
         writeFileSync(join(fixture, "bootstrapped"), "");
         if (failure === "marker") rmSync(join(fixture, "bootstrapped"));
-        const result = spawnSync("/bin/sh", ["-c", candidate], {
+        const result = spawnSync("/bin/sh", ["-c", stubs + candidate], {
           env: {
             PATH: fixture,
             FAIL_TOOL: failure,

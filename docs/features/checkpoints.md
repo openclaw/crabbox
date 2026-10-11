@@ -93,9 +93,10 @@ or restored.
 
 `--mode auto` produces a native checkpoint when the resolved lease supports one
 for the chosen strategy, otherwise it falls back to an archive. With the default
-`--strategy auto`, direct (non-brokered) providers other than Parallels only get
-a native checkpoint when you explicitly ask for `--mode native`; `auto` keeps the
-archive fallback for them.
+`--strategy auto`, direct (non-brokered) providers other than Parallels and
+Cloudflare only get a native checkpoint when you explicitly ask for
+`--mode native`; `auto` keeps the archive fallback for them. Cloudflare has no
+archive path, so `auto` selects its container snapshot.
 
 ## Native strategies
 
@@ -113,6 +114,7 @@ Native checkpoints use one of two provider primitives, selected with
 | Hetzner Linux (direct only) | `hetzner-snapshot` |
 | Parallels | `parallels-snapshot` |
 | Incus Linux containers (direct, root disk only) | `incus-image` (private image published from a stateless disk snapshot) |
+| Cloudflare containers | `cloudflare-container-snapshot` (full container filesystem, captured while running) |
 
 Disk snapshots are faster to create and (on AWS and GCP) boot with fresh
 per-lease SSH keys via injected user-data.

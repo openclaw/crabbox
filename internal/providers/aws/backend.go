@@ -24,6 +24,7 @@ type awsClient interface {
 	CreateServerWithFallback(context.Context, core.Config, string, string, string, bool, func(string, ...any)) (core.Server, core.Config, error)
 	CreateServerWithFallbackControl(context.Context, core.Config, string, string, string, bool, func(string, ...any), *core.AWSFixedCreateControl) (core.Server, core.Config, error)
 	WaitForServerIP(context.Context, string) (core.Server, error)
+	CheckAcquireState(context.Context, string) error
 	GetServer(context.Context, string) (core.Server, error)
 	DeleteServer(context.Context, string) error
 	DeleteSSHKey(context.Context, string) error
@@ -67,7 +68,7 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	slug, err := core.AllocateDirectLeaseSlug(leaseID, requestedSlug, servers)
+	slug, err := core.AllocateDirectLeaseSlugContext(ctx, leaseID, requestedSlug, servers)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -97,6 +98,9 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		defer cancel()
 		retErr = shared.JoinAcquireCleanupError(retErr, cleanupAWSCreatedResources(cleanupCtx, b.RT.Stderr, cfg, rollbackCloudID, rollbackKeyID))
 	}()
+	if err := validateResourceConstrainedAWSServer(cfg, server); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	client, err = newAWSClient(ctx, cfg)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -104,6 +108,9 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s type=%s\n", leaseID, server.DisplayID(), cfg.ServerType)
 	server, err = client.WaitForServerIP(ctx, server.CloudID)
 	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if err := validateResourceConstrainedAWSServer(cfg, server); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	server = annotateAWSServerRegion(server, cfg.AWSRegion)
@@ -119,7 +126,11 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
 	target := sshTargetForBootstrap(cfg, server.PublicNet.IPv4.IP, leaseID, slug)
-	if err := bootstrapAWSWindowsDesktop(ctx, cfg, &target, publicKey, b.RT.Stderr); err != nil {
+	if err := waitAWSAcquireReady(ctx, func(ctx context.Context) error {
+		return client.CheckAcquireState(ctx, server.CloudID)
+	}, func(ctx context.Context) error {
+		return bootstrapAWSWindowsDesktop(ctx, cfg, &target, publicKey, b.RT.Stderr)
+	}); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	server.Labels["state"] = "ready"
@@ -212,7 +223,7 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 			if err != nil {
 				return core.FixedLeaseBinding{}, err
 			}
-			slug, err := core.AllocateDirectLeaseSlug(leaseID, requestedSlug, servers)
+			slug, err := core.AllocateDirectLeaseSlugContext(ctx, leaseID, requestedSlug, servers)
 			if err != nil {
 				return core.FixedLeaseBinding{}, err
 			}
@@ -318,7 +329,11 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 				return core.LeaseTarget{}, err
 			}
 			target := sshTargetForBootstrap(resolvedCfg, server.PublicNet.IPv4.IP, leaseID, intent.Slug)
-			if err := bootstrapAWSWindowsDesktop(ctx, resolvedCfg, &target, publicKey, b.RT.Stderr); err != nil {
+			if err := waitAWSAcquireReady(ctx, func(ctx context.Context) error {
+				return serverClient.CheckAcquireState(ctx, server.CloudID)
+			}, func(ctx context.Context) error {
+				return bootstrapAWSWindowsDesktop(ctx, resolvedCfg, &target, publicKey, b.RT.Stderr)
+			}); err != nil {
 				return core.LeaseTarget{}, err
 			}
 			server.Labels["state"] = "ready"
@@ -921,7 +936,7 @@ func isAWSTerminalServer(server core.Server) bool {
 }
 
 func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun bool) error {
-	claims, err := core.ListLeaseClaims()
+	claims, err := core.ListLeaseClaimsContext(ctx)
 	if err != nil {
 		return err
 	}
@@ -1145,4 +1160,16 @@ func isAWSResolveNotFound(err error) bool {
 	message := err.Error()
 	return strings.Contains(message, "InvalidInstanceID.NotFound") ||
 		strings.Contains(message, "aws instance not found")
+}
+
+// Keep post-create validation inside the ordinary acquisition rollback owner.
+// Fixed acquisitions already bind and validate the exact attempt's instance type.
+func validateResourceConstrainedAWSServer(cfg core.Config, server core.Server) error {
+	if cfg.Capacity.MinVCPUs == 0 && cfg.Capacity.MinMemoryMiB == 0 {
+		return nil
+	}
+	if server.ServerType.Name == "" || server.ServerType.Name != cfg.ServerType {
+		return core.Exit(5, "AWS resource-constrained acquisition returned unverified instance type %q for requested %q", server.ServerType.Name, cfg.ServerType)
+	}
+	return nil
 }

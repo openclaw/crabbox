@@ -9,6 +9,7 @@ import (
 type fileExeDevConfig struct {
 	ControlHost string `yaml:"controlHost,omitempty"`
 	Image       string `yaml:"image,omitempty"`
+	Base        string `yaml:"base,omitempty"`
 	CPUs        int    `yaml:"cpus,omitempty"`
 	Memory      string `yaml:"memory,omitempty"`
 	Disk        string `yaml:"disk,omitempty"`
@@ -48,7 +49,7 @@ func (cfg *ExeDevConfig) applyFile(file *fileExeDevConfig) (ExeDevConfigApplied,
 
 func (cfg *ExeDevConfig) applyEnv() (ExeDevConfigApplied, error) {
 	var applied ExeDevConfigApplied
-	err := applyConfigEnvironment(cfg, &applied, 0, 9)
+	err := applyConfigEnvironment(cfg, &applied, 0, 10)
 	return applied, err
 }
 
@@ -56,6 +57,7 @@ func (cfg *ExeDevConfig) applyEnv() (ExeDevConfigApplied, error) {
 type ExeDevConfigFlagValues struct {
 	ControlHost *string
 	Image       *string
+	Base        *string
 	CPUs        *int
 	Memory      *string
 	Disk        *string
