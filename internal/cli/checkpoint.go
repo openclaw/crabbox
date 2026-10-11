@@ -1272,7 +1272,7 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 	if record.Capture != nil && record.Capture.DiscardFailed {
 		return Exit(2, "checkpoint %s image was discarded; it cannot be forked", record.ID)
 	}
-	cfg, err := loadConfig()
+	cfg, err := loadConfigForFlags(fs)
 	if err != nil {
 		return err
 	}
@@ -1937,7 +1937,7 @@ func (a App) checkpointForkParallelsSnapshot(ctx context.Context, fs *flag.FlagS
 }
 
 func loadCheckpointForkParallelsConfig(fs *flag.FlagSet, leaseFlags leaseCreateFlagValues) (Config, error) {
-	cfg, err := loadConfig()
+	cfg, err := loadConfigForFlags(fs)
 	if err != nil {
 		return Config{}, err
 	}

@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"net/url"
 	"os"
@@ -719,11 +720,17 @@ const (
 )
 
 func defaultConfig() Config {
-	cfg, err := loadConfig()
+	cfg, err := loadConfigInputs()
 	if err != nil {
 		return baseConfig()
 	}
-	return cfg
+	resolved, err := resolveLoadedConfig(cfg, "", "")
+	if err != nil {
+		// Flags may replace an invalid inherited selector. Keep the other
+		// inherited defaults instead of silently resetting the entire config.
+		return cfg
+	}
+	return resolved
 }
 
 func loadConfig() (Config, error) {
@@ -731,6 +738,29 @@ func loadConfig() (Config, error) {
 }
 
 func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
+	return loadConfigWithFlagOverrides(coordinator, provider, nil)
+}
+
+func loadConfigWithFlagOverrides(coordinator, provider string, fs *flag.FlagSet) (Config, error) {
+	cfg, err := loadConfigInputs()
+	if err != nil {
+		return Config{}, err
+	}
+	if fs != nil {
+		if err := applyConfigSelectorFlags(&cfg, fs); err != nil {
+			return Config{}, err
+		}
+	}
+	return resolveLoadedConfig(cfg, coordinator, provider)
+}
+
+// loadConfigForFlags resolves selectors before provider defaults can validate
+// them. Commands still apply their complete flag sets at their own boundary.
+func loadConfigForFlags(fs *flag.FlagSet) (Config, error) {
+	return loadConfigWithFlagOverrides("", "", fs)
+}
+
+func loadConfigInputs() (Config, error) {
 	cfg := baseConfig()
 	for _, path := range configPaths() {
 		trust := classifyConfigPath(path)
@@ -741,6 +771,10 @@ func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
 	if err := applyEnv(&cfg); err != nil {
 		return Config{}, err
 	}
+	return cfg, nil
+}
+
+func resolveLoadedConfig(cfg Config, coordinator, provider string) (Config, error) {
 	// Validate this cross-provider environment destination before provider
 	// dispatch. The selected value may itself be CRABBOX_PROVIDER, so waiting
 	// for External provider validation would let that value route around it.

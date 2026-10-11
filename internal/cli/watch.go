@@ -117,7 +117,7 @@ func (a App) watch(ctx context.Context, args []string) error {
 	if requestedSlug != "" && strings.TrimSpace(*leaseIDFlag) != "" {
 		return Exit(2, "--slug only applies when creating a new lease; omit --id or use the existing slug")
 	}
-	cfg, err := loadConfig()
+	cfg, err := loadConfigForFlags(fs)
 	if err != nil {
 		return err
 	}

@@ -55,7 +55,7 @@ func (a App) hold(ctx context.Context, args []string) error {
 	if *finalize && flagWasSet(fs, "slug") {
 		return Exit(2, "hold --finalize uses the stored original slug; --slug cannot be combined with --finalize")
 	}
-	cfg, err := loadConfig()
+	cfg, err := loadConfigForFlags(fs)
 	if err != nil {
 		return err
 	}

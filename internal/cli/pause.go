@@ -28,7 +28,7 @@ func (a App) pauseResume(ctx context.Context, args []string, action string) erro
 	if strings.TrimSpace(*id) == "" || fs.NArg() > 1 || (idFlagSet && fs.NArg() > 0) {
 		return Exit(2, "usage: crabbox %s --id <lease-or-server-id>", action)
 	}
-	cfg, err := loadConfig()
+	cfg, err := loadConfigForFlags(fs)
 	if err != nil {
 		return err
 	}

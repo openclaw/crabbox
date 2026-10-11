@@ -6,6 +6,10 @@
 
 - Docs: consolidate provider selection, class catalogs, and lifecycle references; correct stale provider support, sizing, and transport guidance.
 
+### Fixes
+
+- CLI: resolve explicit provider, target, Windows mode, architecture, OS, class, and type flags before validating inherited configuration, preserving unrelated defaults and recorded-lease identity checks.
+
 ## 0.74.0 - 2026-10-10
 
 ### Highlights
