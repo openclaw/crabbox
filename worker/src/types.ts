@@ -407,7 +407,6 @@ export type Provider = CoordinatorProviderSpec["provider"];
 export const coordinatorProviders = coordinatorProviderRegistry.map(
   (spec) => spec.provider,
 ) as Provider[];
-export const providers = coordinatorProviders;
 
 export function isCoordinatorProvider(provider: string): provider is Provider {
   return coordinatorProviders.includes(provider as Provider);
@@ -1253,18 +1252,6 @@ export interface HetznerSSHKey {
   fingerprint: string;
   public_key: string;
   labels?: Record<string, string>;
-}
-
-export interface MachineView {
-  id: string;
-  provider: Provider;
-  cloudID: string;
-  name: string;
-  status: string;
-  serverType: string;
-  hostId?: string;
-  host: string;
-  labels: Record<string, string>;
 }
 
 export interface ProviderMachine {
