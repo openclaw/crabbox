@@ -1805,6 +1805,10 @@ func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, le
 }
 
 func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey, fixedFingerprint string, keep bool) (string, string, error) {
+	return b.createContainerWithOptions(ctx, cfg, name, leaseID, slug, publicKey, fixedFingerprint, keep, nil)
+}
+
+func (b *backend) createContainerWithOptions(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey, fixedFingerprint string, keep bool, served *ServedContainerOptions) (string, string, error) {
 	if digest, known := core.DefaultContainerImageDigest(cfg.LocalContainer.Image); known && digest == "" {
 		return "", "", core.Exit(2, "compiled container image is missing its reviewed digest")
 	}
@@ -1882,6 +1886,17 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 	for i, destination := range hostVolumeDestinations {
 		args = append(args, "-e", fmt.Sprintf("CRABBOX_HOST_VOLUME_PATH_%d=%s", i, destination))
 	}
+	if served != nil {
+		for key, value := range served.Labels {
+			labels[key] = value
+		}
+		for i := range args {
+			if args[i] == "127.0.0.1::"+sshPort {
+				args[i] = served.PublishHost + ":" + served.PublishPort + ":" + sshPort
+			}
+		}
+		args = append(args, "--rm", "--cpu-shares", "2", "-e", "CRABBOX_MANAGED_HOME=1")
+	}
 	for key, value := range labels {
 		args = append(args, "--label", key+"="+value)
 	}
@@ -1931,6 +1946,15 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 	}
 	for _, vol := range cfg.LocalContainer.Volumes {
 		args = append(args, "-v", vol)
+	}
+	if served != nil {
+		script := servedWatchdog + "\n" + bootstrapScript
+		args = append(args, "-e", "CRABBOX_SERVE_DEADLINE="+strconv.FormatInt(served.Deadline, 10), cfg.LocalContainer.Image, "/bin/sh", "-c", script)
+		result, err := b.docker(ctx, args, nil, b.rt.Stderr)
+		if err != nil {
+			return "", "", shared.LocalCommandError("container run (check --advertise-address/--publish-host binding)", result, err)
+		}
+		return strings.TrimSpace(result.Stdout), "", nil
 	}
 	bootstrapRoot := localContainerBootstrapRoot()
 	if err := os.MkdirAll(bootstrapRoot, 0o700); err != nil {
@@ -2176,7 +2200,10 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, container i
 }
 
 func (b *backend) listContainers(ctx context.Context) ([]inspectContainer, error) {
-	result, err := b.docker(ctx, []string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=" + providerName, "--format", "{{.ID}}"}, nil, nil)
+	return b.listContainersForProvider(ctx, providerName)
+}
+func (b *backend) listContainersForProvider(ctx context.Context, provider string) ([]inspectContainer, error) {
+	result, err := b.docker(ctx, []string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=" + provider, "--format", "{{.ID}}"}, nil, nil)
 	if err != nil {
 		return nil, shared.LocalCommandError("container list", result, err)
 	}
@@ -3347,6 +3374,10 @@ passwd -d "$user" >/dev/null 2>&1 || true
 home_dir="$(getent passwd "$user" | cut -d: -f6)"
 if [ -z "$home_dir" ]; then
   home_dir="/home/$user"
+fi
+# Named cache mounts can create the home before useradd runs.
+if [ "${CRABBOX_MANAGED_HOME:-0}" = "1" ]; then
+  chown -R "$user" "$home_dir"
 fi
 if [ "${CRABBOX_DOCKER_SOCKET:-0}" = "1" ] && [ -S /var/run/docker.sock ]; then
   socket_gid="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || true)"

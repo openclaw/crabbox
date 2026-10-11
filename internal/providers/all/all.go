@@ -67,6 +67,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/scaleway"
 	_ "github.com/openclaw/crabbox/internal/providers/sealosdevbox"
 	_ "github.com/openclaw/crabbox/internal/providers/semaphore"
+	_ "github.com/openclaw/crabbox/internal/providers/serve"
 	_ "github.com/openclaw/crabbox/internal/providers/smolvm"
 	_ "github.com/openclaw/crabbox/internal/providers/sprites"
 	_ "github.com/openclaw/crabbox/internal/providers/ssh"
