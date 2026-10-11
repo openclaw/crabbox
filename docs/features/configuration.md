@@ -56,6 +56,11 @@ still fail before guest access; the recorded identity is not a configurable
 default. Commands without a selector flag continue to validate the inherited
 value.
 
+Provider and template defaults preserve explicit `--target` and
+`--windows-mode` flags throughout resolution. When `--target` selects a
+non-Windows platform, inherited template Windows modes are cleared unless the
+command also explicitly sets `--windows-mode` (which must be compatible).
+
 For the replacement lists `env.allow`, `results.junit`, and
 `run.preflightTools`, omitting the key inherits the lower layer, `[]` clears
 it, and a nonempty list replaces it. This applies to user config and each

@@ -887,6 +887,34 @@ func ApplyLinuxConnectionDefaults(cfg *Config, defaultSSHUser, defaultSSHPort st
 }
 
 func applyProviderConfigDefaults(cfg *Config) error {
+	target, mode := cfg.TargetOS, cfg.WindowsMode
+	if err := applyProviderConfigDefaultValues(cfg); err != nil {
+		return err
+	}
+	// Templates and adapters supply defaults, not replacements for explicit
+	// platform flags. Preserve their values before target validation runs.
+	if cfg.targetFlagExplicit {
+		cfg.TargetOS = target
+		if normalizeTargetOS(target) != targetWindows {
+			cfg.WindowsMode = windowsModeNormal
+		}
+	}
+	if cfg.windowsModeFlagExplicit {
+		cfg.WindowsMode = mode
+	}
+	if provider, err := ProviderFor(cfg.Provider); err == nil {
+		if _, ok := provider.(ProviderConfigDefaulter); ok {
+			if phase, ok := provider.(ProviderConfigDefaultsPhase); ok && phase.ConfigDefaultsTargetFinalization() == ProviderConfigDefaultsCallerFinalizes {
+				return nil
+			}
+			normalizeTargetConfig(cfg)
+			return validateTargetConfig(*cfg)
+		}
+	}
+	return nil
+}
+
+func applyProviderConfigDefaultValues(cfg *Config) error {
 	prepareProviderDefaults(cfg)
 	if normalized, err := NormalizeArchitecture(cfg.Architecture); err != nil {
 		return err
@@ -905,11 +933,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			if err := defaulter.ApplyConfigDefaults(cfg); err != nil {
 				return err
 			}
-			if phase, ok := provider.(ProviderConfigDefaultsPhase); ok && phase.ConfigDefaultsTargetFinalization() == ProviderConfigDefaultsCallerFinalizes {
-				return nil
-			}
-			normalizeTargetConfig(cfg)
-			return validateTargetConfig(*cfg)
+			return nil
 		}
 	}
 	if cfg.Provider == "tart" || cfg.Provider == "local-tart" || cfg.Provider == "macos-vm" {
