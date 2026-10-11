@@ -2194,6 +2194,7 @@ func TestWindowsSandboxSavedModeProvenance(t *testing.T) {
 		wantErr     string
 	}{
 		{"flag marker alone", "", true, ""},
+		{"flag with saved alias", "powershell", true, ""},
 		{"saved alias", "powershell", false, ""},
 		{"saved unsupported", "wsl", false, "provider=windows-sandbox supports windows.mode=normal only"},
 	} {

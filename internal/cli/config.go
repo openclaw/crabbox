@@ -887,7 +887,7 @@ func ApplyLinuxConnectionDefaults(cfg *Config, defaultSSHUser, defaultSSHPort st
 }
 
 func applyProviderConfigDefaults(cfg *Config) error {
-	target, mode := cfg.TargetOS, cfg.WindowsMode
+	target, mode := cfg.TargetOS, cfg.explicitWindowsMode
 	if err := applyProviderConfigDefaultValues(cfg); err != nil {
 		return err
 	}
@@ -899,8 +899,8 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			cfg.WindowsMode = windowsModeNormal
 		}
 	}
-	if cfg.windowsModeFlagExplicit {
-		cfg.WindowsMode = mode
+	if cfg.windowsModeFlagExplicit && mode != "" {
+		cfg.WindowsMode = normalizeWindowsMode(mode)
 	}
 	if provider, err := ProviderFor(cfg.Provider); err == nil {
 		if _, ok := provider.(ProviderConfigDefaulter); ok {
