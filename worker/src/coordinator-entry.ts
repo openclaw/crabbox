@@ -23,6 +23,7 @@ import {
   pairingRequestBodyBytes,
 } from "./pairing";
 import { runtimeAdapterProxyPath, runtimeAdapterRelayMethodAllowed } from "./runtime-adapter-relay";
+import { serveDisabledResponse, serveBodyLimit } from "./serve";
 import { timingSafeEqual } from "./timing-safe";
 import type { Env } from "./types";
 
@@ -228,9 +229,13 @@ async function authenticatedCoordinatorRequest(
       authenticated: false,
     };
   }
+  const serveRoute = new URL(request.url).pathname.startsWith("/v1/serve/");
+  const disabled = serveRoute ? serveDisabledResponse(env, auth.owner) : undefined;
+  if (disabled) return { response: disabled, authenticated: false };
   return {
     request: await requestWithAdminGrantVersion(requestWithAuthContext(request, auth), env),
     authenticated: true,
+    ...(serveRoute ? { bodyLimit: serveBodyLimit } : {}),
   };
 }
 

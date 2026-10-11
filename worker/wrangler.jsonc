@@ -22,6 +22,7 @@
     "directory": "./public",
   },
   "vars": {
+    "CRABBOX_SERVE_ALLOWED_OWNERS": "github:58493",
     "CRABBOX_DEFAULT_ORG": "openclaw",
     "CRABBOX_GITHUB_ALLOWED_ORG": "openclaw",
     "CRABBOX_PUBLIC_URL": "https://crabbox.openclaw.ai",

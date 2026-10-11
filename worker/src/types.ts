@@ -99,6 +99,7 @@ export interface Env {
   CRABBOX_RUNTIME_ADAPTER_TOKEN?: string;
   CRABBOX_SHARED_TOKEN?: string;
   CRABBOX_SHARED_OWNER?: string;
+  CRABBOX_SERVE_ALLOWED_OWNERS?: string;
   CRABBOX_ADMIN_TOKEN?: string;
   CRABBOX_SESSION_SECRET?: string;
   CRABBOX_DURABLE_PROVISIONING_ADMISSION?: string;
@@ -194,6 +195,7 @@ export interface CapacityRequirements {
 }
 
 export interface LeaseRequest {
+  serveMachine?: string;
   leaseID?: string;
   createAttemptID?: string;
   slug?: string;
@@ -355,6 +357,13 @@ export interface LeaseRegistrationRequest {
 
 export const coordinatorProviderRegistry = [
   {
+    provider: "serve",
+    label: "Served machines",
+    requiredSecrets: [],
+    adminAudit: false,
+    supportsCapacityMarket: false,
+  },
+  {
     provider: "hetzner",
     label: "Hetzner",
     requiredSecrets: ["HETZNER_TOKEN"],
@@ -462,6 +471,15 @@ export interface HetznerCleanupEvidence {
 export type ProviderCleanupEvidence = HetznerCleanupEvidence;
 
 export interface LeaseRecord {
+  serve?: import("./serve").ServeAssignment;
+  serveIntent?: string;
+  sshHostKeyFingerprint?: string;
+  imageEvidence?: {
+    configuredReference: string;
+    runtimeImageId: string;
+    repositoryDigests: string[];
+    repositoryDigestStatus: string;
+  };
   capacityRequirements?: CapacityRequirements;
   creationEvents?: CreationEvent[];
   portablePoolAccess?: true;

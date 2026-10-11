@@ -28,6 +28,8 @@ import {
   type ProviderPoolAccess,
 } from "./ready-pool-access";
 import { setPoolWake } from "./ready-pool-wake";
+import { ServeCoordinator, serveEnabled, serveDisabledResponse } from "./serve";
+import { serveCloudProvider } from "./serve-provider";
 type ReadyPoolMode = boolean | "portable";
 import { AzureResumableProvisioning } from "./azure-provisioning";
 import {
@@ -1329,6 +1331,8 @@ export class FleetCoordinator {
       }
       const parts = pathParts(request);
       const method = request.method.toUpperCase();
+      if (parts[0] === "v1" && parts[1] === "serve")
+        return await new ServeCoordinator(this.state, this.env).route(request, parts);
       const adminError = adminRouteError(request, method, parts);
       if (adminError) {
         return adminError;
@@ -3332,6 +3336,14 @@ export class FleetCoordinator {
       },
       { allowConcurrency: true },
     );
+    let serveWake: number | undefined;
+    if (serveEnabled(this.env)) {
+      try {
+        serveWake = await new ServeCoordinator(this.state, this.env).maintain();
+      } catch {
+        console.error("serve maintenance failed; continuing coordinator maintenance");
+      }
+    }
     await this.reconcileInterruptedLeaseProvisioning(leaseIDs);
     await this.poolAccess.maintain();
     await this.expireLeases(leaseIDs);
@@ -3351,7 +3363,10 @@ export class FleetCoordinator {
     await this.runAWSOrphanSweepIfDue("alarm");
     await this.runAzureOrphanSweepIfDue("alarm");
     await this.reconcileAWSIngressIfIdle();
-    await this.state.runExclusive(() => this.scheduleAlarm(alarmArmRevision));
+    await this.state.runExclusive(async () => {
+      await this.scheduleAlarm(alarmArmRevision);
+      if (serveWake !== undefined) await this.armAlarmNoLaterThan(serveWake);
+    });
   }
 
   private async scheduledMaintenance(request: Request): Promise<Response> {
@@ -3642,6 +3657,16 @@ export class FleetCoordinator {
         await this.putCreateAttempt(attempt);
         return createAttemptBindingConflictResponse();
       }
+      if (lease.provider === "serve") {
+        lease.state = "released";
+        lease.releaseDeletesServer = true;
+        lease.updatedAt = now;
+        lease.endedAt = now;
+        lease.cleanupStartedAt ??= now;
+        await this.putLease(lease);
+        await this.putCreateAttempt(attempt);
+        return { attempt, lease };
+      }
       if (this.state.provisioning) {
         const released = await this.state.provisioning.commitAndWake(async (transaction) => {
           const latest = await transaction.get<LeaseRecord>(leaseKey(lease.id));
@@ -3886,6 +3911,37 @@ export class FleetCoordinator {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const input = await readJson<LeaseRequest>(request);
+    if ((input.provider as string) === "serve") {
+      const result = await new ServeCoordinator(this.state, this.env).create(
+        request,
+        input,
+        fixedLeaseID,
+        async (lease, storage) => {
+          admissionFence.assertActive();
+          const admission = await this.mergedLeaseAdmissionState(
+            lease,
+            new Date(),
+            await this.providerAccessRecords(),
+            undefined,
+            storage,
+          );
+          lease.slug = allocateLeaseSlug(
+            input.slug || leaseSlugFromID(lease.id),
+            lease.id,
+            owner,
+            org,
+            admission.accessLeases,
+          );
+          const limit = enforceCostLimitUsage(admission.costUsage, lease, costLimits(this.env));
+          if (limit) return json({ error: "cost_limit_exceeded", message: limit }, { status: 429 });
+          admissionFence.beginCommit();
+          return undefined;
+        },
+      );
+      if (result.ok)
+        await this.state.runExclusive(() => this.armAlarmNoLaterThan(Date.now() + 15_000));
+      return result;
+    }
     let capacityRequirements: CapacityRequirements | undefined;
     try {
       capacityRequirements = normalizeCapacityRequirements(input.capacity);
@@ -8384,6 +8440,8 @@ export class FleetCoordinator {
     if (providerError) {
       return providerError;
     }
+    if (lease.provider === "serve")
+      return await new ServeCoordinator(this.state, this.env).release(request, lease);
     const expectedProvider =
       typeof body.expectedProvider === "string" ? body.expectedProvider : undefined;
     if (lease.workspaceID) {
@@ -8807,6 +8865,16 @@ export class FleetCoordinator {
   }
 
   private async providerReadiness(request: Request, provider: string): Promise<Response> {
+    if (provider === "serve")
+      return (
+        serveDisabledResponse(this.env, requestOwner(request)) ??
+        json({
+          provider: "serve",
+          configured: true,
+          checks: [],
+          message: "serve supported; use /v1/serve/machines for owner capacity",
+        })
+      );
     if (!isCoordinatorProvider(provider)) {
       return json(
         { error: "invalid_provider", message: `unsupported provider: ${provider}` },
@@ -17331,6 +17399,7 @@ export class FleetCoordinator {
     const candidates = await this.state.runExclusive(async () => {
       const due: LeaseRecord[] = [];
       await this.visitLeaseRecords(async (lease) => {
+        if (lease.provider === "serve") return;
         if (due.length >= interruptedProvisioningRecoveryBatchSize) {
           return;
         }
@@ -17688,6 +17757,7 @@ export class FleetCoordinator {
       const claimed: Array<{ claim: string; lease: LeaseRecord }> = [];
       const bridgeOwners = await this.leaseBridgeOwners();
       await this.visitLeaseRecords(async (stored) => {
+        if (stored.provider === "serve") return;
         const needsCleanup = leaseNeedsCleanup(stored, now);
         const closeBridges = !leaseIsLive(stored) && bridgeOwners.has(stored.id);
         // Most history has neither due provider work nor bridge state. Journal reads and
@@ -19922,6 +19992,7 @@ export class FleetCoordinator {
   }
 
   private provider(provider: Provider, region?: string, project?: string): CloudProvider {
+    if (provider === "serve") return serveCloudProvider();
     const testProvider = this.testProviders[provider];
     if (testProvider) {
       return testProvider;
@@ -27609,7 +27680,7 @@ interface ProviderProvisioningFailureEvidence {
   ownedKeyCleanupPending?: boolean;
 }
 
-interface CloudProvider {
+export interface CloudProvider {
   // No I/O or state mutation.
   provisioningFailureEvidence?(
     context: ProviderProvisioningFailureContext,
