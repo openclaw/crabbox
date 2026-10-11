@@ -19,15 +19,6 @@ import (
 	"google.golang.org/grpc/codes"
 )
 
-// wandbRecordingRunner mirrors the recording-runner pattern used by
-// internal/providers/exedev/backend_test.go: tests pre-load `fn` to assert
-// arguments and return canned stdout/exit codes without actually invoking
-// python3.
-type wandbRecordingRunner struct {
-	calls []core.LocalCommandRequest
-	fn    func(core.LocalCommandRequest) (core.LocalCommandResult, error)
-}
-
 func TestWandbProviderSpec(t *testing.T) {
 	spec := Provider{}.Spec()
 	if spec.Name != providerName {
