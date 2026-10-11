@@ -3339,8 +3339,10 @@ export class FleetCoordinator {
     let serveWake: number | undefined;
     if (serveEnabled(this.env)) {
       try {
+        // Exactly one bounded serve batch; ordinary expiry/cleanup runs before the next.
         serveWake = await new ServeCoordinator(this.state, this.env).maintain();
       } catch {
+        serveWake = Date.now() + 15_000;
         console.error("serve maintenance failed; continuing coordinator maintenance");
       }
     }

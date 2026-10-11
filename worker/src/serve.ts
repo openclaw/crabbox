@@ -12,7 +12,17 @@ const onlineMS = 30_000;
 const lostMS = 90_000;
 const pruneMS = 7 * 24 * 60 * 60 * 1000;
 const maxMachines = 64;
-const maxLeases = 128;
+const maxLeases = 32;
+const maxOwnerLiveLeases = 64;
+// One shared alarm takes one short transaction, including pre-cap (128-lease) machines.
+const maintenanceMachineBatch = 16;
+const maintenanceLeaseReadBudget = 256;
+const maintenanceResumeMS = 15_000;
+const maintenanceCursorKey = "serve-maintenance-cursor";
+interface MaintenanceCursor {
+  after: string;
+  next?: number;
+}
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const live = (l: LeaseRecord) => l.state === "active" || l.state === "provisioning";
 export interface ServeAssignment {
@@ -66,6 +76,13 @@ function validText(v: unknown, max = 128): v is string {
 }
 function integer(v: unknown, max: number): v is number {
   return Number.isSafeInteger(v) && Number(v) > 0 && Number(v) <= max;
+}
+function validLeaseKey(v: unknown): v is string {
+  if (!validText(v, 4096)) return false;
+  const match = /^(ssh-ed25519|ssh-rsa) [A-Za-z0-9+/=]+(?: .*)?$/.exec(v);
+  return Boolean(
+    match && new TextEncoder().encode(v).length <= (match[1] === "ssh-ed25519" ? 256 : 4096),
+  );
 }
 function validAddress(v: unknown): v is string {
   if (typeof v !== "string" || !/^(?:\d{1,3}\.){3}\d{1,3}$/.test(v)) return false;
@@ -251,8 +268,8 @@ export class ServeCoordinator {
         Boolean(l && l.provider === "serve" && l.serve?.machineID === m.machineID),
     );
   }
-  private async view(s: CoordinatorStorageView, m: ServeMachine) {
-    const leases = await this.records(s, m);
+  private async view(s: CoordinatorStorageView, m: ServeMachine, leases?: LeaseRecord[]) {
+    leases ??= await this.records(s, m);
     const held = leases.filter((l) => !leaseProviderCleanupConfirmed(l));
     const cpus = held.reduce((n, l) => n + l.serve!.cpus, 0);
     const memory = held.reduce((n, l) => n + l.serve!.memoryMB, 0);
@@ -345,37 +362,60 @@ export class ServeCoordinator {
   async maintain(): Promise<number | undefined> {
     if (!serveEnabled(this.env)) return undefined;
     return this.commit(async (s) => {
-      const machines = await s.list<ServeMachine>({ prefix: machinePrefix });
-      let next: number | undefined;
-      await Promise.all(
-        [...machines.values()].map(async (m) => {
-          const records = await this.records(s, m);
-          await Promise.all(
-            records.map(async (l) => {
-              const before = JSON.stringify(l);
-              this.expire(l, m, Date.now());
-              if (JSON.stringify(l) !== before) await s.put(`lease:${l.id}`, l);
-              if (live(l)) {
-                const deadline = Math.min(
-                  m.lastHeartbeat + lostMS,
-                  Date.parse(l.expiresAt),
-                  idleDeadline(l),
-                );
-                next = next === undefined ? deadline : Math.min(next, deadline);
-              }
-            }),
-          );
-          if (records.every(leaseProviderCleanupConfirmed)) {
-            const pruneAt = m.lastHeartbeat + pruneMS;
-            if (Date.now() > pruneAt) {
-              await s.delete(machinePrefix + m.machineID);
-              await s.delete((await this.ownerPrefix(m.owner, m.org)) + m.machineID);
-            } else {
-              next = next === undefined ? pruneAt : Math.min(next, pruneAt);
-            }
+      const cursor = await s.get<MaintenanceCursor>(maintenanceCursorKey);
+      const machines = await s.list<ServeMachine>({
+        prefix: machinePrefix,
+        limit: maintenanceMachineBatch,
+        ...(cursor ? { startAfter: cursor.after } : {}),
+      });
+      const now = Date.now();
+      let next = cursor?.next;
+      let after = cursor?.after ?? "";
+      let remaining = maintenanceLeaseReadBudget;
+      let processed = 0;
+      // oxlint-disable eslint/no-await-in-loop -- Commit each machine in order without a global lease fan-out.
+      for (const [key, m] of machines) {
+        // Existing machines can still hold up to 128 reservations. Never start a
+        // machine whose complete allocation set would exceed this tick's budget.
+        if (m.leases.length > remaining) break;
+        remaining -= m.leases.length;
+        const records = await this.records(s, m);
+        for (const l of records) {
+          const before = JSON.stringify(l);
+          this.expire(l, m, now);
+          if (JSON.stringify(l) !== before) await s.put(`lease:${l.id}`, l);
+          if (live(l)) {
+            const deadline = Math.min(
+              m.lastHeartbeat + lostMS,
+              Date.parse(l.expiresAt),
+              idleDeadline(l),
+            );
+            next = next === undefined ? deadline : Math.min(next, deadline);
           }
-        }),
-      );
+        }
+        if (records.every(leaseProviderCleanupConfirmed)) {
+          const pruneAt = m.lastHeartbeat + pruneMS;
+          if (now > pruneAt) {
+            await s.delete(key);
+            await s.delete((await this.ownerPrefix(m.owner, m.org)) + m.machineID);
+          } else {
+            next = next === undefined ? pruneAt : Math.min(next, pruneAt);
+          }
+        }
+        after = key;
+        processed++;
+      }
+      // oxlint-enable eslint/no-await-in-loop
+      if (processed < machines.size || machines.size === maintenanceMachineBatch) {
+        // Carry earlier deadlines through the whole sweep; a later page must not
+        // replace them with its own, later wake. A full page may need an empty tail tick.
+        await s.put(maintenanceCursorKey, {
+          after,
+          ...(next === undefined ? {} : { next }),
+        } satisfies MaintenanceCursor);
+        return Math.min(next ?? Infinity, now + maintenanceResumeMS);
+      }
+      if (cursor) await s.delete(maintenanceCursorKey);
       return next;
     });
   }
@@ -432,11 +472,7 @@ export class ServeCoordinator {
           input.tailscale
         )
           throw new ServeError("serve_unsupported_feature");
-        if (
-          !validText(input.sshPublicKey, 16384) ||
-          !/^ssh-(ed25519|rsa) [A-Za-z0-9+/=]+(?: |$)/.test(input.sshPublicKey)
-        )
-          throw new ServeError("invalid_ssh_public_key");
+        if (!validLeaseKey(input.sshPublicKey)) throw new ServeError("invalid_ssh_public_key");
         if (
           input.os ||
           input.imageRequirements ||
@@ -448,22 +484,31 @@ export class ServeCoordinator {
         const candidates = await Promise.all(
           [...machines.values()]
             .filter((m) => this.owned(m, r))
-            .map(async (m) => ({
-              m,
-              view: await this.view(s, m),
-              size: serveSize(
+            .map(async (m) => {
+              const records = await this.records(s, m);
+              return {
                 m,
-                input.class ?? "beast",
-                input.serverTypeExplicit ? input.serverType : undefined,
-              ),
-            })),
+                liveLeases: records.filter(live).length,
+                reservedLeases: records
+                  .filter((l) => !leaseProviderCleanupConfirmed(l))
+                  .map((l) => l.id),
+                view: await this.view(s, m, records),
+                size: serveSize(
+                  m,
+                  input.class ?? "beast",
+                  input.serverTypeExplicit ? input.serverType : undefined,
+                ),
+              };
+            }),
         );
+        if (candidates.reduce((total, c) => total + c.liveLeases, 0) >= maxOwnerLiveLeases)
+          throw new ServeError("serve_lease_limit", 429);
         const eligible = candidates
           .filter(
             ({ m, view, size }) =>
               view.online &&
               !m.draining &&
-              view.allocatedLeases < m.maxLeases &&
+              view.allocatedLeases < Math.min(m.maxLeases, maxLeases) &&
               view.freeCPUs >= size.cpus &&
               view.freeMemoryMB >= size.memoryMB &&
               (!input.serveMachine ||
@@ -549,7 +594,7 @@ export class ServeCoordinator {
             updatedAt: l.updatedAt,
           } satisfies CreateAttemptRecord);
         await s.put(`lease:${id}`, l);
-        chosen.m.leases.push(id);
+        chosen.m.leases = [...chosen.reservedLeases, id];
         await this.putMachine(s, chosen.m);
         return json({ lease: publicLeaseRecord(l) }, { status: 202 });
       });

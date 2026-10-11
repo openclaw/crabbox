@@ -47,7 +47,13 @@ the existing brokered SSH-lease path.
 
 Placement is owner-only, with matching organization scope. A machine registered
 by one owner cannot receive another owner's lease. There is no sharing option. The coordinator currently accepts up to 64 registered
-machines per owner and organization, and each machine accepts at most 128 leases.
+machines per owner and organization, each machine accepts at most 32 leases,
+and each owner in an organization can have at most 64 live serve leases
+(`serve_lease_limit`, HTTP 429). Lease SSH public keys must be `ssh-ed25519`
+(at most 256 bytes) or `ssh-rsa` (at most 4096 bytes), including any comment.
+Shared coordinator maintenance processes at most 16 machines and reads at most
+256 reserved leases per alarm, resuming from a persisted cursor within 15 seconds
+when more work remains. Ordinary fleet expiry and orphan cleanup run between batches.
 Containers and shared package caches are for the owner's trusted workloads;
 they are not a hostile-tenant boundary. The agent uses the existing broker login
 and stores no new token type. Agent state includes its persistent machine UUID,

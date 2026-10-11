@@ -18,7 +18,7 @@ crabbox serve uninstall
 | --- | --- |
 | `--cpus` | Offered CPU count; defaults to host logical CPUs |
 | `--memory` | Required offered memory; MiB integer, `m`, or `g` suffix |
-| `--max-leases` | Maximum concurrent containers, default 8, maximum 128 |
+| `--max-leases` | Maximum concurrent containers, default 8, maximum 32 |
 | `--name` | Machine display name; default hostname |
 | `--advertise-address` | Client-reachable IPv4; default local CGNAT address |
 | `--ssh-ports` | Published SSH port pool, e.g. `8443` or `2200,2205-2207`; default ephemeral |

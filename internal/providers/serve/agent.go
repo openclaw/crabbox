@@ -122,7 +122,7 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	fs.SetOutput(rt.Stderr)
 	fs.IntVar(&o.cpus, "cpus", o.cpus, "CPU capacity offered to trusted leases")
 	fs.StringVar(&o.memory, "memory", o.memory, "Required memory offer, e.g. 48g")
-	fs.IntVar(&o.maxLeases, "max-leases", o.maxLeases, "Maximum concurrent leases (1-128)")
+	fs.IntVar(&o.maxLeases, "max-leases", o.maxLeases, "Maximum concurrent leases (1-32)")
 	fs.StringVar(&o.name, "name", o.name, "Machine name")
 	fs.StringVar(&o.address, "advertise-address", os.Getenv("CRABBOX_SERVE_ADVERTISE_ADDRESS"), "SSH address reachable by clients (default local CGNAT IPv4)")
 	fs.StringVar(&o.sshPorts, "ssh-ports", o.sshPorts, "Published SSH port or comma-separated ports/ranges (maximum 1024)")
@@ -222,7 +222,7 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	if command == "cache-prune" {
 		return container.PruneCaches(ctx, volumes)
 	}
-	if o.cpus < 1 || o.cpus > 4096 || o.maxLeases < 1 || o.maxLeases > 128 || o.interval < 500*time.Millisecond || o.interval > 10*time.Second {
+	if o.cpus < 1 || o.cpus > 4096 || o.maxLeases < 1 || o.maxLeases > 32 || o.interval < 500*time.Millisecond || o.interval > 10*time.Second {
 		return fmt.Errorf("invalid serve caps or poll interval")
 	}
 	memory, err := parseMemory(o.memory)

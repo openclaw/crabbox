@@ -1,10 +1,11 @@
+// oxlint-disable eslint/no-await-in-loop -- Lifecycle and cursor tests depend on each prior committed operation.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { routeCoordinatorRequest } from "../src/coordinator-entry";
 import type { CoordinatorRuntime, ProvisioningRuntime } from "../src/coordinator-runtime";
 import { FleetCoordinator, FleetDurableObject } from "../src/fleet";
 import { completeLeaseProviderCleanup } from "../src/lease-cleanup";
-import { ServeCoordinator, serveSize, serveBodyLimit } from "../src/serve";
+import { ServeCoordinator, serveSize, serveBodyLimit, type ServeMachine } from "../src/serve";
 import type { Env, LeaseRecord } from "../src/types";
 import { ProvisioningTestStorage } from "./provisioning-fixtures";
 
@@ -79,8 +80,129 @@ function fixture(durable: boolean, settings = env) {
     });
   return { storage, runtime, serve, route, create };
 }
+async function seedMaintenance(f: ReturnType<typeof fixture>, count: number, leases = 1) {
+  await f.route("/v1/serve/heartbeat", machine());
+  await f.create("cbx_000000000001");
+  const template = (await f.storage.get<LeaseRecord>("lease:cbx_000000000001"))!;
+  f.storage.values.clear();
+  const ids: string[] = [];
+  for (let i = 1; i <= count; i++) {
+    const machineID = `00000000-0000-4000-8000-${i.toString(16).padStart(12, "0")}`;
+    const m: ServeMachine = {
+      ...machine(machineID),
+      owner: `owner-${i}@example.com`,
+      org: "example-org",
+      maxLeases: leases,
+      lastHeartbeat: Date.now() - 90_001,
+      leases: [],
+    };
+    for (let j = 0; j < leases; j++) {
+      const id = `cbx_${(i * 128 + j).toString(16).padStart(12, "0")}`;
+      m.leases.push(id);
+      f.storage.values.set(`lease:${id}`, {
+        ...template,
+        id,
+        owner: m.owner,
+        serve: { ...template.serve!, machineID },
+      });
+    }
+    ids.push(machineID);
+    f.storage.values.set(`serve-machine:${machineID}`, m);
+  }
+  f.storage.writes.length = 0;
+  f.storage.listOptions.length = 0;
+  return ids;
+}
 afterEach(() => vi.useRealTimers());
 describe.each([false, true])("serve shared lifecycle durable=%s", (durable) => {
+  it("rejects maxLeases 33", async () => {
+    const f = fixture(durable);
+    const response = await f.route("/v1/serve/heartbeat", { ...machine(), maxLeases: 33 });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "invalid_serve_heartbeat" });
+    expect(f.storage.writes).toEqual([]);
+  });
+  it.each([
+    ["ssh-ed25519", 256],
+    ["ssh-rsa", 4096],
+  ])("bounds %s keys in bytes, including comments", async (kind, limit) => {
+    const f = fixture(durable);
+    await f.route("/v1/serve/heartbeat", machine());
+    const prefix = `${kind} AAAA `;
+    const accepted = prefix + "a".repeat(limit - prefix.length);
+    expect((await f.create("cbx_000000000001", undefined, { sshPublicKey: accepted })).status).toBe(
+      202,
+    );
+    for (const sshPublicKey of [accepted + "a", prefix + "é".repeat(limit - prefix.length)]) {
+      const response = await f.create("cbx_000000000002", undefined, { sshPublicKey });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: "invalid_ssh_public_key" });
+    }
+  });
+  it("rejects unsupported SSH key types", async () => {
+    const f = fixture(durable);
+    const response = await f.create("cbx_000000000001", undefined, {
+      sshPublicKey: "ecdsa-sha2-nistp256 AAAA",
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "invalid_ssh_public_key" });
+  });
+  it("caps an owner's live leases at 64 across machines and frees capacity after release", async () => {
+    const f = fixture(durable);
+    for (const id of [mid, second, "33333333-3333-4333-8333-333333333333"])
+      await f.route("/v1/serve/heartbeat", {
+        ...machine(id),
+        maxLeases: 32,
+        cpus: 256,
+        memoryMB: 524288,
+      });
+    for (let i = 1; i <= 64; i++)
+      expect((await f.create(`cbx_${i.toString(16).padStart(12, "0")}`)).status).toBe(202);
+    const response = await f.create("cbx_000000000041");
+    expect(response.status).toBe(429);
+    expect(await response.json()).toMatchObject({ error: "serve_lease_limit" });
+    // Replaying an existing reservation is still idempotent at the cap.
+    expect((await f.create("cbx_000000000001")).status).toBe(202);
+    const lease = (await f.storage.get<LeaseRecord>("lease:cbx_000000000001"))!;
+    await f.serve.release(req("/", {}), lease);
+    expect((await f.create("cbx_000000000041")).status).toBe(202);
+    await f.route(
+      "/v1/serve/heartbeat",
+      machine("44444444-4444-4444-8444-444444444444"),
+      "bob@example.com",
+    );
+    expect((await f.create("cbx_000000000042", "bob@example.com")).status).toBe(202);
+  });
+  it("heartbeat reads only its own reserved leases", async () => {
+    vi.useFakeTimers();
+    const f = fixture(durable);
+    await f.route("/v1/serve/heartbeat", machine());
+    await f.route("/v1/serve/heartbeat", machine(second));
+    await f.create("cbx_000000000001", undefined, { serveMachine: mid });
+    await f.create("cbx_000000000002", undefined, { serveMachine: second });
+    const reads: string[] = [];
+    f.storage.beforeGet = async (storageKey) => {
+      if (storageKey.startsWith("lease:")) reads.push(storageKey);
+    };
+    vi.advanceTimersByTime(2000);
+    expect((await f.route("/v1/serve/heartbeat", machine())).status).toBe(200);
+    expect(reads).toEqual(["lease:cbx_000000000001"]);
+  });
+  it("drops cleaned reservations before adding another lease", async () => {
+    const f = fixture(durable);
+    await f.route("/v1/serve/heartbeat", { ...machine(), maxLeases: 1 });
+    for (let i = 1; i <= 34; i++) {
+      const id = `cbx_${i.toString(16).padStart(12, "0")}`;
+      expect((await f.create(id)).status).toBe(202);
+      expect((await f.storage.get<ServeMachine>(`serve-machine:${mid}`))?.leases).toEqual([id]);
+      const lease = (await f.storage.get<LeaseRecord>(`lease:${id}`))!;
+      await f.serve.release(req("/", {}), lease);
+      const released = (await f.storage.get<LeaseRecord>(`lease:${id}`))!;
+      delete released.cleanupStartedAt;
+      completeLeaseProviderCleanup(released, new Date().toISOString());
+      await f.storage.put(`lease:${id}`, released);
+    }
+  });
   it("places only on owner machines; pins and reports available capacity", async () => {
     const f = fixture(durable);
     expect((await f.route("/v1/serve/heartbeat", machine(), "bob@example.com")).status).toBe(200);
@@ -210,6 +332,73 @@ describe.each([false, true])("serve shared lifecycle durable=%s", (durable) => {
       (r) => fleet.fetch(r),
     );
     expect(authenticated.status).toBe(200);
+  });
+});
+describe.each([false, true])("bounded serve maintenance durable=%s", (durable) => {
+  it.each([
+    [35, 1, [16, 16, 3]],
+    [10, 32, [8, 2]],
+    [5, 128, [2, 2, 1]],
+  ])(
+    "resumes %i machines with %i leases across bounded transactions",
+    async (count, leases, batches) => {
+      vi.useFakeTimers();
+      const f = fixture(durable);
+      const ids = await seedMaintenance(f, count, leases);
+      const exclusive = vi.spyOn(f.runtime, "runExclusive");
+      const transactions = vi.spyOn(f.storage, "transaction");
+      let visited = 0;
+      for (const batch of batches) {
+        const reads: string[] = [];
+        f.storage.beforeGet = async (storageKey) => {
+          if (storageKey.startsWith("lease:")) reads.push(storageKey);
+        };
+        // Recreate the coordinator to prove that resumption is persisted, not in memory.
+        const wake = await new ServeCoordinator(f.runtime, env).maintain();
+        visited += batch;
+        expect(reads).toHaveLength(batch * leases);
+        expect(reads.length).toBeLessThanOrEqual(256);
+        expect(batch).toBeLessThanOrEqual(16);
+        expect(wake === undefined || wake <= Date.now() + 15_000).toBe(true);
+        const expectedCursor =
+          visited < count ? { after: `serve-machine:${ids[visited - 1]}` } : undefined;
+        expect(await f.storage.get("serve-maintenance-cursor")).toEqual(expectedCursor);
+        expect(visited === count || wake !== undefined).toBe(true);
+      }
+      expect(exclusive).toHaveBeenCalledTimes(batches.length);
+      expect(transactions).toHaveBeenCalledTimes(batches.length);
+      expect(f.storage.listOptions).toEqual(
+        batches.map((_, i) => ({
+          prefix: "serve-machine:",
+          limit: 16,
+          ...(i
+            ? {
+                startAfter: `serve-machine:${ids[batches.slice(0, i).reduce((a, b) => a + b, 0) - 1]}`,
+              }
+            : {}),
+        })),
+      );
+      const records = [...f.storage.values.values()] as LeaseRecord[];
+      for (const lease of records.filter((l) => l.provider === "serve"))
+        expect(lease.failureError).toBe("serve_machine_lost");
+    },
+  );
+  it("preserves earlier page deadlines and resets the cursor after a full page tail", async () => {
+    vi.useFakeTimers();
+    const f = fixture(durable);
+    const ids = await seedMaintenance(f, 16);
+    for (const [storageKey, value] of f.storage.values) {
+      if (storageKey.startsWith("serve-machine:"))
+        (value as ServeMachine).lastHeartbeat = Date.now();
+    }
+    expect(await f.serve.maintain()).toBe(Date.now() + 15_000);
+    expect(await f.serve.maintain()).toBe(Date.now() + 90_000);
+    expect(await f.storage.get("serve-maintenance-cursor")).toBeUndefined();
+    // A fresh sweep starts from the beginning again.
+    await f.serve.maintain();
+    expect(await f.storage.get("serve-maintenance-cursor")).toMatchObject({
+      after: `serve-machine:${ids[15]}`,
+    });
   });
 });
 it("maps classes and explicit cpu sizes", () => {
@@ -361,8 +550,11 @@ describe.each([false, true])("serve owner gate durable=%s", (durable) => {
 it("skips disabled maintenance without reading storage", async () => {
   const f = fixture(false, { ...env, CRABBOX_SERVE_ALLOWED_OWNERS: " , " });
   const list = vi.spyOn(f.storage, "list");
+  const read = vi.fn<() => Promise<void>>(async () => {});
+  f.storage.beforeGet = read;
   expect(await f.serve.maintain()).toBeUndefined();
   expect(list).not.toHaveBeenCalled();
+  expect(read).not.toHaveBeenCalled();
 });
 
 it("does not rewrite unchanged lease rows on heartbeat or maintenance", async () => {
@@ -425,6 +617,44 @@ it("continues the shared alarm after throwing serve maintenance", async () => {
     log.mockRestore();
     aws.mockRestore();
     azure.mockRestore();
+  }
+});
+
+it("continues ordinary alarm maintenance after exactly one serve batch and rearms soon", async () => {
+  vi.useFakeTimers();
+  const f = fixture(false);
+  await seedMaintenance(f, 20);
+  const fleet = new FleetCoordinator(f.runtime, env);
+  const internals = fleet as unknown as {
+    expireLeases: (ids: Set<string>) => Promise<void>;
+    runAWSOrphanSweepIfDue: (source: string) => Promise<void>;
+    runAzureOrphanSweepIfDue: (source: string) => Promise<void>;
+  };
+  const maintain = vi.spyOn(ServeCoordinator.prototype, "maintain");
+  const expire = vi.spyOn(internals, "expireLeases").mockImplementation(async () => {
+    expect(maintain).toHaveBeenCalledOnce();
+    const rows = [...f.storage.values.values()].filter(
+      (v) => (v as LeaseRecord).provider === "serve",
+    ) as LeaseRecord[];
+    expect(rows.filter((l) => l.state === "failed")).toHaveLength(16);
+    expect(rows.filter((l) => l.state === "provisioning")).toHaveLength(4);
+  });
+  const aws = vi.spyOn(internals, "runAWSOrphanSweepIfDue").mockResolvedValue();
+  const azure = vi.spyOn(internals, "runAzureOrphanSweepIfDue").mockResolvedValue();
+  const schedule = vi.spyOn(f.runtime, "scheduleAlarm");
+  try {
+    await fleet.alarm();
+    expect(expire).toHaveBeenCalledOnce();
+    expect(aws).toHaveBeenCalledWith("alarm");
+    expect(azure).toHaveBeenCalledWith("alarm");
+    expect(maintain).toHaveBeenCalledOnce();
+    expect(schedule).toHaveBeenCalledWith(Date.now() + 15_000);
+  } finally {
+    maintain.mockRestore();
+    expire.mockRestore();
+    aws.mockRestore();
+    azure.mockRestore();
+    schedule.mockRestore();
   }
 });
 

@@ -36,6 +36,17 @@ func TestAddressSelection(t *testing.T) {
 		}
 	}
 }
+func TestAgentRejectsExcessLeaseCapacity(t *testing.T) {
+	err := (Provider{}).RunAgent(context.Background(), core.Config{
+		Coordinator: "https://coordinator.example.com",
+		CoordToken:  "synthetic-local-test",
+	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}, []string{
+		"--state-dir", t.TempDir(), "--max-leases", "33",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid serve caps") {
+		t.Fatalf("expected invalid serve caps, got %v", err)
+	}
+}
 func TestFallbackOnlyCapacity(t *testing.T) {
 	b := backend{cfg: core.Config{Serve: core.ServeConfig{Fallback: "aws"}}}
 	for _, tt := range []struct {
