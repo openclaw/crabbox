@@ -75,6 +75,11 @@ bootstrap come from the shared local-container implementation.
 | large | 32 | 64 GiB |
 | beast | Whole offered capacity | Whole offered capacity |
 
+The discovery class catalog is `unmapped` with no static profiles: the
+coordinator resolves these four sizes, and `beast` depends on the selected
+machine's offer. This does not disable `--class`; `tiny` and `small` are not
+supported served sizes.
+
 `--type cpu4` requests four CPUs and 8 GiB. Requests must fit the offer and
 remaining reservations. Placement prefers the most free CPU; use
 `--serve-machine <name-or-UUID>` to pin a machine. No capacity fails immediately

@@ -121,7 +121,7 @@ func TestManualBatchBCodespacesGenericTypeInput(t *testing.T) {
 }
 
 func TestProviderActionsRunnerRestrictions(t *testing.T) {
-	restricted := map[string]bool{"local-container": true, "apple-container": true, "multipass": true}
+	restricted := map[string]bool{"local-container": true, "apple-container": true, "multipass": true, "serve": true}
 	for _, name := range core.RegisteredProviderNames() {
 		provider, err := core.ProviderFor(name)
 		if err != nil {
@@ -1573,6 +1573,7 @@ func allBuiltInProviderNames() []string {
 		"anthropic-sandbox-runtime",
 		"semaphore",
 		"sealos-devbox",
+		"serve",
 		"smolvm",
 		"sprites",
 		"ssh",

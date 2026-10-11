@@ -17,6 +17,8 @@ func init() { core.RegisterProvider(Provider{}) }
 type Provider struct{}
 
 func (Provider) Spec() core.ProviderSpec {
+	// The coordinator resolves the four served sizes, including dynamic whole-offer
+	// capacity; this adapter does not expose a static canonical class profile catalog.
 	return core.ProviderSpec{Authentication: core.ProviderAuthentication{{Route: "brokered", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationCoordinator}, Description: "Owner-scoped coordinator login for donated machines."}}, Name: "serve", Family: "serve", Kind: core.ProviderKindSSHLease, ClassDisposition: core.ProviderClassDispositionUnmapped, Targets: []core.TargetSpec{{OS: core.TargetLinux}}, Features: core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync}, BrokeredOnly: true, Coordinator: core.CoordinatorSupported, ActionsRunnerUnsupported: true}
 }
 
@@ -59,9 +61,6 @@ func (Provider) SupportsArchitecture(_ core.Config, a string) bool {
 	return a == core.ArchitectureAMD64 || a == core.ArchitectureARM64
 }
 func (Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
-	if !core.ShouldUseCoordinator(cfg, Provider{}.Spec()) {
-		return nil, core.Exit(2, "provider=serve requires a coordinator in brokered mode; configure broker.url and log in")
-	}
 	if cfg.Desktop || cfg.Browser || cfg.Code || cfg.Tailscale.Enabled {
 		return nil, core.Exit(2, "provider=serve does not support desktop, WebVNC, browser, code or guest Tailscale; use the machine's advertised address")
 	}
@@ -90,7 +89,9 @@ func (b *backend) ReleaseLease(context.Context, core.ReleaseLeaseRequest) error 
 func (b *backend) Touch(context.Context, core.TouchRequest) (core.Server, error) {
 	return core.Server{}, directError()
 }
-func directError() error { return core.Exit(2, "serve is brokered-only") }
+func directError() error {
+	return core.Exit(2, "provider=serve requires a coordinator in brokered mode; configure broker.url and log in")
+}
 func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	if strings.TrimSpace(b.cfg.Coordinator) == "" {
 		return core.DoctorResult{}, directError()
