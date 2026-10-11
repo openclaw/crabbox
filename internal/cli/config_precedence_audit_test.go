@@ -5,9 +5,12 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 var errPrecedenceBoundary = errors.New("precedence audit stopped before provider access")
@@ -58,6 +61,7 @@ func TestCommandSelectorPrecedence(t *testing.T) {
 		{"desktop", App.desktopLaunch, []string{"--id", "cbx_0123456789ab"}},
 		{"screenshot", App.screenshot, []string{"--id", "cbx_0123456789ab"}},
 		{"checkpoint create", App.checkpointCreate, []string{"--id", "cbx_0123456789ab", "--name", "audit"}},
+		{"checkpoint fork", App.checkpointFork, []string{"chk_audit"}},
 		{"pause", App.pause, []string{"--id", "cbx_0123456789ab"}},
 		{"resume", App.resume, []string{"--id", "cbx_0123456789ab"}},
 		{"doctor", App.doctor, nil},
@@ -90,9 +94,31 @@ func TestCommandSelectorPrecedence(t *testing.T) {
 				provider := precedenceAuditProvider{observed: &observed}
 				providerRegistry[provider.Spec().Name] = provider
 				t.Cleanup(func() { delete(providerRegistry, provider.Spec().Name) })
+				switch command.name {
+				case "code":
+					// Code requires broker login before configuring a provider.
+					// The provider must still stop it before any broker request.
+					broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						t.Errorf("unexpected broker request: %s %s", r.Method, r.URL.Path)
+						http.Error(w, "unexpected request", http.StatusInternalServerError)
+					}))
+					t.Cleanup(broker.Close)
+					t.Setenv("CRABBOX_COORDINATOR", broker.URL)
+					t.Setenv("CRABBOX_COORDINATOR_TOKEN", "fixture-token")
+				case "checkpoint fork":
+					store, err := defaultCheckpointStore()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, _, err := store.Reserve(checkpointRecord{ID: "chk_audit", Kind: checkpointKindArchive}); err != nil {
+						t.Fatal(err)
+					}
+				}
 				args := append([]string{"--provider", provider.Spec().Name}, tc.flags...)
 				args = append(args, command.args...)
-				err := command.run(App{Stdout: io.Discard, Stderr: io.Discard}, context.Background(), args)
+				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cancel()
+				err := command.run(App{Stdout: io.Discard, Stderr: io.Discard}, ctx, args)
 				if !errors.Is(err, errPrecedenceBoundary) && !(command.name == "doctor" && observed.Provider != "") {
 					t.Fatalf("did not reach provider boundary: %v", err)
 				}
@@ -101,6 +127,39 @@ func TestCommandSelectorPrecedence(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestCommandLimitedSelectorPrecedence(t *testing.T) {
+	for _, command := range []struct {
+		name string
+		run  func(App, context.Context, []string) error
+		args []string
+	}{
+		{"hold", App.hold, []string{"--provider", "precedence-audit", "--id", "cbx_0123456789ab"}},
+		{"providers sizes", App.providerSizes, []string{"precedence-audit", "--class", "small"}},
+	} {
+		t.Run(command.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+			t.Setenv("CRABBOX_PROVIDER", "missing-provider")
+			t.Setenv("CRABBOX_DEFAULT_CLASS", "tiny")
+			var observed Config
+			provider := precedenceAuditProvider{observed: &observed}
+			providerRegistry[provider.Spec().Name] = provider
+			t.Cleanup(func() { delete(providerRegistry, provider.Spec().Name) })
+			err := command.run(App{Stdout: io.Discard, Stderr: io.Discard}, t.Context(), command.args)
+			if !errors.Is(err, errPrecedenceBoundary) {
+				t.Fatalf("did not reach provider boundary: %v", err)
+			}
+			wantClass := "tiny"
+			if command.name == "providers sizes" {
+				wantClass = "small"
+			}
+			if observed.Provider != provider.Spec().Name || observed.Class != wantClass {
+				t.Fatalf("provider=%s class=%s", observed.Provider, observed.Class)
+			}
+		})
 	}
 }
 

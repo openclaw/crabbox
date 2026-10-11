@@ -47,6 +47,11 @@ When `--id` is omitted, `job run` first creates a lease (via `warmup --keep`)
 using the job's routing fields, then runs the job against it. When `--id` is
 supplied, the job runs against that existing lease.
 
+The selected job's provider and platform fields apply before inherited defaults
+are validated, just as they do in its generated child commands. This also applies
+to `--dry-run`. An existing lease must still match explicit platform assertions;
+job routing cannot replace a lease's recorded identity.
+
 Blacksmith Testbox does not support `noSync: true`. Such jobs exit 2 before
 warmup, hydration, run, or stop, without generating keys or changing claims.
 This also applies to `--dry-run` and existing leases. Omit `noSync` (or set it
