@@ -232,6 +232,18 @@ policy includes `ec2:DescribeInstanceTypes` and `servicequotas:GetServiceQuota`.
 Types outside the supported Standard-instance quota bucket report
 `capacity=unknown` with `hint=unsupported_instance_quota`.
 
+When the applied quota covers the requested type, the check reports `ok` with
+`capacity=unknown quota_limit=sufficient usage=unchecked`. This confirms only
+that the VM fits the quota ceiling. Doctor does not measure account-wide usage
+or Capacity Reservations, so it cannot establish remaining regional headroom.
+A launch can still fail with `VcpuLimitExceeded`; check usage for the reported
+region and quota before retrying or requesting a quota increase.
+
+For automation, `ok` still means this advisory check succeeded, not that a
+launch is guaranteed. The former `capacity=ready` / `quota_satisfies_default_class`
+result is now `capacity=unknown` / `check_regional_quota_usage`; the JSON
+`details` include the same `capacity`, `quota_limit`, and `usage` fields.
+
 `--json` prints the same checks as a structured object with `ok`, `provider`,
 and `checks` fields. Each check includes `status`, `check`, `message`, and
 parsed `details` when available; the `provider-selection` details include

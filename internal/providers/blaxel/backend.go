@@ -14,10 +14,6 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type processPoller interface {
-	After(time.Duration) <-chan time.Time
-}
-
 func (b *backend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	if req.ActionsRunner {
 		return core.Exit(2, "--actions-runner is not supported for provider=%s", providerName)

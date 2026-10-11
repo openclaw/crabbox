@@ -47,6 +47,20 @@ provider target validation. For example, `stop --provider tart --target macos
 The selected target must still be supported by the provider, and ordinary lease
 identity and ownership checks still apply.
 
+Explicit selector flags are applied before inherited selectors are validated.
+For example, `CRABBOX_TARGET=linux CRABBOX_WINDOWS_MODE=wsl2 crabbox status
+--target windows --id <lease>` resolves a Windows target before validating the
+Windows mode. Correcting a selector does not discard unrelated configuration,
+such as the selected class. Flags that contradict a recorded lease's platform
+still fail before guest access; the recorded identity is not a configurable
+default. Commands without a selector flag continue to validate the inherited
+value.
+
+Provider and template defaults preserve explicit `--target` and
+`--windows-mode` flags throughout resolution. When `--target` selects a
+non-Windows platform, inherited template Windows modes are cleared unless the
+command also explicitly sets `--windows-mode` (which must be compatible).
+
 For the replacement lists `env.allow`, `results.junit`, and
 `run.preflightTools`, omitting the key inherits the lower layer, `[]` clears
 it, and a nonempty list replaces it. This applies to user config and each

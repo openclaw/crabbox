@@ -192,7 +192,7 @@ function render(providers, metadata) {
     const profile = metadata[provider.provider];
     const aliases = provider.aliases?.length ? ` (${provider.aliases.map(code).join(", ")})` : "";
     const features = provider.features?.length ? provider.features.map(code).join(", ") : "none";
-    const coordinator = provider.coordinator === "supported" ? "coordinator optional" : "direct only";
+    const coordinator = provider.brokeredOnly ? "coordinator required" : provider.coordinator === "supported" ? "coordinator optional" : "direct only";
     lines.push(
       `| [${escapeCell(provider.provider)}](${escapeLink(profile.docs)})${aliases} | ${escapeCell(profile.status)}; ${code(provider.kind)} · ${escapeCell(profile.category)} | ${sshLabel(profile.ssh)}; ${code(profile.sync)} · ${escapeCell(coordinator)}; features: ${features} | ${provider.targets.map(code).join(", ")}; ${escapeCell(profile.substrate)} | ${code(profile.location)}; GPU: ${escapeCell(profile.gpu)} | ${escapeCell(profile.lifecycle)}; ${escapeCell(profile.cleanup)} | ${escapeCell(profile.bestFit)} | ${escapeCell(profile.caveat)} |`
     );

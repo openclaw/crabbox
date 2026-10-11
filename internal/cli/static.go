@@ -25,25 +25,14 @@ func registerTargetFlags(fs *flag.FlagSet, defaults Config) targetFlagValues {
 }
 
 func applyTargetFlagOverrides(cfg *Config, fs *flag.FlagSet, values targetFlagValues) error {
-	if flagWasSet(fs, "target") {
-		cfg.TargetOS = *values.Target
-		cfg.targetExplicit = true
-		cfg.targetFlagExplicit = true
-		cfg.credentialProvenance.externalDesktopTarget = credentialSourceFlag
-		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
-		if normalizeTargetOS(cfg.TargetOS) != targetWindows && !flagWasSet(fs, "windows-mode") {
-			cfg.WindowsMode = windowsModeNormal
-			cfg.explicitWindowsMode = ""
-			cfg.credentialProvenance.externalDesktopMode = credentialSourceFlag
-		}
+	var target, mode string
+	if values.Target != nil {
+		target = *values.Target
 	}
-	if flagWasSet(fs, "windows-mode") {
-		cfg.WindowsMode = *values.WindowsMode
-		cfg.explicitWindowsMode = *values.WindowsMode
-		cfg.windowsModeFlagExplicit = true
-		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
-		cfg.credentialProvenance.externalDesktopMode = credentialSourceFlag
+	if values.WindowsMode != nil {
+		mode = *values.WindowsMode
 	}
+	applyTargetSelectorFlags(cfg, fs, target, mode)
 	applied, err := values.Static.Apply(&cfg.Static, fs)
 	recordConfigInput(cfg, "ssh", configInputFlag, applied.InputAccepted)
 	// Target validation can fail after this explicit host approval has applied.

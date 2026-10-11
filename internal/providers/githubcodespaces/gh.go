@@ -163,7 +163,3 @@ func redactGHArgs(args []string) []string {
 func redactSecretText(text string) string {
 	return githubTokenPattern.ReplaceAllString(text, "<redacted>")
 }
-
-func looksLikeGitHubToken(value string) bool {
-	return githubTokenPattern.MatchString(value)
-}

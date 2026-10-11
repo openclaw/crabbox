@@ -107,7 +107,7 @@ func newClient(cfg core.Config, rt core.Runtime) (client, error) {
 	if err != nil {
 		return nil, err
 	}
-	apiKey := firstNonEmpty(os.Getenv("CRABBOX_CROWNEST_API_KEY"), os.Getenv("CROWNEST_API_KEY"))
+	apiKey := shared.FirstNonBlank(os.Getenv("CRABBOX_CROWNEST_API_KEY"), os.Getenv("CROWNEST_API_KEY"))
 	if apiKey == "" {
 		return nil, core.Exit(2, "provider=crownest needs an API key; load CRABBOX_CROWNEST_API_KEY or CROWNEST_API_KEY from a secret manager")
 	}
@@ -396,15 +396,6 @@ func redactSecrets(value string, secrets ...string) string {
 		}
 	}
 	return redacted
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func idempotencyKey(parts ...string) string {

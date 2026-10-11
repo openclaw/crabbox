@@ -572,6 +572,11 @@ are supported; the resulting bundle has no dependency on those stores.
 Preparation does not fetch missing objects. Incomplete selected histories,
 unreadable tag targets, conflicts, hidden sparse paths, assume-unchanged entries,
 and submodules fail with a local diagnostic instead of silently dropping metadata.
+A shallow source checkout with missing selected history fails with a diagnostic
+naming the shallow source. Run `git fetch --unshallow`, or set
+`sync.gitSeed: false` and `sync.gitSeedSource: origin` for file-only sync.
+Shallow markers alone do not prevent seeding when the complete selected history
+is available locally.
 The combined full file payload and uncompressed Git objects count against ordinary
 sync size guardrails, even when the dirty delta is small. The existing allow-large
 override affects those soft limits only. Separate hard bounds limit each of the
@@ -591,7 +596,10 @@ or verification never falls back to origin or file-only sync. Cleanup failures
 report retained temporary state instead of declaring a successful transfer.
 
 Actions hydration, fresh PR checkouts, ready pools, directory sync, and Git overlay
-have different metadata owners and cannot be combined with local seeding. Use a
+have different metadata owners and cannot be combined with local seeding. Git
+overlay fetches origin on the runner; set `sync.gitOverlay: false` when using
+local seeding. For file-only sync, set `sync.gitSeed: false` and
+`sync.gitSeedSource: origin`. Use a
 raw workspace and `--no-hydrate` when Actions hydration is configured. `--no-sync`
 does not prepare or transfer a local seed. Existing mass-deletion guardrails still
 apply, including when many tracked paths are intentionally excluded.

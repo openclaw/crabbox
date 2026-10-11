@@ -26,10 +26,6 @@ type RunArtifact struct {
 
 type runArtifact = RunArtifact
 
-type runArtifactResult struct {
-	Files []runArtifact `json:"files,omitempty"`
-}
-
 func requireRunArtifactGlobs(ctx context.Context, target SSHTarget, workdir string, globs []string) (string, error) {
 	if len(globs) == 0 {
 		return "", nil

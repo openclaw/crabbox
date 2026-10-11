@@ -226,7 +226,7 @@ func newTestConfig() core.Config {
 }
 
 func newTestBackend(cfg core.Config) *codeSandboxBackend {
-	backend, err := Provider{}.Configure(cfg, discardRuntime())
+	backend, err := Provider{}.Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		panic(err)
 	}

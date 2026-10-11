@@ -477,6 +477,7 @@ AWS_SESSION_TOKEN                  optional
 CRABBOX_HOST_ID                    optional; admin-only except owner reactivation of a retained Mac instance
 CRABBOX_AWS_MAC_HOST_ID            optional legacy AWS alias for CRABBOX_HOST_ID
 CRABBOX_SHARED_OWNER              optional fixed owner identity for shared-token automation
+CRABBOX_SERVE_ALLOWED_OWNERS      comma-separated owner IDs (e.g. github:12345); * allows all authenticated owners; unset/empty disables serve
 CRABBOX_ADMIN_TOKEN               required for admin routes and image promotion
 CRABBOX_WORKSPACE_SSH_PUBLIC_KEY  required for SSH-based /v1/workspaces provisioning; unused by private AWS mode
 CRABBOX_WORKSPACE_SSH_PRIVATE_KEY required for SSH-based terminal attachment; unused by private AWS mode

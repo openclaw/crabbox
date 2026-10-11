@@ -99,9 +99,6 @@ func TestValidateGatewayURL(t *testing.T) {
 
 func TestClientHelpers(t *testing.T) {
 	t.Parallel()
-	if got := firstNonEmpty("", "  ", " value ", "later"); got != "value" {
-		t.Fatalf("firstNonEmpty=%q", got)
-	}
 	if !shared.IsLoopbackHost("localhost") || !shared.IsLoopbackHost("::1") || shared.IsLoopbackHost("example.com") {
 		t.Fatal("unexpected loopback classification")
 	}

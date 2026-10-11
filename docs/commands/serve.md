@@ -1,0 +1,55 @@
+# serve
+
+Donate spare container capacity to the configured coordinator using the existing
+broker login. See the [provider reference](../providers/serve.md) for owner-only
+placement, security, sizing, cache volumes, and network requirements.
+
+```sh
+crabbox serve --cpus 24 --memory 48g
+crabbox serve --runtime podman --cpus 8 --memory 16g --advertise-address 100.64.1.2
+crabbox serve machines --json
+crabbox serve status --json
+crabbox serve cache prune
+crabbox serve install --cpus 24 --memory 48g
+crabbox serve uninstall
+```
+
+| Agent flag | Meaning |
+| --- | --- |
+| `--cpus` | Offered CPU count; defaults to host logical CPUs |
+| `--memory` | Required offered memory; MiB integer, `m`, or `g` suffix |
+| `--max-leases` | Maximum concurrent containers, default 8, maximum 32 |
+| `--name` | Machine display name; default hostname |
+| `--advertise-address` | Client-reachable IPv4; default local CGNAT address |
+| `--ssh-ports` | Published SSH port pool, e.g. `8443` or `2200,2205-2207`; default ephemeral |
+| `--publish-host` | Runtime bind IP; default advertised IP |
+| `--runtime` | `docker` or `podman` |
+| `--poll-interval` | 500ms–10s; default 2s |
+| `--state-dir` | Private machine identity/status directory |
+| `--no-cache-volumes` | Disable managed cache volumes |
+| `--drain-on-exit` | Remove containers on orderly agent shutdown |
+
+`CRABBOX_SERVE_MEMORY`, `CRABBOX_SERVE_ADVERTISE_ADDRESS`, and
+`CRABBOX_SERVE_PUBLISH_HOST` supply defaults. `serve.sshPorts` and
+`CRABBOX_SERVE_SSH_PORTS` configure the SSH port pool. The ordinary broker URL/token
+configuration still applies; credentials are never printed or written into a
+service command.
+
+Serve requires coordinator enablement through `CRABBOX_SERVE_ALLOWED_OWNERS`;
+unset or empty disables it. Unlisted owners receive `serve_not_enabled`.
+
+`status` checks coordinator access and reads the local machine UUID, last successful coordinator contact,
+active assignments, caps, and draining state. `machines` queries owner-visible
+coordinator inventory. Both support `--json`.
+
+`install` writes and loads a per-user LaunchAgent on macOS or a systemd user
+unit on Linux, preserving the supplied flags. It uses the current executable
+path and account's existing broker configuration. `uninstall` unloads and
+removes that service. Linux user services run while the user manager is active;
+configure systemd lingering separately if required. Existing service files are
+never overwritten implicitly. Default shutdown leaves containers until their
+last deadlines; install with `--drain-on-exit` for immediate removal on stop.
+
+`cache prune` requires the same state directory and runtime used by the agent,
+and exclusive access to its state lock. Stop the agent first. It removes only
+the named cache volumes derived for that machine.

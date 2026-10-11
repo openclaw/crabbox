@@ -537,7 +537,7 @@ func loadLeaseTargetConfig(fs *flag.FlagSet, provider string, targetFlags target
 }
 
 func loadLeaseTargetConfigContext(ctx context.Context, fs *flag.FlagSet, provider string, targetFlags targetFlagValues, networkFlags networkModeFlagValues, opts leaseTargetConfigOptions) (Config, error) {
-	cfg, err := loadConfig()
+	cfg, err := loadConfigForFlags(fs)
 	if err != nil {
 		return Config{}, err
 	}

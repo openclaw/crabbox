@@ -497,10 +497,6 @@ func (b *leaseBackend) lifecycleLeaseForRequest(request protocolRequest, resourc
 	}, nil
 }
 
-func lifecycleSSH(cfg core.ExternalSSHConnectionConfig, templateCtx lifecycleTemplateContext) (protocolSSH, error) {
-	return lifecycleSSHForTarget(cfg, templateCtx, core.TargetLinux, core.WindowsModeNormal)
-}
-
 func lifecycleSSHForTarget(cfg core.ExternalSSHConnectionConfig, templateCtx lifecycleTemplateContext, targetOS, windowsMode string) (protocolSSH, error) {
 	expand := func(label, value string) (string, error) {
 		expansion, err := expandLifecycleValueTracked(value, templateCtx)

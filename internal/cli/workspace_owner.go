@@ -27,10 +27,9 @@ const (
 const workspaceOwnerRenewRetries, workspaceOwnerRenewBackoff = 2, 250 * time.Millisecond
 
 var (
-	workspaceOwnerCallTimeout         = sshTransportCallBudget(SSHTarget{}, sshControlMetadataLimit, sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true})
-	workspaceOwnerTTL                 = workspaceOwnerRenewInterval + (1+workspaceOwnerRenewRetries)*workspaceOwnerCallTimeout + workspaceOwnerRenewMargin
-	workspaceOwnerCloseQuiesceTimeout = 2*workspaceOwnerCallTimeout + workspaceOwnerRenewMargin
-	workspaceOwnerWaitTimeout         = workspaceOwnerTTL + workspaceOwnerPollInterval + workspaceOwnerCallTimeout + workspaceOwnerRenewMargin
+	workspaceOwnerCallTimeout = sshTransportCallBudget(SSHTarget{}, sshControlMetadataLimit, sshCommandLimit{execution: workspaceOwnerRemoteTimeout, control: true})
+	workspaceOwnerTTL         = workspaceOwnerRenewInterval + (1+workspaceOwnerRenewRetries)*workspaceOwnerCallTimeout + workspaceOwnerRenewMargin
+	workspaceOwnerWaitTimeout = workspaceOwnerTTL + workspaceOwnerPollInterval + workspaceOwnerCallTimeout + workspaceOwnerRenewMargin
 )
 
 func workspaceOwnerTransportCallBudget(transport workspaceOwnerTransport) time.Duration {

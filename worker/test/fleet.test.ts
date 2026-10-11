@@ -13,6 +13,7 @@ import {
   AzureProvisioningRejectedError,
   azureOwnedDeleteClaimKey,
 } from "../src/azure";
+import type { BridgeTicketKind, BridgeTickets } from "../src/bridge-tickets";
 import { codeOriginForLease } from "../src/code-origin";
 import {
   awsPromotedAMIConfigKey,
@@ -118,6 +119,22 @@ import { withProviderHTTP } from "./fixtures/provider-http";
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+function consumeLeaseBridgeTicket(
+  fleet: FleetCoordinator,
+  kind: BridgeTicketKind,
+  bridgeRequest: Request,
+  identifier: string,
+  env: Pick<Env, "CRABBOX_ALLOW_QUERY_BRIDGE_TICKETS"> = {},
+) {
+  const { bridgeTickets } = fleet as unknown as { bridgeTickets: BridgeTickets };
+  return bridgeTickets.consumeAndUse(
+    kind,
+    bridgeTicketFromRequest(bridgeRequest, env),
+    identifier,
+    async (result) => result,
+  );
+}
 
 function expandLogTextRuns(parts: Array<{ text: string; count: number }>): string {
   return parts.map((part) => part.text.repeat(part.count)).join("");
@@ -29507,7 +29524,7 @@ describe("fleet lease identity and idle", () => {
     ).toEqual(["198.51.100.20/32"]);
   });
 
-  it.each(["InsufficientInstanceCapacity", "Unsupported"])(
+  it.each(["InsufficientInstanceCapacity", "Unsupported", "VcpuLimitExceeded"])(
     "preserves definite exact-type AWS rejection on token-bound replay (%s)",
     async (code) => {
       const fixture = awsIngressTestFleet(async (action) => {
@@ -29525,7 +29542,7 @@ describe("fleet lease identity and idle", () => {
       expect(body).toEqual({
         error: "provisioning_failed",
         message: expect.stringContaining(
-          "requested exact AWS instance type t3.small failed; remove --type",
+          "requested exact AWS instance type t3.small failed; remove --type to allow class fallback (regional quota limits still apply)",
         ),
       });
       expect(fixture.storage.value<LeaseRecord>(`lease:${fixture.creatingID}`)).toMatchObject({
@@ -37769,13 +37786,6 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value(`runtime-adapter-ticket:${adapterTicket}`)).toBeDefined();
 
     const consumers = fleet as unknown as {
-      consumeWebVNCTicket(request: Request, identifier: string): Promise<{ status: string }>;
-      consumeCodeTicket(request: Request, identifier: string): Promise<{ status: string }>;
-      consumeEgressTicket(
-        request: Request,
-        identifier: string,
-        role: "host" | "client",
-      ): Promise<{ status: string }>;
       consumeRuntimeAdapterTicket(request: Request, adapterID: string): Promise<{ status: string }>;
     };
 
@@ -37787,7 +37797,9 @@ describe("fleet lease identity and idle", () => {
       });
 
     await expect(
-      consumers.consumeWebVNCTicket(
+      consumeLeaseBridgeTicket(
+        fleet,
+        "webvnc-agent",
         queryOnlyRequest(`/v1/leases/${lease.id}/webvnc/agent`, webVNCTicket),
         lease.id,
       ),
@@ -37795,7 +37807,9 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value(`webvnc-ticket:${webVNCTicket}`)).toBeDefined();
 
     await expect(
-      consumers.consumeCodeTicket(
+      consumeLeaseBridgeTicket(
+        fleet,
+        "code-agent",
         queryOnlyRequest(`/v1/leases/${lease.id}/code/agent`, codeTicket),
         lease.id,
       ),
@@ -37803,16 +37817,19 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value(`code-ticket:${codeTicket}`)).toBeDefined();
 
     await expect(
-      consumers.consumeEgressTicket(
+      consumeLeaseBridgeTicket(
+        fleet,
+        "egress-host",
         queryOnlyRequest(`/v1/leases/${lease.id}/egress/host`, egressTicket),
         lease.id,
-        "host",
       ),
     ).resolves.toMatchObject({ status: "invalid" });
     expect(storage.value(`egress-ticket:${egressTicket}`)).toBeDefined();
 
     await expect(
-      consumers.consumeWebVNCTicket(
+      consumeLeaseBridgeTicket(
+        fleet,
+        "webvnc-agent",
         bridgeRequest(`/v1/leases/${lease.id}/webvnc/agent`, webVNCTicket),
         lease.id,
       ),
@@ -37820,7 +37837,9 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value(`webvnc-ticket:${webVNCTicket}`)).toBeUndefined();
 
     await expect(
-      consumers.consumeCodeTicket(
+      consumeLeaseBridgeTicket(
+        fleet,
+        "code-agent",
         bridgeRequest(`/v1/leases/${lease.id}/code/agent`, codeTicket),
         lease.id,
       ),
@@ -37828,10 +37847,11 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value(`code-ticket:${codeTicket}`)).toBeUndefined();
 
     await expect(
-      consumers.consumeEgressTicket(
+      consumeLeaseBridgeTicket(
+        fleet,
+        "egress-host",
         bridgeRequest(`/v1/leases/${lease.id}/egress/host`, egressTicket),
         lease.id,
-        "host",
       ),
     ).resolves.toMatchObject({ status: "accepted" });
     expect(storage.value(`egress-ticket:${egressTicket}`)).toBeUndefined();
@@ -37892,15 +37912,6 @@ describe("fleet lease identity and idle", () => {
       expiresAt,
     });
 
-    const consumers = fleet as unknown as {
-      consumeWebVNCTicket(request: Request, identifier: string): Promise<{ status: string }>;
-      consumeCodeTicket(request: Request, identifier: string): Promise<{ status: string }>;
-      consumeEgressTicket(
-        request: Request,
-        identifier: string,
-        role: "host" | "client",
-      ): Promise<{ status: string }>;
-    };
     const queryOnlyRequest = (path: string, ticket: string) =>
       request("GET", `${path}?ticket=${ticket}`, {
         headers: {
@@ -37909,26 +37920,34 @@ describe("fleet lease identity and idle", () => {
       });
 
     await expect(
-      consumers.consumeWebVNCTicket(
+      consumeLeaseBridgeTicket(
+        fleet,
+        "webvnc-agent",
         queryOnlyRequest(`/v1/leases/${lease.id}/webvnc/agent`, webVNCTicket),
         lease.id,
+        { CRABBOX_ALLOW_QUERY_BRIDGE_TICKETS: "1" },
       ),
     ).resolves.toMatchObject({ status: "accepted" });
     expect(storage.value(`webvnc-ticket:${webVNCTicket}`)).toBeUndefined();
 
     await expect(
-      consumers.consumeCodeTicket(
+      consumeLeaseBridgeTicket(
+        fleet,
+        "code-agent",
         queryOnlyRequest(`/v1/leases/${lease.id}/code/agent`, codeTicket),
         lease.id,
+        { CRABBOX_ALLOW_QUERY_BRIDGE_TICKETS: "1" },
       ),
     ).resolves.toMatchObject({ status: "accepted" });
     expect(storage.value(`code-ticket:${codeTicket}`)).toBeUndefined();
 
     await expect(
-      consumers.consumeEgressTicket(
+      consumeLeaseBridgeTicket(
+        fleet,
+        "egress-host",
         queryOnlyRequest(`/v1/leases/${lease.id}/egress/host`, egressTicket),
         lease.id,
-        "host",
+        { CRABBOX_ALLOW_QUERY_BRIDGE_TICKETS: "1" },
       ),
     ).resolves.toMatchObject({ status: "accepted" });
     expect(storage.value(`egress-ticket:${egressTicket}`)).toBeUndefined();
@@ -50162,7 +50181,7 @@ describe("fleet identity", () => {
 
     expect(response.status).toBe(200);
     expect(body).toContain("provider health");
-    expect(body).toContain("5 supported");
+    expect(body).toContain("6 supported");
     expect(body).toContain("users");
     expect(body).toContain('href="/portal/admin/users"');
     expect(body).not.toContain("all leases");

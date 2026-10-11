@@ -1,7 +1,6 @@
 package codesandbox
 
 import (
-	"io"
 	"os"
 	"strings"
 	"time"
@@ -85,8 +84,4 @@ func doctorCheck(name string, err error, details map[string]string) core.DoctorC
 		return core.DoctorCheck{Status: "error", Check: name, Message: err.Error(), Details: details}
 	}
 	return core.DoctorCheck{Status: "ok", Check: name, Message: "ready", Details: details}
-}
-
-func discardRuntime() core.Runtime {
-	return core.Runtime{Stdout: io.Discard, Stderr: io.Discard}
 }

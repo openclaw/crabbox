@@ -1053,7 +1053,7 @@ func TestDoctorRedactsRuntimeOnlyProviderSecret(t *testing.T) {
 	}
 }
 
-func TestDoctorJSONCoordinatorOutputIncludesCapacityWarnings(t *testing.T) {
+func TestDoctorJSONCoordinatorOutputIncludesCapacityChecks(t *testing.T) {
 	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("missing local doctor tool %s: %v", tool, err)
@@ -1082,7 +1082,9 @@ func TestDoctorJSONCoordinatorOutputIncludesCapacityWarnings(t *testing.T) {
 					Check:   "capacity",
 					Message: "provider=aws capacity=quota_pressure market=spot recommended_class=standard",
 					Details: map[string]string{"provider": "aws", "market": "spot", "recommended_class": "standard"},
-				}},
+				}, awsCapacityDoctorCheckForQuota(Config{
+					Provider: "aws", AWSRegion: "eu-west-1", Class: "tiny", ServerType: "t3.small",
+				}, "on-demand", 2, true, nil, map[string]int{"t3.small": 2})},
 			})
 		default:
 			http.Error(w, "unexpected "+r.URL.Path, http.StatusBadRequest)
@@ -1107,14 +1109,28 @@ func TestDoctorJSONCoordinatorOutputIncludesCapacityWarnings(t *testing.T) {
 	if !view.OK {
 		t.Fatalf("capacity warning should not fail doctor: %#v", view)
 	}
-	found := false
+	found, foundUnknown := false, false
 	for _, check := range view.Checks {
 		if check.Check == "capacity" && check.Status == "warning" && check.Details["recommended_class"] == "standard" {
 			found = true
 		}
+		if check.Check == "capacity" && check.Status == "ok" {
+			foundUnknown = true
+			for key, want := range map[string]string{
+				"capacity": "unknown", "quota_limit": "sufficient", "usage": "unchecked",
+				"region": "eu-west-1", "hint": "check_regional_quota_usage",
+			} {
+				if check.Details[key] != want || !strings.Contains(check.Message, key+"="+want) {
+					t.Errorf("check=%+v, want %s=%s in JSON details and message", check, key, want)
+				}
+			}
+		}
 	}
 	if !found {
 		t.Fatalf("capacity warning missing from JSON: %#v", view.Checks)
+	}
+	if !foundUnknown {
+		t.Fatalf("unchecked capacity missing from JSON: %#v", view.Checks)
 	}
 }
 

@@ -38,6 +38,8 @@ import {
   type ProviderPoolAccess,
 } from "./ready-pool-access";
 import { setPoolWake } from "./ready-pool-wake";
+import { ServeCoordinator, serveEnabled, serveDisabledResponse } from "./serve";
+import { serveCloudProvider } from "./serve-provider";
 type ReadyPoolMode = boolean | "portable";
 import { AzureResumableProvisioning } from "./azure-provisioning";
 import {
@@ -139,11 +141,9 @@ import {
 import {
   BridgeTickets,
   validBridgeTicket as validLeaseBridgeTicket,
-  type BridgeTicketRecord,
   type CachedAdminGrant,
   type CachedBridgeGrant,
   type EgressRole,
-  type LeaseBridgeTicketConsumption,
 } from "./bridge-tickets";
 import {
   CheckpointError,
@@ -1342,6 +1342,8 @@ export class FleetCoordinator {
       }
       const parts = pathParts(request);
       const method = request.method.toUpperCase();
+      if (parts[0] === "v1" && parts[1] === "serve")
+        return await new ServeCoordinator(this.state, this.env).route(request, parts);
       const adminError = adminRouteError(request, method, parts);
       if (adminError) {
         return adminError;
@@ -3346,6 +3348,16 @@ export class FleetCoordinator {
       },
       { allowConcurrency: true },
     );
+    let serveWake: number | undefined;
+    if (serveEnabled(this.env)) {
+      try {
+        // Exactly one bounded serve batch; ordinary expiry/cleanup runs before the next.
+        serveWake = await new ServeCoordinator(this.state, this.env).maintain();
+      } catch {
+        serveWake = Date.now() + 15_000;
+        console.error("serve maintenance failed; continuing coordinator maintenance");
+      }
+    }
     await this.reconcileInterruptedLeaseProvisioning(leaseIDs);
     await this.poolAccess.maintain();
     await this.maintainLeaseLifetimes(leaseIDs);
@@ -3366,7 +3378,10 @@ export class FleetCoordinator {
     await this.runAWSOrphanSweepIfDue("alarm");
     await this.runAzureOrphanSweepIfDue("alarm");
     await this.reconcileAWSIngressIfIdle();
-    await this.state.runExclusive(() => this.scheduleAlarm(alarmArmRevision));
+    await this.state.runExclusive(async () => {
+      await this.scheduleAlarm(alarmArmRevision);
+      if (serveWake !== undefined) await this.armAlarmNoLaterThan(serveWake);
+    });
   }
 
   private async scheduledMaintenance(request: Request): Promise<Response> {
@@ -3657,6 +3672,16 @@ export class FleetCoordinator {
         await this.putCreateAttempt(attempt);
         return createAttemptBindingConflictResponse();
       }
+      if (lease.provider === "serve") {
+        lease.state = "released";
+        lease.releaseDeletesServer = true;
+        lease.updatedAt = now;
+        lease.endedAt = now;
+        lease.cleanupStartedAt ??= now;
+        await this.putLease(lease);
+        await this.putCreateAttempt(attempt);
+        return { attempt, lease };
+      }
       if (this.state.provisioning) {
         const released = await this.state.provisioning.commitAndWake(async (transaction) => {
           const latest = await transaction.get<LeaseRecord>(leaseKey(lease.id));
@@ -3901,6 +3926,37 @@ export class FleetCoordinator {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const input = await readJson<LeaseRequest>(request);
+    if ((input.provider as string) === "serve") {
+      const result = await new ServeCoordinator(this.state, this.env).create(
+        request,
+        input,
+        fixedLeaseID,
+        async (lease, storage) => {
+          admissionFence.assertActive();
+          const admission = await this.mergedLeaseAdmissionState(
+            lease,
+            new Date(),
+            await this.providerAccessRecords(),
+            undefined,
+            storage,
+          );
+          lease.slug = allocateLeaseSlug(
+            input.slug || leaseSlugFromID(lease.id),
+            lease.id,
+            owner,
+            org,
+            admission.accessLeases,
+          );
+          const limit = enforceCostLimitUsage(admission.costUsage, lease, costLimits(this.env));
+          if (limit) return json({ error: "cost_limit_exceeded", message: limit }, { status: 429 });
+          admissionFence.beginCommit();
+          return undefined;
+        },
+      );
+      if (result.ok)
+        await this.state.runExclusive(() => this.armAlarmNoLaterThan(Date.now() + 15_000));
+      return result;
+    }
     let capacityRequirements: CapacityRequirements | undefined;
     try {
       capacityRequirements = normalizeCapacityRequirements(input.capacity);
@@ -6539,7 +6595,7 @@ export class FleetCoordinator {
       );
     }
     if (method === "POST" && action === "connections" && connection === "native-vnc") {
-      return await this.createWorkspaceNativeVNCTicket(request, key, workspaceID);
+      return await this.createWorkspaceNativeVNCTicket(key, workspaceID);
     }
     if (method === "DELETE" && action === undefined) {
       const release = await this.state.runExclusive(async () => {
@@ -6601,7 +6657,6 @@ export class FleetCoordinator {
   }
 
   private async createWorkspaceNativeVNCTicket(
-    request: Request,
     key: string,
     workspaceID: string,
   ): Promise<Response> {
@@ -8406,6 +8461,8 @@ export class FleetCoordinator {
     if (providerError) {
       return providerError;
     }
+    if (lease.provider === "serve")
+      return await new ServeCoordinator(this.state, this.env).release(request, lease);
     const expectedProvider =
       typeof body.expectedProvider === "string" ? body.expectedProvider : undefined;
     if (lease.workspaceID) {
@@ -8829,6 +8886,16 @@ export class FleetCoordinator {
   }
 
   private async providerReadiness(request: Request, provider: string): Promise<Response> {
+    if (provider === "serve")
+      return (
+        serveDisabledResponse(this.env, requestOwner(request)) ??
+        json({
+          provider: "serve",
+          configured: true,
+          checks: [],
+          message: "serve supported; use /v1/serve/machines for owner capacity",
+        })
+      );
     if (!isCoordinatorProvider(provider)) {
       return json(
         { error: "invalid_provider", message: `unsupported provider: ${provider}` },
@@ -9170,10 +9237,6 @@ export class FleetCoordinator {
       return await this.codePortalProxy(request, parts[2], parts.slice(4));
     }
     return json({ error: "not_found" }, { status: 404 });
-  }
-
-  private async portalLeases(request: Request): Promise<LeaseRecord[]> {
-    return this.filterLeases(await this.portalVisibleLeases(request), request);
   }
 
   private async portalVisibleLeases(request: Request): Promise<LeaseRecord[]> {
@@ -13045,17 +13108,6 @@ export class FleetCoordinator {
     await this.state.storage.put(runtimeAdapterIdentityKey(identity.adapterID), confirmed);
   }
 
-  private async consumeWebVNCTicket(
-    request: Request,
-    identifier: string,
-  ): Promise<LeaseBridgeTicketConsumption<BridgeTicketRecord<"webvnc-agent">>> {
-    return this.bridgeTickets.consume(
-      "webvnc-agent",
-      bridgeTicketFromRequest(request, this.env),
-      identifier,
-    );
-  }
-
   private async currentLeaseBridgeTicket<
     T extends CachedBridgeGrant & { owner: string; org: string; admin?: boolean },
   >(ticket: T, lease: LeaseRecord): Promise<T | undefined> {
@@ -13083,29 +13135,6 @@ export class FleetCoordinator {
       return undefined;
     }
     return currentTicket;
-  }
-
-  private async consumeCodeTicket(
-    request: Request,
-    identifier: string,
-  ): Promise<LeaseBridgeTicketConsumption<BridgeTicketRecord<"code-agent">>> {
-    return this.bridgeTickets.consume(
-      "code-agent",
-      bridgeTicketFromRequest(request, this.env),
-      identifier,
-    );
-  }
-
-  private async consumeEgressTicket(
-    request: Request,
-    identifier: string,
-    role: EgressRole,
-  ): Promise<LeaseBridgeTicketConsumption<BridgeTicketRecord<"egress-host" | "egress-client">>> {
-    return this.bridgeTickets.consume(
-      role === "host" ? "egress-host" : "egress-client",
-      bridgeTicketFromRequest(request, this.env),
-      identifier,
-    );
   }
 
   private async pool(request: Request): Promise<Response> {
@@ -13265,7 +13294,7 @@ export class FleetCoordinator {
       .filter(
         (entry) =>
           (!key || entry.key === key) &&
-          this.readyPoolEntryVisibleToRequest(entry, request, leases.get(entry.leaseID)),
+          this.readyPoolEntryVisibleToRequest(request, leases.get(entry.leaseID)),
       )
       .map((entry) => redactReadyPoolEntry(entry))
       .toSorted((a, b) => a.key.localeCompare(b.key) || a.leaseID.localeCompare(b.leaseID));
@@ -13735,7 +13764,7 @@ export class FleetCoordinator {
       this.state.runExclusive(async () => {
         const current = await this.getReadyPoolEntry(key, leaseID, typed);
         const lease = await this.getLease(leaseID);
-        if (!current || !this.readyPoolEntryVisibleToRequest(current, request, lease)) {
+        if (!current || !this.readyPoolEntryVisibleToRequest(request, lease)) {
           return notFound();
         }
         if (
@@ -14066,7 +14095,7 @@ export class FleetCoordinator {
         const leases = await this.readyPoolLeases(poolEntries);
         const entries = poolEntries.filter((entry) => {
           const lease = leases.get(entry.leaseID);
-          return entry.key === key && this.readyPoolEntryVisibleToRequest(entry, request, lease);
+          return entry.key === key && this.readyPoolEntryVisibleToRequest(request, lease);
         });
         const claims = (await this.readyPoolFillClaims(typed)).filter(
           (claim) =>
@@ -14102,7 +14131,7 @@ export class FleetCoordinator {
         return notFound();
       }
       const lease = await this.getLease(leaseID);
-      if (!this.readyPoolEntryVisibleToRequest(current, request, lease)) {
+      if (!this.readyPoolEntryVisibleToRequest(request, lease)) {
         return notFound();
       }
       const canManage =
@@ -17394,6 +17423,7 @@ export class FleetCoordinator {
     const candidates = await this.state.runExclusive(async () => {
       const due: LeaseRecord[] = [];
       await this.visitLeaseRecords(async (lease) => {
+        if (lease.provider === "serve") return;
         if (due.length >= interruptedProvisioningRecoveryBatchSize) {
           return;
         }
@@ -17994,6 +18024,7 @@ export class FleetCoordinator {
       const claimed: Array<{ claim: string; lease: LeaseRecord }> = [];
       const bridgeOwners = await this.leaseBridgeOwners();
       await this.visitLeaseRecords(async (stored) => {
+        if (stored.provider === "serve") return;
         const needsCleanup = leaseNeedsCleanup(stored, now);
         const closeBridges = !leaseIsLive(stored) && bridgeOwners.has(stored.id);
         // Most history has neither due provider work nor bridge state. Journal reads and
@@ -19728,7 +19759,6 @@ export class FleetCoordinator {
   }
 
   private readyPoolEntryVisibleToRequest(
-    entry: ReadyPoolEntry,
     request: Request,
     lease: LeaseRecord | undefined,
   ): boolean {
@@ -20230,6 +20260,7 @@ export class FleetCoordinator {
   }
 
   private provider(provider: Provider, region?: string, project?: string): CloudProvider {
+    if (provider === "serve") return serveCloudProvider();
     const testProvider = this.testProviders[provider];
     if (testProvider) {
       return testProvider;
@@ -27918,7 +27949,7 @@ interface ProviderProvisioningFailureEvidence {
   ownedKeyCleanupPending?: boolean;
 }
 
-interface CloudProvider {
+export interface CloudProvider {
   // No I/O or state mutation.
   provisioningFailureEvidence?(
     context: ProviderProvisioningFailureContext,

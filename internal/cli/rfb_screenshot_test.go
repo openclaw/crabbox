@@ -1850,3 +1850,11 @@ func errUnexpectedTestBytes(label string, got []byte) error {
 func errUnexpectedTestString(label, got string) error {
 	return testError(label + " mismatch: " + got)
 }
+
+func preflightRFBAuthenticationFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials) error {
+	return preflightRFBAuthenticationFromConnWithMode(ctx, conn, creds, localWebVNCAuthAuto)
+}
+
+func negotiateRFBSecurityType(conn net.Conn, creds rfbCredentials) (byte, error) {
+	return negotiateRFBSecurityTypeForMode(conn, creds, localWebVNCAuthAuto)
+}

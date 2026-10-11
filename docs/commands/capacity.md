@@ -6,6 +6,11 @@ the normal coordinator credentials, including the existing resolved shared or
 `unknown` owner identity. It never falls back to a direct provider or local lease
 list. Older coordinators without `GET /v1/capacity` return an unsupported error.
 
+These are coordinator admission limits, not AWS vCPU quotas or available cloud
+capacity. [Doctor](doctor.md) reports AWS quota ceilings separately; even
+`admissible: yes` and a sufficient quota ceiling do not establish unused
+regional quota or guarantee that a provider can launch the requested VM.
+
 ```sh
 crabbox capacity
 crabbox capacity --json

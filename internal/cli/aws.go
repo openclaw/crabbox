@@ -115,6 +115,7 @@ func (c *AWSClient) CapacityDoctorChecks(ctx context.Context, cfg Config) []Doct
 		cfg.ServerType = serverTypeForConfig(cfg)
 	}
 	vcpus := c.capacityInstanceTypeVCPUs(ctx, cfg)
+	cfg.AWSRegion = c.region
 	checks := make([]DoctorCheck, 0, 2)
 	for _, market := range awsCapacityDoctorMarkets(cfg) {
 		limit, known, err := c.appliedEC2ServiceQuota(ctx, awsQuotaCodeForMarket(market))
@@ -655,7 +656,7 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 		}
 	}
 	if cfg.ServerTypeExplicit {
-		return Server{}, cfg, fmt.Errorf("requested exact AWS instance type %s failed; remove --type to allow class fallback: %w", cfg.ServerType, joinErrors(errs))
+		return Server{}, cfg, fmt.Errorf("requested exact AWS instance type %s failed; remove --type to allow class fallback (regional quota limits still apply): %w", cfg.ServerType, joinErrors(errs))
 	}
 	return Server{}, cfg, joinErrors(errs)
 }
@@ -1669,6 +1670,7 @@ func awsCapacityDoctorCheckForQuota(cfg Config, market string, quotaValue float6
 	needed := vcpus[serverType]
 	base := map[string]string{
 		"provider":             "aws",
+		"region":               cfg.AWSRegion,
 		"market":               market,
 		"quota_code":           quotaCode,
 		"default_class":        cfg.Class,
@@ -1732,11 +1734,14 @@ func awsCapacityDoctorCheckForQuota(cfg Config, market string, quotaValue float6
 			Details: base,
 		}
 	}
-	base["hint"] = "quota_satisfies_default_class"
+	base["capacity"] = "unknown"
+	base["quota_limit"] = "sufficient"
+	base["usage"] = "unchecked"
+	base["hint"] = "check_regional_quota_usage"
 	return DoctorCheck{
 		Status:  "ok",
 		Check:   "capacity",
-		Message: awsDoctorMessage("provider=aws capacity=ready", base),
+		Message: awsDoctorMessage("provider=aws", base),
 		Details: base,
 	}
 }

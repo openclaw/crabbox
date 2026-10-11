@@ -304,10 +304,6 @@ func kubectlAlreadyExists(err error) bool {
 	return strings.Contains(text, "alreadyexists") || strings.Contains(text, "already exists")
 }
 
-func commandString(req core.LocalCommandRequest) string {
-	return strings.TrimSpace(req.Name + " " + strings.Join(req.Args, " "))
-}
-
 func redactSensitive(message string) string {
 	if strings.TrimSpace(message) == "" {
 		return ""
