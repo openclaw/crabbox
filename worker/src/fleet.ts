@@ -17914,6 +17914,18 @@ export class FleetCoordinator {
         const enforced = lifetimeEnforced(policy, this.env);
         const readinessOnly = enforced && policy.readiness?.status !== "ready";
         const deadline = lifetimeDeadline(policy);
+        if (
+          !enforced &&
+          policy.nextCheckAt &&
+          !policy.stopStartedAt &&
+          !policy.retainedIdentity &&
+          !policy.stoppedAt &&
+          now < deadline
+        ) {
+          // A report-only rollback waits for warnings/deadline, not an expired readiness retry.
+          delete policy.nextCheckAt;
+          await this.putLease(lease);
+        }
         if (!policy.warnedAt && Number.isFinite(deadline) && now >= deadline - lifetimeWarningMs) {
           policy.warnedAt = new Date(now).toISOString();
           await this.putLease(lease);

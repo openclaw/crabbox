@@ -57200,6 +57200,31 @@ describe("maximum lifetime safety net", () => {
     expect(f.retainLease).toHaveBeenCalledOnce();
   });
 
+  it("discards pre-deadline readiness retries when enforcement rolls back to report", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const f = fixture();
+    f.lease.lifetimePolicy!.deadlineAt = new Date(now + 10 * 3_600_000).toISOString();
+    f.lease.lifetimePolicy!.readiness = {
+      status: "failed",
+      checkedAt: new Date(now - 300_000).toISOString(),
+      error: "StopInstances denied",
+    };
+    f.lease.lifetimePolicy!.nextCheckAt = new Date(now - 1).toISOString();
+    await f.storage.put(`lease:${f.lease.id}`, f.lease);
+    const fleet = testFleet(
+      f.storage,
+      { aws: { retainLease: f.retainLease, releaseLease: f.releaseLease } },
+      { ...env, CRABBOX_LEASE_LIFETIME_MODE: "report" },
+    );
+    await fleet.alarm();
+    expect(f.retainLease).not.toHaveBeenCalled();
+    expect(await f.storage.getAlarm()).toBe(now + 9 * 3_600_000);
+    expect(
+      f.storage.value<LeaseRecord>(`lease:${f.lease.id}`)?.lifetimePolicy?.nextCheckAt,
+    ).toBeUndefined();
+  });
+
   it("admits only admin-created, bounded on-demand AWS canaries and binds fixed replay", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
