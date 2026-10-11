@@ -216,7 +216,7 @@ func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 		Runpod Vast NvidiaBrev Hostinger Wandb Orgo Islo Freestyle Tenki Tensorlake Cua
 		OpenComputer CodeSandbox OpenSandbox Nomad Blaxel VercelSandbox CloudflareSandbox
 		Superserve Crownest DockerSandbox AnthropicSRT CloudRunSandbox Modal UpstashBox
-		Smolvm AsciiBox Cloudflare CloudflareDynamicWorkers Semaphore Sprites LocalContainer
+		Smolvm AsciiBox Cloudflare CloudflareDynamicWorkers Semaphore Sprites LocalContainer Serve
 		AppleContainer AppleVM MXC Multipass Machine0 Tart Lume HyperV WindowsSandbox Static
 	`)
 	classify("post-acquisition command, transport, reporting, or local maintenance behavior", `

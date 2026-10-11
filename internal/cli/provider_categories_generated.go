@@ -69,6 +69,7 @@ var benchmarkProviderCategories = map[string]string{
 	"scaleway":                   "direct-cloud",
 	"sealos-devbox":              "direct-cloud",
 	"semaphore":                  "ci-proof-runner",
+	"serve":                      "self-hosted-virtualization",
 	"smolvm":                     "delegated-sandbox",
 	"sprites":                    "direct-cloud",
 	"ssh":                        "byo-ssh",

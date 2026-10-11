@@ -204,6 +204,7 @@ type Config struct {
 	CloudflareDynamicWorkers      CloudflareDynamicWorkersConfig
 	Semaphore                     SemaphoreConfig
 	Sprites                       SpritesConfig
+	Serve                         ServeConfig
 	LocalContainer                LocalContainerConfig
 	localContainerRuntimeExplicit bool
 	localContainerImageExplicit   bool
@@ -1734,7 +1735,14 @@ func baseConfig() Config {
 	}
 }
 
+type ServeConfig struct {
+	SSHPorts string `yaml:"sshPorts,omitempty"`
+	Machine  string `yaml:"machine,omitempty"`
+	Fallback string `yaml:"fallback,omitempty"`
+}
+
 type fileConfig struct {
+	Serve                    *ServeConfig                        `yaml:"serve,omitempty"`
 	Claims                   *fileClaimsConfig                   `yaml:"claims,omitempty"`
 	History                  *fileLocalHistoryPolicy             `yaml:"history,omitempty"`
 	Profile                  string                              `yaml:"profile,omitempty"`
@@ -2538,6 +2546,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 }
 
 func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, trusted bool, providerSource providerSelectionSource) error {
+	if file.Serve != nil {
+		cfg.Serve = *file.Serve
+	}
 	if trusted && file.History != nil && file.History.Local != nil && file.History.Local.Enabled != nil {
 		cfg.RecordLocal = *file.History.Local.Enabled
 	}
@@ -3921,6 +3932,9 @@ func applyNonNegativeLeaseDuration(target *time.Duration, value string) bool {
 }
 
 func applyEnv(cfg *Config) error {
+	cfg.Serve.Machine = getenv("CRABBOX_SERVE_MACHINE", cfg.Serve.Machine)
+	cfg.Serve.Fallback = getenv("CRABBOX_SERVE_FALLBACK", cfg.Serve.Fallback)
+	cfg.Serve.SSHPorts = getenv("CRABBOX_SERVE_SSH_PORTS", cfg.Serve.SSHPorts)
 	cfg.Profile = configInputEnvString(cfg, configInputGeneric, cfg.Profile, "CRABBOX_PROFILE")
 	if provider := os.Getenv("CRABBOX_PROVIDER"); provider != "" {
 		setProviderSelection(cfg, provider, providerSelectionEnvironment)

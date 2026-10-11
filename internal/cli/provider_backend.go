@@ -32,6 +32,12 @@ type ProviderConfigValidator interface {
 	ValidateConfig(cfg Config) error
 }
 
+// CoordinatorAcquisitionFallback chooses one alternate provider only after an
+// authoritative capacity rejection. Fixed-ID operations never change provider.
+type CoordinatorAcquisitionFallback interface {
+	AcquisitionFallback(error) (string, bool)
+}
+
 // CoordinatorAcquireValidator keeps provider-owned creation policy at broker
 // acquisition; configuration checks must not prevent existing-lease cleanup.
 type CoordinatorAcquireValidator interface {
@@ -104,6 +110,12 @@ type ProviderReadyPoolImageIdentityRequest struct {
 // of immutable image evidence returned with a typed ready-pool lease.
 type ProviderReadyPoolImageIdentityCapability interface {
 	ReadyPoolImageIdentityMatchesLease(ProviderReadyPoolImageIdentityRequest) bool
+}
+
+// CoordinatorArchitecturePolicy lets a provider place on a machine of either
+// supported architecture when the caller did not explicitly select one.
+type CoordinatorArchitecturePolicy interface {
+	CoordinatorSelectsArchitecture() bool
 }
 
 // ProviderConfigArchitectureDescriber describes an omitted architecture for
@@ -812,6 +824,7 @@ type ProviderSpec struct {
 	Targets          []TargetSpec
 	Features         FeatureSet
 	Coordinator      CoordinatorMode
+	BrokeredOnly     bool
 	ClassDisposition ProviderClassDisposition
 	SizeSelection    ProviderSizeSelector
 	// SyncGuardrailFullCandidate counts the complete ordinary workspace transfer.

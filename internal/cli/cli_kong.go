@@ -11,6 +11,7 @@ import (
 type crabboxKongCLI struct {
 	Version kong.VersionFlag `name:"version" short:"v" help:"Print version."`
 
+	Serve          serveKongCmd          `cmd:"" passthrough:"" help:"Donate trusted container capacity to the coordinator."`
 	VersionCmd     versionKongCmd        `cmd:"" name:"version" help:"Print version."`
 	Init           initKongCmd           `cmd:"" passthrough:"" help:"Onboard the current repo for Crabbox."`
 	Login          loginKongCmd          `cmd:"" passthrough:"" help:"Open GitHub login, store broker credentials, verify access."`

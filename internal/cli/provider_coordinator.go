@@ -237,9 +237,44 @@ func (b *coordinatorLeaseBackend) Acquire(ctx context.Context, req AcquireReques
 		}
 		return acquired, nil
 	}
-	return acquireAttemptsRetry(b.rt, req.Keep, func() (LeaseTarget, error) {
+	lease, err := acquireAttemptsRetry(b.rt, req.Keep, func() (LeaseTarget, error) {
 		return b.acquireOnce(ctx, req.Keep, req.RequestedSlug)
 	})
+	if err == nil {
+		return lease, nil
+	}
+	fallback, ok := b.direct.(CoordinatorAcquisitionFallback)
+	if !ok {
+		return lease, err
+	}
+	name, retry := fallback.AcquisitionFallback(err)
+	if !retry {
+		return lease, err
+	}
+	cfg := b.cfg
+	cfg.Provider = name
+	cfg.Serve.Fallback = ""
+	if !cfg.ServerTypeExplicit {
+		cfg.ServerType = ""
+	}
+	if defaultsErr := applyProviderConfigDefaults(&cfg); defaultsErr != nil {
+		return LeaseTarget{}, defaultsErr
+	}
+	candidate, loadErr := loadBackend(cfg, b.rt)
+	if loadErr != nil {
+		return LeaseTarget{}, loadErr
+	}
+	alternate, ok := candidate.(*coordinatorLeaseBackend)
+	if !ok {
+		return LeaseTarget{}, Exit(2, "capacity fallback requires a brokered SSH-lease provider")
+	}
+	fmt.Fprintf(b.rt.Stderr, "capacity unavailable on %s; retrying acquisition once with provider=%s\n", b.spec.Name, alternate.spec.Name)
+	// A single attempt prevents fallback chains and repeated acquisitions.
+	lease, err = alternate.acquireOnce(ctx, req.Keep, req.RequestedSlug)
+	if err == nil {
+		*b = *alternate
+	}
+	return lease, err
 }
 
 func (b *coordinatorLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (LeaseTarget, error) {

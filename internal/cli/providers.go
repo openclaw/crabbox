@@ -25,6 +25,7 @@ type providerMatrixEntry struct {
 	Evidence      []string             `json:"evidence,omitempty"`
 	Lifecycle     []string             `json:"lifecycle,omitempty"`
 	Coordinator   string               `json:"coordinator"`
+	BrokeredOnly  bool                 `json:"brokeredOnly,omitempty"`
 	Classes       []ClassSpec          `json:"classes,omitempty"`
 	ClassCatalog  ProviderClassCatalog `json:"classCatalog"`
 	SizeSelection ProviderSizeSelector `json:"sizeSelection,omitempty"`
@@ -231,6 +232,7 @@ func providerMatrixEntryFor(provider Provider) providerMatrixEntry {
 		Evidence:             evidenceCapabilitiesForFeatures(spec.Features),
 		Lifecycle:            lifecycleCapabilitiesForProvider(spec.Coordinator, spec.Features),
 		Coordinator:          string(spec.Coordinator),
+		BrokeredOnly:         spec.BrokeredOnly,
 		ClassCatalog:         ProviderClassCatalogFor(provider),
 		SizeSelection:        spec.SizeSelection,
 	}
@@ -1708,7 +1710,11 @@ func printProviderMatrix(out io.Writer, entries []providerMatrixEntry) {
 		if len(entry.Lifecycle) > 0 {
 			fmt.Fprintf(out, "  lifecycle: %s\n", commaOrDash(entry.Lifecycle))
 		}
-		fmt.Fprintf(out, "  coordinator: %s\n", blank(entry.Coordinator, "never"))
+		mode := blank(entry.Coordinator, "never")
+		if entry.BrokeredOnly {
+			mode = "required"
+		}
+		fmt.Fprintf(out, "  coordinator: %s\n", mode)
 		if len(entry.Aliases) > 0 {
 			fmt.Fprintf(out, "  aliases: %s\n", strings.Join(entry.Aliases, ","))
 		}

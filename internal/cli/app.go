@@ -211,6 +211,7 @@ Commands:
   logout      Remove the stored broker token
   whoami      Show broker identity
   doctor      Check local and broker/provider readiness
+  serve       Donate trusted container capacity to the coordinator
   warmup      Lease a box and wait until it is ready
   prewarm     Lease and hydrate a reusable test-ready box
   run         Sync the repo, run a remote command, stream output

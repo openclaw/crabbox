@@ -87,6 +87,7 @@ func coordinatorResponseErrorCode(err error, status int) string {
 }
 
 type CoordinatorLease struct {
+	ImageEvidence                *ImageEvidence                 `json:"imageEvidence,omitempty"`
 	CreationEvents               []CreationEvent                `json:"creationEvents,omitempty"`
 	ID                           string                         `json:"id"`
 	Slug                         string                         `json:"slug,omitempty"`
@@ -1177,6 +1178,7 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 		"slug":                            slug,
 		"profile":                         cfg.Profile,
 		"provider":                        cfg.Provider,
+		"serveMachine":                    cfg.Serve.Machine,
 		"target":                          cfg.TargetOS,
 		"windowsMode":                     cfg.WindowsMode,
 		"desktop":                         cfg.Desktop,
@@ -1220,7 +1222,11 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	if !fixed {
 		req["createAttemptID"] = createAttemptID
 	}
-	if cfg.Provider != "daytona" || cfg.architectureExplicit {
+	nativePlacement := false
+	if policy, ok := provider.(CoordinatorArchitecturePolicy); ok {
+		nativePlacement = policy.CoordinatorSelectsArchitecture()
+	}
+	if cfg.architectureExplicit || (!nativePlacement && cfg.Provider != "daytona") {
 		req["architecture"] = effectiveArchitectureForConfig(cfg)
 	}
 	if len(capacity) > 0 {
@@ -3038,12 +3044,13 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 		provider = strings.TrimSpace(cfg.Provider)
 	}
 	server := Server{
-		Provider: provider,
-		CloudID:  lease.CloudID,
-		HostID:   hostID,
-		ID:       lease.ServerID,
-		Name:     lease.ServerName,
-		Status:   lease.State,
+		ImageEvidence: CloneImageEvidence(lease.ImageEvidence),
+		Provider:      provider,
+		CloudID:       lease.CloudID,
+		HostID:        hostID,
+		ID:            lease.ServerID,
+		Name:          lease.ServerName,
+		Status:        lease.State,
 		Labels: map[string]string{
 			"lease":             lease.ID,
 			"slug":              lease.Slug,
