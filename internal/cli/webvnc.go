@@ -1735,14 +1735,6 @@ func inheritedWebVNCDaemonListener(port string) (net.Listener, error) {
 	return listener, nil
 }
 
-func serveWebVNCLoopbackProxy(ctx context.Context, listener net.Listener, targetPort string, expectedOwnerPID ...int) <-chan error {
-	ownerPID := 0
-	if len(expectedOwnerPID) > 0 {
-		ownerPID = expectedOwnerPID[0]
-	}
-	return serveWebVNCLoopbackProxyWithEnvironment(ctx, listener, targetPort, ownerPID, nil)
-}
-
 func serveWebVNCLoopbackProxyWithEnvironment(ctx context.Context, listener net.Listener, targetPort string, ownerPID int, denied []string) <-chan error {
 	done := make(chan error, 1)
 	proxyCtx, cancelProxy := context.WithCancelCause(ctx)
@@ -2834,10 +2826,6 @@ type webVNCBridge struct {
 
 const webVNCDesktopThemeSSHAttemptTimeout = 35 * time.Second
 
-func connectWebVNCBridge(ctx context.Context, coord *CoordinatorClient, leaseID, host, port string, target SSHTarget, credentials rfbCredentials, authMode localWebVNCAuthenticationMode, log io.Writer) (*webVNCBridge, error) {
-	return connectWebVNCBridgeWithDial(ctx, coord, leaseID, host, port, target, credentials, authMode, log, nil)
-}
-
 func connectWebVNCBridgeWithDial(ctx context.Context, coord *CoordinatorClient, leaseID, host, port string, target SSHTarget, credentials rfbCredentials, authMode localWebVNCAuthenticationMode, log io.Writer, dialVNC func(context.Context) (net.Conn, error)) (*webVNCBridge, error) {
 	agentBaseURL, err := webVNCAgentBaseURL(coord.BaseURL)
 	if err != nil {
@@ -3099,11 +3087,6 @@ func webVNCObserverSlotsExhausted(status CoordinatorWebVNCStatus) bool {
 		return true
 	}
 	return strings.Contains(status.Message, "available WebVNC observer slot")
-}
-
-func isLocalContainerProvider(provider string) bool {
-	p, err := ProviderFor(provider)
-	return err == nil && p.Spec().Name == "local-container"
 }
 
 // guardMacOSDirectWebVNC rejects the direct WebVNC browser path for macOS
@@ -3685,10 +3668,6 @@ func directSSHWebVNCURL(localPort, password string) string {
 }
 
 const directSSHWebVNCProbeTimeout = 5 * time.Second
-
-func probeDirectSSHWebVNC(ctx context.Context, localPort, password string) error {
-	return probeDirectSSHWebVNCWithSecurity(ctx, localPort, password, false)
-}
 
 func probeDirectSSHWebVNCWithSecurity(ctx context.Context, localPort, password string, allowNone bool) error {
 	port, err := strconv.Atoi(strings.TrimSpace(localPort))
@@ -4649,10 +4628,6 @@ func retryBridgeTicketInAuthorization(resp *http.Response, err error) bool {
 		_ = resp.Body.Close()
 	}
 	return resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden
-}
-
-func webVNCAgentURL(base, leaseID string) string {
-	return webVNCAgentURLWithCapabilities(base, leaseID, "")
 }
 
 func webVNCAgentURLWithCapabilities(base, leaseID, capabilities string) string {
