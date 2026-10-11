@@ -372,6 +372,15 @@ the association state.
 --json                       print the structured JSON record
 ```
 
+For enrolled coordinator leases, both text and JSON preserve the
+`lifetimePolicy`, including the `admin-canary` marker, effective stop deadline,
+confirmed-stop deletion deadline, retention duration, current status,
+readiness, and warnings. `DELETION:` warns of permanent root-disk removal.
+Before compute has been confirmed stopped, no exact disk deletion deadline is
+recorded. These are coordinator observations; an administrator can obtain a
+fresh read-only instance and volume observation with
+[`admin lifetime-readback`](admin.md#lifetime-readback).
+
 ## inspect vs status vs list
 
 - `inspect` is the long-form record for one lease, including provider labels

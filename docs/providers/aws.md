@@ -97,6 +97,26 @@ alongside active/provisioning leases. A released lease may still hold a kept
 instance; use the lease ID and `keep`/cleanup fields to distinguish it from a
 confirmed deletion. Listing is read-only.
 
+### Retained lifetime rollout canary
+
+The coordinator's [maximum-age safety net](../features/lifecycle-cleanup.md#maximum-age-safety-net-for-retained-compute)
+defaults off. An administrator can explicitly enroll a new on-demand EBS-root
+lease using `--lifetime-canary 6m --lifetime-retention 5m` on `warmup` or `run`.
+Use `--region eu-west-1 --class tiny --type t3.small --market on-demand` for the
+bounded rollout proof. The visible `admin-canary` policy remains enforced even
+with global mode off or report; other leases are not enrolled.
+
+The first check performs an exact-instance `StopInstances` dry run after
+verifying account, Region, instance ownership and root attachment. Permission
+failure is visible in `lifetimePolicy.readiness`, status, and warnings. AWS
+permissions must include scoped `ec2:StopInstances` and `ec2:DescribeVolumes`;
+the generated admin provider policy and ECS coordinator template include them.
+`crabbox admin lifetime-readback --id <lease-id> --json` reads instance state and
+the original root volume through the coordinator without local AWS credentials.
+Before stopping, an admin may extend the compute deadline with
+`crabbox admin extend-lifetime`; stopping cannot be undone by an extension, and
+the retained root disk is permanently deleted when its separate deadline passes.
+
 ### Fixed-ID replay
 
 `warmup --lease-id cbx_<12 lowercase hex>` makes direct AWS acquisition

@@ -131,6 +131,15 @@ coordinator has retained recent samples (bounded to the latest 60 per lease) for
 portal trend charts. Under `--wait`, JSON is printed once the lease is ready or
 terminal rather than on every poll.
 
+An enrolled coordinator lease also includes its `lifetimePolicy`: mode,
+`source` (including `admin-canary`), effective compute stop deadline,
+confirmed-stop root-disk deletion deadline, retention duration, status,
+readiness, and owner-visible warnings. Text output appends the same lifetime
+summary. `lifetime_delete_after=-` means the retained-disk deadline has not yet
+been established by a confirmed stop. A distinct `DELETION:` warning describes
+permanent root-disk removal. See [lifecycle cleanup](../features/lifecycle-cleanup.md)
+and [`admin extend-lifetime`](admin.md#extend-lifetime).
+
 For Local Container, non-wait JSON status includes fresh read-only
 `diagnostic.memory.*` labels, as described in
 [`inspect`](inspect.md). These optional observations are not requested by

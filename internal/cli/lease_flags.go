@@ -11,35 +11,37 @@ import (
 )
 
 type leaseCreateFlagValues struct {
-	Provider      *string
-	Profile       *string
-	Class         *string
-	Architecture  *string
-	OSImage       *string
-	ServerType    *string
-	SSHPort       *string
-	Market        *string
-	MinVCPUs      *int
-	MinMemoryMiB  *int
-	Slug          *string
-	Pond          *string
-	Expose        *stringListFlag
-	CacheVolumes  *stringListFlag
-	TTL           *time.Duration
-	Idle          *time.Duration
-	Desktop       *bool
-	DesktopEnv    *string
-	Browser       *bool
-	ImageMinOS    *string
-	ImageSDK      *stringListFlag
-	ImageRuntime  *stringListFlag
-	ImageBrowser  *bool
-	ImageWebView2 *bool
-	ImageDesktop  *bool
-	Code          *bool
-	ProviderFlags providerFlagValues
-	Target        targetFlagValues
-	Network       networkFlagValues
+	Provider          *string
+	Profile           *string
+	Class             *string
+	Architecture      *string
+	OSImage           *string
+	ServerType        *string
+	SSHPort           *string
+	Market            *string
+	MinVCPUs          *int
+	MinMemoryMiB      *int
+	Slug              *string
+	Pond              *string
+	Expose            *stringListFlag
+	CacheVolumes      *stringListFlag
+	TTL               *time.Duration
+	Idle              *time.Duration
+	LifetimeCanary    *time.Duration
+	LifetimeRetention *time.Duration
+	Desktop           *bool
+	DesktopEnv        *string
+	Browser           *bool
+	ImageMinOS        *string
+	ImageSDK          *stringListFlag
+	ImageRuntime      *stringListFlag
+	ImageBrowser      *bool
+	ImageWebView2     *bool
+	ImageDesktop      *bool
+	Code              *bool
+	ProviderFlags     providerFlagValues
+	Target            targetFlagValues
+	Network           networkFlagValues
 }
 
 type leaseCreateFlagRegistrationOptions struct {
@@ -67,35 +69,37 @@ func registerLeaseCreateFlagsWithOptions(fs *flag.FlagSet, defaults Config, opti
 	fs.Var(&imageSDK, "image-sdk", "minimum SDK in name=version form; repeatable")
 	fs.Var(&imageRuntime, "image-runtime", "minimum runtime in name=version form; repeatable")
 	return leaseCreateFlagValues{
-		Provider:      registerProviderSelectionFlag(fs, defaults, providerHelpAll()),
-		Profile:       fs.String("profile", defaults.Profile, "profile"),
-		Class:         fs.String("class", defaults.Class, "machine class"),
-		Architecture:  fs.String("arch", defaults.Architecture, "CPU architecture: amd64 or arm64"),
-		OSImage:       fs.String("os", defaults.OSImage, "OS image selector, for example ubuntu:26.04 or windows-server:2025 (AWS Windows)"),
-		ServerType:    fs.String("type", options.serverTypeDefault, "provider server/instance type"),
-		SSHPort:       fs.String("ssh-port", defaults.SSHPort, "SSH port for the leased target"),
-		Market:        fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand"),
-		MinVCPUs:      fs.Int("min-vcpus", defaults.Capacity.MinVCPUs, "minimum provisioned vCPUs (AWS Linux; 0 = unconstrained)"),
-		MinMemoryMiB:  fs.Int("min-memory-mib", defaults.Capacity.MinMemoryMiB, "minimum provisioned memory in MiB (AWS Linux; 0 = unconstrained)"),
-		Slug:          fs.String("slug", "", "request a friendly slug for a new lease"),
-		Pond:          fs.String("pond", defaults.Pond, "tag this lease with a pond name so peers can be selected with --pond"),
-		Expose:        &expose,
-		CacheVolumes:  &cacheVolumes,
-		TTL:           fs.Duration("ttl", defaults.TTL, "maximum lease lifetime"),
-		Idle:          fs.Duration("idle-timeout", defaults.IdleTimeout, "idle timeout"),
-		Desktop:       fs.Bool("desktop", defaults.Desktop, "provision or require a visible desktop/VNC session"),
-		DesktopEnv:    fs.String("desktop-env", defaults.DesktopEnv, "Linux desktop environment: xfce, wayland, or gnome"),
-		Browser:       fs.Bool("browser", defaults.Browser, "provision or require a browser binary"),
-		ImageMinOS:    fs.String("image-min-os", "", "minimum promoted-image OS version"),
-		ImageSDK:      &imageSDK,
-		ImageRuntime:  &imageRuntime,
-		ImageBrowser:  fs.Bool("image-require-browser", false, "require browser support in the promoted image"),
-		ImageWebView2: fs.Bool("image-require-webview2", false, "require WebView2 support in the promoted image"),
-		ImageDesktop:  fs.Bool("image-require-desktop", false, "require desktop support in the promoted image"),
-		Code:          fs.Bool("code", defaults.Code, "provision or require web code-server capability"),
-		ProviderFlags: registerProviderFlagsObserved(fs, defaults, options.observe),
-		Target:        registerTargetFlags(fs, defaults),
-		Network:       registerNetworkFlags(fs, defaults),
+		Provider:          registerProviderSelectionFlag(fs, defaults, providerHelpAll()),
+		Profile:           fs.String("profile", defaults.Profile, "profile"),
+		Class:             fs.String("class", defaults.Class, "machine class"),
+		Architecture:      fs.String("arch", defaults.Architecture, "CPU architecture: amd64 or arm64"),
+		OSImage:           fs.String("os", defaults.OSImage, "OS image selector, for example ubuntu:26.04 or windows-server:2025 (AWS Windows)"),
+		ServerType:        fs.String("type", options.serverTypeDefault, "provider server/instance type"),
+		SSHPort:           fs.String("ssh-port", defaults.SSHPort, "SSH port for the leased target"),
+		Market:            fs.String("market", defaults.Capacity.Market, "capacity market: spot or on-demand"),
+		MinVCPUs:          fs.Int("min-vcpus", defaults.Capacity.MinVCPUs, "minimum provisioned vCPUs (AWS Linux; 0 = unconstrained)"),
+		MinMemoryMiB:      fs.Int("min-memory-mib", defaults.Capacity.MinMemoryMiB, "minimum provisioned memory in MiB (AWS Linux; 0 = unconstrained)"),
+		Slug:              fs.String("slug", "", "request a friendly slug for a new lease"),
+		Pond:              fs.String("pond", defaults.Pond, "tag this lease with a pond name so peers can be selected with --pond"),
+		Expose:            &expose,
+		CacheVolumes:      &cacheVolumes,
+		TTL:               fs.Duration("ttl", defaults.TTL, "maximum lease lifetime"),
+		Idle:              fs.Duration("idle-timeout", defaults.IdleTimeout, "idle timeout"),
+		LifetimeCanary:    fs.Duration("lifetime-canary", 0, "admin-only rollout canary: enforce a maximum compute age (1m..744h) on a new coordinator AWS on-demand lease"),
+		LifetimeRetention: fs.Duration("lifetime-retention", 0, "admin-only rollout canary: retain the stopped root disk for this duration (1m..744h); requires --lifetime-canary"),
+		Desktop:           fs.Bool("desktop", defaults.Desktop, "provision or require a visible desktop/VNC session"),
+		DesktopEnv:        fs.String("desktop-env", defaults.DesktopEnv, "Linux desktop environment: xfce, wayland, or gnome"),
+		Browser:           fs.Bool("browser", defaults.Browser, "provision or require a browser binary"),
+		ImageMinOS:        fs.String("image-min-os", "", "minimum promoted-image OS version"),
+		ImageSDK:          &imageSDK,
+		ImageRuntime:      &imageRuntime,
+		ImageBrowser:      fs.Bool("image-require-browser", false, "require browser support in the promoted image"),
+		ImageWebView2:     fs.Bool("image-require-webview2", false, "require WebView2 support in the promoted image"),
+		ImageDesktop:      fs.Bool("image-require-desktop", false, "require desktop support in the promoted image"),
+		Code:              fs.Bool("code", defaults.Code, "provision or require web code-server capability"),
+		ProviderFlags:     registerProviderFlagsObserved(fs, defaults, options.observe),
+		Target:            registerTargetFlags(fs, defaults),
+		Network:           registerNetworkFlags(fs, defaults),
 	}
 }
 
@@ -352,6 +356,9 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 		}
 	}
 	if err := validateLeaseDurations(*cfg); err != nil {
+		return err
+	}
+	if err := applyLifetimeCanaryFlags(cfg, fs, values, target); err != nil {
 		return err
 	}
 	if cfg.Pond != "" {

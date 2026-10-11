@@ -25,6 +25,33 @@ crabbox warmup --provider ssh --target macos --static-host mac-studio.example.co
 crabbox warmup --provider ssh --target windows --static-host win-dev.example.com --static-work-root 'C:\crabbox' --browser
 ```
 
+## Lifetime rollout canary
+
+Administrators can explicitly enroll a new coordinator-managed AWS on-demand
+lease in enforced maximum-age cleanup, even while the coordinator's default
+lifetime mode is off or report-only:
+
+```sh
+crabbox warmup --provider aws --region eu-west-1 --class tiny --type t3.small --market on-demand --keep --ttl 20m --idle-timeout 10m --lifetime-canary 6m --lifetime-retention 5m
+```
+
+Supply both `--lifetime-canary <duration>` (compute lifetime from creation) and
+`--lifetime-retention <duration>` (root-disk retention after confirmed stop).
+Each must be a whole number of seconds between `1m` and `744h` (31 days).
+These are explicit rollout flags, not configuration defaults. They require a
+new managed AWS on-demand lease without a dedicated Mac host; direct and
+registered leases are rejected. Existing fixed-ID requests must match their
+original policy. The coordinator enforces administrator authorization and
+records `lifetimePolicy.source: "admin-canary"`.
+
+An explicit configured admin credential takes precedence for this canary;
+otherwise the configured broker credential must already have admin access.
+Inspect the resulting policy and warnings with `status`, `inspect`, `list`, or
+`admin leases`. Neither activity nor `--keep` extends the compute deadline.
+The retained root disk is permanently deleted after its retention period.
+Use [`admin extend-lifetime`](admin.md#extend-lifetime) before stopping starts
+to request an audited extension.
+
 ## Output
 
 On success warmup prints two lines on stdout — the lease summary and the ready

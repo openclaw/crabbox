@@ -95,6 +95,7 @@ func (p *privateNet) UnmarshalJSON(data []byte) error {
 }
 
 type Server struct {
+	LifetimePolicy      *LeaseLifetimePolicy `json:"lifetimePolicy,omitempty"`
 	CloudID             string
 	Provider            string
 	HostID              string

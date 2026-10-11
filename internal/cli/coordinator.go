@@ -88,6 +88,7 @@ func coordinatorResponseErrorCode(err error, status int) string {
 
 type CoordinatorLease struct {
 	ImageEvidence                *ImageEvidence                 `json:"imageEvidence,omitempty"`
+	LifetimePolicy               *LeaseLifetimePolicy           `json:"lifetimePolicy,omitempty"`
 	CreationEvents               []CreationEvent                `json:"creationEvents,omitempty"`
 	ID                           string                         `json:"id"`
 	Slug                         string                         `json:"slug,omitempty"`
@@ -1221,6 +1222,9 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	}
 	if !fixed {
 		req["createAttemptID"] = createAttemptID
+	}
+	if cfg.LifetimePolicy != nil {
+		req["lifetimePolicy"] = cfg.LifetimePolicy
 	}
 	nativePlacement := false
 	if policy, ok := provider.(CoordinatorArchitecturePolicy); ok {
@@ -3044,13 +3048,14 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 		provider = strings.TrimSpace(cfg.Provider)
 	}
 	server := Server{
-		ImageEvidence: CloneImageEvidence(lease.ImageEvidence),
-		Provider:      provider,
-		CloudID:       lease.CloudID,
-		HostID:        hostID,
-		ID:            lease.ServerID,
-		Name:          lease.ServerName,
-		Status:        lease.State,
+		LifetimePolicy: lease.LifetimePolicy,
+		ImageEvidence:  CloneImageEvidence(lease.ImageEvidence),
+		Provider:       provider,
+		CloudID:        lease.CloudID,
+		HostID:         hostID,
+		ID:             lease.ServerID,
+		Name:           lease.ServerName,
+		Status:         lease.State,
 		Labels: map[string]string{
 			"lease":             lease.ID,
 			"slug":              lease.Slug,

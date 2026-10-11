@@ -362,10 +362,13 @@ running after a retained release. This uses its existing alarm/cron, not a
 separate cleanup service. It does not replace the shorter ordinary idle/TTL
 expiry or explicit `crabbox stop` deletion contract described above.
 
-Set `CRABBOX_LEASE_LIFETIME_MODE=report` first. Each new managed lease snapshots
+Production defaults to `CRABBOX_LEASE_LIFETIME_MODE=off`. To enroll a default
+cohort, set `CRABBOX_LEASE_LIFETIME_MODE=report` first. Each new managed lease snapshots
 its mode, creation-time deadline and storage retention. Inspect `lifetimePolicy`
-on the lease API: `deadlineAt`, `warnedAt`, `checkedAt`, `status`, `error`,
-`stoppedAt`, and `deleteAfterAt` expose policy and progress. The coordinator logs
+on the lease API and CLI `status`, `inspect`, and `list` (human and JSON):
+`effectiveStopAt` includes any extension; `deleteAfterAt` is the actual deletion
+deadline once stopped, and `status`, `readiness`, and `warnings` expose progress.
+The coordinator logs
 one warning an hour before the deadline (or on its first overdue observation).
 Warnings are logs/API state, not email or messaging notifications.
 
@@ -373,8 +376,41 @@ After qualifying report-only results, `CRABBOX_LEASE_LIFETIME_MODE=enforce`
 enrolls **subsequent creates** for enforcement. Previously report-only leases
 stay report-only; legacy records and registered external resources are never
 automatically enrolled. Setting the runtime mode back to `report` or `off`
-suppresses new safety-net mutations; it does not cancel already-dispatched
+suppresses new default-cohort safety-net mutations; it does not cancel already-dispatched
 provider work or the existing ordinary TTL/cleanup paths.
+
+For a bounded rollout without enrolling other users, an **admin-authenticated**
+create can send `lifetimePolicy: {"mode":"enforce","maxAgeSeconds":360,"retainSeconds":300}`.
+Both durations must be integer seconds in the same 60-second–31-day range.
+The persisted `source: "admin-canary"` marker identifies these leases. Their
+policy remains enforced with global mode `off` or `report`; changing the global
+mode is not a canary kill switch. Non-admin enrollment is rejected by the server.
+Only new, on-demand AWS Linux/Windows EBS-root leases are eligible; fixed-ID
+replay preserves the policy and rejects a changed enrollment intent.
+
+```sh
+crabbox warmup --provider aws --region eu-west-1 --class tiny --type t3.small \
+  --market on-demand --keep --ttl 20m --idle-timeout 10m \
+  --lifetime-canary 6m --lifetime-retention 5m
+crabbox admin lifetime-readback --id cbx_abcdef123456 --json
+```
+
+The first enforcement check verifies the exact owned instance and root disk,
+then calls `StopInstances` with `DryRun=true`. Only AWS `DryRunOperation` proves
+permission; denied or unproved readiness leaves compute untouched and records
+`status: failed`, `readiness.status: failed`, and an owner-visible warning.
+The coordinator retries rather than silently bypassing the policy. Install
+`ec2:StopInstances` with the same account, Region, and ownership-tag restrictions
+as termination, plus Region-scoped `ec2:DescribeVolumes`. Generate the scoped
+policy with `crabbox admin providers policy --provider aws --region eu-west-1`.
+No existing production principal's permission is assumed.
+
+After deployment, the operator can run `scripts/live-lease-lifetime-canary.sh`
+with `CRABBOX_LIVE_CONFIRM=lifetime-canary`, `CRABBOX_COORDINATOR`, and their admin
+configuration. It compares a short-lived canary with an unenrolled kept control,
+uses coordinator-owned AWS readbacks for stopped compute and root-disk presence
+then termination and absence, and cleans up both leases. The script is bounded
+to 40 minutes. Merging does not deploy or run this proof.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -390,11 +426,19 @@ uses the batch cap even if an operator later attaches interactively.
 
 An authenticated admin can grant a bounded exception with
 `POST /v1/admin/leases/{id}/extend-lifetime` and JSON
-`{"reason":"finish debugging","expiresAt":"2026-11-01T12:00:00Z"}` (use a future
-time within seven days of the request). The API records the authenticated owner,
+`{"owner":"alice@example.com","reason":"finish debugging","expiresAt":"2026-11-01T12:00:00Z"}` (use a future
+time within seven days of the request). The API records the responsible owner,
+authenticated grantor,
 reason, grant time, and expiry; it refuses non-advancing deadlines and extensions
 after stopping begins. This extends only the safety-net deadline, **not** the
 ordinary idle/TTL deadline. It cannot revive a stopped lease.
+
+Use `crabbox admin extend-lifetime --id cbx_abcdef123456 --owner alice@example.com
+--reason 'finish debugging' --expires-at <RFC3339>`. A failed or uncertain stop
+still blocks extensions once stop intent is durable. There is no post-stop disk
+retention extension or salvage hold. Copy needed files out before the stop
+deadline. Owners receive a distinct `DELETION:` warning before permanent root
+disk deletion; neither `keep` nor active sessions veto that deletion.
 
 Initial enforcement supports coordinator-owned, on-demand AWS Linux/Windows
 instances with exactly one owned EBS root disk, delete-on-termination enabled,

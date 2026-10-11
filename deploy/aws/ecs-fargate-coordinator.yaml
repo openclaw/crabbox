@@ -560,6 +560,7 @@ Resources:
                 Action:
                   - ec2:RunInstances
                   - ec2:TerminateInstances
+                  - ec2:StopInstances
                   - ssm:SendCommand
                 Resource: "*"
                 Condition:
@@ -581,7 +582,9 @@ Resources:
                     "aws:RequestTag/access_mode": "ssm"
               - Sid: TerminateOwnedWorkspace
                 Effect: Allow
-                Action: ec2:TerminateInstances
+                Action:
+                  - ec2:TerminateInstances
+                  - ec2:StopInstances
                 Resource: !Sub arn:${AWS::Partition}:ec2:${ExpectedRegion}:${ExpectedAccountId}:instance/*
                 Condition:
                   StringEquals:

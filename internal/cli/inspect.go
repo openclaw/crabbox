@@ -38,6 +38,9 @@ func (a App) inspect(ctx context.Context, args []string) error {
 		return json.NewEncoder(a.Stdout).Encode(state)
 	}
 	printImageEvidence(a.Stdout, state.ImageEvidence)
+	if summary := lifetimePolicySummary(state.LifetimePolicy); summary != "" {
+		fmt.Fprintln(a.Stdout, strings.TrimSpace(summary))
+	}
 	if state.ProvisioningPhase != "" {
 		fmt.Fprintf(a.Stdout, "provisioning_phase=%q\n", state.ProvisioningPhase)
 	}

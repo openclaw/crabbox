@@ -1084,6 +1084,7 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		ready = ProbeSSHReady(ctx, &target, statusSSHReadinessTimeout(target))
 	}
 	return statusView{
+		LifetimePolicy:               lease.LifetimePolicy,
 		ID:                           lease.ID,
 		Slug:                         lease.Slug,
 		Provider:                     blank(lease.Provider, b.cfg.Provider),

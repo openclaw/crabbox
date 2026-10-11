@@ -255,6 +255,7 @@ test("workspace boundary is private, SSM-only, and IAM constrained", () => {
   const inspection = policyStatementBlock(role, "InspectWorkspaceResources");
   assert.match(inspection, /Effect: Allow/);
   assert.match(inspection, /ec2:DescribeInstanceTypes/);
+  assert.match(inspection, /ec2:DescribeVolumes/);
   assert.match(inspection, /servicequotas:GetServiceQuota/);
   assert.match(inspection, /Resource: "\*"/);
   assert.match(inspection, /aws:RequestedRegion: !Ref ExpectedRegion/);
@@ -361,11 +362,21 @@ test("workspace boundary is private, SSM-only, and IAM constrained", () => {
 
   const terminate = policyStatementBlock(role, "TerminateOwnedWorkspace");
   assertAllMatches(terminate, [
+    /- ec2:TerminateInstances/,
+    /- ec2:StopInstances/,
+    /Resource: !Sub arn:\$\{AWS::Partition\}:ec2:\$\{ExpectedRegion\}:\$\{ExpectedAccountId\}:instance\/\*/,
+    /aws:RequestedRegion: !Ref ExpectedRegion/,
     /"ec2:ResourceTag\/crabbox": "true"/,
     /"ec2:ResourceTag\/created_by": "crabbox"/,
     /"ec2:ResourceTag\/crabbox_workspace": "true"/,
     /"ec2:ResourceTag\/access_mode": "ssm"/,
   ]);
+  const regionalDeny = policyStatementBlock(role, "DenyWorkspaceOutsideExpectedRegion");
+  assertAllMatches(regionalDeny, [/ec2:StopInstances/, /ec2:TerminateInstances/]);
+  assert.deepEqual(
+    policyStatementBlocks(role).filter(({ body }) => /Effect: Allow/.test(body) && /ec2:StopInstances/.test(body)).map(({ sid }) => sid),
+    ["TerminateOwnedWorkspace"],
+  );
 
   const document = policyStatementBlock(role, "AllowWorkspaceCommandDocument");
   assert.match(document, /document\/AWS-RunShellScript/);

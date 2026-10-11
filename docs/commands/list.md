@@ -44,7 +44,12 @@ It sorts the combined result newest first. Text and `--json` omit
 `creationEvents`, `telemetryHistory`, and `provisioningAttempts`; use
 `crabbox inspect --provider aws --id <lease-id> --json` for full diagnostics.
 Paging is a live view, so leases created or changed during a listing may require
-a refresh.
+a refresh. Coordinator lease rows retain `lifetimePolicy` in JSON and append
+the lifetime summary in text: mode, canary marker, current status, effective
+compute-stop deadline, confirmed-stop disk deletion deadline, retention, and
+warnings. A missing deletion deadline means compute has not yet been confirmed
+stopped. `--all` provider inventory is a resource view; use `admin leases` for
+the full administrator lease policy view.
 
 With an older coordinator, the CLI falls back to its newest-first response and
 filters ended history locally. At that server's 500-row response cap it warns

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -29,8 +30,8 @@ func (a App) adminLeases(ctx context.Context, args []string) error {
 		return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(leases))
 	}
 	for _, lease := range leases {
-		fmt.Fprintf(a.Stdout, "%-16s %-16s %-8s %-10s %-14s %-24s owner=%s org=%s idle=%s expires=%s\n",
-			lease.ID, blank(lease.Slug, "-"), lease.Provider, lease.State, lease.ServerType, lease.Host, lease.Owner, lease.Org, formatSecondsDuration(lease.IdleTimeoutSeconds), blank(lease.ExpiresAt, "-"))
+		fmt.Fprintf(a.Stdout, "%-16s %-16s %-8s %-10s %-14s %-24s owner=%s org=%s idle=%s expires=%s%s\n",
+			lease.ID, blank(lease.Slug, "-"), lease.Provider, lease.State, lease.ServerType, lease.Host, lease.Owner, lease.Org, formatSecondsDuration(lease.IdleTimeoutSeconds), blank(lease.ExpiresAt, "-"), lifetimePolicySummary(lease.LifetimePolicy))
 	}
 	return nil
 }
@@ -163,7 +164,6 @@ const awsProviderPolicyJSON = `{
         "ec2:ImportKeyPair",
         "ec2:DeleteKeyPair",
         "ec2:RunInstances",
-        "ec2:TerminateInstances",
         "ec2:CreateSecurityGroup",
         "ec2:AuthorizeSecurityGroupIngress",
         "ec2:RevokeSecurityGroupIngress",
@@ -176,6 +176,27 @@ const awsProviderPolicyJSON = `{
         "ec2:CreateTags"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "DescribeRetainedVolumes",
+      "Effect": "Allow",
+      "Action": "ec2:DescribeVolumes",
+      "Resource": "*",
+      "Condition": {"StringEquals": {"aws:RequestedRegion": "<aws-region>"}}
+    },
+    {
+      "Sid": "StopAndTerminateOwnedInstances",
+      "Effect": "Allow",
+      "Action": ["ec2:StopInstances", "ec2:TerminateInstances"],
+      "Resource": "arn:aws:ec2:<aws-region>:<aws-resource-account>:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "<aws-region>",
+          "aws:ResourceAccount": "<aws-account>",
+          "ec2:ResourceTag/crabbox": "true",
+          "ec2:ResourceTag/created_by": "crabbox"
+        }
+      }
     },
     {
       "Effect": "Allow",
@@ -192,6 +213,8 @@ func (a App) adminAWSPolicy(args []string) error {
 func (a App) adminProviderPolicy(commandName, defaultProvider string, args []string) error {
 	fs := newFlagSet(commandName, a.Stderr)
 	provider := fs.String("provider", defaultProvider, "provider")
+	region := fs.String("region", "", "AWS region for owned-instance stop and termination permissions")
+	account := fs.String("account", "", "AWS account ID for owned-instance stop and termination permissions (default: principal account)")
 	target := fs.String("target", "", "target operating system")
 	includeMacHosts := fs.Bool("mac-hosts", false, "include EC2 Mac Dedicated Host lifecycle permissions")
 	hostLifecycle := fs.Bool("host-lifecycle", false, "include provider host lifecycle permissions")
@@ -199,7 +222,7 @@ func (a App) adminProviderPolicy(commandName, defaultProvider string, args []str
 		return err
 	}
 	if fs.NArg() > 0 {
-		return Exit(2, "usage: crabbox %s --provider aws [--target macos|--host-lifecycle|--mac-hosts]", commandName)
+		return Exit(2, "usage: crabbox %s --provider aws [--region <region>] [--account <account-id>] [--target macos|--host-lifecycle|--mac-hosts]", commandName)
 	}
 	if strings.ToLower(strings.TrimSpace(*provider)) != "aws" {
 		return Exit(2, "admin provider policy currently supports --provider aws")
@@ -207,9 +230,25 @@ func (a App) adminProviderPolicy(commandName, defaultProvider string, args []str
 	if strings.EqualFold(strings.TrimSpace(*target), targetMacOS) {
 		*hostLifecycle = true
 	}
-	policy := awsProviderPolicyJSON
+	if *account != "" && !regexp.MustCompile(`^\d{12}$`).MatchString(*account) {
+		return Exit(2, "--account must be a 12-digit AWS account ID")
+	}
+	if *region != "" && !regexp.MustCompile(`^[a-z]{2}(?:-[a-z]+)+-\d+$`).MatchString(*region) {
+		return Exit(2, "--region must be an AWS region such as eu-west-1")
+	}
+	policyRegion := "<aws-region>"
+	if *region != "" {
+		policyRegion = *region
+	}
+	policyAccount := "${aws:PrincipalAccount}"
+	resourceAccount := "*"
+	if *account != "" {
+		policyAccount = *account
+		resourceAccount = *account
+	}
+	policy := strings.NewReplacer("<aws-region>", policyRegion, "<aws-account>", policyAccount, "<aws-resource-account>", resourceAccount).Replace(awsProviderPolicyJSON)
 	if *includeMacHosts || *hostLifecycle {
-		combined, err := combineIAMPolicyJSON(awsProviderPolicyJSON, macHostLifecyclePolicyJSON)
+		combined, err := combineIAMPolicyJSON(policy, macHostLifecyclePolicyJSON)
 		if err != nil {
 			return err
 		}

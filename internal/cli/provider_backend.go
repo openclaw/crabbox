@@ -2211,6 +2211,7 @@ func renderServerList(stdout io.Writer, servers []Server) {
 		if orphan := strings.TrimSpace(s.Labels["orphan"]); orphan != "" {
 			extra = " " + orphan
 		}
+		extra += lifetimePolicySummary(s.LifetimePolicy)
 		fmt.Fprintf(stdout, "%-20s %-28s %-12s %-14s %-15s lease=%s slug=%s keep=%s target=%s%s\n",
 			s.DisplayID(), s.Name, s.Status, s.ServerType.Name, s.PublicNet.IPv4.IP, s.Labels["lease"], blank(ServerSlug(s), "-"), s.Labels["keep"], s.Labels["target"], extra)
 	}

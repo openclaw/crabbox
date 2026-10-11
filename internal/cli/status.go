@@ -115,6 +115,7 @@ func (a App) status(ctx context.Context, args []string) error {
 			if state.ProvisioningPhase != "" {
 				telemetry += fmt.Sprintf(" provisioning_phase=%q", state.ProvisioningPhase)
 			}
+			telemetry += lifetimePolicySummary(state.LifetimePolicy)
 			fmt.Fprintf(a.Stdout, "%s slug=%s provider=%s target=%s windows_mode=%s state=%s type=%s host=%s pond=%s network=%s%s ready=%t has_host=%t idle_for=%s idle_timeout=%s expires=%s%s\n", state.ID, blank(state.Slug, "-"), state.Provider, state.TargetOS, blank(state.WindowsMode, "-"), state.State, state.ServerType, state.Host, blank(state.Pond, "-"), state.Network, tailscale, state.Ready, state.HasHost, blank(state.IdleFor, "-"), blank(state.IdleTimeout, "-"), blank(state.ExpiresAt, "-"), telemetry)
 		}
 		if *wait {
@@ -237,6 +238,7 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		serverID = server.DisplayID()
 	}
 	return statusView{
+		LifetimePolicy:   server.LifetimePolicy,
 		ID:               lease.LeaseID,
 		Slug:             ServerSlug(server),
 		Provider:         provider,
@@ -292,16 +294,17 @@ func leaseStatusStateCanBeReady(lease LeaseTarget, state string) bool {
 }
 
 type StatusView struct {
-	ID            string         `json:"id"`
-	Slug          string         `json:"slug,omitempty"`
-	Provider      string         `json:"provider"`
-	TargetOS      string         `json:"target"`
-	WorkRoot      string         `json:"workroot,omitempty"`
-	WindowsMode   string         `json:"windowsMode,omitempty"`
-	State         string         `json:"state"`
-	ServerID      string         `json:"serverId"`
-	ServerType    string         `json:"serverType"`
-	ImageEvidence *ImageEvidence `json:"imageEvidence,omitempty"`
+	LifetimePolicy *LeaseLifetimePolicy `json:"lifetimePolicy,omitempty"`
+	ID             string               `json:"id"`
+	Slug           string               `json:"slug,omitempty"`
+	Provider       string               `json:"provider"`
+	TargetOS       string               `json:"target"`
+	WorkRoot       string               `json:"workroot,omitempty"`
+	WindowsMode    string               `json:"windowsMode,omitempty"`
+	State          string               `json:"state"`
+	ServerID       string               `json:"serverId"`
+	ServerType     string               `json:"serverType"`
+	ImageEvidence  *ImageEvidence       `json:"imageEvidence,omitempty"`
 	// ProviderResourceID optionally exposes an immutable provider resource ID.
 	// ServerID keeps each provider's existing identity semantics; for Islo it
 	// is the sandbox name rather than the immutable sandbox ID.

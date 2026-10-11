@@ -454,17 +454,25 @@ type imageDeleteKongCmd struct {
 }
 
 type adminKongCmd struct {
-	Leases      adminLeasesKongCmd      `cmd:"" passthrough:"" help:"List coordinator lease records."`
-	LeaseAudit  adminLeaseAuditKongCmd  `cmd:"" name:"lease-audit" passthrough:"" help:"Check expired coordinator leases against cloud provider state."`
-	Providers   adminProvidersKongCmd   `cmd:"" passthrough:"" help:"Inspect provider identities and policies."`
-	Hosts       adminHostsKongCmd       `cmd:"" passthrough:"" help:"List, allocate, or release provider hosts."`
-	AWSIdentity adminAWSIdentityKongCmd `cmd:"" name:"aws-identity" passthrough:"" help:"Show the coordinator AWS caller identity."`
-	AWSPolicy   adminAWSPolicyKongCmd   `cmd:"" name:"aws-policy" passthrough:"" help:"Print the baseline brokered AWS IAM policy."`
-	MacHosts    adminMacHostsKongCmd    `cmd:"" name:"mac-hosts" passthrough:"" help:"List, allocate, or release AWS EC2 Mac Dedicated Hosts."`
-	Release     adminReleaseKongCmd     `cmd:"" passthrough:"" help:"Mark a lease released."`
-	Delete      adminDeleteKongCmd      `cmd:"" passthrough:"" help:"Delete the backing server and mark the lease released."`
+	ExtendLifetime   adminExtendLifetimeKongCmd   `cmd:"" name:"extend-lifetime" passthrough:"" help:"Extend an enrolled lease deadline before stopping starts."`
+	LifetimeReadback adminLifetimeReadbackKongCmd `cmd:"" name:"lifetime-readback" passthrough:"" help:"Read coordinator-observed instance and root volume state."`
+	Leases           adminLeasesKongCmd           `cmd:"" passthrough:"" help:"List coordinator lease records."`
+	LeaseAudit       adminLeaseAuditKongCmd       `cmd:"" name:"lease-audit" passthrough:"" help:"Check expired coordinator leases against cloud provider state."`
+	Providers        adminProvidersKongCmd        `cmd:"" passthrough:"" help:"Inspect provider identities and policies."`
+	Hosts            adminHostsKongCmd            `cmd:"" passthrough:"" help:"List, allocate, or release provider hosts."`
+	AWSIdentity      adminAWSIdentityKongCmd      `cmd:"" name:"aws-identity" passthrough:"" help:"Show the coordinator AWS caller identity."`
+	AWSPolicy        adminAWSPolicyKongCmd        `cmd:"" name:"aws-policy" passthrough:"" help:"Print the baseline brokered AWS IAM policy."`
+	MacHosts         adminMacHostsKongCmd         `cmd:"" name:"mac-hosts" passthrough:"" help:"List, allocate, or release AWS EC2 Mac Dedicated Hosts."`
+	Release          adminReleaseKongCmd          `cmd:"" passthrough:"" help:"Mark a lease released."`
+	Delete           adminDeleteKongCmd           `cmd:"" passthrough:"" help:"Delete the backing server and mark the lease released."`
 }
 type adminLeasesKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adminExtendLifetimeKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adminLifetimeReadbackKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type adminLeaseAuditKongCmd struct {
@@ -839,6 +847,12 @@ func (c *imageDeleteKongCmd) Run(ctx context.Context, app App) error {
 
 func (c *adminLeasesKongCmd) Run(ctx context.Context, app App) error {
 	return app.adminLeases(ctx, c.Args)
+}
+func (c *adminExtendLifetimeKongCmd) Run(ctx context.Context, app App) error {
+	return app.adminExtendLifetime(ctx, c.Args)
+}
+func (c *adminLifetimeReadbackKongCmd) Run(ctx context.Context, app App) error {
+	return app.adminLifetimeReadback(ctx, c.Args)
 }
 func (c *adminLeaseAuditKongCmd) Run(ctx context.Context, app App) error {
 	return app.adminLeaseAudit(ctx, c.Args)

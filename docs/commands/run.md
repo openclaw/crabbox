@@ -38,6 +38,16 @@ crabbox run --pool example/app/main/linux --pool-compatibility-key linux-16-vcpu
 crabbox run --pool example/app/main/linux --pool-identity-file pool-identity.json -- pnpm test
 ```
 
+Administrators creating a new coordinator-managed AWS on-demand lease may use
+`--lifetime-canary <duration> --lifetime-retention <duration>` to enroll it in
+the explicit [lifetime rollout canary](warmup.md#lifetime-rollout-canary).
+Both values must be whole seconds between `1m` and `744h`. This is enforced
+even with the coordinator default lifetime mode off; use `--keep` if the box
+should remain after the command completes. These flags reject reuse via `--id`,
+ready pools, direct or registered providers, spot capacity, and dedicated Mac
+hosts. The coordinator checks administrator authorization. Activity and kept
+runs do not extend the compute-stop or permanent root-disk deletion deadline.
+
 The trailing command after `--` is sent to the box verbatim as argv. Use
 `--shell` to run it through the remote shell instead, for multi-statement
 snippets, pipes, or shell expansion.

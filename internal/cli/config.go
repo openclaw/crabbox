@@ -18,7 +18,8 @@ import (
 )
 
 type Config struct {
-	RecordLocal                   bool `json:"-" yaml:"-"`
+	LifetimePolicy                *LeaseLifetimeRequest `json:"-" yaml:"-"`
+	RecordLocal                   bool                  `json:"-" yaml:"-"`
 	Profile                       string
 	Provider                      string
 	providerSelectionSource       providerSelectionSource
