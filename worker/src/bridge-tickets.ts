@@ -135,14 +135,6 @@ export class BridgeTickets {
     return ticket;
   }
 
-  consume<K extends BridgeTicketKind>(
-    kind: K,
-    value: string,
-    identifier: string,
-  ): Promise<LeaseBridgeTicketConsumption<BridgeTicketRecord<K>>> {
-    return this.consumeAndUse(kind, value, identifier, async (result) => result);
-  }
-
   consumeAndUse<K extends BridgeTicketKind, T>(
     kind: K,
     value: string,

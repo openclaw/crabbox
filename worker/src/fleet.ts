@@ -128,11 +128,9 @@ import {
 import {
   BridgeTickets,
   validBridgeTicket as validLeaseBridgeTicket,
-  type BridgeTicketRecord,
   type CachedAdminGrant,
   type CachedBridgeGrant,
   type EgressRole,
-  type LeaseBridgeTicketConsumption,
 } from "./bridge-tickets";
 import {
   CheckpointError,
@@ -6520,7 +6518,7 @@ export class FleetCoordinator {
       );
     }
     if (method === "POST" && action === "connections" && connection === "native-vnc") {
-      return await this.createWorkspaceNativeVNCTicket(request, key, workspaceID);
+      return await this.createWorkspaceNativeVNCTicket(key, workspaceID);
     }
     if (method === "DELETE" && action === undefined) {
       const release = await this.state.runExclusive(async () => {
@@ -6582,7 +6580,6 @@ export class FleetCoordinator {
   }
 
   private async createWorkspaceNativeVNCTicket(
-    request: Request,
     key: string,
     workspaceID: string,
   ): Promise<Response> {
@@ -9151,10 +9148,6 @@ export class FleetCoordinator {
       return await this.codePortalProxy(request, parts[2], parts.slice(4));
     }
     return json({ error: "not_found" }, { status: 404 });
-  }
-
-  private async portalLeases(request: Request): Promise<LeaseRecord[]> {
-    return this.filterLeases(await this.portalVisibleLeases(request), request);
   }
 
   private async portalVisibleLeases(request: Request): Promise<LeaseRecord[]> {
@@ -13026,17 +13019,6 @@ export class FleetCoordinator {
     await this.state.storage.put(runtimeAdapterIdentityKey(identity.adapterID), confirmed);
   }
 
-  private async consumeWebVNCTicket(
-    request: Request,
-    identifier: string,
-  ): Promise<LeaseBridgeTicketConsumption<BridgeTicketRecord<"webvnc-agent">>> {
-    return this.bridgeTickets.consume(
-      "webvnc-agent",
-      bridgeTicketFromRequest(request, this.env),
-      identifier,
-    );
-  }
-
   private async currentLeaseBridgeTicket<
     T extends CachedBridgeGrant & { owner: string; org: string; admin?: boolean },
   >(ticket: T, lease: LeaseRecord): Promise<T | undefined> {
@@ -13064,29 +13046,6 @@ export class FleetCoordinator {
       return undefined;
     }
     return currentTicket;
-  }
-
-  private async consumeCodeTicket(
-    request: Request,
-    identifier: string,
-  ): Promise<LeaseBridgeTicketConsumption<BridgeTicketRecord<"code-agent">>> {
-    return this.bridgeTickets.consume(
-      "code-agent",
-      bridgeTicketFromRequest(request, this.env),
-      identifier,
-    );
-  }
-
-  private async consumeEgressTicket(
-    request: Request,
-    identifier: string,
-    role: EgressRole,
-  ): Promise<LeaseBridgeTicketConsumption<BridgeTicketRecord<"egress-host" | "egress-client">>> {
-    return this.bridgeTickets.consume(
-      role === "host" ? "egress-host" : "egress-client",
-      bridgeTicketFromRequest(request, this.env),
-      identifier,
-    );
   }
 
   private async pool(request: Request): Promise<Response> {
@@ -13246,7 +13205,7 @@ export class FleetCoordinator {
       .filter(
         (entry) =>
           (!key || entry.key === key) &&
-          this.readyPoolEntryVisibleToRequest(entry, request, leases.get(entry.leaseID)),
+          this.readyPoolEntryVisibleToRequest(request, leases.get(entry.leaseID)),
       )
       .map((entry) => redactReadyPoolEntry(entry))
       .toSorted((a, b) => a.key.localeCompare(b.key) || a.leaseID.localeCompare(b.leaseID));
@@ -13716,7 +13675,7 @@ export class FleetCoordinator {
       this.state.runExclusive(async () => {
         const current = await this.getReadyPoolEntry(key, leaseID, typed);
         const lease = await this.getLease(leaseID);
-        if (!current || !this.readyPoolEntryVisibleToRequest(current, request, lease)) {
+        if (!current || !this.readyPoolEntryVisibleToRequest(request, lease)) {
           return notFound();
         }
         if (
@@ -14047,7 +14006,7 @@ export class FleetCoordinator {
         const leases = await this.readyPoolLeases(poolEntries);
         const entries = poolEntries.filter((entry) => {
           const lease = leases.get(entry.leaseID);
-          return entry.key === key && this.readyPoolEntryVisibleToRequest(entry, request, lease);
+          return entry.key === key && this.readyPoolEntryVisibleToRequest(request, lease);
         });
         const claims = (await this.readyPoolFillClaims(typed)).filter(
           (claim) =>
@@ -14083,7 +14042,7 @@ export class FleetCoordinator {
         return notFound();
       }
       const lease = await this.getLease(leaseID);
-      if (!this.readyPoolEntryVisibleToRequest(current, request, lease)) {
+      if (!this.readyPoolEntryVisibleToRequest(request, lease)) {
         return notFound();
       }
       const canManage =
@@ -19462,7 +19421,6 @@ export class FleetCoordinator {
   }
 
   private readyPoolEntryVisibleToRequest(
-    entry: ReadyPoolEntry,
     request: Request,
     lease: LeaseRecord | undefined,
   ): boolean {
