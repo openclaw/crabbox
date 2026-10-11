@@ -104,7 +104,7 @@ func TestGitSeedSourceConfigValidation(t *testing.T) {
 		{"invalid source", SyncConfig{GitSeedSource: "remote"}, "must be origin or local"},
 		{"local seed disabled", SyncConfig{GitSeedSource: "local"}, "requires sync.gitSeed=true"},
 		{"local directory", SyncConfig{GitSeedSource: "local", GitSeed: true, Source: "directory"}, "requires sync.source=git"},
-		{"local overlay", SyncConfig{GitSeedSource: "local", GitSeed: true, GitOverlay: true}, "both own repository metadata"},
+		{"local overlay", SyncConfig{GitSeedSource: "local", GitSeed: true, GitOverlay: true}, "disable sync.gitOverlay for local seeding, or set sync.gitSeed=false"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateGitSeedSource(Config{Sync: tc.sync})

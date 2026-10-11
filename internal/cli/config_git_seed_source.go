@@ -22,7 +22,7 @@ func validateGitSeedSource(cfg Config) error {
 			return Exit(2, "sync.gitSeedSource=local requires sync.source=git")
 		}
 		if cfg.Sync.GitOverlay {
-			return Exit(2, "sync.gitSeedSource=local cannot use sync.gitOverlay: local seeding and Git overlay both own repository metadata")
+			return Exit(2, "sync.gitSeedSource=local cannot use sync.gitOverlay: local seeding and Git overlay both own repository metadata; Git overlay fetches origin on the runner, so disable sync.gitOverlay for local seeding, or set sync.gitSeed=false for file-only sync")
 		}
 		return nil
 	default:
