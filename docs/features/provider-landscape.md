@@ -6,9 +6,8 @@ Read when:
 - deciding whether a competitor should become a first-class provider;
 - planning provider capability work without live provider credentials.
 
-This is a product and architecture map, not a benchmark. External products move
-quickly, so use this page to decide the next Crabbox seam to harden, then verify
-current behavior against the provider docs before adding code.
+Use this architecture map to compare execution contracts. It is not a
+benchmark; check the linked provider documentation for current behavior.
 
 ## Core Position
 
@@ -47,39 +46,21 @@ That means:
 
 Do not add first-class Mitos support yet.
 
-Mitos is strategically interesting because it targets forkable Firecracker
-microVM swarms, MCP, and copy-on-write fan-out from a warm running machine. That
-is a different contract from most Crabbox providers. If Crabbox adds `mitos`
-today, the likely failure mode is ugly: Mitos-specific flags, Kubernetes and KVM
-assumptions leaking into core, and tests that cannot prove the useful behavior
-without a live cluster.
+Mitos targets forkable Firecracker microVMs, MCP, and copy-on-write fan-out.
+A Crabbox adapter would need to keep its Kubernetes/KVM requirements behind the
+provider boundary and prove the lifecycle on a real cluster.
 
-The better path is to make the generic seams real first:
+Develop the shared contracts first: `workspace-checkpoint`, `workspace-fork`,
+`workspace-restore`, `provider-snapshot`, `mcp-attachments`, and portable run
+evidence (`run-proof`, `run-artifacts`, `run-downloads`, `url-bridge`). The
+[runtime, lifecycle, and reachability filters](../commands/providers.md#providers-filters)
+already describe execution and access without vendor-specific CLI modes.
+`fanout-testing` (alias `best-of-n`) selects fork-capable providers;
+`checkpoint fork --count` fans out archive or native checkpoints without
+promising live-memory cloning.
 
-- `workspace-checkpoint`, `workspace-fork`, `workspace-restore`, and
-  `provider-snapshot` keep forkable workspace language provider-neutral.
-- `runtime` filter values like `managed-sandbox`, `delegated-command`, and
-  `worker-module` describe the execution shape without implying Mitos-style
-  live microVM forking.
-- `mcp-attachments` stays a capability, not a Mitos-only command mode.
-- `run-proof`, `run-artifacts`, `run-downloads`, and `url-bridge` keep evidence
-  portable across delegated sandboxes and proof runners.
-- `lifecycle` filter values like `cleanup`, `pause-resume`, `run-session`,
-  `workspace-state`, and `coordinator-governed` expose stateful sandbox and
-  devbox controls without baking in one provider's lifecycle API.
-- `reachability` filter values describe access planes without claiming a
-  provider-specific network isolation model.
-- `remote-dev`, `mcp-sandbox`, `isolated-execution`, and
-  `versioned-workspace` keep recommendations workflow-oriented.
-- `fanout-testing` and its `best-of-n` alias route operators to existing
-  fork-capable providers without adding a Mitos-only live-fork API.
-- `checkpoint fork --count` covers ordinary parallel attempts against archive
-  and native checkpoints while keeping live memory-forking as a future provider
-  optimization, not a core CLI assumption.
-
-Revisit Mitos only when there is a concrete use case that needs live microVM
-forking and the provider contract can be tested with offline unit coverage plus
-an opt-in live smoke. Until then, document it as an observed adjacent system.
+Revisit Mitos when a concrete workload needs live microVM forking and the
+adapter has offline coverage plus an opt-in live smoke.
 
 ## Support Matrix
 
@@ -89,9 +70,9 @@ an opt-in live smoke. Until then, document it as an observed adjacent system.
 | E2B | Supported as `e2b`. | Delegated sandbox execution maps cleanly to provider-owned sessions and URL bridge behavior. |
 | Vercel Sandbox | Supported as `vercel-sandbox`. | Ephemeral Linux sandbox execution fits `delegated-run`; keep adding evidence and artifact parity before more surface area. |
 | Modal | Supported as `modal`. | Provider-owned container execution fits delegated runs, especially Python and ML-shaped workloads. |
-| Cloudflare Sandbox SDK | Candidate, not the same as current Cloudflare providers. | The SDK can be a good delegated-run backend if the lifecycle, file, process, preview, and cleanup contract is stable enough. |
+| Cloudflare Sandbox SDK | Supported through [`cloudflare-sandbox`](../providers/cloudflare-sandbox.md). | Delegated Linux commands and archive sync use an operator-deployed Sandbox bridge; separate from Cloudflare Containers and Dynamic Workers. |
 | Cloudflare Dynamic Workers | Supported as `cloudflare-dynamic-workers`. | Worker/module execution is a separate target from Linux sandbox execution. |
-| Daytona | Supported as `daytona`. | Managed dev environment with SSH-shaped execution fits remote-dev routing. |
+| Daytona | Supported as [`daytona`](../providers/daytona.md). | Direct ordinary runs use SDK/toolbox APIs; script runs and brokered execution use SSH. |
 | Namespace Devbox | Supported as `namespace-devbox`. | SSH lease plus sync/cleanup behavior fits remote-dev routing. |
 | CodeSandbox | Supported as `codesandbox`. | Delegated workspace execution and pause/resume fit remote-dev routing. |
 | Morph | Supported as `morph`. | Managed SSH lease fits local-editor, remote-compute workflows. |
@@ -104,87 +85,26 @@ an opt-in live smoke. Until then, document it as an observed adjacent system.
 
 ## Roadmap
 
-Ship these in small PRs:
-
-1. Keep recommendation surfaces workflow-first.
-   `ci-proof`, `run-evidence`, `fast-feedback`, `isolated-execution`,
-   `mcp-sandbox`, `remote-dev`, `team-cloud`, and `versioned-workspace` should
-   stay the public routing vocabulary.
-2. Improve evidence parity for delegated sandboxes.
-   The biggest practical gap versus hosted sandbox products is not launch; it is
-   consistent proof, artifacts, downloads, preview URLs, logs, and error status.
-   Use `crabbox providers recommend run-session` when the workflow needs a
-   reusable provider session handle for later inspection.
-   Use `crabbox providers recommend artifact-download` when a workflow needs
-   retained files or downloadable results from provider-owned execution.
-   Use `crabbox providers recommend failure-diagnostics` when failed-run triage
-   needs proof, reusable sessions, retained outputs, preview URLs, or SSH access
-   to a synced checkout.
-   Use `crabbox providers recommend interactive-debug` when triage needs a live
-   inspection surface such as synced SSH, browser/code/desktop access, reusable
-   sessions, provider URLs, or retained evidence after the debug session.
-   Use `crabbox providers recommend preview-url` when the workflow specifically
-   needs provider-native app or service URLs.
-   Use `crabbox providers --reachability provider-url` or
-   `crabbox providers recommend reachability --reachability tailnet-peer` when
-   the operator needs an explicit access plane.
-   Use `crabbox providers recommend network-isolation` when the workflow runs
-   untrusted code and network exposure should stay inside a delegated or local
-   sandbox boundary.
-   Use `crabbox providers recommend resource-observability` when the workflow
-   needs coordinator usage/cost visibility, SSH resource telemetry, retained run
-   evidence, reusable sessions, or preview URLs for later inspection.
-   Use `crabbox providers recommend code-interpreter` when generated-code or
-   script execution should prefer delegated or local sandboxes with sessions,
-   archive sync, retained outputs, preview URLs, MCP attachments, or module
-   execution.
-   Use `crabbox providers recommend disposable-execution` when temporary
-   workloads should prefer cleanup-capable delegated or local sandboxes before
-   retaining only the proof, outputs, session, or preview metadata needed for
-   inspection.
-   Use `crabbox providers recommend web-app-smoke` when app or service smoke
-   tests need provider-native URLs, SSH tunnels, tailnet reachability,
-   browser/code/desktop access, sessions, or retained outputs.
-3. Add live smoke docs where credentials are required.
-   Provider adapters can be valuable before broad live access exists, but each
-   one needs an opt-in smoke contract that says what real behavior proves. See
-   [Provider live smoke](provider-live-smoke.md) for the shared contract. Use
-   `crabbox providers recommend live-smoke` to pick candidates from offline
-   lifecycle, sync, cleanup, and evidence metadata before spending capacity.
-   Use `crabbox providers recommend cost-control` when a workflow should prefer
-   local runtimes, coordinator governance, cleanup, cache reuse, or retained
-   proof before spending provider quota.
-   Use `crabbox providers recommend offline-validation` when live provider
-   credentials or quota are not available yet; it prefers local runtimes,
-   local sandboxes/VMs, BYO SSH hosts, and external-provider contracts over
-   cloud API-backed leases.
-   Use `crabbox providers recommend pause-resume` when long-running sandbox or
-   dev-environment state needs to be parked and resumed.
-   Use `crabbox providers recommend warm-start` when repeated runs should
-   prefer local runtimes, reusable caches, retained sessions, pause/resume, or
-   workspace-state signals before paying remote cold-start cost.
-4. Strengthen workspace reuse before runtime-specific forking.
-   Checkpoint, fork, restore, and provider snapshot semantics should be testable
-   through the CLI before adding live microVM fan-out. Use
-   `crabbox providers recommend workspace-reuse` as the workflow entry point
-   when the operator cares about reusable state more than a specific fork API.
-   Use `crabbox providers recommend fanout-testing` when the workflow needs
-   parallel branch or best-of-N experimentation from forkable state.
-5. Keep edge/worker execution separate from Linux sandboxes.
-   A Worker module runtime is not the same thing as a Linux shell. Make the
-   target and feature names say that clearly.
+1. Keep recommendations centered on workflows such as `ci-proof`,
+   `run-evidence`, `fast-feedback`, `remote-dev`, and `team-cloud`. Use the
+   [command reference](../commands/providers.md#providers-recommend) for the full
+   list, aliases, filters, and scoring.
+2. Improve delegated-provider evidence parity: proof, artifacts, downloads,
+   preview URLs, retained logs, reusable sessions, and error status. Access and
+   evidence metadata should describe what users can inspect after a run.
+3. Document an opt-in [live smoke](provider-live-smoke.md) for each provider,
+   including prerequisites and verified cleanup. Offline recommendations do not
+   establish working credentials, capacity, or a security boundary.
+4. Strengthen checkpoint, fork, restore, and snapshot semantics before adding
+   runtime-specific forking. `workspace-reuse` and `fanout-testing` expose these
+   workflows without assuming live-memory cloning.
+5. Keep `worker-runtime` module execution distinct from Linux shells and
+   filesystem sandboxes in both targets and feature declarations.
 
 ## Add-Provider Bar
 
-Add a first-class provider when the PR can prove:
-
-- stable lifecycle: create, inspect, run or attach, release, cleanup;
-- honest `ProviderSpec.Kind`, category, targets, and feature flags;
-- documented auth from env/config, never command-line secrets;
-- offline tests for parsing, command construction, status/list rendering, and
-  provider errors;
-- opt-in live smoke when credentials or quota are required;
-- docs that explain when to use the provider and when to choose an existing
-  workflow instead.
-
-If the bar is not met, use `ssh` or `external` and document the manual contract.
+Follow [Provider authoring](provider-authoring.md) for backend selection,
+capability declarations, credential handling, tests, and documentation. A new
+adapter must prove create, inspect, run or attach, release, and cleanup behavior
+under the [live smoke contract](provider-live-smoke.md#lifecycle-contract).
+Use `ssh` or `external` for a manual integration until that contract is ready.

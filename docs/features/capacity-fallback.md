@@ -38,8 +38,8 @@ Each provider maps the six class names to an ordered list of concrete
 instance types. That list *is* the fallback chain: try the first; if it is
 rejected, try the next; and so on until one succeeds or the chain is exhausted.
 
-The full per-provider class tables (including AWS Windows, Windows WSL2, and
-macOS) live in [Providers](providers.md#machine-classes).
+Inspect the compiled per-provider class catalogs (including AWS Windows,
+Windows WSL2, and macOS) as shown in [Providers](providers.md#machine-classes).
 
 ## When Class Fallback Triggers
 

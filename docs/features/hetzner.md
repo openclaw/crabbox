@@ -47,10 +47,9 @@ large     ccx53, ccx43, cpx62, cx53
 beast     ccx63, ccx53, ccx43, cpx62, cx53
 ```
 
-`--type` pins an explicit server type. It is tried first, but Crabbox still
-falls back to the rest of the class candidates if that type is rejected for
-quota or capacity, so a busy region does not strand a lease. Dedicated-core
-types (the `ccx*` family) are the most likely to hit account quota.
+`--type` pins one exact server type and disables class fallback. Omit it to
+allow the class candidates above. Dedicated-core types (the `ccx*` family) are
+the most likely to hit account quota.
 
 ## Image and location
 
