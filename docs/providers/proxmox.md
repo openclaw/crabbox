@@ -662,7 +662,7 @@ previous identity. The template must retain `crabbox-xvfb.service` (TigerVNC) an
 
 ### Readiness and limits
 
-At clone creation Crabbox generates fresh private VNC credentials, starts the
+At clone creation Crabbox generates fresh private VNC credentials, enables and starts the
 prepared services, and verifies XFCE, TigerVNC, an accessible X11 display at
 `:99`, VncAuth using the per-clone password file, and a VNC listener exclusively
 on loopback port 5900. Both password files must belong to the configured guest

@@ -89,6 +89,7 @@ for file in vnc.password vnc.pass desktop.env; do
 done
 rm -rf -- "$credential_dir"
 trap - EXIT
+systemctl enable crabbox-xvfb.service crabbox-desktop.service
 systemctl restart crabbox-xvfb.service crabbox-desktop.service
 `)
 		checks.WriteString(`template_component='XFCE/X11 and TigerVNC services'

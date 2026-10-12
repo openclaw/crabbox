@@ -180,3 +180,62 @@ func TestProxmoxDesktopLabelTamperingConflicts(t *testing.T) {
 		t.Fatalf("capability tampering accepted: %v", err)
 	}
 }
+
+func TestProxmoxPreparedDesktopSurvivesReboot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("guest bootstrap requires POSIX shell")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := controllerTestConfig()
+	cfg.Desktop = true
+	setup, checks := preparedTemplateBootstrap(cfg)
+	setup = strings.ReplaceAll(setup, "/var/lib/crabbox", dir)
+	checks = strings.ReplaceAll(checks, "/var/lib/crabbox", dir)
+	mock := `#!/bin/bash
+set -eu
+case "${0##*/}" in
+  startxfce4|Xtigervnc|xdpyinfo|chown) exit 0 ;;
+  id) echo crabbox ;;
+  install) /bin/mkdir -p "${@: -1}" ;;
+  openssl) echo fixture-password ;;
+  tigervncpasswd) /bin/cat ;;
+  stat) echo '600:crabbox' ;;
+  mv) shift; /bin/mv "$@" ;;
+  runuser) shift 3; exec "$@" ;;
+  pgrep)
+    if [ "$1" = -a ]; then echo "1 Xtigervnc :99 -SecurityTypes VncAuth -PasswordFile $FIXTURE_DIR/vnc.pass"; fi ;;
+  ss) echo 'LISTEN 0 10 127.0.0.1:5900 0.0.0.0:*' ;;
+  systemctl)
+    command="$1"; shift
+    case "$command" in
+      show) echo crabbox ;;
+      stop) /bin/rm -f "$FIXTURE_DIR/active" ;;
+      enable)
+        [ -s "$FIXTURE_DIR/vnc.password" ] && [ -s "$FIXTURE_DIR/vnc.pass" ]
+        printf '%s\n' "$@" >"$FIXTURE_DIR/enabled" ;;
+      restart) touch "$FIXTURE_DIR/active" ;;
+      reboot)
+        /bin/rm -f "$FIXTURE_DIR/active"
+        if grep -qx crabbox-xvfb.service "$FIXTURE_DIR/enabled" 2>/dev/null && grep -qx crabbox-desktop.service "$FIXTURE_DIR/enabled" 2>/dev/null; then touch "$FIXTURE_DIR/active"; fi ;;
+      is-active) test -f "$FIXTURE_DIR/active" ;;
+      *) exit 2 ;;
+    esac ;;
+  *) exit 2 ;;
+esac
+`
+	for _, name := range []string{"startxfce4", "Xtigervnc", "xdpyinfo", "chown", "id", "install", "openssl", "tigervncpasswd", "stat", "mv", "runuser", "pgrep", "ss", "systemctl"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(mock), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	command := exec.Command("bash", "-c", "set -euo pipefail\n"+setup+"\nsystemctl reboot\n"+checks)
+	command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "FIXTURE_DIR="+dir)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("prepared desktop failed readiness after reboot: %v\n%s", err, output)
+	}
+}
