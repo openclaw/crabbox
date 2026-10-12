@@ -42,6 +42,10 @@ function policy() {
 }
 if (args[0] === "whoami") output({owner: "alice@example.invalid"});
 else if (args[0] === "warmup") {
+  // Mirror the real CLI: warmup rejects unknown flags and reads the Region from the environment.
+  if (args.includes("--region")) fail("flag provided but not defined: -region");
+  if (process.env.CRABBOX_AWS_REGION !== "eu-west-1") fail("AWS Region was not pinned to eu-west-1");
+  if (scenario === "control-create-rejected" && !args.includes("--lifetime-canary")) fail("injected create rejection before admission");
   if (args.includes("--lifetime-canary")) {
     state.canary = value("--lease-id");
     state.deadline = new Date(Date.now() + 360000).toISOString();
@@ -49,11 +53,16 @@ else if (args[0] === "warmup") {
   } else state.control = value("--lease-id");
   output({created: true});
 } else if (args[0] === "status") {
+  if (scenario === "transient-1101" && id === state.canary && !state.blipped) {
+    state.blipped = true;
+    fail("coordinator GET /v1/leases/" + id + ": http 500: error code: 1101");
+  }
   if (id === state.canary) { state.statusReads++; output({id, state: "active", lifetimePolicy: policy()}); }
   else output({id, state: "active", lifetimePolicy: scenario === "control-enrolled" ? policy() : undefined});
 } else if (args[0] === "run") output({ok: true});
 else if (args[0] === "stop") {
   if (scenario === "cleanup-failure" && id === state.canary) fail("injected cleanup failure");
+  if (scenario === "control-create-rejected") fail("coordinator POST /v1/leases/" + id + "/release: http 404: {\\"error\\":\\"not_found\\"}");
   output({stopped: true});
 } else if (args[0] === "admin" && args[1] === "leases") {
   if (scenario === "not-admin") fail("HTTP 403 admin required");
@@ -125,7 +134,7 @@ test("lifetime canary proves extension, stop, disk retention, deletion and unenr
   const creates = calls.filter(args => args[0] === "warmup");
   assert.equal(creates.length, 2);
   for (const args of creates) {
-    for (const [flag, value] of [["--provider", "aws"], ["--target", "linux"], ["--region", "eu-west-1"], ["--class", "tiny"], ["--type", "t3.small"], ["--market", "on-demand"], ["--ttl", "20m"], ["--idle-timeout", "10m"]]) {
+    for (const [flag, value] of [["--provider", "aws"], ["--target", "linux"], ["--class", "tiny"], ["--type", "t3.small"], ["--market", "on-demand"], ["--ttl", "45m"], ["--idle-timeout", "10m"]]) {
       assert.equal(args[args.indexOf(flag) + 1], value);
     }
     assert.ok(args.includes("--keep"));
@@ -171,6 +180,25 @@ for (const [scenario, expected] of [
   });
 }
 
+test("lifetime canary treats a lease rejected before admission as nothing to clean up", t => {
+  const f = fixture(t, "control-create-rejected");
+  const result = f.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /injected create rejection before admission/);
+  assert.match(result.stdout, /cleanup control=cbx_[a-f0-9]{12} not found; nothing was allocated/);
+  assert.doesNotMatch(result.stdout + result.stderr, /CLEANUP FAILED/);
+  assert.equal(f.calls().filter(args => args[0] === "warmup").length, 1);
+  assert.equal(f.calls().filter(args => args[0] === "stop").length, 1);
+});
+
+test("lifetime canary retries a transient coordinator Worker reset", t => {
+  const f = fixture(t, "transient-1101");
+  const result = f.run();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stderr, /transient coordinator error attempt=1: .*error code: 1101/);
+  assert.match(result.stdout, /classification=live_lease_lifetime_canary_passed/);
+});
+
 test("lifetime canary waits for coordinator IAM readiness before extending", t => {
   const f = fixture(t, "readiness-delayed");
   const result = f.run();
@@ -193,10 +221,11 @@ test("lifetime canary stops an unexpectedly enrolled control before creating can
 test("lifetime canary has a hard command budget and bounded cleanup", () => {
   const text = fs.readFileSync(script, "utf8");
   assert.match(text, /deadline=\$\(\(started_at \+ 2100\)\)/);
-  assert.match(text, /deadline=\$\(\(started_at \+ 2390\)\)/);
+  assert.match(text, /deadline=\$\(\(\$\(date \+%s\) \+ 660\)\)/);
   assert.match(text, /process\.wait\(timeout=remaining\)/);
   assert.match(text, /os\.killpg\(process\.pid, signal\.SIGKILL\)/);
-  assert.equal((text.match(/run_cb 120 stop/g) ?? []).length, 2);
+  assert.equal((text.match(/run_cb 300 stop/g) ?? []).length, 1);
+  assert.equal((text.match(/release_lease (canary|control) /g) ?? []).length, 2);
   assert.match(text, /trap cleanup EXIT/);
   assert.doesNotMatch(text, /aws (ec2|sts)|curl|broker\.adminToken|config_value/);
 });

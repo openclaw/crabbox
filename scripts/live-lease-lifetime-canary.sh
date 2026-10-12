@@ -15,6 +15,8 @@ for tool in python3 jq; do
 done
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Warmup has no region flag; the AWS Region comes from the environment.
+export CRABBOX_AWS_REGION=eu-west-1
 cb="${CRABBOX_BIN:-$root/bin/crabbox}"
 [[ -x "$cb" ]] || { printf 'build Crabbox or set CRABBOX_BIN to an executable\n' >&2; exit 2; }
 started_at="$(date +%s)"
@@ -29,7 +31,7 @@ progress() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
 }
 
-# A stalled CLI/transport cannot outrun the 35-minute proof or five-minute cleanup budget.
+# A stalled CLI/transport cannot outrun the 35-minute proof or eleven-minute cleanup budget.
 run_cb() {
   local maximum="$1"
   shift
@@ -66,23 +68,33 @@ except subprocess.TimeoutExpired:
 PY
 }
 
+release_lease() {
+  local label="$1" id="$2" output
+  progress "cleanup $label=$id"
+  if output="$(run_cb 300 stop --provider aws --id "$id" 2>&1)"; then
+    [[ -z "$output" ]] || printf '%s\n' "$output"
+    return 0
+  fi
+  printf '%s\n' "$output" >&2
+  # A create rejected before admission leaves no coordinator lease to release.
+  if [[ "$output" == *'"error":"not_found"'* ]]; then
+    progress "cleanup $label=$id not found; nothing was allocated"
+    return 0
+  fi
+  progress "CLEANUP FAILED $label=$id; retain this ID for operator recovery" >&2
+  return 1
+}
+
 cleanup() {
   local outcome=$?
   trap - EXIT INT TERM
-  deadline=$((started_at + 2390))
-  if [[ "$canary_started" == 1 ]]; then
-    progress "cleanup canary=$canary_id"
-    if ! run_cb 120 stop --provider aws --id "$canary_id"; then
-      progress "CLEANUP FAILED canary=$canary_id; retain this ID for operator recovery" >&2
-      outcome=1
-    fi
+  # Cleanup gets its own budget; observing AWS termination can take several minutes.
+  deadline=$(($(date +%s) + 660))
+  if [[ "$canary_started" == 1 ]] && ! release_lease canary "$canary_id"; then
+    outcome=1
   fi
-  if [[ "$control_started" == 1 ]]; then
-    progress "cleanup control=$control_id"
-    if ! run_cb 120 stop --provider aws --id "$control_id"; then
-      progress "CLEANUP FAILED control=$control_id; retain this ID for operator recovery" >&2
-      outcome=1
-    fi
+  if [[ "$control_started" == 1 ]] && ! release_lease control "$control_id"; then
+    outcome=1
   fi
   if [[ "$outcome" == 0 && "$proof_complete" == 1 ]]; then
     progress "classification=live_lease_lifetime_canary_passed canary=$canary_id instance=$instance_id volume=$volume_id cleanup=complete"
@@ -96,12 +108,34 @@ trap 'exit 143' TERM
 
 fail() { progress "FAILED $*" >&2; exit 1; }
 
+# Ride out brief coordinator Worker resets (5xx, Cloudflare 1101) instead of failing the whole proof.
+retry_cb() {
+  local maximum="$1" attempt output errors
+  shift
+  for attempt in 1 2 3 4 5 6 7 8; do
+    errors="$(mktemp)"
+    if output="$(run_cb "$maximum" "$@" 2>"$errors")"; then
+      rm -f "$errors"
+      [[ -z "$output" ]] || printf '%s\n' "$output"
+      return 0
+    fi
+    if [[ "$attempt" == 8 ]] || ! grep -qE 'http 5[0-9][0-9]|error code: 1101' "$errors"; then
+      cat "$errors" >&2
+      rm -f "$errors"
+      return 1
+    fi
+    progress "transient coordinator error attempt=$attempt: $(tr '\n' ' ' <"$errors" | cut -c1-200)" >&2
+    rm -f "$errors"
+    pause
+  done
+}
+
 snapshot() {
-  run_cb 60 status --provider aws --id "$1" --json
+  retry_cb 60 status --provider aws --id "$1" --json
 }
 
 readback() {
-  run_cb 60 admin lifetime-readback --id "$1" --json
+  retry_cb 60 admin lifetime-readback --id "$1" --json
 }
 
 assert_json() {
@@ -120,7 +154,7 @@ touch_control() {
   now="$(date +%s)"
   if [[ "$now" -ge "$next_touch" ]]; then
     # Keep the control under its ten-minute idle limit, without altering its policy.
-    run_cb 60 run --provider aws --id "$control_id" --no-sync --keep -- true >/dev/null
+    retry_cb 60 run --provider aws --id "$control_id" --no-sync --keep -- true >/dev/null
     next_touch=$((now + 60))
   fi
 }
@@ -143,15 +177,16 @@ identity="$(run_cb 60 whoami --json)"
 owner="$(jq -er '.owner | select(type == "string" and length > 0)' <<<"$identity")"
 
 # Start the control first, so it remains running throughout canary enrollment.
+# Both TTLs outlast the 35-minute proof so ordinary expiry never pre-empts it.
 control_started=1
-run_cb 600 warmup --provider aws --target linux --region eu-west-1 --class tiny --type t3.small \
-  --market on-demand --lease-id "$control_id" --keep --ttl 20m --idle-timeout 10m
+run_cb 600 warmup --provider aws --target linux --class tiny --type t3.small \
+  --market on-demand --lease-id "$control_id" --keep --ttl 45m --idle-timeout 10m
 control="$(snapshot "$control_id")"
 assert_json "$control" '.lifetimePolicy == null' 'control was unexpectedly enrolled; default mode must be off'
 
 canary_started=1
-run_cb 600 warmup --provider aws --target linux --region eu-west-1 --class tiny --type t3.small \
-  --market on-demand --lease-id "$canary_id" --keep --ttl 20m --idle-timeout 10m \
+run_cb 600 warmup --provider aws --target linux --class tiny --type t3.small \
+  --market on-demand --lease-id "$canary_id" --keep --ttl 45m --idle-timeout 10m \
   --lifetime-canary 6m --lifetime-retention 5m
 while :; do
   touch_control
@@ -172,7 +207,7 @@ import sys
 print((datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00")).replace(microsecond=0) + timedelta(minutes=2)).astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"))
 PY
 )"
-run_cb 60 admin extend-lifetime --id "$canary_id" --owner "$owner" \
+retry_cb 60 admin extend-lifetime --id "$canary_id" --owner "$owner" \
   --reason 'bounded live lifetime canary' --expires-at "$extension" --json >/dev/null
 canary="$(snapshot "$canary_id")"
 assert_extension "$canary" "$extension" || fail 'accepted extension did not change the effective stop deadline'
@@ -212,7 +247,7 @@ print((datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00")).replace(micros
 PY
 )"
 set +e
-denial="$(run_cb 60 admin extend-lifetime --id "$canary_id" --owner "$owner" \
+denial="$(retry_cb 60 admin extend-lifetime --id "$canary_id" --owner "$owner" \
   --reason 'must reject after stop' --expires-at "$late_extension" --json 2>&1)"
 denial_code=$?
 set -e
