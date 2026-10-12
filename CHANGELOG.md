@@ -1,39 +1,49 @@
 # Changelog
 
-## Unreleased
+## 0.75.0 - 2026-10-12
+
+### Highlights
+
+- **Turn spare machines into private container capacity.** `crabbox serve` offers owner-only leases through one authenticated SSH front door, with pinned end-to-end container SSH, warm package caches, and opt-in capacity fallback. [PR 2768](https://github.com/openclaw/crabbox/pull/2768), [PR 2770](https://github.com/openclaw/crabbox/pull/2770), [PR 2789](https://github.com/openclaw/crabbox/pull/2789).
+- **Keep coordinator requests moving as lease history grows.** Separate current and maintenance indexes avoid repeated history scans; bounded reads reduce memory pressure, while structured 503 responses and CLI backoff recover transient overload and resets. [PR 2769](https://github.com/openclaw/crabbox/pull/2769), [PR 2774](https://github.com/openclaw/crabbox/pull/2774), [PR 2777](https://github.com/openclaw/crabbox/pull/2777), [PR 2782](https://github.com/openclaw/crabbox/pull/2782), [PR 2786](https://github.com/openclaw/crabbox/pull/2786), [PR 2788](https://github.com/openclaw/crabbox/pull/2788).
+- **Set an optional safety net for retained AWS leases.** Default-off maximum-age policies expose stop and deletion deadlines, allow bounded extensions, and verify stop permissions before enforcement. [PR 2759](https://github.com/openclaw/crabbox/pull/2759), [PR 2771](https://github.com/openclaw/crabbox/pull/2771). Thanks @vincentkoc.
+- **Scan and filter the lease portal more easily.** Clickable fleet readouts, provider activity, and compact state filters bring a refreshed layout to the home, admin, and detail pages. [PR 2773](https://github.com/openclaw/crabbox/pull/2773).
+- **Sync native Jujutsu working copies directly.** Git-backed `jj` workspaces now sync their exact `@` tree, including working-copy edits and octopus merges, to ordinary SSH leases. [PR 2780](https://github.com/openclaw/crabbox/pull/2780), [Issue 1081](https://github.com/openclaw/crabbox/issues/1081). Thanks @atimmer.
+
+### Upgrade notes
+
+- Automation using `crabbox run` should allow up to 30 seconds for run admission when the coordinator is unavailable, increased from 10 seconds; shorter caller deadlines still win. [PR 2777](https://github.com/openclaw/crabbox/pull/2777).
+- `crabbox list --all` now paginates active-lease lookups, so results can include active leases beyond the former single-page cap. Older coordinators retain the legacy fallback with a warning when its limit is reached. [PR 2788](https://github.com/openclaw/crabbox/pull/2788).
 
 ### Added
 
-- Sync: support native Git-backed Jujutsu workspaces by syncing the exact `@` tree, including octopus merges and working-copy edits, with explicit origin-bookmark seeding and fail-closed revision checks. [PR 2780](https://github.com/openclaw/crabbox/pull/2780). Thanks @atimmer.
-- Proxmox: add opt-in prepared XFCE/TigerVNC and browser templates with per-clone credentials, fail-closed readiness and capability-safe adapter replay. [PR 2781](https://github.com/openclaw/crabbox/pull/2781). Thanks @ahkohd.
-- Docs: translate the landing page and core introductions into Simplified Chinese, Japanese, Korean, Spanish, German, French, and Brazilian Portuguese, with language navigation, English fallback, preserved examples, and source-hash staleness notices. [PR 2784](https://github.com/openclaw/crabbox/pull/2784). Thanks @alexandre-leng.
-
+- Sync: support native Git-backed Jujutsu workspaces by syncing the exact `@` tree, including octopus merges and working-copy edits, with explicit origin-bookmark seeding and fail-closed revision checks. [PR 2780](https://github.com/openclaw/crabbox/pull/2780) [Issue 1081](https://github.com/openclaw/crabbox/issues/1081). Thanks @atimmer.
+- Proxmox: add opt-in prepared XFCE/TigerVNC and browser templates with per-clone credentials, fail-closed readiness and capability-safe adapter replay. [PR 2781](https://github.com/openclaw/crabbox/pull/2781) [Issue 2549](https://github.com/openclaw/crabbox/issues/2549). Thanks @ahkohd.
+- Docs: translate the landing page and core introductions into Simplified Chinese, Japanese, Korean, Spanish, German, French, and Brazilian Portuguese, with language navigation, English fallback, preserved examples, and source-hash staleness notices. [PR 2784](https://github.com/openclaw/crabbox/pull/2784) [Issue 1065](https://github.com/openclaw/crabbox/issues/1065). Thanks @alexandre-leng.
 - Coordinator: add default-off maximum-age policies and explicit admin rollout canaries for retained AWS leases, with verified stop permissions, visible stop/deletion deadlines, bounded extensions, and root-disk cleanup. [PR 2759](https://github.com/openclaw/crabbox/pull/2759). Thanks @vincentkoc.
-- Serve: run `crabbox serve` on trusted machines to donate spare CPU as owner-only container leases (`--provider serve`), with outbound coordinator polling, local deadline enforcement, a single authenticated SSH front door (`--ssh-port`) with pinned end-to-end container SSH, warm package caches, per-user service install, and opt-in capacity fallback. Coordinators enable it per owner with `CRABBOX_SERVE_ALLOWED_OWNERS` (off by default). [PR 2768](https://github.com/openclaw/crabbox/pull/2768).
+- Serve: run `crabbox serve` on trusted machines to donate spare CPU as owner-only container leases (`--provider serve`), with outbound coordinator polling, local deadline enforcement, a single authenticated SSH front door (`--ssh-port`) with pinned end-to-end container SSH, warm package caches, per-user service install, and opt-in capacity fallback. Coordinators enable it per owner with `CRABBOX_SERVE_ALLOWED_OWNERS` (off by default). [PR 2768](https://github.com/openclaw/crabbox/pull/2768), [PR 2770](https://github.com/openclaw/crabbox/pull/2770), [PR 2789](https://github.com/openclaw/crabbox/pull/2789).
 
 ### Changes
 
 - Coordinator: enable Cloudflare Workers Logs with full head sampling so Worker requests, Durable Object alarms, and structured coordinator failure lines are retained for incident attribution, with query strings redacted from logged URLs. [PR 2783](https://github.com/openclaw/crabbox/pull/2783), [PR 2785](https://github.com/openclaw/crabbox/pull/2785).
-- Portal: redesign the lease portal with clickable fleet readouts, a per-provider activity bar, a segmented state filter with compact filter chips, calmer text-only state labels, and a refreshed dark/light skin across admin and detail pages.
-- Portal: omit stale external runners from the home page while preserving runner list API and detail access.
-- Docs: consolidate provider selection, class catalogs, and lifecycle references; correct stale provider support, sizing, and transport guidance.
+- Portal: redesign the lease portal with clickable fleet readouts, a per-provider activity bar, a segmented state filter with compact filter chips, calmer text-only state labels, and a refreshed dark/light skin across admin and detail pages. [PR 2773](https://github.com/openclaw/crabbox/pull/2773).
+- Portal: omit stale external runners from the home page while preserving runner list API and detail access. [PR 2775](https://github.com/openclaw/crabbox/pull/2775).
+- Docs: consolidate provider selection, class catalogs, and lifecycle references; correct stale provider support, sizing, and transport guidance. [PR 2763](https://github.com/openclaw/crabbox/pull/2763).
 
 ### Fixes
 
 - Coordinator/CLI: use independent current and maintenance indexes for lease listings and paginate active admin lookups, preserving filters, history fallback and cursor source checks. [PR 2788](https://github.com/openclaw/crabbox/pull/2788).
-
-- AWS: resolve automatic runner images in each fallback region, recover missing promotions with stock images, and let exact-type Spot requests promptly use enabled On-Demand fallback. [PR 2787](https://github.com/openclaw/crabbox/pull/2787).
+- AWS: resolve automatic runner images in each fallback region, recover missing promotions with stock images, and let exact-type Spot requests promptly use enabled On-Demand fallback. [PR 2787](https://github.com/openclaw/crabbox/pull/2787). Thanks @vincentkoc.
 - Coordinator: index leases with pending maintenance so alarm reconciliation, discovery, provider access, slug lookup, and registration avoid scanning settled history, with bounded backfill and daily repair audits. [PR 2786](https://github.com/openclaw/crabbox/pull/2786).
 
 - Coordinator/CLI: return structured retryable 503 responses with Retry-After for Durable Object overload/reset instead of Cloudflare 1101, and retry reads and run admission with bounded backoff. [PR 2777](https://github.com/openclaw/crabbox/pull/2777).
 - Coordinator: stop alarm reconciliation from issuing a storage read per retained historical lease, and keep read-only lifetime readbacks out of the lifecycle queue, reducing request queueing and overload errors on long-lived fleets. [PR 2782](https://github.com/openclaw/crabbox/pull/2782).
-- Coordinator: allow explicitly configured capacity admins to use their owner allowance when shared fleet or org caps are full, while preserving spending limits and ordinary admission.
-
+- Coordinator: allow explicitly configured capacity admins to use their owner allowance when shared fleet or org caps are full, while preserving spending limits and ordinary admission. [PR 2778](https://github.com/openclaw/crabbox/pull/2778). Thanks @vincentkoc.
 - Coordinator: preserve deployment-managed capacity-admin membership across deploys without replacing secret-backed members or raising ordinary owner limits. [PR 2776](https://github.com/openclaw/crabbox/pull/2776). Thanks @vincentkoc.
 - Coordinator: reconcile org-wide external runner inventories across owners, deduplicate visible runners with two bounded streaming scans, hide observations older than two hours, and prune rows last seen more than seven days ago. [PR 2779](https://github.com/openclaw/crabbox/pull/2779).
-- Coordinator: preserve leading zero bytes in generated Ed25519 SSH host keys so the public identity and injected private key remain a valid pair.
-- Bound coordinator storage scans for pools, image catalogs, checkpoints, and dynamic runner indexes to uncached pages.
-- Coordinator: prevent the portal from exhausting coordinator memory when many external runner records are stored by bounding reads and pruning old stale records.
+- Coordinator: preserve leading zero bytes in generated Ed25519 SSH host keys so the public identity and injected private key remain a valid pair. [PR 2772](https://github.com/openclaw/crabbox/pull/2772). Thanks @vincentkoc.
+- Bound coordinator storage scans for pools, image catalogs, checkpoints, and dynamic runner indexes to uncached pages. [PR 2774](https://github.com/openclaw/crabbox/pull/2774).
+- Coordinator: prevent the portal from exhausting coordinator memory when many external runner records are stored by bounding reads and pruning old stale records. [PR 2769](https://github.com/openclaw/crabbox/pull/2769).
 - Serve: stop spurious `serve_rate_limited` heartbeat errors by pacing each heartbeat at least `--poll-interval` after the previous response. [PR 2770](https://github.com/openclaw/crabbox/pull/2770).
 - Serve: prepare bootstrap packages in the background without delaying restart heartbeats or reconciliation; prepared leases start in about a second instead of ~30s, recover automatically after shared-image pruning, and retain unique SSH host keys. [PR 2770](https://github.com/openclaw/crabbox/pull/2770).
 - Coordinator: confirm lifetime-cap stops every 30 seconds for the first five minutes instead of waiting for the five-minute retry, and retire a lease's lifetime policy when an explicit stop deletes it; harden the lifetime canary live proof. [PR 2771](https://github.com/openclaw/crabbox/pull/2771).
