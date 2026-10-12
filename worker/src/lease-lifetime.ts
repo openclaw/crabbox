@@ -2,6 +2,8 @@ import type { Env, LeaseRecord } from "./types";
 
 const daySeconds = 86_400;
 export const lifetimeRetryMs = 5 * 60_000;
+// StopInstances usually settles within a minute; confirm quickly before falling back to the retry cadence.
+export const lifetimeStopConfirmMs = 30_000;
 export const lifetimeWarningMs = 60 * 60_000;
 
 export interface LeaseLifetimePolicy {

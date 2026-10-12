@@ -57391,6 +57391,29 @@ describe("maximum lifetime safety net", () => {
     },
   );
 
+  it("confirms an issued stop quickly, then falls back to the retry cadence", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const f = fixture();
+    f.retainLease.mockImplementation(async (_lease, context) => {
+      await context.saveIdentity(f.identity);
+      await context.assertOwner();
+      return { stopped: false, identity: f.identity };
+    });
+    await f.storage.put(`lease:${f.lease.id}`, f.lease);
+    await f.fleet.alarm();
+    let stored = f.storage.value<LeaseRecord>(`lease:${f.lease.id}`)!;
+    expect(stored.lifetimePolicy?.status).toBe("stopping");
+    expect(stored.lifetimePolicy?.nextCheckAt).toBe(new Date(now + 30_000).toISOString());
+    expect(await f.storage.getAlarm()).toBe(now + 30_000);
+    vi.setSystemTime(now + 300_000);
+    await f.fleet.alarm();
+    stored = f.storage.value<LeaseRecord>(`lease:${f.lease.id}`)!;
+    expect(f.retainLease).toHaveBeenCalledTimes(2);
+    expect(stored.lifetimePolicy?.status).toBe("stopping");
+    expect(stored.lifetimePolicy?.nextCheckAt).toBe(new Date(now + 600_000).toISOString());
+  });
+
   it("records and exposes failed readiness without stopping or revoking the lease, then retries", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);
