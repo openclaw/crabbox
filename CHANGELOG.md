@@ -10,6 +10,7 @@
 
 ### Changes
 
+- Portal: redesign the lease portal with clickable fleet readouts, a per-provider activity bar, a segmented state filter with compact filter chips, calmer text-only state labels, and a refreshed dark/light skin across admin and detail pages.
 - Docs: consolidate provider selection, class catalogs, and lifecycle references; correct stale provider support, sizing, and transport guidance.
 
 ### Fixes

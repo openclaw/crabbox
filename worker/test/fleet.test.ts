@@ -35543,7 +35543,7 @@ describe("fleet lease identity and idle", () => {
     expect(response.status).toBe(200);
     const body = await response.text();
     expect(body).toContain('class="portal-shell"');
-    expect(body).toContain("<h1>🦀 crabbox</h1>");
+    expect(body).toContain('<span class="brand-mark" aria-hidden="true">🦀</span><h1>crabbox</h1>');
     expect(body).toContain('class="portal-actions"');
     expect(body).toContain(
       ".theme-toggle .theme-icon-moon,.theme-toggle .theme-icon-sun,.theme-toggle .theme-icon-system { display:none; }",
@@ -35557,8 +35557,10 @@ describe("fleet lease identity and idle", () => {
       'data-filter-groups="state|state|active|all:any state,active:active,ended:ended,stale:stale,stuck:stuck;provider|provider|all|all:any provider,aws:aws,azure:azure,hetzner:hetzner,blacksmith-testbox:blacksmith;target|os|all|all:any os,linux:Linux,macos:macOS,windows:Windows;kind|kind|all|all:any kind,lease:lease,external:external,dedicated:dedicated"',
     );
     expect(body).toContain('data-filter-default="active"');
-    expect(body).not.toContain("external runners");
-    expect(body).toContain("1 external");
+    expect(body).not.toContain("<h2>external runners</h2>");
+    expect(body).toMatch(
+      /data-filter-preset="kind:external,state:active"[^>]*>\s*<span class="fleet-tile-label">external runners<\/span>\s*<strong class="fleet-tile-value">1<\/strong>/,
+    );
     expect(body).toContain('class="external-row"');
     expect(body).toContain("no box access");
     expect(body).toContain("stuck");
@@ -36606,7 +36608,9 @@ describe("fleet lease identity and idle", () => {
     const adminBody = await adminResponse.text();
     expect(adminBody).toContain("blue-lobster");
     expect(adminBody).toContain("testbox-runner");
-    expect(adminBody).toContain("1 system");
+    expect(adminBody).toMatch(
+      /data-filter-preset="owner:system"[^>]*>\s*<span class="fleet-tile-label">other owners<\/span>\s*<strong class="fleet-tile-value">1<\/strong>/,
+    );
     expect(adminBody).toContain("owner|owner|all|all:any owner,mine:mine,system:system");
     expect(adminBody).toContain('data-filter-tags="lease active mine hetzner linux"');
     expect(adminBody).toContain('data-filter-tags="lease active system aws linux"');
@@ -36796,7 +36800,7 @@ describe("fleet lease identity and idle", () => {
     expect(body).toContain("data-copy-command");
     expect(body).toContain('querySelector("code")');
     expect(body).toContain('class="portal-shell lease-shell"');
-    expect(body).toContain("<h1>🦀 crabbox</h1>");
+    expect(body).toContain('<span class="brand-mark" aria-hidden="true">🦀</span><h1>crabbox</h1>');
     expect(body).toContain("blue-lobster · hetzner linux lease");
     expect(body).toContain('data-search-placeholder="search runs"');
     expect(body).toContain(
@@ -36840,7 +36844,7 @@ describe("fleet lease identity and idle", () => {
     expect(runBody).toContain(
       ".run-shell .meta-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }",
     );
-    expect(runBody).toContain("<h1>🦀 crabbox</h1>");
+    expect(runBody).toContain("<h1>crabbox</h1>");
     expect(runBody).toContain(
       ".portal-header-meta { flex:1 1 auto; min-width:0; overflow:hidden; }",
     );
@@ -40430,7 +40434,7 @@ describe("fleet lease identity and idle", () => {
       "crabbox webvnc --provider hetzner --target linux --id blue-lobster --open",
     );
     expect(pageBody).toContain("/portal/assets/novnc/rfb.js");
-    expect(pageBody).toContain("<h1>🦀 crabbox</h1>");
+    expect(pageBody).toContain("<h1>crabbox</h1>");
     expect(pageBody).toContain("WebVNC blue-lobster");
     expect(pageBody).toContain("function scheduleRetry");
     expect(pageBody).toContain("/portal/leases/cbx_000000000001/vnc/status");
