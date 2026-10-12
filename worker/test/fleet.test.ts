@@ -151,7 +151,7 @@ function expectHostKeyPair(privateKey: string, publicKey: string, expectedPublic
   expect(publicWire.subarray(4, 15).toString()).toBe("ssh-ed25519");
   expect(publicWire.readUInt32BE(15)).toBe(32);
   expect(rawPublic.length).toBe(32);
-  if (expectedPublic) expect(rawPublic.equals(expectedPublic.subarray(12))).toBe(true);
+  expect(expectedPublic === undefined || rawPublic.equals(expectedPublic.subarray(12))).toBe(true);
   const privateWire = Buffer.from(privateKey.split("\n").slice(1, -2).join(""), "base64");
   expect(privateWire.subarray(0, 15).toString()).toBe("openssh-key-v1\0");
   let offset = 15;
