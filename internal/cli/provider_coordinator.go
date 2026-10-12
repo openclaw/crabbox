@@ -1198,10 +1198,13 @@ func (b *coordinatorLeaseBackend) listMachines(ctx context.Context) ([]Coordinat
 	if err != nil {
 		return nil, nil, err
 	}
-	activeLeases, err := coord.AdminLeases(ctx, "active", "", "", 1000)
+	activeLeases, truncated, err := coord.ActiveAdminLeases(ctx)
 	if err != nil {
 		fmt.Fprintf(b.rt.Stderr, "warning: active lease lookup failed; orphan status unavailable: %v\n", err)
 		return machines, nil, nil
+	}
+	if truncated {
+		fmt.Fprintln(b.rt.Stderr, "warning: active lease lookup reached the legacy coordinator limit; orphan status may be incomplete")
 	}
 	return machines, activeCoordinatorLeaseIDs(activeLeases), nil
 }

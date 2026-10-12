@@ -72,6 +72,7 @@ describe("lease record write funnel invariant", () => {
     ])
       expect(bypasses(source)).toHaveLength(1);
     expect(bypasses("storage.put(`lease-maintenance:${id}`, 1)")).toEqual([]);
+    expect(bypasses("storage.put(`lease-current:${id}`, 1)")).toEqual([]);
     expect(bypasses('storage.put("workspace-lease:one", true)')).toEqual([]);
   });
 

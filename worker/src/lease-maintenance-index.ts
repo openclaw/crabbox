@@ -1,16 +1,18 @@
 import type { CoordinatorStorage } from "./coordinator-runtime";
 import {
-  leaseMaintenanceKey,
-  leaseMaintenancePrefix,
-  leaseNeedsMaintenanceIndex,
+  leaseIndexes,
+  leaseMaintenanceIndex,
+  type LeaseIndexDescriptor,
 } from "./lease-record-store";
 import { storageRecordScanBatchSize } from "./storage-scan";
 import type { LeaseRecord } from "./types";
 
-export const leaseMaintenanceVersion = 1;
-export const leaseMaintenanceStateKey = "lease-maintenance-state";
+export const leaseMaintenanceVersion = leaseMaintenanceIndex.version;
+export const leaseMaintenanceStateKey = leaseMaintenanceIndex.stateKey;
 export const leaseMaintenancePagesPerPass = 32;
 export const leaseMaintenanceAuditIntervalMs = 24 * 60 * 60 * 1000;
+// Stale entries only cost a filtered read, so sweep them periodically, not every pass.
+export const leaseIndexPruneIntervalMs = 10 * 60 * 1000;
 
 export interface LeaseMaintenanceState {
   version: number;
@@ -24,33 +26,44 @@ export interface LeaseMaintenanceState {
   auditScanned?: number;
   auditAdded?: number;
   pruneStartAfter?: string;
+  nextPruneAt?: number;
   // Runtime generation that last maintained the index.
   generation?: string;
 }
 
-export function leaseMaintenanceIndexReady(state: LeaseMaintenanceState | undefined): boolean {
-  return state?.version === leaseMaintenanceVersion && state.complete;
+export function leaseMaintenanceIndexReady(
+  state: LeaseMaintenanceState | undefined,
+  index: LeaseIndexDescriptor = leaseMaintenanceIndex,
+): boolean {
+  return state?.version === index.version && state.complete;
 }
 
 // Only maintenance prunes. Rechecking inside a retryable transaction prevents a
 // stale page from deleting membership published by a concurrent lease writer.
-async function pruneStaleEntries(storage: CoordinatorStorage, state: LeaseMaintenanceState) {
+async function pruneStaleEntries(
+  storage: CoordinatorStorage,
+  state: LeaseMaintenanceState,
+  index: LeaseIndexDescriptor,
+  now: number,
+) {
+  // A started sweep continues across passes; a new sweep waits for its interval.
+  if (state.pruneStartAfter === undefined && (state.nextPruneAt ?? 0) > now) return;
   /* oxlint-disable eslint/no-await-in-loop -- bounded cursor pages, each fenced reread precedes deletion. */
   for (let pageNumber = 0; pageNumber < leaseMaintenancePagesPerPass; pageNumber++) {
     const page = await storage.list<number>({
-      prefix: leaseMaintenancePrefix,
+      prefix: index.prefix,
       limit: storageRecordScanBatchSize,
       noCache: true,
       allowConcurrency: true,
       ...(state.pruneStartAfter ? { startAfter: state.pruneStartAfter } : {}),
     });
     for (const key of page.keys()) {
-      const id = key.slice(leaseMaintenancePrefix.length);
+      const id = key.slice(index.prefix.length);
       const lease = await storage.get<LeaseRecord>(`lease:${id}`, { noCache: true });
-      if (!lease || !leaseNeedsMaintenanceIndex(lease)) {
+      if (!lease || !index.member(lease)) {
         await storage.transaction(async (transaction) => {
           const current = await transaction.get<LeaseRecord>(`lease:${id}`, { noCache: true });
-          if (!current || !leaseNeedsMaintenanceIndex(current)) await transaction.delete(key);
+          if (!current || !index.member(current)) await transaction.delete(key);
         });
       }
     }
@@ -58,10 +71,22 @@ async function pruneStaleEntries(storage: CoordinatorStorage, state: LeaseMainte
     if (cursor) state.pruneStartAfter = cursor;
     if (page.size < storageRecordScanBatchSize) {
       delete state.pruneStartAfter;
+      state.nextPruneAt = now + leaseIndexPruneIntervalMs;
       break;
     }
   }
   /* oxlint-enable eslint/no-await-in-loop */
+}
+
+export async function maintainLeaseIndexes(
+  storage: CoordinatorStorage,
+  now: number,
+  generation?: string,
+): Promise<void> {
+  for (const index of leaseIndexes) {
+    // oxlint-disable-next-line eslint/no-await-in-loop -- each index advances its own bounded pass.
+    await maintainLeaseIndex(storage, index, now, generation);
+  }
 }
 
 export async function maintainLeaseMaintenanceIndex(
@@ -69,10 +94,19 @@ export async function maintainLeaseMaintenanceIndex(
   now: number,
   generation?: string,
 ): Promise<void> {
-  let state = await storage.get<LeaseMaintenanceState>(leaseMaintenanceStateKey, { noCache: true });
-  if (state?.version !== leaseMaintenanceVersion) {
-    state = { version: leaseMaintenanceVersion, complete: false };
-    await storage.put(leaseMaintenanceStateKey, state);
+  await maintainLeaseIndex(storage, leaseMaintenanceIndex, now, generation);
+}
+
+export async function maintainLeaseIndex(
+  storage: CoordinatorStorage,
+  index: LeaseIndexDescriptor,
+  now: number,
+  generation?: string,
+): Promise<void> {
+  let state = await storage.get<LeaseMaintenanceState>(index.stateKey, { noCache: true });
+  if (state?.version !== index.version) {
+    state = { version: index.version, complete: false };
+    await storage.put(index.stateKey, state);
   }
   // A new runtime may follow code that wrote leases without the index (a rollback),
   // or a non-coalescing store that crashed between a lease write and its index write.
@@ -106,10 +140,10 @@ export async function maintainLeaseMaintenanceIndex(
         allowConcurrency: true,
         ...(startAfter ? { startAfter } : {}),
       });
-      const members = [...page.values()].filter(leaseNeedsMaintenanceIndex);
+      const members = [...page.values()].filter(index.member);
       const additions = await Promise.all(
         members.map(async (lease) => {
-          const key = leaseMaintenanceKey(lease.id);
+          const key = `${index.prefix}${lease.id}`;
           if (audit) {
             // Count only missing current members, not a stale page whose lease
             // a concurrent writer correctly settled and removed from the index.
@@ -117,7 +151,7 @@ export async function maintainLeaseMaintenanceIndex(
               const current = await transaction.get<LeaseRecord>(`lease:${lease.id}`, {
                 noCache: true,
               });
-              if (!current || !leaseNeedsMaintenanceIndex(current)) return 0;
+              if (!current || !index.member(current)) return 0;
               if ((await transaction.get(key, { noCache: true })) !== undefined) return 0;
               await transaction.put(key, 1, { noCache: true });
               return 1;
@@ -145,11 +179,12 @@ export async function maintainLeaseMaintenanceIndex(
         delete state.startAfter;
         delete state.auditStartAfter;
       }
-      await storage.put(leaseMaintenanceStateKey, state);
+      await storage.put(index.stateKey, state);
       if (finished) {
         console.log(
           JSON.stringify({
             event: "coordinator.lease_maintenance_index",
+            index: index.name,
             phase: audit ? "audit_complete" : "backfill_complete",
             scanned: audit ? state.auditScanned : state.scanned,
             ...(audit ? { added: state.auditAdded } : { members: state.members }),
@@ -160,6 +195,6 @@ export async function maintainLeaseMaintenanceIndex(
     }
     /* oxlint-enable eslint/no-await-in-loop */
   }
-  await pruneStaleEntries(storage, state);
-  await storage.put(leaseMaintenanceStateKey, state);
+  await pruneStaleEntries(storage, state, index, now);
+  await storage.put(index.stateKey, state);
 }

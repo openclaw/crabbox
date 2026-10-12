@@ -73,10 +73,13 @@ import {
 import { GCPClient, gcpProviderLabelValue } from "../src/gcp";
 import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
 import { errorMessage } from "../src/http";
+import { leaseProviderCleanupConfirmed } from "../src/lease-cleanup";
 import { lifetimeCandidate, lifetimeNextAlarm, newLeaseLifetime } from "../src/lease-lifetime";
 import * as maintenanceIndex from "../src/lease-maintenance-index";
 import {
   leaseMaintenanceVersion,
+  leaseMaintenanceIndexReady,
+  maintainLeaseIndex,
   leaseMaintenanceStateKey,
   maintainLeaseMaintenanceIndex,
   type LeaseMaintenanceState,
@@ -88,6 +91,10 @@ import {
 } from "../src/lease-provisioning";
 import {
   deleteLeaseRecord,
+  leaseCurrentIndex,
+  leaseCurrentKey,
+  leaseIndexes,
+  leaseIsListedCurrent,
   leaseMaintenanceKey,
   leaseMaintenancePrefix,
   leaseNeedsMaintenanceIndex,
@@ -17776,7 +17783,9 @@ describe("fleet lease identity and idle", () => {
       commits.push(new Set(keys));
     };
     await storage.transaction((transaction) => putLeaseRecord(transaction, base));
-    expect(commits).toEqual([new Set([`lease:${base.id}`, leaseMaintenanceKey(base.id)])]);
+    expect(commits).toEqual([
+      new Set([`lease:${base.id}`, leaseMaintenanceKey(base.id), leaseCurrentKey(base.id)]),
+    ]);
     await expect(
       storage.transaction(async (transaction) => {
         await deleteLeaseRecord(transaction, base.id);
@@ -17820,6 +17829,7 @@ describe("fleet lease identity and idle", () => {
       expect(log.mock.calls.flat().map(String)).toContain(
         JSON.stringify({
           event: "coordinator.lease_maintenance_index",
+          index: "maintenance",
           phase: "backfill_complete",
           scanned: 4200,
           members: 42,
@@ -17943,9 +17953,7 @@ describe("fleet lease identity and idle", () => {
           .mockImplementation(async (ids) => {
             discovered.push([...ids].toSorted());
           });
-        const maintenance = vi
-          .spyOn(maintenanceIndex, "maintainLeaseMaintenanceIndex")
-          .mockResolvedValue();
+        const maintenance = vi.spyOn(maintenanceIndex, "maintainLeaseIndexes").mockResolvedValue();
         const quiet = [
           "maintainLeaseLifetimes",
           "expireLeases",
@@ -17981,7 +17989,7 @@ describe("fleet lease identity and idle", () => {
     const storage = new BoundedObservedMemoryStorage();
     for (let index = 0; index < 2000; index++) {
       const id = `cbx_${index.toString(16).padStart(12, "0")}`;
-      storage.seed(`lease:${id}`, testLease({ id, state: "released" }));
+      storage.seed(`lease:${id}`, testLease({ id, state: "released", keep: false }));
     }
     const lease = testLease({
       id: "cbx_ffffffffffff",
@@ -17995,12 +18003,14 @@ describe("fleet lease identity and idle", () => {
     });
     await putLeaseRecord(storage, lease);
     // Steady state between deploys: the current runtime already maintains the index.
-    storage.seed(leaseMaintenanceStateKey, {
-      version: leaseMaintenanceVersion,
-      complete: true,
-      nextAuditAt: Date.now() + 86_400_000,
-      generation: "steady-generation",
-    });
+    for (const index of leaseIndexes) {
+      storage.seed(index.stateKey, {
+        version: index.version,
+        complete: true,
+        nextAuditAt: Date.now() + 86_400_000,
+        generation: "steady-generation",
+      });
+    }
     const reads: string[] = [];
     storage.afterGet = (key) => {
       if (key.startsWith("lease:")) reads.push(key);
@@ -18084,12 +18094,14 @@ describe("fleet lease identity and idle", () => {
     };
     const lease = testLease({});
     await putLeaseRecord(storage, lease);
-    await putLeaseRecord(storage, { ...lease, state: "released", cloudID: "" });
+    await putLeaseRecord(storage, { ...lease, state: "released", cloudID: "", keep: false });
     expect(order).toEqual([
       `put:${leaseMaintenanceKey(lease.id)}`,
+      `put:${leaseCurrentKey(lease.id)}`,
       `put:lease:${lease.id}`,
       `put:lease:${lease.id}`,
       `delete:${leaseMaintenanceKey(lease.id)}`,
+      `delete:${leaseCurrentKey(lease.id)}`,
     ]);
   });
 
@@ -18112,8 +18124,12 @@ describe("fleet lease identity and idle", () => {
       },
     } as unknown as MemoryStorage;
     const write = putLeaseRecord(coalescing, lease);
-    // Both operations are issued before either settles, so Durable Objects coalesce them.
-    expect(issued).toEqual([leaseMaintenanceKey(lease.id), `lease:${lease.id}`]);
+    // All operations are issued before any settles, so Durable Objects coalesce them.
+    expect(issued).toEqual([
+      leaseMaintenanceKey(lease.id),
+      leaseCurrentKey(lease.id),
+      `lease:${lease.id}`,
+    ]);
     release();
     await write;
 
@@ -18175,6 +18191,29 @@ describe("fleet lease identity and idle", () => {
     } finally {
       log.mockRestore();
     }
+  });
+
+  it("sweeps stale index entries on an interval instead of every maintenance pass", async () => {
+    const storage = new MemoryStorage();
+    const now = Date.parse("2026-10-12T09:00:00.000Z");
+    storage.seed(leaseMaintenanceStateKey, {
+      version: leaseMaintenanceVersion,
+      complete: true,
+      nextAuditAt: now + 86_400_000,
+      generation: "steady-generation",
+    });
+    storage.seed(leaseMaintenanceKey("cbx_000000000001"), 1);
+    await maintainLeaseMaintenanceIndex(storage, now, "steady-generation");
+    expect(storage.value(leaseMaintenanceKey("cbx_000000000001"))).toBeUndefined();
+    storage.seed(leaseMaintenanceKey("cbx_000000000002"), 1);
+    await maintainLeaseMaintenanceIndex(storage, now + 1_000, "steady-generation");
+    expect(storage.value(leaseMaintenanceKey("cbx_000000000002"))).toBe(1);
+    await maintainLeaseMaintenanceIndex(
+      storage,
+      now + maintenanceIndex.leaseIndexPruneIntervalMs,
+      "steady-generation",
+    );
+    expect(storage.value(leaseMaintenanceKey("cbx_000000000002"))).toBeUndefined();
   });
 
   it("restarts an active audit from the beginning when the runtime generation changes", async () => {
@@ -18280,6 +18319,7 @@ describe("fleet lease identity and idle", () => {
       expect(log.mock.calls.flat().map(String)).toContain(
         JSON.stringify({
           event: "coordinator.lease_maintenance_index",
+          index: "maintenance",
           phase: "audit_complete",
           scanned: 4200,
           added: 1,
@@ -18315,6 +18355,7 @@ describe("fleet lease identity and idle", () => {
       expect(log.mock.calls.flat().map(String)).toContain(
         JSON.stringify({
           event: "coordinator.lease_maintenance_index",
+          index: "maintenance",
           phase: "audit_complete",
           scanned: 1,
           added: 0,
@@ -54949,6 +54990,7 @@ describe("synthetic acknowledgement reliability", () => {
           expect.soft(get.mock.calls.length).toBeLessThanOrEqual(3);
           expect(put.mock.calls.map(([key]) => key)).toEqual([
             leaseMaintenanceKey(leaseID),
+            leaseCurrentKey(leaseID),
             `lease:${leaseID}`,
           ]);
           expect.soft(getAlarm).toHaveBeenCalledTimes(1);
@@ -54957,7 +54999,7 @@ describe("synthetic acknowledgement reliability", () => {
           expect(observedPut.mock.calls.filter(([key]) => key.startsWith("lease:"))).toHaveLength(
             1,
           );
-          expect(observedPut.mock.calls.length).toBeLessThanOrEqual(3);
+          expect(observedPut.mock.calls.length).toBeLessThanOrEqual(4);
           expect(list).toHaveBeenCalledTimes(alarmReads);
           expect(setAlarm.mock.calls.length).toBeLessThanOrEqual(1);
         }
@@ -55177,12 +55219,14 @@ describe("synthetic acknowledgement reliability", () => {
         expectBoundedAlarmReads(storage, 2);
         expect.soft(get.mock.calls.length).toBeLessThanOrEqual(6);
         expect(put.mock.calls.map(([key]) => key)).toEqual(
-          deleteServer ? [leaseMaintenanceKey(leaseID), `lease:${leaseID}`] : [`lease:${leaseID}`],
+          deleteServer
+            ? [leaseMaintenanceKey(leaseID), `lease:${leaseID}`]
+            : [leaseCurrentKey(leaseID), `lease:${leaseID}`],
         );
         expect(storage.value(leaseMaintenanceKey(leaseID))).toBe(deleteServer ? 1 : undefined);
         expect(observedGet.mock.calls.length).toBeLessThanOrEqual(9);
         expect(observedPut.mock.calls.filter(([key]) => key.startsWith("lease:"))).toHaveLength(1);
-        expect(observedPut).toHaveBeenCalledTimes(deleteServer ? 3 : 2);
+        expect(observedPut).toHaveBeenCalledTimes(3);
         expect(storage.alarm()).toBe(before);
         const earlier = before - 1;
         await alarmRuntime(storage).scheduleAlarm(earlier);
@@ -60072,5 +60116,410 @@ describe("bounded pool and image storage scans", () => {
       capabilities: { runtimes: { node: "24" } },
     });
     expect(await access.promotedImage(config)).toMatchObject({ id: "ami-a" });
+  });
+});
+
+describe("current lease index and indexed listings", () => {
+  it("matches the old current clause across lifecycle and cleanup markers without consulting time", () => {
+    const now = vi.spyOn(Date, "now");
+    try {
+      for (const state of ["active", "provisioning", "released", "expired", "failed"] as const)
+        for (const keep of [false, true])
+          for (const releaseDeletesServer of [undefined, false, true])
+            for (const cleanupCompletedAt of [undefined, "invalid", "2026-01-01T00:00:00Z"])
+              for (const cleanupError of [undefined, "pending"])
+                for (const host of ["", "192.0.2.1"]) {
+                  const lease = testLease({
+                    state,
+                    keep,
+                    releaseDeletesServer,
+                    cleanupCompletedAt,
+                    cleanupError,
+                    host,
+                  });
+                  const expected = Boolean(
+                    leaseIsLive(lease) ||
+                    ((lease.keep || lease.releaseDeletesServer === false) &&
+                      !leaseProviderCleanupConfirmed(lease)),
+                  );
+                  for (const time of [0, 8e12]) {
+                    now.mockReturnValue(time);
+                    expect(leaseIsListedCurrent(lease)).toBe(expected);
+                  }
+                }
+      expect(now).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it.each(leaseIndexes)(
+    "maintains $name with bounded backfill, daily audit and generation restarts",
+    async (index) => {
+      const storage = new ObservedMemoryStorage();
+      const member = testLease({ keep: false });
+      storage.seed(`lease:${member.id}`, member);
+      for (let i = 1; i < 4200; i++) {
+        const id = `cbx_${i.toString(16).padStart(12, "0")}`;
+        storage.seed(`lease:${id}`, testLease({ id, state: "released", keep: false }));
+      }
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        await maintainLeaseIndex(storage, index, 100, "one");
+        expect(storage.value(index.stateKey)).toMatchObject({ complete: false, scanned: 4096 });
+        expect(leaseMaintenanceIndexReady(storage.value(index.stateKey), index)).toBe(false);
+        expect(storage.listOptions.filter(({ prefix }) => prefix === "lease:")).toHaveLength(32);
+        await maintainLeaseIndex(storage, index, 100, "one");
+        expect(leaseMaintenanceIndexReady(storage.value(index.stateKey), index)).toBe(true);
+        expect(storage.value(`${index.prefix}${member.id}`)).toBe(1);
+        await storage.delete(`${index.prefix}${member.id}`);
+        const auditAt = storage.value<LeaseMaintenanceState>(index.stateKey)!.nextAuditAt!;
+        await maintainLeaseIndex(storage, index, auditAt - 1, "one");
+        expect(storage.value(`${index.prefix}${member.id}`)).toBeUndefined();
+        await maintainLeaseIndex(storage, index, auditAt, "one");
+        expect(storage.value(index.stateKey)).toMatchObject({
+          complete: true,
+          auditScanned: 4096,
+          auditAdded: 1,
+        });
+        await storage.delete(`${index.prefix}${member.id}`);
+        // A new generation must restart an active audit, including keys already passed.
+        await maintainLeaseIndex(storage, index, auditAt, "two");
+        expect(storage.value(`${index.prefix}${member.id}`)).toBe(1);
+        expect(storage.value(index.stateKey)).toMatchObject({
+          generation: "two",
+          auditScanned: 4096,
+          auditAdded: 1,
+        });
+        await maintainLeaseIndex(storage, index, auditAt, "two");
+        expect(storage.value<LeaseMaintenanceState>(index.stateKey)!.nextAuditAt).toBe(
+          auditAt + 86_400_000,
+        );
+        await storage.delete(`${index.prefix}${member.id}`);
+        storage.seed(index.stateKey, {
+          version: index.version,
+          complete: false,
+          generation: "two",
+          startAfter: "lease:zzzz",
+        });
+        await maintainLeaseIndex(storage, index, auditAt, "three");
+        expect(storage.value(`${index.prefix}${member.id}`)).toBe(1);
+        expect(storage.value(index.stateKey)).toMatchObject({ generation: "three", scanned: 4096 });
+        const lines = log.mock.calls.map(([line]) => JSON.parse(String(line)));
+        expect(
+          lines.some((line) => line.index === index.name && line.phase === "backfill_complete"),
+        ).toBe(true);
+        expect(
+          lines.some((line) => line.index === index.name && line.phase === "audit_complete"),
+        ).toBe(true);
+      } finally {
+        log.mockRestore();
+      }
+    },
+    30_000,
+  );
+
+  it("preserves the deployed maintenance state while the current index backfills", async () => {
+    const storage = new ObservedMemoryStorage();
+    const deployed = { version: 1, complete: true, nextAuditAt: 86_400_000, generation: "old" };
+    storage.seed("lease-maintenance-state", deployed);
+    expect(leaseMaintenanceVersion).toBe(1);
+    expect(leaseMaintenanceStateKey).toBe("lease-maintenance-state");
+    expect(leaseMaintenanceIndexReady(storage.value("lease-maintenance-state"))).toBe(true);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await maintainLeaseIndex(storage, leaseCurrentIndex, 1, "new");
+      expect(storage.value("lease-maintenance-state")).toEqual(deployed);
+      storage.resetListOptions();
+      await maintainLeaseMaintenanceIndex(storage, 1, "new");
+      expect(storage.value("lease-maintenance-state")).toMatchObject({
+        version: 1,
+        complete: true,
+      });
+      expect(
+        log.mock.calls
+          .map(([line]) => JSON.parse(String(line)))
+          .filter((line) => line.index === "maintenance")
+          .map((line) => line.phase),
+      ).toEqual(["audit_complete"]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("prunes current membership only after a transaction-fenced reread", async () => {
+    const storage = new MemoryStorage();
+    const racing = testLease({ keep: false, state: "released" });
+    storage.seed(`lease:${racing.id}`, racing);
+    storage.seed(leaseCurrentKey(racing.id), 1);
+    storage.seed(leaseCurrentKey("missing"), 1);
+    storage.seed(leaseCurrentIndex.stateKey, { version: 1, complete: true, nextAuditAt: 100 });
+    let reads = 0;
+    storage.afterGet = async (key) => {
+      if (key === `lease:${racing.id}` && ++reads === 2)
+        await putLeaseRecord(storage, { ...racing, keep: true });
+    };
+    await maintainLeaseIndex(storage, leaseCurrentIndex, 1);
+    expect(reads).toBeGreaterThanOrEqual(3);
+    expect(storage.value(leaseCurrentKey(racing.id))).toBe(1);
+    expect(storage.value(leaseCurrentKey("missing"))).toBeUndefined();
+  });
+
+  it.each(leaseIndexes)(
+    "leaves no lease on a failed $name membership publish and deletes all keys",
+    async (index) => {
+      const storage = new MemoryStorage();
+      const lease = testLease({});
+      storage.beforePut = async (key) => {
+        if (key === `${index.prefix}${lease.id}`) throw new Error("membership failed");
+      };
+      await expect(putLeaseRecord(storage, lease)).rejects.toThrow("membership failed");
+      expect(storage.value(`lease:${lease.id}`)).toBeUndefined();
+      storage.beforePut = undefined;
+      await putLeaseRecord(storage, lease);
+      const order: string[] = [];
+      storage.beforeDelete = async (key) => {
+        order.push(key);
+      };
+      await deleteLeaseRecord(storage, lease.id);
+      expect(order).toEqual([
+        `lease:${lease.id}`,
+        leaseMaintenanceKey(lease.id),
+        leaseCurrentKey(lease.id),
+      ]);
+      expect(order.every((key) => storage.value(key) === undefined)).toBe(true);
+    },
+  );
+
+  it("orders mixed membership transitions and coalesces all deletes", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({ state: "released", keep: true });
+    const order: string[] = [];
+    storage.beforePut = async (key) => {
+      order.push(`put:${key}`);
+    };
+    storage.beforeDelete = async (key) => {
+      order.push(`delete:${key}`);
+    };
+    await putLeaseRecord(storage, lease);
+    expect(order).toEqual([
+      `put:${leaseCurrentKey(lease.id)}`,
+      `put:lease:${lease.id}`,
+      `delete:${leaseMaintenanceKey(lease.id)}`,
+    ]);
+    order.length = 0;
+    await putLeaseRecord(storage, { ...lease, keep: false, cleanupError: "pending" });
+    expect(order).toEqual([
+      `put:${leaseMaintenanceKey(lease.id)}`,
+      `put:lease:${lease.id}`,
+      `delete:${leaseCurrentKey(lease.id)}`,
+    ]);
+    const issued: string[] = [];
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const coalescing = {
+      transactionSync: () => undefined,
+      delete: async (key: string) => {
+        issued.push(key);
+        await pending;
+      },
+    } as unknown as MemoryStorage;
+    const deletion = deleteLeaseRecord(coalescing, lease.id);
+    expect(issued).toEqual([
+      `lease:${lease.id}`,
+      leaseMaintenanceKey(lease.id),
+      leaseCurrentKey(lease.id),
+    ]);
+    finish();
+    await deletion;
+  });
+
+  it("audits a completed current index immediately on generation change", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({ state: "released", keep: true });
+    storage.seed(`lease:${lease.id}`, lease);
+    storage.seed(leaseCurrentIndex.stateKey, {
+      version: 1,
+      complete: true,
+      nextAuditAt: 100,
+      generation: "old",
+    });
+    await maintainLeaseIndex(storage, leaseCurrentIndex, 1, "old");
+    expect(storage.value(leaseCurrentKey(lease.id))).toBeUndefined();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await maintainLeaseIndex(storage, leaseCurrentIndex, 1, "new");
+      expect(storage.value(leaseCurrentKey(lease.id))).toBe(1);
+      expect(storage.value(leaseCurrentIndex.stateKey)).toMatchObject({
+        complete: true,
+        generation: "new",
+        auditAdded: 1,
+      });
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  async function listingFixture() {
+    const storage = new BoundedObservedMemoryStorage();
+    const fleet = testFleet(storage, {}, { CRABBOX_SESSION_SECRET: "synthetic-list-secret" });
+    await fleet.ready();
+    for (let i = 0; i < 24; i++) {
+      const id = `cbx_${i.toString(16).padStart(12, "0")}`;
+      // oxlint-disable-next-line eslint/no-await-in-loop -- seed each lease and its indexes together.
+      await putLeaseRecord(
+        storage,
+        testLease({
+          id,
+          state: (["active", "provisioning", "released", "expired"] as const)[i % 4]!,
+          provider: i % 3 ? "aws" : "hetzner",
+          keep: i % 5 === 0,
+          owner: i % 2 ? "alice@example.com" : "bob@example.com",
+          org: i % 3 ? "example-org" : "other-org",
+          createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+        }),
+      );
+    }
+    // Stale and missing entries must not leak into either list implementation.
+    for (const index of leaseIndexes) storage.seed(`${index.prefix}cbx_ffffffffffff`, 1);
+    return { storage, fleet };
+  }
+
+  it.each([
+    { path: "/v1/leases", admin: false },
+    { path: "/v1/leases", admin: true },
+    { path: "/v1/admin/leases", admin: true },
+  ])(
+    "matches raw sets and newest-first results for every filter combination: $path admin=$admin",
+    async ({ path, admin }) => {
+      /* oxlint-disable eslint/no-await-in-loop -- compare each frozen filter combination and its cursor chain. */
+      const { storage, fleet } = await listingFixture();
+      const headers = {
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+        ...(admin ? { "x-crabbox-admin": "true" } : {}),
+      };
+      for (const view of ["", "current"])
+        for (const state of ["", "active", "provisioning", "released"])
+          for (const provider of ["", "aws"])
+            for (const owner of ["", "alice@example.com"])
+              for (const org of ["", "example-org", "other-org", "invalid:org"]) {
+                const query = new URLSearchParams({
+                  view,
+                  state,
+                  provider,
+                  owner,
+                  org,
+                  limit: "5",
+                });
+                const read = async (paged: boolean) => {
+                  const leases: LeaseRecord[] = [];
+                  let cursor = "";
+                  let pages = 0;
+                  do {
+                    const params = new URLSearchParams(query);
+                    if (paged) {
+                      params.set("pagination", "keyset-v1");
+                      params.set("cursor", cursor);
+                    }
+                    const response = await fleet.fetch(
+                      request("GET", `${path}?${params}`, { headers }),
+                    );
+                    expect(response.status).toBe(200);
+                    const body = (await response.json()) as {
+                      leases: LeaseRecord[];
+                      nextCursor?: string;
+                    };
+                    leases.push(...body.leases);
+                    cursor = body.nextCursor ?? "";
+                    expect(++pages).toBeLessThan(10);
+                  } while (cursor);
+                  return leases.map((lease) => lease.id);
+                };
+                for (const index of leaseIndexes)
+                  storage.seed(index.stateKey, { version: 1, complete: false });
+                const raw = await read(true);
+                const recent = await read(false);
+                for (const index of leaseIndexes)
+                  storage.seed(index.stateKey, { version: 1, complete: true });
+                expect(await read(true)).toEqual(raw);
+                expect(await read(false)).toEqual(recent);
+              }
+      /* oxlint-enable eslint/no-await-in-loop */
+    },
+    60_000,
+  );
+
+  it("lists current and active leases without history pages at scale", async () => {
+    const { storage, fleet } = await listingFixture();
+    for (let i = 100; i < 2100; i++) {
+      const id = `cbx_${i.toString(16).padStart(12, "0")}`;
+      storage.seed(`lease:${id}`, testLease({ id, state: "released", keep: false }));
+    }
+    for (const index of leaseIndexes) storage.seed(index.stateKey, { version: 1, complete: true });
+    const headers = { "x-crabbox-admin": "true" };
+    for (const query of ["view=current", "state=active"]) {
+      storage.resetListOptions();
+      let cursor = "";
+      const ids: string[] = [];
+      do {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- consume a cursor before requesting its continuation.
+        const response = await fleet.fetch(
+          request(
+            "GET",
+            `/v1/admin/leases?pagination=keyset-v1&limit=100&${query}&cursor=${encodeURIComponent(cursor)}`,
+            { headers },
+          ),
+        );
+        // oxlint-disable-next-line eslint/no-await-in-loop -- response contains the next cursor.
+        const body = (await response.json()) as { leases: LeaseRecord[]; nextCursor?: string };
+        expect(response.status).toBe(200);
+        ids.push(...body.leases.map((lease) => lease.id));
+        cursor = body.nextCursor ?? "";
+      } while (cursor);
+      expect(ids.length).toBeGreaterThan(0);
+      expect(storage.listOptions.filter(({ prefix }) => prefix === "lease:")).toHaveLength(0);
+      expect(storage.listOptions.length).toBeLessThanOrEqual(2);
+    }
+  });
+
+  it("rejects index mode changes and expired readiness but continues raw cursors after readiness", async () => {
+    const { storage, fleet } = await listingFixture();
+    const headers = { "x-crabbox-admin": "true" };
+    const read = async (query: string) =>
+      fleet.fetch(
+        request("GET", `/v1/admin/leases?pagination=keyset-v1&limit=1&${query}`, { headers }),
+      );
+    const raw = await read("view=current");
+    const rawCursor = ((await raw.json()) as { nextCursor: string }).nextCursor;
+    for (const index of leaseIndexes) storage.seed(index.stateKey, { version: 1, complete: true });
+    storage.resetListOptions();
+    expect((await read(`view=current&cursor=${encodeURIComponent(rawCursor)}`)).status).toBe(200);
+    expect(storage.listOptions.map(({ prefix }) => prefix)).toEqual(["lease:"]);
+    for (const query of ["view=current", "state=active"]) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- get each index's own cursor.
+      const first = await read(query);
+      const cursor = encodeURIComponent(
+        // oxlint-disable-next-line eslint/no-await-in-loop -- cursor is returned in this response.
+        ((await first.json()) as { nextCursor: string }).nextCursor,
+      );
+      // oxlint-disable-next-line eslint/no-await-in-loop -- verify mismatch before invalidating readiness.
+      const mismatch = await read(
+        `${query === "view=current" ? "state=active" : "view=current"}&cursor=${cursor}`,
+      );
+      expect(mismatch.status).toBe(400);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- inspect error contract.
+      expect(await mismatch.json()).toEqual({ error: "invalid_lease_cursor" });
+      const index = query === "view=current" ? leaseCurrentIndex : leaseIndexes[0];
+      storage.seed(index.stateKey, { version: 1, complete: false });
+      // oxlint-disable-next-line eslint/no-await-in-loop -- verify readiness expiry.
+      const expired = await read(`${query}&cursor=${cursor}`);
+      expect(expired.status).toBe(409);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- inspect error contract.
+      expect(await expired.json()).toEqual({ error: "lease_cursor_expired" });
+      storage.seed(index.stateKey, { version: 1, complete: true });
+    }
   });
 });

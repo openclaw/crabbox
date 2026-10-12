@@ -70,8 +70,7 @@ import {
 } from "./lease-list";
 import {
   leaseMaintenanceIndexReady,
-  leaseMaintenanceStateKey,
-  maintainLeaseMaintenanceIndex,
+  maintainLeaseIndexes,
   type LeaseMaintenanceState,
 } from "./lease-maintenance-index";
 import {
@@ -84,7 +83,15 @@ import {
   validateProvisioningRecord,
   type LeaseProvisioningOperation,
 } from "./lease-provisioning";
-import { deleteLeaseRecord, leaseMaintenancePrefix, putLeaseRecord } from "./lease-record-store";
+import {
+  deleteLeaseRecord,
+  leaseCurrentIndex,
+  leaseIndexes,
+  leaseIsListedCurrent,
+  leaseMaintenanceIndex,
+  putLeaseRecord,
+  type LeaseIndexDescriptor,
+} from "./lease-record-store";
 import { isRegisteredLease, leaseIsLive } from "./lease-state";
 import type { ProviderResumableProvisioning } from "./provider-provisioning";
 import { ProvisioningAttemptHistory } from "./provisioning-attempts";
@@ -3349,7 +3356,7 @@ export class FleetCoordinator {
     }
     await this.reconcileScheduledAdminGrants(forwardedAdminGrantVersion, preserveForwardedVersion);
     await this.quarantineLegacyWorkspaces();
-    await maintainLeaseMaintenanceIndex(this.state.storage, Date.now(), this.coordinatorGeneration);
+    await maintainLeaseIndexes(this.state.storage, Date.now(), this.coordinatorGeneration);
     // Discovery is not authority: each phase rereads candidates under its own fence.
     // Leave both the lifecycle mutex and Cloudflare input gate open while scanning history.
     const leaseIDs = await this.leaseBridgeOwners({ allowConcurrency: true });
@@ -14645,21 +14652,37 @@ export class FleetCoordinator {
     const cursor = params.get("cursor");
     const startAfter = cursor ? await openLeaseListCursor(cursor, secret) : undefined;
     if (cursor && !startAfter) return json({ error: "invalid_lease_cursor" }, { status: 400 });
+    const selectedIndex = this.leaseListIndex(request);
+    let index = selectedIndex;
+    if (startAfter) {
+      index = leaseIndexes.find((candidate) => startAfter.startsWith(candidate.prefix));
+      // A raw cursor remains raw across index readiness changes.
+      if (index && index !== selectedIndex)
+        return json({ error: "invalid_lease_cursor" }, { status: 400 });
+    }
+    if (index && !(await this.leaseIndexReady(index))) {
+      if (startAfter) return json({ error: "lease_cursor_expired" }, { status: 409 });
+      index = undefined;
+    }
     const limit = Math.max(
       1,
       Math.min(clampLimit(params.get("limit"), leaseListPageSize), leaseListPageSize),
     );
     // One storage page per request bounds both CPU and memory even when no rows are visible.
-    const page = await this.state.storage.list<LeaseRecord>({
-      prefix: "lease:",
+    const page = await this.state.storage.list<LeaseRecord | number>({
+      prefix: index?.prefix ?? "lease:",
       limit,
       noCache: true,
       ...(startAfter ? { startAfter } : {}),
     });
     const matches = this.leaseListFilter(request);
     const leases = [];
-    for (const lease of page.values()) {
-      if ((admin || this.leaseVisibleToRequest(lease, request, false)) && matches(lease)) {
+    for (const [key, value] of page) {
+      const lease = index
+        ? // oxlint-disable-next-line eslint/no-await-in-loop -- hydrate only this bounded index page.
+          await this.getLease(key.slice(index.prefix.length), { noCache: true })
+        : (value as LeaseRecord);
+      if (lease && (admin || this.leaseVisibleToRequest(lease, request, false)) && matches(lease)) {
         leases.push(project(lease));
       }
     }
@@ -14669,6 +14692,20 @@ export class FleetCoordinator {
     return json({ leases, pagination: leaseListPagination, nextCursor });
   }
 
+  private leaseListIndex(request: Request): LeaseIndexDescriptor | undefined {
+    const params = new URL(request.url).searchParams;
+    if (params.get("state") === "active" || params.get("state") === "provisioning")
+      return leaseMaintenanceIndex;
+    return params.get("view") === "current" ? leaseCurrentIndex : undefined;
+  }
+
+  private async leaseIndexReady(index: LeaseIndexDescriptor): Promise<boolean> {
+    const state = await this.state.storage.get<LeaseMaintenanceState>(index.stateKey, {
+      noCache: true,
+    });
+    return leaseMaintenanceIndexReady(state, index);
+  }
+
   private async recentLeases(request: Request, admin: boolean): Promise<LeaseRecord[]> {
     const params = new URL(request.url).searchParams;
     const limit = clampLimit(params.get("limit"), 100);
@@ -14676,7 +14713,7 @@ export class FleetCoordinator {
     const matches = this.leaseListFilter(request);
     const leases: LeaseRecord[] = [];
     if (limit === 0) return leases;
-    await this.visitLeaseRecords((lease) => {
+    await this.visitIndexedLeaseRecords(this.leaseListIndex(request), (lease) => {
       if ((admin || this.leaseVisibleToRequest(lease, request, false)) && matches(lease)) {
         retainRecentLease(leases, summary ? leaseListSummary(lease) : lease, limit);
       }
@@ -15416,10 +15453,7 @@ export class FleetCoordinator {
     const org = orgFilterKey(url);
     if (org === null) return () => false;
     return (lease) =>
-      (!current ||
-        leaseIsLive(lease) ||
-        ((lease.keep || lease.releaseDeletesServer === false) &&
-          !leaseProviderCleanupConfirmed(lease))) &&
+      (!current || leaseIsListedCurrent(lease)) &&
       (!state || lease.state === state) &&
       (!provider || lease.provider === provider) &&
       (!owner || lease.owner === owner) &&
@@ -19735,21 +19769,27 @@ export class FleetCoordinator {
     visitor: (lease: LeaseRecord) => Promise<boolean | void> | boolean | void,
     options: { allowConcurrency?: boolean } = {},
   ): Promise<void> {
+    return this.visitIndexedLeaseRecords(leaseMaintenanceIndex, visitor, options);
+  }
+
+  private async visitIndexedLeaseRecords(
+    index: LeaseIndexDescriptor | undefined,
+    visitor: (lease: LeaseRecord) => Promise<boolean | void> | boolean | void,
+    options: { allowConcurrency?: boolean } = {},
+  ): Promise<void> {
+    if (!index) return this.visitStorageRecords("lease:", visitor, options);
     // Keep every read of an ungated caller (discovery) outside the input gate.
     const readOptions = {
       noCache: true,
       ...(options.allowConcurrency ? { allowConcurrency: true } : {}),
     };
-    const state = await this.state.storage.get<LeaseMaintenanceState>(
-      leaseMaintenanceStateKey,
-      readOptions,
-    );
-    if (!leaseMaintenanceIndexReady(state))
+    const state = await this.state.storage.get<LeaseMaintenanceState>(index.stateKey, readOptions);
+    if (!leaseMaintenanceIndexReady(state, index))
       return this.visitStorageRecords("lease:", visitor, options);
     await this.visitStorageRecords<number>(
-      leaseMaintenancePrefix,
+      index.prefix,
       async (_value, key) => {
-        const lease = await this.getLease(key.slice(leaseMaintenancePrefix.length), readOptions);
+        const lease = await this.getLease(key.slice(index.prefix.length), readOptions);
         if (lease) return visitor(lease);
       },
       options,

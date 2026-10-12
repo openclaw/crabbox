@@ -587,6 +587,39 @@ status, JUnit summary, an event table, and a log tail. The portal run pages mirr
 the `/v1/runs/...` resources but authenticate via the session cookie, so logs and
 events are inspectable without pasting a bearer token into the browser.
 
+## Lease listing paths
+
+`GET /v1/leases` and `GET /v1/admin/leases` share the same selection rules.
+`state=active` or `state=provisioning` reads `lease-maintenance:` once that index
+is ready. Otherwise `view=current` reads `lease-current:` once ready. Other
+queries, and queries whose selected index has not completed backfill, scan
+`lease:` history. Provider, owner, org and visibility filters still apply to the
+freshly loaded lease; index membership never grants access. Legacy requests keep
+their newest-first ordering and existing result limit.
+
+`pagination=keyset-v1&limit=100&projection=summary` reads at most one storage
+page per request, omits large histories, and returns an opaque `nextCursor` even
+when a page contains no visible matches. Continue until the cursor is absent.
+The sealed cursor binds the storage source: raw cursors continue scanning history
+even if an index becomes ready. An index cursor used with filters selecting a
+different source returns `400 invalid_lease_cursor`; an index cursor whose index
+is no longer ready returns `409 lease_cursor_expired`, requiring a fresh listing.
+These are keyset walks, not snapshots of concurrent lease updates.
+
+The CLI uses current summary pages for `crabbox list` and active admin summary
+pages for the orphan lookup in `crabbox list --all`. Older coordinators retain
+the legacy listing fallback. If the active lookup reaches its legacy 500-row limit, the
+CLI warns that orphan status may be incomplete; lookup failures keep the
+existing unavailable-status warning.
+
+Both indexes are maintained with lease writes and deletes. Each has independent
+bounded backfill (32 pages of 128 records per maintenance pass), a daily repair
+audit, and an immediate audit on runtime-generation changes. The current index
+uses the existing definition: live leases, or retained leases (`keep=true` or
+`releaseDeletesServer=false`) without confirmed provider cleanup. Legacy kept
+leases can therefore remain current until cleanup or a retention policy resolves
+them. The maintenance index's state key and version remain unchanged.
+
 ## Lease lifecycle through the broker
 
 **Create.** The CLI generates the lease ID (`cbx_<12 hex>`), a fresh opaque

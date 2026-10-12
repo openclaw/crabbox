@@ -20,6 +20,8 @@
 
 ### Fixes
 
+- Coordinator/CLI: use independent current and maintenance indexes for lease listings and paginate active admin lookups, preserving filters, history fallback and cursor source checks. [PR TODO-PR-LINK].
+
 - AWS: resolve automatic runner images in each fallback region, recover missing promotions with stock images, and let exact-type Spot requests promptly use enabled On-Demand fallback. [PR 2787](https://github.com/openclaw/crabbox/pull/2787).
 - Coordinator: index leases with pending maintenance so alarm reconciliation, discovery, provider access, slug lookup, and registration avoid scanning settled history, with bounded backfill and daily repair audits. [PR 2786](https://github.com/openclaw/crabbox/pull/2786).
 

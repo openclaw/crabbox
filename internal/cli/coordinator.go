@@ -1952,6 +1952,43 @@ func (c *CoordinatorClient) EgressStatus(ctx context.Context, leaseID string) (C
 	return res, err
 }
 
+// ActiveAdminLeases reads every active lease for pool orphan detection.
+// The bool reports a possibly truncated response from a legacy coordinator.
+func (c *CoordinatorClient) ActiveAdminLeases(ctx context.Context) ([]CoordinatorLease, bool, error) {
+	const pagination = "keyset-v1"
+	// recentLeases clamps legacy requests to 500, even when the caller asks for more.
+	const legacyLimit = 500
+	values := url.Values{"state": {"active"}, "limit": {"100"}, "projection": {"summary"}, "pagination": {pagination}}
+	var leases []CoordinatorLease
+	seenCursors := make(map[string]bool)
+	for {
+		var res struct {
+			Leases     []CoordinatorLease `json:"leases"`
+			Pagination string             `json:"pagination"`
+			NextCursor string             `json:"nextCursor"`
+		}
+		if err := c.doRead(ctx, "/v1/admin/leases?"+values.Encode(), &res); err != nil {
+			return nil, false, err
+		}
+		if res.Pagination != pagination {
+			if values.Get("cursor") != "" {
+				return nil, false, fmt.Errorf("coordinator lease pagination changed during listing; retry list")
+			}
+			legacy, err := c.AdminLeases(ctx, "active", "", "", legacyLimit)
+			return legacy, len(legacy) == legacyLimit, err
+		}
+		leases = append(leases, res.Leases...)
+		if res.NextCursor == "" {
+			return leases, false, nil
+		}
+		if seenCursors[res.NextCursor] {
+			return nil, false, fmt.Errorf("coordinator lease pagination did not advance")
+		}
+		seenCursors[res.NextCursor] = true
+		values.Set("cursor", res.NextCursor)
+	}
+}
+
 func (c *CoordinatorClient) AdminLeases(ctx context.Context, state, owner, org string, limit int) ([]CoordinatorLease, error) {
 	var res struct {
 		Leases []CoordinatorLease `json:"leases"`

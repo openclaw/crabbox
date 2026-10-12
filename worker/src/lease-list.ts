@@ -59,7 +59,7 @@ export async function openLeaseListCursor(
       bytes.slice(12),
     );
     const key = new TextDecoder().decode(plaintext);
-    return /^lease:cbx_[a-f0-9]{12}$/.test(key) ? key : undefined;
+    return /^lease(?:-maintenance|-current)?:cbx_[a-f0-9]{12}$/.test(key) ? key : undefined;
   } catch {
     return undefined;
   }

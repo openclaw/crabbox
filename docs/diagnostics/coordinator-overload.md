@@ -127,17 +127,43 @@ between a lease write and its index write. The existing 15-minute
 scheduled maintenance trigger advances scans even when no lease alarm is armed;
 no alarm-selection behavior changes.
 
-Completion emits one JSON line with event `coordinator.lease_maintenance_index`:
+Completion emits one JSON line with event `coordinator.lease_maintenance_index`
+and `index` (`maintenance` or `current`):
 `backfill_complete` includes `scanned` and `members`; `audit_complete` includes
 `scanned` and `added`. A nonzero audit `added` count indicates missing membership
 and warrants investigating a missed write path. Stale entries are removed only
 in maintenance, after a transaction rereads the lease and confirms it is still
 missing or no longer a member. Ordinary index readers never prune.
 
+## Index-backed lease listings
+
+`crabbox list` previously paged through all roughly 34,000 retained `lease:`
+records (about 340 requests per full walk; production observed roughly 650 such
+page requests per hour). Current listings now use a separate
+`lease-current:<leaseID>` index after backfill. Active and provisioning queries
+use the existing maintenance index, whose membership includes all live leases.
+The same selection accelerates legacy newest-first lists and admin lease lists.
+`crabbox list --all` now paginates its active admin lookup instead of relying on
+a single capped history walk; older coordinators retain the legacy fallback with
+a warning when its limit is reached.
+
+The current index has its own `lease-current-state`, version 1, bounded backfill,
+daily audit and runtime-generation repair. Introducing it does not reset the
+already-complete `lease-maintenance-state` version 1. Both indexes use the same
+write funnel and transaction-fenced stale pruning. Until the selected index is
+ready, listings retain raw history scans. Sealed keyset cursors preserve their
+source across pages; an unavailable indexed source requires restarting the list.
+
+The current predicate is deliberately unchanged. Legacy `keep=true` leases
+without confirmed cleanup still make roughly 29% of retained history current.
+That set cannot safely use the smaller maintenance index. Resolving these legacy
+leases requires a reconciliation/retention decision, not a listing-filter change.
+
 ## Remaining work
 
-Portal views, recent leases, administrative lease/host audits, usage and monthly
-cost accounting still scan complete history because their answers include
+Portal views, unfiltered or historical lease listings, administrative lease/host
+audits, usage and monthly cost accounting still scan complete history because
+their answers include
 terminal records. AWS/Azure orphan sweeps, runtime-adapter identity reclamation,
 and host reservations also retain complete-history reads: omitting ownership
 or reservation evidence could authorize unsafe cloud-resource reuse/deletion.
