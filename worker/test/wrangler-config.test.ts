@@ -109,6 +109,12 @@ describe("wrangler config", () => {
     expect(wranglerConfig).toContain('"version_metadata"');
     expect(wranglerConfig).toContain('"binding": "CF_VERSION_METADATA"');
   });
+
+  it("keeps Workers Logs enabled without sampling away rare failures", () => {
+    const observability = wranglerConfig.match(/"observability"\s*:\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(observability).toMatch(/"enabled"\s*:\s*true/);
+    expect(observability).toMatch(/"head_sampling_rate"\s*:\s*1\s*,/);
+  });
 });
 
 function configValues(name: string): number[] {
