@@ -158,12 +158,15 @@ kinds:
   from `crabbox list` output. They render as muted, disabled rows with status
   badges, inferred GitHub Actions run/workflow links, `stuck` markers for
   long-queued or long-running Actions, and a copyable local stop command.
-  The home page selects at most 200 visible non-stale runners by newest
-  `updatedAt`, skipping stale rows during the storage scan. Runners that no
-  longer appear in a sync are marked stale and remain available through the
-  runner list API and runner detail pages, independently of the home page cap.
-  Stale rows older than seven days since `updatedAt` are pruned in bounded
-  maintenance batches.
+  Org-wide inventory sync marks missing runners stale across owners.
+  The portal excludes stale rows, including runners last seen more than two
+  hours ago (`EXTERNAL_RUNNER_FRESHNESS`), and selects at most 200 visible runners
+  by newest `updatedAt`. Duplicate provider/ID/org rows use the newest
+  `lastSeenAt` within the caller's visibility. Stale rows remain available through
+  the runner list API and runner detail pages, independently of this cap.
+  Rows last seen more than seven days
+  ago, and stale rows older than seven days since `updatedAt`, are pruned in
+  bounded maintenance batches.
 - **Dedicated hosts** — when AWS credentials and a region are configured, admins
   see EC2 Mac Dedicated Host inventory as capacity rows. Normal users see only
   hosts attached to active leases already visible to them. Each visible row

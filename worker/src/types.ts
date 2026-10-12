@@ -1171,6 +1171,7 @@ export interface ExternalRunnerInput {
 
 export interface ExternalRunnerSyncRequest {
   provider?: string;
+  inventoryScope?: "org";
   runners?: ExternalRunnerInput[];
 }
 

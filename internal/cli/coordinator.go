@@ -2544,12 +2544,16 @@ func (c *CoordinatorClient) CreateArtifactUploads(ctx context.Context, input Coo
 	return res, err
 }
 
-func (c *CoordinatorClient) SyncExternalRunners(ctx context.Context, provider string, runners []CoordinatorExternalRunner) (CoordinatorExternalRunnerSyncResponse, error) {
+func (c *CoordinatorClient) SyncExternalRunners(ctx context.Context, provider string, runners []CoordinatorExternalRunner, inventoryScope string) (CoordinatorExternalRunnerSyncResponse, error) {
 	var res CoordinatorExternalRunnerSyncResponse
-	err := c.do(ctx, http.MethodPost, "/v1/runners/sync", map[string]any{
+	input := map[string]any{
 		"provider": provider,
 		"runners":  runners,
-	}, &res)
+	}
+	if inventoryScope != "" {
+		input["inventoryScope"] = inventoryScope
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/runners/sync", input, &res)
 	return res, err
 }
 

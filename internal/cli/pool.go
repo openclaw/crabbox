@@ -306,7 +306,7 @@ func syncExternalRunners(ctx context.Context, cfg Config, backend Backend) error
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	_, err = client.SyncExternalRunners(ctx, "blacksmith-testbox", runners)
+	_, err = client.SyncExternalRunners(ctx, "blacksmith-testbox", runners, "org")
 	return err
 }
 

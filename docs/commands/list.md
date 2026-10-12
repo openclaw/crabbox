@@ -92,14 +92,17 @@ same Crabbox list shape as other providers. With `--json` it preserves the
 compatibility fields parsed from the Blacksmith table — id, status, repo, workflow,
 job, ref, and created time — when the upstream table exposes those columns.
 
-When a coordinator is configured, the same command also refreshes owner-scoped
-external runner rows in the portal lease table from the current all-status
-Blacksmith list, and best-effort infers the matching GitHub Actions run/workflow
+When a coordinator is configured, the same command also refreshes external runner
+rows from the org-wide, all-status `blacksmith testbox list --all` inventory using
+`inventoryScope: "org"`, and best-effort infers the matching GitHub Actions run/workflow
 from each row's repo, workflow, ref, and created time. The portal then shows that
 Actions status, tags long-queued or long-running workflow owners as `stuck`,
 exposes a copyable local stop command, and links each row to a read-only runner
-detail page. Runners missing from a later sync are marked stale rather than treated
-as Crabbox leases.
+detail page. Runners missing from a later org-wide sync are marked stale across
+owners within that provider/org. The portal deduplicates visible copies by the
+newest observation and hides stale rows, including those last seen more than two
+hours ago. Sync remains opportunistic when commands run, not a periodic heartbeat;
+runners remain visibility-only records rather than Crabbox leases.
 
 ## Flags
 

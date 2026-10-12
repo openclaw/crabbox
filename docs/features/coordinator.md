@@ -526,23 +526,40 @@ runner leases stay visible without leaking to normal users. External runner rows
 Actions links and stale markers; clicking one opens its visibility-only detail
 page at `/portal/runners/{provider}/{runner-id}`.
 
-Portal home includes at most 200 visible external runners, selected by newest
-`updatedAt` with non-stale runners first. `GET /v1/runners` applies its visibility,
-provider, status, and stale filters before selecting results with the same order;
+Portal home includes at most 200 visible, non-stale external runners. Both the
+portal and `GET /v1/runners` deduplicate visible rows by provider, runner ID, and
+organization, keeping the newest `lastSeenAt` before filtering. Non-admin callers
+still see only their own owner/org rows. A row whose `lastSeenAt` is more than two
+hours old (`EXTERNAL_RUNNER_FRESHNESS`) is treated as stale for display and API
+filters, without changing storage. Exactly two hours old remains fresh.
+`GET /v1/runners` applies its provider, status, and stale filters before selecting
+results by newest `updatedAt`, with non-stale runners first;
 it defaults to 100 results and caps `limit` at 200. The response keeps its
 `runners` array and includes `truncated: true` when more matching rows exist.
-Runner detail lookup is independent of this cap. Reads use uncached storage pages
-of at most 128 records. Maintenance deletes only stale runners whose `updatedAt`
-is more than seven days old, scanning at most 128 records per alarm with a durable
-cursor and hourly repeat scans. Sync refreshes `updatedAt` when marking a runner
-stale or seeing it again, restarting that retention window.
+Runner detail lookup is independent of this cap. Reads and deduplication use
+bounded batches and uncached storage pages of at most 128 records. Maintenance
+deletes runners whose `lastSeenAt` is more than seven days old, regardless of the
+stored stale flag, and stale runners whose `updatedAt` is more than seven days
+old. It scans at most 128 records per alarm with a durable cursor and hourly
+repeat scans, transactionally rechecking each deletion against concurrent sync.
+
+`POST /v1/runners/sync` accepts optional `inventoryScope: "org"` for a complete
+provider/org inventory. Missing runners are then marked stale across all owners
+in that provider/org. Without the field, sync retains the legacy caller-owner/org
+scope; any other field value is rejected. The CLI sets this field for its
+org-wide `blacksmith testbox list --all` inventory. Incoming rows remain owned by
+the caller, and other providers and organizations are untouched. Non-admin sync
+responses include only the caller's rows, even when staling other owners' copies.
 
 Runner synchronization scans historical records in uncached pages and settles bounded
-write batches before returning. It preserves the complete `runners` and newly
-`stale` response arrays, including their order and legacy record identities.
+write batches before returning. It preserves the complete visible `runners` and
+newly `stale` response arrays, including their order and legacy record identities.
 Working memory no longer grows with unrelated or already-stale history; response
 memory still grows with the number and size of newly stale records returned.
 The scan still visits historical runner keys to preserve legacy key compatibility.
+After that read pass, org-wide sync marks other owners' copies stale in bounded
+transactions at their existing keys, rechecking for newer observations before
+writing. Only caller-visible rows are retained for the response.
 
 The CLI's best-effort external-runner sync has a single five-second budget
 covering inventory, optional Actions enrichment, credential resolution, and the

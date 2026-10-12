@@ -340,8 +340,9 @@ func TestLifecycleProviderOverrideRecomputesSingleTargetDefaults(t *testing.T) {
 
 func TestSyncExternalRunnersBestEffortPostsBlacksmithJSONList(t *testing.T) {
 	var posted struct {
-		Provider string                      `json:"provider"`
-		Runners  []CoordinatorExternalRunner `json:"runners"`
+		Provider       string                      `json:"provider"`
+		InventoryScope string                      `json:"inventoryScope"`
+		Runners        []CoordinatorExternalRunner `json:"runners"`
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/runners/sync" {
@@ -369,7 +370,7 @@ func TestSyncExternalRunnersBestEffortPostsBlacksmithJSONList(t *testing.T) {
 	if len(backend.requests) != 1 || !backend.requests[0].All {
 		t.Fatalf("list requests=%#v, want one all request", backend.requests)
 	}
-	if posted.Provider != "blacksmith-testbox" || len(posted.Runners) != 1 {
+	if posted.Provider != "blacksmith-testbox" || posted.InventoryScope != "org" || len(posted.Runners) != 1 {
 		t.Fatalf("posted=%#v", posted)
 	}
 	if got := posted.Runners[0]; got.ID != "tbx_01sync" || got.Provider != "blacksmith-testbox" {

@@ -565,6 +565,7 @@ const runtimeAdapterDeleteBatchSize = 16;
 const defaultTerminalRunRetentionDays = 30;
 const runPruneCursorKey = "maintenance:run-prune-cursor";
 const externalRunnerListLimit = 200;
+export const EXTERNAL_RUNNER_FRESHNESS = 2 * 60 * 60_000;
 const externalRunnerRetentionMs = 7 * 24 * 60 * 60_000;
 const externalRunnerPruneIntervalMs = 60 * 60_000;
 const externalRunnerPruneKey = "maintenance:runner-prune";
@@ -16041,6 +16042,9 @@ export class FleetCoordinator {
     if (!provider) {
       return json({ error: "invalid_provider" }, { status: 400 });
     }
+    if (input.inventoryScope !== undefined && input.inventoryScope !== "org") {
+      return json({ error: "invalid_inventory_scope" }, { status: 400 });
+    }
     const rawRunners = Array.isArray(input.runners) ? input.runners : [];
     if (rawRunners.length > maxExternalRunnerSyncItems) {
       return json({ error: "too_many_runners" }, { status: 400 });
@@ -16056,13 +16060,22 @@ export class FleetCoordinator {
     }
     const previous = new Map<string, ExternalRunnerRecord>();
     const stale: ExternalRunnerRecord[] = [];
+    let hasForeignMissing = false;
     // Finish the read pass before writing: legacy keys can refer to a canonical
     // key on a later page. Mutating it mid-scan would change snapshot/order semantics.
     for await (const [, runner] of coordinatorStorageEntries<ExternalRunnerRecord>(
       this.state.storage,
       { prefix: externalRunnerPrefix(), limit: storageRecordScanBatchSize, noCache: true },
     )) {
-      if (runner.provider !== provider || runner.owner !== owner || runner.org !== org) {
+      if (
+        runner.provider !== provider ||
+        runner.org !== org ||
+        (input.inventoryScope !== "org" && runner.owner !== owner)
+      ) {
+        continue;
+      }
+      if (runner.owner !== owner) {
+        if (!incoming.has(runner.id) && !runner.stale) hasForeignMissing = true;
         continue;
       }
       if (incoming.has(runner.id)) {
@@ -16089,7 +16102,7 @@ export class FleetCoordinator {
       delete runner.stale;
       synced.push(runner);
     }
-    if (synced.length || stale.length) {
+    if (synced.length || stale.length || hasForeignMissing) {
       let progress =
         await this.state.storage.get<ExternalRunnerPruneProgress>(externalRunnerPruneKey);
       if (!progress) {
@@ -16117,6 +16130,60 @@ export class FleetCoordinator {
           }
         }
       }
+    }
+    if (hasForeignMissing) {
+      let startAfter: string | undefined;
+      const admin = isAdminRequest(request);
+      /* oxlint-disable eslint/no-await-in-loop -- finish each bounded foreign-owner page before reading the next. */
+      do {
+        const page = await this.state.storage.list<ExternalRunnerRecord>({
+          prefix: externalRunnerPrefix(),
+          limit: storageRecordScanBatchSize,
+          noCache: true,
+          ...(startAfter ? { startAfter } : {}),
+        });
+        // Update existing keys in place after the initial read pass. Unlike
+        // canonicalizing legacy keys, this cannot alter later pages' key order.
+        const results = await Promise.allSettled(
+          [...page]
+            .filter(
+              ([, runner]) =>
+                runner.provider === provider &&
+                runner.org === org &&
+                runner.owner !== owner &&
+                !incoming.has(runner.id) &&
+                !runner.stale,
+            )
+            .map(([key]) =>
+              this.state.storage.transaction(async (transaction) => {
+                const current = await transaction.get<ExternalRunnerRecord>(key, { noCache: true });
+                if (
+                  !current ||
+                  current.provider !== provider ||
+                  current.org !== org ||
+                  current.owner === owner ||
+                  incoming.has(current.id) ||
+                  current.stale ||
+                  current.lastSeenAt > nowISO
+                )
+                  return;
+                const missing = { ...current, status: "missing", stale: true, updatedAt: nowISO };
+                await transaction.put(key, missing, { noCache: true });
+                return admin ? missing : undefined;
+              }),
+            ),
+        );
+        for (const result of results) {
+          if (result.status === "rejected" && !failed) {
+            failed = true;
+            writeError = result.reason;
+          } else if (result.status === "fulfilled" && result.value) {
+            stale.push(result.value);
+          }
+        }
+        startAfter = page.size === storageRecordScanBatchSize ? [...page.keys()].at(-1) : undefined;
+      } while (startAfter);
+      /* oxlint-enable eslint/no-await-in-loop */
     }
     if (failed) throw writeError;
     return json({
@@ -19976,12 +20043,12 @@ export class FleetCoordinator {
       return;
     }
     for (const [key, runner] of page) {
-      if (runner.stale !== true || !(Date.parse(runner.updatedAt) < cutoff)) continue;
-      // Sync can revive a stale row after discovery; only delete the current stale version.
+      if (!externalRunnerExpired(runner, cutoff)) continue;
+      // Sync can revive a row after discovery; recheck the current version transactionally.
       // oxlint-disable-next-line eslint/no-await-in-loop -- bounded page, with each deletion fenced against concurrent sync.
       await this.state.storage.transaction(async (transaction) => {
         const current = await transaction.get<ExternalRunnerRecord>(key, { noCache: true });
-        if (current?.stale === true && Date.parse(current.updatedAt) < cutoff) {
+        if (current && externalRunnerExpired(current, cutoff)) {
           await transaction.delete(key);
         }
       });
@@ -20008,28 +20075,67 @@ export class FleetCoordinator {
     } = {},
   ): Promise<{ runners: ExternalRunnerRecord[]; truncated: boolean }> {
     const runners: ExternalRunnerRecord[] = [];
-    let truncated = false;
     const admin = isAdminRequest(request);
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
-    for await (const [, runner] of coordinatorStorageEntries<ExternalRunnerRecord>(
-      this.state.storage,
-      { prefix: externalRunnerPrefix(), limit: storageRecordScanBatchSize, noCache: true },
-    )) {
-      if (
-        (!admin && (runner.owner !== owner || runner.org !== org)) ||
-        (!includeStale && runner.stale === true) ||
-        !accept(runner)
-      ) {
-        continue;
+    const now = Date.now();
+    const visible = (runner: ExternalRunnerRecord) =>
+      admin || (runner.owner === owner && runner.org === org);
+    const scan = () =>
+      coordinatorStorageEntries<ExternalRunnerRecord>(this.state.storage, {
+        prefix: externalRunnerPrefix(),
+        limit: storageRecordScanBatchSize,
+        noCache: true,
+      });
+    type Candidate = { key: string; runner: ExternalRunnerRecord };
+    const compare = (a: Candidate, b: Candidate) =>
+      compareExternalRunners(a.runner, b.runner) || a.key.localeCompare(b.key);
+    let after: Candidate | undefined;
+    /* oxlint-disable eslint/no-await-in-loop -- each bounded candidate batch must resolve winners before advancing. */
+    while (runners.length <= limit) {
+      const candidates: Candidate[] = [];
+      for await (const [key, stored] of scan()) {
+        if (!visible(stored)) continue;
+        const runner = externalRunnerForDisplay(stored, now);
+        if ((!includeStale && runner.stale === true) || !accept(runner)) continue;
+        const candidate = { key, runner };
+        if (after && compare(candidate, after) <= 0) continue;
+        const index = candidates.findIndex((other) => compare(candidate, other) < 0);
+        candidates.splice(index < 0 ? candidates.length : index, 0, candidate);
+        if (candidates.length > storageRecordScanBatchSize) candidates.pop();
       }
-      const index = runners.findIndex((other) => compareExternalRunners(runner, other) < 0);
-      runners.splice(index < 0 ? runners.length : index, 0, runner);
-      if (runners.length > limit) {
-        runners.pop();
-        truncated = true;
+      if (!candidates.length) break;
+      after = candidates.at(-1);
+
+      // Resolve only this bounded batch's identities. Check unfiltered visible
+      // rows too, so an older matching copy cannot resurrect a filtered winner.
+      const newest = new Map<string, Candidate>();
+      for (const candidate of candidates) {
+        newest.set(externalRunnerIdentity(candidate.runner), candidate);
       }
+      for await (const [key, runner] of scan()) {
+        if (!visible(runner)) continue;
+        const identity = externalRunnerIdentity(runner);
+        const prior = newest.get(identity);
+        if (
+          prior &&
+          (runner.lastSeenAt > prior.runner.lastSeenAt ||
+            (runner.lastSeenAt === prior.runner.lastSeenAt && key.localeCompare(prior.key) < 0))
+        ) {
+          newest.set(identity, { key, runner });
+        }
+      }
+      for (const candidate of candidates) {
+        if (newest.get(externalRunnerIdentity(candidate.runner))?.key === candidate.key) {
+          runners.push(candidate.runner);
+          if (runners.length > limit) break;
+        }
+      }
+      if (candidates.length < storageRecordScanBatchSize) break;
     }
+    /* oxlint-enable eslint/no-await-in-loop */
+    const truncated = runners.length > limit;
+    if (truncated) runners.pop();
     return { runners, truncated };
   }
 
@@ -25716,6 +25822,23 @@ function compareExternalRunners(a: ExternalRunnerRecord, b: ExternalRunnerRecord
     (b.updatedAt || b.lastSeenAt || b.createdAt || b.firstSeenAt).localeCompare(
       a.updatedAt || a.lastSeenAt || a.createdAt || a.firstSeenAt,
     )
+  );
+}
+
+function externalRunnerIdentity(runner: ExternalRunnerRecord): string {
+  return externalRunnerKey(runner.provider, runner.id, "", runner.org);
+}
+
+function externalRunnerForDisplay(runner: ExternalRunnerRecord, now: number): ExternalRunnerRecord {
+  return Date.parse(runner.lastSeenAt) < now - EXTERNAL_RUNNER_FRESHNESS
+    ? { ...runner, stale: true }
+    : runner;
+}
+
+function externalRunnerExpired(runner: ExternalRunnerRecord, cutoff: number): boolean {
+  return (
+    Date.parse(runner.lastSeenAt) < cutoff ||
+    (runner.stale === true && Date.parse(runner.updatedAt) < cutoff)
   );
 }
 
