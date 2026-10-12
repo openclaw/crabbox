@@ -1738,6 +1738,26 @@ func writeEC2Error(w http.ResponseWriter, code, message string, status int) {
 	_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Response><Errors><Error><Code>` + code + `</Code><Message>` + message + `</Message></Error></Errors></Response>`))
 }
 
+func TestAWSMissingLinuxAMIAllowsRegionFallback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+			return
+		}
+		if r.Form.Get("Action") != "DescribeImages" || r.Form.Get("Owner.1") != awsUbuntuOwner || r.Form.Get("Filter.1.Value.1") != "arm64" {
+			t.Errorf("unexpected image query: %v", r.Form)
+		}
+		writeEC2XML(w, `<DescribeImagesResponse><imagesSet /></DescribeImagesResponse>`)
+	}))
+	defer server.Close()
+	cfg := baseConfig()
+	cfg.TargetOS, cfg.Architecture, cfg.OSImage = targetLinux, ArchitectureARM64, "ubuntu:26.04"
+	_, err := testAWSClient(server.URL).resolveAMI(context.Background(), cfg)
+	if err == nil || !isRetryableAWSRegionProvisioningError(err) || isAWSMarketFallbackError(err) {
+		t.Fatalf("missing regional image must allow region fallback without market fallback: %v", err)
+	}
+}
+
 func TestAWSWindowsOSSelectorAMI(t *testing.T) {
 	for _, selector := range []string{"", "ubuntu:26.04", "windows-server:2022", "windows-server:2025"} {
 		t.Run(selector, func(t *testing.T) {

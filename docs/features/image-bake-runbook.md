@@ -19,6 +19,12 @@ registers an AMI as the default for a given **target**, **architecture**, and
 scoped: a macOS promotion is only selected by `target=macos` leases and never
 replaces the Linux or Windows default.
 
+When capacity fallback changes regions, the coordinator selects that region's
+promotion or its stock image. A missing automatic promotion also falls back
+once to stock. Stock runners use the normal bootstrap and may take longer to
+prepare; image capability requirements still require a matching promoted image.
+Explicit AMIs and checkpoint snapshots retain their requested image source.
+
 Two ways to point a lease at a specific image during testing:
 
 - Set the provider override env var, for example `CRABBOX_AWS_AMI=ami-...`, to

@@ -144,6 +144,10 @@ class AWSQueryError extends Error {
   }
 }
 
+class AWSImageNotFoundError extends Error {
+  override name = "AWSImageNotFoundError";
+}
+
 async function readAWSCapacityErrorBody(response: Response): Promise<string | undefined> {
   const reader = response.clone().body?.getReader();
   if (!reader) return undefined;
@@ -1405,13 +1409,16 @@ export class EC2SpotClient {
         );
       }
       const capabilityImageRequired = hasImageRequirements(config.imageRequirements);
+      const automaticImageSelection =
+        config.selectedImage?.source === "promoted" ||
+        Object.keys(config.awsPromotedAMIs).length > 0;
       const defaultImageID = await diagnostics.measure("image", async () =>
         config.awsSnapshot
           ? await (async () => {
               transientImageID = await this.registerSnapshotImage(config.awsSnapshot, leaseID);
               return this.waitForImageAvailable(transientImageID);
             })()
-          : config.target === "macos" || capabilityImageRequired
+          : config.target === "macos" || capabilityImageRequired || automaticImageSelection
             ? ""
             : await this.resolveAMI(config),
       );
@@ -1465,8 +1472,7 @@ export class EC2SpotClient {
         (config.target === "macos"
           ? new Map<string, number>()
           : await diagnostics.measure("instance_types", () => this.instanceTypeVCPUs(candidates)));
-      const allowCapacityHandoff =
-        !config.awsPrivate && !config.serverTypeExplicit && config.target !== "macos";
+      const allowCapacityHandoff = !config.awsPrivate && config.target !== "macos";
       const hasQuotaEligibleCandidate = (
         serverTypes: string[],
         market: LeaseConfig["capacityMarket"],
@@ -1484,6 +1490,7 @@ export class EC2SpotClient {
         );
       const history = new ProvisioningAttemptHistory();
       const imageCache = new Map<string, string>();
+      const missingPromotedImages = new Set<string>();
       const marketFallbackCandidates: string[] = [];
       const pinnedMacOSImageID =
         config.target === "macos" ? config.awsAMI || this.env.CRABBOX_AWS_AMI || "" : "";
@@ -1494,8 +1501,14 @@ export class EC2SpotClient {
         const promotedImageID =
           config.awsPromotedAMIs[
             awsPromotedAMIConfigKey(this.region, candidateConfig.serverType)
-          ] ?? "";
-        if (promotedImageID) {
+          ] ??
+          (!capabilityImageRequired &&
+          config.selectedImage?.source === "promoted" &&
+          config.selectedImage.region === this.region &&
+          candidateConfig.serverType === config.serverType
+            ? config.selectedImage.id
+            : "");
+        if (promotedImageID && !missingPromotedImages.has(promotedImageID)) {
           return promotedImageID;
         }
         if (capabilityImageRequired) {
@@ -1503,23 +1516,88 @@ export class EC2SpotClient {
             `no AWS AMI found in ${this.region} for ${candidateConfig.serverType} satisfying the requested image capabilities`,
           );
         }
-        if (candidateConfig.target !== "macos") {
-          return this.resolveAMI(candidateConfig);
-        }
-        if (pinnedMacOSImageID && candidateConfig.serverType === config.serverType) {
+        if (
+          pinnedMacOSImageID &&
+          candidateConfig.serverType === config.serverType &&
+          !missingPromotedImages.has(pinnedMacOSImageID)
+        ) {
           return pinnedMacOSImageID;
         }
-        const query = awsMacOSAMIQuery(candidateConfig.serverType);
-        const cacheKey = `${query.name}\0${query.architecture}`;
+        const query =
+          candidateConfig.target === "macos"
+            ? awsMacOSAMIQuery(candidateConfig.serverType)
+            : undefined;
+        const cacheKey = query
+          ? `${query.name}\0${query.architecture}`
+          : `${candidateConfig.os}\0${candidateConfig.architecture}`;
         const cached = imageCache.get(cacheKey);
         if (cached) {
           return cached;
         }
-        const imageID = pinnedMacOSImageID
-          ? await this.resolveLatestAmazonAMI(query.name, query.architecture)
-          : await this.resolveAMI(candidateConfig);
+        const imageID = await this.resolveAMI({
+          ...candidateConfig,
+          awsUseStockImage:
+            candidateConfig.awsUseStockImage ||
+            automaticImageSelection ||
+            Boolean(pinnedMacOSImageID),
+        });
         imageCache.set(cacheKey, imageID);
         return imageID;
+      };
+      const createCandidate = async (
+        candidateConfig: LeaseConfig,
+        capacityHandoff?: () => Promise<boolean>,
+      ) => {
+        let imageID = await diagnostics.measure("image", () =>
+          resolveCandidateImageID(candidateConfig),
+        );
+        const launch = () =>
+          diagnostics.measure("instance_create", () =>
+            this.createServer(
+              candidateConfig,
+              leaseID,
+              slug,
+              owner,
+              imageID,
+              securityGroupID,
+              capacityHandoff,
+            ),
+          );
+        let server: ProviderMachine;
+        try {
+          server = await launch();
+        } catch (error) {
+          // Only a definite missing automatic image may change the launch image.
+          // Explicit images, snapshots and capability requirements retain their contract.
+          if (
+            !(
+              (error instanceof AWSQueryError && error.code === "InvalidAMIID.NotFound") ||
+              error instanceof AWSImageNotFoundError
+            ) ||
+            capabilityImageRequired ||
+            config.awsSnapshot ||
+            missingPromotedImages.has(imageID) ||
+            awsLeaseImageIdentity(candidateConfig, imageID, this.region).source !== "promoted"
+          ) {
+            throw error;
+          }
+          missingPromotedImages.add(imageID);
+          history.record(
+            {
+              region: this.region,
+              serverType: candidateConfig.serverType,
+              market: candidateConfig.capacityMarket,
+              category: "image",
+              message: error.message,
+            },
+            `${candidateConfig.serverType}: ${error.message}`,
+          );
+          imageID = await diagnostics.measure("image", () =>
+            resolveCandidateImageID(candidateConfig),
+          );
+          server = await launch();
+        }
+        return { server, imageID };
       };
       for (const [candidateIndex, serverType] of candidates.entries()) {
         const preflight = awsQuotaPreflightAttempt(
@@ -1539,6 +1617,7 @@ export class EC2SpotClient {
         const laterCandidates = candidates.slice(candidateIndex + 1);
         const canHandoffWithinMarket =
           allowCapacityHandoff &&
+          !config.serverTypeExplicit &&
           hasQuotaEligibleCandidate(laterCandidates, config.capacityMarket, initialQuota.value);
         const canCheckFallbackMarket =
           allowCapacityHandoff &&
@@ -1551,7 +1630,9 @@ export class EC2SpotClient {
                 // Extra-market quota I/O belongs only to an actual capacity rejection.
                 const quota = await quotaForMarket("on-demand");
                 return hasQuotaEligibleCandidate(
-                  [...marketFallbackCandidates, serverType, ...laterCandidates],
+                  config.serverTypeExplicit
+                    ? [serverType]
+                    : [...marketFallbackCandidates, serverType, ...laterCandidates],
                   "on-demand",
                   quota,
                 );
@@ -1559,20 +1640,9 @@ export class EC2SpotClient {
             : undefined;
         try {
           // oxlint-disable-next-line eslint/no-await-in-loop -- instance-type fallback may need an architecture-specific AMI.
-          const imageID = await diagnostics.measure("image", () =>
-            resolveCandidateImageID({ ...config, serverType }),
-          );
-          // oxlint-disable-next-line eslint/no-await-in-loop -- instance-type fallback must stay sequential.
-          const server = await diagnostics.measure("instance_create", () =>
-            this.createServer(
-              { ...config, serverType },
-              leaseID,
-              slug,
-              owner,
-              imageID,
-              securityGroupID,
-              capacityHandoff,
-            ),
+          const { server, imageID } = await createCandidate(
+            { ...config, serverType },
+            capacityHandoff,
           );
           const result: {
             server: ProviderMachine;
@@ -1622,31 +1692,17 @@ export class EC2SpotClient {
           }
           try {
             // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback may need an architecture-specific AMI.
-            const imageID = await diagnostics.measure("image", () =>
-              resolveCandidateImageID({
-                ...config,
-                capacityMarket: "on-demand",
-                serverType,
-              }),
-            );
-            // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback must stay sequential.
-            const server = await diagnostics.measure("instance_create", () =>
-              this.createServer(
-                { ...config, capacityMarket: "on-demand", serverType },
-                leaseID,
-                slug,
-                owner,
-                imageID,
-                securityGroupID,
-                allowCapacityHandoff &&
-                  hasQuotaEligibleCandidate(
-                    marketFallbackCandidates.slice(candidateIndex + 1),
-                    "on-demand",
-                    quota,
-                  )
-                  ? async () => true
-                  : undefined,
-              ),
+            const { server, imageID } = await createCandidate(
+              { ...config, capacityMarket: "on-demand", serverType },
+              allowCapacityHandoff &&
+                !config.serverTypeExplicit &&
+                hasQuotaEligibleCandidate(
+                  marketFallbackCandidates.slice(candidateIndex + 1),
+                  "on-demand",
+                  quota,
+                )
+                ? async () => true
+                : undefined,
             );
             const result: {
               server: ProviderMachine;
@@ -3011,6 +3067,11 @@ export class EC2SpotClient {
     if (!rootGB) {
       const root = await this.ec2("DescribeImages", { "ImageId.1": imageID });
       const images = items(record(root["imagesSet"])["item"]).map(record);
+      if (images.length === 0 && Object.hasOwn(root, "imagesSet")) {
+        throw new AWSImageNotFoundError(
+          `resolve AWS root disk minimum: AMI ${imageID} not found in ${this.region}`,
+        );
+      }
       if (images.length !== 1) {
         throw new Error(`resolve AWS root disk minimum: expected one AMI ${imageID}`);
       }
@@ -3146,7 +3207,7 @@ export class EC2SpotClient {
       awsUbuntuOwner,
       name,
       architecture,
-      `no ${os.awsLabel} ${architecture} AMI found in ${this.region}`,
+      `no AWS AMI found in ${this.region} for ${os.awsLabel} architecture=${architecture}`,
     );
   }
 
@@ -3932,7 +3993,7 @@ export function awsLeaseImageIdentity(
       sourceID: config.awsSnapshot,
     };
   }
-  if (config.selectedImage?.id === imageID) {
+  if (config.selectedImage?.id === imageID && config.selectedImage.region === region) {
     const { revision, ...selected } = config.selectedImage;
     return {
       ...selected,
@@ -3940,11 +4001,16 @@ export function awsLeaseImageIdentity(
       ...(selected.region === region && revision ? { revision } : {}),
     };
   }
-  if (Object.values(config.awsPromotedAMIs).includes(imageID)) {
+  if (config.awsPromotedAMIs[awsPromotedAMIConfigKey(region, config.serverType)] === imageID) {
     return { id: imageID, source: "promoted", provider: "aws", kind: "aws-ami", region };
   }
   const explicitImageID = config.awsAMI;
-  if (explicitImageID && !config.awsUseStockImage && explicitImageID === imageID) {
+  if (
+    explicitImageID &&
+    !config.awsUseStockImage &&
+    explicitImageID === imageID &&
+    config.selectedImage?.source !== "promoted"
+  ) {
     return { id: imageID, source: "explicit", provider: "aws", kind: "aws-ami", region };
   }
   return { id: imageID, source: "stock", provider: "aws", kind: "aws-ami", region };

@@ -1200,7 +1200,7 @@ func (c *AWSClient) resolveAMI(ctx context.Context, cfg Config) (string, error) 
 		return "", err
 	}
 	if len(out.Images) == 0 {
-		return "", Exit(3, "no %s %s AMI found in %s; set CRABBOX_AWS_AMI", label, architecture, cfg.AWSRegion)
+		return "", Exit(3, "no AWS AMI found in %s for %s architecture=%s; set CRABBOX_AWS_AMI", c.region, label, architecture)
 	}
 	sort.Slice(out.Images, func(i, j int) bool {
 		return aws.ToString(out.Images[i].CreationDate) > aws.ToString(out.Images[j].CreationDate)

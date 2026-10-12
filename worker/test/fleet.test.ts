@@ -30560,6 +30560,190 @@ describe("fleet lease identity and idle", () => {
     );
   });
 
+  it.each(["stock", "promoted", "stale promotion", "missing stock"])(
+    "resolves the AWS fallback region's own image (%s)",
+    async (fallback) => {
+      const launched: Array<{ region: string; image: string; source: string }> = [];
+      const stockLookups: Array<{ architecture: string | null; name: string | null }> = [];
+      const fixture = awsIngressTestFleet(async (action, params, region) => {
+        if (action === "DescribeImages") {
+          stockLookups.push({
+            architecture: params.get("Filter.1.Value.1"),
+            name: params.get("Filter.2.Value.1"),
+          });
+          return ec2XMLResponse(
+            `<DescribeImagesResponse><imagesSet>${fallback === "missing stock" && region === "eu-west-1" ? "" : `<item><imageId>ami-stock-${region}</imageId><creationDate>2026-10-01</creationDate></item>`}</imagesSet></DescribeImagesResponse>`,
+          );
+        }
+        if (action !== "RunInstances") return undefined;
+        const tags = Object.fromEntries(
+          [...params]
+            .filter(([key]) => /^TagSpecification\.1\.Tag\.\d+\.Key$/.test(key))
+            .map(([key, value]) => [value, params.get(key.replace(/\.Key$/, ".Value"))]),
+        );
+        const image = params.get("ImageId")!;
+        launched.push({ region, image, source: tags.image_source! });
+        const code =
+          region === "eu-west-1"
+            ? "InsufficientInstanceCapacity"
+            : fallback === "stale promotion" && image === "ami-regional"
+              ? "InvalidAMIID.NotFound"
+              : "";
+        return code
+          ? ec2XMLResponse(
+              `<Response><Errors><Error><Code>${code}</Code></Error></Errors></Response>`,
+              400,
+            )
+          : undefined;
+      });
+      const promotion = (id: string, region: string) => ({
+        id,
+        region,
+        state: "available",
+        target: "linux",
+        os: "ubuntu:26.04",
+        architecture: "x86_64",
+        promotedAt: "2026-10-01T00:00:00Z",
+        revision: `${id}-revision`,
+      });
+      if (fallback !== "missing stock") {
+        fixture.storage.seed(
+          "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1",
+          promotion("ami-primary", "eu-west-1"),
+        );
+      }
+      if (fallback === "promoted" || fallback === "stale promotion") {
+        fixture.storage.seed(
+          "image:aws:promoted:linux:x86_64:ubuntu26.04:us-east-1",
+          promotion("ami-regional", "us-east-1"),
+        );
+      }
+      const response = await fixture.create({
+        awsAMI: "",
+        os: "ubuntu:26.04",
+        capacity: { market: "on-demand", fallback: "none", regions: ["eu-west-1", "us-east-1"] },
+      });
+      const body = (await response.json()) as { lease: LeaseRecord };
+      expect(response.status).toBe(201);
+      const expectedImage = fallback === "promoted" ? "ami-regional" : "ami-stock-us-east-1";
+      const source = fallback === "promoted" ? "promoted" : "stock";
+      expect(stockLookups).toEqual(
+        Array.from(
+          { length: fallback === "promoted" ? 0 : fallback === "missing stock" ? 2 : 1 },
+          () => ({ architecture: "x86_64", name: expect.stringContaining("26.04") }),
+        ),
+      );
+      expect(launched).toEqual([
+        ...(fallback === "missing stock"
+          ? []
+          : [{ region: "eu-west-1", image: "ami-primary", source: "promoted" }]),
+        ...(fallback === "stale promotion"
+          ? [{ region: "us-east-1", image: "ami-regional", source: "promoted" }]
+          : []),
+        { region: "us-east-1", image: expectedImage, source },
+      ]);
+      expect(body.lease.image).toEqual({
+        id: expectedImage,
+        source,
+        provider: "aws",
+        kind: "aws-ami",
+        region: "us-east-1",
+      });
+      expect(body.lease.image?.revision).not.toBe("ami-primary-revision");
+      expect(fixture.storage.value<LeaseRecord>(`lease:${fixture.creatingID}`)?.image).toEqual(
+        body.lease.image,
+      );
+    },
+  );
+
+  it.each(["RunInstances", "DescribeImages", "empty DescribeImages"])(
+    "uses a stock image when an automatic AWS promotion disappeared during %s",
+    async (missingAt) => {
+      const images: string[] = [];
+      const fixture = awsIngressTestFleet(
+        async (action, params) => {
+          const image = params.get(action === "RunInstances" ? "ImageId" : "ImageId.1");
+          if (
+            (action === missingAt ||
+              (action === "DescribeImages" && missingAt === "empty DescribeImages")) &&
+            image === "ami-gone"
+          ) {
+            if (action === "RunInstances") images.push(image);
+            if (missingAt === "empty DescribeImages")
+              return ec2XMLResponse(
+                "<DescribeImagesResponse><imagesSet /></DescribeImagesResponse>",
+              );
+            return ec2XMLResponse(
+              "<Response><Errors><Error><Code>InvalidAMIID.NotFound</Code></Error></Errors></Response>",
+              400,
+            );
+          }
+          if (action === "DescribeImages") {
+            return ec2XMLResponse(
+              "<DescribeImagesResponse><imagesSet><item><imageId>ami-stock</imageId><rootDeviceName>/dev/sda1</rootDeviceName><blockDeviceMapping><item><deviceName>/dev/sda1</deviceName><ebs><volumeSize>8</volumeSize></ebs></item></blockDeviceMapping></item></imagesSet></DescribeImagesResponse>",
+            );
+          }
+          if (action === "RunInstances") images.push(image!);
+          return undefined;
+        },
+        { CRABBOX_AWS_ROOT_GB: missingAt === "RunInstances" ? "400" : "0" },
+      );
+      fixture.storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", {
+        id: "ami-gone",
+        state: "available",
+        target: "linux",
+        os: "ubuntu:26.04",
+        architecture: "x86_64",
+        region: "eu-west-1",
+        promotedAt: "2026-10-01T00:00:00Z",
+      });
+      const response = await fixture.create({ awsAMI: "" });
+      const body = (await response.json()) as { lease: LeaseRecord };
+      expect(response.status).toBe(201);
+      expect(images).toEqual(
+        missingAt === "RunInstances" ? ["ami-gone", "ami-stock"] : ["ami-stock"],
+      );
+      expect(body.lease.image).toMatchObject({ id: "ami-stock", source: "stock" });
+    },
+  );
+
+  it.each(["request", "environment", "capability", "permission error"])(
+    "does not replace a required or unproven missing AWS image (%s)",
+    async (source) => {
+      let stockLookups = 0;
+      const fixture = awsIngressTestFleet(
+        async (action) => {
+          if (action === "DescribeImages") stockLookups++;
+          if (action !== "RunInstances") return undefined;
+          const code =
+            source === "permission error" ? "UnauthorizedOperation" : "InvalidAMIID.NotFound";
+          return ec2XMLResponse(
+            `<Response><Errors><Error><Code>${code}</Code><Message>InvalidAMIID.NotFound</Message></Error></Errors></Response>`,
+            400,
+          );
+        },
+        source === "environment" ? { CRABBOX_AWS_AMI: "ami-required" } : {},
+      );
+      fixture.storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1", {
+        id: "ami-required",
+        state: "available",
+        target: "linux",
+        os: "ubuntu:26.04",
+        architecture: "x86_64",
+        region: "eu-west-1",
+        promotedAt: "2026-10-01T00:00:00Z",
+        capabilities: { browser: true },
+      });
+      const response = await fixture.create({
+        awsAMI: source === "request" ? "ami-required" : "",
+        ...(source === "capability" ? { imageRequirements: { browser: true } } : {}),
+      });
+      expect(response.status).toBe(422);
+      expect(stockLookups).toBe(0);
+      expect(fixture.requests.filter(({ action }) => action === "RunInstances")).toHaveLength(1);
+    },
+  );
+
   it("persists each AWS fallback region before RunInstances", async () => {
     const observed: Array<{ region: string; persistedRegion: string | undefined }> = [];
     let fixture: ReturnType<typeof awsIngressTestFleet>;
@@ -46611,7 +46795,9 @@ describe("fleet lease identity and idle", () => {
       const prepared = await provider.prepareLeaseConfig(config);
       const stock = os?.startsWith("windows-server:");
       expect(prepared.awsAMI).toBe(stock ? "" : "ami-promoted-windows-2025");
-      expect(prepared.awsPromotedAMIs).toEqual({});
+      expect(new Set(Object.values(prepared.awsPromotedAMIs))).toEqual(
+        new Set(stock ? [] : ["ami-promoted-windows-2025"]),
+      );
       expect(prepared.selectedImage?.source).toBe(stock ? undefined : "promoted");
       await expect(
         provider.prepareLeaseConfig({ ...config, awsAMI: "ami-pinned" }),

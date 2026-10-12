@@ -204,6 +204,15 @@ multi-region setups list every region the broker may launch into. Regions are
 tried in order: when every candidate type in a region is rejected for a
 retryable reason, Crabbox advances to the next region.
 
+Automatic brokered AWS images are selected for each candidate region. If that
+region has no matching promoted image, Crabbox resolves its normal stock image
+for the requested OS and architecture. If AWS definitively reports an automatic
+promotion missing (`InvalidAMIID.NotFound`), Crabbox retries once with stock and
+records the image failure in the provisioning attempts. Explicit AMIs,
+snapshots, and required image capabilities do not silently switch to stock.
+An empty stock-image lookup permits the next configured region; changing the
+capacity market cannot fix a missing image.
+
 Brokered Azure uses `CRABBOX_AZURE_REGIONS` on the coordinator for its Azure-specific
 region list, so AWS and Azure do not accidentally share incompatible region
 names. The CLI-level `capacity.regions` list is still included in Azure lease

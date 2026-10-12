@@ -230,7 +230,8 @@ For coordinator-managed public Linux and Windows runners, a complete
 `RunInstances` error with code `InsufficientInstanceCapacity` goes directly to
 the next configured instance type or permitted On-Demand fallback. The client
 does not spend its HTTP retry budget repeating that capacity rejection first.
-Exact `--type` requests, macOS launches, private workspaces, and attempts with no
+Exact `--type` requests keep the selected type but can hand off to its permitted
+On-Demand market. macOS launches, private workspaces, and attempts with no
 remaining alternative that passes quota preflight retain their normal retries.
 The early handoff checks On-Demand quota only after a capacity rejection needs
 that alternative; the normal pass reuses the quota result and attempt order.

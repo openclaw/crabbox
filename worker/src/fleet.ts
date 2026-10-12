@@ -30665,7 +30665,7 @@ export class AWSProvider implements CloudProvider {
       return { ...config, awsAMI: "", awsPromotedAMIs };
     }
     const promoted = await this.promotedImage(config);
-    return {
+    const prepared = {
       ...config,
       awsAMI: promoted?.id ?? "",
       ...(promoted
@@ -30683,6 +30683,7 @@ export class AWSProvider implements CloudProvider {
         : {}),
       ...(promoted?.region ? { awsRegion: promoted.region } : {}),
     };
+    return { ...prepared, awsPromotedAMIs: await this.promotedImagesForFallback(prepared) };
   }
 
   async prepareLeaseCreate(
@@ -31230,7 +31231,7 @@ export class AWSProvider implements CloudProvider {
                 : {}),
             },
             serverType,
-            image: awsLeaseImageIdentity(config, imageID, region),
+            image: awsLeaseImageIdentity({ ...config, serverType }, imageID, region),
             provisioningTiming: withProvisioningPhases({
               requestMs,
               networkReadyMs: Date.now() - networkReadyStartedAt - bootstrapMs,
@@ -32698,7 +32699,7 @@ export class AWSProvider implements CloudProvider {
           awsRegion: region,
           imageRequirements: config.imageRequirements,
         });
-        if (promoted?.id) {
+        if (promoted?.id && promoted.region === region) {
           out[awsPromotedAMIConfigKey(region, serverType)] = promoted.id;
         }
       }

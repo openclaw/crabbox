@@ -142,21 +142,29 @@ it.each([
   },
 );
 
-it("hands capacity rejection to the configured market without retrying Spot", async () => {
-  const { launch, requests } = await capacityTransport({
-    status: 500,
-    reject: (request) => request.has("InstanceMarketOptions.MarketType"),
-  });
-  const result = await launch({
-    awsInstanceTypes: ["t3.small"],
-    capacityFallback: "on-demand-after-120s",
-  });
-  expect(requests.map((request) => request.has("InstanceMarketOptions.MarketType"))).toEqual([
-    true,
-    false,
-  ]);
-  expect(result.market).toBe("on-demand");
-});
+it.each([false, true])(
+  "hands capacity rejection to the configured market without retrying Spot (exact type=%s)",
+  async (serverTypeExplicit) => {
+    const { launch, requests } = await capacityTransport({
+      status: 500,
+      reject: (request) => request.has("InstanceMarketOptions.MarketType"),
+    });
+    const result = await launch({
+      serverTypeExplicit,
+      awsInstanceTypes: ["t3.small"],
+      capacityFallback: "on-demand-after-120s",
+    });
+    expect(requests.map((request) => request.has("InstanceMarketOptions.MarketType"))).toEqual([
+      true,
+      false,
+    ]);
+    expect(requests.map((request) => request.get("InstanceType"))).toEqual([
+      "t3.small",
+      "t3.small",
+    ]);
+    expect(result.market).toBe("on-demand");
+  },
+);
 
 it("also hands off capacity between eligible On-Demand candidates", async () => {
   const { launch, requests } = await capacityTransport({
