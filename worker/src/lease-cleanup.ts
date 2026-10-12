@@ -12,6 +12,11 @@ export function completeLeaseProviderCleanup(lease: LeaseRecord, completedAt: st
       accumulatedMs: lifetimeRuntimeMs(lease, Date.parse(completedAt))!,
     };
   }
+  if (lease.lifetimePolicy && lease.lifetimePolicy.status !== "complete") {
+    // Explicit deletion retires the policy; a stale stopping phase would keep warning the owner.
+    lease.lifetimePolicy.status = "complete";
+    delete lease.lifetimePolicy.nextCheckAt;
+  }
   lease.cleanupCompletedAt = completedAt;
   lease.provisioningResourceMayExist = false;
   delete lease.provisioningFailureRetryable;

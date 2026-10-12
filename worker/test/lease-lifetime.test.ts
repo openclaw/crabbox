@@ -115,6 +115,17 @@ describe("lease lifetime safety policy", () => {
     expect(record.lifetimePolicy!.compute?.state).toBe("stopped");
     expect(lifetimeOwnsCompute(record)).toBe(false);
   });
+  it("retires a stopping policy when explicit cleanup deletes the lease", () => {
+    const record = lease({ createdAt: new Date(now).toISOString() });
+    observeLifetimeCompute(record, false, now);
+    record.lifetimePolicy!.status = "stopping";
+    record.lifetimePolicy!.stopStartedAt = new Date(now + 30_000).toISOString();
+    record.lifetimePolicy!.nextCheckAt = new Date(now + 60_000).toISOString();
+    completeLeaseProviderCleanup(record, new Date(now + 90_000).toISOString());
+    expect(record.lifetimePolicy!.status).toBe("complete");
+    expect(record.lifetimePolicy!.nextCheckAt).toBeUndefined();
+    expect(publicLifetimePolicy(record.lifetimePolicy!, now + 120_000).warnings).toEqual([]);
+  });
   it("publishes effective extensions and a distinct permanent deletion warning", () => {
     const extended = extendLeaseLifetime(
       policy(),
