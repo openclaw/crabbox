@@ -3129,19 +3129,19 @@ func isMacOSDesktopProvider(cfg Config) bool {
 	return true
 }
 
-func supportsDirectSSHWebVNC(provider string) bool {
-	p, err := ProviderFor(provider)
-	if err != nil || isBlacksmithProvider(provider) || isStaticProvider(provider) {
+func supportsDirectSSHWebVNC(cfg Config) bool {
+	p, err := ProviderFor(cfg.Provider)
+	if err != nil || isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) {
 		return false
 	}
 	spec := p.Spec()
 	return spec.Kind == ProviderKindSSHLease &&
 		spec.Coordinator == CoordinatorNever &&
-		spec.Features.Has(FeatureDesktop)
+		ProviderFeaturesForConfig(p, cfg).Has(FeatureDesktop)
 }
 
 func useDirectSSHWebVNC(cfg Config) bool {
-	return supportsDirectSSHWebVNC(cfg.Provider) && !shouldRegisterCoordinatorLease(cfg)
+	return supportsDirectSSHWebVNC(cfg) && !shouldRegisterCoordinatorLease(cfg)
 }
 
 // macOSPortalWebVNCConfig registers direct macOS leases when the operator
@@ -3170,7 +3170,7 @@ func macOSPortalWebVNCConfig(cfg Config) (Config, bool, error) {
 func macOSPortalWebVNCConfigForLease(cfg Config, id string) (Config, bool, error) {
 	var claim leaseClaim
 	var claimExists bool
-	if supportsDirectSSHWebVNC(cfg.Provider) && strings.TrimSpace(id) != "" {
+	if supportsDirectSSHWebVNC(cfg) && strings.TrimSpace(id) != "" {
 		var err error
 		claim, claimExists, err = ResolveLeaseClaimForProvider(id, canonicalClaimProvider(cfg.Provider))
 		if err != nil {

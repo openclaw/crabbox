@@ -42,13 +42,19 @@ func validateRequestedCapabilities(cfg Config) error {
 		return err
 	}
 	spec := provider.Spec()
-	if cfg.Desktop && !spec.Features.Has(FeatureDesktop) {
+	if configured, ok := provider.(ProviderConfiguredFeatures); ok {
+		if err := configured.ValidateRequestedCapabilities(cfg); err != nil {
+			return err
+		}
+	}
+	features := ProviderFeaturesForConfig(provider, cfg)
+	if cfg.Desktop && !features.Has(FeatureDesktop) {
 		return Exit(2, "desktop/VNC is not supported for provider=%s", spec.Name)
 	}
 	if err := validateDesktopEnv(cfg); err != nil {
 		return err
 	}
-	if cfg.Browser && !spec.Features.Has(FeatureBrowser) {
+	if cfg.Browser && !features.Has(FeatureBrowser) {
 		return Exit(2, "browser provisioning is not supported for provider=%s", spec.Name)
 	}
 	if cfg.Code && !spec.Features.Has(FeatureCode) {

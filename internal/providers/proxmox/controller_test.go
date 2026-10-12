@@ -447,7 +447,7 @@ func TestProxmoxConfirmedAbsentReceiptMatchesScopesAndIdentity(t *testing.T) {
 	}
 }
 
-func TestProxmoxRegisteredAdapterDeleteCompletesAfterFixedRelease(t *testing.T) {
+func TestProxmoxRegisteredDesktopAdapterDeleteCompletesAfterFixedRelease(t *testing.T) {
 	_, client, _ := fixedProxmoxFixture(t)
 	const leaseID, slug, adapterID, workspaceID = "cbx_0123456789ab", "adapter-box", "proxmox-lab", "fleet-box"
 	var mu sync.Mutex
@@ -456,6 +456,9 @@ func TestProxmoxRegisteredAdapterDeleteCompletesAfterFixedRelease(t *testing.T) 
 	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			RegistrationID string `json:"runtimeAdapterRegistrationID"`
+			Desktop        bool   `json:"desktop"`
+			Browser        bool   `json:"browser"`
+			DesktopEnv     string `json:"desktopEnv"`
 			Completion     *struct {
 				AdapterID      string `json:"adapterID"`
 				WorkspaceID    string `json:"workspaceID"`
@@ -469,6 +472,9 @@ func TestProxmoxRegisteredAdapterDeleteCompletesAfterFixedRelease(t *testing.T) 
 		switch {
 		case r.Method == http.MethodPut && r.URL.Path == "/v1/leases/"+leaseID+"/registration":
 			registered = body.RegistrationID
+			if !body.Desktop || !body.Browser || body.DesktopEnv != "xfce" {
+				t.Error("registered desktop lost its requested capabilities")
+			}
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+leaseID+"/release" && body.Completion != nil &&
 			body.Completion.AdapterID == adapterID && body.Completion.WorkspaceID == workspaceID:
 			completions = append(completions, body.Completion.RegistrationID)
@@ -488,7 +494,10 @@ func TestProxmoxRegisteredAdapterDeleteCompletesAfterFixedRelease(t *testing.T) 
 	}))
 	defer coordinator.Close()
 	cfg := controllerTestConfig()
+	cfg.Proxmox.DesktopTemplateID, cfg.Proxmox.BrowserTemplateID = 9400, 9400
 	setControllerTestEnv(t, cfg)
+	t.Setenv("CRABBOX_PROXMOX_DESKTOP_TEMPLATE_ID", "9400")
+	t.Setenv("CRABBOX_PROXMOX_BROWSER_TEMPLATE_ID", "9400")
 	for key, value := range map[string]string{
 		"CRABBOX_COORDINATOR": coordinator.URL, "CRABBOX_COORDINATOR_TOKEN": "coordinator-test-token",
 		"CRABBOX_COORDINATOR_MODE": "registered", "CRABBOX_ADAPTER_ID": adapterID, "CRABBOX_ADAPTER_WORKSPACE_ID": workspaceID,
@@ -508,7 +517,7 @@ func TestProxmoxRegisteredAdapterDeleteCompletesAfterFixedRelease(t *testing.T) 
 	if err := json.Unmarshal([]byte(identity), &binding); err != nil || binding.URL == "" {
 		t.Fatalf("registration binding=%q err=%v", identity, err)
 	}
-	if _, err := runControllerTestCommand(t, "warmup", "--keep=true", "--lease-id", leaseID, "--slug", slug, "--provider", "proxmox"); err != nil {
+	if _, err := runControllerTestCommand(t, "warmup", "--keep=true", "--lease-id", leaseID, "--slug", slug, "--provider", "proxmox", "--desktop", "--browser"); err != nil {
 		t.Fatalf("registered warmup: %v", err)
 	}
 	if registered == "" || readFixedProxmoxClaim(t, leaseID).RuntimeAdapterRegistrationID != registered {

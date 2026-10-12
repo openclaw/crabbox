@@ -32,6 +32,20 @@ type ProviderConfigValidator interface {
 	ValidateConfig(cfg Config) error
 }
 
+// ProviderConfiguredFeatures supplies features enabled by trusted runtime
+// configuration. Spec remains the conservative, configuration-free catalog.
+type ProviderConfiguredFeatures interface {
+	ConfiguredFeatures(cfg Config) FeatureSet
+	ValidateRequestedCapabilities(cfg Config) error
+}
+
+func ProviderFeaturesForConfig(provider Provider, cfg Config) FeatureSet {
+	if configured, ok := provider.(ProviderConfiguredFeatures); ok {
+		return configured.ConfiguredFeatures(cfg)
+	}
+	return provider.Spec().Features
+}
+
 // CoordinatorAcquisitionFallback chooses one alternate provider only after an
 // authoritative capacity rejection. Fixed-ID operations never change provider.
 type CoordinatorAcquisitionFallback interface {

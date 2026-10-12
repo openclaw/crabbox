@@ -41,7 +41,7 @@ func TestProxmoxBindingFlags(t *testing.T) {
 					values := (Provider{}).RegisterFlags(fs, cfg)
 					count := 0
 					fs.VisitAll(func(*flag.Flag) { count++ })
-					if count != 10 || fs.Lookup("proxmox-token-id") != nil || fs.Lookup("proxmox-token-secret") != nil {
+					if count != 12 || fs.Lookup("proxmox-token-id") != nil || fs.Lookup("proxmox-token-secret") != nil {
 						t.Fatal("flag surface changed")
 					}
 					if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil || !reflect.DeepEqual(cfg, before) {

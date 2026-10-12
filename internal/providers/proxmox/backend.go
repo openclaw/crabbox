@@ -56,6 +56,9 @@ func withProxmoxGuestAccess(cfg core.Config) core.Config {
 func (b *leaseBackend) SupportsRequestedLeaseID() bool { return true }
 
 func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	if err := (Provider{}).ValidateRequestedCapabilities(b.Cfg); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if strings.TrimSpace(req.RequestedLeaseID) != "" {
 		return b.acquireFixed(ctx, req)
 	}
@@ -719,7 +722,13 @@ func proxmoxClaimLabelLeaseID(server core.Server) string {
 	return ""
 }
 
-var newClient = func(cfg core.Config) (proxmoxClient, error) { return core.NewProxmoxClient(cfg) }
+var newClient = func(cfg core.Config) (proxmoxClient, error) {
+	client, err := core.NewProxmoxClient(cfg)
+	if err == nil {
+		client.GuestBootstrap = preparedTemplateBootstrap
+	}
+	return client, err
+}
 
 var waitForSSHReadyFunc = core.WaitForSSHReady
 

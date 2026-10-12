@@ -26,6 +26,9 @@ type ProxmoxClient struct {
 	TokenSecret string
 	Node        string
 	Client      *http.Client
+	// GuestBootstrap extends the base SSH bootstrap with provider-owned setup
+	// and readiness checks for an explicitly selected prepared template.
+	GuestBootstrap func(Config) (setup, readyChecks string)
 }
 
 type ProxmoxReadinessCheck struct {
@@ -1235,7 +1238,11 @@ func (c *ProxmoxClient) bootstrapSSH(ctx context.Context, host string, cfg Confi
 	for {
 		if proxmoxRunSSHQuietWithOptions(ctx, target, sshTransportProbeCommand(target), "5", "1") == nil {
 			out := newSynchronizedBuffer(proxmoxBootstrapDiagnosticLimit)
-			err := proxmoxRunSSHInput(ctx, target, "sudo /bin/bash -s", strings.NewReader(proxmoxBootstrapScript(cfg)), &out, &out)
+			var setup, checks string
+			if c.GuestBootstrap != nil {
+				setup, checks = c.GuestBootstrap(cfg)
+			}
+			err := proxmoxRunSSHInput(ctx, target, "sudo /bin/bash -s", strings.NewReader(proxmoxBootstrapScriptWithChecks(cfg, setup, checks)), &out, &out)
 			if err == nil {
 				return nil
 			}
@@ -1638,6 +1645,10 @@ func sortedLabelKeys(labels map[string]string) []string {
 }
 
 func proxmoxBootstrapScript(cfg Config) string {
+	return proxmoxBootstrapScriptWithChecks(cfg, "", "")
+}
+
+func proxmoxBootstrapScriptWithChecks(cfg Config, setup, checks string) string {
 	return fmt.Sprintf(`set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 mkdir -p %[1]s /var/cache/crabbox/pnpm /var/cache/crabbox/npm /var/lib/crabbox
@@ -1659,6 +1670,7 @@ retry() {
 retry apt-get update
 retry apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq
 chown -R %[2]s:%[2]s %[1]s /var/cache/crabbox || true
+%[3]s
 cat >/usr/local/bin/crabbox-ready <<'READY'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1667,11 +1679,12 @@ rsync --version >/dev/null
 curl --version >/dev/null
 jq --version >/dev/null
 test -w %[1]s
+%[4]s
 READY
 chmod 0755 /usr/local/bin/crabbox-ready
 systemctl enable ssh || true
 systemctl restart ssh || systemctl restart ssh.socket || true
 touch /var/lib/crabbox/bootstrapped
 /usr/local/bin/crabbox-ready
-`, shellQuote(cfg.WorkRoot), shellQuote(cfg.SSHUser))
+`, shellQuote(cfg.WorkRoot), shellQuote(cfg.SSHUser), setup, checks)
 }

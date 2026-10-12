@@ -16,16 +16,18 @@ const proxmoxControllerScopePrefix = "proxmox-v1:sha256:"
 // proxmoxControllerScope is a persisted runtime-adapter contract: field names,
 // order and omission rules must not change once an adapter records a scope.
 type proxmoxControllerScope struct {
-	Endpoint   string `json:"endpoint"`
-	Node       string `json:"node"`
-	TokenID    string `json:"tokenId"`
-	TemplateID int    `json:"templateId"`
-	Storage    string `json:"storage,omitempty"`
-	Pool       string `json:"pool,omitempty"`
-	Bridge     string `json:"bridge,omitempty"`
-	FullClone  bool   `json:"fullClone"`
-	User       string `json:"user"`
-	WorkRoot   string `json:"workRoot"`
+	Endpoint          string `json:"endpoint"`
+	Node              string `json:"node"`
+	TokenID           string `json:"tokenId"`
+	TemplateID        int    `json:"templateId"`
+	Storage           string `json:"storage,omitempty"`
+	Pool              string `json:"pool,omitempty"`
+	Bridge            string `json:"bridge,omitempty"`
+	FullClone         bool   `json:"fullClone"`
+	User              string `json:"user"`
+	WorkRoot          string `json:"workRoot"`
+	DesktopTemplateID int    `json:"desktopTemplateId,omitempty"`
+	BrowserTemplateID int    `json:"browserTemplateId,omitempty"`
 }
 
 // ControllerProviderScope binds workspaces to a route, principal and clone
@@ -45,16 +47,18 @@ func (Provider) ControllerProviderScope(cfg core.Config) (string, error) {
 	}
 	endpoint.Host = strings.ToLower(endpoint.Host)
 	scope := proxmoxControllerScope{
-		Endpoint:   endpoint.String(),
-		Node:       strings.TrimSpace(cfg.Proxmox.Node),
-		TokenID:    strings.TrimSpace(cfg.Proxmox.TokenID),
-		TemplateID: cfg.Proxmox.TemplateID,
-		Storage:    strings.TrimSpace(cfg.Proxmox.Storage),
-		Pool:       strings.TrimSpace(cfg.Proxmox.Pool),
-		Bridge:     strings.TrimSpace(cfg.Proxmox.Bridge),
-		FullClone:  cfg.Proxmox.FullClone,
-		User:       strings.TrimSpace(cfg.SSHUser),
-		WorkRoot:   strings.TrimSpace(cfg.WorkRoot),
+		Endpoint:          endpoint.String(),
+		Node:              strings.TrimSpace(cfg.Proxmox.Node),
+		TokenID:           strings.TrimSpace(cfg.Proxmox.TokenID),
+		TemplateID:        cfg.Proxmox.TemplateID,
+		Storage:           strings.TrimSpace(cfg.Proxmox.Storage),
+		Pool:              strings.TrimSpace(cfg.Proxmox.Pool),
+		Bridge:            strings.TrimSpace(cfg.Proxmox.Bridge),
+		FullClone:         cfg.Proxmox.FullClone,
+		User:              strings.TrimSpace(cfg.SSHUser),
+		WorkRoot:          strings.TrimSpace(cfg.WorkRoot),
+		DesktopTemplateID: cfg.Proxmox.DesktopTemplateID,
+		BrowserTemplateID: cfg.Proxmox.BrowserTemplateID,
 	}
 	switch {
 	case scope.Node == "":

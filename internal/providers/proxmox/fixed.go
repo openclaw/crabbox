@@ -39,6 +39,8 @@ func fixedProxmoxFingerprint(cfg core.Config, req core.AcquireRequest, providerS
 		{Name: "bridge", Value: strings.TrimSpace(cfg.Proxmox.Bridge), OmitEmpty: true},
 		{Name: "user", Value: strings.TrimSpace(cfg.SSHUser)}, {Name: "workRoot", Value: strings.TrimSpace(cfg.WorkRoot)},
 		{Name: "fullClone", Value: cfg.Proxmox.FullClone}, {Name: "serverType", Value: strings.TrimSpace(cfg.ServerType)},
+		{Name: "desktopTemplateId", Value: cfg.Proxmox.DesktopTemplateID, OmitEmpty: true},
+		{Name: "browserTemplateId", Value: cfg.Proxmox.BrowserTemplateID, OmitEmpty: true},
 		{Name: "targetOS", Value: strings.TrimSpace(cfg.TargetOS)}, {Name: "requestedSlug", Value: core.NormalizeLeaseSlug(req.RequestedSlug), OmitEmpty: true},
 		{Name: "keep", Value: req.Keep}, {Name: "ttlNanoseconds", Value: cfg.TTL.Nanoseconds()},
 		{Name: "idleNanoseconds", Value: cfg.IdleTimeout.Nanoseconds()}, {Name: "sshPublicKey", Value: strings.TrimSpace(publicKey)},
@@ -262,7 +264,14 @@ func reserveFixedProxmoxVMID(ctx context.Context, client proxmoxClient, claim co
 }
 
 func fixedProxmoxIdentityLabels(cfg core.Config, leaseID, slug, fingerprint, node string) map[string]string {
-	return core.FixedIdentityLabels("proxmox", leaseID, slug, fingerprint, map[string]string{"node": node, "template_id": strconv.Itoa(cfg.Proxmox.TemplateID)})
+	labels := core.FixedIdentityLabels("proxmox", leaseID, slug, fingerprint, map[string]string{"node": node, "template_id": strconv.Itoa(cfg.Proxmox.TemplateID)})
+	requested := core.DirectLeaseLabels(cfg, leaseID, slug, "proxmox", "", false, time.Unix(0, 0))
+	for _, key := range []string{"desktop", "browser", "desktop_env"} {
+		if value, ok := requested[key]; ok {
+			labels[key] = value
+		}
+	}
+	return labels
 }
 
 func fixedProxmoxAttempt(claim core.LeaseClaim) (int, string, error) {
@@ -296,6 +305,11 @@ func (b *leaseBackend) findFixedProxmoxServer(ctx context.Context, client proxmo
 
 func validateFixedProxmoxServer(server core.Server, claim core.LeaseClaim, vmid int, attemptNode string) error {
 	intent := claim.FixedCreateIntent
+	for _, key := range []string{"desktop", "browser", "desktop_env"} {
+		if server.Labels[key] != claim.Labels[key] {
+			return core.Exit(4, "lease_id_conflict: Proxmox VM for lease %s changed its %s capability", claim.LeaseID, key)
+		}
+	}
 	if vmid <= 0 || server.CloudID != strconv.Itoa(vmid) || server.ID != 0 && server.ID != int64(vmid) ||
 		server.Provider != "proxmox" || server.HostID == "" || server.ImmutableID == "" ||
 		server.Labels["crabbox"] != "true" || server.Labels["provider"] != "proxmox" ||

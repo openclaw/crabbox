@@ -7,18 +7,20 @@ import (
 )
 
 type fileProxmoxConfig struct {
-	APIURL      string `yaml:"apiUrl,omitempty"`
-	TokenID     string `yaml:"tokenId,omitempty"`
-	TokenSecret string `yaml:"tokenSecret,omitempty"`
-	Node        string `yaml:"node,omitempty"`
-	TemplateID  int    `yaml:"templateId,omitempty"`
-	Storage     string `yaml:"storage,omitempty"`
-	Pool        string `yaml:"pool,omitempty"`
-	Bridge      string `yaml:"bridge,omitempty"`
-	User        string `yaml:"user,omitempty"`
-	WorkRoot    string `yaml:"workRoot,omitempty"`
-	FullClone   *bool  `yaml:"fullClone,omitempty"`
-	InsecureTLS *bool  `yaml:"insecureTLS,omitempty"`
+	APIURL            string `yaml:"apiUrl,omitempty"`
+	TokenID           string `yaml:"tokenId,omitempty"`
+	TokenSecret       string `yaml:"tokenSecret,omitempty"`
+	Node              string `yaml:"node,omitempty"`
+	TemplateID        int    `yaml:"templateId,omitempty"`
+	DesktopTemplateID *int   `yaml:"desktopTemplateId,omitempty"`
+	BrowserTemplateID *int   `yaml:"browserTemplateId,omitempty"`
+	Storage           string `yaml:"storage,omitempty"`
+	Pool              string `yaml:"pool,omitempty"`
+	Bridge            string `yaml:"bridge,omitempty"`
+	User              string `yaml:"user,omitempty"`
+	WorkRoot          string `yaml:"workRoot,omitempty"`
+	FullClone         *bool  `yaml:"fullClone,omitempty"`
+	InsecureTLS       *bool  `yaml:"insecureTLS,omitempty"`
 }
 
 const ProxmoxConfigDefaultUser string = "crabbox"
@@ -42,30 +44,32 @@ type ProxmoxConfigApplied struct {
 	InsecureTLS   bool
 }
 
-func (cfg *ProxmoxConfig) applyFile(file *fileProxmoxConfig) (ProxmoxConfigApplied, error) {
+func (cfg *ProxmoxConfig) applyFile(file *fileProxmoxConfig, trusted bool) (ProxmoxConfigApplied, error) {
 	var applied ProxmoxConfigApplied
-	err := applyConfigFileOverlay(cfg, file, &applied, true, "proxmox")
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "proxmox")
 	return applied, err
 }
 
 func (cfg *ProxmoxConfig) applyEnv() (ProxmoxConfigApplied, error) {
 	var applied ProxmoxConfigApplied
-	err := applyConfigEnvironment(cfg, &applied, 0, 12)
+	err := applyConfigEnvironment(cfg, &applied, 0, 14)
 	return applied, err
 }
 
 // ProxmoxConfigFlagValues holds parsed values; only visited flags are applied.
 type ProxmoxConfigFlagValues struct {
-	APIURL      *string
-	Node        *string
-	TemplateID  *int
-	Storage     *string
-	Pool        *string
-	Bridge      *string
-	User        *string
-	WorkRoot    *string
-	FullClone   *bool
-	InsecureTLS *bool
+	APIURL            *string
+	Node              *string
+	TemplateID        *int
+	DesktopTemplateID *int
+	BrowserTemplateID *int
+	Storage           *string
+	Pool              *string
+	Bridge            *string
+	User              *string
+	WorkRoot          *string
+	FullClone         *bool
+	InsecureTLS       *bool
 }
 
 // RegisterProxmoxConfigFlags registers mechanical bindings without selecting a provider.

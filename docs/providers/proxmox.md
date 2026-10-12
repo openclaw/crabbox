@@ -16,7 +16,8 @@ then drives the normal SSH sync/run/release path.
 The provider is direct-only: it talks to the Proxmox API straight from the CLI.
 The Crabbox coordinator (broker) does not provision or broker Proxmox capacity,
 so brokered shared-team leases are not available here. Proxmox supports the
-`ssh`, `crabbox-sync`, and `cleanup` features on `target=linux` only. Direct
+`ssh`, `crabbox-sync`, and `cleanup` features on `target=linux` only, plus
+[opt-in prepared desktop and browser templates](#prepared-desktop-and-browser-templates). Direct
 Proxmox also supports caller-supplied fixed lease IDs with
 `warmup --lease-id cbx_<12 lowercase hex>`, and can run behind
 [`crabbox adapter serve`](../commands/adapter.md) as described in
@@ -578,3 +579,140 @@ unchanged.
 
 - [Provider reference](README.md)
 - [Provider backends](../provider-backends.md)
+
+## Prepared desktop and browser templates
+
+Desktop and browser leases are opt-in, template-backed Linux features. Crabbox
+never installs a desktop or browser during acquisition. Prepare and review the
+image first, then authorize its exact VMID in **user configuration**, environment
+variables, or explicit flags. Repository configuration cannot grant these
+capabilities. For example, with a prepared template at VMID 9401:
+
+```yaml
+provider: proxmox
+target: linux
+proxmox:
+  node: pve1
+  templateId: 9401
+  desktopTemplateId: 9401
+  browserTemplateId: 9401
+  user: crabbox
+```
+
+Both authorization fields default to `0` (disabled). `desktopTemplateId` enables
+`--desktop` only when it equals the selected `templateId`; `browserTemplateId`
+independently enables `--browser`, including headless browser leases. Environment
+names are `CRABBOX_PROXMOX_DESKTOP_TEMPLATE_ID` and
+`CRABBOX_PROXMOX_BROWSER_TEMPLATE_ID`; explicit flags are
+`--proxmox-desktop-template-id` and `--proxmox-browser-template-id`.
+`crabbox providers --json` reports the features enabled by this configuration.
+Changing either authorization changes the immutable adapter scope: drain old
+workspaces before reconfiguring an adapter. Existing headless configuration and
+scope remain unchanged when both fields are zero.
+
+### Template preparation recipe
+
+Start with a Debian 12 Linux QEMU guest satisfying the cloud-init, guest-agent,
+SSH and passwordless-sudo requirements above. Inside that guest, from a reviewed
+Crabbox checkout, install the existing X11 desktop setup **before** converting the
+VM to a template:
+
+```sh
+sudo env CRABBOX_DESKTOP_USER=crabbox \
+  CRABBOX_DESKTOP_DISPLAY=:99 CRABBOX_DESKTOP_GEOMETRY=1920x1080x24 \
+  bash scripts/install-linux-desktop.sh
+sudo apt-get update
+sudo apt-get install -y chromium x11-utils
+sudo install -d -m 0755 /usr/local/bin
+sudo tee /usr/local/bin/crabbox-browser >/dev/null <<'BROWSER'
+#!/bin/sh
+set -eu
+profile="$HOME/.cache/crabbox/browser-profile"
+umask 077
+mkdir -p "$profile"
+chmod 0700 "$profile"
+exec /usr/bin/chromium --no-first-run --no-default-browser-check \
+  --disable-default-apps --hide-crash-restore-bubble \
+  --user-data-dir="$profile" "$@"
+BROWSER
+sudo chmod 0755 /usr/local/bin/crabbox-browser
+sudo tee /var/lib/crabbox/browser.env >/dev/null <<'ENV'
+BROWSER=/usr/local/bin/crabbox-browser
+CHROME_BIN=/usr/local/bin/crabbox-browser
+ENV
+sudo chmod 0644 /var/lib/crabbox/browser.env
+sudo -H -u crabbox /usr/local/bin/crabbox-browser --version
+```
+
+A reviewed Chrome-based template can use its installed Chrome executable in the
+wrapper instead. Do not bake logged-in browser profiles, SSH keys, or reusable
+credentials into the image. Before sealing it, stop and disable the desktop
+services and remove their temporary VNC credentials, so the clone cannot start
+with the template's password:
+
+```sh
+sudo systemctl disable --now crabbox-desktop.service crabbox-xvfb.service
+sudo rm -f /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
+```
+
+Shut down the guest and convert it to a Proxmox template with your normal image
+preparation process. Authorize the resulting template VMID, not the build VM's
+previous identity. The template must retain `crabbox-xvfb.service` (TigerVNC) and
+`crabbox-desktop.service` (XFCE), running as the configured `proxmox.user`.
+
+### Readiness and limits
+
+At clone creation Crabbox generates fresh private VNC credentials, starts the
+prepared services, and verifies XFCE, TigerVNC, an accessible X11 display at
+`:99`, VncAuth using the per-clone password file, and a VNC listener exclusively
+on loopback port 5900. Both password files must belong to the configured guest
+user with mode `0600`. A browser request also checks `browser.env`, the executable
+`/usr/local/bin/crabbox-browser` wrapper, and its `--version` result as the guest
+user. These checks are installed in `crabbox-ready` for subsequent readiness
+probes. Failures name the missing or invalid component and require repairing the
+template; acquisition does not download a replacement desktop stack. The existing
+headless SSH toolchain bootstrap is unchanged.
+
+Only Linux XFCE/X11 with TigerVNC is supported here. Wayland, GNOME, Windows,
+macOS, arbitrary display numbers, and the 8-bit Xvfb/x11vnc alternative are not
+part of this template contract. A failed initial bootstrap follows the existing
+owned-clone cleanup/recovery path. Fixed-ID replay preserves capability labels
+and rejects a changed desktop/browser request instead of silently reusing an
+incompatible VM. Read-only inspect never installs packages or rotates passwords.
+
+Use the existing [VNC](../features/vnc-linux.md) SSH tunnel or
+[WebVNC](../commands/webvnc.md); do not expose port 5900 on the Proxmox bridge.
+For coordinator inventory and WebVNC, use `broker.mode: registered` with the
+existing [runtime adapter](#runtime-adapter). Proxmox still owns clone creation
+and cleanup; the coordinator does not gain Proxmox API credentials.
+
+### Live desktop proof
+
+This feature's automated tests use fake Proxmox, SSH, service, process and socket
+boundaries. A real proof requires a Proxmox host, API permissions and a prepared
+VMID as described above. On that host, using the trusted configuration:
+
+```sh
+crabbox doctor --provider proxmox --json
+crabbox warmup --provider proxmox --keep --desktop --browser \
+  --lease-id cbx_0123456789ab --slug desktop-proof --ttl 20m --idle-timeout 10m
+crabbox inspect --provider proxmox --id cbx_0123456789ab --json
+crabbox run --provider proxmox --id cbx_0123456789ab --browser --no-sync -- \
+  bash -lc 'crabbox-ready && "$BROWSER" --version'
+crabbox desktop launch --provider proxmox --id cbx_0123456789ab \
+  --browser --url https://example.com
+crabbox webvnc --provider proxmox --id cbx_0123456789ab --open
+crabbox stop --provider proxmox --id cbx_0123456789ab
+crabbox list --provider proxmox --json --refresh --all
+```
+
+Success means the lease reports `desktop=true`, `desktop_env=xfce`, and
+`browser=true`; the browser appears in WebVNC; VNC listens only on guest loopback;
+and stop removes the exact cloned VM, its local claim/key and registration while
+leaving the template intact. Repeat warmup with the same ID and capabilities
+before stop and confirm that there is still only one VM; omit `--browser` on a
+retry and expect `lease_id_conflict`. Repeat through `crabbox adapter serve
+--provider proxmox` with registered mode to validate the controller path.
+Finally, remove a required component in a separate test template and confirm the
+named readiness error and owned-clone cleanup. Preserve any unresolved claim
+until Proxmox inventory proves absence.

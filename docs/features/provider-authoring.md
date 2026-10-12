@@ -93,6 +93,16 @@ which can import and register the real adapter without an import cycle. Use
 scoped backend injection when needed to keep execution local; do not reproduce
 the adapter's policy in a fake provider.
 
+## Configuration-gated features
+
+Keep `Spec()` conservative and free of configuration reads. A provider that
+requires an operator opt-in can implement `ProviderConfiguredFeatures` to
+supply `ConfiguredFeatures(cfg)` and validate capability-specific restrictions.
+Core uses those features for request admission, the configured provider catalog,
+and direct WebVNC routing. Keep template authorization and platform policy in the
+provider; readiness must still verify the requested feature before acquisition
+succeeds. Static metadata such as `providers describe` retains the baseline spec.
+
 ## Step 3. Register The Provider
 
 A provider is a small struct that satisfies `core.Provider`:
