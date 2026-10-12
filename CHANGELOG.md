@@ -14,6 +14,7 @@
 
 ### Fixes
 
+- Coordinator: preserve deployment-managed capacity-admin membership across deploys without replacing secret-backed members or raising ordinary owner limits.
 - Coordinator: preserve leading zero bytes in generated Ed25519 SSH host keys so the public identity and injected private key remain a valid pair.
 - Coordinator: prevent the portal from exhausting coordinator memory when many external runner records are stored by bounding reads and pruning old stale records.
 - Serve: stop spurious `serve_rate_limited` heartbeat errors by pacing each heartbeat at least `--poll-interval` after the previous response. [PR 2770](https://github.com/openclaw/crabbox/pull/2770).

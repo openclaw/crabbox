@@ -31,6 +31,18 @@ describe("wrangler config", () => {
     }
   });
 
+  it("adds deployment capacity membership only in production without replacing the secret list", () => {
+    const productionVars = wranglerConfig.match(/"vars"\s*:\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(productionVars).toContain('"CRABBOX_DEPLOYMENT_CAPACITY_ADMIN_OWNERS": "github:25068"');
+    expect(configStringValues("CRABBOX_DEPLOYMENT_CAPACITY_ADMIN_OWNERS")).toEqual([
+      "github:25068",
+    ]);
+    expect(wranglerConfig.split(/"previews"\s*:/)[1]).not.toContain(
+      "CRABBOX_DEPLOYMENT_CAPACITY_ADMIN_OWNERS",
+    );
+    expect(configStringValues("CRABBOX_CAPACITY_ADMIN_OWNERS")).toEqual([]);
+  });
+
   it.each([
     ["CRABBOX_MAX_ACTIVE_LEASES", 50],
     ["CRABBOX_MAX_ACTIVE_LEASES_PER_ORG", 50],

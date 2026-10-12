@@ -609,6 +609,30 @@ for (const kind of ["cloudflare", "node"] as const) {
 }
 
 describe("owner capacity limit policy", () => {
+  it("reports deployment capacity membership through the authenticated Fleet route", async () => {
+    const f = await fixture("cloudflare", {
+      CRABBOX_DEPLOYMENT_CAPACITY_ADMIN_OWNERS: ` ${owner.toUpperCase()} `,
+      CRABBOX_CAPACITY_ADMIN_OWNERS: "github:99999",
+      CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN: "50",
+      CRABBOX_MAX_ACTIVE_LEASES: "50",
+      CRABBOX_MAX_ACTIVE_LEASES_PER_ORG: "50",
+    });
+    for (let index = 0; index < 10; index++) f.seed(lease(`existing-${index}`));
+    const response = await f.fetch();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      owner,
+      activeLeases: 10,
+      effectiveLimit: 50,
+      observedAt: now.toISOString(),
+      fleet: { activeLeases: 10, limit: 50 },
+      org: { key: "org-a", activeLeases: 10, limit: 50 },
+      admissible: true,
+      blockedBy: null,
+    });
+    f.readonly();
+  });
+
   it.each([
     [10, 20, true, 20],
     [10, 5, true, 10],

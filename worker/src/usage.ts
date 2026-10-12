@@ -119,9 +119,10 @@ export function costLimits(env: Env): CostLimits {
     maxActiveLeases: envInt(env.CRABBOX_MAX_ACTIVE_LEASES),
     maxActiveLeasesPerOwner: envInt(env.CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER),
     maxActiveLeasesPerOrg: envInt(env.CRABBOX_MAX_ACTIVE_LEASES_PER_ORG),
-    capacityAdminOwners: envList(env.CRABBOX_CAPACITY_ADMIN_OWNERS).map((owner) =>
-      owner.toLowerCase(),
-    ),
+    capacityAdminOwners: [
+      ...envList(env.CRABBOX_CAPACITY_ADMIN_OWNERS),
+      ...envList(env.CRABBOX_DEPLOYMENT_CAPACITY_ADMIN_OWNERS),
+    ].map((owner) => owner.toLowerCase()),
     maxActiveLeasesPerCapacityAdmin: envInt(env.CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN),
     maxMonthlyUSD: envFloat(env.CRABBOX_MAX_MONTHLY_USD),
     maxMonthlyUSDPerOwner: envFloat(env.CRABBOX_MAX_MONTHLY_USD_PER_OWNER),

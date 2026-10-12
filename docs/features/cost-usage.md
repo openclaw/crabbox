@@ -129,6 +129,8 @@ CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER  per-owner active lease cap
 CRABBOX_MAX_ACTIVE_LEASES_PER_ORG    per-org active lease cap
 CRABBOX_CAPACITY_ADMIN_OWNERS        comma-separated owners with an elevated active lease cap;
                                       use github:<numeric-id> for GitHub users
+CRABBOX_DEPLOYMENT_CAPACITY_ADMIN_OWNERS
+                                      additional capacity admins managed in deployment config
 CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN
                                       per-owner active lease cap for capacity admins
 CRABBOX_MAX_MONTHLY_USD              fleet-wide monthly reserved-USD budget
@@ -136,6 +138,10 @@ CRABBOX_MAX_MONTHLY_USD_PER_OWNER    per-owner monthly reserved-USD budget
 CRABBOX_MAX_MONTHLY_USD_PER_ORG      per-org monthly reserved-USD budget
 CRABBOX_DEFAULT_ORG                  org assigned when no org header is present
 ```
+
+Capacity membership combines both owner lists case-insensitively. Deployment
+configuration can add members without replacing a secret-backed owner list.
+Capacity membership does not grant administrative API access.
 
 Monthly budget checks add the candidate lease's `reservedUSD` to the month's existing
 reserved total for the relevant scope. Live managed leases keep reserving budget after

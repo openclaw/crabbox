@@ -13,8 +13,9 @@ import {
   requestOrgLabel,
   sameOrgIdentityKey,
 } from "../src/org-identity";
-import type { LeaseRecord } from "../src/types";
+import type { Env, LeaseRecord } from "../src/types";
 import {
+  activeLeaseLimitForOwner,
   addLeaseToCostLimitUsage,
   costLimits,
   createCostLimitUsage,
@@ -332,6 +333,31 @@ describe("usage accounting", () => {
       ),
     ).toBe("");
   });
+
+  it.each([
+    { legacy: " Legacy@Example.com , preserved@example.com ", deployment: "", deployedLimit: 10 },
+    { legacy: "", deployment: " Deployed@Example.com ", deployedLimit: 50 },
+    {
+      legacy: "Legacy@Example.com, preserved@example.com",
+      deployment: "Deployed@Example.com, LEGACY@example.com",
+      deployedLimit: 50,
+    },
+  ])(
+    "combines capacity membership from legacy '$legacy' and deployment '$deployment'",
+    ({ legacy, deployment, deployedLimit }) => {
+      const limits = costLimits({
+        CRABBOX_CAPACITY_ADMIN_OWNERS: legacy,
+        CRABBOX_DEPLOYMENT_CAPACITY_ADMIN_OWNERS: deployment,
+        CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER: "10",
+        CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN: "50",
+      } as Env);
+
+      expect(activeLeaseLimitForOwner(limits, "DEPLOYED@example.com")).toBe(deployedLimit);
+      expect(activeLeaseLimitForOwner(limits, "legacy@example.com")).toBe(legacy ? 50 : 10);
+      expect(activeLeaseLimitForOwner(limits, "preserved@example.com")).toBe(legacy ? 50 : 10);
+      expect(activeLeaseLimitForOwner(limits, "ordinary@example.com")).toBe(10);
+    },
+  );
 
   it("allows configured capacity admins to use the admin owner active cap", () => {
     const now = new Date("2026-05-01T02:00:00Z");
