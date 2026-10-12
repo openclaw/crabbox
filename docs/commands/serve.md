@@ -21,17 +21,17 @@ crabbox serve uninstall
 | `--max-leases` | Maximum concurrent containers, default 8, maximum 32 |
 | `--name` | Machine display name; default hostname |
 | `--advertise-address` | Client-reachable IPv4; default local CGNAT address |
-| `--ssh-ports` | Published SSH port pool, e.g. `8443` or `2200,2205-2207`; default ephemeral |
-| `--publish-host` | Runtime bind IP; default advertised IP |
+| `--ssh-port` | Agent SSH front-door port, 1–65535; default 2222 |
 | `--runtime` | `docker` or `podman` |
 | `--poll-interval` | Minimum poll and heartbeat-response spacing, 500ms–10s; default 2s |
 | `--state-dir` | Private machine identity/status directory |
 | `--no-cache-volumes` | Disable managed cache volumes |
 | `--drain-on-exit` | Remove containers on orderly agent shutdown |
 
-`CRABBOX_SERVE_MEMORY`, `CRABBOX_SERVE_ADVERTISE_ADDRESS`, and
-`CRABBOX_SERVE_PUBLISH_HOST` supply defaults. `serve.sshPorts` and
-`CRABBOX_SERVE_SSH_PORTS` configure the SSH port pool. The ordinary broker URL/token
+`CRABBOX_SERVE_MEMORY` and `CRABBOX_SERVE_ADVERTISE_ADDRESS` supply defaults.
+`serve.sshPort` and `CRABBOX_SERVE_SSH_PORT` configure the single SSH front-door
+port; `--ssh-port` takes precedence. Allow that one port in the host firewall and
+tailnet policy. Containers expose SSH only on loopback. The ordinary broker URL/token
 configuration still applies; credentials are never printed or written into a
 service command.
 

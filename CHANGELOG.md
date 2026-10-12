@@ -9,7 +9,7 @@
 - Docs: translate the landing page and core introductions into Simplified Chinese, Japanese, Korean, Spanish, German, French, and Brazilian Portuguese, with language navigation, English fallback, preserved examples, and source-hash staleness notices. [PR 2784](https://github.com/openclaw/crabbox/pull/2784). Thanks @alexandre-leng.
 
 - Coordinator: add default-off maximum-age policies and explicit admin rollout canaries for retained AWS leases, with verified stop permissions, visible stop/deletion deadlines, bounded extensions, and root-disk cleanup. [PR 2759](https://github.com/openclaw/crabbox/pull/2759). Thanks @vincentkoc.
-- Serve: run `crabbox serve` on trusted machines to donate spare CPU as owner-only container leases (`--provider serve`), with outbound coordinator polling, local deadline enforcement, `--ssh-ports` pools, warm package caches, per-user service install, and opt-in capacity fallback. Coordinators enable it per owner with `CRABBOX_SERVE_ALLOWED_OWNERS` (off by default). [PR 2768](https://github.com/openclaw/crabbox/pull/2768).
+- Serve: run `crabbox serve` on trusted machines to donate spare CPU as owner-only container leases (`--provider serve`), with outbound coordinator polling, local deadline enforcement, a single authenticated SSH front door (`--ssh-port`) with pinned end-to-end container SSH, warm package caches, per-user service install, and opt-in capacity fallback. Coordinators enable it per owner with `CRABBOX_SERVE_ALLOWED_OWNERS` (off by default). [PR 2768](https://github.com/openclaw/crabbox/pull/2768).
 
 ### Changes
 

@@ -172,20 +172,45 @@ Prune cannot discover idle agents with separate state directories. If another
 agent prunes a prepared image, the next lease detects its absence, uses the
 configured image with lease-time bootstrap, and starts background re-preparation.
 
-SSH binds only the advertised address by default. Ports are runtime-assigned
-unless `--ssh-ports` is set, for example `--ssh-ports 8443` or
-`--ssh-ports 2200,2205-2207`. This also accepts config `serve.sshPorts` and
-environment variable `CRABBOX_SERVE_SSH_PORTS`; the flag has highest priority.
-Ports must be in 1–65535, ranges must be ascending, and the pool may contain at
-most 1024 distinct ports. Busy ports are skipped. Advertised lease capacity is
-limited by usable pool ports and `--max-leases`. Exhaustion during assignment
-fails that lease with `serve_ssh_ports_exhausted`; it never uses an ephemeral
-port outside the pool. Permit these ports in the tailnet ACL and host firewall.
+## Single-port SSH reachability
 
-Some macOS VM-backed Docker or Podman runtimes cannot publish a host tailnet address. Select a reachable
-`--advertise-address` and a runtime-supported `--publish-host`. Binding
-`--publish-host 0.0.0.0` is an explicit opt-in and prints a warning; it is never a
-fallback. Check host firewall rules and runtime port forwarding yourself.
+Allow one TCP port per donating machine: the agent's SSH front door, default
+`2222`. `--ssh-port 8443` (config `serve.sshPort`, environment
+`CRABBOX_SERVE_SSH_PORT`) changes it. The flag takes precedence; ports must be
+in 1–65535. The agent binds its advertised address and fails with an actionable
+error if that address or port is unavailable. Capacity is controlled solely by
+`--max-leases` and the CPU/memory offer.
+
+For example, a tailnet grant can allow clients to reach only that front door:
+
+```json
+{
+  "grants": [
+    {"src": ["group:developers"], "dst": ["tag:crabbox-builder"], "ip": ["tcp:2222"]}
+  ]
+}
+```
+
+Containers publish sshd on runtime-assigned **127.0.0.1-only** ports. Those ports
+are agent-side implementation details; clients never connect to them directly
+or need tailnet grants for them. This also works with macOS VM-backed Docker or
+Podman runtimes that cannot bind a host tailnet address.
+
+The front door accepts only public-key authentication as `crabbox`. Each live
+lease key authorizes forwarding to that lease ID on port 22 only; shell, exec,
+agent forwarding, and arbitrary TCP forwarding are rejected. The client runs
+an inner SSH session end to end with the container, using the same per-lease
+key. Its private `known_hosts` pins both the persistent agent host key and the
+per-container host key supplied through the authenticated coordinator.
+
+The ed25519 agent host key is created once with mode 0600 in the agent state
+directory and reused after restart. Keep that directory private and persistent.
+Only assignments in the latest successful heartbeat are eligible; saved state
+does not authorize clients before the first heartbeat. Release, reconciliation,
+deadline expiry, and drain revoke access and close existing tunnels. Deadlines
+are enforced independently of coordinator polling. Each machine admits at most
+32 pending SSH handshakes (10-second timeout, three authentication attempts),
+and each lease at most 16 connections and 16 forwarded streams.
 
 macOS and Windows guest targets, GPU requests, desktop/WebVNC, and cross-owner
 sharing are unsupported. See [serve command](../commands/serve.md) for service
