@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CheckpointError,
+  abortCheckpointProvisioningForLease,
   expireCheckpointClaims,
   backfillFailedCheckpointCreateRecovery,
   checkpointAuditRetentionMS,
@@ -58,7 +59,12 @@ afterEach(() => {
 class CheckpointMemoryStorage implements CoordinatorStorage {
   private values = new Map<string, unknown>();
   private transactionTail = Promise.resolve();
-  readonly lists: Array<{ prefix?: string; limit?: number; startAfter?: string }> = [];
+  readonly lists: Array<{
+    prefix?: string;
+    limit?: number;
+    startAfter?: string;
+    noCache?: boolean;
+  }> = [];
   failKey?: string;
 
   async get<T>(key: string): Promise<T | undefined> {
@@ -76,12 +82,13 @@ class CheckpointMemoryStorage implements CoordinatorStorage {
   }
 
   async list<T>(
-    options: { prefix?: string; limit?: number; startAfter?: string } = {},
+    options: { prefix?: string; limit?: number; startAfter?: string; noCache?: boolean } = {},
   ): Promise<Map<string, T>> {
     this.lists.push({
       ...(options.prefix ? { prefix: options.prefix } : {}),
       ...(options.limit ? { limit: options.limit } : {}),
       ...(options.startAfter ? { startAfter: options.startAfter } : {}),
+      ...(options.noCache ? { noCache: options.noCache } : {}),
     });
     const matches = [...this.values]
       .toSorted(([left], [right]) => left.localeCompare(right))
@@ -6923,3 +6930,180 @@ describe("coordinator-managed checkpoints", () => {
     expect(await storage.get(checkpointKey(checkpointID))).toMatchObject({ activeUseCount: 0 });
   });
 });
+
+/* oxlint-disable eslint/no-await-in-loop -- seed and inspect ordered storage fixtures. */
+describe("bounded checkpoint storage scans", () => {
+  function pages(storage: CheckpointMemoryStorage, prefix: string) {
+    const reads = storage.lists.filter((read) => read.prefix === prefix);
+    expect(reads.length).toBeGreaterThan(1);
+    expect(reads.every((read) => read.limit === 128 && read.noCache === true)).toBe(true);
+    expect(reads.some((read) => read.startAfter !== undefined)).toBe(true);
+  }
+
+  async function ready() {
+    const fixture = await checkpointFixture();
+    expect((await createCheckpoint(fixture.coordinator, "chk_paged")).status).toBe(201);
+    const record = (await fixture.storage.get<CoordinatorCheckpointRecord>(
+      checkpointKey("chk_paged"),
+    ))!;
+    fixture.storage.lists.length = 0;
+    return { ...fixture, record };
+  }
+
+  async function claims(storage: CheckpointMemoryStorage, record: CoordinatorCheckpointRecord) {
+    for (let i = 0; i < 130; i += 1) {
+      await storage.put(`checkpoint-use:${record.id}:${String(i).padStart(4, "0")}`, {
+        checkpointID: record.id,
+        tokenHash: String(i),
+        owner: record.owner,
+        org: record.org,
+        generation: record.generation,
+        createdAt: record.createdAt,
+        expiresAt: new Date(Date.now() - 1).toISOString(),
+        state: "available",
+      } satisfies CoordinatorCheckpointUseClaim);
+    }
+    await storage.put(checkpointKey(record.id), { ...record, activeUseCount: 130 });
+  }
+
+  it("pages claim expiry and deadline calculation, retaining future and provisioning claims", async () => {
+    const { storage, record } = await ready();
+    await claims(storage, record);
+    const future = new Date(Date.now() + 60_000).toISOString();
+    await storage.put(`checkpoint-use:${record.id}:zz_future`, {
+      checkpointID: record.id,
+      tokenHash: "future",
+      owner: record.owner,
+      org: record.org,
+      generation: record.generation,
+      createdAt: record.createdAt,
+      expiresAt: future,
+      state: "available",
+    } satisfies CoordinatorCheckpointUseClaim);
+    await storage.put(checkpointKey(record.id), { ...record, activeUseCount: 131 });
+    const result = await expireCheckpointClaims(storage, record.id);
+    expect(result).toMatchObject({ activeUseCount: 1, nextSweepAt: future });
+    expect(await storage.get(`checkpoint-use:${record.id}:0000`)).toBeUndefined();
+    expect(await storage.get(`checkpoint-use:${record.id}:zz_future`)).toBeDefined();
+    pages(storage, `checkpoint-use:${record.id}:`);
+  });
+
+  it("pages deletion claims and rolls back expired removals when a later claim is active", async () => {
+    const { storage, record } = await ready();
+    await claims(storage, record);
+    await storage.put(`checkpoint-use:${record.id}:zz_active`, {
+      state: "provisioning",
+      expiresAt: new Date(Date.now() - 1).toISOString(),
+    });
+    await expect(
+      claimCheckpointDeletion(
+        storage,
+        record.id,
+        { admin: true, owner: record.owner, org: record.org },
+        "manual",
+      ),
+    ).rejects.toThrow("active use claim");
+    expect(await storage.get(`checkpoint-use:${record.id}:0000`)).toBeDefined();
+    pages(storage, `checkpoint-use:${record.id}:`);
+    await storage.delete(`checkpoint-use:${record.id}:zz_active`);
+    const result = await claimCheckpointDeletion(
+      storage,
+      record.id,
+      { admin: true, owner: record.owner, org: record.org },
+      "manual",
+    );
+    expect(result.checkpoint.state).toBe("deleting");
+    expect(await storage.get(`checkpoint-use:${record.id}:0129`)).toBeUndefined();
+  });
+
+  it("pages the global abort lookup and stops after the first matching claim", async () => {
+    const { storage, record } = await ready();
+    await claims(storage, record);
+    const key = `checkpoint-use:${record.id}:0130`;
+    await storage.put(key, {
+      checkpointID: record.id,
+      tokenHash: "match",
+      owner: record.owner,
+      org: record.org,
+      generation: record.generation,
+      state: "provisioning",
+      leaseID: "target",
+      attemptID: "attempt",
+    });
+    for (let i = 131; i < 400; i += 1)
+      await storage.put(`checkpoint-use:${record.id}:${i}`, { state: "available" });
+    const result = await abortCheckpointProvisioningForLease(storage, "target", "attempt", {
+      owner: record.owner,
+      org: record.org,
+    });
+    expect(result?.activeUseCount).toBe(129);
+    expect(await storage.get(key)).toBeUndefined();
+    pages(storage, "checkpoint-use:");
+    expect(storage.lists.filter((read) => read.prefix === "checkpoint-use:")).toHaveLength(2);
+  });
+
+  it("pages resource ownership and pending intents while preserving exact matches and ambiguity", async () => {
+    const { storage, record } = await ready();
+    const image = record.image!;
+    for (const prefix of ["checkpoint-resource:aws:", "checkpoint-intent:aws:"]) {
+      for (let i = 0; i < 130; i += 1)
+        await storage.put(`${prefix}000-${String(i).padStart(4, "0")}`, {
+          scope: record.scope,
+          kind: image.kind,
+          resourceID: `unrelated-${i}`,
+          resourceName: `unrelated-${i}`,
+          checkpointID: "absent",
+          immutableID: "unrelated",
+        });
+    }
+    // The original exact resource claim sorts after the filler records.
+    expect((await findManagedCheckpointImage(storage, "aws", image))?.id).toBe(record.id);
+    pages(storage, "checkpoint-resource:aws:");
+    for (const [key] of await storage.list({ prefix: "checkpoint-resource:aws:" }))
+      await storage.delete(key);
+    await storage.put(checkpointKey(record.id), { ...record, state: "creating" });
+    await storage.put("checkpoint-intent:aws:zz-match", {
+      checkpointID: record.id,
+      generation: record.generation,
+      provider: "aws",
+      scope: record.scope,
+      kind: image.kind,
+      resourceID: image.id,
+      resourceName: image.id,
+    });
+    storage.lists.length = 0;
+    expect((await findManagedCheckpointImage(storage, "aws", image))?.id).toBe(record.id);
+    pages(storage, "checkpoint-intent:aws:");
+    await storage.put(checkpointKey("chk_duplicate"), {
+      ...record,
+      id: "chk_duplicate",
+      state: "creating",
+    });
+    await storage.put("checkpoint-intent:aws:zz-duplicate", {
+      checkpointID: "chk_duplicate",
+      generation: record.generation,
+      provider: "aws",
+      scope: record.scope,
+      kind: image.kind,
+      resourceID: image.id,
+      resourceName: image.id,
+    });
+    await expect(findManagedCheckpointImage(storage, "aws", image)).rejects.toThrow("multiple");
+  });
+
+  it("pages each promotion catalog before attaching checkpoint pins", async () => {
+    const { coordinator, storage } = await checkpointFixture();
+    const prefixes = ["image:aws:catalog:", "image:aws:variant:", "image:aws:promoted"];
+    for (const prefix of prefixes) {
+      for (let i = 0; i < 130; i += 1)
+        await storage.put(`${prefix}${String(i).padStart(4, "0")}`, { id: `other-${i}` });
+      await storage.put(`${prefix}zz-match`, { id: "snap-000000000001", name: "snapshot" });
+    }
+    expect((await createCheckpoint(coordinator, "chk_paged")).status).toBe(201);
+    const record = (await storage.get<CoordinatorCheckpointRecord>(checkpointKey("chk_paged")))!;
+    expect(record.pinCount).toBe(3);
+    for (const prefix of prefixes) pages(storage, prefix);
+  });
+});
+
+/* oxlint-enable eslint/no-await-in-loop */

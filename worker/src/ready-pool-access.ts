@@ -3,6 +3,7 @@ import { sha256Hex } from "./encoding";
 import { json } from "./http";
 import { leaseProviderCleanupConfirmed } from "./lease-cleanup";
 import { publicLeaseRecord, publicReadyPoolEntry } from "./org-records";
+import { coordinatorStorageEntries, storageRecordScanBatchSize } from "./storage-scan";
 import type { LeaseRecord, ReadyPoolEntry, ReadyPoolBorrowRequest } from "./types";
 
 export const portablePoolPrefix = "portable-ready-pool-v1:";
@@ -211,16 +212,19 @@ export class ReadyPoolAccess {
       if (hardDeadline <= Date.now())
         return json({ error: "authorization_expired" }, { status: 403 });
       await this.hooks.counters(storage, scope, { borrowRequests: 1 });
-      const entries = [
-        ...(await storage.list<ReadyPoolEntry>({ prefix: portablePoolPrefix })).values(),
-      ]
-        .filter(
-          (entry) =>
-            entry.key === key && entry.state === "ready" && this.hooks.matches(entry, input),
-        )
-        .toSorted((a, b) =>
-          (a.lastReadyAt ?? a.createdAt).localeCompare(b.lastReadyAt ?? b.createdAt),
-        );
+      const candidates: ReadyPoolEntry[] = [];
+      for await (const [, entry] of coordinatorStorageEntries<ReadyPoolEntry>(storage, {
+        prefix: portablePoolPrefix,
+        limit: storageRecordScanBatchSize,
+        noCache: true,
+      })) {
+        if (entry.key === key && entry.state === "ready" && this.hooks.matches(entry, input)) {
+          candidates.push(entry);
+        }
+      }
+      const entries = candidates.toSorted((a, b) =>
+        (a.lastReadyAt ?? a.createdAt).localeCompare(b.lastReadyAt ?? b.createdAt),
+      );
       /* oxlint-disable eslint/no-await-in-loop -- candidate admission and its compound writes must use one ordered transaction. */
       for (const entry of entries) {
         const lease = await storage.get<LeaseRecord>(`lease:${entry.leaseID}`);

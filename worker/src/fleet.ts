@@ -85,7 +85,7 @@ import {
   provisioningMaterialKey,
   sealProvisioningMaterial,
 } from "./provisioning-material";
-import { coordinatorStorageEntries } from "./storage-scan";
+import { coordinatorStorageEntries, storageRecordScanBatchSize } from "./storage-scan";
 import { WayVNCRetirement } from "./wayvnc-retirement";
 
 const { Client: SSHClientConstructor } = ssh2;
@@ -559,7 +559,6 @@ const defaultAWSOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAWSOrphanSweepGraceSeconds = 15 * 60;
 const defaultAzureOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAzureOrphanSweepGraceSeconds = 15 * 60;
-const storageRecordScanBatchSize = 128;
 const terminalRunPruneBatchSize = 16;
 const runtimeAdapterDeleteBatchSize = 16;
 const defaultTerminalRunRetentionDays = 30;
@@ -19760,26 +19759,36 @@ export class FleetCoordinator {
     typed: ReadyPoolMode = false,
     storage: CoordinatorStorageView = this.state.storage,
   ): Promise<ReadyPoolEntry[]> {
-    const entries = await storage.list<ReadyPoolEntry>({
+    const entries: ReadyPoolEntry[] = [];
+    for await (const [, entry] of coordinatorStorageEntries<ReadyPoolEntry>(storage, {
       prefix:
         typed === "portable" ? portablePoolPrefix : typed ? typedReadyPoolPrefix : readyPoolPrefix,
-    });
-    return [...entries.values()];
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+    })) {
+      entries.push(entry);
+    }
+    return entries;
   }
 
   private async readyPoolFillClaims(
     typed: ReadyPoolMode = false,
     storage: CoordinatorStorageView = this.state.storage,
   ): Promise<ReadyPoolFillClaim[]> {
-    const claims = await storage.list<ReadyPoolFillClaim>({
+    const claims: ReadyPoolFillClaim[] = [];
+    for await (const [, claim] of coordinatorStorageEntries<ReadyPoolFillClaim>(storage, {
       prefix:
         typed === "portable"
           ? "portable-ready-pool-v1-fill-claim:"
           : typed
             ? typedReadyPoolFillClaimPrefix
             : readyPoolFillClaimPrefix,
-    });
-    return [...claims.values()];
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+    })) {
+      claims.push(claim);
+    }
+    return claims;
   }
 
   private async readyPoolCounters(
@@ -29085,17 +29094,15 @@ export class AzureProvider implements CloudProvider {
     await this.client.deleteImage(imageID, kind);
     const storage = this.storage;
     if (!storage) return;
-    const promoted = await storage.list<PromotedImageRecord>({
+    for await (const [key, image] of coordinatorStorageEntries<PromotedImageRecord>(storage, {
       prefix: "image:azure:promoted:",
-    });
-    await Promise.all(
-      [...promoted]
-        .filter(
-          ([, image]) =>
-            image.id === imageID || image.resourceID === imageID || image.name === imageID,
-        )
-        .map(([key]) => storage.delete(key)),
-    );
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+    })) {
+      if (image.id === imageID || image.resourceID === imageID || image.name === imageID) {
+        await storage.delete(key);
+      }
+    }
   }
 
   storedImageMetadata(imageID: string): Promise<ProviderImage | undefined> {
@@ -29293,20 +29300,22 @@ export class AzureProvider implements CloudProvider {
   async retirePromotedImage(imageID: string, region?: string): Promise<number> {
     if (!this.storage) throw new Error("Azure image catalog storage is unavailable");
     return await imageCatalogTransaction(this.storage, async (transaction) => {
-      const records = await transaction.list<PromotedImageRecord>({
+      let retired = 0;
+      for await (const [key, image] of coordinatorStorageEntries<PromotedImageRecord>(transaction, {
         prefix: "image:azure:promoted:",
-      });
-      const matching = [...records].filter(
-        ([, image]) =>
-          (image.id === imageID || image.resourceID === imageID) &&
-          (!region || image.region?.toLowerCase() === region.toLowerCase()),
-      );
-      await matching.reduce(async (previous, [key, image]) => {
-        await previous;
+        limit: storageRecordScanBatchSize,
+        noCache: true,
+      })) {
+        if (
+          (image.id !== imageID && image.resourceID !== imageID) ||
+          (region && image.region?.toLowerCase() !== region.toLowerCase())
+        )
+          continue;
         await unpinCheckpointPromotion(transaction, "azure", image, key);
         await transaction.delete(key);
-      }, Promise.resolve());
-      return matching.length;
+        retired += 1;
+      }
+      return retired;
     });
   }
 
@@ -31834,11 +31843,13 @@ export class AWSProvider implements CloudProvider {
     imageID: string,
     region?: string,
   ): Promise<void> {
-    const records = await this.storage.list<ProviderImage>({ prefix });
-    for (const [key, image] of records) {
+    for await (const [key, image] of coordinatorStorageEntries<ProviderImage>(this.storage, {
+      prefix,
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+    })) {
       if (image.id !== imageID && image.resourceID !== imageID) continue;
       if (region !== undefined && image.region !== region) continue;
-      // oxlint-disable-next-line eslint/no-await-in-loop -- ordered deletes leave a retryable durable prefix boundary.
       await this.storage.delete(key);
     }
   }
@@ -32472,34 +32483,33 @@ export class AWSProvider implements CloudProvider {
         serverType: config.serverType,
         region: config.awsRegion,
       };
-      const [selected, catalog, variants] = await Promise.all([
-        this.storage.get<PromotedImageRecord>(promotedAWSImageKey(imageScope)),
-        this.storage.list<PromotedImageRecord>({
-          prefix: promotedAWSImageCatalogPrefix(imageScope),
-        }),
-        this.storage.list<PromotedImageRecord>({
-          prefix: promotedAWSImageVariantPrefix(imageScope),
-        }),
-      ]);
-      const candidates = [
-        ...[selected, ...catalog.values()]
-          .filter((image): image is PromotedImageRecord => Boolean(image))
-          .map((image) => ({ image, variant: false })),
-        ...[...variants.values()].map((image) => ({ image, variant: true })),
-      ];
-      return candidates
-        .filter(({ image }) =>
-          imageSatisfiesRequirements(image.capabilities, config.imageRequirements),
+      const selected = await this.storage.get<PromotedImageRecord>(promotedAWSImageKey(imageScope));
+      let best: PromotedImageRecord | undefined;
+      const consider = (image: PromotedImageRecord, variant: boolean) => {
+        if (!imageSatisfiesRequirements(image.capabilities, config.imageRequirements)) return;
+        if (variant && !catalogOnlyImageRequested(image.variantSelectors, config.imageRequirements))
+          return;
+        if (
+          !best ||
+          image.promotedAt.localeCompare(best.promotedAt) > 0 ||
+          (image.promotedAt === best.promotedAt && image.id.localeCompare(best.id) < 0)
         )
-        .filter(
-          ({ image, variant }) =>
-            !variant || catalogOnlyImageRequested(image.variantSelectors, config.imageRequirements),
-        )
-        .toSorted(
-          (left, right) =>
-            right.image.promotedAt.localeCompare(left.image.promotedAt) ||
-            left.image.id.localeCompare(right.image.id),
-        )[0]?.image;
+          best = image;
+      };
+      if (selected) consider(selected, false);
+      for (const [prefix, variant] of [
+        [promotedAWSImageCatalogPrefix(imageScope), false],
+        [promotedAWSImageVariantPrefix(imageScope), true],
+      ] as const) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- preserve catalog precedence for equal candidates.
+        for await (const [, image] of coordinatorStorageEntries<PromotedImageRecord>(this.storage, {
+          prefix,
+          limit: storageRecordScanBatchSize,
+          noCache: true,
+        }))
+          consider(image, variant);
+      }
+      return best;
     }
     return promotedAWSImageDefault(this.storage, {
       target: config.target,
@@ -32537,15 +32547,27 @@ export class AWSProvider implements CloudProvider {
   }
 
   private async promotedImagesByID(imageID: string): Promise<PromotedImageRecord[]> {
-    const promoted = await this.storage.list<PromotedImageRecord>({
+    const matches: PromotedImageRecord[] = [];
+    for await (const [, image] of coordinatorStorageEntries<PromotedImageRecord>(this.storage, {
       prefix: promotedAWSImagePrefix(),
-    });
-    return [...promoted.values()].filter((image) => image.id === imageID);
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+    })) {
+      if (image.id === imageID) matches.push(image);
+    }
+    return matches;
   }
 
   private async variantImagesByID(imageID: string): Promise<PromotedImageRecord[]> {
-    const variants = await this.storage.list<PromotedImageRecord>({ prefix: "image:aws:variant:" });
-    return [...variants.values()].filter((image) => image.id === imageID);
+    const matches: PromotedImageRecord[] = [];
+    for await (const [, image] of coordinatorStorageEntries<PromotedImageRecord>(this.storage, {
+      prefix: "image:aws:variant:",
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+    })) {
+      if (image.id === imageID) matches.push(image);
+    }
+    return matches;
   }
 
   private async promotedImageMetadataByID(
@@ -32554,18 +32576,20 @@ export class AWSProvider implements CloudProvider {
     known?: ProviderImage,
     storage: ProviderStateStorageView = this.storage,
   ): Promise<PromotedImageRecord | undefined> {
-    const [catalog, variants] = await Promise.all([
-      storage.list<PromotedImageRecord>({ prefix: "image:aws:catalog:" }),
-      storage.list<PromotedImageRecord>({ prefix: "image:aws:variant:" }),
-    ]);
-    const matches = [
-      ...[...catalog.values()]
-        .filter((image) => image.id === imageID && image.region === region)
-        .map((image) => ({ image, variant: false })),
-      ...[...variants.values()]
-        .filter((image) => image.id === imageID && image.region === region)
-        .map((image) => ({ image, variant: true })),
-    ];
+    const matches: Array<{ image: PromotedImageRecord; variant: boolean }> = [];
+    for (const [prefix, variant] of [
+      ["image:aws:catalog:", false],
+      ["image:aws:variant:", true],
+    ] as const) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- scan catalog scopes in deterministic order.
+      for await (const [, image] of coordinatorStorageEntries<PromotedImageRecord>(storage, {
+        prefix,
+        limit: storageRecordScanBatchSize,
+        noCache: true,
+      })) {
+        if (image.id === imageID && image.region === region) matches.push({ image, variant });
+      }
+    }
     if (known?.region === region && typeof (known as PromotedImageRecord).promotedAt === "string") {
       const knownPromotion = known as PromotedImageRecord;
       const alreadyCataloged = matches.some(
@@ -32587,29 +32611,30 @@ async function deletePromotedAWSImageRecords(
   prefixes: string[],
   options: { region?: string; retireRevisions?: boolean } = {},
 ): Promise<number> {
-  const catalogs = await Promise.all(
-    prefixes.map(async (prefix) => await storage.list<PromotedImageRecord>({ prefix })),
-  );
-  const entries = catalogs.flatMap((catalog) =>
-    [...catalog.entries()].filter(
-      ([, image]) =>
-        image.id === imageID && (options.region === undefined || image.region === options.region),
-    ),
-  );
+  let deleted = 0;
   const retiredRevisions = new Set<string>();
-  await entries.reduce(async (pending, [key, image]) => {
-    await pending;
-    await unpinCheckpointPromotion(storage, "aws", image, key);
-    await storage.delete(key);
-    if (!options.retireRevisions) return;
-    const state = imageDefaultState(image);
-    if (state.state !== "present") return;
-    const retirementKey = retiredAWSImageRevisionKey(state);
-    if (retiredRevisions.has(retirementKey)) return;
-    await retireAWSImageRevision(storage, state);
-    retiredRevisions.add(retirementKey);
-  }, Promise.resolve());
-  return entries.length;
+  for (const prefix of prefixes) {
+    // oxlint-disable-next-line eslint/no-await-in-loop -- scan catalog scopes in deterministic order.
+    for await (const [key, image] of coordinatorStorageEntries<PromotedImageRecord>(storage, {
+      prefix,
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+    })) {
+      if (image.id !== imageID || (options.region !== undefined && image.region !== options.region))
+        continue;
+      await unpinCheckpointPromotion(storage, "aws", image, key);
+      await storage.delete(key);
+      deleted += 1;
+      if (!options.retireRevisions) continue;
+      const state = imageDefaultState(image);
+      if (state.state !== "present") continue;
+      const retirementKey = retiredAWSImageRevisionKey(state);
+      if (retiredRevisions.has(retirementKey)) continue;
+      await retireAWSImageRevision(storage, state);
+      retiredRevisions.add(retirementKey);
+    }
+  }
+  return deleted;
 }
 
 async function imageCatalogTransaction<T>(

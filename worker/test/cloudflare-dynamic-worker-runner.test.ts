@@ -3581,3 +3581,92 @@ describe("Cloudflare Dynamic Workers runner", () => {
     expect(config).not.toContain('"containers"');
   });
 });
+
+/* oxlint-disable eslint/no-await-in-loop -- seed and inspect ordered storage fixtures. */
+describe("bounded dynamic runner index scans", () => {
+  it("pages live runs and tombstones, pruning only finished, expired, and settled old entries", async () => {
+    const storage = new MockDurableObjectStorage();
+    const coordinator = new DynamicWorkerRunCoordinator(
+      mockDurableObjectState(storage),
+      {} as Parameters<typeof worker.fetch>[1],
+    );
+    const scan = vi.spyOn(storage, "list");
+    const expectedRuns = [];
+    const expectedDeleted = [];
+    for (let i = 0; i < 270; i += 1) {
+      const id = `run_${String(i).padStart(4, "0")}`;
+      const record = {
+        id,
+        workerId: id,
+        state: i % 3 === 0 ? "succeeded" : "running",
+        createdAt: new Date().toISOString(),
+        logs: [],
+        ...(i % 3 === 1 ? { expiresAt: new Date(Date.now() - 1).toISOString() } : {}),
+      };
+      await storage.put(`run:${id}`, { generation: 1, record });
+      if (i % 3 === 2) expectedRuns.push(record);
+      const pending = i % 3 === 0;
+      const deletedAt = i % 3 === 2 ? Date.now() : Date.now() - 600_001;
+      await storage.put(`deleted:${id}`, {
+        runId: id,
+        generation: 1,
+        deletedAt,
+        pending,
+        suppressStored: true,
+      });
+      if (pending || i % 3 === 2) expectedDeleted.push(id);
+    }
+    const response = await coordinator.fetch(new Request("https://run-coordinator/index/list"));
+    expect(await response.json()).toEqual({ runs: expectedRuns, deletedRunIds: expectedDeleted });
+    for (const prefix of ["run:", "deleted:"]) {
+      const reads = scan.mock.calls
+        .map(([options]) => options!)
+        .filter((options) => options.prefix === prefix);
+      expect(reads).toHaveLength(3);
+      expect(reads.every((options) => options.limit === 128 && options.noCache === true)).toBe(
+        true,
+      );
+    }
+    expect(storage.values.has("run:run_0000")).toBe(false);
+    expect(storage.values.has("run:run_0001")).toBe(false);
+    expect(storage.values.has("deleted:run_0000")).toBe(true);
+    expect(storage.values.has("deleted:run_0001")).toBe(false);
+  });
+
+  it("pages alarm tombstone cleanup and retains pending deletions and the earliest future wake", async () => {
+    vi.useFakeTimers();
+    const storage = new MockDurableObjectStorage();
+    await storage.put("run-index", true);
+    const coordinator = new DynamicWorkerRunCoordinator(
+      mockDurableObjectState(storage),
+      {} as Parameters<typeof worker.fetch>[1],
+    );
+    const scan = vi.spyOn(storage, "list");
+    for (let i = 0; i < 270; i += 1) {
+      await storage.put(`deleted:${String(i).padStart(4, "0")}`, {
+        deletedAt: Date.now() - 600_001,
+        pending: false,
+      });
+    }
+    await storage.put("deleted:zz-future", { deletedAt: Date.now() - 1000, pending: false });
+    await storage.put("deleted:zz-pending", { deletedAt: 0, pending: true });
+    await coordinator.alarm();
+    expect([...storage.values.keys()]).toEqual([
+      "run-index",
+      "deleted:zz-future",
+      "deleted:zz-pending",
+    ]);
+    expect(storage.alarmTime).toBe(Date.now() + 599_000);
+    expect(scan.mock.calls).toHaveLength(3);
+    expect(
+      scan.mock.calls.every(([options]) => options?.limit === 128 && options.noCache === true),
+    ).toBe(true);
+    vi.advanceTimersByTime(600_000);
+    await coordinator.alarm();
+    expect(storage.alarmTime).toBeNull();
+    expect(storage.values.has("deleted:zz-pending")).toBe(true);
+    vi.useRealTimers();
+  });
+});
+
+/* oxlint-enable eslint/no-await-in-loop */

@@ -91,6 +91,7 @@ import {
 } from "../src/provider-provisioning";
 import { providerReconciliationFingerprint } from "../src/provider-reconciliation";
 import { ProvisioningAttemptsError } from "../src/provisioning-attempts";
+import { ReadyPoolAccess, portablePoolReservationKey } from "../src/ready-pool-access";
 import { setPoolWake } from "../src/ready-pool-wake";
 import { verifyTerminalReceipt } from "../src/run-receipt";
 import {
@@ -58042,5 +58043,243 @@ describe("maximum lifetime safety net", () => {
     } finally {
       operation.scope.mockRestore();
     }
+  });
+});
+
+describe("bounded pool and image storage scans", () => {
+  function pages(storage: ObservedMemoryStorage, prefix: string) {
+    const reads = storage.listOptions.filter((read) => read.prefix === prefix);
+    expect(reads.length).toBeGreaterThan(1);
+    expect(reads.every((read) => read.limit === 128 && read.noCache === true)).toBe(true);
+    expect(reads.some((read) => read.startAfter !== undefined)).toBe(true);
+  }
+
+  it.each([
+    [false, "ready-pool:", "ready-pool-fill-claim:"],
+    [true, "typed-ready-pool-v1:", "typed-ready-pool-v1-fill-claim:"],
+    ["portable", "portable-ready-pool-v1:", "portable-ready-pool-v1-fill-claim:"],
+  ] as const)(
+    "pages all entries and fill claims for mode %s",
+    async (mode, entryPrefix, claimPrefix) => {
+      const storage = new ObservedMemoryStorage();
+      const coordinator = testCoordinator(storage) as unknown as {
+        readyPoolEntries(mode: boolean | "portable"): Promise<unknown[]>;
+        readyPoolFillClaims(mode: boolean | "portable"): Promise<unknown[]>;
+      };
+      const expected = Array.from({ length: 270 }, (_, index) => ({
+        id: String(index).padStart(4, "0"),
+      }));
+      for (const row of expected) {
+        storage.seed(`${entryPrefix}${row.id}`, row);
+        storage.seed(`${claimPrefix}${row.id}`, row);
+      }
+      expect(await coordinator.readyPoolEntries(mode)).toEqual(expected);
+      expect(await coordinator.readyPoolFillClaims(mode)).toEqual(expected);
+      pages(storage, entryPrefix);
+      pages(storage, claimPrefix);
+    },
+  );
+
+  it("pages portable borrow candidates and still grants the oldest compatible ready lease", async () => {
+    const storage = new ObservedMemoryStorage();
+    const identity = await typedReadyPoolIdentity();
+    const runtime = Object.assign(new FakeCoordinatorRuntime(storage), {
+      provisioning: {
+        commitAndWake: <T>(callback: (transaction: CoordinatorStorageView) => Promise<T>) =>
+          storage.transaction(callback),
+        registerProvisioningTick: () => {},
+        ownMaintenance: () => {},
+      },
+    });
+    const access = new ReadyPoolAccess(runtime, {
+      owner: () => "alice@example.com",
+      org: () => "example-org",
+      authorized: () => true,
+      matches: () => true,
+      identityMatches: () => true,
+      identityEqual: () => true,
+      heartbeatDeadline: () => undefined,
+      withoutBorrow: (entry) => entry,
+      heartbeatMs: 30_000,
+      provider: () => undefined,
+      counters: async () => {},
+      release: async () => {},
+    });
+    for (let i = 0; i < 270; i += 1)
+      storage.seed(`portable-ready-pool-v1:aaa:${String(i).padStart(4, "0")}`, {
+        key: "other",
+        state: "ready",
+      });
+    for (const [id, createdAt] of [
+      ["newer", "2026-10-02"],
+      ["older", "2026-10-01"],
+    ]) {
+      const lease = {
+        ...typedReadyPoolLease(),
+        id,
+        region: "eu-west-1",
+        cloudID: id,
+        provider: "aws" as const,
+        sshUser: "ubuntu",
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      };
+      storage.seed(`lease:${id}`, lease);
+      storage.seed(`portable-ready-pool-v1:builders:${id}`, {
+        key: "builders",
+        leaseID: id,
+        state: "ready",
+        identity,
+        createdAt,
+        updatedAt: createdAt,
+        expiresAt: lease.expiresAt,
+      });
+      storage.seed(portablePoolReservationKey(id!), {
+        binding: {
+          leaseID: id,
+          resourceID: id,
+          provider: "aws",
+          scope: "eu-west-1",
+          user: "ubuntu",
+        },
+        generation: 1,
+      });
+    }
+    const wire = Buffer.concat([
+      Buffer.from([0, 0, 0, 11]),
+      Buffer.from("ssh-ed25519"),
+      Buffer.from([0, 0, 0, 32]),
+      Buffer.alloc(32, 1),
+    ]);
+    const response = await access.borrow(new Request("https://crabbox.test"), "builders", {
+      publicKey: `ssh-ed25519 ${wire.toString("base64")}`,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      entry: { leaseID: "older", state: "busy" },
+      grant: { generation: 2, state: "pending" },
+    });
+    pages(storage, "portable-ready-pool-v1:");
+    expect(storage.value("portable-ready-pool-v1:builders:newer")).toMatchObject({
+      state: "ready",
+    });
+  });
+
+  it.each(["delete", "retire"])(
+    "pages Azure promotions during %s without removing other images or regions",
+    async (action) => {
+      const storage = new ObservedMemoryStorage();
+      const provider = new AzureProvider({} as Env, undefined, storage, "westeurope");
+      (provider as unknown as { clientValue: { deleteImage(): Promise<void> } }).clientValue = {
+        deleteImage: async () => {},
+      };
+      for (let i = 0; i < 270; i += 1)
+        storage.seed(`image:azure:promoted:${String(i).padStart(4, "0")}`, { id: `other-${i}` });
+      storage.seed("image:azure:promoted:zz-match", { id: "target", region: "westeurope" });
+      storage.seed("image:azure:promoted:zz-other-region", { id: "target", region: "eastus" });
+      const retired =
+        action === "delete"
+          ? await provider.deleteImage("target")
+          : await provider.retirePromotedImage("target", "WESTEUROPE");
+      expect(retired).toBe(action === "delete" ? undefined : 1);
+      expect(storage.value("image:azure:promoted:zz-match")).toBeUndefined();
+      expect(storage.value("image:azure:promoted:0000")).toEqual({ id: "other-0" });
+      expect(Boolean(storage.value("image:azure:promoted:zz-other-region"))).toBe(
+        action === "retire",
+      );
+      pages(storage, "image:azure:promoted:");
+    },
+  );
+
+  it("pages AWS image lookups and deletion, retaining only exact matches and merging history", async () => {
+    const storage = new ObservedMemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const access = provider as unknown as {
+      promotedImagesByID(id: string): Promise<ProviderImage[]>;
+      variantImagesByID(id: string): Promise<ProviderImage[]>;
+      promotedImageMetadataByID(id: string, region: string): Promise<ProviderImage>;
+      deleteMatchingImageRecords(prefix: string, id: string, region: string): Promise<void>;
+    };
+    const prefixes = [
+      "image:aws:promoted",
+      "image:aws:catalog:",
+      "image:aws:variant:",
+      "image:aws:created:",
+    ];
+    for (const prefix of prefixes) {
+      for (let i = 0; i < 270; i += 1)
+        storage.seed(`${prefix}${String(i).padStart(4, "0")}`, { id: `other-${i}` });
+      storage.seed(`${prefix}zz-match`, {
+        id: "target",
+        name: "target",
+        region: "eu-west-1",
+        promotedAt: "2026-10-01",
+        capabilities: { runtimes: { node: "24" } },
+      });
+      storage.seed(`${prefix}zz-other-region`, {
+        id: "target",
+        region: "us-east-1",
+        promotedAt: "2026-10-01",
+      });
+    }
+    expect(await access.promotedImagesByID("target")).toHaveLength(2);
+    expect(await access.variantImagesByID("target")).toHaveLength(2);
+    expect(await access.promotedImageMetadataByID("target", "eu-west-1")).toMatchObject({
+      id: "target",
+      region: "eu-west-1",
+      capabilities: { runtimes: { node: "24" } },
+    });
+    await access.deleteMatchingImageRecords("image:aws:created:", "target", "eu-west-1");
+    expect(storage.value("image:aws:created:zz-match")).toBeUndefined();
+    expect(storage.value("image:aws:created:zz-other-region")).toBeDefined();
+    for (const prefix of prefixes) pages(storage, prefix);
+    storage.resetListOptions();
+    expect(await provider.retirePromotedImage("target", "eu-west-1")).toBe(3);
+    for (const prefix of prefixes.slice(0, 3)) {
+      expect(storage.value(`${prefix}zz-match`)).toBeUndefined();
+      expect(storage.value(`${prefix}0000`)).toBeDefined();
+      pages(storage, prefix);
+    }
+  });
+
+  it("pages scoped AWS catalogs and variants and preserves newest-first and ID tie selection", async () => {
+    const storage = new ObservedMemoryStorage();
+    const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+    const config = leaseConfig({
+      provider: "aws",
+      awsRegion: "eu-west-1",
+      serverType: "m8i.large",
+      sshPublicKey: "ssh-ed25519 test",
+      imageRequirements: { runtimes: { node: "24" } },
+    });
+    const catalog = "image:aws:catalog:linux:x86_64:ubuntu26.04:eu-west-1:";
+    const variant = "image:aws:variant:linux:x86_64:ubuntu26.04:eu-west-1:";
+    for (const prefix of [catalog, variant]) {
+      for (let i = 0; i < 270; i += 1)
+        storage.seed(`${prefix}${String(i).padStart(4, "0")}`, {
+          id: `other-${i}`,
+          promotedAt: "2026-09-01",
+          capabilities: { runtimes: { node: "20" } },
+        });
+      storage.seed(`${prefix}zz-match`, {
+        id: "ami-best",
+        name: "best",
+        promotedAt: "2026-10-01",
+        capabilities: { runtimes: { node: "24" } },
+        variantSelectors: { runtimes: { node: "24" } },
+      });
+    }
+    const access = provider as unknown as {
+      promotedImage(config: unknown): Promise<ProviderImage>;
+    };
+    expect(await access.promotedImage(config)).toMatchObject({ id: "ami-best" });
+    pages(storage, catalog);
+    pages(storage, variant);
+    storage.seed(`${catalog}zz-tie`, {
+      id: "ami-a",
+      name: "tie",
+      promotedAt: "2026-10-01",
+      capabilities: { runtimes: { node: "24" } },
+    });
+    expect(await access.promotedImage(config)).toMatchObject({ id: "ami-a" });
   });
 });

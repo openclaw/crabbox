@@ -1,6 +1,7 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 
 import { authorize, isRecord, json, stringField } from "./runner-http";
+import { coordinatorStorageEntries, storageRecordScanBatchSize } from "./storage-scan";
 
 const runnerName = "cloudflare-dynamic-workers";
 const defaultCompatibilityDate = "2026-06-12";
@@ -383,36 +384,37 @@ export class DynamicWorkerRunCoordinator extends DurableObject<Env> {
 
     if (request.method === "GET" && url.pathname === "/index/list") {
       await this.ensureRunIndexMarker();
-      const [stored, storedDeletions] = await Promise.all([
-        this.ctx.storage.list<RunIndexEntry>({ prefix: runIndexStoragePrefix }),
-        this.ctx.storage.list<RunIndexDeletion>({ prefix: runIndexDeletionStoragePrefix }),
-      ]);
-      const records = [...stored.entries()];
-      const deletions = [...storedDeletions.entries()];
-      await Promise.all([
-        ...records
-          .filter(([, entry]) => entry.record.state !== "running" || runRecordExpired(entry.record))
-          .map(([key]) => this.ctx.storage.delete(key)),
-        ...deletions
-          .filter(
-            ([, deletion]) =>
-              !deletion.pending && deletion.deletedAt + deletionTombstoneTTLms <= Date.now(),
-          )
-          .map(([key]) => this.ctx.storage.delete(key)),
-      ]);
-      return json({
-        runs: records
-          .map(([, entry]) => entry.record)
-          .filter((record) => record.state === "running" && !runRecordExpired(record)),
-        deletedRunIds: deletions
-          .map(([, deletion]) => deletion)
-          .filter(
-            (deletion) =>
-              deletion.suppressStored &&
-              (deletion.pending || deletion.deletedAt + deletionTombstoneTTLms > Date.now()),
-          )
-          .map((deletion) => deletion.runId),
-      });
+      const runs: RunRecord[] = [];
+      for await (const [key, entry] of coordinatorStorageEntries<RunIndexEntry>(this.ctx.storage, {
+        prefix: runIndexStoragePrefix,
+        limit: storageRecordScanBatchSize,
+        noCache: true,
+      })) {
+        if (entry.record.state !== "running" || runRecordExpired(entry.record)) {
+          await this.ctx.storage.delete(key);
+        } else {
+          runs.push(entry.record);
+        }
+      }
+      const deletedRunIds: string[] = [];
+      for await (const [key, deletion] of coordinatorStorageEntries<RunIndexDeletion>(
+        this.ctx.storage,
+        {
+          prefix: runIndexDeletionStoragePrefix,
+          limit: storageRecordScanBatchSize,
+          noCache: true,
+        },
+      )) {
+        if (!deletion.pending && deletion.deletedAt + deletionTombstoneTTLms <= Date.now()) {
+          await this.ctx.storage.delete(key);
+        } else if (
+          deletion.suppressStored &&
+          (deletion.pending || deletion.deletedAt + deletionTombstoneTTLms > Date.now())
+        ) {
+          deletedRunIds.push(deletion.runId);
+        }
+      }
+      return json({ runs, deletedRunIds });
     }
 
     if (request.method === "POST" && url.pathname === "/log") {
@@ -699,26 +701,28 @@ export class DynamicWorkerRunCoordinator extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     const runIndex = await this.ctx.storage.get<boolean>(runIndexMarkerStorageKey);
     if (runIndex === true) {
-      const indexDeletions = await this.ctx.storage.list<RunIndexDeletion>({
-        prefix: runIndexDeletionStoragePrefix,
-      });
       const now = Date.now();
-      const remainingExpirations: number[] = [];
-      await Promise.all(
-        [...indexDeletions.entries()].map(async ([key, deletion]) => {
-          if (deletion.pending) return;
-          const expiresAt = deletion.deletedAt + deletionTombstoneTTLms;
-          if (expiresAt <= now) {
-            await this.ctx.storage.delete(key);
-          } else {
-            remainingExpirations.push(expiresAt);
-          }
-        }),
-      );
-      if (remainingExpirations.length === 0) {
-        await this.ctx.storage.deleteAlarm();
+      let nextExpiration = Infinity;
+      for await (const [key, deletion] of coordinatorStorageEntries<RunIndexDeletion>(
+        this.ctx.storage,
+        {
+          prefix: runIndexDeletionStoragePrefix,
+          limit: storageRecordScanBatchSize,
+          noCache: true,
+        },
+      )) {
+        if (deletion.pending) continue;
+        const expiresAt = deletion.deletedAt + deletionTombstoneTTLms;
+        if (expiresAt <= now) {
+          await this.ctx.storage.delete(key);
+        } else {
+          nextExpiration = Math.min(nextExpiration, expiresAt);
+        }
+      }
+      if (Number.isFinite(nextExpiration)) {
+        await this.ctx.storage.setAlarm(nextExpiration);
       } else {
-        await this.ctx.storage.setAlarm(Math.min(...remainingExpirations));
+        await this.ctx.storage.deleteAlarm();
       }
       return;
     }

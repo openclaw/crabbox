@@ -1,7 +1,7 @@
 import type { CoordinatorStorage, CoordinatorStorageView } from "./coordinator-runtime";
 import { sha256Hex } from "./encoding";
 import { orgMatchesForAccounting, sameOrgIdentityKey } from "./org-identity";
-import { coordinatorStorageEntries } from "./storage-scan";
+import { coordinatorStorageEntries, storageRecordScanBatchSize } from "./storage-scan";
 import type {
   CoordinatorCheckpointCreateClaim,
   CoordinatorCheckpointDeleteClaim,
@@ -228,14 +228,14 @@ async function nextCheckpointDeadline(
   transaction: CoordinatorStorageView,
   record: CoordinatorCheckpointRecord,
 ): Promise<string | undefined> {
-  const candidates: number[] = [];
-  const retain = (timestamp: string | undefined) => {
-    const value = Date.parse(timestamp ?? "");
-    if (Number.isFinite(value)) candidates.push(value);
+  let earliest = Infinity;
+  const retainTime = (value: number) => {
+    if (Number.isFinite(value)) earliest = Math.min(earliest, value);
   };
+  const retain = (timestamp: string | undefined) => retainTime(Date.parse(timestamp ?? ""));
   if (record.state === "deleted") {
     const deleted = Date.parse(record.deletedAt ?? "");
-    if (Number.isFinite(deleted)) candidates.push(deleted + checkpointAuditRetentionMS);
+    if (Number.isFinite(deleted)) retainTime(deleted + checkpointAuditRetentionMS);
   } else if (record.state === "creating") {
     retain(record.createClaim?.expiresAt);
     retain(record.retryAt);
@@ -251,10 +251,15 @@ async function nextCheckpointDeadline(
     retain(record.retryAt);
     retain(record.deleteClaim?.expiresAt);
   } else if (record.state === "ready") {
-    const claims = await transaction.list<CoordinatorCheckpointUseClaim>({
-      prefix: `checkpoint-use:${record.id}:`,
-    });
-    for (const claim of claims.values()) retain(claim.expiresAt);
+    for await (const [, claim] of coordinatorStorageEntries<CoordinatorCheckpointUseClaim>(
+      transaction,
+      {
+        prefix: `checkpoint-use:${record.id}:`,
+        limit: storageRecordScanBatchSize,
+        noCache: true,
+      },
+    ))
+      retain(claim.expiresAt);
     if (
       record.retention.mode === "expire-unused" &&
       record.pinCount === 0 &&
@@ -262,11 +267,11 @@ async function nextCheckpointDeadline(
     ) {
       const lastUsed = Date.parse(record.lastUsedAt);
       if (Number.isFinite(lastUsed)) {
-        candidates.push(lastUsed + record.retention.unusedForSeconds * 1000);
+        retainTime(lastUsed + record.retention.unusedForSeconds * 1000);
       }
     }
   }
-  return candidates.length ? new Date(Math.min(...candidates)).toISOString() : undefined;
+  return Number.isFinite(earliest) ? new Date(earliest).toISOString() : undefined;
 }
 
 async function writeCheckpointTransition(
@@ -739,12 +744,14 @@ async function publishCheckpointWithHash(
         : previous.provider === "azure"
           ? ["image:azure:promoted:"]
           : [];
-    const catalog = await Promise.all(
-      catalogPrefixes.map(async (prefix) => await transaction.list<ProviderImage>({ prefix })),
-    );
-    await [...new Map(catalog.flatMap((entries) => [...entries])).entries()].reduce(
-      async (pending, [key, promoted]) => {
-        await pending;
+    // Paging stays inside the catalog transaction, including checkpoint pin updates.
+    for (const prefix of catalogPrefixes) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- pin updates share the catalog transaction in prefix order.
+      for await (const [key, promoted] of coordinatorStorageEntries<ProviderImage>(transaction, {
+        prefix,
+        limit: storageRecordScanBatchSize,
+        noCache: true,
+      })) {
         if (
           (promoted.id !== checkpointImage.id &&
             promoted.resourceID !== checkpointImage.resourceID) ||
@@ -754,15 +761,14 @@ async function publishCheckpointWithHash(
           (previous.provider === "azure" &&
             promoted.resourceID?.toLowerCase() !== checkpointImage.resourceID.toLowerCase())
         ) {
-          return;
+          continue;
         }
         await pinCheckpointPromotion(transaction, previous.provider, promoted, key);
         published = (await transaction.get<CoordinatorCheckpointRecord>(
           checkpointKey(previous.id),
         ))!;
-      },
-      Promise.resolve(),
-    );
+      }
+    }
     return published;
   });
 }
@@ -1297,11 +1303,17 @@ export async function abortCheckpointProvisioningForLease(
 ): Promise<CoordinatorCheckpointRecord | undefined> {
   return storage.transaction(async (transaction) => {
     const attempt = await transaction.get<CreateAttemptRecord>(`create-attempt:${leaseID}`);
-    const claims = await transaction.list<CoordinatorCheckpointUseClaim>({
-      prefix: "checkpoint-use:",
-    });
-    const match = [...claims].find(
-      ([, claim]) =>
+    let match: [string, CoordinatorCheckpointUseClaim] | undefined;
+    for await (const entry of coordinatorStorageEntries<CoordinatorCheckpointUseClaim>(
+      transaction,
+      {
+        prefix: "checkpoint-use:",
+        limit: storageRecordScanBatchSize,
+        noCache: true,
+      },
+    )) {
+      const [, claim] = entry;
+      if (
         claim.state === "provisioning" &&
         claim.leaseID === leaseID &&
         claim.attemptID === attemptID &&
@@ -1310,8 +1322,12 @@ export async function abortCheckpointProvisioningForLease(
           (attempt.checkpointID === claim.checkpointID &&
             attempt.checkpointUseClaimHash === claim.tokenHash)) &&
         (principal.admin ||
-          (claim.owner === principal.owner && sameOrgIdentityKey(claim.org, principal.org))),
-    );
+          (claim.owner === principal.owner && sameOrgIdentityKey(claim.org, principal.org)))
+      ) {
+        match = entry;
+        break;
+      }
+    }
     if (!match) return undefined;
     const [key, claim] = match;
     const checkpoint = await transaction.get<CoordinatorCheckpointRecord>(
@@ -1657,17 +1673,20 @@ export async function claimCheckpointDeletion(
         "checkpoint is pinned by an active image promotion",
       );
     }
-    const claims = await transaction.list<CoordinatorCheckpointUseClaim>({
-      prefix: `checkpoint-use:${checkpointID}:`,
-    });
-    if (
-      [...claims.values()].some(
-        (claim) => claim.state === "provisioning" || Date.parse(claim.expiresAt) > now,
-      )
-    ) {
-      throw new CheckpointError("checkpoint_in_use", "checkpoint has an active use claim");
+    for await (const [key, claim] of coordinatorStorageEntries<CoordinatorCheckpointUseClaim>(
+      transaction,
+      {
+        prefix: `checkpoint-use:${checkpointID}:`,
+        limit: storageRecordScanBatchSize,
+        noCache: true,
+      },
+    )) {
+      if (claim.state === "provisioning" || Date.parse(claim.expiresAt) > now) {
+        throw new CheckpointError("checkpoint_in_use", "checkpoint has an active use claim");
+      }
+      // A rejected deletion rolls back these expired-claim removals with the transaction.
+      await transaction.delete(key);
     }
-    await Promise.all([...claims.keys()].map(async (key) => await transaction.delete(key)));
     if (
       reason === "unused-expiry" &&
       (previous.retention.mode !== "expire-unused" ||
@@ -2058,19 +2077,22 @@ export async function findManagedCheckpointImage(
   image: ManagedCheckpointImage,
 ): Promise<CoordinatorCheckpointRecord | undefined> {
   if (![image.id, image.resourceID, ...(image.snapshots ?? [])].some(Boolean)) return undefined;
-  const claims = await storage.list<CoordinatorCheckpointResourceClaim>({
-    prefix: `checkpoint-resource:${provider}:`,
-  });
-  const matchingClaims = [...claims.values()].filter((claim) => {
-    if (image.immutableID && claim.immutableID !== image.immutableID) return false;
-    return checkpointImageMatchesResource(
-      provider,
-      claim.scope,
-      claim.kind,
-      claim.resourceID,
-      image,
-    );
-  });
+  const matchingClaims: CoordinatorCheckpointResourceClaim[] = [];
+  for await (const [, claim] of coordinatorStorageEntries<CoordinatorCheckpointResourceClaim>(
+    storage,
+    {
+      prefix: `checkpoint-resource:${provider}:`,
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+    },
+  )) {
+    if (image.immutableID && claim.immutableID !== image.immutableID) continue;
+    if (
+      checkpointImageMatchesResource(provider, claim.scope, claim.kind, claim.resourceID, image)
+    ) {
+      matchingClaims.push(claim);
+    }
+  }
   const records = await Promise.all(
     matchingClaims.map(async (claim) => ({
       claim,
@@ -2091,11 +2113,16 @@ export async function findManagedCheckpointImage(
     );
   }
   if (unique[0]) return unique[0];
-  const intents = await storage.list<CoordinatorCheckpointResourceIntent>({
-    prefix: `checkpoint-intent:${provider}:`,
-  });
-  const matchingIntents = [...intents.values()].filter((intent) => {
-    if (!checkpointImageScopeMatches(provider, intent.scope, image)) return false;
+  const matchingIntents: CoordinatorCheckpointResourceIntent[] = [];
+  for await (const [, intent] of coordinatorStorageEntries<CoordinatorCheckpointResourceIntent>(
+    storage,
+    {
+      prefix: `checkpoint-intent:${provider}:`,
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+    },
+  )) {
+    if (!checkpointImageScopeMatches(provider, intent.scope, image)) continue;
     if (
       checkpointImageMatchesResource(
         provider,
@@ -2103,12 +2130,12 @@ export async function findManagedCheckpointImage(
         intent.kind,
         intent.resourceID ?? intent.resourceName,
         image,
-      )
+      ) ||
+      (provider === "aws" && pendingAWSCheckpointOwnershipMatches(intent, image))
     ) {
-      return true;
+      matchingIntents.push(intent);
     }
-    return provider === "aws" && pendingAWSCheckpointOwnershipMatches(intent, image);
-  });
+  }
   const pending = await Promise.all(
     matchingIntents.map(async (intent) => ({
       intent,
@@ -2207,14 +2234,18 @@ export async function expireCheckpointClaims(
   checkpointID: string,
 ): Promise<CoordinatorCheckpointRecord | undefined> {
   return storage.transaction(async (transaction) => {
-    let record = await transaction.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID));
+    const record = await transaction.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID));
     if (!record || record.state !== "ready") return record;
     const now = Date.now();
-    const claims = await transaction.list<CoordinatorCheckpointUseClaim>({
-      prefix: `checkpoint-use:${checkpointID}:`,
-    });
-    return await [...claims].reduce(async (pending, [key, claim]) => {
-      const current = await pending;
+    let current = record;
+    for await (const [key, claim] of coordinatorStorageEntries<CoordinatorCheckpointUseClaim>(
+      transaction,
+      {
+        prefix: `checkpoint-use:${checkpointID}:`,
+        limit: storageRecordScanBatchSize,
+        noCache: true,
+      },
+    )) {
       const expired = Date.parse(claim.expiresAt) <= now;
       if (claim.state === "provisioning") {
         const attempt = claim.leaseID
@@ -2271,7 +2302,7 @@ export async function expireCheckpointClaims(
         );
         if (successful || terminal) {
           await transaction.delete(key);
-          return await writeCheckpointTransition(
+          current = await writeCheckpointTransition(
             transaction,
             current,
             {
@@ -2283,30 +2314,33 @@ export async function expireCheckpointClaims(
             "system",
             { reason: successful ? "lease-create-recovered" : "lease-create-terminal" },
           );
+          continue;
         }
-        if (!expired) return current;
+        if (!expired) continue;
         await transaction.put(key, {
           ...claim,
           expiresAt: new Date(now + checkpointUseClaimTTLMS).toISOString(),
         } satisfies CoordinatorCheckpointUseClaim);
-        return await writeCheckpointTransition(
+        current = await writeCheckpointTransition(
           transaction,
           current,
           current,
           "checkpoint.use.provisioning_extended",
           "system",
         );
+        continue;
       }
-      if (!expired) return current;
+      if (!expired) continue;
       await transaction.delete(key);
-      return await writeCheckpointTransition(
+      current = await writeCheckpointTransition(
         transaction,
         current,
         { ...current, activeUseCount: Math.max(0, current.activeUseCount - 1) },
         "checkpoint.use.expired",
         "system",
       );
-    }, Promise.resolve(record));
+    }
+    return current;
   });
 }
 

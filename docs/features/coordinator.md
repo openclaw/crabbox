@@ -722,3 +722,9 @@ defer retention pruning until they close. Portal run
 previews retain only their displayed tail. See the
 [fleet memory audit](../diagnostics/coordinator-memory.md) for measured scan
 bounds, remaining memory risks, and production telemetry needed for attribution.
+
+Pool entries and fill claims, image catalogs, checkpoint ownership and use claims,
+and dynamic runner indexes use uncached pages of at most 128 records. Transactional
+scans retain their existing transaction boundaries. Paging bounds storage reads;
+operations returning complete lists still retain their matching results. Catalog
+retirement and dynamic runner expiry keep their existing retention rules.
