@@ -63,16 +63,8 @@ declare module "ssh2" {
     once(event: "error", listener: (error: Error) => void): this;
   }
 
-  export const utils: {
-    generateKeyPairSync(
-      keyType: "ed25519",
-      options?: { comment?: string },
-    ): { private: string; public: string };
-  };
-
   const ssh2: {
     Client: typeof Client;
-    utils: typeof utils;
   };
   export default ssh2;
 }

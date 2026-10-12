@@ -43,6 +43,7 @@ import {
 import { setPoolWake } from "./ready-pool-wake";
 import { ServeCoordinator, serveEnabled, serveDisabledResponse } from "./serve";
 import { serveCloudProvider } from "./serve-provider";
+import { generateSSHHostKeyPair } from "./ssh-host-key";
 type ReadyPoolMode = boolean | "portable";
 import { AzureResumableProvisioning } from "./azure-provisioning";
 import {
@@ -87,7 +88,7 @@ import {
 import { coordinatorStorageEntries } from "./storage-scan";
 import { WayVNCRetirement } from "./wayvnc-retirement";
 
-const { Client: SSHClientConstructor, utils: sshUtils } = ssh2;
+const { Client: SSHClientConstructor } = ssh2;
 
 import { artifactUploadResponse, type ArtifactUploadRequest } from "./artifacts";
 import {
@@ -26219,10 +26220,6 @@ function workspaceSSHHostKeysFromRequest(
   } catch {
     return undefined;
   }
-}
-
-function generateSSHHostKeyPair(comment: string): { private: string; public: string } {
-  return sshUtils.generateKeyPairSync("ed25519", { comment });
 }
 
 function withSSHHostKey(config: LeaseConfig, comment: string): LeaseConfig {

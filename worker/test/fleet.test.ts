@@ -1,9 +1,10 @@
+import { createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { Script, createContext } from "node:vm";
 
 import { AwsClient } from "aws4fetch";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 
 import { adminGrantVersion, issueUserToken } from "../src/auth";
 import { EC2SpotClient, AWSLeaseAuthorityError, awsLeaseImageIdentity } from "../src/aws";
@@ -13,6 +14,7 @@ import {
   AzureProvisioningRejectedError,
   azureOwnedDeleteClaimKey,
 } from "../src/azure";
+import { cloudInit } from "../src/bootstrap";
 import type { BridgeTicketKind, BridgeTickets } from "../src/bridge-tickets";
 import { codeOriginForLease } from "../src/code-origin";
 import {
@@ -115,6 +117,96 @@ import type {
 import { addLeaseToCostLimitUsage, createCostLimitUsage } from "../src/usage";
 import { gcpBillingBody, gcpBillingError, gcpBillingMessage } from "./fixtures/gcp-billing-error";
 import { withProviderHTTP } from "./fixtures/provider-http";
+
+const hostKeyGeneration = await vi.hoisted(async () => {
+  const { default: crypto } = await import("node:crypto");
+  const { syncBuiltinESMExports } = await import("node:module");
+  const generate = vi.spyOn(crypto, "generateKeyPairSync");
+  // Install before ssh2 is imported as well, so this regression reaches the
+  // original encoder with the same deterministic native key pair.
+  syncBuiltinESMExports();
+  return generate;
+});
+
+afterAll(async () => {
+  hostKeyGeneration.mockRestore();
+  (await import("node:module")).syncBuiltinESMExports();
+});
+
+function leadingZeroHostKey() {
+  const seed = Buffer.alloc(32);
+  seed.writeUInt32BE(36, 28);
+  const privateKey = Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), seed]);
+  const publicKey = createPublicKey(
+    createPrivateKey({ key: privateKey, type: "pkcs8", format: "der" }),
+  ).export({ type: "spki", format: "der" });
+  expect([...publicKey.subarray(12, 14)]).toEqual([0, 0]);
+  return { privateKey, publicKey };
+}
+
+function expectHostKeyPair(privateKey: string, publicKey: string, expectedPublic?: Buffer) {
+  const publicWire = Buffer.from(publicKey.split(/\s+/u)[1]!, "base64");
+  const rawPublic = publicWire.subarray(19);
+  expect(publicWire.readUInt32BE(0)).toBe(11);
+  expect(publicWire.subarray(4, 15).toString()).toBe("ssh-ed25519");
+  expect(publicWire.readUInt32BE(15)).toBe(32);
+  expect(rawPublic.length).toBe(32);
+  if (expectedPublic) expect(rawPublic.equals(expectedPublic.subarray(12))).toBe(true);
+  const privateWire = Buffer.from(privateKey.split("\n").slice(1, -2).join(""), "base64");
+  expect(privateWire.subarray(0, 15).toString()).toBe("openssh-key-v1\0");
+  let offset = 15;
+  function field() {
+    const length = privateWire.readUInt32BE(offset);
+    offset += 4;
+    const result = privateWire.subarray(offset, offset + length);
+    offset += length;
+    expect(result.length).toBe(length);
+    return result;
+  }
+  expect(field().toString()).toBe("none");
+  expect(field().toString()).toBe("none");
+  expect(field().length).toBe(0);
+  expect(privateWire.readUInt32BE(offset)).toBe(1);
+  offset += 4;
+  expect(field().equals(publicWire)).toBe(true);
+  const privateBodyLength = privateWire.readUInt32BE(offset);
+  offset += 4;
+  expect(privateWire.length - offset).toBe(privateBodyLength);
+  expect(privateBodyLength % 8).toBe(0);
+  expect(privateWire.readUInt32BE(offset)).toBe(privateWire.readUInt32BE(offset + 4));
+  offset += 8;
+  expect(field().toString()).toBe("ssh-ed25519");
+  expect(field().equals(rawPublic)).toBe(true);
+  const secret = field();
+  expect(secret.length).toBe(64);
+  expect(secret.subarray(32).equals(rawPublic)).toBe(true);
+  expect(field().toString()).toBe(publicKey.split(/\s+/u).slice(2).join(" "));
+  const padding = privateWire.subarray(offset);
+  expect([...padding]).toEqual(Array.from({ length: padding.length }, (_, index) => index + 1));
+  const nativePrivate = createPrivateKey({
+    key: Buffer.concat([
+      Buffer.from("302e020100300506032b657004220420", "hex"),
+      secret.subarray(0, 32),
+    ]),
+    format: "der",
+    type: "pkcs8",
+  });
+  const derived = createPublicKey(nativePrivate).export({ format: "der", type: "spki" });
+  expect(derived.subarray(12).equals(rawPublic)).toBe(true);
+  const message = Buffer.from("host-key-pair-contract");
+  expect(
+    verify(
+      null,
+      message,
+      createPublicKey({
+        key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), rawPublic]),
+        format: "der",
+        type: "spki",
+      }),
+      sign(null, message, nativePrivate),
+    ),
+  ).toBe(true);
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -9021,6 +9113,8 @@ describe("fleet lease identity and idle", () => {
   });
 
   it("adapts workspaces onto owner-scoped lease lifecycle", async () => {
+    const hostKeys = leadingZeroHostKey();
+    hostKeyGeneration.mockClear().mockReturnValueOnce(hostKeys);
     const storage = new MemoryStorage();
     let createdClass = "";
     let createdProviderKey = "";
@@ -9101,7 +9195,8 @@ describe("fleet lease identity and idle", () => {
     expect(createdProviderKey).toBe(
       `crabbox-workspace-${(await sha256HexForTest("ssh-ed25519 workspace-test")).slice(0, 12)}`,
     );
-    expect(createdHostPrivateKey).toContain("BEGIN OPENSSH PRIVATE KEY");
+    expectHostKeyPair(createdHostPrivateKey, createdHostPublicKey, hostKeys.publicKey);
+    expect(hostKeyGeneration).toHaveBeenCalledTimes(1);
     expect(createdHostPublicKey).toMatch(/^ssh-ed25519 /);
     const createdHostKeyIdentity = createdHostPublicKey.trim().split(/\s+/u).slice(0, 2).join(" ");
     expect(createdHostKeyIdentity.split(/\s+/u)).toHaveLength(2);
@@ -22775,77 +22870,91 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("provider-access:cbx_abcdef123456")).toBeUndefined();
   });
 
-  it("persists requested market before provider create and records the actual fallback", async () => {
-    const storage = new MemoryStorage();
-    let storedDuringCreate: LeaseRecord | undefined;
-    let injectedHostPrivateKey = "";
-    let injectedHostPublicKey = "";
-    const fleet = testFleet(storage, {
-      azure: fakeProvider(
-        (config) => {
-          injectedHostPrivateKey = config.sshHostPrivateKey;
-          injectedHostPublicKey = config.sshHostPublicKey;
-          storedDuringCreate = structuredClone(storage.value("lease:cbx_abcdef123456"));
-        },
-        {
-          provider: "azure",
-          cloudID: "vm-cbx-abcdef123456",
-          region: "eastus",
-          market: "on-demand",
-        },
-      ),
-    });
+  it.each([false, true])(
+    "persists requested market and a valid host key before provider fallback (leading zero: %s)",
+    async (leadingZero) => {
+      const hostKeys = leadingZero ? leadingZeroHostKey() : undefined;
+      if (hostKeys) hostKeyGeneration.mockReturnValueOnce(hostKeys);
+      const storage = new MemoryStorage();
+      let storedDuringCreate: LeaseRecord | undefined;
+      let injectedHostPrivateKey = "";
+      let injectedHostPublicKey = "";
+      const fleet = testFleet(storage, {
+        azure: fakeProvider(
+          (config) => {
+            injectedHostPrivateKey = config.sshHostPrivateKey;
+            injectedHostPublicKey = config.sshHostPublicKey;
+            const bootstrap = cloudInit(config);
+            expect(bootstrap).toContain(`ed25519_public: ${injectedHostPublicKey}`);
+            expect(bootstrap).toContain(
+              injectedHostPrivateKey
+                .trimEnd()
+                .split("\n")
+                .map((line) => `    ${line}`)
+                .join("\n"),
+            );
+            storedDuringCreate = structuredClone(storage.value("lease:cbx_abcdef123456"));
+          },
+          {
+            provider: "azure",
+            cloudID: "vm-cbx-abcdef123456",
+            region: "eastus",
+            market: "on-demand",
+          },
+        ),
+      });
 
-    const create = await fleet.fetch(
-      request("POST", "/v1/leases", {
-        headers: {
-          "x-crabbox-owner": "alice@example.com",
-          "x-crabbox-org": "example-org",
-        },
-        body: {
-          leaseID: "cbx_abcdef123456",
-          provider: "azure",
-          azureLocation: "eastus",
-          capacity: { market: "spot", fallback: "on-demand" },
-          ttlSeconds: 1200,
-          sshPublicKey: "ssh-ed25519 test",
-        },
-      }),
-    );
+      const create = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers: {
+            "x-crabbox-owner": "alice@example.com",
+            "x-crabbox-org": "example-org",
+          },
+          body: {
+            leaseID: "cbx_abcdef123456",
+            provider: "azure",
+            azureLocation: "eastus",
+            capacity: { market: "spot", fallback: "on-demand" },
+            ttlSeconds: 1200,
+            sshPublicKey: "ssh-ed25519 test",
+          },
+        }),
+      );
 
-    expect(create.status).toBe(201);
-    expect(storedDuringCreate).toMatchObject({
-      id: "cbx_abcdef123456",
-      provider: "azure",
-      state: "provisioning",
-      cloudID: "",
-      market: "spot",
-    });
-    expect(injectedHostPrivateKey).toContain("BEGIN OPENSSH PRIVATE KEY");
-    const injectedHostKeyIdentity = injectedHostPublicKey
-      .trim()
-      .split(/\s+/u)
-      .slice(0, 2)
-      .join(" ");
-    expect(injectedHostKeyIdentity).toMatch(/^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$/u);
-    expect(injectedHostKeyIdentity.split(/\s+/u)).toHaveLength(2);
-    expect(storedDuringCreate?.sshHostKey).toBe(injectedHostKeyIdentity);
-    expect(JSON.stringify(storedDuringCreate)).not.toContain("BEGIN OPENSSH PRIVATE KEY");
-    const { lease } = (await create.json()) as { lease: LeaseRecord };
-    expect(lease).toMatchObject({
-      id: "cbx_abcdef123456",
-      provider: "azure",
-      state: "active",
-      cloudID: "vm-cbx-abcdef123456",
-      market: "on-demand",
-      sshHostKey: injectedHostKeyIdentity,
-    });
-    const storedLease = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
-    expect(storedLease?.state).toBe("active");
-    expect(storedLease?.market).toBe("on-demand");
-    expect(storedLease?.sshHostKey).toBe(injectedHostKeyIdentity);
-    expect(JSON.stringify(storedLease)).not.toContain("BEGIN OPENSSH PRIVATE KEY");
-  });
+      expect(create.status).toBe(201);
+      expect(storedDuringCreate).toMatchObject({
+        id: "cbx_abcdef123456",
+        provider: "azure",
+        state: "provisioning",
+        cloudID: "",
+        market: "spot",
+      });
+      expectHostKeyPair(injectedHostPrivateKey, injectedHostPublicKey, hostKeys?.publicKey);
+      const injectedHostKeyIdentity = injectedHostPublicKey
+        .trim()
+        .split(/\s+/u)
+        .slice(0, 2)
+        .join(" ");
+      expect(injectedHostKeyIdentity).toMatch(/^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$/u);
+      expect(injectedHostKeyIdentity.split(/\s+/u)).toHaveLength(2);
+      expect(storedDuringCreate?.sshHostKey).toBe(injectedHostKeyIdentity);
+      expect(JSON.stringify(storedDuringCreate)).not.toContain("BEGIN OPENSSH PRIVATE KEY");
+      const { lease } = (await create.json()) as { lease: LeaseRecord };
+      expect(lease).toMatchObject({
+        id: "cbx_abcdef123456",
+        provider: "azure",
+        state: "active",
+        cloudID: "vm-cbx-abcdef123456",
+        market: "on-demand",
+        sshHostKey: injectedHostKeyIdentity,
+      });
+      const storedLease = storage.value<LeaseRecord>("lease:cbx_abcdef123456");
+      expect(storedLease?.state).toBe("active");
+      expect(storedLease?.market).toBe("on-demand");
+      expect(storedLease?.sshHostKey).toBe(injectedHostKeyIdentity);
+      expect(JSON.stringify(storedLease)).not.toContain("BEGIN OPENSSH PRIVATE KEY");
+    },
+  );
 
   it.each(["hetzner", "daytona"] as const)(
     "omits capacity market from %s lease records",
