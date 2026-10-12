@@ -5,6 +5,7 @@ import {
   type ProvisioningDueRecord,
 } from "./coordinator-runtime";
 import { completeLeaseProviderCleanup } from "./lease-cleanup";
+import { putLeaseRecord } from "./lease-record-store";
 import type {
   FrozenProvisioningPlan,
   ProviderResumableProvisioning,
@@ -234,7 +235,7 @@ export async function cancelProvisioningOperation(
     provisioningResourceMayExist: true,
   };
   updateCleanupMetadata(released, operation.step.phase, at);
-  await transaction.put(`lease:${lease.id}`, released);
+  await putLeaseRecord(transaction, released);
   return released;
 }
 
@@ -353,7 +354,7 @@ export class LeaseProvisioningController {
         lease.provisioningResourceMayExist = true;
         lease.updatedAt = new Date(now).toISOString();
         updateCleanupMetadata(lease, operation.step.phase, now);
-        await transaction.put(`lease:${leaseID}`, lease);
+        await putLeaseRecord(transaction, lease);
       }
       if (operation.step.coordinationKey) {
         const key = `provisioning-lock:${operation.step.coordinationKey}`;
@@ -479,8 +480,7 @@ export class LeaseProvisioningController {
         if (!canceled)
           latest.failureError = "provisioning candidates exhausted after verified cleanup";
       }
-      if (canceled || result.phase === "terminal")
-        await transaction.put(`lease:${leaseID}`, latest);
+      if (canceled || result.phase === "terminal") await putLeaseRecord(transaction, latest);
     });
   }
 }

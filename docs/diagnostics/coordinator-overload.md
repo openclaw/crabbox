@@ -96,21 +96,54 @@ exceeded`.
 The Worker entrypoint separately maps stub failures to a structured `503`
 with `Retry-After`, and the CLI retries reads and run admission with backoff.
 
-## Remaining work (needs a design decision)
+## Maintenance-candidate index
 
-The full `lease:` walk in `scheduleAlarm()` and discovery is still
-proportional to all retained history. Options, in order of leverage:
+The coordinator now maintains `lease-maintenance:<leaseID>` beside every lease
+write and delete, in the same transaction or coalesced Durable Object write batch.
+Stores without write coalescing still publish membership before the lease and
+retract it only after, so an interrupted write leaves a stale entry rather than a
+missing one. Its time-independent membership includes live leases,
+unresolved cleanup or provisioning custody, pending runtime-adapter deletion,
+non-complete lifetime policies, and retained AWS SSH access. Settled terminal
+history without those markers is excluded. Each consumer still applies its
+original predicate to freshly loaded records.
 
-1. **Durable maintenance-candidate index.** Maintain `lease-maintenance:<id>`
-   for leases that are live, need cleanup, are lifetime candidates, may need
-   interrupted-provisioning recovery, or have a runtime-adapter delete pending.
-   Write it beside every lease write (`putLease` plus the transaction puts),
-   backfill with a cursor across maintenance passes, and fall back to the full
-   walk until the backfill marker is set. Alarm reconciliation and discovery
-   then scale with outstanding work (tens of leases), not history.
-2. **Separate ingress wakes from full maintenance.** Run AWS ingress
-   reconciliation from its own wake so heartbeats cannot schedule a full pass
-   every second.
-3. **Terminal lease retention.** Archive or prune settled leases after a
-   retention window, with usage rollups so monthly usage stays correct. This
-   is a product decision.
+After backfill, five hot reads use this index: alarm reconciliation, maintenance
+discovery, provider-access lease collection, live slug lookup, and registration
+conflict collection. Index keys preserve lease-ID ordering and slug lookup still
+stops after its second match. Reads use bounded uncached pages; discovery keeps
+`allowConcurrency: true` so it does not close the input gate while scanning.
+
+`lease-maintenance-state` records the version and cursors. Backfill adds members
+in at most 32 pages of 128 lease records per maintenance pass (4,096 rows; roughly
+nine passes for 34,000 leases). Until it completes, all five consumers retain
+the full-history fallback. A version change restarts that fallback and backfill.
+An add-only audit starts on the first maintenance pass after its daily deadline,
+continues across bounded passes while consumers keep using the index, and
+schedules the next audit 24 hours after completion. A new runtime generation
+(each Cloudflare deployment, each Node process start) starts an audit
+immediately, repairing membership written by a rolled-back runtime or interrupted
+between a lease write and its index write. The existing 15-minute
+scheduled maintenance trigger advances scans even when no lease alarm is armed;
+no alarm-selection behavior changes.
+
+Completion emits one JSON line with event `coordinator.lease_maintenance_index`:
+`backfill_complete` includes `scanned` and `members`; `audit_complete` includes
+`scanned` and `added`. A nonzero audit `added` count indicates missing membership
+and warrants investigating a missed write path. Stale entries are removed only
+in maintenance, after a transaction rereads the lease and confirms it is still
+missing or no longer a member. Ordinary index readers never prune.
+
+## Remaining work
+
+Portal views, recent leases, administrative lease/host audits, usage and monthly
+cost accounting still scan complete history because their answers include
+terminal records. AWS/Azure orphan sweeps, runtime-adapter identity reclamation,
+and host reservations also retain complete-history reads: omitting ownership
+or reservation evidence could authorize unsafe cloud-resource reuse/deletion.
+These paths are deliberately outside the maintenance index.
+
+Separate ingress wakes from full maintenance remains useful: heartbeat-driven
+SSH reconciliation can still cause frequent passes, although their hot lease
+reads now scale with outstanding work. Terminal lease archival or pruning still
+needs a retention policy and usage rollups to preserve monthly accounting.

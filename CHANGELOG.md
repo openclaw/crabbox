@@ -19,6 +19,8 @@
 
 ### Fixes
 
+- Coordinator: index leases with pending maintenance so alarm reconciliation, discovery, provider access, slug lookup, and registration avoid scanning settled history, with bounded backfill and daily repair audits. [PR TODO-PR-LINK].
+
 - Coordinator/CLI: return structured retryable 503 responses with Retry-After for Durable Object overload/reset instead of Cloudflare 1101, and retry reads and run admission with bounded backoff. [PR 2777](https://github.com/openclaw/crabbox/pull/2777).
 - Coordinator: stop alarm reconciliation from issuing a storage read per retained historical lease, and keep read-only lifetime readbacks out of the lifecycle queue, reducing request queueing and overload errors on long-lived fleets. [PR 2782](https://github.com/openclaw/crabbox/pull/2782).
 - Coordinator: allow explicitly configured capacity admins to use their owner allowance when shared fleet or org caps are full, while preserving spending limits and ordinary admission.

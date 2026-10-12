@@ -1,6 +1,9 @@
 import { AsyncMutex } from "./async-mutex";
 export interface CoordinatorStorageView {
-  get<T>(key: string, options?: { noCache?: boolean }): Promise<T | undefined>;
+  get<T>(
+    key: string,
+    options?: { noCache?: boolean; allowConcurrency?: boolean },
+  ): Promise<T | undefined>;
   put<T>(key: string, value: T, options?: { noCache?: boolean }): Promise<void>;
   delete(key: string): Promise<unknown>;
   list<T>(options?: {

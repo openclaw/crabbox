@@ -37,7 +37,14 @@ import {
   type CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
 import { sha256Hex } from "../src/encoding";
-import { EXTERNAL_RUNNER_FRESHNESS, imageRouteDeadlineMs } from "../src/fleet";
+import {
+  EXTERNAL_RUNNER_FRESHNESS,
+  imageRouteDeadlineMs,
+  leaseNeedsCleanup,
+  leaseMayNeedInterruptedProvisioningRecovery,
+  nextLeaseAlarmTime,
+  leaseOwnsAWSSSHAccess,
+} from "../src/fleet";
 import {
   AWSProvider,
   AzureProvider,
@@ -66,12 +73,27 @@ import {
 import { GCPClient, gcpProviderLabelValue } from "../src/gcp";
 import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
 import { errorMessage } from "../src/http";
-import { newLeaseLifetime } from "../src/lease-lifetime";
+import { lifetimeCandidate, lifetimeNextAlarm, newLeaseLifetime } from "../src/lease-lifetime";
+import * as maintenanceIndex from "../src/lease-maintenance-index";
+import {
+  leaseMaintenanceVersion,
+  leaseMaintenanceStateKey,
+  maintainLeaseMaintenanceIndex,
+  type LeaseMaintenanceState,
+} from "../src/lease-maintenance-index";
 import {
   provisioningOperationKey,
   putProvisioningOperation,
   type LeaseProvisioningOperation,
 } from "../src/lease-provisioning";
+import {
+  deleteLeaseRecord,
+  leaseMaintenanceKey,
+  leaseMaintenancePrefix,
+  leaseNeedsMaintenanceIndex,
+  putLeaseRecord,
+} from "../src/lease-record-store";
+import { leaseIsLive } from "../src/lease-state";
 import { MISSING_ORG_KEY, isCurrentOrgKey, orgKeyForLabel } from "../src/org-identity";
 import { portalCode, portalVNC, webVNCCredentialsFromHistoryState } from "../src/portal";
 import {
@@ -414,6 +436,24 @@ class FleetDurableObject extends ProductionFleetDurableObject {
       await Promise.all(this.tasks);
     }
   }
+}
+
+interface MaintenanceIndexTestFleet {
+  runScheduledMaintenance(): Promise<void>;
+  scheduleAlarm(): Promise<void>;
+  providerAccessLeaseRecords(): Promise<LeaseRecord[]>;
+  resolveLeaseSlug(
+    slug: string,
+    visible: (lease: LeaseRecord) => boolean,
+  ): Promise<LeaseRecord | undefined>;
+  reconcileInterruptedLeaseProvisioning(ids: ReadonlySet<string>): Promise<void>;
+  maintainLeaseLifetimes(ids: ReadonlySet<string>): Promise<void>;
+  expireLeases(ids: ReadonlySet<string>): Promise<void>;
+  reconcileRuntimeAdapterDeletes(ids: ReadonlySet<string>): Promise<void>;
+  visitMaintenanceLeaseRecords(
+    visitor: (lease: LeaseRecord) => void,
+    options?: { allowConcurrency?: boolean },
+  ): Promise<void>;
 }
 
 class MemoryStorage {
@@ -17611,6 +17651,692 @@ describe("fleet lease identity and idle", () => {
       expect(scans.length === 0).toBe(path.startsWith("/v1/ready-pools"));
     },
   );
+
+  it("keeps a time-independent superset of every maintenance consumer", () => {
+    const date = (offset: number) => new Date(Date.now() + offset).toISOString();
+    const policy = newLeaseLifetime({} as Env, new Date(Date.now()), false, {
+      mode: "enforce",
+      maxAgeSeconds: 360,
+      retainSeconds: 300,
+    })!;
+    const markers: Partial<LeaseRecord>[] = [
+      {},
+      { cloudID: "" },
+      { cleanupStartedAt: date(-1000) },
+      { cleanupClaimExpiresAt: date(1000) },
+      { cleanupError: "retry" },
+      { cleanupRetryAt: date(-1000) },
+      { cleanupRetryAt: date(1000) },
+      { providerKeyCleanupPending: true },
+      { provisioningRequestStartedAt: date(-1000) },
+      { provisioningResourceMayExist: true },
+      { runtimeAdapterDeleteRequestedAt: date(-1000) },
+      { runtimeAdapterDeleteRequestedAt: date(-1000), runtimeAdapterDeleteRetryAt: date(1000) },
+      { lifetimePolicy: policy },
+      { lifetimePolicy: { ...policy, status: "retained", deleteAfterAt: date(1000) } },
+      { lifetimePolicy: { ...policy, status: "complete" } },
+      { network: { sshSourceCIDRs: ["192.0.2.1/32"], sshSourceCIDRsComplete: true } },
+      { network: { awsPrivate: true } },
+      { workspaceID: "workspace" },
+      { cleanupCompletedAt: date(-1000) },
+      {
+        provisioningResourceMayExist: true,
+        provisioningFailureRetryable: false,
+        failureError: "uncertain",
+        cleanupError: "unresolved",
+      },
+    ];
+    for (const state of ["provisioning", "active", "released", "expired", "failed"] as const) {
+      for (const marker of markers) {
+        for (const provider of ["aws", "hetzner", "external"] as const) {
+          for (const lifecycle of ["managed", "registered"] as const) {
+            for (const releaseDeletesServer of [true, false]) {
+              const lease = testLease({
+                ...marker,
+                state,
+                provider,
+                lifecycle,
+                releaseDeletesServer,
+              });
+              for (const now of [
+                0,
+                Date.now() - 86_400_000,
+                Date.now(),
+                Date.now() + 86_400_000,
+                8e12,
+              ]) {
+                const live = leaseIsLive(lease);
+                const cleanup = leaseNeedsCleanup(lease, now);
+                const recovery = leaseMayNeedInterruptedProvisioningRecovery(lease);
+                const predicates = {
+                  discovery:
+                    live ||
+                    cleanup ||
+                    lifetimeCandidate(lease) ||
+                    recovery ||
+                    Boolean(lease.runtimeAdapterDeleteRequestedAt),
+                  lifetimeAlarm: lifetimeNextAlarm(lease, now) !== undefined,
+                  readiness:
+                    lifetimeCandidate(lease) && lease.lifetimePolicy?.readiness?.status !== "ready",
+                  leaseAlarm:
+                    (live ||
+                      cleanup ||
+                      recovery ||
+                      Boolean(lease.runtimeAdapterDeleteRequestedAt)) &&
+                    nextLeaseAlarmTime(lease, "test") !== undefined,
+                  providerAccess: live || leaseOwnsAWSSSHAccess(lease),
+                  slug: live && Date.parse(lease.expiresAt) > now,
+                  registration: live || Boolean(lease.runtimeAdapterDeleteRequestedAt),
+                };
+                const uncovered = Object.entries(predicates)
+                  .filter(([, candidate]) => candidate && !leaseNeedsMaintenanceIndex(lease))
+                  .map(([name]) => name);
+                expect(uncovered).toEqual([]);
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(
+      leaseNeedsMaintenanceIndex(testLease({ state: "released", cleanupCompletedAt: date(-1000) })),
+    ).toBe(false);
+  });
+
+  it("updates membership, deletion, and transaction rollback with lease writes", async () => {
+    const storage = new MemoryStorage();
+    const base = testLease({});
+    for (const patch of [
+      {},
+      { state: "released" as const },
+      {
+        state: "released" as const,
+        lifetimePolicy: newLeaseLifetime({} as Env, new Date(Date.now()), false, {
+          mode: "enforce",
+          maxAgeSeconds: 360,
+          retainSeconds: 300,
+        })!,
+      },
+      { state: "failed" as const, cleanupError: "retry" },
+      { state: "failed" as const, provisioningResourceMayExist: true },
+    ]) {
+      const lease = { ...base, ...patch };
+      // oxlint-disable-next-line eslint/no-await-in-loop -- assert each membership transition before the next write.
+      await putLeaseRecord(storage, lease, { noCache: true });
+      expect(storage.value(`lease:${lease.id}`)).toEqual(lease);
+      expect(storage.value(leaseMaintenanceKey(lease.id))).toBe(
+        leaseNeedsMaintenanceIndex(lease) ? 1 : undefined,
+      );
+    }
+    await deleteLeaseRecord(storage, base.id);
+    expect(storage.value(`lease:${base.id}`)).toBeUndefined();
+    expect(storage.value(leaseMaintenanceKey(base.id))).toBeUndefined();
+    const commits: Set<string>[] = [];
+    storage.afterCommit = async (keys) => {
+      commits.push(new Set(keys));
+    };
+    await storage.transaction((transaction) => putLeaseRecord(transaction, base));
+    expect(commits).toEqual([new Set([`lease:${base.id}`, leaseMaintenanceKey(base.id)])]);
+    await expect(
+      storage.transaction(async (transaction) => {
+        await deleteLeaseRecord(transaction, base.id);
+        throw new Error("rollback");
+      }),
+    ).rejects.toThrow("rollback");
+    expect(storage.value(leaseMaintenanceKey(base.id))).toBe(1);
+    expect(storage.value(`lease:${base.id}`)).toEqual(base);
+  });
+
+  it("backfills bounded pages and keeps fallback until the last page", async () => {
+    const storage = new BoundedObservedMemoryStorage();
+    const members = new Set<string>();
+    for (let index = 0; index < 4200; index++) {
+      const id = `cbx_${index.toString(16).padStart(12, "0")}`;
+      const lease = testLease({
+        id,
+        state: index % 100 === 0 ? "active" : "released",
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      });
+      storage.seed(`lease:${id}`, lease);
+      if (leaseNeedsMaintenanceIndex(lease)) members.add(leaseMaintenanceKey(id));
+    }
+    const fleet = testCoordinator(storage) as unknown as MaintenanceIndexTestFleet;
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await fleet.runScheduledMaintenance();
+      expect(storage.value<LeaseMaintenanceState>(leaseMaintenanceStateKey)?.complete).toBe(false);
+      expect(storage.value<LeaseMaintenanceState>(leaseMaintenanceStateKey)?.scanned).toBe(4096);
+      storage.resetListOptions();
+      await fleet.providerAccessLeaseRecords();
+      expect(storage.listOptions.some(({ prefix }) => prefix === "lease:")).toBe(true);
+      await fleet.runScheduledMaintenance();
+      expect(storage.value<LeaseMaintenanceState>(leaseMaintenanceStateKey)?.complete).toBe(true);
+      expect(new Set((await storage.list({ prefix: leaseMaintenancePrefix })).keys())).toEqual(
+        members,
+      );
+      const scans = storage.listOptions.filter(({ prefix }) => prefix === "lease:");
+      expect(scans.every(({ limit, noCache }) => limit === 128 && noCache)).toBe(true);
+      expect(scans.slice(-1)[0]).toMatchObject({ allowConcurrency: true });
+      expect(log.mock.calls.flat().map(String)).toContain(
+        JSON.stringify({
+          event: "coordinator.lease_maintenance_index",
+          phase: "backfill_complete",
+          scanned: 4200,
+          members: 42,
+        }),
+      );
+      storage.resetListOptions();
+      await fleet.providerAccessLeaseRecords();
+      await fleet.scheduleAlarm();
+      expect(storage.listOptions.filter(({ prefix }) => prefix === "lease:")).toEqual([]);
+    } finally {
+      log.mockRestore();
+    }
+  }, 30_000);
+
+  it("keeps alarm, discovery, access, slug and registration equivalent across index modes", async () => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const policy = newLeaseLifetime({} as Env, new Date(now), false, {
+        mode: "enforce",
+        maxAgeSeconds: 360,
+        retainSeconds: 300,
+      })!;
+      const patches: Partial<LeaseRecord>[] = [
+        { state: "released" },
+        { state: "active", slug: "unique-live" },
+        {
+          state: "provisioning",
+          cloudID: "",
+          provisioningRequestStartedAt: new Date(now).toISOString(),
+        },
+        {
+          state: "failed",
+          cleanupError: "retry",
+          cleanupRetryAt: new Date(now + 300_000).toISOString(),
+        },
+        {
+          state: "released",
+          releaseDeletesServer: false,
+          lifetimePolicy: {
+            ...policy,
+            status: "retained",
+            deleteAfterAt: new Date(now + 300_000).toISOString(),
+          },
+        },
+        {
+          state: "failed",
+          cloudID: "",
+          provisioningResourceMayExist: true,
+          provisioningRequestStartedAt: new Date(now).toISOString(),
+        },
+        { state: "released", runtimeAdapterDeleteRequestedAt: new Date(now).toISOString() },
+        {
+          state: "released",
+          provider: "aws",
+          releaseDeletesServer: false,
+          network: { sshSourceCIDRs: ["192.0.2.1/32"] },
+        },
+        {
+          state: "active",
+          lifecycle: "registered",
+          provider: "external",
+          host: "192.0.2.90",
+          target: "linux",
+          slug: "conflict",
+          runtimeAdapterID: "index-adapter",
+          runtimeAdapterWorkspaceID: "index-workspace",
+          runtimeAdapterRegistrationID: "index-registration",
+        },
+      ];
+      const run = async (complete: boolean) => {
+        const storage = new ObservedMemoryStorage();
+        for (const [index, patch] of patches.entries()) {
+          const lease = testLease({
+            id: `cbx_${index.toString(16).padStart(12, "0")}`,
+            owner: "alice@example.com",
+            org: "example-org",
+            ...patch,
+            expiresAt: new Date(now + 3600_000).toISOString(),
+          });
+          // oxlint-disable-next-line eslint/no-await-in-loop -- seed ordered fixtures before comparing both consumer modes.
+          await putLeaseRecord(storage, lease);
+        }
+        storage.seed(leaseMaintenanceStateKey, {
+          version: leaseMaintenanceVersion,
+          complete,
+          nextAuditAt: now + 86_400_000,
+        });
+        const registered = storage.value<LeaseRecord>("lease:cbx_000000000008")!;
+        storage.seed("runtime-adapter-identity:index-adapter", {
+          adapterID: "index-adapter",
+          owner: registered.owner,
+          org: registered.org,
+          createdAt: new Date(now).toISOString(),
+          claimVersion: 1,
+          claimState: "confirmed",
+        });
+        const coordinator = testCoordinator(storage);
+        const fleet = coordinator as unknown as MaintenanceIndexTestFleet;
+        await fleet.scheduleAlarm();
+        const alarm = storage.alarm();
+        const access = (await fleet.providerAccessLeaseRecords()).map(({ id }) => id);
+        const slug = (await fleet.resolveLeaseSlug("unique-live", () => true))?.id;
+        const registration = await coordinator.fetch(
+          request("PUT", "/v1/leases/cbx_ffffffffffff/registration", {
+            headers: { "x-crabbox-owner": registered.owner, "x-crabbox-org": "example-org" },
+            body: {
+              provider: "external",
+              target: "linux",
+              host: "192.0.2.90",
+              slug: "conflict",
+              runtimeAdapterID: "index-adapter",
+              runtimeAdapterWorkspaceID: "index-workspace",
+              runtimeAdapterRegistrationID: "replacement-registration",
+            },
+          }),
+        );
+        const discovered: string[][] = [];
+        const phase = vi
+          .spyOn(fleet, "reconcileInterruptedLeaseProvisioning")
+          .mockImplementation(async (ids) => {
+            discovered.push([...ids].toSorted());
+          });
+        const maintenance = vi
+          .spyOn(maintenanceIndex, "maintainLeaseMaintenanceIndex")
+          .mockResolvedValue();
+        const quiet = [
+          "maintainLeaseLifetimes",
+          "expireLeases",
+          "reconcileRuntimeAdapterDeletes",
+        ] as const;
+        const mocks = quiet.map((name) => vi.spyOn(fleet, name).mockResolvedValue());
+        try {
+          await fleet.runScheduledMaintenance();
+        } finally {
+          phase.mockRestore();
+          maintenance.mockRestore();
+          mocks.forEach((mock) => mock.mockRestore());
+        }
+        return {
+          alarm,
+          access,
+          slug,
+          registration: { status: registration.status, body: await registration.json() },
+          discovered,
+        };
+      };
+      const fallback = await run(false);
+      const indexed = await run(true);
+      expect(indexed).toEqual(fallback);
+      expect(indexed.registration.status).toBe(409);
+      expect(indexed.discovered[0]).toHaveLength(7);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("does no history page reads for maintenance, alarm, changed-CIDR heartbeat or slug at scale", async () => {
+    const storage = new BoundedObservedMemoryStorage();
+    for (let index = 0; index < 2000; index++) {
+      const id = `cbx_${index.toString(16).padStart(12, "0")}`;
+      storage.seed(`lease:${id}`, testLease({ id, state: "released" }));
+    }
+    const lease = testLease({
+      id: "cbx_ffffffffffff",
+      provider: "aws",
+      slug: "indexed-live",
+      owner: "alice@example.com",
+      org: "example-org",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+    });
+    await putLeaseRecord(storage, lease);
+    // Steady state between deploys: the current runtime already maintains the index.
+    storage.seed(leaseMaintenanceStateKey, {
+      version: leaseMaintenanceVersion,
+      complete: true,
+      nextAuditAt: Date.now() + 86_400_000,
+      generation: "steady-generation",
+    });
+    const reads: string[] = [];
+    storage.afterGet = (key) => {
+      if (key.startsWith("lease:")) reads.push(key);
+    };
+    let refreshes = 0;
+    const fleet = testCoordinator(
+      storage,
+      {
+        aws: fakeProvider(undefined, {
+          provider: "aws",
+          onRefreshLeaseAccess: (current) => {
+            refreshes++;
+            return current;
+          },
+        }),
+      },
+      { CF_VERSION_METADATA: { id: "steady-generation" } as Env["CF_VERSION_METADATA"] },
+    );
+    const internal = fleet as unknown as MaintenanceIndexTestFleet;
+    await internal.runScheduledMaintenance();
+    await internal.scheduleAlarm();
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+        headers: {
+          "cf-connecting-ip": "198.51.100.10",
+          "x-crabbox-owner": lease.owner,
+          "x-crabbox-org": "example-org",
+        },
+        body: {},
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(refreshes).toBe(1);
+    expect((await internal.resolveLeaseSlug("indexed-live", () => true))?.id).toBe(lease.id);
+    expect(storage.listOptions.filter(({ prefix }) => prefix === "lease:")).toEqual([]);
+    expect(new Set(reads)).toEqual(new Set([`lease:${lease.id}`]));
+  });
+
+  it("prunes stale membership only in maintenance and retries a concurrent membership write", async () => {
+    const storage = new MemoryStorage();
+    const member = testLease({ id: "cbx_000000000001" });
+    const settled = testLease({ id: "cbx_000000000002", state: "released" });
+    const racing = testLease({ id: "cbx_000000000003", state: "released" });
+    await putLeaseRecord(storage, member);
+    storage.seed(`lease:${settled.id}`, settled);
+    storage.seed(`lease:${racing.id}`, racing);
+    for (const id of [settled.id, racing.id, "missing"]) storage.seed(leaseMaintenanceKey(id), 1);
+    storage.seed(leaseMaintenanceStateKey, {
+      version: leaseMaintenanceVersion,
+      complete: true,
+      nextAuditAt: Date.now() + 86_400_000,
+    });
+    const fleet = testCoordinator(storage) as unknown as MaintenanceIndexTestFleet;
+    await fleet.providerAccessLeaseRecords();
+    await fleet.scheduleAlarm();
+    await fleet.resolveLeaseSlug("absent", () => true);
+    expect(storage.value(leaseMaintenanceKey("missing"))).toBe(1);
+    expect(storage.value(leaseMaintenanceKey(settled.id))).toBe(1);
+    let racingReads = 0;
+    storage.afterGet = async (key) => {
+      if (key === `lease:${racing.id}` && ++racingReads === 2) {
+        await putLeaseRecord(storage, { ...racing, state: "active" });
+      }
+    };
+    await maintainLeaseMaintenanceIndex(storage, Date.now());
+    expect(racingReads).toBeGreaterThanOrEqual(3);
+    expect(storage.value(leaseMaintenanceKey("missing"))).toBeUndefined();
+    expect(storage.value(leaseMaintenanceKey(settled.id))).toBeUndefined();
+    expect(storage.value(leaseMaintenanceKey(racing.id))).toBe(1);
+    expect(storage.value(leaseMaintenanceKey(member.id))).toBe(1);
+  });
+
+  it("issues lease index writes in superset-safe order for stores without coalescing", async () => {
+    const storage = new MemoryStorage();
+    const order: string[] = [];
+    storage.beforePut = async (key) => {
+      order.push(`put:${key}`);
+    };
+    storage.beforeDelete = async (key) => {
+      order.push(`delete:${key}`);
+    };
+    const lease = testLease({});
+    await putLeaseRecord(storage, lease);
+    await putLeaseRecord(storage, { ...lease, state: "released", cloudID: "" });
+    expect(order).toEqual([
+      `put:${leaseMaintenanceKey(lease.id)}`,
+      `put:lease:${lease.id}`,
+      `put:lease:${lease.id}`,
+      `delete:${leaseMaintenanceKey(lease.id)}`,
+    ]);
+  });
+
+  it("batches lease index writes only on coalescing storage and otherwise orders them by success", async () => {
+    const lease = testLease({});
+    const issued: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const coalescing = {
+      transactionSync: () => undefined,
+      put: async (key: string) => {
+        issued.push(key);
+        await gate;
+      },
+      delete: async (key: string) => {
+        issued.push(key);
+        await gate;
+      },
+    } as unknown as MemoryStorage;
+    const write = putLeaseRecord(coalescing, lease);
+    // Both operations are issued before either settles, so Durable Objects coalesce them.
+    expect(issued).toEqual([leaseMaintenanceKey(lease.id), `lease:${lease.id}`]);
+    release();
+    await write;
+
+    const storage = new MemoryStorage();
+    storage.beforePut = async (key) => {
+      if (key === leaseMaintenanceKey(lease.id)) throw new Error("index write failed");
+    };
+    await expect(putLeaseRecord(storage, lease)).rejects.toThrow("index write failed");
+    // A failed membership publish must not leave an unindexed live lease behind.
+    expect(storage.value(`lease:${lease.id}`)).toBeUndefined();
+  });
+
+  it("keeps indexed discovery hydration outside the input gate", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({});
+    await putLeaseRecord(storage, lease);
+    storage.seed(leaseMaintenanceStateKey, {
+      version: leaseMaintenanceVersion,
+      complete: true,
+      nextAuditAt: Date.now() + 86_400_000,
+    });
+    const get = vi.spyOn(storage, "get");
+    const fleet = testCoordinator(storage) as unknown as MaintenanceIndexTestFleet;
+    const visited: string[] = [];
+    await fleet.visitMaintenanceLeaseRecords((current) => void visited.push(current.id), {
+      allowConcurrency: true,
+    });
+    expect(visited).toEqual([lease.id]);
+    const reads = get.mock.calls.filter(
+      ([key]) => key === leaseMaintenanceStateKey || key === `lease:${lease.id}`,
+    );
+    expect(reads).toHaveLength(2);
+    expect(reads.every(([, options]) => options?.allowConcurrency === true)).toBe(true);
+  });
+
+  it("restarts an unfinished backfill from the beginning when the runtime generation changes", async () => {
+    const storage = new MemoryStorage();
+    const member = testLease({});
+    storage.seed(`lease:${member.id}`, member);
+    storage.seed(leaseMaintenanceStateKey, {
+      version: leaseMaintenanceVersion,
+      complete: false,
+      generation: "previous-runtime",
+      // The unfinished backfill already passed this lease's key.
+      startAfter: "lease:zzzz",
+      scanned: 128,
+      members: 0,
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await maintainLeaseMaintenanceIndex(storage, Date.now(), "current-runtime");
+      expect(storage.value(leaseMaintenanceKey(member.id))).toBe(1);
+      expect(storage.value<LeaseMaintenanceState>(leaseMaintenanceStateKey)).toMatchObject({
+        complete: true,
+        generation: "current-runtime",
+        scanned: 1,
+        members: 1,
+      });
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("restarts an active audit from the beginning when the runtime generation changes", async () => {
+    const storage = new MemoryStorage();
+    const member = testLease({});
+    storage.seed(`lease:${member.id}`, member);
+    storage.seed(leaseMaintenanceStateKey, {
+      version: leaseMaintenanceVersion,
+      complete: true,
+      nextAuditAt: Date.now() - 1,
+      generation: "previous-runtime",
+      // A partial audit already passed this lease's key.
+      auditStartAfter: "lease:zzzz",
+      auditScanned: 128,
+      auditAdded: 0,
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await maintainLeaseMaintenanceIndex(storage, Date.now(), "current-runtime");
+      expect(storage.value(leaseMaintenanceKey(member.id))).toBe(1);
+      expect(storage.value<LeaseMaintenanceState>(leaseMaintenanceStateKey)).toMatchObject({
+        generation: "current-runtime",
+        auditAdded: 1,
+      });
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("audits the lease maintenance index immediately when the runtime generation changes", async () => {
+    const storage = new MemoryStorage();
+    // A rolled-back runtime wrote this live lease without its index entry.
+    const member = testLease({});
+    storage.seed(`lease:${member.id}`, member);
+    storage.seed(leaseMaintenanceStateKey, {
+      version: leaseMaintenanceVersion,
+      complete: true,
+      nextAuditAt: Date.now() + 86_400_000,
+      generation: "previous-runtime",
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await maintainLeaseMaintenanceIndex(storage, Date.now(), "previous-runtime");
+      expect(storage.value(leaseMaintenanceKey(member.id))).toBeUndefined();
+      await maintainLeaseMaintenanceIndex(storage, Date.now(), "current-runtime");
+      expect(storage.value(leaseMaintenanceKey(member.id))).toBe(1);
+      expect(storage.value<LeaseMaintenanceState>(leaseMaintenanceStateKey)).toMatchObject({
+        complete: true,
+        generation: "current-runtime",
+        auditAdded: 1,
+      });
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("restarts backfill after a version change and audits missing members across bounded passes", async () => {
+    const storage = new ObservedMemoryStorage();
+    const member = testLease({});
+    storage.seed(`lease:${member.id}`, member);
+    for (let index = 1; index < 4200; index++) {
+      const id = `cbx_${index.toString(16).padStart(12, "0")}`;
+      storage.seed(`lease:${id}`, testLease({ id, state: "released" }));
+    }
+    storage.seed(leaseMaintenanceStateKey, {
+      version: leaseMaintenanceVersion - 1,
+      complete: true,
+      startAfter: "lease:z",
+    });
+    const fleet = testCoordinator(storage) as unknown as MaintenanceIndexTestFleet;
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await fleet.providerAccessLeaseRecords();
+      expect(storage.listOptions.some(({ prefix }) => prefix === "lease:")).toBe(true);
+      await maintainLeaseMaintenanceIndex(storage, Date.now());
+      expect(storage.value<LeaseMaintenanceState>(leaseMaintenanceStateKey)).toMatchObject({
+        version: leaseMaintenanceVersion,
+        complete: false,
+        scanned: 4096,
+      });
+      storage.resetListOptions();
+      await fleet.providerAccessLeaseRecords();
+      expect(storage.listOptions.some(({ prefix }) => prefix === "lease:")).toBe(true);
+      await maintainLeaseMaintenanceIndex(storage, Date.now());
+      const state = storage.value<LeaseMaintenanceState>(leaseMaintenanceStateKey)!;
+      const auditAt = state.nextAuditAt!;
+      await storage.delete(leaseMaintenanceKey(member.id));
+      await maintainLeaseMaintenanceIndex(storage, auditAt - 1);
+      expect(storage.value(leaseMaintenanceKey(member.id))).toBeUndefined();
+      await maintainLeaseMaintenanceIndex(storage, auditAt);
+      expect(storage.value<LeaseMaintenanceState>(leaseMaintenanceStateKey)).toMatchObject({
+        complete: true,
+        auditScanned: 4096,
+        auditAdded: 1,
+      });
+      storage.resetListOptions();
+      await fleet.providerAccessLeaseRecords();
+      expect(storage.listOptions.some(({ prefix }) => prefix === "lease:")).toBe(false);
+      await maintainLeaseMaintenanceIndex(storage, auditAt);
+      expect(storage.value<LeaseMaintenanceState>(leaseMaintenanceStateKey)?.nextAuditAt).toBe(
+        auditAt + 86_400_000,
+      );
+      expect(log.mock.calls.flat().map(String)).toContain(
+        JSON.stringify({
+          event: "coordinator.lease_maintenance_index",
+          phase: "audit_complete",
+          scanned: 4200,
+          added: 1,
+        }),
+      );
+    } finally {
+      log.mockRestore();
+    }
+  }, 30_000);
+
+  it("does not count concurrent settlement as missing audit membership", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({});
+    await putLeaseRecord(storage, lease);
+    storage.seed(leaseMaintenanceStateKey, {
+      version: leaseMaintenanceVersion,
+      complete: true,
+      nextAuditAt: 0,
+    });
+    const originalList = storage.list.bind(storage);
+    const list = vi.spyOn(storage, "list").mockImplementation(async (options) => {
+      const page = await originalList(options);
+      if (options?.prefix === "lease:") {
+        await putLeaseRecord(storage, { ...lease, state: "released" });
+      }
+      return page;
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await maintainLeaseMaintenanceIndex(storage, Date.now());
+      expect(storage.value(leaseMaintenanceKey(lease.id))).toBeUndefined();
+      expect(storage.value<LeaseMaintenanceState>(leaseMaintenanceStateKey)?.auditAdded).toBe(0);
+      expect(log.mock.calls.flat().map(String)).toContain(
+        JSON.stringify({
+          event: "coordinator.lease_maintenance_index",
+          phase: "audit_complete",
+          scanned: 1,
+          added: 0,
+        }),
+      );
+    } finally {
+      list.mockRestore();
+      log.mockRestore();
+    }
+  });
+
+  it("indexes lease writes through the coordinator write funnel", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testCoordinator(storage) as unknown as {
+      putLease(lease: LeaseRecord): Promise<void>;
+    };
+    const lease = testLease({});
+    await fleet.putLease(lease);
+    expect(storage.value(leaseMaintenanceKey(lease.id))).toBe(1);
+    await fleet.putLease({ ...lease, state: "released" });
+    expect(storage.value(leaseMaintenanceKey(lease.id))).toBeUndefined();
+  });
 
   it("reconciles alarms without per-lease reads of settled lease history", async () => {
     vi.useFakeTimers();
@@ -54035,14 +54761,17 @@ describe("synthetic acknowledgement reliability", () => {
           expect(acknowledged).toBe(true);
           expectBoundedAlarmReads(storage, alarmReads);
           expect.soft(get.mock.calls.length).toBeLessThanOrEqual(3);
-          expect(put).toHaveBeenCalledTimes(1);
+          expect(put.mock.calls.map(([key]) => key)).toEqual([
+            leaseMaintenanceKey(leaseID),
+            `lease:${leaseID}`,
+          ]);
           expect.soft(getAlarm).toHaveBeenCalledTimes(1);
           expect(nativeReads).toHaveBeenCalledTimes(1 + alarmReads);
           expect(observedGet.mock.calls.length).toBeLessThanOrEqual(5);
           expect(observedPut.mock.calls.filter(([key]) => key.startsWith("lease:"))).toHaveLength(
             1,
           );
-          expect(observedPut.mock.calls.length).toBeLessThanOrEqual(2);
+          expect(observedPut.mock.calls.length).toBeLessThanOrEqual(3);
           expect(list).toHaveBeenCalledTimes(alarmReads);
           expect(setAlarm.mock.calls.length).toBeLessThanOrEqual(1);
         }
@@ -54261,10 +54990,13 @@ describe("synthetic acknowledgement reliability", () => {
         expect(release.status).toBe(200);
         expectBoundedAlarmReads(storage, 2);
         expect.soft(get.mock.calls.length).toBeLessThanOrEqual(6);
-        expect(put).toHaveBeenCalledTimes(1);
+        expect(put.mock.calls.map(([key]) => key)).toEqual(
+          deleteServer ? [leaseMaintenanceKey(leaseID), `lease:${leaseID}`] : [`lease:${leaseID}`],
+        );
+        expect(storage.value(leaseMaintenanceKey(leaseID))).toBe(deleteServer ? 1 : undefined);
         expect(observedGet.mock.calls.length).toBeLessThanOrEqual(9);
         expect(observedPut.mock.calls.filter(([key]) => key.startsWith("lease:"))).toHaveLength(1);
-        expect(observedPut).toHaveBeenCalledTimes(2);
+        expect(observedPut).toHaveBeenCalledTimes(deleteServer ? 3 : 2);
         expect(storage.alarm()).toBe(before);
         const earlier = before - 1;
         await alarmRuntime(storage).scheduleAlarm(earlier);
@@ -54738,7 +55470,7 @@ describe("synthetic acknowledgement reliability", () => {
       const storage = new MemoryStorage();
       const lease = seedLease(storage);
       const overdue = { ...lease, expiresAt: new Date(Date.now() - 1).toISOString() };
-      storage.seed(`lease:${leaseID}`, overdue);
+      await putLeaseRecord(storage, overdue);
       const fleet = testFleet(storage);
       // Simulate an owner that cannot advance, independently of the repaired owner bugs.
       vi.spyOn(
@@ -54755,20 +55487,20 @@ describe("synthetic acknowledgement reliability", () => {
       expect(warn.mock.calls[0]?.[0]).toMatch(/source=lease key=[a-f0-9]{16} delayMs=1000$/);
       expect(JSON.stringify(warn.mock.calls)).not.toContain(lease.owner);
 
-      storage.seed(`lease:${leaseID}`, {
+      await putLeaseRecord(storage, {
         ...lease,
         expiresAt: new Date(Date.now() + 90_000).toISOString(),
       });
       await fleet.alarm();
       expect(storage.alarm()).toBe(Date.now() + 90_000);
-      storage.seed(`lease:${leaseID}`, overdue);
+      await putLeaseRecord(storage, overdue);
       await fleet.alarm();
       expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1);
       await fleet.alarm();
       expect(storage.alarm()).toBe(Date.now() + 1000);
 
-      await storage.delete(`lease:${leaseID}`);
-      storage.seed(`lease:${releaseID}`, { ...overdue, id: releaseID });
+      await deleteLeaseRecord(storage, leaseID);
+      await putLeaseRecord(storage, { ...overdue, id: releaseID });
       await fleet.alarm();
       expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 1);
     } finally {
@@ -54789,11 +55521,11 @@ describe("synthetic acknowledgement reliability", () => {
         const storage = new MemoryStorage();
         const first = seedLease(storage);
         const second = seedLease(storage, releaseID);
-        storage.seed(`lease:${leaseID}`, {
+        await putLeaseRecord(storage, {
           ...first,
           expiresAt: new Date(Date.now() - 2000).toISOString(),
         });
-        storage.seed(`lease:${releaseID}`, {
+        await putLeaseRecord(storage, {
           ...second,
           expiresAt: new Date(Date.now() - 1000).toISOString(),
         });
@@ -54811,7 +55543,7 @@ describe("synthetic acknowledgement reliability", () => {
         const futureID = "cbx_aacc00000003";
         const future = seedLease(storage, futureID);
         const scanStartedAt = Date.now();
-        storage.seed(`lease:${futureID}`, {
+        await putLeaseRecord(storage, {
           ...future,
           expiresAt: new Date(scanStartedAt + 5000).toISOString(),
         });
@@ -54825,7 +55557,7 @@ describe("synthetic acknowledgement reliability", () => {
         expect(storage.alarm()! - Date.now()).toBe(expectedDelay);
 
         storage.beforeList = async () => {};
-        await storage.delete(`lease:${futureID}`);
+        await deleteLeaseRecord(storage, futureID);
         await fleet.alarm();
         expect(storage.alarm()).toBe(Date.now() + 60000);
       } finally {
@@ -54902,13 +55634,13 @@ describe("synthetic acknowledgement reliability", () => {
           vi.setSystemTime(storage.alarm()!);
         }
         const future = seedLease(storage, releaseID);
-        storage.seed(`lease:${releaseID}`, {
+        await putLeaseRecord(storage, {
           ...future,
           expiresAt: new Date(Date.now() + 500).toISOString(),
         });
         await fleet.alarm();
         expect(storage.alarm()).toBe(Date.now() + 500);
-        await storage.delete(`lease:${releaseID}`);
+        await deleteLeaseRecord(storage, releaseID);
         await fleet.alarm();
         expect(storage.alarm()).toBe(Date.now() + 16000);
       } finally {

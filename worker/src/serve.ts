@@ -2,6 +2,7 @@ import type { CoordinatorRuntime, CoordinatorStorageView } from "./coordinator-r
 import { sha256Hex } from "./encoding";
 import { json, requestOwner } from "./http";
 import { completeLeaseProviderCleanup, leaseProviderCleanupConfirmed } from "./lease-cleanup";
+import { putLeaseRecord } from "./lease-record-store";
 import { requestOrg } from "./org-identity";
 import { publicLeaseRecord } from "./org-records";
 import type { Env, LeaseRecord, LeaseRequest, CreateAttemptRecord } from "./types";
@@ -323,7 +324,7 @@ export class ServeCoordinator {
             }
           } else if (seen.has(l.id)) stop.add(l.id);
           if (live(l)) assignments.push(this.assignment(l));
-          if (JSON.stringify(l) !== before) await s.put(`lease:${l.id}`, l);
+          if (JSON.stringify(l) !== before) await putLeaseRecord(s, l);
         }),
       );
       for (const id of seen) if (!records.some((l) => l.id === id && live(l))) stop.add(id);
@@ -383,7 +384,7 @@ export class ServeCoordinator {
         for (const l of records) {
           const before = JSON.stringify(l);
           this.expire(l, m, now);
-          if (JSON.stringify(l) !== before) await s.put(`lease:${l.id}`, l);
+          if (JSON.stringify(l) !== before) await putLeaseRecord(s, l);
           if (live(l)) {
             const deadline = Math.min(
               m.lastHeartbeat + lostMS,
@@ -593,7 +594,7 @@ export class ServeCoordinator {
             createdAt: l.createdAt,
             updatedAt: l.updatedAt,
           } satisfies CreateAttemptRecord);
-        await s.put(`lease:${id}`, l);
+        await putLeaseRecord(s, l);
         chosen.m.leases = [...chosen.reservedLeases, id];
         await this.putMachine(s, chosen.m);
         return json({ lease: publicLeaseRecord(l) }, { status: 202 });
@@ -614,7 +615,7 @@ export class ServeCoordinator {
       current.updatedAt = new Date().toISOString();
       current.endedAt = current.updatedAt;
       if (!leaseProviderCleanupConfirmed(current)) current.cleanupStartedAt ??= current.updatedAt;
-      await s.put(`lease:${l.id}`, current);
+      await putLeaseRecord(s, current);
       return json({ lease: publicLeaseRecord(current) });
     });
   }
@@ -639,7 +640,7 @@ export class ServeCoordinator {
       if (!m || !this.owned(m, r)) throw new ServeError("not_found", 404);
       this.expire(l, m, Date.now());
       if (!live(l)) {
-        await s.put(`lease:${id}`, l);
+        await putLeaseRecord(s, l);
         throw new ServeError("serve_lease_ended", 409);
       }
       if (action === "ready") {
@@ -685,7 +686,7 @@ export class ServeCoordinator {
         l.endedAt = new Date().toISOString();
       }
       l.updatedAt = new Date().toISOString();
-      await s.put(`lease:${id}`, l);
+      await putLeaseRecord(s, l);
       return json({ ok: true });
     });
   }

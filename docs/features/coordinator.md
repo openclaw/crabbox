@@ -73,6 +73,15 @@ Core can schedule immediate cleanup for an owned pending key when there is no
 remaining allocation uncertainty or recorded resource. Otherwise cleanup keeps
 the normal five-minute retry delay and the unresolved allocation evidence.
 
+Alarm reconciliation, maintenance discovery, provider-access collection, live
+slug lookup, and registration conflicts use a durable maintenance-candidate
+index after bounded backfill. Membership is updated beside every lease write;
+terminal history without pending work is excluded. A daily bounded audit repairs
+missing entries, and version changes restore the full-history fallback until
+backfill finishes. History, accounting, and resource-ownership scans continue to
+read all leases. See the [overload audit](../diagnostics/coordinator-overload.md)
+for coverage, completion logs, and remaining work.
+
 ## Durable Azure provisioning
 
 `CRABBOX_DURABLE_PROVISIONING_ADMISSION=true` opts new eligible creates into the

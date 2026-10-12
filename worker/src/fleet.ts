@@ -69,6 +69,12 @@ import {
   sealLeaseListCursor,
 } from "./lease-list";
 import {
+  leaseMaintenanceIndexReady,
+  leaseMaintenanceStateKey,
+  maintainLeaseMaintenanceIndex,
+  type LeaseMaintenanceState,
+} from "./lease-maintenance-index";
+import {
   LeaseProvisioningController,
   cancelProvisioningOperation,
   provisioningOperationKey,
@@ -78,6 +84,7 @@ import {
   validateProvisioningRecord,
   type LeaseProvisioningOperation,
 } from "./lease-provisioning";
+import { deleteLeaseRecord, leaseMaintenancePrefix, putLeaseRecord } from "./lease-record-store";
 import { isRegisteredLease, leaseIsLive } from "./lease-state";
 import type { ProviderResumableProvisioning } from "./provider-provisioning";
 import { ProvisioningAttemptHistory } from "./provisioning-attempts";
@@ -1307,7 +1314,7 @@ export class FleetCoordinator {
           completed.estimatedHourlyUSD = result.cost.hourlyUSD;
           completed.maxEstimatedUSD = result.cost.maxUSD;
         }
-        await transaction.put(leaseKey(lease.id), completed);
+        await putLeaseRecord(transaction, completed);
         const attempt = await transaction.get<CreateAttemptRecord>(createAttemptKey(lease.id));
         if (attempt && createAttemptMatchesLease(attempt, lease))
           await transaction.put(createAttemptKey(lease.id), {
@@ -3342,12 +3349,12 @@ export class FleetCoordinator {
     }
     await this.reconcileScheduledAdminGrants(forwardedAdminGrantVersion, preserveForwardedVersion);
     await this.quarantineLegacyWorkspaces();
+    await maintainLeaseMaintenanceIndex(this.state.storage, Date.now(), this.coordinatorGeneration);
     // Discovery is not authority: each phase rereads candidates under its own fence.
     // Leave both the lifecycle mutex and Cloudflare input gate open while scanning history.
     const leaseIDs = await this.leaseBridgeOwners({ allowConcurrency: true });
     const now = Date.now();
-    await this.visitStorageRecords<LeaseRecord>(
-      "lease:",
+    await this.visitMaintenanceLeaseRecords(
       (lease) => {
         if (
           leaseIsLive(lease) ||
@@ -4603,7 +4610,7 @@ export class FleetCoordinator {
             checkpointLeaseSourceIdentity(checkpointAuthorization.checkpoint),
           );
         }
-        await storage.put(leaseKey(leaseID), record);
+        await putLeaseRecord(storage, record);
         await retainLeaseWake(
           storage,
           Math.min(Date.parse(record.expiresAt), Date.now() + provisioningRecoveryPollMs),
@@ -5092,7 +5099,7 @@ export class FleetCoordinator {
           }
           const committedRecord = applyLeaseRecordChanges(latest, finalizationBase, record);
           startLeaseIdleClock(committedRecord, new Date());
-          await storage.put(leaseKey(committedRecord.id), committedRecord);
+          await putLeaseRecord(storage, committedRecord);
           if (createAttempt && attempt) {
             await storage.put(createAttemptKey(leaseID), {
               ...attempt,
@@ -5414,7 +5421,7 @@ export class FleetCoordinator {
           generation,
           updatedAt: now.toISOString(),
         });
-      await transaction.put(leaseKey(leaseID), record);
+      await putLeaseRecord(transaction, record);
       await transaction.put(provisioningPlanKey(operationID), prepared.plan);
       await transaction.put(provisioningMaterialKey(operationID), sealed);
       await putProvisioningOperation(transaction, operation);
@@ -7527,7 +7534,7 @@ export class FleetCoordinator {
         await this.scheduleAlarm();
         return;
       }
-      await this.state.storage.delete(leaseKey(currentLease.id));
+      await deleteLeaseRecord(this.state.storage, currentLease.id);
       currentWorkspace.recoveryMisses = (currentWorkspace.recoveryMisses ?? 0) + 1;
       const delay = Math.min(
         workspaceReconcileIntervalMs * 2 ** Math.min(currentWorkspace.recoveryMisses - 1, 5),
@@ -7706,7 +7713,7 @@ export class FleetCoordinator {
         }
         const audit = await writeAudit();
         const now = Date.now();
-        await transaction.put(leaseKey(leaseID), {
+        await putLeaseRecord(transaction, {
           ...current,
           providerScope: observation.providerScope,
           provisioningResourceMayExist: false,
@@ -8071,7 +8078,7 @@ export class FleetCoordinator {
     }
 
     const leases: LeaseRecord[] = [];
-    await this.visitLeaseRecords((lease) => {
+    await this.visitMaintenanceLeaseRecords((lease) => {
       if (leaseIsLive(lease) || lease.runtimeAdapterDeleteRequestedAt) leases.push(lease);
     });
     if (
@@ -13663,7 +13670,7 @@ export class FleetCoordinator {
               ),
           );
           if (accessBinding) {
-            await storage.put(leaseKey(leaseID), { ...lease, portablePoolAccess: true });
+            await putLeaseRecord(storage, { ...lease, portablePoolAccess: true });
             await storage.put(portablePoolReservationKey(leaseID), {
               key,
               binding: accessBinding,
@@ -18523,7 +18530,7 @@ export class FleetCoordinator {
         }
       });
     }
-    await this.visitLeaseRecords(async (lease) => {
+    await this.visitMaintenanceLeaseRecords(async (lease) => {
       const lifetimeEnabled =
         lease.lifetimePolicy?.source === "admin-canary" ||
         (this.env.CRABBOX_LEASE_LIFETIME_MODE ?? "off") !== "off";
@@ -19527,7 +19534,7 @@ export class FleetCoordinator {
 
   private async getLease(
     leaseID: string,
-    options?: { noCache?: boolean },
+    options?: { noCache?: boolean; allowConcurrency?: boolean },
   ): Promise<LeaseRecord | undefined> {
     return this.state.storage.get<LeaseRecord>(leaseKey(leaseID), options);
   }
@@ -19598,7 +19605,7 @@ export class FleetCoordinator {
     }
     const now = Date.now();
     const matches: LeaseRecord[] = [];
-    await this.visitLeaseRecords((lease) => {
+    await this.visitMaintenanceLeaseRecords((lease) => {
       if (
         leaseIsLive(lease) &&
         Date.parse(lease.expiresAt) > now &&
@@ -19712,7 +19719,7 @@ export class FleetCoordinator {
     const providerAccessLeases = await this.providerAccessRecords();
     const providerAccessByID = new Map(providerAccessLeases.map((lease) => [lease.id, lease]));
     const accessLeases: LeaseRecord[] = [];
-    await this.visitLeaseRecords((lease) => {
+    await this.visitMaintenanceLeaseRecords((lease) => {
       if (
         !providerAccessByID.has(lease.id) &&
         (leaseIsLive(lease) || leaseOwnsAWSSSHAccess(lease))
@@ -19722,6 +19729,31 @@ export class FleetCoordinator {
     });
     accessLeases.push(...providerAccessByID.values());
     return accessLeases;
+  }
+
+  private async visitMaintenanceLeaseRecords(
+    visitor: (lease: LeaseRecord) => Promise<boolean | void> | boolean | void,
+    options: { allowConcurrency?: boolean } = {},
+  ): Promise<void> {
+    // Keep every read of an ungated caller (discovery) outside the input gate.
+    const readOptions = {
+      noCache: true,
+      ...(options.allowConcurrency ? { allowConcurrency: true } : {}),
+    };
+    const state = await this.state.storage.get<LeaseMaintenanceState>(
+      leaseMaintenanceStateKey,
+      readOptions,
+    );
+    if (!leaseMaintenanceIndexReady(state))
+      return this.visitStorageRecords("lease:", visitor, options);
+    await this.visitStorageRecords<number>(
+      leaseMaintenancePrefix,
+      async (_value, key) => {
+        const lease = await this.getLease(key.slice(leaseMaintenancePrefix.length), readOptions);
+        if (lease) return visitor(lease);
+      },
+      options,
+    );
   }
 
   private async visitLeaseRecords(
@@ -20433,7 +20465,7 @@ export class FleetCoordinator {
   }
 
   private async putLease(lease: LeaseRecord, options?: { noCache?: boolean }): Promise<void> {
-    await this.state.storage.put(leaseKey(lease.id), lease, options);
+    await putLeaseRecord(this.state.storage, lease, options);
   }
 
   private async cancelLeaseReservation(reservation: LeaseRecord): Promise<void> {
@@ -20450,7 +20482,7 @@ export class FleetCoordinator {
         return;
       }
       await this.deleteProviderAccess(reservation.id);
-      await this.state.storage.delete(leaseKey(reservation.id));
+      await deleteLeaseRecord(this.state.storage, reservation.id);
       await this.unbindCreateAttemptReservation(current);
       await this.scheduleAlarm();
     });
@@ -20492,7 +20524,7 @@ export class FleetCoordinator {
         return latest;
       }
       await this.deleteProviderAccess(reservation.id);
-      await this.state.storage.delete(leaseKey(reservation.id));
+      await deleteLeaseRecord(this.state.storage, reservation.id);
       // This owner proved no provider request started; preserve cancellation
       // without leaving a charged lease row or a dangling canonical binding.
       await this.unbindCreateAttemptReservation(latest);
@@ -20985,7 +21017,7 @@ export class FleetCoordinator {
           }
           await this.putLease(completed);
         } else {
-          await this.state.storage.delete(leaseKey(record.id));
+          await deleteLeaseRecord(this.state.storage, record.id);
         }
       }
       await this.markAWSIngressReconcilePending(preparation.lease);
@@ -27211,7 +27243,7 @@ function recordLeaseCleanupFailure(
   }
 }
 
-function leaseNeedsCleanup(lease: LeaseRecord, now: number): boolean {
+export function leaseNeedsCleanup(lease: LeaseRecord, now: number): boolean {
   if (leaseCleanupIsUnresolved(lease)) return false;
   if (leaseIsLive(lease) && Date.parse(lease.expiresAt) <= now) {
     return true;
@@ -27458,7 +27490,7 @@ function retainProvisioningCleanupClaim(
   lease.cleanupRetryAt = new Date(Date.parse(failedAt) + leaseCleanupRetryDelayMs).toISOString();
 }
 
-function leaseMayNeedInterruptedProvisioningRecovery(lease: LeaseRecord): boolean {
+export function leaseMayNeedInterruptedProvisioningRecovery(lease: LeaseRecord): boolean {
   if (leaseCleanupIsUnresolved(lease)) return false;
   const canceledProvisioning = lease.state === "released" && lease.releaseDeletesServer === true;
   const failedUncertainProvisioning =
@@ -27599,7 +27631,10 @@ function runtimeAdapterDeleteDueAt(lease: LeaseRecord, now: number): number | un
     : dueAt;
 }
 
-function nextLeaseAlarmTime(lease: LeaseRecord, coordinatorGeneration: string): number | undefined {
+export function nextLeaseAlarmTime(
+  lease: LeaseRecord,
+  coordinatorGeneration: string,
+): number | undefined {
   const now = Date.now();
   // A restart must be observed before the TTL/client deadline, even when this
   // runtime still owns the request and has no recovery work on the current tick.
@@ -28041,7 +28076,7 @@ function awsCreateSSHSourceCIDRs(
   return activeAWSSSHSourceCIDRs(targetLeases, awsGlobalSSHSourceCIDRs(env));
 }
 
-function leaseOwnsAWSSSHAccess(lease: LeaseRecord): boolean {
+export function leaseOwnsAWSSSHAccess(lease: LeaseRecord): boolean {
   return (
     lease.provider === "aws" &&
     !isRegisteredLease(lease) &&
