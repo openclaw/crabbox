@@ -110,7 +110,7 @@ template_component='VncAuth on TigerVNC display :99 using the per-clone password
 vnc_command="$(pgrep -a -x Xtigervnc)"
 template_require grep -Eq '(^| )[:](99)( |$)' <<<"$vnc_command"
 template_require grep -Eq '(^| )-SecurityTypes VncAuth( |$)' <<<"$vnc_command"
-template_require grep -Eq '(^| )-PasswordFile /var/lib/crabbox/vnc.pass( |$)' <<<"$vnc_command"
+template_require grep -Eq '(^| )-PasswordFile[ =]/var/lib/crabbox/vnc.pass( |$)' <<<"$vnc_command"
 template_component='VNC listener bound exclusively to loopback port 5900'
 listeners="$(ss -H -ltn 'sport = :5900')"
 template_require awk 'BEGIN { found=0; bad=0 } { if ($4 == "127.0.0.1:5900") found=1; else if ($4 != "[::1]:5900") bad=1 } END { exit (!found || bad) }' <<<"$listeners"

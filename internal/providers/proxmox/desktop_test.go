@@ -96,7 +96,7 @@ func TestProxmoxPreparedReadiness(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("guest probes require POSIX shell")
 	}
-	for _, problem := range []string{"", "service", "xfce", "display", "permission", "password", "public-vnc", "no-vnc", "no-auth", "browser", "wrapper"} {
+	for _, problem := range []string{"", "space-argument", "service", "xfce", "display", "permission", "password", "public-vnc", "no-vnc", "no-auth", "browser", "wrapper"} {
 		t.Run(problem, func(t *testing.T) {
 			dir := t.TempDir()
 			bin := filepath.Join(dir, "bin")
@@ -125,7 +125,7 @@ func TestProxmoxPreparedReadiness(t *testing.T) {
 				"crabbox-browser": `[ "$PROBLEM" != browser ]`,
 				"pgrep": `if [ "$PROBLEM" = xfce ] && [ "$2" = xfce4-session ]; then exit 1; fi
 if [ "$1" = -a ]; then
- if [ "$PROBLEM" = no-auth ]; then echo '1 Xtigervnc :99 -SecurityTypes None'; else echo '1 Xtigervnc :99 -SecurityTypes VncAuth -PasswordFile ` + dir + `/vnc.pass'; fi
+ if [ "$PROBLEM" = no-auth ]; then echo '1 Xtigervnc :99 -SecurityTypes None'; elif [ "$PROBLEM" = space-argument ]; then echo '1 Xtigervnc :99 -SecurityTypes VncAuth -PasswordFile ` + dir + `/vnc.pass'; else echo '1 Xtigervnc :99 -SecurityTypes VncAuth -PasswordFile=` + dir + `/vnc.pass'; fi
 fi`,
 				"ss": `[ "$PROBLEM" != no-vnc ] || exit 0
  echo 'LISTEN 0 10 127.0.0.1:5900 0.0.0.0:*'
@@ -141,7 +141,7 @@ fi`,
 			command := exec.Command("bash", "-c", "set -euo pipefail\n"+checks)
 			command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "PROBLEM="+problem)
 			output, err := command.CombinedOutput()
-			if problem == "" {
+			if problem == "" || problem == "space-argument" {
 				if err != nil {
 					t.Fatalf("success probe: %v %s", err, output)
 				}
@@ -207,7 +207,7 @@ case "${0##*/}" in
   mv) shift; /bin/mv "$@" ;;
   runuser) shift 3; exec "$@" ;;
   pgrep)
-    if [ "$1" = -a ]; then echo "1 Xtigervnc :99 -SecurityTypes VncAuth -PasswordFile $FIXTURE_DIR/vnc.pass"; fi ;;
+    if [ "$1" = -a ]; then echo "1 Xtigervnc :99 -SecurityTypes VncAuth -PasswordFile=$FIXTURE_DIR/vnc.pass"; fi ;;
   ss) echo 'LISTEN 0 10 127.0.0.1:5900 0.0.0.0:*' ;;
   systemctl)
     command="$1"; shift
