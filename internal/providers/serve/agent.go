@@ -28,6 +28,7 @@ import (
 type machine struct {
 	Image          string            `json:"image"`
 	MachineID      string            `json:"machineID"`
+	FrontDoor      frontDoorEndpoint `json:"frontDoor"`
 	Name           string            `json:"name"`
 	OS             string            `json:"os"`
 	Arch           string            `json:"arch"`
@@ -72,13 +73,13 @@ type localState struct {
 	Assignments map[string]assignment `json:"assignments"`
 }
 type options struct {
-	cpus                                          int
-	memory                                        string
-	maxLeases                                     int
-	name, address, publishHost, runtime, stateDir string
-	sshPorts                                      string
-	interval                                      time.Duration
-	noCache, drain                                bool
+	cpus                             int
+	memory                           string
+	maxLeases                        int
+	name, address, runtime, stateDir string
+	sshPort                          int
+	interval                         time.Duration
+	noCache, drain                   bool
 }
 type agent struct {
 	lastHeartbeatReturned time.Time
@@ -88,7 +89,7 @@ type agent struct {
 	containers            containerRuntime
 	rt                    core.Runtime
 	volumes               []core.CacheVolumeConfig
-	ports                 *portPool
+	frontDoor             *frontDoor
 	startPreparation      func(context.Context)
 }
 type containerRuntime interface {
@@ -101,7 +102,10 @@ type containerRuntime interface {
 }
 
 func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, args []string) error {
-	o := options{cpus: runtime.NumCPU(), memory: os.Getenv("CRABBOX_SERVE_MEMORY"), maxLeases: 8, runtime: "docker", interval: 2 * time.Second, sshPorts: cfg.Serve.SSHPorts}
+	o := options{cpus: runtime.NumCPU(), memory: os.Getenv("CRABBOX_SERVE_MEMORY"), maxLeases: 8, runtime: "docker", interval: 2 * time.Second, sshPort: cfg.Serve.SSHPort}
+	if o.sshPort == 0 {
+		o.sshPort = 2222
+	}
 	if cfg.LocalContainer.Runtime != "" {
 		o.runtime = cfg.LocalContainer.Runtime
 	}
@@ -127,8 +131,7 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	fs.IntVar(&o.maxLeases, "max-leases", o.maxLeases, "Maximum concurrent leases (1-32)")
 	fs.StringVar(&o.name, "name", o.name, "Machine name")
 	fs.StringVar(&o.address, "advertise-address", os.Getenv("CRABBOX_SERVE_ADVERTISE_ADDRESS"), "SSH address reachable by clients (default local CGNAT IPv4)")
-	fs.StringVar(&o.sshPorts, "ssh-ports", o.sshPorts, "Published SSH port or comma-separated ports/ranges (maximum 1024)")
-	fs.StringVar(&o.publishHost, "publish-host", os.Getenv("CRABBOX_SERVE_PUBLISH_HOST"), "Runtime bind address (default advertised address)")
+	fs.IntVar(&o.sshPort, "ssh-port", o.sshPort, "Agent SSH front-door port (1-65535)")
 	fs.StringVar(&o.runtime, "runtime", o.runtime, "docker or podman")
 	fs.StringVar(&o.stateDir, "state-dir", o.stateDir, "Private agent state directory")
 	fs.DurationVar(&o.interval, "poll-interval", o.interval, "Coordinator polling interval (500ms-10s)")
@@ -147,6 +150,9 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	o.stateDir, err = filepath.Abs(o.stateDir)
 	if err != nil {
 		return err
+	}
+	if o.sshPort < 1 || o.sshPort > 65535 {
+		return fmt.Errorf("--ssh-port must be in 1-65535")
 	}
 	if command == "install" || command == "uninstall" {
 		return service(ctx, command, o, rt)
@@ -238,19 +244,11 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	if err != nil {
 		return err
 	}
-	if o.publishHost == "" {
-		o.publishHost = o.address
-	}
-	if net.ParseIP(o.publishHost) == nil {
-		return fmt.Errorf("--publish-host must be an IP address")
-	}
-	if o.publishHost == "0.0.0.0" {
-		fmt.Fprintln(rt.Stderr, "warning: explicit --publish-host 0.0.0.0 exposes SSH on every host interface")
-	}
-	ports, err := newPortPool(o.sshPorts, o.publishHost)
+	front, err := startFrontDoor(o.stateDir, net.JoinHostPort(o.address, strconv.Itoa(o.sshPort)))
 	if err != nil {
 		return err
 	}
+	defer front.Close()
 	prepareCtx, cancelPrepare := context.WithTimeout(ctx, 10*time.Minute)
 	err = container.EnsureImage(prepareCtx)
 	cancelPrepare()
@@ -261,7 +259,7 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	if err != nil {
 		return err
 	}
-	state.Machine = machine{MachineID: state.Machine.MachineID, Name: o.name, OS: runtime.GOOS, Arch: runtime.GOARCH, CPUs: o.cpus, MemoryMB: memory, MaxLeases: o.maxLeases, Address: o.address, Runtime: o.runtime, RuntimeVersion: version, AgentVersion: core.Version(), Image: container.Image(), Labels: map[string]string{}, FreeMemoryMB: memory}
+	state.Machine = machine{MachineID: state.Machine.MachineID, Name: o.name, OS: runtime.GOOS, Arch: runtime.GOARCH, CPUs: o.cpus, MemoryMB: memory, MaxLeases: o.maxLeases, Address: o.address, FrontDoor: frontDoorEndpoint{Port: o.sshPort, HostKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(front.signer.PublicKey())))}, Runtime: o.runtime, RuntimeVersion: version, AgentVersion: core.Version(), Image: container.Image(), Labels: map[string]string{}, FreeMemoryMB: memory}
 	state.Coordinator = cfg.Coordinator
 	if state.Assignments == nil {
 		state.Assignments = map[string]assignment{}
@@ -269,7 +267,7 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	if o.noCache {
 		volumes = nil
 	}
-	a := agent{opts: o, state: state, coord: coord, containers: container, rt: rt, volumes: volumes, ports: ports, startPreparation: container.StartPreparation}
+	a := agent{opts: o, state: state, coord: coord, containers: container, rt: rt, volumes: volumes, frontDoor: front, startPreparation: container.StartPreparation}
 	if err := a.save(); err != nil {
 		return err
 	}
@@ -428,10 +426,6 @@ func (a *agent) poll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if a.ports != nil {
-		a.ports.reconcile(containers)
-		a.state.Machine.MaxLeases = min(a.opts.maxLeases, a.ports.capacity())
-	}
 	var response heartbeat
 	err = a.coord.AgentRequest(bounded, "POST", "/v1/serve/heartbeat", a.state.Machine, &response)
 	a.lastHeartbeatReturned = time.Now()
@@ -440,17 +434,25 @@ func (a *agent) poll(ctx context.Context) error {
 	}
 	a.state.LastSuccess = time.Now()
 	active := map[string]assignment{}
+	var imageMismatches []string
 	for _, l := range response.Assignments {
 		if l.MachineID != a.state.Machine.MachineID || !core.IsCanonicalLeaseID(l.ID) || l.CPUs < 1 || l.MemoryMB < 1 || l.CPUs > a.state.Machine.CPUs || l.MemoryMB > a.state.Machine.MemoryMB {
 			return fmt.Errorf("invalid serve assignment")
 		}
 		if l.Image != a.state.Machine.Image {
-			a.failed(bounded, l.ID, "serve_image_mismatch")
+			imageMismatches = append(imageMismatches, l.ID)
 			continue
 		}
 		active[l.ID] = l
 	}
+	for _, id := range response.Stop {
+		delete(active, id)
+	}
 	a.state.Assignments = active
+	a.updateFrontDoor(containers)
+	for _, id := range imageMismatches {
+		a.failed(bounded, id, "serve_image_mismatch")
+	}
 	if err := a.save(); err != nil {
 		return err
 	}
@@ -484,22 +486,13 @@ func (a *agent) poll(ctx context.Context) error {
 				a.failed(bounded, id, "assignment exceeds local capacity")
 				continue
 			}
-			port := ""
-			if a.ports != nil {
-				port, err = a.ports.acquire(id)
-				if err != nil {
-					a.failed(bounded, id, err.Error())
-					continue
-				}
-			}
-			c, err = a.containers.Create(bounded, id, l.SSHPublicKey, l.CPUs, l.MemoryMB, l.Image, a.volumes, localcontainer.ServedContainerOptions{PublishHost: a.opts.publishHost, PublishPort: port, Deadline: deadline(l).Unix(), Labels: map[string]string{"provider": "serve", "crabbox.serve": "true", "crabbox.serve.machine": a.state.Machine.MachineID}})
+			c, err = a.containers.Create(bounded, id, l.SSHPublicKey, l.CPUs, l.MemoryMB, l.Image, a.volumes, localcontainer.ServedContainerOptions{Deadline: deadline(l).Unix(), Labels: map[string]string{"provider": "serve", "crabbox.serve": "true", "crabbox.serve.machine": a.state.Machine.MachineID}})
 			if err != nil {
-				if a.ports != nil {
-					a.ports.release(id)
-				}
 				a.failed(bounded, id, err.Error())
 				continue
 			}
+			containers = append(containers, c)
+			a.updateFrontDoor(containers)
 			present[id] = c
 			usedCPUs += l.CPUs
 			usedMem += l.MemoryMB
@@ -519,7 +512,7 @@ func (a *agent) poll(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		report := map[string]any{"imageEvidence": evidence, "machineID": a.state.Machine.MachineID, "host": a.opts.address, "port": c.Port, "sshHostKey": strings.TrimSpace(key), "fingerprint": ssh.FingerprintSHA256(pub)}
+		report := map[string]any{"imageEvidence": evidence, "machineID": a.state.Machine.MachineID, "sshHostKey": strings.TrimSpace(key), "fingerprint": ssh.FingerprintSHA256(pub)}
 		if err := a.coord.AgentRequest(bounded, "POST", "/v1/serve/leases/"+id+"/ready", report, nil); err != nil {
 			return err
 		}
@@ -535,6 +528,9 @@ func (a *agent) failed(ctx context.Context, id, reason string) {
 func (a *agent) shutdown() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if a.frontDoor != nil {
+		a.frontDoor.Close()
+	}
 	a.state.Machine.Draining = true
 	containers, err := a.ownedContainers(ctx)
 	if err != nil {

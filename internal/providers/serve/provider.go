@@ -51,7 +51,7 @@ func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
 		}
 	}
 
-	core.ApplyLinuxConnectionDefaults(cfg, "crabbox", "2222")
+	core.ApplyLinuxConnectionDefaults(cfg, "crabbox", "22")
 	cfg.SSHFallbackPorts = []string{}
 	cfg.SSHUser = "crabbox"
 	cfg.WorkRoot = "/work/crabbox"
@@ -139,5 +139,15 @@ func (Provider) DescribeImplicitArchitecture(core.Config) string { return "nativ
 
 func (Provider) ConfigureSSHTarget(target *core.SSHTarget, _ string) {
 	target.ReadyCheck = localcontainer.ServedReadyCheck()
+	target.HostKeyAlias = target.Host
+	valid := core.IsCanonicalLeaseID(target.Host) && target.Port == "22" && target.User == "crabbox" && target.SSHHostKey != "" && target.SSHJump != nil
+	target.PrepareConnection = func(context.Context) error {
+		if !valid {
+			return core.Exit(2, "serve lease is missing its pinned SSH front-door route; refresh the lease")
+		}
+		return nil
+	}
+	target.NoControlMaster = true
+	target.SSHConfigProxy = true
 	target.FallbackPorts = []string{}
 }

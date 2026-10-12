@@ -1890,11 +1890,6 @@ func (b *backend) createContainerWithOptions(ctx context.Context, cfg core.Confi
 		for key, value := range served.Labels {
 			labels[key] = value
 		}
-		for i := range args {
-			if args[i] == "127.0.0.1::"+sshPort {
-				args[i] = served.PublishHost + ":" + served.PublishPort + ":" + sshPort
-			}
-		}
 		args = append(args, "--rm", "--cpu-shares", "2", "-e", "CRABBOX_MANAGED_HOME=1")
 	}
 	for key, value := range labels {
@@ -1956,7 +1951,7 @@ func (b *backend) createContainerWithOptions(ctx context.Context, cfg core.Confi
 		args = append(args, "-e", "CRABBOX_SERVE_DEADLINE="+strconv.FormatInt(served.Deadline, 10), runtimeImage, "/bin/sh", "-c", script)
 		result, err := b.docker(ctx, args, nil, b.rt.Stderr)
 		if err != nil {
-			return "", "", shared.LocalCommandError("container run (check --advertise-address/--publish-host binding)", result, err)
+			return "", "", shared.LocalCommandError("served container run (loopback SSH binding)", result, err)
 		}
 		return strings.TrimSpace(result.Stdout), "", nil
 	}

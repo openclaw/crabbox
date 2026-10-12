@@ -45,7 +45,7 @@ func TestServedPreparedDockerProof(t *testing.T) {
 		t.Helper()
 		id := fmt.Sprintf("cbx_%012x", time.Now().UnixNano()&0xffffffffffff)
 		start := time.Now()
-		c, err := r.Create(ctx, id, string(ssh.MarshalAuthorizedKey(public)), 1, 1024, base, nil, ServedContainerOptions{PublishHost: "127.0.0.1", Deadline: time.Now().Add(5 * time.Minute).Unix(), Labels: map[string]string{"provider": "serve", "crabbox.serve": "true", "crabbox.serve.machine": "docker-proof"}})
+		c, err := r.Create(ctx, id, string(ssh.MarshalAuthorizedKey(public)), 1, 1024, base, nil, ServedContainerOptions{Deadline: time.Now().Add(5 * time.Minute).Unix(), Labels: map[string]string{"provider": "serve", "crabbox.serve": "true", "crabbox.serve.machine": "docker-proof"}})
 		if err != nil {
 			t.Fatal(err)
 		}

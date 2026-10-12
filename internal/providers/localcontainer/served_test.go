@@ -22,12 +22,12 @@ func TestServedCreationUsesSharedBootstrapWithoutHostMounts(t *testing.T) {
 	if r.b.cfg.LocalContainer.Network != "bridge" || r.b.cfg.LocalContainer.DockerSocket || len(r.b.cfg.LocalContainer.Volumes) != 0 {
 		t.Fatal("served policy inherited unsafe local-container options")
 	}
-	_, _, err := r.b.createContainerWithOptions(context.Background(), r.b.cfg, "name", "cbx_123456abcdef", "", "ssh-ed25519 AAAA", "", false, &ServedContainerOptions{PublishHost: "100.64.1.2", Deadline: 123, Labels: map[string]string{"provider": "serve", "crabbox.serve": "true", "crabbox.serve.machine": "machine"}})
+	_, _, err := r.b.createContainerWithOptions(context.Background(), r.b.cfg, "name", "cbx_123456abcdef", "", "ssh-ed25519 AAAA", "", false, &ServedContainerOptions{Deadline: 123, Labels: map[string]string{"provider": "serve", "crabbox.serve": "true", "crabbox.serve.machine": "machine"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	args := strings.Join(runner.args, "\n")
-	for _, expected := range []string{"CRABBOX_MANAGED_HOME=1", "--rm", "--cpu-shares\n2", "--cpus\n3", "--memory\n6g", "100.64.1.2::2222", "provider=serve", "crabbox.serve.machine=machine", bootstrapScript, "umask 022", "CRABBOX_SERVE_DEADLINE=123"} {
+	for _, expected := range []string{"CRABBOX_MANAGED_HOME=1", "--rm", "--cpu-shares\n2", "--cpus\n3", "--memory\n6g", "127.0.0.1::2222", "provider=serve", "crabbox.serve.machine=machine", bootstrapScript, "umask 022", "CRABBOX_SERVE_DEADLINE=123"} {
 		if !strings.Contains(args, expected) {
 			t.Errorf("missing %q", expected)
 		}

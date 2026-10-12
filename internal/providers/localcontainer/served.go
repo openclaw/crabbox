@@ -14,8 +14,6 @@ import (
 // ServedContainerOptions selects the outbound agent's stricter container policy.
 // The ordinary local-container path never supplies these options.
 type ServedContainerOptions struct {
-	PublishHost  string
-	PublishPort  string
 	Labels       map[string]string
 	Deadline     int64
 	runtimeImage string

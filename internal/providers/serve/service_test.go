@@ -32,8 +32,7 @@ func TestInstallPreservesEffectiveEnvironmentOptions(t *testing.T) {
 	t.Chdir(project)
 	t.Setenv("CRABBOX_SERVE_MEMORY", "48g")
 	t.Setenv("CRABBOX_SERVE_ADVERTISE_ADDRESS", "100.64.1.2")
-	t.Setenv("CRABBOX_SERVE_PUBLISH_HOST", "0.0.0.0")
-	cfg := core.Config{Serve: core.ServeConfig{SSHPorts: "2200,2205-2207"}}
+	cfg := core.Config{Serve: core.ServeConfig{SSHPort: 2200}}
 	err := (Provider{}).RunAgent(context.Background(), cfg, core.Runtime{Exec: serviceRunner{}, Stdout: io.Discard, Stderr: io.Discard}, []string{"install", "--state-dir", "./agent-state"})
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +61,7 @@ func TestInstallPreservesEffectiveEnvironmentOptions(t *testing.T) {
 	} else {
 		text = strings.ReplaceAll(text, `"`, "")
 	}
-	for _, want := range []string{"--memory 48g", "--advertise-address 100.64.1.2", "--publish-host 0.0.0.0", "--ssh-ports 2200,2205-2207", "--state-dir " + filepath.Join(project, "agent-state")} {
+	for _, want := range []string{"--memory 48g", "--advertise-address 100.64.1.2", "--ssh-port 2200", "--state-dir " + filepath.Join(project, "agent-state")} {
 		if !strings.Contains(text, want) {
 			t.Errorf("installed command lost %q: %s", want, text)
 		}

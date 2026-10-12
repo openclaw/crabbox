@@ -114,7 +114,7 @@ func TestServedCreateRecoversAfterOtherAgentPrunesPreparedImage(t *testing.T) {
 			}
 			create := func(id string) {
 				t.Helper()
-				if _, err := idle.Create(ctx, id, "ssh-ed25519 AAAA", 1, 1024, cfg.LocalContainer.Image, nil, ServedContainerOptions{PublishHost: "127.0.0.1"}); err != nil {
+				if _, err := idle.Create(ctx, id, "ssh-ed25519 AAAA", 1, 1024, cfg.LocalContainer.Image, nil, ServedContainerOptions{}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -408,7 +408,7 @@ func TestServedPreparedCreateAndEvidence(t *testing.T) {
 				if prepared {
 					r.preparedImageID = runtimeID
 				}
-				c, err := r.Create(t.Context(), "cbx_123456abcdef", "ssh-ed25519 AAAA", 1, 1024, "configured:stable", nil, ServedContainerOptions{PublishHost: "127.0.0.1"})
+				c, err := r.Create(t.Context(), "cbx_123456abcdef", "ssh-ed25519 AAAA", 1, 1024, "configured:stable", nil, ServedContainerOptions{})
 				if err != nil {
 					t.Fatal(err)
 				}

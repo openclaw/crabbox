@@ -285,9 +285,12 @@ func TestClassSizes(t *testing.T) {
 	}
 }
 
-func TestServeTargetUsesSharedReadinessAndOnlyPublishedPort(t *testing.T) {
-	target := core.SSHTarget{Port: "30022", FallbackPorts: []string{"22"}}
+func TestServeTargetUsesSharedReadinessThroughProxy(t *testing.T) {
+	target := core.SSHTarget{Port: "22", FallbackPorts: []string{"22"}}
 	Provider{}.ConfigureSSHTarget(&target, "")
+	if !target.SSHConfigProxy {
+		t.Fatal("serve readiness must use the SSH proxy, never TCP dial the lease alias")
+	}
 	if target.FallbackPorts == nil || len(target.FallbackPorts) != 0 {
 		t.Fatalf("fallback ports=%v", target.FallbackPorts)
 	}
