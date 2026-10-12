@@ -128,11 +128,11 @@ func TestRunAdmissionRecoversCommittedResponseWithoutChangingBinding(t *testing.
 	}
 }
 
-func TestRunAdmissionRecoverySharesTenSecondBudget(t *testing.T) {
+func TestRunAdmissionRecoveryPreservesShorterCallerBudget(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		started := time.Now()
 		calls := 0
-		client := &CoordinatorClient{BaseURL: "https://example.test", Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		client := &CoordinatorClient{BaseURL: "https://example.test", readRetryWriter: io.Discard, Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			calls++
 			if calls == 1 {
 				time.Sleep(7 * time.Second)
@@ -145,7 +145,9 @@ func TestRunAdmissionRecoverySharesTenSecondBudget(t *testing.T) {
 			<-req.Context().Done()
 			return nil, req.Context().Err()
 		})}}
-		_, err := client.CreateRun(t.Context(), admissionTestRunID, "cbx_test", Config{}, []string{"true"}, "")
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		_, err := client.CreateRun(ctx, admissionTestRunID, "cbx_test", Config{}, []string{"true"}, "")
 		if !errors.Is(err, context.DeadlineExceeded) || calls != 2 || time.Since(started) != 10*time.Second {
 			t.Fatalf("budget result calls=%d elapsed=%s err=%v", calls, time.Since(started), err)
 		}
@@ -252,14 +254,14 @@ func TestRunAdmissionFailureFinalizesOriginalRequestAfterTimeout(t *testing.T) {
 				t.Fatalf("changed admission: %s != %s", got, want)
 			}
 			deadline, ok := req.Context().Deadline()
-			if !ok || !deadline.Equal(started.Add(runRecorderRequestTimeout+runRecorderFinishTimeout)) {
+			if !ok || !deadline.Equal(started.Add(runAdmissionBudget+runRecorderFinishTimeout)) {
 				t.Fatalf("terminal deadline=%v", deadline)
 			}
 			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"run":{"id":"` + admissionTestRunID + `","state":"failed","phase":"failed","exitCode":7,"command":["true"],"admissionFailedBeforeWork":true,"endedAt":"2026-09-13T00:00:00Z"}}`))}, nil
 		})}}
 		var log bytes.Buffer
 		rec := newRunRecorder(t.Context(), client, Config{Provider: "aws"}, []string{"true"}, "proof", &log, false, admissionTestRunID)
-		if rec.runID != "" || !errors.Is(rec.createErr, context.DeadlineExceeded) || time.Since(started) != runRecorderRequestTimeout {
+		if rec.runID != "" || !errors.Is(rec.createErr, context.DeadlineExceeded) || time.Since(started) != runAdmissionBudget {
 			t.Fatalf("admission result=%v id=%q elapsed=%v", rec.createErr, rec.runID, time.Since(started))
 		}
 		primary := rec.requireHandle()
@@ -272,7 +274,7 @@ func TestRunAdmissionFailureFinalizesOriginalRequestAfterTimeout(t *testing.T) {
 		}
 		rec.Failed(primary)
 		rec.Failed(primary)
-		if puts != 1 || failures != 1 || !rec.terminalConfirmed || !rec.finished || rec.requireHandle() == nil {
+		if puts != 3 || failures != 1 || !rec.terminalConfirmed || !rec.finished || rec.requireHandle() == nil {
 			t.Fatalf("puts=%d failures=%d confirmed=%t finished=%t", puts, failures, rec.terminalConfirmed, rec.finished)
 		}
 		if ExitCodeForError(primary, 1) != 7 {
@@ -400,7 +402,7 @@ func TestRunAdmissionFailureRetainsEffectiveAuthenticationAndRedactsWarning(t *t
 		t.Fatal("presentation redaction changed the stored admission cause")
 	}
 	rec.Failed(primary)
-	if puts != 4 || failures != 1 || rec.terminalConfirmed || ExitCodeForError(primary, 1) != 7 {
+	if puts != 2*runAdmissionAttempts || failures != 1 || rec.terminalConfirmed || ExitCodeForError(primary, 1) != 7 {
 		t.Fatalf("unexpected outcome: puts=%d failures=%d confirmed=%t", puts, failures, rec.terminalConfirmed)
 	}
 	if strings.Contains(log.String(), "first-token") || strings.Contains(log.String(), "configured-diagnostic-marker") {

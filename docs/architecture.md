@@ -415,6 +415,21 @@ upload or Durable Object dispatch throws returns HTTP 503
 `run_event_append_unavailable`; the Worker does not replay it because a reset can
 follow a committed event. Existing application error responses are preserved.
 
+Other Durable Object dispatch failures return JSON with `Cache-Control: no-store`:
+overload returns HTTP 503 `coordinator_overloaded` with `retryable: true` and
+`Retry-After: 5`; runtime resets and known availability failures return HTTP 503
+`coordinator_unavailable` with `retryable: true` and `Retry-After: 2`. Unknown or
+application exceptions return HTTP 500 `coordinator_internal_error` without a
+retry hint. Responses never expose the underlying exception text.
+
+CLI reads retry HTTP 429/502/503/504 and raw Cloudflare HTTP 500 bodies
+`error code: 1101`/`error code: 1102`, keeping their five-attempt, one-minute budget.
+Idempotent run admission retries transient failures up to four attempts within
+30 seconds, with a 10-second limit per attempt and the same body and captured
+authentication. Both use exponential backoff with jitter and honor `Retry-After`
+up to eight seconds; admission stops if the next delay would exceed its remaining
+budget. Lease-create recovery and run-event replay contracts remain unchanged.
+
 Coordinator API requests negotiate HTTP/2 over TLS when the server supports it,
 so independent requests can share a connection. HTTP/1 coordinators and the
 HTTP/1 WebSocket upgrade remain supported; both use the coordinator's same-origin

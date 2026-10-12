@@ -17,6 +17,9 @@ const (
 	runRecorderFinishTimeout   = 60 * time.Second
 	runRecorderFinishAttempts  = 3
 	runRecorderFinishRetry     = 250 * time.Millisecond
+	// Leave recovery time after a saturated coordinator's per-request timeout.
+	runAdmissionBudget   = 30 * time.Second
+	runAdmissionAttempts = 4
 )
 
 type runRecorder struct {
@@ -95,10 +98,12 @@ func (r *runRecorder) createRun(ctx context.Context, leaseID string, cfg Config)
 		// Keep terminal bookkeeping on the initiating route and authentication.
 		r.createCoordinator = &CoordinatorClient{
 			BaseURL: r.coord.BaseURL, Token: r.coord.Token, Access: r.coord.Access,
-			TokenCommand:     append([]string(nil), r.coord.TokenCommand...),
-			ChildEnvDenylist: append([]string(nil), r.coord.ChildEnvDenylist...),
-			Client:           r.coord.Client,
-			admissionAuth:    &coordinatorAdmissionAuth{},
+			TokenCommand:        append([]string(nil), r.coord.TokenCommand...),
+			ChildEnvDenylist:    append([]string(nil), r.coord.ChildEnvDenylist...),
+			Client:              r.coord.Client,
+			readRetryWriter:     r.stderr,
+			admissionRetryDelay: r.coord.admissionRetryDelay,
+			admissionAuth:       &coordinatorAdmissionAuth{},
 		}
 		r.createBaseURL = strings.TrimRight(r.coord.BaseURL, "/")
 		fmt.Fprintf(r.stderr, "run admission attempt %s\n", r.requestedRunID)

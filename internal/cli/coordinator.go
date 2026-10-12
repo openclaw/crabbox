@@ -30,6 +30,7 @@ type CoordinatorClient struct {
 	Access                 AccessConfig
 	Client                 *http.Client
 	readRetryWriter        io.Writer
+	admissionRetryDelay    func(attempt int, err error) time.Duration
 	ChildEnvDenylist       []string
 	admissionAuth          *coordinatorAdmissionAuth
 	checkpointSupportMu    sync.Mutex
@@ -2434,14 +2435,19 @@ func runAdmissionBody(leaseID string, cfg Config, command []string, label string
 
 func (c *CoordinatorClient) CreateRun(ctx context.Context, runID, leaseID string, cfg Config, command []string, label string) (CoordinatorRun, error) {
 	body := runAdmissionBody(leaseID, cfg, command, label)
-	// Only identity-bound admission is replayed, within the caller's original budget.
-	ctx, cancel := context.WithTimeout(ctx, runRecorderRequestTimeout)
+	// Only identity-bound admission is replayed, within the caller's deadline.
+	ctx, cancel := context.WithTimeout(ctx, runAdmissionBudget)
 	defer cancel()
 	if binding := c.admissionAuth; binding != nil {
 		if !binding.captured {
 			binding.captured = true
 			binding.headers = make(http.Header)
-			binding.err = c.resolveRequestHeaders(ctx, binding.headers)
+			authCtx, stopAuth := context.WithTimeout(ctx, runRecorderRequestTimeout)
+			binding.err = c.resolveRequestHeaders(authCtx, binding.headers)
+			if authCtx.Err() != nil {
+				binding.err = authCtx.Err()
+			}
+			stopAuth()
 		}
 		if binding.err != nil {
 			if ctx.Err() != nil {
@@ -2451,9 +2457,11 @@ func (c *CoordinatorClient) CreateRun(ctx context.Context, runID, leaseID string
 		}
 	}
 	var err error
-	for attempt := 0; attempt < 2 && ctx.Err() == nil; attempt++ {
+	for attempt := 1; attempt <= runAdmissionAttempts && ctx.Err() == nil; attempt++ {
 		var res CoordinatorRunResponse
-		err = c.do(ctx, http.MethodPut, "/v1/runs/"+url.PathEscape(runID), body, &res)
+		attemptCtx, stopAttempt := context.WithTimeout(ctx, runRecorderRequestTimeout)
+		err = c.do(attemptCtx, http.MethodPut, "/v1/runs/"+url.PathEscape(runID), body, &res)
+		stopAttempt()
 		if err == nil {
 			if ctx.Err() != nil {
 				return CoordinatorRun{}, ctx.Err()
@@ -2463,8 +2471,31 @@ func (c *CoordinatorClient) CreateRun(ctx context.Context, runID, leaseID string
 			}
 			return res.Run, nil
 		}
-		if !runRecorderFinishRetryable(err) {
+		if !runRecorderFinishRetryable(err) || attempt == runAdmissionAttempts || ctx.Err() != nil {
 			break
+		}
+		backoff := c.admissionRetryDelay
+		if backoff == nil {
+			backoff = coordinatorReadBackoff
+		}
+		delay := backoff(attempt, err)
+		deadline, _ := ctx.Deadline()
+		if delay >= time.Until(deadline) {
+			break
+		}
+		if attempt == 1 {
+			reason := coordinatorReadRetryReason(err)
+			if reason == "" {
+				reason = "transient_error"
+			}
+			writer := c.readRetryWriter
+			if writer == nil {
+				writer = os.Stderr
+			}
+			fmt.Fprintf(writer, "coordinator run admission retry %d/%d reason=%s\n", attempt, runAdmissionAttempts-1, reason)
+		}
+		if sleepErr := sleepContext(ctx, delay); sleepErr != nil {
+			return CoordinatorRun{}, sleepErr
 		}
 	}
 	if ctx.Err() != nil {

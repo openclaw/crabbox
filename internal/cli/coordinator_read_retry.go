@@ -66,12 +66,7 @@ func coordinatorReadRetryReason(err error) string {
 	}
 	var response CoordinatorHTTPError
 	if errors.As(err, &response) {
-		switch response.StatusCode {
-		case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-			return fmt.Sprintf("http_%d", response.StatusCode)
-		default:
-			return ""
-		}
+		return coordinatorTransientUnavailableReason(err)
 	}
 	var network net.Error
 	if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &network) && network.Timeout() {
@@ -79,6 +74,27 @@ func coordinatorReadRetryReason(err error) string {
 	}
 	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return "connection_reset"
+	}
+	return ""
+}
+
+func coordinatorTransientUnavailableReason(err error) string {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return ""
+	}
+	var response CoordinatorHTTPError
+	if errors.As(err, &response) {
+		switch response.StatusCode {
+		case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return fmt.Sprintf("http_%d", response.StatusCode)
+		case http.StatusInternalServerError:
+			switch strings.TrimSpace(response.Message) {
+			case "error code: 1101":
+				return "cloudflare_1101"
+			case "error code: 1102":
+				return "cloudflare_1102"
+			}
+		}
 	}
 	return ""
 }
