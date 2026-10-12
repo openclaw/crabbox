@@ -51,3 +51,12 @@ func TestServedRuntimeRejectsForeignImageBeforeExecution(t *testing.T) {
 		t.Fatal("foreign image reached runtime", runner.args)
 	}
 }
+
+// Served leases regenerate host keys per lease; ordinary local-container leases must keep the shared bootstrap unchanged.
+func TestServedHostKeyPolicyStaysOutOfOrdinaryBootstrap(t *testing.T) {
+	for _, served := range []string{"ssh-keygen -A", "rm -f /etc/ssh/ssh_host_*"} {
+		if strings.Contains(bootstrapScript, served) {
+			t.Fatalf("served host-key policy %q leaked into ordinary local-container bootstrap", served)
+		}
+	}
+}
