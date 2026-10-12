@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	xssh "golang.org/x/crypto/ssh"
@@ -40,6 +41,11 @@ func prepareLeaseSSHTrust(target *SSHTarget, leaseID string) error {
 		}
 		target.HostKeyAlias = alias
 	}
+	if target.SSHJump != nil {
+		if err := prepareSSHJump(target); err != nil {
+			return err
+		}
+	}
 	return installAuthoritativeSSHHostKey(target)
 }
 
@@ -65,6 +71,13 @@ func installAuthoritativeSSHHostKey(target *SSHTarget) error {
 		return Exit(2, "authoritative SSH host key requires an absolute isolated known_hosts path")
 	}
 	entry := knownhosts.Line([]string{token}, publicKey) + "\n"
+	if jump := target.SSHJump; jump != nil {
+		key, err := parseAuthoritativeSSHHostKey(jump.HostKey)
+		if err != nil {
+			return err
+		}
+		entry += knownhosts.Line([]string{net.JoinHostPort(jump.Host, strconv.Itoa(jump.Port))}, key) + "\n"
+	}
 	if err := writeAuthoritativeKnownHosts(path, []byte(entry)); err != nil {
 		return Exit(2, "install authoritative SSH host key in %s: %v", path, err)
 	}
@@ -222,5 +235,29 @@ func removeStoredTestboxConnectionArtifacts(ctx context.Context, leaseID string)
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("remove lease SSH directory: %w", err)
 	}
+	return nil
+}
+
+// Build the hop only once the per-lease identity and trust paths have been selected.
+// OpenSSH invokes ProxyCommand through a shell; quote every exact argument and
+// escape its percent expansion before it reaches that shell.
+func prepareSSHJump(target *SSHTarget) error {
+	jump := target.SSHJump
+	if net.ParseIP(jump.Host) == nil || jump.Port < 1 || jump.Port > 65535 || target.Key == "" {
+		return Exit(2, "invalid SSH jump endpoint or missing lease identity")
+	}
+	key, err := parseAuthoritativeSSHHostKey(jump.HostKey)
+	if err != nil {
+		return err
+	}
+	if key.Type() != xssh.KeyAlgoED25519 || (jump.Fingerprint != "" && jump.Fingerprint != xssh.FingerprintSHA256(key)) {
+		return Exit(2, "invalid SSH jump host key or fingerprint")
+	}
+	args := []string{"ssh", "-F", os.DevNull, "-i", target.Key, "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + sshConfigFileValue(target.KnownHostsFile), "-o", "GlobalKnownHostsFile=none", "-o", "KnownHostsCommand=none", "-o", "VerifyHostKeyDNS=no", "-o", "UpdateHostKeys=no", "-o", "HostKeyAlgorithms=ssh-ed25519", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-p", strconv.Itoa(jump.Port), "-W", net.JoinHostPort(target.Host, target.Port), "crabbox@" + jump.Host}
+	for i, arg := range args {
+		args[i] = ShellQuote(strings.ReplaceAll(arg, "%", "%%"))
+	}
+	target.ProxyCommand = strings.Join(args, " ")
+	target.NoControlMaster = true
 	return nil
 }

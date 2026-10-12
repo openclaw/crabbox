@@ -27,7 +27,17 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 )
 
+// SSHJump describes an authenticated SSH transport hop; the destination still
+// has its own end-to-end SSH host key and authentication.
+type SSHJump struct {
+	Host        string `json:"host"`
+	Port        int    `json:"port"`
+	HostKey     string `json:"hostKey"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+}
+
 type SSHTarget struct {
+	SSHJump                 *SSHJump
 	User                    string
 	Host                    string
 	SSHHostKey              string
@@ -89,6 +99,10 @@ func SSHTargetFromConfig(cfg Config, host string) SSHTarget {
 }
 
 func sshTargetForLease(cfg Config, host, user, port string) SSHTarget {
+	return sshTargetForLeaseConnection(cfg, host, user, port, "", nil)
+}
+
+func sshTargetForLeaseConnection(cfg Config, host, user, port, hostKey string, jump *SSHJump) SSHTarget {
 	if user == "" {
 		user = cfg.SSHUser
 	}
@@ -96,6 +110,7 @@ func sshTargetForLease(cfg Config, host, user, port string) SSHTarget {
 		port = cfg.SSHPort
 	}
 	target := SSHTarget{
+		SSHHostKey: hostKey, SSHJump: jump,
 		User:             user,
 		Host:             host,
 		Key:              cfg.SSHKey,

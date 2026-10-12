@@ -1737,7 +1737,7 @@ func baseConfig() Config {
 }
 
 type ServeConfig struct {
-	SSHPorts string `yaml:"sshPorts,omitempty"`
+	SSHPort  int    `yaml:"sshPort,omitempty"`
 	Machine  string `yaml:"machine,omitempty"`
 	Fallback string `yaml:"fallback,omitempty"`
 }
@@ -3935,7 +3935,13 @@ func applyNonNegativeLeaseDuration(target *time.Duration, value string) bool {
 func applyEnv(cfg *Config) error {
 	cfg.Serve.Machine = getenv("CRABBOX_SERVE_MACHINE", cfg.Serve.Machine)
 	cfg.Serve.Fallback = getenv("CRABBOX_SERVE_FALLBACK", cfg.Serve.Fallback)
-	cfg.Serve.SSHPorts = getenv("CRABBOX_SERVE_SSH_PORTS", cfg.Serve.SSHPorts)
+	if v := os.Getenv("CRABBOX_SERVE_SSH_PORT"); v != "" {
+		var err error
+		cfg.Serve.SSHPort, err = strconv.Atoi(v)
+		if err != nil || cfg.Serve.SSHPort < 1 || cfg.Serve.SSHPort > 65535 {
+			return fmt.Errorf("CRABBOX_SERVE_SSH_PORT must be in 1-65535")
+		}
+	}
 	cfg.Profile = configInputEnvString(cfg, configInputGeneric, cfg.Profile, "CRABBOX_PROFILE")
 	if provider := os.Getenv("CRABBOX_PROVIDER"); provider != "" {
 		setProviderSelection(cfg, provider, providerSelectionEnvironment)
