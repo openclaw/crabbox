@@ -47,7 +47,7 @@ func jjFixtureGit(t *testing.T) (string, string, string) {
 	writeFile(t, filepath.Join(root, "base.txt"), "base\n")
 	writeFile(t, filepath.Join(root, "deleted.txt"), "remove me\n")
 	runGit(t, root, "add", ".")
-	runGit(t, root, "commit", "-m", "base")
+	runGit(t, root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "-c", "commit.gpgsign=false", "commit", "-m", "base")
 	base := gitOutput(root, "rev-parse", "HEAD")
 	writeFile(t, filepath.Join(root, "base.txt"), "working-copy edit\n")
 	writeFile(t, filepath.Join(root, "a.txt"), "first parent\n")
@@ -55,7 +55,7 @@ func jjFixtureGit(t *testing.T) (string, string, string) {
 	writeFile(t, filepath.Join(root, "c.txt"), "third parent\n")
 	runGit(t, root, "rm", "deleted.txt")
 	runGit(t, root, "add", ".")
-	runGit(t, root, "commit", "-m", "working copy")
+	runGit(t, root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "-c", "commit.gpgsign=false", "commit", "-m", "working copy")
 	return root, base, gitOutput(root, "rev-parse", "HEAD")
 }
 
@@ -178,7 +178,7 @@ func TestJujutsuTreeMaterializationRejectsEscapingParent(t *testing.T) {
 	runGit(t, root, "init")
 	writeFile(t, filepath.Join(root, "dir", "payload"), "must stay in snapshot")
 	runGit(t, root, "add", ".")
-	runGit(t, root, "commit", "-m", "tree")
+	runGit(t, root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "-c", "commit.gpgsign=false", "commit", "-m", "tree")
 	commit := gitOutput(root, "rev-parse", "HEAD")
 	if err := os.RemoveAll(filepath.Join(root, "dir")); err != nil {
 		t.Fatal(err)
