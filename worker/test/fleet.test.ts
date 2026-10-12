@@ -36029,6 +36029,69 @@ describe("fleet lease identity and idle", () => {
     await expect(idlePost.text()).resolves.toContain("No active Crabbox lease");
   });
 
+  it.each([
+    ["cloudflare", false],
+    ["cloudflare", true],
+    ["shared", false],
+    ["shared", true],
+  ])(
+    "omits stale external runners from portal home but keeps them in the API on %s (admin: %s)",
+    async (runtime, admin) => {
+      const storage = new ObservedMemoryStorage();
+      const fleet = runtime === "cloudflare" ? testFleet(storage) : testCoordinator(storage);
+      const headers = {
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+        ...(admin ? { "x-crabbox-admin": "true" } : {}),
+      };
+      const runner: ExternalRunnerRecord = {
+        id: "stale-runner",
+        provider: "blacksmith-testbox",
+        owner: "alice@example.com",
+        org: "example-org",
+        status: "missing",
+        stale: true,
+        firstSeenAt: "2026-01-01T00:00:00.000Z",
+        lastSeenAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      };
+      for (let index = 0; index < 130; index += 1) {
+        const id = `stale-runner-${String(index).padStart(4, "0")}`;
+        storage.seed(`runner:${id}`, { ...runner, id });
+      }
+      storage.seed("runner:z-active", {
+        ...runner,
+        id: "active-runner",
+        status: "ready",
+        stale: false,
+      });
+      storage.seed("runner:z-busy", {
+        ...runner,
+        id: "busy-runner",
+        status: "busy",
+        stale: undefined,
+      });
+
+      const home = await fleet.fetch(request("GET", "/portal", { headers }));
+      expect(home.status).toBe(200);
+      const html = await home.text();
+      expect(html).not.toContain("stale-runner");
+      expect(html).toContain("active-runner");
+      expect(html).toContain("busy-runner");
+      expect(html.match(/class="external-row"/g)).toHaveLength(2);
+
+      const list = await fleet.fetch(request("GET", "/v1/runners?limit=200", { headers }));
+      expect(list.status).toBe(200);
+      const body = (await list.json()) as {
+        runners: ExternalRunnerRecord[];
+        truncated?: boolean;
+      };
+      expect(body.runners).toHaveLength(132);
+      expect(body.runners.filter((record) => record.stale === true)).toHaveLength(130);
+      expect(body.truncated).toBeUndefined();
+    },
+  );
+
   it.each(["cloudflare", "shared"])(
     "bounds visible external runner history before portal and API selection on %s",
     async (runtime) => {

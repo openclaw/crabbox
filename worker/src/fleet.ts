@@ -9101,7 +9101,7 @@ export class FleetCoordinator {
     if (method === "GET" && parts.length === 1) {
       const [visibleLeases, runners, macHosts] = await Promise.all([
         this.portalVisibleLeases(request),
-        this.visibleExternalRunners(request),
+        this.visibleExternalRunners(request, { includeStale: false }),
         this.portalMacHosts(true),
       ]);
       const admin = isAdminRequest(request);
@@ -15972,14 +15972,13 @@ export class FleetCoordinator {
     const status = url.searchParams.get("status") ?? "";
     const stale = url.searchParams.get("stale") ?? "";
     const limit = Math.min(clampLimit(url.searchParams.get("limit"), 100), externalRunnerListLimit);
-    const result = await this.visibleExternalRunners(
-      request,
+    const result = await this.visibleExternalRunners(request, {
       limit,
-      (runner) =>
+      accept: (runner) =>
         (!provider || runner.provider === provider) &&
         (!status || runner.status === status) &&
         (stale === "true" ? runner.stale === true : stale !== "false" || runner.stale !== true),
-    );
+    });
     return json({
       runners: result.runners.map(publicExternalRunnerRecord),
       ...(result.truncated ? { truncated: true } : {}),
@@ -19998,8 +19997,15 @@ export class FleetCoordinator {
 
   private async visibleExternalRunners(
     request: Request,
-    limit = externalRunnerListLimit,
-    accept: (runner: ExternalRunnerRecord) => boolean = () => true,
+    {
+      includeStale = true,
+      limit = externalRunnerListLimit,
+      accept = () => true,
+    }: {
+      includeStale?: boolean;
+      limit?: number;
+      accept?: (runner: ExternalRunnerRecord) => boolean;
+    } = {},
   ): Promise<{ runners: ExternalRunnerRecord[]; truncated: boolean }> {
     const runners: ExternalRunnerRecord[] = [];
     let truncated = false;
@@ -20010,7 +20016,13 @@ export class FleetCoordinator {
       this.state.storage,
       { prefix: externalRunnerPrefix(), limit: storageRecordScanBatchSize, noCache: true },
     )) {
-      if ((!admin && (runner.owner !== owner || runner.org !== org)) || !accept(runner)) continue;
+      if (
+        (!admin && (runner.owner !== owner || runner.org !== org)) ||
+        (!includeStale && runner.stale === true) ||
+        !accept(runner)
+      ) {
+        continue;
+      }
       const index = runners.findIndex((other) => compareExternalRunners(runner, other) < 0);
       runners.splice(index < 0 ? runners.length : index, 0, runner);
       if (runners.length > limit) {

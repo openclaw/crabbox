@@ -157,12 +157,13 @@ kinds:
 - **External runners** — visibility-only rows for Blacksmith Testboxes synced
   from `crabbox list` output. They render as muted, disabled rows with status
   badges, inferred GitHub Actions run/workflow links, `stuck` markers for
-  long-queued or long-running Actions, a copyable local stop command, and
-  `stale` markers when a previously visible runner no longer appears in the
-  next sync. The portal selects at most 200 visible runners, preferring non-stale
-  rows and then the newest `updatedAt`. Runner detail links remain available
-  independently of this cap. Stale rows older than seven days since `updatedAt`
-  are pruned in bounded maintenance batches.
+  long-queued or long-running Actions, and a copyable local stop command.
+  The home page selects at most 200 visible non-stale runners by newest
+  `updatedAt`, skipping stale rows during the storage scan. Runners that no
+  longer appear in a sync are marked stale and remain available through the
+  runner list API and runner detail pages, independently of the home page cap.
+  Stale rows older than seven days since `updatedAt` are pruned in bounded
+  maintenance batches.
 - **Dedicated hosts** — when AWS credentials and a region are configured, admins
   see EC2 Mac Dedicated Host inventory as capacity rows. Normal users see only
   hosts attached to active leases already visible to them. Each visible row
