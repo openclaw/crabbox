@@ -193,13 +193,13 @@ For example, a tailnet grant can allow clients to reach only that front door:
 
 On macOS hosts with the Application Firewall enabled, the front door listens in
 the `crabbox` process itself, so that binary must be allowed to accept incoming
-connections. Notarized release builds (Homebrew or GitHub Releases) qualify
-automatically when "Automatically allow downloaded signed software" is on.
-Locally built binaries, including Developer ID-signed but unnotarized builds,
-are blocked silently: the agent registers and leases provision, but clients on
-other machines time out waiting for the SSH transport. Allow that binary in
-System Settings → Network → Firewall → Options, or use a notarized build.
-Connections from the donating machine to its own address are not filtered.
+connections. Signed release builds (Homebrew or GitHub Releases) are allowed
+automatically when "Automatically allow downloaded signed software" is on;
+otherwise allow the binary in System Settings → Network → Firewall → Options.
+If leases provision but clients on other machines time out waiting for the SSH
+transport, first confirm plain TCP reachability of the front door from a client
+machine (for example `nc -z <address> <port>`) before changing the agent: tailnet
+policy and host routing problems produce the same symptom.
 
 Containers publish sshd on runtime-assigned **127.0.0.1-only** ports. Those ports
 are agent-side implementation details; clients never connect to them directly
