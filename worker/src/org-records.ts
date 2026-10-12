@@ -45,6 +45,7 @@ export function publicLeaseRecord(record: LeaseRecord): PublicLeaseRecord {
       publicRecord.host = "";
       delete publicRecord.tailscale;
       delete publicRecord.sshHostKey;
+      delete publicRecord.sshJump;
       delete publicRecord.providerAccessExpiresAt;
     }
   }

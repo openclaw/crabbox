@@ -40,6 +40,7 @@ function machine(id = mid) {
     memoryMB: 32768,
     maxLeases: 4,
     address: "100.64.1.2",
+    frontDoor: { port: 2222, hostKey: key },
     runtime: "docker",
     runtimeVersion: "1.0",
     agentVersion: "dev",
@@ -115,6 +116,56 @@ async function seedMaintenance(f: ReturnType<typeof fixture>, count: number, lea
 }
 afterEach(() => vi.useRealTimers());
 describe.each([false, true])("serve shared lifecycle durable=%s", (durable) => {
+  it("validates the front door and stores its fingerprint", async () => {
+    const f = fixture(durable);
+    for (const frontDoor of [
+      undefined,
+      { port: 0, hostKey: key },
+      { port: 65536, hostKey: key },
+      { port: 2222, hostKey: "ssh-rsa AAAA" },
+      { port: 2222, hostKey: "ssh-ed25519 AAAA" },
+    ]) {
+      expect((await f.route("/v1/serve/heartbeat", { ...machine(), frontDoor })).status).toBe(400);
+    }
+    expect((await f.route("/v1/serve/heartbeat", machine())).status).toBe(200);
+    const saved = await f.storage.get<ServeMachine>(`serve-machine:${mid}`);
+    expect(saved?.frontDoor).toMatchObject({
+      port: 2222,
+      hostKey: key,
+      fingerprint: expect.stringMatching(/^SHA256:/),
+    });
+  });
+  it("exposes both pinned SSH hops without a container endpoint", async () => {
+    const f = fixture(durable);
+    await f.route("/v1/serve/heartbeat", machine());
+    const id = "cbx_000000000001";
+    await f.create(id);
+    expect(
+      (
+        await f.route(`/v1/serve/leases/${id}/ready`, {
+          machineID: mid,
+          host: "100.64.1.2",
+          port: 30022,
+          sshHostKey: key,
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (await f.route(`/v1/serve/leases/${id}/ready`, { machineID: mid, sshHostKey: key })).status,
+    ).toBe(200);
+    const saved = await f.storage.get<LeaseRecord>(`lease:${id}`);
+    expect(saved).toMatchObject({
+      host: id,
+      sshPort: "22",
+      sshHostKey: key,
+      sshJump: {
+        host: "100.64.1.2",
+        port: 2222,
+        hostKey: key,
+        fingerprint: expect.stringMatching(/^SHA256:/),
+      },
+    });
+  });
   it("rejects maxLeases 33", async () => {
     const f = fixture(durable);
     const response = await f.route("/v1/serve/heartbeat", { ...machine(), maxLeases: 33 });
@@ -246,8 +297,6 @@ describe.each([false, true])("serve shared lifecycle durable=%s", (durable) => {
       (
         await f.route(`/v1/serve/leases/${id}/ready`, {
           machineID: mid,
-          host: "100.64.1.2",
-          port: 30022,
           sshHostKey: key,
         })
       ).status,
@@ -257,9 +306,8 @@ describe.each([false, true])("serve shared lifecycle durable=%s", (durable) => {
       (
         await f.route(`/v1/serve/leases/${id}/ready`, {
           machineID: mid,
-          host: "100.64.1.2",
-          port: 30023,
-          sshHostKey: key,
+          sshHostKey:
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
         })
       ).status,
     ).toBe(409);
@@ -434,14 +482,12 @@ it("uses the normal authenticated client read, heartbeat, release and cancellati
     (
       await send(`/v1/serve/leases/${id}/ready`, {
         machineID: mid,
-        host: "100.64.1.2",
-        port: 30022,
         sshHostKey: key,
       })
     ).status,
   ).toBe(200);
   expect(await (await send(`/v1/leases/${id}`)).json()).toMatchObject({
-    lease: { state: "active", host: "100.64.1.2" },
+    lease: { state: "active", host: id },
   });
   expect((await send(`/v1/leases/${id}/heartbeat`, { expectedProvider: "serve" })).status).toBe(
     200,

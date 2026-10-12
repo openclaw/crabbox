@@ -44,6 +44,7 @@ export interface ServeMachine {
   memoryMB: number;
   maxLeases: number;
   address: string;
+  frontDoor: { port: number; hostKey: string; fingerprint?: string };
   runtime: string;
   runtimeVersion: string;
   agentVersion: string;
@@ -132,10 +133,12 @@ function heartbeatInput(v: Heartbeat): boolean {
     ["amd64", "arm64"].includes(v.arch) &&
     integer(v.cpus, 4096) &&
     integer(v.memoryMB, 16 * 1024 * 1024) &&
-    Number.isSafeInteger(v.maxLeases) &&
-    v.maxLeases >= 0 &&
-    v.maxLeases <= maxLeases &&
+    integer(v.maxLeases, maxLeases) &&
     validAddress(v.address) &&
+    v.frontDoor &&
+    integer(v.frontDoor.port, 65535) &&
+    validText(v.frontDoor.hostKey, 256) &&
+    /^ssh-ed25519 [A-Za-z0-9+/=]+(?: |$)/.test(v.frontDoor.hostKey) &&
     ["docker", "podman"].includes(v.runtime) &&
     validText(v.runtimeVersion) &&
     validText(v.agentVersion) &&
@@ -287,6 +290,7 @@ export class ServeCoordinator {
     if (requestOwner(r) === "unknown" || !requestOwner(r))
       throw new ServeError("serve_owner_required", 403);
     if (!heartbeatInput(input)) throw new ServeError("invalid_serve_heartbeat");
+    const fingerprint = await hostKeyFingerprint(input.frontDoor.hostKey);
     return this.commit(async (s) => {
       const key = machinePrefix + input["machineID"];
       const old = await s.get<ServeMachine>(key);
@@ -298,6 +302,7 @@ export class ServeCoordinator {
         throw new ServeError("serve_machine_limit", 409);
       const m: ServeMachine = {
         ...input,
+        frontDoor: { port: input.frontDoor.port, hostKey: input.frontDoor.hostKey, fingerprint },
         owner: requestOwner(r),
         org: requestOrg(r, this.env),
         lastHeartbeat: now,
@@ -311,6 +316,9 @@ export class ServeCoordinator {
         records.map(async (l) => {
           const before = JSON.stringify(l);
           this.expire(l, old ?? m, now);
+          if (live(l) && l.state === "active") {
+            l.sshJump = { host: m.address, ...m.frontDoor, fingerprint };
+          }
           if (!live(l) && !seen.has(l.id) && !leaseProviderCleanupConfirmed(l)) {
             delete l.cleanupStartedAt;
             completeLeaseProviderCleanup(l, new Date(now).toISOString());
@@ -549,7 +557,7 @@ export class ServeCoordinator {
           providerKey: "",
           host: "",
           sshUser: "crabbox",
-          sshPort: "2222",
+          sshPort: "22",
           sshFallbackPorts: [],
           workRoot: "/work/crabbox",
           keep: input.keep ?? false,
@@ -645,18 +653,13 @@ export class ServeCoordinator {
       }
       if (action === "ready") {
         if (
-          input["host"] !== m.address ||
-          !integer(Number(input["port"]), 65535) ||
+          input["host"] !== undefined ||
+          input["port"] !== undefined ||
           !validText(input["sshHostKey"], 1024) ||
           !/^ssh-ed25519 [A-Za-z0-9+/=]+(?: |$)/.test(input["sshHostKey"])
         )
           throw new ServeError("invalid_serve_endpoint");
-        if (
-          l.state === "active" &&
-          (l.host !== input["host"] ||
-            l.sshPort !== String(input["port"]) ||
-            l.sshHostKey !== input["sshHostKey"])
-        )
+        if (l.state === "active" && l.sshHostKey !== input["sshHostKey"])
           throw new ServeError("serve_endpoint_changed", 409);
         const fingerprint = await hostKeyFingerprint(input["sshHostKey"]);
         if (input["fingerprint"] !== undefined && input["fingerprint"] !== fingerprint)
@@ -677,8 +680,9 @@ export class ServeCoordinator {
           l.imageEvidence = evidence;
         }
         l.state = "active";
-        l.host = m.address;
-        l.sshPort = String(input["port"]);
+        l.host = l.id;
+        l.sshPort = "22";
+        l.sshJump = { host: m.address, ...m.frontDoor, fingerprint: m.frontDoor.fingerprint! };
         l.sshHostKey = input["sshHostKey"];
       } else {
         l.state = "failed";
