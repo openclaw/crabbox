@@ -234,7 +234,8 @@ describe.each([false, true])("serve shared lifecycle durable=%s", (durable) => {
     const f = fixture(durable);
     await f.route("/v1/serve/heartbeat", machine());
     const outcomes = await Promise.all([1, 2, 3].map((i) => f.create(`cbx_00000000000${i}`)));
-    expect(outcomes.map((r) => r.status)).toEqual([202, 202, 409]);
+    // Concurrent admissions serialize in arbitrary order; only the outcome set is guaranteed.
+    expect(outcomes.map((r) => r.status).toSorted()).toEqual([202, 202, 409]);
     vi.advanceTimersByTime(2000);
     const hb = (await (await f.route("/v1/serve/heartbeat", machine())).json()) as {
       assignments: { id: string }[];
