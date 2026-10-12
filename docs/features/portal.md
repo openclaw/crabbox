@@ -162,7 +162,10 @@ kinds:
   The portal excludes stale rows, including runners last seen more than two
   hours ago (`EXTERNAL_RUNNER_FRESHNESS`), and selects at most 200 visible runners
   by newest `updatedAt`. Duplicate provider/ID/org rows use the newest
-  `lastSeenAt` within the caller's visibility. Stale rows remain available through
+  `lastSeenAt` within the caller's visibility before status or stale filters are
+  applied. Listing uses exactly two uncached streaming scans: the first retains
+  only each identity's decisive storage key and recency; the second keeps at most
+  the requested limit of full records (up to 200). Stale rows remain available through
   the runner list API and runner detail pages, independently of this cap.
   Rows last seen more than seven days
   ago, and stale rows older than seven days since `updatedAt`, are pruned in

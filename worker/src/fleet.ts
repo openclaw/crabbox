@@ -20074,7 +20074,6 @@ export class FleetCoordinator {
       accept?: (runner: ExternalRunnerRecord) => boolean;
     } = {},
   ): Promise<{ runners: ExternalRunnerRecord[]; truncated: boolean }> {
-    const runners: ExternalRunnerRecord[] = [];
     const admin = isAdminRequest(request);
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
@@ -20087,56 +20086,41 @@ export class FleetCoordinator {
         limit: storageRecordScanBatchSize,
         noCache: true,
       });
+    // Exactly two full scans: retain only winner keys/recency, then select at most
+    // `limit` full records. Unfiltered visible winners suppress older matching copies.
+    const newest = new Map<string, { key: string; lastSeenAt: string }>();
+    for await (const [key, runner] of scan()) {
+      if (!visible(runner)) continue;
+      const identity = externalRunnerIdentity(runner);
+      const prior = newest.get(identity);
+      if (
+        !prior ||
+        runner.lastSeenAt > prior.lastSeenAt ||
+        (runner.lastSeenAt === prior.lastSeenAt && key.localeCompare(prior.key) < 0)
+      ) {
+        newest.set(identity, { key, lastSeenAt: runner.lastSeenAt });
+      }
+    }
+
     type Candidate = { key: string; runner: ExternalRunnerRecord };
     const compare = (a: Candidate, b: Candidate) =>
       compareExternalRunners(a.runner, b.runner) || a.key.localeCompare(b.key);
-    let after: Candidate | undefined;
-    /* oxlint-disable eslint/no-await-in-loop -- each bounded candidate batch must resolve winners before advancing. */
-    while (runners.length <= limit) {
-      const candidates: Candidate[] = [];
-      for await (const [key, stored] of scan()) {
-        if (!visible(stored)) continue;
-        const runner = externalRunnerForDisplay(stored, now);
-        if ((!includeStale && runner.stale === true) || !accept(runner)) continue;
-        const candidate = { key, runner };
-        if (after && compare(candidate, after) <= 0) continue;
-        const index = candidates.findIndex((other) => compare(candidate, other) < 0);
-        candidates.splice(index < 0 ? candidates.length : index, 0, candidate);
-        if (candidates.length > storageRecordScanBatchSize) candidates.pop();
+    const candidates: Candidate[] = [];
+    let truncated = false;
+    for await (const [key, stored] of scan()) {
+      if (!visible(stored) || newest.get(externalRunnerIdentity(stored))?.key !== key) continue;
+      const runner = externalRunnerForDisplay(stored, now);
+      if ((!includeStale && runner.stale === true) || !accept(runner)) continue;
+      const candidate = { key, runner };
+      if (candidates.length === limit) {
+        truncated = true;
+        if (compare(candidate, candidates[candidates.length - 1]!) >= 0) continue;
+        candidates.pop();
       }
-      if (!candidates.length) break;
-      after = candidates.at(-1);
-
-      // Resolve only this bounded batch's identities. Check unfiltered visible
-      // rows too, so an older matching copy cannot resurrect a filtered winner.
-      const newest = new Map<string, Candidate>();
-      for (const candidate of candidates) {
-        newest.set(externalRunnerIdentity(candidate.runner), candidate);
-      }
-      for await (const [key, runner] of scan()) {
-        if (!visible(runner)) continue;
-        const identity = externalRunnerIdentity(runner);
-        const prior = newest.get(identity);
-        if (
-          prior &&
-          (runner.lastSeenAt > prior.runner.lastSeenAt ||
-            (runner.lastSeenAt === prior.runner.lastSeenAt && key.localeCompare(prior.key) < 0))
-        ) {
-          newest.set(identity, { key, runner });
-        }
-      }
-      for (const candidate of candidates) {
-        if (newest.get(externalRunnerIdentity(candidate.runner))?.key === candidate.key) {
-          runners.push(candidate.runner);
-          if (runners.length > limit) break;
-        }
-      }
-      if (candidates.length < storageRecordScanBatchSize) break;
+      const index = candidates.findIndex((other) => compare(candidate, other) < 0);
+      candidates.splice(index < 0 ? candidates.length : index, 0, candidate);
     }
-    /* oxlint-enable eslint/no-await-in-loop */
-    const truncated = runners.length > limit;
-    if (truncated) runners.pop();
-    return { runners, truncated };
+    return { runners: candidates.map(({ runner }) => runner), truncated };
   }
 
   private async runEvents(runID: string, after = 0, limit = 500): Promise<RunEventRecord[]> {

@@ -36617,6 +36617,221 @@ describe("fleet lease identity and idle", () => {
   );
 
   it.each(["cloudflare", "shared"])(
+    "uses exactly two runner scans for duplicate-heavy inventories and bounded results on %s",
+    async (runtime) => {
+      const storage = new ObservedMemoryStorage();
+      const fleet = runtime === "cloudflare" ? testFleet(storage) : testCoordinator(storage);
+      const now = Date.now();
+      const owner = "alice@example.com";
+      const org = "example-org";
+      const row: ExternalRunnerRecord = {
+        id: "duplicate",
+        provider: "blacksmith-testbox",
+        owner,
+        org,
+        status: "ready",
+        firstSeenAt: new Date(now).toISOString(),
+        lastSeenAt: new Date(now).toISOString(),
+        updatedAt: new Date(now).toISOString(),
+      };
+      const keys: string[] = [];
+      const winners: Array<{ key: string; runner: ExternalRunnerRecord }> = [];
+      const ownWinners: typeof winners = [];
+      const seed = (key: string, runner: ExternalRunnerRecord) => {
+        storage.seed(key, runner);
+        keys.push(key);
+        return { key, runner };
+      };
+      for (let identity = 0; identity < 50; identity++) {
+        for (let copy = 0; copy < 40; copy++) {
+          const winner = copy === (identity === 3 ? 38 : 39);
+          const entry = seed(`runner:copy-${identity}-${String(copy).padStart(2, "0")}`, {
+            ...row,
+            id: `duplicate-${identity}`,
+            owner: copy === 0 ? owner : `owner-${copy}@example.com`,
+            status: copy === 39 && identity < 2 ? "missing" : "ready",
+            stale: copy === 39 && identity === 0,
+            lastSeenAt: new Date(
+              now -
+                (identity === 2 ? EXTERNAL_RUNNER_FRESHNESS + 1000 : 0) -
+                (identity === 3 && copy >= 38 ? 1 : 39 - copy) * 1000,
+            ).toISOString(),
+            // The oldest copy sorts first, but must never displace the decisive copy.
+            updatedAt: new Date(now + (copy === 0 ? 100_000 : identity * 1000)).toISOString(),
+          });
+          if (winner) winners.push(entry);
+          if (copy === 0) ownWinners.push(entry);
+        }
+      }
+      for (let index = 0; index < 220; index++) {
+        const entry = seed(`runner:singleton-${String(index).padStart(3, "0")}`, {
+          ...row,
+          id: `singleton-${index}`,
+          updatedAt: new Date(now - index * 1000).toISOString(),
+        });
+        winners.push(entry);
+        ownWinners.push(entry);
+      }
+      for (const extra of [
+        { ...row, id: "duplicate-0", org: "other-org" },
+        { ...row, id: "duplicate-0", provider: "other-provider" },
+      ]) {
+        const entry = seed(`runner:extra-${keys.length}`, extra);
+        winners.push(entry);
+        if (extra.org === org) ownWinners.push(entry);
+      }
+      const expected = (entries: typeof winners, readyOnly = false) =>
+        entries
+          .map(({ key, runner }) => ({
+            key,
+            runner: {
+              ...runner,
+              stale:
+                runner.stale === true ||
+                Date.parse(runner.lastSeenAt) < now - EXTERNAL_RUNNER_FRESHNESS,
+            },
+          }))
+          .filter(({ runner }) => !readyOnly || (runner.status === "ready" && !runner.stale))
+          .toSorted(
+            (a, b) =>
+              Number(a.runner.stale) - Number(b.runner.stale) ||
+              b.runner.updatedAt.localeCompare(a.runner.updatedAt) ||
+              a.key.localeCompare(b.key),
+          )
+          .map(({ runner }) => ({
+            id: runner.id,
+            owner: runner.owner,
+            org: runner.org,
+            provider: runner.provider,
+          }));
+      const sortedKeys = keys.toSorted((a, b) => a.localeCompare(b));
+      const scanPages = Array.from({ length: Math.floor(keys.length / 128) + 1 }, (_, index) => ({
+        prefix: "runner:",
+        limit: 128,
+        noCache: true,
+        ...(index ? { startAfter: sortedKeys[index * 128 - 1] } : {}),
+      }));
+      const list = async (query: string, admin = true) => {
+        storage.resetListOptions();
+        const response = await fleet.fetch(
+          request("GET", `/v1/runners${query}`, {
+            headers: {
+              "x-crabbox-owner": owner,
+              "x-crabbox-org": org,
+              "x-crabbox-admin": String(admin),
+            },
+          }),
+        );
+        expect(response.status).toBe(200);
+        expect(storage.listOptions.filter(({ prefix }) => prefix === "runner:")).toEqual([
+          ...scanPages,
+          ...scanPages,
+        ]);
+        return (await response.json()) as { runners: ExternalRunnerRecord[]; truncated?: boolean };
+      };
+      const summarize = (runners: ExternalRunnerRecord[]) =>
+        runners.map((runner) => ({
+          id: runner.id,
+          owner: runner.owner,
+          org: runner.org,
+          provider: runner.provider,
+        }));
+      const capped = await list("?limit=500");
+      expect(summarize(capped.runners)).toEqual(expected(winners).slice(0, 200));
+      expect(capped.truncated).toBe(true);
+      const filtered = await list("?status=ready&stale=false&limit=17");
+      expect(summarize(filtered.runners)).toEqual(expected(winners, true).slice(0, 17));
+      expect(filtered.truncated).toBe(true);
+      const stale = await list("?stale=true&limit=200");
+      expect(stale.runners.map((runner) => runner.id)).toEqual(["duplicate-2", "duplicate-0"]);
+      expect(stale.truncated).toBeUndefined();
+      const missing = await list("?status=missing&limit=200");
+      expect(missing.runners.map((runner) => runner.id)).toEqual(["duplicate-1", "duplicate-0"]);
+      expect(missing.truncated).toBeUndefined();
+      const own = await list("?limit=200", false);
+      expect(summarize(own.runners)).toEqual(expected(ownWinners).slice(0, 200));
+      expect(own.truncated).toBe(true);
+      expect(await list("?provider=absent")).toEqual({ runners: [] });
+      // IncludeStale=false uses the same two passes for the portal.
+      storage.resetListOptions();
+      const home = await fleet.fetch(
+        request("GET", "/portal", { headers: { "x-crabbox-admin": "true" } }),
+      );
+      const html = await home.text();
+      expect(html.match(/class="external-row"/g)).toHaveLength(200);
+      expect(html).not.toContain("/portal/runners/blacksmith-testbox/duplicate-2?");
+      expect(storage.listOptions.filter(({ prefix }) => prefix === "runner:")).toEqual([
+        ...scanPages,
+        ...scanPages,
+      ]);
+    },
+  );
+
+  it.each(["cloudflare", "shared"])(
+    "keeps decisive runner keys when copies change between the two scans on %s",
+    async (runtime) => {
+      const storage = new ObservedMemoryStorage();
+      const fleet = runtime === "cloudflare" ? testFleet(storage) : testCoordinator(storage);
+      const now = Date.now();
+      const row: ExternalRunnerRecord = {
+        id: "runner",
+        provider: "blacksmith-testbox",
+        owner: "alice@example.com",
+        org: "example-org",
+        status: "ready",
+        firstSeenAt: new Date(now).toISOString(),
+        lastSeenAt: new Date(now).toISOString(),
+        updatedAt: new Date(now).toISOString(),
+      };
+      storage.seed("runner:a-old", { ...row, lastSeenAt: new Date(now - 1000).toISOString() });
+      storage.seed("runner:b-winner", row);
+      storage.seed("runner:c-suppressed-old", { ...row, id: "suppressed" });
+      storage.seed("runner:d-suppressed-winner", {
+        ...row,
+        id: "suppressed",
+        stale: true,
+        status: "missing",
+        lastSeenAt: new Date(now + 1000).toISOString(),
+      });
+      const beforeList = storage.beforeList.bind(storage);
+      vi.spyOn(storage, "beforeList").mockImplementation(async (options) => {
+        await beforeList(options);
+        if (storage.listOptions.filter(({ prefix }) => prefix === "runner:").length === 2) {
+          storage.seed("runner:a-old", { ...row, lastSeenAt: new Date(now + 2000).toISOString() });
+          storage.seed("runner:e-inserted", {
+            ...row,
+            lastSeenAt: new Date(now + 3000).toISOString(),
+          });
+          storage.seed("runner:f-new-identity", { ...row, id: "new-identity" });
+        }
+      });
+      const response = await fleet.fetch(
+        request("GET", "/v1/runners?status=ready&stale=false", {
+          headers: { "x-crabbox-admin": "true" },
+        }),
+      );
+      const body = (await response.json()) as { runners: ExternalRunnerRecord[] };
+      expect(body.runners.map((runner) => runner.id)).toEqual(["runner"]);
+      expect(body.runners[0]?.lastSeenAt).toBe(row.lastSeenAt);
+      expect(storage.listOptions.filter(({ prefix }) => prefix === "runner:")).toHaveLength(2);
+    },
+  );
+
+  it.each(["cloudflare", "shared"])(
+    "uses exactly two empty runner scans on %s",
+    async (runtime) => {
+      const storage = new ObservedMemoryStorage();
+      const fleet = runtime === "cloudflare" ? testFleet(storage) : testCoordinator(storage);
+      const response = await fleet.fetch(request("GET", "/v1/runners"));
+      expect(await response.json()).toEqual({ runners: [] });
+      expect(storage.listOptions.filter(({ prefix }) => prefix === "runner:")).toEqual([
+        { prefix: "runner:", limit: 128, noCache: true },
+        { prefix: "runner:", limit: 128, noCache: true },
+      ]);
+    },
+  );
+
+  it.each(["cloudflare", "shared"])(
     "treats runners older than the freshness boundary as stale without mutating storage on %s",
     async (runtime) => {
       vi.useFakeTimers({ toFake: ["Date"] });
