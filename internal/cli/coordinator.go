@@ -30,7 +30,6 @@ type CoordinatorClient struct {
 	Access                 AccessConfig
 	Client                 *http.Client
 	readRetryWriter        io.Writer
-	admissionRetryDelay    func(attempt int, err error) time.Duration
 	ChildEnvDenylist       []string
 	admissionAuth          *coordinatorAdmissionAuth
 	checkpointSupportMu    sync.Mutex
@@ -2474,11 +2473,7 @@ func (c *CoordinatorClient) CreateRun(ctx context.Context, runID, leaseID string
 		if !runRecorderFinishRetryable(err) || attempt == runAdmissionAttempts || ctx.Err() != nil {
 			break
 		}
-		backoff := c.admissionRetryDelay
-		if backoff == nil {
-			backoff = coordinatorReadBackoff
-		}
-		delay := backoff(attempt, err)
+		delay := runAdmissionRetryDelay(attempt, err)
 		deadline, _ := ctx.Deadline()
 		if delay >= time.Until(deadline) {
 			break

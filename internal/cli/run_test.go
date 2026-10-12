@@ -2786,6 +2786,7 @@ exit 0
 				testAWSBackendOverride = nil
 				RemoveLeaseClaim(leaseID)
 			})
+			disableRunAdmissionBackoff(t)
 
 			var stdout, stderr bytes.Buffer
 			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), []string{
@@ -2798,7 +2799,7 @@ exit 0
 			})
 			wantCalls := int32(1)
 			if tc.createRunFail {
-				wantCalls = 2
+				wantCalls = runAdmissionAttempts
 			}
 			if calls := createRunCalls.Load(); calls != wantCalls {
 				t.Fatalf("create run calls=%d, wrong bounded count; error=%v\nstdout=%s\nstderr=%s", calls, err, stdout.String(), stderr.String())

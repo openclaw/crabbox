@@ -747,9 +747,18 @@ func newRunRecorderCreateHarness(t *testing.T, eventResponse *runRecorderTestRes
 		_, _ = w.Write([]byte(response.body))
 	}))
 	t.Cleanup(server.Close)
-	// Admission backoff timing is covered with synthetic time; keep these real-server tests fast.
-	harness.client = &CoordinatorClient{BaseURL: server.URL, Client: server.Client(), admissionRetryDelay: func(int, error) time.Duration { return 0 }}
+	harness.client = &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+	disableRunAdmissionBackoff(t)
 	return harness
+}
+
+// Admission backoff timing is covered with synthetic time; real-server tests skip the sleeps.
+// Callers must not be parallel tests: this swaps a package-level hook.
+func disableRunAdmissionBackoff(t *testing.T) {
+	t.Helper()
+	previous := runAdmissionRetryDelay
+	runAdmissionRetryDelay = func(int, error) time.Duration { return 0 }
+	t.Cleanup(func() { runAdmissionRetryDelay = previous })
 }
 
 func (h *runRecorderCreateHarness) snapshot(t *testing.T) ([]map[string]any, map[string]any) {
