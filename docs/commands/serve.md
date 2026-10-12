@@ -24,7 +24,7 @@ crabbox serve uninstall
 | `--ssh-ports` | Published SSH port pool, e.g. `8443` or `2200,2205-2207`; default ephemeral |
 | `--publish-host` | Runtime bind IP; default advertised IP |
 | `--runtime` | `docker` or `podman` |
-| `--poll-interval` | 500ms–10s; default 2s |
+| `--poll-interval` | Minimum poll and heartbeat-response spacing, 500ms–10s; default 2s |
 | `--state-dir` | Private machine identity/status directory |
 | `--no-cache-volumes` | Disable managed cache volumes |
 | `--drain-on-exit` | Remove containers on orderly agent shutdown |
@@ -37,6 +37,12 @@ service command.
 
 Serve requires coordinator enablement through `CRABBOX_SERVE_ALLOWED_OWNERS`;
 unset or empty disables it. Unlisted owners receive `serve_not_enabled`.
+
+Serve can prepare a reusable local image at startup to avoid reinstalling bootstrap
+packages for every lease. See [prepared container images](../providers/serve.md#prepared-container-images)
+for details, fallback behavior, and image evidence.
+
+Each poll starts at least `--poll-interval` after the prior poll start and heartbeat response.
 
 `status` checks coordinator access and reads the local machine UUID, last successful coordinator contact,
 active assignments, caps, and draining state. `machines` queries owner-visible
@@ -52,4 +58,7 @@ last deadlines; install with `--drain-on-exit` for immediate removal on stop.
 
 `cache prune` requires the same state directory and runtime used by the agent,
 and exclusive access to its state lock. Stop the agent first. It removes only
-the named cache volumes derived for that machine.
+the named cache volumes derived for that machine and images labeled
+`crabbox.serve.prepared=true` that no running container uses. Prepared images
+may be shared by several agents. Removal is never forced; a runtime refusal
+is reported. The next agent start prepares a pruned image again if needed.

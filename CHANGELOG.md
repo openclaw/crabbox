@@ -5,7 +5,6 @@
 ### Added
 
 - Coordinator: add default-off maximum-age policies and explicit admin rollout canaries for retained AWS leases, with verified stop permissions, visible stop/deletion deadlines, bounded extensions, and root-disk cleanup. [PR 2759](https://github.com/openclaw/crabbox/pull/2759). Thanks @vincentkoc.
-
 - Serve: run `crabbox serve` on trusted machines to donate spare CPU as owner-only container leases (`--provider serve`), with outbound coordinator polling, local deadline enforcement, `--ssh-ports` pools, warm package caches, per-user service install, and opt-in capacity fallback. Coordinators enable it per owner with `CRABBOX_SERVE_ALLOWED_OWNERS` (off by default). [PR 2768](https://github.com/openclaw/crabbox/pull/2768).
 
 ### Changes
@@ -15,6 +14,8 @@
 ### Fixes
 
 - Coordinator: prevent the portal from exhausting coordinator memory when many external runner records are stored by bounding reads and pruning old stale records.
+- Serve: stop spurious `serve_rate_limited` heartbeat errors by pacing each heartbeat at least `--poll-interval` after the previous response. [PR 2770](https://github.com/openclaw/crabbox/pull/2770).
+- Serve: start served leases in about a second instead of ~30s by preparing the bootstrap packages once into a local image at agent start; every lease still gets unique SSH host keys. [PR 2770](https://github.com/openclaw/crabbox/pull/2770).
 - Sync: explain incomplete shallow sources and Git overlay conflicts during local Git seeding, with actionable configuration fixes. [PR 2662](https://github.com/openclaw/crabbox/pull/2662). Thanks @shunkakinoki.
 - CLI: resolve explicit provider, target, Windows mode, architecture, OS, class, and type flags before validating inherited configuration, preserving unrelated defaults and recorded-lease identity checks. [PR 2767](https://github.com/openclaw/crabbox/pull/2767).
 - Jobs: apply a selected job's provider and platform selectors before validating inherited defaults, including dry runs and existing-lease reuse. [PR 2767](https://github.com/openclaw/crabbox/pull/2767).

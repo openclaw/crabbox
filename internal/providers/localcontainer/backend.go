@@ -1949,7 +1949,11 @@ func (b *backend) createContainerWithOptions(ctx context.Context, cfg core.Confi
 	}
 	if served != nil {
 		script := servedWatchdog + "\n" + bootstrapScript
-		args = append(args, "-e", "CRABBOX_SERVE_DEADLINE="+strconv.FormatInt(served.Deadline, 10), cfg.LocalContainer.Image, "/bin/sh", "-c", script)
+		runtimeImage := cfg.LocalContainer.Image
+		if served.runtimeImage != "" {
+			runtimeImage = served.runtimeImage
+		}
+		args = append(args, "-e", "CRABBOX_SERVE_DEADLINE="+strconv.FormatInt(served.Deadline, 10), runtimeImage, "/bin/sh", "-c", script)
 		result, err := b.docker(ctx, args, nil, b.rt.Stderr)
 		if err != nil {
 			return "", "", shared.LocalCommandError("container run (check --advertise-address/--publish-host binding)", result, err)
@@ -3206,6 +3210,9 @@ MOZILLA
 fi
 `
 
+const bootstrapTools = "/usr/sbin/sshd git rsync curl sudo python3"
+const bootstrapPackages = "openssh-server ca-certificates git rsync curl sudo python3"
+
 var bootstrapScript = `
 set -eu
 image_path="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
@@ -3287,12 +3294,12 @@ env | sed -n 's/^CRABBOX_HOST_VOLUME_PATH_[0-9][0-9]*=//p' | while IFS= read -r 
   check_host_volume_path "$host_path"
 done
 need_install=0
-	for tool in /usr/sbin/sshd git rsync curl sudo python3; do
+	for tool in ` + bootstrapTools + `; do
 	  command -v "$tool" >/dev/null 2>&1 || need_install=1
 	done
 	if [ "$need_install" = "1" ] && command -v apt-get >/dev/null 2>&1; then
 	  apt-get update
-	  apt-get install -y --no-install-recommends openssh-server ca-certificates git rsync curl sudo python3
+	  apt-get install -y --no-install-recommends ` + bootstrapPackages + `
 	fi
 if [ "${CRABBOX_DESKTOP:-0}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
   apt-get update

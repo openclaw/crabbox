@@ -531,5 +531,7 @@ heartbeat confirms container absence; capacity stays reserved until then.
 The agent shares container creation and SSH bootstrap with local-container,
 but uses explicit address binding, CPU shares, resource limits, named cache
 volumes, an in-container deadline watchdog, and automatic container removal.
+Serve can reuse prepared bootstrap images; every lease gets fresh SSH host keys.
+Heartbeats are spaced from the previous response.
 Clients transfer files and execute commands directly over SSH. See
 [Serve](providers/serve.md) for the trust boundary and network requirements.

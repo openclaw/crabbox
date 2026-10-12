@@ -100,7 +100,42 @@ is retained for run reporting and cleanup. Fixed-ID acquisition does not switch
 providers. `CRABBOX_SERVE_MACHINE` and `CRABBOX_SERVE_FALLBACK` provide environment
 overrides.
 
+## Prepared container images
+
+At agent startup, Serve probes the configured image for `sshd`, Git, rsync,
+curl, sudo, and Python 3. If any are missing and `apt-get` is available, it
+installs the shared bootstrap package set once in a temporary container, then
+commits a local prepared image. This uses ordinary Docker/Podman `run` and
+`commit`; it requires no buildx or Dockerfile. Preparation output goes to stderr.
+Images that already have the tools, or have no `apt-get`, keep the existing
+bootstrap behavior. If preparation fails, the agent prints a warning and uses
+the configured image, so leases install their tools at startup as before.
+Failure to pull or inspect the configured image still stops agent startup.
+
+The tag is `crabbox-serve-prepared:<hash>`, where the hash is the first 16 hex
+digits of SHA-256 over the base runtime image ID, package list, and recipe
+version. Subsequent agent starts reuse that tag. The image has labels
+`crabbox.serve.prepared=true`, `crabbox.serve.base-reference`, and
+`crabbox.serve.base-image-id`. Preparation preserves the base command,
+entrypoint, user, and environment, and removes SSH host keys and apt lists.
+Each served container generates its own host keys, including when the
+configured image already contained keys.
+
+The advertised image, assignment checks, container `image` label, and image
+evidence's `ConfiguredReference` remain the configured reference. Evidence's
+`RuntimeImageID` identifies the image actually running. When that ID matches
+the agent's prepared image, `RepositoryDigests` and `RepositoryDigestStatus`
+come from the configured base ID recorded at startup, since a locally committed
+image has no repository digests. Otherwise digests are observed from the running
+image itself; container labels cannot select the source. Ordinary
+`local-container` provisioning and evidence are unchanged.
+
 ## Deadlines, shutdown, and cleanup
+
+`--poll-interval` is a minimum pacing interval: the next poll starts only after
+both the previous poll start plus the interval and the previous heartbeat
+response (including errors) plus the interval. Slow container work cannot
+compress successive heartbeat requests below that interval.
 
 The coordinator considers machines online for 30 seconds after their last
 heartbeat. After 90 seconds without a heartbeat, live leases become failed/lost.
@@ -126,8 +161,11 @@ The agent reuses machine-scoped named volumes for the pnpm store, npm cache,
 Go build cache, and Go module cache. Existing `cache.volumes` configuration
 customizes these paths; names remain scoped to the machine. Use
 `--no-cache-volumes` to disable or `crabbox serve cache prune` while the agent is
-stopped to remove its cache volumes. Runtime refusal to remove in-use volumes
-is reported, not forced.
+stopped to remove its cache volumes and local prepared images that are not
+used by running containers. Prepared images are shared by agents using the
+same base and recipe, so prune checks running containers across the runtime.
+Runtime refusal to remove in-use volumes or images is reported, not forced.
+Pruned images are prepared again when needed.
 
 SSH binds only the advertised address by default. Ports are runtime-assigned
 unless `--ssh-ports` is set, for example `--ssh-ports 8443` or

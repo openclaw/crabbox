@@ -81,13 +81,14 @@ type options struct {
 	noCache, drain                                bool
 }
 type agent struct {
-	opts       options
-	state      localState
-	coord      *core.CoordinatorClient
-	containers containerRuntime
-	rt         core.Runtime
-	volumes    []core.CacheVolumeConfig
-	ports      *portPool
+	lastHeartbeatReturned time.Time
+	opts                  options
+	state                 localState
+	coord                 *core.CoordinatorClient
+	containers            containerRuntime
+	rt                    core.Runtime
+	volumes               []core.CacheVolumeConfig
+	ports                 *portPool
 }
 type containerRuntime interface {
 	List(context.Context) ([]localcontainer.ServedContainer, error)
@@ -273,19 +274,29 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	}
 	runCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	ticker := time.NewTicker(o.interval)
-	defer ticker.Stop()
+	return a.run(runCtx)
+}
+
+func (a *agent) run(ctx context.Context) error {
 	for {
-		if err := a.poll(runCtx); err != nil && runCtx.Err() == nil {
-			fmt.Fprintf(rt.Stderr, "serve heartbeat: %v\n", err)
+		pollStart := time.Now()
+		if err := a.poll(ctx); err != nil && ctx.Err() == nil {
+			fmt.Fprintf(a.rt.Stderr, "serve heartbeat: %v\n", err)
 		}
+		next := pollStart.Add(a.opts.interval)
+		if afterHeartbeat := a.lastHeartbeatReturned.Add(a.opts.interval); afterHeartbeat.After(next) {
+			next = afterHeartbeat
+		}
+		timer := time.NewTimer(time.Until(next))
 		select {
-		case <-runCtx.Done():
+		case <-ctx.Done():
+			timer.Stop()
 			return a.shutdown()
-		case <-ticker.C:
+		case <-timer.C:
 		}
 	}
 }
+
 func parseMemory(s string) (int, error) {
 	s = strings.ToLower(strings.TrimSpace(s))
 	factor := 1
@@ -413,7 +424,9 @@ func (a *agent) poll(ctx context.Context) error {
 		a.state.Machine.MaxLeases = min(a.opts.maxLeases, a.ports.capacity())
 	}
 	var response heartbeat
-	if err := a.coord.AgentRequest(bounded, "POST", "/v1/serve/heartbeat", a.state.Machine, &response); err != nil {
+	err = a.coord.AgentRequest(bounded, "POST", "/v1/serve/heartbeat", a.state.Machine, &response)
+	a.lastHeartbeatReturned = time.Now()
+	if err != nil {
 		return err
 	}
 	a.state.LastSuccess = time.Now()

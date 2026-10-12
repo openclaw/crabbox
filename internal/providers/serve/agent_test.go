@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -276,5 +277,82 @@ func TestShutdownRefreshesInventoryBeforeDrainingHeartbeat(t *testing.T) {
 				t.Fatalf("leases=%v removed=%v", got.Leases, containers.removed)
 			}
 		})
+	}
+}
+
+// Two List calls precede each heartbeat. Alternating slow and fast polls expose
+// both fixed-cadence compression and the ticker's buffered-tick catch-up.
+type pacedContainers struct {
+	fakeContainers
+	lists int
+	delay time.Duration
+}
+
+func (f *pacedContainers) List(ctx context.Context) ([]localcontainer.ServedContainer, error) {
+	f.lists++
+	if f.lists%4 == 1 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return nil, nil
+}
+
+func TestAgentRunPacesHeartbeatReceipts(t *testing.T) {
+	const interval = 500 * time.Millisecond
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	var mu sync.Mutex
+	var receipts []time.Time
+	var accepted time.Time
+	rateLimited, drained := 0, false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m machine
+		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+			t.Error(err)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if m.Draining {
+			drained = true
+		} else {
+			now := time.Now()
+			receipts = append(receipts, now)
+			if len(receipts) == 4 {
+				defer cancel()
+			}
+			if !accepted.IsZero() && now.Sub(accepted) < interval {
+				rateLimited++
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = io.WriteString(w, `{"error":"serve_rate_limited"}`)
+				return
+			}
+			accepted = now
+		}
+		_ = json.NewEncoder(w).Encode(heartbeat{})
+	}))
+	defer server.Close()
+	coord, err := core.NewCoordinatorClient(core.Config{Coordinator: server.URL, CoordToken: "synthetic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := agent{coord: coord, containers: &pacedContainers{delay: 450 * time.Millisecond}, opts: options{interval: interval, stateDir: t.TempDir()}, state: localState{Machine: machine{MachineID: "m"}}, rt: core.Runtime{Stderr: io.Discard}}
+	if err := a.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if rateLimited != 0 || len(receipts) != 4 || !drained {
+		t.Errorf("rate limited=%d receipts=%d drained=%t", rateLimited, len(receipts), drained)
+	}
+	for i := 1; i < len(receipts); i++ {
+		gap := receipts[i].Sub(receipts[i-1])
+		t.Logf("heartbeat gap %d: %s", i, gap)
+		if gap < interval {
+			t.Errorf("heartbeat gap %d = %s, want >= %s", i, gap, interval)
+		}
 	}
 }
