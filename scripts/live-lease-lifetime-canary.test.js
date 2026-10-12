@@ -59,7 +59,12 @@ else if (args[0] === "warmup") {
   }
   if (id === state.canary) { state.statusReads++; output({id, state: "active", lifetimePolicy: policy()}); }
   else output({id, state: "active", lifetimePolicy: scenario === "control-enrolled" ? policy() : undefined});
-} else if (args[0] === "run") output({ok: true});
+} else if (args[0] === "run") {
+  state.runs = (state.runs ?? 0) + 1;
+  if (scenario === "control-deadline" && state.runs === 1) fail("run admission run_x unavailable before command: context deadline exceeded");
+  if (scenario === "control-touch-fails" && state.runs === 1) fail("warning: heartbeat failed: lease busy");
+  output({ok: true});
+}
 else if (args[0] === "stop") {
   if (scenario === "cleanup-failure" && id === state.canary) fail("injected cleanup failure");
   if (scenario === "control-create-rejected") fail("coordinator POST /v1/leases/" + id + "/release: http 404: {\\"error\\":\\"not_found\\"}");
@@ -196,6 +201,23 @@ test("lifetime canary retries a transient coordinator Worker reset", t => {
   const result = f.run();
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stderr, /transient coordinator error attempt=1: .*error code: 1101/);
+  assert.match(result.stdout, /classification=live_lease_lifetime_canary_passed/);
+});
+
+test("lifetime canary retries a control touch that hits a coordinator deadline", t => {
+  const f = fixture(t, "control-deadline");
+  const result = f.run();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stderr, /transient coordinator error attempt=1: .*context deadline exceeded/);
+  assert.match(result.stdout, /classification=live_lease_lifetime_canary_passed/);
+});
+
+test("lifetime canary treats a failed control touch as housekeeping, not proof", t => {
+  const f = fixture(t, "control-touch-fails");
+  const result = f.run();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stderr, /control touch failed; retrying on the next poll/);
+  assert.match(result.stdout, /control=.*running=true unenrolled=true/);
   assert.match(result.stdout, /classification=live_lease_lifetime_canary_passed/);
 });
 

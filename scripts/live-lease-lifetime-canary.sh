@@ -108,7 +108,7 @@ trap 'exit 143' TERM
 
 fail() { progress "FAILED $*" >&2; exit 1; }
 
-# Ride out brief coordinator Worker resets (5xx, Cloudflare 1101) instead of failing the whole proof.
+# Ride out brief coordinator Worker resets (5xx, Cloudflare 1101, request deadlines) instead of failing the whole proof.
 retry_cb() {
   local maximum="$1" attempt output errors
   shift
@@ -119,7 +119,7 @@ retry_cb() {
       [[ -z "$output" ]] || printf '%s\n' "$output"
       return 0
     fi
-    if [[ "$attempt" == 8 ]] || ! grep -qE 'http 5[0-9][0-9]|error code: 1101' "$errors"; then
+    if [[ "$attempt" == 8 ]] || ! grep -qE 'http 5[0-9][0-9]|error code: 1101|context deadline exceeded' "$errors"; then
       cat "$errors" >&2
       rm -f "$errors"
       return 1
@@ -154,8 +154,13 @@ touch_control() {
   now="$(date +%s)"
   if [[ "$now" -ge "$next_touch" ]]; then
     # Keep the control under its ten-minute idle limit, without altering its policy.
-    retry_cb 60 run --provider aws --id "$control_id" --no-sync --keep -- true >/dev/null
-    next_touch=$((now + 60))
+    # A missed touch is housekeeping, not proof: the final control assertions still apply.
+    if retry_cb 60 run --provider aws --id "$control_id" --no-sync --keep -- true >/dev/null; then
+      next_touch=$((now + 60))
+    else
+      progress "control touch failed; retrying on the next poll control=$control_id" >&2
+      next_touch=$((now + 15))
+    fi
   fi
 }
 
