@@ -186,6 +186,14 @@ Clicking a lease opens its detail page; clicking an external runner or visible
 dedicated host opens the matching visibility-only detail page. Unattached host
 details and host-pinned launch commands require admin authentication.
 
+Owners enabled for [serve](../providers/serve.md) also see a **Machines** section
+below the fleet and a **machines online** readout when they have donated machines.
+It shows connection and draining status, last heartbeat age, used/offered and free
+CPU and memory, allocated lease links and limits, runtime and agent versions,
+labels, and the advertised SSH front door. Search and status filters apply only
+to this section. Machine visibility is owner- and organization-scoped, including
+for admins; disabled owners and owners without machines see no serve section.
+
 ## Lease detail `/portal/leases/{id-or-slug}`
 
 The lease detail page shows:

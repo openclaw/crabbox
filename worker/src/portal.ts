@@ -1,4 +1,5 @@
 import type { PortalExternalRunnerRecord, PortalLeaseRecord } from "./org-records";
+import type { ServeMachineView } from "./serve";
 import { orderedTelemetrySamples } from "./telemetry";
 import type {
   ExternalRunnerRecord,
@@ -126,6 +127,7 @@ export function portalHome(
   request: Request,
   macHosts: PortalMacHostRecord[] = [],
   manageableLeaseIDs: ReadonlySet<string> = new Set(),
+  machines: ServeMachineView[] = [],
 ): Response {
   const sortedLeases = leases.toSorted((a, b) => leaseSortTime(b).localeCompare(leaseSortTime(a)));
   const active = sortedLeases.filter((lease) => lease.state === "active");
@@ -221,6 +223,13 @@ export function portalHome(
           preset: "kind:dedicated,state:active",
         })
       : "",
+    machines.length > 0
+      ? `<a class="fleet-tile" href="#machines">
+          <span class="fleet-tile-label">machines online</span>
+          <strong class="fleet-tile-value">${machines.filter((machine) => machine.online).length}/${machines.length}</strong>
+          <span class="fleet-tile-detail">your donated capacity</span>
+        </a>`
+      : "",
     fleetTile({
       label: "needs attention",
       value: attention,
@@ -270,8 +279,42 @@ export function portalHome(
           <tbody>${rows || `<tr><td colspan="8" class="empty"><strong>No boxes in the water.</strong><span>Leases you start with <code>crabbox warmup</code> or <code>crabbox run</code> show up here.</span></td></tr>`}</tbody>
         </table>
       </section>
+      ${portalMachines(machines)}
     </main>`,
   );
+}
+
+function portalMachines(machines: ServeMachineView[]): string {
+  if (machines.length === 0) return "";
+  const rows = machines
+    .toSorted((a, b) => a.name.localeCompare(b.name) || a.machineID.localeCompare(b.machineID))
+    .map((machine) => {
+      const connection = machine.online ? "online" : "offline";
+      const labels = Object.entries(machine.labels)
+        .map(([key, value]) => `${key}=${value}`)
+        .join(" · ");
+      const leases = machine.allocatedLeaseRefs
+        .map(
+          (lease) =>
+            `<a class="lease-link" href="/portal/leases/${encodeURIComponent(lease.id)}"><strong>${escapeHTML(lease.slug || lease.id)}</strong><small>${escapeHTML(lease.state)}</small></a>`,
+        )
+        .join("");
+      return `<tr data-filter-tags="${connection}${machine.draining ? " draining" : ""}">
+        <td><div class="lease-link"><strong>${escapeHTML(machine.name)}</strong><small title="${escapeHTML(machine.machineID)}">${escapeHTML(machine.machineID.slice(0, 8))} · ${escapeHTML(machine.os)}/${escapeHTML(machine.arch)}</small>${labels ? `<small>${escapeHTML(labels)}</small>` : ""}</div></td>
+        <td><div class="state-stack"><span class="${badgeClass(machine.online ? "ok" : "neutral")}">${connection}</span>${machine.draining ? `<span class="${badgeClass("warn")}">draining</span>` : ""}<small>seen ${escapeHTML(relativeTime(new Date(machine.lastHeartbeat).toISOString()))}</small></div></td>
+        <td><div class="lease-link"><strong>${machine.cpus - machine.freeCPUs}/${machine.cpus} CPUs · ${machine.memoryMB - machine.freeMemoryMB}/${machine.memoryMB} MiB</strong><small>${machine.freeCPUs} CPUs · ${machine.freeMemoryMB} MiB free</small></div></td>
+        <td><div class="machine-leases"><span>${machine.allocatedLeases}/${machine.maxLeases} allocated</span>${leases || `<span class="muted">No allocated leases.</span>`}</div></td>
+        <td><div class="lease-link"><strong>${escapeHTML(machine.runtime)} ${escapeHTML(machine.runtimeVersion)}</strong><small>agent ${escapeHTML(machine.agentVersion)}</small><small>${escapeHTML(machine.address)}:${machine.frontDoor.port}</small></div></td>
+      </tr>`;
+    })
+    .join("");
+  return `<section class="panel table-panel fleet-panel" id="machines" aria-labelledby="machines-heading">
+    <div class="section-head"><h2 id="machines-heading">Machines</h2><span>${machines.length} donated · owner only</span></div>
+    <table class="machine-table" data-portal-table data-page-size="10" data-search-placeholder="search machines, labels, leases…" data-filter-buttons="all:all,online:online,offline:offline,draining:draining">
+      <thead><tr><th>machine</th><th>connection</th><th>capacity used / offered</th><th>leases</th><th>runtime / endpoint</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </section>`;
 }
 
 function fleetTile(input: {
@@ -3606,6 +3649,7 @@ function html(
     .fleet-overview { border:1px solid var(--line); border-radius:14px; background:var(--surface); box-shadow:var(--panel-shadow); overflow:hidden; }
     .fleet-tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(168px,1fr)); gap:1px; background:var(--line-soft); }
     .fleet-tile { position:relative; display:grid; gap:4px; min-width:0; padding:16px 18px 15px; border:0; background:var(--surface); color:inherit; text-align:left; cursor:pointer; transition:background-color .14s; }
+    a.fleet-tile { text-decoration:none; }
     .fleet-tile::after { content:""; position:absolute; left:18px; right:18px; bottom:0; height:2px; border-radius:2px 2px 0 0; background:var(--accent); transform:scaleX(0); transform-origin:left; transition:transform .22s cubic-bezier(.2,.7,.2,1); }
     .fleet-tile:hover { background:var(--surface-2); }
     .fleet-tile[aria-pressed="true"] { background:var(--surface-2); }
@@ -3862,6 +3906,15 @@ function html(
     .run-shell .table-panel { max-height:55dvh; }
     .run-shell .log-panel { max-height:34dvh; }
     .table-scroll { min-height:0; overflow:auto; border-top:1px solid var(--line-soft); }
+    .machine-table { min-width:900px; }
+    .machine-table th:nth-child(1) { width:24%; }
+    .machine-table th:nth-child(2) { width:14%; }
+    .machine-table th:nth-child(3) { width:24%; }
+    .machine-table th:nth-child(4) { width:19%; }
+    .machine-table td { white-space:normal; overflow-wrap:anywhere; }
+    .machine-table small { color:var(--muted); font-size:11.5px; }
+    .machine-table .lease-link small { display:block; }
+    .machine-leases { display:grid; gap:6px; }
     /* Toolbar: search, a segmented state switch, compact filter chips. */
     .table-tools { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:6px 18px 14px; }
     .table-search-wrap { position:relative; display:flex; align-items:center; flex:1 1 240px; max-width:360px; }

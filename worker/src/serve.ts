@@ -56,6 +56,13 @@ export interface ServeMachine {
   lastHeartbeat: number;
   leases: string[];
 }
+export interface ServeMachineView extends Omit<ServeMachine, "leases"> {
+  leases?: undefined;
+  online: boolean;
+  freeCPUs: number;
+  allocatedLeases: number;
+  allocatedLeaseRefs: Pick<LeaseRecord, "id" | "slug" | "state">[];
+}
 interface Heartbeat extends Omit<ServeMachine, "owner" | "org" | "lastHeartbeat" | "leases"> {
   leases: { id: string; state: string }[];
 }
@@ -242,18 +249,21 @@ export class ServeCoordinator {
     await s.put(machinePrefix + m.machineID, m);
     await s.put((await this.ownerPrefix(m.owner, m.org)) + m.machineID, m);
   }
+  async listMachines(r: Request): Promise<ServeMachineView[]> {
+    if (!serveEnabled(this.env, requestOwner(r))) return [];
+    const machines = await this.machines(this.runtime.storage, r);
+    return Promise.all(
+      [...machines.values()]
+        .filter((m) => this.owned(m, r))
+        .map((m) => this.view(this.runtime.storage, m)),
+    );
+  }
   async route(r: Request, parts: string[]): Promise<Response> {
     try {
       const disabled = serveDisabledResponse(this.env, requestOwner(r));
       if (disabled) return disabled;
       if (parts.length === 3 && parts[2] === "machines" && r.method === "GET") {
-        const machines = await this.machines(this.runtime.storage, r);
-        const visible = await Promise.all(
-          [...machines.values()]
-            .filter((m) => this.owned(m, r))
-            .map(async (m) => this.view(this.runtime.storage, m)),
-        );
-        return json({ machines: visible });
+        return json({ machines: await this.listMachines(r) });
       }
       if (parts.length === 3 && parts[2] === "heartbeat" && r.method === "POST")
         return await this.heartbeat(r, await body<Heartbeat>(r));
@@ -272,7 +282,11 @@ export class ServeCoordinator {
         Boolean(l && l.provider === "serve" && l.serve?.machineID === m.machineID),
     );
   }
-  private async view(s: CoordinatorStorageView, m: ServeMachine, leases?: LeaseRecord[]) {
+  private async view(
+    s: CoordinatorStorageView,
+    m: ServeMachine,
+    leases?: LeaseRecord[],
+  ): Promise<ServeMachineView> {
     leases ??= await this.records(s, m);
     const held = leases.filter((l) => !leaseProviderCleanupConfirmed(l));
     const cpus = held.reduce((n, l) => n + l.serve!.cpus, 0);
@@ -284,6 +298,9 @@ export class ServeCoordinator {
       freeCPUs: Math.max(0, m.cpus - cpus),
       freeMemoryMB: Math.max(0, m.memoryMB - memory),
       allocatedLeases: held.length,
+      allocatedLeaseRefs: held
+        .filter((l) => l.owner === m.owner && l.org === m.org)
+        .map(({ id, slug, state }) => ({ id, state, ...(slug === undefined ? {} : { slug }) })),
     };
   }
   private async heartbeat(r: Request, input: Heartbeat): Promise<Response> {

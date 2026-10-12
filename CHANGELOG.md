@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Portal: show owners their donated serve machines, online status, capacity, allocated leases, and runtime details.
+
 ## 0.75.0 - 2026-10-12
 
 ### Highlights

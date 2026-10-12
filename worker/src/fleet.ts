@@ -9114,10 +9114,11 @@ export class FleetCoordinator {
       request = webVNCPortalViewerRequest(request, webVNCViewerSession);
     }
     if (method === "GET" && parts.length === 1) {
-      const [visibleLeases, runners, macHosts] = await Promise.all([
+      const [visibleLeases, runners, macHosts, machines] = await Promise.all([
         this.portalVisibleLeases(request),
         this.visibleExternalRunners(request, { includeStale: false }),
         this.portalMacHosts(true),
+        new ServeCoordinator(this.state, this.env).listMachines(request),
       ]);
       const admin = isAdminRequest(request);
       const leases = this.filterLeases(visibleLeases, request);
@@ -9136,6 +9137,7 @@ export class FleetCoordinator {
           hostLeases,
         ).map((host) => (host.lease ? { ...host, lease: portalLeaseRecord(host.lease) } : host)),
         manageableLeaseIDs,
+        machines,
       );
     }
     if (method === "GET" && parts[1] === "admin") {

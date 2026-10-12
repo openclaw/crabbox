@@ -43,6 +43,12 @@ Clients must reach this address directly: SSH is not relayed by the coordinator.
 Normal sync, run, logs, results, SSH, list, status, inspect, and stop work through
 the existing brokered SSH-lease path.
 
+The [browser portal](../features/portal.md#index-portal) shows your donated
+machines below the fleet, with online/offline and draining status, heartbeat age,
+capacity, allocated lease links, runtime/agent versions, and SSH front doors.
+The section appears only for enabled owners with machines; even admins see only
+their own machines in the current organization.
+
 ## Trust and limits
 
 Placement is owner-only, with matching organization scope. A machine registered
