@@ -306,7 +306,13 @@ func syncExternalRunners(ctx context.Context, cfg Config, backend Backend) error
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	_, err = client.SyncExternalRunners(ctx, "blacksmith-testbox", runners, "org")
+	// Org scope lets the coordinator stale other owners' rows, so claim it only when the
+	// listing used an explicit Blacksmith org instead of the CLI login's default org.
+	scope := ""
+	if strings.TrimSpace(cfg.Blacksmith.Org) != "" {
+		scope = "org"
+	}
+	_, err = client.SyncExternalRunners(ctx, "blacksmith-testbox", runners, scope)
 	return err
 }
 

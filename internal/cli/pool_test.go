@@ -370,11 +370,19 @@ func TestSyncExternalRunnersBestEffortPostsBlacksmithJSONList(t *testing.T) {
 	if len(backend.requests) != 1 || !backend.requests[0].All {
 		t.Fatalf("list requests=%#v, want one all request", backend.requests)
 	}
-	if posted.Provider != "blacksmith-testbox" || posted.InventoryScope != "org" || len(posted.Runners) != 1 {
+	// Without an explicit Blacksmith org the listing may be another org's inventory.
+	if posted.Provider != "blacksmith-testbox" || posted.InventoryScope != "" || len(posted.Runners) != 1 {
 		t.Fatalf("posted=%#v", posted)
 	}
 	if got := posted.Runners[0]; got.ID != "tbx_01sync" || got.Provider != "blacksmith-testbox" {
 		t.Fatalf("runner=%#v", got)
+	}
+
+	cfg := Config{Provider: "blacksmith-testbox", Coordinator: server.URL}
+	cfg.Blacksmith.Org = "example-org"
+	app.syncExternalRunnersBestEffort(context.Background(), cfg, backend)
+	if posted.InventoryScope != "org" {
+		t.Fatalf("explicit org sync posted=%#v, want inventoryScope org", posted)
 	}
 }
 

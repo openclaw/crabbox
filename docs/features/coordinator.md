@@ -547,7 +547,9 @@ repeat scans, transactionally rechecking each deletion against concurrent sync.
 provider/org inventory. Missing runners are then marked stale across all owners
 in that provider/org. Without the field, sync retains the legacy caller-owner/org
 scope; any other field value is rejected. The CLI sets this field for its
-org-wide `blacksmith testbox list --all` inventory. Incoming rows remain owned by
+`blacksmith testbox list --all` inventory only when `blacksmith.org` is configured
+explicitly; otherwise the listing may reflect the login's default org, and the
+sync stays caller-scoped. Incoming rows remain owned by
 the caller, and other providers and organizations are untouched. Non-admin sync
 responses include only the caller's rows, even when staling other owners' copies.
 
