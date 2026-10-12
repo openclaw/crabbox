@@ -41,6 +41,11 @@ describe("wrangler config", () => {
       "CRABBOX_DEPLOYMENT_CAPACITY_ADMIN_OWNERS",
     );
     expect(configStringValues("CRABBOX_CAPACITY_ADMIN_OWNERS")).toEqual([]);
+    expect(productionVars).toContain('"CRABBOX_SHARED_CAPACITY_OVERRIDE_OWNERS": "github:25068"');
+    expect(configStringValues("CRABBOX_SHARED_CAPACITY_OVERRIDE_OWNERS")).toEqual(["github:25068"]);
+    expect(wranglerConfig.split(/"previews"\s*:/)[1]).not.toContain(
+      "CRABBOX_SHARED_CAPACITY_OVERRIDE_OWNERS",
+    );
   });
 
   it.each([

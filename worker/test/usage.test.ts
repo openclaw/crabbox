@@ -15,7 +15,7 @@ import {
 } from "../src/org-identity";
 import type { Env, LeaseRecord } from "../src/types";
 import {
-  activeLeaseLimitForOwner,
+  activeLeaseLimitsForOwner,
   addLeaseToCostLimitUsage,
   costLimits,
   createCostLimitUsage,
@@ -352,10 +352,12 @@ describe("usage accounting", () => {
         CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN: "50",
       } as Env);
 
-      expect(activeLeaseLimitForOwner(limits, "DEPLOYED@example.com")).toBe(deployedLimit);
-      expect(activeLeaseLimitForOwner(limits, "legacy@example.com")).toBe(legacy ? 50 : 10);
-      expect(activeLeaseLimitForOwner(limits, "preserved@example.com")).toBe(legacy ? 50 : 10);
-      expect(activeLeaseLimitForOwner(limits, "ordinary@example.com")).toBe(10);
+      expect(activeLeaseLimitsForOwner(limits, "DEPLOYED@example.com").owner).toBe(deployedLimit);
+      expect(activeLeaseLimitsForOwner(limits, "legacy@example.com").owner).toBe(legacy ? 50 : 10);
+      expect(activeLeaseLimitsForOwner(limits, "preserved@example.com").owner).toBe(
+        legacy ? 50 : 10,
+      );
+      expect(activeLeaseLimitsForOwner(limits, "ordinary@example.com").owner).toBe(10);
     },
   );
 

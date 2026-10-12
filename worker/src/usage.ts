@@ -15,6 +15,7 @@ export interface CostLimits {
   maxActiveLeasesPerOwner: number;
   maxActiveLeasesPerOrg: number;
   capacityAdminOwners: string[];
+  sharedCapacityOverrideOwners: string[];
   maxActiveLeasesPerCapacityAdmin: number;
   maxMonthlyUSD: number;
   maxMonthlyUSDPerOwner: number;
@@ -123,6 +124,9 @@ export function costLimits(env: Env): CostLimits {
       ...envList(env.CRABBOX_CAPACITY_ADMIN_OWNERS),
       ...envList(env.CRABBOX_DEPLOYMENT_CAPACITY_ADMIN_OWNERS),
     ].map((owner) => owner.toLowerCase()),
+    sharedCapacityOverrideOwners: envList(env.CRABBOX_SHARED_CAPACITY_OVERRIDE_OWNERS).map(
+      (owner) => owner.toLowerCase(),
+    ),
     maxActiveLeasesPerCapacityAdmin: envInt(env.CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN),
     maxMonthlyUSD: envFloat(env.CRABBOX_MAX_MONTHLY_USD),
     maxMonthlyUSDPerOwner: envFloat(env.CRABBOX_MAX_MONTHLY_USD_PER_OWNER),
@@ -186,20 +190,15 @@ export function addLeaseToCostLimitUsage(
 
 export function activeLeaseLimitBlocker(
   usage: CostLimitUsage,
-  owner: string,
-  limits: CostLimits,
+  limits: ReturnType<typeof activeLeaseLimitsForOwner>,
 ): OwnerCapacity["blockedBy"] {
-  if (limits.maxActiveLeases > 0 && usage.activeLeases + 1 > limits.maxActiveLeases) {
+  if (limits.fleet > 0 && usage.activeLeases + 1 > limits.fleet) {
     return "fleet";
   }
-  const ownerLimit = activeLeaseLimitForOwner(limits, owner);
-  if (ownerLimit > 0 && usage.ownerActiveLeases + 1 > ownerLimit) {
+  if (limits.owner > 0 && usage.ownerActiveLeases + 1 > limits.owner) {
     return "owner";
   }
-  if (
-    limits.maxActiveLeasesPerOrg > 0 &&
-    usage.orgActiveLeases + 1 > limits.maxActiveLeasesPerOrg
-  ) {
+  if (limits.org > 0 && usage.orgActiveLeases + 1 > limits.org) {
     return "org";
   }
   return null;
@@ -210,13 +209,14 @@ export function enforceCostLimitUsage(
   candidate: LeaseRecord,
   limits: CostLimits,
 ): string {
-  switch (activeLeaseLimitBlocker(usage, candidate.owner, limits)) {
+  const activeLimits = activeLeaseLimitsForOwner(limits, candidate.owner);
+  switch (activeLeaseLimitBlocker(usage, activeLimits)) {
     case "fleet":
-      return `fleet active lease limit exceeded: ${usage.activeLeases + 1}/${limits.maxActiveLeases}`;
+      return `fleet active lease limit exceeded: ${usage.activeLeases + 1}/${activeLimits.fleet}`;
     case "owner":
-      return `active lease limit for owner exceeded: ${usage.ownerActiveLeases + 1}/${activeLeaseLimitForOwner(limits, candidate.owner)}`;
+      return `active lease limit for owner exceeded: ${usage.ownerActiveLeases + 1}/${activeLimits.owner}`;
     case "org":
-      return `active lease limit for org exceeded: ${usage.orgActiveLeases + 1}/${limits.maxActiveLeasesPerOrg}`;
+      return `active lease limit for org exceeded: ${usage.orgActiveLeases + 1}/${activeLimits.org}`;
   }
 
   if (overBudget(usage.reservedUSD + candidate.maxEstimatedUSD, limits.maxMonthlyUSD)) {
@@ -419,14 +419,19 @@ function envList(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
-export function activeLeaseLimitForOwner(limits: CostLimits, owner: string): number {
-  if (
+export function activeLeaseLimitsForOwner(limits: CostLimits, owner: string) {
+  const capacityAdmin =
     limits.maxActiveLeasesPerCapacityAdmin > 0 &&
-    limits.capacityAdminOwners.includes(owner.toLowerCase())
-  ) {
-    return Math.max(limits.maxActiveLeasesPerOwner, limits.maxActiveLeasesPerCapacityAdmin);
-  }
-  return limits.maxActiveLeasesPerOwner;
+    limits.capacityAdminOwners.includes(owner.toLowerCase());
+  const sharedOverride =
+    capacityAdmin && limits.sharedCapacityOverrideOwners.includes(owner.toLowerCase());
+  return {
+    fleet: sharedOverride ? 0 : limits.maxActiveLeases,
+    owner: capacityAdmin
+      ? Math.max(limits.maxActiveLeasesPerOwner, limits.maxActiveLeasesPerCapacityAdmin)
+      : limits.maxActiveLeasesPerOwner,
+    org: sharedOverride ? 0 : limits.maxActiveLeasesPerOrg,
+  };
 }
 
 function overBudget(value: number, limit: number): boolean {

@@ -14,6 +14,8 @@
 
 ### Fixes
 
+- Coordinator: allow explicitly configured capacity admins to use their owner allowance when shared fleet or org caps are full, while preserving spending limits and ordinary admission.
+
 - Coordinator: preserve deployment-managed capacity-admin membership across deploys without replacing secret-backed members or raising ordinary owner limits.
 - Coordinator: preserve leading zero bytes in generated Ed25519 SSH host keys so the public identity and injected private key remain a valid pair.
 - Bound coordinator storage scans for pools, image catalogs, checkpoints, and dynamic runner indexes to uncached pages.

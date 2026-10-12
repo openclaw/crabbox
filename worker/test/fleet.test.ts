@@ -31380,6 +31380,191 @@ describe("fleet lease identity and idle", () => {
     expect(reconcile).toBe("additive");
   });
 
+  it.each([
+    {
+      name: "eligible shared override",
+      admin: "alice@example.com",
+      override: "alice@example.com",
+      adminLimit: "50",
+      self: 11,
+      fleetLimit: "50",
+      expected: "",
+    },
+    {
+      name: "normalized legacy member",
+      admin: "",
+      legacy: " Alice@Example.com ",
+      override: " ALICE@example.COM ",
+      adminLimit: "50",
+      self: 11,
+      fleetLimit: "50",
+      expected: "",
+    },
+    {
+      name: "legacy admin without override",
+      admin: "",
+      legacy: "alice@example.com",
+      override: "",
+      adminLimit: "50",
+      self: 11,
+      fleetLimit: "50",
+      expected: "fleet active lease limit exceeded: 51/50",
+    },
+    {
+      name: "override without admin",
+      admin: "",
+      override: "alice@example.com",
+      adminLimit: "50",
+      self: 11,
+      fleetLimit: "50",
+      expected: "fleet active lease limit exceeded: 51/50",
+    },
+    {
+      name: "ordinary owner",
+      admin: "other@example.com",
+      override: "other@example.com",
+      adminLimit: "50",
+      self: 11,
+      fleetLimit: "50",
+      expected: "fleet active lease limit exceeded: 51/50",
+    },
+    {
+      name: "disabled admin limit",
+      admin: "alice@example.com",
+      override: "alice@example.com",
+      adminLimit: "0",
+      self: 11,
+      fleetLimit: "50",
+      expected: "fleet active lease limit exceeded: 51/50",
+    },
+    {
+      name: "legacy org exhaustion",
+      admin: "alice@example.com",
+      override: "",
+      adminLimit: "50",
+      self: 11,
+      fleetLimit: "100",
+      expected: "active lease limit for org exceeded: 51/50",
+    },
+    {
+      name: "finite owner allowance",
+      admin: "alice@example.com",
+      override: "alice@example.com",
+      adminLimit: "50",
+      self: 50,
+      fleetLimit: "50",
+      expected: "active lease limit for owner exceeded: 51/50",
+    },
+    {
+      name: "fleet spend",
+      admin: "alice@example.com",
+      override: "alice@example.com",
+      adminLimit: "50",
+      self: 11,
+      fleetLimit: "50",
+      budget: "CRABBOX_MAX_MONTHLY_USD",
+      expected: "monthly budget exceeded",
+    },
+    {
+      name: "owner spend",
+      admin: "alice@example.com",
+      override: "alice@example.com",
+      adminLimit: "50",
+      self: 11,
+      fleetLimit: "50",
+      budget: "CRABBOX_MAX_MONTHLY_USD_PER_OWNER",
+      expected: "monthly budget for owner exceeded",
+    },
+    {
+      name: "org spend",
+      admin: "alice@example.com",
+      override: "alice@example.com",
+      adminLimit: "50",
+      self: 11,
+      fleetLimit: "50",
+      budget: "CRABBOX_MAX_MONTHLY_USD_PER_ORG",
+      expected: "monthly budget for org exceeded",
+    },
+  ])("enforces shared override admission: $name", async (test) => {
+    const storage = new MemoryStorage();
+    let creates = 0;
+    const env = {
+      CRABBOX_SHARED_TOKEN: "synthetic-shared",
+      CRABBOX_SHARED_OWNER: "alice@example.com",
+      CRABBOX_DEFAULT_ORG: "example-org",
+      CRABBOX_DEPLOYMENT_CAPACITY_ADMIN_OWNERS: test.admin,
+      CRABBOX_CAPACITY_ADMIN_OWNERS: test.legacy,
+      CRABBOX_SHARED_CAPACITY_OVERRIDE_OWNERS: test.override,
+      CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN: test.adminLimit,
+      CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER: "10",
+      CRABBOX_MAX_ACTIVE_LEASES: test.fleetLimit,
+      CRABBOX_MAX_ACTIVE_LEASES_PER_ORG: "50",
+      ...(test.budget ? { [test.budget]: "1" } : {}),
+    } as Env;
+    const fleet = testFleet(
+      storage,
+      {
+        hetzner: fakeProvider(() => {
+          creates++;
+        }),
+      },
+      env,
+    );
+    for (let i = 0; i < 50; i++)
+      storage.seed(
+        `lease:cbx_${String(i).padStart(12, "0")}`,
+        testLease({
+          id: `cbx_${String(i).padStart(12, "0")}`,
+          owner: i < test.self ? "alice@example.com" : "other@example.com",
+          org: orgKeyForLabel("example-org"),
+          state: "active",
+          createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          maxEstimatedUSD: 1,
+        }),
+      );
+    const create = await routeCoordinatorRequest(
+      request("POST", "/v1/leases", {
+        headers: { authorization: "Bearer synthetic-shared" },
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "hetzner",
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+      env,
+      (incoming) => fleet.fetch(incoming),
+      { githubMembership: async () => {} },
+    );
+    const body = await create.json();
+    expect(create.status).toBe(test.expected ? 429 : 201);
+    expect(creates).toBe(test.expected ? 0 : 1);
+    const refusal = {
+      error: "cost_limit_exceeded",
+      message: expect.stringContaining(test.expected),
+    };
+    expect(body).toMatchObject(
+      test.expected
+        ? refusal
+        : {
+            lease: { id: "cbx_abcdef123456", owner: "alice@example.com", state: "active" },
+          },
+    );
+    expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")?.owner).toBe(
+      test.expected ? undefined : "alice@example.com",
+    );
+    const usage = await routeCoordinatorRequest(
+      request("GET", "/v1/usage", { headers: { authorization: "Bearer synthetic-shared" } }),
+      env,
+      (incoming) => fleet.fetch(incoming),
+      { githubMembership: async () => {} },
+    );
+    expect(usage.status).toBe(200);
+    const report = await usage.json();
+    expect(report.usage.activeLeases).toBe(test.self + (test.expected ? 0 : 1));
+    expect(report.limits).not.toHaveProperty("sharedCapacityOverrideOwners");
+  });
+
   it("counts in-flight provider access reservations against active lease limits", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(

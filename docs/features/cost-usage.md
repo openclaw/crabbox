@@ -131,6 +131,8 @@ CRABBOX_CAPACITY_ADMIN_OWNERS        comma-separated owners with an elevated act
                                       use github:<numeric-id> for GitHub users
 CRABBOX_DEPLOYMENT_CAPACITY_ADMIN_OWNERS
                                       additional capacity admins managed in deployment config
+CRABBOX_SHARED_CAPACITY_OVERRIDE_OWNERS
+                                      capacity admins exempt from fleet and org active caps
 CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN
                                       per-owner active lease cap for capacity admins
 CRABBOX_MAX_MONTHLY_USD              fleet-wide monthly reserved-USD budget
@@ -142,6 +144,15 @@ CRABBOX_DEFAULT_ORG                  org assigned when no org header is present
 Capacity membership combines both owner lists case-insensitively. Deployment
 configuration can add members without replacing a secret-backed owner list.
 Capacity membership does not grant administrative API access.
+
+A member of `CRABBOX_SHARED_CAPACITY_OVERRIDE_OWNERS` bypasses fleet and org
+active-lease caps only when that owner also belongs to the combined capacity-admin
+list and the admin owner limit is positive. Membership uses the same case-insensitive
+normalization. This explicit override leaves the owner cap, all monthly budgets,
+authentication, and usage accounting unchanged. Other capacity admins still share
+the fleet and org caps. Production enables this override for its configured deployment
+admin; preview does not enable it. Capacity reports the caller's effective shared
+limits as `null` while retaining the real aggregate counts.
 
 Monthly budget checks add the candidate lease's `reservedUSD` to the month's existing
 reserved total for the relevant scope. Live managed leases keep reserving budget after

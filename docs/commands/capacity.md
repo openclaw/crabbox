@@ -46,9 +46,10 @@ an active-lease admission decision:
 }
 ```
 
-`fleet.limit` and `org.limit` are `null` when their configured limit is zero
-(unlimited). The original `effectiveLimit: 0` retains its meaning of an unlimited
-owner limit for compatibility; text prints `unlimited` for every unlimited limit.
+`fleet.limit` and `org.limit` are `null` when the caller's effective shared limit is
+unlimited. This applies when the configured limit is zero or an eligible capacity
+admin has the explicit shared-capacity override. The original `effectiveLimit: 0`
+retains its meaning of an unlimited owner limit for compatibility; text prints `unlimited` for every unlimited limit.
 `org.key` is the authenticated org's display label. Older coordinators that omit
 the new fields still render an owner line and snapshot metadata, with no admission
 decision; their JSON remains unchanged.
@@ -60,6 +61,9 @@ The selected limit uses the existing capacity-owner policy, independently of
 admin authentication. A positive elevated limit for a configured member selects
 the larger of ordinary and elevated limits, including when the ordinary limit
 is zero. The response does not expose membership or the underlying limit config.
+An explicitly configured shared-capacity override requires capacity-admin membership
+and a positive admin owner limit. It bypasses fleet and org active caps for that owner
+only; the owner limit and monthly budgets still apply. Aggregate counts remain real.
 
 `activeLeases` counts existing admission entries only, with no candidate added.
 The fleet dimension counts all owners; the org dimension counts all owners in

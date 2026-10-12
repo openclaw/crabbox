@@ -509,7 +509,7 @@ import {
 } from "./types";
 import {
   activeLeaseLimitBlocker,
-  activeLeaseLimitForOwner,
+  activeLeaseLimitsForOwner,
   addLeaseToCostLimitUsage,
   costLimits,
   createCostLimitUsage,
@@ -16139,17 +16139,18 @@ export class FleetCoordinator {
       await this.readProviderAccessRecords(now.getTime()),
     );
     const limits = costLimits(this.env);
-    const blockedBy = activeLeaseLimitBlocker(costUsage, owner, limits);
+    const activeLimits = activeLeaseLimitsForOwner(limits, owner);
+    const blockedBy = activeLeaseLimitBlocker(costUsage, activeLimits);
     const capacity: OwnerCapacity = {
       owner,
       activeLeases: costUsage.ownerActiveLeases,
-      effectiveLimit: activeLeaseLimitForOwner(limits, owner),
+      effectiveLimit: activeLimits.owner,
       observedAt: now.toISOString(),
-      fleet: { activeLeases: costUsage.activeLeases, limit: limits.maxActiveLeases || null },
+      fleet: { activeLeases: costUsage.activeLeases, limit: activeLimits.fleet || null },
       org: {
         key: orgLabelForDisplay(org),
         activeLeases: costUsage.orgActiveLeases,
-        limit: limits.maxActiveLeasesPerOrg || null,
+        limit: activeLimits.org || null,
       },
       admissible: blockedBy === null,
       blockedBy,
@@ -16178,7 +16179,10 @@ export class FleetCoordinator {
       : requestOrg(request, this.env);
     const usage = createUsageSummary({ scope, owner, month, ...(org ? { org } : {}) }, new Date());
     await this.visitLeaseRecords((lease) => usage.add(lease));
-    return json({ usage: usage.finish(), limits: costLimits(this.env) });
+    return json({
+      usage: usage.finish(),
+      limits: { ...costLimits(this.env), sharedCapacityOverrideOwners: undefined },
+    });
   }
 
   private marketplaceStatus(request: Request): Response {
