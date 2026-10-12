@@ -114,6 +114,7 @@ describe("wrangler config", () => {
     const observability = wranglerConfig.match(/"observability"\s*:\s*\{([^}]*)\}/)?.[1] ?? "";
     expect(observability).toMatch(/"enabled"\s*:\s*true/);
     expect(observability).toMatch(/"head_sampling_rate"\s*:\s*1\s*,/);
+    expect(observability).toMatch(/"redact_query_string"\s*:\s*true/);
   });
 });
 

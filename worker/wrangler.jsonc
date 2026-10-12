@@ -19,6 +19,8 @@
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1,
+    // OAuth callbacks carry authorization codes in the query string; keep them out of retained logs.
+    "redact_query_string": true,
   },
   "triggers": {
     "crons": ["*/15 * * * *"],

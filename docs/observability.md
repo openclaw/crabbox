@@ -528,9 +528,11 @@ comparing CLI output to Worker logs. See [How it works](how-it-works.md) and the
 The Cloudflare coordinator enables Workers Logs in `worker/wrangler.jsonc` with
 full head sampling, so every Worker request, Durable Object request, alarm, and
 `console` line is retained for seven days and searchable in the Cloudflare
-dashboard or the Workers Logs query API. Durable Object dispatch failures log one
-JSON line with `event: "coordinator.durable_object_failure"`, the failure kind,
-method, and pathname. `wrangler tail` streams only Worker invocations, so use
+dashboard or the Workers Logs query API. Query strings are redacted from logged
+request URLs because OAuth callbacks carry authorization codes there. Durable
+Object dispatch failures log one JSON line with
+`event: "coordinator.durable_object_failure"`, the failure kind, method, and
+pathname. `wrangler tail` streams only Worker invocations, so use
 Workers Logs for alarm cadence and Durable Object console output. Running log
 queries through the API (`POST /accounts/{account_id}/workers/observability/telemetry/query`)
 needs a dedicated token with the account-level Workers Observability Write
