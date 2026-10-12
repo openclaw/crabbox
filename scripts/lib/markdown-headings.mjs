@@ -32,8 +32,9 @@ export function scanSiteMarkdownLines(markdown) {
     }
     const heading = line.match(/^(#{1,4})\s+(.+)$/);
     if (heading) {
-      const text = heading[2].trim();
-      const base = siteHeadingSlug(text);
+      const explicit = heading[2].match(/\s+\{#([a-z0-9][a-z0-9-]*)\}$/);
+      const text = (explicit ? heading[2].slice(0, explicit.index) : heading[2]).trim();
+      const base = explicit ? explicit[1] : siteHeadingSlug(text);
       return { line, kind: "heading", level: heading[1].length, text, id: base ? reserveHeadingAnchor(anchors, base) : base };
     }
     return { line, kind: "text" };

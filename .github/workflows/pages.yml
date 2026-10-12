@@ -9,6 +9,8 @@ on:
       - "skills/**"
       - "scripts/build-docs-site.mjs"
       - "scripts/enhance-docs-site.mjs"
+      - "scripts/check-docs-i18n.mjs"
+      - "scripts/lib/**"
       - "scripts/normalize-provider-counts.mjs"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
@@ -38,6 +40,7 @@ jobs:
 
       - name: Build site
         run: |
+          node scripts/check-docs-i18n.mjs
           node scripts/build-docs-site.mjs
           node scripts/enhance-docs-site.mjs
           node scripts/normalize-provider-counts.mjs

@@ -133,3 +133,5 @@ same heading identities the renderer emits; examples and comments do not reserve
 anchors. Keep published heading IDs stable. Repository-only Markdown targets
 retain the checker's separate existing GitHub-oriented anchor rules, not a claim
 of complete GitHub Markdown support.
+
+See [Translating the Documentation](translations.md) to add or refresh a language.

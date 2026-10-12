@@ -1,0 +1,8 @@
+{
+  "keep": ["Crabbox", "GitHub", "Homebrew", "Linux", "macOS", "Windows", "WSL2", "Apple Silicon", "Apple VM", "AWS", "EC2", "Azure", "Google Cloud", "GCP", "Hetzner", "Cloudflare", "Durable Object", "Node.js", "PostgreSQL", "pg-boss", "Docker", "Podman", "VNC", "WebVNC", "VS Code", "Code", "Zed", "Tailscale", "PowerShell", "Git", "SSH", "rsync", "JUnit", "MCP", "GPU", "CUDA", "MIT", "OAuth", "JWT", "Proxmox", "XCP-ng", "Incus", "KubeVirt", "Firecracker", "Parallels", "Local Container", "Daytona", "External", "Namespace Devbox", "Semaphore", "Sprites", "exe.dev", "RunPod", "Railway", "Blacksmith", "Testbox", "E2B", "Modal", "Islo", "Tensorlake", "Upstash Box", "Azure Dynamic Sessions", "W&B", "Multipass", "Windows Sandbox", "TigerVNC", "XFCE", "Wayland", "GNOME", "code-server", "FleetCoordinator"],
+  "rules": [
+    "Keep product and provider names exactly as written in English.",
+    "Keep fenced code (including comments), inline code, commands, flags, paths, identifiers and URL/link destinations byte-identical.",
+    "Translate prose, link labels and headings. Keep explicit English heading IDs stable."
+  ]
+}

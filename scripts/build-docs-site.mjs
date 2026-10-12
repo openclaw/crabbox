@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { scanSiteMarkdownLines } from "./lib/markdown-headings.mjs";
+import { locales, loadTranslations, localizeHTML, sourceHash } from "./lib/docs-i18n.mjs";
 
 const root = process.cwd();
 const docsDir = path.join(root, "docs");
@@ -90,6 +91,7 @@ const sections = [
       "use-cases.md",
       "pricing.md",
       "how-it-works.md",
+      "concepts.md",
       "architecture.md",
       "orchestrator.md",
       "cli.md",
@@ -115,6 +117,12 @@ const pages = allMarkdown(docsDir).map((file) => {
   return { file, rel, title, outRel: outPath(rel), markdown };
 });
 
+const translations = loadTranslations(root, pages);
+const siteMessages = new Map(Object.keys(locales).filter((locale) => locale !== "en").map((locale) => {
+  const file = path.join(docsDir, ".i18n", locale, "site.json");
+  return [locale, fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : { messages: {} }];
+}));
+const siteSourceHash = sourceHash(fs.readFileSync(new URL(import.meta.url)));
 const pageMap = new Map(pages.map((page) => [page.rel, page]));
 const nav = sections
   .map(([name, rels]) => ({
@@ -127,16 +135,62 @@ const sectionByRel = new Map();
 for (const section of nav) for (const page of section.pages) sectionByRel.set(page.rel, section.name);
 const orderedPages = nav.flatMap((s) => s.pages);
 
-for (const page of pages) {
-  const html = markdownToHtml(page.markdown, page.rel);
-  const toc = tocFromHtml(html);
-  const idx = orderedPages.findIndex((p) => p.rel === page.rel);
-  const prev = idx > 0 ? orderedPages[idx - 1] : null;
-  const next = idx >= 0 && idx < orderedPages.length - 1 ? orderedPages[idx + 1] : null;
-  const sectionName = sectionByRel.get(page.rel) || "Crabbox docs";
-  const pageOut = path.join(outDir, page.outRel);
-  fs.mkdirSync(path.dirname(pageOut), { recursive: true });
-  fs.writeFileSync(pageOut, layout({ page, html, toc, prev, next, sectionName }), "utf8");
+for (const original of pages) {
+  for (const locale of Object.keys(locales)) {
+    const translation = translations.get(`${locale}/${original.rel}`);
+    if (locale !== "en" && !translation) continue;
+    const page = { ...original, locale, translation };
+    if (translation) {
+      page.markdown = translation.markdown;
+      page.title = firstHeading(page.markdown)?.replace(/\s+\{#[^}]+\}$/, "") || original.title;
+    }
+    const html = markdownToHtml(page.markdown, page.rel);
+    const toc = tocFromHtml(html);
+    const idx = orderedPages.findIndex((p) => p.rel === page.rel);
+    const prev = idx > 0 ? orderedPages[idx - 1] : null;
+    const next = idx >= 0 && idx < orderedPages.length - 1 ? orderedPages[idx + 1] : null;
+    const sectionName = sectionByRel.get(page.rel) || "Crabbox docs";
+    const pageOut = path.join(outDir, localizedPath(page.outRel, locale));
+    fs.mkdirSync(path.dirname(pageOut), { recursive: true });
+    let output = layout({ page, html, toc, prev, next, sectionName });
+    if (locale !== "en") {
+      output = localizeHTML(output, siteMessages.get(locale).messages);
+      output = routeLocaleLinks(output, page);
+    }
+    fs.writeFileSync(pageOut, output, "utf8");
+  }
+}
+
+function localizedPath(outRel, locale) {
+  return locale === "en" ? outRel : `${locale}/${outRel}`;
+}
+
+function routeLocaleLinks(html, page) {
+  const byOutput = new Map(pages.map((entry) => [entry.outRel, entry]));
+  const from = path.posix.dirname(localizedPath(page.outRel, page.locale));
+  return html.replace(/\b(href|src)="([^"#]+)(#[^"]*)?"/g, (match, attr, href, hash = "") => {
+    if (/^(?:[a-z]+:|\/)/i.test(href)) return match;
+    const target = path.posix.normalize(path.posix.join(path.posix.dirname(page.outRel), href));
+    const linkedPage = byOutput.get(target);
+    const translated = linkedPage && translations.has(`${page.locale}/${linkedPage.rel}`);
+    const destination = translated ? localizedPath(target, page.locale) : target;
+    return `${attr}="${escapeAttr(path.posix.relative(from, destination))}${hash}"`;
+  });
+}
+
+function languageLinks(page) {
+  const links = Object.entries(locales).map(([locale, label]) => {
+    const available = locale === "en" || translations.has(`${locale}/${page.rel}`);
+    const actual = available ? locale : "en";
+    return `<a href="${pageUrl(docsOrigin(), localizedPath(page.outRel, actual))}" hreflang="${actual}" lang="${locale}"${page.locale === locale ? ' aria-current="page"' : ""}>${label}${available ? "" : " (English)"}</a>`;
+  }).join("");
+  return `<details class="language-switcher"><summary>${locales[page.locale]}</summary><nav aria-label="Language">${links}</nav></details>`;
+}
+
+function alternateLinks(page) {
+  return Object.keys(locales).filter((locale) => locale === "en" || translations.has(`${locale}/${page.rel}`))
+    .map((locale) => `<link rel="alternate" hreflang="${locale}" href="${pageUrl(docsOrigin(), localizedPath(page.outRel, locale))}">`).join("\n  ")
+    + `\n  <link rel="alternate" hreflang="x-default" href="${pageUrl(docsOrigin(), page.outRel)}">`;
 }
 
 fs.writeFileSync(path.join(outDir, "crabbox.svg"), crabSvg(), "utf8");
@@ -342,7 +396,7 @@ function allMarkdown(dir) {
     .readdirSync(dir, { withFileTypes: true })
     .flatMap((entry) => {
       const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) return allMarkdown(full);
+      if (entry.isDirectory()) return entry.name.startsWith(".") ? [] : allMarkdown(full);
       return entry.name.endsWith(".md") ? [full] : [];
     })
     .sort();
@@ -596,13 +650,16 @@ function layout({ page, html, toc, prev, next, sectionName }) {
   const editUrl = `${repoEditBase}/${page.rel}`;
   const isHome = page.rel === "README.md";
   const isProviderIndex = page.rel === "providers/README.md";
+  const messages = siteMessages.get(page.locale)?.messages || {};
   const documentTitle = isHome
     ? "Crabbox — On-demand Computers for Agents"
-    : `${page.title} - Crabbox Docs`;
+    : `${page.title} - ${messages["Crabbox Docs"] || "Crabbox Docs"}`;
   const metaDescription = isHome
     ? "Give coding agents on-demand computers for tests and builds. Keep editing locally, run on Linux, macOS, Windows or WSL2, and stream results back."
-    : `${page.title} documentation for Crabbox remote execution.`;
-  const canonicalUrl = pageUrl(docsOrigin(), page.outRel);
+    : page.locale === "en" ? `${page.title} documentation for Crabbox remote execution.` : `${page.title} — ${messages["Crabbox remote execution documentation."]}`;
+  const canonicalUrl = pageUrl(docsOrigin(), localizedPath(page.outRel, page.locale));
+  const stale = page.translation && (page.translation.stale || siteMessages.get(page.locale).sourceHash !== siteSourceHash);
+  const notice = stale ? `<aside class="translation-notice" role="note">${escapeHtml(siteMessages.get(page.locale).outdated || "This translation may be outdated.")} <a href="${pageUrl(docsOrigin(), page.outRel)}" lang="en">English</a></aside>` : "";
   const prevNext = !isHome && (prev || next) ? pageNavHtml(prev, next, rootPrefix) : "";
   const heroBlock = isHome ? landingHero(rootPrefix) : standardHero(page, sectionName, editUrl);
   const articleClass = isProviderIndex ? "doc doc-wide" : "doc";
@@ -614,7 +671,7 @@ function layout({ page, html, toc, prev, next, sectionName }) {
         ${tocBlock}
       </div>`;
   return `<!doctype html>
-<html lang="en">
+<html lang="${page.locale}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -623,6 +680,7 @@ function layout({ page, html, toc, prev, next, sectionName }) {
   <title>${escapeHtml(documentTitle)}</title>
   <meta name="description" content="${escapeAttr(metaDescription)}">
   <link rel="canonical" href="${escapeAttr(canonicalUrl)}">
+  ${alternateLinks(page)}
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Crabbox">
   <meta property="og:title" content="${escapeAttr(documentTitle)}">
@@ -650,6 +708,7 @@ function layout({ page, html, toc, prev, next, sectionName }) {
           <span><strong>Crabbox</strong><small>Execution control plane</small></span>
         </a>
         ${themeToggleHtml()}
+        ${languageLinks(page)}
       </div>
       <label class="search"><span>Search docs</span><input id="doc-search" name="docs-search" type="search" autocomplete="off" spellcheck="false" placeholder="Provider, command, topic…"></label>
       <nav class="sidebar-nav" aria-label="Documentation">${navHtml(page.rel, rootPrefix)}</nav>
@@ -657,11 +716,12 @@ function layout({ page, html, toc, prev, next, sectionName }) {
       <div class="sidebar-foot"><a href="https://github.com/openclaw/crabbox" rel="noopener">GitHub repository</a></div>
     </aside>
     <main id="main-content" tabindex="-1">
+      ${notice}
       ${heroBlock}
       ${articleBlock}
     </main>
   </div>
-  <script>${js()}</script>
+  <script>${js(messages)}</script>
 </body>
 </html>`;
 }
@@ -947,6 +1007,8 @@ function themeToggleHtml() {
 
 function css() {
   return `
+.sidebar-head{flex-wrap:wrap}.language-switcher{position:relative;margin-left:auto;font-size:.8rem}.language-switcher summary{cursor:pointer}.language-switcher nav{display:grid;gap:8px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--paper);position:absolute;right:0;top:100%;z-index:20;min-width:170px}.language-switcher a{color:var(--ink);white-space:nowrap}.language-switcher [aria-current]{font-weight:700}.translation-notice{padding:16px;border:1px solid var(--coral);border-radius:8px;margin-bottom:24px;background:var(--panel);color:var(--ink)}
+
 :root{color-scheme:light;--ink:#1d2023;--muted:#5c646a;--shell:#f6f6f4;--paper:#fff;--reef:#0b6e69;--coral:#b4432e;--ochre:#a66d0a;--line:#dcdfe0;--line-soft:#eaeced;--panel:#fff;--sidebar:#f6f6f4;--body-soft:#454b50;--code-bg:#161a1c;--code-fg:#f4f1ea;--code-border:#0f1214;--code-comment:#97a2a3;--code-scroll:#50575b;--inline-bg:#eef1f1;--inline-border:#dde2e2;--nav-active-bg:#f9e9e5;--nav-active-fg:#8a3122;--quote-bg:#eef5f4;--focus:#0b6e69;--console-line:rgba(255,255,255,.08);--console-raised:rgba(255,255,255,.04);--mint:#7dd3c7;--r-s:6px;--r-m:12px;--r-l:18px;--shadow:0 1px 2px rgba(20,24,28,.04),0 12px 32px -16px rgba(20,24,28,.18)}
 :root[data-theme="dark"]{color-scheme:dark;--ink:#f1eee8;--muted:#a3abae;--shell:#141618;--paper:#1c1f22;--reef:#5fc6bb;--coral:#ff8b78;--ochre:#efc15b;--line:#2d3236;--line-soft:#25292c;--panel:#1c1f22;--sidebar:#141618;--body-soft:#c3c8c8;--code-bg:#0f1214;--code-fg:#f1eee8;--code-border:#2a2f33;--code-comment:#8d9999;--code-scroll:#4e565a;--inline-bg:#262b2e;--inline-border:#353b3f;--nav-active-bg:#3d2622;--nav-active-fg:#ffb3a5;--quote-bg:#1a2c2b;--focus:#5fc6bb;--console-line:rgba(255,255,255,.08);--console-raised:rgba(255,255,255,.035);--shadow:0 1px 2px rgba(0,0,0,.2),0 12px 32px -16px rgba(0,0,0,.5)}
 *{box-sizing:border-box}
@@ -1345,8 +1407,13 @@ main{min-width:0;padding:28px 48px 80px;max-width:1280px;margin:0 auto;width:100
 `;
 }
 
-function js() {
+function js(messages = {}) {
+  const keys = ["Switch to light mode", "Switch to dark mode", "Close navigation", "Open navigation", "Copy code", "Copy", "Copied", "Failed", "Copy failed"];
+  const clientMessages = Object.fromEntries(keys.filter((key) => messages[key]).map((key) => [key, messages[key]]));
   return `
+const docsMessages=${JSON.stringify(clientMessages).replaceAll("<", "\\u003c")};
+const ui=(text)=>docsMessages[text]||text;
+
 const themeRoot=document.documentElement;
 function storedDocsTheme(){try{return localStorage.getItem('crabbox-docs-theme')}catch(e){return null}}
 function applyDocsTheme(mode){
@@ -1355,7 +1422,7 @@ function applyDocsTheme(mode){
   if(themeColor)themeColor.content=mode==='dark'?'#17191b':'#f4f5f5';
   document.querySelectorAll('[data-theme-toggle]').forEach((button)=>{
     button.setAttribute('aria-pressed',mode==='dark'?'true':'false');
-    button.setAttribute('aria-label',mode==='dark'?'Switch to light mode':'Switch to dark mode');
+    button.setAttribute('aria-label',mode==='dark'?ui('Switch to light mode'):ui('Switch to dark mode'));
   });
 }
 applyDocsTheme(themeRoot.dataset.theme==='dark'?'dark':'light');
@@ -1385,7 +1452,7 @@ function setSidebarOpen(open,{focus=false,restore=false}={}){
   open=mobile&&open;
   sidebar.classList.toggle('open',open);
   toggle.setAttribute('aria-expanded',open?'true':'false');
-  toggle.setAttribute('aria-label',open?'Close navigation':'Open navigation');
+  toggle.setAttribute('aria-label',open?ui('Close navigation'):ui('Open navigation'));
   document.body.classList.toggle('nav-open',open);
   if(backdrop){backdrop.hidden=!open;backdrop.setAttribute('aria-hidden',open?'false':'true')}
   if(mobile){
@@ -1532,7 +1599,7 @@ if(homeJobFinder){
   });
 }
 
-document.querySelectorAll('.doc pre,[data-copyable]').forEach(pre=>{const btn=document.createElement('button');const copyLabel=pre.dataset.copyLabel||'Copy code';btn.type='button';btn.className='copy';btn.setAttribute('aria-live','polite');btn.setAttribute('aria-label',copyLabel);btn.textContent='Copy';btn.addEventListener('click',async()=>{const code=pre.dataset.copyText??pre.querySelector('code')?.textContent??'';try{await navigator.clipboard.writeText(code);btn.textContent='Copied';btn.setAttribute('aria-label','Copied');btn.classList.add('copied');setTimeout(()=>{btn.textContent='Copy';btn.setAttribute('aria-label',copyLabel);btn.classList.remove('copied')},1400)}catch{btn.textContent='Failed';btn.setAttribute('aria-label','Copy failed');setTimeout(()=>{btn.textContent='Copy';btn.setAttribute('aria-label',copyLabel)},1400)}});pre.appendChild(btn)});
+document.querySelectorAll('.doc pre,[data-copyable]').forEach(pre=>{const btn=document.createElement('button');const copyLabel=pre.dataset.copyLabel||ui('Copy code');btn.type='button';btn.className='copy';btn.setAttribute('aria-live','polite');btn.setAttribute('aria-label',copyLabel);btn.textContent=ui('Copy');btn.addEventListener('click',async()=>{const code=pre.dataset.copyText??pre.querySelector('code')?.textContent??'';try{await navigator.clipboard.writeText(code);btn.textContent=ui('Copied');btn.setAttribute('aria-label',ui('Copied'));btn.classList.add('copied');setTimeout(()=>{btn.textContent=ui('Copy');btn.setAttribute('aria-label',copyLabel);btn.classList.remove('copied')},1400)}catch{btn.textContent=ui('Failed');btn.setAttribute('aria-label',ui('Copy failed'));setTimeout(()=>{btn.textContent=ui('Copy');btn.setAttribute('aria-label',copyLabel)},1400)}});pre.appendChild(btn)});
 
 const tocLinks=document.querySelectorAll('.toc a');
 if(tocLinks.length){const map=new Map();tocLinks.forEach(a=>{const id=a.getAttribute('href').slice(1);const el=document.getElementById(id);if(el)map.set(el,a)});const setActive=l=>{tocLinks.forEach(x=>x.classList.remove('active'));l.classList.add('active')};const obs=new IntersectionObserver(entries=>{const visible=entries.filter(e=>e.isIntersecting).sort((a,b)=>a.boundingClientRect.top-b.boundingClientRect.top);if(visible.length){const link=map.get(visible[0].target);if(link)setActive(link)}},{rootMargin:'-15% 0px -65% 0px',threshold:0});map.forEach((_,el)=>obs.observe(el))}

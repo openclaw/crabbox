@@ -51,7 +51,7 @@ function walk(dir) {
     .readdirSync(dir, { withFileTypes: true })
     .flatMap((entry) => {
       const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) return walk(full);
+      if (entry.isDirectory()) return entry.name === ".i18n" ? [] : walk(full);
       return entry.name.endsWith(".md") ? [full] : [];
     })
     .sort();

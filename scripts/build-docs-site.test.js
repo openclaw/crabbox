@@ -4,6 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
+import { locales, pilotPages, localizeHTML } from "./lib/docs-i18n.mjs";
 
 import { markdownToHtml, readAgentSkills } from "./build-docs-site.mjs";
 
@@ -14,6 +16,64 @@ const useCasesFile = path.join(repoRoot, "docs", "use-cases.md");
 const siteDir = path.join(repoRoot, "dist", "docs-site");
 // Importing the builder generates the site before these tests register.
 const generatedTest = test;
+
+generatedTest("landing catalogs cover visible English copy without translating provider names or code", () => {
+  const english = readGenerated("index.html").match(/<main\b[^>]*>([\s\S]*?)<\/main>/)[1];
+  const products = [...english.matchAll(/<a data-home-provider="[^"]+"[^>]*>([^<]+)<\/a>/g)].map((match) => match[1]);
+  const keep = new Set([...products, "GitHub", "Linux", "macOS", "Windows", "WSL2", "Linux, Windows, WSL2, macOS"]);
+  const chunks = (html) => html.split(/(<pre\b[\s\S]*?<\/pre>|<code\b[\s\S]*?<\/code>|<[^>]+>)/g)
+    .map((part) => part.trim()).filter((part) => !part.startsWith("<") && /[A-Za-z]/.test(part));
+  const source = new Set(chunks(english));
+  for (const locale of Object.keys(locales).filter((lang) => lang !== "en")) {
+    const catalog = JSON.parse(fs.readFileSync(path.join(repoRoot, "docs/.i18n", locale, "site.json"), "utf8"));
+    const untranslated = chunks(localizeHTML(english, catalog.messages)).filter((text) => source.has(text) && !keep.has(text));
+    assert.deepEqual(untranslated, [], `${locale} landing text is untranslated`);
+  }
+});
+
+generatedTest("translation pilot has language metadata, reciprocal alternates, routing and English fallback", () => {
+  for (const locale of Object.keys(locales).filter((lang) => lang !== "en")) {
+    for (const source of pilotPages) {
+      const output = source === "README.md" ? "index.html" : source.replace(/\.md$/, ".html");
+      const translated = readGenerated(`${locale}/${output}`);
+      const english = readGenerated(output);
+      assert.match(translated, new RegExp(`<html lang="${locale}">`));
+      const canonical = `https://crabbox.sh/${locale}/${output === "index.html" ? "" : output}`;
+      assert.ok(translated.includes(`<link rel="canonical" href="${canonical}">`));
+      assert.ok(english.includes(`hreflang="${locale}" href="${canonical}"`));
+      assert.ok(translated.includes('hreflang="x-default"'));
+      assert.ok(translated.includes('href="../security.html"'), "untranslated navigation points to English");
+      assert.ok(translated.includes('href="getting-started.html"'), "translated navigation stays in the locale");
+      assert.doesNotMatch(translated, /class="translation-notice"/);
+    }
+    const home = readGenerated(`${locale}/index.html`);
+    assert.doesNotMatch(home, /<h1>On-demand computers/);
+    assert.ok(home.includes('href="use-cases.html#fan-out-parallel-experiments"'));
+    const start = readGenerated(`${locale}/getting-started.html`);
+    assert.ok(start.includes('id="choosing-an-access-path"'), "translated headings retain English link identities");
+    const fallback = readGenerated("security.html");
+    assert.ok(fallback.includes(`lang="${locale}">${locales[locale]} (English)</a>`));
+    assert.ok(!fs.existsSync(path.join(siteDir, locale, "security.html")), "fallback does not pretend English is translated");
+  }
+});
+
+generatedTest("English changes do not block a build and stale translations link to the original", () => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cbx-i18n-build-"));
+  try {
+    for (const dir of ["docs", "scripts", "skills"]) {
+      fs.cpSync(path.join(repoRoot, dir), path.join(fixtureRoot, dir), { recursive: true });
+    }
+    fs.appendFileSync(path.join(fixtureRoot, "docs/getting-started.md"), '\n## New guidance\n\n```sh\ncrabbox --help\n```\n');
+    const build = spawnSync(process.execPath, [path.join(fixtureRoot, "scripts/build-docs-site.mjs")], { cwd: fixtureRoot, encoding: "utf8" });
+    assert.equal(build.status, 0, build.stderr);
+    const translated = fs.readFileSync(path.join(fixtureRoot, "dist/docs-site/fr/getting-started.html"), "utf8");
+    assert.match(translated, /class="translation-notice"/);
+    assert.match(translated, /href="https:\/\/crabbox.sh\/getting-started.html" lang="en">English/);
+    const check = spawnSync(process.execPath, [path.join(fixtureRoot, "scripts/check-docs-i18n.mjs")], { cwd: fixtureRoot, encoding: "utf8" });
+    assert.equal(check.status, 0, check.stderr);
+    assert.match(check.stdout, /stale: docs\/\.i18n\/fr\/getting-started.md/);
+  } finally { fs.rmSync(fixtureRoot, { recursive: true, force: true }); }
+});
 
 const providerMarkdown = fs
   .readdirSync(providersDir)
@@ -207,7 +267,7 @@ generatedTest("generated AWS page is active in Providers navigation and pager", 
   const html = readGenerated("providers/aws.html");
 
   assert.match(html, /<p class="eyebrow">Providers<\/p>/);
-  assert.equal(occurrences(html, 'aria-current="page"'), 1);
+  assert.equal(occurrences(navSection(html, "Providers"), 'aria-current="page"'), 1);
   assert.match(
     html,
     /<a class="nav-link active" href="\.\.\/providers\/aws\.html"[^>]*aria-current="page">AWS Provider<\/a>/,
