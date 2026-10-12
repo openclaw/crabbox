@@ -14,6 +14,7 @@
 
 ### Fixes
 
+- Coordinator: prevent the portal from exhausting coordinator memory when many external runner records are stored by bounding reads and pruning old stale records.
 - Sync: explain incomplete shallow sources and Git overlay conflicts during local Git seeding, with actionable configuration fixes. [PR 2662](https://github.com/openclaw/crabbox/pull/2662). Thanks @shunkakinoki.
 - CLI: resolve explicit provider, target, Windows mode, architecture, OS, class, and type flags before validating inherited configuration, preserving unrelated defaults and recorded-lease identity checks. [PR 2767](https://github.com/openclaw/crabbox/pull/2767).
 - Jobs: apply a selected job's provider and platform selectors before validating inherited defaults, including dry runs and existing-lease reuse. [PR 2767](https://github.com/openclaw/crabbox/pull/2767).

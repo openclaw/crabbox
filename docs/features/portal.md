@@ -159,7 +159,10 @@ kinds:
   badges, inferred GitHub Actions run/workflow links, `stuck` markers for
   long-queued or long-running Actions, a copyable local stop command, and
   `stale` markers when a previously visible runner no longer appears in the
-  next sync.
+  next sync. The portal selects at most 200 visible runners, preferring non-stale
+  rows and then the newest `updatedAt`. Runner detail links remain available
+  independently of this cap. Stale rows older than seven days since `updatedAt`
+  are pruned in bounded maintenance batches.
 - **Dedicated hosts** — when AWS credentials and a region are configured, admins
   see EC2 Mac Dedicated Host inventory as capacity rows. Normal users see only
   hosts attached to active leases already visible to them. Each visible row

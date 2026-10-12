@@ -563,6 +563,14 @@ const terminalRunPruneBatchSize = 16;
 const runtimeAdapterDeleteBatchSize = 16;
 const defaultTerminalRunRetentionDays = 30;
 const runPruneCursorKey = "maintenance:run-prune-cursor";
+const externalRunnerListLimit = 200;
+const externalRunnerRetentionMs = 7 * 24 * 60 * 60_000;
+const externalRunnerPruneIntervalMs = 60 * 60_000;
+const externalRunnerPruneKey = "maintenance:runner-prune";
+interface ExternalRunnerPruneProgress {
+  startAfter?: string;
+  nextAt: number;
+}
 const activeEgressSessionPrefix = "active-egress-session:";
 const replacedEgressSessionsPrefix = "replaced-egress-sessions:";
 const providerAccessReservationTTLMS = 15 * 60 * 1000;
@@ -3376,6 +3384,7 @@ export class FleetCoordinator {
     await this.maintainWorkspacePrewarm();
     await this.pruneTerminalWorkspaces();
     await this.pruneTerminalRuns();
+    await this.pruneExternalRunners();
     await this.maintainCheckpoints();
     await this.runAzureDeferredCleanups();
     await this.runAWSOrphanSweepIfDue("alarm");
@@ -9104,7 +9113,7 @@ export class FleetCoordinator {
       );
       return portalHome(
         leases.map(portalLeaseRecord),
-        runners.map(portalExternalRunnerRecord),
+        runners.runners.map(portalExternalRunnerRecord),
         request,
         this.attachPortalMacHostLeases(
           this.portalMacHostsVisibleToRequest(macHosts, hostLeases, request),
@@ -15961,23 +15970,18 @@ export class FleetCoordinator {
     const provider = url.searchParams.get("provider") ?? "";
     const status = url.searchParams.get("status") ?? "";
     const stale = url.searchParams.get("stale") ?? "";
-    const limit = clampLimit(url.searchParams.get("limit"), 100);
+    const limit = Math.min(clampLimit(url.searchParams.get("limit"), 100), externalRunnerListLimit);
+    const result = await this.visibleExternalRunners(
+      request,
+      limit,
+      (runner) =>
+        (!provider || runner.provider === provider) &&
+        (!status || runner.status === status) &&
+        (stale === "true" ? runner.stale === true : stale !== "false" || runner.stale !== true),
+    );
     return json({
-      runners: (await this.visibleExternalRunners(request))
-        .filter((runner) => !provider || runner.provider === provider)
-        .filter((runner) => !status || runner.status === status)
-        .filter((runner) => {
-          if (stale === "true") {
-            return runner.stale === true;
-          }
-          if (stale === "false") {
-            return runner.stale !== true;
-          }
-          return true;
-        })
-        .toSorted((a, b) => runnerSortTime(b).localeCompare(runnerSortTime(a)))
-        .slice(0, limit)
-        .map(publicExternalRunnerRecord),
+      runners: result.runners.map(publicExternalRunnerRecord),
+      ...(result.truncated ? { truncated: true } : {}),
     });
   }
 
@@ -15993,13 +15997,32 @@ export class FleetCoordinator {
     if (org === null) {
       return portalError("Invalid organization", "That organization identifier is invalid.", 400);
     }
-    const runner = (await this.visibleExternalRunners(request)).find(
-      (candidate) =>
-        candidate.provider === provider &&
-        candidate.id === runnerID &&
-        (!owner || candidate.owner === owner) &&
-        (!org || candidate.org === org),
-    );
+    const matches = (candidate: ExternalRunnerRecord) =>
+      candidate.provider === provider &&
+      candidate.id === runnerID &&
+      (!owner || candidate.owner === owner) &&
+      (!org || candidate.org === org) &&
+      (admin || (candidate.owner === owner && candidate.org === org));
+    let runner: ExternalRunnerRecord | undefined;
+    if (owner && org) {
+      const candidate = await this.state.storage.get<ExternalRunnerRecord>(
+        externalRunnerKey(provider, runnerID, owner, org),
+        { noCache: true },
+      );
+      if (candidate && matches(candidate)) runner = candidate;
+    }
+    // Older records can have noncanonical keys; unscoped admins also need a scan.
+    if (!runner) {
+      for await (const [, candidate] of coordinatorStorageEntries<ExternalRunnerRecord>(
+        this.state.storage,
+        { prefix: externalRunnerPrefix(), limit: storageRecordScanBatchSize, noCache: true },
+      )) {
+        if (matches(candidate)) {
+          runner = candidate;
+          break;
+        }
+      }
+    }
     if (!runner) {
       return portalError(
         "Runner not found",
@@ -16065,6 +16088,15 @@ export class FleetCoordinator {
       };
       delete runner.stale;
       synced.push(runner);
+    }
+    if (synced.length || stale.length) {
+      let progress =
+        await this.state.storage.get<ExternalRunnerPruneProgress>(externalRunnerPruneKey);
+      if (!progress) {
+        progress = { nextAt: Date.now() + externalRunnerPruneIntervalMs };
+        await this.state.storage.put(externalRunnerPruneKey, progress);
+      }
+      await this.armAlarmNoLaterThan(progress.nextAt);
     }
     let failed = false;
     let writeError: unknown;
@@ -18576,6 +18608,16 @@ export class FleetCoordinator {
     if (runPruneCursor !== undefined) {
       retainAlarm(now + 1000, "run-prune", runPruneCursor, now);
     }
+    const runnerPrune =
+      await this.state.storage.get<ExternalRunnerPruneProgress>(externalRunnerPruneKey);
+    if (runnerPrune) {
+      retainAlarm(
+        Math.max(now + 1, runnerPrune.nextAt),
+        "runner-prune",
+        runnerPrune.startAfter ?? externalRunnerPruneKey,
+        runnerPrune.nextAt,
+      );
+    }
     const finishedAt = Date.now();
     const dueThrough = finishedAt + maintenanceAlarmDueEpsilonMs;
     let earliest: (typeof candidates)[number] | undefined;
@@ -19904,19 +19946,65 @@ export class FleetCoordinator {
     await deleteStoragePrefix(this.state.storage, prefix);
   }
 
-  private async externalRunnerRecords(): Promise<ExternalRunnerRecord[]> {
-    const runners = await this.state.storage.list<ExternalRunnerRecord>({
+  private async pruneExternalRunners(): Promise<void> {
+    const now = Date.now();
+    const progress =
+      await this.state.storage.get<ExternalRunnerPruneProgress>(externalRunnerPruneKey);
+    if (progress && progress.nextAt > now) return;
+    const cutoff = now - externalRunnerRetentionMs;
+    const page = await this.state.storage.list<ExternalRunnerRecord>({
       prefix: externalRunnerPrefix(),
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+      ...(progress?.startAfter ? { startAfter: progress.startAfter } : {}),
     });
-    return [...runners.values()];
+    if (page.size === 0 && !progress?.startAfter) {
+      await this.state.storage.delete(externalRunnerPruneKey);
+      return;
+    }
+    for (const [key, runner] of page) {
+      if (runner.stale !== true || !(Date.parse(runner.updatedAt) < cutoff)) continue;
+      // Sync can revive a stale row after discovery; only delete the current stale version.
+      // oxlint-disable-next-line eslint/no-await-in-loop -- bounded page, with each deletion fenced against concurrent sync.
+      await this.state.storage.transaction(async (transaction) => {
+        const current = await transaction.get<ExternalRunnerRecord>(key, { noCache: true });
+        if (current?.stale === true && Date.parse(current.updatedAt) < cutoff) {
+          await transaction.delete(key);
+        }
+      });
+    }
+    const lastKey = [...page.keys()].at(-1);
+    await this.state.storage.put<ExternalRunnerPruneProgress>(
+      externalRunnerPruneKey,
+      lastKey && page.size === storageRecordScanBatchSize
+        ? { startAfter: lastKey, nextAt: now + 1000 }
+        : { nextAt: now + externalRunnerPruneIntervalMs },
+    );
   }
 
-  private async visibleExternalRunners(request: Request): Promise<ExternalRunnerRecord[]> {
-    const runners = await this.externalRunnerRecords();
+  private async visibleExternalRunners(
+    request: Request,
+    limit = externalRunnerListLimit,
+    accept: (runner: ExternalRunnerRecord) => boolean = () => true,
+  ): Promise<{ runners: ExternalRunnerRecord[]; truncated: boolean }> {
+    const runners: ExternalRunnerRecord[] = [];
+    let truncated = false;
     const admin = isAdminRequest(request);
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
-    return runners.filter((runner) => admin || (runner.owner === owner && runner.org === org));
+    for await (const [, runner] of coordinatorStorageEntries<ExternalRunnerRecord>(
+      this.state.storage,
+      { prefix: externalRunnerPrefix(), limit: storageRecordScanBatchSize, noCache: true },
+    )) {
+      if ((!admin && (runner.owner !== owner || runner.org !== org)) || !accept(runner)) continue;
+      const index = runners.findIndex((other) => compareExternalRunners(runner, other) < 0);
+      runners.splice(index < 0 ? runners.length : index, 0, runner);
+      if (runners.length > limit) {
+        runners.pop();
+        truncated = true;
+      }
+    }
+    return { runners, truncated };
   }
 
   private async runEvents(runID: string, after = 0, limit = 500): Promise<RunEventRecord[]> {
@@ -25596,8 +25684,13 @@ function sanitizeRunnerTimestamp(value: string | undefined, now: Date): string |
   return date.toISOString();
 }
 
-function runnerSortTime(runner: ExternalRunnerRecord): string {
-  return runner.lastSeenAt || runner.updatedAt || runner.createdAt || runner.firstSeenAt;
+function compareExternalRunners(a: ExternalRunnerRecord, b: ExternalRunnerRecord): number {
+  return (
+    Number(a.stale === true) - Number(b.stale === true) ||
+    (b.updatedAt || b.lastSeenAt || b.createdAt || b.firstSeenAt).localeCompare(
+      a.updatedAt || a.lastSeenAt || a.createdAt || a.firstSeenAt,
+    )
+  );
 }
 
 function webVNCLeaseError(lease: LeaseRecord): string {

@@ -35917,6 +35917,246 @@ describe("fleet lease identity and idle", () => {
     await expect(idlePost.text()).resolves.toContain("No active Crabbox lease");
   });
 
+  it.each(["cloudflare", "shared"])(
+    "bounds visible external runner history before portal and API selection on %s",
+    async (runtime) => {
+      const storage = new ObservedMemoryStorage();
+      const fleet = runtime === "cloudflare" ? testFleet(storage) : testCoordinator(storage);
+      const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+      for (let index = 0; index < 600; index += 1) {
+        const id = `runner-${String(index).padStart(4, "0")}`;
+        storage.seed(`runner:${id}`, {
+          id,
+          provider: "blacksmith-testbox",
+          owner: index < 300 ? "alice@example.com" : "bob@example.com",
+          org: "example-org",
+          status: index < 270 ? "ready" : "missing",
+          stale: index >= 270,
+          firstSeenAt: "2026-01-01T00:00:00.000Z",
+          lastSeenAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+        } satisfies ExternalRunnerRecord);
+      }
+      const list = await fleet.fetch(request("GET", "/v1/runners?limit=500", { headers }));
+      expect(list.status).toBe(200);
+      const body = (await list.json()) as { runners: ExternalRunnerRecord[]; truncated?: boolean };
+      expect(body.truncated).toBe(true);
+      expect(body.runners.map((runner) => runner.id)).toEqual(
+        Array.from({ length: 200 }, (_, index) => `runner-${String(269 - index).padStart(4, "0")}`),
+      );
+
+      const home = await fleet.fetch(request("GET", "/portal", { headers }));
+      expect(home.status).toBe(200);
+      const html = await home.text();
+      expect(html.match(/class="external-row"/g)).toHaveLength(200);
+      expect(html).toContain("runner-0269");
+      expect(html).toContain("runner-0070");
+      expect(html).not.toContain("runner-0069");
+      expect(html).not.toContain("runner-0270");
+      expect(html).not.toContain("runner-0599");
+
+      const stale = await fleet.fetch(
+        request("GET", "/v1/runners?stale=true&status=missing&provider=blacksmith-testbox", {
+          headers,
+        }),
+      );
+      const staleBody = (await stale.json()) as {
+        runners: ExternalRunnerRecord[];
+        truncated?: boolean;
+      };
+      expect(staleBody.runners).toHaveLength(30);
+      expect(staleBody.runners[0]?.id).toBe("runner-0299");
+      expect(staleBody.truncated).toBeUndefined();
+      const empty = await fleet.fetch(
+        request("GET", "/v1/runners?provider=other-provider", { headers }),
+      );
+      expect(await empty.json()).toEqual({ runners: [] });
+      const defaultList = await fleet.fetch(request("GET", "/v1/runners", { headers }));
+      expect(
+        ((await defaultList.json()) as { runners: ExternalRunnerRecord[] }).runners,
+      ).toHaveLength(100);
+      const admin = await fleet.fetch(
+        request("GET", "/v1/runners?limit=1&stale=true", {
+          headers: { ...headers, "x-crabbox-admin": "true" },
+        }),
+      );
+      expect(await admin.json()).toMatchObject({
+        runners: [{ id: "runner-0599" }],
+        truncated: true,
+      });
+      const pages = storage.listOptions.filter((options) => options.prefix === "runner:");
+      expect(pages.length).toBeGreaterThan(5);
+      for (const page of pages) expect(page).toMatchObject({ limit: 128, noCache: true });
+    },
+  );
+
+  it.each(["cloudflare", "shared"])(
+    "gets external runners directly and stops legacy or unscoped scans early on %s",
+    async (runtime) => {
+      const storage = new ObservedMemoryStorage();
+      const fleet = runtime === "cloudflare" ? testFleet(storage) : testCoordinator(storage);
+      const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+      const runner: ExternalRunnerRecord = {
+        id: "old-runner",
+        provider: "blacksmith-testbox",
+        owner: "alice@example.com",
+        org: orgKeyForLabel("example-org"),
+        status: "missing",
+        stale: true,
+        firstSeenAt: "2026-01-01T00:00:00.000Z",
+        lastSeenAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      };
+      const key = `runner:${[runner.provider, runner.id, runner.org, runner.owner].map(encodeURIComponent).join(":")}`;
+      storage.seed(key, runner);
+      for (let index = 0; index < 300; index += 1) {
+        storage.seed(`runner:z-${index}`, {
+          ...runner,
+          id: `newer-${index}`,
+          stale: false,
+          updatedAt: "2026-10-01T00:00:00.000Z",
+        });
+      }
+      const get = vi.spyOn(storage, "get");
+      const detail = await fleet.fetch(
+        request("GET", "/portal/runners/blacksmith-testbox/old-runner", { headers }),
+      );
+      expect(detail.status).toBe(200);
+      expect(get).toHaveBeenCalledWith(key, { noCache: true });
+      expect(storage.listOptions.filter((options) => options.prefix === "runner:")).toEqual([]);
+
+      await storage.delete(key);
+      storage.seed("runner:000-legacy", runner);
+      const legacy = await fleet.fetch(
+        request("GET", "/portal/runners/blacksmith-testbox/old-runner", { headers }),
+      );
+      expect(legacy.status).toBe(200);
+      expect(storage.listOptions.filter((options) => options.prefix === "runner:")).toEqual([
+        { prefix: "runner:", limit: 128, noCache: true },
+      ]);
+      storage.resetListOptions();
+      const admin = await fleet.fetch(
+        request("GET", "/portal/runners/blacksmith-testbox/old-runner", {
+          headers: { "x-crabbox-admin": "true" },
+        }),
+      );
+      expect(admin.status).toBe(200);
+      expect(storage.listOptions.filter((options) => options.prefix === "runner:")).toHaveLength(1);
+      const hidden = await fleet.fetch(
+        request("GET", "/portal/runners/blacksmith-testbox/old-runner", {
+          headers: { ...headers, "x-crabbox-owner": "bob@example.com" },
+        }),
+      );
+      expect(hidden.status).toBe(404);
+    },
+  );
+
+  it.each(["cloudflare", "shared"])(
+    "prunes only old stale external runners in resumable uncached batches on %s",
+    async (runtime) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const storage = new ObservedMemoryStorage();
+        const fleet = runtime === "cloudflare" ? testFleet(storage) : testCoordinator(storage);
+        const cutoff = Date.now() - 7 * 24 * 60 * 60_000;
+        const runner: ExternalRunnerRecord = {
+          id: "old-runner",
+          provider: "blacksmith-testbox",
+          owner: "alice@example.com",
+          org: "example-org",
+          status: "missing",
+          stale: true,
+          firstSeenAt: new Date(cutoff - 1000).toISOString(),
+          lastSeenAt: new Date(cutoff - 1000).toISOString(),
+          updatedAt: new Date(cutoff - 1000).toISOString(),
+        };
+        for (let index = 0; index < 260; index += 1) {
+          storage.seed(`runner:${String(index).padStart(4, "0")}`, runner);
+        }
+        storage.seed("runner:z-active", { ...runner, stale: false });
+        storage.seed("runner:z-invalid", { ...runner, updatedAt: "invalid" });
+        storage.seed("runner:z-recent", { ...runner, updatedAt: new Date().toISOString() });
+        storage.seed("runner:z-cutoff", {
+          ...runner,
+          updatedAt: new Date(cutoff + 10_000).toISOString(),
+        });
+        await fleet.alarm();
+        expect(storage.value("runner:0000")).toBeUndefined();
+        expect(storage.value("runner:0127")).toBeUndefined();
+        expect(storage.value("runner:0128")).toBeDefined();
+        expect(storage.value("maintenance:runner-prune")).toMatchObject({
+          startAfter: "runner:0127",
+        });
+        expect(storage.alarm()).toBe(Date.now() + 1000);
+        vi.setSystemTime(storage.alarm()!);
+        await fleet.alarm();
+        expect(storage.value("runner:0255")).toBeUndefined();
+        expect(storage.value("runner:0256")).toBeDefined();
+        vi.setSystemTime(storage.alarm()!);
+        await fleet.alarm();
+        expect(storage.value("runner:0259")).toBeUndefined();
+        for (const key of [
+          "runner:z-active",
+          "runner:z-invalid",
+          "runner:z-recent",
+          "runner:z-cutoff",
+        ]) {
+          expect(storage.value(key)).toBeDefined();
+        }
+        expect(storage.value("maintenance:runner-prune")).toEqual({
+          nextAt: Date.now() + 60 * 60_000,
+        });
+        expect(storage.alarm()).toBe(Date.now() + 60 * 60_000);
+        expect(storage.listOptions.filter((options) => options.prefix === "runner:")).toEqual([
+          { prefix: "runner:", limit: 128, noCache: true },
+          { prefix: "runner:", limit: 128, noCache: true, startAfter: "runner:0127" },
+          { prefix: "runner:", limit: 128, noCache: true, startAfter: "runner:0255" },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("preserves an external runner revived after prune discovery and schedules sync-only maintenance", async () => {
+    const storage = new ObservedMemoryStorage();
+    const fleet = testFleet(storage);
+    const old = new Date(Date.now() - 8 * 24 * 60 * 60_000).toISOString();
+    const runner: ExternalRunnerRecord = {
+      id: "revived",
+      provider: "blacksmith-testbox",
+      owner: "alice@example.com",
+      org: "example-org",
+      status: "missing",
+      stale: true,
+      firstSeenAt: old,
+      lastSeenAt: old,
+      updatedAt: old,
+    };
+    storage.seed("runner:revived", runner);
+    const original = storage.list.bind(storage);
+    vi.spyOn(storage, "list").mockImplementation(async (options) => {
+      const page = await original(options);
+      if (options?.prefix === "runner:")
+        storage.seed("runner:revived", { ...runner, stale: false });
+      return page;
+    });
+    await fleet.alarm();
+    expect(storage.value<ExternalRunnerRecord>("runner:revived")?.stale).toBe(false);
+    await storage.delete("maintenance:runner-prune");
+    await storage.deleteAlarm();
+    const response = await fleet.fetch(
+      request("POST", "/v1/runners/sync", {
+        headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+        body: { provider: "blacksmith-testbox", runners: [{ id: "new-runner", status: "ready" }] },
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(storage.value("maintenance:runner-prune")).toBeDefined();
+    expect(storage.alarm()).toBeGreaterThan(Date.now());
+    expect(storage.alarm()).toBeLessThanOrEqual(Date.now() + 60 * 60_000);
+  });
+
   it("syncs external runner visibility and marks missing runners stale", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);

@@ -526,6 +526,17 @@ runner leases stay visible without leaking to normal users. External runner rows
 Actions links and stale markers; clicking one opens its visibility-only detail
 page at `/portal/runners/{provider}/{runner-id}`.
 
+Portal home includes at most 200 visible external runners, selected by newest
+`updatedAt` with non-stale runners first. `GET /v1/runners` applies its visibility,
+provider, status, and stale filters before selecting results with the same order;
+it defaults to 100 results and caps `limit` at 200. The response keeps its
+`runners` array and includes `truncated: true` when more matching rows exist.
+Runner detail lookup is independent of this cap. Reads use uncached storage pages
+of at most 128 records. Maintenance deletes only stale runners whose `updatedAt`
+is more than seven days old, scanning at most 128 records per alarm with a durable
+cursor and hourly repeat scans. Sync refreshes `updatedAt` when marking a runner
+stale or seeing it again, restarting that retention window.
+
 Runner synchronization scans historical records in uncached pages and settles bounded
 write batches before returning. It preserves the complete `runners` and newly
 `stale` response arrays, including their order and legacy record identities.
