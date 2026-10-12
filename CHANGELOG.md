@@ -11,7 +11,7 @@
 
 ### Changes
 
-- Coordinator: enable Cloudflare Workers Logs with full head sampling so Worker requests, Durable Object alarms, and structured coordinator failure lines are retained for incident attribution, with query strings redacted from logged URLs. [PR 2783](https://github.com/openclaw/crabbox/pull/2783), [PR TODO-PR-LINK].
+- Coordinator: enable Cloudflare Workers Logs with full head sampling so Worker requests, Durable Object alarms, and structured coordinator failure lines are retained for incident attribution, with query strings redacted from logged URLs. [PR 2783](https://github.com/openclaw/crabbox/pull/2783), [PR 2785](https://github.com/openclaw/crabbox/pull/2785).
 - Portal: redesign the lease portal with clickable fleet readouts, a per-provider activity bar, a segmented state filter with compact filter chips, calmer text-only state labels, and a refreshed dark/light skin across admin and detail pages.
 - Portal: omit stale external runners from the home page while preserving runner list API and detail access.
 - Docs: consolidate provider selection, class catalogs, and lifecycle references; correct stale provider support, sizing, and transport guidance.
