@@ -8,6 +8,7 @@ or query quota. Use [`doctor`](doctor.md) when you need live readiness checks.
 ```sh
 crabbox providers
 crabbox providers --json
+crabbox providers --configured --json
 crabbox providers filters
 crabbox providers filters --json
 crabbox providers describe local-container
@@ -54,8 +55,17 @@ configuration-dependent catalog operation and may invoke authenticated clients.
 The new offline metadata does not change its behavior or JSON shape.
 Capability examples below omit the additive offline status fields for brevity.
 
+`providers --configured` explicitly loads configuration to include features
+that require a trusted operator opt-in, such as prepared Proxmox desktop and
+browser templates. Rows projected through a provider's configuration hook report
+`metadataKind: "configured"`; authentication and readiness remain unchecked.
+This mode reports configuration errors and does not contact provider APIs.
+The default matrix, recommendations, filters, and descriptions remain static
+and work even when configuration is malformed.
+
 ## Flags
 
+- `--configured`: load config and project opt-in features in the matrix.
 - `--json`: emit the matrix as a JSON array instead of grouped text.
 - `--kind <kind>`: keep providers with this driver kind. Repeatable. Current
   values include `ssh-lease`, `delegated-run`, and `service-control`.

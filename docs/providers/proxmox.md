@@ -605,7 +605,7 @@ independently enables `--browser`, including headless browser leases. Environmen
 names are `CRABBOX_PROXMOX_DESKTOP_TEMPLATE_ID` and
 `CRABBOX_PROXMOX_BROWSER_TEMPLATE_ID`; explicit flags are
 `--proxmox-desktop-template-id` and `--proxmox-browser-template-id`.
-`crabbox providers --json` reports the features enabled by this configuration.
+`crabbox providers --configured --json` reports the features enabled by this configuration.
 Changing either authorization changes the immutable adapter scope: drain old
 workspaces before reconfiguring an adapter. Existing headless configuration and
 scope remain unchanged when both fields are zero.

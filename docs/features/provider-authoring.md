@@ -98,7 +98,7 @@ the adapter's policy in a fake provider.
 Keep `Spec()` conservative and free of configuration reads. A provider that
 requires an operator opt-in can implement `ProviderConfiguredFeatures` to
 supply `ConfiguredFeatures(cfg)` and validate capability-specific restrictions.
-Core uses those features for request admission, the configured provider catalog,
+Core uses those features for request admission, `providers --configured`,
 and direct WebVNC routing. Keep template authorization and platform policy in the
 provider; readiness must still verify the requested feature before acquisition
 succeeds. Static metadata such as `providers describe` retains the baseline spec.

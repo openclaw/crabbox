@@ -297,8 +297,8 @@ func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 		t.Fatalf("run --help exit=%d stdout=%q stderr=%q", helpCode, helpStdout, helpStderr)
 	}
 	digest := sha256.Sum256(helpStderr)
-	const baselineSHA256 = "a49f730a2d47f37ac980a7dd2e86467a8adcc45af281197258a2cea84a8544f1"
-	const baselineBytes = 64612
+	const baselineSHA256 = "eaee5cbb97bd434f1cae0312d0a9a88dc9c840fd622f33a9f43943c2948cf629"
+	const baselineBytes = 64827
 	if got := hex.EncodeToString(digest[:]); got != baselineSHA256 || len(helpStderr) != baselineBytes {
 		t.Fatalf("run --help changed: sha256=%s bytes=%d, want sha256=%s bytes=%d", got, len(helpStderr), baselineSHA256, baselineBytes)
 	}
@@ -357,4 +357,58 @@ func sortedDescriptionFlagNames(flags []providerDescriptionFlag) []string {
 		names = append(names, item.Name)
 	}
 	return names
+}
+
+func TestProxmoxConfiguredCatalogBuiltBinary(t *testing.T) {
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	workDir := filepath.Join(root, "work")
+	if err := os.Mkdir(workDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(root, "config.yaml")
+	data := "provider: proxmox\ntarget: linux\nproxmox:\n  templateId: 9401\n  desktopTemplateId: 9401\n  browserTemplateId: 9401\n"
+	if err := os.WriteFile(config, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{"CRABBOX_CONFIG=" + config, "XDG_CONFIG_HOME=" + root, "XDG_STATE_HOME=" + root}
+	for _, configured := range []bool{false, true} {
+		args := []string{"providers", "--json"}
+		if configured {
+			args = append(args, "--configured")
+		}
+		stdout, stderr, code := runDescribeTestBinary(binary, workDir, env, args...)
+		if code != 0 {
+			t.Fatalf("configured=%v exit=%d stderr=%s", configured, code, stderr)
+		}
+		var entries []providerMatrixEntry
+		if err := json.Unmarshal(stdout, &entries); err != nil {
+			t.Fatal(err)
+		}
+		index := slices.IndexFunc(entries, func(e providerMatrixEntry) bool { return e.Provider == "proxmox" })
+		if index < 0 {
+			t.Fatal("Proxmox absent")
+		}
+		entry := entries[index]
+		if slices.Contains(entry.Features, FeatureDesktop) != configured || slices.Contains(entry.Features, FeatureBrowser) != configured {
+			t.Fatalf("configured=%v features=%v", configured, entry.Features)
+		}
+		want := "static"
+		if configured {
+			want = "configured"
+		}
+		if entry.MetadataKind != want || entry.Readiness != "unchecked" {
+			t.Fatalf("configured=%v metadata=%+v", configured, entry.providerStaticStatus)
+		}
+	}
+	if err := os.WriteFile(config, []byte("[invalid yaml\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, code := runDescribeTestBinary(binary, workDir, env, "providers", "--configured", "--json")
+	if code == 0 {
+		t.Fatal("explicit configured discovery accepted malformed configuration")
+	}
 }

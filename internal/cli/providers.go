@@ -98,6 +98,7 @@ func (a App) providers(ctx context.Context, args []string) error {
 	}
 	fs := newFlagSet("providers", a.Stderr)
 	jsonOut := fs.Bool("json", false, "print JSON")
+	configured := fs.Bool("configured", false, "include features enabled by trusted configuration (loads config)")
 	filterFlags := registerProviderMatrixFilterFlags(fs)
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -105,9 +106,13 @@ func (a App) providers(ctx context.Context, args []string) error {
 	if fs.NArg() != 0 {
 		return Exit(2, "usage: crabbox providers [--json] [--kind KIND] [--category CATEGORY] [--target TARGET] [--feature FEATURE] [--runtime CAPABILITY] [--reachability CAPABILITY] [--workspace CAPABILITY] [--evidence CAPABILITY] [--lifecycle CAPABILITY] OR crabbox providers filters [--json] OR crabbox providers recommend <use-case> [--limit N] [--json]")
 	}
-	entries, err := configuredProviderMatrix()
-	if err != nil {
-		return err
+	entries := providerMatrix()
+	if *configured {
+		var err error
+		entries, err = configuredProviderMatrix()
+		if err != nil {
+			return err
+		}
 	}
 	filters := filterFlags.filters()
 	if err := validateProviderMatrixFilters(filters, entries); err != nil {
@@ -186,10 +191,7 @@ func (a App) providerRecommendations(args []string) error {
 	if !ok {
 		return Exit(2, "unknown provider recommendation use case %q; try one of: %s", useCase, strings.Join(providerRecommendationUseCases(), ", "))
 	}
-	entries, err := configuredProviderMatrix()
-	if err != nil {
-		return err
-	}
+	entries := providerMatrix()
 	filters := filterFlags.filters()
 	if err := validateProviderMatrixFilters(filters, entries); err != nil {
 		return err
@@ -228,7 +230,11 @@ func configuredProviderMatrix() ([]providerMatrixEntry, error) {
 	for _, provider := range providers {
 		spec := provider.Spec()
 		spec.Features = ProviderFeaturesForConfig(provider, cfg)
-		entries = append(entries, providerMatrixEntryForSpec(provider, spec))
+		entry := providerMatrixEntryForSpec(provider, spec)
+		if _, ok := provider.(ProviderConfiguredFeatures); ok {
+			entry.MetadataKind = "configured"
+		}
+		entries = append(entries, entry)
 	}
 	return entries, nil
 }
