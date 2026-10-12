@@ -18524,8 +18524,6 @@ export class FleetCoordinator {
       });
     }
     await this.visitLeaseRecords(async (lease) => {
-      // The durable provisioning controller schedules its own wake and owns all mutations.
-      if (await provisioningOwnsLease(this.state.storage, lease.id)) return;
       const lifetimeEnabled =
         lease.lifetimePolicy?.source === "admin-canary" ||
         (this.env.CRABBOX_LEASE_LIFETIME_MODE ?? "off") !== "off";
@@ -18537,6 +18535,16 @@ export class FleetCoordinator {
         lease.lifetimePolicy.readiness?.status !== "ready"
           ? Math.max(now + 1, Date.parse(lease.lifetimePolicy.nextCheckAt ?? "") || 0)
           : undefined;
+      const leaseAlarmDue =
+        leaseIsLive(lease) ||
+        Boolean(lease.runtimeAdapterDeleteRequestedAt) ||
+        leaseNeedsCleanup(lease, now) ||
+        leaseMayNeedInterruptedProvisioningRecovery(lease);
+      // Settled history cannot contribute a wake; skip its per-lease storage reads,
+      // which otherwise scale with all retained leases on every alarm reconciliation.
+      if (lifetimeAlarm === undefined && readinessAlarm === undefined && !leaseAlarmDue) return;
+      // The durable provisioning controller schedules its own wake and owns all mutations.
+      if (await provisioningOwnsLease(this.state.storage, lease.id)) return;
       retainAlarm(
         lifetimeAlarm === undefined && readinessAlarm === undefined
           ? undefined
@@ -18560,12 +18568,7 @@ export class FleetCoordinator {
       ) {
         return;
       }
-      if (
-        leaseIsLive(lease) ||
-        lease.runtimeAdapterDeleteRequestedAt ||
-        leaseNeedsCleanup(lease, now) ||
-        leaseMayNeedInterruptedProvisioningRecovery(lease)
-      ) {
+      if (leaseAlarmDue) {
         // Match expireLeases: the durable controller owns both progress and its wake.
         if (await provisioningOwnsLease(this.state.storage, lease.id)) return;
         const leaseAlarm = nextLeaseAlarmTime(lease, this.coordinatorGeneration);

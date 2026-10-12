@@ -17612,6 +17612,56 @@ describe("fleet lease identity and idle", () => {
     },
   );
 
+  it("reconciles alarms without per-lease reads of settled lease history", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-12T00:00:00.000Z"));
+    try {
+      const settled = new Date(Date.now() - 86_400_000).toISOString();
+      const live = testLease({
+        id: "cbx_ffff00000001",
+        cloudID: "",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+      const alarmFor = async (history: number) => {
+        const storage = new ObservedMemoryStorage();
+        for (let index = 0; index < history; index++) {
+          const id = `cbx_${index.toString(16).padStart(12, "0")}`;
+          storage.seed(
+            `lease:${id}`,
+            testLease({
+              id,
+              state: "released",
+              cloudID: "",
+              createdAt: settled,
+              updatedAt: settled,
+              endedAt: settled,
+              releasedAt: settled,
+              expiresAt: settled,
+            }),
+          );
+        }
+        storage.seed(`lease:${live.id}`, live);
+        const ownershipReads: string[] = [];
+        storage.afterGet = (key) => {
+          if (key.startsWith("lease-provisioning:")) ownershipReads.push(key);
+        };
+        await testFleet(storage).alarm();
+        return { alarm: storage.alarm(), ownershipReads };
+      };
+      const baseline = await alarmFor(0);
+      const withHistory = await alarmFor(500);
+      expect(baseline.alarm).toBeDefined();
+      expect(withHistory.alarm).toBe(baseline.alarm);
+      expect(withHistory.ownershipReads.length).toBeGreaterThan(0);
+      expect(new Set(withHistory.ownershipReads)).toEqual(
+        new Set([`lease-provisioning:${live.id}`]),
+      );
+      expect(withHistory.ownershipReads).toHaveLength(baseline.ownershipReads.length);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("streams ordered run logs on demand and stops reading after cancellation", async () => {
     const storage = new ObservedMemoryStorage();
     const id = "run_000000000001";

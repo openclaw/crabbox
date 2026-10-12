@@ -747,3 +747,8 @@ and dynamic runner indexes use uncached pages of at most 128 records. Transactio
 scans retain their existing transaction boundaries. Paging bounds storage reads;
 operations returning complete lists still retain their matching results. Catalog
 retirement and dynamic runner expiry keep their existing retention rules.
+
+Alarm reconciliation reads per-lease ownership and workspace state only for
+leases that can contribute a wake; the
+[overload audit](../diagnostics/coordinator-overload.md) covers request
+queueing, Cloudflare error 1101, and the remaining history-proportional walks.

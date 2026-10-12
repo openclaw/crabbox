@@ -216,6 +216,17 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     return "direct";
   }
   if (
+    method === "GET" &&
+    path.length === 5 &&
+    path[0] === "v1" &&
+    path[1] === "admin" &&
+    path[2] === "leases" &&
+    path[4] === "lifetime-readback"
+  ) {
+    // Read-only provider readback; holding the lifecycle queue would stall admissions on AWS I/O.
+    return "direct";
+  }
+  if (
     method === "POST" &&
     path[0] === "portal" &&
     path[1] === "leases" &&
