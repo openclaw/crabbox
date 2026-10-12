@@ -5,7 +5,7 @@
 ### Added
 
 - Sync: support native Git-backed Jujutsu workspaces by syncing the exact `@` tree, including octopus merges and working-copy edits, with explicit origin-bookmark seeding and fail-closed revision checks. [PR 2780](https://github.com/openclaw/crabbox/pull/2780). Thanks @atimmer.
-- Proxmox: add opt-in prepared XFCE/TigerVNC and browser templates with per-clone credentials, fail-closed readiness and capability-safe adapter replay. Thanks @ahkohd.
+- Proxmox: add opt-in prepared XFCE/TigerVNC and browser templates with per-clone credentials, fail-closed readiness and capability-safe adapter replay. [PR 2781](https://github.com/openclaw/crabbox/pull/2781). Thanks @ahkohd.
 
 - Coordinator: add default-off maximum-age policies and explicit admin rollout canaries for retained AWS leases, with verified stop permissions, visible stop/deletion deadlines, bounded extensions, and root-disk cleanup. [PR 2759](https://github.com/openclaw/crabbox/pull/2759). Thanks @vincentkoc.
 - Serve: run `crabbox serve` on trusted machines to donate spare CPU as owner-only container leases (`--provider serve`), with outbound coordinator polling, local deadline enforcement, `--ssh-ports` pools, warm package caches, per-user service install, and opt-in capacity fallback. Coordinators enable it per owner with `CRABBOX_SERVE_ALLOWED_OWNERS` (off by default). [PR 2768](https://github.com/openclaw/crabbox/pull/2768).
