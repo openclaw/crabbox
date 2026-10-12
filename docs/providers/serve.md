@@ -102,13 +102,16 @@ overrides.
 
 ## Prepared container images
 
-At agent startup, Serve probes the configured image for `sshd`, Git, rsync,
+After the first heartbeat and reconciliation, Serve probes the configured image
+in the background for `sshd`, Git, rsync,
 curl, sudo, and Python 3. If any are missing and `apt-get` is available, it
 installs the shared bootstrap package set once in a temporary container, then
 commits a local prepared image. This uses ordinary Docker/Podman `run` and
 `commit`; it requires no buildx or Dockerfile. Preparation output goes to stderr.
 Images that already have the tools, or have no `apt-get`, keep the existing
-bootstrap behavior. If preparation fails, the agent prints a warning and uses
+bootstrap behavior. Heartbeats and existing-lease reconciliation continue during
+preparation; new leases use the configured image with lease-time bootstrap until
+the prepared image is ready. If preparation fails, the agent prints a warning and uses
 the configured image, so leases install their tools at startup as before.
 Failure to pull or inspect the configured image still stops agent startup.
 
@@ -165,7 +168,9 @@ stopped to remove its cache volumes and local prepared images that are not
 used by running containers. Prepared images are shared by agents using the
 same base and recipe, so prune checks running containers across the runtime.
 Runtime refusal to remove in-use volumes or images is reported, not forced.
-Pruned images are prepared again when needed.
+Prune cannot discover idle agents with separate state directories. If another
+agent prunes a prepared image, the next lease detects its absence, uses the
+configured image with lease-time bootstrap, and starts background re-preparation.
 
 SSH binds only the advertised address by default. Ports are runtime-assigned
 unless `--ssh-ports` is set, for example `--ssh-ports 8443` or

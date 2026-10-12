@@ -15,7 +15,7 @@
 
 - Coordinator: prevent the portal from exhausting coordinator memory when many external runner records are stored by bounding reads and pruning old stale records.
 - Serve: stop spurious `serve_rate_limited` heartbeat errors by pacing each heartbeat at least `--poll-interval` after the previous response. [PR 2770](https://github.com/openclaw/crabbox/pull/2770).
-- Serve: start served leases in about a second instead of ~30s by preparing the bootstrap packages once into a local image at agent start; every lease still gets unique SSH host keys. [PR 2770](https://github.com/openclaw/crabbox/pull/2770).
+- Serve: prepare bootstrap packages in the background without delaying restart heartbeats or reconciliation; prepared leases start in about a second instead of ~30s, recover automatically after shared-image pruning, and retain unique SSH host keys. [PR 2770](https://github.com/openclaw/crabbox/pull/2770).
 - Sync: explain incomplete shallow sources and Git overlay conflicts during local Git seeding, with actionable configuration fixes. [PR 2662](https://github.com/openclaw/crabbox/pull/2662). Thanks @shunkakinoki.
 - CLI: resolve explicit provider, target, Windows mode, architecture, OS, class, and type flags before validating inherited configuration, preserving unrelated defaults and recorded-lease identity checks. [PR 2767](https://github.com/openclaw/crabbox/pull/2767).
 - Jobs: apply a selected job's provider and platform selectors before validating inherited defaults, including dry runs and existing-lease reuse. [PR 2767](https://github.com/openclaw/crabbox/pull/2767).

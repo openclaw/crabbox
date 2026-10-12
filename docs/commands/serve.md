@@ -38,8 +38,9 @@ service command.
 Serve requires coordinator enablement through `CRABBOX_SERVE_ALLOWED_OWNERS`;
 unset or empty disables it. Unlisted owners receive `serve_not_enabled`.
 
-Serve can prepare a reusable local image at startup to avoid reinstalling bootstrap
-packages for every lease. See [prepared container images](../providers/serve.md#prepared-container-images)
+Serve prepares a reusable local image in the background after its first heartbeat
+and reconciliation to avoid reinstalling bootstrap packages for every lease.
+See [prepared container images](../providers/serve.md#prepared-container-images)
 for details, fallback behavior, and image evidence.
 
 Each poll starts at least `--poll-interval` after the prior poll start and heartbeat response.
@@ -61,4 +62,6 @@ and exclusive access to its state lock. Stop the agent first. It removes only
 the named cache volumes derived for that machine and images labeled
 `crabbox.serve.prepared=true` that no running container uses. Prepared images
 may be shared by several agents. Removal is never forced; a runtime refusal
-is reported. The next agent start prepares a pruned image again if needed.
+is reported. An idle agent whose prepared image was pruned uses its configured
+image with lease-time bootstrap and starts background re-preparation on its next
+lease; no agent restart is required.
