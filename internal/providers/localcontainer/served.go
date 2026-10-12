@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -46,9 +47,14 @@ fi
 `
 
 type ServedRuntime struct {
+	imageMu         sync.RWMutex
 	baseImageID     string
 	b               *backend
 	preparedImageID string
+	baseImage       servedImage
+	preparationCtx  context.Context
+	preparationDone chan struct{}
+	preparing       bool
 }
 type ServedContainer struct {
 	ID, LeaseID string
@@ -90,8 +96,25 @@ func (r *ServedRuntime) Create(ctx context.Context, id, key string, cpus, memory
 	if image != r.Image() {
 		return ServedContainer{}, fmt.Errorf("serve_image_mismatch")
 	}
+	r.imageMu.RLock()
 	options.runtimeImage = r.preparedImageID
+	r.imageMu.RUnlock()
 	idResult, _, err := r.b.createContainerWithOptions(ctx, cfg, "crabbox-serve-"+id, id, "", key, "", false, &options)
+	if err != nil && options.runtimeImage != "" && r.preparedImageMissing(ctx, options.runtimeImage) {
+		r.imageMu.Lock()
+		if r.preparedImageID == options.runtimeImage {
+			r.preparedImageID = ""
+		}
+		preparationCtx := r.preparationCtx
+		r.imageMu.Unlock()
+		// Other agents can prune this shared image while we are idle. This lease
+		// keeps the configured image and bootstraps normally while we rebuild.
+		options.runtimeImage = ""
+		if preparationCtx != nil {
+			r.StartPreparation(preparationCtx)
+		}
+		idResult, _, err = r.b.createContainerWithOptions(ctx, cfg, "crabbox-serve-"+id, id, "", key, "", false, &options)
+	}
 	if err != nil {
 		return ServedContainer{}, err
 	}
@@ -177,9 +200,11 @@ func (r *ServedRuntime) Evidence(ctx context.Context, c ServedContainer) (*core.
 	// Repository digests describe the configured base; the container records the
 	// actual runtime image. Only this runtime's prepared ID maps to its base.
 	runtimeID := observed.Image
+	r.imageMu.RLock()
 	if r.preparedImageID != "" && runtimeID == r.preparedImageID {
 		observed.Image = r.baseImageID
 	}
+	r.imageMu.RUnlock()
 	evidence, err := r.b.observeImageEvidence(ctx, r.b.cfg, observed, core.LeaseClaim{})
 	if err == nil {
 		evidence.ConfiguredReference = r.Image()

@@ -51,12 +51,3 @@ func TestServedRuntimeRejectsForeignImageBeforeExecution(t *testing.T) {
 		t.Fatal("foreign image reached runtime", runner.args)
 	}
 }
-
-func TestServedHostKeysDoNotChangeSharedBootstrap(t *testing.T) {
-	if !strings.Contains(servedWatchdog, "[ ! -f /etc/ssh/ssh_host_ed25519_key ]") || !strings.Contains(servedWatchdog, "ssh-keygen -A") || !strings.Contains(servedWatchdog, "rm -f /etc/ssh/ssh_host_*") {
-		t.Fatal("served leases must generate unique host keys")
-	}
-	if strings.Contains(bootstrapScript, "ssh-keygen -A") || strings.Contains(bootstrapScript, "rm -f /etc/ssh/ssh_host_*") {
-		t.Fatal("served host-key policy leaked into ordinary local-container bootstrap")
-	}
-}

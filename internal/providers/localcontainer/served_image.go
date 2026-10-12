@@ -46,8 +46,22 @@ func servedPreparedTag(baseID string) string {
 }
 
 func (r *ServedRuntime) Prepare(ctx context.Context) error {
+	if err := r.EnsureImage(ctx); err != nil {
+		return err
+	}
+	r.StartPreparation(ctx)
+	r.WaitPreparation()
+	return nil
+}
+
+// EnsureImage retains startup's fatal configured-image validation, without
+// making reconciliation wait for optional package installation.
+func (r *ServedRuntime) EnsureImage(ctx context.Context) error {
+	r.imageMu.Lock()
 	r.preparedImageID = ""
 	r.baseImageID = ""
+	r.baseImage = servedImage{}
+	r.imageMu.Unlock()
 	base, err := r.inspectImage(ctx, r.Image())
 	if err != nil {
 		if _, err := r.b.docker(ctx, []string{"pull", r.Image()}, r.b.rt.Stderr, r.b.rt.Stderr); err != nil {
@@ -58,14 +72,58 @@ func (r *ServedRuntime) Prepare(ctx context.Context) error {
 			return err
 		}
 	}
-	r.baseImageID = base.ID
-	if err := r.prepareImage(ctx, base); err != nil {
-		r.preparedImageID = ""
-		if r.b.rt.Stderr != nil {
+	r.imageMu.Lock()
+	r.baseImageID, r.baseImage = base.ID, base
+	r.imageMu.Unlock()
+	return nil
+}
+
+// StartPreparation uses the agent lifetime, never a single lease's deadline.
+// Only one preparation runs per agent; image selection remains nonblocking.
+func (r *ServedRuntime) StartPreparation(ctx context.Context) {
+	r.imageMu.Lock()
+	if r.preparing || ctx.Err() != nil || r.baseImage.ID == "" {
+		r.imageMu.Unlock()
+		return
+	}
+	r.preparing = true
+	r.preparationCtx = ctx
+	r.preparationDone = make(chan struct{})
+	base, done := r.baseImage, r.preparationDone
+	r.imageMu.Unlock()
+	go func() {
+		bounded, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		defer cancel()
+		id, err := r.prepareImage(bounded, base)
+		if err != nil && r.b.rt.Stderr != nil {
 			fmt.Fprintf(r.b.rt.Stderr, "warning: serve image preparation failed; leases will bootstrap at start: %s\n", strings.ReplaceAll(err.Error(), "\n", "; "))
 		}
+		r.imageMu.Lock()
+		if err == nil {
+			r.preparedImageID = id
+		}
+		r.preparing = false
+		close(done)
+		r.imageMu.Unlock()
+	}()
+}
+
+func (r *ServedRuntime) WaitPreparation() {
+	r.imageMu.RLock()
+	done := r.preparationDone
+	r.imageMu.RUnlock()
+	if done != nil {
+		<-done
 	}
-	return nil
+}
+
+func (r *ServedRuntime) preparedImageMissing(ctx context.Context, id string) bool {
+	result, err := r.b.docker(ctx, []string{"image", "inspect", id}, nil, nil)
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(result.Stderr + "\n" + err.Error())
+	return strings.Contains(message, "no such image") || strings.Contains(message, "image not known")
 }
 
 func (r *ServedRuntime) cleanupPreparationContainer(name string) error {
@@ -75,24 +133,23 @@ func (r *ServedRuntime) cleanupPreparationContainer(name string) error {
 	return err
 }
 
-func (r *ServedRuntime) prepareImage(ctx context.Context, base servedImage) (err error) {
+func (r *ServedRuntime) prepareImage(ctx context.Context, base servedImage) (id string, err error) {
 	probe := "for tool in " + bootstrapTools + "; do command -v \"$tool\" >/dev/null 2>&1 || { command -v apt-get >/dev/null 2>&1 && { echo prepare; exit 0; }; echo skip; exit 0; }; done; echo ready"
 	probeName := "crabbox-serve-probe-" + strings.ToLower(rand.Text())
 	result, err := r.b.docker(ctx, []string{"run", "--rm", "--name", probeName, "--entrypoint", "/bin/sh", base.ID, "-c", probe}, nil, r.b.rt.Stderr)
 	if err != nil {
-		return errors.Join(err, r.cleanupPreparationContainer(probeName))
+		return "", errors.Join(err, r.cleanupPreparationContainer(probeName))
 	}
 	switch strings.TrimSpace(result.Stdout) {
 	case "ready", "skip":
-		return nil
+		return "", nil
 	case "prepare":
 	default:
-		return fmt.Errorf("unexpected serve image tool probe: %q", result.Stdout)
+		return "", fmt.Errorf("unexpected serve image tool probe: %q", result.Stdout)
 	}
 	tag := servedPreparedTag(base.ID)
 	if prepared, err := r.inspectImage(ctx, tag); err == nil {
-		r.preparedImageID = prepared.ID
-		return nil
+		return prepared.ID, nil
 	}
 	name := "crabbox-serve-prepare-" + strings.ToLower(rand.Text())
 	committed := false
@@ -121,7 +178,7 @@ func (r *ServedRuntime) prepareImage(ctx context.Context, base servedImage) (err
 	script := "set -eu; export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y --no-install-recommends " + bootstrapPackages + "; rm -f /etc/ssh/ssh_host_*; rm -rf /var/lib/apt/lists/*"
 	args = append(args, "-c", script)
 	if _, err := r.b.docker(ctx, args, r.b.rt.Stderr, r.b.rt.Stderr); err != nil {
-		return err
+		return "", err
 	}
 	// A nil slice marshals as null, which Docker treats as a shell command.
 	// Empty JSON arrays clear the command for ENTRYPOINT-only images.
@@ -138,15 +195,14 @@ func (r *ServedRuntime) prepareImage(ctx context.Context, base servedImage) (err
 	args = append(args, name, tag)
 	committed = true
 	if _, err := r.b.docker(ctx, args, nil, r.b.rt.Stderr); err != nil {
-		return err
+		return "", err
 	}
 	prepared, err := r.inspectImage(ctx, tag)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !slices.Equal(base.Config.Cmd, prepared.Config.Cmd) || !slices.Equal(base.Config.Entrypoint, prepared.Config.Entrypoint) || base.Config.User != prepared.Config.User || !slices.Equal(base.Config.Env, prepared.Config.Env) {
-		return fmt.Errorf("serve prepared image did not preserve base CMD, entrypoint, user, and environment")
+		return "", fmt.Errorf("serve prepared image did not preserve base CMD, entrypoint, user, and environment")
 	}
-	r.preparedImageID = prepared.ID
-	return nil
+	return prepared.ID, nil
 }

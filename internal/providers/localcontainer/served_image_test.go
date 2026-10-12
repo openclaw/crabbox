@@ -4,13 +4,163 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+type servedRuntimeFunc func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error)
+
+func (f servedRuntimeFunc) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	return f(ctx, req)
+}
+
+func TestServedCreateRecoversAfterOtherAgentPrunesPreparedImage(t *testing.T) {
+	for _, runtimeName := range []string{"docker", "podman"} {
+		t.Run(runtimeName, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var mu sync.Mutex
+			imageID := ""
+			commits := 0
+			var runImages []string
+			containers := map[string]string{}
+			blocked, release := make(chan struct{}), make(chan struct{})
+			tag := servedPreparedTag("sha256:base")
+			runner := servedRuntimeFunc(func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				a := req.Args
+				mu.Lock()
+				defer mu.Unlock()
+				out := ""
+				switch a[0] {
+				case "image":
+					switch a[1] {
+					case "ls":
+						out = imageID
+					case "rm":
+						if a[2] != imageID || imageID == "" {
+							t.Errorf("unexpected image removal: %v", a)
+						}
+						imageID = ""
+					case "inspect":
+						if a[2] == "configured:stable" {
+							out = servedImageFixture("sha256:base")
+						} else if imageID != "" && (a[2] == tag || a[2] == imageID) {
+							out = servedImageFixture(imageID)
+						} else {
+							message := "No such image: " + a[2]
+							if runtimeName == "podman" {
+								message = a[2] + ": image not known"
+							}
+							return core.LocalCommandResult{Stderr: message}, errors.New("exit status 1")
+						}
+					}
+				case "run":
+					if a[1] == "--rm" {
+						out = "prepare"
+					} else if a[1] == "--name" {
+						if commits == 1 {
+							close(blocked)
+							mu.Unlock()
+							select {
+							case <-release:
+							case <-ctx.Done():
+							}
+							mu.Lock()
+							if ctx.Err() != nil {
+								return core.LocalCommandResult{}, ctx.Err()
+							}
+						}
+					} else {
+						image := a[len(a)-4]
+						runImages = append(runImages, image)
+						if image != "configured:stable" && image != imageID {
+							return core.LocalCommandResult{}, errors.New("container image unavailable")
+						}
+						out = fmt.Sprintf("container-%d", len(runImages))
+						containers[out] = image
+					}
+				case "commit":
+					commits++
+					imageID = fmt.Sprintf("sha256:prepared-%d", commits)
+				case "inspect":
+					out = `[{"Id":"` + a[1] + `","Image":"` + containers[a[1]] + `","State":{"Running":true},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"22222"}]}}}]`
+				case "ps", "rm":
+				default:
+					t.Errorf("unexpected command %v", a)
+				}
+				return core.LocalCommandResult{Stdout: out}, nil
+			})
+			cfg := core.Config{LocalContainer: core.LocalContainerConfig{Runtime: runtimeName, Image: "configured:stable"}}
+			rt := core.Runtime{Exec: runner, Stderr: io.Discard}
+			// Independent runtime instances represent agents with separate state
+			// directories sharing one Docker/Podman image store.
+			pruner, idle := NewServedRuntime(cfg, rt), NewServedRuntime(cfg, rt)
+			if err := pruner.Prepare(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := idle.Prepare(ctx); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { cancel(); idle.WaitPreparation() }()
+			if err := pruner.PruneCaches(ctx, nil); err != nil {
+				t.Fatal(err)
+			}
+			create := func(id string) {
+				t.Helper()
+				if _, err := idle.Create(ctx, id, "ssh-ed25519 AAAA", 1, 1024, cfg.LocalContainer.Image, nil, ServedContainerOptions{PublishHost: "127.0.0.1"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			create("cbx_123456abcdef")
+			select {
+			case <-blocked:
+			case <-time.After(5 * time.Second):
+				t.Fatal("missing asynchronous re-preparation")
+			}
+			create("cbx_123456abcdee")
+			close(release)
+			idle.WaitPreparation()
+			create("cbx_123456abcded")
+			mu.Lock()
+			defer mu.Unlock()
+			want := []string{"sha256:prepared-1", "configured:stable", "configured:stable", "sha256:prepared-2"}
+			if !reflect.DeepEqual(runImages, want) || commits != 2 {
+				t.Fatalf("run images=%v commits=%d", runImages, commits)
+			}
+		})
+	}
+}
+
+func TestServedCreateDoesNotFallbackOnOtherRuntimeErrors(t *testing.T) {
+	for _, inspectError := range []string{"", "permission denied"} {
+		t.Run(inspectError, func(t *testing.T) {
+			runs := 0
+			runner := &recordingRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				if req.Args[0] == "run" {
+					runs++
+					return core.LocalCommandResult{}, errors.New("port already allocated")
+				}
+				if inspectError != "" {
+					return core.LocalCommandResult{Stderr: inspectError}, errors.New("exit status 1")
+				}
+				return core.LocalCommandResult{Stdout: servedImageFixture("sha256:prepared")}, nil
+			}}
+			r := NewServedRuntime(core.Config{LocalContainer: core.LocalContainerConfig{Runtime: "docker", Image: "configured:stable"}}, core.Runtime{Exec: runner, Stderr: io.Discard})
+			r.preparedImageID = "sha256:prepared"
+			_, err := r.Create(t.Context(), "cbx_123456abcdef", "ssh-ed25519 AAAA", 1, 1024, r.Image(), nil, ServedContainerOptions{})
+			if err == nil || runs != 1 || r.preparedImageID != "sha256:prepared" {
+				t.Fatalf("err=%v runs=%d prepared=%s", err, runs, r.preparedImageID)
+			}
+		})
+	}
+}
 
 func servedImageFixture(id string) string {
 	return `[{"Id":"` + id + `","Config":{"Cmd":["default-command"],"Entrypoint":["entrypoint"],"User":"1000","Env":["FIXTURE=value"]}}]`
