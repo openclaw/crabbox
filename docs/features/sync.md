@@ -157,7 +157,7 @@ Git-backed ready pools, Actions hydration/owned workspaces, `sync.gitOverlay`,
 unsupported selections fail before acquisition; an existing Actions-owned
 workspace is rejected after its marker is read, before sync changes it; lookup failures stop rather than assume a raw workspace. Default
 Git seeding and fingerprinting are inapplicable, and directory runs explicitly
-use plain-manifest mode. Native Jujutsu workspaces remain unsupported.
+use plain-manifest mode. Native Jujutsu workspaces use the revision adapter below.
 
 With `--no-sync`, a valid directory selection is inactive: no include requirement,
 enumeration, or temporary Git metadata is needed. Existing provider-specific
@@ -166,19 +166,39 @@ enumeration, or temporary Git metadata is needed. Existing provider-specific
 
 ### Jujutsu workspaces
 
-Crabbox currently supports Jujutsu workspaces only when they are colocated with
-Git metadata: the workspace root must contain both `.jj` and `.git`. Native
-Jujutsu revision mapping is not supported yet. Because the sync manifest is
-Git-owned, Crabbox rejects a native `.jj` workspace before leasing or borrowing
-a runner rather than letting Git discover an outer checkout and sync the wrong
-revision. This also applies when the native workspace is nested inside an outer
-Git repository.
+Native, Git-backed Jujutsu workspaces are supported by `sync-plan` and ordinary
+SSH-lease `run` sync. Install `jj` locally (`brew install jj` on macOS). Crabbox
+asks jj to snapshot working-copy edits, resolves the full commit ID of `@`, pins
+the jj operation, and reads that commit's tree from `jj git root`. An octopus
+merge with three or more parents is handled exactly like any other revision;
+Crabbox never guesses a parent or uses a change ID as a Git commit. Files that
+jj ignores or leaves untracked are not part of `@` and are not transferred.
 
-If you are starting from an existing Git checkout and want a colocated Jujutsu
-workspace, `jj git init --git-repo=.` is one initialization example. It does not
-convert an existing native Jujutsu repository in place. Use `--no-sync` with a
-supporting provider when you intentionally want to run without transferring
-local files.
+The immutable tree is materialized in a temporary Git checkout and passed
+through the normal manifest, exclude, seed, and overlay machinery. Raw blob
+contents, executable bits, and symlink targets are preserved without checkout
+filters. `.jj` metadata is excluded. Changes made after selection belong to the
+next run. `sync-plan --json` reports `source: "jj"` and the full `revision`.
+
+For seeding and Git overlay, Crabbox explicitly maps jj's `origin` remote
+bookmarks to Git remote-tracking refs. `sync.baseRef`, when set, must name one
+of those bookmarks (for example `origin/main`). Otherwise the first bookmark
+in name order with shared ancestry supplies the base. The base is the unique
+merge base of that bookmark and `@`, so it remains reachable from the advertised
+origin branch. The normal remote ancestry check still applies. With no eligible
+origin bookmark, Crabbox transfers the full tree without origin seeding.
+
+Missing jj, unsupported jj commands/backends, stale workspaces, divergent
+operation heads, divergent or conflicted `@`, conflicted origin bookmarks, and
+ambiguous merge bases fail before lease acquisition. Resolve those conditions
+in jj and retry. Git submodules are not supported in this adapter. Use external
+Crabbox state storage; native sync rejects state directories inside the workspace.
+Ready pools, Actions hydration, delegated-run providers, and local Git object
+seeding are currently unsupported; use an ordinary SSH provider with
+`--no-hydrate`. `sync.source=directory` still rejects native workspaces.
+
+Colocated `.jj` + `.git` workspaces continue through the existing Git path.
+`--no-sync` on a supporting provider intentionally skips local revision mapping.
 
 The built-in excludes are intentionally conservative. They cover common churn
 such as `node_modules`, `.git`, `dist`, `coverage`, `playwright-report`,

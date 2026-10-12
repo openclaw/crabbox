@@ -189,6 +189,13 @@ manifest. If it shows surprises (a `dist/` folder, a forgotten `.cache/`, a
 multi-gigabyte asset), tighten `sync.exclude` and re-run. The first sync to a
 fresh runner is bound by this size.
 
+Native Git-backed Jujutsu workspaces work with an installed `jj`: Crabbox
+snapshots working-copy edits and syncs the exact `@` tree, including multi-parent
+merges. `sync-plan --json` shows the selected revision. Use `run --no-hydrate`
+with an ordinary SSH provider. Colocated Git/Jujutsu workspaces use the Git
+path. See [Jujutsu sync](features/sync.md#jujutsu-workspaces) for prerequisites
+and fail-closed conditions.
+
 ## Step 4. Warm A Box
 
 ```sh

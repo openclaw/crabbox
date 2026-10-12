@@ -20,6 +20,7 @@ type syncPlanRow struct {
 type syncPlanJSONOutput struct {
 	Source              string                    `json:"source,omitempty"`
 	Root                string                    `json:"root,omitempty"`
+	Revision            string                    `json:"revision,omitempty"`
 	Candidate           syncPlanJSONSize          `json:"candidate"`
 	DirtyDelta          syncPlanJSONSize          `json:"dirtyDelta"`
 	DeletedTrackedPaths int                       `json:"deletedTrackedPaths"`
@@ -131,6 +132,11 @@ func (a App) syncPlan(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	repo, jjSource, err := prepareJujutsuSource(ctx, repo, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, jjSource.cleanup()) }()
 	var localSeed preparedLocalGitSeed
 	local := effectiveGitSeedSource(cfg) == "local"
 	if local {
@@ -177,6 +183,9 @@ func (a App) syncPlan(ctx context.Context, args []string) (err error) {
 		if directory {
 			out.Source, out.Root = "directory", repo.Root
 		}
+		if jjSource.Commit != "" {
+			out.Source, out.Root, out.Revision = "jj", jjSource.WorkspaceRoot, jjSource.Commit
+		}
 		if err := json.NewEncoder(a.Stdout).Encode(out); err != nil {
 			return err
 		}
@@ -184,6 +193,9 @@ func (a App) syncPlan(ctx context.Context, args []string) (err error) {
 	}
 	if directory {
 		fmt.Fprintf(a.Stdout, "sync source=directory root=%s\n", repo.Root)
+	}
+	if jjSource.Commit != "" {
+		fmt.Fprintf(a.Stdout, "sync source=jj root=%s revision=%s\n", jjSource.WorkspaceRoot, jjSource.Commit)
 	}
 	if local {
 		fmt.Fprintf(a.Stdout, "Git seed source=local head=%s base=%s objects=%d object_bytes=%d seed_bytes=%d\n", localSeed.Selection.Head, blank(localSeed.Selection.Base, "absent"), localSeed.Artifact.ObjectCount, localSeed.Artifact.ObjectBytes, localSeed.Artifact.PackedBytes)

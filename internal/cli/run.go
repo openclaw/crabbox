@@ -819,6 +819,32 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if err != nil {
 		return err
 	}
+	var jjSource jujutsuSource
+	if *applyLocalPatch {
+		boundary, err := nearestRepositoryBoundary(repo.Root, "")
+		if err != nil {
+			return err
+		}
+		if boundary.kind == repositoryBoundaryNativeJujutsu {
+			return Exit(6, "native Jujutsu workspace does not support --apply-local-patch; run the exact @ tree without --fresh-pr")
+		}
+	}
+	if !*noSync && strings.TrimSpace(*freshPRValue) == "" {
+		repo, jjSource, err = prepareJujutsuSource(ctx, repo, cfg)
+		if err != nil {
+			return err
+		}
+		defer func() { err = errors.Join(err, jjSource.cleanup()) }()
+	}
+	identityRepo := repo
+	if jjSource.Commit != "" {
+		identityRepo.Root = jjSource.WorkspaceRoot
+		cfg.Sync.BaseRef = normalizedOriginBranch(cfg.Sync.BaseRef)
+		fmt.Fprintf(a.Stderr, "native jj source revision=%s operation=%s\n", jjSource.Commit, jjSource.Operation)
+		if strings.TrimSpace(*readyPool) != "" || shouldAutoHydrateActions(cfg, *noHydrate, false, FreshPRSpec{}, *syncOnly) {
+			return Exit(2, "native jj sync requires an ordinary workspace without ready-pool reuse or Actions hydration; use --no-hydrate")
+		}
+	}
 	directorySync := !*noSync && effectiveSyncSource(cfg) == "directory"
 	if directorySync {
 		if err := validateDirectorySyncConfig(cfg); err != nil {
@@ -843,7 +869,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 	}
-	timingRecordRepo = repo
+	timingRecordRepo = identityRepo
 	freshPR, err := parseFreshPRSpec(*freshPRValue, repo)
 	if err != nil {
 		return err
@@ -939,6 +965,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 		providerSpec := provider.Spec()
+		if jjSource.Commit != "" && providerSpec.Kind != ProviderKindSSHLease {
+			return Exit(2, "native jj sync requires an SSH lease provider")
+		}
 		if localGitSeed && providerSpec.Kind != ProviderKindSSHLease {
 			return Exit(2, "local Git seeding requires an SSH-backed provider that supports ordinary workspace sync")
 		}
@@ -1055,7 +1084,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			report := TimingReportWithRunResult(timingReport{
 				Provider: cfg.Provider, LeaseID: leaseID, Slug: ServerSlug(server),
 			}, RunResult{}, err)
-			populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, nil)
+			populateRunTimingMetadata(&report, cfg, identityRepo, server, leaseID, executionRunID, workdir, nil)
 			report.Label = runLabelValue
 			finalTimingReport = &report
 		}
@@ -1207,6 +1236,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if err := validateSSHRunLeaseOutputPolicy(backend.Spec(), strings.TrimSpace(*leaseIDFlag), *keep, *keepOnFailure, *stopAfter); err != nil {
 			return err
 		}
+	}
+	if jjSource.Commit != "" && backend.Spec().Kind != ProviderKindSSHLease {
+		return Exit(2, "native jj sync requires an SSH lease provider")
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok && !sshScriptRun {
 		delegatedRoute = true
@@ -1668,7 +1700,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		leasePhase = "provider.resolve"
 		observation.Phase(RunPhaseResolve)
 		var lease LeaseTarget
-		req := ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true}
+		req := ResolveRequest{Repo: identityRepo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true}
 		if borrowedPool == nil {
 			lease, claimAdmitted, err = admitRunLeaseUnderClaim(ctx, sshBackend, req, &cfg, runIdleTimeoutOverride, func(lease *LeaseTarget) error {
 				if err := prepareResolvedLease(lease); err != nil {
@@ -1692,7 +1724,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	} else {
 		var lease LeaseTarget
 		observation.Phase(RunPhaseAcquire)
-		lease, err = sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim, RequestedSlug: requestedSlug})
+		lease, err = sshBackend.Acquire(ctx, AcquireRequest{Repo: identityRepo, Options: options, Keep: *keep, Reclaim: *reclaim, RequestedSlug: requestedSlug})
 		if err == nil {
 			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
 			runnerProviderTiming = lease.runnerTiming
@@ -1726,7 +1758,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		err = a.registerCoordinatorLeaseBestEffort(ctx, cfg, &lease)
 		server = lease.Server
 	} else {
-		err = a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), &cfg, &server, target, repo.Root, *reclaim || borrowedPool != nil, *leaseIDFlag != "", runIdleTimeoutOverride)
+		err = a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), &cfg, &server, target, identityRepo.Root, *reclaim || borrowedPool != nil, *leaseIDFlag != "", runIdleTimeoutOverride)
 	}
 	if err != nil {
 		return recordFailure(err)
@@ -1901,7 +1933,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if err != nil {
 			report = TimingReportWithRunResult(report, RunResult{}, err)
 		}
-		populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, nil)
+		populateRunTimingMetadata(&report, cfg, identityRepo, server, leaseID, executionRunID, workdir, nil)
 		report.Label = runLabelValue
 		finalTimingReport = &report
 	}()
@@ -2133,7 +2165,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 
 		replacementLeaseStartedAt := time.Now()
 		acquireCtx := contextWithoutNativeRuntimeAdmission(context.WithValue(ctx, nativeRuntimeLeaseKey{}, ""))
-		newLease, err := sshBackend.Acquire(acquireCtx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim})
+		newLease, err := sshBackend.Acquire(acquireCtx, AcquireRequest{Repo: identityRepo, Options: options, Keep: *keep, Reclaim: *reclaim})
 		replacementLeaseDuration := time.Since(replacementLeaseStartedAt)
 		if err != nil {
 			recordFailedReplacementLeaseDuration(&timings, replacementLeaseDuration)
@@ -2192,7 +2224,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		applyRunExecutionMetadata(&envSelection, leaseID, executionRunID, ServerSlug(server))
 		runReq.RunID = executionRunID
 		runReq.Env = envSelection.Effective
-		if err := a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), &cfg, &server, target, repo.Root, *reclaim, false, nil); err != nil {
+		if err := a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), &cfg, &server, target, identityRepo.Root, *reclaim, false, nil); err != nil {
 			return true, err
 		}
 		if runtimeScope.selected() && isWindowsWSL2Target(target) {
@@ -2816,7 +2848,7 @@ afterSync:
 		if *timingJSON || timingRecordEnabled || observation != nil {
 			total := time.Since(timings.started)
 			report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, ServerSlug(server), timings, total, 0, actionsURL)
-			populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, nil)
+			populateRunTimingMetadata(&report, cfg, identityRepo, server, leaseID, executionRunID, workdir, nil)
 			report.Label = runLabelValue
 			finalTimingReport = &report
 		}
@@ -3338,7 +3370,7 @@ afterSync:
 	}
 	var runArtifacts []runArtifact
 	if code == 0 && streamErr == nil && len(requiredArtifactChanges) > 0 {
-		collected, err := collectChangedArtifacts(repo.Root, executionRunID, leaseID, artifactChangeResults, afterArtifacts)
+		collected, err := collectChangedArtifacts(identityRepo.Root, executionRunID, leaseID, artifactChangeResults, afterArtifacts)
 		if err != nil {
 			return recordFailure(err)
 		}
@@ -3350,7 +3382,7 @@ afterSync:
 		}
 	}
 	if code == 0 && len(requiredArtifactChanges) == 0 && len(runArtifactGlobs) > 0 {
-		collected, artifactOutput, err := collectRunArtifactGlobs(ctx, target, workdir, repo.Root, executionRunID, leaseID, runArtifactGlobs)
+		collected, artifactOutput, err := collectRunArtifactGlobs(ctx, target, workdir, identityRepo.Root, executionRunID, leaseID, runArtifactGlobs)
 		if err != nil {
 			return recordFailure(err)
 		}
@@ -3387,7 +3419,7 @@ afterSync:
 	}
 	report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, ServerSlug(server), timings, total, code, actionsURL)
 	applyArtifactFailureOutcome(&report, artifactFailure, artifactFailureContextErr)
-	populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, runArtifacts)
+	populateRunTimingMetadata(&report, cfg, identityRepo, server, leaseID, executionRunID, workdir, runArtifacts)
 	report.Label = runLabelValue
 	report.SchemaValidations = schemaValidationResults
 	report.ArtifactChanges = artifactChangeResults
@@ -3429,7 +3461,7 @@ afterSync:
 	if runLabelValue != "" {
 		labelField = fmt.Sprintf(" label=%q", runLabelValue)
 	}
-	fmt.Fprintf(a.Stderr, "run details provider=%s lease=%s slug=%s run=%s%s type=%s repo=%s workdir=%s actions=%s stop_command=%q idle_timeout=%s\n", cfg.Provider, leaseID, blank(ServerSlug(server), "-"), executionRunID, labelField, blank(server.ServerType.Name, "-"), repo.Root, workdir, blank(actionsURL, "-"), report.StopCommand, cfg.IdleTimeout)
+	fmt.Fprintf(a.Stderr, "run details provider=%s lease=%s slug=%s run=%s%s type=%s repo=%s workdir=%s actions=%s stop_command=%q idle_timeout=%s\n", cfg.Provider, leaseID, blank(ServerSlug(server), "-"), executionRunID, labelField, blank(server.ServerType.Name, "-"), identityRepo.Root, workdir, blank(actionsURL, "-"), report.StopCommand, cfg.IdleTimeout)
 	if *timingJSON || timingRecordEnabled || observation != nil {
 		finalTimingReport = &report
 	}

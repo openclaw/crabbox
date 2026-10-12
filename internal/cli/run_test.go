@@ -1152,7 +1152,7 @@ func TestRunDelegatedArchiveSyncValidatesSourceBeforeProviderCall(t *testing.T) 
 		if !AsExitError(err, &exitErr) || exitErr.Code != 6 {
 			t.Fatalf("error=%v, want exit 6\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
 		}
-		for _, want := range []string{root, "native Jujutsu workspace", "Git-manifest-based", "wrong revision", "colocated Git workspace", "jj git init --git-repo=.", "--no-sync"} {
+		for _, want := range []string{root, "native Jujutsu workspace", "install jj", "--no-sync"} {
 			if !strings.Contains(exitErr.Message, want) {
 				t.Fatalf("message missing %q: %q", want, exitErr.Message)
 			}
@@ -1237,7 +1237,7 @@ func TestRunDelegatedArchiveSyncValidatesSourceBeforeProviderCall(t *testing.T) 
 func runWorkdirCases() []runWorkdirCase {
 	return []runWorkdirCase{
 		{name: "ordinary non-Git", diagnostic: "not a Git repository", guidance: []string{"git init", "--no-sync"}},
-		{name: "native Jujutsu", native: true, diagnostic: "native Jujutsu workspace", guidance: []string{"Git-manifest-based", "wrong revision", "colocated Git workspace", "jj git init --git-repo=.", "--no-sync"}},
+		{name: "native Jujutsu", native: true, diagnostic: "native Jujutsu workspace", guidance: []string{"install jj", "--no-sync"}},
 	}
 }
 

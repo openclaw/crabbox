@@ -1092,13 +1092,8 @@ func TestSyncManifestNativeJujutsuReturnsActionableError(t *testing.T) {
 	for _, want := range []string{
 		root,
 		"native Jujutsu workspace",
-		"Git-manifest-based",
-		"native Jujutsu sync is not supported yet",
-		"wrong revision",
-		"colocated Git workspace",
-		"from an existing Git checkout",
-		"jj git init --git-repo=.",
-		"does not convert the current native workspace in place",
+		"jj installed",
+		"exact @ tree",
 		"--no-sync",
 	} {
 		if !strings.Contains(msg, want) {

@@ -374,13 +374,11 @@ common caches stay out. Default excludes also cover common generated churn such
 as `.ignored`, `.vite`, `playwright-report`, `test-results`, and local
 `.crabbox` log/capture directories.
 
-Jujutsu workspaces are supported for sync only when `.jj` is colocated with
-same-root `.git` metadata. Native Jujutsu revision mapping is not supported yet;
-`run` fails before lease acquisition or ready-pool borrowing instead of risking
-sync of an outer Git checkout's revision. Use a colocated Git workspace or pass
-`--no-sync` with a provider that supports it to run without transferring local
-files. See
-[sync](../features/sync.md#jujutsu-workspaces) for safe initialization guidance.
+Native Git-backed Jujutsu workspaces use installed `jj` to snapshot and sync the
+exact `@` tree, including octopus merges and working-copy edits. Use an ordinary
+SSH provider with `--no-hydrate`; ambiguous or conflicted revisions fail before
+leasing. Colocated `.jj` + `.git` workspaces retain the Git path. See
+[sync](../features/sync.md#jujutsu-workspaces) for bookmark mapping and limitations.
 
 Before the first rsync into a Git checkout, Crabbox seeds the remote worktree
 from your `origin` remote so the first sync is a dirty-tree overlay instead of a

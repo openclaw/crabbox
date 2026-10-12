@@ -4,6 +4,8 @@
 
 ### Added
 
+- Sync: support native Git-backed Jujutsu workspaces by syncing the exact `@` tree, including octopus merges and working-copy edits, with explicit origin-bookmark seeding and fail-closed revision checks. Thanks @atimmer.
+
 - Coordinator: add default-off maximum-age policies and explicit admin rollout canaries for retained AWS leases, with verified stop permissions, visible stop/deletion deadlines, bounded extensions, and root-disk cleanup. [PR 2759](https://github.com/openclaw/crabbox/pull/2759). Thanks @vincentkoc.
 - Serve: run `crabbox serve` on trusted machines to donate spare CPU as owner-only container leases (`--provider serve`), with outbound coordinator polling, local deadline enforcement, `--ssh-ports` pools, warm package caches, per-user service install, and opt-in capacity fallback. Coordinators enable it per owner with `CRABBOX_SERVE_ALLOWED_OWNERS` (off by default). [PR 2768](https://github.com/openclaw/crabbox/pull/2768).
 
@@ -18,7 +20,7 @@
 - Coordinator/CLI: return structured retryable 503 responses with Retry-After for Durable Object overload/reset instead of Cloudflare 1101, and retry reads and run admission with bounded backoff. [PR 2777](https://github.com/openclaw/crabbox/pull/2777).
 - Coordinator: allow explicitly configured capacity admins to use their owner allowance when shared fleet or org caps are full, while preserving spending limits and ordinary admission.
 
-- Coordinator: preserve deployment-managed capacity-admin membership across deploys without replacing secret-backed members or raising ordinary owner limits.
+- Coordinator: preserve deployment-managed capacity-admin membership across deploys without replacing secret-backed members or raising ordinary owner limits. [PR 2776](https://github.com/openclaw/crabbox/pull/2776). Thanks @vincentkoc.
 - Coordinator: reconcile org-wide external runner inventories across owners, deduplicate visible runners with two bounded streaming scans, hide observations older than two hours, and prune rows last seen more than seven days ago. [PR 2779](https://github.com/openclaw/crabbox/pull/2779).
 - Coordinator: preserve leading zero bytes in generated Ed25519 SSH host keys so the public identity and injected private key remain a valid pair.
 - Bound coordinator storage scans for pools, image catalogs, checkpoints, and dynamic runner indexes to uncached pages.

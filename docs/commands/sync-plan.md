@@ -1,5 +1,10 @@
 # sync-plan
 
+For native Git-backed Jujutsu workspaces, installed `jj` selects and snapshots
+the exact `@` tree. JSON output includes `source: "jj"`, the original workspace
+`root`, and the full selected `revision`; see
+[Jujutsu sync](../features/sync.md#jujutsu-workspaces).
+
 `crabbox sync-plan` prints the local sync manifest and its size hotspots
 without leasing a box. Use it to preview what `crabbox run` would upload
 before paying for a cold sync, or to confirm that artifacts dropped out of
