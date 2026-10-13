@@ -36,6 +36,7 @@ export interface RetainedSettings {
   graceSeconds: number;
   budget: number;
   lookupBudget: number;
+  intervalSeconds: number;
 }
 function integer(value: string | undefined, fallback: number, min: number, max: number): number {
   if (!value || !/^\d+$/.test(value)) return fallback;
@@ -50,6 +51,7 @@ export function retainedReconcileSettings(env: Env): RetainedSettings {
     graceSeconds: integer(env.CRABBOX_RETAINED_RECONCILE_GRACE_SECONDS, 3600, 60, 31_536_000),
     budget: integer(env.CRABBOX_RETAINED_RECONCILE_BUDGET, 200, 1, 200),
     lookupBudget: integer(env.CRABBOX_RETAINED_RECONCILE_LOOKUP_BUDGET, 64, 5, 256),
+    intervalSeconds: integer(env.CRABBOX_RETAINED_RECONCILE_INTERVAL_SECONDS, 120, 60, 86_400),
   };
 }
 function emptyState(): RetainedReconcileState {
@@ -63,6 +65,45 @@ export async function retainedReconcileStatus(storage: CoordinatorStorage, env: 
       allowConcurrency: true,
     })) ?? emptyState()),
   };
+}
+
+export async function retainedReconcileDue(
+  storage: CoordinatorStorage,
+  env: Env,
+  now: number,
+): Promise<boolean> {
+  const settings = retainedReconcileSettings(env);
+  if (settings.mode === "off") return false;
+  const state = await storage.get<RetainedReconcileState>(retainedReconcileStateKey, {
+    noCache: true,
+    allowConcurrency: true,
+  });
+  const lastPass = Date.parse(state?.version === 1 ? (state.lastPassAt ?? "") : "");
+  return !Number.isFinite(lastPass) || now >= lastPass + settings.intervalSeconds * 1000;
+}
+
+// Called only after the failed pass has unwound, under the provider maintenance lock.
+export async function recordRetainedReconcileFailure(
+  storage: CoordinatorStorage,
+  started: number,
+): Promise<void> {
+  const stored = await storage.get<RetainedReconcileState>(retainedReconcileStateKey, {
+    noCache: true,
+    allowConcurrency: true,
+  });
+  const state = stored?.version === 1 ? stored : emptyState();
+  await storage.put(retainedReconcileStateKey, {
+    ...state,
+    lastPassAt: new Date(started).toISOString(),
+    lastPass: { counters: { all: { pass_failed: 1 } }, sample: [] },
+    counters: {
+      ...state.counters,
+      all: {
+        ...state.counters["all"],
+        pass_failed: (state.counters["all"]?.["pass_failed"] ?? 0) + 1,
+      },
+    },
+  } satisfies RetainedReconcileState);
 }
 
 export type RetainedObservation = {

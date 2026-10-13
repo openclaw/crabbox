@@ -12,6 +12,7 @@ import {
 import {
   maintainRetainedLeases,
   observeAWSRetained,
+  retainedReconcileDue,
   retainedReconcileSettings,
   retainedReconcileStatus,
   retainedUnresolvedReason,
@@ -102,6 +103,82 @@ async function fixture(records = [lease()]) {
 }
 afterEach(() => vi.restoreAllMocks());
 describe("retained lease reconciliation", () => {
+  it.each([
+    [undefined, 120],
+    ["60", 60],
+    ["86400", 86400],
+    ["59", 120],
+    ["86401", 120],
+    ["1.5", 120],
+    ["120seconds", 120],
+    ["", 120],
+    ["9007199254740992", 120],
+  ])("parses interval %s as %s seconds", (value, expected) => {
+    expect(
+      retainedReconcileSettings(
+        (value === undefined ? {} : { CRABBOX_RETAINED_RECONCILE_INTERVAL_SECONDS: value }) as Env,
+      ).intervalSeconds,
+    ).toBe(expected);
+  });
+  it("skips index and AWS reads until the persisted pass is due, including after restart", async () => {
+    const f = await fixture();
+    const env = {} as Env;
+    expect(await retainedReconcileDue(f.storage, env, epoch)).toBe(true);
+    await f.run();
+    expect((await retainedReconcileStatus(f.storage, env)).lastPassAt).toBe(
+      new Date(epoch).toISOString(),
+    );
+    f.storage.listOptions.length = 0;
+    vi.mocked(f.hooks.observe!).mockClear();
+    const reads: string[] = [];
+    f.storage.beforeGet = async (key) => {
+      reads.push(key);
+    };
+    const restartStorage = new ProvisioningTestStorage();
+    restartStorage.values = structuredClone(f.storage.values);
+    expect(await retainedReconcileDue(restartStorage, env, epoch + 119_999)).toBe(false);
+    if (await retainedReconcileDue(f.storage, env, epoch + 119_999)) await f.run();
+    expect(f.storage.listOptions).toEqual([]);
+    expect(reads).toEqual(["retained-reconcile-state"]);
+    expect(f.hooks.observe).not.toHaveBeenCalled();
+    f.setTime(epoch + 120_000);
+    expect(await retainedReconcileDue(f.storage, env, epoch + 120_000)).toBe(true);
+    await f.run();
+    expect(f.hooks.observe).toHaveBeenCalledOnce();
+    expect((await retainedReconcileStatus(f.storage, env)).lastPassAt).toBe(
+      new Date(epoch + 120_000).toISOString(),
+    );
+  });
+  it("uses the configured interval and ignores invalid persisted times", async () => {
+    const f = await fixture();
+    await f.run();
+    const env = { CRABBOX_RETAINED_RECONCILE_INTERVAL_SECONDS: "60" } as Env;
+    expect(await retainedReconcileDue(f.storage, env, epoch + 59_999)).toBe(false);
+    expect(await retainedReconcileDue(f.storage, env, epoch + 60_000)).toBe(true);
+    expect(
+      await retainedReconcileDue(
+        f.storage,
+        { CRABBOX_RETAINED_RECONCILE: "off" } as Env,
+        epoch + 120_000,
+      ),
+    ).toBe(false);
+    const state = await retainedReconcileStatus(f.storage, env);
+    await f.storage.put("retained-reconcile-state", { ...state, lastPassAt: "invalid" });
+    expect(await retainedReconcileDue(f.storage, env, epoch)).toBe(true);
+  });
+  it("lets confirmation transaction failures escape without publishing partial cleanup", async () => {
+    const f = await fixture();
+    await f.run();
+    const original = await f.read();
+    f.setTime(epoch + 600_000);
+    f.storage.failKey = leaseCurrentKey(original.id);
+    await expect(f.run()).rejects.toThrow("injected storage failure");
+    expect(await f.read()).toEqual(original);
+    expect(await f.storage.get(leaseCurrentKey(original.id))).toBeDefined();
+    expect((await retainedReconcileStatus(f.storage, {} as Env)).lastPassAt).toBe(
+      new Date(epoch).toISOString(),
+    );
+  });
   it("reads only bounded current-index pages and resumes after restart", async () => {
     const f = await fixture(Array.from({ length: 5 }, (_, n) => lease(n + 1)));
     f.storage.values.set(

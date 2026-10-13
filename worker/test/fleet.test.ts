@@ -122,6 +122,7 @@ import { providerReconciliationFingerprint } from "../src/provider-reconciliatio
 import { ProvisioningAttemptsError } from "../src/provisioning-attempts";
 import { ReadyPoolAccess, portablePoolReservationKey } from "../src/ready-pool-access";
 import { setPoolWake } from "../src/ready-pool-wake";
+import * as retainedReconcile from "../src/retained-lease-reconcile";
 import { verifyTerminalReceipt } from "../src/run-receipt";
 import {
   runtimeAdapterDesktopRelayTimeoutMs,
@@ -16423,6 +16424,58 @@ describe("fleet lease identity and idle", () => {
       "198.51.100.44/32",
     ]);
   });
+
+  it("does not run retained reconciliation before its persisted deadline", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    await fleet.ready();
+    storage.seed("retained-reconcile-state", {
+      version: 1,
+      lastPassAt: new Date().toISOString(),
+    });
+    const reconcile = vi.spyOn(retainedReconcile, "maintainRetainedLeases");
+    await fleet.alarm();
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "re-arms the alarm when retained reconciliation throws (failure persistence unavailable: %s)",
+    async (storageUnavailable) => {
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage);
+      await fleet.ready();
+      storage.seed(
+        "lease:cbx_000000000001",
+        testLease({
+          id: "cbx_000000000001",
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        }),
+      );
+      vi.spyOn(retainedReconcile, "maintainRetainedLeases").mockRejectedValue(
+        new Error("private-provider-error-body"),
+      );
+      if (storageUnavailable) {
+        storage.beforePut = async (key) => {
+          if (key === "retained-reconcile-state") throw new Error("storage unavailable");
+        };
+      }
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      await expect(fleet.alarm()).resolves.toBeUndefined();
+      expect(storage.alarm()).toBeGreaterThan(Date.now());
+      expect(log).toHaveBeenCalledOnce();
+      expect(JSON.parse(log.mock.calls[0]![0] as string)).toEqual({
+        event: "coordinator.retained_reconcile",
+        at: expect.any(String),
+        outcome: "pass_failed",
+      });
+      expect(storage.value<{ lastPass: unknown }>("retained-reconcile-state")?.lastPass).toEqual(
+        storageUnavailable ? undefined : { counters: { all: { pass_failed: 1 } }, sample: [] },
+      );
+      expect(await retainedReconcile.retainedReconcileDue(storage, {} as Env, Date.now())).toBe(
+        storageUnavailable,
+      );
+    },
+  );
 
   it("does not postpone the first AWS orphan sweep alarm on repeated scheduling", async () => {
     const storage = new MemoryStorage();

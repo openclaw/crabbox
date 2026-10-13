@@ -704,7 +704,11 @@ make name-addressed resources equivalent to immutable-ID deletion targets.
 The existing maintenance alarm and scheduled trigger continuously reconcile terminal
 members of `lease-current:`. There is no history scan or new service. A persisted
 cursor resumes across passes and runtime restarts; an unready current index delays
-reconciliation without falling back to `lease:`. Ordinary maintenance runs first;
+reconciliation without falling back to `lease:`. Passes run only when due, using
+the persisted last-pass time, and share the provider-maintenance lock with orphan
+sweeps. Unexpected failures log one structured `coordinator.retained_reconcile`
+error and record `pass_failed` when storage is available; they never prevent alarm
+re-arming. Ordinary maintenance runs first;
 provider reads run outside the lifecycle mutex and discovery leaves the storage
 input gate open. Each pass hydrates at most 200 current-index entries and has a
 separate AWS request budget. AWS batches exact instance IDs by recorded account
@@ -758,6 +762,7 @@ from current settings.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `CRABBOX_RETAINED_RECONCILE` | `on` | `on` confirms complete AWS cleanup; `report` observes and logs without lease mutations; `off` disables passes. Unknown values disable it. |
+| `CRABBOX_RETAINED_RECONCILE_INTERVAL_SECONDS` | `120` | Minimum interval between pass starts, including recorded failures, integer 60–86400. A due pass runs on the next alarm or scheduled maintenance trigger. |
 | `CRABBOX_RETAINED_RECONCILE_DELETE` | `0` | Only exact `1` allows AWS owned deletion in `on` mode. |
 | `CRABBOX_RETAINED_RECONCILE_GRACE_SECONDS` | `3600` | Terminal age before deletion, integer 60–31536000. |
 | `CRABBOX_RETAINED_RECONCILE_BUDGET` | `200` | Maximum current-index entries hydrated per pass, integer 1–200. |

@@ -43,7 +43,12 @@ import {
   type ProviderPoolAccess,
 } from "./ready-pool-access";
 import { setPoolWake } from "./ready-pool-wake";
-import { maintainRetainedLeases, retainedReconcileStatus } from "./retained-lease-reconcile";
+import {
+  maintainRetainedLeases,
+  recordRetainedReconcileFailure,
+  retainedReconcileDue,
+  retainedReconcileStatus,
+} from "./retained-lease-reconcile";
 import { ServeCoordinator, serveEnabled, serveDisabledResponse } from "./serve";
 import { serveCloudProvider } from "./serve-provider";
 import { generateSSHHostKeyPair } from "./ssh-host-key";
@@ -3411,10 +3416,29 @@ export class FleetCoordinator {
     await this.runAWSOrphanSweepIfDue("alarm");
     await this.runAzureOrphanSweepIfDue("alarm");
     await this.reconcileAWSIngressIfIdle();
-    await maintainRetainedLeases(this.state.storage, this.env, {
-      exclusive: (work) => this.state.runExclusive(work),
-      ownsProvisioning: (id) => provisioningOwnsLease(this.state.storage, id),
-      deleteLease: (lease, guard, signal) => this.deleteLeaseServer(lease, guard, signal),
+    await this.providerMaintenanceLock.run(async () => {
+      const started = Date.now();
+      try {
+        if (!(await retainedReconcileDue(this.state.storage, this.env, started))) return;
+        await maintainRetainedLeases(this.state.storage, this.env, {
+          exclusive: (work) => this.state.runExclusive(work),
+          ownsProvisioning: (id) => provisioningOwnsLease(this.state.storage, id),
+          deleteLease: (lease, guard, signal) => this.deleteLeaseServer(lease, guard, signal),
+        });
+      } catch {
+        console.error(
+          JSON.stringify({
+            event: "coordinator.retained_reconcile",
+            at: new Date(started).toISOString(),
+            outcome: "pass_failed",
+          }),
+        );
+        try {
+          await recordRetainedReconcileFailure(this.state.storage, started);
+        } catch {
+          // Storage may itself be unavailable; alarm re-arming must still run.
+        }
+      }
     });
     await this.state.runExclusive(async () => {
       await this.scheduleAlarm(alarmArmRevision);
