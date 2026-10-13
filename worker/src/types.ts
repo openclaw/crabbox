@@ -12,6 +12,13 @@ export interface AWSCredentials {
 export type AWSCredentialProvider = () => Promise<AWSCredentials>;
 
 export interface Env {
+  CRABBOX_RETAINED_RECONCILE?: string;
+  CRABBOX_RETAINED_RECONCILE_DELETE?: string;
+  CRABBOX_RETAINED_RECONCILE_GRACE_SECONDS?: string;
+  CRABBOX_RETAINED_RECONCILE_BUDGET?: string;
+  CRABBOX_RETAINED_RECONCILE_LOOKUP_BUDGET?: string;
+  CRABBOX_RETAINED_RECONCILE_INTERVAL_SECONDS?: string;
+
   CRABBOX_LEASE_LIFETIME_MODE?: string;
   CRABBOX_BATCH_MAX_AGE_SECONDS?: string;
   CRABBOX_INTERACTIVE_MAX_AGE_SECONDS?: string;
@@ -482,6 +489,15 @@ export interface HetznerCleanupEvidence {
 export type ProviderCleanupEvidence = HetznerCleanupEvidence;
 
 export interface LeaseRecord {
+  retainedReconcileDeleteClaim?: string;
+  retainedReconcileDeleteCredentialFingerprint?: string;
+  retainedReconcileObservation?: {
+    fingerprint: string;
+    credentialFingerprint: string;
+    firstAbsentAt: string;
+    lastAbsentAt: string;
+  };
+  cleanupConfirmedBy?: "retained-reconcile";
   serve?: import("./serve").ServeAssignment;
   serveIntent?: string;
   sshHostKeyFingerprint?: string;

@@ -454,22 +454,26 @@ type imageDeleteKongCmd struct {
 }
 
 type adminKongCmd struct {
-	ExtendLifetime   adminExtendLifetimeKongCmd   `cmd:"" name:"extend-lifetime" passthrough:"" help:"Extend an enrolled lease deadline before stopping starts."`
-	LifetimeReadback adminLifetimeReadbackKongCmd `cmd:"" name:"lifetime-readback" passthrough:"" help:"Read coordinator-observed instance and root volume state."`
-	Leases           adminLeasesKongCmd           `cmd:"" passthrough:"" help:"List coordinator lease records."`
-	LeaseAudit       adminLeaseAuditKongCmd       `cmd:"" name:"lease-audit" passthrough:"" help:"Check expired coordinator leases against cloud provider state."`
-	Providers        adminProvidersKongCmd        `cmd:"" passthrough:"" help:"Inspect provider identities and policies."`
-	Hosts            adminHostsKongCmd            `cmd:"" passthrough:"" help:"List, allocate, or release provider hosts."`
-	AWSIdentity      adminAWSIdentityKongCmd      `cmd:"" name:"aws-identity" passthrough:"" help:"Show the coordinator AWS caller identity."`
-	AWSPolicy        adminAWSPolicyKongCmd        `cmd:"" name:"aws-policy" passthrough:"" help:"Print the baseline brokered AWS IAM policy."`
-	MacHosts         adminMacHostsKongCmd         `cmd:"" name:"mac-hosts" passthrough:"" help:"List, allocate, or release AWS EC2 Mac Dedicated Hosts."`
-	Release          adminReleaseKongCmd          `cmd:"" passthrough:"" help:"Mark a lease released."`
-	Delete           adminDeleteKongCmd           `cmd:"" passthrough:"" help:"Delete the backing server and mark the lease released."`
+	ExtendLifetime    adminExtendLifetimeKongCmd    `cmd:"" name:"extend-lifetime" passthrough:"" help:"Extend an enrolled lease deadline before stopping starts."`
+	RetainedReconcile adminRetainedReconcileKongCmd `cmd:"" name:"retained-reconcile" passthrough:"" help:"Inspect retained lease reconciliation progress."`
+	LifetimeReadback  adminLifetimeReadbackKongCmd  `cmd:"" name:"lifetime-readback" passthrough:"" help:"Read coordinator-observed instance and root volume state."`
+	Leases            adminLeasesKongCmd            `cmd:"" passthrough:"" help:"List coordinator lease records."`
+	LeaseAudit        adminLeaseAuditKongCmd        `cmd:"" name:"lease-audit" passthrough:"" help:"Check expired coordinator leases against cloud provider state."`
+	Providers         adminProvidersKongCmd         `cmd:"" passthrough:"" help:"Inspect provider identities and policies."`
+	Hosts             adminHostsKongCmd             `cmd:"" passthrough:"" help:"List, allocate, or release provider hosts."`
+	AWSIdentity       adminAWSIdentityKongCmd       `cmd:"" name:"aws-identity" passthrough:"" help:"Show the coordinator AWS caller identity."`
+	AWSPolicy         adminAWSPolicyKongCmd         `cmd:"" name:"aws-policy" passthrough:"" help:"Print the baseline brokered AWS IAM policy."`
+	MacHosts          adminMacHostsKongCmd          `cmd:"" name:"mac-hosts" passthrough:"" help:"List, allocate, or release AWS EC2 Mac Dedicated Hosts."`
+	Release           adminReleaseKongCmd           `cmd:"" passthrough:"" help:"Mark a lease released."`
+	Delete            adminDeleteKongCmd            `cmd:"" passthrough:"" help:"Delete the backing server and mark the lease released."`
 }
 type adminLeasesKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type adminExtendLifetimeKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adminRetainedReconcileKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type adminLifetimeReadbackKongCmd struct {
@@ -1010,4 +1014,8 @@ func stripKongCommandPath(args []string, path ...string) []string {
 		out = out[1:]
 	}
 	return out
+}
+
+func (c *adminRetainedReconcileKongCmd) Run(ctx context.Context, app App) error {
+	return app.adminRetainedReconcile(ctx, c.Args)
 }

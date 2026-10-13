@@ -785,6 +785,20 @@ type JSONListBackend interface {
 	ListJSON(ctx context.Context, req ListRequest) (any, error)
 }
 
+// StreamingListBackend emits bounded pages in display order. Callbacks are
+// synchronous: returning an error cancels outstanding reads.
+type StreamingListBackend interface {
+	Backend
+	StreamList(context.Context, ListRequest, func(ListPage) error) error
+}
+
+type ListPage struct {
+	Servers []Server
+	JSON    any
+	Section string
+	More    bool
+}
+
 // DelegatedFixedWarmupBackend explicitly opts into durable delegated acquisition.
 type DelegatedFixedWarmupBackend interface {
 	WarmupFixed(context.Context, FixedWarmupRequest) error
@@ -1411,9 +1425,10 @@ type TouchRequest struct {
 }
 
 type ListRequest struct {
-	Options LeaseOptions
-	All     bool
-	Refresh bool
+	Options  LeaseOptions
+	All      bool
+	Refresh  bool
+	Retained bool
 }
 
 type RunRequest struct {
@@ -2219,16 +2234,19 @@ func RejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	return rejectDelegatedSyncOptionsForSpec(spec, req)
 }
 
-func renderServerList(stdout io.Writer, servers []Server) {
+func renderServerList(stdout io.Writer, servers []Server) error {
 	for _, s := range servers {
 		extra := ""
 		if orphan := strings.TrimSpace(s.Labels["orphan"]); orphan != "" {
 			extra = " " + orphan
 		}
 		extra += lifetimePolicySummary(s.LifetimePolicy)
-		fmt.Fprintf(stdout, "%-20s %-28s %-12s %-14s %-15s lease=%s slug=%s keep=%s target=%s%s\n",
-			s.DisplayID(), s.Name, s.Status, s.ServerType.Name, s.PublicNet.IPv4.IP, s.Labels["lease"], blank(ServerSlug(s), "-"), s.Labels["keep"], s.Labels["target"], extra)
+		if _, err := fmt.Fprintf(stdout, "%-20s %-28s %-12s %-14s %-15s lease=%s slug=%s keep=%s target=%s%s\n",
+			s.DisplayID(), s.Name, s.Status, s.ServerType.Name, s.PublicNet.IPv4.IP, s.Labels["lease"], blank(ServerSlug(s), "-"), s.Labels["keep"], s.Labels["target"], extra); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 const bestEffortLeaseTouchTimeout = 20 * time.Second

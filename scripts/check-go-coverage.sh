@@ -21,7 +21,27 @@ trap cleanup EXIT
 profile="$work_dir/coverage.out"
 core_profile="$work_dir/core-coverage.out"
 
-go test -timeout=20m ./... -covermode=atomic -coverprofile="$profile"
+if [[ $# -eq 1 || $# -eq 0 ]]; then
+  go test -count=1 -timeout=20m ./... -covermode=atomic -coverprofile="$profile"
+elif [[ $# -eq 3 && "$2" == --profiles ]]; then
+  printf 'mode: atomic\n' >"$profile"
+  for name in core cli-0 cli-1 cli-2; do
+    input="$3/$name.out"
+    if [[ ! -f "$input" ]] || [[ "$(head -n 1 "$input")" != 'mode: atomic' ]] ||
+      ! awk 'NR > 1 && NF { found = 1 } END { exit !found }' "$input"; then
+      echo "missing, empty, or non-atomic coverage profile: $name" >&2
+      exit 1
+    fi
+    tail -n +2 "$input" >>"$profile"
+  done
+else
+  echo "usage: $0 [threshold] [--profiles directory]" >&2
+  exit 2
+fi
+
+# Go's parser merges duplicate atomic blocks. Validate the whole input before
+# filtering, so corrupt records outside the gated files cannot disappear.
+go tool cover -func="$profile" >/dev/null
 
 awk '
   NR == 1 {

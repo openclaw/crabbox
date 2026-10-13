@@ -1,4 +1,7 @@
 import importlib.util
+import contextlib
+import io
+import json
 import pathlib
 import re
 import subprocess
@@ -16,12 +19,13 @@ class ShardTests(unittest.TestCase):
     def test_partition_includes_every_test_once(self):
         names = [f"TestCase{i}" for i in range(101)] + ["FuzzInput", "Example", "Example_run"]
         listing = "\n".join(names + ["BenchmarkIgnored", "ok package 0.1s"])
-        groups = [shard.select_tests(listing, i, 4) for i in range(4)]
-        self.assertEqual(sorted(sum(groups, [])), sorted(names))
-        self.assertEqual({len(g) for g in groups}, {26})
-        for group in groups:
-            pattern = re.compile("^(" + "|".join(group) + ")$")
-            self.assertEqual([n for n in names if pattern.fullmatch(n)], [n for n in names if n in group])
+        for count in (3, 4):
+            groups = [shard.select_tests(listing, i, count) for i in range(count)]
+            self.assertEqual(sorted(sum(groups, [])), sorted(names))
+            self.assertLessEqual(max(map(len, groups)) - min(map(len, groups)), 1)
+            for group in groups:
+                pattern = re.compile("^(" + "|".join(group) + ")$")
+                self.assertEqual([n for n in names if pattern.fullmatch(n)], [n for n in names if n in group])
 
     def test_bad_or_empty_selection_fails(self):
         for index, count in [(-1, 4), (4, 4), (0, 0), (0, 4)]:
@@ -47,6 +51,45 @@ class ShardTests(unittest.TestCase):
             "go", "test", "-race", "-count=1", "-timeout=10m", "./internal/cli",
             "-run", "^(FuzzInput|TestB)$",
         ])
+
+    @patch.object(shard, "coverage_test", return_value=7)
+    @patch.object(shard.subprocess, "run")
+    def test_coverage_is_explicit_and_propagates_failure(self, run, coverage):
+        run.return_value = subprocess.CompletedProcess([], 0, "TestA\nTestB\nExample\nFuzzInput\n", "")
+        with patch("sys.argv", ["test-go-shard.py", "1", "3", "--coverprofile", "cli-1.out"]):
+            self.assertEqual(shard.main(), 7)
+        self.assertEqual(run.call_args.args[0], [
+            "go", "test", "-count=1", "-timeout=20m", "-covermode=atomic", "./internal/cli", "-list", ".",
+        ])
+        self.assertEqual(coverage.call_args.args[0], [
+            "go", "test", "-count=1", "-timeout=20m", "-covermode=atomic", "./internal/cli",
+            "-run", "^(FuzzInput)$", "-coverprofile=cli-1.out",
+        ])
+
+    @patch.object(shard.subprocess, "Popen")
+    def test_timings_are_bounded_and_do_not_sum_subtests(self, popen):
+        child = popen.return_value.__enter__.return_value
+        events = [{"Action": "pass", "Test": f"Test{i}", "Elapsed": i} for i in range(20)]
+        events += [{"Action": "pass", "Test": "Test19/child", "Elapsed": 999},
+                   {"Action": "pass", "Package": "fixture", "Elapsed": 1000},
+                   {"Action": "output", "Output": "diagnostic\n"}]
+        child.stdout = [json.dumps(event) + "\n" for event in events]
+        child.wait.return_value = 0
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(shard.coverage_test(["go", "test"]), 0)
+        lines = output.getvalue().splitlines()
+        self.assertEqual(lines[0], "diagnostic")
+        self.assertEqual(lines[2:], [f"  {i:.3f} Test{i}" for i in reversed(range(10, 20))])
+        self.assertEqual(popen.call_args.args[0], ["go", "test", "-json"])
+
+    @patch.object(shard.subprocess, "Popen")
+    def test_bad_json_or_failed_test_cannot_succeed(self, popen):
+        child = popen.return_value.__enter__.return_value
+        for result, lines, expected in [(9, [], 9), (0, ["not JSON\n"], 1)]:
+            child.stdout, child.wait.return_value = lines, result
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(shard.coverage_test(["go", "test"]), expected)
 
 
 if __name__ == "__main__":

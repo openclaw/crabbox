@@ -1146,6 +1146,9 @@ func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
 		}
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "run" {
 			runCalls++
+			if got := testBlacksmithFlag(req.Args, "--wait-timeout"); got != "1m30s" {
+				t.Fatalf("artifact readiness timeout=%q, want 1m30s", got)
+			}
 			return runSyntheticBlacksmithCommand(t, t.Context(), req)
 		}
 		if len(req.Args) >= 2 && req.Args[0] == "testbox" && req.Args[1] == "stop" {
@@ -1155,6 +1158,7 @@ func TestBlacksmithRunCollectsArtifactsBeforeOneShotCleanup(t *testing.T) {
 	}}
 	cfg := core.BaseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
+	cfg.Blacksmith.WaitTimeout = 90 * time.Second
 	backend := newTestBlacksmithBackend(cfg, runner)
 	result, err := backend.Run(context.Background(), core.RunRequest{
 		Repo:                  core.Repo{Root: repo},
@@ -1801,6 +1805,7 @@ func TestConfigShowCompleteRawContract(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := core.Config{Provider: "unselected-display"}
 			cfg.Blacksmith = tc.config
+			tc.fields = append(tc.fields, core.ProviderConfigShowField{JSONName: "waitTimeout", JSONValue: "0s", TextName: "wait_timeout", TextValue: "0s"})
 			want := core.ProviderConfigShowSection{JSONKey: "blacksmith", TextLabel: "blacksmith", Providers: []string{"blacksmith-testbox"}, Fields: tc.fields}
 			for _, selection := range []string{"unselected-display", "blacksmith-testbox"} {
 				cfg.Provider = selection

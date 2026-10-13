@@ -51,7 +51,7 @@ func syntheticBlacksmithCommand(t *testing.T, req core.LocalCommandRequest) stri
 	if len(args) >= 2 && args[0] == "testbox" && args[1] == "run" {
 		for args = args[2:]; len(args) > 0; {
 			switch args[0] {
-			case "--id", "--ssh-private-key":
+			case "--id", "--ssh-private-key", "--wait-timeout":
 				if len(args) < 2 {
 					t.Fatal("missing native option value")
 				}

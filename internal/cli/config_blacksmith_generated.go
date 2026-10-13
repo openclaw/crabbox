@@ -13,6 +13,7 @@ type fileBlacksmithConfig struct {
 	Ref         string `yaml:"ref,omitempty"`
 	IdleTimeout string `yaml:"idleTimeout,omitempty"`
 	Debug       *bool  `yaml:"debug,omitempty"`
+	WaitTimeout string `yaml:"waitTimeout,omitempty"`
 }
 
 func defaultBlacksmithConfig() BlacksmithConfig {
@@ -38,16 +39,17 @@ func (cfg *BlacksmithConfig) applyEnvPrefix() (BlacksmithConfigApplied, error) {
 
 func (cfg *BlacksmithConfig) applyEnvSuffix() (BlacksmithConfigApplied, error) {
 	var applied BlacksmithConfigApplied
-	err := applyConfigEnvironment(cfg, &applied, 4, 6)
+	err := applyConfigEnvironment(cfg, &applied, 4, 7)
 	return applied, err
 }
 
 // BlacksmithConfigFlagValues holds parsed values; only visited flags are applied.
 type BlacksmithConfigFlagValues struct {
-	Org      *string
-	Workflow *string
-	Job      *string
-	Ref      *string
+	Org         *string
+	Workflow    *string
+	Job         *string
+	Ref         *string
+	WaitTimeout *string
 }
 
 // RegisterBlacksmithConfigFlags registers mechanical bindings without selecting a provider.

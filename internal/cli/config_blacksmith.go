@@ -4,7 +4,7 @@ import "time"
 
 //go:generate go run ../../scripts/configgen -source config_blacksmith.go -output config_blacksmith_generated.go -type BlacksmithConfig -provider blacksmith-testbox
 
-// BlacksmithConfig owns the six ordinary bindings; environment halves retain loader order.
+// BlacksmithConfig owns ordinary bindings; environment halves retain loader order.
 type BlacksmithConfig struct {
 	Org         string        `config:"org" env:"CRABBOX_BLACKSMITH_ORG" flag:"blacksmith-org" help:"Blacksmith organization" sources:"user,repo,env,flag" fileIgnoreEmpty:"true" fileStorage:"value"`
 	Workflow    string        `config:"workflow" env:"CRABBOX_BLACKSMITH_WORKFLOW" flag:"blacksmith-workflow" help:"Blacksmith Testbox workflow file, name, or id" sources:"user,repo,env,flag" fileIgnoreEmpty:"true" fileStorage:"value"`
@@ -12,4 +12,5 @@ type BlacksmithConfig struct {
 	Ref         string        `config:"ref" env:"CRABBOX_BLACKSMITH_REF" flag:"blacksmith-ref" help:"Blacksmith Testbox git ref" sources:"user,repo,env,flag" fileIgnoreEmpty:"true" fileStorage:"value"`
 	IdleTimeout time.Duration `config:"idleTimeout" env:"CRABBOX_BLACKSMITH_IDLE_TIMEOUT" sources:"user,repo,env" duration:"positive-overlay" fileStorage:"value" envSplitBefore:"true"`
 	Debug       bool          `config:"debug" env:"CRABBOX_BLACKSMITH_DEBUG" sources:"user,repo,env"`
+	WaitTimeout time.Duration `config:"waitTimeout" env:"CRABBOX_BLACKSMITH_WAIT_TIMEOUT" flag:"blacksmith-wait-timeout" help:"Blacksmith total readiness wait (queue and hydration); unset uses the native 15m default" sources:"user,repo,env,flag" duration:"positive-overlay" fileStorage:"value" flagDuration:"raw-positive"`
 }

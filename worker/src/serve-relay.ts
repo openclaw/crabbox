@@ -69,6 +69,8 @@ export class ServeRelaySession {
     const { socket, response } = this.runtime.createWebSocketUpgrade({
       maxPayload: serveRelayFrameBytes,
     });
+    // Workerd defaults to Blob delivery; the synchronous frame parser requires bytes.
+    socket.binaryType = "arraybuffer";
     this.sockets[role] = socket;
     if (role === "agent") this.token = undefined;
     this.runtime.acceptEphemeralWebSocket(

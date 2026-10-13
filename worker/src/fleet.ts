@@ -1,6 +1,7 @@
 import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 
 import { AsyncMutex, KeyedAsyncMutex } from "./async-mutex";
+import { awsCleanupCompletionBlocker } from "./aws-cleanup-completion";
 import { AWSPoolAccess } from "./aws-pool-access";
 import { AWSVPCCache } from "./aws-vpc-cache";
 import {
@@ -42,6 +43,12 @@ import {
   type ProviderPoolAccess,
 } from "./ready-pool-access";
 import { setPoolWake } from "./ready-pool-wake";
+import {
+  maintainRetainedLeases,
+  recordRetainedReconcileFailure,
+  retainedReconcileDue,
+  retainedReconcileStatus,
+} from "./retained-lease-reconcile";
 import { ServeCoordinator, serveEnabled, serveDisabledResponse } from "./serve";
 import { serveCloudProvider } from "./serve-provider";
 import { generateSSHHostKeyPair } from "./ssh-host-key";
@@ -1441,6 +1448,9 @@ export class FleetCoordinator {
       }
       if (method === "GET" && parts.join("/") === "v1/admin/leases") {
         return await this.adminLeases(request);
+      }
+      if (method === "GET" && parts.join("/") === "v1/admin/retained-reconcile") {
+        return json(await retainedReconcileStatus(this.state.storage, this.env));
       }
       if (method === "GET" && parts.join("/") === "v1/admin/lease-audit") {
         return await this.adminLeaseAudit(request);
@@ -3406,6 +3416,30 @@ export class FleetCoordinator {
     await this.runAWSOrphanSweepIfDue("alarm");
     await this.runAzureOrphanSweepIfDue("alarm");
     await this.reconcileAWSIngressIfIdle();
+    await this.providerMaintenanceLock.run(async () => {
+      const started = Date.now();
+      try {
+        if (!(await retainedReconcileDue(this.state.storage, this.env, started))) return;
+        await maintainRetainedLeases(this.state.storage, this.env, {
+          exclusive: (work) => this.state.runExclusive(work),
+          ownsProvisioning: (id) => provisioningOwnsLease(this.state.storage, id),
+          deleteLease: (lease, guard, signal) => this.deleteLeaseServer(lease, guard, signal),
+        });
+      } catch {
+        console.error(
+          JSON.stringify({
+            event: "coordinator.retained_reconcile",
+            at: new Date(started).toISOString(),
+            outcome: "pass_failed",
+          }),
+        );
+        try {
+          await recordRetainedReconcileFailure(this.state.storage, started);
+        } catch {
+          // Storage may itself be unavailable; alarm re-arming must still run.
+        }
+      }
+    });
     await this.state.runExclusive(async () => {
       await this.scheduleAlarm(alarmArmRevision);
       if (serveWake !== undefined) await this.armAlarmNoLaterThan(serveWake);
@@ -20754,7 +20788,11 @@ export class FleetCoordinator {
     return new HetznerProvider(this.env);
   }
 
-  private async deleteLeaseServer(lease: LeaseRecord): Promise<void> {
+  private async deleteLeaseServer(
+    lease: LeaseRecord,
+    retainedGuard?: () => Promise<void>,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (lease.portablePoolAccess)
       await this.poolAccess.invalidateLease(lease.id, "lease timeout or provider cleanup");
     const provider = managedLeaseProvider(lease);
@@ -20785,9 +20823,14 @@ export class FleetCoordinator {
     };
     let expectedCleanupEvidence = structuredClone(lease.providerCleanup);
     const context: ProviderReleaseContext = {
+      ...(signal ? { signal } : {}),
+      ...(lease.retainedReconcileDeleteCredentialFingerprint
+        ? { credentialFingerprint: lease.retainedReconcileDeleteCredentialFingerprint }
+        : {}),
       ...(resourceIdentity ? { resourceIdentity } : {}),
       assertCleanupOwner: async () => {
         await this.state.runExclusive(async () => {
+          await retainedGuard?.();
           const current = await currentCleanupLease();
           if (
             canonicalJSONStringify(current.providerCleanup) !==
@@ -25621,6 +25664,7 @@ function isAWSTerminalInstanceState(state: string): boolean {
 }
 
 function isAdminRoute(method: string, parts: string[]): boolean {
+  if (method === "GET" && parts.join("/") === "v1/admin/retained-reconcile") return true;
   if (method === "GET" && parts.join("/") === "v1/pool") {
     return true;
   }
@@ -27290,6 +27334,7 @@ function recordLeaseCleanupFailure(
 }
 
 export function leaseNeedsCleanup(lease: LeaseRecord, now: number): boolean {
+  if (lease.retainedReconcileDeleteClaim) return false;
   if (leaseCleanupIsUnresolved(lease)) return false;
   if (leaseIsLive(lease) && Date.parse(lease.expiresAt) <= now) {
     return true;
@@ -28645,6 +28690,8 @@ interface ProviderAccessContext {
 }
 
 interface ProviderReleaseContext {
+  signal?: AbortSignal;
+  credentialFingerprint?: string;
   resourceIdentity?: string;
   assertCleanupOwner?: () => Promise<void>;
   saveCleanupEvidence?: (evidence: ProviderCleanupEvidence) => Promise<void>;
@@ -30569,9 +30616,10 @@ export class AWSProvider implements CloudProvider {
 
   private async withLeaseOperation<T>(
     operation: (session: AWSLeaseOperationSession) => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<T> {
     try {
-      return await this.client.withLeaseOperation(operation);
+      return await this.client.withLeaseOperation(operation, signal);
     } catch (error) {
       if (!(error instanceof AWSLeaseAuthorityError)) {
         throw error;
@@ -30712,7 +30760,9 @@ export class AWSProvider implements CloudProvider {
       }
       return { ...config, awsAMI: "", awsPromotedAMIs };
     }
-    const promoted = await this.promotedImage(config);
+    const candidate = await this.promotedImage(config);
+    // Legacy promotion aliases can point elsewhere; they must not redirect the lease.
+    const promoted = candidate?.region === config.awsRegion ? candidate : undefined;
     const prepared = {
       ...config,
       awsAMI: promoted?.id ?? "",
@@ -30729,7 +30779,6 @@ export class AWSProvider implements CloudProvider {
             },
           }
         : {}),
-      ...(promoted?.region ? { awsRegion: promoted.region } : {}),
     };
     return { ...prepared, awsPromotedAMIs: await this.promotedImagesForFallback(prepared) };
   }
@@ -31497,6 +31546,11 @@ export class AWSProvider implements CloudProvider {
   async releaseLease(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void> {
     await this.withLeaseOperation(async (session) => {
       const recordedAccount = await this.verifyLeaseOperationAuthority(lease, session);
+      if (
+        context?.credentialFingerprint &&
+        context.credentialFingerprint !== (await session.credentialFingerprint())
+      )
+        throw new ProviderResourceUnresolvedError("AWS cleanup credential context changed");
       const unsettledAllocation = Boolean(
         lease.provisioningRequestStartedAt || lease.provisioningResourceMayExist,
       );
@@ -31554,9 +31608,16 @@ export class AWSProvider implements CloudProvider {
             "AWS lease account scope was not persisted; refusing key-only cleanup",
           );
         }
+        await context?.assertCleanupOwner?.();
         await session.deleteSSHKey(lease.providerKey, lease.id);
       }
-    });
+      const blocker = awsCleanupCompletionBlocker(lease, {
+        instanceComplete: true,
+        volumeComplete: true,
+        keyComplete: !lease.providerKeyCleanupPending || leaseUsesCanonicalProviderKey(lease),
+      });
+      if (blocker) throw new ProviderResourceUnresolvedError(blocker);
+    }, context?.signal);
   }
 
   supportsNativeImages(): boolean {

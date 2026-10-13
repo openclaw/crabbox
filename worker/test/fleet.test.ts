@@ -122,6 +122,7 @@ import { providerReconciliationFingerprint } from "../src/provider-reconciliatio
 import { ProvisioningAttemptsError } from "../src/provisioning-attempts";
 import { ReadyPoolAccess, portablePoolReservationKey } from "../src/ready-pool-access";
 import { setPoolWake } from "../src/ready-pool-wake";
+import * as retainedReconcile from "../src/retained-lease-reconcile";
 import { verifyTerminalReceipt } from "../src/run-receipt";
 import {
   runtimeAdapterDesktopRelayTimeoutMs,
@@ -16424,6 +16425,58 @@ describe("fleet lease identity and idle", () => {
     ]);
   });
 
+  it("does not run retained reconciliation before its persisted deadline", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    await fleet.ready();
+    storage.seed("retained-reconcile-state", {
+      version: 1,
+      lastPassAt: new Date().toISOString(),
+    });
+    const reconcile = vi.spyOn(retainedReconcile, "maintainRetainedLeases");
+    await fleet.alarm();
+    expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "re-arms the alarm when retained reconciliation throws (failure persistence unavailable: %s)",
+    async (storageUnavailable) => {
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage);
+      await fleet.ready();
+      storage.seed(
+        "lease:cbx_000000000001",
+        testLease({
+          id: "cbx_000000000001",
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        }),
+      );
+      vi.spyOn(retainedReconcile, "maintainRetainedLeases").mockRejectedValue(
+        new Error("private-provider-error-body"),
+      );
+      if (storageUnavailable) {
+        storage.beforePut = async (key) => {
+          if (key === "retained-reconcile-state") throw new Error("storage unavailable");
+        };
+      }
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      await expect(fleet.alarm()).resolves.toBeUndefined();
+      expect(storage.alarm()).toBeGreaterThan(Date.now());
+      expect(log).toHaveBeenCalledOnce();
+      expect(JSON.parse(log.mock.calls[0]![0] as string)).toEqual({
+        event: "coordinator.retained_reconcile",
+        at: expect.any(String),
+        outcome: "pass_failed",
+      });
+      expect(storage.value<{ lastPass: unknown }>("retained-reconcile-state")?.lastPass).toEqual(
+        storageUnavailable ? undefined : { counters: { all: { pass_failed: 1 } }, sample: [] },
+      );
+      expect(await retainedReconcile.retainedReconcileDue(storage, {} as Env, Date.now())).toBe(
+        storageUnavailable,
+      );
+    },
+  );
+
   it("does not postpone the first AWS orphan sweep alarm on repeated scheduling", async () => {
     const storage = new MemoryStorage();
     const now = new Date();
@@ -30758,6 +30811,86 @@ describe("fleet lease identity and idle", () => {
       "provisioning",
     );
   });
+
+  it.each([
+    { requested: "us-west-1", promoted: true, rejected: [], regions: ["us-west-1"] },
+    { requested: "us-west-1", promoted: false, rejected: [], regions: ["us-west-1"] },
+    {
+      requested: "us-west-1",
+      promoted: false,
+      rejected: ["us-west-1", "eu-west-1"],
+      regions: ["us-west-1", "eu-west-1", "us-east-1"],
+    },
+    { requested: "eu-west-1", promoted: true, rejected: [], regions: ["eu-west-1"] },
+    { requested: undefined, promoted: true, rejected: [], regions: ["eu-west-1"] },
+  ])(
+    "admits AWS leases in request-first region order: $requested / $promoted / $rejected",
+    async ({ requested, promoted, rejected, regions }) => {
+      const launched: Array<{ region: string; image: string }> = [];
+      const stockRegions: string[] = [];
+      const fixture = awsIngressTestFleet(
+        async (action, params, region) => {
+          if (action === "DescribeImages") {
+            stockRegions.push(region);
+            return ec2XMLResponse(
+              `<DescribeImagesResponse><imagesSet><item><imageId>ami-stock-${region}</imageId><creationDate>2026-10-01</creationDate></item></imagesSet></DescribeImagesResponse>`,
+            );
+          }
+          if (action !== "RunInstances") return undefined;
+          launched.push({ region, image: params.get("ImageId")! });
+          // Admission must move the durable allocation target before dispatching in each region.
+          expect(fixture.storage.value<LeaseRecord>(`lease:${fixture.creatingID}`)?.region).toBe(
+            region,
+          );
+          return rejected.includes(region)
+            ? ec2XMLResponse(
+                "<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code></Error></Errors></Response>",
+                400,
+              )
+            : undefined;
+        },
+        { CRABBOX_AWS_REGION: "eu-west-1", CRABBOX_CAPACITY_REGIONS: "us-east-1,us-west-2" },
+      );
+      const promotion = (region: string) => ({
+        id: `ami-promoted-${region}`,
+        region,
+        state: "available",
+        target: "linux",
+        os: "ubuntu:26.04",
+        architecture: "x86_64",
+        promotedAt: "2026-10-01T00:00:00Z",
+      });
+      // A legacy alias from another region must not override the client's region.
+      fixture.storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04", promotion("eu-west-1"));
+      fixture.storage.seed(
+        "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1",
+        promotion("eu-west-1"),
+      );
+      if (promoted && requested === "us-west-1") {
+        fixture.storage.seed(
+          "image:aws:promoted:linux:x86_64:ubuntu26.04:us-west-1",
+          promotion("us-west-1"),
+        );
+      }
+      const response = await fixture.create({
+        awsRegion: requested,
+        awsAMI: "",
+        os: "ubuntu:26.04",
+      });
+      const body = (await response.json()) as { lease: LeaseRecord };
+      expect(response.status).toBe(201);
+      const imageFor = (region: string) =>
+        `ami-${region === "eu-west-1" || (region === "us-west-1" && promoted) ? "promoted" : "stock"}-${region}`;
+      expect(launched).toEqual(regions.map((region) => ({ region, image: imageFor(region) })));
+      expect(stockRegions).toEqual(regions.filter((region) => imageFor(region).includes("stock")));
+      const region = regions.at(-1)!;
+      expect(body.lease.region).toBe(region);
+      expect(body.lease.image).toMatchObject({ id: imageFor(region), region });
+      expect(fixture.storage.value<LeaseRecord>(`lease:${fixture.creatingID}`)?.region).toBe(
+        region,
+      );
+    },
+  );
 
   it.each(["stock", "promoted", "stale promotion", "missing stock"])(
     "resolves the AWS fallback region's own image (%s)",
@@ -45611,7 +45744,8 @@ describe("fleet lease identity and idle", () => {
     const operation = stubAWSLeaseOperation();
     const config = leaseConfig({
       provider: "aws",
-      awsRegion: "us-east-1",
+      awsRegion: "eu-west-1",
+      capacity: { regions: ["us-east-1"] },
       sshPublicKey: "ssh-ed25519 test",
     });
     let clock = 0;
@@ -47689,7 +47823,7 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("image:aws:promoted")).toBeUndefined();
   });
 
-  it("uses promoted AWS image region when creating leases", async () => {
+  it("uses the promoted AWS image in the requested region when creating leases", async () => {
     const storage = new MemoryStorage();
     let createdConfig: LeaseConfig | undefined;
     const provider = fakeProvider(
@@ -47727,6 +47861,7 @@ describe("fleet lease identity and idle", () => {
       request("POST", "/v1/leases", {
         body: {
           provider: "aws",
+          awsRegion: "us-east-2",
           sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@example.com",
         },
       }),
@@ -47786,6 +47921,7 @@ describe("fleet lease identity and idle", () => {
         body: {
           provider: "aws",
           architecture: "arm64",
+          awsRegion: "us-east-2",
           sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@example.com",
         },
       }),
@@ -60739,5 +60875,33 @@ describe("current lease index and indexed listings", () => {
       expect(await expired.json()).toEqual({ error: "lease_cursor_expired" });
       storage.seed(index.stateKey, { version: 1, complete: true });
     }
+  });
+});
+
+describe("retained reconciliation admin status", () => {
+  it("requires an admin grant and returns status without running maintenance", async () => {
+    const env = {
+      CRABBOX_ADMIN_TOKEN: "fixture-admin",
+      CRABBOX_SHARED_TOKEN: "fixture-user",
+    } as Env;
+    const fleet = testFleet(new MemoryStorage(), {}, env);
+    const send = (token: string) =>
+      routeCoordinatorRequest(
+        new Request("https://coordinator.test/v1/admin/retained-reconcile", {
+          headers: { authorization: `Bearer ${token}`, "x-crabbox-admin": "true" },
+        }),
+        env,
+        (incoming) => fleet.fetch(incoming),
+        { githubMembership: async () => {} },
+      );
+    const denied = await send("fixture-user");
+    expect([401, 403]).toContain(denied.status);
+    const allowed = await send("fixture-admin");
+    expect(allowed.status).toBe(200);
+    expect(await allowed.json()).toMatchObject({
+      settings: { mode: "on", delete: false },
+      counters: {},
+      scanned: 0,
+    });
   });
 });

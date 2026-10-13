@@ -5,20 +5,23 @@
 ### Changed
 
 - CLI: add `stop --wait=false` for coordinator-owned queued cleanup while preserving pending local recovery state; ordinary stop still waits for confirmed deletion.
-
 - CLI: batch no-sync SSH workspace preparation and script upload, overlap independent telemetry and event delivery, and preserve retained scripts and terminal run records.
-
+- CI: run CLI coverage in three isolated shards, retaining atomic whole-suite coverage and the 90% core gate; report the slowest top-level tests without summing nested timings.
 - Coordinator monthly reserved-USD budgets are raised to $100,000 fleet-wide, $50,000 per owner and $100,000 per org; reservations from finished leases had exhausted the per-owner cap at roughly a quarter of the estimated spend.
+- CLI: `crabbox list` streams and shows live leases by default; `--retained` includes kept terminal leases. Add `--jsonl` streaming and uncapped `--all` lease lookups while preserving the buffered `--json` array.
 
 ### Added
 
+- Blacksmith Testbox: configure the native total readiness wait (queue and hydration) through `blacksmith.waitTimeout`, `CRABBOX_BLACKSMITH_WAIT_TIMEOUT`, or `--blacksmith-wait-timeout`, preserving the native 15-minute default when unset.
 - Serve leases can fall back to an owner-authorized, end-to-end encrypted coordinator relay when LAN and tailnet routes are unavailable.
+- Coordinator: reconcile retained terminal AWS leases from the current index with scoped cleanup proof, bounded resumable passes, opt-in owned deletion, and `crabbox admin retained-reconcile` status.
 - Serve agents advertise LAN and tailnet front-door candidates, with pinned-key LAN-first client selection and per-lease route caching.
 - Portal: show owners their donated serve machines, online status, capacity, allocated leases, and runtime details.
 
 ### Fixed
 
 - CLI: retain idempotent SSH retries for batched workspace preparation and script upload after transient transport failures.
+- AWS: honor the requested region before coordinator and capacity fallbacks, using a regional promoted image or the normal stock image without redirecting to another region's promotion.
 - Preserve worst-case `reservedUSD` in usage reports and expose enforced cost as `committedUSD`, with compatible CLI output and conservative reservations for retained legacy VMs and unresolved provisioning. [PR 2801](https://github.com/openclaw/crabbox/pull/2801).
 - Settle terminal lease budget reservations at elapsed compute cost capped by the admission reservation, preserve observed runtime through late release and cleanup retries, and charge confirmed never-allocated leases zero compute runtime.
 - Coordinator deployments fail when credentials are missing or the public health endpoint does not confirm the active version and requested commit.

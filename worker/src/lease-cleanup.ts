@@ -3,6 +3,10 @@ import type { LeaseRecord } from "./types";
 
 export function clearLeaseCleanupCompletion(lease: LeaseRecord): void {
   delete lease.cleanupCompletedAt;
+  delete lease.cleanupConfirmedBy;
+  delete lease.retainedReconcileDeleteClaim;
+  delete lease.retainedReconcileDeleteCredentialFingerprint;
+  delete lease.retainedReconcileObservation;
 }
 
 export function completeLeaseProviderCleanup(lease: LeaseRecord, completedAt: string): void {

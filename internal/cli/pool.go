@@ -21,6 +21,8 @@ func (a App) list(ctx context.Context, args []string) error {
 	fs := newFlagSet("list", a.Stderr)
 	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	jsonOut := fs.Bool("json", false, "print JSON")
+	jsonlOut := fs.Bool("jsonl", false, "stream one JSON object per line")
+	retained := fs.Bool("retained", false, "include kept terminal coordinator leases (ignored by direct providers)")
 	all := fs.Bool("all", false, "include provider inventory outside Crabbox-owned leases where supported")
 	refresh := fs.Bool("refresh", false, "refresh provider-backed state where supported")
 	pondFilter := fs.String("pond", "", "only list leases tagged with this pond")
@@ -28,6 +30,9 @@ func (a App) list(ctx context.Context, args []string) error {
 	targetFlags := registerTargetFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if *jsonOut && *jsonlOut {
+		return Exit(2, "--json and --jsonl are mutually exclusive")
 	}
 	cfg, err := loadConfigForFlags(fs)
 	if err != nil {
@@ -50,9 +55,18 @@ func (a App) list(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if *jsonOut {
+	req := ListRequest{Options: leaseOptionsFromConfig(cfg), All: *all, Refresh: *refresh, Retained: *retained}
+	if streaming, ok := backend.(StreamingListBackend); ok {
+		return a.renderStreamingList(ctx, cfg, backend, streaming, req, pondName, *jsonOut, *jsonlOut)
+	}
+	if !*jsonOut && !*jsonlOut {
+		if err := renderListHeader(a.Stdout); err != nil {
+			return err
+		}
+	}
+	if *jsonOut || *jsonlOut {
 		if jsonBackend, ok := backend.(JSONListBackend); ok {
-			view, err := jsonBackend.ListJSON(ctx, ListRequest{Options: leaseOptionsFromConfig(cfg), All: *all, Refresh: *refresh})
+			view, err := jsonBackend.ListJSON(ctx, req)
 			if err != nil {
 				return err
 			}
@@ -60,15 +74,15 @@ func (a App) list(ctx context.Context, args []string) error {
 			if pondName != "" {
 				view = filterJSONListViewByPond(view, pondName)
 			}
-			return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(view))
+			return writeListJSON(a.Stdout, view, *jsonlOut)
 		}
 	}
 	var servers []Server
 	switch b := backend.(type) {
 	case SSHLeaseBackend:
-		servers, err = b.List(ctx, ListRequest{Options: leaseOptionsFromConfig(cfg), All: *all, Refresh: *refresh})
+		servers, err = b.List(ctx, req)
 	case DelegatedRunBackend:
-		servers, err = b.List(ctx, ListRequest{Options: leaseOptionsFromConfig(cfg), All: *all, Refresh: *refresh})
+		servers, err = b.List(ctx, req)
 	default:
 		return Exit(2, "provider=%s does not support list", backend.Spec().Name)
 	}
@@ -79,11 +93,10 @@ func (a App) list(ctx context.Context, args []string) error {
 	if pondName != "" {
 		servers = filterServersByPond(servers, pondName)
 	}
-	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(nonNullJSONCollection(servers))
+	if *jsonOut || *jsonlOut {
+		return writeListJSON(a.Stdout, servers, *jsonlOut)
 	}
-	renderServerList(a.Stdout, servers)
-	return nil
+	return renderServerList(a.Stdout, servers)
 }
 
 // filterJSONListViewByPond filters a list-view payload (whatever shape the

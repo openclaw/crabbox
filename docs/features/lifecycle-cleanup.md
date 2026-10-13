@@ -698,3 +698,78 @@ DELETE. Inner create-failure rollback and Windows setup performed during create,
 intermediate hidden readiness polls, and replacement races after the final
 validation remain separate boundaries. This does not change GCP cleanup or
 make name-addressed resources equivalent to immutable-ID deletion targets.
+
+### Retained record reconciliation
+
+The existing maintenance alarm and scheduled trigger continuously reconcile terminal
+members of `lease-current:`. There is no history scan or new service. A persisted
+cursor resumes across passes and runtime restarts; an unready current index delays
+reconciliation without falling back to `lease:`. Passes run only when due, using
+the persisted last-pass time, and share the provider-maintenance lock with orphan
+sweeps. Unexpected failures log one structured `coordinator.retained_reconcile`
+error and record `pass_failed` when storage is available; they never prevent alarm
+re-arming. Ordinary maintenance runs first;
+provider reads run outside the lifecycle mutex and discovery leaves the storage
+input gate open. Each pass hydrates at most 200 current-index entries and has a
+separate AWS request budget. AWS batches exact instance IDs by recorded account
+and Region; an exact batch NotFound falls back to bounded individual ID reads.
+Budget exhaustion resumes at the first unprocessed entry.
+
+Confirmation currently supports **AWS only**. Every observation verifies the
+recorded account through STS using one fixed credential snapshot. Missing or
+malformed original account/Region, uncertain provisioning, pending cleanup owners,
+unresolved provider actions, registered resources, and Mac dedicated-host leases
+remain unresolved. Historical scope is never inferred from current credentials.
+Dedicated hosts retain their separate ownership and billing lifecycle.
+
+A complete observation requires the exact instance to be absent or `terminated`
+(`shutting-down` is not complete), the original retained root volume to pass the
+ordinary release verifier when recorded, and any canonical lease-owned SSH key
+to be absent. Shared keys are retained as in ordinary release. Present companion
+resources leave the record unresolved; the default confirmation path deletes
+nothing. The first observation is timestamped after its provider checks; the confirming
+pass must start at least ten minutes later. Two complete observations, bound to the same
+lease record and credential fingerprint, are required before publishing the
+ordinary cleanup-completion fact through the lease-record write funnel. Publication
+scrubs the same remote-access fields as release/expiry and removes current-index
+membership. `cleanupConfirmedBy: retained-reconcile` and first/last observation
+timestamps remain on the historical record. A present instance interrupts the
+absence sequence; errors never count as absence. Changed credential fingerprints
+remain unresolved, including credential rotation between observations.
+
+With deletion explicitly enabled, an exact present AWS instance can enter the
+ordinary owned-delete path only after the terminal grace period, exact ownership
+label validation, a current-lease reread, and proof it has no live lease binding. At most one owned deletion runs per pass,
+with a separate 20-second provider deadline.
+The bounded live-binding scan defers deletion if the maintenance index is unready
+or exceeds 200 entries. Existing cleanup ownership is revalidated before provider
+mutation. Deletion does not itself publish completion: fresh complete observations
+must still satisfy the two-pass interval. Interrupted deletion retains a durable
+claim and resumes observation after its five-minute claim deadline. Provider
+errors back off, honoring `Retry-After`; logs do not include provider error bodies
+or credentials.
+
+Azure, Hetzner, GCP, Daytona and other providers are **classification-only**: this
+reconciler performs no provider calls or lease mutations for them. Counters include
+`missing_identity`, `missing_original_scope`, `unresolved_action`,
+`no_scoped_exact_read`, `dedicated_host`, and `unresolved_key`. Azure needs direct
+recorded-scope VM/NIC/public-IP/disk reads; Hetzner needs original project/credential
+evidence and its action journal; GCP needs immutable instance/project/zone checks;
+Daytona needs its original API/organization/credential context. Historical records
+without original scope remain unresolved indefinitely; they are never backfilled
+from current settings.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `CRABBOX_RETAINED_RECONCILE` | `on` | `on` confirms complete AWS cleanup; `report` observes and logs without lease mutations; `off` disables passes. Unknown values disable it. |
+| `CRABBOX_RETAINED_RECONCILE_INTERVAL_SECONDS` | `120` | Minimum interval between pass starts, including recorded failures, integer 60–86400. A due pass runs on the next alarm or scheduled maintenance trigger. |
+| `CRABBOX_RETAINED_RECONCILE_DELETE` | `0` | Only exact `1` allows AWS owned deletion in `on` mode. |
+| `CRABBOX_RETAINED_RECONCILE_GRACE_SECONDS` | `3600` | Terminal age before deletion, integer 60–31536000. |
+| `CRABBOX_RETAINED_RECONCILE_BUDGET` | `200` | Maximum current-index entries hydrated per pass, integer 1–200. |
+| `CRABBOX_RETAINED_RECONCILE_LOOKUP_BUDGET` | `64` | AWS lookups per pass, including STS, exact-instance batches/fallbacks and companion reads, integer 5–256. |
+
+Invalid numeric settings use their defaults. Use
+`crabbox admin retained-reconcile --json` to inspect cumulative outcomes, cursor
+progress and backoff. The first rollout processes the roughly 9,000 retained AWS
+records over repeated bounded passes; only records meeting all evidence
+requirements leave the current index. Deletion remains off until explicitly enabled.

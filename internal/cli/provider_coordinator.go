@@ -1133,68 +1133,55 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 }
 
 func (b *coordinatorLeaseBackend) List(ctx context.Context, req ListRequest) ([]Server, error) {
-	if !req.All {
-		leases, err := b.listUserLeases(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return coordinatorLeasesToServers(leases, b.cfg), nil
-	}
-	machines, activeLeaseIDs, err := b.listMachines(ctx)
-	if err != nil {
-		leases, fallbackErr := b.listLeasesFallback(ctx, err)
-		if fallbackErr != nil {
-			return nil, fallbackErr
-		}
-		return coordinatorLeasesToServers(leases, b.cfg), nil
-	}
-	return coordinatorMachinesToServers(machines, activeLeaseIDs), nil
+	var servers []Server
+	err := b.StreamList(ctx, req, func(page ListPage) error {
+		servers = append(servers, page.Servers...)
+		return nil
+	})
+	return servers, err
 }
 
 func (b *coordinatorLeaseBackend) ListJSON(ctx context.Context, req ListRequest) (any, error) {
-	if !req.All {
-		return b.listUserLeases(ctx)
-	}
-	machines, _, err := b.listMachines(ctx)
-	if err != nil {
-		return b.listLeasesFallback(ctx, err)
-	}
-	return machines, nil
-}
-
-func (b *coordinatorLeaseBackend) listUserLeases(ctx context.Context) ([]CoordinatorLease, error) {
-	leases, truncated, err := b.coord.CurrentLeases(ctx, b.cfg.Provider)
+	leases := make([]CoordinatorLease, 0)
+	machines := make([]CoordinatorMachine, 0)
+	machineView := false
+	err := b.StreamList(ctx, req, func(page ListPage) error {
+		switch rows := page.JSON.(type) {
+		case []CoordinatorLease:
+			leases = append(leases, rows...)
+		case []CoordinatorMachine:
+			machineView = true
+			machines = append(machines, rows...)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if truncated {
-		fmt.Fprintln(b.rt.Stderr, "warning: coordinator list reached its legacy 500-lease limit; older kept leases may be omitted; update the coordinator or inspect them by exact lease ID")
+	if machineView {
+		return machines, nil
 	}
-	// Older coordinators ignore view=current and return ended history too.
-	current := make([]CoordinatorLease, 0, len(leases))
-	for _, lease := range leases {
-		retained := lease.Keep || lease.ReleaseDeletesServer != nil && !*lease.ReleaseDeletesServer
-		if lease.State == "active" || lease.State == "provisioning" || retained && !coordinatorProviderReleaseConfirmed(lease) {
-			current = append(current, lease)
-		}
-	}
-	return redactCoordinatorLeaseListSecrets(
-		filterCoordinatorLeasesForProvider(current, b.cfg.Provider),
-	), nil
+	slices.SortStableFunc(leases, func(a, b CoordinatorLease) int { return strings.Compare(b.CreatedAt, a.CreatedAt) })
+	return leases, nil
 }
 
-func (b *coordinatorLeaseBackend) listMachines(ctx context.Context) ([]CoordinatorMachine, map[string]struct{}, error) {
+func (b *coordinatorLeaseBackend) adminListClient() (*CoordinatorClient, error) {
 	if b.cfg.CoordAdminToken == "" {
-		return nil, nil, Exit(2, "pool list requires broker.adminToken or CRABBOX_COORDINATOR_ADMIN_TOKEN when a coordinator is configured")
+		return nil, Exit(2, "pool list requires broker.adminToken or CRABBOX_COORDINATOR_ADMIN_TOKEN when a coordinator is configured")
 	}
 	cfg := b.cfg
 	cfg.CoordToken = cfg.CoordAdminToken
 	cfg.CoordTokenCommand = nil
 	coord, _, err := newCoordinatorClient(cfg)
+	return coord, err
+}
+
+func (b *coordinatorLeaseBackend) listMachines(ctx context.Context) ([]CoordinatorMachine, map[string]struct{}, error) {
+	coord, err := b.adminListClient()
 	if err != nil {
 		return nil, nil, err
 	}
-	machines, err := coord.Pool(ctx, cfg)
+	machines, err := coord.Pool(ctx, b.cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1209,18 +1196,18 @@ func (b *coordinatorLeaseBackend) listMachines(ctx context.Context) ([]Coordinat
 	return machines, activeCoordinatorLeaseIDs(activeLeases), nil
 }
 
-func (b *coordinatorLeaseBackend) listLeasesFallback(ctx context.Context, adminErr error) ([]CoordinatorLease, error) {
+func (b *coordinatorLeaseBackend) allowListLeasesFallback(adminErr error) error {
 	if b.cfg.CoordToken == "" && len(b.cfg.CoordTokenCommand) == 0 {
-		return nil, adminErr
+		return adminErr
 	}
 	if adminErr != nil && isCoordinatorUnauthorized(adminErr) {
 		fmt.Fprintf(b.rt.Stderr, "warning: coordinator admin pool list unauthorized; falling back to user-visible leases\n")
 	} else if adminErr != nil && b.cfg.CoordAdminToken == "" {
 		fmt.Fprintf(b.rt.Stderr, "warning: coordinator admin pool list unavailable; falling back to user-visible leases\n")
 	} else if adminErr != nil {
-		return nil, adminErr
+		return adminErr
 	}
-	return b.listUserLeases(ctx)
+	return nil
 }
 
 func coordinatorLeasesToServers(leases []CoordinatorLease, cfg Config) []Server {
