@@ -194,11 +194,11 @@ func checkCIGoContract(document *yaml.Node) error {
 	}
 
 	for _, job := range []struct{ id, name string }{
-		{"go-test-core", "Go core"}, {"go-modules", "Go modules"}, {"go-coverage", "Go coverage"}, {"go", "Go"},
+		{"go-test-core", "Go core"}, {"go-modules", "Go modules"}, {"go-coverage", "Go coverage"}, {"go-coverage-core", "Go non-CLI coverage"}, {"go", "Go"},
 	} {
 		node := ciGoJob(document, job.id)
 		keys := []string{"name", "runs-on", "timeout-minutes", "steps"}
-		if job.id == "go" {
+		if job.id == "go" || job.id == "go-coverage" {
 			keys = append(keys, "needs", "if")
 		}
 		fields(node, job.id, keys...)
@@ -211,13 +211,16 @@ func checkCIGoContract(document *yaml.Node) error {
 	testSteps := ciGoSteps(ciGoJob(document, "go-test-core"))
 	moduleSteps := ciGoSteps(ciGoJob(document, "go-modules"))
 	coverageSteps := ciGoSteps(ciGoJob(document, "go-coverage"))
+	coverageCoreSteps := ciGoSteps(ciGoJob(document, "go-coverage-core"))
+	coverageCLISteps := ciGoSteps(ciGoJob(document, "go-coverage-cli"))
 	require(len(testSteps) == 2+len(ciGoTestCommands), "go-test must retain setup and every ordered workload step")
 	require(len(moduleSteps) == 3, "go-modules must have setup and Test all Go modules only")
-	require(len(coverageSteps) == 3, "go-coverage must have setup and Coverage only")
+	require(len(coverageSteps) == 5, "coverage gate needs setup, producer checks, download, and Coverage")
+	require(len(coverageCoreSteps) == 4 && len(coverageCLISteps) == 4, "coverage producers need setup, execution, and upload")
 	for _, workload := range []struct {
 		id    string
 		steps []*yaml.Node
-	}{{"go-test-core", testSteps}, {"go-modules", moduleSteps}, {"go-coverage", coverageSteps}} {
+	}{{"go-test-core", testSteps}, {"go-modules", moduleSteps}, {"go-coverage", coverageSteps}, {"go-coverage-core", coverageCoreSteps}, {"go-coverage-cli", coverageCLISteps}} {
 		for i, setup := range []struct{ name, action string }{
 			{"Check out", "actions/checkout"}, {"Set up Go", "actions/setup-go"},
 		} {
@@ -264,8 +267,63 @@ func checkCIGoContract(document *yaml.Node) error {
 	if len(moduleSteps) == 3 {
 		checkCommand(moduleSteps[2], ciGoCommand{name: "Test all Go modules", run: "scripts/test-go-modules.sh"})
 	}
-	if len(coverageSteps) == 3 {
-		checkCommand(coverageSteps[2], ciGoCommand{name: "Coverage", run: "scripts/check-go-coverage.sh 90.0"})
+	if len(coverageSteps) == 5 {
+		checkCommand(coverageSteps[4], ciGoCommand{name: "Coverage", run: `scripts/check-go-coverage.sh 90.0 --profiles "${{ runner.temp }}/go-coverage"`})
+		step := coverageSteps[2]
+		fields(step, "coverage producer gate", "name", "shell", "env", "run")
+		require(ciGoScalar(step, "name") == "Require all coverage producers" && ciGoScalar(step, "shell") == "bash", "coverage gate command changed")
+		bindings := ciGoField(step, "env")
+		fields(bindings, "coverage gate bindings", "CORE_RESULT", "CLI_RESULT")
+		require(ciGoScalar(bindings, "CORE_RESULT") == "${{ needs['go-coverage-core'].result }}" && ciGoScalar(bindings, "CLI_RESULT") == "${{ needs['go-coverage-cli'].result }}", "coverage result bindings changed")
+		require(ciGoScalar(step, "run") == ciGoCoverageGateScript, "coverage gate must propagate every unsuccessful result")
+		download := coverageSteps[3]
+		fields(download, "coverage download", "name", "uses", "with")
+		require(ciGoScalar(download, "name") == "Download coverage profiles" && strings.HasPrefix(ciGoScalar(download, "uses"), "actions/download-artifact@"), "coverage download changed")
+		with := ciGoField(download, "with")
+		fields(with, "coverage download inputs", "pattern", "path", "merge-multiple")
+		require(ciGoScalar(with, "pattern") == "go-coverage-*" && ciGoScalar(with, "path") == "${{ runner.temp }}/go-coverage" && ciGoScalar(with, "merge-multiple") == "true", "coverage must download this run's complete profile set")
+	}
+	coverageGate := ciGoJob(document, "go-coverage")
+	coverageNeeds := ciGoField(coverageGate, "needs")
+	require(ciGoScalar(coverageGate, "if") == "${{ always() }}", "coverage gate must always evaluate")
+	require(coverageNeeds.Kind == yaml.SequenceNode && len(coverageNeeds.Content) == 2, "coverage needs both producers")
+	if len(coverageNeeds.Content) == 2 {
+		require(scalarNodeValue(coverageNeeds.Content[0]) == "go-coverage-core" && scalarNodeValue(coverageNeeds.Content[1]) == "go-coverage-cli", "coverage dependencies changed")
+	}
+	coverageCLI := ciGoJob(document, "go-coverage-cli")
+	fields(coverageCLI, "CLI coverage shards", "name", "runs-on", "timeout-minutes", "strategy", "steps")
+	require(ciGoScalar(coverageCLI, "name") == "Go CLI coverage shard ${{ matrix.shard }}" && ciGoScalar(coverageCLI, "runs-on") == "ubuntu-latest" && ciGoScalar(coverageCLI, "timeout-minutes") == "30", "CLI coverage execution changed")
+	coverageStrategy := ciGoField(coverageCLI, "strategy")
+	fields(coverageStrategy, "coverage strategy", "fail-fast", "matrix")
+	require(ciGoScalar(coverageStrategy, "fail-fast") == "false", "all coverage shards must finish")
+	coverageMatrix := ciGoField(coverageStrategy, "matrix")
+	fields(coverageMatrix, "coverage matrix", "shard")
+	coverageShards := ciGoField(coverageMatrix, "shard")
+	require(coverageShards.Kind == yaml.SequenceNode && len(coverageShards.Content) == 3, "all three CLI coverage shards are required")
+	for i, shard := range coverageShards.Content {
+		require(scalarNodeValue(shard) == fmt.Sprint(i), "coverage shards must be unique and exhaustive")
+	}
+	if len(coverageCoreSteps) == 4 {
+		checkCommand(coverageCoreSteps[2], ciGoCommand{name: "Cover other packages", shell: "bash", run: ciGoCoverageCoreScript})
+	}
+	if len(coverageCLISteps) == 4 {
+		checkCommand(coverageCLISteps[2], ciGoCommand{name: "Cover CLI shard", run: `python3 scripts/test-go-shard.py ${{ matrix.shard }} 3 --coverprofile "${{ runner.temp }}/cli-${{ matrix.shard }}.out"`})
+	}
+	for _, producer := range []struct {
+		steps           []*yaml.Node
+		suffix, profile string
+	}{{coverageCoreSteps, "core", "core"}, {coverageCLISteps, "cli-${{ matrix.shard }}", "cli-${{ matrix.shard }}"}} {
+		if len(producer.steps) != 4 {
+			continue
+		}
+		upload := producer.steps[3]
+		fields(upload, "coverage upload", "name", "uses", "with")
+		require(ciGoScalar(upload, "name") == "Upload coverage profile" && strings.HasPrefix(ciGoScalar(upload, "uses"), "actions/upload-artifact@"), "coverage upload changed")
+		with := ciGoField(upload, "with")
+		fields(with, "coverage upload inputs", "name", "path", "overwrite", "if-no-files-found", "retention-days")
+		require(ciGoScalar(with, "name") == "go-coverage-"+producer.suffix && ciGoScalar(with, "path") == "${{ runner.temp }}/"+producer.profile+".out", "coverage artifact identity changed")
+		require(ciGoScalar(with, "if-no-files-found") == "error" && ciGoScalar(with, "retention-days") == "1", "coverage profiles must exist and expire after one day")
+		require(ciGoScalar(with, "overwrite") == "true", "a rerun must replace only its own coverage profile")
 	}
 
 	aggregate := ciGoJob(document, "go")
@@ -347,6 +405,15 @@ const ciGoRaceGateScript = `printf 'Go core: %s\nGo CLI shards: %s\n' "${CORE_RE
 [[ "${CORE_RESULT:-}" == success && "${CLI_RESULT:-}" == success ]]
 `
 
+const ciGoCoverageGateScript = `printf 'Go non-CLI coverage: %s\nGo CLI coverage shards: %s\n' "${CORE_RESULT:-missing}" "${CLI_RESULT:-missing}"
+[[ "${CORE_RESULT:-}" == success && "${CLI_RESULT:-}" == success ]]
+`
+
+const ciGoCoverageCoreScript = `packages=$(go list ./...)
+mapfile -t packages < <(printf '%s\n' "$packages" | sed '\|^github.com/openclaw/crabbox/internal/cli$|d')
+go test -count=1 -timeout=20m -covermode=atomic -coverprofile="${{ runner.temp }}/core.out" "${packages[@]}"
+`
+
 func TestCIGoShardSelection(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -359,13 +426,22 @@ func TestCIGoShardSelection(t *testing.T) {
 }
 
 func TestCIGoRaceGateTruthTable(t *testing.T) {
-	steps := ciGoSteps(ciGoJob(readCIGoWorkflow(t), "go-test"))
-	if len(steps) != 1 {
-		t.Fatal("missing race gate")
+	checkCIGoProducerTruthTable(t, "go-test", 0)
+}
+
+func TestCIGoCoverageGateTruthTable(t *testing.T) {
+	checkCIGoProducerTruthTable(t, "go-coverage", 2)
+}
+
+func checkCIGoProducerTruthTable(t *testing.T, job string, index int) {
+	t.Helper()
+	steps := ciGoSteps(ciGoJob(readCIGoWorkflow(t), job))
+	if len(steps) <= index {
+		t.Fatal("missing producer gate")
 	}
 	for _, core := range []string{"success", "failure", "cancelled", "skipped", "", "unknown"} {
 		for _, cli := range []string{"success", "failure", "cancelled", "skipped", "", "unknown"} {
-			cmd := exec.CommandContext(t.Context(), "bash", "-c", ciGoScalar(steps[0], "run"))
+			cmd := exec.CommandContext(t.Context(), "bash", "-c", ciGoScalar(steps[index], "run"))
 			cmd.Env = []string{"CORE_RESULT=" + core, "CLI_RESULT=" + cli}
 			output, err := cmd.CombinedOutput()
 			if (err == nil) != (core == "success" && cli == "success") {
@@ -442,6 +518,38 @@ func TestCIGoContractRejectsMutations(t *testing.T) {
 		change func(*yaml.Node)
 	}
 	mutations := []mutation{
+		{"missing coverage shard", func(d *yaml.Node) {
+			ciGoSet(t, ciGoField(ciGoJob(d, "go-coverage-cli"), "strategy"), "matrix", "{shard: [0, 1]}")
+		}},
+		{"duplicate coverage shard", func(d *yaml.Node) {
+			ciGoSet(t, ciGoField(ciGoJob(d, "go-coverage-cli"), "strategy"), "matrix", "{shard: [0, 1, 1]}")
+		}},
+		{"skip coverage shard", func(d *yaml.Node) { ciGoSet(t, ciGoJob(d, "go-coverage-cli"), "if", "false") }},
+		{"ignore coverage failure", func(d *yaml.Node) { ciGoSet(t, ciGoJob(d, "go-coverage-cli"), "continue-on-error", "true") }},
+		{"coverage wrong shard count", func(d *yaml.Node) {
+			ciGoField(ciGoSteps(ciGoJob(d, "go-coverage-cli"))[2], "run").Value = strings.Replace(ciGoScalar(ciGoSteps(ciGoJob(d, "go-coverage-cli"))[2], "run"), " 3 ", " 2 ", 1)
+		}},
+		{"skip coverage on failure", func(d *yaml.Node) { ciGoDelete(t, ciGoJob(d, "go-coverage"), "if") }},
+		{"coverage missing dependency", func(d *yaml.Node) { ciGoSet(t, ciGoJob(d, "go-coverage"), "needs", "[go-coverage-cli]") }},
+		{"coverage masks producer failure", func(d *yaml.Node) { ciGoSet(t, ciGoSteps(ciGoJob(d, "go-coverage"))[2], "run", "true") }},
+		{"coverage wrong result", func(d *yaml.Node) {
+			ciGoSet(t, ciGoField(ciGoSteps(ciGoJob(d, "go-coverage"))[2], "env"), "CLI_RESULT", "success")
+		}},
+		{"coverage missing upload succeeds", func(d *yaml.Node) {
+			ciGoSet(t, ciGoField(ciGoSteps(ciGoJob(d, "go-coverage-cli"))[3], "with"), "if-no-files-found", "warn")
+		}},
+		{"coverage rerun profile collision", func(d *yaml.Node) {
+			ciGoDelete(t, ciGoField(ciGoSteps(ciGoJob(d, "go-coverage-cli"))[3], "with"), "overwrite")
+		}},
+		{"coverage profile collision", func(d *yaml.Node) {
+			ciGoSet(t, ciGoField(ciGoSteps(ciGoJob(d, "go-coverage-cli"))[3], "with"), "name", "go-coverage-core")
+		}},
+		{"coverage foreign run", func(d *yaml.Node) {
+			ciGoSet(t, ciGoField(ciGoSteps(ciGoJob(d, "go-coverage"))[3], "with"), "run-id", "1")
+		}},
+		{"coverage omit non-CLI packages", func(d *yaml.Node) {
+			ciGoSet(t, ciGoSteps(ciGoJob(d, "go-coverage-core"))[2], "run", "go test ./internal/cli")
+		}},
 		{"missing CLI shard", func(d *yaml.Node) {
 			ciGoSet(t, ciGoField(ciGoJob(d, "go-test-cli"), "strategy"), "matrix", "{shard: [0, 1, 2]}")
 		}},
@@ -476,7 +584,7 @@ func TestCIGoContractRejectsMutations(t *testing.T) {
 		{"serialize tests", func(d *yaml.Node) { ciGoSet(t, ciGoJob(d, "go-test-core"), "needs", "[go-coverage]") }},
 		{"serialize modules", func(d *yaml.Node) { ciGoSet(t, ciGoJob(d, "go-modules"), "needs", "[go-test]") }},
 		{"threshold", func(d *yaml.Node) {
-			ciGoSet(t, ciGoSteps(ciGoJob(d, "go-coverage"))[2], "run", "scripts/check-go-coverage.sh 89.0")
+			ciGoSet(t, ciGoSteps(ciGoJob(d, "go-coverage"))[4], "run", `scripts/check-go-coverage.sh 89.0 --profiles "${{ runner.temp }}/go-coverage"`)
 		}},
 		{"coverage checkout differs", func(d *yaml.Node) {
 			ciGoSet(t, ciGoSteps(ciGoJob(d, "go-coverage"))[0], "uses", "actions/checkout@"+strings.Repeat("a", 40))
