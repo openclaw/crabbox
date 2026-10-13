@@ -1,7 +1,11 @@
 // oxlint-disable eslint/no-await-in-loop -- Session caps depend on each preceding admission and close.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { CoordinatorRuntime, CoordinatorSocketHandlers } from "../src/coordinator-runtime";
+import {
+  CloudflareCoordinatorRuntime,
+  type CoordinatorRuntime,
+  type CoordinatorSocketHandlers,
+} from "../src/coordinator-runtime";
 import { ServeCoordinator } from "../src/serve";
 import {
   LocalServeRelayBackend,
@@ -119,6 +123,66 @@ async function controlFixture() {
 }
 afterEach(() => vi.useRealTimers());
 describe("isolated serve relay session", () => {
+  it("receives binary frames synchronously through Cloudflare's Blob-default sockets", () => {
+    class CloudflareSocket extends EventTarget {
+      binaryType: "blob" | "arraybuffer" = "blob";
+      accept = vi.fn<() => void>();
+      send = vi.fn<(data: ArrayBuffer | Uint8Array) => void>();
+      close = vi.fn<() => void>();
+      receive(frame: Uint8Array<ArrayBuffer>) {
+        this.dispatchEvent(
+          new MessageEvent("message", {
+            data: this.binaryType === "blob" ? new Blob([frame]) : frame.buffer,
+          }),
+        );
+      }
+    }
+    const runtime = new CloudflareCoordinatorRuntime({
+      storage: {},
+      acceptWebSocket: vi.fn<() => void>(),
+    } as unknown as DurableObjectState);
+    const sockets = [new CloudflareSocket(), new CloudflareSocket()];
+    const [client, agent] = sockets as [CloudflareSocket, CloudflareSocket];
+    let next = 0;
+    vi.spyOn(runtime, "createWebSocketUpgrade").mockImplementation(() => ({
+      socket: sockets[next++]! as unknown as WebSocket,
+      response: new Response(null, { status: 204 }),
+    }));
+    const session = new ServeRelaySession(
+      {
+        sessionID: "a".repeat(32),
+        connectBy: Date.now() + 60_000,
+        deadline: Date.now() + 3600_000,
+      },
+      "b".repeat(32),
+      runtime,
+    );
+    try {
+      session.attach("client");
+      session.attach("agent");
+      expect(client.accept).toHaveBeenCalledOnce();
+      expect(agent.accept).toHaveBeenCalledOnce();
+      expect(client.send).toHaveBeenCalledWith(new Uint8Array([2]));
+      expect(agent.send).toHaveBeenCalledWith(new Uint8Array([2]));
+      for (const [sender, receiver] of [
+        [client, agent],
+        [agent, client],
+      ] as const) {
+        const frame = new Uint8Array(32 * 1024 + 1);
+        frame.fill(42, 1);
+        sender.receive(frame);
+        expect(receiver.send).toHaveBeenLastCalledWith(frame.buffer);
+        receiver.receive(new Uint8Array([1]));
+        expect(sender.send).toHaveBeenLastCalledWith(new Uint8Array([1]).buffer);
+      }
+      expect(session.alive()).toBe(true);
+      client.dispatchEvent(new Event("close"));
+      expect(session.alive()).toBe(false);
+      expect(agent.close).toHaveBeenCalledOnce();
+    } finally {
+      session.close();
+    }
+  });
   it("pairs once and pipes bounded binary frames with consumption acknowledgements and no Fleet calls", () => {
     vi.useFakeTimers();
     const f = runtimeFixture();
