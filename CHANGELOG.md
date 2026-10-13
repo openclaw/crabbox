@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Blacksmith Testbox: prepare Node 24 alongside Go so coordinator checks use the repository's supported runtime.
+- Blacksmith Testbox: expose the configured Node and Go runtimes to native commands instead of using the runner image defaults.
 - Coordinator: preserve ordinary TTL deletion ahead of maximum-lifetime retention, reject conflicting delete requests during lifetime work, and reconcile shared AWS ingress after lifetime deletion. [PR 2795](https://github.com/openclaw/crabbox/pull/2795).
 
 ## 0.76.0 - 2026-10-13
