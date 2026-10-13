@@ -106,7 +106,20 @@ func uploadRunScriptAfter(ctx context.Context, target SSHTarget, workdir string,
 		remote = "( " + prepare + " ) </dev/null && " + remote
 	}
 	var stdout, stderr bytes.Buffer
-	if err := runSSHInput(ctx, target, remote, bytes.NewReader(spec.Data), &stdout, &stderr); err != nil {
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		stdout.Reset()
+		stderr.Reset()
+		err = runSSHInput(ctx, target, remote, bytes.NewReader(spec.Data), &stdout, &stderr)
+		if err == nil || !shouldRetrySSHPort(err) || attempt == 1 {
+			break
+		}
+		// Preparation and overwriting the same script are safe to repeat.
+		if err = sleepContext(ctx, idempotentSSHRetryDelay); err != nil {
+			break
+		}
+	}
+	if err != nil {
 		detail := trimFailureDetail(strings.TrimSpace(stdout.String() + "\n" + stderr.String()))
 		if detail != "" {
 			return Exit(7, "upload script %s: %v: %s", spec.RemotePath, err, detail)

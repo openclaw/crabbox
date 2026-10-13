@@ -636,7 +636,7 @@ case "$remote" in
     if [ ! -e "$CRABBOX_FAKE_SSH_MKDIR_COMMAND" ]; then
       printf '%s\n' "$remote" > "$CRABBOX_FAKE_SSH_MKDIR_COMMAND"
     fi
-    IFS= read -r mkdir_command < "$CRABBOX_FAKE_SSH_MKDIR_COMMAND"
+    mkdir_command=$(/bin/cat "$CRABBOX_FAKE_SSH_MKDIR_COMMAND")
     if [ "$remote" = "$mkdir_command" ]; then
       printf 'call\n' >> "$CRABBOX_FAKE_SSH_MKDIR_CALLS"
       if [ ! -e "$CRABBOX_FAKE_SSH_FIRST_MKDIR" ]; then

@@ -7,9 +7,72 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+func TestBatchedUploadRetriesIdempotentPreparation(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		first, second int
+		calls         int
+	}{
+		{name: "transient", first: 255, calls: 2},
+		{name: "exhausted", first: 255, second: 255, calls: 2},
+		{name: "remote failure", first: 7, calls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ssh := `#!/bin/sh
+printf 'call\n' >> "$CRABBOX_UPLOAD_TEST_DIR/calls"
+attempt=1
+if [ -e "$CRABBOX_UPLOAD_TEST_DIR/input-1" ]; then attempt=2; fi
+/bin/cat > "$CRABBOX_UPLOAD_TEST_DIR/input-$attempt"
+if [ "$attempt" = 1 ]; then
+  printf 'first failure\n' >&2
+  exit "$CRABBOX_UPLOAD_TEST_FIRST"
+fi
+printf 'second attempt\n' >&2
+exit "$CRABBOX_UPLOAD_TEST_SECOND"
+`
+			if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(ssh), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir)
+			t.Setenv("CRABBOX_UPLOAD_TEST_DIR", dir)
+			t.Setenv("CRABBOX_UPLOAD_TEST_FIRST", strconv.Itoa(tc.first))
+			t.Setenv("CRABBOX_UPLOAD_TEST_SECOND", strconv.Itoa(tc.second))
+			spec, err := loadRunScript("", true, strings.NewReader("printf 'unchanged script bytes\\n'\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := SSHTarget{User: "fixture", Host: "fixture.invalid", Port: "22", SSHConfigProxy: true}
+			err = uploadRunScriptAfter(t.Context(), target, dir, spec, remoteMkdir(dir))
+			wantFailure := tc.calls == 1 || tc.second != 0
+			if (err != nil) != wantFailure {
+				t.Fatalf("upload error=%v, want failure=%v", err, wantFailure)
+			}
+			if err != nil && tc.calls == 2 && (strings.Contains(err.Error(), "first failure") || !strings.Contains(err.Error(), "second attempt")) {
+				t.Fatalf("failure should retain only the final attempt's diagnostics: %v", err)
+			}
+			calls, err := os.ReadFile(filepath.Join(dir, "calls"))
+			if err != nil || strings.Count(string(calls), "call\n") != tc.calls {
+				t.Fatalf("upload calls=%q, want %d: %v", calls, tc.calls, err)
+			}
+			inputs, err := filepath.Glob(filepath.Join(dir, "input-*"))
+			if err != nil || len(inputs) != tc.calls {
+				t.Fatalf("upload calls=%d, want %d: %v", len(inputs), tc.calls, err)
+			}
+			for _, input := range inputs {
+				data, err := os.ReadFile(input)
+				if err != nil || !bytes.Equal(data, spec.Data) {
+					t.Fatalf("replayed script bytes=%q: %v", data, err)
+				}
+			}
+		})
+	}
+}
 
 func TestNoSyncScriptBatchesPreparation(t *testing.T) {
 	p, backend, dir := setupSSHScriptRun(t)
