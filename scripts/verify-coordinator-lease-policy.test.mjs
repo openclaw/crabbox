@@ -6,7 +6,7 @@ import { verifyCoordinatorLeasePolicy } from "./verify-coordinator-lease-policy.
 const owner = "github:12345";
 const bindingName = "CRABBOX_LEASE_POLICY_OVERRIDES";
 const desired = { owners: { [owner]: { maxTTLSeconds: 86400 } } };
-const config = { accountId: "a".repeat(32), apiToken: "synthetic-api-token", owner };
+const config = { accountId: "a".repeat(32), apiToken: "synthetic-api-token", owners: [owner] };
 const plaintext = (value) => ({
   name: bindingName,
   type: "plain_text",
@@ -146,12 +146,105 @@ test("rejects changed non-target fields even when both documents declare them", 
   await assert.rejects(fixture(settings(plaintext(live)), source).run(), /not preserved/);
 });
 
+const secondOwner = "github:67890";
+const twoOwners = [owner, secondOwner];
+const twoOwnerPolicy = {
+  owners: {
+    [owner]: { maxTTLSeconds: 86400 },
+    [secondOwner]: { maxTTLSeconds: 43200 },
+  },
+};
+
+test("permits changing two explicitly authorized owner maximums", async () => {
+  const live = {
+    owners: {
+      [owner]: { maxTTLSeconds: 14400, autoExtend: "deny" },
+      [secondOwner]: { maxTTLSeconds: 7200, extension: "allow" },
+    },
+  };
+  const source = structuredClone(live);
+  source.owners[owner].maxTTLSeconds = 86400;
+  source.owners[secondOwner].maxTTLSeconds = 43200;
+  await fixture(settings(plaintext(live)), source).run({ owners: twoOwners });
+});
+
+test("permits a new maximum-only owner entry only when explicitly authorized", async () => {
+  const f = fixture(settings(plaintext(desired)), twoOwnerPolicy);
+  await assert.rejects(f.run(), /not preserved/);
+  await f.run({ owners: twoOwners });
+});
+
+for (const [label, mutate] of [
+  ["first owner field", (policy) => (policy.owners[owner].extension = "deny")],
+  ["second owner field", (policy) => (policy.owners[secondOwner].autoExtend = "deny")],
+  ["unrelated owner entry", (policy) => (policy.owners["github:99999"] = { maxTTLSeconds: 7200 })],
+  ["unrelated empty owner entry", (policy) => (policy.owners["github:99999"] = {})],
+  ["organization entry", (policy) => (policy.orgs = { example: { maxTTLSeconds: 7200 } })],
+  ["top-level field", (policy) => (policy.additional = "synthetic-policy-value")],
+]) {
+  for (const side of ["live", "source"]) {
+    test(`two-owner authorization rejects added or dropped ${label} in ${side}`, async () => {
+      const live = structuredClone(twoOwnerPolicy);
+      const source = structuredClone(twoOwnerPolicy);
+      mutate(side === "live" ? live : source);
+      await assert.rejects(
+        fixture(settings(plaintext(live)), source).run({ owners: twoOwners }),
+        /not preserved/,
+      );
+    });
+  }
+}
+
+for (const maxTTLSeconds of [undefined, null, "43200", 43200.5]) {
+  test(`every authorized owner must declare an integer maximum: ${maxTTLSeconds}`, async () => {
+    const source = structuredClone(twoOwnerPolicy);
+    source.owners[secondOwner] = { maxTTLSeconds };
+    const f = fixture(settings(), source);
+    await assert.rejects(
+      f.run({ owners: twoOwners }),
+      /Source policy must declare the named owner's maximum TTL; deployment stopped\./,
+    );
+    assert.equal(f.calls.length, 0);
+  });
+}
+
+test("rejects a missing second source owner before reading settings", async () => {
+  const f = fixture(settings());
+  await assert.rejects(f.run({ owners: twoOwners }), /must declare the named owner's maximum TTL/);
+  assert.equal(f.calls.length, 0);
+});
+
+for (const invalidOwner of [
+  "",
+  "github:",
+  "github:abc",
+  "github:0",
+  "github:-1",
+  "github:1.5",
+  "github:123\n",
+  " github:123",
+  "__proto__",
+  null,
+  123,
+]) {
+  test(`rejects malformed owner in the authorization list: ${JSON.stringify(invalidOwner)}`, async () => {
+    const f = fixture(settings());
+    await assert.rejects(
+      f.run({ owners: [owner, invalidOwner] }),
+      /Set the Cloudflare account, API token, and policy owner before verification\./,
+    );
+    assert.equal(f.calls.length, 0);
+  });
+}
+
 test("rejects invalid source or authority before reading settings", async () => {
   await Promise.all(
     [
       { accountId: "../synthetic-value" },
       { apiToken: "" },
-      { owner: "" },
+      { owners: [] },
+      { owners: undefined },
+      { owners: owner },
       { desiredOverrides: "synthetic-invalid" },
       { desiredOverrides: JSON.stringify({ owners: { [owner]: {} } }) },
     ].map(async (overrides) => {

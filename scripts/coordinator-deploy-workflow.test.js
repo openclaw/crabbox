@@ -188,7 +188,7 @@ test("main deployment verifies final serving identity after optional secret chan
 test("deployment checks live lease policy preservation before publishing", () => {
   assert.match(
     workflow,
-    /- name: Verify lease policy preservation\n        run: node scripts\/verify-coordinator-lease-policy\.mjs github:25068[^]*?- name: Deploy\n/,
+    /- name: Verify lease policy preservation\n        run: node scripts\/verify-coordinator-lease-policy\.mjs github:25068 github:58493\n[^]*?- name: Deploy\n/,
   );
   assert.match(
     workflow,
