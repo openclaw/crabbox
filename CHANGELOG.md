@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Coordinator: preserve ordinary TTL deletion ahead of maximum-lifetime retention, reject conflicting delete requests during lifetime work, and reconcile shared AWS ingress after lifetime deletion.
+- Coordinator: preserve ordinary TTL deletion ahead of maximum-lifetime retention, reject conflicting delete requests during lifetime work, and reconcile shared AWS ingress after lifetime deletion. [PR 2795](https://github.com/openclaw/crabbox/pull/2795).
 
 ## 0.75.0 - 2026-10-12
 
