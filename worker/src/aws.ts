@@ -36,6 +36,7 @@ import {
   type LeaseConfig,
 } from "./config";
 import { creationEvent, observedRunning, measureCreationStep } from "./creation-events";
+import { sha256Hex } from "./encoding";
 import { hasImageRequirements } from "./image-capabilities";
 import { osImageSpec } from "./os-image";
 import {
@@ -133,7 +134,8 @@ const awsInstanceVisibilityBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_0
 // Leave room below Workers' six-connection limit for concurrent quota discovery.
 const awsIngressBatchSize = 4;
 
-class AWSQueryError extends Error {
+export class AWSQueryError extends Error {
+  retryAfter?: string | undefined;
   constructor(
     readonly action: string,
     readonly status: number,
@@ -364,7 +366,10 @@ interface AWSQueryOptions {
   skipExpectedIdentity?: boolean;
 }
 
-interface AWSLeaseOperation {
+export interface AWSLeaseOperation {
+  credentialFingerprint(): Promise<string>;
+  findServers(instanceIDs: string[]): Promise<Map<string, ProviderMachine>>;
+  sshKeyAbsent(name: string, leaseID: string): Promise<boolean>;
   readonly region: string;
   readonly client: EC2SpotClient;
   verifiedIdentity(): Promise<AWSIdentity>;
@@ -858,22 +863,20 @@ export class EC2SpotClient {
     );
   }
 
-  async withLeaseOperation<T>(operation: (session: AWSLeaseOperation) => Promise<T>): Promise<T> {
+  async withLeaseOperation<T>(
+    operation: (session: AWSLeaseOperation) => Promise<T>,
+    signal = this.requestSignal,
+  ): Promise<T> {
     // One snapshot owns the full regional operation, including quota and SSM calls.
     const snapshot = this.credentialProvider
       ? resolvedAWSCredentials(
           await waitForProviderSignal(
-            providerRequestSignal(
-              providerRequestTimeoutMs,
-              this.requestSignal,
-              "aws",
-              "credential snapshot",
-            ),
+            providerRequestSignal(providerRequestTimeoutMs, signal, "aws", "credential snapshot"),
             () => this.credentialProvider!(),
           ),
         )
-      : undefined;
-    const client = snapshot ? new EC2SpotClient(this.env, this.region, snapshot) : this;
+      : this.credentialSnapshot;
+    const client = new EC2SpotClient(this.env, this.region, snapshot, signal);
     const ec2 = client.aws;
     const sts = client.stsClient;
     let identity: Promise<AWSIdentity> | undefined;
@@ -896,6 +899,23 @@ export class EC2SpotClient {
     return await operation({
       region: this.region,
       client,
+      credentialFingerprint: () => {
+        const credentials = snapshot ?? this.credentialSnapshot;
+        if (!credentials)
+          throw new AWSLeaseAuthorityError(
+            "retained reconciliation requires a fixed credential snapshot",
+          );
+        return sha256Hex(
+          JSON.stringify([
+            credentials.accessKeyId,
+            credentials.secretAccessKey,
+            credentials.sessionToken,
+          ]),
+        );
+      },
+      findServers: (ids) => withAccount((account) => client.findServersWith(ids, query(account))),
+      sshKeyAbsent: (name, leaseID) =>
+        withAccount((account) => client.sshKeyAbsentWith(name, leaseID, query(account))),
       verifiedIdentity,
       findServer: (instanceID) =>
         withAccount((account) => client.findServerWith(instanceID, query(account))),
@@ -1863,6 +1883,45 @@ export class EC2SpotClient {
       );
     }
     return { kind: "present", server: instances[0]! };
+  }
+
+  private async findServersWith(
+    ids: string[],
+    options: AWSQueryOptions,
+  ): Promise<Map<string, ProviderMachine>> {
+    if (!ids.length || ids.length > 200 || ids.some((id) => !/^i-[a-f0-9]{8,17}$/.test(id)))
+      throw new AWSLeaseAuthorityError("invalid exact instance batch");
+    const params = Object.fromEntries(ids.map((id, index) => [`InstanceId.${index + 1}`, id]));
+    const described = await this.describeInstances(params, options);
+    if (asString(described.root["nextToken"]))
+      throw new AWSLeaseObservationError("unexpected pagination in exact instance batch");
+    const result = new Map<string, ProviderMachine>();
+    for (const reservation of described.reservations) {
+      for (const value of items(record(reservation["instancesSet"])["item"])) {
+        const instance = record(value);
+        const id = asString(instance["instanceId"]);
+        if (!ids.includes(id) || result.has(id))
+          throw new AWSLeaseAuthorityError("unexpected or duplicate exact instance identity");
+        result.set(id, this.withRegion(instanceToMachine(instance)));
+      }
+    }
+    return result;
+  }
+
+  private async sshKeyAbsentWith(
+    name: string,
+    leaseID: string,
+    options: AWSQueryOptions,
+  ): Promise<boolean> {
+    if (name !== providerKeyForLease(leaseID))
+      throw new AWSLeaseAuthorityError("invalid owned key identity");
+    try {
+      await this.ec2("DescribeKeyPairs", { "KeyName.1": name }, options);
+      return false;
+    } catch (error) {
+      if (error instanceof AWSQueryError && error.code === "InvalidKeyPair.NotFound") return true;
+      throw error;
+    }
   }
 
   async getServer(instanceID: string): Promise<ProviderMachine> {
@@ -3770,7 +3829,9 @@ export class EC2SpotClient {
     );
     const text = await response.text();
     if (!response.ok) {
-      throw this.awsQueryError(action, response.status, text);
+      const error = this.awsQueryError(action, response.status, text);
+      error.retryAfter = response.headers.get("Retry-After") ?? undefined;
+      throw error;
     }
     let parsed: unknown;
     try {
@@ -3820,7 +3881,9 @@ export class EC2SpotClient {
     });
     const text = await response.text();
     if (!response.ok) {
-      throw this.awsQueryError(action, response.status, text);
+      const error = this.awsQueryError(action, response.status, text);
+      error.retryAfter = response.headers.get("Retry-After") ?? undefined;
+      throw error;
     }
     const parsed = this.parser.parse(text) as unknown;
     const parsedRecord = record(parsed);

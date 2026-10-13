@@ -60741,3 +60741,31 @@ describe("current lease index and indexed listings", () => {
     }
   });
 });
+
+describe("retained reconciliation admin status", () => {
+  it("requires an admin grant and returns status without running maintenance", async () => {
+    const env = {
+      CRABBOX_ADMIN_TOKEN: "fixture-admin",
+      CRABBOX_SHARED_TOKEN: "fixture-user",
+    } as Env;
+    const fleet = testFleet(new MemoryStorage(), {}, env);
+    const send = (token: string) =>
+      routeCoordinatorRequest(
+        new Request("https://coordinator.test/v1/admin/retained-reconcile", {
+          headers: { authorization: `Bearer ${token}`, "x-crabbox-admin": "true" },
+        }),
+        env,
+        (incoming) => fleet.fetch(incoming),
+        { githubMembership: async () => {} },
+      );
+    const denied = await send("fixture-user");
+    expect([401, 403]).toContain(denied.status);
+    const allowed = await send("fixture-admin");
+    expect(allowed.status).toBe(200);
+    expect(await allowed.json()).toMatchObject({
+      settings: { mode: "on", delete: false },
+      counters: {},
+      scanned: 0,
+    });
+  });
+});

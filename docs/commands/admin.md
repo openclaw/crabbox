@@ -10,6 +10,7 @@ Coordinator-backed `admin` commands require server-authorized admin access. An e
 
 ```sh
 crabbox admin leases
+crabbox admin retained-reconcile --json
 crabbox admin leases --state active --json
 crabbox admin lease-audit --state expired --provider aws
 crabbox admin lease-audit --fail-on-live
@@ -330,3 +331,17 @@ The EC2 Mac Dedicated Host lifecycle policy is intentionally limited to host ope
 
 - [Operations](../operations.md)
 - [Auth and admin](../features/auth-admin.md)
+
+## retained-reconcile
+
+`crabbox admin retained-reconcile [--json]` reads the admin-only
+`GET /v1/admin/retained-reconcile` status endpoint. It reports effective settings,
+cumulative counters by provider/outcome, last pass time, the current-index cursor,
+completed cycles, records scanned, and provider backoff deadlines. Counters count
+observations across passes, not distinct leases. `present` identifies real retained
+machines; only a bounded sample of their lease IDs appears in each structured
+`coordinator.retained_reconcile` log line. The command does not start a pass or
+change deletion settings.
+
+See [Retained record reconciliation](../features/lifecycle-cleanup.md#retained-record-reconciliation)
+for provider coverage and unresolved classes.

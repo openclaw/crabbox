@@ -84,7 +84,12 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   if (method === "POST" && path.join("/") === "v1/admin/tailscale-preflight") {
     return "direct";
   }
-  if (method === "GET" && ["v1/whoami", "v1/leases", "v1/admin/leases"].includes(path.join("/"))) {
+  if (
+    method === "GET" &&
+    ["v1/whoami", "v1/leases", "v1/admin/leases", "v1/admin/retained-reconcile"].includes(
+      path.join("/"),
+    )
+  ) {
     return "direct";
   }
   if (
