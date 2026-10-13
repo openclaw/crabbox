@@ -320,6 +320,13 @@ Verification only reads deployment metadata and health; it creates no lease.
 If manually clearing the Daytona snapshot creates a new untagged version,
 verification fails too; inspect the final version before rerunning the deploy.
 
+Before deployment, the workflow compares the live `CRABBOX_LEASE_POLICY_OVERRIDES`
+binding with the production value in `worker/wrangler.jsonc`. Only the named
+owner's maximum TTL may change; other owner, organization, and policy fields
+must be preserved. An unreadable secret binding or a conflicting document stops
+deployment before upload. Reconcile those entries into the source configuration
+before deploying; do not replace an unknown override document.
+
 Worker source lives in `worker/`. Run the gate, then deploy:
 
 ```sh

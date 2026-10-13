@@ -13,6 +13,7 @@ on:
       - ".github/workflows/coordinator-deploy.yml"
       - "scripts/prepare-coordinator-deploy-secrets.mjs"
       - "scripts/verify-coordinator-deployment.mjs"
+      - "scripts/verify-coordinator-lease-policy.mjs"
   workflow_dispatch:
     inputs:
       clearDaytonaSnapshot:
@@ -59,6 +60,12 @@ jobs:
       - name: Install
         run: npm ci
         working-directory: worker
+
+      - name: Verify lease policy preservation
+        run: node scripts/verify-coordinator-lease-policy.mjs github:25068
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: "91b59577e757131d68d55a471fe32aca"
 
       - name: Deploy
         # `npm run deploy` runs the predeploy bundle (vendor-novnc) then
