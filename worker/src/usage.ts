@@ -352,18 +352,25 @@ function leaseReservesBudget(lease: LeaseRecord): boolean {
 }
 
 function leaseUsage(lease: LeaseRecord, now: Date): UsageAccumulator {
+  const live = leaseIsLive(lease) || lifetimeOwnsCompute(lease);
   const created = parseTime(lease.createdAt, now);
-  const ended = parseTime(lease.endedAt || lease.releasedAt || "", now);
+  // Legacy terminal rows may lack endedAt. Their last persisted observation,
+  // rather than query time, bounds runtime until lifecycle evidence is available.
+  const ended = parseTime(
+    lease.endedAt || lease.releasedAt || lease.cleanupCompletedAt || lease.updatedAt,
+    created,
+  );
   const stopped = parseTime(lease.lifetimePolicy?.stoppedAt ?? "", ended);
-  const stop = leaseIsLive(lease) || lifetimeOwnsCompute(lease) ? now : stopped;
+  const stop = live ? now : stopped;
+  const neverAllocated = !live && !lease.cloudID && lease.provisioningResourceMayExist === false;
   const runtimeSeconds = Math.max(
     0,
     Math.trunc(
-      (lifetimeRuntimeMs(lease, now.getTime()) ?? stop.getTime() - created.getTime()) / 1000,
+      (lifetimeRuntimeMs(lease, stop.getTime()) ??
+        (neverAllocated ? 0 : stop.getTime() - created.getTime())) / 1000,
     ),
   );
   const estimatedUSD = roundUSD((runtimeSeconds / 3600) * (lease.estimatedHourlyUSD || 0));
-  const live = leaseIsLive(lease) || lifetimeOwnsCompute(lease);
   const reservedUSD = roundUSD(lease.maxEstimatedUSD ?? estimatedUSD);
   // Failed admissions have timestamps and a reservation but no billable resource.
   const provisioned = Boolean(

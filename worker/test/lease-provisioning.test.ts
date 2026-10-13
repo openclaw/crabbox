@@ -278,6 +278,8 @@ afterEach(() => {
 });
 
 it("bounds durable admission history reads while preserving monthly cost accounting", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-05-20T02:00:00Z"));
   const storage = new ProvisioningTestStorage();
   const azure = new AzureFixture();
   vi.stubGlobal("fetch", azure.fetch);

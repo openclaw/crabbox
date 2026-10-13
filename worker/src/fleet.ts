@@ -18412,6 +18412,8 @@ export class FleetCoordinator {
         if (claimed.length >= leaseCleanupBatchSize) {
           return;
         }
+        // Freeze legacy terminal runtime before the cleanup claim updates its observation.
+        if (!leaseIsLive(lease)) lease.endedAt ??= lease.releasedAt ?? lease.updatedAt;
         lease.cleanupStartedAt = nowISO;
         lease.cleanupClaimExpiresAt = new Date(
           nowDate.getTime() + leaseCleanupClaimStaleMs,
@@ -18459,9 +18461,11 @@ export class FleetCoordinator {
             );
             return;
           }
+          current.endedAt = leaseIsLive(current)
+            ? nowISO
+            : (current.endedAt ?? current.releasedAt ?? current.updatedAt);
           current.state = leaseIsLive(current) ? "expired" : current.state;
           current.updatedAt = nowISO;
-          current.endedAt = nowISO;
           if (current.provisioningResourceMayExist) {
             if (!current.failureError && current.cleanupError) {
               current.failureError = current.cleanupError;
@@ -27826,7 +27830,9 @@ function finalizedReleasedLease(
   lease.state = "released";
   lease.updatedAt = now;
   lease.releasedAt = now;
-  lease.endedAt = now;
+  // Releasing failed/expired history must not extend its observed runtime.
+  if (leaseIsLive(current)) lease.endedAt = now;
+  else lease.endedAt ??= current.releasedAt ?? current.updatedAt;
   if (!unresolvedCreation) {
     delete lease.provisioningCoordinatorVersion;
     delete lease.provisioningRequestSettledAt;

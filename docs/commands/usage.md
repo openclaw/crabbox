@@ -96,7 +96,10 @@ limits:
 
 ## Estimated, reserved, and committed cost
 
-`estimatedUSD` is the elapsed-runtime cost for leases in the selected month.
+`estimatedUSD` is the elapsed-runtime cost for leases in the selected month. Terminal
+runtime stops at the persisted end/release time or last observation for legacy rows;
+late release and cleanup preserve that boundary. Confirmed never-allocated leases
+have zero compute runtime.
 
 `reservedUSD` is the worst-case cost based on each lease's TTL. The broker computes reserved cost before provisioning so monthly spend guardrails can reject a lease before any machine is created.
 

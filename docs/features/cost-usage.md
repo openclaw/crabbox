@@ -69,7 +69,9 @@ ignored. Admin callers may use any scope and filter by an arbitrary owner or org
 Three cost figures are reported per lease:
 
 - **`estimatedUSD`** — elapsed cost: `runtime_hours x estimatedHourlyUSD`. For active
-  leases, runtime is measured to "now"; otherwise to the lease end/release time.
+  leases, runtime is measured to "now"; otherwise to the persisted end/release time
+  or last observation for legacy terminal rows. Late release and cleanup preserve
+  that boundary. Confirmed never-allocated leases have zero compute runtime.
 - **`reservedUSD`** — worst-case cost reserved up front: `ttl_hours x hourlyUSD`, captured
   before provisioning. This historical worst-case figure stays unchanged after the lease finishes.
 - **`committedUSD`** — the amount used by monthly budget enforcement: the full
@@ -79,6 +81,9 @@ Three cost figures are reported per lease:
   provisioned a resource contributes zero. Recorded compute intervals account for
   retained machines that stop and resume; otherwise runtime uses the existing
   creation and end/release timestamps.
+
+The read-only lease audit cannot reconstruct an earlier deletion time that was not
+persisted. Confirmed stop/resume intervals remain authoritative.
 
 Settlement is computed from existing lease records on read, including older finished
 leases; no backfill is required. Release, expiry, deletion, reclamation, and provisioning
