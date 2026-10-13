@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Coordinator deployment: allow explicitly authorized maximum TTL changes for multiple owners while preserving all other live lease-policy overrides; thanks @vincentkoc for the original preservation guard in [PR 2816](https://github.com/openclaw/crabbox/pull/2816).
 - Coordinator: preserve ordinary TTL deletion ahead of maximum-lifetime retention, reject conflicting delete requests during lifetime work, and reconcile shared AWS ingress after lifetime deletion. [PR 2795](https://github.com/openclaw/crabbox/pull/2795).
 
 ## 0.76.0 - 2026-10-13
