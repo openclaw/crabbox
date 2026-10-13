@@ -190,7 +190,7 @@ func TestLifetimePolicyVisibleInLeaseCommands(t *testing.T) {
 				if command == "status" || command == "inspect" {
 					args = append(args, "--id", lease.ID, "--provider", "aws")
 				} else if command == "list" {
-					args = append(args, "--provider", "aws")
+					args = append(args, "--provider", "aws", "--retained")
 				}
 				if jsonOut {
 					args = append(args, "--json")
