@@ -5,6 +5,7 @@
 ### Changed
 
 - Coordinator monthly reserved-USD budgets are raised to $100,000 fleet-wide, $50,000 per owner and $100,000 per org; reservations from finished leases had exhausted the per-owner cap at roughly a quarter of the estimated spend.
+- CLI: stream `list` rows live-first with bounded concurrent pagination, add `--live` and `--jsonl`, and stream uncapped `--all` lease lookups while preserving the buffered `--json` array.
 
 ### Added
 

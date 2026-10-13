@@ -15,7 +15,9 @@ crabbox list --provider ssh --target macos --static-host mac-studio.local
 crabbox list --provider cloudflare --refresh
 crabbox list --provider hostinger --all
 crabbox list --pond alpha
+crabbox list --live
 crabbox list --json
+crabbox list --jsonl
 ```
 
 `crabbox pool list` is a compatibility alias for the same command.
@@ -38,9 +40,29 @@ The shape of the output depends on the selected `--provider`:
 
 Providers that do not implement listing exit with an error.
 
-Coordinator listing requests the current lease view in summary pages of at most
-100 stored rows and follows continuation cursors, including empty filtered pages.
-It sorts the combined result newest first. Text and `--json` omit
+Coordinator text output prints its header immediately, then streams rows as
+summary pages arrive (at most 100 stored rows per page, including empty filtered
+pages). Active leases appear first, then provisioning leases, then kept terminal
+leases under `retained (cleanup not confirmed):`. These queries run concurrently
+with a maximum of four in flight; output keeps that section order and deduplicates
+lease IDs. Rows within each section follow the coordinator's keyset page order,
+not a global newest-first sort. When stderr is a terminal, a one-line progress
+hint appears while more pages are pending.
+
+Use `--live` to stop after the active and provisioning sections, without requesting
+the retained-record pages. This is the fastest way to inspect running work when
+many older kept records remain. For `--all`, live machines appear first as indexed
+admin lease pages arrive, followed by `other provider inventory:`; `--live --all`
+omits that remaining inventory. Admin lease lookups follow every page without a
+1,000-row cap. Direct providers retain their provider-native inventory behavior.
+
+`--json` keeps its buffered, single-array contract and sorts the ordinary
+coordinator lease view newest first, including with `--live`. `--jsonl` streams
+one object per line in the same live-first order as text, without headers or
+separators. The two JSON flags
+are mutually exclusive and both support `--live` and `--pond`. On error, text and
+JSONL output may already contain rows; check the command's exit status before
+treating the listing as complete. Text and both JSON formats omit
 `creationEvents`, `telemetryHistory`, and `provisioningAttempts`; use
 `crabbox inspect --provider aws --id <lease-id> --json` for full diagnostics.
 Paging is a live view, so leases created or changed during a listing may require
@@ -81,7 +103,7 @@ normalized like slugs (lowercased, non-alphanumeric runs collapsed to single
 dashes), so `--pond "Alpha Pond"` matches a lease created with `--pond alpha-pond`.
 See [pond](pond.md) and [docs/features/pond.md](../features/pond.md).
 
-In `--json` mode the pond filter is applied to the same payload the backend emits;
+In either JSON mode the pond filter is applied to the same payload the backend emits;
 backends whose entries carry no labels return an empty list rather than an
 unfiltered one.
 
@@ -118,7 +140,9 @@ runners remain visibility-only records rather than Crabbox leases.
 --all                    include provider inventory outside Crabbox-owned leases where supported
 --refresh                query live provider state where supported
 --pond <name>            only list leases tagged with this pond
---json                   print JSON
+--live                   stop after active/provisioning coordinator leases
+--json                   print one buffered JSON array
+--jsonl                  stream one JSON object per line
 ```
 
 Provider-specific connection overrides are also accepted when listing that

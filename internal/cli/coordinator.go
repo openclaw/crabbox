@@ -1545,41 +1545,16 @@ func (c *CoordinatorClient) Leases(ctx context.Context, state string, limit int)
 // CurrentLeases negotiates bounded summary pages. Older coordinators keep their
 // existing newest-first list contract; report its actual 500-row server cap.
 func (c *CoordinatorClient) CurrentLeases(ctx context.Context, provider string) ([]CoordinatorLease, bool, error) {
-	const pagination = "keyset-v1"
-	values := url.Values{"view": {"current"}, "provider": {provider}, "limit": {"100"}, "projection": {"summary"}, "pagination": {pagination}}
 	var leases []CoordinatorLease
-	seenCursors := make(map[string]bool)
-	for {
-		var res struct {
-			Leases     []CoordinatorLease `json:"leases"`
-			Pagination string             `json:"pagination"`
-			NextCursor string             `json:"nextCursor"`
-		}
-		if err := c.doRead(ctx, "/v1/leases?"+values.Encode(), &res); err != nil {
-			return nil, false, err
-		}
-		if res.Pagination != pagination {
-			if values.Get("cursor") != "" {
-				return nil, false, fmt.Errorf("coordinator lease pagination changed during listing; retry list")
-			}
-			if len(res.Leases) < 100 {
-				return res.Leases, false, nil
-			}
-			legacy, err := c.listLeases(ctx, "", 500, "current", provider)
-			return legacy, len(legacy) >= 500, err
-		}
-		leases = append(leases, res.Leases...)
-		if res.NextCursor == "" {
-			break
-		}
-		if seenCursors[res.NextCursor] {
-			return nil, false, fmt.Errorf("coordinator lease pagination did not advance")
-		}
-		seenCursors[res.NextCursor] = true
-		values.Set("cursor", res.NextCursor)
+	truncated, err := c.visitLeasePages(ctx, coordinatorLeaseQuery{provider: provider, current: true}, func(page []CoordinatorLease, _ bool) error {
+		leases = append(leases, page...)
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
 	}
 	slices.SortStableFunc(leases, func(a, b CoordinatorLease) int { return strings.Compare(b.CreatedAt, a.CreatedAt) })
-	return leases, false, nil
+	return leases, truncated, nil
 }
 
 func (c *CoordinatorClient) listLeases(ctx context.Context, state string, limit int, view, provider string) ([]CoordinatorLease, error) {
@@ -1958,38 +1933,15 @@ func (c *CoordinatorClient) EgressStatus(ctx context.Context, leaseID string) (C
 // ActiveAdminLeases reads every active lease for pool orphan detection.
 // The bool reports a possibly truncated response from a legacy coordinator.
 func (c *CoordinatorClient) ActiveAdminLeases(ctx context.Context) ([]CoordinatorLease, bool, error) {
-	const pagination = "keyset-v1"
-	// recentLeases clamps legacy requests to 500, even when the caller asks for more.
-	const legacyLimit = 500
-	values := url.Values{"state": {"active"}, "limit": {"100"}, "projection": {"summary"}, "pagination": {pagination}}
 	var leases []CoordinatorLease
-	seenCursors := make(map[string]bool)
-	for {
-		var res struct {
-			Leases     []CoordinatorLease `json:"leases"`
-			Pagination string             `json:"pagination"`
-			NextCursor string             `json:"nextCursor"`
-		}
-		if err := c.doRead(ctx, "/v1/admin/leases?"+values.Encode(), &res); err != nil {
-			return nil, false, err
-		}
-		if res.Pagination != pagination {
-			if values.Get("cursor") != "" {
-				return nil, false, fmt.Errorf("coordinator lease pagination changed during listing; retry list")
-			}
-			legacy, err := c.AdminLeases(ctx, "active", "", "", legacyLimit)
-			return legacy, len(legacy) == legacyLimit, err
-		}
-		leases = append(leases, res.Leases...)
-		if res.NextCursor == "" {
-			return leases, false, nil
-		}
-		if seenCursors[res.NextCursor] {
-			return nil, false, fmt.Errorf("coordinator lease pagination did not advance")
-		}
-		seenCursors[res.NextCursor] = true
-		values.Set("cursor", res.NextCursor)
+	truncated, err := c.visitLeasePages(ctx, coordinatorLeaseQuery{admin: true, state: "active"}, func(page []CoordinatorLease, _ bool) error {
+		leases = append(leases, page...)
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
 	}
+	return leases, truncated, err
 }
 
 func (c *CoordinatorClient) AdminLeases(ctx context.Context, state, owner, org string, limit int) ([]CoordinatorLease, error) {
