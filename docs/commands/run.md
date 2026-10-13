@@ -144,6 +144,14 @@ ownership is uncertain. Check it with `crabbox inspect --provider <provider> --i
 and use the matching `stop` command for a disposable lease. Static SSH hosts are
 not destroyed by `stop`.
 
+With `--no-sync` on POSIX SSH targets, workspace creation, sync-fingerprint
+invalidation, and script upload share one SSH session when no preflight or
+profile probe must run before the upload. The script is still
+retained at its content-addressed path for execution and failure capture.
+Baseline telemetry is collected concurrently with preparation and joined before
+execution; terminal telemetry and run-event delivery complete before the run
+record is finalized.
+
 ## Remote workspace root
 
 Use `CRABBOX_WORK_ROOT` to change the portable base root for one run without

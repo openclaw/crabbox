@@ -90,12 +90,20 @@ func runScriptForTarget(spec *RunScriptSpec, target SSHTarget) *RunScriptSpec {
 }
 
 func uploadRunScript(ctx context.Context, target SSHTarget, workdir string, spec *RunScriptSpec) error {
+	return uploadRunScriptAfter(ctx, target, workdir, spec, "")
+}
+
+func uploadRunScriptAfter(ctx context.Context, target SSHTarget, workdir string, spec *RunScriptSpec, prepare string) error {
 	if spec == nil {
 		return nil
 	}
 	remote := remoteUploadRunScriptCommand(workdir, spec.RemotePath)
 	if isWindowsNativeTarget(target) {
 		remote = windowsRemoteUploadRunScriptCommand(workdir, spec.RemotePath)
+	}
+	if prepare != "" {
+		// Preparation previously had no stdin; login hooks must not consume script bytes.
+		remote = "( " + prepare + " ) </dev/null && " + remote
 	}
 	var stdout, stderr bytes.Buffer
 	if err := runSSHInput(ctx, target, remote, bytes.NewReader(spec.Data), &stdout, &stderr); err != nil {

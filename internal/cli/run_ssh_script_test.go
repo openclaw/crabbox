@@ -94,6 +94,12 @@ func setupSSHScriptRun(t *testing.T) (*sshScriptTestProvider, *sshScriptTestBack
 	b.lease = LeaseTarget{LeaseID: "cbx_123456789abc", Server: Server{Provider: p.Spec().Name}, SSH: SSHTarget{
 		User: "synthetic-script-credential", Host: "fixture.invalid", Port: "22", TargetOS: targetLinux, SSHConfigProxy: true, AuthSecret: true,
 	}}
+	// The fake transport never authenticates; pin one fixture identity instead
+	// of probing every ambient default identity on every command.
+	b.lease.SSH.Key = filepath.Join(dir, "ssh-identity")
+	if err := os.WriteFile(b.lease.SSH.Key, []byte("synthetic identity"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	p.backend = b
 	RegisterProvider(p)
 	t.Cleanup(func() { delete(providerRegistry, p.Spec().Name) })
@@ -294,7 +300,8 @@ func TestHybridSSHScriptCancellationAndSameLeaseReplay(t *testing.T) {
 			<-done
 		}
 	})
-	deadline := time.Now().Add(10 * time.Second)
+	// Configuration probes precede the cancellation boundary and can be slow on busy hosts.
+	deadline := time.Now().Add(time.Minute)
 	for {
 		if _, err := os.Stat(started); err == nil {
 			break

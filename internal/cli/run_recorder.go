@@ -293,8 +293,13 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 		return nil
 	}
 	r.terminalAttempted = true
-	r.waitForEvents(r.publisher.drainTimeout())
+	eventsDrained := make(chan struct{})
+	go func() {
+		r.waitForEvents(r.publisher.drainTimeout())
+		close(eventsDrained)
+	}()
 	r.CaptureTelemetryEnd(ctx, target)
+	<-eventsDrained
 	telemetry := runTelemetrySummary(r.telemetryStart, r.telemetryEnd, r.telemetrySnapshot())
 	ctx, cancel := context.WithTimeout(context.Background(), runRecorderFinishTimeout)
 	defer cancel()
