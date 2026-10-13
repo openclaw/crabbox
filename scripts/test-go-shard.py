@@ -1,12 +1,62 @@
 #!/usr/bin/env python3
-"""Run one exhaustive, disjoint shard of the CLI's top-level Go tests."""
+"""Run one exhaustive, disjoint shard of the CLI's top-level Go tests.
+
+A test's shard depends only on its own name and SLOW_TESTS, never on which
+other tests exist:
+
+- Tests in SLOW_TESTS are placed heaviest first, each on the shard with the
+  least SLOW_TESTS weight so far (lowest index on ties).
+- Every other test runs on shard sha256(name) mod count.
+
+Adding, removing, or renaming an unlisted test therefore moves no other test;
+only edits to SLOW_TESTS move listed tests.
+"""
 
 import argparse
+import hashlib
 import heapq
 import json
 import re
 import subprocess
 import sys
+
+# Top-level elapsed seconds from `go test -race -count=1 -json ./internal/cli`;
+# only relative weights matter. List every test at 15 seconds or more: hashing
+# tests that large leaves shard totals uneven. Discovery fails while a listed
+# test is missing, so renaming one must update this list.
+SLOW_TESTS = {
+    "TestRunGitOverlaySuccessFallbackAndLateLocalEdit": 201,
+    "TestRunDefaultSyncWithoutBash": 71,
+    "TestCoordinatorStopAggregateGuestCleanupPreservesReleaseBudget": 64,
+    "TestFunctionalPOSIXPreflightOwner": 59,
+    "TestRunActionsWorkspaceRealFinalEffects": 54,
+    "TestCheckpointCaptureBuiltBinaryContract": 42,
+    "TestRunArtifactChangeWithFailureDownloadsE2E": 42,
+    "TestRunArtifactChangeE2E": 37,
+    "TestHybridSSHScriptRun": 32,
+    "TestWaitForSSHReadyRealSSHTimeoutDiagnostic": 32,
+    "TestRunScriptFailureBundleScopesRetainedUploads": 32,
+    "TestVNCPasswordSSHProductionDeadline": 31,
+    "TestHeartbeatCoordinatorWaitsForAccessRefresh": 31,
+    "TestWebVNCWebSocketHeaderDeadlineNetwork": 31,
+    "TestRunFunctionalPreflightContinuation": 30,
+    "TestRunDetachedGitSeedPreservesManifestAuthority": 26,
+    "TestRsyncStallTimeoutBehavior": 24,
+    "TestRunDirectorySourceActionsWorkspaceRejected": 22,
+    "TestRunCoordinatorCleanupOutcomes": 22,
+    "TestStopCoordinatorStalledLookup": 21,
+    "TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache": 21,
+    "TestEgressOpenRemoteTimeoutLeaksPendingAndNeverClosesHostConn": 20,
+    "TestWarmupCreationRejectedTiming": 19,
+    "TestRemoteGitCoherenceRollsBackFailuresAndRetries": 19,
+    "TestFixedAcquisitionSerializesCLIReplayAcrossProcesses": 19,
+    "TestRunCommandLeaseCleanupQuiescesWorkspaceOwner": 19,
+    "TestCommandSelectorPrecedence": 19,
+    "TestRunLeaseRecoveryGuidance": 16,
+    "TestCoordinatorStopReleasesAfterUnreachableGuestCleanup": 16,
+    "TestRunAdmissionFailureRetainsEffectiveAuthenticationAndRedactsWarning": 16,
+    "TestExecuteLocalActionsHydrationUsesCallerPlainManifestMode": 15,
+}
 
 
 def coverage_test(command):
@@ -41,7 +91,18 @@ def select_tests(listing, shard, count):
     names = sorted(set(re.findall(r"^(?:Test|Example|Fuzz)\w*$", listing, re.M)))
     if len(names) < count:
         raise ValueError("test discovery returned fewer tests than shards")
-    return names[shard::count]
+    missing = sorted(SLOW_TESTS.keys() - set(names))
+    if missing:
+        raise ValueError("SLOW_TESTS lists undiscovered tests: " + ", ".join(missing))
+    owners, loads = {}, [0] * count
+    for name in sorted(SLOW_TESTS, key=lambda name: (-SLOW_TESTS[name], name)):
+        owners[name] = loads.index(min(loads))
+        loads[owners[name]] += SLOW_TESTS[name]
+    return [name for name in names if owners.get(name, hashed_shard(name, count)) == shard]
+
+
+def hashed_shard(name, count):
+    return int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "big") % count
 
 
 def main():

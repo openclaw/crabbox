@@ -5,6 +5,7 @@
 ### Fixed
 
 - Release verification: report bounded, attributable macOS notarization diagnostics without changing failed checks or executing rejected binaries. [PR 2823](https://github.com/openclaw/crabbox/pull/2823).
+- CI: assign Go CLI race and coverage shards by test-name hash, with a checked-in weight list spreading known-slow tests, so adding a test no longer moves hundreds of existing tests between shards and pushes one past its 10-minute race timeout. [PR 2826](https://github.com/openclaw/crabbox/pull/2826).
 
 ## 0.77.0 - 2026-10-13
 
