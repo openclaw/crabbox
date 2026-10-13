@@ -121,7 +121,7 @@ func TestCoordinatorCreateIdentityMismatchNeverCancelsLegacyAdoption(t *testing.
 func TestCoordinatorListIncludesRetainedLeasesInTextAndJSON(t *testing.T) {
 	retained, deleted := false, true
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("state") != "" || r.URL.Query().Get("view") != "current" || r.URL.Query().Get("provider") != "aws" {
+		if (r.URL.Query().Get("view") == "current") != (r.URL.Query().Get("state") == "") || r.URL.Query().Get("provider") != "aws" {
 			t.Errorf("query=%s", r.URL.RawQuery)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"leases": []CoordinatorLease{
@@ -137,14 +137,14 @@ func TestCoordinatorListIncludesRetainedLeasesInTextAndJSON(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider, cfg.Coordinator, cfg.CoordToken = "aws", server.URL, "synthetic-token"
 	backend := &coordinatorLeaseBackend{cfg: cfg, coord: mustNewCoordinatorClient(t, cfg), rt: Runtime{Stderr: &bytes.Buffer{}}}
-	servers, err := backend.List(t.Context(), ListRequest{})
+	servers, err := backend.List(t.Context(), ListRequest{Retained: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(servers) != 3 || servers[1].Labels["lease"] != "cbx_kept" || servers[1].Labels["slug"] != "kept-desktop" {
 		t.Fatalf("servers=%#v", servers)
 	}
-	result, err := backend.ListJSON(t.Context(), ListRequest{})
+	result, err := backend.ListJSON(t.Context(), ListRequest{Retained: true})
 	if err != nil {
 		t.Fatal(err)
 	}

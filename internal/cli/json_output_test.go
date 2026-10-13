@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -40,9 +41,9 @@ func TestEmptyJSONCoordinatorLists(t *testing.T) {
 		for _, shape := range []string{"omitted", "null", "[]"} {
 			t.Run(tc.args+"/"+shape, func(t *testing.T) {
 				clearConfigEnv(t)
-				requests := 0
+				var requests atomic.Int32
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					requests++
+					requests.Add(1)
 					if r.Method != tc.method || r.URL.Path != tc.path {
 						t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 						http.NotFound(w, r)
@@ -63,7 +64,7 @@ func TestEmptyJSONCoordinatorLists(t *testing.T) {
 				if err := app.Run(context.Background(), append(strings.Fields(tc.args), "--json")); err != nil {
 					t.Fatalf("command failed: %v; stderr=%s", err, &stderr)
 				}
-				if requests == 0 {
+				if requests.Load() == 0 {
 					t.Fatal("command did not contact the fixture coordinator")
 				}
 				if got := stdout.String(); got != "[]\n" {

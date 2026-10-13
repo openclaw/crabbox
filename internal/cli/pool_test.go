@@ -193,7 +193,7 @@ func (b *testListRequestBackend) List(_ context.Context, req ListRequest) ([]Lea
 	return []LeaseView{{CloudID: "cbx_list_all", Name: "list-all", Status: "ready"}}, nil
 }
 
-func TestListForwardsAllAndRefreshToBackend(t *testing.T) {
+func TestListMachinesForwardsAllRefreshAndRetainedToDirectBackend(t *testing.T) {
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
 	t.Setenv("CRABBOX_COORDINATOR", "")
 	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "")
@@ -202,13 +202,13 @@ func TestListForwardsAllAndRefreshToBackend(t *testing.T) {
 	defer func() { testAWSBackendOverride = nil }()
 
 	var stdout, stderr bytes.Buffer
-	if err := (App{Stdout: &stdout, Stderr: &stderr}).list(context.Background(), []string{"--provider", "aws", "--all", "--refresh", "--json"}); err != nil {
+	if err := (App{Stdout: &stdout, Stderr: &stderr}).list(context.Background(), []string{"--provider", "aws", "--all", "--refresh", "--retained", "--json"}); err != nil {
 		t.Fatalf("list error=%v stderr=%q", err, stderr.String())
 	}
 	if len(backend.requests) != 1 {
 		t.Fatalf("list requests=%#v, want one request", backend.requests)
 	}
-	if got := backend.requests[0]; !got.All || !got.Refresh {
+	if got := backend.requests[0]; !got.All || !got.Refresh || !got.Retained {
 		t.Fatalf("list request=%#v, want all and refresh", got)
 	}
 	if stdout.Len() == 0 {

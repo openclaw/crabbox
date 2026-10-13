@@ -1425,10 +1425,10 @@ type TouchRequest struct {
 }
 
 type ListRequest struct {
-	Options LeaseOptions
-	All     bool
-	Refresh bool
-	Live    bool
+	Options  LeaseOptions
+	All      bool
+	Refresh  bool
+	Retained bool
 }
 
 type RunRequest struct {

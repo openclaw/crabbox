@@ -14,10 +14,10 @@ func (b *coordinatorLeaseBackend) StreamList(ctx context.Context, req ListReques
 
 func (b *coordinatorLeaseBackend) streamUserLeases(ctx context.Context, req ListRequest, emit func(ListPage) error) error {
 	queries := []coordinatorLeaseQuery{
-		{provider: b.cfg.Provider, current: true, state: "active"},
-		{provider: b.cfg.Provider, current: true, state: "provisioning"},
+		{provider: b.cfg.Provider, state: "active"},
+		{provider: b.cfg.Provider, state: "provisioning"},
 	}
-	if !req.Live {
+	if req.Retained {
 		queries = append(queries, coordinatorLeaseQuery{provider: b.cfg.Provider, current: true})
 	}
 	seen := make(map[string]bool)
@@ -125,7 +125,7 @@ func (b *coordinatorLeaseBackend) streamMachines(ctx context.Context, req ListRe
 				}
 			}
 		}
-		renderErr = emit(ListPage{Servers: coordinatorMachinesToServers(page, ids), JSON: page, More: more || section+1 < len(queries) || !req.Live})
+		renderErr = emit(ListPage{Servers: coordinatorMachinesToServers(page, ids), JSON: page, More: more || section+1 < len(queries) || req.Retained})
 		return renderErr
 	})
 	if renderErr != nil {
@@ -141,7 +141,7 @@ func (b *coordinatorLeaseBackend) streamMachines(ctx context.Context, req ListRe
 		return b.streamUserLeases(ctx, req, emit)
 	}
 	if lookupErr != nil {
-		if req.Live {
+		if !req.Retained {
 			return lookupErr
 		}
 		fmt.Fprintf(b.rt.Stderr, "warning: active lease lookup failed; orphan status unavailable: %v\n", lookupErr)
@@ -153,7 +153,7 @@ func (b *coordinatorLeaseBackend) streamMachines(ctx context.Context, req ListRe
 			break
 		}
 	}
-	if req.Live {
+	if !req.Retained {
 		return nil
 	}
 	remaining := make([]CoordinatorMachine, 0)

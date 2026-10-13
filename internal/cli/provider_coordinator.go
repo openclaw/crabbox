@@ -1133,44 +1133,36 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 }
 
 func (b *coordinatorLeaseBackend) List(ctx context.Context, req ListRequest) ([]Server, error) {
-	if !req.All {
-		leases, err := b.listUserLeases(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return coordinatorLeasesToServers(leases, b.cfg), nil
-	}
-	machines, activeLeaseIDs, err := b.listMachines(ctx)
-	if err != nil {
-		leases, fallbackErr := b.listLeasesFallback(ctx, err)
-		if fallbackErr != nil {
-			return nil, fallbackErr
-		}
-		return coordinatorLeasesToServers(leases, b.cfg), nil
-	}
-	return coordinatorMachinesToServers(machines, activeLeaseIDs), nil
+	var servers []Server
+	err := b.StreamList(ctx, req, func(page ListPage) error {
+		servers = append(servers, page.Servers...)
+		return nil
+	})
+	return servers, err
 }
 
 func (b *coordinatorLeaseBackend) ListJSON(ctx context.Context, req ListRequest) (any, error) {
-	if !req.All {
-		return b.listUserLeases(ctx)
-	}
-	machines, _, err := b.listMachines(ctx)
-	if err != nil {
-		return b.listLeasesFallback(ctx, err)
-	}
-	return machines, nil
-}
-
-func (b *coordinatorLeaseBackend) listUserLeases(ctx context.Context) ([]CoordinatorLease, error) {
-	leases, truncated, err := b.coord.CurrentLeases(ctx, b.cfg.Provider)
+	leases := make([]CoordinatorLease, 0)
+	machines := make([]CoordinatorMachine, 0)
+	machineView := false
+	err := b.StreamList(ctx, req, func(page ListPage) error {
+		switch rows := page.JSON.(type) {
+		case []CoordinatorLease:
+			leases = append(leases, rows...)
+		case []CoordinatorMachine:
+			machineView = true
+			machines = append(machines, rows...)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if truncated {
-		b.warnLegacyListLimit()
+	if machineView {
+		return machines, nil
 	}
-	return currentCoordinatorLeases(leases, b.cfg.Provider), nil
+	slices.SortStableFunc(leases, func(a, b CoordinatorLease) int { return strings.Compare(b.CreatedAt, a.CreatedAt) })
+	return leases, nil
 }
 
 func (b *coordinatorLeaseBackend) adminListClient() (*CoordinatorClient, error) {
@@ -1202,13 +1194,6 @@ func (b *coordinatorLeaseBackend) listMachines(ctx context.Context) ([]Coordinat
 		fmt.Fprintln(b.rt.Stderr, "warning: active lease lookup reached the legacy coordinator limit; orphan status may be incomplete")
 	}
 	return machines, activeCoordinatorLeaseIDs(activeLeases), nil
-}
-
-func (b *coordinatorLeaseBackend) listLeasesFallback(ctx context.Context, adminErr error) ([]CoordinatorLease, error) {
-	if err := b.allowListLeasesFallback(adminErr); err != nil {
-		return nil, err
-	}
-	return b.listUserLeases(ctx)
 }
 
 func (b *coordinatorLeaseBackend) allowListLeasesFallback(adminErr error) error {

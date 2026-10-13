@@ -49,7 +49,7 @@ func listTestConfig(t *testing.T, url string) {
 	t.Setenv("CRABBOX_OWNER", "alice@example.test")
 }
 
-func TestListStreamsBeforeLaterPagesLiveFirstAndDeduplicates(t *testing.T) {
+func TestListStreamingRetainedBeforeLaterPagesLiveFirstAndDeduplicates(t *testing.T) {
 	for _, format := range []string{"text", "jsonl"} {
 		t.Run(format, func(t *testing.T) {
 			deleted := true
@@ -57,7 +57,7 @@ func TestListStreamsBeforeLaterPagesLiveFirstAndDeduplicates(t *testing.T) {
 			var stderr bytes.Buffer
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				q := r.URL.Query()
-				if q.Get("view") != "current" || q.Get("pagination") != "keyset-v1" || q.Get("provider") != "aws" || q.Get("projection") != "summary" || q.Get("limit") != "100" {
+				if (q.Get("view") == "current") != (q.Get("state") == "") || q.Get("pagination") != "keyset-v1" || q.Get("provider") != "aws" || q.Get("projection") != "summary" || q.Get("limit") != "100" {
 					t.Errorf("unexpected query %s", r.URL.RawQuery)
 				}
 				if format == "text" && !strings.HasPrefix(out.String(), "ID ") {
@@ -96,7 +96,7 @@ func TestListStreamsBeforeLaterPagesLiveFirstAndDeduplicates(t *testing.T) {
 			}))
 			defer server.Close()
 			listTestConfig(t, server.URL)
-			args := []string{"--provider", "aws", "--pond", "alpha"}
+			args := []string{"--provider", "aws", "--pond", "alpha", "--retained"}
 			if format == "jsonl" {
 				args = append(args, "--jsonl")
 			}
@@ -137,15 +137,15 @@ func TestListStreamsBeforeLaterPagesLiveFirstAndDeduplicates(t *testing.T) {
 	}
 }
 
-func TestListLiveStopsAfterLiveQueries(t *testing.T) {
+func TestListStreamingDefaultStopsAfterLiveQueries(t *testing.T) {
 	for _, format := range []string{"--json", "--jsonl", ""} {
 		t.Run(format, func(t *testing.T) {
 			var calls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
 				state := r.URL.Query().Get("state")
-				if state != "active" && state != "provisioning" {
-					t.Error("--live requested retained history")
+				if state != "active" && state != "provisioning" || r.URL.Query().Get("view") == "current" {
+					t.Error("default requested retained history")
 				}
 				createdAt := "2026-01-01"
 				if state == "provisioning" {
@@ -156,7 +156,7 @@ func TestListLiveStopsAfterLiveQueries(t *testing.T) {
 			defer server.Close()
 			listTestConfig(t, server.URL)
 			var stdout, stderr bytes.Buffer
-			args := []string{"--provider", "aws", "--live"}
+			args := []string{"--provider", "aws"}
 			if format != "" {
 				args = append(args, format)
 			}
@@ -173,15 +173,19 @@ func TestListLiveStopsAfterLiveQueries(t *testing.T) {
 	}
 }
 
-func TestListJSONKeepsBufferedNewestFirstArray(t *testing.T) {
+func TestListStreamingRetainedJSONKeepsBufferedNewestFirstArray(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		if q.Get("state") != "" || stdout.Len() != 0 {
-			t.Error("--json changed its query or emitted a partial array")
+		if stdout.Len() != 0 {
+			t.Error("--json emitted a partial array")
 		}
 		res := map[string]any{"pagination": "keyset-v1"}
-		if q.Get("cursor") == "" {
+		if q.Get("state") == "active" {
+			res["leases"] = []CoordinatorLease{{ID: "old", Provider: "aws", State: "active", CreatedAt: "2026-01-01"}}
+		} else if q.Get("state") == "provisioning" {
+			res["leases"] = []CoordinatorLease{}
+		} else if q.Get("cursor") == "" {
 			res["leases"] = []CoordinatorLease{{ID: "old", Provider: "aws", State: "active", CreatedAt: "2026-01-01"}}
 			res["nextCursor"] = "next"
 		} else {
@@ -191,7 +195,7 @@ func TestListJSONKeepsBufferedNewestFirstArray(t *testing.T) {
 	}))
 	defer server.Close()
 	listTestConfig(t, server.URL)
-	if err := (App{Stdout: &stdout, Stderr: &stderr}).list(t.Context(), []string{"--provider", "aws", "--json"}); err != nil {
+	if err := (App{Stdout: &stdout, Stderr: &stderr}).list(t.Context(), []string{"--provider", "aws", "--json", "--retained"}); err != nil {
 		t.Fatal(err)
 	}
 	var leases []CoordinatorLease
@@ -200,7 +204,7 @@ func TestListJSONKeepsBufferedNewestFirstArray(t *testing.T) {
 	}
 }
 
-func TestListSectionsBoundedConcurrencyAndStableOrder(t *testing.T) {
+func TestListStreamingSectionsBoundedConcurrencyAndStableOrder(t *testing.T) {
 	var inFlight, maximum, started atomic.Int32
 	fourStarted := make(chan struct{})
 	release := make(chan struct{})
@@ -293,7 +297,7 @@ func TestListMachinesStreamsPast1000WithoutCap(t *testing.T) {
 			listTestConfig(t, server.URL)
 			t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "synthetic-admin")
 			var stderr bytes.Buffer
-			if err := (App{Stdout: out, Stderr: &stderr}).list(t.Context(), []string{"--provider", "aws", "--all", format}); err != nil {
+			if err := (App{Stdout: out, Stderr: &stderr}).list(t.Context(), []string{"--provider", "aws", "--all", "--retained", format}); err != nil {
 				t.Fatal(err)
 			}
 			var machines []CoordinatorMachine
@@ -317,7 +321,7 @@ func TestListMachinesStreamsPast1000WithoutCap(t *testing.T) {
 	}
 }
 
-func TestCoordinatorListReadRetriesRemainUnchanged(t *testing.T) {
+func TestListStreamingReadRetriesRemainUnchanged(t *testing.T) {
 	t.Setenv("CRABBOX_OWNER", "alice@example.test")
 	synctest.Test(t, func(t *testing.T) {
 		calls := 0
@@ -346,7 +350,7 @@ func TestCoordinatorListReadRetriesRemainUnchanged(t *testing.T) {
 	})
 }
 
-func TestListSectionsCancelOnRenderFailure(t *testing.T) {
+func TestListStreamingSectionsCancelOnRenderFailure(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -386,7 +390,7 @@ func TestListStreamingAdminFallbackAndUnavailableLookup(t *testing.T) {
 				t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "synthetic-admin")
 			}
 			var stdout, stderr bytes.Buffer
-			if err := (App{Stdout: &stdout, Stderr: &stderr}).list(t.Context(), []string{"--provider", "aws", "--all"}); err != nil {
+			if err := (App{Stdout: &stdout, Stderr: &stderr}).list(t.Context(), []string{"--provider", "aws", "--all", "--retained"}); err != nil {
 				t.Fatal(err)
 			}
 			if mode == "lookup failure" {
@@ -400,7 +404,7 @@ func TestListStreamingAdminFallbackAndUnavailableLookup(t *testing.T) {
 	}
 }
 
-func TestListAllLiveOmitsUnmatchedInventory(t *testing.T) {
+func TestListStreamingAllOmitsUnmatchedInventory(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/pool" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"machines": []CoordinatorMachine{
@@ -418,11 +422,112 @@ func TestListAllLiveOmitsUnmatchedInventory(t *testing.T) {
 	defer server.Close()
 	listTestConfig(t, server.URL)
 	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "synthetic-admin")
-	var stdout, stderr bytes.Buffer
-	if err := (App{Stdout: &stdout, Stderr: &stderr}).list(t.Context(), []string{"--provider", "aws", "--all", "--live", "--jsonl"}); err != nil {
-		t.Fatal(err)
+	for _, retained := range []bool{false, true} {
+		for _, format := range []string{"", "--json", "--jsonl"} {
+			t.Run(fmt.Sprintf("retained=%t/%s", retained, format), func(t *testing.T) {
+				var stdout, stderr bytes.Buffer
+				args := []string{"--provider", "aws", "--all"}
+				if retained {
+					args = append(args, "--retained")
+				}
+				if format != "" {
+					args = append(args, format)
+				}
+				if err := (App{Stdout: &stdout, Stderr: &stderr}).list(t.Context(), args); err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(stdout.String(), "live-machine") || strings.Contains(stdout.String(), "other-machine") != retained {
+					t.Fatalf("stdout=%s stderr=%s", &stdout, &stderr)
+				}
+				if format == "" && strings.Contains(stdout.String(), "other provider inventory:") != retained {
+					t.Fatalf("unexpected inventory section: %s", &stdout)
+				}
+			})
+		}
 	}
-	if strings.Count(stdout.String(), "\n") != 1 || !strings.Contains(stdout.String(), "live-machine") || strings.Contains(stdout.String(), "other-machine") {
-		t.Fatalf("stdout=%s stderr=%s", &stdout, &stderr)
+}
+
+func TestListStreamingLegacyCoordinatorFiltersLocally(t *testing.T) {
+	for _, retained := range []bool{false, true} {
+		for _, format := range []string{"", "--json", "--jsonl"} {
+			t.Run(fmt.Sprintf("retained=%t/%s", retained, format), func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if !retained && (r.URL.Query().Get("state") == "" || r.URL.Query().Get("view") == "current") {
+						t.Errorf("default requested history: %s", r.URL)
+					}
+					// Older coordinators may ignore both state and view filters.
+					_ = json.NewEncoder(w).Encode(map[string]any{"leases": []CoordinatorLease{
+						{ID: "cbx_active", Provider: "aws", State: "active"},
+						{ID: "cbx_pending", Provider: "aws", State: "provisioning"},
+						{ID: "cbx_retained", Provider: "aws", State: "released", Keep: true},
+						{ID: "cbx_ended", Provider: "aws", State: "expired"},
+						{ID: "cbx_deleted", Provider: "aws", State: "released", Keep: true, CleanupStatus: "complete", CleanupCompletedAt: "2026-01-01T00:00:00Z"},
+					}})
+				}))
+				defer server.Close()
+				listTestConfig(t, server.URL)
+				var stdout, stderr bytes.Buffer
+				args := []string{"--provider", "aws"}
+				if retained {
+					args = append(args, "--retained")
+				}
+				if format != "" {
+					args = append(args, format)
+				}
+				if err := (App{Stdout: &stdout, Stderr: &stderr}).list(t.Context(), args); err != nil {
+					t.Fatal(err)
+				}
+				got := stdout.String()
+				if !strings.Contains(got, "cbx_active") || !strings.Contains(got, "cbx_pending") || strings.Contains(got, "cbx_retained") != retained || strings.Contains(got, "cbx_ended") || strings.Contains(got, "cbx_deleted") {
+					t.Fatalf("stdout=%s stderr=%s", got, &stderr)
+				}
+			})
+		}
+	}
+}
+
+func TestListStreamingRetainedHintUsesStdoutTTY(t *testing.T) {
+	for _, stdoutTTY := range []bool{false, true} {
+		for _, stderrTTY := range []bool{false, true} {
+			for _, option := range []string{"", "--retained", "--json", "--jsonl"} {
+				t.Run(fmt.Sprintf("stdout=%t/stderr=%t/%s", stdoutTTY, stderrTTY, option), func(t *testing.T) {
+					var stdout bytes.Buffer
+					stderr := listObservedWriter{needle: "unused", written: make(chan struct{})}
+					original := listIsTerminal
+					listIsTerminal = func(w io.Writer) bool { return w == &stdout && stdoutTTY || w == &stderr && stderrTTY }
+					t.Cleanup(func() { listIsTerminal = original })
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if strings.Contains(stderr.String(), "retained leases hidden") {
+							t.Error("hint emitted before live requests finished")
+						}
+						state := r.URL.Query().Get("state")
+						_ = json.NewEncoder(w).Encode(map[string]any{"pagination": "keyset-v1", "leases": []CoordinatorLease{{ID: "cbx_" + state, Provider: "aws", State: state}}})
+					}))
+					defer server.Close()
+					listTestConfig(t, server.URL)
+					args := []string{"--provider", "aws"}
+					if option != "" {
+						args = append(args, option)
+					}
+					if err := (App{Stdout: &stdout, Stderr: &stderr}).list(t.Context(), args); err != nil {
+						t.Fatal(err)
+					}
+					const hint = "\x1b[2mretained leases hidden; use --retained to include them\x1b[0m\n"
+					want := stdoutTTY && option == ""
+					if strings.Contains(stderr.String(), hint) != want || strings.Contains(stdout.String(), "retained leases hidden") || strings.Count(stderr.String(), hint) > 1 {
+						t.Fatalf("stdout=%q stderr=%q wantHint=%t", &stdout, &stderr, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestListStreamingLiveFlagRemoved(t *testing.T) {
+	listTestConfig(t, "https://unused.example.test")
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).list(t.Context(), []string{"--live"})
+	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined: -live") || stdout.Len() != 0 {
+		t.Fatalf("err=%v stdout=%s stderr=%s", err, &stdout, &stderr)
 	}
 }

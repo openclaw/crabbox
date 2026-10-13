@@ -22,7 +22,7 @@ func (a App) list(ctx context.Context, args []string) error {
 	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	jsonOut := fs.Bool("json", false, "print JSON")
 	jsonlOut := fs.Bool("jsonl", false, "stream one JSON object per line")
-	live := fs.Bool("live", false, "only list active and provisioning coordinator leases")
+	retained := fs.Bool("retained", false, "include kept terminal coordinator leases (ignored by direct providers)")
 	all := fs.Bool("all", false, "include provider inventory outside Crabbox-owned leases where supported")
 	refresh := fs.Bool("refresh", false, "refresh provider-backed state where supported")
 	pondFilter := fs.String("pond", "", "only list leases tagged with this pond")
@@ -55,8 +55,8 @@ func (a App) list(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	req := ListRequest{Options: leaseOptionsFromConfig(cfg), All: *all, Refresh: *refresh, Live: *live}
-	if streaming, ok := backend.(StreamingListBackend); ok && (!*jsonOut || *live) {
+	req := ListRequest{Options: leaseOptionsFromConfig(cfg), All: *all, Refresh: *refresh, Retained: *retained}
+	if streaming, ok := backend.(StreamingListBackend); ok {
 		return a.renderStreamingList(ctx, cfg, backend, streaming, req, pondName, *jsonOut, *jsonlOut)
 	}
 	if !*jsonOut && !*jsonlOut {

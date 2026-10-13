@@ -13,6 +13,11 @@ import (
 	"golang.org/x/term"
 )
 
+var listIsTerminal = func(w io.Writer) bool {
+	file, ok := w.(*os.File)
+	return ok && term.IsTerminal(int(file.Fd()))
+}
+
 func renderListHeader(w io.Writer) error {
 	_, err := fmt.Fprintf(w, "%-20s %-28s %-12s %-14s %-15s\n", "ID", "NAME", "STATE", "TYPE", "IP")
 	return err
@@ -48,10 +53,7 @@ func (a App) renderStreamingList(ctx context.Context, cfg Config, backend Backen
 			return err
 		}
 	}
-	tty := false
-	if file, ok := a.Stderr.(*os.File); ok {
-		tty = term.IsTerminal(int(file.Fd()))
-	}
+	tty := listIsTerminal(a.Stderr)
 	progress := false
 	clearProgress := func() {
 		if progress {
@@ -102,6 +104,9 @@ func (a App) renderStreamingList(ctx context.Context, cfg Config, backend Backen
 		return err
 	}
 	clearProgress()
+	if !jsonOut && !jsonlOut && !req.Retained && listIsTerminal(a.Stdout) {
+		fmt.Fprintln(a.Stderr, "\x1b[2mretained leases hidden; use --retained to include them\x1b[0m")
+	}
 	a.syncExternalRunnersBestEffort(ctx, cfg, backend)
 	if jsonOut {
 		// Buffered lease JSON keeps its newest-first contract even when the
