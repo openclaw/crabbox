@@ -136,7 +136,7 @@ attempt so an interrupted operation can be safely replayed.
 
 ## Lifetime: TTL and idle timeout
 
-- `--ttl <duration>` is the maximum wall-clock lifetime. Default `90m`.
+- `--ttl <duration>` is the maximum wall-clock lifetime. Default `30m`.
 - `--idle-timeout <duration>` releases the lease after no touch for that long.
   Default `30m`.
 
@@ -151,7 +151,7 @@ For managed coordinator leases, TTL counts from admission and remains a hard
 wall-clock cap. Provisioning does not consume idle time: `lastTouchedAt` and the
 idle deadline start when the coordinator publishes the active lease. Expiry is
 then the earlier of admission plus TTL and activation plus idle timeout; later
-heartbeats extend only the idle deadline. Choose a TTL that covers provisioning
+plain heartbeats extend only the idle deadline. Choose a TTL that covers provisioning
 and intended use. A TTL exhausted during provisioning still triggers cleanup.
 The CLI's lease labels reflect these authoritative coordinator timestamps.
 
@@ -462,7 +462,7 @@ bootstrap, key migration, or failure cleanup.
 --pond <name>                      tag this lease into a pond
 --expose <port>                    declare a TCP port reachable over the SSH-mesh plane; repeatable
 --cache-volume [name=]key:path     require a provider-backed cache volume; repeatable
---ttl <duration>                   maximum lease lifetime; default 90m
+--ttl <duration>                   maximum lease lifetime; default 30m
 --idle-timeout <duration>          release after idle; default 30m
 --desktop                          provision/require a visible desktop + VNC
 --desktop-env xfce|wayland|gnome   Linux desktop environment
@@ -541,3 +541,11 @@ prepared reuse are refused while custody remains. See [Power hooks](../providers
 
 Optional resource minimums and supported creation/reuse combinations are documented
 in [capacity fallback](../features/capacity-fallback.md#optional-aws-resource-minimums).
+
+Ordinary lease lifetime defaults to 30m with a 4h maximum. The coordinator may
+clamp requested TTL/idle values and prints a policy notice through the CLI.
+Use [extend](extend.md) for an explicit extension. `run` requests auto-extension
+only while executing the user command, when fewer than 10 minutes remain, adding
+30 minutes up to the effective maximum. Policy or a creation-fixed provider
+deadline can disable this; setup and sync-only phases do not auto-extend.
+See [lifetime policy](../features/lifecycle-cleanup.md#ordinary-lifetime-policy).

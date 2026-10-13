@@ -36,6 +36,7 @@ same order as the CLI help.
 - [verify](verify.md)
 - [cache](cache.md)
 - [status](status.md)
+- [extend](extend.md)
 - [heartbeat](heartbeat.md)
 - [claims](claims.md)
 - [list](list.md)

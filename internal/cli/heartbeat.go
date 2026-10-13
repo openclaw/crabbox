@@ -67,6 +67,9 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
+		if lease.PolicyNotice != "" {
+			fmt.Fprintln(a.Stderr, lease.PolicyNotice)
+		}
 		return writeLeaseHeartbeatView(a.Stdout, heartbeatViewFromCoordinatorLease(lease), *jsonOut)
 	}
 	// A delegated-run provider has no Crabbox-managed SSH lease for the generic
@@ -173,6 +176,7 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	a.reportIdleTimeoutPolicyNotice(idleTimeoutOverride, touched)
 	if registeredLease != nil {
 		return writeLeaseHeartbeatView(a.Stdout, heartbeatViewFromCoordinatorLease(*registeredLease), *jsonOut)
 	}

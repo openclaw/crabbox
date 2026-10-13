@@ -1072,10 +1072,10 @@ func TestTouchIdleTimeoutIntent(t *testing.T) {
 	}{
 		{name: "stored policy beats effective fallback", storedKey: "idle_timeout_secs", stored: 30 * time.Minute, fallback: 90 * time.Minute, want: 30 * time.Minute},
 		{name: "legacy stored spelling", storedKey: "idle_timeout", stored: 30 * time.Minute, fallback: 90 * time.Minute, want: 30 * time.Minute},
-		{name: "explicit pointer beats fallback", storedKey: "idle_timeout_secs", stored: 30 * time.Minute, fallback: time.Minute, explicit: 90 * time.Minute, want: 90 * time.Minute},
-		{name: "explicit without fallback", storedKey: "idle_timeout_secs", stored: 30 * time.Minute, explicit: 90 * time.Minute, want: 90 * time.Minute},
+		{name: "explicit pointer beats fallback within TTL", storedKey: "idle_timeout_secs", stored: 30 * time.Minute, fallback: time.Minute, explicit: 90 * time.Minute, want: time.Hour},
+		{name: "explicit without fallback", storedKey: "idle_timeout_secs", stored: 30 * time.Minute, explicit: 90 * time.Minute, want: time.Hour},
 		{name: "missing policy uses fallback", fallback: 45 * time.Minute, want: 45 * time.Minute},
-		{name: "refreshes live policy", storedKey: "idle_timeout_secs", stored: 90 * time.Minute, fallback: time.Minute, want: 90 * time.Minute},
+		{name: "refreshes live policy within TTL", storedKey: "idle_timeout_secs", stored: 90 * time.Minute, fallback: time.Minute, want: time.Hour},
 		{name: "remote update failure", storedKey: "idle_timeout_secs", stored: 30 * time.Minute, explicit: 90 * time.Minute, want: 90 * time.Minute, writeFails: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

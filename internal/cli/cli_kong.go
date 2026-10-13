@@ -41,6 +41,7 @@ type crabboxKongCLI struct {
 	Cache          cacheKongCmd          `cmd:"" help:"Inspect, purge, or warm remote caches."`
 	Status         statusKongCmd         `cmd:"" passthrough:"" help:"Show lease state; add --wait to block until ready."`
 	Heartbeat      heartbeatKongCmd      `cmd:"" passthrough:"" help:"Refresh a lease idle deadline and print its state."`
+	Extend         extendKongCmd         `cmd:"" passthrough:"" help:"Extend a lease within its lifetime policy."`
 	Claims         claimsKongCmd         `cmd:"" help:"Inspect unverified local lease claims without loading providers."`
 	List           listKongCmd           `cmd:"" passthrough:"" help:"List Crabbox machines."`
 	Ports          portsKongCmd          `cmd:"" passthrough:"" help:"Publish, list, or unpublish provider-native ports."`
@@ -247,6 +248,10 @@ type tunnelKongCmd struct {
 type statusKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
+type extendKongCmd struct {
+	Args []string `arg:"" optional:"" passthrough:""`
+}
+
 type heartbeatKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
@@ -1016,6 +1021,7 @@ func stripKongCommandPath(args []string, path ...string) []string {
 	return out
 }
 
+func (c *extendKongCmd) Run(ctx context.Context, app App) error { return app.extend(ctx, c.Args) }
 func (c *adminRetainedReconcileKongCmd) Run(ctx context.Context, app App) error {
 	return app.adminRetainedReconcile(ctx, c.Args)
 }

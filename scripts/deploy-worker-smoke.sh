@@ -197,6 +197,7 @@ warmup_dir="$(mktemp -d)"
 log="$warmup_dir/warmup.err"
 warmup_pipe="$warmup_dir/warmup.err.pipe"
 lease_id=""
+aws_smoke_args=(--provider aws --target linux --arch amd64 --class tiny --type t3.small --market on-demand)
 cleanup() {
   if [[ -n "$lease_id" ]]; then
     (cd "$CRABBOX_LIVE_REPO" && "$CRABBOX_BIN" stop "$lease_id") || true
@@ -211,7 +212,8 @@ tee "$log" <"$warmup_pipe" >&2 &
 tee_pid="$!"
 (
   cd "$CRABBOX_LIVE_REPO"
-  "$CRABBOX_BIN" warmup --provider aws --ttl 20m --idle-timeout 6m --reclaim --timing-json
+  "$CRABBOX_BIN" warmup "${aws_smoke_args[@]}" \
+    --ttl 20m --idle-timeout 6m --reclaim --timing-json
 ) 2>"$warmup_pipe" || warmup_status=$?
 rm -f "$warmup_pipe"
 wait "$tee_pid"
@@ -229,7 +231,7 @@ printf 'aws deploy smoke lease=%s\n' "$lease_id"
 
 (
   cd "$CRABBOX_LIVE_REPO"
-  "$CRABBOX_BIN" run --id "$lease_id" --no-sync --timing-json -- uname -a
+  "$CRABBOX_BIN" run "${aws_smoke_args[@]}" --id "$lease_id" --no-sync --timing-json -- uname -a
 )
 
 (

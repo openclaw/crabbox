@@ -1016,10 +1016,13 @@ type lifecycleClock struct{ now time.Time }
 
 func (c lifecycleClock) Now() time.Time { return c.now }
 
-func acquiredLifecycleFixture(t *testing.T) (*backend, core.LeaseTarget, core.LeaseClaim) {
+func acquiredLifecycleFixture(t *testing.T, ttl ...time.Duration) (*backend, core.LeaseTarget, core.LeaseClaim) {
 	t.Helper()
 	_, b := setupAcquireMetadataFailureTest(t)
 	b.cfg.IdleTimeout, b.cfg.TTL = 30*time.Minute, time.Hour
+	if len(ttl) > 0 {
+		b.cfg.TTL = ttl[0]
+	}
 	lease, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
 	if err != nil {
 		t.Fatal(err)
@@ -1041,7 +1044,7 @@ func TestMultipassLifecycleAcquireSnapshot(t *testing.T) {
 }
 
 func TestMultipassLifecycleHeartbeat(t *testing.T) {
-	b, lease, claim := acquiredLifecycleFixture(t)
+	b, lease, claim := acquiredLifecycleFixture(t, 90*time.Minute)
 	// Isolate renewal from the separately tested acquire snapshot contract.
 	core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
 	original := claim
@@ -1063,7 +1066,7 @@ func TestMultipassLifecycleHeartbeat(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Labels["expires_at"] != strconv.FormatInt(created+3600, 10) {
+		if got.Labels["expires_at"] != strconv.FormatInt(created+5400, 10) {
 			t.Fatal("original TTL cap lost")
 		}
 		for _, key := range []string{"instance", "image", "ssh_user", "ssh_port", "work_root"} {
@@ -1137,7 +1140,7 @@ func TestMultipassLifecycleHeartbeatCLI(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX CLI fixture, not native Multipass")
 	}
-	_, lease, _ := acquiredLifecycleFixture(t)
+	_, lease, _ := acquiredLifecycleFixture(t, 2*time.Hour)
 	binDir := t.TempDir()
 	refreshPath := filepath.Join(t.TempDir(), "lease-expiry")
 	sshFixture := "#!/bin/sh\ncase \"$*\" in\n*'/etc/crabbox/.lease-expiry.'*) cat >\"$CRABBOX_TEST_EXPIRY_FILE\";;\nesac\n"

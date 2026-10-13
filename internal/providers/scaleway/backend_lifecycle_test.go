@@ -230,6 +230,7 @@ func TestWaitForPublicIPv4CompletedSDKResponseWinsCancellation(t *testing.T) {
 
 func TestScalewayAcquireListResolveTouchReleaseLifecycle(t *testing.T) {
 	backend, fake := newTestBackend(t)
+	backend.cfg.TTL = 4 * time.Hour
 	var observed core.LeaseTarget
 	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{
 		Repo:          core.Repo{Root: t.TempDir()},

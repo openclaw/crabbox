@@ -1,7 +1,9 @@
 import { requireAWSRegion } from "./aws-region";
 import { hasImageRequirements, normalizeImageRequirements } from "./image-capabilities";
+import { MISSING_ORG_KEY, orgLabelFromKey } from "./org-identity";
 import { normalizeOSImage, osImageSpec } from "./os-image";
 import type {
+  Env,
   CapacityRequirements,
   ImageRequirements,
   LeaseImageIdentity,
@@ -27,6 +29,8 @@ export const workspaceProviderKeyPrefix = "crabbox-workspace-";
 
 export interface LeaseConfig {
   lifetimePolicy?: LeaseRequest["lifetimePolicy"];
+  policyNotice?: string;
+  leasePolicy?: LeasePolicy;
   provider: Provider;
   target: TargetOS;
   architecture: Architecture;
@@ -140,6 +144,7 @@ export function normalizeCapacityRequirements(
 }
 
 export interface LeaseConfigDefaults {
+  leasePolicy?: LeasePolicy;
   azureOSDisk?: string;
   azureImage?: string;
   azureWindowsARM64Image?: string;
@@ -319,8 +324,8 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
       serverType,
     );
   }
-  const ttlSeconds = clampTTL(input.ttlSeconds ?? 5400);
-  const idleTimeoutSeconds = clampIdleTimeout(input.idleTimeoutSeconds ?? 1800);
+  const policy = defaults.leasePolicy ?? resolveLeasePolicy({});
+  const { ttlSeconds, idleTimeoutSeconds, policyNotice } = clampLeaseDurations(input, policy);
   const awsSSHCIDRs =
     provider === "aws"
       ? validatedCIDRs(input.awsSSHCIDRs ?? [], "awsSSHCIDRs")
@@ -448,6 +453,8 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
         : defaultWorkRoot(target, windowsMode, sshUser)),
     ttlSeconds,
     idleTimeoutSeconds,
+    leasePolicy: policy,
+    ...(policyNotice ? { policyNotice } : {}),
     keep: input.keep ?? false,
     sshPublicKey,
     sshHostPrivateKey: "",
@@ -1445,16 +1452,111 @@ export function awsInstanceTypeIsARM64(instanceType: string): boolean {
   return /^[cmr][0-9]+g[dn]?$/.test(family);
 }
 
-function clampTTL(ttlSeconds: number): number {
-  if (!Number.isFinite(ttlSeconds) || ttlSeconds <= 0) {
-    return 5400;
-  }
-  return Math.min(Math.trunc(ttlSeconds), 86_400);
+export interface LeasePolicy {
+  defaultTTLSeconds: number;
+  defaultIdleTimeoutSeconds: number;
+  maxTTLSeconds: number;
+  extension: "allow" | "deny";
+  autoExtend: "allow" | "deny";
+  runtimeExtension?: boolean;
 }
 
-function clampIdleTimeout(seconds: number): number {
-  if (!Number.isFinite(seconds) || seconds <= 0) {
-    return 1800;
+type PolicyOverrides = {
+  orgs?: Record<string, Partial<LeasePolicy>>;
+  owners?: Record<string, Partial<LeasePolicy>>;
+};
+const durationPolicyFields = [
+  "defaultTTLSeconds",
+  "defaultIdleTimeoutSeconds",
+  "maxTTLSeconds",
+] as const;
+const switchPolicyFields = ["extension", "autoExtend"] as const;
+
+function parsedPolicyOverrides(env: Partial<Env>): PolicyOverrides | undefined {
+  if (!env.CRABBOX_LEASE_POLICY_OVERRIDES) return {};
+  try {
+    const value: unknown = JSON.parse(env.CRABBOX_LEASE_POLICY_OVERRIDES);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    for (const [group, entries] of Object.entries(value)) {
+      if (
+        !["orgs", "owners"].includes(group) ||
+        !entries ||
+        typeof entries !== "object" ||
+        Array.isArray(entries)
+      )
+        return undefined;
+      for (const entry of Object.values(entries)) {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return undefined;
+        for (const [key, field] of Object.entries(entry)) {
+          if (durationPolicyFields.some((name) => name === key)) {
+            if (
+              !Number.isInteger(field) ||
+              typeof field !== "number" ||
+              field < 1 ||
+              field > 86_400
+            )
+              return undefined;
+          } else if (switchPolicyFields.some((name) => name === key)) {
+            if (field !== "allow" && field !== "deny") return undefined;
+          } else return undefined;
+        }
+      }
+    }
+    return value as PolicyOverrides;
+  } catch {
+    return undefined;
   }
-  return Math.min(Math.trunc(seconds), 86_400);
+}
+
+// Pure validation lets the coordinator log once at construction, without logging on every read.
+export function leasePolicyOverridesInvalid(env: Partial<Env>): boolean {
+  return parsedPolicyOverrides(env) === undefined;
+}
+
+export function resolveLeasePolicy(env: Partial<Env>, owner = "", org = ""): LeasePolicy {
+  const seconds = (value: string | undefined, fallback: number): number => {
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, 86_400) : fallback;
+  };
+  const global: LeasePolicy = {
+    defaultTTLSeconds: seconds(env.CRABBOX_LEASE_DEFAULT_TTL_SECONDS, 1800),
+    defaultIdleTimeoutSeconds: seconds(env.CRABBOX_LEASE_DEFAULT_IDLE_TIMEOUT_SECONDS, 1800),
+    maxTTLSeconds: seconds(env.CRABBOX_LEASE_MAX_TTL_SECONDS, 14_400),
+    extension: env.CRABBOX_LEASE_EXTENSION === "deny" ? "deny" : "allow",
+    autoExtend: env.CRABBOX_LEASE_AUTO_EXTEND === "deny" ? "deny" : "allow",
+  };
+  const overrides = parsedPolicyOverrides(env);
+  const policy = {
+    ...global,
+    ...(org === MISSING_ORG_KEY ? undefined : overrides?.orgs?.[orgLabelFromKey(org) ?? org]),
+    ...overrides?.owners?.[owner],
+  };
+  policy.defaultTTLSeconds = Math.min(policy.defaultTTLSeconds, policy.maxTTLSeconds);
+  policy.defaultIdleTimeoutSeconds = Math.min(
+    policy.defaultIdleTimeoutSeconds,
+    policy.maxTTLSeconds,
+  );
+  return policy;
+}
+
+export function clampLeaseDurations(
+  input: { ttlSeconds?: number; idleTimeoutSeconds?: number },
+  policy: LeasePolicy,
+): { ttlSeconds: number; idleTimeoutSeconds: number; policyNotice?: string } {
+  const positive = (value: number | undefined, fallback: number): number =>
+    value !== undefined && Number.isFinite(value) && value > 0
+      ? Math.max(1, Math.trunc(value))
+      : fallback;
+  const requestedTTL = positive(input.ttlSeconds, policy.defaultTTLSeconds);
+  const ttlSeconds = Math.min(
+    requestedTTL,
+    policy.extension === "deny" ? policy.defaultTTLSeconds : policy.maxTTLSeconds,
+  );
+  const requestedIdle = positive(input.idleTimeoutSeconds, policy.defaultIdleTimeoutSeconds);
+  const idleTimeoutSeconds = Math.min(requestedIdle, ttlSeconds, policy.maxTTLSeconds);
+  const policyNotice =
+    requestedTTL !== ttlSeconds || requestedIdle !== idleTimeoutSeconds
+      ? `Lease policy clamped lifetime to ${ttlSeconds}s and idle timeout to ${idleTimeoutSeconds}s (maximum ${policy.maxTTLSeconds}s; extension ${policy.extension}).`
+      : undefined;
+  return { ttlSeconds, idleTimeoutSeconds, ...(policyNotice ? { policyNotice } : {}) };
 }

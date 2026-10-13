@@ -870,3 +870,24 @@ claim under its existing operation lock. See [`claims prune`](../commands/claims
 Use the `Context` variants of claim lookup, listing, and slug allocation helpers
 when an operation has a context. The existing context-free provider extension
 APIs remain available, but cannot cancel fallback slug/resource scans.
+
+### Lifetime extension capability
+
+Brokered providers declare `runtimeExtension` in the coordinator provider
+registry. Use `false` when allocation fixes a native destruction deadline;
+creation still receives the clamped requested TTL, but explicit runtime extension
+returns 409 and auto-extension is skipped. Coordinator-owned VM lifetimes and
+served assignments that can receive revised deadlines declare `true`.
+
+Direct adapters with mutable lifecycle labels/tags implement the optional
+`LeaseExtensionBackend.ExtendLease` interface. `LeaseExtendRequest` carries the
+exact resolved lease, a new total TTL or additive duration, and an optional
+reason. `ExtendDirectLease` applies the configured ceiling and holds the local
+claim fence across the adapter's identity checks and metadata write. The adapter
+must verify the live resource in its original account/scope before changing
+`ttl_secs` and `expires_at`. Pass the backend to `ExtendDirectLease` so it can
+reuse the authenticated SSH target resolution for file-backed guest guards.
+It publishes provider metadata and the local claim before refreshing the guest,
+and retains a pending refresh on failure so the same request is retryable without
+another lifetime increase. Metadata-backed guards need no guest write. Providers
+without the capability return an explicit unsupported-provider diagnostic.

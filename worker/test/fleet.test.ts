@@ -145,7 +145,7 @@ import type {
   RunEventRecord,
   RunRecord,
 } from "../src/types";
-import { addLeaseToCostLimitUsage, createCostLimitUsage } from "../src/usage";
+import { addLeaseToCostLimitUsage, createCostLimitUsage, leaseCost } from "../src/usage";
 import { gcpBillingBody, gcpBillingError, gcpBillingMessage } from "./fixtures/gcp-billing-error";
 import { withProviderHTTP } from "./fixtures/provider-http";
 
@@ -19529,7 +19529,10 @@ describe("fleet lease identity and idle", () => {
         expect({ action, field, status: response.status }).toEqual({ action, field, status: 409 });
         // oxlint-disable-next-line eslint/no-await-in-loop -- consume each isolated CAS response.
         expect(await response.json()).toMatchObject({
-          error: field === "state" ? "lease_not_active" : "ready_pool_image_observation_conflict",
+          error:
+            field === "state" || field === "createdAt"
+              ? "lease_not_active"
+              : "ready_pool_image_observation_conflict",
         });
         expect(writes).toBe(0);
       }
@@ -26644,8 +26647,11 @@ describe("fleet lease identity and idle", () => {
     );
     expect(createdLease.createAttemptID).toBeUndefined();
     expect(createdLease.createAttemptGeneration).toBeUndefined();
+    expect(createdLease.leasePolicy).toMatchObject({ maxTTLSeconds: 14400 });
+    const persistedFields = currentOrgFixture(createdLease);
+    delete persistedFields.leasePolicy;
     expect(storage.value<LeaseRecord>("lease:cbx_abcdef123456")).toMatchObject({
-      ...currentOrgFixture(createdLease),
+      ...persistedFields,
       createAttemptID: expect.stringMatching(/^cat_[a-f0-9]{32}$/),
       createAttemptGeneration: expect.any(String),
     });
@@ -33140,6 +33146,7 @@ describe("fleet lease identity and idle", () => {
         provider: "aws",
         owner: "alice@example.com",
         org: "example-org",
+        createdAt: new Date(Date.parse(expiresAt) - 5400_000).toISOString(),
         lastTouchedAt,
         expiresAt,
         cleanupAttempts: 1,
@@ -41733,6 +41740,7 @@ describe("fleet lease identity and idle", () => {
         testLease({
           id: leaseID,
           slug: "released-egress",
+          createdAt: new Date().toISOString(),
           provider: "external",
           lifecycle: "registered",
           owner: "alice@example.com",
@@ -55298,7 +55306,6 @@ describe("synthetic acknowledgement reliability", () => {
         await fleet.ready();
         const socket = addSocket(fleet, "synthetic-heartbeat");
         const get = vi.spyOn(storage, "get");
-        const put = vi.spyOn(storage, "put");
         const getAlarm = vi.spyOn(storage, "getAlarm");
         const nativeReads = vi.spyOn(storage, "beforeGetAlarm");
         const observedGet = (storage.beforeGet = vi.fn<NonNullable<MemoryStorage["beforeGet"]>>(
@@ -55312,7 +55319,6 @@ describe("synthetic acknowledgement reliability", () => {
         async function heartbeat(alarmReads: number, idleTimeoutSeconds?: number): Promise<void> {
           storage.resetListOptions();
           get.mockClear();
-          put.mockClear();
           list.mockClear();
           getAlarm.mockClear();
           setAlarm.mockClear();
@@ -55342,11 +55348,10 @@ describe("synthetic acknowledgement reliability", () => {
           expect(acknowledged).toBe(true);
           expectBoundedAlarmReads(storage, alarmReads);
           expect.soft(get.mock.calls.length).toBeLessThanOrEqual(3);
-          expect(put.mock.calls.map(([key]) => key)).toEqual([
-            leaseMaintenanceKey(leaseID),
-            leaseCurrentKey(leaseID),
-            `lease:${leaseID}`,
-          ]);
+          // The shared hook observes writes through transaction views as well.
+          expect(
+            observedPut.mock.calls.map(([key]) => key).filter((key) => key.startsWith("lease")),
+          ).toEqual([leaseMaintenanceKey(leaseID), leaseCurrentKey(leaseID), `lease:${leaseID}`]);
           expect.soft(getAlarm).toHaveBeenCalledTimes(1);
           expect(nativeReads).toHaveBeenCalledTimes(1 + alarmReads);
           expect(observedGet.mock.calls.length).toBeLessThanOrEqual(5);
@@ -58093,6 +58098,14 @@ async function typedReadyPoolIdentity(
 }
 
 function testLease(overrides: Partial<LeaseRecord>): LeaseRecord {
+  // An explicit expiry without a creation anchor describes a consistent live/expired lease.
+  const createdAt =
+    overrides.createdAt ??
+    (overrides.expiresAt && Date.parse(overrides.expiresAt) > Date.now()
+      ? new Date(
+          Date.parse(overrides.expiresAt) - (overrides.ttlSeconds ?? 5400) * 1000,
+        ).toISOString()
+      : "2026-05-01T00:00:00.000Z");
   return currentOrgFixture({
     id: "cbx_000000000000",
     slug: "blue-lobster",
@@ -58116,7 +58129,7 @@ function testLease(overrides: Partial<LeaseRecord>): LeaseRecord {
     estimatedHourlyUSD: 1,
     maxEstimatedUSD: 1.5,
     state: "active",
-    createdAt: "2026-05-01T00:00:00.000Z",
+    createdAt,
     updatedAt: "2026-05-01T00:00:00.000Z",
     expiresAt: "2026-05-01T01:30:00.000Z",
     ...overrides,
@@ -59701,6 +59714,7 @@ describe("maximum lifetime safety net", () => {
     delete f.lease.lifetimePolicy!.readiness;
     f.lease.lifetimePolicy!.source = "admin-canary";
     f.lease.state = "active";
+    f.lease.createdAt = new Date(now).toISOString();
     f.lease.expiresAt = new Date(now + 3_600_000).toISOString();
     const checkLifetimeReadiness = vi
       .fn<() => Promise<string>>()
@@ -60905,3 +60919,587 @@ describe("retained reconciliation admin status", () => {
     });
   });
 });
+describe("coordinator lease lifetime policy", () => {
+  const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+  function fixture(overrides: Partial<LeaseRecord> = {}, env: Partial<Env> = {}) {
+    const now = Date.now();
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      slug: "policy-box",
+      owner: headers["x-crabbox-owner"],
+      org: headers["x-crabbox-org"],
+      createdAt: new Date(now - 1_300_000).toISOString(),
+      lastTouchedAt: new Date(now).toISOString(),
+      ttlSeconds: 1800,
+      idleTimeoutSeconds: 1800,
+      expiresAt: new Date(now + 500_000).toISOString(),
+      ...overrides,
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    return { storage, lease, fleet: testFleet(storage, {}, env) };
+  }
+  it("extends for the owner, caps the total lifetime and bounds history to ten", async () => {
+    const { fleet, lease } = fixture();
+    for (let index = 0; index < 12; index++) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each extension advances the preceding committed TTL.
+      const response = await fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/extend`, {
+          headers,
+          body: { extendBySeconds: 600, reason: "test" },
+        }),
+      );
+      expect(response.status).toBe(200);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- inspect the committed result before the next extension.
+      const body = (await response.json()) as { lease: LeaseRecord };
+      expect(body.lease.ttlSeconds).toBe(1800 + (index + 1) * 600);
+      expect(body.lease.extensionHistory).toHaveLength(Math.min(index + 1, 10));
+      expect(body.lease.leasePolicy).toMatchObject({
+        maxTTLSeconds: 14400,
+        runtimeExtension: true,
+      });
+    }
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/extend`, { headers, body: { ttlSeconds: 86400 } }),
+    );
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { lease: LeaseRecord }).lease.ttlSeconds).toBe(14400);
+    const again = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/extend`, { headers, body: { extendBySeconds: 600 } }),
+    );
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: "lease_extension_not_advancing" });
+  });
+  it("refuses another owner and allows an authenticated admin", async () => {
+    const { fleet, lease } = fixture();
+    const denied = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/extend`, {
+        headers: { ...headers, "x-crabbox-owner": "bob@example.com" },
+        body: { extendBySeconds: 600 },
+      }),
+    );
+    expect([403, 404]).toContain(denied.status);
+    const admin = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/extend`, {
+        headers: {
+          ...headers,
+          "x-crabbox-owner": "operator@example.com",
+          "x-crabbox-admin": "true",
+        },
+        body: { extendBySeconds: 600 },
+      }),
+    );
+    expect(admin.status).toBe(200);
+  });
+  it.each([
+    { ttlSeconds: 0 },
+    { ttlSeconds: 600, extendBySeconds: 600 },
+    { extendBySeconds: 1.5 },
+    { extendBySeconds: 600, reason: "x".repeat(201) },
+    {},
+  ])("rejects bad extension body %j", async (body) => {
+    const { fleet, lease } = fixture();
+    expect(
+      (await fleet.fetch(request("POST", `/v1/leases/${lease.id}/extend`, { headers, body })))
+        .status,
+    ).toBe(400);
+  });
+  it.each(["released", "expired", "failed", "provisioning"] as const)(
+    "does not extend %s leases",
+    async (state) => {
+      const { fleet, lease } = fixture({ state });
+      const response = await fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/extend`, {
+          headers,
+          body: { extendBySeconds: 600 },
+        }),
+      );
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ error: "lease_not_active" });
+    },
+  );
+  it("denies explicit extension under policy", async () => {
+    const { fleet, lease } = fixture({}, { CRABBOX_LEASE_EXTENSION: "deny" });
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/extend`, { headers, body: { extendBySeconds: 600 } }),
+    );
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: "lease_extension_denied" });
+  });
+  it("reserves the create-time cost at the recorded rate, charging only the increase", async () => {
+    const { fleet, lease, storage } = fixture(
+      { estimatedHourlyUSD: 1.13, maxEstimatedUSD: 0.57 },
+      {
+        CRABBOX_MAX_MONTHLY_USD: "2",
+        CRABBOX_MAX_MONTHLY_USD_PER_OWNER: "2",
+        CRABBOX_MAX_MONTHLY_USD_PER_ORG: "2",
+        CRABBOX_MAX_ACTIVE_LEASES: "1",
+        CRABBOX_COST_RATES_JSON: JSON.stringify({ "hetzner:ccx63": 99 }),
+      },
+    );
+    storage.seed("lease:cbx_other", { ...lease, id: "cbx_other", maxEstimatedUSD: 0.2 });
+    storage.seed(`provider-access:${lease.id}`, structuredClone(lease));
+    for (const ttlSeconds of [3600, 5400]) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- the second admission must replace the first reservation.
+      const response = await fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/extend`, {
+          headers,
+          body: { ttlSeconds },
+        }),
+      );
+      expect(response.status).toBe(200);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- inspect the committed result.
+      const body = (await response.json()) as { lease: LeaseRecord };
+      const expected = leaseCost({}, lease.provider, lease.serverType, ttlSeconds, 1.13).maxUSD;
+      expect(body.lease).toMatchObject({
+        ttlSeconds,
+        estimatedHourlyUSD: 1.13,
+        maxEstimatedUSD: expected,
+      });
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.maxEstimatedUSD).toBe(expected);
+      expect(storage.value<LeaseRecord>(`provider-access:${lease.id}`)?.maxEstimatedUSD).toBe(
+        expected,
+      );
+    }
+  });
+  it.each([
+    ["fleet", "CRABBOX_MAX_MONTHLY_USD"],
+    ["owner", "CRABBOX_MAX_MONTHLY_USD_PER_OWNER"],
+    ["org", "CRABBOX_MAX_MONTHLY_USD_PER_ORG"],
+  ] as const)(
+    "denies owner and admin extensions beyond the %s budget without partial writes",
+    async (_scope, setting) => {
+      const { fleet, lease, storage } = fixture({ maxEstimatedUSD: 0.5 }, { [setting]: "1.1" });
+      storage.seed("lease:cbx_other", { ...lease, id: "cbx_other", maxEstimatedUSD: 0.3 });
+      storage.seed(`provider-access:${lease.id}`, structuredClone(lease));
+      const before = structuredClone(storage.value<LeaseRecord>(`lease:${lease.id}`));
+      const reservation = structuredClone(
+        storage.value<LeaseRecord>(`provider-access:${lease.id}`),
+      );
+      for (const admin of [false, true]) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- both authorities must preserve the original reservation.
+        const response = await fleet.fetch(
+          request("POST", `/v1/leases/${lease.id}/extend`, {
+            headers: admin
+              ? { ...headers, "x-crabbox-admin": "true", "x-crabbox-owner": "operator@example.com" }
+              : headers,
+            body: { ttlSeconds: 3600 },
+          }),
+        );
+        expect(response.status).toBe(403);
+        // oxlint-disable-next-line eslint/no-await-in-loop -- inspect the budget contract.
+        expect(await response.json()).toMatchObject({
+          error: "lease_extension_budget_exceeded",
+          message: expect.stringContaining("remaining headroom $0.30"),
+        });
+        expect(storage.value(`lease:${lease.id}`)).toEqual(before);
+        expect(storage.value(`provider-access:${lease.id}`)).toEqual(reservation);
+      }
+    },
+  );
+  it.each([
+    "CRABBOX_MAX_MONTHLY_USD",
+    "CRABBOX_MAX_MONTHLY_USD_PER_OWNER",
+    "CRABBOX_MAX_MONTHLY_USD_PER_ORG",
+  ] as const)(
+    "skips auto-extension over %s and returns an expiry notice with one structured log",
+    async (setting) => {
+      const { fleet, lease, storage } = fixture({ maxEstimatedUSD: 0.5 }, { [setting]: "0.8" });
+      storage.seed("lease:cbx_other", { ...lease, id: "cbx_other", maxEstimatedUSD: 0.3 });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const response = await fleet.fetch(
+          request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+            headers,
+            body: { extendWhileRunning: true },
+          }),
+        );
+        expect(response.status).toBe(200);
+        const body = (await response.json()) as { lease: LeaseRecord };
+        expect(body.lease).toMatchObject({
+          ttlSeconds: 1800,
+          maxEstimatedUSD: 0.5,
+          expiresAt: lease.expiresAt,
+          policyNotice: expect.stringContaining(
+            `Lease will expire at ${lease.expiresAt}; budget exhausted`,
+          ),
+        });
+        expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+          ttlSeconds: 1800,
+          maxEstimatedUSD: 0.5,
+        });
+        expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.policyNotice).toBeUndefined();
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(JSON.parse(warn.mock.calls[0][0] as string)).toMatchObject({
+          event: "lease_auto_extension_budget_exceeded",
+          leaseID: lease.id,
+          expiresAt: lease.expiresAt,
+        });
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  );
+  it("includes the budget notice in a control heartbeat response", async () => {
+    const { fleet, lease } = fixture(
+      { maxEstimatedUSD: 0.5 },
+      { CRABBOX_MAX_MONTHLY_USD_PER_OWNER: "0.5" },
+    );
+    const socket = new FakeWebSocket({
+      kind: "control",
+      clientID: "ctrl_budget",
+      owner: lease.owner,
+      org: lease.org,
+      admin: false,
+      subscriptions: {},
+    });
+    await fleet.ready();
+    (fleet as unknown as { controlSockets: Map<string, WebSocket> }).controlSockets.set(
+      "ctrl_budget",
+      socket as unknown as WebSocket,
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await fleet.webSocketMessage(
+        socket as unknown as WebSocket,
+        JSON.stringify({
+          type: "heartbeat",
+          leaseID: lease.id,
+          extendWhileRunning: true,
+          idleTimeoutSeconds: 7200,
+        }),
+      );
+      expect(socket.sentJSON().at(-1)).toMatchObject({
+        type: "heartbeat",
+        ok: true,
+        policyNotice: expect.stringContaining("budget exhausted"),
+      });
+      expect(socket.sentJSON().at(-1)).toMatchObject({
+        policyNotice: expect.stringContaining("clamped idle timeout from 7200s to 1800s"),
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+  it("reports a clamped heartbeat idle override without persisting the notice", async () => {
+    const { fleet, lease, storage } = fixture();
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+        headers,
+        body: { idleTimeoutSeconds: 7200 },
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      lease: {
+        idleTimeoutSeconds: 1800,
+        policyNotice: "Lease policy clamped idle timeout from 7200s to 1800s.",
+      },
+    });
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.policyNotice).toBeUndefined();
+  });
+  it.each(["explicit", "auto"])(
+    "fences concurrent extension and heartbeat with %s first",
+    async (first) => {
+      const { fleet, lease, storage } = fixture(
+        { maxEstimatedUSD: 0.5 },
+        { CRABBOX_MAX_MONTHLY_USD_PER_OWNER: "1" },
+      );
+      const entered = deferred<void>();
+      const release = deferred<void>();
+      let blocked = false;
+      storage.beforeCommit = async (keys) => {
+        if (keys.has(`lease:${lease.id}`) && !blocked) {
+          blocked = true;
+          entered.resolve();
+          await release.promise;
+        }
+      };
+      const extend = () =>
+        fleet.fetch(
+          request("POST", `/v1/leases/${lease.id}/extend`, { headers, body: { ttlSeconds: 3600 } }),
+        );
+      const heartbeat = () =>
+        fleet.fetch(
+          request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+            headers,
+            body: { extendWhileRunning: true },
+          }),
+        );
+      const firstResponse = first === "explicit" ? extend() : heartbeat();
+      await entered.promise;
+      const secondResponse = first === "explicit" ? heartbeat() : extend();
+      release.resolve();
+      const responses = await Promise.all([firstResponse, secondResponse]);
+      expect(responses.map((response) => response.status)).toEqual(
+        first === "explicit" ? [200, 200] : [200, 409],
+      );
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+        ttlSeconds: 3600,
+        maxEstimatedUSD: 1,
+      });
+    },
+  );
+  it("does not release reserved cost when current policy clamps the lifetime", async () => {
+    const { fleet, lease, storage } = fixture(
+      { ttlSeconds: 7200, maxEstimatedUSD: 2 },
+      { CRABBOX_LEASE_MAX_TTL_SECONDS: "3600" },
+    );
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/heartbeat`, { headers, body: {} }),
+    );
+    expect(response.status).toBe(200);
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.maxEstimatedUSD).toBe(2);
+  });
+  it("rolls back TTL and reservation together when the extension commit fails", async () => {
+    const { fleet, lease, storage } = fixture({ maxEstimatedUSD: 0.5 });
+    await fleet.ready();
+    storage.seed(`provider-access:${lease.id}`, structuredClone(lease));
+    const before = structuredClone(storage.value(`lease:${lease.id}`));
+    const reservation = structuredClone(storage.value(`provider-access:${lease.id}`));
+    storage.beforeCommit = async (keys) => {
+      if (keys.has(`lease:${lease.id}`)) throw new Error("synthetic extension commit failure");
+    };
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/extend`, {
+        headers,
+        body: { ttlSeconds: 3600 },
+      }),
+    );
+    expect(response.status).toBe(500);
+    expect(storage.value(`lease:${lease.id}`)).toEqual(before);
+    expect(storage.value(`provider-access:${lease.id}`)).toEqual(reservation);
+  });
+  it("does not replay a creation policy notice on ordinary heartbeats", async () => {
+    const { fleet, lease, storage } = fixture({ policyNotice: "Creation policy clamped TTL." });
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/heartbeat`, { headers, body: {} }),
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { lease: LeaseRecord };
+    expect(body.lease.policyNotice).toBeUndefined();
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.policyNotice).toBe(lease.policyNotice);
+  });
+  it.each([14400, 600])(
+    "keeps registered leases renewable under a %s-second policy ceiling",
+    async (maxTTL) => {
+      vi.useFakeTimers();
+      try {
+        const now = Date.now();
+        const { fleet, lease, storage } = fixture(
+          {
+            provider: "external",
+            lifecycle: "registered",
+            createdAt: new Date(now - 2 * 86400_000).toISOString(),
+            lastTouchedAt: new Date(now - 120_000).toISOString(),
+            expiresAt: new Date(now + 1680_000).toISOString(),
+          },
+          { CRABBOX_LEASE_MAX_TTL_SECONDS: String(maxTTL) },
+        );
+        const read = await fleet.fetch(request("GET", `/v1/leases/${lease.id}`, { headers }));
+        const readLease = ((await read.json()) as { lease: LeaseRecord }).lease;
+        expect(readLease.expiresAt).toBe(
+          new Date(now + (Math.min(1800, maxTTL) - 120) * 1000).toISOString(),
+        );
+        const heartbeat = await fleet.fetch(
+          request("POST", `/v1/leases/${lease.id}/heartbeat`, { headers, body: {} }),
+        );
+        expect(heartbeat.status).toBe(200);
+        expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toMatchObject({
+          expiresAt: new Date(now + Math.min(1800, maxTTL) * 1000).toISOString(),
+          lastTouchedAt: new Date(now).toISOString(),
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+  it.each([
+    { remaining: 599, body: { extendWhileRunning: true }, env: {}, provider: "hetzner", ttl: 3600 },
+    { remaining: 600, body: { extendWhileRunning: true }, env: {}, provider: "hetzner", ttl: 1800 },
+    { remaining: 599, body: {}, env: {}, provider: "hetzner", ttl: 1800 },
+    {
+      remaining: 599,
+      body: { extendWhileRunning: true },
+      env: { CRABBOX_LEASE_AUTO_EXTEND: "deny" },
+      provider: "hetzner",
+      ttl: 1800,
+    },
+    {
+      remaining: 599,
+      body: { extendWhileRunning: true },
+      env: { CRABBOX_LEASE_EXTENSION: "deny" },
+      provider: "hetzner",
+      ttl: 1800,
+    },
+    { remaining: 599, body: { extendWhileRunning: true }, env: {}, provider: "daytona", ttl: 1800 },
+  ])(
+    "auto extension respects threshold and policy %j",
+    async ({ remaining, body, env, provider, ttl }) => {
+      vi.useFakeTimers();
+      try {
+        const now = Date.now();
+        const { fleet, lease } = fixture(
+          {
+            provider,
+            createdAt: new Date(now - (1800 - remaining) * 1000).toISOString(),
+            expiresAt: new Date(now + remaining * 1000).toISOString(),
+          },
+          env,
+        );
+        const response = await fleet.fetch(
+          request("POST", `/v1/leases/${lease.id}/heartbeat`, { headers, body }),
+        );
+        expect(response.status).toBe(200);
+        expect(((await response.json()) as { lease: LeaseRecord }).lease.ttlSeconds).toBe(ttl);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+  it("rejects Daytona extension with a creation-time hint", async () => {
+    const { fleet, lease } = fixture({ provider: "daytona" });
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/extend`, { headers, body: { extendBySeconds: 600 } }),
+    );
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: "lease_extension_unsupported_provider",
+      message: expect.stringContaining("--ttl"),
+    });
+  });
+  it("tightens existing expiry on reads and refuses heartbeat revival", async () => {
+    const now = Date.now();
+    const { fleet, lease } = fixture({
+      ttlSeconds: 86400,
+      createdAt: new Date(now - 5 * 3600_000).toISOString(),
+      expiresAt: new Date(now + 3600_000).toISOString(),
+    });
+    const read = await fleet.fetch(request("GET", `/v1/leases/${lease.id}`, { headers }));
+    expect(((await read.json()) as { lease: LeaseRecord }).lease.expiresAt).toBe(
+      new Date(now - 3600_000).toISOString(),
+    );
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+        headers,
+        body: { extendWhileRunning: true },
+      }),
+    );
+    expect(response.status).toBe(409);
+  });
+});
+
+describe("lease policy creation", () => {
+  const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+  it.each(["hetzner", "daytona"] as const)(
+    "clamps %s create before provider allocation",
+    async (provider) => {
+      let allocated: LeaseConfig | undefined;
+      const fleet = testFleet(new MemoryStorage(), {
+        [provider]: fakeProvider(
+          (config) => {
+            allocated = config;
+          },
+          { provider },
+        ),
+      });
+      const response = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers,
+          body: {
+            provider,
+            sshPublicKey: "ssh-ed25519 test",
+            ttlSeconds: 86400,
+            idleTimeoutSeconds: 18000,
+          },
+        }),
+      );
+      expect(response.status).toBe(201);
+      expect(allocated).toMatchObject({ ttlSeconds: 14400, idleTimeoutSeconds: 14400 });
+      expect(((await response.json()) as { lease: LeaseRecord }).lease).toMatchObject({
+        ttlSeconds: 14400,
+        policyNotice: expect.any(String),
+        leasePolicy: { maxTTLSeconds: 14400, runtimeExtension: provider !== "daytona" },
+      });
+    },
+  );
+  it("clamps a denied create to defaults without rejecting an old client", async () => {
+    const fleet = testFleet(
+      new MemoryStorage(),
+      { hetzner: fakeProvider() },
+      { CRABBOX_LEASE_EXTENSION: "deny" },
+    );
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers,
+        body: {
+          provider: "hetzner",
+          sshPublicKey: "ssh-ed25519 test",
+          ttlSeconds: 86400,
+          idleTimeoutSeconds: 18000,
+        },
+      }),
+    );
+    expect(response.status).toBe(201);
+    expect(((await response.json()) as { lease: LeaseRecord }).lease).toMatchObject({
+      ttlSeconds: 1800,
+      idleTimeoutSeconds: 1800,
+      policyNotice: expect.any(String),
+    });
+  });
+});
+
+it("uses the lease policy default for workspace admission", async () => {
+  const storage = new MemoryStorage();
+  const fleet = testFleet(
+    storage,
+    { hetzner: fakeProvider() },
+    {
+      CRABBOX_WORKSPACE_PROVIDER: "hetzner",
+      CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-policy",
+      CRABBOX_WORKSPACE_SSH_PRIVATE_KEY: "fixture-key",
+    },
+  );
+  const response = await fleet.fetch(
+    request("POST", "/v1/workspaces", {
+      headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+      body: { id: "policy-workspace", runtime: "crabbox" },
+    }),
+  );
+  expect(response.status).toBe(202);
+  const workspace = storage.value<{ ttlSeconds: number; idleTimeoutSeconds: number }>(
+    workspaceFixtureKey("policy-workspace"),
+  );
+  expect(workspace).toMatchObject({ ttlSeconds: 1800, idleTimeoutSeconds: 1800 });
+});
+
+it.each([
+  { maximum: 86400, requested: 86400, expected: 86400, status: 202 },
+  { maximum: 3600, requested: 86400, expected: 3600, status: 202 },
+  { maximum: 600, requested: 86400, expected: 0, status: 400 },
+])(
+  "normalizes workspace duration against policy $maximum",
+  async ({ maximum, requested, expected, status }) => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(
+      storage,
+      { hetzner: fakeProvider() },
+      {
+        CRABBOX_WORKSPACE_PROVIDER: "hetzner",
+        CRABBOX_WORKSPACE_SSH_PUBLIC_KEY: "ssh-ed25519 workspace-policy",
+        CRABBOX_WORKSPACE_SSH_PRIVATE_KEY: "fixture-key",
+        CRABBOX_LEASE_MAX_TTL_SECONDS: String(maximum),
+      },
+    );
+    const response = await fleet.fetch(
+      request("POST", "/v1/workspaces", {
+        headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+        body: { id: "policy-workspace", runtime: "crabbox", ttlSeconds: requested },
+      }),
+    );
+    expect(response.status).toBe(status);
+    expect(
+      storage.value<{ ttlSeconds: number }>(workspaceFixtureKey("policy-workspace"))?.ttlSeconds,
+    ).toBe(status === 202 ? expected : undefined);
+  },
+);

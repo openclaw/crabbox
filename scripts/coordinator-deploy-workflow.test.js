@@ -185,6 +185,18 @@ test("main deployment verifies final serving identity after optional secret chan
   );
 });
 
+test("deployment checks live lease policy preservation before publishing", () => {
+  assert.match(
+    workflow,
+    /- name: Verify lease policy preservation\n        run: node scripts\/verify-coordinator-lease-policy\.mjs github:25068[^]*?- name: Deploy\n/,
+  );
+  assert.match(
+    workflow,
+    /- name: Verify lease policy preservation[^]*?CLOUDFLARE_API_TOKEN: \$\{\{ secrets\.CLOUDFLARE_API_TOKEN \}\}/,
+  );
+  assert.match(workflow, /      - "scripts\/verify-coordinator-lease-policy\.mjs"/);
+});
+
 test("coordinator deploy keeps optional credentials with the serialized environment owner", () => {
   assert.match(workflow, /environment: coordinator/);
   assert.match(workflow, /group: coordinator-deploy\n  cancel-in-progress: false/);

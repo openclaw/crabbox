@@ -1,16 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.76.0 - 2026-10-13
 
 ### Changed
 
 - CLI: add `stop --wait=false` for coordinator-owned queued cleanup while preserving pending local recovery state; ordinary stop still waits for confirmed deletion.
 - CLI: batch no-sync SSH workspace preparation and script upload, overlap independent telemetry and event delivery, and preserve retained scripts and terminal run records.
+- Coordinator: restore the deployment-authorized owner's 24-hour lease maximum while retaining the global 4-hour limit; deployments refuse to overwrite other live lifetime-policy overrides. [PR 2816](https://github.com/openclaw/crabbox/pull/2816).
 - CI: run CLI coverage in three isolated shards, retaining atomic whole-suite coverage and the 90% core gate; report the slowest top-level tests without summing nested timings.
 - Coordinator monthly reserved-USD budgets are raised to $100,000 fleet-wide, $50,000 per owner and $100,000 per org; reservations from finished leases had exhausted the per-owner cap at roughly a quarter of the estimated spend.
 - CLI: `crabbox list` streams and shows live leases by default; `--retained` includes kept terminal leases. Add `--jsonl` streaming and uncapped `--all` lease lookups while preserving the buffered `--json` array.
 - Direct cleanup now expires `keep=true` leases and reduces running/provisioning expiry grace from 12 hours to 1 hour; unowned machines remain untouched.
 - Direct leases: preserve provider user-data limits with compressed Tencent Cloud bootstrap, retain renewed leases during cleanup, and normalize Sealos ownership labels. [PR 2806](https://github.com/openclaw/crabbox/pull/2806).
+- Default lease lifetime to 30 minutes with a 4-hour maximum and coordinator global, organization, and owner lifetime policies that also clamp live leases.
+- Direct lease allocations and explicit idle-timeout updates report policy clamps and persist the effective timeout consistently; coordinator heartbeats also report clamped idle overrides. ([#2804](https://github.com/openclaw/crabbox/pull/2804))
+- Lease extensions atomically reserve their additional cost against fleet, owner, and organization budgets; running commands report when exhausted budgets prevent extension. ([#2804](https://github.com/openclaw/crabbox/pull/2804))
+- Registered external leases retain their renewable heartbeat deadline when lifetime policy is tightened. ([#2804](https://github.com/openclaw/crabbox/pull/2804))
 
 ### Added
 
@@ -18,13 +23,16 @@
 - Serve leases can fall back to an owner-authorized, end-to-end encrypted coordinator relay when LAN and tailnet routes are unavailable.
 - Coordinator: reconcile retained terminal AWS leases from the current index with scoped cleanup proof, bounded resumable passes, opt-in owned deletion, and `crabbox admin retained-reconcile` status.
 - Direct Linux guest expiry guards across shared-bootstrap providers, plus `directLeases: deny` and trusted provider exceptions to require coordinator allocation.
+- `crabbox extend` requests bounded lifetime extensions; running commands can auto-extend when policy and provider lifetime capabilities allow.
 - Serve agents advertise LAN and tailnet front-door candidates, with pinned-key LAN-first client selection and per-lease route caching.
 - Portal: show owners their donated serve machines, online status, capacity, allocated leases, and runtime details.
 
 ### Fixed
 
 - CLI: retain idempotent SSH retries for batched workspace preparation and script upload after transient transport failures.
+- AWS deployment smoke: pin Linux/amd64 `t3.small` with class `tiny` and On-Demand capacity so inherited defaults cannot launch a larger instance. [PR 2814](https://github.com/openclaw/crabbox/pull/2814).
 - Blacksmith Testbox: cancel the exact owned GitHub workflow after native stop leaves it active, releasing concurrency slots without waiting for the SSH idle timer; retain recovery state until both sides confirm completion. [PR 2813](https://github.com/openclaw/crabbox/pull/2813).
+- Direct lease extension refreshes file-backed guest expiry guards after saving provider labels; failed guest writes report both deadlines and can be retried without adding lifetime twice. ([#2804](https://github.com/openclaw/crabbox/pull/2804))
 - AWS: honor the requested region before coordinator and capacity fallbacks, using a regional promoted image or the normal stock image without redirecting to another region's promotion.
 - Serve: allow relay pairing and both SSH handshakes to complete during bootstrap and sync; add bounded, payload-free client and agent diagnostics with `CRABBOX_SERVE_RELAY_DEBUG=1`. [PR 2811](https://github.com/openclaw/crabbox/pull/2811).
 - Preserve worst-case `reservedUSD` in usage reports and expose enforced cost as `committedUSD`, with compatible CLI output and conservative reservations for retained legacy VMs and unresolved provisioning. [PR 2801](https://github.com/openclaw/crabbox/pull/2801).

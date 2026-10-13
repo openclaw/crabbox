@@ -99,7 +99,7 @@ func TestDescribeProviderAliasSchemaCapabilitiesAndFlags(t *testing.T) {
 	if shared["download"].ValueShape != "string-list" || !shared["download"].Repeatable {
 		t.Fatalf("download metadata=%#v", shared["download"])
 	}
-	if shared["ttl"].Type != "duration" || shared["ttl"].Default != (90*time.Minute).String() {
+	if shared["ttl"].Type != "duration" || shared["ttl"].Default != (30*time.Minute).String() {
 		t.Fatalf("ttl metadata=%#v", shared["ttl"])
 	}
 	if _, ok := shared["provider"]; !ok {

@@ -1066,7 +1066,7 @@ type touchClock struct{ now time.Time }
 
 func (c touchClock) Now() time.Time { return c.now }
 
-func touchFixture(t *testing.T) (*backend, core.LeaseTarget, core.LeaseClaim, time.Time) {
+func touchFixture(t *testing.T, ttl ...time.Duration) (*backend, core.LeaseTarget, core.LeaseClaim, time.Time) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1080,6 +1080,9 @@ func touchFixture(t *testing.T) (*backend, core.LeaseTarget, core.LeaseClaim, ti
 	cfg := configFor()
 	cfg.IdleTimeout = 5 * time.Minute
 	cfg.TTL = time.Hour
+	if len(ttl) > 0 {
+		cfg.TTL = ttl[0]
+	}
 	runner := &fake{responses: results{}}
 	b := backendFor(cfg, runner)
 	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
@@ -1103,7 +1106,7 @@ func touchFixture(t *testing.T) (*backend, core.LeaseTarget, core.LeaseClaim, ti
 }
 
 func TestTouchKeepsRouting(t *testing.T) {
-	b, lease, claim, now := touchFixture(t)
+	b, lease, claim, now := touchFixture(t, 90*time.Minute)
 	writeLumeKnownHost(t, lease.LeaseID, lease.Server.Name, hostKey)
 	leaseID, server, metadata := lease.LeaseID, lease.Server, lease.Server.Labels
 	for _, override := range []*time.Duration{nil, ptrDuration(90 * time.Minute), nil} {
@@ -1128,7 +1131,7 @@ func TestTouchKeepsRouting(t *testing.T) {
 		if !set || !exists || !reflect.DeepEqual(snapshot, persisted) {
 			t.Fatal("Touch did not return its committed snapshot")
 		}
-		if wantIdle == 5400 && got.Labels["expires_at"] != core.LeaseLabelTime(now.Add(40*time.Minute)) {
+		if wantIdle == 5400 && got.Labels["expires_at"] != core.LeaseLabelTime(now.Add(70*time.Minute)) {
 			t.Fatal("heartbeat lost original TTL cap")
 		}
 		stale := req

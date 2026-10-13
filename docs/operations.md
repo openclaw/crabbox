@@ -320,6 +320,13 @@ Verification only reads deployment metadata and health; it creates no lease.
 If manually clearing the Daytona snapshot creates a new untagged version,
 verification fails too; inspect the final version before rerunning the deploy.
 
+Before deployment, the workflow compares the live `CRABBOX_LEASE_POLICY_OVERRIDES`
+binding with the production value in `worker/wrangler.jsonc`. Only the named
+owner's maximum TTL may change; other owner, organization, and policy fields
+must be preserved. An unreadable secret binding or a conflicting document stops
+deployment before upload. Reconcile those entries into the source configuration
+before deploying; do not replace an unknown override document.
+
 Worker source lives in `worker/`. Run the gate, then deploy:
 
 ```sh
@@ -346,6 +353,13 @@ CRABBOX_DEPLOY_SMOKE_URLS="https://$BROKER_HOST/v1/health" \
   CRABBOX_LIVE_REPO=/path/to/my-app \
   scripts/deploy-worker-smoke.sh
 ```
+
+The AWS smoke pins Linux/amd64, class `tiny`, and On-Demand `t3.small` (2 vCPU,
+2 GiB), the smallest instance in Crabbox's supported AWS amd64 class catalog.
+Both warmup and run override inherited target, architecture, and machine sizing.
+The smoke fails if that exact type is unavailable;
+it does not fall back to a larger instance. The smoke runs without repository sync
+and attempts to stop its lease after the command or on failure, with a 20-minute TTL as a backstop.
 
 ### Node.js And PostgreSQL
 

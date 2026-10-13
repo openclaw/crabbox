@@ -34,6 +34,7 @@ func TestFixedDropletHeartbeatAndStatusWait(t *testing.T) {
 				b := newTestBackend(t, api)
 				port, refreshes := guestExpirySSHFixture(t)
 				b.Cfg.SSHPort = port
+				b.Cfg.TTL = 2 * time.Hour
 				// Ensure renewal changes activity tags even within one wall-clock second.
 				b.RT.Clock = fixedClock{t: time.Now().Add(-time.Minute)}
 				repo := t.TempDir()

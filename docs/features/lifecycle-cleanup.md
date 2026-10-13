@@ -138,10 +138,87 @@ rejected so they cannot revive a lease once expiry cleanup owns it.
 Expiry is the minimum of two clocks (`leaseExpiresAt` in `worker/src/fleet.ts`):
 
 - **idle expiry** — `lastTouchedAt + idleTimeout` (default idle timeout 1800s);
-- **max lifetime** — `createdAt + ttl` (default TTL 5400s, capped at 86400s).
+- **max lifetime** — `createdAt + min(ttl, current policy max)` (default TTL 1800s, default maximum 14400s).
 
-A heartbeat can only push idle expiry forward up to the max-lifetime cap, so a
-busy lease still expires at its TTL regardless of activity.
+Plain heartbeats only move idle expiry. While the user command executes, `run`
+sends `extendWhileRunning: true`: when fewer than 600 seconds remain in the total
+lifetime, the coordinator adds 1800 seconds, up to the current maximum, if both
+extension policies and the provider capability allow it. Setup, sync-only runs,
+manual heartbeat, SSH, connect, and desktop sessions do not request auto-extension.
+
+### Ordinary lifetime policy
+
+Every new lease defaults to a 30-minute TTL and a 30-minute idle timeout. The
+coordinator resolves global, organization, then owner policy; each owner field
+wins independently, falling through to organization and global values when omitted.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `CRABBOX_LEASE_DEFAULT_TTL_SECONDS` | `1800` | Initial total lifetime from creation |
+| `CRABBOX_LEASE_DEFAULT_IDLE_TIMEOUT_SECONDS` | `1800` | Initial inactivity window |
+| `CRABBOX_LEASE_MAX_TTL_SECONDS` | `14400` | Ceiling for ordinary TTL and idle timeout |
+| `CRABBOX_LEASE_EXTENSION` | `allow` | `allow` or `deny`: above-default create TTL, explicit extension, and auto-extension |
+| `CRABBOX_LEASE_AUTO_EXTEND` | `allow` | `allow` or `deny`: extension during command execution; also requires extension allowed |
+| `CRABBOX_LEASE_POLICY_OVERRIDES` | unset | JSON with `orgs` and `owners` maps |
+
+Duration settings are positive integer seconds, with an absolute bound of 86400
+seconds. Global durations above that bound are clamped; invalid overrides are
+ignored as one document and log one structured error per coordinator instance.
+Overrides use `defaultTTLSeconds`, `defaultIdleTimeoutSeconds`, `maxTTLSeconds`,
+`extension`, and `autoExtend`, for example:
+
+```json
+{"orgs":{"example-org":{"maxTTLSeconds":7200}},"owners":{"alice@example.com":{"autoExtend":"deny"}}}
+```
+
+Create requests are clamped rather than rejected, including older clients asking
+for 24h TTL and 5h idle. Denied extension clamps create TTL to the effective
+default, and idle timeout never exceeds the effective TTL. Lease responses
+include `leasePolicy` and a `policyNotice` when clamped; the CLI prints that notice
+once on stderr. Workspace defaults follow the same policy; the provisioning
+minimum is 1800 seconds and matches the global default.
+
+Direct allocation commands also print a policy notice when configuration is
+clamped. Explicit heartbeat and run idle-timeout overrides report the effective
+timeout when it is shortened to fit the lease; the local claim records that
+effective timeout alongside the provider labels.
+
+Policy tightening also applies to live leases on reads, heartbeats, and the
+existing indexed alarm/expiry pass. **Active leases older than 4h expire at the
+next alarm after deploy** with the defaults. Heartbeats at or after expiry cannot
+revive them. No additional full lease-history walk is needed.
+
+Use [crabbox extend](../commands/extend.md) to request a new total TTL or add to it:
+`POST /v1/leases/{id}/extend` accepts exactly one of `ttlSeconds` or
+`extendBySeconds`, and an optional reason of at most 200 characters. Only the
+owner or an authenticated admin can extend. The coordinator caps the result,
+refuses ended or non-advancing leases, and records the last ten explicit
+extensions with timestamp, actor, old/new TTL, and reason. Extension changes total
+lifetime; it does not refresh the idle clock.
+
+Explicit and automatic extensions pass the same budget checks as creation, using
+the lease's recorded hourly estimate and the same cost rounding. The existing
+reservation is replaced atomically with the new TTL, so only additional cost is
+charged. An over-budget explicit request returns 403
+`lease_extension_budget_exceeded` with remaining headroom and changes nothing.
+An over-budget command heartbeat still refreshes activity but skips extension,
+returns a `policyNotice` with the expiry, and emits one structured log line. The
+CLI prints the notice once during the run. No partial extension is applied.
+Policy tightening can shorten expiry but does not release reserved cost.
+Registered external resources keep their renewable registration clock: their
+policy ceiling counts from the last heartbeat rather than resource creation.
+
+The provider lifetime capability `runtimeExtension` reports whether a native
+deadline can move after allocation. AWS, Azure, GCP, Hetzner, and served containers
+allow runtime extension; served agents receive current deadlines through polling.
+Daytona fixes its native deadline at allocation and declares `false`. Such leases
+accept longer TTLs at creation, reject explicit extension with HTTP 409
+`lease_extension_unsupported_provider` and a longer-`--ttl` hint, and silently skip
+auto-extension. Live policy tightening still shortens their coordinator deadline;
+normal expiry then deletes the provider resource.
+
+This policy is separate from the retained-compute maximum-age safety net below;
+`CRABBOX_LEASE_LIFETIME_MODE` is unchanged.
 
 ### Release vs expiry
 
@@ -323,7 +400,10 @@ New brokered Daytona sandboxes receive native wall-clock TTL in the original
 allocation request: the requested lease TTL rounded up to whole minutes, with a
 one-minute minimum. This clock starts at provider creation, not coordinator
 reservation, and applies even when the sandbox is kept or explicitly retained.
-Heartbeats do not extend it. A TTL-capable Daytona API is required; Crabbox never
+Its provider lifetime capability declares `runtimeExtension: false`: explicit
+extension is unsupported and command heartbeats never extend it. Request a longer
+`--ttl` at creation, subject to coordinator policy. The clamped TTL is sent to
+Daytona before allocation. A TTL-capable Daytona API is required; Crabbox never
 retries allocation without TTL. Before publishing access, a ready sandbox must
 report a future native destruction deadline no later than one requested TTL from
 the start of readiness observation. This bound does not move during polling or
@@ -632,7 +712,11 @@ File-backed bootstraps write exactly four nonsecret fields: `crabbox`, `state`,
 is the hook for a file-backed provider's lease-lifetime update: it validates the
 fields and writes mode 0600 through the existing SSH transport, publishing by
 atomic rename in `/etc/crabbox`. Ordinary CLI state touches and heartbeats refresh this file as well as provider
-labels. Other deadline updates must use this hook, not only change provider labels. No new `extend` command is introduced here.
+labels. The [extend command](../commands/extend.md) saves provider labels and the local
+claim before calling this hook. If SSH refresh fails, it retains the provider
+extension, exits nonzero with both deadlines, and records a pending refresh in
+the local claim. Rerunning the same extension retries only the guest write.
+Other deadline updates must use this hook as well.
 
 Brokered leases never install this guard; the coordinator owns their lifecycle.
 Windows and macOS targets do not install it. Providers using prepared templates,

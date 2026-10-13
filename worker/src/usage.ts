@@ -112,10 +112,23 @@ export function leaseCost(
   providerHourlyUSD?: number,
 ): LeaseCost {
   const hourlyUSD = hourlyRateUSD(env, provider, serverType, providerHourlyUSD);
+  return leaseCostForHourlyRate(ttlSeconds, hourlyUSD);
+}
+
+function leaseCostForHourlyRate(ttlSeconds: number, hourlyUSD: number): LeaseCost {
   return {
     hourlyUSD,
     maxUSD: roundUSD((Math.max(1, ttlSeconds) / 3600) * hourlyUSD),
   };
+}
+
+export function leaseExtensionReservationUSD(
+  lease: Pick<LeaseRecord, "estimatedHourlyUSD" | "maxEstimatedUSD">,
+  ttlSeconds: number,
+): number {
+  const cost = leaseCostForHourlyRate(ttlSeconds, lease.estimatedHourlyUSD);
+  // Policy tightening must not release an existing reservation during extension.
+  return Math.max(lease.maxEstimatedUSD, cost.maxUSD);
 }
 
 export function costLimits(env: Env): CostLimits {
@@ -219,16 +232,30 @@ export function enforceCostLimitUsage(
       return `active lease limit for org exceeded: ${usage.orgActiveLeases + 1}/${activeLimits.org}`;
   }
 
+  return enforceBudgetLimitUsage(usage, candidate, limits);
+}
+
+export function enforceBudgetLimitUsage(
+  usage: CostLimitUsage,
+  candidate: Pick<LeaseRecord, "maxEstimatedUSD">,
+  limits: CostLimits,
+  existingReservationUSD?: number,
+): string {
+  const headroom = (used: number, limit: number): string =>
+    existingReservationUSD === undefined
+      ? ""
+      : `; remaining headroom ${formatUSD(Math.max(0, limit - used - existingReservationUSD))}`;
+
   if (overBudget(usage.committedUSD + candidate.maxEstimatedUSD, limits.maxMonthlyUSD)) {
-    return `monthly budget exceeded: ${formatUSD(usage.committedUSD + candidate.maxEstimatedUSD)}/${formatUSD(limits.maxMonthlyUSD)}`;
+    return `monthly budget exceeded: ${formatUSD(usage.committedUSD + candidate.maxEstimatedUSD)}/${formatUSD(limits.maxMonthlyUSD)}${headroom(usage.committedUSD, limits.maxMonthlyUSD)}`;
   }
   if (
     overBudget(usage.ownerCommittedUSD + candidate.maxEstimatedUSD, limits.maxMonthlyUSDPerOwner)
   ) {
-    return `monthly budget for owner exceeded: ${formatUSD(usage.ownerCommittedUSD + candidate.maxEstimatedUSD)}/${formatUSD(limits.maxMonthlyUSDPerOwner)}`;
+    return `monthly budget for owner exceeded: ${formatUSD(usage.ownerCommittedUSD + candidate.maxEstimatedUSD)}/${formatUSD(limits.maxMonthlyUSDPerOwner)}${headroom(usage.ownerCommittedUSD, limits.maxMonthlyUSDPerOwner)}`;
   }
   if (overBudget(usage.orgCommittedUSD + candidate.maxEstimatedUSD, limits.maxMonthlyUSDPerOrg)) {
-    return `monthly budget for org exceeded: ${formatUSD(usage.orgCommittedUSD + candidate.maxEstimatedUSD)}/${formatUSD(limits.maxMonthlyUSDPerOrg)}`;
+    return `monthly budget for org exceeded: ${formatUSD(usage.orgCommittedUSD + candidate.maxEstimatedUSD)}/${formatUSD(limits.maxMonthlyUSDPerOrg)}${headroom(usage.orgCommittedUSD, limits.maxMonthlyUSDPerOrg)}`;
   }
   return "";
 }

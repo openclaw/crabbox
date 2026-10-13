@@ -5,7 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
-import { locales, pilotPages, localizeHTML } from "./lib/docs-i18n.mjs";
+import { locales, pilotPages, localizeHTML, readTranslation } from "./lib/docs-i18n.mjs";
 
 import { markdownToHtml, readAgentSkills } from "./build-docs-site.mjs";
 
@@ -44,7 +44,12 @@ generatedTest("translation pilot has language metadata, reciprocal alternates, r
       assert.ok(translated.includes('hreflang="x-default"'));
       assert.ok(translated.includes('href="../security.html"'), "untranslated navigation points to English");
       assert.ok(translated.includes('href="getting-started.html"'), "translated navigation stays in the locale");
-      assert.doesNotMatch(translated, /class="translation-notice"/);
+      const translation = readTranslation(
+        path.join(repoRoot, "docs/.i18n", locale, source),
+        fs.readFileSync(path.join(repoRoot, "docs", source), "utf8"),
+      );
+      assert.equal(/class="translation-notice"/.test(translated), translation.stale,
+        `${locale}/${source} should show a notice only when its source changed`);
     }
     const home = readGenerated(`${locale}/index.html`);
     assert.doesNotMatch(home, /<h1>On-demand computers/);

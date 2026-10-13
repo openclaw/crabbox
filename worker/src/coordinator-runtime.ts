@@ -203,6 +203,7 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     path[2] &&
     method === "POST" &&
     (path[3] === "heartbeat" ||
+      path[3] === "extend" ||
       path[3] === "tailscale" ||
       path[3] === "release" ||
       path[3] === "cancel-create")

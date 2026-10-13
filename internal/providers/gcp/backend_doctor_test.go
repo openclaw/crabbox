@@ -123,6 +123,7 @@ func TestGCPTouchPreservesZoneAndIdlePolicy(t *testing.T) {
 			}
 			t.Cleanup(func() { newGCPClient = old })
 			server := canonicalGCPTestServer("cbx_123456abcdef", "idle-policy")
+			server.Labels["ttl_secs"] = "7200"
 			server.Labels[tc.storedKey] = "1800"
 			before := maps.Clone(server.Labels)
 			cfg := core.Config{GCP: core.GCPConfig{Zone: "us-central1-a"}, IdleTimeout: 5 * time.Minute}

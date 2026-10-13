@@ -1721,11 +1721,14 @@ type lifecycleClock struct{ now time.Time }
 
 func (c lifecycleClock) Now() time.Time { return c.now }
 
-func lifecycleFixture(t *testing.T) (*backend, core.LeaseTarget, core.LeaseClaim) {
+func lifecycleFixture(t *testing.T, ttl ...time.Duration) (*backend, core.LeaseTarget, core.LeaseClaim) {
 	t.Helper()
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(t, runner)
 	b.cfg.IdleTimeout, b.cfg.TTL = 30*time.Minute, time.Hour
+	if len(ttl) > 0 {
+		b.cfg.TTL = ttl[0]
+	}
 	now := time.Now().UTC().Truncate(time.Second)
 	b.rt.Clock = lifecycleClock{now}
 	const id, name = "cbx_applevmlifecycle", "crabbox-lifecycle-test"
@@ -1752,7 +1755,7 @@ func lifecycleFixture(t *testing.T) (*backend, core.LeaseTarget, core.LeaseClaim
 }
 
 func TestAppleVMLifecycleHeartbeat(t *testing.T) {
-	b, lease, claim := lifecycleFixture(t)
+	b, lease, claim := lifecycleFixture(t, 90*time.Minute)
 	original := claim
 	b.cfg.IdleTimeout = time.Minute
 	override := 90 * time.Minute
@@ -1768,7 +1771,7 @@ func TestAppleVMLifecycleHeartbeat(t *testing.T) {
 		if persisted.Revision == claim.Revision || persisted.IdleTimeoutSeconds != 5400 || persisted.LastUsedAt != b.rt.Clock.Now().Format(time.RFC3339) {
 			t.Fatal("heartbeat did not commit timestamp/timeout")
 		}
-		if got.Labels["expires_at"] != core.LeaseLabelTime(b.rt.Clock.Now().Add(40*time.Minute)) {
+		if got.Labels["expires_at"] != core.LeaseLabelTime(b.rt.Clock.Now().Add(70*time.Minute)) {
 			t.Fatal("original TTL cap lost")
 		}
 		for _, key := range []string{"instance", "image", "server_type", "ssh_user", "work_root", "ssh_port"} {
@@ -1844,7 +1847,7 @@ func TestAppleVMLifecycleHeartbeatCLI(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX helper fixture; native proof is separate")
 	}
-	b, lease, _ := lifecycleFixture(t)
+	b, lease, _ := lifecycleFixture(t, 2*time.Hour)
 	root, _ := b.stateRoot()
 	data := b.rt.Exec.(*recordingRunner).responses[commandKey("helper", []string{"list", "--state-root", root})].Stdout
 	helper := filepath.Join(t.TempDir(), "helper")

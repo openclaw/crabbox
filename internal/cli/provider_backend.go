@@ -2079,6 +2079,9 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 	if err := validateControllerCoordinatorRegistrationBinding(cfg); err != nil {
 		return nil, err
 	}
+	if !ShouldUseCoordinator(cfg, provider.Spec()) {
+		cfg = clampDirectLeaseDurations(cfg)
+	}
 	backend, err := configureProviderBackend(provider, &cfg, rt)
 	if err != nil {
 		return nil, err
@@ -2121,6 +2124,9 @@ func backendCoordinator(backend Backend) *CoordinatorClient {
 }
 
 func leaseOptionsFromConfig(cfg Config) LeaseOptions {
+	if provider, err := ProviderFor(cfg.Provider); err == nil && !ShouldUseCoordinator(cfg, provider.Spec()) {
+		cfg = clampDirectLeaseDurations(cfg)
+	}
 	return LeaseOptions{
 		TargetOS:      cfg.TargetOS,
 		WindowsMode:   cfg.WindowsMode,
@@ -2283,4 +2289,28 @@ func RuntimeForProviderOperation(stderr io.Writer) Runtime {
 		stderr = io.Discard
 	}
 	return Runtime{Stdout: io.Discard, Stderr: stderr, Clock: realClock{}, Exec: execCommandRunner{}}
+}
+
+// LeaseExtensionBackend updates provider metadata under the exact lease claim.
+// File-backed guest guards are refreshed after the provider deadline is saved.
+type LeaseExtensionBackend interface {
+	ExtendLease(context.Context, LeaseExtendRequest) (LeaseExtendResult, error)
+}
+
+type LeaseExtendRequest struct {
+	Lease  LeaseTarget
+	TTL    time.Duration
+	By     time.Duration
+	Reason string
+}
+
+type LeaseExtendResult struct {
+	ID                        string `json:"id"`
+	ExpiresAt                 string `json:"expiresAt"`
+	Remaining                 string `json:"remainingLifetime"`
+	MaxLifetime               string `json:"maxLifetime"`
+	RuntimeExtension          bool   `json:"runtimeExtension"`
+	GuestExpiresAt            string `json:"guestExpiresAt,omitempty"`
+	GuestExpiryRefreshPending bool   `json:"guestExpiryRefreshPending,omitempty"`
+	Error                     string `json:"error,omitempty"`
 }

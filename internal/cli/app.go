@@ -125,6 +125,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.verify(ctx, helpArgs), true
 	case "status":
 		return a.status(ctx, helpArgs), true
+	case "extend":
+		return a.extend(ctx, helpArgs), true
 	case "heartbeat":
 		return a.heartbeat(ctx, helpArgs), true
 	case "list":
@@ -236,6 +238,7 @@ Commands:
   verify      Verify a signed run receipt
   cache       Inspect, purge, warm, or list remote cache volumes
   status      Show lease state; add --wait to block until ready
+  extend      Extend a lease within its lifetime policy
   heartbeat   Refresh a lease idle deadline and print its state
   claims      Inspect unverified local lease claims without loading providers
   list        List Crabbox machines
@@ -374,7 +377,8 @@ Environment:
   CRABBOX_ORG                  Usage org override
   CRABBOX_CONFIG               Optional config path
   CRABBOX_IDLE_TIMEOUT         Default idle expiry, e.g. 30m
-  CRABBOX_TTL                  Maximum lease lifetime, e.g. 90m
+  CRABBOX_TTL                  Lease lifetime (default 30m)
+  CRABBOX_MAX_TTL              Direct lease ceiling (default 4h, at most 24h)
   CRABBOX_AWS_REGION           Default eu-west-1
   CRABBOX_AWS_SSH_CIDRS        Comma-separated AWS SSH source CIDRs
   CRABBOX_SSH_FALLBACK_PORTS   Comma-separated SSH fallback ports, or none

@@ -135,6 +135,7 @@ type Config struct {
 	ProviderKey                   string
 	WorkRoot                      string
 	explicitWorkRoot              string
+	MaxTTL                        time.Duration
 	TTL                           time.Duration
 	IdleTimeout                   time.Duration
 	WarmupKeep                    bool
@@ -1622,7 +1623,8 @@ func baseConfig() Config {
 		SSHFallbackPorts:        []string{"22"},
 		ProviderKey:             "crabbox-steipete",
 		WorkRoot:                defaultPOSIXWorkRoot,
-		TTL:                     90 * time.Minute,
+		TTL:                     30 * time.Minute,
+		MaxTTL:                  4 * time.Hour,
 		IdleTimeout:             30 * time.Minute,
 		WarmupKeep:              true,
 		ClaimsAutoPrune:         true,
@@ -1870,6 +1872,7 @@ type fileConfig struct {
 	Presets                  map[string]filePresetConfig         `yaml:"presets,omitempty"`
 	ProofTemplates           map[string]fileProofTemplateConfig  `yaml:"proofTemplates,omitempty"`
 	Jobs                     map[string]fileJobConfig            `yaml:"jobs,omitempty"`
+	MaxTTL                   string                              `yaml:"maxTTL,omitempty"`
 	TTL                      string                              `yaml:"ttl,omitempty"`
 	IdleTimeout              string                              `yaml:"idleTimeout,omitempty"`
 	WorkRoot                 string                              `yaml:"workRoot,omitempty"`
@@ -2966,6 +2969,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		cfg.WorkRoot = file.WorkRoot
 		recordConfigInput(cfg, configInputGeneric, inputSource, true)
 		cfg.explicitWorkRoot = file.WorkRoot
+	}
+	if file.MaxTTL != "" {
+		duration, err := parseMaxTTL(file.MaxTTL)
+		if err != nil {
+			return err
+		}
+		cfg.MaxTTL = duration
 	}
 	recordConfigInput(cfg, configInputGeneric, inputSource, applyLeaseDuration(&cfg.TTL, file.TTL))
 	recordConfigInput(cfg, configInputGeneric, inputSource, applyLeaseDuration(&cfg.IdleTimeout, file.IdleTimeout))
@@ -4331,6 +4341,13 @@ func applyEnv(cfg *Config) error {
 		cfg.WorkRoot = workRoot
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
 		cfg.explicitWorkRoot = workRoot
+	}
+	if value := os.Getenv("CRABBOX_MAX_TTL"); value != "" {
+		duration, err := parseMaxTTL(value)
+		if err != nil {
+			return err
+		}
+		cfg.MaxTTL = duration
 	}
 	if ttl := os.Getenv("CRABBOX_TTL"); ttl != "" {
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, applyLeaseDuration(&cfg.TTL, ttl))
@@ -5736,4 +5753,46 @@ func TencentCloudTypeWasExplicit(cfg Config) bool {
 
 func SetTencentCloudTypeExplicit(cfg *Config) {
 	cfg.tencentCloudTypeExplicit = true
+}
+
+func parseMaxTTL(value string) (time.Duration, error) {
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 || duration > 24*time.Hour {
+		return 0, Exit(2, "maxTTL / CRABBOX_MAX_TTL must be a positive duration no greater than 24h")
+	}
+	return duration, nil
+}
+
+func EffectiveMaxTTL(cfg Config) time.Duration {
+	if cfg.MaxTTL <= 0 {
+		return 4 * time.Hour
+	}
+	return min(cfg.MaxTTL, 24*time.Hour)
+}
+
+func clampDirectLeaseDurations(cfg Config) Config {
+	cfg.MaxTTL = EffectiveMaxTTL(cfg)
+	cfg.TTL = min(cfg.TTL, cfg.MaxTTL)
+	cfg.IdleTimeout = min(cfg.IdleTimeout, cfg.TTL)
+	return cfg
+}
+
+func (a App) reportDirectLeasePolicyNotice(cfg Config) {
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil || ShouldUseCoordinator(cfg, provider.Spec()) {
+		return
+	}
+	effective := clampDirectLeaseDurations(cfg)
+	if effective.TTL != cfg.TTL || effective.IdleTimeout != cfg.IdleTimeout {
+		fmt.Fprintf(a.Stderr, "Lease policy clamped lifetime to %s and idle timeout to %s.\n", effective.TTL, effective.IdleTimeout)
+	}
+}
+
+func (a App) reportIdleTimeoutPolicyNotice(requested *time.Duration, server Server) {
+	if requested == nil {
+		return
+	}
+	if effective, ok := directLeaseIdleTimeout(server.Labels); ok && effective < *requested {
+		fmt.Fprintf(a.Stderr, "Lease policy clamped idle timeout to %s.\n", effective)
+	}
 }

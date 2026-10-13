@@ -2997,8 +2997,8 @@ func TestTouchIdleTimeoutIntent(t *testing.T) {
 		{name: "omitted preserves remote policy", stored: "300", fallback: time.Minute, want: 5 * time.Minute},
 		{name: "omitted preserves legacy policy", stored: "300", legacy: true, fallback: time.Minute, want: 5 * time.Minute},
 		{name: "missing policy uses request fallback", fallback: 2 * time.Minute, want: 2 * time.Minute},
-		{name: "explicit policy beats fallback and TTL caps expiry", stored: "300", fallback: time.Minute, override: &override, want: override},
-		{name: "explicit policy without fallback", stored: "300", override: &override, want: override},
+		{name: "explicit policy beats fallback and TTL caps idle", stored: "300", fallback: time.Minute, override: &override, want: time.Hour},
+		{name: "explicit policy without fallback", stored: "300", override: &override, want: time.Hour},
 		{name: "failed write does not publish policy", stored: "300", override: &override, writeErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

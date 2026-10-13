@@ -1977,8 +1977,8 @@ func TestNvidiaBrevCleanupPreservesActiveAndKeepClaims(t *testing.T) {
 func TestNvidiaBrevTouchRefreshesClaimBeforeCleanup(t *testing.T) {
 	state, _ := isolateNvidiaBrevState(t)
 	leaseID := "cbx_444455556666"
-	server := workspaceToServer(core.Config{}, brevWorkspace{ID: "ws-touch", Name: "crabbox-touch-444455556666", Status: "RUNNING"}, leaseID, "touch", false)
-	cfg := core.Config{Provider: providerName, IdleTimeout: time.Hour}
+	cfg := core.Config{Provider: providerName, IdleTimeout: time.Hour, TTL: 4 * time.Hour}
+	server := workspaceToServer(cfg, brevWorkspace{ID: "ws-touch", Name: "crabbox-touch-444455556666", Status: "RUNNING"}, leaseID, "touch", false)
 	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "touch", cfg, server, core.SSHTarget{Host: "203.0.113.8", Port: "22", User: "brev"}, t.TempDir(), false); err != nil {
 		t.Fatal(err)
 	}

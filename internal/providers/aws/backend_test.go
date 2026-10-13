@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"os"
@@ -66,6 +67,9 @@ func (c *fakeAWSClient) CreateServerWithFallback(_ context.Context, cfg core.Con
 	}
 	if c.created.CloudID == "" {
 		c.created = awsTestServer("i-created", leaseID, slug, "us-east-1")
+		if cfg.TTL > 0 {
+			c.created.Labels["ttl_secs"] = fmt.Sprint(int(cfg.TTL.Seconds()))
+		}
 	}
 	if c.created.Labels["provider_key"] == "" {
 		c.created.Labels["provider_key"] = cfg.ProviderKey
@@ -1286,6 +1290,7 @@ func fixedAWSTestAttempt(cfg core.Config) core.AWSLaunchAttempt {
 
 func fixedAWSTestServer(control *core.AWSFixedCreateControl, cfg core.Config, leaseID, slug string, attempt core.AWSLaunchAttempt) core.Server {
 	server := awsTestServer("i-fixed", leaseID, slug, cfg.AWSRegion)
+	server.Labels["ttl_secs"] = fmt.Sprint(int(cfg.TTL.Seconds()))
 	server.ServerType.Name = attempt.ServerType
 	server.HostID = attempt.HostID
 	server.ProviderMetadata = map[string]any{

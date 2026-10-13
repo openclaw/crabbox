@@ -223,6 +223,7 @@ func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 		Sync Run EnvAllow Actions Results Shard Profiles Presets ProofTemplates Jobs RecordLocal ClaimsAutoPrune
 	`)
 	classify("command default resolved into the explicit create request Keep field", `WarmupKeep`)
+	classify("direct lifetime ceiling resolved into the effective TTL before creation", `MaxTTL`)
 	classify("coordinator-only lifetime enrollment; direct creation rejects canary flags", `LifetimePolicy`)
 	classify("local allocation admission policy, not remote resource intent", `DirectLeases DirectLeaseAllow`)
 

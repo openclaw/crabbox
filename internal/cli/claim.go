@@ -18,15 +18,16 @@ import (
 )
 
 type leaseClaim struct {
-	RecoveryHold      *LeaseRecoveryHold        `json:"recoveryHold,omitempty"`
-	ImageEvidence     *ImageEvidence            `json:"imageEvidence,omitempty"`
-	LeaseID           string                    `json:"leaseID"`
-	Revision          string                    `json:"revision,omitempty"`
-	CheckpointCapture *CheckpointCaptureBinding `json:"checkpointCapture,omitempty"`
-	ActionsWorkspace  *ActionsWorkspaceBinding  `json:"actionsWorkspace,omitempty"`
-	Slug              string                    `json:"slug,omitempty"`
-	Provider          string                    `json:"provider,omitempty"`
-	CloudID           string                    `json:"cloudID,omitempty"`
+	PendingGuestExtension *PendingGuestExtension    `json:"pendingGuestExtension,omitempty"`
+	RecoveryHold          *LeaseRecoveryHold        `json:"recoveryHold,omitempty"`
+	ImageEvidence         *ImageEvidence            `json:"imageEvidence,omitempty"`
+	LeaseID               string                    `json:"leaseID"`
+	Revision              string                    `json:"revision,omitempty"`
+	CheckpointCapture     *CheckpointCaptureBinding `json:"checkpointCapture,omitempty"`
+	ActionsWorkspace      *ActionsWorkspaceBinding  `json:"actionsWorkspace,omitempty"`
+	Slug                  string                    `json:"slug,omitempty"`
+	Provider              string                    `json:"provider,omitempty"`
+	CloudID               string                    `json:"cloudID,omitempty"`
 	// CloudNumericID binds providers whose CloudID is a reusable resource name.
 	CloudNumericID int64 `json:"cloudNumericID,omitempty"`
 	// CloudImmutableID binds providers whose immutable identity is a string.
@@ -823,6 +824,9 @@ func updateLeaseClaimEndpointIfUnchangedActionMode(
 				if touch.idleTimeoutOverride != nil {
 					claim.IdleTimeoutSeconds = int(touch.idleTimeoutOverride.Round(time.Second) / time.Second)
 				}
+				if effective, ok := directLeaseIdleTimeout(server.Labels); ok {
+					claim.IdleTimeoutSeconds = int(effective.Round(time.Second) / time.Second)
+				}
 			}
 			return nil
 		},
@@ -919,6 +923,9 @@ func UpdateLeaseClaimTouchIfUnchanged(ctx context.Context, leaseID string, expec
 					return Exit(2, "lease %s idle timeout override must be at least one second", leaseID)
 				}
 			}
+			if effective, ok := directLeaseIdleTimeout(labels); ok {
+				claim.IdleTimeoutSeconds = int(effective.Round(time.Second) / time.Second)
+			}
 			return nil
 		},
 	})
@@ -940,6 +947,10 @@ func UpdateLeaseClaimLabelsIfUnchangedAfter(leaseID string, expected leaseClaim,
 }
 
 func cloneLeaseClaim(claim leaseClaim) leaseClaim {
+	if claim.PendingGuestExtension != nil {
+		pending := *claim.PendingGuestExtension
+		claim.PendingGuestExtension = &pending
+	}
 	if claim.RecoveryHold != nil {
 		hold := *claim.RecoveryHold
 		hold.Resources = append([]LeaseHeldResource(nil), hold.Resources...)

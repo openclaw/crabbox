@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"strings"
 	"time"
@@ -93,6 +94,7 @@ func (a App) status(ctx context.Context, args []string) error {
 			}
 			return err
 		}
+		addStatusLifetime(&state, cfg)
 		if *jsonOut {
 			if !*wait || statusWaitDone(state) {
 				if err := json.NewEncoder(a.Stdout).Encode(state); err != nil {
@@ -116,6 +118,7 @@ func (a App) status(ctx context.Context, args []string) error {
 				telemetry += fmt.Sprintf(" provisioning_phase=%q", state.ProvisioningPhase)
 			}
 			telemetry += lifetimePolicySummary(state.LifetimePolicy)
+			printStatusLifetime(a.Stdout, state)
 			fmt.Fprintf(a.Stdout, "%s slug=%s provider=%s target=%s windows_mode=%s state=%s type=%s host=%s pond=%s network=%s%s ready=%t has_host=%t idle_for=%s idle_timeout=%s expires=%s%s\n", state.ID, blank(state.Slug, "-"), state.Provider, state.TargetOS, blank(state.WindowsMode, "-"), state.State, state.ServerType, state.Host, blank(state.Pond, "-"), state.Network, tailscale, state.Ready, state.HasHost, blank(state.IdleFor, "-"), blank(state.IdleTimeout, "-"), blank(state.ExpiresAt, "-"), telemetry)
 		}
 		if *wait {
@@ -294,17 +297,20 @@ func leaseStatusStateCanBeReady(lease LeaseTarget, state string) bool {
 }
 
 type StatusView struct {
-	LifetimePolicy *LeaseLifetimePolicy `json:"lifetimePolicy,omitempty"`
-	ID             string               `json:"id"`
-	Slug           string               `json:"slug,omitempty"`
-	Provider       string               `json:"provider"`
-	TargetOS       string               `json:"target"`
-	WorkRoot       string               `json:"workroot,omitempty"`
-	WindowsMode    string               `json:"windowsMode,omitempty"`
-	State          string               `json:"state"`
-	ServerID       string               `json:"serverId"`
-	ServerType     string               `json:"serverType"`
-	ImageEvidence  *ImageEvidence       `json:"imageEvidence,omitempty"`
+	LeasePolicy       *CoordinatorLeasePolicy `json:"leasePolicy,omitempty"`
+	RemainingLifetime string                  `json:"remainingLifetime,omitempty"`
+	MaxLifetime       string                  `json:"maxLifetime,omitempty"`
+	LifetimePolicy    *LeaseLifetimePolicy    `json:"lifetimePolicy,omitempty"`
+	ID                string                  `json:"id"`
+	Slug              string                  `json:"slug,omitempty"`
+	Provider          string                  `json:"provider"`
+	TargetOS          string                  `json:"target"`
+	WorkRoot          string                  `json:"workroot,omitempty"`
+	WindowsMode       string                  `json:"windowsMode,omitempty"`
+	State             string                  `json:"state"`
+	ServerID          string                  `json:"serverId"`
+	ServerType        string                  `json:"serverType"`
+	ImageEvidence     *ImageEvidence          `json:"imageEvidence,omitempty"`
 	// ProviderResourceID optionally exposes an immutable provider resource ID.
 	// ServerID keeps each provider's existing identity semantics; for Islo it
 	// is the sandbox name rather than the immutable sandbox ID.
@@ -660,4 +666,27 @@ func formatSecondsDuration(seconds int) string {
 		return ""
 	}
 	return (time.Duration(seconds) * time.Second).String()
+}
+
+func addStatusLifetime(state *StatusView, cfg Config) {
+	if deadline, err := time.Parse(time.RFC3339, state.ExpiresAt); err == nil {
+		state.RemainingLifetime = max(time.Duration(0), time.Until(deadline)).Round(time.Second).String()
+	}
+	if state.LeasePolicy != nil {
+		state.MaxLifetime = formatSecondsDuration(state.LeasePolicy.MaxTTLSeconds)
+	} else if state.ExpiresAt != "" {
+		if provider, err := ProviderFor(state.Provider); err == nil && !ShouldUseCoordinator(cfg, provider.Spec()) {
+			state.MaxLifetime = EffectiveMaxTTL(cfg).String()
+		}
+	}
+}
+
+func printStatusLifetime(out io.Writer, state StatusView) {
+	if state.RemainingLifetime != "" {
+		fmt.Fprintf(out, "remaining_lifetime=%s max_lifetime=%s", state.RemainingLifetime, blank(state.MaxLifetime, "-"))
+		if state.LeasePolicy != nil {
+			fmt.Fprintf(out, " runtime_extension=%t", state.LeasePolicy.RuntimeExtension)
+		}
+		fmt.Fprintln(out)
+	}
 }
