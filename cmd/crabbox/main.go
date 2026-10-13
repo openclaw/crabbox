@@ -69,6 +69,12 @@ func printError(w io.Writer, err error) {
 	}
 	var printCauses func(error)
 	printCauses = func(err error) {
+		// Safe provider diagnostics may retain private typed causes for Is/As.
+		// Visit sibling failures, but never render through this display boundary.
+		if safe, ok := err.(interface{ DiagnosticMessage() string }); ok {
+			printMessage(safe.DiagnosticMessage())
+			return
+		}
 		if joined, ok := err.(interface{ Unwrap() []error }); ok {
 			causes := joined.Unwrap()
 			var exit cli.ExitError

@@ -567,6 +567,10 @@ func TestBlacksmithOneShotReconciliationPreservesCommandResult(t *testing.T) {
 				var stderr bytes.Buffer
 				stopped := false
 				keyMoved := false
+				var commandErr error
+				if command.code != 0 {
+					commandErr = fmt.Errorf("exit status %d", command.code)
+				}
 				runner := reconciliationRunner(t, func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 					switch req.Args[1] {
 					case "warmup":
@@ -574,7 +578,7 @@ func TestBlacksmithOneShotReconciliationPreservesCommandResult(t *testing.T) {
 					case "run":
 						fmt.Fprint(req.Stderr, command.output)
 						if command.code != 0 {
-							return core.LocalCommandResult{ExitCode: command.code}, fmt.Errorf("exit status %d", command.code)
+							return core.LocalCommandResult{ExitCode: command.code}, commandErr
 						}
 						return core.LocalCommandResult{}, nil
 					case "stop":
@@ -638,8 +642,18 @@ func TestBlacksmithOneShotReconciliationPreservesCommandResult(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-				} else if !errors.As(err, &exitErr) || exitErr.Code != wantCode || exitErr.Message != fmt.Sprintf("blacksmith testbox run exited %d", wantCode) {
+				} else if !errors.As(err, &exitErr) || exitErr.Code != wantCode {
 					t.Fatalf("command error changed: %v", err)
+				}
+				if commandErr != nil && !errors.Is(err, commandErr) {
+					t.Errorf("native command cause lost: %v", err)
+				}
+				// Native stderr is not a workload receipt, even when it says a test failed.
+				if command.code == 255 && !strings.Contains(err.Error(), "native exit 255; workload exit unconfirmed") {
+					t.Errorf("native exit uncertainty lost: %v", err)
+				}
+				if wantCode != 0 && result.ErrorKind != core.RunErrorProvider {
+					t.Errorf("native or cleanup failure misclassified: %+v", result)
 				}
 				if result.ExitCode != wantCode || result.LeaseID != id {
 					t.Fatalf("result=%#v", result)

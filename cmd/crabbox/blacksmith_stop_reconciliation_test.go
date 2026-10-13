@@ -347,8 +347,10 @@ printf '%s\n' '{"id":123456789,"html_url":"https://github.com/example-org/my-app
 	}
 	for _, want := range []string{
 		"FAIL: synthetic assertion mismatch",
-		"blacksmith testbox run exited 255",
+		"native exit 255; workload exit unconfirmed",
+		"blacksmith failed: exit status 255",
 		`"exitCode":255`,
+		`"errorKind":"provider-error"`,
 		"cleanup reconciled lease=" + id + " state=completed",
 	} {
 		if !strings.Contains(stderr.String(), want) {
