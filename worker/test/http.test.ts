@@ -32,6 +32,27 @@ const allowGitHubMembership = {
   githubMembership: async (): Promise<void> => {},
 };
 
+describe("coordinator health", () => {
+  it.each([undefined, { id: "version-id", tag: "commit-sha", timestamp: "2026-10-13T00:00:00Z" }])(
+    "returns public, uncached health with available version metadata: %j",
+    async (version) => {
+      const prepared = await prepareCoordinatorRequest(
+        new Request("https://example.test/v1/health"),
+        { CF_VERSION_METADATA: version } as Env,
+      );
+      if (!("response" in prepared)) throw new Error("expected direct health response");
+      expect(prepared.authenticated).toBe(false);
+      expect(prepared.response.status).toBe(200);
+      expect(prepared.response.headers.get("cache-control")).toBe("no-store");
+      expect(await prepared.response.json()).toEqual({
+        ok: true,
+        service: "crabbox-coordinator",
+        ...(version ? { version: { id: version.id, tag: version.tag } } : {}),
+      });
+    },
+  );
+});
+
 describe("coordinator auth", () => {
   it("keeps colliding org labels distinct after coordinator authentication", async () => {
     const sharedEnv = {

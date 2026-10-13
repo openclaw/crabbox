@@ -52,7 +52,19 @@ export async function prepareCoordinatorRequest(
 ): Promise<PreparedCoordinatorRequest> {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/v1/health") {
-    return { response: json({ ok: true, service: "crabbox-coordinator" }), authenticated: false };
+    return {
+      response: json(
+        {
+          ok: true,
+          service: "crabbox-coordinator",
+          ...(env.CF_VERSION_METADATA
+            ? { version: { id: env.CF_VERSION_METADATA.id, tag: env.CF_VERSION_METADATA.tag } }
+            : {}),
+        },
+        { headers: { "cache-control": "no-store" } },
+      ),
+      authenticated: false,
+    };
   }
   if (request.method === "GET" && url.pathname === "/") {
     return {

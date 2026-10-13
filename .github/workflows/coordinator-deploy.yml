@@ -12,6 +12,7 @@ on:
       - "worker/**"
       - ".github/workflows/coordinator-deploy.yml"
       - "scripts/prepare-coordinator-deploy-secrets.mjs"
+      - "scripts/verify-coordinator-deployment.mjs"
   workflow_dispatch:
     inputs:
       clearDaytonaSnapshot:
@@ -36,26 +37,19 @@ jobs:
     # to gate production deploys without changing the workflow.
     environment: coordinator
     steps:
-      # Stay green (skip, don't fail) until the deploy secret is wired, so
-      # landing this workflow doesn't red-X main before activation.
       - name: Check for deploy token
-        id: token
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           if [ -z "${CLOUDFLARE_API_TOKEN}" ]; then
-            echo "::notice::CLOUDFLARE_API_TOKEN is not set; skipping deploy. Add it to the 'coordinator' environment to activate."
-            echo "ready=false" >> "${GITHUB_OUTPUT}"
-          else
-            echo "ready=true" >> "${GITHUB_OUTPUT}"
+            echo "::error::CLOUDFLARE_API_TOKEN is not set. Add it to the 'coordinator' environment before deploying."
+            exit 1
           fi
 
       - name: Check out
-        if: steps.token.outputs.ready == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node
-        if: steps.token.outputs.ready == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -63,12 +57,10 @@ jobs:
           cache-dependency-path: worker/package-lock.json
 
       - name: Install
-        if: steps.token.outputs.ready == 'true'
         run: npm ci
         working-directory: worker
 
       - name: Deploy
-        if: steps.token.outputs.ready == 'true'
         # `npm run deploy` runs the predeploy bundle (vendor-novnc) then
         # `wrangler deploy`; a bundling failure fails the job before publishing.
         run: |
@@ -80,9 +72,9 @@ jobs:
           node ../scripts/prepare-coordinator-deploy-secrets.mjs
 
           if [ -s "${SECRETS_FILE}" ]; then
-            npm run deploy -- --secrets-file "${SECRETS_FILE}"
+            npm run deploy -- --tag "${GITHUB_SHA}" --secrets-file "${SECRETS_FILE}"
           else
-            npm run deploy
+            npm run deploy -- --tag "${GITHUB_SHA}"
           fi
 
           if [ "${CLEAR_DAYTONA_SNAPSHOT}" = "true" ]; then
@@ -99,3 +91,9 @@ jobs:
           CRABBOX_DAYTONA_SNAPSHOT: ${{ secrets.CRABBOX_DAYTONA_SNAPSHOT }}
           CRABBOX_ARTIFACTS_CREDENTIALS_JSON: ${{ secrets.CRABBOX_ARTIFACTS_CREDENTIALS_JSON }}
           CLEAR_DAYTONA_SNAPSHOT: ${{ inputs.clearDaytonaSnapshot }}
+
+      - name: Verify deployed coordinator
+        run: node scripts/verify-coordinator-deployment.mjs
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: "91b59577e757131d68d55a471fe32aca"

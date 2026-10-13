@@ -309,6 +309,17 @@ cutover.
 
 ### Cloudflare Worker
 
+The `Deploy Coordinator` workflow deploys matching `main` changes and can also
+run manually. A missing `coordinator` environment API token fails the job.
+Each upload is tagged with the full commit SHA. After all deployment steps,
+verification requires one Cloudflare version receiving 100% of traffic and
+an uncached public `/v1/health` response with that version ID and SHA tag.
+The deployment must remain unchanged across the check. A gradual rollout,
+stale route, unavailable API, or missing version metadata fails visibly.
+Verification only reads deployment metadata and health; it creates no lease.
+If manually clearing the Daytona snapshot creates a new untagged version,
+verification fails too; inspect the final version before rerunning the deploy.
+
 Worker source lives in `worker/`. Run the gate, then deploy:
 
 ```sh

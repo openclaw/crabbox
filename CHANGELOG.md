@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixes
+
+- Coordinator deployments fail when credentials are missing or the public health endpoint does not confirm the active version and requested commit.
+
 ### Added
 
 - Serve agents advertise LAN and tailnet front-door candidates, with pinned-key LAN-first client selection and per-lease route caching.
