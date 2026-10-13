@@ -33,6 +33,7 @@ type coordinatorControlMessage struct {
 	ExpectedProvider   string                `json:"expectedProvider,omitempty"`
 	OK                 bool                  `json:"ok,omitempty"`
 	ExpiresAt          string                `json:"expiresAt,omitempty"`
+	PolicyNotice       string                `json:"policyNotice,omitempty"`
 	Code               string                `json:"code,omitempty"`
 	Message            string                `json:"message,omitempty"`
 	Error              string                `json:"error,omitempty"`
@@ -206,7 +207,7 @@ func coordinatorRunDone(ctx context.Context, coord *CoordinatorClient, runID str
 	return run.State != "running", nil
 }
 
-func (c *coordinatorControlConn) heartbeat(ctx context.Context, leaseID, expectedProvider string, idleTimeout *time.Duration, telemetry *LeaseTelemetry, extendWhileRunning ...bool) error {
+func (c *coordinatorControlConn) heartbeat(ctx context.Context, leaseID, expectedProvider string, idleTimeout *time.Duration, telemetry *LeaseTelemetry, extendWhileRunning ...bool) (string, error) {
 	payload := coordinatorControlMessage{
 		ExtendWhileRunning: len(extendWhileRunning) > 0 && extendWhileRunning[0],
 		Type:               "heartbeat",
@@ -218,22 +219,22 @@ func (c *coordinatorControlConn) heartbeat(ctx context.Context, leaseID, expecte
 		payload.IdleTimeoutSeconds = int(idleTimeout.Seconds())
 	}
 	if err := c.write(ctx, payload); err != nil {
-		return err
+		return "", err
 	}
 	for {
 		msg, err := c.read(ctx)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if msg.Type != "heartbeat" {
 			continue
 		}
 		if !msg.OK {
 			if msg.Error != "" {
-				return fmt.Errorf("control heartbeat failed: %s", msg.Error)
+				return "", fmt.Errorf("control heartbeat failed: %s", msg.Error)
 			}
-			return fmt.Errorf("control heartbeat failed")
+			return "", fmt.Errorf("control heartbeat failed")
 		}
-		return nil
+		return msg.PolicyNotice, nil
 	}
 }

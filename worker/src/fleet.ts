@@ -538,7 +538,9 @@ import {
   costLimits,
   createCostLimitUsage,
   enforceCostLimitUsage,
+  enforceBudgetLimitUsage,
   leaseCost,
+  leaseExtensionReservationUSD,
   requestOrg,
   createUsageSummary,
   type CostLimitUsage,
@@ -1190,7 +1192,7 @@ type ControlMessage =
   | { type: "ping" };
 
 type ControlHeartbeatResult =
-  | { leaseID: string; ok: true; expiresAt: string }
+  | { leaseID: string; ok: true; expiresAt: string; policyNotice?: string }
   | { leaseID: string; ok: false; error: string };
 
 interface WebVNCEvent {
@@ -2998,7 +3000,12 @@ export class FleetCoordinator {
         return { leaseID: lease.id, ok: false, error: heartbeatError };
       }
       const updated = await this.applyLeaseHeartbeatState(lease, heartbeat);
-      return { leaseID: lease.id, ok: true, expiresAt: updated.expiresAt };
+      return {
+        leaseID: lease.id,
+        ok: true,
+        expiresAt: updated.expiresAt,
+        ...(updated.policyNotice ? { policyNotice: updated.policyNotice } : {}),
+      };
     });
     sendControl(socket, { type: "heartbeat", ...result });
   }
@@ -8412,7 +8419,10 @@ export class FleetCoordinator {
       managedProvider === "aws" && !committed.network?.awsPrivate
         ? await this.awsIngressOperationLock.run(refresh)
         : await refresh();
-    return json({ lease: this.leaseForRequest(lease, request, isAdminRequest(request)) });
+    const visible = { ...lease };
+    delete visible.policyNotice;
+    if (committed.policyNotice) visible.policyNotice = committed.policyNotice;
+    return json({ lease: this.leaseForRequest(visible, request, isAdminRequest(request)) });
   }
 
   private async refreshLeaseAccessForResolution(lease: LeaseRecord): Promise<LeaseRecord> {
@@ -8450,7 +8460,7 @@ export class FleetCoordinator {
   }
 
   private async applyLeaseHeartbeatState(
-    lease: LeaseRecord,
+    snapshot: LeaseRecord,
     input: {
       creationEvents?: unknown;
       extendWhileRunning?: boolean;
@@ -8458,52 +8468,76 @@ export class FleetCoordinator {
       telemetry?: Partial<LeaseTelemetry>;
     },
   ): Promise<LeaseRecord> {
-    const now = new Date();
-    const policy = this.currentLeasePolicy(lease);
-    lease.idleTimeoutSeconds = Math.min(
-      leaseIdleTimeoutSeconds(lease, policy.maxTTLSeconds),
-      leaseTTLSeconds(lease, policy.maxTTLSeconds),
-      policy.maxTTLSeconds,
-    );
-    if (
-      input.extendWhileRunning === true &&
-      policy.runtimeExtension &&
-      policy.extension === "allow" &&
-      policy.autoExtend === "allow" &&
-      Date.parse(lease.createdAt) +
-        leaseTTLSeconds(lease, policy.maxTTLSeconds) * 1000 -
-        now.getTime() <
-        600_000
-    ) {
-      lease.ttlSeconds = Math.min(
-        leaseTTLSeconds(lease, policy.maxTTLSeconds) + 1800,
+    const committed = await this.state.storage.transaction(async (storage) => {
+      const lease = await this.getLeaseFrom(storage, snapshot.id);
+      if (!lease) throw new Error("Lease disappeared during heartbeat");
+      const now = new Date();
+      let budgetError = "";
+      const policy = this.currentLeasePolicy(lease);
+      lease.idleTimeoutSeconds = Math.min(
+        leaseIdleTimeoutSeconds(lease, policy.maxTTLSeconds),
+        leaseTTLSeconds(lease, policy.maxTTLSeconds),
         policy.maxTTLSeconds,
       );
-    }
-    mergeClientCreationEvents(lease, input.creationEvents, now.getTime());
-    const requestedIdleTimeoutSeconds = input.idleTimeoutSeconds;
-    if (
-      Number.isFinite(requestedIdleTimeoutSeconds) &&
-      requestedIdleTimeoutSeconds !== undefined &&
-      requestedIdleTimeoutSeconds > 0
-    ) {
-      lease.idleTimeoutSeconds = clampLeaseSeconds(
-        requestedIdleTimeoutSeconds,
-        Math.min(leaseTTLSeconds(lease, policy.maxTTLSeconds), policy.maxTTLSeconds),
-      );
-    }
-    const telemetry = sanitizeLeaseTelemetry(input.telemetry, now);
-    if (telemetry) {
-      lease.telemetry = telemetry;
-      lease.telemetryHistory = appendLeaseTelemetryHistory(lease.telemetryHistory, telemetry);
-    }
-    lease.updatedAt = now.toISOString();
-    lease.lastTouchedAt = now.toISOString();
-    lease.expiresAt = recomputeLeaseExpiresAt(lease, now, policy.maxTTLSeconds).toISOString();
-    clearLeaseCleanupMetadata(lease);
-    await this.putLease(lease);
+      if (
+        input.extendWhileRunning === true &&
+        policy.runtimeExtension &&
+        policy.extension === "allow" &&
+        policy.autoExtend === "allow" &&
+        Date.parse(lease.createdAt) +
+          leaseTTLSeconds(lease, policy.maxTTLSeconds) * 1000 -
+          now.getTime() <
+          600_000
+      ) {
+        const toTTL = Math.min(
+          leaseTTLSeconds(lease, policy.maxTTLSeconds) + 1800,
+          policy.maxTTLSeconds,
+        );
+        if (toTTL > leaseTTLSeconds(lease, policy.maxTTLSeconds))
+          budgetError = await this.admitLeaseExtension(storage, lease, toTTL, now);
+      }
+      mergeClientCreationEvents(lease, input.creationEvents, now.getTime());
+      const requestedIdleTimeoutSeconds = input.idleTimeoutSeconds;
+      if (
+        Number.isFinite(requestedIdleTimeoutSeconds) &&
+        requestedIdleTimeoutSeconds !== undefined &&
+        requestedIdleTimeoutSeconds > 0
+      ) {
+        lease.idleTimeoutSeconds = clampLeaseSeconds(
+          requestedIdleTimeoutSeconds,
+          Math.min(leaseTTLSeconds(lease, policy.maxTTLSeconds), policy.maxTTLSeconds),
+        );
+      }
+      const telemetry = sanitizeLeaseTelemetry(input.telemetry, now);
+      if (telemetry) {
+        lease.telemetry = telemetry;
+        lease.telemetryHistory = appendLeaseTelemetryHistory(lease.telemetryHistory, telemetry);
+      }
+      lease.updatedAt = now.toISOString();
+      lease.lastTouchedAt = now.toISOString();
+      lease.expiresAt = recomputeLeaseExpiresAt(lease, now, policy.maxTTLSeconds).toISOString();
+      clearLeaseCleanupMetadata(lease);
+      await putLeaseRecord(storage, this.applyCurrentLeasePolicy(lease));
+      return { lease, budgetError };
+    });
+    const { lease, budgetError } = committed;
     await this.armAlarmNoLaterThan(nextLeaseAlarmTime(lease, this.coordinatorGeneration));
-    return lease;
+    // Creation notices were already delivered; a heartbeat reports only its own notice.
+    if (!budgetError) {
+      const visible = { ...lease };
+      delete visible.policyNotice;
+      return visible;
+    }
+    const policyNotice = `Lease will expire at ${lease.expiresAt}; budget exhausted (${budgetError}).`;
+    console.warn(
+      JSON.stringify({
+        event: "lease_auto_extension_budget_exceeded",
+        leaseID: lease.id,
+        expiresAt: lease.expiresAt,
+        message: budgetError,
+      }),
+    );
+    return { ...lease, policyNotice };
   }
 
   private async prepareTailscaleConfig(
@@ -19689,12 +19723,55 @@ export class FleetCoordinator {
   private applyCurrentLeasePolicy(lease: LeaseRecord): LeaseRecord {
     const policy = this.currentLeasePolicy(lease);
     if (leaseIsLive(lease)) {
-      const maxExpiry =
-        Date.parse(lease.createdAt) + leaseTTLSeconds(lease, policy.maxTTLSeconds) * 1000;
+      const anchor = isRegisteredLease(lease)
+        ? (lease.lastTouchedAt ?? lease.createdAt)
+        : lease.createdAt;
+      const maxExpiry = Date.parse(anchor) + leaseTTLSeconds(lease, policy.maxTTLSeconds) * 1000;
       if (Number.isFinite(maxExpiry))
         lease.expiresAt = new Date(Math.min(Date.parse(lease.expiresAt), maxExpiry)).toISOString();
     }
     return lease;
+  }
+
+  private async admitLeaseExtension(
+    storage: CoordinatorStorageView,
+    lease: LeaseRecord,
+    ttlSeconds: number,
+    now: Date,
+  ): Promise<string> {
+    const access = await this.readProviderAccessRecords(now.getTime(), storage);
+    const reservation = access.find((record) => record.id === lease.id);
+    const existingReservationUSD = Math.max(
+      lease.maxEstimatedUSD,
+      reservation?.maxEstimatedUSD ?? 0,
+    );
+    const candidate = {
+      ...lease,
+      ttlSeconds,
+      maxEstimatedUSD: leaseExtensionReservationUSD(
+        { ...lease, maxEstimatedUSD: existingReservationUSD },
+        ttlSeconds,
+      ),
+    };
+    // Replace this lease's reservation in admission rather than charging it twice.
+    const admission = await this.mergedLeaseAdmissionState(lease, now, access, lease.id, storage);
+    const error = enforceBudgetLimitUsage(
+      admission.costUsage,
+      candidate,
+      costLimits(this.env),
+      existingReservationUSD,
+    );
+    if (error) return error;
+    lease.ttlSeconds = ttlSeconds;
+    lease.maxEstimatedUSD = candidate.maxEstimatedUSD;
+    if (reservation) {
+      await storage.put(providerAccessKey(lease.id), {
+        ...reservation,
+        ttlSeconds,
+        maxEstimatedUSD: candidate.maxEstimatedUSD,
+      });
+    }
+    return "";
   }
 
   private async extendLease(request: Request, leaseID: string): Promise<Response> {
@@ -19721,58 +19798,69 @@ export class FleetCoordinator {
       return json({ error: "invalid_extension" }, { status: 400 });
     return this.state.runExclusive(async () => {
       const admin = isAdminRequest(request);
-      const lease = await this.resolveLease(leaseID, request, admin);
-      if (!lease) return notFound();
-      // Sharing manage access is not authority to extend another owner's lifetime.
-      if (
-        !admin &&
-        (lease.owner !== requestOwner(request) ||
-          !sameOrgIdentityKey(lease.org, requestOrg(request, this.env)))
-      )
-        return json({ error: "forbidden" }, { status: 403 });
-      const providerError = mutationExpectedProviderError(body.expectedProvider, lease);
-      if (providerError) return providerError;
-      if (
-        lease.state !== "active" ||
-        lease.cleanupStartedAt ||
-        Date.parse(lease.expiresAt) <= Date.now()
-      )
-        return json({ error: "lease_not_active" }, { status: 409 });
-      const policy = this.currentLeasePolicy(lease);
-      if (!policy.runtimeExtension)
-        return json(
-          {
-            error: "lease_extension_unsupported_provider",
-            message: `Lease extension is not supported for provider ${lease.provider}; request a longer --ttl at creation.`,
-          },
-          { status: 409 },
+      const resolved = await this.resolveLease(leaseID, request, admin);
+      if (!resolved) return notFound();
+      const committed = await this.state.storage.transaction(async (storage) => {
+        const lease = await this.getLeaseFrom(storage, resolved.id);
+        if (!lease) return notFound();
+        // Sharing manage access is not authority to extend another owner's lifetime.
+        if (
+          !admin &&
+          (lease.owner !== requestOwner(request) ||
+            !sameOrgIdentityKey(lease.org, requestOrg(request, this.env)))
+        )
+          return json({ error: "forbidden" }, { status: 403 });
+        const providerError = mutationExpectedProviderError(body.expectedProvider, lease);
+        if (providerError) return providerError;
+        if (
+          lease.state !== "active" ||
+          lease.cleanupStartedAt ||
+          Date.parse(lease.expiresAt) <= Date.now()
+        )
+          return json({ error: "lease_not_active" }, { status: 409 });
+        const policy = this.currentLeasePolicy(lease);
+        if (!policy.runtimeExtension)
+          return json(
+            {
+              error: "lease_extension_unsupported_provider",
+              message: `Lease extension is not supported for provider ${lease.provider}; request a longer --ttl at creation.`,
+            },
+            { status: 409 },
+          );
+        if (policy.extension === "deny")
+          return json({ error: "lease_extension_denied" }, { status: 403 });
+        const fromTTL = leaseTTLSeconds(lease, policy.maxTTLSeconds);
+        const toTTL = Math.min(
+          typeof ttl === "number" ? ttl : fromTTL + (by as number),
+          policy.maxTTLSeconds,
         );
-      if (policy.extension === "deny")
-        return json({ error: "lease_extension_denied" }, { status: 403 });
-      const fromTTL = leaseTTLSeconds(lease, policy.maxTTLSeconds);
-      const toTTL = Math.min(
-        typeof ttl === "number" ? ttl : fromTTL + (by as number),
-        policy.maxTTLSeconds,
-      );
-      if (toTTL <= fromTTL)
-        return json({ error: "lease_extension_not_advancing" }, { status: 409 });
-      const now = new Date();
-      lease.ttlSeconds = toTTL;
-      lease.updatedAt = now.toISOString();
-      lease.extensionHistory = [
-        ...(lease.extensionHistory ?? []),
-        {
-          at: now.toISOString(),
-          actor: requestOwner(request),
-          fromTTL,
-          toTTL,
-          ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
-        },
-      ].slice(-10);
-      lease.expiresAt = recomputeLeaseExpiresAt(lease, now, policy.maxTTLSeconds).toISOString();
-      await this.putLease(lease);
-      await this.armAlarmNoLaterThan(nextLeaseAlarmTime(lease, this.coordinatorGeneration));
-      return json({ lease: this.leaseForRequest(lease, request, admin) });
+        if (toTTL <= fromTTL)
+          return json({ error: "lease_extension_not_advancing" }, { status: 409 });
+        const now = new Date();
+        const budgetError = await this.admitLeaseExtension(storage, lease, toTTL, now);
+        if (budgetError)
+          return json(
+            { error: "lease_extension_budget_exceeded", message: budgetError },
+            { status: 403 },
+          );
+        lease.updatedAt = now.toISOString();
+        lease.extensionHistory = [
+          ...(lease.extensionHistory ?? []),
+          {
+            at: now.toISOString(),
+            actor: requestOwner(request),
+            fromTTL,
+            toTTL,
+            ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
+          },
+        ].slice(-10);
+        lease.expiresAt = recomputeLeaseExpiresAt(lease, now, policy.maxTTLSeconds).toISOString();
+        await putLeaseRecord(storage, this.applyCurrentLeasePolicy(lease));
+        return lease;
+      });
+      if (committed instanceof Response) return committed;
+      await this.armAlarmNoLaterThan(nextLeaseAlarmTime(committed, this.coordinatorGeneration));
+      return json({ lease: this.leaseForRequest(committed, request, admin) });
     });
   }
 

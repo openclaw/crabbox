@@ -1528,6 +1528,37 @@ func TestUpdateLeaseClaimTouchIfUnchangedActionCommitsAtomically(t *testing.T) {
 	}
 }
 
+func TestLeaseClaimTouchPersistsEffectiveIdleTimeout(t *testing.T) {
+	for _, atomicAction := range []bool{false, true} {
+		t.Run(fmt.Sprint(atomicAction), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const id = "cbx_clamped_idle"
+			server := Server{Provider: "aws", CloudID: "i-test", Labels: map[string]string{"provider": "aws"}}
+			if err := ClaimLeaseTargetForRepoConfig(id, "test", Config{Provider: "aws"}, server, SSHTarget{}, "/repo", 30*time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			claim, err := ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requested := 90 * time.Minute
+			server.Labels = map[string]string{"provider": "aws", "idle_timeout_secs": "1800", "ttl_secs": "1800"}
+			if atomicAction {
+				claim, _, _, err = UpdateLeaseClaimTouchIfUnchangedAction(t.Context(), id, claim, time.Now(), &requested, func() (Server, SSHTarget, bool, error) { return server, SSHTarget{}, true, nil })
+			} else {
+				claim, err = UpdateLeaseClaimTouchIfUnchanged(t.Context(), id, claim, server.Labels, time.Now(), &requested)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			persisted, err := ReadLeaseClaim(id)
+			if err != nil || claim.IdleTimeoutSeconds != 1800 || persisted.IdleTimeoutSeconds != 1800 {
+				t.Fatalf("effective idle timeout lost: claim=%d persisted=%d err=%v", claim.IdleTimeoutSeconds, persisted.IdleTimeoutSeconds, err)
+			}
+		})
+	}
+}
+
 func TestUpdateLeaseClaimTouchIfUnchangedActionFailsClosed(t *testing.T) {
 	tests := []struct {
 		name     string

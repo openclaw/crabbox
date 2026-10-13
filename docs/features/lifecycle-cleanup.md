@@ -178,6 +178,11 @@ include `leasePolicy` and a `policyNotice` when clamped; the CLI prints that not
 once on stderr. Workspace defaults follow the same policy; the provisioning
 minimum is 1800 seconds and matches the global default.
 
+Direct allocation commands also print a policy notice when configuration is
+clamped. Explicit heartbeat and run idle-timeout overrides report the effective
+timeout when it is shortened to fit the lease; the local claim records that
+effective timeout alongside the provider labels.
+
 Policy tightening also applies to live leases on reads, heartbeats, and the
 existing indexed alarm/expiry pass. **Active leases older than 4h expire at the
 next alarm after deploy** with the defaults. Heartbeats at or after expiry cannot
@@ -190,6 +195,18 @@ owner or an authenticated admin can extend. The coordinator caps the result,
 refuses ended or non-advancing leases, and records the last ten explicit
 extensions with timestamp, actor, old/new TTL, and reason. Extension changes total
 lifetime; it does not refresh the idle clock.
+
+Explicit and automatic extensions pass the same budget checks as creation, using
+the lease's recorded hourly estimate and the same cost rounding. The existing
+reservation is replaced atomically with the new TTL, so only additional cost is
+charged. An over-budget explicit request returns 403
+`lease_extension_budget_exceeded` with remaining headroom and changes nothing.
+An over-budget command heartbeat still refreshes activity but skips extension,
+returns a `policyNotice` with the expiry, and emits one structured log line. The
+CLI prints the notice once during the run. No partial extension is applied.
+Policy tightening can shorten expiry but does not release reserved cost.
+Registered external resources keep their renewable registration clock: their
+policy ceiling counts from the last heartbeat rather than resource creation.
 
 The provider lifetime capability `runtimeExtension` reports whether a native
 deadline can move after allocation. AWS, Azure, GCP, Hetzner, and served containers

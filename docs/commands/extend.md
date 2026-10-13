@@ -21,6 +21,12 @@ leases return 409 `lease_not_active`; a request that cannot increase total
 lifetime after clamping returns 409 `lease_extension_not_advancing`. Invalid
 bodies return 400. The API retains only the last ten explicit extension events.
 
+Extensions also require fleet, owner, and organization budget headroom, including
+admin requests. The coordinator reserves the extra cost at the lease's recorded
+hourly estimate in the same transaction as the new TTL. Insufficient headroom
+returns 403 `lease_extension_budget_exceeded`, reports the remaining headroom,
+and leaves the lease unchanged. Partial extensions are never applied.
+
 Providers with `leasePolicy.runtimeExtension: false`, including brokered Daytona,
 return 409 `lease_extension_unsupported_provider`. Request a longer `--ttl` when
 creating those leases. Their command heartbeats silently skip auto-extension.

@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"nhooyr.io/websocket"
 )
 
 func TestLeaseTTLDefaultsAndMax(t *testing.T) {
@@ -35,6 +37,45 @@ func TestLeaseTTLDefaultsAndMax(t *testing.T) {
 	cfg = clampDirectLeaseDurations(cfg)
 	if cfg.TTL != 2*time.Hour {
 		t.Fatalf("direct TTL=%s", cfg.TTL)
+	}
+}
+
+func TestDirectLeasePolicyNotices(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		ttl, idle   time.Duration
+		coordinator bool
+		want        string
+	}{
+		{name: "unchanged", ttl: time.Hour, idle: 30 * time.Minute},
+		{name: "idle clamp", ttl: 30 * time.Minute, idle: time.Hour, want: "Lease policy clamped lifetime to 30m0s and idle timeout to 30m0s.\n"},
+		{name: "maximum clamp", ttl: 24 * time.Hour, idle: 5 * time.Hour, want: "Lease policy clamped lifetime to 4h0m0s and idle timeout to 4h0m0s.\n"},
+		{name: "broker reports its own policy", ttl: 24 * time.Hour, idle: 5 * time.Hour, coordinator: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.Provider, cfg.TTL, cfg.IdleTimeout = "aws", tc.ttl, tc.idle
+			cfg.Coordinator = ""
+			if tc.coordinator {
+				cfg.Coordinator = "https://broker.example.test"
+			}
+			var stderr bytes.Buffer
+			(App{Stderr: &stderr}).reportDirectLeasePolicyNotice(cfg)
+			if stderr.String() != tc.want {
+				t.Fatalf("notice=%q want=%q", stderr.String(), tc.want)
+			}
+		})
+	}
+	var stderr bytes.Buffer
+	app := App{Stderr: &stderr}
+	requested := time.Hour
+	server := Server{Labels: map[string]string{"idle_timeout_secs": "1800"}}
+	app.reportIdleTimeoutPolicyNotice(&requested, server)
+	app.reportIdleTimeoutPolicyNotice(nil, server)
+	requested = 30 * time.Minute
+	app.reportIdleTimeoutPolicyNotice(&requested, server)
+	if stderr.String() != "Lease policy clamped idle timeout to 30m0s.\n" {
+		t.Fatalf("heartbeat notice=%q", stderr.String())
 	}
 }
 
@@ -175,5 +216,61 @@ func TestLeasePolicyNoticePrintedOnce(t *testing.T) {
 	}
 	if strings.Count(stderr.String(), notice) != 1 {
 		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestRunHeartbeatBudgetNotice(t *testing.T) {
+	const notice = "Lease will expire at 2026-10-13T12:30:00Z; budget exhausted."
+	for _, transport := range []string{"control", "http"} {
+		t.Run(transport, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/control" {
+					if transport == "http" {
+						http.NotFound(w, r)
+						return
+					}
+					conn, err := websocket.Accept(w, r, nil)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					defer conn.CloseNow()
+					if _, _, err := conn.Read(r.Context()); err != nil {
+						t.Error(err)
+						return
+					}
+					data, _ := json.Marshal(coordinatorControlMessage{Type: "heartbeat", OK: true, PolicyNotice: notice})
+					_ = conn.Write(r.Context(), websocket.MessageText, data)
+					_, _, _ = conn.Read(r.Context())
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: "cbx_123", Provider: "aws", PolicyNotice: notice}})
+			}))
+			defer server.Close()
+			messages := make(chan string, 2)
+			client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
+			stop, err := startCoordinatorHeartbeat(t.Context(), &client, "cbx_123", "aws", time.Minute, nil, nil, heartbeatWarningWriter{messages}, func() bool { return true })
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stop()
+			select {
+			case got := <-messages:
+				if got != notice+"\n" {
+					t.Fatalf("notice=%q", got)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("missing budget exhaustion notice")
+			}
+		})
+	}
+	var stderr bytes.Buffer
+	printNotice := leasePolicyNoticePrinter(&stderr)
+	printNotice("")
+	printNotice(notice)
+	printNotice(notice)
+	printNotice(notice + " Updated headroom.")
+	if stderr.String() != notice+"\n" {
+		t.Fatalf("repeated notice: %q", stderr.String())
 	}
 }

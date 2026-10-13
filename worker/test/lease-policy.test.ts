@@ -7,8 +7,24 @@ import {
   resolveLeasePolicy,
 } from "../src/config";
 import { MISSING_ORG_KEY, orgKeyForLabel } from "../src/org-identity";
+import { leaseCost, leaseExtensionReservationUSD } from "../src/usage";
 
 describe("lease lifetime policy", () => {
+  it.each([0, 0.08, 1.13, 9])(
+    "uses create-time reservation rounding at hourly rate %s",
+    (hourlyUSD) => {
+      for (const ttl of [1800, 3600, 7199]) {
+        const created =
+          hourlyUSD === 0 ? 0 : leaseCost({}, "hetzner", "custom", ttl, hourlyUSD).maxUSD;
+        expect(
+          leaseExtensionReservationUSD({ estimatedHourlyUSD: hourlyUSD, maxEstimatedUSD: 0 }, ttl),
+        ).toBe(created);
+      }
+      expect(
+        leaseExtensionReservationUSD({ estimatedHourlyUSD: hourlyUSD, maxEstimatedUSD: 100 }, 1800),
+      ).toBe(100);
+    },
+  );
   it("defaults to 30 minutes with a four-hour ceiling", () => {
     expect(resolveLeasePolicy({})).toEqual({
       defaultTTLSeconds: 1800,

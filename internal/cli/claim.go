@@ -823,6 +823,9 @@ func updateLeaseClaimEndpointIfUnchangedActionMode(
 				if touch.idleTimeoutOverride != nil {
 					claim.IdleTimeoutSeconds = int(touch.idleTimeoutOverride.Round(time.Second) / time.Second)
 				}
+				if effective, ok := directLeaseIdleTimeout(server.Labels); ok {
+					claim.IdleTimeoutSeconds = int(effective.Round(time.Second) / time.Second)
+				}
 			}
 			return nil
 		},
@@ -918,6 +921,9 @@ func UpdateLeaseClaimTouchIfUnchanged(ctx context.Context, leaseID string, expec
 				if claim.IdleTimeoutSeconds <= 0 {
 					return Exit(2, "lease %s idle timeout override must be at least one second", leaseID)
 				}
+			}
+			if effective, ok := directLeaseIdleTimeout(labels); ok {
+				claim.IdleTimeoutSeconds = int(effective.Round(time.Second) / time.Second)
 			}
 			return nil
 		},

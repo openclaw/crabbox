@@ -10,6 +10,9 @@
 - Direct cleanup now expires `keep=true` leases and reduces running/provisioning expiry grace from 12 hours to 1 hour; unowned machines remain untouched.
 - Direct leases: preserve provider user-data limits with compressed Tencent Cloud bootstrap, retain renewed leases during cleanup, and normalize Sealos ownership labels. [PR 2806](https://github.com/openclaw/crabbox/pull/2806).
 - Default lease lifetime to 30 minutes with a 4-hour maximum and coordinator global, organization, and owner lifetime policies that also clamp live leases.
+- Direct lease allocations and explicit idle-timeout updates report policy clamps and persist the effective timeout consistently. ([#2804](https://github.com/openclaw/crabbox/pull/2804))
+- Lease extensions atomically reserve their additional cost against fleet, owner, and organization budgets; running commands report when exhausted budgets prevent extension. ([#2804](https://github.com/openclaw/crabbox/pull/2804))
+- Registered external leases retain their renewable heartbeat deadline when lifetime policy is tightened. ([#2804](https://github.com/openclaw/crabbox/pull/2804))
 
 ### Added
 

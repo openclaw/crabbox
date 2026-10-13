@@ -5776,3 +5776,23 @@ func clampDirectLeaseDurations(cfg Config) Config {
 	cfg.IdleTimeout = min(cfg.IdleTimeout, cfg.TTL)
 	return cfg
 }
+
+func (a App) reportDirectLeasePolicyNotice(cfg Config) {
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil || ShouldUseCoordinator(cfg, provider.Spec()) {
+		return
+	}
+	effective := clampDirectLeaseDurations(cfg)
+	if effective.TTL != cfg.TTL || effective.IdleTimeout != cfg.IdleTimeout {
+		fmt.Fprintf(a.Stderr, "Lease policy clamped lifetime to %s and idle timeout to %s.\n", effective.TTL, effective.IdleTimeout)
+	}
+}
+
+func (a App) reportIdleTimeoutPolicyNotice(requested *time.Duration, server Server) {
+	if requested == nil {
+		return
+	}
+	if effective, ok := directLeaseIdleTimeout(server.Labels); ok && effective < *requested {
+		fmt.Fprintf(a.Stderr, "Lease policy clamped idle timeout to %s.\n", effective)
+	}
+}
