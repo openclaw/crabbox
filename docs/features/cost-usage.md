@@ -128,8 +128,8 @@ usage summary's active count uses the same definition.
 
 The deployed and preview coordinator configuration sets the fleet-wide, per-org,
 and capacity-admin active-lease caps to 50. The ordinary per-owner cap is 10.
-Monthly committed-USD budgets remain $50,000 fleet-wide, $25,000 per owner, and
-$50,000 per org.
+Monthly committed-USD budgets are $100,000 fleet-wide, $50,000 per owner, and
+$100,000 per org.
 
 Active-lease checks run in fleet → owner → org order, before monthly budgets.
 The capacity response's `admissible` and `blockedBy` use that same order, with

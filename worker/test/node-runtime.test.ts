@@ -330,30 +330,33 @@ describe("NodeCoordinatorRuntime", () => {
     expect(terminal).not.toContain("!workspace.sshHostKeySha256");
   });
 
-  it("lets code-agent replies bypass the lifecycle queue", async () => {
-    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
-    const socket = Object.assign(new EventEmitter(), {
-      close: vi.fn<(code?: number, reason?: string) => void>(),
-      terminate: vi.fn<() => void>(),
-    });
-    const operationRunner = vi.fn<OperationRunner>(
-      async <T>(_callback: () => Promise<T>): Promise<T> => await new Promise<T>(() => {}),
-    );
-    const message = vi.fn<() => Promise<void>>(async () => {});
-    runtime.setOperationRunner(operationRunner);
+  it.each(["code-agent", "serve-relay"])(
+    "lets %s replies bypass the lifecycle queue",
+    async (kind) => {
+      const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+      const socket = Object.assign(new EventEmitter(), {
+        close: vi.fn<(code?: number, reason?: string) => void>(),
+        terminate: vi.fn<() => void>(),
+      });
+      const operationRunner = vi.fn<OperationRunner>(
+        async <T>(_callback: () => Promise<T>): Promise<T> => await new Promise<T>(() => {}),
+      );
+      const message = vi.fn<() => Promise<void>>(async () => {});
+      runtime.setOperationRunner(operationRunner);
 
-    runtime.acceptWebSocket(socket as unknown as WebSocket, { kind: "code-agent" }, [], {
-      message,
-      close: vi.fn<(code: number, reason: string) => void>(),
-      error: vi.fn<() => void>(),
-    });
-    socket.emit("message", Buffer.from("{}"), false);
+      runtime.acceptWebSocket(socket as unknown as WebSocket, { kind }, [], {
+        message,
+        close: vi.fn<(code: number, reason: string) => void>(),
+        error: vi.fn<() => void>(),
+      });
+      socket.emit("message", Buffer.from("{}"), false);
 
-    await vi.waitFor(() => {
-      expect(message).toHaveBeenCalledOnce();
-    });
-    expect(operationRunner).not.toHaveBeenCalled();
-  });
+      await vi.waitFor(() => {
+        expect(message).toHaveBeenCalledOnce();
+      });
+      expect(operationRunner).not.toHaveBeenCalled();
+    },
+  );
 
   it("lets runtime-adapter replies bypass the lifecycle queue", async () => {
     const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
@@ -422,7 +425,7 @@ describe("NodeCoordinatorRuntime", () => {
     },
   );
 
-  it.each(["code-agent", "runtime-adapter-agent"])(
+  it.each(["code-agent", "runtime-adapter-agent", "serve-relay"])(
     "keeps %s data-plane close callbacks behind earlier messages",
     async (kind) => {
       const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");

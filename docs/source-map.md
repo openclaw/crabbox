@@ -20,8 +20,10 @@ Crabbox has three implementation surfaces:
   adapter for its registration side effects; `internal/providers/shared` holds
   common helpers.
 - **Coordinator** — TypeScript, under `worker/src` and `worker/node`. Shared
-  `FleetCoordinator` behavior runs either in a Cloudflare Worker plus one
-  Durable Object or in Node.js backed by PostgreSQL and pg-boss. Only `aws`,
+  `FleetCoordinator` behavior runs either in a Cloudflare Worker plus a Fleet
+  Durable Object or in Node.js backed by PostgreSQL and pg-boss. Serve relay
+  sessions use separate Durable Objects or an isolated in-process Node data plane.
+  Only `aws`,
   `azure`, `daytona`, `gcp`, `hetzner`, and `serve` can transfer provider lifecycle to it;
   everything else runs direct or delegated from the CLI.
 
@@ -260,6 +262,7 @@ Provider docs:
 - HTTP response/request helpers: `worker/src/http.ts`
 - GitHub OAuth login flow and user-token issuance: `worker/src/oauth.ts`
 - Shared fleet routes and behavior: `worker/src/fleet.ts`
+- Serve relay admission, per-session data plane, and client transport: `worker/src/serve-relay-control.ts`, `worker/src/serve-relay.ts`, `internal/cli/serve_relay_transport.go`
 - Cloudflare runtime adapter: `worker/src/coordinator-runtime.ts`
 - Node.js/PostgreSQL runtime, HTTP/WebSocket server, default-chain AWS credentials, private AWS deployment guard, and durable jobs: `worker/node/node-runtime.ts`, `worker/node/postgres-storage.ts`, `worker/node/server.ts`, `worker/node/aws-credentials.ts`, `worker/node/aws-deployment.ts`
 - Node request limits, trusted proxy handling, and graceful shutdown: `worker/node/server-support.ts`, `worker/node/server.ts`

@@ -5,6 +5,8 @@ import { completeLeaseProviderCleanup, leaseProviderCleanupConfirmed } from "./l
 import { putLeaseRecord } from "./lease-record-store";
 import { requestOrg } from "./org-identity";
 import { publicLeaseRecord } from "./org-records";
+import { serveRelayBackend } from "./serve-relay";
+import { ServeRelayControl } from "./serve-relay-control";
 import type { Env, LeaseRecord, LeaseRequest, CreateAttemptRecord } from "./types";
 
 export const serveBodyLimit = 32 * 1024;
@@ -53,6 +55,7 @@ export interface ServeMachine {
     hostKey: string;
     fingerprint?: string;
     candidates?: ServeAddressCandidate[];
+    relay?: boolean;
   };
   runtime: string;
   runtimeVersion: string;
@@ -142,7 +145,7 @@ function validCandidates(value: unknown, address: string): boolean {
     return c.kind === "explicit";
   });
 }
-function jumpForMachine(m: ServeMachine): NonNullable<LeaseRecord["sshJump"]> {
+function jumpForMachine(m: ServeMachine, env: Env): NonNullable<LeaseRecord["sshJump"]> {
   const candidates = m.frontDoor.candidates ?? [{ address: m.address, kind: "tailnet" }];
   return {
     host: candidates[0]!.address,
@@ -150,6 +153,7 @@ function jumpForMachine(m: ServeMachine): NonNullable<LeaseRecord["sshJump"]> {
     hostKey: m.frontDoor.hostKey,
     fingerprint: m.frontDoor.fingerprint!,
     candidates: candidates.map((c) => ({ host: c.address, port: m.frontDoor.port })),
+    ...(m.frontDoor.relay && serveRelayBackend(env) ? { relay: true } : {}),
   };
 }
 async function body<T>(r: Request): Promise<T> {
@@ -199,6 +203,7 @@ function heartbeatInput(v: Heartbeat): boolean {
     v.frontDoor &&
     integer(v.frontDoor.port, 65535) &&
     validCandidates(v.frontDoor.candidates, v.address) &&
+    (v.frontDoor.relay === undefined || typeof v.frontDoor.relay === "boolean") &&
     validText(v.frontDoor.hostKey, 256) &&
     /^ssh-ed25519 [A-Za-z0-9+/=]+(?: |$)/.test(v.frontDoor.hostKey) &&
     ["docker", "podman"].includes(v.runtime) &&
@@ -316,12 +321,28 @@ export class ServeCoordinator {
   async route(r: Request, parts: string[]): Promise<Response> {
     try {
       const disabled = serveDisabledResponse(this.env, requestOwner(r));
-      if (disabled) return disabled;
+      if (disabled)
+        return parts[2] === "relay" || parts[4] === "relay"
+          ? json({ error: "serve_relay_not_allowed" }, { status: 403 })
+          : disabled;
       if (parts.length === 3 && parts[2] === "machines" && r.method === "GET") {
         return json({ machines: await this.listMachines(r) });
       }
       if (parts.length === 3 && parts[2] === "heartbeat" && r.method === "POST")
         return await this.heartbeat(r, await body<Heartbeat>(r));
+      if (
+        parts.length === 5 &&
+        parts[2] === "leases" &&
+        parts[4] === "relay" &&
+        r.method === "POST"
+      ) {
+        await body<Record<string, unknown>>(r);
+        return this.commit((s) => new ServeRelayControl(this.env).mint(s, r, parts[3]!));
+      }
+      if (parts.length === 5 && parts[2] === "relay" && r.method === "GET")
+        return this.commit((s) =>
+          new ServeRelayControl(this.env).authorize(s, r, parts[3]!, parts[4]!),
+        );
       if (parts.length === 5 && parts[2] === "leases" && r.method === "POST")
         return await this.report(r, parts[3]!, parts[4]!, await body<Record<string, unknown>>(r));
       return json({ error: "not_found" }, { status: 404 });
@@ -378,6 +399,7 @@ export class ServeCoordinator {
           port: input.frontDoor.port,
           hostKey: input.frontDoor.hostKey,
           fingerprint,
+          relay: input.frontDoor.relay === true,
           candidates: input.frontDoor.candidates?.map(({ address, kind }) => ({
             address,
             kind,
@@ -397,7 +419,7 @@ export class ServeCoordinator {
           const before = JSON.stringify(l);
           this.expire(l, old ?? m, now);
           if (live(l) && l.state === "active") {
-            l.sshJump = jumpForMachine(m);
+            l.sshJump = jumpForMachine(m, this.env);
           }
           if (!live(l) && !seen.has(l.id) && !leaseProviderCleanupConfirmed(l)) {
             delete l.cleanupStartedAt;
@@ -412,6 +434,7 @@ export class ServeCoordinator {
             }
           } else if (seen.has(l.id)) stop.add(l.id);
           if (live(l)) assignments.push(this.assignment(l));
+          if (!live(l)) await new ServeRelayControl(this.env).closeLease(l);
           if (JSON.stringify(l) !== before) await putLeaseRecord(s, l);
         }),
       );
@@ -423,6 +446,7 @@ export class ServeCoordinator {
         assignments: assignments.filter((a) => !stop.has(a.id)),
         stop: [...stop],
         serverTime: now,
+        relays: await new ServeRelayControl(this.env).pending(s, m.owner, m.org, m.machineID),
       });
     });
   }
@@ -472,6 +496,7 @@ export class ServeCoordinator {
         for (const l of records) {
           const before = JSON.stringify(l);
           this.expire(l, m, now);
+          if (!live(l)) await new ServeRelayControl(this.env).closeLease(l);
           if (JSON.stringify(l) !== before) await putLeaseRecord(s, l);
           if (live(l)) {
             const deadline = Math.min(
@@ -703,6 +728,7 @@ export class ServeCoordinator {
       current.updatedAt = new Date().toISOString();
       current.endedAt = current.updatedAt;
       if (!leaseProviderCleanupConfirmed(current)) current.cleanupStartedAt ??= current.updatedAt;
+      await new ServeRelayControl(this.env).closeLease(current);
       await putLeaseRecord(s, current);
       return json({ lease: publicLeaseRecord(current) });
     });
@@ -728,6 +754,7 @@ export class ServeCoordinator {
       if (!m || !this.owned(m, r)) throw new ServeError("not_found", 404);
       this.expire(l, m, Date.now());
       if (!live(l)) {
+        await new ServeRelayControl(this.env).closeLease(l);
         await putLeaseRecord(s, l);
         throw new ServeError("serve_lease_ended", 409);
       }
@@ -762,7 +789,7 @@ export class ServeCoordinator {
         l.state = "active";
         l.host = l.id;
         l.sshPort = "22";
-        l.sshJump = jumpForMachine(m);
+        l.sshJump = jumpForMachine(m, this.env);
         l.sshHostKey = input["sshHostKey"];
       } else {
         l.state = "failed";
@@ -770,6 +797,7 @@ export class ServeCoordinator {
         l.endedAt = new Date().toISOString();
       }
       l.updatedAt = new Date().toISOString();
+      if (!live(l)) await new ServeRelayControl(this.env).closeLease(l);
       await putLeaseRecord(s, l);
       return json({ ok: true });
     });

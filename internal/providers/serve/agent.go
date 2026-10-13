@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -60,10 +61,16 @@ type assignment struct {
 	IdleDeadline int64     `json:"idleDeadline"`
 	State        string    `json:"state"`
 }
+type relayAssignment struct {
+	SessionID  string `json:"sessionID"`
+	LeaseID    string `json:"leaseID"`
+	AgentToken string `json:"agentToken"`
+}
 type heartbeat struct {
-	Assignments []assignment `json:"assignments"`
-	Stop        []string     `json:"stop"`
-	ServerTime  int64        `json:"serverTime"`
+	Relays      []relayAssignment `json:"relays,omitempty"`
+	Assignments []assignment      `json:"assignments"`
+	Stop        []string          `json:"stop"`
+	ServerTime  int64             `json:"serverTime"`
 }
 type localState struct {
 	Machine     machine               `json:"machine"`
@@ -83,6 +90,8 @@ type options struct {
 	noCache, drain          bool
 }
 type agent struct {
+	relayMu               sync.Mutex
+	relays                map[string]bool
 	lastHeartbeatReturned time.Time
 	opts                  options
 	state                 localState
@@ -285,7 +294,7 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	if err != nil {
 		return err
 	}
-	state.Machine = machine{MachineID: state.Machine.MachineID, Name: o.name, OS: runtime.GOOS, Arch: runtime.GOARCH, CPUs: o.cpus, MemoryMB: memory, MaxLeases: o.maxLeases, Address: front.candidates[0].Address, FrontDoor: frontDoorEndpoint{Candidates: front.candidates, Port: o.sshPort, HostKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(front.signer.PublicKey())))}, Runtime: o.runtime, RuntimeVersion: version, AgentVersion: core.Version(), Image: container.Image(), Labels: map[string]string{}, FreeMemoryMB: memory}
+	state.Machine = machine{MachineID: state.Machine.MachineID, Name: o.name, OS: runtime.GOOS, Arch: runtime.GOARCH, CPUs: o.cpus, MemoryMB: memory, MaxLeases: o.maxLeases, Address: front.candidates[0].Address, FrontDoor: frontDoorEndpoint{Relay: true, Candidates: front.candidates, Port: o.sshPort, HostKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(front.signer.PublicKey())))}, Runtime: o.runtime, RuntimeVersion: version, AgentVersion: core.Version(), Image: container.Image(), Labels: map[string]string{}, FreeMemoryMB: memory}
 	state.Coordinator = cfg.Coordinator
 	if state.Assignments == nil {
 		state.Assignments = map[string]assignment{}
@@ -470,6 +479,7 @@ func (a *agent) poll(ctx context.Context) error {
 	}
 	a.state.Assignments = active
 	a.updateFrontDoor(containers)
+	a.startRelays(ctx, response.Relays)
 	for _, id := range imageMismatches {
 		a.failed(bounded, id, "serve_image_mismatch")
 	}
@@ -583,4 +593,37 @@ func showStatus(dir string, asJSON bool, rt core.Runtime) error {
 	}
 	fmt.Fprintf(rt.Stdout, "machine=%s name=%s coordinator=%s coordinator_reachable=%t last_success=%s active_leases=%d cpus=%d memoryMB=%d draining=%t\n", s.Machine.MachineID, s.Machine.Name, s.Coordinator, s.Machine.Online, s.LastSuccess.Format(time.RFC3339), len(s.Assignments), s.Machine.CPUs, s.Machine.MemoryMB, s.Machine.Draining)
 	return nil
+}
+
+func (a *agent) startRelays(ctx context.Context, pending []relayAssignment) {
+	if a.frontDoor == nil || len(pending) > 8 {
+		return
+	}
+	for _, session := range pending {
+		l, ok := a.state.Assignments[session.LeaseID]
+		if !ok || l.MachineID != a.state.Machine.MachineID || !deadline(l).After(time.Now()) || l.State != "active" {
+			continue
+		}
+		a.relayMu.Lock()
+		if a.relays == nil {
+			a.relays = map[string]bool{}
+		}
+		if a.relays[session.SessionID] || len(a.relays) >= 8 {
+			a.relayMu.Unlock()
+			continue
+		}
+		a.relays[session.SessionID] = true
+		a.relayMu.Unlock()
+		go func(session relayAssignment) {
+			defer func() { a.relayMu.Lock(); delete(a.relays, session.SessionID); a.relayMu.Unlock() }()
+			conn, err := core.DialServeRelay(ctx, a.coord, session.SessionID, "agent", session.AgentToken, a.state.Machine.MachineID)
+			if err != nil {
+				if ctx.Err() == nil {
+					fmt.Fprintln(a.rt.Stderr, "serve relay: connection failed")
+				}
+				return
+			}
+			a.frontDoor.admit(conn, session.LeaseID)
+		}(session)
+	}
 }
