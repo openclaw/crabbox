@@ -32,8 +32,11 @@ lease in enforced maximum-age cleanup, even while the coordinator's default
 lifetime mode is off or report-only:
 
 ```sh
-crabbox warmup --provider aws --region eu-west-1 --class tiny --type t3.small --market on-demand --keep --ttl 20m --idle-timeout 10m --lifetime-canary 6m --lifetime-retention 5m
+CRABBOX_AWS_REGION=eu-west-1 crabbox warmup --provider aws --class tiny --type t3.small --market on-demand --keep --ttl 45m --idle-timeout 10m --lifetime-canary 6m --lifetime-retention 5m
 ```
+
+Set the AWS Region with `CRABBOX_AWS_REGION`; warmup accepts neither `--region`
+nor `--aws-region`.
 
 Supply both `--lifetime-canary <duration>` (compute lifetime from creation) and
 `--lifetime-retention <duration>` (root-disk retention after confirmed stop).

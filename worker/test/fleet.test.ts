@@ -59555,6 +59555,194 @@ describe("maximum lifetime safety net", () => {
     expect(f.storage.value<LeaseRecord>(`lease:${legacy.id}`)!.lifetimePolicy).toBeUndefined();
   });
 
+  it.each(
+    (["readiness", "stop", "retention"] as const).flatMap((phase) =>
+      (["api", "portal"] as const).map((surface) => ({ phase, surface })),
+    ),
+  )(
+    "rejects $surface deletion during a lifetime $phase claim and accepts a later retry",
+    async ({ phase, surface }) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(now);
+      const f = fixture();
+      f.lease.owner = "alice@example.com";
+      f.lease.org = orgKeyForLabel("example-org");
+      f.lease.state = "active";
+      f.lease.expiresAt = new Date(now + 3_600_000).toISOString();
+      delete f.lease.releaseDeletesServer;
+      if (phase === "readiness") delete f.lease.lifetimePolicy!.readiness;
+      const started = deferred<void>();
+      const finish = deferred<void>();
+      const checkLifetimeReadiness = vi.fn<() => Promise<string>>(async () => {
+        started.resolve();
+        await finish.promise;
+        return f.identity;
+      });
+      f.retainLease.mockImplementation(async (_lease, context) => {
+        if (phase === "retention") await context.saveIdentity(f.identity);
+        started.resolve();
+        await finish.promise;
+        if (phase !== "retention") await context.saveIdentity(f.identity);
+        await context.assertOwner();
+        return { stopped: true, identity: f.identity };
+      });
+      const fleet = testFleet(
+        f.storage,
+        {
+          aws: { checkLifetimeReadiness, retainLease: f.retainLease, releaseLease: f.releaseLease },
+        },
+        env,
+      );
+      await f.storage.put(`lease:${f.lease.id}`, f.lease);
+      const alarm = fleet.alarm();
+      await started.promise;
+      const release = () =>
+        fleet.fetch(
+          request("POST", `/${surface === "api" ? "v1" : "portal"}/leases/${f.lease.id}/release`, {
+            headers: { "x-crabbox-owner": f.lease.owner, "x-crabbox-org": "example-org" },
+            body: { delete: true },
+          }),
+        );
+      const conflict = await release();
+      // Always let provider work drain, including when the regression assertion fails.
+      finish.resolve();
+      await alarm;
+      expect(conflict.status).toBe(409);
+      expect(await conflict.text()).toContain(
+        surface === "api" ? "cleanup_in_progress" : "Cleanup in progress",
+      );
+      expect(f.releaseLease).not.toHaveBeenCalled();
+      expect((await release()).status).toBe(surface === "api" ? 200 : 303);
+      await fleet.alarm();
+      expect(f.releaseLease).toHaveBeenCalledOnce();
+      expect(f.storage.value<LeaseRecord>(`lease:${f.lease.id}`)?.cleanupCompletedAt).toBeDefined();
+    },
+  );
+
+  it.each([false, true])(
+    "rechecks concurrent cleanup intent after release authorization (deleting=%s)",
+    async (deleting) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(now);
+      const f = fixture();
+      f.lease.owner = "alice@example.com";
+      f.lease.org = orgKeyForLabel("example-org");
+      await f.storage.put(`lease:${f.lease.id}`, f.lease);
+      const claimed = {
+        ...f.lease,
+        releaseDeletesServer: deleting,
+        cleanupStartedAt: new Date(now).toISOString(),
+        cleanupClaimExpiresAt: new Date(now + 60_000).toISOString(),
+      };
+      f.storage.afterGet = async (key) => {
+        if (key !== `lease:${f.lease.id}`) return;
+        f.storage.afterGet = undefined;
+        await f.storage.put(key, claimed);
+      };
+      const response = await f.fleet.fetch(
+        request("POST", `/v1/leases/${f.lease.id}/release`, {
+          headers: { "x-crabbox-owner": f.lease.owner, "x-crabbox-org": "example-org" },
+          body: { delete: true },
+        }),
+      );
+      expect(response.status).toBe(deleting ? 200 : 409);
+      await expect(response.json()).resolves.toMatchObject(
+        deleting ? { lease: { id: f.lease.id } } : { error: "cleanup_in_progress" },
+      );
+      expect(f.storage.value<LeaseRecord>(`lease:${f.lease.id}`)).toEqual(claimed);
+      expect(f.releaseLease).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { name: "coincident deadlines", expires: now, ready: true },
+    { name: "delayed maintenance", expires: now - 60_000, ready: true },
+    { name: "pending readiness", expires: now, ready: false },
+  ])(
+    "lets ordinary TTL deletion win over lifetime retention: $name",
+    async ({ expires, ready }) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(now);
+      const f = fixture();
+      f.lease.state = "active";
+      f.lease.expiresAt = new Date(expires).toISOString();
+      f.lease.lifetimePolicy!.deadlineAt = new Date(expires).toISOString();
+      delete f.lease.releaseDeletesServer;
+      if (!ready) delete f.lease.lifetimePolicy!.readiness;
+      const checkLifetimeReadiness = vi.fn<() => Promise<string>>(async () => f.identity);
+      const fleet = testFleet(
+        f.storage,
+        {
+          aws: { checkLifetimeReadiness, retainLease: f.retainLease, releaseLease: f.releaseLease },
+        },
+        env,
+      );
+      await f.storage.put(`lease:${f.lease.id}`, f.lease);
+      await fleet.alarm();
+      expect(f.retainLease).not.toHaveBeenCalled();
+      expect(checkLifetimeReadiness).not.toHaveBeenCalled();
+      expect(f.releaseLease).toHaveBeenCalledOnce();
+      const expired = f.storage.value<LeaseRecord>(`lease:${f.lease.id}`)!;
+      expect(expired.state).toBe("expired");
+      expect(expired.cleanupCompletedAt).toBeDefined();
+      expect(expired.lifetimePolicy?.retainedIdentity).toBeUndefined();
+    },
+  );
+
+  it("preserves TTL deletion when expiry arrives during lifetime provider reads", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const f = fixture();
+    f.lease.state = "active";
+    f.lease.expiresAt = new Date(now + 1_000).toISOString();
+    delete f.lease.releaseDeletesServer;
+    f.retainLease.mockImplementation(async (_lease, context) => {
+      vi.setSystemTime(now + 1_000);
+      await context.saveIdentity(f.identity);
+      return { stopped: true, identity: f.identity };
+    });
+    await f.storage.put(`lease:${f.lease.id}`, f.lease);
+    await f.fleet.alarm();
+    expect(f.releaseLease).toHaveBeenCalledOnce();
+    const expired = f.storage.value<LeaseRecord>(`lease:${f.lease.id}`)!;
+    expect(expired.state).toBe("expired");
+    expect(expired.lifetimePolicy?.retainedIdentity).toBeUndefined();
+    expect(expired.cleanupCompletedAt).toBeDefined();
+  });
+
+  it("reconciles shared AWS ingress after lifetime deletion while preserving surviving access", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const f = fixture();
+    f.lease.network = { sshSourceCIDRs: ["198.51.100.10/32"], awsSecurityGroupID: "sg-shared" };
+    const sibling = {
+      ...f.lease,
+      id: "cbx_000000000001",
+      cloudID: "i-0fedcba9876543210",
+      lifetimePolicy: undefined,
+      network: { ...f.lease.network, sshSourceCIDRs: ["198.51.100.20/32"] },
+    };
+    const reconcileLeaseAccess = vi.fn<AWSProvider["reconcileLeaseAccess"]>(async () => {});
+    const fleet = testFleet(
+      f.storage,
+      { aws: { retainLease: f.retainLease, releaseLease: f.releaseLease, reconcileLeaseAccess } },
+      env,
+    );
+    await f.storage.put(`lease:${f.lease.id}`, f.lease);
+    await f.storage.put(`lease:${sibling.id}`, sibling);
+    await fleet.alarm();
+    expect(reconcileLeaseAccess).not.toHaveBeenCalled();
+    vi.setSystemTime(now + 7 * 86_400_000);
+    await fleet.alarm();
+    expect(f.releaseLease).toHaveBeenCalledOnce();
+    expect(reconcileLeaseAccess).toHaveBeenCalledOnce();
+    expect(reconcileLeaseAccess.mock.calls[0]![1].activeLeases.map((lease) => lease.id)).toEqual([
+      sibling.id,
+    ]);
+    expect(f.storage.value("aws-ingress-reconcile:pending")).toBeUndefined();
+    expect(f.storage.value<LeaseRecord>(`lease:${sibling.id}`)).toEqual(sibling);
+  });
+
   it("persists identity before stop and deletes only after confirmed seven-day retention", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(now);

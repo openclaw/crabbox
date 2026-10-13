@@ -1709,6 +1709,12 @@ export class FleetCoordinator {
       }
       return json({ error: "not_found" }, { status: 404 });
     } catch (error) {
+      if (error instanceof LeaseCleanupInProgressError) {
+        const message = "Lease cleanup has already started. Retry after it completes.";
+        return pathParts(request)[0] === "portal"
+          ? portalError("Cleanup in progress", message, 409)
+          : json({ error: "cleanup_in_progress", message }, { status: 409 });
+      }
       if (error instanceof ProviderRequestTimeoutError) {
         return json(
           { error: "provider_request_timeout", message: coordinatorErrorMessage(this.env, error) },
@@ -8621,7 +8627,8 @@ export class FleetCoordinator {
     }
     const shouldDelete = body.delete ?? !lease.keep;
     if (lease.cleanupStartedAt) {
-      if (!shouldDelete) {
+      // Lifetime readiness/retention claims are not queued deletion requests.
+      if (!shouldDelete || lease.releaseDeletesServer !== true) {
         return json(
           {
             error: "cleanup_in_progress",
@@ -18051,6 +18058,8 @@ export class FleetCoordinator {
           return;
         const policy = lease.lifetimePolicy!;
         const now = Date.now();
+        // Ordinary expiry owns due live leases; lifetime retention must not extend their TTL.
+        if (leaseNeedsCleanup(lease, now)) return;
         if (lease.cleanupStartedAt && cleanupClaimDeadline(lease) > now) return;
         if (
           policy.source !== "admin-canary" &&
@@ -18162,6 +18171,7 @@ export class FleetCoordinator {
             !sameLeaseCleanupClaim(current, lease) ||
             JSON.stringify(current.lifetimePolicy) !== JSON.stringify(lease.lifetimePolicy) ||
             cleanupClaimDeadline(current) <= Date.now() ||
+            leaseNeedsCleanup(current, Date.now()) ||
             (await provisioningOwnsLease(this.state.storage, id))
           ) {
             throw new Error("lifetime cleanup owner, policy, or resource identity changed");
@@ -18209,6 +18219,7 @@ export class FleetCoordinator {
                     !current ||
                     !sameLeaseCleanupClaim(current, lease) ||
                     cleanupClaimDeadline(current) <= Date.now() ||
+                    leaseNeedsCleanup(current, Date.now()) ||
                     !identity ||
                     (current.lifetimePolicy!.retainedIdentity &&
                       current.lifetimePolicy!.retainedIdentity !== identity)
@@ -18261,7 +18272,7 @@ export class FleetCoordinator {
         stopRequired = error instanceof LifetimeStopRequiredError;
       }
       // oxlint-disable-next-line eslint/no-await-in-loop -- publish only the result belonging to this exact claim.
-      await this.state.runExclusive(async () => {
+      await this.withLeaseCleanupState(lease, async () => {
         const current = await this.getLease(id);
         if (
           !current ||
@@ -18317,6 +18328,7 @@ export class FleetCoordinator {
             policy.nextCheckAt = new Date(now.getTime() + lifetimeStopConfirmMs).toISOString();
         }
         await this.putLease(current);
+        if (policy.status === "complete") await this.markAWSIngressReconcilePending(current);
       });
     }
   }
@@ -21212,7 +21224,10 @@ export class FleetCoordinator {
           // Reclaim the expired claim below. Its prior owner remains fenced by the
           // cleanupStartedAt comparison in finishLeaseCleanupClaim.
         } else {
-          if (options.awaitProviderCleanup) {
+          if (
+            options.awaitProviderCleanup ||
+            (options.deleteServer && current.releaseDeletesServer !== true)
+          ) {
             throw new LeaseCleanupInProgressError();
           }
           await this.armAlarmNoLaterThan(Date.now());

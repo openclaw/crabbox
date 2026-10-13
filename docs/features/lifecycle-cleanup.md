@@ -360,7 +360,11 @@ resolution; never backfill them from current configuration.
 The coordinator can cap newly admitted resources that would otherwise remain
 running after a retained release. This uses its existing alarm/cron, not a
 separate cleanup service. It does not replace the shorter ordinary idle/TTL
-expiry or explicit `crabbox stop` deletion contract described above.
+expiry or explicit `crabbox stop` deletion contract described above. If ordinary
+TTL expiry is already due, it deletes the resource without adding lifetime disk
+retention. An explicit delete during an in-flight lifetime readiness or stop
+check returns `409 cleanup_in_progress`; retry after that operation finishes.
+It is not acknowledged as a queued deletion.
 
 Production defaults to `CRABBOX_LEASE_LIFETIME_MODE=off`. To enroll a default
 cohort, set `CRABBOX_LEASE_LIFETIME_MODE=report` first. Each new managed lease snapshots
@@ -389,8 +393,8 @@ Only new, on-demand AWS Linux/Windows EBS-root leases are eligible; fixed-ID
 replay preserves the policy and rejects a changed enrollment intent.
 
 ```sh
-crabbox warmup --provider aws --region eu-west-1 --class tiny --type t3.small \
-  --market on-demand --keep --ttl 20m --idle-timeout 10m \
+CRABBOX_AWS_REGION=eu-west-1 crabbox warmup --provider aws --class tiny --type t3.small \
+  --market on-demand --keep --ttl 45m --idle-timeout 10m \
   --lifetime-canary 6m --lifetime-retention 5m
 crabbox admin lifetime-readback --id cbx_abcdef123456 --json
 ```
@@ -409,8 +413,10 @@ After deployment, the operator can run `scripts/live-lease-lifetime-canary.sh`
 with `CRABBOX_LIVE_CONFIRM=lifetime-canary`, `CRABBOX_COORDINATOR`, and their admin
 configuration. It compares a short-lived canary with an unenrolled kept control,
 uses coordinator-owned AWS readbacks for stopped compute and root-disk presence
-then termination and absence, and cleans up both leases. The script is bounded
-to 40 minutes. Merging does not deploy or run this proof.
+then termination and absence, and cleans up both leases. It allows 35 minutes
+for proof, followed by an independent 11-minute cleanup budget (46 minutes
+combined). Both leases use a 45-minute TTL so ordinary expiry does not pre-empt
+the proof. Merging does not deploy or run this proof.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
