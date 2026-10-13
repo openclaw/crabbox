@@ -83,6 +83,9 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	if err != nil {
 		return err
 	}
+	if err := validateDirectLeaseCreation(cfg); err != nil {
+		return err
+	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return err
@@ -102,6 +105,7 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		defer unlock()
 	}
 	options := leaseOptionsFromConfig(cfg)
+	a.reportDirectLeasePolicyNotice(cfg)
 	if strings.TrimSpace(*requestedLeaseID) != "" {
 		if fixed, ok := backend.(DelegatedFixedWarmupBackend); ok {
 			return fixed.WarmupFixed(ctx, FixedWarmupRequest{
@@ -1008,6 +1012,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		delegatedTimingCapture = &capturedTimingReportWriter{writer: a.Stderr}
 		backendRuntime.Stderr = delegatedTimingCapture
 	}
+	if strings.TrimSpace(*leaseIDFlag) == "" {
+		if err := validateDirectLeaseCreation(cfg); err != nil {
+			return err
+		}
+	}
 	backend, err := loadBackend(cfg, backendRuntime)
 	if err != nil {
 		return err
@@ -1280,6 +1289,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		runnerObservedStartedAt = time.Now()
 		observation.Phase(RunPhaseOpaque)
+		if runReq.ID == "" && !runReq.ReuseLease {
+			a.reportDirectLeasePolicyNotice(cfg)
+		}
 		result, runErr := delegated.Run(ctx, runReq)
 		observation.BindLease(result.LeaseID, result.Slug)
 		delegatedProviderEndedAt = time.Now()
@@ -1724,6 +1736,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	} else {
 		var lease LeaseTarget
 		observation.Phase(RunPhaseAcquire)
+		a.reportDirectLeasePolicyNotice(cfg)
 		lease, err = sshBackend.Acquire(ctx, AcquireRequest{Repo: identityRepo, Options: options, Keep: *keep, Reclaim: *reclaim, RequestedSlug: requestedSlug})
 		if err == nil {
 			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
@@ -1791,8 +1804,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	a.startRegisteredWebVNCDaemonBestEffort(ctx, cfg, target, leaseID, acquired && *keep)
 	if !useCoordinator && leaseID != "" {
-		if touched, touchErr := sshBackend.Touch(ctx, TouchRequest{Lease: LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, State: blank(server.Labels["state"], "ready"), IdleTimeout: cfg.IdleTimeout}); touchErr == nil {
+		if touched, touchErr := touchLeaseWithGuestExpiry(ctx, sshBackend, cfg, TouchRequest{Lease: LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, State: blank(server.Labels["state"], "ready"), IdleTimeout: cfg.IdleTimeout}); touchErr == nil {
 			server = touched
+			a.reportIdleTimeoutPolicyNotice(runIdleTimeoutOverride, server)
 		} else {
 			fmt.Fprintf(a.Stderr, "warning: direct touch failed for %s: %v\n", leaseID, touchErr)
 		}
@@ -1803,6 +1817,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return recordFailure(err)
 		}
 	}
+	var commandExecuting atomic.Bool
 	var stopHeartbeat func()
 	stopRunHeartbeat := func() {
 		if stopHeartbeat == nil {
@@ -1820,7 +1835,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if heartbeatCoord != nil {
 			var err error
-			stopHeartbeat, err = startCoordinatorHeartbeat(ctx, heartbeatCoord, leaseID, cfg.Provider, cfg.IdleTimeout, updateIdleTimeout, leaseTelemetryCollectorForTarget(target), a.Stderr)
+			stopHeartbeat, err = startCoordinatorHeartbeat(ctx, heartbeatCoord, leaseID, cfg.Provider, cfg.IdleTimeout, updateIdleTimeout, leaseTelemetryCollectorForTarget(target), a.Stderr, commandExecuting.Load)
 			return err
 		}
 		return nil
@@ -2126,6 +2141,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if beforeCommandLeaseReplacementAttempted ||
 			!shouldReplaceLeaseAfterBeforeCommandSSHFailure(waitErr, acquired, useCoordinator, *leaseIDFlag != "", *keep, *keepOnFailure, *noSync, *syncOnly, *stopAfter, requestedSlug) {
 			return false, nil
+		}
+		if err := validateDirectLeaseCreation(cfg); err != nil {
+			return true, err
 		}
 		beforeCommandLeaseReplacementAttempted = true
 		oldLease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}
@@ -2986,13 +3004,13 @@ afterSync:
 		}
 	}
 	if !useCoordinator {
-		if touched, touchErr := sshBackend.Touch(context.Background(), TouchRequest{Lease: LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, State: "running", IdleTimeout: cfg.IdleTimeout}); touchErr == nil {
+		if touched, touchErr := touchLeaseWithGuestExpiry(context.Background(), sshBackend, cfg, TouchRequest{Lease: LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, State: "running", IdleTimeout: cfg.IdleTimeout}); touchErr == nil {
 			server = touched
 		} else {
 			fmt.Fprintf(a.Stderr, "warning: direct touch state=running: %v\n", touchErr)
 		}
 		defer func() {
-			if touched, touchErr := sshBackend.Touch(context.Background(), TouchRequest{Lease: LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, State: "ready", IdleTimeout: cfg.IdleTimeout}); touchErr == nil {
+			if touched, touchErr := touchLeaseWithGuestExpiry(context.Background(), sshBackend, cfg, TouchRequest{Lease: LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, State: "ready", IdleTimeout: cfg.IdleTimeout}); touchErr == nil {
 				server = touched
 			} else {
 				fmt.Fprintf(a.Stderr, "warning: direct touch state=ready: %v\n", touchErr)
@@ -3119,7 +3137,9 @@ afterSync:
 	for i := range beforeArtifacts {
 		beforeArtifacts[i].data = nil
 	}
+	commandExecuting.Store(true)
 	code, streamErr := runSSHStreamResult(ctx, commandTarget, remote, stdout, stderr)
+	commandExecuting.Store(false)
 	failureDownloadEligible := false
 	if witness != nil {
 		code, streamErr, failureDownloadEligible = witness.finish(ctx, code, streamErr)
@@ -3667,6 +3687,7 @@ func shouldReleaseRunLease(acquired, keep, keepFailedLease bool, stopAfter strin
 
 func populateRunTimingMetadata(report *timingReport, cfg Config, repo Repo, server Server, leaseID, runID, workdir string, artifacts []runArtifact) {
 	report.RunID = runID
+	report.SSHRoute = cachedSSHRouteDescription(leaseID)
 	report.ImageEvidence = CloneImageEvidence(server.ImageEvidence)
 	report.MachineType = server.ServerType.Name
 	report.RepoPath = repo.Root
@@ -4864,7 +4885,7 @@ func (a App) releaseBackendLease(ctx context.Context, backend SSHLeaseBackend, c
 	return outcome, nil
 }
 
-func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, leaseID, expectedProvider string, idleTimeout time.Duration, updateIdleTimeout *time.Duration, telemetryCollector leaseTelemetryCollector, stderr io.Writer) (func(), error) {
+func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, leaseID, expectedProvider string, idleTimeout time.Duration, updateIdleTimeout *time.Duration, telemetryCollector leaseTelemetryCollector, stderr io.Writer, running ...func() bool) (func(), error) {
 	expectedProvider, err := canonicalProviderName(expectedProvider)
 	if err != nil {
 		return nil, err
@@ -4875,6 +4896,7 @@ func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, le
 	go func() {
 		defer close(done)
 		var control *coordinatorControlConn
+		printPolicyNotice := leasePolicyNoticePrinter(stderr)
 		defer func() {
 			if control != nil {
 				control.close()
@@ -4884,13 +4906,15 @@ func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, le
 		defer ticker.Stop()
 		for {
 			telemetry := collectLeaseTelemetryBestEffort(rootCtx, telemetryCollector)
+			extend := len(running) > 0 && running[0]()
 			callCtx, heartbeatCancel := context.WithTimeout(rootCtx, 20*time.Second)
 			var err error
+			var policyNotice string
 			if control == nil {
 				control, err = dialCoordinatorControl(callCtx, coord)
 			}
 			if control != nil {
-				err = control.heartbeat(callCtx, leaseID, expectedProvider, updateIdleTimeout, telemetry)
+				policyNotice, err = control.heartbeat(callCtx, leaseID, expectedProvider, updateIdleTimeout, telemetry, extend)
 				if err != nil {
 					control.close()
 					control = nil
@@ -4901,13 +4925,17 @@ func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, le
 			}
 			// A spent shared budget cannot send HTTP; preserve the failed control stage.
 			if control == nil && callCtx.Err() == nil {
-				if _, fallbackErr := coord.heartbeatLease(callCtx, leaseID, expectedProvider, updateIdleTimeout, telemetry); fallbackErr != nil {
+				if lease, fallbackErr := coord.heartbeatLease(callCtx, leaseID, expectedProvider, updateIdleTimeout, telemetry, extend); fallbackErr != nil {
 					err = errors.Join(err, fallbackErr)
 				} else {
 					err = nil
+					policyNotice = lease.PolicyNotice
 				}
 			}
 			heartbeatCancel()
+			if err == nil {
+				printPolicyNotice(policyNotice)
+			}
 			if err != nil && rootCtx.Err() == nil {
 				fmt.Fprintf(stderr, "warning: heartbeat failed for %s: %v\n", leaseID, err)
 			}
@@ -4922,6 +4950,28 @@ func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, le
 		cancel()
 		<-done
 	}, nil
+}
+
+func leasePolicyNoticePrinter(stderr io.Writer) func(string) {
+	printedPolicy, printedBudget := false, false
+	return func(notice string) {
+		if notice == "" {
+			return
+		}
+		// A prior clamp notice must not hide the expiry warning for an exhausted budget.
+		if strings.Contains(notice, "budget exhausted") {
+			if printedBudget {
+				return
+			}
+			printedBudget = true
+		} else {
+			if printedPolicy {
+				return
+			}
+			printedPolicy = true
+		}
+		fmt.Fprintln(stderr, notice)
+	}
 }
 
 var readyPoolBorrowHeartbeatInterval = 30 * time.Second

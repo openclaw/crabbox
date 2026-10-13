@@ -375,7 +375,7 @@ func (c *vultrClient) createInstanceBody(ctx context.Context, cfg core.Config, p
 		"region":           vultrRegion(cfg),
 		"plan":             cfg.ServerType,
 		"sshkey_id":        []string{keyID},
-		"user_data":        base64.StdEncoding.EncodeToString([]byte(core.CloudInitUserData(cfg, publicKey))),
+		"user_data":        base64.StdEncoding.EncodeToString([]byte(core.CloudInitUserData(core.WithGuestLeaseExpiry(cfg, labelsFromTags(leaseTags(cfg, leaseID, slug, "provisioning", keep, now))), publicKey))),
 		"label":            name,
 		"hostname":         name,
 		"tags":             leaseTags(cfg, leaseID, slug, "provisioning", keep, now),

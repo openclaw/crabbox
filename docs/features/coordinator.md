@@ -240,6 +240,11 @@ unauthenticated, rejects `/v1/internal/*` externally, and otherwise
 authenticates and forwards to the fleet. Cloudflare cron or pg-boss
 reconciliation runs maintenance.
 
+Health is public and uncached. On Cloudflare it includes `version.id` and
+`version.tag` from the existing version metadata binding, so deployment checks
+can match the serving version to the uploaded commit. Other runtimes omit
+`version` when that binding is unavailable. Health does not access fleet storage.
+
 Public and user-scoped routes:
 
 ```text

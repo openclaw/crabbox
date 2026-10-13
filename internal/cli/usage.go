@@ -53,8 +53,8 @@ func printUsageSummary(out interface{ Write([]byte) (int, error) }, usage Coordi
 		scopeParts = append(scopeParts, "org="+usage.Org)
 	}
 	fmt.Fprintf(out, "usage month=%s %s\n", usage.Month, strings.Join(scopeParts, " "))
-	fmt.Fprintf(out, "total leases=%d active=%d runtime=%s estimated=$%.2f reserved=$%.2f\n",
-		usage.Leases, usage.ActiveLeases, formatDurationSeconds(usage.RuntimeSeconds), usage.EstimatedUSD, usage.ReservedUSD)
+	fmt.Fprintf(out, "total leases=%d active=%d runtime=%s estimated=$%.2f reserved=$%.2f%s\n",
+		usage.Leases, usage.ActiveLeases, formatDurationSeconds(usage.RuntimeSeconds), usage.EstimatedUSD, usage.ReservedUSD, formatCommittedUSD(usage.CommittedUSD))
 	printUsageGroups(out, "owners", usage.ByOwner)
 	printUsageGroups(out, "orgs", usage.ByOrg)
 	printUsageGroups(out, "providers", usage.ByProvider)
@@ -67,9 +67,16 @@ func printUsageGroups(out interface{ Write([]byte) (int, error) }, title string,
 	}
 	fmt.Fprintf(out, "%s:\n", title)
 	for _, group := range groups {
-		fmt.Fprintf(out, "  %-24s leases=%-3d active=%-3d runtime=%-9s estimated=$%-8.2f reserved=$%.2f\n",
-			group.Key, group.Leases, group.ActiveLeases, formatDurationSeconds(group.RuntimeSeconds), group.EstimatedUSD, group.ReservedUSD)
+		fmt.Fprintf(out, "  %-24s leases=%-3d active=%-3d runtime=%-9s estimated=$%-8.2f reserved=$%.2f%s\n",
+			group.Key, group.Leases, group.ActiveLeases, formatDurationSeconds(group.RuntimeSeconds), group.EstimatedUSD, group.ReservedUSD, formatCommittedUSD(group.CommittedUSD))
 	}
+}
+
+func formatCommittedUSD(value *float64) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprintf(" committed=$%.2f", *value)
 }
 
 func printCostLimits(out interface{ Write([]byte) (int, error) }, limits CoordinatorCostLimits) {

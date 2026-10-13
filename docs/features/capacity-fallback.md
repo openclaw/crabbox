@@ -198,7 +198,13 @@ capacity:
     - eu-west-1b
 ```
 
-`regions` is the ordered list of brokered AWS regions the coordinator considers.
+Ordinary brokered AWS leases try the requested `aws.region` first, followed by
+the coordinator's preferred region and the configured capacity regions, with
+duplicates removed. Private AWS workspaces and pinned Mac leases retain their
+single-region routing. Promotions from another region do not override the request.
+
+`regions` is the ordered list of additional brokered AWS regions the coordinator
+considers.
 Single-region setups use `aws.region` and leave `capacity.regions` empty;
 multi-region setups list every region the broker may launch into. Regions are
 tried in order: when every candidate type in a region is rejected for a

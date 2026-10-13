@@ -324,7 +324,7 @@ func (b *blacksmithBackend) printStopOutput(result core.LocalCommandResult) {
 	}
 }
 
-func (b *blacksmithBackend) terminateTestbox(ctx context.Context, claim core.LeaseClaim) (settled *blacksmithReconciledStop, err error) {
+func (b *blacksmithBackend) terminateTestbox(ctx context.Context, claim core.LeaseClaim, cancelWorkflow bool) (settled *blacksmithReconciledStop, err error) {
 	identity, err := b.verifyTestbox(ctx, claim)
 	if err != nil {
 		return nil, err
@@ -356,6 +356,7 @@ func (b *blacksmithBackend) terminateTestbox(ctx context.Context, claim core.Lea
 	// Remember whether native stop had the association. A later association (or
 	// a retained completed claim) permits one further exact native stop attempt.
 	stoppedWithURL := ""
+	cancellationAttempted := false
 	if !identity.terminal() {
 		stoppedWithURL = identity.RunURL
 		stop()
@@ -385,6 +386,17 @@ func (b *blacksmithBackend) terminateTestbox(ctx context.Context, claim core.Lea
 			if stoppedWithURL != result.runURL {
 				stoppedWithURL = result.runURL
 				stop()
+			}
+			// Native completion can leave the workflow's SSH idle loop holding
+			// its concurrency slot. Only a claim-fenced stop may cancel that run;
+			// acquisition rollback has no persisted ownership claim.
+			if cancelWorkflow && !cancellationAttempted {
+				attempted, cancelErr := b.cancelGitHubRun(ctx, claim, result.runURL)
+				if !attempted {
+					return nil, blacksmithSettlementError(claim.LeaseID, cancelErr)
+				}
+				result.err = errors.Join(result.err, cancelErr)
+				cancellationAttempted = true
 			}
 		} else if result.err != nil {
 			return nil, fmt.Errorf("Blacksmith stop verification failed: Testbox state=%s is not completed", identity.State)
@@ -442,7 +454,7 @@ func (b *blacksmithBackend) rollbackTestbox(id, pendingID, repoRoot string) {
 			return err
 		}
 		claim := blacksmithIdentityClaim(id, "acquisition-rollback", repoRoot, *b.route, identity)
-		if _, err := b.terminateTestbox(ctx, claim); err != nil {
+		if _, err := b.terminateTestbox(ctx, claim, false); err != nil {
 			return err
 		}
 		if err := core.RemoveStoredTestboxConnectionArtifacts(pendingID); err != nil {

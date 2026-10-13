@@ -247,6 +247,7 @@ func TestProxmoxCleanupDryRunAndKeptLease(t *testing.T) {
 			b, c, claim, output := cleanupFixture(t)
 			if !dry {
 				c.servers[0].Labels["keep"] = "true"
+				c.servers[0].Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(time.Hour))
 			}
 			if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: dry}); err != nil {
 				t.Fatal(err)
@@ -270,8 +271,14 @@ func TestProxmoxCleanupRevalidatesLiveState(t *testing.T) {
 	}{
 		{"generation before stop", 0, func(s *core.Server) { s.ImmutableID = replacementGeneration }},
 		{"generation after stop", 1, func(s *core.Server) { s.ImmutableID = replacementGeneration }},
-		{"keep before stop", 0, func(s *core.Server) { s.Labels["keep"] = "true" }},
-		{"keep after stop", 1, func(s *core.Server) { s.Labels["keep"] = "true" }},
+		{"renewed kept before stop", 0, func(s *core.Server) {
+			s.Labels["keep"] = "true"
+			s.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(time.Hour))
+		}},
+		{"renewed kept after stop", 1, func(s *core.Server) {
+			s.Labels["keep"] = "true"
+			s.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(time.Hour))
+		}},
 		{"ownership after stop", 1, func(s *core.Server) { s.Labels["lease"] = "cbx_other" }},
 		{"node changed", 0, func(s *core.Server) { s.HostID = "pve2" }},
 	} {
@@ -289,6 +296,32 @@ func TestProxmoxCleanupRevalidatesLiveState(t *testing.T) {
 				t.Fatalf("stop=%d delete=%d", c.stopCalls, c.deleteCalls)
 			}
 			assertCleanupClaimPreserved(t, claim)
+		})
+	}
+}
+
+func TestProxmoxCleanupDeletesExpiredKeptLease(t *testing.T) {
+	for _, step := range []int{-1, 0, 1} {
+		t.Run(fmt.Sprintf("keep at step %d", step), func(t *testing.T) {
+			b, c, claim, _ := cleanupFixture(t)
+			if step == -1 {
+				c.servers[0].Labels["keep"] = "true"
+			} else {
+				c.checkHook = func(current int) {
+					if current == step {
+						c.servers[0].Labels["keep"] = "true"
+					}
+				}
+			}
+			if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+				t.Fatal(err)
+			}
+			if c.stopCalls != 1 || c.deleteCalls != 1 {
+				t.Fatalf("stop=%d delete=%d", c.stopCalls, c.deleteCalls)
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
+				t.Fatalf("claim exists=%t err=%v", exists, err)
+			}
 		})
 	}
 }

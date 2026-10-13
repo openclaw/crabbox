@@ -129,6 +129,8 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	cfg.SSHKey = keyPath
 	name := core.LeaseProviderName(leaseID, slug)
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%s disk=%s keep=%v\n", providerName, leaseID, slug, cfg.Multipass.Image, cfg.Multipass.CPUs, core.Blank(cfg.Multipass.Memory, "-"), core.Blank(cfg.Multipass.Disk, "-"), req.Keep)
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, time.Now().UTC())
+	cfg = core.WithGuestLeaseExpiry(cfg, labels)
 	if err := b.createInstance(ctx, cfg, name, leaseID, slug, publicKey); err != nil {
 		_ = b.removeInstance(context.Background(), name)
 		return core.LeaseTarget{}, err
@@ -154,7 +156,6 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, rollbackProvisioned(err)
 	}
-	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, time.Now().UTC())
 	labels["instance"] = name
 	labels["image"] = cfg.Multipass.Image
 	labels["ssh_user"] = cfg.Multipass.User

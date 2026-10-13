@@ -173,15 +173,15 @@ func coordinatorInvalidLeaseSSHNamespace(t *testing.T, leaseID string) string {
 	return path
 }
 
-func TestCoordinatorListUsesUserLeasesWithoutAdminProbe(t *testing.T) {
+func TestListStreamingCoordinatorUsesUserLeasesWithoutAdminProbe(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/pool":
 			t.Error("ordinary list must not probe the admin pool")
 			http.Error(w, "unexpected admin probe", http.StatusInternalServerError)
 		case "/v1/leases":
-			if got := r.URL.Query().Get("state"); got != "" {
-				t.Fatalf("leases state=%q", got)
+			if got := r.URL.Query().Get("state"); got != "active" && got != "provisioning" {
+				t.Errorf("leases state=%q", got)
 			}
 			if got := r.Header.Get("Authorization"); got != "Bearer user-token" {
 				t.Fatalf("leases auth=%q", got)
@@ -238,7 +238,7 @@ func TestCoordinatorListUsesUserLeasesWithoutAdminProbe(t *testing.T) {
 	}
 }
 
-func TestCoordinatorListAllFallsBackToUserLeasesWhenAdminTokenUnauthorized(t *testing.T) {
+func TestListStreamingCoordinatorAllFallsBackToUserLeasesWhenAdminTokenUnauthorized(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/pool":
@@ -282,13 +282,13 @@ func TestCoordinatorListAllFallsBackToUserLeasesWhenAdminTokenUnauthorized(t *te
 	}
 }
 
-func TestCoordinatorListJSONUsesUserLeasesWhenAdminTokenMissing(t *testing.T) {
+func TestListStreamingCoordinatorJSONUsesUserLeasesWhenAdminTokenMissing(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/leases" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
-		if got := r.URL.Query().Get("state"); got != "" {
-			t.Fatalf("leases state=%q", got)
+		if got := r.URL.Query().Get("state"); got != "active" && got != "provisioning" {
+			t.Errorf("leases state=%q", got)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"leases": []CoordinatorLease{
 			{

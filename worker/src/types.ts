@@ -1,5 +1,6 @@
 import type { AWSQualificationTransportBinding } from "./aws-qualification-contract";
 import type { LeaseLifetimePolicy } from "./lease-lifetime";
+import type { ServeRelayBackend } from "./serve-relay";
 
 export interface AWSCredentials {
   accessKeyId: string;
@@ -11,12 +12,27 @@ export interface AWSCredentials {
 export type AWSCredentialProvider = () => Promise<AWSCredentials>;
 
 export interface Env {
+  CRABBOX_LEASE_DEFAULT_TTL_SECONDS?: string;
+  CRABBOX_LEASE_DEFAULT_IDLE_TIMEOUT_SECONDS?: string;
+  CRABBOX_LEASE_MAX_TTL_SECONDS?: string;
+  CRABBOX_LEASE_EXTENSION?: string;
+  CRABBOX_LEASE_AUTO_EXTEND?: string;
+  CRABBOX_LEASE_POLICY_OVERRIDES?: string;
+  CRABBOX_RETAINED_RECONCILE?: string;
+  CRABBOX_RETAINED_RECONCILE_DELETE?: string;
+  CRABBOX_RETAINED_RECONCILE_GRACE_SECONDS?: string;
+  CRABBOX_RETAINED_RECONCILE_BUDGET?: string;
+  CRABBOX_RETAINED_RECONCILE_LOOKUP_BUDGET?: string;
+  CRABBOX_RETAINED_RECONCILE_INTERVAL_SECONDS?: string;
+
   CRABBOX_LEASE_LIFETIME_MODE?: string;
   CRABBOX_BATCH_MAX_AGE_SECONDS?: string;
   CRABBOX_INTERACTIVE_MAX_AGE_SECONDS?: string;
   CRABBOX_STOPPED_RETENTION_SECONDS?: string;
   CRABBOX_PORTABLE_POOLS_ENABLED?: string;
   FLEET: DurableObjectNamespace;
+  SERVE_RELAY?: DurableObjectNamespace;
+  serveRelayBackend?: ServeRelayBackend;
   CF_VERSION_METADATA?: {
     id: string;
     tag?: string;
@@ -365,6 +381,7 @@ export interface LeaseRegistrationRequest {
 
 export const coordinatorProviderRegistry = [
   {
+    runtimeExtension: true,
     provider: "serve",
     label: "Served machines",
     requiredSecrets: [],
@@ -372,6 +389,7 @@ export const coordinatorProviderRegistry = [
     supportsCapacityMarket: false,
   },
   {
+    runtimeExtension: true,
     provider: "hetzner",
     label: "Hetzner",
     requiredSecrets: ["HETZNER_TOKEN"],
@@ -379,6 +397,7 @@ export const coordinatorProviderRegistry = [
     supportsCapacityMarket: false,
   },
   {
+    runtimeExtension: true,
     provider: "aws",
     label: "AWS",
     requiredSecrets: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
@@ -386,6 +405,7 @@ export const coordinatorProviderRegistry = [
     supportsCapacityMarket: true,
   },
   {
+    runtimeExtension: true,
     provider: "azure",
     label: "Azure",
     requiredSecrets: [
@@ -398,6 +418,7 @@ export const coordinatorProviderRegistry = [
     supportsCapacityMarket: true,
   },
   {
+    runtimeExtension: true,
     provider: "gcp",
     label: "GCP",
     requiredSecrets: ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"],
@@ -405,6 +426,7 @@ export const coordinatorProviderRegistry = [
     supportsCapacityMarket: true,
   },
   {
+    runtimeExtension: false,
     provider: "daytona",
     label: "Daytona",
     requiredSecrets: ["DAYTONA_CRABBOX_KEY"],
@@ -412,6 +434,7 @@ export const coordinatorProviderRegistry = [
     supportsCapacityMarket: false,
   },
 ] as const satisfies readonly {
+  runtimeExtension: boolean;
   provider: string;
   label: string;
   requiredSecrets: readonly (keyof Env)[];
@@ -479,6 +502,24 @@ export interface HetznerCleanupEvidence {
 export type ProviderCleanupEvidence = HetznerCleanupEvidence;
 
 export interface LeaseRecord {
+  leasePolicy?: import("./config").LeasePolicy;
+  policyNotice?: string;
+  extensionHistory?: {
+    at: string;
+    actor: string;
+    fromTTL: number;
+    toTTL: number;
+    reason?: string;
+  }[];
+  retainedReconcileDeleteClaim?: string;
+  retainedReconcileDeleteCredentialFingerprint?: string;
+  retainedReconcileObservation?: {
+    fingerprint: string;
+    credentialFingerprint: string;
+    firstAbsentAt: string;
+    lastAbsentAt: string;
+  };
+  cleanupConfirmedBy?: "retained-reconcile";
   serve?: import("./serve").ServeAssignment;
   serveIntent?: string;
   sshHostKeyFingerprint?: string;
@@ -555,7 +596,15 @@ export interface LeaseRecord {
   sshUser: string;
   sshPort: string;
   sshFallbackPorts?: string[];
-  sshJump?: { host: string; port: number; hostKey: string; fingerprint: string };
+  serveRelaySessions?: string[];
+  sshJump?: {
+    host: string;
+    port: number;
+    hostKey: string;
+    fingerprint: string;
+    candidates?: { host: string; port: number }[];
+    relay?: boolean;
+  };
   sshHostKey?: string;
   providerAccessExpiresAt?: string;
   workRoot: string;

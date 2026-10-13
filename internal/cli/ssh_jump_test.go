@@ -33,7 +33,7 @@ func TestSSHJumpPinsBothHopsAndQuotesProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for address, value := range map[string]string{id + ":22": inner, "127.0.0.1:2222": outer} {
+	for address, value := range map[string]string{id + ":22": inner, target.SSHJump.HostKeyAlias + ":22": outer} {
 		pub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(value))
 		if err := verify(address, testSSHAddr(address), pub); err != nil {
 			t.Fatalf("pin %s: %v", address, err)
@@ -42,7 +42,7 @@ func TestSSHJumpPinsBothHopsAndQuotesProxy(t *testing.T) {
 	if !strings.Contains(target.ProxyCommand, "%%h") || !strings.Contains(target.ProxyCommand, "StrictHostKeyChecking=yes") || !strings.Contains(target.ProxyCommand, "IdentityAgent=none") || !strings.Contains(target.ProxyCommand, id+":22") {
 		t.Fatal(target.ProxyCommand)
 	}
-	if !bytes.Contains(data, []byte("[127.0.0.1]:2222")) {
+	if !bytes.Contains(data, []byte(target.SSHJump.HostKeyAlias)) || !strings.Contains(target.ProxyCommand, "HostKeyAlias="+target.SSHJump.HostKeyAlias) {
 		t.Fatal(string(data))
 	}
 	info, _ := os.Stat(target.KnownHostsFile)

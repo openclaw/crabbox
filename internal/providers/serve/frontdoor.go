@@ -27,8 +27,10 @@ const (
 )
 
 type frontDoorEndpoint struct {
-	Port    int    `json:"port"`
-	HostKey string `json:"hostKey"`
+	Relay      bool               `json:"relay,omitempty"`
+	Candidates []addressCandidate `json:"candidates,omitempty"`
+	Port       int                `json:"port"`
+	HostKey    string             `json:"hostKey"`
 }
 type frontLease struct {
 	key         []byte
@@ -40,7 +42,8 @@ type frontLease struct {
 	streams     int
 }
 type frontDoor struct {
-	listener   net.Listener
+	listeners  map[string]net.Listener
+	candidates []addressCandidate
 	signer     ssh.Signer
 	mu         sync.Mutex
 	leases     map[string]*frontLease
@@ -98,25 +101,68 @@ func frontDoorHostKey(dir string) (ssh.Signer, error) {
 	return signer, nil
 }
 
-func startFrontDoor(dir, address string) (*frontDoor, error) {
+type frontDoorAddressError struct{ error }
+
+func startFrontDoors(dir string, candidates []addressCandidate, port int, log io.Writer) (*frontDoor, error) {
 	signer, err := frontDoorHostKey(dir)
 	if err != nil {
 		return nil, err
 	}
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		return nil, fmt.Errorf("bind serve SSH front door %s: %w; free that address/port or select --ssh-port and --advertise-address", address, err)
+	f := &frontDoor{listeners: map[string]net.Listener{}, signer: signer, leases: map[string]*frontLease{}, sockets: map[net.Conn]struct{}{}, handshakes: make(chan struct{}, frontDoorHandshakes)}
+	if _, err := f.rebind(candidates, port, log); err != nil {
+		f.Close()
+		return nil, err
 	}
-	f := &frontDoor{listener: listener, signer: signer, leases: map[string]*frontLease{}, sockets: map[net.Conn]struct{}{}, handshakes: make(chan struct{}, frontDoorHandshakes)}
-	f.wg.Add(1)
-	go f.accept()
 	return f, nil
 }
+
+// Keep listeners for unchanged addresses (and all authenticated sessions).
+// Newly bound addresses are the only addresses published to the coordinator.
+func (f *frontDoor) rebind(candidates []addressCandidate, port int, log io.Writer) ([]addressCandidate, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return nil, &frontDoorAddressError{fmt.Errorf("serve front door closed")}
+	}
+	next := map[string]net.Listener{}
+	var bound []addressCandidate
+	for _, candidate := range candidates {
+		address := net.JoinHostPort(candidate.Address, strconv.Itoa(port))
+		listener := f.listeners[address]
+		if listener == nil {
+			var err error
+			listener, err = net.Listen("tcp4", address)
+			if err != nil {
+				if log != nil {
+					fmt.Fprintf(log, "serve front door: bind %s: %v\n", address, err)
+				}
+				continue
+			}
+			f.wg.Add(1)
+			go f.accept(listener)
+		}
+		next[address] = listener
+		bound = append(bound, candidate)
+	}
+	for address, listener := range f.listeners {
+		if next[address] == nil {
+			_ = listener.Close()
+		}
+	}
+	f.listeners, f.candidates = next, bound
+	if len(bound) == 0 {
+		return nil, &frontDoorAddressError{fmt.Errorf("no serve SSH front-door addresses bound; free the configured port or select --ssh-port and --advertise-address")}
+	}
+	return append([]addressCandidate(nil), bound...), nil
+}
+
 func (f *frontDoor) Close() {
 	f.mu.Lock()
 	if !f.closed {
 		f.closed = true
-		_ = f.listener.Close()
+		for _, listener := range f.listeners {
+			_ = listener.Close()
+		}
 		for _, l := range f.leases {
 			f.revoke(l)
 		}
@@ -194,36 +240,50 @@ func (a *agent) updateFrontDoor(containers []localcontainer.ServedContainer) {
 	f.leases = next
 }
 
-func (f *frontDoor) accept() {
+func (f *frontDoor) accept(listener net.Listener) {
 	defer f.wg.Done()
 	for {
-		c, err := f.listener.Accept()
+		c, err := listener.Accept()
 		if err != nil {
 			return
 		}
-		f.mu.Lock()
-		if f.closed {
-			f.mu.Unlock()
+		f.admit(c, "")
+	}
+}
+
+// Relay admissions are pre-bound to their minted lease, including while SSH
+// authentication is pending. The same key and channel policy still applies.
+func (f *frontDoor) admit(c net.Conn, leaseID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		_ = c.Close()
+		return
+	}
+	var bound *frontLease
+	if leaseID != "" {
+		bound = f.leases[leaseID]
+		if bound == nil || !bound.deadline.After(time.Now()) || len(bound.connections) >= frontDoorConnections {
 			_ = c.Close()
 			return
 		}
-		select {
-		case f.handshakes <- struct{}{}:
-			f.sockets[c] = struct{}{}
-			f.wg.Add(1)
-			go f.serve(c)
-		default:
-			_ = c.Close()
+	}
+	select {
+	case f.handshakes <- struct{}{}:
+		f.sockets[c] = struct{}{}
+		if bound != nil {
+			bound.connections[c] = struct{}{}
 		}
-		f.mu.Unlock()
+		f.wg.Add(1)
+		go f.serve(c, bound, leaseID)
+	default:
+		_ = c.Close()
 	}
 }
-func (f *frontDoor) serve(raw net.Conn) {
+func (f *frontDoor) serve(raw net.Conn, bound *frontLease, id string) {
 	defer f.wg.Done()
 	defer raw.Close()
 	slot := true
-	var bound *frontLease
-	var id string
 	defer func() {
 		if slot {
 			<-f.handshakes

@@ -18,6 +18,9 @@ import (
 )
 
 type Config struct {
+	DirectLeases                  string
+	DirectLeaseAllow              []string
+	guestLeaseExpiry              *GuestLeaseExpiryFields
 	LifetimePolicy                *LeaseLifetimeRequest `json:"-" yaml:"-"`
 	RecordLocal                   bool                  `json:"-" yaml:"-"`
 	Profile                       string
@@ -132,6 +135,7 @@ type Config struct {
 	ProviderKey                   string
 	WorkRoot                      string
 	explicitWorkRoot              string
+	MaxTTL                        time.Duration
 	TTL                           time.Duration
 	IdleTimeout                   time.Duration
 	WarmupKeep                    bool
@@ -1581,6 +1585,7 @@ func baseConfig() Config {
 	multipassImage, _ := osImageDefaultMultipassImage(osImage)
 	return Config{
 		Profile:                 "default",
+		DirectLeases:            "allow",
 		Provider:                provider,
 		providerSelectionSource: providerSelectionCompiledDefault,
 		TargetOS:                "linux",
@@ -1618,7 +1623,8 @@ func baseConfig() Config {
 		SSHFallbackPorts:        []string{"22"},
 		ProviderKey:             "crabbox-steipete",
 		WorkRoot:                defaultPOSIXWorkRoot,
-		TTL:                     90 * time.Minute,
+		TTL:                     30 * time.Minute,
+		MaxTTL:                  4 * time.Hour,
 		IdleTimeout:             30 * time.Minute,
 		WarmupKeep:              true,
 		ClaimsAutoPrune:         true,
@@ -1737,12 +1743,16 @@ func baseConfig() Config {
 }
 
 type ServeConfig struct {
-	SSHPort  int    `yaml:"sshPort,omitempty"`
-	Machine  string `yaml:"machine,omitempty"`
-	Fallback string `yaml:"fallback,omitempty"`
+	AdvertiseAddresses []string `yaml:"advertiseAddresses,omitempty"`
+	NoLANCandidates    bool     `yaml:"noLANCandidates,omitempty"`
+	SSHPort            int      `yaml:"sshPort,omitempty"`
+	Machine            string   `yaml:"machine,omitempty"`
+	Fallback           string   `yaml:"fallback,omitempty"`
 }
 
 type fileConfig struct {
+	DirectLeases             string                              `yaml:"directLeases,omitempty"`
+	DirectLeaseAllow         *[]string                           `yaml:"directLeaseAllow,omitempty"`
 	Serve                    *ServeConfig                        `yaml:"serve,omitempty"`
 	Claims                   *fileClaimsConfig                   `yaml:"claims,omitempty"`
 	History                  *fileLocalHistoryPolicy             `yaml:"history,omitempty"`
@@ -1862,6 +1872,7 @@ type fileConfig struct {
 	Presets                  map[string]filePresetConfig         `yaml:"presets,omitempty"`
 	ProofTemplates           map[string]fileProofTemplateConfig  `yaml:"proofTemplates,omitempty"`
 	Jobs                     map[string]fileJobConfig            `yaml:"jobs,omitempty"`
+	MaxTTL                   string                              `yaml:"maxTTL,omitempty"`
 	TTL                      string                              `yaml:"ttl,omitempty"`
 	IdleTimeout              string                              `yaml:"idleTimeout,omitempty"`
 	WorkRoot                 string                              `yaml:"workRoot,omitempty"`
@@ -2547,6 +2558,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 }
 
 func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, trusted bool, providerSource providerSelectionSource) error {
+	if err := applyDirectLeaseFileConfig(cfg, file, trusted); err != nil {
+		return err
+	}
 	if file.Serve != nil {
 		cfg.Serve = *file.Serve
 	}
@@ -2955,6 +2969,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		cfg.WorkRoot = file.WorkRoot
 		recordConfigInput(cfg, configInputGeneric, inputSource, true)
 		cfg.explicitWorkRoot = file.WorkRoot
+	}
+	if file.MaxTTL != "" {
+		duration, err := parseMaxTTL(file.MaxTTL)
+		if err != nil {
+			return err
+		}
+		cfg.MaxTTL = duration
 	}
 	recordConfigInput(cfg, configInputGeneric, inputSource, applyLeaseDuration(&cfg.TTL, file.TTL))
 	recordConfigInput(cfg, configInputGeneric, inputSource, applyLeaseDuration(&cfg.IdleTimeout, file.IdleTimeout))
@@ -3933,6 +3954,31 @@ func applyNonNegativeLeaseDuration(target *time.Duration, value string) bool {
 }
 
 func applyEnv(cfg *Config) error {
+	if value := os.Getenv("CRABBOX_DIRECT_LEASES"); strings.TrimSpace(value) != "" {
+		policy, err := normalizeDirectLeases(value)
+		if err != nil {
+			return err
+		}
+		cfg.DirectLeases = policy
+	}
+	if value, ok := os.LookupEnv("CRABBOX_DIRECT_LEASE_ALLOW"); ok {
+		allow, err := normalizeDirectLeaseAllow(strings.Split(value, ","))
+		if err != nil {
+			return err
+		}
+		cfg.DirectLeaseAllow = allow
+	}
+	if value, ok := os.LookupEnv("CRABBOX_SERVE_ADVERTISE_ADDRESSES"); ok {
+		cfg.Serve.AdvertiseAddresses = strings.Split(value, ",")
+	}
+	if value, ok := os.LookupEnv("CRABBOX_SERVE_NO_LAN_CANDIDATES"); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("CRABBOX_SERVE_NO_LAN_CANDIDATES must be a boolean")
+		}
+		cfg.Serve.NoLANCandidates = parsed
+	}
+
 	cfg.Serve.Machine = getenv("CRABBOX_SERVE_MACHINE", cfg.Serve.Machine)
 	cfg.Serve.Fallback = getenv("CRABBOX_SERVE_FALLBACK", cfg.Serve.Fallback)
 	if v := os.Getenv("CRABBOX_SERVE_SSH_PORT"); v != "" {
@@ -4295,6 +4341,13 @@ func applyEnv(cfg *Config) error {
 		cfg.WorkRoot = workRoot
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
 		cfg.explicitWorkRoot = workRoot
+	}
+	if value := os.Getenv("CRABBOX_MAX_TTL"); value != "" {
+		duration, err := parseMaxTTL(value)
+		if err != nil {
+			return err
+		}
+		cfg.MaxTTL = duration
 	}
 	if ttl := os.Getenv("CRABBOX_TTL"); ttl != "" {
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, applyLeaseDuration(&cfg.TTL, ttl))
@@ -5700,4 +5753,46 @@ func TencentCloudTypeWasExplicit(cfg Config) bool {
 
 func SetTencentCloudTypeExplicit(cfg *Config) {
 	cfg.tencentCloudTypeExplicit = true
+}
+
+func parseMaxTTL(value string) (time.Duration, error) {
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 || duration > 24*time.Hour {
+		return 0, Exit(2, "maxTTL / CRABBOX_MAX_TTL must be a positive duration no greater than 24h")
+	}
+	return duration, nil
+}
+
+func EffectiveMaxTTL(cfg Config) time.Duration {
+	if cfg.MaxTTL <= 0 {
+		return 4 * time.Hour
+	}
+	return min(cfg.MaxTTL, 24*time.Hour)
+}
+
+func clampDirectLeaseDurations(cfg Config) Config {
+	cfg.MaxTTL = EffectiveMaxTTL(cfg)
+	cfg.TTL = min(cfg.TTL, cfg.MaxTTL)
+	cfg.IdleTimeout = min(cfg.IdleTimeout, cfg.TTL)
+	return cfg
+}
+
+func (a App) reportDirectLeasePolicyNotice(cfg Config) {
+	provider, err := ProviderFor(cfg.Provider)
+	if err != nil || ShouldUseCoordinator(cfg, provider.Spec()) {
+		return
+	}
+	effective := clampDirectLeaseDurations(cfg)
+	if effective.TTL != cfg.TTL || effective.IdleTimeout != cfg.IdleTimeout {
+		fmt.Fprintf(a.Stderr, "Lease policy clamped lifetime to %s and idle timeout to %s.\n", effective.TTL, effective.IdleTimeout)
+	}
+}
+
+func (a App) reportIdleTimeoutPolicyNotice(requested *time.Duration, server Server) {
+	if requested == nil {
+		return
+	}
+	if effective, ok := directLeaseIdleTimeout(server.Labels); ok && effective < *requested {
+		fmt.Fprintf(a.Stderr, "Lease policy clamped idle timeout to %s.\n", effective)
+	}
 }

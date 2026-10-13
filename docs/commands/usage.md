@@ -55,9 +55,9 @@ Human output prints one total row, then any non-empty group breakdowns (owners, 
 
 ```text
 usage month=2026-05 scope=user user=github:12345 org=example-org
-total leases=2 active=0 runtime=12m41s estimated=$0.13 reserved=$4.57
+total leases=2 active=0 runtime=12m41s estimated=$0.13 reserved=$4.57 committed=$0.13
 owners:
-  github:12345             leases=2   active=0   runtime=12m41s    estimated=$0.13     reserved=$4.57
+  github:12345             leases=2   active=0   runtime=12m41s    estimated=$0.13     reserved=$4.57 committed=$0.13
 limits:
   active leases: fleet=off user=off org=off
   monthly usd:   fleet=off user=off org=off
@@ -75,6 +75,7 @@ limits:
     "runtimeSeconds": 13551,
     "estimatedUSD": 0.13,
     "reservedUSD": 4.57,
+    "committedUSD": 0.13,
     "byOwner": [],
     "byOrg": [],
     "byProvider": [],
@@ -93,11 +94,32 @@ limits:
 }
 ```
 
-## Estimated vs reserved cost
+## Estimated, reserved, and committed cost
 
-`estimatedUSD` is the elapsed-runtime cost for leases in the selected month.
+`estimatedUSD` is the elapsed-runtime cost for leases in the selected month. Terminal
+runtime stops at the persisted end/release time or last observation for legacy rows;
+late release and cleanup preserve that boundary. Confirmed never-allocated leases
+have zero compute runtime.
 
 `reservedUSD` is the worst-case cost based on each lease's TTL. The broker computes reserved cost before provisioning so monthly spend guardrails can reject a lease before any machine is created.
+
+`committedUSD` is the budget contribution, reported in totals and every breakdown.
+Active and provisioning leases retain their full reservation, including live managed
+leases past their heartbeat deadline and retained machines whose compute is still
+running, including older retained VMs without a lifetime policy. Finished leases (released, expired, deleted, reclaimed, or failed) settle to
+elapsed billable runtime times the recorded hourly rate, capped at their reservation;
+leases that never provisioned contribute zero. Existing finished records settle on
+read without a backfill. Unresolved provisioning keeps its reservation until cleanup
+confirms completion. Recorded stop/resume intervals exclude stopped time.
+
+Monthly admission adds a candidate's full reservation to existing committed costs,
+checking fleet, owner, and org budgets after active-lease limits. Finished costs remain
+in the creation month. Live leases from previous months still reserve admission budget,
+although this report keeps its selected-month filter.
+
+Current CLIs append `committed=$...` to text rows and preserve `committedUSD` in JSON.
+Older CLIs ignore the additive field and keep rendering existing columns. If the
+coordinator omits it, newer CLIs retain the old output without inventing a value.
 
 Cost values are estimates for compute leases, not provider invoice reconciliation. They do not fully model provider extras such as static public IP charges, egress, storage, snapshots, taxes, credits, or discounts.
 

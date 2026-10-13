@@ -324,7 +324,7 @@ func TestTartHeartbeatPersistsAcrossFreshResolve(t *testing.T) {
 			claim := original
 			claim.Labels = maps.Clone(original.Labels)
 			claim.Labels["state"] = "ready"
-			claim.Labels["ttl_secs"] = "3600"
+			claim.Labels["ttl_secs"] = "5400"
 			claim.Labels["image"] = "fixture-image"
 			for _, key := range []string{"created_at", "last_touched_at", "expires_at", "idle_timeout", "idle_timeout_secs"} {
 				delete(claim.Labels, key)
@@ -368,7 +368,7 @@ func TestTartHeartbeatPersistsAcrossFreshResolve(t *testing.T) {
 				override := 90 * time.Minute
 				req.IdleTimeoutOverride = &override
 				wantIdle = 5400
-				wantExpiry = now.Add(40 * time.Minute)
+				wantExpiry = now.Add(70 * time.Minute)
 			}
 			touched, err := b.Touch(context.Background(), req)
 			if err != nil {

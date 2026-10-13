@@ -309,6 +309,17 @@ cutover.
 
 ### Cloudflare Worker
 
+The `Deploy Coordinator` workflow deploys matching `main` changes and can also
+run manually. A missing `coordinator` environment API token fails the job.
+Each upload is tagged with the full commit SHA. After all deployment steps,
+verification requires one Cloudflare version receiving 100% of traffic and
+an uncached public `/v1/health` response with that version ID and SHA tag.
+The deployment must remain unchanged across the check. A gradual rollout,
+stale route, unavailable API, or missing version metadata fails visibly.
+Verification only reads deployment metadata and health; it creates no lease.
+If manually clearing the Daytona snapshot creates a new untagged version,
+verification fails too; inspect the final version before rerunning the deploy.
+
 Worker source lives in `worker/`. Run the gate, then deploy:
 
 ```sh
@@ -335,6 +346,13 @@ CRABBOX_DEPLOY_SMOKE_URLS="https://$BROKER_HOST/v1/health" \
   CRABBOX_LIVE_REPO=/path/to/my-app \
   scripts/deploy-worker-smoke.sh
 ```
+
+The AWS smoke pins Linux/amd64, class `tiny`, and On-Demand `t3.small` (2 vCPU,
+2 GiB), the smallest instance in Crabbox's supported AWS amd64 class catalog.
+Both warmup and run override inherited target, architecture, and machine sizing.
+The smoke fails if that exact type is unavailable;
+it does not fall back to a larger instance. The smoke runs without repository sync
+and attempts to stop its lease after the command or on failure, with a 20-minute TTL as a backstop.
 
 ### Node.js And PostgreSQL
 

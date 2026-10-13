@@ -30,13 +30,19 @@ import (
 // SSHJump describes an authenticated SSH transport hop; the destination still
 // has its own end-to-end SSH host key and authentication.
 type SSHJump struct {
-	Host        string `json:"host"`
-	Port        int    `json:"port"`
-	HostKey     string `json:"hostKey"`
-	Fingerprint string `json:"fingerprint,omitempty"`
+	Relay        bool `json:"relay,omitempty"`
+	useRelay     bool
+	Candidates   []SSHJumpCandidate `json:"candidates,omitempty"`
+	HostKeyAlias string             `json:"-"`
+	Host         string             `json:"host"`
+	Port         int                `json:"port"`
+	HostKey      string             `json:"hostKey"`
+	Fingerprint  string             `json:"fingerprint,omitempty"`
 }
 
 type SSHTarget struct {
+	relayConfig             *Config
+	relayCoordinator        *CoordinatorClient
 	SSHJump                 *SSHJump
 	User                    string
 	Host                    string
@@ -119,6 +125,10 @@ func sshTargetForLeaseConnection(cfg Config, host, user, port, hostKey string, j
 		TargetOS:         cfg.TargetOS,
 		WindowsMode:      cfg.WindowsMode,
 		ChildEnvDenylist: externalDesktopChildEnvDenylist(cfg, cfg.TargetOS),
+	}
+	if jump != nil && jump.Relay {
+		relayCfg := cfg
+		target.relayConfig = &relayCfg
 	}
 	configureProviderSSHTarget(cfg, &target)
 	return target
@@ -1433,6 +1443,7 @@ func sshForwardingDenyArgs() []string {
 }
 
 func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts string) []string {
+	connectTimeout = relaySSHConnectTimeout(connectTimeout, usesServeRelay(target))
 	args := append(sshForwardingDenyArgs(),
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout="+connectTimeout,

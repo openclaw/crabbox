@@ -197,6 +197,7 @@ func (a App) watchWithBackend(ctx context.Context, opts watchOptions, repo Repo,
 	if err != nil {
 		return err
 	}
+	a.reportDirectLeasePolicyNotice(cfg)
 	lease, err := backend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: opts.Keep, Reclaim: opts.Reclaim, RequestedSlug: opts.RequestedSlug})
 	if err != nil {
 		return err

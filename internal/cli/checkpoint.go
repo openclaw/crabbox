@@ -1326,6 +1326,9 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 	if *jsonOut {
 		operationApp.Stdout = a.Stderr
 	}
+	if err := validateDirectLeaseCreation(cfg); err != nil {
+		return err
+	}
 	backend, err := loadBackend(cfg, runtimeForApp(operationApp))
 	if err != nil {
 		return err
@@ -1625,6 +1628,7 @@ func (a App) provisionCheckpointForkWithoutClaim(ctx context.Context, cfg Config
 		native := nativeCheckpointForkRecord(record)
 		source = &native
 	}
+	a.reportDirectLeasePolicyNotice(cfg)
 	lease, err := sshBackend.Acquire(ctx, AcquireRequest{
 		Repo: repo, Options: leaseOptionsFromConfig(cfg), Keep: keep, Reclaim: reclaim,
 		RequestedLeaseID: requestedLeaseID, RequestedCheckpointID: checkpointID, RequestedSlug: requestedSlug,
@@ -1909,6 +1913,9 @@ func (a App) checkpointForkParallelsSnapshot(ctx context.Context, fs *flag.FlagS
 	if jsonOut {
 		operationApp.Stdout = a.Stderr
 	}
+	if err := validateDirectLeaseCreation(cfg); err != nil {
+		return err
+	}
 	backend, err := loadBackend(cfg, runtimeForApp(operationApp))
 	if err != nil {
 		return err
@@ -1949,6 +1956,7 @@ func loadCheckpointForkParallelsConfig(fs *flag.FlagSet, leaseFlags leaseCreateF
 }
 
 func (a App) checkpointForkParallelsSnapshotOnce(ctx context.Context, cfg Config, sshBackend SSHLeaseBackend, repo Repo, source, snapshot string, keep, reclaim bool, requestedSlug string, runOpts checkpointForkRunOptions) (err error) {
+	a.reportDirectLeasePolicyNotice(cfg)
 	lease, err := sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: leaseOptionsFromConfig(cfg), Keep: keep, Reclaim: reclaim, RequestedSlug: requestedSlug})
 	if err != nil {
 		return err

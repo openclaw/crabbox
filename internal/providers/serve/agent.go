@@ -9,13 +9,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -61,10 +61,16 @@ type assignment struct {
 	IdleDeadline int64     `json:"idleDeadline"`
 	State        string    `json:"state"`
 }
+type relayAssignment struct {
+	SessionID  string `json:"sessionID"`
+	LeaseID    string `json:"leaseID"`
+	AgentToken string `json:"agentToken"`
+}
 type heartbeat struct {
-	Assignments []assignment `json:"assignments"`
-	Stop        []string     `json:"stop"`
-	ServerTime  int64        `json:"serverTime"`
+	Relays      []relayAssignment `json:"relays,omitempty"`
+	Assignments []assignment      `json:"assignments"`
+	Stop        []string          `json:"stop"`
+	ServerTime  int64             `json:"serverTime"`
 }
 type localState struct {
 	Machine     machine               `json:"machine"`
@@ -73,15 +79,19 @@ type localState struct {
 	Assignments map[string]assignment `json:"assignments"`
 }
 type options struct {
-	cpus                             int
-	memory                           string
-	maxLeases                        int
-	name, address, runtime, stateDir string
-	sshPort                          int
-	interval                         time.Duration
-	noCache, drain                   bool
+	cpus                    int
+	memory                  string
+	maxLeases               int
+	name, runtime, stateDir string
+	addresses               []string
+	noLAN                   bool
+	sshPort                 int
+	interval                time.Duration
+	noCache, drain          bool
 }
 type agent struct {
+	relayMu               sync.Mutex
+	relays                map[string]bool
 	lastHeartbeatReturned time.Time
 	opts                  options
 	state                 localState
@@ -90,6 +100,7 @@ type agent struct {
 	rt                    core.Runtime
 	volumes               []core.CacheVolumeConfig
 	frontDoor             *frontDoor
+	detectAddresses       func() ([]addressCandidate, error)
 	startPreparation      func(context.Context)
 }
 type containerRuntime interface {
@@ -130,7 +141,31 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	fs.StringVar(&o.memory, "memory", o.memory, "Required memory offer, e.g. 48g")
 	fs.IntVar(&o.maxLeases, "max-leases", o.maxLeases, "Maximum concurrent leases (1-32)")
 	fs.StringVar(&o.name, "name", o.name, "Machine name")
-	fs.StringVar(&o.address, "advertise-address", os.Getenv("CRABBOX_SERVE_ADVERTISE_ADDRESS"), "SSH address reachable by clients (default local CGNAT IPv4)")
+	o.addresses = append([]string(nil), cfg.Serve.AdvertiseAddresses...)
+	// The released singular environment variable remains a supported fallback.
+	if len(o.addresses) == 0 && os.Getenv("CRABBOX_SERVE_ADVERTISE_ADDRESS") != "" {
+		o.addresses = []string{os.Getenv("CRABBOX_SERVE_ADVERTISE_ADDRESS")}
+	}
+	if value, ok := os.LookupEnv("CRABBOX_SERVE_ADVERTISE_ADDRESSES"); ok {
+		o.addresses = strings.Split(value, ",")
+	}
+	o.noLAN = cfg.Serve.NoLANCandidates
+	if value, ok := os.LookupEnv("CRABBOX_SERVE_NO_LAN_CANDIDATES"); ok {
+		o.noLAN, err = strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("CRABBOX_SERVE_NO_LAN_CANDIDATES must be a boolean")
+		}
+	}
+	explicitFlags := false
+	fs.Func("advertise-address", "Client-reachable IPv4 (repeatable, max 4; replaces automatic candidates)", func(value string) error {
+		if !explicitFlags {
+			o.addresses = nil
+			explicitFlags = true
+		}
+		o.addresses = append(o.addresses, value)
+		return nil
+	})
+	fs.BoolVar(&o.noLAN, "no-lan-candidates", o.noLAN, "Disable automatic private LAN addresses")
 	fs.IntVar(&o.sshPort, "ssh-port", o.sshPort, "Agent SSH front-door port (1-65535)")
 	fs.StringVar(&o.runtime, "runtime", o.runtime, "docker or podman")
 	fs.StringVar(&o.stateDir, "state-dir", o.stateDir, "Private agent state directory")
@@ -240,11 +275,11 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	if o.runtime != "docker" && o.runtime != "podman" {
 		return fmt.Errorf("serve runtime must be docker or podman")
 	}
-	o.address, err = advertiseAddress(o.address, nil)
+	candidates, err := detectCandidates(o.addresses, o.noLAN, nil)
 	if err != nil {
 		return err
 	}
-	front, err := startFrontDoor(o.stateDir, net.JoinHostPort(o.address, strconv.Itoa(o.sshPort)))
+	front, err := startFrontDoors(o.stateDir, candidates, o.sshPort, rt.Stderr)
 	if err != nil {
 		return err
 	}
@@ -259,7 +294,7 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	if err != nil {
 		return err
 	}
-	state.Machine = machine{MachineID: state.Machine.MachineID, Name: o.name, OS: runtime.GOOS, Arch: runtime.GOARCH, CPUs: o.cpus, MemoryMB: memory, MaxLeases: o.maxLeases, Address: o.address, FrontDoor: frontDoorEndpoint{Port: o.sshPort, HostKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(front.signer.PublicKey())))}, Runtime: o.runtime, RuntimeVersion: version, AgentVersion: core.Version(), Image: container.Image(), Labels: map[string]string{}, FreeMemoryMB: memory}
+	state.Machine = machine{MachineID: state.Machine.MachineID, Name: o.name, OS: runtime.GOOS, Arch: runtime.GOARCH, CPUs: o.cpus, MemoryMB: memory, MaxLeases: o.maxLeases, Address: front.candidates[0].Address, FrontDoor: frontDoorEndpoint{Relay: true, Candidates: front.candidates, Port: o.sshPort, HostKey: strings.TrimSpace(string(ssh.MarshalAuthorizedKey(front.signer.PublicKey())))}, Runtime: o.runtime, RuntimeVersion: version, AgentVersion: core.Version(), Image: container.Image(), Labels: map[string]string{}, FreeMemoryMB: memory}
 	state.Coordinator = cfg.Coordinator
 	if state.Assignments == nil {
 		state.Assignments = map[string]assignment{}
@@ -284,6 +319,10 @@ func (a *agent) run(ctx context.Context) error {
 	for {
 		pollStart := time.Now()
 		if err := a.poll(ctx); err != nil && ctx.Err() == nil {
+			var fatal *frontDoorAddressError
+			if errors.As(err, &fatal) {
+				return err
+			}
 			fmt.Fprintf(a.rt.Stderr, "serve heartbeat: %v\n", err)
 		}
 		if !startedPreparation && a.startPreparation != nil {
@@ -318,32 +357,6 @@ func parseMemory(s string) (int, error) {
 		return 0, fmt.Errorf("--memory is required and must be a positive MiB or GiB amount, e.g. 48g")
 	}
 	return n * factor, nil
-}
-func advertiseAddress(explicit string, addrs []net.Addr) (string, error) {
-	if explicit != "" {
-		ip := net.ParseIP(explicit)
-		if ip == nil || ip.To4() == nil || ip.IsUnspecified() || ip.IsMulticast() {
-			return "", fmt.Errorf("--advertise-address must be a unicast IPv4 address")
-		}
-		return ip.String(), nil
-	}
-	if addrs == nil {
-		var err error
-		addrs, err = net.InterfaceAddrs()
-		if err != nil {
-			return "", err
-		}
-	}
-	for _, a := range addrs {
-		ip, _, err := net.ParseCIDR(a.String())
-		if err == nil {
-			v := ip.To4()
-			if v != nil && v[0] == 100 && v[1] >= 64 && v[1] <= 127 {
-				return ip.String(), nil
-			}
-		}
-	}
-	return "", fmt.Errorf("no CGNAT IPv4 (100.64.0.0/10) found; set --advertise-address to an address clients can reach")
 }
 func cacheVolumes(id string, configured []core.CacheVolumeConfig) []core.CacheVolumeConfig {
 	if len(configured) == 0 {
@@ -402,6 +415,22 @@ func (a *agent) ownedContainers(ctx context.Context) ([]localcontainer.ServedCon
 	return out, nil
 }
 func (a *agent) poll(ctx context.Context) error {
+	if a.frontDoor != nil {
+		detect := a.detectAddresses
+		if detect == nil {
+			detect = func() ([]addressCandidate, error) { return detectCandidates(a.opts.addresses, a.opts.noLAN, nil) }
+		}
+		candidates, err := detect()
+		if err != nil {
+			return &frontDoorAddressError{err}
+		}
+		bound, err := a.frontDoor.rebind(candidates, a.opts.sshPort, a.rt.Stderr)
+		if err != nil {
+			return err
+		}
+		a.state.Machine.Address = bound[0].Address
+		a.state.Machine.FrontDoor.Candidates = bound
+	}
 	bounded, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	containers, err := a.ownedContainers(bounded)
@@ -450,6 +479,7 @@ func (a *agent) poll(ctx context.Context) error {
 	}
 	a.state.Assignments = active
 	a.updateFrontDoor(containers)
+	a.startRelays(ctx, response.Relays)
 	for _, id := range imageMismatches {
 		a.failed(bounded, id, "serve_image_mismatch")
 	}
@@ -563,4 +593,37 @@ func showStatus(dir string, asJSON bool, rt core.Runtime) error {
 	}
 	fmt.Fprintf(rt.Stdout, "machine=%s name=%s coordinator=%s coordinator_reachable=%t last_success=%s active_leases=%d cpus=%d memoryMB=%d draining=%t\n", s.Machine.MachineID, s.Machine.Name, s.Coordinator, s.Machine.Online, s.LastSuccess.Format(time.RFC3339), len(s.Assignments), s.Machine.CPUs, s.Machine.MemoryMB, s.Machine.Draining)
 	return nil
+}
+
+func (a *agent) startRelays(ctx context.Context, pending []relayAssignment) {
+	if a.frontDoor == nil || len(pending) > 8 {
+		return
+	}
+	for _, session := range pending {
+		l, ok := a.state.Assignments[session.LeaseID]
+		if !ok || l.MachineID != a.state.Machine.MachineID || !deadline(l).After(time.Now()) || l.State != "active" {
+			continue
+		}
+		a.relayMu.Lock()
+		if a.relays == nil {
+			a.relays = map[string]bool{}
+		}
+		if a.relays[session.SessionID] || len(a.relays) >= 8 {
+			a.relayMu.Unlock()
+			continue
+		}
+		a.relays[session.SessionID] = true
+		a.relayMu.Unlock()
+		go func(session relayAssignment) {
+			defer func() { a.relayMu.Lock(); delete(a.relays, session.SessionID); a.relayMu.Unlock() }()
+			conn, err := core.DialServeRelay(ctx, a.coord, session.SessionID, "agent", session.AgentToken, a.state.Machine.MachineID, a.rt.Stderr)
+			if err != nil {
+				if ctx.Err() == nil {
+					fmt.Fprintln(a.rt.Stderr, "serve relay: connection failed")
+				}
+				return
+			}
+			a.frontDoor.admit(conn, session.LeaseID)
+		}(session)
+	}
 }

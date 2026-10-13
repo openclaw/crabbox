@@ -23,6 +23,7 @@ type sshTransportSession struct {
 	dir         string
 	configPath  string
 	destination string
+	serveRelay  bool
 	cleanup     func() error
 }
 
@@ -84,7 +85,7 @@ func newSSHTransportSession(ctx context.Context, target SSHTarget, localForward 
 	if err := secureSSHTransportPath(path, false); err != nil {
 		return fail(fmt.Errorf("secure private SSH transport config: %w", err))
 	}
-	return &sshTransportSession{dir: dir, configPath: path, destination: sshTransportDestination(target)}, nil
+	return &sshTransportSession{dir: dir, configPath: path, destination: sshTransportDestination(target), serveRelay: usesServeRelay(target)}, nil
 }
 
 func (s *sshTransportSession) Close() error {
@@ -194,7 +195,7 @@ func newWSLSSHTransportSession(ctx context.Context, target SSHTarget, wslExe, mo
 	if err := writeWSLSSHTransportFile(ctx, wslExe, configPath, []byte(config), target); err != nil {
 		return fail(err)
 	}
-	return &sshTransportSession{dir: dir, configPath: configPath, destination: sshTransportDestination(wslTarget), cleanup: cleanup}, nil
+	return &sshTransportSession{dir: dir, configPath: configPath, destination: sshTransportDestination(wslTarget), serveRelay: usesServeRelay(wslTarget), cleanup: cleanup}, nil
 }
 
 func validWSLSSHTransportDirectory(value string) bool {
@@ -288,6 +289,7 @@ func (s *sshTransportSession) commandPrefix() []string {
 }
 
 func (s *sshTransportSession) commandPrefixWithOptions(connectTimeout, connectionAttempts string) []string {
+	connectTimeout = relaySSHConnectTimeout(connectTimeout, s.serveRelay)
 	return append(s.commandPrefix(), "-o", "ConnectTimeout="+connectTimeout, "-o", "ConnectionAttempts="+connectionAttempts)
 }
 
@@ -652,7 +654,7 @@ func startOwnedSSHTransportSubsystem(ctx context.Context, target SSHTarget, conn
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	args := append(session.commandPrefix(), "-o", "ConnectTimeout="+connectTimeout, "-o", "ConnectionAttempts="+connectionAttempts, "-s", session.host(), subsystem)
+	args := append(session.commandPrefixWithOptions(connectTimeout, connectionAttempts), "-s", session.host(), subsystem)
 	handle := newOwnedSSHTransportCommand(ctx, target, args)
 	handle.cmd.Stderr = stderr
 	input, err := handle.cmd.StdinPipe()
@@ -970,7 +972,7 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 	b.WriteString("  ForwardX11 no\n")
 	b.WriteString("  ForwardX11Trusted no\n")
 	b.WriteString("  RequestTTY no\n")
-	b.WriteString("  ConnectTimeout 10\n")
+	b.WriteString("  ConnectTimeout " + relaySSHConnectTimeout("10", usesServeRelay(target)) + "\n")
 	b.WriteString("  ConnectionAttempts 1\n")
 	b.WriteString("  ServerAliveInterval 15\n")
 	b.WriteString("  ServerAliveCountMax 2\n")

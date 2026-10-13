@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -87,6 +86,10 @@ func TestAgentRestartReconcilesDuringSlowImagePreparation(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(heartbeat{Assignments: []assignment{l}})
 	}))
 	defer server.Close()
+	candidates, err := detectCandidates(nil, false, nil)
+	if err != nil {
+		t.Skip("no non-loopback IPv4 for agent integration")
+	}
 	dir := t.TempDir()
 	saved := agent{opts: options{stateDir: dir}, state: localState{Machine: machine{MachineID: l.MachineID}, Assignments: map[string]assignment{l.ID: l}}}
 	if err := saved.save(); err != nil {
@@ -94,7 +97,7 @@ func TestAgentRestartReconcilesDuringSlowImagePreparation(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		done <- (Provider{}).RunAgent(ctx, core.Config{Coordinator: server.URL, CoordToken: "synthetic", LocalContainer: core.LocalContainerConfig{Runtime: "docker", Image: l.Image}}, core.Runtime{Exec: f, Stdout: io.Discard, Stderr: io.Discard}, []string{"--state-dir", dir, "--memory", "2g", "--cpus", "2", "--advertise-address", "127.0.0.1", "--no-cache-volumes", "--poll-interval", "500ms"})
+		done <- (Provider{}).RunAgent(ctx, core.Config{Coordinator: server.URL, CoordToken: "synthetic", LocalContainer: core.LocalContainerConfig{Runtime: "docker", Image: l.Image}}, core.Runtime{Exec: f, Stdout: io.Discard, Stderr: io.Discard}, []string{"--state-dir", dir, "--memory", "2g", "--cpus", "2", "--advertise-address", candidates[0].Address, "--no-cache-volumes", "--poll-interval", "500ms"})
 	}()
 	defer func() {
 		cancel()
@@ -129,26 +132,6 @@ func TestAgentRestartReconcilesDuringSlowImagePreparation(t *testing.T) {
 	}
 }
 
-func TestAddressSelection(t *testing.T) {
-	for _, tt := range []struct{ ip, want string }{{"100.64.1.2/24", "100.64.1.2"}, {"100.127.255.1/24", "100.127.255.1"}, {"100.128.1.1/24", ""}, {"192.168.1.1/24", ""}} {
-		_, n, _ := net.ParseCIDR(tt.ip)
-		parts := strings.Split(tt.ip, "/")
-		n.IP = net.ParseIP(parts[0])
-		got, err := advertiseAddress("", []net.Addr{n})
-		if tt.want == "" {
-			if err == nil {
-				t.Fatal("accepted non-CGNAT", tt.ip)
-			}
-		} else if err != nil || got != tt.want {
-			t.Fatalf("%s: %s %v", tt.ip, got, err)
-		}
-	}
-	for _, ip := range []string{"0.0.0.0", "::", "224.0.0.1", "hostname"} {
-		if _, err := advertiseAddress(ip, nil); err == nil {
-			t.Fatal("accepted", ip)
-		}
-	}
-}
 func TestAgentRejectsExcessLeaseCapacity(t *testing.T) {
 	err := (Provider{}).RunAgent(context.Background(), core.Config{
 		Coordinator: "https://coordinator.example.com",

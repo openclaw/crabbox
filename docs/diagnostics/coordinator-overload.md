@@ -156,8 +156,10 @@ source across pages; an unavailable indexed source requires restarting the list.
 
 The current predicate is deliberately unchanged. Legacy `keep=true` leases
 without confirmed cleanup still make roughly 29% of retained history current.
-That set cannot safely use the smaller maintenance index. Resolving these legacy
-leases requires a reconciliation/retention decision, not a listing-filter change.
+That set cannot safely use the smaller maintenance index. The bounded
+[retained reconciliation pass](../features/lifecycle-cleanup.md#retained-record-reconciliation)
+now retires eligible AWS members only after proving cleanup; the listing
+predicate remains unchanged.
 
 ## Remaining work
 
@@ -173,3 +175,11 @@ Separate ingress wakes from full maintenance remains useful: heartbeat-driven
 SSH reconciliation can still cause frequent passes, although their hot lease
 reads now scale with outstanding work. Terminal lease archival or pruning still
 needs a retention policy and usage rollups to preserve monthly accounting.
+
+Retained terminal current-index members now have a bounded
+[reconciliation pass](../features/lifecycle-cleanup.md#retained-record-reconciliation).
+It confirms AWS cleanup only with original account/Region evidence and two complete
+observations ten minutes apart, preserving unresolved companion and provider work.
+Other providers are classification-only. Inspect `crabbox admin retained-reconcile
+--json` for counters, cursor progress and backoff; deletion defaults off. This
+shrinks current listings without changing the current predicate or deleting history.

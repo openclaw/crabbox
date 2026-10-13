@@ -176,15 +176,20 @@ settlement; completion is not described as proof of cancellation.
 Missing `gh`, unavailable existing authentication or repository access, an absent
 or invalid run URL, a changed association, or a nonterminal GitHub run leaves
 settlement unresolved. Stop returns nonzero and retains the unchanged claim and
-key. Crabbox neither installs tools nor acquires credentials. Native stop remains
-the only mutation; GitHub reads never cancel a workflow or another job.
+key. Crabbox neither installs tools nor acquires credentials. Status reads never
+cancel a workflow or another job.
 
 A queued Testbox may report native completion before its run URL appears. That
 stop reports unresolved settlement promptly. Retry the same stop after association
 becomes available. A retained completed Testbox with a still-active associated run,
 or an association first observed after native stop, permits one further exact
-native stop attempt within the cleanup deadline. Pending GitHub completion is
-polled within that existing deadline. Failed native stop errors remain visible
+native stop attempt within the cleanup deadline. If that exact run remains active,
+the claim-fenced stop refreshes the native association and requests cancellation
+through existing `gh` access. This requires GitHub Actions write permission.
+Acquisition rollback without a persisted claim does not cancel workflows.
+Accepted cancellation is not completion: pending GitHub completion is polled
+within that existing deadline. A rejected request can reconcile through confirmed
+completion; unresolved settlement retains the claim and key. Failed native stop errors remain visible
 unless both native and GitHub completion are verified and local cleanup succeeds.
 
 Finalization takes the existing exclusive claim fence and rechecks the original

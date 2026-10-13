@@ -117,9 +117,9 @@ function lease(id: string, overrides: Partial<LeaseRecord> = {}): LeaseRecord {
     estimatedHourlyUSD: 1,
     maxEstimatedUSD: 1,
     state: "active",
-    createdAt: "2026-09-01T00:00:00Z",
+    createdAt: "2026-09-02T11:30:00Z",
     updatedAt: now.toISOString(),
-    expiresAt: "2026-09-03T00:00:00Z",
+    expiresAt: "2026-09-02T12:30:00Z",
     ...overrides,
   };
 }

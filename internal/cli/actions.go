@@ -185,7 +185,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 		}
 		defer stopHeartbeat()
 	} else if sshBackend, ok := backend.(SSHLeaseBackend); ok {
-		_, err := sshBackend.Touch(ctx, TouchRequest{Lease: LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, State: blank(server.Labels["state"], "ready"), IdleTimeout: cfg.IdleTimeout})
+		_, err := touchLeaseWithGuestExpiry(ctx, sshBackend, cfg, TouchRequest{Lease: LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, State: blank(server.Labels["state"], "ready"), IdleTimeout: cfg.IdleTimeout})
 		if err != nil {
 			fmt.Fprintf(a.Stderr, "warning: touch failed for %s: %v\n", leaseID, err)
 		}

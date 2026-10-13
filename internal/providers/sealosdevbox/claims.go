@@ -386,6 +386,11 @@ func leaseLabelsFromDevbox(item devboxItem) map[string]string {
 			labels["provider"] = value
 		}
 	}
+	// Native ownership is authoritative; annotations cannot grant it.
+	delete(labels, "crabbox")
+	if item.Metadata.Labels[managedByLabel] == "crabbox" && item.Metadata.Labels[providerLabel] == providerName {
+		labels["crabbox"] = "true"
+	}
 	if item.Metadata.CreationTimestamp != "" {
 		labels["created"] = item.Metadata.CreationTimestamp
 	}

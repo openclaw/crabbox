@@ -110,8 +110,14 @@ Crabbox lease ID and local slug:
   `gh` read confirms its exact associated GitHub run is terminal. A missing run
   association or unavailable GitHub read returns nonzero and retains recovery
   ownership; retry the same stop after association or access becomes available.
-  Native completion alone never proves GitHub cancellation. GitHub reads use
-  existing access only, and Crabbox does not mutate GitHub runs.
+  Native completion alone never proves GitHub cancellation. If native stop leaves
+  that exact associated run active, the claim-fenced stop requests its cancellation
+  through existing `gh` access, then waits within the same cleanup budget for
+  terminal confirmation. Cancellation requires GitHub Actions write permission;
+  missing access or unconfirmed completion retains recovery state. A rejected
+  cancellation can reconcile if the exact run subsequently confirms completion.
+  Status remains read-only, and acquisition rollback without a persisted
+  ownership claim does not cancel GitHub runs.
   Failed native stops can reconcile through the same confirmation; ambiguous,
   failed or cancelled queries retain the original stop error and local state.
   Verification and local artifact cleanup failures remain visible alongside the

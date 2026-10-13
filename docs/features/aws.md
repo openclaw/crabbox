@@ -72,8 +72,10 @@ instead of silently picking another type. During capacity incidents, prefer
 192 vCPUs before fallback.
 
 Give AWS more regional headroom with `CRABBOX_CAPACITY_REGIONS` or
-`capacity.regions`. Both brokered and direct launches try the primary region
-first, then each configured region in order. Pin specific zones with
+`capacity.regions`. Brokered launches try the requested `aws.region` first,
+then the coordinator's preferred region and configured capacity regions. Direct
+launches try the primary region first, then each configured region in order. Pin
+specific zones with
 `CRABBOX_CAPACITY_AVAILABILITY_ZONES`. The public coordinator defaults its pool
 to:
 

@@ -20,7 +20,8 @@ crabbox serve uninstall
 | `--memory` | Required offered memory; MiB integer, `m`, or `g` suffix |
 | `--max-leases` | Maximum concurrent containers, default 8, maximum 32 |
 | `--name` | Machine display name; default hostname |
-| `--advertise-address` | Client-reachable IPv4; default local CGNAT address |
+| `--advertise-address` | Repeatable client-reachable IPv4 (max 4); replaces automatic tailnet and LAN candidates |
+| `--no-lan-candidates` | Disable automatic private LAN candidates |
 | `--ssh-port` | Agent SSH front-door port, 1–65535; default 2222 |
 | `--runtime` | `docker` or `podman` |
 | `--poll-interval` | Minimum poll and heartbeat-response spacing, 500ms–10s; default 2s |
@@ -28,10 +29,14 @@ crabbox serve uninstall
 | `--no-cache-volumes` | Disable managed cache volumes |
 | `--drain-on-exit` | Remove containers on orderly agent shutdown |
 
-`CRABBOX_SERVE_MEMORY` and `CRABBOX_SERVE_ADVERTISE_ADDRESS` supply defaults.
+`CRABBOX_SERVE_MEMORY` supplies the memory default. `serve.advertiseAddresses`
+or comma-separated `CRABBOX_SERVE_ADVERTISE_ADDRESSES` configures explicit
+addresses; the singular `CRABBOX_SERVE_ADVERTISE_ADDRESS` remains a fallback.
+`serve.noLANCandidates` / `CRABBOX_SERVE_NO_LAN_CANDIDATES` disables LAN discovery.
 `serve.sshPort` and `CRABBOX_SERVE_SSH_PORT` configure the single SSH front-door
 port; `--ssh-port` takes precedence. Allow that one port in the host firewall and
-tailnet policy. Containers expose SSH only on loopback. The ordinary broker URL/token
+tailnet policy when using tailnet routes. LAN routes bypass tailnet policy and
+expose the key-authenticated front door to the LAN. Containers expose SSH only on loopback. The ordinary broker URL/token
 configuration still applies; credentials are never printed or written into a
 service command.
 

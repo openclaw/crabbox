@@ -50,7 +50,7 @@ func assignFront(a *agent, id string, key ssh.Signer, address string) localconta
 	return localcontainer.ServedContainer{ID: id, LeaseID: id, Host: host, Port: port, Running: true, Labels: map[string]string{"crabbox.serve": "true", "crabbox.serve.machine": "test"}}
 }
 func dialFront(f *frontDoor, user string, keys ...ssh.Signer) (*ssh.Client, error) {
-	return ssh.Dial("tcp", f.listener.Addr().String(), &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(keys...)}, HostKeyCallback: ssh.FixedHostKey(f.signer.PublicKey()), Timeout: 2 * time.Second})
+	return ssh.Dial("tcp", frontDoorTestAddress(f), &ssh.ClientConfig{User: user, Auth: []ssh.AuthMethod{ssh.PublicKeys(keys...)}, HostKeyCallback: ssh.FixedHostKey(f.signer.PublicKey()), Timeout: 2 * time.Second})
 }
 func requireClosed(t *testing.T, c *ssh.Client) {
 	t.Helper()
@@ -192,13 +192,14 @@ func TestFrontDoorRevokesConnectionsAndIdleStreams(t *testing.T) {
 func TestFrontDoorLimits(t *testing.T) {
 	t.Run("handshake timeout", func(t *testing.T) {
 		f, _ := testFront(t)
-		conn, err := net.Dial("tcp", f.listener.Addr().String())
+		// Measure before dialing: the server can start its deadline before Dial returns.
+		start := time.Now()
+		conn, err := net.Dial("tcp", frontDoorTestAddress(f))
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer conn.Close()
 		_ = conn.SetReadDeadline(time.Now().Add(frontDoorHandshakeTimeout + 5*time.Second))
-		start := time.Now()
 		_, err = io.ReadAll(conn)
 		if err != nil || time.Since(start) < frontDoorHandshakeTimeout || time.Since(start) > frontDoorHandshakeTimeout+5*time.Second {
 			t.Fatalf("timeout=%s err=%v", time.Since(start), err)
@@ -240,7 +241,7 @@ func TestFrontDoorLimits(t *testing.T) {
 	t.Run("pending handshakes", func(t *testing.T) {
 		f, _ := testFront(t)
 		for range frontDoorHandshakes {
-			c, err := net.Dial("tcp", f.listener.Addr().String())
+			c, err := net.Dial("tcp", frontDoorTestAddress(f))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -253,7 +254,7 @@ func TestFrontDoorLimits(t *testing.T) {
 		if len(f.handshakes) != frontDoorHandshakes {
 			t.Fatal("pending handshakes not registered")
 		}
-		c, err := net.Dial("tcp", f.listener.Addr().String())
+		c, err := net.Dial("tcp", frontDoorTestAddress(f))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -272,7 +273,7 @@ func TestFrontDoorHostKeyPersists(t *testing.T) {
 		t.Fatal(err)
 	}
 	key := f.signer.PublicKey().Marshal()
-	address := f.listener.Addr().String()
+	address := frontDoorTestAddress(f)
 	f.Close()
 	f, err = startFrontDoor(dir, address)
 	if err != nil {
@@ -428,4 +429,25 @@ func TestFrontDoorStreamLimitAndDuplicateKeys(t *testing.T) {
 		c.Close()
 		t.Fatal("ambiguous key selected a lease")
 	}
+}
+
+func startFrontDoor(dir, address string) (*frontDoor, error) {
+	signer, err := frontDoorHostKey(dir)
+	if err != nil {
+		return nil, err
+	}
+	listener, err := net.Listen("tcp4", address)
+	if err != nil {
+		return nil, fmt.Errorf("bind serve SSH front door: %w; select --ssh-port", err)
+	}
+	f := &frontDoor{listeners: map[string]net.Listener{address: listener}, signer: signer, leases: map[string]*frontLease{}, sockets: map[net.Conn]struct{}{}, handshakes: make(chan struct{}, frontDoorHandshakes)}
+	f.wg.Add(1)
+	go f.accept(listener)
+	return f, nil
+}
+func frontDoorTestAddress(f *frontDoor) string {
+	for _, listener := range f.listeners {
+		return listener.Addr().String()
+	}
+	return ""
 }

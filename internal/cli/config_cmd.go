@@ -132,6 +132,8 @@ func configShowView(cfg Config) map[string]any {
 		"providerStatus":             providerConfigStatus(cfg),
 		"profile":                    cfg.Profile,
 		"provider":                   provider,
+		"directLeases":               cfg.DirectLeases,
+		"directLeaseAllow":           cfg.DirectLeaseAllow,
 		"providerSelected":           providerSelected,
 		"providerSource":             cfg.providerSelectionSource,
 		"target":                     cfg.TargetOS,
@@ -155,6 +157,7 @@ func configShowView(cfg Config) map[string]any {
 		"sshFallbackPorts":           cfg.SSHFallbackPorts,
 		"workRoot":                   cfg.WorkRoot,
 		"ttl":                        cfg.TTL.String(),
+		"maxTTL":                     EffectiveMaxTTL(cfg).String(),
 		"idleTimeout":                cfg.IdleTimeout.String(),
 		"warmup":                     map[string]any{"keep": cfg.WarmupKeep},
 		"claims":                     map[string]any{"autoPrune": cfg.ClaimsAutoPrune},
@@ -683,6 +686,7 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	if err := layout.writeRemaining(w); err != nil {
 		return err
 	}
+	fmt.Fprintf(w, "directLeases=%s directLeaseAllow=%s\n", cfg.DirectLeases, strings.Join(cfg.DirectLeaseAllow, ","))
 	writeProviderConfigStatus(w, providerConfigStatus(cfg))
 	return output.err
 }

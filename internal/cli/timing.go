@@ -9,6 +9,7 @@ import (
 )
 
 type TimingReport struct {
+	SSHRoute           string                   `json:"sshRoute,omitempty"`
 	CreationRejected   *CreationRejection       `json:"creationRejected,omitempty"`
 	CreationEvents     []CreationEvent          `json:"creationEvents,omitempty"`
 	Provider           string                   `json:"provider"`

@@ -18,6 +18,7 @@ func (Provider) ConfigShowSection(cfg core.Config) core.ProviderConfigShowSectio
 			{JSONName: "ref", JSONValue: c.Ref, TextName: "ref", TextValue: core.Blank(c.Ref, "-")},
 			{JSONName: "idleTimeout", JSONValue: c.IdleTimeout.String(), TextName: "idle_timeout", TextValue: c.IdleTimeout.String()},
 			{JSONName: "debug", JSONValue: c.Debug, TextName: "debug", TextValue: strconv.FormatBool(c.Debug)},
+			{JSONName: "waitTimeout", JSONValue: c.WaitTimeout.String(), TextName: "wait_timeout", TextValue: c.WaitTimeout.String()},
 		},
 	}
 }

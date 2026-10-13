@@ -683,7 +683,7 @@ func (b *blacksmithBackend) stopClaimedTestbox(ctx context.Context, leaseID stri
 		if err != nil {
 			return err
 		}
-		reconciled, err = bound.terminateTestbox(ctx, claim)
+		reconciled, err = bound.terminateTestbox(ctx, claim, true)
 		return err
 	}); err != nil {
 		return err

@@ -785,6 +785,20 @@ type JSONListBackend interface {
 	ListJSON(ctx context.Context, req ListRequest) (any, error)
 }
 
+// StreamingListBackend emits bounded pages in display order. Callbacks are
+// synchronous: returning an error cancels outstanding reads.
+type StreamingListBackend interface {
+	Backend
+	StreamList(context.Context, ListRequest, func(ListPage) error) error
+}
+
+type ListPage struct {
+	Servers []Server
+	JSON    any
+	Section string
+	More    bool
+}
+
 // DelegatedFixedWarmupBackend explicitly opts into durable delegated acquisition.
 type DelegatedFixedWarmupBackend interface {
 	WarmupFixed(context.Context, FixedWarmupRequest) error
@@ -1411,9 +1425,10 @@ type TouchRequest struct {
 }
 
 type ListRequest struct {
-	Options LeaseOptions
-	All     bool
-	Refresh bool
+	Options  LeaseOptions
+	All      bool
+	Refresh  bool
+	Retained bool
 }
 
 type RunRequest struct {
@@ -2064,6 +2079,9 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 	if err := validateControllerCoordinatorRegistrationBinding(cfg); err != nil {
 		return nil, err
 	}
+	if !ShouldUseCoordinator(cfg, provider.Spec()) {
+		cfg = clampDirectLeaseDurations(cfg)
+	}
 	backend, err := configureProviderBackend(provider, &cfg, rt)
 	if err != nil {
 		return nil, err
@@ -2106,6 +2124,9 @@ func backendCoordinator(backend Backend) *CoordinatorClient {
 }
 
 func leaseOptionsFromConfig(cfg Config) LeaseOptions {
+	if provider, err := ProviderFor(cfg.Provider); err == nil && !ShouldUseCoordinator(cfg, provider.Spec()) {
+		cfg = clampDirectLeaseDurations(cfg)
+	}
 	return LeaseOptions{
 		TargetOS:      cfg.TargetOS,
 		WindowsMode:   cfg.WindowsMode,
@@ -2219,16 +2240,19 @@ func RejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 	return rejectDelegatedSyncOptionsForSpec(spec, req)
 }
 
-func renderServerList(stdout io.Writer, servers []Server) {
+func renderServerList(stdout io.Writer, servers []Server) error {
 	for _, s := range servers {
 		extra := ""
 		if orphan := strings.TrimSpace(s.Labels["orphan"]); orphan != "" {
 			extra = " " + orphan
 		}
 		extra += lifetimePolicySummary(s.LifetimePolicy)
-		fmt.Fprintf(stdout, "%-20s %-28s %-12s %-14s %-15s lease=%s slug=%s keep=%s target=%s%s\n",
-			s.DisplayID(), s.Name, s.Status, s.ServerType.Name, s.PublicNet.IPv4.IP, s.Labels["lease"], blank(ServerSlug(s), "-"), s.Labels["keep"], s.Labels["target"], extra)
+		if _, err := fmt.Fprintf(stdout, "%-20s %-28s %-12s %-14s %-15s lease=%s slug=%s keep=%s target=%s%s\n",
+			s.DisplayID(), s.Name, s.Status, s.ServerType.Name, s.PublicNet.IPv4.IP, s.Labels["lease"], blank(ServerSlug(s), "-"), s.Labels["keep"], s.Labels["target"], extra); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 const bestEffortLeaseTouchTimeout = 20 * time.Second
@@ -2249,7 +2273,7 @@ func (a App) touchLeaseTargetBestEffort(ctx context.Context, cfg Config, lease L
 	}
 	touchCtx, cancel := context.WithTimeout(ctx, bestEffortLeaseTouchTimeout)
 	defer cancel()
-	server, err := sshBackend.Touch(touchCtx, TouchRequest{Lease: lease, State: state, IdleTimeout: cfg.IdleTimeout})
+	server, err := touchLeaseWithGuestExpiry(touchCtx, sshBackend, cfg, TouchRequest{Lease: lease, State: state, IdleTimeout: cfg.IdleTimeout})
 	if err != nil {
 		fmt.Fprintf(a.Stderr, "warning: touch failed for %s: %v\n", lease.LeaseID, err)
 		return lease.Server
@@ -2265,4 +2289,28 @@ func RuntimeForProviderOperation(stderr io.Writer) Runtime {
 		stderr = io.Discard
 	}
 	return Runtime{Stdout: io.Discard, Stderr: stderr, Clock: realClock{}, Exec: execCommandRunner{}}
+}
+
+// LeaseExtensionBackend updates provider metadata under the exact lease claim.
+// File-backed guest guards are refreshed after the provider deadline is saved.
+type LeaseExtensionBackend interface {
+	ExtendLease(context.Context, LeaseExtendRequest) (LeaseExtendResult, error)
+}
+
+type LeaseExtendRequest struct {
+	Lease  LeaseTarget
+	TTL    time.Duration
+	By     time.Duration
+	Reason string
+}
+
+type LeaseExtendResult struct {
+	ID                        string `json:"id"`
+	ExpiresAt                 string `json:"expiresAt"`
+	Remaining                 string `json:"remainingLifetime"`
+	MaxLifetime               string `json:"maxLifetime"`
+	RuntimeExtension          bool   `json:"runtimeExtension"`
+	GuestExpiresAt            string `json:"guestExpiresAt,omitempty"`
+	GuestExpiryRefreshPending bool   `json:"guestExpiryRefreshPending,omitempty"`
+	Error                     string `json:"error,omitempty"`
 }

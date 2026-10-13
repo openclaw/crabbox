@@ -25,6 +25,42 @@ repository remain valid. An inherited user-config or environment credential is
 not sent to a repository-defined destination unless the operator explicitly
 overrides that destination through its environment variable or CLI flag.
 
+## Direct lease policy
+
+`directLeases: allow|deny` defaults to `allow`. Set it in trusted user/system
+configuration to require coordinator-managed remote allocation on this machine:
+
+```yaml
+directLeases: deny
+directLeaseAllow: [hetzner]
+```
+
+`CRABBOX_DIRECT_LEASES` overrides the policy; `CRABBOX_DIRECT_LEASE_ALLOW`
+overrides the allowlist with comma-separated provider names. Names and aliases
+resolve to canonical provider names. Repository configuration may tighten the
+policy to `deny`; it cannot override an inherited deny with `allow` or add
+allowlist entries. Repository `directLeaseAllow` is ignored. Environment is a
+trusted operator override and can explicitly restore `allow`.
+
+When denied, creation fails before configuring or calling the direct provider:
+
+```text
+direct-provider leases are disabled (directLeases: deny); configure a coordinator or add <provider> to directLeaseAllow
+```
+
+This applies to warmup/prewarm, new runs, fixed lease IDs, checkpoint forks,
+and shards. Stop, cleanup, status, list, and runs against existing leases remain
+available. A stale reused lease cannot be replaced with a new direct allocation.
+A coordinator URL exempts only providers actually allocating through the
+coordinator; registered-direct mode and providers without coordinator support
+still obey the policy.
+
+Providers that provision nothing remote are always exempt: `ssh`,
+`local-container`, `docker-sandbox`, `apple-container`, `apple-machine`,
+`apple-vm`, `anthropic-sandbox-runtime`, `mxc`, `multipass`, `firecracker`,
+`lume`, `tart`, `hyperv`, and `windows-sandbox`. Providers capable of selecting
+remote hosts, such as Parallels and Incus, are not automatically exempt.
+
 ## Precedence
 
 ```text
@@ -32,8 +68,8 @@ flags > env > repo-local crabbox.yaml/.crabbox.yaml > user config > defaults
 ```
 
 Lowest precedence is applied first: defaults, then user config, then repo
-config, then env vars, then flags. Each layer only overrides fields that are
-explicitly set; unset fields fall through to the layer below.
+config, then env vars, then flags. Except for the tightening-only repository direct-lease policy above, each layer
+only overrides fields that are explicitly set; unset fields fall through to the layer below.
 
 Lease-creating commands validate OS selector compatibility after resolving the
 provider, target, and Windows mode from all layers. For example,
@@ -145,7 +181,7 @@ workRoot: /srv/crabbox   # portable base root; not an exact command PWD
 
 lease:
   idleTimeout: 30m
-  ttl: 90m
+  ttl: 30m
 
 warmup:
   keep: true
@@ -159,8 +195,14 @@ local lease removes its registration, and coordinator release/expiry never
 invokes provider deletion. `CRABBOX_COORDINATOR_MODE` and
 `CRABBOX_COORDINATOR_AUTO_WEBVNC` provide environment overrides.
 
+`maxTTL: 4h` (top-level) and `CRABBOX_MAX_TTL` set the direct-provider lifetime
+ceiling; values must be positive and cannot exceed `24h`. Brokered requests retain
+their configured durations and the coordinator clamps them. Its global/org/owner
+settings, response notices, extension permissions, and live policy tightening are
+documented in [ordinary lifetime policy](lifecycle-cleanup.md#ordinary-lifetime-policy).
+
 `ttl`, `idleTimeout`, and `workRoot` are also accepted as top-level keys. The
-default class is `beast`, the default TTL is `90m`, and the default idle
+default class is `beast`, the default TTL is `30m`, and the default idle
 timeout is `30m`. Setting `serverType` (or `--type` on the command line) pins
 that exact provider type and disables class fallback.
 
@@ -1290,7 +1332,8 @@ CRABBOX_SERVER_TYPE             explicit provider type
 CRABBOX_IDLE_TIMEOUT            idle timeout
 CRABBOX_WARMUP_KEEP             warmup retention default (true | false)
 CRABBOX_CLAIMS_AUTO_PRUNE        prune eligible old local claims after successful stop/release (true | false; default true)
-CRABBOX_TTL                     lease TTL
+CRABBOX_TTL                     lease TTL (default 30m)
+CRABBOX_MAX_TTL                 direct-provider ceiling (default 4h; at most 24h)
 CRABBOX_NETWORK                 network mode
 CRABBOX_OWNER                   usage owner override
 CRABBOX_ORG                     usage org override

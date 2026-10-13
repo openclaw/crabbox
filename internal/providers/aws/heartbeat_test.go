@@ -31,6 +31,7 @@ func awsHeartbeatFixture(t *testing.T, fixed bool) (*awsLeaseBackend, *fakeAWSCl
 	cfg := fixedAWSTestConfig()
 	cfg.AWSSSHCIDRs = []string{"198.51.100.10/32"}
 	cfg.IdleTimeout = 45 * time.Minute
+	cfg.TTL = 2 * time.Hour
 	backend := NewAWSLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
 	request := core.AcquireRequest{RequestedSlug: "heartbeat"}
 	if fixed {

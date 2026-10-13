@@ -139,6 +139,7 @@ Provider flags (override config):
 --blacksmith-workflow
 --blacksmith-job
 --blacksmith-ref
+--blacksmith-wait-timeout
 ```
 
 Environment variables supply the same defaults:
@@ -150,6 +151,7 @@ CRABBOX_BLACKSMITH_JOB
 CRABBOX_BLACKSMITH_REF
 CRABBOX_BLACKSMITH_IDLE_TIMEOUT
 CRABBOX_BLACKSMITH_DEBUG
+CRABBOX_BLACKSMITH_WAIT_TIMEOUT
 ```
 
 `blacksmith.workflow` (or `actions.workflow`, when it is not a generic
@@ -157,6 +159,19 @@ CRABBOX_BLACKSMITH_DEBUG
 Reusing an existing ID or slug does not need it. `idleTimeout` falls back to the
 global `idleTimeout` when unset, and `debug` passes `--debug` through to the
 Blacksmith CLI.
+
+Set `blacksmith.waitTimeout: 5m`, `CRABBOX_BLACKSMITH_WAIT_TIMEOUT=5m`, or
+`--blacksmith-wait-timeout 5m` to override the native `testbox run --wait-timeout`.
+This positive duration bounds the total wait for command readiness, including
+both queueing and workflow hydration. When unset, Blacksmith keeps its native
+15-minute default. It applies to ordinary and artifact runs, including reused
+leases; it does not shorten workload execution, sync, artifact collection, idle
+retention, or `status --wait`.
+
+A readiness timeout keeps the existing run cleanup policy: a newly acquired
+one-shot lease is stopped unless retention was requested; a reused lease is not
+automatically stopped. Unconfirmed stop retains local ownership and reports a
+cleanup failure. No local execution or alternate provider is started.
 
 ### Environment forwarding is unsupported
 

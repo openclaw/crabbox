@@ -146,7 +146,7 @@ func (b *Backend) prepareFixedServer(ctx context.Context, client Client, cfg cor
 	labels := maps.Clone(claim.Labels)
 	if claim.FixedCreateIntent.Attempt["userdata"] == "" {
 		if err := client.Instance().SetServerUserData(&instance.SetServerUserDataRequest{Zone: scw.Zone(client.Zone()), ServerID: item.ID,
-			Key: "cloud-init", Content: strings.NewReader(core.CloudInitUserData(cfg, publicKey))}, scw.WithContext(ctx)); err != nil {
+			Key: "cloud-init", Content: strings.NewReader(core.CloudInitUserData(core.WithGuestLeaseExpiry(cfg, labels), publicKey))}, scw.WithContext(ctx)); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		if err := tx.Observe(core.FixedResourceBinding{AttemptValues: map[string]string{"userdata": "written"}}); err != nil {

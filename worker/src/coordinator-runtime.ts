@@ -84,7 +84,12 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   if (method === "POST" && path.join("/") === "v1/admin/tailscale-preflight") {
     return "direct";
   }
-  if (method === "GET" && ["v1/whoami", "v1/leases", "v1/admin/leases"].includes(path.join("/"))) {
+  if (
+    method === "GET" &&
+    ["v1/whoami", "v1/leases", "v1/admin/leases", "v1/admin/retained-reconcile"].includes(
+      path.join("/"),
+    )
+  ) {
     return "direct";
   }
   if (
@@ -198,6 +203,7 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     path[2] &&
     method === "POST" &&
     (path[3] === "heartbeat" ||
+      path[3] === "extend" ||
       path[3] === "tailscale" ||
       path[3] === "release" ||
       path[3] === "cancel-create")
@@ -288,7 +294,11 @@ export interface CoordinatorRuntime {
     tags: string[],
     handlers: CoordinatorSocketHandlers,
   ): void;
-  acceptEphemeralWebSocket(socket: WebSocket, handlers: CoordinatorSocketHandlers): void;
+  acceptEphemeralWebSocket(
+    socket: WebSocket,
+    handlers: CoordinatorSocketHandlers,
+    kind?: string,
+  ): void;
   take<T>(key: string): Promise<T | undefined>;
   getAlarm(): Promise<number | undefined>;
   scheduleAlarm(time: number): Promise<void>;
@@ -358,7 +368,11 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
     });
   }
 
-  acceptEphemeralWebSocket(socket: WebSocket, handlers: CoordinatorSocketHandlers): void {
+  acceptEphemeralWebSocket(
+    socket: WebSocket,
+    handlers: CoordinatorSocketHandlers,
+    _kind?: string,
+  ): void {
     socket.accept();
     socket.addEventListener("message", (event) => {
       void handlers.message(event.data);

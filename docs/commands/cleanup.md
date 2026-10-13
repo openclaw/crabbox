@@ -81,19 +81,28 @@ What cleanup does depends on the selected provider:
 
 ### Deletion decisions for direct machines
 
-Selection is label-driven. Cleanup reads the `keep`, `state`, `expires_at`, and
+Selection is label-driven. Cleanup requires `crabbox=true` and reads `state`, `expires_at`, and
 `ttl` labels written when the machine was created. The decision is conservative:
 
-- skip machines labeled `keep=true`, even after recorded expiry;
+- `keep=true` does not exempt a machine from expiry; it only suppresses automatic release after `run`;
 - for `running` or `provisioning` machines, skip until well past expiry — delete
-  only once the expiry time plus a 12-hour stale window has elapsed;
+  only once the expiry time plus a 1-hour stale window has elapsed;
 - for `leased`, `ready`, or `active` machines, delete once expired;
 - always delete machines in `failed`, `released`, or `expired` states;
 - for any other machine, delete only if `expires_at`/`ttl` parses and has passed;
   skip if the expiry label is missing or still in the future.
 
-Resources without these labels are skipped (`reason=missing labels`), so
+Resources without `crabbox=true` are skipped (`reason=missing labels`), so
 non-Crabbox machines are never touched.
+
+Supported direct Linux guests also run an expiry guard every two minutes.
+GCP self-deletes; AWS powers off and terminates; other covered providers power
+off only. Stopped machines can remain billable (including Hetzner and Azure),
+so run cleanup to delete them. See the
+[provider coverage table](../features/lifecycle-cleanup.md#guest-side-expiry-guard).
+
+`directLeases: deny` blocks new remote allocations, not cleanup, stop, list, or
+status of existing machines.
 
 ### Namespace local cleanup
 
@@ -115,12 +124,12 @@ For direct machine providers, each candidate prints one decision line. `--dry-ru
 prints the same lines but makes no provider calls:
 
 ```text
-skip server id=12345 name=crabbox-blue-lobster reason=keep=true
+skip server id=12345 name=crabbox-blue-lobster reason=not expired
 delete server id=67890 name=crabbox-amber-crab
 stop server id=11223 name=crabbox-green-heron
 ```
 
-`skip` lines include a `reason=` (for example `keep=true`, `state=running`,
+`skip` lines include a `reason=` (for example `state=running`,
 `missing expires_at`, `not expired`). Without `--dry-run`, each `delete` line is
 followed by the actual provider delete call; a failed delete returns the provider
 error and stops the sweep. Stop-only providers such as Hostinger print `stop`

@@ -2520,7 +2520,23 @@ describe("aws provider", () => {
         { CRABBOX_AWS_REGION: "eu-central-1", CRABBOX_CAPACITY_REGIONS: "us-west-2, us-east-1" },
         "eu-west-2",
       ),
-    ).toEqual(["eu-west-2", "eu-west-1", "eu-central-1", "us-west-2", "us-east-1"]);
+    ).toEqual(["eu-west-1", "eu-west-2", "eu-central-1", "us-west-2", "us-east-1"]);
+    for (const awsRegion of ["", "eu-west-1"]) {
+      expect(
+        awsRegionCandidates(
+          { awsRegion, capacityRegions: ["us-east-1", "eu-west-1"] },
+          { CRABBOX_AWS_REGION: "eu-west-1", CRABBOX_CAPACITY_REGIONS: "us-west-2" },
+          "eu-west-1",
+        ),
+      ).toEqual(["eu-west-1", "us-west-2", "us-east-1"]);
+    }
+    expect(
+      awsRegionCandidates(
+        { awsPrivate: true, awsRegion: "us-west-1", capacityRegions: ["us-east-1"] },
+        { CRABBOX_AWS_REGION: "eu-west-1", CRABBOX_CAPACITY_REGIONS: "us-west-2" },
+        "eu-central-1",
+      ),
+    ).toEqual(["us-west-1"]);
     expect(
       awsAvailabilityZoneForRegion(
         { capacityAvailabilityZones: ["us-east-1a", "eu-west-1b"] },

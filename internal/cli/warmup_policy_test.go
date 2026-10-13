@@ -78,8 +78,8 @@ func TestWarmupKeepIdleConfigPrecedence(t *testing.T) {
 			if due, reason := shouldCleanupServer(server, created.Add(tc.idle-time.Second)); due {
 				t.Fatalf("cleanup before idle deadline: %s", reason)
 			}
-			if due, reason := shouldCleanupServer(server, created.Add(tc.idle+time.Second)); due == tc.keep {
-				t.Fatalf("manual cleanup=%t (%s), want keep=%t respected", due, reason, tc.keep)
+			if due, reason := shouldCleanupServer(server, created.Add(tc.idle+time.Second)); !due {
+				t.Fatalf("manual cleanup=%t (%s), want expired lease cleanup", due, reason)
 			}
 		})
 	}

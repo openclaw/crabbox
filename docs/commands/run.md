@@ -267,7 +267,7 @@ Aliases, explicit reclaim, and coordinator-managed leases retain their existing
 resolution paths; stale heartbeat snapshots still fail the exact-claim check.
 
 `--idle-timeout` controls inactivity expiry (default `30m`); `--ttl` is the
-maximum wall-clock lifetime (default `90m`). Reusing a claimed direct lease keeps
+maximum wall-clock lifetime (default `30m`). Reusing a claimed direct lease keeps
 its recorded idle timeout unless `--idle-timeout` is explicitly supplied; reader
 defaults and transferring the repository claim with `--reclaim` do not replace
 that policy. This applies to direct allocation even in registered broker mode;
@@ -1207,7 +1207,7 @@ lease-acting commands):
 --expose <port>              Repeatable; SSH-mesh TCP port; creation-only for managed leases.
 --cache-volume [name=]key:path
                              Require a provider cache volume.
---ttl <duration>             Default 90m.
+--ttl <duration>             Default 30m.
 --idle-timeout <duration>    Default 30m.
 --desktop
 --desktop-env xfce|wayland|gnome
@@ -1323,3 +1323,11 @@ prepared reuse are refused while custody remains. See [Power hooks](../providers
 
 Optional resource minimums and supported creation/reuse combinations are documented
 in [capacity fallback](../features/capacity-fallback.md#optional-aws-resource-minimums).
+
+Ordinary lease lifetime defaults to 30m with a 4h maximum. The coordinator may
+clamp requested TTL/idle values and prints a policy notice through the CLI.
+Use [extend](extend.md) for an explicit extension. `run` requests auto-extension
+only while executing the user command, when fewer than 10 minutes remain, adding
+30 minutes up to the effective maximum. Policy or a creation-fixed provider
+deadline can disable this; setup and sync-only phases do not auto-extend.
+See [lifetime policy](../features/lifecycle-cleanup.md#ordinary-lifetime-policy).

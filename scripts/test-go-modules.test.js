@@ -60,7 +60,7 @@ exit "\${GO_TEST_EXIT:-0}"
 }
 
 for (const discovery of ["real find", "fake find"]) {
-  test(`all modules including root run once with a 15m timeout and spaced paths (${discovery})`, (t) => {
+  test(`all modules including root run once with a 20m timeout and spaced paths (${discovery})`, (t) => {
     const fixture = moduleFixture(
       t,
       discovery === "fake find"
@@ -76,10 +76,10 @@ for (const discovery of ["real find", "fake find"]) {
     assert.deepEqual(
       fixture.calls().sort(),
       fixture.modules
-        .map((module) => `${fs.realpathSync(path.join(fixture.root, module))}\ttest -timeout=15m ./...`)
+        .map((module) => `${fs.realpathSync(path.join(fixture.root, module))}\ttest -timeout=20m ./...`)
         .sort(),
     );
-    assert.match(result.stdout, /go test -timeout=15m \.\/\.\.\./);
+    assert.match(result.stdout, /go test -timeout=20m \.\/\.\.\./);
   });
 }
 
@@ -113,5 +113,5 @@ test("ordinary module test failure propagates without running later modules", (t
   );
   const result = fixture.run(23);
   assert.equal(result.status, 23, result.stdout + result.stderr);
-  assert.deepEqual(fixture.calls(), [`${fs.realpathSync(fixture.root)}\ttest -timeout=15m ./...`]);
+  assert.deepEqual(fixture.calls(), [`${fs.realpathSync(fixture.root)}\ttest -timeout=20m ./...`]);
 });

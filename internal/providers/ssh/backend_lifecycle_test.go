@@ -296,6 +296,7 @@ func acquireStaticLifecycleLease(t *testing.T, idleTimeout time.Duration) (core.
 	cfg.Static.ID = "static_heartbeat"
 	cfg.Static.Name = "heartbeat-static"
 	cfg.IdleTimeout = idleTimeout
+	cfg.TTL = 2 * time.Hour
 	backend := NewStaticSSHLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*staticLeaseBackend)
 	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true})
 	if err != nil {

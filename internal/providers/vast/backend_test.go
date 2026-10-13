@@ -1261,7 +1261,7 @@ func TestHeartbeatLifecycleSurvivesFreshReads(t *testing.T) {
 			b := newTestBackend(t, api)
 			clock := &lifecycleClock{current: time.Now().UTC().Truncate(time.Second)}
 			b.rt.Clock = clock
-			b.cfg.IdleTimeout, b.cfg.TTL = 5*time.Minute, time.Hour
+			b.cfg.IdleTimeout, b.cfg.TTL = 5*time.Minute, 2*time.Hour
 			repo := core.Repo{Root: t.TempDir()}
 			lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: repo, RequestedSlug: "policy", Keep: true})
 			if err != nil {
@@ -1366,7 +1366,7 @@ func TestHeartbeatLifecycleSurvivesFreshReads(t *testing.T) {
 					t.Error("touch did not atomically commit activity and idle policy")
 				}
 				created, _ := strconv.ParseInt(initial.Labels["created_at"], 10, 64)
-				expires := min(created+3600, clock.current.Unix()+int64(wantIdle))
+				expires := min(created+7200, clock.current.Unix()+int64(wantIdle))
 				if after.Labels["expires_at"] != strconv.FormatInt(expires, 10) {
 					t.Error("touch lost creation-based TTL cap")
 				}

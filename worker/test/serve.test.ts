@@ -166,6 +166,109 @@ describe.each([false, true])("serve shared lifecycle durable=%s", (durable) => {
       },
     });
   });
+  it("accepts legacy heartbeats and adds compatible jump candidates", async () => {
+    const f = fixture(durable);
+    expect((await f.route("/v1/serve/heartbeat", machine())).status).toBe(200);
+    const id = "cbx_000000000001";
+    await f.create(id);
+    await f.route(`/v1/serve/leases/${id}/ready`, { machineID: mid, sshHostKey: key });
+    expect((await f.storage.get<LeaseRecord>(`lease:${id}`))?.sshJump).toMatchObject({
+      host: "100.64.1.2",
+      port: 2222,
+      candidates: [{ host: "100.64.1.2", port: 2222 }],
+    });
+  });
+  it("publishes all candidates and updates active leases on heartbeat", async () => {
+    const f = fixture(durable);
+    const candidates = [
+      { address: "100.64.1.2", kind: "tailnet" },
+      { address: "192.168.1.20", kind: "lan" },
+      { address: "203.0.113.1", kind: "explicit" },
+    ];
+    const m = { ...machine(), frontDoor: { ...machine().frontDoor, candidates } };
+    expect((await f.route("/v1/serve/heartbeat", m)).status).toBe(200);
+    const id = "cbx_000000000001";
+    await f.create(id);
+    await f.route(`/v1/serve/leases/${id}/ready`, { machineID: mid, sshHostKey: key });
+    expect((await f.storage.get<LeaseRecord>(`lease:${id}`))?.sshJump).toMatchObject({
+      host: m.address,
+      port: 2222,
+      candidates: candidates.map((c) => ({ host: c.address, port: 2222 })),
+    });
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 1000);
+    m.address = "192.168.2.20";
+    m.frontDoor.candidates = [{ address: m.address, kind: "lan" }];
+    m.leases = [{ id, state: "running" }];
+    expect((await f.route("/v1/serve/heartbeat", m)).status).toBe(200);
+    expect((await f.storage.get<LeaseRecord>(`lease:${id}`))?.sshJump).toMatchObject({
+      host: m.address,
+      candidates: [{ host: m.address, port: 2222 }],
+    });
+    vi.restoreAllMocks();
+  });
+  it.each(
+    [
+      [],
+      [{ address: "100.64.1.2", kind: "bad" }],
+      [{ address: "192.168.1.2", kind: "tailnet" }],
+      [{ address: "100.64.1.2", kind: "lan" }],
+      [{ address: "127.0.0.1", kind: "explicit" }],
+      [{ address: "0.0.0.0", kind: "explicit" }],
+      [{ address: "224.0.0.1", kind: "explicit" }],
+      [{ address: "::1", kind: "explicit" }],
+      [{ address: "100.064.1.2", kind: "tailnet" }],
+      [
+        { address: "100.64.1.2", kind: "tailnet" },
+        { address: "100.64.1.2", kind: "explicit" },
+      ],
+      [
+        { address: "100.64.1.2", kind: "tailnet" },
+        { address: "169.254.1.2", kind: "lan" },
+      ],
+      [
+        { address: "100.64.1.2", kind: "tailnet" },
+        { address: "172.32.1.2", kind: "lan" },
+      ],
+      [
+        { address: "100.64.1.2", kind: "tailnet" },
+        ...Array.from({ length: 4 }, (_, i) => ({ address: `10.1.1.${i + 1}`, kind: "lan" })),
+      ],
+    ].map((candidates) => [candidates]),
+  )("rejects invalid candidates %j", async (candidates) => {
+    const f = fixture(durable);
+    const response = await f.route("/v1/serve/heartbeat", {
+      ...machine(),
+      frontDoor: { ...machine().frontDoor, candidates },
+    });
+    expect(response.status).toBe(400);
+    expect(f.storage.writes).toEqual([]);
+  });
+  it.each(["0.1.2.3", "240.1.2.3", "169.254.1.2"])(
+    "accepts explicitly configured IPv4 %s",
+    async (address) => {
+      const f = fixture(durable);
+      expect(
+        (
+          await f.route("/v1/serve/heartbeat", {
+            ...machine(),
+            address,
+            frontDoor: { ...machine().frontDoor, candidates: [{ address, kind: "explicit" }] },
+          })
+        ).status,
+      ).toBe(200);
+    },
+  );
+  it("rejects a legacy address inconsistent with the first candidate", async () => {
+    const f = fixture(durable);
+    expect(
+      (
+        await f.route("/v1/serve/heartbeat", {
+          ...machine(),
+          frontDoor: { ...machine().frontDoor, candidates: [{ address: "10.1.1.1", kind: "lan" }] },
+        })
+      ).status,
+    ).toBe(400);
+  });
   it("rejects maxLeases 33", async () => {
     const f = fixture(durable);
     const response = await f.route("/v1/serve/heartbeat", { ...machine(), maxLeases: 33 });

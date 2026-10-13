@@ -124,6 +124,12 @@ adapter's `Spec()`; the type definitions live in
 (`FLEET.idFromName("default")`); `worker/node/server.ts` forwards them to the
 Node runtime:
 
+Serve relay admission uses the normal authenticated Fleet routes. After a
+single-use admission, the Worker upgrades the connection in a dedicated
+`ServeRelayDurableObject` addressed by session ID. Node uses the same session
+engine outside its lifecycle queue. Neither implementation sends SSH data
+frames through Fleet or stores them in the coordinator database.
+
 - `GET /v1/health` returns liveness; `GET /` redirects to `/portal`.
 - `/v1/auth/*`, `/portal/login`, and WebSocket upgrades for the live bridges go
   to `FleetCoordinator` without the normal portal-session authentication;

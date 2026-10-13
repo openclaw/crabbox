@@ -2,6 +2,7 @@ package tencentcloud
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -236,6 +237,15 @@ func TestBuildRunInstanceRequest(t *testing.T) {
 		t.Fatalf("internet=%+v", req.InternetAccessible)
 	}
 	userData, err := base64.StdEncoding.DecodeString(req.UserData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(userData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gz.Close()
+	userData, err = io.ReadAll(gz)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1062,10 +1072,10 @@ func TestTouchIdleTimeoutIntent(t *testing.T) {
 	}{
 		{name: "stored policy beats effective fallback", storedKey: "idle_timeout_secs", stored: 30 * time.Minute, fallback: 90 * time.Minute, want: 30 * time.Minute},
 		{name: "legacy stored spelling", storedKey: "idle_timeout", stored: 30 * time.Minute, fallback: 90 * time.Minute, want: 30 * time.Minute},
-		{name: "explicit pointer beats fallback", storedKey: "idle_timeout_secs", stored: 30 * time.Minute, fallback: time.Minute, explicit: 90 * time.Minute, want: 90 * time.Minute},
-		{name: "explicit without fallback", storedKey: "idle_timeout_secs", stored: 30 * time.Minute, explicit: 90 * time.Minute, want: 90 * time.Minute},
+		{name: "explicit pointer beats fallback within TTL", storedKey: "idle_timeout_secs", stored: 30 * time.Minute, fallback: time.Minute, explicit: 90 * time.Minute, want: time.Hour},
+		{name: "explicit without fallback", storedKey: "idle_timeout_secs", stored: 30 * time.Minute, explicit: 90 * time.Minute, want: time.Hour},
 		{name: "missing policy uses fallback", fallback: 45 * time.Minute, want: 45 * time.Minute},
-		{name: "refreshes live policy", storedKey: "idle_timeout_secs", stored: 90 * time.Minute, fallback: time.Minute, want: 90 * time.Minute},
+		{name: "refreshes live policy within TTL", storedKey: "idle_timeout_secs", stored: 90 * time.Minute, fallback: time.Minute, want: time.Hour},
 		{name: "remote update failure", storedKey: "idle_timeout_secs", stored: 30 * time.Minute, explicit: 90 * time.Minute, want: 90 * time.Minute, writeFails: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -41,6 +41,7 @@ type crabboxKongCLI struct {
 	Cache          cacheKongCmd          `cmd:"" help:"Inspect, purge, or warm remote caches."`
 	Status         statusKongCmd         `cmd:"" passthrough:"" help:"Show lease state; add --wait to block until ready."`
 	Heartbeat      heartbeatKongCmd      `cmd:"" passthrough:"" help:"Refresh a lease idle deadline and print its state."`
+	Extend         extendKongCmd         `cmd:"" passthrough:"" help:"Extend a lease within its lifetime policy."`
 	Claims         claimsKongCmd         `cmd:"" help:"Inspect unverified local lease claims without loading providers."`
 	List           listKongCmd           `cmd:"" passthrough:"" help:"List Crabbox machines."`
 	Ports          portsKongCmd          `cmd:"" passthrough:"" help:"Publish, list, or unpublish provider-native ports."`
@@ -247,6 +248,10 @@ type tunnelKongCmd struct {
 type statusKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
+type extendKongCmd struct {
+	Args []string `arg:"" optional:"" passthrough:""`
+}
+
 type heartbeatKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
@@ -454,22 +459,26 @@ type imageDeleteKongCmd struct {
 }
 
 type adminKongCmd struct {
-	ExtendLifetime   adminExtendLifetimeKongCmd   `cmd:"" name:"extend-lifetime" passthrough:"" help:"Extend an enrolled lease deadline before stopping starts."`
-	LifetimeReadback adminLifetimeReadbackKongCmd `cmd:"" name:"lifetime-readback" passthrough:"" help:"Read coordinator-observed instance and root volume state."`
-	Leases           adminLeasesKongCmd           `cmd:"" passthrough:"" help:"List coordinator lease records."`
-	LeaseAudit       adminLeaseAuditKongCmd       `cmd:"" name:"lease-audit" passthrough:"" help:"Check expired coordinator leases against cloud provider state."`
-	Providers        adminProvidersKongCmd        `cmd:"" passthrough:"" help:"Inspect provider identities and policies."`
-	Hosts            adminHostsKongCmd            `cmd:"" passthrough:"" help:"List, allocate, or release provider hosts."`
-	AWSIdentity      adminAWSIdentityKongCmd      `cmd:"" name:"aws-identity" passthrough:"" help:"Show the coordinator AWS caller identity."`
-	AWSPolicy        adminAWSPolicyKongCmd        `cmd:"" name:"aws-policy" passthrough:"" help:"Print the baseline brokered AWS IAM policy."`
-	MacHosts         adminMacHostsKongCmd         `cmd:"" name:"mac-hosts" passthrough:"" help:"List, allocate, or release AWS EC2 Mac Dedicated Hosts."`
-	Release          adminReleaseKongCmd          `cmd:"" passthrough:"" help:"Mark a lease released."`
-	Delete           adminDeleteKongCmd           `cmd:"" passthrough:"" help:"Delete the backing server and mark the lease released."`
+	ExtendLifetime    adminExtendLifetimeKongCmd    `cmd:"" name:"extend-lifetime" passthrough:"" help:"Extend an enrolled lease deadline before stopping starts."`
+	RetainedReconcile adminRetainedReconcileKongCmd `cmd:"" name:"retained-reconcile" passthrough:"" help:"Inspect retained lease reconciliation progress."`
+	LifetimeReadback  adminLifetimeReadbackKongCmd  `cmd:"" name:"lifetime-readback" passthrough:"" help:"Read coordinator-observed instance and root volume state."`
+	Leases            adminLeasesKongCmd            `cmd:"" passthrough:"" help:"List coordinator lease records."`
+	LeaseAudit        adminLeaseAuditKongCmd        `cmd:"" name:"lease-audit" passthrough:"" help:"Check expired coordinator leases against cloud provider state."`
+	Providers         adminProvidersKongCmd         `cmd:"" passthrough:"" help:"Inspect provider identities and policies."`
+	Hosts             adminHostsKongCmd             `cmd:"" passthrough:"" help:"List, allocate, or release provider hosts."`
+	AWSIdentity       adminAWSIdentityKongCmd       `cmd:"" name:"aws-identity" passthrough:"" help:"Show the coordinator AWS caller identity."`
+	AWSPolicy         adminAWSPolicyKongCmd         `cmd:"" name:"aws-policy" passthrough:"" help:"Print the baseline brokered AWS IAM policy."`
+	MacHosts          adminMacHostsKongCmd          `cmd:"" name:"mac-hosts" passthrough:"" help:"List, allocate, or release AWS EC2 Mac Dedicated Hosts."`
+	Release           adminReleaseKongCmd           `cmd:"" passthrough:"" help:"Mark a lease released."`
+	Delete            adminDeleteKongCmd            `cmd:"" passthrough:"" help:"Delete the backing server and mark the lease released."`
 }
 type adminLeasesKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type adminExtendLifetimeKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type adminRetainedReconcileKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type adminLifetimeReadbackKongCmd struct {
@@ -1010,4 +1019,9 @@ func stripKongCommandPath(args []string, path ...string) []string {
 		out = out[1:]
 	}
 	return out
+}
+
+func (c *extendKongCmd) Run(ctx context.Context, app App) error { return app.extend(ctx, c.Args) }
+func (c *adminRetainedReconcileKongCmd) Run(ctx context.Context, app App) error {
+	return app.adminRetainedReconcile(ctx, c.Args)
 }

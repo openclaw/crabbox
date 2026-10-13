@@ -12,6 +12,10 @@ through CVM user data, writes Crabbox ownership metadata as Tencent Cloud tags,
 waits for public IPv4 and SSH readiness, then uses the normal Crabbox
 SSH/sync/run/stop/cleanup path.
 
+Linux cloud-init is gzip-compressed before base64 encoding. Crabbox keeps the
+encoded user-data field within CVM's 16 KiB limit and rejects oversized payloads
+before requesting an instance.
+
 The provider is **direct-only** in this release. It does not run through the
 coordinator, so the local CLI must have Tencent Cloud API credentials and direct
 cleanup remains the operator's responsibility.

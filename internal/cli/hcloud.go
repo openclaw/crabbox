@@ -292,12 +292,13 @@ func (c *HetznerClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
+	now := time.Now().UTC()
+	labels := DirectLeaseLabels(cfg, leaseID, slug, "hetzner", "", keep, now)
+	cfg = WithGuestLeaseExpiry(cfg, labels)
 	userData, err := hetznerUserData(cloudInit(cfg, publicKey))
 	if err != nil {
 		return Server{}, err
 	}
-	now := time.Now().UTC()
-	labels := DirectLeaseLabels(cfg, leaseID, slug, "hetzner", "", keep, now)
 	body := map[string]any{
 		"name":               name,
 		"server_type":        cfg.ServerType,

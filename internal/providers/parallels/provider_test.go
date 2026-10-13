@@ -834,6 +834,7 @@ func seedParallelsCleanupState(t *testing.T) (string, string) {
 		t.Fatal(err)
 	}
 	labels := map[string]string{
+		"crabbox":    "true",
 		"provider":   "parallels",
 		"lease":      leaseID,
 		"slug":       "blue",
@@ -1274,6 +1275,7 @@ func TestParallelsTouchPersistsIdlePolicyOverride(t *testing.T) {
 			cfg.Provider = "parallels"
 			cfg.TargetOS = core.TargetLinux
 			cfg.IdleTimeout = 5 * time.Minute
+			cfg.TTL = time.Hour
 			backend := &leaseBackend{DirectSSHBackend: shared.DirectSSHBackend{Cfg: cfg, RT: core.Runtime{Exec: runner, Stderr: io.Discard}}}
 
 			got, err := backend.Touch(context.Background(), core.TouchRequest{

@@ -172,6 +172,10 @@ func buildRunInstanceRequest(cfg core.Config, leaseID, slug, publicKey string, t
 	if err != nil {
 		return runInstanceRequest{}, err
 	}
+	userData, err := tencentCloudUserData(core.WithGuestLeaseExpiry(cfg, labelsFromTags(tags)), publicKey)
+	if err != nil {
+		return runInstanceRequest{}, err
+	}
 	req := runInstanceRequest{
 		InstanceChargeType: chargeType,
 		Placement:          placement{Zone: zoneForConfig(cfg)},
@@ -179,7 +183,7 @@ func buildRunInstanceRequest(cfg core.Config, leaseID, slug, publicKey string, t
 		InstanceType:       serverTypeForConfig(cfg),
 		InstanceCount:      1,
 		InstanceName:       core.LeaseProviderName(leaseID, slug),
-		UserData:           base64.StdEncoding.EncodeToString([]byte(core.CloudInitUserData(cfg, publicKey))),
+		UserData:           userData,
 		ClientToken:        strings.ReplaceAll(core.ProviderKeyForLease(leaseID), "_", "-"),
 		TagSpecification: []tagSpecification{{
 			ResourceType: "instance",
@@ -203,6 +207,20 @@ func buildRunInstanceRequest(cfg core.Config, leaseID, slug, publicKey string, t
 		req.SecurityGroupIDs = []string{cfg.TencentCloud.SecurityGroupID}
 	}
 	return req, nil
+}
+
+func tencentCloudUserData(cfg core.Config, publicKey string) (string, error) {
+	compressed, err := core.GzipCloudInit(core.CloudInitUserData(cfg, publicKey))
+	if err != nil {
+		return "", fmt.Errorf("gzip Tencent Cloud user data: %w", err)
+	}
+	encoded := base64.StdEncoding.EncodeToString(compressed)
+	// Keep even the encoded field within CVM's documented 16 KB user-data limit.
+	// https://www.tencentcloud.com/document/api/213/15730
+	if len(encoded) > 16*1024 {
+		return "", fmt.Errorf("Tencent Cloud user-data limit is 16 KiB; compressed base64 cloud-init is %d bytes", len(encoded))
+	}
+	return encoded, nil
 }
 
 func tencentCloudChargeType(cfg core.Config) (string, error) {

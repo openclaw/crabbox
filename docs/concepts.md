@@ -154,9 +154,12 @@ dispatches a real Actions job when full GitHub semantics are required. See
 auto-releases it. Default 1800s (30m). Reset by every heartbeat or explicit
 touch.
 
-**TTL** - the absolute maximum wall-clock lifetime of a lease. Default 5400s
-(90m), capped at 86400s (24h). Cannot be extended by heartbeats.
-`expiresAt = min(createdAt + ttl, lastTouchedAt + idleTimeout)`.
+**TTL** - the total wall-clock lifetime from creation. Default 1800s (30m),
+with a default maximum of 14400s (4h). Owners can request bounded extension with
+`crabbox extend`; command-running heartbeats can auto-extend when policy and the
+provider lifetime capability allow it. Plain heartbeats only refresh idle time.
+`expiresAt = min(createdAt + min(ttl, currentMaxTTL), lastTouchedAt + idleTimeout)`.
+Policy tightening also applies to existing live leases.
 
 **Heartbeat** - a `POST /v1/leases/{id}/heartbeat` call sent by the CLI during
 long-running commands. Bumps `lastTouchedAt`, can ship telemetry samples, and can

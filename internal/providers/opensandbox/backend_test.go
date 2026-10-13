@@ -678,8 +678,8 @@ func TestRunCreatesSandboxForwardsEnvAndCleansUp(t *testing.T) {
 	if fake.created.Image != "ubuntu:24.04" || fake.created.Metadata[openSandboxClaimKey] == "" || fake.created.Metadata[openSandboxNameKey] == "" {
 		t.Fatalf("create request not populated: %#v", fake.created)
 	}
-	if fake.created.TimeoutSecs != 5400 {
-		t.Fatalf("create timeout=%d want Crabbox TTL cap 5400", fake.created.TimeoutSecs)
+	if fake.created.TimeoutSecs != int(backend.cfg.TTL.Seconds()) {
+		t.Fatalf("create timeout=%d want configured Crabbox TTL %s", fake.created.TimeoutSecs, backend.cfg.TTL)
 	}
 	if got := fake.runs[len(fake.runs)-1].Env["API_TOKEN"]; got != "secret-value" {
 		t.Fatalf("env forwarded as %q", got)
