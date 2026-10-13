@@ -33,6 +33,7 @@ func TestBlacksmithRunSyncTimeoutOutcome(t *testing.T) {
 		{"artifact-command-124", true, "exit", 124, 124, false},
 		{"artifact-workload-23-before-sync-timeout", true, "sync", 23, 23, false},
 		{"artifact-workload-124-before-sync-timeout", true, "sync", 124, 124, false},
+		{"artifact-workload-255-before-sync-timeout", true, "sync", 255, 255, false},
 		{"normal-caller-canceled", false, "caller", -1, 1, false},
 		{"artifact-caller-canceled", true, "caller", 0, 1, false},
 		{"artifact-collection-canceled", true, "collection", 0, 1, false},
@@ -91,12 +92,20 @@ func TestBlacksmithRunSyncTimeoutOutcome(t *testing.T) {
 				if tt.wantTimeout {
 					wantStatus, wantKind = core.RunStatusTimedOut, core.RunErrorTimeout
 					wantStage, wantRetry = "sync", "true"
+				} else if tt.trigger == "caller" || tt.trigger == "collection" && tt.workloadCode == 0 {
+					wantStatus, wantKind = core.RunStatusCanceled, core.RunErrorCanceled
+				} else if !tt.artifacts {
+					// The native CLI's exit alone is not an observed workload exit.
+					wantKind = core.RunErrorProvider
 				}
 				if runs != 1 || result.ExitCode != tt.wantCode || core.ExitCodeForError(err, 0) != tt.wantCode {
 					t.Fatalf("runs=%d result=%+v err=%v", runs, result, err)
 				}
 				if result.Status != wantStatus || result.ErrorKind != wantKind {
 					t.Errorf("public outcome=%s/%s, want %s/%s", result.Status, result.ErrorKind, wantStatus, wantKind)
+				}
+				if tt.artifacts && tt.workloadCode == 255 && strings.Contains(stderr.String(), "workload exit unconfirmed") {
+					t.Fatal("observed workload exit was mislabeled as uncertain")
 				}
 				if tt.trigger != "exit" && nativeCtx.Err() == nil {
 					t.Fatal("native runner was not canceled")
@@ -228,7 +237,11 @@ func TestBlacksmithArtifactProtocolCancellation(t *testing.T) {
 						} else {
 							result, err := backend.Run(ctx, req)
 							finalized := core.FinalizeRunResult(result, err)
-							if result.ExitCode != wantCode || core.ExitCodeForError(err, 0) != wantCode || finalized.Status != core.RunStatusFailed || finalized.ErrorKind != core.RunErrorCommandExit {
+							wantStatus, wantKind := core.RunStatusFailed, core.RunErrorCommandExit
+							if workloadCode == 0 {
+								wantStatus, wantKind = core.RunStatusCanceled, core.RunErrorCanceled
+							}
+							if result.ExitCode != wantCode || core.ExitCodeForError(err, 0) != wantCode || finalized.Status != wantStatus || finalized.ErrorKind != wantKind {
 								t.Errorf("secondary cancellation changed public workload classification: result=%+v err=%v", finalized, err)
 							}
 							if observedCause == nil || !strings.Contains(stderr.String(), observedCause.Error()) {

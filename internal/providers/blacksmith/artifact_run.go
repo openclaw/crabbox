@@ -362,7 +362,7 @@ func (b *blacksmithBackend) runArtifactTestbox(ctx context.Context, req core.Run
 	stdoutPhase.Flush()
 	stderrPhase.Flush()
 	ended = r.exitedAt
-	outcome = blacksmithRunOutcome{code: native.ExitCode, syncTimedOut: syncTimeout}
+	outcome = blacksmithRunOutcome{code: native.ExitCode, err: nativeErr, syncTimedOut: syncTimeout}
 	if syncTimeout {
 		outcome.code = 124
 	}
@@ -373,12 +373,13 @@ func (b *blacksmithBackend) runArtifactTestbox(ctx context.Context, req core.Run
 		// An observed nonzero workload status, including 124, remains primary
 		// over later sync or collection failures; it does not authorize publication.
 		if r.stage >= 2 && r.code != 0 {
-			outcome = blacksmithRunOutcome{code: r.code}
+			outcome = blacksmithRunOutcome{code: r.code, err: nativeErr, workloadObserved: true}
 		}
 		protocolErr := core.Exit(7, "native run did not complete a clean artifact protocol; artifacts withheld")
 		return outcome, ended, collected, blacksmithContextError(runCtx, protocolErr)
 	}
 	outcome.code = r.code
+	outcome.workloadObserved = true
 	if outcome.code >= 128 {
 		return outcome, ended, collected, nil
 	}

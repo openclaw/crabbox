@@ -170,17 +170,14 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 		return nil
 	}
 	defer func() {
+		runResult, runErr = shared.PinDelegatedRunFailure(runResult, runErr)
 		if err := cleanup(); err != nil {
 			if runResult.Session == nil {
 				runResult.Provider, runResult.LeaseID, runResult.Slug = blacksmithTestboxProvider, leaseID, slug
 				runResult.Session = &core.RunSessionHandle{Provider: blacksmithTestboxProvider, LeaseID: leaseID, Slug: slug, CleanupCommand: fmt.Sprintf("crabbox stop --provider %s %s", blacksmithTestboxProvider, leaseID)}
 			}
 			runResult.Session.Kept = true
-			if runErr == nil {
-				runResult.ExitCode = 1
-				runResult.ErrorKind = core.RunErrorProvider
-				runErr = core.Exit(1, "Blacksmith cleanup unconfirmed; retained lease %s: %v", leaseID, err)
-			}
+			runResult, runErr = shared.AppendDelegatedRunFailure(runResult, runErr, blacksmithRunDiagnostic(1, err), 1)
 		}
 	}()
 	fmt.Fprintf(b.rt.Stderr, "provider=blacksmith-testbox id=%s sync=delegated auth=blacksmith\n", leaseID)
@@ -230,19 +227,57 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 	}
 	// Artifact diagnostics must not reclassify an earlier workload failure.
 	code := outcome.code
+	result := core.RunResult{ExitCode: code}
+	primaryErr := blacksmithRunDiagnostic(code, outcome.err)
+	if outcome.syncTimedOut {
+		result.Status, result.ErrorKind = core.RunStatusTimedOut, core.RunErrorTimeout
+	} else if outcome.workloadObserved && code != 0 {
+		result = core.FinalizeRunResult(result, nil)
+	}
+	if primaryErr == nil && code != 0 && (outcome.workloadObserved || outcome.syncTimedOut || artifactErr == nil) {
+		primaryErr = core.Exit(code, "blacksmith testbox run exited %d", code)
+		result = core.FinalizeRunResult(result, nil)
+	}
+	result, primaryErr = shared.PinDelegatedRunFailure(result, primaryErr)
 	artifactFailedSuccess := artifactErr != nil && code == 0
 	if artifactErr != nil {
-		fmt.Fprintf(b.rt.Stderr, "blacksmith artifact retrieval failed: %v\n", artifactErr)
-		if code == 0 {
-			code = core.ExitCodeForError(artifactErr, 7)
+		artifactCode := core.ExitCodeForError(artifactErr, 7)
+		if primaryErr == nil && code != 0 {
+			artifactCode = code
+		}
+		diagnostic := blacksmithRunDiagnostic(artifactCode, fmt.Errorf("blacksmith artifact retrieval failed: %w", artifactErr))
+		if primaryErr == nil {
+			result, primaryErr = shared.PinDelegatedRunFailure(result, diagnostic)
+		} else {
+			result, primaryErr = shared.AppendDelegatedRunFailure(result, primaryErr, diagnostic, 7)
 		}
 	}
-	if closeErr := stdoutCapture.Close(); closeErr != nil && code == 0 {
-		return core.RunResult{}, core.Exit(2, "blacksmith failure bundle stdout close: %v", closeErr)
+	code = result.ExitCode
+	// Only command/artifact failures activate keep-on-failure. Local capture
+	// and reporting errors must not retain a successful one-shot lease.
+	retainForFailure := code != 0
+	if primaryErr != nil {
+		if code == 255 && !outcome.workloadObserved {
+			primaryErr = shared.ExitErrorWithCause(code, "native exit 255; workload exit unconfirmed: "+primaryErr.Error(), primaryErr)
+		}
+		// A broken console must not prevent either owned capture from retaining
+		// the safe primary diagnostic before the streams close.
+		var writeErr error
+		for _, writer := range []io.Writer{stderrCapture, stderrProof, b.rt.Stderr} {
+			_, err := fmt.Fprintln(writer, primaryErr)
+			writeErr = errors.Join(writeErr, err)
+		}
+		result, primaryErr = shared.AppendDelegatedRunFailure(result, primaryErr, blacksmithRunDiagnostic(1, writeErr), 1)
 	}
-	if closeErr := stderrCapture.Close(); closeErr != nil && code == 0 {
-		return core.RunResult{}, core.Exit(2, "blacksmith failure bundle stderr close: %v", closeErr)
+	appendFailure := func(stage string, err error, firstCode int) {
+		if err != nil {
+			diagnostic := blacksmithRunDiagnostic(firstCode, fmt.Errorf("blacksmith %s: %w", stage, err))
+			result, primaryErr = shared.AppendDelegatedRunFailure(result, primaryErr, diagnostic, firstCode)
+		}
 	}
+	// Close both streams before publishing evidence, even if one close fails.
+	appendFailure("failure capture close", errors.Join(stdoutCapture.Close(), stderrCapture.Close()), 2)
+	code = result.ExitCode
 	finished := b.rt.Clock.Now()
 	if commandEnd.IsZero() {
 		commandEnd = finished
@@ -251,7 +286,7 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 	commandPhases := core.FinishCommandPhaseTracker(phaseTracker, commandEnd)
 	total := finished.Sub(started)
 	actionsURL := shared.FirstNonBlank(stdoutProof.ActionsURL(), stderrProof.ActionsURL())
-	result := core.RunResult{
+	result = core.RunResult{
 		Provider:      blacksmithTestboxProvider,
 		LeaseID:       leaseID,
 		Slug:          slug,
@@ -259,33 +294,42 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 		LogExcerpt:    core.SelectProofLogExcerpt(strings.TrimSpace(string(stdoutProof.Bytes()) + "\n" + string(stderrProof.Bytes()))),
 		ActionsURL:    shared.FirstNonBlank(actionsURL, firstBlacksmithActionsURL(string(stdoutProof.Bytes())+"\n"+string(stderrProof.Bytes()))),
 		ExitCode:      code,
+		Status:        result.Status,
+		ErrorKind:     result.ErrorKind,
 		Command:       commandDuration,
 		Total:         total,
 		SyncDelegated: true,
 	}
-	if outcome.syncTimedOut {
-		result.Status, result.ErrorKind = core.RunStatusTimedOut, core.RunErrorTimeout
-	}
 	for _, artifact := range collected {
-		fmt.Fprintf(b.rt.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
+		_, err := fmt.Fprintf(b.rt.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
+		appendFailure("artifact report", err, 1)
 	}
 	result.Artifacts = append(result.Artifacts, collected...)
-	if code != 0 && req.KeepOnFailure {
-		shouldStop = false
+	if retainForFailure {
+		core.HandleDelegatedRunFailure(b.rt.Stderr, req, blacksmithTestboxProvider, leaseID, slug, blacksmithIdleTimeout(b.cfg), b.cfg.TTL, acquired, &shouldStop)
 	}
 	cleanupErr := cleanup()
-	if cleanupErr != nil && code == 0 {
-		code = 1
-		result.ExitCode = code
-		result.ErrorKind = core.RunErrorProvider
+	cleanupFailedSuccess := cleanupErr != nil && result.ExitCode == 0
+	appendFailure("cleanup", cleanupErr, 1)
+	if cleanupErr == nil && cleanupAttempted && result.ExitCode == 0 {
+		appendFailure("one-shot report", printBlacksmithOneShotActionsWarning(b.rt.Stderr, result.ActionsURL), 1)
 	}
-	if cleanupErr == nil && cleanupAttempted && code == 0 {
-		printBlacksmithOneShotActionsWarning(b.rt.Stderr, result.ActionsURL)
+	// Custody is settled before reporting; an output failure must still return
+	// the retained/reused lease's cleanup handle.
+	result.Session = &core.RunSessionHandle{
+		Provider:       blacksmithTestboxProvider,
+		LeaseID:        leaseID,
+		Slug:           slug,
+		Reused:         !acquired,
+		Kept:           !shouldStop,
+		ActionsURL:     result.ActionsURL,
+		RunID:          blacksmithActionsRunID(result.ActionsURL),
+		CleanupCommand: fmt.Sprintf("crabbox stop --provider %s %s", blacksmithTestboxProvider, leaseID),
 	}
 	total = b.rt.Clock.Now().Sub(started)
 	result.Total = total
+	code = result.ExitCode
 	report := delegatedTimingReport(blacksmithTestboxProvider, leaseID, slug, "blacksmith-testbox owns sync", commandDuration, commandPhases, total, code)
-	report = core.TimingReportWithRunResult(report, result, cleanupErr)
 	if outcome.syncTimedOut {
 		report.BlockedStage, report.RetryLikely = "sync", "true"
 	} else if code != 0 {
@@ -298,20 +342,25 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 		classification := core.ClassifyRunFailure(code, classificationInput, failurePhases)
 		core.ApplyFailureClassification(&report, classification)
 	}
-	if cleanupErr != nil && result.ErrorKind == core.RunErrorProvider {
+	if cleanupFailedSuccess {
 		report.BlockedStage, report.RetryLikely = "cleanup", "true"
 	}
-	fmt.Fprintf(b.rt.Stderr, "blacksmith run summary sync=delegated command=%s total=%s exit=%d%s\n", commandDuration.Round(time.Millisecond), total.Round(time.Millisecond), code, core.FormatFailureClassificationFields(core.FailureClassification{BlockedStage: report.BlockedStage, RetryLikely: report.RetryLikely}))
+	_, summaryErr := fmt.Fprintf(b.rt.Stderr, "blacksmith run summary sync=delegated command=%s total=%s exit=%d%s\n", commandDuration.Round(time.Millisecond), total.Round(time.Millisecond), code, core.FormatFailureClassificationFields(core.FailureClassification{BlockedStage: report.BlockedStage, RetryLikely: report.RetryLikely}))
+	appendFailure("summary", summaryErr, 1)
 	report.Label = strings.TrimSpace(req.Label)
+	// Each independent destination gets the outcome known at its write. A
+	// failed destination cannot skip later evidence or rewrite settled custody.
+	currentReport := func() core.TimingReport {
+		snapshot := report
+		snapshot.ExitCode = result.ExitCode
+		snapshot.RunStatus, snapshot.ErrorKind = result.Status, result.ErrorKind
+		return core.TimingReportWithRunResult(snapshot, result, primaryErr)
+	}
 	if req.TimingJSON {
-		if err := core.WriteTimingJSON(b.rt.Stderr, report); err != nil {
-			return core.RunResult{}, err
-		}
+		appendFailure("timing report", core.WriteTimingJSON(b.rt.Stderr, currentReport()), 1)
 	}
-	proof, proofErr := b.blacksmithProofResult(req, leaseID, slug, code, commandDuration, total, report, stdoutProof.Bytes(), stderrProof.Bytes(), actionsURL)
-	if proofErr != nil && code == 0 {
-		return core.RunResult{}, proofErr
-	}
+	proof, proofErr := b.blacksmithProofResult(req, leaseID, slug, result.ExitCode, commandDuration, total, currentReport(), stdoutProof.Bytes(), stderrProof.Bytes(), actionsURL)
+	appendFailure("proof", proofErr, core.ExitCodeForError(proofErr, 1))
 	if proofErr == nil {
 		result.Provider = proof.Provider
 		result.LeaseID = proof.LeaseID
@@ -321,51 +370,42 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 		result.ActionsURL = proof.ActionsURL
 		result.Artifacts = append(result.Artifacts, proof.Artifacts...)
 	}
-	result.Session = &core.RunSessionHandle{
-		Provider:       blacksmithTestboxProvider,
-		LeaseID:        leaseID,
-		Slug:           slug,
-		Reused:         !acquired,
-		Kept:           !shouldStop,
-		ActionsURL:     result.ActionsURL,
-		RunID:          blacksmithActionsRunID(result.ActionsURL),
-		CleanupCommand: fmt.Sprintf("crabbox stop --provider %s %s", blacksmithTestboxProvider, leaseID),
-	}
-	if code != 0 {
+	if result.ExitCode != 0 {
 		local, bytes, bundleErr := core.CaptureLocalFailureBundle(leaseID, core.FailureCaptureMetadata{
 			Provider:   blacksmithTestboxProvider,
 			LeaseID:    leaseID,
 			Slug:       slug,
 			Workdir:    "blacksmith-testbox",
-			ExitCode:   code,
-			Timing:     report,
+			ExitCode:   result.ExitCode,
+			Timing:     currentReport(),
 			EnvAllow:   req.Options.EnvAllow,
 			Env:        req.Env,
 			Config:     b.cfg,
 			StdoutPath: stdoutCapturePath,
 			StderrPath: stderrCapturePath,
 		})
+		appendFailure("failure bundle", bundleErr, core.ExitCodeForError(bundleErr, 1))
 		if bundleErr != nil {
-			fmt.Fprintf(b.rt.Stderr, "warning: failure bundle failed: %v\n", bundleErr)
+			_, err := fmt.Fprintf(b.rt.Stderr, "warning: failure bundle failed: %v\n", blacksmithRunDiagnostic(1, bundleErr))
+			appendFailure("failure bundle diagnostic", err, 1)
 		} else {
-			fmt.Fprintf(b.rt.Stderr, "failure-bundle local=%s bytes=%d secret_risk=caller-redacts-before-sharing\n", local, bytes)
+			_, err := fmt.Fprintf(b.rt.Stderr, "failure-bundle local=%s bytes=%d secret_risk=caller-redacts-before-sharing\n", local, bytes)
+			appendFailure("failure bundle report", err, 1)
 		}
-		core.HandleDelegatedRunFailure(b.rt.Stderr, req, blacksmithTestboxProvider, leaseID, slug, blacksmithIdleTimeout(b.cfg), b.cfg.TTL, acquired, &shouldStop)
-		result.Session.Kept = !shouldStop
-		return result, core.ExitError{Code: code, Message: fmt.Sprintf("blacksmith testbox run exited %d", code)}
 	}
-	return result, nil
+	return result, primaryErr
 }
 
-func printBlacksmithOneShotActionsWarning(w io.Writer, actionsURL string) {
+func printBlacksmithOneShotActionsWarning(w io.Writer, actionsURL string) error {
 	if w == nil {
-		return
+		return nil
 	}
-	fmt.Fprint(w, "blacksmith proof note: stopped one-shot Testbox after success; the backing GitHub Actions run may show a cancelled Testbox step because Blacksmith owns the delegated session lifecycle")
+	message := "blacksmith proof note: stopped one-shot Testbox after success; the backing GitHub Actions run may show a cancelled Testbox step because Blacksmith owns the delegated session lifecycle"
 	if strings.TrimSpace(actionsURL) != "" {
-		fmt.Fprintf(w, " actions=%s", strings.TrimSpace(actionsURL))
+		message += " actions=" + strings.TrimSpace(actionsURL)
 	}
-	fmt.Fprintln(w)
+	_, err := fmt.Fprintln(w, message)
+	return err
 }
 
 var githubActionsRunURLPattern = regexp.MustCompile(`https://github\.com/[^\s"'<>]+/actions/runs/[0-9]+[^\s"'<>]*`)
@@ -809,15 +849,32 @@ func (b *blacksmithBackend) openFailureStreamCapture(label string) (io.WriteClos
 
 // Exit 124 alone cannot distinguish the sync guard from a workload failure.
 type blacksmithRunOutcome struct {
-	code         int
-	syncTimedOut bool
+	code             int
+	err              error
+	syncTimedOut     bool
+	workloadObserved bool
+}
+
+func blacksmithRunDiagnostic(code int, err error) error {
+	if err == nil {
+		return nil
+	}
+	if code == 0 {
+		code = 1
+	}
+	message := shared.RedactErrorSecrets(err.Error())
+	// Redact before bounding; truncating a credential first can leak its prefix.
+	if len(message) > 4096 {
+		message = message[:4096] + " [truncated]"
+	}
+	return shared.ExitErrorWithCause(code, message, err)
 }
 
 func (b *blacksmithBackend) runTestbox(ctx context.Context, leaseID string, command []string, debug, shellMode bool, phaseTracker *core.CommandPhaseTracker, stdoutExtra, stderrExtra io.Writer, observation *core.RunObservation) blacksmithRunOutcome {
 	keyPath, err := core.StoredTestboxKeyPath(leaseID)
 	if err != nil {
 		fmt.Fprintf(b.rt.Stderr, "blacksmith key path failed: %v\n", err)
-		return blacksmithRunOutcome{code: 2}
+		return blacksmithRunOutcome{code: 2, err: err}
 	}
 	args := blacksmithRunArgs(b.cfg, leaseID, keyPath, command, debug || b.cfg.Blacksmith.Debug, shellMode)
 	stdoutTarget, stderrTarget := observation.CommandWriters(mergeWriters(b.rt.Stdout, stdoutExtra), mergeWriters(b.rt.Stderr, stderrExtra), core.RunOutputProvider)
@@ -833,12 +890,9 @@ func (b *blacksmithBackend) runTestbox(ctx context.Context, leaseID string, comm
 				"Rerun with CRABBOX_BLACKSMITH_SYNC_TIMEOUT_MS=0 to disable this guard.\n",
 			blacksmithSyncTimeout(os.Getenv),
 		)
-		return blacksmithRunOutcome{code: 124, syncTimedOut: true}
+		return blacksmithRunOutcome{code: 124, err: err, syncTimedOut: true}
 	}
-	if err != nil {
-		return blacksmithRunOutcome{code: result.ExitCode}
-	}
-	return blacksmithRunOutcome{}
+	return blacksmithRunOutcome{code: result.ExitCode, err: err}
 }
 
 func commandPhaseWriter(w io.Writer, tracker *core.CommandPhaseTracker) (io.Writer, *core.PhaseMarkerWriter) {
