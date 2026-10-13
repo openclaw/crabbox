@@ -44,21 +44,29 @@ printf '{"ok":true,"service":"crabbox-coordinator"}\\n'
 			`#!/usr/bin/env bash
 set -euo pipefail
 printf 'crabbox %s\\n' "$*" >>"${calls}"
+validate_smoke_target() {
+  local type="\${CRABBOX_SERVER_TYPE:-}"
+  local target="\${CRABBOX_TARGET:-}"
+  local arch="\${CRABBOX_ARCH:-}"
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --type) type="$2"; shift ;;
+      --target) target="$2"; shift ;;
+      --arch) arch="$2"; shift ;;
+    esac
+    shift
+  done
+  [[ "$type" == "t3.small" && "$target" == "linux" && "$arch" == "amd64" ]] || exit 64
+}
 case "\${1:-}" in
   warmup)
-    type="\${CRABBOX_SERVER_TYPE:-}"
-    while [[ "$#" -gt 0 ]]; do
-      case "$1" in
-        --type) type="$2"; shift ;;
-      esac
-      shift
-    done
-    [[ "$type" == "t3.small" ]] || exit 64
+    validate_smoke_target "$@"
     [[ "${scenario.warmupStatus}" == "0" ]] || exit ${scenario.warmupStatus}
     sleep 0.1
     printf '{"leaseId":"cbx_smoke"}\\n' >&2
     ;;
   run)
+    validate_smoke_target "$@"
     exit ${scenario.runStatus}
     ;;
   stop)
@@ -103,6 +111,6 @@ esac
 			return;
 		}
 		assert.match(result.stdout, /aws deploy smoke lease=cbx_smoke/);
-		assert.match(callLog, /crabbox run --id cbx_smoke --no-sync --timing-json -- uname -a/);
+		assert.match(callLog, /^crabbox run --provider aws --target linux --arch amd64 --class tiny --type t3.small --market on-demand --id cbx_smoke --no-sync --timing-json -- uname -a$/m);
 	});
 }
