@@ -267,7 +267,7 @@ func prepareSSHJump(target *SSHTarget) error {
 	if err := selectSSHJumpCandidate(target, key); err != nil {
 		return err
 	}
-	args := []string{"ssh", "-F", os.DevNull, "-i", target.Key, "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + sshConfigFileValue(target.KnownHostsFile), "-o", "GlobalKnownHostsFile=none", "-o", "KnownHostsCommand=none", "-o", "VerifyHostKeyDNS=no", "-o", "UpdateHostKeys=no", "-o", "HostKeyAlgorithms=ssh-ed25519", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-p", strconv.Itoa(jump.Port), "-W", net.JoinHostPort(target.Host, target.Port), "crabbox@" + jump.Host}
+	args := []string{"ssh", "-F", os.DevNull, "-i", target.Key, "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + sshConfigFileValue(target.KnownHostsFile), "-o", "GlobalKnownHostsFile=none", "-o", "KnownHostsCommand=none", "-o", "VerifyHostKeyDNS=no", "-o", "UpdateHostKeys=no", "-o", "HostKeyAlgorithms=ssh-ed25519", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ConnectTimeout=" + relaySSHConnectTimeout("10", jump.useRelay), "-o", "ServerAliveInterval=15", "-p", strconv.Itoa(jump.Port), "-W", net.JoinHostPort(target.Host, target.Port), "crabbox@" + jump.Host}
 	if jump.useRelay {
 		proxy, err := prepareServeRelayProxy(target)
 		if err != nil {
