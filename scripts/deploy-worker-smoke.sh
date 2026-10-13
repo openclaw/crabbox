@@ -211,7 +211,9 @@ tee "$log" <"$warmup_pipe" >&2 &
 tee_pid="$!"
 (
   cd "$CRABBOX_LIVE_REPO"
-  "$CRABBOX_BIN" warmup --provider aws --ttl 20m --idle-timeout 6m --reclaim --timing-json
+  "$CRABBOX_BIN" warmup --provider aws --target linux --arch amd64 \
+    --class tiny --type t3.small --market on-demand \
+    --ttl 20m --idle-timeout 6m --reclaim --timing-json
 ) 2>"$warmup_pipe" || warmup_status=$?
 rm -f "$warmup_pipe"
 wait "$tee_pid"
