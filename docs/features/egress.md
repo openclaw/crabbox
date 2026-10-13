@@ -521,7 +521,7 @@ Per-command environment files under `.crabbox/env-<nonce>` have private
 permissions and receive a cancellation-independent cleanup attempt. A cleanup
 failure is a run failure, names the staging directory for manual removal, and
 never echoes remote output or environment values. If the workload also failed,
-its exit status remains primary. An unreachable lease or lost workspace
+its status, error kind, and exit code remain primary. An unreachable lease or lost workspace
 ownership can prevent removal; inspect and clean the named directory before
 reuse, or release the lease.
 

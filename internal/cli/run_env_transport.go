@@ -117,6 +117,12 @@ func isSSHCommandEnvFile(path string) bool {
 // Keep workload status primary, but make every cleanup failure visible to callers.
 func (e sshCommandEnv) closeAfter(err *error) {
 	if cleanupErr := e.close(); cleanupErr != nil {
-		*err = Exit(ExitCodeForError(*err, 7), "%v", errors.Join(*err, cleanupErr))
+		if *err == nil {
+			*err = cleanupErr
+			return
+		}
+		// Only the primary error participates in classification and exit-code
+		// lookup; cleanup adds its already-redacted diagnostic.
+		*err = fmt.Errorf("%w\n%v", *err, cleanupErr)
 	}
 }
