@@ -9,7 +9,7 @@
 
 ### Fixes
 
-- Coordinator: settle finished leases to elapsed billable cost (zero when never provisioned), capped at their reservations, for monthly budget enforcement; keep live reservations and expose additive `committedUSD` usage totals and CLI output without a state migration.
+- Coordinator: settle finished leases to elapsed billable cost (zero when never provisioned), capped at their reservations, for monthly budget enforcement; keep live reservations and expose additive `committedUSD` usage totals and CLI output without a state migration. [PR 2801](https://github.com/openclaw/crabbox/pull/2801).
 
 ## 0.75.0 - 2026-10-12
 
