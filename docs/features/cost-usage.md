@@ -7,7 +7,7 @@ Read this when you are:
 - interpreting `crabbox usage` output.
 
 The coordinator tracks lease counts, active leases,
-elapsed runtime, estimated elapsed cost, and reserved worst-case cost. This is an
+elapsed runtime, estimated elapsed cost, and budget commitments. This is an
 operational guardrail, not invoice reconciliation. Provider extras such as static IP
 charges, egress, snapshots, taxes, credits, and discounts are not modeled.
 
@@ -69,9 +69,23 @@ ignored. Admin callers may use any scope and filter by an arbitrary owner or org
 Two cost figures are tracked per lease:
 
 - **`estimatedUSD`** — elapsed cost: `runtime_hours x estimatedHourlyUSD`. For active
-  leases, runtime is measured to "now"; otherwise to the lease end/release time.
-- **`reservedUSD`** — worst-case cost reserved up front: `ttl_hours x hourlyUSD`, captured
-  before provisioning. Budget enforcement uses reserved cost, not elapsed cost.
+  leases, runtime is measured to "now"; otherwise to the persisted lease end/release
+  time (or last persisted observation for legacy terminal rows). Releasing failed
+  or expired history later does not extend its recorded runtime. A terminal lease
+  with no cloud instance and explicit evidence that no resource may exist has zero
+  compute runtime. Confirmed lifetime stop/resume intervals remain authoritative.
+- **`reservedUSD`** — the budget commitment: live leases contribute their worst-case
+  `ttl_hours x hourlyUSD`, captured before provisioning; terminal leases contribute
+  elapsed cost capped at that original reservation. Usage reports and admission
+  share this calculation. The field name remains stable for existing consumers.
+
+Settlement is derived from persisted lease evidence, without a separate ledger or
+data migration. Existing terminal leases settle on the next usage or budget read.
+The read-only lease audit can confirm that a cloud resource is gone, but does not
+persist its deletion time; accounting cannot reconstruct an earlier stop time from
+that diagnostic alone. Cleanup and release preserve an existing terminal timestamp.
+Leases released with retained compute still running under a lifetime policy keep
+their full reservation until compute is confirmed stopped.
 
 Pricing precedence (highest first):
 
@@ -103,7 +117,7 @@ resolution or authority RPCs remain with their existing owners.
 ## Budget guardrails
 
 Budgets are enforced on lease creation. Exceeding any active-lease limit or monthly
-reserved-USD budget rejects the request with HTTP 429 (`cost_limit_exceeded`). All
+budget commitment rejects the request with HTTP 429 (`cost_limit_exceeded`). All
 budgets default to `off` when their environment variable is unset or non-positive.
 Active limits keep counting a live managed lease after its heartbeat deadline until
 cleanup commits a terminal state, because its provider resource may still exist. The
@@ -154,10 +168,15 @@ the fleet and org caps. Production enables this override for its configured depl
 admin; preview does not enable it. Capacity reports the caller's effective shared
 limits as `null` while retaining the real aggregate counts.
 
-Monthly budget checks add the candidate lease's `reservedUSD` to the month's existing
-reserved total for the relevant scope. Live managed leases keep reserving budget after
-a UTC month rollover until cleanup commits a terminal state. A lease that would push
-the scope over budget is refused before it provisions.
+Monthly budget checks add the candidate lease's full reservation to live reservations
+plus settled terminal costs for the relevant scope. A lease that would push the scope
+over budget is refused before it provisions; a total exactly at the cap is allowed.
+Live managed leases keep their full reservation after a UTC month rollover and after
+their heartbeat deadline until cleanup commits a terminal state. Cleanup failure does
+not free a live reservation. Terminal costs remain attributed to the creation month,
+so a prior-month lease leaves the current admission window when it becomes terminal.
+The selected-month usage report retains its creation-month filtering; admission also
+includes live leases from earlier months. Repeated cleanup does not settle twice.
 
 ## Identity for usage accounting
 

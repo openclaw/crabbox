@@ -111,6 +111,91 @@ describe("azure cost overrides", () => {
 });
 
 describe("usage accounting", () => {
+  it("reserves retained running compute and settles its confirmed stop/resume intervals", () => {
+    const now = new Date("2026-05-20T00:00:00Z");
+    const running = testLease({
+      state: "released",
+      releaseDeletesServer: false,
+      endedAt: "2026-05-01T00:10:00Z",
+      lifetimePolicy: {
+        mode: "enforce",
+        workload: "batch",
+        deadlineAt: "2026-05-21T00:00:00Z",
+        retainSeconds: 3600,
+        compute: { state: "running", accumulatedMs: 600_000, runningSince: "2026-05-19T23:50:00Z" },
+      },
+    });
+    expect(usageSummary([running], { scope: "all", month: "2026-05" }, now)).toMatchObject({
+      activeLeases: 1,
+      estimatedUSD: 3,
+      reservedUSD: 13.5,
+    });
+    const stopped = testLease({
+      ...running,
+      lifetimePolicy: {
+        ...running.lifetimePolicy!,
+        stoppedAt: "2026-05-20T00:00:00Z",
+        compute: { state: "stopped", accumulatedMs: 1_200_000 },
+      },
+    });
+    expect(usageSummary([stopped], { scope: "all", month: "2026-05" }, now)).toMatchObject({
+      activeLeases: 0,
+      runtimeSeconds: 1200,
+      estimatedUSD: 3,
+      reservedUSD: 3,
+    });
+  });
+
+  it.each(["released", "failed", "expired"] as const)(
+    "settles %s leases at elapsed cost capped by their admission reservation",
+    (state) => {
+      const now = new Date("2026-05-20T00:00:00Z");
+      const leases = [
+        testLease({ state, endedAt: "2026-05-01T00:30:00Z", maxEstimatedUSD: 13.5 }),
+        testLease({ state, endedAt: "2026-05-01T02:00:00Z", maxEstimatedUSD: 13.5 }),
+        testLease({ state, endedAt: "2026-05-01T02:00:00Z", maxEstimatedUSD: 0 }),
+      ];
+      const summary = usageSummary(leases, { scope: "all", month: "2026-05" }, now);
+      expect(summary).toMatchObject({ activeLeases: 0, estimatedUSD: 40.5, reservedUSD: 18 });
+      const budget = createCostLimitUsage(leases[0]!, now);
+      for (const lease of leases) addLeaseToCostLimitUsage(budget, lease, now);
+      expect(budget).toMatchObject({ reservedUSD: 18, ownerReservedUSD: 18, orgReservedUSD: 18 });
+    },
+  );
+
+  it("stops failed runtime at its persisted observation and charges nothing when never allocated", () => {
+    const now = new Date("2026-05-20T00:00:00Z");
+    const observed = testLease({
+      state: "failed",
+      endedAt: "2026-05-01T00:10:00Z",
+      updatedAt: "2026-05-01T00:10:00Z",
+    });
+    const legacy = testLease({ ...observed, endedAt: undefined });
+    const neverRan = testLease({ ...observed, cloudID: "", provisioningResourceMayExist: false });
+    expect(
+      usageSummary([observed, legacy, neverRan], { scope: "all", month: "2026-05" }, now),
+    ).toMatchObject({ runtimeSeconds: 1200, estimatedUSD: 3, reservedUSD: 3 });
+  });
+
+  it.each([
+    ["fleet", { maxMonthlyUSD: 10 }],
+    ["owner", { maxMonthlyUSDPerOwner: 10 }],
+    ["org", { maxMonthlyUSDPerOrg: 10 }],
+  ])(
+    "admits exactly at the %s cap and refuses the next candidate reservation",
+    (_scope, limits) => {
+      const now = new Date("2026-05-01T02:00:00Z");
+      const settled = testLease({ state: "released", endedAt: "2026-05-01T00:20:00Z" });
+      const live = testLease({ maxEstimatedUSD: 5 });
+      const candidate = testLease({ maxEstimatedUSD: 2 });
+      const caps = { ...costLimits({} as never), ...limits };
+      expect(enforceCostLimits([settled, live], candidate, caps, now)).toBe("");
+      expect(
+        enforceCostLimits([settled, live], { ...candidate, maxEstimatedUSD: 2.01 }, caps, now),
+      ).toContain("monthly budget");
+    },
+  );
+
   it("estimates cost and aggregates by owner and org", () => {
     const now = new Date("2026-05-01T02:00:00Z");
     const org = orgKeyForLabel("openclaw");
@@ -127,7 +212,7 @@ describe("usage accounting", () => {
     expect(usage.leases).toBe(1);
     expect(usage.runtimeSeconds).toBe(3600);
     expect(usage.estimatedUSD).toBe(2);
-    expect(usage.reservedUSD).toBe(3);
+    expect(usage.reservedUSD).toBe(2);
     expect(usage.byOwner[0]?.key).toBe("peter@example.com");
     expect(usage.byOrg[0]?.key).toBe("openclaw");
   });

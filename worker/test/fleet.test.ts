@@ -865,6 +865,163 @@ class FakeCoordinatorRuntime implements CoordinatorRuntime {
   }
 }
 
+describe("terminal budget settlement", () => {
+  it("preserves the last observation when maintenance completes legacy failed cleanup", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-05-20T00:00:00Z"));
+      const storage = new MemoryStorage();
+      const lease = testLease({
+        state: "failed",
+        keep: false,
+        endedAt: undefined,
+        updatedAt: "2026-05-01T00:12:00.000Z",
+        releaseDeletesServer: true,
+        cleanupError: "synthetic pending cleanup",
+        cleanupRetryAt: "2026-05-20T00:00:00.000Z",
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      const releaseLease = vi.fn<() => Promise<void>>(async () => {});
+      const fleet = testFleet(storage, { hetzner: { ...fakeProvider(), releaseLease } });
+      const budget = () => {
+        const usage = createCostLimitUsage(lease, new Date());
+        addLeaseToCostLimitUsage(
+          usage,
+          storage.value<LeaseRecord>(`lease:${lease.id}`)!,
+          new Date(),
+        );
+        return usage.reservedUSD;
+      };
+      expect(budget()).toBe(0.2);
+      await fleet.alarm();
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.endedAt).toBe(lease.updatedAt);
+      expect(budget()).toBe(0.2);
+      vi.setSystemTime(new Date("2026-05-21T00:00:00Z"));
+      await fleet.alarm();
+      expect(budget()).toBe(0.2);
+      expect(releaseLease).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["never-allocated", "cloud-gone"])(
+    "preserves observed runtime for a late release and repeated cleanup: %s",
+    async (kind) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(new Date("2026-05-20T00:00:00Z"));
+        const storage = new MemoryStorage();
+        const lease = testLease({
+          id: "cbx_abcdef123456",
+          provider: "aws",
+          cloudID: kind === "cloud-gone" ? "i-gone" : "",
+          serverID: 0,
+          owner: "alice@example.com",
+          org: "example-org",
+          state: "failed",
+          keep: false,
+          endedAt: "2026-05-01T00:12:00.000Z",
+          updatedAt: "2026-05-01T00:12:00.000Z",
+          provisioningResourceMayExist: false,
+          host: "",
+        });
+        storage.seed(`lease:${lease.id}`, lease);
+        const releaseLease = vi.fn<() => Promise<void>>(async () => {});
+        const fleet = testFleet(storage, {
+          aws: {
+            ...fakeProvider(undefined, { provider: "aws", servers: [] }),
+            releaseLease,
+            async getServer() {
+              throw new Error("aws instance not found: i-gone");
+            },
+          },
+        });
+        const headers = { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" };
+        const audit = await fleet.fetch(
+          request("GET", "/v1/admin/lease-audit?state=failed", {
+            headers: { "x-crabbox-admin": "true" },
+          }),
+        );
+        await expect(audit.json()).resolves.toMatchObject({
+          audits: kind === "cloud-gone" ? [{ leaseID: lease.id, cloudStatus: "missing" }] : [],
+        });
+        // Retries must run sequentially against the prior persisted cleanup result.
+        /* oxlint-disable eslint/no-await-in-loop */
+        for (let retry = 0; retry < 2; retry++) {
+          const released = await fleet.fetch(
+            request("POST", `/v1/leases/${lease.id}/release`, {
+              headers,
+              body: { delete: true },
+            }),
+          );
+          expect(released.status).toBe(200);
+          await fleet.alarm();
+          expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.endedAt).toBe(lease.endedAt);
+          const usage = await fleet.fetch(request("GET", "/v1/usage", { headers }));
+          await expect(usage.json()).resolves.toMatchObject({
+            usage: {
+              activeLeases: 0,
+              runtimeSeconds: kind === "cloud-gone" ? 720 : 0,
+              estimatedUSD: kind === "cloud-gone" ? 0.2 : 0,
+              reservedUSD: kind === "cloud-gone" ? 0.2 : 0,
+            },
+          });
+          vi.setSystemTime(new Date("2026-05-21T00:00:00Z"));
+        }
+        /* oxlint-enable eslint/no-await-in-loop */
+        expect(releaseLease).toHaveBeenCalledTimes(kind === "cloud-gone" ? 1 : 0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("keeps a rollover reservation until expiry cleanup succeeds, then retries idempotently", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-06-01T00:10:00Z"));
+      const storage = new MemoryStorage();
+      const lease = testLease({
+        createdAt: "2026-05-31T23:50:00.000Z",
+        updatedAt: "2026-05-31T23:50:00.000Z",
+        expiresAt: "2026-06-01T00:00:00.000Z",
+        keep: false,
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      const releaseLease = vi
+        .fn<() => Promise<void>>(async () => {})
+        .mockRejectedValueOnce(new Error("synthetic retry"));
+      const fleet = testFleet(storage, { hetzner: { ...fakeProvider(), releaseLease } });
+      const budget = () => {
+        const usage = createCostLimitUsage(lease, new Date());
+        addLeaseToCostLimitUsage(
+          usage,
+          storage.value<LeaseRecord>(`lease:${lease.id}`)!,
+          new Date(),
+        );
+        return usage;
+      };
+      await fleet.alarm();
+      expect(budget()).toMatchObject({ activeLeases: 1, reservedUSD: 1.5 });
+      vi.setSystemTime(new Date("2026-06-01T00:20:00Z"));
+      await fleet.alarm();
+      const settled = structuredClone(storage.value<LeaseRecord>(`lease:${lease.id}`)!);
+      expect(settled.state).toBe("expired");
+      expect(budget()).toMatchObject({ activeLeases: 0, reservedUSD: 0 });
+      const mayUsage = createCostLimitUsage(lease, new Date("2026-05-31T23:59:00Z"));
+      addLeaseToCostLimitUsage(mayUsage, settled, new Date());
+      expect(mayUsage.reservedUSD).toBe(0.5);
+      vi.setSystemTime(new Date("2026-06-02T00:20:00Z"));
+      await fleet.alarm();
+      expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.endedAt).toBe(settled.endedAt);
+      expect(releaseLease).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("fleet cleanup inspection", () => {
   type CleanupCommitGuard = NonNullable<Parameters<AzureClient["recoverMissingPublicIP"]>[3]>;
 
@@ -18597,7 +18754,7 @@ describe("fleet lease identity and idle", () => {
     const limitedFleet = testFleet(
       storage,
       { hetzner: fakeProvider() },
-      { CRABBOX_MAX_MONTHLY_USD: "300" },
+      { CRABBOX_MAX_MONTHLY_USD: "1.5" },
     );
     const overBudget = await limitedFleet.fetch(
       request("POST", "/v1/leases", {
@@ -32693,7 +32850,7 @@ describe("fleet lease identity and idle", () => {
     expect(reopenedStorage.value(`lease:${leaseID}`)).toBeUndefined();
     const reopenedUsage = await reopened.fetch(request("GET", "/v1/usage", { headers }));
     await expect(reopenedUsage.json()).resolves.toMatchObject({
-      usage: { leases: 1, activeLeases: 0, reservedUSD: 1 },
+      usage: { leases: 1, activeLeases: 0, reservedUSD: 0 },
     });
     const fresh = await reopened.fetch(
       request("PUT", "/v1/leases/cbx_ca1100000042", { headers, body }),
