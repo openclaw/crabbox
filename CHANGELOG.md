@@ -8,6 +8,7 @@
 
 ### Added
 
+- Blacksmith Testbox: configure the native total readiness wait (queue and hydration) through `blacksmith.waitTimeout`, `CRABBOX_BLACKSMITH_WAIT_TIMEOUT`, or `--blacksmith-wait-timeout`, preserving the native 15-minute default when unset.
 - Serve leases can fall back to an owner-authorized, end-to-end encrypted coordinator relay when LAN and tailnet routes are unavailable.
 - Serve agents advertise LAN and tailnet front-door candidates, with pinned-key LAN-first client selection and per-lease route caching.
 - Portal: show owners their donated serve machines, online status, capacity, allocated leases, and runtime details.

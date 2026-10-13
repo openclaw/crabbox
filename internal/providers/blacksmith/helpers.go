@@ -56,6 +56,9 @@ func blacksmithWarmupArgs(cfg core.Config, publicKey string) ([]string, error) {
 func blacksmithRunArgs(cfg core.Config, leaseID, keyPath string, command []string, debug, shellMode bool) []string {
 	args := blacksmithBaseArgs(cfg)
 	args = append(args, "testbox", "run", "--id", leaseID)
+	if cfg.Blacksmith.WaitTimeout > 0 {
+		args = append(args, "--wait-timeout", cfg.Blacksmith.WaitTimeout.String())
+	}
 	if keyPath != "" {
 		args = append(args, "--ssh-private-key", keyPath)
 	}
