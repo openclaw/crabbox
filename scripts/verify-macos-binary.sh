@@ -93,7 +93,8 @@ if (!isDeepStrictEqual(actual, expected)) {
 }
 NODE
 fi
-codesign --verify --strict --check-notarization -R=notarized --verbose=2 "$BINARY"
+CDHASH=$(sed -n 's/^CDHash=//p' <<<"$SIGNATURE")
+node "$ROOT/scripts/verify-macos-notarization.mjs" "$BINARY" "$ARCH" "$CDHASH"
 
 if [[ "$EXECUTE" == 1 ]]; then
   [[ "$IDENTIFIER" == "$CRABBOX_RELEASE_CLI_IDENTIFIER" ]] || {

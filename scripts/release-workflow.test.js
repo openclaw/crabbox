@@ -1115,6 +1115,7 @@ test("signing and verification enforce Foundation identity, runtime, timestamp, 
   const config = read("scripts/release-config.sh");
   const signer = read("scripts/codesign-macos.sh");
   const verifier = read("scripts/verify-macos-binary.sh");
+  const notarization = read("scripts/verify-macos-notarization.mjs");
   const packager = read("scripts/package-release.sh");
   assert.match(config, /Developer ID Application: OpenClaw Foundation/);
   assert.match(config, /FWJYW4S8P8/);
@@ -1125,8 +1126,11 @@ test("signing and verification enforce Foundation identity, runtime, timestamp, 
   assert.match(signer, /notarytool submit/);
   assert.match(signer, /--keychain "\$MAC_RELEASE_CODESIGN_KEYCHAIN"/);
   assert.match(signer, /NOTARY_STATUS.*Accepted/);
+  assert.match(signer, /--verify --strict --check-notarization -R=notarized/);
+  assert.match(verifier, /node "\$ROOT\/scripts\/verify-macos-notarization\.mjs"/);
+  assert.match(notarization, /"--verify", "--strict", "--check-notarization", "-R=notarized"/);
+  assert.match(read("scripts/verify-homebrew-release.sh"), /PROTECTED_HOMEBREW_TOOLING=\([\s\S]*scripts\/verify-macos-notarization\.mjs[\s\S]*?\n\)/);
   for (const script of [signer, verifier]) {
-    assert.match(script, /--verify --strict --check-notarization -R=notarized/);
     assert.match(script, /Authority=\$CRABBOX_RELEASE_AUTHORITY/);
     assert.match(script, /TeamIdentifier=\$CRABBOX_RELEASE_TEAM_ID/);
     assert.doesNotMatch(script, /\bspctl\b|stapler/);

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Release verification: report bounded, attributable macOS notarization diagnostics without changing failed checks or executing rejected binaries. [PR 2823](https://github.com/openclaw/crabbox/pull/2823).
 - Blacksmith Testbox: expose the configured Node and Go runtimes to native commands instead of using the runner image defaults.
 
 ## 0.77.0 - 2026-10-13
