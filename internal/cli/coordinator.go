@@ -937,6 +937,7 @@ type CoordinatorUsageSummary struct {
 	RuntimeSeconds int64                   `json:"runtimeSeconds"`
 	EstimatedUSD   float64                 `json:"estimatedUSD"`
 	ReservedUSD    float64                 `json:"reservedUSD"`
+	CommittedUSD   *float64                `json:"committedUSD,omitempty"`
 	ByOwner        []CoordinatorUsageGroup `json:"byOwner"`
 	ByOrg          []CoordinatorUsageGroup `json:"byOrg"`
 	ByProvider     []CoordinatorUsageGroup `json:"byProvider"`
@@ -944,12 +945,13 @@ type CoordinatorUsageSummary struct {
 }
 
 type CoordinatorUsageGroup struct {
-	Key            string  `json:"key"`
-	Leases         int     `json:"leases"`
-	ActiveLeases   int     `json:"activeLeases"`
-	RuntimeSeconds int64   `json:"runtimeSeconds"`
-	EstimatedUSD   float64 `json:"estimatedUSD"`
-	ReservedUSD    float64 `json:"reservedUSD"`
+	Key            string   `json:"key"`
+	Leases         int      `json:"leases"`
+	ActiveLeases   int      `json:"activeLeases"`
+	RuntimeSeconds int64    `json:"runtimeSeconds"`
+	EstimatedUSD   float64  `json:"estimatedUSD"`
+	ReservedUSD    float64  `json:"reservedUSD"`
+	CommittedUSD   *float64 `json:"committedUSD,omitempty"`
 }
 
 type CoordinatorCostLimits struct {

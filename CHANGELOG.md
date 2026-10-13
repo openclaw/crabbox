@@ -7,6 +7,10 @@
 - Serve agents advertise LAN and tailnet front-door candidates, with pinned-key LAN-first client selection and per-lease route caching.
 - Portal: show owners their donated serve machines, online status, capacity, allocated leases, and runtime details.
 
+### Fixes
+
+- Coordinator: settle finished leases to elapsed billable cost (zero when never provisioned), capped at their reservations, for monthly budget enforcement; keep live reservations and expose additive `committedUSD` usage totals and CLI output without a state migration.
+
 ## 0.75.0 - 2026-10-12
 
 ### Highlights

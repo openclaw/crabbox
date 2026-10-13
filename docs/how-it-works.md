@@ -97,7 +97,7 @@ as a run record with phased events.
 **5. Release.** By default, release a newly acquired lease unless `--keep` is
 set; leave an explicitly reused `--id` lease available. `--stop-after` can
 override this policy. The provider applies its cleanup contract, and the broker
-frees reserved cost. If bootstrap never reached SSH readiness on
+settles its budget contribution to elapsed billable cost, capped at its reservation. If bootstrap never reached SSH readiness on
 a fresh, non-kept lease, `crabbox run` replaces the machine once and retries; it
 never duplicates the command on kept or explicitly reused leases.
 

@@ -199,7 +199,7 @@ Raw Cloudflare Access identity headers are ignored — only a verified Access JW
 email can become the bearer-token owner.
 
 If a new lease would exceed any configured active-lease count or monthly
-reserved-cost budget, the create call returns HTTP 429 `cost_limit_exceeded`
+committed-cost budget, the create call returns HTTP 429 `cost_limit_exceeded`
 and no machine is provisioned. See [Cost and usage](features/cost-usage.md).
 
 ## Usage statistics
@@ -214,7 +214,7 @@ crabbox usage --scope all --json
 ```
 
 A report includes lease count, active-lease count, elapsed runtime, estimated
-elapsed cost, reserved worst-case cost, and breakdowns by owner, org, provider,
+elapsed cost, reserved worst-case cost, committed budget cost, and breakdowns by owner, org, provider,
 and server type.
 
 ## Actions parity boundary
