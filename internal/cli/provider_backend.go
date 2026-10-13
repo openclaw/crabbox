@@ -2267,7 +2267,7 @@ func (a App) touchLeaseTargetBestEffort(ctx context.Context, cfg Config, lease L
 	}
 	touchCtx, cancel := context.WithTimeout(ctx, bestEffortLeaseTouchTimeout)
 	defer cancel()
-	server, err := sshBackend.Touch(touchCtx, TouchRequest{Lease: lease, State: state, IdleTimeout: cfg.IdleTimeout})
+	server, err := touchLeaseWithGuestExpiry(touchCtx, sshBackend, cfg, TouchRequest{Lease: lease, State: state, IdleTimeout: cfg.IdleTimeout})
 	if err != nil {
 		fmt.Fprintf(a.Stderr, "warning: touch failed for %s: %v\n", lease.LeaseID, err)
 		return lease.Server

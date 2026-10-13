@@ -60,7 +60,7 @@ func (a App) startInteractiveSSHLeaseActivity(ctx context.Context, cfg Config, l
 		fmt.Fprintf(a.Stderr, "warning: provider=%s does not support lease touch\n", backend.Spec().Name)
 		return stopInteractiveSSHHeartbeat(stopHeartbeat)
 	}
-	if touched, touchErr := sshBackend.Touch(ctx, TouchRequest{Lease: lease, State: "running", IdleTimeout: cfg.IdleTimeout}); touchErr == nil {
+	if touched, touchErr := touchLeaseWithGuestExpiry(ctx, sshBackend, cfg, TouchRequest{Lease: lease, State: "running", IdleTimeout: cfg.IdleTimeout}); touchErr == nil {
 		lease.Server = touched
 	} else {
 		fmt.Fprintf(a.Stderr, "warning: direct touch state=running: %v\n", touchErr)
@@ -71,7 +71,7 @@ func (a App) startInteractiveSSHLeaseActivity(ctx context.Context, cfg Config, l
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		if touched, touchErr := sshBackend.Touch(cleanupCtx, TouchRequest{Lease: lease, State: "ready", IdleTimeout: cfg.IdleTimeout}); touchErr == nil {
+		if touched, touchErr := touchLeaseWithGuestExpiry(cleanupCtx, sshBackend, cfg, TouchRequest{Lease: lease, State: "ready", IdleTimeout: cfg.IdleTimeout}); touchErr == nil {
 			lease.Server = touched
 		} else {
 			fmt.Fprintf(a.Stderr, "warning: direct touch state=ready: %v\n", touchErr)

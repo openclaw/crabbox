@@ -3,7 +3,9 @@ package sealosdevbox
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -97,6 +99,61 @@ func TestCleanupRefusesResourceWhoseScopeChangesBeforeDelete(t *testing.T) {
 	}
 	if got := strings.Join(flattenArgs(runner.requests), " "); strings.Contains(got, " delete ") {
 		t.Fatalf("scope change reached delete: %s", got)
+	}
+}
+
+func TestCleanupPreservesRenewedDevbox(t *testing.T) {
+	for _, duringRevalidation := range []bool{false, true} {
+		t.Run(fmt.Sprintf("during revalidation=%t", duringRevalidation), func(t *testing.T) {
+			isolateSealosState(t)
+			cfg := lifecycleConfig()
+			leaseID, slug, name := "cbx_renewed0000", "renewed", "devbox-renewed"
+			claimExactSealosTarget(t, cfg, leaseID, slug, name, t.TempDir(), core.SSHTarget{})
+			old := cleanupDevboxJSON(cfg, leaseID, slug, name, sealosClaimScopeID(cfg), "2026-06-24T00:00:00Z")
+			fresh := cleanupDevboxJSON(cfg, leaseID, slug, name, sealosClaimScopeID(cfg), "2026-06-24T13:00:00Z")
+			fresh = strings.Replace(fresh, `"annotations":{`, `"annotations":{"crabbox.dev/keep":"true",`, 1)
+			listed := fresh
+			if duringRevalidation {
+				listed = old
+			}
+			runner := &lifecycleRunner{outputs: []string{`{"items":[` + listed + `]}`, fresh}}
+			backend := lifecycleBackend(cfg, runner)
+			err := backend.Cleanup(context.Background(), core.CleanupRequest{})
+			if duringRevalidation && (err == nil || !strings.Contains(err.Error(), "not expired")) {
+				t.Fatalf("renewal error=%v", err)
+			}
+			if !duringRevalidation && err != nil {
+				t.Fatal(err)
+			}
+			for _, req := range runner.requests {
+				if strings.Contains(strings.Join(req.Args, " "), " delete ") {
+					t.Fatal("renewed devbox was deleted")
+				}
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || !exists {
+				t.Fatalf("claim exists=%t err=%v", exists, err)
+			}
+		})
+	}
+}
+
+func TestCleanupOwnershipUsesNativeLabels(t *testing.T) {
+	cfg := lifecycleConfig()
+	backend := lifecycleBackend(cfg, &lifecycleRunner{})
+	for _, managedBy := range []string{"crabbox", "dashboard", ""} {
+		t.Run("managed by "+managedBy, func(t *testing.T) {
+			data := cleanupDevboxJSON(cfg, "cbx_owned000000", "owned", "devbox-owned", sealosClaimScopeID(cfg), "2026-06-24T00:00:00Z")
+			data = strings.Replace(data, `"app.kubernetes.io/managed-by":"crabbox"`, `"app.kubernetes.io/managed-by":"`+managedBy+`"`, 1)
+			data = strings.Replace(data, `"annotations":{`, `"annotations":{"crabbox.dev/crabbox":"true",`, 1)
+			var item devboxItem
+			if err := json.Unmarshal([]byte(data), &item); err != nil {
+				t.Fatal(err)
+			}
+			eligible, reason := core.ShouldCleanupServer(backend.serverFromDevbox(item), backend.now())
+			if eligible != (managedBy == "crabbox") {
+				t.Fatalf("eligible=%t reason=%s", eligible, reason)
+			}
+		})
 	}
 }
 

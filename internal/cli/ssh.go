@@ -1443,6 +1443,7 @@ func sshForwardingDenyArgs() []string {
 }
 
 func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts string) []string {
+	connectTimeout = relaySSHConnectTimeout(connectTimeout, usesServeRelay(target))
 	args := append(sshForwardingDenyArgs(),
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout="+connectTimeout,

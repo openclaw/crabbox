@@ -67,8 +67,8 @@ Read this when:
 
 A lease holds a remote box until it is released or expires. Two independent
 paths reclaim the underlying resources: the **brokered** path, owned by the
-coordinator, and the **direct** path, owned by the local CLI (and, for GCP, a
-guest-side guard). Which one applies depends on whether the provider runs
+coordinator, and the **direct** path, owned by the local CLI and supported Linux
+guest-side guards. Which one applies depends on whether the provider runs
 through a coordinator.
 
 ## Brokered lifecycle
@@ -587,36 +587,58 @@ Use `--dry-run` to print what would be deleted without touching anything. The
 sweep is conservative; for each candidate machine `shouldCleanupServer`
 (`internal/cli/pool.go`) decides from the machine's Crabbox labels:
 
-- skip machines with no labels, or labeled `keep=true`, even after recorded expiry;
-- `running` / `provisioning`: delete only when stale — past `expires_at` plus a
-  12-hour safety window;
-- `leased` / `ready` / `active`: delete once past `expires_at`;
-- `failed` / `released` / `expired`: delete;
-- otherwise: delete once past `expires_at`, skip if `expires_at` is missing or
-  still in the future.
+- skip machines unless `crabbox=true`; unrelated or unlabeled machines are never reclaimed;
+- `running` / `provisioning`: reclaim only after `expires_at` plus **1 hour**;
+- `leased` / `ready` / `active`: reclaim after `expires_at`;
+- `failed` / `released` / `expired`: reclaim immediately;
+- other states: reclaim only after a valid expiry; missing or invalid expiry is left alone.
 
-For this to work, every direct-provider machine must carry Crabbox labels/tags
-(at least `crabbox`, `state`, and `expires_at`) so the sweep can identify owned
-resources without touching unrelated infrastructure.
+`keep=true` only suppresses automatic release after `run`. It does **not**
+exempt a direct lease from expiry, matching brokered leases. This changes the
+old direct sweep behavior, which skipped kept leases and allowed a 12-hour
+running/provisioning grace. Cleanup retains its legacy `ttl` expiry-label
+fallback. New bootstraps use `expires_at` (Unix seconds).
 
-### GCP guest-side expiry guard
+### Guest-side expiry guard
 
-A direct GCP lease can outlive the local CLI that created it — if `cleanup`
-never runs, the VM would leak. To guard against this, direct GCP leases install
-a self-deleting guard (`cloudInitGCPExpiryGuardFiles` in
-`internal/cli/bootstrap.go`): a systemd timer runs every 2 minutes, reads the
-instance's own labels via the GCP metadata server, and deletes the instance when
-it is clearly expired. Unlike the manual CLI sweep, this automatic expiry path
-also reaps kept leases:
+Direct Linux VMs on the shared cloud-init path install one root-owned script,
+`/usr/local/sbin/crabbox-expiry-guard`, and a systemd service/timer. The timer
+runs every two minutes, beginning two minutes after boot, before optional
+bootstrap work completes. It uses the same decision cases as the CLI sweep;
+tests execute these cases through both Go and the shell guard. No provider
+credentials are stored in guard files. Missing, ambiguous, or unavailable
+ownership metadata fails closed. Expiry-based decisions require a valid deadline;
+terminal `failed` / `released` / `expired` states remain immediately reclaimable.
 
-- exits unless `crabbox=true` and the provider label is absent or `gcp`;
-- retains `keep=true` machines until their recorded expiry, leaving those without valid expiry metadata alone;
-- `failed` / `released` / `expired`: delete;
-- `running` / `provisioning`: delete only past `expires_at` plus 12 hours;
-- `leased` / `ready` / `active` (and unlabeled state): delete once past
-  `expires_at`.
+| Direct Linux provider | Deadline source | Reclaim action |
+| --- | --- | --- |
+| GCP | Current labels fetched through the metadata server's service-account token and Compute API (existing mechanism) | Delete this VM through the Compute API |
+| AWS | Instance tags via IMDSv2; new direct Linux launches enable instance metadata tags | Power off; `InstanceInitiatedShutdownBehavior=terminate` terminates the instance |
+| Azure | IMDS `compute/tagsList` | `systemctl poweroff` |
+| Hetzner | Root-owned `/etc/crabbox/lease-expiry` | `systemctl poweroff` |
+| DigitalOcean, Vultr, Linode | Root-owned `/etc/crabbox/lease-expiry` | `systemctl poweroff` |
+| OVHcloud, Scaleway, Nebius, Lambda, Tencent Cloud | Root-owned `/etc/crabbox/lease-expiry` | `systemctl poweroff` |
+| Incus, Multipass, Firecracker | Root-owned `/etc/crabbox/lease-expiry` | `systemctl poweroff` |
 
-So an expired GCP box can reclaim itself even if the operator's machine is gone.
+Powering off stops the workload; it does **not** guarantee that billing stops.
+Providers that bill stopped machines, including Hetzner, still require
+`crabbox cleanup` to delete them. Azure guest shutdown does not deallocate its
+VM. Provider disks and other retained resources can also remain billable.
+GCP retains its existing self-delete permissions requirement.
+
+File-backed bootstraps write exactly four nonsecret fields: `crabbox`, `state`,
+`keep`, and `expires_at`. `RefreshGuestLeaseExpiry(ctx, target, fields)` in
+`internal/cli/guest_expiry.go`
+is the hook for a file-backed provider's lease-lifetime update: it validates the
+fields and writes mode 0600 through the existing SSH transport, publishing by
+atomic rename in `/etc/crabbox`. Ordinary CLI state touches and heartbeats refresh this file as well as provider
+labels. Other deadline updates must use this hook, not only change provider labels. No new `extend` command is introduced here.
+
+Brokered leases never install this guard; the coordinator owns their lifecycle.
+Windows and macOS targets do not install it. Providers using prepared templates,
+custom bootstrap, hosted sandboxes, delegated execution, or static hosts rather
+than the shared cloud-init path also do not install it. The explicit uncovered
+provider list is in [Providers](providers.md#direct-lease-expiry-coverage).
 
 ## Claims and `--reclaim`
 

@@ -65,6 +65,9 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			if err := b.validateClaimBinding(claim, validated); err != nil {
 				return err
 			}
+			if eligible, reason := core.ShouldCleanupServer(b.serverFromDevbox(validated), b.now()); !eligible {
+				return core.Exit(4, "refusing to delete Sealos DevBox %q: %s", server.Name, reason)
+			}
 			if err := b.deleteDevbox(ctx, validated); err != nil {
 				return err
 			}

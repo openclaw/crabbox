@@ -192,3 +192,18 @@ func TestServeRelayCoordinatorBindingExcludesCredentials(t *testing.T) {
 		t.Fatal("destination binding includes credentials")
 	}
 }
+
+func TestServeRelaySSHTimeoutRoutes(t *testing.T) {
+	for _, tc := range []struct {
+		relay           bool
+		requested, want string
+	}{
+		{true, "2", "60"}, {true, "5", "60"}, {true, "10", "60"}, {true, "90", "90"}, {true, "0", "0"}, {false, "5", "5"},
+	} {
+		target := SSHTarget{Host: "127.0.0.1", Port: "22", User: "synthetic", SSHJump: &SSHJump{useRelay: tc.relay}}
+		args := sshBaseArgsWithOptions(target, tc.requested, "1")
+		assertSSHOption(t, args, "ConnectTimeout", tc.want)
+		session := &sshTransportSession{serveRelay: tc.relay}
+		assertSSHOption(t, session.commandPrefixWithOptions(tc.requested, "1"), "ConnectTimeout", tc.want)
+	}
+}

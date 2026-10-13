@@ -242,6 +242,18 @@ Node/PostgreSQL. Fleet handles admission and lifecycle, never the data frames.
 Printed SSH commands reuse your normal coordinator login and refuse to connect
 if the configured coordinator has changed since the command was generated.
 
+Relay SSH connections allow up to 60 seconds for admission, pairing, and the
+two SSH handshakes, including bootstrap probes and sync. A shorter caller
+deadline or cancellation still stops the operation. Direct routes keep their
+existing connection timeouts.
+
+Set `CRABBOX_SERVE_RELAY_DEBUG=1` on the client and agent to diagnose relay
+connections. Client stderr (including bootstrap probes) and the agent log show
+session IDs, bytes sent/received, ACK counts, outstanding bytes, the window
+limit, and close reasons. Output is limited to the first 16 events per session,
+then one event every five seconds and a close summary. Payloads, credentials,
+and peer-provided close text are never logged.
+
 For example, a tailnet grant can allow clients to reach only that front door:
 
 ```json

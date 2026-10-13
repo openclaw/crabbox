@@ -197,6 +197,7 @@ func TestSpecAndAliases(t *testing.T) {
 func TestCleanupExpiry(t *testing.T) {
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	server := core.Server{Status: "running", Labels: labels{
+		"crabbox":    "true",
 		"state":      "ready",
 		"expires_at": core.LeaseLabelTime(now),
 	}}
@@ -220,7 +221,7 @@ func TestCleanupExpiry(t *testing.T) {
 
 func TestCleanupKeepsStartup(t *testing.T) {
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
-	server := core.Server{Status: "starting", Labels: labels{"state": "starting", "expires_at": core.LeaseLabelTime(now.Add(time.Hour))}}
+	server := core.Server{Status: "starting", Labels: labels{"crabbox": "true", "state": "starting", "expires_at": core.LeaseLabelTime(now.Add(time.Hour))}}
 	if cleanup, reason := shouldCleanup(server, core.LeaseClaim{}, now); cleanup {
 		t.Fatalf("active startup cleanup=%v reason=%q", cleanup, reason)
 	}

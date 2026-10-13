@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -85,7 +86,11 @@ func (d *sshReadinessDiagnostic) hostKeyRejected() bool {
 
 func runSSHReadinessProbe(ctx context.Context, target SSHTarget, remote, connectTimeout, attempts string) error {
 	var diagnostic sshReadinessDiagnostic
-	err := executeSSH(ctx, &target, remote, nil, 0, 0, connectTimeout, attempts, io.Discard, &diagnostic)
+	var stderr io.Writer = &diagnostic
+	if usesServeRelay(target) && os.Getenv("CRABBOX_SERVE_RELAY_DEBUG") == "1" {
+		stderr = io.MultiWriter(stderr, &serveRelayDiagnosticForwarder{out: os.Stderr})
+	}
+	err := executeSSH(ctx, &target, remote, nil, 0, 0, connectTimeout, attempts, io.Discard, stderr)
 	if err == nil {
 		recordCreationObservation(ctx, "ssh_authenticated")
 	}

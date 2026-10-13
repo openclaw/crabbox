@@ -19,14 +19,17 @@ func TestHetznerDesktopUserDataFitsProviderLimit(t *testing.T) {
 			cfg := baseConfig()
 			cfg.Provider, cfg.Desktop, cfg.Browser, cfg.DesktopEnv = "hetzner", true, true, desktop
 			var userData string
+			var labels map[string]string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var body struct {
-					UserData string `json:"user_data"`
+					UserData string            `json:"user_data"`
+					Labels   map[string]string `json:"labels"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Error(err)
 				}
 				userData = body.UserData
+				labels = body.Labels
 				_, _ = io.WriteString(w, `{"server":{"id":123}}`)
 			}))
 			defer server.Close()
@@ -54,7 +57,10 @@ func TestHetznerDesktopUserDataFitsProviderLimit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(decoded) != cloudInit(cfg, "ssh-ed25519 fixture") {
+			if labels["crabbox"] != "true" || labels["expires_at"] == "" {
+				t.Fatal("missing allocation ownership or deadline")
+			}
+			if string(decoded) != cloudInit(WithGuestLeaseExpiry(cfg, labels), "ssh-ed25519 fixture") {
 				t.Fatal("MIME transport changed cloud-config content")
 			}
 		})

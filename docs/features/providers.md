@@ -54,6 +54,40 @@ selection metadata, so registration and documentation drift fail the docs gate.
 `crabbox providers --json` remains the low-level compiled spec. `crabbox doctor`
 checks whether the selected provider is usable from the current environment.
 
+## Direct lease expiry coverage
+
+The shared Linux guest guard covers **AWS, Azure, GCP, Hetzner, DigitalOcean,
+Vultr, Linode, OVHcloud, Scaleway, Nebius, Lambda, Tencent Cloud, Incus,
+Multipass, and Firecracker**. See the [deadline source and reclaim action
+table](lifecycle-cleanup.md#guest-side-expiry-guard). Coordinator-managed leases
+and Windows/macOS targets are excluded.
+
+The following providers do not use that shared Linux bootstrap and receive no
+guard (some have provider-native expiry instead):
+
+- `agent-sandbox`, `anthropic-sandbox-runtime`, `apple-container`, `apple-machine`, `apple-vm`, `ascii-box`, `aws-lambda-microvm`, `azure-dynamic-sessions`.
+- `azure-sandbox`, `blacksmith-testbox`, `blaxel`, `boxd`, `cloud-run-sandbox`, `cloudflare`, `cloudflare-dynamic-workers`, `cloudflare-sandbox`.
+- `coder`, `codesandbox`, `crownest`, `cua`, `cubesandbox`, `daytona`, `docker-sandbox`, `e2b`.
+- `exe-dev`, `external`, `fastapi-cloud`, `freestyle`, `github-codespaces`, `hostinger`, `hyperv`, `islo`.
+- `kubevirt`, `local-container`, `lume`, `machine0`, `modal`, `morph`, `mxc`, `namespace-devbox`.
+- `namespace-instance`, `nomad`, `nvidia-brev`, `opencomputer`, `opensandbox`, `orgo`, `parallels`, `phala`.
+- `proxmox`, `railway`, `runpod`, `sealos-devbox`, `semaphore`, `serve`, `smolvm`, `sprites`.
+- `ssh`, `superserve`, `tart`, `tenki`, `tensorlake`, `unikraft-cloud`, `upstash-box`, `vast`.
+- `vercel-sandbox`, `wandb`, `windows-sandbox`, `xcp-ng`.
+
+In particular, prepared/custom-bootstrapped VMs such as Proxmox, XCP-ng,
+Parallels, and Apple VM remain uncovered; their existing provider cleanup still
+applies. This guard does not add a bootstrap path to hosted sandboxes or static
+hosts. A guest shutdown is not deletion: stopped machines can remain billable
+and still need `crabbox cleanup`.
+
+To forbid new direct remote allocations, set
+[`directLeases: deny`](configuration.md#direct-lease-policy), with optional
+trusted `directLeaseAllow` exceptions. The always-exempt local/static set is
+`ssh`, `local-container`, `docker-sandbox`, `apple-container`, `apple-machine`,
+`apple-vm`, `anthropic-sandbox-runtime`, `mxc`, `multipass`, `firecracker`,
+`lume`, `tart`, `hyperv`, and `windows-sandbox`.
+
 ## Machine classes
 
 An explicitly selected canonical `--class tiny|small|standard|fast|large|beast` maps to an
@@ -166,7 +200,8 @@ describes retry order.
 
 `crabbox list` marks brokered machines as `orphan=no-active-lease` when their
 provider label references a lease no longer active in the coordinator. This is an
-operator hint only; `keep=true` machines are never deleted automatically.
+operator hint only; listing does not delete machines. Recorded expiry still
+applies regardless of `keep=true`.
 
 The structured quota preflight and `provisioningAttempts` metadata belong to the
 brokered Worker path; direct AWS fallback can still retry provider types but

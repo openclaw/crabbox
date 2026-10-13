@@ -124,7 +124,7 @@ func (b *linodeLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireR
 		claim := tx.Claim
 		createReq.Label, createReq.Tags = core.LeaseProviderName(claim.LeaseID, claim.Slug), tagsFromLabels(tx.CreateLabels())
 		createReq.AuthorizedKeys = []string{publicKey}
-		createReq.Metadata = &linodeMetadata{UserData: linodeUserData(cfg, publicKey)}
+		createReq.Metadata = &linodeMetadata{UserData: linodeUserData(core.WithGuestLeaseExpiry(cfg, tx.CreateLabels()), publicKey)}
 		createReq.RootPass, err = generateLinodeRootPass()
 		if err != nil {
 			return linodeInstance{}, err

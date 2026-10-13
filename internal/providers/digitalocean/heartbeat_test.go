@@ -3,10 +3,13 @@ package digitalocean
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,6 +19,7 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
+	"golang.org/x/crypto/ssh"
 )
 
 type heartbeatTransport func(*http.Request) (*http.Response, error)
@@ -28,6 +32,8 @@ func TestFixedDropletHeartbeatAndStatusWait(t *testing.T) {
 			t.Run(command+"/"+change, func(t *testing.T) {
 				api := &fakeDigitalOceanAPI{}
 				b := newTestBackend(t, api)
+				port, refreshes := guestExpirySSHFixture(t)
+				b.Cfg.SSHPort = port
 				// Ensure renewal changes activity tags even within one wall-clock second.
 				b.RT.Clock = fixedClock{t: time.Now().Add(-time.Minute)}
 				repo := t.TempDir()
@@ -46,6 +52,7 @@ func TestFixedDropletHeartbeatAndStatusWait(t *testing.T) {
 					t.Fatalf("fixed acquisition lost ownership: %+v, %v", claim, err)
 				}
 				if err := core.WithDurableLeaseClaimLock(lease.LeaseID, func(c *core.LeaseClaim, _ bool, persist func() error) error {
+					c.SSHHost = "127.0.0.1"
 					switch change {
 					case "scope":
 						c.ProviderScope = "team:foreign"
@@ -61,7 +68,7 @@ func TestFixedDropletHeartbeatAndStatusWait(t *testing.T) {
 					t.Fatal(err)
 				}
 				config := filepath.Join(t.TempDir(), "config.yaml")
-				if err := os.WriteFile(config, []byte("provider: digitalocean\n"), 0600); err != nil {
+				if err := os.WriteFile(config, []byte(fmt.Sprintf("provider: digitalocean\nssh:\n  port: %q\n", port)), 0600); err != nil {
 					t.Fatal(err)
 				}
 				t.Setenv("CRABBOX_CONFIG", config)
@@ -70,6 +77,9 @@ func TestFixedDropletHeartbeatAndStatusWait(t *testing.T) {
 					t.Setenv(name, "")
 				}
 				item := api.created[0]
+				for i := range item.Networks.V4 {
+					item.Networks.V4[i].IPAddress = "127.0.0.1"
+				}
 				labels := labelsFromTags(item.Tags)
 				if command == "status" {
 					labels["state"] = "provisioning"
@@ -126,6 +136,14 @@ func TestFixedDropletHeartbeatAndStatusWait(t *testing.T) {
 				}
 				err = (core.App{Stdout: output, Stderr: &stderr}).Run(ctx, args)
 				if change == "owned" || change == "ordinary" {
+					select {
+					case input := <-refreshes:
+						if !strings.HasPrefix(input, "crabbox=true\nstate=") || !strings.Contains(input, "\nkeep=true\nexpires_at=") {
+							t.Fatalf("invalid guest expiry refresh: %q", input)
+						}
+					default:
+						t.Fatalf("owned lease did not refresh guest expiry: err=%v stderr=%s", err, &stderr)
+					}
 					if writes == 0 || (command == "heartbeat" && err != nil) {
 						t.Fatalf("owned lease not touched: writes=%d err=%v stderr=%s", writes, err, &stderr)
 					}
@@ -143,7 +161,82 @@ func TestFixedDropletHeartbeatAndStatusWait(t *testing.T) {
 				} else if writes != 0 || (command == "heartbeat" && err == nil) {
 					t.Fatalf("foreign/incomplete claim touched: writes=%d err=%v", writes, err)
 				}
+				if len(refreshes) != 0 {
+					t.Fatal("unexpected guest expiry refresh")
+				}
 			})
 		}
 	}
+}
+
+// Model the guest without executing its root-owned refresh command locally.
+func guestExpirySSHFixture(t *testing.T) (string, <-chan string) {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := &ssh.ServerConfig{NoClientAuth: true}
+	config.AddHostKey(signer)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	refreshes := make(chan string, 8)
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(time.Minute))
+				server, channels, requests, err := ssh.NewServerConn(conn, config)
+				if err != nil {
+					return // Readiness probes connect without an SSH handshake.
+				}
+				defer server.Close()
+				go ssh.DiscardRequests(requests)
+				for channel := range channels {
+					ch, requests, err := channel.Accept()
+					if err != nil {
+						return
+					}
+					defer ch.Close()
+					for req := range requests {
+						var command struct{ Command string }
+						valid := req.Type == "exec" && ssh.Unmarshal(req.Payload, &command) == nil
+						_ = req.Reply(valid, nil)
+						if !valid {
+							continue
+						}
+						input, err := io.ReadAll(ch)
+						if err != nil {
+							return
+						}
+						if strings.Contains(command.Command, "/etc/crabbox/.lease-expiry.") && strings.Contains(command.Command, "mv -fT") {
+							refreshes <- string(input)
+						}
+						_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{0}))
+						_ = ch.Close()
+						// Native OpenSSH must receive the exit status before TCP closes.
+						for range requests {
+						}
+						return
+					}
+				}
+			}()
+		}
+	}()
+	_, port, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return port, refreshes
 }

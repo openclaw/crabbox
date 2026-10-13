@@ -224,6 +224,7 @@ func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 	`)
 	classify("command default resolved into the explicit create request Keep field", `WarmupKeep`)
 	classify("coordinator-only lifetime enrollment; direct creation rejects canary flags", `LifetimePolicy`)
+	classify("local allocation admission policy, not remote resource intent", `DirectLeases DirectLeaseAllow`)
 
 	configType := reflect.TypeOf(Config{})
 	known := map[string]bool{}

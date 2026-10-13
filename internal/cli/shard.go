@@ -226,6 +226,9 @@ func (a App) shard(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := validateDirectLeaseCreation(cfg); err != nil {
+		return err
+	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return err

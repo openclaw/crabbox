@@ -9,19 +9,24 @@
 - CI: run CLI coverage in three isolated shards, retaining atomic whole-suite coverage and the 90% core gate; report the slowest top-level tests without summing nested timings.
 - Coordinator monthly reserved-USD budgets are raised to $100,000 fleet-wide, $50,000 per owner and $100,000 per org; reservations from finished leases had exhausted the per-owner cap at roughly a quarter of the estimated spend.
 - CLI: `crabbox list` streams and shows live leases by default; `--retained` includes kept terminal leases. Add `--jsonl` streaming and uncapped `--all` lease lookups while preserving the buffered `--json` array.
+- Direct cleanup now expires `keep=true` leases and reduces running/provisioning expiry grace from 12 hours to 1 hour; unowned machines remain untouched.
+- Direct leases: preserve provider user-data limits with compressed Tencent Cloud bootstrap, retain renewed leases during cleanup, and normalize Sealos ownership labels. [PR 2806](https://github.com/openclaw/crabbox/pull/2806).
 
 ### Added
 
 - Blacksmith Testbox: configure the native total readiness wait (queue and hydration) through `blacksmith.waitTimeout`, `CRABBOX_BLACKSMITH_WAIT_TIMEOUT`, or `--blacksmith-wait-timeout`, preserving the native 15-minute default when unset.
 - Serve leases can fall back to an owner-authorized, end-to-end encrypted coordinator relay when LAN and tailnet routes are unavailable.
 - Coordinator: reconcile retained terminal AWS leases from the current index with scoped cleanup proof, bounded resumable passes, opt-in owned deletion, and `crabbox admin retained-reconcile` status.
+- Direct Linux guest expiry guards across shared-bootstrap providers, plus `directLeases: deny` and trusted provider exceptions to require coordinator allocation.
 - Serve agents advertise LAN and tailnet front-door candidates, with pinned-key LAN-first client selection and per-lease route caching.
 - Portal: show owners their donated serve machines, online status, capacity, allocated leases, and runtime details.
 
 ### Fixed
 
 - CLI: retain idempotent SSH retries for batched workspace preparation and script upload after transient transport failures.
+- Blacksmith Testbox: cancel the exact owned GitHub workflow after native stop leaves it active, releasing concurrency slots without waiting for the SSH idle timer; retain recovery state until both sides confirm completion. [PR 2813](https://github.com/openclaw/crabbox/pull/2813).
 - AWS: honor the requested region before coordinator and capacity fallbacks, using a regional promoted image or the normal stock image without redirecting to another region's promotion.
+- Serve: allow relay pairing and both SSH handshakes to complete during bootstrap and sync; add bounded, payload-free client and agent diagnostics with `CRABBOX_SERVE_RELAY_DEBUG=1`. [PR 2811](https://github.com/openclaw/crabbox/pull/2811).
 - Preserve worst-case `reservedUSD` in usage reports and expose enforced cost as `committedUSD`, with compatible CLI output and conservative reservations for retained legacy VMs and unresolved provisioning. [PR 2801](https://github.com/openclaw/crabbox/pull/2801).
 - Settle terminal lease budget reservations at elapsed compute cost capped by the admission reservation, preserve observed runtime through late release and cleanup retries, and charge confirmed never-allocated leases zero compute runtime.
 - Coordinator deployments fail when credentials are missing or the public health endpoint does not confirm the active version and requested commit.

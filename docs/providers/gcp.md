@@ -466,13 +466,14 @@ Three independent safety nets enforce expiry:
 
 - Direct GCP VMs set Compute Engine `maxRunDuration` with termination action
   `DELETE`, so the TTL hard cap is enforced by the platform.
-- Each VM installs a guest-side `crabbox-gcp-expiry-guard` systemd timer that
-  reads live instance labels through the metadata service and Compute API, then
-  self-deletes expired leases, including kept warmups, when the attached service
-  account can delete the VM. New VMs receive this behavior; existing VMs retain
-  their installed guard and must be recreated to receive the updated idle reaper.
-  Manual `crabbox cleanup` continues to skip kept leases; use explicit `stop`
-  to remove an existing kept VM.
+- New direct Linux VMs install the shared `crabbox-expiry-guard` systemd timer.
+  It reads live instance labels through the metadata service and Compute API,
+  then self-deletes expired leases, including kept warmups, when the attached
+  service account can delete the VM. The timer runs every two minutes; running
+  and provisioning states have a one-hour expiry grace. Existing VMs retain
+  their installed guard and must be recreated to receive this version.
+  Manual `crabbox cleanup` also expires kept leases. Brokered leases do not
+  install this guard; their coordinator owns expiry.
 - Cleanup removes stale local GCP claim files whose lease IDs no longer appear in
   provider inventory.
 

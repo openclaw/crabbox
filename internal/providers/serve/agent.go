@@ -616,7 +616,7 @@ func (a *agent) startRelays(ctx context.Context, pending []relayAssignment) {
 		a.relayMu.Unlock()
 		go func(session relayAssignment) {
 			defer func() { a.relayMu.Lock(); delete(a.relays, session.SessionID); a.relayMu.Unlock() }()
-			conn, err := core.DialServeRelay(ctx, a.coord, session.SessionID, "agent", session.AgentToken, a.state.Machine.MachineID)
+			conn, err := core.DialServeRelay(ctx, a.coord, session.SessionID, "agent", session.AgentToken, a.state.Machine.MachineID, a.rt.Stderr)
 			if err != nil {
 				if ctx.Err() == nil {
 					fmt.Fprintln(a.rt.Stderr, "serve relay: connection failed")

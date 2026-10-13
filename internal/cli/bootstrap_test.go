@@ -146,13 +146,13 @@ func TestCloudInitGCPInstallsExpiryGuard(t *testing.T) {
 	cfg.Provider = "gcp"
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
-		"/usr/local/sbin/crabbox-gcp-expiry-guard",
+		"/usr/local/sbin/crabbox-expiry-guard",
 		"computeMetadata/v1/$1",
 		"compute/v1/projects/$project/zones/$zone/instances/$name",
-		"crabbox-gcp-expiry-guard.service",
-		"crabbox-gcp-expiry-guard.timer",
+		"crabbox-expiry-guard.service",
+		"crabbox-expiry-guard.timer",
 		"OnUnitActiveSec=2min",
-		"systemctl enable --now crabbox-gcp-expiry-guard.timer",
+		"systemctl enable --now crabbox-expiry-guard.timer",
 		"expires_at",
 		"failed|released|expired",
 		"running|provisioning",
@@ -162,7 +162,7 @@ func TestCloudInitGCPInstallsExpiryGuard(t *testing.T) {
 		}
 	}
 	early, final, found := strings.Cut(got, "\nruncmd:")
-	if !found || !strings.Contains(early, "touch /var/lib/crabbox/bootstrapped") || strings.Contains(final, "crabbox-gcp-expiry-guard.timer") {
+	if !found || !strings.Contains(early, "touch /var/lib/crabbox/bootstrapped") || strings.Contains(final, "crabbox-expiry-guard.timer") {
 		t.Fatal("default GCP expiry guard must be armed before early readiness")
 	}
 

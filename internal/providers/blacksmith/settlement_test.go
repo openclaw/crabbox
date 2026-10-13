@@ -87,6 +87,13 @@ func TestBlacksmithStopRequiresExactGitHubSettlement(t *testing.T) {
 				defer cancel()
 				backend := newTestBlacksmithBackend(cfg, settlementRunner(func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 					if req.Name == "gh" {
+						if testBlacksmithFlag(req.Args, "--method") == "POST" {
+							want := []string{"api", "--hostname", "github.com", "--method", "POST", "repos/example-org/my-app/actions/runs/123456789/cancel"}
+							if !reflect.DeepEqual(req.Args, want) {
+								t.Fatalf("non-exact cancellation: %+v", req)
+							}
+							return core.LocalCommandResult{}, nil
+						}
 						reads++
 						want := []string{"api", "--hostname", "github.com", "--method", "GET", "repos/example-org/my-app/actions/runs/123456789", "--jq", "{id,html_url,status,conclusion}"}
 						if !reflect.DeepEqual(req.Args, want) || req.MaxCapturedOutputBytes <= 0 || req.MaxCapturedOutputBytes > 16384 {
@@ -218,6 +225,102 @@ func TestBlacksmithStopRequiresExactGitHubSettlement(t *testing.T) {
 				}
 				if mode == "cancel-read" && !errors.Is(err, context.Canceled) {
 					t.Fatalf("cancellation lost: %v", err)
+				}
+			})
+		})
+	}
+}
+
+func TestBlacksmithStopCancelsOnlyAssociatedWorkflow(t *testing.T) {
+	for _, mode := range []string{"accepted", "already-terminal", "denied", "nonzero", "completion-race", "still-running", "changed-association", "lost-association", "cancelled-request"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				isolateBlacksmithOwnership(t)
+				const id = "tbx_cancel_owned"
+				const runURL = "https://github.com/example-org/my-app/actions/runs/123456789"
+				claim := seedStopClaim(t, id)
+				other := seedStopClaim(t, "tbx_unrelated_cancel")
+				cfg := core.BaseConfig()
+				cfg.Blacksmith.Org = "example-org"
+				ctx, cancel := context.WithTimeout(t.Context(), 2500*time.Millisecond)
+				defer cancel()
+				stops, statuses, reads, cancellations := 0, 0, 0, 0
+				var stderr bytes.Buffer
+				backend := newTestBlacksmithBackend(cfg, settlementRunner(func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					if _, ok := ctx.Deadline(); !ok {
+						t.Fatal("unbounded cleanup command")
+					}
+					if req.Name == "gh" {
+						if testBlacksmithFlag(req.Args, "--hostname") != "github.com" || req.MaxCapturedOutputBytes != 16384 {
+							t.Fatalf("unbounded or redirected GitHub access: %+v", req)
+						}
+						if testBlacksmithFlag(req.Args, "--method") == "POST" {
+							cancellations++
+							want := []string{"api", "--hostname", "github.com", "--method", "POST", "repos/example-org/my-app/actions/runs/123456789/cancel"}
+							if !reflect.DeepEqual(req.Args, want) || stops == 0 {
+								t.Fatalf("cancellation is not bound to the stopped run: %+v", req)
+							}
+							switch mode {
+							case "denied", "completion-race":
+								return core.LocalCommandResult{ExitCode: 1, Stderr: "synthetic private cancellation diagnostic"}, errors.New("cancel rejected")
+							case "nonzero":
+								return core.LocalCommandResult{ExitCode: 4}, nil
+							case "cancelled-request":
+								cancel()
+							}
+							return core.LocalCommandResult{}, nil
+						}
+						reads++
+						want := []string{"api", "--hostname", "github.com", "--method", "GET", "repos/example-org/my-app/actions/runs/123456789", "--jq", "{id,html_url,status,conclusion}"}
+						if !reflect.DeepEqual(req.Args, want) {
+							t.Fatalf("non-exact GitHub read: %+v", req)
+						}
+						state, conclusion := "in_progress", ""
+						if mode == "already-terminal" || cancellations > 0 && (mode == "accepted" || mode == "completion-race") {
+							state, conclusion = "completed", "cancelled"
+						}
+						return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"id":123456789,"html_url":%q,"status":%q,"conclusion":%q}`, runURL, state, conclusion)}, nil
+					}
+					if req.Name != "blacksmith" || testBlacksmithFlag(req.Args, "--id") != id || testBlacksmithFlag(req.Args, "--org") != "example-org" {
+						t.Fatalf("unowned native command: %+v", req)
+					}
+					if strings.Contains(strings.Join(req.Args, " "), "testbox stop") {
+						stops++
+						return core.LocalCommandResult{}, nil
+					}
+					statuses++
+					state, url := "ready", runURL
+					if stops > 0 {
+						state = "completed"
+					}
+					if reads > 0 && mode == "changed-association" {
+						url = strings.ReplaceAll(runURL, "123456789", "987654321")
+					}
+					if reads > 0 && mode == "lost-association" {
+						url = ""
+					}
+					return core.LocalCommandResult{Stdout: nativeStopStatusTable(id, state, "", claim.Labels["workflow"], claim.Labels["job"], claim.Labels["ref"], "2026-10-03T12:00:00Z", url)}, nil
+				}))
+				backend.rt.Stderr = &stderr
+				err := backend.Stop(ctx, core.StopRequest{ID: id})
+				wantSuccess := mode == "accepted" || mode == "already-terminal" || mode == "completion-race"
+				if (err == nil) != wantSuccess {
+					t.Fatalf("err=%v stops=%d statuses=%d reads=%d cancellations=%d", err, stops, statuses, reads, cancellations)
+				}
+				wantCancellations := 1
+				if mode == "already-terminal" || mode == "changed-association" || mode == "lost-association" {
+					wantCancellations = 0
+				}
+				if cancellations != wantCancellations || statuses < 3 {
+					t.Fatalf("cancellations=%d want=%d statuses=%d", cancellations, wantCancellations, statuses)
+				}
+				assertStopState(t, claim, !wantSuccess)
+				assertStopState(t, other, true)
+				if strings.Contains(stderr.String()+fmt.Sprint(err), "synthetic private cancellation diagnostic") {
+					t.Fatal("cancellation diagnostics leaked")
+				}
+				if mode == "cancelled-request" && !errors.Is(err, context.Canceled) {
+					t.Fatalf("caller cancellation lost: %v", err)
 				}
 			})
 		})

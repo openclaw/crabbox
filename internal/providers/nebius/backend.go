@@ -75,7 +75,7 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	now := b.now().UTC()
 	labels := nebiusLeaseLabels(cfg, leaseID, slug, "provisioning", req.Keep, now)
 	created := nebiusInstance{}
-	userData, err := renderNebiusCloudInit(cfg, publicKey)
+	userData, err := renderNebiusCloudInit(core.WithGuestLeaseExpiry(cfg, labels), publicKey)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
