@@ -2603,7 +2603,7 @@ func TestHyperVLifecycleLegacyPlainStatusIsReadOnly(t *testing.T) {
 }
 
 func TestHyperVLifecycleHeartbeat(t *testing.T) {
-	b, lease, claim := lifecycleFixture(t)
+	b, lease, claim := lifecycleFixture(t, 90*time.Minute)
 	original := claim
 	override := 90 * time.Minute
 	b.cfg.IdleTimeout = time.Minute
@@ -2619,7 +2619,7 @@ func TestHyperVLifecycleHeartbeat(t *testing.T) {
 		if after.IdleTimeoutSeconds != 5400 || after.Revision == claim.Revision || after.LastUsedAt != b.rt.Clock.Now().UTC().Format(time.RFC3339) {
 			t.Fatal("heartbeat not durably published")
 		}
-		if got.Labels["expires_at"] != core.LeaseLabelTime(b.rt.Clock.Now().Add(40*time.Minute)) {
+		if got.Labels["expires_at"] != core.LeaseLabelTime(b.rt.Clock.Now().Add(70*time.Minute)) {
 			t.Fatal("original TTL cap lost")
 		}
 		for _, key := range []string{"instance", "image", "ssh_user", "ssh_port", "work_root"} {

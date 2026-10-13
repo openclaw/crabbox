@@ -1044,7 +1044,7 @@ func TestMultipassLifecycleAcquireSnapshot(t *testing.T) {
 }
 
 func TestMultipassLifecycleHeartbeat(t *testing.T) {
-	b, lease, claim := acquiredLifecycleFixture(t)
+	b, lease, claim := acquiredLifecycleFixture(t, 90*time.Minute)
 	// Isolate renewal from the separately tested acquire snapshot contract.
 	core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
 	original := claim
@@ -1066,7 +1066,7 @@ func TestMultipassLifecycleHeartbeat(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Labels["expires_at"] != strconv.FormatInt(created+3600, 10) {
+		if got.Labels["expires_at"] != strconv.FormatInt(created+5400, 10) {
 			t.Fatal("original TTL cap lost")
 		}
 		for _, key := range []string{"instance", "image", "ssh_user", "ssh_port", "work_root"} {

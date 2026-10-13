@@ -10,7 +10,9 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -886,7 +888,17 @@ func TestHetznerAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
 }
 
 func TestHetznerExtendUpdatesLabelsUnderClaim(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX SSH fixture")
+	}
 	installHetznerClaimState(t)
+	binDir := t.TempDir()
+	expiryFile := filepath.Join(t.TempDir(), "guest-expiry")
+	if err := os.WriteFile(filepath.Join(binDir, "ssh"), []byte("#!/bin/sh\ncat >\"$CRABBOX_TEST_GUEST_EXPIRY\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_TEST_GUEST_EXPIRY", expiryFile)
 	now := time.Now().UTC().Truncate(time.Second)
 	cfg := core.BaseConfig()
 	cfg.Provider = "hetzner"
@@ -906,7 +918,7 @@ func TestHetznerExtendUpdatesLabelsUnderClaim(t *testing.T) {
 	newHetznerClient = func() (hetznerClient, error) { return fake, nil }
 	t.Cleanup(func() { newHetznerClient = old })
 	backend := NewHetznerLeaseBackend(core.ProviderSpec{Name: "hetzner"}, cfg, core.Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
-	result, err := backend.ExtendLease(t.Context(), core.LeaseExtendRequest{Lease: core.LeaseTarget{LeaseID: server.Labels["lease"], Server: server}, By: 30 * time.Minute})
+	result, err := backend.ExtendLease(t.Context(), core.LeaseExtendRequest{Lease: core.LeaseTarget{LeaseID: server.Labels["lease"], Server: server, SSH: core.SSHTarget{Host: "fixture", Port: "22"}}, By: 30 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -916,5 +928,9 @@ func TestHetznerExtendUpdatesLabelsUnderClaim(t *testing.T) {
 	updated, _, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"])
 	if err != nil || updated.Labels["ttl_secs"] != "3600" {
 		t.Fatalf("updated claim=%+v err=%v", updated, err)
+	}
+	guest, err := os.ReadFile(expiryFile)
+	if err != nil || !strings.Contains(string(guest), "expires_at="+updated.Labels["expires_at"]+"\n") {
+		t.Fatalf("guest expiry=%q err=%v", guest, err)
 	}
 }

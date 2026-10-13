@@ -67,6 +67,9 @@ func (c *fakeAWSClient) CreateServerWithFallback(_ context.Context, cfg core.Con
 	}
 	if c.created.CloudID == "" {
 		c.created = awsTestServer("i-created", leaseID, slug, "us-east-1")
+		if cfg.TTL > 0 {
+			c.created.Labels["ttl_secs"] = fmt.Sprint(int(cfg.TTL.Seconds()))
+		}
 	}
 	if c.created.Labels["provider_key"] == "" {
 		c.created.Labels["provider_key"] = cfg.ProviderKey

@@ -1755,7 +1755,7 @@ func lifecycleFixture(t *testing.T, ttl ...time.Duration) (*backend, core.LeaseT
 }
 
 func TestAppleVMLifecycleHeartbeat(t *testing.T) {
-	b, lease, claim := lifecycleFixture(t)
+	b, lease, claim := lifecycleFixture(t, 90*time.Minute)
 	original := claim
 	b.cfg.IdleTimeout = time.Minute
 	override := 90 * time.Minute
@@ -1771,7 +1771,7 @@ func TestAppleVMLifecycleHeartbeat(t *testing.T) {
 		if persisted.Revision == claim.Revision || persisted.IdleTimeoutSeconds != 5400 || persisted.LastUsedAt != b.rt.Clock.Now().Format(time.RFC3339) {
 			t.Fatal("heartbeat did not commit timestamp/timeout")
 		}
-		if got.Labels["expires_at"] != core.LeaseLabelTime(b.rt.Clock.Now().Add(40*time.Minute)) {
+		if got.Labels["expires_at"] != core.LeaseLabelTime(b.rt.Clock.Now().Add(70*time.Minute)) {
 			t.Fatal("original TTL cap lost")
 		}
 		for _, key := range []string{"instance", "image", "server_type", "ssh_user", "work_root", "ssh_port"} {

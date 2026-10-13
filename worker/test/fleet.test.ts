@@ -55306,7 +55306,6 @@ describe("synthetic acknowledgement reliability", () => {
         await fleet.ready();
         const socket = addSocket(fleet, "synthetic-heartbeat");
         const get = vi.spyOn(storage, "get");
-        const put = vi.spyOn(storage, "put");
         const getAlarm = vi.spyOn(storage, "getAlarm");
         const nativeReads = vi.spyOn(storage, "beforeGetAlarm");
         const observedGet = (storage.beforeGet = vi.fn<NonNullable<MemoryStorage["beforeGet"]>>(
@@ -55320,7 +55319,6 @@ describe("synthetic acknowledgement reliability", () => {
         async function heartbeat(alarmReads: number, idleTimeoutSeconds?: number): Promise<void> {
           storage.resetListOptions();
           get.mockClear();
-          put.mockClear();
           list.mockClear();
           getAlarm.mockClear();
           setAlarm.mockClear();
@@ -55350,11 +55348,10 @@ describe("synthetic acknowledgement reliability", () => {
           expect(acknowledged).toBe(true);
           expectBoundedAlarmReads(storage, alarmReads);
           expect.soft(get.mock.calls.length).toBeLessThanOrEqual(3);
-          expect(put.mock.calls.map(([key]) => key)).toEqual([
-            leaseMaintenanceKey(leaseID),
-            leaseCurrentKey(leaseID),
-            `lease:${leaseID}`,
-          ]);
+          // The shared hook observes writes through transaction views as well.
+          expect(
+            observedPut.mock.calls.map(([key]) => key).filter((key) => key.startsWith("lease")),
+          ).toEqual([leaseMaintenanceKey(leaseID), leaseCurrentKey(leaseID), `lease:${leaseID}`]);
           expect.soft(getAlarm).toHaveBeenCalledTimes(1);
           expect(nativeReads).toHaveBeenCalledTimes(1 + alarmReads);
           expect(observedGet.mock.calls.length).toBeLessThanOrEqual(5);

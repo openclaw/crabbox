@@ -47,6 +47,11 @@ Rerun the same command with the same arguments to retry the guest refresh;
 that retry does not add lifetime again. The pending refresh is stored in the
 exact local claim, so use the same local state for the retry.
 
+Morph must accept its native deadline before the new total lifetime is published.
+If metadata publication fails, rerun the same extension to retry without adding
+the duration twice. Cleanup continues to use the old metadata deadline until
+publication succeeds.
+
 Human output shows the new expiry, remaining lifetime, and maximum lifetime;
 `--json` returns `id`, `expiresAt`, `remainingLifetime`, `maxLifetime`, and
 `runtimeExtension`. File-backed extensions also return `guestExpiresAt`; a failed

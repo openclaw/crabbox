@@ -2572,6 +2572,7 @@ func TestTouchPersistsRunningStateForCleanup(t *testing.T) {
 	}
 	cfg := core.Config{
 		Provider: providerName,
+		TTL:      3 * time.Hour,
 		Hostinger: core.HostingerConfig{
 			APIToken:       "token",
 			HostnamePrefix: "crabbox",
