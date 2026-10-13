@@ -17,6 +17,19 @@ crabbox stop --provider ssh --static-host mac-studio.local mac-studio.local
 
 `crabbox release` is a compatibility alias for `crabbox stop`.
 
+Coordinator-backed stops wait for confirmed provider cleanup by default. To
+return once the coordinator has durably accepted deletion, use:
+
+```sh
+crabbox stop --provider aws --id cbx_0a1b2c3d4e5f --wait=false
+```
+
+The coordinator continues cleanup and capacity accounting. Pending cleanup
+retains the local claim and SSH recovery files; acceptance does not mean the
+machine is already gone. Run `stop --wait` again to confirm completion and
+remove those local files. Direct providers do not support `--wait=false`.
+Guest shutdown hooks still run before the release request.
+
 ## Repeating a stop
 
 An exact failed Azure lease can instead be retained with [hold](hold.md).
@@ -316,6 +329,7 @@ for marker paths, Linux egress process-matching scope, and Tailscale limits.
 ```text
 --provider <name>          provider to act against (see crabbox providers)
 --id <lease-or-slug>        lease ID or slug (equivalent to the positional arg)
+--wait                      wait for coordinator cleanup (default true)
 --current-repo              restrict fixed-ID cleanup to its current repository owner
 --reclaim                   explicitly adopt a provider resource when that provider supports safe stop adoption
 --force                     recover one exact resource through verified provider adoption or an inspected coordinator lease

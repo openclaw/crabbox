@@ -5128,6 +5128,7 @@ func (a App) stop(ctx context.Context, args []string) (stopErr error) {
 	reclaim := fs.Bool("reclaim", false, "adopt an unclaimed provider resource before stopping it")
 	forceRecovery := fs.Bool("force", false, "recover and stop one exactly identified provider resource")
 	currentRepo := fs.Bool("current-repo", false, "stop a fixed-ID lease only while its claim belongs to the current repository")
+	wait := fs.Bool("wait", true, "wait for coordinator provider cleanup to complete")
 	expectedLeaseID := fs.String("expected-provider-lease-id", "", "internal: immutable provider lease identity")
 	expectedAttemptLeaseID := fs.String("expected-provider-attempt-lease-id", "", "internal: immutable provider attempt identity")
 	expectedSlug := fs.String("expected-provider-slug", "", "internal: immutable provider slug identity")
@@ -5286,6 +5287,9 @@ func (a App) stop(ctx context.Context, args []string) (stopErr error) {
 	if err != nil {
 		return err
 	}
+	if !*wait && (backendCoordinator(backend) == nil || *currentRepo || *confirmedAbsentLocalCleanup) {
+		return Exit(2, "--wait=false requires an ordinary coordinator-backed stop")
+	}
 	if *currentRepo {
 		scoped, ok := backend.(RepositoryScopedStopBackend)
 		if !ok {
@@ -5401,9 +5405,10 @@ func (a App) stop(ctx context.Context, args []string) (stopErr error) {
 		a.cleanupBackendLeaseLocalConnectionsBestEffort(ctx, *id, lease.LeaseID)
 	}
 	request := ReleaseLeaseRequest{
-		Lease:                    lease,
-		Force:                    true,
-		ExpectedProviderIdentity: expectedIdentity,
+		Lease:                           lease,
+		Force:                           true,
+		ExpectedProviderIdentity:        expectedIdentity,
+		DeferProviderCleanupObservation: !*wait,
 	}
 	if !connectionCleanupSafe {
 		request.GuardedRemoteCleanup = a.cleanupBackendLeaseRemoteConnectionsBestEffort
@@ -5419,6 +5424,10 @@ func (a App) stop(ctx context.Context, args []string) (stopErr error) {
 	}
 	if outcome.ForgottenLocally {
 		fmt.Fprintf(a.Stderr, "lease=%s forgotten locally (resource absent)\n", lease.LeaseID)
+		return nil
+	}
+	if !*wait && !outcome.Terminal {
+		fmt.Fprintf(a.Stderr, "release accepted lease=%s; coordinator cleanup continues; retry stop --wait to confirm completion\n", lease.LeaseID)
 		return nil
 	}
 	if !connectionCleanupSafe {
