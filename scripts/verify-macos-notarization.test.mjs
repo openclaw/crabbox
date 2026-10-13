@@ -73,7 +73,8 @@ else if (tool === "codesign") {
     console.log("null");
     console.log(JSON.stringify({processID:Number(fs.readFileSync(p)), eventMessage:"Error checking with notarization daemon: -67050 Error Domain=NSURLErrorDomain Code=-1005 PRIVATE_PATH https://private.invalid/token"}));
     console.log(JSON.stringify({processID:999999, eventMessage:"Error Domain=NSURLErrorDomain Code=-1001 PRIVATE_PATH"}));
-    console.log(JSON.stringify({processID:999998, eventMessage:"ticket not available for "+"a".repeat(40)+" PRIVATE_PATH"}));
+    console.log(JSON.stringify({processID:999998, eventMessage:"ticket not available for "+"A".repeat(40)+" PRIVATE_PATH"}));
+    console.log(JSON.stringify({processID:999997, eventMessage:"ticket not available for b"+"a".repeat(40)+"c PRIVATE_PATH"}));
     setInterval(() => {},1000);
   },10);
 }

@@ -1190,6 +1190,13 @@ func TestBlacksmithArtifactFailureCleanupAndClassification(t *testing.T) {
 				if !errors.As(err, &ee) || ee.Code != want || result.ExitCode != want {
 					t.Fatalf("result=%+v err=%v", result, err)
 				}
+				wantKind := core.RunErrorCommandExit
+				if code == 0 {
+					wantKind = core.RunErrorProvider
+				}
+				if result.Status != core.RunStatusFailed || result.ErrorKind != wantKind {
+					t.Errorf("collection/cleanup replaced observed workload outcome: %+v", result)
+				}
 				if mode == "lease-cleanup" {
 					assertArtifactTransferCalls(t, runner.calls, 1)
 					if len(result.Artifacts) != 1 || !result.Session.Kept {

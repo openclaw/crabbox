@@ -104,7 +104,6 @@ await stopObserver();
 if (status !== 0) {
   try {
     const validCDHash = /^[0-9a-f]{40}$/.test(cdhash ?? "") ? cdhash : null;
-    const hashPattern = validCDHash === null ? null : new RegExp(`(?:^|[^0-9a-f])${validCDHash}(?:$|[^0-9a-f])`, "i");
     const events = new Map();
     let attributed = 0;
     let omittedEvents = 0;
@@ -114,7 +113,7 @@ if (status !== 0) {
       if (value === null || typeof value !== "object") continue;
       const message = value.eventMessage;
       if (typeof message !== "string") continue;
-      const matchesHash = hashPattern?.test(message) ?? false;
+      const matchesHash = validCDHash !== null && (message.toLowerCase().match(/[0-9a-f]+/g)?.includes(validCDHash) ?? false);
       const matchesPID = Number.isSafeInteger(checkPID) && Number(value.processID) === checkPID;
       if (!matchesHash && !matchesPID) continue;
       attributed++;
