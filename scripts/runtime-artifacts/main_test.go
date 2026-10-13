@@ -30,7 +30,7 @@ func TestArguments(t *testing.T) {
 	}
 }
 
-func TestPrepareAndVerifyActualRuntime(t *testing.T) {
+func TestPrepareAndVerifyRuntime(t *testing.T) {
 	directory, controller := runtimeFixture(t)
 	args := []string{"prepare", "--directory", directory, "--controller", controller}
 	var stdout, stderr bytes.Buffer
@@ -93,11 +93,7 @@ func runtimeFixture(t *testing.T) (string, string) {
 		t.Fatal(err)
 	}
 	for _, arch := range []string{"amd64", "arm64"} {
-		cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", filepath.Join(directory, "linux-"+arch), "../../cmd/crabbox-runtime")
-		cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+arch, "CGO_ENABLED=0", "GOFLAGS=", "GOWORK=off", "GOPROXY=off", "GOSUMDB=off")
-		if output, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("build %s: %v\n%s", arch, err, output)
-		}
+		buildPackFixture(t, filepath.Join(directory, "linux-"+arch), "linux", arch)
 	}
 	return directory, controller
 }
@@ -112,59 +108,65 @@ func TestFilesystemReleaseArchiveLayouts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inputs := filesystemInputs(buildID)
+	inputs := filesystemInputs(buildID, false)
 	for _, input := range inputs {
-		cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w -X github.com/openclaw/crabbox/internal/runner.BuildID="+buildID, "-o", filepath.Join(pack, input.Path), "../../cmd/crabbox-runtime")
-		cmd.Env = append(os.Environ(), "GOOS="+input.Target.OS, "GOARCH="+input.Target.Arch, "CGO_ENABLED=0", "GOFLAGS=", "GOWORK=off", "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local")
-		if output, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("build %s: %v\n%s", input.Path, err, output)
+		buildPackFixture(t, filepath.Join(pack, input.Path), input.Target.OS, input.Target.Arch)
+	}
+	for _, egress := range []bool{false, true} {
+		inputs = filesystemInputs(buildID, egress)
+		layout := "filesystem"
+		if egress {
+			layout = "egress"
 		}
-	}
-	var output, diagnostic bytes.Buffer
-	args := []string{"prepare", "--directory", pack, "--controller", controller, "--filesystem-build-id", buildID}
-	if code := run(t.Context(), args, &output, &diagnostic); code != 0 {
-		t.Fatalf("prepare=%d: %s", code, diagnostic.String())
-	}
-	if err := os.WriteFile(filepath.Join(pack, "manifest.json"), output.Bytes(), 0600); err != nil {
-		t.Fatal(err)
-	}
-	args[0] = "verify"
-	if code := run(t.Context(), args, io.Discard, &diagnostic); code != 0 {
-		t.Fatalf("verify=%d: %s", code, diagnostic.String())
-	}
-	for _, platform := range []string{"linux", "windows"} {
-		for _, mode := range []string{"unsigned-filesystem", "final-filesystem"} {
-			t.Run(platform+"/"+mode, func(t *testing.T) {
-				name := "crabbox"
-				if platform == "windows" {
-					name += ".exe"
-				}
-				files := map[string]string{name: controller}
-				for _, input := range inputs {
-					files["crabbox-runtime/"+input.Path] = filepath.Join(pack, input.Path)
-				}
-				if mode == "final-filesystem" {
-					files["crabbox-runtime/manifest.json"] = filepath.Join(pack, "manifest.json")
-				}
-				archive := writeArchiveFixture(t, files, platform == "windows")
-				report, err := extractArchive(t.Context(), archive, filepath.Join(t.TempDir(), "stage"), platform, "amd64", mode, buildID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if report.RuntimePack.SchemaVersion != 2 || report.RuntimePack.ProtocolVersion != "" || len(report.RuntimePack.Artifacts) != 6 || (report.RuntimePack.Manifest != nil) != (mode == "final-filesystem") {
-					t.Fatalf("wrong pack report: %+v", report.RuntimePack)
-				}
-				for i, artifact := range report.RuntimePack.Artifacts {
-					if artifact.Path != "crabbox-runtime/"+inputs[i].Path || len(artifact.Capabilities) != len(inputs[i].Capabilities) || artifact.Capabilities[0].BuildID != buildID {
-						t.Fatalf("wrong artifact: %+v", artifact)
+		var output, diagnostic bytes.Buffer
+		args := []string{"prepare", "--directory", pack, "--controller", controller, "--filesystem-build-id", buildID}
+		if egress {
+			args = append(args, "--egress")
+		}
+		if code := run(t.Context(), args, &output, &diagnostic); code != 0 {
+			t.Fatalf("prepare=%d: %s", code, diagnostic.String())
+		}
+		if err := os.WriteFile(filepath.Join(pack, "manifest.json"), output.Bytes(), 0600); err != nil {
+			t.Fatal(err)
+		}
+		args[0] = "verify"
+		if code := run(t.Context(), args, io.Discard, &diagnostic); code != 0 {
+			t.Fatalf("verify=%d: %s", code, diagnostic.String())
+		}
+		for _, platform := range []string{"linux", "windows"} {
+			for _, mode := range []string{"unsigned-" + layout, "final-" + layout} {
+				t.Run(platform+"/"+mode, func(t *testing.T) {
+					name := "crabbox"
+					if platform == "windows" {
+						name += ".exe"
 					}
-				}
-				delete(files, "crabbox-runtime/windows-arm64.exe")
-				incomplete := writeArchiveFixture(t, files, platform == "windows")
-				if _, err := extractArchive(t.Context(), incomplete, filepath.Join(t.TempDir(), "incomplete"), platform, "amd64", mode, buildID); err == nil {
-					t.Fatal("incomplete archive accepted")
-				}
-			})
+					files := map[string]string{name: controller}
+					for _, input := range inputs {
+						files["crabbox-runtime/"+input.Path] = filepath.Join(pack, input.Path)
+					}
+					if mode == "final-"+layout {
+						files["crabbox-runtime/manifest.json"] = filepath.Join(pack, "manifest.json")
+					}
+					archive := writeArchiveFixture(t, files, platform == "windows")
+					report, err := extractArchive(t.Context(), archive, filepath.Join(t.TempDir(), "stage"), platform, "amd64", mode, buildID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if report.RuntimePack.SchemaVersion != 2 || report.RuntimePack.ProtocolVersion != "" || len(report.RuntimePack.Artifacts) != 6 || (report.RuntimePack.Manifest != nil) != (mode == "final-"+layout) {
+						t.Fatalf("wrong pack report: %+v", report.RuntimePack)
+					}
+					for i, artifact := range report.RuntimePack.Artifacts {
+						if artifact.Path != "crabbox-runtime/"+inputs[i].Path || len(artifact.Capabilities) != len(inputs[i].Capabilities) || artifact.Capabilities[0] != inputs[i].Capabilities[0] {
+							t.Fatalf("wrong artifact: %+v", artifact)
+						}
+					}
+					delete(files, "crabbox-runtime/windows-arm64.exe")
+					incomplete := writeArchiveFixture(t, files, platform == "windows")
+					if _, err := extractArchive(t.Context(), incomplete, filepath.Join(t.TempDir(), "incomplete"), platform, "amd64", mode, buildID); err == nil {
+						t.Fatal("incomplete archive accepted")
+					}
+				})
+			}
 		}
 	}
 }
@@ -333,3 +335,25 @@ func writeArchiveFixture(t *testing.T, files map[string]string, windows bool) st
 type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("output unavailable") }
+
+// Packaging authenticates metadata and bytes, not runtime behavior. Small fixed-
+// package fixtures keep the archive matrix bounded; dispatcher tests cover code.
+func buildPackFixture(t *testing.T, out, platform, arch string) {
+	t.Helper()
+	source := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(source, "cmd", "crabbox-runtime"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "go.mod"), []byte("module github.com/openclaw/crabbox\n\ngo 1.26.0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "cmd", "crabbox-runtime", "main.go"), []byte("package main\nfunc main() {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", out, "./cmd/crabbox-runtime")
+	cmd.Dir = source
+	cmd.Env = append(os.Environ(), "GOOS="+platform, "GOARCH="+arch, "CGO_ENABLED=0", "GOFLAGS=", "GOWORK=off", "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build %s/%s: %v: %s", platform, arch, err, output)
+	}
+}

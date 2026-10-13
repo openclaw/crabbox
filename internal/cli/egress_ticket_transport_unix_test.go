@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/runtimeartifact"
 )
 
 // Prove the shared primitives independently of the caller and receiver tests.
@@ -74,6 +76,19 @@ func TestEgressRunStartupAdmissionAndCleanup(t *testing.T) {
 
 func testEgressStartTicketTransport(t *testing.T, failure string) {
 	clearConfigEnv(t)
+	manifest := egressPackFixture(t)
+	controller, _ := os.Executable()
+	source, err := egressRuntimeSource(t.Context(), controller, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := source.Open(t.Context(), runtimeartifact.Target{OS: "linux", Arch: "amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_TEST_EGRESS_DIGEST", artifact.Identity().SHA256)
+	_ = artifact.Close()
+	t.Setenv(runtimeArtifactsEnv, manifest)
 	dir := t.TempDir()
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -93,10 +108,21 @@ p = Path(os.environ["CRABBOX_TEST_EGRESS_OBSERVATIONS"])
 payload = sys.stdin.buffer.read()
 (p / "helper.json").write_text(json.dumps({"argv": sys.argv, "stdin": payload.decode()}))
 `)
-	write("ssh", "#!"+python+"\n"+`import json, os, subprocess, sys, time
+	write("ssh", "#!"+python+"\n"+`import json, os, subprocess, sys, time, re, shlex
 from pathlib import Path
 p = Path(os.environ["CRABBOX_TEST_EGRESS_OBSERVATIONS"])
 remote = sys.argv[-1]
+metadata = shlex.split(remote)[-1] if "/bin/sh -c " in remote else remote
+if "uname -m" in remote:
+    print("x86_64\nraw")
+    sys.exit(0)
+if "sha256sum --" in remote:
+    filename = re.search(r"sha256sum -- '([^']+)'", metadata)[1]
+    print(os.environ["CRABBOX_TEST_EGRESS_DIGEST"] + "  " + filename)
+    sys.exit(0)
+if "--internal-identity" in remote:
+    print(json.dumps({"protocol":"CBX-EGRESS-1", "os":"linux", "arch":"amd64"}))
+    sys.exit(0)
 if "--internal-stop-session" in remote:
     (p / "cleanup").write_text(remote)
     if os.environ.get("CRABBOX_TEST_EGRESS_FAILURE") == "run-host-cleanup":
@@ -106,6 +132,7 @@ if "--internal-stop-session" in remote:
 if "--internal-ticket-stdin" not in remote:
     if "command -v nc" in remote and os.environ.get("CRABBOX_TEST_EGRESS_FAILURE") == "readiness":
         sys.exit(42)
+    sys.stdin.buffer.read()
     sys.exit(0) # install and readiness are fixtures, never real SSH or probes
 payload = sys.stdin.buffer.read()
 (p / "ssh.json").write_text(json.dumps({"argv": sys.argv, "stdin": payload.decode()}))
@@ -124,7 +151,7 @@ while not (p / "helper.json").exists():
 `)
 	write("pkill", "#!/bin/sh\nexit 0\n")
 	write("scp", "#!/bin/sh\nexit 0\n")
-	write("go", "#!/bin/sh\nexit 0\n")
+	write("go", "#!/bin/sh\necho unexpected-repository-build >&2\nexit 99\n")
 	// nohup must be real; every other executable named by the remote start is
 	// fixture-owned. Neither binary installation nor process cleanup runs here.
 	nohup, err := exec.LookPath("nohup")

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -38,7 +39,7 @@ func TestFormatEgressStatusPreservesDetailedAndCoarseState(t *testing.T) {
 				HostConnected:   &connected,
 				ClientConnected: &disconnected,
 			},
-			want: "egress: lease=cbx_123 session=egress_123 profile=custom host=true client=false allow=example.com",
+			want: "egress: lease=cbx_123 session=egress_123 profile=custom host=true client=false allow=example.com public-destinations=false",
 		},
 		{
 			name:   "shared coarse state",
@@ -73,9 +74,6 @@ func TestEgressAllowlistRejectsBareWildcard(t *testing.T) {
 	allow := egressAllowlist("", []string{"*"})
 	if len(allow) != 0 {
 		t.Fatalf("bare wildcard allowlist=%v, want empty", allow)
-	}
-	if egressHostAllowed("example.com", []string{"*"}) {
-		t.Fatal("bare wildcard should not allow every host")
 	}
 }
 
@@ -273,41 +271,6 @@ func TestExplicitEgressTicketDoesNotCreateFakeBearer(t *testing.T) {
 	}
 	if got := headers.Get("Authorization"); got != "" {
 		t.Fatalf("Authorization=%q, want empty", got)
-	}
-}
-
-func TestEgressClientBinaryRejectsNonLinuxTargets(t *testing.T) {
-	_, cleanup, err := egressClientBinaryForTarget(context.Background(), SSHTarget{TargetOS: targetWindows})
-	defer cleanup()
-	if err == nil {
-		t.Fatal("expected non-Linux egress target to be rejected")
-	}
-	if !strings.Contains(err.Error(), "only supports Linux lease targets") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestCrossBuildEgressClientStripsDesktopPasswordEnvironment(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell child fixture")
-	}
-	const passwordEnv = "CRABBOX_TEST_EGRESS_DESKTOP_PASSWORD"
-	dir := t.TempDir()
-	goPath := filepath.Join(dir, "go")
-	script := "#!/bin/sh\n" +
-		"if [ \"${" + passwordEnv + "+x}\" = x ]; then exit 89; fi\n" +
-		"if [ \"$CRABBOX_TEST_KEEP\" != preserved ]; then exit 90; fi\n" +
-		"if [ \"$GOOS\" != linux ] || [ \"$GOARCH\" != amd64 ] || [ \"$CGO_ENABLED\" != 0 ]; then exit 91; fi\n" +
-		"exit 0\n"
-	if err := os.WriteFile(goPath, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv(passwordEnv, "must-not-reach-go-build")
-	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
-	target := SSHTarget{TargetOS: targetLinux, ChildEnvDenylist: []string{passwordEnv}}
-	if err := crossBuildEgressClient(context.Background(), target, t.TempDir(), filepath.Join(t.TempDir(), "egress-client")); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -554,5 +517,51 @@ func TestEgressStopUsesSharedRemoteClientStopCommand(t *testing.T) {
 	}
 	if want != "pkill -f '[c]rabbox-egress-client egress client' >/dev/null 2>&1 || true" {
 		t.Fatalf("unexpected remote stop command: %q", want)
+	}
+}
+
+func TestEgressPublicDestinationsRemainPublicOnly(t *testing.T) {
+	for _, host := range []string{"example.com", "8.8.8.8", "127.0.0.1", "10.0.0.1", "169.254.169.254", "::1", "fe80::1"} {
+		t.Run(host, func(t *testing.T) {
+			if !egressHostAllowed(host, []string{"*"}) {
+				t.Fatal("public mode must bypass only hostname selection")
+			}
+			lookup := func(context.Context, string, string) ([]netip.Addr, error) {
+				return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
+			}
+			_, _, err := publicEgressDestination(t.Context(), host, "443", lookup)
+			wantAllowed := host == "example.com" || host == "8.8.8.8"
+			if (err == nil) != wantAllowed {
+				t.Fatalf("public preflight error=%v", err)
+			}
+		})
+	}
+	connected := true
+	line := formatEgressStatus(CoordinatorEgressStatus{LeaseID: "cbx_fixture", Allow: []string{"*"}, HostConnected: &connected, ClientConnected: &connected})
+	if !strings.Contains(line, "public-destinations=true") {
+		t.Fatalf("status=%s", line)
+	}
+	for _, args := range [][]string{{"run", "--id", "fixture", "--allow", "*", "--", "true"}, {"host", "--id", "fixture", "--allow", "*"}} {
+		app := App{Stdout: io.Discard, Stderr: io.Discard}
+		err := app.egress(t.Context(), args)
+		if err == nil || !strings.Contains(err.Error(), "requires --profile") {
+			t.Fatalf("bare wildcard bypassed opt-in: %v", err)
+		}
+	}
+}
+
+func TestEgressRuntimeTicketNeedsNoProviderConfiguration(t *testing.T) {
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+	app := App{egressClientRuntime: true}
+	coord, id, err := app.egressCoordinatorAndLease(t.Context(), "unregistered", "https://coordinator.example", "cbx_fixture", "egress_0123456789abcdef0123456789abcdef", true)
+	if err != nil || coord == nil || coord.BaseURL != "https://coordinator.example" || id != "cbx_fixture" || coord.hasConfiguredAuth() {
+		t.Fatalf("ticket-only client: %v %s %v", coord, id, err)
+	}
+	for _, test := range []struct{ name, url, ticket string }{{"no ticket", "https://coordinator.example", ""}, {"no url", "", "egress_fixture"}} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, _, err := app.egressCoordinatorAndLease(t.Context(), "unregistered", test.url, "cbx_fixture", test.ticket, true); err == nil {
+				t.Fatal("runtime attempted coordinator login")
+			}
+		})
 	}
 }

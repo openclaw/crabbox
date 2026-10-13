@@ -18,7 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -106,7 +106,9 @@ running the egress host agent. The coordinator only mediates paired WebSocket
 bridges; the host agent opens the real outbound TCP connections.
 
 Use start or host --upstream-proxy-env <name> to chain those connections through
-a trusted HTTP(S) CONNECT proxy named by a local environment variable.`)
+a trusted HTTP(S) CONNECT proxy named by a local environment variable.
+Use --allow-public-destinations to allow any public destination while continuing
+to block private, loopback, link-local, and reserved addresses.`)
 }
 
 func (a App) egressHost(ctx context.Context, args []string) error {
@@ -119,17 +121,21 @@ func (a App) egressHost(ctx context.Context, args []string) error {
 	sessionID := fs.String("session", "", "egress session id")
 	profile := fs.String("profile", "", "egress profile name")
 	allowCSV := fs.String("allow", "", "comma-separated allowed host patterns")
+	allowPublic := fs.Bool("allow-public-destinations", false, "permit any public destination; private and reserved addresses remain blocked")
 	upstreamProxyEnv := fs.String("upstream-proxy-env", "", "local environment variable containing a trusted HTTP(S) CONNECT proxy URL")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	setIDFromFirstArg(fs, id)
 	allow := egressAllowlist(*profile, splitCSV(*allowCSV))
+	if *allowPublic {
+		allow = append([]string{"*"}, allow...)
+	}
 	if *id == "" {
 		return Exit(2, "usage: crabbox egress host --id <lease-id-or-slug> --profile <name>|--allow <hosts>")
 	}
 	if len(allow) == 0 {
-		return Exit(2, "egress host requires --profile or --allow; refusing to start an open proxy")
+		return Exit(2, "egress host requires --profile, --allow, or --allow-public-destinations; refusing to start an open proxy")
 	}
 	var upstream *egressUpstreamProxy
 	if flagWasSet(fs, "upstream-proxy-env") {
@@ -151,6 +157,9 @@ func (a App) egressHost(ctx context.Context, args []string) error {
 }
 
 func (a App) egressClient(ctx context.Context, args []string) error {
+	if len(args) == 1 && args[0] == egressIdentityArg {
+		return json.NewEncoder(a.Stdout).Encode(currentEgressRuntimeIdentity())
+	}
 	if len(args) > 0 && args[0] == egressStopSessionArg {
 		fs := newFlagSet("egress client session cleanup", a.Stderr)
 		id := fs.String("id", "", "lease id")
@@ -346,6 +355,7 @@ func (a App) egressStart(ctx context.Context, args []string, runMode bool) (err 
 	id := fs.String("id", "", "lease id or slug")
 	profile := fs.String("profile", "", "egress profile name")
 	allowCSV := fs.String("allow", "", "comma-separated allowed host patterns")
+	allowPublic := fs.Bool("allow-public-destinations", false, "permit any public destination; private and reserved addresses remain blocked")
 	upstreamProxyEnv := fs.String("upstream-proxy-env", "", "local environment variable containing a trusted HTTP(S) CONNECT proxy URL")
 	listen := fs.String("listen", defaultEgressListen, "lease-local proxy listen address")
 	var coordinatorURL string
@@ -380,8 +390,11 @@ func (a App) egressStart(ctx context.Context, args []string, runMode bool) (err 
 		commandApp.Stdin = bytes.NewReader(script.Data)
 	}
 	allow := egressAllowlist(*profile, splitCSV(*allowCSV))
+	if *allowPublic {
+		allow = append([]string{"*"}, allow...)
+	}
 	if len(allow) == 0 {
-		return Exit(2, "%s requires --profile or --allow; refusing to start an open proxy", name)
+		return Exit(2, "%s requires --profile, --allow, or --allow-public-destinations; refusing to start an open proxy", name)
 	}
 	if err := validateEgressListen(*listen); err != nil {
 		return err
@@ -444,7 +457,7 @@ func (a App) egressStart(ctx context.Context, args []string, runMode bool) (err 
 	}
 	sessionID := newLocalEgressSessionID()
 	fmt.Fprintf(a.Stdout, "egress session: lease=%s session=%s\n", leaseID, sessionID)
-	if err := installRemoteEgressClient(ctx, target); err != nil {
+	if err := a.installRemoteEgressClient(ctx, target); err != nil {
 		return err
 	}
 	if runMode {
@@ -476,6 +489,9 @@ func (a App) egressStart(ctx context.Context, args []string, runMode bool) (err 
 			"--coordinator", coord.BaseURL,
 			"--session", sessionID,
 			"--allow", strings.Join(allow, ","),
+		}
+		if *allowPublic {
+			hostArgs = append(hostArgs, "--allow-public-destinations")
 		}
 		if *profile != "" {
 			hostArgs = append(hostArgs, "--profile", *profile)
@@ -594,7 +610,7 @@ func formatEgressStatus(status CoordinatorEgressStatus) string {
 	if status.HostConnected == nil || status.ClientConnected == nil {
 		return fmt.Sprintf("egress: lease=%s active=%t", status.LeaseID, status.Active)
 	}
-	return fmt.Sprintf("egress: lease=%s session=%s profile=%s host=%t client=%t allow=%s", status.LeaseID, blank(status.SessionID, "-"), blank(status.Profile, "-"), *status.HostConnected, *status.ClientConnected, strings.Join(status.Allow, ","))
+	return fmt.Sprintf("egress: lease=%s session=%s profile=%s host=%t client=%t allow=%s public-destinations=%t", status.LeaseID, blank(status.SessionID, "-"), blank(status.Profile, "-"), *status.HostConnected, *status.ClientConnected, strings.Join(status.Allow, ","), slices.Contains(status.Allow, "*"))
 }
 
 func (a App) egressStop(ctx context.Context, args []string) error {
@@ -672,6 +688,15 @@ func (a App) egressStop(ctx context.Context, args []string) error {
 }
 
 func (a App) egressCoordinatorAndLease(ctx context.Context, provider, coordinatorURL, id, ticket string, coordinatorFlag bool) (*CoordinatorClient, string, error) {
+	if a.egressClientRuntime {
+		if strings.TrimSpace(ticket) == "" || strings.TrimSpace(coordinatorURL) == "" {
+			return nil, "", Exit(2, "runtime egress client requires --coordinator and a one-use ticket")
+		}
+		// The restricted lease helper has no provider registry or login secrets.
+		cfg := Config{Coordinator: strings.TrimRight(strings.TrimSpace(coordinatorURL), "/")}
+		coord, _, err := newCoordinatorClient(cfg)
+		return coord, id, err
+	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return nil, "", err
@@ -1489,6 +1514,8 @@ func egressHostAllowed(host string, allow []string) bool {
 	for _, pattern := range allow {
 		pattern = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(pattern)), ".")
 		switch {
+		case pattern == "*":
+			return true
 		case strings.HasPrefix(pattern, "*."):
 			suffix := strings.TrimPrefix(pattern, "*.")
 			if host == suffix || strings.HasSuffix(host, "."+suffix) {
@@ -1572,72 +1599,6 @@ func newLocalEgressSessionID() string {
 
 func newLocalEgressConnID() string {
 	return "conn_" + strconv.FormatInt(time.Now().UnixNano(), 36)
-}
-
-func installRemoteEgressClient(ctx context.Context, target SSHTarget) error {
-	exe, cleanup, err := egressClientBinaryForTarget(ctx, target)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-	uploadNonce, err := randomHex(8)
-	if err != nil {
-		return Exit(2, "create egress client upload path: %v", err)
-	}
-	uploadPath := egressRemoteBinary + ".tmp-" + uploadNonce
-	promoted := false
-	defer func() {
-		if promoted {
-			return
-		}
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = runSSHQuiet(cleanupCtx, target, "rm -f "+shellQuote(uploadPath))
-	}()
-	if err := copyLocalFileToTarget(ctx, target, exe, uploadPath); err != nil {
-		return Exit(5, "copy egress client: %v", err)
-	}
-	if err := runSSHQuiet(ctx, target, "chmod 700 "+shellQuote(uploadPath)+" && mv -f "+shellQuote(uploadPath)+" "+shellQuote(egressRemoteBinary)); err != nil {
-		return Exit(5, "install egress client: %v", err)
-	}
-	promoted = true
-	return nil
-}
-
-func egressClientBinaryForTarget(ctx context.Context, target SSHTarget) (string, func(), error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", func() {}, Exit(2, "resolve crabbox executable: %v", err)
-	}
-	if target.TargetOS != "" && target.TargetOS != targetLinux {
-		return "", func() {}, Exit(2, "egress start only supports Linux lease targets; target=%s is not supported", target.TargetOS)
-	}
-	if runtime.GOOS == "linux" {
-		return exe, func() {}, nil
-	}
-	boundary, err := findRepositoryBoundary()
-	if err != nil {
-		return "", func() {}, Exit(2, "cross-build egress client: %v", err)
-	}
-	out := filepath.Join(os.TempDir(), "crabbox-egress-client-linux-amd64-"+strconv.FormatInt(time.Now().UnixNano(), 36))
-	if err := crossBuildEgressClient(ctx, target, boundary.root, out); err != nil {
-		return "", func() {}, err
-	}
-	return out, func() { _ = os.Remove(out) }, nil
-}
-
-func crossBuildEgressClient(ctx context.Context, target SSHTarget, repoRoot, out string) error {
-	cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", out, "./cmd/crabbox")
-	cmd.Dir = repoRoot
-	buildEnv := os.Environ()
-	if len(target.ChildEnvDenylist) > 0 {
-		buildEnv = childEnvironmentWithout(buildEnv, target.ChildEnvDenylist...)
-	}
-	cmd.Env = append(buildEnv, "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
-	if data, err := cmd.CombinedOutput(); err != nil {
-		return Exit(5, "cross-build linux egress client: %v: %s", err, strings.TrimSpace(string(data)))
-	}
-	return nil
 }
 
 func remoteEgressClientCommand(coordinatorURL, leaseID, sessionID, listen string) string {

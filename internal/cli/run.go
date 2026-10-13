@@ -2005,7 +2005,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		printRunContextSummary(a.Stderr, coord, cfg, server, currentTarget, leaseID, executionRunID, recorder.runID, workdir, hydratedByActions, actionsURL)
 		contextPrinted = true
 	}
-	printPreflight := func(currentTarget SSHTarget) error {
+	printPreflight := func(currentTarget SSHTarget) (err error) {
 		if !*preflight || preflightPrinted {
 			return nil
 		}
@@ -2023,7 +2023,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if err != nil {
 			return err
 		}
-		defer commandEnv.close()
+		defer commandEnv.closeAfter(&err)
 		preflightErr := printRemoteCapabilityPreflight(ctx, a.Stderr, cfg, server, currentTarget, leaseID, workdir, remoteRunEnvFiles(actionsEnvFile, profileEnvFile, commandEnv.File), hydratedByActions, actionsURL, hydrateSupported, runExecutionMetadata(leaseID, executionRunID, ServerSlug(server)))
 		preflightPrinted = true
 		if preflightErr != nil {
@@ -3044,7 +3044,7 @@ afterSync:
 	if err != nil {
 		return recordFailure(err)
 	}
-	defer commandEnv.close()
+	defer commandEnv.closeAfter(&err)
 	runEnv = runExecutionMetadata(leaseID, executionRunID, ServerSlug(server))
 	envFiles := remoteRunEnvFiles(actionsEnvFile, profileEnvFile, commandEnv.File)
 	useShell := shouldUseShellWithLiteralArgs(command, expansion.LiteralArgs)

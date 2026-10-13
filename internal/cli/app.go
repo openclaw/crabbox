@@ -18,6 +18,7 @@ type App struct {
 
 	runOutcome             *shardRunOutcome
 	runEnvDenylist         []string
+	egressClientRuntime    bool
 	workspaceOwnerAcquirer func(context.Context, SSHTarget, string, io.Writer) (*workspaceOwner, error)
 	sshReadinessWaiter     func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error
 }

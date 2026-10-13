@@ -37,7 +37,7 @@ operator machine opens the actual internet connections.
 
 Mediated egress is not:
 
-- a public open proxy (it refuses to start without an allowlist);
+- an unauthenticated public proxy (lease tickets and loopback binding remain required);
 - a replacement for provider firewalls or SSH access controls;
 - a transparent VM-wide VPN;
 - a way for the coordinator to become the internet egress point;
@@ -154,7 +154,12 @@ the launched browser (default proxy `127.0.0.1:3128`, override with
 `--egress-proxy`). It requires `--browser`. Start `egress start` first so
 something is listening on the lease proxy port.
 
-`egress run` and `egress start` install a Linux helper over SSH. For non-Linux
+`egress run` and `egress start` install a verified Linux runtime-pack helper over
+SSH, selected for the lease architecture (`amd64` or `arm64`). The manifest
+binds exact helper digests to the running CLI digest; invalid packs fail closed
+with an install or local-pack preparation step. Installed CLIs need neither a
+Crabbox checkout nor Go in the caller's project. The caller-repository compiler
+path has been removed. For non-Linux
 boxes, set up the client and host pieces manually with the low-level commands.
 
 ### Upstream proxies
@@ -494,3 +499,61 @@ Related docs:
 - [Browser portal](portal.md)
 - [Tailscale](tailscale.md)
 - [Configuration](configuration.md)
+
+## Public destinations for setup commands
+
+Use `--allow-public-destinations` on `egress run`, `start`, or `host` when a
+trusted setup command needs arbitrary public package registries and endpoints.
+The default still requires a profile or explicit hostname allowlist, and
+`--allow '*'` does not enable this mode. Status exposes the opt-in as
+`public-destinations=true` with `allow=*`; daemon restarts retain it.
+
+The flag changes only hostname selection. Both direct and upstream connections
+still run the existing public-address preflight: private, loopback, link-local,
+metadata, and reserved destinations remain blocked. Direct connections dial
+validated IPs to prevent DNS retargeting. Upstream DNS trust and limitations
+remain as described under [upstream proxies](#upstream-proxies). Authentication,
+loopback-only listening, one-use tickets, and exclusive lease ownership remain
+required. This broad mode allows a workload to send data to arbitrary public
+services; use an allowlist when that broader authority is unnecessary.
+
+Per-command environment files under `.crabbox/env-<nonce>` have private
+permissions and receive a cancellation-independent cleanup attempt. A cleanup
+failure is a run failure, names the staging directory for manual removal, and
+never echoes remote output or environment values. If the workload also failed,
+its exit status remains primary. An unreachable lease or lost workspace
+ownership can prevent removal; inspect and clean the named directory before
+reuse, or release the lease.
+
+## Development helper packs
+
+Development and CLI-only installations use the same local artifact verifier as
+release installations. Prepare trusted binaries from the same checkout once;
+commands may then run from any directory without compiling or downloading:
+
+```sh
+go build -trimpath -o /tmp/crabbox-egress-test ./cmd/crabbox
+mkdir -p /tmp/crabbox-egress-runtime
+for arch in amd64 arm64; do
+  CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath \
+    -o "/tmp/crabbox-egress-runtime/linux-$arch" ./cmd/crabbox-runtime
+done
+go run ./scripts/runtime-artifacts prepare --egress \
+  --directory /tmp/crabbox-egress-runtime --controller /tmp/crabbox-egress-test \
+  > /tmp/crabbox-egress-runtime/manifest.json
+go run ./scripts/runtime-artifacts verify --egress \
+  --directory /tmp/crabbox-egress-runtime --controller /tmp/crabbox-egress-test
+CRABBOX_RUNTIME_ARTIFACTS=/tmp/crabbox-egress-runtime/manifest.json \
+  /tmp/crabbox-egress-test egress run --id swift-crab \
+  --allow-public-destinations --no-sync --no-hydrate -- \
+  curl --fail --proxy http://127.0.0.1:3128 https://example.com
+```
+
+The Linux pair claims egress and supervisor capabilities for command execution.
+For filesystem operations on all supported targets, combine `--egress` with
+`--filesystem-build-id` and build the six companions described in the
+[runtime artifact tool](../../scripts/runtime-artifacts/README.md). Local
+manifests bind bytes but do not establish source provenance: only use trusted
+packs and keep them immutable during execution. Any controller rebuild or
+signing change requires a new manifest. Invalid explicit or discovered packs
+are authoritative errors, never permission to compile a fallback.

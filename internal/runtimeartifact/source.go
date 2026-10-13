@@ -16,7 +16,10 @@ type Capability string
 const (
 	Supervisor Capability = "supervisor"
 	Filesystem Capability = "filesystem"
+	Egress     Capability = "egress"
 )
+
+const EgressProtocol = "CBX-EGRESS-1"
 
 // Source opens independently positioned, validated artifact streams. Selection
 // policy belongs to the caller: an invalid or incomplete official installation

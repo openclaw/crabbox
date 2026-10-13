@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -12,11 +13,11 @@ import (
 // workspace-owner wrapper. The caller may retain Crabbox-owned metadata inline.
 type sshCommandEnv struct {
 	File  string
-	close func()
+	close func() error
 }
 
 func stageSSHCommandEnv(ctx context.Context, target SSHTarget, workdir string, env map[string]string, stderr io.Writer) (sshCommandEnv, error) {
-	prepared := sshCommandEnv{close: func() {}}
+	prepared := sshCommandEnv{close: func() error { return nil }}
 	private := map[string]string{}
 	for name, value := range env {
 		if !ValidShellEnvName(name) {
@@ -41,18 +42,18 @@ func stageSSHCommandEnv(ctx context.Context, target SSHTarget, workdir string, e
 		prepared.File = dir + "/values.ps1"
 		input = formatPowerShellCommandEnv(private)
 	}
-	prepared.close = func() {
+	prepared.close = func() error {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
 		if err := runSSHQuiet(cleanupCtx, target, removeSSHCommandEnvCommand(target, workdir, prepared.File)); err != nil {
 			// Remote output can contain values (for example, shell tracing).
-			fmt.Fprintln(stderr, "warning: remote command environment cleanup failed")
+			return Exit(7, "remote command environment cleanup failed; remove %s from the lease workdir before reusing it", dir)
 		}
+		return nil
 	}
 	// Install cleanup before upload: a failed SSH call may have written the file.
 	if err := runSSHInput(ctx, target, uploadSSHCommandEnvCommand(target, workdir, prepared.File), strings.NewReader(input), io.Discard, io.Discard); err != nil {
-		prepared.close()
-		return prepared, Exit(7, "upload command environment failed")
+		return prepared, errors.Join(Exit(7, "upload command environment failed"), prepared.close())
 	}
 	return prepared, nil
 }
@@ -111,4 +112,11 @@ if (Test-Path -LiteralPath ` + psQuote(shellDir(path)) + `) { [IO.Directory]::De
 
 func isSSHCommandEnvFile(path string) bool {
 	return strings.HasPrefix(path, ".crabbox/env-") && (strings.HasSuffix(path, "/values.sh") || strings.HasSuffix(path, "/values.ps1"))
+}
+
+// Keep workload status primary, but make every cleanup failure visible to callers.
+func (e sshCommandEnv) closeAfter(err *error) {
+	if cleanupErr := e.close(); cleanupErr != nil {
+		*err = Exit(ExitCodeForError(*err, 7), "%v", errors.Join(*err, cleanupErr))
+	}
 }

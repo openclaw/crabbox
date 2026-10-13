@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/remoteruntime"
 	"github.com/openclaw/crabbox/internal/runner"
 )
@@ -32,6 +33,14 @@ func runWithIO(ctx context.Context, args []string, stdin, stdout, stderr *os.Fil
 			return remoteruntime.RunCLI(ctx, args[1:], stdin, stdout, stderr)
 		case runner.Command:
 			return runner.Main(ctx, args[1:], stdin, stdout, stderr)
+		case "egress":
+			if len(args) > 1 && args[1] == "client" {
+				if err := cli.RunEgressClient(ctx, args[2:], stdin, stdout, stderr); err != nil {
+					fmt.Fprintln(stderr, err)
+					return cli.ExitCodeForError(err, 1)
+				}
+				return 0
+			}
 		}
 	}
 	fmt.Fprintln(stderr, "invalid remote runtime invocation")

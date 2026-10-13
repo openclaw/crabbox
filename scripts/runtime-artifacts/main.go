@@ -28,9 +28,10 @@ const usage = `Usage: runtime-artifacts <prepare|verify> --directory DIR --contr
   extract  Stage an exact release archive in a new private directory; print JSON evidence.
   source-id  Fingerprint dependency-free helper source without executing it.
 
+Use --egress for a controller-bound Linux egress pair, or combine it with filesystem mode.
 Filesystem mode prepares/verifies all six targets and explicit capability claims.
 Extraction MODE: none, unsigned, final (historical layouts), or
-unsigned-filesystem/final-filesystem (requires the frozen filesystem build ID).
+unsigned-filesystem/final-filesystem or unsigned-egress/final-egress (requires the frozen filesystem build ID).
 
 Inputs are read-only. No configuration, network, build, execution, or prompts.
 The caller writes prepare output atomically only after controller signing and
@@ -80,6 +81,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	directory := fs.String("directory", "", "runtime pack directory")
 	buildID := fs.String("filesystem-build-id", "", "frozen filesystem source fingerprint")
+	egress := fs.Bool("egress", false, "claim and verify Linux egress capability")
 	if args[0] == "extract" {
 		archive := fs.String("archive", "", "release archive")
 		platform := fs.String("os", "", "controller operating system")
@@ -89,7 +91,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "%v; use --help\n", err)
 			return 2
 		}
-		if fs.NArg() != 0 || *directory == "" || *archive == "" || !validArchiveTarget(*platform, *arch) || !validArchiveMode(*mode) {
+		if (*egress && *mode != "unsigned-egress" && *mode != "final-egress") || fs.NArg() != 0 || *directory == "" || *archive == "" || !validArchiveTarget(*platform, *arch) || !validArchiveMode(*mode) {
 			fmt.Fprintln(stderr, "extract requires --archive, a new --directory, --os, --arch, and --runtime-pack; use --help")
 			return 2
 		}
@@ -120,7 +122,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if args[0] == "prepare" {
 		var data []byte
 		if *buildID != "" {
-			data, err = prepareFilesystemPack(ctx, *directory, *controller, *buildID)
+			data, err = prepareFilesystemPack(ctx, *directory, *controller, *buildID, *egress)
+		} else if *egress {
+			data, err = prepareEgressPack(ctx, *directory, *controller)
 		} else {
 			data, err = runtimeartifact.MarshalLocal(ctx, *directory, *controller, inputs, remoteruntime.Protocol)
 		}
@@ -134,10 +138,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	} else {
 		if *buildID != "" {
 			var data []byte
-			data, err = verifyFilesystemPack(ctx, *directory, *controller, *buildID)
+			data, err = verifyFilesystemPack(ctx, *directory, *controller, *buildID, *egress)
 			if err == nil {
 				_, err = io.Copy(stdout, bytes.NewReader(data))
 			}
+		} else if *egress {
+			err = verifyEgressPack(ctx, *directory, *controller, stdout)
 		} else {
 			err = verify(ctx, *directory, *controller, inputs, stdout)
 		}

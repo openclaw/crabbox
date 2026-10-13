@@ -727,3 +727,26 @@ func TestCapabilityManifestValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestEgressCapabilityContract(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		target Target
+		claim  CapabilityClaim
+		valid  bool
+	}{
+		{"amd64", Target{"linux", "amd64"}, CapabilityClaim{Name: Egress, ProtocolVersion: EgressProtocol}, true},
+		{"arm64", Target{"linux", "arm64"}, CapabilityClaim{Name: Egress, ProtocolVersion: EgressProtocol}, true},
+		{"darwin", Target{"darwin", "arm64"}, CapabilityClaim{Name: Egress, ProtocolVersion: EgressProtocol}, false},
+		{"windows", Target{"windows", "amd64"}, CapabilityClaim{Name: Egress, ProtocolVersion: EgressProtocol}, false},
+		{"protocol", Target{"linux", "amd64"}, CapabilityClaim{Name: Egress, ProtocolVersion: "unknown"}, false},
+		{"build id", Target{"linux", "amd64"}, CapabilityClaim{Name: Egress, ProtocolVersion: EgressProtocol, BuildID: strings.Repeat("a", 64)}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := capabilityManifest{SchemaVersion: 2, ControllerSHA256: strings.Repeat("a", 64), Artifacts: []capabilityEntry{{entry: entry{OS: test.target.OS, Arch: test.target.Arch, Path: "helper", Size: 1, SHA256: strings.Repeat("b", 64)}, Capabilities: []CapabilityClaim{test.claim}}}}
+			if err := validateCapabilities(&m); (err == nil) != test.valid {
+				t.Fatalf("validate=%v", err)
+			}
+		})
+	}
+}

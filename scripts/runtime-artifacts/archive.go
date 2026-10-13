@@ -54,7 +54,7 @@ func validArchiveTarget(platform, arch string) bool {
 }
 
 func validArchiveMode(mode string) bool {
-	return mode == "none" || mode == "unsigned" || mode == "final" || mode == "unsigned-filesystem" || mode == "final-filesystem"
+	return mode == "none" || mode == "unsigned" || mode == "final" || mode == "unsigned-filesystem" || mode == "final-filesystem" || mode == "unsigned-egress" || mode == "final-egress"
 }
 
 type contextReader struct {
@@ -89,9 +89,10 @@ func extractArchive(ctx context.Context, archive, directory, platform, arch, mod
 	if !validArchiveTarget(platform, arch) || !validArchiveMode(mode) {
 		return report, fmt.Errorf("invalid release archive target or runtime mode")
 	}
-	filesystemPack := mode == "unsigned-filesystem" || mode == "final-filesystem"
-	finalPack := mode == "final" || mode == "final-filesystem"
-	unsignedPack := mode == "unsigned" || mode == "unsigned-filesystem"
+	egressPack := mode == "unsigned-egress" || mode == "final-egress"
+	filesystemPack := mode == "unsigned-filesystem" || mode == "final-filesystem" || egressPack
+	finalPack := mode == "final" || mode == "final-filesystem" || mode == "final-egress"
+	unsignedPack := mode == "unsigned" || mode == "unsigned-filesystem" || mode == "unsigned-egress"
 	if filesystemPack && !validBuildID(buildID) || !filesystemPack && buildID != "" {
 		return report, fmt.Errorf("filesystem archive mode requires its exact build ID; legacy modes do not accept it")
 	}
@@ -112,7 +113,7 @@ func extractArchive(ctx context.Context, archive, directory, platform, arch, mod
 		names := []string{"linux-amd64", "linux-arm64"}
 		if filesystemPack {
 			names = nil
-			for _, input := range filesystemInputs(buildID) {
+			for _, input := range filesystemInputs(buildID, egressPack) {
 				names = append(names, input.Path)
 			}
 		}
@@ -258,7 +259,7 @@ func extractArchive(ctx context.Context, archive, directory, platform, arch, mod
 		if finalPack {
 			var err error
 			if filesystemPack {
-				data, err = verifyFilesystemPack(ctx, packDirectory, controllerPath, buildID)
+				data, err = verifyFilesystemPack(ctx, packDirectory, controllerPath, buildID, egressPack)
 			} else {
 				err = verify(ctx, packDirectory, controllerPath, inputs, io.Discard)
 			}
@@ -268,7 +269,7 @@ func extractArchive(ctx context.Context, archive, directory, platform, arch, mod
 		}
 		var err error
 		if filesystemPack && !finalPack {
-			data, err = prepareFilesystemPack(ctx, packDirectory, controllerPath, buildID)
+			data, err = prepareFilesystemPack(ctx, packDirectory, controllerPath, buildID, egressPack)
 		} else if !filesystemPack {
 			data, err = runtimeartifact.MarshalLocal(ctx, packDirectory, controllerPath, inputs, remoteruntime.Protocol)
 		}

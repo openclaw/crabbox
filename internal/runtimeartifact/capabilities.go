@@ -49,6 +49,10 @@ func validateRequirement(r Requirement) error {
 		if !validDigest(r.BuildID) {
 			return fmt.Errorf("filesystem build ID must be a lowercase SHA-256")
 		}
+	case Egress:
+		if r.BuildID != "" || r.ProtocolVersion != EgressProtocol {
+			return fmt.Errorf("egress requires protocol %s and no build ID", EgressProtocol)
+		}
 	default:
 		return fmt.Errorf("unknown runtime capability %q", r.Capability)
 	}
@@ -97,6 +101,9 @@ func validateCapabilities(m *capabilityManifest) error {
 			claims[c.Name] = true
 			if c.Name == Supervisor && !supported(t) {
 				return fmt.Errorf("supervisor requires a Linux target")
+			}
+			if c.Name == Egress && !supported(t) {
+				return fmt.Errorf("egress requires a Linux target")
 			}
 		}
 	}
@@ -174,7 +181,7 @@ func OpenCapabilitySet(ctx context.Context, manifestPath, controllerPath string,
 	}
 	if header.SchemaVersion == 1 {
 		if required.Capability != Supervisor {
-			return nil, fmt.Errorf("v1 runtime manifest does not claim filesystem capability")
+			return nil, fmt.Errorf("v1 runtime manifest does not claim %s capability", required.Capability)
 		}
 		legacy, err := parseManifest(data)
 		if err != nil {

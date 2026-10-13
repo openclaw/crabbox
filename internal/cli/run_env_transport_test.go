@@ -343,3 +343,49 @@ printf '%s' "$BUILD_FLAVOR"`, "sh", payloadPath)
 		}
 	}
 }
+
+func TestRunEnvCleanupFailurePreservesWorkloadStatusAndRedactsOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX SSH fixture")
+	}
+	for _, test := range []struct {
+		name     string
+		workload error
+		wantCode int
+	}{
+		{"success", nil, 7}, {"workload failure", Exit(23, "workload exited 23"), 23},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			isolateTestUserDirs(t)
+			dir := t.TempDir()
+			workdir := t.TempDir()
+			mustWriteTestFile(t, filepath.Join(dir, "ssh"), `#!/bin/sh
+for arg do remote=$arg; done
+case "$remote" in
+ *'rm -f --'*) printf 'secret-cleanup-canary' >&2;exit 9 ;;
+ *) /bin/sh -c "$remote" ;;
+esac
+`)
+			if err := os.Chmod(filepath.Join(dir, "ssh"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			var diagnostics bytes.Buffer
+			prepared, err := stageSSHCommandEnv(t.Context(), SSHTarget{Host: "fixture.invalid", User: "fixture", Port: "22", TargetOS: targetLinux}, workdir, map[string]string{"TEST_VALUE": "secret-cleanup-canary"}, &diagnostics)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = test.workload
+			prepared.closeAfter(&err)
+			if ExitCodeForError(err, 1) != test.wantCode || !strings.Contains(err.Error(), "environment cleanup failed") || !strings.Contains(err.Error(), shellDir(prepared.File)) {
+				t.Fatalf("cleanup result=%v", err)
+			}
+			if test.workload != nil && !strings.HasPrefix(err.Error(), test.workload.Error()) {
+				t.Fatalf("workload error lost precedence: %v", err)
+			}
+			if strings.Contains(err.Error()+diagnostics.String(), "secret-cleanup-canary") {
+				t.Fatal("cleanup output leaked")
+			}
+		})
+	}
+}

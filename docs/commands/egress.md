@@ -105,8 +105,8 @@ responsibilities and failure handling.
 
 ## Profiles and allowlist
 
-The host side refuses to become an open proxy. Every session needs either a
-built-in profile or an explicit allowlist; without one, `run`, `start`, and `host`
+Every session needs a built-in profile, an explicit allowlist, or the explicit
+`--allow-public-destinations` opt-in. Without one, `run`, `start`, and `host`
 exit with `refusing to start an open proxy`.
 
 ```sh
@@ -120,6 +120,22 @@ Built-in profiles:
 - `slack`: `slack.com`, `*.slack.com`, `slack-edge.com`, `*.slack-edge.com`
 - `discord`: `discord.com`, `*.discord.com`, `discordcdn.com`,
   `*.discordcdn.com`, `hcaptcha.com`, `*.hcaptcha.com`
+
+`--allow-public-destinations` permits any hostname or public IP destination.
+It bypasses only hostname selection: private, loopback, link-local, metadata,
+and other reserved addresses remain blocked, including through an upstream
+proxy. `egress status` reports `public-destinations=true` and `allow=*`.
+`--allow '*'` remains rejected as an empty allowlist. Use this broader mode
+only for a trusted setup command on a lease you own exclusively.
+
+```sh
+crabbox egress run --id blue-lobster --allow-public-destinations \
+  --upstream-proxy-env CRABBOX_EGRESS_UPSTREAM_PROXY \
+  --no-sync --no-hydrate --script-stdin -- setup < ./scripts/setup.sh
+```
+
+The script must set its application proxy to `http://127.0.0.1:3128`; upstream
+credentials remain on the host.
 
 A wildcard entry like `*.example.com` matches `example.com` and any of its
 subdomains. A bare entry like `example.com` matches only that exact host.
@@ -143,6 +159,7 @@ argument.
 ```text
 --profile <name>                 built-in allowlist profile
 --allow <host,patterns>          comma-separated allowed host patterns
+--allow-public-destinations     permit any public destination (explicit opt-in)
 --upstream-proxy-env <ENV_NAME>  local env containing an HTTP/HTTPS upstream proxy URL
 --listen 127.0.0.1:<port>        lease-local proxy listen address (default 127.0.0.1:3128)
 --target linux                   lease target (linux only; see Limitations)
@@ -163,7 +180,7 @@ before changing transport state. Sync and configured hydration retain normal
 and does not accept `--daemon`; `start --daemon` backgrounds the host bridge.
 
 `host` and `client` also accept `--ticket <ticket>` and `--session <id>` for
-driving a pre-created bridge by hand; `host` takes `--profile`/`--allow`, and
+driving a pre-created bridge by hand; `host` takes `--profile`/`--allow`/`--allow-public-destinations`, and
 `client` takes `--listen`. `host` also accepts `--upstream-proxy-env`.
 
 `stop` accepts `--session <id>` to stop only the matching lease-side client,
@@ -190,6 +207,22 @@ direct egress. The destination allowlist and public-address preflight still
 apply. See [upstream proxy setup](../features/egress.md#upstream-proxies) for
 authentication, TLS trust, DNS ownership, and grant lifetimes.
 
+## Helper provisioning
+
+Automatic setup uses the matching release's `crabbox-runtime` pack, discovered
+beside the real installed CLI executable (including Homebrew symlinks). It
+verifies the pack's SHA-256 binding to the exact running CLI, selects the Linux
+`amd64` or `arm64` helper using the lease's architecture, verifies its digest and
+executable metadata, and verifies the uploaded bytes and egress handshake before
+starting it. No caller repository, local Go toolchain, or runtime download is
+required. Missing, mismatched, or incomplete packs fail with a reinstall step;
+they never fall back to compiling the caller's project.
+
+A CLI-only `go install` or development build must use a controller-bound local
+pack prepared with `--egress` and selected by `CRABBOX_RUNTIME_ARTIFACTS`. See
+[development helper packs](../features/egress.md#development-helper-packs).
+Rebuild the manifest after changing or signing either executable.
+
 ## Requirements and limitations
 
 - A configured coordinator login is required. Run
@@ -209,10 +242,11 @@ authentication, TLS trust, DNS ownership, and grant lifetimes.
 
 ## Troubleshooting
 
-`egress start requires --profile or --allow; refusing to start an open proxy`
+`egress start requires --profile, --allow, or --allow-public-destinations; refusing to start an open proxy`
 
-The host bridge will not run as an open proxy. Pick a profile or pass an
-explicit `--allow` allowlist.
+Pick a profile or pass an explicit `--allow` allowlist. For a trusted setup
+command that needs arbitrary public endpoints, opt into
+`--allow-public-destinations`.
 
 `remote egress client did not listen on 127.0.0.1:3128`
 
@@ -237,3 +271,9 @@ allow at least 75 seconds after SIGTERM before forcing termination. See
 
 For upstream connection, authentication, TLS, or scoped cleanup errors, see
 [egress troubleshooting](../features/egress.md#troubleshooting).
+
+Per-command `.crabbox/env-<nonce>` staging files are removed on completion,
+failure, and cancellation. Cleanup uses a separate bounded context. A cleanup
+failure fails the run and identifies the directory to remove before lease reuse;
+a workload failure keeps its own exit code as primary. Cleanup diagnostics never
+include remote output or environment values.

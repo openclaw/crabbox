@@ -86,3 +86,34 @@ func TestFilesystemDispatchCollectsReport(t *testing.T) {
 		t.Fatalf("filesystem response: files=%d error=%v", count, err)
 	}
 }
+
+func TestEgressDispatchIsRestricted(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"identity", []string{"egress", "client", "--internal-identity"}, 0},
+		{"host", []string{"egress", "host"}, 74},
+		{"start", []string{"egress", "start"}, 74},
+		{"missing", []string{"egress"}, 74},
+		{"invalid client", []string{"egress", "client", "--unknown"}, 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			file, err := os.CreateTemp(t.TempDir(), "output")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			if got := runWithIO(t.Context(), test.args, os.Stdin, file, file); got != test.want {
+				t.Fatalf("exit=%d", got)
+			}
+			if test.name == "identity" {
+				data, _ := os.ReadFile(file.Name())
+				if !bytes.Contains(data, []byte(`"protocol":"CBX-EGRESS-1"`)) {
+					t.Fatalf("identity=%s", data)
+				}
+			}
+		})
+	}
+}

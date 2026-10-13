@@ -93,3 +93,16 @@ For release integration, compile the tool from the protected verifier source
 in the credential-free preparation phase. Do not compile or execute candidate
 source in a signing-credential environment. This tool alone does not change
 the official archive inventory or authorize packaging, signing, or publication.
+
+## Egress-capable packs
+
+`prepare --egress` and `verify --egress` select a local Linux pair with explicit
+egress protocol `CBX-EGRESS-1` and supervisor protocol `CBX-REMOTE-1` claims.
+Both `linux-amd64` and `linux-arm64` are required. The verifier checks controller
+binding, helper digests, and executable metadata without executing either file.
+
+Combine `--egress` with `--filesystem-build-id` for the six-companion release
+layout. Linux adds the egress claim; Darwin and Windows retain filesystem-only
+claims. Extraction selects `unsigned-egress` or `final-egress` with the frozen
+filesystem build ID. Release provenance schema 4 binds that exact capability
+inventory. Historical schemas and filesystem archive modes remain unchanged.

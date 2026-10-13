@@ -120,6 +120,10 @@ if git -C "$SOURCE" cat-file -e "$TAG_COMMIT:cmd/crabbox-runtime/main.go" 2>/dev
     filesystem_build_id=$(cat "$WORK/runtime-build/filesystem-build-id")
     [[ "$filesystem_build_id" =~ ^[0-9a-f]{64}$ ]]
     filesystem_identity_args=(--filesystem-build-id "$filesystem_build_id")
+    if git -C "$SOURCE" cat-file -e "$TAG_COMMIT:internal/cli/egress_runtime.go" 2>/dev/null; then
+      runtime_pack=egress
+      filesystem_identity_args+=(--egress)
+    fi
   fi
 fi
 

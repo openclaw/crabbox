@@ -124,7 +124,7 @@ func (a App) cachePurge(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (a App) cacheWarm(ctx context.Context, args []string) error {
+func (a App) cacheWarm(ctx context.Context, args []string) (err error) {
 	fs := newFlagSet("cache warm", a.Stderr)
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
@@ -165,7 +165,7 @@ func (a App) cacheWarm(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer commandEnv.close()
+	defer commandEnv.closeAfter(&err)
 	envFiles := remoteRunEnvFiles(actionsEnvFile, commandEnv.File)
 	remote := remoteCommandWithEnvFiles(workdir, nil, envFiles, command)
 	if isWindowsNativeTarget(target) {

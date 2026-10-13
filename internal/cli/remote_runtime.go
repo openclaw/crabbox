@@ -226,6 +226,16 @@ func preparePOSIXRuntime(ctx context.Context, target SSHTarget, artifacts runtim
 	if required.Capability == runtimeartifact.Filesystem {
 		return runtime, nil
 	}
+	if required.Capability == runtimeartifact.Egress {
+		hello := newSynchronizedBuffer(4097)
+		if err := runtime.runPOSIX(installCtx, shellQuote(runtime.path)+" egress client "+egressIdentityArg, &hello); err != nil {
+			return nil, fmt.Errorf("egress helper handshake: %w", err)
+		}
+		if err := validateEgressRuntimeIdentity(hello.Bytes(), arch); err != nil {
+			return nil, err
+		}
+		return runtime, nil
+	}
 	hello := newSynchronizedBuffer(4097)
 	if err := runtime.runMetadata(installCtx, []string{"identity"}, &hello); err != nil {
 		return nil, fmt.Errorf("native runtime handshake: %w", err)
@@ -351,6 +361,10 @@ func posixRuntimeOS(target SSHTarget, required runtimeartifact.Requirement) (str
 	case runtimeartifact.Filesystem:
 		if required.ProtocolVersion != "1" || required.BuildID == "" {
 			return "", errors.New("invalid filesystem requirement")
+		}
+	case runtimeartifact.Egress:
+		if required.ProtocolVersion != runtimeartifact.EgressProtocol || required.BuildID != "" {
+			return "", errors.New("invalid egress requirement")
 		}
 	default:
 		return "", errors.New("unsupported runtime capability")

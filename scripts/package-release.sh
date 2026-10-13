@@ -133,15 +133,19 @@ filesystem_identity_args=()
 if git -C "$ROOT" cat-file -e "$TAG_COMMIT:internal/runner/development/main.go.txt" 2>/dev/null; then
   runtime_pack_enabled=filesystem
 fi
+if git -C "$ROOT" cat-file -e "$TAG_COMMIT:internal/cli/egress_runtime.go" 2>/dev/null; then
+  runtime_pack_enabled=egress
+fi
 # Clone frozen source as data and build only the protected artifact reader.
 git clone --quiet --no-local --no-checkout "$ROOT" "$SOURCE"
 git -C "$SOURCE" checkout --quiet --detach "$TAG_COMMIT"
 "$ROOT/scripts/build-release-runtime-tool.sh" "$WORK/runtime-tool"
 runtime_tool="$WORK/runtime-tool/runtime-artifacts"
-if [[ "$runtime_pack_enabled" == filesystem ]]; then
+if [[ "$runtime_pack_enabled" == filesystem || "$runtime_pack_enabled" == egress ]]; then
   filesystem_build_id=$("$runtime_tool" source-id --source-directory "$SOURCE")
   [[ "$filesystem_build_id" =~ ^[0-9a-f]{64}$ ]]
   filesystem_identity_args=(--filesystem-build-id "$filesystem_build_id")
+  [[ "$runtime_pack_enabled" != egress ]] || filesystem_identity_args+=(--egress)
 fi
 candidate_manifest_sha=$(node "$ROOT/scripts/release-provenance.mjs" candidate-verify \
   --dir "$CANDIDATE" \
@@ -226,11 +230,11 @@ runtime_pack=none
 if git -C "$SOURCE" cat-file -e "$TAG_COMMIT:cmd/crabbox-runtime/main.go" 2>/dev/null; then
   runtime_pack=unsigned
 fi
-if [[ "$runtime_pack_enabled" == filesystem ]]; then
-  runtime_pack=unsigned-filesystem
+if [[ "$runtime_pack_enabled" == filesystem || "$runtime_pack_enabled" == egress ]]; then
+  runtime_pack="unsigned-$runtime_pack_enabled"
 fi
 runtime_names=(linux-amd64 linux-arm64)
-if [[ "$runtime_pack_enabled" == filesystem ]]; then
+if [[ "$runtime_pack_enabled" == filesystem || "$runtime_pack_enabled" == egress ]]; then
   runtime_names=(darwin-amd64 darwin-arm64 linux-amd64 linux-arm64 windows-amd64.exe windows-arm64.exe)
 fi
 
@@ -247,7 +251,7 @@ for platform in darwin linux windows; do
       ${filesystem_identity_args[@]+"${filesystem_identity_args[@]}"} >/dev/null
     if [[ "$runtime_pack" != none ]]; then
       runtime_verification_args=()
-      [[ "$runtime_pack_enabled" != filesystem ]] || runtime_verification_args=(filesystem)
+      [[ "$runtime_pack_enabled" != filesystem && "$runtime_pack_enabled" != egress ]] || runtime_verification_args=(filesystem)
       for runtime_name in "${runtime_names[@]}"; do
         runtime_platform=${runtime_name%%-*}
         runtime_arch=${runtime_name#*-}
@@ -351,7 +355,7 @@ notary_helper_arm64=$(sign_and_capture_notary_id \
   "$CRABBOX_RELEASE_HELPER_IDENTIFIER" arm64 "$arm64_stage/crabbox-apple-vm-helper")
 
 runtime_notary_args=()
-if [[ "$runtime_pack_enabled" == filesystem ]]; then
+if [[ "$runtime_pack_enabled" == filesystem || "$runtime_pack_enabled" == egress ]]; then
   for arch in amd64 arm64; do
     notary_runtime=$(sign_and_capture_notary_id \
       "$CRABBOX_RELEASE_RUNTIME_IDENTIFIER" "$arch" "$amd64_stage/crabbox-runtime/darwin-$arch")
@@ -402,7 +406,7 @@ done
 provenance_runtime_args=(--runtime-pack "$runtime_pack_enabled" ${filesystem_identity_args[@]+"${filesystem_identity_args[@]}"})
 if [[ "$runtime_pack_enabled" != false ]]; then
   final_runtime_pack=final
-  [[ "$runtime_pack_enabled" != filesystem ]] || final_runtime_pack=final-filesystem
+  [[ "$runtime_pack_enabled" != filesystem && "$runtime_pack_enabled" != egress ]] || final_runtime_pack="final-$runtime_pack_enabled"
   mkdir -m 700 "$WORK/reports"
   for platform in darwin linux windows; do
     for arch in amd64 arm64; do

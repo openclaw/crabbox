@@ -19,7 +19,7 @@ func validBuildID(id string) bool {
 	return err == nil && len(decoded) == 32 && id == strings.ToLower(id)
 }
 
-func filesystemInputs(buildID string) []runtimeartifact.CapabilityInput {
+func filesystemInputs(buildID string, egress bool) []runtimeartifact.CapabilityInput {
 	var inputs []runtimeartifact.CapabilityInput
 	for _, platform := range []string{"darwin", "linux", "windows"} {
 		for _, arch := range []string{"amd64", "arm64"} {
@@ -29,6 +29,9 @@ func filesystemInputs(buildID string) []runtimeartifact.CapabilityInput {
 			}
 			claims := []runtimeartifact.CapabilityClaim{{Name: runtimeartifact.Filesystem, ProtocolVersion: "1", BuildID: buildID}}
 			if platform == "linux" {
+				if egress {
+					claims = append([]runtimeartifact.CapabilityClaim{{Name: runtimeartifact.Egress, ProtocolVersion: runtimeartifact.EgressProtocol}}, claims...)
+				}
 				claims = append(claims, runtimeartifact.CapabilityClaim{Name: runtimeartifact.Supervisor, ProtocolVersion: remoteruntime.Protocol})
 			}
 			inputs = append(inputs, runtimeartifact.CapabilityInput{Target: runtimeartifact.Target{OS: platform, Arch: arch}, Path: name, Capabilities: claims})
@@ -37,15 +40,15 @@ func filesystemInputs(buildID string) []runtimeartifact.CapabilityInput {
 	return inputs
 }
 
-func prepareFilesystemPack(ctx context.Context, directory, controller, buildID string) ([]byte, error) {
+func prepareFilesystemPack(ctx context.Context, directory, controller, buildID string, egress bool) ([]byte, error) {
 	if !validBuildID(buildID) {
 		return nil, fmt.Errorf("filesystem build ID must be a lowercase SHA-256")
 	}
-	return runtimeartifact.MarshalCapabilities(ctx, directory, controller, filesystemInputs(buildID))
+	return runtimeartifact.MarshalCapabilities(ctx, directory, controller, filesystemInputs(buildID, egress))
 }
 
-func verifyFilesystemPack(ctx context.Context, directory, controller, buildID string) ([]byte, error) {
-	expected, err := prepareFilesystemPack(ctx, directory, controller, buildID)
+func verifyFilesystemPack(ctx context.Context, directory, controller, buildID string, egress bool) ([]byte, error) {
+	expected, err := prepareFilesystemPack(ctx, directory, controller, buildID, egress)
 	if err != nil {
 		return nil, err
 	}
@@ -64,4 +67,34 @@ func verifyFilesystemPack(ctx context.Context, directory, controller, buildID st
 		return nil, fmt.Errorf("finalized capability manifest does not match exact inventory and controller")
 	}
 	return expected, nil
+}
+
+func prepareEgressPack(ctx context.Context, directory, controller string) ([]byte, error) {
+	var inputs []runtimeartifact.CapabilityInput
+	for _, arch := range []string{"amd64", "arm64"} {
+		inputs = append(inputs, runtimeartifact.CapabilityInput{
+			Target: runtimeartifact.Target{OS: "linux", Arch: arch}, Path: "linux-" + arch,
+			Capabilities: []runtimeartifact.CapabilityClaim{{Name: runtimeartifact.Egress, ProtocolVersion: runtimeartifact.EgressProtocol}, {Name: runtimeartifact.Supervisor, ProtocolVersion: remoteruntime.Protocol}},
+		})
+	}
+	return runtimeartifact.MarshalCapabilities(ctx, directory, controller, inputs)
+}
+
+func verifyEgressPack(ctx context.Context, directory, controller string, stdout io.Writer) error {
+	set, err := runtimeartifact.OpenCapabilitySet(ctx, filepath.Join(directory, "manifest.json"), controller,
+		runtimeartifact.Requirement{Capability: runtimeartifact.Egress, ProtocolVersion: runtimeartifact.EgressProtocol})
+	if err != nil {
+		return err
+	}
+	for _, arch := range []string{"amd64", "arm64"} {
+		artifact, err := set.Open(ctx, runtimeartifact.Target{OS: "linux", Arch: arch})
+		if err != nil {
+			return err
+		}
+		if err := artifact.Close(); err != nil {
+			return err
+		}
+	}
+	_, err = io.WriteString(stdout, "{\"egressProtocol\":\""+runtimeartifact.EgressProtocol+"\"}\n")
+	return err
 }

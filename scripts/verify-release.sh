@@ -159,6 +159,11 @@ if [[ "$runtime_pack_enabled" == true ]] &&
   filesystem_identity_args=(--filesystem-build-id "$filesystem_build_id")
   runtime_metadata_args=(filesystem)
 fi
+if git -C "$ROOT" cat-file -e "$TAG_COMMIT:internal/cli/egress_runtime.go" 2>/dev/null; then
+  runtime_pack=final-egress
+  runtime_pack_enabled=egress
+  filesystem_identity_args+=(--egress)
+fi
 
 for platform in darwin linux windows; do
   for arch in amd64 arm64; do
@@ -174,7 +179,7 @@ for platform in darwin linux windows; do
       "$runtime_tool" verify --directory "$destination/crabbox-runtime" \
         --controller "$destination/$binary" ${filesystem_identity_args[@]+"${filesystem_identity_args[@]}"} >/dev/null
       runtime_platforms=(linux)
-      [[ "$runtime_pack" == final-filesystem ]] && runtime_platforms=(darwin linux windows)
+      [[ "$runtime_pack" == final-filesystem || "$runtime_pack" == final-egress ]] && runtime_platforms=(darwin linux windows)
       for runtime_platform in "${runtime_platforms[@]}"; do
         for runtime_arch in amd64 arm64; do
           runtime_name="$runtime_platform-$runtime_arch"
@@ -217,7 +222,7 @@ node "$ROOT/scripts/release-provenance.mjs" verify "${provenance_runtime_args[@]
 "$ROOT/scripts/verify-macos-binary.sh" \
   "$CRABBOX_RELEASE_HELPER_IDENTIFIER" arm64 "$WORK/darwin-arm64/crabbox-apple-vm-helper"
 
-if [[ "$runtime_pack" == final-filesystem ]]; then
+if [[ "$runtime_pack" == final-filesystem || "$runtime_pack" == final-egress ]]; then
   # Each archive carries the same signed companions, authenticated by provenance.
   # Verify signatures and online notarization without executing either runtime.
   CRABBOX_VERIFY_EXECUTE=0 "$ROOT/scripts/verify-macos-binary.sh" \
