@@ -268,6 +268,13 @@ func prepareSSHJump(target *SSHTarget) error {
 		return err
 	}
 	args := []string{"ssh", "-F", os.DevNull, "-i", target.Key, "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + sshConfigFileValue(target.KnownHostsFile), "-o", "GlobalKnownHostsFile=none", "-o", "KnownHostsCommand=none", "-o", "VerifyHostKeyDNS=no", "-o", "UpdateHostKeys=no", "-o", "HostKeyAlgorithms=ssh-ed25519", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-p", strconv.Itoa(jump.Port), "-W", net.JoinHostPort(target.Host, target.Port), "crabbox@" + jump.Host}
+	if jump.useRelay {
+		proxy, err := prepareServeRelayProxy(target)
+		if err != nil {
+			return err
+		}
+		args = append(args[:1], append([]string{"-o", "ProxyCommand=" + proxy}, args[1:]...)...)
+	}
 	if jump.HostKeyAlias != "" {
 		if _, err := authoritativeKnownHostToken(SSHTarget{HostKeyAlias: jump.HostKeyAlias}); err != nil {
 			return err

@@ -30,6 +30,8 @@ import (
 // SSHJump describes an authenticated SSH transport hop; the destination still
 // has its own end-to-end SSH host key and authentication.
 type SSHJump struct {
+	Relay        bool `json:"relay,omitempty"`
+	useRelay     bool
 	Candidates   []SSHJumpCandidate `json:"candidates,omitempty"`
 	HostKeyAlias string             `json:"-"`
 	Host         string             `json:"host"`
@@ -39,6 +41,8 @@ type SSHJump struct {
 }
 
 type SSHTarget struct {
+	relayConfig             *Config
+	relayCoordinator        *CoordinatorClient
 	SSHJump                 *SSHJump
 	User                    string
 	Host                    string
@@ -121,6 +125,10 @@ func sshTargetForLeaseConnection(cfg Config, host, user, port, hostKey string, j
 		TargetOS:         cfg.TargetOS,
 		WindowsMode:      cfg.WindowsMode,
 		ChildEnvDenylist: externalDesktopChildEnvDenylist(cfg, cfg.TargetOS),
+	}
+	if jump != nil && jump.Relay {
+		relayCfg := cfg
+		target.relayConfig = &relayCfg
 	}
 	configureProviderSSHTarget(cfg, &target)
 	return target

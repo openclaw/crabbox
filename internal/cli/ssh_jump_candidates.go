@@ -132,11 +132,14 @@ func chooseJumpCandidate(ctx context.Context, candidates []SSHJumpCandidate, key
 
 func selectSSHJumpCandidate(target *SSHTarget, key ssh.PublicKey) error {
 	jump := target.SSHJump
-	if len(jump.Candidates) <= 1 {
+	if len(jump.Candidates) <= 1 && !jump.Relay {
 		return nil
 	}
 	if len(jump.Candidates) > 4 {
 		return Exit(2, "too many SSH jump candidates")
+	}
+	if len(jump.Candidates) == 0 {
+		jump.Candidates = []SSHJumpCandidate{{Host: jump.Host, Port: jump.Port}}
 	}
 	seen := map[SSHJumpCandidate]bool{}
 	for _, candidate := range jump.Candidates {
@@ -153,7 +156,19 @@ func selectSSHJumpCandidate(target *SSHTarget, key ssh.PublicKey) error {
 	}
 	route, err := chooseJumpCandidate(context.Background(), jump.Candidates, key, cached, localJumpSubnets(), probeJumpCandidate)
 	if err != nil {
-		return err
+		if !jump.Relay || target.relayConfig == nil {
+			return err
+		}
+		coordinator, _, authErr := newCoordinatorClient(*target.relayConfig)
+		if authErr != nil {
+			return authErr
+		}
+		if coordinator == nil {
+			return err
+		}
+		target.relayCoordinator = coordinator
+		jump.useRelay = true
+		route = sshJumpRoute{Fingerprint: ssh.FingerprintSHA256(key), Kind: "relay"}
 	}
 	data, err := json.Marshal(route)
 	if err != nil {
@@ -162,8 +177,12 @@ func selectSSHJumpCandidate(target *SSHTarget, key ssh.PublicKey) error {
 	if err := writeAuthoritativeKnownHosts(path, data); err != nil {
 		return fmt.Errorf("save SSH jump route: %w", err)
 	}
-	jump.Host, jump.Port = route.Host, route.Port
-	fmt.Fprintf(os.Stderr, "serve route: %s %s\n", route.Kind, net.JoinHostPort(route.Host, strconv.Itoa(route.Port)))
+	if jump.useRelay {
+		fmt.Fprintln(os.Stderr, "serve route: relay")
+	} else {
+		jump.Host, jump.Port = route.Host, route.Port
+		fmt.Fprintf(os.Stderr, "serve route: %s %s\n", route.Kind, net.JoinHostPort(route.Host, strconv.Itoa(route.Port)))
+	}
 	return nil
 }
 
@@ -176,6 +195,9 @@ func cachedSSHRouteDescription(leaseID string) string {
 	data, err := os.ReadFile(filepath.Join(filepath.Dir(path), "jump_route.json"))
 	if err != nil || json.Unmarshal(data, &route) != nil {
 		return ""
+	}
+	if route.Kind == "relay" {
+		return "relay"
 	}
 	return route.Kind + " " + net.JoinHostPort(route.Host, strconv.Itoa(route.Port))
 }

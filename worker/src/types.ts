@@ -1,5 +1,6 @@
 import type { AWSQualificationTransportBinding } from "./aws-qualification-contract";
 import type { LeaseLifetimePolicy } from "./lease-lifetime";
+import type { ServeRelayBackend } from "./serve-relay";
 
 export interface AWSCredentials {
   accessKeyId: string;
@@ -17,6 +18,8 @@ export interface Env {
   CRABBOX_STOPPED_RETENTION_SECONDS?: string;
   CRABBOX_PORTABLE_POOLS_ENABLED?: string;
   FLEET: DurableObjectNamespace;
+  SERVE_RELAY?: DurableObjectNamespace;
+  serveRelayBackend?: ServeRelayBackend;
   CF_VERSION_METADATA?: {
     id: string;
     tag?: string;
@@ -555,12 +558,14 @@ export interface LeaseRecord {
   sshUser: string;
   sshPort: string;
   sshFallbackPorts?: string[];
+  serveRelaySessions?: string[];
   sshJump?: {
     host: string;
     port: number;
     hostKey: string;
     fingerprint: string;
     candidates?: { host: string; port: number }[];
+    relay?: boolean;
   };
   sshHostKey?: string;
   providerAccessExpiresAt?: string;

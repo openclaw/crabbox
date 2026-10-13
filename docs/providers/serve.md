@@ -40,7 +40,8 @@ crabbox doctor --provider serve
 The agent advertises up to four IPv4 front-door candidates: a local tailnet
 address in `100.64.0.0/10`, followed by private LAN addresses. Clients try
 same-subnet LAN candidates first, then tailnet, then other candidates.
-SSH is not relayed by the coordinator; at least one candidate must be reachable.
+If no direct candidate is reachable, new agents and clients use a coordinator-brokered
+WebSocket relay. Released 0.75.0 agents retain their direct-only behavior.
 Normal sync, run, logs, results, SSH, list, status, inspect, and stop work through
 the existing brokered SSH-lease path.
 
@@ -215,6 +216,31 @@ and included in run timing JSON as `sshRoute`. Private per-lease state caches th
 choice; subsequent invocations validate only that endpoint's pinned key and
 re-probe candidates if it fails. Existing single-address agents and clients
 remain supported.
+
+If direct candidates fail, the client prints `serve route: relay`. Relay works
+from off-network clients and without any tailnet-policy changes: both the client
+and donating agent connect outbound to the coordinator. A dedicated relay session
+forwards the end-to-end SSH transport; both front-door and container host keys
+remain pinned. The relay never terminates either SSH hop.
+
+Relay admission remains owner-only and requires an active lease on an online
+machine. Each owner may have eight concurrent sessions, each lease four (Node
+also caps the process at 1,024 sessions). Admission tokens are single use; the
+agent token is stored only as a hash in coordinator storage and delivered from
+the live session's memory on the next heartbeat. Parties have 60 seconds to
+connect, and the first socket waits at most 30 seconds for its peer. Closing
+either side or ending the lease closes the relay; sessions cannot outlive the
+lease's hard deadline. Sessions do not survive a relay restart; start a fresh
+invocation to retry.
+
+Relay adds coordinator latency. Each direction allows one acknowledged 32 KiB
+frame at a time, bounding buffering with backpressure at the cost of throughput
+on high-latency links. A fresh invocation always retries direct candidates, even
+if its previous route was relay, so returning to the LAN restores direct access.
+The relay runs on both Cloudflare (one dedicated Durable Object per session) and
+Node/PostgreSQL. Fleet handles admission and lifecycle, never the data frames.
+Printed SSH commands reuse your normal coordinator login and refuse to connect
+if the configured coordinator has changed since the command was generated.
 
 For example, a tailnet grant can allow clients to reach only that front door:
 

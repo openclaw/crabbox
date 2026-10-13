@@ -231,7 +231,13 @@ async function authenticatedCoordinatorRequest(
   }
   const serveRoute = new URL(request.url).pathname.startsWith("/v1/serve/");
   const disabled = serveRoute ? serveDisabledResponse(env, auth.owner) : undefined;
-  if (disabled) return { response: disabled, authenticated: false };
+  if (disabled)
+    return {
+      response: /\/v1\/serve\/(?:relay\/|leases\/[^/]+\/relay$)/.test(new URL(request.url).pathname)
+        ? json({ error: "serve_relay_not_allowed" }, { status: 403 })
+        : disabled,
+      authenticated: false,
+    };
   return {
     request: await requestWithAdminGrantVersion(requestWithAuthContext(request, auth), env),
     authenticated: true,

@@ -81,6 +81,7 @@
   },
   "durable_objects": {
     "bindings": [
+      { "name": "SERVE_RELAY", "class_name": "ServeRelayDurableObject" },
       {
         "name": "FLEET",
         "class_name": "FleetDurableObject",
@@ -123,6 +124,7 @@
     },
     "durable_objects": {
       "bindings": [
+        { "name": "SERVE_RELAY", "class_name": "ServeRelayDurableObject" },
         {
           "name": "FLEET",
           "class_name": "FleetDurableObject",
@@ -135,5 +137,6 @@
       "tag": "v1",
       "new_sqlite_classes": ["FleetDurableObject"],
     },
+    { "tag": "serve-relay-v1", "new_sqlite_classes": ["ServeRelayDurableObject"] },
   ],
 }
