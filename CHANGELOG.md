@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Coordinator monthly reserved-USD budgets are raised to $100,000 fleet-wide, $50,000 per owner and $100,000 per org; reservations from finished leases had exhausted the per-owner cap at roughly a quarter of the estimated spend.
+
 ### Added
 
 - Serve agents advertise LAN and tailnet front-door candidates, with pinned-key LAN-first client selection and per-lease route caching.
