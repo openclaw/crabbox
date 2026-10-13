@@ -288,7 +288,11 @@ export interface CoordinatorRuntime {
     tags: string[],
     handlers: CoordinatorSocketHandlers,
   ): void;
-  acceptEphemeralWebSocket(socket: WebSocket, handlers: CoordinatorSocketHandlers): void;
+  acceptEphemeralWebSocket(
+    socket: WebSocket,
+    handlers: CoordinatorSocketHandlers,
+    kind?: string,
+  ): void;
   take<T>(key: string): Promise<T | undefined>;
   getAlarm(): Promise<number | undefined>;
   scheduleAlarm(time: number): Promise<void>;
@@ -358,7 +362,11 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
     });
   }
 
-  acceptEphemeralWebSocket(socket: WebSocket, handlers: CoordinatorSocketHandlers): void {
+  acceptEphemeralWebSocket(
+    socket: WebSocket,
+    handlers: CoordinatorSocketHandlers,
+    _kind?: string,
+  ): void {
     socket.accept();
     socket.addEventListener("message", (event) => {
       void handlers.message(event.data);

@@ -2,14 +2,19 @@
 
 ## Unreleased
 
-### Fixes
+### Changed
 
-- Coordinator deployments fail when credentials are missing or the public health endpoint does not confirm the active version and requested commit.
+- Coordinator monthly reserved-USD budgets are raised to $100,000 fleet-wide, $50,000 per owner and $100,000 per org; reservations from finished leases had exhausted the per-owner cap at roughly a quarter of the estimated spend.
 
 ### Added
 
+- Serve leases can fall back to an owner-authorized, end-to-end encrypted coordinator relay when LAN and tailnet routes are unavailable.
 - Serve agents advertise LAN and tailnet front-door candidates, with pinned-key LAN-first client selection and per-lease route caching.
 - Portal: show owners their donated serve machines, online status, capacity, allocated leases, and runtime details.
+
+### Fixes
+
+- Coordinator deployments fail when credentials are missing or the public health endpoint does not confirm the active version and requested commit.
 
 ## 0.75.0 - 2026-10-12
 

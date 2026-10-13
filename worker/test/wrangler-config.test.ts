@@ -53,9 +53,9 @@ describe("wrangler config", () => {
     ["CRABBOX_MAX_ACTIVE_LEASES_PER_ORG", 50],
     ["CRABBOX_MAX_ACTIVE_LEASES_PER_CAPACITY_ADMIN", 50],
     ["CRABBOX_MAX_ACTIVE_LEASES_PER_OWNER", 10],
-    ["CRABBOX_MAX_MONTHLY_USD", 50000],
-    ["CRABBOX_MAX_MONTHLY_USD_PER_OWNER", 25000],
-    ["CRABBOX_MAX_MONTHLY_USD_PER_ORG", 50000],
+    ["CRABBOX_MAX_MONTHLY_USD", 100000],
+    ["CRABBOX_MAX_MONTHLY_USD_PER_OWNER", 50000],
+    ["CRABBOX_MAX_MONTHLY_USD_PER_ORG", 100000],
   ])("keeps deployed and preview %s at %i", (name, limit) => {
     expect(configValues(name)).toEqual([limit, limit]);
   });

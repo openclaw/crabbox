@@ -27,6 +27,7 @@ const (
 )
 
 type frontDoorEndpoint struct {
+	Relay      bool               `json:"relay,omitempty"`
 	Candidates []addressCandidate `json:"candidates,omitempty"`
 	Port       int                `json:"port"`
 	HostKey    string             `json:"hostKey"`
@@ -246,29 +247,43 @@ func (f *frontDoor) accept(listener net.Listener) {
 		if err != nil {
 			return
 		}
-		f.mu.Lock()
-		if f.closed {
-			f.mu.Unlock()
+		f.admit(c, "")
+	}
+}
+
+// Relay admissions are pre-bound to their minted lease, including while SSH
+// authentication is pending. The same key and channel policy still applies.
+func (f *frontDoor) admit(c net.Conn, leaseID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		_ = c.Close()
+		return
+	}
+	var bound *frontLease
+	if leaseID != "" {
+		bound = f.leases[leaseID]
+		if bound == nil || !bound.deadline.After(time.Now()) || len(bound.connections) >= frontDoorConnections {
 			_ = c.Close()
 			return
 		}
-		select {
-		case f.handshakes <- struct{}{}:
-			f.sockets[c] = struct{}{}
-			f.wg.Add(1)
-			go f.serve(c)
-		default:
-			_ = c.Close()
+	}
+	select {
+	case f.handshakes <- struct{}{}:
+		f.sockets[c] = struct{}{}
+		if bound != nil {
+			bound.connections[c] = struct{}{}
 		}
-		f.mu.Unlock()
+		f.wg.Add(1)
+		go f.serve(c, bound, leaseID)
+	default:
+		_ = c.Close()
 	}
 }
-func (f *frontDoor) serve(raw net.Conn) {
+func (f *frontDoor) serve(raw net.Conn, bound *frontLease, id string) {
 	defer f.wg.Done()
 	defer raw.Close()
 	slot := true
-	var bound *frontLease
-	var id string
 	defer func() {
 		if slot {
 			<-f.handshakes

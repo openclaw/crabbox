@@ -25,6 +25,7 @@ const alarmQueue = "coordinator-alarm";
 const alarmTimeStorageKey = "node-runtime:alarm-time";
 const reconcileQueue = "coordinator-reconcile";
 const bridgeDataAttachmentKinds = new Set([
+  "serve-relay",
   "webvnc-agent",
   "webvnc-viewer",
   "code-agent",
@@ -245,8 +246,12 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
     });
   }
 
-  acceptEphemeralWebSocket(socket: WebSocket, handlers: CoordinatorSocketHandlers): void {
-    this.acceptWebSocket(socket, { kind: "workspace-terminal" }, [], handlers);
+  acceptEphemeralWebSocket(
+    socket: WebSocket,
+    handlers: CoordinatorSocketHandlers,
+    kind = "workspace-terminal",
+  ): void {
+    this.acceptWebSocket(socket, { kind }, [], handlers);
   }
 
   async getAlarm(): Promise<number | undefined> {

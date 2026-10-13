@@ -7,6 +7,7 @@ import { fileURLToPath, URL as NodeURL } from "node:url";
 import { AsyncMutex } from "../src/async-mutex";
 import { prepareCoordinatorRequest, routeCoordinatorRequest } from "../src/coordinator-entry";
 import { FleetCoordinator } from "../src/fleet";
+import { LocalServeRelayBackend, upgradeServeRelay } from "../src/serve-relay";
 import { AsyncOperationTracker } from "./async-operation-tracker";
 import {
   createAWSDeploymentGuard,
@@ -41,6 +42,7 @@ const port = positiveInt(process.env["PORT"], 8080);
 const shutdownTimeoutMs = positiveInt(process.env["CRABBOX_SHUTDOWN_TIMEOUT_MS"], 120_000);
 const awsDeployment = createAWSDeploymentGuard(env);
 const runtime = new NodeCoordinatorRuntime(databaseURL);
+env.serveRelayBackend = new LocalServeRelayBackend(runtime);
 const coordinator = new FleetCoordinator(runtime, env);
 const lifecycleMutex = new AsyncMutex();
 const activeRequests = new AsyncOperationTracker();
@@ -164,7 +166,13 @@ async function handleUpgrade(
     const webRequest = webRequestFromNode(request, requestContext);
     const authContext = { trustedProxy: requestContext.trustedProxy };
     const response = await runtime.runWithUpgrade(context, () =>
-      routeCoordinatorRequest(webRequest, env, runFleetRequest, authContext),
+      routeCoordinatorRequest(
+        webRequest,
+        env,
+        async (relayRequest) =>
+          upgradeServeRelay(relayRequest, await runFleetRequest(relayRequest), env),
+        authContext,
+      ),
     );
     if (!context.upgraded) {
       await writeUpgradeResponse(socket, response);
