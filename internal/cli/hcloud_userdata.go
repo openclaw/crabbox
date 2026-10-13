@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"bytes"
-	"compress/gzip"
 	"encoding/base64"
 	"fmt"
 	"strings"
@@ -13,18 +11,14 @@ func hetznerUserData(cloudConfig string) (string, error) {
 	if len(cloudConfig) <= limit {
 		return cloudConfig, nil
 	}
-	var compressed bytes.Buffer
-	writer := gzip.NewWriter(&compressed)
-	if _, err := writer.Write([]byte(cloudConfig)); err != nil {
-		return "", err
-	}
-	if err := writer.Close(); err != nil {
+	compressed, err := GzipCloudInit(cloudConfig)
+	if err != nil {
 		return "", err
 	}
 	// Cloud-init decodes MIME transfer encoding, then detects the gzipped cloud-config.
 	var envelope strings.Builder
 	envelope.WriteString("MIME-Version: 1.0\nContent-Type: application/gzip\nContent-Transfer-Encoding: base64\n\n")
-	encoded := base64.StdEncoding.EncodeToString(compressed.Bytes())
+	encoded := base64.StdEncoding.EncodeToString(compressed)
 	for len(encoded) > 76 {
 		envelope.WriteString(encoded[:76] + "\n")
 		encoded = encoded[76:]

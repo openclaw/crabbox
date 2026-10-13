@@ -72,8 +72,11 @@ const guestExpiryDecision = `expiry_due() {
 }
 `
 
+const guestExpiryRequest = `request() { curl --connect-timeout 5 --max-time 15 -fsS "$@"; }
+`
+
 const guestExpiryGCPSource = `metadata() {
-  curl --connect-timeout 5 --max-time 15 -fsS -H 'Metadata-Flavor: Google' "http://metadata.google.internal/computeMetadata/v1/$1"
+  request -H 'Metadata-Flavor: Google' "http://metadata.google.internal/computeMetadata/v1/$1"
 }
 project="$(metadata project/project-id)" || exit 0
 name="$(metadata instance/name)" || exit 0
@@ -82,18 +85,18 @@ zone="${zone_path##*/}"
 token_json="$(metadata instance/service-accounts/default/token)" || exit 0
 token="$(printf '%s' "$token_json" | jq -er '.access_token | select(type == "string" and length > 0)')" || exit 0
 [ -n "$project" ] && [ -n "$name" ] && [ -n "$zone" ] || exit 0
-instance="$(curl --connect-timeout 5 --max-time 15 -fsS -H "Authorization: Bearer $token" "https://compute.googleapis.com/compute/v1/projects/$project/zones/$zone/instances/$name")" || exit 0
+instance="$(request -H "Authorization: Bearer $token" "https://compute.googleapis.com/compute/v1/projects/$project/zones/$zone/instances/$name")" || exit 0
 label() { printf '%s' "$instance" | jq -er --arg key "$1" '.labels[$key] // "" | select(type == "string")'; }
 provider="$(label provider)" || exit 0
 [ -z "$provider" ] || [ "$provider" = gcp ] || exit 0
 `
-const guestExpiryAWSSource = `metadata_token="$(curl --connect-timeout 5 --max-time 15 -fsS -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token)" || exit 0
+const guestExpiryAWSSource = `metadata_token="$(request -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token)" || exit 0
 [ -n "$metadata_token" ] || exit 0
 label() {
-  curl --connect-timeout 5 --max-time 15 -fsS -H "X-aws-ec2-metadata-token: $metadata_token" "http://169.254.169.254/latest/meta-data/tags/instance/$1"
+  request -H "X-aws-ec2-metadata-token: $metadata_token" "http://169.254.169.254/latest/meta-data/tags/instance/$1"
 }
 `
-const guestExpiryAzureSource = `instance="$(curl --connect-timeout 5 --max-time 15 -fsS -H 'Metadata: true' --noproxy '*' 'http://169.254.169.254/metadata/instance?api-version=2021-02-01')" || exit 0
+const guestExpiryAzureSource = `instance="$(request -H 'Metadata: true' --noproxy '*' 'http://169.254.169.254/metadata/instance?api-version=2021-02-01')" || exit 0
 label() {
   printf '%s' "$instance" | jq -er --arg key "$1" '[.compute.tagsList[] | select(.name == $key) | .value] | if length == 1 and (.[0] | type == "string") then .[0] else error("missing or ambiguous tag") end'
 }
@@ -112,18 +115,16 @@ func guestExpiryScript(adapter string) string {
 	reclaim := "systemctl poweroff\n"
 	switch adapter {
 	case "gcp":
-		source = guestExpiryGCPSource
-		reclaim = `curl --connect-timeout 5 --max-time 15 -fsS -X DELETE -H "Authorization: Bearer $token" "https://compute.googleapis.com/compute/v1/projects/$project/zones/$zone/instances/$name" >/dev/null` + "\n"
+		source = guestExpiryRequest + guestExpiryGCPSource
+		reclaim = `request -X DELETE -H "Authorization: Bearer $token" "https://compute.googleapis.com/compute/v1/projects/$project/zones/$zone/instances/$name" >/dev/null` + "\n"
 	case "aws":
-		source = guestExpiryAWSSource
+		source = guestExpiryRequest + guestExpiryAWSSource
 	case "azure":
-		source = guestExpiryAzureSource
+		source = guestExpiryRequest + guestExpiryAzureSource
 	}
 	return "#!/bin/sh\nset -eu\n" + guestExpiryDecision + source + `crabbox="$(label crabbox)" || exit 0
 state="$(label state)" || exit 0
 state="$(printf '%s' "$state" | tr '[:upper:]' '[:lower:]')" || exit 0
-keep="$(label keep)" || exit 0
-: "$keep"
 expires_at="$(label expires_at)" || exit 0
 now="$(date -u +%s)"
 expiry_due || exit 0
@@ -199,9 +200,6 @@ func cloudInitGuestExpiryGuardBootstrap(cfg Config) string {
 // uses the existing authenticated SSH transport; the old deadline remains
 // intact on failed writes, and readers see either complete version.
 func RefreshGuestLeaseExpiry(ctx context.Context, target SSHTarget, fields GuestLeaseExpiryFields) error {
-	return refreshGuestLeaseExpiry(ctx, target, fields)
-}
-func refreshGuestLeaseExpiry(ctx context.Context, target SSHTarget, fields GuestLeaseExpiryFields) error {
 	if target.TargetOS != "" && target.TargetOS != targetLinux {
 		return fmt.Errorf("guest expiry refresh requires Linux")
 	}
@@ -254,7 +252,7 @@ func touchLeaseWithGuestExpiry(ctx context.Context, backend LeaseTouchBackend, c
 		}
 		target = lease.SSH
 	}
-	if err := refreshGuestLeaseExpiry(ctx, target, GuestLeaseExpiryFromLabels(server.Labels)); err != nil {
+	if err := RefreshGuestLeaseExpiry(ctx, target, GuestLeaseExpiryFromLabels(server.Labels)); err != nil {
 		return server, fmt.Errorf("refresh guest lease expiry: %w", err)
 	}
 	return server, nil

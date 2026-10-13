@@ -834,6 +834,7 @@ func seedParallelsCleanupState(t *testing.T) (string, string) {
 		t.Fatal(err)
 	}
 	labels := map[string]string{
+		"crabbox":    "true",
 		"provider":   "parallels",
 		"lease":      leaseID,
 		"slug":       "blue",

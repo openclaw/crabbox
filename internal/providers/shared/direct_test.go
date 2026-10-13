@@ -319,19 +319,22 @@ func TestCleanupServersSkipsDeletesAndDryRuns(t *testing.T) {
 	servers := []core.Server{
 		testCleanupServerWithLabels("kept", map[string]string{
 			"keep":       "true",
-			"expires_at": clock.now.Add(-time.Hour).Format(time.RFC3339Nano),
+			"expires_at": clock.now.Add(time.Hour).Format(time.RFC3339Nano),
 		}),
 		testCleanupServerWithLabels("failed", map[string]string{
 			"state": "failed",
+		}),
+		testCleanupServerWithLabels("expired-kept", map[string]string{
+			"keep": "true", "expires_at": clock.now.Add(-time.Hour).Format(time.RFC3339Nano),
 		}),
 	}
 	if err := backend.CleanupServers(context.Background(), core.CleanupRequest{}, servers); err != nil {
 		t.Fatalf("CleanupServers returned error: %v", err)
 	}
-	if strings.Join(deleted, ",") != "failed" {
-		t.Fatalf("deleted=%v, want failed", deleted)
+	if strings.Join(deleted, ",") != "failed,expired-kept" {
+		t.Fatalf("deleted=%v, want failed,expired-kept", deleted)
 	}
-	if got := stderr.String(); !strings.Contains(got, "skip server id=kept name=kept reason=keep=true") || !strings.Contains(got, "delete server id=failed name=failed") {
+	if got := stderr.String(); !strings.Contains(got, "skip server id=kept name=kept reason=not expired") || !strings.Contains(got, "delete server id=failed name=failed") {
 		t.Fatalf("stderr=%q, want skip and delete lines", got)
 	}
 
@@ -347,6 +350,28 @@ func TestCleanupServersSkipsDeletesAndDryRuns(t *testing.T) {
 	}
 	if got := stderr.String(); !strings.Contains(got, "delete server id=dry-run name=dry-run") {
 		t.Fatalf("dry-run stderr=%q, want delete plan", got)
+	}
+}
+
+func TestCleanupServersRejectsUnowned(t *testing.T) {
+	for _, owner := range []string{"", "false"} {
+		t.Run("owner="+owner, func(t *testing.T) {
+			backend := DirectSSHBackend{
+				RT: core.Runtime{Stderr: io.Discard},
+				PrepareCleanup: func(context.Context, core.Server) (core.Server, bool, CleanupSkipReason, error) {
+					t.Fatal("unowned server reached preparation")
+					return core.Server{}, false, "", nil
+				},
+				Delete: func(context.Context, core.Config, core.Server) error {
+					t.Fatal("unowned server deleted")
+					return nil
+				},
+			}
+			server := core.Server{Labels: map[string]string{"crabbox": owner, "state": "failed", "expires_at": "1"}}
+			if err := backend.CleanupServers(context.Background(), core.CleanupRequest{}, []core.Server{server}); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -477,9 +502,10 @@ func TestCleanupServersRechecksPreparedServerAndClaimEligibility(t *testing.T) {
 			prepare: func(server core.Server) core.Server {
 				server.Labels = CloneLabels(server.Labels)
 				server.Labels["keep"] = "true"
+				server.Labels["expires_at"] = clock.now.Add(time.Hour).Format(time.RFC3339Nano)
 				return server
 			},
-			reason: "keep=true",
+			reason: "not expired",
 		},
 		{
 			name: "prepared claim was renewed",
@@ -489,6 +515,7 @@ func TestCleanupServersRechecksPreparedServerAndClaimEligibility(t *testing.T) {
 					Provider: "example",
 					Revision: "renewed",
 					Labels: map[string]string{
+						"crabbox":    "true",
 						"lease":      "cbx_aaaaaaaaaaaa",
 						"keep":       "false",
 						"expires_at": clock.now.Add(time.Hour).Format(time.RFC3339Nano),
@@ -500,6 +527,15 @@ func TestCleanupServersRechecksPreparedServerAndClaimEligibility(t *testing.T) {
 				return server
 			},
 			reason: "not expired",
+		},
+		{
+			name: "refreshed server lost ownership",
+			prepare: func(server core.Server) core.Server {
+				server.Labels = CloneLabels(server.Labels)
+				delete(server.Labels, "crabbox")
+				return server
+			},
+			reason: "missing labels",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -655,6 +691,8 @@ func testCleanupServer(name string, expiresAt time.Time) core.Server {
 }
 
 func testCleanupServerWithLabels(name string, labels map[string]string) core.Server {
+	labels = CloneLabels(labels)
+	labels["crabbox"] = "true"
 	return core.Server{CloudID: name, Name: name, Labels: labels}
 }
 

@@ -628,7 +628,7 @@ GCP retains its existing self-delete permissions requirement.
 
 File-backed bootstraps write exactly four nonsecret fields: `crabbox`, `state`,
 `keep`, and `expires_at`. `RefreshGuestLeaseExpiry(ctx, target, fields)` in
-`internal/cli/guest_expiry.go` (internal implementation `refreshGuestLeaseExpiry`)
+`internal/cli/guest_expiry.go`
 is the hook for a file-backed provider's lease-lifetime update: it validates the
 fields and writes mode 0600 through the existing SSH transport, publishing by
 atomic rename in `/etc/crabbox`. Ordinary CLI state touches and heartbeats refresh this file as well as provider

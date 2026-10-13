@@ -180,12 +180,12 @@ func TestRefreshGuestLeaseExpiryAtomic(t *testing.T) {
 		}
 		return nil
 	}
-	if err := refreshGuestLeaseExpiry(context.Background(), SSHTarget{Host: "fixture"}, fields); err != nil || !called {
+	if err := RefreshGuestLeaseExpiry(context.Background(), SSHTarget{Host: "fixture"}, fields); err != nil || !called {
 		t.Fatalf("refresh: %v", err)
 	}
 	fields.State = "ready\n$(touch injected)"
 	called = false
-	if err := refreshGuestLeaseExpiry(context.Background(), SSHTarget{}, fields); err == nil || called {
+	if err := RefreshGuestLeaseExpiry(context.Background(), SSHTarget{}, fields); err == nil || called {
 		t.Fatal("unsafe fields reached SSH")
 	}
 	// Execute the actual transaction locally, replacing only ownership operations

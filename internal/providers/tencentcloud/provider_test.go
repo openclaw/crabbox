@@ -2,6 +2,7 @@ package tencentcloud
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -236,6 +237,15 @@ func TestBuildRunInstanceRequest(t *testing.T) {
 		t.Fatalf("internet=%+v", req.InternetAccessible)
 	}
 	userData, err := base64.StdEncoding.DecodeString(req.UserData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(userData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gz.Close()
+	userData, err = io.ReadAll(gz)
 	if err != nil {
 		t.Fatal(err)
 	}
