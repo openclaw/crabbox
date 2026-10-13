@@ -1592,7 +1592,13 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			}
 		}
 		if cleanup.Err == nil {
-			recorder.Event("lease.released", "released", "")
+			// Accepted release may retain recovery or leave cleanup unconfirmed.
+			// Only the release owner's terminal outcome supports the released phase.
+			phase, message := string(RunPhaseCleanup), "leaseStopped=false; lease retained or cleanup unconfirmed"
+			if cleanup.Stopped {
+				phase, message = "released", "leaseStopped=true; lease recovery ended"
+			}
+			recorder.Event("lease.released", phase, message)
 		}
 		if !*timingJSON {
 			if cleanup.Err != nil {

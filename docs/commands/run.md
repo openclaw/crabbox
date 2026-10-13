@@ -1122,6 +1122,9 @@ cleanup error: it can accompany `leaseStopped=true` when the remote resource is
 gone but local finalization failed. An existing workload failure keeps its exit
 code. Accepted pending or retained cleanup does not itself turn a successful
 workload into a command failure.
+The `lease.released` event carries the same outcome in its message: phase `cleanup`
+means the lease is retained or cleanup is unconfirmed; phase `released` means
+lease recovery has ended. The event type alone does not prove deletion.
 Commands can emit
 phase markers on stdout or stderr as
 `CRABBOX_PHASE:<name>`; Crabbox records those as `commandPhases` without removing

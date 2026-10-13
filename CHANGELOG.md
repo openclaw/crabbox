@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- CLI: distinguish accepted release from confirmed cleanup in run events, preserving retained or unconfirmed outcomes in the `cleanup` phase.
 - Coordinator: preserve ordinary TTL deletion ahead of maximum-lifetime retention, reject conflicting delete requests during lifetime work, and reconcile shared AWS ingress after lifetime deletion. [PR 2795](https://github.com/openclaw/crabbox/pull/2795).
 
 ## 0.76.0 - 2026-10-13
