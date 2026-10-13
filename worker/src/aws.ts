@@ -4546,8 +4546,8 @@ export function awsRegionCandidates(
     ]);
   }
   return validAWSRegionCandidates([
-    preferredRegion,
     config.awsRegion,
+    preferredRegion,
     env.CRABBOX_AWS_REGION ?? "",
     ...splitCommaList(env.CRABBOX_CAPACITY_REGIONS ?? ""),
     ...config.capacityRegions,

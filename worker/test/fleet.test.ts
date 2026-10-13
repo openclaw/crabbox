@@ -30759,6 +30759,86 @@ describe("fleet lease identity and idle", () => {
     );
   });
 
+  it.each([
+    { requested: "us-west-1", promoted: true, rejected: [], regions: ["us-west-1"] },
+    { requested: "us-west-1", promoted: false, rejected: [], regions: ["us-west-1"] },
+    {
+      requested: "us-west-1",
+      promoted: false,
+      rejected: ["us-west-1", "eu-west-1"],
+      regions: ["us-west-1", "eu-west-1", "us-east-1"],
+    },
+    { requested: "eu-west-1", promoted: true, rejected: [], regions: ["eu-west-1"] },
+    { requested: undefined, promoted: true, rejected: [], regions: ["eu-west-1"] },
+  ])(
+    "admits AWS leases in request-first region order: $requested / $promoted / $rejected",
+    async ({ requested, promoted, rejected, regions }) => {
+      const launched: Array<{ region: string; image: string }> = [];
+      const stockRegions: string[] = [];
+      const fixture = awsIngressTestFleet(
+        async (action, params, region) => {
+          if (action === "DescribeImages") {
+            stockRegions.push(region);
+            return ec2XMLResponse(
+              `<DescribeImagesResponse><imagesSet><item><imageId>ami-stock-${region}</imageId><creationDate>2026-10-01</creationDate></item></imagesSet></DescribeImagesResponse>`,
+            );
+          }
+          if (action !== "RunInstances") return undefined;
+          launched.push({ region, image: params.get("ImageId")! });
+          // Admission must move the durable allocation target before dispatching in each region.
+          expect(fixture.storage.value<LeaseRecord>(`lease:${fixture.creatingID}`)?.region).toBe(
+            region,
+          );
+          return rejected.includes(region)
+            ? ec2XMLResponse(
+                "<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code></Error></Errors></Response>",
+                400,
+              )
+            : undefined;
+        },
+        { CRABBOX_AWS_REGION: "eu-west-1", CRABBOX_CAPACITY_REGIONS: "us-east-1,us-west-2" },
+      );
+      const promotion = (region: string) => ({
+        id: `ami-promoted-${region}`,
+        region,
+        state: "available",
+        target: "linux",
+        os: "ubuntu:26.04",
+        architecture: "x86_64",
+        promotedAt: "2026-10-01T00:00:00Z",
+      });
+      // A legacy alias from another region must not override the client's region.
+      fixture.storage.seed("image:aws:promoted:linux:x86_64:ubuntu26.04", promotion("eu-west-1"));
+      fixture.storage.seed(
+        "image:aws:promoted:linux:x86_64:ubuntu26.04:eu-west-1",
+        promotion("eu-west-1"),
+      );
+      if (promoted && requested === "us-west-1") {
+        fixture.storage.seed(
+          "image:aws:promoted:linux:x86_64:ubuntu26.04:us-west-1",
+          promotion("us-west-1"),
+        );
+      }
+      const response = await fixture.create({
+        awsRegion: requested,
+        awsAMI: "",
+        os: "ubuntu:26.04",
+      });
+      const body = (await response.json()) as { lease: LeaseRecord };
+      expect(response.status).toBe(201);
+      const imageFor = (region: string) =>
+        `ami-${region === "eu-west-1" || (region === "us-west-1" && promoted) ? "promoted" : "stock"}-${region}`;
+      expect(launched).toEqual(regions.map((region) => ({ region, image: imageFor(region) })));
+      expect(stockRegions).toEqual(regions.filter((region) => imageFor(region).includes("stock")));
+      const region = regions.at(-1)!;
+      expect(body.lease.region).toBe(region);
+      expect(body.lease.image).toMatchObject({ id: imageFor(region), region });
+      expect(fixture.storage.value<LeaseRecord>(`lease:${fixture.creatingID}`)?.region).toBe(
+        region,
+      );
+    },
+  );
+
   it.each(["stock", "promoted", "stale promotion", "missing stock"])(
     "resolves the AWS fallback region's own image (%s)",
     async (fallback) => {
@@ -45611,7 +45691,8 @@ describe("fleet lease identity and idle", () => {
     const operation = stubAWSLeaseOperation();
     const config = leaseConfig({
       provider: "aws",
-      awsRegion: "us-east-1",
+      awsRegion: "eu-west-1",
+      capacity: { regions: ["us-east-1"] },
       sshPublicKey: "ssh-ed25519 test",
     });
     let clock = 0;
@@ -47689,7 +47770,7 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("image:aws:promoted")).toBeUndefined();
   });
 
-  it("uses promoted AWS image region when creating leases", async () => {
+  it("uses the promoted AWS image in the requested region when creating leases", async () => {
     const storage = new MemoryStorage();
     let createdConfig: LeaseConfig | undefined;
     const provider = fakeProvider(
@@ -47727,6 +47808,7 @@ describe("fleet lease identity and idle", () => {
       request("POST", "/v1/leases", {
         body: {
           provider: "aws",
+          awsRegion: "us-east-2",
           sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@example.com",
         },
       }),
@@ -47786,6 +47868,7 @@ describe("fleet lease identity and idle", () => {
         body: {
           provider: "aws",
           architecture: "arm64",
+          awsRegion: "us-east-2",
           sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@example.com",
         },
       }),
