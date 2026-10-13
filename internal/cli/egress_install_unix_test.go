@@ -25,10 +25,27 @@ func egressPackFixture(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	egressFixtureOnce.Do(func() {
+		// Remote execution is mocked; only package and target metadata are real.
+		source := filepath.Join(dir, "source")
+		pkg := filepath.Join(source, "cmd", "crabbox-runtime")
+		if err := os.MkdirAll(pkg, 0700); err != nil {
+			egressFixtureError = err
+			return
+		}
+		for _, file := range []struct{ path, content string }{
+			{filepath.Join(source, "go.mod"), "module github.com/openclaw/crabbox\n\ngo 1.26\n"},
+			{filepath.Join(pkg, "main.go"), "package main\nfunc main() {}\n"},
+		} {
+			if err := os.WriteFile(file.path, []byte(file.content), 0600); err != nil {
+				egressFixtureError = err
+				return
+			}
+		}
 		for _, arch := range []string{"amd64", "arm64"} {
 			name := "linux-" + arch
-			cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", filepath.Join(dir, name), "../../cmd/crabbox-runtime")
-			cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+arch, "CGO_ENABLED=0", "GOWORK=off")
+			cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", filepath.Join(dir, name), "./cmd/crabbox-runtime")
+			cmd.Dir = source
+			cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+arch, "CGO_ENABLED=0", "GOTOOLCHAIN=local", "GOWORK=off", "GOFLAGS=", "GOPROXY=off", "GOSUMDB=off")
 			if out, err := cmd.CombinedOutput(); err != nil {
 				egressFixtureError = fmt.Errorf("build helper: %w: %s", err, out)
 				return
