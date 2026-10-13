@@ -2,23 +2,34 @@
 
 ## Unreleased
 
-### Changed
-
-- Production lease policy gives owner `github:58493` a 12-hour maximum lease lifetime for long serial proof runs; the 30-minute default and idle timeout still apply.
-
 ### Fixed
 
 - Release verification: report bounded, attributable macOS notarization diagnostics without changing failed checks or executing rejected binaries. [PR 2823](https://github.com/openclaw/crabbox/pull/2823).
+
+## 0.77.0 - 2026-10-13
+
+### Changed
+
+- Production lease policy gives owner `github:58493` a 12-hour maximum lease lifetime for long serial proof runs; the 30-minute default and idle timeout still apply.
+- CLI: add `stop --wait=false` for coordinator-owned queued cleanup while preserving pending local recovery state; ordinary stop still waits for confirmed deletion.
+- CLI: batch no-sync SSH workspace preparation and script upload, overlap independent telemetry and event delivery, and preserve retained scripts and terminal run records.
+- Coordinator: restore the deployment-authorized owner's 24-hour lease maximum while retaining the global 4-hour limit; deployments refuse to overwrite other live lifetime-policy overrides. [PR 2816](https://github.com/openclaw/crabbox/pull/2816).
+
+### Added
+
+- Egress: provision verified architecture-specific runtime-pack helpers for installed setup wrappers, add opt-in public destinations, and fail runs on redacted environment cleanup errors while preserving primary workload and owner outcomes. [PR 2812](https://github.com/openclaw/crabbox/pull/2812).
+
+### Fixed
+
+- Coordinator deployment: allow explicitly authorized maximum TTL changes for multiple owners while preserving all other live lease-policy overrides; thanks @vincentkoc for the original preservation guard in [PR 2816](https://github.com/openclaw/crabbox/pull/2816).
 - Blacksmith Testbox: preserve native failures and safe diagnostics through cleanup and reporting, finish independent proof and failure captures, and keep lease recovery handles accurate. (https://github.com/openclaw/crabbox/pull/2820, thanks @vincentkoc)
 - Coordinator: preserve ordinary TTL deletion ahead of maximum-lifetime retention, reject conflicting delete requests during lifetime work, and reconcile shared AWS ingress after lifetime deletion. [PR 2795](https://github.com/openclaw/crabbox/pull/2795).
+- CLI: retain idempotent SSH retries for batched workspace preparation and script upload after transient transport failures.
 
 ## 0.76.0 - 2026-10-13
 
 ### Changed
 
-- CLI: add `stop --wait=false` for coordinator-owned queued cleanup while preserving pending local recovery state; ordinary stop still waits for confirmed deletion.
-- CLI: batch no-sync SSH workspace preparation and script upload, overlap independent telemetry and event delivery, and preserve retained scripts and terminal run records.
-- Coordinator: restore the deployment-authorized owner's 24-hour lease maximum while retaining the global 4-hour limit; deployments refuse to overwrite other live lifetime-policy overrides. [PR 2816](https://github.com/openclaw/crabbox/pull/2816).
 - CI: run CLI coverage in three isolated shards, retaining atomic whole-suite coverage and the 90% core gate; report the slowest top-level tests without summing nested timings.
 - Coordinator monthly reserved-USD budgets are raised to $100,000 fleet-wide, $50,000 per owner and $100,000 per org; reservations from finished leases had exhausted the per-owner cap at roughly a quarter of the estimated spend.
 - CLI: `crabbox list` streams and shows live leases by default; `--retained` includes kept terminal leases. Add `--jsonl` streaming and uncapped `--all` lease lookups while preserving the buffered `--json` array.
@@ -41,13 +52,11 @@
 
 ### Fixed
 
-- CLI: retain idempotent SSH retries for batched workspace preparation and script upload after transient transport failures.
 - AWS deployment smoke: pin Linux/amd64 `t3.small` with class `tiny` and On-Demand capacity so inherited defaults cannot launch a larger instance. [PR 2814](https://github.com/openclaw/crabbox/pull/2814).
 - Blacksmith Testbox: cancel the exact owned GitHub workflow after native stop leaves it active, releasing concurrency slots without waiting for the SSH idle timer; retain recovery state until both sides confirm completion. [PR 2813](https://github.com/openclaw/crabbox/pull/2813).
 - Direct lease extension refreshes file-backed guest expiry guards after saving provider labels; failed guest writes report both deadlines and can be retried without adding lifetime twice. ([#2804](https://github.com/openclaw/crabbox/pull/2804))
 - AWS: honor the requested region before coordinator and capacity fallbacks, using a regional promoted image or the normal stock image without redirecting to another region's promotion.
 - Serve: allow relay pairing and both SSH handshakes to complete during bootstrap and sync; add bounded, payload-free client and agent diagnostics with `CRABBOX_SERVE_RELAY_DEBUG=1`. [PR 2811](https://github.com/openclaw/crabbox/pull/2811).
-- Egress: provision verified architecture-specific runtime-pack helpers for installed setup wrappers, add opt-in public destinations, and fail runs on redacted environment cleanup errors while preserving primary workload and owner outcomes. [PR 2812](https://github.com/openclaw/crabbox/pull/2812).
 - Preserve worst-case `reservedUSD` in usage reports and expose enforced cost as `committedUSD`, with compatible CLI output and conservative reservations for retained legacy VMs and unresolved provisioning. [PR 2801](https://github.com/openclaw/crabbox/pull/2801).
 - Settle terminal lease budget reservations at elapsed compute cost capped by the admission reservation, preserve observed runtime through late release and cleanup retries, and charge confirmed never-allocated leases zero compute runtime.
 - Coordinator deployments fail when credentials are missing or the public health endpoint does not confirm the active version and requested commit.

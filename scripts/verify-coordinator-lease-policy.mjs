@@ -25,11 +25,13 @@ function parseOverrides(text, label) {
   return value;
 }
 
-function withoutOwnerMaximum(policy, owner) {
+function withoutOwnerMaximums(policy, owners) {
   const copy = structuredClone(policy);
-  if (Object.hasOwn(copy.owners ?? {}, owner)) {
-    delete copy.owners[owner].maxTTLSeconds;
-    if (Object.keys(copy.owners[owner]).length === 0) delete copy.owners[owner];
+  for (const owner of owners) {
+    if (Object.hasOwn(copy.owners ?? {}, owner)) {
+      delete copy.owners[owner].maxTTLSeconds;
+      if (Object.keys(copy.owners[owner]).length === 0) delete copy.owners[owner];
+    }
   }
   for (const group of ["owners", "orgs"]) {
     if (copy[group] && Object.keys(copy[group]).length === 0) delete copy[group];
@@ -40,17 +42,26 @@ function withoutOwnerMaximum(policy, owner) {
 export async function verifyCoordinatorLeasePolicy({
   accountId,
   apiToken,
-  owner,
+  owners,
   desiredOverrides,
   fetchImpl = fetch,
 }) {
-  if (!/^[a-f0-9]{32}$/.test(accountId ?? "") || !apiToken || !owner) {
+  if (
+    !/^[a-f0-9]{32}$/.test(accountId ?? "") ||
+    !apiToken ||
+    !Array.isArray(owners) ||
+    owners.length === 0 ||
+    owners.some((owner) => typeof owner !== "string" || !/^github:[1-9][0-9]*$/.test(owner))
+  ) {
     throw new Error("Set the Cloudflare account, API token, and policy owner before verification.");
   }
   const desired = parseOverrides(desiredOverrides, "Source");
   if (
-    !Object.hasOwn(desired.owners ?? {}, owner) ||
-    !Number.isInteger(desired.owners[owner].maxTTLSeconds)
+    owners.some(
+      (owner) =>
+        !Object.hasOwn(desired.owners ?? {}, owner) ||
+        !Number.isInteger(desired.owners[owner].maxTTLSeconds),
+    )
   ) {
     throw new Error(
       "Source policy must declare the named owner's maximum TTL; deployment stopped.",
@@ -95,7 +106,9 @@ export async function verifyCoordinatorLeasePolicy({
     throw new Error("Live lease policy is not one readable plaintext binding; deployment stopped.");
   }
   const live = parseOverrides(bindings[0].text, "Live");
-  if (!isDeepStrictEqual(withoutOwnerMaximum(live, owner), withoutOwnerMaximum(desired, owner))) {
+  if (
+    !isDeepStrictEqual(withoutOwnerMaximums(live, owners), withoutOwnerMaximums(desired, owners))
+  ) {
     throw new Error(
       "Live lease policy contains other entries or fields not preserved in source; reconcile the complete override document before deploying.",
     );
@@ -123,7 +136,7 @@ if (import.meta.main) {
     await verifyCoordinatorLeasePolicy({
       accountId: process.env.CLOUDFLARE_ACCOUNT_ID,
       apiToken: process.env.CLOUDFLARE_API_TOKEN,
-      owner: process.argv[2],
+      owners: process.argv.slice(2),
       desiredOverrides: config.vars[bindingName],
     });
     console.log("Verified coordinator lease policy preservation.");
