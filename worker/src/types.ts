@@ -12,6 +12,12 @@ export interface AWSCredentials {
 export type AWSCredentialProvider = () => Promise<AWSCredentials>;
 
 export interface Env {
+  CRABBOX_LEASE_DEFAULT_TTL_SECONDS?: string;
+  CRABBOX_LEASE_DEFAULT_IDLE_TIMEOUT_SECONDS?: string;
+  CRABBOX_LEASE_MAX_TTL_SECONDS?: string;
+  CRABBOX_LEASE_EXTENSION?: string;
+  CRABBOX_LEASE_AUTO_EXTEND?: string;
+  CRABBOX_LEASE_POLICY_OVERRIDES?: string;
   CRABBOX_RETAINED_RECONCILE?: string;
   CRABBOX_RETAINED_RECONCILE_DELETE?: string;
   CRABBOX_RETAINED_RECONCILE_GRACE_SECONDS?: string;
@@ -375,6 +381,7 @@ export interface LeaseRegistrationRequest {
 
 export const coordinatorProviderRegistry = [
   {
+    runtimeExtension: true,
     provider: "serve",
     label: "Served machines",
     requiredSecrets: [],
@@ -382,6 +389,7 @@ export const coordinatorProviderRegistry = [
     supportsCapacityMarket: false,
   },
   {
+    runtimeExtension: true,
     provider: "hetzner",
     label: "Hetzner",
     requiredSecrets: ["HETZNER_TOKEN"],
@@ -389,6 +397,7 @@ export const coordinatorProviderRegistry = [
     supportsCapacityMarket: false,
   },
   {
+    runtimeExtension: true,
     provider: "aws",
     label: "AWS",
     requiredSecrets: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
@@ -396,6 +405,7 @@ export const coordinatorProviderRegistry = [
     supportsCapacityMarket: true,
   },
   {
+    runtimeExtension: true,
     provider: "azure",
     label: "Azure",
     requiredSecrets: [
@@ -408,6 +418,7 @@ export const coordinatorProviderRegistry = [
     supportsCapacityMarket: true,
   },
   {
+    runtimeExtension: true,
     provider: "gcp",
     label: "GCP",
     requiredSecrets: ["GCP_CLIENT_EMAIL", "GCP_PRIVATE_KEY"],
@@ -415,6 +426,7 @@ export const coordinatorProviderRegistry = [
     supportsCapacityMarket: true,
   },
   {
+    runtimeExtension: false,
     provider: "daytona",
     label: "Daytona",
     requiredSecrets: ["DAYTONA_CRABBOX_KEY"],
@@ -422,6 +434,7 @@ export const coordinatorProviderRegistry = [
     supportsCapacityMarket: false,
   },
 ] as const satisfies readonly {
+  runtimeExtension: boolean;
   provider: string;
   label: string;
   requiredSecrets: readonly (keyof Env)[];
@@ -489,6 +502,15 @@ export interface HetznerCleanupEvidence {
 export type ProviderCleanupEvidence = HetznerCleanupEvidence;
 
 export interface LeaseRecord {
+  leasePolicy?: import("./config").LeasePolicy;
+  policyNotice?: string;
+  extensionHistory?: {
+    at: string;
+    actor: string;
+    fromTTL: number;
+    toTTL: number;
+    reason?: string;
+  }[];
   retainedReconcileDeleteClaim?: string;
   retainedReconcileDeleteCredentialFingerprint?: string;
   retainedReconcileObservation?: {

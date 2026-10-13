@@ -182,7 +182,7 @@ describe("daytona coordinator client", () => {
     expect(createBodies).toHaveLength(1);
     expect(createBodies[0]).toMatchObject({
       snapshot: "crabbox-ready",
-      ttlMinutes: 90,
+      ttlMinutes: 30,
       autoStopInterval: 0,
       autoDeleteInterval: -1,
       labels: {

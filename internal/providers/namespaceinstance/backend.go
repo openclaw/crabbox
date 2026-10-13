@@ -71,7 +71,7 @@ func applyDefaults(cfg *core.Config) {
 		cfg.NamespaceInstance.WorkRoot = core.NamespaceInstanceConfigDefaultWorkRoot
 	}
 	if cfg.NamespaceInstance.Duration > 0 {
-		cfg.TTL = cfg.NamespaceInstance.Duration
+		cfg.TTL = min(cfg.NamespaceInstance.Duration, core.EffectiveMaxTTL(*cfg))
 	}
 	cfg.WorkRoot = cfg.NamespaceInstance.WorkRoot
 	cfg.ServerType = (Provider{}).ServerTypeForConfig(*cfg)

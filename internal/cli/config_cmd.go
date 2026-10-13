@@ -157,6 +157,7 @@ func configShowView(cfg Config) map[string]any {
 		"sshFallbackPorts":           cfg.SSHFallbackPorts,
 		"workRoot":                   cfg.WorkRoot,
 		"ttl":                        cfg.TTL.String(),
+		"maxTTL":                     EffectiveMaxTTL(cfg).String(),
 		"idleTimeout":                cfg.IdleTimeout.String(),
 		"warmup":                     map[string]any{"keep": cfg.WarmupKeep},
 		"claims":                     map[string]any{"autoPrune": cfg.ClaimsAutoPrune},

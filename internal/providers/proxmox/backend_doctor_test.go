@@ -304,6 +304,7 @@ func TestProxmoxTouchUsesMigratedVMNode(t *testing.T) {
 			newClient = func(core.Config) (proxmoxClient, error) { return fake, nil }
 			t.Cleanup(func() { newClient = oldClient })
 			server := expiredProxmoxServer("101", "cbx_migrated_touch")
+			server.Labels["ttl_secs"] = "7200"
 			server.HostID = "pve2"
 			delete(server.Labels, "idle_timeout")
 			delete(server.Labels, "idle_timeout_secs")

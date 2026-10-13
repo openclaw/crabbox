@@ -8,6 +8,7 @@ import (
 )
 
 func DirectLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep bool, now time.Time) map[string]string {
+	cfg = clampDirectLeaseDurations(cfg)
 	expiresAt := directLeaseExpiresAt(now, cfg)
 	labels := map[string]string{
 		"class":             cfg.Class,
@@ -27,6 +28,7 @@ func DirectLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep 
 		"idle_timeout":      durationSecondsLabel(cfg.IdleTimeout),
 		"idle_timeout_secs": durationSecondsLabel(cfg.IdleTimeout),
 		"ttl_secs":          durationSecondsLabel(cfg.TTL),
+		"max_ttl_secs":      durationSecondsLabel(EffectiveMaxTTL(cfg)),
 		"expires_at":        LeaseLabelTime(expiresAt),
 	}
 	if market != "" {
@@ -101,6 +103,8 @@ func TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels map[string]string, cfg
 	if ttl <= 0 {
 		ttl = defaultConfig().TTL
 	}
+	ttl = min(ttl, EffectiveMaxTTL(cfg))
+	idleTimeout = min(idleTimeout, ttl)
 	next["last_touched_at"] = LeaseLabelTime(now)
 	next["idle_timeout"] = durationSecondsLabel(idleTimeout)
 	next["idle_timeout_secs"] = durationSecondsLabel(idleTimeout)

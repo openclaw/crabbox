@@ -150,3 +150,9 @@ For Local Container, non-wait JSON status includes fresh read-only
 - [`inspect`](inspect.md) — fuller lease and provider detail.
 - [`list`](list.md) — all machines for a provider.
 - [`warmup`](warmup.md) — lease a box and wait until ready.
+
+Lifetime output includes `remaining_lifetime`, `max_lifetime`, and the provider
+`runtime_extension` capability when known. JSON uses `remainingLifetime`,
+`maxLifetime`, and `leasePolicy`. `inspect` exposes the same policy. A provider
+with `runtimeExtension: false` requires choosing a longer `--ttl` at creation;
+[extend](extend.md) cannot move its native deadline.

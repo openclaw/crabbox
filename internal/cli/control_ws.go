@@ -22,6 +22,7 @@ type coordinatorControlConn struct {
 }
 
 type coordinatorControlMessage struct {
+	ExtendWhileRunning bool                  `json:"extendWhileRunning,omitempty"`
 	Type               string                `json:"type"`
 	Protocol           int                   `json:"protocol,omitempty"`
 	ClientID           string                `json:"clientID,omitempty"`
@@ -205,12 +206,13 @@ func coordinatorRunDone(ctx context.Context, coord *CoordinatorClient, runID str
 	return run.State != "running", nil
 }
 
-func (c *coordinatorControlConn) heartbeat(ctx context.Context, leaseID, expectedProvider string, idleTimeout *time.Duration, telemetry *LeaseTelemetry) error {
+func (c *coordinatorControlConn) heartbeat(ctx context.Context, leaseID, expectedProvider string, idleTimeout *time.Duration, telemetry *LeaseTelemetry, extendWhileRunning ...bool) error {
 	payload := coordinatorControlMessage{
-		Type:             "heartbeat",
-		LeaseID:          leaseID,
-		ExpectedProvider: expectedProvider,
-		Telemetry:        telemetry,
+		ExtendWhileRunning: len(extendWhileRunning) > 0 && extendWhileRunning[0],
+		Type:               "heartbeat",
+		LeaseID:            leaseID,
+		ExpectedProvider:   expectedProvider,
+		Telemetry:          telemetry,
 	}
 	if idleTimeout != nil && *idleTimeout > 0 {
 		payload.IdleTimeoutSeconds = int(idleTimeout.Seconds())

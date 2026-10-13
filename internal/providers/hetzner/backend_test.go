@@ -97,7 +97,7 @@ func TestHetznerTouchUsesProviderClientBestEffort(t *testing.T) {
 			t.Cleanup(func() { newHetznerClient = oldClient })
 			var stderr bytes.Buffer
 			backend := NewHetznerLeaseBackend(core.ProviderSpec{Name: "hetzner"}, core.Config{}, core.Runtime{Stderr: &stderr}).(*hetznerLeaseBackend)
-			server := core.Server{ID: 42, CloudID: "42", Name: "not-the-ID", Provider: "hetzner", Labels: map[string]string{"idle_timeout_secs": "1800"}}
+			server := core.Server{ID: 42, CloudID: "42", Name: "not-the-ID", Provider: "hetzner", Labels: map[string]string{"idle_timeout_secs": "1800", "ttl_secs": "7200"}}
 			req := core.TouchRequest{Lease: core.LeaseTarget{Server: server}, State: "ready"}
 			wantIdle := "1800"
 			if mode == "explicit idle timeout" {
@@ -882,5 +882,39 @@ func TestHetznerAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
 				t.Fatalf("cleanup debt lost: error=%v stderr=%s", err, stderr.String())
 			}
 		})
+	}
+}
+
+func TestHetznerExtendUpdatesLabelsUnderClaim(t *testing.T) {
+	installHetznerClaimState(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	cfg := core.BaseConfig()
+	cfg.Provider = "hetzner"
+	server := crabboxHetznerServer(42, "cbx_abcdef123456")
+	server.Provider = "hetzner"
+	for key, value := range core.DirectLeaseLabels(cfg, server.Labels["lease"], "test", "hetzner", "", true, now) {
+		server.Labels[key] = value
+	}
+	seedHetznerClaim(t, server)
+	claim, exists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"])
+	if err != nil || !exists {
+		t.Fatalf("claim exists=%t err=%v", exists, err)
+	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	fake := &fakeHetznerClient{servers: map[int64]core.Server{42: server}}
+	old := newHetznerClient
+	newHetznerClient = func() (hetznerClient, error) { return fake, nil }
+	t.Cleanup(func() { newHetznerClient = old })
+	backend := NewHetznerLeaseBackend(core.ProviderSpec{Name: "hetzner"}, cfg, core.Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend)
+	result, err := backend.ExtendLease(t.Context(), core.LeaseExtendRequest{Lease: core.LeaseTarget{LeaseID: server.Labels["lease"], Server: server}, By: 30 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.labeledValues) != 1 || fake.labeledValues[0]["ttl_secs"] != "3600" || result.MaxLifetime != "4h0m0s" {
+		t.Fatalf("labels=%v result=%+v", fake.labeledValues, result)
+	}
+	updated, _, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"])
+	if err != nil || updated.Labels["ttl_secs"] != "3600" {
+		t.Fatalf("updated claim=%+v err=%v", updated, err)
 	}
 }

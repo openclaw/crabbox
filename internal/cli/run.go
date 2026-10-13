@@ -1811,6 +1811,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return recordFailure(err)
 		}
 	}
+	var commandExecuting atomic.Bool
 	var stopHeartbeat func()
 	stopRunHeartbeat := func() {
 		if stopHeartbeat == nil {
@@ -1828,7 +1829,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if heartbeatCoord != nil {
 			var err error
-			stopHeartbeat, err = startCoordinatorHeartbeat(ctx, heartbeatCoord, leaseID, cfg.Provider, cfg.IdleTimeout, updateIdleTimeout, leaseTelemetryCollectorForTarget(target), a.Stderr)
+			stopHeartbeat, err = startCoordinatorHeartbeat(ctx, heartbeatCoord, leaseID, cfg.Provider, cfg.IdleTimeout, updateIdleTimeout, leaseTelemetryCollectorForTarget(target), a.Stderr, commandExecuting.Load)
 			return err
 		}
 		return nil
@@ -3130,7 +3131,9 @@ afterSync:
 	for i := range beforeArtifacts {
 		beforeArtifacts[i].data = nil
 	}
+	commandExecuting.Store(true)
 	code, streamErr := runSSHStreamResult(ctx, commandTarget, remote, stdout, stderr)
+	commandExecuting.Store(false)
 	failureDownloadEligible := false
 	if witness != nil {
 		code, streamErr, failureDownloadEligible = witness.finish(ctx, code, streamErr)
@@ -4876,7 +4879,7 @@ func (a App) releaseBackendLease(ctx context.Context, backend SSHLeaseBackend, c
 	return outcome, nil
 }
 
-func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, leaseID, expectedProvider string, idleTimeout time.Duration, updateIdleTimeout *time.Duration, telemetryCollector leaseTelemetryCollector, stderr io.Writer) (func(), error) {
+func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, leaseID, expectedProvider string, idleTimeout time.Duration, updateIdleTimeout *time.Duration, telemetryCollector leaseTelemetryCollector, stderr io.Writer, running ...func() bool) (func(), error) {
 	expectedProvider, err := canonicalProviderName(expectedProvider)
 	if err != nil {
 		return nil, err
@@ -4896,13 +4899,14 @@ func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, le
 		defer ticker.Stop()
 		for {
 			telemetry := collectLeaseTelemetryBestEffort(rootCtx, telemetryCollector)
+			extend := len(running) > 0 && running[0]()
 			callCtx, heartbeatCancel := context.WithTimeout(rootCtx, 20*time.Second)
 			var err error
 			if control == nil {
 				control, err = dialCoordinatorControl(callCtx, coord)
 			}
 			if control != nil {
-				err = control.heartbeat(callCtx, leaseID, expectedProvider, updateIdleTimeout, telemetry)
+				err = control.heartbeat(callCtx, leaseID, expectedProvider, updateIdleTimeout, telemetry, extend)
 				if err != nil {
 					control.close()
 					control = nil
@@ -4913,7 +4917,7 @@ func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, le
 			}
 			// A spent shared budget cannot send HTTP; preserve the failed control stage.
 			if control == nil && callCtx.Err() == nil {
-				if _, fallbackErr := coord.heartbeatLease(callCtx, leaseID, expectedProvider, updateIdleTimeout, telemetry); fallbackErr != nil {
+				if _, fallbackErr := coord.heartbeatLease(callCtx, leaseID, expectedProvider, updateIdleTimeout, telemetry, extend); fallbackErr != nil {
 					err = errors.Join(err, fallbackErr)
 				} else {
 					err = nil

@@ -1,0 +1,38 @@
+# extend
+
+Extend an owned lease within its lifetime policy. Total lifetime always counts
+from creation; extending does not reset the idle clock or revive an expired lease.
+
+```sh
+crabbox extend blue-lobster
+crabbox extend blue-lobster --by 30m --reason 'finish tests'
+crabbox extend cbx_abcdef123456 --ttl 2h --json
+```
+
+Supply exactly one positional ID or slug. `--by` and `--ttl` are mutually
+exclusive; omitting both means `--by 30m`. Durations must be positive whole
+seconds. `--reason` accepts at most 200 characters. Use `--provider` when normal
+claim routing does not select the intended provider.
+
+Brokered requests use `POST /v1/leases/{id}/extend`. The owner or an authenticated
+admin may extend; shared manage access alone does not grant this authority.
+Policy can deny extensions (403 `lease_extension_denied`). Inactive or expired
+leases return 409 `lease_not_active`; a request that cannot increase total
+lifetime after clamping returns 409 `lease_extension_not_advancing`. Invalid
+bodies return 400. The API retains only the last ten explicit extension events.
+
+Providers with `leasePolicy.runtimeExtension: false`, including brokered Daytona,
+return 409 `lease_extension_unsupported_provider`. Request a longer `--ttl` when
+creating those leases. Their command heartbeats silently skip auto-extension.
+
+Direct providers with a supported mutable label/tag path update the exact
+claimed resource's `ttl_secs` and `expires_at` metadata, respecting `maxTTL`
+(default 4h, configurable up to 24h with `CRABBOX_MAX_TTL`). Providers without
+that capability report `extend is not supported for provider X`. The backend
+`LeaseExtensionBackend.ExtendLease` boundary owns provider metadata writes;
+it is also the integration point for provider-owned expiry guards. This command
+does not install or modify a guest-side guard.
+
+Human output shows the new expiry, remaining lifetime, and maximum lifetime;
+`--json` returns `id`, `expiresAt`, `remainingLifetime`, `maxLifetime`, and
+`runtimeExtension`. See [lifecycle policy](../features/lifecycle-cleanup.md#ordinary-lifetime-policy).

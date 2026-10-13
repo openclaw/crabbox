@@ -1008,9 +1008,9 @@ describe("lease config", () => {
     expect(config.desktopEnv).toBe("xfce");
     expect(config.browser).toBe(false);
     expect(config.code).toBe(false);
-    expect(config.ttlSeconds).toBe(86_400);
-    expect(leaseConfig({ sshPublicKey: "ssh-ed25519 test", ttlSeconds: 0 }).ttlSeconds).toBe(5400);
-    expect(leaseConfig({ sshPublicKey: "ssh-ed25519 test", ttlSeconds: -1 }).ttlSeconds).toBe(5400);
+    expect(config.ttlSeconds).toBe(14_400);
+    expect(leaseConfig({ sshPublicKey: "ssh-ed25519 test", ttlSeconds: 0 }).ttlSeconds).toBe(1800);
+    expect(leaseConfig({ sshPublicKey: "ssh-ed25519 test", ttlSeconds: -1 }).ttlSeconds).toBe(1800);
     expect(leaseConfig({ sshPublicKey: "ssh-ed25519 test", ttlSeconds: 42.9 }).ttlSeconds).toBe(42);
     expect(
       leaseConfig({ sshPublicKey: "ssh-ed25519 test", idleTimeoutSeconds: 0 }).idleTimeoutSeconds,
@@ -1021,7 +1021,7 @@ describe("lease config", () => {
     expect(
       leaseConfig({ sshPublicKey: "ssh-ed25519 test", idleTimeoutSeconds: 999_999 })
         .idleTimeoutSeconds,
-    ).toBe(86_400);
+    ).toBe(1800);
     expect(
       leaseConfig({ sshPublicKey: "ssh-ed25519 test", idleTimeoutSeconds: 42.9 })
         .idleTimeoutSeconds,

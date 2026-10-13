@@ -86,7 +86,18 @@ func coordinatorResponseErrorCode(err error, status int) string {
 	return body.Error
 }
 
+type CoordinatorLeasePolicy struct {
+	DefaultTTLSeconds         int    `json:"defaultTTLSeconds"`
+	DefaultIdleTimeoutSeconds int    `json:"defaultIdleTimeoutSeconds"`
+	MaxTTLSeconds             int    `json:"maxTTLSeconds"`
+	Extension                 string `json:"extension"`
+	AutoExtend                string `json:"autoExtend"`
+	RuntimeExtension          bool   `json:"runtimeExtension"`
+}
+
 type CoordinatorLease struct {
+	LeasePolicy                  *CoordinatorLeasePolicy        `json:"leasePolicy,omitempty"`
+	PolicyNotice                 string                         `json:"policyNotice,omitempty"`
 	ImageEvidence                *ImageEvidence                 `json:"imageEvidence,omitempty"`
 	LifetimePolicy               *LeaseLifetimePolicy           `json:"lifetimePolicy,omitempty"`
 	CreationEvents               []CreationEvent                `json:"creationEvents,omitempty"`
@@ -1492,7 +1503,7 @@ func (c *CoordinatorClient) UpdateLeaseIdleTimeoutWithTelemetryForProvider(ctx c
 	return c.heartbeatLease(ctx, id, expectedProvider, &idleTimeout, telemetry)
 }
 
-func (c *CoordinatorClient) heartbeatLease(ctx context.Context, id, expectedProvider string, idleTimeout *time.Duration, telemetry *LeaseTelemetry) (CoordinatorLease, error) {
+func (c *CoordinatorClient) heartbeatLease(ctx context.Context, id, expectedProvider string, idleTimeout *time.Duration, telemetry *LeaseTelemetry, extendWhileRunning ...bool) (CoordinatorLease, error) {
 	var res struct {
 		Lease CoordinatorLease `json:"lease"`
 	}
@@ -1501,12 +1512,15 @@ func (c *CoordinatorClient) heartbeatLease(ctx context.Context, id, expectedProv
 		return res.Lease, err
 	}
 	// A heartbeat can wait for provider access changes; callers bound periodic touches.
-	err = c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/heartbeat", heartbeatRequestBody(expectedProvider, idleTimeout, telemetry), &res)
+	err = c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/heartbeat", heartbeatRequestBody(expectedProvider, idleTimeout, telemetry, extendWhileRunning...), &res)
 	return res.Lease, err
 }
 
-func heartbeatRequestBody(expectedProvider string, idleTimeout *time.Duration, telemetry *LeaseTelemetry) map[string]any {
+func heartbeatRequestBody(expectedProvider string, idleTimeout *time.Duration, telemetry *LeaseTelemetry, extendWhileRunning ...bool) map[string]any {
 	body := map[string]any{}
+	if len(extendWhileRunning) > 0 && extendWhileRunning[0] {
+		body["extendWhileRunning"] = true
+	}
 	if expectedProvider != "" {
 		body["expectedProvider"] = expectedProvider
 	}
@@ -3133,4 +3147,25 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 
 func coordinatorLeaseHostID(lease CoordinatorLease) string {
 	return firstNonBlank(lease.HostID, lease.HostIDCompat)
+}
+
+func (c *CoordinatorClient) ExtendLease(ctx context.Context, id, expectedProvider string, req LeaseExtendRequest) (CoordinatorLease, error) {
+	var response struct {
+		Lease CoordinatorLease `json:"lease"`
+	}
+	provider, err := canonicalCoordinatorMutationProvider(expectedProvider)
+	if err != nil {
+		return response.Lease, err
+	}
+	body := map[string]any{"expectedProvider": provider}
+	if req.TTL > 0 {
+		body["ttlSeconds"] = int(req.TTL / time.Second)
+	} else {
+		body["extendBySeconds"] = int(req.By / time.Second)
+	}
+	if req.Reason != "" {
+		body["reason"] = req.Reason
+	}
+	err = c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/extend", body, &response)
+	return response.Lease, err
 }

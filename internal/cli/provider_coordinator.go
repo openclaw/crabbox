@@ -549,6 +549,11 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgress(ctx context
 }
 
 func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug string, fixed bool) (lease CoordinatorLease, err error) {
+	defer func() {
+		if err == nil && lease.PolicyNotice != "" {
+			fmt.Fprintln(b.rt.Stderr, lease.PolicyNotice)
+		}
+	}()
 	started := time.Now()
 	timeout := coordinatorCreateLeaseTimeoutForConfig(cfg)
 	createCtx, cancelCreate := context.WithTimeout(ctx, timeout)
@@ -1109,6 +1114,7 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		IdleFor:                      idleForString(lease.LastTouchedAt, time.Now()),
 		IdleTimeout:                  formatSecondsDuration(lease.IdleTimeoutSeconds),
 		ExpiresAt:                    lease.ExpiresAt,
+		LeasePolicy:                  lease.LeasePolicy,
 		CleanupStatus:                lease.CleanupStatus,
 		ProviderCleanup:              lease.ProviderCleanup,
 		CleanupStartedAt:             lease.CleanupStartedAt,
@@ -1495,4 +1501,25 @@ func coordinatorMachinesToServers(machines []CoordinatorMachine, activeLeaseIDs 
 		servers = append(servers, server)
 	}
 	return servers
+}
+
+func (b *coordinatorLeaseBackend) ExtendLease(ctx context.Context, req LeaseExtendRequest) (LeaseExtendResult, error) {
+	provider, err := b.expectedProvider()
+	if err != nil {
+		return LeaseExtendResult{}, err
+	}
+	lease, err := b.coord.ExtendLease(ctx, req.Lease.LeaseID, provider, req)
+	if err != nil {
+		return LeaseExtendResult{}, err
+	}
+	if err := b.validateCoordinatorLeaseProviderIdentity(lease); err != nil {
+		return LeaseExtendResult{}, err
+	}
+	maximum := ""
+	runtimeExtension := true
+	if lease.LeasePolicy != nil {
+		maximum = formatSecondsDuration(lease.LeasePolicy.MaxTTLSeconds)
+		runtimeExtension = lease.LeasePolicy.RuntimeExtension
+	}
+	return leaseExtendResult(lease.ID, lease.ExpiresAt, maximum, runtimeExtension), nil
 }

@@ -1,3 +1,4 @@
+import { clampLeaseDurations, resolveLeasePolicy } from "./config";
 import type { CoordinatorRuntime, CoordinatorStorageView } from "./coordinator-runtime";
 import { sha256Hex } from "./encoding";
 import { json, requestOwner } from "./http";
@@ -461,6 +462,13 @@ export class ServeCoordinator {
   }
   private expire(l: LeaseRecord, m: ServeMachine, now: number) {
     if (!live(l)) return;
+    l.leasePolicy = { ...resolveLeasePolicy(this.env, l.owner, l.org), runtimeExtension: true };
+    l.expiresAt = new Date(
+      Math.min(
+        Date.parse(l.expiresAt),
+        Date.parse(l.createdAt) + Math.min(l.ttlSeconds, l.leasePolicy.maxTTLSeconds) * 1000,
+      ),
+    ).toISOString();
     if (now - m.lastHeartbeat >= lostMS) {
       l.state = "failed";
       l.failureError = "serve_machine_lost";
@@ -642,8 +650,15 @@ export class ServeCoordinator {
             candidates.map((c) => c.view),
           );
         const now = new Date();
-        const ttl = boundedSeconds(input.ttlSeconds, 5400, 86400);
-        const idle = boundedSeconds(input.idleTimeoutSeconds, 1800, 86400);
+        const policy = {
+          ...resolveLeasePolicy(this.env, requestOwner(r), requestOrg(r, this.env)),
+          runtimeExtension: true,
+        };
+        const {
+          ttlSeconds: ttl,
+          idleTimeoutSeconds: idle,
+          policyNotice,
+        } = clampLeaseDurations(input, policy);
         const l: LeaseRecord = {
           id,
           serveIntent: intent,
@@ -666,6 +681,8 @@ export class ServeCoordinator {
           sshFallbackPorts: [],
           workRoot: "/work/crabbox",
           keep: input.keep ?? false,
+          leasePolicy: policy,
+          ...(policyNotice ? { policyNotice } : {}),
           ttlSeconds: ttl,
           idleTimeoutSeconds: idle,
           estimatedHourlyUSD: 0,
@@ -803,11 +820,7 @@ export class ServeCoordinator {
     });
   }
 }
-function boundedSeconds(v: unknown, fallback: number, max: number): number {
-  if (v === undefined) return fallback;
-  if (!integer(v, max)) throw new ServeError("invalid_serve_deadline");
-  return v;
-}
+
 function idleDeadline(l: LeaseRecord): number {
   return Date.parse(l.lastTouchedAt ?? l.createdAt) + (l.idleTimeoutSeconds ?? 1800) * 1000;
 }

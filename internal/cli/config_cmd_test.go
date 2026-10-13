@@ -261,7 +261,7 @@ func TestConfigShowEffectiveLeaseDurations(t *testing.T) {
 		wantTTL, wantIdleTimeout, wantProvider           string
 	}{
 		{
-			name: "compiled defaults", wantTTL: "1h30m0s", wantIdleTimeout: "30m0s",
+			name: "compiled defaults", wantTTL: "30m0s", wantIdleTimeout: "30m0s",
 		},
 		{
 			name: "top-level YAML", userYAML: "ttl: 125m\nidleTimeout: 75s\n",
@@ -297,7 +297,7 @@ jobs:
     ttl: 17m
     idleTimeout: 3m
 `,
-			wantTTL: "1h30m0s", wantIdleTimeout: "30m0s", wantProvider: "aws",
+			wantTTL: "30m0s", wantIdleTimeout: "30m0s", wantProvider: "aws",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
