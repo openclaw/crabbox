@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Production lease policy gives owner `github:58493` a 12-hour maximum lease lifetime for long serial proof runs; the 30-minute default and idle timeout still apply.
+
 ### Fixed
 
 - Coordinator: preserve ordinary TTL deletion ahead of maximum-lifetime retention, reject conflicting delete requests during lifetime work, and reconcile shared AWS ingress after lifetime deletion. [PR 2795](https://github.com/openclaw/crabbox/pull/2795).
