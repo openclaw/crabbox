@@ -336,23 +336,35 @@ function leaseMatchesUsageFilter(lease: LeaseRecord, filter: UsageFilter): boole
 }
 
 function leaseUsage(lease: LeaseRecord, now: Date): UsageAccumulator {
+  const live = leaseIsLive(lease) || lifetimeOwnsCompute(lease);
   const created = parseTime(lease.createdAt, now);
-  const ended = parseTime(lease.endedAt || lease.releasedAt || "", now);
+  // Legacy terminal rows may lack endedAt. Their last persisted observation,
+  // rather than query time, bounds runtime until lifecycle evidence is available.
+  const ended = parseTime(
+    lease.endedAt || lease.releasedAt || lease.cleanupCompletedAt || lease.updatedAt,
+    created,
+  );
   const stopped = parseTime(lease.lifetimePolicy?.stoppedAt ?? "", ended);
-  const stop = leaseIsLive(lease) || lifetimeOwnsCompute(lease) ? now : stopped;
+  const stop = live ? now : stopped;
+  const neverAllocated = !live && !lease.cloudID && lease.provisioningResourceMayExist === false;
   const runtimeSeconds = Math.max(
     0,
     Math.trunc(
-      (lifetimeRuntimeMs(lease, now.getTime()) ?? stop.getTime() - created.getTime()) / 1000,
+      (lifetimeRuntimeMs(lease, stop.getTime()) ??
+        (neverAllocated ? 0 : stop.getTime() - created.getTime())) / 1000,
     ),
   );
   const estimatedUSD = roundUSD((runtimeSeconds / 3600) * (lease.estimatedHourlyUSD || 0));
   return {
     leases: 1,
-    activeLeases: leaseIsLive(lease) || lifetimeOwnsCompute(lease) ? 1 : 0,
+    activeLeases: live ? 1 : 0,
     runtimeSeconds,
     estimatedUSD,
-    reservedUSD: roundUSD(lease.maxEstimatedUSD || estimatedUSD),
+    reservedUSD: roundUSD(
+      live
+        ? (lease.maxEstimatedUSD ?? estimatedUSD)
+        : Math.min(lease.maxEstimatedUSD ?? estimatedUSD, estimatedUSD),
+    ),
   };
 }
 

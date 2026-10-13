@@ -12,8 +12,9 @@
 - Serve agents advertise LAN and tailnet front-door candidates, with pinned-key LAN-first client selection and per-lease route caching.
 - Portal: show owners their donated serve machines, online status, capacity, allocated leases, and runtime details.
 
-### Fixes
+### Fixed
 
+- Settle terminal lease budget reservations at elapsed compute cost capped by the admission reservation, preserve observed runtime through late release and cleanup retries, and charge confirmed never-allocated leases zero compute runtime.
 - Coordinator deployments fail when credentials are missing or the public health endpoint does not confirm the active version and requested commit.
 
 ## 0.75.0 - 2026-10-12

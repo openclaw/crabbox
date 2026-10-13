@@ -55,9 +55,9 @@ Human output prints one total row, then any non-empty group breakdowns (owners, 
 
 ```text
 usage month=2026-05 scope=user user=github:12345 org=example-org
-total leases=2 active=0 runtime=12m41s estimated=$0.13 reserved=$4.57
+total leases=2 active=0 runtime=12m41s estimated=$0.13 reserved=$0.13
 owners:
-  github:12345             leases=2   active=0   runtime=12m41s    estimated=$0.13     reserved=$4.57
+  github:12345             leases=2   active=0   runtime=12m41s    estimated=$0.13     reserved=$0.13
 limits:
   active leases: fleet=off user=off org=off
   monthly usd:   fleet=off user=off org=off
@@ -74,7 +74,7 @@ limits:
     "activeLeases": 0,
     "runtimeSeconds": 13551,
     "estimatedUSD": 0.13,
-    "reservedUSD": 4.57,
+    "reservedUSD": 0.13,
     "byOwner": [],
     "byOrg": [],
     "byProvider": [],
@@ -95,9 +95,23 @@ limits:
 
 ## Estimated vs reserved cost
 
-`estimatedUSD` is the elapsed-runtime cost for leases in the selected month.
+`estimatedUSD` is the elapsed-runtime cost for leases created in the selected month.
+Live runtime advances to now. Terminal runtime stops at its persisted end/release
+time, with the last persisted observation used for legacy rows missing an end time.
+Late release does not extend failed or expired runtime; confirmed never-allocated
+leases have zero compute runtime.
 
-`reservedUSD` is the worst-case cost based on each lease's TTL. The broker computes reserved cost before provisioning so monthly spend guardrails can reject a lease before any machine is created.
+`reservedUSD` is the budget commitment: the sum of live leases' full TTL reservations
+and terminal leases' elapsed costs, each capped at its original reservation. The
+field name and text label remain unchanged. The broker computes a candidate's full
+reservation before provisioning and rejects it if that reservation plus existing
+commitments would exceed a monthly cap.
+
+Existing terminal history settles on read, without a migration. Live leases from an
+earlier month continue reserving against current admission until cleanup commits a
+terminal state, even after their heartbeat deadline. This report keeps its selected
+creation-month scope; terminal costs belong to that creation month. Retained compute
+still running under a lifetime policy continues reserving until confirmed stopped.
 
 Cost values are estimates for compute leases, not provider invoice reconciliation. They do not fully model provider extras such as static public IP charges, egress, storage, snapshots, taxes, credits, or discounts.
 
