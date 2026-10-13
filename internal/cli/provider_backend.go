@@ -2292,7 +2292,7 @@ func RuntimeForProviderOperation(stderr io.Writer) Runtime {
 }
 
 // LeaseExtensionBackend updates provider metadata under the exact lease claim.
-// It does not install or update guest-side guards; providers own that hook.
+// File-backed guest guards are refreshed after the provider deadline is saved.
 type LeaseExtensionBackend interface {
 	ExtendLease(context.Context, LeaseExtendRequest) (LeaseExtendResult, error)
 }
@@ -2305,9 +2305,12 @@ type LeaseExtendRequest struct {
 }
 
 type LeaseExtendResult struct {
-	ID               string `json:"id"`
-	ExpiresAt        string `json:"expiresAt"`
-	Remaining        string `json:"remainingLifetime"`
-	MaxLifetime      string `json:"maxLifetime"`
-	RuntimeExtension bool   `json:"runtimeExtension"`
+	ID                        string `json:"id"`
+	ExpiresAt                 string `json:"expiresAt"`
+	Remaining                 string `json:"remainingLifetime"`
+	MaxLifetime               string `json:"maxLifetime"`
+	RuntimeExtension          bool   `json:"runtimeExtension"`
+	GuestExpiresAt            string `json:"guestExpiresAt,omitempty"`
+	GuestExpiryRefreshPending bool   `json:"guestExpiryRefreshPending,omitempty"`
+	Error                     string `json:"error,omitempty"`
 }

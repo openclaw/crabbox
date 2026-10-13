@@ -6,7 +6,7 @@ import (
 )
 
 func (b *awsLeaseBackend) ExtendLease(ctx context.Context, req core.LeaseExtendRequest) (core.LeaseExtendResult, error) {
-	return core.ExtendDirectLease(ctx, b.Cfg, req, core.ClockNow(b.RT.Clock).UTC(), func(ctx context.Context, server core.Server, claim core.LeaseClaim) error {
+	return core.ExtendDirectLease(ctx, b, b.Cfg, req, core.ClockNow(b.RT.Clock).UTC(), func(ctx context.Context, server core.Server, claim core.LeaseClaim) error {
 		client, err := newAWSClient(ctx, awsConfigForServer(b.Cfg, server))
 		if err != nil {
 			return err

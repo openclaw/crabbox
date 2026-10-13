@@ -6,7 +6,7 @@ import (
 )
 
 func (b *Backend) ExtendLease(ctx context.Context, req core.LeaseExtendRequest) (core.LeaseExtendResult, error) {
-	return core.ExtendDirectLease(ctx, b.Cfg, req, b.clockNow(), func(ctx context.Context, server core.Server, _ core.LeaseClaim) error {
+	return core.ExtendDirectLease(ctx, b, b.Cfg, req, b.clockNow(), func(ctx context.Context, server core.Server, _ core.LeaseClaim) error {
 		client, err := b.clientFactory(b.Cfg, b.RT)
 		if err != nil {
 			return err

@@ -240,20 +240,30 @@ func touchLeaseWithGuestExpiry(ctx context.Context, backend LeaseTouchBackend, c
 	if err != nil || guestExpiryAdapter(cfg) != "file" {
 		return server, err
 	}
-	target := req.Lease.SSH
-	if target.Host == "" {
-		resolver, ok := backend.(SSHLoginBackend)
-		if !ok {
-			return server, fmt.Errorf("provider cannot resolve guest expiry SSH target")
-		}
-		lease, resolveErr := resolver.Resolve(ctx, ResolveRequest{ID: req.Lease.LeaseID, Options: leaseOptionsFromConfig(cfg)})
-		if resolveErr != nil {
-			return server, resolveErr
-		}
-		target = lease.SSH
+	target, err := resolveGuestLeaseExpiryTarget(ctx, backend, cfg, req.Lease)
+	if err != nil {
+		return server, err
 	}
 	if err := RefreshGuestLeaseExpiry(ctx, target, GuestLeaseExpiryFromLabels(server.Labels)); err != nil {
 		return server, fmt.Errorf("refresh guest lease expiry: %w", err)
 	}
 	return server, nil
+}
+
+// Resolve before taking a claim mutation fence: provider resolution may read
+// the claim. Both touch and extend use the same authenticated SSH route.
+func resolveGuestLeaseExpiryTarget(ctx context.Context, backend Backend, cfg Config, lease LeaseTarget) (SSHTarget, error) {
+	target := lease.SSH
+	if target.Host == "" {
+		resolver, ok := backend.(SSHLoginBackend)
+		if !ok {
+			return target, fmt.Errorf("provider cannot resolve guest expiry SSH target")
+		}
+		lease, resolveErr := resolver.Resolve(ctx, ResolveRequest{ID: lease.LeaseID, Options: leaseOptionsFromConfig(cfg), NoLocalStateMutations: true})
+		if resolveErr != nil {
+			return target, resolveErr
+		}
+		target = lease.SSH
+	}
+	return target, nil
 }

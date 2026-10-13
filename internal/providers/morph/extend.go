@@ -7,7 +7,7 @@ import (
 
 func (b *morphLeaseBackend) ExtendLease(ctx context.Context, req core.LeaseExtendRequest) (core.LeaseExtendResult, error) {
 	cfg := b.configForRun()
-	return core.ExtendDirectLease(ctx, cfg, req, b.now().UTC(), func(ctx context.Context, server core.Server, _ core.LeaseClaim) error {
+	return core.ExtendDirectLease(ctx, b, cfg, req, b.now().UTC(), func(ctx context.Context, server core.Server, _ core.LeaseClaim) error {
 		client, err := b.api()
 		if err != nil {
 			return err

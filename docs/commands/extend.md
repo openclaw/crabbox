@@ -35,10 +35,21 @@ Direct providers with a supported mutable label/tag path update the exact
 claimed resource's `ttl_secs` and `expires_at` metadata, respecting `maxTTL`
 (default 4h, configurable up to 24h with `CRABBOX_MAX_TTL`). Providers without
 that capability report `extend is not supported for provider X`. The backend
-`LeaseExtensionBackend.ExtendLease` boundary owns provider metadata writes;
-it is also the integration point for provider-owned expiry guards. This command
-does not install or modify a guest-side guard.
+`LeaseExtensionBackend.ExtendLease` boundary owns provider metadata writes.
+For file-backed Linux guest guards, extension saves provider labels and the
+local claim first, then refreshes `/etc/crabbox/lease-expiry` through the existing
+SSH route. AWS, Azure, and GCP guards read metadata directly and need no SSH write.
+
+If the guest refresh fails, the command exits nonzero and reports both deadlines:
+the provider deadline has advanced, but the on-box guard still holds the old
+deadline and will power the machine off then. Provider labels are retained.
+Rerun the same command with the same arguments to retry the guest refresh;
+that retry does not add lifetime again. The pending refresh is stored in the
+exact local claim, so use the same local state for the retry.
 
 Human output shows the new expiry, remaining lifetime, and maximum lifetime;
 `--json` returns `id`, `expiresAt`, `remainingLifetime`, `maxLifetime`, and
-`runtimeExtension`. See [lifecycle policy](../features/lifecycle-cleanup.md#ordinary-lifetime-policy).
+`runtimeExtension`. File-backed extensions also return `guestExpiresAt`; a failed
+refresh adds `guestExpiryRefreshPending: true` and an `error` message, while
+`expiresAt` remains the committed provider deadline. JSON output also exits
+nonzero on this partial failure. See [lifecycle policy](../features/lifecycle-cleanup.md#ordinary-lifetime-policy).

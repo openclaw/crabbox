@@ -65,11 +65,14 @@ func (a App) extend(ctx context.Context, args []string) error {
 		SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
 	}
 	result, err := extension.ExtendLease(ctx, LeaseExtendRequest{Lease: lease, TTL: *ttl, By: *by, Reason: *reason})
-	if err != nil {
+	if *jsonOut && (err == nil || result.Error != "") {
+		if encodeErr := json.NewEncoder(a.Stdout).Encode(result); encodeErr != nil {
+			return encodeErr
+		}
 		return err
 	}
-	if *jsonOut {
-		return json.NewEncoder(a.Stdout).Encode(result)
+	if err != nil {
+		return err
 	}
 	_, err = fmt.Fprintf(a.Stdout, "extended lease=%s expires=%s remaining=%s max_lifetime=%s\n", result.ID, result.ExpiresAt, result.Remaining, result.MaxLifetime)
 	return err
@@ -83,10 +86,19 @@ func leaseExtendResult(id, expires, maximum string, runtime bool) LeaseExtendRes
 	return result
 }
 
-// ExtendDirectLease serializes the metadata write with the exact local claim.
-// The adapter must validate provider identity and persist labels in write.
-// Future guest guards belong behind this adapter boundary, not in the CLI.
-func ExtendDirectLease(ctx context.Context, cfg Config, req LeaseExtendRequest, now time.Time, write func(context.Context, Server, LeaseClaim) error) (LeaseExtendResult, error) {
+// PendingGuestExtension makes a failed file-backed refresh retryable without
+// applying --by twice. It is local recovery state, never provider metadata.
+type PendingGuestExtension struct {
+	BySeconds    int64  `json:"bySeconds"`
+	TTLSeconds   int64  `json:"ttlSeconds"`
+	Reason       string `json:"reason,omitempty"`
+	OldExpiresAt string `json:"oldExpiresAt"`
+	NewTTL       string `json:"newTTL"`
+}
+
+// ExtendDirectLease serializes provider metadata, claim publication and guest
+// refresh. Provider labels remain authoritative if the guest write fails.
+func ExtendDirectLease(ctx context.Context, backend Backend, cfg Config, req LeaseExtendRequest, now time.Time, write func(context.Context, Server, LeaseClaim) error) (LeaseExtendResult, error) {
 	expected, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
 	if !set || !exists {
 		return LeaseExtendResult{}, Exit(4, "lease %s has no exact claim; refusing extension", req.Lease.LeaseID)
@@ -94,29 +106,83 @@ func ExtendDirectLease(ctx context.Context, cfg Config, req LeaseExtendRequest, 
 	if err := AuthorizeCheckpointRelease(expected, ""); err != nil {
 		return LeaseExtendResult{}, err
 	}
-	lastUsed, err := time.Parse(time.RFC3339Nano, expected.LastUsedAt)
-	if err != nil {
-		lastUsed, _ = parseLeaseLabelTime(req.Lease.Server.Labels["last_touched_at"])
+	fileGuard := guestExpiryAdapter(cfg) == "file"
+	var target SSHTarget
+	var resolveErr error
+	if fileGuard {
+		target, resolveErr = resolveGuestLeaseExpiryTarget(ctx, backend, cfg, req.Lease)
 	}
-	_, server, _, err := UpdateLeaseClaimTouchIfUnchangedAction(ctx, req.Lease.LeaseID, expected, lastUsed, nil, func() (Server, SSHTarget, bool, error) {
+	var result LeaseExtendResult
+	err := WithLeaseClaimUnchangedContext(ctx, req.Lease.LeaseID, expected, func() error {
 		server := req.Lease.Server
 		if expected.Labels["created_at"] == "" || server.Labels["created_at"] != expected.Labels["created_at"] {
-			return Server{}, SSHTarget{}, false, Exit(4, "lease creation anchor differs from its exact claim; refusing extension")
+			return Exit(4, "lease creation anchor differs from its exact claim; refusing extension")
 		}
-		labels, err := ExtendedLeaseLabels(server.Labels, cfg, req, now)
+		claim := cloneLeaseClaim(expected)
+		pending := claim.PendingGuestExtension
+		if pending != nil {
+			if pending.BySeconds != int64(req.By/time.Second) || pending.TTLSeconds != int64(req.TTL/time.Second) || pending.Reason != req.Reason {
+				return Exit(4, "guest expiry refresh is pending; rerun crabbox extend with the original arguments before requesting another extension")
+			}
+			if server.Labels["ttl_secs"] != pending.NewTTL {
+				return Exit(4, "lease lifetime changed since the pending guest expiry refresh; refusing extension")
+			}
+		} else {
+			labels, err := ExtendedLeaseLabels(server.Labels, cfg, req, now)
+			if err != nil {
+				return err
+			}
+			server.Labels = labels
+			if err := transformLeaseClaimEndpoint(&claim, server, req.Lease.SSH, leaseClaimEndpointPolicy{}); err != nil {
+				return err
+			}
+			if fileGuard {
+				pending = &PendingGuestExtension{BySeconds: int64(req.By / time.Second), TTLSeconds: int64(req.TTL / time.Second), Reason: req.Reason, OldExpiresAt: LeaseLabelTimeDisplay(req.Lease.Server.Labels["expires_at"]), NewTTL: labels["ttl_secs"]}
+				claim.PendingGuestExtension = pending
+			}
+			if err := refreshLeaseClaimRevision(&claim); err != nil {
+				return err
+			}
+			if err := write(ctx, server, expected); err != nil {
+				return err
+			}
+			path, err := leaseClaimPath(req.Lease.LeaseID)
+			if err != nil {
+				return err
+			}
+			if err := writeLeaseClaimAtomic(path, claim); err != nil {
+				return fmt.Errorf("provider deadline extended to %s, but saving the local extension claim failed: %w", LeaseLabelTimeDisplay(labels["expires_at"]), err)
+			}
+		}
+		result = leaseExtendResult(req.Lease.LeaseID, LeaseLabelTimeDisplay(server.Labels["expires_at"]), EffectiveMaxTTL(cfg).String(), true)
+		if !fileGuard {
+			return nil
+		}
+		if resolveErr == nil {
+			resolveErr = RefreshGuestLeaseExpiry(ctx, target, GuestLeaseExpiryFromLabels(server.Labels))
+		}
+		if resolveErr != nil {
+			result.GuestExpiresAt = pending.OldExpiresAt
+			result.GuestExpiryRefreshPending = true
+			result.Error = fmt.Sprintf("provider deadline extended to %s, but the on-box guard still holds %s and will power the machine off then; rerun crabbox extend with the same arguments to retry: %v", result.ExpiresAt, result.GuestExpiresAt, resolveErr)
+			return Exit(1, "%s", result.Error)
+		}
+		result.GuestExpiresAt = result.ExpiresAt
+		claim.PendingGuestExtension = nil
+		if err := refreshLeaseClaimRevision(&claim); err != nil {
+			return err
+		}
+		path, err := leaseClaimPath(req.Lease.LeaseID)
 		if err != nil {
-			return Server{}, SSHTarget{}, false, err
+			return err
 		}
-		server.Labels = labels
-		if err := write(ctx, server, expected); err != nil {
-			return Server{}, SSHTarget{}, false, err
+		if err := writeLeaseClaimAtomic(path, claim); err != nil {
+			result.Error = fmt.Sprintf("provider and guest deadlines extended to %s, but clearing the local retry state failed: %v", result.ExpiresAt, err)
+			return Exit(1, "%s", result.Error)
 		}
-		return server, req.Lease.SSH, true, nil
+		return nil
 	})
-	if err != nil {
-		return LeaseExtendResult{}, err
-	}
-	return leaseExtendResult(req.Lease.LeaseID, LeaseLabelTimeDisplay(server.Labels["expires_at"]), EffectiveMaxTTL(cfg).String(), true), nil
+	return result, err
 }
 
 func ExtendedLeaseLabels(labels map[string]string, cfg Config, req LeaseExtendRequest, now time.Time) (map[string]string, error) {

@@ -712,7 +712,11 @@ File-backed bootstraps write exactly four nonsecret fields: `crabbox`, `state`,
 is the hook for a file-backed provider's lease-lifetime update: it validates the
 fields and writes mode 0600 through the existing SSH transport, publishing by
 atomic rename in `/etc/crabbox`. Ordinary CLI state touches and heartbeats refresh this file as well as provider
-labels. Other deadline updates must use this hook, not only change provider labels. No new `extend` command is introduced here.
+labels. The [extend command](../commands/extend.md) saves provider labels and the local
+claim before calling this hook. If SSH refresh fails, it retains the provider
+extension, exits nonzero with both deadlines, and records a pending refresh in
+the local claim. Rerunning the same extension retries only the guest write.
+Other deadline updates must use this hook as well.
 
 Brokered leases never install this guard; the coordinator owns their lifecycle.
 Windows and macOS targets do not install it. Providers using prepared templates,

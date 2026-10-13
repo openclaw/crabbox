@@ -4953,12 +4953,24 @@ func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, le
 }
 
 func leasePolicyNoticePrinter(stderr io.Writer) func(string) {
-	printed := false
+	printedPolicy, printedBudget := false, false
 	return func(notice string) {
-		if notice != "" && !printed {
-			fmt.Fprintln(stderr, notice)
-			printed = true
+		if notice == "" {
+			return
 		}
+		// A prior clamp notice must not hide the expiry warning for an exhausted budget.
+		if strings.Contains(notice, "budget exhausted") {
+			if printedBudget {
+				return
+			}
+			printedBudget = true
+		} else {
+			if printedPolicy {
+				return
+			}
+			printedPolicy = true
+		}
+		fmt.Fprintln(stderr, notice)
 	}
 }
 

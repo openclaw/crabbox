@@ -885,6 +885,9 @@ exact resolved lease, a new total TTL or additive duration, and an optional
 reason. `ExtendDirectLease` applies the configured ceiling and holds the local
 claim fence across the adapter's identity checks and metadata write. The adapter
 must verify the live resource in its original account/scope before changing
-`ttl_secs` and `expires_at`. Provider-owned guest guard updates can hook behind
-this method; core does not install or update guards. Providers without the
-capability return an explicit unsupported-provider diagnostic.
+`ttl_secs` and `expires_at`. Pass the backend to `ExtendDirectLease` so it can
+reuse the authenticated SSH target resolution for file-backed guest guards.
+It publishes provider metadata and the local claim before refreshing the guest,
+and retains a pending refresh on failure so the same request is retryable without
+another lifetime increase. Metadata-backed guards need no guest write. Providers
+without the capability return an explicit unsupported-provider diagnostic.

@@ -8473,6 +8473,7 @@ export class FleetCoordinator {
       if (!lease) throw new Error("Lease disappeared during heartbeat");
       const now = new Date();
       let budgetError = "";
+      let idlePolicyNotice = "";
       const policy = this.currentLeasePolicy(lease);
       lease.idleTimeoutSeconds = Math.min(
         leaseIdleTimeoutSeconds(lease, policy.maxTTLSeconds),
@@ -8507,6 +8508,9 @@ export class FleetCoordinator {
           requestedIdleTimeoutSeconds,
           Math.min(leaseTTLSeconds(lease, policy.maxTTLSeconds), policy.maxTTLSeconds),
         );
+        if (lease.idleTimeoutSeconds < requestedIdleTimeoutSeconds) {
+          idlePolicyNotice = `Lease policy clamped idle timeout from ${requestedIdleTimeoutSeconds}s to ${lease.idleTimeoutSeconds}s.`;
+        }
       }
       const telemetry = sanitizeLeaseTelemetry(input.telemetry, now);
       if (telemetry) {
@@ -8518,17 +8522,23 @@ export class FleetCoordinator {
       lease.expiresAt = recomputeLeaseExpiresAt(lease, now, policy.maxTTLSeconds).toISOString();
       clearLeaseCleanupMetadata(lease);
       await putLeaseRecord(storage, this.applyCurrentLeasePolicy(lease));
-      return { lease, budgetError };
+      return { lease, budgetError, idlePolicyNotice };
     });
-    const { lease, budgetError } = committed;
+    const { lease, budgetError, idlePolicyNotice } = committed;
     await this.armAlarmNoLaterThan(nextLeaseAlarmTime(lease, this.coordinatorGeneration));
     // Creation notices were already delivered; a heartbeat reports only its own notice.
     if (!budgetError) {
       const visible = { ...lease };
       delete visible.policyNotice;
+      if (idlePolicyNotice) visible.policyNotice = idlePolicyNotice;
       return visible;
     }
-    const policyNotice = `Lease will expire at ${lease.expiresAt}; budget exhausted (${budgetError}).`;
+    const policyNotice = [
+      `Lease will expire at ${lease.expiresAt}; budget exhausted (${budgetError}).`,
+      idlePolicyNotice,
+    ]
+      .filter(Boolean)
+      .join(" ");
     console.warn(
       JSON.stringify({
         event: "lease_auto_extension_budget_exceeded",

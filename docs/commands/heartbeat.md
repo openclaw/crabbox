@@ -149,6 +149,7 @@ object.
 - [`run`](run.md) — run a command with automatic background heartbeats.
 
 This command never requests auto-extension or changes total TTL. Its idle window
-is capped by total TTL and the current coordinator maximum. The default TTL and
+is capped by total TTL and the current coordinator maximum. An explicit idle
+override above that cap is reduced and reported in a policy notice. The default TTL and
 idle timeout are both 30m, with a 4h default lifetime maximum. Use
 [extend](extend.md) to increase total lifetime when permitted.

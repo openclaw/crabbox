@@ -274,3 +274,20 @@ func TestRunHeartbeatBudgetNotice(t *testing.T) {
 		t.Fatalf("repeated notice: %q", stderr.String())
 	}
 }
+
+func TestLeasePolicyNoticeKeepsBudgetWarningAfterClamp(t *testing.T) {
+	const clamp = "Lease policy clamped idle timeout from 7200s to 1800s."
+	const budget = "Lease will expire at 2026-10-13T12:30:00Z; budget exhausted."
+	for _, notices := range [][]string{{clamp, budget}, {budget, clamp}} {
+		var stderr bytes.Buffer
+		printNotice := leasePolicyNoticePrinter(&stderr)
+		for _, notice := range notices {
+			printNotice(notice)
+			printNotice(notice)
+		}
+		printNotice(budget + " Updated headroom.")
+		if want := strings.Join(notices, "\n") + "\n"; stderr.String() != want {
+			t.Fatalf("notices=%q, want %q", stderr.String(), want)
+		}
+	}
+}

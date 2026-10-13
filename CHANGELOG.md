@@ -10,7 +10,7 @@
 - Direct cleanup now expires `keep=true` leases and reduces running/provisioning expiry grace from 12 hours to 1 hour; unowned machines remain untouched.
 - Direct leases: preserve provider user-data limits with compressed Tencent Cloud bootstrap, retain renewed leases during cleanup, and normalize Sealos ownership labels. [PR 2806](https://github.com/openclaw/crabbox/pull/2806).
 - Default lease lifetime to 30 minutes with a 4-hour maximum and coordinator global, organization, and owner lifetime policies that also clamp live leases.
-- Direct lease allocations and explicit idle-timeout updates report policy clamps and persist the effective timeout consistently. ([#2804](https://github.com/openclaw/crabbox/pull/2804))
+- Direct lease allocations and explicit idle-timeout updates report policy clamps and persist the effective timeout consistently; coordinator heartbeats also report clamped idle overrides. ([#2804](https://github.com/openclaw/crabbox/pull/2804))
 - Lease extensions atomically reserve their additional cost against fleet, owner, and organization budgets; running commands report when exhausted budgets prevent extension. ([#2804](https://github.com/openclaw/crabbox/pull/2804))
 - Registered external leases retain their renewable heartbeat deadline when lifetime policy is tightened. ([#2804](https://github.com/openclaw/crabbox/pull/2804))
 
@@ -27,6 +27,7 @@
 ### Fixed
 
 - Blacksmith Testbox: cancel the exact owned GitHub workflow after native stop leaves it active, releasing concurrency slots without waiting for the SSH idle timer; retain recovery state until both sides confirm completion. [PR 2813](https://github.com/openclaw/crabbox/pull/2813).
+- Direct lease extension refreshes file-backed guest expiry guards after saving provider labels; failed guest writes report both deadlines and can be retried without adding lifetime twice. ([#2804](https://github.com/openclaw/crabbox/pull/2804))
 - AWS: honor the requested region before coordinator and capacity fallbacks, using a regional promoted image or the normal stock image without redirecting to another region's promotion.
 - Preserve worst-case `reservedUSD` in usage reports and expose enforced cost as `committedUSD`, with compatible CLI output and conservative reservations for retained legacy VMs and unresolved provisioning. [PR 2801](https://github.com/openclaw/crabbox/pull/2801).
 - Settle terminal lease budget reservations at elapsed compute cost capped by the admission reservation, preserve observed runtime through late release and cleanup retries, and charge confirmed never-allocated leases zero compute runtime.

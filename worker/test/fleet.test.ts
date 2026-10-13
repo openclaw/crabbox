@@ -61165,16 +61165,41 @@ describe("coordinator lease lifetime policy", () => {
     try {
       await fleet.webSocketMessage(
         socket as unknown as WebSocket,
-        JSON.stringify({ type: "heartbeat", leaseID: lease.id, extendWhileRunning: true }),
+        JSON.stringify({
+          type: "heartbeat",
+          leaseID: lease.id,
+          extendWhileRunning: true,
+          idleTimeoutSeconds: 7200,
+        }),
       );
       expect(socket.sentJSON().at(-1)).toMatchObject({
         type: "heartbeat",
         ok: true,
         policyNotice: expect.stringContaining("budget exhausted"),
       });
+      expect(socket.sentJSON().at(-1)).toMatchObject({
+        policyNotice: expect.stringContaining("clamped idle timeout from 7200s to 1800s"),
+      });
     } finally {
       warn.mockRestore();
     }
+  });
+  it("reports a clamped heartbeat idle override without persisting the notice", async () => {
+    const { fleet, lease, storage } = fixture();
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+        headers,
+        body: { idleTimeoutSeconds: 7200 },
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      lease: {
+        idleTimeoutSeconds: 1800,
+        policyNotice: "Lease policy clamped idle timeout from 7200s to 1800s.",
+      },
+    });
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)?.policyNotice).toBeUndefined();
   });
   it.each(["explicit", "auto"])(
     "fences concurrent extension and heartbeat with %s first",

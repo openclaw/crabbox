@@ -6,7 +6,7 @@ import (
 )
 
 func (b *gcpLeaseBackend) ExtendLease(ctx context.Context, req core.LeaseExtendRequest) (core.LeaseExtendResult, error) {
-	return core.ExtendDirectLease(ctx, b.Cfg, req, core.ClockNow(b.RT.Clock).UTC(), func(ctx context.Context, server core.Server, claim core.LeaseClaim) error {
+	return core.ExtendDirectLease(ctx, b, b.Cfg, req, core.ClockNow(b.RT.Clock).UTC(), func(ctx context.Context, server core.Server, claim core.LeaseClaim) error {
 		cfg := b.Cfg
 		if zone := server.Labels["zone"]; zone != "" {
 			cfg.GCP.Zone = zone

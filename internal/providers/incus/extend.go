@@ -7,7 +7,7 @@ import (
 
 func (b *backend) ExtendLease(ctx context.Context, req core.LeaseExtendRequest) (core.LeaseExtendResult, error) {
 	cfg := b.configForRun()
-	return core.ExtendDirectLease(ctx, cfg, req, core.ClockNow(b.rt.Clock).UTC(), func(ctx context.Context, server core.Server, _ core.LeaseClaim) error {
+	return core.ExtendDirectLease(ctx, b, cfg, req, core.ClockNow(b.rt.Clock).UTC(), func(ctx context.Context, server core.Server, _ core.LeaseClaim) error {
 		client, err := newClient(cfg)
 		if err != nil {
 			return err
