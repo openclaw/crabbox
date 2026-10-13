@@ -290,9 +290,11 @@ func TestBlacksmithFinalizationAttemptsIndependentDestinations(t *testing.T) {
 		{"proof", 255, false}, {"bundle", 255, false}, {"proof+bundle", 255, false},
 	} {
 		t.Run(fmt.Sprintf("%s/%d/artifacts=%t", tc.failure, tc.code, tc.artifacts), func(t *testing.T) {
-			isolateBlacksmithOwnership(t)
 			if tc.artifacts {
+				isolateArtifactOwnership(t)
 				requireBlacksmithArtifactShell(t)
+			} else {
+				isolateBlacksmithOwnership(t)
 			}
 			repo := t.TempDir()
 			t.Chdir(repo)
@@ -339,6 +341,9 @@ func TestBlacksmithFinalizationAttemptsIndependentDestinations(t *testing.T) {
 				req.ArtifactGlobs = []string{"report"}
 			}
 			result, err := backend.Run(t.Context(), req)
+			if tc.artifacts {
+				assertArtifactTransferCalls(t, runner.calls, 1)
+			}
 			wantCode := tc.code
 			if wantCode == 0 {
 				wantCode = 2
