@@ -260,7 +260,7 @@ esac
 case "$1" in
   --verify)
     if [[ "$*" == *--check-notarization* ]]; then
-      [[ "$*" == "--verify --strict --check-notarization -R=notarized --verbose=2 $binary" ]] || exit 98
+      [[ "$*" == "--verify --strict --check-notarization -R=notarized --verbose=4 $binary" ]] || exit 98
       ${notarizationFailure ? "exit 74" : "exit 0"}
     fi
     requirement=$(crabbox_release_designated_requirement "$identifier")
