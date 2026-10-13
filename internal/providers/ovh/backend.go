@@ -230,7 +230,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		FlavorID: cfg.ServerType,
 		ImageID:  cfg.OVH.Image,
 		SSHKeyID: createdKey.ID,
-		UserData: core.CloudInitUserData(cfg, publicKey),
+		UserData: core.CloudInitUserData(core.WithGuestLeaseExpiry(cfg, labels), publicKey),
 	})
 	if err != nil {
 		if !isDeterminateCreateError(err) {

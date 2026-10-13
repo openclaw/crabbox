@@ -580,17 +580,14 @@ func (a App) cleanup(ctx context.Context, args []string) error {
 
 func shouldCleanupServer(server Server, now time.Time) (bool, string) {
 	labels := server.Labels
-	if labels == nil {
+	if labels == nil || labels["crabbox"] != "true" {
 		return false, "missing labels"
-	}
-	if strings.EqualFold(labels["keep"], "true") {
-		return false, "keep=true"
 	}
 	state := strings.ToLower(labels["state"])
 	switch state {
 	case "running", "provisioning":
 		expiresAt, ok := cleanupExpiry(labels)
-		if ok && now.After(expiresAt.Add(12*time.Hour)) {
+		if ok && now.After(expiresAt.Add(time.Hour)) {
 			return true, "stale state=" + state
 		}
 		return false, "state=" + state
@@ -608,7 +605,7 @@ func shouldCleanupServer(server Server, now time.Time) (bool, string) {
 	if !ok {
 		return false, "missing expires_at"
 	}
-	if now.Before(expiresAt) {
+	if !now.After(expiresAt) {
 		return false, "not expired"
 	}
 	return true, "expired"
@@ -624,7 +621,7 @@ func cleanupExpiry(labels map[string]string) (time.Time, bool) {
 		if value == "" {
 			continue
 		}
-		if parsed, ok := parseLeaseLabelTime(value); ok {
+		if parsed, ok := parseLeaseLabelTime(value); ok && guestExpiryTimeValid(parsed) {
 			return parsed, true
 		}
 	}

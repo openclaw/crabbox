@@ -185,7 +185,7 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (cor
 		}
 	}()
 	cfg.SSHKey = keyPath
-	payload, err := buildCloudInitPayload(cfg, leaseID, slug, publicKey)
+	payload, err := buildCloudInitPayload(core.WithGuestLeaseExpiry(cfg, core.TouchDirectLeaseLabels(core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, now), cfg, "provisioning", now)), leaseID, slug, publicKey)
 	if err != nil {
 		_ = b.removeStateDir(leaseStateRecord{LeaseID: leaseID})
 		return core.LeaseTarget{}, err

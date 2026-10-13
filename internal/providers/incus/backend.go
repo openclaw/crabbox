@@ -688,7 +688,7 @@ func instanceConfigForCreate(cfg core.Config, labels map[string]string, publicKe
 		bootstrapCfg.SSHFallbackPorts = nil
 	}
 	config := map[string]string{
-		"cloud-init.user-data": core.CloudInitUserData(bootstrapCfg, publicKey),
+		"cloud-init.user-data": core.CloudInitUserData(core.WithGuestLeaseExpiry(bootstrapCfg, labels), publicKey),
 	}
 	for key, value := range labels {
 		config[labelKey(key)] = value

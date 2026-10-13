@@ -73,7 +73,7 @@ func (a App) status(ctx context.Context, args []string) error {
 						fmt.Fprintf(a.Stderr, "warning: touch skipped for %s: %v\n", lease.LeaseID, claimErr)
 					} else if claimed {
 						SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
-						_, touchErr := sshBackend.Touch(statusCtx, TouchRequest{Lease: lease, State: state.State, IdleTimeout: cfg.IdleTimeout})
+						_, touchErr := touchLeaseWithGuestExpiry(statusCtx, sshBackend, cfg, TouchRequest{Lease: lease, State: state.State, IdleTimeout: cfg.IdleTimeout})
 						if touchErr != nil {
 							fmt.Fprintf(a.Stderr, "warning: touch failed for %s: %v\n", lease.LeaseID, touchErr)
 						}

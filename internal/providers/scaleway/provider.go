@@ -381,7 +381,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		Zone:     scw.Zone(client.Zone()),
 		ServerID: created.ID,
 		Key:      "cloud-init",
-		Content:  strings.NewReader(core.CloudInitUserData(cfg, publicKey)),
+		Content:  strings.NewReader(core.CloudInitUserData(core.WithGuestLeaseExpiry(cfg, labels), publicKey)),
 	}, scw.WithContext(ctx)); err != nil {
 		return core.LeaseTarget{}, err
 	}

@@ -172,7 +172,7 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 		Tags:           leaseTags(cfg, leaseID, slug, "provisioning", req.Keep, now),
 		AuthorizedKeys: []string{publicKey},
 		RootPass:       rootPass,
-		Metadata:       &linodeMetadata{UserData: linodeUserData(cfg, publicKey)},
+		Metadata:       &linodeMetadata{UserData: linodeUserData(core.WithGuestLeaseExpiry(cfg, labelsFromTags(leaseTags(cfg, leaseID, slug, "provisioning", req.Keep, now))), publicKey)},
 	}
 	if firewallID > 0 {
 		settings, settingsErr := client.AccountSettings(ctx)

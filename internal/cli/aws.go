@@ -783,6 +783,7 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 		}
 	}
 	applyAWSRunInstanceTargetOptions(input, cfg)
+	applyAWSGuestExpiryOptions(input, cfg)
 	if cfg.TargetOS == targetMacOS {
 		hostID := cfg.HostID
 		if hostID == "" {
@@ -1850,4 +1851,14 @@ func parsePort32(port string) (int32, bool) {
 		return 0, false
 	}
 	return int32(n), true
+}
+
+// Only direct Linux guests own their expiry. IMDSv2 exposes the same launch
+// tags used by cleanup; guest poweroff must terminate rather than stop billing.
+func applyAWSGuestExpiryOptions(input *ec2.RunInstancesInput, cfg Config) {
+	if guestExpiryAdapter(cfg) != "aws" {
+		return
+	}
+	input.InstanceInitiatedShutdownBehavior = types.ShutdownBehaviorTerminate
+	input.MetadataOptions = &types.InstanceMetadataOptionsRequest{HttpEndpoint: types.InstanceMetadataEndpointStateEnabled, HttpTokens: types.HttpTokensStateRequired, InstanceMetadataTags: types.InstanceMetadataTagsStateEnabled}
 }

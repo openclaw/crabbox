@@ -366,7 +366,7 @@ func (c *digitalOceanClient) createDroplet(ctx context.Context, cfg core.Config,
 		"image":     digitalOceanImage(cfg),
 		"ssh_keys":  []any{key.ID},
 		"tags":      tags,
-		"user_data": core.CloudInitUserData(cfg, publicKey),
+		"user_data": core.CloudInitUserData(core.WithGuestLeaseExpiry(cfg, labelsFromTags(tags)), publicKey),
 		"ipv6":      false,
 	}
 	if cfg.DigitalOcean.VPCUUID != "" {

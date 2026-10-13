@@ -179,7 +179,7 @@ func buildRunInstanceRequest(cfg core.Config, leaseID, slug, publicKey string, t
 		InstanceType:       serverTypeForConfig(cfg),
 		InstanceCount:      1,
 		InstanceName:       core.LeaseProviderName(leaseID, slug),
-		UserData:           base64.StdEncoding.EncodeToString([]byte(core.CloudInitUserData(cfg, publicKey))),
+		UserData:           base64.StdEncoding.EncodeToString([]byte(core.CloudInitUserData(core.WithGuestLeaseExpiry(cfg, labelsFromTags(tags)), publicKey))),
 		ClientToken:        strings.ReplaceAll(core.ProviderKeyForLease(leaseID), "_", "-"),
 		TagSpecification: []tagSpecification{{
 			ResourceType: "instance",

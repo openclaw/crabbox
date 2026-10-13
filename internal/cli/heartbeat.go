@@ -164,7 +164,7 @@ func (a App) heartbeat(ctx context.Context, args []string) error {
 		}
 		registeredLease = &coordinatorLease
 	}
-	touched, err := sshBackend.Touch(ctx, TouchRequest{
+	touched, err := touchLeaseWithGuestExpiry(ctx, sshBackend, cfg, TouchRequest{
 		Lease:               lease,
 		State:               state,
 		IdleTimeout:         cfg.IdleTimeout,

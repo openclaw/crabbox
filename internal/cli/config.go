@@ -18,6 +18,9 @@ import (
 )
 
 type Config struct {
+	DirectLeases                  string
+	DirectLeaseAllow              []string
+	guestLeaseExpiry              *GuestLeaseExpiryFields
 	LifetimePolicy                *LeaseLifetimeRequest `json:"-" yaml:"-"`
 	RecordLocal                   bool                  `json:"-" yaml:"-"`
 	Profile                       string
@@ -1581,6 +1584,7 @@ func baseConfig() Config {
 	multipassImage, _ := osImageDefaultMultipassImage(osImage)
 	return Config{
 		Profile:                 "default",
+		DirectLeases:            "allow",
 		Provider:                provider,
 		providerSelectionSource: providerSelectionCompiledDefault,
 		TargetOS:                "linux",
@@ -1745,6 +1749,8 @@ type ServeConfig struct {
 }
 
 type fileConfig struct {
+	DirectLeases             string                              `yaml:"directLeases,omitempty"`
+	DirectLeaseAllow         *[]string                           `yaml:"directLeaseAllow,omitempty"`
 	Serve                    *ServeConfig                        `yaml:"serve,omitempty"`
 	Claims                   *fileClaimsConfig                   `yaml:"claims,omitempty"`
 	History                  *fileLocalHistoryPolicy             `yaml:"history,omitempty"`
@@ -2549,6 +2555,9 @@ func applyFileConfigWithTrust(cfg *Config, file fileConfig, trusted bool) error 
 }
 
 func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, trusted bool, providerSource providerSelectionSource) error {
+	if err := applyDirectLeaseFileConfig(cfg, file, trusted); err != nil {
+		return err
+	}
 	if file.Serve != nil {
 		cfg.Serve = *file.Serve
 	}
@@ -3935,6 +3944,20 @@ func applyNonNegativeLeaseDuration(target *time.Duration, value string) bool {
 }
 
 func applyEnv(cfg *Config) error {
+	if value := os.Getenv("CRABBOX_DIRECT_LEASES"); strings.TrimSpace(value) != "" {
+		policy, err := normalizeDirectLeases(value)
+		if err != nil {
+			return err
+		}
+		cfg.DirectLeases = policy
+	}
+	if value, ok := os.LookupEnv("CRABBOX_DIRECT_LEASE_ALLOW"); ok {
+		allow, err := normalizeDirectLeaseAllow(strings.Split(value, ","))
+		if err != nil {
+			return err
+		}
+		cfg.DirectLeaseAllow = allow
+	}
 	if value, ok := os.LookupEnv("CRABBOX_SERVE_ADVERTISE_ADDRESSES"); ok {
 		cfg.Serve.AdvertiseAddresses = strings.Split(value, ",")
 	}

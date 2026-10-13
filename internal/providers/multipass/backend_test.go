@@ -1138,6 +1138,14 @@ func TestMultipassLifecycleHeartbeatCLI(t *testing.T) {
 		t.Skip("POSIX CLI fixture, not native Multipass")
 	}
 	_, lease, _ := acquiredLifecycleFixture(t)
+	binDir := t.TempDir()
+	refreshPath := filepath.Join(t.TempDir(), "lease-expiry")
+	sshFixture := "#!/bin/sh\ncase \"$*\" in\n*'/etc/crabbox/.lease-expiry.'*) cat >\"$CRABBOX_TEST_EXPIRY_FILE\";;\nesac\n"
+	if err := os.WriteFile(filepath.Join(binDir, "ssh"), []byte(sshFixture), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_TEST_EXPIRY_FILE", refreshPath)
 	helper := filepath.Join(t.TempDir(), "multipass-fixture")
 	data := sampleInfoJSON(lease.Server.Name)
 	script := "#!/bin/sh\ncase \"$1\" in\ninfo) printf '%s\\n' '" + data + "';;\n*) exit 91;;\nesac\n"
@@ -1172,6 +1180,11 @@ func TestMultipassLifecycleHeartbeatCLI(t *testing.T) {
 		}
 		if output.IdleTimeout != "1h30m0s" || claim.IdleTimeoutSeconds != 5400 {
 			t.Fatal("public renewal lost override")
+		}
+		refresh, err := os.ReadFile(refreshPath)
+		want := fmt.Sprintf("crabbox=true\nstate=%s\nkeep=%s\nexpires_at=%s\n", claim.Labels["state"], claim.Labels["keep"], claim.Labels["expires_at"])
+		if err != nil || string(refresh) != want {
+			t.Fatalf("guest expiry refresh=%q want=%q err=%v", refresh, want, err)
 		}
 	}
 }

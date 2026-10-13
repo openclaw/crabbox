@@ -1326,6 +1326,9 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 	if *jsonOut {
 		operationApp.Stdout = a.Stderr
 	}
+	if err := validateDirectLeaseCreation(cfg); err != nil {
+		return err
+	}
 	backend, err := loadBackend(cfg, runtimeForApp(operationApp))
 	if err != nil {
 		return err
@@ -1908,6 +1911,9 @@ func (a App) checkpointForkParallelsSnapshot(ctx context.Context, fs *flag.FlagS
 	operationApp := a
 	if jsonOut {
 		operationApp.Stdout = a.Stderr
+	}
+	if err := validateDirectLeaseCreation(cfg); err != nil {
+		return err
 	}
 	backend, err := loadBackend(cfg, runtimeForApp(operationApp))
 	if err != nil {
