@@ -30,8 +30,9 @@ The shape of the output depends on the selected `--provider`:
   configured) list visible active and provisioning leases by default. Add
   `--retained` to include kept terminal leases whose provider cleanup is not
   confirmed. This applies to text, `--json`, and `--jsonl`. Add `--all` to request
-  admin-wide live provider inventory when an admin token is configured, or
-  `--all --retained` to include the remaining provider inventory.
+  admin-wide provider inventory when an admin token is configured: machines
+  backing live leases first, then every other provider machine (including
+  orphans with no live lease) under `other provider inventory:`.
 - **Direct cloud / hypervisor / static providers** list the machines the provider
   itself reports. In `provider=ssh` mode this prints the single configured static
   target.
@@ -55,8 +56,8 @@ requesting retained-record pages. When stdout is a terminal, text output prints
 one dim hint on stderr after the live sections:
 `retained leases hidden; use --retained to include them`. It makes no extra
 requests to count hidden records. For `--all`, live machines appear as indexed
-admin lease pages arrive; `--all --retained` adds `other provider inventory:`
-afterward. Admin lease lookups follow every page without a 1,000-row cap.
+admin lease pages arrive, followed by `other provider inventory:` (the pool
+inventory is already loaded, so this costs no extra requests). Admin lease lookups follow every page without a 1,000-row cap.
 Direct and delegated providers retain their provider-native inventory behavior
 and accept but ignore `--retained`.
 
@@ -97,8 +98,9 @@ claimed run ID and reports missing metadata as a stale local claim.
 ## Including full provider inventory
 
 `--all` asks providers that support it to include inventory outside the
-Crabbox-owned lease view. Coordinator-backed listings show live admin leases;
-add `--retained` for the remaining inventory. This is useful for direct providers such as Hostinger,
+Crabbox-owned lease view. Coordinator-backed listings show machines backing live
+admin leases first, then the remaining provider inventory, which is where
+orphaned machines appear. This is useful for direct providers such as Hostinger,
 where an account can contain manually created VPSs alongside Crabbox-created
 leases. Providers that do not expose a broader inventory may return the same
 lease view they normally print.

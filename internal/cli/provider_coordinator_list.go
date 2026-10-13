@@ -125,7 +125,7 @@ func (b *coordinatorLeaseBackend) streamMachines(ctx context.Context, req ListRe
 				}
 			}
 		}
-		renderErr = emit(ListPage{Servers: coordinatorMachinesToServers(page, ids), JSON: page, More: more || section+1 < len(queries) || req.Retained})
+		renderErr = emit(ListPage{Servers: coordinatorMachinesToServers(page, ids), JSON: page, More: more || section+1 < len(queries) || len(seen) < len(machines)})
 		return renderErr
 	})
 	if renderErr != nil {
@@ -141,9 +141,6 @@ func (b *coordinatorLeaseBackend) streamMachines(ctx context.Context, req ListRe
 		return b.streamUserLeases(ctx, req, emit)
 	}
 	if lookupErr != nil {
-		if !req.Retained {
-			return lookupErr
-		}
 		fmt.Fprintf(b.rt.Stderr, "warning: active lease lookup failed; orphan status unavailable: %v\n", lookupErr)
 		ids = nil
 	}
@@ -152,9 +149,6 @@ func (b *coordinatorLeaseBackend) streamMachines(ctx context.Context, req ListRe
 			fmt.Fprintln(b.rt.Stderr, "warning: active lease lookup reached the legacy coordinator limit; orphan status may be incomplete")
 			break
 		}
-	}
-	if !req.Retained {
-		return nil
 	}
 	remaining := make([]CoordinatorMachine, 0)
 	for i, machine := range machines {

@@ -390,7 +390,7 @@ func TestListStreamingAdminFallbackAndUnavailableLookup(t *testing.T) {
 				t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "synthetic-admin")
 			}
 			var stdout, stderr bytes.Buffer
-			if err := (App{Stdout: &stdout, Stderr: &stderr}).list(t.Context(), []string{"--provider", "aws", "--all", "--retained"}); err != nil {
+			if err := (App{Stdout: &stdout, Stderr: &stderr}).list(t.Context(), []string{"--provider", "aws", "--all"}); err != nil {
 				t.Fatal(err)
 			}
 			if mode == "lookup failure" {
@@ -404,7 +404,7 @@ func TestListStreamingAdminFallbackAndUnavailableLookup(t *testing.T) {
 	}
 }
 
-func TestListStreamingAllOmitsUnmatchedInventory(t *testing.T) {
+func TestListStreamingAllIncludesUnmatchedInventory(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/pool" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"machines": []CoordinatorMachine{
@@ -436,10 +436,10 @@ func TestListStreamingAllOmitsUnmatchedInventory(t *testing.T) {
 				if err := (App{Stdout: &stdout, Stderr: &stderr}).list(t.Context(), args); err != nil {
 					t.Fatal(err)
 				}
-				if !strings.Contains(stdout.String(), "live-machine") || strings.Contains(stdout.String(), "other-machine") != retained {
+				if !strings.Contains(stdout.String(), "live-machine") || !strings.Contains(stdout.String(), "other-machine") {
 					t.Fatalf("stdout=%s stderr=%s", &stdout, &stderr)
 				}
-				if format == "" && strings.Contains(stdout.String(), "other provider inventory:") != retained {
+				if format == "" && !strings.Contains(stdout.String(), "other provider inventory:") {
 					t.Fatalf("unexpected inventory section: %s", &stdout)
 				}
 			})
