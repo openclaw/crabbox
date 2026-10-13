@@ -65,9 +65,9 @@ func blacksmithSettlementError(id string, err error) error {
 	return blacksmithCommandError{ExitError: core.ExitError{Code: 5, Message: fmt.Sprintf("Blacksmith GitHub settlement unresolved for %s; retaining claim/key for retry with the same organization/API: %v", id, err)}, cause: err}
 }
 
-// gh is an existing optional metadata integration. Use only its existing
-// access, pinned to the exact native github.com URL; never acquire credentials
-// or mutate GitHub. Missing access is uncertainty, not completion.
+// Use only existing gh access, pinned to the exact native github.com URL.
+// Missing access is uncertainty, not completion. Status remains read-only;
+// claim-fenced stop can also cancel this exact associated workflow.
 func (b *blacksmithBackend) githubRunConclusion(ctx context.Context, runURL string) (string, error) {
 	parts := blacksmithActionsURL.FindStringSubmatch(runURL)
 	if parts == nil || parts[2] == "." || parts[2] == ".." {
@@ -131,4 +131,41 @@ func (b *blacksmithBackend) verifySettlement(ctx context.Context, claim core.Lea
 		return "", blacksmithSettlementError(claim.LeaseID, fmt.Errorf("associated GitHub run is not completed"))
 	}
 	return conclusion, nil
+}
+
+// The caller holds the unchanged claim fence. Refresh native identity after the
+// preceding GitHub read and native stop, immediately before requesting cancellation.
+func (b *blacksmithBackend) cancelGitHubRun(ctx context.Context, claim core.LeaseClaim, runURL string) (bool, error) {
+	identity, err := b.verifyTestbox(ctx, claim)
+	if err != nil {
+		return false, err
+	}
+	if !identity.terminal() {
+		return false, fmt.Errorf("native Testbox is not completed; retaining claim")
+	}
+	if err := blacksmithObserveRunURL(&runURL, identity.RunURL); err != nil {
+		return false, err
+	}
+	parts := blacksmithActionsURL.FindStringSubmatch(runURL)
+	if parts == nil {
+		return false, fmt.Errorf("native status has no exact GitHub run to cancel")
+	}
+	if err := context.Cause(ctx); err != nil {
+		return false, err
+	}
+	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
+		Name: "gh",
+		Args: []string{"api", "--hostname", "github.com", "--method", "POST",
+			"repos/" + parts[1] + "/" + parts[2] + "/actions/runs/" + parts[3] + "/cancel"},
+		MaxCapturedOutputBytes: 16 * 1024,
+	})
+	if err = blacksmithContextError(ctx, err); err == nil && result.ExitCode == 0 {
+		return true, nil // Accepted is not settled: the caller still verifies terminal state.
+	}
+	if ctx.Err() != nil {
+		return true, context.Cause(ctx)
+	}
+	// Native stop may already have initiated cancellation. Preserve a rejected
+	// request, but let the existing bounded terminal checks reconcile that race.
+	return true, fmt.Errorf("exact GitHub run cancellation failed (gh exit=%d); existing gh access must permit cancelling the owned workflow", result.ExitCode)
 }
