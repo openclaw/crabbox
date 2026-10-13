@@ -224,6 +224,10 @@ func guestExpirySSHFixture(t *testing.T) (string, <-chan string) {
 							refreshes <- string(input)
 						}
 						_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Code uint32 }{0}))
+						_ = ch.Close()
+						// Native OpenSSH must receive the exit status before TCP closes.
+						for range requests {
+						}
 						return
 					}
 				}
