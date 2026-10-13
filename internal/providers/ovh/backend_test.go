@@ -1143,6 +1143,7 @@ func TestTouchAppliesIdleTimeoutOverride(t *testing.T) {
 	clock := &mutableClock{t: time.Now().UTC().Truncate(time.Second)}
 	backend.RT.Clock = clock
 	backend.Cfg.IdleTimeout = 5 * time.Minute
+	backend.Cfg.TTL = 2 * time.Hour
 	repo := core.Repo{Root: t.TempDir()}
 	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: repo, RequestedSlug: "touch-me"})
 	if err != nil {
@@ -1167,8 +1168,8 @@ func TestTouchAppliesIdleTimeoutOverride(t *testing.T) {
 	assertPolicy := func(server core.Server, want core.LeaseClaim) {
 		t.Helper()
 		for key, value := range map[string]string{
-			"idle_timeout": "7200", "idle_timeout_secs": "7200", "ttl_secs": "3600",
-			"created_at": core.LeaseLabelTime(created), "expires_at": core.LeaseLabelTime(created.Add(time.Hour)),
+			"idle_timeout": "7200", "idle_timeout_secs": "7200", "ttl_secs": "7200",
+			"created_at": core.LeaseLabelTime(created), "expires_at": core.LeaseLabelTime(created.Add(2 * time.Hour)),
 		} {
 			if server.Labels[key] != value || want.Labels[key] != value {
 				t.Errorf("%s: server=%q claim=%q want=%q", key, server.Labels[key], want.Labels[key], value)
@@ -1292,6 +1293,7 @@ func TestLegacyHeartbeatPolicySurvivesUpgrade(t *testing.T) {
 			clock := &mutableClock{t: time.Now().UTC().Truncate(time.Second)}
 			backend.RT.Clock = clock
 			backend.Cfg.IdleTimeout = 5 * time.Minute
+			backend.Cfg.TTL = 2 * time.Hour
 			repo := core.Repo{Root: t.TempDir()}
 			lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: repo, RequestedSlug: "upgrade-policy"})
 			if err != nil {

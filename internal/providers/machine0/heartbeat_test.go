@@ -67,6 +67,7 @@ func TestMachine0TouchDurablyPersistsLifecycleAndIdleTimeout(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			b, api, req := fixedMachine0TestFixture(t)
 			b.cfg.IdleTimeout = 45 * time.Minute
+			b.cfg.TTL = 2 * time.Hour
 			if !tc.fixed {
 				req.RequestedLeaseID = ""
 			}
@@ -239,6 +240,7 @@ func TestMachine0TouchRejectsOwnershipChangesWithoutMutation(t *testing.T) {
 func TestMachine0FixedHeartbeatCommandRenewsRegisteredLease(t *testing.T) {
 	b, api, req := fixedMachine0TestFixture(t)
 	b.cfg.IdleTimeout = 45 * time.Minute
+	b.cfg.TTL = 2 * time.Hour
 	b.rt.Clock = machine0HeartbeatClock(time.Now().Add(-2 * time.Minute))
 	req.Keep = true
 	lease, err := b.Acquire(context.Background(), req)

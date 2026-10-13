@@ -1721,11 +1721,14 @@ type lifecycleClock struct{ now time.Time }
 
 func (c lifecycleClock) Now() time.Time { return c.now }
 
-func lifecycleFixture(t *testing.T) (*backend, core.LeaseTarget, core.LeaseClaim) {
+func lifecycleFixture(t *testing.T, ttl ...time.Duration) (*backend, core.LeaseTarget, core.LeaseClaim) {
 	t.Helper()
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	b := testBackend(t, runner)
 	b.cfg.IdleTimeout, b.cfg.TTL = 30*time.Minute, time.Hour
+	if len(ttl) > 0 {
+		b.cfg.TTL = ttl[0]
+	}
 	now := time.Now().UTC().Truncate(time.Second)
 	b.rt.Clock = lifecycleClock{now}
 	const id, name = "cbx_applevmlifecycle", "crabbox-lifecycle-test"
@@ -1844,7 +1847,7 @@ func TestAppleVMLifecycleHeartbeatCLI(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX helper fixture; native proof is separate")
 	}
-	b, lease, _ := lifecycleFixture(t)
+	b, lease, _ := lifecycleFixture(t, 2*time.Hour)
 	root, _ := b.stateRoot()
 	data := b.rt.Exec.(*recordingRunner).responses[commandKey("helper", []string{"list", "--state-root", root})].Stdout
 	helper := filepath.Join(t.TempDir(), "helper")

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"os"
@@ -1286,6 +1287,7 @@ func fixedAWSTestAttempt(cfg core.Config) core.AWSLaunchAttempt {
 
 func fixedAWSTestServer(control *core.AWSFixedCreateControl, cfg core.Config, leaseID, slug string, attempt core.AWSLaunchAttempt) core.Server {
 	server := awsTestServer("i-fixed", leaseID, slug, cfg.AWSRegion)
+	server.Labels["ttl_secs"] = fmt.Sprint(int(cfg.TTL.Seconds()))
 	server.ServerType.Name = attempt.ServerType
 	server.HostID = attempt.HostID
 	server.ProviderMetadata = map[string]any{

@@ -27,7 +27,7 @@ type lifecycleClock struct{ current time.Time }
 
 func (c *lifecycleClock) Now() time.Time { return c.current }
 
-func runpodLifecycleFixture(t *testing.T) (*runpodLeaseBackend, core.LeaseTarget, core.LeaseClaim, core.Repo, *lifecycleClock) {
+func runpodLifecycleFixture(t *testing.T, ttl ...time.Duration) (*runpodLeaseBackend, core.LeaseTarget, core.LeaseClaim, core.Repo, *lifecycleClock) {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	clock := &lifecycleClock{current: time.Now().UTC().Truncate(time.Second)}
@@ -35,6 +35,9 @@ func runpodLifecycleFixture(t *testing.T) (*runpodLeaseBackend, core.LeaseTarget
 	pod := runpodPod{ID: "pod-policy", Name: core.LeaseProviderName(leaseID, slug), DesiredStatus: "RUNNING"}
 	fake := &fakeRunpodAPI{listPods: []runpodPod{pod}, getPod: func(string) (runpodPod, error) { return pod, nil }}
 	cfg := core.Config{Provider: providerName, IdleTimeout: 5 * time.Minute, TTL: time.Hour, Runpod: core.RunpodConfig{APIKey: "test-key"}}
+	if len(ttl) > 0 {
+		cfg.TTL = ttl[0]
+	}
 	applyRunpodDefaults(&cfg)
 	server := initializeRunpodLifecycle(runpodServer(pod, leaseID, slug, cfg), cfg, false, clock.current)
 	created := clock.current.Add(-2 * time.Minute)
@@ -133,7 +136,7 @@ func TestRunpodResolveRejectsClaimChangedDuringObservation(t *testing.T) {
 }
 
 func TestRunpodTouchCommitsLifecyclePolicy(t *testing.T) {
-	b, lease, original, repo, clock := runpodLifecycleFixture(t)
+	b, lease, original, repo, clock := runpodLifecycleFixture(t, 90*time.Minute)
 	lease, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo})
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +171,7 @@ func TestRunpodTouchCommitsLifecyclePolicy(t *testing.T) {
 		}
 		if i > 0 {
 			created, _ := strconv.ParseInt(original.Labels["created_at"], 10, 64)
-			if claim.Labels["expires_at"] != strconv.FormatInt(created+3600, 10) {
+			if claim.Labels["expires_at"] != strconv.FormatInt(created+5400, 10) {
 				t.Error("touch lost original TTL cap")
 			}
 		}

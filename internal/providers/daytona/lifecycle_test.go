@@ -337,7 +337,7 @@ func TestDaytonaCreationIsPrivateAndHasNativeTTL(t *testing.T) {
 	if sandbox.Public || f.create.GetPublic() {
 		t.Fatal("sandbox previews must remain private")
 	}
-	if got := f.create.GetTtlMinutes(); got != 90 {
+	if got := f.create.GetTtlMinutes(); got != 30 {
 		t.Fatalf("ttlMinutes=%v", got)
 	}
 	if f.create.GetAutoStopInterval() != 30 {
@@ -653,6 +653,7 @@ func TestDaytonaReadinessIgnoresStaleLabels(t *testing.T) {
 
 func TestDaytonaHeartbeatUpdatesProviderAndLabels(t *testing.T) {
 	f, b, repo := newDaytonaLifecycleFixture(t)
+	b.cfg.TTL = 2 * time.Hour
 	sandbox, leaseID, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, "")
 	if err != nil {
 		t.Fatal(err)

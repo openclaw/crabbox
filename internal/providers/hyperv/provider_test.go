@@ -2440,7 +2440,7 @@ type lifecycleClock struct{ now time.Time }
 
 func (c lifecycleClock) Now() time.Time { return c.now }
 
-func lifecycleFixture(t *testing.T) (*backend, core.LeaseTarget, core.LeaseClaim) {
+func lifecycleFixture(t *testing.T, ttl ...time.Duration) (*backend, core.LeaseTarget, core.LeaseClaim) {
 	t.Helper()
 	testutil.IsolateUserDirs(t)
 	const id, name = "cbx_hypervlifecycle", "crabbox-lifecycle-test"
@@ -2457,6 +2457,9 @@ func lifecycleFixture(t *testing.T) (*backend, core.LeaseTarget, core.LeaseClaim
 	}}
 	b := testBackend(runner)
 	b.cfg.IdleTimeout, b.cfg.TTL = 30*time.Minute, time.Hour
+	if len(ttl) > 0 {
+		b.cfg.TTL = ttl[0]
+	}
 	now := time.Now().UTC().Truncate(time.Second)
 	b.rt.Clock = lifecycleClock{now}
 	labels := core.DirectLeaseLabels(b.configForRun(), id, "lifecycle", providerName, "", false, now.Add(-20*time.Minute))
@@ -2659,7 +2662,7 @@ func TestHyperVLifecycleHeartbeatCLI(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX command fixture; native Hyper-V proof is separate")
 	}
-	_, lease, _ := lifecycleFixture(t)
+	_, lease, _ := lifecycleFixture(t, 2*time.Hour)
 	dir := t.TempDir()
 	script := "#!/bin/sh\ncase \"$4\" in\nGet-VMNetworkAdapter*) printf '%s\\n' '[\"192.0.2.10\"]';;\nGet-VM\\ *) printf '%s\\n' '{\"Name\":\"crabbox-lifecycle-test\",\"State\":2}';;\n*) exit 91;;\nesac\n"
 	if err := os.WriteFile(filepath.Join(dir, "powershell"), []byte(script), 0o700); err != nil {
