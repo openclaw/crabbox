@@ -49,6 +49,14 @@ else if (tool === "codesign") {
   if (args.includes("--check-notarization")) {
     record("online"); fs.writeFileSync(path.join(root, "check-pid"), String(process.pid));
     if (settings.checkSignal) process.kill(process.pid, settings.checkSignal);
+    else if (settings.streamMode) {
+      const done = setInterval(() => {
+        if (fs.existsSync(path.join(root, "stream-complete"))) {
+          clearInterval(done); process.exit(settings.onlineStatus ?? 0);
+        }
+      }, 20);
+      setTimeout(() => process.exit(98), 10000);
+    }
     else setTimeout(() => process.exit(settings.onlineStatus ?? 0), 100);
   } else if (args[0] === "-dvvv") process.stderr.write([
     "Identifier=org.openclaw.crabbox", "Authority=Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)",
@@ -70,11 +78,48 @@ else if (tool === "codesign") {
   const timer = setInterval(() => {
     const p = path.join(root, "check-pid"); if (!fs.existsSync(p)) return;
     clearInterval(timer);
-    console.log("null");
-    console.log(JSON.stringify({processID:Number(fs.readFileSync(p)), eventMessage:"Error checking with notarization daemon: -67050 Error Domain=NSURLErrorDomain Code=-1005 PRIVATE_PATH https://private.invalid/token"}));
-    console.log(JSON.stringify({processID:999999, eventMessage:"Error Domain=NSURLErrorDomain Code=-1001 PRIVATE_PATH"}));
-    console.log(JSON.stringify({processID:999998, eventMessage:"ticket not available for "+"A".repeat(40)+" PRIVATE_PATH"}));
-    console.log(JSON.stringify({processID:999997, eventMessage:"ticket not available for b"+"a".repeat(40)+"c PRIVATE_PATH"}));
+    const pid = Number(fs.readFileSync(p));
+    const output = [null,
+      {processID:pid, eventMessage:"trace é Error checking with notarization daemon: -67050 Error Domain=NSURLErrorDomain Code=-1005 PRIVATE_PATH https://private.invalid/token"},
+      {processID:999999, eventMessage:"Error Domain=NSURLErrorDomain Code=-1001 PRIVATE_PATH"},
+      {processID:999998, eventMessage:"ticket not available for "+"A".repeat(40)+" PRIVATE_PATH"},
+      {processID:999997, eventMessage:"ticket not available for b"+"a".repeat(40)+"c PRIVATE_PATH"},
+    ].map(value => JSON.stringify(value)+"\n").join("");
+    const complete = () => fs.writeFileSync(path.join(root,"stream-complete"),"yes");
+    const emitTarget = () => process.stdout.write(output, complete);
+    if (settings.streamMode === "flood") {
+      const prefix = '{"processID":999996,"eventMessage":"';
+      const suffix = '"}\n';
+      const unrelated = prefix+"x".repeat(64-prefix.length-suffix.length)+suffix;
+      let sent = 0;
+      const flood = setInterval(() => {
+        process.stdout.write(unrelated);
+        if (++sent === 4500) { clearInterval(flood); setTimeout(emitTarget,20); }
+      }, 1);
+    } else if (settings.streamMode === "oversized") {
+      process.stdout.write("x".repeat(65537), () => {
+        process.stdout.write(JSON.stringify({processID:pid,eventMessage:"Error checking with notarization daemon: -9999"})+"\n", emitTarget);
+      });
+    } else if (settings.streamMode === "split") {
+      const bytes = Buffer.from(output);
+      const split = bytes.indexOf(Buffer.from("é"))+1;
+      process.stdout.write(bytes.subarray(0,split), () => {
+        setTimeout(() => process.stdout.write(bytes.subarray(split),complete),20);
+      });
+    } else if (settings.streamMode === "groups") {
+      for (let code=1000; code<1040; code++) {
+        process.stdout.write(JSON.stringify({processID:pid,eventMessage:"Error checking with notarization daemon: "+code})+"\n");
+      }
+      emitTarget();
+    } else if (settings.streamMode?.endsWith("eof")) {
+      const target = JSON.stringify({processID:pid,eventMessage:"Error checking with notarization daemon: -67050"});
+      const tail = settings.streamMode === "oversized-eof" ? "x".repeat(65537)+target
+        : settings.streamMode === "incomplete-eof" ? target.slice(0,-1) : target;
+      process.stdout.end(tail, () => {
+        complete();
+        if (settings.streamMode !== "open-eof") process.exit(0);
+      });
+    } else emitTarget();
     setInterval(() => {},1000);
   },10);
 }
@@ -117,6 +162,44 @@ test("online failure emits only attributed allowlisted fields and never executes
   assert.equal(r.diagnostic.events.some((e) => e.code === -1001), false);
   assert.doesNotMatch(r.stderr, /PRIVATE_PATH|private\.invalid/);
 });
+
+for (const streamMode of ["flood", "oversized", "split"]) {
+  test(`late attributed errors survive ${streamMode} records`, (t) => {
+    const r = fixture(t, { onlineStatus: 3, streamMode });
+    assert.equal(r.status, 3, r.stderr);
+    assert.equal(r.executed, false);
+    assert.equal(r.events.filter((e) => e.event === "online").length, 1);
+    assert.equal(r.diagnostic.attributedEvents, 2);
+    assert.equal(r.diagnostic.truncated, streamMode === "oversized");
+    assert.equal(r.diagnostic.observerState, streamMode === "oversized" ? "partial" : "captured");
+    assert.equal(r.diagnostic.events.some((e) => e.daemonCode === -67050 && e.domain === "NSURLErrorDomain" && e.code === -1005), true);
+    assert.equal(r.diagnostic.events.some((e) => e.daemonCode === -9999), false);
+    assert.doesNotMatch(r.stderr, /PRIVATE_PATH|private\.invalid/);
+  });
+}
+
+test("attributed stream aggregation stays bounded and reports omitted groups", (t) => {
+  const r = fixture(t, { onlineStatus: 3, streamMode: "groups" });
+  assert.equal(r.status, 3, r.stderr);
+  assert.equal(r.executed, false);
+  assert.equal(r.diagnostic.events.length, 32);
+  assert.equal(r.diagnostic.attributedEvents, 42);
+  assert.equal(r.diagnostic.omittedEvents, 10);
+});
+
+for (const streamMode of ["eof", "open-eof", "oversized-eof", "incomplete-eof"]) {
+  test(`stream completion handles ${streamMode} without losing framing`, (t) => {
+    const r = fixture(t, { onlineStatus: 3, streamMode });
+    const validTail = streamMode === "eof" || streamMode === "open-eof";
+    assert.equal(r.status, 3, r.stderr);
+    assert.equal(r.executed, false);
+    assert.equal(r.events.filter((e) => e.event === "online").length, 1);
+    assert.equal(r.diagnostic.truncated, !validTail);
+    assert.equal(r.diagnostic.observerState, streamMode === "open-eof" ? "captured" : "partial");
+    assert.equal(r.diagnostic.attributedEvents, validTail ? 1 : 0);
+    assert.equal(r.diagnostic.events.some((e) => e.daemonCode === -67050), validTail);
+  });
+}
 
 for (const observer of ["error", "early", "silent"]) {
   test(`observer ${observer} cannot mask online rejection`, (t) => {

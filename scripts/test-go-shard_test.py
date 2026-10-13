@@ -15,6 +15,12 @@ shard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(shard)
 
 
+def owners(names, count):
+    listing = "\n".join(names)
+    return {name: i for i in range(count) for name in shard.select_tests(listing, i, count)}
+
+
+@patch.dict(shard.SLOW_TESTS, clear=True)
 class ShardTests(unittest.TestCase):
     def test_partition_includes_every_test_once(self):
         names = [f"TestCase{i}" for i in range(101)] + ["FuzzInput", "Example", "Example_run"]
@@ -22,10 +28,27 @@ class ShardTests(unittest.TestCase):
         for count in (3, 4):
             groups = [shard.select_tests(listing, i, count) for i in range(count)]
             self.assertEqual(sorted(sum(groups, [])), sorted(names))
-            self.assertLessEqual(max(map(len, groups)) - min(map(len, groups)), 1)
+            self.assertTrue(all(groups))
             for group in groups:
                 pattern = re.compile("^(" + "|".join(group) + ")$")
                 self.assertEqual([n for n in names if pattern.fullmatch(n)], [n for n in names if n in group])
+
+    def test_adding_tests_moves_no_existing_test(self):
+        names = [f"TestCase{i}" for i in range(200)]
+        for count in (3, 4):
+            before = owners(names, count)
+            after = owners(names + ["TestAAAFirst", "TestCase99b", "TestZZZLast"], count)
+            self.assertEqual({name: after[name] for name in names}, before)
+
+    def test_slow_tests_are_spread_by_weight(self):
+        weights = {"TestA": 100, "TestB": 90, "TestC": 50, "TestD": 40, "TestE": 10}
+        with patch.dict(shard.SLOW_TESTS, weights):
+            self.assertEqual(owners(list(weights), 2), {"TestA": 0, "TestB": 1, "TestC": 1, "TestD": 0, "TestE": 0})
+
+    def test_missing_slow_test_fails(self):
+        with patch.dict(shard.SLOW_TESTS, {"TestRenamed": 60}):
+            with self.assertRaisesRegex(ValueError, "TestRenamed"):
+                shard.select_tests("TestA\nTestB", 0, 2)
 
     def test_bad_or_empty_selection_fails(self):
         for index, count in [(-1, 4), (4, 4), (0, 0), (0, 4)]:
@@ -49,7 +72,7 @@ class ShardTests(unittest.TestCase):
             self.assertEqual(shard.main(), 1)
         self.assertEqual(run.call_args.args[0], [
             "go", "test", "-race", "-count=1", "-timeout=10m", "./internal/cli",
-            "-run", "^(FuzzInput|TestB)$",
+            "-run", "^(Example|FuzzInput|TestB)$",
         ])
 
     @patch.object(shard, "coverage_test", return_value=7)
@@ -63,7 +86,7 @@ class ShardTests(unittest.TestCase):
         ])
         self.assertEqual(coverage.call_args.args[0], [
             "go", "test", "-count=1", "-timeout=20m", "-covermode=atomic", "./internal/cli",
-            "-run", "^(FuzzInput)$", "-coverprofile=cli-1.out",
+            "-run", "^(FuzzInput|TestA)$", "-coverprofile=cli-1.out",
         ])
 
     @patch.object(shard.subprocess, "Popen")

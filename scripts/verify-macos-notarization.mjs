@@ -8,12 +8,21 @@ if (!binary || !["arm64", "x86_64"].includes(binaryArch)) {
   process.exit(2);
 }
 
-const limit = 256 * 1024;
-let logData = "";
+const lineLimit = 64 * 1024;
+const validCDHash = /^[0-9a-f]{40}$/.test(cdhash ?? "") ? cdhash : null;
+const events = new Map();
+let attributed = 0;
+let omittedEvents = 0;
+let partialLine = "";
+let discardLine = false;
+let sawObserverReady = false;
+let collectorError = false;
+let checkPID;
 let observerError = false;
 let truncated = false;
 let stoppingObserver = false;
 let observerEndedEarly = false;
+let observerClosed = false;
 const observer = spawn(
   "/usr/bin/log",
   [
@@ -23,14 +32,76 @@ const observer = spawn(
   { stdio: ["ignore", "pipe", "ignore"], detached: true },
 );
 observer.on("error", () => { observerError = true; });
-observer.on("close", () => { if (!stoppingObserver) observerEndedEarly = true; });
-observer.stdout.on("data", (chunk) => {
-  if (Buffer.byteLength(logData) + chunk.length <= limit) {
-    logData += chunk.toString();
-  } else {
-    truncated = true;
-  }
+observer.on("close", () => {
+  observerClosed = true;
+  if (!stoppingObserver) observerEndedEarly = true;
 });
+observer.stdout.setEncoding("utf8");
+observer.stdout.on("data", (chunk) => {
+  try { consumeChunk(chunk); } catch { collectorError = true; }
+});
+observer.stdout.on("end", () => {
+  if (partialLine && !discardLine) {
+    try { JSON.parse(partialLine); observeLine(partialLine); } catch { truncated = true; }
+  }
+  partialLine = "";
+});
+
+function observeLine(line) {
+  if (line.startsWith("Filtering the log data using ")) {
+    sawObserverReady = true;
+    return;
+  }
+  let value;
+  try { value = JSON.parse(line); } catch { return; }
+  if (value === null || typeof value !== "object") return;
+  const message = value.eventMessage;
+  if (typeof message !== "string") return;
+  sawObserverReady = true;
+  const matchesHash = validCDHash !== null && (message.toLowerCase().match(/[0-9a-f]+/g)?.includes(validCDHash) ?? false);
+  const matchesPID = Number.isSafeInteger(checkPID) && Number(value.processID) === checkPID;
+  if (!matchesHash && !matchesPID) return;
+  attributed++;
+  let category = "unclassified";
+  if (/ticket (?:is )?not available/i.test(message)) category = "ticket-unavailable";
+  else if (/Notarization daemon found revoked hash:/i.test(message)) category = "revoked-hash";
+  else if (/Error checking with notarization daemon/i.test(message)) category = "notarization-daemon-error";
+  const daemonCode = message.match(/Error checking with notarization daemon:\s*(-?\d{1,10})\b/i);
+  const domainCode = message.match(/\b(NSURLErrorDomain|NSOSStatusErrorDomain|NSPOSIXErrorDomain|kCFErrorDomainCFNetwork)\b.{0,80}?\bCode\s*=\s*(-?\d{1,10})\b/);
+  const event = {
+    attribution: matchesHash ? "cdhash" : "codesign-pid",
+    category,
+    daemonCode: Number(daemonCode?.[1] ?? NaN),
+    domain: domainCode?.[1] ?? null,
+    code: Number(domainCode?.[2] ?? NaN),
+  };
+  const key = JSON.stringify(event);
+  if (!events.has(key) && events.size >= 32) { omittedEvents++; return; }
+  events.set(key, (events.get(key) ?? 0) + 1);
+}
+
+function consumeChunk(chunk) {
+  let start = 0;
+  while (start < chunk.length) {
+    const newline = chunk.indexOf("\n", start);
+    const part = chunk.slice(start, newline < 0 ? chunk.length : newline);
+    if (!discardLine) {
+      if (Buffer.byteLength(partialLine) + Buffer.byteLength(part) > lineLimit) {
+        // Do not interpret a suffix of an oversized record as a new event.
+        partialLine = "";
+        discardLine = true;
+        truncated = true;
+      } else {
+        partialLine += part;
+      }
+    }
+    if (newline < 0) return;
+    if (!discardLine) observeLine(partialLine);
+    partialLine = "";
+    discardLine = false;
+    start = newline + 1;
+  }
+}
 
 function signalObserver(signal) {
   if (observer.pid && observer.exitCode === null && observer.signalCode === null) {
@@ -40,11 +111,11 @@ function signalObserver(signal) {
 
 async function stopObserver() {
   stoppingObserver = true;
-  if (observer.exitCode !== null || observer.signalCode !== null || observerError) return;
+  if (observerClosed || observerError) return;
   const closed = new Promise((resolve) => observer.once("close", resolve));
   signalObserver("SIGINT");
   const timer = setTimeout(() => signalObserver("SIGKILL"), 500);
-  const deadline = setTimeout(() => observer.stdout.destroy(), 1500);
+  const deadline = setTimeout(() => { truncated = true; observer.stdout.destroy(); }, 1500);
   let drain;
   await Promise.race([closed, new Promise((resolve) => { drain = setTimeout(resolve, 2000); })]);
   clearTimeout(timer);
@@ -71,13 +142,7 @@ const observerReady = await new Promise((resolve) => {
     resolve(ready);
   };
   const unavailable = () => finish(false);
-  const onData = () => {
-    const ready = logData.split("\n").some((line) => {
-      if (line.startsWith("Filtering the log data using ")) return true;
-      try { return typeof JSON.parse(line)?.eventMessage === "string"; } catch { return false; }
-    });
-    if (ready) finish(true);
-  };
+  const onData = () => { if (sawObserverReady) finish(true); };
   const timer = setTimeout(() => finish(false), 2000);
   observer.stdout.on("data", onData);
   observer.once("error", unavailable);
@@ -93,7 +158,7 @@ check = spawn(
   ["--verify", "--strict", "--check-notarization", "-R=notarized", "--verbose=4", binary],
   { stdio: "inherit" },
 );
-const checkPID = check.pid;
+checkPID = check.pid;
 const status = await new Promise((resolve) => {
   check.once("error", () => resolve(127));
   check.once("exit", (code, signal) => resolve(code ?? (128 + (constants.signals[signal] ?? 1))));
@@ -103,37 +168,6 @@ await stopObserver();
 
 if (status !== 0) {
   try {
-    const validCDHash = /^[0-9a-f]{40}$/.test(cdhash ?? "") ? cdhash : null;
-    const events = new Map();
-    let attributed = 0;
-    let omittedEvents = 0;
-    for (const line of logData.split("\n")) {
-      let value;
-      try { value = JSON.parse(line); } catch { continue; }
-      if (value === null || typeof value !== "object") continue;
-      const message = value.eventMessage;
-      if (typeof message !== "string") continue;
-      const matchesHash = validCDHash !== null && (message.toLowerCase().match(/[0-9a-f]+/g)?.includes(validCDHash) ?? false);
-      const matchesPID = Number.isSafeInteger(checkPID) && Number(value.processID) === checkPID;
-      if (!matchesHash && !matchesPID) continue;
-      attributed++;
-      let category = "unclassified";
-      if (/ticket (?:is )?not available/i.test(message)) category = "ticket-unavailable";
-      else if (/Notarization daemon found revoked hash:/i.test(message)) category = "revoked-hash";
-      else if (/Error checking with notarization daemon/i.test(message)) category = "notarization-daemon-error";
-      const daemonCode = message.match(/Error checking with notarization daemon:\s*(-?\d{1,10})\b/i);
-      const domainCode = message.match(/\b(NSURLErrorDomain|NSOSStatusErrorDomain|NSPOSIXErrorDomain|kCFErrorDomainCFNetwork)\b.{0,80}?\bCode\s*=\s*(-?\d{1,10})\b/);
-      const event = {
-        attribution: matchesHash ? "cdhash" : "codesign-pid",
-        category,
-        daemonCode: Number(daemonCode?.[1] ?? NaN),
-        domain: domainCode?.[1] ?? null,
-        code: Number(domainCode?.[2] ?? NaN),
-      };
-      const key = JSON.stringify(event);
-      if (!events.has(key) && events.size >= 32) { omittedEvents++; continue; }
-      events.set(key, (events.get(key) ?? 0) + 1);
-    }
     const build = spawnSync("/usr/bin/sw_vers", ["-buildVersion"], { encoding: "utf8", timeout: 2000, maxBuffer: 1024 });
     const osBuild = /^[A-Za-z0-9.]+\s*$/.test(build.stdout ?? "") ? build.stdout.trim() : null;
     console.error(JSON.stringify({
@@ -141,8 +175,9 @@ if (status !== 0) {
       binaryArch, hostArch: arch(), osBuild, cdhash: validCDHash,
       binarySHA256: createHash("sha256").update(readFileSync(binary)).digest("hex"),
       evidence: attributed ? "attributed-events" : "unknown",
-      observerState: observerError || !observerReady ? "unavailable" : observerEndedEarly || truncated ? "partial" : "captured",
+      observerState: observerError || !observerReady ? "unavailable" : observerEndedEarly || truncated || collectorError ? "partial" : "captured",
       truncated, omittedEvents, attributedEvents: attributed,
+      ...(collectorError ? { collectorError: true } : {}),
       events: [...events].map(([event, count]) => ({ ...JSON.parse(event), count })),
     }));
   } catch {
