@@ -321,11 +321,27 @@ If manually clearing the Daytona snapshot creates a new untagged version,
 verification fails too; inspect the final version before rerunning the deploy.
 
 Before deployment, the workflow compares the live `CRABBOX_LEASE_POLICY_OVERRIDES`
-binding with the production value in `worker/wrangler.jsonc`. Only the named
-owner's maximum TTL may change; other owner, organization, and policy fields
-must be preserved. An unreadable secret binding or a conflicting document stops
-deployment before upload. Reconcile those entries into the source configuration
-before deploying; do not replace an unknown override document.
+binding with the production value in `worker/wrangler.jsonc`. The guard takes no
+arguments and compares the complete documents, treating an absent binding, `{}`,
+and empty `owners`/`orgs` groups as equivalent. A difference stops deployment
+before upload and reports only the affected groups and keys, without policy
+values. Unreadable bindings, invalid document shapes, and Cloudflare API errors
+always stop deployment.
+
+Production source declares no individual memberships or lease policy overrides;
+every owner uses the global lease defaults (30-minute TTL and idle timeout,
+4-hour maximum). Individual memberships and exceptions belong in runtime
+configuration managed outside the repository, not in source-controlled vars.
+
+For an intentional one-time replacement of a known live override document,
+dispatch the **Deploy Coordinator** workflow (`coordinator-deploy.yml`) with
+`replace_live_lease_policy: true`. This sets
+`CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT=1` for the guard step only: it
+prints the same key summary and permits replacement, but still fails closed on
+unreadable or invalid bindings and API errors. Push-triggered deployments never
+acknowledge replacement. When removing existing overrides from source, the
+first push-triggered deployment therefore fails by design until a maintainer
+reviews the difference and dispatches that acknowledged replacement once.
 
 Worker source lives in `worker/`. Run the gate, then deploy:
 

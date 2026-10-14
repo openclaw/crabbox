@@ -55,6 +55,15 @@ jobs:
           cache: true
           cache-dependency-path: '**/go.sum'
 
+      # setup-go restores cache entries with their saved mtimes. Once those are
+      # older than Go's 5-day trim limit, the race build trims every entry it
+      # did not use, including the non-race packages builtCLITestBinary reuses.
+      - name: Keep restored Go build cache
+        run: |
+          cache="$(go env GOCACHE)"
+          mkdir -p "$cache"
+          find "$cache" -type f -exec touch -c {} +
+
       - name: Test CLI shard
         run: python3 scripts/test-go-shard.py ${{ matrix.shard }} 4
 

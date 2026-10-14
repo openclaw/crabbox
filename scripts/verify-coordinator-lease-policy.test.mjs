@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import { verifyCoordinatorLeasePolicy } from "./verify-coordinator-lease-policy.mjs";
 
-const owner = "github:12345";
 const bindingName = "CRABBOX_LEASE_POLICY_OVERRIDES";
-const desired = { owners: { [owner]: { maxTTLSeconds: 86400 } } };
-const config = { accountId: "a".repeat(32), apiToken: "synthetic-api-token", owners: [owner] };
+const desired = { orgs: { "example-org": { maxTTLSeconds: 7200 } } };
+const config = { accountId: "a".repeat(32), apiToken: "synthetic-api-token" };
 const plaintext = (value) => ({
   name: bindingName,
   type: "plain_text",
@@ -14,7 +14,7 @@ const plaintext = (value) => ({
 });
 const settings = (...bindings) => ({ success: true, result: { bindings } });
 
-function fixture(reply, desiredPolicy = desired) {
+function fixture(reply, desiredPolicy) {
   const calls = [];
   return {
     calls,
@@ -49,61 +49,71 @@ test("reads only exact Worker settings without forwarding credentials", async ()
 });
 
 for (const [label, live, source] of [
-  ["absent override", settings(), desired],
-  ["empty document", settings(plaintext({})), desired],
-  ["empty maps", settings(plaintext({ orgs: {}, owners: {} })), desired],
+  ["absent documents", settings(), undefined],
+  ["absent live and empty source", settings(), {}],
+  ["empty live and absent source", settings(plaintext({})), undefined],
+  ["empty live groups", settings(plaintext({ orgs: {}, owners: {} })), undefined],
+  ["empty source groups", settings(), { orgs: {}, owners: {} }],
+  ["equal policies", settings(plaintext(desired)), desired],
   [
-    "existing owner maximum",
-    settings(plaintext({ owners: { [owner]: { maxTTLSeconds: 14400 } } })),
-    desired,
-  ],
-  ["already desired", settings(plaintext(desired)), desired],
-  [
-    "preserved unrelated policies regardless of key order",
+    "equal policies regardless of key order",
     settings(
       plaintext({
-        orgs: { example: { extension: "deny" } },
-        owners: {
-          [owner]: { autoExtend: "deny", maxTTLSeconds: 14400 },
-          other: { maxTTLSeconds: 7200 },
-        },
+        orgs: desired.orgs,
+        owners: { "github:12345": { extension: "deny", maxTTLSeconds: 7200 } },
       }),
     ),
-    {
-      owners: {
-        other: { maxTTLSeconds: 7200 },
-        [owner]: { maxTTLSeconds: 86400, autoExtend: "deny" },
-      },
-      orgs: { example: { extension: "deny" } },
-    },
+    { owners: { "github:12345": { maxTTLSeconds: 7200, extension: "deny" } }, orgs: desired.orgs },
   ],
 ]) {
   test(`permits ${label}`, async () => {
-    await fixture(live, source).run();
+    assert.equal(await fixture(live, source).run(), undefined);
+  });
+}
+
+for (const [label, live, source, summary] of [
+  ["removed org", desired, undefined, '"orgs"["example-org"]'],
+  ["added org", undefined, desired, '"orgs"["example-org"]'],
+  [
+    "changed policy",
+    desired,
+    { orgs: { "example-org": { maxTTLSeconds: 14400 } } },
+    '"orgs"["example-org"]',
+  ],
+  [
+    "removed owner",
+    { owners: { "github:12345": { maxTTLSeconds: 7200 } } },
+    undefined,
+    '"owners"["github:12345"]',
+  ],
+  ["empty owner entry", { owners: { "github:12345": {} } }, undefined, '"owners"["github:12345"]'],
+  ["unknown field", { additional: "synthetic-policy-value" }, undefined, '"additional"'],
+  ["unknown empty object", { additional: {} }, undefined, '"additional"'],
+  ["prototype key", JSON.parse('{"owners":{"__proto__":{}}}'), undefined, '"owners"["__proto__"]'],
+  [
+    "multiple groups",
+    { owners: { "github:12345": { extension: "synthetic-policy-value" } }, orgs: desired.orgs },
+    undefined,
+    '"orgs"["example-org"], "owners"["github:12345"]',
+  ],
+]) {
+  test(`requires acknowledgment and reports only keys: ${label}`, async () => {
+    const f = fixture(live === undefined ? settings() : settings(plaintext(live)), source);
+    let failure;
+    await assert.rejects(f.run(), (error) => {
+      failure = error.message;
+      assert.ok(failure.includes(`Live and source lease policy differ at: ${summary}.`));
+      assert.match(failure, /CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT=1/);
+      assert.doesNotMatch(failure, /synthetic-|7200|14400/);
+      return true;
+    });
+    const acknowledged = await f.run({ acknowledgeReplacement: true });
+    assert.equal(acknowledged, `Live and source lease policy differ at: ${summary}.`);
+    assert.ok(failure.startsWith(acknowledged));
   });
 }
 
 for (const [label, live, message] of [
-  [
-    "unknown owner",
-    settings(plaintext({ owners: { other: { maxTTLSeconds: 7200 } } })),
-    /not preserved/,
-  ],
-  [
-    "unknown organization",
-    settings(plaintext({ orgs: { example: { maxTTLSeconds: 7200 } } })),
-    /not preserved/,
-  ],
-  [
-    "other target-owner field",
-    settings(plaintext({ owners: { [owner]: { extension: "deny" } } })),
-    /not preserved/,
-  ],
-  [
-    "unknown top-level field",
-    settings(plaintext({ additional: { private: "synthetic-policy-value" } })),
-    /not preserved/,
-  ],
   [
     "secret-valued override",
     settings({ name: bindingName, type: "secret_text" }),
@@ -124,133 +134,57 @@ for (const [label, live, message] of [
     settings({ name: bindingName, type: "plain_text", text: "synthetic-private-invalid" }),
     /not readable JSON/,
   ],
-  ["invalid override shape", settings(plaintext({ owners: [] })), /invalid document shape/],
+  [
+    "empty override text",
+    settings({ name: bindingName, type: "plain_text", text: "" }),
+    /not readable JSON/,
+  ],
+  ["null document", settings(plaintext(null)), /invalid document shape/],
+  ["array document", settings(plaintext([])), /invalid document shape/],
+  ["array group", settings(plaintext({ owners: [] })), /invalid document shape/],
+  ["null group", settings(plaintext({ orgs: null })), /invalid document shape/],
+  [
+    "invalid entry",
+    settings(plaintext({ owners: { "github:12345": 123 } })),
+    /invalid document shape/,
+  ],
   ["missing bindings", { success: true, result: {} }, /did not confirm/],
   ["API rejection", { success: false, errors: [{ message: config.apiToken }] }, /did not confirm/],
   ["HTTP failure", new Response(config.apiToken, { status: 403 }), /HTTP 403/],
   ["non-JSON reply", new Response(config.apiToken), /returned invalid JSON/],
   ["transport failure", new Error(config.apiToken), /request failed/],
 ]) {
-  test(`stops deployment without disclosing values: ${label}`, async () => {
-    await assert.rejects(fixture(live).run(), (error) => {
-      assert.match(error.message, message);
-      assert.doesNotMatch(error.message, /synthetic-/);
-      return true;
-    });
-  });
-}
-
-test("rejects changed non-target fields even when both documents declare them", async () => {
-  const live = { owners: { [owner]: { maxTTLSeconds: 14400, autoExtend: "deny" } } };
-  const source = { owners: { [owner]: { maxTTLSeconds: 86400, autoExtend: "allow" } } };
-  await assert.rejects(fixture(settings(plaintext(live)), source).run(), /not preserved/);
-});
-
-const secondOwner = "github:67890";
-const twoOwners = [owner, secondOwner];
-const twoOwnerPolicy = {
-  owners: {
-    [owner]: { maxTTLSeconds: 86400 },
-    [secondOwner]: { maxTTLSeconds: 43200 },
-  },
-};
-
-test("permits changing two explicitly authorized owner maximums", async () => {
-  const live = {
-    owners: {
-      [owner]: { maxTTLSeconds: 14400, autoExtend: "deny" },
-      [secondOwner]: { maxTTLSeconds: 7200, extension: "allow" },
-    },
-  };
-  const source = structuredClone(live);
-  source.owners[owner].maxTTLSeconds = 86400;
-  source.owners[secondOwner].maxTTLSeconds = 43200;
-  await fixture(settings(plaintext(live)), source).run({ owners: twoOwners });
-});
-
-test("permits a new maximum-only owner entry only when explicitly authorized", async () => {
-  const f = fixture(settings(plaintext(desired)), twoOwnerPolicy);
-  await assert.rejects(f.run(), /not preserved/);
-  await f.run({ owners: twoOwners });
-});
-
-for (const [label, mutate] of [
-  ["first owner field", (policy) => (policy.owners[owner].extension = "deny")],
-  ["second owner field", (policy) => (policy.owners[secondOwner].autoExtend = "deny")],
-  ["unrelated owner entry", (policy) => (policy.owners["github:99999"] = { maxTTLSeconds: 7200 })],
-  ["unrelated empty owner entry", (policy) => (policy.owners["github:99999"] = {})],
-  ["organization entry", (policy) => (policy.orgs = { example: { maxTTLSeconds: 7200 } })],
-  ["top-level field", (policy) => (policy.additional = "synthetic-policy-value")],
-]) {
-  for (const side of ["live", "source"]) {
-    test(`two-owner authorization rejects added or dropped ${label} in ${side}`, async () => {
-      const live = structuredClone(twoOwnerPolicy);
-      const source = structuredClone(twoOwnerPolicy);
-      mutate(side === "live" ? live : source);
-      await assert.rejects(
-        fixture(settings(plaintext(live)), source).run({ owners: twoOwners }),
-        /not preserved/,
-      );
+  for (const acknowledgeReplacement of [false, true]) {
+    test(`fails closed without disclosing values (${acknowledgeReplacement}): ${label}`, async () => {
+      await assert.rejects(fixture(live).run({ acknowledgeReplacement }), (error) => {
+        assert.match(error.message, message);
+        assert.doesNotMatch(error.message, /synthetic-/);
+        return true;
+      });
     });
   }
 }
 
-for (const maxTTLSeconds of [undefined, null, "43200", 43200.5]) {
-  test(`every authorized owner must declare an integer maximum: ${maxTTLSeconds}`, async () => {
-    const source = structuredClone(twoOwnerPolicy);
-    source.owners[secondOwner] = { maxTTLSeconds };
-    const f = fixture(settings(), source);
-    await assert.rejects(
-      f.run({ owners: twoOwners }),
-      /Source policy must declare the named owner's maximum TTL; deployment stopped\./,
-    );
-    assert.equal(f.calls.length, 0);
-  });
-}
-
-test("rejects a missing second source owner before reading settings", async () => {
-  const f = fixture(settings());
-  await assert.rejects(f.run({ owners: twoOwners }), /must declare the named owner's maximum TTL/);
-  assert.equal(f.calls.length, 0);
-});
-
-for (const invalidOwner of [
-  "",
-  "github:",
-  "github:abc",
-  "github:0",
-  "github:-1",
-  "github:1.5",
-  "github:123\n",
-  " github:123",
-  "__proto__",
-  null,
-  123,
+for (const overrides of [
+  { accountId: "../synthetic-value" },
+  { apiToken: "" },
+  { desiredOverrides: "synthetic-invalid" },
+  { desiredOverrides: "null" },
+  { desiredOverrides: JSON.stringify({ orgs: [] }) },
 ]) {
-  test(`rejects malformed owner in the authorization list: ${JSON.stringify(invalidOwner)}`, async () => {
+  test(`rejects invalid source or authority before reading settings: ${JSON.stringify(overrides)}`, async () => {
     const f = fixture(settings());
-    await assert.rejects(
-      f.run({ owners: [owner, invalidOwner] }),
-      /Set the Cloudflare account, API token, and policy owner before verification\./,
-    );
+    await assert.rejects(f.run({ ...overrides, acknowledgeReplacement: true }));
     assert.equal(f.calls.length, 0);
   });
 }
 
-test("rejects invalid source or authority before reading settings", async () => {
-  await Promise.all(
-    [
-      { accountId: "../synthetic-value" },
-      { apiToken: "" },
-      { owners: [] },
-      { owners: undefined },
-      { owners: owner },
-      { desiredOverrides: "synthetic-invalid" },
-      { desiredOverrides: JSON.stringify({ owners: { [owner]: {} } }) },
-    ].map(async (overrides) => {
-      const f = fixture(settings());
-      await assert.rejects(f.run(overrides));
-      assert.equal(f.calls.length, 0);
-    }),
+test("CLI rejects arguments before reading settings", () => {
+  const result = spawnSync(
+    process.execPath,
+    [new URL("./verify-coordinator-lease-policy.mjs", import.meta.url).pathname, "unexpected"],
+    { encoding: "utf8" },
   );
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /takes no arguments/);
 });

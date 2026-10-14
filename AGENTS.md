@@ -71,6 +71,8 @@ Follow `docs/RELEASING.md` exactly. One explicit full release/publish request au
 
 ## Security & Configuration Tips
 
+No person-specific code, config, or policy: never hardcode individual GitHub owners/logins or per-person exceptions (lease limits, budgets, capacity, allowlists, special cases) in source, `wrangler.jsonc` vars, workflows, scripts, tests, docs, or `CHANGELOG.md`. Use generic org/role/class mechanisms; individual memberships or exceptions are runtime configuration managed outside the repository. Test fixtures use obviously fake IDs.
+
 The authentication and isolation model is documented in `SECURITY.md` and `docs/security.md`.
 
 Keep provider and broker tokens out of the repository. Do not pass secrets as command-line arguments. Local config belongs in `~/.config/crabbox/config.yaml`, `~/Library/Application Support/crabbox/config.yaml`, `crabbox.yaml`, or `.crabbox.yaml` as documented.

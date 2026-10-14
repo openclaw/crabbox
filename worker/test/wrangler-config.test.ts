@@ -31,21 +31,17 @@ describe("wrangler config", () => {
     }
   });
 
-  it("adds deployment capacity membership only in production without replacing the secret list", () => {
-    const productionVars = wranglerConfig.match(/"vars"\s*:\s*\{([^}]*)\}/)?.[1] ?? "";
-    expect(productionVars).toContain('"CRABBOX_DEPLOYMENT_CAPACITY_ADMIN_OWNERS": "github:25068"');
-    expect(configStringValues("CRABBOX_DEPLOYMENT_CAPACITY_ADMIN_OWNERS")).toEqual([
-      "github:25068",
-    ]);
-    expect(wranglerConfig.split(/"previews"\s*:/)[1]).not.toContain(
+  it("leaves individual memberships and lease policy overrides out of deployment config", () => {
+    for (const name of [
+      "CRABBOX_SERVE_ALLOWED_OWNERS",
       "CRABBOX_DEPLOYMENT_CAPACITY_ADMIN_OWNERS",
-    );
-    expect(configStringValues("CRABBOX_CAPACITY_ADMIN_OWNERS")).toEqual([]);
-    expect(productionVars).toContain('"CRABBOX_SHARED_CAPACITY_OVERRIDE_OWNERS": "github:25068"');
-    expect(configStringValues("CRABBOX_SHARED_CAPACITY_OVERRIDE_OWNERS")).toEqual(["github:25068"]);
-    expect(wranglerConfig.split(/"previews"\s*:/)[1]).not.toContain(
+      "CRABBOX_CAPACITY_ADMIN_OWNERS",
       "CRABBOX_SHARED_CAPACITY_OVERRIDE_OWNERS",
-    );
+      "CRABBOX_LEASE_POLICY_OVERRIDES",
+    ]) {
+      expect(configStringValues(name)).toEqual([]);
+    }
+    expect(wranglerConfig).not.toMatch(/github:\d+/);
   });
 
   it.each([
