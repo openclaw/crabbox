@@ -10,11 +10,15 @@ other tests exist:
 
 Adding, removing, or renaming an unlisted test therefore moves no other test;
 only edits to SLOW_TESTS move listed tests.
+
+Both lanes stream `go test -json` but print only what plain `go test` would:
+package output and the output of failed or unfinished tests. Each shard ends
+with the elapsed seconds of its listed tests and of unlisted tests at
+SLOW_SECONDS or more; the race shards' summaries calibrate SLOW_TESTS.
 """
 
 import argparse
 import hashlib
-import heapq
 import json
 import re
 import subprocess
@@ -24,6 +28,7 @@ import sys
 # only relative weights matter. List every test at 15 seconds or more: hashing
 # tests that large leaves shard totals uneven. Discovery fails while a listed
 # test is missing, so renaming one must update this list.
+SLOW_SECONDS = 0
 SLOW_TESTS = {
     "TestRunGitOverlaySuccessFallbackAndLateLocalEdit": 201,
     "TestRunDefaultSyncWithoutBash": 71,
@@ -59,10 +64,13 @@ SLOW_TESTS = {
 }
 
 
-def coverage_test(command):
-    """Stream Go's diagnostics and retain only ten top-level elapsed times."""
-    slowest = []
-    invalid = False
+def go_test(command):
+    """Hold each top-level test's output until it ends; print it only on failure.
+
+    A timeout panic can be attributed to a test that already passed, and the
+    hung test never ends, so output still held at exit is printed too.
+    """
+    held, timings, invalid = {}, [], False
     with subprocess.Popen(command + ["-json"], stdout=subprocess.PIPE, text=True) as child:
         for line in child.stdout:
             try:
@@ -71,16 +79,26 @@ def coverage_test(command):
                 print(line, end="", file=sys.stderr)
                 invalid = True
                 continue
-            print(event.get("Output", ""), end="", flush=True)
-            name = event.get("Test", "")
-            if event.get("Action") in ("pass", "fail") and name and "/" not in name:
-                heapq.heappush(slowest, (event.get("Elapsed", 0), name))
-                if len(slowest) > 10:
-                    heapq.heappop(slowest)
+            name, action = event.get("Test", ""), event.get("Action")
+            top = name.split("/")[0]
+            if not top:
+                print(event.get("Output", ""), end="", flush=True)
+                continue
+            held.setdefault(top, []).append(event.get("Output", ""))
+            if name != top or action not in ("pass", "fail", "skip"):
+                continue
+            output = "".join(held.pop(top))
+            if action == "fail":
+                print(output, end="", flush=True)
+            elapsed = event.get("Elapsed", 0)
+            if action != "skip" and (name in SLOW_TESTS or elapsed >= SLOW_SECONDS):
+                timings.append((elapsed, name))
         code = child.wait()
-    print("Slowest top-level tests (elapsed seconds; nested durations are not summed):")
-    for elapsed, name in sorted(slowest, reverse=True):
-        print(f"  {elapsed:.3f} {name}")
+    for output in held.values():
+        print("".join(output), end="")
+    print(f"Top-level seconds for SLOW_TESTS and unlisted tests >= {SLOW_SECONDS} s (subtests not summed):")
+    for elapsed, name in sorted(timings, reverse=True):
+        print(f"  {elapsed:.3f} {name}" + ("" if name in SLOW_TESTS else " (unlisted)"))
     return code or int(invalid)
 
 
@@ -126,8 +144,8 @@ def main():
     print(f"CLI shard {args.shard + 1}/{args.count}: {len(names)} tests", flush=True)
     command = common + ["-run", "^(" + "|".join(names) + ")$"]
     if args.coverprofile:
-        return coverage_test(command + ["-coverprofile=" + args.coverprofile])
-    return subprocess.run(command).returncode
+        command.append("-coverprofile=" + args.coverprofile)
+    return go_test(command)
 
 
 if __name__ == "__main__":

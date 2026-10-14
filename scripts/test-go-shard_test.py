@@ -62,49 +62,74 @@ class ShardTests(unittest.TestCase):
             self.assertEqual(shard.main(), 7)
         self.assertEqual(run.call_count, 1)
 
+    @patch.object(shard, "go_test", return_value=1)
     @patch.object(shard.subprocess, "run")
-    def test_runs_selected_tests_with_race_and_propagates_failure(self, run):
-        run.side_effect = [
-            subprocess.CompletedProcess([], 0, "TestA\nTestB\nExample\nFuzzInput\n", ""),
-            subprocess.CompletedProcess([], 1),
-        ]
+    def test_runs_selected_tests_with_race_and_propagates_failure(self, run, go_test):
+        run.return_value = subprocess.CompletedProcess([], 0, "TestA\nTestB\nExample\nFuzzInput\n", "")
         with patch("sys.argv", ["test-go-shard.py", "1", "2"]):
             self.assertEqual(shard.main(), 1)
-        self.assertEqual(run.call_args.args[0], [
+        self.assertEqual(go_test.call_args.args[0], [
             "go", "test", "-race", "-count=1", "-timeout=10m", "./internal/cli",
             "-run", "^(Example|FuzzInput|TestB)$",
         ])
 
-    @patch.object(shard, "coverage_test", return_value=7)
+    @patch.object(shard, "go_test", return_value=7)
     @patch.object(shard.subprocess, "run")
-    def test_coverage_is_explicit_and_propagates_failure(self, run, coverage):
+    def test_coverage_is_explicit_and_propagates_failure(self, run, go_test):
         run.return_value = subprocess.CompletedProcess([], 0, "TestA\nTestB\nExample\nFuzzInput\n", "")
         with patch("sys.argv", ["test-go-shard.py", "1", "3", "--coverprofile", "cli-1.out"]):
             self.assertEqual(shard.main(), 7)
         self.assertEqual(run.call_args.args[0], [
             "go", "test", "-count=1", "-timeout=20m", "-covermode=atomic", "./internal/cli", "-list", ".",
         ])
-        self.assertEqual(coverage.call_args.args[0], [
+        self.assertEqual(go_test.call_args.args[0], [
             "go", "test", "-count=1", "-timeout=20m", "-covermode=atomic", "./internal/cli",
             "-run", "^(FuzzInput|TestA)$", "-coverprofile=cli-1.out",
         ])
 
-    @patch.object(shard.subprocess, "Popen")
-    def test_timings_are_bounded_and_do_not_sum_subtests(self, popen):
+    def stream(self, popen, events, result=0):
         child = popen.return_value.__enter__.return_value
-        events = [{"Action": "pass", "Test": f"Test{i}", "Elapsed": i} for i in range(20)]
-        events += [{"Action": "pass", "Test": "Test19/child", "Elapsed": 999},
-                   {"Action": "pass", "Package": "fixture", "Elapsed": 1000},
-                   {"Action": "output", "Output": "diagnostic\n"}]
         child.stdout = [json.dumps(event) + "\n" for event in events]
-        child.wait.return_value = 0
+        child.wait.return_value = result
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            self.assertEqual(shard.coverage_test(["go", "test"]), 0)
-        lines = output.getvalue().splitlines()
-        self.assertEqual(lines[0], "diagnostic")
-        self.assertEqual(lines[2:], [f"  {i:.3f} Test{i}" for i in reversed(range(10, 20))])
+            code = shard.go_test(["go", "test"])
         self.assertEqual(popen.call_args.args[0], ["go", "test", "-json"])
+        return code, output.getvalue().splitlines()
+
+    @patch.object(shard.subprocess, "Popen")
+    def test_only_failed_or_unfinished_test_output_is_printed(self, popen):
+        def out(test, text):
+            return {"Action": "output", "Test": test, "Output": text + "\n"}
+        code, lines = self.stream(popen, [
+            {"Action": "output", "Output": "build note\n"},
+            out("TestPass", "=== RUN   TestPass"), out("TestPass/child", "passing log"),
+            {"Action": "pass", "Test": "TestPass/child"}, {"Action": "pass", "Test": "TestPass"},
+            out("TestSkip", "skip reason"), {"Action": "skip", "Test": "TestSkip"},
+            out("TestFail/child", "child broke"), {"Action": "fail", "Test": "TestFail/child"},
+            out("TestFail", "--- FAIL: TestFail"), {"Action": "fail", "Test": "TestFail"},
+            out("TestHang", "before hang"), out("TestPass", "panic: test timed out"),
+            {"Action": "output", "Output": "FAIL\tpackage\n"},
+        ], result=1)
+        self.assertEqual(code, 1)
+        self.assertEqual(lines[:6], [
+            "build note", "child broke", "--- FAIL: TestFail", "FAIL\tpackage",
+            "before hang", "panic: test timed out",
+        ])
+
+    @patch.object(shard.subprocess, "Popen")
+    def test_timings_list_slow_tests_and_do_not_sum_subtests(self, popen):
+        events = [{"Action": "pass", "Test": f"Test{i}", "Elapsed": i} for i in range(20)]
+        events += [{"Action": "fail", "Test": "TestFailed", "Elapsed": 30},
+                   {"Action": "skip", "Test": "TestSkipped", "Elapsed": 40},
+                   {"Action": "pass", "Test": "Test19/child", "Elapsed": 999},
+                   {"Action": "pass", "Package": "fixture", "Elapsed": 1000}]
+        with patch.object(shard, "SLOW_SECONDS", 15), patch.dict(shard.SLOW_TESTS, {"Test16": 1, "Test2": 1}):
+            self.assertEqual(self.stream(popen, events)[1][1:], [
+                "  30.000 TestFailed (unlisted)", "  19.000 Test19 (unlisted)",
+                "  18.000 Test18 (unlisted)", "  17.000 Test17 (unlisted)", "  16.000 Test16",
+                "  15.000 Test15 (unlisted)", "  2.000 Test2",
+            ])
 
     @patch.object(shard.subprocess, "Popen")
     def test_bad_json_or_failed_test_cannot_succeed(self, popen):
@@ -112,8 +137,7 @@ class ShardTests(unittest.TestCase):
         for result, lines, expected in [(9, [], 9), (0, ["not JSON\n"], 1)]:
             child.stdout, child.wait.return_value = lines, result
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(shard.coverage_test(["go", "test"]), expected)
-
+                self.assertEqual(shard.go_test(["go", "test"]), expected)
 
 if __name__ == "__main__":
     unittest.main()
