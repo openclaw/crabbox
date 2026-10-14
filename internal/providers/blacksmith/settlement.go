@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
 	"regexp"
+	"syscall"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -65,6 +67,61 @@ func blacksmithSettlementError(id string, err error) error {
 	return blacksmithCommandError{ExitError: core.ExitError{Code: 5, Message: fmt.Sprintf("Blacksmith GitHub settlement unresolved for %s; retaining claim/key for retry with the same organization/API: %v", id, err)}, cause: err}
 }
 
+func blacksmithGitHubCause(err error) string {
+	var exitErr *exec.ExitError
+	var startErr *exec.Error
+	switch {
+	case err == nil:
+		return "none"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.As(err, &exitErr):
+		return "exit"
+	case errors.As(err, &startErr):
+		return "start"
+	default:
+		return "other"
+	}
+}
+
+func (b *blacksmithBackend) githubCommand(ctx context.Context, args []string) (core.LocalCommandResult, error, string) {
+	issued := time.Now()
+	remaining := "unknown"
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining = fmt.Sprint(deadline.Sub(issued).Milliseconds())
+	}
+	result, rawErr := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
+		Name: "gh", Args: args, MaxCapturedOutputBytes: 16 * 1024,
+	})
+	elapsed := time.Since(issued)
+	// The runner records cancellation at the child watcher. A deadline observed
+	// after return is a separate fact, not evidence that it stopped the child.
+	cause, contextAfter := blacksmithGitHubCause(rawErr), blacksmithGitHubCause(ctx.Err())
+	err := blacksmithContextError(ctx, rawErr)
+	if err == nil && result.ExitCode == 0 {
+		return result, nil, ""
+	}
+	process, signal := "unknown", "unknown"
+	var exitErr *exec.ExitError
+	if errors.As(rawErr, &exitErr) && exitErr != nil && exitErr.ProcessState != nil {
+		if status, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			process, signal = "signaled", fmt.Sprint(int(status.Signal()))
+		} else if exitErr.ProcessState.Exited() {
+			process, signal = "exited", "none"
+		}
+	}
+	if err == nil {
+		err = errors.New("gh returned a nonzero exit code")
+	}
+	// Only typed, allowlisted facts cross the display boundary. Raw errors and
+	// captured API output may contain private paths or credentials.
+	diagnostic := fmt.Sprintf("gh exit=%d cause=%s process=%s signal=%s issued_at=%s elapsed_ms=%d remaining_budget_ms=%s context_after=%s",
+		result.ExitCode, cause, process, signal, issued.UTC().Format(time.RFC3339Nano), elapsed.Milliseconds(), remaining, contextAfter)
+	return result, err, diagnostic
+}
+
 // Use only existing gh access, pinned to the exact native github.com URL.
 // Missing access is uncertainty, not completion. Status remains read-only;
 // claim-fenced stop can also cancel this exact associated workflow.
@@ -73,19 +130,11 @@ func (b *blacksmithBackend) githubRunConclusion(ctx context.Context, runURL stri
 	if parts == nil || parts[2] == "." || parts[2] == ".." {
 		return "", fmt.Errorf("native status has no valid exact GitHub run URL")
 	}
-	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
-		Name: "gh",
-		Args: []string{"api", "--hostname", "github.com", "--method", "GET",
-			"repos/" + parts[1] + "/" + parts[2] + "/actions/runs/" + parts[3],
-			"--jq", "{id,html_url,status,conclusion}"},
-		MaxCapturedOutputBytes: 16 * 1024,
-	})
-	if err = blacksmithContextError(ctx, err); err != nil || result.ExitCode != 0 {
-		// Do not echo credential-bearing environment or arbitrary API diagnostics.
-		if err == nil {
-			err = errors.New("gh returned a nonzero exit code")
-		}
-		return "", blacksmithCommandError{ExitError: core.ExitError{Code: 5, Message: fmt.Sprintf("exact GitHub run read failed (gh exit=%d); existing gh access must be available", result.ExitCode)}, cause: err}
+	result, err, diagnostic := b.githubCommand(ctx, []string{"api", "--hostname", "github.com", "--method", "GET",
+		"repos/" + parts[1] + "/" + parts[2] + "/actions/runs/" + parts[3],
+		"--jq", "{id,html_url,status,conclusion}"})
+	if err != nil {
+		return "", blacksmithCommandError{ExitError: core.ExitError{Code: 5, Message: fmt.Sprintf("exact GitHub run read failed (%s); existing gh access must be available", diagnostic)}, cause: err}
 	}
 	var run struct {
 		ID         json.Number `json:"id"`
@@ -153,19 +202,15 @@ func (b *blacksmithBackend) cancelGitHubRun(ctx context.Context, claim core.Leas
 	if err := context.Cause(ctx); err != nil {
 		return false, err
 	}
-	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
-		Name: "gh",
-		Args: []string{"api", "--hostname", "github.com", "--method", "POST",
-			"repos/" + parts[1] + "/" + parts[2] + "/actions/runs/" + parts[3] + "/cancel"},
-		MaxCapturedOutputBytes: 16 * 1024,
-	})
-	if err = blacksmithContextError(ctx, err); err == nil && result.ExitCode == 0 {
+	_, err, diagnostic := b.githubCommand(ctx, []string{"api", "--hostname", "github.com", "--method", "POST",
+		"repos/" + parts[1] + "/" + parts[2] + "/actions/runs/" + parts[3] + "/cancel"})
+	if err == nil {
 		return true, nil // Accepted is not settled: the caller still verifies terminal state.
-	}
-	if ctx.Err() != nil {
-		return true, context.Cause(ctx)
 	}
 	// Native stop may already have initiated cancellation. Preserve a rejected
 	// request, but let the existing bounded terminal checks reconcile that race.
-	return true, fmt.Errorf("exact GitHub run cancellation failed (gh exit=%d); existing gh access must permit cancelling the owned workflow", result.ExitCode)
+	return true, blacksmithCommandError{ExitError: core.ExitError{
+		Code:    core.ExitCodeForError(context.Cause(ctx), 1),
+		Message: fmt.Sprintf("exact GitHub run cancellation failed (%s); existing gh access must permit cancelling the owned workflow", diagnostic),
+	}, cause: err}
 }

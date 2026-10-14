@@ -28,9 +28,15 @@ function fixture(t, settings = {}) {
   fs.copyFileSync(path.join(import.meta.dirname, "../internal/applevmhelper/vmd-entitlements.plist"),
     path.join(root, "internal/applevmhelper/vmd-entitlements.plist"));
   // Replace only the two absolute native metadata tools inside the isolated fixture.
-  const helper = fs.readFileSync(path.join(import.meta.dirname, "verify-macos-notarization.mjs"), "utf8")
+  let helper = fs.readFileSync(path.join(import.meta.dirname, "verify-macos-notarization.mjs"), "utf8")
     .replaceAll('"/usr/bin/log"', JSON.stringify(path.join(root, "bin", "log")))
     .replaceAll('"/usr/bin/sw_vers"', JSON.stringify(path.join(root, "bin", "sw_vers")));
+  assert.ok(helper.includes("const retryDelays = [5000, 15000];"));
+  helper = helper.replace("const retryDelays = [5000, 15000];", "const retryDelays = [100, 150];");
+  if (settings.cancelBackoff) {
+    helper = helper.replace("async function backoff(milliseconds) {",
+      'async function backoff(milliseconds) { setTimeout(() => process.kill(process.pid, "SIGTERM"), 20);');
+  }
   fs.writeFileSync(path.join(root, "scripts", "verify-macos-notarization.mjs"), helper);
   fs.symlinkSync(process.execPath, path.join(root, "bin", "node"));
   fs.writeFileSync(path.join(root, "settings.json"), JSON.stringify(settings));
@@ -52,17 +58,23 @@ else if (tool === "sw_vers") console.log("24A123");
 else if (tool === "plutil") fs.writeFileSync(args[3], JSON.stringify({"com.apple.security.virtualization": true}));
 else if (tool === "codesign") {
   if (args.includes("--check-notarization")) {
-    record("online"); fs.writeFileSync(path.join(root, "check-pid"), String(process.pid));
-    if (settings.checkSignal) process.kill(process.pid, settings.checkSignal);
+    record("online");
+    fs.writeFileSync(path.join(root, "check-pid.tmp"), String(process.pid));
+    fs.renameSync(path.join(root, "check-pid.tmp"), path.join(root, "check-pid"));
+    const attempt = fs.readFileSync(path.join(root, "events"), "utf8").trim().split("\n")
+      .map(JSON.parse).filter(e => e.event === "online").length;
+    const onlineStatus = settings.onlineStatuses?.[attempt-1] ?? settings.onlineStatus ?? 0;
+    const checkSignal = settings.checkSignals?.[attempt-1] ?? settings.checkSignal;
+    if (checkSignal) process.kill(process.pid, checkSignal);
     else if (settings.streamMode) {
       const done = setInterval(() => {
         if (fs.existsSync(path.join(root, "stream-complete"))) {
-          clearInterval(done); process.exit(settings.onlineStatus ?? 0);
+          clearInterval(done); process.exit(onlineStatus);
         }
       }, 20);
       setTimeout(() => process.exit(98), 10000);
     }
-    else setTimeout(() => process.exit(settings.onlineStatus ?? 0), 100);
+    else setTimeout(() => process.exit(onlineStatus), 100);
   } else if (args[0] === "-dvvv") process.stderr.write([
     "Identifier="+identifier, "Authority=Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)",
     "TeamIdentifier=FWJYW4S8P8", "CodeDirectory v=20500 size=1 flags=0x10000(runtime)",
@@ -73,6 +85,9 @@ else if (tool === "codesign") {
   else { record("signature"); process.exit(settings.signatureStatus ?? 0); }
 } else if (tool === "log") {
   record("observer");
+  const attempt = fs.readFileSync(path.join(root, "events"), "utf8").trim().split("\n")
+    .map(JSON.parse).filter(e => e.event === "observer").length;
+  for (const name of ["check-pid", "stream-complete"]) fs.rmSync(path.join(root, name), {force:true});
   if (settings.observer === "error") process.exit(1);
   if (settings.cancelBeforeReady) { process.kill(process.ppid, "SIGTERM"); setInterval(() => {},1000); return; }
   if (settings.observer !== "silent") console.log("Filtering the log data using fixture predicate");
@@ -85,23 +100,23 @@ else if (tool === "codesign") {
     const p = path.join(root, "check-pid"); if (!fs.existsSync(p)) return;
     clearInterval(timer);
     const pid = Number(fs.readFileSync(p));
-    const output = [null,
+    const defaultEvents = [null,
       {processID:pid, eventMessage:"trace é Error checking with notarization daemon: -67050 Error Domain=NSURLErrorDomain Code=-1005 PRIVATE_PATH https://private.invalid/token"},
       {processID:999999, eventMessage:"Error Domain=NSURLErrorDomain Code=-1001 PRIVATE_PATH"},
       {processID:999998, eventMessage:"ticket not available for "+"A".repeat(40)+" PRIVATE_PATH"},
       {processID:999997, eventMessage:"ticket not available for b"+"a".repeat(40)+"c PRIVATE_PATH"},
-    ].map(value => JSON.stringify(value)+"\n").join("");
+    ];
+    const messages = settings.attemptMessages?.[attempt-1] ?? settings.messages;
+    const output = (messages ? messages.map(eventMessage => ({processID:pid, eventMessage})) : defaultEvents)
+      .map(value => JSON.stringify(value)+"\n").join("");
     const complete = () => fs.writeFileSync(path.join(root,"stream-complete"),"yes");
     const emitTarget = () => process.stdout.write(output, complete);
     if (settings.streamMode === "flood") {
       const prefix = '{"processID":999996,"eventMessage":"';
       const suffix = '"}\n';
       const unrelated = prefix+"x".repeat(64-prefix.length-suffix.length)+suffix;
-      let sent = 0;
-      const flood = setInterval(() => {
-        process.stdout.write(unrelated);
-        if (++sent === 4500) { clearInterval(flood); setTimeout(emitTarget,20); }
-      }, 1);
+      // Keep the >256 KiB flood deterministic even on busy runners.
+      process.stdout.write(unrelated.repeat(4500), () => setTimeout(emitTarget,20));
     } else if (settings.streamMode === "oversized") {
       process.stdout.write("x".repeat(65537), () => {
         process.stdout.write(JSON.stringify({processID:pid,eventMessage:"Error checking with notarization daemon: -9999"})+"\n", emitTarget);
@@ -147,9 +162,10 @@ else if (tool === "codesign") {
   for (const event of events.filter((e) => e.event === "observer")) {
     assert.throws(() => process.kill(event.pid, 0), { code: "ESRCH" });
   }
-  const line = result.stderr.split("\n").find((value) => value.startsWith('{"type":"notarization-diagnostic"'));
+  const diagnostics = result.stderr.split("\n").filter((value) => value.startsWith('{"type":"notarization-diagnostic"')).map(JSON.parse);
+  const summaryLine = result.stderr.split("\n").find((value) => value.startsWith('{"type":"notarization-summary"'));
   const checks = fs.readFileSync(path.join(root, "checks"), "utf8").trim().split("\n").map(JSON.parse);
-  return { ...result, events, checks, diagnostic: line ? JSON.parse(line) : null, executed: fs.existsSync(path.join(root, "executed")) };
+  return { ...result, events, checks, diagnostic: diagnostics[0] ?? null, diagnostics, summary: summaryLine ? JSON.parse(summaryLine) : null, executed: fs.existsSync(path.join(root, "executed")) };
 }
 
 function assertStaticChecks(r) {
@@ -304,4 +320,108 @@ test("cancellation before observer readiness stops its group without launching a
   assert.equal(r.executed, false);
   const observerPID = r.events.find((e) => e.event === "observer").pid;
   assert.throws(() => process.kill(observerPID, 0), { code: "ESRCH" });
+});
+
+const transientMessages = [
+  "ordinary trace",
+  "ordinary trace Error Domain=NSOSStatusErrorDomain Code=-50",
+  "Error checking with notarization daemon: 3",
+];
+
+test("cold-start daemon failure retries the identical check and then permits execution", (t) => {
+  const r = fixture(t, { onlineStatuses: [3, 0], messages: transientMessages });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.executed, true);
+  assert.deepEqual(r.summary, { type: "notarization-summary", attempts: 2, exitCodes: [3, 0], exitCode: 0, verdict: "pass" });
+  assert.deepEqual(r.diagnostics.map(d => [d.attempt, d.exitCode]), [[1, 3]]);
+  const checks = r.events.filter(e => e.event === "online");
+  assert.equal(checks.length, 2);
+  assert.deepEqual(checks[0].args, checks[1].args);
+  assert.equal(r.events.filter(e => e.event === "observer").length, 2);
+});
+
+test("three transient failures exhaust retries, retain every diagnostic, and never execute", (t) => {
+  const r = fixture(t, { onlineStatus: 3, messages: transientMessages });
+  assert.equal(r.status, 3, r.stderr);
+  assert.equal(r.executed, false);
+  assert.deepEqual(r.summary.exitCodes, [3, 3, 3]);
+  assert.equal(r.summary.attempts, 3);
+  assert.equal(r.summary.verdict, "fail");
+  assert.deepEqual(r.diagnostics.map(d => d.attempt), [1, 2, 3]);
+  assert.equal(new Set(r.diagnostics.map(d => d.checkPID)).size, 3);
+  for (const diagnostic of r.diagnostics) {
+    assert.equal(diagnostic.exitCode, 3);
+    assert.equal(diagnostic.attributedEvents, 3);
+    assert.equal(diagnostic.observerState, "captured");
+  }
+});
+
+for (const [name, onlineStatus, messages] of [
+  ["non-3 exit", 1, transientMessages],
+  ["requirement rejection", 3, ["unsatisfied designated requirement"]],
+  ["invalid signature alongside daemon error", 3, [...transientMessages, "invalid signature"]],
+  ["wrong team alongside daemon error", 3, [...transientMessages, "wrong team"]],
+  ["requirement rejection alongside daemon error", 3, [...transientMessages, "unsatisfied designated requirement"]],
+  ["missing ticket alongside daemon error", 3, [...transientMessages, "ticket not available"]],
+  ["revoked hash alongside daemon error", 3, [...transientMessages, "Notarization daemon found revoked hash: abc"]],
+  ["different daemon error alongside code 3", 3, [...transientMessages, "Error checking with notarization daemon: -67050"]],
+  ["unknown evidence", 3, ["unclassified failure"]],
+]) {
+  test(`${name} never retries or executes`, (t) => {
+    const r = fixture(t, { onlineStatuses: [onlineStatus, 0], messages });
+    assert.equal(r.status, onlineStatus, r.stderr);
+    assert.equal(r.executed, false);
+    assert.deepEqual(r.summary.exitCodes, [onlineStatus]);
+    assert.equal(r.diagnostics.length, 1);
+    assert.equal(r.events.filter(e => e.event === "online").length, 1);
+  });
+}
+
+test("a non-transient second failure cannot reuse the first attempt's daemon evidence", (t) => {
+  const r = fixture(t, { onlineStatuses: [3, 3, 0], attemptMessages: [transientMessages, ["unclassified failure"]] });
+  assert.equal(r.status, 3, r.stderr);
+  assert.equal(r.executed, false);
+  assert.deepEqual(r.summary.exitCodes, [3, 3]);
+  assert.equal(r.diagnostics.length, 2);
+});
+
+test("a signaled retry preserves the signal status and never executes", (t) => {
+  const r = fixture(t, { onlineStatus: 3, messages: transientMessages, checkSignals: [null, "SIGKILL"] });
+  assert.equal(r.status, 137, r.stderr);
+  assert.equal(r.executed, false);
+  assert.deepEqual(r.summary.exitCodes, [3, 137]);
+});
+
+test("cancellation during backoff stops before another observer or check", (t) => {
+  const r = fixture(t, { onlineStatus: 3, messages: transientMessages, cancelBackoff: true });
+  assert.equal(r.status, 143, r.stderr);
+  assert.equal(r.executed, false);
+  assert.deepEqual(r.summary.exitCodes, [3]);
+  assert.equal(r.summary.exitCode, 143);
+  assert.equal(r.events.filter(e => e.event === "observer").length, 1);
+});
+
+for (const observer of ["error", "early", "silent"]) {
+  test(`transient-looking failure with ${observer} observer cannot retry`, (t) => {
+    const r = fixture(t, { onlineStatuses: [3, 0], messages: transientMessages, observer });
+    assert.equal(r.status, 3, r.stderr);
+    assert.deepEqual(r.summary.exitCodes, [3]);
+    assert.equal(r.executed, false);
+  });
+}
+
+test("truncated transient evidence cannot retry", (t) => {
+  const r = fixture(t, { onlineStatuses: [3, 0], messages: transientMessages, streamMode: "oversized" });
+  assert.equal(r.status, 3, r.stderr);
+  assert.equal(r.diagnostic.truncated, true);
+  assert.deepEqual(r.summary.exitCodes, [3]);
+  assert.equal(r.executed, false);
+});
+
+test("a third strict-check success permits execution", (t) => {
+  const r = fixture(t, { onlineStatuses: [3, 3, 0], messages: transientMessages });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.executed, true);
+  assert.deepEqual(r.summary.exitCodes, [3, 3, 0]);
+  assert.equal(r.diagnostics.length, 2);
 });
