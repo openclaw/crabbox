@@ -389,17 +389,25 @@ func checkCIGoContract(document *yaml.Node) error {
 		require(scalarNodeValue(shard) == fmt.Sprint(i), "CLI shards must be unique and exhaustive")
 	}
 	cliSteps := ciGoSteps(cliJob)
-	require(len(cliSteps) == 3, "CLI shards need setup and execution")
-	if len(cliSteps) == 3 && len(testSteps) >= 2 {
+	require(len(cliSteps) == 4, "CLI shards need setup, restored-cache retention, and execution")
+	if len(cliSteps) == 4 && len(testSteps) >= 2 {
 		for i := 0; i < 2; i++ {
 			want, _ := yaml.Marshal(testSteps[i])
 			got, _ := yaml.Marshal(cliSteps[i])
 			require(string(got) == string(want), "CLI shard setup must match core setup")
 		}
-		checkCommand(cliSteps[2], ciGoCommand{name: "Test CLI shard", run: "python3 scripts/test-go-shard.py ${{ matrix.shard }} 4"})
+		checkCommand(cliSteps[2], ciGoCommand{name: "Keep restored Go build cache", run: ciGoKeepCacheScript})
+		checkCommand(cliSteps[3], ciGoCommand{name: "Test CLI shard", run: "python3 scripts/test-go-shard.py ${{ matrix.shard }} 4"})
 	}
 	return errors.Join(findings...)
 }
+
+// The race build would otherwise trim restored non-race entries older than
+// Go's 5-day limit, and builtCLITestBinary would recompile them in every shard.
+const ciGoKeepCacheScript = `cache="$(go env GOCACHE)"
+mkdir -p "$cache"
+find "$cache" -type f -exec touch -c {} +
+`
 
 const ciGoRaceGateScript = `printf 'Go core: %s\nGo CLI shards: %s\n' "${CORE_RESULT:-missing}" "${CLI_RESULT:-missing}"
 [[ "${CORE_RESULT:-}" == success && "${CLI_RESULT:-}" == success ]]
@@ -565,7 +573,15 @@ func TestCIGoContractRejectsMutations(t *testing.T) {
 		{"race gate skip on failure", func(d *yaml.Node) { ciGoDelete(t, ciGoJob(d, "go-test"), "if") }},
 		{"race gate masks failure", func(d *yaml.Node) { ciGoSet(t, ciGoSteps(ciGoJob(d, "go-test"))[0], "run", "true") }},
 		{"wrong shard count", func(d *yaml.Node) {
-			ciGoSet(t, ciGoSteps(ciGoJob(d, "go-test-cli"))[2], "run", "python3 scripts/test-go-shard.py ${{ matrix.shard }} 3")
+			ciGoSet(t, ciGoSteps(ciGoJob(d, "go-test-cli"))[3], "run", "python3 scripts/test-go-shard.py ${{ matrix.shard }} 3")
+		}},
+		{"CLI shard trims restored cache", func(d *yaml.Node) {
+			steps := ciGoField(ciGoJob(d, "go-test-cli"), "steps")
+			steps.Content = append(steps.Content[:2], steps.Content[3:]...)
+		}},
+		{"CLI shard keeps cache after tests", func(d *yaml.Node) {
+			steps := ciGoSteps(ciGoJob(d, "go-test-cli"))
+			steps[2], steps[3] = steps[3], steps[2]
 		}},
 		{"cache ignores nested modules", func(d *yaml.Node) {
 			ciGoSet(t, ciGoField(ciGoSteps(ciGoJob(d, "go-test-core"))[1], "with"), "cache-dependency-path", "go.sum")
