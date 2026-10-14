@@ -24,43 +24,32 @@ import re
 import subprocess
 import sys
 
-# Top-level elapsed seconds from `go test -race -count=1 -json ./internal/cli`;
-# only relative weights matter. List every test at 15 seconds or more: hashing
-# tests that large leaves shard totals uneven. Discovery fails while a listed
-# test is missing, so renaming one must update this list.
-SLOW_SECONDS = 0
+# Rounded top-level seconds from the CI race shards' timing summaries; only
+# relative weights matter. List every test at SLOW_SECONDS or more: hashing
+# tests that large leaves shard totals uneven. Each shard's first
+# builtCLITestBinary caller also pays the one-time CLI build (about 140 s
+# under race); every shard pays it once, so leave it out of weights. Discovery
+# fails while a listed test is missing, so renaming one must update this list.
+SLOW_SECONDS = 15
 SLOW_TESTS = {
-    "TestRunGitOverlaySuccessFallbackAndLateLocalEdit": 201,
-    "TestRunDefaultSyncWithoutBash": 71,
     "TestCoordinatorStopAggregateGuestCleanupPreservesReleaseBudget": 64,
-    "TestFunctionalPOSIXPreflightOwner": 59,
-    "TestRunActionsWorkspaceRealFinalEffects": 54,
-    "TestCheckpointCaptureBuiltBinaryContract": 42,
-    "TestRunArtifactChangeWithFailureDownloadsE2E": 42,
-    "TestRunArtifactChangeE2E": 37,
-    "TestHybridSSHScriptRun": 32,
+    "TestWSLStageInitialHandoffBudgets": 38,
     "TestWaitForSSHReadyRealSSHTimeoutDiagnostic": 32,
-    "TestRunScriptFailureBundleScopesRetainedUploads": 32,
-    "TestVNCPasswordSSHProductionDeadline": 31,
     "TestHeartbeatCoordinatorWaitsForAccessRefresh": 31,
+    "TestRunGitOverlaySuccessFallbackAndLateLocalEdit": 31,
+    "TestVNCPasswordSSHProductionDeadline": 31,
     "TestWebVNCWebSocketHeaderDeadlineNetwork": 31,
-    "TestRunFunctionalPreflightContinuation": 30,
-    "TestRunDetachedGitSeedPreservesManifestAuthority": 26,
-    "TestRsyncStallTimeoutBehavior": 24,
-    "TestRunDirectorySourceActionsWorkspaceRejected": 22,
-    "TestRunCoordinatorCleanupOutcomes": 22,
+    "TestFunctionalPOSIXPreflightOwner": 29,
     "TestStopCoordinatorStalledLookup": 21,
-    "TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache": 21,
     "TestEgressOpenRemoteTimeoutLeaksPendingAndNeverClosesHostConn": 20,
-    "TestWarmupCreationRejectedTiming": 19,
-    "TestRemoteGitCoherenceRollsBackFailuresAndRetries": 19,
-    "TestFixedAcquisitionSerializesCLIReplayAcrossProcesses": 19,
-    "TestRunCommandLeaseCleanupQuiescesWorkspaceOwner": 19,
-    "TestCommandSelectorPrecedence": 19,
-    "TestRunLeaseRecoveryGuidance": 16,
+    "TestLocalActionsHydrationLiteralPaths": 20,
+    "TestRunDirectorySourceActionsWorkspaceRejected": 20,
     "TestCoordinatorStopReleasesAfterUnreachableGuestCleanup": 16,
+    "TestFixedAcquisitionSerializesCLIReplayAcrossProcesses": 16,
     "TestRunAdmissionFailureRetainsEffectiveAuthenticationAndRedactsWarning": 16,
-    "TestExecuteLocalActionsHydrationUsesCallerPlainManifestMode": 15,
+    "TestRunFunctionalPreflightContinuation": 16,
+    "TestWarmupCreationRejectedTiming": 16,
+    "TestRunActionsWorkspaceRealFinalEffects": 15,
 }
 
 
