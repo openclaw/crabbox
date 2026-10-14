@@ -309,8 +309,11 @@ cutover.
 
 ### Cloudflare Worker
 
-The `Deploy Coordinator` workflow deploys matching `main` changes and can also
-run manually. A missing `coordinator` environment API token fails the job.
+The `Deploy Coordinator` workflow deploys Worker runtime, configuration, and
+deployment-helper changes on `main` and can also run manually. Changes limited
+to `worker/test/**` do not trigger deployment; mixed changes still deploy when
+another changed path matches the workflow filters. A missing `coordinator`
+environment API token fails the job.
 Each upload is tagged with the full commit SHA. After all deployment steps,
 verification requires one Cloudflare version receiving 100% of traffic and
 an uncached public `/v1/health` response with that version ID and SHA tag.

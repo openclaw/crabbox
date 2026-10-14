@@ -1,15 +1,15 @@
 name: Deploy Coordinator
 
-# Deploys the crabbox-coordinator Worker whenever worker/** lands on main, so
-# production tracks main instead of drifting behind a manual `wrangler deploy`
-# (stale deploys are how a fixed-on-main OOM stayed broken in prod). Also
-# runnable on demand from the Actions tab.
+# Deploys the crabbox-coordinator Worker when runtime or deployment inputs land
+# on main, so production tracks main without redeploying for test-only changes.
+# Also runnable on demand from the Actions tab.
 on:
   push:
     branches:
       - main
     paths:
       - "worker/**"
+      - "!worker/test/**"
       - ".github/workflows/coordinator-deploy.yml"
       - "scripts/prepare-coordinator-deploy-secrets.mjs"
       - "scripts/verify-coordinator-deployment.mjs"

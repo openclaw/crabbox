@@ -143,6 +143,27 @@ function assertDeploy(event, secrets) {
   assert.deepEqual(event.secrets, secrets);
 }
 
+test("main deployment excludes coordinator tests while retaining deployment inputs", () => {
+  const paths = workflow.match(/    paths:\n((?:      - .*\n)+)/);
+  assert.ok(paths, "expected the actual push path filters");
+  assert.deepEqual(
+    paths[1]
+      .trim()
+      .split("\n")
+      .map((line) => line.trim()),
+    [
+      '- "worker/**"',
+      '- "!worker/test/**"',
+      '- ".github/workflows/coordinator-deploy.yml"',
+      '- "scripts/prepare-coordinator-deploy-secrets.mjs"',
+      '- "scripts/verify-coordinator-deployment.mjs"',
+      '- "scripts/verify-coordinator-lease-policy.mjs"',
+    ],
+  );
+  assert.doesNotMatch(workflow, /paths-ignore:/);
+  assert.match(workflow, /^  workflow_dispatch:$/m);
+});
+
 test("artifact-only deploy delivers the bundled pair with the Worker version", (t) => {
   const result = runDeploy(t, {
     CRABBOX_ARTIFACTS_CREDENTIALS_JSON: JSON.stringify(artifactPair),
