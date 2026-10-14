@@ -58,7 +58,9 @@ else if (tool === "sw_vers") console.log("24A123");
 else if (tool === "plutil") fs.writeFileSync(args[3], JSON.stringify({"com.apple.security.virtualization": true}));
 else if (tool === "codesign") {
   if (args.includes("--check-notarization")) {
-    record("online"); fs.writeFileSync(path.join(root, "check-pid"), String(process.pid));
+    record("online");
+    fs.writeFileSync(path.join(root, "check-pid.tmp"), String(process.pid));
+    fs.renameSync(path.join(root, "check-pid.tmp"), path.join(root, "check-pid"));
     const attempt = fs.readFileSync(path.join(root, "events"), "utf8").trim().split("\n")
       .map(JSON.parse).filter(e => e.event === "online").length;
     const onlineStatus = settings.onlineStatuses?.[attempt-1] ?? settings.onlineStatus ?? 0;
@@ -113,11 +115,8 @@ else if (tool === "codesign") {
       const prefix = '{"processID":999996,"eventMessage":"';
       const suffix = '"}\n';
       const unrelated = prefix+"x".repeat(64-prefix.length-suffix.length)+suffix;
-      let sent = 0;
-      const flood = setInterval(() => {
-        process.stdout.write(unrelated);
-        if (++sent === 4500) { clearInterval(flood); setTimeout(emitTarget,20); }
-      }, 1);
+      // Keep the >256 KiB flood deterministic even on busy runners.
+      process.stdout.write(unrelated.repeat(4500), () => setTimeout(emitTarget,20));
     } else if (settings.streamMode === "oversized") {
       process.stdout.write("x".repeat(65537), () => {
         process.stdout.write(JSON.stringify({processID:pid,eventMessage:"Error checking with notarization daemon: -9999"})+"\n", emitTarget);
