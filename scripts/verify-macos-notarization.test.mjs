@@ -31,8 +31,8 @@ function fixture(t, settings = {}) {
   let helper = fs.readFileSync(path.join(import.meta.dirname, "verify-macos-notarization.mjs"), "utf8")
     .replaceAll('"/usr/bin/log"', JSON.stringify(path.join(root, "bin", "log")))
     .replaceAll('"/usr/bin/sw_vers"', JSON.stringify(path.join(root, "bin", "sw_vers")));
-  assert.ok(helper.includes("const retryDelays = [5000, 15000];"));
-  helper = helper.replace("const retryDelays = [5000, 15000];", "const retryDelays = [100, 150];");
+  assert.ok(helper.includes("const retryDelays = [5000, 15000, 45000];"));
+  helper = helper.replace("const retryDelays = [5000, 15000, 45000];", "const retryDelays = [100, 150, 200];");
   if (settings.cancelBackoff) {
     helper = helper.replace("async function backoff(milliseconds) {",
       'async function backoff(milliseconds) { setTimeout(() => process.kill(process.pid, "SIGTERM"), 20);');
@@ -153,7 +153,7 @@ else if (tool === "codesign") {
   const result = spawnSync("/bin/bash", [path.join(root, "scripts", "verify-macos-binary.sh"),
     settings.identifier ?? "org.openclaw.crabbox", settings.archArgument ?? settings.binaryArch ?? "x86_64", binary,
     ...(settings.execute === false ? [] : ["--execute"])], {
-    encoding: "utf8", timeout: 15_000,
+    encoding: "utf8", timeout: 30_000,
     env: { PATH: `${root}/bin:/usr/bin:/bin`, HOME: `${root}/home`, TMPDIR: root, LANG: "C", LC_ALL: "C",
       ...(settings.foreignOnline === undefined ? {} : { CRABBOX_VERIFY_FOREIGN_ONLINE_NOTARIZATION: settings.foreignOnline }) },
   });
@@ -276,7 +276,7 @@ for (const streamMode of ["eof", "open-eof", "oversized-eof", "incomplete-eof"])
     const validTail = streamMode === "eof" || streamMode === "open-eof";
     assert.equal(r.status, 3, r.stderr);
     assert.equal(r.executed, false);
-    assert.equal(r.events.filter((e) => e.event === "online").length, 1);
+    assert.equal(r.events.filter((e) => e.event === "online").length, streamMode === "open-eof" ? 4 : 1);
     assert.equal(r.diagnostic.truncated, !validTail);
     assert.equal(r.diagnostic.observerState, streamMode === "open-eof" ? "captured" : "partial");
     assert.equal(r.diagnostic.attributedEvents, validTail ? 1 : 0);
@@ -340,15 +340,15 @@ test("cold-start daemon failure retries the identical check and then permits exe
   assert.equal(r.events.filter(e => e.event === "observer").length, 2);
 });
 
-test("three transient failures exhaust retries, retain every diagnostic, and never execute", (t) => {
+test("four transient failures exhaust retries, retain every diagnostic, and never execute", (t) => {
   const r = fixture(t, { onlineStatus: 3, messages: transientMessages });
   assert.equal(r.status, 3, r.stderr);
   assert.equal(r.executed, false);
-  assert.deepEqual(r.summary.exitCodes, [3, 3, 3]);
-  assert.equal(r.summary.attempts, 3);
+  assert.deepEqual(r.summary.exitCodes, [3, 3, 3, 3]);
+  assert.equal(r.summary.attempts, 4);
   assert.equal(r.summary.verdict, "fail");
-  assert.deepEqual(r.diagnostics.map(d => d.attempt), [1, 2, 3]);
-  assert.equal(new Set(r.diagnostics.map(d => d.checkPID)).size, 3);
+  assert.deepEqual(r.diagnostics.map(d => d.attempt), [1, 2, 3, 4]);
+  assert.equal(new Set(r.diagnostics.map(d => d.checkPID)).size, 4);
   for (const diagnostic of r.diagnostics) {
     assert.equal(diagnostic.exitCode, 3);
     assert.equal(diagnostic.attributedEvents, 3);
@@ -364,7 +364,6 @@ for (const [name, onlineStatus, messages] of [
   ["requirement rejection alongside daemon error", 3, [...transientMessages, "unsatisfied designated requirement"]],
   ["missing ticket alongside daemon error", 3, [...transientMessages, "ticket not available"]],
   ["revoked hash alongside daemon error", 3, [...transientMessages, "Notarization daemon found revoked hash: abc"]],
-  ["different daemon error alongside code 3", 3, [...transientMessages, "Error checking with notarization daemon: -67050"]],
   ["unknown evidence", 3, ["unclassified failure"]],
 ]) {
   test(`${name} never retries or executes`, (t) => {
@@ -376,6 +375,36 @@ for (const [name, onlineStatus, messages] of [
     assert.equal(r.events.filter(e => e.event === "online").length, 1);
   });
 }
+
+for (const daemonCode of [51, -67050]) {
+  test(`daemon codes ${daemonCode} and 3 retry and permit a later strict-check success`, (t) => {
+    const r = fixture(t, { onlineStatuses: [3, 0],
+      messages: [...transientMessages, `Error checking with notarization daemon: ${daemonCode}`] });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.executed, true);
+    assert.deepEqual(r.summary.exitCodes, [3, 0]);
+    assert.equal(r.diagnostics.length, 1);
+    assert.deepEqual(r.diagnostic.events.filter(e => e.category === "notarization-daemon-error").map(e => e.daemonCode), [3, daemonCode]);
+  });
+}
+
+test("daemon evidence attributed only by cdhash cannot authorize a retry", (t) => {
+  const r = fixture(t, { onlineStatuses: [3, 0],
+    messages: [`Error checking with notarization daemon: 51 ${"a".repeat(40)}`] });
+  assert.equal(r.status, 3, r.stderr);
+  assert.equal(r.executed, false);
+  assert.equal(r.diagnostic.events[0].attribution, "cdhash");
+  assert.deepEqual(r.summary.exitCodes, [3]);
+});
+
+test("omitted daemon events cannot authorize a retry", (t) => {
+  const r = fixture(t, { onlineStatuses: [3, 0], messages: transientMessages, streamMode: "groups" });
+  assert.equal(r.status, 3, r.stderr);
+  assert.equal(r.executed, false);
+  assert.equal(r.diagnostic.observerState, "captured");
+  assert.ok(r.diagnostic.omittedEvents > 0);
+  assert.deepEqual(r.summary.exitCodes, [3]);
+});
 
 test("a non-transient second failure cannot reuse the first attempt's daemon evidence", (t) => {
   const r = fixture(t, { onlineStatuses: [3, 3, 0], attemptMessages: [transientMessages, ["unclassified failure"]] });
@@ -424,4 +453,14 @@ test("a third strict-check success permits execution", (t) => {
   assert.equal(r.executed, true);
   assert.deepEqual(r.summary.exitCodes, [3, 3, 0]);
   assert.equal(r.diagnostics.length, 2);
+});
+
+test("a fourth strict-check success after mixed daemon codes permits execution", (t) => {
+  const mixedMessages = [...transientMessages, "Error checking with notarization daemon: 51"];
+  const r = fixture(t, { onlineStatuses: [3, 3, 3, 0],
+    attemptMessages: [transientMessages, mixedMessages, mixedMessages] });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.executed, true);
+  assert.deepEqual(r.summary, { type: "notarization-summary", attempts: 4, exitCodes: [3, 3, 3, 0], exitCode: 0, verdict: "pass" });
+  assert.deepEqual(r.diagnostics.map(d => d.attempt), [1, 2, 3]);
 });

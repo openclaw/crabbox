@@ -10,7 +10,7 @@ if (!binary || !["arm64", "x86_64"].includes(binaryArch)) {
 
 const lineLimit = 64 * 1024;
 const validCDHash = /^[0-9a-f]{40}$/.test(cdhash ?? "") ? cdhash : null;
-const retryDelays = [5000, 15000];
+const retryDelays = [5000, 15000, 45000];
 let interrupted;
 let cancelAttempt;
 let cancelBackoff;
@@ -28,7 +28,7 @@ function isTransient(status, diagnostic) {
   // Ordinary trace messages are unclassified; they cannot authorize a retry.
   const classified = diagnostic.events.filter((event) => event.category !== "unclassified");
   return classified.some((event) => event.attribution === "codesign-pid") &&
-    classified.every((event) => event.category === "notarization-daemon-error" && event.daemonCode === 3);
+    classified.every((event) => event.category === "notarization-daemon-error");
 }
 
 async function backoff(milliseconds) {
