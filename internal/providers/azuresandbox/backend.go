@@ -142,6 +142,11 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		return core.StatusView{}, err
 	}
 	view := core.StatusView{ID: claim.LeaseID, Slug: claim.Slug, Provider: providerName, TargetOS: core.TargetLinux, Network: core.NetworkPublic, ServerID: claim.CloudID}
+	expiresAt := claim.FixedCreateIntent.Attempt["expires_at"]
+	deadline, expiryErr := time.Parse(time.RFC3339Nano, expiresAt)
+	if expiryErr == nil {
+		view.ExpiresAt = expiresAt
+	}
 	if claim.FixedCreateIntent.State == "released" {
 		view.State = "deleted"
 		return view, nil
@@ -150,7 +155,17 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 	if err != nil {
 		return view, err
 	}
-	view.State, view.ServerID, view.Ready, view.Labels = s.State, s.ID, s.State == "Running", s.Labels
+	view.State, view.ServerID, view.Labels = s.State, s.ID, s.Labels
+	if expiryErr != nil {
+		return view, fmt.Errorf("ACA Sandbox allocation deadline is unavailable; reconcile this lease")
+	}
+	// Expiry ends execution admission, not resource ownership or cleanup duty.
+	// Check after observation so a deadline crossed during the read is terminal.
+	if !deadline.After(time.Now()) {
+		view.State = "expired"
+	} else {
+		view.Ready = s.State == "Running"
+	}
 	return view, nil
 }
 

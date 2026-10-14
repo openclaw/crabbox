@@ -62,6 +62,11 @@ common terminal receipt; cancellation alone is not proof of remote termination.
 The original TTL bounds execution admission and heartbeats. Platform auto-suspend
 uses the idle interval. Within that original TTL, warmup replay, commands, uploads
 and heartbeats resume an owned idle Sandbox and recheck ownership before use.
+Status and inspect expose that original deadline as `expiresAt`. Once it passes,
+an exactly observed owned allocation reports `state=expired` and `ready=false`,
+even if the physical Sandbox is still running. Its resource ID and ownership
+labels remain available for `stop`; expiry does not prove resource deletion.
+Missing or invalid allocation deadlines return a status error instead of readiness.
 Administratively disabled Sandboxes are never enabled automatically. Auto-delete
 runs after the Sandbox stops. Those platform
 policies are not an absolute wall-clock deletion guarantee. Transport failure or
