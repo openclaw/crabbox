@@ -2,30 +2,44 @@
 
 ## Unreleased
 
+## 0.78.0 - 2026-10-14
+
+### Highlights
+
+- **Donate spare capacity without slowing down your own work.** `crabbox serve` offers new leases only when host CPU, memory, user activity, and power policies allow; running leases continue, and the CLI and portal explain why a machine is busy. [PR 2838](https://github.com/openclaw/crabbox/pull/2838).
+- **Tell accepted release from confirmed cleanup.** Run history preserves retained or unconfirmed lease outcomes in the `cleanup` phase instead of claiming the machine has stopped. [PR 2819](https://github.com/openclaw/crabbox/pull/2819). Thanks @vincentkoc.
+- **Get the configured runtimes and clearer Testbox failures.** Native commands use the selected Node and Go versions, readiness waits for successful setup, and settlement and cleanup failures retain safe, phase-specific diagnostics. [PR 2818](https://github.com/openclaw/crabbox/pull/2818), [PR 2831](https://github.com/openclaw/crabbox/pull/2831), [PR 2835](https://github.com/openclaw/crabbox/pull/2835), [PR 2837](https://github.com/openclaw/crabbox/pull/2837). Thanks @vincentkoc.
+- **Verify release installs more reliably.** Native-host notarization checks, bounded cold-start retries, and attributable diagnostics improve macOS verification; Homebrew verification accepts the current egress runtime packs. [PR 2829](https://github.com/openclaw/crabbox/pull/2829), [PR 2836](https://github.com/openclaw/crabbox/pull/2836), [PR 2823](https://github.com/openclaw/crabbox/pull/2823), [PR 2828](https://github.com/openclaw/crabbox/pull/2828), [PR 2840](https://github.com/openclaw/crabbox/pull/2840). Thanks @vincentkoc.
+
+### Upgrade notes
+
+- Automation reading `lease.released` must use the `cleanup` phase and `leaseStopped=false` to distinguish an accepted release request from confirmed machine cleanup. [PR 2819](https://github.com/openclaw/crabbox/pull/2819). Thanks @vincentkoc.
+- Serve availability gating is enabled by default. Set `--availability always` only when a donor should accept new leases regardless of host activity; laptop defaults also require ten minutes of user idle and AC power. [PR 2838](https://github.com/openclaw/crabbox/pull/2838).
+
 ### Changed
 
 - Coordinator: remove per-owner lease lifetime overrides from the production configuration; every owner uses the global lease policy, and the deploy guard now protects the complete live override document generically. [PR 2830](https://github.com/openclaw/crabbox/pull/2830).
 
 ### Added
 
-- Serve: offer machines only while host CPU, memory, user activity, and power policies allow, with availability reasons, portal measurements, and a read-only local probe; running leases continue.
+- Serve: offer machines only while host CPU, memory, user activity, and power policies allow, with availability reasons, portal measurements, and a read-only local probe; running leases continue. [PR 2838](https://github.com/openclaw/crabbox/pull/2838).
 
 ### Fixed
 
 - Release verification: accept provenance schema 4 (egress runtime packs) in the installed-Homebrew verifier, checking it against the same exact filesystem-layout archive inventory as schema 3. [PR 2840](https://github.com/openclaw/crabbox/pull/2840).
 - Release verification: retry transient cold-start online notarization lookups twice with bounded backoff while retaining every failure diagnostic and rejecting signature or requirement failures. [PR 2836](https://github.com/openclaw/crabbox/pull/2836).
 - CI: Go CLI race shards keep the restored Go build cache, so the race build's cache trim no longer deletes the non-race packages the one-time CLI test build reuses; that build drops from about 135 s to about 30 s per shard. [PR 2833](https://github.com/openclaw/crabbox/pull/2833).
-- Testbox: announce readiness only after setup succeeds, so failed preparation does not keep an unprepared runner in its idle loop. [PR 2831](https://github.com/openclaw/crabbox/pull/2831).
+- Testbox: announce readiness only after setup succeeds, so failed preparation does not keep an unprepared runner in its idle loop. [PR 2831](https://github.com/openclaw/crabbox/pull/2831). Thanks @vincentkoc.
 - CI: skip production coordinator deployment for changes limited to Worker tests while retaining runtime, configuration, and deployment-helper triggers. [PR 2839](https://github.com/openclaw/crabbox/pull/2839). Thanks @vincentkoc.
 - CLI: distinguish accepted release from confirmed cleanup in run events, preserving retained or unconfirmed outcomes in the `cleanup` phase. [PR 2819](https://github.com/openclaw/crabbox/pull/2819). Thanks @vincentkoc.
 - Release verification: check online notarization on each binary's native macOS host while retaining foreign-architecture static checks and a manual online opt-in. [PR 2829](https://github.com/openclaw/crabbox/pull/2829).
-- Release verification: report bounded, attributable macOS notarization diagnostics without changing failed checks or executing rejected binaries. [PR 2823](https://github.com/openclaw/crabbox/pull/2823).
+- Release verification: report bounded, attributable macOS notarization diagnostics without changing failed checks or executing rejected binaries. [PR 2823](https://github.com/openclaw/crabbox/pull/2823). Thanks @vincentkoc.
 - CI: assign Go CLI race and coverage shards by test-name hash, with a checked-in weight list spreading known-slow tests, so adding a test no longer moves hundreds of existing tests between shards and pushes one past its 10-minute race timeout. [PR 2826](https://github.com/openclaw/crabbox/pull/2826).
 - CI: Go CLI race shards stream test events like the coverage shards, print only failed or unfinished test output, and end with listed and unlisted slow-test timings; the slow-test weights now come from those linux race timings. [PR 2832](https://github.com/openclaw/crabbox/pull/2832).
-- Release verification: retain attributable notarization errors after unrelated log floods, while bounding streamed records and sanitized diagnostics. [PR 2828](https://github.com/openclaw/crabbox/pull/2828).
-- Blacksmith Testbox: expose the configured Node and Go runtimes to native commands instead of using the runner image defaults. [PR 2818](https://github.com/openclaw/crabbox/pull/2818).
-- Blacksmith Testbox: report typed command causes and remaining cleanup budget when GitHub settlement fails, while keeping private error details out of CLI output. [PR 2835](https://github.com/openclaw/crabbox/pull/2835), thanks @vincentkoc.
-- Blacksmith Testbox: distinguish native status or stop failures from later cleanup phases, preserving command timing and typed causes with display-safe error diagnostics. Native stop output remains unchanged. [PR 2837](https://github.com/openclaw/crabbox/pull/2837), thanks @vincentkoc.
+- Release verification: retain attributable notarization errors after unrelated log floods, while bounding streamed records and sanitized diagnostics. [PR 2828](https://github.com/openclaw/crabbox/pull/2828). Thanks @vincentkoc.
+- Blacksmith Testbox: expose the configured Node and Go runtimes to native commands instead of using the runner image defaults. [PR 2818](https://github.com/openclaw/crabbox/pull/2818). Thanks @vincentkoc.
+- Blacksmith Testbox: report typed command causes and remaining cleanup budget when GitHub settlement fails, while keeping private error details out of CLI output. [PR 2835](https://github.com/openclaw/crabbox/pull/2835). Thanks @vincentkoc.
+- Blacksmith Testbox: distinguish native status or stop failures from later cleanup phases, preserving command timing and typed causes with display-safe error diagnostics. Native stop output remains unchanged. [PR 2837](https://github.com/openclaw/crabbox/pull/2837). Thanks @vincentkoc.
 
 ## 0.77.0 - 2026-10-13
 
