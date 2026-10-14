@@ -5,10 +5,38 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"testing"
 
 	"github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
+
+func BenchmarkPrintDisplaySafeError(b *testing.B) {
+	err := errors.Join(shared.ExitErrorWithCause(255, "native failure [redacted]", cli.Exit(23, "synthetic private diagnostic")), errors.New("cleanup failed"))
+	b.ReportAllocs()
+	for b.Loop() {
+		printError(io.Discard, err)
+	}
+}
+
+func TestPrintErrorHonorsDisplaySafeCauseBoundary(t *testing.T) {
+	raw := cli.Exit(23, "private provider credential")
+	safe := shared.ExitErrorWithCause(255, "native connection lost [redacted]", raw)
+	for _, err := range []error{safe, fmt.Errorf("wrapper: %w", safe), errors.Join(safe, errors.New("cleanup failed"))} {
+		var output bytes.Buffer
+		printError(&output, err)
+		if !errors.Is(err, raw) || cli.ExitCodeForError(err, 0) != 255 {
+			t.Fatal("typed cause or selected exit lost")
+		}
+		if bytes.Contains(output.Bytes(), []byte("private provider")) || !bytes.Contains(output.Bytes(), []byte("native connection lost")) {
+			t.Fatalf("unsafe CLI display: %q", output.String())
+		}
+		if _, joined := err.(interface{ Unwrap() []error }); joined && err != safe && !bytes.Contains(output.Bytes(), []byte("cleanup failed")) {
+			t.Fatal("safe boundary swallowed sibling cleanup")
+		}
+	}
+}
 
 func TestPrintErrorPreservesJoinedCauses(t *testing.T) {
 	cause := errors.New("boxd gRPC API returned FailedPrecondition: billing is not enabled")

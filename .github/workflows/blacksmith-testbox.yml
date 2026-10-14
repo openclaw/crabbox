@@ -37,6 +37,33 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Expose runtimes to Testbox shell
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Bind SSH commands to setup-selected runtimes; they do not inherit the Actions PATH.
+          node_bin="$(dirname "$(node -p 'process.execPath')")"
+          go_bin="$(go env GOROOT)/bin"
+          link_tool() {
+            local source="$1"
+            local target="/usr/local/bin/$2"
+            test -x "$source"
+            if [ -e "$target" ] && [ "$(readlink -f "$source")" = "$(readlink -f "$target")" ]; then
+              return
+            fi
+            sudo ln -sf "$source" "$target"
+          }
+          link_tool "$node_bin/node" node
+          link_tool "$node_bin/npm" npm
+          link_tool "$node_bin/npx" npx
+          link_tool "$go_bin/go" go
+          link_tool "$go_bin/gofmt" gofmt
+
       - name: Run Testbox
         # v2
         uses: useblacksmith/run-testbox@5ca05834db1d3813554d1dd109e5f2087a8d7cbc

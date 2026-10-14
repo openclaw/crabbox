@@ -260,7 +260,7 @@ esac
 case "$1" in
   --verify)
     if [[ "$*" == *--check-notarization* ]]; then
-      [[ "$*" == "--verify --strict --check-notarization -R=notarized --verbose=2 $binary" ]] || exit 98
+      [[ "$*" == "--verify --strict --check-notarization -R=notarized --verbose=4 $binary" ]] || exit 98
       ${notarizationFailure ? "exit 74" : "exit 0"}
     fi
     requirement=$(crabbox_release_designated_requirement "$identifier")
@@ -419,6 +419,18 @@ if [[ "\${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
     fs.rmSync(root, { recursive: true, force: true });
   }
 }
+
+test("Homebrew workflow runs full release verification on both native hosts", () => {
+  const workflow = fs.readFileSync(path.join(repoRoot, ".github/workflows/verify-homebrew.yml"), "utf8");
+  const job = workflow.split("\n  verify:\n")[1];
+  assert.ok(job);
+  assert.match(job, /runs-on: \$\{\{ matrix\.runner \}\}/);
+  assert.match(job, /runner: macos-15\n\s+arch: arm64/);
+  assert.match(job, /runner: macos-15-intel\n\s+arch: x86_64/);
+  assert.doesNotMatch(job.split("    steps:")[0], /\bif:|exclude:/);
+  assert.match(job, /scripts\/verify-homebrew-release\.sh/);
+  assert.match(source, /CRABBOX_VERIFY_EXEC_ARCH="\$native_arch"\s*\\\n\s*CRABBOX_VERIFY_MODE=static[\s\S]*"\$ROOT\/scripts\/verify-release\.sh"/);
+});
 
 test("Homebrew verifier checks immutable bytes before credential-free native installation", () => {
   const main = source.slice(source.indexOf("main() {"));

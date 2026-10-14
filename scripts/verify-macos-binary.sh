@@ -27,6 +27,12 @@ crabbox_release_assert_no_publication_tokens
   echo "native macOS release verification must run on macOS" >&2
   exit 1
 }
+HOST_ARCH=$(crabbox_release_normalize_macos_arch "$(uname -m)")
+FOREIGN_ONLINE_NOTARIZATION=${CRABBOX_VERIFY_FOREIGN_ONLINE_NOTARIZATION:-0}
+[[ "$FOREIGN_ONLINE_NOTARIZATION" == 0 || "$FOREIGN_ONLINE_NOTARIZATION" == 1 ]] || {
+  echo "CRABBOX_VERIFY_FOREIGN_ONLINE_NOTARIZATION must be 0 or 1" >&2
+  exit 2
+}
 [[ -f "$BINARY" && ! -L "$BINARY" && -x "$BINARY" ]] || {
   echo "release binary must be a regular executable file: $BINARY" >&2
   exit 2
@@ -93,14 +99,18 @@ if (!isDeepStrictEqual(actual, expected)) {
 }
 NODE
 fi
-codesign --verify --strict --check-notarization -R=notarized --verbose=2 "$BINARY"
+CDHASH=$(sed -n 's/^CDHash=//p' <<<"$SIGNATURE")
+if [[ "$HOST_ARCH" == "$ARCH" || "$FOREIGN_ONLINE_NOTARIZATION" == 1 ]]; then
+  node "$ROOT/scripts/verify-macos-notarization.mjs" "$BINARY" "$ARCH" "$CDHASH"
+else
+  echo "online notarization: skipped for $ARCH binary on $HOST_ARCH host; verified by the native $ARCH verifier"
+fi
 
 if [[ "$EXECUTE" == 1 ]]; then
   [[ "$IDENTIFIER" == "$CRABBOX_RELEASE_CLI_IDENTIFIER" ]] || {
     echo "candidate execution is supported only for the Crabbox CLI" >&2
     exit 2
   }
-  HOST_ARCH=$(uname -m)
   if [[ "$HOST_ARCH" == "$ARCH" ]]; then
     env -i LC_ALL=C PATH=/usr/bin:/bin:/usr/sbin:/sbin "$BINARY" --version
   elif [[ "$HOST_ARCH" == arm64 && "$ARCH" == x86_64 ]]; then

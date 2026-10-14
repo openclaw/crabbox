@@ -676,6 +676,16 @@ keeps its original exit status even if cleanup also fails.
 
 ### 2. Verify the draft natively
 
+Online notarization runs only when the binary architecture matches the native
+host; foreign binaries still receive every static signature, requirement,
+identity, and entitlement check. Both native hosts are required for complete
+draft, public-release, and Homebrew verification, including the arm64 helper,
+embedded VMD, and both companion runtimes from the amd64 archive. A local script
+invocation or draft-creation precheck covers only its host's online checks; the
+dual-host workflow supplies the complete gate. For local/manual diagnostics,
+set `CRABBOX_VERIFY_FOREIGN_ONLINE_NOTARIZATION=1` when invoking
+`scripts/verify-macos-binary.sh` to force the foreign online check (default `0`).
+
 Dispatch the protected-default verifier with the tag, tag-object ID, source
 commit, numeric draft ID, and protected workflow commit. Both native static and
 both dependent native execution jobs are required:

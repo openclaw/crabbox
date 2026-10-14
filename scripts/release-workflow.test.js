@@ -12,6 +12,40 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 const currentToolchain = releaseToolchainPolicy(repoRoot);
 const read = (file) => fs.readFileSync(path.join(repoRoot, file), "utf8");
 
+test("every release verifier workflow retains both native hosts and complete Darwin coverage", () => {
+  const callers = fs.readdirSync(path.join(repoRoot, ".github/workflows"))
+    .filter((name) => /scripts\/verify-(?:release|homebrew-release)\.sh/.test(read(`.github/workflows/${name}`)))
+    .sort();
+  assert.deepEqual(callers, ["release-assets.yml", "verify-homebrew.yml"]);
+  const workflow = read(".github/workflows/release-assets.yml");
+  for (const job of ["verify-native", "execute-native"]) {
+    const block = workflow.split(`\n  ${job}:\n`)[1]?.split(/\n  [\w-]+:\n/)[0];
+    assert.ok(block, `missing ${job}`);
+    assert.match(block, /runs-on: \$\{\{ matrix\.runner \}\}/);
+    assert.match(block, /runner: macos-15\n\s+arch: arm64/);
+    assert.match(block, /runner: macos-15-intel\n\s+arch: x86_64/);
+    assert.doesNotMatch(block.split("    steps:")[0], /\bif:|exclude:/);
+    assert.match(block, /VERIFY_ARCH: \$\{\{ matrix\.arch \}\}/);
+    assert.match(block, /CRABBOX_VERIFY_EXEC_ARCH="\$VERIFY_ARCH"/);
+    assert.match(block, /scripts\/verify-release\.sh/);
+  }
+  assert.match(workflow, /execute-native:[\s\S]*needs: \[guard, download-draft, verify-native\]/);
+  const verifier = read("scripts/verify-release.sh");
+  for (const [identifier, arch, binary] of [
+    ["CLI", "x86_64", "$WORK/darwin-amd64/crabbox"],
+    ["CLI", "arm64", "$WORK/darwin-arm64/crabbox"],
+    ["HELPER", "arm64", "$WORK/darwin-arm64/crabbox-apple-vm-helper"],
+    ["VMD", "arm64", "$embedded_vmd"],
+    ["RUNTIME", "x86_64", "$WORK/darwin-amd64/crabbox-runtime/darwin-amd64"],
+    ["RUNTIME", "arm64", "$WORK/darwin-amd64/crabbox-runtime/darwin-arm64"],
+  ]) {
+    assert.ok(verifier.includes(`"$CRABBOX_RELEASE_${identifier}_IDENTIFIER" ${arch} "${binary}"`), binary);
+  }
+  const runtimeChecks = verifier.slice(verifier.indexOf('if [[ "$runtime_pack" == final-filesystem ||'), verifier.indexOf('embedded_vmd='));
+  assert.doesNotMatch(runtimeChecks, /\$EXEC_ARCH|\$host_arch/);
+  assert.match(read("scripts/publish-release.sh"), /for arch in arm64 x86_64; do/);
+});
+
 test("release workflow is verifier-only, protected-default, dual-native, and token-bounded", () => {
   const workflow = read(".github/workflows/release-assets.yml");
   assert.match(workflow, /^  workflow_dispatch:$/m);
@@ -1115,6 +1149,7 @@ test("signing and verification enforce Foundation identity, runtime, timestamp, 
   const config = read("scripts/release-config.sh");
   const signer = read("scripts/codesign-macos.sh");
   const verifier = read("scripts/verify-macos-binary.sh");
+  const notarization = read("scripts/verify-macos-notarization.mjs");
   const packager = read("scripts/package-release.sh");
   assert.match(config, /Developer ID Application: OpenClaw Foundation/);
   assert.match(config, /FWJYW4S8P8/);
@@ -1125,8 +1160,11 @@ test("signing and verification enforce Foundation identity, runtime, timestamp, 
   assert.match(signer, /notarytool submit/);
   assert.match(signer, /--keychain "\$MAC_RELEASE_CODESIGN_KEYCHAIN"/);
   assert.match(signer, /NOTARY_STATUS.*Accepted/);
+  assert.match(signer, /--verify --strict --check-notarization -R=notarized/);
+  assert.match(verifier, /node "\$ROOT\/scripts\/verify-macos-notarization\.mjs"/);
+  assert.match(notarization, /"--verify", "--strict", "--check-notarization", "-R=notarized"/);
+  assert.match(read("scripts/verify-homebrew-release.sh"), /PROTECTED_HOMEBREW_TOOLING=\([\s\S]*scripts\/verify-macos-notarization\.mjs[\s\S]*?\n\)/);
   for (const script of [signer, verifier]) {
-    assert.match(script, /--verify --strict --check-notarization -R=notarized/);
     assert.match(script, /Authority=\$CRABBOX_RELEASE_AUTHORITY/);
     assert.match(script, /TeamIdentifier=\$CRABBOX_RELEASE_TEAM_ID/);
     assert.doesNotMatch(script, /\bspctl\b|stapler/);

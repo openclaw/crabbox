@@ -26,6 +26,7 @@ PROTECTED_HOMEBREW_TOOLING=(
   scripts/verify-go-release-binary.mjs
   scripts/verify-homebrew-release.sh
   scripts/verify-macos-binary.sh
+  scripts/verify-macos-notarization.mjs
   scripts/verify-release.sh
   scripts/verify-release-source.sh
 )

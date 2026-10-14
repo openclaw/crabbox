@@ -381,6 +381,9 @@ type sandboxRunError struct {
 
 func (e *sandboxRunError) Unwrap() []error { return []error{e.ExitError, e.cause} }
 
+// DiagnosticMessage is the display boundary; causes remain available to Is/As.
+func (e *sandboxRunError) DiagnosticMessage() string { return e.Message }
+
 func (e *sandboxRunError) RunClassificationCause() error {
 	return core.PrimaryRunClassificationCause(e.cause)
 }

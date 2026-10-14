@@ -171,6 +171,13 @@ Overrides use `defaultTTLSeconds`, `defaultIdleTimeoutSeconds`, `maxTTLSeconds`,
 {"orgs":{"example-org":{"maxTTLSeconds":7200}},"owners":{"alice@example.com":{"autoExtend":"deny"}}}
 ```
 
+The production deploy guard accepts one or more explicitly authorized GitHub
+owner IDs (`github:<positive integer>`). Each must declare an integer
+`maxTTLSeconds` in the source override document. Only those maximums may differ
+from the live binding, including a new owner entry containing only that field;
+all other owner, organization, and policy fields must be preserved. The guard
+stops deployment if it cannot read and compare the live override document.
+
 Create requests are clamped rather than rejected, including older clients asking
 for 24h TTL and 5h idle. Denied extension clamps create TTL to the effective
 default, and idle timeout never exceeds the effective TTL. Lease responses
