@@ -295,21 +295,27 @@ printf '%s\n' '{"id":123456789,"html_url":"https://github.com/example-org/my-app
 		return
 	}
 	if mode != "run" {
-		wantCode, wantCalls, reason := 1, 3, "authentication unavailable for synthetic status query"
+		wantCode, wantCalls, reason := 1, 3, "blacksmith testbox status exit=7 cause=exit"
+		phase := "reconciliation"
 		switch mode {
 		case "preflight":
 			wantCode, wantCalls = 7, 1
 		case "missing-status":
-			reason = `unknown command "status" for "blacksmith testbox"`
+			reason = "blacksmith testbox status exit=2 cause=exit"
 		case "late-status":
 			wantCalls = 4
+			phase = "final-verification"
 		case "late-artifacts":
 			wantCalls, reason = 4, "local connection artifacts"
+			phase = "connection-removal"
 		}
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() != wantCode || strings.Count(stderr.String(), reason) != 1 {
 			t.Errorf("CLI diagnostic/code lost: err=%v stderr=%s", err, stderr.String())
 		}
-		if mode != "preflight" && (strings.Count(stderr.String(), "blacksmith failed: exit status 1") != 1 || !strings.Contains(stderr.String(), "HTTP 409")) {
+		if !strings.Contains(stderr.String(), "phase="+phase) || strings.Contains(stderr.String(), "authentication unavailable for synthetic status query") || strings.Contains(stderr.String(), `unknown command "status"`) {
+			t.Errorf("cleanup phase missing or raw status diagnostics leaked: %s", stderr.String())
+		}
+		if mode != "preflight" && (strings.Count(stderr.String(), "blacksmith testbox stop exit=1 cause=exit") != 1 || !strings.Contains(stderr.String(), "HTTP 409")) {
 			t.Errorf("native stop diagnostic lost or repeated: %s", stderr.String())
 		}
 		if strings.Contains(stderr.String(), "cleanup reconciled") {

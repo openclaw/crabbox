@@ -11,6 +11,7 @@
 - Release verification: retry transient cold-start online notarization lookups twice with bounded backoff while retaining every failure diagnostic and rejecting signature or requirement failures. [PR 2836](https://github.com/openclaw/crabbox/pull/2836).
 - CI: Go CLI race shards keep the restored Go build cache, so the race build's cache trim no longer deletes the non-race packages the one-time CLI test build reuses; that build drops from about 135 s to about 30 s per shard. [PR 2833](https://github.com/openclaw/crabbox/pull/2833).
 - Testbox: announce readiness only after setup succeeds, so failed preparation does not keep an unprepared runner in its idle loop. [PR 2831](https://github.com/openclaw/crabbox/pull/2831).
+- CLI: distinguish accepted release from confirmed cleanup in run events, preserving retained or unconfirmed outcomes in the `cleanup` phase. [PR 2819](https://github.com/openclaw/crabbox/pull/2819). Thanks @vincentkoc.
 - Release verification: check online notarization on each binary's native macOS host while retaining foreign-architecture static checks and a manual online opt-in. [PR 2829](https://github.com/openclaw/crabbox/pull/2829).
 - Release verification: report bounded, attributable macOS notarization diagnostics without changing failed checks or executing rejected binaries. [PR 2823](https://github.com/openclaw/crabbox/pull/2823).
 - CI: assign Go CLI race and coverage shards by test-name hash, with a checked-in weight list spreading known-slow tests, so adding a test no longer moves hundreds of existing tests between shards and pushes one past its 10-minute race timeout. [PR 2826](https://github.com/openclaw/crabbox/pull/2826).
@@ -18,7 +19,7 @@
 - Release verification: retain attributable notarization errors after unrelated log floods, while bounding streamed records and sanitized diagnostics. [PR 2828](https://github.com/openclaw/crabbox/pull/2828).
 - Blacksmith Testbox: expose the configured Node and Go runtimes to native commands instead of using the runner image defaults. [PR 2818](https://github.com/openclaw/crabbox/pull/2818).
 - Blacksmith Testbox: report typed command causes and remaining cleanup budget when GitHub settlement fails, while keeping private error details out of CLI output. [PR 2835](https://github.com/openclaw/crabbox/pull/2835), thanks @vincentkoc.
-- CLI: distinguish accepted release from confirmed cleanup in run events, preserving retained or unconfirmed outcomes in the `cleanup` phase. [PR 2819](https://github.com/openclaw/crabbox/pull/2819). Thanks @vincentkoc.
+- Blacksmith Testbox: distinguish native status or stop failures from later cleanup phases, preserving command timing and typed causes with display-safe error diagnostics. Native stop output remains unchanged. [PR 2837](https://github.com/openclaw/crabbox/pull/2837), thanks @vincentkoc.
 
 ## 0.77.0 - 2026-10-13
 
