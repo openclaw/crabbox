@@ -687,12 +687,14 @@ set `CRABBOX_VERIFY_FOREIGN_ONLINE_NOTARIZATION=1` when invoking
 `scripts/verify-macos-binary.sh` to force the foreign online check (default `0`).
 
 A fresh macOS host can transiently fail its first online notarization lookup.
-The verifier retries the identical strict check at most twice, after 5 and 15
-seconds, only for exit 3 with an attributed notarization-daemon error code 3 and
-complete diagnostics without a conflicting classified failure. Each failed
-attempt and the final verdict remain visible. Signature, identity, designated
-requirement, revoked-hash, missing-ticket, other daemon errors, unknown failures,
-and interrupted checks are never retried; rejected binaries are never executed.
+The verifier runs the identical strict check at most four times, with retry
+delays of 5, 15, and 45 seconds, only for exit 3 with complete diagnostics and
+zero omitted events. At least one classified event must be attributed to the
+codesign PID, and every classified event must be a notarization-daemon error;
+any daemon code within that category is eligible. Each failed attempt and the
+final verdict remain visible. Signature, identity, designated requirement,
+revoked-hash, missing-ticket, unknown failures, and interrupted checks are never
+retried; rejected binaries are never executed.
 
 Dispatch the protected-default verifier with the tag, tag-object ID, source
 commit, numeric draft ID, and protected workflow commit. Both native static and
