@@ -27,9 +27,9 @@ import sys
 # Rounded top-level seconds from the CI race shards' timing summaries; only
 # relative weights matter. List every test at SLOW_SECONDS or more: hashing
 # tests that large leaves shard totals uneven. Each shard's first
-# builtCLITestBinary caller also pays the one-time CLI build (about 140 s
-# under race); every shard pays it once, so leave it out of weights. Discovery
-# fails while a listed test is missing, so renaming one must update this list.
+# builtCLITestBinary caller also pays the one-time CLI build; every shard pays
+# it once, so leave it out of weights. Discovery fails while a listed test is
+# missing, so renaming one must update this list.
 SLOW_SECONDS = 15
 SLOW_TESTS = {
     "TestCoordinatorStopAggregateGuestCleanupPreservesReleaseBudget": 64,
