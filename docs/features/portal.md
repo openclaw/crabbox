@@ -187,9 +187,11 @@ dedicated host opens the matching visibility-only detail page. Unattached host
 details and host-pinned launch commands require admin authentication.
 
 Owners enabled for [serve](../providers/serve.md) also see a **Machines** section
-below the fleet and a **machines online** readout when they have donated machines.
-It shows connection and draining status, last heartbeat age, used/offered and free
-CPU and memory, allocated lease links and limits, runtime and agent versions,
+below the fleet and a **machines available** readout when they have donated machines.
+It counts online, non-draining machines whose availability permits new leases.
+The section shows availability and reasons, measured host CPU, console idle time,
+power source, connection and draining status, last heartbeat age, used/offered and
+free CPU and memory, allocated lease links and limits, runtime and agent versions,
 labels, and the advertised SSH front door. Search and status filters apply only
 to this section. Machine visibility is owner- and organization-scoped, including
 for admins; disabled owners and owners without machines see no serve section.

@@ -6,6 +6,10 @@
 
 - Coordinator: remove per-owner lease lifetime overrides from the production configuration; every owner uses the global lease policy, and the deploy guard now protects the complete live override document generically. [PR 2830](https://github.com/openclaw/crabbox/pull/2830).
 
+### Added
+
+- Serve: offer machines only while host CPU, memory, user activity, and power policies allow, with availability reasons, portal measurements, and a read-only local probe; running leases continue.
+
 ### Fixed
 
 - Release verification: accept provenance schema 4 (egress runtime packs) in the installed-Homebrew verifier, checking it against the same exact filesystem-layout archive inventory as schema 3. [PR 2840](https://github.com/openclaw/crabbox/pull/2840).

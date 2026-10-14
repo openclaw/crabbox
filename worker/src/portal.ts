@@ -225,8 +225,8 @@ export function portalHome(
       : "",
     machines.length > 0
       ? `<a class="fleet-tile" href="#machines">
-          <span class="fleet-tile-label">machines online</span>
-          <strong class="fleet-tile-value">${machines.filter((machine) => machine.online).length}/${machines.length}</strong>
+          <span class="fleet-tile-label">machines available</span>
+          <strong class="fleet-tile-value">${machines.filter((machine) => machine.online && !machine.draining && (!machine.availability || machine.availability.state === "available")).length}/${machines.length}</strong>
           <span class="fleet-tile-detail">your donated capacity</span>
         </a>`
       : "",
@@ -290,6 +290,12 @@ function portalMachines(machines: ServeMachineView[]): string {
     .toSorted((a, b) => a.name.localeCompare(b.name) || a.machineID.localeCompare(b.machineID))
     .map((machine) => {
       const connection = machine.online ? "online" : "offline";
+      const availability = machine.availability;
+      const state = availability?.state ?? "available";
+      const availabilityLabel = [state, ...(availability?.reasons ?? [])].join(" · ");
+      const measurements = availability
+        ? `host CPU ${availability.hostCPU === null ? "unknown" : `${Math.round(availability.hostCPU * 100)}%`} · user idle ${availability.userIdleSeconds === null ? "unknown" : `${Math.floor(availability.userIdleSeconds)}s`} · power ${availability.power}`
+        : "";
       const labels = Object.entries(machine.labels)
         .map(([key, value]) => `${key}=${value}`)
         .join(" · ");
@@ -301,8 +307,8 @@ function portalMachines(machines: ServeMachineView[]): string {
         .join("");
       return `<tr data-filter-tags="${connection}${machine.draining ? " draining" : ""}">
         <td><div class="lease-link"><strong>${escapeHTML(machine.name)}</strong><small title="${escapeHTML(machine.machineID)}">${escapeHTML(machine.machineID.slice(0, 8))} · ${escapeHTML(machine.os)}/${escapeHTML(machine.arch)}</small>${labels ? `<small>${escapeHTML(labels)}</small>` : ""}</div></td>
-        <td><div class="state-stack"><span class="${badgeClass(machine.online ? "ok" : "neutral")}">${connection}</span>${machine.draining ? `<span class="${badgeClass("warn")}">draining</span>` : ""}<small>seen ${escapeHTML(relativeTime(new Date(machine.lastHeartbeat).toISOString()))}</small></div></td>
-        <td><div class="lease-link"><strong>${machine.cpus - machine.freeCPUs}/${machine.cpus} CPUs · ${machine.memoryMB - machine.freeMemoryMB}/${machine.memoryMB} MiB</strong><small>${machine.freeCPUs} CPUs · ${machine.freeMemoryMB} MiB free</small></div></td>
+        <td><div class="state-stack"><span class="${badgeClass(machine.online ? "ok" : "neutral")}">${connection}</span><span class="${badgeClass(state === "available" ? "ok" : state === "busy" ? "warn" : "neutral")}">${escapeHTML(availabilityLabel)}</span>${machine.draining ? `<span class="${badgeClass("warn")}">draining</span>` : ""}<small>seen ${escapeHTML(relativeTime(new Date(machine.lastHeartbeat).toISOString()))}</small>${measurements ? `<small>${escapeHTML(measurements)}</small>` : ""}</div></td>
+        <td><div class="lease-link"><strong>${machine.allocatedCPUs}/${machine.cpus} CPUs · ${machine.allocatedMemoryMB}/${machine.memoryMB} MiB</strong><small>${machine.freeCPUs} CPUs · ${machine.freeMemoryMB} MiB free</small></div></td>
         <td><div class="machine-leases"><span>${machine.allocatedLeases}/${machine.maxLeases} allocated</span>${leases || `<span class="muted">No allocated leases.</span>`}</div></td>
         <td><div class="lease-link"><strong>${escapeHTML(machine.runtime)} ${escapeHTML(machine.runtimeVersion)}</strong><small>agent ${escapeHTML(machine.agentVersion)}</small><small>${escapeHTML(machine.address)}:${machine.frontDoor.port}</small></div></td>
       </tr>`;
@@ -311,7 +317,7 @@ function portalMachines(machines: ServeMachineView[]): string {
   return `<section class="panel table-panel fleet-panel" id="machines" aria-labelledby="machines-heading">
     <div class="section-head"><h2 id="machines-heading">Machines</h2><span>${machines.length} donated · owner only</span></div>
     <table class="machine-table" data-portal-table data-page-size="10" data-search-placeholder="search machines, labels, leases…" data-filter-buttons="all:all,online:online,offline:offline,draining:draining">
-      <thead><tr><th>machine</th><th>connection</th><th>capacity used / offered</th><th>leases</th><th>runtime / endpoint</th></tr></thead>
+      <thead><tr><th>machine</th><th>connection / availability</th><th>capacity used / offered</th><th>leases</th><th>runtime / endpoint</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
   </section>`;

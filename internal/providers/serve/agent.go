@@ -26,6 +26,7 @@ import (
 )
 
 type machine struct {
+	Availability   *availability     `json:"availability,omitempty"`
 	Image          string            `json:"image"`
 	MachineID      string            `json:"machineID"`
 	FrontDoor      frontDoorEndpoint `json:"frontDoor"`
@@ -79,6 +80,7 @@ type localState struct {
 	Assignments map[string]assignment `json:"assignments"`
 }
 type options struct {
+	availability            availabilityPolicy
 	cpus                    int
 	memory                  string
 	maxLeases               int
@@ -90,18 +92,23 @@ type options struct {
 	noCache, drain          bool
 }
 type agent struct {
-	relayMu               sync.Mutex
-	relays                map[string]bool
-	lastHeartbeatReturned time.Time
-	opts                  options
-	state                 localState
-	coord                 *core.CoordinatorClient
-	containers            containerRuntime
-	rt                    core.Runtime
-	volumes               []core.CacheVolumeConfig
-	frontDoor             *frontDoor
-	detectAddresses       func() ([]addressCandidate, error)
-	startPreparation      func(context.Context)
+	availabilityMu          sync.Mutex
+	availabilityResult      availability
+	availabilityAt          time.Time
+	availabilityInventory   []localcontainer.ServedContainer
+	availabilityInventoryAt time.Time
+	relayMu                 sync.Mutex
+	relays                  map[string]bool
+	lastHeartbeatReturned   time.Time
+	opts                    options
+	state                   localState
+	coord                   *core.CoordinatorClient
+	containers              containerRuntime
+	rt                      core.Runtime
+	volumes                 []core.CacheVolumeConfig
+	frontDoor               *frontDoor
+	detectAddresses         func() ([]addressCandidate, error)
+	startPreparation        func(context.Context)
 }
 type containerRuntime interface {
 	List(context.Context) ([]localcontainer.ServedContainer, error)
@@ -173,6 +180,16 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	fs.BoolVar(&o.noCache, "no-cache-volumes", false, "Disable package-cache named volumes")
 	fs.BoolVar(&o.drain, "drain-on-exit", false, "Remove owned containers on exit")
 	jsonOutput := fs.Bool("json", false, "Print JSON for machines/status")
+	probe := fs.Bool("probe", false, "Sample availability without registration or changes (status only)")
+	probeDuration := fs.Duration("probe-duration", 7*time.Minute, "Read-only availability probe duration (1m-1h)")
+	// An unknown form factor takes the conservative laptop defaults.
+	powerCtx, cancelPower := context.WithTimeout(ctx, time.Second)
+	_, laptop, _ := samplePower(powerCtx, rt.Exec)
+	cancelPower()
+	policy, err := availabilityFlags(fs, cfg.Serve.Availability, laptop)
+	if err != nil {
+		return err
+	}
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -182,12 +199,22 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected serve arguments")
 	}
+	if err := policy.validate(); err != nil {
+		return err
+	}
+	o.availability = *policy
 	o.stateDir, err = filepath.Abs(o.stateDir)
 	if err != nil {
 		return err
 	}
 	if o.sshPort < 1 || o.sshPort > 65535 {
 		return fmt.Errorf("--ssh-port must be in 1-65535")
+	}
+	if *probe {
+		if command != "status" {
+			return fmt.Errorf("--probe requires serve status")
+		}
+		return probeAvailability(ctx, cfg, rt, o, *probeDuration, *jsonOutput)
 	}
 	if command == "install" || command == "uninstall" {
 		return service(ctx, command, o, rt)
@@ -226,7 +253,7 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 			return json.NewEncoder(rt.Stdout).Encode(result)
 		}
 		for _, m := range result.Machines {
-			fmt.Fprintf(rt.Stdout, "%s %s online=%t cpus=%d memoryMB=%d\n", m.MachineID, m.Name, m.Online, m.CPUs, m.MemoryMB)
+			fmt.Fprintf(rt.Stdout, "%s %s online=%t cpus=%d memoryMB=%d availability=%s\n", m.MachineID, m.Name, m.Online, m.CPUs, m.MemoryMB, availabilityText(m.Availability))
 		}
 		return nil
 	}
@@ -315,6 +342,14 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 }
 
 func (a *agent) run(ctx context.Context) error {
+	sampleCtx, cancelSamples := context.WithCancel(ctx)
+	var sampleDone chan struct{}
+	defer func() {
+		cancelSamples()
+		if sampleDone != nil {
+			<-sampleDone
+		}
+	}()
 	startedPreparation := false
 	for {
 		pollStart := time.Now()
@@ -325,9 +360,14 @@ func (a *agent) run(ctx context.Context) error {
 			}
 			fmt.Fprintf(a.rt.Stderr, "serve heartbeat: %v\n", err)
 		}
-		if !startedPreparation && a.startPreparation != nil {
-			a.startPreparation(ctx)
+		if !startedPreparation {
+			if a.startPreparation != nil {
+				a.startPreparation(ctx)
+			}
 			startedPreparation = true
+			// Reconciliation and image preparation take precedence over sampling.
+			sampleDone = make(chan struct{})
+			go func() { defer close(sampleDone); a.monitorAvailability(sampleCtx) }()
 		}
 		next := pollStart.Add(a.opts.interval)
 		if afterHeartbeat := a.lastHeartbeatReturned.Add(a.opts.interval); afterHeartbeat.After(next) {
@@ -412,6 +452,10 @@ func (a *agent) ownedContainers(ctx context.Context) ([]localcontainer.ServedCon
 			out = append(out, c)
 		}
 	}
+	a.availabilityMu.Lock()
+	a.availabilityInventory = out
+	a.availabilityInventoryAt = time.Now()
+	a.availabilityMu.Unlock()
 	return out, nil
 }
 func (a *agent) poll(ctx context.Context) error {
@@ -439,6 +483,11 @@ func (a *agent) poll(ctx context.Context) error {
 	}
 	if a.rt.Exec != nil {
 		a.sampleCapacity(bounded)
+	}
+	availability := a.currentAvailability()
+	a.state.Machine.Availability = &availability
+	if availability.State != "available" {
+		a.state.Machine.FreeMemoryMB = 0
 	}
 	a.state.Machine.Leases = []leaseView{}
 	for _, c := range containers {
@@ -591,7 +640,7 @@ func showStatus(dir string, asJSON bool, rt core.Runtime) error {
 	if asJSON {
 		return json.NewEncoder(rt.Stdout).Encode(s)
 	}
-	fmt.Fprintf(rt.Stdout, "machine=%s name=%s coordinator=%s coordinator_reachable=%t last_success=%s active_leases=%d cpus=%d memoryMB=%d draining=%t\n", s.Machine.MachineID, s.Machine.Name, s.Coordinator, s.Machine.Online, s.LastSuccess.Format(time.RFC3339), len(s.Assignments), s.Machine.CPUs, s.Machine.MemoryMB, s.Machine.Draining)
+	fmt.Fprintf(rt.Stdout, "machine=%s name=%s coordinator=%s coordinator_reachable=%t last_success=%s active_leases=%d cpus=%d memoryMB=%d draining=%t availability=%s\n", s.Machine.MachineID, s.Machine.Name, s.Coordinator, s.Machine.Online, s.LastSuccess.Format(time.RFC3339), len(s.Assignments), s.Machine.CPUs, s.Machine.MemoryMB, s.Machine.Draining, availabilityText(s.Machine.Availability))
 	return nil
 }
 

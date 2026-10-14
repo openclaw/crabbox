@@ -122,6 +122,9 @@ func service(ctx context.Context, action string, o options, rt core.Runtime) err
 // Services cannot inherit a caller's environment, so retain effective nonsecret options.
 func serviceArguments(executable string, o options) []string {
 	args := []string{executable, "serve", "--cpus", strconv.Itoa(o.cpus), "--memory", o.memory, "--max-leases", strconv.Itoa(o.maxLeases), "--ssh-port", strconv.Itoa(o.sshPort), "--name", o.name, "--runtime", o.runtime, "--poll-interval", o.interval.String(), "--state-dir", o.stateDir}
+	if o.availability.mode != "" {
+		args = append(args, "--availability", o.availability.mode, "--max-host-cpu", strconv.FormatFloat(o.availability.maxHostCPU, 'g', -1, 64), "--require-user-idle", o.availability.requireUserIdle.String(), "--require-ac-power="+strconv.FormatBool(o.availability.requireACPower), "--max-memory-pressure", o.availability.maxMemoryPressure)
+	}
 	for _, address := range o.addresses {
 		args = append(args, "--advertise-address", address)
 	}
