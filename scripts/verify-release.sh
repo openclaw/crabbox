@@ -224,7 +224,8 @@ node "$ROOT/scripts/release-provenance.mjs" verify "${provenance_runtime_args[@]
 
 if [[ "$runtime_pack" == final-filesystem || "$runtime_pack" == final-egress ]]; then
   # Each archive carries the same signed companions, authenticated by provenance.
-  # Verify signatures and online notarization without executing either runtime.
+  # Both hosts check these copies: static trust on each, online on the native host.
+  # In particular, arm64 checks the arm64 runtime inside the amd64 archive.
   CRABBOX_VERIFY_EXECUTE=0 "$ROOT/scripts/verify-macos-binary.sh" \
     "$CRABBOX_RELEASE_RUNTIME_IDENTIFIER" x86_64 "$WORK/darwin-amd64/crabbox-runtime/darwin-amd64"
   CRABBOX_VERIFY_EXECUTE=0 "$ROOT/scripts/verify-macos-binary.sh" \

@@ -12,6 +12,40 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 const currentToolchain = releaseToolchainPolicy(repoRoot);
 const read = (file) => fs.readFileSync(path.join(repoRoot, file), "utf8");
 
+test("every release verifier workflow retains both native hosts and complete Darwin coverage", () => {
+  const callers = fs.readdirSync(path.join(repoRoot, ".github/workflows"))
+    .filter((name) => /scripts\/verify-(?:release|homebrew-release)\.sh/.test(read(`.github/workflows/${name}`)))
+    .sort();
+  assert.deepEqual(callers, ["release-assets.yml", "verify-homebrew.yml"]);
+  const workflow = read(".github/workflows/release-assets.yml");
+  for (const job of ["verify-native", "execute-native"]) {
+    const block = workflow.split(`\n  ${job}:\n`)[1]?.split(/\n  [\w-]+:\n/)[0];
+    assert.ok(block, `missing ${job}`);
+    assert.match(block, /runs-on: \$\{\{ matrix\.runner \}\}/);
+    assert.match(block, /runner: macos-15\n\s+arch: arm64/);
+    assert.match(block, /runner: macos-15-intel\n\s+arch: x86_64/);
+    assert.doesNotMatch(block.split("    steps:")[0], /\bif:|exclude:/);
+    assert.match(block, /VERIFY_ARCH: \$\{\{ matrix\.arch \}\}/);
+    assert.match(block, /CRABBOX_VERIFY_EXEC_ARCH="\$VERIFY_ARCH"/);
+    assert.match(block, /scripts\/verify-release\.sh/);
+  }
+  assert.match(workflow, /execute-native:[\s\S]*needs: \[guard, download-draft, verify-native\]/);
+  const verifier = read("scripts/verify-release.sh");
+  for (const [identifier, arch, binary] of [
+    ["CLI", "x86_64", "$WORK/darwin-amd64/crabbox"],
+    ["CLI", "arm64", "$WORK/darwin-arm64/crabbox"],
+    ["HELPER", "arm64", "$WORK/darwin-arm64/crabbox-apple-vm-helper"],
+    ["VMD", "arm64", "$embedded_vmd"],
+    ["RUNTIME", "x86_64", "$WORK/darwin-amd64/crabbox-runtime/darwin-amd64"],
+    ["RUNTIME", "arm64", "$WORK/darwin-amd64/crabbox-runtime/darwin-arm64"],
+  ]) {
+    assert.ok(verifier.includes(`"$CRABBOX_RELEASE_${identifier}_IDENTIFIER" ${arch} "${binary}"`), binary);
+  }
+  const runtimeChecks = verifier.slice(verifier.indexOf('if [[ "$runtime_pack" == final-filesystem ||'), verifier.indexOf('embedded_vmd='));
+  assert.doesNotMatch(runtimeChecks, /\$EXEC_ARCH|\$host_arch/);
+  assert.match(read("scripts/publish-release.sh"), /for arch in arm64 x86_64; do/);
+});
+
 test("release workflow is verifier-only, protected-default, dual-native, and token-bounded", () => {
   const workflow = read(".github/workflows/release-assets.yml");
   assert.match(workflow, /^  workflow_dispatch:$/m);
