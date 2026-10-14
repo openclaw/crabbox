@@ -7,6 +7,7 @@
 - Release verification: check online notarization on each binary's native macOS host while retaining foreign-architecture static checks and a manual online opt-in. [PR 2829](https://github.com/openclaw/crabbox/pull/2829).
 - Release verification: report bounded, attributable macOS notarization diagnostics without changing failed checks or executing rejected binaries. [PR 2823](https://github.com/openclaw/crabbox/pull/2823).
 - CI: assign Go CLI race and coverage shards by test-name hash, with a checked-in weight list spreading known-slow tests, so adding a test no longer moves hundreds of existing tests between shards and pushes one past its 10-minute race timeout. [PR 2826](https://github.com/openclaw/crabbox/pull/2826).
+- CI: Go CLI race shards stream test events like the coverage shards, print only failed or unfinished test output, and end with listed and unlisted slow-test timings; the slow-test weights now come from those linux race timings. [PR 2832](https://github.com/openclaw/crabbox/pull/2832).
 - Release verification: retain attributable notarization errors after unrelated log floods, while bounding streamed records and sanitized diagnostics. [PR 2828](https://github.com/openclaw/crabbox/pull/2828).
 
 ## 0.77.0 - 2026-10-13
