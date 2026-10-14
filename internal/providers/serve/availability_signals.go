@@ -2,6 +2,8 @@ package serve
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -9,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -17,6 +20,7 @@ import (
 
 type hostSampler struct {
 	exec        core.CommandRunner
+	debug       io.Writer
 	total, idle uint64
 }
 
@@ -40,13 +44,13 @@ func parseHostCPU(output string) *float64 {
 	last := matches[len(matches)-1]
 	user, e1 := strconv.ParseFloat(last[1], 64)
 	system, e2 := strconv.ParseFloat(last[2], 64)
-	if e1 != nil || e2 != nil {
+	idle, e3 := strconv.ParseFloat(last[3], 64)
+	if e1 != nil || e2 != nil || e3 != nil || user < 0 || user > 100 || system < 0 || system > 100 || idle < 0 || idle > 100 {
 		return nil
 	}
-	value := (user + system) / 100
-	if value < 0 || value > 1 {
-		return nil
-	}
+	// top can report user + system above 100% on saturated hosts. Derive
+	// utilization from its interval idle percentage instead of rejecting it.
+	value := (100 - idle) / 100
 	return &value
 }
 func samplePower(ctx context.Context, exec core.CommandRunner) (string, bool, bool) {
@@ -99,62 +103,145 @@ type containerCPUStats interface {
 	CPUCores(context.Context, []localcontainer.ServedContainer) (float64, error)
 }
 
-// A nil inventory is unknown; an empty non-nil inventory is a known idle host.
-func (h *hostSampler) sample(ctx context.Context, inventory []localcontainer.ServedContainer, stats containerCPUStats, id string) availabilitySample {
+const (
+	availabilitySampleInterval = 10 * time.Second
+	availabilitySignalTimeout  = 45 * time.Second
+	availabilitySampleMaxAge   = time.Minute
+)
+
+type containerInventory func(context.Context) ([]localcontainer.ServedContainer, error)
+
+type hostSignals struct {
+	cpu    func(context.Context) *float64
+	memory func() string
+	idle   func(context.Context) *float64
+	power  func(context.Context) string
+}
+
+func (h *hostSampler) sample(ctx context.Context, inventory containerInventory, stats containerCPUStats, id string) availabilitySample {
+	return h.sampleSignals(ctx, inventory, stats, id, hostSignals{
+		cpu: h.hostCPU, memory: hostMemoryPressure, idle: h.userIdle,
+		power: func(ctx context.Context) string {
+			power, _, _ := samplePower(ctx, h.exec)
+			return power
+		},
+	})
+}
+
+// Each signal gets its own deadline. In particular, slow runtime or top calls
+// must not spend the deadline needed by an unrelated, healthy host signal.
+func (h *hostSampler) sampleSignals(ctx context.Context, inventory containerInventory, stats containerCPUStats, id string, signals hostSignals) availabilitySample {
 	s := availabilitySample{memory: "unknown", power: "unknown"}
-	s.power, _, _ = samplePower(ctx, h.exec)
 	var cpu *float64
-	switch runtime.GOOS {
-	case "darwin":
-		cpu = h.darwinCPU(ctx)
-		s.memory = hostMemoryPressure()
-		if out, ok := signalCommand(ctx, h.exec, "ioreg", "-r", "-c", "IOHIDSystem", "-d", "1"); ok {
-			if match := idlePattern.FindStringSubmatch(out); len(match) == 2 {
-				if n, err := strconv.ParseUint(match[1], 10, 64); err == nil {
-					v := float64(n) / 1e9
-					s.idle = &v
-				}
+	var cores float64
+	var wg sync.WaitGroup
+	run := func(name string, read func(context.Context) bool) {
+		wg.Go(func() {
+			bounded, cancel := context.WithTimeout(ctx, availabilitySignalTimeout)
+			defer cancel()
+			started := time.Now()
+			known := read(bounded)
+			outcome := signalOutcome(bounded, nil)
+			if outcome == "ok" && !known {
+				outcome = "unknown"
 			}
-		}
-	case "linux":
-		if b, err := os.ReadFile("/proc/stat"); err == nil {
-			fields := strings.Fields(strings.SplitN(string(b), "\n", 2)[0])
-			var total, idle uint64
-			good := len(fields) >= 5
-			// guest and guest_nice are already counted in user and nice.
-			for i := 1; i < len(fields) && i <= 8; i++ {
-				n, err := strconv.ParseUint(fields[i], 10, 64)
-				if err != nil {
-					good = false
-				}
-				total += n
-				if i == 4 || i == 5 {
-					idle += n
-				}
-			}
-			if good {
-				cpu = h.cpuDelta(total, idle)
-			}
-		}
-		s.memory = hostMemoryPressure()
+			debugAvailability(h.debug, name, outcome, started)
+		})
 	}
-	if cpu != nil && inventory != nil {
+	run("host_cpu", func(ctx context.Context) bool { cpu = signals.cpu(ctx); return cpu != nil })
+	run("memory_pressure", func(context.Context) bool { s.memory = signals.memory(); return s.memory != "unknown" })
+	run("user_idle", func(ctx context.Context) bool { s.idle = signals.idle(ctx); return s.idle != nil })
+	run("power", func(ctx context.Context) bool { s.power = signals.power(ctx); return s.power != "unknown" })
+	run("container_cpu", func(ctx context.Context) bool {
+		s.containerCPUUnknown = true
+		started := time.Now()
+		items, err := inventory(ctx)
+		debugAvailability(h.debug, "container_inventory", signalOutcome(ctx, err), started)
+		if err != nil || items == nil {
+			return false
+		}
 		selected := []localcontainer.ServedContainer{}
-		for _, c := range inventory {
+		for _, c := range items {
 			if owned(c, id) && c.Running {
 				selected = append(selected, c)
 			}
 		}
-		if len(selected) == 0 {
-			s.cpu = cpu
-		} else if stats != nil {
-			if cores, err := stats.CPUCores(ctx, selected); err == nil {
-				s.cpu = subtractOwnedCPU(*cpu, cores, runtime.NumCPU())
+		if len(selected) != 0 {
+			if stats == nil {
+				return false
+			}
+			started = time.Now()
+			cores, err = stats.CPUCores(ctx, selected)
+			debugAvailability(h.debug, "container_cpu_stats", signalOutcome(ctx, err), started)
+			if err != nil || subtractOwnedCPU(0, cores, runtime.NumCPU()) == nil {
+				return false
 			}
 		}
+		s.containerCPUUnknown = false
+		return true
+	})
+	wg.Wait()
+	s.cpu = cpu
+	if cpu != nil && !s.containerCPUUnknown {
+		s.cpu = subtractOwnedCPU(*cpu, cores, runtime.NumCPU())
 	}
 	s.at = time.Now()
 	return s
+}
+
+func (h *hostSampler) userIdle(ctx context.Context) *float64 {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	out, ok := signalCommand(ctx, h.exec, "ioreg", "-r", "-c", "IOHIDSystem", "-d", "1")
+	if ok {
+		if match := idlePattern.FindStringSubmatch(out); len(match) == 2 {
+			if n, err := strconv.ParseUint(match[1], 10, 64); err == nil {
+				v := float64(n) / 1e9
+				return &v
+			}
+		}
+	}
+	return nil
+}
+
+func (h *hostSampler) hostCPU(ctx context.Context) *float64 {
+	switch runtime.GOOS {
+	case "darwin":
+		return h.darwinCPU(ctx)
+	case "linux":
+		b, err := os.ReadFile("/proc/stat")
+		if err != nil {
+			return nil
+		}
+		fields := strings.Fields(strings.SplitN(string(b), "\n", 2)[0])
+		if len(fields) < 5 {
+			return nil
+		}
+		var total, idle uint64
+		// guest and guest_nice are already counted in user and nice.
+		for i := 1; i < len(fields) && i <= 8; i++ {
+			n, err := strconv.ParseUint(fields[i], 10, 64)
+			if err != nil {
+				return nil
+			}
+			total += n
+			if i == 4 || i == 5 {
+				idle += n
+			}
+		}
+		return h.cpuDelta(total, idle)
+	}
+	return nil
+}
+
+func knownInventory(items []localcontainer.ServedContainer) containerInventory {
+	return func(context.Context) ([]localcontainer.ServedContainer, error) {
+		if items == nil {
+			return nil, fmt.Errorf("container inventory unavailable")
+		}
+		return items, nil
+	}
 }
 
 func memoryPressureFromAvailable(available, total uint64) string {

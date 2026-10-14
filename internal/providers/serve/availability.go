@@ -33,11 +33,12 @@ type availabilityPolicy struct {
 	laptop            bool
 }
 type availabilitySample struct {
-	at     time.Time
-	cpu    *float64
-	memory string
-	idle   *float64
-	power  string
+	at                  time.Time
+	cpu                 *float64
+	memory              string
+	idle                *float64
+	power               string
+	containerCPUUnknown bool
 }
 type availabilityWindow struct {
 	samples     []availabilitySample
@@ -109,8 +110,13 @@ func subtractOwnedCPU(total, ownedCores float64, cores int) *float64 {
 	return &n
 }
 
-func (w *availabilityWindow) evaluate(p availabilityPolicy, s availabilitySample) availability {
-	result := availability{State: "unknown", Reasons: []string{}, MemoryPressure: s.memory, UserIdleSeconds: s.idle, Power: s.power}
+func (w *availabilityWindow) evaluate(p availabilityPolicy, s availabilitySample) (result availability) {
+	result = availability{State: "unknown", Reasons: []string{}, MemoryPressure: s.memory, UserIdleSeconds: s.idle, Power: s.power}
+	defer func() {
+		if s.containerCPUUnknown {
+			result.Reasons = append(result.Reasons, "serve container CPU unknown")
+		}
+	}()
 	if result.MemoryPressure == "" {
 		result.MemoryPressure = "unknown"
 	}
@@ -134,7 +140,7 @@ func (w *availabilityWindow) evaluate(p availabilityPolicy, s availabilitySample
 		}
 		dt := cur.at.Sub(start)
 		// Long sampling gaps must not convert stale measurements into idle time.
-		if cur.cpu == nil || cur.at.Sub(prev.at) > 30*time.Second {
+		if cur.cpu == nil || cur.at.Sub(prev.at) > availabilitySampleMaxAge {
 			cpuKnown = false
 		} else if dt > 0 {
 			weighted += *cur.cpu * dt.Seconds()
@@ -241,10 +247,11 @@ func (w *availabilityWindow) evaluate(p availabilityPolicy, s availabilitySample
 // Sampling runs independently of heartbeat/deadline enforcement.
 func (a *agent) monitorAvailability(ctx context.Context) {
 	var window availabilityWindow
-	sampler := hostSampler{exec: a.rt.Exec}
+	sampler := hostSampler{exec: availabilityRunner(a.rt), debug: a.rt.Stderr}
 	stats, _ := a.containers.(containerCPUStats)
 	id := a.state.Machine.MachineID
 	for {
+		started := time.Now()
 		// Reuse reconciliation's immutable inventory instead of concurrently
 		// querying its runtime. A stale inventory must not imply an idle host.
 		a.availabilityMu.Lock()
@@ -253,15 +260,13 @@ func (a *agent) monitorAvailability(ctx context.Context) {
 			inventory = nil
 		}
 		a.availabilityMu.Unlock()
-		bounded, cancel := context.WithTimeout(ctx, 8*time.Second)
-		sample := sampler.sample(bounded, inventory, stats, id)
-		cancel()
+		sample := sampler.sample(ctx, knownInventory(inventory), stats, id)
 		result := window.evaluate(a.opts.availability, sample)
 		a.availabilityMu.Lock()
 		a.availabilityResult = result
 		a.availabilityAt = sample.at
 		a.availabilityMu.Unlock()
-		timer := time.NewTimer(10 * time.Second)
+		timer := time.NewTimer(availabilitySampleDelay(started, time.Now()))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -287,7 +292,7 @@ func (a *agent) currentAvailability() availability {
 		}
 		return r
 	}
-	if a.availabilityAt.IsZero() || time.Since(a.availabilityAt) > 30*time.Second {
+	if a.availabilityAt.IsZero() || time.Since(a.availabilityAt) > availabilitySampleMaxAge {
 		return availability{State: "unknown", Reasons: []string{"availability samples stale"}, MemoryPressure: "unknown", Power: "unknown"}
 	}
 	return a.availabilityResult
@@ -310,20 +315,14 @@ func probeAvailability(ctx context.Context, cfg core.Config, rt core.Runtime, o 
 		return err
 	}
 	cfg.LocalContainer.Runtime = o.runtime
-	sampler := hostSampler{exec: rt.Exec}
+	rt.Exec = availabilityRunner(rt)
+	sampler := hostSampler{exec: rt.Exec, debug: rt.Stderr}
 	containers := localcontainer.NewServedRuntime(cfg, rt)
 	var window availabilityWindow
 	end := time.Now().Add(duration)
 	for {
-		bounded, cancel := context.WithTimeout(ctx, 8*time.Second)
-		inventory, err := containers.List(bounded)
-		if err != nil {
-			inventory = nil
-		} else if inventory == nil {
-			inventory = []localcontainer.ServedContainer{}
-		}
-		sample := sampler.sample(bounded, inventory, containers, saved.Machine.MachineID)
-		cancel()
+		started := time.Now()
+		sample := sampler.sample(ctx, containers.List, containers, saved.Machine.MachineID)
 		result := window.evaluate(o.availability, sample)
 		if !time.Now().Before(end) {
 			if asJSON {
@@ -340,7 +339,7 @@ func probeAvailability(ctx context.Context, cfg core.Config, rt core.Runtime, o 
 			_, err = fmt.Fprintf(rt.Stdout, "availability=%s hostCPU=%s memoryPressure=%s userIdle=%s power=%s\n", availabilityText(&result), cpu, result.MemoryPressure, idle, result.Power)
 			return err
 		}
-		timer := time.NewTimer(min(10*time.Second, time.Until(end)))
+		timer := time.NewTimer(min(availabilitySampleDelay(started, time.Now()), time.Until(end)))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -348,4 +347,10 @@ func probeAvailability(ctx context.Context, cfg core.Config, rt core.Runtime, o 
 		case <-timer.C:
 		}
 	}
+}
+
+// Slow samples already consumed the interval; do not add another ten seconds
+// and turn a valid measurement into a gap in the rolling CPU window.
+func availabilitySampleDelay(started, now time.Time) time.Duration {
+	return max(0, started.Add(availabilitySampleInterval).Sub(now))
 }

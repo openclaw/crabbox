@@ -63,6 +63,11 @@ active assignments, caps, draining state, and availability with reasons. `machin
 coordinator inventory. Both support `--json`. See [availability](../providers/serve.md#availability) for
 signals, configuration, laptop defaults, and hysteresis.
 
+Use `CRABBOX_SERVE_AVAILABILITY_DEBUG=1 crabbox serve status --probe --json`
+to diagnose individual signal failures and timeouts on stderr. See
+[availability diagnostics](../providers/serve.md#availability) for sampling
+deadlines and conservative raw-host-CPU fallback behavior.
+
 `install` writes and loads a per-user LaunchAgent on macOS or a systemd user
 unit on Linux, preserving the supplied flags. It uses the current executable
 path and account's existing broker configuration. `uninstall` unloads and

@@ -137,6 +137,17 @@ requirement there conservatively prevents availability. Unsupported or failed
 required measurements are unknown, never treated as idle. Unknown form factor
 uses laptop defaults.
 
+If the agent cannot read its container inventory or CPU stats, it uses raw host
+CPU without subtracting container usage. This conservatively overestimates load;
+`serve container CPU unknown` is an informational reason, not an unknown host
+measurement. Host signals are sampled concurrently with independent 45-second
+deadlines. A slow or failed signal does not consume another signal's deadline,
+and sampling never blocks heartbeats. Samples start at least ten seconds apart;
+reads that take longer begin the next sample immediately after completion.
+Readings and gaps older than one minute are treated as unknown; the longer
+budget allows CPU sampling to complete on heavily loaded hosts without treating
+those bounded reads as stale.
+
 CPU above the threshold, memory pressure at or above the selected level, or
 battery power must persist for at least 60 seconds before becoming busy.
 Recent console activity makes the machine busy immediately. All required
@@ -173,6 +184,11 @@ without registering, changing services, starting containers, or writing state.
 `--probe-duration 1m` through `1h` changes the observation period; a short probe
 may correctly report unknown while warming up. Use the agent's `--state-dir`
 and `--runtime` to subtract its own containers.
+
+Set `CRABBOX_SERVE_AVAILABILITY_DEBUG=1` on the agent or probe to log bounded
+per-signal outcomes and elapsed times to stderr, including errors and timeouts.
+These diagnostics omit command arguments, output, and error text; JSON probe
+results remain on stdout.
 
 ## Prepared container images
 
