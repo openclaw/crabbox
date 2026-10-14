@@ -203,9 +203,6 @@ func (b *blacksmithBackend) inspectTestbox(ctx context.Context, id string) (blac
 		err = core.Exit(result.ExitCode, "Blacksmith exact status failed")
 	}
 	if err != nil {
-		if diagnostic := strings.TrimSpace(result.Stderr); diagnostic != "" {
-			err = fmt.Errorf("%w: %s", err, diagnostic)
-		}
 		return blacksmithIdentity{}, blacksmithExitDiagnostics(err)
 	}
 	return parseBlacksmithIdentity(result.Stdout, id)
@@ -326,18 +323,12 @@ func (b *blacksmithBackend) printStopOutput(result core.LocalCommandResult) {
 }
 
 func (b *blacksmithBackend) terminateTestbox(ctx context.Context, claim core.LeaseClaim, cancelWorkflow bool) (settled *blacksmithReconciledStop, err error) {
-	identity, err := b.verifyTestbox(ctx, claim)
-	if err != nil {
-		return nil, err
-	}
 	result := &blacksmithReconciledStop{}
-	if err := blacksmithObserveRunURL(&result.runURL, identity.RunURL); err != nil {
-		return nil, blacksmithSettlementError(claim.LeaseID, err)
-	}
 	// A native error can be reconciled only after both the Testbox and its exact
 	// GitHub work settle. Preserve that error through every failed verification.
 	defer func() {
 		if err != nil {
+			err = fmt.Errorf("Blacksmith cleanup phase=reconciliation: %w", err)
 			b.printStopOutput(result.result)
 			if result.err != nil {
 				err = fmt.Errorf("Blacksmith stop verification failed: %w", err)
@@ -345,6 +336,13 @@ func (b *blacksmithBackend) terminateTestbox(ctx context.Context, claim core.Lea
 			err = errors.Join(result.err, err)
 		}
 	}()
+	identity, err := b.verifyTestbox(ctx, claim)
+	if err != nil {
+		return nil, err
+	}
+	if err := blacksmithObserveRunURL(&result.runURL, identity.RunURL); err != nil {
+		return nil, blacksmithSettlementError(claim.LeaseID, err)
+	}
 	stop := func() {
 		attempt, stopErr := b.runCommand(ctx, blacksmithStopArgs(b.cfg, claim.CloudID), nil, nil)
 		result.result.Stdout += attempt.Stdout

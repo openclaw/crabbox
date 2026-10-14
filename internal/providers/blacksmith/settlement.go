@@ -67,7 +67,7 @@ func blacksmithSettlementError(id string, err error) error {
 	return blacksmithCommandError{ExitError: core.ExitError{Code: 5, Message: fmt.Sprintf("Blacksmith GitHub settlement unresolved for %s; retaining claim/key for retry with the same organization/API: %v", id, err)}, cause: err}
 }
 
-func blacksmithGitHubCause(err error) string {
+func blacksmithCommandCause(err error) string {
 	var exitErr *exec.ExitError
 	var startErr *exec.Error
 	switch {
@@ -86,23 +86,14 @@ func blacksmithGitHubCause(err error) string {
 	}
 }
 
-func (b *blacksmithBackend) githubCommand(ctx context.Context, args []string) (core.LocalCommandResult, error, string) {
-	issued := time.Now()
+func blacksmithCommandDiagnostic(ctx context.Context, operation string, issued time.Time, elapsed time.Duration, contextAfter error, result core.LocalCommandResult, rawErr error) string {
 	remaining := "unknown"
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining = fmt.Sprint(deadline.Sub(issued).Milliseconds())
 	}
-	result, rawErr := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
-		Name: "gh", Args: args, MaxCapturedOutputBytes: 16 * 1024,
-	})
-	elapsed := time.Since(issued)
 	// The runner records cancellation at the child watcher. A deadline observed
 	// after return is a separate fact, not evidence that it stopped the child.
-	cause, contextAfter := blacksmithGitHubCause(rawErr), blacksmithGitHubCause(ctx.Err())
-	err := blacksmithContextError(ctx, rawErr)
-	if err == nil && result.ExitCode == 0 {
-		return result, nil, ""
-	}
+	cause, contextCause := blacksmithCommandCause(rawErr), blacksmithCommandCause(contextAfter)
 	process, signal := "unknown", "unknown"
 	var exitErr *exec.ExitError
 	if errors.As(rawErr, &exitErr) && exitErr != nil && exitErr.ProcessState != nil {
@@ -112,14 +103,26 @@ func (b *blacksmithBackend) githubCommand(ctx context.Context, args []string) (c
 			process, signal = "exited", "none"
 		}
 	}
+	// Only typed, allowlisted facts cross the display boundary. Raw errors and
+	// captured API output may contain private paths or credentials.
+	return fmt.Sprintf("%s exit=%d cause=%s process=%s signal=%s issued_at=%s elapsed_ms=%d remaining_budget_ms=%s context_after=%s",
+		operation, result.ExitCode, cause, process, signal, issued.UTC().Format(time.RFC3339Nano), elapsed.Milliseconds(), remaining, contextCause)
+}
+
+func (b *blacksmithBackend) githubCommand(ctx context.Context, args []string) (core.LocalCommandResult, error, string) {
+	issued := time.Now()
+	result, rawErr := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
+		Name: "gh", Args: args, MaxCapturedOutputBytes: 16 * 1024,
+	})
+	elapsed, contextAfter := time.Since(issued), ctx.Err()
+	err := blacksmithContextError(ctx, rawErr)
+	if err == nil && result.ExitCode == 0 {
+		return result, nil, ""
+	}
 	if err == nil {
 		err = errors.New("gh returned a nonzero exit code")
 	}
-	// Only typed, allowlisted facts cross the display boundary. Raw errors and
-	// captured API output may contain private paths or credentials.
-	diagnostic := fmt.Sprintf("gh exit=%d cause=%s process=%s signal=%s issued_at=%s elapsed_ms=%d remaining_budget_ms=%s context_after=%s",
-		result.ExitCode, cause, process, signal, issued.UTC().Format(time.RFC3339Nano), elapsed.Milliseconds(), remaining, contextAfter)
-	return result, err, diagnostic
+	return result, err, blacksmithCommandDiagnostic(ctx, "gh", issued, elapsed, contextAfter, result, rawErr)
 }
 
 // Use only existing gh access, pinned to the exact native github.com URL.

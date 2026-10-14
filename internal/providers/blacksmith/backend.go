@@ -717,34 +717,45 @@ func (b *blacksmithBackend) stopClaimedTestbox(ctx context.Context, leaseID stri
 	defer cancel()
 	var bound *blacksmithBackend
 	var reconciled *blacksmithReconciledStop
+	phase := "reconciliation-admission"
 	if err := core.WithLeaseClaimUnchangedShared(ctx, leaseID, claim, func() error {
+		phase = "reconciliation"
 		var err error
 		bound, err = b.withRoute(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("Blacksmith cleanup phase=%s: %w", phase, err)
 		}
 		reconciled, err = bound.terminateTestbox(ctx, claim, true)
 		return err
 	}); err != nil {
+		if phase == "reconciliation-admission" {
+			return fmt.Errorf("Blacksmith cleanup phase=%s: %w", phase, err)
+		}
 		return err
 	}
 	// Release the shared fence before taking the exclusive one. A replacement
 	// published in between must survive: only the original snapshot authorizes
 	// finalization, and a stuck command must not make this wait unbounded.
+	// Callback entry distinguishes admission from verification. Failure before
+	// entry does not by itself establish lock contention.
+	phase = "finalization-admission"
 	err = core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, leaseID, claim, true, func() error {
+		phase = "final-verification"
 		conclusion, err := bound.verifySettlement(ctx, claim, reconciled.runURL)
 		if err != nil {
 			return err
 		}
 		reconciled.conclusion = conclusion
+		phase = "connection-removal"
 		if err := core.RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
 			return fmt.Errorf("Blacksmith local connection artifacts cleanup failed; retaining claim: %w", err)
 		}
+		phase = "claim-commit"
 		return nil
 	})
 	if err != nil && reconciled != nil {
 		bound.printStopOutput(reconciled.result)
-		return errors.Join(reconciled.err, err)
+		return errors.Join(reconciled.err, fmt.Errorf("Blacksmith cleanup phase=%s: %w", phase, err))
 	}
 	if reconciled != nil && reconciled.err != nil {
 		fmt.Fprintf(b.rt.Stderr, "blacksmith cleanup reconciled lease=%s state=completed: stop failed; native status and exact GitHub run confirmed completion conclusion=%s\n", leaseID, reconciled.conclusion)
@@ -936,6 +947,14 @@ func (b *blacksmithBackend) runCommandCapture(ctx context.Context, args []string
 }
 
 func (b *blacksmithBackend) runCommandCaptureInDir(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool, dir string) (result core.LocalCommandResult, err error) {
+	operationArgs := args
+	if len(operationArgs) > 2 && operationArgs[0] == "--org" {
+		operationArgs = operationArgs[2:]
+	}
+	operation := ""
+	if len(operationArgs) > 1 && operationArgs[0] == "testbox" && (operationArgs[1] == "status" || operationArgs[1] == "stop") {
+		operation = "blacksmith testbox " + operationArgs[1]
+	}
 	if b.route != nil {
 		args = append(append([]string(nil), args...), "--api-url", b.route.API, "--org", b.route.Org)
 	}
@@ -973,7 +992,15 @@ func (b *blacksmithBackend) runCommandCaptureInDir(ctx context.Context, args []s
 	if !disableOutputCapture {
 		request.MaxCapturedOutputBytes = blacksmithCommandCaptureBytes
 	}
+	var issued time.Time
+	if operation != "" {
+		issued = time.Now()
+	}
 	result, err = b.rt.Exec.Run(ctx, request)
+	if operation != "" && (err != nil || result.ExitCode != 0) {
+		diagnostic := blacksmithCommandDiagnostic(ctx, operation, issued, time.Since(issued), ctx.Err(), result, err)
+		return result, blacksmithCommandError{ExitError: core.ExitError{Code: result.ExitCode, Message: diagnostic}, cause: err}
+	}
 	if err != nil {
 		return result, blacksmithCommandError{ExitError: core.ExitError{Code: result.ExitCode, Message: fmt.Sprintf("blacksmith failed: %v", err)}, cause: err}
 	}
