@@ -11,7 +11,7 @@
 - Release verification: retry transient cold-start online notarization lookups twice with bounded backoff while retaining every failure diagnostic and rejecting signature or requirement failures. [PR 2836](https://github.com/openclaw/crabbox/pull/2836).
 - CI: Go CLI race shards keep the restored Go build cache, so the race build's cache trim no longer deletes the non-race packages the one-time CLI test build reuses; that build drops from about 135 s to about 30 s per shard. [PR 2833](https://github.com/openclaw/crabbox/pull/2833).
 - Testbox: announce readiness only after setup succeeds, so failed preparation does not keep an unprepared runner in its idle loop. [PR 2831](https://github.com/openclaw/crabbox/pull/2831).
-- CI: skip production coordinator deployment for changes limited to Worker tests while retaining runtime, configuration, and deployment-helper triggers.
+- CI: skip production coordinator deployment for changes limited to Worker tests while retaining runtime, configuration, and deployment-helper triggers. [PR 2839](https://github.com/openclaw/crabbox/pull/2839). Thanks @vincentkoc.
 - CLI: distinguish accepted release from confirmed cleanup in run events, preserving retained or unconfirmed outcomes in the `cleanup` phase. [PR 2819](https://github.com/openclaw/crabbox/pull/2819). Thanks @vincentkoc.
 - Release verification: check online notarization on each binary's native macOS host while retaining foreign-architecture static checks and a manual online opt-in. [PR 2829](https://github.com/openclaw/crabbox/pull/2829).
 - Release verification: report bounded, attributable macOS notarization diagnostics without changing failed checks or executing rejected binaries. [PR 2823](https://github.com/openclaw/crabbox/pull/2823).
