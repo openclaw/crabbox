@@ -211,14 +211,15 @@ func (b *blacksmithBackend) inspectTestbox(ctx context.Context, id string) (blac
 	return parseBlacksmithIdentity(result.Stdout, id)
 }
 
-// Present all diagnostics through AsExitError while retaining the native code
-// and causes. The CLI prints only the first ExitError's Message.
+// Retain native codes and causes for Is/As. The CLI uses the prepared
+// diagnostic instead of traversing private command causes.
 type blacksmithCommandError struct {
 	core.ExitError
 	cause error
 }
 
-func (e blacksmithCommandError) Unwrap() []error { return []error{e.ExitError, e.cause} }
+func (e blacksmithCommandError) Unwrap() []error           { return []error{e.ExitError, e.cause} }
+func (e blacksmithCommandError) DiagnosticMessage() string { return e.Message }
 
 func blacksmithExitDiagnostics(err error) error {
 	var exitErr core.ExitError

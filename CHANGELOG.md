@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Blacksmith Testbox: report typed command causes and remaining cleanup budget when GitHub settlement fails, while keeping private error details out of CLI output. Thanks @vincentkoc.
 - Testbox: announce readiness only after setup succeeds, so failed preparation does not keep an unprepared runner in its idle loop. [PR 2831](https://github.com/openclaw/crabbox/pull/2831).
 - Release verification: check online notarization on each binary's native macOS host while retaining foreign-architecture static checks and a manual online opt-in. [PR 2829](https://github.com/openclaw/crabbox/pull/2829).
 - Release verification: report bounded, attributable macOS notarization diagnostics without changing failed checks or executing rejected binaries. [PR 2823](https://github.com/openclaw/crabbox/pull/2823).
