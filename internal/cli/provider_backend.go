@@ -1439,6 +1439,7 @@ type RunRequest struct {
 	RunID                 string
 	Options               LeaseOptions
 	Keep                  bool
+	NoRuntimeExtension    bool
 	Reclaim               bool
 	NoSync                bool
 	NoHydrate             bool

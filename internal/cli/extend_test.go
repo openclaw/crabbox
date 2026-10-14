@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -156,41 +157,135 @@ func TestExtendedLeaseLabels(t *testing.T) {
 	}
 }
 
-func TestRunHeartbeatExtendOnlyDuringCommand(t *testing.T) {
-	for _, running := range []bool{false, true} {
-		t.Run(time.Duration(0).String()+strings.ToUpper(strings.TrimSpace(map[bool]string{false: "setup", true: "command"}[running])), func(t *testing.T) {
-			var executing atomic.Bool
-			executing.Store(running)
-			received := make(chan map[string]any, 1)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/v1/control" {
-					http.NotFound(w, r)
-					return
-				}
-				var body map[string]any
-				_ = json.NewDecoder(r.Body).Decode(&body)
-				select {
-				case received <- body:
-				default:
-				}
-				_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","provider":"aws"}}`))
-			}))
-			defer server.Close()
-			client := CoordinatorClient{BaseURL: server.URL, Token: "fixture-token", Client: server.Client()}
-			stop, err := startCoordinatorHeartbeat(t.Context(), &client, "cbx_123", "aws", 30*time.Minute, nil, nil, io.Discard, executing.Load)
-			if err != nil {
+func TestRunNoRuntimeExtensionFlag(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "default"},
+		{name: "opt out", args: []string{"--no-runtime-extension"}, want: true},
+		{name: "explicit false", args: []string{"--no-runtime-extension=false"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("run", flag.ContinueOnError)
+			cfg := defaultConfig()
+			flags := registerRunFlags(fs, cfg, ordinaryLeaseCreateFlagRegistrationOptions())
+			if err := fs.Parse(tt.args); err != nil {
 				t.Fatal(err)
 			}
-			defer stop()
-			select {
-			case body := <-received:
-				if (body["extendWhileRunning"] == true) != running {
-					t.Fatalf("body=%v running=%t", body, running)
-				}
-			case <-time.After(10 * time.Second):
-				t.Fatal("heartbeat timeout")
+			req := runRequestFromFlags(cfg, flags, []string{"true"})
+			if req.NoRuntimeExtension != tt.want {
+				t.Fatalf("NoRuntimeExtension=%t, want %t", req.NoRuntimeExtension, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunHeartbeatExtendOnlyDuringCommand(t *testing.T) {
+	for _, transport := range []string{"control", "http"} {
+		for _, tt := range []struct {
+			name    string
+			running bool
+			optOut  bool
+		}{
+			{name: "setup"},
+			{name: "command", running: true},
+			{name: "opt out", running: true, optOut: true},
+		} {
+			t.Run(transport+"/"+tt.name, func(t *testing.T) {
+				var executing atomic.Bool
+				executing.Store(tt.running)
+				req := RunRequest{NoRuntimeExtension: tt.optOut}
+				received := make(chan map[string]any, 1)
+				handlerDone := make(chan struct{})
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/v1/control" {
+						if transport == "http" {
+							http.NotFound(w, r)
+							return
+						}
+						defer close(handlerDone)
+						conn, err := websocket.Accept(w, r, nil)
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						defer conn.CloseNow()
+						_, data, err := conn.Read(r.Context())
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						var body map[string]any
+						if err := json.Unmarshal(data, &body); err != nil {
+							t.Error(err)
+							return
+						}
+						received <- body
+						_ = conn.Write(r.Context(), websocket.MessageText, []byte(`{"type":"heartbeat","leaseID":"cbx_123","ok":true}`))
+						_, _, _ = conn.Read(r.Context())
+						return
+					}
+					if transport != "http" || r.Method != http.MethodPost || r.URL.Path != "/v1/leases/cbx_123/heartbeat" {
+						t.Errorf("unexpected heartbeat route %s %s", r.Method, r.URL.Path)
+						http.NotFound(w, r)
+						return
+					}
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+						return
+					}
+					select {
+					case received <- body:
+					default:
+					}
+					_, _ = w.Write([]byte(`{"lease":{"id":"cbx_123","provider":"aws"}}`))
+				}))
+				defer server.Close()
+				client := CoordinatorClient{BaseURL: server.URL, Token: "fixture-token", Client: server.Client()}
+				idleTimeout := 5 * time.Minute
+				load := 0.25
+				collector := func(context.Context) (*LeaseTelemetry, error) {
+					return &LeaseTelemetry{Load1: &load}, nil
+				}
+				stop, err := startCoordinatorHeartbeat(t.Context(), &client, "cbx_123", "aws", 30*time.Minute, &idleTimeout, collector, io.Discard, func() bool {
+					return req.runtimeExtensionRequested(executing.Load())
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer stop()
+				select {
+				case body := <-received:
+					wantExtension := tt.running && !tt.optOut
+					if value, present := body["extendWhileRunning"]; present != wantExtension || (present && value != true) {
+						t.Fatalf("body=%v wantExtension=%t", body, wantExtension)
+					}
+					if body["expectedProvider"] != "aws" || body["idleTimeoutSeconds"] != float64(300) {
+						t.Fatalf("missing custody fields: %v", body)
+					}
+					telemetry, ok := body["telemetry"].(map[string]any)
+					if !ok || telemetry["load1"] != load {
+						t.Fatalf("missing telemetry: %v", body)
+					}
+					if transport == "control" && (body["type"] != "heartbeat" || body["leaseID"] != "cbx_123") {
+						t.Fatalf("missing control custody: %v", body)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("heartbeat timeout")
+				}
+				stop()
+				if transport == "control" {
+					select {
+					case <-handlerDone:
+					case <-time.After(time.Second):
+						t.Fatal("heartbeat stop did not close control connection")
+					}
+				}
+			})
+		}
 	}
 	if _, ok := heartbeatRequestBody("aws", nil, nil)["extendWhileRunning"]; ok {
 		t.Fatal("plain heartbeat requests extension")

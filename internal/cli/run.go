@@ -254,6 +254,7 @@ type runFlagValues struct {
 	LeaseID                *string
 	Keep                   *bool
 	KeepOnFailure          *bool
+	NoRuntimeExtension     *bool
 	NoSync                 *bool
 	SyncOnly               *bool
 	NoHydrate              *bool
@@ -311,6 +312,7 @@ func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlag
 		LeaseID:                fs.String("id", "", "existing lease or server id"),
 		Keep:                   fs.Bool("keep", false, "keep server after command"),
 		KeepOnFailure:          fs.Bool("keep-on-failure", false, "keep a newly acquired lease when the remote command exits non-zero (does not retain failed acquisitions)"),
+		NoRuntimeExtension:     fs.Bool("no-runtime-extension", false, "keep custody heartbeats without requesting lease extensions while the command runs"),
 		NoSync:                 fs.Bool("no-sync", false, "skip local file transfer (unsupported by Blacksmith Testbox)"),
 		SyncOnly:               fs.Bool("sync-only", false, "sync and exit"),
 		NoHydrate:              fs.Bool("no-hydrate", false, "skip configured Actions hydration"),
@@ -408,6 +410,7 @@ func runRequestFromFlags(cfg Config, flags runFlagValues, command []string) RunR
 		Options:               leaseOptionsFromConfig(cfg),
 		Keep:                  *flags.Keep,
 		KeepOnFailure:         *flags.KeepOnFailure,
+		NoRuntimeExtension:    *flags.NoRuntimeExtension,
 		Reclaim:               *flags.Reclaim,
 		NoSync:                *flags.NoSync,
 		NoHydrate:             *flags.NoHydrate,
@@ -1841,7 +1844,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if heartbeatCoord != nil {
 			var err error
-			stopHeartbeat, err = startCoordinatorHeartbeat(ctx, heartbeatCoord, leaseID, cfg.Provider, cfg.IdleTimeout, updateIdleTimeout, leaseTelemetryCollectorForTarget(target), a.Stderr, commandExecuting.Load)
+			stopHeartbeat, err = startCoordinatorHeartbeat(ctx, heartbeatCoord, leaseID, cfg.Provider, cfg.IdleTimeout, updateIdleTimeout, leaseTelemetryCollectorForTarget(target), a.Stderr, func() bool {
+				return runReq.runtimeExtensionRequested(commandExecuting.Load())
+			})
 			return err
 		}
 		return nil
@@ -3968,6 +3973,9 @@ func delegatedRunNeedsLocalWorkspaceSync(spec ProviderSpec, req RunRequest) bool
 }
 
 func validateDelegatedRunRouting(spec ProviderSpec, req RunRequest, readyPool string, hasArtifactSchemas, profileDoctor bool) error {
+	if req.NoRuntimeExtension {
+		return Exit(2, "%s delegates run execution; --no-runtime-extension is not supported", spec.Name)
+	}
 	if strings.TrimSpace(readyPool) != "" {
 		return Exit(2, "--pool requires a brokered SSH lease provider")
 	}
@@ -4913,6 +4921,10 @@ func (a App) releaseBackendLease(ctx context.Context, backend SSHLeaseBackend, c
 	}
 	a.releaseRegisteredCoordinatorLeaseBestEffort(ctx, cfg, lease.LeaseID)
 	return outcome, nil
+}
+
+func (req RunRequest) runtimeExtensionRequested(commandExecuting bool) bool {
+	return commandExecuting && !req.NoRuntimeExtension
 }
 
 func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, leaseID, expectedProvider string, idleTimeout time.Duration, updateIdleTimeout *time.Duration, telemetryCollector leaseTelemetryCollector, stderr io.Writer, running ...func() bool) (func(), error) {

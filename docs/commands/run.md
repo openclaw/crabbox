@@ -1262,11 +1262,19 @@ per-provider docs under [providers](../providers/README.md).
 
 Run-specific flags:
 
+By default, coordinator heartbeats request lease extensions while a command runs,
+subject to the coordinator's current policy. `--no-runtime-extension` disables
+those requests for this invocation only. Custody heartbeats, telemetry, idle-timeout
+handling, and cleanup still run. The flag does not change the lease's TTL or
+prevent changes made by other authorized clients or administrators. Delegated
+execution routes reject the flag because this client cannot enforce it there.
+
 ```text
 --id <lease-id-or-slug>
 --reclaim
 --keep
 --keep-on-failure
+--no-runtime-extension       Keep custody heartbeats without requesting lease extensions.
 --stop-after success|always|failure|never
 --lease-output <file>        Write a retained run-session handle when supported.
 --no-sync                    Skip local file transfer; unsupported by Blacksmith Testbox.

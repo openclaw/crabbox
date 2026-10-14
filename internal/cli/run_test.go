@@ -2376,6 +2376,9 @@ func TestRunCommandRejectsUnsupportedDelegatedCaptureOptions(t *testing.T) {
 		args     []string
 		want     string
 	}{
+		{name: "daytona no runtime extension", provider: "daytona", args: []string{"--no-runtime-extension"}, want: "daytona delegates run execution; --no-runtime-extension is not supported"},
+		{name: "e2b no runtime extension", provider: "e2b", args: []string{"--no-runtime-extension"}, want: "e2b delegates run execution; --no-runtime-extension is not supported"},
+		{name: "blacksmith no runtime extension", provider: "blacksmith", args: []string{"--no-runtime-extension"}, want: "blacksmith-testbox delegates run execution; --no-runtime-extension is not supported"},
 		{name: "daytona capture stdout", provider: "daytona", args: []string{"--capture-stdout", "stdout.bin"}, want: "daytona delegates run execution; --capture-stdout is not supported"},
 		{name: "islo capture stdout", provider: "islo", args: []string{"--capture-stdout", "stdout.bin"}, want: "islo delegates run execution; --capture-stdout is not supported"},
 		{name: "e2b capture stdout", provider: "e2b", args: []string{"--capture-stdout", "stdout.bin"}, want: "e2b delegates run execution; --capture-stdout is not supported"},

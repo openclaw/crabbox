@@ -5999,6 +5999,211 @@ func TestRemoteGitSeedLocalCanary(t *testing.T) {
 	}
 }
 
+func TestRemoteGitSeedExactSourceCanary(t *testing.T) {
+	mode := os.Getenv("CRABBOX_ORIGIN_CANARY")
+	if mode == "" {
+		t.Skip("opt-in exact-source origin seed; set plan or materialize with approved inputs")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX origin seed canary")
+	}
+	if mode != "plan" && mode != "materialize" {
+		t.Fatal("CRABBOX_ORIGIN_CANARY must be plan or materialize")
+	}
+	source := os.Getenv("CRABBOX_ORIGIN_CANARY_SOURCE")
+	head := os.Getenv("CRABBOX_ORIGIN_CANARY_HEAD")
+	tree := os.Getenv("CRABBOX_ORIGIN_CANARY_TREE")
+	origin := os.Getenv("CRABBOX_ORIGIN_CANARY_URL")
+	if !filepath.IsAbs(source) || !localGitSeedOID(head, "sha1") || !localGitSeedOID(tree, "sha1") ||
+		!strings.HasPrefix(origin, "https://") || gitRemoteURLHasCredentials(origin) || normalizeGitRemoteURL(origin) != origin {
+		t.Fatal("explicit source, exact SHA-1 HEAD/tree and credential-free HTTPS origin required")
+	}
+	t.Chdir(source)
+	t.Setenv("GIT_NO_LAZY_FETCH", "1")
+	t.Setenv("GIT_OPTIONAL_LOCKS", "0")
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Minute)
+	defer cancel()
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This is the same per-command selector as --git-seed-source origin.
+	cfg.Sync.GitSeedSource = "origin"
+	repo, err := findRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, blocked := syncGitCoherencePlan(cfg, repo)
+	subtree, stateErr := managedStateSyncSubtree(repo.Root)
+	t.Logf("eligibility source=%s git_seed=%t seed_source=%s include_count=%d delete=%t overlay=%t nested_state=%t blocked=%t target=%s tree=%s branch=%q",
+		effectiveSyncSource(cfg), cfg.Sync.GitSeed, effectiveGitSeedSource(cfg), len(syncIncludes(cfg)), cfg.Sync.Delete,
+		cfg.Sync.GitOverlay, subtree != "" || stateErr != nil, blocked, plan.Target, plan.Tree, plan.Branch)
+	if effectiveSyncSource(cfg) != "git" || !cfg.Sync.GitSeed || cfg.Sync.GitOverlay || len(syncIncludes(cfg)) != 0 ||
+		stateErr != nil || subtree != "" || blocked || !plan.seedEnabled() ||
+		plan.RemoteURL != origin || plan.Target != head || plan.Tree != tree {
+		t.Fatal("native origin seed eligibility or exact input binding refused")
+	}
+	if branch, bound := os.LookupEnv("CRABBOX_ORIGIN_CANARY_BRANCH"); mode == "materialize" && (!bound || branch != plan.Branch) {
+		t.Fatal("materialization requires the previously admitted native branch selection")
+	}
+	if cfg.Sync.AllowLarge || os.Getenv("CRABBOX_SYNC_ALLOW_LARGE") == "1" {
+		t.Fatal("canary does not permit a sync-size override")
+	}
+	if status, err := localGitSeedSourceOutput(ctx, source, "status", "--porcelain=v1"); err != nil || status != "" {
+		t.Fatalf("canary requires proven unchanged source status: %v", err)
+	}
+	excludes, err := syncExcludes(source, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := syncManifestForSource(ctx, repo, cfg, excludes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Changed) != 0 || len(manifest.Deleted) != 0 {
+		t.Fatal("canary requires the committed source, without a file overlay")
+	}
+	if err := checkSyncPreflight(FullSyncGuardrailManifest(manifest), cfg, false, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := syncFingerprintForManifest(ctx, repo, cfg, manifest, excludes, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := func(root string) string {
+		t.Helper()
+		h := sha256.New()
+		if err := syncFingerprintPaths(ctx, h, root, manifest.Files, true); err != nil {
+			t.Fatal(err)
+		}
+		return fmt.Sprintf("%x", h.Sum(nil))
+	}
+	sourceDigest := digest(source)
+	index := coherenceIndexBytes(t, source)
+	t.Cleanup(func() {
+		verificationCtx, done := context.WithTimeout(context.Background(), 15*time.Second)
+		defer done()
+		status, statusErr := localGitSeedSourceOutput(verificationCtx, source, "status", "--porcelain=v1")
+		if gitOutput(source, "rev-parse", "HEAD") != head || gitOutput(source, "rev-parse", "HEAD^{tree}") != tree ||
+			!bytes.Equal(coherenceIndexBytes(t, source), index) || statusErr != nil || status != "" {
+			t.Errorf("source identity/index/status changed or unavailable during canary: %v", statusErr)
+		}
+		current, err := loadConfig()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		current.Sync.GitSeedSource = "origin"
+		currentRepo, err := findRepo()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		currentPlan, currentBlocked := syncGitCoherencePlan(current, currentRepo)
+		if !reflect.DeepEqual(current.Sync, cfg.Sync) || currentPlan != plan || currentBlocked {
+			t.Error("native sync inputs changed during canary")
+		}
+	})
+	t.Logf("source origin=%s head=%s tree=%s files=%d bytes=%d content_sha256=%s", origin, head, tree, len(manifest.Files), manifest.Bytes, sourceDigest)
+	if mode == "plan" {
+		return
+	}
+
+	root := t.TempDir()
+	available, err := availableRunDownloadBytes(root)
+	if err != nil || available < 6<<30 {
+		t.Fatalf("canary requires six GiB available for a four GiB observed budget and two GiB reserve: available=%d err=%v", available, err)
+	}
+	// This is a conservative filesystem observation stop, not a disk quota or
+	// a promise that the native transfer fits. Unrelated disk use can stop it.
+	floor := available - (4 << 30)
+	budgetDone := make(chan struct{})
+	budgetError := make(chan error, 1)
+	go func() {
+		defer close(budgetDone)
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				free, err := availableRunDownloadBytes(root)
+				if err != nil || free < floor {
+					budgetError <- fmt.Errorf("canary disk observation stop: available=%d floor=%d err=%v", free, floor, err)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	defer func() { cancel(); <-budgetDone }()
+	home := filepath.Join(root, "home")
+	if err := os.Mkdir(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	workdir := filepath.Join(root, "work")
+	if _, err := os.Lstat(workdir); !os.IsNotExist(err) {
+		t.Fatal("canary destination must be absent")
+	}
+	childEnv := []string{"HOME=" + home, "XDG_CONFIG_HOME=" + home, "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C", "LC_ALL=C",
+		"BASH_ENV=/dev/null", "ENV=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "SSH_ASKPASS=/bin/false", "GIT_SSH_COMMAND=/bin/false"}
+	run := func(label, command, input string) string {
+		t.Helper()
+		t.Logf("phase=%s started=%s", label, time.Now().UTC().Format(time.RFC3339Nano))
+		result, err := (execCommandRunner{}).Run(ctx, LocalCommandRequest{
+			Name: "/bin/sh", Args: []string{"-c", command}, Dir: root, Env: childEnv, Stdin: strings.NewReader(input),
+			CaptureOutputToFiles: true, MaxCapturedOutputBytes: 1 << 20, CancelGracePeriod: 5 * time.Second, RequireProcessGroupJoin: true,
+		})
+		if err != nil || result.ExitCode != 0 {
+			select {
+			case budget := <-budgetError:
+				t.Log(budget)
+			default:
+			}
+			t.Fatalf("phase=%s exit=%d err=%v stderr=%s", label, result.ExitCode, err, result.Stderr)
+		}
+		t.Logf("phase=%s settled=true stdout_bytes=%d stderr_bytes=%d", label, len(result.Stdout), len(result.Stderr))
+		return strings.TrimSpace(result.Stdout)
+	}
+	run("seed", remoteGitSeed(workdir, plan), "")
+	const token = "61616161616161616161616161616161"
+	run("manifest", remoteWriteSyncManifestsNew(workdir, token), syncManifestInputForTarget(SSHTarget{TargetOS: targetLinux}, manifest.NUL(), manifest.DeletedNUL()))
+	if cfg.Sync.Delete {
+		run("prune", remotePruneSyncManifest(workdir, token), "")
+	}
+	run("finalize", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: token, Fingerprint: fingerprint, Coherence: plan}), "")
+	git := func(args ...string) string {
+		t.Helper()
+		command := "/usr/bin/git -C " + shellQuote(workdir)
+		for _, arg := range args {
+			command += " " + shellQuote(arg)
+		}
+		return run("verify", command, "")
+	}
+	if git("rev-parse", "HEAD") != head || git("write-tree") != tree || git("status", "--porcelain=v1", "--untracked-files=no") != "" {
+		t.Fatal("post-filter tracked HEAD/index/tree coherence failed")
+	}
+	git("diff", "--no-ext-diff", "--exit-code", "HEAD", "--")
+	if digest(workdir) != sourceDigest || digest(source) != sourceDigest {
+		t.Fatal("post-filter source content/mode/link digest differs")
+	}
+	staging, err := filepath.Glob(filepath.Join(root, ".seed.*"))
+	if err != nil || len(staging) != 0 {
+		t.Fatalf("native seed temporary cleanup incomplete: count=%d err=%v", len(staging), err)
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("canary deadline or cancellation prevents success: %v", err)
+	}
+	select {
+	case budget := <-budgetError:
+		t.Fatal(budget)
+	default:
+	}
+	t.Logf("exact_source_pass head=%s tree=%s content_sha256=%s", head, tree, sourceDigest)
+}
+
 func TestRemoteGitSeedSupportsSeedOnlyPlanWithoutTree(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell Git seed fixture")
