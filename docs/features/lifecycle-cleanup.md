@@ -171,12 +171,12 @@ Overrides use `defaultTTLSeconds`, `defaultIdleTimeoutSeconds`, `maxTTLSeconds`,
 {"orgs":{"example-org":{"maxTTLSeconds":7200}},"owners":{"alice@example.com":{"autoExtend":"deny"}}}
 ```
 
-The production deploy guard accepts one or more explicitly authorized GitHub
-owner IDs (`github:<positive integer>`). Each must declare an integer
-`maxTTLSeconds` in the source override document. Only those maximums may differ
-from the live binding, including a new owner entry containing only that field;
-all other owner, organization, and policy fields must be preserved. The guard
-stops deployment if it cannot read and compare the live override document.
+Production source declares no lease policy overrides, so every owner uses the
+global defaults. The deploy guard compares the complete live override document
+with source, treating absent bindings and empty groups as equivalent. Differences
+require an explicit one-time replacement acknowledgment; unreadable or invalid
+bindings and API errors always stop deployment. See
+[Operations](../operations.md#cloudflare-worker) for the dispatch procedure.
 
 Create requests are clamped rather than rejected, including older clients asking
 for 24h TTL and 5h idle. Denied extension clamps create TTL to the effective

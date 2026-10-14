@@ -16,6 +16,11 @@ on:
       - "scripts/verify-coordinator-lease-policy.mjs"
   workflow_dispatch:
     inputs:
+      replace_live_lease_policy:
+        description: Acknowledge replacing the complete live lease policy override document with source
+        required: false
+        default: false
+        type: boolean
       clearDaytonaSnapshot:
         description: Clear the Worker snapshot binding after removing the coordinator environment secret
         required: false
@@ -62,8 +67,9 @@ jobs:
         working-directory: worker
 
       - name: Verify lease policy preservation
-        run: node scripts/verify-coordinator-lease-policy.mjs github:25068 github:58493
+        run: node scripts/verify-coordinator-lease-policy.mjs
         env:
+          CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.replace_live_lease_policy == true && '1' || '0' }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: "91b59577e757131d68d55a471fe32aca"
 

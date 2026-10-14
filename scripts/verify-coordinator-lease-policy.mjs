@@ -25,48 +25,50 @@ function parseOverrides(text, label) {
   return value;
 }
 
-function withoutOwnerMaximums(policy, owners) {
+function normalizeOverrides(policy) {
   const copy = structuredClone(policy);
-  for (const owner of owners) {
-    if (Object.hasOwn(copy.owners ?? {}, owner)) {
-      delete copy.owners[owner].maxTTLSeconds;
-      if (Object.keys(copy.owners[owner]).length === 0) delete copy.owners[owner];
-    }
-  }
   for (const group of ["owners", "orgs"]) {
     if (copy[group] && Object.keys(copy[group]).length === 0) delete copy[group];
   }
   return copy;
 }
 
+function differenceSummary(live, desired) {
+  const differences = [];
+  for (const group of [...new Set([...Object.keys(live), ...Object.keys(desired)])].sort()) {
+    const liveGroup = Object.hasOwn(live, group) ? live[group] : undefined;
+    const desiredGroup = Object.hasOwn(desired, group) ? desired[group] : undefined;
+    if (isDeepStrictEqual(liveGroup, desiredGroup)) continue;
+    const start = differences.length;
+    if (isRecord(liveGroup ?? {}) && isRecord(desiredGroup ?? {})) {
+      for (const key of [
+        ...new Set([...Object.keys(liveGroup ?? {}), ...Object.keys(desiredGroup ?? {})]),
+      ].sort()) {
+        const liveValue = Object.hasOwn(liveGroup ?? {}, key) ? liveGroup[key] : undefined;
+        const desiredValue = Object.hasOwn(desiredGroup ?? {}, key) ? desiredGroup[key] : undefined;
+        if (!isDeepStrictEqual(liveValue, desiredValue)) {
+          differences.push(`${JSON.stringify(group)}[${JSON.stringify(key)}]`);
+        }
+      }
+    }
+    if (differences.length === start) differences.push(JSON.stringify(group));
+  }
+  return `Live and source lease policy differ at: ${differences.join(", ")}.`;
+}
+
 export async function verifyCoordinatorLeasePolicy({
   accountId,
   apiToken,
-  owners,
   desiredOverrides,
+  acknowledgeReplacement = false,
   fetchImpl = fetch,
 }) {
-  if (
-    !/^[a-f0-9]{32}$/.test(accountId ?? "") ||
-    !apiToken ||
-    !Array.isArray(owners) ||
-    owners.length === 0 ||
-    owners.some((owner) => typeof owner !== "string" || !/^github:[1-9][0-9]*$/.test(owner))
-  ) {
-    throw new Error("Set the Cloudflare account, API token, and policy owner before verification.");
+  if (!/^[a-f0-9]{32}$/.test(accountId ?? "") || !apiToken) {
+    throw new Error("Set the Cloudflare account and API token before verification.");
   }
-  const desired = parseOverrides(desiredOverrides, "Source");
-  if (
-    owners.some(
-      (owner) =>
-        !Object.hasOwn(desired.owners ?? {}, owner) ||
-        !Number.isInteger(desired.owners[owner].maxTTLSeconds),
-    )
-  ) {
-    throw new Error(
-      "Source policy must declare the named owner's maximum TTL; deployment stopped.",
-    );
-  }
+  const desired = normalizeOverrides(
+    parseOverrides(desiredOverrides === undefined ? "{}" : desiredOverrides, "Source"),
+  );
 
   let response;
   try {
@@ -97,26 +99,30 @@ export async function verifyCoordinatorLeasePolicy({
     );
   }
   const bindings = data.result.bindings.filter((binding) => binding?.name === bindingName);
-  if (bindings.length === 0) return;
   if (
-    bindings.length !== 1 ||
-    bindings[0].type !== "plain_text" ||
-    typeof bindings[0].text !== "string"
+    bindings.length > 1 ||
+    (bindings.length === 1 &&
+      (bindings[0].type !== "plain_text" || typeof bindings[0].text !== "string"))
   ) {
     throw new Error("Live lease policy is not one readable plaintext binding; deployment stopped.");
   }
-  const live = parseOverrides(bindings[0].text, "Live");
-  if (
-    !isDeepStrictEqual(withoutOwnerMaximums(live, owners), withoutOwnerMaximums(desired, owners))
-  ) {
-    throw new Error(
-      "Live lease policy contains other entries or fields not preserved in source; reconcile the complete override document before deploying.",
-    );
+  const live = normalizeOverrides(parseOverrides(bindings[0]?.text ?? "{}", "Live"));
+  if (!isDeepStrictEqual(live, desired)) {
+    const summary = differenceSummary(live, desired);
+    if (!acknowledgeReplacement) {
+      throw new Error(
+        `${summary} Reconcile the complete override document or set CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT=1 for an intentional replacement; deployment stopped.`,
+      );
+    }
+    return summary;
   }
 }
 
 if (import.meta.main) {
   try {
+    if (process.argv.length > 2) {
+      throw new Error("Lease policy verification takes no arguments; deployment stopped.");
+    }
     let config;
     try {
       const require = createRequire(new URL("../worker/package.json", import.meta.url));
@@ -133,12 +139,13 @@ if (import.meta.main) {
         "Production Wrangler configuration targets another Worker; deployment stopped.",
       );
     }
-    await verifyCoordinatorLeasePolicy({
+    const summary = await verifyCoordinatorLeasePolicy({
       accountId: process.env.CLOUDFLARE_ACCOUNT_ID,
       apiToken: process.env.CLOUDFLARE_API_TOKEN,
-      owners: process.argv.slice(2),
-      desiredOverrides: config.vars[bindingName],
+      desiredOverrides: config.vars?.[bindingName],
+      acknowledgeReplacement: process.env.CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT === "1",
     });
+    if (summary) console.log(`${summary} Intentional replacement acknowledged.`);
     console.log("Verified coordinator lease policy preservation.");
   } catch (error) {
     console.error(`::error::${error.message}`);

@@ -188,13 +188,28 @@ test("main deployment verifies final serving identity after optional secret chan
 test("deployment checks live lease policy preservation before publishing", () => {
   assert.match(
     workflow,
-    /- name: Verify lease policy preservation\n        run: node scripts\/verify-coordinator-lease-policy\.mjs github:25068 github:58493\n[^]*?- name: Deploy\n/,
+    /- name: Verify lease policy preservation\n        run: node scripts\/verify-coordinator-lease-policy\.mjs\n[^]*?- name: Deploy\n/,
   );
   assert.match(
     workflow,
     /- name: Verify lease policy preservation[^]*?CLOUDFLARE_API_TOKEN: \$\{\{ secrets\.CLOUDFLARE_API_TOKEN \}\}/,
   );
   assert.match(workflow, /      - "scripts\/verify-coordinator-lease-policy\.mjs"/);
+  assert.doesNotMatch(workflow, /github:/);
+});
+
+test("lease policy replacement acknowledgment is dispatch-only and scoped to the guard", () => {
+  assert.match(
+    workflow,
+    /workflow_dispatch:\n    inputs:\n      replace_live_lease_policy:\n        description: [^\n]+\n        required: false\n        default: false\n        type: boolean\n/,
+  );
+  const acknowledgment =
+    "CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.replace_live_lease_policy == true && '1' || '0' }}";
+  assert.equal(workflow.split("CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT").length, 2);
+  const guard = workflow
+    .split("      - name: Verify lease policy preservation\n")[1]
+    .split("      - name: Deploy\n")[0];
+  assert.ok(guard.includes(acknowledgment));
 });
 
 test("coordinator deploy keeps optional credentials with the serialized environment owner", () => {
