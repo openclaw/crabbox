@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -57,6 +58,8 @@ func TestRunCoordinatorCleanupOutcomes(t *testing.T) {
 				}
 				var posts atomic.Int32
 				var artifactFailure atomic.Bool
+				var releaseEventsMu sync.Mutex
+				var releaseEvents []CoordinatorRunEventInput
 				outside := t.TempDir()
 				active := CoordinatorLease{ID: id, Provider: provider, State: "active", Host: "127.0.0.1", SSHPort: sshPort, SSHUser: "crabbox", TargetOS: targetLinux}
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -83,6 +86,19 @@ func TestRunCoordinatorCleanupOutcomes(t *testing.T) {
 						_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
 					case strings.HasPrefix(r.URL.Path, "/v1/leases/"):
 						_ = json.NewEncoder(w).Encode(map[string]any{"lease": active})
+					case strings.HasSuffix(r.URL.Path, "/events"):
+						var event CoordinatorRunEventInput
+						if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+							t.Error(err)
+							http.Error(w, err.Error(), http.StatusBadRequest)
+							return
+						}
+						if event.Type == "lease.released" {
+							releaseEventsMu.Lock()
+							releaseEvents = append(releaseEvents, event)
+							releaseEventsMu.Unlock()
+						}
+						_, _ = io.WriteString(w, `{"event":{"seq":1}}`)
 					case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/runs/"):
 						var body struct {
 							Command []string `json:"command"`
@@ -94,8 +110,6 @@ func TestRunCoordinatorCleanupOutcomes(t *testing.T) {
 						_ = json.NewEncoder(w).Encode(CoordinatorRunResponse{Run: CoordinatorRun{ID: strings.TrimPrefix(r.URL.Path, "/v1/runs/"), LeaseID: id, State: "running", Phase: "starting", Command: body.Command}})
 					case strings.HasSuffix(r.URL.Path, "/finish"):
 						_ = json.NewEncoder(w).Encode(map[string]any{"run": map[string]any{"id": strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/runs/"), "/finish")}})
-					case strings.HasSuffix(r.URL.Path, "/events"):
-						_, _ = io.WriteString(w, `{"event":{"seq":1}}`)
 					default:
 						http.NotFound(w, r)
 					}
@@ -142,6 +156,25 @@ func TestRunCoordinatorCleanupOutcomes(t *testing.T) {
 				}
 				if got := posts.Load(); got != wantPosts {
 					t.Errorf("release POSTs=%d want %d", got, wantPosts)
+				}
+				releaseEventsMu.Lock()
+				events := append([]CoordinatorRunEventInput(nil), releaseEvents...)
+				releaseEventsMu.Unlock()
+				wantEvents := 1
+				if tc.releaseError || tc.artifactError {
+					wantEvents = 0
+				}
+				if len(events) != wantEvents {
+					t.Fatalf("release events=%+v want count=%d", events, wantEvents)
+				}
+				if wantEvents == 1 {
+					phase, message := "cleanup", "leaseStopped=false; lease retained or cleanup unconfirmed"
+					if tc.terminal {
+						phase, message = "released", "leaseStopped=true; lease recovery ended"
+					}
+					if events[0].Phase != phase || events[0].Message != message {
+						t.Errorf("release event=%+v want phase=%q message=%q", events[0], phase, message)
+					}
 				}
 				_, exists, claimErr := ReadLeaseClaimWithPresence(id)
 				wantClaim := !tc.terminal || tc.artifactError

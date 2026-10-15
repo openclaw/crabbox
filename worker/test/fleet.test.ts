@@ -51633,7 +51633,16 @@ describe("fleet run history", () => {
           serverType: "replacement-type",
         },
         { type: "stdout", stream: "stdout", data: log },
-        { type: "lease.released", phase: "released" },
+        {
+          type: "lease.released",
+          phase: "cleanup",
+          message: "leaseStopped=false; lease retained or cleanup unconfirmed",
+        },
+        {
+          type: "lease.released",
+          phase: "released",
+          message: "leaseStopped=true; lease recovery ended",
+        },
         failure,
       ];
       const appendedEvents: RunEventRecord[] = [];
@@ -51645,6 +51654,7 @@ describe("fleet run history", () => {
         expect(response.status).toBe(201);
         // oxlint-disable-next-line eslint/no-await-in-loop -- inspect each append before the next delivery.
         const { event } = (await response.json()) as { event: RunEventRecord };
+        expect(event).toMatchObject(lateEvent);
         appendedEvents.push(event);
         // oxlint-disable-next-line eslint/no-await-in-loop -- assert that no individual late event rewrites terminal metadata.
         const read = await fleet.fetch(request("GET", `/v1/runs/${run.id}`, { headers }));
@@ -51657,7 +51667,7 @@ describe("fleet run history", () => {
           },
         });
       }
-      expect(appendedEvents.map((event) => event.seq)).toEqual([3, 4, 5, 6, 7]);
+      expect(appendedEvents.map((event) => event.seq)).toEqual([3, 4, 5, 6, 7, 8]);
       const events = await fleet.fetch(
         request("GET", `/v1/runs/${run.id}/events?after=2`, { headers }),
       );
@@ -51667,7 +51677,7 @@ describe("fleet run history", () => {
       );
       expect(duplicate.status).toBe(200);
       expect(await duplicate.json()).toEqual({
-        run: { ...finished, eventCount: 7, lastEventAt: appendedEvents.at(-1)?.createdAt },
+        run: { ...finished, eventCount: 8, lastEventAt: appendedEvents.at(-1)?.createdAt },
       });
       const logs = await fleet.fetch(request("GET", `/v1/runs/${run.id}/logs`, { headers }));
       expect(await logs.text()).toBe(log);

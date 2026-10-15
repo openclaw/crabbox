@@ -328,7 +328,7 @@ func TestBlacksmithStopReconciliationFailsClosed(t *testing.T) {
 					t.Fatalf("verification elapsed=%s, want the caller deadline", time.Since(started))
 				}
 				var exitErr core.ExitError
-				if !core.AsExitError(err, &exitErr) || exitErr.Code != 1 || !strings.Contains(exitErr.Message, "blacksmith failed: exit status 1") || !strings.Contains(exitErr.Message, "verification") {
+				if !core.AsExitError(err, &exitErr) || exitErr.Code != 1 || !strings.Contains(exitErr.Message, "blacksmith testbox stop exit=1 cause=other") || !strings.Contains(exitErr.Message, "verification") {
 					t.Fatalf("original stop error lost: %v", err)
 				}
 				want := []string{"status", "stop", "status"}
@@ -405,7 +405,7 @@ func TestBlacksmithReconciliationRetainsOriginalErrorUntilFinalized(t *testing.T
 			backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
 			err := backend.Stop(ctx, core.StopRequest{ID: claim.LeaseID})
 			var nativeErr core.ExitError
-			if !core.AsExitError(err, &nativeErr) || nativeErr.Code != 1 || !strings.Contains(nativeErr.Message, "blacksmith failed: exit status 1") || nativeErr.Message != err.Error() || inspections != 3 {
+			if !core.AsExitError(err, &nativeErr) || nativeErr.Code != 1 || !strings.Contains(nativeErr.Message, "blacksmith testbox stop exit=1 cause=other") || nativeErr.Message != err.Error() || inspections != 3 {
 				t.Fatalf("original failure lost after finalization: err=%v inspections=%d", err, inspections)
 			}
 			assertStopState(t, claim, true)
@@ -890,7 +890,7 @@ func TestBlacksmithStopVerificationDiagnostics(t *testing.T) {
 			}))
 			err := backend.Stop(ctx, core.StopRequest{ID: claim.LeaseID})
 			var exitErr core.ExitError
-			if !core.AsExitError(err, &exitErr) || exitErr.Code != 9 || exitErr.Message != err.Error() || strings.Count(exitErr.Message, nativeCause.Error()) != 1 || !errors.Is(err, nativeCause) {
+			if !core.AsExitError(err, &exitErr) || exitErr.Code != 9 || exitErr.Message != err.Error() || strings.Count(exitErr.Message, "blacksmith testbox stop exit=9 cause=other") != 1 || strings.Contains(exitErr.Message, nativeCause.Error()) || !errors.Is(err, nativeCause) {
 				t.Errorf("native diagnostic/cause lost: %v", err)
 			}
 			switch mode {
@@ -903,7 +903,7 @@ func TestBlacksmithStopVerificationDiagnostics(t *testing.T) {
 					t.Errorf("cancellation cause hidden: %v", err)
 				}
 			default:
-				if !errors.Is(err, queryCause) || strings.Count(exitErr.Message, queryCause.Error()) != 1 || strings.Count(exitErr.Message, "authentication unavailable") != 1 {
+				if !errors.Is(err, queryCause) || strings.Count(exitErr.Message, "blacksmith testbox status exit=7 cause=other") != 1 || strings.Contains(exitErr.Message, queryCause.Error()) || strings.Contains(exitErr.Message, "authentication unavailable") {
 					t.Errorf("independent lookup diagnostic/cause lost: %v", err)
 				}
 			}

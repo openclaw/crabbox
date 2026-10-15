@@ -850,3 +850,85 @@ it("accepts an immediate draining transition but throttles repeated heartbeats",
   expect((await f.create("cbx_000000000002")).status).toBe(409);
   expect((await f.route("/v1/serve/heartbeat", draining)).status).toBe(429);
 });
+
+describe.each([false, true])("serve availability durable=%s", (durable) => {
+  const available = {
+    state: "available",
+    reasons: [],
+    hostCPU: 0.1,
+    memoryPressure: "normal",
+    userIdleSeconds: null,
+    power: "ac",
+  };
+  it.each(["available", "legacy"])("places on eligible agents: %s", async (state) => {
+    const f = fixture(durable);
+    const availability =
+      state === "legacy"
+        ? undefined
+        : {
+            ...available,
+            state,
+            reasons: [],
+          };
+    expect((await f.route("/v1/serve/heartbeat", { ...machine(), availability })).status).toBe(200);
+    const response = await f.create("cbx_000000000001");
+    expect(response.status).toBe(202);
+  });
+  it.each(["busy", "unknown"])("rejects unavailable agents: %s", async (state) => {
+    const f = fixture(durable);
+    const availability = {
+      ...available,
+      state,
+      reasons: state === "busy" ? ["host CPU"] : [],
+    };
+    expect((await f.route("/v1/serve/heartbeat", { ...machine(), availability })).status).toBe(200);
+    const response = await f.create("cbx_000000000001");
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: "serve_capacity_unavailable",
+      details: [{ name: "builder", freeCPUs: 0, freeMemoryMB: 0, availability }],
+    });
+    expect(await f.storage.get("lease:cbx_000000000001")).toBeUndefined();
+  });
+  it("skips a busier high-capacity machine and preserves its running lease", async () => {
+    vi.useFakeTimers();
+    const f = fixture(durable);
+    await f.route("/v1/serve/heartbeat", { ...machine(), availability: available });
+    await f.create("cbx_000000000001");
+    vi.advanceTimersByTime(1000);
+    const heartbeat = await f.route("/v1/serve/heartbeat", {
+      ...machine(),
+      availability: { ...available, state: "busy", reasons: ["host CPU"] },
+      leases: [{ id: "cbx_000000000001", state: "running" }],
+    });
+    expect(await heartbeat.json()).toMatchObject({
+      assignments: [{ id: "cbx_000000000001" }],
+      stop: [],
+    });
+    const other = "22222222-2222-4222-8222-222222222222";
+    await f.route("/v1/serve/heartbeat", { ...machine(other), availability: available });
+    const response = await f.create("cbx_000000000002");
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ lease: { serve: { machineID: other } } });
+  });
+  it.each([
+    null,
+    [],
+    {},
+    { ...available, state: "idle" },
+    { ...available, reasons: "busy" },
+    { ...available, reasons: Array(9).fill("cpu") },
+    { ...available, reasons: ["x".repeat(129)] },
+    { ...available, reasons: ["bad\nreason"] },
+    { ...available, hostCPU: -1 },
+    { ...available, hostCPU: 1.1 },
+    { ...available, hostCPU: "0.2" },
+    { ...available, userIdleSeconds: -1 },
+    { ...available, userIdleSeconds: 1e100 },
+    { ...available, power: "solar" },
+    { ...available, memoryPressure: "low" },
+  ])("rejects malformed availability %#", async (availability) => {
+    const f = fixture(durable);
+    expect((await f.route("/v1/serve/heartbeat", { ...machine(), availability })).status).toBe(400);
+  });
+});

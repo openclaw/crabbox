@@ -40,7 +40,16 @@ export interface ServeAddressCandidate {
   address: string;
   kind: "tailnet" | "lan" | "explicit";
 }
+export interface ServeAvailability {
+  state: "available" | "busy" | "unknown";
+  reasons: string[];
+  hostCPU: number | null;
+  memoryPressure: "normal" | "warn" | "critical" | "unknown";
+  userIdleSeconds: number | null;
+  power: "ac" | "battery" | "unknown";
+}
 export interface ServeMachine {
+  availability?: ServeAvailability;
   machineID: string;
   owner: string;
   org: string;
@@ -74,6 +83,8 @@ export interface ServeMachineView extends Omit<ServeMachine, "leases"> {
   online: boolean;
   freeCPUs: number;
   allocatedLeases: number;
+  allocatedCPUs: number;
+  allocatedMemoryMB: number;
   allocatedLeaseRefs: Pick<LeaseRecord, "id" | "slug" | "state">[];
 }
 interface Heartbeat extends Omit<ServeMachine, "owner" | "org" | "lastHeartbeat" | "leases"> {
@@ -98,6 +109,24 @@ function validText(v: unknown, max = 128): v is string {
 }
 function integer(v: unknown, max: number): v is number {
   return Number.isSafeInteger(v) && Number(v) > 0 && Number(v) <= max;
+}
+function validAvailability(value: unknown): boolean {
+  if (value === undefined) return true; // Released agents retain their placement behavior.
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as ServeAvailability;
+  return (
+    ["available", "busy", "unknown"].includes(v.state) &&
+    Array.isArray(v.reasons) &&
+    v.reasons.length <= 8 &&
+    v.reasons.every((reason) => validText(reason, 128)) &&
+    (v.hostCPU === null || (Number.isFinite(v.hostCPU) && v.hostCPU >= 0 && v.hostCPU <= 1)) &&
+    ["normal", "warn", "critical", "unknown"].includes(v.memoryPressure) &&
+    (v.userIdleSeconds === null ||
+      (Number.isFinite(v.userIdleSeconds) &&
+        v.userIdleSeconds >= 0 &&
+        v.userIdleSeconds <= Number.MAX_SAFE_INTEGER)) &&
+    ["ac", "battery", "unknown"].includes(v.power)
+  );
 }
 function validLeaseKey(v: unknown): v is string {
   if (!validText(v, 4096)) return false;
@@ -200,6 +229,7 @@ function heartbeatInput(v: Heartbeat): boolean {
     integer(v.cpus, 4096) &&
     integer(v.memoryMB, 16 * 1024 * 1024) &&
     integer(v.maxLeases, maxLeases) &&
+    validAvailability(v.availability) &&
     (v.frontDoor?.candidates !== undefined || validAddress(v.address)) &&
     v.frontDoor &&
     integer(v.frontDoor.port, 65535) &&
@@ -368,13 +398,16 @@ export class ServeCoordinator {
     const held = leases.filter((l) => !leaseProviderCleanupConfirmed(l));
     const cpus = held.reduce((n, l) => n + l.serve!.cpus, 0);
     const memory = held.reduce((n, l) => n + l.serve!.memoryMB, 0);
+    const available = m.availability === undefined || m.availability.state === "available";
     return {
       ...m,
       leases: undefined,
       online: Date.now() - m.lastHeartbeat < onlineMS,
-      freeCPUs: Math.max(0, m.cpus - cpus),
-      freeMemoryMB: Math.max(0, m.memoryMB - memory),
+      freeCPUs: available ? Math.max(0, m.cpus - cpus) : 0,
+      freeMemoryMB: available ? Math.max(0, m.memoryMB - memory) : 0,
       allocatedLeases: held.length,
+      allocatedCPUs: cpus,
+      allocatedMemoryMB: memory,
       allocatedLeaseRefs: held
         .filter((l) => l.owner === m.owner && l.org === m.org)
         .map(({ id, slug, state }) => ({ id, state, ...(slug === undefined ? {} : { slug }) })),
@@ -629,6 +662,7 @@ export class ServeCoordinator {
           .filter(
             ({ m, view, size }) =>
               view.online &&
+              (m.availability === undefined || m.availability.state === "available") &&
               !m.draining &&
               view.allocatedLeases < Math.min(m.maxLeases, maxLeases) &&
               view.freeCPUs >= size.cpus &&

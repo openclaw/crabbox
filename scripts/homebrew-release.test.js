@@ -166,7 +166,7 @@ function runMockedHomebrewPhase({
     )}\n`,
   );
 
-  const packMembers = runtimePack === "filesystem"
+  const packMembers = runtimePack === "filesystem" || runtimePack === "egress"
     ? ["manifest.json", "darwin-amd64", "darwin-arm64", "linux-amd64", "linux-arm64", "windows-amd64.exe", "windows-arm64.exe"]
     : ["manifest.json", "linux-amd64", "linux-arm64"];
   if (runtimePack) {
@@ -205,7 +205,7 @@ function runMockedHomebrewPhase({
   fs.writeFileSync(
     path.join(assets, "provenance.json"),
     JSON.stringify({
-      schemaVersion: runtimePack === "filesystem" ? 3 : runtimePack ? 2 : 1,
+      schemaVersion: runtimePack === "egress" ? 4 : runtimePack === "filesystem" ? 3 : runtimePack ? 2 : 1,
       payloads: [
         {
           binaries: [
@@ -1155,6 +1155,15 @@ test("schema 2 Homebrew phase rejects formulae that omit the offline pack", () =
   assert.notEqual(result.status, 0);
   assert.doesNotMatch(result.calls, /brew:test/);
 });
+
+for (const nativeArch of ["arm64", "x86_64"]) {
+  test(`schema 4 (egress) Homebrew install verifies the filesystem-layout runtime pack on ${nativeArch}`, () => {
+    const result = runMockedHomebrewPhase({ runtimePack: "egress", nativeArch });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.calls, /brew:--prefix\n/);
+    assert.match(result.stdout, /Verified Homebrew/);
+  });
+}
 
 for (const nativeArch of ["arm64", "x86_64"]) {
   test(`schema 3 Homebrew install preserves all six filesystem companions on ${nativeArch}`, () => {

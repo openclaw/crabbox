@@ -104,7 +104,7 @@ describe("portal donated machines", () => {
       body.indexOf("</main>"),
     );
     expect(body).toContain('href="#machines"');
-    expect(body).toContain('class="fleet-tile-value">2/3</strong>');
+    expect(body).toContain('class="fleet-tile-value">1/3</strong>');
     expect(section).toContain('id="machines-heading">Machines</h2>');
     expect(section).toContain("11111111 · linux/amd64");
     expect(section).toContain("darwin/arm64");
@@ -151,7 +151,7 @@ describe("portal donated machines", () => {
       };
       const body = await f.home();
       expect(body).not.toContain('id="machines"');
-      expect(body).not.toContain("machines online");
+      expect(body).not.toContain("machines available");
       expect(body).not.toContain("serve_not_enabled");
       expect(
         f.storage.listOptions.filter((options) => options?.prefix?.startsWith("serve-")),
@@ -165,7 +165,7 @@ describe("portal donated machines", () => {
     await f.seed(f.machine({ owner: "bob@example.com", name: "private-builder" }));
     const body = await f.home();
     expect(body).not.toContain('id="machines"');
-    expect(body).not.toContain("machines online");
+    expect(body).not.toContain("machines available");
     expect(body).not.toContain("private-builder");
   });
 
@@ -259,5 +259,48 @@ describe("portal donated machines", () => {
     expect(
       f.storage.writes.filter((key) => key.startsWith("serve-") || key.startsWith("lease:")),
     ).toEqual([]);
+  });
+});
+
+describe("portal availability", () => {
+  it("renders states, measurements and escaped reasons, counting only available online machines", async () => {
+    const f = fixture();
+    await f.seed(
+      f.machine({
+        availability: {
+          state: "busy",
+          reasons: ["host CPU", "<script>alert(1)</script>"],
+          hostCPU: 0.9,
+          memoryPressure: "normal",
+          userIdleSeconds: 12,
+          power: "ac",
+        },
+      }),
+    );
+    await f.seed(
+      f.machine({
+        machineID: "22222222-2222-4222-8222-222222222222",
+        availability: {
+          state: "unknown",
+          reasons: ["power unknown"],
+          hostCPU: null,
+          memoryPressure: "unknown",
+          userIdleSeconds: null,
+          power: "unknown",
+        },
+      }),
+    );
+    await f.seed(f.machine({ machineID: "33333333-3333-4333-8333-333333333333" }));
+    const body = await f.home();
+    expect(body).toContain("machines available");
+    expect(body).toContain('class="fleet-tile-value">1/3</strong>');
+    expect(body).toContain("busy · host CPU · &lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(body).not.toContain("<script>alert(1)</script>");
+    expect(body).toContain("host CPU 90% · user idle 12s · power ac");
+    expect(body).toContain("unknown · power unknown");
+    expect(body).toContain("host CPU unknown · user idle unknown · power unknown");
+    expect(body).toContain(">available</span>");
+    expect(body).toContain("0/16 CPUs · 0/32768 MiB");
+    expect(body).toContain("0 CPUs · 0 MiB free");
   });
 });

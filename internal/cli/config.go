@@ -1743,11 +1743,20 @@ func baseConfig() Config {
 }
 
 type ServeConfig struct {
-	AdvertiseAddresses []string `yaml:"advertiseAddresses,omitempty"`
-	NoLANCandidates    bool     `yaml:"noLANCandidates,omitempty"`
-	SSHPort            int      `yaml:"sshPort,omitempty"`
-	Machine            string   `yaml:"machine,omitempty"`
-	Fallback           string   `yaml:"fallback,omitempty"`
+	Availability       ServeAvailabilityConfig `yaml:"availability,omitempty"`
+	AdvertiseAddresses []string                `yaml:"advertiseAddresses,omitempty"`
+	NoLANCandidates    bool                    `yaml:"noLANCandidates,omitempty"`
+	SSHPort            int                     `yaml:"sshPort,omitempty"`
+	Machine            string                  `yaml:"machine,omitempty"`
+	Fallback           string                  `yaml:"fallback,omitempty"`
+}
+
+type ServeAvailabilityConfig struct {
+	Mode              string   `yaml:"mode,omitempty"`
+	MaxHostCPU        *float64 `yaml:"maxHostCPU,omitempty"`
+	RequireUserIdle   string   `yaml:"requireUserIdle,omitempty"`
+	RequireACPower    *bool    `yaml:"requireACPower,omitempty"`
+	MaxMemoryPressure string   `yaml:"maxMemoryPressure,omitempty"`
 }
 
 type fileConfig struct {

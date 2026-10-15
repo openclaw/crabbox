@@ -398,8 +398,9 @@ homebrew_phase() {
   local runtime_pack
   runtime_pack=$("$node_bin" -e '
     const p = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
-    if (![1, 2, 3].includes(p.schemaVersion)) throw new Error("unsupported release provenance schema");
-    process.stdout.write(p.schemaVersion === 3 ? "filesystem" : p.schemaVersion === 2 ? "true" : "false");
+    if (![1, 2, 3, 4].includes(p.schemaVersion)) throw new Error("unsupported release provenance schema");
+    // Schema 4 (egress) ships the same archive inventory as schema 3 (filesystem).
+    process.stdout.write(p.schemaVersion >= 3 ? "filesystem" : p.schemaVersion === 2 ? "true" : "false");
   ' "$asset_dir/provenance.json")
   local expected_members=crabbox
   [[ "$native_arch" == arm64 ]] && expected_members=$'crabbox\ncrabbox-apple-vm-helper'
