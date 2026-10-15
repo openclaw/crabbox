@@ -5,6 +5,7 @@
 ### Fixes
 
 - Azure Sandbox: report original allocation expiry without discarding cleanup ownership, and expose safe operation-specific transport failure categories without leaking private causes. [PR 2849](https://github.com/openclaw/crabbox/pull/2849). Thanks @galiniliev.
+- Coordinator Node image: re-pin the AWS RDS global CA bundle after AWS added the `sa-west-1` root CAs (114 Amazon RDS certificates, all self-signed Amazon roots). [PR 2853](https://github.com/openclaw/crabbox/pull/2853).
 - Checkpoints: establish every direct AWS backing snapshot before non-waiting success, expose provider-owned `captureEstablished` attestations while preserving other providers' success semantics, and reduce native availability and AWS public-IP polling slack. [PR 2834](https://github.com/openclaw/crabbox/pull/2834).
 - Serve: preserve CPU and user-idle readings on heavily loaded Macs with independent sampling deadlines and interval-idle CPU measurement, fall back to raw host CPU when container stats fail, and add opt-in per-signal diagnostics.
 
