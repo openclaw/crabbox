@@ -2955,10 +2955,11 @@ fi
 	if !opts.GitOverlay && !opts.PlainManifest && opts.HydrateGit && opts.BaseRef != "" {
 		refspec := "+refs/heads/" + opts.BaseRef + ":refs/remotes/origin/" + opts.BaseRef
 		script += `if exact_git_root && git remote get-url origin >/dev/null 2>&1; then
+  hydrate_fetch() { git fetch --quiet --filter=blob:none origin "$@"; }
   if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
-    git fetch --quiet --filter=blob:none --unshallow origin ` + shellQuote(refspec) + ` || git fetch --quiet --filter=blob:none --depth=1000 origin ` + shellQuote(refspec) + ` || git fetch --quiet --filter=blob:none origin ` + shellQuote(refspec) + ` || git fetch --quiet --filter=blob:none origin ` + shellQuote(opts.BaseRef) + ` || true
+    hydrate_fetch --unshallow ` + shellQuote(refspec) + ` || hydrate_fetch --depth=1000 ` + shellQuote(refspec) + ` || hydrate_fetch ` + shellQuote(refspec) + ` || hydrate_fetch ` + shellQuote(opts.BaseRef) + ` || true
   else
-    git fetch --quiet --filter=blob:none origin ` + shellQuote(refspec) + ` || git fetch --quiet --filter=blob:none origin ` + shellQuote(opts.BaseRef) + ` || true
+    hydrate_fetch ` + shellQuote(refspec) + ` || hydrate_fetch ` + shellQuote(opts.BaseRef) + ` || true
   fi
 fi
 `
