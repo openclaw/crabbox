@@ -1,2 +1,5 @@
 {"phase":"setup","result":"isolated fresh-base worktree ready","base":"05eded31b4d8b9a96f8e56813de142f4a9255b8e"}
 {"at": "2026-10-15T20:21:33.369254+00:00", "phase": "verification", "result": "focused Go and 54 Worker tests passed; full gates running; exact Node24 runtime installed"}
+{"at": "2026-10-15T20:27:09.255176+00:00", "phase": "draft", "pr": "https://github.com/openclaw/crabbox/pull/2860", "head": "8143ed2f94c9a54b6aa6405c5e406740cf666a94", "result": "draft pushed, CI and native ClawSweeper dispatch started; full local Go race pending"}
+{"at": "2026-10-15T20:46:06.229284+00:00", "phase": "full-go-closeout", "result": "exit 1; CLI 20m timeout and native-child failures; three introduced capability integration failures reproduced and repaired with targeted race coverage", "raw": "runs/cloudflare-artifacts-runs/20261015/go-race.log"}
+{"at": "2026-10-15T20:47:21.285555+00:00", "phase": "closeout", "source": "1ef4e2d03a670d2d360dbe855f47a76a28db7fa2", "result": "targeted repaired contracts and recommendation race passed; targeted vet passed; full prior race failure retained; draft handoff prepared"}
