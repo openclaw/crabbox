@@ -107,6 +107,11 @@ func (b *backend) observe(ctx context.Context, tx *core.FixedTransaction, mode c
 		if s.ID == "" || s.Labels["crabbox_lease"] != claim.LeaseID || s.Labels["crabbox_fingerprint"] != fingerprintLabel(claim.FixedCreateIntent.Fingerprint) || s.Labels["crabbox_attempt"] == "" || s.Labels["crabbox_attempt"] != claim.FixedCreateIntent.Attempt["nonce"] {
 			return out, fmt.Errorf("ACA Sandbox ownership does not match the exact lease attempt")
 		}
+		if snapshotID := claim.FixedCreateIntent.Attempt["snapshot_id"]; snapshotID != "" {
+			if s.SourcesRef.Snapshot == nil || s.SourcesRef.Snapshot.ID != snapshotID || s.SourcesRef.DiskImage == nil || s.SourcesRef.DiskImage.ID != claim.FixedCreateIntent.Attempt["source_disk_id"] {
+				return out, fmt.Errorf("ACA Sandbox restored source differs from its exact lease attempt")
+			}
+		}
 	}
 	out.Candidates = candidates
 	if len(candidates) == 1 {
@@ -119,6 +124,10 @@ func (b *backend) observe(ctx context.Context, tx *core.FixedTransaction, mode c
 func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (core.LeaseTarget, error) {
 	if b.cfg.AzureSandbox.DiskID != "" && b.cfg.AzureSandbox.Disk != "" && b.cfg.AzureSandbox.Disk != core.AzureSandboxConfigDefaultDisk {
 		return core.LeaseTarget{}, fmt.Errorf("ACA Sandbox private disk ID cannot be combined with a public disk override")
+	}
+	snapshot, err := b.snapshotBinding()
+	if err != nil {
+		return core.LeaseTarget{}, err
 	}
 	c, err := b.connect()
 	if err != nil {
@@ -145,18 +154,30 @@ func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (cor
 			return core.FixedLeaseBinding{ProviderScope: (Provider{}).ClaimScope(b.cfg), Fingerprint: fingerprint, AllocateSlug: true, RequestedSlug: req.RequestedSlug}, err
 		},
 		Plan: func(_ context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
-			return core.FixedAttemptPlan{Values: map[string]string{"submission": "pending", "expires_at": time.Now().Add(b.cfg.TTL).UTC().Format(time.RFC3339Nano)}, NonceBytes: 16, NonceKey: "nonce", NonceLabel: "crabbox_attempt", Labels: map[string]string{"crabbox_lease": claim.LeaseID, "crabbox_fingerprint": fingerprintLabel(claim.FixedCreateIntent.Fingerprint)}}, nil
+			values := map[string]string{"submission": "pending", "expires_at": time.Now().Add(b.cfg.TTL).UTC().Format(time.RFC3339Nano)}
+			if snapshot != nil {
+				values["snapshot_id"], values["source_disk_id"] = snapshot.SnapshotID, snapshot.SourceDiskID
+			}
+			return core.FixedAttemptPlan{Values: values, NonceBytes: 16, NonceKey: "nonce", NonceLabel: "crabbox_attempt", Labels: map[string]string{"crabbox_lease": claim.LeaseID, "crabbox_fingerprint": fingerprintLabel(claim.FixedCreateIntent.Fingerprint)}}, nil
 		},
 		ObserveExact: b.observe,
 		Submit: func(ctx context.Context, tx *core.FixedTransaction) (sandbox, error) {
+			if err := b.verifySnapshotSource(ctx, snapshot); err != nil {
+				return sandbox{}, err
+			}
 			body := createRequest{Resources: map[string]string{"cpu": "2000m", "memory": "4096Mi"}, Labels: maps.Clone(tx.Claim.Labels), Lifecycle: map[string]any{
 				"autoSuspendPolicy": map[string]any{"enabled": true, "interval": int(b.cfg.IdleTimeout.Seconds()), "mode": "Disk"},
 				"autoDeletePolicy":  map[string]any{"enabled": true, "deleteIntervalInSeconds": int(b.cfg.TTL.Seconds())},
 			}}
-			if cfg.DiskID != "" {
-				body.SourcesRef.DiskImage.ID = cfg.DiskID
+			if snapshot != nil {
+				// CLI/server-qualified restore accepts fresh labels. Do not send
+				// unqualified environment, resource or lifecycle overrides.
+				body.SourcesRef.Snapshot = &snapshotReference{ID: snapshot.SnapshotID}
+				body.Resources, body.Lifecycle = nil, nil
+			} else if cfg.DiskID != "" {
+				body.SourcesRef.DiskImage = &diskReference{ID: cfg.DiskID}
 			} else {
-				body.SourcesRef.DiskImage.Name, body.SourcesRef.DiskImage.IsPublic = cfg.Disk, true
+				body.SourcesRef.DiskImage = &diskReference{Name: cfg.Disk, IsPublic: true}
 			}
 			s, err := c.Create(ctx, body)
 			if err != nil {
@@ -177,6 +198,11 @@ func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (cor
 			s, err = b.ensureRunning(ctx, *tx.Claim)
 			if err != nil {
 				return core.LeaseTarget{}, err
+			}
+			if snapshot != nil {
+				if err := b.configureSnapshotLifecycle(ctx, tx, s, snapshot.Lifecycle); err != nil {
+					return core.LeaseTarget{}, err
+				}
 			}
 			return core.LeaseTarget{LeaseID: tx.Claim.LeaseID, Server: core.Server{Provider: providerName, CloudID: s.ID, ImmutableID: s.ID, Labels: s.Labels, Status: s.State}}, nil
 		},
