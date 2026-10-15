@@ -19,6 +19,10 @@ var blacksmithActionsURL = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9_
 
 const blacksmithStatusReadTimeout = 10 * time.Second
 
+// Cleanup polls settlement until its own deadline, so a read can otherwise
+// start with milliseconds left and be killed before GitHub can answer.
+const blacksmithGitHubReadMinBudget = 5 * time.Second
+
 // Status is observational: it needs no claim and never finalizes local custody.
 // A terminal run is useful evidence only while its native association is stable.
 func (b *blacksmithBackend) statusSettlement(ctx context.Context, identity blacksmithIdentity) map[string]any {
@@ -132,6 +136,11 @@ func (b *blacksmithBackend) githubRunConclusion(ctx context.Context, runURL stri
 	parts := blacksmithActionsURL.FindStringSubmatch(runURL)
 	if parts == nil || parts[2] == "." || parts[2] == ".." {
 		return "", fmt.Errorf("native status has no valid exact GitHub run URL")
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < b.githubReadMinBudget {
+			return "", blacksmithCommandError{ExitError: core.ExitError{Code: 5, Message: fmt.Sprintf("exact GitHub run read skipped (remaining_budget_ms=%d minimum_budget_ms=%d); retry with a fresh cleanup budget", remaining.Milliseconds(), b.githubReadMinBudget.Milliseconds())}, cause: context.DeadlineExceeded}
+		}
 	}
 	result, err, diagnostic := b.githubCommand(ctx, []string{"api", "--hostname", "github.com", "--method", "GET",
 		"repos/" + parts[1] + "/" + parts[2] + "/actions/runs/" + parts[3],
