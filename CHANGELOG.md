@@ -2,12 +2,19 @@
 
 ## Unreleased
 
-### Fixes
+## 0.78.1 - 2026-10-15
+
+### Highlights
+
+- **Put busy-but-usable machines back in the pool.** Heavily loaded Macs now report real availability instead of staying `unknown` and never being offered for new leases. [PR 2845](https://github.com/openclaw/crabbox/pull/2845).
+- **Capture AWS checkpoints before returning success.** Direct AWS `checkpoint create --wait=false` now establishes every backing snapshot before returning, so subsequent work cannot race an unstarted capture. [PR 2834](https://github.com/openclaw/crabbox/pull/2834).
+
+### Fixed
 
 - Azure Sandbox: report original allocation expiry without discarding cleanup ownership, and expose safe operation-specific transport failure categories without leaking private causes. [PR 2849](https://github.com/openclaw/crabbox/pull/2849). Thanks @galiniliev.
 - Coordinator Node image: re-pin the AWS RDS global CA bundle after AWS added the `sa-west-1` root CAs (114 Amazon RDS certificates, all self-signed Amazon roots). [PR 2853](https://github.com/openclaw/crabbox/pull/2853).
 - Checkpoints: establish every direct AWS backing snapshot before non-waiting success, expose provider-owned `captureEstablished` attestations while preserving other providers' success semantics, and reduce native availability and AWS public-IP polling slack. [PR 2834](https://github.com/openclaw/crabbox/pull/2834).
-- Serve: preserve CPU and user-idle readings on heavily loaded Macs with independent sampling deadlines and interval-idle CPU measurement, fall back to raw host CPU when container stats fail, and add opt-in per-signal diagnostics.
+- Serve: preserve CPU and user-idle readings on heavily loaded Macs with independent sampling deadlines and interval-idle CPU measurement, accept CPU totals above 100%, fall back to raw host CPU when container stats fail, and add opt-in per-signal diagnostics. [PR 2845](https://github.com/openclaw/crabbox/pull/2845).
 
 ## 0.78.0 - 2026-10-14
 
