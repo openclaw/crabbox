@@ -192,6 +192,7 @@ func createNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreate
 		return core.NativeCheckpointCreateResult{}, core.Exit(7, "docker tag %s: %v: %s", imageID, err, detail)
 	}
 	return core.NativeCheckpointCreateResult{
+		CaptureEstablished: true,
 		Image: core.NativeCheckpointImage{
 			ID:       imageID,
 			Name:     imageName,

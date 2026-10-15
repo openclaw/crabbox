@@ -662,8 +662,11 @@ type NativeCheckpointCapture struct {
 }
 
 type NativeCheckpointCreateResult struct {
-	Image    NativeCheckpointImage
-	Metadata map[string]string
+	// CaptureEstablished attests a fixed capture under the provider's own
+	// contract. False preserves success semantics and omits the JSON assertion.
+	CaptureEstablished bool `json:"-"`
+	Image              NativeCheckpointImage
+	Metadata           map[string]string
 }
 
 // NativeCheckpointNotSubmittedError attests that this invocation never attempted

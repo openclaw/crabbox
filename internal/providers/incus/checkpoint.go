@@ -137,6 +137,7 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		}
 		metadata["checkpoint_state"] = "available"
 		result.Image.State, result.Image.Architecture = "available", image.Architecture
+		result.CaptureEstablished = true
 		if err := req.Persist(result); err != nil {
 			return err
 		}

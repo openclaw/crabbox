@@ -476,6 +476,7 @@ type CoordinatorImage struct {
 	CatalogOnly          bool                             `json:"catalogOnly,omitempty"`
 	VariantSelectors     *imageVariantSelectors           `json:"variantSelectors,omitempty"`
 	managedCheckpoint    *coordinatorCheckpoint
+	captureEstablished   bool
 }
 
 type CoordinatorImageDefaultState struct {

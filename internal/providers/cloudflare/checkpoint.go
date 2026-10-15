@@ -96,6 +96,7 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		"workdir":       snapshot.Workdir,
 		"size_bytes":    strconv.FormatInt(snapshot.Size, 10),
 	}
+	result.CaptureEstablished = true
 	return result, nil
 }
 

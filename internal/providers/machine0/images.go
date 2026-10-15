@@ -280,6 +280,7 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 	if actionErr != nil {
 		return result, errors.Join(lifecycleErr, actionErr)
 	}
+	result.CaptureEstablished = lifecycleErr == nil
 	return result, lifecycleErr
 }
 
