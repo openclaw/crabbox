@@ -107,7 +107,8 @@ func (b *backend) observe(ctx context.Context, tx *core.FixedTransaction, mode c
 		if s.ID == "" || s.Labels["crabbox_lease"] != claim.LeaseID || s.Labels["crabbox_fingerprint"] != fingerprintLabel(claim.FixedCreateIntent.Fingerprint) || s.Labels["crabbox_attempt"] == "" || s.Labels["crabbox_attempt"] != claim.FixedCreateIntent.Attempt["nonce"] {
 			return out, fmt.Errorf("ACA Sandbox ownership does not match the exact lease attempt")
 		}
-		if snapshotID := claim.FixedCreateIntent.Attempt["snapshot_id"]; snapshotID != "" {
+		// A bad restore is unusable, but exact ownership still permits explicit cleanup.
+		if snapshotID := claim.FixedCreateIntent.Attempt["snapshot_id"]; snapshotID != "" && mode != core.FixedObserveDelete {
 			if s.SourcesRef.Snapshot == nil || s.SourcesRef.Snapshot.ID != snapshotID || s.SourcesRef.DiskImage == nil || s.SourcesRef.DiskImage.ID != claim.FixedCreateIntent.Attempt["source_disk_id"] {
 				return out, fmt.Errorf("ACA Sandbox restored source differs from its exact lease attempt")
 			}
@@ -145,6 +146,8 @@ func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (cor
 		Reclaim: req.Reclaim, TargetOS: core.TargetLinux, TTL: b.cfg.TTL, IdleTimeout: b.cfg.IdleTimeout,
 	}, core.FixedLeaseOperations[sandbox]{
 		Admission: &core.FixedAdmission{PendingKey: "submission", PendingValue: "pending", SubmittedValue: "submitted"},
+		// Read-only prerequisites must not consume the attempt's create admission.
+		DeferredAdmission: true,
 		DescribeIntent: func(_ context.Context, _ *core.LeaseClaim, _ bool) (core.FixedLeaseBinding, error) {
 			fingerprint, err := core.FixedIntentFingerprint("aca-sandbox-v1", struct {
 				Config    core.AzureSandboxConfig
@@ -178,6 +181,12 @@ func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (cor
 				body.SourcesRef.DiskImage = &diskReference{ID: cfg.DiskID}
 			} else {
 				body.SourcesRef.DiskImage = &diskReference{Name: cfg.Disk, IsPublic: true}
+			}
+			if err := ctx.Err(); err != nil {
+				return sandbox{}, err
+			}
+			if err := tx.Admit(); err != nil {
+				return sandbox{}, err
 			}
 			s, err := c.Create(ctx, body)
 			if err != nil {

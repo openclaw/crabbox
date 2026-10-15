@@ -174,6 +174,106 @@ func TestSnapshotRestoreRefusesWrongReadbackWithoutReplacement(t *testing.T) {
 			if f.creates != 1 || f.deletes != 0 {
 				t.Fatal("uncertain restore replaced or destroyed")
 			}
+			// Invalid source readback must not strand an exactly owned clone.
+			if err := os.Remove(b.cfg.AzureSandbox.SnapshotReceipt); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err != nil {
+				t.Fatal(err)
+			}
+			claim, err := b.claim(req.RequestedLeaseID)
+			if err != nil || claim.FixedCreateIntent.State != "released" || f.box != nil || f.deletes != 1 {
+				t.Fatalf("bad restore cleanup did not settle: err=%v deletes=%d", err, f.deletes)
+			}
+		})
+	}
+}
+
+func TestSnapshotPrerequisiteFailurePreservesCreateAdmission(t *testing.T) {
+	for _, failure := range []string{"snapshot-unavailable", "disk-unavailable", "disk-not-ready"} {
+		for _, recoverBy := range []string{"retry", "stop"} {
+			t.Run(failure+"/"+recoverBy, func(t *testing.T) {
+				f := &fixture{}
+				b, req := fixtureBackend(t, f)
+				binding := pinSnapshotFixture(t, b, nil)
+				snapshotTransport(t, b, f, binding, nil)
+				inner := b.api.http.Transport
+				unhealthy := true
+				b.api.http.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+					if unhealthy {
+						if failure == "snapshot-unavailable" && strings.Contains(r.URL.Path, "/snapshots/") {
+							return response(503, ""), nil
+						}
+						if strings.Contains(r.URL.Path, "/diskimages/") {
+							switch failure {
+							case "disk-unavailable":
+								return response(503, ""), nil
+							case "disk-not-ready":
+								return response(200, `{"id":"disk-id","status":{"state":"Creating"}}`), nil
+							}
+						}
+					}
+					return inner.RoundTrip(r)
+				})
+				if _, err := b.acquire(t.Context(), req); err == nil || f.creates != 0 {
+					t.Fatalf("failed prerequisite allocated: err=%v creates=%d", err, f.creates)
+				}
+				before, err := b.claim(req.RequestedLeaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				attempt := before.FixedCreateIntent.Attempt
+				if attempt["submission"] != "pending" || before.FixedCreateIntent.Journal.Phase != "prepared" || attempt["nonce"] == "" {
+					t.Fatal("read-only prerequisite consumed create admission")
+				}
+				unhealthy = false
+				wantDeletes := 0
+				if recoverBy == "retry" {
+					if _, err := b.acquire(t.Context(), req); err != nil {
+						t.Fatal(err)
+					}
+					after, err := b.claim(req.RequestedLeaseID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if f.creates != 1 || after.FixedCreateIntent.Attempt["nonce"] != attempt["nonce"] || after.FixedCreateIntent.Attempt["expires_at"] != attempt["expires_at"] || after.FixedCreateIntent.Attempt["submission"] != "submitted" {
+						t.Fatal("retry replaced the original attempt or failed to record submission")
+					}
+					wantDeletes = 1
+				}
+				if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err != nil {
+					t.Fatal(err)
+				}
+				if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err != nil {
+					t.Fatal(err)
+				}
+				claim, err := b.claim(req.RequestedLeaseID)
+				if err != nil || claim.FixedCreateIntent.State != "released" || f.box != nil || f.deletes != wantDeletes {
+					t.Fatalf("prerequisite recovery did not settle: err=%v deletes=%d", err, f.deletes)
+				}
+			})
+		}
+	}
+}
+
+func TestSnapshotWrongSourceStillRequiresExactOwnerForCleanup(t *testing.T) {
+	for _, label := range []string{"crabbox_lease", "crabbox_fingerprint", "crabbox_attempt"} {
+		t.Run(label, func(t *testing.T) {
+			f := &fixture{}
+			b, req := fixtureBackend(t, f)
+			binding := pinSnapshotFixture(t, b, nil)
+			snapshotTransport(t, b, f, binding, nil)
+			if _, err := b.acquire(t.Context(), req); err != nil {
+				t.Fatal(err)
+			}
+			f.box.SourcesRef.Snapshot.ID = "wrong"
+			f.box.Labels[label] = "foreign-owner"
+			if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err == nil || f.deletes != 0 {
+				t.Fatalf("foreign restore was deleted: err=%v deletes=%d", err, f.deletes)
+			}
 		})
 	}
 }
