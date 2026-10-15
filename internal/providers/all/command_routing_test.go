@@ -904,6 +904,14 @@ func TestCommandRoutingStaticAdapterOwnsResolvedTargetFallback(t *testing.T) {
 			t.Fatalf("missing %q: %s", want, output)
 		}
 	}
+	if strings.Contains(output, "--static-no-control-master") {
+		t.Fatalf("unset no-control-master routed: %s", output)
+	}
+	cfg.Static.NoControlMaster = true
+	route = CommandRoutingFor(cfg, "lease", CommandRoutingRescue, target)
+	if !strings.Contains(strings.Join(route.Args, " "), "--static-no-control-master") {
+		t.Fatalf("no-control-master not routed: %v", route.Args)
+	}
 	target.AuthSecret = true
 	target.User = "synthetic-secret"
 	route = CommandRoutingFor(cfg, "lease", CommandRoutingRescue, target)
