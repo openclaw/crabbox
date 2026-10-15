@@ -323,6 +323,31 @@ Verification only reads deployment metadata and health; it creates no lease.
 If manually clearing the Daytona snapshot creates a new untagged version,
 verification fails too; inspect the final version before rerunning the deploy.
 
+#### GitHub credential header migration
+
+The private Worker-to-Durable-Object grant header is moving from
+`x-crabbox-github-sealed-credential` to `x-crabbox-github-credential-token`.
+Cloudflare's [header redaction](https://developers.cloudflare.com/workers/runtime-apis/handlers/tail/#tailrequest)
+recognizes the new token-named header. This does not change stored grants or CLI tokens.
+
+Deploy in separate releases; Worker and Durable Object versions can overlap:
+
+1. **Stage A (reader compatibility):** read both names, prefer the legacy name,
+   and keep writing only the legacy name. Strip caller-supplied new-name values.
+   Verify the existing deployment proof shows Stage A at 100% and record its
+   version ID and source SHA before advancing. Existing logs remain unredacted
+   until Stage B.
+2. **Stage B (redacted writer):** only after that receipt, write only the new name,
+   strip legacy caller input, and keep both readers. Never ship both headers.
+   Verify Stage B's version and an authenticated grant-bearing invocation shows
+   `REDACTED` for the new header; do not copy the grant into the receipt.
+3. Remove the legacy reader in a later release only after Stage B has converged
+   and no old writers or pre-Stage-A rollback targets remain. Until then, roll
+   Stage B back only to Stage A or a later compatible reader.
+
+Do not combine Stage A and Stage B into one deployment. A source commit or
+successful upload alone is not the Stage A convergence receipt.
+
 Before deployment, the workflow compares the live `CRABBOX_LEASE_POLICY_OVERRIDES`
 binding with the production value in `worker/wrangler.jsonc`. The guard takes no
 arguments and compares the complete documents, treating an absent binding, `{}`,

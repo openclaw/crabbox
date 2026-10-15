@@ -1,4 +1,5 @@
 import { AsyncMutex } from "./async-mutex";
+import { recordDurableObjectStorageFailure } from "./durable-object-errors";
 export interface CoordinatorStorageView {
   get<T>(
     key: string,
@@ -19,6 +20,26 @@ export interface CoordinatorStorage extends CoordinatorStorageView {
   // Implementations may retry callbacks after serialization conflicts; callbacks must contain
   // only storage reads/writes and must not perform external or otherwise non-idempotent effects.
   transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T>;
+}
+
+// Runtime flags are not unique to storage errors. Record provenance without wrapping
+// the error so admission retries and provider errors keep their original identity.
+async function storageOperation<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    recordDurableObjectStorageFailure(error);
+    throw error;
+  }
+}
+
+function trackedStorageView(storage: CoordinatorStorageView): CoordinatorStorageView {
+  return {
+    get: (...args) => storageOperation(() => storage.get(...args)),
+    put: (...args) => storageOperation(() => storage.put(...args)),
+    delete: (...args) => storageOperation(() => storage.delete(...args)),
+    list: (...args) => storageOperation(() => storage.list(...args)),
+  };
 }
 
 export const provisioningDuePrefix = "provisioning-due:";
@@ -314,7 +335,32 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
   private readonly exclusive = new AsyncMutex();
 
   constructor(private readonly state: DurableObjectState) {
-    this.storage = state.storage;
+    this.storage = {
+      ...trackedStorageView(state.storage),
+      transaction: (callback) =>
+        this.storageTransaction((transaction) => callback(trackedStorageView(transaction))),
+    };
+  }
+
+  private async storageTransaction<T>(
+    callback: (transaction: DurableObjectTransaction) => Promise<T>,
+  ): Promise<T> {
+    const callbackFailures = new Set<unknown>();
+    try {
+      return await this.state.storage.transaction(async (transaction) => {
+        try {
+          return await callback(transaction);
+        } catch (error) {
+          callbackFailures.add(error);
+          throw error;
+        }
+      });
+    } catch (error) {
+      // A rejected callback is application code, unless an actual storage call
+      // already recorded this same error. Only transaction/commit failures are new.
+      if (!callbackFailures.has(error)) recordDurableObjectStorageFailure(error);
+      throw error;
+    }
   }
 
   runExclusive<T>(callback: () => Promise<T>): Promise<T> {
@@ -386,11 +432,11 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
   }
 
   async getAlarm(): Promise<number | undefined> {
-    return (await this.state.storage.getAlarm()) ?? undefined;
+    return (await storageOperation(() => this.state.storage.getAlarm())) ?? undefined;
   }
 
   take<T>(key: string): Promise<T | undefined> {
-    return this.state.storage.transaction(async (transaction) => {
+    return this.storage.transaction(async (transaction) => {
       const value = await transaction.get<T>(key);
       if (value !== undefined) {
         await transaction.delete(key);
@@ -402,18 +448,19 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
   async commitAndWake<T>(
     callback: (transaction: CoordinatorStorageView) => Promise<T>,
   ): Promise<T> {
-    return this.state.storage.transaction(async (transaction) => {
-      const currentAlarm = await transaction.getAlarm();
-      if ((await transaction.get(legacyAlarmKey)) === undefined) {
-        if (currentAlarm !== null) await transaction.put(legacyAlarmKey, currentAlarm);
+    return this.storageTransaction(async (transaction) => {
+      const storage = trackedStorageView(transaction);
+      const currentAlarm = await storageOperation(() => transaction.getAlarm());
+      if ((await storage.get(legacyAlarmKey)) === undefined) {
+        if (currentAlarm !== null) await storage.put(legacyAlarmKey, currentAlarm);
       }
-      const result = await callback(transaction);
-      const wake = await mergedCoordinatorWake(transaction);
+      const result = await callback(storage);
+      const wake = await mergedCoordinatorWake(storage);
       if (wake === undefined) {
-        if (currentAlarm !== null) await transaction.deleteAlarm();
+        if (currentAlarm !== null) await storageOperation(() => transaction.deleteAlarm());
       } else if (wake !== currentAlarm || wake <= Date.now()) {
         // A retained due timestamp may outlive its consumed job; only future wakes are reusable.
-        await transaction.setAlarm(wake);
+        await storageOperation(() => transaction.setAlarm(wake));
       }
       return result;
     });

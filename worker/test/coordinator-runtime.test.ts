@@ -13,6 +13,7 @@ import {
   type CoordinatorStorageView,
   type CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
+import { isDurableObjectStorageFailure } from "../src/durable-object-errors";
 import { FleetCoordinator } from "../src/fleet";
 import { githubAuthRoute } from "../src/oauth";
 import { orgKeyForLabel } from "../src/org-identity";
@@ -164,6 +165,87 @@ class MemoryRuntime implements CoordinatorRuntime {
     this.alarmTime = undefined;
   }
 }
+
+describe("Cloudflare storage failure provenance", () => {
+  function fixture() {
+    const storage = Object.assign(new MemoryStorage(), {
+      getAlarm: vi.fn<() => Promise<number>>(async () => 1),
+      setAlarm: vi.fn<(_time: number) => Promise<void>>(async (_time) => {}),
+      deleteAlarm: vi.fn<() => Promise<void>>(async () => {}),
+    });
+    const runtime = new CloudflareCoordinatorRuntime({ storage } as unknown as DurableObjectState);
+    return { storage, runtime };
+  }
+
+  it.each([
+    ["get", "get", (runtime: CloudflareCoordinatorRuntime) => runtime.storage.get("key")],
+    ["put", "put", (runtime: CloudflareCoordinatorRuntime) => runtime.storage.put("key", 1)],
+    ["delete", "delete", (runtime: CloudflareCoordinatorRuntime) => runtime.storage.delete("key")],
+    ["list", "list", (runtime: CloudflareCoordinatorRuntime) => runtime.storage.list()],
+    ["take", "get", (runtime: CloudflareCoordinatorRuntime) => runtime.take("key")],
+    ["alarm read", "getAlarm", (runtime: CloudflareCoordinatorRuntime) => runtime.getAlarm()],
+    [
+      "alarm write",
+      "setAlarm",
+      (runtime: CloudflareCoordinatorRuntime) => runtime.scheduleAlarm(2),
+    ],
+    [
+      "alarm delete",
+      "deleteAlarm",
+      (runtime: CloudflareCoordinatorRuntime) => runtime.clearAlarm(),
+    ],
+    [
+      "transaction read",
+      "get",
+      (runtime: CloudflareCoordinatorRuntime) =>
+        runtime.storage.transaction((storage) => storage.get("key")),
+    ],
+    [
+      "transaction write",
+      "put",
+      (runtime: CloudflareCoordinatorRuntime) =>
+        runtime.storage.transaction((storage) => storage.put("key", 1)),
+    ],
+  ] as const)("preserves and marks %s rejections without replay", async (_label, method, run) => {
+    const { storage, runtime } = fixture();
+    const error = Object.assign(new Error("storage unavailable"), { retryable: true });
+    const operation = vi.spyOn(storage, method).mockRejectedValue(error);
+    await expect(run(runtime)).rejects.toBe(error);
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(isDurableObjectStorageFailure(error)).toBe(true);
+  });
+
+  it("marks native commit failures after a successful callback", async () => {
+    const { storage, runtime } = fixture();
+    const error = Object.assign(new Error("commit acknowledgement lost"), { retryable: true });
+    vi.spyOn(storage, "transaction").mockImplementation(async (callback) => {
+      await callback(storage);
+      throw error;
+    });
+    await expect(runtime.storage.transaction(async () => 1)).rejects.toBe(error);
+    expect(isDurableObjectStorageFailure(error)).toBe(true);
+  });
+
+  it.each(["transaction", "commitAndWake"] as const)(
+    "does not mark arbitrary %s callback failures",
+    async (method) => {
+      const { runtime } = fixture();
+      const error = Object.assign(new Error("provider unavailable"), {
+        retryable: true,
+        overloaded: true,
+      });
+      const callback = async () => {
+        throw error;
+      };
+      const operation =
+        method === "transaction"
+          ? runtime.storage.transaction(callback)
+          : runtime.commitAndWake(callback);
+      await expect(operation).rejects.toBe(error);
+      expect(isDurableObjectStorageFailure(error)).toBe(false);
+    },
+  );
+});
 
 describe("coordinator runtimes", () => {
   it("applies the protocol frame limit to runtime adapter upgrades", async () => {

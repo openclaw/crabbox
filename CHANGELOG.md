@@ -4,6 +4,9 @@
 
 ### Fixes
 
+- Node coordinator: refresh the pinned AWS RDS certificate bundle so container builds accept the current official bundle. [PR 2847](https://github.com/openclaw/crabbox/pull/2847).
+- Coordinator: prepare compatible readers for a staged migration to redacted internal GitHub grant headers; keep the existing writer until the reader deployment is verified. [PR 2847](https://github.com/openclaw/crabbox/pull/2847).
+- Coordinator: return retryable responses for transient storage failures caught inside request handling. [PR 2847](https://github.com/openclaw/crabbox/pull/2847).
 - Serve: preserve CPU and user-idle readings on heavily loaded Macs with independent sampling deadlines and interval-idle CPU measurement, fall back to raw host CPU when container stats fail, and add opt-in per-signal diagnostics.
 
 ## 0.78.0 - 2026-10-14
