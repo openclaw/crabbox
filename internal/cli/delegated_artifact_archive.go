@@ -36,14 +36,16 @@ func DelegatedRunArtifactSelection(req RunRequest) ([]string, error) {
 	return selected, nil
 }
 
-// MaterializeDelegatedRunArtifactArchive validates the complete bounded archive
-// before publishing anything. It never extracts paths supplied by the runner.
-func MaterializeDelegatedRunArtifactArchive(ctx context.Context, req RunRequest, leaseID string, archive []byte) ([]RunArtifact, error) {
+// ReadDelegatedRunArtifactArchive validates a complete bounded archive without
+// writing files or extracting paths supplied by the runner.
+func ReadDelegatedRunArtifactArchive(ctx context.Context, req RunRequest, archive []byte) (map[string][]byte, error) {
 	selected, err := DelegatedRunArtifactSelection(req)
 	if err != nil {
 		return nil, err
 	}
-	fail := func(message string) ([]RunArtifact, error) { return nil, Exit(7, "delegated artifacts: %s", message) }
+	fail := func(message string) (map[string][]byte, error) {
+		return nil, Exit(7, "delegated artifacts: %s", message)
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -143,6 +145,16 @@ func MaterializeDelegatedRunArtifactArchive(ctx context.Context, req RunRequest,
 		}
 	}
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+// MaterializeDelegatedRunArtifactArchive validates the complete bounded archive
+// before publishing anything. It never extracts paths supplied by the runner.
+func MaterializeDelegatedRunArtifactArchive(ctx context.Context, req RunRequest, leaseID string, archive []byte) ([]RunArtifact, error) {
+	files, err := ReadDelegatedRunArtifactArchive(ctx, req, archive)
+	if err != nil {
 		return nil, err
 	}
 	var artifacts []RunArtifact

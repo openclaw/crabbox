@@ -917,6 +917,7 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 			add(8, "supports native desktop OS targets")
 		}
 	case "fast-feedback":
+		fastLoop := hasFeature(FeatureCacheVolume) || strings.HasPrefix(category, "local-") || category == "ci-proof-runner"
 		if hasFeature(FeatureCacheVolume) {
 			add(45, "can reuse dependency/cache volumes across runs")
 		}
@@ -929,7 +930,7 @@ func scoreProviderRecommendation(entry providerMatrixEntry, useCase string) (int
 		if category == "ci-proof-runner" {
 			add(18, "CI-shaped runner for repeated validation loops")
 		}
-		if hasFeature(FeatureRunProof) || hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads) {
+		if fastLoop && (hasFeature(FeatureRunProof) || hasFeature(FeatureRunArtifacts) || hasFeature(FeatureRunDownloads)) {
 			add(15, "can preserve validation evidence")
 		}
 		if hasFeature(FeatureRunSession) {

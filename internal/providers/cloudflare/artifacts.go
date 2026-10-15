@@ -8,12 +8,63 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const cloudflareArtifactProtocol = "CBX-CF-ARTIFACT-1"
+
+var _ core.DelegatedRunDownloadBackend = (*cloudflareBackend)(nil)
+
+// FetchRunFile keeps generic download consumers on the same captured claim,
+// runner and workdir as run collection, with no local publication or reclaim.
+func (b *cloudflareBackend) FetchRunFile(ctx context.Context, req core.DelegatedRunDownloadRequest) ([]byte, error) {
+	remote, err := core.NormalizeDelegatedRunFilePath("--download", req.RemotePath)
+	if err != nil {
+		return nil, err
+	}
+	claim, err := resolveCloudflareClaim(req.LeaseID)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	var data []byte
+	err = core.WithLeaseClaimUnchangedShared(ctx, claim.LeaseID, claim, func() error {
+		client, err := b.leaseClient(claim)
+		if err != nil {
+			return err
+		}
+		workdir, err := cloudflareWorkdir(leaseConfig(b.cfg, claim))
+		if err != nil {
+			return err
+		}
+		if err := client.checkArtifactCapability(ctx); err != nil {
+			return err
+		}
+		required := []string{remote}
+		archive, err := client.collectArtifacts(ctx, claim.LeaseID, workdir, core.DelegatedRunArtifactFileScript(required, required, 0, 0))
+		if err != nil {
+			return err
+		}
+		files, err := core.ReadDelegatedRunArtifactArchive(ctx, core.RunRequest{RequiredArtifactGlobs: required}, archive)
+		if err != nil {
+			return err
+		}
+		limit := req.MaxBytes
+		if limit <= 0 {
+			limit = core.DelegatedRunDownloadMaxBytes
+		}
+		if len(files[remote]) > limit {
+			return fmt.Errorf("artifact file exceeds %d bytes", limit)
+		}
+		data = files[remote]
+		return nil
+	})
+	return data, err
+}
 
 func (c *cloudflareClient) checkArtifactCapability(ctx context.Context) error {
 	var ready struct {

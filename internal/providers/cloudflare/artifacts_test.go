@@ -1,7 +1,9 @@
 package cloudflare
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -21,6 +23,67 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestCloudflareFetchRunFileUsesClaimAndBound(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var archive bytes.Buffer
+	gz := gzip.NewWriter(&archive)
+	tw := tar.NewWriter(gz)
+	payload := []byte("binary\x00\xff\n")
+	if err := tw.WriteHeader(&tar.Header{Name: "result.bin", Typeflag: tar.TypeReg, Mode: 0o600, Size: int64(len(payload))}); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = tw.Write(payload)
+	_ = tw.Close()
+	_ = gz.Close()
+	collections := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer fixture-token" {
+			t.Error("missing authentication")
+		}
+		if r.URL.Path == "/v1/readiness" {
+			_, _ = fmt.Fprintf(w, `{"ok":true,"runner":"cloudflare","artifactProtocol":%q}`, cloudflareArtifactProtocol)
+			return
+		}
+		if r.URL.Path != "/v1/sandboxes/cbx_fetch/artifacts" {
+			http.NotFound(w, r)
+			return
+		}
+		var collect struct{ Cwd, Script string }
+		_ = json.NewDecoder(r.Body).Decode(&collect)
+		if collect.Cwd != "/workspace/claimed" || !strings.Contains(collect.Script, "result.bin") {
+			t.Errorf("unexpected collection scope: %+v", collect)
+		}
+		collections++
+		serveCloudflareArtifact(w, archive.Bytes())
+	}))
+	defer server.Close()
+	if err := core.ClaimLeaseForRepoProvider("cbx_fetch", "fixture", providerName, t.TempDir(), time.Hour, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := resolveCloudflareClaim("cbx_fetch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, map[string]string{runnerURLLabel: server.URL, "workdir": "/workspace/claimed"}); err != nil {
+		t.Fatal(err)
+	}
+	b := cloudflareBackend{cfg: core.Config{Cloudflare: core.CloudflareConfig{APIURL: "http://127.0.0.1:1", Token: "fixture-token", Workdir: "/workspace/wrong"}}, rt: core.Runtime{HTTP: server.Client(), Stderr: io.Discard}}
+	data, err := b.FetchRunFile(context.Background(), core.DelegatedRunDownloadRequest{LeaseID: "cbx_fetch", RemotePath: "./result.bin", MaxBytes: 100})
+	if err != nil || !bytes.Equal(data, payload) {
+		t.Fatalf("binary fetch=%x error=%v", data, err)
+	}
+	data, err = b.FetchRunFile(context.Background(), core.DelegatedRunDownloadRequest{LeaseID: "cbx_fetch", RemotePath: "result.bin", MaxBytes: 2})
+	if err == nil || data != nil {
+		t.Fatalf("byte limit ignored: %x %v", data, err)
+	}
+	if _, err = b.FetchRunFile(context.Background(), core.DelegatedRunDownloadRequest{LeaseID: "cbx_fetch", RemotePath: "../outside"}); err == nil {
+		t.Fatal("unsafe path accepted")
+	}
+	if collections != 2 {
+		t.Fatalf("collection count=%d", collections)
+	}
+}
 
 func serveCloudflareArtifact(w http.ResponseWriter, archive []byte) {
 	digest := sha256.Sum256(archive)
