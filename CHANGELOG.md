@@ -4,7 +4,7 @@
 
 ### Fixes
 
-- Coordinator: prepare compatible readers for a staged migration to redacted internal GitHub grant headers; keep the existing writer until the reader deployment is verified.
+- Coordinator: write encrypted GitHub grants only under a Cloudflare-redacted header after the separate compatible-reader deployment; retain both readers during rollout.
 - Coordinator: return retryable responses for transient storage failures caught inside request handling.
 - Serve: preserve CPU and user-idle readings on heavily loaded Macs with independent sampling deadlines and interval-idle CPU measurement, fall back to raw host CPU when container stats fail, and add opt-in per-signal diagnostics.
 

@@ -240,7 +240,7 @@ export function requestWithAuthContext(request: Request, auth: AuthContext): Req
   headers.delete("cf-access-jwt-assertion");
   headers.delete("x-crabbox-internal");
   headers.delete("x-crabbox-proxy-secret");
-  headers.delete("x-crabbox-github-credential-token");
+  headers.delete("x-crabbox-github-sealed-credential");
   headers.set("x-crabbox-auth", auth.auth);
   headers.set("x-crabbox-admin", auth.admin ? "true" : "false");
   headers.set("x-crabbox-owner", auth.owner);
@@ -262,10 +262,12 @@ export function requestWithAuthContext(request: Request, auth: AuthContext): Req
   }
   if (auth.githubGrant) {
     headers.set("x-crabbox-github-token-id", auth.githubGrant.tokenID);
-    headers.set("x-crabbox-github-sealed-credential", auth.githubGrant.sealedCredential);
+    // Stage B requires the completed Stage A reader deployment; see docs/operations.md.
+    // Keep a single token-named header so Cloudflare invocation logs redact the grant.
+    headers.set("x-crabbox-github-credential-token", auth.githubGrant.sealedCredential);
   } else {
     headers.delete("x-crabbox-github-token-id");
-    headers.delete("x-crabbox-github-sealed-credential");
+    headers.delete("x-crabbox-github-credential-token");
   }
   return new Request(request, { headers });
 }

@@ -647,7 +647,7 @@ describe("coordinator auth", () => {
     expect(requestGitHubCredential(incoming)).toBe("authoritative-grant");
   });
 
-  it.each([true, false])("keeps stage A compatible with old readers: %s", (hasGrant) => {
+  it.each([true, false])("writes only the redacted header after stage A: %s", (hasGrant) => {
     const routed = requestWithAuthContext(
       new Request("https://example.test", {
         headers: {
@@ -672,12 +672,11 @@ describe("coordinator auth", () => {
           : {}),
       },
     );
-    // This legacy reader is the transport contract of the pre-migration DO.
-    expect(routed.headers.get("x-crabbox-github-sealed-credential")).toBe(
+    expect(routed.headers.get("x-crabbox-github-sealed-credential")).toBeNull();
+    expect(requestGitHubCredential(routed)).toBe(hasGrant ? "encrypted-grant" : undefined);
+    expect(routed.headers.get("x-crabbox-github-credential-token")).toBe(
       hasGrant ? "encrypted-grant" : null,
     );
-    expect(requestGitHubCredential(routed)).toBe(hasGrant ? "encrypted-grant" : undefined);
-    expect(routed.headers.get("x-crabbox-github-credential-token")).toBeNull();
   });
 
   it("strips trusted headers from unauthenticated pass-through routes", async () => {

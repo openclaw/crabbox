@@ -335,8 +335,10 @@ Deploy in separate releases; Worker and Durable Object versions can overlap:
 1. **Stage A (reader compatibility):** read both names, prefer the legacy name,
    and keep writing only the legacy name. Strip caller-supplied new-name values.
    Verify the existing deployment proof shows Stage A at 100% and record its
-   version ID and source SHA before advancing. Existing logs remain unredacted
-   until Stage B.
+   version ID and source SHA before advancing. That Worker receipt alone does
+   not prove Fleet Durable Object convergence; when observable, verify a Fleet
+   invocation runs the Stage A version before Stage B. Existing logs remain
+   unredacted until Stage B.
 2. **Stage B (redacted writer):** only after that receipt, write only the new name,
    strip legacy caller input, and keep both readers. Never ship both headers.
    Verify Stage B's version and an authenticated grant-bearing invocation shows
@@ -347,6 +349,9 @@ Deploy in separate releases; Worker and Durable Object versions can overlap:
 
 Do not combine Stage A and Stage B into one deployment. A source commit or
 successful upload alone is not the Stage A convergence receipt.
+The current source writes the Stage B header. Deploy this revision only after
+the separately deployed Stage A receipt has been verified; otherwise deploy
+the preceding reader-only revision first.
 
 Before deployment, the workflow compares the live `CRABBOX_LEASE_POLICY_OVERRIDES`
 binding with the production value in `worker/wrangler.jsonc`. The guard takes no
