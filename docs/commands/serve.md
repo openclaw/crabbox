@@ -64,13 +64,18 @@ coordinator inventory. Both support `--json`. See [availability](../providers/se
 signals, configuration, laptop defaults, and hysteresis.
 
 `machines` also shows each machine's served lease count, runtime, and CPU-hours for
-leases created in the current UTC month, including released leases. JSON exposes
+leases created in the current UTC month. Completed usage is recorded once when
+the agent confirms container cleanup; live and pending-cleanup allocations are
+added from the machine's current lease list. JSON exposes
 these as `usage.month`, `usage.leases`, `usage.activeLeases`, `usage.runtimeSeconds`,
 and `usage.cpuSeconds`. CPU-hours are runtime multiplied by each lease's assigned
 CPUs, divided by 3600; they measure allocated capacity, not sampled CPU utilization.
 Only your machines and usage in the current organization are shown, even for admins.
-The portal Machines section shows the same totals. Use [usage](usage.md) with
-`--month YYYY-MM` for another month or to inspect historical machine IDs.
+The portal Machines section shows the same totals. Completed-usage rollups start
+at deployment, with no historical backfill. A lease that crosses a month boundary
+is attributed to its creation month, including its entire recorded runtime.
+Use [usage](usage.md) with `--month YYYY-MM` for full recorded history, another month,
+or historical machine IDs. Machine listings use point reads, not a history scan.
 
 Use `CRABBOX_SERVE_AVAILABILITY_DEBUG=1 crabbox serve status --probe --json`
 to diagnose individual signal failures and timeouts on stderr. See

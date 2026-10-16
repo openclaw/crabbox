@@ -66,7 +66,12 @@ scope and creation-month filters. `cpuSeconds` sums runtime times assigned CPUs;
 text output converts this to CPU-hours. Missing assignments use the `cloudID`
 machine prefix or `unknown`, and contribute zero CPU-seconds when CPUs are unknown.
 The owner-only `crabbox serve machines` output and portal Machines section show
-these totals for the current UTC month, including released leases.
+totals for the current UTC month using current allocations plus durable completion
+rollups. Each completion is counted once after agent-confirmed cleanup, in the
+lease's creation month. These rollups start at deployment without a historical
+backfill; `/v1/usage` and `crabbox usage` retain full recorded history. Machine
+listings use point reads of rollups and current allocations instead of scanning
+the lease history.
 
 Only admin-token callers can widen the report: non-admin requests are forced to `scope=user`
 scoped to the caller's own identity, and the `--scope`, `--user`, and `--org` filters are

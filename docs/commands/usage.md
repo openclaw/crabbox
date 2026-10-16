@@ -104,6 +104,9 @@ use the same visibility, scope, and creation-month filters as the rest of the re
 runtime is not split across calendar months. Missing assignments fall back to the
 machine prefix of `cloudID`, or `unknown`; missing CPU assignments contribute zero
 CPU-seconds. Removed machines remain attributable by ID without a display label.
+This endpoint includes full recorded history. The owner-only `serve machines`
+and portal Machines summaries instead combine current allocations with durable
+monthly completion rollups that start at deployment, without historical backfill.
 
 ## Estimated, reserved, and committed cost
 

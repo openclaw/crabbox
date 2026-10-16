@@ -522,6 +522,7 @@ export interface LeaseRecord {
   cleanupConfirmedBy?: "retained-reconcile";
   serve?: import("./serve").ServeAssignment;
   serveIntent?: string;
+  serveUsageRecordedAt?: string;
   sshHostKeyFingerprint?: string;
   imageEvidence?: {
     configuredReference: string;

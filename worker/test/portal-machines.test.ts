@@ -4,7 +4,12 @@ import { sha256Hex } from "../src/encoding";
 import { FleetCoordinator } from "../src/fleet";
 import { putLeaseRecord } from "../src/lease-record-store";
 import { requestOrg } from "../src/org-identity";
-import { ServeCoordinator, type ServeMachine } from "../src/serve";
+import {
+  ServeCoordinator,
+  serveUsageKey,
+  type ServeMachine,
+  type ServeUsageRollup,
+} from "../src/serve";
 import type { Env, LeaseRecord } from "../src/types";
 import { ProvisioningTestRuntime, ProvisioningTestStorage } from "./provisioning-fixtures";
 
@@ -68,7 +73,7 @@ function fixture(allowed = owner) {
 afterEach(() => vi.useRealTimers());
 
 describe("portal donated machines", () => {
-  it("shows monthly served usage through bounded pages without exposing another owner or org", async () => {
+  it("reads monthly rollups and current allocations without scanning or backfilling lease history", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-01T02:00:00Z"));
     const f = fixture("*");
@@ -113,14 +118,34 @@ describe("portal donated machines", () => {
       id: "cbx_000000000004",
       createdAt: "2026-04-30T23:00:00Z",
     });
+    await f.storage.put(serveUsageKey(machineID, "2026-05"), {
+      owner,
+      org: original.org,
+      leases: 2,
+      runtimeSeconds: 7200,
+      cpuSeconds: 57600,
+      updatedAt: "2026-05-01T01:00:00Z",
+    } satisfies ServeUsageRollup);
+    await f.storage.put(serveUsageKey("22222222-2222-4222-8222-222222222222", "2026-05"), {
+      owner: "bob@example.com",
+      org: original.org,
+      leases: 99,
+      runtimeSeconds: 99,
+      cpuSeconds: 99,
+      updatedAt: "2026-05-01T01:00:00Z",
+    } satisfies ServeUsageRollup);
     f.storage.listOptions.length = 0;
+    const reads: string[] = [];
+    f.storage.beforeGet = async (key) => {
+      reads.push(key);
+    };
     const machines = await f.serve.listMachines(f.request());
     expect(machines.find((m) => m.machineID === machineID)?.usage).toEqual({
       month: "2026-05",
-      leases: 131,
+      leases: 3,
       activeLeases: 1,
-      runtimeSeconds: 469800,
-      cpuSeconds: 3758400,
+      runtimeSeconds: 9000,
+      cpuSeconds: 72000,
     });
     expect(machines.find((m) => m.name === "idle-builder")?.usage).toEqual({
       month: "2026-05",
@@ -130,14 +155,13 @@ describe("portal donated machines", () => {
       cpuSeconds: 0,
     });
     const pages = f.storage.listOptions.filter((o) => o?.prefix === "lease:");
-    expect(pages.length).toBeGreaterThan(1);
-    expect(pages.every((o) => o?.limit === 128)).toBe(true);
-    expect(pages.every((o) => o?.noCache === true)).toBe(true);
-    expect(pages[1]?.startAfter).toBeTruthy();
+    expect(pages).toEqual([]);
+    expect(reads.filter((key) => key.startsWith("lease:"))).toEqual([`lease:${leaseID}`]);
+    expect(reads.filter((key) => key.startsWith("serve-usage:"))).toHaveLength(2);
     const body = await f.home();
     expect(body).toContain("served this month");
-    expect(body).toContain("131 served · 1044.00 CPU-hours");
-    expect(body).toContain("7830m 0s runtime · 2026-05 UTC");
+    expect(body).toContain("3 served · 20.00 CPU-hours");
+    expect(body).toContain("150m 0s runtime · 2026-05 UTC");
     expect(body).toContain("0 served · 0.00 CPU-hours");
   });
 
