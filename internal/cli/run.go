@@ -4601,6 +4601,9 @@ func releaseCoordinatorLeaseMutation(
 	leaseID, expectedProvider string,
 	release func(context.Context) (CoordinatorLease, error),
 ) (CoordinatorLease, error) {
+	if err := closeServeRelayControls(ctx, leaseID); err != nil {
+		return CoordinatorLease{}, err
+	}
 	var lastLease CoordinatorLease
 	var lastErr error
 	for attempt := 1; attempt <= 5; attempt++ {
