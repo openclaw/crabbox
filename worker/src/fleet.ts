@@ -16053,7 +16053,7 @@ export class FleetCoordinator {
     return json({ run: publicRunRecord(committed.run) });
   }
 
-  private async *runLogChunks(runID: string): AsyncGenerator<string> {
+  private async *runLogChunks(runID: string, reverse = false): AsyncGenerator<string> {
     const run = await this.getRun(runID);
     const terminalPrefix = run?.terminalLogPrefix?.startsWith(runTerminalLogRoot(runID))
       ? run.terminalLogPrefix
@@ -16063,6 +16063,7 @@ export class FleetCoordinator {
       prefix: terminalPrefix ? terminalRunLogChunkPrefix(terminalPrefix) : runLogChunkPrefix(runID),
       limit: 1,
       noCache: true,
+      ...(reverse ? { reverse } : {}),
     })) {
       found = true;
       yield chunk;
@@ -16112,7 +16113,11 @@ export class FleetCoordinator {
     const release = this.retainRunLogReader(runID);
     try {
       let tail = "";
-      for await (const chunk of this.runLogChunks(runID)) tail = tailString(tail + chunk, limit);
+      // Read newest chunks first; a portal tail must not scan the entire retained log.
+      for await (const chunk of this.runLogChunks(runID, true)) {
+        tail = tailString(chunk + tail, limit);
+        if (tail.length >= limit) break;
+      }
       return tail;
     } finally {
       release();

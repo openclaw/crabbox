@@ -10,6 +10,8 @@ export interface CoordinatorStorageView {
     prefix?: string;
     limit?: number;
     startAfter?: string;
+    end?: string;
+    reverse?: boolean;
     noCache?: boolean;
     allowConcurrency?: boolean;
   }): Promise<Map<string, T>>;

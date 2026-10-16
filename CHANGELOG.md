@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Coordinator: read run-log previews from the latest chunks without scanning the full retained log.
 - CI: stop aggregate checks when a run is cancelled while preserving failed dependency results, and check coverage producers before toolchain setup. [PR 2868](https://github.com/openclaw/crabbox/pull/2868).
 - Coordinator deployment: reject lease-policy overrides the runtime would ignore, while preserving acknowledged repair of invalid live policy values. [PR 2867](https://github.com/openclaw/crabbox/pull/2867).
 - Coordinator: reconcile retained AWS records with filtered batches of at most 200 unique instance IDs, avoiding missing-instance fallback storms and isolating transient chunk failures while preserving successful observations and bounded backoff. [PR 2866](https://github.com/openclaw/crabbox/pull/2866).

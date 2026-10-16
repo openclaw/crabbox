@@ -464,6 +464,11 @@ interface MaintenanceIndexTestFleet {
   ): Promise<void>;
 }
 
+interface RunLogTestFleet {
+  readRunLogTail(id: string, limit: number): Promise<string>;
+  deleteTerminalRun(id: string, cutoff: number): Promise<void>;
+}
+
 class MemoryStorage {
   private values: Map<string, unknown>;
   private alarmTime: number | undefined;
@@ -620,20 +625,21 @@ class MemoryStorage {
   }
 
   async list<T>(
-    options: {
-      prefix?: string;
-      limit?: number;
-      startAfter?: string;
-      noCache?: boolean;
-    } = {},
+    options: NonNullable<Parameters<CoordinatorStorageView["list"]>[0]> = {},
   ): Promise<Map<string, T>> {
     await this.beforeList(options);
-    const { prefix = "", limit, startAfter } = options;
+    const { prefix = "", limit, startAfter, end, reverse } = options;
     const matches = new Map<string, T>();
-    for (const [key, value] of [...this.values].toSorted(([left], [right]) =>
+    const entries = [...this.values].toSorted(([left], [right]) =>
       left.localeCompare(right),
-    )) {
-      if (key.startsWith(prefix) && (!startAfter || key > startAfter)) {
+    );
+    if (reverse) entries.reverse();
+    for (const [key, value] of entries) {
+      if (
+        key.startsWith(prefix) &&
+        (!startAfter || key > startAfter) &&
+        (end === undefined || key < end)
+      ) {
         matches.set(key, value as T);
         if (limit !== undefined && matches.size >= limit) {
           break;
@@ -684,20 +690,10 @@ class HookedMemoryStorage extends MemoryStorage {
 }
 
 class ObservedMemoryStorage extends MemoryStorage {
-  readonly listOptions: Array<{
-    prefix?: string;
-    limit?: number;
-    startAfter?: string;
-    noCache?: boolean;
-  }> = [];
+  readonly listOptions: Array<NonNullable<Parameters<CoordinatorStorageView["list"]>[0]>> = [];
 
   override async beforeList(
-    options: {
-      prefix?: string;
-      limit?: number;
-      startAfter?: string;
-      noCache?: boolean;
-    } = {},
+    options: NonNullable<Parameters<CoordinatorStorageView["list"]>[0]> = {},
   ): Promise<void> {
     this.listOptions.push({ ...options });
     await super.beforeList(options);
@@ -710,12 +706,7 @@ class ObservedMemoryStorage extends MemoryStorage {
 
 class BoundedObservedMemoryStorage extends ObservedMemoryStorage {
   override async beforeList(
-    options: {
-      prefix?: string;
-      limit?: number;
-      startAfter?: string;
-      noCache?: boolean;
-    } = {},
+    options: NonNullable<Parameters<CoordinatorStorageView["list"]>[0]> = {},
   ): Promise<void> {
     if (
       (options.prefix === "lease:" || options.prefix === "workspace:") &&
@@ -18668,6 +18659,203 @@ describe("fleet lease identity and idle", () => {
     const scans = storage.listOptions.filter(({ prefix }) => prefix === `runlog:${id}:chunk:`);
     expect(scans).toHaveLength(2);
     expect(scans.every(({ limit, noCache }) => limit === 1 && noCache)).toBe(true);
+  });
+
+  it.each([false, true])("bounds portal tail reads (terminal: %s)", async (terminal) => {
+    const storage = new ObservedMemoryStorage();
+    const id = "run_bounded_tail";
+    const terminalLogPrefix = terminal ? `runlog:${id}:finish:chosen:attempt:` : undefined;
+    const prefix = terminalLogPrefix ? `${terminalLogPrefix}chunk:` : `runlog:${id}:chunk:`;
+    storage.seed(
+      `run:${id}`,
+      testRun({
+        id,
+        owner: "alice@example.com",
+        org: "example-org",
+        leaseIDs: [],
+        terminalLogPrefix,
+      }),
+    );
+    const latest = "latest-tail\n" + "z".repeat(13_000);
+    for (let index = 0; index < 128; index++) {
+      storage.seed(
+        `${prefix}${String(index).padStart(6, "0")}`,
+        index === 127 ? latest : `old-${index}\n`,
+      );
+    }
+    storage.seed(`runlog:${id}:finish:other:attempt:chunk:999999`, "unselected attempt");
+    if (terminal) storage.seed(`runlog:${id}:chunk:999999`, "unselected legacy output");
+    const fleet = testFleet(storage);
+    const denied = await fleet.fetch(
+      request("GET", `/portal/runs/${id}`, {
+        headers: { "x-crabbox-owner": "other@example.com", "x-crabbox-org": "example-org" },
+      }),
+    );
+    expect(denied.status).toBe(404);
+    expect(storage.listOptions.filter((options) => options.prefix === prefix)).toEqual([]);
+    const response = await fleet.fetch(
+      request("GET", `/portal/runs/${id}`, {
+        headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html.match(/<pre id="run-log-tail" class="log-preview">([\s\S]*?)<\/pre>/)?.[1]).toBe(
+      latest.slice(-12 * 1024),
+    );
+    expect(storage.listOptions.filter((options) => options.prefix === prefix)).toEqual([
+      { prefix, limit: 1, noCache: true, reverse: true },
+    ]);
+    expect(html).not.toContain("unselected");
+  });
+
+  it.each([
+    { chunks: ["prefix😀", "tail"], limit: 5, reads: 2 },
+    { chunks: ["old", "\ufeff", "😀\n"], limit: 4, reads: 2 },
+    { chunks: ["a😀", "€é"], limit: 6, reads: 3 },
+    { chunks: ["short", "", ""], limit: 12 * 1024, reads: 4 },
+  ])("preserves sparse Unicode tails ($limit units)", async ({ chunks, limit, reads }) => {
+    const storage = new ObservedMemoryStorage();
+    const id = "run_sparse_tail";
+    const prefix = `runlog:${id}:finish:chosen:attempt:`;
+    storage.seed(`run:${id}`, testRun({ id, terminalLogPrefix: prefix }));
+    storage.seed(`${prefix}value`, "scalar must not replace chunks");
+    chunks.forEach((chunk, index) =>
+      storage.seed(`${prefix}chunk:${String(index * 7).padStart(6, "0")}`, chunk),
+    );
+    const fleet = testFleet(storage) as unknown as RunLogTestFleet;
+    expect(await fleet.readRunLogTail(id, limit)).toBe(chunks.join("").slice(-limit));
+    expect(
+      storage.listOptions.filter((options) => options.prefix === `${prefix}chunk:`),
+    ).toHaveLength(reads);
+  });
+
+  it.each([
+    "legacy",
+    "terminal",
+    "invalid-terminal",
+    "missing",
+  ] as const)("uses %s scalar fallback", async (source) => {
+    const storage = new ObservedMemoryStorage();
+    const id = "run_scalar_tail";
+    const prefix = `runlog:${id}:finish:chosen:attempt:`;
+    storage.seed(
+      `run:${id}`,
+      testRun({
+        id,
+        terminalLogPrefix:
+          source === "terminal"
+            ? prefix
+            : source === "invalid-terminal"
+              ? "runlog:other:finish:chosen:"
+              : undefined,
+      }),
+    );
+    if (source !== "missing") {
+      storage.seed(`runlog:${id}`, "legacy\ufeff😀");
+      storage.seed(`${prefix}value`, "terminal\ufeff😀");
+    }
+    storage.seed("runlog:other:finish:chosen:chunk:000000", "other run");
+    storage.seed(`runlog:${id}:finish:other:attempt:chunk:000000`, "other attempt");
+    const fleet = testFleet(storage) as unknown as RunLogTestFleet;
+    const expected =
+      source === "terminal" ? "terminal\ufeff😀" : source === "missing" ? "" : "legacy\ufeff😀";
+    expect(await fleet.readRunLogTail(id, 12 * 1024)).toBe(expected);
+    expect(storage.listOptions.filter((options) => options.prefix?.startsWith("runlog:"))).toEqual([
+      {
+        prefix: source === "terminal" ? `${prefix}chunk:` : `runlog:${id}:chunk:`,
+        limit: 1,
+        noCache: true,
+        reverse: true,
+      },
+    ]);
+  });
+
+  it.each([false, true])("keeps empty chunks authoritative (terminal: %s)", async (terminal) => {
+    const storage = new MemoryStorage();
+    const id = "run_empty_chunks";
+    const terminalLogPrefix = terminal ? `runlog:${id}:finish:chosen:attempt:` : undefined;
+    const prefix = terminalLogPrefix ? `${terminalLogPrefix}chunk:` : `runlog:${id}:chunk:`;
+    storage.seed(`run:${id}`, testRun({ id, terminalLogPrefix }));
+    storage.seed(`${prefix}000000`, "");
+    storage.seed(`${prefix}000009`, "");
+    const scalar = terminalLogPrefix ? `${terminalLogPrefix}value` : `runlog:${id}`;
+    storage.seed(scalar, "must not appear");
+    const get = vi.spyOn(storage, "get");
+    const fleet = testFleet(storage) as unknown as RunLogTestFleet;
+    expect(await fleet.readRunLogTail(id, 12 * 1024)).toBe("");
+    expect(get.mock.calls.some(([key]) => key === scalar)).toBe(false);
+  });
+
+  it("keeps the selected terminal prefix throughout a tail read", async () => {
+    const storage = new MemoryStorage();
+    const id = "run_selected_tail";
+    const prefix = `runlog:${id}:finish:chosen:attempt:`;
+    const otherPrefix = `runlog:${id}:finish:other:attempt:`;
+    const run = testRun({ id, terminalLogPrefix: prefix });
+    storage.seed(`run:${id}`, run);
+    storage.seed(`${prefix}chunk:000000`, "first");
+    storage.seed(`${prefix}chunk:000007`, "last");
+    storage.seed(`${otherPrefix}chunk:000000`, "wrong attempt");
+    let changed = false;
+    vi.spyOn(storage, "beforeList").mockImplementation(async (options) => {
+      if (options?.prefix !== `${prefix}chunk:` || changed) return;
+      changed = true;
+      storage.seed(`run:${id}`, { ...run, terminalLogPrefix: otherPrefix });
+    });
+    const fleet = testFleet(storage) as unknown as RunLogTestFleet;
+    expect(await fleet.readRunLogTail(id, 12 * 1024)).toBe("firstlast");
+    expect(changed).toBe(true);
+  });
+
+  it.each(["success", "run", "chunks", "scalar"] as const)("releases pin (%s)", async (outcome) => {
+    const storage = new MemoryStorage();
+    const id = "run_pinned_tail";
+    storage.seed(
+      `run:${id}`,
+      testRun({
+        id,
+        state: "failed",
+        endedAt: new Date(Date.now() - 40 * 86400_000).toISOString(),
+      }),
+    );
+    if (outcome !== "scalar") storage.seed(`runlog:${id}:chunk:000000`, "retained tail");
+    storage.seed(`runlog:${id}`, "scalar tail");
+    const fleet = testFleet(storage);
+    await fleet.ready();
+    const logs = fleet as unknown as RunLogTestFleet;
+    let entered!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let resume!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    let first = true;
+    const failure = new Error("tail read failed");
+    storage.beforeGet = async (key) => {
+      if (outcome === "scalar" && key === `runlog:${id}`) throw failure;
+      if (key !== `run:${id}` || !first) return;
+      first = false;
+      entered();
+      await paused;
+      if (outcome === "run") throw failure;
+    };
+    const list = vi.spyOn(storage, "beforeList").mockImplementation(async (options) => {
+      if (outcome === "chunks" && options?.prefix === `runlog:${id}:chunk:`) throw failure;
+    });
+    const tail = logs.readRunLogTail(id, 12 * 1024);
+    await reading;
+    await logs.deleteTerminalRun(id, Date.now());
+    expect(storage.value(`run:${id}`)).toBeDefined();
+    resume();
+    if (outcome !== "success") await expect(tail).rejects.toBe(failure);
+    else expect(await tail).toBe("retained tail");
+    storage.beforeGet = undefined;
+    list.mockRestore();
+    await logs.deleteTerminalRun(id, Date.now());
+    expect(storage.value(`run:${id}`)).toBeUndefined();
   });
 
   it("defers terminal run pruning until every log reader closes", async () => {
