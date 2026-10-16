@@ -13,6 +13,7 @@ func (Provider) ConfigShowSection(cfg core.Config) core.ProviderConfigShowSectio
 	return core.ProviderConfigShowSection{
 		JSONKey: "dockerSandbox", TextLabel: "docker_sandbox", Providers: []string{"docker-sandbox"},
 		Fields: []core.ProviderConfigShowField{
+			{JSONName: "target", JSONValue: c.Target, TextName: "target", TextValue: c.Target},
 			{JSONName: "cliPath", JSONValue: c.CLIPath, TextName: "cli", TextValue: c.CLIPath},
 			{JSONName: "agent", JSONValue: c.Agent, TextName: "agent", TextValue: c.Agent},
 			{JSONName: "template", JSONValue: c.Template, TextName: "template", TextValue: core.Blank(c.Template, "-")},

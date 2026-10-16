@@ -3164,7 +3164,7 @@ dockerSandbox:
 	text := stdout.String()
 	for _, want := range []string{
 		"provider=docker-sandbox",
-		"docker_sandbox cli=/opt/sbx agent=shell template=ubuntu cpus=2 memory=4g clone=true workdir=/workspace/my-app",
+		"docker_sandbox target=local cli=/opt/sbx agent=shell template=ubuntu cpus=2 memory=4g clone=true workdir=/workspace/my-app",
 		"extra_workspaces=/tmp/extra",
 		"mcp=context7,all",
 		"kit=example-org/base",

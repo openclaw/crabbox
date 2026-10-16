@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -35,6 +36,9 @@ func (c *sbxCLI) env() []string {
 }
 
 func (c *sbxCLI) runQuiet(ctx context.Context, args []string) (string, string, error) {
+	if cloudTarget(c.cfg) {
+		return c.cloudQuiet(ctx, args)
+	}
 	var stdout, stderr bytes.Buffer
 	res, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:   c.binary(),
@@ -53,12 +57,12 @@ func (c *sbxCLI) runQuiet(ctx context.Context, args []string) (string, string, e
 }
 
 func (c *sbxCLI) runStreamed(ctx context.Context, args []string, stdout, stderr io.Writer) (int, error) {
+	if cloudTarget(c.cfg) {
+		args = append([]string{"--cloud"}, args...)
+	}
 	res, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{
-		Name:   c.binary(),
-		Args:   args,
-		Env:    c.env(),
-		Stdout: stdout,
-		Stderr: stderr,
+		Name: c.binary(), Args: args, Env: c.env(), Stdout: stdout, Stderr: stderr,
+		DisableOutputCapture: cloudTarget(c.cfg),
 	})
 	if isMissingExecutableError(err) {
 		var stdoutBuf, stderrBuf bytes.Buffer
@@ -301,7 +305,7 @@ func classifySBXError(action, text string, runErr error) string {
 }
 
 func isMissingExecutableError(err error) bool {
-	return err != nil && (errors.Is(err, os.ErrNotExist) || strings.Contains(strings.ToLower(err.Error()), "no such file"))
+	return err != nil && (errors.Is(err, os.ErrNotExist) || errors.Is(err, exec.ErrNotFound) || strings.Contains(strings.ToLower(err.Error()), "no such file"))
 }
 
 func firstNonEmptyLine(value string) string {

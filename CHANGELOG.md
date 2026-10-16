@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Docker Sandbox: add an opt-in Docker Cloud Sandboxes target with archive sync, result downloads, scoped ownership and native TTL cleanup, requested by @coygeek. [PR 2863](https://github.com/openclaw/crabbox/pull/2863). Thanks @coygeek.
+
 ### Fixed
 
 - Sync: keep finalization fetches blob-filtered when completing shallow Git history, and explain live-child owner release refusals with safe lease recovery guidance. [PR 2854](https://github.com/openclaw/crabbox/pull/2854).

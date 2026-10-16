@@ -28,6 +28,10 @@ func ApplyDockerSandboxProviderFlags(cfg *core.Config, fs *flag.FlagSet, values 
 }
 
 func validateConfig(cfg core.Config) error {
+	target := strings.TrimSpace(cfg.DockerSandbox.Target)
+	if target != "" && target != "local" && target != "cloud" {
+		return core.Exit(2, "dockerSandbox.target must be local or cloud")
+	}
 	agent := strings.TrimSpace(cfg.DockerSandbox.Agent)
 	if agent == "" {
 		agent = defaultAgent
@@ -67,5 +71,10 @@ func validateConfig(cfg core.Config) error {
 			}
 		}
 	}
+	if cloudTarget(cfg) {
+		return validateCloudConfig(cfg)
+	}
 	return nil
 }
+
+func cloudTarget(cfg core.Config) bool { return strings.TrimSpace(cfg.DockerSandbox.Target) == "cloud" }

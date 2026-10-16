@@ -969,6 +969,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 		providerSpec := provider.Spec()
+		providerSpec.Features = ProviderFeaturesForConfig(provider, cfg)
 		if jjSource.Commit != "" && providerSpec.Kind != ProviderKindSSHLease {
 			return Exit(2, "native jj sync requires an SSH lease provider")
 		}
@@ -986,7 +987,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if len(failureDownloads) > 0 && providerSpec.Kind != ProviderKindSSHLease {
 			return Exit(2, "--download-on-failure requires an ordinary SSH-backed Linux provider")
 		}
-		if err := validateProviderRun(provider, runReq, *readyPool, len(requiredArtifactSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
+		if err := validateProviderRun(provider, cfg, runReq, *readyPool, len(requiredArtifactSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
 			return err
 		}
 		if providerSpec.Kind == ProviderKindDelegatedRun {
@@ -3980,8 +3981,10 @@ func validateDelegatedRunRouting(spec ProviderSpec, req RunRequest, readyPool st
 	return RejectDelegatedSyncOptionsForSpec(spec, req)
 }
 
-func validateProviderRun(provider Provider, req RunRequest, readyPool string, hasArtifactSchemas, profileDoctor bool) error {
-	sshScriptRun, err := selectSSHScriptRun(provider.Spec(), req)
+func validateProviderRun(provider Provider, cfg Config, req RunRequest, readyPool string, hasArtifactSchemas, profileDoctor bool) error {
+	spec := provider.Spec()
+	spec.Features = ProviderFeaturesForConfig(provider, cfg)
+	sshScriptRun, err := selectSSHScriptRun(spec, req)
 	if err != nil {
 		return err
 	}
@@ -3990,7 +3993,7 @@ func validateProviderRun(provider Provider, req RunRequest, readyPool string, ha
 			return err
 		}
 	}
-	if spec := provider.Spec(); spec.Kind == ProviderKindDelegatedRun && !sshScriptRun {
+	if spec.Kind == ProviderKindDelegatedRun && !sshScriptRun {
 		return validateDelegatedRunRouting(spec, req, readyPool, hasArtifactSchemas, profileDoctor)
 	}
 	return nil

@@ -234,6 +234,11 @@ native GitHub Actions runner, as local-container, apple-container, and multipass
 do. This restriction does not disable ordinary Actions hydration. Set
 `target=linux` only on a backend that can actually satisfy it.
 
+An adapter with a local-only direct-lease exemption that can also allocate remote
+compute must implement `ProviderDirectLeasePolicy.RequiresDirectLeasePermission`.
+Return true for remote configurations so `directLeases: deny` and the trusted
+`directLeaseAllow` policy still apply; keep target-specific logic in the adapter.
+
 Versioned workspace features describe provider depth, not the presence of
 Crabbox checkpoint commands. Core can always record a generic checkpoint from
 repo metadata, logs, and artifacts. Set the checkpoint-related flags only when

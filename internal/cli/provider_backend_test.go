@@ -2254,3 +2254,31 @@ func TestCallerFinalizedDefaultsResolvedConfig(t *testing.T) {
 		}
 	}
 }
+
+type configuredRunFeaturesTestProvider struct{ Provider }
+
+func (configuredRunFeaturesTestProvider) Spec() ProviderSpec {
+	return ProviderSpec{Name: "configured-run-features", Kind: ProviderKindDelegatedRun}
+}
+func (configuredRunFeaturesTestProvider) ConfiguredFeatures(cfg Config) FeatureSet {
+	if cfg.TargetOS == TargetLinux {
+		return FeatureSet{FeatureArchiveSync, FeatureRunDownloads}
+	}
+	return nil
+}
+func (configuredRunFeaturesTestProvider) ValidateRequestedCapabilities(Config) error { return nil }
+
+func TestValidateProviderRunUsesConfiguredFeatures(t *testing.T) {
+	provider := configuredRunFeaturesTestProvider{}
+	for _, req := range []RunRequest{{Downloads: []string{"result.txt=local.txt"}}, {SyncOnly: true}} {
+		if err := validateProviderRun(provider, Config{TargetOS: TargetLinux}, req, "", false, false); err != nil {
+			t.Fatalf("configured capability rejected before backend construction: %v", err)
+		}
+		if err := validateProviderRun(provider, Config{TargetOS: TargetWindows}, req, "", false, false); err == nil {
+			t.Fatal("inactive capability unexpectedly admitted")
+		}
+	}
+	if len(provider.Spec().Features) != 0 {
+		t.Fatal("static provider catalog mutated")
+	}
+}

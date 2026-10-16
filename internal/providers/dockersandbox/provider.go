@@ -43,3 +43,16 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	}
 	return NewBackend(p.Spec(), cfg, rt), nil
 }
+
+func (Provider) RequiresDirectLeasePermission(cfg core.Config) bool {
+	return cloudTarget(cfg)
+}
+
+func (p Provider) ConfiguredFeatures(cfg core.Config) core.FeatureSet {
+	if cloudTarget(cfg) {
+		return core.FeatureSet{core.FeatureRunSession, core.FeatureMCP, core.FeatureArchiveSync, core.FeatureRunDownloads, core.FeatureCleanup}
+	}
+	return p.Spec().Features
+}
+
+func (Provider) ValidateRequestedCapabilities(cfg core.Config) error { return validateConfig(cfg) }

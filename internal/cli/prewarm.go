@@ -486,7 +486,7 @@ func admitPrewarmProbe(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := validateProviderRun(provider, req, *flags.ReadyPool, len(*flags.RequiredSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
+	if err := validateProviderRun(provider, cfg, req, *flags.ReadyPool, len(*flags.RequiredSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
 		return Exit(2, "prewarm --probe-command is not supported for provider=%s: %v; omit --probe-command or choose a provider that supports the probe options", provider.Spec().Name, err)
 	}
 	if err := validateProviderConfig(cfg); err != nil {

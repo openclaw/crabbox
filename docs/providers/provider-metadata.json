@@ -377,8 +377,8 @@
     "gpu": "no",
     "lifecycle": "Docker sbx CLI",
     "cleanup": "sandbox delete",
-    "bestFit": "Local delegated sandbox with reusable session handles",
-    "caveat": "Requires the standalone sbx CLI",
+    "bestFit": "Local sandbox or explicit Docker Cloud target with source transfer and results",
+    "caveat": "Cloud requires subscribed sbx access, bills compute and expires by TTL; local remains default",
     "docs": "docker-sandbox.md"
   },
   "e2b": {

@@ -7,6 +7,7 @@ import (
 )
 
 type fileDockerSandboxConfig struct {
+	Target          string    `yaml:"target,omitempty"`
 	CLIPath         string    `yaml:"cliPath,omitempty"`
 	Agent           string    `yaml:"agent,omitempty"`
 	Template        *string   `yaml:"template,omitempty"`
@@ -19,11 +20,13 @@ type fileDockerSandboxConfig struct {
 	Kit             *[]string `yaml:"kit,omitempty"`
 }
 
+const DockerSandboxConfigDefaultTarget string = "local"
 const DockerSandboxConfigDefaultCLIPath string = "sbx"
 const DockerSandboxConfigDefaultAgent string = "shell"
 
 func defaultDockerSandboxConfig() DockerSandboxConfig {
 	return DockerSandboxConfig{
+		Target:  DockerSandboxConfigDefaultTarget,
 		CLIPath: DockerSandboxConfigDefaultCLIPath,
 		Agent:   DockerSandboxConfigDefaultAgent,
 	}
@@ -42,12 +45,13 @@ func (cfg *DockerSandboxConfig) applyFile(file *fileDockerSandboxConfig) (Docker
 
 func (cfg *DockerSandboxConfig) applyEnv() (DockerSandboxConfigApplied, error) {
 	var applied DockerSandboxConfigApplied
-	err := applyConfigEnvironment(cfg, &applied, 0, 10)
+	err := applyConfigEnvironment(cfg, &applied, 0, 11)
 	return applied, err
 }
 
 // DockerSandboxConfigFlagValues holds parsed values; only visited flags are applied.
 type DockerSandboxConfigFlagValues struct {
+	Target          *string
 	CLIPath         *string
 	Agent           *string
 	Template        *string
