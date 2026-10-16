@@ -90,13 +90,14 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 	var client *cloudflareClient
 	var claim core.LeaseClaim
 	var command string
+	var artifactSelection []string
 	bound := func() shared.DelegatedSandbox {
 		return shared.DelegatedSandbox{LeaseID: claim.LeaseID, Slug: core.Blank(claim.Slug, core.NewLeaseSlug(claim.LeaseID)), CleanupCommand: cloudflareCleanupCommand(claim.LeaseID)}
 	}
 	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
 		Provider: providerName, Runtime: b.rt, Workdir: workdir,
 		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: cloudflareCleanupTimeout,
-		Preflight: func(context.Context) error {
+		Preflight: func(ctx context.Context) error {
 			if err := rejectCloudflareSyncOptions(req); err != nil {
 				return err
 			}
@@ -108,7 +109,14 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 				command = intent.ShellScript()
 			}
 			client, err = newCloudflareClient(cfg, b.rt)
-			return err
+			if err != nil {
+				return err
+			}
+			artifactSelection, err = core.DelegatedRunArtifactSelection(req)
+			if err != nil || len(artifactSelection) == 0 {
+				return err
+			}
+			return client.checkArtifactCapability(ctx)
 		},
 		Workspace: func() shared.SandboxWorkspace {
 			return shared.WorkspaceOperations{
@@ -146,6 +154,24 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 			return shared.DelegatedSandboxCommand{Text: command, Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
 				return client.execStream(ctx, claim.LeaseID, shared.CommandStreamRequest{Command: command, Cwd: workdir, Env: req.Env, TimeoutMS: durationMillisecondsCeil(b.cfg.TTL)}, stdout, stderr)
 			}}, nil
+		},
+		Artifacts: func(ctx context.Context) ([]core.RunArtifact, error) {
+			if len(artifactSelection) == 0 {
+				return nil, nil
+			}
+			ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+			defer cancel()
+			archive, err := client.collectArtifacts(ctx, claim.LeaseID, workdir, core.DelegatedRunArtifactFileScript(req.RequiredArtifactGlobs, artifactSelection, 0, 0))
+			if err != nil {
+				return nil, shared.ExitErrorWithCause(7, fmt.Sprintf("cloudflare artifacts: %v", err), err)
+			}
+			artifacts, err := core.MaterializeDelegatedRunArtifactArchive(ctx, req, claim.LeaseID, archive)
+			if err == nil {
+				for _, artifact := range artifacts {
+					fmt.Fprintf(b.rt.Stderr, "downloaded %s bytes=%d\n", artifact.Path, artifact.Bytes)
+				}
+			}
+			return artifacts, err
 		},
 		Cleanup: func(ctx context.Context) error {
 			_, err := destroyClaimedSandbox(ctx, client, claim)

@@ -1,5 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 
+import {
+  ArtifactCollectionFailure,
+  artifactProtocol,
+  collectContainerArtifacts,
+} from "./cloudflare-artifacts";
 import { authorize, isRecord, json, stringField } from "./runner-http";
 
 const leaseMetaKey = "crabbox:lease";
@@ -99,6 +104,9 @@ export class CrabboxSandbox extends DurableObject<Env> {
     }
     if (url.pathname === "/__crabbox/exec-stream" && request.method === "POST") {
       return this.execLeaseStream(request);
+    }
+    if (url.pathname === "/__crabbox/artifacts" && request.method === "POST") {
+      return this.collectLeaseArtifacts(request);
     }
     if (url.pathname === "/__crabbox/snapshot" && request.method === "POST") {
       return this.snapshotLease(request);
@@ -308,6 +316,58 @@ export class CrabboxSandbox extends DurableObject<Env> {
     return new Response(stream, {
       headers: { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" },
     });
+  }
+
+  private async collectLeaseArtifacts(request: Request): Promise<Response> {
+    const body = await readObject(request);
+    if (body instanceof Response) return body;
+    if (body["protocol"] !== artifactProtocol) {
+      return json({ error: "unsupported artifact protocol" }, 400);
+    }
+    const script = stringField(body, "script") ?? "";
+    if (!script || new TextEncoder().encode(script).byteLength > 256 * 1024) {
+      return json({ error: "artifact script must be between 1 and 262144 bytes" }, 400);
+    }
+    const meta = await this.beginExecution();
+    if (meta.state !== "running") return expiredResponse(meta);
+    try {
+      if (body["cwd"] !== meta.workdir) {
+        return json({ error: "artifact cwd must match the claimed lease workdir" }, 400);
+      }
+      const container = await this.ensureRunning(meta);
+      const bytes = await collectContainerArtifacts(
+        container,
+        meta.workdir,
+        script,
+        request.signal,
+        (process) =>
+          withTimeout(stopProcessGroup(container, process), 6_000, "artifact process cleanup"),
+      );
+      const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+      const hash = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+      return new Response(bytes, {
+        headers: {
+          "Content-Type": "application/gzip",
+          "Content-Length": String(bytes.byteLength),
+          "Cache-Control": "no-store",
+          "X-Crabbox-Artifact-Protocol": artifactProtocol,
+          "X-Crabbox-Artifact-Sha256": hash,
+        },
+      });
+    } catch (error) {
+      // Collector output may contain file contents or forwarded credentials.
+      return json(
+        {
+          error:
+            error instanceof ArtifactCollectionFailure
+              ? error.message
+              : "artifact collection or transfer failed",
+        },
+        422,
+      );
+    } finally {
+      await this.finishExecution();
+    }
   }
 
   private async snapshotLease(request: Request): Promise<Response> {
@@ -571,6 +631,11 @@ export default {
         stub.fetch(internalRequest("/__crabbox/exec-stream", request, { method: "POST" })),
       );
     }
+    if (request.method === "POST" && action === "artifacts") {
+      return withExistingLease(env, sandboxID, (stub) =>
+        stub.fetch(internalRequest("/__crabbox/artifacts", request, { method: "POST" })),
+      );
+    }
 
     return json({ error: "not found" }, 404);
   },
@@ -625,7 +690,7 @@ function runnerReadiness(env: Env): Response {
       503,
     );
   }
-  return json({ ok: true, runner: "cloudflare", instanceTypes });
+  return json({ ok: true, runner: "cloudflare", instanceTypes, artifactProtocol });
 }
 
 async function waitForExec(
