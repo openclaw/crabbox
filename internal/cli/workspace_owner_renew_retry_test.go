@@ -94,40 +94,80 @@ func TestWorkspaceOwnerRenewalSurvivesOneTransportFailure(t *testing.T) {
 	}
 }
 
+func TestWorkspaceOwnerRenewalConfirmsAcknowledgementOnlyAfterCleanRetry(t *testing.T) {
+	ownerCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	confirmed := time.Now()
+	owner := &workspaceOwner{
+		ctx: ownerCtx, cancel: cancel, stop: make(chan struct{}), done: make(chan struct{}),
+		key: "same-workspace", token: strings.Repeat("a", 64), ttl: time.Minute, confirmed: confirmed,
+	}
+	calls := 0
+	var retrySent time.Time
+	owner.transport = workspaceOwnerTransportFunc(func(_ context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+		calls++
+		if req.Action != workspaceOwnerRenew || req.Key != owner.key || req.Token != owner.token || req.TTL != owner.ttl {
+			t.Errorf("retry changed the ownership request: %+v", req)
+		}
+		if owner.confirmed != confirmed {
+			t.Error("transport error advanced the confirmed deadline")
+		}
+		if calls == 1 {
+			return "RENEWED", errors.New("exit status 255")
+		}
+		retrySent = time.Now()
+		close(owner.stop)
+		return "RENEWED", nil
+	})
+	ticks := make(chan time.Time, 1)
+	ticks <- time.Now()
+	owner.renewLoopWithTicks(ticks, time.Second)
+	if calls != 2 || owner.Err() != nil || ownerCtx.Err() != nil {
+		t.Fatalf("calls=%d err=%v context=%v; want clean retry without cancellation", calls, owner.Err(), ownerCtx.Err())
+	}
+	if !owner.confirmed.After(confirmed) || owner.confirmed.After(retrySent) {
+		t.Fatalf("confirmation=%s; want the clean retry's send time between %s and %s", owner.confirmed, confirmed, retrySent)
+	}
+}
+
 // When every renewal call fails, the owner still fails closed, and no retry starts
 // that could finish after the last confirmed ownership lapses.
 func TestWorkspaceOwnerRenewalStopsAfterTwoRetries(t *testing.T) {
-	const (
-		ttl    = 3 * time.Second
-		budget = 200 * time.Millisecond
-	)
-	transport := &budgetedOwnerTransport{budget: budget, renew: func(int) (string, error) {
-		return "", errors.New("ssh: connect to host: Operation timed out")
-	}}
-	owner := acquireBudgetedOwner(t, transport, ttl, 50*time.Millisecond)
-	select {
-	case <-owner.done:
-	case <-time.After(2 * ttl):
-		t.Fatal("renewal never failed closed")
-	}
-	failedAt := time.Now()
-	var exitErr ExitError
-	if err := owner.Err(); !AsExitError(err, &exitErr) || exitErr.Code != 7 || !strings.Contains(err.Error(), "renewal failed closed") {
-		t.Fatalf("err=%v; want exit 7 renewal failed closed", err)
-	}
-	if owner.Context().Err() != context.Canceled {
-		t.Fatalf("job context=%v; want canceled", owner.Context().Err())
-	}
-	acquired, renewals := transport.snapshot()
-	if len(renewals) != 3 {
-		t.Fatalf("got %d calls; want one initial call and two retries", len(renewals))
-	}
-	confirmedUntil := acquired.Add(ttl - workspaceOwnerRenewMargin)
-	if last := renewals[len(renewals)-1]; last.Add(budget).After(confirmedUntil) {
-		t.Fatalf("a retry started at %s could finish after ownership lapsed at %s", last, confirmedUntil)
-	}
-	if slack := 100 * time.Millisecond; failedAt.After(confirmedUntil.Add(slack)) {
-		t.Fatalf("failed closed at %s, after ownership lapsed at %s", failedAt, confirmedUntil)
+	for _, response := range []string{"", "RENEWED"} {
+		t.Run("response="+response, func(t *testing.T) {
+			const (
+				ttl    = 3 * time.Second
+				budget = 200 * time.Millisecond
+			)
+			transport := &budgetedOwnerTransport{budget: budget, renew: func(int) (string, error) {
+				return response, errors.New("exit status 255")
+			}}
+			owner := acquireBudgetedOwner(t, transport, ttl, 50*time.Millisecond)
+			select {
+			case <-owner.done:
+			case <-time.After(2 * ttl):
+				t.Fatal("renewal never failed closed")
+			}
+			failedAt := time.Now()
+			var exitErr ExitError
+			if err := owner.Err(); !AsExitError(err, &exitErr) || exitErr.Code != 7 || !strings.Contains(err.Error(), "renewal failed closed") {
+				t.Fatalf("err=%v; want exit 7 renewal failed closed", err)
+			}
+			if owner.Context().Err() != context.Canceled {
+				t.Fatalf("job context=%v; want canceled", owner.Context().Err())
+			}
+			acquired, renewals := transport.snapshot()
+			if len(renewals) != 3 {
+				t.Fatalf("got %d calls; want one initial call and two retries", len(renewals))
+			}
+			confirmedUntil := acquired.Add(ttl - workspaceOwnerRenewMargin)
+			if last := renewals[len(renewals)-1]; last.Add(budget).After(confirmedUntil) {
+				t.Fatalf("a retry started at %s could finish after ownership lapsed at %s", last, confirmedUntil)
+			}
+			if slack := 100 * time.Millisecond; failedAt.After(confirmedUntil.Add(slack)) {
+				t.Fatalf("failed closed at %s, after ownership lapsed at %s", failedAt, confirmedUntil)
+			}
+		})
 	}
 }
 
@@ -154,22 +194,26 @@ func TestWorkspaceOwnerRenewalProtocolAnswerIsNotRetried(t *testing.T) {
 // dispatch a retry that could finish after the confirmed ownership lapses: the window
 // is rechecked after the wait, and the owner fails closed without another call.
 func TestWorkspaceOwnerRenewalRechecksTheWindowAfterALateWake(t *testing.T) {
-	const ttl = 3 * time.Second
-	transport := &budgetedOwnerTransport{budget: 200 * time.Millisecond, renew: func(int) (string, error) {
-		return "", errors.New("ssh: connect to host: Operation timed out")
-	}}
-	workspaceOwnerRenewAfterBackoffHook = func() { time.Sleep(ttl) }
-	t.Cleanup(func() { workspaceOwnerRenewAfterBackoffHook = nil })
-	owner := acquireBudgetedOwner(t, transport, ttl, 50*time.Millisecond)
-	select {
-	case <-owner.done:
-	case <-time.After(3 * ttl):
-		t.Fatal("renewal never failed closed")
-	}
-	if err := owner.Err(); err == nil || !strings.Contains(err.Error(), "lapsed while waiting to retry") {
-		t.Fatalf("err=%v; want fail-closed after a late wake", err)
-	}
-	if _, renewals := transport.snapshot(); len(renewals) != 1 {
-		t.Fatalf("a retry was dispatched after the window lapsed: %d renewal calls", len(renewals))
+	for _, response := range []string{"", "RENEWED"} {
+		t.Run("response="+response, func(t *testing.T) {
+			const ttl = 3 * time.Second
+			transport := &budgetedOwnerTransport{budget: 200 * time.Millisecond, renew: func(int) (string, error) {
+				return response, errors.New("exit status 255")
+			}}
+			workspaceOwnerRenewAfterBackoffHook = func() { time.Sleep(ttl) }
+			t.Cleanup(func() { workspaceOwnerRenewAfterBackoffHook = nil })
+			owner := acquireBudgetedOwner(t, transport, ttl, 50*time.Millisecond)
+			select {
+			case <-owner.done:
+			case <-time.After(3 * ttl):
+				t.Fatal("renewal never failed closed")
+			}
+			if err := owner.Err(); err == nil || !strings.Contains(err.Error(), "lapsed while waiting to retry") {
+				t.Fatalf("err=%v; want fail-closed after a late wake", err)
+			}
+			if _, renewals := transport.snapshot(); len(renewals) != 1 {
+				t.Fatalf("a retry was dispatched after the window lapsed: %d renewal calls", len(renewals))
+			}
+		})
 	}
 }

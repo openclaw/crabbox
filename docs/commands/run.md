@@ -419,12 +419,14 @@ Owner-call errors identify canceled or expired call contexts without printing
 caller-provided cancellation causes; the original transport error is preserved.
 Workspace-owner protocol calls disable SSH connection multiplexing. Sync and
 command transport keep their existing connection policy.
-A renewal transport failure with no protocol response is retried at most twice,
-after 250 ms and 500 ms backoffs, while a complete retry call still fits before
-the last acknowledged ownership expires. The window is measured from when that
-acknowledged acquire or renewal was sent, with a safety margin for the remote
-clock's whole-second expiry. Any nonempty response other than error-free
-`RENEWED` remains terminal, including recognized denials and unknown output.
+A renewal transport failure with no protocol response or exactly `RENEWED` is
+retried at most twice, after 250 ms and 500 ms backoffs, while a complete retry
+call still fits before the last acknowledged ownership expires. The window is
+measured from when that acknowledged acquire or renewal was sent, with a safety margin for the remote
+clock's whole-second expiry. Only an error-free `RENEWED` confirms ownership;
+`RENEWED` with a transport error does not extend the confirmed deadline. Any
+other nonempty response remains terminal, including recognized denials and
+unknown output.
 The owner TTL includes two additional transport-call budgets, so reclaiming a
 crashed client's workspace can take longer. Calls use the same fencing token;
 retries never acquire ownership or revive an expired owner.
