@@ -5,6 +5,7 @@
 ### Added
 
 - Serve: report per-machine lease counts, runtime, and allocated CPU-hours; machine listings and the portal use durable completion rollups starting at deployment without a history scan or backfill, while usage retains full recorded history. [PR 2864](https://github.com/openclaw/crabbox/pull/2864).
+- Coordinator: allow an explicit legacy AWS account attestation to reconcile pre-cutover retained records without enabling resource deletion.
 
 ### Fixed
 

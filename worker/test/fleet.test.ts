@@ -61418,10 +61418,36 @@ describe("retained reconciliation admin status", () => {
     const allowed = await send("fixture-admin");
     expect(allowed.status).toBe(200);
     expect(await allowed.json()).toMatchObject({
-      settings: { mode: "on", delete: false },
+      settings: { mode: "on", delete: false, awsLegacyAccountConfigured: false },
       counters: {},
       scanned: 0,
     });
+  });
+});
+describe("retained reconciliation legacy admin status", () => {
+  it("exposes the legacy attestation counter and only a configured boolean", async () => {
+    const env = { CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT: "123456789012" } as Env;
+    const storage = new MemoryStorage();
+    storage.seed("retained-reconcile-state", {
+      version: 1,
+      cycles: 1,
+      scanned: 1,
+      counters: { aws: { legacy_scope_attested: 1 } },
+      backoff: {},
+    });
+    const fleet = testFleet(storage, {}, env);
+    const response = await fleet.fetch(
+      new Request("https://coordinator.test/v1/admin/retained-reconcile", {
+        headers: { "x-crabbox-admin": "true" },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      settings: { awsLegacyAccountConfigured: true },
+      counters: { aws: { legacy_scope_attested: 1 } },
+    });
+    expect(JSON.stringify(body)).not.toContain(env.CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT);
   });
 });
 describe("coordinator lease lifetime policy", () => {

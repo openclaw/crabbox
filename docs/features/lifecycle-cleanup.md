@@ -878,8 +878,8 @@ reconciler performs no provider calls or lease mutations for them. Counters incl
 recorded-scope VM/NIC/public-IP/disk reads; Hetzner needs original project/credential
 evidence and its action journal; GCP needs immutable instance/project/zone checks;
 Daytona needs its original API/organization/credential context. Historical records
-without original scope remain unresolved indefinitely; they are never backfilled
-from current settings.
+without original scope remain unresolved unless eligible for the explicit legacy
+AWS attestation below; current credentials never supply missing historical scope.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -889,9 +889,36 @@ from current settings.
 | `CRABBOX_RETAINED_RECONCILE_GRACE_SECONDS` | `3600` | Terminal age before deletion, integer 60–31536000. |
 | `CRABBOX_RETAINED_RECONCILE_BUDGET` | `200` | Maximum current-index entries hydrated per pass, integer 1–200. |
 | `CRABBOX_RETAINED_RECONCILE_LOOKUP_BUDGET` | `64` | AWS lookups per pass, including STS, exact-instance batches/fallbacks and companion reads, integer 5–256. |
+| `CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT` | unset | Operator-attested AWS account for eligible legacy records; exactly 12 digits. Invalid values are treated as unset and logged once per runtime, without the value. |
 
 Invalid numeric settings use their defaults. Use
 `crabbox admin retained-reconcile --json` to inspect cumulative outcomes, cursor
 progress and backoff. The first rollout processes the roughly 9,000 retained AWS
 records over repeated bounded passes; only records meeting all evidence
 requirements leave the current index. Deletion remains off until explicitly enabled.
+
+#### Attested legacy AWS scope
+
+An operator who has independently established the original AWS account may set
+`CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT` in coordinator runtime configuration.
+This permits reconciliation of AWS records created strictly before
+`2026-09-13T00:00:00Z`, the cutover following scope persistence in commit
+`1efb91002`. The account is not inferred from current credentials or stored in
+repository configuration. Admin status exposes `awsLegacyAccountConfigured` as a
+boolean and counts eligible records as `legacy_scope_attested`.
+
+Only records with an absent `providerScope`, a valid recorded AWS Region and an
+instance ID are eligible. Present scopes, including empty or malformed values,
+are never overridden; records at or after the cutover remain unresolved. All
+other ownership, action, dedicated-host, retained-identity and key checks still
+apply. STS must match the attested account, and the same fixed credentials,
+exact-ID reads, companion-resource checks and two observations at least ten
+minutes apart are required. The attested scope is persisted only together with
+cleanup completion through the lease-record write funnel, with
+`cleanupConfirmedBy: retained-reconcile-legacy-attested`.
+
+Attested records never enter the deletion path, even with
+`CRABBOX_RETAINED_RECONCILE_DELETE=1`; existing resources are reported as `present`.
+A wrong attestation can only incorrectly mark audit records as cleaned up; it
+cannot delete provider resources. Verify the historical account before enabling
+the setting.

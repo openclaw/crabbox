@@ -18,6 +18,35 @@ import type { Env, LeaseRecord, ProviderMachine } from "./types";
 export const retainedReconcileStateKey = "retained-reconcile-state";
 export const retainedAbsenceIntervalMs = 10 * 60_000;
 const claimDurationMs = 5 * 60_000;
+// Scope persistence landed in 1efb91002; only older records may use operator attestation.
+const awsLegacyScopeCutoverMs = Date.parse("2026-09-13T00:00:00Z");
+let warnedInvalidAWSLegacyAccount = false;
+
+function awsLegacyAccount(env: Env): string | undefined {
+  const account = env.CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT;
+  if (account?.length === 12 && /^\d{12}$/.test(account)) return account;
+  if (account !== undefined && !warnedInvalidAWSLegacyAccount) {
+    warnedInvalidAWSLegacyAccount = true;
+    console.warn("CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT is invalid; ignoring it");
+  }
+  return undefined;
+}
+
+function attestedAWSLegacyScope(lease: LeaseRecord, account?: string): string | undefined {
+  if (
+    lease.provider === "aws" &&
+    lease.providerScope === undefined &&
+    account !== undefined &&
+    account.length === 12 &&
+    /^\d{12}$/.test(account) &&
+    lease.region &&
+    sanitizeAWSRegion(lease.region) === lease.region &&
+    /^i-[a-f0-9]{8,17}$/.test(lease.cloudID) &&
+    Date.parse(lease.createdAt) < awsLegacyScopeCutoverMs
+  )
+    return `aws:account:${account}`;
+  return undefined;
+}
 
 type Counters = Record<string, Record<string, number>>;
 export interface RetainedReconcileState {
@@ -37,6 +66,7 @@ export interface RetainedSettings {
   budget: number;
   lookupBudget: number;
   intervalSeconds: number;
+  awsLegacyAccountConfigured: boolean;
 }
 function integer(value: string | undefined, fallback: number, min: number, max: number): number {
   if (!value || !/^\d+$/.test(value)) return fallback;
@@ -52,6 +82,7 @@ export function retainedReconcileSettings(env: Env): RetainedSettings {
     budget: integer(env.CRABBOX_RETAINED_RECONCILE_BUDGET, 200, 1, 200),
     lookupBudget: integer(env.CRABBOX_RETAINED_RECONCILE_LOOKUP_BUDGET, 64, 5, 256),
     intervalSeconds: integer(env.CRABBOX_RETAINED_RECONCILE_INTERVAL_SECONDS, 120, 60, 86_400),
+    awsLegacyAccountConfigured: awsLegacyAccount(env) !== undefined,
   };
 }
 function emptyState(): RetainedReconcileState {
@@ -129,7 +160,10 @@ export class RetainedLookupBudget {
 }
 
 // Skip uncertain allocation/action ownership; a missing instance cannot retire these journals.
-export function retainedUnresolvedReason(lease: LeaseRecord): string | undefined {
+export function retainedUnresolvedReason(
+  lease: LeaseRecord,
+  legacyAccount?: string,
+): string | undefined {
   if (isRegisteredLease(lease)) return "registered_resource";
   if (!lease.cloudID) return "missing_identity";
   if (
@@ -151,8 +185,8 @@ export function retainedUnresolvedReason(lease: LeaseRecord): string | undefined
     return "no_scoped_exact_read";
   }
   if (!/^i-[a-f0-9]{8,17}$/.test(lease.cloudID)) return "missing_identity";
-  if (!/^aws:account:\d{12}$/.test(lease.providerScope ?? "") || !lease.region)
-    return "missing_original_scope";
+  const scope = lease.providerScope ?? attestedAWSLegacyScope(lease, legacyAccount);
+  if (!/^aws:account:\d{12}$/.test(scope ?? "") || !lease.region) return "missing_original_scope";
   try {
     if (sanitizeAWSRegion(lease.region) !== lease.region) return "invalid_scope";
   } catch {
@@ -228,6 +262,7 @@ export async function observeAWSRetained(
 ): Promise<Map<string, RetainedObservation>> {
   const result = new Map<string, RetainedObservation>();
   if (!leases.length) return result;
+  const legacyAccount = awsLegacyAccount(env);
   try {
     budget.take(); // STS identity is part of the provider lookup budget.
     await new EC2SpotClient(env, leases[0]!.region!, undefined, budget.signal).withLeaseOperation(
@@ -236,7 +271,10 @@ export async function observeAWSRetained(
         if (
           leases.some(
             (lease) =>
-              lease.providerScope !== `aws:account:${identity.account}` ||
+              (lease.providerScope ??
+                (!retainedUnresolvedReason(lease, legacyAccount)
+                  ? attestedAWSLegacyScope(lease, legacyAccount)
+                  : undefined)) !== `aws:account:${identity.account}` ||
               lease.region !== session.region,
           )
         ) {
@@ -348,6 +386,7 @@ export async function maintainRetainedLeases(
 ): Promise<void> {
   const settings = retainedReconcileSettings(env);
   if (settings.mode === "off") return;
+  const legacyAccount = awsLegacyAccount(env);
   const now = hooks.now ?? Date.now;
   const started = now();
   const stored = await storage.get<RetainedReconcileState>(retainedReconcileStateKey, {
@@ -409,10 +448,11 @@ export async function maintainRetainedLeases(
         !lease ||
         !leaseCurrentIndex.member(lease) ||
         leaseIsLive(lease) ||
-        retainedUnresolvedReason(lease)
+        retainedUnresolvedReason(lease, legacyAccount)
       )
         continue;
-      const group = `${lease.providerScope}:${lease.region}`;
+      const scope = lease.providerScope ?? attestedAWSLegacyScope(lease, legacyAccount);
+      const group = `${scope}:${lease.region}`;
       groups.set(group, [...(groups.get(group) ?? []), lease]);
     }
     if ((state.backoff["aws"]?.until ?? 0) <= started) {
@@ -444,7 +484,7 @@ export async function maintainRetainedLeases(
       if (
         lease &&
         !leaseIsLive(lease) &&
-        !retainedUnresolvedReason(lease) &&
+        !retainedUnresolvedReason(lease, legacyAccount) &&
         observations.get(lease.id)?.outcome === "lookup_budget"
       )
         break;
@@ -455,11 +495,13 @@ export async function maintainRetainedLeases(
         count(lease?.provider ?? "all", "not_terminal");
         continue;
       }
-      const reason = retainedUnresolvedReason(lease);
+      const reason = retainedUnresolvedReason(lease, legacyAccount);
       if (reason) {
         count(lease.provider, reason);
         continue;
       }
+      const attestedScope = attestedAWSLegacyScope(lease, legacyAccount);
+      if (attestedScope) count(lease.provider, "legacy_scope_attested");
       const observation = observations.get(lease.id);
       if (!observation) {
         count(lease.provider, "backoff");
@@ -484,7 +526,9 @@ export async function maintainRetainedLeases(
       if (settings.mode === "report") continue;
       const snapshot = baseline(lease);
       // oxlint-disable-next-line eslint/no-await-in-loop -- fingerprint is bound to this exact candidate before a short transactional commit.
-      const fingerprint = await sha256Hex(snapshot);
+      const fingerprint = await sha256Hex(
+        attestedScope ? JSON.stringify([snapshot, attestedScope]) : snapshot,
+      );
       if (outcome === "absent" && observation.credentialFingerprint) {
         // oxlint-disable-next-line eslint/no-await-in-loop -- only publication holds the lifecycle fence; all cloud I/O has finished.
         await hooks.exclusive(() =>
@@ -512,7 +556,11 @@ export async function maintainRetainedLeases(
               current.retainedReconcileDeleteClaim = "awaiting-confirmation";
               delete current.cleanupStartedAt;
               delete current.cleanupClaimExpiresAt;
-              observationFingerprint = await sha256Hex(baseline(current));
+              observationFingerprint = await sha256Hex(
+                attestedScope
+                  ? JSON.stringify([baseline(current), attestedScope])
+                  : baseline(current),
+              );
             }
             const previous = current.retainedReconcileObservation;
             if (previous && previous.credentialFingerprint !== observation.credentialFingerprint) {
@@ -545,7 +593,10 @@ export async function maintainRetainedLeases(
               delete current.providerKeyCleanupPending;
               delete current.providerKeyCleanupID;
               completeLeaseProviderCleanup(current, observedAt);
-              current.cleanupConfirmedBy = "retained-reconcile";
+              current.cleanupConfirmedBy = attestedScope
+                ? "retained-reconcile-legacy-attested"
+                : "retained-reconcile";
+              if (attestedScope) current.providerScope = attestedScope;
               count("aws", "confirmed");
             } else count("aws", "first_absence");
             await putLeaseRecord(transaction, current);
@@ -565,7 +616,14 @@ export async function maintainRetainedLeases(
             }
           }),
         );
-        if (!settings.delete || !observation.server || !observation.credentialFingerprint) continue;
+        // Attestation permits audit completion only, never provider deletion.
+        if (
+          attestedScope ||
+          !settings.delete ||
+          !observation.server ||
+          !observation.credentialFingerprint
+        )
+          continue;
         const terminalAt = Date.parse(lease.endedAt ?? lease.releasedAt ?? "");
         if (!Number.isFinite(terminalAt) || started - terminalAt < settings.graceSeconds * 1000) {
           count("aws", "grace");

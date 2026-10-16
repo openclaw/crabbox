@@ -394,6 +394,226 @@ function useSession(session: AWSLeaseOperation) {
     work(session),
   );
 }
+describe("attested legacy AWS scope", () => {
+  const env = {
+    AWS_ACCESS_KEY_ID: "test",
+    AWS_SECRET_ACCESS_KEY: "secret",
+    CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT: "123456789012",
+  } as Env;
+  function legacy(patch: Partial<LeaseRecord> = {}) {
+    return lease(1, {
+      providerScope: undefined,
+      createdAt: "2026-09-12T23:59:59.999Z",
+      ...patch,
+    });
+  }
+  it("confirms through exact reads only after two observations ten minutes apart", async () => {
+    const row = legacy();
+    const f = await fixture([row]);
+    const session = mockSession();
+    useSession(session);
+    delete f.hooks.observe;
+    await f.run(env);
+    expect(await f.read()).toMatchObject({
+      retainedReconcileObservation: { firstAbsentAt: new Date(epoch).toISOString() },
+    });
+    expect((await f.read()).providerScope).toBeUndefined();
+    expect((await f.read()).cleanupConfirmedBy).toBeUndefined();
+    expect(await f.storage.get(leaseCurrentKey(row.id))).toBeDefined();
+    f.setTime(epoch + 599_999);
+    await f.run(env);
+    expect((await f.read()).cleanupCompletedAt).toBeUndefined();
+    f.setTime(epoch + 600_000);
+    await f.run(env);
+    expect(await f.read()).toMatchObject({
+      providerScope: "aws:account:123456789012",
+      cleanupConfirmedBy: "retained-reconcile-legacy-attested",
+      cleanupCompletedAt: new Date(epoch + 600_000).toISOString(),
+    });
+    expect(leaseProviderCleanupConfirmed(await f.read())).toBe(true);
+    expect(await f.storage.get(leaseCurrentKey(row.id))).toBeUndefined();
+    expect(session.findServers).toHaveBeenCalledWith([row.cloudID]);
+    const status = await retainedReconcileStatus(f.storage, env);
+    expect(status.counters["aws"]).toMatchObject({ legacy_scope_attested: 3, confirmed: 1 });
+    expect(status.settings.awsLegacyAccountConfigured).toBe(true);
+    expect(JSON.stringify(status)).not.toContain(env.CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT);
+  });
+  it.each([
+    { patch: { createdAt: "2026-09-13T00:00:00Z" }, reason: "missing_original_scope" },
+    { patch: { createdAt: "2026-09-13T00:00:00.001Z" }, reason: "missing_original_scope" },
+    { patch: { createdAt: "invalid" }, reason: "missing_original_scope" },
+    { patch: { providerScope: "aws:account:bad" }, reason: "missing_original_scope" },
+    { patch: { providerScope: "" }, reason: "missing_original_scope" },
+    { patch: { region: undefined }, reason: "missing_original_scope" },
+    { patch: { region: "invalid" }, reason: "missing_original_scope" },
+    { patch: { region: " EU-WEST-1 " }, reason: "missing_original_scope" },
+    { patch: { cloudID: "not-an-instance" }, reason: "missing_identity" },
+    { patch: { provider: "azure" }, reason: "missing_original_scope" },
+    { patch: { lifecycle: "registered" }, reason: "registered_resource" },
+    { patch: { providerCleanup: {} }, reason: "unresolved_action" },
+    { patch: { target: "macos" }, reason: "dedicated_host" },
+    { patch: { hostID: "h-1234" }, reason: "dedicated_host" },
+    { patch: { serverType: "mac2.metal" }, reason: "dedicated_host" },
+    {
+      patch: { lifetimePolicy: { retainedIdentity: "i-other:vol-1234:/dev/sda1" } },
+      reason: "unresolved_resource_identity",
+    },
+    { patch: { providerKeyCleanupPending: true }, reason: "unresolved_key" },
+  ] as { patch: Partial<LeaseRecord>; reason: string }[])(
+    "preserves $reason for $patch",
+    async ({ patch, reason }) => {
+      const row = legacy(patch);
+      const f = await fixture([row]);
+      await f.run(env);
+      expect(retainedUnresolvedReason(row, env.CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT)).toBe(
+        reason,
+      );
+      expect(await f.read()).toEqual(row);
+      expect(f.hooks.observe).not.toHaveBeenCalled();
+      expect(
+        (await retainedReconcileStatus(f.storage, env)).counters["aws"]?.["legacy_scope_attested"],
+      ).toBeUndefined();
+    },
+  );
+  it("treats invalid settings as unset and logs once without the value", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    for (const account of [
+      "",
+      "12345678901",
+      "1234567890123",
+      " 123456789012",
+      "123456789012\n",
+      "abcdefghijkl",
+    ]) {
+      const row = legacy();
+      // oxlint-disable-next-line eslint/no-await-in-loop -- initialize an independent fixture for each setting.
+      const f = await fixture([row]);
+      const invalidEnv = { ...env, CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT: account };
+      // oxlint-disable-next-line eslint/no-await-in-loop -- verify each invalid runtime setting independently.
+      await f.run(invalidEnv);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- inspect the persisted fixture for this setting.
+      expect(await f.read()).toEqual(row);
+      expect(f.hooks.observe).not.toHaveBeenCalled();
+      expect(retainedReconcileSettings(invalidEnv).awsLegacyAccountConfigured).toBe(false);
+    }
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      "CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT is invalid; ignoring it",
+    );
+  });
+  it("leaves missing scope unresolved when the setting is absent", async () => {
+    const row = legacy();
+    const f = await fixture([row]);
+    await f.run();
+    expect(await f.read()).toEqual(row);
+    expect(f.hooks.observe).not.toHaveBeenCalled();
+    expect(retainedReconcileSettings({} as Env).awsLegacyAccountConfigured).toBe(false);
+  });
+  it("rejects a different STS account before exact reads or lease mutation", async () => {
+    const row = legacy();
+    const f = await fixture([row]);
+    const session = mockSession({ verifiedIdentity: async () => ({ account: "999999999999" }) });
+    useSession(session);
+    delete f.hooks.observe;
+    await f.run(env);
+    expect(await f.read()).toEqual(row);
+    expect(session.findServers).not.toHaveBeenCalled();
+    expect(f.hooks.deleteLease).not.toHaveBeenCalled();
+    expect((await retainedReconcileStatus(f.storage, env)).counters["aws"]).toMatchObject({
+      legacy_scope_attested: 1,
+      scope_mismatch: 1,
+    });
+  });
+  it("never deletes a present legacy instance even when deletion is enabled", async () => {
+    const row = legacy({ slug: "test", serverName: "test" });
+    const f = await fixture([row]);
+    useSession(mockSession({ findServers: async () => new Map([[row.cloudID, machine(row)]]) }));
+    delete f.hooks.observe;
+    await f.run({ ...env, CRABBOX_RETAINED_RECONCILE_DELETE: "1" });
+    expect(await f.read()).toEqual(row);
+    expect(f.hooks.deleteLease).not.toHaveBeenCalled();
+    expect((await retainedReconcileStatus(f.storage, env)).counters["aws"]).toMatchObject({
+      legacy_scope_attested: 1,
+      present: 1,
+    });
+  });
+  it("does not override a recorded scope or its ordinary completion attribution", async () => {
+    const row = legacy({ providerScope: "aws:account:123456789012" });
+    const f = await fixture([row]);
+    await f.run({ ...env, CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT: "999999999999" });
+    f.setTime(epoch + 600_000);
+    await f.run(env);
+    expect(await f.read()).toMatchObject({
+      providerScope: row.providerScope,
+      cleanupConfirmedBy: "retained-reconcile",
+    });
+    expect(
+      (await retainedReconcileStatus(f.storage, env)).counters["aws"]?.["legacy_scope_attested"],
+    ).toBeUndefined();
+  });
+  it("keeps credential pinning and companion checks for attested scope", async () => {
+    const { providerKeyForLease } = await import("../src/provider-key");
+    const row = legacy({
+      providerKeyCleanupOwned: true,
+      providerKey: providerKeyForLease(lease().id),
+    });
+    const f = await fixture([row]);
+    const session = mockSession({
+      sshKeyAbsent: vi.fn<AWSLeaseOperation["sshKeyAbsent"]>(async () => false),
+    });
+    useSession(session);
+    delete f.hooks.observe;
+    await f.run(env);
+    expect(await f.read()).toEqual(row);
+    expect(session.sshKeyAbsent).toHaveBeenCalled();
+    session.sshKeyAbsent = async () => true;
+    await f.run(env);
+    const first = await f.read();
+    session.credentialFingerprint = async () => "changed";
+    f.setTime(epoch + 600_000);
+    await f.run(env);
+    expect(await f.read()).toEqual(first);
+    expect((await retainedReconcileStatus(f.storage, env)).counters["aws"]).toMatchObject({
+      owned_key_present: 1,
+      credential_changed: 1,
+    });
+  });
+  it("rolls back both scope and completion if current-index publication fails", async () => {
+    const row = legacy();
+    const f = await fixture([row]);
+    await f.run(env);
+    const first = await f.read();
+    f.setTime(epoch + 600_000);
+    f.storage.failKey = leaseCurrentKey(row.id);
+    await expect(f.run(env)).rejects.toThrow("injected storage failure");
+    expect(await f.read()).toEqual(first);
+    expect((await f.read()).providerScope).toBeUndefined();
+    expect(await f.storage.get(leaseCurrentKey(row.id))).toBeDefined();
+  });
+  it("does not persist an attested scope or observations in report mode", async () => {
+    const row = legacy();
+    const f = await fixture([row]);
+    await f.run({ ...env, CRABBOX_RETAINED_RECONCILE: "report" });
+    f.setTime(epoch + 600_000);
+    await f.run({ ...env, CRABBOX_RETAINED_RECONCILE: "report" });
+    expect(await f.read()).toEqual(row);
+    expect(
+      (await retainedReconcileStatus(f.storage, env)).counters["aws"]?.["legacy_scope_attested"],
+    ).toBe(2);
+  });
+  it("rejects concurrent changes to the cutover timestamp before publication", async () => {
+    const row = legacy();
+    const f = await fixture([row]);
+    const changed = { ...row, createdAt: "2026-09-13T00:00:00Z" };
+    f.hooks.observe = async (_env, rows) => {
+      await putLeaseRecord(f.storage, changed);
+      return new Map(
+        rows.map((record) => [record.id, { outcome: "absent", credentialFingerprint: "one" }]),
+      );
+    };
+    await f.run(env);
+    expect(await f.read()).toEqual(changed);
+  });
+});
 describe("AWS retained exact observation", () => {
   it("batches exact IDs and confirms terminated, never shutting-down", async () => {
     const row = lease(1, { slug: "test" });
