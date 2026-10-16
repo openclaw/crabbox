@@ -1,5 +1,9 @@
-const durationPolicyFields = ["defaultTTLSeconds", "defaultIdleTimeoutSeconds", "maxTTLSeconds"];
-const switchPolicyFields = ["extension", "autoExtend"];
+const durationPolicyFields = new Set([
+  "defaultTTLSeconds",
+  "defaultIdleTimeoutSeconds",
+  "maxTTLSeconds",
+]);
+const switchPolicyFields = new Set(["extension", "autoExtend"]);
 
 // Deployments must accept exactly the override documents the runtime can apply.
 export function isLeasePolicyOverrides(value) {
@@ -15,10 +19,10 @@ export function isLeasePolicyOverrides(value) {
     for (const entry of Object.values(entries)) {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
       for (const [key, field] of Object.entries(entry)) {
-        if (durationPolicyFields.includes(key)) {
+        if (durationPolicyFields.has(key)) {
           if (!Number.isInteger(field) || typeof field !== "number" || field < 1 || field > 86_400)
             return false;
-        } else if (switchPolicyFields.includes(key)) {
+        } else if (switchPolicyFields.has(key)) {
           if (field !== "allow" && field !== "deny") return false;
         } else return false;
       }
