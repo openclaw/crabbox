@@ -459,6 +459,8 @@ describe("attested legacy AWS scope", () => {
       reason: "unresolved_resource_identity",
     },
     { patch: { providerKeyCleanupPending: true }, reason: "unresolved_key" },
+    // sanitizeAWSRegion throws on malformed regions; the pass must not fail.
+    { patch: { region: "not a region!" }, reason: "missing_original_scope" },
   ] as { patch: Partial<LeaseRecord>; reason: string }[])(
     "preserves $reason for $patch",
     async ({ patch, reason }) => {

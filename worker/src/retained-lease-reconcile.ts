@@ -32,6 +32,16 @@ function awsLegacyAccount(env: Env): string | undefined {
   return undefined;
 }
 
+// sanitizeAWSRegion throws on malformed input; one bad legacy record must not
+// fail every reconcile pass at the same cursor.
+function sanitizedRegionMatches(region: string): boolean {
+  try {
+    return sanitizeAWSRegion(region) === region;
+  } catch {
+    return false;
+  }
+}
+
 function attestedAWSLegacyScope(lease: LeaseRecord, account?: string): string | undefined {
   if (
     lease.provider === "aws" &&
@@ -40,7 +50,7 @@ function attestedAWSLegacyScope(lease: LeaseRecord, account?: string): string | 
     account.length === 12 &&
     /^\d{12}$/.test(account) &&
     lease.region &&
-    sanitizeAWSRegion(lease.region) === lease.region &&
+    sanitizedRegionMatches(lease.region) &&
     /^i-[a-f0-9]{8,17}$/.test(lease.cloudID) &&
     Date.parse(lease.createdAt) < awsLegacyScopeCutoverMs
   )
