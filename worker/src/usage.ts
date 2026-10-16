@@ -67,10 +67,13 @@ export interface UsageSummary {
   byOrg: UsageGroup[];
   byProvider: UsageGroup[];
   byServerType: UsageGroup[];
+  byMachine: UsageGroup[];
 }
 
 export interface UsageGroup {
   key: string;
+  label?: string;
+  cpuSeconds?: number;
   leases: number;
   activeLeases: number;
   runtimeSeconds: number;
@@ -276,6 +279,8 @@ export function createUsageSummary(filter: UsageFilter, now: Date) {
   const byOrg = new Map<string, UsageAccumulator>();
   const byProvider = new Map<string, UsageAccumulator>();
   const byServerType = new Map<string, UsageAccumulator>();
+  const byMachine = new Map<string, UsageAccumulator>();
+  const machineCPUSeconds = new Map<string, number>();
   const add = (lease: LeaseRecord) => {
     if (isRegisteredLease(lease) || !leaseMatchesUsageFilter(lease, filter)) return;
     const item = leaseUsage(lease, now);
@@ -284,6 +289,19 @@ export function createUsageSummary(filter: UsageFilter, now: Date) {
     addUsage(mapAccumulator(byOrg, lease.org || "unknown"), item);
     addUsage(mapAccumulator(byProvider, lease.provider), item);
     addUsage(mapAccumulator(byServerType, lease.serverType || "unknown"), item);
+    if (lease.provider === "serve") {
+      const machineID =
+        lease.serve?.machineID ||
+        (lease.cloudID?.includes("/") ? lease.cloudID.split("/")[0] : "") ||
+        "unknown";
+      addUsage(mapAccumulator(byMachine, machineID), item);
+      const cpus = lease.serve?.cpus ?? 0;
+      machineCPUSeconds.set(
+        machineID,
+        (machineCPUSeconds.get(machineID) ?? 0) +
+          item.runtimeSeconds * (Number.isFinite(cpus) && cpus > 0 ? cpus : 0),
+      );
+    }
   };
   const finish = (): UsageSummary => {
     const summary: UsageSummary = {
@@ -297,6 +315,10 @@ export function createUsageSummary(filter: UsageFilter, now: Date) {
       })),
       byProvider: finalizeGroups(byProvider),
       byServerType: finalizeGroups(byServerType),
+      byMachine: finalizeGroups(byMachine).map((group) => ({
+        ...group,
+        cpuSeconds: machineCPUSeconds.get(group.key) ?? 0,
+      })),
     };
     if (filter.owner) {
       summary.owner = filter.owner;
@@ -448,9 +470,7 @@ function addUsage(total: UsageAccumulator, item: UsageAccumulator): void {
   total.committedUSD = roundUSD(total.committedUSD + item.committedUSD);
 }
 
-function finalize(
-  group: UsageAccumulator,
-): Omit<UsageSummary, "month" | "scope" | "byOwner" | "byOrg" | "byProvider" | "byServerType"> {
+function finalize(group: UsageAccumulator): UsageAccumulator {
   return {
     leases: group.leases,
     activeLeases: group.activeLeases,

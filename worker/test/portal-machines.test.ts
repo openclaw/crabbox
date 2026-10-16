@@ -62,12 +62,136 @@ function fixture(allowed = owner) {
     expect(response.status).toBe(200);
     return response.text();
   };
-  return { storage, serve, request, machine, ownerPrefix, seed, home };
+  return { storage, fleet, serve, request, machine, ownerPrefix, seed, home };
 }
 
 afterEach(() => vi.useRealTimers());
 
 describe("portal donated machines", () => {
+  it("shows monthly served usage through bounded pages without exposing another owner or org", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T02:00:00Z"));
+    const f = fixture("*");
+    await f.seed(f.machine());
+    await f.seed(
+      f.machine({ machineID: "22222222-2222-4222-8222-222222222222", name: "idle-builder" }),
+    );
+    await f.serve.create(f.request(), {
+      provider: "serve",
+      leaseID,
+      sshPublicKey: sshKey,
+      class: "standard",
+    });
+    const original = (await f.storage.get<LeaseRecord>(`lease:${leaseID}`))!;
+    const released: LeaseRecord = {
+      ...original,
+      state: "released",
+      createdAt: "2026-05-01T00:00:00Z",
+      endedAt: "2026-05-01T01:00:00Z",
+    };
+    await Promise.all(
+      Array.from({ length: 130 }, (_, n) =>
+        putLeaseRecord(f.storage, {
+          ...released,
+          id: `cbx_${(n + 100).toString(16).padStart(12, "0")}`,
+        }),
+      ),
+    );
+    await putLeaseRecord(f.storage, { ...original, createdAt: "2026-05-01T01:30:00Z" });
+    await putLeaseRecord(f.storage, {
+      ...released,
+      id: "cbx_000000000002",
+      owner: "bob@example.com",
+    });
+    await putLeaseRecord(f.storage, {
+      ...released,
+      id: "cbx_000000000003",
+      org: requestOrg(f.request(owner, "other-org"), {}),
+    });
+    await putLeaseRecord(f.storage, {
+      ...released,
+      id: "cbx_000000000004",
+      createdAt: "2026-04-30T23:00:00Z",
+    });
+    f.storage.listOptions.length = 0;
+    const machines = await f.serve.listMachines(f.request());
+    expect(machines.find((m) => m.machineID === machineID)?.usage).toEqual({
+      month: "2026-05",
+      leases: 131,
+      activeLeases: 1,
+      runtimeSeconds: 469800,
+      cpuSeconds: 3758400,
+    });
+    expect(machines.find((m) => m.name === "idle-builder")?.usage).toEqual({
+      month: "2026-05",
+      leases: 0,
+      activeLeases: 0,
+      runtimeSeconds: 0,
+      cpuSeconds: 0,
+    });
+    const pages = f.storage.listOptions.filter((o) => o?.prefix === "lease:");
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages.every((o) => o?.limit === 128)).toBe(true);
+    expect(pages.every((o) => o?.noCache === true)).toBe(true);
+    expect(pages[1]?.startAfter).toBeTruthy();
+    const body = await f.home();
+    expect(body).toContain("served this month");
+    expect(body).toContain("131 served · 1044.00 CPU-hours");
+    expect(body).toContain("7830m 0s runtime · 2026-05 UTC");
+    expect(body).toContain("0 served · 0.00 CPU-hours");
+  });
+
+  it("labels only visible machine groups and keeps unavailable machine records attributable", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T02:00:00Z"));
+    const f = fixture("*");
+    await f.seed(f.machine());
+    await f.serve.create(f.request(), {
+      provider: "serve",
+      leaseID,
+      sshPublicKey: sshKey,
+      class: "standard",
+    });
+    const original = (await f.storage.get<LeaseRecord>(`lease:${leaseID}`))!;
+    await putLeaseRecord(f.storage, {
+      ...original,
+      id: "cbx_000000000002",
+      cloudID: "deleted-machine/cbx_000000000002",
+      serve: undefined,
+    });
+    await f.seed(
+      f.machine({
+        machineID: "22222222-2222-4222-8222-222222222222",
+        owner: "bob@example.com",
+        name: "private-builder",
+      }),
+    );
+    await putLeaseRecord(f.storage, {
+      ...original,
+      id: "cbx_000000000003",
+      owner: "bob@example.com",
+      serve: { ...original.serve!, machineID: "22222222-2222-4222-8222-222222222222" },
+    });
+    const reads: string[] = [];
+    f.storage.beforeGet = async (key) => {
+      reads.push(key);
+    };
+    const response = await f.fleet.fetch(
+      f.request(owner, "example-org", false, "/v1/usage?scope=all&owner=bob@example.com"),
+    );
+    expect(response.status).toBe(200);
+    const result = (await response.json()) as { usage: { byMachine: unknown[] } };
+    expect(result.usage.byMachine).toHaveLength(2);
+    expect(result.usage.byMachine).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: machineID, label: "linux-builder" }),
+        expect.objectContaining({ key: "deleted-machine", cpuSeconds: 0 }),
+      ]),
+    );
+    expect(JSON.stringify(result)).not.toContain("private-builder");
+    expect(reads).not.toContain("serve-machine:22222222-2222-4222-8222-222222222222");
+  });
+
   it("renders online, offline and draining capacity with allocated lease links", async () => {
     vi.useFakeTimers();
     const f = fixture();

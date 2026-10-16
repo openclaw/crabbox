@@ -1,3 +1,4 @@
+import { isAdminRequest } from "./auth";
 import { clampLeaseDurations, resolveLeasePolicy } from "./config";
 import type { CoordinatorRuntime, CoordinatorStorageView } from "./coordinator-runtime";
 import { sha256Hex } from "./encoding";
@@ -8,7 +9,9 @@ import { requestOrg } from "./org-identity";
 import { publicLeaseRecord } from "./org-records";
 import { serveRelayBackend } from "./serve-relay";
 import { ServeRelayControl } from "./serve-relay-control";
+import { coordinatorStorageEntries, storageRecordScanBatchSize } from "./storage-scan";
 import type { Env, LeaseRecord, LeaseRequest, CreateAttemptRecord } from "./types";
+import { createUsageSummary, type UsageGroup } from "./usage";
 
 export const serveBodyLimit = 32 * 1024;
 const machinePrefix = "serve-machine:";
@@ -79,6 +82,13 @@ export interface ServeMachine {
   leases: string[];
 }
 export interface ServeMachineView extends Omit<ServeMachine, "leases"> {
+  usage?: {
+    month: string;
+    leases: number;
+    activeLeases: number;
+    runtimeSeconds: number;
+    cpuSeconds: number;
+  };
   leases?: undefined;
   online: boolean;
   freeCPUs: number;
@@ -343,11 +353,47 @@ export class ServeCoordinator {
   async listMachines(r: Request): Promise<ServeMachineView[]> {
     if (!serveEnabled(this.env, requestOwner(r))) return [];
     const machines = await this.machines(this.runtime.storage, r);
-    return Promise.all(
-      [...machines.values()]
-        .filter((m) => this.owned(m, r))
-        .map((m) => this.view(this.runtime.storage, m)),
+    const owned = [...machines.values()].filter((m) => this.owned(m, r));
+    if (owned.length === 0) return [];
+    const now = new Date();
+    const month = now.toISOString().slice(0, 7);
+    const summary = createUsageSummary(
+      { scope: "user", owner: requestOwner(r), org: requestOrg(r, this.env), month },
+      now,
     );
+    for await (const [, lease] of coordinatorStorageEntries<LeaseRecord>(this.runtime.storage, {
+      prefix: "lease:",
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+    })) {
+      summary.add(lease);
+    }
+    const usage = new Map(summary.finish().byMachine.map((group) => [group.key, group]));
+    return Promise.all(
+      owned.map(async (m) => {
+        const group = usage.get(m.machineID);
+        return {
+          ...(await this.view(this.runtime.storage, m)),
+          usage: {
+            month,
+            leases: group?.leases ?? 0,
+            activeLeases: group?.activeLeases ?? 0,
+            runtimeSeconds: group?.runtimeSeconds ?? 0,
+            cpuSeconds: group?.cpuSeconds ?? 0,
+          },
+        };
+      }),
+    );
+  }
+  async labelUsageGroups(groups: UsageGroup[], r: Request): Promise<void> {
+    for (const group of groups) {
+      if (group.key === "unknown") continue;
+      // oxlint-disable-next-line eslint/no-await-in-loop -- bound name hydration to one point read at a time, after usage filtering.
+      const machine = await this.runtime.storage.get<ServeMachine>(machinePrefix + group.key);
+      if (machine?.name && (isAdminRequest(r) || this.owned(machine, r))) {
+        group.label = machine.name;
+      }
+    }
   }
   async route(r: Request, parts: string[]): Promise<Response> {
     try {

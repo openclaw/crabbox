@@ -1,6 +1,7 @@
 package serve
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,48 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/localcontainer"
 )
+
+func TestServeMachinesMonthlyUsage(t *testing.T) {
+	for _, jsonOut := range []bool{false, true} {
+		t.Run(fmt.Sprintf("json=%t", jsonOut), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/serve/machines" {
+					t.Errorf("unexpected path %s", r.URL.Path)
+				}
+				fmt.Fprint(w, `{"machines":[{"machineID":"machine-a","name":"build-mac","online":true,"cpus":8,"memoryMB":16384,"usage":{"month":"2026-05","leases":3,"activeLeases":1,"runtimeSeconds":5400,"cpuSeconds":21600}},{"machineID":"machine-b","name":"legacy"}]}`)
+			}))
+			defer server.Close()
+			var out bytes.Buffer
+			args := []string{"machines"}
+			if jsonOut {
+				args = append(args, "--json")
+			}
+			err := (Provider{}).RunAgent(context.Background(), core.Config{
+				Coordinator: server.URL, CoordToken: "synthetic-test-token",
+			}, core.Runtime{Exec: &slowPreparationRuntime{}, Stdout: &out, Stderr: io.Discard}, args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if jsonOut {
+				var result struct {
+					Machines []machine `json:"machines"`
+				}
+				if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+					t.Fatal(err)
+				}
+				if len(result.Machines) != 2 || result.Machines[0].Usage == nil || result.Machines[0].Usage.CPUSeconds != 21600 || result.Machines[1].Usage != nil {
+					t.Fatalf("monthly usage lost: %s", &out)
+				}
+			} else {
+				for _, want := range []string{"machine-a build-mac", "month=2026-05 served=3 runtime=1h30m0s cpu-hours=6.00", "machine-b legacy"} {
+					if !strings.Contains(out.String(), want) {
+						t.Fatalf("missing %q in %s", want, &out)
+					}
+				}
+			}
+		})
+	}
+}
 
 type slowPreparationRuntime struct {
 	started    chan struct{}

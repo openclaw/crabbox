@@ -16444,8 +16444,10 @@ export class FleetCoordinator {
       : requestOrg(request, this.env);
     const usage = createUsageSummary({ scope, owner, month, ...(org ? { org } : {}) }, new Date());
     await this.visitLeaseRecords((lease) => usage.add(lease));
+    const summary = usage.finish();
+    await new ServeCoordinator(this.state, this.env).labelUsageGroups(summary.byMachine, request);
     return json({
-      usage: usage.finish(),
+      usage: summary,
       limits: { ...costLimits(this.env), sharedCapacityOverrideOwners: undefined },
     });
   }
