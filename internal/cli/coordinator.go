@@ -954,10 +954,13 @@ type CoordinatorUsageSummary struct {
 	ByOrg          []CoordinatorUsageGroup `json:"byOrg"`
 	ByProvider     []CoordinatorUsageGroup `json:"byProvider"`
 	ByServerType   []CoordinatorUsageGroup `json:"byServerType"`
+	ByMachine      []CoordinatorUsageGroup `json:"byMachine"`
 }
 
 type CoordinatorUsageGroup struct {
 	Key            string   `json:"key"`
+	Label          string   `json:"label,omitempty"`
+	CPUSeconds     *int64   `json:"cpuSeconds,omitempty"`
 	Leases         int      `json:"leases"`
 	ActiveLeases   int      `json:"activeLeases"`
 	RuntimeSeconds int64    `json:"runtimeSeconds"`

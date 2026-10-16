@@ -111,6 +111,90 @@ describe("azure cost overrides", () => {
 });
 
 describe("usage accounting", () => {
+  const serveLease = (machineID: string, cpus: number, overrides: Partial<LeaseRecord> = {}) =>
+    testLease({
+      provider: "serve",
+      cloudID: `${machineID}/cbx_000000000001`,
+      estimatedHourlyUSD: 0,
+      maxEstimatedUSD: 0,
+      serve: { machineID, cpus, memoryMB: 2048, sshPublicKey: "synthetic", image: "test" },
+      ...overrides,
+    });
+
+  it("aggregates serve machines by stable ID and assigned CPUs across active and released leases", () => {
+    const summary = usageSummary(
+      [
+        serveLease("machine-a", 2),
+        serveLease("machine-a", 8, { state: "released", endedAt: "2026-05-01T00:30:00Z" }),
+        serveLease("machine-b", 4, { state: "released", endedAt: "2026-05-01T01:00:00Z" }),
+        testLease({}),
+      ],
+      { scope: "all", month: "2026-05" },
+      new Date("2026-05-01T02:00:00Z"),
+    );
+    expect(summary.leases).toBe(4);
+    expect(summary.byMachine).toEqual([
+      {
+        key: "machine-a",
+        leases: 2,
+        activeLeases: 1,
+        runtimeSeconds: 9000,
+        cpuSeconds: 28800,
+        estimatedUSD: 0,
+        reservedUSD: 0,
+        committedUSD: 0,
+      },
+      {
+        key: "machine-b",
+        leases: 1,
+        activeLeases: 0,
+        runtimeSeconds: 3600,
+        cpuSeconds: 14400,
+        estimatedUSD: 0,
+        reservedUSD: 0,
+        committedUSD: 0,
+      },
+    ]);
+  });
+
+  it.each([
+    [{ scope: "user" as const, owner: "owner@example.com", org: orgKeyForLabel("example.com") }, 1],
+    [{ scope: "user" as const, owner: "owner@example.com" }, 2],
+    [{ scope: "org" as const, org: orgKeyForLabel("example.com") }, 2],
+    [{ scope: "all" as const }, 3],
+  ])("keeps machine usage inside the existing scope and creation month (%j)", (filter, count) => {
+    const summary = usageSummary(
+      [
+        serveLease("machine-a", 2),
+        serveLease("machine-b", 2, { owner: "other@example.com" }),
+        serveLease("machine-c", 2, { org: orgKeyForLabel("other") }),
+        serveLease("previous-month", 2, { createdAt: "2026-04-30T23:59:59Z" }),
+        serveLease("next-month", 2, { createdAt: "2026-06-01T00:00:00Z" }),
+      ],
+      { ...filter, month: "2026-05" },
+      new Date("2026-06-01T00:00:00Z"),
+    );
+    expect(summary.byMachine).toHaveLength(count);
+    expect(summary.byMachine.map((group) => group.key)).not.toContain("previous-month");
+    expect(summary.byMachine.map((group) => group.key)).not.toContain("next-month");
+  });
+
+  it("falls back to cloudID prefixes or unknown without inventing assigned CPUs", () => {
+    const summary = usageSummary(
+      [
+        serveLease("fallback", 2, { serve: undefined }),
+        serveLease("missing", 2, { serve: undefined, cloudID: "" }),
+        serveLease("malformed", 2, { serve: undefined, cloudID: "no-prefix" }),
+      ],
+      { scope: "all", month: "2026-05" },
+      new Date("2026-05-01T01:00:00Z"),
+    );
+    expect(summary.byMachine).toMatchObject([
+      { key: "fallback", leases: 1, runtimeSeconds: 3600, cpuSeconds: 0 },
+      { key: "unknown", leases: 2, runtimeSeconds: 7200, cpuSeconds: 0 },
+    ]);
+  });
+
   it("reserves retained running compute and settles its confirmed stop/resume intervals", () => {
     const now = new Date("2026-05-20T00:00:00Z");
     const running = testLease({

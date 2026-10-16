@@ -10,11 +10,12 @@ import (
 type CoordinatorRetainedReconcile struct {
 	Version  int `json:"version"`
 	Settings struct {
-		Mode         string `json:"mode"`
-		Delete       bool   `json:"delete"`
-		Budget       int    `json:"budget"`
-		GraceSeconds int    `json:"graceSeconds"`
-		LookupBudget int    `json:"lookupBudget"`
+		Mode                       string `json:"mode"`
+		Delete                     bool   `json:"delete"`
+		Budget                     int    `json:"budget"`
+		GraceSeconds               int    `json:"graceSeconds"`
+		LookupBudget               int    `json:"lookupBudget"`
+		AWSLegacyAccountConfigured bool   `json:"awsLegacyAccountConfigured"`
 	} `json:"settings"`
 	Cursor     string                      `json:"cursor"`
 	Cycles     int64                       `json:"cycles"`
@@ -61,7 +62,7 @@ func (a App) adminRetainedReconcile(ctx context.Context, args []string) error {
 	if *jsonOut {
 		return json.NewEncoder(a.Stdout).Encode(result)
 	}
-	fmt.Fprintf(a.Stdout, "retained reconciliation mode=%s delete=%t budget=%d lookups=%d grace_seconds=%d scanned=%d cycles=%d last_pass=%s cursor=%s\n", result.Settings.Mode, result.Settings.Delete, result.Settings.Budget, result.Settings.LookupBudget, result.Settings.GraceSeconds, result.Scanned, result.Cycles, blank(result.LastPassAt, "-"), blank(result.Cursor, "-"))
+	fmt.Fprintf(a.Stdout, "retained reconciliation mode=%s delete=%t aws_legacy_account_configured=%t budget=%d lookups=%d grace_seconds=%d scanned=%d cycles=%d last_pass=%s cursor=%s\n", result.Settings.Mode, result.Settings.Delete, result.Settings.AWSLegacyAccountConfigured, result.Settings.Budget, result.Settings.LookupBudget, result.Settings.GraceSeconds, result.Scanned, result.Cycles, blank(result.LastPassAt, "-"), blank(result.Cursor, "-"))
 	var rows []string
 	for provider, outcomes := range result.Counters {
 		for outcome, count := range outcomes {

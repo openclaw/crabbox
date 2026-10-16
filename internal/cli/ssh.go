@@ -60,7 +60,7 @@ type SSHTarget struct {
 	ReadyCheck              string
 	AuthSecret              bool
 	NoControlMaster         bool
-	ownerControlPath        string // Private, foreground master owned by the workspace owner.
+	ownerControlPath        string // Private foreground master with an explicit local lifetime owner.
 	DisableHostKeyChecking  bool
 	NetworkKind             NetworkMode
 	SSHConfigProxy          bool
@@ -1008,6 +1008,11 @@ func prepareSSHTransport(ctx context.Context, target SSHTarget, command string, 
 }
 
 func (p *sshTransportPreparation) run(ctx context.Context, target *SSHTarget, connectTimeout, connectionAttempts string, stdout, stderr io.Writer) error {
+	preparedTarget, err := prepareServeRelayControl(ctx, *target)
+	if err != nil {
+		return err
+	}
+	*target = preparedTarget
 	if p.stage != nil {
 		p.retirementUnconfirmed = true
 		p.stage.setupMarker = p.setupMarker

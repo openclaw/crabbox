@@ -48,8 +48,19 @@ the existing brokered SSH-lease path.
 The [browser portal](../features/portal.md#index-portal) shows your donated
 machines below the fleet, with online/offline and draining status, heartbeat age,
 capacity, allocated lease links, runtime/agent versions, and SSH front doors.
+It also shows served leases, runtime, and allocated CPU-hours for leases created
+in the current UTC month, matching `crabbox serve machines`. These summaries combine
+current allocations with durable monthly rollups recorded once on agent-confirmed
+cleanup. Rollups start at deployment with no historical backfill; cross-month leases
+remain attributed to their creation month. Listings read only each machine's rollup
+and current allocations, never the full lease history.
 The section appears only for enabled owners with machines; even admins see only
 their own machines in the current organization.
+
+[`crabbox usage`](../commands/usage.md) also groups serve leases by stable machine
+ID with the display name when available, including full recorded history. It uses the selected reporting month and
+normal usage authorization. CPU-hours are runtime times assigned CPUs, not actual
+CPU utilization; serve leases continue to carry zero estimated cost.
 
 ## Trust and limits
 
@@ -317,7 +328,21 @@ invocation to retry.
 
 Relay adds coordinator latency. Each direction allows one acknowledged 32 KiB
 frame at a time, bounding buffering with backpressure at the cost of throughput
-on high-latency links. A fresh invocation always retries direct candidates, even
+on high-latency links. On macOS and Linux clients, foreground commands reuse one
+relay-backed front-door SSH connection for the invocation. Readiness, sync, and
+workload commands also reuse their inner SSH connection; workspace ownership
+uses a separate inner connection over that same relay so renewals and release
+remain independent of the workload. Both host keys remain pinned, and the front
+door still restricts every forwarding channel to the authenticated lease.
+
+Control sockets live in private, owner-only directories unique to the invocation
+and lease identity. Their foreground masters are joined and the directories
+removed before release or when the invocation exits, including cancellation and
+`--keep`. They are never shared between invocations or coordinator logins.
+Exported background forwards retain their independent transport lifetime.
+Windows clients retain the non-multiplexed relay transport.
+
+A fresh invocation always retries direct candidates, even
 if its previous route was relay, so returning to the LAN restores direct access.
 The relay runs on both Cloudflare (one dedicated Durable Object per session) and
 Node/PostgreSQL. Fleet handles admission and lifecycle, never the data frames.

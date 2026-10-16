@@ -310,6 +310,7 @@ function portalMachines(machines: ServeMachineView[]): string {
         <td><div class="state-stack"><span class="${badgeClass(machine.online ? "ok" : "neutral")}">${connection}</span><span class="${badgeClass(state === "available" ? "ok" : state === "busy" ? "warn" : "neutral")}">${escapeHTML(availabilityLabel)}</span>${machine.draining ? `<span class="${badgeClass("warn")}">draining</span>` : ""}<small>seen ${escapeHTML(relativeTime(new Date(machine.lastHeartbeat).toISOString()))}</small>${measurements ? `<small>${escapeHTML(measurements)}</small>` : ""}</div></td>
         <td><div class="lease-link"><strong>${machine.allocatedCPUs}/${machine.cpus} CPUs · ${machine.allocatedMemoryMB}/${machine.memoryMB} MiB</strong><small>${machine.freeCPUs} CPUs · ${machine.freeMemoryMB} MiB free</small></div></td>
         <td><div class="machine-leases"><span>${machine.allocatedLeases}/${machine.maxLeases} allocated</span>${leases || `<span class="muted">No allocated leases.</span>`}</div></td>
+        <td>${machine.usage ? `<div class="lease-link"><strong>${machine.usage.leases} served · ${(machine.usage.cpuSeconds / 3600).toFixed(2)} CPU-hours</strong><small>${escapeHTML(formatDuration(machine.usage.runtimeSeconds * 1000))} runtime · ${escapeHTML(machine.usage.month)} UTC</small></div>` : `<span class="muted">Unavailable</span>`}</td>
         <td><div class="lease-link"><strong>${escapeHTML(machine.runtime)} ${escapeHTML(machine.runtimeVersion)}</strong><small>agent ${escapeHTML(machine.agentVersion)}</small><small>${escapeHTML(machine.address)}:${machine.frontDoor.port}</small></div></td>
       </tr>`;
     })
@@ -317,7 +318,7 @@ function portalMachines(machines: ServeMachineView[]): string {
   return `<section class="panel table-panel fleet-panel" id="machines" aria-labelledby="machines-heading">
     <div class="section-head"><h2 id="machines-heading">Machines</h2><span>${machines.length} donated · owner only</span></div>
     <table class="machine-table" data-portal-table data-page-size="10" data-search-placeholder="search machines, labels, leases…" data-filter-buttons="all:all,online:online,offline:offline,draining:draining">
-      <thead><tr><th>machine</th><th>connection / availability</th><th>capacity used / offered</th><th>leases</th><th>runtime / endpoint</th></tr></thead>
+      <thead><tr><th>machine</th><th>connection / availability</th><th>capacity used / offered</th><th>leases</th><th>served this month</th><th>runtime / endpoint</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
   </section>`;
@@ -3913,10 +3914,11 @@ function html(
     .run-shell .log-panel { max-height:34dvh; }
     .table-scroll { min-height:0; overflow:auto; border-top:1px solid var(--line-soft); }
     .machine-table { min-width:900px; }
-    .machine-table th:nth-child(1) { width:24%; }
-    .machine-table th:nth-child(2) { width:14%; }
-    .machine-table th:nth-child(3) { width:24%; }
-    .machine-table th:nth-child(4) { width:19%; }
+    .machine-table th:nth-child(1) { width:18%; }
+    .machine-table th:nth-child(2) { width:16%; }
+    .machine-table th:nth-child(3) { width:22%; }
+    .machine-table th:nth-child(4) { width:14%; }
+    .machine-table th:nth-child(5) { width:18%; }
     .machine-table td { white-space:normal; overflow-wrap:anywhere; }
     .machine-table small { color:var(--muted); font-size:11.5px; }
     .machine-table .lease-link small { display:block; }
