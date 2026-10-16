@@ -122,9 +122,14 @@ and skip coordinator login. Cloud capacity is billed by the provider; choose
 | `crabbox job run <name>` | Run a named workflow from repository configuration. |
 | `crabbox list` / `crabbox stop <box>` | List active boxes or release one. |
 
-Use `--script <file>` for longer scripts. Commands use your configured provider;
-pass `--provider <name>` to select one explicitly. See [Commands](docs/commands/README.md)
-and the [CLI reference](docs/cli.md) for details.
+Use `--script <file>` for longer scripts. The execution and lease commands above
+(`run`, `warmup`, `prewarm`, `connect`, `ssh`, `list`, and `stop`) and
+`doctor` accept `--provider <name>` to override your configured provider.
+Named jobs select their provider in repository configuration. `--provider`
+is a command-specific flag, not a global flag. The `providers` catalog
+does not accept `--provider`; use `crabbox providers describe aws` to inspect
+one provider. See [Commands](docs/commands/README.md) and the
+[CLI reference](docs/cli.md) for details.
 
 ## Any OS
 
