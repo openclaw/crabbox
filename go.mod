@@ -2,7 +2,7 @@ module github.com/openclaw/crabbox
 
 go 1.26.0
 
-toolchain go1.26.5
+toolchain go1.27.2
 
 require (
 	cloud.google.com/go/compute v1.69.0
@@ -29,7 +29,7 @@ require (
 	github.com/hashicorp/nomad/api v0.0.0-20260921134951-9e1409fc523a
 	github.com/islo-labs/go-sdk v0.0.0-20260902083704-1464faf8f1fd
 	github.com/lima-vm/go-qcow2reader v0.8.0
-	github.com/lxc/incus/v7 v7.1.0
+	github.com/lxc/incus/v7 v7.2.0
 	github.com/pkg/sftp v1.13.11
 	github.com/scaleway/scaleway-sdk-go v1.0.0-beta.36
 	github.com/sirupsen/logrus v1.10.2
@@ -170,8 +170,8 @@ require (
 	go.opentelemetry.io/otel/trace v1.46.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.yaml.in/yaml/v4 v4.0.0-rc.4 // indirect
-	golang.org/x/net v0.59.0 // indirect
+	go.yaml.in/yaml/v4 v4.0.0-rc.6 // indirect
+	golang.org/x/net v0.60.0
 	golang.org/x/term v0.46.0
 	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/genproto v0.0.0-20260921155816-b14227669459 // indirect
