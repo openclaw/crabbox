@@ -18848,8 +18848,8 @@ describe("fleet lease identity and idle", () => {
     await logs.deleteTerminalRun(id, Date.now());
     expect(storage.value(`run:${id}`)).toBeDefined();
     resume();
-    if (outcome !== "success") await expect(tail).rejects.toBe(failure);
-    else expect(await tail).toBe("retained tail");
+    const result = await tail.catch((error: unknown) => error);
+    expect(result).toBe(outcome === "success" ? "retained tail" : failure);
     storage.beforeGet = undefined;
     list.mockRestore();
     await logs.deleteTerminalRun(id, Date.now());
