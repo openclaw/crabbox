@@ -48,8 +48,15 @@ the existing brokered SSH-lease path.
 The [browser portal](../features/portal.md#index-portal) shows your donated
 machines below the fleet, with online/offline and draining status, heartbeat age,
 capacity, allocated lease links, runtime/agent versions, and SSH front doors.
+It also shows served leases, runtime, and allocated CPU-hours for leases created
+in the current UTC month, including released leases, matching `crabbox serve machines`.
 The section appears only for enabled owners with machines; even admins see only
 their own machines in the current organization.
+
+[`crabbox usage`](../commands/usage.md) also groups serve leases by stable machine
+ID with the display name when available. It uses the selected reporting month and
+normal usage authorization. CPU-hours are runtime times assigned CPUs, not actual
+CPU utilization; serve leases continue to carry zero estimated cost.
 
 ## Trust and limits
 

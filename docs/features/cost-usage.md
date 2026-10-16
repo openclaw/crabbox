@@ -12,7 +12,7 @@ operational guardrail, not invoice reconciliation. Provider extras such as stati
 charges, egress, snapshots, taxes, credits, and discounts are not modeled.
 
 Cost tracking only applies to brokered providers (`aws`, `azure`, `daytona`,
-`gcp`, `hetzner`). Direct-from-CLI leases never reach the broker and are not
+`gcp`, `hetzner`, `serve`). Serve leases report usage at zero cost. Direct-from-CLI leases never reach the broker and are not
 accounted for.
 
 ## Reading `crabbox usage`
@@ -59,6 +59,14 @@ limits:
 ```
 
 Limits print `off` when the corresponding budget is unset.
+
+Serve leases add a `by machine` section (`byMachine` in JSON), keyed by stable
+machine ID with an optional display `label`. Counts and runtime follow the same
+scope and creation-month filters. `cpuSeconds` sums runtime times assigned CPUs;
+text output converts this to CPU-hours. Missing assignments use the `cloudID`
+machine prefix or `unknown`, and contribute zero CPU-seconds when CPUs are unknown.
+The owner-only `crabbox serve machines` output and portal Machines section show
+these totals for the current UTC month, including released leases.
 
 Only admin-token callers can widen the report: non-admin requests are forced to `scope=user`
 scoped to the caller's own identity, and the `--scope`, `--user`, and `--org` filters are

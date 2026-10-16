@@ -63,6 +63,15 @@ active assignments, caps, draining state, and availability with reasons. `machin
 coordinator inventory. Both support `--json`. See [availability](../providers/serve.md#availability) for
 signals, configuration, laptop defaults, and hysteresis.
 
+`machines` also shows each machine's served lease count, runtime, and CPU-hours for
+leases created in the current UTC month, including released leases. JSON exposes
+these as `usage.month`, `usage.leases`, `usage.activeLeases`, `usage.runtimeSeconds`,
+and `usage.cpuSeconds`. CPU-hours are runtime multiplied by each lease's assigned
+CPUs, divided by 3600; they measure allocated capacity, not sampled CPU utilization.
+Only your machines and usage in the current organization are shown, even for admins.
+The portal Machines section shows the same totals. Use [usage](usage.md) with
+`--month YYYY-MM` for another month or to inspect historical machine IDs.
+
 Use `CRABBOX_SERVE_AVAILABILITY_DEBUG=1 crabbox serve status --probe --json`
 to diagnose individual signal failures and timeouts on stderr. See
 [availability diagnostics](../providers/serve.md#availability) for sampling
