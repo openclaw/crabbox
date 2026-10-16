@@ -205,6 +205,8 @@ cannot infer whether a Windows host runs native PowerShell or WSL2 commands.
 On Linux, macOS, and WSL2 targets, Crabbox's workspace-owner protocol invokes
 `/bin/sh` explicitly and does not require the SSH account to use a POSIX login
 shell on POSIX hosts; zsh, Bash, and Fish login shells are supported there.
+Linux and macOS workspace sync stages its rsync receiver through the same
+explicit POSIX interpreter and reports the receiver path if staging fails.
 WSL staging supports Windows OpenSSH with `cmd.exe`, Windows PowerShell, or
 PowerShell (`pwsh`) as DefaultShell. Preparation binds the observed shell kind
 to the fresh route nonce; PowerShell executes the verified script directly to

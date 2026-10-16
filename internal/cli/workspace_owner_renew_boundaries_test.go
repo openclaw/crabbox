@@ -9,7 +9,7 @@ import (
 )
 
 func TestWorkspaceOwnerRenewalConfirmedDenialsAreNotRetried(t *testing.T) {
-	for _, response := range []string{"MISMATCH", "EXPIRED", "AMBIGUOUS", "CHILD", "BUSY", "unrecognized"} {
+	for _, response := range []string{"MISMATCH", "EXPIRED", "AMBIGUOUS", "CHILD", "BUSY", "unrecognized", "RENEWED\nMISMATCH", "RENEWED extra"} {
 		for _, failedTransport := range []bool{false, true} {
 			name := response
 			if failedTransport {
@@ -36,26 +36,30 @@ func TestWorkspaceOwnerRenewalConfirmedDenialsAreNotRetried(t *testing.T) {
 }
 
 func TestWorkspaceOwnerRenewalRefusesRetryOutsideConfirmedWindow(t *testing.T) {
-	for _, confirmed := range []bool{false, true} {
-		t.Run(map[bool]string{false: "no confirmation", true: "insufficient time"}[confirmed], func(t *testing.T) {
-			calls := 0
-			original := errors.New("synthetic transport failure")
-			owner := &workspaceOwner{
-				ctx: t.Context(), stop: make(chan struct{}), ttl: time.Minute,
-				transport: workspaceOwnerTransportFunc(func(context.Context, workspaceOwnerRemoteRequest) (string, error) {
-					calls++
-					return "", original
-				}),
-			}
-			if confirmed {
-				owner.confirmed = time.Now().Add(-owner.ttl + workspaceOwnerRenewMargin + 100*time.Millisecond)
-			}
-			err := owner.renewWithinOwnership(time.Second)
-			if !errors.Is(err, original) || calls != 1 {
-				t.Fatalf("calls=%d err=%v; want original failure without retry", calls, err)
-			}
-			if confirmed && !strings.Contains(err.Error(), "no retry fits") {
-				t.Fatalf("err=%v; want confirmed-window refusal", err)
+	for _, response := range []string{"", "RENEWED"} {
+		t.Run("response="+response, func(t *testing.T) {
+			for _, confirmed := range []bool{false, true} {
+				t.Run(map[bool]string{false: "no confirmation", true: "insufficient time"}[confirmed], func(t *testing.T) {
+					calls := 0
+					original := errors.New("synthetic transport failure")
+					owner := &workspaceOwner{
+						ctx: t.Context(), stop: make(chan struct{}), ttl: time.Minute,
+						transport: workspaceOwnerTransportFunc(func(context.Context, workspaceOwnerRemoteRequest) (string, error) {
+							calls++
+							return response, original
+						}),
+					}
+					if confirmed {
+						owner.confirmed = time.Now().Add(-owner.ttl + workspaceOwnerRenewMargin + 100*time.Millisecond)
+					}
+					err := owner.renewWithinOwnership(time.Second)
+					if !errors.Is(err, original) || calls != 1 {
+						t.Fatalf("calls=%d err=%v; want original failure without retry", calls, err)
+					}
+					if confirmed && !strings.Contains(err.Error(), "no retry fits") {
+						t.Fatalf("err=%v; want confirmed-window refusal", err)
+					}
+				})
 			}
 		})
 	}

@@ -22,8 +22,8 @@ const (
 	workspaceOwnerPollInterval, workspaceOwnerSSHConnectTimeoutOption, workspaceOwnerSSHConnectionAttemptsOption = time.Second, "10", "3"
 )
 
-// A renewal call that got no protocol answer is retried up to this many times, the
-// first after this backoff; the owner TTL leaves room for that many more calls.
+// Unconfirmed renewals with no response or RENEWED are retried up to this many times,
+// the first after this backoff; the owner TTL leaves room for that many more calls.
 const workspaceOwnerRenewRetries, workspaceOwnerRenewBackoff = 2, 250 * time.Millisecond
 
 var (
@@ -454,11 +454,12 @@ var errWorkspaceOwnerRenewStopped = errors.New("workspace owner renewal stopped"
 // simulate a late wake (scheduling delay or host suspension). It is nil in production.
 var workspaceOwnerRenewAfterBackoffHook func()
 
-// renewWithinOwnership renews once. A call that got no protocol answer (the transport
-// itself failed) is retried, with backoff, while the retry can still finish before the
-// ownership the last acknowledged request proved can lapse; past that point a second
+// renewWithinOwnership renews once. A transport failure with no response or RENEWED
+// is retried, with backoff, while the retry can still finish before the ownership
+// the last acknowledged request proved can lapse; past that point a second
 // owner could be admitted, so it fails closed. A protocol answer other than RENEWED is
-// final and is never retried. An owner with no confirmed time never retries.
+// final and is never retried. Only error-free RENEWED confirms ownership.
+// An owner with no confirmed time never retries.
 func (o *workspaceOwner) renewWithinOwnership(callTimeout time.Duration) error {
 	confirmedUntil := o.confirmed.Add(o.ttl - workspaceOwnerRenewMargin)
 	backoff := workspaceOwnerRenewBackoff
@@ -472,7 +473,7 @@ func (o *workspaceOwner) renewWithinOwnership(callTimeout time.Duration) error {
 		if err == nil {
 			err = errors.New("unexpected protocol response")
 		}
-		if response != "" || attempt == workspaceOwnerRenewRetries || o.confirmed.IsZero() {
+		if (response != "" && response != "RENEWED") || attempt == workspaceOwnerRenewRetries || o.confirmed.IsZero() {
 			return workspaceOwnerProtocolError(response, err)
 		}
 		if time.Now().Add(backoff + callTimeout).After(confirmedUntil) {
@@ -595,7 +596,7 @@ func stageRsyncWorkspaceReceiver(ctx context.Context, target SSHTarget, owner *w
 	script := "#!/bin/sh\n" + `trap 'rm -f -- "$0"' 0` + "\n" + remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, `exec rsync "$@"`, "")
 	prepared := workspaceOwnerRemotePreparation{
 		command: "~/.crabbox/workspace-owners/" + name,
-		cleanup: "rm -f -- " + path,
+		cleanup: "exec /bin/sh -c " + shellQuote("rm -f -- "+path),
 	}
 	stage := `set -eu
 umask 077
@@ -606,8 +607,10 @@ root="$HOME/.crabbox/workspace-owners"
 (set -C; cat > ` + path + `)
 [ "$(wc -c < ` + path + ` | tr -d '[:space:]')" = ` + strconv.Itoa(len(script)) + ` ]
 chmod 700 ` + path
+	// Staging bypasses witnessing, but still needs the login-shell-safe launcher.
+	stage = remoteWorkspaceOwnerPOSIXLauncher(owner.key, owner.token, stage)
 	if err := runSSHInput(contextWithoutWorkspaceOwner(ctx), target, stage, strings.NewReader(script), io.Discard, io.Discard); err != nil {
-		return workspaceOwnerRemotePreparation{}, errors.Join(err, prepared.close(ctx, target))
+		return workspaceOwnerRemotePreparation{}, errors.Join(fmt.Errorf("stage rsync workspace receiver %q: %w", prepared.command, err), prepared.close(ctx, target))
 	}
 	return prepared, nil
 }

@@ -135,6 +135,7 @@ type Config struct {
 	ProviderKey                   string
 	WorkRoot                      string
 	explicitWorkRoot              string
+	derivedStaticWorkRoot         string
 	MaxTTL                        time.Duration
 	TTL                           time.Duration
 	IdleTimeout                   time.Duration

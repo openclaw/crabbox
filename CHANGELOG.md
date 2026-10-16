@@ -11,6 +11,9 @@
 ### Fixed
 
 - Docs: clarify command-specific `--provider` selection, doctor readiness failures, and `providers describe <name>` for catalog inspection. [Issue 2846](https://github.com/openclaw/crabbox/issues/2846). Thanks @aitrawog.
+- Static SSH: derive the macOS work root from the final `--static-user` flag instead of the default or config user, while explicit work roots and SSH users still win. [PR 2871](https://github.com/openclaw/crabbox/pull/2871). Thanks @holgergruenhagen.
+- Sync: stage rsync receivers through an explicit POSIX shell for Fish-login SSH hosts and identify receiver setup failures without weakening workspace ownership. [PR 2874](https://github.com/openclaw/crabbox/pull/2874). Thanks @shunkakinoki.
+- Run: retry workspace-owner `RENEWED` replies with transport errors within the existing same-token retry budget and confirmed deadline; only an error-free reply confirms ownership. [Issue 2858](https://github.com/openclaw/crabbox/issues/2858). Thanks @shunkakinoki.
 - Coordinator: read run-log previews from the latest chunks without scanning the full retained log. [PR 2869](https://github.com/openclaw/crabbox/pull/2869).
 - CI: stop aggregate checks when a run is cancelled while preserving failed dependency results, and check coverage producers before toolchain setup. [PR 2868](https://github.com/openclaw/crabbox/pull/2868).
 - Security: update the Incus client and HTTP/2 dependencies to address reachable advisories, and use Go 1.27.2 for builds while retaining the Go 1.26 module minimum.

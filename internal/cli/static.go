@@ -89,13 +89,19 @@ func staticLease(cfg Config) (Server, SSHTarget, string, error) {
 	}
 	server.PublicNet.IPv4.IP = cfg.Static.Host
 	server.ServerType.Name = staticServerType(cfg)
-	target := sshTargetForLease(cfg, cfg.Static.Host, firstNonEmpty(cfg.Static.User, cfg.SSHUser), firstNonEmpty(cfg.Static.Port, cfg.SSHPort))
+	target := sshTargetForLease(cfg, cfg.Static.Host, staticLoginUser(cfg), firstNonEmpty(cfg.Static.Port, cfg.SSHPort))
 	target.ReadyCheck = staticReadyCommand(target)
 	return server, target, leaseID, nil
 }
 
 func StaticLease(cfg Config) (Server, SSHTarget, string, error) {
 	return staticLease(cfg)
+}
+
+// staticLoginUser is the user Static SSH connects as; the implicit macOS
+// work root is derived from it.
+func staticLoginUser(cfg Config) string {
+	return firstNonEmpty(cfg.Static.User, cfg.SSHUser)
 }
 
 func staticReadyCommand(target SSHTarget) string {
