@@ -18723,9 +18723,9 @@ describe("fleet lease identity and idle", () => {
     );
     const fleet = testFleet(storage) as unknown as RunLogTestFleet;
     expect(await fleet.readRunLogTail(id, limit)).toBe(chunks.join("").slice(-limit));
-    expect(storage.listOptions.filter((options) => options.prefix === `${prefix}chunk:`)).toHaveLength(
-      reads,
-    );
+    expect(
+      storage.listOptions.filter((options) => options.prefix === `${prefix}chunk:`),
+    ).toHaveLength(reads);
   });
 
   it.each(["legacy", "terminal", "invalid-terminal", "missing"] as const)(
@@ -18756,7 +18756,9 @@ describe("fleet lease identity and idle", () => {
       const expected =
         source === "terminal" ? "terminal\ufeff😀" : source === "missing" ? "" : "legacy\ufeff😀";
       expect(await fleet.readRunLogTail(id, 12 * 1024)).toBe(expected);
-      expect(storage.listOptions.filter((options) => options.prefix?.startsWith("runlog:"))).toEqual([
+      expect(
+        storage.listOptions.filter((options) => options.prefix?.startsWith("runlog:")),
+      ).toEqual([
         {
           prefix: source === "terminal" ? `${prefix}chunk:` : `runlog:${id}:chunk:`,
           limit: 1,
