@@ -149,7 +149,7 @@ Historical final provenance verifies its producer configuration against the
 `.goreleaser.yaml` and literal toolchain versions in `scripts/release-config.sh`
 at the originally pinned verifier commit, not the newer tooling checkout. The
 policy reader never executes historical shell code. New candidate production
-uses the current protected configuration, including Go 1.26.5. Missing historical Git objects fail verification; this lookup
+uses the current protected configuration, including Go 1.27.2. Missing historical Git objects fail verification; this lookup
 does not lazily fetch them or consult replacement objects.
 
 The protected `scripts/runtime-artifacts` tool stages exact archive inventories
