@@ -630,9 +630,7 @@ class MemoryStorage {
     await this.beforeList(options);
     const { prefix = "", limit, startAfter, end, reverse } = options;
     const matches = new Map<string, T>();
-    const entries = [...this.values].toSorted(([left], [right]) =>
-      left.localeCompare(right),
-    );
+    const entries = [...this.values].toSorted(([left], [right]) => left.localeCompare(right));
     if (reverse) entries.reverse();
     for (const [key, value] of entries) {
       if (
@@ -18725,51 +18723,49 @@ describe("fleet lease identity and idle", () => {
     );
     const fleet = testFleet(storage) as unknown as RunLogTestFleet;
     expect(await fleet.readRunLogTail(id, limit)).toBe(chunks.join("").slice(-limit));
-    expect(
-      storage.listOptions.filter((options) => options.prefix === `${prefix}chunk:`),
-    ).toHaveLength(reads);
+    expect(storage.listOptions.filter((options) => options.prefix === `${prefix}chunk:`)).toHaveLength(
+      reads,
+    );
   });
 
-  it.each([
-    "legacy",
-    "terminal",
-    "invalid-terminal",
-    "missing",
-  ] as const)("uses %s scalar fallback", async (source) => {
-    const storage = new ObservedMemoryStorage();
-    const id = "run_scalar_tail";
-    const prefix = `runlog:${id}:finish:chosen:attempt:`;
-    storage.seed(
-      `run:${id}`,
-      testRun({
-        id,
-        terminalLogPrefix:
-          source === "terminal"
-            ? prefix
-            : source === "invalid-terminal"
-              ? "runlog:other:finish:chosen:"
-              : undefined,
-      }),
-    );
-    if (source !== "missing") {
-      storage.seed(`runlog:${id}`, "legacy\ufeff😀");
-      storage.seed(`${prefix}value`, "terminal\ufeff😀");
-    }
-    storage.seed("runlog:other:finish:chosen:chunk:000000", "other run");
-    storage.seed(`runlog:${id}:finish:other:attempt:chunk:000000`, "other attempt");
-    const fleet = testFleet(storage) as unknown as RunLogTestFleet;
-    const expected =
-      source === "terminal" ? "terminal\ufeff😀" : source === "missing" ? "" : "legacy\ufeff😀";
-    expect(await fleet.readRunLogTail(id, 12 * 1024)).toBe(expected);
-    expect(storage.listOptions.filter((options) => options.prefix?.startsWith("runlog:"))).toEqual([
-      {
-        prefix: source === "terminal" ? `${prefix}chunk:` : `runlog:${id}:chunk:`,
-        limit: 1,
-        noCache: true,
-        reverse: true,
-      },
-    ]);
-  });
+  it.each(["legacy", "terminal", "invalid-terminal", "missing"] as const)(
+    "uses %s scalar fallback",
+    async (source) => {
+      const storage = new ObservedMemoryStorage();
+      const id = "run_scalar_tail";
+      const prefix = `runlog:${id}:finish:chosen:attempt:`;
+      storage.seed(
+        `run:${id}`,
+        testRun({
+          id,
+          terminalLogPrefix:
+            source === "terminal"
+              ? prefix
+              : source === "invalid-terminal"
+                ? "runlog:other:finish:chosen:"
+                : undefined,
+        }),
+      );
+      if (source !== "missing") {
+        storage.seed(`runlog:${id}`, "legacy\ufeff😀");
+        storage.seed(`${prefix}value`, "terminal\ufeff😀");
+      }
+      storage.seed("runlog:other:finish:chosen:chunk:000000", "other run");
+      storage.seed(`runlog:${id}:finish:other:attempt:chunk:000000`, "other attempt");
+      const fleet = testFleet(storage) as unknown as RunLogTestFleet;
+      const expected =
+        source === "terminal" ? "terminal\ufeff😀" : source === "missing" ? "" : "legacy\ufeff😀";
+      expect(await fleet.readRunLogTail(id, 12 * 1024)).toBe(expected);
+      expect(storage.listOptions.filter((options) => options.prefix?.startsWith("runlog:"))).toEqual([
+        {
+          prefix: source === "terminal" ? `${prefix}chunk:` : `runlog:${id}:chunk:`,
+          limit: 1,
+          noCache: true,
+          reverse: true,
+        },
+      ]);
+    },
+  );
 
   it.each([false, true])("keeps empty chunks authoritative (terminal: %s)", async (terminal) => {
     const storage = new MemoryStorage();

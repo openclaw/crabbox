@@ -112,9 +112,9 @@ describe("coordinator storage scans", () => {
 
   it.each([false, true])("keeps exclusive bounds across pages (reverse: %s)", async (reverse) => {
     const storage = records(8);
-    expect(
-      await collect(storage, { reverse, startAfter: "record:1", end: "record:7" }),
-    ).toEqual(reverse ? [6, 5, 4, 3, 2] : [2, 3, 4, 5, 6]);
+    expect(await collect(storage, { reverse, startAfter: "record:1", end: "record:7" })).toEqual(
+      reverse ? [6, 5, 4, 3, 2] : [2, 3, 4, 5, 6],
+    );
     expect(storage.listOptions).toEqual(
       (reverse ? ["record:7", "record:5", "record:3"] : ["record:1", "record:3", "record:5"]).map(
         (cursor) => ({
