@@ -72,6 +72,7 @@ import type {
 const awsUbuntuOwner = "099720109477";
 const ec2Version = "2016-11-15";
 const awsDescribeInstancesMaxPages = 100;
+export const awsExactInstanceBatchSize = 200;
 const stsVersion = "2011-06-15";
 const awsSpotQuotaCode = "L-34B43A08";
 const awsOnDemandQuotaCode = "L-1216C47A";
@@ -1889,7 +1890,11 @@ export class EC2SpotClient {
     ids: string[],
     options: AWSQueryOptions,
   ): Promise<Map<string, ProviderMachine>> {
-    if (!ids.length || ids.length > 200 || ids.some((id) => !/^i-[a-f0-9]{8,17}$/.test(id)))
+    if (
+      !ids.length ||
+      ids.length > awsExactInstanceBatchSize ||
+      ids.some((id) => !/^i-[a-f0-9]{8,17}$/.test(id))
+    )
       throw new AWSLeaseAuthorityError("invalid exact instance batch");
     const params = Object.fromEntries(ids.map((id, index) => [`InstanceId.${index + 1}`, id]));
     const described = await this.describeInstances(params, options);

@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { AWSQueryError, EC2SpotClient, type AWSLeaseOperation } from "../src/aws";
+import {
+  awsExactInstanceBatchSize,
+  AWSQueryError,
+  EC2SpotClient,
+  type AWSLeaseOperation,
+} from "../src/aws";
 import { awsCleanupCompletionBlocker } from "../src/aws-cleanup-completion";
 import { completeLeaseProviderCleanup, leaseProviderCleanupConfirmed } from "../src/lease-cleanup";
 import {
@@ -617,6 +622,65 @@ describe("attested legacy AWS scope", () => {
   });
 });
 describe("AWS retained exact observation", () => {
+  it.each([0, 1])("falls back only for the NotFound chunk %s", async (missingChunk) => {
+    const rows = Array.from({ length: 250 }, (_, n) => lease(n + 1));
+    const chunks = [rows.slice(0, 200), rows.slice(200)];
+    const missing = chunks[missingChunk]!;
+    const session = mockSession({
+      findServers: vi.fn<AWSLeaseOperation["findServers"]>(async (ids) => {
+        if (ids.includes(missing[0]!.cloudID))
+          throw new AWSQueryError(
+            "DescribeInstances",
+            400,
+            "InvalidInstanceID.NotFound",
+            "missing",
+          );
+        return new Map(
+          rows.filter((row) => ids.includes(row.cloudID)).map((row) => [row.cloudID, machine(row)]),
+        );
+      }),
+    });
+    useSession(session);
+    const budget = new RetainedLookupBudget(256);
+    const result = await observeAWSRetained(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      rows,
+      budget,
+    );
+    expect(vi.mocked(session.findServers).mock.calls).toEqual(
+      chunks.map((chunk) => [chunk.map((row) => row.cloudID)]),
+    );
+    expect(vi.mocked(session.findServer).mock.calls).toEqual(missing.map((row) => [row.cloudID]));
+    expect([...result]).toEqual(
+      rows.map((row) => [
+        row.id,
+        missing.includes(row)
+          ? { outcome: "absent", credentialFingerprint: "one" }
+          : { outcome: "present", credentialFingerprint: "one", server: machine(row) },
+      ]),
+    );
+    expect(budget.remaining).toBe(256 - 3 - missing.length);
+  });
+  it("discards earlier chunks when a later chunk has a non-NotFound error", async () => {
+    const rows = Array.from({ length: 250 }, (_, n) => lease(n + 1));
+    const session = mockSession({
+      findServers: vi
+        .fn<AWSLeaseOperation["findServers"]>()
+        .mockResolvedValueOnce(new Map())
+        .mockRejectedValueOnce(
+          new AWSQueryError("DescribeInstances", 403, "UnauthorizedOperation", "denied"),
+        ),
+    });
+    useSession(session);
+    const result = await observeAWSRetained(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      rows,
+      new RetainedLookupBudget(256),
+    );
+    expect([...result]).toEqual(rows.map((row) => [row.id, { outcome: "lookup_error" }]));
+    expect(session.findServers).toHaveBeenCalledTimes(2);
+    expect(session.findServer).not.toHaveBeenCalled();
+  });
   it("batches exact IDs and confirms terminated, never shutting-down", async () => {
     const row = lease(1, { slug: "test" });
     const server = { ...machine(row), status: "terminated" };
@@ -743,6 +807,27 @@ describe("AWS exact-ID batch transport", () => {
     return calls;
   }
   const env = { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env;
+  it.each([200, 250, 256])("chunks %s unique IDs within the transport limit", async (size) => {
+    const calls = transport(
+      "<DescribeInstancesResponse><requestId>test</requestId><reservationSet/></DescribeInstancesResponse>",
+    );
+    const rows = Array.from({ length: size }, (_, n) => lease(n + 1));
+    rows.push(lease(size + 1, { cloudID: rows[0]!.cloudID }));
+    const budget = new RetainedLookupBudget(256);
+    const result = await observeAWSRetained(env, rows, budget);
+    expect([...result]).toEqual(
+      rows.map((row) => [row.id, { outcome: "absent", credentialFingerprint: expect.any(String) }]),
+    );
+    expect(calls[0]!.get("Action")).toBe("GetCallerIdentity");
+    const batches = calls.slice(1).map((params) => {
+      expect(params.get("Action")).toBe("DescribeInstances");
+      return [...params].filter(([key]) => key.startsWith("InstanceId.")).map(([, id]) => id);
+    });
+    expect(batches.map((ids) => ids.length)).toEqual(size <= 200 ? [200] : [200, size - 200]);
+    expect(batches.every((ids) => ids.length <= awsExactInstanceBatchSize)).toBe(true);
+    expect(batches.flat()).toEqual(rows.slice(0, size).map((row) => row.cloudID));
+    expect(budget.remaining).toBe(256 - 1 - batches.length);
+  });
   it("sends only exact instance IDs in the recorded region and accepts an empty exact response", async () => {
     const calls = transport(
       "<DescribeInstancesResponse><requestId>test</requestId><reservationSet/></DescribeInstancesResponse>",
@@ -770,6 +855,44 @@ describe("AWS exact-ID batch transport", () => {
 });
 
 describe("retained reconciliation recovery guards", () => {
+  it.each([5, 64, 128, 201, 202, 256])(
+    "bounds selection and advances with lookup budget %s",
+    async (lookupBudget) => {
+      const rows = Array.from({ length: 250 }, (_, n) => lease(n + 1));
+      const f = await fixture(rows);
+      const session = mockSession({
+        findServers: vi.fn<AWSLeaseOperation["findServers"]>(async () => {
+          throw new AWSQueryError(
+            "DescribeInstances",
+            400,
+            "InvalidInstanceID.NotFound",
+            "missing",
+          );
+        }),
+      });
+      useSession(session);
+      delete f.hooks.observe;
+      await f.run({
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_RETAINED_RECONCILE_LOOKUP_BUDGET: String(lookupBudget),
+      });
+      const selected = Math.min(200, lookupBudget - 2);
+      const state = await retainedReconcileStatus(f.storage, {} as Env);
+      expect(session.findServers).toHaveBeenCalledWith(
+        rows.slice(0, selected).map((row) => row.cloudID),
+      );
+      expect(session.findServer).toHaveBeenCalledTimes(selected);
+      expect(state.scanned).toBe(selected);
+      expect(state.lastPass?.counters["aws"]).toEqual({
+        absent: selected,
+        first_absence: selected,
+      });
+      expect(state.backoff).toEqual({});
+      expect((await f.read(rows[selected - 1]!.id)).retainedReconcileObservation).toBeDefined();
+      expect((await f.read(rows[selected]!.id)).retainedReconcileObservation).toBeUndefined();
+    },
+  );
   it("reserves enough request budget to observe companion keys and advance the cursor", async () => {
     const { providerKeyForLease } = await import("../src/provider-key");
     const rows = Array.from({ length: 100 }, (_, n) => {

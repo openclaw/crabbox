@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Coordinator: chunk retained AWS reconciliation lookups into at most 200 unique instance IDs so larger lookup budgets cannot stall reconciliation, keeping NotFound fallback bounded to the affected chunk.
 - Serve: reuse invocation-owned relay SSH connections across readiness, sync, commands, and cleanup while preserving pinned host keys and independent workspace ownership. [PR 2865](https://github.com/openclaw/crabbox/pull/2865).
 - Sync: keep finalization fetches blob-filtered when completing shallow Git history, and explain live-child owner release refusals with safe lease recovery guidance. [PR 2854](https://github.com/openclaw/crabbox/pull/2854).
 

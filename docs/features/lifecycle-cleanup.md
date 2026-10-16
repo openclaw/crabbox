@@ -834,7 +834,9 @@ re-arming. Ordinary maintenance runs first;
 provider reads run outside the lifecycle mutex and discovery leaves the storage
 input gate open. Each pass hydrates at most 200 current-index entries and has a
 separate AWS request budget. AWS batches exact instance IDs by recorded account
-and Region; an exact batch NotFound falls back to bounded individual ID reads.
+and Region in chunks of at most 200 unique IDs; an exact batch NotFound falls
+back to bounded individual ID reads only for that chunk. Each chunk and fallback
+read consumes the shared AWS request budget.
 Budget exhaustion resumes at the first unprocessed entry.
 
 Confirmation currently supports **AWS only**. Every observation verifies the

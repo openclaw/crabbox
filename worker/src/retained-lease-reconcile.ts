@@ -1,4 +1,5 @@
 import {
+  awsExactInstanceBatchSize,
   AWSQueryError,
   AWSLeaseObservationError,
   EC2SpotClient,
@@ -305,25 +306,30 @@ export async function observeAWSRetained(
           return true;
         });
         if (!eligible.length) return;
-        let servers: Map<string, ProviderMachine>;
-        try {
-          budget.take();
-          servers = await session.findServers([...new Set(eligible.map((lease) => lease.cloudID))]);
-        } catch (error) {
-          // AWS rejects an entire InstanceId batch if any ID is gone. Only exact
-          // NotFound permits bounded individual reads; no inventory/name fallback.
-          if (!(error instanceof AWSQueryError) || error.code !== "InvalidInstanceID.NotFound")
-            throw error;
-          servers = new Map();
-          for (const lease of eligible) {
-            try {
-              budget.take();
-              // oxlint-disable-next-line eslint/no-await-in-loop -- exact fallback consumes the shared bounded budget.
-              const server = await session.findServer(lease.cloudID);
-              if (server) servers.set(lease.cloudID, server);
-            } catch (failure) {
-              result.set(lease.id, errorObservation(failure));
-              if (errorObservation(failure).outcome !== "lookup_budget") throw failure;
+        const servers = new Map<string, ProviderMachine>();
+        const ids = [...new Set(eligible.map((lease) => lease.cloudID))];
+        for (let offset = 0; offset < ids.length; offset += awsExactInstanceBatchSize) {
+          const chunk = ids.slice(offset, offset + awsExactInstanceBatchSize);
+          try {
+            budget.take();
+            // oxlint-disable-next-line eslint/no-await-in-loop -- each exact batch consumes the shared bounded budget.
+            const found = await session.findServers(chunk);
+            for (const [id, server] of found) servers.set(id, server);
+          } catch (error) {
+            // AWS rejects an entire InstanceId batch if any ID is gone. Only exact
+            // NotFound permits bounded individual reads for that chunk.
+            if (!(error instanceof AWSQueryError) || error.code !== "InvalidInstanceID.NotFound")
+              throw error;
+            for (const lease of eligible.filter((candidate) => chunk.includes(candidate.cloudID))) {
+              try {
+                budget.take();
+                // oxlint-disable-next-line eslint/no-await-in-loop -- exact fallback consumes the shared bounded budget.
+                const server = await session.findServer(lease.cloudID);
+                if (server) servers.set(lease.cloudID, server);
+              } catch (failure) {
+                result.set(lease.id, errorObservation(failure));
+                if (errorObservation(failure).outcome !== "lookup_budget") throw failure;
+              }
             }
           }
         }
@@ -468,14 +474,18 @@ export async function maintainRetainedLeases(
     if ((state.backoff["aws"]?.until ?? 0) <= started) {
       for (const leases of groups.values()) {
         const selected: LeaseRecord[] = [];
-        let reserved = 2; // STS plus batch; reserve worst-case exact fallback and companions.
+        const ids = new Set<string>();
+        let reserved = 1; // STS; reserve every batch, worst-case exact fallback, and companions.
         for (const lease of leases) {
+          const startsBatch = !ids.has(lease.cloudID) && ids.size % awsExactInstanceBatchSize === 0;
           const cost =
             1 +
+            Number(startsBatch) +
             Number(awsLeaseOwnsKey(lease)) +
             Number(Boolean(lease.lifetimePolicy?.retainedIdentity));
           if (reserved + cost <= budget.remaining) {
             selected.push(lease);
+            ids.add(lease.cloudID);
             reserved += cost;
           } else observations.set(lease.id, { outcome: "lookup_budget" });
         }
