@@ -834,9 +834,15 @@ re-arming. Ordinary maintenance runs first;
 provider reads run outside the lifecycle mutex and discovery leaves the storage
 input gate open. Each pass hydrates at most 200 current-index entries and has a
 separate AWS request budget. AWS batches exact instance IDs by recorded account
-and Region in chunks of at most 200 unique IDs; an exact batch NotFound falls
-back to bounded individual ID reads only for that chunk. Each chunk and fallback
-read consumes the shared AWS request budget.
+and Region using `instance-id` filters in chunks of at most 200 unique IDs.
+Missing IDs require no individual fallback reads. A paginated response is
+rejected rather than treating IDs omitted from its first page as absent or
+exceeding the reserved request budget. Each chunk and companion read consumes
+the shared AWS request budget. Connection/network failures, request deadlines,
+and AWS throttling discard that chunk's observations while preserving successful
+chunks and allowing other regional groups to proceed. The failed pass backs off
+once, honoring the longest Retry-After; authorization and identity failures remain
+fail-closed.
 Budget exhaustion resumes at the first unprocessed entry.
 
 Confirmation currently supports **AWS only**. Every observation verifies the

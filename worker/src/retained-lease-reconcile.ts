@@ -1,6 +1,7 @@
 import {
   awsExactInstanceBatchSize,
   AWSQueryError,
+  AWSLeaseAuthorityError,
   AWSLeaseObservationError,
   EC2SpotClient,
   type AWSLeaseOperation,
@@ -13,6 +14,7 @@ import { completeLeaseProviderCleanup } from "./lease-cleanup";
 import { leaseMaintenanceIndexReady } from "./lease-maintenance-index";
 import { leaseCurrentIndex, leaseMaintenanceIndex, putLeaseRecord } from "./lease-record-store";
 import { isRegisteredLease, leaseIsLive } from "./lease-state";
+import { ProviderRequestTimeoutError } from "./provider-deadline";
 import { providerMachineOwnedByLease } from "./provider-labels";
 import type { Env, LeaseRecord, ProviderMachine } from "./types";
 
@@ -165,7 +167,8 @@ export class RetainedLookupBudget {
   readonly signal = AbortSignal.timeout(20_000);
   constructor(public remaining: number) {}
   take(): void {
-    if (this.remaining <= 0 || this.signal.aborted) throw new Error("retained_lookup_budget");
+    this.signal.throwIfAborted();
+    if (this.remaining <= 0) throw new Error("retained_lookup_budget");
     this.remaining--;
   }
 }
@@ -229,6 +232,23 @@ function errorObservation(error: unknown): RetainedObservation {
     (error.status === 429 || /Throttl|RequestLimit|SlowDown/.test(error.code))
   )
     return { outcome: "throttled", retryAfter: error.retryAfter };
+  // Provider authority/response failures must never be reclassified by their message.
+  if (
+    error instanceof AWSQueryError ||
+    error instanceof AWSLeaseAuthorityError ||
+    error instanceof AWSLeaseObservationError
+  )
+    return { outcome: "lookup_error" };
+  if (
+    error instanceof ProviderRequestTimeoutError ||
+    (error instanceof Error &&
+      (error.name === "TimeoutError" ||
+        error.name === "AbortError" ||
+        /response closed due to connection limit|fetch failed|failed to fetch|network(?: connection)? (?:error|failure|lost)|networkerror/i.test(
+          error.message,
+        )))
+  )
+    return { outcome: "throttled" };
   return { outcome: "lookup_error" };
 }
 
@@ -306,49 +326,51 @@ export async function observeAWSRetained(
           return true;
         });
         if (!eligible.length) return;
-        const servers = new Map<string, ProviderMachine>();
+        const observations = new Map<string, RetainedObservation>();
         const ids = [...new Set(eligible.map((lease) => lease.cloudID))];
         for (let offset = 0; offset < ids.length; offset += awsExactInstanceBatchSize) {
           const chunk = ids.slice(offset, offset + awsExactInstanceBatchSize);
+          const candidates = eligible.filter((lease) => chunk.includes(lease.cloudID));
+          const chunkResults = new Map<string, RetainedObservation>();
           try {
             budget.take();
             // oxlint-disable-next-line eslint/no-await-in-loop -- each exact batch consumes the shared bounded budget.
-            const found = await session.findServers(chunk);
-            for (const [id, server] of found) servers.set(id, server);
-          } catch (error) {
-            // AWS rejects an entire InstanceId batch if any ID is gone. Only exact
-            // NotFound permits bounded individual reads for that chunk.
-            if (!(error instanceof AWSQueryError) || error.code !== "InvalidInstanceID.NotFound")
-              throw error;
-            for (const lease of eligible.filter((candidate) => chunk.includes(candidate.cloudID))) {
+            const servers = await session.findServersByIDFilter(chunk);
+            for (const lease of candidates) {
+              const server = servers.get(lease.cloudID);
               try {
-                budget.take();
-                // oxlint-disable-next-line eslint/no-await-in-loop -- exact fallback consumes the shared bounded budget.
-                const server = await session.findServer(lease.cloudID);
-                if (server) servers.set(lease.cloudID, server);
-              } catch (failure) {
-                result.set(lease.id, errorObservation(failure));
-                if (errorObservation(failure).outcome !== "lookup_budget") throw failure;
+                // oxlint-disable-next-line eslint/no-await-in-loop -- companion evidence stays inside the fixed credential session.
+                const outcome = await observeCompanions(lease, session, server, budget);
+                chunkResults.set(lease.id, {
+                  outcome,
+                  credentialFingerprint,
+                  ...(server ? { server } : {}),
+                });
+              } catch (error) {
+                const failure = errorObservation(error);
+                if (
+                  failure.outcome === "throttled" ||
+                  error instanceof AWSLeaseAuthorityError ||
+                  error instanceof AWSQueryError
+                )
+                  throw error;
+                chunkResults.set(lease.id, failure);
               }
             }
-          }
-        }
-        for (const lease of eligible) {
-          if (result.has(lease.id)) continue;
-          const server = servers.get(lease.cloudID);
-          try {
-            // oxlint-disable-next-line eslint/no-await-in-loop -- companion evidence stays inside the fixed credential session.
-            const outcome = await observeCompanions(lease, session, server, budget);
-            result.set(lease.id, { outcome, credentialFingerprint, ...(server ? { server } : {}) });
           } catch (error) {
-            result.set(lease.id, errorObservation(error));
-            if (errorObservation(error).outcome === "throttled") throw error;
+            const failure = errorObservation(error);
+            if (failure.outcome !== "throttled") throw error;
+            // Publish nothing from a transiently failed chunk, including companion reads.
+            for (const lease of candidates) observations.set(lease.id, failure);
+            continue;
           }
+          for (const [id, observation] of chunkResults) observations.set(id, observation);
         }
+        for (const lease of eligible) result.set(lease.id, observations.get(lease.id)!);
       },
     );
   } catch (error) {
-    // A failed or throttled session cannot publish even an earlier partial observation.
+    // A failed authority/session check invalidates the entire regional observation.
     for (const lease of leases) result.set(lease.id, errorObservation(error));
   }
   return result;
@@ -412,6 +434,7 @@ export async function maintainRetainedLeases(
   const state = stored?.version === 1 ? stored : emptyState();
   const counters: Counters = {};
   let deletionsRemaining = 1;
+  let observationFailures: number | undefined;
   const sample: { id: string; provider: string; outcome: string }[] = [];
   const count = (provider: string, outcome: string, id?: string) => {
     if (!Object.hasOwn(counters, provider)) counters[provider] = {};
@@ -475,11 +498,10 @@ export async function maintainRetainedLeases(
       for (const leases of groups.values()) {
         const selected: LeaseRecord[] = [];
         const ids = new Set<string>();
-        let reserved = 1; // STS; reserve every batch, worst-case exact fallback, and companions.
+        let reserved = 1; // STS; reserve every filter batch and companion read.
         for (const lease of leases) {
           const startsBatch = !ids.has(lease.cloudID) && ids.size % awsExactInstanceBatchSize === 0;
           const cost =
-            1 +
             Number(startsBatch) +
             Number(awsLeaseOwnsKey(lease)) +
             Number(Boolean(lease.lifetimePolicy?.retainedIdentity));
@@ -492,12 +514,7 @@ export async function maintainRetainedLeases(
         // oxlint-disable-next-line eslint/no-await-in-loop -- one provider session at a time, outside the lifecycle mutex.
         const results = await (hooks.observe ?? observeAWSRetained)(env, selected, budget);
         for (const [id, observation] of results) observations.set(id, observation);
-        if (
-          [...results.values()].some(
-            (value) => value.outcome === "throttled" || value.outcome === "lookup_error",
-          )
-        )
-          break;
+        if ([...results.values()].some((value) => value.outcome === "lookup_error")) break;
       }
     }
     for (const { key, lease } of rows) {
@@ -535,11 +552,15 @@ export async function maintainRetainedLeases(
         outcome === "scope_mismatch" ||
         outcome === "credential_changed"
       ) {
-        const failures = (state.backoff["aws"]?.failures ?? 0) + 1;
+        // One failed pass, not one failure for every lease in the same failed chunk.
+        observationFailures ??= (state.backoff["aws"]?.failures ?? 0) + 1;
         const failedAt = now();
         state.backoff["aws"] = {
-          failures,
-          until: failedAt + retryDelay(observation.retryAfter, failedAt, failures),
+          failures: observationFailures,
+          until: Math.max(
+            state.backoff["aws"]?.until ?? 0,
+            failedAt + retryDelay(observation.retryAfter, failedAt, observationFailures),
+          ),
         };
         continue;
       }

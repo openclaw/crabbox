@@ -370,6 +370,7 @@ interface AWSQueryOptions {
 export interface AWSLeaseOperation {
   credentialFingerprint(): Promise<string>;
   findServers(instanceIDs: string[]): Promise<Map<string, ProviderMachine>>;
+  findServersByIDFilter(instanceIDs: string[]): Promise<Map<string, ProviderMachine>>;
   sshKeyAbsent(name: string, leaseID: string): Promise<boolean>;
   readonly region: string;
   readonly client: EC2SpotClient;
@@ -915,6 +916,8 @@ export class EC2SpotClient {
         );
       },
       findServers: (ids) => withAccount((account) => client.findServersWith(ids, query(account))),
+      findServersByIDFilter: (ids) =>
+        withAccount((account) => client.findServersWith(ids, query(account), true)),
       sshKeyAbsent: (name, leaseID) =>
         withAccount((account) => client.sshKeyAbsentWith(name, leaseID, query(account))),
       verifiedIdentity,
@@ -1889,6 +1892,7 @@ export class EC2SpotClient {
   private async findServersWith(
     ids: string[],
     options: AWSQueryOptions,
+    filterByID = false,
   ): Promise<Map<string, ProviderMachine>> {
     if (
       !ids.length ||
@@ -1896,7 +1900,12 @@ export class EC2SpotClient {
       ids.some((id) => !/^i-[a-f0-9]{8,17}$/.test(id))
     )
       throw new AWSLeaseAuthorityError("invalid exact instance batch");
-    const params = Object.fromEntries(ids.map((id, index) => [`InstanceId.${index + 1}`, id]));
+    const params = filterByID
+      ? {
+          "Filter.1.Name": "instance-id",
+          ...Object.fromEntries(ids.map((id, index) => [`Filter.1.Value.${index + 1}`, id])),
+        }
+      : Object.fromEntries(ids.map((id, index) => [`InstanceId.${index + 1}`, id]));
     const described = await this.describeInstances(params, options);
     if (asString(described.root["nextToken"]))
       throw new AWSLeaseObservationError("unexpected pagination in exact instance batch");
