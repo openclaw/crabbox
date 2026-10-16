@@ -56,6 +56,19 @@ for (const [label, live, source] of [
   ["empty source groups", settings(), { orgs: {}, owners: {} }],
   ["equal policies", settings(plaintext(desired)), desired],
   [
+    "duration bounds and both switches",
+    settings(
+      plaintext({
+        orgs: { "example-org": { defaultTTLSeconds: 1, defaultIdleTimeoutSeconds: 86400 } },
+        owners: { alice: { maxTTLSeconds: 86400, extension: "deny", autoExtend: "allow" } },
+      }),
+    ),
+    {
+      orgs: { "example-org": { defaultTTLSeconds: 1, defaultIdleTimeoutSeconds: 86400 } },
+      owners: { alice: { maxTTLSeconds: 86400, extension: "deny", autoExtend: "allow" } },
+    },
+  ],
+  [
     "equal policies regardless of key order",
     settings(
       plaintext({
@@ -89,6 +102,12 @@ for (const [label, live, source, summary] of [
   ["empty owner entry", { owners: { "github:12345": {} } }, undefined, '"owners"["github:12345"]'],
   ["unknown field", { additional: "synthetic-policy-value" }, undefined, '"additional"'],
   ["unknown empty object", { additional: {} }, undefined, '"additional"'],
+  [
+    "invalid duration repaired with valid source",
+    { orgs: { "example-org": { maxTTLSeconds: "7200" } } },
+    desired,
+    '"orgs"["example-org"]',
+  ],
   ["prototype key", JSON.parse('{"owners":{"__proto__":{}}}'), undefined, '"owners"["__proto__"]'],
   [
     "multiple groups",
@@ -177,6 +196,28 @@ for (const overrides of [
     await assert.rejects(f.run({ ...overrides, acknowledgeReplacement: true }));
     assert.equal(f.calls.length, 0);
   });
+}
+
+for (const policy of [
+  { orgs: { "example-org": { maxTTLSeconds: "7200" } } },
+  { owners: { alice: { defaultTTLSeconds: 1.5 } } },
+  { owners: { alice: { defaultIdleTimeoutSeconds: 0 } } },
+  { owners: { alice: { maxTTLSeconds: 86401 } } },
+  { owners: { alice: { extension: "yes" } } },
+  { owners: { alice: { autoExtend: true } } },
+  { owners: { alice: { runtimeExtension: true } } },
+  { unknown: {} },
+]) {
+  test(
+    `rejects runtime-invalid source before fetching, even when acknowledged: ${JSON.stringify(policy)}`,
+    async () => {
+      for (const acknowledgeReplacement of [false, true]) {
+        const f = fixture(settings(plaintext(policy)), policy);
+        await assert.rejects(f.run({ acknowledgeReplacement }), /Source lease policy is invalid/);
+        assert.equal(f.calls.length, 0);
+      }
+    },
+  );
 }
 
 test("CLI rejects arguments before reading settings", () => {

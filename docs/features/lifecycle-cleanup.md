@@ -174,8 +174,10 @@ Overrides use `defaultTTLSeconds`, `defaultIdleTimeoutSeconds`, `maxTTLSeconds`,
 Production source declares no lease policy overrides, so every owner uses the
 global defaults. The deploy guard compares the complete live override document
 with source, treating absent bindings and empty groups as equivalent. Differences
-require an explicit one-time replacement acknowledgment; unreadable or invalid
-bindings and API errors always stop deployment. See
+require an explicit one-time replacement acknowledgment. Source must pass runtime
+validation, including during acknowledged repair of shape-valid but invalid live
+policies. Unreadable bindings, invalid document shapes, and API errors always stop
+deployment. See
 [Operations](../operations.md#cloudflare-worker) for the dispatch procedure.
 
 Create requests are clamped rather than rejected, including older clients asking
