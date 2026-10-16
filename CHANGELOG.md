@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- CI: stop aggregate checks when a run is cancelled while preserving failed dependency results, and check coverage producers before toolchain setup.
 - Coordinator deployment: reject lease-policy overrides the runtime would ignore, while preserving acknowledged repair of invalid live policy values. [PR 2867](https://github.com/openclaw/crabbox/pull/2867).
 - Coordinator: reconcile retained AWS records with filtered batches of at most 200 unique instance IDs, avoiding missing-instance fallback storms and isolating transient chunk failures while preserving successful observations and bounded backoff. [PR 2866](https://github.com/openclaw/crabbox/pull/2866).
 - Serve: reuse invocation-owned relay SSH connections across readiness, sync, commands, and cleanup while preserving pinned host keys and independent workspace ownership. [PR 2865](https://github.com/openclaw/crabbox/pull/2865).
