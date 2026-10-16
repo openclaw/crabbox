@@ -664,7 +664,9 @@ func (o *workspaceOwner) Close(ctx context.Context) (err error) {
 	}
 	renewErr := o.Err()
 	response, releaseErr := callWorkspaceOwnerTransport(ctx, o.callTimeout(), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerRelease, Key: o.key, Token: o.token, TTL: o.ttl})
-	if releaseErr != nil {
+	if response == "CHILD" && ctx.Err() == nil && (releaseErr == nil || exitCode(releaseErr) == 75) {
+		releaseErr = errors.Join(Exit(7, "release remote workspace owner failed closed: remote phase is still active (protocol state CHILD); owner retained; wait for the phase to finish, or use the printed stop_command and retry on a fresh lease"), releaseErr)
+	} else if releaseErr != nil {
 		releaseErr = workspaceOwnerProtocolError(response, releaseErr)
 		releaseErr = workspaceOwnerCallError("release remote workspace owner", releaseErr)
 	} else if response != "RELEASED" {

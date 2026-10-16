@@ -2955,10 +2955,11 @@ fi
 	if !opts.GitOverlay && !opts.PlainManifest && opts.HydrateGit && opts.BaseRef != "" {
 		refspec := "+refs/heads/" + opts.BaseRef + ":refs/remotes/origin/" + opts.BaseRef
 		script += `if exact_git_root && git remote get-url origin >/dev/null 2>&1; then
+  hydrate_fetch() { git fetch --quiet --filter=blob:none origin "$@"; }
   if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
-    git fetch --quiet --unshallow origin ` + shellQuote(refspec) + ` || git fetch --quiet --depth=1000 origin ` + shellQuote(refspec) + ` || git fetch --quiet origin ` + shellQuote(refspec) + ` || git fetch --quiet origin ` + shellQuote(opts.BaseRef) + ` || true
+    hydrate_fetch --unshallow ` + shellQuote(refspec) + ` || hydrate_fetch --depth=1000 ` + shellQuote(refspec) + ` || hydrate_fetch ` + shellQuote(refspec) + ` || hydrate_fetch ` + shellQuote(opts.BaseRef) + ` || true
   else
-    git fetch --quiet origin ` + shellQuote(refspec) + ` || git fetch --quiet origin ` + shellQuote(opts.BaseRef) + ` || true
+    hydrate_fetch ` + shellQuote(refspec) + ` || hydrate_fetch ` + shellQuote(opts.BaseRef) + ` || true
   fi
 fi
 `
@@ -3058,7 +3059,7 @@ coherence_committed=; coherence_mutated=; head_changed=; index_changed=
 tmp_ref="refs/crabbox/sync-$expected_token"; advertised_branch=` + shellQuote(plan.Branch) + `; expected_origin=` + shellQuote(plan.RemoteURL) + `
 ` + remoteGitOriginTransportFunctions() + `
 coherence_fetch() {
-  set -- --quiet --no-tags
+  set -- --quiet --filter=blob:none --no-tags
   # An existing shallow boundary can hide ancestors of the advertised branch.
   if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
     set -- "$@" --unshallow

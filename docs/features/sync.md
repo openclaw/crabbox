@@ -318,6 +318,13 @@ the original error. These labels add diagnostic context, not permission to
 continue or retry; arbitrary protocol output is not added to those transport
 error messages. An ambiguous inspection still fails closed.
 
+A release refusal with `protocol state CHILD` and exit 75 means the witnessed
+remote phase is still active; the owner is retained. Cancelling local SSH does
+not prove that its remote Git fetch or other phase stopped. Wait for that phase
+to finish before retrying. If it remains stuck, use the run's printed
+`stop_command` to release the lease and retry on a fresh lease. `--full-resync`
+still needs the same owner and cannot override a live child.
+
 POSIX and WSL2 children register themselves before executing the requested
 workload. Registration waits at most five seconds for the owner lock; it does
 not leave a background child waiting indefinitely for a start file. A failed
@@ -353,6 +360,13 @@ Once ownership is established, sync runs these steps:
    the full manifest.
 10. Finalize: git-hydrate the worktree against the configured base ref, run the
     mass-deletion sanity check, and record the new fingerprint.
+
+Finalization requests blob-filtered Git fetches, including when completing a
+shallow repository left by workflow setup or a previous command. On origins
+that support filtering, commit ancestry becomes available without downloading
+every historical version of every file. Git can fetch historical file contents
+when a later command explicitly requests them. Origins that ignore filtering
+can still transfer full historical contents.
 
 For a new or empty POSIX workspace with Git seeding disabled (`sync.gitSeed:
 false`) and no requested Git overlay, the manifest-writing command also checks
