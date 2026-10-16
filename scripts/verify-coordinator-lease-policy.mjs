@@ -70,7 +70,11 @@ export async function verifyCoordinatorLeasePolicy({
   }
   const source = parseOverrides(desiredOverrides === undefined ? "{}" : desiredOverrides, "Source");
   if (!isLeasePolicyOverrides(source)) {
-    throw new Error("Source lease policy is invalid; deployment stopped.");
+    throw new Error(
+      `Source lease policy is invalid; deployment stopped. Correct ${bindingName} in worker/wrangler.jsonc: ` +
+        "use only owners/orgs entries with defaultTTLSeconds, defaultIdleTimeoutSeconds, or maxTTLSeconds " +
+        "as integers from 1 to 86400, and extension/autoExtend values of allow or deny. Then retry.",
+    );
   }
   const desired = normalizeOverrides(source);
 

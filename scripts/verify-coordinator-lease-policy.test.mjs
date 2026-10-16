@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { verifyCoordinatorLeasePolicy } from "./verify-coordinator-lease-policy.mjs";
@@ -30,6 +33,27 @@ function fixture(reply, desiredPolicy) {
         },
       }),
   };
+}
+
+function assertInvalidSourceGuidance(message) {
+  assert.match(message, /Source lease policy is invalid; deployment stopped/);
+  for (const text of [
+    bindingName,
+    "worker/wrangler.jsonc",
+    "owners",
+    "orgs",
+    "defaultTTLSeconds",
+    "defaultIdleTimeoutSeconds",
+    "maxTTLSeconds",
+    "extension",
+    "autoExtend",
+    "allow or deny",
+    "Then retry.",
+  ]) {
+    assert.ok(message.includes(text), `missing repair guidance: ${text}`);
+  }
+  assert.match(message, /integers from 1 to 86400/);
+  assert.doesNotMatch(message, /synthetic-/);
 }
 
 test("reads only exact Worker settings without forwarding credentials", async () => {
@@ -213,7 +237,10 @@ for (const policy of [
     async () => {
       for (const acknowledgeReplacement of [false, true]) {
         const f = fixture(settings(plaintext(policy)), policy);
-        await assert.rejects(f.run({ acknowledgeReplacement }), /Source lease policy is invalid/);
+        await assert.rejects(f.run({ acknowledgeReplacement }), (error) => {
+          assertInvalidSourceGuidance(error.message);
+          return true;
+        });
         assert.equal(f.calls.length, 0);
       }
     },
@@ -228,4 +255,64 @@ test("CLI rejects arguments before reading settings", () => {
   );
   assert.equal(result.status, 1);
   assert.match(result.stderr, /takes no arguments/);
+});
+
+test("CLI explains invalid source without reading Cloudflare settings", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "crabbox-policy-cli-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scripts = join(root, "scripts");
+  const worker = join(root, "worker");
+  const wrangler = join(worker, "node_modules", "wrangler");
+  mkdirSync(scripts, { recursive: true });
+  mkdirSync(join(worker, "src"), { recursive: true });
+  mkdirSync(wrangler, { recursive: true });
+  cpSync(
+    new URL("./verify-coordinator-lease-policy.mjs", import.meta.url),
+    join(scripts, "verify-coordinator-lease-policy.mjs"),
+  );
+  cpSync(
+    new URL("../worker/src/lease-policy-overrides.mjs", import.meta.url),
+    join(worker, "src", "lease-policy-overrides.mjs"),
+  );
+  writeFileSync(join(worker, "package.json"), "{}\n");
+  writeFileSync(
+    join(worker, "wrangler.jsonc"),
+    JSON.stringify({
+      name: "crabbox-coordinator",
+      vars: {
+        [bindingName]: JSON.stringify({
+          owners: { "synthetic-private-owner": { maxTTLSeconds: "synthetic-private-value" } },
+        }),
+      },
+    }),
+  );
+  // Only Wrangler's config reader is stubbed; the actual CLI and validator run.
+  // Trap fetch so a regression cannot contact Cloudflare with fixture credentials.
+  writeFileSync(
+    join(wrangler, "index.js"),
+    `const fs = require("node:fs");
+globalThis.fetch = async () => {
+  fs.writeFileSync(__dirname + "/fetch-called", "called");
+  throw new Error("unexpected network call");
+};
+exports.unstable_readConfig = ({ config }) => JSON.parse(fs.readFileSync(config, "utf8"));
+`,
+  );
+  for (const acknowledgeReplacement of ["0", "1"]) {
+    const result = spawnSync(process.execPath, [join(scripts, "verify-coordinator-lease-policy.mjs")], {
+      encoding: "utf8",
+      timeout: 5000,
+      env: {
+        CLOUDFLARE_ACCOUNT_ID: config.accountId,
+        CLOUDFLARE_API_TOKEN: config.apiToken,
+        CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT: acknowledgeReplacement,
+      },
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /^::error::/);
+    assertInvalidSourceGuidance(result.stderr);
+    assert.equal(existsSync(join(wrangler, "fetch-called")), false);
+  }
 });
