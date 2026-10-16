@@ -595,7 +595,7 @@ func stageRsyncWorkspaceReceiver(ctx context.Context, target SSHTarget, owner *w
 	script := "#!/bin/sh\n" + `trap 'rm -f -- "$0"' 0` + "\n" + remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, `exec rsync "$@"`, "")
 	prepared := workspaceOwnerRemotePreparation{
 		command: "~/.crabbox/workspace-owners/" + name,
-		cleanup: "rm -f -- " + path,
+		cleanup: "exec /bin/sh -c " + shellQuote("rm -f -- "+path),
 	}
 	stage := `set -eu
 umask 077
@@ -606,8 +606,10 @@ root="$HOME/.crabbox/workspace-owners"
 (set -C; cat > ` + path + `)
 [ "$(wc -c < ` + path + ` | tr -d '[:space:]')" = ` + strconv.Itoa(len(script)) + ` ]
 chmod 700 ` + path
+	// Staging bypasses witnessing, but still needs the login-shell-safe launcher.
+	stage = remoteWorkspaceOwnerPOSIXLauncher(owner.key, owner.token, stage)
 	if err := runSSHInput(contextWithoutWorkspaceOwner(ctx), target, stage, strings.NewReader(script), io.Discard, io.Discard); err != nil {
-		return workspaceOwnerRemotePreparation{}, errors.Join(err, prepared.close(ctx, target))
+		return workspaceOwnerRemotePreparation{}, errors.Join(fmt.Errorf("stage rsync workspace receiver %q: %w", prepared.command, err), prepared.close(ctx, target))
 	}
 	return prepared, nil
 }
