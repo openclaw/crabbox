@@ -11,7 +11,7 @@ other tests exist:
 Adding, removing, or renaming an unlisted test therefore moves no other test;
 only edits to SLOW_TESTS move listed tests.
 
-Both lanes stream `go test -json` but print only what plain `go test` would:
+All lanes stream `go test -json` but print only what plain `go test` would:
 package output and the output of failed or unfinished tests. Each shard ends
 with the elapsed seconds of its listed tests and of unlisted tests at
 SLOW_SECONDS or more; the race shards' summaries calibrate SLOW_TESTS.
@@ -105,7 +105,10 @@ def select_tests(listing, shard, count):
     for name in sorted(SLOW_TESTS, key=lambda name: (-SLOW_TESTS[name], name)):
         owners[name] = loads.index(min(loads))
         loads[owners[name]] += SLOW_TESTS[name]
-    return [name for name in names if owners.get(name, hashed_shard(name, count)) == shard]
+    selected = [name for name in names if owners.get(name, hashed_shard(name, count)) == shard]
+    if not selected:
+        raise ValueError("test discovery selected an empty shard")
+    return selected
 
 
 def hashed_shard(name, count):
@@ -116,13 +119,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("shard", type=int)
     parser.add_argument("count", type=int)
-    parser.add_argument("--coverprofile", help="opt into atomic coverage instead of the race lane")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--normal", action="store_true", help="run normal tests without race or coverage instrumentation")
+    mode.add_argument("--coverprofile", help="opt into atomic coverage instead of the race lane")
     args = parser.parse_args()
     if args.count < 1 or not 0 <= args.shard < args.count:
         parser.error("shard must be in [0, count)")
     package = "./internal/cli"
     common = ["go", "test", "-race", "-count=1", "-timeout=10m", package]
-    if args.coverprofile:
+    if args.normal:
+        common = ["go", "test", "-count=1", "-timeout=20m", package]
+    elif args.coverprofile is not None:
+        if not args.coverprofile:
+            parser.error("coverprofile must not be empty")
         common = ["go", "test", "-count=1", "-timeout=20m", "-covermode=atomic", package]
     listing = subprocess.run(common + ["-list", "."], text=True, capture_output=True)
     if listing.returncode:

@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- CI: split normal CLI tests across parallel shards while retaining all root and nested-module tests and strict aggregate checks. [PR 2875](https://github.com/openclaw/crabbox/pull/2875).
 - Docs: clarify command-specific `--provider` selection, doctor readiness failures, and `providers describe <name>` for catalog inspection. [Issue 2846](https://github.com/openclaw/crabbox/issues/2846). Thanks @aitrawog.
 - Static SSH: derive the macOS work root from the final `--static-user` flag instead of the default or config user, while explicit work roots and SSH users still win. [PR 2871](https://github.com/openclaw/crabbox/pull/2871). Thanks @holgergruenhagen.
 - Sync: stage rsync receivers through an explicit POSIX shell for Fish-login SSH hosts and identify receiver setup failures without weakening workspace ownership. [PR 2874](https://github.com/openclaw/crabbox/pull/2874). Thanks @shunkakinoki.

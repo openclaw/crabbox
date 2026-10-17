@@ -1,10 +1,14 @@
 import importlib.util
 import contextlib
+import collections
 import io
 import json
+import os
 import pathlib
 import re
+import shutil
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -55,6 +59,11 @@ class ShardTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 shard.select_tests("TestOnly", index, count)
 
+    def test_empty_shard_fails_even_when_discovery_has_enough_tests(self):
+        names = [f"TestCase{i}" for i in range(20) if shard.hashed_shard(f"TestCase{i}", 2) == 0]
+        with self.assertRaisesRegex(ValueError, "empty shard"):
+            shard.select_tests("\n".join(names), 1, 2)
+
     @patch.object(shard.subprocess, "run")
     def test_discovery_failure_is_not_hidden(self, run):
         run.return_value = subprocess.CompletedProcess([], 7, "", "")
@@ -86,6 +95,90 @@ class ShardTests(unittest.TestCase):
             "go", "test", "-count=1", "-timeout=20m", "-covermode=atomic", "./internal/cli",
             "-run", "^(FuzzInput|TestA)$", "-coverprofile=cli-1.out",
         ])
+
+    @patch.object(shard, "go_test", return_value=5)
+    @patch.object(shard.subprocess, "run")
+    def test_normal_is_explicit_and_uses_the_same_selection(self, run, go_test):
+        run.return_value = subprocess.CompletedProcess([], 0, "TestA\nTestB\nExample\nFuzzInput\n", "")
+        with patch("sys.argv", ["test-go-shard.py", "1", "2", "--normal"]):
+            self.assertEqual(shard.main(), 5)
+        common = ["go", "test", "-count=1", "-timeout=20m", "./internal/cli"]
+        self.assertEqual(run.call_args.args[0], common + ["-list", "."])
+        self.assertEqual(go_test.call_args.args[0], common + ["-run", "^(Example|FuzzInput|TestB)$"])
+
+    @patch.object(shard.subprocess, "run")
+    def test_conflicting_or_empty_modes_fail_before_discovery(self, run):
+        for flags in [["--normal", "--coverprofile", "out"], ["--coverprofile", ""]]:
+            with patch("sys.argv", ["test-go-shard.py", "0", "4"] + flags), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    shard.main()
+                self.assertEqual(error.exception.code, 2)
+        run.assert_not_called()
+
+    @unittest.skipUnless(shutil.which("go"), "Go is not installed")
+    def test_native_normal_partition_matches_all_modules(self):
+        # Standard-library-only source exercises real Go discovery and -run,
+        # including subtests, fuzz seeds, examples and a nested CLI package.
+        with tempfile.TemporaryDirectory(prefix="crabbox-normal-partition-") as temporary:
+            base = pathlib.Path(temporary)
+            root = base / "repo with spaces"
+            (root / "scripts").mkdir(parents=True)
+            runner = root / "scripts/test-go-modules.sh"
+            shutil.copyfile(pathlib.Path(__file__).with_name("test-go-modules.sh"), runner)
+            (root / "go.mod").write_text("module example.test/fixture\n\ngo 1.26.0\n")
+            preamble = '''import ("fmt"; "os"; "testing")
+func record(name string) {
+    file, err := os.OpenFile(os.Getenv("TEST_LOG"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+    if err != nil { panic(err) }
+    defer file.Close()
+    if _, err := fmt.Fprintln(file, name); err != nil { panic(err) }
+}
+'''
+            names = [f"TestCase{i}" for i in range(16)]
+            cli = root / "internal/cli"
+            cli.mkdir(parents=True)
+            (cli / "cli_test.go").write_text("package cli\n" + preamble + "\n".join(
+                f'func {name}(t *testing.T) {{ record(t.Name()) }}' for name in names
+            ) + '''
+func TestPrefix(t *testing.T) { record(t.Name()); t.Run("child", func(t *testing.T) { record(t.Name()) }) }
+func TestPrefixLong(t *testing.T) { record(t.Name()) }
+func FuzzInput(f *testing.F) { f.Add("seed"); f.Fuzz(func(t *testing.T, value string) { record(t.Name()) }) }
+func Example_demo() { record("Example_demo"); fmt.Println("ok")
+    // Output: ok
+}
+func BenchmarkExcluded(b *testing.B) { record(b.Name()) }
+''')
+            for directory, name in [(root / "core", "TestCore"), (root / "nested module/internal/cli", "TestNestedCLI")]:
+                directory.mkdir(parents=True)
+                (directory / "fixture_test.go").write_text("package fixture\n" + preamble +
+                    f'func {name}(t *testing.T) {{ record(t.Name()) }}\n')
+            (root / "nested module/go.mod").write_text("module example.test/nested\n\ngo 1.26.0\n")
+            env = {
+                "PATH": os.environ.get("PATH", ""), "HOME": str(base / "home"),
+                "GOCACHE": str(base / "cache"), "GOPATH": str(base / "gopath"),
+                "GOENV": "off", "GOTOOLCHAIN": "local", "GOPROXY": "off",
+                "GOSUMDB": "off", "GOWORK": "off", "GOTELEMETRY": "off",
+                "CGO_ENABLED": "0",
+            }
+            records = []
+            for label, flags in [("baseline", []), ("partition", ["--exclude-root-cli"])]:
+                log = base / (label + ".log")
+                env["TEST_LOG"] = str(log)
+                result = subprocess.run(["/bin/bash", str(runner)] + flags, cwd=root, env=env,
+                                        text=True, capture_output=True, timeout=120)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                if label == "partition":
+                    with contextlib.ExitStack() as cleanup, patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(io.StringIO()):
+                        cleanup.callback(os.chdir, os.getcwd())
+                        os.chdir(root)
+                        for index in range(4):
+                            with patch("sys.argv", ["test-go-shard.py", str(index), "4", "--normal"]):
+                                self.assertEqual(shard.main(), 0)
+                records.append(collections.Counter(log.read_text().splitlines()))
+            expected = collections.Counter(names + ["TestPrefix", "TestPrefix/child", "TestPrefixLong",
+                "FuzzInput/seed#0", "Example_demo", "TestCore", "TestNestedCLI"])
+            self.assertEqual(records[0], expected)
+            self.assertEqual(records[1], expected)
 
     def stream(self, popen, events, result=0):
         child = popen.return_value.__enter__.return_value

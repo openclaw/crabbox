@@ -162,6 +162,44 @@ jobs:
 
   go-modules:
     name: Go modules
+    needs: [go-modules-core, go-modules-cli]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Require all normal module tests
+        shell: bash
+        env:
+          CORE_RESULT: ${{ needs['go-modules-core'].result }}
+          CLI_RESULT: ${{ needs['go-modules-cli'].result }}
+        run: |
+          printf 'Go non-CLI and nested modules: %s\nGo normal CLI shards: %s\n' "${CORE_RESULT:-missing}" "${CLI_RESULT:-missing}"
+          [[ "${CORE_RESULT:-}" == success && "${CLI_RESULT:-}" == success ]]
+
+  go-modules-cli:
+    name: Go normal CLI shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: '**/go.sum'
+
+      - name: Test normal CLI shard
+        run: python3 scripts/test-go-shard.py ${{ matrix.shard }} 4 --normal
+
+  go-modules-core:
+    name: Go normal non-CLI and nested modules
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -176,8 +214,8 @@ jobs:
           cache: true
           cache-dependency-path: '**/go.sum'
 
-      - name: Test all Go modules
-        run: scripts/test-go-modules.sh
+      - name: Test non-CLI root and all nested modules
+        run: scripts/test-go-modules.sh --exclude-root-cli
 
   go-coverage-cli:
     name: Go CLI coverage shard ${{ matrix.shard }}
