@@ -536,7 +536,7 @@ jobs:
 
   apple-vm:
     name: Apple VM
-    runs-on: macos-15
+    runs-on: xcode-27
     timeout-minutes: 15
 
     steps:

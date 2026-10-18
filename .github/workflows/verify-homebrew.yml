@@ -79,9 +79,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
+          - runner: xcode-27
             arch: arm64
-          - runner: macos-15-intel
+          - runner: xcode-27
             arch: x86_64
     steps:
 
@@ -91,6 +91,11 @@ jobs:
           ref: ${{ github.workflow_sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Set up macOS verification architecture
+        env:
+          VERIFY_ARCH: ${{ matrix.arch }}
+        run: bash scripts/setup-release-macos-architecture.sh "$VERIFY_ARCH" homebrew
 
       - name: Set up Go for build-info inspection
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -151,13 +156,14 @@ jobs:
           TAG_OBJECT: ${{ inputs.tag_object }}
           VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
           WORKFLOW_COMMIT: ${{ github.workflow_sha }}
+          VERIFY_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_RUNTIME_TOKEN GH_TOKEN GITHUB_TOKEN
           unset HOMEBREW_GITHUB_API_TOKEN HOMEBREW_TAP_GITHUB_TOKEN
           CRABBOX_VERIFY_TOOLING_COMMIT="$WORKFLOW_COMMIT" \
             CRABBOX_HOMEBREW_RELEASE_METADATA="$RUNNER_TEMP/public-release.json" \
-            scripts/verify-homebrew-release.sh \
+            /usr/bin/arch "-$VERIFY_ARCH" /bin/bash scripts/verify-homebrew-release.sh \
             "$RELEASE_TAG" "$RUNNER_TEMP/release-assets" \
             "$TAG_OBJECT" "$SOURCE_COMMIT" "$VERIFIER_COMMIT" \
             "$RELEASE_ID"

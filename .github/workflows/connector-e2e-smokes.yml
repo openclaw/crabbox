@@ -97,7 +97,7 @@ jobs:
           # Mirrors the apple-vm job in ci.yml: hermetic native helper and
           # embedded VM daemon proof on Apple Silicon.
           - name: apple-vm
-            runner: macos-15
+            runner: xcode-27
             build-cli: false
             smoke: |
               test "$(uname -m)" = arm64

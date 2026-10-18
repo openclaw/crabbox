@@ -760,8 +760,10 @@ Publication establishes eligibility. Dispatch the ordinary tap update using the
 TAG-only four-target handoff above, without waiting for either public native
 or Go smoke. The updater maintains all four URL/hash routes; retry only this
 step after an update failure. An already-current update succeeds. After the tap
-finishes, run the independent installed-Homebrew smoke on both native macOS
-architectures. Neither smoke failure requires rebuilding or republishing.
+finishes, run the independent installed-Homebrew smoke for both macOS
+architectures. Hosted verification uses `xcode-27` Apple Silicon runners; the
+Intel row runs through Rosetta with the Intel Homebrew prefix at `/usr/local`.
+Neither smoke failure requires rebuilding or republishing.
 
 ### 5. Independent public channel smokes
 
@@ -771,6 +773,13 @@ using the same opaque `release-input` transport; public mode emits no
 `verified-assets-*` approval artifacts. Draft mode still freezes exactly
 `release-input`, `verified-assets-arm64`, and `verified-assets-x86_64` for the
 publisher, with unchanged proof schemas.
+
+For a release-pipeline dry run on merged `main`, dispatch the same verifier with
+`dry_run=true` and `draft=false`, supplying the current published release's
+existing identity inputs. The guard rejects dry runs against drafts. This
+repeats static verification and isolated execution for ARM and Intel on macOS
+27 without creating, modifying, or publishing a release. The macOS 13 deployment
+gates remain enforced; Intel execution uses an explicit Rosetta shell.
 
 Run the public Go installation procedure independently with fresh proxy-only
 state. It proves the actual published tag is remotely resolvable, unlike the
