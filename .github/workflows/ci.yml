@@ -534,6 +534,21 @@ jobs:
       - name: Test source-derived hermetic lifecycle packages
         run: scripts/test-provider-lifecycles.sh
 
+  macos-intel-tools:
+    name: macOS Intel verification tools
+    runs-on: xcode-27
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Bootstrap Intel verification tools
+        run: bash scripts/setup-release-macos-architecture.sh x86_64 homebrew
+      - name: Prove Intel execution context and Homebrew
+        run: |
+          /usr/bin/arch -x86_64 /bin/bash -c 'test "$(uname -m)" = x86_64'
+          /usr/bin/arch -x86_64 /usr/local/bin/brew --version
+
   apple-vm:
     name: Apple VM
     runs-on: xcode-27

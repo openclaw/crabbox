@@ -17,8 +17,9 @@ arch -x86_64 /usr/bin/true
 
 if [[ ${2:-} == homebrew ]]; then
   if [[ ! -x /usr/local/bin/brew ]]; then
+    # This revision supports macOS 27 and predates removal of the Intel prefix.
     curl --fail --silent --show-error --location \
-      https://raw.githubusercontent.com/Homebrew/install/be041513824fd2666a0e93cf5c3b0ca3bb0eb4b6/install.sh \
+      https://raw.githubusercontent.com/Homebrew/install/df3c2556141c012eaba0453ede7a1bd4f05b824c/install.sh \
       --output "$RUNNER_TEMP/install-homebrew.sh"
     NONINTERACTIVE=1 arch -x86_64 /bin/bash "$RUNNER_TEMP/install-homebrew.sh"
   fi
