@@ -12,7 +12,7 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 const currentToolchain = releaseToolchainPolicy(repoRoot);
 const read = (file) => fs.readFileSync(path.join(repoRoot, file), "utf8");
 
-test("every release verifier workflow retains both native hosts and complete Darwin coverage", () => {
+test("every release verifier workflow retains both architectures and complete Darwin coverage", () => {
   const callers = fs.readdirSync(path.join(repoRoot, ".github/workflows"))
     .filter((name) => /scripts\/verify-(?:release|homebrew-release)\.sh/.test(read(`.github/workflows/${name}`)))
     .sort();
@@ -22,11 +22,12 @@ test("every release verifier workflow retains both native hosts and complete Dar
     const block = workflow.split(`\n  ${job}:\n`)[1]?.split(/\n  [\w-]+:\n/)[0];
     assert.ok(block, `missing ${job}`);
     assert.match(block, /runs-on: \$\{\{ matrix\.runner \}\}/);
-    assert.match(block, /runner: macos-15\n\s+arch: arm64/);
-    assert.match(block, /runner: macos-15-intel\n\s+arch: x86_64/);
+    assert.match(block, /runner: xcode-27\n\s+arch: arm64/);
+    assert.match(block, /runner: xcode-27\n\s+arch: x86_64/);
     assert.doesNotMatch(block.split("    steps:")[0], /\bif:|exclude:/);
     assert.match(block, /VERIFY_ARCH: \$\{\{ matrix\.arch \}\}/);
     assert.match(block, /CRABBOX_VERIFY_EXEC_ARCH="\$VERIFY_ARCH"/);
+    assert.match(block, /\/usr\/bin\/arch "-\$VERIFY_ARCH" \/bin\/bash scripts\/verify-release\.sh/);
     assert.match(block, /scripts\/verify-release\.sh/);
   }
   assert.match(workflow, /execute-native:[\s\S]*needs: \[guard, download-draft, verify-native\]/);
@@ -46,7 +47,7 @@ test("every release verifier workflow retains both native hosts and complete Dar
   assert.match(read("scripts/publish-release.sh"), /for arch in arm64 x86_64; do/);
 });
 
-test("release workflow is verifier-only, protected-default, dual-native, and token-bounded", () => {
+test("release workflow is verifier-only, protected-default, dual-architecture, and token-bounded", () => {
   const workflow = read(".github/workflows/release-assets.yml");
   assert.match(workflow, /^  workflow_dispatch:$/m);
   assert.doesNotMatch(workflow, /repository_dispatch:|^  push:|^  release:/m);
@@ -64,8 +65,9 @@ test("release workflow is verifier-only, protected-default, dual-native, and tok
     workflow,
     /name: Set up Go for Apple VM source verification\n\s+uses: actions\/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e[\s\S]*name: Verify shipped Apple VM image source[\s\S]*git show "\$RELEASE_COMMIT:internal\/cli\/os_image[.]go"[\s\S]*git show "\$RELEASE_COMMIT:internal\/providers\/applevm\/backend[.]go"[\s\S]*go run [.][/]scripts\/apple-vm-image-source "\$source_root"/,
   );
-  assert.match(workflow, /runner: macos-15\n\s+arch: arm64/);
-  assert.match(workflow, /runner: macos-15-intel\n\s+arch: x86_64/);
+  assert.match(workflow, /runner: xcode-27\n\s+arch: arm64/);
+  assert.match(workflow, /runner: xcode-27\n\s+arch: x86_64/);
+  assert.match(workflow, /\[\[ "\$DRY_RUN" != true \|\| "\$VERIFY_DRAFT" == false \]\]/);
   assert.match(workflow, /cancel-in-progress: false/);
   assert.equal((workflow.match(/GH_TOKEN:/g) ?? []).length, 2);
   assert.equal((workflow.match(/secrets\.CRABBOX_RULESET_READ_TOKEN/g) ?? []).length, 1);
@@ -223,8 +225,8 @@ test("Homebrew smoke authenticates only metadata reads and keeps installation cr
   assert.match(workflow, /\[\[ "\$WORKFLOW_SHA" == "\$RUN_SHA" \]\]/);
   assert.match(workflow, /git merge-base --is-ancestor "\$SOURCE_COMMIT" "\$VERIFIER_COMMIT"/);
   assert.match(workflow, /git merge-base --is-ancestor "\$VERIFIER_COMMIT" "\$WORKFLOW_SHA"/);
-  assert.match(workflow, /runner: macos-15\n\s+arch: arm64/);
-  assert.match(workflow, /runner: macos-15-intel\n\s+arch: x86_64/);
+  assert.match(workflow, /runner: xcode-27\n\s+arch: arm64/);
+  assert.match(workflow, /runner: xcode-27\n\s+arch: x86_64/);
   assert.match(workflow, /persist-credentials: false/);
   assert.match(workflow, /ref: \$\{\{ github.workflow_sha \}\}/);
   assert.match(workflow, /assets_dir="\$RUNNER_TEMP\/release-assets"/);
