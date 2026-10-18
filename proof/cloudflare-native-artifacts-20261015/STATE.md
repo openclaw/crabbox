@@ -15,3 +15,11 @@
 - Next/stop reason: maintainer safe attribution/qualification is required before a fresh native re-review; coordinator owns closeout. See input-safety-diagnosis.md.
 
 - Resumed investigation: 2026-10-15T21:03:40Z; current source head 01c38947bde5f36ca4e4c885a44e3bf9075c885d; proof-only closeout follows.
+
+## Live evidence preparation resumed 2026-10-18T02:16:45.899435+00:00
+
+- Source/proof owner: `/root/crabbox_2860_evidence`; PR body handed off by parent.
+- Status: LIVE_PACKET_PREPARED; local real-browser fixture and verifier passed; Cloudflare run not executed.
+- Added fixed generic fixture/lockfile, opt-in caller, exact-handle cleanup and bounded verification.
+- Review: native safety hold remains; no duplicate native request; current proof-only source needs new CI/review evidence.
+- Next: parent reviews the immutable packet; runtime owner binds disposable deployment, approved budget and attended credential consumer.
