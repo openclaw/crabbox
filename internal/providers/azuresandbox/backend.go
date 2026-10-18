@@ -17,8 +17,20 @@ func (b *backend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	return b.WarmupFixed(ctx, core.FixedWarmupRequest{WarmupRequest: req, RequestedLeaseID: core.NewLeaseID()})
 }
 
-func (b *backend) WarmupFixed(ctx context.Context, req core.FixedWarmupRequest) error {
-	started := time.Now()
+func (b *backend) WarmupFixed(ctx context.Context, req core.FixedWarmupRequest) (resultErr error) {
+	now := time.Now
+	if b.rt.Clock != nil {
+		now = b.rt.Clock.Now
+	}
+	started := now()
+	timing := &sandboxProvisionTiming{now: now}
+	ctx = context.WithValue(ctx, sandboxProvisionTimingKey{}, timing)
+	completionStarted := false
+	defer func() {
+		if resultErr != nil && req.TimingJSON && !completionStarted {
+			_ = core.WriteTimingJSON(b.rt.Stderr, core.TimingReport{Provider: providerName, TotalMs: now().Sub(started).Milliseconds(), ExitCode: 1, RunnerPhases: timing.phases(), CreationEvents: timing.events()})
+		}
+	}()
 	lease, err := b.acquire(ctx, req)
 	if err != nil {
 		return err
@@ -35,7 +47,8 @@ func (b *backend) WarmupFixed(ctx context.Context, req core.FixedWarmupRequest) 
 	if req.BeforeComplete != nil {
 		req.BeforeComplete()
 	}
-	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{Provider: providerName, LeaseID: lease.LeaseID, Slug: claim.Slug, Total: time.Since(started)})
+	completionStarted = true
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{Provider: providerName, LeaseID: lease.LeaseID, Slug: claim.Slug, Total: now().Sub(started), RunnerPhases: timing.phases(), CreationEvents: timing.events()})
 }
 
 func (b *backend) claim(id string) (core.LeaseClaim, error) {
@@ -128,10 +141,13 @@ func (b *backend) ensureRunning(ctx context.Context, claim core.LeaseClaim) (san
 		default:
 			return sandbox{}, fmt.Errorf("ACA Sandbox cannot run in state %s", s.State)
 		}
+		finishWait := measureSandboxProvisionStep(ctx, "poll_wait."+sandboxPollState(s.State))
 		select {
 		case <-ctx.Done():
+			finishWait()
 			return sandbox{}, ctx.Err()
 		case <-time.After(time.Second):
+			finishWait()
 		}
 	}
 }

@@ -101,7 +101,9 @@ func (c *client) request(ctx context.Context, operation, method, path string, qu
 		return fmt.Errorf("ACA Sandbox request is invalid")
 	}
 	// The SDK credential owns caching and renewal. Never cache a bearer in a lease.
+	finishCredential := measureSandboxProvisionStep(ctx, "credential")
 	token, err := c.credential.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{tokenScope}})
+	finishCredential()
 	if err != nil {
 		return fmt.Errorf("ACA Sandbox managed-identity authentication failed")
 	}
@@ -114,6 +116,8 @@ func (c *client) request(ctx context.Context, operation, method, path string, qu
 	}
 	// No automatic retry: create and command outcomes may be uncertain. The fixed
 	// lease journal reconciles creation before another mutation is considered.
+	finishRequest := measureSandboxProvisionStep(ctx, operation)
+	defer finishRequest()
 	response, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("ACA Sandbox %s request failed: %w", operation, ctxOrTransportError(ctx, err))

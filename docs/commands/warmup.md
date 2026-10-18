@@ -74,6 +74,20 @@ Scripts should prefer the canonical ID. On success, add `--timing-json` to emit 
 JSON timing record (provider, lease ID, slug, total duration, exit code) on
 stderr.
 
+Azure Sandbox warmup also reports client-side provisioning steps in the existing
+`runnerPhases` and `creationEvents` fields: credential acquisition, create/inspect/
+list/resume requests, and polling waits grouped by observed lifecycle state.
+Creation events contain each step's cumulative duration and call count. Steps
+partition the client's time; request durations exclude credential acquisition,
+and `unattributed` retains local bookkeeping time. Failed or cancelled Sandbox
+warmup emits the same observational timing record on stderr with a nonzero exit
+code; it is not allocation rejection, readiness, or cleanup evidence. Timing
+output never authorizes another create or retry.
+
+The service does not expose separate disk-attachment or boot timestamps. Create
+and lifecycle waits therefore remain explicitly opaque server work; these client
+observations must not be presented as exact server disk/boot measurements.
+
 For a fixed-ID coordinator request rejected by a quota before lease admission,
 `--timing-json` emits a failure record on **stdout**, separately from diagnostic
 text on stderr. Its optional `creationRejected`
