@@ -1447,6 +1447,8 @@ func offlineConformanceConfig(provider string) (core.Config, bool) {
 	cfg := core.BaseConfig()
 	cfg.Provider = provider
 	switch provider {
+	case "azure-sandbox":
+		return cfg, true
 	case "agent-sandbox":
 		cfg.AgentSandbox.Context = "agent-context"
 		cfg.AgentSandbox.WarmPool = "linux-pool"

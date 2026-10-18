@@ -68,9 +68,12 @@ func (b *backend) claim(id string) (core.LeaseClaim, error) {
 	return claim, nil
 }
 
-// A heartbeat or configuration change cannot extend the original allocation.
+// A heartbeat or configuration change cannot extend a legacy allocation.
 // Teardown deliberately does not depend on this execution-admission check.
 func executionDeadline(claim core.LeaseClaim) (time.Time, error) {
+	if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.Retention != nil {
+		return core.SessionDiskExecutionDeadline(claim, time.Now())
+	}
 	i := claim.FixedCreateIntent
 	if i == nil || i.State != "acquired" || claim.CloudID == "" {
 		return time.Time{}, fmt.Errorf("ACA Sandbox has no completed allocation")
@@ -102,6 +105,10 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 		labels := maps.Clone(s.Labels)
 		labels["lease"], labels["slug"], labels["target"] = claim.LeaseID, claim.Slug, core.TargetLinux
 		labels["keep"] = "true" // Acquisition requires a kept lease.
+		if claim.FixedCreateIntent.Retention != nil {
+			labels["retention"] = "session-disk"
+			labels["retained_disk"] = "true"
+		}
 		result = append(result, core.Server{Provider: providerName, CloudID: s.ID, ImmutableID: s.ID, Name: claim.Slug, Status: s.State, Labels: labels})
 	}
 	return result, nil
@@ -118,7 +125,7 @@ func (b *backend) inspect(ctx context.Context, claim core.LeaseClaim) (sandbox, 
 	return observed.Candidates[0], nil
 }
 
-// Callers hold the claim fence and bound ctx by the original allocation TTL.
+// Callers hold the claim fence and bound ctx by the authorized work deadline.
 // Recheck exact ownership on every observation, including after activation.
 func (b *backend) ensureRunning(ctx context.Context, claim core.LeaseClaim) (sandbox, error) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
@@ -129,6 +136,14 @@ func (b *backend) ensureRunning(ctx context.Context, claim core.LeaseClaim) (san
 		if err != nil {
 			return sandbox{}, err
 		}
+		if claim.FixedCreateIntent.Retention != nil {
+			if _, err := core.SessionDiskWindowDeadline(claim, b.now()); err != nil {
+				return sandbox{}, err
+			}
+			if err := b.verifyRetentionPolicy(claim, s); err != nil {
+				return sandbox{}, err
+			}
+		}
 		if s.StateDetails.StoppedReason == "Disabled" {
 			return sandbox{}, fmt.Errorf("ACA Sandbox is administratively disabled")
 		}
@@ -136,6 +151,9 @@ func (b *backend) ensureRunning(ctx context.Context, claim core.LeaseClaim) (san
 		case "Running":
 			return s, nil
 		case "Stopped", "Suspended", "Idle":
+			if claim.FixedCreateIntent.Retention != nil {
+				return sandbox{}, fmt.Errorf("retained sandbox requires explicit pause/resume lifecycle admission")
+			}
 			if !resumed {
 				if err := b.api.Resume(ctx, s.ID); err != nil {
 					return sandbox{}, err
@@ -164,6 +182,9 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		return core.StatusView{}, err
 	}
 	view := core.StatusView{ID: claim.LeaseID, Slug: claim.Slug, Provider: providerName, TargetOS: core.TargetLinux, Network: core.NetworkPublic, ServerID: claim.CloudID}
+	if claim.FixedCreateIntent.Retention != nil {
+		return b.retainedStatus(ctx, claim, view)
+	}
 	expiresAt := claim.FixedCreateIntent.Attempt["expires_at"]
 	deadline, expiryErr := time.Parse(time.RFC3339Nano, expiresAt)
 	if expiryErr == nil {
@@ -200,13 +221,28 @@ func (b *backend) StopForRepository(ctx context.Context, req core.StopRequest, r
 }
 
 func (b *backend) stop(ctx context.Context, req core.StopRequest, root string) error {
+	return b.stopExpected(ctx, req, root, core.ProviderIdentityExpectation{})
+}
+
+func (b *backend) StopFixed(ctx context.Context, req core.FixedStopRequest) error {
+	return b.stopExpected(ctx, req.StopRequest, "", req.ExpectedProviderIdentity)
+}
+
+func (b *backend) stopExpected(ctx context.Context, req core.StopRequest, root string, expected core.ProviderIdentityExpectation) error {
 	claim, err := b.claim(req.ID)
 	if err != nil {
+		return err
+	}
+	if err := core.ValidateLeaseTargetProviderIdentity(core.LeaseTarget{LeaseID: claim.LeaseID, Server: core.Server{CloudID: claim.CloudID, ImmutableID: claim.CloudImmutableID, Name: claim.Slug, Labels: map[string]string{"slug": claim.Slug}}}, expected); err != nil {
 		return err
 	}
 	c, err := b.connect()
 	if err != nil {
 		return err
+	}
+	kind := leaseKind
+	if claim.FixedCreateIntent.Retention != nil {
+		kind.TerminalIdentityLabels = []string{"crabbox_lease", "crabbox_fingerprint", "crabbox_attempt"}
 	}
 	if claim.FixedCreateIntent.State == "acquired" && (claim.FixedCreateIntent.Journal == nil || claim.FixedCreateIntent.Journal.Phase != "deleting") {
 		release, err := b.interruptActivity(ctx, claim, root)
@@ -215,7 +251,7 @@ func (b *backend) stop(ctx context.Context, req core.StopRequest, root string) e
 		}
 		defer release()
 	}
-	return core.DeleteFixedResource(ctx, leaseKind, claim, core.FixedLeaseOperations[sandbox]{
+	return core.DeleteFixedResource(ctx, kind, claim, core.FixedLeaseOperations[sandbox]{
 		Release:      &core.FixedReleasePolicy{RepoRoot: root, SkipTerminalObservation: true},
 		ObserveExact: b.observe,
 		DeleteExact: func(ctx context.Context, _ *core.FixedTransaction, s sandbox) error {
@@ -252,7 +288,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 	if err := core.CheckLeaseClaimRepositoryOwner(claim.LeaseID, claim, req.Repo.Root, false); err != nil {
 		return core.RunResult{}, err
 	}
-	deadline, err := executionDeadline(claim)
+	deadline, err := b.executionDeadline(claim)
 	if err != nil {
 		return core.RunResult{}, err
 	}
@@ -314,7 +350,7 @@ func (b *backend) Heartbeat(ctx context.Context, req core.LeaseHeartbeatRequest)
 	if err != nil {
 		return core.LeaseHeartbeatResult{}, err
 	}
-	deadline, err := executionDeadline(claim)
+	deadline, err := b.executionDeadline(claim)
 	if err != nil {
 		return core.LeaseHeartbeatResult{}, err
 	}
@@ -353,7 +389,7 @@ func (b *backend) Copy(ctx context.Context, req core.CopyRequest) error {
 	if err := core.CheckLeaseClaimRepositoryOwner(claim.LeaseID, claim, req.RepoRoot, false); err != nil {
 		return err
 	}
-	deadline, err := executionDeadline(claim)
+	deadline, err := b.executionDeadline(claim)
 	if err != nil {
 		return err
 	}

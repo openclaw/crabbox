@@ -297,20 +297,21 @@ func leaseStatusStateCanBeReady(lease LeaseTarget, state string) bool {
 }
 
 type StatusView struct {
-	LeasePolicy       *CoordinatorLeasePolicy `json:"leasePolicy,omitempty"`
-	RemainingLifetime string                  `json:"remainingLifetime,omitempty"`
-	MaxLifetime       string                  `json:"maxLifetime,omitempty"`
-	LifetimePolicy    *LeaseLifetimePolicy    `json:"lifetimePolicy,omitempty"`
-	ID                string                  `json:"id"`
-	Slug              string                  `json:"slug,omitempty"`
-	Provider          string                  `json:"provider"`
-	TargetOS          string                  `json:"target"`
-	WorkRoot          string                  `json:"workroot,omitempty"`
-	WindowsMode       string                  `json:"windowsMode,omitempty"`
-	State             string                  `json:"state"`
-	ServerID          string                  `json:"serverId"`
-	ServerType        string                  `json:"serverType"`
-	ImageEvidence     *ImageEvidence          `json:"imageEvidence,omitempty"`
+	Retention         *SessionDiskRetentionView `json:"retention,omitempty"`
+	LeasePolicy       *CoordinatorLeasePolicy   `json:"leasePolicy,omitempty"`
+	RemainingLifetime string                    `json:"remainingLifetime,omitempty"`
+	MaxLifetime       string                    `json:"maxLifetime,omitempty"`
+	LifetimePolicy    *LeaseLifetimePolicy      `json:"lifetimePolicy,omitempty"`
+	ID                string                    `json:"id"`
+	Slug              string                    `json:"slug,omitempty"`
+	Provider          string                    `json:"provider"`
+	TargetOS          string                    `json:"target"`
+	WorkRoot          string                    `json:"workroot,omitempty"`
+	WindowsMode       string                    `json:"windowsMode,omitempty"`
+	State             string                    `json:"state"`
+	ServerID          string                    `json:"serverId"`
+	ServerType        string                    `json:"serverType"`
+	ImageEvidence     *ImageEvidence            `json:"imageEvidence,omitempty"`
 	// ProviderResourceID optionally exposes an immutable provider resource ID.
 	// ServerID keeps each provider's existing identity semantics; for Islo it
 	// is the sandbox name rather than the immutable sandbox ID.
@@ -669,6 +670,10 @@ func formatSecondsDuration(seconds int) string {
 }
 
 func addStatusLifetime(state *StatusView, cfg Config) {
+	if state.Retention != nil {
+		state.MaxLifetime = (time.Duration(state.Retention.ComputeWindowSeconds) * time.Second).String()
+		return
+	}
 	if deadline, err := time.Parse(time.RFC3339, state.ExpiresAt); err == nil {
 		state.RemainingLifetime = max(time.Duration(0), time.Until(deadline)).Round(time.Second).String()
 	}

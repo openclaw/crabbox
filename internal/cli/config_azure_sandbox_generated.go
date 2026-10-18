@@ -7,16 +7,18 @@ import (
 )
 
 type fileAzureSandboxConfig struct {
-	Subscription       string `yaml:"subscriptionId,omitempty"`
-	ResourceGroup      string `yaml:"resourceGroup,omitempty"`
-	Group              string `yaml:"group,omitempty"`
-	Region             string `yaml:"region,omitempty"`
-	ClientID           string `yaml:"clientId,omitempty"`
-	Disk               string `yaml:"disk,omitempty"`
-	DiskID             string `yaml:"diskId,omitempty"`
-	SnapshotID         string `yaml:"snapshotId,omitempty"`
-	SnapshotReceipt    string `yaml:"snapshotReceipt,omitempty"`
-	SnapshotGeneration string `yaml:"snapshotGeneration,omitempty"`
+	Retention          *string `yaml:"retention,omitempty"`
+	OwnerBinding       *string `yaml:"ownerBinding,omitempty"`
+	Subscription       string  `yaml:"subscriptionId,omitempty"`
+	ResourceGroup      string  `yaml:"resourceGroup,omitempty"`
+	Group              string  `yaml:"group,omitempty"`
+	Region             string  `yaml:"region,omitempty"`
+	ClientID           string  `yaml:"clientId,omitempty"`
+	Disk               string  `yaml:"disk,omitempty"`
+	DiskID             string  `yaml:"diskId,omitempty"`
+	SnapshotID         string  `yaml:"snapshotId,omitempty"`
+	SnapshotReceipt    string  `yaml:"snapshotReceipt,omitempty"`
+	SnapshotGeneration string  `yaml:"snapshotGeneration,omitempty"`
 }
 
 const AzureSandboxConfigDefaultDisk string = "ubuntu"
@@ -40,12 +42,14 @@ func (cfg *AzureSandboxConfig) applyFile(file *fileAzureSandboxConfig, trusted b
 
 func (cfg *AzureSandboxConfig) applyEnv() (AzureSandboxConfigApplied, error) {
 	var applied AzureSandboxConfigApplied
-	err := applyConfigEnvironment(cfg, &applied, 0, 10)
+	err := applyConfigEnvironment(cfg, &applied, 0, 12)
 	return applied, err
 }
 
 // AzureSandboxConfigFlagValues holds parsed values; only visited flags are applied.
 type AzureSandboxConfigFlagValues struct {
+	Retention          *string
+	OwnerBinding       *string
 	Subscription       *string
 	ResourceGroup      *string
 	Group              *string

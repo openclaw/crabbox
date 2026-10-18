@@ -5209,6 +5209,9 @@ func (a App) stop(ctx context.Context, args []string) (stopErr error) {
 	if strings.TrimSpace(*id) == "" || fs.NArg() > 1 || (idFlagSet && fs.NArg() > 0) {
 		return Exit(2, "usage: crabbox stop --id <lease-or-server-id>")
 	}
+	if err := refuseControllerRetainedLease(*id); err != nil {
+		return err
+	}
 	if *forceRecovery {
 		if !flagWasSet(fs, "provider") {
 			return Exit(2, "stop --force requires an explicit --provider")

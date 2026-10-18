@@ -922,10 +922,11 @@ const (
 	// FeatureFixedLeaseID advertises caller-supplied idempotent lease IDs.
 	FeatureFixedLeaseID Feature = "fixed-lease-id"
 	// FeatureFixedCurrentRepoStop requires RepositoryScopedStopBackend for fixed IDs.
-	FeatureFixedCurrentRepoStop Feature = "fixed-current-repo-stop"
-	FeaturePauseResume          Feature = "pause-resume"
-	FeatureLeaseHeartbeat       Feature = "lease-heartbeat"
-	FeatureMCP                  Feature = "mcp-attachments"
+	FeatureFixedCurrentRepoStop   Feature = "fixed-current-repo-stop"
+	FeaturePauseResume            Feature = "pause-resume"
+	FeatureSessionDiskRetentionV1 Feature = "session-disk-retention-v1"
+	FeatureLeaseHeartbeat         Feature = "lease-heartbeat"
+	FeatureMCP                    Feature = "mcp-attachments"
 )
 
 const FeaturePreparedArtifactWorkspace Feature = "prepared-artifact-workspace"
@@ -1513,13 +1514,15 @@ type RepositoryScopedStopBackend interface {
 }
 
 type PauseRequest struct {
-	Options LeaseOptions
-	ID      string
+	Lifecycle RetentionLifecycleRequest
+	Options   LeaseOptions
+	ID        string
 }
 
 type ResumeRequest struct {
-	Options LeaseOptions
-	ID      string
+	Lifecycle RetentionLifecycleRequest
+	Options   LeaseOptions
+	ID        string
 }
 
 type CleanupRequest struct {
