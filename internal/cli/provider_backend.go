@@ -611,17 +611,18 @@ type NativeCheckpointSourcePolicyProvider interface {
 }
 
 type NativeCheckpointImage struct {
-	ID           string
-	Name         string
-	State        string
-	Provider     string
-	Kind         string
-	Region       string
-	AccountID    string
-	ResourceID   string
-	SnapshotIDs  []string
-	Architecture string
-	Direct       bool
+	ID               string
+	Name             string
+	State            string
+	Provider         string
+	Kind             string
+	Region           string
+	AccountID        string
+	ResourceID       string
+	ResourceUniqueID string
+	SnapshotIDs      []string
+	Architecture     string
+	Direct           bool
 }
 
 type NativeCheckpointCreateRequest struct {
