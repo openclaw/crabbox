@@ -245,25 +245,28 @@ func (b *freestyleBackend) createSandbox(ctx context.Context, client freestyleAP
 		return "", "", "", err
 	}
 	name := newFreestyleSandboxName(repo)
-	// Only send sizing when explicitly configured; otherwise omit so Freestyle
-	// applies the plan defaults. Sending custom sizing on a plan that does not
-	// allow it fails with CUSTOM_SIZING_NOT_ALLOWED.
+	// Only resize when explicitly configured; otherwise Freestyle applies its
+	// default resources. v5 sizing is a separate, grow-only resize operation.
 	create := freestyleCreateVMRequest{
-		Name:  name,
-		Ports: []freestylePortMapping{},
-	}
-	if b.cfg.Freestyle.VCPUs > 0 || b.cfg.Freestyle.MemoryGB > 0 {
-		create.Template = &freestyleCreateVMTemplate{
-			VcpuCount: b.cfg.Freestyle.VCPUs,
-			MemSizeGb: b.cfg.Freestyle.MemoryGB,
-		}
+		Name:     name,
+		VCPUs:    b.cfg.Freestyle.VCPUs,
+		MemoryGB: b.cfg.Freestyle.MemoryGB,
 	}
 	vm, err := client.CreateVM(ctx, create)
 	if err != nil {
-		return "", "", "", freestyleError("create vm", err)
+		cause := freestyleError("create vm", err)
+		if vm.ID != "" {
+			return "", "", "", b.rollbackCreatedVM(client, vm.ID, cause)
+		}
+		return "", "", "", cause
 	}
 	if vm.ID == "" {
 		return "", "", "", core.Exit(5, "freestyle create vm returned no id")
+	}
+	if !freestyleStatusReady(vm.State) {
+		if err := waitForFreestyleVM(ctx, client, vm.ID); err != nil {
+			return "", "", "", b.rollbackCreatedVM(client, vm.ID, err)
+		}
 	}
 	leaseID := freestyleLeasePrefix + vm.ID
 	slug, err := core.AllocateClaimLeaseSlug(leaseID, requestedSlug)
@@ -274,6 +277,30 @@ func (b *freestyleBackend) createSandbox(ctx context.Context, client freestyleAP
 		return "", "", "", b.rollbackCreatedVM(client, vm.ID, err)
 	}
 	return leaseID, vm.ID, slug, nil
+}
+
+func waitForFreestyleVM(ctx context.Context, client freestyleAPI, id string) error {
+	waitCtx, cancel := context.WithTimeout(ctx, freestyleControlTimeout)
+	defer cancel()
+	for {
+		vm, err := client.GetVM(waitCtx, id)
+		if err != nil {
+			return freestyleError("wait for vm", err)
+		}
+		if freestyleStatusReady(vm.State) {
+			return nil
+		}
+		if vm.State != "starting" {
+			return fmt.Errorf("freestyle vm %s entered state %q before becoming ready", id, vm.State)
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-waitCtx.Done():
+			timer.Stop()
+			return freestyleError("wait for vm", waitCtx.Err())
+		case <-timer.C:
+		}
+	}
 }
 
 func (b *freestyleBackend) rollbackCreatedVM(client freestyleAPI, vmID string, cause error) error {
@@ -521,7 +548,13 @@ func newFreestyleSandboxName(repo core.Repo) string {
 		base = "crabbox"
 	}
 	base = strings.TrimPrefix(base, freestyleNamePrefix)
-	return freestyleNamePrefix + base + "-" + shared.RandomSuffix()
+	suffix := shared.RandomSuffix()
+	const maxFreestyleSlugLength = 63
+	maxBase := maxFreestyleSlugLength - len(freestyleNamePrefix) - 1 - len(suffix)
+	if len(base) > maxBase {
+		base = strings.TrimRight(base[:maxBase], "-")
+	}
+	return freestyleNamePrefix + base + "-" + suffix
 }
 
 func isCrabboxFreestyleSandboxName(name string) bool {

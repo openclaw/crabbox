@@ -3,13 +3,15 @@ package atomicfile
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/openclaw/crabbox/internal/privatefile"
 )
 
-// WritePrivate stages a complete 0600 file beside path, syncs and closes it,
+// WritePrivate stages a complete private file beside path, syncs and closes it,
 // then publishes it with replace. A successful replace must consume the staged
 // path. Callers retain path admission, parent creation, and directory-sync policy.
 func WritePrivate(path, pattern string, data []byte, replace func(string, string) error) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), pattern)
+	tmp, err := privatefile.CreateTemp(filepath.Dir(path), pattern)
 	if err != nil {
 		return err
 	}
@@ -20,10 +22,6 @@ func WritePrivate(path, pattern string, data []byte, replace func(string, string
 			_ = os.Remove(staged)
 		}
 	}()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		return err
