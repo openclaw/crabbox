@@ -182,7 +182,43 @@ func screenshotRemoteCommand(target SSHTarget) string {
 $base = "C:\ProgramData\crabbox"
 New-Item -ItemType Directory -Force -Path $base | Out-Null
 ` + windowsScreenshotCredentialReadPowerShell(WindowsActionsRunnerCredentialPath) +
-			windowsInteractiveScheduledTaskPowerShell() + `
+			windowsInteractiveScheduledTaskPowerShell() + windowsScreenshotRemoteBody()
+	}
+	if target.TargetOS == targetMacOS {
+		return `set -eu
+if command -v screencapture >/dev/null 2>&1; then
+  screencapture -x -t png -
+else
+  echo "no screenshot tool found; EC2 macOS should provide screencapture" >&2
+  exit 127
+fi`
+	}
+
+	return `set -eu
+if [ -f /var/lib/crabbox/desktop.env ]; then
+  . /var/lib/crabbox/desktop.env
+  export XDG_RUNTIME_DIR WAYLAND_DISPLAY
+fi
+if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v grim >/dev/null 2>&1; then
+  grim -
+  exit 0
+fi
+export DISPLAY="${DISPLAY:-:99}"
+if command -v scrot >/dev/null 2>&1; then
+  tmp="$(mktemp --suffix=.png)"
+  trap 'rm -f "$tmp"' EXIT
+  scrot -z -o "$tmp"
+  cat "$tmp"
+elif command -v import >/dev/null 2>&1; then
+  import -window root png:-
+else
+  echo "no screenshot tool found; warm a new --desktop lease or install grim/scrot" >&2
+  exit 127
+fi`
+}
+
+func windowsScreenshotRemoteBody() string {
+	return `
 $taskName = "CrabboxScreenshot-" + [Guid]::NewGuid().ToString("N")
 $taskRoot = Join-Path $base $taskName
 Protect-CrabboxInteractiveDirectory $taskRoot
@@ -229,35 +265,4 @@ try {
   Remove-Item -Recurse -Force -LiteralPath $taskRoot -ErrorAction SilentlyContinue
 }
 `
-	}
-	if target.TargetOS == targetMacOS {
-		return `set -eu
-if command -v screencapture >/dev/null 2>&1; then
-  screencapture -x -t png -
-else
-  echo "no screenshot tool found; EC2 macOS should provide screencapture" >&2
-  exit 127
-fi`
-	}
-	return `set -eu
-if [ -f /var/lib/crabbox/desktop.env ]; then
-  . /var/lib/crabbox/desktop.env
-  export XDG_RUNTIME_DIR WAYLAND_DISPLAY
-fi
-if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v grim >/dev/null 2>&1; then
-  grim -
-  exit 0
-fi
-export DISPLAY="${DISPLAY:-:99}"
-if command -v scrot >/dev/null 2>&1; then
-  tmp="$(mktemp --suffix=.png)"
-  trap 'rm -f "$tmp"' EXIT
-  scrot -z -o "$tmp"
-  cat "$tmp"
-elif command -v import >/dev/null 2>&1; then
-  import -window root png:-
-else
-  echo "no screenshot tool found; warm a new --desktop lease or install grim/scrot" >&2
-  exit 127
-fi`
 }
