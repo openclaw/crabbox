@@ -71,21 +71,23 @@ type checkpointRecord struct {
 	Retention          *coordinatorCheckpointRetention `json:"retention,omitempty"`
 	CoordinatorState   string                          `json:"coordinatorState,omitempty"`
 	Native             struct {
-		Provider     string            `json:"provider,omitempty"`
-		ImageID      string            `json:"imageId,omitempty"`
-		Kind         string            `json:"kind,omitempty"`
-		Name         string            `json:"name,omitempty"`
-		State        string            `json:"state,omitempty"`
-		Region       string            `json:"region,omitempty"`
-		AccountID    string            `json:"accountId,omitempty"`
-		Project      string            `json:"project,omitempty"`
-		Resource     string            `json:"resource,omitempty"`
-		Architecture string            `json:"architecture,omitempty"`
-		SnapshotIDs  []string          `json:"snapshotIds,omitempty"`
-		Direct       bool              `json:"direct,omitempty"`
-		Strategy     string            `json:"strategy,omitempty"`
-		NoReboot     bool              `json:"noReboot,omitempty"`
-		Metadata     map[string]string `json:"metadata,omitempty"`
+		Provider         string            `json:"provider,omitempty"`
+		ImageID          string            `json:"imageId,omitempty"`
+		Kind             string            `json:"kind,omitempty"`
+		Name             string            `json:"name,omitempty"`
+		State            string            `json:"state,omitempty"`
+		Region           string            `json:"region,omitempty"`
+		AccountID        string            `json:"accountId,omitempty"`
+		Project          string            `json:"project,omitempty"`
+		Resource         string            `json:"resource,omitempty"`
+		ResourceUniqueID string            `json:"resourceUniqueId,omitempty"`
+		DetachedReason   string            `json:"detachedReason,omitempty"`
+		Architecture     string            `json:"architecture,omitempty"`
+		SnapshotIDs      []string          `json:"snapshotIds,omitempty"`
+		Direct           bool              `json:"direct,omitempty"`
+		Strategy         string            `json:"strategy,omitempty"`
+		NoReboot         bool              `json:"noReboot,omitempty"`
+		Metadata         map[string]string `json:"metadata,omitempty"`
 	} `json:"native,omitempty"`
 	Repo struct {
 		Root      string `json:"root,omitempty"`
@@ -982,6 +984,9 @@ func printCheckpointInspect(stdout io.Writer, record checkpointRecord) {
 		}
 		if record.Native.Resource != "" {
 			fmt.Fprintf(stdout, "image_resource=%s\n", record.Native.Resource)
+		}
+		if record.Native.DetachedReason != "" {
+			fmt.Fprintf(stdout, "detached_reason=%s\n", record.Native.DetachedReason)
 		}
 	}
 }
@@ -2168,7 +2173,18 @@ func deleteCheckpointRecord(ctx context.Context, store checkpointStore, record c
 		return Exit(2, "checkpoint %s is unresolved; retain its record and source and reconcile the original capture", id)
 	}
 	if !localOnly {
+		if record.Native.DetachedReason != "" {
+			return Exit(2, "checkpoint %s is detached: %s; inspect the snapshot in Azure for manual cleanup, then use --local-only to remove the record", id, record.Native.DetachedReason)
+		}
 		if err := deleteCheckpointResource(ctx, store, record); err != nil {
+			var identityErr *azureSnapshotIdentityError
+			if errors.As(err, &identityErr) {
+				record.Native.State = "detached"
+				record.Native.DetachedReason = identityErr.reason
+				if writeErr := store.Write(record); writeErr != nil {
+					return errors.Join(err, writeErr)
+				}
+			}
 			return err
 		}
 	}
@@ -2205,6 +2221,9 @@ func deleteCheckpointResource(ctx context.Context, store checkpointStore, record
 		return coord.DeleteCheckpoint(ctx, record.ID)
 	}
 	providerID := record.nativeDeleteID()
+	if record.Kind == checkpointKindAzureOS && record.Native.Direct && providerID == "" {
+		return &azureSnapshotIdentityError{reason: "captured Azure snapshot resource ID is missing"}
+	}
 	if !isNativeCheckpointKind(record.Kind) || providerID == "" {
 		return nil
 	}
@@ -2233,12 +2252,22 @@ func deleteCheckpointResource(ctx context.Context, store checkpointStore, record
 			return store.Write(record)
 		})
 	}
-	if cfg, ok := directAzureCheckpointConfig(record); ok {
-		client, err := NewAzureClient(ctx, cfg)
+	if record.Kind == checkpointKindAzureOS && record.Native.Direct {
+		if record.Native.ResourceUniqueID == "" {
+			return &azureSnapshotIdentityError{reason: "captured Azure snapshot uniqueId is missing (legacy or incomplete checkpoint)"}
+		}
+		if !strings.EqualFold(providerID, record.Native.Resource) {
+			return &azureSnapshotIdentityError{reason: "captured Azure snapshot resource IDs disagree"}
+		}
+		cfg, ok := directAzureCheckpointConfig(record)
+		if !ok {
+			return Exit(2, "cannot resolve direct Azure checkpoint scope; retain the record and check Azure configuration")
+		}
+		client, err := newAzureCheckpointClient(ctx, cfg)
 		if err != nil {
 			return err
 		}
-		return client.DeleteOSDiskSnapshot(ctx, providerID)
+		return client.DeleteOSDiskSnapshot(ctx, providerID, record.Native.ResourceUniqueID)
 	}
 	coord, err := configuredAdminCoordinator()
 	if err != nil {
@@ -2472,6 +2501,11 @@ func (a App) verifyCheckpointResource(ctx context.Context, store checkpointStore
 	paths, err := store.Paths(record.ID)
 	if err != nil {
 		return checkpointAudit{}, err
+	}
+	if record.Native.DetachedReason != "" {
+		audit.ProviderState, audit.NextAction = "detached", "manual_cleanup"
+		audit.Error = record.Native.DetachedReason
+		return audit, nil
 	}
 	switch {
 	case record.Kind == checkpointKindArchive:
