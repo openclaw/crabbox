@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- CI: make Blacksmith's buffered artifact-timeout regression deterministic under scheduler pressure without changing production timeouts or workload results. [PR 2909](https://github.com/openclaw/crabbox/pull/2909).
 - Coordinator: revoke non-admin control sessions after shared-token rotation or GitHub authorization withdrawal, including restored sessions, event delivery, and queued heartbeats. [PR 2907](https://github.com/openclaw/crabbox/pull/2907). Thanks @coygeek.
 - Freestyle: report commands whose exec response has no exit status (timeouts) as failures instead of success, keeping output and failure retention. [PR 2896](https://github.com/openclaw/crabbox/pull/2896). Thanks @coygeek.
 - Tests: preserve literal SSH username and transport coverage across OpenSSH parser versions, including clients that reject combined backslash/percent usernames. [PR 2904](https://github.com/openclaw/crabbox/pull/2904). Thanks @coygeek.
