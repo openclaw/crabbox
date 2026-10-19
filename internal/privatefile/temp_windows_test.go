@@ -4,12 +4,27 @@ package privatefile
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
 )
 
 func TestCreateTempWindowsPrivateBeforeWrite(t *testing.T) {
+	for _, longPath := range []bool{false, true} {
+		name := "short path"
+		if longPath {
+			name = "long path"
+		}
+		t.Run(name, func(t *testing.T) {
+			testCreateTempWindowsPrivateBeforeWrite(t, longPath)
+		})
+	}
+}
+
+func testCreateTempWindowsPrivateBeforeWrite(t *testing.T, longPath bool) {
+	t.Helper()
 	dir := t.TempDir()
 	user, err := WindowsUserSID()
 	if err != nil {
@@ -27,6 +42,14 @@ func TestCreateTempWindowsPrivateBeforeWrite(t *testing.T) {
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
 		nil, nil, acl, nil); err != nil {
 		t.Fatal(err)
+	}
+	if longPath {
+		for len(dir) < 300 {
+			dir = filepath.Join(dir, strings.Repeat("nested", 8))
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	file, err := CreateTemp(dir, ".config-*.tmp")
 	if err != nil {

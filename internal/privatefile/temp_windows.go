@@ -32,7 +32,11 @@ func CreateTemp(dir, pattern string) (*os.File, error) {
 	}
 	for attempt := 0; attempt < 32; attempt++ {
 		path := filepath.Join(dir, prefix+rand.Text()+suffix)
-		pathPtr, err := windows.UTF16PtrFromString(path)
+		openPath, err := WindowsPath(path)
+		if err != nil {
+			return nil, err
+		}
+		pathPtr, err := windows.UTF16PtrFromString(openPath)
 		if err != nil {
 			return nil, err
 		}
