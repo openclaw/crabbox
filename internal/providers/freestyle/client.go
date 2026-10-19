@@ -17,19 +17,27 @@ import (
 )
 
 type freestyleAPI interface {
+	// CreateVM preserves an allocated VM on setup failure; the caller owns rollback.
 	CreateVM(ctx context.Context, req freestyleCreateVMRequest) (freestyleVM, error)
 	GetVM(ctx context.Context, id string) (freestyleVM, error)
 	ListVMs(ctx context.Context) ([]freestyleVM, error)
 	DeleteVM(ctx context.Context, id string) error
 	Exec(ctx context.Context, id string, command string, stdout, stderr io.Writer) (int, error)
 	WriteFile(ctx context.Context, id, path, content, encoding string) error
-	ReadFile(ctx context.Context, id, path string) (string, error)
 }
 
 type freestyleVM struct {
 	ID    string `json:"id"`
-	Name  string `json:"name"`
+	Name  string `json:"displayName"`
+	Slug  string `json:"slug"`
 	State string `json:"state"`
+}
+
+func normalizeFreestyleVM(vm freestyleVM) freestyleVM {
+	if vm.Name == "" {
+		vm.Name = vm.Slug
+	}
+	return vm
 }
 
 type freestyleListVMsResponse struct {
@@ -37,44 +45,22 @@ type freestyleListVMsResponse struct {
 	TotalCount int           `json:"totalCount"`
 }
 
-type freestyleCreateVMResponse struct {
-	ID string `json:"id"`
-}
-
 type freestyleCreateVMRequest struct {
-	Name     string                     `json:"name"`
-	Ports    []freestylePortMapping     `json:"ports"`
-	Template *freestyleCreateVMTemplate `json:"template,omitempty"`
-}
-
-type freestyleCreateVMTemplate struct {
-	VcpuCount int `json:"vcpuCount,omitempty"`
-	MemSizeGb int `json:"memSizeGb,omitempty"`
-}
-
-type freestylePortMapping struct {
-	Port       int `json:"port"`
-	TargetPort int `json:"targetPort"`
+	Name     string
+	VCPUs    int
+	MemoryGB int
 }
 
 type freestyleExecRequest struct {
-	Command string `json:"command"`
+	Command   string `json:"command"`
+	Stdin     string `json:"stdin,omitempty"`
+	LinuxUser string `json:"linuxUser"`
 }
 
 type freestyleExecResponse struct {
 	StatusCode *int    `json:"statusCode"`
 	Stdout     *string `json:"stdout"`
 	Stderr     *string `json:"stderr"`
-}
-
-type freestyleWriteFileRequest struct {
-	Content  string `json:"content"`
-	Encoding string `json:"encoding"`
-}
-
-type freestyleReadFileResponse struct {
-	Content  string `json:"content"`
-	Encoding string `json:"encoding"`
 }
 
 type freestyleHTTPClient struct {
@@ -148,14 +134,19 @@ func (c *freestyleHTTPClient) doWithClient(ctx context.Context, httpClient *http
 }
 
 func (c *freestyleHTTPClient) CreateVM(ctx context.Context, req freestyleCreateVMRequest) (freestyleVM, error) {
-	if req.Ports == nil {
-		req.Ports = []freestylePortMapping{}
-	}
-	payload, err := json.Marshal(req)
+	// v5 creates a default-sized VM; custom sizes are a separate grow-only
+	// resize operation. The empty source denotes this new VM, never public ingress.
+	payload, err := json.Marshal(struct {
+		DisplayName string `json:"displayName"`
+		Slug        string `json:"slug"`
+		Firewall    any    `json:"firewall"`
+	}{req.Name, req.Name, map[string]any{"rules": []any{map[string]any{
+		"action": "allow", "source": map[string]any{}, "destination": map[string]any{"public": true},
+	}}}})
 	if err != nil {
 		return freestyleVM{}, err
 	}
-	resp, err := c.do(ctx, http.MethodPost, "/v1/vms", bytes.NewReader(payload))
+	resp, err := c.do(ctx, http.MethodPost, "/v5/vms", bytes.NewReader(payload))
 	if err != nil {
 		return freestyleVM{}, freestyleError("create vm", err)
 	}
@@ -163,15 +154,41 @@ func (c *freestyleHTTPClient) CreateVM(ctx context.Context, req freestyleCreateV
 	if resp.StatusCode >= 400 {
 		return freestyleVM{}, c.responseError("create vm", resp)
 	}
-	var parsed freestyleCreateVMResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	var vm freestyleVM
+	if err := json.NewDecoder(resp.Body).Decode(&vm); err != nil {
 		return freestyleVM{}, freestyleError("create vm", err)
 	}
-	return freestyleVM{ID: parsed.ID, State: "running"}, nil
+	if (req.VCPUs > 0 || req.MemoryGB > 0) && vm.ID != "" {
+		if err := c.resizeVM(ctx, vm.ID, req.VCPUs, req.MemoryGB); err != nil {
+			// Acquisition cleanup belongs to the backend, which also supplies exact
+			// adoption and stop commands if deleting the allocated VM fails.
+			return normalizeFreestyleVM(vm), err
+		}
+	}
+	return normalizeFreestyleVM(vm), nil
+}
+
+func (c *freestyleHTTPClient) resizeVM(ctx context.Context, id string, vcpus, memoryGB int) error {
+	payload, err := json.Marshal(struct {
+		CPU    int   `json:"cpu,omitempty"`
+		Memory int64 `json:"memory,omitempty"`
+	}{vcpus, int64(memoryGB) * 1024})
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(ctx, http.MethodPost, "/v5/vms/"+url.PathEscape(id)+"/resize", bytes.NewReader(payload))
+	if err != nil {
+		return freestyleError("resize vm", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return c.responseError("resize vm", resp)
+	}
+	return nil
 }
 
 func (c *freestyleHTTPClient) GetVM(ctx context.Context, id string) (freestyleVM, error) {
-	resp, err := c.do(ctx, http.MethodGet, "/v1/vms/"+url.PathEscape(id), nil)
+	resp, err := c.do(ctx, http.MethodGet, "/v5/vms/"+url.PathEscape(id), nil)
 	if err != nil {
 		return freestyleVM{}, freestyleError("get vm", err)
 	}
@@ -183,13 +200,13 @@ func (c *freestyleHTTPClient) GetVM(ctx context.Context, id string) (freestyleVM
 	if err := json.NewDecoder(resp.Body).Decode(&vm); err != nil {
 		return freestyleVM{}, freestyleError("get vm", err)
 	}
-	return vm, nil
+	return normalizeFreestyleVM(vm), nil
 }
 
 func (c *freestyleHTTPClient) ListVMs(ctx context.Context) ([]freestyleVM, error) {
 	var vms []freestyleVM
 	for offset := 0; ; offset += freestyleListPageSize {
-		urlPath := fmt.Sprintf("/v1/vms?limit=%d&offset=%d", freestyleListPageSize, offset)
+		urlPath := fmt.Sprintf("/v5/vms?limit=%d&offset=%d", freestyleListPageSize, offset)
 		resp, err := c.do(ctx, http.MethodGet, urlPath, nil)
 		if err != nil {
 			return nil, freestyleError("list vms", err)
@@ -208,7 +225,9 @@ func (c *freestyleHTTPClient) ListVMs(ctx context.Context) ([]freestyleVM, error
 		if closeErr != nil {
 			return nil, freestyleError("list vms", closeErr)
 		}
-		vms = append(vms, parsed.VMs...)
+		for _, vm := range parsed.VMs {
+			vms = append(vms, normalizeFreestyleVM(vm))
+		}
 		if len(parsed.VMs) < freestyleListPageSize || len(vms) >= parsed.TotalCount {
 			return vms, nil
 		}
@@ -216,7 +235,7 @@ func (c *freestyleHTTPClient) ListVMs(ctx context.Context) ([]freestyleVM, error
 }
 
 func (c *freestyleHTTPClient) DeleteVM(ctx context.Context, id string) error {
-	resp, err := c.do(ctx, http.MethodDelete, "/v1/vms/"+url.PathEscape(id), nil)
+	resp, err := c.do(ctx, http.MethodDelete, "/v5/vms/"+url.PathEscape(id), nil)
 	if err != nil {
 		return freestyleError("delete vm", err)
 	}
@@ -231,11 +250,16 @@ func (c *freestyleHTTPClient) DeleteVM(ctx context.Context, id string) error {
 }
 
 func (c *freestyleHTTPClient) Exec(ctx context.Context, id string, command string, stdout, stderr io.Writer) (int, error) {
-	payload, err := json.Marshal(freestyleExecRequest{Command: command})
+	return c.exec(ctx, id, freestyleExecRequest{Command: command}, stdout, stderr)
+}
+
+func (c *freestyleHTTPClient) exec(ctx context.Context, id string, request freestyleExecRequest, stdout, stderr io.Writer) (int, error) {
+	request.LinuxUser = "root"
+	payload, err := json.Marshal(request)
 	if err != nil {
 		return 1, err
 	}
-	resp, err := c.doData(ctx, http.MethodPost, "/v1/vms/"+url.PathEscape(id)+"/exec-await", bytes.NewReader(payload))
+	resp, err := c.doData(ctx, http.MethodPost, "/v5/vms/"+url.PathEscape(id)+"/exec-await", bytes.NewReader(payload))
 	if err != nil {
 		return 1, freestyleError("exec", err)
 	}
@@ -261,56 +285,48 @@ func (c *freestyleHTTPClient) Exec(ctx context.Context, id string, command strin
 	return *parsed.StatusCode, nil
 }
 
-func (c *freestyleHTTPClient) WriteFile(ctx context.Context, id, path string, content, encoding string) error {
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	payload, err := json.Marshal(freestyleWriteFileRequest{Content: content, Encoding: encoding})
-	if err != nil {
-		return err
-	}
-	resp, err := c.doData(ctx, http.MethodPut, freestyleFileURLPath(id, path), bytes.NewReader(payload))
-	if err != nil {
-		return freestyleError("write file", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return c.responseError("write file", resp)
-	}
-	return nil
-}
-
-func (c *freestyleHTTPClient) ReadFile(ctx context.Context, id, path string) (string, error) {
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	resp, err := c.doData(ctx, http.MethodGet, freestyleFileURLPath(id, path), nil)
-	if err != nil {
-		return "", freestyleError("read file", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return "", c.responseError("read file", resp)
-	}
-	var parsed freestyleReadFileResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return "", freestyleError("read file", err)
-	}
-	if parsed.Encoding == "base64" {
-		decoded, err := base64.StdEncoding.DecodeString(parsed.Content)
+// This adapter uses exec for file transport alongside its archive transaction.
+// Freestyle also exposes native /fs read/write endpoints. Base64-encoded stdin
+// preserves file bytes through exec's JSON request.
+func (c *freestyleHTTPClient) WriteFile(ctx context.Context, id, path, content, encoding string) error {
+	data := []byte(content)
+	switch encoding {
+	case "base64":
+		var err error
+		data, err = base64.StdEncoding.DecodeString(content)
 		if err != nil {
-			return "", freestyleError("read file", err)
+			return freestyleError("write file", err)
 		}
-		return string(decoded), nil
+	case "", "utf8", "utf-8":
+	default:
+		return freestyleError("write file", fmt.Errorf("unsupported encoding %q", encoding))
 	}
-	return parsed.Content, nil
-}
-
-func freestyleFileURLPath(id, path string) string {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	return "/v1/vms/" + url.PathEscape(id) + "/files/" + url.PathEscape(path)
+	// Base64 and JSON must fit the service's 1 MiB HTTP request limit.
+	const chunkSize = 512 << 10
+	for offset := 0; ; offset += chunkSize {
+		end := min(offset+chunkSize, len(data))
+		redirect := ">"
+		if offset > 0 {
+			redirect = ">>"
+		}
+		var stderr bytes.Buffer
+		code, err := c.exec(ctx, id, freestyleExecRequest{
+			Command: "cat " + redirect + " " + core.ShellQuote(path),
+			Stdin:   base64.StdEncoding.EncodeToString(data[offset:end]),
+		}, io.Discard, &stderr)
+		if err != nil {
+			return freestyleError("write file", err)
+		}
+		if code != 0 {
+			return freestyleError("write file", fmt.Errorf("guest command exited %d: %s", code, redactFreestyleSecret(strings.TrimSpace(stderr.String()), c.apiKey)))
+		}
+		if end == len(data) {
+			return nil
+		}
+	}
 }
 
 func (c *freestyleHTTPClient) responseError(action string, resp *http.Response) error {

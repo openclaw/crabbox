@@ -11,6 +11,7 @@
 ### Fixed
 
 - Config: protect persisted Windows credentials with a verified current-user-only DACL before writing, without inheriting parent read grants. [PR 2901](https://github.com/openclaw/crabbox/pull/2901). Thanks @coygeek.
+- Freestyle: create and resume VMs through the current Freestyle API contract, validating readiness for stopped or paused creation responses. [PR 2897](https://github.com/openclaw/crabbox/pull/2897). Thanks @coygeek.
 - Coordinator: revoke non-admin control sessions after shared-token rotation or GitHub authorization withdrawal, including restored sessions, event delivery, and queued heartbeats. [PR 2907](https://github.com/openclaw/crabbox/pull/2907). Thanks @coygeek.
 - Freestyle: report commands whose exec response has no exit status (timeouts) as failures instead of success, keeping output and failure retention. [PR 2896](https://github.com/openclaw/crabbox/pull/2896). Thanks @coygeek.
 - Tests: preserve literal SSH username and transport coverage across OpenSSH parser versions, including clients that reject combined backslash/percent usernames. [PR 2904](https://github.com/openclaw/crabbox/pull/2904). Thanks @coygeek.

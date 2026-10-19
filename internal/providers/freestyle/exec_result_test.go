@@ -27,7 +27,7 @@ func TestFreestyleExecExitStatus(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost || r.URL.Path != "/v1/vms/vm-fixture/exec-await" {
+				if r.Method != http.MethodPost || r.URL.Path != "/v5/vms/vm-fixture/exec-await" {
 					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 					http.NotFound(w, r)
 					return
@@ -74,16 +74,16 @@ func TestFreestyleRunHTTPExitStatusRetention(t *testing.T) {
 				execs, deletes := 0, 0
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					switch {
-					case r.Method == http.MethodPost && r.URL.Path == "/v1/vms":
-						_, _ = io.WriteString(w, `{"id":"vm-fixture"}`)
-					case r.Method == http.MethodPost && r.URL.Path == "/v1/vms/vm-fixture/exec-await":
+					case r.Method == http.MethodPost && r.URL.Path == "/v5/vms":
+						_, _ = io.WriteString(w, `{"id":"vm-fixture","state":"running"}`)
+					case r.Method == http.MethodPost && r.URL.Path == "/v5/vms/vm-fixture/exec-await":
 						execs++
 						if execs == 1 {
 							_, _ = io.WriteString(w, `{"statusCode":0}`)
 						} else {
 							_, _ = io.WriteString(w, tc.response)
 						}
-					case r.Method == http.MethodDelete && r.URL.Path == "/v1/vms/vm-fixture":
+					case r.Method == http.MethodDelete && r.URL.Path == "/v5/vms/vm-fixture":
 						deletes++
 						w.WriteHeader(http.StatusNoContent)
 					default:
