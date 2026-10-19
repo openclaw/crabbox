@@ -5,11 +5,12 @@ package cli
 import (
 	"os"
 
+	"github.com/openclaw/crabbox/internal/privatefile"
 	"golang.org/x/sys/windows"
 )
 
 func localHistoryCreateDirectory(root *os.Root, name string) (bool, error) {
-	descriptor, user, err := privateWindowsSecurityDescriptor(true)
+	descriptor, user, err := privatefile.WindowsDescriptor(true)
 	if err != nil {
 		return false, err
 	}
@@ -24,7 +25,7 @@ func localHistoryCreateDirectory(root *os.Root, name string) (bool, error) {
 		return false, err
 	}
 	defer windows.CloseHandle(handle)
-	if err := verifyPrivateWindowsHandle(handle, true, user); err != nil {
+	if err := privatefile.VerifyWindowsHandle(handle, true, user); err != nil {
 		return created, err
 	}
 	return created, nil
@@ -38,10 +39,10 @@ func localHistoryOpen(root *os.Root, name string, writable bool) (*os.File, erro
 	return root.OpenFile(name, flags, 0)
 }
 func localHistoryPrivate(file *os.File, directory bool) error {
-	user, err := currentWindowsUserSID()
+	user, err := privatefile.WindowsUserSID()
 	if err != nil {
 		return err
 	}
-	return verifyPrivateWindowsHandle(windows.Handle(file.Fd()), directory, user)
+	return privatefile.VerifyWindowsHandle(windows.Handle(file.Fd()), directory, user)
 }
 func localHistorySync(root *os.Root) error { return syncControllerDirectory(root.Name()) }

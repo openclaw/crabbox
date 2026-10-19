@@ -91,7 +91,11 @@ not grant browser authority.
 ### GitHub browser login
 
 `crabbox login --url <broker-url>` opens a GitHub OAuth flow and stores the
-returned signed user token in local config. Authorization during login is gated
+returned signed user token in local config. Config writes stage a private file
+before atomically replacing the destination: mode `0600` on Unix, or a protected
+current-user-only DACL on Windows, verified before any credentials are written.
+Existing parent directory permissions are preserved; Windows writes fail if the
+private descriptor cannot be established. Authorization during login is gated
 by coordinator config:
 
 - `CRABBOX_GITHUB_ALLOWED_ORG` / `CRABBOX_GITHUB_ALLOWED_ORGS` restrict login to
