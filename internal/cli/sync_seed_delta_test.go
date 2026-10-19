@@ -15,19 +15,6 @@ func TestSeededSyncDeltaRoundTripReusedWorkspace(t *testing.T) {
 	for _, exact := range []bool{false, true} {
 		t.Run(map[bool]string{false: "branch", true: "exact-commit"}[exact], func(t *testing.T) {
 			fixture := newGitOverlayFixture(t)
-			manifest, _ := fixture.manifest(t)
-			for _, name := range manifest.Files {
-				path := filepath.Join(fixture.root, name)
-				info, err := os.Lstat(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if info.Mode().IsRegular() {
-					if err := os.Chmod(path, 0o644); err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
 			plan := fixture.plan
 			if exact {
 				plan.Branch = ""
@@ -42,6 +29,21 @@ func TestSeededSyncDeltaRoundTripReusedWorkspace(t *testing.T) {
 				return out
 			}
 			run(remoteGitSeed(remote, plan), nil)
+			manifest, _ := fixture.manifest(t)
+			for _, root := range []string{fixture.root, remote} {
+				for _, name := range manifest.Files {
+					path := filepath.Join(root, name)
+					info, err := os.Lstat(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if info.Mode().IsRegular() {
+						if err := os.Chmod(path, 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			}
 			mustWriteTestFile(t, filepath.Join(fixture.root, "staged.txt"), "staged edit\n")
 			mustWriteTestFile(t, filepath.Join(fixture.root, "added.txt"), "added\n")
 			runGit(t, fixture.root, "add", "staged.txt", "added.txt")
