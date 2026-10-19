@@ -176,11 +176,11 @@ verified digest retroactively.
 Maintainers refresh this pin and its metadata before releases and when upstream
 security fixes require it; see [image maintenance](../operations.md#tart-default-image).
 
-## Automatic cleanup ownership
+## Release and cleanup ownership
 
-`crabbox cleanup --provider tart` treats names and stopped state as discovery
-signals, not permission to delete. Cleanup requires one exact local claim that
-binds the provider, lease, slug, VM name, canonical Tart storage directory, and
+`crabbox stop --provider tart` and `crabbox cleanup --provider tart` treat names
+and stopped state as discovery signals, not permission to delete. Both require
+one exact local claim that binds the provider, lease, slug, VM name, canonical Tart storage directory, and
 the VM's ownership marker. New acquisitions create a private `.crabbox-owner`
 marker after cloning and store its random identity in the claim. Cleanup never
 creates or adopts a missing marker. `TART_HOME` selects the storage directory;
@@ -189,23 +189,32 @@ otherwise Crabbox uses `~/.tart` and passes that same directory to Tart.
 The claim lock covers fresh inventory and marker checks, any required stop,
 deletion, and durable claim removal. A changed claim, missing or replaced marker,
 duplicate claim, different store, or inventory failure prevents deletion.
-Waiting for that lock honors cleanup cancellation, including when pruning a
+Waiting for that lock honors command cancellation, including when pruning a
 missing VM's claim. Cancellation stops the remaining scan rather than being
 treated as an ordinary stale-claim skip; confirmed successful deletion still
 finishes claim retirement.
-Legacy claims without this binding are retained for explicit operator inspection;
-they are not silently upgraded by cleanup. Inspect such VMs with Tart before
-choosing any manual `tart stop <name>` / `tart delete <name>` operation.
 
-Cleanup retains local SSH keys because key creation can precede claim publication;
-the claim lock alone cannot prove a concurrent acquisition is not using a key.
+Explicit release does not require an expired or idle VM and may release kept
+VMs, but it rejects stale claim revisions and rechecks ownership after stopping
+before deletion. A failed stop, delete, or ownership check retains the claim for
+inspection or retry. A cached missing status never authorizes claim removal:
+release requires fresh inventory absence and no VM directory in the recorded
+store.
+
+Legacy claims without this binding are retained for explicit operator inspection;
+they are not silently upgraded by release or cleanup. Inspect such VMs with Tart
+before choosing any manual `tart stop <name>` / `tart delete <name>` operation.
+
+Release and cleanup retain local SSH keys because key creation can precede claim
+publication; the claim lock alone cannot prove a concurrent acquisition is not using a key.
 Missing-instance claim pruning is also limited to the bound storage directory.
 Dry runs perform no provider mutations or claim/key removal.
 
 The marker detects ordinary replacement and reuse; it is not a boundary against
 an operator modifying the Tart store directly. Tart's name-based deletion API
 does not provide an atomic expected-identity check against concurrent raw Tart
-or filesystem replacement. Do not modify a VM's store while cleanup is running.
+or filesystem replacement. Do not modify a VM's store while release or cleanup
+is running.
 
 ## Run artifacts
 
