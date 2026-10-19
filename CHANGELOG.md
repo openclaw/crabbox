@@ -11,6 +11,8 @@
 ### Fixed
 
 - Azure: bind direct checkpoint deletion to the captured snapshot identity and detach stale or legacy records for manual cleanup. [PR 2905](https://github.com/openclaw/crabbox/pull/2905). Thanks @coygeek.
+- Login: preserve configured broker provenance during browser authentication so repository-selected destinations cannot use inherited coordinator credentials. [PR 2903](https://github.com/openclaw/crabbox/pull/2903). Thanks @coygeek.
+- Tart: enforce recorded VM ownership and current claims during explicit release, preserve retry state on failure, and verify storage absence before pruning missing leases. [PR 2902](https://github.com/openclaw/crabbox/pull/2902). Thanks @coygeek.
 - Sync: preserve Darwin symlink permissions in local Git seed and overlay snapshots without changing symlink targets or weakening source validation. [PR 2900](https://github.com/openclaw/crabbox/pull/2900).
 - Sync: retain redacted attempt, stage, and failed-check diagnostics when local Git-seed snapshot preparation exhausts its retries, without changing acceptance or cleanup. [PR 2899](https://github.com/openclaw/crabbox/pull/2899).
 - CI: move macOS checks and release verification to macOS 27, preserving macOS 13 deployment gates and Intel verification through Rosetta.

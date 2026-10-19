@@ -47,6 +47,14 @@ logged in broker=https://broker.example.com provider=aws user=alice@example.com 
 When `--url` is omitted, the configured broker URL is used; `--provider` likewise
 falls back to the configured default provider when unset.
 
+Browser login preserves the configured broker's credential-source checks. A
+repository-defined broker cannot use inherited token helpers or Cloudflare
+Access credentials from your user config or environment. To approve a trusted
+broker for those credentials, pass its URL with `--url` or set
+`CRABBOX_COORDINATOR` explicitly. Credentials defined alongside the broker in
+the same repository config remain supported. Browser login omits the stored
+broker token while obtaining a new one.
+
 ## Operator automation with `--token-stdin`
 
 Trusted operator automation can skip the browser flow and write a shared broker
