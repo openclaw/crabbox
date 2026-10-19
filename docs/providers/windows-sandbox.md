@@ -58,6 +58,20 @@ The temporary workspace is removed after successful runs. With `--keep`, or with
 `--keep-on-failure` after a non-zero exit, Crabbox leaves both the sandbox window
 and the host temp directory in place for inspection.
 
+Host cleanup records the launched process's PID and creation time in a host-only
+file, outside the mapped directories. It can also record descendants while their
+parent's identity is still verifiable. Normal completion, timeout, and cancellation
+cleanup stop only these recorded identities, using a verified process handle;
+process names alone never authorize a stop. A replacement session is left running,
+even if Windows reuses a recorded PID.
+
+If a launcher hands off before Crabbox can verify its descendants, or a process
+identity cannot be read, Crabbox warns and leaves the unverified session running.
+An unconfirmed cleanup also preserves the host workspace. Close the remaining
+Windows Sandbox window manually before deleting that workspace or starting another
+run. This conservative behavior also applies when cancellation cannot reach the
+host runner and Crabbox uses its fallback cleanup.
+
 `warmup`, `list`, `status`, and `stop` are not persistent lifecycle operations
 for this provider. Close the Windows Sandbox window to end a kept session.
 The provider therefore omits `run-session`, and `--lease-output` remains
