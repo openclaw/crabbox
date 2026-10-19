@@ -722,6 +722,25 @@ removed, retry the same checkpoint deletion to finish its recorded cleanup.
 An unavailable backing mapping or failed discovery retains the checkpoint;
 it does not count as completed cleanup.
 
+Direct Azure OS-disk deletion requires the ARM resource ID and Azure `uniqueId`
+saved when the snapshot was captured. Crabbox reads the current snapshot before
+deleting it and compares both values. A replacement at the same name, missing
+identity, or contradictory response stops deletion and retains the local record
+with `native.state=detached` and a `native.detachedReason`. Later delete attempts
+report that reason without contacting Azure. Inspection exposes the reason;
+`inspect --verify` reports `provider_state=detached` and `next_action=manual_cleanup`.
+An inspection or deletion API error retains the record for retry; confirmed
+absence of an identity-bound snapshot completes deletion without a DELETE.
+
+Legacy direct Azure records have no capture-time `uniqueId`; Crabbox never
+adopts the current snapshot's identity into them or deletes their snapshot by
+name. Inspect and clean up the resource manually in Azure, then use
+`crabbox checkpoint delete <id> --local-only` to remove the retained record.
+The pinned Compute API `2026-03-02` has no documented conditional snapshot
+DELETE (`If-Match`), so the identity check detects replacements already present
+at inspection but cannot prevent concurrent external replacement between GET
+and DELETE. Coordinate external snapshot changes with checkpoint deletion.
+
 Coordinator-managed checkpoints delete through the checkpoint endpoint, never
 the generic image endpoint. Active use claims, promoted-image catalog pins,
 pending deletion, provider errors, and ambiguous deletion retain coordinator

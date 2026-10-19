@@ -62,7 +62,7 @@ type freestyleExecRequest struct {
 }
 
 type freestyleExecResponse struct {
-	StatusCode int     `json:"statusCode"`
+	StatusCode *int    `json:"statusCode"`
 	Stdout     *string `json:"stdout"`
 	Stderr     *string `json:"stderr"`
 }
@@ -253,7 +253,12 @@ func (c *freestyleHTTPClient) Exec(ctx context.Context, id string, command strin
 	if parsed.Stderr != nil {
 		_, _ = stderr.Write([]byte(*parsed.Stderr))
 	}
-	return parsed.StatusCode, nil
+	// Freestyle omits the exit status (or returns null) when the command times
+	// out. Preserve any captured output, but never infer a successful exit.
+	if parsed.StatusCode == nil {
+		return 1, freestyleError("exec", fmt.Errorf("command timed out: %w", context.DeadlineExceeded))
+	}
+	return *parsed.StatusCode, nil
 }
 
 func (c *freestyleHTTPClient) WriteFile(ctx context.Context, id, path string, content, encoding string) error {

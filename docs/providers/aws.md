@@ -564,6 +564,13 @@ Brokered cleanup is owned by the Worker (lease expiry plus an AWS orphan
 sweep). Direct cleanup is best-effort via provider labels and
 `crabbox cleanup --provider aws`.
 
+Direct lease release deletes the SSH key registration only when its current
+immutable key-pair ID matches the ID retained in the local lease claim and the
+registration still has canonical Crabbox ownership tags. Deletion uses that ID,
+so reusing the key name cannot redirect cleanup to a replacement. A mismatched
+registration or a legacy claim without a retained key ID produces a skip message;
+the original instance is still terminated and the lease is released.
+
 AWS also supports the provider-neutral retained run handle. Add
 `--lease-output <file>` to a retained run to record the exact lease ID, slug,
 coordinator run ID when brokered, and cleanup command before sync or command
