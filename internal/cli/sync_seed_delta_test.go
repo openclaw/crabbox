@@ -9,7 +9,26 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 )
+
+func chmodSeededSyncBaseline(t *testing.T, manifest SyncManifest, roots ...string) {
+	t.Helper()
+	for _, root := range roots {
+		for _, name := range manifest.Files {
+			path := filepath.Join(root, name)
+			info, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().IsRegular() {
+				if err := os.Chmod(path, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+}
 
 func TestSeededSyncDeltaRoundTripReusedWorkspace(t *testing.T) {
 	for _, exact := range []bool{false, true} {
@@ -30,19 +49,10 @@ func TestSeededSyncDeltaRoundTripReusedWorkspace(t *testing.T) {
 			}
 			run(remoteGitSeed(remote, plan), nil)
 			manifest, _ := fixture.manifest(t)
-			for _, root := range []string{fixture.root, remote} {
-				for _, name := range manifest.Files {
-					path := filepath.Join(root, name)
-					info, err := os.Lstat(path)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if info.Mode().IsRegular() {
-						if err := os.Chmod(path, 0o644); err != nil {
-							t.Fatal(err)
-						}
-					}
-				}
+			chmodSeededSyncBaseline(t, manifest, fixture.root, remote)
+			cleanTime := time.Unix(1, 0)
+			if err := os.Chtimes(filepath.Join(remote, "clean.txt"), cleanTime, cleanTime); err != nil {
+				t.Fatal(err)
 			}
 			mustWriteTestFile(t, filepath.Join(fixture.root, "staged.txt"), "staged edit\n")
 			mustWriteTestFile(t, filepath.Join(fixture.root, "added.txt"), "added\n")
@@ -84,7 +94,7 @@ func TestSeededSyncDeltaRoundTripReusedWorkspace(t *testing.T) {
 				changes := run(remoteSeededSyncChanges(remote, plan), nil)
 				delta, count, _, ok := seededSyncTransferFromChanges(fixture.root, manifest, changes)
 				if !ok || count >= len(manifest.Files) {
-					t.Fatalf("full transfer: accepted=%t delta=%q", ok, delta)
+					t.Fatalf("full transfer: iteration=%d accepted=%t delta=%q local=%q remote=%q", iteration, ok, delta, manifest.OverlayFiles, changes)
 				}
 				if iteration == 0 && bytes.Contains(delta, []byte("clean.txt\x00")) {
 					t.Fatalf("clean seeded file selected: %q", delta)
@@ -220,10 +230,12 @@ func TestSeededSyncTextAttributesPreserveWorkingBytes(t *testing.T) {
 	if out, err := runPortableGitControlCommand(t, remoteGitSeed(remote, fixture.plan), nil); err != nil {
 		t.Fatalf("seed: %v %s", err, out)
 	}
-	// Git normalizes this remote-only edit to the original blob, so diff-files
+	manifest, _ := fixture.manifest(t)
+	chmodSeededSyncBaseline(t, manifest, fixture.root, remote)
+	// Git normalizes this remote-only edit to the original blob, so diff
 	// alone cannot identify it. The line-ending inventory must repair it.
 	mustWriteTestFile(t, filepath.Join(remote, "clean.txt"), "base clean.txt\r\n")
-	manifest, _ := fixture.manifest(t)
+	manifest, _ = fixture.manifest(t)
 	manifest, err := seededSyncManifest(fixture.repo, manifest)
 	if err != nil {
 		t.Fatal(err)
@@ -242,7 +254,7 @@ func TestSeededSyncTextAttributesPreserveWorkingBytes(t *testing.T) {
 		}
 	}
 	if slices.Contains(splitNul(delta), "auto.bin") || slices.Contains(splitNul(delta), "staged.txt") {
-		t.Fatalf("unchanged bytes selected: %q", delta)
+		t.Fatalf("unchanged bytes selected: %q local=%q remote=%q", delta, manifest.OverlayFiles, changes)
 	}
 	cmd := exec.Command("rsync", "-a", "--checksum", "--from0", "--files-from=-", fixture.root+"/", remote+"/")
 	cmd.Stdin = bytes.NewReader(delta)

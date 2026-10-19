@@ -195,7 +195,7 @@ git ls-files -z > "$probe/paths"
 git check-attr -z --stdin ` + strings.Join(seededSyncTransformAttributes, " ") + ` < "$probe/paths" > "$probe/attrs"
 git ls-tree -r -l -z --full-tree HEAD > "$probe/sizes"
 ` + remoteSyncInterpreterCommand(python, perl, `"$probe/flags" "$probe/attrs" "$probe/modes" "$probe/sizes"`) + `
-git -c core.trustctime=true -c core.checkStat=default -c core.ignorestat=false diff-files --no-ext-diff --no-textconv --no-renames --name-only -z > "$probe/changed"
+git -c core.trustctime=true -c core.checkStat=default -c core.ignorestat=false -c core.safecrlf=false -c diff.autoRefreshIndex=true diff --no-ext-diff --no-textconv --no-renames --name-only -z > "$probe/changed"
 printf 'CRABBOX_SEEDED_DELTA_V1\000'
 cat "$probe/changed" "$probe/modes"
 `

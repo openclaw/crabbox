@@ -440,7 +440,9 @@ excludes, and finalization. Reused workspaces include previous edits that have
 since been reverted locally and files changed by remote commands. Delta files
 use checksums so same-size edits with unchanged timestamps are repaired. Clean
 seeded files retain their checkout timestamps instead of being read by rsync
-solely because the local timestamps differ. Nonstandard file permissions also
+solely because the local timestamps differ. Remote timestamp-only changes are
+checked against file contents rather than treated as edits by Git's stat cache.
+Nonstandard file permissions also
 enter the delta. Ordinary `text=auto eol=lf` repositories are supported. Working files whose
 sizes differ from their Git blobs also enter the delta, including CRLF bytes
 that Git considers clean after normalization. Blob-size metadata avoids reading
