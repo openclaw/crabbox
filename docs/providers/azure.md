@@ -399,6 +399,14 @@ creates a durable pin that blocks expiry and manual checkpoint deletion until
 the exact promotion is replaced. Direct Azure snapshots and older image records
 remain operator-managed.
 
+Direct OS-disk checkpoint deletion compares the captured ARM ID and immutable
+snapshot `uniqueId` against a fresh read. Missing or mismatched identity detaches
+the local record and leaves the current snapshot untouched. Legacy records
+require manual Azure cleanup followed by `checkpoint delete <id> --local-only`;
+see [checkpoint deletion](../commands/checkpoint.md#delete), including the
+remaining GET-to-DELETE race because the snapshot API has no documented
+conditional deletion support.
+
 ## Classes
 
 Default Linux SKU candidates (first that provisions wins):

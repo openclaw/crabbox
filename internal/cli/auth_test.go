@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -490,7 +491,11 @@ func TestCoordinatorClientForLoginAppliesURLBeforeRegisteredModeValidation(t *te
 	server := httptest.NewServer(http.NotFoundHandler())
 	defer server.Close()
 
-	client, err := coordinatorClientForLogin(server.URL, "")
+	cfg, err := loadConfigWithOverrides(server.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, _, err := coordinatorClientConfigForLogin(cfg, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,6 +507,133 @@ func TestCoordinatorClientForLoginAppliesURLBeforeRegisteredModeValidation(t *te
 	}
 	if got := strings.Join(client.TokenCommand, "\x00"); got != "token-helper\x00--scope\x00example" {
 		t.Fatalf("login token command=%q", client.TokenCommand)
+	}
+}
+
+func TestCoordinatorClientConfigForLoginPreservesProvenance(t *testing.T) {
+	const brokerURL = "https://broker.example.test"
+	for _, test := range []struct {
+		name       string
+		source     credentialValueSource
+		sameSource bool
+	}{
+		{"repository without inherited credentials", credentialSourceRepository, false},
+		{"repository with same-source Access", credentialSourceRepository, true},
+		{"trusted user broker", credentialSourceTrustedFile, false},
+		{"environment-selected broker", credentialSourceEnvironment, false},
+		{"explicit URL", credentialSourceFlag, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Chdir(t.TempDir())
+			configPath := "crabbox.yaml"
+			if test.source == credentialSourceTrustedFile {
+				configPath = userConfigPath()
+				if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			contents := "broker:\n  url: " + brokerURL + "\n  token: fixture-stored-token\n"
+			if test.sameSource {
+				contents += "  access:\n    clientId: fixture-id\n    clientSecret: fixture-secret\n    token: fixture-access-token\n"
+			} else if test.source != credentialSourceRepository {
+				t.Setenv("CRABBOX_COORDINATOR_TOKEN_COMMAND", `["crabbox-login-helper-must-not-run"]`)
+				t.Setenv("CRABBOX_ACCESS_CLIENT_ID", "fixture-id")
+				t.Setenv("CRABBOX_ACCESS_CLIENT_SECRET", "fixture-secret")
+				t.Setenv("CRABBOX_ACCESS_TOKEN", "fixture-access-token")
+			}
+			if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var explicitURL string
+			if test.source == credentialSourceEnvironment {
+				t.Setenv("CRABBOX_COORDINATOR", brokerURL)
+			} else if test.source == credentialSourceFlag {
+				explicitURL = brokerURL
+			}
+			cfg, err := loadConfigWithOverrides(explicitURL, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			client, loginCfg, err := coordinatorClientConfigForLogin(cfg, "aws")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := loginCfg.credentialProvenance.coordinator; got != test.source {
+				t.Errorf("broker source=%v want %v", got, test.source)
+			}
+			if client.BaseURL != brokerURL || loginCfg.Coordinator != brokerURL {
+				t.Errorf("login broker changed: client=%q config=%q", client.BaseURL, loginCfg.Coordinator)
+			}
+			if client.Token != "" || loginCfg.CoordToken != "" || cfg.CoordToken != "fixture-stored-token" {
+				t.Error("login must omit the stored token without changing the input config")
+			}
+			if client.Access != cfg.Access || loginCfg.Access != cfg.Access || strings.Join(client.TokenCommand, "\x00") != strings.Join(cfg.CoordTokenCommand, "\x00") {
+				t.Error("login changed approved Access or token-helper credentials")
+			}
+		})
+	}
+}
+
+func TestLoginRejectsInheritedCredentialsForRepositoryBroker(t *testing.T) {
+	credentials := []struct {
+		name  string
+		yaml  string
+		env   string
+		value string
+	}{
+		{"token helper", "", "CRABBOX_COORDINATOR_TOKEN_COMMAND", `["crabbox-login-helper-must-not-run"]`},
+		{"Access client secret", "  access:\n    clientId: fixture-id\n    clientSecret: fixture-secret\n", "CRABBOX_ACCESS_CLIENT_SECRET", "fixture-secret"},
+		{"Access token", "  access:\n    token: fixture-token\n", "CRABBOX_ACCESS_TOKEN", "fixture-token"},
+	}
+	for _, explicitConfig := range []bool{false, true} {
+		for _, environmentCredential := range []bool{false, true} {
+			for _, credential := range credentials {
+				if !environmentCredential && (explicitConfig || credential.yaml == "") {
+					continue
+				}
+				name := fmt.Sprintf("explicit_config=%t/environment_credential=%t/%s", explicitConfig, environmentCredential, credential.name)
+				t.Run(name, func(t *testing.T) {
+					clearConfigEnv(t)
+					repo := t.TempDir()
+					t.Chdir(repo)
+					if err := os.Mkdir(filepath.Join(repo, ".git"), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					var requests atomic.Int32
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						requests.Add(1)
+						w.WriteHeader(http.StatusTeapot)
+					}))
+					defer server.Close()
+					config := "broker:\n  url: " + server.URL + "\n"
+					if explicitConfig {
+						t.Setenv("CRABBOX_CONFIG", filepath.Join(repo, "crabbox.yaml"))
+					}
+					if environmentCredential {
+						t.Setenv(credential.env, credential.value)
+					} else {
+						if err := os.MkdirAll(filepath.Dir(userConfigPath()), 0o700); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(userConfigPath(), []byte("broker:\n"+credential.yaml), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := os.WriteFile("crabbox.yaml", []byte(config), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					app := App{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}}
+					err := app.login(context.Background(), []string{"--no-browser"})
+					if err == nil || !strings.Contains(err.Error(), "repository-configured broker.url cannot be combined with inherited coordinator credentials") {
+						t.Errorf("login error=%v; want inherited-credential rejection before helper or request activity", err)
+					}
+					if got := requests.Load(); got != 0 {
+						t.Errorf("login sent %d requests before rejecting inherited credentials", got)
+					}
+				})
+			}
+		}
 	}
 }
 

@@ -1903,6 +1903,9 @@ func (c *AzureClient) CreateOSDiskSnapshot(ctx context.Context, vmName, snapshot
 		ResourceID: *response.ID,
 		Direct:     true,
 	}
+	if response.Properties != nil {
+		image.ResourceUniqueID = stringValue(response.Properties.UniqueID)
+	}
 	return image, nil
 }
 
@@ -1934,8 +1937,8 @@ func (c *AzureClient) GetOSDiskSnapshot(ctx context.Context, snapshotID string) 
 	if response.Properties != nil && response.Properties.ProvisioningState != nil {
 		state = string(*response.Properties.ProvisioningState)
 	}
-	id := firstNonBlank(stringValue(response.ID), snapshotID)
-	return NativeCheckpointImage{
+	id := stringValue(response.ID)
+	image := NativeCheckpointImage{
 		ID:         id,
 		Name:       firstNonBlank(stringValue(response.Name), name),
 		State:      state,
@@ -1944,10 +1947,39 @@ func (c *AzureClient) GetOSDiskSnapshot(ctx context.Context, snapshotID string) 
 		Region:     c.Location,
 		ResourceID: id,
 		Direct:     true,
-	}, nil
+	}
+	if response.Properties != nil {
+		image.ResourceUniqueID = stringValue(response.Properties.UniqueID)
+	}
+	return image, nil
 }
 
-func (c *AzureClient) DeleteOSDiskSnapshot(ctx context.Context, snapshotID string) error {
+type azureSnapshotIdentityError struct{ reason string }
+
+func (e *azureSnapshotIdentityError) Error() string {
+	return "Azure snapshot deletion refused: " + e.reason + "; checkpoint detached; inspect the snapshot in Azure for manual cleanup, then use --local-only to remove the record"
+}
+
+func (c *AzureClient) DeleteOSDiskSnapshot(ctx context.Context, snapshotID, expectedUniqueID string) error {
+	if strings.TrimSpace(expectedUniqueID) == "" {
+		return &azureSnapshotIdentityError{reason: "captured Azure snapshot uniqueId is missing (legacy or incomplete checkpoint)"}
+	}
+	canonicalID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/snapshots/%s", c.SubscriptionID, c.ResourceGroup, azureResourceName(snapshotID))
+	if !strings.EqualFold(snapshotID, canonicalID) {
+		return &azureSnapshotIdentityError{reason: "captured Azure snapshot resource ID does not match the deletion scope"}
+	}
+	snapshot, err := c.GetOSDiskSnapshot(ctx, snapshotID)
+	if err != nil {
+		if isAzureNotFoundError(err) {
+			return nil
+		}
+		return fmt.Errorf("verify OS disk snapshot identity before deletion: %w", err)
+	}
+	if !strings.EqualFold(snapshot.ResourceID, snapshotID) || snapshot.ResourceUniqueID != expectedUniqueID {
+		return &azureSnapshotIdentityError{reason: "current Azure snapshot resource ID or uniqueId does not match the captured identity"}
+	}
+	// Compute 2026-03-02 exposes no conditional snapshot DELETE. This check
+	// detects existing replacements, but cannot fence replacement after the GET.
 	poller, err := c.snapc.BeginDelete(ctx, c.ResourceGroup, azureResourceName(snapshotID), nil)
 	if err != nil {
 		if isAzureNotFoundError(err) {

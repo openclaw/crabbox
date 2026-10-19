@@ -461,6 +461,7 @@ type CoordinatorImage struct {
 	AccountID            string                           `json:"accountId,omitempty"`
 	Project              string                           `json:"project,omitempty"`
 	ResourceID           string                           `json:"resourceID,omitempty"`
+	ResourceUniqueID     string                           `json:"resourceUniqueId,omitempty"`
 	SnapshotIDs          []string                         `json:"snapshotIds,omitempty"`
 	Snapshots            []string                         `json:"snapshots,omitempty"`
 	Direct               bool                             `json:"direct,omitempty"`
