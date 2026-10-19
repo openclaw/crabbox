@@ -66,22 +66,26 @@ export interface ProvisioningRuntime {
 
 export type CoordinatorRequestQueue = "direct" | "lifecycle";
 
-export function controlMessageOwnsTransaction(message: unknown): boolean {
-  if (typeof message !== "string") {
-    return false;
-  }
-  try {
-    const input = JSON.parse(message) as { type?: unknown };
-    return input.type === "heartbeat";
-  } catch {
-    return false;
-  }
+export function coordinatorRequestPublishesRunEvents(request: Request): boolean {
+  const path = new URL(request.url).pathname.split("/").filter(Boolean);
+  const method = request.method.toUpperCase();
+  return (
+    path[0] === "v1" &&
+    path[1] === "runs" &&
+    ((method === "POST" && path.length === 2) ||
+      (method === "PUT" && path.length === 3) ||
+      (["POST", "PUT"].includes(method) &&
+        path.length === 4 &&
+        ["events", "finish", "admission-failure"].includes(path[3] ?? "")))
+  );
 }
 
 export function coordinatorRequestQueue(request: Request): CoordinatorRequestQueue {
   const url = new URL(request.url);
   const path = url.pathname.split("/").filter(Boolean);
   const method = request.method.toUpperCase();
+  // These routes commit with storage transactions; subscriber authorization may use GitHub.
+  if (coordinatorRequestPublishesRunEvents(request)) return "direct";
   if (path[0] === "v1" && path[1] === "serve") return "direct";
   if (method === "POST" && path.join("/") === "v1/admin/tailscale-preflight") {
     return "direct";
@@ -360,7 +364,7 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
     }
     socket.accept();
     socket.addEventListener("message", (event) => {
-      void this.runSocketOperation(attachment, event.data, () => handlers.message(event.data));
+      void handlers.message(event.data);
     });
     socket.addEventListener("close", (event) => {
       handlers.close(event.code, event.reason);
@@ -439,23 +443,4 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
   clearAlarm(): Promise<void> {
     return this.commitAndWake(async (transaction) => setLegacyWake(transaction));
   }
-
-  private runSocketOperation<T>(
-    attachment: unknown,
-    message: unknown,
-    callback: () => Promise<T> | T,
-  ): Promise<T> {
-    const operation = async () => callback();
-    if (socketAttachmentKind(attachment) === "control" && !controlMessageOwnsTransaction(message)) {
-      return this.runExclusive(operation);
-    }
-    return operation();
-  }
-}
-
-function socketAttachmentKind(attachment: unknown): string | undefined {
-  if (!attachment || typeof attachment !== "object" || !("kind" in attachment)) {
-    return undefined;
-  }
-  return String(attachment.kind);
 }

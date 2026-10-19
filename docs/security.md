@@ -296,6 +296,14 @@ membership-cache window. Membership errors fail closed. New or restored legacy
 GitHub bridge tickets and attachments without a complete encrypted grant and
 portal-session binding fail before carrying traffic; plaintext GitHub
 credentials are never stored in bridge state.
+Non-admin control sessions use the same continuing credential checks on incoming
+messages, subscribed run events, and lease heartbeats. Shared-token controls
+retain only a token hash; GitHub controls retain the encrypted grant and the
+hash of the signed token that opened them. Direct GitHub API-user tokens do not
+require a Portal cookie; Portal-backed controls also end when that Portal
+session logs out. Restored controls without verifiable credential provenance
+must reconnect. GitHub checks retain the configured membership-cache window,
+and queued heartbeats recheck current authority before changing lease state.
 Shared-operator requests do **not** trust caller-supplied `X-Crabbox-Owner` /
 `X-Crabbox-Org` headers — pin that automation's identity with
 `CRABBOX_SHARED_OWNER` (and `CRABBOX_DEFAULT_ORG`), or prefer per-user signed

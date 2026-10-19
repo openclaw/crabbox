@@ -950,7 +950,7 @@ describe("coordinator runtimes", () => {
     expect(order).toEqual(["first:start", "first:end", "second"]);
   });
 
-  it("serializes fallback control socket messages with state transitions", async () => {
+  it("runs fallback control authorization outside lifecycle state transitions", async () => {
     const state = {
       storage: {},
     } as unknown as DurableObjectState;
@@ -976,7 +976,7 @@ describe("coordinator runtimes", () => {
 
     listeners.get("message")?.({ data: "{}" } as MessageEvent);
     await Promise.resolve();
-    expect(message).not.toHaveBeenCalled();
+    expect(message).toHaveBeenCalledOnce();
 
     releaseTransition();
     await transition;

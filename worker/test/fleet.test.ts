@@ -6,7 +6,12 @@ import { Script, createContext } from "node:vm";
 import { AwsClient } from "aws4fetch";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 
-import { adminGrantVersion, issueUserToken } from "../src/auth";
+import {
+  adminGrantVersion,
+  issueUserToken,
+  requestWithAuthContext,
+  requestWithAdminGrantVersion,
+} from "../src/auth";
 import { EC2SpotClient, AWSLeaseAuthorityError, awsLeaseImageIdentity } from "../src/aws";
 import { RefreshingAWSFetchClient } from "../src/aws-fetch-client";
 import {
@@ -50060,6 +50065,7 @@ describe("fleet run history", () => {
         const server = new FakeWebSocket({
           kind: "control",
           clientID: "ctrl_memory",
+          auth: "proxy",
           owner: "alice@example.com",
           org: "example-org",
           subscriptions: {},
@@ -50919,6 +50925,7 @@ describe("fleet run history", () => {
     const socket = new FakeWebSocket({
       kind: "control",
       clientID: "owner-audit",
+      auth: "proxy",
       owner: "alice@example.com",
       org: "example-org",
       subscriptions: {},
@@ -51305,6 +51312,7 @@ describe("fleet run history", () => {
     const socket = new FakeWebSocket({
       kind: "control",
       clientID: "ctrl_1",
+      auth: "proxy",
       owner: "peter@example.com",
       org: "openclaw",
       subscriptions: {},
@@ -51441,6 +51449,7 @@ describe("fleet run history", () => {
     const attachment = {
       kind: "control" as const,
       clientID: "ctrl_provider_fence",
+      auth: "proxy",
       owner: "peter@example.com",
       org: "openclaw",
       subscriptions: {},
@@ -51499,6 +51508,7 @@ describe("fleet run history", () => {
     const attachment = {
       kind: "control" as const,
       clientID: "ctrl_provider_alias",
+      auth: "proxy",
       owner: "peter@example.com",
       org: "openclaw",
       subscriptions: {},
@@ -54712,7 +54722,11 @@ function expectBoundedAlarmReads(storage: ObservedMemoryStorage, count: number):
 }
 
 describe("synthetic acknowledgement reliability", () => {
-  const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+  const headers = {
+    "x-crabbox-owner": "alice@example.com",
+    "x-crabbox-org": "example-org",
+    "x-crabbox-auth": "proxy",
+  };
   const leaseID = "cbx_aacc00000001";
   const releaseID = "cbx_aacc00000002";
 
@@ -54772,6 +54786,7 @@ describe("synthetic acknowledgement reliability", () => {
     const socket = new FakeWebSocket({
       kind: "control",
       clientID,
+      auth: "proxy",
       owner: "alice@example.com",
       org: "example-org",
       subscriptions: {},
@@ -61865,6 +61880,7 @@ describe("coordinator lease lifetime policy", () => {
     const socket = new FakeWebSocket({
       kind: "control",
       clientID: "ctrl_budget",
+      auth: "proxy",
       owner: lease.owner,
       org: lease.org,
       admin: false,
@@ -62220,3 +62236,412 @@ it.each([
     ).toBe(status === 202 ? expected : undefined);
   },
 );
+
+describe("control credential continuation", () => {
+  afterEach(() => vi.restoreAllMocks());
+  async function fixture(auth: "bearer" | "github" | "proxy" | "admin", portal = false) {
+    const storage = new MemoryStorage();
+    const runtime = new FakeCoordinatorRuntime(storage);
+    const env = {
+      CRABBOX_SHARED_TOKEN: "synthetic-shared-token",
+      CRABBOX_ADMIN_TOKEN: "synthetic-admin-token",
+      CRABBOX_SESSION_SECRET: "synthetic-session-secret",
+      CRABBOX_DEFAULT_ORG: "example-org",
+      CRABBOX_GITHUB_ALLOWED_ORG: "example-org",
+      CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS: "0",
+    } as Env;
+    const owner = auth === "github" ? testGitHubOwner : "alice@example.com";
+    const token =
+      auth === "github"
+        ? await issueUserToken(env, {
+            owner,
+            ownerSource: "github-verified-email",
+            org: "example-org",
+            login: "friend",
+            githubAccessToken: "synthetic-github-token",
+          })
+        : auth === "admin"
+          ? env.CRABBOX_ADMIN_TOKEN
+          : env.CRABBOX_SHARED_TOKEN;
+    const payload = auth === "github" ? decodeUserTokenPayload(token!) : undefined;
+    let inMutation = false;
+    const runExclusive = runtime.runExclusive.bind(runtime);
+    vi.spyOn(runtime, "runExclusive").mockImplementation(async (callback) => {
+      inMutation = true;
+      try {
+        return await runExclusive(callback);
+      } finally {
+        inMutation = false;
+      }
+    });
+    const github = githubFetchMock({ member: true, org: "example-org" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        expect(inMutation, "GitHub membership checks must not hold the lifecycle lock").toBe(false);
+        return github(input);
+      }),
+    );
+    const accept = vi.spyOn(runtime, "acceptWebSocket");
+    const fleet = new FleetCoordinator(runtime, env);
+    const requestAuth = {
+      authorized: true,
+      auth: auth === "admin" ? ("bearer" as const) : auth,
+      admin: auth === "admin",
+      owner,
+      org: "example-org",
+      ...(payload
+        ? {
+            login: "friend",
+            portalSession: portal,
+            tokenExpiresAt: new Date(payload.exp * 1000).toISOString(),
+            githubGrant: {
+              tokenID: payload.jti,
+              sealedCredential: payload.githubCredential,
+              expiresAt: new Date(payload.exp * 1000).toISOString(),
+            },
+          }
+        : {}),
+    };
+    await fleet.fetch(
+      await requestWithAdminGrantVersion(
+        requestWithAuthContext(
+          request("GET", "/v1/control", {
+            headers: { upgrade: "websocket", authorization: `Bearer ${token}` },
+          }),
+          requestAuth,
+        ),
+        env,
+      ),
+    );
+    const socket = runtime.createdSockets[0]!;
+    const handlers = accept.mock.calls[0]![3];
+    const attachment = socket.deserializeAttachment() as Record<string, unknown>;
+    const run = testRun({
+      id: "run_credential_control",
+      owner,
+      org: "example-org",
+      leaseIDs: [],
+      leaseOwners: [],
+    });
+    const lease = testLease({
+      id: "cbx_abcdef012345",
+      owner,
+      org: "example-org",
+      provider: "external",
+      lifecycle: "registered",
+      state: "active",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    storage.seed(`run:${run.id}`, run);
+    const internal = fleet as unknown as {
+      broadcastRunEvent(run: RunRecord, event: unknown): Promise<void>;
+      controlSockets: Map<string, WebSocket>;
+    };
+    const send = (type: string, extra = {}) => handlers.message(JSON.stringify({ type, ...extra }));
+    const broadcast = () =>
+      internal.broadcastRunEvent(run, {
+        seq: 1,
+        runID: run.id,
+        type: "log",
+        createdAt: new Date().toISOString(),
+        log: "synthetic output",
+      });
+    const revoke = () => {
+      if (auth === "github") env.CRABBOX_GITHUB_REVOKED_USERS = owner;
+      else env.CRABBOX_SHARED_TOKEN = "synthetic-rotated-token";
+    };
+    return {
+      storage,
+      runtime,
+      fleet,
+      env,
+      socket,
+      handlers,
+      attachment,
+      run,
+      lease,
+      internal,
+      send,
+      broadcast,
+      revoke,
+      github,
+    };
+  }
+
+  it.each(["bearer", "github", "proxy", "admin"] as const)(
+    "retains valid %s control events and heartbeats",
+    async (auth) => {
+      const f = await fixture(auth);
+      await f.send("subscribe_run", { runID: f.run.id });
+      await f.broadcast();
+      await f.send("heartbeat", { leaseID: f.lease.id, idleTimeoutSeconds: 777 });
+      expect(f.socket.closeCode).toBeUndefined();
+      expect(f.socket.sentJSON()).toContainEqual(
+        expect.objectContaining({ type: "heartbeat", ok: true }),
+      );
+      expect(f.socket.sentJSON()).toContainEqual(
+        expect.objectContaining({
+          type: "run_events",
+          events: [expect.objectContaining({ log: "synthetic output" })],
+        }),
+      );
+      expect(f.storage.value<LeaseRecord>(`lease:${f.lease.id}`)?.idleTimeoutSeconds).toBe(777);
+      expect(f.attachment.sharedTokenHash).toBe(
+        auth === "bearer" ? await sha256Hex("synthetic-shared-token") : undefined,
+      );
+      const githubGrant = expect.objectContaining({ tokenID: expect.any(String) });
+      expect(f.attachment.githubGrant).toEqual(auth === "github" ? githubGrant : undefined);
+    },
+  );
+
+  it.each([
+    ["bearer", "incoming"],
+    ["bearer", "outgoing"],
+    ["github", "incoming"],
+    ["github", "outgoing"],
+  ] as const)("revokes %s controls on %s traffic", async (auth, path) => {
+    const f = await fixture(auth);
+    await f.send("subscribe_run", { runID: f.run.id });
+    const before = f.socket.sentJSON();
+    const original = structuredClone(f.storage.value(`lease:${f.lease.id}`));
+    f.revoke();
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 1_100);
+    if (path === "incoming")
+      await f.send("heartbeat", { leaseID: f.lease.id, idleTimeoutSeconds: 888 });
+    else await f.broadcast();
+    expect(f.socket.closeCode).toBe(1008);
+    expect(f.socket.sentJSON()).toEqual(before);
+    expect(f.storage.value(`lease:${f.lease.id}`)).toEqual(original);
+    expect(f.internal.controlSockets.size).toBe(0);
+  });
+
+  it.each(["bearer", "github"] as const)(
+    "revalidates queued %s heartbeats before mutation",
+    async (auth) => {
+      const f = await fixture(auth);
+      const entered = deferred<void>();
+      const release = deferred<void>();
+      vi.spyOn(f.runtime, "runExclusive").mockImplementationOnce(async (callback) => {
+        entered.resolve();
+        await release.promise;
+        return callback();
+      });
+      const original = structuredClone(f.storage.value(`lease:${f.lease.id}`));
+      const heartbeat = f.send("heartbeat", { leaseID: f.lease.id, idleTimeoutSeconds: 888 });
+      await entered.promise;
+      f.revoke();
+      release.resolve();
+      await heartbeat;
+      expect(f.socket.closeCode).toBe(1008);
+      expect(f.storage.value(`lease:${f.lease.id}`)).toEqual(original);
+      expect(f.socket.sentJSON()).not.toContainEqual(
+        expect.objectContaining({ type: "heartbeat", ok: true }),
+      );
+    },
+  );
+
+  it.each(["bearer", "github", "proxy"] as const)(
+    "continues a restored current %s control",
+    async (auth) => {
+      const f = await fixture(auth);
+      const restored = new FakeWebSocket(f.attachment);
+      const runtime = new FakeCoordinatorRuntime(f.storage);
+      vi.spyOn(runtime, "getWebSockets").mockReturnValue([restored as unknown as WebSocket]);
+      const fleet = new FleetCoordinator(runtime, f.env);
+      await fleet.webSocketMessage(restored as unknown as WebSocket, '{"type":"ping"}');
+      expect(restored.closeCode).toBeUndefined();
+      expect(restored.sentJSON()).toEqual([{ type: "pong" }]);
+    },
+  );
+
+  it.each(["bearer", "github"] as const)("rejects restored revoked %s controls", async (auth) => {
+    const f = await fixture(auth);
+    f.revoke();
+    const restored = new FakeWebSocket(f.attachment);
+    const runtime = new FakeCoordinatorRuntime(f.storage);
+    vi.spyOn(runtime, "getWebSockets").mockReturnValue([restored as unknown as WebSocket]);
+    const fleet = new FleetCoordinator(runtime, f.env);
+    await fleet.fetch(request("GET", "/v1/health"));
+    expect(restored.closeCode).toBe(1008);
+    expect(restored.sentJSON()).toEqual([]);
+  });
+
+  it.each(["bearer", "github"] as const)(
+    "rejects restored incomplete %s controls",
+    async (auth) => {
+      const f = await fixture(auth);
+      delete f.attachment[auth === "bearer" ? "sharedTokenHash" : "githubGrant"];
+      const restored = new FakeWebSocket(f.attachment);
+      const runtime = new FakeCoordinatorRuntime(f.storage);
+      vi.spyOn(runtime, "getWebSockets").mockReturnValue([restored as unknown as WebSocket]);
+      const fleet = new FleetCoordinator(runtime, f.env);
+      await fleet.fetch(request("GET", "/v1/health"));
+      expect(restored.closeCode).toBe(1012);
+    },
+  );
+
+  it.each(["membership", "expiry", "secret rotation", "API error"] as const)(
+    "revokes GitHub control output after %s",
+    async (reason) => {
+      const f = await fixture("github");
+      await f.send("subscribe_run", { runID: f.run.id });
+      const before = f.socket.sentJSON();
+      if (reason === "membership")
+        f.github.mockImplementation(githubFetchMock({ member: false, org: "example-org" }));
+      if (reason === "expiry")
+        (f.attachment.githubGrant as { expiresAt: string }).expiresAt = new Date(
+          Date.now() - 1,
+        ).toISOString();
+      if (reason === "secret rotation") f.env.CRABBOX_SESSION_SECRET = "synthetic-new-secret";
+      if (reason === "API error") f.github.mockRejectedValue(new Error("synthetic unavailable"));
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 1_100);
+      await f.broadcast();
+      expect(f.socket.closeCode).toBe(1008);
+      expect(f.socket.sentJSON()).toEqual(before);
+    },
+  );
+
+  it("revalidates a queued GitHub heartbeat outside the lock after its cached check expires", async () => {
+    const f = await fixture("github");
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    vi.spyOn(f.runtime, "runExclusive").mockImplementationOnce(async (callback) => {
+      entered.resolve();
+      await release.promise;
+      return callback();
+    });
+    const before = structuredClone(f.storage.value(`lease:${f.lease.id}`));
+    const heartbeat = f.send("heartbeat", { leaseID: f.lease.id, idleTimeoutSeconds: 999 });
+    await entered.promise;
+    f.github.mockImplementation(githubFetchMock({ member: false, org: "example-org" }));
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 1_100);
+    release.resolve();
+    await heartbeat;
+    expect(f.socket.closeCode).toBe(1008);
+    expect(f.storage.value(`lease:${f.lease.id}`)).toEqual(before);
+  });
+
+  it("rejects legacy controls with no authentication provenance", async () => {
+    const f = await fixture("proxy");
+    delete f.attachment.auth;
+    const socket = new FakeWebSocket(f.attachment);
+    const runtime = new FakeCoordinatorRuntime(f.storage);
+    vi.spyOn(runtime, "getWebSockets").mockReturnValue([socket as unknown as WebSocket]);
+    const fleet = new FleetCoordinator(runtime, f.env);
+    await fleet.fetch(request("GET", "/v1/health"));
+    expect(socket.closeCode).toBe(1012);
+  });
+
+  it.each(["bearer", "github"] as const)(
+    "enforces %s control revocation through Cloudflare message dispatch",
+    async (auth) => {
+      const f = await fixture(auth);
+      const socket = new FakeWebSocket(f.attachment);
+      const fleet = testFleet(f.storage, {}, f.env);
+      (fleet as unknown as { controlSockets: Map<string, WebSocket> }).controlSockets.set(
+        f.attachment.clientID as string,
+        socket as unknown as WebSocket,
+      );
+      await fleet.webSocketMessage(socket as unknown as WebSocket, '{"type":"ping"}');
+      expect(socket.sentJSON()).toEqual([{ type: "pong" }]);
+      const current = fleet as unknown as { env: Env };
+      if (auth === "github") current.env.CRABBOX_GITHUB_REVOKED_USERS = testGitHubOwner;
+      else current.env.CRABBOX_SHARED_TOKEN = "synthetic-rotated-token";
+      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 1_100);
+      await fleet.webSocketMessage(socket as unknown as WebSocket, '{"type":"ping"}');
+      expect(socket.closeCode).toBe(1008);
+      expect(socket.sentJSON()).toEqual([{ type: "pong" }]);
+    },
+  );
+
+  it.each(["telemetry", "legacy attribution"] as const)(
+    "preserves a concurrent run event while writing %s",
+    async (writer) => {
+      const f = await fixture("proxy");
+      const run = { ...f.run };
+      if (writer === "legacy attribution") {
+        delete run.leaseIDs;
+        delete run.leaseOwners;
+      }
+      const key = `run:${run.id}`;
+      f.storage.seed(key, run);
+      let raced = false;
+      f.storage.beforePut = async (writtenKey) => {
+        if (writtenKey !== key || raced) return;
+        raced = true;
+        f.storage.seed(key, { ...run, eventCount: 77, state: "succeeded", phase: "succeeded" });
+      };
+      const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+      const response = await f.fleet.fetch(
+        writer === "telemetry"
+          ? request("POST", `/v1/runs/${run.id}/telemetry`, {
+              headers,
+              body: { telemetry: { capturedAt: new Date().toISOString(), load1: 0.5 } },
+            })
+          : request("GET", `/v1/runs/${run.id}`, { headers }),
+      );
+      expect(response.status).toBe(200);
+      expect(raced).toBe(true);
+      expect(f.storage.value(key)).toMatchObject({
+        eventCount: 77,
+        state: "succeeded",
+        phase: "succeeded",
+      });
+    },
+  );
+
+  it("revalidates restored GitHub controls outside the Cloudflare lifecycle lock", async () => {
+    const f = await fixture("github");
+    const restored = new FakeWebSocket(f.attachment);
+    const fleet = new FleetDurableObject(
+      {
+        storage: f.storage,
+        getWebSockets: () => [restored as unknown as WebSocket],
+      } as unknown as DurableObjectState,
+      f.env,
+    );
+    const started = deferred<void>();
+    const release = deferred<void>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        started.resolve();
+        await release.promise;
+        return f.github(input);
+      }),
+    );
+    const pending = fleet.fetch(
+      request("GET", `/v1/runs/${f.run.id}`, {
+        headers: { "x-crabbox-owner": testGitHubOwner, "x-crabbox-org": "example-org" },
+      }),
+    );
+    await started.promise;
+    const runtime = (fleet as unknown as { runtime: CloudflareCoordinatorRuntime }).runtime;
+    let independentRan = false;
+    const independent = runtime.runExclusive(async () => {
+      independentRan = true;
+    });
+    try {
+      await vi.waitFor(() => expect(independentRan).toBe(true), { timeout: 300 });
+    } finally {
+      release.resolve();
+      await independent;
+      await pending;
+    }
+    expect(restored.closeCode).toBeUndefined();
+  });
+
+  it("revokes a Portal-bound control after logout without requiring cookies for API controls", async () => {
+    const f = await fixture("github", true);
+    await f.send("ping");
+    expect(f.socket.sentJSON()).toContainEqual({ type: "pong" });
+    const internal = f.fleet as unknown as {
+      closeBridgesForPortalSession(hash: string): Promise<void>;
+    };
+    await internal.closeBridgesForPortalSession(f.attachment.portalSessionHash as string);
+    expect(f.socket.closeCode).toBe(1008);
+    expect(f.socket.closeReason).toBe("portal session ended");
+  });
+});
