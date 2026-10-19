@@ -62,10 +62,25 @@ func captureLocalGitSnapshotInputs(ctx context.Context, root string) (inputs loc
 	return inputs, err
 }
 
-func (inputs localGitSnapshotInputs) same(other localGitSnapshotInputs) bool {
-	return inputs.head == other.head && inputs.root == other.root && inputs.ignore == other.ignore && inputs.sparse == other.sparse &&
-		bytes.Equal(inputs.index, other.index) && bytes.Equal(inputs.files, other.files) &&
-		bytes.Equal(inputs.deleted, other.deleted) && bytes.Equal(inputs.cached, other.cached)
+func (inputs localGitSnapshotInputs) mismatch(other localGitSnapshotInputs) string {
+	for _, check := range []struct {
+		name string
+		same bool
+	}{
+		{"head", inputs.head == other.head},
+		{"repository_root", inputs.root == other.root},
+		{"global_ignore", inputs.ignore == other.ignore},
+		{"sparse_checkout", inputs.sparse == other.sparse},
+		{"index", bytes.Equal(inputs.index, other.index)},
+		{"file_inventory", bytes.Equal(inputs.files, other.files)},
+		{"deleted_inventory", bytes.Equal(inputs.deleted, other.deleted)},
+		{"cached_deletions", bytes.Equal(inputs.cached, other.cached)},
+	} {
+		if !check.same {
+			return check.name
+		}
+	}
+	return ""
 }
 
 func (inputs localGitSnapshotInputs) checkout() gitOverlayCheckoutState {
