@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Sync: preserve Darwin symlink permissions in local Git seed and overlay snapshots without changing symlink targets or weakening source validation.
 - CI: move macOS checks and release verification to macOS 27, preserving macOS 13 deployment gates and Intel verification through Rosetta.
 - Docs: clarify command-specific `--provider` selection, doctor readiness failures, and `providers describe <name>` for catalog inspection. [Issue 2846](https://github.com/openclaw/crabbox/issues/2846). Thanks @aitrawog.
 - Static SSH: derive the macOS work root from the final `--static-user` flag instead of the default or config user, while explicit work roots and SSH users still win. [PR 2871](https://github.com/openclaw/crabbox/pull/2871). Thanks @holgergruenhagen.

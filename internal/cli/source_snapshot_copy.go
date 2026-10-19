@@ -42,6 +42,11 @@ func copySourceSnapshotContentsWithThaw(ctx context.Context, sourceRoot, snapsho
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	destinationRoot, closeRoot, err := sourceSnapshotDestinationRoot(snapshotRoot, owner)
+	if err != nil {
+		return err
+	}
+	defer closeRoot()
 	parents, err := newSourceSnapshotParents(sourceRoot)
 	if err != nil {
 		return err
@@ -93,6 +98,19 @@ func copySourceSnapshotContentsWithThaw(ctx context.Context, sourceRoot, snapsho
 			if err := os.Symlink(target, destination); err != nil {
 				return fmt.Errorf("create overlay snapshot symlink %q: %w", rel, err)
 			}
+			copied, err := destinationRoot.Lstat(rel)
+			if err != nil {
+				return fmt.Errorf("stat overlay snapshot symlink destination %q: %w", rel, err)
+			}
+			if hook != nil {
+				hook("before_symlink_mode_restore", attempt, snapshotRoot)
+			}
+			if err := parents.verifyDestinationAncestors(snapshotRoot, filepath.Dir(rel)); err != nil {
+				return err
+			}
+			if err := syncSourceSnapshotSymlinkMode(destinationRoot, rel, copied, sourceSnapshotSupportedMode(info.Mode())); err != nil {
+				return fmt.Errorf("restore overlay snapshot symlink mode %q: %w", rel, err)
+			}
 			finalMTime := normalizedSourceSnapshotFileTime(info.ModTime())
 			if err := syncSourceSnapshotSymlinkTimes(destination, finalMTime); err != nil {
 				return fmt.Errorf("restore overlay snapshot symlink mtime %q: %w", rel, err)
@@ -111,11 +129,11 @@ func copySourceSnapshotContentsWithThaw(ctx context.Context, sourceRoot, snapsho
 			if refreshedTarget != target {
 				return fmt.Errorf("%w: overlay snapshot symlink target changed during copy at %q", errSourceSnapshotDrift, rel)
 			}
-			copied, err := os.Lstat(destination)
+			copied, err = destinationRoot.Lstat(rel)
 			if err != nil {
 				return fmt.Errorf("stat overlay snapshot symlink destination %q: %w", rel, err)
 			}
-			if copied.Mode()&os.ModeSymlink == 0 || !copied.ModTime().Equal(finalMTime) {
+			if copied.Mode()&os.ModeSymlink == 0 || sourceSnapshotSupportedMode(copied.Mode()) != sourceSnapshotSupportedMode(info.Mode()) || !copied.ModTime().Equal(finalMTime) {
 				return fmt.Errorf("overlay snapshot symlink metadata changed at %q", rel)
 			}
 			copiedTarget, err := os.Readlink(destination)
@@ -143,6 +161,38 @@ func copySourceSnapshotContentsWithThaw(ctx context.Context, sourceRoot, snapsho
 		return err
 	}
 	return ctx.Err()
+}
+
+// Owned snapshots already retain their root. Plain shared-copy callers pin and
+// verify it before writes so symlink metadata restoration cannot escape staging.
+func sourceSnapshotDestinationRoot(path string, owner *sourceSnapshotRoot) (*os.Root, func(), error) {
+	if owner != nil {
+		if err := owner.verifyIdentity(); err != nil {
+			return nil, nil, err
+		}
+		return owner.root, func() {}, nil
+	}
+	parent, err := openSourceSnapshotParent(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer parent.Close()
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	pinned, pinErr := parent.Stat()
+	opened, statErr := root.Stat(".")
+	current, pathErr := os.Lstat(path)
+	if err := errors.Join(pinErr, statErr, pathErr); err != nil {
+		_ = root.Close()
+		return nil, nil, err
+	}
+	if !current.IsDir() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(pinned, opened) || !os.SameFile(opened, current) {
+		_ = root.Close()
+		return nil, nil, fmt.Errorf("overlay snapshot destination root changed while opening")
+	}
+	return root, func() { _ = root.Close() }, nil
 }
 
 func newSourceSnapshotParents(sourceRoot string) (*sourceSnapshotParents, error) {
