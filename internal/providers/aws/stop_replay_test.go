@@ -178,7 +178,7 @@ func TestAWSFixedStopReplayAfterInventoryDisappears(t *testing.T) {
 					}
 				}
 				if !reflect.DeepEqual(fake.deletedInstances, []string{lease.Server.CloudID}) ||
-					!reflect.DeepEqual(fake.deletedKeys, []string{core.ServerProviderKey(lease.Server)}) {
+					!reflect.DeepEqual(fake.deletedKeys, []string{lease.Server.Labels["aws_key_pair_id"]}) {
 					t.Fatalf("first stop did not attempt exact instance/key cleanup: instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
 				}
 			}
@@ -404,7 +404,7 @@ func TestAWSFixedStopRetriesLocalSSHCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(fake.deletedInstances, []string{lease.Server.CloudID}) ||
-		!reflect.DeepEqual(fake.deletedKeys, []string{core.ServerProviderKey(lease.Server)}) {
+		!reflect.DeepEqual(fake.deletedKeys, []string{lease.Server.Labels["aws_key_pair_id"]}) {
 		t.Fatal("local cleanup failure did not follow exact provider cleanup")
 	}
 	fresh := &fakeAWSClient{}

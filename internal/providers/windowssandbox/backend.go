@@ -129,13 +129,17 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 		Stdout:               stdout,
 		Stderr:               stderr,
 		DisableOutputCapture: true,
-	}, filepath.Join(run.hostControl, "cancel.txt"), req.Keep || req.KeepOnFailure)
+	}, filepath.Join(run.hostControl, "cancel.txt"), run.identityPath, req.Keep || req.KeepOnFailure)
 	commandDuration := core.ClockNow(b.rt.Clock).Sub(commandStarted)
 	exitCode := execResult.ExitCode
 	if execErr != nil && exitCode == 0 {
 		exitCode = 1
 	}
 	keepWorkspace = req.Keep || (req.KeepOnFailure && exitCode != 0)
+	if _, err := os.Stat(run.identityPath + ".unconfirmed"); err == nil {
+		keepWorkspace = true
+		fmt.Fprintf(b.rt.Stderr, "warning: windows-sandbox cleanup unconfirmed; host workspace preserved path=%s; close any remaining sandbox window manually\n", run.root)
+	}
 	if keepWorkspace {
 		fmt.Fprintf(b.rt.Stderr, "windows-sandbox temp preserved path=%s policy=%s\n", run.root, keepPolicy(req, exitCode))
 	}
@@ -228,6 +232,7 @@ type preparedRun struct {
 	hostControl   string
 	wsbPath       string
 	hostRunner    string
+	identityPath  string
 }
 
 func (b *backend) prepareRun(ctx context.Context, cfg core.Config, req core.RunRequest) (preparedRun, []core.TimingPhase, time.Duration, error) {
@@ -244,6 +249,7 @@ func (b *backend) prepareRun(ctx context.Context, cfg core.Config, req core.RunR
 		hostControl:   filepath.Join(root, "control"),
 		wsbPath:       filepath.Join(root, "crabbox.wsb"),
 		hostRunner:    filepath.Join(root, "host-runner.ps1"),
+		identityPath:  filepath.Join(root, "session.json"),
 	}
 	keep := false
 	defer func() {
@@ -402,6 +408,8 @@ func hostRunnerArgs(run preparedRun, cfg core.Config, req core.RunRequest) []str
 		run.wsbPath,
 		"-ControlDir",
 		run.hostControl,
+		"-IdentityPath",
+		run.identityPath,
 		"-TimeoutSeconds",
 		fmt.Sprintf("%d", timeout),
 	}
@@ -419,7 +427,7 @@ type localCommandOutcome struct {
 	err    error
 }
 
-func (b *backend) runHostRunner(ctx context.Context, command core.LocalCommandRequest, cancelPath string, keepOnCancel bool) (core.LocalCommandResult, error) {
+func (b *backend) runHostRunner(ctx context.Context, command core.LocalCommandRequest, cancelPath, identityPath string, keepOnCancel bool) (core.LocalCommandResult, error) {
 	runCtx, cancelRun := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelRun()
 	done := make(chan localCommandOutcome, 1)
@@ -436,7 +444,7 @@ func (b *backend) runHostRunner(ctx context.Context, command core.LocalCommandRe
 			cancelRun()
 			outcome := <-done
 			if !keepOnCancel {
-				b.stopCanceledSandbox(ctx)
+				b.stopCanceledSandbox(ctx, identityPath)
 			}
 			outcome.result.ExitCode = 130
 			return outcome.result, fmt.Errorf("signal windows-sandbox cancellation: %w", err)
@@ -455,7 +463,7 @@ func (b *backend) runHostRunner(ctx context.Context, command core.LocalCommandRe
 			cancelRun()
 			outcome := <-done
 			if !keepOnCancel {
-				b.stopCanceledSandbox(ctx)
+				b.stopCanceledSandbox(ctx, identityPath)
 			}
 			outcome.result.ExitCode = 130
 			if outcome.err == nil {
@@ -466,7 +474,7 @@ func (b *backend) runHostRunner(ctx context.Context, command core.LocalCommandRe
 	}
 }
 
-func (b *backend) stopCanceledSandbox(ctx context.Context) {
+func (b *backend) stopCanceledSandbox(ctx context.Context, identityPath string) {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 	defer cancel()
 	result, err := b.rt.Exec.Run(cleanupCtx, core.LocalCommandRequest{
@@ -476,12 +484,16 @@ func (b *backend) stopCanceledSandbox(ctx context.Context) {
 			"-ExecutionPolicy",
 			"Bypass",
 			"-Command",
-			`Get-Process -Name ` + windowsSandboxProcessNames + ` -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue`,
+			canceledSandboxScript(identityPath),
 		},
+		Stdout:               b.rt.Stdout,
+		Stderr:               b.rt.Stderr,
 		DisableOutputCapture: true,
 	})
 	if err != nil {
 		fmt.Fprintf(b.rt.Stderr, "warning: stop canceled windows-sandbox session: %s\n", commandDetail(result, err))
+		// Even a failed cleanup interpreter must preserve the mapped workspace.
+		_ = os.WriteFile(identityPath+".unconfirmed", []byte("cleanup failed\n"), 0o600)
 	}
 }
 
@@ -621,6 +633,7 @@ func hostRunnerScript() string {
 	return strings.ReplaceAll(strings.ReplaceAll(`param(
   [Parameter(Mandatory=$true)][string]$WsbPath,
   [Parameter(Mandatory=$true)][string]$ControlDir,
+  [Parameter(Mandatory=$true)][string]$IdentityPath,
   [int]$TimeoutSeconds = 5400,
   [switch]$Keep,
   [switch]$KeepOnFailure
@@ -632,9 +645,7 @@ $exitFile = Join-Path $ControlDir 'exit-code.txt'
 $cancelFile = Join-Path $ControlDir 'cancel.txt'
 Remove-Item -LiteralPath $stdout,$stderr,$exitFile -Force -ErrorAction SilentlyContinue
 
-function Get-SandboxProcesses {
-  Get-Process -Name __SANDBOX_PROCESS_NAMES__ -ErrorAction SilentlyContinue
-}
+__SESSION_FUNCTIONS__
 
 $running = Get-SandboxProcesses
 if ($running) {
@@ -644,6 +655,13 @@ if ($running) {
 
 $sandboxExe = (Get-Command WindowsSandbox.exe -ErrorAction Stop).Source
 $process = Start-Process -FilePath $sandboxExe -ArgumentList ('"{0}"' -f $WsbPath) -PassThru
+$script:identities = @()
+try {
+  Add-SandboxIdentity $process $true
+  Update-SandboxIdentities
+} catch {
+  Report-UnconfirmedSandbox
+}
 $started = Get-Date
 $deadline = $started.AddSeconds($TimeoutSeconds)
 $startupGraceSeconds = [Math]::Min($TimeoutSeconds, 120)
@@ -651,24 +669,6 @@ $startupDeadline = $started.AddSeconds($startupGraceSeconds)
 $outOffset = 0
 $errOffset = 0
 $sandboxSeen = $false
-
-function Stop-SandboxSession {
-  if ($process -and -not $process.HasExited) {
-    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-  }
-  Get-SandboxProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
-}
-
-function Wait-SandboxSession([int]$TimeoutSeconds) {
-  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-  while (Get-SandboxProcesses) {
-    if ((Get-Date) -gt $deadline) {
-      Stop-SandboxSession
-      return
-    }
-    Start-Sleep -Milliseconds 500
-  }
-}
 
 function Flush-Log([string]$Path, [ref]$Offset, [bool]$IsError) {
   if (-not (Test-Path -LiteralPath $Path)) { return }
@@ -701,6 +701,7 @@ function Flush-Log([string]$Path, [ref]$Offset, [bool]$IsError) {
 }
 
 while ($true) {
+  Update-SandboxIdentities
   Flush-Log $stdout ([ref]$outOffset) $false
   Flush-Log $stderr ([ref]$errOffset) $true
   $sandboxRunning = Get-SandboxProcesses
@@ -764,7 +765,7 @@ while ($true) {
   }
   Start-Sleep -Milliseconds 500
 }
-`, "__SANDBOX_PROCESS_NAMES__", windowsSandboxProcessNames), "\n", "\r\n")
+`, "__SESSION_FUNCTIONS__", strings.ReplaceAll(sandboxSessionScript(), "\r\n", "\n")), "\n", "\r\n")
 }
 
 func rejectWindowsSandboxRunOptions(spec core.ProviderSpec, req core.RunRequest) error {

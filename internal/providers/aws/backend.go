@@ -27,7 +27,6 @@ type awsClient interface {
 	CheckAcquireState(context.Context, string) error
 	GetServer(context.Context, string) (core.Server, error)
 	DeleteServer(context.Context, string) error
-	DeleteSSHKey(context.Context, string) error
 	ResolveCleanupSSHKeyID(context.Context, string) (string, error)
 	DeleteCleanupSSHKeyID(context.Context, string) error
 	CallerAccountID(context.Context) (string, error)
@@ -38,7 +37,7 @@ type awsClient interface {
 
 func NewAWSLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = "aws"
-	return &awsLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, Delete: deleteServer, StoredLeaseKeys: true}}
+	return &awsLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, StoredLeaseKeys: true}}
 }
 
 func (b *awsLeaseBackend) SupportsRequestedLeaseID() bool { return true }
@@ -613,8 +612,8 @@ func (b *awsLeaseBackend) releaseLease(ctx context.Context, req core.ReleaseLeas
 				}
 				return core.FixedObservation[core.Server]{Candidates: []core.Server{req.Lease.Server}}, nil
 			},
-			DeleteExact: func(ctx context.Context, _ *core.FixedTransaction, server core.Server) error {
-				err := deleteServer(ctx, awsConfigForServer(b.Cfg, server), server)
+			DeleteExact: func(ctx context.Context, tx *core.FixedTransaction, server core.Server) error {
+				err := deleteReleaseServer(ctx, awsConfigForServer(b.Cfg, server), server, *tx.Claim, b.RT.Stderr)
 				var keyErr *awsProviderKeyCleanupError
 				outcome.Terminal = err == nil || errors.As(err, &keyErr)
 				return err
@@ -626,7 +625,7 @@ func (b *awsLeaseBackend) releaseLease(ctx context.Context, req core.ReleaseLeas
 		if err := core.AuthorizeCheckpointRelease(exact, req.CheckpointID); err != nil {
 			return err
 		}
-		if err := deleteServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server); err != nil {
+		if err := deleteReleaseServer(ctx, awsConfigForServer(b.Cfg, req.Lease.Server), req.Lease.Server, exact, b.RT.Stderr); err != nil {
 			var keyErr *awsProviderKeyCleanupError
 			if errors.As(err, &keyErr) {
 				outcome.Terminal = true
@@ -826,7 +825,7 @@ func sshTargetForBootstrap(cfg core.Config, publicIP, leaseID, slug string) core
 
 var bootstrapAWSWindowsDesktop = core.BootstrapAWSWindowsDesktop
 
-func deleteServer(ctx context.Context, cfg core.Config, server core.Server) error {
+func deleteReleaseServer(ctx context.Context, cfg core.Config, server core.Server, claim core.LeaseClaim, stderr io.Writer) error {
 	if !isCrabboxAWSLease(server) {
 		return core.Exit(4, "refusing to delete AWS instance %s without canonical Crabbox ownership tags", server.DisplayID())
 	}
@@ -834,17 +833,35 @@ func deleteServer(ctx context.Context, cfg core.Config, server core.Server) erro
 	if err != nil {
 		return err
 	}
-	return deleteAWSServerWithClient(ctx, client, server)
+	return deleteAWSReleaseServerWithClient(ctx, client, server, claim, stderr)
 }
 
-func deleteAWSServerWithClient(ctx context.Context, client awsClient, server core.Server) error {
+func deleteAWSReleaseServerWithClient(ctx context.Context, client awsClient, server core.Server, claim core.LeaseClaim, stderr io.Writer) error {
 	if err := client.DeleteServer(ctx, server.CloudID); err != nil {
 		return err
 	}
-	if keyName := core.ServerProviderKey(server); core.ValidCrabboxProviderKey(keyName) {
-		if err := client.DeleteSSHKey(ctx, keyName); err != nil {
-			return &awsProviderKeyCleanupError{keyName: keyName, err: err}
+	keyName := core.ServerProviderKey(server)
+	if !core.ValidCrabboxProviderKey(keyName) {
+		fmt.Fprintf(stderr, "skip provider key name=%s reason=not a canonical Crabbox provider key\n", keyName)
+		return nil
+	}
+	if strings.TrimSpace(claim.Labels["aws_key_pair_id"]) == "" {
+		fmt.Fprintf(stderr, "skip provider key name=%s reason=no retained immutable key identity\n", keyName)
+		return nil
+	}
+	cleanupKeyID, err := resolveAWSCleanupKeyID(ctx, client, server, claim)
+	if err != nil {
+		if core.IsAWSCleanupKeyOwnershipError(err) {
+			fmt.Fprintf(stderr, "skip provider key name=%s reason=%v\n", keyName, err)
+			return nil
 		}
+		return &awsProviderKeyCleanupError{keyName: core.ServerProviderKey(server), err: err}
+	}
+	if cleanupKeyID == "" {
+		return nil
+	}
+	if err := client.DeleteCleanupSSHKeyID(ctx, cleanupKeyID); err != nil {
+		return &awsProviderKeyCleanupError{keyName: core.ServerProviderKey(server), err: err}
 	}
 	return nil
 }

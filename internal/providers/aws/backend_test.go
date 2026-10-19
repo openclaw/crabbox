@@ -795,6 +795,41 @@ func TestAWSFixedReleasePersistsTerminalTombstoneAndRejectsReplay(t *testing.T) 
 	}
 }
 
+func TestAWSFixedReleaseSkipsSameNameReplacementProviderKey(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	fake := &fakeAWSClient{}
+	t.Cleanup(installFixedAWSTestClient(t, fake))
+	cfg := fixedAWSTestConfig()
+	req := core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true, RequestedLeaseID: "cbx_abcdef123482", RequestedSlug: "fixed-replacement"}
+	backend := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	lease, err := backend.Acquire(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.ClaimLeaseTargetForRepoConfig(lease.LeaseID, req.RequestedSlug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	fake.resolvedKeyID = "key-replacement-id"
+
+	outcome, err := backend.ReleaseLeaseWithOutcome(t.Context(), core.ReleaseLeaseRequest{Lease: lease})
+	if err != nil || !outcome.Terminal {
+		t.Fatalf("release outcome=%+v err=%v", outcome, err)
+	}
+	if !slices.Equal(fake.deletedInstances, []string{lease.Server.CloudID}) {
+		t.Fatalf("deleted instances=%v, want original instance", fake.deletedInstances)
+	}
+	if !slices.Equal(fake.validatedKeys, []string{core.ServerProviderKey(lease.Server)}) {
+		t.Fatalf("validated keys=%v, want immutable identity check", fake.validatedKeys)
+	}
+	if len(fake.deletedKeys) != 0 {
+		t.Fatalf("deleted replacement provider key: %v", fake.deletedKeys)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != fixedAWSIntentReleased {
+		t.Fatalf("terminal claim=%+v exists=%t err=%v", claim, exists, err)
+	}
+}
+
 func TestAWSOrdinaryReleaseKeepsLegacyClaimDeletionBehavior(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	server := awsTestServer("i-ordinary-release", "cbx_abcdef12347f", "ordinary-release", "us-east-1")
@@ -830,6 +865,57 @@ func TestAWSOrdinaryReleaseKeepsLegacyClaimDeletionBehavior(t *testing.T) {
 	}
 	if len(fake.deletedInstances) != 1 || fake.deletedInstances[0] != server.CloudID {
 		t.Fatalf("deleted instances=%v, want ordinary instance", fake.deletedInstances)
+	}
+	if len(fake.validatedKeys) != 0 || len(fake.deletedKeys) != 0 {
+		t.Fatalf("legacy release used an unbound provider key: validated=%v deleted=%v", fake.validatedKeys, fake.deletedKeys)
+	}
+}
+
+func TestAWSOrdinaryReleaseSkipsSameNameReplacementProviderKey(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	server := awsTestServer("i-ordinary-release", "cbx_abcdef123481", "ordinary-release", "us-east-1")
+	server.Labels["provider_key"] = core.ProviderKeyForLease(server.Labels["lease"])
+	fake := &fakeAWSClient{
+		servers:       []core.Server{server},
+		resolvedKeyID: "key-replacement-id",
+	}
+	t.Cleanup(installFixedAWSTestClient(t, fake))
+	cfg := fixedAWSTestConfig()
+	claimAWSCleanupServer(t, cfg, server)
+
+	backend := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	lease := core.LeaseTarget{LeaseID: server.Labels["lease"], Server: server}
+	if err := backend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(fake.deletedInstances, []string{server.CloudID}) {
+		t.Fatalf("deleted instances=%v, want original instance", fake.deletedInstances)
+	}
+	if !slices.Equal(fake.validatedKeys, []string{server.Labels["provider_key"]}) {
+		t.Fatalf("validated keys=%v, want immutable identity check", fake.validatedKeys)
+	}
+	if len(fake.deletedKeys) != 0 {
+		t.Fatalf("deleted replacement provider key: %v", fake.deletedKeys)
+	}
+}
+
+func TestAWSOrdinaryReleaseDeletesMatchingProviderKeyByImmutableID(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	server := awsTestServer("i-ordinary-release", "cbx_abcdef123483", "ordinary-release", "us-east-1")
+	server.Labels["provider_key"] = core.ProviderKeyForLease(server.Labels["lease"])
+	fake := &fakeAWSClient{servers: []core.Server{server}}
+	t.Cleanup(installFixedAWSTestClient(t, fake))
+	cfg := fixedAWSTestConfig()
+	claimAWSCleanupServer(t, cfg, server)
+
+	backend := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	lease := core.LeaseTarget{LeaseID: server.Labels["lease"], Server: server}
+	if err := backend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	expectedKeyID := "key-id-for-" + server.Labels["provider_key"]
+	if !slices.Equal(fake.deletedKeys, []string{expectedKeyID}) {
+		t.Fatalf("deleted keys=%v, want immutable id %q", fake.deletedKeys, expectedKeyID)
 	}
 }
 
@@ -1567,6 +1653,7 @@ func TestAWSResolveAndReleaseUseFallbackRegion(t *testing.T) {
 	east := &fakeAWSClient{}
 	west := &fakeAWSClient{servers: []core.Server{awsTestServer("i-west", "cbx_fedcba654321", "west", "us-west-2")}}
 	west.servers[0].Labels["provider_key"] = "crabbox-cbx-fedcba654321"
+	west.servers[0].Labels["aws_key_pair_id"] = "key-id-for-crabbox-cbx-fedcba654321"
 	oldClient := newAWSClient
 	newAWSClient = func(_ context.Context, cfg core.Config) (awsClient, error) {
 		switch cfg.AWSRegion {
@@ -1606,8 +1693,8 @@ func TestAWSResolveAndReleaseUseFallbackRegion(t *testing.T) {
 	if len(west.deletedInstances) != 1 || west.deletedInstances[0] != "i-west" {
 		t.Fatalf("west deleted instances=%v, want i-west", west.deletedInstances)
 	}
-	if len(west.deletedKeys) != 1 || west.deletedKeys[0] != "crabbox-cbx-fedcba654321" {
-		t.Fatalf("west deleted keys=%v, want provider key", west.deletedKeys)
+	if len(west.deletedKeys) != 1 || west.deletedKeys[0] != west.servers[0].Labels["aws_key_pair_id"] {
+		t.Fatalf("west deleted keys=%v, want immutable provider key id", west.deletedKeys)
 	}
 }
 
@@ -1748,6 +1835,7 @@ func TestAWSReleaseRemovesClaimWhenProviderKeyDeletionFails(t *testing.T) {
 	keyName := "crabbox-cbx-abcdef123456"
 	server := awsTestServer("i-partial", leaseID, "partial-release", "us-west-2")
 	server.Labels["provider_key"] = keyName
+	server.Labels["aws_key_pair_id"] = "key-id-for-" + keyName
 	cfg := core.Config{Provider: "aws", AWSRegion: "us-west-2"}
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "partial-release", cfg, server, core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatalf("seed claim: %v", err)
@@ -1774,8 +1862,8 @@ func TestAWSReleaseRemovesClaimWhenProviderKeyDeletionFails(t *testing.T) {
 	if len(fake.deletedInstances) != 1 || fake.deletedInstances[0] != "i-partial" {
 		t.Fatalf("deleted instances=%v, want terminated instance", fake.deletedInstances)
 	}
-	if len(fake.deletedKeys) != 1 || fake.deletedKeys[0] != keyName {
-		t.Fatalf("deleted keys=%v, want failed provider key cleanup attempt", fake.deletedKeys)
+	if len(fake.deletedKeys) != 1 || fake.deletedKeys[0] != server.Labels["aws_key_pair_id"] {
+		t.Fatalf("deleted keys=%v, want failed immutable provider key cleanup attempt", fake.deletedKeys)
 	}
 	if claim, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || ok || claim.LeaseID != "" {
 		t.Fatalf("claim=%+v ok=%v err=%v, want removed claim after instance termination", claim, ok, err)

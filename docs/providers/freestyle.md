@@ -133,6 +133,9 @@ Setup failures honor `--keep-on-failure`, reused VMs remain kept, and cleanup
 uses an uncanceled 30-second budget. Freestyle still owns its HTTP transport,
 command encoding, and existing claim/reclaim rules.
 
+A null or absent exec exit status is reported as a timeout, with captured output
+preserved. `--keep-on-failure` retains the VM for inspection after that timeout.
+
 ## Sync
 
 Freestyle advertises archive sync (`FeatureArchiveSync`). Crabbox supports

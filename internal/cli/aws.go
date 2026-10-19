@@ -440,14 +440,6 @@ func colonHex(data []byte) string {
 	return strings.Join(parts, ":")
 }
 
-func (c *AWSClient) DeleteSSHKey(ctx context.Context, name string) error {
-	_, err := c.ec2.DeleteKeyPair(ctx, &ec2.DeleteKeyPairInput{KeyName: aws.String(name)})
-	if err != nil && strings.Contains(err.Error(), "InvalidKeyPair.NotFound") {
-		return nil
-	}
-	return err
-}
-
 type awsCleanupKeyOwnershipError struct{ err error }
 
 func (e *awsCleanupKeyOwnershipError) Error() string { return e.err.Error() }

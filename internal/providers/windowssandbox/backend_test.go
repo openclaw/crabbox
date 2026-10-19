@@ -140,7 +140,8 @@ func TestHostRunnerScriptStopsActualSandboxProcessOnTimeout(t *testing.T) {
 		"$startupGraceSeconds = [Math]::Min($TimeoutSeconds, 120)",
 		"$sandboxSeen = $false",
 		"Wait-SandboxSession 20",
-		"Get-SandboxProcesses | Stop-Process -Force",
+		"Add-SandboxIdentity $process $true",
+		"$candidate.Kill()",
 		"Test-Path -LiteralPath $cancelFile",
 		"Windows Sandbox run canceled.",
 		"exit 130",
@@ -161,10 +162,10 @@ func TestHostRunnerScriptStopsActualSandboxProcessOnTimeout(t *testing.T) {
 	}
 }
 
-func TestStopCanceledSandboxStopsLegacyAnd24H2Processes(t *testing.T) {
+func TestStopCanceledSandboxUsesCapturedIdentities(t *testing.T) {
 	runner := &recordingRunner{}
 	be := &backend{rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
-	be.stopCanceledSandbox(context.Background())
+	be.stopCanceledSandbox(context.Background(), `C:\host\session.json`)
 
 	if runner.name != "powershell.exe" {
 		t.Fatalf("cleanup runner name=%q", runner.name)
@@ -173,14 +174,13 @@ func TestStopCanceledSandboxStopsLegacyAnd24H2Processes(t *testing.T) {
 		t.Fatal("cleanup runner must stream without retaining output")
 	}
 	joined := strings.Join(runner.args, "\n")
-	wantCommand := "Get-Process -Name " + windowsSandboxProcessNames + " -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue"
-	if !strings.Contains(joined, wantCommand) {
-		t.Fatalf("cleanup command missing %q: %#v", wantCommand, runner.args)
-	}
-	for _, processName := range strings.Split(windowsSandboxProcessNames, ",") {
-		if !strings.Contains(joined, processName) {
-			t.Fatalf("cleanup command missing sandbox process name %q: %#v", processName, runner.args)
+	for _, want := range []string{`$IdentityPath = 'C:\host\session.json'`, "StartTimeTicks", "Stop-SandboxSession", "Report-UnconfirmedSandbox"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("cleanup command missing %q: %#v", want, runner.args)
 		}
+	}
+	if strings.Contains(joined, "Stop-Process") {
+		t.Fatal("cleanup must use the verified process handle, not a fresh PID/name lookup")
 	}
 }
 
@@ -213,7 +213,10 @@ func TestHostRunnerScriptHonorsKeepFlagsOnTimeout(t *testing.T) {
 func TestGeneratedPowerShellScriptsParse(t *testing.T) {
 	powershell, err := exec.LookPath("powershell.exe")
 	if err != nil {
-		t.Skip("powershell.exe not available")
+		powershell, err = exec.LookPath("pwsh")
+		if err != nil {
+			t.Skip("PowerShell not available")
+		}
 	}
 	cfg := core.BaseConfig()
 	sandboxScript, err := sandboxRunScript(cfg, core.RunRequest{Command: []string{"cmd.exe", "/c", "echo ok"}})
@@ -223,6 +226,7 @@ func TestGeneratedPowerShellScriptsParse(t *testing.T) {
 	for name, script := range map[string]string{
 		"host-runner.ps1": hostRunnerScript(),
 		"run.ps1":         sandboxScript,
+		"cleanup.ps1":     canceledSandboxScript(`C:\host\session.json`),
 	} {
 		path := filepath.Join(t.TempDir(), name)
 		if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
@@ -394,7 +398,7 @@ func TestRunHostRunnerNormalizesCancellationFallbackExitCode(t *testing.T) {
 	cancelPath := filepath.Join(t.TempDir(), "missing", "cancel.txt")
 	done := make(chan localCommandOutcome, 1)
 	go func() {
-		result, err := be.runHostRunner(ctx, core.LocalCommandRequest{Name: "powershell.exe"}, cancelPath, true)
+		result, err := be.runHostRunner(ctx, core.LocalCommandRequest{Name: "powershell.exe"}, cancelPath, filepath.Join(t.TempDir(), "session.json"), true)
 		done <- localCommandOutcome{result: result, err: err}
 	}()
 	<-runner.started
