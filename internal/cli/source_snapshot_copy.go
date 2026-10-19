@@ -15,6 +15,20 @@ import (
 
 var errSourceSnapshotDrift = errors.New("local source changed during snapshot creation")
 
+// Keep the failed check separate from filesystem errors, whose paths are not
+// safe to print in the local-seed retry summary.
+type sourceSnapshotCheckError struct {
+	check string
+	err   error
+}
+
+func (err *sourceSnapshotCheckError) Error() string { return err.err.Error() }
+func (err *sourceSnapshotCheckError) Unwrap() error { return err.err }
+
+func sourceSnapshotCheck(check string, err error) error {
+	return &sourceSnapshotCheckError{check: check, err: err}
+}
+
 type sourceSnapshotHook func(phase string, attempt int, root string)
 
 func copySourceSnapshot(ctx context.Context, sourceRoot, snapshotRoot string, paths []string) error {
@@ -73,7 +87,7 @@ func copySourceSnapshotContentsWithThaw(ctx context.Context, sourceRoot, snapsho
 		info, err := os.Lstat(source)
 		if err != nil {
 			if os.IsNotExist(err) {
-				return fmt.Errorf("%w: snapshot overlay path %q disappeared", errSourceSnapshotDrift, rel)
+				return sourceSnapshotCheck("source_missing", fmt.Errorf("%w: snapshot overlay path %q disappeared", errSourceSnapshotDrift, rel))
 			}
 			return fmt.Errorf("snapshot overlay path %q: %w", rel, err)
 		}
@@ -102,14 +116,14 @@ func copySourceSnapshotContentsWithThaw(ctx context.Context, sourceRoot, snapsho
 				return fmt.Errorf("restat overlay snapshot symlink %q: %w", rel, classifySourceSnapshotError(source, info, err))
 			}
 			if !sameSourceSnapshotIdentity(info, refreshed) {
-				return fmt.Errorf("%w: overlay snapshot symlink changed during copy at %q", errSourceSnapshotDrift, rel)
+				return sourceSnapshotCheck("symlink_identity", fmt.Errorf("%w: overlay snapshot symlink changed during copy at %q", errSourceSnapshotDrift, rel))
 			}
 			refreshedTarget, err := os.Readlink(source)
 			if err != nil {
 				return fmt.Errorf("reread overlay snapshot symlink %q: %w", rel, classifySourceSnapshotError(source, info, err))
 			}
 			if refreshedTarget != target {
-				return fmt.Errorf("%w: overlay snapshot symlink target changed during copy at %q", errSourceSnapshotDrift, rel)
+				return sourceSnapshotCheck("symlink_target", fmt.Errorf("%w: overlay snapshot symlink target changed during copy at %q", errSourceSnapshotDrift, rel))
 			}
 			copied, err := os.Lstat(destination)
 			if err != nil {
@@ -180,7 +194,7 @@ func (parents *sourceSnapshotParents) ensure(snapshotRoot, parent, observedSourc
 		}
 		if retained, ok := parents.byPath[destination]; ok {
 			if !sameSourceSnapshotIdentity(retained.source.info, info) {
-				return nil, fmt.Errorf("%w: snapshot parent changed during copy at %q", errSourceSnapshotDrift, source)
+				return nil, sourceSnapshotCheck("parent_identity", fmt.Errorf("%w: snapshot parent changed during copy at %q", errSourceSnapshotDrift, source))
 			}
 			if err := verifySourceSnapshotDestination(retained, retained.tempMode, true, false); err != nil {
 				return nil, err
@@ -358,12 +372,12 @@ func verifySourceSnapshotParents(identities []sourceSnapshotParentIdentity) erro
 		refreshed, err := os.Lstat(identity.path)
 		if err != nil {
 			if os.IsNotExist(err) {
-				return fmt.Errorf("%w: snapshot parent changed during copy at %q: %v", errSourceSnapshotDrift, identity.path, err)
+				return sourceSnapshotCheck("parent_missing", fmt.Errorf("%w: snapshot parent changed during copy at %q: %v", errSourceSnapshotDrift, identity.path, err))
 			}
 			return fmt.Errorf("stat snapshot parent during copy at %q: %w", identity.path, err)
 		}
 		if !refreshed.IsDir() || refreshed.Mode()&os.ModeSymlink != 0 || !sameSourceSnapshotIdentity(identity.info, refreshed) {
-			return fmt.Errorf("%w: snapshot parent changed during copy at %q", errSourceSnapshotDrift, identity.path)
+			return sourceSnapshotCheck("parent_identity", fmt.Errorf("%w: snapshot parent changed during copy at %q", errSourceSnapshotDrift, identity.path))
 		}
 	}
 	return nil
@@ -431,12 +445,12 @@ func copyObservedSourceFileBytes(ctx context.Context, dst io.Writer, source stri
 		return 0, err
 	}
 	if !openedInfo.Mode().IsRegular() || !sameSourceSnapshotIdentity(info, openedInfo) || !sameSyncDigestChangeTime(info, openedInfo) {
-		return 0, fmt.Errorf("%w: source changed before reading", errSourceSnapshotDrift)
+		return 0, sourceSnapshotCheck("read_identity", fmt.Errorf("%w: source changed before reading", errSourceSnapshotDrift))
 	}
 	written, err = copySourceBytes(ctx, dst, input, openedInfo.Size())
 	if err != nil {
 		if errors.Is(err, errSourceCopyLimit) {
-			return written, fmt.Errorf("%w: source grew beyond its accepted size", errSourceSnapshotDrift)
+			return written, sourceSnapshotCheck("read_growth", fmt.Errorf("%w: source grew beyond its accepted size", errSourceSnapshotDrift))
 		}
 		return written, err
 	}
@@ -450,7 +464,7 @@ func copyObservedSourceFileBytes(ctx context.Context, dst io.Writer, source stri
 	}
 	if !sameSourceSnapshotIdentity(openedInfo, postCopyInfo) || !sameSourceSnapshotIdentity(postCopyInfo, finalPathInfo) ||
 		!sameSyncDigestChangeTime(openedInfo, postCopyInfo) || !sameSyncDigestChangeTime(postCopyInfo, finalPathInfo) || written != openedInfo.Size() {
-		return written, fmt.Errorf("%w: source changed while reading", errSourceSnapshotDrift)
+		return written, sourceSnapshotCheck("read_identity", fmt.Errorf("%w: source changed while reading", errSourceSnapshotDrift))
 	}
 	return written, nil
 }
@@ -482,7 +496,7 @@ func verifySourceSnapshotFileDestination(file *os.File, path string, wantMode os
 func classifySourceSnapshotError(source string, observed os.FileInfo, operationErr error) error {
 	refreshed, err := os.Lstat(source)
 	if os.IsNotExist(err) || (err == nil && !sameSourceSnapshotIdentity(observed, refreshed)) {
-		return fmt.Errorf("%w: snapshot source changed at %q", errSourceSnapshotDrift, source)
+		return sourceSnapshotCheck("source_identity", fmt.Errorf("%w: snapshot source changed at %q", errSourceSnapshotDrift, source))
 	}
 	return operationErr
 }
