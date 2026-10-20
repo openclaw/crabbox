@@ -78,6 +78,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/tensorlake"
 	_ "github.com/openclaw/crabbox/internal/providers/unikraftcloud"
 	_ "github.com/openclaw/crabbox/internal/providers/upstashbox"
+	_ "github.com/openclaw/crabbox/internal/providers/utm"
 	_ "github.com/openclaw/crabbox/internal/providers/vast"
 	_ "github.com/openclaw/crabbox/internal/providers/vercelsandbox"
 	_ "github.com/openclaw/crabbox/internal/providers/vultr"

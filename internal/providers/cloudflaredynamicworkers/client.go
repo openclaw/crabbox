@@ -320,19 +320,25 @@ func (c *client) Readiness(ctx context.Context) (readinessResponse, error) {
 
 func (c *client) Run(ctx context.Context, req runRequest) (runResponse, error) {
 	var out runResponse
-	httpReq, err := shared.NewJSONRequest(ctx, http.MethodPost, c.baseURL+"/v1/runs", req)
+	requestCtx, cancelRequest := c.responseRequestContext(ctx)
+	httpReq, err := shared.NewJSONRequest(requestCtx, http.MethodPost, c.baseURL+"/v1/runs", req)
 	if err != nil {
+		cancelRequest()
 		return out, err
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+c.token)
 	httpReq.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
+		cancelRequest()
 		return out, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		cancelRequest()
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		err := c.decodeJSONResponse(ctx, resp.Body, &out)
+		err := c.decodeJSONResponse(ctx, resp.Body, &out, cancelRequest)
 		if err != nil {
 			return out, &responseContractError{message: "loader response is not valid JSON", cause: err}
 		}
@@ -342,7 +348,7 @@ func (c *client) Run(ctx context.Context, req runRequest) (runResponse, error) {
 		}
 		return out, err
 	}
-	responseBody, readErr := c.readResponseBody(ctx, resp.Body, 64*1024)
+	responseBody, readErr := c.readResponseBody(ctx, resp.Body, 64*1024, cancelRequest)
 	responseErr := c.responseErrorBody(resp.StatusCode, resp.Status, responseBody)
 	decoded, lifecycleResponse, decodeErr := decodeRunErrorResponse(responseBody)
 	if lifecycleResponse {
@@ -530,8 +536,10 @@ func (c *client) DeleteAcknowledgedComplete(ctx context.Context, id string) erro
 
 func (c *client) doJSON(ctx context.Context, method, endpoint string, input any, output any) error {
 	for attempt := 0; ; attempt++ {
-		req, err := shared.NewJSONRequest(ctx, method, c.baseURL+endpoint, input)
+		requestCtx, cancelRequest := c.responseRequestContext(ctx)
+		req, err := shared.NewJSONRequest(requestCtx, method, c.baseURL+endpoint, input)
 		if err != nil {
+			cancelRequest()
 			return err
 		}
 		req.Header.Set("Authorization", "Bearer "+c.token)
@@ -540,23 +548,28 @@ func (c *client) doJSON(ctx context.Context, method, endpoint string, input any,
 		}
 		resp, err := c.http.Do(req)
 		if err != nil {
+			cancelRequest()
 			return err
 		}
 		if method == http.MethodGet && retryableReadStatus(resp.StatusCode) && attempt < len(c.readRetryDelays) {
+			cancelRequest()
 			_ = resp.Body.Close()
 			if err := core.SleepContext(ctx, c.readRetryDelays[attempt]); err != nil {
 				return err
 			}
 			continue
 		}
-		defer resp.Body.Close()
+		defer func() {
+			cancelRequest()
+			_ = resp.Body.Close()
+		}()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return c.responseError(ctx, resp)
+			return c.responseError(ctx, resp, cancelRequest)
 		}
 		if output == nil {
 			return nil
 		}
-		return c.decodeJSONResponse(ctx, resp.Body, output)
+		return c.decodeJSONResponse(ctx, resp.Body, output, cancelRequest)
 	}
 }
 
@@ -569,8 +582,8 @@ func retryableReadStatus(statusCode int) bool {
 	}
 }
 
-func (c *client) responseError(ctx context.Context, resp *http.Response) error {
-	body, err := c.readResponseBody(ctx, resp.Body, 64*1024)
+func (c *client) responseError(ctx context.Context, resp *http.Response, cancelRequest context.CancelFunc) error {
+	body, err := c.readResponseBody(ctx, resp.Body, 64*1024, cancelRequest)
 	responseErr := c.responseErrorBody(resp.StatusCode, resp.Status, body)
 	if err != nil {
 		return fmt.Errorf("%w: reading response body: %w", responseErr, err)
@@ -578,8 +591,8 @@ func (c *client) responseError(ctx context.Context, resp *http.Response) error {
 	return responseErr
 }
 
-func (c *client) decodeJSONResponse(ctx context.Context, body io.ReadCloser, output any) error {
-	return c.withResponseBodyDeadline(ctx, body, func() error {
+func (c *client) decodeJSONResponse(ctx context.Context, body io.ReadCloser, output any, cancelRequest context.CancelFunc) error {
+	return c.withResponseBodyDeadline(ctx, cancelRequest, func() error {
 		decoder := json.NewDecoder(body)
 		if err := decoder.Decode(output); err != nil {
 			return err
@@ -595,9 +608,9 @@ func (c *client) decodeJSONResponse(ctx context.Context, body io.ReadCloser, out
 	})
 }
 
-func (c *client) readResponseBody(ctx context.Context, body io.ReadCloser, limit int64) ([]byte, error) {
+func (c *client) readResponseBody(ctx context.Context, body io.ReadCloser, limit int64, cancelRequest context.CancelFunc) ([]byte, error) {
 	var out []byte
-	err := c.withResponseBodyDeadline(ctx, body, func() error {
+	err := c.withResponseBodyDeadline(ctx, cancelRequest, func() error {
 		var err error
 		out, err = io.ReadAll(io.LimitReader(body, limit))
 		return err
@@ -605,16 +618,28 @@ func (c *client) readResponseBody(ctx context.Context, body io.ReadCloser, limit
 	return out, err
 }
 
-func (c *client) withResponseBodyDeadline(ctx context.Context, body io.ReadCloser, read func() error) error {
+// Allocate cancellation authority before dispatch, without starting the body
+// budget until response headers arrive. Disabled body timeouts preserve the
+// caller's exact request context and rely on its existing cancellation policy.
+func (c *client) responseRequestContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if c.responseBodyTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithCancel(ctx)
+}
+
+func (c *client) withResponseBodyDeadline(ctx context.Context, cancelRequest context.CancelFunc, read func() error) error {
 	if c.responseBodyTimeout <= 0 {
 		return read()
 	}
 	bodyCtx, cancel := context.WithTimeout(ctx, c.responseBodyTimeout)
 	defer cancel()
-	stopClose := context.AfterFunc(bodyCtx, func() {
-		_ = body.Close()
-	})
-	defer stopClose()
+	// Cancel the request to interrupt response reads. Concurrent Body.Close
+	// may instead start asynchronous HTTP/1 draining behind the reader's mutex.
+	// Each callback owns only this attempt's context, including when it races
+	// completion; it cannot cancel another retry or request on the same client.
+	stopCancel := context.AfterFunc(bodyCtx, cancelRequest)
+	defer stopCancel()
 	err := read()
 	if bodyCtx.Err() != nil {
 		return bodyCtx.Err()

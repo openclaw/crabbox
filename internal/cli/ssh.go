@@ -2512,7 +2512,13 @@ func remoteSyncInterpreterCommand(python, perl, args string) string {
 	if args != "" && !strings.HasPrefix(args, " ") {
 		args = " " + args
 	}
-	return "if command -v python3 >/dev/null 2>&1; then python3 -c " + shellQuote(python) + args +
+	// Stock macOS exposes /usr/bin/python3 as a developer-tool shim even when
+	// Command Line Tools are absent. Prefer the bundled Perl on Darwin without
+	// executing that shim (which can fail or request an interactive install).
+	// Select once: an interpreter failure must still stop pruning, not trigger
+	// a fallback after partially produced output.
+	return `if [ "$(uname -s 2>/dev/null)" = Darwin ] && command -v perl >/dev/null 2>&1; then perl -e ` + shellQuote(perl) + args +
+		"; elif command -v python3 >/dev/null 2>&1; then python3 -c " + shellQuote(python) + args +
 		"; elif command -v python >/dev/null 2>&1; then python -c " + shellQuote(python) + args +
 		"; elif command -v perl >/dev/null 2>&1; then perl -e " + shellQuote(perl) + args +
 		"; else echo " + shellQuote("missing required sync interpreter: need python3, python, or perl") + " >&2; exit 127; fi"

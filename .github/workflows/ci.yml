@@ -572,6 +572,15 @@ jobs:
         with:
           node-version: 24
 
+      - name: Set up Python for workload contracts
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+          check-latest: true
+
+      - name: Test macOS virtualization workload and native Swift contracts
+        run: python3 -m unittest discover -s examples/macos-virtualization -p 'test_*.py' -v
+
       - name: Test macOS script compatibility
         run: PATH="/usr/bin:/bin:$PATH" node --test scripts/mint-aws-devtools-image.test.js
 
@@ -583,6 +592,31 @@ jobs:
 
       - name: Vet native helper
         run: go vet ./internal/applevmhelper ./cmd/crabbox-apple-vm-helper
+
+      - name: Require UTM release ownership before guest cleanup
+        shell: bash
+        env:
+          GOFLAGS: -mod=readonly -trimpath -p=2
+          GOMAXPROCS: 2
+        run: |
+          set -o pipefail
+          go test -race ./internal/cli -run '^TestUTMCoreRelease' -count=1 -timeout=5m -json | tee "$RUNNER_TEMP/utm-release-tests.jsonl"
+          node - "$RUNNER_TEMP/utm-release-tests.jsonl" <<'NODE'
+          const fs = require('node:fs');
+          const records = fs.readFileSync(process.argv[2], 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
+          const required = [
+            'TestUTMCoreReleaseRejectsStaleBeforeGuestCleanup',
+            'TestUTMCoreReleaseCurrentCleanupHoldsFence',
+          ];
+          for (const name of required) {
+            for (const action of ['run', 'pass']) {
+              if (!records.some(record => record.Test === name && record.Action === action)) {
+                throw new Error(`required UTM release contract ${name} did not ${action}`);
+              }
+            }
+          }
+          if (records.some(record => record.Action === 'skip')) throw new Error('required UTM release contract was skipped');
+          NODE
 
       - name: Require native macOS lease SSH root and managed-state contracts
         shell: bash
@@ -755,6 +789,15 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+
+      - name: Set up Python for workload contracts
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+          check-latest: true
+
+      - name: Test virtualization workload script contracts
+        run: python3 -m unittest discover -s examples/macos-virtualization -p 'test_*.py' -v
 
       - name: Install script dependencies
         run: sudo apt-get update && sudo apt-get install -y ripgrep

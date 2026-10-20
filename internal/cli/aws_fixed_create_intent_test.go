@@ -217,7 +217,7 @@ func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 		OpenComputer CodeSandbox OpenSandbox Nomad Blaxel VercelSandbox CloudflareSandbox
 		Superserve Crownest DockerSandbox AnthropicSRT CloudRunSandbox Modal UpstashBox
 		Smolvm AsciiBox Cloudflare CloudflareDynamicWorkers Semaphore Sprites LocalContainer Serve
-		AppleContainer AppleVM MXC Multipass Machine0 Tart Lume HyperV WindowsSandbox Static
+		AppleContainer AppleVM MXC Multipass Machine0 Tart Lume UTM HyperV WindowsSandbox Static
 	`)
 	classify("post-acquisition command, transport, reporting, or local maintenance behavior", `
 		Sync Run EnvAllow Actions Results Shard Profiles Presets ProofTemplates Jobs RecordLocal ClaimsAutoPrune

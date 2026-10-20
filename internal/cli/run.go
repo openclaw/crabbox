@@ -1047,6 +1047,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var server Server
 	var target SSHTarget
 	var leaseID string
+	var coord *CoordinatorClient
+	defer func() {
+		a.recordRunLeaseTarget(LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
+	}()
 	var borrowedPool *CoordinatorReadyPoolResponse
 	var returnedPool bool
 	var stopReadyPoolHeartbeat func()
@@ -1384,7 +1388,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if !ok {
 		return Exit(2, "provider=%s does not support run", backend.Spec().Name)
 	}
-	coord := backendCoordinator(backend)
+	coord = backendCoordinator(backend)
 	var terminalReceiptKey ed25519.PrivateKey
 	if strings.TrimSpace(*attestOut) != "" || (coord != nil && !*syncOnly) {
 		terminalReceiptKey, err = resolveAttestKey(strings.TrimSpace(*attestKeyOverride))
@@ -1733,6 +1737,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if err == nil && !claimAdmitted {
 			err = prepareResolvedLease(&lease)
+		}
+		if err == nil && claimAdmitted {
+			// This result carries the claim committed by the admission transaction.
+			a.recordRunLeasePublication(lease)
 		}
 		if err == nil {
 			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID

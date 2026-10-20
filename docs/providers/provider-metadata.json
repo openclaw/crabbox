@@ -964,6 +964,20 @@
     "auth": "API token via CRABBOX_SEMAPHORE_TOKEN or SEMAPHORE_API_TOKEN; CI remote proof runner",
     "docs": "semaphore.md"
   },
+  "serve": {
+    "status": "built-in",
+    "category": "self-hosted-virtualization",
+    "substrate": "Donated Docker or Podman containers",
+    "location": "self-hosted",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "no",
+    "lifecycle": "Crabbox coordinator and outbound agent",
+    "cleanup": "agent-confirmed container removal",
+    "bestFit": "Trusted owner workloads on spare machine capacity",
+    "caveat": "Brokered only; clients must reach the advertised SSH address; containers are not hostile-tenant isolation",
+    "docs": "serve.md"
+  },
   "smolvm": {
     "status": "built-in",
     "category": "delegated-sandbox",
@@ -1112,6 +1126,20 @@
     "auth": "API key via UPSTASH_BOX_API_KEY or CRABBOX_UPSTASH_BOX_API_KEY; delegated remote sandbox auth",
     "docs": "upstash-box.md"
   },
+  "utm": {
+    "status": "built-in",
+    "category": "local-vm",
+    "substrate": "UTM QEMU or Apple VM",
+    "location": "local",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "no",
+    "lifecycle": "Crabbox",
+    "cleanup": "owned VM delete",
+    "bestFit": "Local Linux ARM64 clones or fresh macOS guests with native snapshots",
+    "caveat": "Requires UTM Automation and bundle storage access; fresh macOS needs Apple silicon, macOS 27+, full Xcode and compatible IPSW; checkpoints stay inside the source lease",
+    "docs": "utm.md"
+  },
   "vast": {
     "status": "built-in",
     "category": "gpu-cloud",
@@ -1199,19 +1227,5 @@
     "bestFit": "Self-hosted Linux VM pool over XAPI",
     "caveat": "Normal leases require prepared Linux templates",
     "docs": "xcp-ng.md"
-  },
-  "serve": {
-    "status": "built-in",
-    "category": "self-hosted-virtualization",
-    "substrate": "Donated Docker or Podman containers",
-    "location": "self-hosted",
-    "ssh": "crabbox-managed",
-    "sync": "crabbox-sync",
-    "gpu": "no",
-    "lifecycle": "Crabbox coordinator and outbound agent",
-    "cleanup": "agent-confirmed container removal",
-    "bestFit": "Trusted owner workloads on spare machine capacity",
-    "caveat": "Brokered only; clients must reach the advertised SSH address; containers are not hostile-tenant isolation",
-    "docs": "serve.md"
   }
 }

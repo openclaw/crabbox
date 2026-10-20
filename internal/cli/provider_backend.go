@@ -686,6 +686,10 @@ type NativeCheckpointWorkdirRequest struct {
 }
 
 type NativeCheckpointResourceRequest struct {
+	// CaptureEstablished records the owner's completed capture attestation. A
+	// resource identity alone is sufficient for cleanup, never for restoration.
+	CaptureEstablished bool
+
 	// Persist records recovered identity before deletion; absent on read-only verification.
 	Persist func(NativeCheckpointCreateResult) error
 	// LoadConfig is required only when the provider needs current CLI settings.
@@ -725,6 +729,23 @@ type NativeCheckpointLifecycleProvider interface {
 	CreateNativeCheckpoint(ctx context.Context, req NativeCheckpointCreateRequest) (NativeCheckpointCreateResult, error)
 	VerifyNativeCheckpoint(ctx context.Context, req NativeCheckpointResourceRequest) (NativeCheckpointVerifyResult, error)
 	DeleteNativeCheckpoint(ctx context.Context, req NativeCheckpointResourceRequest) error
+}
+
+// NativeCheckpointRestoreProvider restores an existing claimed lease in place.
+// The provider must fence the current claim, validate the exact checkpoint/source
+// identity and supported state before mutation, and reestablish its verified
+// workload transport before reporting success. DryRun must perform admission only.
+type NativeCheckpointRestoreProvider interface {
+	RestoreNativeCheckpoint(context.Context, NativeCheckpointRestoreRequest) (LeaseTarget, error)
+}
+
+type NativeCheckpointRestoreRequest struct {
+	Config   Config
+	Repo     Repo
+	Lease    LeaseTarget
+	Resource NativeCheckpointResourceRequest
+	DryRun   bool
+	Stderr   io.Writer
 }
 
 type NativeCheckpointForkRecord struct {

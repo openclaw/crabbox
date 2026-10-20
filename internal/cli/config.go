@@ -224,6 +224,7 @@ type Config struct {
 	appleVMMemoryExplicit         bool
 	appleVMDiskExplicit           bool
 	MXC                           MXCConfig
+	UTM                           UTMConfig
 	Multipass                     MultipassConfig
 	multipassImageExplicit        bool
 	Machine0                      Machine0Config
@@ -1722,6 +1723,7 @@ func baseConfig() Config {
 		AppleContainer: initialAppleContainerConfig(containerImage),
 		AppleVM:        initialAppleVMConfig(osImageSpecs[osImage].AppleVMImage, osImageSpecs[osImage].AppleVMSHA256),
 		MXC:            defaultMXCConfig(),
+		UTM:            defaultUTMConfig(),
 		Multipass:      initialMultipassConfig(multipassImage),
 		Machine0:       defaultMachine0Config(),
 		Tart:           initialTartConfig(),
@@ -1865,6 +1867,7 @@ type fileConfig struct {
 	AppleVM                  *fileAppleVMConfig                  `yaml:"appleVM,omitempty"`
 	AppleVZLegacy            *fileAppleVMConfig                  `yaml:"appleVZ,omitempty"`
 	MXC                      *fileMXCConfig                      `yaml:"mxc,omitempty"`
+	UTM                      *fileUTMConfig                      `yaml:"utm,omitempty"`
 	Multipass                *fileMultipassConfig                `yaml:"multipass,omitempty"`
 	Machine0                 *fileMachine0Config                 `yaml:"machine0,omitempty"`
 	Tart                     *fileTartConfig                     `yaml:"tart,omitempty"`
@@ -3590,6 +3593,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 	}
 	{
+		applied, err := cfg.UTM.applyFile(file.UTM)
+		recordConfigInput(cfg, "utm", inputSource, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
+	}
+	{
 		applied, err := cfg.Multipass.applyFile(file.Multipass)
 		recordConfigInput(cfg, "multipass", inputSource, applied.InputAccepted)
 		if applied.Image {
@@ -4895,6 +4905,13 @@ func applyEnv(cfg *Config) error {
 	{
 		applied, err := cfg.MXC.applyEnv()
 		recordConfigInput(cfg, "mxc", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
+	}
+	{
+		applied, err := cfg.UTM.applyEnv()
+		recordConfigInput(cfg, "utm", configInputEnvironment, applied.InputAccepted)
 		if err != nil {
 			return err
 		}

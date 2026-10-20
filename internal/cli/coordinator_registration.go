@@ -140,6 +140,9 @@ func (a App) claimLeaseTargetForRepoAndRegisterMode(
 		SSH:     target,
 		LeaseID: leaseID,
 	}
+	// The local claim is committed even if a later coordinator registration
+	// stage fails. Preserve this exact owned result for a surrounding run owner.
+	a.recordRunLeasePublication(lease)
 	err = a.registerCoordinatorLeaseBestEffort(ctx, *cfg, &lease)
 	*server = lease.Server
 	return err
