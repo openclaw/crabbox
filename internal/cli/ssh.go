@@ -1377,11 +1377,15 @@ func (e *gitOriginDiagnosticsTruncatedError) Unwrap() error {
 const gitSeedPublishedReceipt = "crabbox-git-seed published"
 
 func runIdempotentSSHGitOriginAttempt(ctx context.Context, target SSHTarget, remote string, retryDelay time.Duration) (string, error) {
-	out, _, err := runIdempotentSSHGitOriginAttemptWithPublication(ctx, target, remote, retryDelay)
+	out, _, err := runIdempotentSSHGitOriginAttemptCapture(ctx, target, remote, retryDelay, false)
 	return out, err
 }
 
 func runIdempotentSSHGitOriginAttemptWithPublication(ctx context.Context, target SSHTarget, remote string, retryDelay time.Duration) (string, bool, error) {
+	return runIdempotentSSHGitOriginAttemptCapture(ctx, target, remote, retryDelay, true)
+}
+
+func runIdempotentSSHGitOriginAttemptCapture(ctx context.Context, target SSHTarget, remote string, retryDelay time.Duration, capturePublication bool) (string, bool, error) {
 	published := false
 	var (
 		out       synchronizedBuffer
@@ -1393,14 +1397,19 @@ func runIdempotentSSHGitOriginAttemptWithPublication(ctx context.Context, target
 		// Keep diagnostics scoped to the last attempt, but retain an observed
 		// publication across transport retries. Origin diagnostics on stderr
 		// cannot supply the native producer's stdout receipt.
-		stdout := newSynchronizedBuffer(gitSeedDiagnosticLimit)
-		lastErr = executeSSH(ctx, &target, remote, nil, 0, 0, "10", "3", io.MultiWriter(&out, &stdout), &out)
-		if receipt, clipped := stdout.boundedString(); !clipped {
-			for _, line := range strings.Split(receipt, "\n") {
-				if line == gitSeedPublishedReceipt {
-					published = true
+		if capturePublication {
+			stdout := newSynchronizedBuffer(gitSeedDiagnosticLimit)
+			lastErr = executeSSH(ctx, &target, remote, nil, 0, 0, "10", "3", io.MultiWriter(&out, &stdout), &out)
+			if receipt, clipped := stdout.boundedString(); !clipped {
+				for _, line := range strings.Split(receipt, "\n") {
+					if line == gitSeedPublishedReceipt {
+						published = true
+					}
 				}
 			}
+		} else {
+			// The shared writer preserves the ordinary combined-pipe ordering.
+			lastErr = executeSSH(ctx, &target, remote, nil, 0, 0, "10", "3", &out, &out)
 		}
 		if lastErr == nil || !shouldRetrySSHPort(lastErr) || attempt == 1 {
 			break
@@ -2344,9 +2353,9 @@ origin_git -C "$tmp" remote add origin "$expected_origin"
 		checkoutGit = "origin_git"
 	}
 	script := `set -e
-printf 'crabbox-git-seed phase=prerequisite\n'
+printf 'crabbox-git-seed phase=prerequisite\n' >&2
 command -v git >/dev/null 2>&1 || exit ` + strconv.Itoa(prerequisiteExitCode) + `
-printf 'crabbox-git-seed phase=prepare\n'
+printf 'crabbox-git-seed phase=prepare\n' >&2
 workdir=` + shellAbsolutePath(workdir) + `
 # Keep clone publication and cleanup anchored across directory changes.
 [ -n "$workdir" ] || { echo 'crabbox-git-seed: missing workspace path' >&2; exit 2; }
@@ -2385,7 +2394,7 @@ require_empty_seed_destination() {
 if [ -d "$workdir" ]; then
   cd "$workdir" || reject_seed_destination
   if usable_git_workspace; then
-    printf 'crabbox-git-seed phase=origin\n'
+    printf 'crabbox-git-seed phase=origin\n' >&2
     repair_origin
     exit 0
   fi
@@ -2397,24 +2406,24 @@ transport_error="$tmp.transport-error"
 cleanup_seed() { rm -rf -- "$tmp"; rm -f -- "$transport_error"; }
 trap cleanup_seed EXIT
 ` + prepare + `
-printf 'crabbox-git-seed phase=clone\n'
+printf 'crabbox-git-seed phase=clone\n' >&2
 if ! { ` + seed + `; } >/dev/null 2>"$transport_error"; then
   cat "$transport_error" >&2
   exit ` + strconv.Itoa(gitOriginRuntimeFallbackExitCode) + `
 fi
-printf 'crabbox-git-seed phase=checkout\n'
+printf 'crabbox-git-seed phase=checkout\n' >&2
 ` + checkoutGit + ` -C "$tmp" checkout --quiet --detach ` + shellQuote(plan.Target) + `
-printf 'crabbox-git-seed phase=verify\n'
+printf 'crabbox-git-seed phase=verify\n' >&2
 [ "$(git -C "$tmp" rev-parse --verify HEAD^{commit})" = ` + shellQuote(plan.Target) + ` ]
 cd "$tmp"
 usable_git_workspace
 if [ -n "$expected_tree" ]; then
   [ "$(git write-tree)" = "$expected_tree" ]
 fi
-printf 'crabbox-git-seed phase=origin\n'
+printf 'crabbox-git-seed phase=origin\n' >&2
 repair_origin
 ` + seedManifest + `
-printf 'crabbox-git-seed phase=publish\n'
+printf 'crabbox-git-seed phase=publish\n' >&2
 cd /
 require_empty_seed_destination
 # Never recursively remove files that appeared while the clone was prepared.

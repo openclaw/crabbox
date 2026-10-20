@@ -177,7 +177,7 @@ if [ "$CRABBOX_SEED_DROP_PUBLISH" = true ] && [ ! -f "$CRABBOX_SEED_DROP_FILE" ]
       /bin/bash --noprofile --norc -c "$remote" > "$CRABBOX_SEED_DROP_FILE.output"
       result=$?
       cat "$CRABBOX_SEED_DROP_FILE.output"
-      if [ "$result" = 0 ] && grep -Fxq 'crabbox-git-seed phase=publish' "$CRABBOX_SEED_DROP_FILE.output"; then
+      if [ "$result" = 0 ] && grep -Fxq 'crabbox-git-seed published' "$CRABBOX_SEED_DROP_FILE.output"; then
         touch "$CRABBOX_SEED_DROP_FILE"
         exit 255
       fi
