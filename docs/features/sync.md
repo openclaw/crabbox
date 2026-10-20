@@ -492,8 +492,11 @@ Crabbox can seed a verified published ancestor shared with the configured or
 inferred `sync.baseRef`. The full manifest still applies the exact selected working
 files and exclusions. Remote Git HEAD honestly remains that published ancestor;
 Crabbox does not transfer private Git history or certify it as the selected commit.
-This requires a usable origin-tracking branch and an empty cold workspace. It does
-not adopt a populated raw directory or bypass repository and lease checks.
+A local base ref is sufficient; origin-tracking refs are not required. The
+ancestor must have an eligible tree and be fetchable and verifiable from the same
+origin. Without a containing origin-tracking branch, `sync.delete: true` remains
+required. Seeding requires an empty cold workspace and does not adopt a populated
+raw directory or bypass repository and lease checks.
 `--no-hydrate` and ordinary file-only sync retain their existing behavior.
 
 These seeds do not enable branch-based coherence, reusable fingerprints, or Git

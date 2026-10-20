@@ -722,7 +722,9 @@ func (a App) seedLocalActionsAncestor(ctx context.Context, cfg Config, repo Repo
 	baseline := repo
 	baseline.Head = ancestor
 	plan, blocked := syncGitCoherencePlan(cfg, baseline)
-	if blocked || !plan.enabled() {
+	// A verified exact-SHA seed needs no local origin-tracking branch.
+	// Keep the tree requirement without enabling branch coherence or reuse.
+	if blocked || !plan.seedEnabled() || plan.Tree == "" {
 		return nil
 	}
 	out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, plan), idempotentSSHRetryDelay)
