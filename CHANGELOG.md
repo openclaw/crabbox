@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Local Actions hydration: prepare cold unpublished detached sources from a verified published ancestor while preserving selected files, privacy filters, and repository identity checks. [PR 2914](https://github.com/openclaw/crabbox/pull/2914). Thanks @shakkernerd.
+
 ## 0.79.0 - 2026-10-19
 
 ### Highlights
