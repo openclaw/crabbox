@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 0.79.0 - 2026-10-19
+
+### Highlights
+
+- **Release owned resources with stronger replacement checks.** Tart validates recorded VM ownership, AWS matches immutable key-pair IDs, Azure checks snapshot identity, and Windows Sandbox stops only verified run-owned sessions. [PR 2902](https://github.com/openclaw/crabbox/pull/2902), [PR 2890](https://github.com/openclaw/crabbox/pull/2890), [PR 2905](https://github.com/openclaw/crabbox/pull/2905), [PR 2906](https://github.com/openclaw/crabbox/pull/2906). Thanks @goutamadwant and @coygeek.
+- **Keep credentials within their intended boundaries.** Browser login preserves broker provenance, non-admin control sessions revalidate continuing authorization, and persisted Windows configuration uses an owner-only DACL. [PR 2903](https://github.com/openclaw/crabbox/pull/2903), [PR 2907](https://github.com/openclaw/crabbox/pull/2907), [PR 2901](https://github.com/openclaw/crabbox/pull/2901). Thanks @coygeek.
+- **Run relay-backed serve leases faster and see each machine's contribution.** Reusing one relay connection per invocation cut measured end-to-end runtime by about 3.5×; usage, machine listings, and the portal report leases, runtime, and allocated CPU-hours per machine. [PR 2865](https://github.com/openclaw/crabbox/pull/2865), [PR 2864](https://github.com/openclaw/crabbox/pull/2864).
+- **Sync and run reliably over static SSH.** Fish login shells work again after the 0.72.0 regression, acknowledged renewals retry failed transports, and macOS work roots follow the final static login user. [PR 2874](https://github.com/openclaw/crabbox/pull/2874), [PR 2872](https://github.com/openclaw/crabbox/pull/2872), [PR 2871](https://github.com/openclaw/crabbox/pull/2871). Thanks @shunkakinoki and @holgergruenhagen.
+- **Restore prepared Azure Sandboxes and run Freestyle with its current API.** Fresh Azure leases can use pinned clean snapshots; Freestyle validates VM readiness and reports timed-out commands as failures. [PR 2850](https://github.com/openclaw/crabbox/pull/2850), [PR 2897](https://github.com/openclaw/crabbox/pull/2897), [PR 2896](https://github.com/openclaw/crabbox/pull/2896). Thanks @galiniliev and @coygeek.
+
+### Upgrade notes
+
+- Direct Azure checkpoints without a recorded snapshot `uniqueId`, or with a mismatched identity, become `detached` instead of deleting by name. Reconcile those snapshots manually; `--local-only` removes only the local record. [PR 2905](https://github.com/openclaw/crabbox/pull/2905). Thanks @coygeek.
+- Explicit Tart release refuses VMs whose recorded ownership, storage, or current claim does not match. Resolve the ownership mismatch before retrying; failed releases preserve recovery state. [PR 2902](https://github.com/openclaw/crabbox/pull/2902). Thanks @coygeek.
+- Non-admin control clients already connected without a verifiable authorization grant must reconnect once after the coordinator update. [PR 2907](https://github.com/openclaw/crabbox/pull/2907). Thanks @coygeek.
+- Windows Sandbox cleanup leaves unverifiable sessions running with a warning and preserves the host workspace for manual inspection. [PR 2906](https://github.com/openclaw/crabbox/pull/2906). Thanks @coygeek.
+
+### Changed
+
+- Serve: reuse invocation-owned relay SSH connections across readiness, sync, commands, and cleanup while preserving pinned host keys and independent workspace ownership. [PR 2865](https://github.com/openclaw/crabbox/pull/2865).
+
 ### Added
 
 - Azure Sandbox: optionally restore fresh independently owned leases from pinned clean snapshots, verify source and lifecycle settings, and preserve safe recovery and exact-owned cleanup. [PR 2850](https://github.com/openclaw/crabbox/pull/2850). Thanks @galiniliev.
@@ -21,20 +42,22 @@
 - Azure: bind direct checkpoint deletion to the captured snapshot identity and detach stale or legacy records for manual cleanup. [PR 2905](https://github.com/openclaw/crabbox/pull/2905). Thanks @coygeek.
 - Login: preserve configured broker provenance during browser authentication so repository-selected destinations cannot use inherited coordinator credentials. [PR 2903](https://github.com/openclaw/crabbox/pull/2903). Thanks @coygeek.
 - Tart: enforce recorded VM ownership and current claims during explicit release, preserve retry state on failure, and verify storage absence before pruning missing leases. [PR 2902](https://github.com/openclaw/crabbox/pull/2902). Thanks @coygeek.
-- Sync: preserve Darwin symlink permissions in local Git seed and overlay snapshots without changing symlink targets or weakening source validation. [PR 2900](https://github.com/openclaw/crabbox/pull/2900).
-- Sync: retain redacted attempt, stage, and failed-check diagnostics when local Git-seed snapshot preparation exhausts its retries, without changing acceptance or cleanup. [PR 2899](https://github.com/openclaw/crabbox/pull/2899).
-- CI: move macOS checks and release verification to macOS 27, preserving macOS 13 deployment gates and Intel verification through Rosetta.
-- Docs: clarify command-specific `--provider` selection, doctor readiness failures, and `providers describe <name>` for catalog inspection. [Issue 2846](https://github.com/openclaw/crabbox/issues/2846). Thanks @aitrawog.
-- Static SSH: derive the macOS work root from the final `--static-user` flag instead of the default or config user, while explicit work roots and SSH users still win. [PR 2871](https://github.com/openclaw/crabbox/pull/2871). Thanks @holgergruenhagen.
+- Sync: preserve Darwin symlink permissions in local Git seed and overlay snapshots without changing symlink targets or weakening source validation. [PR 2900](https://github.com/openclaw/crabbox/pull/2900). Thanks @vincentkoc.
+- Sync: retain redacted attempt, stage, and failed-check diagnostics when local Git-seed snapshot preparation exhausts its retries, without changing acceptance or cleanup. [PR 2899](https://github.com/openclaw/crabbox/pull/2899). Thanks @vincentkoc.
+- CI: move macOS checks and release verification to macOS 27, preserving macOS 13 deployment gates and Intel verification through Rosetta. [PR 2881](https://github.com/openclaw/crabbox/pull/2881).
+- Docs: clarify command-specific `--provider` selection, doctor readiness failures, and `providers describe <name>` for catalog inspection. [PR 2873](https://github.com/openclaw/crabbox/pull/2873). Thanks @aitrawog.
+- Static SSH: derive the macOS work root from the final `--static-user` flag instead of the default or config user, while explicit work roots still win and the generic SSH user remains the fallback. [PR 2871](https://github.com/openclaw/crabbox/pull/2871). Thanks @holgergruenhagen.
 - Sync: stage rsync receivers through an explicit POSIX shell for Fish-login SSH hosts and identify receiver setup failures without weakening workspace ownership. [PR 2874](https://github.com/openclaw/crabbox/pull/2874). Thanks @shunkakinoki.
-- Run: retry workspace-owner `RENEWED` replies with transport errors within the existing same-token retry budget and confirmed deadline; only an error-free reply confirms ownership. [Issue 2858](https://github.com/openclaw/crabbox/issues/2858). Thanks @shunkakinoki.
-- Coordinator: read run-log previews from the latest chunks without scanning the full retained log. [PR 2869](https://github.com/openclaw/crabbox/pull/2869).
-- CI: stop aggregate checks when a run is cancelled while preserving failed dependency results, and check coverage producers before toolchain setup. [PR 2868](https://github.com/openclaw/crabbox/pull/2868).
-- Security: update the Incus client and HTTP/2 dependencies to address reachable advisories, and use Go 1.27.2 for builds while retaining the Go 1.26 module minimum.
-- Coordinator deployment: reject lease-policy overrides the runtime would ignore, while preserving acknowledged repair of invalid live policy values. [PR 2867](https://github.com/openclaw/crabbox/pull/2867).
+- Run: retry workspace-owner `RENEWED` replies with transport errors within the existing same-token retry budget and confirmed deadline; only an error-free reply confirms ownership. [PR 2872](https://github.com/openclaw/crabbox/pull/2872). Thanks @shunkakinoki.
+- Coordinator: read run-log previews from the latest chunks without scanning the full retained log. [PR 2869](https://github.com/openclaw/crabbox/pull/2869). Thanks @vincentkoc.
+- CI: stop aggregate checks when a run is cancelled while preserving failed dependency results, and check coverage producers before toolchain setup. [PR 2868](https://github.com/openclaw/crabbox/pull/2868). Thanks @vincentkoc.
+- Security: update the Incus client and HTTP/2 dependencies to address reachable advisories, and use Go 1.27.2 for builds while retaining the Go 1.26 module minimum. [PR 2870](https://github.com/openclaw/crabbox/pull/2870).
+- Coordinator deployment: reject lease-policy overrides the runtime would ignore, while preserving acknowledged repair of invalid live policy values. [PR 2867](https://github.com/openclaw/crabbox/pull/2867). Thanks @vincentkoc.
 - Coordinator: reconcile retained AWS records with filtered batches of at most 200 unique instance IDs, avoiding missing-instance fallback storms and isolating transient chunk failures while preserving successful observations and bounded backoff. [PR 2866](https://github.com/openclaw/crabbox/pull/2866).
-- Serve: reuse invocation-owned relay SSH connections across readiness, sync, commands, and cleanup while preserving pinned host keys and independent workspace ownership. [PR 2865](https://github.com/openclaw/crabbox/pull/2865).
 - Sync: keep finalization fetches blob-filtered when completing shallow Git history, and explain live-child owner release refusals with safe lease recovery guidance. [PR 2854](https://github.com/openclaw/crabbox/pull/2854).
+
+- Tests: use small controller fixtures in archive tests while preserving companion and manifest validation. [PR 2876](https://github.com/openclaw/crabbox/pull/2876). Thanks @vincentkoc.
+- CI: use keyless OIDC intake for review dispatch. [PR 2892](https://github.com/openclaw/crabbox/pull/2892).
 
 ## 0.78.1 - 2026-10-15
 
