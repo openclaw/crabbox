@@ -229,7 +229,7 @@ func TestRunFunctionalPreflightContinuation(t *testing.T) {
 				}
 			}
 			if tc.ownerStoredFailure {
-				if tc.envCleanup && !strings.Contains(err.Error(), "remote command environment cleanup failed") {
+				if tc.envCleanup && !strings.Contains(err.Error(), "could not confirm removal of forwarded environment file") {
 					t.Fatalf("missing additional cleanup diagnostic: %v", err)
 				}
 				if !errors.Is(err, ownerFailure) || ExitCodeForError(err, 1) != 7 {
