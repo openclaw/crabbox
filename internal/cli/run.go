@@ -2642,6 +2642,11 @@ retrySync:
 			stepStart = time.Now()
 			if out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
 				if reason, fallback := gitSeedRuntimeFallbackResult(coherence, out, err); fallback {
+					if reason == "exact_commit_unavailable" && autoHydrateActions && !hydratedByActions && supportsLocalActionsHydrateTarget(targetWithConfigDefaults(target, cfg)) {
+						if err := a.seedLocalActionsAncestor(ctx, cfg, repo, target, workdir); err != nil {
+							return recordFailure(err)
+						}
+					}
 					usePlainManifestForOrigin(reason)
 				} else if coherence.Branch == "" || exitCode(err) == gitSeedUnsafeWorkspaceExitCode {
 					reportRemoteGitSeedFailure(a.Stderr, out, err, "aborting before file sync")
