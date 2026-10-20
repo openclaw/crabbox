@@ -496,7 +496,9 @@ A local base ref is sufficient; origin-tracking refs are not required. The
 ancestor must have an eligible tree and be fetchable and verifiable from the same
 origin. Without a containing origin-tracking branch, `sync.delete: true` remains
 required. Seeding requires an empty cold workspace and does not adopt a populated
-raw directory or bypass repository and lease checks.
+raw directory or bypass repository and lease checks. When this operation publishes
+a fresh ancestor seed, pruning may remove all excluded files it just imported;
+the deletion policy for pre-existing workspace contents remains unchanged.
 `--no-hydrate` and ordinary file-only sync retain their existing behavior.
 
 These seeds do not enable branch-based coherence, reusable fingerprints, or Git

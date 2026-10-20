@@ -24,12 +24,13 @@ func TestRunDetachedGitSeedPreservesManifestAuthority(t *testing.T) {
 	for _, tc := range []struct {
 		name                                                        string
 		published, checksum, delete, missingGit, githubSSH, hydrate bool
-		localBase, explicit, unavailableBase                        bool
+		localBase, explicit, unavailableBase, manyExcluded          bool
 	}{
 		{name: "unpublished-warm", delete: true, hydrate: true},
 		{name: "unpublished-hydration", delete: true, hydrate: true},
 		{name: "unpublished-explicit", delete: true, hydrate: true, explicit: true},
 		{name: "local-base-script", delete: true, hydrate: true, localBase: true},
+		{name: "local-base-many-exclusions", delete: true, hydrate: true, localBase: true, manyExcluded: true},
 		{name: "local-base-explicit", delete: true, hydrate: true, localBase: true, explicit: true},
 		{name: "local-base-no-hydrate", delete: true, localBase: true},
 		{name: "local-base-unavailable", delete: true, hydrate: true, localBase: true, unavailableBase: true},
@@ -45,6 +46,15 @@ func TestRunDetachedGitSeedPreservesManifestAuthority(t *testing.T) {
 			clearConfigEnv(t)
 			f := newGitCoherenceFixture(t)
 			runGit(t, f.source, "checkout", "--quiet", "--detach", f.b)
+			if tc.manyExcluded {
+				for index := range 200 {
+					mustWriteTestFile(t, filepath.Join(f.source, "other", fmt.Sprintf("public-%03d.txt", index)), "excluded published bytes\n")
+				}
+				runGit(t, f.source, "add", "other")
+				runGit(t, f.source, "commit", "-qm", "published excluded files")
+				f.b = gitOutput(f.source, "rev-parse", "HEAD")
+				runGit(t, f.source, "push", "--quiet", "origin", "HEAD:refs/heads/fixture-base")
+			}
 			payload := strings.Repeat("unchanged seed payload\n", 32768)
 			mustWriteTestFile(t, filepath.Join(f.source, "payload.txt"), payload)
 			runGit(t, f.source, "add", "payload.txt")
@@ -239,6 +249,15 @@ exec ` + shellQuote(realRsync) + ` "${args[@]}"
 				if err := app.actionsHydrate(t.Context(), []string{"--provider", providerName, "--id", "cbx_detached_seed"}); err != nil {
 					t.Fatalf("explicit hydration: %v\n%s", err, stderr.String())
 				}
+				if tc.localBase {
+					cfg := baseConfig()
+					cfg.Sync.BaseRef = "main"
+					target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetLinux, SSHConfigProxy: true}
+					fresh, err := app.seedLocalActionsAncestor(t.Context(), cfg, repo, target, workdir)
+					if err != nil || fresh {
+						t.Fatalf("existing workspace reported fresh publication: fresh=%t err=%v", fresh, err)
+					}
+				}
 				args = append([]string{"--id", "cbx_detached_seed", "--stop-after", "always"}, args...)
 			}
 			err = app.runCommand(context.Background(), args)
@@ -311,6 +330,11 @@ exec ` + shellQuote(realRsync) + ` "${args[@]}"
 			for _, name := range []string{"deleted.txt", "other/omit.txt", "other/private.txt", ".git/crabbox/sync-fingerprint"} {
 				if _, err := os.Lstat(filepath.Join(workdir, name)); !os.IsNotExist(err) {
 					t.Fatalf("unexpected remote path %s: %v", name, err)
+				}
+			}
+			if tc.manyExcluded {
+				if _, err := os.Lstat(filepath.Join(workdir, "other")); !os.IsNotExist(err) {
+					t.Fatalf("excluded published files remain: %v", err)
 				}
 			}
 			if tc.hydrate {

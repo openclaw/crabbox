@@ -2638,14 +2638,17 @@ retrySync:
 			fmt.Fprintf(a.Stderr, "git origin fallback reason=%s; using plain manifest sync\n", reason)
 		}
 		seedSucceeded := false
+		freshActionsSeed := false
 		if !overlayDecision.Enabled && !plainManifestMode && coherence.seedEnabled() {
 			stepStart = time.Now()
 			if out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
 				if reason, fallback := gitSeedRuntimeFallbackResult(coherence, out, err); fallback {
 					if reason == "exact_commit_unavailable" && autoHydrateActions && !hydratedByActions && supportsLocalActionsHydrateTarget(targetWithConfigDefaults(target, cfg)) {
-						if err := a.seedLocalActionsAncestor(ctx, cfg, repo, target, workdir); err != nil {
+						fresh, err := a.seedLocalActionsAncestor(ctx, cfg, repo, target, workdir)
+						if err != nil {
 							return recordFailure(err)
 						}
+						freshActionsSeed = fresh
 					}
 					usePlainManifestForOrigin(reason)
 				} else if coherence.Branch == "" || exitCode(err) == gitSeedUnsafeWorkspaceExitCode {
@@ -2771,7 +2774,9 @@ retrySync:
 				pruneCommand = remotePruneGitOverlaySyncManifest(workdir, finalizeToken, allowRemoteSyncMassDeletions(cfg, hydratedByActions))
 			} else if plainManifestMode || localGitSeed {
 				// Local metadata does not make prior raw paths safe to follow through symlink ancestors.
-				pruneCommand = remotePruneSyncManifestForTargetMode(target, workdir, finalizeToken, true, allowRemoteSyncMassDeletions(cfg, hydratedByActions))
+				// A fresh ancestor seed contains only files imported by this sync;
+				// the selected manifest must prune excluded baseline files at any count.
+				pruneCommand = remotePruneSyncManifestForTargetMode(target, workdir, finalizeToken, true, freshActionsSeed || allowRemoteSyncMassDeletions(cfg, hydratedByActions))
 			}
 			if _, err := runIdempotentSSHCombinedOutput(ctx, target, pruneCommand, idempotentSSHRetryDelay); err != nil {
 				return recordFailure(Exit(6, "remote sync prune failed: %v", err))
@@ -2819,7 +2824,7 @@ retrySync:
 		}
 		stepStart = time.Now()
 		out, finalizeErr, reason, fallback := runRemoteFinalizeSync(ctx, target, workdir, remoteSyncFinalizeOptions{
-			AllowMassDeletions: allowRemoteSyncMassDeletions(cfg, hydratedByActions),
+			AllowMassDeletions: freshActionsSeed || allowRemoteSyncMassDeletions(cfg, hydratedByActions),
 			HydrateGit:         hydrateGit && !overlayDecision.Enabled && !plainManifestMode,
 			GitOverlay:         overlayDecision.Enabled,
 			PlainManifest:      plainManifestMode,

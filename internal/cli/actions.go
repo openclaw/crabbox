@@ -710,14 +710,14 @@ func invalidateActionsHydrationWorkspaces(ctx context.Context, target SSHTarget,
 // An unavailable detached commit can still use the same genuine Git baseline
 // as a warm Actions workspace. Only origin supplies objects; the full manifest
 // remains authoritative for selected files, without certifying the selected HEAD.
-func (a App) seedLocalActionsAncestor(ctx context.Context, cfg Config, repo Repo, target SSHTarget, workdir string) error {
+func (a App) seedLocalActionsAncestor(ctx context.Context, cfg Config, repo Repo, target SSHTarget, workdir string) (bool, error) {
 	base := gitHydrateBaseSHA(repo, firstNonBlank(cfg.Sync.BaseRef, repo.BaseRef))
 	if base == "" {
-		return nil
+		return false, nil
 	}
 	ancestor := gitOutput(repo.Root, "merge-base", repo.Head, base)
 	if !validGitObjectID(ancestor) || ancestor == repo.Head {
-		return nil
+		return false, nil
 	}
 	baseline := repo
 	baseline.Head = ancestor
@@ -725,18 +725,25 @@ func (a App) seedLocalActionsAncestor(ctx context.Context, cfg Config, repo Repo
 	// A verified exact-SHA seed needs no local origin-tracking branch.
 	// Keep the tree requirement without enabling branch coherence or reuse.
 	if blocked || !plan.seedEnabled() || plan.Tree == "" {
-		return nil
+		return false, nil
 	}
 	out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, plan), idempotentSSHRetryDelay)
 	if err != nil {
 		if _, fallback := gitSeedRuntimeFallbackResult(plan, out, err); fallback {
-			return nil
+			return false, nil
 		}
 		reportRemoteGitSeedFailure(a.Stderr, out, err, "aborting before file sync")
-		return Exit(6, "local Actions ancestor seed failed: %v", err)
+		return false, Exit(6, "local Actions ancestor seed failed: %v", err)
 	}
 	fmt.Fprintf(a.Stderr, "local Actions Git baseline=%s; selected source=%s uses full manifest sync\n", ancestor, repo.Head)
-	return nil
+	// Only successful publication into an empty destination owns the seeded files.
+	// Existing Git workspaces return before this phase and retain deletion limits.
+	for _, line := range strings.Split(out, "\n") {
+		if line == "crabbox-git-seed phase=publish" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Repo, target SSHTarget, workdir string, plainManifest bool) (bool, error) {
@@ -768,7 +775,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		if out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
 			if reason, fallback := gitSeedRuntimeFallbackResult(coherence, out, err); fallback {
 				if reason == "exact_commit_unavailable" {
-					if err := a.seedLocalActionsAncestor(ctx, cfg, repo, target, workdir); err != nil {
+					if _, err := a.seedLocalActionsAncestor(ctx, cfg, repo, target, workdir); err != nil {
 						return plainManifest, err
 					}
 				}
