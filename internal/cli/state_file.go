@@ -9,8 +9,12 @@ import (
 
 // Publish the complete record atomically and sync its namespace before remote effects.
 func writeStateFileAtomic(path string, data []byte, syncDirectory func(string) error) error {
+	return writeStateFileAtomicWithReplace(path, data, syncDirectory, replaceClaimFile)
+}
+
+func writeStateFileAtomicWithReplace(path string, data []byte, syncDirectory func(string) error, replace func(string, string) error) error {
 	dir := filepath.Dir(path)
-	if err := atomicfile.WritePrivate(path, "."+filepath.Base(path)+".tmp-*", data, replaceClaimFile); err != nil {
+	if err := atomicfile.WritePrivate(path, "."+filepath.Base(path)+".tmp-*", data, replace); err != nil {
 		return err
 	}
 	if err := syncDirectory(dir); err != nil {

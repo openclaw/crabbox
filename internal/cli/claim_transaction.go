@@ -47,6 +47,7 @@ type leaseClaimTransaction struct {
 	directory     claimDirectoryPolicy
 	publication   claimPublicationPolicy
 	write         func(string, leaseClaim) error
+	replace       func(context.Context, string, string, func() error) error
 	syncDirectory func(string) error
 }
 
@@ -60,9 +61,15 @@ func transactLeaseClaim(leaseID string, tx leaseClaimTransaction) (leaseClaim, e
 	if err != nil {
 		return leaseClaim{}, err
 	}
+	replace := replaceClaimFile
 	write := tx.write
 	if write == nil {
-		write = writeLeaseClaimAtomic
+		write = func(path string, claim leaseClaim) error {
+			return writeLeaseClaimAtomicWithReplace(path, claim, func(dir string) error {
+				fsyncDir(dir)
+				return nil
+			}, replace)
+		}
 	}
 	if tx.directory == claimDirectoryDurableNamespace {
 		// Capture the boundary before lock-directory creation can create ancestors.
@@ -75,7 +82,10 @@ func transactLeaseClaim(leaseID string, tx leaseClaimTransaction) (leaseClaim, e
 			syncDirectory = syncControllerDirectory
 		}
 		write = func(path string, claim leaseClaim) error {
-			return writeLeaseClaimAtomicDurableWithSync(path, claim, firstExistingDir, syncDirectory)
+			if err := writeLeaseClaimAtomicWithReplace(path, claim, syncDirectory, replace); err != nil {
+				return err
+			}
+			return syncCreatedClaimDirectoryParentsWithSync(filepath.Dir(path), firstExistingDir, syncDirectory)
 		}
 	}
 	if tx.directory != claimDirectoryExisting {
@@ -102,6 +112,19 @@ func transactLeaseClaim(leaseID string, tx leaseClaimTransaction) (leaseClaim, e
 			}
 		}
 		original := cloneLeaseClaim(claim)
+		replace = func(tmpPath, path string) error {
+			publish := tx.replace
+			if publish == nil {
+				publish = replaceClaimFileWithRetry
+			}
+			return publish(ctx, tmpPath, path, func() error {
+				current, present, err := readLeaseClaimPathWithPresence(path)
+				if err != nil {
+					return err
+				}
+				return unchangedLeaseClaimGuard(leaseID, original, exists)(current, present)
+			})
+		}
 		if tx.revision == claimRevisionBeforeAction {
 			if err := refreshLeaseClaimRevision(&claim); err != nil {
 				return err

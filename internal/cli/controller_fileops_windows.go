@@ -34,21 +34,44 @@ func openWindowsNamespaceFile(path string) (windows.Handle, error) {
 }
 
 func renameWindowsFile(from, to string, flags uint32) (err error) {
+	_, err = renameWindowsFileWithOps(from, to, flags, defaultWindowsRenameOps())
+	return err
+}
+
+type windowsRenameOps struct {
+	open   func(string) (windows.Handle, error)
+	rename func(windows.Handle, *byte, uint32) error
+	flush  func(windows.Handle) error
+	close  func(windows.Handle) error
+}
+
+func defaultWindowsRenameOps() windowsRenameOps {
+	return windowsRenameOps{
+		open: openWindowsNamespaceFile,
+		rename: func(handle windows.Handle, info *byte, size uint32) error {
+			return windows.SetFileInformationByHandle(handle, windows.FileRenameInfoEx, info, size)
+		},
+		flush: windows.FlushFileBuffers,
+		close: windows.CloseHandle,
+	}
+}
+
+func renameWindowsFileWithOps(from, to string, flags uint32, ops windowsRenameOps) (retryable bool, err error) {
 	// Use a full destination path with a null root handle for FileRenameInfoEx.
 	fullPath := to
 	if !filepath.IsAbs(fullPath) {
 		fullPath, err = filepath.Abs(fullPath)
 		if err != nil {
-			return err
+			return false, err
 		}
 	}
 	fullPath, err = privatefile.WindowsPath(fullPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 	name, err := windows.UTF16FromString(fullPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 	// The HANDLE determines alignment; FileNameLength counts UTF-16 bytes,
 	// excluding the terminator, and FileName starts before any tail padding.
@@ -64,24 +87,28 @@ func renameWindowsFile(from, to string, flags uint32) (err error) {
 	info.Flags = flags
 	info.FileNameLength = uint32(2 * (len(name) - 1))
 	copy(unsafe.Slice((*uint16)(unsafe.Pointer(&buffer[unsafe.Offsetof(layout.FileName)])), len(name)), name)
-	handle, err := openWindowsNamespaceFile(from)
+	handle, err := ops.open(from)
 	if err != nil {
-		return err
+		return errors.Is(err, windows.ERROR_SHARING_VIOLATION), err
 	}
 	defer func() {
-		err = errors.Join(err, windowsNamespaceOperationError("close namespace file", windows.CloseHandle(handle)))
+		closeErr := ops.close(handle)
+		if closeErr != nil {
+			retryable = false
+		}
+		err = errors.Join(err, windowsNamespaceOperationError("close namespace file", closeErr))
 	}()
 	// POSIX replacement keeps old snapshots readable while new opens see the
 	// replacement. Requires Windows 10 1709+; never fall back to MoveFileEx.
 	// https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
-	if err := windows.SetFileInformationByHandle(handle, windows.FileRenameInfoEx, &buffer[0], uint32(len(buffer))); err != nil {
-		return windowsNamespaceOperationError("rename namespace file", err)
+	if err := ops.rename(handle, &buffer[0], uint32(len(buffer))); err != nil {
+		return errors.Is(err, windows.ERROR_SHARING_VIOLATION), windowsNamespaceOperationError("rename namespace file", err)
 	}
 	// Callers sync staged data before publication. WRITE_THROUGH covers NTFS
 	// rename metadata; flush the renamed handle too. Failure is postpublication:
 	// preserve the destination and propagate it without replaying any action.
 	// https://learn.microsoft.com/en-us/windows/win32/fileio/file-caching
-	return windowsNamespaceOperationError("flush renamed file "+to, windows.FlushFileBuffers(handle))
+	return false, windowsNamespaceOperationError("flush renamed file "+to, ops.flush(handle))
 }
 
 func removeWindowsTombstone(path string) (err error) {

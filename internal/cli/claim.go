@@ -1309,13 +1309,17 @@ func writeLeaseClaimAtomic(path string, claim leaseClaim) error {
 }
 
 func writeLeaseClaimAtomicWithSync(path string, claim leaseClaim, syncDirectory func(string) error) error {
+	return writeLeaseClaimAtomicWithReplace(path, claim, syncDirectory, replaceClaimFile)
+}
+
+func writeLeaseClaimAtomicWithReplace(path string, claim leaseClaim, syncDirectory func(string) error, replace func(string, string) error) error {
 	data, err := json.MarshalIndent(claim, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
 
-	if err := writeStateFileAtomic(path, data, syncDirectory); err != nil {
+	if err := writeStateFileAtomicWithReplace(path, data, syncDirectory, replace); err != nil {
 		return Exit(2, "write claim %s: %v", path, err)
 	}
 	return nil

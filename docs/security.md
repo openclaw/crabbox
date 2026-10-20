@@ -477,6 +477,15 @@ operation, and claim removal or retained-state update. Names, provider tags,
 and inventory matches remain discovery hints; missing, stale, or concurrently
 replaced claims never authorize deletion or stopping.
 
+On Windows, fenced claim publication retries only prepublication sharing
+violations while opening or renaming the staged file: at most six attempts,
+with 25/50/100/200/200 ms backoff and a one-second cooperative retry deadline.
+Each retry checks cancellation and the unchanged original claim, including
+its revision, while retaining the claim lock. An in-flight filesystem call
+cannot be interrupted by this deadline. Provider actions are never replayed;
+other errors and flush, close, or directory-sync failures propagate without
+retry.
+
 `stop --force` is an explicit, single-resource recovery path rather than an
 authorization bypass. It requires an explicit provider and exact resource ID.
 Adapters that support safe adoption must first inspect provider identity and

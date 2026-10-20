@@ -129,7 +129,7 @@ func (a App) claimLeaseTargetForRepoAndRegisterMode(
 		reclaim,
 		expected,
 		expectedExists,
-		leaseClaimTargetOptions{idle: idlePolicy},
+		leaseClaimTargetOptions{context: ctx, idle: idlePolicy},
 	)
 	if err != nil {
 		return err
