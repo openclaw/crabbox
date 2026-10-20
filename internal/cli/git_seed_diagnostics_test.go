@@ -228,3 +228,30 @@ cat >/dev/null
 		t.Fatalf("production transition order=%q err=%v", data, err)
 	}
 }
+
+func TestGitOriginAttemptPublicationReceipt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell SSH fixture")
+	}
+	for _, tc := range []struct {
+		name, script string
+		want         bool
+	}{
+		{"published", "printf '%s\\n' " + shellQuote(gitSeedPublishedReceipt), true},
+		{"stderr-is-not-a-receipt", "printf '%s\\n' " + shellQuote(gitSeedPublishedReceipt) + " >&2", false},
+		{"publication-not-completed", "printf 'crabbox-git-seed phase=publish\\n'", false},
+		{"truncated", "printf '%s\\n' " + shellQuote(gitSeedPublishedReceipt) + "; head -c 1048576 /dev/zero", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte("#!/bin/sh\n"+tc.script+"\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			_, published, err := runIdempotentSSHGitOriginAttemptWithPublication(t.Context(), SSHTarget{Host: "fixture.invalid", Port: "22", FallbackPorts: []string{}}, "true", 0)
+			if err != nil || published != tc.want {
+				t.Fatalf("published=%t want=%t err=%v", published, tc.want, err)
+			}
+		})
+	}
+}

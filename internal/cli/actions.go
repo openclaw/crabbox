@@ -727,7 +727,7 @@ func (a App) seedLocalActionsAncestor(ctx context.Context, cfg Config, repo Repo
 	if blocked || !plan.seedEnabled() || plan.Tree == "" {
 		return false, nil
 	}
-	out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, plan), idempotentSSHRetryDelay)
+	out, published, err := runIdempotentSSHGitOriginAttemptWithPublication(ctx, target, remoteGitSeed(workdir, plan), idempotentSSHRetryDelay)
 	if err != nil {
 		if _, fallback := gitSeedRuntimeFallbackResult(plan, out, err); fallback {
 			return false, nil
@@ -736,14 +736,9 @@ func (a App) seedLocalActionsAncestor(ctx context.Context, cfg Config, repo Repo
 		return false, Exit(6, "local Actions ancestor seed failed: %v", err)
 	}
 	fmt.Fprintf(a.Stderr, "local Actions Git baseline=%s; selected source=%s uses full manifest sync\n", ancestor, repo.Head)
-	// Only successful publication into an empty destination owns the seeded files.
-	// Existing Git workspaces return before this phase and retain deletion limits.
-	for _, line := range strings.Split(out, "\n") {
-		if line == "crabbox-git-seed phase=publish" {
-			return true, nil
-		}
-	}
-	return false, nil
+	// Only an observed publication into an empty destination owns the seeded
+	// files. Existing roots and missing receipts retain deletion limits.
+	return published, nil
 }
 
 func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Repo, target SSHTarget, workdir string, plainManifest bool) (bool, error) {

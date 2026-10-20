@@ -1374,7 +1374,15 @@ func (e *gitOriginDiagnosticsTruncatedError) Unwrap() error {
 	return e.err
 }
 
+const gitSeedPublishedReceipt = "crabbox-git-seed published"
+
 func runIdempotentSSHGitOriginAttempt(ctx context.Context, target SSHTarget, remote string, retryDelay time.Duration) (string, error) {
+	out, _, err := runIdempotentSSHGitOriginAttemptWithPublication(ctx, target, remote, retryDelay)
+	return out, err
+}
+
+func runIdempotentSSHGitOriginAttemptWithPublication(ctx context.Context, target SSHTarget, remote string, retryDelay time.Duration) (string, bool, error) {
+	published := false
 	var (
 		out       synchronizedBuffer
 		lastErr   error
@@ -1382,7 +1390,18 @@ func runIdempotentSSHGitOriginAttempt(ctx context.Context, target SSHTarget, rem
 	)
 	for attempt := 0; attempt < 2; attempt++ {
 		out = newSynchronizedBuffer(gitSeedDiagnosticLimit)
-		lastErr = executeSSH(ctx, &target, remote, nil, 0, 0, "10", "3", &out, &out)
+		// Keep diagnostics scoped to the last attempt, but retain an observed
+		// publication across transport retries. Origin diagnostics on stderr
+		// cannot supply the native producer's stdout receipt.
+		stdout := newSynchronizedBuffer(gitSeedDiagnosticLimit)
+		lastErr = executeSSH(ctx, &target, remote, nil, 0, 0, "10", "3", io.MultiWriter(&out, &stdout), &out)
+		if receipt, clipped := stdout.boundedString(); !clipped {
+			for _, line := range strings.Split(receipt, "\n") {
+				if line == gitSeedPublishedReceipt {
+					published = true
+				}
+			}
+		}
 		if lastErr == nil || !shouldRetrySSHPort(lastErr) || attempt == 1 {
 			break
 		}
@@ -1396,7 +1415,7 @@ func runIdempotentSSHGitOriginAttempt(ctx context.Context, target SSHTarget, rem
 	if truncated && lastErr != nil {
 		lastErr = &gitOriginDiagnosticsTruncatedError{err: lastErr}
 	}
-	return output, lastErr
+	return output, published, lastErr
 }
 
 func isSSHCommandExitError(err error) bool {
@@ -2401,6 +2420,7 @@ require_empty_seed_destination
 # Never recursively remove files that appeared while the clone was prepared.
 if [ -d "$workdir" ]; then rmdir -- "$workdir" || reject_seed_destination; fi
 mv -- "$tmp" "$workdir"
+printf '%s\n' ` + shellQuote(gitSeedPublishedReceipt) + `
 rm -f -- "$transport_error"
 trap - EXIT
 `

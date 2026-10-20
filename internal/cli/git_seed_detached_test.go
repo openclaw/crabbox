@@ -22,15 +22,16 @@ func TestRunDetachedGitSeedPreservesManifestAuthority(t *testing.T) {
 		t.Skip("rsync unavailable")
 	}
 	for _, tc := range []struct {
-		name                                                        string
-		published, checksum, delete, missingGit, githubSSH, hydrate bool
-		localBase, explicit, unavailableBase, manyExcluded          bool
+		name                                                            string
+		published, checksum, delete, missingGit, githubSSH, hydrate     bool
+		localBase, explicit, unavailableBase, manyExcluded, dropPublish bool
 	}{
 		{name: "unpublished-warm", delete: true, hydrate: true},
 		{name: "unpublished-hydration", delete: true, hydrate: true},
 		{name: "unpublished-explicit", delete: true, hydrate: true, explicit: true},
 		{name: "local-base-script", delete: true, hydrate: true, localBase: true},
 		{name: "local-base-many-exclusions", delete: true, hydrate: true, localBase: true, manyExcluded: true},
+		{name: "local-base-retry-exclusions", delete: true, hydrate: true, localBase: true, manyExcluded: true, dropPublish: true},
 		{name: "local-base-explicit", delete: true, hydrate: true, localBase: true, explicit: true},
 		{name: "local-base-no-hydrate", delete: true, localBase: true},
 		{name: "local-base-unavailable", delete: true, hydrate: true, localBase: true, unavailableBase: true},
@@ -170,6 +171,20 @@ fi
 # Substitute only the public network destination with the fixture's Git mirror.
 # Planning, seed publication, file transfer and the Git-root guard execute normally.
 remote="${1//https:\/\/github.com\/example-org\/project.git/$CRABBOX_SEED_ORIGIN}"
+if [ "$CRABBOX_SEED_DROP_PUBLISH" = true ] && [ ! -f "$CRABBOX_SEED_DROP_FILE" ]; then
+  case "$probe" in
+    *"crabbox-git-seed phase=prerequisite"*)
+      /bin/bash --noprofile --norc -c "$remote" > "$CRABBOX_SEED_DROP_FILE.output"
+      result=$?
+      cat "$CRABBOX_SEED_DROP_FILE.output"
+      if [ "$result" = 0 ] && grep -Fxq 'crabbox-git-seed phase=publish' "$CRABBOX_SEED_DROP_FILE.output"; then
+        touch "$CRABBOX_SEED_DROP_FILE"
+        exit 255
+      fi
+      exit "$result"
+      ;;
+  esac
+fi
 exec /bin/bash --noprofile --norc -c "$remote"
 `)
 			if tc.hydrate {
@@ -212,6 +227,8 @@ exec ` + shellQuote(realRsync) + ` "${args[@]}"
 			}
 			beforeRsync := filepath.Join(root, "seed-before-rsync")
 			t.Setenv("CRABBOX_SEED_BEFORE_RSYNC", beforeRsync)
+			t.Setenv("CRABBOX_SEED_DROP_PUBLISH", fmt.Sprint(tc.dropPublish))
+			t.Setenv("CRABBOX_SEED_DROP_FILE", filepath.Join(root, "dropped-publication"))
 			t.Setenv("CRABBOX_SEED_MISSING_GIT", fmt.Sprint(tc.missingGit))
 			t.Setenv("CRABBOX_SEED_ORIGIN", f.origin)
 			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -275,6 +292,11 @@ exec ` + shellQuote(realRsync) + ` "${args[@]}"
 			}
 			if err != nil {
 				t.Fatalf("sync: %v\n%s\n%s", err, stdout.String(), stderr.String())
+			}
+			if tc.dropPublish {
+				if _, err := os.Stat(filepath.Join(root, "dropped-publication")); err != nil {
+					t.Fatalf("publication transport failure was not exercised: %v", err)
+				}
 			}
 			seeded, err := os.ReadFile(beforeRsync)
 			if err != nil {
