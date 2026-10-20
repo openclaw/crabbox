@@ -8,12 +8,13 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/openclaw/crabbox/internal/privatefile"
 	"golang.org/x/sys/windows"
 )
 
 func makeTestDirectoryUnreadable(t *testing.T, path string) {
 	t.Helper()
-	user, err := currentWindowsUserSID()
+	user, err := privatefile.WindowsUserSID()
 	if err != nil {
 		t.Fatal(err)
 	}

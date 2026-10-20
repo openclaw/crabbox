@@ -1,5 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
@@ -77,15 +78,15 @@ describe("lease record write funnel invariant", () => {
   });
 
   it("allows lease-record storage writes only in the shared helper", async () => {
-    const root = new URL("../src/", import.meta.url).pathname;
+    const root = fileURLToPath(new URL("../src/", import.meta.url));
     const files = [
       ...(await sourceFiles(root)),
-      ...(await sourceFiles(new URL("../node/", import.meta.url).pathname)),
+      ...(await sourceFiles(fileURLToPath(new URL("../node/", import.meta.url)))),
     ];
     const violations = (
       await Promise.all(
         files
-          .filter((file) => !file.endsWith("/lease-record-store.ts"))
+          .filter((file) => !file.replaceAll("\\", "/").endsWith("/lease-record-store.ts"))
           .map(async (file) => bypasses(await readFile(file, "utf8"), file)),
       )
     ).flat();

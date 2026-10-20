@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/openclaw/crabbox/internal/privatefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -38,7 +39,7 @@ func lockWindowsSFTPDirectory(name string) ([]windows.Handle, error) {
 			return nil, errors.Join(err, closeWindowsRunOutputDirectories(handles))
 		}
 		handles = append(handles, handle)
-		if err := validatePrivateWindowsFileType(handle, true); err != nil {
+		if err := privatefile.ValidateWindowsFileType(handle, true); err != nil {
 			return nil, errors.Join(err, closeWindowsRunOutputDirectories(handles))
 		}
 	}

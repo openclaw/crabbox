@@ -1580,6 +1580,37 @@ func TestValidateRequestedCapabilitiesUsesProviderSpec(t *testing.T) {
 	}
 }
 
+type targetFeatureTestProvider struct {
+	Provider
+	spec ProviderSpec
+}
+
+func (p targetFeatureTestProvider) Spec() ProviderSpec { return p.spec }
+
+func TestProviderFeaturesForConfigUsesTargetOverrides(t *testing.T) {
+	spec := ProviderSpec{
+		Features: FeatureSet{FeatureSSH},
+		TargetFeatures: map[string]FeatureSet{
+			TargetLinux:                             FeatureSet{FeatureSSH, FeatureCode},
+			TargetWindows + "/" + WindowsModeNormal: FeatureSet{FeatureSSH, FeatureDesktop},
+		},
+	}
+	provider := targetFeatureTestProvider{spec: spec}
+	for _, tc := range []struct {
+		target, mode string
+		want         FeatureSet
+	}{
+		{TargetLinux, "", FeatureSet{FeatureSSH, FeatureCode}},
+		{TargetWindows, WindowsModeNormal, FeatureSet{FeatureSSH, FeatureDesktop}},
+		{TargetMacOS, "", FeatureSet{FeatureSSH}},
+	} {
+		cfg := Config{TargetOS: tc.target, WindowsMode: tc.mode}
+		if got := ProviderFeaturesForConfig(provider, cfg); !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("target=%s mode=%s features=%v want=%v", tc.target, tc.mode, got, tc.want)
+		}
+	}
+}
+
 func TestProviderSpecFeaturesForTarget(t *testing.T) {
 	common := FeatureSet{FeatureSSH, FeatureCleanup}
 	linux := FeatureSet{FeatureSSH, FeatureCleanup, FeatureCode}

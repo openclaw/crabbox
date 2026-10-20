@@ -7,6 +7,7 @@ import (
 	"os"
 	"unsafe"
 
+	"github.com/openclaw/crabbox/internal/privatefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -34,7 +35,7 @@ func fileSnapshotHandleInfo(file *os.File) (os.FileInfo, error) {
 }
 
 func fileSnapshotPathInfo(path string) (_ os.FileInfo, resultErr error) {
-	name, err := artifactWindowsLongPath(path)
+	name, err := privatefile.WindowsPath(path)
 	if err != nil {
 		return nil, err
 	}

@@ -43,7 +43,7 @@ func ProviderFeaturesForConfig(provider Provider, cfg Config) FeatureSet {
 	if configured, ok := provider.(ProviderConfiguredFeatures); ok {
 		return configured.ConfiguredFeatures(cfg)
 	}
-	return provider.Spec().Features
+	return provider.Spec().FeaturesForTarget(cfg.TargetOS, cfg.WindowsMode)
 }
 
 // CoordinatorAcquisitionFallback chooses one alternate provider only after an
