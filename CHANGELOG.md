@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Local Actions hydration: accept verified published ancestors from detached source mirrors with only a local base ref. [PR 2916](https://github.com/openclaw/crabbox/pull/2916). Thanks @shakkernerd.
+
 - Local Actions hydration: prepare cold unpublished detached sources from a verified published ancestor while preserving selected files, privacy filters, and repository identity checks. [PR 2914](https://github.com/openclaw/crabbox/pull/2914). Thanks @shakkernerd.
 
 ## 0.79.0 - 2026-10-19
