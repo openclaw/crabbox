@@ -56,11 +56,14 @@ func TestInspectWindowsProcessCommandLineFailsClosed(t *testing.T) {
 }
 
 func TestQueryWindowsProcessCommandLineRejectsOutOfBoundsRuntimePointer(t *testing.T) {
+	// A live allocation outside the response is a valid Go pointer; a one-past-
+	// the-end address is not, and checkptr (enabled by -race) aborts on it.
+	outside := new(uint16)
 	query := func(_ windows.Handle, _ int32, info unsafe.Pointer, infoLen uint32, returned *uint32) error {
 		header := (*windows.NTUnicodeString)(info)
 		header.Length = 2
 		header.MaximumLength = 2
-		header.Buffer = (*uint16)(unsafe.Add(info, uintptr(infoLen)))
+		header.Buffer = outside
 		*returned = infoLen
 		return nil
 	}
