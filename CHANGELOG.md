@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.79.1 - 2026-10-20
+
+### Highlights
+
+- **Patch certificate validation across Go builds.** Source, release binaries, container runners, and developer-image toolchains now select Go 1.27.3 to fix GO-2026-6809, retaining the Go 1.26 minimum.
+
 - Local Actions hydration: hydrate detached source mirrors from a verified published ancestor with only a local base ref, preserving selected-file exclusions during cold sync. [PR 2916](https://github.com/openclaw/crabbox/pull/2916). Thanks @shakkernerd.
 
 - Local Actions hydration: prepare cold unpublished detached sources from a verified published ancestor while preserving selected files, privacy filters, and repository identity checks. [PR 2914](https://github.com/openclaw/crabbox/pull/2914). Thanks @shakkernerd.
