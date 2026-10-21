@@ -380,7 +380,7 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 	if pendingPath != "" {
 		// Keep recovery pins with the failure instead of appending progress text
 		// after the caller has emitted its final machine-readable timing report.
-		return Exit(7, "run history terminal commit failed for %s after %d attempts: %v; pending signed finish: run=%q file=%q signer=%s finish-sha256=%s; use receipt --recover with these original pins", r.runID, attempts, lastErr, r.runID, pendingPath, receipt.Signer, sha256Digest(data))
+		return Exit(7, "run history terminal commit failed for %s after %d attempts: %v; recover with `crabbox receipt %s`; pending signed finish: run=%q file=%q signer=%s finish-sha256=%s; use receipt --recover with these original pins", r.runID, attempts, lastErr, r.runID, r.runID, pendingPath, receipt.Signer, sha256Digest(data))
 	}
 	return Exit(7, "run history terminal commit failed for %s after %d attempts: %v; recover with `crabbox receipt %s`", r.runID, attempts, lastErr, r.runID)
 }
