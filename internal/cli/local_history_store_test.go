@@ -313,6 +313,7 @@ func TestLocalHistoryStoreCommitFailureLeavesIncomplete(t *testing.T) {
 }
 func TestLocalHistoryStoreRetentionIncludesIncomplete(t *testing.T) {
 	path := localHistoryTestHome(t)
+	started := time.Now().Add(-time.Hour)
 	for i := 0; i < localHistoryInactiveLimit+2; i++ {
 		record := localHistoryTestRecord(i + 10)
 		writer, err := beginLocalHistory(record)
@@ -320,6 +321,19 @@ func TestLocalHistoryStoreRetentionIncludesIncomplete(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		record, _, _, err = readLocalHistory(record.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record.StartedAt = started.Add(time.Duration(i) * time.Millisecond).UTC().Format(time.RFC3339Nano)
+		record.UpdatedAt = record.StartedAt
+		data, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "runs", record.ID, "record.json"), data, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
