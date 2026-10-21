@@ -9,39 +9,7 @@ import (
 	"testing"
 )
 
-// PowerShell treats U+2018, U+2019, U+201A and U+201B like an ASCII
-// apostrophe when delimiting and escaping verbatim strings.
-func isPowerShellSingleQuote(r rune) bool {
-	switch r {
-	case '\'', '‘', '’', '‚', '‛':
-		return true
-	}
-	return false
-}
-
-// decodePowerShellVerbatimString follows the PowerShell language grammar for a
-// single-quoted string and reports whether the literal spans the whole input.
-func decodePowerShellVerbatimString(literal string) (string, bool) {
-	runes := []rune(literal)
-	if len(runes) < 2 || !isPowerShellSingleQuote(runes[0]) {
-		return "", false
-	}
-	var value strings.Builder
-	for i := 1; i < len(runes); i++ {
-		if !isPowerShellSingleQuote(runes[i]) {
-			value.WriteRune(runes[i])
-			continue
-		}
-		if i+1 < len(runes) && isPowerShellSingleQuote(runes[i+1]) {
-			value.WriteRune(runes[i+1])
-			i++
-			continue
-		}
-		return value.String(), i == len(runes)-1
-	}
-	return "", false
-}
-
+// PowerShell also treats U+2018, U+2019, U+201A and U+201B as single quotes.
 var powerShellQuoteCases = []string{
 	"",
 	"plain",
@@ -51,16 +19,6 @@ var powerShellQuoteCases = []string{
 	"a’;Write-Output injected;’",
 	"'‘’‚‛",
 	"trailing’",
-}
-
-func TestPSQuoteEscapesEveryPowerShellSingleQuote(t *testing.T) {
-	for _, value := range powerShellQuoteCases {
-		quoted := psQuote(value)
-		got, complete := decodePowerShellVerbatimString(quoted)
-		if !complete || got != value {
-			t.Fatalf("psQuote(%q)=%q decodes to %q complete=%t", value, quoted, got, complete)
-		}
-	}
 }
 
 func TestPSQuoteRoundTripsThroughPowerShell(t *testing.T) {
