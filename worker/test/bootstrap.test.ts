@@ -1099,7 +1099,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("com.openssh.sshd");
     expect(got).toContain("com.apple.screensharing");
     expect(got).toContain("/usr/local/bin/crabbox-ready");
-    expect(got).toContain("node_version=24.19.0");
+    expect(got).toContain("node_version=24.22.1");
     expect(got).toContain("UsePAM yes");
     expect(got).toContain("KbdInteractiveAuthentication no");
     expect(got).toContain("node_arch=x64");

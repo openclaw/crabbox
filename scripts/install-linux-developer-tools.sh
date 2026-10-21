@@ -4,7 +4,7 @@ set -euo pipefail
 pnpm_version="${CRABBOX_LINUX_PNPM_VERSION:-11.1.0}"
 node_major="${CRABBOX_LINUX_NODE_MAJOR:-24}"
 trufflehog_version="3.95.9"
-docker_images="${CRABBOX_LINUX_DOCKER_IMAGES:-hello-world ubuntu:24.04 node:24-bookworm}"
+docker_images="${CRABBOX_LINUX_DOCKER_IMAGES:-hello-world ubuntu:24.04 node:24.22.1-bookworm}"
 install_desktop="${CRABBOX_LINUX_DESKTOP_TOOLS:-1}"
 install_browser="${CRABBOX_LINUX_BROWSER:-1}"
 apt_keyrings_dir="${CRABBOX_LINUX_APT_KEYRINGS_DIR:-/etc/apt/keyrings}"
@@ -24,7 +24,7 @@ google_linux_signing_key_fingerprint="EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"
 public_toolchain_archive_dir="/opt/crabbox/toolchain-archives"
 node_toolcache_root="/opt/hostedtoolcache"
 node_link_dir="/usr/local/bin"
-pinned_node_version="24.19.0"
+pinned_node_version="24.22.1"
 go_toolcache_root="/opt/hostedtoolcache"
 go_link_dir="/usr/local/bin"
 pinned_go_version="1.27.3"
@@ -255,14 +255,14 @@ toolchain_archive_spec() {
       printf '%s\n' "sha256 23bf5552d220e0842b65c862097b2ebaeba0064b74eda5e565e77fd25969d8c8 https://github.com/astral-sh/uv/releases/download/0.12.19/uv-x86_64-unknown-linux-gnu.tar.gz" ;;
     go1.27.3.linux-amd64.tar.gz)
       printf '%s\n' "sha256 65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 https://go.dev/dl/$1" ;;
-    node-v24.19.0-linux-x64.tar.xz)
-      printf '%s\n' "sha256 14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647 https://nodejs.org/dist/v24.19.0/$1" ;;
+    node-v24.22.1-linux-x64.tar.xz)
+      printf '%s\n' "sha256 6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6 https://nodejs.org/dist/v24.22.1/$1" ;;
     pnpm-11.22.0.tgz)
       printf '%s\n' "sha512 1ff870c4c6133dfd88fb2afc46dd13d47f09c9794b438c6fdb47ca98caf3bc16381ee0be93a091b8e3824cf01f889f46d7d9e20910fb0be1ab0fb5baa80dd621 https://registry.npmjs.org/pnpm/-/$1" ;;
-    pnpm-12.3.4.tgz)
-      printf '%s\n' "sha512 961aa41fb077da3a04a441d9f8e15ebc0c96da8ef710b2eb67bf9ee7cb0610eabd48f1fd85f51cffe73846785fa0f87c56a3a872a1d893f8446741b5cce45457 https://registry.npmjs.org/pnpm/-/$1" ;;
-    exe.linux-x64-12.3.4.tgz)
-      printf '%s\n' "sha512 d99a8e9523e47f05f5879711f853e259ff3e17eda1653ff74ef8542b9b22807ab06900888aaf11ec21b186774ab3adc9b5c2e2d9ad50a68fb05ff128c9f8f225 https://registry.npmjs.org/@pnpm/exe.linux-x64/-/$1" ;;
+    pnpm-12.15.0.tgz)
+      printf '%s\n' "sha512 b3951d6d6ff4a9f13dc7cf56cd28d2b8eb37dbcc9c68e52e1e1191873ea9f82a017287ab50baadc5ccc494f036c67c0e47eb13608c2fa36f47711b61ea128e61 https://registry.npmjs.org/pnpm/-/$1" ;;
+    exe.linux-x64-12.15.0.tgz)
+      printf '%s\n' "sha512 c9cf9095947ef7e9ebdbd2787d1ce13286a98314c10e776affea5eca8ab55d4b9f9d01677db5d4305b9d0c82b31e2e78e658a71aa98e9977e7d0da2e7cd81c3a https://registry.npmjs.org/@pnpm/exe.linux-x64/-/$1" ;;
     bun-v1.4.0-linux-x64.zip)
       printf '%s\n' "sha256 2d03fb5fb83ac8b567aca0a281b2ce1a1a19d488f56c2968d88c3f25e92fe452 https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64.zip" ;;
     bun-v1.4.0-linux-x64-baseline.zip)
@@ -338,7 +338,7 @@ cache_public_toolchain_archives() (
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
   if [[ "$#" -eq 0 ]]; then
-    set -- node-v24.19.0-linux-x64.tar.xz pnpm-11.22.0.tgz pnpm-12.3.4.tgz exe.linux-x64-12.3.4.tgz
+    set -- node-v24.22.1-linux-x64.tar.xz pnpm-11.22.0.tgz pnpm-12.15.0.tgz exe.linux-x64-12.15.0.tgz
   fi
   for name in "$@"; do
     stage_toolchain_archive "$name" "$staging" 1 || return $?
@@ -458,10 +458,10 @@ seed_offline_pnpm() {
   stage_toolchain_archive "pnpm-$version.tgz" "$staging" || return 1
   mkdir -p "$destination" || return 1
   tar --no-same-owner -xzf "$staging/pnpm-$version.tgz" -C "$destination" --strip-components=1 || return 1
-  if [[ "$version" == "12.3.4" ]]; then
-    stage_toolchain_archive exe.linux-x64-12.3.4.tgz "$staging" || return 1
+  if [[ "$version" == "12.15.0" ]]; then
+    stage_toolchain_archive exe.linux-x64-12.15.0.tgz "$staging" || return 1
     mkdir "$staging/native" || return 1
-    tar --no-same-owner -xzf "$staging/exe.linux-x64-12.3.4.tgz" -C "$staging/native" || return 1
+    tar --no-same-owner -xzf "$staging/exe.linux-x64-12.15.0.tgz" -C "$staging/native" || return 1
     install -m 0755 "$staging/native/package/pnpm" "$destination/pnpm-native" || return 1
   fi
   # Corepack 0.35.0 does not authenticate cache hits or `install -g <pack.tgz>`.
@@ -517,11 +517,11 @@ install_pinned_node() (
   staging="$(mktemp -d)" || return $?
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
-  stage_toolchain_archive node-v24.19.0-linux-x64.tar.xz "$staging" || return $?
+  stage_toolchain_archive node-v24.22.1-linux-x64.tar.xz "$staging" || return $?
   install -d -m 0755 "$(dirname "$destination")" || return $?
   rm -f "$destination.complete" || return $?
   mkdir "$staging/node" || return $?
-  tar --no-same-owner -xJf "$staging/node-v24.19.0-linux-x64.tar.xz" -C "$staging/node" --strip-components=1 || return $?
+  tar --no-same-owner -xJf "$staging/node-v24.22.1-linux-x64.tar.xz" -C "$staging/node" --strip-components=1 || return $?
   node_path="$staging/node/bin:$PATH"
   [[ "$("$staging/node/bin/node" --version)" == "v$pinned_node_version" ]] || return 1
   env PATH="$node_path" "$staging/node/bin/npm" --version || return $?
@@ -578,7 +578,7 @@ install_requested_node() {
   for tool in node npm npx corepack pnpm pnpx; do
     if [[ -L "$node_link_dir/$tool" ]]; then
       link_target="$(readlink -n "$node_link_dir/$tool" && printf '.')" || return 1
-      [[ "$link_target" != "$node_toolcache_root/node/24.19.0/x64/bin/$tool." ]] || retired_tools+=("$tool")
+      [[ "$link_target" != "$node_toolcache_root/node/24.22.1/x64/bin/$tool." ]] || retired_tools+=("$tool")
     fi
   done
   if retry apt-get "${install_args[@]}" "nodejs:$arch=$version"; then
@@ -615,7 +615,7 @@ install_requested_node() {
     if [[ -L "$node_link_dir/$tool" ]]; then
       # Preserve operator replacements, including targets with trailing newlines.
       link_target="$(readlink -n "$node_link_dir/$tool" && printf '.')" || return 1
-      if [[ "$link_target" == "$node_toolcache_root/node/24.19.0/x64/bin/$tool." ]]; then
+      if [[ "$link_target" == "$node_toolcache_root/node/24.22.1/x64/bin/$tool." ]]; then
         rm -- "$node_link_dir/$tool" || return 1
       fi
     fi
@@ -672,11 +672,11 @@ offline_node_pnpm_probe() (
   staging="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
-  stage_toolchain_archive node-v24.19.0-linux-x64.tar.xz "$staging"
+  stage_toolchain_archive node-v24.22.1-linux-x64.tar.xz "$staging"
   mkdir "$staging/node" "$staging/home"
-  tar --no-same-owner -xJf "$staging/node-v24.19.0-linux-x64.tar.xz" -C "$staging/node" --strip-components=1
-  [[ "$("$staging/node/bin/node" --version)" == "v24.19.0" ]]
-  for version in 11.22.0 12.3.4; do
+  tar --no-same-owner -xJf "$staging/node-v24.22.1-linux-x64.tar.xz" -C "$staging/node" --strip-components=1
+  [[ "$("$staging/node/bin/node" --version)" == "v24.22.1" ]]
+  for version in 11.22.0 12.15.0; do
     corepack_home="$staging/corepack-$version"
     seed_offline_pnpm "$version" "$staging" "$corepack_home"
     read -r algorithm digest url <<<"$(toolchain_archive_spec "pnpm-$version.tgz")"

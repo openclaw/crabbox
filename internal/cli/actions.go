@@ -3125,8 +3125,8 @@ def seed():
         directory(runner / "_work")
         directory(cache)
         slots = (
-            ("node", "24.19.0", "node-v24.19.0-linux-x64.tar.xz",
-             "14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647"),
+            ("node", "24.22.1", "node-v24.22.1-linux-x64.tar.xz",
+             "6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6"),
             ("go", "1.27.3", "go1.27.3.linux-amd64.tar.gz",
              "65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40"),
         )

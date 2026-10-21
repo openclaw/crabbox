@@ -515,7 +515,7 @@ scripts/mint-aws-devtools-image.sh \
 ### What the prep scripts install
 
 - **Linux** (`scripts/install-linux-developer-tools.sh`): common CLI/build
-  tooling, GitHub CLI, Node 24.19.0, Go 1.27.3, Bun 1.4.0, Rust/Cargo 1.98.1,
+  tooling, GitHub CLI, Node 24.22.1, Go 1.27.3, Bun 1.4.0, Rust/Cargo 1.98.1,
   and uv/uvx 0.12.19 on x86_64,
   corepack/pnpm, TruffleHog 3.95.9, Chrome or
   Chromium for browser lanes, desktop/VNC helpers, Docker Engine, Compose,
@@ -533,7 +533,7 @@ scripts/mint-aws-devtools-image.sh \
   functional probe, including creating and checking a disposable pip-enabled
   virtual environment, before atomically emitting the strongest supported profile.
 - **Managed WSL2 distro bootstrap**: the Linux installer's `--node-only` entrypoint
-  provides the same Node/npm baseline (checksum-pinned Node 24.19.0 on amd64).
+  provides the same Node/npm baseline (checksum-pinned Node 24.22.1 on amd64).
   It skips image-only Docker, Go, Rust, uv, browser/desktop setup, pnpm activation, and the
   offline pnpm archives; see [AWS targets](../providers/aws.md#targets).
 - **Windows** (`scripts/install-windows-developer-tools.ps1`): common CLI/build
@@ -599,9 +599,9 @@ mint pass.
 
 ### Linux public toolchain archives
 
-The x86_64 recipe installs the checksum-pinned upstream Node 24.19.0 archive,
+The x86_64 recipe installs the checksum-pinned upstream Node 24.22.1 archive,
 including its bundled Corepack 0.35.0, at
-`/opt/hostedtoolcache/node/24.19.0/x64`. The sibling `x64.complete` marker is
+`/opt/hostedtoolcache/node/24.22.1/x64`. The sibling `x64.complete` marker is
 written only after executable checks. This matches the GitHub tool-cache
 `$RUNNER_TOOL_CACHE/node/<version>/<architecture>` layout; it does not bind a
 runner to that root. Crabbox's GitHub runner defaults to
@@ -613,7 +613,7 @@ as described below. Completion markers are availability hints, not authenticatio
 Before cache or network preparation, the pinned Node route checks all six
 public aliases: `node`, `npm`, `npx`, `corepack`, `pnpm`, and `pnpx`. It repeats
 the check before replacing the image toolcache slot. Each alias must be absent
-or an absolute symlink to its same-named binary in the exact Node 24.19.0 x64
+or an absolute symlink to its same-named binary in the exact Node 24.22.1 x64
 slot; dangling matching links are allowed. Files, directories, and other link
 targets stop the bake with a resolve-before-rebake diagnostic. Relative aliases,
 including those from earlier unshipped builder revisions, require operator
@@ -629,10 +629,10 @@ Public archives are retained under `/opt/crabbox/toolchain-archives`:
 
 | Filename | Purpose |
 | --- | --- |
-| `node-v24.19.0-linux-x64.tar.xz` | Node, npm, and bundled Corepack |
+| `node-v24.22.1-linux-x64.tar.xz` | Node, npm, and bundled Corepack |
 | `pnpm-11.22.0.tgz` | pnpm 11.22.0 |
-| `pnpm-12.3.4.tgz` | pnpm 12.3.4 JavaScript wrapper |
-| `exe.linux-x64-12.3.4.tgz` | pnpm 12.3.4 native executable for glibc Linux x64 |
+| `pnpm-12.15.0.tgz` | pnpm 12.15.0 JavaScript wrapper |
+| `exe.linux-x64-12.15.0.tgz` | pnpm 12.15.0 native executable for glibc Linux x64 |
 | `go1.27.3.linux-amd64.tar.gz` | Complete Go 1.27.3 distribution |
 | `bun-v1.4.0-linux-x64-baseline.zip` | Original Bun 1.4.0 baseline Linux glibc ZIP |
 | `bun-v1.4.0-linux-x64.zip` | Original Bun 1.4.0 optimized Linux glibc ZIP |
@@ -665,7 +665,7 @@ route. APT failure or a failed installed-package version, architecture, or
 package-owned binary check leaves the owned links and caches intact.
 
 Only after those checks does the installer recheck and remove its six exact
-Node 24.19.0 toolcache symlinks, including dangling ones. Operator files,
+Node 24.22.1 toolcache symlinks, including dangling ones. Operator files,
 nonmatching symlinks, and cached archives and trees remain intact. It clears the
 shell command cache and checks normal PATH selection before preparing Corepack.
 A conflicting operator-provided Node stops the rebake with a PATH diagnostic
@@ -774,7 +774,7 @@ private home and dependency-free fixtures with auto-install disabled; `bunx`
 executes a local binary with `--no-install`. A missing cache fails this offline
 proof even though installation supports a pinned download fallback.
 
-Native GitHub runner registration seeds only `node/24.19.0/x64` and
+Native GitHub runner registration seeds only `node/24.22.1/x64` and
 `go/1.27.3/x64` after configuration and before service start. It reads the
 actual `.runner` work folder and `.env` values, including the precedence of
 `RUNNER_TOOL_CACHE`, `RUNNER_TOOLSDIRECTORY`, `AGENT_TOOLSDIRECTORY` and
@@ -809,7 +809,7 @@ and hydration behavior are unchanged.
 ### Tuning the prebake set
 
 ```bash
-CRABBOX_LINUX_DOCKER_IMAGES='hello-world ubuntu:24.04 node:24-bookworm'
+CRABBOX_LINUX_DOCKER_IMAGES='hello-world ubuntu:24.04 node:24.22.1-bookworm'
 CRABBOX_WINDOWS_DOCKER_IMAGES='mcr.microsoft.com/windows/servercore:ltsc2022'
 CRABBOX_WINDOWS_NODE_VERSION='<version>'
 CRABBOX_WINDOWS_NODE_SHA256='<reviewed-64-hex-sha256>'

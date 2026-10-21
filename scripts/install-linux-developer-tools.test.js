@@ -1179,7 +1179,7 @@ main --node-only
     assert.match(result.stdout, /packages=ca-certificates curl gnupg python3-minimal xz-utils/);
     if (major === "24") {
       assert.equal(result.stdout.split("pinned-node").length - 1, 2);
-      assert.match(result.stdout, /archives=node-v24\.19\.0-linux-x64\.tar\.xz/);
+      assert.match(result.stdout, /archives=node-v24\.22\.1-linux-x64\.tar\.xz/);
     } else {
       assert.equal(result.stdout.split("requested-node").length - 1, 2);
     }

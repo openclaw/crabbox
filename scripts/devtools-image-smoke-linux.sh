@@ -106,9 +106,9 @@ trap 'exit 143' TERM
 docker version
 docker compose version
 docker buildx version
-docker image inspect hello-world ubuntu:24.04 node:24-bookworm >/dev/null
+docker image inspect hello-world ubuntu:24.04 node:24.22.1-bookworm >/dev/null
 docker run --rm --pull=never --network=none hello-world
-docker run --rm --pull=never --network=none node:24-bookworm node -e 'require("node:assert/strict").equal(2 + 2, 4)'
+docker run --rm --pull=never --network=none node:24.22.1-bookworm node -e 'require("node:assert/strict").equal(2 + 2, 4)'
 printf 'FROM scratch\nCOPY payload /payload\n' >"$directory/Dockerfile"
 printf 'offline-build-ok\n' >"$directory/payload"
 docker buildx build --builder default --pull=false --network=none --load --tag "$tag" "$directory"

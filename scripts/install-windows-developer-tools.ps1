@@ -16,8 +16,8 @@ Remove-Item -LiteralPath $PrepErrorFile -Force -ErrorAction SilentlyContinue
 Set-Content -LiteralPath $PrepStepFile -Value "validating prep configuration"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$DefaultNodeVersion = "24.19.0"
-$DefaultNodeSHA256 = "f0f66c2a80c08a30a5ab5179ee9ea9e45f9b46289436a8cc87ff833b852db351"
+$DefaultNodeVersion = "24.22.1"
+$DefaultNodeSHA256 = "3bda4baf1ee709b33cf920dd633106ddb23951e322bff9c03ec9f64ab8981b01"
 $NodeVersion = $env:CRABBOX_WINDOWS_NODE_VERSION
 if (-not $NodeVersion) { $NodeVersion = $DefaultNodeVersion }
 $NodeSHA256 = $env:CRABBOX_WINDOWS_NODE_SHA256

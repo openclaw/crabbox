@@ -581,7 +581,7 @@ for PowerShell expressions rather than nesting another `powershell -Command`.
 
 ### Native Windows background processes
 
-Managed native Windows leases install Node 24.19.0 and npm when either runtime
+Managed native Windows leases install Node 24.22.1 and npm when either runtime
 is missing or broken. The checksum-pinned x64 or ARM64 runtime lives in
 `C:\Program Files\nodejs` on the machine PATH; working existing installations
 are retained. Readiness requires both version commands to succeed.

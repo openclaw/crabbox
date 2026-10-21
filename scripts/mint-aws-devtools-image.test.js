@@ -525,7 +525,7 @@ for (const [name, bytes] of [
 }
 
 test("runtime-user pnpm rejects a shadowing ordinary command before image capture", async (t) => {
-  const { result, log } = await runtimePnpmFixture(t, { versions: { cbx_source: "12.3.4" } });
+  const { result, log } = await runtimePnpmFixture(t, { versions: { cbx_source: "12.15.0" } });
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /pnpm.*does not match Corepack/);
   assert.doesNotMatch(log, /checkpoint create|docker_probe=|image promote/);
@@ -741,7 +741,7 @@ test("AWS devtools mint wrapper runs linux source candidate and promoted proof",
   }
   assert.equal((log.match(/\n  offline_uv_probe\nfi\n}/g) ?? []).length, 3);
   assert.equal((log.match(/\ndeveloper_archive_probe\necho devtools-smoke-ok/g) ?? []).length, 3);
-  assert.match(log, /docker image inspect hello-world ubuntu:24\.04 node:24-bookworm/);
+  assert.match(log, /docker image inspect hello-world ubuntu:24\.04 node:24.22.1-bookworm/);
   assert.match(
     log,
     /env CRABBOX_AWS_REGION=us-west-2 AWS_REGION=us-west-2 CRABBOX_AWS_AMI= args checkpoint create --provider aws --target linux --id cbx_source --name crabbox-linux-devtools-/,
@@ -1073,7 +1073,7 @@ test("generated Linux smoke emits success only after nonroot, tool, and offline 
   }
   await mkdir(path.join(fake.dir, "missing-archives"));
   await writeFile(
-    path.join(fake.dir, "missing-archives", "node-v24.19.0-linux-x64.tar.xz"),
+    path.join(fake.dir, "missing-archives", "node-v24.22.1-linux-x64.tar.xz"),
     "corrupt",
   );
   await writeFile(path.join(fake.dir, "missing-archives", "x64.complete"), "");
@@ -1190,7 +1190,7 @@ test("generated Linux smoke requires the normal nonroot pnpm command even when p
 });
 
 test("generated Linux smoke keeps required x64 archives under a pnpm override", async (t) => {
-  const { execute } = await linuxSmokeFixture(t, { pnpm: "12.3.4" });
+  const { execute } = await linuxSmokeFixture(t, { pnpm: "12.15.0" });
   const result = execute();
   assert.notEqual(result.status, 0);
   assert.match(

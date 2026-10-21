@@ -209,7 +209,7 @@ readiness probe does, in this order:
    itself is not present. If the preserved runtime still does not run there,
    preparation falls back to the pinned installer rather than leaving a
    readiness helper that fails.
-3. Neither: preparation installs Node 24.19.0, matching the Linux developer
+3. Neither: preparation installs Node 24.22.1, matching the Linux developer
    recipe's LTS baseline. Intel and Apple Silicon both use checksum-pinned
    official `nodejs.org` archives, with versioned installations under
    `/usr/local/lib/crabbox` and command links in `/usr/local/bin`. Homebrew is
