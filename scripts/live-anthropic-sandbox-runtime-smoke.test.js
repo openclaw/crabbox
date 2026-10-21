@@ -25,7 +25,7 @@ function smokeEnv(dir, bin, extra = {}) {
 }
 
 test("live Anthropic Sandbox Runtime smoke proves run and enforcement paths", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-srt-smoke-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-live-srt-smoke-cat-"));
   const bin = path.join(dir, "bin");
   const { tempRoot, smokeScript } = prepareSmokeRepo(dir);
   const calls = path.join(dir, "calls.log");
@@ -49,14 +49,14 @@ case "$*" in
   "run --provider anthropic-sandbox-runtime -- echo ok")
     printf 'ok\\n'
     ;;
-  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*allowed*)
+  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*\\ --\\ sh\\ -lc\\ *)
     printf 'ok\\n'
     ;;
-  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*cat*)
+  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*\\ --\\ cat\\ *)
     printf 'Operation not permitted\\n' >&2
     exit 5
     ;;
-  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*curl*)
+  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*\\ --\\ curl\\ *)
     printf 'Connection blocked by network allowlist\\n' >&2
     exit 7
     ;;
@@ -141,14 +141,14 @@ case "$*" in
   "run --provider anthropic-sandbox-runtime -- echo ok")
     printf 'ok\\n'
     ;;
-  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*allowed*)
+  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*\\ --\\ sh\\ -lc\\ *)
     printf 'ok\\n'
     ;;
-  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*cat*)
+  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*\\ --\\ cat\\ *)
     printf 'Operation not permitted\\n' >&2
     exit 5
     ;;
-  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*curl*)
+  run\\ --provider\\ anthropic-sandbox-runtime\\ --anthropic-sandbox-runtime-settings*\\ --\\ curl\\ *)
     printf 'Connection blocked by network allowlist\\n' >&2
     exit 7
     ;;
