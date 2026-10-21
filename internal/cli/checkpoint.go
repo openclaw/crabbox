@@ -274,12 +274,10 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	switch createKind {
-	case checkpointKindRecipe, checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindIncus, checkpointKindCloudflare, checkpointKindArchive:
-		record.Kind = createKind
-	default:
+	if createKind != checkpointKindRecipe && createKind != checkpointKindArchive && !isNativeCheckpointKind(createKind) {
 		return Exit(2, "checkpoint mode must be auto, native, or archive")
 	}
+	record.Kind = createKind
 	// All observers and final writes share deletion/prune's operation lock.
 	// Take checkpoint before source-claim locks, as retirement does.
 	return store.WithLock(record.ID, func() (err error) {
