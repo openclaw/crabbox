@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- smolvm: upload workspace archives and environment profiles through the files API instead of base64 in exec requests, so repositories over ~750 KiB compressed no longer fail with 413, and keep complete command output past 1 MiB (or report truncation). Narrowed API keys now need the `machine:files` scope. [PR 2915](https://github.com/openclaw/crabbox/pull/2915). Thanks @NickyHeC.
 - Security: build source, release binaries, container runners, and developer-image toolchains with Go 1.27.3 to fix reachable GO-2026-6809 certificate validation, retaining the Go 1.26 minimum.
 - Cloudflare Dynamic Workers: cancel stalled response reads at their deadline instead of blocking while closing the response body.
 - Run: verify forwarded environment file removal after cleanup failures, preserve success when only the staging directory remains, and distinguish present files from unconfirmed removal. [PR 2917](https://github.com/openclaw/crabbox/pull/2917). Thanks @mr3od.
@@ -47,7 +48,6 @@
 
 ### Fixed
 
-- smolvm: upload workspace archives and environment profiles through the files API instead of base64 in exec requests, so repositories over ~750 KiB compressed no longer fail with 413, and keep complete command output past 1 MiB (or report truncation). Narrowed API keys now need the `machine:files` scope. [PR 2915](https://github.com/openclaw/crabbox/pull/2915). Thanks @NickyHeC.
 - CI: make Blacksmith's buffered artifact-timeout regression deterministic under scheduler pressure without changing production timeouts or workload results. [PR 2909](https://github.com/openclaw/crabbox/pull/2909).
 - Config: protect persisted Windows credentials with a verified current-user-only DACL before writing, without inheriting parent read grants. [PR 2901](https://github.com/openclaw/crabbox/pull/2901). Thanks @coygeek.
 - Freestyle: create and resume VMs through the current Freestyle API contract, validating readiness for stopped or paused creation responses. [PR 2897](https://github.com/openclaw/crabbox/pull/2897). Thanks @coygeek.
