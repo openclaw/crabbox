@@ -324,7 +324,6 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 		if encodeErr != nil {
 			return Exit(7, "retain original terminal finish for %s before submission: %v", r.runID, encodeErr)
 		}
-		fmt.Fprintf(r.stderr, "pending signed finish: run=%q file=%q signer=%s finish-sha256=%s; use receipt --recover with these original pins\n", r.runID, pendingPath, receipt.Signer, sha256Digest(data))
 	}
 	var lastErr error
 	attempts := 0
@@ -378,6 +377,11 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 		}
 	}
 	lastErr = errors.Join(lastErr, ctx.Err())
+	if pendingPath != "" {
+		// Keep recovery pins with the failure instead of appending progress text
+		// after the caller has emitted its final machine-readable timing report.
+		return Exit(7, "run history terminal commit failed for %s after %d attempts: %v; pending signed finish: run=%q file=%q signer=%s finish-sha256=%s; use receipt --recover with these original pins", r.runID, attempts, lastErr, r.runID, pendingPath, receipt.Signer, sha256Digest(data))
+	}
 	return Exit(7, "run history terminal commit failed for %s after %d attempts: %v; recover with `crabbox receipt %s`", r.runID, attempts, lastErr, r.runID)
 }
 

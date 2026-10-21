@@ -67,10 +67,13 @@ does not have those identities.
 Brokered signed finishes are retained privately before the first submission,
 even when `run --attest` is not set. The pending outbox is under
 `$XDG_STATE_HOME/crabbox/pending-finishes`, or the platform Crabbox config
-directory's `state/pending-finishes` when `XDG_STATE_HOME` is unset. The CLI
-prints the exact file path, original signer fingerprint, and finish-request
-digest. A normal confirmed finish removes its pending file. An ambiguous or
-conflicting finish keeps it; import never deletes the supplied original.
+directory's `state/pending-finishes` when `XDG_STATE_HOME` is unset. If terminal
+submission or readback cannot be confirmed, the returned error includes the
+exact file path, original signer fingerprint, and finish-request digest. These
+pins stay with the failure diagnostic rather than adding progress output after
+the final timing JSON. A normal confirmed finish removes its pending file. An
+ambiguous or conflicting finish keeps it; import never deletes the supplied
+original.
 
 After resolving the transport failure, use the original coordinator and the
 same authenticated owner and organization:

@@ -451,9 +451,14 @@ func TestRunRecorderRetainsOriginalBeforePostAndAfterFailure(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			rec := &runRecorder{coord: &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}, runID: "run_123", runOwner: "alice@example.com", runOrg: "example-org", stderr: io.Discard}
-			if err := rec.Finish(context.Background(), SSHTarget{}, 1, 0, 100*time.Millisecond, "", false, nil, FailureClassification{}, &receipt); err == nil {
+			var stderr bytes.Buffer
+			rec := &runRecorder{coord: &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}, runID: "run_123", runOwner: "alice@example.com", runOrg: "example-org", stderr: &stderr}
+			finishErr := rec.Finish(context.Background(), SSHTarget{}, 1, 0, 100*time.Millisecond, "", false, nil, FailureClassification{}, &receipt)
+			if finishErr == nil {
 				t.Fatal("failed finish accepted")
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("finish appended progress output after final timing: %s", stderr.String())
 			}
 			if rec.terminalConfirmed {
 				t.Fatal("ambiguous finish marked confirmed")
@@ -467,6 +472,15 @@ func TestRunRecorderRetainsOriginalBeforePostAndAfterFailure(t *testing.T) {
 			}
 			if !bytes.Equal(original, after) {
 				t.Fatal("failed finish evidence changed")
+			}
+			var pending pendingRunFinish
+			if err := decodePendingFinishJSON(after, &pending); err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{"run_123", pendingPath, receipt.Signer, sha256Digest(pending.Body), "receipt --recover"} {
+				if !strings.Contains(finishErr.Error(), want) {
+					t.Fatalf("terminal error lost recovery detail %q: %v", want, finishErr)
+				}
 			}
 		})
 	}
