@@ -1009,7 +1009,7 @@ async function linuxSmokeFixture(t, { major = "24", pnpm = "11.1.0", customPrep 
     await writeTool(name, "exit 0");
   }
   await writeNodeVersionFixture(bin);
-  await writeTool("go", "printf 'go version go1.27.0 linux/amd64\\n'");
+  await writeTool("go", "printf 'go version go1.27.3 linux/amd64\\n'");
   await writeTool("gofmt", "exit 0");
   await writeTool("bun", '[[ "$*" == "--version" ]] && printf "1.4.0\\n" || printf "42\\n"');
   await writeTool("bunx", 'printf "42\\n"');
@@ -1133,11 +1133,11 @@ test("generated Go smoke requires its own archive under an alternate Node major"
   const { fake, execute } = await linuxSmokeFixture(t, { major: "26" });
   const absent = execute();
   assert.notEqual(absent.status, 0);
-  assert.match(absent.stderr, /unavailable offline: go1\.27\.0\.linux-amd64\.tar\.gz/);
+  assert.match(absent.stderr, /unavailable offline: go1\.27\.3\.linux-amd64\.tar\.gz/);
   assert.doesNotMatch(absent.stdout, /devtools-smoke-ok/);
   await mkdir(path.join(fake.dir, "missing-archives"));
   await writeFile(
-    path.join(fake.dir, "missing-archives", "go1.27.0.linux-amd64.tar.gz"),
+    path.join(fake.dir, "missing-archives", "go1.27.3.linux-amd64.tar.gz"),
     "corrupt",
   );
   const corrupt = execute();

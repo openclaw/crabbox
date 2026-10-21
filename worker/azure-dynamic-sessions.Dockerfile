@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM mcr.microsoft.com/devcontainers/go:1.26-bookworm@sha256:5b40bf0530204ec28eac4bd95b0398b15bfbef337d47ed77d7b29daca9fac18a AS runner-build
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.3-bookworm@sha256:5c3e9b43cfd3bb95c7937462e29d87ada57b481a96fa23ad0eb61778d7a00110 AS runner-build
 
 ARG TARGETOS=linux
 ARG TARGETARCH

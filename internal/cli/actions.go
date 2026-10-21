@@ -3127,8 +3127,8 @@ def seed():
         slots = (
             ("node", "24.19.0", "node-v24.19.0-linux-x64.tar.xz",
              "14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647"),
-            ("go", "1.27.0", "go1.27.0.linux-amd64.tar.gz",
-             "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685"),
+            ("go", "1.27.3", "go1.27.3.linux-amd64.tar.gz",
+             "65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40"),
         )
         for tool, version, filename, pin in slots:
             source = image / tool / version / "x64"

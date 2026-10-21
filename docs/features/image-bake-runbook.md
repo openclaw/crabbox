@@ -515,7 +515,7 @@ scripts/mint-aws-devtools-image.sh \
 ### What the prep scripts install
 
 - **Linux** (`scripts/install-linux-developer-tools.sh`): common CLI/build
-  tooling, GitHub CLI, Node 24.19.0, Go 1.27.0, Bun 1.4.0, Rust/Cargo 1.98.1,
+  tooling, GitHub CLI, Node 24.19.0, Go 1.27.3, Bun 1.4.0, Rust/Cargo 1.98.1,
   and uv/uvx 0.12.19 on x86_64,
   corepack/pnpm, TruffleHog 3.95.9, Chrome or
   Chromium for browser lanes, desktop/VNC helpers, Docker Engine, Compose,
@@ -633,7 +633,7 @@ Public archives are retained under `/opt/crabbox/toolchain-archives`:
 | `pnpm-11.22.0.tgz` | pnpm 11.22.0 |
 | `pnpm-12.3.4.tgz` | pnpm 12.3.4 JavaScript wrapper |
 | `exe.linux-x64-12.3.4.tgz` | pnpm 12.3.4 native executable for glibc Linux x64 |
-| `go1.27.0.linux-amd64.tar.gz` | Complete Go 1.27.0 distribution |
+| `go1.27.3.linux-amd64.tar.gz` | Complete Go 1.27.3 distribution |
 | `bun-v1.4.0-linux-x64-baseline.zip` | Original Bun 1.4.0 baseline Linux glibc ZIP |
 | `bun-v1.4.0-linux-x64.zip` | Original Bun 1.4.0 optimized Linux glibc ZIP |
 | `rust-1.98.1-x86_64-unknown-linux-gnu.tar.xz` | Official standalone Rust/Cargo host distribution |
@@ -716,7 +716,7 @@ passing credentials to the tools. Its opt-in test downloads approximately
 a five-minute step. Ordinary local script tests use fixtures and skip this
 download; the isolated tool proof does not replace a baked-image smoke.
 
-Go 1.27.0 installs at `/opt/hostedtoolcache/go/1.27.0/x64`, with image-owned
+Go 1.27.3 installs at `/opt/hostedtoolcache/go/1.27.3/x64`, with image-owned
 `/usr/local/bin/go` and `gofmt` links. The installer authenticates a private
 archive copy and freshly extracts the entire distribution; it never executes
 an existing same-version tree to establish trust. The sibling `x64.complete`
@@ -724,11 +724,11 @@ marker is written last, after version/architecture, standard-library tests and
 a CGO compile/link/run assertion pass. Source, candidate and promoted smokes
 repeat those functional checks as nonroot from a new private extraction with
 fresh writable build/module caches, `GOPROXY=off` and `GOTOOLCHAIN=local`.
-Go 1.27.1 or another version does not satisfy the exact 1.27.0 cache slot.
+Go 1.27.1 or another version does not satisfy the exact 1.27.3 cache slot.
 
 Before cache or network preparation, and again before changing the Go slot or
 marker, both public `go` and `gofmt` paths must be absent or exact same-name
-absolute symlinks into the Go 1.27.0 x64 slot. Matching dangling links are
+absolute symlinks into the Go 1.27.3 x64 slot. Matching dangling links are
 allowed. Files, directories and other targets require operator resolution
 before rebaking; a conflict preserves the existing tree, marker and aliases.
 Publication uses the same private temporary-symlink replacement as Node,
@@ -775,7 +775,7 @@ executes a local binary with `--no-install`. A missing cache fails this offline
 proof even though installation supports a pinned download fallback.
 
 Native GitHub runner registration seeds only `node/24.19.0/x64` and
-`go/1.27.0/x64` after configuration and before service start. It reads the
+`go/1.27.3/x64` after configuration and before service start. It reads the
 actual `.runner` work folder and `.env` values, including the precedence of
 `RUNNER_TOOL_CACHE`, `RUNNER_TOOLSDIRECTORY`, `AGENT_TOOLSDIRECTORY` and
 `agent.ToolsDirectory`. Literal `.env` values are not evaluated as shell code.
@@ -797,7 +797,7 @@ tools root and existing Go-on-PATH validation; its shim is not an upstream
 `setup-go` execution.
 
 Qualification must exercise the real pinned `setup-go` action with exact
-`go-version: 1.27.0`, `check-latest: false`, dependency `cache: false` and no
+`go-version: 1.27.3`, `check-latest: false`, dependency `cache: false` and no
 custom download URL, verifying an offline toolchain hit and the native Runner's
 effective cache root. Fixture tests do not replace that Linux proof or imply
 ARM support, another Ubuntu release's ABI, or successful image publication.

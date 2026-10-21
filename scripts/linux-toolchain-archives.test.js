@@ -10,7 +10,7 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 const installer = path.join(repoRoot, "scripts/install-linux-developer-tools.sh");
 const publicArchives = process.env.CRABBOX_TEST_TOOLCHAIN_ARCHIVES;
 const nodeArchive = "node-v24.19.0-linux-x64.tar.xz";
-const goArchive = "go1.27.0.linux-amd64.tar.gz";
+const goArchive = "go1.27.3.linux-amd64.tar.gz";
 const archiveNames = [
   nodeArchive,
   "pnpm-11.22.0.tgz",
@@ -672,7 +672,7 @@ function goArchiveFixture(t) {
 [[ ! -f "$FIXTURE_MARKER" ]] || exit 92
 printf '%s\\n' "$*" >>"$FIXTURE_LOG"
 case "$*" in
-  version) printf 'go version go1.27.0 linux/amd64\\n' ;;
+  version) printf 'go version go1.27.3 linux/amd64\\n' ;;
   'env GOOS GOARCH') printf 'linux\\namd64\\n' ;;
   'test bytes crypto/sha256') exit "\${FIXTURE_GO_FAILURE:-0}" ;;
   'run main.go') [[ "$CGO_ENABLED" == 1 ]]; grep -q 'C.answer()' main.go; printf 'go-cgo-ok\\n' ;;
@@ -689,7 +689,7 @@ esac`,
     );
     return createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
   };
-  const destination = path.join(root, "tools", "go", "1.27.0", "x64");
+  const destination = path.join(root, "tools", "go", "1.27.3", "x64");
   const shell = `
 public_toolchain_archive_dir="$PWD/archives"
 go_toolcache_root="$PWD/tools"
@@ -750,7 +750,7 @@ for (const failure of ["tamper", "wrong architecture"]) {
   test(`Go image publication rejects ${failure} without executing a cached tree`, (t) => {
     const { root, bin, destination, runGo } = goArchiveFixture(t);
     if (failure === "wrong architecture") {
-      writeTool(path.join(bin, "go"), "printf 'go version go1.27.0 linux/arm64\\n'");
+      writeTool(path.join(bin, "go"), "printf 'go version go1.27.3 linux/arm64\\n'");
     }
     const result = runGo(`
 ${failure === "tamper" ? `printf corrupt >"$public_toolchain_archive_dir/${goArchive}"` : ""}
@@ -874,13 +874,13 @@ install_go_toolchain
   assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
 });
 
-test("Go archive pin remains exact 1.27.0 independently of the Node major", (t) => {
+test("Go archive pin remains exact 1.27.3 independently of the Node major", (t) => {
   const { run } = fixture(t);
   const result = run(`node_major=22\ntoolchain_archive_spec ${goArchive}`);
   success(result);
   assert.equal(
     result.stdout.trim(),
-    `sha256 675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685 https://go.dev/dl/${goArchive}`,
+    `sha256 65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 https://go.dev/dl/${goArchive}`,
   );
 });
 

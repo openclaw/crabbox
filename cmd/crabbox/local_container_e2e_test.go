@@ -43,7 +43,7 @@ func TestLocalContainerProviderE2E(t *testing.T) {
 
 	image := strings.TrimSpace(os.Getenv("CRABBOX_LOCAL_CONTAINER_E2E_IMAGE"))
 	if image == "" {
-		image = "golang:1.26-bookworm"
+		image = "golang:1.27.3-bookworm"
 	}
 	tag := strings.ToLower(strings.ReplaceAll(t.Name(), "_", "-"))
 	if len(tag) > 16 {

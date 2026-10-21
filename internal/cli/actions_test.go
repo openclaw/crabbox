@@ -545,10 +545,10 @@ func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
 				return fmt.Sprintf("%x", sha256.Sum256(buf.Bytes()))
 			}
 			nodeDigest := pack("node", "24.19.0", "node-v24.19.0-linux-x64.tar.xz")
-			goDigest := pack("go", "1.27.0", "go1.27.0.linux-amd64.tar.gz")
+			goDigest := pack("go", "1.27.3", "go1.27.3.linux-amd64.tar.gz")
 			nodeSlot := filepath.Join(image, "node", "24.19.0", "x64")
-			goSlot := filepath.Join(image, "go", "1.27.0", "x64")
-			destGo := filepath.Join(cache, "go", "1.27.0", "x64")
+			goSlot := filepath.Join(image, "go", "1.27.3", "x64")
+			destGo := filepath.Join(cache, "go", "1.27.3", "x64")
 			workFolder := tc.workFolder
 			if workFolder == "" {
 				workFolder = "_work"
@@ -640,7 +640,7 @@ func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "archive":
-				write(filepath.Join(archives, "go1.27.0.linux-amd64.tar.gz"), "tampered", 0o644)
+				write(filepath.Join(archives, "go1.27.3.linux-amd64.tar.gz"), "tampered", 0o644)
 			case "tree":
 				write(filepath.Join(goSlot, "bin", "go"), "tampered", 0o755)
 			case "extra":
@@ -695,7 +695,7 @@ esac
 				"/opt/hostedtoolcache", image,
 				"/opt/crabbox/toolchain-archives", archives,
 				"14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647", nodeDigest,
-				"675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685", goDigest,
+				"65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40", goDigest,
 			).Replace(githubActionsRunnerInstallScript("2.337.0", true))
 			// The installer runs in its own shell and must not alter the caller's umask.
 			cmd := exec.Command("bash", "-c", "umask 002; bash -c \"$1\"; result=$?; [ \"$(umask)\" = 0002 ] || exit 99; exit \"$result\"", "fixture", script)
@@ -746,7 +746,7 @@ esac
 				tool, version string
 				present       bool
 			}{
-				{"node", "24.19.0", tc.wantNode}, {"go", "1.27.0", tc.wantGo},
+				{"node", "24.19.0", tc.wantNode}, {"go", "1.27.3", tc.wantGo},
 			} {
 				slot := filepath.Join(cache, expected.tool, expected.version, "x64")
 				_, err := os.Stat(slot + ".complete")
