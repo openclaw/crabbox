@@ -3274,7 +3274,6 @@ afterSync:
 		if preparedTerminalReceiptFile == nil {
 			return
 		}
-		localReceiptPersisted := attestPath == ""
 		if attestPath != "" {
 			artifact, writeErr := persistPreparedRunReceipt(*preparedTerminalReceiptFile)
 			if writeErr != nil {
@@ -3285,33 +3284,14 @@ afterSync:
 					return
 				}
 			} else {
-				localReceiptPersisted = true
 				fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
 			}
 		}
 		if finishErr := recorder.Finish(ctx, target, preparedTerminalReceipt.ExitCode, timings.sync, timings.command, terminalLog.Log, terminalLog.Truncated, results, classification, &preparedTerminalReceipt); finishErr != nil {
 			err = errors.Join(err, finishErr)
 			recordRunFailure(&runFailure, finishErr)
-			if localReceiptPersisted && attestPath != "" && preparedTerminalReceipt.ExitCode == 0 {
-				// The coordinator commit is now ambiguous. Preserve the exact receipt
-				// sent remotely, but make the local CLI failure impossible to miss.
-				failedReceipt, receiptErr := buildTerminalReceipt(ExitCodeForError(finishErr, 7))
-				if receiptErr != nil {
-					err = errors.Join(err, receiptErr)
-					recordRunFailure(&runFailure, receiptErr)
-				} else {
-					failedPrepared, prepareErr := prepareTerminalRunReceipt(attestPath, failedReceipt)
-					if prepareErr != nil {
-						err = errors.Join(err, prepareErr)
-						recordRunFailure(&runFailure, prepareErr)
-					} else if artifact, writeErr := persistPreparedRunReceipt(failedPrepared); writeErr != nil {
-						err = errors.Join(err, writeErr)
-						recordRunFailure(&runFailure, writeErr)
-					} else {
-						fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
-					}
-				}
-			}
+			// A transport failure is not a different task result. Keep --attest and
+			// the pending outbox's original signature; report CLI failure separately.
 			if a.runOutcome != nil {
 				a.runOutcome.Recorded = false
 			}

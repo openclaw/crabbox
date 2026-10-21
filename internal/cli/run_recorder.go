@@ -30,6 +30,8 @@ type runRecorder struct {
 	command            []string
 	label              string
 	runID              string
+	runOwner           string
+	runOrg             string
 	requestedRunID     string
 	createLeaseID      string
 	createConfig       *Config
@@ -271,6 +273,7 @@ func (r *runRecorder) StartTelemetrySampler(ctx context.Context, target SSHTarge
 
 func (r *runRecorder) attachRun(run CoordinatorRun) {
 	r.runID = run.ID
+	r.runOwner, r.runOrg = run.Owner, run.Org
 	r.leaseID, r.leaseSlug, r.leaseProvider = run.LeaseID, run.Slug, run.Provider
 	r.startedAt, _ = time.Parse(time.RFC3339Nano, run.StartedAt)
 	r.attachedAt = time.Now()
@@ -303,11 +306,31 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 	telemetry := runTelemetrySummary(r.telemetryStart, r.telemetryEnd, r.telemetrySnapshot())
 	ctx, cancel := context.WithTimeout(context.Background(), runRecorderFinishTimeout)
 	defer cancel()
+	data, encodeErr := encodeRunFinish(exitCode, sync, command, log, truncated, results, telemetry, classification, receipt)
+	if encodeErr != nil {
+		return Exit(7, "encode terminal finish for %s: %v", r.runID, encodeErr)
+	}
+	coord := r.coord
+	if r.createCoordinator != nil {
+		coord = r.createCoordinator
+	}
+	var pendingPath string
+	if receipt != nil {
+		pendingPath, encodeErr = retainPendingRunFinish(pendingRunFinish{
+			SchemaVersion: 1, Coordinator: strings.TrimRight(coord.BaseURL, "/"),
+			RunID: r.runID, Owner: r.runOwner, Org: r.runOrg,
+			Body: data, BodySHA256: sha256Digest(data),
+		})
+		if encodeErr != nil {
+			return Exit(7, "retain original terminal finish for %s before submission: %v", r.runID, encodeErr)
+		}
+		fmt.Fprintf(r.stderr, "pending signed finish: run=%q file=%q signer=%s finish-sha256=%s; use receipt --recover with these original pins\n", r.runID, pendingPath, receipt.Signer, sha256Digest(data))
+	}
 	var lastErr error
 	attempts := 0
 	for attempt := 1; attempt <= runRecorderFinishAttempts && ctx.Err() == nil; attempt++ {
 		attempts = attempt
-		_, finishErr := r.coord.FinishRun(ctx, r.runID, exitCode, sync, command, log, truncated, results, telemetry, classification, receipt)
+		_, finishErr := coord.finishRunBytes(ctx, r.runID, data)
 		if finishErr == nil && receipt == nil {
 			r.finished = true
 			r.terminalConfirmed = true
@@ -319,17 +342,25 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 		}
 		retryErr := finishErr
 		if receipt != nil {
-			committed, receiptErr := r.coord.RunReceipt(ctx, r.runID)
+			committed, receiptErr := coord.RunReceipt(ctx, r.runID)
 			if receiptErr == nil {
-				if committed == *receipt {
+				if committed == *receipt && finishErr == nil {
+					if removeErr := removePendingRunFinish(pendingPath); removeErr != nil {
+						fmt.Fprintf(r.stderr, "terminal committed; pending finish cleanup failed: %v\n", removeErr)
+					}
 					r.finished = true
 					r.terminalConfirmed = true
 					return nil
 				}
-				lastErr = fmt.Errorf("stored terminal receipt differs from the signed finish payload")
-				break
+				if committed != *receipt {
+					lastErr = errors.Join(lastErr, fmt.Errorf("stored terminal receipt differs from the signed finish payload"))
+					break
+				}
+				// The receipt does not bind results/telemetry. Require a successful
+				// idempotent POST of the full original before accepting a lost response.
+			} else {
+				lastErr = errors.Join(lastErr, fmt.Errorf("verify persisted terminal receipt: %w", receiptErr))
 			}
-			lastErr = errors.Join(lastErr, fmt.Errorf("verify persisted terminal receipt: %w", receiptErr))
 			// Preserve both diagnostics without letting a secondary read error
 			// change whether the original finish request can be retried.
 			if retryErr == nil {

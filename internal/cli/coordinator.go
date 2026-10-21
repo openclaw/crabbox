@@ -37,7 +37,7 @@ type CoordinatorClient struct {
 	checkpointSupported    bool
 }
 
-// Only a recorder-owned admission client retains this in-memory header binding.
+// Admission and original-finish recovery retain this in-memory header binding.
 type coordinatorAdmissionAuth struct {
 	captured bool
 	headers  http.Header
@@ -2528,7 +2528,15 @@ func (c *CoordinatorClient) FailRunAdmission(ctx context.Context, runID, leaseID
 }
 
 func (c *CoordinatorClient) FinishRun(ctx context.Context, runID string, exitCode int, sync, command time.Duration, log string, truncated bool, results *TestResultSummary, telemetry *RunTelemetrySummary, classification FailureClassification, receipt *terminalRunReceipt) (CoordinatorRun, error) {
-	var res CoordinatorRunResponse
+	data, err := encodeRunFinish(exitCode, sync, command, log, truncated, results, telemetry, classification, receipt)
+	if err != nil {
+		return CoordinatorRun{}, err
+	}
+	return c.finishRunBytes(ctx, runID, data)
+}
+
+// Encode once: retries and recovery must submit the original finish, not rebuild it.
+func encodeRunFinish(exitCode int, sync, command time.Duration, log string, truncated bool, results *TestResultSummary, telemetry *RunTelemetrySummary, classification FailureClassification, receipt *terminalRunReceipt) ([]byte, error) {
 	log, changed := retainedRunLogText(log, maxRunLogBytes)
 	truncated = truncated || changed
 	logChunks := splitRunLogChunks(log)
@@ -2553,7 +2561,13 @@ func (c *CoordinatorClient) FinishRun(ctx context.Context, runID string, exitCod
 	if receipt != nil {
 		body["receipt"] = receipt
 	}
-	err := c.do(ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/finish", body, &res)
+	return json.Marshal(body)
+}
+
+func (c *CoordinatorClient) finishRunBytes(ctx context.Context, runID string, data []byte) (CoordinatorRun, error) {
+	var res CoordinatorRunResponse
+	// Use the ordinary authenticated, redirect-checked transport without re-encoding.
+	err := c.doHTTP(ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/finish", data, true, &res)
 	return res.Run, err
 }
 
@@ -2695,7 +2709,9 @@ func (c *CoordinatorClient) doWithHeaders(ctx context.Context, method, path stri
 		}
 	}
 	err = c.doHTTPWithHeaders(ctx, method, path, data, body != nil, out, headers)
-	if err == nil || !shouldUseCoordinatorCurlFallback(ctx, method, body != nil, err) {
+	// The curl path resolves credentials again. Never change an identity-bound
+	// admission/recovery operation to fresh authentication after an HTTP failure.
+	if err == nil || c.admissionAuth != nil || !shouldUseCoordinatorCurlFallback(ctx, method, body != nil, err) {
 		return err
 	}
 	if curlErr := c.doCurl(ctx, method, path, data, body != nil, out); curlErr == nil {
