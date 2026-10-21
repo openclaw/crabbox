@@ -15,6 +15,7 @@
 ### Fixed
 
 - Security: build source, release binaries, container runners, and developer-image toolchains with Go 1.27.3 to fix reachable GO-2026-6809 certificate validation, retaining the Go 1.26 minimum.
+- Cloudflare Dynamic Workers: cancel stalled response reads at their deadline instead of blocking while closing the response body.
 - Run: verify forwarded environment file removal after cleanup failures, preserve success when only the staging directory remains, and distinguish present files from unconfirmed removal. [PR 2917](https://github.com/openclaw/crabbox/pull/2917). Thanks @mr3od.
 
 ## 0.79.0 - 2026-10-19
