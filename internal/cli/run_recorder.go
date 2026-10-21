@@ -102,7 +102,8 @@ func (r *runRecorder) createRun(ctx context.Context, leaseID string, cfg Config)
 	if r.createConfig == nil {
 		r.createLeaseID = leaseID
 		r.createConfig = &Config{Provider: cfg.Provider, TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode, Class: cfg.Class, ServerType: cfg.ServerType}
-		// Keep terminal bookkeeping on the initiating route and authentication.
+		// Keep admission replay and terminal bookkeeping on the initiating route
+		// and credential source. Renewable credentials are refreshed at finish.
 		r.createCoordinator = &CoordinatorClient{
 			BaseURL: r.coord.BaseURL, Token: r.coord.Token, Access: r.coord.Access,
 			TokenCommand:     append([]string(nil), r.coord.TokenCommand...),
@@ -327,9 +328,12 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 			return Exit(7, "retain original terminal finish for %s before submission: %v", r.runID, encodeErr)
 		}
 	}
-	var lastErr error
+	// Retain the signed original before refreshing: an unavailable helper or
+	// changed identity must not discard the only recoverable finish bytes.
+	coord, authErr := r.finishCoordinator(ctx, coord)
+	lastErr := authErr
 	attempts := 0
-	for attempt := 1; attempt <= runRecorderFinishAttempts && ctx.Err() == nil; attempt++ {
+	for attempt := 1; authErr == nil && attempt <= runRecorderFinishAttempts && ctx.Err() == nil; attempt++ {
 		attempts = attempt
 		_, finishErr := coord.finishRunBytes(ctx, r.runID, data)
 		if finishErr == nil && receipt == nil {
@@ -385,6 +389,45 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 		return Exit(7, "run history terminal commit failed for %s after %d attempts: %v; recover with `crabbox receipt %s`; pending signed finish: run=%q file=%q signer=%s finish-sha256=%s; use receipt --recover with these original pins", r.runID, attempts, lastErr, r.runID, r.runID, pendingPath, receipt.Signer, sha256Digest(data))
 	}
 	return Exit(7, "run history terminal commit failed for %s after %d attempts: %v; recover with `crabbox receipt %s`", r.runID, attempts, lastErr, r.runID)
+}
+
+// finishCoordinator renews only renewable credentials. Static admission headers
+// have no refresh source and retain their original binding. Never select a later
+// r.coord or mutate createCoordinator: admission retries must still use the
+// original credentials, while all finish requests share one fresh authority.
+func (r *runRecorder) finishCoordinator(ctx context.Context, original *CoordinatorClient) (*CoordinatorClient, error) {
+	if r.createCoordinator == nil || len(original.TokenCommand) == 0 {
+		return original, nil
+	}
+	if r.runOwner == "" || r.runOrg == "" {
+		return nil, errors.New("cannot refresh terminal credentials without the admitted run owner and organization")
+	}
+	headers := make(http.Header)
+	// resolveRequestHeaders intentionally bypasses the admission snapshot once.
+	if err := original.resolveRequestHeaders(ctx, headers); err != nil {
+		return nil, fmt.Errorf("refresh terminal credentials: %w", err)
+	}
+	r.diagnosticSecrets = append(r.diagnosticSecrets, strings.TrimPrefix(headers.Get("Authorization"), "Bearer "), headers.Get("CF-Access-Client-Secret"), headers.Get("cf-access-token"))
+	bound := &CoordinatorClient{
+		BaseURL: original.BaseURL, Client: original.Client,
+		readRetryWriter: original.readRetryWriter,
+		admissionAuth:   &coordinatorAdmissionAuth{captured: true, headers: headers},
+	}
+	who, err := bound.Whoami(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("verify refreshed terminal identity: %w", err)
+	}
+	if who.Owner != r.runOwner || who.Org != r.runOrg {
+		return nil, errors.New("refreshed terminal owner or organization mismatch")
+	}
+	run, err := bound.Run(ctx, r.runID)
+	if err != nil {
+		return nil, fmt.Errorf("verify admitted terminal run: %w", err)
+	}
+	if run.ID != r.runID || run.Owner != r.runOwner || run.Org != r.runOrg {
+		return nil, errors.New("admitted run owner or organization mismatch")
+	}
+	return bound, nil
 }
 
 func runRecorderFinishRetryable(err error) bool {

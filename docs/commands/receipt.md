@@ -97,6 +97,17 @@ request digest binds those fields and the exact original HTTP bytes. The
 versioned outbox wraps those bytes as base64 with their digest and original
 coordinator, run, owner, and organization. A bare receipt is not a finish file.
 
+For ordinary finalization with `CRABBOX_COORDINATOR_TOKEN_COMMAND`, the CLI
+invokes the original configured helper once again after the task ends. It checks
+the fresh identity and the recorded run against the admitted owner and organization, then
+uses those same fresh credentials for the finish and receipt readback, including
+bounded retries. It does not reuse an expired admission token or switch to a
+later coordinator/helper. An administrator with a different owner or organization
+is refused too. Static credentials keep their original admission binding.
+Refresh or identity-check failures leave the signed original pending for recovery;
+credentials are never stored in the pending file. This does not change the
+schema-1 envelope or schema-2 signed receipt format.
+
 Recovery checks the private regular file, schema, digest, signature, retained
 log, run identity and original command/timing bindings before submission. It
 then makes one ordinary authenticated, idempotent finish request, without
