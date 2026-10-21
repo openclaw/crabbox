@@ -306,7 +306,7 @@ test("Windows developer tools prep verifies a versioned Chocolatey package befor
 
 test("Windows developer tools prep verifies the Node MSI before installation", () => {
   assert.match(script, /CRABBOX_WINDOWS_NODE_SHA256/);
-  assert.match(script, /f0f66c2a80c08a30a5ab5179ee9ea9e45f9b46289436a8cc87ff833b852db351/);
+  assert.match(script, /3bda4baf1ee709b33cf920dd633106ddb23951e322bff9c03ec9f64ab8981b01/);
   assert.match(
     script,
     /CRABBOX_WINDOWS_NODE_SHA256 is required when CRABBOX_WINDOWS_NODE_VERSION overrides \$DefaultNodeVersion/,
