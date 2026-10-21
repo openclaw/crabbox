@@ -11,9 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
-	"time"
 )
 
 type sshScriptTestProvider struct {
@@ -110,18 +111,11 @@ func setupSSHScriptRun(t *testing.T) (*sshScriptTestProvider, *sshScriptTestBack
 		t.Fatal(err)
 	}
 	t.Setenv("CRABBOX_SCRIPT_COMPLETIONS", completions)
+	t.Setenv("CRABBOX_SCRIPT_DETACH_REMOTE", "")
 	t.Cleanup(func() {
 		// Runs join renewal before teardown; cancellation waits for workload
 		// startup or a completed owner refusal, so registrations are settled.
-		entries, err := os.ReadDir(completions)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, entry := range entries {
-			if !strings.HasSuffix(entry.Name(), ".done") {
-				waitForWorkspaceOwnerTestFile(t, filepath.Join(completions, entry.Name()+".done"))
-			}
-		}
+		waitForSSHScriptCompletions(t, completions)
 	})
 	ssh := `#!/bin/sh
 for arg do
@@ -145,6 +139,16 @@ case "$decoded" in
   *"/usr/local/bin/crabbox-ready"*) exit 0 ;;
 esac
 completion=$(mktemp "$CRABBOX_SCRIPT_COMPLETIONS/run.XXXXXXXX") || exit 1
+if [ "$CRABBOX_SCRIPT_DETACH_REMOTE" = 1 ]; then
+  # Model the server independently of the canceled client, including its pipes.
+  cat > "$completion.stdin" || exit 1
+  sh -c 'sh -c "$1" < "$2.stdin"; code=$?; printf "%s\n" "$code" > "$2.done"; exit "$code"' sh "$cmd" "$completion" > "$completion.stdout" 2> "$completion.stderr" &
+  wait "$!"
+  code=$?
+  cat "$completion.stdout"
+  cat "$completion.stderr" >&2
+  exit "$code"
+fi
 # Cancellation kills the SSH root, not this foreground remote supervisor.
 # Publish completion only after the full witness and launcher have exited.
 sh -c 'sh -c "$1"; code=$?; printf "%s\n" "$code" > "$2.done"; exit "$code"' sh "$cmd" "$completion"
@@ -159,6 +163,19 @@ exit "$code"
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return p, b, dir
+}
+
+func waitForSSHScriptCompletions(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "run.") && strings.Count(entry.Name(), ".") == 1 {
+			waitForWorkspaceOwnerTestFile(t, filepath.Join(dir, entry.Name()+".done"))
+		}
+	}
 }
 
 func TestHybridSSHScriptRun(t *testing.T) {
@@ -278,21 +295,57 @@ func TestHybridSSHScriptPrewarmAdmissionUsesScriptRoute(t *testing.T) {
 
 func TestHybridSSHScriptCancellationAndSameLeaseReplay(t *testing.T) {
 	p, b, dir := setupSSHScriptRun(t)
+	t.Setenv("CRABBOX_SCRIPT_DETACH_REMOTE", "1")
+	openFIFO := func(path string) *os.File {
+		if err := syscall.Mkfifo(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := os.OpenFile(path, os.O_RDWR, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { file.Close() })
+		return file
+	}
+	signal := func(path string) <-chan error {
+		file := openFIFO(path)
+		result := make(chan error, 1)
+		joined := make(chan struct{})
+		go func() {
+			defer close(joined)
+			var marker [1]byte
+			_, err := io.ReadFull(file, marker[:])
+			result <- err
+		}()
+		t.Cleanup(func() { file.Close(); <-joined })
+		return result
+	}
 	started := filepath.Join(dir, "script-started")
 	stop := filepath.Join(dir, "script-stop")
-	source := "#!/bin/sh\ntouch " + shellQuote(started) + "\nwhile [ ! -e " + shellQuote(stop) + " ]; do sleep 0.05; done\n"
+	retired := filepath.Join(dir, "script-retired")
+	pidPath := filepath.Join(dir, "script-pid")
+	startedSignal, retiredSignal := signal(started), signal(retired)
+	stopWriter := openFIFO(stop)
+	source := "#!/bin/sh\nprintf '%s\\n' \"$$\" > " + shellQuote(pidPath) + "\nprintf x > " + shellQuote(started) + "\nIFS= read -r stop < " + shellQuote(stop) + "\nprintf x > " + shellQuote(retired) + "\n"
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var stdout, stderr bytes.Buffer
+	var firstOwner *workspaceOwner
+	firstApp := App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader(source)}
+	firstApp.workspaceOwnerAcquirer = func(ctx context.Context, target SSHTarget, leaseID string, stderr io.Writer) (*workspaceOwner, error) {
+		owner, err := acquireWorkspaceOwner(ctx, target, leaseID, stderr)
+		firstOwner = owner
+		return owner, err
+	}
 	done := make(chan error, 1)
 	go func() {
-		done <- (App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader(source)}).runCommand(ctx, []string{
+		done <- firstApp.runCommand(ctx, []string{
 			"--provider", p.Spec().Name, "--no-sync", "--no-hydrate", "--keep", "--script-stdin",
 		})
 	}()
 	joined := false
 	t.Cleanup(func() {
-		if err := os.WriteFile(stop, nil, 0o600); err != nil {
+		if _, err := stopWriter.WriteString("stop\n"); err != nil {
 			t.Error(err)
 		}
 		cancel()
@@ -300,27 +353,50 @@ func TestHybridSSHScriptCancellationAndSameLeaseReplay(t *testing.T) {
 			<-done
 		}
 	})
-	// Configuration probes precede the cancellation boundary and can be slow on busy hosts.
-	deadline := time.Now().Add(time.Minute)
-	for {
-		if _, err := os.Stat(started); err == nil {
-			break
+	select {
+	case err := <-startedSignal:
+		if err != nil {
+			t.Fatal(err)
 		}
-		select {
-		case err := <-done:
-			joined = true
-			t.Fatalf("run ended before script started: %v\n%s", err, stderr.String())
-		case <-time.After(10 * time.Millisecond):
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("script did not start")
-		}
+	case err := <-done:
+		joined = true
+		t.Fatalf("run ended before script started: %v\n%s", err, stderr.String())
+	case <-t.Context().Done():
+		t.Fatal(t.Context().Err())
+	}
+	if firstOwner == nil {
+		t.Fatal("initial retained lease did not acquire a workspace owner")
+	}
+	if firstOwner.key != workspaceOwnerKey(b.lease.LeaseID) {
+		t.Fatalf("initial owner key %s does not match replay lease %s", firstOwner.key, b.lease.LeaseID)
 	}
 	cancel()
 	err := <-done
 	joined = true
 	if err == nil || b.joined != 1 {
 		t.Fatalf("cancel=%v activity joins=%d", err, b.joined)
+	}
+	pidBytes, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer child.Release()
+	if err := child.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("fixture did not retain its real remote child after client cancellation: %v", err)
+	}
+	state, stateErr := (sshWorkspaceOwnerTransport{target: b.lease.SSH}).Do(t.Context(), workspaceOwnerRemoteRequest{
+		Action: workspaceOwnerInspect, Key: firstOwner.key, Token: firstOwner.token, TTL: firstOwner.ttl,
+	})
+	if stateErr != nil || state != "CHILD" {
+		t.Fatalf("real remote child survived but its workspace witness did not: state=%q error=%v\n%s", state, stateErr, stderr.String())
 	}
 	stdout.Reset()
 	stderr.Reset()
@@ -350,6 +426,29 @@ func TestHybridSSHScriptCancellationAndSameLeaseReplay(t *testing.T) {
 	}
 	if _, err := os.Stat(replayMarker); !os.IsNotExist(err) {
 		t.Fatal("replayed while the earlier workspace witness was unsettled")
+	}
+	if _, err := stopWriter.WriteString("stop\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-retiredSignal; err != nil {
+		t.Fatal(err)
+	}
+	waitForSSHScriptCompletions(t, filepath.Join(dir, "ssh-completions"))
+	response, err := (sshWorkspaceOwnerTransport{target: b.lease.SSH}).Do(t.Context(), workspaceOwnerRemoteRequest{
+		Action: workspaceOwnerRelease, Key: firstOwner.key, Token: firstOwner.token, TTL: firstOwner.ttl,
+	})
+	if err != nil || response != "RELEASED" {
+		t.Fatalf("release after remote retirement: response=%q error=%v", response, err)
+	}
+	stderr.Reset()
+	err = (App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader("touch " + shellQuote(replayMarker) + "\n")}).runCommand(t.Context(), []string{
+		"--provider", p.Spec().Name, "--id", b.lease.LeaseID, "--no-sync", "--no-hydrate", "--keep", "--script-stdin",
+	})
+	if err != nil || b.joined != 3 {
+		t.Fatalf("settled same-lease replay=%v joins=%d\n%s", err, b.joined, stderr.String())
+	}
+	if _, err := os.Stat(replayMarker); err != nil {
+		t.Fatalf("settled replay did not execute: %v", err)
 	}
 }
 
