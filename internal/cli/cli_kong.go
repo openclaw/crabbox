@@ -197,8 +197,28 @@ type benchCheckKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type jobKongCmd struct {
-	List jobListKongCmd `cmd:"" passthrough:"" help:"List configured jobs."`
-	Run  jobRunKongCmd  `cmd:"" passthrough:"" help:"Run a configured job."`
+	List   jobListKongCmd   `cmd:"" passthrough:"" help:"List configured jobs."`
+	Run    jobRunKongCmd    `cmd:"" passthrough:"" help:"Run a configured job."`
+	Submit jobSubmitKongCmd `cmd:"" passthrough:"" help:"Submit a detached command to an existing Linux SSH lease."`
+	Status jobStatusKongCmd `cmd:"" passthrough:"" help:"Read a detached job's status."`
+	Logs   jobLogsKongCmd   `cmd:"" passthrough:"" help:"Read bounded detached job logs."`
+	Push   jobPushKongCmd   `cmd:"" passthrough:"" help:"Upload a workspace path under the lease's workspace lock."`
+	Pull   jobPullKongCmd   `cmd:"" passthrough:"" help:"Download a workspace path under the lease's workspace lock."`
+}
+type jobSubmitKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type jobStatusKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type jobLogsKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type jobPushKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type jobPullKongCmd struct {
+	Args []string `arg:"" optional:""`
 }
 type jobListKongCmd struct {
 	Args []string `arg:"" optional:""`
@@ -709,8 +729,23 @@ func (c *benchReportKongCmd) Run(ctx context.Context, app App) error {
 func (c *benchCheckKongCmd) Run(ctx context.Context, app App) error {
 	return app.benchCheck(ctx, c.Args)
 }
-func (c *jobListKongCmd) Run(ctx context.Context, app App) error   { return app.jobList(ctx, c.Args) }
-func (c *jobRunKongCmd) Run(ctx context.Context, app App) error    { return app.jobRun(ctx, c.Args) }
+func (c *jobListKongCmd) Run(ctx context.Context, app App) error { return app.jobList(ctx, c.Args) }
+func (c *jobRunKongCmd) Run(ctx context.Context, app App) error  { return app.jobRun(ctx, c.Args) }
+func (c *jobSubmitKongCmd) Run(ctx context.Context, app App) error {
+	return app.detachedJob(ctx, "submit", c.Args)
+}
+func (c *jobStatusKongCmd) Run(ctx context.Context, app App) error {
+	return app.detachedJob(ctx, "status", c.Args)
+}
+func (c *jobLogsKongCmd) Run(ctx context.Context, app App) error {
+	return app.detachedJob(ctx, "logs", c.Args)
+}
+func (c *jobPushKongCmd) Run(ctx context.Context, app App) error {
+	return app.detachedJob(ctx, "push", c.Args)
+}
+func (c *jobPullKongCmd) Run(ctx context.Context, app App) error {
+	return app.detachedJob(ctx, "pull", c.Args)
+}
 func (c *syncPlanKongCmd) Run(ctx context.Context, app App) error  { return app.syncPlan(ctx, c.Args) }
 func (c *providersKongCmd) Run(ctx context.Context, app App) error { return app.providers(ctx, c.Args) }
 func (c *preflightToolsKongCmd) Run(_ context.Context, app App) error {

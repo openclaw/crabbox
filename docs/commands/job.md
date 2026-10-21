@@ -17,8 +17,95 @@ For the concept and authoring guidance, see [jobs](../features/jobs.md).
 | --- | --- |
 | `crabbox job list` | List configured jobs and their key routing fields. |
 | `crabbox job run <name>` | Run a configured job. |
+| `crabbox job submit --id <lease> --job-id <job> -- <command...>` | Submit a detached command to an existing Linux SSH lease. |
+| `crabbox job status --id <lease> --job-id <job>` | Read JSON status without interpreting SSH errors as workload exits. |
+| `crabbox job logs --id <lease> --job-id <job> [--lines 100]` | Read a bounded tail of combined stdout and stderr. |
+| `crabbox job push --id <lease> <local-path> <relative-path>` | Upload one workspace path while holding workspace ownership. |
+| `crabbox job pull --id <lease> <local-path> <relative-path>` | Download one workspace path while holding workspace ownership. |
 
 Running `crabbox job` with no subcommand is equivalent to `crabbox job list`.
+
+## Detached commands on existing hosts
+
+A detached command continues on the host after its initiating SSH connection
+closes. Unlike named `job run`, these commands require an existing lease, never
+provision or release a machine, and do not apply named-job configuration.
+The first implementation supports native Linux SSH targets only. Lease expiry,
+provider shutdown, host reboot, and operator cleanup can still interrupt a job;
+detachment is not a lifetime extension or a restart service.
+
+Prepare the ordinary repository workspace with `run --sync-only`, then submit:
+
+```sh
+crabbox run --id buildbox --no-hydrate --sync-only
+crabbox job submit --id buildbox --job-id test-001 -- sh -c 'make test'
+crabbox job status --id buildbox --job-id test-001
+crabbox job logs --id buildbox --job-id test-001 --lines 50
+crabbox job pull --id buildbox ./results results
+```
+
+Submission runs the exact command arguments in the ordinary repository workspace
+(`workRoot/leaseID/repositoryName`). Use explicit `sh -c` for shell syntax.
+No local environment values, named-job hooks, hydration, automatic artifact
+collection, or machine cleanup are implied. Commands must remain in the
+foreground and wait for their children; do not submit a daemonizing command.
+
+IDs contain 1–64 letters, digits, underscores or hyphens, starting with a letter
+or digit. Choose the ID **before** submission. Reusing an ID is refused even
+after completion. If submission loses its acknowledgment, inspect the same ID:
+do not invent another ID and retry. A successful submission reports
+`{"id":"test-001","state":"submitted"}`, not successful workload completion.
+
+Status reports `running` with a process ID (PID), `exited` with that PID and an
+`exitCode`, `missing` when no record exists, or `unknown` when no durable exit
+record proves completion and the recorded process cannot be confirmed. Process
+identity includes its start time, not just its reusable PID. Even workload exit
+255 is a normal `exited` observation. A successful status read exits zero;
+automation must inspect `exitCode`. An SSH or malformed-record failure exits 7
+and does **not** report that the workload failed. Status and logs have a
+one-minute operation limit; log reads accept 1–10000 lines and do not follow
+indefinitely. Repeat these reads with a caller-chosen deadline to monitor a job.
+
+### Routing and transfers
+
+These commands reuse resolved lease SSH transport, including existing external
+provider `sshConfigProxy` aliases and `proxyCommand` routes; no second SSH
+configuration format is introduced. See [external SSH routing](../providers/external.md)
+and [SSH transport](../features/ssh-transport.md). Configure destination and
+credential approval in trusted user configuration as those contracts require.
+
+`push` and `pull` take the local operand **first** in both directions. The
+remote operand is relative to the repository workspace. Absolute paths,
+parent traversal, `.git`, `.crabbox`, and remote symlink traversal are refused.
+Both operations use the existing [cp transport](cp.md): incremental rsync when
+available, otherwise validated archive replacement of the selected subtree.
+They do not delete the rest of the workspace. Explicit uploads copy the selected
+operand, not Git's tracked/non-ignored manifest; review its contents before
+uploading. Use `run --sync-only` for ordinary repository-aware source sync.
+
+### Ownership and interrupted operations
+
+Jobs and transfers share `run`'s remote workspace owner. Its existing scope is
+one lease, deliberately serializing all repository workspaces within that lease.
+Different leases use distinct workspace paths. Do not alias those paths through
+symlinks or use different lease identities for the same workspace. This is
+cooperative collision protection, not isolation from direct SSH commands or
+other operating-system accounts. Ordinary `cp` does not take this reservation;
+use `job push`/`job pull` for transfers that must exclude running jobs.
+
+A persistent reservation prevents automatic takeover after an ambiguous
+dispatch, lost transfer connection, missing supervisor, or expired local owner.
+It is removed only after observed transfer success or completed foreground
+execution and witness cleanup. A recorded workload exit can precede that cleanup;
+it does not by itself prove that the reservation was released.
+
+Job records and logs remain under `~/.crabbox/jobs/` on the host. A crash before
+dispatch or during cleanup can leave the workspace reserved indefinitely.
+Inspect the job's `supervisor.log`, the exact workspace-owner record, and host
+processes before any manual recovery. Do not remove ownership state based only
+on elapsed time, an unreachable host, or an absent PID. This release does not
+provide automatic recovery, cancellation, or garbage collection for detached
+jobs; preserve records until results have been recovered and ownership resolved.
 
 ## job list
 

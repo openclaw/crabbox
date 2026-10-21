@@ -55,10 +55,12 @@ type workspaceOwnerAction string
 type workspaceOwnerInspectResult uint8
 
 const (
-	workspaceOwnerAcquire workspaceOwnerAction = "acquire"
-	workspaceOwnerRenew   workspaceOwnerAction = "renew"
-	workspaceOwnerInspect workspaceOwnerAction = "inspect"
-	workspaceOwnerRelease workspaceOwnerAction = "release"
+	workspaceOwnerAcquire  workspaceOwnerAction = "acquire"
+	workspaceOwnerRenew    workspaceOwnerAction = "renew"
+	workspaceOwnerInspect  workspaceOwnerAction = "inspect"
+	workspaceOwnerRelease  workspaceOwnerAction = "release"
+	workspaceOwnerDetach   workspaceOwnerAction = "detach"
+	workspaceOwnerComplete workspaceOwnerAction = "complete"
 )
 
 const workspaceOwnerQuiescent, workspaceOwnerChildActive workspaceOwnerInspectResult = 0, 1
@@ -870,6 +872,8 @@ child_status() {
 }
 case "$action" in
   acquire)
+    # Detached dispatch is never recovered on expiry or PID absence alone.
+    [ ! -e "$state.detached" ] || { printf CHILD; exit 0; }
     if read_state; then
       now=$(date +%s)
       if [ "$state_expiry" -gt "$now" ]; then printf BUSY; exit 0; fi
@@ -901,11 +905,23 @@ case "$action" in
     rm -f "$child"
     printf OWNED
     ;;
-  release)
+  detach)
     read_state || { printf AMBIGUOUS; exit 74; }
     [ "$state_token" = "$token" ] || { printf MISMATCH; exit 75; }
+    [ "$state_expiry" -gt "$(date +%s)" ] || { printf EXPIRED; exit 75; }
+    (umask 077; set -C; printf '%s\n' "$token" >"$state.detached") || { printf AMBIGUOUS; exit 74; }
+    printf DETACHED
+    ;;
+  release|complete)
+    read_state || { printf AMBIGUOUS; exit 74; }
+    [ "$state_token" = "$token" ] || { printf MISMATCH; exit 75; }
+    if [ -e "$state.detached" ]; then
+      [ "$action" = complete ] || { printf CHILD; exit 75; }
+      [ "$(cat "$state.detached")" = "$token" ] || { printf MISMATCH; exit 75; }
+    fi
     if child_status; then printf CHILD; exit 75; else child_rc=$?; fi
     [ "$child_rc" -ne 2 ] || { printf AMBIGUOUS; exit 74; }
+    rm -f "$state.detached"
     rm -f "$child" "$state"
     [ ! -e "$state" ] || { printf AMBIGUOUS; exit 74; }
     printf RELEASED
