@@ -23,6 +23,8 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 # Rounded top-level seconds from the CI race shards' timing summaries; only
 # relative weights matter. List every test at SLOW_SECONDS or more: hashing
@@ -130,6 +132,18 @@ def main():
         sys.stderr.write(listing.stderr)
         return listing.returncode
     names = select_tests(listing.stdout, args.shard, args.count)
+    # Binary-contract tests share this build. Warm its cache before the package
+    # timeout starts, especially after a toolchain update invalidates the cache.
+    with tempfile.TemporaryDirectory(prefix="crabbox-shard-build-") as directory:
+        build = subprocess.run(
+            ["go", "build", "-trimpath", "-o", str(Path(directory) / "crabbox"), "./cmd/crabbox"],
+            text=True,
+            capture_output=True,
+        )
+        if build.returncode:
+            sys.stdout.write(build.stdout)
+            sys.stderr.write(build.stderr)
+            return build.returncode
     print(f"CLI shard {args.shard + 1}/{args.count}: {len(names)} tests", flush=True)
     command = common + ["-run", "^(" + "|".join(names) + ")$"]
     if args.coverprofile:

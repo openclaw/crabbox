@@ -68,6 +68,9 @@ class ShardTests(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess([], 0, "TestA\nTestB\nExample\nFuzzInput\n", "")
         with patch("sys.argv", ["test-go-shard.py", "1", "2"]):
             self.assertEqual(shard.main(), 1)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[1].args[0][:4], ["go", "build", "-trimpath", "-o"])
+        self.assertEqual(run.call_args_list[1].args[0][-1], "./cmd/crabbox")
         self.assertEqual(go_test.call_args.args[0], [
             "go", "test", "-race", "-count=1", "-timeout=10m", "./internal/cli",
             "-run", "^(Example|FuzzInput|TestB)$",
@@ -79,13 +82,47 @@ class ShardTests(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess([], 0, "TestA\nTestB\nExample\nFuzzInput\n", "")
         with patch("sys.argv", ["test-go-shard.py", "1", "3", "--coverprofile", "cli-1.out"]):
             self.assertEqual(shard.main(), 7)
-        self.assertEqual(run.call_args.args[0], [
+        self.assertEqual(run.call_args_list[0].args[0], [
             "go", "test", "-count=1", "-timeout=20m", "-covermode=atomic", "./internal/cli", "-list", ".",
         ])
         self.assertEqual(go_test.call_args.args[0], [
             "go", "test", "-count=1", "-timeout=20m", "-covermode=atomic", "./internal/cli",
             "-run", "^(FuzzInput|TestA)$", "-coverprofile=cli-1.out",
         ])
+
+    @patch.object(shard, "go_test")
+    @patch.object(shard.subprocess, "run")
+    def test_cli_build_failure_stops_before_tests(self, run, go_test):
+        run.side_effect = [
+            subprocess.CompletedProcess([], 0, "TestA\nTestB\n", ""),
+            subprocess.CompletedProcess([], 9, "build output\n", "build failed\n"),
+        ]
+        with patch("sys.argv", ["test-go-shard.py", "0", "2"]), \
+             contextlib.redirect_stdout(io.StringIO()) as out, \
+             contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(shard.main(), 9)
+        self.assertEqual(out.getvalue(), "build output\n")
+        self.assertEqual(err.getvalue(), "build failed\n")
+        go_test.assert_not_called()
+
+    @patch.object(shard, "go_test", return_value=0)
+    @patch.object(shard.subprocess, "run")
+    def test_temporary_build_output_is_removed_before_tests(self, run, go_test):
+        output = None
+
+        def invoke(command, **kwargs):
+            nonlocal output
+            if command[1] == "build":
+                output = pathlib.Path(command[4])
+                self.assertTrue(output.parent.is_dir())
+                output.write_bytes(b"fixture")
+                return subprocess.CompletedProcess(command, 0, "", "")
+            return subprocess.CompletedProcess(command, 0, "TestA\nTestB\n", "")
+
+        run.side_effect = invoke
+        go_test.side_effect = lambda command: self.assertFalse(output.parent.exists()) or 0
+        with patch("sys.argv", ["test-go-shard.py", "0", "2"]):
+            self.assertEqual(shard.main(), 0)
 
     def stream(self, popen, events, result=0):
         child = popen.return_value.__enter__.return_value
