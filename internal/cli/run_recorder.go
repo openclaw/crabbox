@@ -62,6 +62,8 @@ type runRecorder struct {
 	telemetrySamples   []*LeaseTelemetry
 	telemetryCancel    func()
 	telemetryDone      chan struct{}
+
+	pendingFinishCleanupErr error
 }
 
 func newRunRecorder(ctx context.Context, coord *CoordinatorClient, cfg Config, command []string, label string, stderr io.Writer, createAfterLease bool, requestedRunID string) *runRecorder {
@@ -344,9 +346,9 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 			committed, receiptErr := coord.RunReceipt(ctx, r.runID)
 			if receiptErr == nil {
 				if committed == *receipt && finishErr == nil {
-					if removeErr := removePendingRunFinish(pendingPath); removeErr != nil {
-						fmt.Fprintf(r.stderr, "terminal committed; pending finish cleanup failed: %v\n", removeErr)
-					}
+					// The caller owns terminal output ordering. Cleanup is diagnostic:
+					// it cannot change the confirmed original task result.
+					r.pendingFinishCleanupErr = removePendingRunFinish(pendingPath)
 					r.finished = true
 					r.terminalConfirmed = true
 					return nil

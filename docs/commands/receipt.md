@@ -73,7 +73,12 @@ exact file path, original signer fingerprint, and finish-request digest. These
 pins stay with the failure diagnostic rather than adding progress output after
 the final timing JSON. A normal confirmed finish removes its pending file. An
 ambiguous or conflicting finish keeps it; import never deletes the supplied
-original.
+original. If local cleanup fails after a confirmed commit, the original task
+outcome stays committed and a cleanup warning is printed. A removal failure
+leaves the exact pending file intact; a directory-sync failure means removal
+durability is unconfirmed. With `--timing-json`, that late warning is followed
+by the same frozen timing JSON again so the final line remains parseable. This
+does not append another benchmark observation or resubmit the signed finish.
 
 After resolving the transport failure, use the original coordinator and the
 same authenticated owner and organization:

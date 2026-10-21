@@ -606,6 +606,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				fmt.Fprintf(a.Stderr, "benchmark timing record appended path=%s observations=1\n", timingRecordPath)
 			}
 		}
+		timingJSONWritten := false
 		if hasReport && *timingJSON {
 			if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil {
 				timingErr := Exit(7, "write timing JSON: %v", writeErr)
@@ -614,10 +615,24 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				if prepareTerminalRun != nil {
 					prepareTerminalRun()
 				}
+			} else {
+				timingJSONWritten = true
 			}
 		}
 		if finalizeTerminalRun != nil {
 			finalizeTerminalRun()
+		}
+		if cleanupErr := recorder.pendingFinishCleanupErr; cleanupErr != nil {
+			fmt.Fprintf(a.Stderr, "terminal committed; pending finish cleanup failed: %s\n", recorder.redactDiagnostic(cleanupErr.Error()))
+			if timingJSONWritten {
+				// The first timing write must precede terminal commit so a sink
+				// failure remains part of the original receipt. A late cleanup
+				// warning needs the same frozen report again as the final line,
+				// not another observation, signature, or terminal submission.
+				if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil {
+					err = errors.Join(err, Exit(7, "write final timing JSON after pending finish cleanup diagnostic: %v", writeErr))
+				}
+			}
 		}
 		recorder.Failed(runFailure)
 		if observation != nil {
