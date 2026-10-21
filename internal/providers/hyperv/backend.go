@@ -353,16 +353,24 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 }
 
 func (b *backend) prepareWindowsGuestNetwork(ctx context.Context, cfg core.Config, vmName, publicKey string) error {
+	fmt.Fprintf(b.rt.Stderr, "hyperv windows bootstrap vm=%s stage=powershell-direct state=waiting budget=%s\n", vmName, b.guestReadyBudget)
 	if err := b.waitGuestReady(ctx, vmName, cfg.HyperV.User); err != nil {
 		return fmt.Errorf("guest did not become reachable over PowerShell Direct: %w", err)
 	}
+	fmt.Fprintf(b.rt.Stderr, "hyperv windows bootstrap vm=%s stage=powershell-direct state=authenticated\n", vmName)
 	if err := b.persistWindowsActionsRunnerCredential(ctx, vmName, cfg.HyperV.User); err != nil {
 		return fmt.Errorf("guest Actions runner credential persistence failed: %w", err)
 	}
+	fmt.Fprintf(b.rt.Stderr, "hyperv windows bootstrap vm=%s stage=credential-escrow state=complete\n", vmName)
 	if err := b.stageSSHKey(ctx, vmName, cfg.HyperV.User, publicKey); err != nil {
 		return fmt.Errorf("pre-network SSH lockdown failed: %w", err)
 	}
-	return b.connectVMNetwork(ctx, vmName, cfg.HyperV.Switch)
+	fmt.Fprintf(b.rt.Stderr, "hyperv windows bootstrap vm=%s stage=ssh-lockdown state=complete\n", vmName)
+	if err := b.connectVMNetwork(ctx, vmName, cfg.HyperV.Switch); err != nil {
+		return err
+	}
+	fmt.Fprintf(b.rt.Stderr, "hyperv windows bootstrap vm=%s stage=network-connect state=complete\n", vmName)
+	return nil
 }
 
 // persistLease records ownership before VM creation, then atomically updates

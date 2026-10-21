@@ -2132,6 +2132,46 @@ func readinessProbe(req core.LocalCommandRequest) bool {
 }
 
 // A blocked readiness probe must time out and retry.
+func TestWindowsBootstrapReportsAuthenticatedProgressOnlyAfterGuestProbe(t *testing.T) {
+	for _, blocked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("blocked_%t", blocked), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				runner := &recordingRunner{}
+				runner.blockUntilCtx = func(req core.LocalCommandRequest) bool {
+					return blocked && readinessProbe(req)
+				}
+				b := testBackend(runner)
+				b.guestReadyBudget = 100 * time.Millisecond
+				b.guestReadyProbeTimeout = 20 * time.Millisecond
+				b.guestRetryBackoff = time.Millisecond
+				b.cfg.HyperV.GuestPassword = "fixture-guest-value"
+				var output bytes.Buffer
+				b.rt.Stderr = &output
+				err := b.prepareWindowsGuestNetwork(t.Context(), b.cfg, "crabbox-test-vm", "ssh-ed25519 fixture-only")
+				if (err != nil) != blocked {
+					t.Fatalf("blocked=%t err=%v", blocked, err)
+				}
+				if !strings.Contains(output.String(), "stage=powershell-direct state=waiting budget=100ms") {
+					t.Fatalf("missing bounded authentication stage: %q", output.String())
+				}
+				if strings.Contains(output.String(), b.cfg.HyperV.GuestPassword) {
+					t.Fatal("bootstrap progress disclosed the guest password")
+				}
+				for _, stage := range []string{
+					"stage=powershell-direct state=authenticated",
+					"stage=credential-escrow state=complete",
+					"stage=ssh-lockdown state=complete",
+					"stage=network-connect state=complete",
+				} {
+					if strings.Contains(output.String(), stage) == blocked {
+						t.Fatalf("blocked=%t incorrect progress %q: %q", blocked, stage, output.String())
+					}
+				}
+			})
+		})
+	}
+}
+
 func TestWaitGuestReadyRetriesThroughBlockingBoot(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		runner := &recordingRunner{}

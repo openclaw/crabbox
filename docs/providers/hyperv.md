@@ -99,6 +99,13 @@ Windows Update, WSUS, or a matching Features on Demand source. This keeps the
 template requirement to a plain Windows VHDX with a known admin password. ISO
 images are not supported — provide a fully installed VHDX.
 
+Windows acquisition allows up to 15 minutes overall, including a five-minute
+authenticated PowerShell Direct readiness budget after VM creation. An external
+five-minute timeout can terminate acquisition before that readiness budget
+finishes. Bootstrap progress on stderr distinguishes waiting for authentication
+from completed credential escrow, SSH lockdown, and network connection. A booted
+VM or a started network adapter alone does not prove guest authentication.
+
 ## Linux code-server
 
 Hyper-V advertises the `code` capability only for Linux targets. Create the VM
