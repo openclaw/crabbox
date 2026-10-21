@@ -696,11 +696,15 @@ type Runtime struct {
 	Clock  Clock
 	HTTP   *http.Client
 	Exec   CommandRunner
+	SSHReady func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error
 }
 ```
 
 Rules:
 
+- Provider-owned SSH waits can use `rt.SSHReady` when supplied, falling back to
+  `core.WaitForSSHReady` when nil. This lets binary fixtures substitute an owned
+  probe endpoint without changing the provider's lease endpoint or defaults.
 - Use `rt.Exec.Run(ctx, core.LocalCommandRequest{...})` for every subprocess.
   Never call `exec.CommandContext` directly. Tests pass a fake `CommandRunner`
   to assert on argv without spawning real processes.

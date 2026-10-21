@@ -160,7 +160,9 @@ func (p Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeChe
 	if !claimed || claim.CloudID != req.Server.CloudID {
 		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: core.Exit(2, "refusing Machine0 image save without an exact source lease claim")}
 	}
-	configured, err := p.Configure(req.Config, providerOperationRuntime(req.Stderr))
+	rt := providerOperationRuntime(req.Stderr)
+	rt.SSHReady = req.Runtime.SSHReady
+	configured, err := p.Configure(req.Config, rt)
 	if err != nil {
 		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: err}
 	}

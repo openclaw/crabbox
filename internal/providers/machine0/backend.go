@@ -43,8 +43,12 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 	b.sleep = core.SleepContext
 	b.stat = os.Stat
 	b.knownHostsFile = machine0KnownHostsFile
+	waitSSH := rt.SSHReady
+	if waitSSH == nil {
+		waitSSH = core.WaitForSSHReady
+	}
 	b.waitSSH = func(ctx context.Context, target *core.SSHTarget, timeout time.Duration) error {
-		return core.WaitForSSHReady(ctx, target, rt.Stderr, "machine0", timeout)
+		return waitSSH(ctx, target, rt.Stderr, "machine0", timeout)
 	}
 	b.prepareNativeImageSource = core.PrepareNativeImageSource
 	return b

@@ -264,6 +264,47 @@ func readyMachine(ip string) machine {
 	return machine{ID: "vm-123", Name: "crabbox-blue", Status: "RUNNING", IP: ip, URL: "https://crabbox-blue.mac0.io", Size: "large", Region: "eu", Image: "ubuntu-24-04-loaded", ImageVersion: 1, DefaultSSHUsername: "ubuntu", Distribution: "ubuntu", PricePerHour: 52_000, Key: &machineKey{Name: "ci"}}
 }
 
+func TestPrepareLeaseUsesRuntimeSSHReadiness(t *testing.T) {
+	unreachable := errors.New("fixture SSH readiness failed")
+	for _, readinessErr := range []error{nil, unreachable} {
+		name := "ready"
+		if readinessErr != nil {
+			name = "unreachable"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.SSHKey = "fixture-key"
+			cfg.SSHPort = "2222"
+			calls := 0
+			rt := core.Runtime{Stderr: io.Discard, SSHReady: func(ctx context.Context, target *core.SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+				calls++
+				if ctx != t.Context() || stderr != io.Discard || phase != "machine0" || timeout != core.BootstrapWaitTimeout(cfg) {
+					t.Fatal("readiness lost its caller context, diagnostics, phase, or timeout")
+				}
+				if target.Host != "192.0.2.5" || target.Port != "22" || target.Key != cfg.SSHKey {
+					t.Fatalf("unexpected readiness target: %+v", target)
+				}
+				return readinessErr
+			}}
+			b := newBackend(Provider{}.Spec(), cfg, rt).(*backend)
+			b.knownHostsFile = func(string, string) (string, error) { return "fixture-known-hosts", nil }
+			item := readyMachine("192.0.2.5")
+			item.Key = nil
+			lease, err := b.prepareLease(t.Context(), item, core.Server{CloudID: item.ID}, "cbx_123456789abc", true)
+			if !errors.Is(err, readinessErr) || calls != 1 {
+				t.Fatalf("prepare lease error=%v readiness calls=%d", err, calls)
+			}
+			if readinessErr != nil {
+				if lease.LeaseID != "" {
+					t.Fatal("failed readiness returned a usable lease")
+				}
+			} else if lease.SSH.Host != item.IP || lease.SSH.Port != "22" || lease.LeaseID != "cbx_123456789abc" {
+				t.Fatalf("readiness changed the lease endpoint or identity: %+v", lease)
+			}
+		})
+	}
+}
+
 func testBackendWithAPI(api *fakeAPI) *backend {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName

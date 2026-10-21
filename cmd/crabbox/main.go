@@ -17,6 +17,10 @@ import (
 )
 
 func main() {
+	runMain(cli.Run)
+}
+
+func runMain(runCLI func(context.Context, []string) error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
@@ -28,7 +32,7 @@ func main() {
 	if len(args) > 0 && args[0] == "__vercel-sandbox-bridge" {
 		err = vercelsandbox.RunBridgeCLI(ctx, os.Stdin, os.Stdout, os.Stderr)
 	} else {
-		err = cli.Run(ctx, args)
+		err = runCLI(ctx, args)
 	}
 	if err != nil {
 		printError(os.Stderr, err)

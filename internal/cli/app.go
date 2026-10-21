@@ -23,6 +23,11 @@ type App struct {
 	sshReadinessWaiter     func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error
 }
 
+func (a App) WithSSHReadinessWaiter(waiter func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error) App {
+	a.sshReadinessWaiter = waiter
+	return a
+}
+
 func (a App) waitForSSHReady(ctx context.Context, target *SSHTarget, phase string, timeout time.Duration) error {
 	if a.sshReadinessWaiter != nil {
 		return a.sshReadinessWaiter(ctx, target, a.Stderr, phase, timeout)

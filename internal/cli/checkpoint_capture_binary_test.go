@@ -39,11 +39,16 @@ func TestCheckpointCaptureBuiltBinaryContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	binary, err := builtCLITestBinary()
-	if err != nil {
-		t.Fatal(err)
+	binary := filepath.Join(t.TempDir(), "crabbox")
+	build := exec.CommandContext(t.Context(), "go", "test", "-c", "-trimpath", "-ldflags=-X=github.com/openclaw/crabbox/cmd/crabbox.checkpointFixtureCLI=1", "-o", binary, "./cmd/crabbox")
+	build.Dir = repo
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build checkpoint CLI: %v\n%s", err, output)
 	}
-	t.Logf("compiled immutable Crabbox binary: %s", binary)
+	if output, err := exec.CommandContext(t.Context(), binary, "--version").CombinedOutput(); err != nil || strings.TrimSpace(string(output)) != currentVersion() {
+		t.Fatalf("checkpoint binary did not dispatch the CLI: %v\n%s", err, output)
+	}
+	t.Logf("compiled checkpoint CLI with test-only readiness fixture: %s", binary)
 	providerBuild := exec.Command("go", "build", "-trimpath", "-o", binary+".provider", "./internal/cli/testdata/checkpoint-provider")
 	providerBuild.Dir = repo
 	if output, err := providerBuild.CombinedOutput(); err != nil {
@@ -719,6 +724,7 @@ func newCheckpointCaptureFixture(t *testing.T, repo, binary string) *checkpointC
 		"XDG_STATE_HOME=" + filepath.Join(root, "state"), "XDG_CACHE_HOME=" + filepath.Join(root, "cache"),
 		"TMPDIR=" + filepath.Join(root, "tmp"), "CRABBOX_CONFIG=" + filepath.Join(root, "config.yaml"),
 		"PATH=" + filepath.Join(root, "bin") + ":/usr/bin:/bin", captureFixtureEnv + "=" + root,
+		"CRABBOX_CAPTURE_SSH_PROBE_PORT=" + startTCPReadinessFixture(t),
 		"HTTP_PROXY=http://127.0.0.1:1", "HTTPS_PROXY=http://127.0.0.1:1",
 	}
 	hash := fnv.New32a()

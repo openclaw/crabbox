@@ -997,11 +997,12 @@ func providerTargetKey(targetOS, windowsMode string) string {
 }
 
 type Runtime struct {
-	Stdout io.Writer
-	Stderr io.Writer
-	Clock  Clock
-	HTTP   *http.Client
-	Exec   CommandRunner
+	Stdout   io.Writer
+	Stderr   io.Writer
+	Clock    Clock
+	HTTP     *http.Client
+	Exec     CommandRunner
+	SSHReady func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error
 }
 
 type Clock interface {
@@ -2041,7 +2042,7 @@ func routeConfiguredProvider(cfg *Config) error {
 }
 
 func runtimeForApp(a App) Runtime {
-	return Runtime{Stdout: a.Stdout, Stderr: a.Stderr, Clock: realClock{}, Exec: execCommandRunner{}}
+	return Runtime{Stdout: a.Stdout, Stderr: a.Stderr, Clock: realClock{}, Exec: execCommandRunner{}, SSHReady: a.sshReadinessWaiter}
 }
 
 const (
