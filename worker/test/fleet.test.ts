@@ -12025,6 +12025,81 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it.each(["success", "changed", "foreign lease", "readiness failure"])(
+    "preserves original AWS root disk through durable publication: %s",
+    async (outcome) => {
+      const storage = new MemoryStorage();
+      const leaseID = "cbx_abcdef123456";
+      const cloudID = "i-0123456789abcdef0";
+      const providerScope = "aws:account:123456789012";
+      const disk = {
+        leaseID,
+        instanceID: cloudID,
+        volumeID: "vol-0123456789abcdef0",
+        deviceName: "/dev/sda1",
+        region: "eu-west-1",
+        providerScope,
+      };
+      const fleet = testFleet(storage, {
+        aws: fakeProvider(undefined, {
+          provider: "aws",
+          cloudID,
+          region: "eu-west-1",
+          onPrepareLeaseCreate(config, lease) {
+            return { config, lease: { ...lease, providerScope }, provisioning: {} };
+          },
+          async onCreateProvisioning(provisioning) {
+            const claim = { provider: "aws" as const, cloudID, region: "eu-west-1", providerScope };
+            expect(await provisioning?.onResourceCreated?.(claim)).toBe(true);
+            expect(
+              await provisioning?.onResourceCreated?.({ ...claim, awsOriginalRootDisk: disk }),
+            ).toBe(true);
+            // Repeated observations must neither lose the binding nor enroll retention.
+            expect(await provisioning?.onResourceCreated?.(claim)).toBe(true);
+            expect(storage.value<LeaseRecord>("lease:" + leaseID)).toMatchObject({
+              state: "provisioning",
+              cloudID,
+              awsOriginalRootDisk: disk,
+            });
+            if (outcome === "changed" || outcome === "foreign lease") {
+              await provisioning?.onResourceCreated?.({
+                ...claim,
+                awsOriginalRootDisk: {
+                  ...disk,
+                  ...(outcome === "changed"
+                    ? { volumeID: "vol-fffffffffffffffff" }
+                    : { leaseID: "cbx_ffffffffffff" }),
+                },
+              });
+            }
+            if (outcome === "readiness failure") throw new Error("synthetic readiness failure");
+          },
+        }),
+      });
+      const response = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          body: {
+            leaseID,
+            provider: "aws",
+            target: "linux",
+            awsRegion: "eu-west-1",
+            sshPublicKey: "ssh-ed25519 test",
+          },
+        }),
+      );
+      expect(response.status).toBe(
+        outcome === "success" ? 201 : outcome === "readiness failure" ? 422 : 500,
+      );
+      const persisted = storage.value<LeaseRecord>("lease:" + leaseID)!;
+      expect(persisted.awsOriginalRootDisk).toEqual(disk);
+      expect(persisted.lifetimePolicy).toBeUndefined();
+      const conflict = outcome === "changed" || outcome === "foreign lease";
+      expect(persisted).toMatchObject(conflict ? { provisioningResourceMayExist: true } : {});
+      expect(persisted.cleanupCompletedAt).toBeUndefined();
+      expect(conflict && persisted.cleanupRetryAt !== undefined).toBe(false);
+    },
+  );
+
   it("publishes exact GCP fallback identity before the lease becomes active", async () => {
     const storage = new MemoryStorage();
     const leaseID = "cbx_abcdef123456";
@@ -60090,7 +60165,14 @@ describe("maximum lifetime safety net", () => {
     let instancePresent = true;
     const operation = stubAWSLeaseOperation({
       findServer: async (id) =>
-        instancePresent ? { ...ownedTestMachine("aws", id), status: "stopped" } : undefined,
+        instancePresent
+          ? {
+              ...ownedTestMachine("aws", id),
+              status: "stopped",
+              awsRootVolumeID: "vol-0123456789abcdef0",
+              awsRootDeviceName: "/dev/sda1",
+            }
+          : undefined,
       retainedVolumePresent: async () => instancePresent,
       checkRetainedStopPermission: async () => f.identity,
     });

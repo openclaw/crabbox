@@ -3,6 +3,7 @@ import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 import { AsyncMutex, KeyedAsyncMutex } from "./async-mutex";
 import { awsCleanupCompletionBlocker } from "./aws-cleanup-completion";
 import { AWSPoolAccess } from "./aws-pool-access";
+import { acquisitionRootDisk, sameAWSRootDisk, validAWSRootDiskIdentity } from "./aws-root-disk";
 import { AWSVPCCache } from "./aws-vpc-cache";
 import {
   coordinatorGCPFirewallCache,
@@ -3967,7 +3968,11 @@ export class FleetCoordinator {
   ): Promise<boolean> {
     const provider = managedLeaseProvider(reservation);
     const claim = provider && validateProviderProvisioningCleanupClaim(suppliedClaim, provider);
-    if (!claim || claim.providerScope !== reservation.providerScope) {
+    if (
+      !claim ||
+      claim.providerScope !== reservation.providerScope ||
+      (claim.awsOriginalRootDisk && claim.awsOriginalRootDisk.leaseID !== reservation.id)
+    ) {
       throw new ProviderResourceUnresolvedError(
         "provider create returned an invalid allocation claim",
       );
@@ -3996,6 +4001,15 @@ export class FleetCoordinator {
           `provider resource ${claim.cloudID} cannot be bound to the original lease incarnation`,
         );
       }
+      if (
+        current.awsOriginalRootDisk &&
+        claim.awsOriginalRootDisk &&
+        !sameAWSRootDisk(current.awsOriginalRootDisk, claim.awsOriginalRootDisk)
+      ) {
+        throw new ProviderResourceUnresolvedError(
+          "original AWS root disk changed during acquisition",
+        );
+      }
       const attempt = current.createAttemptID ? await this.getCreateAttempt(current.id) : undefined;
       if (current.createAttemptID && (!attempt || !createAttemptMatchesLease(attempt, current))) {
         throw new ProviderResourceUnresolvedError(
@@ -4009,6 +4023,7 @@ export class FleetCoordinator {
       // Rechecks must not reopen terminal cleanup; expired provisioning still needs its failed transition.
       if (
         current.cloudID === claim.cloudID &&
+        (!claim.awsOriginalRootDisk || Boolean(current.awsOriginalRootDisk)) &&
         (!claim.providerResourceID || current.providerResourceID === claim.providerResourceID) &&
         (continueReadiness || current.state !== "provisioning")
       ) {
@@ -4017,6 +4032,7 @@ export class FleetCoordinator {
       const lease = structuredClone(current);
       const now = new Date();
       lease.cloudID = claim.cloudID;
+      if (claim.awsOriginalRootDisk) lease.awsOriginalRootDisk = { ...claim.awsOriginalRootDisk };
       lease.serverID = claim.serverID ?? 0;
       if (claim.providerResourceID) {
         lease.providerResourceID = claim.providerResourceID;
@@ -27987,6 +28003,21 @@ function retainProvisioningCleanupClaim(
   error: string,
   failedAt: string,
 ): void {
+  if (claim.awsOriginalRootDisk) {
+    if (
+      claim.awsOriginalRootDisk.leaseID !== lease.id ||
+      (lease.awsOriginalRootDisk &&
+        !sameAWSRootDisk(lease.awsOriginalRootDisk, claim.awsOriginalRootDisk))
+    ) {
+      retainUnresolvedProviderResource(
+        lease,
+        "original AWS root disk conflicts with allocation claim",
+        failedAt,
+      );
+      return;
+    }
+    lease.awsOriginalRootDisk = { ...claim.awsOriginalRootDisk };
+  }
   const retainResource = lease.state === "released" && lease.releaseDeletesServer === false;
   lease.cloudID = claim.cloudID;
   lease.serverName = claim.cloudID;
@@ -28997,6 +29028,7 @@ export interface CloudProvider {
     instanceState: string;
     rootVolumeId: string;
     rootVolumePresent: boolean;
+    rootIdentityEvidence?: { eventID: string; eventTime: string };
   }>;
   releaseLease(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void>;
   deleteServer(id: string): Promise<void>;
@@ -31649,6 +31681,17 @@ export class AWSProvider implements CloudProvider {
             region,
             providerScope,
           };
+          const recordRootDisk = (observed: ProviderMachine) => {
+            const disk = acquisitionRootDisk(observed, leaseID, providerScope, region);
+            if (!disk) return;
+            if (claim.awsOriginalRootDisk && !sameAWSRootDisk(claim.awsOriginalRootDisk, disk)) {
+              throw new ProviderResourceUnresolvedError(
+                "original AWS root disk changed during acquisition",
+              );
+            }
+            claim.awsOriginalRootDisk = disk;
+          };
+          recordRootDisk(server);
           const onResourceCreated = provisioning.onResourceCreated;
           const publishResource = onResourceCreated
             ? async (readinessError?: unknown) => {
@@ -31680,6 +31723,8 @@ export class AWSProvider implements CloudProvider {
               config.awsPrivate,
               checkReadiness,
             );
+            recordRootDisk(readyServer);
+            await checkReadiness?.();
             if (config.capacityRequirements && readyServer.serverType !== serverType) {
               throw new Error(
                 "AWS resource requirement mismatch: ready instance type differs from the qualified request",
@@ -31881,6 +31926,7 @@ export class AWSProvider implements CloudProvider {
     instanceState: string;
     rootVolumeId: string;
     rootVolumePresent: boolean;
+    rootIdentityEvidence?: { eventID: string; eventTime: string };
   }> {
     return this.withLeaseOperation(async (session) => {
       if (!(await this.verifyLeaseOperationAuthority(lease, session)))
@@ -31893,17 +31939,56 @@ export class AWSProvider implements CloudProvider {
         () => session.findServer(lease.cloudID),
         "machine",
       );
-      const identity =
-        lease.lifetimePolicy?.retainedIdentity ??
-        lease.lifetimePolicy?.readiness?.identity ??
-        (server && server.status !== "terminated"
-          ? await session.retainedServerIdentity(lease.cloudID, lease.id)
-          : undefined);
-      if (!identity || !identity.startsWith(`${lease.cloudID}:`))
+      const disk = lease.awsOriginalRootDisk;
+      if (
+        disk &&
+        (!validAWSRootDiskIdentity(disk) ||
+          disk.leaseID !== lease.id ||
+          disk.instanceID !== lease.cloudID ||
+          disk.region !== lease.region ||
+          disk.providerScope !== lease.providerScope)
+      ) {
+        throw new ProviderResourceUnresolvedError(
+          "original AWS root disk binding does not match lease",
+        );
+      }
+      const recorded = [
+        disk ? [disk.instanceID, disk.volumeID, disk.deviceName].join(":") : undefined,
+        lease.lifetimePolicy?.retainedIdentity,
+        lease.lifetimePolicy?.readiness?.identity,
+      ].filter((value): value is string => value !== undefined);
+      let identity = recorded[0];
+      let rootIdentityEvidence: { eventID: string; eventTime: string } | undefined;
+      if (recorded.length === 0) {
+        const original = await session.client.originalRootDiskEvidence(
+          lease,
+          (await session.verifiedIdentity()).account,
+        );
+        identity = [
+          original.disk.instanceID,
+          original.disk.volumeID,
+          original.disk.deviceName,
+        ].join(":");
+        rootIdentityEvidence = { eventID: original.eventID, eventTime: original.eventTime };
+      }
+      if (!identity || !identity.startsWith(lease.cloudID + ":"))
         throw new ProviderResourceUnresolvedError(
           "lifetime readback requires the original root disk identity",
         );
+      if (recorded.some((value) => value !== identity))
+        throw new ProviderResourceUnresolvedError("original AWS root disk records conflict");
+      // A current mapping cannot establish the original identity. Resource
+      // presence does not prove remote process closure or artifact custody.
+      if (
+        server &&
+        server.status !== "terminated" &&
+        [server.cloudID, server.awsRootVolumeID, server.awsRootDeviceName].join(":") !== identity
+      )
+        throw new ProviderResourceUnresolvedError(
+          "current AWS root disk does not match original identity",
+        );
       return {
+        ...(rootIdentityEvidence ? { rootIdentityEvidence } : {}),
         instanceId: lease.cloudID,
         instanceState: server?.status ?? "terminated",
         rootVolumeId: identity.split(":")[1]!,
