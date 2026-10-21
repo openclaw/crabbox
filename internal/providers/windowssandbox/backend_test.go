@@ -128,6 +128,26 @@ func TestSandboxRunScriptQuotesCommandEnvAndKeepOnFailure(t *testing.T) {
 	}
 }
 
+func TestSandboxRunScriptQuotesTypographicSingleQuotes(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.WindowsSandbox.Workdir = `C:\work\repo`
+	script, err := sandboxRunScript(cfg, core.RunRequest{
+		Command: []string{"Write-Output", "Don\u2019t \u2018panic\u2019"},
+		Env:     map[string]string{"MSG": "a\u201a\u201bb"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"$env:MSG = 'a\u201a\u201a\u201b\u201bb'",
+		"& 'Write-Output' 'Don\u2019\u2019t \u2018\u2018panic\u2019\u2019'",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script missing %q:\n%s", want, script)
+		}
+	}
+}
+
 func TestHostRunnerScriptStopsActualSandboxProcessOnTimeout(t *testing.T) {
 	script := hostRunnerScript()
 	for _, want := range []string{
