@@ -23,6 +23,9 @@ func TestManagedWSLWorkerIdentity(t *testing.T) {
 			if test.target == targetWindows {
 				script = WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
 			}
+			if test.mode == windowsModeWSL2 {
+				script = decodedWSLBootstrapPowerShell(cfg)
+			}
 			steps := []string{
 				"useradd --create-home --user-group --shell /bin/bash crabbox",
 				"groupadd -f docker",
@@ -59,11 +62,19 @@ func TestManagedWSLWorkerIdentity(t *testing.T) {
 	}
 }
 
+// decodedWSLBootstrapPowerShell returns the WSL2 bootstrap with the embedded
+// Linux setup literal replaced by the text PowerShell writes to linux-setup.sh.
+func decodedWSLBootstrapPowerShell(cfg Config) string {
+	script := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+	linux := windowsWSL2LinuxSetup(windowsWSLWorkRoot(cfg))
+	return strings.Replace(script, psQuote(linux), linux, 1)
+}
+
 func wslBootstrapHereDoc(t *testing.T, marker string) string {
 	t.Helper()
 	cfg := baseConfig()
 	cfg.TargetOS, cfg.WindowsMode = targetWindows, windowsModeWSL2
-	script := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+	script := windowsWSL2LinuxSetup(windowsWSLWorkRoot(cfg))
 	_, body, ok := strings.Cut(script, "<<'"+marker+"'\n")
 	if !ok {
 		t.Fatalf("missing %s heredoc", marker)
