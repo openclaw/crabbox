@@ -807,6 +807,7 @@ func TestPartitionShardRunArgs(t *testing.T) {
 		wantErr string
 	}{
 		{name: "owned only stays local", args: []string{"--count", "3", "--from", "chk_1", "--fail-fast"}, wantOwn: "--count 3 --from chk_1 --fail-fast"},
+		{name: "capacity-wait stays local", args: []string{"--count", "2", "--from", "chk_1", "--capacity-wait", "30s", "--concurrency", "2"}, wantOwn: "--count 2 --from chk_1 --capacity-wait 30s --concurrency 2"},
 		{name: "provider stays local", args: []string{"--count", "2", "--from", "chk_1", "--provider", "local-container"}, wantOwn: "--count 2 --from chk_1 --provider local-container"},
 		{name: "registered flags forward to both", args: []string{"--count", "2", "--junit", "junit.xml"}, wantOwn: "--count 2 --junit junit.xml", wantRun: "--junit junit.xml"},
 		{name: "unknown flags forward to run", args: []string{"--count", "2", "--no-hydrate"}, wantOwn: "--count 2", wantRun: "--no-hydrate"},

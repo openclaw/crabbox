@@ -52,6 +52,7 @@ var shardOwnedOnlyFlags = map[string]bool{
 	"count":                 true,
 	"from":                  true,
 	"concurrency":           true,
+	"capacity-wait":         true,
 	"fail-fast":             true,
 	"keep":                  true,
 	"quiet":                 true,
