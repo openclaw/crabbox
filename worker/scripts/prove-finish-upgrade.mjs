@@ -5,6 +5,7 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 import { build } from "esbuild";
 import { Pool } from "pg";
@@ -408,6 +409,46 @@ const relevant = (rows) =>
   );
 const legacyRows = (rows) =>
   rows.filter((r) => [legacyLease, legacyID].some((id) => r.key.includes(id)));
+function legacyDifferenceReport(before, after) {
+  const prior = new Map(legacyRows(before).map((row) => [row.key, row]));
+  const current = new Map(legacyRows(after).map((row) => [row.key, row]));
+  const families = new Set(["lease", "run", "lease-maintenance", "lease-current"]);
+  const fields = [
+    "state", "updatedAt", "lastUsedAt", "expiresAt", "ttlSeconds", "idleTimeoutSeconds",
+    "workRoot", "keep", "lifetimePolicy", "attribution", "attributionVersion",
+    "eventCount", "terminalReceipt", "log", "logChunks", "logTruncated",
+  ];
+  const changes = [...new Set([...prior.keys(), ...current.keys()])]
+    .filter((key) => !isDeepStrictEqual(prior.get(key), current.get(key)))
+    .map((key) => {
+      const a = prior.get(key);
+      const b = current.get(key);
+      const family = key.split(":")[0];
+      return {
+        role: key.includes(legacyLease) ? "legacy-lease" : "legacy-run",
+        family: families.has(family) ? family : "other",
+        change: !a ? "added" : !b ? "removed" : "changed",
+        equal: Object.fromEntries(
+          ["value", "value_text", "updated_at", "value_text_updated_at"]
+            .map((field) => [field, isDeepStrictEqual(a?.[field], b?.[field])]),
+        ),
+        changedBusinessFields: fields.filter(
+          (field) => !isDeepStrictEqual(a?.value?.[field], b?.value?.[field]),
+        ),
+      };
+    });
+  const indexes = (rows) => Object.fromEntries(
+    ["lease-maintenance-state", "lease-current-state"].map((key) => {
+      const state = rows.find((row) => row.key === key)?.value;
+      return [key, {
+        present: state !== undefined,
+        versionValid: state?.version === 1,
+        complete: state?.complete === true,
+      }];
+    }),
+  );
+  return { changes, indexesBefore: indexes(before), indexesAfter: indexes(after) };
+}
 try {
   // Only an initialized-but-empty predecessor may continue after a transport
   // setup failure. Never replay a create or reset a database with business rows.
@@ -481,6 +522,7 @@ try {
   await cli("upgraded-recovery", pending);
   await stop();
   const committed = await snapshot("after-upgrade");
+  report.legacyDifferences = legacyDifferenceReport(before, committed);
   assert.deepEqual(legacyRows(committed), legacyRows(before));
   const terminal = record(committed, "run:" + pendingID);
   assert.equal(terminal.state, "succeeded");

@@ -146,6 +146,7 @@ jobs:
             status: report.status, candidate: report.candidate,
             assertions: report.assertions, requests: report.requests?.length,
             failure: report.failure,
+            legacyDifferences: report.legacyDifferences,
             lastRequest: report.requests?.at(-1) && {
               method: report.requests.at(-1).method, status: report.requests.at(-1).status
             },
