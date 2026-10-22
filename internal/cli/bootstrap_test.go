@@ -966,9 +966,9 @@ func TestManagedWindowsWSL2BootstrapInstallsNodeBeforeReadiness(t *testing.T) {
 				}
 				return
 			}
-			setupStart := strings.Index(script, "$linuxSetup = @'")
+			setupStart := strings.Index(script, "$linuxSetup = ")
 			installIndex := strings.Index(script, install)
-			readyIndex := strings.Index(script, "cat >/usr/local/bin/crabbox-ready <<'READY'")
+			readyIndex := strings.Index(script, "cat >/usr/local/bin/crabbox-ready <<")
 			if setupStart < 0 || installIndex <= setupStart || readyIndex <= installIndex {
 				t.Fatal("WSL distro must install the shared Node baseline before readiness")
 			}

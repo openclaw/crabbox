@@ -94,6 +94,10 @@ func TestSharedBootstrapFixtures(t *testing.T) {
 				}
 			}
 			for name, fragment := range fragments {
+				if cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeWSL2 && (name == "trufflehog" || name == "node") {
+					quoted := psQuote(fragment)
+					fragment = quoted[1 : len(quoted)-1]
+				}
 				if !strings.Contains(script, fragment) {
 					t.Errorf("missing shared %s fragment", name)
 				}

@@ -13,6 +13,7 @@ import {
   windowsBootstrapPowerShell,
 } from "../src/bootstrap";
 import {
+  psQuote,
   sharedLinuxBootstrapPrelude,
   sharedGnomeDesktopTheme,
   sharedWindowsRuntime,
@@ -137,7 +138,7 @@ describe("native Windows runtime readiness", () => {
       expect(script).toContain("Restart-Service sshd -Force");
     }
     expect(shared).toContain(sharedWindowsNativePrelude());
-    expect(shared).toContain(sharedWslTruffleHogInstall());
+    expect(shared).toContain(psQuote(sharedWslTruffleHogInstall()).slice(1, -1));
     expect(shared.indexOf('$wslDistro = "Crabbox"')).toBeGreaterThan(
       shared.indexOf(sharedWindowsCore()) + sharedWindowsCore().length,
     );
@@ -983,7 +984,8 @@ describe("cloud-init bootstrap", () => {
       windowsMode: "wsl2",
       workRoot: "/work/crabbox",
     } as const;
-    const got = windowsBootstrapPowerShell(input);
+    // Inspect the embedded shell text after unescaping its PowerShell literal.
+    const got = windowsBootstrapPowerShell(input).replaceAll("''", "'");
     expect(got).toContain("$workRoot = 'C:\\crabbox'");
     expect(got).toContain("C:\\ProgramData\\crabbox\\windows.password");
     expect(got).toContain("Microsoft-Windows-Subsystem-Linux");
@@ -1015,8 +1017,8 @@ describe("cloud-init bootstrap", () => {
     const nodeInstall = got.indexOf(
       "bash /var/lib/crabbox/install-linux-developer-tools.sh --node-only",
     );
-    const readyScript = got.indexOf("cat >/usr/local/bin/crabbox-ready <<'READY'");
-    expect(nodeInstall).toBeGreaterThan(got.indexOf("$linuxSetup = @'"));
+    const readyScript = got.indexOf("cat >/usr/local/bin/crabbox-ready <<");
+    expect(nodeInstall).toBeGreaterThan(got.indexOf("$linuxSetup = "));
     expect(readyScript).toBeGreaterThan(nodeInstall);
     expect(got.slice(readyScript)).toContain("node --version >/dev/null");
     expect(got.slice(readyScript)).toContain("npm --version >/dev/null");
@@ -1108,4 +1110,49 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("node --version >/dev/null");
     expect(got).toContain("npm --version >/dev/null");
   });
+});
+
+it("keeps WSL here-string terminators inside work roots as data", (context) => {
+  if (
+    spawnSync("pwsh", ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"]).status !==
+    0
+  ) {
+    context.skip();
+  }
+  const workRoot = "/work/‘’‚‛“”„$(`n)\n'@\nthrow 'injected'\n@'\n’@\nthrow 'injected'\n@‘\nend";
+  const source = windowsBootstrapPowerShell({
+    ...config,
+    target: "windows",
+    windowsMode: "wsl2",
+    workRoot,
+  });
+  const directory = mkdtempSync(join(tmpdir(), "crabbox-wsl-quotes-"));
+  try {
+    const file = join(directory, "bootstrap.ps1");
+    writeFileSync(file, "\ufeff" + source);
+    const result = spawnSync(
+      "pwsh",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `
+      $tokens=$null; $errors=$null
+      $ast=[System.Management.Automation.Language.Parser]::ParseFile(${psQuote(file)},[ref]$tokens,[ref]$errors)
+      if ($errors.Count) { throw ($errors | Out-String) }
+      $node=$ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$linuxSetup' },$true)
+      $literal=$node.Right.Expression
+      if ($literal -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { throw 'WSL setup must be a constant string' }
+      [Console]::Out.Write($literal.Value)
+    `,
+      ],
+      { encoding: "utf8", timeout: 30000 },
+    );
+    expect(result.status).toBe(0);
+    const quotedRoot = "'" + workRoot.replaceAll("'", "'\\''") + "'";
+    expect(result.stdout).toContain("mkdir -p " + quotedRoot);
+    expect(result.stdout).toContain("test -w " + quotedRoot);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
