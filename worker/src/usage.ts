@@ -170,10 +170,7 @@ export function createCostLimitUsage(
   };
 }
 
-export function addLeaseToActiveLimitUsage(
-  usage: CostLimitUsage,
-  lease: LeaseRecord,
-): void {
+export function addLeaseToActiveLimitUsage(usage: CostLimitUsage, lease: LeaseRecord): void {
   if (isRegisteredLease(lease)) {
     return;
   }
