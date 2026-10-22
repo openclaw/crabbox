@@ -89,12 +89,15 @@ leases owned by someone else do not count toward the owner dimension, but do
 count toward the fleet and, where applicable, org dimensions. Direct-only leases
 absent from the coordinator do not count.
 
-This read-only snapshot uses a storage transaction on Cloudflare and Node without
-holding the lifecycle mutex. It reads the maintained lease index instead of
+This read-only snapshot does not hold the lifecycle mutex. Node uses a storage
+transaction. Cloudflare permits concurrent events during its reads and rejects
+the snapshot if any storage write overlaps, without holding the input gate for
+the scan. It reads the maintained lease index instead of
 scanning retained history or calculating monthly spend. Before the current
 runtime finishes index backfill or audit, only a store with at most 128 lease
 records can use the bounded historical fallback. A larger unindexed store or
-a snapshot exceeding 4,096 lease-index and reservation entries returns
+a snapshot exceeding 4,096 lease-index and reservation entries, or a concurrent
+Cloudflare write returns
 retryable HTTP 503 `capacity_unavailable`, never a partial count. Each index or
 reservation page contains at most 128 entries.
 

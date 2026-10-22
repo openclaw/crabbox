@@ -16499,14 +16499,17 @@ export class FleetCoordinator {
     const now = new Date();
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
-    const costUsage = await this.state.storage.transaction((storage) =>
-      this.capacityUsage(storage, { owner, org }, now),
-    );
+    const read = (storage: CoordinatorStorageView) =>
+      this.capacityUsage(storage, { owner, org }, now);
+    const costUsage = this.state.readSnapshot
+      ? await this.state.readSnapshot(read)
+      : await this.state.storage.transaction(read);
     if (!costUsage) {
       return json(
         {
           error: "capacity_unavailable",
-          message: "capacity snapshot exceeds its read bound or lease indexing is incomplete",
+          message:
+            "capacity snapshot changed, exceeds its read bound, or lease indexing is incomplete",
           retryable: true,
         },
         { status: 503, headers: { "retry-after": "2" } },
@@ -16543,6 +16546,7 @@ export class FleetCoordinator {
     let records = 0;
     const state = await storage.get<LeaseMaintenanceState>(leaseMaintenanceIndex.stateKey, {
       noCache: true,
+      allowConcurrency: true,
     });
     const indexed =
       leaseMaintenanceIndexReady(state) &&
@@ -16554,12 +16558,12 @@ export class FleetCoordinator {
         prefix: leaseMaintenanceIndex.prefix,
         limit: storageRecordScanBatchSize,
         noCache: true,
+        allowConcurrency: true,
       })) {
         if (++records > recordLimit) return undefined;
-        // oxlint-disable-next-line eslint/no-await-in-loop -- bounded hydration stays in the same storage snapshot.
         const lease = await storage.get<LeaseRecord>(
           leaseKey(key.slice(leaseMaintenanceIndex.prefix.length)),
-          { noCache: true },
+          { noCache: true, allowConcurrency: true },
         );
         if (lease) leases.set(lease.id, lease);
       }
@@ -16570,6 +16574,7 @@ export class FleetCoordinator {
         prefix: "lease:",
         limit: storageRecordScanBatchSize + 1,
         noCache: true,
+        allowConcurrency: true,
       });
       if (page.size > storageRecordScanBatchSize) return undefined;
       records = page.size;
@@ -16579,6 +16584,7 @@ export class FleetCoordinator {
       prefix: providerAccessPrefix(),
       limit: storageRecordScanBatchSize,
       noCache: true,
+      allowConcurrency: true,
     })) {
       if (++records > recordLimit) return undefined;
       this.applyCurrentLeasePolicy(lease);

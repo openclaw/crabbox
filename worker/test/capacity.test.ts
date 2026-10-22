@@ -53,9 +53,21 @@ type StorageMutation =
 
 class CapacityStorage extends ProvisioningTestStorage {
   readonly mutations: StorageMutation[] = [];
-  beforeList?: (options: { prefix?: string; startAfter?: string }) => Promise<void>;
+  readonly reads: Array<{ noCache?: boolean; allowConcurrency?: boolean } | undefined> = [];
+  beforeList?: (options: {
+    prefix?: string;
+    startAfter?: string;
+    allowConcurrency?: boolean;
+  }) => Promise<void>;
   initialize = vi.fn<() => Promise<void>>(async () => {});
   close = vi.fn<() => Promise<void>>(async () => {});
+  override get<T>(
+    key: string,
+    options?: { noCache?: boolean; allowConcurrency?: boolean },
+  ): Promise<T | undefined> {
+    this.reads.push(options);
+    return super.get<T>(key);
+  }
   override list = vi.fn<
     <T>(options?: {
       prefix?: string;
@@ -76,9 +88,9 @@ class CapacityStorage extends ProvisioningTestStorage {
       // Observe transaction-local effects too; the shared fixture still owns commit/rollback.
       const { put, delete: remove, setAlarm, deleteAlarm } = transaction;
       const list = transaction.list.bind(transaction);
-      transaction.list = async <T>(options?: Parameters<CapacityTransaction["list"]>[0]) => {
+      transaction.list = async <Value>(options?: Parameters<CapacityTransaction["list"]>[0]) => {
         await this.beforeList?.(options ?? {});
-        return list<T>(options);
+        return list<Value>(options);
       };
       transaction.put = async (key, value) => {
         this.mutations.push({ kind: "put", key });
@@ -609,7 +621,7 @@ for (const kind of ["cloudflare", "node"] as const) {
         retryable: true,
       });
       expect(f.storage.listOptions.slice(start)).toEqual([
-        { prefix: "lease:", limit: 129, noCache: true },
+        { prefix: "lease:", limit: 129, noCache: true, allowConcurrency: true },
       ]);
       f.readonly();
     });
@@ -627,8 +639,10 @@ for (const kind of ["cloudflare", "node"] as const) {
       f.storage.beforeGet = async (key) => {
         reads.push(key);
       };
-      for (let i = 0; i < 3; i++)
+      for (let i = 0; i < 3; i++) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- prove successive snapshots, not concurrent requests.
         expect(await (await f.fetch()).json()).toMatchObject({ activeLeases: 1 });
+      }
       expect(f.storage.listOptions.slice(start).map((options) => options?.prefix)).toEqual(
         Array.from({ length: 3 }, () => [leaseMaintenanceIndex.prefix, "provider-access:"]).flat(),
       );
@@ -687,6 +701,8 @@ for (const kind of ["cloudflare", "node"] as const) {
 
     it("leaves the lifecycle mutex available while a capacity read awaits storage", async () => {
       const f = await fixture(kind);
+      const transactions = vi.spyOn(f.storage, "transaction");
+      const readStart = f.storage.reads.length;
       let entered!: () => void;
       let release!: () => void;
       const started = new Promise<void>((resolve) => {
@@ -695,12 +711,20 @@ for (const kind of ["cloudflare", "node"] as const) {
       const gate = new Promise<void>((resolve) => {
         release = resolve;
       });
-      f.storage.beforeList = async () => {
+      f.storage.beforeList = async (options) => {
+        expect(options.allowConcurrency).toBe(true);
         entered();
         await gate;
       };
       const snapshot = f.fetch();
       await started;
+      if (kind === "cloudflare") {
+        // A native transaction closes the input gate even when its reads opt out.
+        expect(transactions).not.toHaveBeenCalled();
+        expect(f.storage.reads.slice(readStart)).toEqual([
+          { noCache: true, allowConcurrency: true },
+        ]);
+      }
       let timer!: ReturnType<typeof setTimeout>;
       try {
         const outcome = await Promise.race([
