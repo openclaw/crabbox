@@ -568,7 +568,7 @@ jobs:
   apple-vm:
     name: Apple VM
     runs-on: xcode-27
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - name: Check out

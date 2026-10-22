@@ -138,9 +138,12 @@ func TestAgentRestartReconcilesDuringSlowImagePreparation(t *testing.T) {
 	if err := saved.save(); err != nil {
 		t.Fatal(err)
 	}
+	cfg := core.Config{Coordinator: server.URL, CoordToken: "synthetic", LocalContainer: core.LocalContainerConfig{Runtime: "docker", Image: l.Image}}
+	// This runtime mock implements Docker even on hosts with only Podman.
+	core.MarkLocalContainerRuntimeExplicit(&cfg)
 	done := make(chan error, 1)
 	go func() {
-		done <- (Provider{}).RunAgent(ctx, core.Config{Coordinator: server.URL, CoordToken: "synthetic", LocalContainer: core.LocalContainerConfig{Runtime: "docker", Image: l.Image}}, core.Runtime{Exec: f, Stdout: io.Discard, Stderr: io.Discard}, []string{"--state-dir", dir, "--memory", "2g", "--cpus", "2", "--advertise-address", candidates[0].Address, "--no-cache-volumes", "--poll-interval", "500ms"})
+		done <- (Provider{}).RunAgent(ctx, cfg, core.Runtime{Exec: f, Stdout: io.Discard, Stderr: io.Discard}, []string{"--state-dir", dir, "--memory", "2g", "--cpus", "2", "--advertise-address", candidates[0].Address, "--no-cache-volumes", "--poll-interval", "500ms"})
 	}()
 	defer func() {
 		cancel()

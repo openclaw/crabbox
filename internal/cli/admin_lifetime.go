@@ -10,15 +10,21 @@ import (
 	"time"
 )
 
+type CoordinatorRootIdentityEvidence struct {
+	EventID   string `json:"eventID"`
+	EventTime string `json:"eventTime"`
+}
+
 type CoordinatorLifetimeReadback struct {
-	LeaseID           string `json:"leaseId"`
-	Provider          string `json:"provider"`
-	Region            string `json:"region"`
-	InstanceID        string `json:"instanceId"`
-	InstanceState     string `json:"instanceState"`
-	RootVolumeID      string `json:"rootVolumeId"`
-	RootVolumePresent *bool  `json:"rootVolumePresent,omitempty"`
-	ObservedAt        string `json:"observedAt"`
+	LeaseID              string                           `json:"leaseId"`
+	Provider             string                           `json:"provider"`
+	Region               string                           `json:"region"`
+	InstanceID           string                           `json:"instanceId"`
+	InstanceState        string                           `json:"instanceState"`
+	RootVolumeID         string                           `json:"rootVolumeId"`
+	RootVolumePresent    *bool                            `json:"rootVolumePresent,omitempty"`
+	RootIdentityEvidence *CoordinatorRootIdentityEvidence `json:"rootIdentityEvidence,omitempty"`
+	ObservedAt           string                           `json:"observedAt"`
 }
 
 func (c *CoordinatorClient) AdminExtendLifetime(ctx context.Context, id, owner, reason, expiresAt string) (CoordinatorLease, error) {

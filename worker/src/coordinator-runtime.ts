@@ -92,9 +92,13 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   }
   if (
     method === "GET" &&
-    ["v1/whoami", "v1/leases", "v1/admin/leases", "v1/admin/retained-reconcile"].includes(
-      path.join("/"),
-    )
+    [
+      "v1/whoami",
+      "v1/capacity",
+      "v1/leases",
+      "v1/admin/leases",
+      "v1/admin/retained-reconcile",
+    ].includes(path.join("/"))
   ) {
     return "direct";
   }
@@ -290,6 +294,9 @@ export interface CoordinatorRuntime {
   readonly storage: CoordinatorStorage;
   readonly ephemeralWebSocketMaxPayloadBytes: number;
   runExclusive<T>(callback: () => Promise<T>): Promise<T>;
+  readSnapshot?<T>(
+    callback: (storage: CoordinatorStorageView) => Promise<T>,
+  ): Promise<T | undefined>;
   createWebSocketUpgrade(options?: CoordinatorWebSocketUpgradeOptions): CoordinatorWebSocketUpgrade;
   getWebSockets(): Iterable<WebSocket>;
   socketAttachment<T>(socket: WebSocket): T | undefined;
@@ -314,13 +321,67 @@ export interface CoordinatorRuntime {
 
 export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
   readonly provisioning: ProvisioningRuntime = this;
-  readonly storage: CoordinatorStorage;
+  readonly storage: DurableObjectStorage;
   readonly ephemeralWebSocketMaxPayloadBytes = 32 * 1024 * 1024;
   private readonly attachments = new WeakMap<WebSocket, unknown>();
   private readonly exclusive = new AsyncMutex();
+  private storageRevision = 0;
+  private pendingStorageWrites = 0;
 
   constructor(private readonly state: DurableObjectState) {
-    this.storage = state.storage;
+    const mutations = new Set<PropertyKey>([
+      "put",
+      "delete",
+      "deleteAll",
+      "setAlarm",
+      "deleteAlarm",
+      "transaction",
+    ]);
+    this.storage = new Proxy(state.storage, {
+      get: (target, key) => {
+        const value: unknown = Reflect.get(target, key, target);
+        if (typeof value !== "function") return value;
+        if (key === "transactionSync") {
+          return (...args: unknown[]) => {
+            this.storageRevision++;
+            try {
+              return Reflect.apply(value, target, args);
+            } finally {
+              this.storageRevision++;
+            }
+          };
+        }
+        if (mutations.has(key)) {
+          return (...args: unknown[]) =>
+            this.observeStorageWrite(() => Reflect.apply(value, target, args));
+        }
+        return value.bind(target);
+      },
+    });
+  }
+
+  private async observeStorageWrite<T>(operation: () => Promise<T>): Promise<T> {
+    this.storageRevision++;
+    this.pendingStorageWrites++;
+    try {
+      return await operation();
+    } finally {
+      this.pendingStorageWrites--;
+      this.storageRevision++;
+    }
+  }
+
+  async readSnapshot<T>(
+    callback: (storage: CoordinatorStorageView) => Promise<T>,
+  ): Promise<T | undefined> {
+    // Native async transactions close the DO input gate for the whole callback.
+    // Concurrent diagnostic reads instead fail closed if any write overlaps.
+    if (this.pendingStorageWrites > 0) return undefined;
+    const revision = this.storageRevision;
+    const result = await callback(this.storage);
+    return this.pendingStorageWrites === 0 && revision === this.storageRevision
+      ? result
+      : undefined;
   }
 
   runExclusive<T>(callback: () => Promise<T>): Promise<T> {
@@ -392,11 +453,11 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
   }
 
   async getAlarm(): Promise<number | undefined> {
-    return (await this.state.storage.getAlarm()) ?? undefined;
+    return (await this.storage.getAlarm()) ?? undefined;
   }
 
   take<T>(key: string): Promise<T | undefined> {
-    return this.state.storage.transaction(async (transaction) => {
+    return this.storage.transaction(async (transaction) => {
       const value = await transaction.get<T>(key);
       if (value !== undefined) {
         await transaction.delete(key);
@@ -408,7 +469,7 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
   async commitAndWake<T>(
     callback: (transaction: CoordinatorStorageView) => Promise<T>,
   ): Promise<T> {
-    return this.state.storage.transaction(async (transaction) => {
+    return this.storage.transaction(async (transaction) => {
       const currentAlarm = await transaction.getAlarm();
       if ((await transaction.get(legacyAlarmKey)) === undefined) {
         if (currentAlarm !== null) await transaction.put(legacyAlarmKey, currentAlarm);

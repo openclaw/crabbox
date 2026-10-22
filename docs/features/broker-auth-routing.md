@@ -233,9 +233,13 @@ Access, and local identity headers from being replayed to a different origin.
 
 For coordinators behind an upstream identity proxy that consumes the `Authorization` header,
 set `CRABBOX_COORDINATOR_TOKEN_COMMAND` to a JSON argv array. Crabbox executes it directly,
-without a shell, before each HTTP request and WebSocket reconnect. The command must print one
-bearer token line and takes precedence over `CRABBOX_COORDINATOR_TOKEN`. The proxy must inject a
-trusted identity header accepted by the coordinator after validating that token.
+without a shell, before ordinary HTTP requests and WebSocket reconnects. Replay-safe run
+admission pins its credentials across retries. Terminal finalization refreshes once, verifies
+the original owner and organization, then pins the fresh credentials through submission and
+readback. [Explicit finish recovery](../commands/receipt.md) also pins one verified identity
+for its sequence. The command must print one bearer token line and takes precedence over
+`CRABBOX_COORDINATOR_TOKEN`. The proxy must inject a trusted identity header accepted by the
+coordinator after validating that token.
 
 ```bash
 export CRABBOX_COORDINATOR_TOKEN_COMMAND='["identity-cli","token","--audience","coordinator"]'

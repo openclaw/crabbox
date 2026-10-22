@@ -14,6 +14,10 @@ export default defineConfig({
     environment: "node",
     globals: false,
     // The real-store proof runs separately against its job-local PostgreSQL service.
-    exclude: [...configDefaults.exclude, "test/aws-cleanup-recovery.postgres.test.ts"],
+    exclude: [
+      ...configDefaults.exclude,
+      "test/aws-cleanup-recovery.postgres.test.ts",
+      "test/original-finish.postgres.test.ts",
+    ],
   },
 });

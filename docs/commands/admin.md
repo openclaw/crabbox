@@ -87,6 +87,14 @@ crabbox admin lifetime-readback --id cbx_abcdef123456 --json
 deletion. The coordinator verifies recorded ownership and resource identity
 before reporting provider state. This operation is admin-only and read-only.
 
+When the coordinator resolves the original root identity from a matching
+provider allocation event, JSON also contains `rootIdentityEvidence` with only
+the original `eventID` and `eventTime`. The field is omitted when no such evidence
+is returned; the CLI does not infer or create it. Raw provider event payloads
+are not included. This provenance is not proof of remote child termination,
+private artifact custody, or a trial score. Those require their own original
+records and verification.
+
 ## lease-audit
 
 Check coordinator lease records against the backing cloud provider. The audit currently reconciles AWS and Azure leases and reports, for each matching lease, whether its `cloudID` is still `found`, `missing`, or could not be checked (`error`). Each line also surfaces cleanup attempt counts and errors recorded by the broker's expiry sweep.

@@ -606,6 +606,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				fmt.Fprintf(a.Stderr, "benchmark timing record appended path=%s observations=1\n", timingRecordPath)
 			}
 		}
+		timingJSONWritten := false
 		if hasReport && *timingJSON {
 			if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil {
 				timingErr := Exit(7, "write timing JSON: %v", writeErr)
@@ -614,10 +615,24 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				if prepareTerminalRun != nil {
 					prepareTerminalRun()
 				}
+			} else {
+				timingJSONWritten = true
 			}
 		}
 		if finalizeTerminalRun != nil {
 			finalizeTerminalRun()
+		}
+		if cleanupErr := recorder.pendingFinishCleanupErr; cleanupErr != nil {
+			fmt.Fprintf(a.Stderr, "terminal committed; pending finish cleanup failed: %s\n", recorder.redactDiagnostic(cleanupErr.Error()))
+			if timingJSONWritten {
+				// The first timing write must precede terminal commit so a sink
+				// failure remains part of the original receipt. A late cleanup
+				// warning needs the same frozen report again as the final line,
+				// not another observation, signature, or terminal submission.
+				if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil {
+					err = errors.Join(err, Exit(7, "write final timing JSON after pending finish cleanup diagnostic: %v", writeErr))
+				}
+			}
 		}
 		recorder.Failed(runFailure)
 		if observation != nil {
@@ -3274,7 +3289,6 @@ afterSync:
 		if preparedTerminalReceiptFile == nil {
 			return
 		}
-		localReceiptPersisted := attestPath == ""
 		if attestPath != "" {
 			artifact, writeErr := persistPreparedRunReceipt(*preparedTerminalReceiptFile)
 			if writeErr != nil {
@@ -3285,33 +3299,14 @@ afterSync:
 					return
 				}
 			} else {
-				localReceiptPersisted = true
 				fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
 			}
 		}
 		if finishErr := recorder.Finish(ctx, target, preparedTerminalReceipt.ExitCode, timings.sync, timings.command, terminalLog.Log, terminalLog.Truncated, results, classification, &preparedTerminalReceipt); finishErr != nil {
 			err = errors.Join(err, finishErr)
 			recordRunFailure(&runFailure, finishErr)
-			if localReceiptPersisted && attestPath != "" && preparedTerminalReceipt.ExitCode == 0 {
-				// The coordinator commit is now ambiguous. Preserve the exact receipt
-				// sent remotely, but make the local CLI failure impossible to miss.
-				failedReceipt, receiptErr := buildTerminalReceipt(ExitCodeForError(finishErr, 7))
-				if receiptErr != nil {
-					err = errors.Join(err, receiptErr)
-					recordRunFailure(&runFailure, receiptErr)
-				} else {
-					failedPrepared, prepareErr := prepareTerminalRunReceipt(attestPath, failedReceipt)
-					if prepareErr != nil {
-						err = errors.Join(err, prepareErr)
-						recordRunFailure(&runFailure, prepareErr)
-					} else if artifact, writeErr := persistPreparedRunReceipt(failedPrepared); writeErr != nil {
-						err = errors.Join(err, writeErr)
-						recordRunFailure(&runFailure, writeErr)
-					} else {
-						fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
-					}
-				}
-			}
+			// A transport failure is not a different task result. Keep --attest and
+			// the pending outbox's original signature; report CLI failure separately.
 			if a.runOutcome != nil {
 				a.runOutcome.Recorded = false
 			}

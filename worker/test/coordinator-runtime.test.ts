@@ -758,6 +758,104 @@ describe("coordinator runtimes", () => {
     await expect(runtime.getAlarm()).resolves.toBeUndefined();
   });
 
+  it.each(["put", "delete", "transaction", "take", "commitAndWake", "rollback"] as const)(
+    "rejects a concurrent Cloudflare diagnostic snapshot after %s",
+    async (mutation) => {
+      const storage = new ProvisioningTestStorage();
+      const runtime = new CloudflareCoordinatorRuntime({
+        storage,
+      } as unknown as DurableObjectState);
+      await runtime.storage.put("lease:one", { state: "active" });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const snapshot = runtime.readSnapshot(async (view) => {
+        const value = await view.get("lease:one", { allowConcurrency: true });
+        entered();
+        await gate;
+        return value;
+      });
+      await started;
+      let failure: unknown;
+      try {
+        if (mutation === "put") await runtime.storage.put("lease:one", { state: "released" });
+        if (mutation === "delete") await runtime.storage.delete("lease:one");
+        if (mutation === "take") await runtime.take("lease:one");
+        if (mutation === "transaction") {
+          await runtime.storage.transaction((view) => view.delete("lease:one"));
+        }
+        if (mutation === "commitAndWake") {
+          await runtime.commitAndWake((view) => view.delete("lease:one"));
+        }
+        if (mutation === "rollback") {
+          await runtime.storage
+            .transaction(async (view) => {
+              await view.delete("lease:one");
+              throw new Error("rollback");
+            })
+            .catch((error) => {
+              failure = error;
+            });
+        }
+      } finally {
+        release();
+      }
+      expect(failure).toEqual(mutation === "rollback" ? new Error("rollback") : undefined);
+      await expect(snapshot).resolves.toBeUndefined();
+      await expect(runtime.readSnapshot(async () => "stable")).resolves.toBe("stable");
+    },
+  );
+
+  it("refuses snapshots while a Cloudflare write is pending and preserves native binding", async () => {
+    const storage = new ProvisioningTestStorage();
+    const runtime = new CloudflareCoordinatorRuntime({ storage } as unknown as DurableObjectState);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const writer = runtime.storage.transaction(async (view) => {
+      await gate;
+      await view.put("lease:one", { state: "active" });
+    });
+    const read = vi.fn<() => Promise<string>>(async () => "unsafe");
+    try {
+      await expect(runtime.readSnapshot(read)).resolves.toBeUndefined();
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      release();
+    }
+    await writer;
+    await expect(
+      runtime.readSnapshot((view) => view.get("lease:one", { allowConcurrency: true })),
+    ).resolves.toEqual({ state: "active" });
+  });
+
+  it("preserves synchronous transaction results and observes their writes", async () => {
+    const storage = {
+      value: 0,
+      transactionSync<T>(callback: () => T): T {
+        this.value++;
+        return callback();
+      },
+    };
+    const runtime = new CloudflareCoordinatorRuntime({ storage } as unknown as DurableObjectState);
+    const snapshot = runtime.readSnapshot(async () => "before");
+    expect(runtime.storage.transactionSync(() => 42)).toBe(42);
+    expect(storage.value).toBe(1);
+    await expect(snapshot).resolves.toBeUndefined();
+    expect(() =>
+      runtime.storage.transactionSync(() => {
+        throw new Error("sync rollback");
+      }),
+    ).toThrow("sync rollback");
+    await expect(runtime.readSnapshot(async () => "after")).resolves.toBe("after");
+  });
+
   it("atomically commits durable due work and alarms across rollback and concurrent clear", async () => {
     const storage = new ProvisioningTestStorage();
     const runtime = new CloudflareCoordinatorRuntime({ storage } as unknown as DurableObjectState);
