@@ -67,6 +67,26 @@ type hypervVM struct {
 	ID    string `json:"Id,omitempty"`
 }
 
+const (
+	defaultGuestReadyBudget = 10 * time.Minute
+	maxGuestReadyBudget     = 60 * time.Minute
+)
+
+// guestReadyBudgetFromEnv returns the PowerShell Direct readiness budget. A cold
+// Windows differencing clone (especially with desktop auto-logon, or a busy host)
+// can take longer than the former fixed five minutes to accept its first login.
+func guestReadyBudgetFromEnv(getenv func(string) string) time.Duration {
+	raw := strings.TrimSpace(getenv("CRABBOX_HYPERV_GUEST_READY_BUDGET"))
+	if raw == "" {
+		return defaultGuestReadyBudget
+	}
+	budget, err := time.ParseDuration(raw)
+	if err != nil || budget < time.Minute || budget > maxGuestReadyBudget {
+		return defaultGuestReadyBudget
+	}
+	return budget
+}
+
 func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	applyDefaults(&cfg)
 	b := &backend{
@@ -74,7 +94,7 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 		cfg:                    cfg,
 		rt:                     rt,
 		guestReadyProbeTimeout: 45 * time.Second,
-		guestReadyBudget:       5 * time.Minute,
+		guestReadyBudget:       guestReadyBudgetFromEnv(os.Getenv),
 		guestInvokeTimeout:     10 * time.Minute,
 		guestRetryBackoff:      3 * time.Second,
 		resumeSSHProbeTimeout:  10 * time.Second,
