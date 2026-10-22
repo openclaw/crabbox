@@ -31,7 +31,7 @@ func startActionsLeaseHeartbeat(
 	if touchBackend, ok := backend.(LeaseTouchBackend); ok {
 		return startDirectLeaseHeartbeat(
 			ctx,
-			touchBackend,
+			guestExpiryHeartbeatBackend{LeaseTouchBackend: touchBackend, cfg: cfg},
 			lease,
 			expectedClaim,
 			cancelOperation,
@@ -41,6 +41,17 @@ func startActionsLeaseHeartbeat(
 		), nil
 	}
 	return func() {}, nil
+}
+
+// guestExpiryHeartbeatBackend routes heartbeat touches through the shared touch
+// owner so file-backed guest expiry guards advance with the lease.
+type guestExpiryHeartbeatBackend struct {
+	LeaseTouchBackend
+	cfg Config
+}
+
+func (b guestExpiryHeartbeatBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
+	return touchLeaseWithGuestExpiry(ctx, b.LeaseTouchBackend, b.cfg, req)
 }
 
 func startDirectLeaseHeartbeat(
