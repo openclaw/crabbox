@@ -1,0 +1,151 @@
+name: Original Finish Qualification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [test/original-finish-qualification-20261022]
+
+permissions:
+  contents: read
+
+env:
+  GOFLAGS: -mod=readonly -trimpath
+  GOTOOLCHAIN: local
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: "1.27.3"
+          cache: true
+      - name: Exercise native pending-file ACL and exact-byte recovery
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP "finish-windows.jsonl"
+          go test -json -timeout=8m ./internal/cli -run '^Test(PendingFinish|ReceiptRecover)' -count=1 | Tee-Object -FilePath $output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $events = Get-Content $output | ForEach-Object { $_ | ConvertFrom-Json }
+          foreach ($name in @(
+            "TestPendingFinishSchemaOneStoredCompatibility",
+            "TestPendingFinishRejectsPublicWindowsACLWithoutRepair",
+            "TestPendingFinishRetentionIsPrivateAndNoClobber",
+            "TestPendingFinishRecoveryPreservesBytesAndIsIdempotent"
+          )) {
+            if (-not ($events | Where-Object { $_.Test -eq $name -and $_.Action -eq "pass" })) {
+              throw "Required native test did not pass: $name"
+            }
+          }
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: "1.27.3"
+          cache: true
+      - name: Install rootless fixture tooling
+        run: sudo apt-get update && sudo apt-get install -y podman uidmap slirp4netns
+      - name: Qualify recovery authority, upgrade, restart and fresh storage
+        shell: bash
+        env:
+          PG_IMAGE: docker.io/library/postgres:17-bookworm@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0
+        run: |
+          set -euo pipefail
+          umask 077
+          export PROOF_DIR CANDIDATE
+          PROOF_DIR=$(mktemp -d "$RUNNER_TEMP/finish-proof.XXXXXX")
+          CANDIDATE=$(git rev-parse HEAD)
+          mkdir "$PROOF_DIR/old" "$PROOF_DIR/auth" "$PROOF_DIR/upgrade"
+          old=$(node -p 'JSON.parse(require("fs").readFileSync("release/records/v0.79.1.json")).sourceCommit')
+          test "$old" = 74fe694e6783664afbb718985a5337d10fb440c1
+          git archive "$old" | tar -x -C "$PROOF_DIR/old"
+          npm ci --prefix worker
+          npm ci --prefix "$PROOF_DIR/old/worker"
+          go build -trimpath -o "$PROOF_DIR/crabbox" ./cmd/crabbox
+          (
+            cd "$PROOF_DIR/old"
+            go build -trimpath -buildvcs=false -o "$PROOF_DIR/crabbox-old" ./cmd/crabbox
+          )
+          go test -race -p 2 -timeout=8m ./internal/cli -run '^(TestPendingFinish|TestReceiptCommandImportsOriginalFinish|TestRunRecorder(RetainsOriginal|DoesNotPostWhenRetentionFails|Finish)|TestRunCommandPendingFinishCleanupDiagnostic)' -count=1
+          test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+          pg=$(podman run --detach --publish 127.0.0.1::5432 \
+            --env POSTGRES_USER=crabbox_test --env POSTGRES_PASSWORD=crabbox-test-only \
+            --env POSTGRES_DB=crabbox_recovery_test "$PG_IMAGE")
+          cleanup() {
+            status=$?
+            trap - EXIT
+            podman stop --time 10 "$pg" >/dev/null || status=1
+            podman rm --volumes "$pg" >/dev/null || status=1
+            if podman container exists "$pg"; then status=1; fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if podman exec "$pg" pg_isready -U crabbox_test -d crabbox_recovery_test; then break; fi
+            sleep 1
+          done
+          podman exec "$pg" pg_isready -U crabbox_test -d crabbox_recovery_test
+          podman exec "$pg" createdb -U crabbox_test crabbox_finish_upgrade_test
+          podman exec "$pg" createdb -U crabbox_test crabbox_finish_fresh_test
+          export PG_PORT
+          PG_PORT=$(podman port "$pg" 5432/tcp | awk -F: '{print $NF}')
+          node --input-type=module <<'JS'
+          import fs from "node:fs";
+          import path from "node:path";
+          import crypto from "node:crypto";
+          import net from "node:net";
+          const root = process.env.PROOF_DIR;
+          const server = net.createServer();
+          await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+          const port = server.address().port;
+          await new Promise((resolve) => server.close(resolve));
+          const database = (name) => `postgres://crabbox_test:crabbox-test-only@127.0.0.1:${process.env.PG_PORT}/${name}`;
+          const common = {
+            cli: path.join(root, "crabbox"),
+            sharedToken: crypto.randomBytes(32).toString("hex"),
+            adminToken: crypto.randomBytes(32).toString("hex")
+          };
+          fs.writeFileSync(path.join(root, "auth.json"), JSON.stringify({
+            ...common, database: database("crabbox_recovery_test"), evidence: path.join(root, "auth")
+          }), { mode: 0o600 });
+          fs.writeFileSync(path.join(root, "upgrade.json"), JSON.stringify({
+            ...common, database: database("crabbox_finish_upgrade_test"),
+            freshDatabase: database("crabbox_finish_fresh_test"), port,
+            evidence: path.join(root, "upgrade"), oldCheckout: path.join(root, "old"),
+            candidate: process.env.CANDIDATE, oldCLI: path.join(root, "crabbox-old")
+          }), { mode: 0o600 });
+          JS
+          (
+            cd worker
+            CRABBOX_FINISH_PROOF_CONFIG="$PROOF_DIR/auth.json" \
+              NO_PROXY=127.0.0.1,localhost npm exec -- vitest run --config vitest.finish-postgres.config.ts
+          )
+          NO_PROXY=127.0.0.1,localhost node worker/scripts/prove-finish-upgrade.mjs "$PROOF_DIR/upgrade.json"
+          node --input-type=module <<'JS'
+          import assert from "node:assert/strict";
+          import fs from "node:fs";
+          import path from "node:path";
+          const report = JSON.parse(fs.readFileSync(path.join(process.env.PROOF_DIR, "upgrade/PROOF-REPORT.json")));
+          assert.equal(report.status, "passed");
+          assert.equal(report.cleanupError, undefined);
+          const summary = {
+            status: report.status, candidate: report.candidate,
+            assertions: report.assertions, requests: report.requests?.length,
+            syntheticOnly: true
+          };
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "```json\n" + JSON.stringify(summary, null, 2) + "\n```\n");
+          console.log(JSON.stringify(summary));
+          JS

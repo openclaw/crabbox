@@ -19,7 +19,7 @@ func TestPendingFinishSchemaOneStoredCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "original.json")
-	if err := os.WriteFile(path, raw, 0600); err != nil {
+	if err := writePrivateRunOutputFile(path, raw); err != nil {
 		t.Fatal(err)
 	}
 	read, err := readPendingFinishFile(path)
