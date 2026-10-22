@@ -115,6 +115,10 @@ func TestPowerShellWSLBootstrapPreservesHereStringTerminators(t *testing.T) {
 	cfg.TargetOS, cfg.WindowsMode = targetWindows, windowsModeWSL2
 	cfg.WorkRoot = "/work/‘’‚‛“”„$(`n)\n'@\nthrow 'injected'\n@'\n’@\nthrow 'injected'\n@‘\nend"
 	source := windowsWSL2BootstrapPowerShell(cfg)
+	_, expected, _, err := splitWSLSetupLiteral(source)
+	if err != nil {
+		t.Fatal(err)
+	}
 	script := "$source = " + psQuote(source) + `
 $tokens = $null; $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
@@ -129,6 +133,9 @@ $value = $literal.Value
 		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(got))
 		if err != nil {
 			t.Fatalf("WSL setup emitted unexpected output: %q: %v", got, err)
+		}
+		if string(decoded) != expected {
+			t.Fatal("Go literal decoder disagrees with PowerShell about the emitted WSL setup")
 		}
 		for _, command := range []string{"mkdir -p ", "test -w ", "wslpath -w "} {
 			if !strings.Contains(string(decoded), command+shellQuote(cfg.WorkRoot)) {
