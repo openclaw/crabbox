@@ -29,11 +29,14 @@ function fixture(t) {
     const commands = path.join(root, "commands");
     fs.mkdirSync(commands);
     // Darwin's bare mktemp -d ignores TMPDIR; model Linux placement inside the fixture.
-    writeTool(path.join(commands, "mktemp"), `
+    writeTool(
+      path.join(commands, "mktemp"),
+      `
 if [[ "$#" -eq 1 && "$1" == -d ]]; then
   exec /usr/bin/mktemp -d "\${TMPDIR%/}/tmp.XXXXXXXXXX"
 fi
-exec /usr/bin/mktemp "$@"`);
+exec /usr/bin/mktemp "$@"`,
+    );
     fixturePath = `${commands}${path.delimiter}${fixturePath}`;
   }
   const run = (body, env = {}) =>
@@ -1045,13 +1048,21 @@ function fileState(file) {
   return { mode: stat.mode, contents: fs.readFileSync(file).toString("base64") };
 }
 
-for (const state of ["fresh", "current", "dangling"]) {
+for (const state of ["fresh", "current", "dangling", "previous", "previous-dangling"]) {
   test(`default Node complete flow preserves public ownership and Yarn on ${state} repeat`, (t) => {
     const { root, run, setup, shell, pack } = nodeArchiveFixture(t);
     const digest = pack();
     const destination = path.join(root, "tools", "node", "24.22.1", "x64");
     const links = path.join(root, "links");
-    if (state !== "fresh") {
+    if (state.startsWith("previous")) {
+      const previous = path.join(root, "tools", "node", "24.19.0", "x64");
+      writeNodeToolchain(path.join(previous, "bin"), "24.19.0");
+      fs.mkdirSync(links, { recursive: true });
+      for (const tool of publicNodeTools) {
+        fs.symlinkSync(path.join(previous, "bin", tool), path.join(links, tool));
+      }
+      if (state === "previous-dangling") fs.rmSync(path.join(previous, "bin"), { recursive: true });
+    } else if (state !== "fresh") {
       success(run(shell, { FIXTURE_DIGEST: digest }));
       if (state === "dangling") fs.rmSync(path.join(destination, "bin"), { recursive: true });
     }
@@ -1096,6 +1107,28 @@ done
     assert.deepEqual(fs.readdirSync(links).sort(), [...publicNodeTools, "yarn", "yarnpkg"].sort());
   });
 }
+
+test("previous Node aliases and data survive a failed replacement before publication", (t) => {
+  const { root, run, bin, setup, pack } = nodeArchiveFixture(t);
+  const previous = path.join(root, "tools", "node", "24.19.0", "x64");
+  const links = path.join(root, "links");
+  writeNodeToolchain(path.join(previous, "bin"), "24.19.0");
+  fs.mkdirSync(links);
+  for (const tool of publicNodeTools) {
+    fs.symlinkSync(path.join(previous, "bin", tool), path.join(links, tool));
+  }
+  fs.writeFileSync(path.join(previous, "keep"), "existing image data");
+  const before = { links: fileState(links), previous: fileState(previous) };
+  writeTool(path.join(bin, "npm"), "exit 47");
+  const result = run(`${setup}${defaultNodePreparation}install_node_pnpm`, {
+    FIXTURE_DIGEST: pack(),
+  });
+  assert.equal(result.status, 47, result.stderr);
+  assert.deepEqual(fileState(links), before.links);
+  assert.deepEqual(fileState(previous), before.previous);
+  assert.equal(fs.existsSync(path.join(root, "tools", "node", "24.22.1", "x64.complete")), false);
+  assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
+});
 
 for (const entry of ["install_node_pnpm", "install_pinned_node"]) {
   for (const kind of [
@@ -1189,12 +1222,21 @@ if install_node_pnpm; then exit 91; fi
   assert.deepEqual(fileState(`${destination}.complete`), marker);
 });
 
-for (const dangling of [false, true]) {
-  test(`Node-major rebake selects Node22 after a pinned install with ${dangling ? "dangling" : "live"} owned links`, (t) => {
-    const { root, runRebake, destination, archive } = nodeRebakeFixture(t);
-    const before = fs.readFileSync(archive);
-    const result = runRebake(`
-${dangling ? 'mv "$node_toolcache_root/node/24.22.1/x64/bin" "$node_toolcache_root/node/24.22.1/x64/saved-bin"' : ""}
+for (const previous of [false, true]) {
+  for (const dangling of [false, true]) {
+    test(`Node-major rebake selects Node22 after a ${previous ? "previous" : "current"} pinned install with ${dangling ? "dangling" : "live"} owned links`, (t) => {
+      const { root, runRebake, destination, archive } = nodeRebakeFixture(t);
+      const before = fs.readFileSync(archive);
+      const result = runRebake(`
+${
+  previous
+    ? `mv "$node_toolcache_root/node/24.22.1" "$node_toolcache_root/node/24.19.0"
+for tool in node npm npx corepack pnpm pnpx; do
+  ln -sfn "$node_toolcache_root/node/24.19.0/x64/bin/$tool" "$node_link_dir/$tool"
+done`
+    : ""
+}
+${dangling ? `mv "$node_toolcache_root/node/${previous ? "24.19.0" : "24.22.1"}/x64/bin" "$node_toolcache_root/node/${previous ? "24.19.0" : "24.22.1"}/x64/saved-bin"` : ""}
 install_node_pnpm
 printf 'selected=%s\\n' "$(node --version)"
 for tool in node npm npx corepack pnpm pnpx; do
@@ -1202,33 +1244,35 @@ for tool in node npm npx corepack pnpm pnpx; do
   "$tool" --version
 done
 `);
-    success(result);
-    assert.match(result.stdout, /selected=v22\.0\.0/);
-    assert.deepEqual(
-      new Set(fs.readFileSync(path.join(root, "apt-calls"), "utf8").trim().split(/\s+/)),
-      new Set([
-        "install",
-        "-y",
-        "--no-install-recommends",
-        "--allow-downgrades",
-        "nodejs:amd64=22.0.0-1nodesource1",
-      ]),
-    );
-    for (const tool of ["node", "npm", "npx", "corepack", "pnpm", "pnpx"]) {
-      assert.equal(fs.existsSync(path.join(root, "links", tool)), false);
-      assert.throws(() => fs.lstatSync(path.join(root, "links", tool)), { code: "ENOENT" });
-    }
-    assert.equal(
-      fs.readFileSync(path.join(root, "home", "corepack.log"), "utf8"),
-      "22 enable node=v22.0.0\n22 prepare pnpm@10.0.0 --activate node=v22.0.0\n",
-    );
-    assert.deepEqual(fs.readFileSync(archive), before);
-    assert.equal(fs.existsSync(`${destination}.complete`), true);
-    assert.equal(
-      fs.existsSync(path.join(destination, dangling ? "saved-bin" : "bin", "node")),
-      true,
-    );
-  });
+      success(result);
+      assert.match(result.stdout, /selected=v22\.0\.0/);
+      assert.deepEqual(
+        new Set(fs.readFileSync(path.join(root, "apt-calls"), "utf8").trim().split(/\s+/)),
+        new Set([
+          "install",
+          "-y",
+          "--no-install-recommends",
+          "--allow-downgrades",
+          "nodejs:amd64=22.0.0-1nodesource1",
+        ]),
+      );
+      for (const tool of ["node", "npm", "npx", "corepack", "pnpm", "pnpx"]) {
+        assert.equal(fs.existsSync(path.join(root, "links", tool)), false);
+        assert.throws(() => fs.lstatSync(path.join(root, "links", tool)), { code: "ENOENT" });
+      }
+      assert.equal(
+        fs.readFileSync(path.join(root, "home", "corepack.log"), "utf8"),
+        "22 enable node=v22.0.0\n22 prepare pnpm@10.0.0 --activate node=v22.0.0\n",
+      );
+      assert.deepEqual(fs.readFileSync(archive), before);
+      const retained = previous ? destination.replace("24.22.1", "24.19.0") : destination;
+      assert.equal(fs.existsSync(`${retained}.complete`), true);
+      assert.equal(
+        fs.existsSync(path.join(retained, dangling ? "saved-bin" : "bin", "node")),
+        true,
+      );
+    });
+  }
 }
 
 test("Node-major rebake preserves exact owned links when APT fails even in a conditional caller", (t) => {
@@ -1691,12 +1735,12 @@ if cache_public_toolchain_archives good.tgz bad.tgz unattempted.tgz; then exit 9
   });
 }
 
-
 for (const boundary of ["parent", "leaf"]) {
   for (const kind of ["private", "symlink", "file"]) {
     test(`public archive permissions handle ${boundary} ${kind} without widening ancestors`, (t) => {
       const { root, run } = fixture(t);
-      const parent = path.join(root, "public"), archives = path.join(parent, "archives");
+      const parent = path.join(root, "public"),
+        archives = path.join(parent, "archives");
       fs.mkdirSync(archives, { recursive: true });
       const target = boundary === "parent" ? parent : archives;
       fs.chmodSync(target, 0o700);
@@ -1709,7 +1753,8 @@ for (const boundary of ["parent", "leaf"]) {
       const result = run(`public_toolchain_archive_dir="$PWD/public/archives"
 if prepare_public_toolchain_archive_dir; then exit 0; else exit "$?"; fi`);
       assert.equal(result.status, kind === "private" ? 0 : 1, result.stderr);
-      if (kind === "private") for (const dir of [parent, archives]) assert.equal(fs.statSync(dir).mode & 0o777, 0o755);
+      if (kind === "private")
+        for (const dir of [parent, archives]) assert.equal(fs.statSync(dir).mode & 0o777, 0o755);
       assert.equal(fs.statSync(root).mode, before);
       assert.deepEqual(fs.readdirSync(path.join(root, "home")), []);
     });
@@ -1723,8 +1768,11 @@ for (const [phase, injection, code] of [
 ]) {
   test(`conditional Go installation preserves ${phase} failure without completion`, (t) => {
     const { root, destination, runGo } = goArchiveFixture(t);
-    const result = runGo(`${defaultGoPreparation}${injection}
-if install_go_toolchain; then exit 91; else exit "$?"; fi`, { FIXTURE_GO_FAILURE: "47" });
+    const result = runGo(
+      `${defaultGoPreparation}${injection}
+if install_go_toolchain; then exit 91; else exit "$?"; fi`,
+      { FIXTURE_GO_FAILURE: "47" },
+    );
     assert.equal(result.status, code, result.stderr);
     assert.equal(fs.existsSync(`${destination}.complete`), false);
     assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);

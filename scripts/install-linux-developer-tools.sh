@@ -25,6 +25,8 @@ public_toolchain_archive_dir="/opt/crabbox/toolchain-archives"
 node_toolcache_root="/opt/hostedtoolcache"
 node_link_dir="/usr/local/bin"
 pinned_node_version="24.22.1"
+# Retire only aliases owned by the released predecessor image, never arbitrary Node trees.
+previous_pinned_node_version="24.19.0"
 go_toolcache_root="/opt/hostedtoolcache"
 go_link_dir="/usr/local/bin"
 pinned_go_version="1.27.3"
@@ -486,13 +488,18 @@ import sys
 import tempfile
 
 action, link_dir, bin_dir, *tools = sys.argv[1:]
+previous_bin_dir = None
+if tools[:1] == ["--previous-bin-dir"]:
+    _, previous_bin_dir, *tools = tools
 if action not in ("check", "publish") or not os.path.isabs(bin_dir):
     sys.exit("invalid public tool link operation")
 
 def check(tool):
     link = os.path.join(link_dir, tool)
-    target = os.path.join(bin_dir, tool)
-    if os.path.lexists(link) and (not os.path.islink(link) or os.readlink(link) != target):
+    targets = [os.path.join(bin_dir, tool)]
+    if previous_bin_dir is not None:
+        targets.append(os.path.join(previous_bin_dir, tool))
+    if os.path.lexists(link) and (not os.path.islink(link) or os.readlink(link) not in targets):
         sys.exit("linux-tools: public tool conflict at " + link + "; resolve before rebake")
 
 for tool in tools:
@@ -513,7 +520,8 @@ install_pinned_node() (
   umask 022
   local staging destination node_path
   destination="$node_toolcache_root/node/$pinned_node_version/x64"
-  public_tool_links check "$node_link_dir" "$destination/bin" node npm npx corepack pnpm pnpx || return $?
+  # Version 0.79.1 images own these exact predecessor aliases, including dangling links.
+  public_tool_links check "$node_link_dir" "$destination/bin" --previous-bin-dir "$node_toolcache_root/node/$previous_pinned_node_version/x64/bin" node npm npx corepack pnpm pnpx || return $?
   staging="$(mktemp -d)" || return $?
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
@@ -531,7 +539,7 @@ install_pinned_node() (
   rm -rf "$destination" || return $?
   mv "$staging/node" "$destination" || return $?
   install -d -m 0755 "$node_link_dir" || return $?
-  public_tool_links publish "$node_link_dir" "$destination/bin" node npm npx corepack pnpm pnpx || return $?
+  public_tool_links publish "$node_link_dir" "$destination/bin" --previous-bin-dir "$node_toolcache_root/node/$previous_pinned_node_version/x64/bin" node npm npx corepack pnpm pnpx || return $?
   touch "$destination.complete"
 )
 
@@ -578,7 +586,9 @@ install_requested_node() {
   for tool in node npm npx corepack pnpm pnpx; do
     if [[ -L "$node_link_dir/$tool" ]]; then
       link_target="$(readlink -n "$node_link_dir/$tool" && printf '.')" || return 1
-      [[ "$link_target" != "$node_toolcache_root/node/24.22.1/x64/bin/$tool." ]] || retired_tools+=("$tool")
+      case "$link_target" in
+        "$node_toolcache_root/node/$previous_pinned_node_version/x64/bin/$tool."|"$node_toolcache_root/node/$pinned_node_version/x64/bin/$tool.") retired_tools+=("$tool") ;;
+      esac
     fi
   done
   if retry apt-get "${install_args[@]}" "nodejs:$arch=$version"; then
@@ -615,9 +625,9 @@ install_requested_node() {
     if [[ -L "$node_link_dir/$tool" ]]; then
       # Preserve operator replacements, including targets with trailing newlines.
       link_target="$(readlink -n "$node_link_dir/$tool" && printf '.')" || return 1
-      if [[ "$link_target" == "$node_toolcache_root/node/24.22.1/x64/bin/$tool." ]]; then
-        rm -- "$node_link_dir/$tool" || return 1
-      fi
+      case "$link_target" in
+        "$node_toolcache_root/node/$previous_pinned_node_version/x64/bin/$tool."|"$node_toolcache_root/node/$pinned_node_version/x64/bin/$tool.") rm -- "$node_link_dir/$tool" || return 1 ;;
+      esac
     fi
   done
   hash -r
@@ -627,7 +637,7 @@ install_node_runtime() {
   local use_pinned_node=0
   if pinned_node_supported; then
     use_pinned_node=1
-    public_tool_links check "$node_link_dir" "$node_toolcache_root/node/$pinned_node_version/x64/bin" node npm npx corepack pnpm pnpx || return $?
+    public_tool_links check "$node_link_dir" "$node_toolcache_root/node/$pinned_node_version/x64/bin" --previous-bin-dir "$node_toolcache_root/node/$previous_pinned_node_version/x64/bin" node npm npx corepack pnpm pnpx || return $?
     cache_public_toolchain_archives "node-v$pinned_node_version-linux-x64.tar.xz" || return $?
     install_pinned_node || return $?
     export PATH="$node_link_dir:$PATH"
