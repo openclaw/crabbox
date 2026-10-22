@@ -413,12 +413,8 @@ func TestShardCreateFailureMidFanOutUnderConcurrency(t *testing.T) {
 }
 
 func TestShardCapacityRetryThenSucceed(t *testing.T) {
-	shardCapacityWaitBudgetForTest = time.Minute
-	shardCapacityBackoffOverride = func(int) time.Duration { return time.Millisecond }
-	t.Cleanup(func() {
-		shardCapacityWaitBudgetForTest = 0
-		shardCapacityBackoffOverride = nil
-	})
+	setShardCapacityTestHooks(time.Minute, func(int) time.Duration { return time.Millisecond })
+	t.Cleanup(clearShardCapacityTestHooks)
 
 	var mu sync.Mutex
 	attemptsByShard := map[int]int{}
@@ -462,12 +458,8 @@ func TestShardCapacityRetryThenSucceed(t *testing.T) {
 }
 
 func TestShardCapacityRetryExhausted(t *testing.T) {
-	shardCapacityWaitBudgetForTest = 20 * time.Millisecond
-	shardCapacityBackoffOverride = func(int) time.Duration { return 5 * time.Millisecond }
-	t.Cleanup(func() {
-		shardCapacityWaitBudgetForTest = 0
-		shardCapacityBackoffOverride = nil
-	})
+	setShardCapacityTestHooks(20*time.Millisecond, func(int) time.Duration { return 5 * time.Millisecond })
+	t.Cleanup(clearShardCapacityTestHooks)
 
 	provision := func(context.Context, int, string) (checkpointForkProvision, error) {
 		return checkpointForkProvision{}, errors.New("AllocationFailed: out of capacity")
@@ -512,12 +504,8 @@ func TestShardCapacityNonCapacityFailsFast(t *testing.T) {
 }
 
 func TestShardCapacityCancelDuringBackoff(t *testing.T) {
-	shardCapacityWaitBudgetForTest = time.Minute
-	shardCapacityBackoffOverride = func(int) time.Duration { return time.Hour }
-	t.Cleanup(func() {
-		shardCapacityWaitBudgetForTest = 0
-		shardCapacityBackoffOverride = nil
-	})
+	setShardCapacityTestHooks(time.Minute, func(int) time.Duration { return time.Hour })
+	t.Cleanup(clearShardCapacityTestHooks)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	provision := func(context.Context, int, string) (checkpointForkProvision, error) {
@@ -536,24 +524,27 @@ func TestShardCapacityCancelDuringBackoff(t *testing.T) {
 }
 
 func TestShardCapacityFailFastCancelsWaiter(t *testing.T) {
-	shardCapacityWaitBudgetForTest = time.Minute
-	enteredWait := make(chan struct{}, 1)
-	shardCapacityBackoffOverride = func(int) time.Duration {
+	enteredWait := make(chan struct{})
+	setShardCapacityTestHooks(time.Minute, func(int) time.Duration {
 		select {
-		case enteredWait <- struct{}{}:
+		case <-enteredWait:
 		default:
+			close(enteredWait)
 		}
 		return time.Hour
-	}
-	t.Cleanup(func() {
-		shardCapacityWaitBudgetForTest = 0
-		shardCapacityBackoffOverride = nil
 	})
+	t.Cleanup(clearShardCapacityTestHooks)
 
 	base := newShardTestProvisioner()
+	releaseOK := make(chan struct{})
 	provision := func(ctx context.Context, index int, slug string) (checkpointForkProvision, error) {
 		if index == 2 {
 			return checkpointForkProvision{}, errors.New("resource_limit_exceeded")
+		}
+		select {
+		case <-releaseOK:
+		case <-ctx.Done():
+			return checkpointForkProvision{}, ctx.Err()
 		}
 		return base.provision(ctx, index, slug)
 	}
@@ -568,7 +559,6 @@ func TestShardCapacityFailFastCancelsWaiter(t *testing.T) {
 	}
 	executor := newShardTestExecutor()
 	executor.outcomes[1] = recordedOutcome(4, nil)
-	executor.started = make(chan int, 2)
 
 	done := make(chan error, 1)
 	go func() {
@@ -580,7 +570,9 @@ func TestShardCapacityFailFastCancelsWaiter(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for capacity backoff")
 	}
-	// Shard 1's non-zero exit triggers fail-fast and cancels shard 2's capacity wait.
+	close(releaseOK)
+	// Shard 1 provisions after shard 2 is waiting, then exits 4 and fail-fast
+	// cancels the capacity waiter.
 	err := <-done
 	var exitErr ExitError
 	if !AsExitError(err, &exitErr) {

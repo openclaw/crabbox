@@ -22,11 +22,28 @@ const (
 
 // Test hooks; production keeps the constants above.
 var (
+	shardCapacityTestMu                sync.Mutex
 	shardCapacityWaitBudgetForTest     time.Duration
 	shardCapacityBackoffInitialForTest time.Duration
 	shardCapacityBackoffMaxForTest     time.Duration
 	shardCapacityBackoffOverride       func(attempt int) time.Duration
 )
+
+func setShardCapacityTestHooks(budget time.Duration, backoff func(attempt int) time.Duration) {
+	shardCapacityTestMu.Lock()
+	defer shardCapacityTestMu.Unlock()
+	shardCapacityWaitBudgetForTest = budget
+	shardCapacityBackoffOverride = backoff
+}
+
+func clearShardCapacityTestHooks() {
+	shardCapacityTestMu.Lock()
+	defer shardCapacityTestMu.Unlock()
+	shardCapacityWaitBudgetForTest = 0
+	shardCapacityBackoffInitialForTest = 0
+	shardCapacityBackoffMaxForTest = 0
+	shardCapacityBackoffOverride = nil
+}
 
 const shardPartialLineLimit = 64 * 1024
 
@@ -376,16 +393,18 @@ func resolveShardConcurrency(count, concurrencyFlag int, concurrencySet bool, ma
 }
 
 func shardCapacityWaitBudgetDuration() time.Duration {
-	if shardCapacityWaitBudgetForTest > 0 {
-		return shardCapacityWaitBudgetForTest
+	shardCapacityTestMu.Lock()
+	budget := shardCapacityWaitBudgetForTest
+	shardCapacityTestMu.Unlock()
+	if budget > 0 {
+		return budget
 	}
 	return shardCapacityWaitBudget
 }
 
 func shardCapacityBackoff(attempt int) time.Duration {
-	if shardCapacityBackoffOverride != nil {
-		return shardCapacityBackoffOverride(attempt)
-	}
+	shardCapacityTestMu.Lock()
+	override := shardCapacityBackoffOverride
 	initial := shardCapacityBackoffInitial
 	if shardCapacityBackoffInitialForTest > 0 {
 		initial = shardCapacityBackoffInitialForTest
@@ -393,6 +412,10 @@ func shardCapacityBackoff(attempt int) time.Duration {
 	capDelay := shardCapacityBackoffMax
 	if shardCapacityBackoffMaxForTest > 0 {
 		capDelay = shardCapacityBackoffMaxForTest
+	}
+	shardCapacityTestMu.Unlock()
+	if override != nil {
+		return override(attempt)
 	}
 	delay := initial
 	for i := 0; i < attempt; i++ {
