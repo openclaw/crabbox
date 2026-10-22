@@ -402,10 +402,18 @@ func (a App) provisionShardWithCapacityRetry(ctx context.Context, mux *shardOutp
 			}
 			return checkpointForkProvision{}, err
 		}
-		// Each attempt calls provision with an empty requested lease ID path so
-		// adapters mint a fresh lease ID (or use a replay-safe fixed ID) and
-		// failed attempts leave zero residue.
-		lease, err := provision(ctx, index, slug)
+		remaining := deadline.Sub(now())
+		if remaining <= 0 {
+			if lastErr != nil {
+				return checkpointForkProvision{}, fmt.Errorf("capacity wait exhausted after %s: %w", budget, lastErr)
+			}
+			return checkpointForkProvision{}, fmt.Errorf("capacity wait exhausted after %s", budget)
+		}
+		// Bound each create by the capacity deadline while still honoring parent
+		// cancel / fail-fast. Adapters mint a fresh lease ID per attempt.
+		attemptCtx, cancel := context.WithDeadline(ctx, deadline)
+		lease, err := provision(attemptCtx, index, slug)
+		cancel()
 		if err == nil {
 			return lease, nil
 		}
@@ -413,7 +421,7 @@ func (a App) provisionShardWithCapacityRetry(ctx context.Context, mux *shardOutp
 		if !IsCapacityRefusal(err) {
 			return checkpointForkProvision{}, err
 		}
-		remaining := deadline.Sub(now())
+		remaining = deadline.Sub(now())
 		if remaining <= 0 {
 			return checkpointForkProvision{}, fmt.Errorf("capacity wait exhausted after %s: %w", budget, err)
 		}

@@ -461,6 +461,24 @@ func TestShardCapacityWait(t *testing.T) {
 		}
 	})
 
+	t.Run("budget expired during sleep skips further provision", func(t *testing.T) {
+		calls := 0
+		provision := func(context.Context, int, string) (checkpointForkProvision, error) {
+			calls++
+			return checkpointForkProvision{}, MarkCapacityRefusal(errors.New("InsufficientInstanceCapacity"))
+		}
+		opts := shardTestOptions(1)
+		opts.CapacityWait = 25 * time.Millisecond
+		opts.capacityBackoff = func(int, error) time.Duration { return time.Hour }
+		_, err := App{Stdout: io.Discard, Stderr: io.Discard}.provisionShardWithCapacityRetry(context.Background(), &shardOutputMux{}, opts, 1, "slug", provision)
+		if err == nil || !strings.Contains(err.Error(), "capacity wait exhausted") {
+			t.Fatalf("err=%v, want capacity wait exhausted", err)
+		}
+		if calls != 1 {
+			t.Fatalf("calls=%d, want 1 (no provision after budget expires during sleep)", calls)
+		}
+	})
+
 	t.Run("fail-fast cancels waiter", func(t *testing.T) {
 		enteredWait := make(chan struct{})
 		base := newShardTestProvisioner()

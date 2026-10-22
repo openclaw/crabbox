@@ -800,7 +800,7 @@ func (c *AzureClient) CreateServerWithFallback(ctx context.Context, cfg Config, 
 			return Server{}, nextCfg, joinErrors(errs)
 		}
 	}
-	return Server{}, cfg, markCapacityRefusalIf(joinErrors(errs), isAzureRetryableProvisioningError)
+	return Server{}, cfg, markCapacityRefusalIf(joinErrors(errs), isAzureCapacityRefusal)
 }
 
 // LeaseClaimScope identifies the Azure account boundary used by this client.
@@ -2630,13 +2630,23 @@ func isAzureRetryableProvisioningError(err error) bool {
 		return false
 	}
 	s := err.Error()
+	return isAzureCapacityRefusal(err) ||
+		strings.Contains(s, "OperationNotAllowed") ||
+		strings.Contains(s, "NotAvailableForSubscription")
+}
+
+// isAzureCapacityRefusal reports definite capacity or quota refusals for
+// --capacity-wait. Broader placement retries stay on isAzureRetryableProvisioningError.
+func isAzureCapacityRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
 	return strings.Contains(s, "SkuNotAvailable") ||
 		strings.Contains(s, "QuotaExceeded") ||
-		strings.Contains(s, "OperationNotAllowed") ||
 		strings.Contains(s, "AllocationFailed") ||
 		strings.Contains(s, "ZonalAllocationFailed") ||
-		strings.Contains(s, "OverconstrainedAllocationRequest") ||
-		strings.Contains(s, "NotAvailableForSubscription")
+		strings.Contains(s, "OverconstrainedAllocationRequest")
 }
 
 func isAzureNotFoundError(err error) bool {

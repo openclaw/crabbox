@@ -57,13 +57,23 @@ func TestAdapterCapacityTagging(t *testing.T) {
 	t.Parallel()
 	t.Run("aws", func(t *testing.T) {
 		t.Parallel()
-		err := markCapacityRefusalIf(errors.New("InsufficientInstanceCapacity: AZ full"), isRetryableAWSProvisioningError)
+		err := markCapacityRefusalIf(errors.New("InsufficientInstanceCapacity: AZ full"), isAWSCapacityRefusal)
 		if !IsCapacityRefusal(err) {
 			t.Fatalf("aws capacity not tagged: %v", err)
 		}
-		err = markCapacityRefusalIf(errors.New("unauthorized"), isRetryableAWSProvisioningError)
-		if IsCapacityRefusal(err) {
-			t.Fatalf("aws non-capacity tagged: %v", err)
+		for _, msg := range []string{
+			"unauthorized",
+			"InvalidParameterValue: invalid subnet",
+			"no AWS AMI found in eu-west-1",
+			"Unsupported: instance type",
+		} {
+			err = markCapacityRefusalIf(errors.New(msg), isAWSCapacityRefusal)
+			if IsCapacityRefusal(err) {
+				t.Fatalf("aws non-capacity tagged for %q: %v", msg, err)
+			}
+			if !isRetryableAWSProvisioningError(errors.New(msg)) && msg != "unauthorized" {
+				t.Fatalf("aws fallback classifier should still retry %q", msg)
+			}
 		}
 	})
 	t.Run("hetzner", func(t *testing.T) {
@@ -71,6 +81,10 @@ func TestAdapterCapacityTagging(t *testing.T) {
 		err := markCapacityRefusalIf(errors.New("resource_limit_exceeded"), isRetryableProvisioningError)
 		if !IsCapacityRefusal(err) {
 			t.Fatalf("hetzner capacity not tagged: %v", err)
+		}
+		err = markCapacityRefusalIf(errors.New("unauthorized"), isRetryableProvisioningError)
+		if IsCapacityRefusal(err) {
+			t.Fatalf("hetzner non-capacity tagged: %v", err)
 		}
 	})
 	t.Run("gcp", func(t *testing.T) {
@@ -80,12 +94,22 @@ func TestAdapterCapacityTagging(t *testing.T) {
 		if !IsCapacityRefusal(err) {
 			t.Fatalf("gcp capacity not tagged: %v", err)
 		}
+		err = markCapacityRefusalIf(errors.New("Invalid value for field machineType"), isGCPCapacityRefusal)
+		if IsCapacityRefusal(err) {
+			t.Fatalf("gcp config error tagged: %v", err)
+		}
 	})
 	t.Run("azure", func(t *testing.T) {
 		t.Parallel()
-		err := markCapacityRefusalIf(errors.New("AllocationFailed: out of capacity"), isAzureRetryableProvisioningError)
+		err := markCapacityRefusalIf(errors.New("AllocationFailed: out of capacity"), isAzureCapacityRefusal)
 		if !IsCapacityRefusal(err) {
 			t.Fatalf("azure capacity not tagged: %v", err)
+		}
+		for _, msg := range []string{"OperationNotAllowed: policy", "NotAvailableForSubscription"} {
+			err = markCapacityRefusalIf(errors.New(msg), isAzureCapacityRefusal)
+			if IsCapacityRefusal(err) {
+				t.Fatalf("azure non-capacity tagged for %q: %v", msg, err)
+			}
 		}
 	})
 	t.Run("coordinator capacity_unavailable", func(t *testing.T) {

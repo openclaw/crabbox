@@ -1603,6 +1603,32 @@ func (a App) provisionManagedCheckpointFork(ctx context.Context, cfg Config, bac
 	return provision, nil
 }
 
+// refreshAuthorizedForkReleaseClaim adopts a persisted claim only when it is
+// still the same lease/owner/repository and resource lineage as the carried
+// acquisition snapshot (a same-owner successor after run --keep). A replaced
+// repository claim fails closed without authorizing deletion.
+func refreshAuthorizedForkReleaseClaim(server *Server, leaseID string) error {
+	if server == nil {
+		return nil
+	}
+	expected, expectedExists, set := ServerLeaseClaimSnapshot(*server)
+	if !set || !expectedExists {
+		return nil
+	}
+	current, exists, err := ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("%w: lease %s claim missing after acquisition; refusing automatic release", ErrReleaseLeaseOwnershipChanged, leaseID)
+	}
+	if !sameActionsWorkspaceClaimOwner(expected, current) {
+		return fmt.Errorf("%w: lease %s claim ownership changed after acquisition; refusing automatic release", ErrReleaseLeaseOwnershipChanged, leaseID)
+	}
+	SetServerLeaseClaimSnapshot(server, current, true)
+	return nil
+}
+
 type managedCheckpointCacheConflict struct{ error }
 
 func writeSafeManagedCheckpointCache(store checkpointStore, record checkpointRecord) error {
@@ -1653,11 +1679,12 @@ func (a App) provisionCheckpointForkWithoutClaim(ctx context.Context, cfg Config
 	release := func(releaseCtx context.Context) {
 		releaseOnce.Do(func() {
 			releaseLease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}
-			// run --keep (shard/fork command fan-out) rewrites the claim after
-			// acquire. Refresh the carried snapshot so release does not fail
-			// closed on an expected-claim mismatch and leave the box running.
-			if claim, err := ReadLeaseClaim(leaseID); err == nil && strings.TrimSpace(claim.LeaseID) != "" {
-				SetServerLeaseClaimSnapshot(&releaseLease.Server, claim, true)
+			// run --keep (shard/fork fan-out) rewrites the claim after acquire.
+			// Refresh only same-owner successors so release can fence against the
+			// kept generation without adopting a reassigned repository claim.
+			if err := refreshAuthorizedForkReleaseClaim(&releaseLease.Server, leaseID); err != nil {
+				fmt.Fprintf(a.Stderr, "warning: refusing release for lease %s: %v\n", leaseID, err)
+				return
 			}
 			a.releaseBackendLeaseBestEffort(releaseCtx, sshBackend, cfg, releaseLease)
 		})

@@ -55,6 +55,78 @@ func TestProvisionCheckpointForkReleasesWithFreshContextWhenCanceled(t *testing.
 	}
 }
 
+func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
+	cases := []struct {
+		name         string
+		reassignRepo bool
+		wantReleases int
+		wantRefusal  bool
+	}{
+		{name: "allowed same-owner successor reaches release", wantReleases: 1},
+		{name: "forbidden reassigned owner never reaches deletion", reassignRepo: true, wantRefusal: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const leaseID = "cbx_forkrelease01"
+			repoRoot := t.TempDir()
+			acquired := leaseClaim{
+				LeaseID: leaseID, Revision: "gen-1", Provider: "aws", ProviderScope: "us-east-1",
+				CloudID: "i-123", RepoRoot: repoRoot, Slug: "fork-claim",
+			}
+			path, err := leaseClaimPath(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeLeaseClaimAtomic(path, acquired); err != nil {
+				t.Fatal(err)
+			}
+			server := Server{Provider: "aws", CloudID: "i-123"}
+			SetServerLeaseClaimSnapshot(&server, acquired, true)
+			next := acquired
+			next.Labels = map[string]string{"run": "kept"}
+			if tc.reassignRepo {
+				next.RepoRoot = filepath.Join(t.TempDir(), "hijacked")
+			}
+			if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, next); err != nil {
+				t.Fatal(err)
+			}
+			backend := &checkpointForkReleaseBackend{leaseID: leaseID}
+			var stderr bytes.Buffer
+			app := App{Stdout: io.Discard, Stderr: &stderr}
+			releaseLease := LeaseTarget{Server: server, LeaseID: leaseID}
+			// Mirrors provisionCheckpointForkWithoutClaim's release gate.
+			if err := refreshAuthorizedForkReleaseClaim(&releaseLease.Server, leaseID); err != nil {
+				fmt.Fprintf(&stderr, "warning: refusing release for lease %s: %v\n", leaseID, err)
+				if !errors.Is(err, ErrReleaseLeaseOwnershipChanged) {
+					t.Fatalf("err=%v, want ownership-changed sentinel", err)
+				}
+			} else if err := app.releaseBackendLeaseBestEffort(context.Background(), backend, Config{Provider: "aws"}, releaseLease); err != nil {
+				t.Fatalf("release: %v", err)
+			}
+			if backend.releaseCount != tc.wantReleases {
+				t.Fatalf("releases=%d, want %d", backend.releaseCount, tc.wantReleases)
+			}
+			got, exists, set := ServerLeaseClaimSnapshot(releaseLease.Server)
+			if tc.wantRefusal {
+				if !set || !exists || got.RepoRoot != repoRoot {
+					t.Fatalf("snapshot adopted foreign owner: %#v", got)
+				}
+				if !strings.Contains(stderr.String(), "refusing release") || !strings.Contains(stderr.String(), "ownership changed") {
+					t.Fatalf("stderr missing ownership refusal:\n%s", stderr.String())
+				}
+				return
+			}
+			if !set || !exists || got.RepoRoot != repoRoot || got.Labels["run"] != "kept" {
+				t.Fatalf("snapshot=%#v, want same-owner successor", got)
+			}
+		})
+	}
+}
+
 func TestValidateCheckpointID(t *testing.T) {
 	if got, err := validateCheckpointID("chk_abc-123_DEF"); err != nil || got != "chk_abc-123_DEF" {
 		t.Fatalf("valid id got=%q err=%v", got, err)
