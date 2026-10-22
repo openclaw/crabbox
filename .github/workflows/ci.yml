@@ -607,7 +607,7 @@ jobs:
 
       - name: Prove native TLS rejection and legitimate private CA
         if: github.event_name == 'pull_request' && github.head_ref == 'security/emudhra-node-release'
-        run: go test ./internal/cli -run '^TestCoordinator(ReadDoesNotOverrideTLSVerificationWithCurl|CurlFallbackEligibility)$' -count=1 -v
+        run: go test -race ./internal/cli -run '^TestCoordinator(ReadDoesNotOverrideTLSVerificationWithCurl|CurlFallbackEligibility)$' -count=1 -v
 
       - name: Vet native helper
         run: go vet ./internal/applevmhelper ./cmd/crabbox-apple-vm-helper
