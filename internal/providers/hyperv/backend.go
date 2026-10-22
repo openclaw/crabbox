@@ -1313,6 +1313,9 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst hyperv
 	if cfg.TargetOS == targetLinux {
 		target.ReadyCheck = "test -x /usr/local/bin/crabbox-ready && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1"
 	}
+	if cfg.TargetOS == targetWindows && cfg.WindowsMode != core.WindowsModeWSL2 {
+		target.ReadyCheck = windowsReadyCheck()
+	}
 	if wait {
 		if err := b.sshReady(ctx, &target, b.rt.Stderr, "hyperv ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
 			return core.LeaseTarget{}, err
@@ -1321,6 +1324,17 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst hyperv
 		server.Labels["state"] = "ready"
 	}
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: claim.LeaseID}, nil
+}
+
+// windowsReadyCheck matches what the Hyper-V Windows bootstrap installs (OpenSSH
+// and MinGit). The generic native Windows check also demands Node.js and npm,
+// which an arbitrary template image does not carry, so the lease never became ready.
+func windowsReadyCheck() string {
+	return core.PowershellCommand(`$env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+$ErrorActionPreference = "Stop"
+git --version | Out-Null
+tar --version | Out-Null
+if (-not (Test-Path -LiteralPath 'C:\')) { throw "work root missing" }`)
 }
 
 func applyStoredLeaseKey(cfg *core.Config, leaseID string) {
