@@ -20,23 +20,21 @@ func webVNCDaemonPortReservationUnavailable(err error) bool {
 }
 
 func inheritWebVNCDaemonPortReservation(cmd *exec.Cmd, listener *net.TCPListener) (string, *os.File, error) {
-	// TCPListener.File returns a Winsock duplicate that Go explicitly forbids
-	// using in another process. Transfer the original bound socket handle; the
-	// child immediately makes its own Winsock duplicate through net.FileListener.
-	raw, err := listener.SyscallConn()
+	// The bound listener is registered with Go's IOCP poller, and net's own
+	// dupFileSocket documents that a handle associated with IOCP is not safe to
+	// share with another process: the child's WSADuplicateSocket fails with
+	// ERROR_INVALID_PARAMETER. TCPListener.File hands back a fresh Winsock
+	// duplicate that was never registered with the poller, so that is the handle
+	// the child can adopt through net.FileListener. The caller keeps the file
+	// open until handoff so the kernel reservation stays live.
+	file, err := listener.File()
 	if err != nil {
 		return "", nil, err
 	}
-	var handle windows.Handle
-	var inheritErr error
-	if err := raw.Control(func(fd uintptr) {
-		handle = windows.Handle(fd)
-		inheritErr = windows.SetHandleInformation(handle, windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT)
-	}); err != nil {
+	handle := windows.Handle(file.Fd())
+	if err := windows.SetHandleInformation(handle, windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT); err != nil {
+		_ = file.Close()
 		return "", nil, err
-	}
-	if inheritErr != nil {
-		return "", nil, inheritErr
 	}
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
@@ -45,7 +43,7 @@ func inheritWebVNCDaemonPortReservation(cmd *exec.Cmd, listener *net.TCPListener
 		cmd.SysProcAttr.AdditionalInheritedHandles,
 		syscall.Handle(handle),
 	)
-	return strconv.FormatUint(uint64(handle), 10), nil, nil
+	return strconv.FormatUint(uint64(handle), 10), file, nil
 }
 
 func forwardInheritedWebVNCDaemonPortReservation(cmd *exec.Cmd) (func(), error) {
