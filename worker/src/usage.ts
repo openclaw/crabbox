@@ -170,10 +170,9 @@ export function createCostLimitUsage(
   };
 }
 
-export function addLeaseToCostLimitUsage(
+export function addLeaseToActiveLimitUsage(
   usage: CostLimitUsage,
   lease: LeaseRecord,
-  now: Date,
 ): void {
   if (isRegisteredLease(lease)) {
     return;
@@ -189,6 +188,17 @@ export function addLeaseToCostLimitUsage(
       usage.orgActiveLeases += 1;
     }
   }
+}
+
+export function addLeaseToCostLimitUsage(
+  usage: CostLimitUsage,
+  lease: LeaseRecord,
+  now: Date,
+): void {
+  if (isRegisteredLease(lease)) {
+    return;
+  }
+  addLeaseToActiveLimitUsage(usage, lease);
   // A live lease still reserves provider spend in the active budget window,
   // even when its creation month has rolled over.
   if (!leaseReservesBudget(lease) && monthKey(new Date(lease.createdAt)) !== usage.month) {

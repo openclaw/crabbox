@@ -80,16 +80,25 @@ go to stdout. Malformed successful responses fail instead of displaying zeros.
 Unlike [monthly usage](usage.md), the count spans every creation month and org
 for the exact, case-sensitive owner identity. Active and provisioning managed
 leases count even after their canonical expiry, until a terminal state is
-committed. Released, expired, failed, and registered inventory records do not
-count. A live, unexpired admission reservation overrides its canonical lease
+committed. Released leases with unconfirmed running lifetime compute still count;
+other released, expired, failed, and registered inventory records do not.
+A live, unexpired admission reservation overrides its canonical lease
 by ID and counts once; reservation-only IDs count too. Stale reservations are
 ignored without cleanup, with canonical records used when present. Shared
 leases owned by someone else do not count toward the owner dimension, but do
 count toward the fleet and, where applicable, org dimensions. Direct-only leases
 absent from the coordinator do not count.
 
-This read-only snapshot uses the same serialized boundary as admission on
-Cloudflare and Node. Normal service startup and background recovery retain their
+This read-only snapshot uses a storage transaction on Cloudflare and Node without
+holding the lifecycle mutex. It reads the maintained lease index instead of
+scanning retained history or calculating monthly spend. Before the current
+runtime finishes index backfill or audit, only a store with at most 128 lease
+records can use the bounded historical fallback. A larger unindexed store or
+a snapshot exceeding 4,096 lease-index and reservation entries returns
+retryable HTTP 503 `capacity_unavailable`, never a partial count. Each index or
+reservation page contains at most 128 entries.
+
+Normal service startup and background recovery retain their
 existing behavior; the capacity handler itself neither allocates nor reconciles
 resources, deletes stale records, schedules maintenance, nor calls providers.
 Fleet or org cap exhaustion caused by other owners is reported as an aggregate

@@ -92,9 +92,13 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   }
   if (
     method === "GET" &&
-    ["v1/whoami", "v1/leases", "v1/admin/leases", "v1/admin/retained-reconcile"].includes(
-      path.join("/"),
-    )
+    [
+      "v1/whoami",
+      "v1/capacity",
+      "v1/leases",
+      "v1/admin/leases",
+      "v1/admin/retained-reconcile",
+    ].includes(path.join("/"))
   ) {
     return "direct";
   }

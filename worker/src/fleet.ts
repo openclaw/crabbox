@@ -534,6 +534,7 @@ import {
 import {
   activeLeaseLimitBlocker,
   activeLeaseLimitsForOwner,
+  addLeaseToActiveLimitUsage,
   addLeaseToCostLimitUsage,
   costLimits,
   createCostLimitUsage,
@@ -16498,11 +16499,19 @@ export class FleetCoordinator {
     const now = new Date();
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
-    const { costUsage } = await this.mergedLeaseAdmissionState(
-      { owner, org },
-      now,
-      await this.readProviderAccessRecords(now.getTime()),
+    const costUsage = await this.state.storage.transaction((storage) =>
+      this.capacityUsage(storage, { owner, org }, now),
     );
+    if (!costUsage) {
+      return json(
+        {
+          error: "capacity_unavailable",
+          message: "capacity snapshot exceeds its read bound or lease indexing is incomplete",
+          retryable: true,
+        },
+        { status: 503, headers: { "retry-after": "2" } },
+      );
+    }
     const limits = costLimits(this.env);
     const activeLimits = activeLeaseLimitsForOwner(limits, owner);
     const blockedBy = activeLeaseLimitBlocker(costUsage, activeLimits);
@@ -16521,6 +16530,63 @@ export class FleetCoordinator {
       blockedBy,
     };
     return json(capacity);
+  }
+
+  private async capacityUsage(
+    storage: CoordinatorStorageView,
+    candidate: Pick<LeaseRecord, "owner" | "org">,
+    now: Date,
+  ): Promise<CostLimitUsage | undefined> {
+    // Capacity is a diagnostic, not budget admission. Bound its snapshot and never
+    // traverse retained history or compute spend while holding the lifecycle mutex.
+    const recordLimit = 4096;
+    let records = 0;
+    const state = await storage.get<LeaseMaintenanceState>(leaseMaintenanceIndex.stateKey, {
+      noCache: true,
+    });
+    const indexed =
+      leaseMaintenanceIndexReady(state) &&
+      state?.generation === this.coordinatorGeneration &&
+      state.auditStartAfter === undefined;
+    const leases = new Map<string, LeaseRecord>();
+    if (indexed) {
+      for await (const [key] of coordinatorStorageEntries<number>(storage, {
+        prefix: leaseMaintenanceIndex.prefix,
+        limit: storageRecordScanBatchSize,
+        noCache: true,
+      })) {
+        if (++records > recordLimit) return undefined;
+        // oxlint-disable-next-line eslint/no-await-in-loop -- bounded hydration stays in the same storage snapshot.
+        const lease = await storage.get<LeaseRecord>(
+          leaseKey(key.slice(leaseMaintenanceIndex.prefix.length)),
+          { noCache: true },
+        );
+        if (lease) leases.set(lease.id, lease);
+      }
+    } else {
+      // Fresh/small stores remain usable before maintenance. Larger stores must
+      // finish their bounded background backfill/audit before reporting capacity.
+      const page = await storage.list<LeaseRecord>({
+        prefix: "lease:",
+        limit: storageRecordScanBatchSize + 1,
+        noCache: true,
+      });
+      if (page.size > storageRecordScanBatchSize) return undefined;
+      records = page.size;
+      for (const lease of page.values()) leases.set(lease.id, lease);
+    }
+    for await (const [, lease] of coordinatorStorageEntries<LeaseRecord>(storage, {
+      prefix: providerAccessPrefix(),
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+    })) {
+      if (++records > recordLimit) return undefined;
+      this.applyCurrentLeasePolicy(lease);
+      if (isActiveProviderAccessRecord(lease, now.getTime())) leases.set(lease.id, lease);
+    }
+    const usage = createCostLimitUsage(candidate, now);
+    for (const lease of leases.values()) addLeaseToActiveLimitUsage(usage, lease);
+    return usage;
   }
 
   private async usage(request: Request): Promise<Response> {

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Coordinator: bound capacity snapshots, use maintained lease indexes, and keep diagnostic reads off the lifecycle mutex so retained history cannot stall completion and heartbeats. Incomplete or oversized snapshots fail closed without reporting partial capacity.
+
 ## 0.79.1 - 2026-10-20
 
 ### Highlights
