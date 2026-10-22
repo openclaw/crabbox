@@ -108,9 +108,13 @@ func linuxForkExternalStateResetCommands() []string {
 	return strings.Split(core.TailscaleIdentityResetScript(core.TargetLinux, ""), "\n")
 }
 
-func linuxForkSpecializationUserData(user, publicKey, hostname, instanceID string) string {
+func linuxForkSpecializationUserData(user, publicKey, hostname, instanceID string, keepCloudInitOff bool) string {
 	publicKeyBase64 := base64.StdEncoding.EncodeToString([]byte(strings.TrimSpace(publicKey) + "\n"))
 	externalReset := strings.Join(linuxForkExternalStateResetCommands(), "\n      ")
+	reDisable := ""
+	if keepCloudInitOff {
+		reDisable = "touch /etc/cloud/cloud-init.disabled\n      "
+	}
 	return fmt.Sprintf(`#cloud-config
 write_files:
   - path: /usr/local/sbin/crabbox-checkpoint-fork-specialize
@@ -159,10 +163,34 @@ write_files:
       if [ "$mounted_here" = true ]; then
         umount "$seed_mount"
       fi
-      systemctl poweroff
+      %[8]ssystemctl poweroff
 runcmd:
   - ["/usr/local/sbin/crabbox-checkpoint-fork-specialize"]
-`, user, publicKeyBase64, hostname, instanceID, externalReset, linuxForkSpecializationMarker, linuxForkSeedCompletionMarker)
+`, user, publicKeyBase64, hostname, instanceID, externalReset, linuxForkSpecializationMarker, linuxForkSeedCompletionMarker, reDisable)
+}
+
+// enableCloudInitForCheckpoint temporarily lifts the persisted
+// cloud-init.disabled marker so the checkpoint's clones can run their NoCloud
+// specialization seed. The source guest gets the marker back afterwards.
+func (b *backend) enableCloudInitForCheckpoint(ctx context.Context, target core.SSHTarget) (bool, func(context.Context) error, error) {
+	const marker = "/etc/cloud/cloud-init.disabled"
+	probe := "if [ \"$(id -u)\" -eq 0 ]; then S=; else S='sudo -n'; fi; " +
+		"if $S test -e " + marker + "; then $S rm -f " + marker + " && echo disabled; fi"
+	out, err := b.runSSHOutput(ctx, target, probe)
+	if err != nil {
+		return false, nil, fmt.Errorf("prepare Linux guest cloud-init for checkpoint: %w", err)
+	}
+	if strings.TrimSpace(out) != "disabled" {
+		return false, nil, nil
+	}
+	restore := func(restoreCtx context.Context) error {
+		script := "if [ \"$(id -u)\" -eq 0 ]; then S=; else S='sudo -n'; fi; $S touch " + marker
+		if _, err := b.runSSHOutput(restoreCtx, target, script); err != nil {
+			return fmt.Errorf("restore Linux guest cloud-init.disabled after checkpoint: %w", err)
+		}
+		return nil
+	}
+	return true, restore, nil
 }
 
 func (b *backend) specializeLinuxCheckpointFork(
@@ -173,10 +201,11 @@ func (b *backend) specializeLinuxCheckpointFork(
 	leaseID string,
 	publicKey string,
 	hostname string,
+	keepCloudInitOff bool,
 ) (err error) {
 	instanceID := linuxForkSpecializationInstanceID(leaseID)
 	seedPath := cloudInitSeedPath(name)
-	userData := linuxForkSpecializationUserData(cfg.HyperV.User, publicKey, hostname, instanceID)
+	userData := linuxForkSpecializationUserData(cfg.HyperV.User, publicKey, hostname, instanceID, keepCloudInitOff)
 	metaData := cloudInitMetaDataForInstance(instanceID, hostname)
 	if err := b.createNoCloudSeed(ctx, seedPath, userData, metaData); err != nil {
 		return err

@@ -38,6 +38,7 @@ const (
 	checkpointMetadataWorkRoot       = "work_root"
 	checkpointMetadataSwitch         = "switch"
 	checkpointMetadataSpecialization = "linux_fork_specialization"
+	checkpointMetadataCloudInitOff   = "linux_cloud_init_disabled"
 	checkpointMetadataSecureBoot     = "secure_boot_enabled"
 	checkpointMetadataSecureTemplate = "secure_boot_template"
 )
@@ -538,6 +539,22 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 		escapePSString(paths.exportRoot),
 		escapePSString(paths.exportRoot),
 	)
+	var cloudInitWasDisabled bool
+	if target == core.TargetLinux {
+		var reenable func(context.Context) error
+		cloudInitWasDisabled, reenable, err = b.enableCloudInitForCheckpoint(ctx, cacheTarget)
+		if err != nil {
+			return result, err
+		}
+		defer func() {
+			if reenable == nil {
+				return
+			}
+			restoreCtx, cancel := context.WithTimeout(context.Background(), hypervCheckpointCleanupTimeout)
+			defer cancel()
+			err = errors.Join(err, reenable(restoreCtx))
+		}()
+	}
 	commandResult, runErr := b.powershell(ctx, script)
 	if runErr != nil {
 		return result, shared.LocalCommandError("create production Hyper-V checkpoint", commandResult, runErr)
@@ -579,6 +596,9 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 		metadata[checkpointMetadataSpecialization] = linuxForkSpecializationVersion
 		metadata[checkpointMetadataSecureBoot] = fmt.Sprintf("%t", sourceFirmware.enabled)
 		metadata[checkpointMetadataSecureTemplate] = sourceFirmware.template
+		if cloudInitWasDisabled {
+			metadata[checkpointMetadataCloudInitOff] = "true"
+		}
 	}
 	result = core.NativeCheckpointCreateResult{
 		ArtifactDir: paths.artifactDir,
@@ -1191,7 +1211,8 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		if err != nil {
 			return lease, err
 		}
-		if err := b.specializeLinuxCheckpointFork(ctx, cfg, firmware, name, leaseID, publicKey, hostname); err != nil {
+		keepCloudInitOff := strings.TrimSpace(req.Record.Metadata[checkpointMetadataCloudInitOff]) == "true"
+		if err := b.specializeLinuxCheckpointFork(ctx, cfg, firmware, name, leaseID, publicKey, hostname, keepCloudInitOff); err != nil {
 			return lease, err
 		}
 	} else {
