@@ -357,7 +357,12 @@ profile behavior.
 Credential-bearing coordinator requests follow redirects only when scheme,
 hostname, and effective port remain unchanged. The curl transport fallback
 does not follow redirects and disables ambient curl configuration before
-loading Crabbox's generated request config. Configure the CLI with the final
+loading Crabbox's generated request config. Native TLS certificate-verification
+failures are final: neither curl's CA configuration nor a read retry overrides
+the native verifier's rejection. Configure legitimate private CAs in the OS
+trust store, or through Go's supported `SSL_CERT_FILE`/`SSL_CERT_DIR` inputs on
+platforms that support them; a curl-only `CURL_CA_BUNDLE` does not override a
+rejected native TLS connection. Configure the CLI with the final
 canonical coordinator or Access-protected origin, not a redirecting alias.
 GitHub browser login follows the same destination rule by default: a callback
 origin that differs from the selected broker is rejected before browser open,

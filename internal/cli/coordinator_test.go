@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1451,6 +1453,9 @@ func TestCoordinatorCurlFallbackEligibility(t *testing.T) {
 		{"read deadline", &net.OpError{Op: "read", Net: "tcp", Err: context.DeadlineExceeded}, true, false, false},
 		{"cancellation", context.Canceled, true, false, false},
 		{"dial cancellation", &net.OpError{Op: "dial", Net: "tcp", Err: context.Canceled}, true, false, false},
+		{"TLS unknown authority", &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}, true, false, false},
+		{"TLS certificate policy", &tls.CertificateVerificationError{Err: x509.CertificateInvalidError{Reason: x509.Expired}}, true, false, false},
+		{"TLS hostname", &tls.CertificateVerificationError{Err: x509.HostnameError{}}, true, false, false},
 		{"no error", nil, false, false, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {

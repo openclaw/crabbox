@@ -3,13 +3,18 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -298,6 +303,44 @@ func TestCoordinatorReadCurlFallbackRejectsIneligibleRequests(t *testing.T) {
 					err, nativeCalls.Load(), curlCalls.Load(), wantCalls)
 			}
 		})
+	}
+}
+
+func TestCoordinatorReadDoesNotOverrideTLSVerificationWithCurl(t *testing.T) {
+	clearConfigEnv(t)
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl is not installed")
+	}
+	t.Setenv("NO_PROXY", "127.0.0.1")
+	t.Setenv("no_proxy", "127.0.0.1")
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+	certificate := server.Certificate()
+	ca := filepath.Join(t.TempDir(), "curl-only-ca.pem")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Curl would trust this server, but the native client's trust decision is authoritative.
+	t.Setenv("CURL_CA_BUNDLE", ca)
+	client := &CoordinatorClient{BaseURL: server.URL, Token: "synthetic-fixture-only", Client: &http.Client{}}
+	err := client.Health(t.Context())
+	var verification *tls.CertificateVerificationError
+	if !errors.As(err, &verification) || requests.Load() != 0 {
+		t.Fatalf("TLS rejection must not send an authenticated fallback: err=%v requests=%d", err, requests.Load())
+	}
+
+	// A private CA configured in the native verifier still works through the real request path.
+	roots := x509.NewCertPool()
+	roots.AddCert(certificate)
+	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}
+	defer transport.CloseIdleConnections()
+	client.Client = &http.Client{Transport: transport}
+	if err := client.Health(t.Context()); err != nil || requests.Load() != 1 {
+		t.Fatalf("native private CA request failed: err=%v requests=%d", err, requests.Load())
 	}
 }
 

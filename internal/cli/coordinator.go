@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3013,6 +3014,12 @@ func isCoordinatorTransportError(err error) bool {
 		return false
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	// TLS identity and trust rejections are final, including hardened verifier policy.
+	// A different transport or CA store must not override that decision.
+	var verification *tls.CertificateVerificationError
+	if errors.As(err, &verification) {
 		return false
 	}
 	var urlErr *url.Error

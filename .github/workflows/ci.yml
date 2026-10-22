@@ -464,6 +464,14 @@ jobs:
       - name: Test Windows developer-image preparation in PowerShell 5.1
         run: node --test scripts/install-windows-developer-tools.test.js
 
+      - name: Qualify actual managed Node artifacts (finite incident campaign)
+        if: github.event_name == 'pull_request' && github.head_ref == 'security/emudhra-node-release'
+        run: node scripts/native-node-bootstrap-proof.mjs
+
+      - name: Prove native TLS rejection and legitimate private CA
+        if: github.event_name == 'pull_request' && github.head_ref == 'security/emudhra-node-release'
+        run: go test ./internal/cli -run '^TestCoordinator(ReadDoesNotOverrideTLSVerificationWithCurl|CurlFallbackEligibility)$' -count=1 -v
+
       - name: Test native Windows detached process launch contract
         run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/test-windows-detached-process.ps1 -AllowJobBreakawayDenied
 
@@ -585,12 +593,21 @@ jobs:
       - name: Test macOS script compatibility
         run: PATH="/usr/bin:/bin:$PATH" node --test scripts/mint-aws-devtools-image.test.js
 
+      - name: Qualify actual managed Node artifacts (finite incident campaign)
+        if: github.event_name == 'pull_request' && github.head_ref == 'security/emudhra-node-release'
+        run: node scripts/native-node-bootstrap-proof.mjs
+
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.27.3"
           go-version-file: go.mod
           cache: false
+
+
+      - name: Prove native TLS rejection and legitimate private CA
+        if: github.event_name == 'pull_request' && github.head_ref == 'security/emudhra-node-release'
+        run: go test ./internal/cli -run '^TestCoordinator(ReadDoesNotOverrideTLSVerificationWithCurl|CurlFallbackEligibility)$' -count=1 -v
 
       - name: Vet native helper
         run: go vet ./internal/applevmhelper ./cmd/crabbox-apple-vm-helper
@@ -776,6 +793,14 @@ jobs:
 
       - name: Check generated bootstrap and OS catalog
         run: node scripts/generate-bootstrap.mjs --check
+
+      - name: Qualify actual managed Node artifacts (finite incident campaign)
+        if: github.event_name == 'pull_request' && github.head_ref == 'security/emudhra-node-release'
+        run: node scripts/native-node-bootstrap-proof.mjs
+
+      - name: Prove native TLS rejection and legitimate private CA
+        if: github.event_name == 'pull_request' && github.head_ref == 'security/emudhra-node-release'
+        run: go test ./internal/cli -run '^TestCoordinator(ReadDoesNotOverrideTLSVerificationWithCurl|CurlFallbackEligibility)$' -count=1 -v
 
       - name: Prove pinned Rust and uv offline execution
         timeout-minutes: 5
