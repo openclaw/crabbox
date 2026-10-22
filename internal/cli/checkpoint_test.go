@@ -59,11 +59,16 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 	cases := []struct {
 		name         string
 		reassignRepo bool
+		deleteClaim  bool
 		wantReleases int
 		wantRefusal  bool
+		wantAdopted  bool
 	}{
-		{name: "allowed same-owner successor reaches release", wantReleases: 1},
+		{name: "allowed same-owner successor reaches release", wantReleases: 1, wantAdopted: true},
 		{name: "forbidden reassigned owner never reaches deletion", reassignRepo: true, wantRefusal: true},
+		// Missing claim: keep carried snapshot; fenced release proceeds with it
+		// (this fake backend does not re-check the claim file).
+		{name: "missing claim keeps snapshot and proceeds to release", deleteClaim: true, wantReleases: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -86,13 +91,20 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 			}
 			server := Server{Provider: "aws", CloudID: "i-123"}
 			SetServerLeaseClaimSnapshot(&server, acquired, true)
-			next := acquired
-			next.Labels = map[string]string{"run": "kept"}
-			if tc.reassignRepo {
-				next.RepoRoot = filepath.Join(t.TempDir(), "hijacked")
-			}
-			if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, next); err != nil {
-				t.Fatal(err)
+			switch {
+			case tc.deleteClaim:
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				next := acquired
+				next.Labels = map[string]string{"run": "kept"}
+				if tc.reassignRepo {
+					next.RepoRoot = filepath.Join(t.TempDir(), "hijacked")
+				}
+				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, next); err != nil {
+					t.Fatal(err)
+				}
 			}
 			backend := &checkpointForkReleaseBackend{leaseID: leaseID}
 			var stderr bytes.Buffer
@@ -120,8 +132,17 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 				}
 				return
 			}
-			if !set || !exists || got.RepoRoot != repoRoot || got.Labels["run"] != "kept" {
-				t.Fatalf("snapshot=%#v, want same-owner successor", got)
+			if !set || !exists || got.RepoRoot != repoRoot {
+				t.Fatalf("snapshot=%#v", got)
+			}
+			if tc.wantAdopted {
+				if got.Labels["run"] != "kept" || got.Revision == acquired.Revision {
+					t.Fatalf("snapshot=%#v, want adopted same-owner successor", got)
+				}
+				return
+			}
+			if got.Revision != acquired.Revision || got.Labels["run"] != "" {
+				t.Fatalf("snapshot=%#v, want unchanged carried acquisition claim", got)
 			}
 		})
 	}

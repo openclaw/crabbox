@@ -479,6 +479,36 @@ func TestShardCapacityWait(t *testing.T) {
 		}
 	})
 
+	t.Run("in-flight create is not canceled by capacity deadline", func(t *testing.T) {
+		started := make(chan struct{})
+		provision := func(ctx context.Context, _ int, _ string) (checkpointForkProvision, error) {
+			close(started)
+			select {
+			case <-time.After(80 * time.Millisecond):
+			case <-ctx.Done():
+				return checkpointForkProvision{}, ctx.Err()
+			}
+			if err := ctx.Err(); err != nil {
+				return checkpointForkProvision{}, err
+			}
+			return checkpointForkProvision{Lease: LeaseTarget{LeaseID: "cbx_slowcreate01"}, Release: func(context.Context) {}}, nil
+		}
+		opts := shardTestOptions(1)
+		opts.CapacityWait = 20 * time.Millisecond
+		lease, err := App{Stdout: io.Discard, Stderr: io.Discard}.provisionShardWithCapacityRetry(context.Background(), &shardOutputMux{}, opts, 1, "slug", provision)
+		select {
+		case <-started:
+		default:
+			t.Fatal("provision never started")
+		}
+		if err != nil {
+			t.Fatalf("slow create canceled by capacity deadline: %v", err)
+		}
+		if lease.Lease.LeaseID != "cbx_slowcreate01" {
+			t.Fatalf("lease=%s", lease.Lease.LeaseID)
+		}
+	})
+
 	t.Run("fail-fast cancels waiter", func(t *testing.T) {
 		enteredWait := make(chan struct{})
 		base := newShardTestProvisioner()

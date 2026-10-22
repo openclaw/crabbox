@@ -409,11 +409,11 @@ func (a App) provisionShardWithCapacityRetry(ctx context.Context, mux *shardOutp
 			}
 			return checkpointForkProvision{}, fmt.Errorf("capacity wait exhausted after %s", budget)
 		}
-		// Bound each create by the capacity deadline while still honoring parent
-		// cancel / fail-fast. Adapters mint a fresh lease ID per attempt.
-		attemptCtx, cancel := context.WithDeadline(ctx, deadline)
-		lease, err := provision(attemptCtx, index, slug)
-		cancel()
+		// Do not bound the create with the capacity deadline: a slow but successful
+		// provision (for example a long AWS boot) must not be canceled mid-flight.
+		// Parent ctx still carries fail-fast / interrupt cancel. Adapters mint a
+		// fresh lease ID per attempt.
+		lease, err := provision(ctx, index, slug)
 		if err == nil {
 			return lease, nil
 		}
