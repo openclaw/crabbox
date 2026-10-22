@@ -9,7 +9,7 @@ import path from "node:path";
 // Use the exact workerd/Miniflare dependency owned by the locked Wrangler install.
 const require = createRequire(import.meta.url);
 const wrangler = createRequire(require.resolve("wrangler/package.json"));
-const { Miniflare } = wrangler("miniflare");
+const { Miniflare, convertV4MiniflareOptions } = wrangler("miniflare");
 const output = await fs.mkdtemp(path.join(os.tmpdir(), "capacity-workerd-"));
 execFileSync(process.execPath, [
   path.join(path.dirname(require.resolve("wrangler/package.json")), "bin/wrangler.js"),
@@ -19,14 +19,14 @@ execFileSync(process.execPath, [
 const bundles = (await fs.readdir(output)).filter((name) => name.endsWith(".js"));
 assert.equal(bundles.length, 1);
 const script = await fs.readFile(path.join(output, bundles[0]), "utf8");
-const mf = new Miniflare({
+const mf = new Miniflare(convertV4MiniflareOptions({
   modules: true,
   script,
   compatibilityDate: "2026-04-30",
   compatibilityFlags: ["nodejs_compat"],
   cf: false,
   durableObjects: { CAPACITY: { className: "CapacityProof", useSQLite: true } },
-});
+}));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 try {
   const namespace = await mf.getDurableObjectNamespace("CAPACITY");
@@ -85,7 +85,7 @@ try {
     seeded: 5001,
     controlMs,
     mixedTraffic: { attempts: 40, successful, conflicts: 40 - successful },
-    stats,
+    stats: { gets: stats.gets, lists: stats.lists.length, prefixes: [...new Set(stats.lists)] },
     nativeLifecycleEvents: ["heartbeat", "finish"],
     syntheticOnly: true,
   }));
