@@ -294,7 +294,19 @@ try {
       );
     if (!resumedIDs.has(ordinaryID))
       await request("POST", "/v1/leases", leaseInput(ordinaryID, "existing-ordinary"), true, 201);
-    const oldRead = await request("GET", "/v1/leases/" + oldID);
+    async function readReadyOldLease(deadline) {
+      const value = await request("GET", "/v1/leases/" + oldID);
+      const readiness = value.lease.lifetimePolicy?.readiness;
+      assert.notEqual(readiness?.status, "failed", readiness?.error);
+      if (readiness?.status === "ready") {
+        assert.equal(readiness.identity, "i-00000000000000001:vol-00000000000000001:/dev/sda1");
+        return value;
+      }
+      assert.ok(Date.now() < deadline, "old lifetime readiness timed out");
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return readReadyOldLease(deadline);
+    }
+    const oldRead = await readReadyOldLease(Date.now() + 30_000);
     await request("GET", "/v1/admin/leases/" + oldID + "/lifetime-readback", undefined, true);
     await stop();
     const before = await snapshot("before-upgrade");

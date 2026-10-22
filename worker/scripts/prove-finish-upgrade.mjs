@@ -5,6 +5,7 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 import { build } from "esbuild";
 import { Pool } from "pg";
@@ -56,6 +57,7 @@ const fixture = await fs.readFile(
   "utf8",
 );
 async function bundle(label, checkout, revision) {
+  report.phase = "bundle-" + label;
   const outdir = path.join(evidence, label);
   await fs.mkdir(outdir, { mode: 0o700 });
   await fs.symlink(path.join(checkout, "worker/node_modules"), path.join(outdir, "node_modules"));
@@ -103,6 +105,7 @@ async function bundle(label, checkout, revision) {
   return outfile;
 }
 async function start(file, phase, fresh = false) {
+  report.phase = "start-" + phase;
   const privatePath = path.join(evidence, phase + "-private.json");
   await fs.writeFile(
     privatePath,
@@ -142,6 +145,7 @@ async function start(file, phase, fresh = false) {
 }
 async function stop() {
   if (!active) return;
+  report.phase = "stop-" + active.phase;
   const state = active;
   if (state.child.exitCode === null && state.child.signalCode === null) state.child.kill("SIGTERM");
   let timer;
@@ -181,6 +185,7 @@ const record = (rows, key) => {
   return JSON.parse(row.value_text ?? JSON.stringify(row.value));
 };
 async function request(method, route, body, expected = 200, raw = false) {
+  report.phase = "request-" + active.phase;
   const response = await fetch(active.origin + route, {
     method,
     headers: {
@@ -335,6 +340,7 @@ async function admit(id, label, leaseID) {
   return { id, run, receipt, body, envelope, file };
 }
 async function cli(label, original, recover = true, binary = config.cli) {
+  report.phase = "cli-" + label;
   const home = path.join(evidence, "home-" + label);
   await fs.mkdir(home, { mode: 0o700 });
   const args = [
@@ -403,6 +409,85 @@ const relevant = (rows) =>
   );
 const legacyRows = (rows) =>
   rows.filter((r) => [legacyLease, legacyID].some((id) => r.key.includes(id)));
+async function waitForLegacyIndexes(deadline) {
+  const keys = ["lease-maintenance-state", "lease-current-state"];
+  const rows = (
+    await pools.upgrade.query(
+      "select key,value from crabbox.coordinator_kv where key = any($1::text[])",
+      [keys],
+    )
+  ).rows;
+  if (
+    keys.every((key) =>
+      rows.some(
+        (row) => row.key === key && row.value?.version === 1 && row.value.complete === true,
+      ),
+    )
+  )
+    return;
+  assert.ok(Date.now() < deadline, "old lease index maintenance did not complete");
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  return waitForLegacyIndexes(deadline);
+}
+function legacyDifferenceReport(before, after) {
+  const prior = new Map(legacyRows(before).map((row) => [row.key, row]));
+  const current = new Map(legacyRows(after).map((row) => [row.key, row]));
+  const families = new Set(["lease", "run", "lease-maintenance", "lease-current"]);
+  const fields = [
+    "state",
+    "updatedAt",
+    "lastUsedAt",
+    "expiresAt",
+    "ttlSeconds",
+    "idleTimeoutSeconds",
+    "workRoot",
+    "keep",
+    "lifetimePolicy",
+    "attribution",
+    "attributionVersion",
+    "eventCount",
+    "terminalReceipt",
+    "log",
+    "logChunks",
+    "logTruncated",
+  ];
+  const changes = [...new Set([...prior.keys(), ...current.keys()])]
+    .filter((key) => !isDeepStrictEqual(prior.get(key), current.get(key)))
+    .map((key) => {
+      const a = prior.get(key);
+      const b = current.get(key);
+      const family = key.split(":")[0];
+      return {
+        role: key.includes(legacyLease) ? "legacy-lease" : "legacy-run",
+        family: families.has(family) ? family : "other",
+        change: !a ? "added" : !b ? "removed" : "changed",
+        equal: Object.fromEntries(
+          ["value", "value_text", "updated_at", "value_text_updated_at"].map((field) => [
+            field,
+            isDeepStrictEqual(a?.[field], b?.[field]),
+          ]),
+        ),
+        changedBusinessFields: fields.filter(
+          (field) => !isDeepStrictEqual(a?.value?.[field], b?.value?.[field]),
+        ),
+      };
+    });
+  const indexes = (rows) =>
+    Object.fromEntries(
+      ["lease-maintenance-state", "lease-current-state"].map((key) => {
+        const state = rows.find((row) => row.key === key)?.value;
+        return [
+          key,
+          {
+            present: state !== undefined,
+            versionValid: state?.version === 1,
+            complete: state?.complete === true,
+          },
+        ];
+      }),
+    );
+  return { changes, indexesBefore: indexes(before), indexesAfter: indexes(after) };
+}
 try {
   // Only an initialized-but-empty predecessor may continue after a transport
   // setup failure. Never replay a create or reset a database with business rows.
@@ -458,6 +543,8 @@ try {
   await request("POST", "/v1/runs/" + legacy.id + "/finish", legacy.body, 200, true);
   await cli("old-legacy-read", legacy, false, config.oldCLI);
   const pending = await admit(pendingID, "old-pending", pendingLease);
+  // Snapshot settled old-version indexes, not partially completed background work.
+  await waitForLegacyIndexes(Date.now() + 90_000);
   await stop();
   const before = await snapshot("before-upgrade");
   const settings = record(before, "lease:" + legacyLease);
@@ -476,6 +563,7 @@ try {
   await cli("upgraded-recovery", pending);
   await stop();
   const committed = await snapshot("after-upgrade");
+  report.legacyDifferences = legacyDifferenceReport(before, committed);
   assert.deepEqual(legacyRows(committed), legacyRows(before));
   const terminal = record(committed, "run:" + pendingID);
   assert.equal(terminal.state, "succeeded");
@@ -508,6 +596,13 @@ try {
 } catch (error) {
   report.status = "failed";
   report.error = String(error.stack ?? error);
+  report.failure = {
+    phase: report.phase,
+    kind: error instanceof assert.AssertionError ? "assertion" : "runtime",
+    line: /prove-finish-upgrade\.mjs:(\d+):/.exec(String(error.stack))?.[1],
+    ...(typeof error.actual === "number" ? { actual: error.actual } : {}),
+    ...(typeof error.expected === "number" ? { expected: error.expected } : {}),
+  };
   process.exitCode = 1;
 } finally {
   try {
