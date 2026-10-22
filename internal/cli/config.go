@@ -501,7 +501,8 @@ type ResultsConfig struct {
 }
 
 type ShardConfig struct {
-	MaxCount int
+	MaxCount       int
+	MaxConcurrency int
 }
 
 type CacheConfig struct {
@@ -2202,7 +2203,8 @@ type fileResultsConfig struct {
 }
 
 type fileShardConfig struct {
-	MaxCount *int `yaml:"maxCount,omitempty"`
+	MaxCount       *int `yaml:"maxCount,omitempty"`
+	MaxConcurrency *int `yaml:"maxConcurrency,omitempty"`
 }
 
 type fileCacheConfig struct {
@@ -3658,9 +3660,15 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Results.Auto, file.Results.Auto))
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Results.FailOnFailures, file.Results.FailOnFailures))
 	}
-	if file.Shard != nil && file.Shard.MaxCount != nil {
-		cfg.Shard.MaxCount = *file.Shard.MaxCount
-		recordConfigInput(cfg, configInputGeneric, inputSource, true)
+	if file.Shard != nil {
+		if file.Shard.MaxCount != nil {
+			cfg.Shard.MaxCount = *file.Shard.MaxCount
+			recordConfigInput(cfg, configInputGeneric, inputSource, true)
+		}
+		if file.Shard.MaxConcurrency != nil {
+			cfg.Shard.MaxConcurrency = *file.Shard.MaxConcurrency
+			recordConfigInput(cfg, configInputGeneric, inputSource, true)
+		}
 	}
 	if file.Cache != nil {
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Cache.Pnpm, file.Cache.Pnpm))

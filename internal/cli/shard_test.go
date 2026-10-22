@@ -101,7 +101,7 @@ func (e *shardTestExecutor) call(index int) []string {
 }
 
 func shardTestOptions(count int) shardOptions {
-	return shardOptions{Checkpoint: "chk_test", Count: count, ResultsWired: true, Command: []string{"pnpm", "test"}}
+	return shardOptions{Checkpoint: "chk_test", Count: count, Concurrency: count, ResultsWired: true, Command: []string{"pnpm", "test"}}
 }
 
 func recordedOutcome(exitCode int, results *TestResultSummary) shardRunOutcome {
@@ -196,6 +196,47 @@ func TestShardFailFastCancelsSiblings(t *testing.T) {
 	}
 	if _, releases := provisioner.stats(); releases != 3 {
 		t.Fatalf("releases=%d, want every provisioned shard released", releases)
+	}
+}
+
+func TestShardFailFastSkipsWaitersWithoutProvisioning(t *testing.T) {
+	provisioner := newShardTestProvisioner()
+	executor := newShardTestExecutor()
+	executor.started = make(chan int, 4)
+	executor.unblock = make(chan struct{})
+	for i := 1; i <= 4; i++ {
+		executor.block[i] = true
+		executor.outcomes[i] = recordedOutcome(1, nil)
+	}
+	opts := shardTestOptions(4)
+	opts.Concurrency = 1
+	opts.FailFast = true
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
+	done := make(chan error, 1)
+	go func() {
+		done <- app.shardRun(context.Background(), opts, &shardOutputMux{}, provisioner.provision, executor.run)
+	}()
+	select {
+	case <-executor.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first shard did not start")
+	}
+	close(executor.unblock)
+	err := <-done
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 1 {
+		t.Fatalf("err=%v, want exit 1", err)
+	}
+	if !strings.Contains(stdout.String(), "canceled=") {
+		t.Fatalf("verdict missing canceled shards:\n%s", stdout.String())
+	}
+	provisions, releases := provisioner.stats()
+	if provisions != releases {
+		t.Fatalf("provisions=%d releases=%d, want matching cleanup", provisions, releases)
+	}
+	if provisions != 1 {
+		t.Fatalf("provisions=%d, want exactly one under concurrency 1 fail-fast", provisions)
 	}
 }
 
@@ -540,6 +581,7 @@ func TestShardRejectsInvalidArgs(t *testing.T) {
 	}{
 		{name: "missing count", args: []string{"--from", "chk_1", "--", "pnpm", "test"}, want: "--count must be at least 1"},
 		{name: "zero count", args: []string{"--count", "0", "--from", "chk_1", "--", "pnpm", "test"}, want: "--count must be at least 1"},
+		{name: "zero concurrency", args: []string{"--count", "2", "--concurrency", "0", "--from", "chk_1", "--", "pnpm", "test"}, want: "--concurrency must be at least 1"},
 		{name: "missing from", args: []string{"--count", "2", "--", "pnpm", "test"}, want: "usage: crabbox shard"},
 		{name: "missing command", args: []string{"--count", "2", "--from", "chk_1"}, want: "usage: crabbox shard"},
 		{name: "positional argument", args: []string{"--count", "2", "--from", "chk_1", "stray", "--", "pnpm", "test"}, want: "place the command after --"},
@@ -581,6 +623,137 @@ func TestShardMaxCountCap(t *testing.T) {
 	}
 }
 
+func TestShardMaxConcurrencyCap(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "crabbox.yaml")
+	if err := os.WriteFile(configPath, []byte("shard:\n  maxConcurrency: 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+	store, err := defaultCheckpointStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, _, err := store.Reserve(checkpointRecord{ID: "chk_shard_conc_cap", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	err = app.shard(context.Background(), []string{"--count", "4", "--concurrency", "3", "--from", record.ID, "--", "pnpm", "test"})
+	if err == nil || !strings.Contains(err.Error(), "--concurrency 3 exceeds shard.maxConcurrency 2") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestResolveShardConcurrency(t *testing.T) {
+	cases := []struct {
+		name           string
+		count          int
+		flag           int
+		flagSet        bool
+		maxConcurrency int
+		want           int
+		wantErr        string
+	}{
+		{name: "default all", count: 8, want: 8},
+		{name: "flag bounds", count: 8, flag: 3, flagSet: true, want: 3},
+		{name: "flag above count clamps", count: 4, flag: 9, flagSet: true, want: 4},
+		{name: "config bounds default", count: 8, maxConcurrency: 2, want: 2},
+		{name: "flag within config", count: 8, flag: 2, flagSet: true, maxConcurrency: 4, want: 2},
+		{name: "flag exceeds config", count: 8, flag: 5, flagSet: true, maxConcurrency: 2, wantErr: "--concurrency 5 exceeds shard.maxConcurrency 2"},
+		{name: "zero flag", count: 4, flag: 0, flagSet: true, wantErr: "--concurrency must be at least 1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveShardConcurrency(tc.count, tc.flag, tc.flagSet, tc.maxConcurrency)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err=%v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveShardConcurrency: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("concurrency=%d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShardBoundsInFlightConcurrency(t *testing.T) {
+	provisioner := newShardTestProvisioner()
+	executor := newShardTestExecutor()
+	executor.started = make(chan int, 8)
+	executor.unblock = make(chan struct{})
+	var (
+		mu       sync.Mutex
+		inFlight int
+		peak     int
+	)
+	track := func(delta int) {
+		mu.Lock()
+		defer mu.Unlock()
+		inFlight += delta
+		if inFlight > peak {
+			peak = inFlight
+		}
+	}
+	provision := func(ctx context.Context, index int, slug string) (checkpointForkProvision, error) {
+		track(1)
+		defer track(-1)
+		return provisioner.provision(ctx, index, slug)
+	}
+	run := func(ctx context.Context, index int, runArgs []string, outcome *shardRunOutcome) error {
+		track(1)
+		defer track(-1)
+		return executor.run(ctx, index, runArgs, outcome)
+	}
+	for i := 1; i <= 6; i++ {
+		executor.block[i] = true
+		executor.outcomes[i] = recordedOutcome(0, nil)
+	}
+	opts := shardTestOptions(6)
+	opts.Concurrency = 2
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	done := make(chan error, 1)
+	go func() {
+		done <- app.shardRun(context.Background(), opts, &shardOutputMux{}, provision, run)
+	}()
+	seen := map[int]bool{}
+	for len(seen) < 2 {
+		select {
+		case index := <-executor.started:
+			seen[index] = true
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d of first 2 shards started", len(seen))
+		}
+	}
+	select {
+	case index := <-executor.started:
+		t.Fatalf("third shard %d started before a slot was free", index)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(executor.unblock)
+	if err := <-done; err != nil {
+		t.Fatalf("shardRun: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if peak > 2 {
+		t.Fatalf("peak in-flight=%d, want at most 2", peak)
+	}
+	if peak < 2 {
+		t.Fatalf("peak in-flight=%d, want to observe concurrency 2", peak)
+	}
+	provisions, releases := provisioner.stats()
+	if provisions != 6 || releases != 6 {
+		t.Fatalf("provisions=%d releases=%d, want 6/6", provisions, releases)
+	}
+}
+
 func TestShardDryRunPrintsPlan(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
@@ -603,7 +776,7 @@ func TestShardDryRunPrintsPlan(t *testing.T) {
 	}
 	out := stdout.String()
 	for _, want := range []string{
-		`would shard checkpoint id=chk_shard_dry`,
+		`would shard checkpoint id=chk_shard_dry provider=local-container count=2 concurrency=2 keep=false`,
 		`slug=suite-1 keep=false index=1/2 command="pnpm test -- --shard 1/2"`,
 		`slug=suite-2 keep=false index=2/2 command="pnpm test -- --shard 2/2"`,
 	} {

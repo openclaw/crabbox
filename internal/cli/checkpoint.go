@@ -1652,7 +1652,14 @@ func (a App) provisionCheckpointForkWithoutClaim(ctx context.Context, cfg Config
 	var releaseOnce sync.Once
 	release := func(releaseCtx context.Context) {
 		releaseOnce.Do(func() {
-			a.releaseBackendLeaseBestEffort(releaseCtx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
+			releaseLease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}
+			// run --keep (shard/fork command fan-out) rewrites the claim after
+			// acquire. Refresh the carried snapshot so release does not fail
+			// closed on an expected-claim mismatch and leave the box running.
+			if claim, err := ReadLeaseClaim(leaseID); err == nil && strings.TrimSpace(claim.LeaseID) != "" {
+				SetServerLeaseClaimSnapshot(&releaseLease.Server, claim, true)
+			}
+			a.releaseBackendLeaseBestEffort(releaseCtx, sshBackend, cfg, releaseLease)
 		})
 	}
 	rollback := func() {

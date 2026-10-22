@@ -140,10 +140,13 @@ attempts, or test shards that should start from prepared state:
 ```sh
 crabbox providers recommend fanout-testing
 crabbox checkpoint fork <checkpoint-id> --count 4
+crabbox shard --count 8 --concurrency 3 --from <checkpoint-id> --results-auto -- pnpm test -- --shard '{{index}}/{{total}}'
 ```
 
-This is provider-neutral checkpoint and fork routing. It is not a guarantee of
-live-memory microVM forking.
+`checkpoint fork` creates leases serially. `shard` runs them with one merged
+verdict and optional `--concurrency` so large fan-outs stay within provider
+quotas or host capacity. This is provider-neutral checkpoint and fork routing.
+It is not a guarantee of live-memory microVM forking.
 
 ## Run GPU Workloads
 
