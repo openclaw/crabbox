@@ -170,6 +170,11 @@ ordered list of additional ports the CLI tries when the primary is unreachable,
 typically because the operator's egress is restricted, sshd has not bound the
 new port yet, or cloud-init is still mid-flight.
 
+For Static SSH targets, an explicit `static.port`, `ssh.port`, or corresponding
+flag/environment setting selects only that port, even if fallback ports are
+configured. With no explicit port, the default fallback behavior remains,
+including for localhost. Always select a port for a forwarded static endpoint.
+
 For coordinator leases, an explicit `--ssh-port`, `ssh.port`, or
 `CRABBOX_SSH_PORT` selects exactly one of the lease's advertised ports. An
 unadvertised port is rejected, and command delivery never retries on another
