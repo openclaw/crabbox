@@ -133,9 +133,9 @@ resource and deletion evidence are preserved independently.
 Read-only lease lookups (including authoritative provider metadata), lease
 lists and audits, pool inventory, run history/events/logs, health, identity, and
 provider readiness use a 60-second total read budget. Each attempt allows
-30 seconds, including authentication, response-body reads, and any eligible
-read-only curl fallback for explicitly configured HTTP coordinator targets.
-HTTPS targets retain the native transport and verifier on every attempt.
+30 seconds, including authentication and response-body reads.
+HTTP and HTTPS targets retain the native transport, proxy configuration and
+verifier on every attempt; the CLI never switches automatically to external curl.
 An earlier caller deadline always wins, and cancellation interrupts both requests
 and backoff waits.
 

@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os/exec"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -294,48 +293,5 @@ func TestCoordinatorReadRetryAfterParsingAndConnectionReset(t *testing.T) {
 	}
 	if got := coordinatorReadRetryReason(&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}); got != "connection_reset" {
 		t.Fatalf("reset reason=%q", got)
-	}
-}
-
-func TestCoordinatorReadRetryCurlResponsePolicy(t *testing.T) {
-	t.Setenv("CRABBOX_OWNER", "alice@example.test")
-	t.Setenv("NO_PROXY", "127.0.0.1")
-	t.Setenv("no_proxy", "127.0.0.1")
-	if _, err := exec.LookPath("curl"); err != nil {
-		t.Skip("curl is unavailable")
-	}
-	for _, status := range []int{404, 429} {
-		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			var calls atomic.Int32
-			times := make(chan time.Time, 2)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				times <- time.Now()
-				if calls.Add(1) == 1 {
-					w.Header().Set("Retry-After", "2")
-					http.Error(w, "fallback response", status)
-					return
-				}
-				io.WriteString(w, `{"lease":{"id":"cbx_read"}}`)
-			}))
-			defer server.Close()
-			c := &CoordinatorClient{BaseURL: server.URL, readRetryWriter: io.Discard, Client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				return nil, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
-			})}}
-			lease, err := c.GetLease(t.Context(), "cbx_read")
-			if status == 404 {
-				var response CoordinatorHTTPError
-				if !errors.As(err, &response) || response.StatusCode != 404 || calls.Load() != 1 {
-					t.Fatalf("err=%v calls=%d", err, calls.Load())
-				}
-			} else {
-				if err != nil || lease.ID != "cbx_read" || calls.Load() != 2 {
-					t.Fatalf("lease=%s err=%v calls=%d", lease.ID, err, calls.Load())
-				}
-				first, second := <-times, <-times
-				if delay := second.Sub(first); delay < 2*time.Second || delay > 4*time.Second {
-					t.Fatalf("fallback Retry-After delay=%s", delay)
-				}
-			}
-		})
 	}
 }

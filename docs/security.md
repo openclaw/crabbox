@@ -355,21 +355,15 @@ profile behavior.
 ### Credential destinations and diagnostics
 
 Credential-bearing coordinator requests follow redirects only when scheme,
-hostname, and effective port remain unchanged. HTTPS coordinator requests always
-use the native transport and its verifier, including retries after interrupted
-handshakes. The curl transport fallback is restricted to explicitly configured
-HTTP coordinator targets, does not follow redirects and disables ambient curl configuration before
-loading Crabbox's generated request config. Native TLS certificate-verification
-failures are final: neither curl's CA configuration nor a read retry overrides
-the native verifier's rejection. Configure legitimate private CAs in the OS
-trust store, or through Go's supported `SSL_CERT_FILE`/`SSL_CERT_DIR` inputs on
-platforms that support them; a curl-only `CURL_CA_BUNDLE` does not override a
-rejected native TLS connection. HTTPS endpoints that previously depended on
-curl-specific trust or proxy behavior must configure the native runtime's trust
-or proxy settings instead. HTTP fallback may still use an HTTPS proxy with
-curl's verifier; this policy does not establish equivalent proxy TLS rejection.
-Configure the CLI with the final
-canonical coordinator or Access-protected origin, not a redirecting alias.
+hostname, and effective port remain unchanged. All coordinator requests use the
+native HTTP transport, proxy configuration and TLS verifier, including retries
+after interrupted handshakes. There is no automatic external curl fallback.
+Configure legitimate private CAs in the OS trust store, or through Go's supported
+`SSL_CERT_FILE`/`SSL_CERT_DIR` inputs on platforms that support them. A curl-only
+`CURL_CA_BUNDLE` has no effect. Operators previously relying on curl-specific
+trust, proxy or connectivity behavior must repair the native configuration.
+Configure the CLI with the final canonical coordinator or Access-protected
+origin, not a redirecting alias.
 GitHub browser login follows the same destination rule by default: a callback
 origin that differs from the selected broker is rejected before browser open,
 polling, or config write. Operators who are deliberately migrating between
