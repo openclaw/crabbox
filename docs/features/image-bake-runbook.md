@@ -613,8 +613,10 @@ as described below. Completion markers are availability hints, not authenticatio
 Before cache or network preparation, the pinned Node route checks all six
 public aliases: `node`, `npm`, `npx`, `corepack`, `pnpm`, and `pnpx`. It repeats
 the check before replacing the image toolcache slot. Each alias must be absent
-or an absolute symlink to its same-named binary in the exact Node 24.22.1 x64
-slot; dangling matching links are allowed. Files, directories, and other link
+or an absolute symlink to its same-named binary in
+`/opt/hostedtoolcache/node/24.19.0/x64/bin` (the released predecessor) or
+`/opt/hostedtoolcache/node/24.22.1/x64/bin` (the current slot); dangling matching
+links are allowed. Files, directories, and other link
 targets stop the bake with a resolve-before-rebake diagnostic. Relative aliases,
 including those from earlier unshipped builder revisions, require operator
 resolution rather than automatic ownership inference.
@@ -624,6 +626,8 @@ installer publishes each public alias using a private temporary symlink and
 rename, then prepares the selected pnpm version without running public
 `corepack enable`. Existing public `yarn` and `yarnpkg` entries remain untouched.
 Each alias replacement is atomic; the six replacements are not one transaction.
+Publication replaces accepted 24.19.0 aliases with 24.22.1 links; old managed
+trees and cached archives remain intact.
 
 Public archives are retained under `/opt/crabbox/toolchain-archives`:
 
@@ -664,10 +668,11 @@ Node 22; it does not authorize other downgrades or change the default Node 24
 route. APT failure or a failed installed-package version, architecture, or
 package-owned binary check leaves the owned links and caches intact.
 
-Only after those checks does the installer recheck and remove its six exact
-Node 24.22.1 toolcache symlinks, including dangling ones. Operator files,
-nonmatching symlinks, and cached archives and trees remain intact. It clears the
-shell command cache and checks normal PATH selection before preparing Corepack.
+Only after those checks does the installer recheck the aliases identified before
+APT and remove only same-name absolute links into the Node 24.19.0 or 24.22.1
+toolcache slot, including dangling ones. Operator files, nonmatching symlinks,
+and cached archives and trees remain intact. It clears the shell command cache
+and checks normal PATH selection before preparing Corepack.
 A conflicting operator-provided Node stops the rebake with a PATH diagnostic
 rather than being deleted. The alternate toolchain must provide npm and Corepack;
 this does not add packaging for newer Node majors.
