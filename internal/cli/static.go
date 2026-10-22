@@ -134,14 +134,9 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-// staticSSHFallbackPorts keeps an explicitly configured static port from
-// falling back to another port. A static host is often 127.0.0.1 behind a
-// port-forward, where port 22 is the operator's own sshd. Explicit
-// ssh.fallbackPorts remain an opt-in.
+// staticSSHFallbackPorts keeps an explicitly selected endpoint exclusive.
+// Another port on the same host can reach a different machine through a forward.
 func staticSSHFallbackPorts(cfg Config, fallback []string) []string {
-	if cfg.sshFallbackPortsExplicit {
-		return append([]string{}, cfg.explicitSSHFallbackPorts...)
-	}
 	if strings.TrimSpace(cfg.Static.Port) != "" || IsSSHPortExplicit(&cfg) {
 		return []string{}
 	}
