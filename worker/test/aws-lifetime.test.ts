@@ -18,6 +18,9 @@ function fixture(
     dryRunDenied?: boolean;
     dryRunAcceptedNormally?: boolean;
     volumeMissing?: boolean;
+    movedVolume?: boolean;
+    detachedVolume?: boolean;
+    volumeDenied?: boolean;
   } = {},
 ) {
   const actions: string[] = [];
@@ -44,6 +47,11 @@ function fixture(
         return xml(
           `<DescribeInstanceTypesResponse><instanceTypeSet><item><instanceType>m7i.large</instanceType><instanceStorageSupported>${options.localDisk ? "true" : "false"}</instanceStorageSupported></item></instanceTypeSet></DescribeInstanceTypesResponse>`,
         );
+      if (action === "DescribeVolumes" && options.volumeDenied)
+        return xml(
+          "<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>private details</Message></Error></Errors></Response>",
+          403,
+        );
       if (action === "DescribeVolumes" && options.volumeMissing)
         return xml(
           "<Response><Errors><Error><Code>InvalidVolume.NotFound</Code><Message>missing</Message></Error></Errors></Response>",
@@ -51,7 +59,7 @@ function fixture(
         );
       if (action === "DescribeVolumes")
         return xml(
-          `<DescribeVolumesResponse><volumeSet><item><volumeId>${volumeID}</volumeId><tagSet><item><key>lease</key><value>${options.wrongVolumeOwner ? "another-lease" : leaseID}</value></item></tagSet><attachmentSet><item><instanceId>${instanceID}</instanceId><device>/dev/sda1</device><status>attached</status></item></attachmentSet></item></volumeSet></DescribeVolumesResponse>`,
+          `<DescribeVolumesResponse><volumeSet><item><volumeId>${volumeID}</volumeId><tagSet><item><key>lease</key><value>${options.wrongVolumeOwner ? "another-lease" : leaseID}</value></item></tagSet><attachmentSet>${options.detachedVolume ? "" : "<item><instanceId>" + (options.movedVolume ? "i-fffffffffffffffff" : instanceID) + "</instanceId><device>/dev/sda1</device><status>attached</status></item>"}</attachmentSet></item></volumeSet></DescribeVolumesResponse>`,
         );
       if (
         action === "StopInstances" &&
@@ -174,4 +182,24 @@ describe("AWS lifetime stop", () => {
       f.client.withLeaseOperation((session) => session.confirmRetainedVolumeDeleted(identity)),
     ).rejects.toThrow("not been confirmed");
   });
+});
+
+it.each([{ movedVolume: true }, { wrongVolumeOwner: true }, { volumeDenied: true }])(
+  "refuses original disk presence after attachment, ownership or authority changes: %j",
+  async (options) => {
+    const f = fixture(options);
+    await expect(
+      f.client.withLeaseOperation((session) => session.retainedVolumePresent(identity, leaseID)),
+    ).rejects.toThrow(/attachment changed|ownership mismatch|UnauthorizedOperation/);
+    expect(f.actions).toEqual(["GetCallerIdentity", "DescribeVolumes"]);
+    expect(f.requests[1]!.get("VolumeId.1")).toBe(volumeID);
+  },
+);
+it("reports a detached original disk as present without modifying it", async () => {
+  const f = fixture({ detachedVolume: true });
+  await expect(
+    f.client.withLeaseOperation((session) => session.retainedVolumePresent(identity, leaseID)),
+  ).resolves.toBe(true);
+  expect(f.actions).toEqual(["GetCallerIdentity", "DescribeVolumes"]);
+  expect(f.requests[1]!.get("VolumeId.1")).toBe(volumeID);
 });
