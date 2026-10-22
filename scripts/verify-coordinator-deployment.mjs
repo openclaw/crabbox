@@ -1,20 +1,39 @@
+import { setTimeout as sleepFor } from "node:timers/promises";
+
 // Keep the API token on Cloudflare's API origin; the public health request is anonymous.
-export async function verifyCoordinatorDeployment({ accountId, apiToken, sha, fetchImpl = fetch }) {
+export async function verifyCoordinatorDeployment({
+  accountId,
+  apiToken,
+  sha,
+  fetchImpl = fetch,
+  timeoutMs = 180_000,
+  pollIntervalMs = 5_000,
+  now = () => performance.now(),
+  sleep = sleepFor,
+}) {
   if (!/^[a-f0-9]{32}$/.test(accountId ?? "") || !apiToken) {
     throw new Error("Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN before verification.");
   }
   if (!/^[a-f0-9]{40}$/.test(sha ?? "")) {
     throw new Error("GITHUB_SHA must be the full commit SHA deployed to the coordinator.");
   }
+  if (
+    !Number.isFinite(timeoutMs) ||
+    timeoutMs < 0 ||
+    !Number.isFinite(pollIntervalMs) ||
+    pollIntervalMs <= 0
+  ) {
+    throw new Error("Health timeout must be non-negative and poll interval must be positive.");
+  }
   const deploymentsURL = `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/crabbox-coordinator/deployments`;
-  async function readJSON(url, label, headers = {}) {
+  async function readJSON(url, label, headers = {}, requestTimeoutMs = 10_000) {
     let response;
     try {
       response = await fetchImpl(url, {
         headers,
         redirect: "error",
         cache: "no-store",
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(requestTimeoutMs),
       });
     } catch {
       throw new Error(`${label} request failed; check connectivity and retry verification.`);
@@ -52,18 +71,39 @@ export async function verifyCoordinatorDeployment({ accountId, apiToken, sha, fe
   }
 
   const before = await activeDeployment();
-  const health = await readJSON(
-    `https://crabbox.openclaw.ai/v1/health?deployment=${sha}`,
-    "Coordinator health",
-  );
-  if (
-    health?.ok !== true ||
-    health.service !== "crabbox-coordinator" ||
-    health.version?.id !== before.versionId ||
-    health.version?.tag !== sha
-  ) {
+  const deadline = now() + timeoutMs;
+  let health;
+  let confirmed = false;
+  function lastVersion() {
+    const redact = (value) =>
+      typeof value === "string" ? value.replaceAll(apiToken, "[redacted]") : null;
+    return JSON.stringify({ id: redact(health?.version?.id), tag: redact(health?.version?.tag) });
+  }
+  while (true) {
+    try {
+      health = await readJSON(
+        `https://crabbox.openclaw.ai/v1/health?deployment=${sha}`,
+        "Coordinator health",
+        {},
+        Math.max(1, Math.min(10_000, Math.ceil(deadline - now()))),
+      );
+    } catch (error) {
+      throw new Error(`${error.message} Last reported version: ${lastVersion()}.`);
+    }
+    confirmed =
+      health?.ok === true &&
+      health.service === "crabbox-coordinator" &&
+      health.version?.id === before.versionId &&
+      health.version?.tag === sha;
+    if (confirmed) break;
+    const remaining = deadline - now();
+    if (remaining <= 0) break;
+    await sleep(Math.min(pollIntervalMs, remaining));
+    if (now() >= deadline) break;
+  }
+  if (!confirmed) {
     throw new Error(
-      "Coordinator health did not confirm the active version and requested commit; inspect the route and deployment.",
+      `Coordinator health did not confirm the active version and requested commit within ${timeoutMs}ms; last reported version: ${lastVersion()}; inspect the route and deployment.`,
     );
   }
   // Reject a concurrent rollout instead of reporting success for a superseded version.
