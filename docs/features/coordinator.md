@@ -134,7 +134,8 @@ Read-only lease lookups (including authoritative provider metadata), lease
 lists and audits, pool inventory, run history/events/logs, health, identity, and
 provider readiness use a 60-second total read budget. Each attempt allows
 30 seconds, including authentication, response-body reads, and any eligible
-read-only curl fallback.
+read-only curl fallback for explicitly configured HTTP coordinator targets.
+HTTPS targets retain the native transport and verifier on every attempt.
 An earlier caller deadline always wins, and cancellation interrupts both requests
 and backoff waits.
 

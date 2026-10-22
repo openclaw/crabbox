@@ -344,6 +344,88 @@ func TestCoordinatorReadDoesNotOverrideTLSVerificationWithCurl(t *testing.T) {
 	}
 }
 
+// Drop a real TCP connection before TLS, then serve subsequent native retries.
+type coordinatorDropFirstListener struct {
+	net.Listener
+	dropped atomic.Bool
+}
+
+func (l *coordinatorDropFirstListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if !l.dropped.Swap(true) {
+			_ = conn.Close()
+			continue
+		}
+		return conn, nil
+	}
+}
+
+func TestCoordinatorHTTPSReadNeverDowngradesAfterDroppedHandshake(t *testing.T) {
+	clearConfigEnv(t)
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl is not installed")
+	}
+	t.Setenv("NO_PROXY", "127.0.0.1")
+	t.Setenv("no_proxy", "127.0.0.1")
+	for _, nativeTrust := range []bool{false, true} {
+		name := "curl-only CA"
+		if nativeTrust {
+			name = "native trusted CA"
+		}
+		t.Run(name, func(t *testing.T) {
+			var nativeRequests, curlRequests atomic.Int32
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer synthetic-drop-token" {
+					t.Error("missing fixture authorization")
+				}
+				if strings.HasPrefix(r.UserAgent(), "curl/") {
+					curlRequests.Add(1)
+				} else {
+					nativeRequests.Add(1)
+				}
+				_, _ = io.WriteString(w, `{}`)
+			}))
+			listener := &coordinatorDropFirstListener{Listener: server.Listener}
+			server.Listener = listener
+			server.StartTLS()
+			defer server.Close()
+			ca := filepath.Join(t.TempDir(), "curl-only-ca.pem")
+			if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CURL_CA_BUNDLE", ca)
+			transport := &http.Transport{}
+			if nativeTrust {
+				roots := x509.NewCertPool()
+				roots.AddCert(server.Certificate())
+				transport.TLSClientConfig = &tls.Config{RootCAs: roots}
+			}
+			defer transport.CloseIdleConnections()
+			client := &CoordinatorClient{BaseURL: server.URL, Token: "synthetic-drop-token", Client: &http.Client{Transport: transport}}
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			err := client.Health(ctx)
+			if nativeTrust {
+				if err != nil || nativeRequests.Load() != 1 {
+					t.Errorf("native retry recovery: err=%v native=%d", err, nativeRequests.Load())
+				}
+			} else {
+				var verification *tls.CertificateVerificationError
+				if !errors.As(err, &verification) || nativeRequests.Load() != 0 {
+					t.Errorf("native rejection: err=%v native=%d", err, nativeRequests.Load())
+				}
+			}
+			if !listener.dropped.Load() || curlRequests.Load() != 0 || ctx.Err() != nil {
+				t.Fatalf("verifier switched or request expired: dropped=%t curl=%d context=%v", listener.dropped.Load(), curlRequests.Load(), ctx.Err())
+			}
+		})
+	}
+}
+
 func TestStopCoordinatorStalledLookup(t *testing.T) {
 	if runParallelCLIContract(t, 0) {
 		return

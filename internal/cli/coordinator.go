@@ -2696,7 +2696,7 @@ func (c *CoordinatorClient) doWithHeaders(ctx context.Context, method, path stri
 		}
 	}
 	err = c.doHTTPWithHeaders(ctx, method, path, data, body != nil, out, headers)
-	if err == nil || !shouldUseCoordinatorCurlFallback(ctx, method, body != nil, err) {
+	if err == nil || !shouldUseCoordinatorCurlFallback(ctx, c.BaseURL+path, method, body != nil, err) {
 		return err
 	}
 	if curlErr := c.doCurl(ctx, method, path, data, body != nil, out); curlErr == nil {
@@ -3026,7 +3026,13 @@ func isCoordinatorTransportError(err error) bool {
 	return errors.As(err, &urlErr)
 }
 
-func shouldUseCoordinatorCurlFallback(ctx context.Context, method string, hasBody bool, err error) bool {
+func shouldUseCoordinatorCurlFallback(ctx context.Context, requestURL, method string, hasBody bool, err error) bool {
+	// HTTPS must retain the native verifier even when the first handshake never
+	// reaches certificate verification. Use the actual target, not an error's URL.
+	target, parseErr := url.Parse(requestURL)
+	if parseErr != nil || target.Scheme != "http" || target.Host == "" {
+		return false
+	}
 	if ctx.Err() != nil || hasBody || errors.Is(err, context.Canceled) {
 		return false
 	}

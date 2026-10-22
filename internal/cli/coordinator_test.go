@@ -1464,7 +1464,7 @@ func TestCoordinatorCurlFallbackEligibility(t *testing.T) {
 				err = &url.Error{Op: "Get", URL: "https://broker.example.test/v1/leases", Err: err}
 			}
 			for _, method := range []string{http.MethodGet, http.MethodHead} {
-				if got := shouldUseCoordinatorCurlFallback(t.Context(), method, false, err); got != test.fallback {
+				if got := shouldUseCoordinatorCurlFallback(t.Context(), "http://broker.example.test/v1/leases", method, false, err); got != test.fallback {
 					t.Errorf("%s fallback=%t, want %t", method, got, test.fallback)
 				}
 			}
@@ -1472,6 +1472,19 @@ func TestCoordinatorCurlFallbackEligibility(t *testing.T) {
 				t.Errorf("shared transport classification=%t, want unchanged %t", got, test.transport)
 			}
 		})
+	}
+}
+
+func TestCoordinatorCurlFallbackUsesActualTarget(t *testing.T) {
+	// Redirect errors can name a different URL from the URL curl would request.
+	err := &url.Error{Op: "Get", URL: "http://redirect.example.test/v1/health", Err: io.ErrUnexpectedEOF}
+	for _, target := range []string{"https://broker.example.test/v1/health", "ftp://broker.example.test", "http:/missing-host", "http:opaque", ":invalid"} {
+		if shouldUseCoordinatorCurlFallback(t.Context(), target, http.MethodGet, false, err) {
+			t.Errorf("fallback admitted target %q based on error URL", target)
+		}
+	}
+	if !shouldUseCoordinatorCurlFallback(t.Context(), "http://broker.example.test/v1/health", http.MethodGet, false, err) {
+		t.Fatal("explicit HTTP fallback contract was lost")
 	}
 }
 
