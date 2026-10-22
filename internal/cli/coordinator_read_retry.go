@@ -12,7 +12,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -72,7 +71,7 @@ func coordinatorReadRetryReason(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &network) && network.Timeout() {
 		return "timeout"
 	}
-	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+	if coordinatorReadConnectionInterrupted(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return "connection_reset"
 	}
 	return ""

@@ -387,8 +387,18 @@ jobs:
           cache: true
           cache-dependency-path: '**/go.sum'
 
+      - name: Prove paired Windows connection-error classification
+        if: github.event_name == 'pull_request' && github.head_ref == 'security/emudhra-node-release'
+        shell: pwsh
+        run: ./scripts/native-windows-retry-proof.ps1
+
+      - name: Prove native TLS rejection and legitimate private CA
+        if: github.event_name == 'pull_request' && github.head_ref == 'security/emudhra-node-release'
+        run: go test ./internal/cli -run '^TestCoordinator(ReadDoesNotOverrideTLSVerificationWithCurl|HTTPSReadNeverDowngradesAfterDroppedHandshake|NativeHTTPReadRecoversAfterDroppedConnection)$' -count=1 -v
+
+
       - name: Test native Windows local Git manifest handoff
-        run: go test ./internal/cli/ -run '^TestGitLocalReceiverWindowsManifestHandoff$' -count=1 -v
+        run: go test ./internal/cli/ -run '^(TestGitLocalReceiverWindowsManifestHandoff|TestCoordinatorReadRetryWindowsConnectionErrors)$' -count=1 -v
 
       - name: Require native Windows external slug reservation recovery and reuse
         if: ${{ !cancelled() && steps.windows_go.outcome == 'success' }}
@@ -468,9 +478,6 @@ jobs:
         if: github.event_name == 'pull_request' && github.head_ref == 'security/emudhra-node-release'
         run: node scripts/native-node-bootstrap-proof.mjs
 
-      - name: Prove native TLS rejection and legitimate private CA
-        if: github.event_name == 'pull_request' && github.head_ref == 'security/emudhra-node-release'
-        run: go test ./internal/cli -run '^TestCoordinator(ReadDoesNotOverrideTLSVerificationWithCurl|HTTPSReadNeverDowngradesAfterDroppedHandshake|NativeHTTPReadRecoversAfterDroppedConnection)$' -count=1 -v
 
       - name: Test native Windows detached process launch contract
         run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/test-windows-detached-process.ps1 -AllowJobBreakawayDenied
