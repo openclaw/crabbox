@@ -781,6 +781,7 @@ describe("coordinator runtimes", () => {
         return value;
       });
       await started;
+      let failure: unknown;
       try {
         if (mutation === "put") await runtime.storage.put("lease:one", { state: "released" });
         if (mutation === "delete") await runtime.storage.delete("lease:one");
@@ -792,16 +793,19 @@ describe("coordinator runtimes", () => {
           await runtime.commitAndWake((view) => view.delete("lease:one"));
         }
         if (mutation === "rollback") {
-          await expect(
-            runtime.storage.transaction(async (view) => {
+          await runtime.storage
+            .transaction(async (view) => {
               await view.delete("lease:one");
               throw new Error("rollback");
-            }),
-          ).rejects.toThrow("rollback");
+            })
+            .catch((error) => {
+              failure = error;
+            });
         }
       } finally {
         release();
       }
+      expect(failure).toEqual(mutation === "rollback" ? new Error("rollback") : undefined);
       await expect(snapshot).resolves.toBeUndefined();
       await expect(runtime.readSnapshot(async () => "stable")).resolves.toBe("stable");
     },
@@ -818,7 +822,7 @@ describe("coordinator runtimes", () => {
       await gate;
       await view.put("lease:one", { state: "active" });
     });
-    const read = vi.fn(async () => "unsafe");
+    const read = vi.fn<() => Promise<string>>(async () => "unsafe");
     try {
       await expect(runtime.readSnapshot(read)).resolves.toBeUndefined();
       expect(read).not.toHaveBeenCalled();

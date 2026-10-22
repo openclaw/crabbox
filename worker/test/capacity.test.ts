@@ -718,13 +718,11 @@ for (const kind of ["cloudflare", "node"] as const) {
       };
       const snapshot = f.fetch();
       await started;
-      if (kind === "cloudflare") {
-        // A native transaction closes the input gate even when its reads opt out.
-        expect(transactions).not.toHaveBeenCalled();
-        expect(f.storage.reads.slice(readStart)).toEqual([
-          { noCache: true, allowConcurrency: true },
-        ]);
-      }
+      // A native transaction closes the input gate even when its reads opt out.
+      expect(transactions).toHaveBeenCalledTimes(kind === "cloudflare" ? 0 : 1);
+      expect(f.storage.reads.slice(readStart)).toEqual(
+        kind === "cloudflare" ? [{ noCache: true, allowConcurrency: true }] : [],
+      );
       let timer!: ReturnType<typeof setTimeout>;
       try {
         const outcome = await Promise.race([
