@@ -409,14 +409,47 @@ const relevant = (rows) =>
   );
 const legacyRows = (rows) =>
   rows.filter((r) => [legacyLease, legacyID].some((id) => r.key.includes(id)));
+async function waitForLegacyIndexes(deadline) {
+  const keys = ["lease-maintenance-state", "lease-current-state"];
+  const rows = (
+    await pools.upgrade.query(
+      "select key,value from crabbox.coordinator_kv where key = any($1::text[])",
+      [keys],
+    )
+  ).rows;
+  if (
+    keys.every((key) =>
+      rows.some(
+        (row) => row.key === key && row.value?.version === 1 && row.value.complete === true,
+      ),
+    )
+  )
+    return;
+  assert.ok(Date.now() < deadline, "old lease index maintenance did not complete");
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  return waitForLegacyIndexes(deadline);
+}
 function legacyDifferenceReport(before, after) {
   const prior = new Map(legacyRows(before).map((row) => [row.key, row]));
   const current = new Map(legacyRows(after).map((row) => [row.key, row]));
   const families = new Set(["lease", "run", "lease-maintenance", "lease-current"]);
   const fields = [
-    "state", "updatedAt", "lastUsedAt", "expiresAt", "ttlSeconds", "idleTimeoutSeconds",
-    "workRoot", "keep", "lifetimePolicy", "attribution", "attributionVersion",
-    "eventCount", "terminalReceipt", "log", "logChunks", "logTruncated",
+    "state",
+    "updatedAt",
+    "lastUsedAt",
+    "expiresAt",
+    "ttlSeconds",
+    "idleTimeoutSeconds",
+    "workRoot",
+    "keep",
+    "lifetimePolicy",
+    "attribution",
+    "attributionVersion",
+    "eventCount",
+    "terminalReceipt",
+    "log",
+    "logChunks",
+    "logTruncated",
   ];
   const changes = [...new Set([...prior.keys(), ...current.keys()])]
     .filter((key) => !isDeepStrictEqual(prior.get(key), current.get(key)))
@@ -429,24 +462,30 @@ function legacyDifferenceReport(before, after) {
         family: families.has(family) ? family : "other",
         change: !a ? "added" : !b ? "removed" : "changed",
         equal: Object.fromEntries(
-          ["value", "value_text", "updated_at", "value_text_updated_at"]
-            .map((field) => [field, isDeepStrictEqual(a?.[field], b?.[field])]),
+          ["value", "value_text", "updated_at", "value_text_updated_at"].map((field) => [
+            field,
+            isDeepStrictEqual(a?.[field], b?.[field]),
+          ]),
         ),
         changedBusinessFields: fields.filter(
           (field) => !isDeepStrictEqual(a?.value?.[field], b?.value?.[field]),
         ),
       };
     });
-  const indexes = (rows) => Object.fromEntries(
-    ["lease-maintenance-state", "lease-current-state"].map((key) => {
-      const state = rows.find((row) => row.key === key)?.value;
-      return [key, {
-        present: state !== undefined,
-        versionValid: state?.version === 1,
-        complete: state?.complete === true,
-      }];
-    }),
-  );
+  const indexes = (rows) =>
+    Object.fromEntries(
+      ["lease-maintenance-state", "lease-current-state"].map((key) => {
+        const state = rows.find((row) => row.key === key)?.value;
+        return [
+          key,
+          {
+            present: state !== undefined,
+            versionValid: state?.version === 1,
+            complete: state?.complete === true,
+          },
+        ];
+      }),
+    );
   return { changes, indexesBefore: indexes(before), indexesAfter: indexes(after) };
 }
 try {
@@ -504,6 +543,8 @@ try {
   await request("POST", "/v1/runs/" + legacy.id + "/finish", legacy.body, 200, true);
   await cli("old-legacy-read", legacy, false, config.oldCLI);
   const pending = await admit(pendingID, "old-pending", pendingLease);
+  // Snapshot settled old-version indexes, not partially completed background work.
+  await waitForLegacyIndexes(Date.now() + 90_000);
   await stop();
   const before = await snapshot("before-upgrade");
   const settings = record(before, "lease:" + legacyLease);
