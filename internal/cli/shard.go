@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"strconv"
@@ -62,6 +63,9 @@ var shardOwnedOnlyFlags = map[string]bool{
 	"admin":                 true,
 	"slug":                  true,
 	"fail-on-test-failures": true,
+	// Lease creation selects the fork provider; each shard run targets --id and
+	// must not re-apply --provider (a mismatched flag would break the kept lease).
+	"provider": true,
 }
 
 type shardOptions struct {
@@ -206,6 +210,9 @@ func (a App) shard(ctx context.Context, args []string) error {
 		if record.nativeResourceID() == "" {
 			return Exit(2, "checkpoint %s is pending; native provider resource is not recorded yet", record.ID)
 		}
+		if err := rejectShardProviderMismatch(fs, leaseFlags, record); err != nil {
+			return err
+		}
 		if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, leaseFlags.ProviderFlags); err != nil {
 			return err
 		}
@@ -246,7 +253,7 @@ func (a App) shard(ctx context.Context, args []string) error {
 		return err
 	}
 	if _, ok := backend.(SSHLeaseBackend); !ok {
-		return Exit(2, "provider=%s does not support shard: it requires an SSH lease provider that supports checkpoint fork", backend.Spec().Name)
+		return Exit(2, "provider=%s does not support shard: it requires an SSH lease provider that supports checkpoint fork; use parallel crabbox run --provider %s for delegated boxes", backend.Spec().Name, backend.Spec().Name)
 	}
 	opts := shardOptions{
 		Checkpoint:         record.ID,
@@ -278,7 +285,7 @@ func (a App) shard(ctx context.Context, args []string) error {
 		}
 		shardSSH, ok := shardBackend.(SSHLeaseBackend)
 		if !ok {
-			return checkpointForkProvision{}, Exit(2, "provider=%s does not support shard: it requires an SSH lease provider that supports checkpoint fork", shardBackend.Spec().Name)
+			return checkpointForkProvision{}, Exit(2, "provider=%s does not support shard: it requires an SSH lease provider that supports checkpoint fork; use parallel crabbox run --provider %s for delegated boxes", shardBackend.Spec().Name, shardBackend.Spec().Name)
 		}
 		return shardApp.provisionCheckpointFork(provisionCtx, shardCfg, shardBackend, shardSSH, repo, record, paths, opts.Keep, *reclaim, slug, workdir, *clear)
 	}
@@ -297,6 +304,35 @@ func cloneConfigForShard(cfg Config) Config {
 		out.LocalContainer.Volumes = append([]string(nil), cfg.LocalContainer.Volumes...)
 	}
 	return out
+}
+
+func rejectShardProviderMismatch(fs *flag.FlagSet, leaseFlags leaseCreateFlagValues, record checkpointRecord) error {
+	if !flagWasSet(fs, "provider") {
+		return nil
+	}
+	requested := strings.TrimSpace(*leaseFlags.Provider)
+	if requested == "" {
+		return nil
+	}
+	recorded := strings.TrimSpace(record.nativeProvider())
+	if recorded == "" {
+		recorded = strings.TrimSpace(record.Provider)
+	}
+	if recorded == "" {
+		return nil
+	}
+	requestedName := requested
+	if selected, err := ProviderFor(requested); err == nil {
+		requestedName = selected.Spec().Name
+	}
+	recordedName := recorded
+	if selected, err := ProviderFor(recorded); err == nil {
+		recordedName = selected.Spec().Name
+	}
+	if requestedName == recordedName {
+		return nil
+	}
+	return Exit(2, "checkpoint %s is provider=%s; --provider %s does not match the recorded native checkpoint provider", record.ID, recordedName, requestedName)
 }
 
 func resolveShardConcurrency(count, concurrencyFlag int, concurrencySet bool, maxConcurrency int) (int, error) {
@@ -534,6 +570,15 @@ func (a App) shardVerdict(opts shardOptions, results []shardResult, wall time.Du
 		canceledLine = fmt.Sprintf(" canceled=%d", canceledShards)
 	}
 	fmt.Fprintf(a.Stdout, "shard verdict shards=%d failed_shards=%d%s%s wall=%.3fs\n", opts.Count, failedShards, canceledLine, mergedLine, wall.Seconds())
+	if infraFailures > 0 {
+		fmt.Fprintln(a.Stdout, "provision failures:")
+		for _, result := range results {
+			if !result.infraFailed() || result.Err == nil {
+				continue
+			}
+			fmt.Fprintf(a.Stdout, "  [%d/%d] error=%s\n", result.Index, opts.Count, result.Err.Error())
+		}
+	}
 	if len(failedCases) > 0 {
 		fmt.Fprintln(a.Stdout, "failed:")
 		for _, failure := range failedCases {

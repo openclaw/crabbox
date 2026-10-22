@@ -304,7 +304,8 @@ func TestShardProvisionFailureDoesNotOrphanSiblings(t *testing.T) {
 	executor := newShardTestExecutor()
 	executor.outcomes[1] = recordedOutcome(0, nil)
 	executor.outcomes[3] = recordedOutcome(0, nil)
-	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	var stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: io.Discard}
 	err := app.shardRun(context.Background(), shardTestOptions(3), &shardOutputMux{}, provisioner.provision, executor.run)
 	var exitErr ExitError
 	if !AsExitError(err, &exitErr) || exitErr.Code != 7 || exitErr.Message != "1 of 3 shards failed to provision or run" {
@@ -318,6 +319,98 @@ func TestShardProvisionFailureDoesNotOrphanSiblings(t *testing.T) {
 	}
 	if _, releases := provisioner.stats(); releases != 2 {
 		t.Fatalf("releases=%d, want 2", releases)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "provision failures:") || !strings.Contains(out, "[2/3] error=acquire failed") {
+		t.Fatalf("stdout missing clear provision failure report:\n%s", out)
+	}
+}
+
+func TestShardCreateFailureMidFanOutUnderConcurrency(t *testing.T) {
+	// Mimic a hard account cap (Islo ~2 concurrent boxes): concurrency=2,
+	// count=4, one in-flight create refused mid fan-out. Siblings must still
+	// run and every successful lease must release.
+	provisioner := &shardTestProvisioner{
+		errs: map[int]error{
+			2: errors.New(`provider=islo: HTTP 402 BILLING_NOT_ALLOWED`),
+		},
+	}
+	var (
+		mu       sync.Mutex
+		inflight int
+		maxSeen  int
+		gate     = make(chan struct{})
+		started  = make(chan int, 4)
+	)
+	slowProvision := func(ctx context.Context, index int, slug string) (checkpointForkProvision, error) {
+		mu.Lock()
+		inflight++
+		if inflight > maxSeen {
+			maxSeen = inflight
+		}
+		mu.Unlock()
+		started <- index
+		defer func() {
+			mu.Lock()
+			inflight--
+			mu.Unlock()
+		}()
+		if index == 1 || index == 2 {
+			<-gate
+		}
+		return provisioner.provision(ctx, index, slug)
+	}
+	executor := newShardTestExecutor()
+	for _, i := range []int{1, 3, 4} {
+		executor.outcomes[i] = recordedOutcome(0, nil)
+	}
+	opts := shardTestOptions(4)
+	opts.Concurrency = 2
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	done := make(chan error, 1)
+	go func() {
+		done <- app.shardRun(context.Background(), opts, &shardOutputMux{}, slowProvision, executor.run)
+	}()
+	first := map[int]bool{}
+	for len(first) < 2 {
+		select {
+		case idx := <-started:
+			first[idx] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for first concurrency wave; started=%v", first)
+		}
+	}
+	close(gate)
+	err := <-done
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 7 || exitErr.Message != "1 of 4 shards failed to provision or run" {
+		t.Fatalf("err=%v, want exit 7 create failure mid fan-out", err)
+	}
+	mu.Lock()
+	seen := maxSeen
+	mu.Unlock()
+	if seen > 2 {
+		t.Fatalf("max in-flight provisions=%d, want <= 2", seen)
+	}
+	if executor.callCount() != 3 {
+		t.Fatalf("calls=%d, want 3 successful siblings", executor.callCount())
+	}
+	if executor.call(2) != nil {
+		t.Fatal("executor ran for the shard whose create was refused")
+	}
+	if _, releases := provisioner.stats(); releases != 3 {
+		t.Fatalf("releases=%d, want 3 successful leases released", releases)
+	}
+	if !strings.Contains(stderr.String(), `shard 2/4 failed error="provider=islo: HTTP 402 BILLING_NOT_ALLOWED"`) {
+		t.Fatalf("stderr missing create refusal:\n%s", stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "provision failures:") || !strings.Contains(out, "[2/4] error=provider=islo: HTTP 402 BILLING_NOT_ALLOWED") {
+		t.Fatalf("stdout missing provision failure summary:\n%s", out)
+	}
+	if !strings.Contains(out, "failed_shards=1") {
+		t.Fatalf("stdout missing failed_shards tally:\n%s", out)
 	}
 }
 
@@ -447,6 +540,7 @@ func TestPartitionShardRunArgs(t *testing.T) {
 		wantErr string
 	}{
 		{name: "owned only stays local", args: []string{"--count", "3", "--from", "chk_1", "--fail-fast"}, wantOwn: "--count 3 --from chk_1 --fail-fast"},
+		{name: "provider stays local", args: []string{"--count", "2", "--from", "chk_1", "--provider", "local-container"}, wantOwn: "--count 2 --from chk_1 --provider local-container"},
 		{name: "registered flags forward to both", args: []string{"--count", "2", "--junit", "junit.xml"}, wantOwn: "--count 2 --junit junit.xml", wantRun: "--junit junit.xml"},
 		{name: "unknown flags forward to run", args: []string{"--count", "2", "--no-hydrate"}, wantOwn: "--count 2", wantRun: "--no-hydrate"},
 		{name: "id is forbidden", args: []string{"--id", "cbx_1"}, wantErr: "--id cannot be used with shard"},
@@ -464,6 +558,7 @@ func TestPartitionShardRunArgs(t *testing.T) {
 			fs.String("from", "", "")
 			fs.Bool("fail-fast", false, "")
 			fs.String("junit", "", "")
+			fs.String("provider", "", "")
 			own, run, err := partitionForwardedRunArgs(fs, tc.args, shardOwnedOnlyFlags, shardForbiddenRunFlags, "shard: it conflicts with parallel shard runs")
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
@@ -751,6 +846,29 @@ func TestShardBoundsInFlightConcurrency(t *testing.T) {
 	provisions, releases := provisioner.stats()
 	if provisions != 6 || releases != 6 {
 		t.Fatalf("provisions=%d releases=%d, want 6/6", provisions, releases)
+	}
+}
+
+func TestRejectShardProviderMismatch(t *testing.T) {
+	fs := newFlagSet("shard", io.Discard)
+	provider := fs.String("provider", "", "")
+	record := checkpointRecord{ID: "chk_mismatch", Provider: "local-container"}
+	record.Native.Provider = "local-container"
+	if err := parseFlags(fs, []string{"--provider", "islo"}); err != nil {
+		t.Fatal(err)
+	}
+	err := rejectShardProviderMismatch(fs, leaseCreateFlagValues{Provider: provider}, record)
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "does not match the recorded native checkpoint provider") {
+		t.Fatalf("err=%v, want exit 2 mismatch", err)
+	}
+	fsOK := newFlagSet("shard", io.Discard)
+	providerOK := fsOK.String("provider", "", "")
+	if err := parseFlags(fsOK, []string{"--provider", "local-container"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectShardProviderMismatch(fsOK, leaseCreateFlagValues{Provider: providerOK}, record); err != nil {
+		t.Fatalf("matching provider: %v", err)
 	}
 }
 

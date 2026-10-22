@@ -143,10 +143,15 @@ crabbox checkpoint fork <checkpoint-id> --count 4
 crabbox shard --count 8 --concurrency 3 --from <checkpoint-id> --results-auto -- pnpm test -- --shard '{{index}}/{{total}}'
 ```
 
-`checkpoint fork` creates leases serially. `shard` runs them with one merged
-verdict and optional `--concurrency` so large fan-outs stay within provider
-quotas or host capacity. This is provider-neutral checkpoint and fork routing.
-It is not a guarantee of live-memory microVM forking.
+`checkpoint fork` creates leases serially. `shard` already forks checkpoints in
+parallel; `--concurrency` / `shard.maxConcurrency` improve that fan-out so
+accounts with tight concurrent-box caps (or hosts with limited Docker slots)
+stay inside quota. A create refused mid fan-out is reported for that shard,
+siblings keep running, and every acquired lease still releases. This is an
+improvement to existing `crabbox shard` checkpoint forking, not a replacement
+for [`pond`](features/pond.md) tagging or peer discovery. Delegated providers
+such as Islo that lack checkpoint fork still fan out with parallel
+`crabbox run --provider islo` (and `warmup` when you want kept boxes).
 
 ## Run GPU Workloads
 

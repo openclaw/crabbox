@@ -21,9 +21,11 @@ The command template owns the sharding: crabbox never splits tests itself.
 provisioned, and repo config caps (`shard.maxCount`, `shard.maxConcurrency`)
 bound what a checkout may request. `--concurrency` limits how many shards may
 provision or run at once; the default is all `--count` shards. Requires an SSH
-lease provider that supports checkpoint fork; delegated providers are rejected.
-Provider-native snapshot fan-out stays on
-[`checkpoint fork --snapshot`](checkpoint.md).
+lease provider that supports checkpoint fork; delegated providers such as Islo
+are rejected (drive those with parallel `crabbox run --provider islo` instead).
+Native checkpoints stay on their recorded provider: a mismatched `--provider`
+flag is rejected before any lease is created. Provider-native snapshot fan-out
+stays on [`checkpoint fork --snapshot`](checkpoint.md).
 
 ## Lease lifecycle
 
@@ -32,8 +34,11 @@ Every shard forks its own lease from the checkpoint and runs with an injected
 `run`. Forks exist only for the duration of their shard: each lease is
 released when its shard finishes, on failure, and on Ctrl-C, always with a
 fresh context so cleanup survives cancellation. A shard that fails to
-provision does not orphan its siblings; the others run to completion and
-release normally. Pass `--keep` to retain all forked leases instead.
+provision (including provider create refusals such as capacity or billing
+limits mid fan-out) does not orphan its siblings; the others run to completion
+and release normally, and the refused shard is listed under
+`provision failures` in the verdict. Pass `--keep` to retain all forked leases
+instead.
 
 For a coordinator-managed brokered native checkpoint, each shard acquires its
 own short-lived, generation-bound use claim before provisioning. Claims renew
