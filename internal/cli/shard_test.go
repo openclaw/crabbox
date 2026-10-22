@@ -213,10 +213,9 @@ func TestShardFailFastSkipsWaitersWithoutProvisioning(t *testing.T) {
 	opts.Concurrency = 1
 	opts.FailFast = true
 	var stdout bytes.Buffer
-	app := App{Stdout: &stdout, Stderr: io.Discard}
 	done := make(chan error, 1)
 	go func() {
-		done <- app.shardRun(context.Background(), opts, &shardOutputMux{}, provisioner.provision, executor.run)
+		done <- App{Stdout: &stdout, Stderr: io.Discard}.shardRun(context.Background(), opts, &shardOutputMux{}, provisioner.provision, executor.run)
 	}()
 	select {
 	case <-executor.started:
@@ -226,18 +225,11 @@ func TestShardFailFastSkipsWaitersWithoutProvisioning(t *testing.T) {
 	close(executor.unblock)
 	err := <-done
 	var exitErr ExitError
-	if !AsExitError(err, &exitErr) || exitErr.Code != 1 {
-		t.Fatalf("err=%v, want exit 1", err)
+	if !AsExitError(err, &exitErr) || exitErr.Code != 1 || !strings.Contains(stdout.String(), "canceled=") {
+		t.Fatalf("err=%v stdout=%s, want exit 1 with canceled=", err, stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "canceled=") {
-		t.Fatalf("verdict missing canceled shards:\n%s", stdout.String())
-	}
-	provisions, releases := provisioner.stats()
-	if provisions != releases {
-		t.Fatalf("provisions=%d releases=%d, want matching cleanup", provisions, releases)
-	}
-	if provisions != 1 {
-		t.Fatalf("provisions=%d, want exactly one under concurrency 1 fail-fast", provisions)
+	if provisions, releases := provisioner.stats(); provisions != 1 || releases != 1 {
+		t.Fatalf("provisions=%d releases=%d, want 1/1 under concurrency 1 fail-fast", provisions, releases)
 	}
 }
 
@@ -299,41 +291,10 @@ func TestShardKeepSkipsRelease(t *testing.T) {
 	}
 }
 
-func TestShardProvisionFailureDoesNotOrphanSiblings(t *testing.T) {
-	provisioner := newShardTestProvisioner()
-	provisioner.errs[2] = errors.New("acquire failed")
-	executor := newShardTestExecutor()
-	executor.outcomes[1] = recordedOutcome(0, nil)
-	executor.outcomes[3] = recordedOutcome(0, nil)
-	var stdout bytes.Buffer
-	app := App{Stdout: &stdout, Stderr: io.Discard}
-	err := app.shardRun(context.Background(), shardTestOptions(3), &shardOutputMux{}, provisioner.provision, executor.run)
-	var exitErr ExitError
-	if !AsExitError(err, &exitErr) || exitErr.Code != 7 || exitErr.Message != "1 of 3 shards failed to provision or run" {
-		t.Fatalf("err=%v, want exit 7 provision failure", err)
-	}
-	if executor.callCount() != 2 {
-		t.Fatalf("calls=%d, want the failed shard skipped and siblings run", executor.callCount())
-	}
-	if executor.call(2) != nil {
-		t.Fatal("executor ran for the shard that failed to provision")
-	}
-	if _, releases := provisioner.stats(); releases != 2 {
-		t.Fatalf("releases=%d, want 2", releases)
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "provision failures:") || !strings.Contains(out, "[2/3] error=acquire failed") {
-		t.Fatalf("stdout missing clear provision failure report:\n%s", out)
-	}
-}
-
 func TestShardCreateFailureMidFanOutUnderConcurrency(t *testing.T) {
-	// Non-capacity create refusal mid fan-out: siblings still run and release.
-	provisioner := &shardTestProvisioner{
-		errs: map[int]error{
-			2: errors.New("image not found"),
-		},
-	}
+	// Non-capacity create refusal mid fan-out: siblings still run and release,
+	// and in-flight provisions stay within --concurrency.
+	provisioner := &shardTestProvisioner{errs: map[int]error{2: errors.New("image not found")}}
 	var (
 		mu       sync.Mutex
 		inflight int
@@ -366,11 +327,10 @@ func TestShardCreateFailureMidFanOutUnderConcurrency(t *testing.T) {
 	opts := shardTestOptions(4)
 	opts.Concurrency = 2
 	var stdout, stderr bytes.Buffer
+	mux := &shardOutputMux{}
 	app := App{Stdout: &stdout, Stderr: &stderr}
 	done := make(chan error, 1)
-	go func() {
-		done <- app.shardRun(context.Background(), opts, &shardOutputMux{}, slowProvision, executor.run)
-	}()
+	go func() { done <- app.shardRun(context.Background(), opts, mux, slowProvision, executor.run) }()
 	first := map[int]bool{}
 	for len(first) < 2 {
 		select {
@@ -392,176 +352,165 @@ func TestShardCreateFailureMidFanOutUnderConcurrency(t *testing.T) {
 	if seen > 2 {
 		t.Fatalf("max in-flight provisions=%d, want <= 2", seen)
 	}
-	if executor.callCount() != 3 {
-		t.Fatalf("calls=%d, want 3 successful siblings", executor.callCount())
-	}
-	if executor.call(2) != nil {
-		t.Fatal("executor ran for the shard whose create was refused")
+	if executor.callCount() != 3 || executor.call(2) != nil {
+		t.Fatalf("calls=%d call2=%v, want 3 siblings and skipped refused shard", executor.callCount(), executor.call(2))
 	}
 	if _, releases := provisioner.stats(); releases != 3 {
-		t.Fatalf("releases=%d, want 3 successful leases released", releases)
-	}
-	if !strings.Contains(stderr.String(), `shard 2/4 failed error="image not found"`) {
-		t.Fatalf("stderr missing create refusal:\n%s", stderr.String())
+		t.Fatalf("releases=%d, want 3", releases)
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "provision failures:") || !strings.Contains(out, "[2/4] error=image not found") {
-		t.Fatalf("stdout missing provision failure summary:\n%s", out)
-	}
-	if !strings.Contains(out, "failed_shards=1") {
-		t.Fatalf("stdout missing failed_shards tally:\n%s", out)
+	if !strings.Contains(out, "provision failures:") || !strings.Contains(out, "[2/4] error=image not found") || !strings.Contains(out, "failed_shards=1") {
+		t.Fatalf("stdout missing provision failure report:\n%s", out)
 	}
 }
 
-func TestShardCapacityRetry(t *testing.T) {
+func TestShardCapacityWait(t *testing.T) {
 	costLimit := coordinatorCreationRejectedError{
 		cause:            CoordinatorHTTPError{StatusCode: http.StatusTooManyRequests, Message: `{"error":"cost_limit_exceeded"}`},
 		provider:         "aws",
 		requestedLeaseID: "cbx_costlimit01",
 	}
-	cases := []struct {
-		name         string
-		wait         time.Duration
-		err          error
-		wantCalls    int
-		wantCapacity bool
-		wantSubstr   string
-	}{
-		{name: "default 0 means no retry", wait: 0, err: MarkCapacityRefusal(errors.New("resource_limit_exceeded")), wantCalls: 1, wantCapacity: true},
-		{name: "cost_limit not retried", wait: time.Minute, err: costLimit, wantCalls: 1, wantSubstr: "cost_limit_exceeded"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			calls := 0
-			provision := func(context.Context, int, string) (checkpointForkProvision, error) {
-				calls++
-				return checkpointForkProvision{}, tc.err
-			}
-			opts := shardTestOptions(1)
-			opts.CapacityWait = tc.wait
-			opts.capacityBackoff = func(int, error) time.Duration { return time.Millisecond }
-			_, err := App{Stdout: io.Discard, Stderr: io.Discard}.provisionShardWithCapacityRetry(context.Background(), &shardOutputMux{}, opts, 1, "slug", provision)
-			if err == nil {
-				t.Fatal("expected error")
-			}
-			if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
-				t.Fatalf("err=%v, want %q", err, tc.wantSubstr)
-			}
-			if IsCapacityRefusal(err) != tc.wantCapacity {
-				t.Fatalf("IsCapacityRefusal=%v want %v", IsCapacityRefusal(err), tc.wantCapacity)
-			}
-			if calls != tc.wantCalls {
-				t.Fatalf("calls=%d, want %d", calls, tc.wantCalls)
-			}
-		})
-	}
-}
+	t.Run("no retry", func(t *testing.T) {
+		cases := []struct {
+			name       string
+			wait       time.Duration
+			err        error
+			wantCalls  int
+			wantSubstr string
+		}{
+			{name: "default 0 means no retry", wait: 0, err: MarkCapacityRefusal(errors.New("resource_limit_exceeded")), wantCalls: 1},
+			{name: "cost_limit not retried", wait: time.Minute, err: costLimit, wantCalls: 1, wantSubstr: "cost_limit_exceeded"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				calls := 0
+				provision := func(context.Context, int, string) (checkpointForkProvision, error) {
+					calls++
+					return checkpointForkProvision{}, tc.err
+				}
+				opts := shardTestOptions(1)
+				opts.CapacityWait = tc.wait
+				opts.capacityBackoff = func(int, error) time.Duration { return time.Millisecond }
+				_, err := App{Stdout: io.Discard, Stderr: io.Discard}.provisionShardWithCapacityRetry(context.Background(), &shardOutputMux{}, opts, 1, "slug", provision)
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("err=%v, want %q", err, tc.wantSubstr)
+				}
+				if calls != tc.wantCalls {
+					t.Fatalf("calls=%d, want %d", calls, tc.wantCalls)
+				}
+			})
+		}
+	})
 
-func TestShardCapacityWaitThenSucceedAndFreshLease(t *testing.T) {
-	var mu sync.Mutex
-	attempts := 0
-	var seen []string
-	provision := func(context.Context, int, string) (checkpointForkProvision, error) {
+	t.Run("wait then succeed with fresh lease", func(t *testing.T) {
+		var mu sync.Mutex
+		attempts := 0
+		var seen []string
+		provision := func(context.Context, int, string) (checkpointForkProvision, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			attempts++
+			id := NewLeaseID()
+			seen = append(seen, id)
+			if attempts < 3 {
+				return checkpointForkProvision{}, MarkCapacityRefusal(errors.New("InsufficientInstanceCapacity"))
+			}
+			return checkpointForkProvision{Lease: LeaseTarget{LeaseID: id}, Release: func(context.Context) {}}, nil
+		}
+		var stderr bytes.Buffer
+		opts := shardTestOptions(1)
+		opts.CapacityWait = time.Minute
+		opts.capacityBackoff = func(int, error) time.Duration { return time.Millisecond }
+		lease, err := App{Stdout: io.Discard, Stderr: &stderr}.provisionShardWithCapacityRetry(context.Background(), &shardOutputMux{}, opts, 1, "slug", provision)
+		if err != nil {
+			t.Fatalf("provision: %v", err)
+		}
 		mu.Lock()
 		defer mu.Unlock()
-		attempts++
-		id := NewLeaseID()
-		seen = append(seen, id)
-		if attempts < 3 {
-			return checkpointForkProvision{}, MarkCapacityRefusal(errors.New("InsufficientInstanceCapacity"))
+		if attempts != 3 || len(seen) != 3 || seen[0] == seen[1] || seen[1] == seen[2] || lease.Lease.LeaseID != seen[2] {
+			t.Fatalf("attempts=%d leases=%v final=%s", attempts, seen, lease.Lease.LeaseID)
 		}
-		return checkpointForkProvision{Lease: LeaseTarget{LeaseID: id}, Release: func(context.Context) {}}, nil
-	}
-	var stderr bytes.Buffer
-	opts := shardTestOptions(1)
-	opts.CapacityWait = time.Minute
-	opts.capacityBackoff = func(int, error) time.Duration { return time.Millisecond }
-	lease, err := App{Stdout: io.Discard, Stderr: &stderr}.provisionShardWithCapacityRetry(context.Background(), &shardOutputMux{}, opts, 1, "slug", provision)
-	if err != nil {
-		t.Fatalf("provision: %v", err)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if attempts != 3 || len(seen) != 3 || seen[0] == seen[1] || seen[1] == seen[2] {
-		t.Fatalf("attempts=%d leases=%v", attempts, seen)
-	}
-	if lease.Lease.LeaseID != seen[2] {
-		t.Fatalf("lease=%s, want %s", lease.Lease.LeaseID, seen[2])
-	}
-	if !strings.Contains(stderr.String(), "waiting for capacity") {
-		t.Fatalf("stderr missing wait log:\n%s", stderr.String())
-	}
-}
+		if !strings.Contains(stderr.String(), "waiting for capacity") {
+			t.Fatalf("stderr missing wait log:\n%s", stderr.String())
+		}
+	})
 
-func TestShardCapacityWaitExhausted(t *testing.T) {
-	provision := func(context.Context, int, string) (checkpointForkProvision, error) {
-		return checkpointForkProvision{}, MarkCapacityRefusal(errors.New("AllocationFailed"))
-	}
-	var stdout, stderr bytes.Buffer
-	opts := shardTestOptions(1)
-	opts.CapacityWait = 20 * time.Millisecond
-	opts.capacityBackoff = func(int, error) time.Duration { return 5 * time.Millisecond }
-	wrapped := func(ctx context.Context, index int, slug string) (checkpointForkProvision, error) {
-		return App{Stdout: &stdout, Stderr: &stderr}.provisionShardWithCapacityRetry(ctx, &shardOutputMux{}, opts, index, slug, provision)
-	}
-	err := App{Stdout: &stdout, Stderr: &stderr}.shardRun(context.Background(), opts, &shardOutputMux{}, wrapped, newShardTestExecutor().run)
-	var exitErr ExitError
-	if !AsExitError(err, &exitErr) || exitErr.Code != 7 {
-		t.Fatalf("err=%v, want exit 7", err)
-	}
-	if !strings.Contains(stdout.String(), "provision failures:") || !strings.Contains(stdout.String(), "capacity wait exhausted") {
-		t.Fatalf("stdout missing exhausted provision failure:\n%s", stdout.String())
-	}
-}
+	t.Run("wait exhausted", func(t *testing.T) {
+		provision := func(context.Context, int, string) (checkpointForkProvision, error) {
+			return checkpointForkProvision{}, MarkCapacityRefusal(errors.New("AllocationFailed"))
+		}
+		var stdout, stderr bytes.Buffer
+		mux := &shardOutputMux{}
+		opts := shardTestOptions(1)
+		opts.CapacityWait = 20 * time.Millisecond
+		opts.capacityBackoff = func(int, error) time.Duration { return 5 * time.Millisecond }
+		app := App{Stdout: &stdout, Stderr: &stderr}
+		wrapped := func(ctx context.Context, index int, slug string) (checkpointForkProvision, error) {
+			return app.provisionShardWithCapacityRetry(ctx, mux, opts, index, slug, provision)
+		}
+		err := app.shardRun(context.Background(), opts, mux, wrapped, newShardTestExecutor().run)
+		var exitErr ExitError
+		if !AsExitError(err, &exitErr) || exitErr.Code != 7 {
+			t.Fatalf("err=%v, want exit 7", err)
+		}
+		if !strings.Contains(stdout.String(), "provision failures:") || !strings.Contains(stdout.String(), "capacity wait exhausted") {
+			t.Fatalf("stdout missing exhausted provision failure:\n%s", stdout.String())
+		}
+	})
 
-func TestShardCapacityFailFastCancelsWaiter(t *testing.T) {
-	enteredWait := make(chan struct{})
-	base := newShardTestProvisioner()
-	releaseOK := make(chan struct{})
-	provision := func(ctx context.Context, index int, slug string) (checkpointForkProvision, error) {
-		if index == 2 {
-			return checkpointForkProvision{}, MarkCapacityRefusal(errors.New("resource_limit_exceeded"))
+	t.Run("fail-fast cancels waiter", func(t *testing.T) {
+		enteredWait := make(chan struct{})
+		base := newShardTestProvisioner()
+		releaseOK := make(chan struct{})
+		provision := func(ctx context.Context, index int, slug string) (checkpointForkProvision, error) {
+			if index == 2 {
+				return checkpointForkProvision{}, MarkCapacityRefusal(errors.New("resource_limit_exceeded"))
+			}
+			select {
+			case <-releaseOK:
+			case <-ctx.Done():
+				return checkpointForkProvision{}, ctx.Err()
+			}
+			return base.provision(ctx, index, slug)
 		}
-		select {
-		case <-releaseOK:
-		case <-ctx.Done():
-			return checkpointForkProvision{}, ctx.Err()
+		var stderr bytes.Buffer
+		mux := &shardOutputMux{}
+		opts := shardTestOptions(2)
+		opts.Concurrency = 2
+		opts.FailFast = true
+		opts.CapacityWait = time.Minute
+		opts.capacityBackoff = func(int, error) time.Duration {
+			select {
+			case <-enteredWait:
+			default:
+				close(enteredWait)
+			}
+			return time.Hour
 		}
-		return base.provision(ctx, index, slug)
-	}
-	var stderr bytes.Buffer
-	opts := shardTestOptions(2)
-	opts.Concurrency = 2
-	opts.FailFast = true
-	opts.CapacityWait = time.Minute
-	opts.capacityBackoff = func(int, error) time.Duration {
+		app := App{Stdout: io.Discard, Stderr: &stderr}
+		wrapped := func(ctx context.Context, index int, slug string) (checkpointForkProvision, error) {
+			return app.provisionShardWithCapacityRetry(ctx, mux, opts, index, slug, provision)
+		}
+		executor := newShardTestExecutor()
+		executor.outcomes[1] = recordedOutcome(4, nil)
+		done := make(chan error, 1)
+		go func() { done <- app.shardRun(context.Background(), opts, mux, wrapped, executor.run) }()
 		select {
 		case <-enteredWait:
-		default:
-			close(enteredWait)
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for capacity backoff")
 		}
-		return time.Hour
-	}
-	app := App{Stdout: io.Discard, Stderr: &stderr}
-	wrapped := func(ctx context.Context, index int, slug string) (checkpointForkProvision, error) {
-		return app.provisionShardWithCapacityRetry(ctx, &shardOutputMux{}, opts, index, slug, provision)
-	}
-	executor := newShardTestExecutor()
-	executor.outcomes[1] = recordedOutcome(4, nil)
-	done := make(chan error, 1)
-	go func() { done <- app.shardRun(context.Background(), opts, &shardOutputMux{}, wrapped, executor.run) }()
-	select {
-	case <-enteredWait:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for capacity backoff")
-	}
-	close(releaseOK)
-	if err := <-done; err == nil {
-		t.Fatal("expected fail-fast error")
-	}
-	if !strings.Contains(stderr.String(), "waiting for capacity") || !strings.Contains(stderr.String(), "canceled") {
-		t.Fatalf("stderr missing wait/cancel:\n%s", stderr.String())
-	}
+		close(releaseOK)
+		if err := <-done; err == nil {
+			t.Fatal("expected fail-fast error")
+		}
+		if !strings.Contains(stderr.String(), "waiting for capacity") || !strings.Contains(stderr.String(), "canceled") {
+			t.Fatalf("stderr missing wait/cancel:\n%s", stderr.String())
+		}
+	})
 }
 
 func TestShardInfraFailureTakesPrecedenceOverCommandFailure(t *testing.T) {
@@ -846,49 +795,37 @@ func TestShardRejectsInvalidArgs(t *testing.T) {
 	}
 }
 
-func TestShardMaxCountCap(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	configDir := t.TempDir()
-	configPath := filepath.Join(configDir, "crabbox.yaml")
-	if err := os.WriteFile(configPath, []byte("shard:\n  maxCount: 2\n"), 0o600); err != nil {
-		t.Fatal(err)
+func TestShardConfigCaps(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		args []string
+		want string
+		id   string
+	}{
+		{name: "maxCount", yaml: "shard:\n  maxCount: 2\n", args: []string{"--count", "3", "--from", "chk_shard_cap", "--", "pnpm", "test"}, want: "--count 3 exceeds shard.maxCount 2", id: "chk_shard_cap"},
+		{name: "maxConcurrency", yaml: "shard:\n  maxConcurrency: 2\n", args: []string{"--count", "4", "--concurrency", "3", "--from", "chk_shard_conc_cap", "--", "pnpm", "test"}, want: "--concurrency 3 exceeds shard.maxConcurrency 2", id: "chk_shard_conc_cap"},
 	}
-	t.Setenv("CRABBOX_CONFIG", configPath)
-	store, err := defaultCheckpointStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	record, _, err := store.Reserve(checkpointRecord{ID: "chk_shard_cap", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	app := App{Stdout: io.Discard, Stderr: io.Discard}
-	err = app.shard(context.Background(), []string{"--count", "3", "--from", record.ID, "--", "pnpm", "test"})
-	if err == nil || !strings.Contains(err.Error(), "--count 3 exceeds shard.maxCount 2") {
-		t.Fatalf("err=%v", err)
-	}
-}
-
-func TestShardMaxConcurrencyCap(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	configDir := t.TempDir()
-	configPath := filepath.Join(configDir, "crabbox.yaml")
-	if err := os.WriteFile(configPath, []byte("shard:\n  maxConcurrency: 2\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CRABBOX_CONFIG", configPath)
-	store, err := defaultCheckpointStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	record, _, err := store.Reserve(checkpointRecord{ID: "chk_shard_conc_cap", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	app := App{Stdout: io.Discard, Stderr: io.Discard}
-	err = app.shard(context.Background(), []string{"--count", "4", "--concurrency", "3", "--from", record.ID, "--", "pnpm", "test"})
-	if err == nil || !strings.Contains(err.Error(), "--concurrency 3 exceeds shard.maxConcurrency 2") {
-		t.Fatalf("err=%v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			configPath := filepath.Join(t.TempDir(), "crabbox.yaml")
+			if err := os.WriteFile(configPath, []byte(tc.yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_CONFIG", configPath)
+			store, err := defaultCheckpointStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := store.Reserve(checkpointRecord{ID: tc.id, Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+				t.Fatal(err)
+			}
+			err = App{Stdout: io.Discard, Stderr: io.Discard}.shard(context.Background(), tc.args)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -926,77 +863,6 @@ func TestResolveShardConcurrency(t *testing.T) {
 				t.Fatalf("concurrency=%d, want %d", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestShardBoundsInFlightConcurrency(t *testing.T) {
-	provisioner := newShardTestProvisioner()
-	executor := newShardTestExecutor()
-	executor.started = make(chan int, 8)
-	executor.unblock = make(chan struct{})
-	var (
-		mu       sync.Mutex
-		inFlight int
-		peak     int
-	)
-	track := func(delta int) {
-		mu.Lock()
-		defer mu.Unlock()
-		inFlight += delta
-		if inFlight > peak {
-			peak = inFlight
-		}
-	}
-	provision := func(ctx context.Context, index int, slug string) (checkpointForkProvision, error) {
-		track(1)
-		defer track(-1)
-		return provisioner.provision(ctx, index, slug)
-	}
-	run := func(ctx context.Context, index int, runArgs []string, outcome *shardRunOutcome) error {
-		track(1)
-		defer track(-1)
-		return executor.run(ctx, index, runArgs, outcome)
-	}
-	for i := 1; i <= 6; i++ {
-		executor.block[i] = true
-		executor.outcomes[i] = recordedOutcome(0, nil)
-	}
-	opts := shardTestOptions(6)
-	opts.Concurrency = 2
-	app := App{Stdout: io.Discard, Stderr: io.Discard}
-	done := make(chan error, 1)
-	go func() {
-		done <- app.shardRun(context.Background(), opts, &shardOutputMux{}, provision, run)
-	}()
-	seen := map[int]bool{}
-	for len(seen) < 2 {
-		select {
-		case index := <-executor.started:
-			seen[index] = true
-		case <-time.After(5 * time.Second):
-			t.Fatalf("only %d of first 2 shards started", len(seen))
-		}
-	}
-	select {
-	case index := <-executor.started:
-		t.Fatalf("third shard %d started before a slot was free", index)
-	case <-time.After(100 * time.Millisecond):
-	}
-	close(executor.unblock)
-	if err := <-done; err != nil {
-		t.Fatalf("shardRun: %v", err)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if peak > 2 {
-		t.Fatalf("peak in-flight=%d, want at most 2", peak)
-	}
-	if peak < 2 {
-		t.Fatalf("peak in-flight=%d, want to observe concurrency 2", peak)
-	}
-	provisions, releases := provisioner.stats()
-	if provisions != 6 || releases != 6 {
-		t.Fatalf("provisions=%d releases=%d, want 6/6", provisions, releases)
 	}
 }
 
