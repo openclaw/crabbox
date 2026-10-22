@@ -1,0 +1,16 @@
+{
+  "name": "capacity-proof",
+  "main": "capacity-workerd.mjs",
+  "compatibility_date": "2026-04-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "alias": {
+    "cpu-features": "../../src/cpu-features.cjs",
+    "./agent.js": "../../src/ssh2-agent.cjs",
+    "./crypto/build/Release/sshcrypto.node": "../../src/ssh2-native.cjs",
+    "./crypto/poly1305.js": "../../src/ssh2-poly1305.cjs"
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "CAPACITY", "class_name": "CapacityProof" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CapacityProof"] }]
+}

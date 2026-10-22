@@ -1,22 +1,24 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
 import { createRequire } from "node:module";
-import { build } from "esbuild";
+import os from "node:os";
+import path from "node:path";
 
 // Use the exact workerd/Miniflare dependency owned by the locked Wrangler install.
 const require = createRequire(import.meta.url);
 const wrangler = createRequire(require.resolve("wrangler/package.json"));
 const { Miniflare } = wrangler("miniflare");
-const { outputFiles } = await build({
-  entryPoints: ["test/fixtures/capacity-workerd.mjs"],
-  bundle: true,
-  write: false,
-  platform: "browser",
-  format: "esm",
-  target: "es2022",
-  external: ["node:*", "cloudflare:*"],
-});
-const script = outputFiles[0].text;
+const output = await fs.mkdtemp(path.join(os.tmpdir(), "capacity-workerd-"));
+execFileSync(process.execPath, [
+  path.join(path.dirname(require.resolve("wrangler/package.json")), "bin/wrangler.js"),
+  "deploy", "--dry-run", "--config", "test/fixtures/capacity-workerd.jsonc",
+  "--outdir", output,
+], { stdio: "inherit", env: { ...process.env, WRANGLER_SEND_METRICS: "false" } });
+const bundles = (await fs.readdir(output)).filter((name) => name.endsWith(".js"));
+assert.equal(bundles.length, 1);
+const script = await fs.readFile(path.join(output, bundles[0]), "utf8");
 const mf = new Miniflare({
   modules: true,
   script,
@@ -89,4 +91,5 @@ try {
   }));
 } finally {
   await mf.dispose();
+  await fs.rm(output, { recursive: true, force: true });
 }
