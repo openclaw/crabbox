@@ -18,8 +18,9 @@ type CapacityRefusal interface {
 	CapacityRefusal() bool
 }
 
-// httpStatusCoder is implemented by provider HTTP error types that expose a
-// numeric status without requiring the classifier to switch on provider names.
+// httpStatusCoder is implemented by HTTP error types that expose a numeric
+// status. Crabbox transport errors implement this so the shard retry path never
+// switches on provider names.
 type httpStatusCoder interface {
 	HTTPStatusCode() int
 }
@@ -27,23 +28,22 @@ type httpStatusCoder interface {
 // IsCapacityRefusal reports whether err is a capacity or quota refusal that
 // shard create may retry. Non-capacity errors return false.
 //
-// Recognition order:
+// Recognition order (shared across every provider):
 //  1. CapacityRefusal interface (preferred typed signal)
-//  2. HTTP status via httpStatusCoder, CoordinatorHTTPError, HetznerHTTPError,
-//     googleapi.Error, or azcore.ResponseError: 429, 503, and 402
+//  2. HTTP status via httpStatusCoder or common SDK HTTP errors: 429, 503, 402
 //  3. Documented text fallback for providers that only return message text
 //
-// Covered signals (not an exhaustive runtime inventory of every provider binary):
-//   - AWS: InsufficientInstanceCapacity, UnfulfillableCapacity,
+// Covered signals (examples; recognition is signal-based, not provider-switched):
+//   - AWS-style codes: InsufficientInstanceCapacity, UnfulfillableCapacity,
 //     MaxSpotInstanceCountExceeded, VcpuLimitExceeded
-//   - Azure: SkuNotAvailable, QuotaExceeded, AllocationFailed,
+//   - Azure-style codes: SkuNotAvailable, QuotaExceeded, AllocationFailed,
 //     ZonalAllocationFailed, OverconstrainedAllocationRequest
-//   - GCP: quota exceeded / QuotaExceeded, rate limit, resource_pool_exhausted,
-//     does not have enough resources (also googleapi 429)
-//   - Hetzner: dedicated_core_limit, resource_limit_exceeded,
-//     server_type_not_available, location_not_available (also HTTP 429/503)
-//   - Islo and other billing-slot APIs: HTTP 402 / BILLING_NOT_ALLOWED
-//   - Coordinator and generic HTTP APIs: 429 Too Many Requests, 503 Unavailable
+//   - GCP-style text / googleapi 429: quota exceeded, rate limit,
+//     resource_pool_exhausted, does not have enough resources
+//   - Hetzner-style codes: dedicated_core_limit, resource_limit_exceeded,
+//     server_type_not_available, location_not_available
+//   - Billing-slot APIs (including Islo): HTTP 402 / BILLING_NOT_ALLOWED
+//   - Coordinator and generic HTTP APIs: 429, 503
 //   - Docker / local host: resource exhausted, no space left on device,
 //     cannot allocate, too many containers
 func IsCapacityRefusal(err error) bool {
@@ -68,14 +68,7 @@ func capacityHTTPStatus(err error) (int, bool) {
 	if errors.As(err, &coder) {
 		return coder.HTTPStatusCode(), true
 	}
-	var coord CoordinatorHTTPError
-	if errors.As(err, &coord) {
-		return coord.StatusCode, true
-	}
-	var hetzner HetznerHTTPError
-	if errors.As(err, &hetzner) {
-		return hetzner.StatusCode, true
-	}
+	// Common cloud SDK HTTP errors (not crabbox provider switches).
 	var googleErr *googleapi.Error
 	if errors.As(err, &googleErr) && googleErr != nil {
 		return googleErr.Code, true

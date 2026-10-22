@@ -72,6 +72,10 @@ func (e CoordinatorHTTPError) Error() string {
 	return fmt.Sprintf("coordinator %s %s: http %d", e.Method, e.Path, e.StatusCode)
 }
 
+// HTTPStatusCode exposes the transport status for shared classifiers such as
+// IsCapacityRefusal without requiring provider-name switches.
+func (e CoordinatorHTTPError) HTTPStatusCode() int { return e.StatusCode }
+
 func coordinatorResponseErrorCode(err error, status int) string {
 	var httpErr CoordinatorHTTPError
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != status {

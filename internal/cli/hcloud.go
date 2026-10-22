@@ -31,6 +31,10 @@ func (e HetznerHTTPError) Error() string {
 	return fmt.Sprintf("hetzner %s %s: http %d: %s", e.Method, e.Path, e.StatusCode, e.Detail)
 }
 
+// HTTPStatusCode exposes the transport status for shared classifiers such as
+// IsCapacityRefusal without requiring provider-name switches.
+func (e HetznerHTTPError) HTTPStatusCode() int { return e.StatusCode }
+
 func IsHetznerNotFound(err error) bool {
 	var httpErr HetznerHTTPError
 	return errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound
