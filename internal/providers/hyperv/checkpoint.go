@@ -290,6 +290,18 @@ func validateCheckpointCleanupArtifact(artifactDir string, metadata map[string]s
 	return checkpointArtifactPaths{artifactDir: trusted, exportRoot: root}, nil
 }
 
+// grantExportRootSystemScript adds SYSTEM (the VMMS identity that performs
+// Export-VMSnapshot) to the private export directory while keeping inheritance
+// protected and the existing owner-only entries.
+func grantExportRootSystemScript(exportRoot string) string {
+	return fmt.Sprintf(
+		`$exportDir=[IO.DirectoryInfo]::new('%s'); $exportAcl=$exportDir.GetAccessControl([Security.AccessControl.AccessControlSections]::Access); `+
+			`$exportAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-18'),'FullControl','ContainerInherit,ObjectInherit','None','Allow')); `+
+			`$exportDir.SetAccessControl($exportAcl); `,
+		escapePSString(exportRoot),
+	)
+}
+
 func checkpointArtifactForCreate(artifactDir string) (checkpointArtifactPaths, error) {
 	artifactDir = strings.TrimSpace(artifactDir)
 	if artifactDir == "" {
@@ -555,6 +567,8 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 			err = errors.Join(err, reenable(restoreCtx))
 		}()
 	}
+	// The VMMS service writes the export as SYSTEM; the owner-only private DACL denies it.
+	script = grantExportRootSystemScript(paths.exportRoot) + script
 	commandResult, runErr := b.powershell(ctx, script)
 	if runErr != nil {
 		return result, shared.LocalCommandError("create production Hyper-V checkpoint", commandResult, runErr)
