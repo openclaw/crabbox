@@ -2351,6 +2351,7 @@ func TestJSONRequestAdoptionEnvelope(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
+			var requestCtx context.Context
 			endpoint := "/records"
 			if tc.query {
 				endpoint += "?limit=2&prefix=two+words"
@@ -2363,7 +2364,11 @@ func TestJSONRequestAdoptionEnvelope(t *testing.T) {
 			}
 			transport := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
 				calls++
-				testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, base+endpoint, tc.want, headers)
+				requestCtx = req.Context()
+				if requestCtx.Value(key{}) != "capture" || requestCtx.Err() != nil {
+					t.Fatal("request context lost caller values or was canceled before dispatch")
+				}
+				testutil.RequireRequestEnvelope(t, req, requestCtx, http.MethodPost, base+endpoint, tc.want, headers)
 				if tc.fail {
 					return nil, sentinel
 				}
@@ -2383,18 +2388,27 @@ func TestJSONRequestAdoptionEnvelope(t *testing.T) {
 			if calls != 1 {
 				t.Fatalf("calls=%d", calls)
 			}
+			if requestCtx.Err() != context.Canceled || ctx.Err() != nil {
+				t.Fatal("request completion must cancel only the owned request context")
+			}
 		})
 	}
 }
 
 func TestJSONRequestAdoptionConcreteEnvelope(t *testing.T) {
-	ctx := context.Background()
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "capture")
+	var requestCtx context.Context
 	sentinel := errors.New("synthetic captured concrete request")
 	calls := 0
 	headers := http.Header{"Authorization": []string{"Bearer synthetic-token"}, "Content-Type": []string{"application/json"}}
 	transport := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		calls++
-		testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, "https://api.example.test/base/v1/runs", "{\"cacheMode\":\"none\",\"retainMetadata\":true,\"module\":{\"source\":\"\\u003c\\u0026\\u003e\"},\"egress\":\"none\",\"limits\":{},\"timeoutMs\":7}\n", headers)
+		requestCtx = req.Context()
+		if requestCtx.Value(key{}) != "capture" || requestCtx.Err() != nil {
+			t.Fatal("request context lost caller values or was canceled before dispatch")
+		}
+		testutil.RequireRequestEnvelope(t, req, requestCtx, http.MethodPost, "https://api.example.test/base/v1/runs", "{\"cacheMode\":\"none\",\"retainMetadata\":true,\"module\":{\"source\":\"\\u003c\\u0026\\u003e\"},\"egress\":\"none\",\"limits\":{},\"timeoutMs\":7}\n", headers)
 		return nil, sentinel
 	})}
 	c := &client{baseURL: "https://api.example.test/base", token: "synthetic-token", http: transport}
@@ -2404,6 +2418,9 @@ func TestJSONRequestAdoptionConcreteEnvelope(t *testing.T) {
 	}
 	if !errors.Is(err, sentinel) || calls != 1 {
 		t.Fatalf("error=%v calls=%d", err, calls)
+	}
+	if requestCtx.Err() != context.Canceled || ctx.Err() != nil {
+		t.Fatal("request completion must cancel only the owned request context")
 	}
 }
 

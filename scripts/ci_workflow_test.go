@@ -237,7 +237,8 @@ func checkCIGoContract(document *yaml.Node) error {
 			if i == 1 {
 				keys = append(keys, "with")
 				with := ciGoField(step, "with")
-				fields(with, label+" inputs", "go-version-file", "cache", "cache-dependency-path")
+				fields(with, label+" inputs", "go-version", "go-version-file", "cache", "cache-dependency-path")
+				require(ciGoScalar(with, "go-version") == "1.27.3", "%s must select the patched Go toolchain", label)
 				require(ciGoScalar(with, "go-version-file") == "go.mod", "%s must use go.mod", label)
 				require(ciGoScalar(with, "cache") == "true", "%s must cache Go builds and modules", label)
 				require(ciGoScalar(with, "cache-dependency-path") == "**/go.sum", "%s must key every module dependency", label)
@@ -648,6 +649,9 @@ func TestCIGoContractRejectsMutations(t *testing.T) {
 		}},
 		{"setup toolchain source", func(d *yaml.Node) {
 			ciGoSet(t, ciGoField(ciGoSteps(ciGoJob(d, "go-test-core"))[1], "with"), "go-version-file", "worker/go.mod")
+		}},
+		{"setup toolchain version", func(d *yaml.Node) {
+			ciGoSet(t, ciGoField(ciGoSteps(ciGoJob(d, "go-test-core"))[1], "with"), "go-version", "1.26.0")
 		}},
 		{"setup cache", func(d *yaml.Node) {
 			ciGoSet(t, ciGoField(ciGoSteps(ciGoJob(d, "go-coverage"))[2], "with"), "cache", "false")

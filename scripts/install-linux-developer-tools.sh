@@ -27,7 +27,7 @@ node_link_dir="/usr/local/bin"
 pinned_node_version="24.19.0"
 go_toolcache_root="/opt/hostedtoolcache"
 go_link_dir="/usr/local/bin"
-pinned_go_version="1.27.0"
+pinned_go_version="1.27.3"
 bun_bin_dir="/usr/local/bin"
 bun_toolchain_root="/opt/crabbox/toolchains/bun"
 pinned_bun_version="1.4.0"
@@ -253,8 +253,8 @@ toolchain_archive_spec() {
       printf '%s\n' "sha256 5326b36c53de11d148c8f8dab6553a3d1006c2cfd32123683073fad3c302605b https://static.rust-lang.org/dist/$1" ;;
     uv-0.12.19-x86_64-unknown-linux-gnu.tar.gz)
       printf '%s\n' "sha256 23bf5552d220e0842b65c862097b2ebaeba0064b74eda5e565e77fd25969d8c8 https://github.com/astral-sh/uv/releases/download/0.12.19/uv-x86_64-unknown-linux-gnu.tar.gz" ;;
-    go1.27.0.linux-amd64.tar.gz)
-      printf '%s\n' "sha256 675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685 https://go.dev/dl/$1" ;;
+    go1.27.3.linux-amd64.tar.gz)
+      printf '%s\n' "sha256 65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 https://go.dev/dl/$1" ;;
     node-v24.19.0-linux-x64.tar.xz)
       printf '%s\n' "sha256 14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647 https://nodejs.org/dist/v24.19.0/$1" ;;
     pnpm-11.22.0.tgz)
@@ -433,9 +433,9 @@ offline_go_probe() (
   staging="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
-  stage_toolchain_archive go1.27.0.linux-amd64.tar.gz "$staging"
+  stage_toolchain_archive go1.27.3.linux-amd64.tar.gz "$staging"
   mkdir "$staging/go"
-  tar --no-same-owner -xzf "$staging/go1.27.0.linux-amd64.tar.gz" -C "$staging/go" --strip-components=1
+  tar --no-same-owner -xzf "$staging/go1.27.3.linux-amd64.tar.gz" -C "$staging/go" --strip-components=1
   check_go_toolchain "$staging/go" "$staging/check"
 )
 
@@ -445,7 +445,7 @@ go_smoke_script() {
   declare -f log linux_x64_supported toolchain_archive_spec verify_toolchain_archive stage_toolchain_archive check_go_toolchain offline_go_probe
   # shellcheck disable=SC2016
   printf '%s\n' 'if linux_x64_supported; then' \
-    '  [[ "$(GOTOOLCHAIN=local GOENV=off go version)" == "go version go1.27.0 linux/amd64" ]]' \
+    '  [[ "$(GOTOOLCHAIN=local GOENV=off go version)" == "go version go1.27.3 linux/amd64" ]]' \
     '  command -v gofmt' '  offline_go_probe' 'fi'
 }
 

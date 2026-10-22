@@ -50,7 +50,7 @@ install_go_toolchain
     );
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.includes("go-installed"), expected);
-    assert.equal(result.stdout.includes("archive=go1.27.0.linux-amd64.tar.gz"), expected);
+    assert.equal(result.stdout.includes("archive=go1.27.3.linux-amd64.tar.gz"), expected);
   });
 }
 
@@ -1083,7 +1083,7 @@ test("linux developer image reports TruffleHog from the configured install direc
 	);
 	writeExecutable(
 		path.join(goLinkDir, "go"),
-		"#!/usr/bin/env bash\nprintf 'go version go1.27.0 linux/amd64\\n'\n",
+		"#!/usr/bin/env bash\nprintf 'go version go1.27.3 linux/amd64\\n'\n",
 	);
 	for (const command of [
 		"git",
@@ -1139,7 +1139,7 @@ test("linux developer image reports TruffleHog from the configured install direc
 	);
 
 	assert.equal(result.status, 0, result.stderr || result.stdout);
-	assert.match(result.stdout, /go version go1\.27\.0 linux\/amd64/);
+	assert.match(result.stdout, /go version go1\.27\.3 linux\/amd64/);
 	assert.match(result.stdout, /bun test-version/);
 	for (const command of ["rustc", "cargo", "rustdoc", "uv", "uvx"]) {
 		assert.match(result.stdout, new RegExp(`${command} test-version`));

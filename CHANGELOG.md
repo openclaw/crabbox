@@ -2,12 +2,25 @@
 
 ## Unreleased
 
+- Coordinator: bound capacity snapshots, use maintained lease indexes, and keep diagnostic reads off the lifecycle mutex so retained history cannot stall completion and heartbeats. Incomplete or oversized snapshots fail closed without reporting partial capacity. [PR 2932](https://github.com/openclaw/crabbox/pull/2932).
+- AWS: preserve the original root disk identity after instance loss, fail closed when historical evidence is unavailable, and prevent replacement disks from acquiring the original identity. [PR 2926](https://github.com/openclaw/crabbox/pull/2926). Thanks @Surendra-4 and @cropsgg.
+- Run: retain private original signed completion bytes before delivery and support exact-byte receipt recovery after coordinator failures, without reconstructing missing historical signatures. [PR 2925](https://github.com/openclaw/crabbox/pull/2925). Thanks @Surendra-4 and @cropsgg.
+
+## 0.79.1 - 2026-10-20
+
+### Highlights
+
+- **Patch certificate validation across Go builds.** Source, release binaries, container runners, and developer-image toolchains now select Go 1.27.3 to fix GO-2026-6809, retaining the Go 1.26 minimum.
+
 - Local Actions hydration: hydrate detached source mirrors from a verified published ancestor with only a local base ref, preserving selected-file exclusions during cold sync. [PR 2916](https://github.com/openclaw/crabbox/pull/2916). Thanks @shakkernerd.
 
 - Local Actions hydration: prepare cold unpublished detached sources from a verified published ancestor while preserving selected files, privacy filters, and repository identity checks. [PR 2914](https://github.com/openclaw/crabbox/pull/2914). Thanks @shakkernerd.
 
 ### Fixed
 
+- smolvm: upload workspace archives and environment profiles through the files API instead of base64 in exec requests, so repositories over ~750 KiB compressed no longer fail with 413, and keep complete command output past 1 MiB (or report truncation). Narrowed API keys now need the `machine:files` scope. [PR 2915](https://github.com/openclaw/crabbox/pull/2915). Thanks @NickyHeC.
+- Security: build source, release binaries, container runners, and developer-image toolchains with Go 1.27.3 to fix reachable GO-2026-6809 certificate validation, retaining the Go 1.26 minimum.
+- Cloudflare Dynamic Workers: cancel stalled response reads at their deadline instead of blocking while closing the response body.
 - Run: verify forwarded environment file removal after cleanup failures, preserve success when only the staging directory remains, and distinguish present files from unconfirmed removal. [PR 2917](https://github.com/openclaw/crabbox/pull/2917). Thanks @mr3od.
 
 ## 0.79.0 - 2026-10-19
@@ -39,7 +52,6 @@
 
 ### Fixed
 
-- smolvm: upload workspace archives and environment profiles through the files API instead of base64 in exec requests, so repositories over ~750 KiB compressed no longer fail with 413, and keep complete command output past 1 MiB (or report truncation). Narrowed API keys now need the `machine:files` scope. [PR 2915](https://github.com/openclaw/crabbox/pull/2915). Thanks @NickyHeC.
 - CI: make Blacksmith's buffered artifact-timeout regression deterministic under scheduler pressure without changing production timeouts or workload results. [PR 2909](https://github.com/openclaw/crabbox/pull/2909).
 - Config: protect persisted Windows credentials with a verified current-user-only DACL before writing, without inheriting parent read grants. [PR 2901](https://github.com/openclaw/crabbox/pull/2901). Thanks @coygeek.
 - Freestyle: create and resume VMs through the current Freestyle API contract, validating readiness for stopped or paused creation responses. [PR 2897](https://github.com/openclaw/crabbox/pull/2897). Thanks @coygeek.

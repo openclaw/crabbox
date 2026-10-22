@@ -1,7 +1,8 @@
+import { validAWSRootDiskIdentity } from "./aws-root-disk";
 import type { LeaseConfig } from "./config";
 import type { CoordinatorStorageView } from "./coordinator-runtime";
 import type { ProvisioningMaterial } from "./provisioning-material";
-import type { Provider } from "./types";
+import type { AWSRootDiskIdentity, Provider } from "./types";
 import type { LeaseRecord, ProviderMachine, LeaseImageIdentity } from "./types";
 
 export type ProvisioningPhase =
@@ -82,6 +83,7 @@ export interface ProviderProvisioningCleanupClaim {
   providerScope?: string;
   serverID?: number;
   providerResourceID?: string;
+  awsOriginalRootDisk?: AWSRootDiskIdentity;
 }
 
 // Unlike retryable cleanup failure, this requires identity or scope resolution before
@@ -150,7 +152,14 @@ export function validateProviderProvisioningCleanupClaim(
   }
   switch (claim.provider) {
     case "aws":
-      return nonEmptyClaimValue(claim.region) ? claim : undefined;
+      return nonEmptyClaimValue(claim.region) &&
+        (claim.awsOriginalRootDisk === undefined ||
+          (validAWSRootDiskIdentity(claim.awsOriginalRootDisk) &&
+            claim.awsOriginalRootDisk.instanceID === claim.cloudID &&
+            claim.awsOriginalRootDisk.region === claim.region &&
+            claim.awsOriginalRootDisk.providerScope === claim.providerScope))
+        ? claim
+        : undefined;
     case "azure":
       return nonEmptyClaimValue(claim.region) && validAzureProviderScope(claim.providerScope)
         ? claim

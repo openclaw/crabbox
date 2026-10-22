@@ -103,6 +103,7 @@ jobs:
       - name: Set up Go for Apple VM source verification
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
+          go-version: "1.27.3"
           go-version-file: go.mod
           cache: false
 
@@ -306,6 +307,7 @@ jobs:
       - name: Set up Go for build-info inspection
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
+          go-version: "1.27.3"
           go-version-file: go.mod
           cache: false
       - name: Set up Node for protected release tooling
@@ -449,6 +451,7 @@ jobs:
       - name: Set up Go for build-info inspection
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
+          go-version: "1.27.3"
           go-version-file: go.mod
           cache: false
       - name: Set up Node for protected release tooling

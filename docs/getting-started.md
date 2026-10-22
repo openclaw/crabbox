@@ -53,7 +53,7 @@ tag from [GitHub Releases](https://github.com/openclaw/crabbox/releases); this
 channel is supported starting with v0.44.0. For example:
 
 ```sh
-GOTOOLCHAIN=go1.27.2 go install github.com/openclaw/crabbox/cmd/crabbox@v0.70.0
+GOTOOLCHAIN=go1.27.3 go install github.com/openclaw/crabbox/cmd/crabbox@v0.70.0
 ```
 
 The module minimum remains Go 1.26. Use the explicit patched toolchain above:

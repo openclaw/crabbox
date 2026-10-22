@@ -4980,7 +4980,7 @@ func runCommandSyncOnlyFinalization(t *testing.T, missingEvents bool) {
 	}
 }
 
-func TestRunCommandTerminalReceiptMarksCoordinatorFinishFailureLocally(t *testing.T) {
+func TestRunCommandTerminalReceiptPreservesOriginalAfterCoordinatorFinishFailure(t *testing.T) {
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
 	sshPath := filepath.Join(dir, "ssh")
@@ -5112,8 +5112,8 @@ func TestRunCommandTerminalReceiptMarksCoordinatorFinishFailureLocally(t *testin
 	if decodeErr != nil {
 		t.Fatalf("decode terminal receipt: %v", decodeErr)
 	}
-	if localReceipt.ExitCode != 7 {
-		t.Fatalf("local receipt exit=%d, want coordinator failure exit 7", localReceipt.ExitCode)
+	if localReceipt.ExitCode != 0 {
+		t.Fatalf("local receipt exit=%d, want original task exit 0", localReceipt.ExitCode)
 	}
 
 	mu.Lock()
@@ -5135,8 +5135,8 @@ func TestRunCommandTerminalReceiptMarksCoordinatorFinishFailureLocally(t *testin
 			t.Fatalf("finish attempt %d used a different receipt from local persistence:\nlocal=%+v\nremote=%+v", i+1, finishLocalReceipts[i], receipt)
 		}
 	}
-	if localReceipt == finishReceipts[0] {
-		t.Fatal("local failure receipt must differ from the ambiguous remote execution receipt")
+	if localReceipt != finishReceipts[0] {
+		t.Fatal("transport failure must not reconstruct or re-sign the original receipt")
 	}
 	if len(unexpectedCalls) != 0 {
 		t.Fatalf("unexpected coordinator calls: %v", unexpectedCalls)
