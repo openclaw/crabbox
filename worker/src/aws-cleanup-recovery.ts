@@ -1,9 +1,10 @@
 import { sanitizeAWSRegion } from "./aws-region";
+import { validAWSRootDiskIdentity } from "./aws-root-disk";
 import { sha256Hex } from "./encoding";
 import { providerKeyForLease } from "./provider-key";
 import { providerLabelsOwnedByLease } from "./provider-labels";
 import { ProviderResourceUnresolvedError } from "./provider-provisioning";
-import type { LeaseRecord } from "./types";
+import type { AWSRootDiskIdentity, LeaseRecord } from "./types";
 
 export interface AWSLegacyCleanupAudit {
   leaseID: string;
@@ -120,8 +121,53 @@ export async function lookupAWSLegacyAllocation(
   fetch: (input: string, init: RequestInit) => Promise<Response>,
 ): Promise<AWSLegacyAllocationEvidence> {
   requireAWSLegacyCleanupLease(lease);
+  return lookupAllocation(lease, account, fetch);
+}
+
+export interface AWSOriginalRootEvidence extends AWSLegacyAllocationEvidence {
+  disk: AWSRootDiskIdentity;
+}
+
+// Read-only recovery: no caller-supplied disk, tag search, live replacement, or
+// absence inference. Only the original, authenticated RunInstances response.
+export async function lookupAWSOriginalRootDisk(
+  lease: LeaseRecord,
+  account: string,
+  fetch: (input: string, init: RequestInit) => Promise<Response>,
+): Promise<AWSOriginalRootEvidence> {
+  if (
+    lease.provider !== "aws" ||
+    lease.lifecycle === "registered" ||
+    !/^cbx_[a-f0-9]{12}$/.test(lease.id) ||
+    !/^i-[a-f0-9]{8,17}$/.test(lease.cloudID) ||
+    !lease.region ||
+    sanitizeAWSRegion(lease.region) !== lease.region ||
+    lease.providerScope !== "aws:account:" + account ||
+    lease.providerKey !== providerKeyForLease(lease.id) ||
+    lease.providerKeyCleanupOwned !== true
+  ) {
+    throw new ProviderResourceUnresolvedError(
+      "original root recovery requires an exact owned lease and authenticated account scope",
+    );
+  }
+  const evidence = await lookupAllocation(lease, account, fetch, true);
+  if (!evidence.disk)
+    throw new ProviderResourceUnresolvedError(
+      "original root disk is absent from allocation evidence",
+    );
+  return { ...evidence, disk: evidence.disk };
+}
+
+async function lookupAllocation(
+  lease: LeaseRecord,
+  account: string,
+  fetch: (input: string, init: RequestInit) => Promise<Response>,
+  requireRootDisk = false,
+): Promise<AWSLegacyAllocationEvidence & { disk?: AWSRootDiskIdentity }> {
   const start = Math.floor(Date.parse(lease.createdAt) / 1000) * 1000;
-  const end = Date.parse(lease.releasedAt ?? lease.endedAt ?? "");
+  const end = Date.parse(
+    lease.releasedAt ?? lease.endedAt ?? (requireRootDisk ? new Date().toISOString() : ""),
+  );
   if (
     !/^\d{12}$/.test(account) ||
     !Number.isFinite(start) ||
@@ -140,7 +186,7 @@ export async function lookupAWSLegacyAllocation(
     EndTime: end / 1000,
     MaxResults: 50,
   };
-  const evidence = new Map<string, AWSLegacyAllocationEvidence>();
+  const evidence = new Map<string, AWSLegacyAllocationEvidence & { disk?: AWSRootDiskIdentity }>();
   const tokens = new Set<string>();
   let nextToken: string | undefined;
   let remainingBytes = maxLookupBytes;
@@ -175,7 +221,7 @@ export async function lookupAWSLegacyAllocation(
     for (const value of result["Events"]) {
       const summary = record(value);
       if (summary["EventName"] !== "RunInstances") continue;
-      const observed = allocationEvidence(summary, lease, account, start, end);
+      const observed = allocationEvidence(summary, lease, account, start, end, requireRootDisk);
       const previous = evidence.get(observed.eventID);
       if (previous && JSON.stringify(previous) !== JSON.stringify(observed)) invalidEvidence();
       evidence.set(observed.eventID, observed);
@@ -210,7 +256,8 @@ function allocationEvidence(
   account: string,
   start: number,
   end: number,
-): AWSLegacyAllocationEvidence {
+  requireRootDisk: boolean,
+): AWSLegacyAllocationEvidence & { disk?: AWSRootDiskIdentity } {
   if (typeof summary["CloudTrailEvent"] !== "string") invalidEvidence();
   let event: Record<string, unknown>;
   try {
@@ -267,7 +314,31 @@ function allocationEvidence(
     labels["provider_key"] !== lease.providerKey
   )
     invalidEvidence();
+  let disk: AWSRootDiskIdentity | undefined;
+  if (requireRootDisk) {
+    const instance = record(instances[0]);
+    const rootName = instance["rootDeviceName"];
+    const mappings = record(instance["blockDeviceMapping"])["items"];
+    const roots = Array.isArray(mappings)
+      ? mappings.map(record).filter((mapping) => mapping["deviceName"] === rootName)
+      : [];
+    const candidate = {
+      leaseID: lease.id,
+      instanceID: lease.cloudID,
+      region: lease.region,
+      providerScope: "aws:account:" + account,
+      deviceName: rootName,
+      volumeID: record(roots[0]?.["ebs"])["volumeId"],
+    };
+    if (roots.length !== 1 || !validAWSRootDiskIdentity(candidate)) {
+      throw new ProviderResourceUnresolvedError(
+        "original root disk is absent or ambiguous in the authenticated RunInstances response; original provider custody evidence is required",
+      );
+    }
+    disk = candidate;
+  }
   return {
+    ...(disk ? { disk } : {}),
     region: lease.region!,
     providerScope: `aws:account:${account}`,
     eventID: event["eventID"],
