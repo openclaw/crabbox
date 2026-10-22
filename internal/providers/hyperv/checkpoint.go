@@ -881,39 +881,76 @@ func (b *backend) restoreNativeCheckpoint(ctx context.Context, req core.NativeCh
 		}
 	}()
 	claim := reservedClaim
-	vm, err := b.queryCheckpointVM(ctx, sourceName)
-	if err != nil {
+	// The reservation transaction releases the claim lock, so every effect
+	// below re-checks that this exact reservation still owns the lease.
+	verifyClaim := func(c context.Context) error {
+		return core.WithLeaseClaimUnchangedContext(c, sourceLease, reservedClaim, nil)
+	}
+	fenced := func(c context.Context, action func() error) error {
+		return core.WithLeaseClaimUnchangedContext(c, sourceLease, reservedClaim, action)
+	}
+	if err := verifyClaim(ctx); err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if vm.State == hypervMissingState || !strings.EqualFold(vm.ID, sourceID) {
-		return core.LeaseTarget{}, core.Exit(4, "Hyper-V source VM identity no longer matches checkpoint %s", req.Record.ImageID)
-	}
-	originalState := vm.State
+	originalState := 0
 	stateRestorePending := false
-	if len(claim.CacheVolumes) > 0 {
-		reservationTarget, stateRestorePending, err = b.resumeCheckpointCacheSource(ctx, sourceName, originalState, cfg, reservationTarget)
-		if err != nil {
-			return core.LeaseTarget{}, err
+	var detachedCaches []hypervDetachedCacheVolume
+	// Cache preparation resumes the VM and detaches caches, so it runs under
+	// the reservation fence; the detach path consumes the fenced claim instead
+	// of re-reading it.
+	prepareErr := fenced(ctx, func() error {
+		vm, queryErr := b.queryCheckpointVM(ctx, sourceName)
+		if queryErr != nil {
+			return queryErr
 		}
-		if stateRestorePending {
-			defer func() {
-				if !stateRestorePending {
-					return
-				}
-				restoreCtx, cancel := context.WithTimeout(context.Background(), hypervCheckpointCleanupTimeout)
-				defer cancel()
-				err = errors.Join(err, b.restoreCheckpointSourceState(restoreCtx, sourceName, originalState))
-			}()
+		if vm.State == hypervMissingState || !strings.EqualFold(vm.ID, sourceID) {
+			return core.Exit(4, "Hyper-V source VM identity no longer matches checkpoint %s", req.Record.ImageID)
 		}
+		originalState = vm.State
+		if len(claim.CacheVolumes) > 0 {
+			var resumeErr error
+			reservationTarget, stateRestorePending, resumeErr = b.resumeCheckpointCacheSource(ctx, sourceName, originalState, cfg, reservationTarget)
+			if resumeErr != nil {
+				return resumeErr
+			}
+		}
+		var detachErr error
+		detachedCaches, detachErr = b.detachLeaseCacheVolumes(context.WithValue(ctx, fencedCacheClaimKey{}, reservedClaim), sourceName, sourceLease, cfg, reservationTarget, true)
+		if detachErr != nil {
+			return errors.Join(detachErr, b.restoreDetachedCacheVolumes(sourceName, cfg, reservationTarget, detachedCaches))
+		}
+		return nil
+	})
+	if stateRestorePending {
+		defer func() {
+			if !stateRestorePending {
+				return
+			}
+			restoreCtx, cancel := context.WithTimeout(context.Background(), hypervCheckpointCleanupTimeout)
+			defer cancel()
+			err = errors.Join(err, fenced(restoreCtx, func() error {
+				return b.restoreCheckpointSourceState(restoreCtx, sourceName, originalState)
+			}))
+		}()
 	}
-	detachedCaches, detachErr := b.detachLeaseCacheVolumes(ctx, sourceName, sourceLease, cfg, reservationTarget, true)
-	if detachErr != nil {
-		return core.LeaseTarget{}, errors.Join(detachErr, b.restoreDetachedCacheVolumes(sourceName, cfg, reservationTarget, detachedCaches))
+	if prepareErr != nil {
+		return core.LeaseTarget{}, prepareErr
 	}
 	cacheRestorePending := len(detachedCaches) > 0
 	defer func() {
 		if cacheRestorePending {
-			err = errors.Join(err, b.restoreCheckpointCachesAfterFailure(sourceName, cfg, reservationTarget, detachedCaches))
+			recoverCtx, cancel := context.WithTimeout(context.Background(), hypervCheckpointCleanupTimeout)
+			defer cancel()
+			recovered := false
+			fenceErr := fenced(recoverCtx, func() error {
+				recovered = true
+				return b.restoreCheckpointCachesAfterFailure(sourceName, cfg, reservationTarget, detachedCaches)
+			})
+			if !recovered {
+				// Revoked authority: skip guest and VM effects but free the cache locks.
+				fenceErr = errors.Join(fenceErr, releaseDetachedCacheVolumeLocks(detachedCaches))
+			}
+			err = errors.Join(err, fenceErr)
 		}
 	}()
 	script := fmt.Sprintf(
@@ -930,7 +967,14 @@ func (b *backend) restoreNativeCheckpoint(ctx context.Context, req core.NativeCh
 	if err := ctx.Err(); err != nil {
 		return core.LeaseTarget{}, err
 	}
-	commandResult, runErr := b.powershell(ctx, script)
+	var commandResult core.LocalCommandResult
+	var runErr error
+	if fenceErr := fenced(ctx, func() error {
+		commandResult, runErr = b.powershell(ctx, script)
+		return nil
+	}); fenceErr != nil {
+		return core.LeaseTarget{}, fenceErr
+	}
 	if runErr != nil {
 		if ctx.Err() != nil {
 			// A canceled host command may have reached Hyper-V before its process
@@ -947,7 +991,14 @@ func (b *backend) restoreNativeCheckpoint(ctx context.Context, req core.NativeCh
 		escapePSString(sourceName),
 		escapePSString(sourceID),
 	)
-	startResult, startErr := b.powershell(ctx, startScript)
+	var startResult core.LocalCommandResult
+	var startErr error
+	if fenceErr := fenced(ctx, func() error {
+		startResult, startErr = b.powershell(ctx, startScript)
+		return nil
+	}); fenceErr != nil {
+		return core.LeaseTarget{}, fenceErr
+	}
 	if startErr != nil {
 		return core.LeaseTarget{}, shared.LocalCommandError("start restored Hyper-V VM", startResult, startErr)
 	}
@@ -959,20 +1010,24 @@ func (b *backend) restoreNativeCheckpoint(ctx context.Context, req core.NativeCh
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	cacheErr := b.restoreDetachedCacheVolumes(sourceName, cfg, lease.SSH, detachedCaches)
-	cacheRestorePending = false
-	if cacheErr != nil {
-		return core.LeaseTarget{}, cacheErr
+	if err := fenced(ctx, func() error {
+		cacheErr := b.restoreDetachedCacheVolumes(sourceName, cfg, lease.SSH, detachedCaches)
+		cacheRestorePending = false
+		return cacheErr
+	}); err != nil {
+		return core.LeaseTarget{}, err
 	}
 	if stateRestorePending {
-		if err := b.restoreCheckpointSourceState(ctx, sourceName, originalState); err != nil {
+		if err := fenced(ctx, func() error {
+			return b.restoreCheckpointSourceState(ctx, sourceName, originalState)
+		}); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		stateRestorePending = false
 		lease.Server = b.serverFromInstance(hypervVM{Name: sourceName, State: originalState}, claim, cfg)
 		lease.Server.PublicNet.IPv4.IP = ip
 	}
-	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(sourceLease, claim.Slug, providerName, instanceScope(sourceName), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
+	if _, err := core.ClaimLeaseForRepoProviderScopePondEndpointIfUnchanged(sourceLease, claim.Slug, providerName, instanceScope(sourceName), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH, reservedClaim, true); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	rollbackClaim = false

@@ -728,8 +728,17 @@ func posixShellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
+// fencedCacheClaimKey carries the reservation claim already authenticated by a
+// claim fence so cache locking does not re-enter the claim lock.
+type fencedCacheClaimKey struct{}
+
 func (b *backend) lockLeaseCacheVolumes(ctx context.Context, leaseID string, cfg core.Config, target core.SSHTarget, requireMetadata bool) ([]hypervDetachedCacheVolume, core.SSHTarget, error) {
-	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	claim, ok, err := core.LeaseClaim{}, false, error(nil)
+	if fenced, isFenced := ctx.Value(fencedCacheClaimKey{}).(core.LeaseClaim); isFenced {
+		claim, ok = fenced, true
+	} else {
+		claim, ok, err = core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	}
 	if err != nil {
 		return nil, target, err
 	}
