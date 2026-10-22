@@ -217,7 +217,7 @@ func freshWindowsBootstrapFixture(t *testing.T, mode, explicitPort string) (Conf
 	}
 	return cfg, CoordinatorLease{
 		ID: "cbx_abcdef123456", Provider: "aws", State: "active", TargetOS: targetWindows, WindowsMode: mode,
-		Host: "127.0.0.1", SSHUser: "lease-user", SSHPort: "2222", SSHFallbackPorts: []string{"22"},
+		Host: "203.0.113.10", SSHUser: "lease-user", SSHPort: "2222", SSHFallbackPorts: []string{"22"},
 		SSHHostKey: testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 41)),
 	}
 }

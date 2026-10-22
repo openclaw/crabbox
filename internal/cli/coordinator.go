@@ -3141,6 +3141,11 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 	}
 	cfg.Provider = provider
 	target := sshTargetForLeaseConnection(cfg, lease.Host, lease.SSHUser, lease.SSHPort, lease.SSHHostKey, lease.SSHJump)
+	if lease.SSHFallbackPorts != nil {
+		// The coordinator advertisement is provider policy, so it survives the
+		// loopback rule for implicit fallbacks, except for port 22.
+		target.FallbackPorts = loopbackSafeAdvertisedFallbackPorts(cfg, lease.Host, lease.SSHFallbackPorts)
+	}
 	if server.Provider == "daytona" {
 		target.Key = ""
 		target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"

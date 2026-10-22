@@ -130,8 +130,44 @@ func sshTargetForLeaseConnection(cfg Config, host, user, port, hostKey string, j
 		relayCfg := cfg
 		target.relayConfig = &relayCfg
 	}
+	target.FallbackPorts = loopbackSafeFallbackPorts(cfg, host, target.FallbackPorts)
 	configureProviderSSHTarget(cfg, &target)
 	return target
+}
+
+// loopbackSafeFallbackPorts drops implicit fallback ports for loopback hosts.
+// A loopback endpoint is a port-forward, so the implicit port 22 fallback
+// would reach the operator's own sshd. Explicit ssh.fallbackPorts still apply.
+func loopbackSafeFallbackPorts(cfg Config, host string, fallback []string) []string {
+	if cfg.sshFallbackPortsExplicit || !isLoopbackSSHHost(host) {
+		return fallback
+	}
+	return []string{}
+}
+
+// loopbackSafeAdvertisedFallbackPorts drops an advertised port 22 for a
+// loopback host: on a port-forward it would reach the operator's own sshd.
+// Explicit ssh.fallbackPorts still apply.
+func loopbackSafeAdvertisedFallbackPorts(cfg Config, host string, advertised []string) []string {
+	if cfg.sshFallbackPortsExplicit || !isLoopbackSSHHost(host) {
+		return advertised
+	}
+	kept := make([]string, 0, len(advertised))
+	for _, port := range advertised {
+		if strings.TrimSpace(port) != "22" {
+			kept = append(kept, port)
+		}
+	}
+	return kept
+}
+
+func isLoopbackSSHHost(host string) bool {
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // configureProviderSSHTarget lets the configured provider adjust a target for

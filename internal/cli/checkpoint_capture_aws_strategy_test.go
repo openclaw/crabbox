@@ -170,8 +170,10 @@ esac
 				if !os.IsNotExist(readErr) {
 					t.Fatalf("unsupported strategy reached SSH: calls=%q err=%v", calls, readErr)
 				}
-			} else if readErr != nil || string(calls) != "probe\nprepare\n" {
-				t.Fatalf("expected one SSH probe then one preparation: calls=%q err=%v", calls, readErr)
+			} else if readErr != nil || string(calls) != "prepare\n" {
+				// The fixture instance address is loopback, which pins the SSH port,
+				// so no port-selection probe runs before preparation.
+				t.Fatalf("expected one SSH preparation: calls=%q err=%v", calls, readErr)
 			}
 		})
 	}

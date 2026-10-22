@@ -90,6 +90,7 @@ func staticLease(cfg Config) (Server, SSHTarget, string, error) {
 	server.PublicNet.IPv4.IP = cfg.Static.Host
 	server.ServerType.Name = staticServerType(cfg)
 	target := sshTargetForLease(cfg, cfg.Static.Host, staticLoginUser(cfg), firstNonEmpty(cfg.Static.Port, cfg.SSHPort))
+	target.FallbackPorts = staticSSHFallbackPorts(cfg, target.FallbackPorts)
 	target.ReadyCheck = staticReadyCommand(target)
 	return server, target, leaseID, nil
 }
@@ -131,4 +132,18 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// staticSSHFallbackPorts keeps an explicitly configured static port from
+// falling back to another port. A static host is often 127.0.0.1 behind a
+// port-forward, where port 22 is the operator's own sshd. Explicit
+// ssh.fallbackPorts remain an opt-in.
+func staticSSHFallbackPorts(cfg Config, fallback []string) []string {
+	if cfg.sshFallbackPortsExplicit {
+		return append([]string{}, cfg.explicitSSHFallbackPorts...)
+	}
+	if strings.TrimSpace(cfg.Static.Port) != "" || IsSSHPortExplicit(&cfg) {
+		return []string{}
+	}
+	return fallback
 }
