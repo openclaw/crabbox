@@ -9,6 +9,7 @@
 ### Fixed
 
 - Providers: consistently list `serve` under `self-hosted-virtualization`, generate the category index from metadata, and check README category membership. [PR 2936](https://github.com/openclaw/crabbox/pull/2936). Thanks @aitrawog.
+- Docs: Daytona API key, JWT token, and organization ID are environment-only; the docs no longer list them as config keys that Crabbox silently ignores. [PR 2931](https://github.com/openclaw/crabbox/pull/2931). Thanks @KrasimirKralev.
 
 ## 0.79.1 - 2026-10-20
 
