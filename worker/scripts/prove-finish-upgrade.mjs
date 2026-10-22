@@ -56,6 +56,7 @@ const fixture = await fs.readFile(
   "utf8",
 );
 async function bundle(label, checkout, revision) {
+  report.phase = "bundle-" + label;
   const outdir = path.join(evidence, label);
   await fs.mkdir(outdir, { mode: 0o700 });
   await fs.symlink(path.join(checkout, "worker/node_modules"), path.join(outdir, "node_modules"));
@@ -103,6 +104,7 @@ async function bundle(label, checkout, revision) {
   return outfile;
 }
 async function start(file, phase, fresh = false) {
+  report.phase = "start-" + phase;
   const privatePath = path.join(evidence, phase + "-private.json");
   await fs.writeFile(
     privatePath,
@@ -142,6 +144,7 @@ async function start(file, phase, fresh = false) {
 }
 async function stop() {
   if (!active) return;
+  report.phase = "stop-" + active.phase;
   const state = active;
   if (state.child.exitCode === null && state.child.signalCode === null) state.child.kill("SIGTERM");
   let timer;
@@ -181,6 +184,7 @@ const record = (rows, key) => {
   return JSON.parse(row.value_text ?? JSON.stringify(row.value));
 };
 async function request(method, route, body, expected = 200, raw = false) {
+  report.phase = "request-" + active.phase;
   const response = await fetch(active.origin + route, {
     method,
     headers: {
@@ -335,6 +339,7 @@ async function admit(id, label, leaseID) {
   return { id, run, receipt, body, envelope, file };
 }
 async function cli(label, original, recover = true, binary = config.cli) {
+  report.phase = "cli-" + label;
   const home = path.join(evidence, "home-" + label);
   await fs.mkdir(home, { mode: 0o700 });
   const args = [
@@ -508,6 +513,13 @@ try {
 } catch (error) {
   report.status = "failed";
   report.error = String(error.stack ?? error);
+  report.failure = {
+    phase: report.phase,
+    kind: error instanceof assert.AssertionError ? "assertion" : "runtime",
+    line: /prove-finish-upgrade\.mjs:(\d+):/.exec(String(error.stack))?.[1],
+    ...(typeof error.actual === "number" ? { actual: error.actual } : {}),
+    ...(typeof error.expected === "number" ? { expected: error.expected } : {}),
+  };
   process.exitCode = 1;
 } finally {
   try {

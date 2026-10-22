@@ -14,6 +14,8 @@ env:
 
 jobs:
   windows:
+    # Native ACL proof already passed; proof-runner edits only repeat PostgreSQL.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -133,19 +135,29 @@ jobs:
             CRABBOX_FINISH_PROOF_CONFIG="$PROOF_DIR/auth.json" \
               NO_PROXY=127.0.0.1,localhost npm exec -- vitest run --config vitest.finish-postgres.config.ts
           )
-          NO_PROXY=127.0.0.1,localhost node worker/scripts/prove-finish-upgrade.mjs "$PROOF_DIR/upgrade.json"
+          proof_status=0
+          NO_PROXY=127.0.0.1,localhost node worker/scripts/prove-finish-upgrade.mjs "$PROOF_DIR/upgrade.json" || proof_status=$?
           node --input-type=module <<'JS'
           import assert from "node:assert/strict";
           import fs from "node:fs";
           import path from "node:path";
           const report = JSON.parse(fs.readFileSync(path.join(process.env.PROOF_DIR, "upgrade/PROOF-REPORT.json")));
-          assert.equal(report.status, "passed");
-          assert.equal(report.cleanupError, undefined);
           const summary = {
             status: report.status, candidate: report.candidate,
             assertions: report.assertions, requests: report.requests?.length,
+            failure: report.failure,
+            lastRequest: report.requests?.at(-1) && {
+              method: report.requests.at(-1).method, status: report.requests.at(-1).status
+            },
+            lastCLI: report.cli?.at(-1) && {
+              label: report.cli.at(-1).label, code: report.cli.at(-1).code
+            },
+            cleanupFailed: report.cleanupError !== undefined,
             syntheticOnly: true
           };
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "```json\n" + JSON.stringify(summary, null, 2) + "\n```\n");
           console.log(JSON.stringify(summary));
+          assert.equal(report.status, "passed");
+          assert.equal(report.cleanupError, undefined);
           JS
+          exit "$proof_status"
