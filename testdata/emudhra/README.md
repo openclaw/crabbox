@@ -13,3 +13,6 @@ and the executable it selects. The CI steps are limited to the finite
 runtimes are intentionally retained by the existing bootstrap contract; the
 proof records that behavior separately from fresh install and broken-runtime
 recovery. No image or release is published.
+
+The repository attributes preserve LF line endings on Windows so checkout bytes
+match this authenticated SHA256 input.
