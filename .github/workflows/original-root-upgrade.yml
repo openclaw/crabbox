@@ -1,0 +1,95 @@
+name: Original Root Upgrade Qualification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [test/original-root-qualification-20261022]
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+      - name: Install rootless fixture tooling
+        run: sudo apt-get update && sudo apt-get install -y podman uidmap slirp4netns
+      - name: Qualify original-root upgrade and restart
+        shell: bash
+        env:
+          CANDIDATE: 75e32701c489bac36ec21ab84d769b92af5ba046
+          PG_IMAGE: docker.io/library/postgres:17-bookworm@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0
+        run: |
+          set -euo pipefail
+          umask 077
+          export PROOF_DIR
+          PROOF_DIR=$(mktemp -d "$RUNNER_TEMP/root-upgrade.XXXXXX")
+          mkdir "$PROOF_DIR/old" "$PROOF_DIR/evidence"
+          old=$(node -p 'JSON.parse(require("fs").readFileSync("release/records/v0.79.1.json")).sourceCommit')
+          test "$old" = 74fe694e6783664afbb718985a5337d10fb440c1
+          git archive "$old" | tar -x -C "$PROOF_DIR/old"
+          npm ci --prefix worker
+          npm ci --prefix "$PROOF_DIR/old/worker"
+          test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+          pg=$(podman run --detach --publish 127.0.0.1::5432 \
+            --env POSTGRES_USER=crabbox_test --env POSTGRES_PASSWORD=crabbox-test-only \
+            --env POSTGRES_DB=crabbox_root_upgrade_test "$PG_IMAGE")
+          cleanup() {
+            status=$?
+            trap - EXIT
+            podman stop --time 10 "$pg" >/dev/null || status=1
+            podman rm --volumes "$pg" >/dev/null || status=1
+            if podman container exists "$pg"; then status=1; fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if podman exec "$pg" pg_isready -U crabbox_test -d crabbox_root_upgrade_test; then break; fi
+            sleep 1
+          done
+          podman exec "$pg" pg_isready -U crabbox_test -d crabbox_root_upgrade_test
+          export PG_PORT
+          PG_PORT=$(podman port "$pg" 5432/tcp | awk -F: '{print $NF}')
+          node --input-type=module <<'JS'
+          import fs from "node:fs";
+          import path from "node:path";
+          import crypto from "node:crypto";
+          const root = process.env.PROOF_DIR;
+          fs.writeFileSync(path.join(root, "config.json"), JSON.stringify({
+            database: `postgres://crabbox_test:crabbox-test-only@127.0.0.1:${process.env.PG_PORT}/crabbox_root_upgrade_test`,
+            sharedToken: crypto.randomBytes(32).toString("hex"),
+            adminToken: crypto.randomBytes(32).toString("hex"),
+            candidate: process.env.CANDIDATE,
+            oldSource: path.join(root, "old"),
+            evidence: path.join(root, "evidence")
+          }), { mode: 0o600 });
+          JS
+          NO_PROXY=127.0.0.1,localhost node worker/scripts/prove-root-upgrade.mjs "$PROOF_DIR/config.json"
+          node --input-type=module <<'JS'
+          import assert from "node:assert/strict";
+          import fs from "node:fs";
+          import path from "node:path";
+          const report = JSON.parse(fs.readFileSync(path.join(process.env.PROOF_DIR, "evidence/PROOF-REPORT.json")));
+          assert.equal(report.status, "passed");
+          assert.equal(report.cleanupError, undefined);
+          const summary = {
+            status: report.status,
+            candidate: report.candidate,
+            oldSource: report.release.sourceCommit,
+            node: report.node,
+            builds: report.builds.map(({ label, revision, lockSHA256, bundleSHA256, fixtureSHA256, inputs }) =>
+              ({ label, revision, lockSHA256, bundleSHA256, fixtureSHA256, inputCount: inputs.length })),
+            assertions: report.assertions,
+            requests: report.requests.length
+          };
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "```json\n" + JSON.stringify(summary, null, 2) + "\n```\n");
+          console.log(JSON.stringify(summary));
+          JS
