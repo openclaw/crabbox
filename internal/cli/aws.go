@@ -528,12 +528,13 @@ func (c *AWSClient) CreateServerWithFallbackControl(ctx context.Context, cfg Con
 			}
 			errs = append(errs, fmt.Errorf("%s: %w", region, err))
 			if !shouldRetryAWSRegionAfterCreateError(err, control) {
-				return Server{}, resolved, joinErrors(errs)
+				return Server{}, resolved, markCapacityRefusalIf(joinErrors(errs), isRetryableAWSProvisioningError)
 			}
 		}
-		return Server{}, cfg, joinErrors(errs)
+		return Server{}, cfg, markCapacityRefusalIf(joinErrors(errs), isRetryableAWSProvisioningError)
 	}
-	return c.createServerWithFallbackInRegion(ctx, cfg, publicKey, leaseID, slug, keep, logf, control)
+	server, resolved, err := c.createServerWithFallbackInRegion(ctx, cfg, publicKey, leaseID, slug, keep, logf, control)
+	return server, resolved, markCapacityRefusalIf(err, isRetryableAWSProvisioningError)
 }
 
 func shouldRetryAWSRegionAfterCreateError(err error, control *AWSFixedCreateControl) bool {

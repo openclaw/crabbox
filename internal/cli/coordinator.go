@@ -72,10 +72,6 @@ func (e CoordinatorHTTPError) Error() string {
 	return fmt.Sprintf("coordinator %s %s: http %d", e.Method, e.Path, e.StatusCode)
 }
 
-// HTTPStatusCode exposes the transport status for shared classifiers such as
-// IsCapacityRefusal without requiring provider-name switches.
-func (e CoordinatorHTTPError) HTTPStatusCode() int { return e.StatusCode }
-
 func coordinatorResponseErrorCode(err error, status int) string {
 	var httpErr CoordinatorHTTPError
 	if !errors.As(err, &httpErr) || httpErr.StatusCode != status {
@@ -88,6 +84,19 @@ func coordinatorResponseErrorCode(err error, status int) string {
 		return ""
 	}
 	return body.Error
+}
+
+// isCoordinatorCapacityRefusal reports definite coordinator create refusals that
+// may clear when capacity frees. Budget and policy limits stay final.
+func isCoordinatorCapacityRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch coordinatorResponseErrorCode(err, http.StatusTooManyRequests) {
+	case "cost_limit_exceeded", "workspace_limit_exceeded":
+		return false
+	}
+	return coordinatorResponseErrorCode(err, http.StatusServiceUnavailable) == "capacity_unavailable"
 }
 
 type CoordinatorLeasePolicy struct {
@@ -1319,7 +1328,7 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	if checkpointBacked && checkpointRouteUnsupported(err) {
 		return CoordinatorLease{}, c.checkpointOperationError(ctx, err)
 	}
-	return res.Lease, err
+	return res.Lease, markCapacityRefusalIf(err, isCoordinatorCapacityRefusal)
 }
 
 func (c *CoordinatorClient) RegisterLease(ctx context.Context, leaseID string, input CoordinatorLeaseRegistration) (CoordinatorLease, error) {

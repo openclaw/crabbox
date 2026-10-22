@@ -800,7 +800,7 @@ func (c *AzureClient) CreateServerWithFallback(ctx context.Context, cfg Config, 
 			return Server{}, nextCfg, joinErrors(errs)
 		}
 	}
-	return Server{}, cfg, joinErrors(errs)
+	return Server{}, cfg, markCapacityRefusalIf(joinErrors(errs), isAzureRetryableProvisioningError)
 }
 
 // LeaseClaimScope identifies the Azure account boundary used by this client.

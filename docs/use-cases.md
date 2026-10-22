@@ -146,13 +146,14 @@ crabbox shard --count 8 --concurrency 3 --from <checkpoint-id> --results-auto --
 `checkpoint fork` creates leases serially. `shard` already forks checkpoints in
 parallel; `--concurrency` / `shard.maxConcurrency` improve that fan-out so
 accounts with tight concurrent-box caps (or hosts with limited Docker slots)
-stay inside quota. Capacity or quota create refusals wait and retry with
-bounded backoff; other create errors fail that shard immediately, siblings keep
-running, and every acquired lease still releases. This is an improvement to
-existing `crabbox shard` checkpoint forking, not a replacement for
-[`pond`](features/pond.md) tagging or peer discovery. Delegated providers such
-as Islo that lack checkpoint fork still fan out with parallel
-`crabbox run --provider islo` (and `warmup` when you want kept boxes).
+stay inside quota. Opt into `--capacity-wait` / `shard.capacityWait` when an
+adapter tags a definite capacity refusal after its own fallback; other create
+errors still fail that shard immediately, siblings keep running, and every
+acquired lease still releases. This is an improvement to existing
+`crabbox shard` checkpoint forking, not a replacement for
+[`pond`](features/pond.md) tagging or peer discovery. Delegated providers that
+lack checkpoint fork still fan out with parallel `crabbox run` (and `warmup`
+when you want kept boxes).
 
 ## Run GPU Workloads
 

@@ -273,10 +273,14 @@ func (c *runpodClient) DeployPod(ctx context.Context, input runpodDeployInput) (
 			return runpodPod{}, err
 		}
 		if capacityErr != nil {
-			return runpodPod{}, capacityErr
+			return runpodPod{}, core.MarkCapacityRefusal(capacityErr)
 		}
 	}
-	return c.deployPod(ctx, input)
+	pod, err := c.deployPod(ctx, input)
+	if isRunpodCapacityError(err) {
+		return runpodPod{}, core.MarkCapacityRefusal(err)
+	}
+	return pod, err
 }
 
 func (c *runpodClient) deployPod(ctx context.Context, input runpodDeployInput) (runpodPod, error) {

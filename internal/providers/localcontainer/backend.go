@@ -270,7 +270,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s runtime=%s image=%s keep=%v\n", providerName, leaseID, slug, cfg.LocalContainer.Runtime, cfg.LocalContainer.Image, req.Keep)
 	containerID, bootstrapDir, createErr := b.createContainer(ctx, cfg, name, leaseID, slug, publicKey, req.Keep)
 	if containerID == "" {
-		return core.LeaseTarget{}, createErr
+		// No container was created; tag definite host capacity refusals so shard
+		// can optionally wait. Keys are removed by the cleanupKey defer.
+		return core.LeaseTarget{}, markLocalContainerCapacityRefusal(createErr)
 	}
 	lease := createdPendingLease(cfg, containerID, leaseID, slug, bootstrapDir, req.Keep)
 	pendingClaim, err := b.publishCreatedPendingClaim(leaseID, slug, claimScope, req, cfg, lease)
@@ -2266,6 +2268,26 @@ func (b *backend) exactContainerAbsent(ctx context.Context, id string) (bool, er
 		}
 	}
 	return false, shared.LocalCommandError("confirm local-container absence", result, err)
+}
+
+// isLocalContainerCapacityError reports definite create refusals that clear when
+// host capacity frees. Disk-full and generic allocate failures stay final.
+func isLocalContainerCapacityError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	if strings.Contains(s, "no space left") || strings.Contains(s, "cannot allocate") {
+		return false
+	}
+	return strings.Contains(s, "resource exhausted") || strings.Contains(s, "too many containers")
+}
+
+func markLocalContainerCapacityRefusal(err error) error {
+	if isLocalContainerCapacityError(err) {
+		return core.MarkCapacityRefusal(err)
+	}
+	return err
 }
 
 func localContainerRouteFailure(detail string) bool {

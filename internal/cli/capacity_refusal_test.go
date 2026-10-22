@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"google.golang.org/api/googleapi"
 )
 
@@ -14,15 +13,7 @@ type capacityRefusalMark struct{ error }
 
 func (e capacityRefusalMark) CapacityRefusal() bool { return true }
 
-type statusCodeErr struct {
-	code int
-	msg  string
-}
-
-func (e statusCodeErr) Error() string       { return e.msg }
-func (e statusCodeErr) HTTPStatusCode() int { return e.code }
-
-func TestIsCapacityRefusal(t *testing.T) {
+func TestIsCapacityRefusalMarkerOnly(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
@@ -32,32 +23,13 @@ func TestIsCapacityRefusal(t *testing.T) {
 		{name: "nil", err: nil, want: false},
 		{name: "plain", err: errors.New("boom"), want: false},
 		{name: "typed CapacityRefusal", err: capacityRefusalMark{errors.New("slots full")}, want: true},
-		{name: "httpStatusCoder 429", err: statusCodeErr{code: http.StatusTooManyRequests, msg: "busy"}, want: true},
-		{name: "httpStatusCoder 503", err: statusCodeErr{code: http.StatusServiceUnavailable, msg: "unavailable"}, want: true},
-		{name: "httpStatusCoder 402", err: statusCodeErr{code: http.StatusPaymentRequired, msg: "billing"}, want: true},
-		{name: "httpStatusCoder 400", err: statusCodeErr{code: http.StatusBadRequest, msg: "bad"}, want: false},
-		{name: "CoordinatorHTTPError 429", err: CoordinatorHTTPError{StatusCode: http.StatusTooManyRequests, Message: "slow down"}, want: true},
-		{name: "CoordinatorHTTPError 500", err: CoordinatorHTTPError{StatusCode: http.StatusInternalServerError, Message: "oops"}, want: false},
-		{name: "HetznerHTTPError 503", err: HetznerHTTPError{StatusCode: http.StatusServiceUnavailable, Detail: "busy"}, want: true},
-		{name: "googleapi 429", err: &googleapi.Error{Code: http.StatusTooManyRequests, Message: "rate"}, want: true},
-		{name: "azcore 429", err: &azcore.ResponseError{StatusCode: http.StatusTooManyRequests, ErrorCode: "TooManyRequests"}, want: true},
-		{name: "AWS InsufficientInstanceCapacity", err: errors.New("InsufficientInstanceCapacity: AZ full"), want: true},
-		{name: "AWS UnfulfillableCapacity", err: errors.New("UnfulfillableCapacity"), want: true},
-		{name: "AWS MaxSpotInstanceCountExceeded", err: errors.New("MaxSpotInstanceCountExceeded: quota"), want: true},
-		{name: "AWS VcpuLimitExceeded", err: errors.New("VcpuLimitExceeded: regional quota"), want: true},
-		{name: "Azure AllocationFailed", err: errors.New("AllocationFailed: out of capacity"), want: true},
-		{name: "Azure SkuNotAvailable", err: errors.New("SkuNotAvailable"), want: true},
-		{name: "Azure QuotaExceeded", err: errors.New("QuotaExceeded"), want: true},
-		{name: "GCP resource_pool_exhausted", err: errors.New("resource_pool_exhausted in zone"), want: true},
-		{name: "GCP quota exceeded", err: errors.New("QUOTA_EXCEEDED: CPUS"), want: true},
-		{name: "Hetzner resource_limit_exceeded", err: errors.New("resource_limit_exceeded"), want: true},
-		{name: "Hetzner dedicated_core_limit", err: errors.New("dedicated_core_limit"), want: true},
-		{name: "Islo BILLING_NOT_ALLOWED text", err: errors.New("provider=islo: HTTP 402 BILLING_NOT_ALLOWED"), want: true},
-		{name: "Docker resource exhausted", err: errors.New("container create: resource exhausted"), want: true},
-		{name: "Docker no space", err: errors.New("no space left on device"), want: true},
-		{name: "auth failure not capacity", err: errors.New("unauthorized: bad token"), want: false},
-		{name: "image not found not capacity", err: errors.New("image not found"), want: false},
-		{name: "wrapped capacity", err: fmt.Errorf("create failed: %w", errors.New("VcpuLimitExceeded")), want: true},
+		{name: "MarkCapacityRefusal", err: MarkCapacityRefusal(errors.New("quota")), want: true},
+		{name: "wrapped marker", err: fmt.Errorf("create failed: %w", MarkCapacityRefusal(errors.New("full"))), want: true},
+		{name: "http 429 text alone is not capacity", err: errors.New("http 429 slow down"), want: false},
+		{name: "AWS capacity text alone is not capacity", err: errors.New("InsufficientInstanceCapacity"), want: false},
+		{name: "402 billing text alone is not capacity", err: errors.New("HTTP 402 BILLING_NOT_ALLOWED"), want: false},
+		{name: "disk full text alone is not capacity", err: errors.New("no space left on device"), want: false},
+		{name: "CoordinatorHTTPError 503 alone is not capacity", err: CoordinatorHTTPError{StatusCode: http.StatusServiceUnavailable, Message: "busy"}, want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -67,4 +39,83 @@ func TestIsCapacityRefusal(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMarkCapacityRefusalIdempotent(t *testing.T) {
+	t.Parallel()
+	err := errors.New("full")
+	marked := MarkCapacityRefusal(err)
+	if MarkCapacityRefusal(marked) != marked {
+		t.Fatal("MarkCapacityRefusal should return an already-marked error unchanged")
+	}
+	if MarkCapacityRefusal(nil) != nil {
+		t.Fatal("MarkCapacityRefusal(nil) should be nil")
+	}
+}
+
+func TestAdapterCapacityTagging(t *testing.T) {
+	t.Parallel()
+	t.Run("aws", func(t *testing.T) {
+		t.Parallel()
+		err := markCapacityRefusalIf(errors.New("InsufficientInstanceCapacity: AZ full"), isRetryableAWSProvisioningError)
+		if !IsCapacityRefusal(err) {
+			t.Fatalf("aws capacity not tagged: %v", err)
+		}
+		err = markCapacityRefusalIf(errors.New("unauthorized"), isRetryableAWSProvisioningError)
+		if IsCapacityRefusal(err) {
+			t.Fatalf("aws non-capacity tagged: %v", err)
+		}
+	})
+	t.Run("hetzner", func(t *testing.T) {
+		t.Parallel()
+		err := markCapacityRefusalIf(errors.New("resource_limit_exceeded"), isRetryableProvisioningError)
+		if !IsCapacityRefusal(err) {
+			t.Fatalf("hetzner capacity not tagged: %v", err)
+		}
+	})
+	t.Run("gcp", func(t *testing.T) {
+		t.Parallel()
+		apiErr := &googleapi.Error{Code: http.StatusForbidden, Message: "Quota exceeded for CPUs"}
+		err := markCapacityRefusalIf(apiErr, isGCPCapacityRefusal)
+		if !IsCapacityRefusal(err) {
+			t.Fatalf("gcp capacity not tagged: %v", err)
+		}
+	})
+	t.Run("azure", func(t *testing.T) {
+		t.Parallel()
+		err := markCapacityRefusalIf(errors.New("AllocationFailed: out of capacity"), isAzureRetryableProvisioningError)
+		if !IsCapacityRefusal(err) {
+			t.Fatalf("azure capacity not tagged: %v", err)
+		}
+	})
+	t.Run("coordinator capacity_unavailable", func(t *testing.T) {
+		t.Parallel()
+		err := markCapacityRefusalIf(CoordinatorHTTPError{
+			StatusCode: http.StatusServiceUnavailable,
+			Message:    `{"error":"capacity_unavailable","retryable":true}`,
+		}, isCoordinatorCapacityRefusal)
+		if !IsCapacityRefusal(err) {
+			t.Fatalf("coordinator capacity_unavailable not tagged: %v", err)
+		}
+	})
+	t.Run("coordinator cost_limit_exceeded not tagged", func(t *testing.T) {
+		t.Parallel()
+		err := markCapacityRefusalIf(CoordinatorHTTPError{
+			StatusCode: http.StatusTooManyRequests,
+			Message:    `{"error":"cost_limit_exceeded","message":"owner limit"}`,
+		}, isCoordinatorCapacityRefusal)
+		if IsCapacityRefusal(err) {
+			t.Fatalf("cost_limit_exceeded must not be capacity: %v", err)
+		}
+	})
+	t.Run("coordinator workspace_limit_exceeded not tagged", func(t *testing.T) {
+		t.Parallel()
+		err := markCapacityRefusalIf(CoordinatorHTTPError{
+			StatusCode: http.StatusTooManyRequests,
+			Message:    `{"error":"workspace_limit_exceeded"}`,
+		}, isCoordinatorCapacityRefusal)
+		if IsCapacityRefusal(err) {
+			t.Fatalf("workspace_limit_exceeded must not be capacity: %v", err)
+		}
+	})
 }
