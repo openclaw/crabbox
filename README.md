@@ -308,6 +308,7 @@ Catalog category: `self-hosted-virtualization`.
 | [incus](docs/providers/incus.md) | Self-hosted Linux containers or VMs. |
 | [kubevirt](docs/providers/kubevirt.md) | Kubernetes-hosted Linux VM. |
 | [proxmox](docs/providers/proxmox.md) | Self-hosted Linux VM fleet. |
+| [serve](docs/providers/serve.md) | Owner-only donated container capacity through a coordinator. |
 | [xcp-ng](docs/providers/xcp-ng.md) | Self-hosted Linux VM pool over XAPI. |
 
 ### GPU clouds
@@ -340,7 +341,6 @@ Catalog category: `local-runtime`.
 | Provider | Best fit |
 | --- | --- |
 | [apple-container](docs/providers/apple-container.md) | Local Linux containers on Apple silicon. |
-| [serve](docs/providers/serve.md) | Owner-only donated container capacity through a coordinator. |
 | [local-container](docs/providers/local-container.md) | Local Linux tests through Docker or Podman; no cloud account needed. |
 
 ### CI proof runners
