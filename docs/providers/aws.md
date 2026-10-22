@@ -117,6 +117,39 @@ Before stopping, an admin may extend the compute deadline with
 `crabbox admin extend-lifetime`; stopping cannot be undone by an extension, and
 the retained root disk is permanently deleted when its separate deadline passes.
 
+### Original root disk readback
+
+When AWS returns an explicit, unique EBS root mapping during acquisition, the
+coordinator persists an exact lease, instance, root volume, root device, account,
+and Region binding before handing the ready machine to the caller. Missing or
+ambiguous root mappings do not establish an original identity. A later acquisition
+observation cannot replace that binding. This records identity only: it does not enroll a
+lease in retention, preserve a volume on termination, or change cleanup deadlines.
+
+`crabbox admin lifetime-readback --id <lease-id> --json` uses that recorded
+identity even after the instance disappears. A current instance mapping cannot
+stand in for the original disk. Conflicting records, a replaced root, or an
+original volume attached to another instance are refused. A detached original
+volume can be reported as present; an explicit provider volume-not-found response
+is reported as absent. Permission failures are not absence evidence.
+
+For older owned leases without a recorded root, readback can consult CloudTrail
+using the coordinator's existing fixed AWS credentials in the original account
+and Region. This requires existing `cloudtrail:LookupEvents` permission; readback
+does not grant it or fall back to another identity. The lookup is scoped to the
+exact original instance and acquisition interval, with a 90-day history window,
+10-page limit, and 2 MiB response budget. Only one authenticated `RunInstances`
+event with matching ownership, instance, provider key, and an explicit unique
+root volume in the allocation response can establish the identity. The response
+includes the source event ID and time, not the raw provider event.
+
+If allocation history omits the root volume, is unavailable, or is ambiguous,
+readback remains blocked pending authoritative original provider custody
+evidence. It does not adopt a replacement disk, backfill a guessed lease record,
+mount or copy private artifacts, or declare the original run finished. Disk
+identity and presence are not remote-child termination, credential cleanup,
+artifact custody, or task-score evidence; those protocols remain required.
+
 ### Fixed-ID replay
 
 `warmup --lease-id cbx_<12 lowercase hex>` makes direct AWS acquisition
