@@ -327,12 +327,10 @@ func TestShardProvisionFailureDoesNotOrphanSiblings(t *testing.T) {
 }
 
 func TestShardCreateFailureMidFanOutUnderConcurrency(t *testing.T) {
-	// Mimic a hard account cap (Islo ~2 concurrent boxes): concurrency=2,
-	// count=4, one in-flight create refused mid fan-out. Siblings must still
-	// run and every successful lease must release.
+	// Non-capacity create refusal mid fan-out: siblings still run and release.
 	provisioner := &shardTestProvisioner{
 		errs: map[int]error{
-			2: errors.New(`provider=islo: HTTP 402 BILLING_NOT_ALLOWED`),
+			2: errors.New("image not found"),
 		},
 	}
 	var (
@@ -402,15 +400,197 @@ func TestShardCreateFailureMidFanOutUnderConcurrency(t *testing.T) {
 	if _, releases := provisioner.stats(); releases != 3 {
 		t.Fatalf("releases=%d, want 3 successful leases released", releases)
 	}
-	if !strings.Contains(stderr.String(), `shard 2/4 failed error="provider=islo: HTTP 402 BILLING_NOT_ALLOWED"`) {
+	if !strings.Contains(stderr.String(), `shard 2/4 failed error="image not found"`) {
 		t.Fatalf("stderr missing create refusal:\n%s", stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "provision failures:") || !strings.Contains(out, "[2/4] error=provider=islo: HTTP 402 BILLING_NOT_ALLOWED") {
+	if !strings.Contains(out, "provision failures:") || !strings.Contains(out, "[2/4] error=image not found") {
 		t.Fatalf("stdout missing provision failure summary:\n%s", out)
 	}
 	if !strings.Contains(out, "failed_shards=1") {
 		t.Fatalf("stdout missing failed_shards tally:\n%s", out)
+	}
+}
+
+func TestShardCapacityRetryThenSucceed(t *testing.T) {
+	shardCapacityWaitBudgetForTest = time.Minute
+	shardCapacityBackoffOverride = func(int) time.Duration { return time.Millisecond }
+	t.Cleanup(func() {
+		shardCapacityWaitBudgetForTest = 0
+		shardCapacityBackoffOverride = nil
+	})
+
+	var mu sync.Mutex
+	attemptsByShard := map[int]int{}
+	base := newShardTestProvisioner()
+	provision := func(ctx context.Context, index int, slug string) (checkpointForkProvision, error) {
+		mu.Lock()
+		attemptsByShard[index]++
+		n := attemptsByShard[index]
+		mu.Unlock()
+		if index == 1 && n < 3 {
+			return checkpointForkProvision{}, errors.New("InsufficientInstanceCapacity: AZ full")
+		}
+		return base.provision(ctx, index, slug)
+	}
+	var stderr bytes.Buffer
+	app := App{Stdout: io.Discard, Stderr: &stderr}
+	mux := &shardOutputMux{}
+	opts := shardTestOptions(2)
+	opts.Concurrency = 2
+	wrapped := func(ctx context.Context, index int, slug string) (checkpointForkProvision, error) {
+		return app.provisionShardWithCapacityRetry(ctx, mux, opts, index, slug, provision)
+	}
+	executor := newShardTestExecutor()
+	executor.outcomes[1] = recordedOutcome(0, nil)
+	executor.outcomes[2] = recordedOutcome(0, nil)
+	if err := app.shardRun(context.Background(), opts, mux, wrapped, executor.run); err != nil {
+		t.Fatalf("shardRun: %v", err)
+	}
+	mu.Lock()
+	attempts := attemptsByShard[1]
+	mu.Unlock()
+	if attempts < 3 {
+		t.Fatalf("shard 1 attempts=%d, want at least 3", attempts)
+	}
+	if !strings.Contains(stderr.String(), "waiting for capacity") {
+		t.Fatalf("stderr missing capacity wait log:\n%s", stderr.String())
+	}
+	if _, releases := base.stats(); releases != 2 {
+		t.Fatalf("releases=%d, want 2", releases)
+	}
+}
+
+func TestShardCapacityRetryExhausted(t *testing.T) {
+	shardCapacityWaitBudgetForTest = 20 * time.Millisecond
+	shardCapacityBackoffOverride = func(int) time.Duration { return 5 * time.Millisecond }
+	t.Cleanup(func() {
+		shardCapacityWaitBudgetForTest = 0
+		shardCapacityBackoffOverride = nil
+	})
+
+	provision := func(context.Context, int, string) (checkpointForkProvision, error) {
+		return checkpointForkProvision{}, errors.New("AllocationFailed: out of capacity")
+	}
+	var stderr, stdout bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	mux := &shardOutputMux{}
+	opts := shardTestOptions(1)
+	wrapped := func(ctx context.Context, index int, slug string) (checkpointForkProvision, error) {
+		return app.provisionShardWithCapacityRetry(ctx, mux, opts, index, slug, provision)
+	}
+	executor := newShardTestExecutor()
+	err := app.shardRun(context.Background(), opts, mux, wrapped, executor.run)
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("err=%v, want exit 7", err)
+	}
+	if !strings.Contains(stdout.String(), "capacity wait exhausted") && !strings.Contains(stderr.String(), "waiting for capacity") {
+		t.Fatalf("missing capacity exhaustion evidence\nstdout=%s\nstderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "provision failures:") || !strings.Contains(stdout.String(), "capacity wait exhausted") {
+		t.Fatalf("stdout missing exhausted provision failure:\n%s", stdout.String())
+	}
+}
+
+func TestShardCapacityNonCapacityFailsFast(t *testing.T) {
+	calls := 0
+	provision := func(context.Context, int, string) (checkpointForkProvision, error) {
+		calls++
+		return checkpointForkProvision{}, errors.New("unauthorized: bad token")
+	}
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	mux := &shardOutputMux{}
+	opts := shardTestOptions(1)
+	_, err := app.provisionShardWithCapacityRetry(context.Background(), mux, opts, 1, "slug", provision)
+	if err == nil || !strings.Contains(err.Error(), "unauthorized") {
+		t.Fatalf("err=%v, want unauthorized", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls=%d, want 1 (no retry)", calls)
+	}
+}
+
+func TestShardCapacityCancelDuringBackoff(t *testing.T) {
+	shardCapacityWaitBudgetForTest = time.Minute
+	shardCapacityBackoffOverride = func(int) time.Duration { return time.Hour }
+	t.Cleanup(func() {
+		shardCapacityWaitBudgetForTest = 0
+		shardCapacityBackoffOverride = nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	provision := func(context.Context, int, string) (checkpointForkProvision, error) {
+		cancel()
+		return checkpointForkProvision{}, errors.New("VcpuLimitExceeded")
+	}
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	start := time.Now()
+	_, err := app.provisionShardWithCapacityRetry(ctx, &shardOutputMux{}, shardTestOptions(1), 1, "slug", provision)
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("cancel during backoff took too long: %v", time.Since(start))
+	}
+	if err == nil || (!errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "VcpuLimitExceeded")) {
+		t.Fatalf("err=%v, want cancel or capacity err", err)
+	}
+}
+
+func TestShardCapacityFailFastCancelsWaiter(t *testing.T) {
+	shardCapacityWaitBudgetForTest = time.Minute
+	enteredWait := make(chan struct{}, 1)
+	shardCapacityBackoffOverride = func(int) time.Duration {
+		select {
+		case enteredWait <- struct{}{}:
+		default:
+		}
+		return time.Hour
+	}
+	t.Cleanup(func() {
+		shardCapacityWaitBudgetForTest = 0
+		shardCapacityBackoffOverride = nil
+	})
+
+	base := newShardTestProvisioner()
+	provision := func(ctx context.Context, index int, slug string) (checkpointForkProvision, error) {
+		if index == 2 {
+			return checkpointForkProvision{}, errors.New("resource_limit_exceeded")
+		}
+		return base.provision(ctx, index, slug)
+	}
+	var stderr bytes.Buffer
+	app := App{Stdout: io.Discard, Stderr: &stderr}
+	mux := &shardOutputMux{}
+	opts := shardTestOptions(2)
+	opts.Concurrency = 2
+	opts.FailFast = true
+	wrapped := func(ctx context.Context, index int, slug string) (checkpointForkProvision, error) {
+		return app.provisionShardWithCapacityRetry(ctx, mux, opts, index, slug, provision)
+	}
+	executor := newShardTestExecutor()
+	executor.outcomes[1] = recordedOutcome(4, nil)
+	executor.started = make(chan int, 2)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- app.shardRun(context.Background(), opts, mux, wrapped, executor.run)
+	}()
+
+	select {
+	case <-enteredWait:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for capacity backoff")
+	}
+	// Shard 1's non-zero exit triggers fail-fast and cancels shard 2's capacity wait.
+	err := <-done
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) {
+		t.Fatalf("err=%v, want ExitError", err)
+	}
+	if !strings.Contains(stderr.String(), "waiting for capacity") {
+		t.Fatalf("stderr missing capacity wait:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "canceled") {
+		t.Fatalf("stderr missing canceled waiter:\n%s", stderr.String())
 	}
 }
 

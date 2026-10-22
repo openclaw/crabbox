@@ -33,10 +33,11 @@ Every shard forks its own lease from the checkpoint and runs with an injected
 `--id`, so sync, history, logs, artifacts, and results behave exactly as for
 `run`. Forks exist only for the duration of their shard: each lease is
 released when its shard finishes, on failure, and on Ctrl-C, always with a
-fresh context so cleanup survives cancellation. A shard that fails to
-provision (including provider create refusals such as capacity or billing
-limits mid fan-out) does not orphan its siblings; the others run to completion
-and release normally, and the refused shard is listed under
+fresh context so cleanup survives cancellation. When a create is refused for capacity or quota, that shard waits and retries
+with bounded backoff (about two minutes) while respecting cancellation and
+`--fail-fast`. Non-capacity create errors fail that shard immediately. A shard
+that still cannot provision does not orphan its siblings; the others run to
+completion and release normally, and the refused shard is listed under
 `provision failures` in the verdict. Pass `--keep` to retain all forked leases
 instead.
 

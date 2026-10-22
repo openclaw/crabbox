@@ -7,10 +7,25 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	shardCapacityWaitBudget     = 2 * time.Minute
+	shardCapacityBackoffInitial = 500 * time.Millisecond
+	shardCapacityBackoffMax     = 15 * time.Second
+)
+
+// Test hooks; production keeps the constants above.
+var (
+	shardCapacityWaitBudgetForTest     time.Duration
+	shardCapacityBackoffInitialForTest time.Duration
+	shardCapacityBackoffMaxForTest     time.Duration
+	shardCapacityBackoffOverride       func(attempt int) time.Duration
 )
 
 const shardPartialLineLimit = 64 * 1024
@@ -272,7 +287,7 @@ func (a App) shard(ctx context.Context, args []string) error {
 	fmt.Fprintf(a.Stderr, "shard plan checkpoint=%s provider=%s count=%d concurrency=%d keep=%t fail_fast=%t command=%s\n", record.ID, cfg.Provider, opts.Count, opts.Concurrency, opts.Keep, opts.FailFast, strconv.Quote(runCommandDisplay(command, false)))
 	mux := &shardOutputMux{}
 	workdir := strings.TrimSpace(*workdirOverride)
-	provision := func(provisionCtx context.Context, index int, slug string) (checkpointForkProvision, error) {
+	provisionOnce := func(provisionCtx context.Context, index int, slug string) (checkpointForkProvision, error) {
 		shardApp, flush := a.forShard(mux, index, opts.Count, opts.Quiet, nil)
 		defer flush()
 		// Each shard gets its own backend and checkpoint metadata map. Shared
@@ -288,6 +303,9 @@ func (a App) shard(ctx context.Context, args []string) error {
 			return checkpointForkProvision{}, Exit(2, "provider=%s does not support shard: it requires an SSH lease provider that supports checkpoint fork; use parallel crabbox run --provider %s for delegated boxes", shardBackend.Spec().Name, shardBackend.Spec().Name)
 		}
 		return shardApp.provisionCheckpointFork(provisionCtx, shardCfg, shardBackend, shardSSH, repo, record, paths, opts.Keep, *reclaim, slug, workdir, *clear)
+	}
+	provision := func(provisionCtx context.Context, index int, slug string) (checkpointForkProvision, error) {
+		return a.provisionShardWithCapacityRetry(provisionCtx, mux, opts, index, slug, provisionOnce)
 	}
 	execute := func(runCtx context.Context, index int, shardRunArgs []string, outcome *shardRunOutcome) error {
 		shardApp, flush := a.forShard(mux, index, opts.Count, opts.Quiet, outcome)
@@ -355,6 +373,80 @@ func resolveShardConcurrency(count, concurrencyFlag int, concurrencySet bool, ma
 		concurrency = count
 	}
 	return concurrency, nil
+}
+
+func shardCapacityWaitBudgetDuration() time.Duration {
+	if shardCapacityWaitBudgetForTest > 0 {
+		return shardCapacityWaitBudgetForTest
+	}
+	return shardCapacityWaitBudget
+}
+
+func shardCapacityBackoff(attempt int) time.Duration {
+	if shardCapacityBackoffOverride != nil {
+		return shardCapacityBackoffOverride(attempt)
+	}
+	initial := shardCapacityBackoffInitial
+	if shardCapacityBackoffInitialForTest > 0 {
+		initial = shardCapacityBackoffInitialForTest
+	}
+	capDelay := shardCapacityBackoffMax
+	if shardCapacityBackoffMaxForTest > 0 {
+		capDelay = shardCapacityBackoffMaxForTest
+	}
+	delay := initial
+	for i := 0; i < attempt; i++ {
+		if delay >= capDelay {
+			delay = capDelay
+			break
+		}
+		next := delay * 2
+		if next < delay || next > capDelay {
+			delay = capDelay
+			break
+		}
+		delay = next
+	}
+	// Positive jitter (50% to 100% of delay) avoids synchronized shard retries.
+	half := delay / 2
+	if half <= 0 {
+		return delay
+	}
+	return half + time.Duration(rand.Int64N(int64(half)+1))
+}
+
+func (a App) provisionShardWithCapacityRetry(ctx context.Context, mux *shardOutputMux, opts shardOptions, index int, slug string, provision shardProvisioner) (checkpointForkProvision, error) {
+	budget := shardCapacityWaitBudgetDuration()
+	deadline := time.Now().Add(budget)
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			if lastErr != nil {
+				return checkpointForkProvision{}, lastErr
+			}
+			return checkpointForkProvision{}, err
+		}
+		lease, err := provision(ctx, index, slug)
+		if err == nil {
+			return lease, nil
+		}
+		lastErr = err
+		if !IsCapacityRefusal(err) {
+			return checkpointForkProvision{}, err
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return checkpointForkProvision{}, fmt.Errorf("capacity wait exhausted after %s: %w", budget, err)
+		}
+		wait := shardCapacityBackoff(attempt)
+		if wait > remaining {
+			wait = remaining
+		}
+		mux.printf(a.Stderr, "shard %d/%d waiting for capacity attempt=%d sleep=%s error=%q\n", index, opts.Count, attempt+1, wait.Round(time.Millisecond), err.Error())
+		if sleepErr := sleepContext(ctx, wait); sleepErr != nil {
+			return checkpointForkProvision{}, err
+		}
+	}
 }
 
 func (a App) forShard(mux *shardOutputMux, index, total int, quiet bool, outcome *shardRunOutcome) (App, func()) {
