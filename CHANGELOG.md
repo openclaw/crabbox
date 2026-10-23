@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- AWS: distinguish recognized CloudTrail lookup errors during original root readback without exposing provider messages or weakening account, Region, or evidence checks.
+- AWS: distinguish recognized CloudTrail lookup errors during original root readback without exposing provider messages or weakening account, Region, or evidence checks. [PR](https://github.com/openclaw/crabbox/pull/2942).
 
 ## 0.79.2 - 2026-10-22
 
