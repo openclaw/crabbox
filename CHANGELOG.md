@@ -2,14 +2,25 @@
 
 ## Unreleased
 
-- Security: refresh managed runtime trust inputs, preserve predecessor Node aliases during Linux rebakes, and keep coordinator retries on native TLS with Windows connection recovery. Curl-specific coordinator trust and connectivity workarounds must move to native configuration. [PR 2927](https://github.com/openclaw/crabbox/pull/2927).
+## 0.79.2 - 2026-10-22
 
-- Coordinator: bound capacity snapshots, use maintained lease indexes, and keep diagnostic reads off the lifecycle mutex so retained history cannot stall completion and heartbeats. Incomplete or oversized snapshots fail closed without reporting partial capacity. [PR 2932](https://github.com/openclaw/crabbox/pull/2932).
-- AWS: preserve the original root disk identity after instance loss, fail closed when historical evidence is unavailable, and prevent replacement disks from acquiring the original identity. [PR 2926](https://github.com/openclaw/crabbox/pull/2926). Thanks @Surendra-4 and @cropsgg.
-- Run: retain private original signed completion bytes before delivery and support exact-byte receipt recovery after coordinator failures, without reconstructing missing historical signatures. [PR 2925](https://github.com/openclaw/crabbox/pull/2925). Thanks @Surendra-4 and @cropsgg.
+### Highlights
+
+- **Keep Windows values intact and prevent PowerShell injection.** Typographic single quotes stay inside string literals across commands, forwarded environment values, bootstrap, Hyper-V, and Windows Sandbox. [PR 2924](https://github.com/openclaw/crabbox/pull/2924). Thanks @parth-garg01.
+- **Connect only to the Static SSH port you selected.** An unavailable explicit port no longer falls back to port 22 on the same address, preventing a forwarded endpoint from reaching the wrong machine. [PR 2933](https://github.com/openclaw/crabbox/pull/2933). Thanks @valkyriweb.
+- **Refresh managed runtime trust and keep coordinator recovery on native TLS.** Updated runtime inputs remove compromised trust data, Linux rebakes preserve managed aliases, and native connection recovery retains the configured authentication, TLS, and proxy boundaries. [PR 2927](https://github.com/openclaw/crabbox/pull/2927), [PR 2939](https://github.com/openclaw/crabbox/pull/2939). Thanks @joshavant.
+
+### Upgrade notes
+
+- Static SSH configurations with an explicit port must make that endpoint available; scripts that relied on silent fallback to port 22 now fail instead. Omitted ports retain the existing fallback policy, and stored leases need no migration. [PR 2933](https://github.com/openclaw/crabbox/pull/2933). Thanks @valkyriweb.
+- Coordinator connections use native HTTP/TLS for every request and retry. Move curl-only CA, proxy, or connectivity workarounds to native OS/runtime trust and proxy configuration. [PR 2927](https://github.com/openclaw/crabbox/pull/2927). Thanks @joshavant.
 
 ### Fixed
 
+- Security: refresh managed runtime trust inputs, preserve predecessor Node aliases during Linux rebakes, and keep coordinator retries on native TLS with Windows connection recovery. Curl-specific coordinator trust and connectivity workarounds must move to native configuration. [PR 2927](https://github.com/openclaw/crabbox/pull/2927). Thanks @joshavant.
+- Coordinator: bound capacity snapshots, use maintained lease indexes, and keep diagnostic reads off the lifecycle mutex so retained history cannot stall completion and heartbeats. Incomplete or oversized snapshots fail closed without reporting partial capacity. [PR 2932](https://github.com/openclaw/crabbox/pull/2932). Thanks @vincentkoc.
+- AWS: preserve the original root disk identity after instance loss, fail closed when historical evidence is unavailable, and prevent replacement disks from acquiring the original identity. [PR 2926](https://github.com/openclaw/crabbox/pull/2926). Thanks @roboclaw-bot, @Surendra-4 and @cropsgg.
+- Run: retain private original signed completion bytes before delivery and support exact-byte receipt recovery after coordinator failures, without reconstructing missing historical signatures. [PR 2925](https://github.com/openclaw/crabbox/pull/2925). Thanks @roboclaw-bot, @Surendra-4 and @cropsgg.
 - Coordinator client: recover idempotent reads from native HTTP idle-connection closes and socket/pipe drops within the existing retry budget, without retrying mutations. [PR 2939](https://github.com/openclaw/crabbox/pull/2939). Thanks @joshavant.
 - CI: give the real-PowerShell WSL bootstrap parsing test its own 60 s budget and a bounded pwsh probe, since cold pwsh starts on runners exceeded the 5 s default. [PR 2938](https://github.com/openclaw/crabbox/pull/2938).
 - CI: retry coordinator health verification for up to three minutes during edge propagation, preserving deployment consistency checks and reporting the last version ID and tag on failure. [PR 2937](https://github.com/openclaw/crabbox/pull/2937).
@@ -17,6 +28,7 @@
 - Static SSH: an explicitly configured SSH port is exclusive, so a port-forwarded host that is not ready yet no longer falls back to port 22 on the same address (for loopback, the operator's own machine); unset ports and provider fallbacks are unchanged, and reused leases keep the pinned port. [PR 2933](https://github.com/openclaw/crabbox/pull/2933). Thanks @valkyriweb.
 - Providers: consistently list `serve` under `self-hosted-virtualization`, generate the category index from metadata, and check README category membership. [PR 2936](https://github.com/openclaw/crabbox/pull/2936). Thanks @aitrawog.
 - Docs: Daytona API key, JWT token, and organization ID are environment-only; the docs no longer list them as config keys that Crabbox silently ignores. [PR 2931](https://github.com/openclaw/crabbox/pull/2931). Thanks @KrasimirKralev.
+- Tests: wait for settled predecessor state in upgrade proofs, create private Windows recovery fixtures, and give Apple VM validation enough time to finish. [PR 2934](https://github.com/openclaw/crabbox/pull/2934). Thanks @vincentkoc.
 
 ## 0.79.1 - 2026-10-20
 
