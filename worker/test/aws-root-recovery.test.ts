@@ -199,7 +199,7 @@ describe("authenticated original root evidence", () => {
   ])("reports only the known provider error code %s", async (code, body) => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(now);
-    const fetch = vi.fn(async () =>
+    const fetch = vi.fn<() => Promise<Response>>(async () =>
       Response.json(
         { ...body, message: "private provider message", credentials: "private" },
         { status: 400 },
@@ -234,7 +234,7 @@ describe("authenticated original root evidence", () => {
   it("uses the error-type header without reading or exposing the body", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(now);
-    const cancel = vi.fn();
+    const cancel = vi.fn<() => void>();
     const body = new ReadableStream<Uint8Array>({ cancel });
     const response = new Response(body, {
       status: 400,
@@ -282,9 +282,9 @@ describe("authenticated original root evidence", () => {
     vi.setSystemTime(now);
     const timeout = new AbortController();
     vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeout.signal);
-    const cancel = vi.fn(() => new Promise<void>(() => {}));
+    const cancel = vi.fn<() => Promise<void>>(() => new Promise<void>(() => {}));
     const body = new ReadableStream<Uint8Array>({ cancel });
-    const fetch = vi.fn(async () => new Response(body, { status: 400 }));
+    const fetch = vi.fn<() => Promise<Response>>(async () => new Response(body, { status: 400 }));
     const result = lookupAWSOriginalRootDisk(lease, account, fetch).catch((value: Error) => value);
     await vi.advanceTimersByTimeAsync(1_000);
     timeout.abort(new Error("private timeout diagnostic"));
