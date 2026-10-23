@@ -561,5 +561,17 @@ func (a App) retireCheckpointSource(ctx context.Context, cfg Config, repo Repo, 
 }
 
 func unresolvedCheckpoint(record checkpointRecord) bool {
+	return unresolvedCheckpointJournal(record) || pendingHyperVCheckpointJournal(record)
+}
+
+// unresolvedCheckpointJournal is the provider-neutral rule. Native states such as
+// Hetzner's asynchronous "creating" are not journals; they resolve through verify.
+func unresolvedCheckpointJournal(record checkpointRecord) bool {
 	return isNativeCheckpointKind(record.Kind) && (record.Capture != nil && record.Capture.Phase != "retired" || strings.TrimSpace(record.nativeDeleteID()) == "")
+}
+
+// pendingHyperVCheckpointJournal marks a Hyper-V record persisted before export and
+// never finalized; capture and fork must wait, but delete may run guarded cleanup.
+func pendingHyperVCheckpointJournal(record checkpointRecord) bool {
+	return record.Kind == checkpointKindHyperV && strings.EqualFold(strings.TrimSpace(record.Native.State), "creating")
 }

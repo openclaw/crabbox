@@ -164,6 +164,9 @@ func TestProviderFeaturesAreWindowsOnly(t *testing.T) {
 		core.FeatureCrabboxSync,
 		core.FeatureCleanup,
 		core.FeaturePauseResume,
+		core.FeatureCheckpoint,
+		core.FeatureFork,
+		core.FeatureRestore,
 	} {
 		if !windows.Has(feature) {
 			t.Fatalf("feature %s missing from windows=%v", feature, windows)

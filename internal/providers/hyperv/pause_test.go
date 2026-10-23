@@ -394,6 +394,36 @@ func TestCleanupRemovesExpiredSavedAndPausedLeases(t *testing.T) {
 	}
 }
 
+func TestCleanupSkipsLeaseWhoseClaimChangesBeforeRemoval(t *testing.T) {
+	b, runner, leaseID, name := pauseTestLease(t, hypervStatePaused, "192.0.2.10")
+	claim, _, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := b.serverFromInstance(hypervVM{Name: name, State: hypervStatePaused}, claim, b.configForRun())
+	server.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+	if err := updateLeaseClaimEndpointIfUnchanged(leaseID, claim, server, core.SSHTargetFromConfig(b.configForRun(), "192.0.2.10")); err != nil {
+		t.Fatal(err)
+	}
+	runner.respond = hyperVCleanupResponder(name, hypervStatePaused)
+	cleanupBeforeClaimFence = func(c core.LeaseClaim) {
+		if _, err := core.UpdateLeaseClaimTouchIfUnchanged(context.Background(), c.LeaseID, c, nil, time.Now().UTC(), nil); err != nil {
+			t.Errorf("simulate concurrent restore reservation: %v", err)
+		}
+	}
+	t.Cleanup(func() { cleanupBeforeClaimFence = nil })
+
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if got := matchingScripts(runner.calls, "Remove-VM"); len(got) != 0 {
+		t.Fatalf("Remove-VM calls=%v want none", got)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil || !ok {
+		t.Fatalf("claim must survive aborted cleanup ok=%v err=%v", ok, err)
+	}
+}
+
 func pauseTestLease(t *testing.T, state int, ip string) (*backend, *recordingRunner, string, string) {
 	t.Helper()
 	testutil.IsolateUserDirs(t)

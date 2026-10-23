@@ -37,6 +37,9 @@ func providerFeatures() core.FeatureSet {
 		core.FeatureCrabboxSync,
 		core.FeatureCleanup,
 		core.FeaturePauseResume,
+		core.FeatureCheckpoint,
+		core.FeatureFork,
+		core.FeatureRestore,
 	}
 }
 
