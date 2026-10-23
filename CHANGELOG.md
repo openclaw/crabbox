@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- AWS: distinguish recognized CloudTrail lookup errors during original root readback without exposing provider messages or weakening account, Region, or evidence checks.
+
 ## 0.79.2 - 2026-10-22
 
 ### Highlights

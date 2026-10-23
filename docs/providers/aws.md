@@ -143,6 +143,11 @@ event with matching ownership, instance, provider key, and an explicit unique
 root volume in the allocation response can establish the identity. The response
 includes the source event ID and time, not the raw provider event.
 
+Failed lookups report the HTTP status and, when recognized, a fixed AWS error
+code. Diagnostic bodies are limited to 4 KiB and one second; raw messages and
+unknown error strings are not exposed. HTTP 400 alone does not establish a
+permission failure, and a failed lookup never establishes resource absence.
+
 If allocation history omits the root volume, is unavailable, or is ambiguous,
 readback remains blocked pending authoritative original provider custody
 evidence. It does not adopt a replacement disk, backfill a guessed lease record,
