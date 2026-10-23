@@ -8,7 +8,7 @@ python_formula="${CRABBOX_MACOS_PYTHON_FORMULA:-python@3.13}"
 require_xcode="${CRABBOX_MACOS_REQUIRE_XCODE:-0}"
 xcode_developer_dir="${CRABBOX_MACOS_XCODE_DEVELOPER_DIR:-}"
 force_links="${CRABBOX_MACOS_FORCE_LINKS:-0}"
-trufflehog_version="3.95.9"
+trufflehog_version="3.99.4"
 trufflehog_bin_dir="${CRABBOX_MACOS_TRUFFLEHOG_BIN_DIR:-/usr/local/bin}"
 homebrew_install_commit="280cbc9adffcbdef15dd1c9d991ef2d1dd7cfc9c"
 homebrew_install_sha256="f3e91784ffeda32bc397de7acc1154724cc47522a459c9ac656cca176eeba457"
@@ -305,8 +305,8 @@ trufflehog_arch() {
 
 trufflehog_sha256_for_arch() {
   case "$1" in
-    amd64) printf '%s\n' "4306a58d25b85aad7b5fb6f5732df77c50a9161db2746b56e196649072218691" ;;
-    arm64) printf '%s\n' "944c6ea3a2993a9f808d08107b40e03ba92bc75972876a1ee47d567bfd6fa1b5" ;;
+    amd64) printf '%s\n' "c10e3ec17550e24081b9e045396cf78e494a86616736f0472024519b7416aa37" ;;
+    arm64) printf '%s\n' "dc942daecb4a7795fd0a7421c66281bd4cc2ba29a265f3f6c63ecb684a6db291" ;;
     *)
       log "unsupported TruffleHog architecture: $1"
       return 1

@@ -264,7 +264,7 @@ CRABBOX_TAILSCALE_CLIENT_SECRET
 CRABBOX_TAILSCALE_TAILNET=-              # or an explicit tailnet/org
 CRABBOX_TAILSCALE_TAGS=tag:crabbox      # requested-tag allowlist/default
 CRABBOX_TAILSCALE_INSTALL_MODE=package  # package (default) or pinned static archive
-CRABBOX_TAILSCALE_VERSION=1.98.4        # static archive version
+CRABBOX_TAILSCALE_VERSION=1.104.2        # static archive version
 CRABBOX_TAILSCALE_SHA256_AMD64=...      # amd64 archive checksum
 CRABBOX_TAILSCALE_SHA256_ARM64=...      # arm64 archive checksum
 ```

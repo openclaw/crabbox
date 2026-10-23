@@ -155,9 +155,9 @@ $ErrorActionPreference = 'Stop'
 $env:TEMP = ${psQuote(dir)}
 $fixture = ${psQuote(binary)}
 ${compile}
-$TruffleHogVersion = '3.95.9'
+$TruffleHogVersion = '3.99.4'
 $TruffleHogInstallDir = Join-Path $env:TEMP 'install with spaces'
-$env:CRABBOX_TEST_STDOUT = 'trufflehog 3.95.9'
+$env:CRABBOX_TEST_STDOUT = 'trufflehog 3.99.4'
 $env:CRABBOX_TEST_STDERR = ''
 $env:CRABBOX_TEST_EXIT = '0'
 function Write-Log { param([string]$Message) Write-Host "windows-tools: $Message" }
@@ -205,7 +205,7 @@ $target = Join-Path $TruffleHogInstallDir 'trufflehog.exe'
 Copy-Item -LiteralPath $fixture -Destination $target
 Add-Content -LiteralPath $target -Value '# existing target'
 $before = (Get-FileHash $target).Hash
-$env:CRABBOX_TEST_STDOUT = 'trufflehog 3.95.90'
+$env:CRABBOX_TEST_STDOUT = 'trufflehog 3.99.40'
 $rejected = $false
 try { Install-TruffleHog } catch { $rejected = $_.Exception.Message -match 'did not report version' }
 if (-not $rejected) { throw 'wrong version was accepted' }
@@ -223,7 +223,7 @@ if ($valid.Count -ne 1 -or $valid[0] -isnot [bool] -or $valid[0]) { throw 'inval
 `);
   if (result) {
     assert.match(result.stdout, /exit code[=: ]+17/i);
-    assert.match(result.stdout, /trufflehog 3\.95\.9/);
+    assert.match(result.stdout, /trufflehog 3\.99\.4/);
     assert.match(result.stdout, /fixture loader diagnostic/);
   }
 });
@@ -231,7 +231,7 @@ if ($valid.Count -ne 1 -or $valid[0] -isnot [bool] -or $valid[0]) { throw 'inval
 test("TruffleHog accepts stderr version output and diagnoses launch failures", async (t) => {
   const result = await truffleHogFixture(t, `
 $env:CRABBOX_TEST_STDOUT = ''
-$env:CRABBOX_TEST_STDERR = 'trufflehog 3.95.9'
+$env:CRABBOX_TEST_STDERR = 'trufflehog 3.99.4'
 if (-not (Test-TruffleHogBinary $fixture)) { throw 'stderr version was rejected' }
 $invalid = Join-Path $env:TEMP 'invalid.exe'
 Set-Content -LiteralPath $invalid -Value 'not an executable'
@@ -352,9 +352,9 @@ test("Windows developer tools prep verifies the Docker archive before extraction
 });
 
 test("Windows developer tools prep verifies and atomically installs pinned TruffleHog archives", () => {
-  assert.match(script, /\$TruffleHogVersion = "3\.95\.9"/);
-  assert.match(script, /25cc731f678922c870edba49f19c324aa6c8e7190b551c4fbe49d0c4e1c5446a/);
-  assert.match(script, /df982afbf72d1c1a125e4871b624b7f959b2f62caa40e4d14bf861fb93c237bb/);
+  assert.match(script, /\$TruffleHogVersion = "3\.99\.4"/);
+  assert.match(script, /97749c11ec76ef93ca50a3a50bd2a40f25fb92dfee4366d4bff0ba0d951307a8/);
+  assert.match(script, /e56d8a6c60b69aa4d00753c202b3864a2d045bc1ee8538012b99c8f7352fcbc6/);
   assert.match(script, /Resolve-TruffleHogAsset/);
 
   const start = script.indexOf("function Install-TruffleHog");

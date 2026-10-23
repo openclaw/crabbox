@@ -1011,7 +1011,7 @@ async function linuxSmokeFixture(t, { major = "24", pnpm = "11.1.0", customPrep 
   await writeNodeVersionFixture(bin);
   await writeTool("go", "printf 'go version go1.27.3 linux/amd64\\n'");
   await writeTool("gofmt", "exit 0");
-  await writeTool("bun", '[[ "$*" == "--version" ]] && printf "1.4.0\\n" || printf "42\\n"');
+  await writeTool("bun", '[[ "$*" == "--version" ]] && printf "1.4.4\\n" || printf "42\\n"');
   await writeTool("bunx", 'printf "42\\n"');
   await writeTool(
     "uname",
@@ -1151,12 +1151,12 @@ test("generated Bun smoke is required independently of Node overrides and cannot
   const source = generated.replace(/\n[ \t]*offline_go_probe\n/, "\ntrue\n");
   const missing = execute({}, source);
   assert.notEqual(missing.status, 0);
-  assert.match(missing.stderr, /unavailable offline: bun-v1\.4\.0-linux-x64-baseline\.zip/);
+  assert.match(missing.stderr, /unavailable offline: bun-v1\.4\.4-linux-x64-baseline\.zip/);
   assert.doesNotMatch(missing.stdout, /devtools-smoke-ok/);
   assert.deepEqual(await readdir(tmp), []);
   await mkdir(path.join(fake.dir, "missing-archives"));
   await writeFile(
-    path.join(fake.dir, "missing-archives", "bun-v1.4.0-linux-x64-baseline.zip"),
+    path.join(fake.dir, "missing-archives", "bun-v1.4.4-linux-x64-baseline.zip"),
     "corrupt",
   );
   const corrupt = execute({}, source);

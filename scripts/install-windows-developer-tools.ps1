@@ -63,9 +63,9 @@ $ChocolateyPackageURL = $env:CRABBOX_WINDOWS_CHOCO_PACKAGE_URL
 if (-not $ChocolateyPackageURL) { $ChocolateyPackageURL = "https://community.chocolatey.org/api/v2/package/chocolatey/2.7.3" }
 $ChocolateyPackageSHA256 = $env:CRABBOX_WINDOWS_CHOCO_PACKAGE_SHA256
 if (-not $ChocolateyPackageSHA256) { $ChocolateyPackageSHA256 = "40778cc59245b3eb6ea5147aeef5bea5d577419e5abce22a224189740dc16db5" }
-$TruffleHogVersion = "3.95.9"
-$TruffleHogAMD64SHA256 = "25cc731f678922c870edba49f19c324aa6c8e7190b551c4fbe49d0c4e1c5446a"
-$TruffleHogARM64SHA256 = "df982afbf72d1c1a125e4871b624b7f959b2f62caa40e4d14bf861fb93c237bb"
+$TruffleHogVersion = "3.99.4"
+$TruffleHogAMD64SHA256 = "97749c11ec76ef93ca50a3a50bd2a40f25fb92dfee4366d4bff0ba0d951307a8"
+$TruffleHogARM64SHA256 = "e56d8a6c60b69aa4d00753c202b3864a2d045bc1ee8538012b99c8f7352fcbc6"
 $TruffleHogInstallDir = $env:CRABBOX_WINDOWS_TRUFFLEHOG_INSTALL_DIR
 if (-not $TruffleHogInstallDir) { $TruffleHogInstallDir = "C:\Program Files\TruffleHog" }
 

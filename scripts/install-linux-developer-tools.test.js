@@ -944,7 +944,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 cat > "$output_dir/trufflehog" <<'SCRIPT'
 #!/usr/bin/env bash
-printf 'trufflehog %s\n' "\${CRABBOX_FAKE_TRUFFLEHOG_VERSION:-3.95.9}"
+printf 'trufflehog %s\n' "\${CRABBOX_FAKE_TRUFFLEHOG_VERSION:-3.99.4}"
 SCRIPT
 chmod 0755 "$output_dir/trufflehog"
 `,
@@ -974,17 +974,17 @@ test("linux developer image installs pinned TruffleHog after checksum verificati
 	assert.equal(result.status, 0, result.stderr || result.stdout);
 	assert.match(
 		fs.readFileSync(fixture.downloadLog, "utf8"),
-		/trufflehog\/releases\/download\/v3\.95\.9\/trufflehog_3\.95\.9_linux_amd64\.tar\.gz/,
+		/trufflehog\/releases\/download\/v3\.99\.4\/trufflehog_3\.99\.4_linux_amd64\.tar\.gz/,
 	);
 	assert.match(
 		fs.readFileSync(fixture.checksumLog, "utf8"),
-		/^f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e  trufflehog_3\.95\.9_linux_amd64\.tar\.gz\n$/,
+		/^5ae9b313342d1bfa96404064c0f59e77a2cbd1824d797ca7b11e6655aa8fd9d1  trufflehog_3\.99\.4_linux_amd64\.tar\.gz\n$/,
 	);
 	assert.equal(
 		spawnSync(path.join(fixture.targetBin, "trufflehog"), ["--version"], {
 			encoding: "utf8",
 		}).stdout,
-		"trufflehog 3.95.9\n",
+		"trufflehog 3.99.4\n",
 	);
 });
 
@@ -992,7 +992,7 @@ test("linux developer image re-verifies an existing same-version TruffleHog bina
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-linux-trufflehog-existing-"));
 	const fixture = installTruffleHogFixture(dir);
 	const target = path.join(fixture.targetBin, "trufflehog");
-	writeExecutable(target, "#!/usr/bin/env bash\nprintf 'trufflehog 3.95.9\\n'\nprintf 'untrusted\\n'\n");
+	writeExecutable(target, "#!/usr/bin/env bash\nprintf 'trufflehog 3.99.4\\n'\nprintf 'untrusted\\n'\n");
 	const result = spawnSync(
 		"bash",
 		["-c", "set -euo pipefail\nsource scripts/install-linux-developer-tools.sh\ninstall_trufflehog"],
@@ -1010,10 +1010,10 @@ test("linux developer image re-verifies an existing same-version TruffleHog bina
 	);
 
 	assert.equal(result.status, 0, result.stderr || result.stdout);
-	assert.match(fs.readFileSync(fixture.downloadLog, "utf8"), /trufflehog_3\.95\.9_linux_amd64/);
+	assert.match(fs.readFileSync(fixture.downloadLog, "utf8"), /trufflehog_3\.99\.4_linux_amd64/);
 	assert.equal(
 		spawnSync(target, ["--version"], { encoding: "utf8" }).stdout,
-		"trufflehog 3.95.9\n",
+		"trufflehog 3.99.4\n",
 	);
 });
 
@@ -1079,7 +1079,7 @@ test("linux developer image reports TruffleHog from the configured install direc
 	fs.writeFileSync(osRelease, "PRETTY_NAME='Test Linux'\n", "utf8");
 	writeExecutable(
 		path.join(fixture.targetBin, "trufflehog"),
-		"#!/usr/bin/env bash\nprintf 'trufflehog 3.95.9\\n'\n",
+		"#!/usr/bin/env bash\nprintf 'trufflehog 3.99.4\\n'\n",
 	);
 	writeExecutable(
 		path.join(goLinkDir, "go"),
@@ -1145,7 +1145,7 @@ test("linux developer image reports TruffleHog from the configured install direc
 		assert.match(result.stdout, new RegExp(`${command} test-version`));
 	}
 	assert.match(result.stdout, new RegExp(`${fixture.bin}/bunx`));
-	assert.match(result.stdout, /trufflehog 3\.95\.9/);
+	assert.match(result.stdout, /trufflehog 3\.99\.4/);
 });
 
 test("linux developer image keeps pinned TruffleHog probes update-free", () => {

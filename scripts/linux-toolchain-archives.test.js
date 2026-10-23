@@ -65,7 +65,7 @@ function writeTool(file, body) {
 
 function bunFixture(
   t,
-  { version = "1.4.0", malformed = false, failCommand = "", optimizedExit = 0 } = {},
+  { version = "1.4.4", malformed = false, failCommand = "", optimizedExit = 0 } = {},
 ) {
   const result = fixture(t);
   const { root } = result;
@@ -87,7 +87,7 @@ case "$*" in
   *) exit 64 ;;
 esac`,
     );
-    const name = `bun-v1.4.0-${variant}.zip`;
+    const name = `bun-v1.4.4-${variant}.zip`;
     const archive = path.join(root, "archives", name);
     success(
       spawnSync(
@@ -122,7 +122,7 @@ curl() { echo unexpected-network >&2; return 89; }
   return {
     ...result,
     setup,
-    destination: path.join(root, "tools", "bun", "1.4.0", "linux-x64-baseline"),
+    destination: path.join(root, "tools", "bun", "1.4.4", "linux-x64-baseline"),
   };
 }
 
@@ -138,7 +138,7 @@ hash -p "$PWD/stale/bunx" bunx
 install_bun
 [[ "$(command -v bun)" == "$bun_bin_dir/bun" ]]
 [[ "$(command -v bunx)" == "$bun_bin_dir/bunx" ]]
-[[ "$(bun --version)" == "1.4.0" ]]
+[[ "$(bun --version)" == "1.4.4" ]]
 install_bun
 bun_optimized_supported() { return 1; }
 offline_bun_probe
@@ -195,6 +195,27 @@ for (const state of ["dangling", "incomplete"]) {
   });
 }
 
+for (const state of ["present", "dangling"]) {
+  test(`Bun rebakes released predecessor ${state} aliases without running old bytes`, (t) => {
+    const { root, run, setup, destination } = bunFixture(t);
+    const previous = path.join(root, "tools", "bun", "1.4.0", "linux-x64-baseline");
+    if (state === "present") {
+      fs.mkdirSync(previous, { recursive: true });
+      writeTool(path.join(previous, "bun"), 'touch "$HOME/old-bun-executed"; exit 79');
+      fs.symlinkSync("bun", path.join(previous, "bunx"));
+    }
+    for (const tool of ["bun", "bunx"]) {
+      fs.symlinkSync(path.join(previous, tool), path.join(root, "bin", tool));
+    }
+    success(run(`${setup}\ninstall_bun\ninstall_bun\n[[ "$(bun --version)" == "1.4.4" ]]`));
+    for (const tool of ["bun", "bunx"]) {
+      assert.equal(fs.readlinkSync(path.join(root, "bin", tool)), path.join(destination, tool));
+    }
+    assert.equal(fs.existsSync(path.join(root, "home", "old-bun-executed")), false);
+    if (state === "present") assert.match(fs.readFileSync(path.join(previous, "bun"), "utf8"), /exit 79/);
+  });
+}
+
 for (const tool of ["bun", "bunx"]) {
   for (const kind of [
     "regular",
@@ -227,7 +248,7 @@ for (const tool of ["bun", "bunx"]) {
           relative: path.relative(links, path.join(destination, tool)),
           newline: path.join(destination, tool) + "\n",
           "wrong-pin": path.join(root, "tools", "bun", "1.3.0", "linux-x64-baseline", tool),
-          "wrong-variant": path.join(root, "tools", "bun", "1.4.0", "linux-x64", tool),
+          "wrong-variant": path.join(root, "tools", "bun", "1.4.4", "linux-x64", tool),
         }[kind];
         fs.symlinkSync(target, conflict);
       }
@@ -256,7 +277,7 @@ for (const tool of ["bun", "bunx"]) {
 test("Bun refuses the unpublished regular executable and relative public bunx layout", (t) => {
   const { root, run, setup } = bunFixture(t);
   const links = path.join(root, "bin");
-  writeTool(path.join(links, "bun"), "echo 1.4.0");
+  writeTool(path.join(links, "bun"), "echo 1.4.4");
   fs.symlinkSync("bun", path.join(links, "bunx"));
   const before = fileState(links);
   const result = run(`${setup}\ninstall_bun`);
@@ -268,8 +289,8 @@ test("Bun refuses the unpublished regular executable and relative public bunx la
 for (const component of [
   "tools",
   "tools/bun",
-  "tools/bun/1.4.0",
-  "tools/bun/1.4.0/linux-x64-baseline",
+  "tools/bun/1.4.4",
+  "tools/bun/1.4.4/linux-x64-baseline",
 ]) {
   test(`Bun rejects a symlinked managed directory at ${component}`, (t) => {
     const { root, run, setup } = bunFixture(t);
@@ -294,15 +315,15 @@ for (const component of [
 
 test("Bun rejects present corrupt or malformed caches without downloading or replacing tools", (t) => {
   const { root, run, setup } = bunFixture(t);
-  const archive = path.join(root, "archives", "bun-v1.4.0-linux-x64-baseline.zip");
+  const archive = path.join(root, "archives", "bun-v1.4.4-linux-x64-baseline.zip");
   const original = fs.readFileSync(archive);
   for (const kind of ["tamper", "wrong-variant", "directory", "symlink"]) {
     fs.rmSync(archive, { recursive: true, force: true });
     if (kind === "tamper") fs.writeFileSync(archive, "corrupt");
     if (kind === "wrong-variant")
-      fs.copyFileSync(path.join(root, "archives", "bun-v1.4.0-linux-x64.zip"), archive);
+      fs.copyFileSync(path.join(root, "archives", "bun-v1.4.4-linux-x64.zip"), archive);
     if (kind === "directory") fs.mkdirSync(archive);
-    if (kind === "symlink") fs.symlinkSync("bun-v1.4.0-linux-x64.zip", archive);
+    if (kind === "symlink") fs.symlinkSync("bun-v1.4.4-linux-x64.zip", archive);
     const result = run(`${setup}\ninstall_bun`);
     assert.notEqual(result.status, 0, kind);
     assert.match(result.stderr, /checksum mismatch|malformed Bun archive/);
@@ -339,7 +360,7 @@ install_bun
   success(download);
   assert.deepEqual(
     fs.readdirSync(path.join(root, "archives")).sort(),
-    bunVariants.map((variant) => `bun-v1.4.0-${variant}.zip`).sort(),
+    bunVariants.map((variant) => `bun-v1.4.4-${variant}.zip`).sort(),
   );
 });
 
@@ -371,8 +392,8 @@ test("Bun producer preserves unsupported platform routes independently of Node o
   success(run(`${setup}\nnode_major=26\ninstall_bun`));
   for (const name of [
     "bun-v1.3.0-linux-x64.zip",
-    "bun-v1.4.0-darwin-x64.zip",
-    "bun-v1.4.0-linux-x64-musl.zip",
+    "bun-v1.4.4-darwin-x64.zip",
+    "bun-v1.4.4-linux-x64-musl.zip",
   ]) {
     const invalid = run(`stage_bun_archive "${name}" "$PWD/staging" 1`);
     assert.notEqual(invalid.status, 0);

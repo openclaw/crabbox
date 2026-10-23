@@ -3,7 +3,7 @@ set -euo pipefail
 
 pnpm_version="${CRABBOX_LINUX_PNPM_VERSION:-11.1.0}"
 node_major="${CRABBOX_LINUX_NODE_MAJOR:-24}"
-trufflehog_version="3.95.9"
+trufflehog_version="3.99.4"
 docker_images="${CRABBOX_LINUX_DOCKER_IMAGES:-hello-world ubuntu:24.04 node:24.22.1-bookworm}"
 install_desktop="${CRABBOX_LINUX_DESKTOP_TOOLS:-1}"
 install_browser="${CRABBOX_LINUX_BROWSER:-1}"
@@ -32,12 +32,15 @@ go_link_dir="/usr/local/bin"
 pinned_go_version="1.27.3"
 bun_bin_dir="/usr/local/bin"
 bun_toolchain_root="/opt/crabbox/toolchains/bun"
-pinned_bun_version="1.4.0"
+pinned_bun_version="1.4.4"
+# Retire only aliases owned by the released predecessor image.
+previous_pinned_bun_version="1.4.0"
 rust_toolchain_root="/opt/crabbox/toolchains/rust"
 uv_toolchain_root="/opt/crabbox/toolchains/uv"
 developer_bin_dir="/usr/local/bin"
 pinned_rust_version="1.98.1"
-pinned_uv_version="0.12.19"
+pinned_uv_version="0.13.5"
+previous_pinned_uv_version="0.12.19"
 
 log() {
   printf 'linux-tools: %s\n' "$*" >&2
@@ -253,8 +256,8 @@ toolchain_archive_spec() {
   case "$1" in
     rust-1.98.1-x86_64-unknown-linux-gnu.tar.xz)
       printf '%s\n' "sha256 5326b36c53de11d148c8f8dab6553a3d1006c2cfd32123683073fad3c302605b https://static.rust-lang.org/dist/$1" ;;
-    uv-0.12.19-x86_64-unknown-linux-gnu.tar.gz)
-      printf '%s\n' "sha256 23bf5552d220e0842b65c862097b2ebaeba0064b74eda5e565e77fd25969d8c8 https://github.com/astral-sh/uv/releases/download/0.12.19/uv-x86_64-unknown-linux-gnu.tar.gz" ;;
+    uv-0.13.5-x86_64-unknown-linux-gnu.tar.gz)
+      printf '%s\n' "sha256 f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f https://github.com/astral-sh/uv/releases/download/0.13.5/uv-x86_64-unknown-linux-gnu.tar.gz" ;;
     go1.27.3.linux-amd64.tar.gz)
       printf '%s\n' "sha256 65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 https://go.dev/dl/$1" ;;
     node-v24.22.1-linux-x64.tar.xz)
@@ -265,12 +268,12 @@ toolchain_archive_spec() {
       printf '%s\n' "sha512 b3951d6d6ff4a9f13dc7cf56cd28d2b8eb37dbcc9c68e52e1e1191873ea9f82a017287ab50baadc5ccc494f036c67c0e47eb13608c2fa36f47711b61ea128e61 https://registry.npmjs.org/pnpm/-/$1" ;;
     exe.linux-x64-12.15.0.tgz)
       printf '%s\n' "sha512 c9cf9095947ef7e9ebdbd2787d1ce13286a98314c10e776affea5eca8ab55d4b9f9d01677db5d4305b9d0c82b31e2e78e658a71aa98e9977e7d0da2e7cd81c3a https://registry.npmjs.org/@pnpm/exe.linux-x64/-/$1" ;;
-    bun-v1.4.0-linux-x64.zip)
-      printf '%s\n' "sha256 2d03fb5fb83ac8b567aca0a281b2ce1a1a19d488f56c2968d88c3f25e92fe452 https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64.zip" ;;
-    bun-v1.4.0-linux-x64-baseline.zip)
-      printf '%s\n' "sha256 184fb4595f0d401a217cf7c78c1bc430ba83314dab7a8b94805babbf7fa7097f https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64-baseline.zip" ;;
-    bun-v1.4.0-linux-aarch64.zip)
-      printf '%s\n' "sha256 4b1a332ee861983eb93bcfe6f770fff94e3e31b2c388bdaea3c8ed35e58eed0e https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-aarch64.zip" ;;
+    bun-v1.4.4-linux-x64.zip)
+      printf '%s\n' "sha256 bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64.zip" ;;
+    bun-v1.4.4-linux-x64-baseline.zip)
+      printf '%s\n' "sha256 e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76 https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64-baseline.zip" ;;
+    bun-v1.4.4-linux-aarch64.zip)
+      printf '%s\n' "sha256 baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-aarch64.zip" ;;
     *) log "no reviewed public toolchain archive: $1"; return 1 ;;
   esac
 }
@@ -752,7 +755,7 @@ bun_optimized_supported() {
 stage_bun_archive() {
   local name="$1" staging="$2" allow_download="${3:-0}"
   case "$name" in
-    bun-v1.4.0-linux-x64.zip|bun-v1.4.0-linux-x64-baseline.zip|bun-v1.4.0-linux-aarch64.zip) ;;
+    bun-v1.4.4-linux-x64.zip|bun-v1.4.4-linux-x64-baseline.zip|bun-v1.4.4-linux-aarch64.zip) ;;
     *) log "unsupported pinned Bun archive: $name"; return 1 ;;
   esac
   if [[ -L "$public_toolchain_archive_dir" ||
@@ -798,7 +801,7 @@ PY
 install_bun() {
   pinned_bun_supported || return 0
   local destination="$bun_toolchain_root/$pinned_bun_version/linux-x64-baseline" directory
-  public_tool_links check "$bun_bin_dir" "$destination" bun bunx || return $?
+  public_tool_links check "$bun_bin_dir" "$destination" --previous-bin-dir "$bun_toolchain_root/$previous_pinned_bun_version/linux-x64-baseline" bun bunx || return $?
   # Check only this managed path's ancestors before any write can follow a symlink.
   directory="$destination"
   while [[ "$directory" != "/" ]]; do
@@ -832,12 +835,12 @@ PY
     # The installed image can move to a less capable guest. Keep its default baseline.
     chmod 0755 "$staging/linux-x64-baseline" || return $?
     ln -s bun "$staging/linux-x64-baseline/bunx" || return $?
-    public_tool_links check "$bun_bin_dir" "$destination" bun bunx || return $?
+    public_tool_links check "$bun_bin_dir" "$destination" --previous-bin-dir "$bun_toolchain_root/$previous_pinned_bun_version/linux-x64-baseline" bun bunx || return $?
     (umask 022; install -d -m 0755 "$(dirname "$destination")" "$bun_bin_dir") || return $?
     # The exact image-owned slot may be incomplete; never reuse its executable bytes.
     rm -rf -- "$destination" || return $?
     mv "$staging/linux-x64-baseline" "$destination" || return $?
-    public_tool_links publish "$bun_bin_dir" "$destination" bun bunx || return $?
+    public_tool_links publish "$bun_bin_dir" "$destination" --previous-bin-dir "$bun_toolchain_root/$previous_pinned_bun_version/linux-x64-baseline" bun bunx || return $?
   ) || return $?
   export PATH="$bun_bin_dir:$PATH"
   hash -r
@@ -1013,13 +1016,17 @@ install_rust_uv_toolchain() (
   umask 022
   pinned_rust_uv_supported || return 0
   local tool="$1" destination name staging pending
-  local -a commands
+  local -a commands link_arguments
   case "$tool" in
     rust) destination="$rust_toolchain_root/$pinned_rust_version"; name="rust-$pinned_rust_version-x86_64-unknown-linux-gnu.tar.xz"; commands=(rustc cargo rustdoc) ;;
     uv) destination="$uv_toolchain_root/$pinned_uv_version"; name="uv-$pinned_uv_version-x86_64-unknown-linux-gnu.tar.gz"; commands=(uv uvx) ;;
     *) return 2 ;;
   esac
-  public_tool_links check "$developer_bin_dir" "$destination/bin" "${commands[@]}" || return $?
+  link_arguments=("$developer_bin_dir" "$destination/bin")
+  if [[ "$tool" == uv ]]; then
+    link_arguments+=(--previous-bin-dir "$uv_toolchain_root/$previous_pinned_uv_version/bin")
+  fi
+  public_tool_links check "${link_arguments[@]}" "${commands[@]}" || return $?
   check_developer_toolchain_destination "$destination" || return $?
   prepare_public_toolchain_archive_dir || return $?
   staging="$(mktemp -d)" || return $?
@@ -1043,12 +1050,12 @@ PY
       uv-x86_64-unknown-linux-gnu/uv uv-x86_64-unknown-linux-gnu/uvx || return $?
   fi
   "check_${tool}_toolchain" "$staging/toolchain/bin" "$staging/check" || return $?
-  public_tool_links check "$developer_bin_dir" "$destination/bin" "${commands[@]}" || return $?
+  public_tool_links check "${link_arguments[@]}" "${commands[@]}" || return $?
   check_developer_toolchain_destination "$destination" || return $?
   install -d -m 0755 "$(dirname "$destination")" "$developer_bin_dir" || return $?
   rm -rf -- "$destination" || return $?
   mv "$staging/toolchain" "$destination" || return $?
-  public_tool_links publish "$developer_bin_dir" "$destination/bin" "${commands[@]}" || return $?
+  public_tool_links publish "${link_arguments[@]}" "${commands[@]}" || return $?
 )
 
 offline_rust_probe() (
@@ -1092,8 +1099,8 @@ uv_smoke_script() {
 
 trufflehog_sha256_for_arch() {
   case "$1" in
-    amd64) printf '%s\n' "f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e" ;;
-    arm64) printf '%s\n' "9d9c2ec4ea36a089a9c5aaafe1969d176013ddf9f44d68e8cd75291aed8c83ed" ;;
+    amd64) printf '%s\n' "5ae9b313342d1bfa96404064c0f59e77a2cbd1824d797ca7b11e6655aa8fd9d1" ;;
+    arm64) printf '%s\n' "e6285aff62e692131255dca91ad300a62a479330e0b72e4eb1d60ae58908f8d5" ;;
     *)
       log "unsupported TruffleHog architecture: $1"
       return 1

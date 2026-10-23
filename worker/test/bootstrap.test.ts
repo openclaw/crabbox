@@ -888,7 +888,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("crabbox-sshd-$port");
     expect(got).toContain("tightvnc-2.8.85-gpl-setup-64bit.msi");
     expect(got).toContain("d8fbed7b27ebab86df6f780f6e86f723668f3715cee521ccaa4568812aef5f3e");
-    expect(got).toContain("d8de7a3152266c8bb13577eab850ea1df6dccf8c2aa48be5b4a1c58b7190d62c");
+    expect(got).toContain("dc6d3db061999136e139f31376c5582a9ed6f36a4ea12f15e54ad7fa2bfc0bf2");
     expect(got).toContain("NewNetworkWindowOff");
     expect(got).toContain("DoNotOpenServerManagerAtLogon");
     expect(got).toContain("VALUE_OF_PASSWORD=$vncPassword");
@@ -946,8 +946,8 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("function Assert-CrabboxFileSHA256");
     expect(got).toContain("OpenSSH-Win64.zip");
     expect(got).toContain("0ca131f3a78f404dc819a6336606caec0db1663a692ccc3af1e90232706ada54");
-    expect(got).toContain("Git-2.52.0-64-bit.exe");
-    expect(got).toContain("d8de7a3152266c8bb13577eab850ea1df6dccf8c2aa48be5b4a1c58b7190d62c");
+    expect(got).toContain("Git-2.56.0.3-64-bit.exe");
+    expect(got).toContain("dc6d3db061999136e139f31376c5582a9ed6f36a4ea12f15e54ad7fa2bfc0bf2");
     expect(got).toContain("$passwordPath = $windowsPasswordPath");
     expect(got).toContain("$credentialPaths = @($passwordPath)");
     expect(got).toContain("PubkeyAuthentication yes");
@@ -1008,9 +1008,9 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc");
     expect(got).toContain("test -w /proc/sys/fs/binfmt_misc/register");
     expect(got).toContain(":WSLInterop:M::MZ::/init:PF");
-    expect(got).toContain("trufflehog_version='3.95.9'");
+    expect(got).toContain("trufflehog_version='3.99.4'");
     expect(got).toContain("trufflehog_${trufflehog_version}_linux_amd64.tar.gz");
-    expect(got).toContain("f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e");
+    expect(got).toContain("5ae9b313342d1bfa96404064c0f59e77a2cbd1824d797ca7b11e6655aa8fd9d1");
     expect(got).toContain("sha256sum -c -");
     expect(got).toContain('mv -f "$trufflehog_candidate" /usr/local/bin/trufflehog');
     expect(got).toContain("trufflehog --no-update --version >/dev/null");
@@ -1051,7 +1051,7 @@ describe("cloud-init bootstrap", () => {
     } as const;
     const got = azureWindowsBootstrapPowerShell(input);
     expect(got).toContain("OpenSSH-Win64.zip");
-    expect(got).toContain("Git-2.52.0-64-bit.exe");
+    expect(got).toContain("Git-2.56.0.3-64-bit.exe");
     expect(got).toContain("administrators_authorized_keys");
     expect(got).toContain("Match Group administrators");
     expect(got).toContain("$sshPorts = @('2222', '22')");

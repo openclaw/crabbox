@@ -515,9 +515,9 @@ scripts/mint-aws-devtools-image.sh \
 ### What the prep scripts install
 
 - **Linux** (`scripts/install-linux-developer-tools.sh`): common CLI/build
-  tooling, GitHub CLI, Node 24.22.1, Go 1.27.3, Bun 1.4.0, Rust/Cargo 1.98.1,
+  tooling, GitHub CLI, Node 24.22.1, Go 1.27.3, Bun 1.4.4, Rust/Cargo 1.98.1,
   and uv/uvx 0.12.19 on x86_64,
-  corepack/pnpm, TruffleHog 3.95.9, Chrome or
+  corepack/pnpm, TruffleHog 3.99.4, Chrome or
   Chromium for browser lanes, desktop/VNC helpers, Docker Engine, Compose,
   buildx, and a small default Docker image set. TruffleHog archives are pinned
   to reviewed SHA-256 digests for amd64 and arm64. NodeSource, Docker, and
@@ -537,7 +537,7 @@ scripts/mint-aws-devtools-image.sh \
   It skips image-only Docker, Go, Rust, uv, browser/desktop setup, pnpm activation, and the
   offline pnpm archives; see [AWS targets](../providers/aws.md#targets).
 - **Windows** (`scripts/install-windows-developer-tools.ps1`): common CLI/build
-  tooling, GitHub CLI, Node 24, corepack/pnpm, TruffleHog 3.95.9, and Windows
+  tooling, GitHub CLI, Node 24, corepack/pnpm, TruffleHog 3.99.4, and Windows
   Server container support with Docker Engine. It deliberately avoids Docker
   Desktop because headless image bakes should not depend on a user-session
   desktop app or Docker Desktop licensing. The Chocolatey package, Node MSI,
@@ -548,7 +548,7 @@ scripts/mint-aws-devtools-image.sh \
   the exit code, both output streams, and any launch error; the existing binary
   remains untouched and the rejected candidate is removed.
 - **Windows WSL2**: the shared Windows bootstrap installs the checksum-pinned
-  Linux TruffleHog 3.95.9 binary inside the managed WSL distro during environment
+  Linux TruffleHog 3.99.4 binary inside the managed WSL distro during environment
   setup.
 
 Linux preparation retains `cloud-init clean --logs --seed` while preserving
@@ -638,8 +638,8 @@ Public archives are retained under `/opt/crabbox/toolchain-archives`:
 | `pnpm-12.15.0.tgz` | pnpm 12.15.0 JavaScript wrapper |
 | `exe.linux-x64-12.15.0.tgz` | pnpm 12.15.0 native executable for glibc Linux x64 |
 | `go1.27.3.linux-amd64.tar.gz` | Complete Go 1.27.3 distribution |
-| `bun-v1.4.0-linux-x64-baseline.zip` | Original Bun 1.4.0 baseline Linux glibc ZIP |
-| `bun-v1.4.0-linux-x64.zip` | Original Bun 1.4.0 optimized Linux glibc ZIP |
+| `bun-v1.4.0-linux-x64-baseline.zip` | Original Bun 1.4.4 baseline Linux glibc ZIP |
+| `bun-v1.4.0-linux-x64.zip` | Original Bun 1.4.4 optimized Linux glibc ZIP |
 | `rust-1.98.1-x86_64-unknown-linux-gnu.tar.xz` | Official standalone Rust/Cargo host distribution |
 | `uv-0.12.19-x86_64-unknown-linux-gnu.tar.gz` | Original uv/uvx Linux glibc release archive |
 
@@ -739,7 +739,7 @@ before rebaking; a conflict preserves the existing tree, marker and aliases.
 Publication uses the same private temporary-symlink replacement as Node,
 without treating the pair as one atomic transaction.
 
-The bundled builder retains both Bun 1.4.0 x64 ZIPs on glibc Linux `amd64`,
+The bundled builder retains both Bun 1.4.4 x64 ZIPs on glibc Linux `amd64`,
 independently of the Node-major override. Their versioned cache filenames do
 not change the upstream ZIP bytes. After Node and Go setup, the baseline
 executable is installed at
@@ -1149,7 +1149,7 @@ image generic: it verifies Command Line Tools by default, or selects an
 installed `/Applications/Xcode*.app` developer directory when
 `CRABBOX_MACOS_REQUIRE_XCODE=1`. It installs Homebrew when missing, installs
 common developer packages (Git, GitHub CLI, jq/yq, ripgrep, fd, ShellCheck,
-shfmt, Python, Node 24, pnpm via corepack), installs TruffleHog 3.95.9 from a
+shfmt, Python, Node 24, pnpm via corepack), installs TruffleHog 3.99.4 from a
 reviewed SHA-256-pinned archive, and creates `/usr/local/bin` shims so non-login
 SSH commands find those tools after the AMI boots. It does not download Xcode —
 install Xcode in a private prep hook first if the base image lacks it. Do not
