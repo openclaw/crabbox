@@ -1079,6 +1079,133 @@ func GnomeDesktopThemeScript() string {
 	return sharedGnomeDesktopTheme()
 }
 
+func managedWindowsDesktopBootstrapPowerShell(user string) string {
+	return `param([string]$userPassword)
+` + windowsBootstrapUtilitiesPowerShell() + tightVNCReconcilePowerShell() + `
+$user = ` + psQuote(user) + `
+$base = "C:\ProgramData\crabbox"
+$setupCompletePath = Join-Path $base "desktop-setup-complete"
+$vncPasswordPath = "C:\ProgramData\crabbox\vnc.password"
+$tightVNCInstaller = "$env:TEMP\tightvnc-2.8.85-gpl-setup-64bit.msi"
+New-Item -ItemType Directory -Force -Path $base | Out-Null
+if ([string]::IsNullOrWhiteSpace($userPassword)) {
+  throw "managed Windows desktop bootstrap requires the guest password"
+}
+if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
+  throw "managed Windows desktop user was not found: $user"
+}
+$vncPasswordChanged = $false
+if (-not (Test-Path -LiteralPath $vncPasswordPath)) {
+  $vncPasswordChanged = $true
+  New-CrabboxPassword | Set-Content -NoNewline -Encoding ASCII -Path $vncPasswordPath
+}
+$vncPassword = (Get-Content -Raw -Path $vncPasswordPath).Trim()
+if ($vncPassword.Length -lt 12 -or $vncPassword -notmatch '[A-Z]' -or $vncPassword -notmatch '[a-z]' -or $vncPassword -notmatch '[0-9]' -or $vncPassword -notmatch '[^A-Za-z0-9]') {
+  $vncPassword = New-CrabboxPassword
+  Set-Content -NoNewline -Encoding ASCII -Path $vncPasswordPath -Value $vncPassword
+  $vncPasswordChanged = $true
+}
+$userSID = (Get-LocalUser -Name $user).SID.Value
+icacls.exe $vncPasswordPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
+$vncReconcilePendingPath = Join-Path $base "vnc-reconcile-pending"
+Invoke-CrabboxTightVNCReconcile -PasswordChanged $vncPasswordChanged -PendingPath $vncReconcilePendingPath -ServerPath "C:\Program Files\TightVNC\tvnserver.exe" -Remove { Remove-CrabboxPreinstalledTightVNC }` + windowsDesktopBootstrapPowerShell() + managedWindowsDesktopDisplayPowerShell()
+}
+
+// managedWindowsDesktopDisplayPowerShell keeps a managed guest's virtual display
+// from blanking, which freezes captured frames. It is appended only to the
+// managed desktop bootstrap so the shared recipe leaves AWS and Azure guests'
+// own power and screensaver preferences alone.
+func managedWindowsDesktopDisplayPowerShell() string {
+	return `
+foreach ($powerSetting in @("monitor-timeout-ac", "monitor-timeout-dc", "standby-timeout-ac", "standby-timeout-dc")) {
+  & powercfg.exe /change $powerSetting 0 | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "failed to disable desktop power timeout $powerSetting" }
+}
+foreach ($desktopKey in @("HKCU:\Control Panel\Desktop", "Registry::HKEY_USERS\.DEFAULT\Control Panel\Desktop")) {
+  if (Test-Path -LiteralPath $desktopKey) {
+    Set-ItemProperty -LiteralPath $desktopKey -Name ScreenSaveActive -Value "0" -Type String
+    Set-ItemProperty -LiteralPath $desktopKey -Name ScreenSaveTimeOut -Value "0" -Type String
+    Set-ItemProperty -LiteralPath $desktopKey -Name ScreenSaverIsSecure -Value "0" -Type String
+  }
+}
+`
+}
+
+// tightVNCReconcilePowerShell defines the reconcile seam: the intent to remove a
+// preinstalled TightVNC is persisted before the removal, so a failed removal is
+// retried by the next bootstrap instead of being forgotten.
+func tightVNCReconcilePowerShell() string {
+	return `function Remove-CrabboxPreinstalledTightVNC {
+  # A TightVNC installed with another password would keep it; remove it so
+  # the shared recipe reinstalls it with the managed secret.
+  Stop-Service -Name tvnserver -Force -ErrorAction SilentlyContinue
+  $tightVNCProduct = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "TightVNC*" -and $_.PSChildName -match '^\{[0-9A-Fa-f-]+\}$' } | Select-Object -First 1
+  if (-not $tightVNCProduct) { throw "preinstalled TightVNC could not be reconciled with the managed VNC password" }
+  $uninstall = Start-Process -FilePath msiexec.exe -ArgumentList @("/x", $tightVNCProduct.PSChildName, "/qn", "/norestart") -Wait -PassThru
+  if ($uninstall.ExitCode -ne 0 -and $uninstall.ExitCode -ne 3010) { throw "TightVNC removal failed with exit code $($uninstall.ExitCode)" }
+}
+function Invoke-CrabboxTightVNCReconcile {
+  param([bool]$PasswordChanged, [string]$PendingPath, [string]$ServerPath, [scriptblock]$Remove)
+  if ($PasswordChanged) {
+    Set-Content -NoNewline -Encoding ASCII -Path $PendingPath -Value "1"
+  }
+  if ((Test-Path -LiteralPath $PendingPath) -and (Test-Path -LiteralPath $ServerPath)) {
+    & $Remove
+  }
+  Remove-Item -Force -LiteralPath $PendingPath -ErrorAction SilentlyContinue
+}
+`
+}
+
+func managedWindowsDesktopTerminalBootstrapPowerShell() string {
+	return `$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$gitInstaller = Join-Path $env:TEMP "crabbox-git-for-windows.exe"
+$git = "C:\Program Files\Git\cmd\git.exe"
+$mintty = "C:\Program Files\Git\usr\bin\mintty.exe"
+function Invoke-CrabboxDesktopDownload {
+  for ($attempt = 1; $attempt -le 8; $attempt++) {
+    try {
+      Invoke-WebRequest -Uri ` + psQuote(gitForWindowsSetupURL) + ` -OutFile $gitInstaller -UseBasicParsing
+      return
+    } catch {
+      if ($attempt -eq 8) { throw }
+      Start-Sleep -Seconds ($attempt * 5)
+    }
+  }
+}
+if (-not (Test-Path -LiteralPath $git) -or -not (Test-Path -LiteralPath $mintty)) {
+  Invoke-CrabboxDesktopDownload
+  $actual = (Get-FileHash -LiteralPath $gitInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($actual -ne ` + psQuote(gitForWindowsSetupSHA256) + `) {
+    Remove-Item -Force -LiteralPath $gitInstaller -ErrorAction SilentlyContinue
+    throw "Git for Windows SHA-256 mismatch"
+  }
+  try {
+    $process = Start-Process -FilePath $gitInstaller -ArgumentList "/VERYSILENT","/NORESTART","/NOCANCEL","/SP-" -PassThru -Wait
+    if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
+      throw "Git for Windows install failed with exit $($process.ExitCode)"
+    }
+  } finally {
+    Remove-Item -Force -LiteralPath $gitInstaller -ErrorAction SilentlyContinue
+  }
+}
+if (-not (Test-Path -LiteralPath $git) -or -not (Test-Path -LiteralPath $mintty)) {
+  throw "Git for Windows desktop terminal is unavailable after install"
+}
+$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+foreach ($path in @("C:\Program Files\Git\cmd", "C:\Program Files\Git\usr\bin")) {
+  if ($machinePath -notlike "*$path*") { $machinePath = "$machinePath;$path" }
+  if ($env:Path -notlike "*$path*") { $env:Path = "$env:Path;$path" }
+}
+[Environment]::SetEnvironmentVariable("Path", $machinePath, "Machine")
+Restart-Service sshd -Force
+Write-Output "GIT=$git"
+Write-Output "MINTTY=$mintty"
+`
+}
+
 // WindowsNodeBaselinePowerShell installs and verifies the shared native Windows
 // Node/npm baseline (the same recipe the generic Windows bootstrap runs).
 func WindowsNodeBaselinePowerShell() string {

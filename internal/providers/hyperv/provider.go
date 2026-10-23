@@ -14,14 +14,15 @@ type Provider struct{}
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationLocalContext),
-		Name:             providerName,
-		Family:           "local-vm",
-		Kind:             core.ProviderKindSSHLease,
-		Targets:          providerTargets(),
-		Features:         providerFeatures(),
-		Coordinator:      core.CoordinatorNever,
-		ClassDisposition: core.ProviderClassDispositionUnmapped,
+		Authentication:               core.DirectProviderAuthentication(core.ProviderAuthenticationLocalContext),
+		Name:                         providerName,
+		Family:                       "local-vm",
+		Kind:                         core.ProviderKindSSHLease,
+		Targets:                      providerTargets(),
+		Features:                     providerFeatures(),
+		Coordinator:                  core.CoordinatorNever,
+		DesktopLoginPasswordSeparate: true,
+		ClassDisposition:             core.ProviderClassDispositionUnmapped,
 	}
 }
 
@@ -35,6 +36,8 @@ func providerFeatures() core.FeatureSet {
 	return core.FeatureSet{
 		core.FeatureSSH,
 		core.FeatureCrabboxSync,
+		core.FeatureDesktop,
+		core.FeatureBrowser,
 		core.FeatureCleanup,
 		core.FeaturePauseResume,
 	}

@@ -206,7 +206,7 @@ PowerShell and `--script <file.ps1>` for longer scripts.
 
 ### Hyper-V Windows leases
 
-`hyperv` is a direct Windows-hosted `ssh-lease`/`local-vm` provider for native Windows Generation 2 VHDXs; it supports SSH/sync, pause/resume, and cleanup. See `docs/providers/hyperv.md`.
+`hyperv` is a direct Windows-hosted `ssh-lease`/`local-vm` provider for native Windows Generation 2 VHDXs; it supports SSH/sync, pause/resume, cleanup, and `--desktop` with WebVNC/screenshots (`crabbox desktop proof`). See `docs/providers/hyperv.md`.
 
 Needs DHCP plus a known local administrator password from trusted user config or `CRABBOX_HYPERV_GUEST_PASSWORD` (never argv/repo/logs); PowerShell Direct bootstraps OpenSSH/MinGit. Run with Hyper-V VM/storage permissions as the invoking interactive user, never as `LocalSystem`; local `Hyper-V Administrators` membership suffices without elevation. Host session 0 is only an unattended-host convenience against PowerShell Direct credential UI and diverges profile, `PATH`, and SSH known-hosts. Doctor is non-mutating inventory/feature proof only: it does not boot the image or validate credentials. Pause uses `Save-VM`.
 

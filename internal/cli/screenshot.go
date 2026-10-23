@@ -97,7 +97,11 @@ func captureDesktopScreenshot(ctx context.Context, cfg Config, target SSHTarget,
 			_ = os.Remove(outputPath)
 		}
 	}()
-	if err := runSSHToWriter(ctx, target, screenshotRemoteCommand(target), file); err != nil {
+	capture := runSSHToWriter
+	if isWindowsNativeTarget(target) {
+		capture = runWindowsPowerShellScriptToWriter
+	}
+	if err := capture(ctx, target, screenshotRemoteCommand(target), file); err != nil {
 		return Exit(5, "capture screenshot: %v", err)
 	}
 	ok = true
@@ -176,53 +180,9 @@ func screenshotRemoteCommand(target SSHTarget) string {
 	if isWindowsNativeTarget(target) {
 		return `$ErrorActionPreference = "Stop"
 $base = "C:\ProgramData\crabbox"
-$password = Get-Content -Raw -LiteralPath (Join-Path $base "windows.password")
-$taskName = "CrabboxScreenshot-" + [Guid]::NewGuid().ToString("N")
-$out = Join-Path $base ($taskName + ".png")
-$script = Join-Path $base ($taskName + ".ps1")
-@'
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-$bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
-$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-$graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-$bitmap.Save("__CRABBOX_SCREENSHOT_OUT__", [System.Drawing.Imaging.ImageFormat]::Png)
-$graphics.Dispose()
-$bitmap.Dispose()
-'@.Replace("__CRABBOX_SCREENSHOT_OUT__", $out.Replace("\", "\\")) | Set-Content -Encoding ASCII -LiteralPath $script
-cmd.exe /c "schtasks.exe /Delete /TN $taskName /F 2>NUL" | Out-Null
-$startTime = (Get-Date).AddMinutes(1).ToString("HH:mm")
-$createArgs = @("/Create", "/TN", $taskName, "/SC", "ONCE", "/ST", $startTime, "/TR", "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $script", "/RU", $env:USERNAME, "/IT", "/F")
-& schtasks.exe @createArgs | Out-Null
-if ($LASTEXITCODE -ne 0 -and $password -ne "") {
-  & schtasks.exe @($createArgs + @("/RP", $password)) | Out-Null
-}
-if ($LASTEXITCODE -ne 0) { throw "failed to create interactive screenshot task" }
-schtasks.exe /Run /TN $taskName | Out-Null
-for ($i = 0; $i -lt 30; $i++) {
-  if (Test-Path -LiteralPath $out) {
-    try {
-      $stream = [IO.File]::Open($out, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-      try {
-        $bytes = New-Object byte[] $stream.Length
-        $read = $stream.Read($bytes, 0, $bytes.Length)
-        [Console]::OpenStandardOutput().Write($bytes, 0, $read)
-      } finally {
-        $stream.Dispose()
-      }
-      schtasks.exe /Delete /TN $taskName /F | Out-Null
-      Remove-Item -Force -LiteralPath $out, $script -ErrorAction SilentlyContinue
-      exit 0
-    } catch {
-      Start-Sleep -Milliseconds 500
-    }
-  }
-  Start-Sleep -Milliseconds 500
-}
-schtasks.exe /Delete /TN $taskName /F | Out-Null
-Remove-Item -Force -LiteralPath $script -ErrorAction SilentlyContinue
-throw "scheduled interactive screenshot did not produce output"`
+New-Item -ItemType Directory -Force -Path $base | Out-Null
+` + windowsScreenshotCredentialReadPowerShell(WindowsGuestCredentialPath) +
+			windowsInteractiveScheduledTaskPowerShell() + windowsScreenshotRemoteBody()
 	}
 	if target.TargetOS == targetMacOS {
 		return `set -eu
@@ -233,6 +193,7 @@ else
   exit 127
 fi`
 	}
+
 	return `set -eu
 if [ -f /var/lib/crabbox/desktop.env ]; then
   . /var/lib/crabbox/desktop.env
@@ -254,4 +215,54 @@ else
   echo "no screenshot tool found; warm a new --desktop lease or install grim/scrot" >&2
   exit 127
 fi`
+}
+
+func windowsScreenshotRemoteBody() string {
+	return `
+$taskName = "CrabboxScreenshot-" + [Guid]::NewGuid().ToString("N")
+$taskRoot = Join-Path $base $taskName
+Protect-CrabboxInteractiveDirectory $taskRoot
+$out = Join-Path $taskRoot "screenshot.png"
+$script = Join-Path $taskRoot "capture.ps1"
+@'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+$graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+$bitmap.Save("__CRABBOX_SCREENSHOT_OUT__", [System.Drawing.Imaging.ImageFormat]::Png)
+$graphics.Dispose()
+$bitmap.Dispose()
+'@.Replace("__CRABBOX_SCREENSHOT_OUT__", $out.Replace("\", "\\")) | Set-Content -Encoding ASCII -LiteralPath $script
+$captured = $false
+try {
+  $arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $script + '"'
+  Register-CrabboxInteractiveTask $taskName "powershell.exe" $arguments
+  Start-CrabboxInteractiveTask $taskName
+  for ($i = 0; $i -lt 30; $i++) {
+    if (Test-Path -LiteralPath $out) {
+      try {
+        $stream = [IO.File]::Open($out, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+          $stream.CopyTo([Console]::OpenStandardOutput())
+        } finally {
+          $stream.Dispose()
+        }
+        $captured = $true
+        break
+      } catch {
+        Start-Sleep -Milliseconds 500
+      }
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  if (-not $captured) {
+    throw "scheduled interactive screenshot did not produce output"
+  }
+} finally {
+  Remove-CrabboxInteractiveTask $taskName
+  Remove-Item -Recurse -Force -LiteralPath $taskRoot -ErrorAction SilentlyContinue
+}
+`
 }

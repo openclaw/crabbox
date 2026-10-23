@@ -17,6 +17,7 @@ is the default target when `--target` is omitted.
 | --- | --- |
 | SSH, Crabbox sync, cleanup | Yes |
 | Pause and resume | Yes |
+| Desktop and browser | Yes, through PowerShell Direct |
 
 Hyper-V must be enabled on the host (`Enable-WindowsOptionalFeature -Online
 -FeatureName Microsoft-Hyper-V-All`). The provider is Windows-only and will
@@ -45,7 +46,8 @@ otherwise use an elevated shell.
 Do not run the host-side Crabbox process as `LocalSystem`. Session 0 is only a
 convenience for **unattended** hosts, where failed early PowerShell Direct
 authentication can display credential UI that no one dismisses. It is unrelated
-to the guest. A `LocalSystem` host process resolves a different profile, so SSH
+to the guest interactive desktop that `--desktop` and `desktop proof` establish
+inside the VM. A `LocalSystem` host process resolves a different profile, so SSH
 known-hosts, Crabbox config, and `PATH` differ from the invoking user, per-user
 tools such as `ffmpeg` are missing, leftover state becomes `LocalSystem`-owned
 and needs elevation to remove, and elevation wrappers can corrupt captured
@@ -54,7 +56,7 @@ command output.
 `crabbox doctor --provider hyperv` is non-mutating. It checks that the host is
 Windows, queries the Hyper-V optional feature, inventories VMs, and reports the
 configured image path. It does not validate that the image exists or boots,
-that Windows credentials work, or that other guest prerequisites are satisfied. `--probe-ssh` reports that a running lease is
+that Windows credentials work, or that optional browser requirements are satisfied. `--probe-ssh` reports that a running lease is
 required rather than creating one. Its Hyper-V optional-feature query calls
 `Get-WindowsOptionalFeature`, which requires elevation even when provisioning
 does not, so an unelevated `Hyper-V Administrators` shell reports that one check
@@ -76,8 +78,72 @@ Windows acquisition allows up to 25 minutes overall, including a ten-minute
 authenticated PowerShell Direct readiness budget after VM creation. An external
 timeout shorter than that can terminate acquisition
 before readiness finishes. Bootstrap progress on stderr distinguishes waiting for authentication
-from completed SSH lockdown and network connection. A booted
+from completed credential escrow, SSH lockdown, and network connection. A booted
 VM or a started network adapter alone does not prove guest authentication.
+
+## Desktop and browser capabilities
+
+`--desktop` installs the pinned, SHA-256-verified TightVNC server after the
+OpenSSH and git bootstrap completes. TightVNC is configured without a firewall
+exception and restricted to loopback; connect through Crabbox's SSH-backed VNC
+or WebVNC commands. The guest account password is passed to PowerShell Direct
+through the host process environment and a remoting argument, never on the
+host command line. TightVNC receives a separate generated password stored at
+`C:\ProgramData\crabbox\vnc.password`.
+
+The desktop setup enables auto-logon and performs one expected Windows reboot.
+Acquisition waits for bounded PowerShell Direct readiness, reruns the marked
+idempotent setup after reboot, then waits for SSH, loopback VNC, and an active
+interactive session for the configured `--hyperv-user` with a running Explorer
+shell. TightVNC service readiness alone is not desktop readiness. If auto-logon
+settings were applied to an already-marked template but no usable session
+appears, acquisition performs at most two explicit bounded reboot retries,
+reapplies the idempotent setup, waits again, and requires repeated stable SSH
+probes.
+`desktop=true` is recorded only after all checks succeed.
+
+`--browser` is probe-only. After final SSH readiness, Crabbox accepts an
+existing Microsoft Edge or Google Chrome installation. It does not install a
+browser, and acquisition fails with a capability error when neither browser is
+present. The `browser=true` label is recorded only after the probe succeeds.
+
+For native Windows screenshot, video, and `desktop proof`, use a **fresh**
+desktop lease acquired by the pinned Crabbox binary. Retained leases are not
+backfilled with the credential/session contract. Git for Windows supplies
+Mintty, and MP4 encoding requires local `ffmpeg` on the Hyper-V host:
+
+```powershell
+& $crabboxPath warmup --provider hyperv --target windows --desktop --keep `
+  --hyperv-image 'E:\vhd\windows-template.vhdx' `
+  --hyperv-user crabbox --hyperv-switch 'Default Switch'
+
+ffmpeg -version
+& $crabboxPath desktop proof --provider hyperv --id <lease> `
+  --output 'C:\proof\<lease>' -- cmd.exe /d /c "echo desktop-proof"
+
+& $crabboxPath stop --provider hyperv <lease>
+```
+
+Run this provider flow as the invoking interactive user, not as `LocalSystem`.
+The interactive session the proof requires is the guest session belonging to the
+SSH user, which the proof launcher targets; the host-side session is irrelevant.
+Screenshot and video capture use short-lived interactive tasks in per-capture
+directories protected for only the lease user, Builtin Administrators, and
+LocalSystem. Normal completion and failure paths delete the tasks, scripts,
+frames, archives, and protected directories; always stop the lease to remove the
+VM and differencing disk.
+
+Crabbox copies guest PowerShell scripts larger than 4 KB, such as screenshot
+and video capture setup, to a protected guest directory and runs them with a
+short argument-based command, because Windows OpenSSH intermittently
+wedges its per-connection event loop while forwarding a large stdin payload;
+when that happens the guest never finishes reading stdin and ssh aborts with
+`Timeout, server <host> not responding` even though the guest is healthy.
+
+Screenshot and video task setup decode
+`windows.password` as strict UTF-8, preserve Unicode plus leading/trailing
+whitespace exactly, and reject only a zero-length file. The credential is never
+trimmed, logged, or added to native process arguments.
 
 ### Preparing a Windows template
 
@@ -200,16 +266,36 @@ During Windows `Acquire`, the provider:
 4. Waits for a trivial authenticated PowerShell Direct call to succeed. The
    readiness loop has an overall boot budget and bounds each attempt so a guest
    that is still booting cannot hang acquisition.
-5. Uses PowerShell Direct to stop/disable sshd, add an inbound TCP/22 block
+5. Escrows the exact guest password at
+   `C:\ProgramData\crabbox\windows.password` for interactive capture tasks
+   that must run as the selected user. The password reaches the host
+   PowerShell process only through `_CRABBOX_GP` and reaches the guest only
+   through the remoting argument list. Crabbox writes UTF-8 without a BOM or
+   newline to an empty temporary file after applying a fresh protected ACL
+   containing only the selected local user, Builtin Administrators, and
+   LocalSystem, then atomically replaces the target. The password is never
+   added to lease claims, labels, or logs.
+6. Uses PowerShell Direct to stop/disable sshd, add an inbound TCP/22 block
    rule, replace authorized keys, discard template `Match` authentication
    blocks, and restrict SSH to the selected user
-6. Connects the network adapter, installs the pinned Win32-OpenSSH MSI from
+7. Connects the network adapter, installs the pinned Win32-OpenSSH MSI from
    GitHub if `sshd` is absent, and keeps sshd stopped behind the quarantine rule
-7. Reapplies the final key-only config, validates `sshd_config`, regenerates
+8. Reapplies the final key-only config, validates `sshd_config`, regenerates
    per-lease SSH host keys, starts sshd, and removes the quarantine rule last
-8. Installs pinned MinGit when git is absent, then ensures the shared Node/npm
-   baseline
-9. Waits for SSH readiness on the injected key, followed by repeated stable SSH probes
+9. Installs full, pinned Git for Windows (including Mintty) for `--desktop`;
+   otherwise installs pinned MinGit when git is absent
+10. With `--desktop`, installs/configures loopback-only TightVNC, handles its
+    expected setup reboot through bounded PowerShell Direct retries, and reruns
+    the marked setup idempotently
+11. Ensures the shared Node/npm baseline
+12. Waits for SSH readiness on the injected key and, for `--desktop`, loopback
+    VNC plus an active Explorer-backed session for the configured guest user,
+    followed by repeated stable SSH probes.
+    When auto-logon settings have not taken effect, it performs at most two
+    explicit reboot retries and repeats the bounded readiness checks
+13. With `--browser`, probes for Edge or Chrome without installing either
+14. Records successful desktop/browser lease labels only after all requested
+    readiness checks pass
 
 PowerShell Direct calls use the guest administrator password. Readiness and
 later guest operations have bounded retries, preventing a stalled call from
@@ -285,6 +371,8 @@ The fixed operation budgets are:
 | `Start-VM` | 5 minutes, then up to 45 seconds to reconcile a reported failure |
 | Initial authenticated PowerShell Direct readiness | 10 minutes overall, 45 seconds per probe |
 | Guest PowerShell Direct invocation | 10 minutes per attempt, at most 5 attempts within acquisition's overall budget |
+| `--desktop` guest setup, including its expected reboot and at most two auto-logon reboot retries | Within acquisition's overall budget; each auto-logon session check waits 30 seconds, or 1 minute after a retry reboot |
+| `--desktop` readiness after SSH | Loopback VNC 5 minutes, then an active Explorer session 5 minutes, then stable SSH 45 seconds |
 
 After starting or resuming a guest, DHCP and SSH readiness use the shared
 bootstrap wait budget: 20 minutes, or 45 minutes with desktop/browser enabled.

@@ -876,6 +876,9 @@ type ProviderSpec struct {
 	TailscaleEgressOnly bool
 	// ActionsRunnerUnsupported rejects --actions-runner, not ordinary Actions hydration.
 	ActionsRunnerUnsupported bool
+	// DesktopLoginPasswordSeparate marks managed Windows desktops whose VNC
+	// secret differs from the Windows account password.
+	DesktopLoginPasswordSeparate bool
 }
 
 type ProviderKind string

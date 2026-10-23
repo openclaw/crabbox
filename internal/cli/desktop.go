@@ -506,14 +506,26 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 		return err
 	}
 	rescueCtx := rescueContext{Cfg: cfg, Target: target, LeaseID: leaseID}
-	if out, err := runDesktopLaunchRemoteCombinedOutput(ctx, target, desktopLaunchRemoteCommand(target, workdir, env, terminalCommand, desktopLaunchOptions{
+	launchOutput, err := runDesktopLaunchRemoteCombinedOutput(ctx, target, desktopLaunchRemoteCommand(target, workdir, env, terminalCommand, desktopLaunchOptions{
 		VerifyProcess:      true,
 		VisibleWindowTitle: terminalTitle,
-	})); err != nil {
-		printRescue(a.Stdout, classifyDesktopFailure(out), trimFailureDetail(out), desktopDoctorCommand(rescueCtx), desktopLaunchRetryCommand(rescueCtx, terminalCommand))
+	}))
+	if err != nil {
+		printRescue(a.Stdout, classifyDesktopFailure(launchOutput), trimFailureDetail(launchOutput), desktopDoctorCommand(rescueCtx), desktopLaunchRetryCommand(rescueCtx, terminalCommand))
 		return Exit(5, "launch desktop proof terminal: %v", err)
 	}
+	var terminalWindow windowsDesktopWindow
+	if isWindowsNativeTarget(target) {
+		terminalWindow, err = parseWindowsDesktopWindow(launchOutput)
+		if err != nil {
+			printRescue(a.Stdout, rescueDesktopCommandNotLaunched, trimFailureDetail(launchOutput), desktopDoctorCommand(rescueCtx), desktopLaunchRetryCommand(rescueCtx, terminalCommand))
+			return Exit(5, "launch desktop proof terminal: %v", err)
+		}
+	}
 	fmt.Fprintf(a.Stdout, "launched terminal: %s\n", strings.Join(terminalCommand, " "))
+	if terminalWindow.PID != 0 {
+		fmt.Fprintf(a.Stdout, "terminal window: pid=%d session=%d title=%q\n", terminalWindow.PID, terminalWindow.SessionID, terminalWindow.Title)
+	}
 	if *waitVisible > 0 {
 		timer := time.NewTimer(*waitVisible)
 		select {
@@ -525,19 +537,22 @@ func (a App) desktopProof(ctx context.Context, args []string) error {
 	}
 	metadataPath := filepath.Join(dir, "metadata.json")
 	if err := writeProofMetadata(metadataPath, desktopProofMetadata{
-		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
-		Version:        currentVersion(),
-		LeaseID:        leaseID,
-		Slug:           ServerSlug(server),
-		Provider:       cfg.Provider,
-		Network:        string(cfg.Network),
-		TargetOS:       target.TargetOS,
-		Command:        command,
-		TerminalCols:   *cols,
-		TerminalRows:   *rows,
-		TerminalSixel:  *sixel,
-		RecordDuration: recordDuration.String(),
-		RecordFPS:      *recordFPS,
+		CreatedAt:         time.Now().UTC().Format(time.RFC3339),
+		Version:           currentVersion(),
+		LeaseID:           leaseID,
+		Slug:              ServerSlug(server),
+		Provider:          cfg.Provider,
+		Network:           string(cfg.Network),
+		TargetOS:          target.TargetOS,
+		Command:           command,
+		TerminalCols:      *cols,
+		TerminalRows:      *rows,
+		TerminalSixel:     *sixel,
+		TerminalPID:       terminalWindow.PID,
+		TerminalSessionID: terminalWindow.SessionID,
+		TerminalTitle:     terminalWindow.Title,
+		RecordDuration:    recordDuration.String(),
+		RecordFPS:         *recordFPS,
 	}); err != nil {
 		return err
 	}
@@ -616,6 +631,14 @@ type desktopTerminalOptions struct {
 	Title    string
 }
 
+func windowsCommandNeedsNoPathConv(program string) bool {
+	base := strings.ToLower(program)
+	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
+		base = base[i+1:]
+	}
+	return base == "cmd" || base == "cmd.exe"
+}
+
 func desktopTerminalCommand(target SSHTarget, command []string, opts desktopTerminalOptions) ([]string, error) {
 	if opts.FontSize <= 0 {
 		opts.FontSize = 14
@@ -634,16 +657,22 @@ func desktopTerminalCommand(target SSHTarget, command []string, opts desktopTerm
 		if len(command) > 0 {
 			shellCommand = shellJoin(command)
 		}
+		// Git for Windows runs the terminal command through the MSYS runtime,
+		// which rewrites arguments that look like POSIX paths. Without this,
+		// `cmd.exe /d /c ...` loses its switches and opens an interactive shell
+		// switches and opens an interactive shell instead of running the
+		// requested command. Other commands keep MSYS path conversion.
+		prefix := ""
+		if shellCommand != "" && windowsCommandNeedsNoPathConv(command[0]) {
+			prefix = "export MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1; "
+		}
 		if opts.Sixel {
-			prefix := "export TERM=xterm-256color GIFGREP_INLINE=${GIFGREP_INLINE:-sixel}; "
-			if shellCommand == "" {
-				shellCommand = prefix + "exec /usr/bin/bash -l"
-			} else {
-				shellCommand = prefix + shellCommand
-			}
-		} else if shellCommand == "" {
+			prefix += "export TERM=xterm-256color GIFGREP_INLINE=${GIFGREP_INLINE:-sixel}; "
+		}
+		if shellCommand == "" {
 			shellCommand = "exec /usr/bin/bash -l"
 		}
+		shellCommand = prefix + shellCommand
 		return []string{
 			`C:\Program Files\Git\usr\bin\mintty.exe`,
 			"-t", opts.Title,
@@ -651,6 +680,7 @@ func desktopTerminalCommand(target SSHTarget, command []string, opts desktopTerm
 			"-o", fmt.Sprintf("Columns=%d", opts.Cols),
 			"-o", fmt.Sprintf("Rows=%d", opts.Rows),
 			"-o", "Scrollbar=none",
+			"-h", "always",
 			"/usr/bin/bash", "-lc", shellCommand,
 		}, nil
 	}
@@ -1030,13 +1060,15 @@ $requestDirectory = Join-Path $base "desktop-launch-requests"
 $request = Join-Path $requestDirectory ("desktop-launch-" + $launchID + ".request")
 $requestTemp = $request + ".tmp"
 $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-if ($null -eq $service) {
+$launcherVersionFile = Join-Path $base "desktop-launcher-service.version"
+$launcherVersion = if (Test-Path -LiteralPath $launcherVersionFile) { (Get-Content -Raw -LiteralPath $launcherVersionFile).Trim() } else { "" }
+if ($null -eq $service -or $launcherVersion -ne "` + windowsDesktopLauncherProtocolVersion + `") {
 ` + windowsDesktopLauncherServicePowerShell() + `
   $service = Get-Service -Name $serviceName -ErrorAction Stop
 }
 try {
   New-Item -ItemType Directory -Force -Path $requestDirectory | Out-Null
-  Set-Content -Encoding UTF8 -LiteralPath $requestTemp -Value @($script, $result)
+  Set-Content -Encoding UTF8 -LiteralPath $requestTemp -Value @($script, $result, $env:USERNAME)
   Move-Item -Force -LiteralPath $requestTemp -Destination $request
   if ($service.Status -ne "Running") { Start-Service -Name $serviceName }
   $deadline = [DateTime]::UtcNow.AddSeconds(45)
@@ -1065,14 +1097,7 @@ func runDesktopLaunchRemoteCombinedOutput(ctx context.Context, target SSHTarget,
 		return runSSHCombinedOutput(ctx, target, remote)
 	}
 	var output bytes.Buffer
-	err := runSSHInput(
-		ctx,
-		target,
-		windowsPowerShellStdinScriptCommand(len([]byte(remote))),
-		strings.NewReader(remote),
-		&output,
-		&output,
-	)
+	err := runGuestWindowsPowerShellScript(ctx, target, remote, &output, &output)
 	return strings.TrimSpace(output.String()), err
 }
 
