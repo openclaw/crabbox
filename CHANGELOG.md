@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Security: refresh managed runtime trust inputs, preserve predecessor Node aliases during Linux rebakes, and keep coordinator retries on native TLS with Windows connection recovery. Curl-specific coordinator trust and connectivity workarounds must move to native configuration. [PR 2927](https://github.com/openclaw/crabbox/pull/2927).
+
+- Coordinator: bound capacity snapshots, use maintained lease indexes, and keep diagnostic reads off the lifecycle mutex so retained history cannot stall completion and heartbeats. Incomplete or oversized snapshots fail closed without reporting partial capacity. [PR 2932](https://github.com/openclaw/crabbox/pull/2932).
+- AWS: preserve the original root disk identity after instance loss, fail closed when historical evidence is unavailable, and prevent replacement disks from acquiring the original identity. [PR 2926](https://github.com/openclaw/crabbox/pull/2926). Thanks @Surendra-4 and @cropsgg.
+- Run: retain private original signed completion bytes before delivery and support exact-byte receipt recovery after coordinator failures, without reconstructing missing historical signatures. [PR 2925](https://github.com/openclaw/crabbox/pull/2925). Thanks @Surendra-4 and @cropsgg.
+
+### Fixed
+
+- CI: retry coordinator health verification for up to three minutes during edge propagation, preserving deployment consistency checks and reporting the last version ID and tag on failure. [PR 2937](https://github.com/openclaw/crabbox/pull/2937).
+- Windows: quote PowerShell values containing typographic single quotes (‘ ’ ‚ ‛), which PowerShell treats as string delimiters, across commands, forwarded environment values, bootstrap generators, Hyper-V and Windows Sandbox, so such values no longer break runs or execute as code. [PR 2924](https://github.com/openclaw/crabbox/pull/2924). Thanks @parth-garg01.
+- Static SSH: an explicitly configured SSH port is exclusive, so a port-forwarded host that is not ready yet no longer falls back to port 22 on the same address (for loopback, the operator's own machine); unset ports and provider fallbacks are unchanged, and reused leases keep the pinned port. [PR 2933](https://github.com/openclaw/crabbox/pull/2933). Thanks @valkyriweb.
+- Providers: consistently list `serve` under `self-hosted-virtualization`, generate the category index from metadata, and check README category membership. [PR 2936](https://github.com/openclaw/crabbox/pull/2936). Thanks @aitrawog.
+- Docs: Daytona API key, JWT token, and organization ID are environment-only; the docs no longer list them as config keys that Crabbox silently ignores. [PR 2931](https://github.com/openclaw/crabbox/pull/2931). Thanks @KrasimirKralev.
+
 ## 0.79.1 - 2026-10-20
 
 ### Highlights

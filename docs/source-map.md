@@ -82,7 +82,7 @@ Crabbox has three implementation surfaces:
   attempt checkpoints: `internal/cli/claim.go`, `internal/providers/aws/backend.go`
 - Direct-provider labels, safe label encoding, idle-touch labels, TTL cap math: `internal/cli/provider_labels.go`
 - Lease status/inspect/list/share/unshare/stop/cleanup commands: `internal/cli/status.go`, `internal/cli/inspect.go`, `internal/cli/pool.go`, `internal/cli/share.go`, `internal/cli/rescue.go`
-- Coordinator client request/response structs, same-origin credential redirect guard, curl fallback, slug lookup, heartbeats, usage, and run history: `internal/cli/coordinator.go`, `internal/cli/provider_coordinator.go`
+- Coordinator client request/response structs, same-origin credential redirect guard, native HTTP/TLS transport, slug lookup, heartbeats, usage, and run history: `internal/cli/coordinator.go`, `internal/cli/provider_coordinator.go`
 - Lease backend selection (brokered vs direct SSH vs delegated): `internal/cli/provider_backend.go`
 - Worker env/request/record types: `worker/src/types.ts`
 - Worker lease records, public routes, slug allocation, heartbeat/expiry math, cleanup alarms: `worker/src/fleet.ts`

@@ -63,7 +63,7 @@ https://crabbox-coordinator.example.workers.dev     # workers.dev fallback for h
 
 Point each CLI configuration directly at the final canonical or
 Access-protected origin it should authenticate to. Credentialed Go requests
-follow only same-origin redirects, and the curl fallback follows no redirects;
+follow only same-origin redirects and retain the native TLS verifier on retries;
 do not use a cross-origin redirecting alias as `CRABBOX_COORDINATOR`. Additional
 workers.dev or custom domains remain useful as independently verified health
 endpoints.

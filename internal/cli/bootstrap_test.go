@@ -885,7 +885,7 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 	cfg.TargetOS = targetWindows
 	cfg.WindowsMode = windowsModeWSL2
 	cfg.WorkRoot = `/work/crabbox`
-	got := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+	got := decodedWSLBootstrapPowerShell(t, cfg)
 	for _, want := range []string{
 		`$workRoot = 'C:\crabbox'`,
 		`C:\ProgramData\crabbox\windows.password`,
@@ -966,9 +966,9 @@ func TestManagedWindowsWSL2BootstrapInstallsNodeBeforeReadiness(t *testing.T) {
 				}
 				return
 			}
-			setupStart := strings.Index(script, "$linuxSetup = @'")
+			setupStart := strings.Index(script, "$linuxSetup = ")
 			installIndex := strings.Index(script, install)
-			readyIndex := strings.Index(script, "cat >/usr/local/bin/crabbox-ready <<'READY'")
+			readyIndex := strings.Index(script, "cat >/usr/local/bin/crabbox-ready <<")
 			if setupStart < 0 || installIndex <= setupStart || readyIndex <= installIndex {
 				t.Fatal("WSL distro must install the shared Node baseline before readiness")
 			}

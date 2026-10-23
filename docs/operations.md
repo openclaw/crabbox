@@ -317,6 +317,9 @@ environment API token fails the job.
 Each upload is tagged with the full commit SHA. After all deployment steps,
 verification requires one Cloudflare version receiving 100% of traffic and
 an uncached public `/v1/health` response with that version ID and SHA tag.
+Health verification polls every five seconds for up to three minutes to allow
+edge propagation. If it expires, the error includes the last reported version ID
+and tag. Each request still has a timeout of at most ten seconds.
 The deployment must remain unchanged across the check. A gradual rollout,
 stale route, unavailable API, or missing version metadata fails visibly.
 Verification only reads deployment metadata and health; it creates no lease.

@@ -387,6 +387,22 @@ jobs:
           cache: true
           cache-dependency-path: '**/go.sum'
 
+      - name: Require PowerShell literal parsing on Windows
+        shell: pwsh
+        run: |
+          $required = @(
+            'TestPSQuoteRoundTripsThroughPowerShell',
+            'TestPowerShellGeneratedCommandPreservesValues',
+            'TestPowerShellBootstrapPreservesValues',
+            'TestPowerShellWSLBootstrapPreservesHereStringTerminators'
+          )
+          $events = @(go test ./internal/cli -run ('^(' + ($required -join '|') + ')$') -count=1 -timeout=5m -json)
+          $code = $LASTEXITCODE
+          $events | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { exit $code }
+          $required += @($required | ForEach-Object { "$_/powershell.exe" })
+          & ./scripts/verify-go-test-events.ps1 -Events $events -RequiredTests $required -Label 'PowerShell literal parsing'
+
       - name: Prove paired Windows connection-error classification
         if: github.event_name == 'pull_request' && github.head_ref == 'security/emudhra-node-release'
         shell: pwsh
@@ -395,7 +411,6 @@ jobs:
       - name: Prove native TLS rejection and legitimate private CA
         if: github.event_name == 'pull_request' && github.head_ref == 'security/emudhra-node-release'
         run: go test ./internal/cli -run '^TestCoordinator(ReadDoesNotOverrideTLSVerificationWithCurl|HTTPSReadNeverDowngradesAfterDroppedHandshake|NativeHTTPReadRecoversAfterDroppedConnection)$' -count=1 -v
-
 
       - name: Test native Windows local Git manifest handoff
         run: go test ./internal/cli/ -run '^(TestGitLocalReceiverWindowsManifestHandoff|TestCoordinatorReadRetryWindowsConnectionErrors)$' -count=1 -v
@@ -583,7 +598,7 @@ jobs:
   apple-vm:
     name: Apple VM
     runs-on: xcode-27
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - name: Check out

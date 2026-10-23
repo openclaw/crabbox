@@ -485,16 +485,28 @@ func TestReleaseRequiresExactClaim(t *testing.T) {
 	}
 }
 
-func TestEscapePSString(t *testing.T) {
-	tests := map[string]string{
-		"hello":       "hello",
-		"it's a test": "it''s a test",
-		"no'pe":       "no''pe",
-	}
-	for input, want := range tests {
-		if got := escapePSString(input); got != want {
-			t.Fatalf("escapePSString(%q)=%q want %q", input, got, want)
-		}
+func TestHyperVPowerShellQuotes(t *testing.T) {
+	for value, literal := range map[string]string{
+		"plain":                 "'plain'",
+		"'‘’‚‛":                 "'''‘‘’’‚‚‛‛'",
+		"“”„$(`n)":              "'“”„$(`n)'",
+		"a’;throw 'injected';‘": "'a’’;throw ''injected'';‘‘'",
+	} {
+		t.Run(value, func(t *testing.T) {
+			runner := &recordingRunner{}
+			b := &backend{rt: core.Runtime{Exec: runner}}
+			if err := b.connectVMNetwork(context.Background(), value, value); err != nil {
+				t.Fatal(err)
+			}
+			args := runner.calls[0].Args
+			want := "Connect-VMNetworkAdapter -VMName " + literal + " -SwitchName " + literal
+			if !strings.Contains(args[len(args)-1], want) {
+				t.Fatalf("network script missing %q: %v", want, args)
+			}
+			if script := sshAccessScript("fixture", value, false); !strings.Contains(script, "-Value "+literal) {
+				t.Fatalf("SSH script did not quote key: %s", script)
+			}
+		})
 	}
 }
 
