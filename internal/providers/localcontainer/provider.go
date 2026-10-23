@@ -171,6 +171,10 @@ func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkReq
 	req.Config.LocalContainer.WorkRoot = workRoot
 	req.Config.WorkRoot = workRoot
 	req.Config.LocalContainer.DockerSocket = false
+	// Keep the source lease's isolation unless the fork flag overrides it.
+	if ociRuntime := strings.TrimSpace(metadata[checkpointMetadataOCIRuntime]); ociRuntime != "" {
+		req.Config.LocalContainer.OCIRuntime = ociRuntime
+	}
 	req.Config.LocalContainer.CheckpointMetadata = metadata
 	core.MarkLocalContainerImageExplicit(req.Config)
 	core.MarkLocalContainerRuntimeExplicit(req.Config)
@@ -190,6 +194,9 @@ func (Provider) ApplyNativeCheckpointForkFlags(cfg *core.Config, fs *flag.FlagSe
 	}
 	if core.FlagWasSet(fs, "local-container-network") {
 		cfg.LocalContainer.Network = *v.Network
+	}
+	if core.FlagWasSet(fs, "local-container-oci-runtime") {
+		cfg.LocalContainer.OCIRuntime = *v.OCIRuntime
 	}
 	if v.Volumes != nil && len(*v.Volumes) > 0 {
 		cfg.LocalContainer.Volumes = append([]string(nil), (*v.Volumes)...)

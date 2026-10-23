@@ -25,6 +25,8 @@ const (
 	checkpointMetadataForkName = "fork_image_name"
 	checkpointMetadataUser     = "container_user"
 	checkpointMetadataWorkRoot = "container_work_root"
+	// Recorded only for leases created with an explicit OCI runtime.
+	checkpointMetadataOCIRuntime = "container_oci_runtime"
 )
 
 var checkpointScopeMetadataKeys = []string{
@@ -77,6 +79,7 @@ var checkpointLeaseLabelKeys = []string{
 	"last_touched_at",
 	"lease",
 	"market",
+	"oci_runtime",
 	"pond",
 	"profile",
 	"provider",
@@ -501,6 +504,9 @@ func checkpointMetadataForServer(scope checkpointScope, cfg core.Config, server 
 	metadata := checkpointScopeMetadata(scope)
 	metadata[checkpointMetadataUser] = firstCheckpointValue(server.Labels["ssh_user"], cfg.LocalContainer.User, cfg.SSHUser)
 	metadata[checkpointMetadataWorkRoot] = firstCheckpointValue(server.Labels["work_root"], cfg.LocalContainer.WorkRoot, cfg.WorkRoot)
+	if ociRuntime := strings.TrimSpace(server.Labels["oci_runtime"]); ociRuntime != "" {
+		metadata[checkpointMetadataOCIRuntime] = ociRuntime
+	}
 	return metadata
 }
 

@@ -162,6 +162,7 @@ localContainer:
   network: bridge          # container network
   dockerSocket: false      # mount the host Docker-compatible socket into the lease
   noHostname: false        # omit the explicit container hostname when true
+  ociRuntime: ""           # engine runtime for run --runtime, e.g. io.containerd.kata.v2
 ```
 
 Defaults applied when unset: `runtime=docker`, a reviewed Ubuntu OCI index
@@ -250,6 +251,7 @@ Provider flags:
 --local-container-memory <size>
 --local-container-network <network>
 --local-container-docker-socket
+--local-container-oci-runtime <name-or-path>
 --local-container-volume host:container[:ro]   (repeatable)
 ```
 
@@ -283,6 +285,7 @@ CRABBOX_LOCAL_CONTAINER_MEMORY
 CRABBOX_LOCAL_CONTAINER_NETWORK
 CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET
 CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME
+CRABBOX_LOCAL_CONTAINER_OCI_RUNTIME
 ```
 
 File strings only replace earlier values when nonempty, and file CPU values
@@ -305,6 +308,34 @@ It does not change the runtime's namespace, network, or capability settings.
 The configured runtime must still support the loopback-published SSH port.
 Changing this setting for a fixed lease ID returns `lease_id_conflict`; omitted
 or `false` preserves the existing fixed-lease fingerprint.
+
+### OCI runtime
+
+Set `localContainer.ociRuntime`, `CRABBOX_LOCAL_CONTAINER_OCI_RUNTIME`, or
+`--local-container-oci-runtime` to run leases under a different OCI runtime
+than the engine default. Crabbox passes the value to the container engine as
+`run --runtime=<value>` and records it in the lease's `oci_runtime` label and
+`doctor` output. Use a runtime name the engine already knows: one registered in
+the Docker daemon's `runtimes` configuration, a containerd shim name such as
+`io.containerd.kata.v2` or `io.containerd.runsc.v1` whose shim binary is on the
+daemon's `PATH`. Values with whitespace or a leading dash are rejected before
+any container is created. Empty keeps the engine default. The setting currently
+supports Docker only: Podman takes the runtime as its global
+`podman --runtime=<value>` option rather than a `run` option, and Crabbox does
+not pass that option yet, so it rejects this setting with Podman.
+
+Use this for hardware-virtualized leases with
+[Kata Containers](https://katacontainers.io/) or user-space kernel isolation
+with [gVisor](https://gvisor.dev/). Crabbox does not install or configure the
+runtime; the engine host must already support it. Kata needs a Linux host with
+KVM, so it does not run under Docker Desktop on macOS or Windows. Kata cannot
+pass a host Unix socket into its guest VM, so `dockerSocket` fails at container
+creation under Kata. A stronger runtime narrows the shared-kernel exposure of a
+lease; it does not change the [trust model](../security.md), and `dockerSocket`
+still grants the lease control of the host engine where the runtime supports it.
+
+Changing `ociRuntime` for a fixed lease ID returns `lease_id_conflict`; empty
+preserves the existing fixed-lease fingerprint.
 
 Host bind mounts must be passed explicitly with `--local-container-volume`.
 Crabbox intentionally ignores `localContainer.volumes` from config files because
@@ -488,8 +519,10 @@ container ID leaves both the container and claim untouched.
   stored in a mounted volume because `docker commit` omits mounted data.
 - `crabbox checkpoint fork <id>` launches a fresh lease from the committed
   image. Fork validates the checkpoint tag and Docker system ID, replays the
-  recorded Docker runtime and daemon scope, disables Docker socket passthrough,
-  relocates the saved workspace into the new lease path, and persists the scope
+  recorded Docker runtime and daemon scope, replays the source lease's
+  `ociRuntime` unless `--local-container-oci-runtime` overrides it, disables
+  Docker socket passthrough, relocates the saved workspace into the new lease
+  path, and persists the scope
   for later lease commands even when ambient Docker settings change. The source
   container user and work root are also replayed so relocation keeps ownership
   and path semantics intact. Fixed-ID ownership belongs to each new allocation:

@@ -52,6 +52,7 @@ func fixedLocalContainerFingerprint(cfg core.Config, req core.AcquireRequest, pu
 		{Name: "network", Value: strings.TrimSpace(cfg.LocalContainer.Network)},
 		{Name: "dockerSocket", Value: cfg.LocalContainer.DockerSocket},
 		{Name: "noHostname", Value: cfg.LocalContainer.NoHostname, OmitEmpty: true},
+		{Name: "ociRuntime", Value: strings.TrimSpace(cfg.LocalContainer.OCIRuntime), OmitEmpty: true},
 		{Name: "hostVolumes", Value: volumes, OmitEmpty: true},
 		{Name: "cacheVolumes", Value: cacheVolumes, OmitEmpty: true},
 		{Name: "desktop", Value: cfg.Desktop},

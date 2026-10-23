@@ -8751,3 +8751,148 @@ func TestVolumeFlagRejectsLeaseReuse(t *testing.T) {
 		})
 	}
 }
+
+func TestCreateContainerOCIRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name, configured, want string
+	}{
+		{name: "engine default", configured: "", want: ""},
+		{name: "kata shim", configured: "io.containerd.kata.v2", want: "io.containerd.kata.v2"},
+		{name: "trimmed name", configured: " runsc ", want: "runsc"},
+		{name: "absolute path", configured: "/usr/local/bin/crun", want: "/usr/local/bin/crun"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+				"run": {Stdout: "container123456\n"},
+			}}
+			b := testBackend(runner)
+			cfg := b.configForRun()
+			cfg.LocalContainer.OCIRuntime = tc.configured
+			_, bootstrapDir, err := b.createContainer(context.Background(), cfg, "crabbox-oci", "cbx_123", "oci", "ssh-ed25519 fixture", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(bootstrapDir) })
+			args := recordedArgsForCommand(t, runner, "run")
+			if tc.want == "" {
+				if strings.Contains(args, "--runtime") || strings.Contains(args, "oci_runtime=") {
+					t.Fatalf("engine default must not pass a runtime:\n%s", args)
+				}
+				return
+			}
+			for _, want := range []string{"--runtime=" + tc.want + "\n", "--label\noci_runtime=" + tc.want + "\n"} {
+				if !strings.Contains(args, want) {
+					t.Fatalf("container args missing %q:\n%s", want, args)
+				}
+			}
+		})
+	}
+}
+
+func TestCreateContainerRejectsUnsafeOCIRuntime(t *testing.T) {
+	for _, value := range []string{"--privileged", "-v", "kata runtime", "kata\nruntime", "kata\x00"} {
+		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
+			runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+				"run": {Stdout: "container123456\n"},
+			}}
+			b := testBackend(runner)
+			cfg := b.configForRun()
+			cfg.LocalContainer.OCIRuntime = value
+			_, bootstrapDir, err := b.createContainer(context.Background(), cfg, "crabbox-oci", "cbx_123", "oci", "ssh-ed25519 fixture", true)
+			if bootstrapDir != "" {
+				t.Cleanup(func() { _ = os.RemoveAll(bootstrapDir) })
+			}
+			if err == nil || !strings.Contains(err.Error(), "localContainer.ociRuntime") {
+				t.Fatalf("err=%v, want ociRuntime validation error", err)
+			}
+			if creates := localContainerCreateCalls(runner); creates != 0 {
+				t.Fatalf("container creates=%d, want 0", creates)
+			}
+		})
+	}
+}
+
+func TestCreateContainerRejectsOCIRuntimeWithPodman(t *testing.T) {
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+		"run": {Stdout: "container123456\n"},
+	}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.LocalContainer.Runtime = "/usr/bin/podman"
+	cfg.LocalContainer.OCIRuntime = "runsc"
+	_, bootstrapDir, err := b.createContainer(context.Background(), cfg, "crabbox-oci", "cbx_123", "oci", "ssh-ed25519 fixture", true)
+	if bootstrapDir != "" {
+		t.Cleanup(func() { _ = os.RemoveAll(bootstrapDir) })
+	}
+	if err == nil || !strings.Contains(err.Error(), "not supported with Podman") {
+		t.Fatalf("err=%v, want Podman rejection", err)
+	}
+	if creates := localContainerCreateCalls(runner); creates != 0 {
+		t.Fatalf("container creates=%d, want 0", creates)
+	}
+}
+
+func TestFixedLocalContainerFingerprintOCIRuntime(t *testing.T) {
+	cfg := core.Config{
+		LocalContainer: core.LocalContainerConfig{
+			Runtime: "docker", Image: "example.org/runner:stable", User: "runner",
+			WorkRoot: "/work", CPUs: 2, Memory: "2g", Network: "bridge",
+		},
+		DesktopEnv: "xfce", TTL: 90 * time.Second, IdleTimeout: 30 * time.Second,
+	}
+	req := core.AcquireRequest{Keep: true, RequestedSlug: "legacy-shape"}
+	// Same persisted fingerprint as TestFixedLocalContainerFingerprintNoHostnameCompatibility.
+	const legacyFingerprint = "7b7b7ee1fa690a3fcaa079e3351cea2f16440391a18895ee71cc011103f0776c"
+	fingerprint := func(value string) string {
+		t.Helper()
+		cfg.LocalContainer.OCIRuntime = value
+		got, err := fixedLocalContainerFingerprint(cfg, req, "ssh-ed25519 fixture")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got := fingerprint(""); got != legacyFingerprint {
+		t.Fatalf("unset ociRuntime changed the legacy fingerprint: %q", got)
+	}
+	kata := fingerprint("io.containerd.kata.v2")
+	if kata == legacyFingerprint {
+		t.Fatal("ociRuntime must change the fixed create intent")
+	}
+	if got := fingerprint(" io.containerd.kata.v2 "); got != kata {
+		t.Fatalf("surrounding whitespace changed the fingerprint: %q != %q", got, kata)
+	}
+	if fingerprint("runsc") == kata {
+		t.Fatal("different runtimes must produce different fixed create intents")
+	}
+}
+
+func TestFixedAcquireOCIRuntimeDrift(t *testing.T) {
+	b, runner, _, _, _, _ := pendingAcquireBackend(t)
+	b.cfg.LocalContainer.OCIRuntime = "io.containerd.kata.v2"
+	b.waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	req := core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, Keep: true,
+		RequestedLeaseID: "cbx_abcdef123468", RequestedSlug: "oci-runtime-replay",
+	}
+	lease, err := b.Acquire(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := testBackend(runner)
+	restarted.cfg.LocalContainer.OCIRuntime = "io.containerd.kata.v2"
+	restarted.waitForSSHReady = b.waitForSSHReady
+	replayed, err := restarted.Acquire(context.Background(), req)
+	if err != nil || replayed.Server.CloudID != lease.Server.CloudID {
+		t.Fatalf("same-intent replay cloudID=%q err=%v", replayed.Server.CloudID, err)
+	}
+	restarted.cfg.LocalContainer.OCIRuntime = ""
+	_, err = restarted.Acquire(context.Background(), req)
+	requireFixedLocalContainerConflict(t, err)
+	if creates := localContainerCreateCalls(runner); creates != 1 {
+		t.Fatalf("container creates after runtime drift=%d, want 1", creates)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: replayed}); err != nil {
+		t.Fatal(err)
+	}
+}

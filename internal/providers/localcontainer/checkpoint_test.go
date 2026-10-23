@@ -306,6 +306,22 @@ func TestCheckpointResetLeaseLabelsClearsOwnershipSelectors(t *testing.T) {
 	}
 }
 
+func TestCheckpointResetLeaseLabelsClearsOCIRuntime(t *testing.T) {
+	// A fork that clears the runtime must not inherit the source's label from
+	// the committed image, or the next checkpoint would record it again.
+	if !strings.Contains(checkpointResetLeaseLabelsChange(), ` oci_runtime=""`) {
+		t.Fatal("label reset missing oci_runtime")
+	}
+	metadata := checkpointMetadataForServer(
+		checkpointScope{Runtime: "docker", DaemonID: "daemon-123"},
+		core.Config{LocalContainer: core.LocalContainerConfig{User: "runner", WorkRoot: "/workspace"}},
+		core.Server{Labels: map[string]string{"ssh_user": "runner", "work_root": "/workspace", "oci_runtime": ""}},
+	)
+	if _, ok := metadata[checkpointMetadataOCIRuntime]; ok {
+		t.Fatalf("cleared label recorded an OCI runtime: %#v", metadata)
+	}
+}
+
 func TestCheckpointBootableCommandDoesNotReferenceBootstrapMount(t *testing.T) {
 	change := checkpointBootableCommandChange()
 	if strings.Contains(change, "crabbox-bootstrap") || !strings.HasPrefix(change, "CMD ") {
@@ -516,6 +532,56 @@ func TestCheckpointMetadataForServerPreservesUserAndWorkRoot(t *testing.T) {
 	)
 	if metadata[checkpointMetadataUser] != "runner" || metadata[checkpointMetadataWorkRoot] != "/workspace" {
 		t.Fatalf("metadata=%#v", metadata)
+	}
+	if _, ok := metadata[checkpointMetadataOCIRuntime]; ok {
+		t.Fatalf("engine-default lease recorded an OCI runtime: %#v", metadata)
+	}
+}
+
+func TestCheckpointMetadataForServerRecordsLeaseOCIRuntime(t *testing.T) {
+	metadata := checkpointMetadataForServer(
+		checkpointScope{Runtime: "docker", DaemonID: "daemon-123"},
+		core.Config{LocalContainer: core.LocalContainerConfig{User: "runner", WorkRoot: "/workspace", OCIRuntime: "configured-runtime"}},
+		core.Server{Labels: map[string]string{"ssh_user": "runner", "work_root": "/workspace", "oci_runtime": "io.containerd.kata.v2"}},
+	)
+	if got := metadata[checkpointMetadataOCIRuntime]; got != "io.containerd.kata.v2" {
+		t.Fatalf("recorded OCI runtime=%q, want the lease label", got)
+	}
+}
+
+func TestApplyNativeCheckpointForkConfigReplaysOCIRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name, recorded, configured, want string
+	}{
+		{name: "recorded runtime replaces ambient config", recorded: "io.containerd.kata.v2", configured: "", want: "io.containerd.kata.v2"},
+		{name: "recorded runtime wins over a different config", recorded: "io.containerd.kata.v2", configured: "runsc", want: "io.containerd.kata.v2"},
+		{name: "older checkpoint keeps configured runtime", recorded: "", configured: "runsc", want: "runsc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.LocalContainer.OCIRuntime = tc.configured
+			metadata := map[string]string{
+				checkpointMetadataRuntime:  "docker",
+				checkpointMetadataDaemonID: "daemon-123",
+				checkpointMetadataUser:     "runner",
+				checkpointMetadataWorkRoot: "/workspace",
+			}
+			if tc.recorded != "" {
+				metadata[checkpointMetadataOCIRuntime] = tc.recorded
+			}
+			err := (Provider{}).ApplyNativeCheckpointForkConfig(core.NativeCheckpointForkRequest{
+				Config: &cfg,
+				Record: core.NativeCheckpointForkRecord{
+					Kind: core.CheckpointKindDockerCommit, ImageID: "sha256:123", Name: "crabbox-checkpoint-demo-123", Metadata: metadata,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.LocalContainer.OCIRuntime != tc.want {
+				t.Fatalf("OCIRuntime=%q, want %q", cfg.LocalContainer.OCIRuntime, tc.want)
+			}
+		})
 	}
 }
 

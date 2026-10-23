@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
@@ -410,6 +411,9 @@ func createdPendingLease(cfg core.Config, containerID, leaseID, slug, bootstrapD
 		containerWorkRoot = resolvedWorkRoot
 	}
 	labels["work_root"] = containerWorkRoot
+	if ociRuntime := strings.TrimSpace(cfg.LocalContainer.OCIRuntime); ociRuntime != "" {
+		labels["oci_runtime"] = ociRuntime
+	}
 	for _, key := range checkpointScopeMetadataKeys {
 		if value := strings.TrimSpace(cfg.LocalContainer.CheckpointMetadata[key]); value != "" {
 			labels[key] = value
@@ -988,7 +992,11 @@ func (b *backend) Doctor(ctx context.Context, req core.DoctorRequest) (core.Doct
 		probe = "requires_running_lease"
 	}
 	cfg := b.configForRun()
-	msg := fmt.Sprintf("cli=ready control_plane=local inventory=ready api=list mutation=false leases=%d runtime=%s context=%s ssh_probe=%s image=%s docker_socket=%v", len(containers), runtime, blank(contextName, "-"), probe, cfg.LocalContainer.Image, cfg.LocalContainer.DockerSocket)
+	ociRuntime, err := localContainerOCIRuntime(cfg)
+	if err != nil {
+		return core.DoctorResult{}, err
+	}
+	msg := fmt.Sprintf("cli=ready control_plane=local inventory=ready api=list mutation=false leases=%d runtime=%s context=%s ssh_probe=%s image=%s docker_socket=%v oci_runtime=%s", len(containers), runtime, blank(contextName, "-"), probe, cfg.LocalContainer.Image, cfg.LocalContainer.DockerSocket, blank(ociRuntime, "-"))
 	return core.DoctorResult{Provider: providerName, Message: msg}, nil
 }
 
@@ -1800,6 +1808,24 @@ func localContainerDisplayImage(cfg core.Config) string {
 	return cfg.LocalContainer.Image
 }
 
+// localContainerOCIRuntime returns the trimmed runtime name or path for
+// docker run --runtime. Empty keeps the engine default.
+func localContainerOCIRuntime(cfg core.Config) (string, error) {
+	value := strings.TrimSpace(cfg.LocalContainer.OCIRuntime)
+	if value == "" {
+		return "", nil
+	}
+	// Podman takes the OCI runtime as a global option, which this setting
+	// does not pass yet.
+	if isPodmanRuntime(cfg.LocalContainer.Runtime) {
+		return "", core.Exit(2, "localContainer.ociRuntime is not supported with Podman yet; Crabbox passes it only as docker run --runtime, while Podman selects the runtime with its global --runtime option")
+	}
+	if strings.HasPrefix(value, "-") || strings.IndexFunc(value, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return "", core.Exit(2, "localContainer.ociRuntime %q must be an engine runtime name or path without whitespace or a leading dash", value)
+	}
+	return value, nil
+}
+
 func (b *backend) createContainer(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey string, keep bool) (string, string, error) {
 	return b.createContainerWithFixedIntent(ctx, cfg, name, leaseID, slug, publicKey, "", keep)
 }
@@ -1811,6 +1837,10 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 func (b *backend) createContainerWithOptions(ctx context.Context, cfg core.Config, name, leaseID, slug, publicKey, fixedFingerprint string, keep bool, served *ServedContainerOptions) (string, string, error) {
 	if digest, known := core.DefaultContainerImageDigest(cfg.LocalContainer.Image); known && digest == "" {
 		return "", "", core.Exit(2, "compiled container image is missing its reviewed digest")
+	}
+	ociRuntime, err := localContainerOCIRuntime(cfg)
+	if err != nil {
+		return "", "", err
 	}
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
 	// Checkpoint images may carry an older allocation's fixed-ID authority.
@@ -1853,6 +1883,9 @@ func (b *backend) createContainerWithOptions(ctx context.Context, cfg core.Confi
 		}
 	}()
 	labels["work_root"] = containerWorkRoot
+	if ociRuntime != "" {
+		labels["oci_runtime"] = ociRuntime
+	}
 	cacheVolumeMounts, err := localContainerCacheVolumeMounts(cfg.Cache.Volumes)
 	if err != nil {
 		return "", "", err
@@ -1894,6 +1927,9 @@ func (b *backend) createContainerWithOptions(ctx context.Context, cfg core.Confi
 	}
 	for key, value := range labels {
 		args = append(args, "--label", key+"="+value)
+	}
+	if ociRuntime != "" {
+		args = append(args, "--runtime="+ociRuntime)
 	}
 	if cfg.LocalContainer.CPUs > 0 {
 		args = append(args, "--cpus", strconv.Itoa(cfg.LocalContainer.CPUs))
