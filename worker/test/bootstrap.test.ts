@@ -1114,8 +1114,9 @@ describe("cloud-init bootstrap", () => {
 
 it("keeps WSL here-string terminators inside work roots as data", (context) => {
   if (
-    spawnSync("pwsh", ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"]).status !==
-    0
+    spawnSync("pwsh", ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], {
+      timeout: 10_000,
+    }).status !== 0
   ) {
     context.skip();
   }
@@ -1155,4 +1156,5 @@ it("keeps WSL here-string terminators inside work roots as data", (context) => {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
-});
+  // Cold pwsh starts on CI runners exceed the 5 s default; cover the probe and the 30 s parse.
+}, 60_000);
