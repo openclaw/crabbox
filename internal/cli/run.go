@@ -181,12 +181,19 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	if observe != nil {
 		observe(LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
 	}
-	if serverTailscaleMetadata(server).Enabled {
+	if serverTailscaleMetadata(server).Enabled || tailscaleMetadataRequired(sshBackend, lease) {
 		target = bootstrapNetworkTarget(cfg, server, target)
 		if err := waitForSSHReady(ctx, &target, a.Stderr, "tailscale metadata", 2*time.Minute); err == nil {
-			a.refreshTailscaleMetadata(ctx, cfg, sshBackend, lease.Coordinator, lease.Coordinator != nil, &server, target, leaseID)
+			if err := a.refreshTailscaleMetadata(ctx, cfg, sshBackend, lease.Coordinator, lease.Coordinator != nil, &server, target, leaseID); err != nil {
+				a.releaseWarmupLeaseAfterFailure(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, retainOnFailure)
+				return err
+			}
 			refreshRunLeaseClaimEndpoint(leaseID, &server, target)
 		} else {
+			if tailscaleMetadataRequired(sshBackend, lease) {
+				a.releaseWarmupLeaseAfterFailure(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, retainOnFailure)
+				return err
+			}
 			fmt.Fprintf(a.Stderr, "warning: tailscale metadata wait failed: %v\n", err)
 		}
 	}
@@ -1912,7 +1919,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if waitErr != nil {
 			return recordFailure(waitErr)
 		}
-		a.refreshTailscaleMetadata(ctx, cfg, sshBackend, coord, useCoordinator, &server, target, leaseID)
+		if err := a.refreshTailscaleMetadata(ctx, cfg, sshBackend, coord, useCoordinator, &server, target, leaseID); err != nil {
+			return recordFailure(err)
+		}
 		refreshRunLeaseClaimEndpoint(leaseID, &server, target)
 		if resolved, resolveErr := resolveNetworkTarget(ctx, cfg, server, target); resolveErr != nil {
 			return recordFailure(resolveErr)
@@ -2330,7 +2339,9 @@ retrySync:
 		if bootstrapErr != nil {
 			return recordFailure(bootstrapErr)
 		}
-		a.refreshTailscaleMetadata(ctx, cfg, sshBackend, coord, useCoordinator, &server, target, leaseID)
+		if err := a.refreshTailscaleMetadata(ctx, cfg, sshBackend, coord, useCoordinator, &server, target, leaseID); err != nil {
+			return recordFailure(err)
+		}
 		refreshRunLeaseClaimEndpoint(leaseID, &server, target)
 		if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
 			return recordFailure(err)
@@ -2943,7 +2954,9 @@ afterSync:
 	if !portableBorrowStarted.IsZero() {
 		portableTimings.FirstCommandMs = min(time.Since(portableBorrowStarted).Milliseconds(), int64((30*time.Minute)/time.Millisecond))
 	}
-	a.refreshTailscaleMetadata(ctx, cfg, sshBackend, coord, useCoordinator, &server, target, leaseID)
+	if err := a.refreshTailscaleMetadata(ctx, cfg, sshBackend, coord, useCoordinator, &server, target, leaseID); err != nil {
+		return recordFailure(err)
+	}
 	refreshRunLeaseClaimEndpoint(leaseID, &server, target)
 	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
 		return recordFailure(err)

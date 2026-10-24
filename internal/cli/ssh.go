@@ -62,12 +62,14 @@ type SSHTarget struct {
 	NoControlMaster         bool
 	ownerControlPath        string // Private foreground master with an explicit local lifetime owner.
 	DisableHostKeyChecking  bool
-	NetworkKind             NetworkMode
-	SSHConfigProxy          bool
-	SSHConfigFile           string // Provider-owned IdentitiesOnly route; bypass ambient SSH config.
-	SSHConfigData           []byte `json:"-"` // Captured provider config; keep resolution and transport on the same bytes.
-	ProxyCommand            string
-	ChildEnvDenylist        []string
+	// AuthoritativeNetwork pins a provider-validated route; stored metadata cannot replace it.
+	AuthoritativeNetwork bool `json:"-"`
+	NetworkKind          NetworkMode
+	SSHConfigProxy       bool
+	SSHConfigFile        string // Provider-owned IdentitiesOnly route; bypass ambient SSH config.
+	SSHConfigData        []byte `json:"-"` // Captured provider config; keep resolution and transport on the same bytes.
+	ProxyCommand         string
+	ChildEnvDenylist     []string
 	// Transport-only overrides can contain credentials; never serialize them.
 	ChildEnv          map[string]string `json:"-"`
 	DiagnosticSecrets []string          `json:"-"` // Provider credentials echoed by local authentication hooks.

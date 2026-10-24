@@ -438,6 +438,15 @@ type TailscaleMetadataBackend interface {
 	UpdateTailscaleMetadata(ctx context.Context, lease LeaseTarget, meta TailscaleMetadata) (Server, error)
 }
 
+// RequiredTailscaleMetadataBackend makes the guest receipt an access gate, not
+// optional display metadata. Callers must stop before workload or sync operations
+// if reading or validating/persisting the receipt fails. Other backends retain
+// best-effort metadata refresh semantics.
+type RequiredTailscaleMetadataBackend interface {
+	TailscaleMetadataBackend
+	TailscaleMetadataRequired(lease LeaseTarget) bool
+}
+
 // RunOptionsValidator optionally checks run flags before a caller acquires a
 // lease, including during dry-run planning. Validation must be side-effect-free:
 // no external I/O or lease-state access, and no dependency on a resolved lease.
