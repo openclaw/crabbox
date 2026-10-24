@@ -27,16 +27,18 @@ func pairedRelay(t *testing.T, a *agent, leaseID string) net.Conn {
 func pairedRelays(t *testing.T, a *agent, leaseID string, count int) []net.Conn {
 	t.Helper()
 	type session struct {
-		sockets  map[string]*websocket.Conn
-		ready    chan struct{}
-		inFlight map[string]bool
+		sockets      map[string]*websocket.Conn
+		ready        chan struct{}
+		inFlight     map[string]bool
+		forwardReady chan struct{}
+		readyWrites  int
 	}
 	var mu sync.Mutex
 	sessions := map[string]*session{}
 	pending := make([]relayAssignment, count)
 	for i := range pending {
 		id := fmt.Sprintf("%032x", i+1)
-		sessions[id] = &session{sockets: map[string]*websocket.Conn{}, ready: make(chan struct{}), inFlight: map[string]bool{}}
+		sessions[id] = &session{sockets: map[string]*websocket.Conn{}, ready: make(chan struct{}), inFlight: map[string]bool{}, forwardReady: make(chan struct{})}
 		pending[i] = relayAssignment{SessionID: id, LeaseID: leaseID, AgentToken: strings.Repeat("b", 32)}
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -80,6 +82,17 @@ func pairedRelays(t *testing.T, a *agent, leaseID string, count int) []net.Conn 
 		mu.Unlock()
 		defer peer.CloseNow()
 		if socket.Write(r.Context(), websocket.MessageBinary, []byte{2}) != nil {
+			return
+		}
+		mu.Lock()
+		state.readyWrites++
+		if state.readyWrites == 2 {
+			close(state.forwardReady)
+		}
+		mu.Unlock()
+		select {
+		case <-state.forwardReady:
+		case <-r.Context().Done():
 			return
 		}
 		for {
