@@ -387,6 +387,9 @@ jobs:
           cache: true
           cache-dependency-path: '**/go.sum'
 
+      - name: Test native Windows project detection
+        run: go test ./internal/cli -run '^(TestDetectInitProject|TestInitProjectDetectsRepoCommands)' -count=1 -timeout=5m -v
+
       - name: Require PowerShell literal parsing on Windows
         shell: pwsh
         run: |

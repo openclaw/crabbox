@@ -3,8 +3,12 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestDetectInitProjectPackageManagers(t *testing.T) {
@@ -52,13 +56,44 @@ func TestDetectInitProjectNestedModulesUseSlashSeparatedPaths(t *testing.T) {
 			t.Fatalf("detected command must use remote-shell slash paths: %q", command)
 		}
 	}
-	for _, want := range []string{
+	wantCommands := []string{
 		"(cd './svc/api' && go test ./...)",
+		"(cd './svc/web' && npm install && npm test)",
 		"(cd './svc/core' && cargo test)",
-	} {
-		if !initDetectContains(got.Commands, want) {
-			t.Fatalf("detected commands missing %q: %#v", want, got.Commands)
-		}
+	}
+	if !reflect.DeepEqual(got.Commands, wantCommands) {
+		t.Fatalf("detected commands = %#v, want %#v", got.Commands, wantCommands)
+	}
+
+	var config fileConfig
+	if err := yaml.Unmarshal([]byte(projectConfigTemplate("example", ".github/workflows/crabbox.yml", got)), &config); err != nil {
+		t.Fatal(err)
+	}
+	loaded := baseConfig()
+	applyFileConfig(&loaded, config)
+	if names := configuredJobNames(loaded); !reflect.DeepEqual(names, []string{"detected"}) {
+		t.Fatalf("job names = %#v, want only detected", names)
+	}
+	if command := loaded.Jobs["detected"].Command; strings.TrimSpace(command) != strings.Join(wantCommands, " && ") {
+		t.Fatalf("configured command = %q", command)
+	}
+}
+
+func TestDetectInitProjectPreservesLiteralBackslash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reserves backslashes as directory separators")
+	}
+	dir := t.TempDir()
+	writeInitDetectFile(t, dir, `svc\api/go.mod`, "module example.com/api\n")
+	writeInitDetectFile(t, dir, `svc\web/package.json`, `{"scripts":{"test":"vitest run"}}`)
+	writeInitDetectFile(t, dir, `svc\core/Cargo.toml`, "[package]\nname = \"core\"\nversion = \"0.1.0\"\n")
+	want := []string{
+		`(cd './svc\api' && go test ./...)`,
+		`(cd './svc\web' && npm install && npm test)`,
+		`(cd './svc\core' && cargo test)`,
+	}
+	if got := detectInitProject(dir).Commands; !reflect.DeepEqual(got, want) {
+		t.Fatalf("detected commands = %#v, want %#v", got, want)
 	}
 }
 
