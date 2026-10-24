@@ -1,0 +1,22 @@
+--- FAIL: TestCheckpointCaptureBuiltBinaryContract (19.38s)
+--- FAIL: TestProvidersRecommendFastFeedbackPrefersCacheVolumes (0.00s)
+--- FAIL: TestProvidersRecommendFilteredNoMatch (0.00s)
+--- FAIL: TestRsyncStallTimeoutBehavior (24.55s)
+--- FAIL: TestRunActionsWorkspaceRealFinalEffects (19.51s)
+panic: test timed out after 20m0s
+		TestRunCommandWritesBrokeredReusedAWSLeaseOutputBeforeCommand (35s)
+		TestRunCommandWritesBrokeredReusedAWSLeaseOutputBeforeCommand/success (35s)
+FAIL	github.com/openclaw/crabbox/internal/cli	1206.264s
+--- FAIL: TestRunDownloadFeatureRequiresDelegatedBackend (0.00s)
+FAIL	github.com/openclaw/crabbox/internal/providers/all	23.179s
+--- FAIL: TestReleaseLeaseBoundsNativeChildAndRetainsClaim (5.05s)
+FAIL	github.com/openclaw/crabbox/internal/providers/asciibox	54.238s
+--- FAIL: TestAWSLinuxReadinessWaitsForCurrentBootCloudInit (27.46s)
+--- FAIL: TestAWSLinuxReadinessRequiresCurrentBootWorkspaceMarker (36.37s)
+FAIL	github.com/openclaw/crabbox/internal/providers/aws	138.761s
+--- FAIL: TestBlacksmithDownloadCancellationRetainsClaimUntilClosure (5.03s)
+FAIL	github.com/openclaw/crabbox/internal/providers/blacksmith	247.376s
+--- FAIL: TestBrowserBootstrapPackageSelection (100.17s)
+FAIL	github.com/openclaw/crabbox/internal/providers/localcontainer	240.159s
+--- FAIL: TestRunNativeCommandOutcomes (25.82s)
+FAIL	github.com/openclaw/crabbox/internal/providers/tensorlake	41.573s
