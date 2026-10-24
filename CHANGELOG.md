@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- CI: the serve relay test fixture forwards data only after both READY frames, matching the coordinator relay, which removes a concurrent large-transfer flake. [PR 2955](https://github.com/openclaw/crabbox/pull/2955).
+
 ## 0.79.3 - 2026-10-24
 
 ### Highlights
