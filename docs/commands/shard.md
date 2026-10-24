@@ -1,25 +1,31 @@
 # shard
 
-`crabbox shard` forks a [checkpoint](checkpoint.md) into `--count` leases
-concurrently, runs the command on every fork in parallel through the normal
-[`crabbox run`](run.md) pipeline, and merges the collected JUnit results into
-one suite verdict. It is the parallel counterpart of
-[`checkpoint fork --count`](checkpoint.md): the same fork flow and
-`{{index}}`/`{{total}}`/`{{lease}}`/`{{slug}}` placeholders, but shards run at
-the same time and their [test results](../features/test-results.md) fold into
-a single answer with one aggregate exit code.
+`crabbox shard` forks a [checkpoint](checkpoint.md) into `--count` leases,
+runs the command on every fork through the normal [`crabbox run`](run.md)
+pipeline, and merges the collected JUnit results into one suite verdict. It is
+the parallel counterpart of [`checkpoint fork --count`](checkpoint.md): the
+same fork flow and `{{index}}`/`{{total}}`/`{{lease}}`/`{{slug}}` placeholders,
+but shards run with bounded concurrency and their
+[test results](../features/test-results.md) fold into a single answer with one
+aggregate exit code.
 
 ```sh
 crabbox shard --count 8 --from chk_abc123 --results-auto -- pnpm test -- --shard '{{index}}/{{total}}'
+crabbox shard --count 8 --concurrency 3 --from chk_abc123 --results-auto -- pnpm test -- --shard '{{index}}/{{total}}'
 crabbox shard --count 4 --from chk_deps --junit junit.xml --fail-on-test-failures -- go test ./...
 crabbox shard --count 3 --from chk_abc123 --fail-fast --quiet -- pnpm vitest --shard '{{index}}/{{total}}'
+crabbox shard --count 4 --concurrency 2 --capacity-wait 2m --from chk_abc123 --results-auto -- pnpm test -- --shard '{{index}}/{{total}}'
 ```
 
 The command template owns the sharding: crabbox never splits tests itself.
 `--count` is always explicit, the plan is printed before any lease is
-provisioned, and a repo config cap (`shard.maxCount`) bounds what a checkout
-may request. Requires an SSH lease provider that supports checkpoint fork;
-delegated providers are rejected. Provider-native snapshot fan-out stays on
+provisioned, and repo config caps (`shard.maxCount`, `shard.maxConcurrency`)
+bound what a checkout may request. `--concurrency` limits how many shards may
+provision or run at once; the default is all `--count` shards. Requires an SSH
+lease provider that supports checkpoint fork; delegated providers are rejected
+(drive those with parallel `crabbox run` instead). Native checkpoints stay on
+their recorded provider: a mismatched `--provider` flag is rejected before any
+lease is created. Provider-native snapshot fan-out stays on
 [`checkpoint fork --snapshot`](checkpoint.md).
 
 ## Lease lifecycle
@@ -28,9 +34,16 @@ Every shard forks its own lease from the checkpoint and runs with an injected
 `--id`, so sync, history, logs, artifacts, and results behave exactly as for
 `run`. Forks exist only for the duration of their shard: each lease is
 released when its shard finishes, on failure, and on Ctrl-C, always with a
-fresh context so cleanup survives cancellation. A shard that fails to
-provision does not orphan its siblings; the others run to completion and
-release normally. Pass `--keep` to retain all forked leases instead.
+fresh context so cleanup survives cancellation. Create refusals fail that shard
+immediately by default. With `--capacity-wait` / `shard.capacityWait` set to a
+positive duration, adapter-tagged capacity refusals (definite quota or capacity
+errors where no resource was created, after the provider's own class/market/
+region fallback) wait and retry on the same provider within that bound, using a
+fresh lease ID each attempt. Non-capacity create errors still fail immediately.
+A shard that still cannot provision does not orphan its siblings; the others run
+to completion and release normally, and the refused shard is listed under
+`provision failures` in the verdict. Pass `--keep` to retain all forked leases
+instead.
 
 For a coordinator-managed brokered native checkpoint, each shard acquires its
 own short-lived, generation-bound use claim before provisioning. Claims renew
@@ -81,8 +94,9 @@ failed:
 
 The exit code aggregates across shards: shards that fail to provision or run
 exit `7`, and that takes precedence over everything else because the verdict
-is incomplete; otherwise, if any shard's command exits non-zero, shard exits
-with that code (or `1` when failing shards disagree); and
+is incomplete (including capacity wait exhaustion listed under
+`provision failures`); otherwise, if any shard's command exits non-zero, shard
+exits with that code (or `1` when failing shards disagree); and
 `--fail-on-test-failures` keeps its
 documented meaning evaluated against the merged summary, exiting `1` when the
 merged results contain failures or errors even though every command exited
@@ -97,6 +111,10 @@ verdict; the canceled siblings are tallied separately.
 ```text
 --count <n>              Number of parallel shards to run; required, no default.
 --from <checkpoint-id>   Checkpoint to fork each shard from; required.
+--concurrency <n>        Max shards provisioning or running at once; default is
+                         all --count shards (or shard.maxConcurrency when set).
+--capacity-wait <dur>    Bound wait/retry for adapter-tagged capacity refusals;
+                         default 0 (fail fast). Config: shard.capacityWait.
 --fail-fast              Cancel remaining shards after the first failing shard.
 --keep                   Keep forked leases after their shard finishes.
 --quiet                  Suppress shard output streams; keep per-shard status lines.
@@ -125,11 +143,18 @@ each run `shard N/M` so runs stay readable in [`history`](history.md).
 
 - No automatic test splitting: the command template distributes work via
   `{{index}}`/`{{total}}`, exactly as the runner's own sharding flag expects.
-- `shard.maxCount` in repo config bounds `--count`:
+- `shard.maxCount` in repo config bounds `--count`.
+- `shard.maxConcurrency` bounds in-flight shards: when `--concurrency` is
+  omitted it caps parallelism, and when the flag is set a higher value is
+  rejected.
+- `shard.capacityWait` sets the default capacity wait bound; `--capacity-wait`
+  overrides it. Zero (the default) keeps fail-fast create behavior.
 
   ```yaml
   shard:
     maxCount: 8
+    maxConcurrency: 3
+    capacityWait: 2m
   ```
 
 - The merged verdict is printed locally; each shard's run record keeps its own
@@ -141,3 +166,5 @@ each run `shard N/M` so runs stay readable in [`history`](history.md).
 - [run](run.md) — the pipeline each shard executes.
 - [results](results.md) — per-run recorded test results.
 - [Test results](../features/test-results.md) — JUnit collection and storage.
+- [Capacity and fallback](../features/capacity-fallback.md) — class/market/region
+  fallback and the shard capacity-wait surface.

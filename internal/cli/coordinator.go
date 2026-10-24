@@ -86,6 +86,19 @@ func coordinatorResponseErrorCode(err error, status int) string {
 	return body.Error
 }
 
+// isCoordinatorCapacityRefusal reports definite coordinator create refusals that
+// may clear when capacity frees. Budget and policy limits stay final.
+func isCoordinatorCapacityRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch coordinatorResponseErrorCode(err, http.StatusTooManyRequests) {
+	case "cost_limit_exceeded", "workspace_limit_exceeded":
+		return false
+	}
+	return coordinatorResponseErrorCode(err, http.StatusServiceUnavailable) == "capacity_unavailable"
+}
+
 type CoordinatorLeasePolicy struct {
 	DefaultTTLSeconds         int    `json:"defaultTTLSeconds"`
 	DefaultIdleTimeoutSeconds int    `json:"defaultIdleTimeoutSeconds"`
@@ -1315,7 +1328,7 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	if checkpointBacked && checkpointRouteUnsupported(err) {
 		return CoordinatorLease{}, c.checkpointOperationError(ctx, err)
 	}
-	return res.Lease, err
+	return res.Lease, markCapacityRefusalIf(err, isCoordinatorCapacityRefusal)
 }
 
 func (c *CoordinatorClient) RegisterLease(ctx context.Context, leaseID string, input CoordinatorLeaseRegistration) (CoordinatorLease, error) {

@@ -138,8 +138,7 @@ Use fork-capable workspace providers for parallel branches, best-of-N agent
 attempts, or test shards that should start from prepared state:
 
 ```sh
-crabbox providers recommend fanout-testing
-crabbox checkpoint fork <checkpoint-id> --count 4
+crabbox shard --count 8 --concurrency 3 --from <checkpoint-id> --results-auto -- pnpm test -- --shard '{{index}}/{{total}}'
 ```
 
 This is provider-neutral checkpoint and fork routing. It is not a guarantee of

@@ -144,7 +144,7 @@ func (c *GCPClient) CreateServerWithFallback(ctx context.Context, cfg Config, pu
 	if err != nil {
 		return Server{}, cfg, err
 	}
-	return ProvisionServerCandidates(ctx, cfg, attempts, ServerProvisioner{
+	server, next, err := ProvisionServerCandidates(ctx, cfg, attempts, ServerProvisioner{
 		Create: func(ctx context.Context, next Config) (Server, error) {
 			server, err := c.withZone(next.GCP.Zone).createServer(ctx, next, publicKey, leaseID, slug, keep)
 			if err == nil {
@@ -154,6 +154,18 @@ func (c *GCPClient) CreateServerWithFallback(ctx context.Context, cfg Config, pu
 		},
 		CanRetry: isGCPFallbackProvisioningError,
 	}, logf)
+	return server, next, markCapacityRefusalIf(err, isGCPCapacityRefusal)
+}
+
+func isGCPCapacityRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) && isGCPQuotaOrCapacityError(apiErr) {
+		return true
+	}
+	return isGCPQuotaOrCapacityMessage(err.Error())
 }
 
 func gcpProvisioningPlan(cfg Config) ([]ProvisioningCandidate, error) {

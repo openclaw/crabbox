@@ -1603,6 +1603,33 @@ func (a App) provisionManagedCheckpointFork(ctx context.Context, cfg Config, bac
 	return provision, nil
 }
 
+// refreshAuthorizedForkReleaseClaim adopts a persisted claim only when it is
+// still the same lease/owner/repository and resource lineage as the carried
+// acquisition snapshot (a same-owner successor after run --keep). A replaced
+// repository claim fails closed without authorizing deletion. A missing claim
+// leaves the carried snapshot unchanged so the fenced release path can decide.
+func refreshAuthorizedForkReleaseClaim(server *Server, leaseID string) error {
+	if server == nil {
+		return nil
+	}
+	expected, expectedExists, set := ServerLeaseClaimSnapshot(*server)
+	if !set || !expectedExists {
+		return nil
+	}
+	current, exists, err := ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	if !sameActionsWorkspaceClaimOwner(expected, current) {
+		return fmt.Errorf("%w: lease %s claim ownership changed after acquisition; refusing automatic release", ErrReleaseLeaseOwnershipChanged, leaseID)
+	}
+	SetServerLeaseClaimSnapshot(server, current, true)
+	return nil
+}
+
 type managedCheckpointCacheConflict struct{ error }
 
 func writeSafeManagedCheckpointCache(store checkpointStore, record checkpointRecord) error {
@@ -1652,7 +1679,15 @@ func (a App) provisionCheckpointForkWithoutClaim(ctx context.Context, cfg Config
 	var releaseOnce sync.Once
 	release := func(releaseCtx context.Context) {
 		releaseOnce.Do(func() {
-			a.releaseBackendLeaseBestEffort(releaseCtx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator})
+			releaseLease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}
+			// run --keep (shard/fork fan-out) rewrites the claim after acquire.
+			// Refresh only same-owner successors so release can fence against the
+			// kept generation without adopting a reassigned repository claim.
+			if err := refreshAuthorizedForkReleaseClaim(&releaseLease.Server, leaseID); err != nil {
+				fmt.Fprintf(a.Stderr, "warning: refusing release for lease %s: %v\n", leaseID, err)
+				return
+			}
+			a.releaseBackendLeaseBestEffort(releaseCtx, sshBackend, cfg, releaseLease)
 		})
 	}
 	rollback := func() {
