@@ -12,7 +12,7 @@ import (
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
-func TestSpritesStatusOnlyProbesSSHWhenRequested(t *testing.T) {
+func TestSpritesStatusProbesSSHOnlyWhenAwakeOrRequested(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	bin := t.TempDir()
 	probe := filepath.Join(bin, "probed")
@@ -53,10 +53,11 @@ printf 'probed' > "$CRABBOX_TEST_STATUS_PROBE"
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &spritesBackend{cfg: cfg, client: &fakeSpritesAPI{get: spritesInfo{
+	api := &fakeSpritesAPI{get: spritesInfo{
 		ID: "original-id", Name: "crabbox-test", Organization: "test-org", Status: "cold",
 		Labels: spritesAPILabels(lease.LeaseID, "test-identity"),
-	}}}
+	}}
+	b := &spritesBackend{cfg: cfg, client: api}
 	view, err := b.Status(t.Context(), core.StatusRequest{ID: lease.LeaseID})
 	if err != nil || view.Ready || view.SSHKey != key {
 		t.Fatalf("plain status: ready=%t key=%q err=%v", view.Ready, view.SSHKey, err)
@@ -64,6 +65,19 @@ printf 'probed' > "$CRABBOX_TEST_STATUS_PROBE"
 	if _, err := os.Stat(probe); !os.IsNotExist(err) {
 		t.Fatalf("plain status invoked SSH: %v", err)
 	}
+	// A running Sprite is already awake, so plain status reports real readiness.
+	api.get.Status = "running"
+	view, err = b.Status(t.Context(), core.StatusRequest{ID: lease.LeaseID})
+	if err != nil || !view.Ready {
+		t.Fatalf("running status: ready=%t err=%v", view.Ready, err)
+	}
+	if _, err := os.Stat(probe); err != nil {
+		t.Fatalf("running status did not probe SSH: %v", err)
+	}
+	if err := os.Remove(probe); err != nil {
+		t.Fatal(err)
+	}
+	api.get.Status = "cold"
 	view, err = b.Status(t.Context(), core.StatusRequest{ID: lease.LeaseID, Wait: true})
 	if err != nil || !view.Ready {
 		t.Fatalf("explicit SSH probe: ready=%t err=%v", view.Ready, err)

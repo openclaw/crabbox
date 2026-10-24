@@ -4,7 +4,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
+	"os"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -78,6 +81,10 @@ type spritesBackend struct {
 	cfg    core.Config
 	rt     core.Runtime
 	client spritesAPI
+	// waitSSH defaults to core.WaitForSSHReady; tests replace the network probe.
+	waitSSH func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error
+	// holdTask defaults to the Sprites Tasks API helper; tests replace process execution.
+	holdTask func(context.Context, string, time.Duration) error
 }
 
 func (b *spritesBackend) Spec() core.ProviderSpec { return b.spec }
@@ -87,6 +94,13 @@ func (b *spritesBackend) RebindResolvedLeaseTarget(target *core.LeaseTarget, lea
 }
 
 func (b *spritesBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	// Reject bootstrap env misconfiguration before any Sprite exists.
+	if _, err := spritesBootstrapEnv(); err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if req.RequestedLeaseID != "" {
+		return b.acquireFixed(ctx, req)
+	}
 	if err := b.ensureCLI(ctx); err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -149,6 +163,11 @@ func (b *spritesBackend) Acquire(ctx context.Context, req core.AcquireRequest) (
 }
 
 func (b *spritesBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
+	if claim, ok, err := core.ResolveLeaseClaimForProvider(req.ID, spritesProvider); err != nil {
+		return core.LeaseTarget{}, err
+	} else if ok && fixedSpriteKind.IsFixedClaim(claim) {
+		return b.resolveFixed(ctx, claim, req)
+	}
 	name, leaseID, slug, err := b.resolveSpriteName(ctx, req.ID, req.Reclaim)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -282,6 +301,19 @@ func (b *spritesBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core
 }
 
 func (b *spritesBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	if snapshot, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server); set && exists && fixedSpriteKind.IsFixedClaim(snapshot) {
+		claim, err := shared.RequireClaimSnapshot(req.Lease.Server, spritesProvider)
+		if err != nil {
+			return err
+		}
+		if req.Lease.LeaseID != claim.LeaseID {
+			return core.Exit(4, "lease_id_conflict: Sprites release target changed")
+		}
+		if err := core.ValidateLeaseTargetProviderIdentity(req.Lease, req.ExpectedProviderIdentity); err != nil {
+			return err
+		}
+		return b.releaseFixed(ctx, claim)
+	}
 	name := strings.TrimSpace(req.Lease.Server.Name)
 	if name == "" {
 		var err error
@@ -383,12 +415,23 @@ func spriteHasExactOwnership(sprite spritesInfo, leaseID, slug string) bool {
 	return true
 }
 
-func (b *spritesBackend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
+func (b *spritesBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	server := req.Lease.Server
 	if server.Labels == nil {
 		server.Labels = map[string]string{}
 	}
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.cfg, req.State, time.Now().UTC())
+	name, err := b.resolvedLeaseSpriteName(req.Lease)
+	if err != nil {
+		return server, err
+	}
+	hold := b.holdTask
+	if hold == nil {
+		hold = b.holdSpriteTask
+	}
+	if err := hold(ctx, name, effectiveSpriteHoldTimeout(req.IdleTimeout, b.cfg.IdleTimeout)); err != nil {
+		return server, err
+	}
 	return server, nil
 }
 
@@ -411,7 +454,14 @@ func (b *spritesBackend) prepareLease(ctx context.Context, sprite spritesInfo, l
 	if err := cleanSpritesWorkRoot(cfg.WorkRoot); err != nil {
 		return core.LeaseTarget{}, err
 	}
+	bootstrapEnv, err := spritesBootstrapEnv()
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if err := b.bootstrapSSH(ctx, sprite.Name, publicKey); err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if err := b.bootstrapEnv(ctx, sprite.Name, bootstrapEnv); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	target, err := b.sshTarget(sprite.Name, keyPath)
@@ -424,10 +474,104 @@ func (b *spritesBackend) prepareLease(ctx context.Context, sprite spritesInfo, l
 	server.Labels["work_root"] = cfg.WorkRoot
 	server.Labels["state"] = "ready"
 	server.Status = "ready"
-	if err := core.WaitForSSHReady(ctx, &target, b.rt.Stderr, "sprites ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
+	waitSSH := b.waitSSH
+	if waitSSH == nil {
+		waitSSH = core.WaitForSSHReady
+	}
+	if err := waitSSH(ctx, &target, b.rt.Stderr, "sprites ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
 		return core.LeaseTarget{}, err
 	}
-	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	lease := core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+	name, err := b.resolvedLeaseSpriteName(lease)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	hold := b.holdTask
+	if hold == nil {
+		hold = b.holdSpriteTask
+	}
+	if err := hold(ctx, name, effectiveSpriteHoldTimeout(cfg.IdleTimeout, 0)); err != nil {
+		return core.LeaseTarget{}, err
+	}
+	return lease, nil
+}
+
+// resolvedLeaseSpriteName binds local execution to the resource name already
+// attached to this lease. A claim, when present, is authoritative and must
+// agree with the resolved server labels.
+func (b *spritesBackend) resolvedLeaseSpriteName(lease core.LeaseTarget) (string, error) {
+	if strings.TrimSpace(lease.LeaseID) == "" {
+		return "", core.Exit(4, "refusing Sprites task without a resolved lease ID")
+	}
+	name := strings.TrimSpace(lease.Server.Labels["name"])
+	if name == "" {
+		name = strings.TrimSpace(lease.Server.CloudID)
+	}
+	if name == "" {
+		return "", core.Exit(4, "refusing Sprites task without a resolved Sprite name")
+	}
+	if cloudID := strings.TrimSpace(lease.Server.CloudID); cloudID != "" && cloudID != name {
+		return "", core.Exit(4, "refusing Sprites task: lease Sprite labels do not match its resolved resource")
+	}
+	if claim, ok, err := core.ResolveLeaseClaim(lease.LeaseID); err != nil {
+		return "", err
+	} else if ok {
+		if claim.Provider != "" && claim.Provider != spritesProvider {
+			return "", core.Exit(4, "refusing Sprites task: lease claim belongs to provider=%s", claim.Provider)
+		}
+		claimName, hasName := spriteNameFromClaim(claim)
+		if !hasName || claimName != name {
+			return "", core.Exit(4, "refusing Sprites task: lease Sprite does not match its resolved ownership claim")
+		}
+	}
+	return name, nil
+}
+
+var spritesBootstrapEnvName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,63}$`)
+
+type spriteBootstrapEnv struct {
+	name  string
+	value string
+}
+
+func spritesBootstrapEnv() ([]spriteBootstrapEnv, error) {
+	raw := os.Getenv("CRABBOX_SPRITES_BOOTSTRAP_ENV")
+	if raw == "" {
+		return nil, nil
+	}
+	names := strings.Split(raw, ",")
+	if len(names) > 8 {
+		return nil, core.Exit(2, "CRABBOX_SPRITES_BOOTSTRAP_ENV permits at most 8 names")
+	}
+	values := make([]spriteBootstrapEnv, 0, len(names))
+	for _, name := range names {
+		if !spritesBootstrapEnvName.MatchString(name) {
+			return nil, core.Exit(2, "sprites bootstrap env %q: invalid variable name", name)
+		}
+		value := os.Getenv(name)
+		if value == "" {
+			return nil, core.Exit(2, "sprites bootstrap env %s: variable is unset or empty", name)
+		}
+		values = append(values, spriteBootstrapEnv{name: name, value: value})
+	}
+	return values, nil
+}
+
+// spritesBootstrapConsumedMarker lets guest setup stop re-delivery after it has
+// used the values; lease preparation runs again on every fixed-lease replay.
+const spritesBootstrapConsumedMarker = "/var/lib/crabbox-bootstrap/consumed"
+
+const spritesBootstrapEnvScript = `set -eu; if sudo test -e ` + spritesBootstrapConsumedMarker + `; then cat >/dev/null; exit 0; fi; sudo install -d -m 700 -o root -g root /run/crabbox-bootstrap; sudo sh -c 'umask 077; cat > "/run/crabbox-bootstrap/$1.tmp" && mv "/run/crabbox-bootstrap/$1.tmp" "/run/crabbox-bootstrap/$1"' sh "$1"`
+
+func (b *spritesBackend) bootstrapEnv(ctx context.Context, spriteName string, values []spriteBootstrapEnv) error {
+	for _, env := range values {
+		// Discard both streams and never wrap the runner error: the CLI may echo stdin.
+		result, err := b.runSpriteWithStdin(ctx, []string{"exec", "-s", spriteName, "--", "/bin/sh", "-c", spritesBootstrapEnvScript, "sh", env.name}, strings.NewReader(env.value), io.Discard, io.Discard)
+		if err != nil || result.ExitCode != 0 {
+			return core.Exit(1, "sprites bootstrap env %s failed", env.name)
+		}
+	}
+	return nil
 }
 
 func (b *spritesBackend) bootstrapSSH(ctx context.Context, spriteName, publicKey string) error {
@@ -447,6 +591,9 @@ func (b *spritesBackend) bootstrapSSH(ctx context.Context, spriteName, publicKey
 	result, err := b.runSprite(ctx, []string{"exec", "-s", spriteName, "--env", "CRABBOX_SSH_PUBLIC_KEY=" + publicKey, "--", "/bin/bash", "-lc", script}, nil, b.rt.Stderr)
 	if err != nil {
 		return core.ExitError{Code: result.ExitCode, Message: fmt.Sprintf("sprites ssh bootstrap failed: %v", err)}
+	}
+	if result.ExitCode != 0 {
+		return core.Exit(result.ExitCode, "sprites ssh bootstrap failed")
 	}
 	return nil
 }
