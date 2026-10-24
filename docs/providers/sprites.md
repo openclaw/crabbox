@@ -31,6 +31,7 @@ supports none of those.
 | Desktop / browser / code | No |
 | Tailscale | No (SSH is exposed through `sprite proxy`) |
 | Coordinator (broker) | No (always direct from the CLI) |
+| Fixed lease IDs | Yes (`warmup --lease-id`) |
 
 `--class`, `--type`, and `--tailscale` are rejected: Sprites owns VM sizing and
 exposes SSH only through its proxy. Only `target=linux` is accepted.
@@ -134,10 +135,11 @@ Reuse validates the saved API endpoint, immutable Sprite ID, organization,
 and lease ownership before installing keys or running bootstrap. A replacement
 Sprite with the same name is not silently adopted, even with `--reclaim`.
 
-Plain `status` is API-only: it does not wake the Sprite, generate keys, install
-packages, or start services. It reports the provider state with `ready=false`
-until readiness is explicitly probed. `status --wait` probes SSH using the
-existing key; it can wake the Sprite but does not bootstrap it. Use a normal
+Plain `status` and `inspect` do not wake the Sprite, generate keys, install
+packages, or start services. When the API reports the Sprite `running`, they
+probe SSH with the existing key and report real readiness; otherwise they report
+`ready=false` without contacting the Sprite. `status --wait` probes SSH in any
+state; it can wake the Sprite but does not bootstrap it. Use a normal
 reuse command such as `run --id <slug>` when SSH bootstrap needs to be retried.
 
 Status and list project native identity and state without inventing creation
@@ -152,6 +154,15 @@ against the saved claim and rechecks absence before removing the local claim
 and key. Claims without the original organization and immutable ID are preserved,
 as are claims when the account differs or verification fails.
 
+### Staying awake
+
+While a lease is in use, Crabbox heartbeats upsert a `crabbox-lease` task through
+the in-Sprite Tasks API. The task keeps the Sprite running so background
+processes and their outbound connections remain reachable. Its expiry follows
+the lease idle window and is refreshed by each heartbeat; after the last
+heartbeat, it expires within that idle window so an idle lease stops billing
+compute. Sprites caps task expiry at one hour.
+
 Raw names and provider labels only discover sprites; they never authorize
 deletion. Explicit `--reclaim` can adopt a verified sprite through a normal
 reuse command before it can be stopped. `stop --force` is unavailable because
@@ -160,6 +171,54 @@ Sprites cannot independently prove ownership of an arbitrary lost-claim sprite.
 Normal reuse without a local ownership claim requires `--reclaim` even when all
 Crabbox labels match. Adoption requires an immutable provider resource ID;
 read-only status and inspection do not create a claim or bootstrap the Sprite.
+
+## Fixed lease IDs
+
+```sh
+crabbox warmup --provider sprites --lease-id cbx_123456789abc
+crabbox warmup --provider sprites --lease-id cbx_123456789abc
+crabbox stop --provider sprites cbx_123456789abc
+```
+
+Sprites has no idempotency key, but Sprite names are unique per organization
+and a duplicate create is rejected with HTTP 409. A fixed lease therefore uses a
+deterministic name derived from the canonical lease ID and slug, and the shared
+fixed-lease engine durably records the intent, API endpoint, token
+organization, and a random per-attempt nonce before sending the create. The
+create request carries the usual lease labels plus `attempt-<nonce>`; Sprites
+stores labels atomically with the Sprite.
+
+Crabbox never treats the create reply as identity evidence. After every create,
+and on every replay, it reads the Sprite by name and adopts it only when its
+name, organization, lease and slug labels, and attempt nonce all match the
+recorded intent. It then binds the immutable Sprite `id`; later reads must
+match it exactly. A Sprite with the same name but any other labels, nonce,
+organization, or `id` produces `lease_id_conflict` and is never deleted.
+
+| Interrupted step | Replay outcome |
+| --- | --- |
+| Create reply lost, Sprite exists | Adopted after attestation; no second create |
+| Create never landed (404 for the name) | The same attempt is resubmitted |
+| Sprite bound, then deleted out of band | `lease_id_conflict`; `stop` records absence |
+
+A 404 only proves absence after the token's organization is confirmed to match
+the claim, since a token for another organization sees every foreign Sprite as
+missing. If a create outcome is still unresolved, `stop` refuses and asks for a
+replay with the same lease ID first.
+
+Release re-reads and re-attests the Sprite immediately before deleting it by
+name, then requires a 404 before publishing a `released` tombstone. A failed or
+unconfirmed delete keeps the claim for retry. The tombstone keeps the lease ID
+from being reused for a new Sprite: later warmups with it fail, `status` reports
+`released`, and repeat `stop` calls succeed without touching the API.
+
+The Sprites API addresses a Sprite only by name: there is no delete or read by
+immutable `id` and no conditional request. Two limits follow. Re-attestation
+narrows, but cannot close, the window between the last check and the delete in
+which a same-name replacement could appear. And a Sprite deleted out of band
+before its `id` was bound is indistinguishable from a create that never landed,
+so a replay recreates it; a lease still has at most one live Sprite. Once the
+`id` is bound, the same disappearance is reported as `lease_id_conflict`.
 
 ## Live smoke
 
@@ -214,7 +273,8 @@ Expected results:
   a raw sprite name.
 - A raw sprite that Crabbox did not create can only be adopted with `--reclaim`.
 - If `sprite proxy` cannot connect, SSH readiness and execution fail even when
-  the Sprites API can see the sprite. Plain `status` still uses only the API.
+  the Sprites API can see the sprite. Plain `status` of a sprite that is not
+  running still uses only the API.
 
 ## Related docs
 
