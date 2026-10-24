@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+
+- Local-container: release checkpoint reservations after pre-submission failures so lease cleanup can proceed, while retaining holds for ambiguous commits. [PR 2952](https://github.com/openclaw/crabbox/pull/2952). Thanks @coygeek.
 - AWS: distinguish recognized CloudTrail lookup errors during original root readback without exposing provider messages or weakening account, Region, or evidence checks. [PR](https://github.com/openclaw/crabbox/pull/2942).
 
 ## 0.79.2 - 2026-10-22
