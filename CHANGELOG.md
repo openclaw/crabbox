@@ -4,6 +4,10 @@
 
 - AWS: distinguish recognized CloudTrail lookup errors during original root readback without exposing provider messages or weakening account, Region, or evidence checks. [PR](https://github.com/openclaw/crabbox/pull/2942).
 
+### Fixed
+
+- Init: nested module jobs detected on Windows use slash-separated repository paths in generated commands instead of backslashes. [PR 2946](https://github.com/openclaw/crabbox/pull/2946). Thanks @paulcam206.
+
 ## 0.79.2 - 2026-10-22
 
 ### Highlights
