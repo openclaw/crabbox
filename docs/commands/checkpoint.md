@@ -376,11 +376,12 @@ native records with missing image references are also held: a blank reference
 does not prove that submission never happened. Inspect and reconcile the
 original provider operation before removing any ownership evidence.
 
-An ordinary Machine0 capture that returns an error before attempting image
-submission removes its uncommitted reservation, so the source can still be
-released normally. A process interruption or attempted submission without a
-returned image identity remains unresolved; this does not unlock historical
-blank records.
+An ordinary Machine0 or local-container capture that returns an error before
+attempting image submission removes its uncommitted reservation, so the source
+can still be released normally. For local-container, this includes a missing
+workspace or a rejected workspace mount before `docker commit`. A process
+interruption or attempted submission without a returned image identity remains
+unresolved; this does not unlock historical blank records.
 
 For an ordinary Machine0 record without an image identity, `abandon` can dispose
 of the exact source while retaining the unresolved image obligation. It does not
