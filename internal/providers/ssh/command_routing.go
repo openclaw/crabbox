@@ -19,6 +19,9 @@ func (Provider) CommandRouting(cfg core.Config, request core.CommandRoutingReque
 			args = append(args, field.flag, field.value)
 		}
 	}
+	if cfg.Static.NoControlMaster {
+		args = append(args, "--static-no-control-master")
+	}
 	return core.CommandRouting{Args: args}
 }
 

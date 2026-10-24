@@ -92,6 +92,7 @@ func staticLease(cfg Config) (Server, SSHTarget, string, error) {
 	target := sshTargetForLease(cfg, cfg.Static.Host, staticLoginUser(cfg), firstNonEmpty(cfg.Static.Port, cfg.SSHPort))
 	target.FallbackPorts = staticSSHFallbackPorts(cfg, target.FallbackPorts)
 	target.ReadyCheck = staticReadyCommand(target)
+	target.NoControlMaster = cfg.Static.NoControlMaster
 	return server, target, leaseID, nil
 }
 

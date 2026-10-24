@@ -420,6 +420,7 @@ workspace descendant containment or require `setsid` on macOS.
 | `workRoot` | Remote checkout/work directory. |
 | `id` | Optional stable lease id (default derived from `host`). |
 | `name` | Optional friendly slug (default derived from `host`). |
+| `noControlMaster` | Open a separate SSH connection per command, including workspace owner calls, instead of an SSH `ControlMaster`. Use it for SSH servers that close multiplexed sessions without sending `exit-status`. Also `CRABBOX_STATIC_NO_CONTROL_MASTER` or `--static-no-control-master`. |
 | `startCommand` | Optional local argv run before the SSH readiness wait. See [Power hooks](#power-hooks). |
 | `stopCommand` | Optional local argv run before final custody retirement; failures remain retryable. |
 | `power.dedicated` | Required `true` for hooks; one controller exclusively owns the whole host. |
