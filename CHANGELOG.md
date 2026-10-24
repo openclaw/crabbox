@@ -2,14 +2,18 @@
 
 ## Unreleased
 
+## 0.79.3 - 2026-10-24
+
+### Highlights
+
+- **Refresh managed developer tools with verified security updates.** Bun 1.4.4, uv 0.13.5, TruffleHog 3.99.4, Tailscale 1.104.2, and Git for Windows 2.56.0.windows.3 use verified checksums; existing managed Bun/uv slots can be refreshed during image rebakes. [PR 2944](https://github.com/openclaw/crabbox/pull/2944). Thanks @joshavant.
+- **Keep lease cleanup moving after local-container checkpoint failures.** Failures before checkpoint submission release their reservations, while ambiguous commits retain their safety holds. [PR 2952](https://github.com/openclaw/crabbox/pull/2952). Thanks @coygeek.
+
 ### Fixed
 
 - Security: refresh managed developer toolchains to Bun 1.4.4, uv 0.13.5, TruffleHog 3.99.4, Tailscale 1.104.2, and Git for Windows 2.56.0.windows.3 with verified checksums, and let pin-only image rebakes replace the known previous Bun/uv slots instead of rejecting them as foreign. [PR 2944](https://github.com/openclaw/crabbox/pull/2944). Thanks @joshavant.
 - Local-container: release checkpoint reservations after pre-submission failures so lease cleanup can proceed, while retaining holds for ambiguous commits. [PR 2952](https://github.com/openclaw/crabbox/pull/2952). Thanks @coygeek.
-- AWS: distinguish recognized CloudTrail lookup errors during original root readback without exposing provider messages or weakening account, Region, or evidence checks. [PR](https://github.com/openclaw/crabbox/pull/2942).
-
-### Fixed
-
+- AWS: distinguish recognized CloudTrail lookup errors during original root readback without exposing provider messages or weakening account, Region, or evidence checks. [PR 2942](https://github.com/openclaw/crabbox/pull/2942). Thanks @vincentkoc.
 - Init: nested module jobs detected on Windows use slash-separated repository paths in generated commands instead of backslashes. [PR 2946](https://github.com/openclaw/crabbox/pull/2946). Thanks @paulcam206.
 - Docs: Azure Dynamic Sessions name the real `azure.tenantId` / `azure.subscriptionId` keys and their environment variables instead of nonexistent `azure.tenant` / `azure.subscription` keys. [PR 2943](https://github.com/openclaw/crabbox/pull/2943). Thanks @KrasimirKralev.
 
