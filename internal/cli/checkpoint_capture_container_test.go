@@ -24,11 +24,102 @@ type captureContainerState struct {
 	Commits   int
 	Removes   int
 	Calls     [][]string
+	Failure   string
 }
 
-// Use the real CLI and Docker command boundary: provider capability unit tests
-// cannot catch core turning implicit Docker commit into an explicit VM strategy.
-func runCheckpointContainerReviewContract(t *testing.T, repo, binary string) {
+func TestLocalContainerCheckpointFailureCleanup(t *testing.T) {
+	repo, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	docker := buildCheckpointContainerRuntime(t, repo)
+	for _, tc := range []struct {
+		failure   string
+		submitted bool
+	}{
+		{failure: "missing-workspace"},
+		{failure: "mount-inspection"},
+		{failure: "mounted-workspace"},
+		{failure: "commit-error", submitted: true},
+		{failure: "commit-unknown", submitted: true},
+		{},
+	} {
+		t.Run(blank(tc.failure, "success"), func(t *testing.T) {
+			f := newCheckpointContainerFixture(t, repo, binary, docker)
+			statePath := filepath.Join(f.root, "docker.json")
+			var state captureContainerState
+			f.readJSON(statePath, &state)
+			state.Failure = tc.failure
+			f.writeJSON(statePath, state)
+			result := f.run("checkpoint", "create", "--provider", "local-container", "--id", captureFixtureLease, "--mode", "native", "--json")
+			if (result.err != nil) != (tc.failure != "") {
+				t.Fatalf("capture: %v\n%s", result.err, result.stderr)
+			}
+			checkpoints := filepath.Join(f.root, "state", "crabbox", "checkpoints")
+			records, err := filepath.Glob(filepath.Join(checkpoints, "*", checkpointMetaFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			preSubmissionFailure := tc.failure != "" && !tc.submitted
+			if preSubmissionFailure {
+				entries, err := os.ReadDir(checkpoints)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, entry := range entries {
+					if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".lock") {
+						t.Errorf("unsubmitted capture left orphaned state: %s", entry.Name())
+					}
+				}
+				var outcome map[string]string
+				if err := json.Unmarshal(result.stdout, &outcome); err != nil || outcome["outcome"] != "not_submitted" || outcome["localReservation"] != "removed" {
+					t.Errorf("missing non-submission outcome: %s err=%v", result.stdout, err)
+				}
+			} else if len(records) != 1 {
+				t.Fatalf("capture reservation lost: %v", records)
+			}
+			var recordBefore []byte
+			if tc.submitted {
+				recordBefore, err = os.ReadFile(records[0])
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			result = f.run("stop", "--provider", "local-container", captureFixtureLease)
+			f.readJSON(statePath, &state)
+			wantCommits := 1
+			if preSubmissionFailure {
+				wantCommits = 0
+			}
+			if state.Commits != wantCommits {
+				t.Fatalf("commits=%d want=%d", state.Commits, wantCommits)
+			}
+			if tc.submitted {
+				after, err := os.ReadFile(records[0])
+				if result.err == nil || !bytes.Contains(result.stderr, []byte("unresolved checkpoint")) || state.Removed || state.Removes != 0 || err != nil || !bytes.Equal(recordBefore, after) {
+					t.Fatalf("ambiguous commit lost cleanup hold: err=%v stderr=%s state=%+v journalErr=%v", result.err, result.stderr, state, err)
+				}
+				return
+			}
+			if result.err != nil || !state.Removed || state.Removes != 1 || f.claim().CheckpointCapture != nil {
+				t.Fatalf("cleanup failed: err=%v stderr=%s state=%+v claim=%+v", result.err, result.stderr, state, f.claim())
+			}
+			if tc.failure == "" {
+				var record checkpointRecord
+				f.readJSON(records[0], &record)
+				if !record.CaptureEstablished || record.Native.ImageID != captureContainerImage || record.Native.Name != state.Tag {
+					t.Fatalf("successful capture changed: %+v", record)
+				}
+			}
+		})
+	}
+}
+
+func buildCheckpointContainerRuntime(t *testing.T, repo string) string {
 	t.Helper()
 	docker := filepath.Join(t.TempDir(), "docker")
 	build := exec.Command("go", "build", "-trimpath", "-o", docker, "./internal/cli/testdata/checkpoint-container")
@@ -36,6 +127,14 @@ func runCheckpointContainerReviewContract(t *testing.T, repo, binary string) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build fake Docker: %v\n%s", err, output)
 	}
+	return docker
+}
+
+// Use the real CLI and Docker command boundary: provider capability unit tests
+// cannot catch core turning implicit Docker commit into an explicit VM strategy.
+func runCheckpointContainerReviewContract(t *testing.T, repo, binary string) {
+	t.Helper()
+	docker := buildCheckpointContainerRuntime(t, repo)
 	t.Parallel()
 	for _, strategy := range []string{"", "auto", "image", "disk-snapshot"} {
 		t.Run("local container retirement strategy "+blank(strategy, "default"), func(t *testing.T) {
@@ -127,6 +226,7 @@ func newCheckpointContainerFixture(t *testing.T, repo, binary, docker string) *c
 	f.writeJSON(filepath.Join(root, "state", "crabbox", "claims", captureFixtureLease+".json"), claim)
 	f.writeJSON(filepath.Join(root, "docker.json"), captureContainerState{Container: map[string]any{
 		"Id": captureContainerID, "Name": "/container-proof", "Created": now,
+		"Mounts":          []any{},
 		"Config":          map[string]any{"Image": "ubuntu:24.04", "Labels": labels},
 		"State":           map[string]any{"Status": "running", "Running": true},
 		"NetworkSettings": map[string]any{"Ports": map[string]any{"2222/tcp": []map[string]string{{"HostIp": "127.0.0.1", "HostPort": "49160"}}}},
