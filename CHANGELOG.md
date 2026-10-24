@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Security: refresh managed developer toolchains to Bun 1.4.4, uv 0.13.5, TruffleHog 3.99.4, Tailscale 1.104.2, and Git for Windows 2.56.0.windows.3 with verified checksums, and let pin-only image rebakes replace the known previous Bun/uv slots instead of rejecting them as foreign. [PR 2944](https://github.com/openclaw/crabbox/pull/2944). Thanks @joshavant.
 - Local-container: release checkpoint reservations after pre-submission failures so lease cleanup can proceed, while retaining holds for ambiguous commits. [PR 2952](https://github.com/openclaw/crabbox/pull/2952). Thanks @coygeek.
 - AWS: distinguish recognized CloudTrail lookup errors during original root readback without exposing provider messages or weakening account, Region, or evidence checks. [PR](https://github.com/openclaw/crabbox/pull/2942).
 
