@@ -40,6 +40,28 @@ func TestDetectInitProjectPackageManagers(t *testing.T) {
 	}
 }
 
+func TestDetectInitProjectNestedModulesUseSlashSeparatedPaths(t *testing.T) {
+	dir := t.TempDir()
+	writeInitDetectFile(t, dir, "svc/api/go.mod", "module example.com/api\n")
+	writeInitDetectFile(t, dir, "svc/web/package.json", `{"scripts":{"test":"vitest run"}}`)
+	writeInitDetectFile(t, dir, "svc/core/Cargo.toml", "[package]\nname = \"core\"\nversion = \"0.1.0\"\n")
+
+	got := detectInitProject(dir)
+	for _, command := range got.Commands {
+		if strings.Contains(command, `\`) {
+			t.Fatalf("detected command must use remote-shell slash paths: %q", command)
+		}
+	}
+	for _, want := range []string{
+		"(cd './svc/api' && go test ./...)",
+		"(cd './svc/core' && cargo test)",
+	} {
+		if !initDetectContains(got.Commands, want) {
+			t.Fatalf("detected commands missing %q: %#v", want, got.Commands)
+		}
+	}
+}
+
 func TestDetectInitProjectSkipsWorkspacePackagesWithoutLockfile(t *testing.T) {
 	dir := t.TempDir()
 	writeInitDetectFile(t, dir, "package.json", `{"scripts":{"test":"node --test"},"workspaces":["packages/*"]}`)
