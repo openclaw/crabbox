@@ -616,20 +616,13 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 			cancelOnError = true
 		}
 		if err != nil {
-			retryableCapacity := lease.ProvisioningFailureRetryable != nil && *lease.ProvisioningFailureRetryable &&
-				(lease.ProvisioningResourceMayExist == nil || !*lease.ProvisioningResourceMayExist)
 			lease = CoordinatorLease{}
 			if !fixed && cancelOnError {
 				err = b.abandonUnrecoveredCoordinatorLeaseCreate(ctx, leaseID, slug, createAttemptID, err)
 				err = errors.Join(ctx.Err(), err)
 			}
 			if rejected != nil && createCtx.Err() == nil {
-				// cost_limit_exceeded stays final (coordinatorCreationRejectedError).
 				err = *rejected
-			} else if retryableCapacity {
-				err = MarkCapacityRefusal(err)
-			} else {
-				err = markCapacityRefusalIf(err, isCoordinatorCapacityRefusal)
 			}
 		}
 	}()

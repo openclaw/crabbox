@@ -1603,11 +1603,15 @@ func (a App) provisionManagedCheckpointFork(ctx context.Context, cfg Config, bac
 	return provision, nil
 }
 
-// refreshAuthorizedForkReleaseClaim adopts a persisted claim only when it is
-// still the same lease/owner/repository and resource lineage as the carried
-// acquisition snapshot (a same-owner successor after run --keep). A replaced
-// repository claim fails closed without authorizing deletion. A missing claim
-// leaves the carried snapshot unchanged so the fenced release path can decide.
+// refreshAuthorizedForkReleaseClaim adopts a persisted claim only when it is a
+// legitimate continuation of the carried acquisition snapshot: same owner and
+// the same ClaimedAt acquisition lifecycle (revision may advance via authorized
+// same-owner updates such as run --keep). A replaced repository claim, a
+// revoked or reclaimed generation (ClaimedAt changed), or an ABA reassignment
+// back to the same owner fails closed without authorizing deletion. A missing
+// claim leaves the carried snapshot unchanged so the fenced release path can
+// decide (CleanupLeaseClaimIfUnchangedAfter with expectedExists=false still
+// authorizes provider delete from the carried acquisition).
 func refreshAuthorizedForkReleaseClaim(server *Server, leaseID string) error {
 	if server == nil {
 		return nil
@@ -1623,11 +1627,29 @@ func refreshAuthorizedForkReleaseClaim(server *Server, leaseID string) error {
 	if !exists {
 		return nil
 	}
-	if !sameActionsWorkspaceClaimOwner(expected, current) {
+	if !authorizedForkReleaseClaimContinuation(expected, current) {
 		return fmt.Errorf("%w: lease %s claim ownership changed after acquisition; refusing automatic release", ErrReleaseLeaseOwnershipChanged, leaseID)
 	}
 	SetServerLeaseClaimSnapshot(server, current, true)
 	return nil
+}
+
+// authorizedForkReleaseClaimContinuation reports whether current is the same
+// acquisition lifecycle as expected (PR #1437 generation continuity): owner
+// identity matches and ClaimedAt is unchanged. ClaimedAt advances on reclaim or
+// repository reassignment, so ABA "away and back" generations fail closed even
+// when owner fields look identical again.
+func authorizedForkReleaseClaimContinuation(expected, current leaseClaim) bool {
+	if !sameActionsWorkspaceClaimOwner(expected, current) {
+		return false
+	}
+	expectedClaimedAt := strings.TrimSpace(expected.ClaimedAt)
+	currentClaimedAt := strings.TrimSpace(current.ClaimedAt)
+	if expectedClaimedAt == "" {
+		// Acquisition snapshots should record ClaimedAt; refuse opaque successors.
+		return currentClaimedAt == "" && expected.Revision == current.Revision
+	}
+	return currentClaimedAt == expectedClaimedAt
 }
 
 type managedCheckpointCacheConflict struct{ error }

@@ -503,7 +503,6 @@ type ResultsConfig struct {
 type ShardConfig struct {
 	MaxCount       int
 	MaxConcurrency int
-	CapacityWait   time.Duration
 }
 
 type CacheConfig struct {
@@ -2204,9 +2203,8 @@ type fileResultsConfig struct {
 }
 
 type fileShardConfig struct {
-	MaxCount       *int   `yaml:"maxCount,omitempty"`
-	MaxConcurrency *int   `yaml:"maxConcurrency,omitempty"`
-	CapacityWait   string `yaml:"capacityWait,omitempty"`
+	MaxCount       *int `yaml:"maxCount,omitempty"`
+	MaxConcurrency *int `yaml:"maxConcurrency,omitempty"`
 }
 
 type fileCacheConfig struct {
@@ -3670,9 +3668,6 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		if file.Shard.MaxConcurrency != nil {
 			cfg.Shard.MaxConcurrency = *file.Shard.MaxConcurrency
 			recordConfigInput(cfg, configInputGeneric, inputSource, true)
-		}
-		if file.Shard.CapacityWait != "" {
-			recordConfigInput(cfg, configInputGeneric, inputSource, applyNonNegativeLeaseDuration(&cfg.Shard.CapacityWait, file.Shard.CapacityWait))
 		}
 	}
 	if file.Cache != nil {

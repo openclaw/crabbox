@@ -270,13 +270,6 @@ The error message names the class chain, the markets that were tried, and — fo
 brokered runs — the `provisioningAttempts` you can inspect with `crabbox history
 --lease cbx_...`.
 
-After a provider adapter exhausts its own class/market/region/host fallback and
-tags a definite capacity refusal (no resource created), [`crabbox shard`](../commands/shard.md)
-can optionally wait and retry on the same provider with `--capacity-wait` /
-`shard.capacityWait`. The default wait is zero (fail fast). Budget and policy
-refusals such as coordinator `cost_limit_exceeded` stay final. Exhausted waits
-are listed under `provision failures` and exit `7`.
-
 Related docs:
 
 - [Provider Reference](../providers/README.md)

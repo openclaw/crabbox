@@ -57,18 +57,84 @@ func TestProvisionCheckpointForkReleasesWithFreshContextWhenCanceled(t *testing.
 
 func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 	cases := []struct {
-		name         string
-		reassignRepo bool
-		deleteClaim  bool
-		wantReleases int
-		wantRefusal  bool
-		wantAdopted  bool
+		name        string
+		mutate      func(t *testing.T, leaseID string, acquired leaseClaim, path string)
+		wantDeletes int
+		wantRefusal bool
+		wantAdopted bool
 	}{
-		{name: "allowed same-owner successor reaches release", wantReleases: 1, wantAdopted: true},
-		{name: "forbidden reassigned owner never reaches deletion", reassignRepo: true, wantRefusal: true},
-		// Missing claim: keep carried snapshot; fenced release proceeds with it
-		// (this fake backend does not re-check the claim file).
-		{name: "missing claim keeps snapshot and proceeds to release", deleteClaim: true, wantReleases: 1},
+		{
+			name: "authorized same-owner update releases and deletes",
+			mutate: func(t *testing.T, leaseID string, acquired leaseClaim, _ string) {
+				t.Helper()
+				next := acquired
+				next.Labels = map[string]string{"run": "kept"}
+				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, next); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantDeletes: 1,
+			wantAdopted: true,
+		},
+		{
+			name: "claim reassigned to another repo refuses and never deletes",
+			mutate: func(t *testing.T, leaseID string, acquired leaseClaim, _ string) {
+				t.Helper()
+				next := acquired
+				next.RepoRoot = filepath.Join(t.TempDir(), "hijacked")
+				next.ClaimedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano)
+				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, next); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantRefusal: true,
+		},
+		{
+			name: "reassigned away and back with new generation refuses",
+			mutate: func(t *testing.T, leaseID string, acquired leaseClaim, _ string) {
+				t.Helper()
+				foreign := acquired
+				foreign.RepoRoot = filepath.Join(t.TempDir(), "hijacked")
+				foreign.ClaimedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano)
+				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, foreign); err != nil {
+					t.Fatal(err)
+				}
+				current, err := ReadLeaseClaim(leaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				back := acquired
+				back.ClaimedAt = time.Now().UTC().Add(2 * time.Second).Format(time.RFC3339Nano)
+				back.Labels = map[string]string{"run": "aba"}
+				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, current, back); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantRefusal: true,
+		},
+		{
+			name: "revoked claim refuses and never deletes",
+			mutate: func(t *testing.T, leaseID string, acquired leaseClaim, _ string) {
+				t.Helper()
+				revoked := acquired
+				revoked.CloudID = ""
+				revoked.ClaimedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano)
+				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, revoked); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantRefusal: true,
+		},
+		{
+			name: "missing claim uses carried snapshot and releases",
+			mutate: func(t *testing.T, _ string, _ leaseClaim, path string) {
+				t.Helper()
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantDeletes: 1,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,6 +144,7 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 			acquired := leaseClaim{
 				LeaseID: leaseID, Revision: "gen-1", Provider: "aws", ProviderScope: "us-east-1",
 				CloudID: "i-123", RepoRoot: repoRoot, Slug: "fork-claim",
+				ClaimedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).Format(time.RFC3339Nano),
 			}
 			path, err := leaseClaimPath(leaseID)
 			if err != nil {
@@ -91,26 +158,14 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 			}
 			server := Server{Provider: "aws", CloudID: "i-123"}
 			SetServerLeaseClaimSnapshot(&server, acquired, true)
-			switch {
-			case tc.deleteClaim:
-				if err := os.Remove(path); err != nil {
-					t.Fatal(err)
-				}
-			default:
-				next := acquired
-				next.Labels = map[string]string{"run": "kept"}
-				if tc.reassignRepo {
-					next.RepoRoot = filepath.Join(t.TempDir(), "hijacked")
-				}
-				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, next); err != nil {
-					t.Fatal(err)
-				}
-			}
+			tc.mutate(t, leaseID, acquired, path)
 			backend := &checkpointForkReleaseBackend{leaseID: leaseID}
 			var stderr bytes.Buffer
 			app := App{Stdout: io.Discard, Stderr: &stderr}
 			releaseLease := LeaseTarget{Server: server, LeaseID: leaseID}
-			// Mirrors provisionCheckpointForkWithoutClaim's release gate.
+			// Mirrors provisionCheckpointForkWithoutClaim's release gate, then the
+			// fenced provider delete path (RemoveLeaseClaimIfUnchangedAfter /
+			// CleanupLeaseClaimIfUnchangedAfter).
 			if err := refreshAuthorizedForkReleaseClaim(&releaseLease.Server, leaseID); err != nil {
 				fmt.Fprintf(&stderr, "warning: refusing release for lease %s: %v\n", leaseID, err)
 				if !errors.Is(err, ErrReleaseLeaseOwnershipChanged) {
@@ -119,13 +174,13 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 			} else if err := app.releaseBackendLeaseBestEffort(context.Background(), backend, Config{Provider: "aws"}, releaseLease); err != nil {
 				t.Fatalf("release: %v", err)
 			}
-			if backend.releaseCount != tc.wantReleases {
-				t.Fatalf("releases=%d, want %d", backend.releaseCount, tc.wantReleases)
+			if backend.releaseCount != tc.wantDeletes {
+				t.Fatalf("provider deletes=%d, want %d stderr=%s", backend.releaseCount, tc.wantDeletes, stderr.String())
 			}
 			got, exists, set := ServerLeaseClaimSnapshot(releaseLease.Server)
 			if tc.wantRefusal {
-				if !set || !exists || got.RepoRoot != repoRoot {
-					t.Fatalf("snapshot adopted foreign owner: %#v", got)
+				if !set || !exists || got.RepoRoot != repoRoot || got.ClaimedAt != acquired.ClaimedAt {
+					t.Fatalf("snapshot adopted foreign/revoked generation: %#v", got)
 				}
 				if !strings.Contains(stderr.String(), "refusing release") || !strings.Contains(stderr.String(), "ownership changed") {
 					t.Fatalf("stderr missing ownership refusal:\n%s", stderr.String())
@@ -136,12 +191,12 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 				t.Fatalf("snapshot=%#v", got)
 			}
 			if tc.wantAdopted {
-				if got.Labels["run"] != "kept" || got.Revision == acquired.Revision {
-					t.Fatalf("snapshot=%#v, want adopted same-owner successor", got)
+				if got.Labels["run"] != "kept" || got.Revision == acquired.Revision || got.ClaimedAt != acquired.ClaimedAt {
+					t.Fatalf("snapshot=%#v, want adopted same-lifecycle successor", got)
 				}
 				return
 			}
-			if got.Revision != acquired.Revision || got.Labels["run"] != "" {
+			if got.Revision != acquired.Revision || got.ClaimedAt != acquired.ClaimedAt || got.Labels["run"] != "" {
 				t.Fatalf("snapshot=%#v, want unchanged carried acquisition claim", got)
 			}
 		})
@@ -2857,9 +2912,32 @@ func (b *checkpointForkReleaseBackend) List(context.Context, ListRequest) ([]Lea
 	return nil, nil
 }
 
-func (b *checkpointForkReleaseBackend) ReleaseLease(context.Context, ReleaseLeaseRequest) error {
-	b.releaseCount++
-	return nil
+func (b *checkpointForkReleaseBackend) ReleaseLease(_ context.Context, req ReleaseLeaseRequest) error {
+	leaseID := strings.TrimSpace(req.Lease.LeaseID)
+	if leaseID == "" {
+		leaseID = b.leaseID
+	}
+	deleteExact := func() error {
+		b.releaseCount++
+		return nil
+	}
+	snapshot, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
+	if !set {
+		return deleteExact()
+	}
+	_, diskExists, err := ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return err
+	}
+	// Missing claim file: carried acquisition still authorizes provider delete
+	// (CleanupLeaseClaimIfUnchangedAfter with expectedExists=false).
+	if exists && !diskExists {
+		return CleanupLeaseClaimIfUnchangedAfter(leaseID, leaseClaim{}, false, deleteExact)
+	}
+	if !exists {
+		return fmt.Errorf("release lease %s: missing acquisition claim snapshot", leaseID)
+	}
+	return RemoveLeaseClaimIfUnchangedAfter(leaseID, snapshot, deleteExact)
 }
 
 func (b *checkpointForkReleaseBackend) Touch(context.Context, TouchRequest) (Server, error) {

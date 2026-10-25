@@ -340,13 +340,12 @@ func (c *HetznerClient) CreateServerWithFallback(ctx context.Context, cfg Config
 		}
 		attempts = append(attempts, attempt)
 	}
-	server, next, err := ProvisionServerCandidates(ctx, cfg, attempts, ServerProvisioner{
+	return ProvisionServerCandidates(ctx, cfg, attempts, ServerProvisioner{
 		Create: func(ctx context.Context, next Config) (Server, error) {
 			return c.CreateServer(ctx, next, publicKey, leaseID, slug, keep)
 		},
 		CanRetry: isRetryableProvisioningError,
 	}, logf)
-	return server, next, markCapacityRefusalIf(err, isRetryableProvisioningError)
 }
 
 func isRetryableProvisioningError(err error) bool {

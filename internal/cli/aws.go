@@ -528,13 +528,12 @@ func (c *AWSClient) CreateServerWithFallbackControl(ctx context.Context, cfg Con
 			}
 			errs = append(errs, fmt.Errorf("%s: %w", region, err))
 			if !shouldRetryAWSRegionAfterCreateError(err, control) {
-				return Server{}, resolved, markCapacityRefusalIf(joinErrors(errs), isAWSCapacityRefusal)
+				return Server{}, resolved, joinErrors(errs)
 			}
 		}
-		return Server{}, cfg, markCapacityRefusalIf(joinErrors(errs), isAWSCapacityRefusal)
+		return Server{}, cfg, joinErrors(errs)
 	}
-	server, resolved, err := c.createServerWithFallbackInRegion(ctx, cfg, publicKey, leaseID, slug, keep, logf, control)
-	return server, resolved, markCapacityRefusalIf(err, isAWSCapacityRefusal)
+	return c.createServerWithFallbackInRegion(ctx, cfg, publicKey, leaseID, slug, keep, logf, control)
 }
 
 func shouldRetryAWSRegionAfterCreateError(err error, control *AWSFixedCreateControl) bool {
@@ -1540,9 +1539,13 @@ func awsTagsWithName(labels map[string]string, name string) []types.Tag {
 
 func isRetryableAWSProvisioningError(err error) bool {
 	s := err.Error()
-	return isAWSCapacityRefusal(err) ||
+	return strings.Contains(s, "InsufficientInstanceCapacity") ||
+		strings.Contains(s, "UnfulfillableCapacity") ||
+		strings.Contains(s, "MaxSpotInstanceCountExceeded") ||
+		strings.Contains(s, "VcpuLimitExceeded") ||
 		strings.Contains(s, "InvalidHostID.NotFound") ||
 		strings.Contains(s, "no AWS AMI found") ||
+		strings.Contains(s, "no available EC2 Mac Dedicated Host") ||
 		strings.Contains(s, "Unsupported") ||
 		strings.Contains(s, "InvalidParameterValue") ||
 		(strings.Contains(s, "InvalidParameterCombination") &&
@@ -1550,24 +1553,6 @@ func isRetryableAWSProvisioningError(err error) bool {
 				strings.Contains(s, "eligible") ||
 				strings.Contains(s, "InstanceType") ||
 				strings.Contains(s, "instance type")))
-}
-
-// isAWSCapacityRefusal reports definite capacity or quota refusals suitable for
-// --capacity-wait. Candidate fallback may still retry broader placement errors
-// via isRetryableAWSProvisioningError; those must not be tagged as capacity.
-func isAWSCapacityRefusal(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	return strings.Contains(s, "InsufficientInstanceCapacity") ||
-		strings.Contains(s, "InsufficientHostCapacity") ||
-		strings.Contains(s, "InsufficientCapacityOnOutpost") ||
-		strings.Contains(s, "UnfulfillableCapacity") ||
-		strings.Contains(s, "MaxSpotInstanceCountExceeded") ||
-		strings.Contains(s, "VcpuLimitExceeded") ||
-		strings.Contains(s, "InstanceLimitExceeded") ||
-		strings.Contains(s, "no available EC2 Mac Dedicated Host")
 }
 
 func isAWSMarketFallbackError(err error) bool {

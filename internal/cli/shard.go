@@ -52,7 +52,6 @@ var shardOwnedOnlyFlags = map[string]bool{
 	"count":                 true,
 	"from":                  true,
 	"concurrency":           true,
-	"capacity-wait":         true,
 	"fail-fast":             true,
 	"keep":                  true,
 	"quiet":                 true,
@@ -73,7 +72,6 @@ type shardOptions struct {
 	Checkpoint         string
 	Count              int
 	Concurrency        int
-	CapacityWait       time.Duration
 	Keep               bool
 	FailFast           bool
 	Quiet              bool
@@ -83,9 +81,6 @@ type shardOptions struct {
 	RequestedSlug      string
 	RunArgs            []string
 	Command            []string
-	// Optional test injection; production leaves these nil.
-	capacityBackoff func(attempt int, err error) time.Duration
-	capacityNow     func() time.Time
 }
 
 type shardResult struct {
@@ -137,7 +132,6 @@ func (a App) shard(ctx context.Context, args []string) error {
 	count := fs.Int("count", 0, "number of parallel shards to run")
 	from := fs.String("from", "", "checkpoint id to fork each shard from")
 	concurrencyFlag := fs.Int("concurrency", 0, "max shards provisioning or running at once (default: all)")
-	capacityWaitFlag := fs.Duration("capacity-wait", 0, "bound wait/retry for adapter-tagged capacity refusals (default: 0, fail fast)")
 	failFast := fs.Bool("fail-fast", false, "cancel remaining shards after the first failing shard")
 	keep := fs.Bool("keep", false, "keep forked leases after their shard finishes")
 	quiet := fs.Bool("quiet", false, "suppress shard output streams and print per-shard status lines only")
@@ -196,13 +190,6 @@ func (a App) shard(ctx context.Context, args []string) error {
 	concurrency, err := resolveShardConcurrency(*count, *concurrencyFlag, concurrencySet, cfg.Shard.MaxConcurrency)
 	if err != nil {
 		return err
-	}
-	capacityWait := cfg.Shard.CapacityWait
-	if flagWasSet(fs, "capacity-wait") {
-		if *capacityWaitFlag < 0 {
-			return Exit(2, "--capacity-wait must be non-negative")
-		}
-		capacityWait = *capacityWaitFlag
 	}
 	nativeCheckpoint := isNativeCheckpointKind(record.Kind)
 	if nativeCheckpoint && record.TargetOS == targetMacOS && !flagWasSet(fs, "market") {
@@ -272,7 +259,6 @@ func (a App) shard(ctx context.Context, args []string) error {
 		Checkpoint:         record.ID,
 		Count:              *count,
 		Concurrency:        concurrency,
-		CapacityWait:       capacityWait,
 		Keep:               *keep,
 		FailFast:           *failFast,
 		Quiet:              *quiet,
@@ -303,15 +289,12 @@ func (a App) shard(ctx context.Context, args []string) error {
 		}
 		return shardApp.provisionCheckpointFork(provisionCtx, shardCfg, shardBackend, shardSSH, repo, record, paths, opts.Keep, *reclaim, slug, workdir, *clear)
 	}
-	provision := func(provisionCtx context.Context, index int, slug string) (checkpointForkProvision, error) {
-		return a.provisionShardWithCapacityRetry(provisionCtx, mux, opts, index, slug, provisionOnce)
-	}
 	execute := func(runCtx context.Context, index int, shardRunArgs []string, outcome *shardRunOutcome) error {
 		shardApp, flush := a.forShard(mux, index, opts.Count, opts.Quiet, outcome)
 		defer flush()
 		return shardApp.runCommand(runCtx, shardRunArgs)
 	}
-	return a.shardRun(ctx, opts, mux, provision, execute)
+	return a.shardRun(ctx, opts, mux, provisionOnce, execute)
 }
 
 func cloneConfigForShard(cfg Config) Config {
@@ -372,68 +355,6 @@ func resolveShardConcurrency(count, concurrencyFlag int, concurrencySet bool, ma
 		concurrency = count
 	}
 	return concurrency, nil
-}
-
-func shardCapacityBackoff(attempt int, err error) time.Duration {
-	// Same shape as coordinatorReadBackoff: exponential with positive jitter,
-	// honoring Retry-After when the refusal carries CoordinatorHTTPError.
-	return coordinatorReadBackoff(attempt+1, err)
-}
-
-func (a App) provisionShardWithCapacityRetry(ctx context.Context, mux *shardOutputMux, opts shardOptions, index int, slug string, provision shardProvisioner) (checkpointForkProvision, error) {
-	budget := opts.CapacityWait
-	if budget <= 0 {
-		return provision(ctx, index, slug)
-	}
-	now := opts.capacityNow
-	if now == nil {
-		now = time.Now
-	}
-	backoff := opts.capacityBackoff
-	if backoff == nil {
-		backoff = shardCapacityBackoff
-	}
-	deadline := now().Add(budget)
-	var lastErr error
-	for attempt := 0; ; attempt++ {
-		if err := ctx.Err(); err != nil {
-			if lastErr != nil {
-				return checkpointForkProvision{}, lastErr
-			}
-			return checkpointForkProvision{}, err
-		}
-		remaining := deadline.Sub(now())
-		if remaining <= 0 {
-			if lastErr != nil {
-				return checkpointForkProvision{}, fmt.Errorf("capacity wait exhausted after %s: %w", budget, lastErr)
-			}
-			return checkpointForkProvision{}, fmt.Errorf("capacity wait exhausted after %s", budget)
-		}
-		// Do not bound the create with the capacity deadline: a slow but successful
-		// provision (for example a long AWS boot) must not be canceled mid-flight.
-		// Parent ctx still carries fail-fast / interrupt cancel. Adapters mint a
-		// fresh lease ID per attempt.
-		lease, err := provision(ctx, index, slug)
-		if err == nil {
-			return lease, nil
-		}
-		lastErr = err
-		if !IsCapacityRefusal(err) {
-			return checkpointForkProvision{}, err
-		}
-		remaining = deadline.Sub(now())
-		if remaining <= 0 {
-			return checkpointForkProvision{}, fmt.Errorf("capacity wait exhausted after %s: %w", budget, err)
-		}
-		wait := backoff(attempt, err)
-		if wait > remaining {
-			wait = remaining
-		}
-		mux.printf(a.Stderr, "shard %d/%d waiting for capacity attempt=%d sleep=%s error=%q\n", index, opts.Count, attempt+1, wait.Round(time.Millisecond), err.Error())
-		if sleepErr := sleepContext(ctx, wait); sleepErr != nil {
-			return checkpointForkProvision{}, err
-		}
-	}
 }
 
 func (a App) forShard(mux *shardOutputMux, index, total int, quiet bool, outcome *shardRunOutcome) (App, func()) {
