@@ -686,13 +686,14 @@ func (c *ParallelsClient) BootstrapMacOSOverSSH(ctx context.Context, ip string, 
 }
 
 func (c *ParallelsClient) runWindowsPowerShellFile(ctx context.Context, vmID, name, script string) error {
+	ctx, cancel := ParallelsStartupContext(ctx, c.Cfg)
+	defer cancel()
 	base := `C:\ProgramData\crabbox`
 	ps1 := base + `\` + name + `.ps1`
 	b64 := ps1 + `.b64`
-	if err := c.runWindowsPowerShell(ctx, vmID, fmt.Sprintf(`New-Item -ItemType Directory -Force -Path %s | Out-Null
-foreach ($path in @(%s, %s)) {
-  if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
-}`, psQuote(base), psQuote(ps1), psQuote(b64))); err != nil {
+	if err := c.runWindowsPowerShellStaging(ctx, vmID, fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+New-Item -ItemType Directory -Force -Path %s | Out-Null
+[IO.File]::Open(%s, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite).Dispose()`, psQuote(base), psQuote(b64))); err != nil {
 		return err
 	}
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))
@@ -703,16 +704,48 @@ foreach ($path in @(%s, %s)) {
 			end = len(encoded)
 		}
 		chunk := encoded[start:end]
-		if err := c.runWindowsPowerShell(ctx, vmID, fmt.Sprintf(`Add-Content -Encoding ASCII -LiteralPath %s -Value %s`, psQuote(b64), psQuote(chunk))); err != nil {
+		// Tools can lose the result after a write. Replaying an offset overwrite
+		// preserves bytes even if the previous invocation already completed.
+		write := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+$bytes = [Text.Encoding]::ASCII.GetBytes(%s)
+$file = [IO.File]::Open(%s, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+try {
+  $file.Position = %d
+  $file.Write($bytes, 0, $bytes.Length)
+} finally { $file.Dispose() }`, psQuote(chunk), psQuote(b64), start)
+		if err := c.runWindowsPowerShellStaging(ctx, vmID, write); err != nil {
 			return err
 		}
 	}
-	run := fmt.Sprintf(`$raw = (Get-Content -Raw -LiteralPath %s) -replace '\s',''
+	// Ignore a longer previous upload's tail; every byte in this prefix was
+	// overwritten. Do not retry this invocation: the bootstrap may have run.
+	run := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+$raw = [IO.File]::ReadAllText(%s).Substring(0, %d)
 $bytes = [Convert]::FromBase64String($raw)
 $text = [Text.Encoding]::UTF8.GetString($bytes)
 [IO.File]::WriteAllText(%s, $text, [Text.UTF8Encoding]::new($false))
-& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File %s`, psQuote(b64), psQuote(ps1), psQuote(ps1))
+& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File %s`, psQuote(b64), len(encoded), psQuote(ps1), psQuote(ps1))
 	return c.runWindowsPowerShell(ctx, vmID, run)
+}
+
+func (c *ParallelsClient) runWindowsPowerShellStaging(ctx context.Context, vmID, script string) error {
+	for {
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		err := c.runWindowsPowerShell(ctx, vmID, script)
+		if err == nil || !ParallelsGuestToolsUnavailable(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-time.After(ParallelsGuestExecProbeInterval):
+		}
+		if err := c.WaitForGuestExec(ctx, vmID, c.Cfg, c.Cfg.Parallels.StartupTimeout); err != nil {
+			return err
+		}
+	}
 }
 
 func (c *ParallelsClient) runWindowsPowerShell(ctx context.Context, vmID, script string) error {
