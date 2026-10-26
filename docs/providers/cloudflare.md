@@ -68,7 +68,7 @@ slow CLI does not count toward those limits.
 
 ## Runner toolchain and pnpm upgrades
 
-The bundled image pins Node 24.22.1, Go 1.27.3, GitHub CLI 2.101.0, and
+The bundled image pins Node 24.22.1, Go 1.27.3, GitHub CLI 2.102.1, and
 pnpm 12.15.0. These versions take effect when the runner image is deployed;
 updating the local Crabbox CLI does not update an existing deployment.
 

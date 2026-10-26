@@ -37,11 +37,11 @@ export const defaultTailscaleARM64SHA256 = "5776aaa901b5ef1916e66be5bb54b9f481cd
 // prettier-ignore
 export const defaultTailscaleKeyringSHA256 = "3e03dacf222698c60b8e2f990b809ca1b3e104de127767864284e6c228f1fb39";
 // prettier-ignore
-export const defaultCodeServerVersion = "4.126.0";
+export const defaultCodeServerVersion = "4.143.1";
 // prettier-ignore
-export const defaultCodeServerAMD64SHA256 = "54b648d010c02b6583aa06bd8d2aaf109fc624479b9bc2ff71cb94807ac39afa";
+export const defaultCodeServerAMD64SHA256 = "614877cf71005f14ea252bd2d9b1c12237cf7d73681ef150f0dff7f13849fdb5";
 // prettier-ignore
-export const defaultCodeServerARM64SHA256 = "441614708ae81b13f14b26db41da8f46f88d7d092c08343a42a0c6c52c51a69d";
+export const defaultCodeServerARM64SHA256 = "51481a891754dc2585b86d007aec24ac675453fc5ef6cfa346c4462449277384";
 // prettier-ignore
 export const googleLinuxSigningKeyFingerprint = "EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796";
 // prettier-ignore
@@ -167,7 +167,7 @@ export function sharedMacOS(user: string, publicKey: string, workRoot: string, p
 
 // prettier-ignore
 export function sharedCodeServerInstall(): string {
-  return "CS_VERSION='4.126.0'\n    case \"$(uname -m)\" in\n      x86_64) CS_ARCH=amd64; CS_SHA256='54b648d010c02b6583aa06bd8d2aaf109fc624479b9bc2ff71cb94807ac39afa' ;;\n      aarch64|arm64) CS_ARCH=arm64; CS_SHA256='441614708ae81b13f14b26db41da8f46f88d7d092c08343a42a0c6c52c51a69d' ;;\n      *) echo \"unsupported code-server architecture: $(uname -m)\" >&2; exit 3 ;;\n    esac\n    if [ -z \"$CS_SHA256\" ]; then echo \"missing code-server checksum for $CS_ARCH\" >&2; exit 3; fi\n    CS_INSTALL_DIR=\"$(mktemp -d)\"\n    trap 'rm -rf \"$CS_INSTALL_DIR\"' EXIT\n    CS_ARCHIVE=\"$CS_INSTALL_DIR/code-server.tgz\"\n    retry curl -fsSL -o \"$CS_ARCHIVE\" \"https://github.com/coder/code-server/releases/download/v${CS_VERSION}/code-server-${CS_VERSION}-linux-${CS_ARCH}.tar.gz\"\n    printf '%s  %s\\n' \"$CS_SHA256\" \"$CS_ARCHIVE\" | sha256sum -c -\n    tar -xzf \"$CS_ARCHIVE\" -C \"$CS_INSTALL_DIR\" --strip-components=1\n    rm -f \"$CS_ARCHIVE\"\n    rm -rf /usr/local/lib/code-server\n    install -d -m 0755 /usr/local/lib/code-server\n    cp -a \"$CS_INSTALL_DIR/.\" /usr/local/lib/code-server/\n    # cp -a preserves mktemp's private root mode; restore traversal for lease users.\n    chmod 0755 /usr/local/lib/code-server\n    ln -sfn /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server\n    rm -rf \"$CS_INSTALL_DIR\"\n    trap - EXIT";
+  return "CS_VERSION='4.143.1'\n    case \"$(uname -m)\" in\n      x86_64) CS_ARCH=amd64; CS_SHA256='614877cf71005f14ea252bd2d9b1c12237cf7d73681ef150f0dff7f13849fdb5' ;;\n      aarch64|arm64) CS_ARCH=arm64; CS_SHA256='51481a891754dc2585b86d007aec24ac675453fc5ef6cfa346c4462449277384' ;;\n      *) echo \"unsupported code-server architecture: $(uname -m)\" >&2; exit 3 ;;\n    esac\n    if [ -z \"$CS_SHA256\" ]; then echo \"missing code-server checksum for $CS_ARCH\" >&2; exit 3; fi\n    CS_INSTALL_DIR=\"$(mktemp -d)\"\n    trap 'rm -rf \"$CS_INSTALL_DIR\"' EXIT\n    CS_ARCHIVE=\"$CS_INSTALL_DIR/code-server.tgz\"\n    retry curl -fsSL -o \"$CS_ARCHIVE\" \"https://github.com/coder/code-server/releases/download/v${CS_VERSION}/code-server-${CS_VERSION}-linux-${CS_ARCH}.tar.gz\"\n    printf '%s  %s\\n' \"$CS_SHA256\" \"$CS_ARCHIVE\" | sha256sum -c -\n    tar -xzf \"$CS_ARCHIVE\" -C \"$CS_INSTALL_DIR\" --strip-components=1\n    rm -f \"$CS_ARCHIVE\"\n    rm -rf /usr/local/lib/code-server\n    install -d -m 0755 /usr/local/lib/code-server\n    cp -a \"$CS_INSTALL_DIR/.\" /usr/local/lib/code-server/\n    # cp -a preserves mktemp's private root mode; restore traversal for lease users.\n    chmod 0755 /usr/local/lib/code-server\n    ln -sfn /usr/local/lib/code-server/bin/code-server /usr/local/bin/code-server\n    rm -rf \"$CS_INSTALL_DIR\"\n    trap - EXIT";
 }
 
 // prettier-ignore

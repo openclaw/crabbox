@@ -36,9 +36,9 @@
       "KeyringSHA256": "3e03dacf222698c60b8e2f990b809ca1b3e104de127767864284e6c228f1fb39"
     },
     "defaultCodeServer": {
-      "Version": "4.126.0",
-      "AMD64SHA256": "54b648d010c02b6583aa06bd8d2aaf109fc624479b9bc2ff71cb94807ac39afa",
-      "ARM64SHA256": "441614708ae81b13f14b26db41da8f46f88d7d092c08343a42a0c6c52c51a69d"
+      "Version": "4.143.1",
+      "AMD64SHA256": "614877cf71005f14ea252bd2d9b1c12237cf7d73681ef150f0dff7f13849fdb5",
+      "ARM64SHA256": "51481a891754dc2585b86d007aec24ac675453fc5ef6cfa346c4462449277384"
     },
     "googleLinuxSigningKey": {
       "Fingerprint": "EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796"

@@ -728,12 +728,12 @@ describe("cloud-init bootstrap", () => {
     const got = cloudInit({ ...config, code: true });
     expect(got).not.toContain("https://code-server.dev/install.sh");
     expect(got).not.toContain("curl -fsSL https://code-server.dev/install.sh | sh");
-    expect(got).toContain("CS_VERSION='4.126.0'");
+    expect(got).toContain("CS_VERSION='4.143.1'");
     expect(got).toContain(
-      "x86_64) CS_ARCH=amd64; CS_SHA256='54b648d010c02b6583aa06bd8d2aaf109fc624479b9bc2ff71cb94807ac39afa'",
+      "x86_64) CS_ARCH=amd64; CS_SHA256='614877cf71005f14ea252bd2d9b1c12237cf7d73681ef150f0dff7f13849fdb5'",
     );
     expect(got).toContain(
-      "aarch64|arm64) CS_ARCH=arm64; CS_SHA256='441614708ae81b13f14b26db41da8f46f88d7d092c08343a42a0c6c52c51a69d'",
+      "aarch64|arm64) CS_ARCH=arm64; CS_SHA256='51481a891754dc2585b86d007aec24ac675453fc5ef6cfa346c4462449277384'",
     );
     expect(got).toContain(
       "https://github.com/coder/code-server/releases/download/v${CS_VERSION}/code-server-${CS_VERSION}-linux-${CS_ARCH}.tar.gz",

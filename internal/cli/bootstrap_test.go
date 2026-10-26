@@ -488,9 +488,9 @@ func TestCloudInitCodeProfile(t *testing.T) {
 	cfg.Code = true
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
-		"CS_VERSION='4.126.0'",
-		"x86_64) CS_ARCH=amd64; CS_SHA256='54b648d010c02b6583aa06bd8d2aaf109fc624479b9bc2ff71cb94807ac39afa'",
-		"aarch64|arm64) CS_ARCH=arm64; CS_SHA256='441614708ae81b13f14b26db41da8f46f88d7d092c08343a42a0c6c52c51a69d'",
+		"CS_VERSION='4.143.1'",
+		"x86_64) CS_ARCH=amd64; CS_SHA256='614877cf71005f14ea252bd2d9b1c12237cf7d73681ef150f0dff7f13849fdb5'",
+		"aarch64|arm64) CS_ARCH=arm64; CS_SHA256='51481a891754dc2585b86d007aec24ac675453fc5ef6cfa346c4462449277384'",
 		"https://github.com/coder/code-server/releases/download/v${CS_VERSION}/code-server-${CS_VERSION}-linux-${CS_ARCH}.tar.gz",
 		"sha256sum -c -",
 		"/usr/local/lib/code-server",
