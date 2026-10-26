@@ -206,14 +206,13 @@ PowerShell and `--script <file.ps1>` for longer scripts.
 
 ### Hyper-V Windows leases
 
-`hyperv` needs a Generation 2 VHDX, DHCP, and a known local administrator
-password in trusted config or `CRABBOX_HYPERV_GUEST_PASSWORD`. It installs
-pinned, verified OpenSSH and MinGit packages when missing, using PowerShell
-Direct. See `docs/providers/hyperv.md` for template and lifecycle details.
+`hyperv` is a direct Windows-hosted `ssh-lease`/`local-vm` provider for native Windows Generation 2 VHDXs; it supports SSH/sync, pause/resume, and cleanup. See `docs/providers/hyperv.md`.
 
-For provider testing, prefer an elevated headless runner; early PowerShell
-Direct failures can show credential UI. Keep passwords out of arguments and
-logs, and verify the lease becomes ready, runs over SSH, and releases.
+Needs DHCP plus a known local administrator password from trusted user config or `CRABBOX_HYPERV_GUEST_PASSWORD` (never argv/repo/logs); PowerShell Direct bootstraps OpenSSH/MinGit. Run with Hyper-V VM/storage permissions as the invoking interactive user, never as `LocalSystem`; local `Hyper-V Administrators` membership suffices without elevation. Host session 0 is only an unattended-host convenience against PowerShell Direct credential UI and diverges profile, `PATH`, and SSH known-hosts. Doctor is non-mutating inventory/feature proof only: it does not boot the image or validate credentials. Pause uses `Save-VM`.
+
+Windows proof: `crabbox doctor --provider hyperv --target windows --hyperv-image 'C:\Images\windows-template.vhdx'`, then `crabbox warmup --provider hyperv --target windows --hyperv-image 'C:\Images\windows-template.vhdx' --slug hyperv-win-smoke --timing-json`, `crabbox status --provider hyperv --id hyperv-win-smoke --wait`, a no-sync command, and `crabbox stop --provider hyperv hyperv-win-smoke`.
+
+Exercise `pause`/`resume` and `cleanup --dry-run`. Expected blockers: host permissions, wrong image/generation, bad Windows credentials, or DHCP/internet. Destructive actions require an exact claim; explicitly `--reclaim` recovered VMs.
 
 ## Secrets And Environment Forwarding
 

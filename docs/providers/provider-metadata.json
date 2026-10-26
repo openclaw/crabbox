@@ -537,8 +537,8 @@
     "gpu": "no",
     "lifecycle": "Crabbox",
     "cleanup": "VM delete",
-    "bestFit": "Local native Windows VM",
-    "caveat": "Windows host with Hyper-V required",
+    "bestFit": "Local native Windows Generation 2 VM",
+    "caveat": "Windows Hyper-V host, VM-management permissions, and Windows-ready VHDX required",
     "docs": "hyperv.md"
   },
   "incus": {

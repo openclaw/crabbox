@@ -18,10 +18,25 @@ func (Provider) Spec() core.ProviderSpec {
 		Name:             providerName,
 		Family:           "local-vm",
 		Kind:             core.ProviderKindSSHLease,
-		Targets:          []core.TargetSpec{{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal}},
-		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup},
+		Targets:          providerTargets(),
+		Features:         providerFeatures(),
 		Coordinator:      core.CoordinatorNever,
 		ClassDisposition: core.ProviderClassDispositionUnmapped,
+	}
+}
+
+func providerTargets() []core.TargetSpec {
+	return []core.TargetSpec{
+		{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
+	}
+}
+
+func providerFeatures() core.FeatureSet {
+	return core.FeatureSet{
+		core.FeatureSSH,
+		core.FeatureCrabboxSync,
+		core.FeatureCleanup,
+		core.FeaturePauseResume,
 	}
 }
 
@@ -34,10 +49,14 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
-	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetWindows {
+	targetOS := cfg.TargetOS
+	if targetOS == "" {
+		targetOS = core.TargetWindows
+	}
+	if targetOS != core.TargetWindows {
 		return nil, core.Exit(2, "provider=%s supports target=windows only", providerName)
 	}
-	if cfg.TargetOS == core.TargetWindows && cfg.WindowsMode != "" && cfg.WindowsMode != core.WindowsModeNormal {
+	if targetOS == core.TargetWindows && cfg.WindowsMode != "" && cfg.WindowsMode != core.WindowsModeNormal {
 		return nil, core.Exit(2, "provider=%s supports windows.mode=normal only", providerName)
 	}
 	if cfg.Tailscale.Enabled || string(cfg.Network) == "tailscale" {

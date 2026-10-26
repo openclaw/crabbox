@@ -121,6 +121,7 @@ func commandKey(args []string) string {
 func testBackend(runner *recordingRunner) *backend {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
+	cfg.TargetOS = core.TargetWindows
 	cfg.HyperV = core.HyperVConfig{
 		Image:         `C:\Images\windows.vhdx`,
 		User:          "crabbox",
@@ -138,23 +139,42 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	if p.Spec().Name != providerName {
 		t.Fatalf("Name=%q want %s", p.Spec().Name, providerName)
 	}
-	spec := p.Spec()
-	if spec.Kind != core.ProviderKindSSHLease || spec.Family != "local-vm" {
-		t.Fatalf("unexpected spec: %#v", spec)
+	want := core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationLocalContext),
+		ClassDisposition: core.ProviderClassDispositionUnmapped,
+		Name:             providerName,
+		Family:           "local-vm",
+		Kind:             core.ProviderKindSSHLease,
+		Targets: []core.TargetSpec{
+			{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
+		},
+		Features:    providerFeatures(),
+		Coordinator: core.CoordinatorNever,
 	}
-	if spec.Coordinator != core.CoordinatorNever {
-		t.Fatalf("coordinator=%s want never", spec.Coordinator)
-	}
-	for _, feature := range []core.Feature{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup} {
-		if !spec.Features.Has(feature) {
-			t.Fatalf("features=%v missing %s", spec.Features, feature)
-		}
-	}
-	if len(spec.Targets) != 1 || spec.Targets[0].OS != core.TargetWindows || spec.Targets[0].WindowsMode != core.WindowsModeNormal {
-		t.Fatalf("unexpected targets: %#v", spec.Targets)
+	if spec := p.Spec(); !reflect.DeepEqual(spec, want) {
+		t.Fatalf("Spec()=%#v want %#v", spec, want)
 	}
 }
 
+func TestProviderFeaturesAreWindowsOnly(t *testing.T) {
+	spec := (Provider{}).Spec()
+	windows := spec.Features
+	for _, feature := range []core.Feature{
+		core.FeatureSSH,
+		core.FeatureCrabboxSync,
+		core.FeatureCleanup,
+		core.FeaturePauseResume,
+	} {
+		if !windows.Has(feature) {
+			t.Fatalf("feature %s missing from windows=%v", feature, windows)
+		}
+	}
+	for _, feature := range []core.Feature{core.FeatureCode, core.FeatureTailscale, core.FeatureCacheVolume} {
+		if windows.Has(feature) {
+			t.Fatalf("windows unexpectedly advertises %s: %v", feature, windows)
+		}
+	}
+}
 func TestProviderAliasesResolve(t *testing.T) {
 	for _, alias := range []string{"hyperv"} {
 		got, err := core.ProviderFor(alias)
@@ -167,30 +187,12 @@ func TestProviderAliasesResolve(t *testing.T) {
 	}
 }
 
-func TestConfigureRejectsLinux(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.TargetOS = core.TargetLinux
-	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
-		t.Fatal("Configure accepted linux target")
-	}
-}
-
 func TestConfigureRejectsMacOS(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.TargetOS = core.TargetMacOS
 	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
 		t.Fatal("Configure accepted macos target")
-	}
-}
-
-func TestConfigureRejectsTailscale(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.Tailscale.Enabled = true
-	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
-		t.Fatal("Configure accepted tailscale")
 	}
 }
 
@@ -201,6 +203,21 @@ func TestConfigureAcceptsWindows(t *testing.T) {
 	cfg.WindowsMode = core.WindowsModeNormal
 	if _, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}); err != nil {
 		t.Fatalf("Configure rejected windows target: %v", err)
+	}
+}
+
+func TestConfigureAcceptsWindowsDesktopAndBrowser(t *testing.T) {
+	for _, feature := range []string{"desktop", "browser"} {
+		t.Run(feature, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.TargetOS = core.TargetWindows
+			cfg.Desktop = feature == "desktop"
+			cfg.Browser = feature == "browser"
+			if _, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}); err != nil {
+				t.Fatalf("Configure rejected Windows %s: %v", feature, err)
+			}
+		})
 	}
 }
 
@@ -585,6 +602,18 @@ func TestServerFromInstanceOverridesStaleReadyState(t *testing.T) {
 	}
 }
 
+func TestServerFromInstanceNormalizesSavedStateAndRetainsRawState(t *testing.T) {
+	b := testBackend(&recordingRunner{})
+	server := b.serverFromInstance(
+		hypervVM{Name: "crabbox-blue-1234", State: hypervStateSaved},
+		core.LeaseClaim{Labels: map[string]string{"state": "ready"}},
+		b.configForRun(),
+	)
+	if server.Status != "paused" || server.Labels["state"] != "paused" || server.Labels["hyperv_state"] != "saved" {
+		t.Fatalf("status=%q state=%q hyperv_state=%q", server.Status, server.Labels["state"], server.Labels["hyperv_state"])
+	}
+}
+
 func TestCreateVMUsesDifferencingDisk(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	runner := &recordingRunner{
@@ -897,10 +926,14 @@ func TestAcquireKeepPersistsClaimAndKeyBeforeBootstrap(t *testing.T) {
 	hypervHostOS = "windows"
 	t.Cleanup(func() { hypervHostOS = oldOS })
 
-	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
-	b := testBackend(runner)
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	defer cancel()
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}, onRun: func(req core.LocalCommandRequest) {
+		if strings.Contains(commandScript(req), "Get-VMNetworkAdapter") {
+			cancel()
+		}
+	}}
+	b := testBackend(runner)
 	_, err := b.Acquire(ctx, core.AcquireRequest{
 		Repo:          core.Repo{Root: t.TempDir()},
 		RequestedSlug: "retained-failure",
@@ -941,6 +974,8 @@ func TestAcquirePersistsProvisionalClaimThenRollsBackFailedLease(t *testing.T) {
 	t.Cleanup(func() { hypervHostOS = oldOS })
 
 	var observed core.LeaseClaim
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	runner.onRun = func(req core.LocalCommandRequest) {
 		if len(req.Args) == 0 || !strings.Contains(req.Args[len(req.Args)-1], "Get-VMNetworkAdapter") {
@@ -950,10 +985,9 @@ func TestAcquirePersistsProvisionalClaimThenRollsBackFailedLease(t *testing.T) {
 		if err == nil && len(claims) == 1 {
 			observed = claims[0]
 		}
+		cancel()
 	}
 	b := testBackend(runner)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 	_, err := b.Acquire(ctx, core.AcquireRequest{
 		Repo:          core.Repo{Root: t.TempDir()},
 		RequestedSlug: "rollback-failure",
@@ -1136,7 +1170,7 @@ func TestResolveStatusOnlyAllowsRetainedLeaseWithoutIP(t *testing.T) {
 	}
 }
 
-func TestAcquireRejectsISO(t *testing.T) {
+func TestAcquireDispatchesWindowsTarget(t *testing.T) {
 	b := testBackend(&recordingRunner{})
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
@@ -1199,7 +1233,7 @@ func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 		Slug:          "missing-vm",
 		Provider:      providerName,
 		ProviderScope: instanceScope(name),
-		Labels:        map[string]string{"instance": name, "lease": leaseID},
+		Labels:        map[string]string{"instance": name, "lease": leaseID, "desktop": "true", "browser": "true"},
 	}
 	lease := core.LeaseTarget{
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
@@ -1301,15 +1335,19 @@ func TestCleanupMissingClaimRemovesDeterministicStorage(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(baseVHD), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(baseVHD, []byte("disk"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, path := range []string{baseVHD} {
+		if err := os.WriteFile(path, []byte("disk"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatalf("Cleanup: %v", err)
 	}
-	if _, err := os.Stat(baseVHD); !os.IsNotExist(err) {
-		t.Fatalf("cleanup left deterministic disk %s: %v", baseVHD, err)
+	for _, path := range []string{baseVHD} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("cleanup left deterministic disk %s: %v", path, err)
+		}
 	}
 	if claims, err := core.ListLeaseClaims(); err != nil || len(claims) != 0 {
 		t.Fatalf("claims after cleanup=%#v err=%v", claims, err)
@@ -1883,8 +1921,8 @@ func TestApplyFlagsDefersTargetValidation(t *testing.T) {
 	if cfg.TargetOS != core.TargetLinux {
 		t.Fatalf("applyFlags rewrote explicit target to %s", cfg.TargetOS)
 	}
-	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil {
-		t.Fatal("central provider configuration should reject target=linux")
+	if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err == nil || !strings.Contains(err.Error(), "windows only") {
+		t.Fatalf("central provider configuration should reject target=linux, got: %v", err)
 	}
 }
 
@@ -1992,6 +2030,45 @@ func readinessProbe(req core.LocalCommandRequest) bool {
 }
 
 // A blocked readiness probe must time out and retry.
+func TestWindowsBootstrapReportsAuthenticatedProgressOnlyAfterGuestProbe(t *testing.T) {
+	for _, blocked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("blocked_%t", blocked), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				runner := &recordingRunner{}
+				runner.blockUntilCtx = func(req core.LocalCommandRequest) bool {
+					return blocked && readinessProbe(req)
+				}
+				b := testBackend(runner)
+				b.guestReadyBudget = 100 * time.Millisecond
+				b.guestReadyProbeTimeout = 20 * time.Millisecond
+				b.guestRetryBackoff = time.Millisecond
+				b.cfg.HyperV.GuestPassword = "fixture-guest-value"
+				var output bytes.Buffer
+				b.rt.Stderr = &output
+				err := b.prepareWindowsGuestNetwork(t.Context(), b.cfg, "crabbox-test-vm", "ssh-ed25519 fixture-only")
+				if (err != nil) != blocked {
+					t.Fatalf("blocked=%t err=%v", blocked, err)
+				}
+				if !strings.Contains(output.String(), "stage=powershell-direct state=waiting budget=100ms") {
+					t.Fatalf("missing bounded authentication stage: %q", output.String())
+				}
+				if strings.Contains(output.String(), b.cfg.HyperV.GuestPassword) {
+					t.Fatal("bootstrap progress disclosed the guest password")
+				}
+				for _, stage := range []string{
+					"stage=powershell-direct state=authenticated",
+					"stage=ssh-lockdown state=complete",
+					"stage=network-connect state=complete",
+				} {
+					if strings.Contains(output.String(), stage) == blocked {
+						t.Fatalf("blocked=%t incorrect progress %q: %q", blocked, stage, output.String())
+					}
+				}
+			})
+		})
+	}
+}
+
 func TestWaitGuestReadyRetriesThroughBlockingBoot(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		runner := &recordingRunner{}

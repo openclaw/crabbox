@@ -81,13 +81,7 @@ func (a App) pauseResume(ctx context.Context, args []string, action string) erro
 		return err
 	}
 	if *jsonOut {
-		status, ok := backend.(interface {
-			Status(context.Context, StatusRequest) (StatusView, error)
-		})
-		if !ok {
-			return Exit(2, "provider has no lifecycle status receipt")
-		}
-		view, err := status.Status(ctx, StatusRequest{Options: opts, ID: *id})
+		view, err := a.leaseStatusWithRequest(ctx, cfg, StatusRequest{Options: opts, ID: *id}, false)
 		if err != nil {
 			return err
 		}

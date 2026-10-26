@@ -1078,3 +1078,17 @@ func XfceDesktopSessionScript() string {
 func GnomeDesktopThemeScript() string {
 	return sharedGnomeDesktopTheme()
 }
+
+// WindowsNodeBaselinePowerShell installs and verifies the shared native Windows
+// Node/npm baseline (the same recipe the generic Windows bootstrap runs).
+func WindowsNodeBaselinePowerShell() string {
+	return `
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+` + windowsBootstrapUtilitiesPowerShell() + sharedWindowsNodeInstall()
+}
+
+func windowsBootstrapUtilitiesPowerShell() string {
+	return sharedWindowsUtilities()
+}

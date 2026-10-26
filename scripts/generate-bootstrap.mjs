@@ -156,6 +156,17 @@ export function fragmentTokens(fragment, constants) {
   }
   return merged.length ? merged : [{ literal: "" }];
 }
+export function expandFragmentIncludes(fragment, fragments) {
+  return fragment.source.replace(/\{\{include:([^{}]+)\}\}/gu, (_match, name) => {
+    const included = fragments.find((candidate) => candidate.name === name);
+    if (!included || included.literal !== true || Object.keys(included.parameters).length ||
+        included.source.includes("{{include:")) {
+      throw new Error(`${fragment.name}: include ${name} must be a declared, parameter-free literal fragment without nested includes`);
+    }
+    return included.source.replace(/\n$/u, "");
+  });
+}
+
 export async function loadSources(root = repoRoot) {
   const directory = resolve(root, sourceDirectory);
   const json = async (name) => parseStrictJSON(await readFile(resolve(directory, name), "utf8"), name);
@@ -178,8 +189,11 @@ export async function loadSources(root = repoRoot) {
     const source = await readFile(resolve(directory, fragment.file), "utf8");
     if (!source || source.includes("\r") || source.includes("\0")) throw new Error(`${fragment.name}: use nonempty LF text without NUL`);
     const loaded = { ...fragment, source };
-    fragmentTokens(loaded, constants);
     fragments.push(loaded);
+  }
+  for (const fragment of fragments) {
+    fragment.source = expandFragmentIncludes(fragment, fragments);
+    fragmentTokens(fragment, constants);
   }
   // Ship the canonical installer with its Node-only entrypoint; never fetch mutable script bytes at boot.
   const installer = await readFile(resolve(root, "scripts/install-linux-developer-tools.sh"), "utf8");

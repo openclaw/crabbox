@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -22,13 +23,27 @@ type backend struct {
 	cfg  core.Config
 	rt   core.Runtime
 
-	// PowerShell Direct can block instead of failing while a guest boots, so
-	// readiness probes and later guest calls need per-attempt timeouts.
-	// Overridden by tests.
+	// Guest boot/readiness timing. crabbox waits for PowerShell Direct itself to
+	// answer a trivial authenticated probe before the first real guest call,
+	// because PS Direct blocks (rather than fast-failing) while the guest is
+	// still booting. Each attempt is bounded by guestReadyProbeTimeout so a
+	// blocked probe is killed and retried (proven not to corrupt the guest
+	// session), and guestInvokeTimeout bounds each real guest call so a wedged
+	// mid-session call cannot hang the provision forever. Overridable in tests.
 	guestReadyProbeTimeout time.Duration
 	guestReadyBudget       time.Duration
 	guestInvokeTimeout     time.Duration
 	guestRetryBackoff      time.Duration
+	sshReady               func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error
+	resumeSSHProbeTimeout  time.Duration
+	resumeIPStableWindow   time.Duration
+	resumePollInterval     time.Duration
+	acquireBudget          time.Duration
+	cleanupBudget          time.Duration
+	hostCommandTimeout     time.Duration
+	startVMTimeout         time.Duration
+	now                    func() time.Time
+	sleep                  func(context.Context, time.Duration) error
 }
 
 var hypervHostOS = runtime.GOOS
@@ -41,19 +56,36 @@ const (
 type hypervVM struct {
 	Name  string `json:"Name"`
 	State int    `json:"State"`
+	ID    string `json:"Id,omitempty"`
 }
+
+// guestReadyBudget bounds the wait for the first PowerShell Direct login. A cold
+// Windows differencing clone on a busy host took 6m21s to warm up in live proof,
+// longer than the former fixed five minutes.
+const guestReadyBudget = 10 * time.Minute
 
 func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	applyDefaults(&cfg)
-	return &backend{
+	b := &backend{
 		spec:                   spec,
 		cfg:                    cfg,
 		rt:                     rt,
 		guestReadyProbeTimeout: 45 * time.Second,
-		guestReadyBudget:       5 * time.Minute,
+		guestReadyBudget:       guestReadyBudget,
 		guestInvokeTimeout:     10 * time.Minute,
 		guestRetryBackoff:      3 * time.Second,
+		resumeSSHProbeTimeout:  10 * time.Second,
+		resumeIPStableWindow:   5 * time.Second,
+		resumePollInterval:     time.Second,
+		sshReady:               core.WaitForSSHReady,
+		acquireBudget:          25 * time.Minute,
+		cleanupBudget:          2 * time.Minute,
+		hostCommandTimeout:     45 * time.Second,
+		startVMTimeout:         5 * time.Minute,
+		now:                    time.Now,
+		sleep:                  shared.SleepContext,
 	}
+	return b
 }
 
 func applyDefaults(cfg *core.Config) {
@@ -72,7 +104,8 @@ func applyDefaults(cfg *core.Config) {
 			cfg.HyperV.User = "crabbox"
 		}
 	}
-	cfg.HyperV.WorkRoot = core.ResolveInheritedWorkRoot(cfg.HyperV.WorkRoot, cfg.WorkRoot, `C:\crabbox`)
+	defaultRoot := `C:\crabbox`
+	cfg.HyperV.WorkRoot = core.ResolveInheritedWorkRoot(cfg.HyperV.WorkRoot, cfg.WorkRoot, defaultRoot)
 	if cfg.HyperV.CPUs == 0 {
 		cfg.HyperV.CPUs = 4
 	}
@@ -89,6 +122,8 @@ func applyDefaults(cfg *core.Config) {
 
 func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
+func (b *backend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
+
 func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
 	return core.UseStoredTestboxKey(&target.SSH, leaseID)
 }
@@ -100,6 +135,11 @@ func (b *backend) configForRun() core.Config {
 }
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	ctx, cancel := context.WithTimeout(ctx, b.acquireBudget)
+	defer cancel()
+	if req.RequestedLeaseID != "" || req.RequestedCheckpointID != "" {
+		return core.LeaseTarget{}, core.Exit(2, "provider=%s does not support requested fixed lease or checkpoint IDs", providerName)
+	}
 	// Sizing applies only to creation; existing leases must remain recoverable.
 	if b.cfg.HyperV.CPUs < 0 {
 		return core.LeaseTarget{}, core.Exit(2, "hyperv.cpus must be zero or greater")
@@ -110,6 +150,13 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if _, ok := shared.MiBToBytes(int64(b.cfg.HyperV.Memory)); !ok {
 		return core.LeaseTarget{}, core.Exit(2, "hyperv.memory exceeds the supported byte range")
 	}
+	if b.configForRun().TargetOS != targetWindows {
+		return core.LeaseTarget{}, core.Exit(2, "provider=%s supports target=windows only", providerName)
+	}
+	return b.acquireWindows(ctx, req)
+}
+
+func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	if hypervHostOS != "windows" {
 		return core.LeaseTarget{}, core.Exit(2, "provider=%s requires a Windows host with Hyper-V enabled", providerName)
 	}
@@ -159,9 +206,11 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	keyPath, publicKey, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
+	keyPath, publicKey, err := core.EnsureTestboxKeyForConfigContext(ctx, cfg, leaseID)
 	if err != nil {
-		return core.LeaseTarget{}, err
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), b.cleanupBudget)
+		defer cancel()
+		return core.LeaseTarget{}, errors.Join(err, core.RemoveStoredTestboxConnectionArtifactsContext(cleanupCtx, leaseID))
 	}
 	cleanupKey := true
 	defer func() {
@@ -192,7 +241,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	claim, _, _ = core.ServerLeaseClaimSnapshot(provisional.Server)
 	cleanupKey = false
 	if err := b.createVM(ctx, cfg, name); err != nil {
-		cleanupErr := b.removeVM(context.Background(), name)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), b.cleanupBudget)
+		defer cancel()
+		cleanupErr := b.removeVM(cleanupCtx, name)
 		if cleanupErr == nil {
 			pruneLeaseState(leaseID)
 		}
@@ -202,21 +253,16 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		if req.Keep {
 			return nil
 		}
-		if err := b.removeVM(context.Background(), name); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), b.cleanupBudget)
+		defer cancel()
+		if err := b.removeVM(cleanupCtx, name); err != nil {
 			return fmt.Errorf("remove failed hyperv lease %s: %w", leaseID, err)
 		}
 		core.RemoveLeaseClaim(leaseID)
-		core.RemoveStoredTestboxKey(leaseID)
-		return nil
+		return core.RemoveStoredTestboxConnectionArtifactsContext(cleanupCtx, leaseID)
 	}
 
-	if err := b.waitGuestReady(ctx, name, cfg.HyperV.User); err != nil {
-		return core.LeaseTarget{}, errors.Join(fmt.Errorf("guest did not become reachable over PowerShell Direct: %w", err), cleanupFailedLease())
-	}
-	if err := b.stageSSHKey(ctx, name, cfg.HyperV.User, publicKey); err != nil {
-		return core.LeaseTarget{}, errors.Join(fmt.Errorf("pre-network SSH lockdown failed: %w", err), cleanupFailedLease())
-	}
-	if err := b.connectVMNetwork(ctx, name, cfg.HyperV.Switch); err != nil {
+	if err := b.prepareWindowsGuestNetwork(ctx, cfg, name, publicKey); err != nil {
 		return core.LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
 
@@ -237,6 +283,12 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err := b.ensureGit(ctx, name, cfg.HyperV.User); err != nil {
 		return core.LeaseTarget{}, errors.Join(fmt.Errorf("guest git setup failed: %w", err), cleanupFailedLease())
 	}
+	// The shared native Windows ready check requires the Node/npm baseline, so
+	// install the same pinned, verified baseline the generic Windows bootstrap uses.
+	fmt.Fprintf(b.rt.Stderr, "installing guest Node.js baseline (verified download)...\n")
+	if err := b.ensureNode(ctx, name, cfg.HyperV.User); err != nil {
+		return core.LeaseTarget{}, errors.Join(fmt.Errorf("guest Node.js baseline setup failed: %w", err), cleanupFailedLease())
+	}
 	lease, err := b.prepareLease(ctx, cfg, hypervVM{Name: name, State: 2}, ip, claim, true)
 	if err != nil {
 		return core.LeaseTarget{}, errors.Join(err, cleanupFailedLease())
@@ -247,6 +299,23 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, name)
 	return lease, nil
+}
+
+func (b *backend) prepareWindowsGuestNetwork(ctx context.Context, cfg core.Config, vmName, publicKey string) error {
+	fmt.Fprintf(b.rt.Stderr, "hyperv windows bootstrap vm=%s stage=powershell-direct state=waiting budget=%s\n", vmName, b.guestReadyBudget)
+	if err := b.waitGuestReady(ctx, vmName, cfg.HyperV.User); err != nil {
+		return fmt.Errorf("guest did not become reachable over PowerShell Direct: %w", err)
+	}
+	fmt.Fprintf(b.rt.Stderr, "hyperv windows bootstrap vm=%s stage=powershell-direct state=authenticated\n", vmName)
+	if err := b.stageSSHKey(ctx, vmName, cfg.HyperV.User, publicKey); err != nil {
+		return fmt.Errorf("pre-network SSH lockdown failed: %w", err)
+	}
+	fmt.Fprintf(b.rt.Stderr, "hyperv windows bootstrap vm=%s stage=ssh-lockdown state=complete\n", vmName)
+	if err := b.connectVMNetwork(ctx, vmName, cfg.HyperV.Switch); err != nil {
+		return err
+	}
+	fmt.Fprintf(b.rt.Stderr, "hyperv windows bootstrap vm=%s stage=network-connect state=complete\n", vmName)
+	return nil
 }
 
 // persistLease records ownership before VM creation, then atomically updates
@@ -352,6 +421,8 @@ func (b *backend) Doctor(ctx context.Context, req core.DoctorRequest) (core.Doct
 }
 
 func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	ctx, cancel := context.WithTimeout(ctx, b.cleanupBudget)
+	defer cancel()
 	lease := req.Lease
 	if lease.LeaseID == "" {
 		lease.LeaseID = strings.TrimSpace(lease.Server.Labels["lease"])
@@ -367,16 +438,56 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if name == "" {
 		return core.Exit(2, "provider=%s release requires a Hyper-V VM name", providerName)
 	}
-	if err := requireExactHyperVClaim(lease.LeaseID, name); err != nil {
+	claim, owned, err := exactHyperVClaimSnapshot(lease.LeaseID, name)
+	if err != nil {
 		return err
 	}
-	if err := b.removeVM(ctx, name); err != nil {
+	if !owned {
+		return core.Exit(4, "hyperv lease %q has no exact local claim bound to VM %q; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(lease.LeaseID), name)
+	}
+	cfg := b.configForRun()
+	if user := strings.TrimSpace(lease.Server.Labels["ssh_user"]); user != "" {
+		cfg.HyperV.User = user
+		cfg.SSHUser = user
+	}
+	if workRoot := strings.TrimSpace(lease.Server.Labels["work_root"]); workRoot != "" {
+		cfg.HyperV.WorkRoot = workRoot
+		cfg.WorkRoot = workRoot
+	}
+	if err := b.runGuardedReleaseCleanup(ctx, req, cfg, lease, name, claim); err != nil {
+		return err
+	}
+	if err := core.WithLeaseClaimUnchangedContext(ctx, claim.LeaseID, claim, func() error { return b.removeVM(ctx, name) }); err != nil {
 		return err
 	}
 	if lease.LeaseID != "" {
 		pruneLeaseState(lease.LeaseID)
 	}
 	return nil
+}
+
+func (b *backend) runGuardedReleaseCleanup(ctx context.Context, req core.ReleaseLeaseRequest, cfg core.Config, lease core.LeaseTarget, name string, claim core.LeaseClaim) error {
+	if req.GuardedRemoteCleanup == nil {
+		return nil
+	}
+	vm, err := b.queryVM(ctx, name)
+	if err != nil {
+		return err
+	}
+	if vm.State != hypervStateRunning {
+		return nil
+	}
+	// The remote cleanup uses the endpoint from the claim read at release
+	// start; a replaced claim must not reach it.
+	return core.WithLeaseClaimUnchangedContext(ctx, claim.LeaseID, claim, func() error {
+		cleanupLease, prepareErr := b.prepareLease(ctx, cfg, vm, b.getIPFromClaim(claim), claim, false)
+		if prepareErr != nil {
+			fmt.Fprintf(b.rt.Stderr, "warning: skipping guarded remote cleanup for Hyper-V VM %s: %v\n", name, prepareErr)
+			return nil
+		}
+		req.GuardedRemoteCleanup(ctx, cleanupLease)
+		return nil
+	})
 }
 
 func pruneLeaseState(leaseID string) {
@@ -389,6 +500,8 @@ func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 }
 
 func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
+	ctx, cancel := context.WithTimeout(ctx, b.cleanupBudget)
+	defer cancel()
 	cfg := b.configForRun()
 	instances, err := b.listInstances(ctx)
 	if errors.Is(err, errNotWindows) {
@@ -579,13 +692,33 @@ func (b *backend) createVM(ctx context.Context, cfg core.Config, name string) er
 		return shared.LocalCommandError("Set-VM", result, err)
 	}
 
-	startScript := fmt.Sprintf(`Start-VM -Name %s`, core.PowerShellQuote(name))
-	result, err = b.powershell(ctx, startScript)
-	if err != nil {
-		return shared.LocalCommandError("Start-VM", result, err)
-	}
+	return b.startVM(ctx, name)
+}
 
-	return nil
+// startVM starts the VM with a budget that fits a loaded host: Start-VM can take
+// longer than the generic host-command timeout when other VMs compete for memory,
+// and a timed-out command can still have started the VM. A failed command is
+// therefore reconciled against the VM's actual state before it is reported.
+func (b *backend) startVM(ctx context.Context, name string) error {
+	startCtx, cancel := context.WithTimeout(ctx, b.startVMTimeout)
+	defer cancel()
+	result, err := b.rt.Exec.Run(startCtx, core.LocalCommandRequest{
+		Name: "powershell",
+		Args: []string{"-NoProfile", "-NonInteractive", "-Command", fmt.Sprintf(`Start-VM -Name '%s' -ErrorAction Stop`, escapePSString(name))},
+	})
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	settleCtx, settleCancel := context.WithTimeout(ctx, b.hostCommandTimeout)
+	defer settleCancel()
+	if vm, queryErr := b.queryVM(settleCtx, name); queryErr == nil && vm.State == hypervStateRunning {
+		fmt.Fprintf(b.rt.Stderr, "Start-VM reported failure but VM %s is running; continuing\n", name)
+		return nil
+	}
+	return shared.LocalCommandError("Start-VM", result, err)
 }
 
 func (b *backend) connectVMNetwork(ctx context.Context, name, switchName string) error {
@@ -660,9 +793,8 @@ func (b *backend) invokeGuestScript(ctx context.Context, script string, env []st
 // Direct readiness. Each probe is bounded because early boot calls can block.
 func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error {
 	script := fmt.Sprintf(
-		`$cred = New-Object PSCredential(%s, (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
-			`Invoke-Command -VMName %s -Credential $cred -ScriptBlock { $true } -ErrorAction Stop | Out-Null`,
-		core.PowerShellQuote(user), core.PowerShellQuote(vmName),
+		`%sInvoke-Command -VMName '%s' -Credential $cred -ScriptBlock { $true } -ErrorAction Stop | Out-Null`,
+		powershellCredentialPrelude(user), escapePSString(vmName),
 	)
 	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
 	// Include attempts and backoff in the overall boot budget.
@@ -711,9 +843,8 @@ func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error
 // _CRABBOX_GP, never the command line.
 func (b *backend) invokeInGuest(ctx context.Context, vmName, user, scriptBlock, label string) error {
 	script := fmt.Sprintf(
-		`$cred = New-Object PSCredential(%s, (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
-			`Invoke-Command -VMName %s -Credential $cred -ScriptBlock { %s }`,
-		core.PowerShellQuote(user), core.PowerShellQuote(vmName), scriptBlock,
+		`%sInvoke-Command -VMName '%s' -Credential $cred -ScriptBlock { %s }`,
+		powershellCredentialPrelude(user), escapePSString(vmName), scriptBlock,
 	)
 	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
 	var lastErr error
@@ -818,6 +949,12 @@ func (b *backend) ensureGit(ctx context.Context, vmName, user string) error {
 	return b.invokeInGuest(ctx, vmName, user, scriptBlock, "git install")
 }
 
+// ensureNode runs the shared Windows Node/npm baseline recipe (pinned version and
+// SHA-256, verified before use) inside the guest.
+func (b *backend) ensureNode(ctx context.Context, vmName, user string) error {
+	return b.invokeInGuest(ctx, vmName, user, core.WindowsNodeBaselinePowerShell(), "node baseline install")
+}
+
 func sshAccessScript(user, publicKey string, activate bool) string {
 	script := fmt.Sprintf(
 		`$ErrorActionPreference='Stop'; `+
@@ -847,6 +984,7 @@ func sshAccessScript(user, publicKey string, activate bool) string {
 			`if ($line -match '^\s*Match\s+') { break }; `+
 			`if ($line -match '^\s*(Port|ListenAddress|AddressFamily|HostKey|AuthenticationMethods|PasswordAuthentication|PubkeyAuthentication|KbdInteractiveAuthentication|AllowUsers|AllowGroups|DenyUsers|DenyGroups|AuthorizedKeysFile|AuthorizedKeysCommand|AuthorizedKeysCommandUser|TrustedUserCAKeys|AuthorizedPrincipalsFile|Include)\s+') { continue }; `+
 			`$globalLines += $line }; `+
+			`if (-not ($globalLines | Where-Object { $_ -match '^\s*Subsystem\s+sftp\s+' })) { $globalLines += 'Subsystem sftp sftp-server.exe' }; `+
 			`$globalLines += 'Port 22'; `+
 			`$globalLines += 'AddressFamily any'; `+
 			`$globalLines += 'PubkeyAuthentication yes'; `+
@@ -926,7 +1064,7 @@ func validHyperVSSHUser(user string) bool {
 
 // waitForIP polls Get-VMNetworkAdapter until an IPv4 address appears.
 func (b *backend) waitForIP(ctx context.Context, name string, timeout time.Duration) (string, error) {
-	deadline := time.Now().Add(timeout)
+	deadline := b.now().Add(timeout)
 	script := fmt.Sprintf(
 		`Get-VMNetworkAdapter -VMName %s | Select-Object -ExpandProperty IPAddresses | ConvertTo-Json`,
 		core.PowerShellQuote(name),
@@ -936,13 +1074,16 @@ func (b *backend) waitForIP(ctx context.Context, name string, timeout time.Durat
 	// while preventing Poll's preflight check from skipping that observation.
 	pollCtx := context.WithoutCancel(ctx)
 	result, err := shared.Poll(pollCtx, 0, 3*time.Second,
-		func(_ context.Context, delay time.Duration) error { return shared.SleepContext(ctx, delay) },
+		func(_ context.Context, delay time.Duration) error { return b.sleep(ctx, delay) },
 		func(context.Context) (string, error) {
-			if time.Now().After(deadline) {
+			if !b.now().Before(deadline) {
 				return "", core.Exit(5, "hyperv VM %s did not acquire an IP within %s", name, timeout)
 			}
 			result, err := b.powershell(ctx, script)
-			if err != nil || strings.TrimSpace(result.Stdout) == "" || strings.TrimSpace(result.Stdout) == "null" {
+			if err != nil {
+				return "", shared.LocalCommandError("Hyper-V IP discovery", result, err)
+			}
+			if strings.TrimSpace(result.Stdout) == "" || strings.TrimSpace(result.Stdout) == "null" {
 				return "", nil
 			}
 			return parseFirstIPv4(result.Stdout), nil
@@ -962,7 +1103,7 @@ func (b *backend) listInstances(ctx context.Context) ([]hypervVM, error) {
 	if hypervHostOS != "windows" {
 		return nil, errNotWindows
 	}
-	script := `Get-VM | Where-Object { $_.Name -like 'crabbox-*' } | Select-Object Name, State | ConvertTo-Json -Compress`
+	script := `Get-VM | Where-Object { $_.Name -like 'crabbox-*' } | Select-Object Name, State, @{Name='Id';Expression={[string]$_.Id}} | ConvertTo-Json -Compress`
 	result, err := b.powershell(ctx, script)
 	if err != nil {
 		return nil, shared.LocalCommandError("Get-VM list", result, err)
@@ -1012,6 +1153,9 @@ func (b *backend) resolveInstance(ctx context.Context, identifier string) (hyper
 
 func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst hypervVM, ip string, claim core.LeaseClaim, wait bool) (core.LeaseTarget, error) {
 	server := b.serverFromInstance(inst, claim, cfg)
+	if mode := strings.TrimSpace(server.Labels["windows_mode"]); mode != "" {
+		cfg.WindowsMode = mode
+	}
 	if user := strings.TrimSpace(server.Labels["ssh_user"]); user != "" {
 		cfg.HyperV.User = user
 		cfg.SSHUser = user
@@ -1038,7 +1182,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst hyperv
 	target.Port = sshPort
 	target.FallbackPorts = []string{}
 	if wait {
-		if err := core.WaitForSSHReady(ctx, &target, b.rt.Stderr, "hyperv ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
+		if err := b.sshReady(ctx, &target, b.rt.Stderr, "hyperv ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		server.Status = "ready"
@@ -1104,6 +1248,9 @@ func (b *backend) removeVMStorage(name string, attachedPaths []string) error {
 	} else if !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("read Hyper-V VHD directory %s: %w", vhdDir, err))
 	}
+	if err := removeOwnedHyperVLeaseTree(filepath.Join(vhdDir, name), vhdDir, name); err != nil {
+		errs = append(errs, err)
+	}
 	if err := removeHyperVConfigFiles(filepath.Join(hypervVMDir(), name)); err != nil {
 		errs = append(errs, err)
 	}
@@ -1151,6 +1298,30 @@ func ownedHyperVCheckpoint(path, vhdDir, name string) bool {
 		}
 	}
 	return true
+}
+
+func removeOwnedHyperVLeaseTree(path, root, name string) error {
+	cleanRoot := filepath.Clean(root)
+	cleanPath := filepath.Clean(path)
+	if !validHyperVVMName(name) || !strings.EqualFold(filepath.Dir(cleanPath), cleanRoot) || !strings.EqualFold(filepath.Base(cleanPath), name) {
+		return core.Exit(2, "refusing to remove unowned Hyper-V lease storage %q", path)
+	}
+	// Only an empty directory is removed: the directory name does not prove that
+	// every file in it belongs to the lease.
+	entries, err := os.ReadDir(cleanPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read Hyper-V lease storage %s: %w", cleanPath, err)
+	}
+	if len(entries) > 0 {
+		return nil
+	}
+	if err := os.Remove(cleanPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove Hyper-V lease storage %s: %w", cleanPath, err)
+	}
+	return nil
 }
 
 func (b *backend) removeVHDFile(path string) error {
@@ -1270,11 +1441,14 @@ func (b *backend) serverFromInstance(inst hypervVM, claim core.LeaseClaim, cfg c
 		"ssh_port":  sshPort,
 		"work_root": cfg.HyperV.WorkRoot,
 	})
-	liveState := hypervState(inst.State)
+	rawState := hypervState(inst.State)
+	liveState := hypervLeaseState(inst.State)
+	labels["hyperv_state"] = rawState
 	if inst.State != 2 || labels["state"] == "" {
 		labels["state"] = liveState
 	}
 	server := shared.LocalInstanceServer(providerName, inst.Name, liveState, inst.State == 2, labels)
+	server.ImmutableID = shared.FirstNonBlank(inst.ID, claim.CloudImmutableID)
 	server.ServerType.Name = "hyperv"
 	if claim.SSHHost != "" {
 		server.PublicNet.IPv4.IP = claim.SSHHost
@@ -1293,6 +1467,8 @@ func (b *backend) getIPFromClaim(claim core.LeaseClaim) string {
 }
 
 func (b *backend) powershell(ctx context.Context, script string) (core.LocalCommandResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, b.hostCommandTimeout)
+	defer cancel()
 	return b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name: "powershell",
 		Args: []string{"-NoProfile", "-NonInteractive", "-Command", script},
@@ -1357,7 +1533,7 @@ func shouldCleanup(server core.Server, claim core.LeaseClaim, hasClaim bool, now
 	if !hasClaim {
 		return false, "missing claim"
 	}
-	if server.Status != "running" && server.Status != "ready" {
+	if server.Status != "running" && server.Status != "ready" && server.Status != "paused" && server.Status != "saved" {
 		return true, "instance state=" + core.Blank(server.Status, "unknown")
 	}
 	expiresAt := strings.TrimSpace(server.Labels["expires_at"])
@@ -1373,25 +1549,31 @@ func shouldCleanup(server core.Server, claim core.LeaseClaim, hasClaim bool, now
 	return shared.ClaimIdleExpiredAfterGrace(claim, now, 12*time.Hour)
 }
 
-func requireExactHyperVClaim(leaseID, instanceName string) error {
+func requireExactHyperVClaimFor(leaseID, instanceName, action string) error {
 	owned, err := exactHyperVClaimOwned(leaseID, instanceName)
 	if err != nil {
 		return err
 	}
 	if !owned {
-		return core.Exit(4, "hyperv lease %q has no exact local claim bound to VM %q; adopt it with an explicit --reclaim reuse before stop", strings.TrimSpace(leaseID), strings.TrimSpace(instanceName))
+		return core.Exit(4, "hyperv lease %q has no exact local claim bound to VM %q; adopt it with an explicit --reclaim reuse before %s", strings.TrimSpace(leaseID), strings.TrimSpace(instanceName), action)
 	}
 	return nil
 }
 
 func exactHyperVClaimOwned(leaseID, instanceName string) (bool, error) {
+	_, owned, err := exactHyperVClaimSnapshot(leaseID, instanceName)
+	return owned, err
+}
+
+func exactHyperVClaimSnapshot(leaseID, instanceName string) (core.LeaseClaim, bool, error) {
 	leaseID = strings.TrimSpace(leaseID)
 	instanceName = strings.TrimSpace(instanceName)
 	claim, ok, exact, err := core.ResolveLeaseClaimForProviderWithExact(leaseID, providerName)
 	if err != nil {
-		return false, err
+		return core.LeaseClaim{}, false, err
 	}
-	return ok && exact && claim.LeaseID == leaseID && claim.CloudID == instanceName && claim.ProviderScope == instanceScope(instanceName) && instanceNameFromClaim(claim) == instanceName, nil
+	owned := ok && exact && claim.LeaseID == leaseID && claim.CloudID == instanceName && claim.ProviderScope == instanceScope(instanceName) && instanceNameFromClaim(claim) == instanceName
+	return claim, owned, nil
 }
 
 // hypervState maps Hyper-V State enum values to string labels.
@@ -1475,6 +1657,26 @@ func parseFirstIPv4(raw string) string {
 func isUsableIPv4(s string) bool {
 	addr, err := netip.ParseAddr(strings.TrimSpace(s))
 	return err == nil && addr.Is4() && addr.IsGlobalUnicast()
+}
+
+// escapePSString escapes s for use inside a single-quoted PowerShell literal,
+// including the typographic quotes PowerShell also treats as quote characters.
+func escapePSString(s string) string {
+	quoted := core.PowerShellQuote(s)
+	return quoted[1 : len(quoted)-1]
+}
+
+func powershellCredentialPrelude(user string) string {
+	// Stop on a failed credential construction: continuing with a null $cred would
+	// make Invoke-Command -VMName show an interactive credential dialog.
+	return fmt.Sprintf(
+		`$ErrorActionPreference = 'Stop'; `+
+			`$secure = [System.Security.SecureString]::new(); `+
+			`foreach ($character in ([string]$env:_CRABBOX_GP).ToCharArray()) { $secure.AppendChar($character) }; `+
+			`$secure.MakeReadOnly(); `+
+			`$cred = [System.Management.Automation.PSCredential]::new('%s', $secure); `,
+		escapePSString(user),
+	)
 }
 
 func firstLine(value string) string {
