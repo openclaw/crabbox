@@ -960,12 +960,22 @@ func (b *shardAuthorityDeleteBackend) ReleaseLease(_ context.Context, req Releas
 	if !set || !exists {
 		return errors.New("release missing carried claim snapshot")
 	}
-	return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, snapshot, func() error {
+	deleteExact := func() error {
 		b.mu.Lock()
 		b.deletes++
 		b.mu.Unlock()
 		return nil
-	})
+	}
+	_, diskExists, err := ReadLeaseClaimWithPresence(req.Lease.LeaseID)
+	if err != nil {
+		return err
+	}
+	// Missing claim: carried snapshot still authorizes delete via the real
+	// CleanupLeaseClaimIfUnchangedAfter fence (same as fork release docs).
+	if !diskExists {
+		return CleanupLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, leaseClaim{}, false, deleteExact)
+	}
+	return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, snapshot, deleteExact)
 }
 func (b *shardAuthorityDeleteBackend) deleteCount() int {
 	b.mu.Lock()
@@ -1059,6 +1069,20 @@ func TestRunOneShardCarriesAuthorizedClaimOnly(t *testing.T) {
 				}
 			},
 			wantRefuse: true,
+		},
+		{
+			name: "missing claim file releases",
+			afterRun: func(t *testing.T, leaseID string, _ leaseClaim) {
+				t.Helper()
+				path, err := leaseClaimPath(leaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantDeletes: 1,
 		},
 	}
 	for _, tc := range cases {
@@ -1215,7 +1239,4 @@ func TestShardV0793OnDiskSettingsAndClaimIntact(t *testing.T) {
 	if claim.LeaseID != leaseID || claim.Revision != "gen-v0793" || claim.CloudID != "i-v0793" || claim.Provider != "aws" {
 		t.Fatalf("claim not intact after load: %#v", claim)
 	}
-	// Binary-level upgrade smoke (builds v0.79.3 + HEAD) lives in
-	// scripts/shard-v0793-upgrade-smoke.sh so CI shard timing stays free of an
-	// extra crabbox build on this hashed shard.
 }
