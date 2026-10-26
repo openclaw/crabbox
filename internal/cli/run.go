@@ -1070,6 +1070,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var lifecycleOwner *workspaceOwner
 	var acquired, releaseResolvedLease, keepFailedLease bool
 	ownerParentCtx := ctx
+	// Hand the exact post-run claim snapshot back to shard. Must not reread disk
+	// at release time — that rediscovers authority and breaks ABA fencing.
+	defer func() {
+		if a.runOutcome == nil {
+			return
+		}
+		claim, exists, set := ServerLeaseClaimSnapshot(server)
+		if !set || !exists {
+			return
+		}
+		cloned := cloneLeaseClaim(claim)
+		a.runOutcome.AuthorizedClaim = &cloned
+	}()
 	// Report recovery after every cleanup defer, including early setup and
 	// fail-closed owner returns, but before the final timing record is written.
 	defer func() {

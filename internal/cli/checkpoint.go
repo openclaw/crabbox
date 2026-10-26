@@ -1646,28 +1646,6 @@ func authorizedForkReleaseClaimContinuation(expected, current leaseClaim) bool {
 	return reflect.DeepEqual(expected, current)
 }
 
-// carryAuthorizedForkReleaseClaimFromDisk installs the current persisted claim
-// into the release snapshot when it still has the same owner as the carried
-// acquisition. Call only after an authorized run lifecycle that may have minted
-// a successor revision (shard run --keep). Refresh then requires an exact match.
-func carryAuthorizedForkReleaseClaimFromDisk(lease checkpointForkProvision) {
-	if lease.carryReleaseClaim == nil {
-		return
-	}
-	expected, expectedExists, set := ServerLeaseClaimSnapshot(lease.Lease.Server)
-	if !set || !expectedExists {
-		return
-	}
-	current, exists, err := ReadLeaseClaimWithPresence(lease.Lease.LeaseID)
-	if err != nil || !exists {
-		return
-	}
-	if !sameActionsWorkspaceClaimOwner(expected, current) {
-		return
-	}
-	lease.carryReleaseClaim(current)
-}
-
 type managedCheckpointCacheConflict struct{ error }
 
 func writeSafeManagedCheckpointCache(store checkpointStore, record checkpointRecord) error {

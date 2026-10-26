@@ -73,6 +73,8 @@ func TestRunLeaseRecoveryGuidance(t *testing.T) {
 		{name: "kept", flags: []string{"--keep"}, wantReason: "--keep", wantReleases: 0},
 		// Label alone must not select the shard cleanup-owner message.
 		{name: "kept with shard-like label", flags: []string{"--keep", "--label", "shard smoke"}, wantReason: "--keep", wantReleases: 0},
+		// Outer shard --keep: configureShardRunOwnsLeaseCleanup leaves the flag false.
+		{name: "shard --keep retains with --keep reason", flags: []string{"--keep", "--label", "shard 1/1"}, wantReason: "--keep", wantReleases: 0},
 		{name: "shard owns cleanup flag", flags: []string{"--keep", "--label", "shard 1/2"}, shardOwnsLeaseCleanup: true, wantReason: "shard owns lease cleanup", wantReleases: 0},
 		{name: "reused", flags: []string{"--id", "cbx_env_profile_test"}, wantReason: "existing lease", wantReleases: 0},
 		{name: "stop policy", flags: []string{"--stop-after", "never"}, wantReason: "--stop-after never", wantReleases: 0},

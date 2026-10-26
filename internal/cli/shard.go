@@ -20,6 +20,9 @@ type shardRunOutcome struct {
 	ExitCode int
 	RunID    string
 	Results  *TestResultSummary
+	// AuthorizedClaim is the exact claim generation run --keep wrote. Shard
+	// carries only this snapshot into release; never rediscover authority from disk.
+	AuthorizedClaim *leaseClaim
 }
 
 var shardForbiddenRunFlags = map[string]bool{
@@ -291,6 +294,7 @@ func (a App) shard(ctx context.Context, args []string) error {
 	}
 	execute := func(runCtx context.Context, index int, shardRunArgs []string, outcome *shardRunOutcome) error {
 		shardApp, flush := a.forShard(mux, index, opts.Count, opts.Quiet, outcome)
+		configureShardRunOwnsLeaseCleanup(&shardApp, opts.Keep)
 		defer flush()
 		return shardApp.runCommand(runCtx, shardRunArgs)
 	}
@@ -357,10 +361,19 @@ func resolveShardConcurrency(count, concurrencyFlag int, concurrencySet bool, ma
 	return concurrency, nil
 }
 
+// configureShardRunOwnsLeaseCleanup marks the inner run as shard-owned cleanup
+// only when the outer shard will release (!outerKeep). Outer --keep retains
+// leases for the user, so recovery must report --keep, not shard ownership.
+func configureShardRunOwnsLeaseCleanup(shardApp *App, outerKeep bool) {
+	if shardApp == nil || outerKeep {
+		return
+	}
+	shardApp.shardOwnsLeaseCleanup = true
+}
+
 func (a App) forShard(mux *shardOutputMux, index, total int, quiet bool, outcome *shardRunOutcome) (App, func()) {
 	shardApp := a
 	shardApp.runOutcome = outcome
-	shardApp.shardOwnsLeaseCleanup = true
 	if quiet {
 		shardApp.Stdout = io.Discard
 		shardApp.Stderr = io.Discard
@@ -449,17 +462,19 @@ func (a App) runOneShard(runCtx context.Context, cancel context.CancelFunc, opts
 	}
 	leaseID := lease.Lease.LeaseID
 	leaseSlug := ServerSlug(lease.Lease.Server)
+	var outcome shardRunOutcome
 	if !opts.Keep {
 		defer func() {
-			// Propagate the claim generation produced by run --keep into the
-			// release fence before exact-match refresh.
-			carryAuthorizedForkReleaseClaimFromDisk(lease)
+			// Carry only the claim generation run reported — never rediscover
+			// authority from disk (same-second reclaim / ABA would pass that).
+			if outcome.AuthorizedClaim != nil && lease.carryReleaseClaim != nil {
+				lease.carryReleaseClaim(*outcome.AuthorizedClaim)
+			}
 			lease.Release(context.Background())
 		}()
 	}
 	mux.printf(a.Stderr, "shard %d/%d provisioned lease=%s slug=%s\n", index, opts.Count, leaseID, blank(leaseSlug, "-"))
 	expanded := checkpointForkRunCommand(opts.Command, checkpointForkRunContext{Index: index, Total: opts.Count, LeaseID: leaseID, Slug: leaseSlug})
-	var outcome shardRunOutcome
 	err = execute(runCtx, index, shardRunArgs(leaseID, index, opts.Count, opts.RunArgs, expanded), &outcome)
 	result := shardResult{Index: index, LeaseID: leaseID, Slug: leaseSlug, RunID: outcome.RunID, Recorded: outcome.Recorded, Results: outcome.Results}
 	if outcome.Recorded {
