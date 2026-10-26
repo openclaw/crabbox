@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Parallels: an explicitly configured macOS guest user (including `crabbox`, or a generic `ssh.user` / `CRABBOX_SSH_USER`) is honored instead of being replaced by the host `USER`; the host-user fallback still applies when no guest user is configured. [PR 2958](https://github.com/openclaw/crabbox/pull/2958). Thanks @rustanacexd.
 - CI: the serve relay test fixture forwards data only after both READY frames, matching the coordinator relay, which removes a concurrent large-transfer flake. [PR 2955](https://github.com/openclaw/crabbox/pull/2955).
 
 ## 0.79.3 - 2026-10-24
