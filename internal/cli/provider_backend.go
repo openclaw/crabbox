@@ -32,6 +32,12 @@ type ProviderConfigValidator interface {
 	ValidateConfig(cfg Config) error
 }
 
+// ProviderDirectLeasePolicy identifies configuration-dependent remote allocation.
+// It overrides the legacy local-only exemption, never the operator's allowlist.
+type ProviderDirectLeasePolicy interface {
+	RequiresDirectLeasePermission(cfg Config) bool
+}
+
 // ProviderConfiguredFeatures supplies features enabled by trusted runtime
 // configuration. Spec remains the conservative, configuration-free catalog.
 type ProviderConfiguredFeatures interface {

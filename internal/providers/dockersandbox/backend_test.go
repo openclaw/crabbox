@@ -1847,6 +1847,9 @@ func newTestBackend(cfg core.Config, runner *recordingCommandRunner, stdout, std
 }
 
 func scriptKey(args []string) string {
+	if len(args) > 0 && args[0] == "--cloud" {
+		args = args[1:]
+	}
 	if len(args) == 0 {
 		return ""
 	}
@@ -2103,12 +2106,14 @@ func TestDockerSandboxConfigShowSection(t *testing.T) {
 				got[field.JSONName] = field.JSONValue
 				fields = append(fields, field.TextName+"="+field.TextValue)
 			}
-			if section.JSONKey != "dockerSandbox" || section.TextLabel != "docker_sandbox" || !reflect.DeepEqual(section.Providers, []string{"docker-sandbox"}) || len(section.Fields) != 10 {
+			tc.want["target"] = tc.cfg.Target
+			if section.JSONKey != "dockerSandbox" || section.TextLabel != "docker_sandbox" || !reflect.DeepEqual(section.Providers, []string{"docker-sandbox"}) || len(section.Fields) != 11 {
 				t.Fatalf("section metadata=%#v", section)
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("public fields=%#v want %#v", got, tc.want)
 			}
+			tc.text = strings.Replace(tc.text, "docker_sandbox ", "docker_sandbox target="+tc.cfg.Target+" ", 1)
 			if line := section.TextLabel + " " + strings.Join(fields, " ") + "\n"; line != tc.text {
 				t.Fatalf("text=%q want %q", line, tc.text)
 			}
@@ -2296,7 +2301,7 @@ func TestDockerSandboxBindingHelpSurface(t *testing.T) {
 	if err := ApplyDockerSandboxProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	want := core.DockerSandboxConfig{CLIPath: "fixture", Agent: "shell", Template: "fixture", CPUs: 2, Memory: "6g", Clone: true, Workdir: "/workspace/fixture", ExtraWorkspaces: []string{"a,b"}, MCP: []string{"mcp"}, Kit: []string{"kit"}}
+	want := core.DockerSandboxConfig{Target: "local", CLIPath: "fixture", Agent: "shell", Template: "fixture", CPUs: 2, Memory: "6g", Clone: true, Workdir: "/workspace/fixture", ExtraWorkspaces: []string{"a,b"}, MCP: []string{"mcp"}, Kit: []string{"kit"}}
 	if !reflect.DeepEqual(cfg.DockerSandbox, want) {
 		t.Fatalf("all flag fields: %#v", cfg.DockerSandbox)
 	}

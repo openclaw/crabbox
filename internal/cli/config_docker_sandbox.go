@@ -4,6 +4,7 @@ package cli
 
 // DockerSandboxConfig owns input bindings; final validation stays provider-owned.
 type DockerSandboxConfig struct {
+	Target          string   `config:"target" env:"CRABBOX_DOCKER_SANDBOX_TARGET" flag:"docker-sandbox-target" sources:"user,repo,env,flag" help:"Docker Sandbox target: local or cloud" default:"local" fileIgnoreEmpty:"true" fileStorage:"value"`
 	CLIPath         string   `config:"cliPath" env:"CRABBOX_DOCKER_SANDBOX_CLI" flag:"docker-sandbox-cli" sources:"user,repo,env,flag" help:"path to the sbx CLI binary" default:"sbx" fileIgnoreEmpty:"true" fileStorage:"value"`
 	Agent           string   `config:"agent" env:"CRABBOX_DOCKER_SANDBOX_AGENT" flag:"docker-sandbox-agent" sources:"user,repo,env,flag" help:"Docker Sandbox agent; v1 supports shell only" default:"shell" fileIgnoreEmpty:"true" fileStorage:"value"`
 	Template        string   `config:"template" env:"CRABBOX_DOCKER_SANDBOX_TEMPLATE" flag:"docker-sandbox-template" sources:"user,repo,env,flag" help:"Docker Sandbox template"`

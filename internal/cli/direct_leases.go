@@ -82,7 +82,11 @@ func validateDirectLeaseCreation(cfg Config) error {
 		return err
 	}
 	name := provider.Spec().Name
-	if directLeaseExempt(name) || ShouldUseCoordinator(cfg, provider.Spec()) {
+	exempt := directLeaseExempt(name)
+	if policy, ok := provider.(ProviderDirectLeasePolicy); ok {
+		exempt = !policy.RequiresDirectLeasePermission(cfg)
+	}
+	if exempt || ShouldUseCoordinator(cfg, provider.Spec()) {
 		return nil
 	}
 	for _, allowed := range cfg.DirectLeaseAllow {
@@ -92,3 +96,6 @@ func validateDirectLeaseCreation(cfg Config) error {
 	}
 	return Exit(2, "direct-provider leases are disabled (directLeases: deny); configure a coordinator or add %s to directLeaseAllow", name)
 }
+
+// ValidateDirectLeaseCreation also protects provider-owned acquisition entrypoints.
+func ValidateDirectLeaseCreation(cfg Config) error { return validateDirectLeaseCreation(cfg) }

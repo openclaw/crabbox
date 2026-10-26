@@ -84,9 +84,14 @@ and still need `crabbox cleanup`.
 To forbid new direct remote allocations, set
 [`directLeases: deny`](configuration.md#direct-lease-policy), with optional
 trusted `directLeaseAllow` exceptions. The always-exempt local/static set is
-`ssh`, `local-container`, `docker-sandbox`, `apple-container`, `apple-machine`,
+`ssh`, `local-container`, `docker-sandbox` (local target only), `apple-container`, `apple-machine`,
 `apple-vm`, `anthropic-sandbox-runtime`, `mxc`, `multipass`, `firecracker`,
 `lume`, `tart`, `hyperv`, and `windows-sandbox`.
+
+Docker Sandbox also offers an explicit [cloud target](../providers/docker-sandbox.md#cloud-target)
+through `--docker-sandbox-target cloud`: archive sync, cloud execution, result
+copying, immutable-ID ownership, and native TTL deletion. It is a direct remote
+allocation and respects `directLeases: deny`.
 
 ## Machine classes
 

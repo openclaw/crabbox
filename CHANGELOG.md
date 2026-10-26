@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- Docker Sandbox: add an opt-in Docker Cloud Sandboxes target with archive sync, result downloads, scoped ownership and native TTL cleanup, requested by @coygeek. [PR 2863](https://github.com/openclaw/crabbox/pull/2863). Thanks @coygeek.
+
 ### Fixed
 
+- Docker Sandbox: honor cloud status waits and preserve artifact failure exit codes before cleanup. [PR 2863](https://github.com/openclaw/crabbox/pull/2863). Thanks @coygeek.
 - Parallels: an explicitly configured macOS guest user (including `crabbox`, or a generic `ssh.user` / `CRABBOX_SSH_USER`) is honored instead of being replaced by the host `USER`; the host-user fallback still applies when no guest user is configured. [PR 2958](https://github.com/openclaw/crabbox/pull/2958). Thanks @rustanacexd.
 - Parallels: Windows guest setup retries script staging after Parallels Tools loses a result, verifies the staged bootstrap by SHA-256, runs it exactly once, and confirms a lost final result through a run-specific receipt instead of failing or replaying it. [PR 2957](https://github.com/openclaw/crabbox/pull/2957). Thanks @rustanacexd.
 - CI: the serve relay test fixture forwards data only after both READY frames, matching the coordinator relay, which removes a concurrent large-transfer flake. [PR 2955](https://github.com/openclaw/crabbox/pull/2955).

@@ -3017,7 +3017,7 @@ func TestAgentSandboxConfigRejectsNegativeExecTimeout(t *testing.T) {
 func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
-	if cfg.DockerSandbox.CLIPath != "sbx" || cfg.DockerSandbox.Agent != "shell" || cfg.DockerSandbox.Workdir != "" {
+	if cfg.DockerSandbox.Target != "local" || cfg.DockerSandbox.CLIPath != "sbx" || cfg.DockerSandbox.Agent != "shell" || cfg.DockerSandbox.Workdir != "" {
 		t.Fatalf("dockerSandbox defaults not applied: %#v", cfg.DockerSandbox)
 	}
 	clone := true
@@ -3031,6 +3031,7 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	applyFileConfig(&cfg, fileConfig{
 		Provider: "docker-sandbox",
 		DockerSandbox: &fileDockerSandboxConfig{
+			Target:          "cloud",
 			CLIPath:         "/opt/sbx",
 			Agent:           "shell",
 			Template:        &template,
@@ -3043,6 +3044,9 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 			Kit:             &kit,
 		},
 	})
+	if cfg.DockerSandbox.Target != "cloud" {
+		t.Fatal("Docker Sandbox target from config was ignored")
+	}
 	if cfg.Provider != "docker-sandbox" || cfg.DockerSandbox.CLIPath != "/opt/sbx" || cfg.DockerSandbox.Template != "ubuntu" || cfg.DockerSandbox.CPUs != 2.5 || cfg.DockerSandbox.Memory != "6g" || !cfg.DockerSandbox.Clone || cfg.DockerSandbox.Workdir != "/workspace/my-app" {
 		t.Fatalf("file dockerSandbox config not applied: %#v", cfg.DockerSandbox)
 	}
@@ -3051,6 +3055,7 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 
 	t.Setenv("CRABBOX_DOCKER_SANDBOX_CLI", "/usr/local/bin/sbx")
+	t.Setenv("CRABBOX_DOCKER_SANDBOX_TARGET", "local")
 	t.Setenv("CRABBOX_DOCKER_SANDBOX_AGENT", "shell")
 	t.Setenv("CRABBOX_DOCKER_SANDBOX_TEMPLATE", "debian")
 	t.Setenv("CRABBOX_DOCKER_SANDBOX_CPUS", "4")
@@ -3062,6 +3067,9 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	t.Setenv("CRABBOX_DOCKER_SANDBOX_KIT", "kit-a,kit-b")
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatalf("applyEnv err=%v", err)
+	}
+	if cfg.DockerSandbox.Target != "local" {
+		t.Fatal("Docker Sandbox target environment did not override config")
 	}
 	if cfg.DockerSandbox.CLIPath != "/usr/local/bin/sbx" || cfg.DockerSandbox.Template != "debian" || cfg.DockerSandbox.CPUs != 4 || cfg.DockerSandbox.Memory != "8g" || cfg.DockerSandbox.Clone || cfg.DockerSandbox.Workdir != "/workspace/env-app" {
 		t.Fatalf("env dockerSandbox config not applied: %#v", cfg.DockerSandbox)
@@ -19621,7 +19629,7 @@ func TestDockerSandboxBindingEnvironmentFloatAndPartialState(t *testing.T) {
 
 func TestDockerSandboxBindingStringsAndLists(t *testing.T) {
 	clearConfigEnv(t)
-	assertDockerSandboxBindingEqual(t, baseConfig().DockerSandbox, DockerSandboxConfig{CLIPath: "sbx", Agent: "shell"})
+	assertDockerSandboxBindingEqual(t, baseConfig().DockerSandbox, DockerSandboxConfig{Target: "local", CLIPath: "sbx", Agent: "shell"})
 	for _, trusted := range []bool{false, true} {
 		for _, raw := range []string{"", "  ", "fixture"} {
 			for _, list := range []*[]string{nil, new([]string(nil)), new([]string{}), new([]string{" raw ", "", "a,b", "dup", "dup"})} {

@@ -56,7 +56,7 @@ coordinator; registered-direct mode and providers without coordinator support
 still obey the policy.
 
 Providers that provision nothing remote are always exempt: `ssh`,
-`local-container`, `docker-sandbox`, `apple-container`, `apple-machine`,
+`local-container`, `docker-sandbox` (local target only), `apple-container`, `apple-machine`,
 `apple-vm`, `anthropic-sandbox-runtime`, `mxc`, `multipass`, `firecracker`,
 `lume`, `tart`, `hyperv`, and `windows-sandbox`. Providers capable of selecting
 remote hosts, such as Parallels and Incus, are not automatically exempt.

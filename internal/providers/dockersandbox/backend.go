@@ -33,6 +33,10 @@ type backend struct {
 
 func NewBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
+	if cloudTarget(cfg) {
+		spec.Features = (Provider{}).ConfiguredFeatures(cfg)
+		return &cloudBackend{spec: spec, cfg: cfg, rt: rt}
+	}
 	return &backend{spec: spec, cfg: cfg, rt: rt}
 }
 
@@ -205,7 +209,7 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 	}
 	var servers []core.Server
 	for _, claim := range claims {
-		if claim.Provider != providerName {
+		if claim.Provider != providerName || strings.HasPrefix(claim.LeaseID, cloudLeasePrefix) || claim.ProviderScope == cloudScope {
 			continue
 		}
 		name := sandboxNameFromLeaseID(claim.LeaseID)
@@ -538,6 +542,9 @@ func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration
 		}
 		if !ok {
 			continue
+		}
+		if strings.HasPrefix(claim.LeaseID, cloudLeasePrefix) || claim.ProviderScope == cloudScope {
+			return "", "", "", core.Exit(4, "Docker cloud claim requires --docker-sandbox-target cloud")
 		}
 		if repoRoot != "" {
 			if err := core.ClaimLeaseForRepoProviderPond(claim.LeaseID, claim.Slug, providerName, claim.Pond, repoRoot, timeoutOrDefault(idleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim); err != nil {
