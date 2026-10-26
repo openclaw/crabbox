@@ -46,6 +46,9 @@
     "vitest": "^5.0.1",
     "wrangler": "^4.136.1"
   },
+  "overrides": {
+    "workerd": "1.20261021.1"
+  },
   "engines": {
     "node": ">=22.12.0"
   }
