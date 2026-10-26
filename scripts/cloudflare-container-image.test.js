@@ -7,7 +7,7 @@ const dockerfile = await readFile("worker/cloudflare-container.Dockerfile", "utf
 test("Cloudflare image pins GitHub CLI artifacts for each supported architecture", () => {
   assert.match(dockerfile, /^ARG TARGETARCH$/m);
   assert.doesNotMatch(dockerfile, /^ARG TARGETARCH=/m);
-  assert.match(dockerfile, /^ARG GH_VERSION=2\.101\.0$/m);
+  assert.match(dockerfile, /^ARG GH_VERSION=2\.102\.1$/m);
   assert.match(dockerfile, /^ARG GH_SHA256_AMD64=[0-9a-f]{64}$/m);
   assert.match(dockerfile, /^ARG GH_SHA256_ARM64=[0-9a-f]{64}$/m);
   assert.match(dockerfile, /amd64\) gh_arch="amd64"; gh_sha256="\$\{GH_SHA256_AMD64\}" ;;/);
