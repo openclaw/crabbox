@@ -141,7 +141,17 @@ func (a App) status(ctx context.Context, args []string) error {
 }
 
 func statusWaitDone(state statusView) bool {
-	return state.Ready || statusTerminalState(state.State)
+	return state.Ready || statusWaitTerminalState(state)
+}
+
+func statusWaitTerminalState(state statusView) bool {
+	if state.Retention != nil {
+		switch strings.ToLower(strings.TrimSpace(state.State)) {
+		case "suspended", "compute-expired", "deleted":
+			return true
+		}
+	}
+	return statusTerminalState(state.State)
 }
 
 func statusLeaseExactClaim(ctx context.Context, backend Backend, lease LeaseTarget, fallbackProvider, providerScope string) (leaseClaim, bool, error) {
@@ -182,8 +192,11 @@ func statusLeaseExactClaim(ctx context.Context, backend Backend, lease LeaseTarg
 }
 
 func statusWaitTerminalError(id string, state statusView) error {
-	if state.Ready || !statusTerminalState(state.State) {
+	if state.Ready || !statusWaitTerminalState(state) {
 		return nil
+	}
+	if state.Retention != nil {
+		return Exit(5, "retained lease %s is %s and cannot become ready by waiting; inspect its lifecycle receipt", id, state.State)
 	}
 	return Exit(5, "lease %s reached terminal state %s before ready", id, state.State)
 }

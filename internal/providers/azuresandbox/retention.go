@@ -69,11 +69,15 @@ func (b *backend) retentionLifecycle(ctx context.Context, id string, req core.Re
 	defer cancel()
 	// Reuse activity interruption, but the durable lifecycle intent, not this
 	// transient signal, remains authority across a crash.
-	release, err := b.interruptActivity(ctx, claim, "")
-	if err != nil {
-		return err
+	op := claim.FixedCreateIntent.Journal.Retention.Operation
+	observedResumeReplay := action == "resume" && op != nil && op.ID == req.OperationID && op.Phase == "observed"
+	if !observedResumeReplay {
+		release, err := b.interruptActivity(ctx, claim, "")
+		if err != nil {
+			return err
+		}
+		defer release()
 	}
-	defer release()
 	return core.MutateFixedRetention(ctx, leaseKind, claim, req, action, b.now, func(ctx context.Context, c core.LeaseClaim) (string, error) {
 		s, err := b.inspect(ctx, c)
 		if err != nil {

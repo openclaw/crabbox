@@ -167,6 +167,29 @@ func MutateFixedRetention(ctx context.Context, kind FixedLeaseKind, expected Lea
 	if err := ValidateRetentionLifecycleRequest(expected, req, action); err != nil {
 		return err
 	}
+	if op := expected.FixedCreateIntent.Journal.Retention.Operation; op != nil && op.ID == req.OperationID && op.Phase == "observed" {
+		// Completed replays are observations, not mutations. Share the activity
+		// fence so a duplicate resume neither cancels nor waits for admitted work.
+		return WithLeaseClaimUnchangedShared(ctx, expected.LeaseID, expected, func() error {
+			if !kind.IsFixedClaim(expected) || expected.FixedCreateIntent.Version != kind.IntentVersion {
+				return Exit(4, "retained claim changed; inspect and retry")
+			}
+			state, err := observe(ctx, expected)
+			if err != nil {
+				return err
+			}
+			target := "suspended"
+			var admissionErr error
+			if action == "resume" {
+				target = "running"
+				_, admissionErr = SessionDiskExecutionDeadline(expected, now())
+			}
+			if state != target || admissionErr != nil {
+				return Exit(4, "observed lifecycle no longer has an active target; inspect before new admission")
+			}
+			return nil
+		})
+	}
 	return WithDurableLeaseClaimLockContext(ctx, expected.LeaseID, func(claim *LeaseClaim, exists bool, persist func() error) error {
 		if !exists || !reflect.DeepEqual(*claim, expected) || !kind.IsFixedClaim(*claim) || claim.FixedCreateIntent.Version != kind.IntentVersion {
 			return Exit(4, "retained claim changed; inspect and retry")

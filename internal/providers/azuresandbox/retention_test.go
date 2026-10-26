@@ -284,6 +284,14 @@ func TestRetainedCLIExactBoundary(t *testing.T) {
 	if v.State != "suspended" || v.Ready || v.Retention.ComputeWindow.State != "closed" || v.Retention.Operation.Phase != "observed" {
 		t.Fatalf("pause receipt: %s", stdout.String())
 	}
+	stdout.Reset()
+	err := app.Run(t.Context(), append([]string{"status", "--id", id.LeaseID, "--wait", "--wait-timeout", "1s", "--json"}, common...))
+	if err == nil || !strings.Contains(err.Error(), "cannot become ready by waiting") || !strings.Contains(err.Error(), "suspended") {
+		t.Fatalf("suspended readiness wait did not return its lifecycle result: %v", err)
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &v); err != nil || v.State != "suspended" {
+		t.Fatalf("suspended wait receipt: %s %v", stdout.String(), err)
+	}
 	stop := append([]string{"stop", "--id", id.LeaseID, "--expected-provider-lease-id", id.LeaseID, "--expected-provider-attempt-lease-id", id.AttemptLeaseID, "--expected-provider-slug", id.Slug, "--expected-provider-resource-id", id.ResourceID}, common...)
 	t.Setenv("CRABBOX_CONTROLLER_PROCESS_TREE_OWNED", "1")
 	if err := app.Run(t.Context(), stop); err == nil {

@@ -197,6 +197,12 @@ until the native lifecycle owner reconciles it; Gateway outages can delay actual
 stopping. This is finite authorized work plus provider idle suspension, not a
 Gateway-independent billed-compute limit.
 
+Creation is also bounded by the original work window: an expired preparation
+or retry cannot allocate a new retained disk. Replaying a completed resume is a
+read-only exact observation and does not cancel or wait for admitted activity.
+`status --wait` exits nonzero for suspended, compute-expired or deleted retained
+leases rather than waiting for readiness that requires an explicit lifecycle action.
+
 States are `running`, `suspended`, `transitioning`, `compute-expired`, `missing`,
 `unknown`, and terminal `deleted`. Missing, uncertain policy or mismatched
 ownership must not cause replacement or a fresh native conversation. Existing

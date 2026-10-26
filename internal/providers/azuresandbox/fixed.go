@@ -182,8 +182,23 @@ func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (cor
 		},
 		ObserveExact: b.observe,
 		Submit: func(ctx context.Context, tx *core.FixedTransaction) (sandbox, error) {
+			if retention != nil {
+				deadline, err := core.SessionDiskWindowDeadline(*tx.Claim, b.now())
+				if err != nil {
+					return sandbox{}, err
+				}
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithDeadline(ctx, deadline)
+				defer cancel()
+			}
 			if err := b.verifySnapshotSource(ctx, snapshot); err != nil {
 				return sandbox{}, err
+			}
+			// Read-only prerequisites cannot authorize creation after the window.
+			if retention != nil {
+				if _, err := core.SessionDiskWindowDeadline(*tx.Claim, b.now()); err != nil {
+					return sandbox{}, err
+				}
 			}
 			body := createRequest{Resources: map[string]string{"cpu": "2000m", "memory": "4096Mi"}, Labels: maps.Clone(tx.Claim.Labels), Lifecycle: map[string]any{
 				"autoSuspendPolicy": map[string]any{"enabled": true, "interval": int(b.cfg.IdleTimeout.Seconds()), "mode": "Disk"},
