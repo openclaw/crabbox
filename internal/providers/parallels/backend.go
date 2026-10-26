@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -26,6 +27,9 @@ func NewBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 	}
 	if cfg.Parallels.WorkRoot != "" {
 		cfg.WorkRoot = cfg.Parallels.WorkRoot
+	}
+	if cfg.TargetOS == core.TargetMacOS && !cfg.Parallels.UserExplicit && cfg.SSHUser == core.BaseConfig().SSHUser {
+		cfg.SSHUser = os.Getenv("USER")
 	}
 	if cfg.SSHPort == "" {
 		cfg.SSHPort = "22"

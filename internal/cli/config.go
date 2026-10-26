@@ -449,6 +449,7 @@ type ParallelsConfig struct {
 	BootstrapKey     string
 	VMRoot           string
 	User             string
+	UserExplicit     bool
 	Password         string
 	WorkRoot         string
 	StartupTimeout   time.Duration
@@ -2903,6 +2904,9 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, "parallels", inputSource, true)
 		}
 		configInputFileString(cfg, "parallels", inputSource, &cfg.Parallels.User, file.Parallels.User)
+		if file.Parallels.User != "" {
+			cfg.Parallels.UserExplicit = true
+		}
 		// The macOS account password authenticates the local ARD viewer. A
 		// repository must not supply or replace it; use trusted user config or
 		// the environment, matching the Tart desktop credential boundary.
@@ -4318,6 +4322,9 @@ func applyEnv(cfg *Config) error {
 	cfg.Parallels.BootstrapKey = strings.TrimSpace(configInputEnvString(cfg, "parallels", cfg.Parallels.BootstrapKey, "CRABBOX_PARALLELS_BOOTSTRAP_KEY"))
 	cfg.Parallels.VMRoot = expandUserPath(configInputEnvString(cfg, "parallels", cfg.Parallels.VMRoot, "CRABBOX_PARALLELS_VM_ROOT"))
 	cfg.Parallels.User = configInputEnvString(cfg, "parallels", cfg.Parallels.User, "CRABBOX_PARALLELS_USER")
+	if _, ok := firstNonEmptyEnv("CRABBOX_PARALLELS_USER"); ok {
+		cfg.Parallels.UserExplicit = true
+	}
 	cfg.Parallels.Password = configInputEnvString(cfg, "parallels", cfg.Parallels.Password, "CRABBOX_PARALLELS_PASSWORD")
 	cfg.Parallels.WorkRoot = configInputEnvString(cfg, "parallels", cfg.Parallels.WorkRoot, "CRABBOX_PARALLELS_WORK_ROOT")
 	cfg.Parallels.MaxVMs = configInputEnvInt(cfg, "parallels", cfg.Parallels.MaxVMs, "CRABBOX_PARALLELS_MAX_VMS")
@@ -5290,6 +5297,7 @@ func ApplyParallelsTemplateConfig(cfg *Config, name string) error {
 	}
 	if template.User != "" {
 		cfg.Parallels.User = template.User
+		cfg.Parallels.UserExplicit = true
 		cfg.SSHUser = template.User
 	}
 	if template.WorkRoot != "" {
