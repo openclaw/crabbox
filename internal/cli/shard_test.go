@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -902,165 +903,319 @@ func TestShardProvisionFailureSummarySanitizesControlBytes(t *testing.T) {
 	assertTerminalSafe(t, report.Shards[0].Error)
 }
 
-// TestRunOneShardCarriesAuthorizedClaimOnly drives runOneShard with the real
-// production release bindings (checkpointForkReleaseBindings) and the outermost
-// fakeable provider delete seam (checkpointForkReleaseBackend.ReleaseLease).
+const shardAuthorityProviderName = "shard-authority-test"
+
+type shardAuthorityTestProvider struct{}
+
+func (shardAuthorityTestProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        shardAuthorityProviderName,
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
+		Coordinator: CoordinatorNever,
+	}
+}
+func (shardAuthorityTestProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (shardAuthorityTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (p shardAuthorityTestProvider) Configure(Config, Runtime) (Backend, error) {
+	if shardAuthorityTestBackend == nil {
+		return nil, errors.New("shard authority test backend not installed")
+	}
+	return shardAuthorityTestBackend, nil
+}
+
+// shardAuthorityDeleteBackend fakes only the provider Delete call. Claim
+// ownership is fenced by production RemoveLeaseClaimIfUnchangedAfter (AWS-style)
+// after refreshAuthorizedForkReleaseClaim in checkpointForkReleaseBindings.
+type shardAuthorityDeleteBackend struct {
+	spec    ProviderSpec
+	lease   LeaseTarget
+	mu      sync.Mutex
+	deletes int
+}
+
+var shardAuthorityTestBackend *shardAuthorityDeleteBackend
+
+func (b *shardAuthorityDeleteBackend) Spec() ProviderSpec { return b.spec }
+func (b *shardAuthorityDeleteBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
+	return b.lease, nil
+}
+func (b *shardAuthorityDeleteBackend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
+	return b.lease, nil
+}
+func (b *shardAuthorityDeleteBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
+	return nil, nil
+}
+func (b *shardAuthorityDeleteBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
+	server := req.Lease.Server
+	server.Provider = b.spec.Name
+	return server, nil
+}
+func (b *shardAuthorityDeleteBackend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
+func (b *shardAuthorityDeleteBackend) ReleaseLease(_ context.Context, req ReleaseLeaseRequest) error {
+	snapshot, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
+	if !set || !exists {
+		return errors.New("release missing carried claim snapshot")
+	}
+	return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, snapshot, func() error {
+		b.mu.Lock()
+		b.deletes++
+		b.mu.Unlock()
+		return nil
+	})
+}
+func (b *shardAuthorityDeleteBackend) deleteCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.deletes
+}
+
+// TestRunOneShardCarriesAuthorizedClaimOnly drives the real runOneShard →
+// runCommand → checkpointForkReleaseBindings path. Only remote SSH I/O and the
+// innermost provider Delete are faked; claim writes use the real claim store and
+// ownership is validated before any delete.
 func TestRunOneShardCarriesAuthorizedClaimOnly(t *testing.T) {
+	RegisterProvider(shardAuthorityTestProvider{})
+	t.Cleanup(func() { delete(providerRegistry, shardAuthorityProviderName) })
+
 	cases := []struct {
 		name string
-		// run simulates run --keep: returns the exact claim generation to carry,
-		// after optionally mutating disk the way a concurrent reclaim would.
-		run         func(t *testing.T, leaseID string, acquired leaseClaim, path string) leaseClaim
+		// afterRun mutates the claim store after real run --keep finished, as a
+		// concurrent reclaim would between run and shard release.
+		afterRun    func(t *testing.T, leaseID string, authorized leaseClaim)
 		wantDeletes int
 		wantRefuse  bool
 	}{
 		{
+			name:        "authorized update releases",
+			wantDeletes: 1,
+		},
+		{
 			name: "same-second reclaim refuses",
-			run: func(t *testing.T, leaseID string, acquired leaseClaim, _ string) leaseClaim {
+			afterRun: func(t *testing.T, leaseID string, authorized leaseClaim) {
 				t.Helper()
-				next := acquired
-				next.Labels = map[string]string{"run": "reclaimed"}
-				updated, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, next)
+				next := authorized
+				next.Labels = cloneStringMap(authorized.Labels)
+				if next.Labels == nil {
+					next.Labels = map[string]string{}
+				}
+				next.Labels["run"] = "reclaimed"
+				updated, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, authorized, next)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if updated.ClaimedAt != acquired.ClaimedAt {
-					t.Fatalf("ClaimedAt=%q, want same-second %q", updated.ClaimedAt, acquired.ClaimedAt)
+				if updated.ClaimedAt != authorized.ClaimedAt {
+					t.Fatalf("ClaimedAt=%q, want same-second %q", updated.ClaimedAt, authorized.ClaimedAt)
 				}
-				return acquired
 			},
 			wantRefuse: true,
 		},
 		{
 			name: "away and back (ABA) refuses",
-			run: func(t *testing.T, leaseID string, acquired leaseClaim, _ string) leaseClaim {
+			afterRun: func(t *testing.T, leaseID string, authorized leaseClaim) {
 				t.Helper()
-				foreign := acquired
+				foreign := authorized
 				foreign.RepoRoot = filepath.Join(t.TempDir(), "hijacked")
-				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, foreign); err != nil {
+				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, authorized, foreign); err != nil {
 					t.Fatal(err)
 				}
 				cur, err := ReadLeaseClaim(leaseID)
 				if err != nil {
 					t.Fatal(err)
 				}
-				back := acquired
+				back := authorized
 				back.ClaimedAt = time.Now().UTC().Add(2 * time.Second).Format(time.RFC3339)
 				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, cur, back); err != nil {
 					t.Fatal(err)
 				}
-				return acquired
 			},
 			wantRefuse: true,
 		},
 		{
 			name: "reassigned to another owner refuses",
-			run: func(t *testing.T, leaseID string, acquired leaseClaim, _ string) leaseClaim {
+			afterRun: func(t *testing.T, leaseID string, authorized leaseClaim) {
 				t.Helper()
-				next := acquired
+				next := authorized
 				next.RepoRoot = filepath.Join(t.TempDir(), "hijacked")
 				next.ClaimedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339)
-				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, next); err != nil {
+				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, authorized, next); err != nil {
 					t.Fatal(err)
 				}
-				return acquired
 			},
 			wantRefuse: true,
 		},
 		{
 			name: "revoked claim refuses",
-			run: func(t *testing.T, leaseID string, acquired leaseClaim, _ string) leaseClaim {
+			afterRun: func(t *testing.T, leaseID string, authorized leaseClaim) {
 				t.Helper()
-				revoked := acquired
+				revoked := authorized
 				revoked.CloudID = ""
 				revoked.ClaimedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339)
-				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, revoked); err != nil {
+				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, authorized, revoked); err != nil {
 					t.Fatal(err)
 				}
-				return acquired
 			},
 			wantRefuse: true,
-		},
-		{
-			name: "authorized update releases",
-			run: func(t *testing.T, leaseID string, acquired leaseClaim, _ string) leaseClaim {
-				t.Helper()
-				next := acquired
-				next.Labels = map[string]string{"run": "kept"}
-				updated, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, next)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return updated
-			},
-			wantDeletes: 1,
-		},
-		{
-			name: "missing claim file releases",
-			run: func(t *testing.T, _ string, acquired leaseClaim, path string) leaseClaim {
-				t.Helper()
-				if err := os.Remove(path); err != nil {
-					t.Fatal(err)
-				}
-				return acquired
-			},
-			wantDeletes: 1,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			const leaseID = "cbx_shardcarry01"
-			acquired := leaseClaim{
-				LeaseID: leaseID, Revision: "gen-1", Provider: "aws", ProviderScope: "us-east-1",
-				CloudID: "i-123", RepoRoot: t.TempDir(), Slug: "fork-claim",
-				ClaimedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).Format(time.RFC3339),
-			}
-			path, err := leaseClaimPath(leaseID)
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			installRecordingSSH(t, dir)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+			t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+			t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+
+			repo, err := findRepo()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			const leaseID = "cbx_shardcarry01"
+			cfg := baseConfig()
+			cfg.Provider = shardAuthorityProviderName
+			server := Server{
+				CloudID:  "i-shard-authority",
+				Provider: cfg.Provider,
+				Labels: map[string]string{
+					"lease":    leaseID,
+					"provider": cfg.Provider,
+					"slug":     "shard-authority",
+					"state":    "ready",
+				},
+			}
+			target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetLinux, SSHConfigProxy: true}
+			if err := ClaimLeaseTargetForRepoConfig(leaseID, "shard-authority", cfg, server, target, repo.Root, cfg.IdleTimeout, false); err != nil {
 				t.Fatal(err)
 			}
-			if err := writeLeaseClaimAtomic(path, acquired); err != nil {
+			acquired, err := ReadLeaseClaim(leaseID)
+			if err != nil {
 				t.Fatal(err)
 			}
-
-			server := Server{Provider: "aws", CloudID: "i-123"}
 			SetServerLeaseClaimSnapshot(&server, acquired, true)
-			backend := &checkpointForkReleaseBackend{leaseID: leaseID}
+			lease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+			backend := &shardAuthorityDeleteBackend{spec: shardAuthorityTestProvider{}.Spec(), lease: lease}
+			shardAuthorityTestBackend = backend
+			t.Cleanup(func() {
+				shardAuthorityTestBackend = nil
+				RemoveLeaseClaim(leaseID)
+			})
+
 			var stderr bytes.Buffer
-			app := App{Stdout: io.Discard, Stderr: &stderr}
-			cfg := Config{Provider: "aws"}
-			// Same constructor production provisionCheckpointForkWithoutClaim uses.
-			target := SSHTarget{}
-			release, carryReleaseClaim := app.checkpointForkReleaseBindings(&server, &target, leaseID, nil, backend, &cfg)
+			fakeOwner := func(ctx context.Context, target SSHTarget, id string, _ io.Writer) (*workspaceOwner, error) {
+				ownerCtx, cancel := context.WithCancel(ctx)
+				done := make(chan struct{})
+				close(done)
+				return &workspaceOwner{
+					target: target, transport: runRecoveryOwnerTransport{},
+					key: workspaceOwnerKey(id), token: strings.Repeat("a", 64), ttl: time.Minute,
+					ctx: ownerCtx, cancel: cancel, stop: make(chan struct{}), done: done,
+				}, nil
+			}
+			app := App{Stdout: io.Discard, Stderr: &stderr, workspaceOwnerAcquirer: fakeOwner}
+			releaseCFG := cfg
+			release, carryReleaseClaim := app.checkpointForkReleaseBindings(&server, &target, leaseID, nil, backend, &releaseCFG)
 			provision := func(context.Context, int, string) (checkpointForkProvision, error) {
 				return checkpointForkProvision{
-					Lease:             LeaseTarget{Server: server, LeaseID: leaseID},
+					Lease:             lease,
 					Release:           release,
 					carryReleaseClaim: carryReleaseClaim,
 				}, nil
 			}
-			execute := func(_ context.Context, _ int, _ []string, outcome *shardRunOutcome) error {
-				reported := tc.run(t, leaseID, acquired, path)
-				clone := cloneLeaseClaim(reported)
-				*outcome = shardRunOutcome{Recorded: true, ExitCode: 0, RunID: "run_carry", AuthorizedClaim: &clone}
+			execute := func(ctx context.Context, _ int, runArgs []string, outcome *shardRunOutcome) error {
+				shardApp := App{Stdout: io.Discard, Stderr: &stderr, runOutcome: outcome, workspaceOwnerAcquirer: fakeOwner}
+				args := append([]string{
+					"--provider", shardAuthorityProviderName,
+					"--no-sync", "--no-hydrate", "--timing-record", "off",
+				}, runArgs...)
+				if err := shardApp.runCommand(ctx, args); err != nil {
+					return err
+				}
+				if outcome.AuthorizedClaim == nil {
+					return errors.New("runCommand did not return AuthorizedClaim")
+				}
+				if tc.afterRun != nil {
+					tc.afterRun(t, leaseID, *outcome.AuthorizedClaim)
+				}
 				return nil
 			}
 			opts := shardTestOptions(1)
 			opts.Keep = false
+			opts.Command = []string{"true"}
 			result := app.runOneShard(context.Background(), func() {}, opts, &shardOutputMux{}, provision, execute, 1)
 			if !result.Recorded || result.ExitCode != 0 {
 				t.Fatalf("result=%#v stderr=%s", result, stderr.String())
 			}
-			if backend.releaseCount != tc.wantDeletes {
-				t.Fatalf("provider deletes=%d, want %d stderr=%q", backend.releaseCount, tc.wantDeletes, stderr.String())
+			if got := backend.deleteCount(); got != tc.wantDeletes {
+				t.Fatalf("provider deletes=%d, want %d stderr=%q", got, tc.wantDeletes, stderr.String())
 			}
 			if tc.wantRefuse && !strings.Contains(stderr.String(), "refusing release") {
 				t.Fatalf("stderr missing refusal:\n%s", stderr.String())
 			}
 		})
 	}
+}
+
+// TestShardV0793OnDiskSettingsAndClaimIntact loads the v0.79.3 on-disk shapes
+// (shard.maxCount-only config + claim JSON) with the current code and asserts
+// settings/claims stay intact for the shard path.
+func TestShardV0793OnDiskSettingsAndClaimIntact(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	configPath := filepath.Join(dir, "crabbox.yaml")
+	// Shape recorded at tag v0.79.3: shard.maxCount only, no maxConcurrency.
+	const v0793YAML = "shard:\n  maxCount: 12\n"
+	if err := os.WriteFile(configPath, []byte(v0793YAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", configPath)
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Shard != (ShardConfig{MaxCount: 12}) {
+		t.Fatalf("loaded shard=%#v, want maxCount=12 maxConcurrency=0 (v0.79.3 default)", cfg.Shard)
+	}
+	got, err := resolveShardConcurrency(12, 0, false, cfg.Shard.MaxConcurrency)
+	if err != nil || got != 12 {
+		t.Fatalf("concurrency=%d err=%v, want unbounded 12", got, err)
+	}
+
+	const leaseID = "cbx_v0793claim01"
+	// Minimal claim JSON matching v0.79.3's persisted fields.
+	seed := map[string]any{
+		"leaseID": leaseID, "revision": "gen-v0793", "slug": "upgrade-claim",
+		"provider": "aws", "cloudID": "i-v0793", "providerScope": "us-east-1",
+		"repoRoot": dir, "claimedAt": "2026-01-02T03:04:05Z", "lastUsedAt": "2026-01-02T03:04:05Z",
+	}
+	claimBytes, err := json.MarshalIndent(seed, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(claimBytes, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.LeaseID != leaseID || claim.Revision != "gen-v0793" || claim.CloudID != "i-v0793" || claim.Provider != "aws" {
+		t.Fatalf("claim not intact after load: %#v", claim)
+	}
+	// Binary-level upgrade smoke (builds v0.79.3 + HEAD) lives in
+	// scripts/shard-v0793-upgrade-smoke.sh so CI shard timing stays free of an
+	// extra crabbox build on this hashed shard.
 }
