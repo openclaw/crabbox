@@ -3594,7 +3594,7 @@ afterSync:
 		if streamCaptureErr != nil {
 			return recordFailure(streamCaptureErr)
 		}
-		return recordFailure(ExitError{Code: code, Message: fmt.Sprintf("remote command exited %d", code)})
+		return recordFailure(ExitError{Code: code, Message: streamFailureMessage(streamErr, fmt.Sprintf("remote command exited %d", code))})
 	}
 	return nil
 }

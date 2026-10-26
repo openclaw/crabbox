@@ -171,9 +171,9 @@ func (a App) cacheWarm(ctx context.Context, args []string) (err error) {
 	if isWindowsNativeTarget(target) {
 		remote = windowsRemoteCommandWithEnvFiles(workdir, nil, envFiles, command)
 	}
-	code := runSSHStream(ctx, target, remote, a.Stdout, a.Stderr)
+	code, streamErr := runSSHStreamResult(ctx, target, remote, a.Stdout, a.Stderr)
 	if code != 0 {
-		return ExitError{Code: code, Message: fmt.Sprintf("cache warm command exited %d", code)}
+		return ExitError{Code: code, Message: streamFailureMessage(streamErr, fmt.Sprintf("cache warm command exited %d", code))}
 	}
 	return nil
 }

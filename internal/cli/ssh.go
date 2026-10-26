@@ -1427,6 +1427,24 @@ func runIdempotentSSHGitOriginAttemptCapture(ctx context.Context, target SSHTarg
 	return output, published, lastErr
 }
 
+// commandStreamLimitError reports that local spooling of SSH output was
+// stopped, so callers can show it instead of a generic remote exit code.
+type commandStreamLimitError struct{ limit int64 }
+
+func (e *commandStreamLimitError) Error() string {
+	return fmt.Sprintf("SSH output exceeded the %d byte temporary spool limit and process suspension is unavailable to reclaim it", e.limit)
+}
+
+// streamFailureMessage prefers a local stream-limit failure over the generic
+// message built from the (kill-induced) exit code.
+func streamFailureMessage(streamErr error, fallback string) string {
+	var limitErr *commandStreamLimitError
+	if errors.As(streamErr, &limitErr) {
+		return limitErr.Error()
+	}
+	return fallback
+}
+
 func isSSHCommandExitError(err error) bool {
 	var exitErr *exec.ExitError
 	return errors.As(err, &exitErr)
