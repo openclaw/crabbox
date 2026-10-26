@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -16,11 +17,28 @@ import (
 // master amortizes authentication without leaving a ControlPersist daemon behind.
 func startWorkspaceOwnerControl(ctx context.Context, target SSHTarget) (SSHTarget, func() error, error) {
 	noop := func() error { return nil }
-	if runtime.GOOS == "windows" || target.TargetOS == targetWindows || target.NoControlMaster ||
-		target.AuthSecret || target.AuthoritativeKnownHosts || target.SSHConfigProxy || target.SSHConfigFile != "" || target.ProxyCommand != "" {
+	relay := usesServeRelay(target) && serveRelayControlsFromContext(ctx) != nil
+	if runtime.GOOS == "windows" || target.TargetOS == targetWindows ||
+		target.AuthSecret || target.AuthoritativeKnownHosts || target.SSHConfigProxy || target.SSHConfigFile != "" ||
+		(!relay && (target.NoControlMaster || target.ProxyCommand != "")) {
 		return target, noop, nil
 	}
-	if err := resolveSSHPortNoInput(ctx, &target, workspaceOwnerSSHConnectTimeoutOption, workspaceOwnerSSHConnectionAttemptsOption, io.Discard); err != nil {
+	if relay {
+		var err error
+		target, err = prepareServeRelayControl(ctx, target)
+		if err != nil {
+			return target, noop, err
+		}
+		// Renewals and release must remain independent of workload sessions.
+		target.ownerControlPath = ""
+	}
+	return startSSHControlMaster(ctx, target, workspaceOwnerSSHConnectTimeoutOption, workspaceOwnerSSHConnectionAttemptsOption)
+}
+
+func startSSHControlMaster(ctx context.Context, target SSHTarget, connectTimeout, attempts string) (SSHTarget, func() error, error) {
+	noop := func() error { return nil }
+	ctx = context.WithValue(ctx, serveRelayControlBypassKey{}, true)
+	if err := resolveSSHPortNoInput(ctx, &target, connectTimeout, attempts, io.Discard); err != nil {
 		return target, noop, err
 	}
 	session, err := newSSHTransportSession(ctx, target, false)
@@ -35,11 +53,14 @@ func startWorkspaceOwnerControl(ctx context.Context, target SSHTarget) (SSHTarge
 	controlPath := filepath.Join(dir, "control")
 	masterCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	args := []string{"-o", "ControlMaster=yes", "-o", "ControlPersist=no", "-S", controlPath, "-N"}
-	args = append(args, session.commandPrefixWithOptions(workspaceOwnerSSHConnectTimeoutOption, workspaceOwnerSSHConnectionAttemptsOption)...)
+	args = append(args, session.commandPrefixWithOptions(connectTimeout, attempts)...)
 	args = append(args, session.host())
 	master := pondMeshExecCommand(masterCtx, target, directSSHExecutable(), args...)
 	diagnostic := newSynchronizedBuffer(4096)
 	master.cmd.Stderr = &diagnostic
+	if os.Getenv("CRABBOX_SERVE_RELAY_DEBUG") == "1" {
+		master.cmd.Stderr = io.MultiWriter(master.cmd.Stderr, &serveRelayDiagnosticForwarder{out: os.Stderr})
+	}
 	if err := master.Start(); err != nil {
 		cancel()
 		return target, noop, errors.Join(err, session.Close(), os.RemoveAll(dir))
@@ -65,7 +86,11 @@ func startWorkspaceOwnerControl(ctx context.Context, target SSHTarget) (SSHTarge
 		})
 		return closeErr
 	}
-	readyCtx, readyCancel := context.WithTimeout(ctx, workspaceOwnerTransportCallBudget(sshWorkspaceOwnerTransport{target: target}))
+	budget := workspaceOwnerTransportCallBudget(sshWorkspaceOwnerTransport{target: target})
+	if seconds, err := strconv.Atoi(connectTimeout); err == nil {
+		budget = max(budget, time.Duration(seconds)*time.Second)
+	}
+	readyCtx, readyCancel := context.WithTimeout(ctx, budget)
 	defer readyCancel()
 	for {
 		select {

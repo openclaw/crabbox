@@ -1,9 +1,9 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,7 +37,7 @@ type CoordinatorClient struct {
 	checkpointSupported    bool
 }
 
-// Only a recorder-owned admission client retains this in-memory header binding.
+// Admission and original-finish recovery retain this in-memory header binding.
 type coordinatorAdmissionAuth struct {
 	captured bool
 	headers  http.Header
@@ -461,6 +461,7 @@ type CoordinatorImage struct {
 	AccountID            string                           `json:"accountId,omitempty"`
 	Project              string                           `json:"project,omitempty"`
 	ResourceID           string                           `json:"resourceID,omitempty"`
+	ResourceUniqueID     string                           `json:"resourceUniqueId,omitempty"`
 	SnapshotIDs          []string                         `json:"snapshotIds,omitempty"`
 	Snapshots            []string                         `json:"snapshots,omitempty"`
 	Direct               bool                             `json:"direct,omitempty"`
@@ -954,10 +955,13 @@ type CoordinatorUsageSummary struct {
 	ByOrg          []CoordinatorUsageGroup `json:"byOrg"`
 	ByProvider     []CoordinatorUsageGroup `json:"byProvider"`
 	ByServerType   []CoordinatorUsageGroup `json:"byServerType"`
+	ByMachine      []CoordinatorUsageGroup `json:"byMachine"`
 }
 
 type CoordinatorUsageGroup struct {
 	Key            string   `json:"key"`
+	Label          string   `json:"label,omitempty"`
+	CPUSeconds     *int64   `json:"cpuSeconds,omitempty"`
 	Leases         int      `json:"leases"`
 	ActiveLeases   int      `json:"activeLeases"`
 	RuntimeSeconds int64    `json:"runtimeSeconds"`
@@ -2524,7 +2528,15 @@ func (c *CoordinatorClient) FailRunAdmission(ctx context.Context, runID, leaseID
 }
 
 func (c *CoordinatorClient) FinishRun(ctx context.Context, runID string, exitCode int, sync, command time.Duration, log string, truncated bool, results *TestResultSummary, telemetry *RunTelemetrySummary, classification FailureClassification, receipt *terminalRunReceipt) (CoordinatorRun, error) {
-	var res CoordinatorRunResponse
+	data, err := encodeRunFinish(exitCode, sync, command, log, truncated, results, telemetry, classification, receipt)
+	if err != nil {
+		return CoordinatorRun{}, err
+	}
+	return c.finishRunBytes(ctx, runID, data)
+}
+
+// Encode once: retries and recovery must submit the original finish, not rebuild it.
+func encodeRunFinish(exitCode int, sync, command time.Duration, log string, truncated bool, results *TestResultSummary, telemetry *RunTelemetrySummary, classification FailureClassification, receipt *terminalRunReceipt) ([]byte, error) {
 	log, changed := retainedRunLogText(log, maxRunLogBytes)
 	truncated = truncated || changed
 	logChunks := splitRunLogChunks(log)
@@ -2549,7 +2561,13 @@ func (c *CoordinatorClient) FinishRun(ctx context.Context, runID string, exitCod
 	if receipt != nil {
 		body["receipt"] = receipt
 	}
-	err := c.do(ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/finish", body, &res)
+	return json.Marshal(body)
+}
+
+func (c *CoordinatorClient) finishRunBytes(ctx context.Context, runID string, data []byte) (CoordinatorRun, error) {
+	var res CoordinatorRunResponse
+	// Use the ordinary authenticated, redirect-checked transport without re-encoding.
+	err := c.doHTTP(ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(runID)+"/finish", data, true, &res)
 	return res.Run, err
 }
 
@@ -2666,8 +2684,8 @@ func (c *CoordinatorClient) Health(ctx context.Context) error {
 	return c.doRead(ctx, "/v1/health", &res)
 }
 
-// Control requests share one deadline across authentication, HTTP response bodies,
-// and eligible curl fallback. Provisioning and image operations keep their budget.
+// Control requests share one deadline across authentication and HTTP response bodies.
+// Provisioning and image operations keep their budget.
 func (c *CoordinatorClient) doControl(ctx context.Context, method, path string, body any, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, coordinatorControlTimeout)
 	defer cancel()
@@ -2690,16 +2708,7 @@ func (c *CoordinatorClient) doWithHeaders(ctx context.Context, method, path stri
 			return err
 		}
 	}
-	err = c.doHTTPWithHeaders(ctx, method, path, data, body != nil, out, headers)
-	if err == nil || !shouldUseCoordinatorCurlFallback(ctx, method, body != nil, err) {
-		return err
-	}
-	if curlErr := c.doCurl(ctx, method, path, data, body != nil, out); curlErr == nil {
-		return nil
-	} else {
-		// Keep both diagnostics and the typed fallback status for read retry policy.
-		return fmt.Errorf("%w; curl fallback failed: %w", err, curlErr)
-	}
+	return c.doHTTPWithHeaders(ctx, method, path, data, body != nil, out, headers)
 }
 
 func (c *CoordinatorClient) doHTTP(ctx context.Context, method, path string, data []byte, hasBody bool, out any) error {
@@ -2824,119 +2833,6 @@ func (c *CoordinatorClient) authorizationToken(ctx context.Context) (string, err
 	return token, nil
 }
 
-func (c *CoordinatorClient) doCurl(ctx context.Context, method, path string, data []byte, hasBody bool, out any) error {
-	config, cleanup, err := c.curlConfig(ctx, method, path, data, hasBody)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-
-	// Retain response metadata for read retries without mixing headers into logs.
-	headers, err := os.CreateTemp("", "crabbox-curl-headers-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(headers.Name())
-	defer headers.Close()
-	var extra strings.Builder
-	curlConfigValue(&extra, "dump-header", headers.Name())
-	config += extra.String()
-
-	// -q must be curl's first argument so ambient curlrc settings cannot
-	// re-enable redirects or otherwise change credential handling.
-	cmd := exec.CommandContext(ctx, "curl", "-q", "--config", "-")
-	c.applyChildEnvironment(cmd)
-	cmd.Stdin = strings.NewReader(config)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg != "" {
-			return fmt.Errorf("%v: %s", err, msg)
-		}
-		return err
-	}
-	body, status, err := splitCurlResponse(stdout.Bytes())
-	if err != nil {
-		return err
-	}
-	err = decodeCoordinatorResponse(method, path, status, bytes.NewReader(body), out)
-	var response CoordinatorHTTPError
-	if errors.As(err, &response) {
-		scanner := bufio.NewScanner(io.LimitReader(headers, 64*1024))
-		var retryAfter string
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "HTTP/") {
-				retryAfter = "" // Ignore proxy and informational response headers.
-			}
-			if name, value, ok := strings.Cut(line, ":"); ok && strings.EqualFold(name, "Retry-After") {
-				retryAfter = strings.TrimSpace(value)
-			}
-		}
-		response.retryAfter = coordinatorReadRetryAfter(retryAfter, time.Now())
-		return response
-	}
-	return err
-}
-
-func (c *CoordinatorClient) curlConfig(ctx context.Context, method, path string, data []byte, hasBody bool) (string, func(), error) {
-	var bodyPath string
-	cleanup := func() {}
-	if hasBody {
-		file, err := os.CreateTemp("", "crabbox-curl-body-*")
-		if err != nil {
-			return "", cleanup, err
-		}
-		bodyPath = file.Name()
-		cleanup = func() { _ = os.Remove(bodyPath) }
-		if _, err := file.Write(data); err != nil {
-			_ = file.Close()
-			cleanup()
-			return "", func() {}, err
-		}
-		if err := file.Close(); err != nil {
-			cleanup()
-			return "", func() {}, err
-		}
-	}
-
-	var cfg strings.Builder
-	curlConfigValue(&cfg, "url", c.BaseURL+path)
-	curlConfigValue(&cfg, "request", method)
-	curlConfigValue(&cfg, "connect-timeout", "10")
-	curlConfigValue(&cfg, "max-time", strconv.Itoa(int(coordinatorHTTPTimeout/time.Second)))
-	curlConfigFlag(&cfg, "silent")
-	curlConfigFlag(&cfg, "show-error")
-	curlConfigValue(&cfg, "output", "-")
-	curlConfigValue(&cfg, "write-out", "\n%{http_code}")
-	if hasBody {
-		curlConfigValue(&cfg, "header", "Content-Type: application/json")
-		curlConfigValue(&cfg, "data-binary", "@"+bodyPath)
-	}
-	token, err := c.authorizationToken(ctx)
-	if err != nil {
-		cleanup()
-		return "", func() {}, err
-	}
-	if token != "" {
-		curlConfigValue(&cfg, "header", "Authorization: Bearer "+token)
-	}
-	c.addCurlAccessHeaders(&cfg)
-	if owner := c.localCoordinatorOwner(ctx); owner != "" {
-		curlConfigValue(&cfg, "header", "X-Crabbox-Owner: "+owner)
-	}
-	if org := os.Getenv("CRABBOX_ORG"); org != "" {
-		curlConfigValue(&cfg, "header", "X-Crabbox-Org: "+org)
-	}
-	if err := ctx.Err(); err != nil {
-		cleanup()
-		return "", func() {}, err
-	}
-	return cfg.String(), cleanup, nil
-}
-
 func (c *CoordinatorClient) addAccessHeaders(header http.Header) {
 	if c.Access.ClientID != "" && c.Access.ClientSecret != "" {
 		header.Set("CF-Access-Client-Id", c.Access.ClientID)
@@ -2945,36 +2841,6 @@ func (c *CoordinatorClient) addAccessHeaders(header http.Header) {
 	if c.Access.Token != "" {
 		header.Set("cf-access-token", c.Access.Token)
 	}
-}
-
-func (c *CoordinatorClient) addCurlAccessHeaders(cfg *strings.Builder) {
-	if c.Access.ClientID != "" && c.Access.ClientSecret != "" {
-		curlConfigValue(cfg, "header", "CF-Access-Client-Id: "+c.Access.ClientID)
-		curlConfigValue(cfg, "header", "CF-Access-Client-Secret: "+c.Access.ClientSecret)
-	}
-	if c.Access.Token != "" {
-		curlConfigValue(cfg, "header", "cf-access-token: "+c.Access.Token)
-	}
-}
-
-func curlConfigValue(out *strings.Builder, key, value string) {
-	fmt.Fprintf(out, "%s = %s\n", key, strconv.Quote(value))
-}
-
-func curlConfigFlag(out *strings.Builder, key string) {
-	fmt.Fprintln(out, key)
-}
-
-func splitCurlResponse(data []byte) ([]byte, int, error) {
-	idx := bytes.LastIndexByte(data, '\n')
-	if idx < 0 || idx+1 >= len(data) {
-		return nil, 0, fmt.Errorf("curl response missing status")
-	}
-	status, err := strconv.Atoi(strings.TrimSpace(string(data[idx+1:])))
-	if err != nil {
-		return nil, 0, fmt.Errorf("curl response invalid status: %w", err)
-	}
-	return data[:idx], status, nil
 }
 
 func decodeCoordinatorResponse(method, path string, statusCode int, body io.Reader, out any) error {
@@ -3011,27 +2877,14 @@ func isCoordinatorTransportError(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	// TLS identity and trust rejections are final, including hardened verifier policy.
+	// A different transport or CA store must not override that decision.
+	var verification *tls.CertificateVerificationError
+	if errors.As(err, &verification) {
+		return false
+	}
 	var urlErr *url.Error
 	return errors.As(err, &urlErr)
-}
-
-func shouldUseCoordinatorCurlFallback(ctx context.Context, method string, hasBody bool, err error) bool {
-	if ctx.Err() != nil || hasBody || errors.Is(err, context.Canceled) {
-		return false
-	}
-	switch method {
-	case http.MethodGet, http.MethodHead:
-	default:
-		return false
-	}
-	if isCoordinatorTransportError(err) {
-		return true
-	}
-	// A dial timeout can match DeadlineExceeded while the request budget is live.
-	var urlErr *url.Error
-	var dialErr *net.OpError
-	return errors.As(err, &urlErr) && errors.As(urlErr.Err, &dialErr) &&
-		dialErr.Op == "dial" && dialErr.Timeout()
 }
 
 func (c *CoordinatorClient) applyChildEnvironment(cmd *exec.Cmd) {

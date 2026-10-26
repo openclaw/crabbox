@@ -60,8 +60,14 @@ describe("lease lifetime policy", () => {
   it.each([
     "{",
     "[]",
+    '{"unknown":{}}',
+    '{"owners":{"alice":{"maxTTLSeconds":"7200"}}}',
+    '{"owners":{"alice":{"defaultTTLSeconds":1.5}}}',
+    '{"owners":{"alice":{"defaultIdleTimeoutSeconds":0}}}',
     '{"owners":{"alice":{"maxTTLSeconds":86401}}}',
     '{"owners":{"alice":{"extension":"yes"}}}',
+    '{"owners":{"alice":{"autoExtend":true}}}',
+    '{"owners":{"alice":{"runtimeExtension":true}}}',
     '{"orgs":{"team":{"defaultTTLSeconds":3600}},"owners":{"bob":{"maxTTLSeconds":0}}}',
   ])("rejects the entire invalid override document %s", (overrides) => {
     const env = { CRABBOX_LEASE_POLICY_OVERRIDES: overrides };

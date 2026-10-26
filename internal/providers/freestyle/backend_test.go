@@ -1036,11 +1036,8 @@ func TestFreestyleCreateSandboxWorksWithoutWorkdir(t *testing.T) {
 	if client.createReq == nil {
 		t.Fatal("create request was nil")
 	}
-	if client.createReq.Template != nil {
-		t.Fatalf("create template=%#v want omitted", client.createReq.Template)
-	}
-	if client.createReq.Ports == nil || len(client.createReq.Ports) != 0 {
-		t.Fatalf("create ports=%#v want explicit empty array", client.createReq.Ports)
+	if client.createReq.VCPUs != 0 || client.createReq.MemoryGB != 0 {
+		t.Fatalf("create sizing=%#v want omitted", client.createReq)
 	}
 }
 
@@ -1061,11 +1058,8 @@ func TestFreestyleCreateSandboxPassesNameWithoutWorkdir(t *testing.T) {
 	if !strings.HasPrefix(client.createReq.Name, "crabbox-repo-") {
 		t.Fatalf("name=%q", client.createReq.Name)
 	}
-	if client.createReq.Template == nil || client.createReq.Template.VcpuCount != 4 || client.createReq.Template.MemSizeGb != 8 {
-		t.Fatalf("create template=%#v", client.createReq.Template)
-	}
-	if client.createReq.Ports == nil || len(client.createReq.Ports) != 0 {
-		t.Fatalf("create ports=%#v want explicit empty array", client.createReq.Ports)
+	if client.createReq.VCPUs != 4 || client.createReq.MemoryGB != 8 {
+		t.Fatalf("create sizing=%#v", client.createReq)
 	}
 }
 
@@ -1561,6 +1555,7 @@ func TestFreestyleOwnershipRequiresCanonicalGeneratedName(t *testing.T) {
 
 type fakeFreestyleClient struct {
 	createID          string
+	createState       string
 	createReq         *freestyleCreateVMRequest
 	create            func() error
 	getVM             freestyleVM
@@ -1593,7 +1588,11 @@ func (f *fakeFreestyleClient) CreateVM(_ context.Context, req freestyleCreateVMR
 	if id == "" {
 		id = "vm-test-abcdef"
 	}
-	return freestyleVM{ID: id, State: "running"}, nil
+	state := f.createState
+	if state == "" {
+		state = "running"
+	}
+	return freestyleVM{ID: id, State: state}, nil
 }
 
 func (f *fakeFreestyleClient) GetVM(_ context.Context, id string) (freestyleVM, error) {
@@ -1643,10 +1642,6 @@ func (f *fakeFreestyleClient) WriteFile(ctx context.Context, _ string, path, con
 		return f.writeFileErr
 	}
 	return nil
-}
-
-func (f *fakeFreestyleClient) ReadFile(_ context.Context, _, _ string) (string, error) {
-	return "", nil
 }
 
 func (f *fakeFreestyleClient) commandContains(value string) bool {
@@ -1890,7 +1885,7 @@ func TestFreestyleUploadNativeAttemptIsolation(t *testing.T) {
 					t.Fatalf("fallback bytes changed: %v", err)
 				}
 			}
-			if chunks != 3 {
+			if chunks != 4 {
 				t.Fatalf("chunk count=%d", chunks)
 			}
 			for _, suffix := range []string{".api", ".exec.b64", ".exec"} {

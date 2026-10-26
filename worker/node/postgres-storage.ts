@@ -82,21 +82,10 @@ export class PostgresCoordinatorStorage implements CoordinatorStorage {
     return row ? decodeStoredValue<T>(row.encoded_value) : undefined;
   }
 
-  async list<T>({
-    prefix = "",
-    limit,
-    startAfter,
-  }: {
-    prefix?: string;
-    limit?: number;
-    startAfter?: string;
-    noCache?: boolean;
-  } = {}): Promise<Map<string, T>> {
-    return this.view.list<T>({
-      prefix,
-      ...(limit === undefined ? {} : { limit }),
-      ...(startAfter === undefined ? {} : { startAfter }),
-    });
+  async list<T>(
+    options: NonNullable<Parameters<CoordinatorStorageView["list"]>[0]> = {},
+  ): Promise<Map<string, T>> {
+    return this.view.list<T>(options);
   }
 
   async transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T> {
@@ -215,14 +204,12 @@ class PostgresCoordinatorStorageView implements CoordinatorStorageView {
     prefix = "",
     limit,
     startAfter,
-  }: {
-    prefix?: string;
-    limit?: number;
-    startAfter?: string;
-    noCache?: boolean;
-  } = {}): Promise<Map<string, T>> {
+    end,
+    reverse,
+  }: NonNullable<Parameters<CoordinatorStorageView["list"]>[0]> = {}): Promise<Map<string, T>> {
     const values: unknown[] = [`${escapeLike(prefix)}%`];
     const afterClause = startAfter ? `and key > $${values.push(startAfter)}` : "";
+    const endClause = end === undefined ? "" : `and key < $${values.push(end)}`;
     const limitClause = limit === undefined ? "" : `limit $${values.push(limit)}`;
     const result = await this.query<{ key: string; encoded_value: unknown }>(
       `
@@ -234,7 +221,8 @@ class PostgresCoordinatorStorageView implements CoordinatorStorageView {
         from ${table}
         where key like $1 escape '\\'
         ${afterClause}
-        order by key
+        ${endClause}
+        order by key ${reverse ? "desc" : "asc"}
         ${limitClause}
       `,
       values,

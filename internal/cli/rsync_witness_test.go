@@ -85,16 +85,30 @@ func TestRsyncReceiverWitnessReusedLease(t *testing.T) {
 	if runtime.GOOS == "darwin" && binary != "/usr/bin/rsync" {
 		t.Run("openrsync", func(t *testing.T) { testRsyncReceiverWitnessReusedLease(t, "/usr/bin/rsync", binary) })
 	}
+	t.Run("fish", func(t *testing.T) {
+		fish, err := exec.LookPath("fish")
+		if err != nil {
+			t.Skip("fish unavailable")
+		}
+		t.Run("default", func(t *testing.T) {
+			testRsyncReceiverWitnessReusedLease(t, binary, binary, fish, "--no-config", "-c")
+		})
+		if runtime.GOOS == "darwin" && binary != "/usr/bin/rsync" {
+			t.Run("openrsync", func(t *testing.T) {
+				testRsyncReceiverWitnessReusedLease(t, "/usr/bin/rsync", binary, fish, "--no-config", "-c")
+			})
+		}
+	})
 }
 
-func testRsyncReceiverWitnessReusedLease(t *testing.T, binary, serverBinary string) {
+func testRsyncReceiverWitnessReusedLease(t *testing.T, binary, serverBinary string, loginShell ...string) {
 	home, bin := t.TempDir(), t.TempDir()
-	installLocalRsyncSSH(t, bin)
+	installLocalRsyncSSH(t, bin, loginShell...)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	writeExecutable(t, filepath.Join(bin, "rsync"), "#!/bin/sh\n"+`[ "$(sed -n '1p' "$child")" = "$$" ] || exit 73`+"\nexec "+shellQuote(serverBinary)+` "$@"`+"\n")
 	t.Setenv("HOME", home)
 	shell := filepath.Join(bin, "remote-shell")
-	writeExecutable(t, shell, "#!/bin/sh\nshift\nexec /bin/sh -c \"$*\"\n")
+	writeExecutable(t, shell, "#!/bin/sh\nshift\nexec "+rsyncTestLoginShell(loginShell)+" \"$*\"\n")
 	source, remote := t.TempDir(), filepath.Join(t.TempDir(), "remote")
 	name := "payload name's\n.txt"
 	key := workspaceOwnerKey("reused-rsync-receiver")
@@ -198,11 +212,56 @@ cat >/dev/null
 	}
 }
 
-func installLocalRsyncSSH(t *testing.T, bin string) {
+func TestRsyncReceiverStagingFailure(t *testing.T) {
+	for _, failure := range []string{"owner-mismatch", "chmod"} {
+		t.Run(failure, func(t *testing.T) {
+			home, bin := t.TempDir(), t.TempDir()
+			t.Setenv("HOME", home)
+			installLocalRsyncSSH(t, bin)
+			chmod, err := exec.LookPath("chmod")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			owner := &workspaceOwner{key: workspaceOwnerKey(t.Name()), token: strings.Repeat("a", 64)}
+			req := workspaceOwnerRemoteRequest{Action: workspaceOwnerAcquire, Key: owner.key, Token: owner.token, TTL: time.Minute}
+			if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(req)); err != nil || out != "ACQUIRED" {
+				t.Fatalf("acquire: %q %v", out, err)
+			}
+			if failure == "owner-mismatch" {
+				owner.token = strings.Repeat("b", 64)
+			} else {
+				writeExecutable(t, filepath.Join(bin, "chmod"), "#!/bin/sh\ncase \"$2\" in *.rsync.*) exit 75 ;; esac\nexec "+shellQuote(chmod)+" \"$@\"\n")
+			}
+			_, err = stageRsyncWorkspaceReceiver(t.Context(), SSHTarget{Host: "local", Port: "22", NoControlMaster: true}, owner)
+			prefix := `stage rsync workspace receiver "~/.crabbox/workspace-owners/` + owner.key + ".rsync." + owner.token + "."
+			if err == nil || !strings.Contains(err.Error(), prefix) || !strings.Contains(err.Error(), "exit status") {
+				t.Fatalf("missing receiver setup context: %v", err)
+			}
+			matches, err := filepath.Glob(filepath.Join(home, ".crabbox", "workspace-owners", "*.rsync.*"))
+			if err != nil || len(matches) != 0 {
+				t.Fatalf("failed staging left receiver files: %v, %v", matches, err)
+			}
+		})
+	}
+}
+
+func rsyncTestLoginShell(args []string) string {
+	if len(args) == 0 {
+		args = []string{"/bin/sh", "-c"}
+	}
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		quoted[i] = shellQuote(arg)
+	}
+	return strings.Join(quoted, " ")
+}
+
+func installLocalRsyncSSH(t *testing.T, bin string, loginShell ...string) {
 	t.Helper()
 	ssh, err := exec.LookPath("ssh")
 	if err != nil {
 		t.Skip("SSH unavailable")
 	}
-	writeExecutable(t, filepath.Join(bin, "ssh"), "#!/bin/sh\nfor arg do\n if [ \"$arg\" = -G ]; then exec "+shellQuote(ssh)+" \"$@\"; fi\ndone\nfor arg do remote=$arg; done\nexec /bin/sh -c \"$remote\"\n")
+	writeExecutable(t, filepath.Join(bin, "ssh"), "#!/bin/sh\nfor arg do\n if [ \"$arg\" = -G ]; then exec "+shellQuote(ssh)+" \"$@\"; fi\ndone\nfor arg do remote=$arg; done\nexec "+rsyncTestLoginShell(loginShell)+" \"$remote\"\n")
 }

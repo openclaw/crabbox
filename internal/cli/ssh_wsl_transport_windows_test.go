@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openclaw/crabbox/internal/privatefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -468,7 +469,7 @@ func writeWSLStageReady(t *testing.T, home, nonce string, data []byte) string {
 
 func createWindowsStageTestDirectory(t *testing.T, path string) {
 	t.Helper()
-	security, _, err := privateWindowsSecurityAttributes(true)
+	security, _, err := privatefile.WindowsAttributes(true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,7 +568,7 @@ func TestWSLStageRootPreparationSecuresInheritedWindowsACL(t *testing.T) {
 				if err := os.MkdirAll(root, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				user, err := currentWindowsUserSID()
+				user, err := privatefile.WindowsUserSID()
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -702,7 +703,7 @@ func TestWSLStageRootPreparationSecuresInheritedWindowsACL(t *testing.T) {
 			if err := os.MkdirAll(root, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			user, err := currentWindowsUserSID()
+			user, err := privatefile.WindowsUserSID()
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSSHCommandEnvRejectsLostOwnerWithFreshContext(t *testing.T) {
@@ -177,6 +178,34 @@ func TestSSHCommandEnvWindowsRoundTrip(t *testing.T) {
 	}
 	if strings.Index(upload, "Set-Acl") > strings.Index(upload, "[IO.File]::Open") {
 		t.Fatal("Windows upload writes before restricting access")
+	}
+}
+
+func TestSSHCommandEnvWindowsCleanupProbe(t *testing.T) {
+	pwsh, err := exec.LookPath("pwsh")
+	if err != nil {
+		t.Skip("PowerShell unavailable")
+	}
+	workdir := t.TempDir()
+	path := ".crabbox/env-fixture/values.ps1"
+	mustWriteTestFile(t, filepath.Join(workdir, path), "synthetic environment")
+	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	probe := decodePowerShellCommand(t, probeSSHCommandEnvCommand(target, workdir, path))
+	for _, state := range []string{"file=present dir=present", "file=absent dir=present", "file=absent dir=absent"} {
+		cmd := exec.CommandContext(t.Context(), pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", probe)
+		out, err := cmd.CombinedOutput()
+		if err != nil || strings.TrimSpace(string(out)) != state {
+			t.Fatalf("Windows cleanup probe: want=%q got=%q err=%v", state, out, err)
+		}
+		switch state {
+		case "file=present dir=present":
+			err = os.Remove(filepath.Join(workdir, path))
+		case "file=absent dir=present":
+			err = os.Remove(filepath.Join(workdir, shellDir(path)))
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -355,7 +384,7 @@ func TestRunEnvCleanupFailurePreservesWorkloadStatusAndRedactsOutput(t *testing.
 		wantStatus RunStatus
 		wantKind   RunErrorKind
 	}{
-		{"success", nil, 7, RunStatusFailed, RunErrorProvider},
+		{"success", nil, 0, RunStatusSucceeded, RunErrorNone},
 		{"workload failure", Exit(23, "workload exited 23"), 23, RunStatusFailed, RunErrorProvider},
 		{"timeout", context.DeadlineExceeded, 1, RunStatusTimedOut, RunErrorTimeout},
 		{"cancellation", context.Canceled, 1, RunStatusCanceled, RunErrorCanceled},
@@ -368,10 +397,21 @@ func TestRunEnvCleanupFailurePreservesWorkloadStatusAndRedactsOutput(t *testing.
 			isolateTestUserDirs(t)
 			dir := t.TempDir()
 			workdir := t.TempDir()
+			// A nonempty directory is harmless once the forwarded file is gone.
+			if test.workload == nil {
+				t.Setenv("CRABBOX_ENV_REMOVE_FILE", "1")
+			}
 			mustWriteTestFile(t, filepath.Join(dir, "ssh"), `#!/bin/sh
 for arg do remote=$arg; done
 case "$remote" in
- *'rm -f --'*) printf 'secret-cleanup-canary' >&2;exit 9 ;;
+ *'rm -f --'*)
+   if [ "${CRABBOX_ENV_REMOVE_FILE:-}" = 1 ]; then
+     for file in "$CRABBOX_ENV_WORKDIR"/.crabbox/env-*/values.sh; do
+       rm -f -- "$file"
+       touch "${file%/*}/stray"
+     done
+   fi
+   printf 'secret-cleanup-canary' >&2; exit 9 ;;
  *) /bin/sh -c "$remote" ;;
 esac
 `)
@@ -379,6 +419,7 @@ esac
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_ENV_WORKDIR", workdir)
 			var diagnostics bytes.Buffer
 			prepared, err := stageSSHCommandEnv(t.Context(), SSHTarget{Host: "fixture.invalid", User: "fixture", Port: "22", TargetOS: targetLinux}, workdir, map[string]string{"TEST_VALUE": "secret-cleanup-canary"}, &diagnostics)
 			if err != nil {
@@ -386,8 +427,19 @@ esac
 			}
 			err = test.workload
 			prepared.closeAfter(&err)
-			if ExitCodeForError(err, 1) != test.wantCode || !strings.Contains(err.Error(), "environment cleanup failed") || !strings.Contains(err.Error(), shellDir(prepared.File)) {
+			code := 0
+			if err != nil {
+				code = ExitCodeForError(err, 1)
+			}
+			if code != test.wantCode {
 				t.Fatalf("cleanup result=%v", err)
+			}
+			if test.workload == nil {
+				if err != nil || !strings.Contains(diagnostics.String(), "warning:") || !strings.Contains(diagnostics.String(), shellDir(prepared.File)) {
+					t.Fatalf("harmless leftover directory: error=%v diagnostics=%s", err, &diagnostics)
+				}
+			} else if !strings.Contains(err.Error(), "is still present") || !strings.Contains(err.Error(), prepared.File) {
+				t.Fatalf("missing file cleanup diagnostic: %v", err)
 			}
 			if test.workload != nil && (!errors.Is(err, test.workload) || !strings.HasPrefix(err.Error(), test.workload.Error())) {
 				t.Fatalf("workload error lost precedence: %v", err)
@@ -395,10 +447,119 @@ esac
 			if RunStatusForResult(RunResult{}, err) != test.wantStatus || RunErrorKindForResult(RunResult{}, err) != test.wantKind {
 				t.Fatalf("cleanup changed primary classification: %v", err)
 			}
-			if strings.Contains(err.Error()+diagnostics.String(), "secret-cleanup-canary") {
+			if strings.Contains(fmt.Sprint(err)+diagnostics.String(), "secret-cleanup-canary") {
 				t.Fatal("cleanup output leaked")
 			}
 		})
+	}
+}
+
+func TestSSHCommandEnvCleanupVerification(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX SSH fixture")
+	}
+	shells := []string{"/bin/sh"}
+	if fish, err := exec.LookPath("fish"); err == nil {
+		shells = append(shells, fish)
+	}
+	for _, loginShell := range shells {
+		for _, test := range []struct {
+			name, cleanup, probe, wantMessage string
+			wantCode                          int
+			wantWarning                       bool
+		}{
+			{name: "removed after failed acknowledgement", cleanup: "removed"},
+			{name: "removed after cleanup timeout", cleanup: "timeout"},
+			{name: "stray file", cleanup: "stray", wantWarning: true},
+			{name: "file remains", wantCode: 7, wantMessage: "is still present"},
+			{name: "probe fails", probe: "failure", wantCode: 7, wantMessage: "could not confirm removal"},
+			{name: "probe times out", probe: "timeout", wantCode: 7, wantMessage: "could not confirm removal"},
+			{name: "probe output invalid", probe: "invalid", wantCode: 7, wantMessage: "could not confirm removal"},
+			{name: "directory inaccessible", cleanup: "inaccessible", wantCode: 7, wantMessage: "could not confirm removal"},
+		} {
+			t.Run(filepath.Base(loginShell)+"/"+test.name, func(t *testing.T) {
+				// Exercise real deadline expiry once; the remaining cases also run
+				// through Fish to catch accidental login-shell interpretation.
+				if loginShell != "/bin/sh" && (test.cleanup == "timeout" || test.probe == "timeout") {
+					t.Skip("deadline covered with sh")
+				}
+				isolateTestUserDirs(t)
+				dir, workdir := t.TempDir(), t.TempDir()
+				t.Setenv("CRABBOX_ENV_LOGIN_SHELL", loginShell)
+				t.Setenv("CRABBOX_ENV_CLEANUP", test.cleanup)
+				t.Setenv("CRABBOX_ENV_PROBE", test.probe)
+				t.Setenv("CRABBOX_ENV_WORKDIR", workdir)
+				t.Setenv("CRABBOX_ENV_PENDING_CLEANUP", filepath.Join(dir, "pending-cleanup"))
+				logPath := installRecordingSSH(t, dir, `
+case "$match" in
+  *'rm -f --'*)
+    printf 'secret-cleanup-canary' >&2
+    case "$CRABBOX_ENV_CLEANUP" in
+      removed) "$CRABBOX_ENV_LOGIN_SHELL" -c "$cmd" || exit $? ;;
+      timeout) printf '%s' "$cmd" > "$CRABBOX_ENV_PENDING_CLEANUP" ;;
+      stray)
+        for file in "$CRABBOX_ENV_WORKDIR"/.crabbox/env-*/values.sh; do
+          /bin/rm -f -- "$file"
+          /usr/bin/touch "${file%/*}/stray"
+        done ;;
+      inaccessible) /bin/chmod 000 "$CRABBOX_ENV_WORKDIR"/.crabbox/env-* ;;
+    esac
+    if [ "$CRABBOX_ENV_CLEANUP" = timeout ]; then exec /bin/sleep 60; fi
+    exit 9 ;;
+  *'file=absent'*|*'file=present'*)
+    printf 'secret-probe-canary' >&2
+    if [ "$CRABBOX_ENV_CLEANUP" = timeout ]; then
+      # Simulate remote cleanup completing after the client timed out.
+      pending=$(/bin/cat "$CRABBOX_ENV_PENDING_CLEANUP")
+      "$CRABBOX_ENV_LOGIN_SHELL" -c "$pending" || exit $?
+    fi
+    case "$CRABBOX_ENV_PROBE" in
+      failure) exit 9 ;;
+      timeout) exec /bin/sleep 60 ;;
+      invalid) printf 'secret-probe-canary'; exit 0 ;;
+    esac ;;
+esac
+exec "$CRABBOX_ENV_LOGIN_SHELL" -c "$cmd"
+`)
+				var diagnostics bytes.Buffer
+				ctx, cancel := context.WithCancel(t.Context())
+				prepared, err := stageSSHCommandEnv(ctx, SSHTarget{Host: "fixture.invalid", User: "fixture", Port: "22", TargetOS: targetLinux}, workdir, map[string]string{"TEST_VALUE": "secret-cleanup-canary"}, &diagnostics)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(filepath.Join(workdir, shellDir(prepared.File)), 0700) })
+				cancel() // Cleanup and verification must each get their own budget.
+				started := time.Now()
+				prepared.closeAfter(&err)
+				elapsed := time.Since(started)
+				if ExitCodeForError(err, 0) != test.wantCode || (test.wantMessage != "" && (err == nil || !strings.Contains(err.Error(), test.wantMessage) || !strings.Contains(err.Error(), prepared.File))) {
+					t.Fatalf("cleanup result=%v, want code=%d message=%q", err, test.wantCode, test.wantMessage)
+				}
+				if strings.Contains(diagnostics.String(), "warning:") != test.wantWarning || (test.wantWarning && !strings.Contains(diagnostics.String(), shellDir(prepared.File))) {
+					t.Fatalf("cleanup diagnostics=%q", diagnostics.String())
+				}
+				if !test.wantWarning && diagnostics.Len() != 0 {
+					t.Fatalf("unexpected cleanup diagnostics: %s", &diagnostics)
+				}
+				if strings.Contains(fmt.Sprint(err)+diagnostics.String(), "canary") {
+					t.Fatal("cleanup/probe output leaked")
+				}
+				minimum := 9 * time.Second
+				if test.cleanup == "timeout" {
+					minimum = 14 * time.Second
+				}
+				if (test.cleanup == "timeout" || test.probe == "timeout") && (elapsed < minimum || elapsed > 35*time.Second) {
+					t.Fatalf("cleanup/verification deadline not enforced: %v", elapsed)
+				}
+				commands, err := os.ReadFile(logPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Count(string(commands), "rm -f --") != 1 || strings.Count(string(commands), "file=present") != 1 {
+					t.Fatalf("expected one cleanup and one verification probe: %s", commands)
+				}
+			})
+		}
 	}
 }
 

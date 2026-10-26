@@ -551,7 +551,8 @@ func TestNormalizeTargetConfigWorkRoots(t *testing.T) {
 			wantRoot: "/Users/alice/crabbox",
 		},
 		{
-			name: "static macOS uses explicit SSH user",
+			// StaticLease connects as static.user, so the root follows it.
+			name: "static macOS root follows static user over explicit SSH user",
 			configure: func(cfg *Config) {
 				cfg.Provider = staticProvider
 				cfg.TargetOS = targetMacOS
@@ -560,7 +561,7 @@ func TestNormalizeTargetConfigWorkRoots(t *testing.T) {
 				MarkSSHUserExplicit(cfg)
 			},
 			wantUser: "builder",
-			wantRoot: "/Users/builder/crabbox",
+			wantRoot: "/Users/alice/crabbox",
 		},
 		{
 			name: "static macOS preserves static work root",
@@ -640,6 +641,125 @@ func TestNormalizeTargetConfigWorkRoots(t *testing.T) {
 			}
 			if cfg.WorkRoot != tt.wantRoot {
 				t.Fatalf("WorkRoot=%q want %q", cfg.WorkRoot, tt.wantRoot)
+			}
+		})
+	}
+}
+
+func TestRunConfigStaticMacOSWorkRootFollowsStaticLoginUser(t *testing.T) {
+	staticMacOS := []string{"--provider", "ssh", "--target", "macos", "--static-host", "192.0.2.10"}
+	tests := []struct {
+		name      string
+		file      string
+		env       map[string]string
+		args      []string
+		wantLogin string
+		wantRoot  string
+	}{
+		{
+			name:      "flag user",
+			args:      append(staticMacOS, "--static-user", "alice"),
+			wantLogin: "alice",
+			wantRoot:  "/Users/alice/crabbox",
+		},
+		{
+			name:      "flag user over config user",
+			file:      "static:\n  user: bob\n",
+			args:      append(staticMacOS, "--static-user", "alice"),
+			wantLogin: "alice",
+			wantRoot:  "/Users/alice/crabbox",
+		},
+		{
+			name:      "flag user over environment user",
+			env:       map[string]string{"CRABBOX_STATIC_USER": "bob"},
+			args:      append(staticMacOS, "--static-user", "alice"),
+			wantLogin: "alice",
+			wantRoot:  "/Users/alice/crabbox",
+		},
+		{
+			name:      "flag user with config target",
+			file:      "target: macos\n",
+			args:      []string{"--provider", "ssh", "--static-host", "192.0.2.10", "--static-user", "alice"},
+			wantLogin: "alice",
+			wantRoot:  "/Users/alice/crabbox",
+		},
+		{
+			name:      "explicit default SSH user with config static user",
+			file:      "static:\n  user: alice\n",
+			env:       map[string]string{"CRABBOX_SSH_USER": "crabbox"},
+			args:      staticMacOS,
+			wantLogin: "alice",
+			wantRoot:  "/Users/alice/crabbox",
+		},
+		{
+			name:      "explicit SSH user with static user flag",
+			env:       map[string]string{"CRABBOX_SSH_USER": "builder"},
+			args:      append(staticMacOS, "--static-user", "alice"),
+			wantLogin: "alice",
+			wantRoot:  "/Users/alice/crabbox",
+		},
+		{
+			name:      "explicit SSH user with config static user and flag",
+			file:      "static:\n  user: bob\n",
+			env:       map[string]string{"CRABBOX_SSH_USER": "builder"},
+			args:      append(staticMacOS, "--static-user", "alice"),
+			wantLogin: "alice",
+			wantRoot:  "/Users/alice/crabbox",
+		},
+		{
+			name:      "explicit SSH user without static user",
+			env:       map[string]string{"CRABBOX_SSH_USER": "builder"},
+			args:      staticMacOS,
+			wantLogin: "builder",
+			wantRoot:  "/Users/builder/crabbox",
+		},
+		{
+			name:      "explicit work root still wins",
+			file:      "workRoot: /Users/bob/crabbox\n",
+			args:      append(staticMacOS, "--static-user", "alice"),
+			wantLogin: "alice",
+			wantRoot:  "/Users/bob/crabbox",
+		},
+		{
+			name:      "static work root flag still wins",
+			args:      append(staticMacOS, "--static-user", "alice", "--static-work-root", "/Volumes/build/crabbox"),
+			wantLogin: "alice",
+			wantRoot:  "/Volumes/build/crabbox",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			t.Setenv("HOME", dir)
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, ".crabbox.yaml"))
+			if tt.file != "" {
+				if err := os.WriteFile(filepath.Join(dir, ".crabbox.yaml"), []byte(tt.file), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for name, value := range tt.env {
+				t.Setenv(name, value)
+			}
+			fs := newFlagSet("run", io.Discard)
+			flags := registerRunFlags(fs, defaultConfig(), ordinaryLeaseCreateFlagRegistrationOptions())
+			if err := parseFlags(fs, tt.args); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := loadRunConfig(fs, flags, leaseFlagTarget{}, false, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, target, _, err := StaticLease(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if target.User != tt.wantLogin || cfg.WorkRoot != tt.wantRoot {
+				t.Fatalf("login=%q WorkRoot=%q want login=%q WorkRoot=%q", target.User, cfg.WorkRoot, tt.wantLogin, tt.wantRoot)
 			}
 		})
 	}

@@ -47,21 +47,30 @@ esac
 }
 
 func TestCheckpointReservationHoldsClaimlessContainerCleanup(t *testing.T) {
-	for _, dryRun := range []bool{false, true} {
-		t.Run(fmt.Sprint(dryRun), func(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		dryRun  bool
+		capture string
+	}{
+		{name: "historical"},
+		{name: "historical dry-run", dryRun: true},
+		{name: "in-flight", capture: `,"capture":{"sourceDisposition":"retire","phase":"pending"}`},
+		{name: "in-flight dry-run", dryRun: true, capture: `,"capture":{"sourceDisposition":"retire","phase":"pending"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			const id = "cbx_abcdef123456"
 			dir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "checkpoints", "chk_capture_hold")
 			if err := os.MkdirAll(dir, 0700); err != nil {
 				t.Fatal(err)
 			}
-			const journal = `{"id":"chk_capture_hold","provider":"local-container","kind":"docker-commit","leaseId":"cbx_abcdef123456","capture":{"sourceDisposition":"retire","phase":"pending"}}`
+			journal := `{"id":"chk_capture_hold","provider":"local-container","kind":"docker-commit","leaseId":"cbx_abcdef123456"` + tc.capture + `}`
 			path := filepath.Join(dir, "checkpoint.json")
 			if err := os.WriteFile(path, []byte(journal), 0600); err != nil {
 				t.Fatal(err)
 			}
 			runner := &recordingRunner{}
-			_, err := testBackend(runner).cleanupClaimlessContainer(context.Background(), id, testRecoveredContainerID, nil, dryRun)
+			_, err := testBackend(runner).cleanupClaimlessContainer(context.Background(), id, testRecoveredContainerID, nil, tc.dryRun)
 			if err == nil || len(runner.calls) != 0 {
 				t.Fatalf("claimless capture was not held: err=%v commands=%+v", err, runner.commandSummary())
 			}

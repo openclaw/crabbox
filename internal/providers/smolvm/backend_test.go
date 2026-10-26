@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -249,13 +251,15 @@ func TestClientUsesSmolvmRESTShape(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			// Direct heredoc-based archive inject.
+			if strings.Contains(body.Command, "mktemp -d") {
+				_ = json.NewEncoder(w).Encode(map[string]any{"exitCode": 0, "stdout": "/tmp/.crabbox-upload.1234567890\n"})
+				return
+			}
 			if strings.Contains(body.Command, "tar -xzf") {
 				injectSeen = true
 				_ = json.NewEncoder(w).Encode(map[string]any{"exitCode": 0, "stdout": "smolvm-direct-archive-extract: ok\n"})
 				return
 			}
-			// Direct write (env profile etc) also uses base64 heredoc /exec.
 			if strings.Contains(body.Command, "mv -f") {
 				_ = json.NewEncoder(w).Encode(map[string]any{"exitCode": 0, "stdout": "smolvm-direct-write: ok\n"})
 				return
@@ -264,6 +268,11 @@ func TestClientUsesSmolvmRESTShape(t *testing.T) {
 				t.Fatalf("exec body=%#v", body)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"exitCode": 0, "stdout": "hi\n", "stderr": "warn\n"})
+		case "/v1/machines/mach_1/files/tmp/.crabbox-upload.1234567890/payload":
+			if r.Method != http.MethodPut {
+				t.Fatalf("unexpected method %s on files route", r.Method)
+			}
+			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
@@ -304,6 +313,61 @@ func TestClientUsesSmolvmRESTShape(t *testing.T) {
 	}
 	if err := client.DeleteMachine(context.Background(), "mach_1"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUploadsTravelOverFilesRouteNotExecBody(t *testing.T) {
+	archiveBytes := make([]byte, 2<<20)
+	if _, err := rand.Read(archiveBytes); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(t.TempDir(), "archive.tgz")
+	if err := os.WriteFile(archive, archiveBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const profile = "export TOKEN=value\n"
+	uploads := map[string][]byte{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if guestPath, ok := strings.CutPrefix(r.URL.Path, "/v1/machines/mach_1/files"); ok && r.Method == http.MethodPut {
+			uploads[guestPath] = body
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.URL.Path != "/v1/machines/mach_1/exec" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		// The hosted API refuses JSON bodies over 1 MiB.
+		if len(body) > 1<<20 {
+			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		if bytes.Contains(body, []byte(profile[:12])) || bytes.Contains(body, []byte(base64.StdEncoding.EncodeToString(archiveBytes[:48]))) {
+			t.Fatalf("exec body carries upload payload: %.200s", body)
+		}
+		stdout := ""
+		if bytes.Contains(body, []byte("mktemp -d")) {
+			stdout = "/staging/.crabbox-upload.1234567890\n"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"exitCode": 0, "stdout": stdout})
+	}))
+	defer srv.Close()
+	c := &client{apiKey: "smk_key", base: srv.URL, http: srv.Client()}
+
+	if err := c.InjectArchive(t.Context(), "mach_1", archive, "/workspace"); err != nil {
+		t.Fatal(err)
+	}
+	if got := uploads["/staging/.crabbox-upload.1234567890/payload"]; !bytes.Equal(got, archiveBytes) {
+		t.Fatalf("files route received %d archive bytes, want %d", len(got), len(archiveBytes))
+	}
+	if err := c.WriteFile(t.Context(), "mach_1", "/workspace/.crabbox-env", profile); err != nil {
+		t.Fatal(err)
+	}
+	if got := uploads["/staging/.crabbox-upload.1234567890/payload"]; string(got) != profile {
+		t.Fatalf("files route received profile %q, want %q", got, profile)
 	}
 }
 
@@ -591,6 +655,34 @@ func TestExecExitCodePropagatesCamelAndSnake(t *testing.T) {
 			code, err := c.ExecStream(context.Background(), "mach_1", "false", "/workspace", &bytes.Buffer{})
 			if err != nil || code != tc.want {
 				t.Fatalf("ExecStream code=%d want %d err=%v", code, tc.want, err)
+			}
+		})
+	}
+}
+
+func TestExecPrefersExactOutputOverTruncatedText(t *testing.T) {
+	full := strings.Repeat("x", 2<<20) + "\xff end"
+	for _, tc := range []struct {
+		name       string
+		resp       map[string]any
+		wantStdout string
+	}{
+		{"truncated text replaced by exact copy", map[string]any{"stdout": full[:8], "stdoutTruncated": true, "stdoutB64": base64.StdEncoding.EncodeToString([]byte(full))}, full},
+		{"truncated text without exact copy is marked", map[string]any{"stdout": full[:8], "stdoutTruncated": true}, full[:8] + "\ncrabbox: the smolvm API truncated stdout and sent no complete copy; rerun with reduced verbosity or save output to a guest file\n"},
+		{"text only response is kept", map[string]any{"stdout": "hello\n"}, "hello\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(tc.resp)
+			}))
+			defer srv.Close()
+			c := &client{apiKey: "smk_key", base: srv.URL, http: srv.Client()}
+			var out bytes.Buffer
+			if _, err := c.ExecStream(t.Context(), "mach_1", "make test", "/workspace", &out); err != nil {
+				t.Fatal(err)
+			}
+			if out.String() != tc.wantStdout {
+				t.Fatalf("stream output has %d bytes, want %d; prefix=%.80q", out.Len(), len(tc.wantStdout), out.String())
 			}
 		})
 	}
@@ -1519,17 +1611,9 @@ func TestClientNativeUploadFailureAndPublication(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("native upload fixture requires POSIX shell tools")
 	}
-	for _, tool := range []string{"sh", "base64", "tar", "mktemp"} {
+	for _, tool := range []string{"sh", "cat", "tar", "mktemp"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s unavailable", tool)
-		}
-	}
-	decoder, _ := exec.LookPath("base64")
-	if runtime.GOOS == "darwin" {
-		var err error
-		decoder, err = exec.LookPath("gbase64")
-		if err != nil {
-			t.Skip("GNU base64 required to reproduce the Linux decoder contract")
 		}
 	}
 	for _, tc := range []struct {
@@ -1537,13 +1621,13 @@ func TestClientNativeUploadFailureAndPublication(t *testing.T) {
 		wantError                bool
 	}{
 		{"write", "write", "", false},
-		{"write-partial-decoder", "write", "decode", true},
+		{"write-upload-rejected", "write", "reject", true},
 		{"write-directory", "write", "directory", true},
 		{"write-cleanup-failure", "write", "cleanup", true},
-		{"write-decode-and-cleanup-failure", "write", "decode-cleanup", true},
+		{"write-reject-and-cleanup-failure", "write", "reject-cleanup", true},
 		{"archive", "archive", "", false},
 		{"archive-corrupt", "archive", "corrupt", true},
-		{"archive-decoder-late-failure", "archive", "decode-after-output", true},
+		{"archive-upload-rejected", "archive", "reject", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -1560,16 +1644,35 @@ func TestClientNativeUploadFailureAndPublication(t *testing.T) {
 				t.Fatal(err)
 			}
 			const content = "literal quote'\n$(must-not-execute)\x00bytes"
-			scriptPrefix := "base64() { " + core.ShellQuote(decoder) + " \"$@\"; };\n"
-			if tc.failure == "decode" || tc.failure == "decode-cleanup" {
-				scriptPrefix = "base64() { printf partial; return 23; };\n"
-			} else if tc.failure == "decode-after-output" {
-				scriptPrefix = "base64() { " + core.ShellQuote(decoder) + " \"$@\"; return 23; };\n"
-			}
+			scriptPrefix := ""
 			if strings.Contains(tc.failure, "cleanup") {
-				scriptPrefix += "rm() { return 17; };\n"
+				scriptPrefix = "rm() { return 17; };\n"
 			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// The files route writes the raw body root-owned style (0644) into an existing directory.
+				if guestPath, ok := strings.CutPrefix(r.URL.Path, "/v1/machines/fixture/files"); ok && r.Method == http.MethodPut {
+					data, err := io.ReadAll(r.Body)
+					if info, statErr := os.Stat(filepath.Dir(guestPath)); statErr != nil || info.Mode().Perm() != 0o700 {
+						t.Errorf("upload staging directory is not private: info=%v err=%v", info, statErr)
+					}
+					if strings.HasPrefix(tc.failure, "reject") {
+						// Rejections can leave a partial file that still needs cleanup.
+						data = data[:min(len(data), 7)]
+					}
+					if err == nil {
+						err = os.WriteFile(guestPath, data, 0o644)
+					}
+					if err != nil {
+						http.Error(w, err.Error(), 500)
+						return
+					}
+					if strings.HasPrefix(tc.failure, "reject") {
+						http.Error(w, "file exceeds the upload limit", http.StatusRequestEntityTooLarge)
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
 				if r.Method != http.MethodPost || r.URL.Path != "/v1/machines/fixture/exec" {
 					http.Error(w, "unexpected request", 400)
 					return
@@ -1585,7 +1688,7 @@ func TestClientNativeUploadFailureAndPublication(t *testing.T) {
 				script := strings.ReplaceAll(request.Command, "/tmp/crabbox-sync.tgz", core.ShellQuote(filepath.Join(root, "baseline-sync.tgz")))
 				script = strings.ReplaceAll(script, "/tmp/crabbox-write-", filepath.Join(root, "baseline-write-"))
 				cmd := exec.Command("sh", "-c", "umask 022\n"+scriptPrefix+script)
-				cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "TMPDIR=" + root}
+				cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "TMPDIR=" + root + "/./"}
 				out, err := cmd.CombinedOutput()
 				code := 0
 				if err != nil {
@@ -1626,10 +1729,10 @@ func TestClientNativeUploadFailureAndPublication(t *testing.T) {
 			if (uploadErr != nil) != tc.wantError {
 				t.Fatalf("upload error=%v, wantError=%v", uploadErr, tc.wantError)
 			}
-			if strings.HasPrefix(tc.failure, "decode") {
-				var exitErr core.ExitError
-				if !errors.As(uploadErr, &exitErr) || exitErr.Code != 23 {
-					t.Fatalf("decoder status lost: %v", uploadErr)
+			if strings.HasPrefix(tc.failure, "reject") {
+				var apiErr *smolvmAPIError
+				if !errors.As(uploadErr, &apiErr) || apiErr.StatusCode != http.StatusRequestEntityTooLarge {
+					t.Fatalf("upload rejection lost: %v", uploadErr)
 				}
 			}
 			if strings.Contains(tc.failure, "cleanup") && !strings.Contains(uploadErr.Error(), "upload staging cleanup failed") {

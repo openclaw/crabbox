@@ -21,6 +21,7 @@ function fixture(replies = [api(), health, api()]) {
     run: (overrides = {}) =>
       verifyCoordinatorDeployment({
         ...config,
+        timeoutMs: 0,
         ...overrides,
         fetchImpl: async (url, options) => {
           calls.push({ url, options });
@@ -32,6 +33,103 @@ function fixture(replies = [api(), health, api()]) {
       }),
   };
 }
+
+function pollingClock(timeoutMs = 15_000) {
+  let elapsed = 0;
+  const delays = [];
+  return {
+    delays,
+    options: {
+      timeoutMs,
+      pollIntervalMs: 5_000,
+      now: () => elapsed,
+      sleep: async (ms) => {
+        delays.push(ms);
+        elapsed += ms;
+      },
+    },
+  };
+}
+
+test("waits for public health to propagate before confirming the deployment", async () => {
+  const stale = { ...health, version: { id: "previous-version", tag: "c".repeat(40) } };
+  const f = fixture([api(), stale, stale, health, api()]);
+  const clock = pollingClock();
+  assert.deepEqual(await f.run(clock.options), { sha, deploymentId: deployment.id, versionId });
+  assert.deepEqual(clock.delays, [5_000, 5_000]);
+  assert.equal(f.calls.length, 5);
+  for (const { url, options } of f.calls.slice(1, -1)) {
+    assert.equal(new URL(url).searchParams.get("deployment"), sha);
+    assert.deepEqual(options.headers, {});
+    assert.ok(options.signal instanceof AbortSignal);
+    assert.equal(options.cache, "no-store");
+  }
+});
+
+for (const [label, version] of [
+  ["never propagates", { id: "previous-version", tag: "c".repeat(40) }],
+  ["keeps serving the wrong commit", { id: versionId, tag: "d".repeat(40) }],
+]) {
+  test(`exhausts the health budget when it ${label} and reports the last version`, async () => {
+    const stale = { ...health, version };
+    const f = fixture([api(), healthWithOldVersion(), stale, stale]);
+    const clock = pollingClock(12_000);
+    await assert.rejects(f.run(clock.options), (error) => {
+      assert.match(error.message, /health did not confirm the active version and requested commit/);
+      assert.ok(error.message.includes(JSON.stringify(version)));
+      assert.doesNotMatch(error.message, /first-version|synthetic-api-token/);
+      return true;
+    });
+    assert.deepEqual(clock.delays, [5_000, 5_000, 2_000]);
+    assert.equal(f.calls.length, 4);
+  });
+}
+
+function healthWithOldVersion() {
+  return { ...health, version: { id: "first-version", tag: "e".repeat(40) } };
+}
+
+test("rejects a deployment that changes while health is propagating", async () => {
+  const f = fixture([
+    api(),
+    healthWithOldVersion(),
+    health,
+    api({ ...deployment, id: "replacement-deployment" }),
+  ]);
+  const clock = pollingClock();
+  await assert.rejects(f.run(clock.options), /changed during verification/);
+  assert.deepEqual(clock.delays, [5_000]);
+  assert.equal(f.calls.length, 4);
+});
+
+test("health mismatch diagnostics omit unrelated fields and redact the API token", async () => {
+  const f = fixture([
+    api(),
+    {
+      ...health,
+      version: { id: config.apiToken, tag: `prefix-${config.apiToken}`, secret: "unrelated" },
+      detail: "unrelated",
+    },
+  ]);
+  await assert.rejects(f.run(), (error) => {
+    assert.match(error.message, /\[redacted\]/);
+    assert.doesNotMatch(error.message, /synthetic-api-token|unrelated/);
+    return true;
+  });
+});
+
+test("a failed health retry includes the last reported version", async () => {
+  const stale = healthWithOldVersion();
+  const f = fixture([api(), stale, new Error(config.apiToken)]);
+  const clock = pollingClock();
+  await assert.rejects(f.run(clock.options), (error) => {
+    assert.match(error.message, /Coordinator health request failed/);
+    assert.ok(error.message.includes(JSON.stringify(stale.version)));
+    assert.doesNotMatch(error.message, /synthetic-api-token/);
+    return true;
+  });
+  assert.deepEqual(clock.delays, [5_000]);
+});
 
 test("confirms public health matches the sole active version across the check", async () => {
   const f = fixture();

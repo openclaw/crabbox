@@ -223,8 +223,8 @@ command, including `status`, `cp`, `stop`, and `cleanup`.
 Install from Docker's official Homebrew tap on an Apple silicon Mac:
 
 ```sh
-brew tap docker/tap
-brew install --cask docker/tap/sbx
+brew trust docker/tap
+brew install docker/tap/sbx
 sbx login
 sbx --cloud diagnose
 crabbox doctor --provider docker-sandbox --docker-sandbox-target cloud
@@ -240,9 +240,14 @@ Cloud support requires **sbx v0.48.0 or newer**, the locally verified baseline.
 Docker's general cloud guides start at v0.45.0; Crabbox's narrower baseline
 covers the current structured diagnostics and `--static-mcp` interface.
 The official `docker/tap/sbx` cask pins a SHA-256 for Docker's release artifact.
-The v0.48.0 help was checked for `create`, `exec`, `cp`, `ls`, `diagnose`, `ttl`,
-and `rm`, including their `--cloud` forms. The signed-out diagnostic was checked
-with isolated empty user state. Coordinator verification with a real account
+On 2026-10-25, Docker's latest release was **v0.49.2**. Its installed binary's
+`version --json` and help for cloud `create`, `exec`, `cp`, `ls`, `diagnose`,
+`ttl`, and `rm` were rechecked with empty user state and network access denied.
+The provider's v0.48.0 command contract remains supported, including
+`--static-mcp`, `--workdir`, `--json`, and `--ttl --on-timeout delete`.
+Docker's current Mac install instructions use `brew trust docker/tap` followed
+by `brew install docker/tap/sbx`. No real Docker account was accessed during
+this recheck. Earlier coordinator verification with a real account
 covered device-flow login and entitlement refusal: doctor and warmup returned
 exit 2 without allocating or changing inventory because the account lacked a
 Docker Agentic Platform subscription. The full live lifecycle remains unverified;
@@ -273,6 +278,9 @@ paths are supported through the shared result machinery (64 KiB per file), with
 bounded `sbx exec` capture before any host file is written. Directories and
 symlinks are rejected for these downloads.
 Use `crabbox cp` for larger files or directories. Artifact globs are not supported.
+Required-artifact and download failures retain their artifact exit code (7),
+and collection finishes before automatic removal. `--keep-on-failure` can retain
+the sandbox for investigation when collection fails after a successful command.
 
 The cloud target rejects local `--clone`, extra host workspaces and user environment
 forwarding. Core-generated run/lease/slug metadata is passed as non-secret values.
@@ -301,6 +309,9 @@ copy, status and deletion verify the immutable ID and recorded name against
 `sbx --cloud ls --json` for the currently authenticated account. An account
 switch, missing ID or changed name fails closed. Local claims cannot authorize
 cloud operations and cloud claims cannot authorize local operations.
+
+`status --wait` polls until the sandbox is ready or reaches a terminal state;
+`--wait-timeout` bounds the wait and returns exit 5 on timeout.
 
 Crabbox maps `--ttl` to cloud `--ttl` with an explicit `--on-timeout delete`.
 Crabbox's effective TTL is 30 minutes by default and is passed explicitly,
@@ -338,8 +349,8 @@ Do not change accounts during this proof. Native shell creation needs no AI
 provider API key.
 
 ```sh
-brew tap docker/tap
-brew install --cask docker/tap/sbx  # or brew upgrade --cask docker/tap/sbx
+brew trust docker/tap
+brew install docker/tap/sbx  # or brew upgrade --cask docker/tap/sbx
 sbx login
 sbx --cloud diagnose
 CRABBOX_CLOUD_BINARY="$PWD/bin/crabbox"
@@ -356,9 +367,11 @@ git init -q
 printf 'bin/\ncloud-*.txt\n' > .gitignore
 printf 'Synthetic cloud proof checkout\n' > README.md
 git add .gitignore README.md
+sbx --cloud ls --json > "$CRABBOX_CLOUD_PROOF_DIR/native-before.json"
 
 bin/crabbox doctor --provider docker-sandbox
 bin/crabbox warmup --provider docker-sandbox --slug cloud-proof --ttl 30m
+bin/crabbox list --provider docker-sandbox --json > "$CRABBOX_CLOUD_PROOF_DIR/owned.json"
 bin/crabbox status --provider docker-sandbox --id cloud-proof
 bin/crabbox run --provider docker-sandbox --id cloud-proof --shell \
   'test -f README.md && mkdir -p proof && printf "cloud-source-ok\n" > proof/result.txt && cat proof/result.txt'
@@ -370,10 +383,27 @@ bin/crabbox run --provider docker-sandbox --id cloud-proof --no-sync \
 cmp ./cloud-result.txt ./cloud-downloaded.txt
 bin/crabbox list --provider docker-sandbox --json
 bin/crabbox status --provider docker-sandbox --id cloud-proof
+bin/crabbox inspect --provider docker-sandbox --id cloud-proof --json
 bin/crabbox stop --provider docker-sandbox cloud-proof
 bin/crabbox cleanup --provider docker-sandbox --dry-run
 bin/crabbox list --provider docker-sandbox --json
-sbx --cloud ls --json
+sbx --cloud ls --json > "$CRABBOX_CLOUD_PROOF_DIR/native-after.json"
+python3 - "$CRABBOX_CLOUD_PROOF_DIR" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+def rows(name):
+    value = json.loads((root / name).read_text())
+    if isinstance(value, dict):
+        value = next(value[key] for key in ("sandboxes", "items", "data", "results") if key in value)
+    return value or []
+owned = {row["CloudID"] for row in rows("owned.json")}
+before = {row["id"] for row in rows("native-before.json")}
+after = {row["id"] for row in rows("native-after.json")}
+assert len(owned) == 1, owned
+assert not owned & after, "Proof sandbox still exists"
+assert before == after, "Native inventory changed; inspect before/after snapshots"
+print("PASS: proof sandbox removed; pre-existing sandbox IDs unchanged")
+PY
 ```
 
 Record the immutable ID printed by warmup and confirm it is absent from the

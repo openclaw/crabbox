@@ -50,10 +50,16 @@ func normalizeTargetConfig(cfg *Config) {
 		if cfg.Static.User != "" && cfg.SSHUser == baseConfig().SSHUser {
 			cfg.SSHUser = cfg.Static.User
 		}
+		// Selector normalization runs before command flags apply. A root derived
+		// from an earlier login user stays implicit and follows the final one.
+		if !IsWorkRootExplicit(cfg) && cfg.WorkRoot == cfg.derivedStaticWorkRoot {
+			cfg.WorkRoot = ""
+		}
 	}
 	if shouldDeriveTargetWorkRoot(cfg) {
 		if isStaticProvider(cfg.Provider) && cfg.TargetOS == targetMacOS {
-			cfg.WorkRoot = path.Join("/Users", cfg.SSHUser, "crabbox")
+			cfg.WorkRoot = path.Join("/Users", staticLoginUser(*cfg), "crabbox")
+			cfg.derivedStaticWorkRoot = cfg.WorkRoot
 		} else {
 			cfg.WorkRoot = defaultWorkRootForTarget(cfg.TargetOS, cfg.WindowsMode)
 		}

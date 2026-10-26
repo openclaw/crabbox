@@ -118,6 +118,7 @@ func TestDockerCloudReadiness(t *testing.T) {
 		want                    string
 	}{
 		{name: "ready", version: cloudVersionJSON, diagnose: cloudReadyJSON},
+		{name: "current CLI", version: `{"client":{"version":"v0.49.2"},"server":{"state":"unavailable"}}`, diagnose: cloudReadyJSON},
 		{name: "missing", cause: os.ErrNotExist, want: "brew install"},
 		{name: "old", version: `{"client":{"version":"v0.45.0"}}`, want: "v0.48.0"},
 		{name: "malformed version", version: `garbage`, want: "version JSON"},
@@ -553,6 +554,85 @@ func TestDockerCloudRunAcceptsCoreExecutionMetadata(t *testing.T) {
 	for _, value := range []string{"CRABBOX_RUN_ID=run_fixture", "CRABBOX_LEASE_ID=lease_fixture", "CRABBOX_SLUG=fixture"} {
 		if !strings.Contains(strings.Join(command, " "), value) {
 			t.Fatalf("core metadata missing from command: %v", command)
+		}
+	}
+}
+
+func TestDockerCloudStatusWait(t *testing.T) {
+	for _, mode := range []string{"ready", "timeout", "canceled", "terminal"} {
+		t.Run(mode, func(t *testing.T) {
+			b, r, _ := newCloudTest(t)
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: cloudRepo(t), NoSync: true, Keep: true, Command: []string{"true"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, err := core.ReadLeaseClaim(result.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inventory := func(state string) string {
+				return `[{"id":"` + cloudFixtureID + `","name":"` + claim.Labels["sandbox"] + `","status":"` + state + `"}]`
+			}
+			r.defaults["ls"] = scriptedReply{stdout: inventory("provisioning")}
+			if mode == "terminal" {
+				r.defaults["ls"] = scriptedReply{stdout: inventory("stopped")}
+			}
+			oldPoll := statusPollInterval
+			statusPollInterval = time.Millisecond
+			t.Cleanup(func() { statusPollInterval = oldPoll })
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			polls := 0
+			r.onRequest = func(_ context.Context, req core.LocalCommandRequest) {
+				if scriptKey(req.Args) != "ls" {
+					t.Fatalf("status called %v", req.Args)
+				}
+				polls++
+				if mode == "ready" && polls == 1 {
+					r.defaults["ls"] = scriptedReply{stdout: inventory("running")}
+				}
+				if mode == "canceled" {
+					cancel()
+				}
+			}
+			timeout := time.Second
+			if mode == "timeout" {
+				timeout = time.Nanosecond
+			}
+			view, err := b.Status(ctx, core.StatusRequest{ID: result.LeaseID, Wait: true, WaitTimeout: timeout})
+			switch mode {
+			case "ready":
+				if err != nil || !view.Ready || polls != 2 {
+					t.Fatalf("view=%#v polls=%d err=%v", view, polls, err)
+				}
+			case "timeout":
+				if err == nil || core.ExitCodeForError(err, 1) != 5 {
+					t.Fatalf("polls=%d err=%v", polls, err)
+				}
+			case "canceled":
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("err=%v", err)
+				}
+			case "terminal":
+				if err != nil || view.Ready || view.State != "stopped" || polls != 1 {
+					t.Fatalf("view=%#v polls=%d err=%v", view, polls, err)
+				}
+			}
+		})
+	}
+}
+
+func TestDockerCloudArtifactFailurePreservesExitAndCleanup(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		b, r, _ := newCloudTest(t)
+		// Workspace preparation and the command succeed; reading the artifact fails.
+		r.scripts["exec"] = []scriptedReply{{}, {}, {exitCode: 1}}
+		result, err := b.Run(t.Context(), core.RunRequest{Repo: cloudRepo(t), NoSync: true, Command: []string{"true"}, KeepOnFailure: keep, RequiredArtifactGlobs: []string{"missing.txt"}})
+		if err == nil || core.ExitCodeForError(err, 1) != 7 || result.ExitCode != 7 {
+			t.Fatalf("keep=%v exit=%d err=%v", keep, result.ExitCode, err)
+		}
+		if result.Session == nil || result.Session.Kept != keep || (findCall(r, "rm") == nil) != keep {
+			t.Fatalf("keep=%v session=%#v", keep, result.Session)
 		}
 	}
 }

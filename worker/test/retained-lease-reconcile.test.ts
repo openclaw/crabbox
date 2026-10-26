@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { AWSQueryError, EC2SpotClient, type AWSLeaseOperation } from "../src/aws";
+import {
+  awsExactInstanceBatchSize,
+  AWSLeaseAuthorityError,
+  AWSQueryError,
+  EC2SpotClient,
+  type AWSLeaseOperation,
+} from "../src/aws";
 import { awsCleanupCompletionBlocker } from "../src/aws-cleanup-completion";
 import { completeLeaseProviderCleanup, leaseProviderCleanupConfirmed } from "../src/lease-cleanup";
 import {
@@ -9,6 +15,7 @@ import {
   leaseMaintenanceIndex,
   putLeaseRecord,
 } from "../src/lease-record-store";
+import { ProviderRequestTimeoutError } from "../src/provider-deadline";
 import {
   maintainRetainedLeases,
   observeAWSRetained,
@@ -382,6 +389,7 @@ function mockSession(patch: Partial<AWSLeaseOperation> = {}): AWSLeaseOperation 
     region: "eu-west-1",
     verifiedIdentity: async () => ({ account: "123456789012" }),
     credentialFingerprint: async () => "one",
+    findServersByIDFilter: vi.fn<AWSLeaseOperation["findServersByIDFilter"]>(async () => new Map()),
     findServers: vi.fn<AWSLeaseOperation["findServers"]>(async () => new Map()),
     findServer: vi.fn<AWSLeaseOperation["findServer"]>(async () => undefined),
     sshKeyAbsent: async () => true,
@@ -394,12 +402,349 @@ function useSession(session: AWSLeaseOperation) {
     work(session),
   );
 }
+describe("attested legacy AWS scope", () => {
+  const env = {
+    AWS_ACCESS_KEY_ID: "test",
+    AWS_SECRET_ACCESS_KEY: "secret",
+    CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT: "123456789012",
+  } as Env;
+  function legacy(patch: Partial<LeaseRecord> = {}) {
+    return lease(1, {
+      providerScope: undefined,
+      createdAt: "2026-09-12T23:59:59.999Z",
+      ...patch,
+    });
+  }
+  it("confirms through exact reads only after two observations ten minutes apart", async () => {
+    const row = legacy();
+    const f = await fixture([row]);
+    const session = mockSession();
+    useSession(session);
+    delete f.hooks.observe;
+    await f.run(env);
+    expect(await f.read()).toMatchObject({
+      retainedReconcileObservation: { firstAbsentAt: new Date(epoch).toISOString() },
+    });
+    expect((await f.read()).providerScope).toBeUndefined();
+    expect((await f.read()).cleanupConfirmedBy).toBeUndefined();
+    expect(await f.storage.get(leaseCurrentKey(row.id))).toBeDefined();
+    f.setTime(epoch + 599_999);
+    await f.run(env);
+    expect((await f.read()).cleanupCompletedAt).toBeUndefined();
+    f.setTime(epoch + 600_000);
+    await f.run(env);
+    expect(await f.read()).toMatchObject({
+      providerScope: "aws:account:123456789012",
+      cleanupConfirmedBy: "retained-reconcile-legacy-attested",
+      cleanupCompletedAt: new Date(epoch + 600_000).toISOString(),
+    });
+    expect(leaseProviderCleanupConfirmed(await f.read())).toBe(true);
+    expect(await f.storage.get(leaseCurrentKey(row.id))).toBeUndefined();
+    expect(session.findServersByIDFilter).toHaveBeenCalledWith([row.cloudID]);
+    const status = await retainedReconcileStatus(f.storage, env);
+    expect(status.counters["aws"]).toMatchObject({ legacy_scope_attested: 3, confirmed: 1 });
+    expect(status.settings.awsLegacyAccountConfigured).toBe(true);
+    expect(JSON.stringify(status)).not.toContain(env.CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT);
+  });
+  it.each([
+    { patch: { createdAt: "2026-09-13T00:00:00Z" }, reason: "missing_original_scope" },
+    { patch: { createdAt: "2026-09-13T00:00:00.001Z" }, reason: "missing_original_scope" },
+    { patch: { createdAt: "invalid" }, reason: "missing_original_scope" },
+    { patch: { providerScope: "aws:account:bad" }, reason: "missing_original_scope" },
+    { patch: { providerScope: "" }, reason: "missing_original_scope" },
+    { patch: { region: undefined }, reason: "missing_original_scope" },
+    { patch: { region: "invalid" }, reason: "missing_original_scope" },
+    { patch: { region: " EU-WEST-1 " }, reason: "missing_original_scope" },
+    { patch: { cloudID: "not-an-instance" }, reason: "missing_identity" },
+    { patch: { provider: "azure" }, reason: "missing_original_scope" },
+    { patch: { lifecycle: "registered" }, reason: "registered_resource" },
+    { patch: { providerCleanup: {} }, reason: "unresolved_action" },
+    { patch: { target: "macos" }, reason: "dedicated_host" },
+    { patch: { hostID: "h-1234" }, reason: "dedicated_host" },
+    { patch: { serverType: "mac2.metal" }, reason: "dedicated_host" },
+    {
+      patch: { lifetimePolicy: { retainedIdentity: "i-other:vol-1234:/dev/sda1" } },
+      reason: "unresolved_resource_identity",
+    },
+    { patch: { providerKeyCleanupPending: true }, reason: "unresolved_key" },
+    // sanitizeAWSRegion throws on malformed regions; the pass must not fail.
+    { patch: { region: "not a region!" }, reason: "missing_original_scope" },
+  ] as { patch: Partial<LeaseRecord>; reason: string }[])(
+    "preserves $reason for $patch",
+    async ({ patch, reason }) => {
+      const row = legacy(patch);
+      const f = await fixture([row]);
+      await f.run(env);
+      expect(retainedUnresolvedReason(row, env.CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT)).toBe(
+        reason,
+      );
+      expect(await f.read()).toEqual(row);
+      expect(f.hooks.observe).not.toHaveBeenCalled();
+      expect(
+        (await retainedReconcileStatus(f.storage, env)).counters["aws"]?.["legacy_scope_attested"],
+      ).toBeUndefined();
+    },
+  );
+  it("treats invalid settings as unset and logs once without the value", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    for (const account of [
+      "",
+      "12345678901",
+      "1234567890123",
+      " 123456789012",
+      "123456789012\n",
+      "abcdefghijkl",
+    ]) {
+      const row = legacy();
+      // oxlint-disable-next-line eslint/no-await-in-loop -- initialize an independent fixture for each setting.
+      const f = await fixture([row]);
+      const invalidEnv = { ...env, CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT: account };
+      // oxlint-disable-next-line eslint/no-await-in-loop -- verify each invalid runtime setting independently.
+      await f.run(invalidEnv);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- inspect the persisted fixture for this setting.
+      expect(await f.read()).toEqual(row);
+      expect(f.hooks.observe).not.toHaveBeenCalled();
+      expect(retainedReconcileSettings(invalidEnv).awsLegacyAccountConfigured).toBe(false);
+    }
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      "CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT is invalid; ignoring it",
+    );
+  });
+  it("leaves missing scope unresolved when the setting is absent", async () => {
+    const row = legacy();
+    const f = await fixture([row]);
+    await f.run();
+    expect(await f.read()).toEqual(row);
+    expect(f.hooks.observe).not.toHaveBeenCalled();
+    expect(retainedReconcileSettings({} as Env).awsLegacyAccountConfigured).toBe(false);
+  });
+  it("rejects a different STS account before exact reads or lease mutation", async () => {
+    const row = legacy();
+    const f = await fixture([row]);
+    const session = mockSession({ verifiedIdentity: async () => ({ account: "999999999999" }) });
+    useSession(session);
+    delete f.hooks.observe;
+    await f.run(env);
+    expect(await f.read()).toEqual(row);
+    expect(session.findServersByIDFilter).not.toHaveBeenCalled();
+    expect(f.hooks.deleteLease).not.toHaveBeenCalled();
+    expect((await retainedReconcileStatus(f.storage, env)).counters["aws"]).toMatchObject({
+      legacy_scope_attested: 1,
+      scope_mismatch: 1,
+    });
+  });
+  it("never deletes a present legacy instance even when deletion is enabled", async () => {
+    const row = legacy({ slug: "test", serverName: "test" });
+    const f = await fixture([row]);
+    useSession(
+      mockSession({ findServersByIDFilter: async () => new Map([[row.cloudID, machine(row)]]) }),
+    );
+    delete f.hooks.observe;
+    await f.run({ ...env, CRABBOX_RETAINED_RECONCILE_DELETE: "1" });
+    expect(await f.read()).toEqual(row);
+    expect(f.hooks.deleteLease).not.toHaveBeenCalled();
+    expect((await retainedReconcileStatus(f.storage, env)).counters["aws"]).toMatchObject({
+      legacy_scope_attested: 1,
+      present: 1,
+    });
+  });
+  it("does not override a recorded scope or its ordinary completion attribution", async () => {
+    const row = legacy({ providerScope: "aws:account:123456789012" });
+    const f = await fixture([row]);
+    await f.run({ ...env, CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT: "999999999999" });
+    f.setTime(epoch + 600_000);
+    await f.run(env);
+    expect(await f.read()).toMatchObject({
+      providerScope: row.providerScope,
+      cleanupConfirmedBy: "retained-reconcile",
+    });
+    expect(
+      (await retainedReconcileStatus(f.storage, env)).counters["aws"]?.["legacy_scope_attested"],
+    ).toBeUndefined();
+  });
+  it("keeps credential pinning and companion checks for attested scope", async () => {
+    const { providerKeyForLease } = await import("../src/provider-key");
+    const row = legacy({
+      providerKeyCleanupOwned: true,
+      providerKey: providerKeyForLease(lease().id),
+    });
+    const f = await fixture([row]);
+    const session = mockSession({
+      sshKeyAbsent: vi.fn<AWSLeaseOperation["sshKeyAbsent"]>(async () => false),
+    });
+    useSession(session);
+    delete f.hooks.observe;
+    await f.run(env);
+    expect(await f.read()).toEqual(row);
+    expect(session.sshKeyAbsent).toHaveBeenCalled();
+    session.sshKeyAbsent = async () => true;
+    await f.run(env);
+    const first = await f.read();
+    session.credentialFingerprint = async () => "changed";
+    f.setTime(epoch + 600_000);
+    await f.run(env);
+    expect(await f.read()).toEqual(first);
+    expect((await retainedReconcileStatus(f.storage, env)).counters["aws"]).toMatchObject({
+      owned_key_present: 1,
+      credential_changed: 1,
+    });
+  });
+  it("rolls back both scope and completion if current-index publication fails", async () => {
+    const row = legacy();
+    const f = await fixture([row]);
+    await f.run(env);
+    const first = await f.read();
+    f.setTime(epoch + 600_000);
+    f.storage.failKey = leaseCurrentKey(row.id);
+    await expect(f.run(env)).rejects.toThrow("injected storage failure");
+    expect(await f.read()).toEqual(first);
+    expect((await f.read()).providerScope).toBeUndefined();
+    expect(await f.storage.get(leaseCurrentKey(row.id))).toBeDefined();
+  });
+  it("does not persist an attested scope or observations in report mode", async () => {
+    const row = legacy();
+    const f = await fixture([row]);
+    await f.run({ ...env, CRABBOX_RETAINED_RECONCILE: "report" });
+    f.setTime(epoch + 600_000);
+    await f.run({ ...env, CRABBOX_RETAINED_RECONCILE: "report" });
+    expect(await f.read()).toEqual(row);
+    expect(
+      (await retainedReconcileStatus(f.storage, env)).counters["aws"]?.["legacy_scope_attested"],
+    ).toBe(2);
+  });
+  it("rejects concurrent changes to the cutover timestamp before publication", async () => {
+    const row = legacy();
+    const f = await fixture([row]);
+    const changed = { ...row, createdAt: "2026-09-13T00:00:00Z" };
+    f.hooks.observe = async (_env, rows) => {
+      await putLeaseRecord(f.storage, changed);
+      return new Map(
+        rows.map((record) => [record.id, { outcome: "absent", credentialFingerprint: "one" }]),
+      );
+    };
+    await f.run(env);
+    expect(await f.read()).toEqual(changed);
+  });
+});
 describe("AWS retained exact observation", () => {
+  it.each(
+    [0, 1].flatMap((failedChunk) =>
+      [
+        new Error("Response closed due to connection limit"),
+        new TypeError("fetch failed"),
+        new TypeError("NetworkError when attempting to fetch resource"),
+        new DOMException("The operation timed out", "TimeoutError"),
+        new DOMException("The operation was aborted", "AbortError"),
+        new ProviderRequestTimeoutError("aws", "ec2"),
+      ].map((error) => ({ failedChunk, error })),
+    ),
+  )(
+    "keeps other chunks when chunk $failedChunk fails with $error",
+    async ({ failedChunk, error }) => {
+      const rows = Array.from({ length: 250 }, (_, n) => lease(n + 1));
+      const session = mockSession({
+        findServersByIDFilter: vi.fn<AWSLeaseOperation["findServersByIDFilter"]>(async (ids) => {
+          if (ids.includes(rows[failedChunk * 200]!.cloudID)) throw error;
+          return new Map();
+        }),
+      });
+      useSession(session);
+      const budget = new RetainedLookupBudget(256);
+      const result = await observeAWSRetained(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+        rows,
+        budget,
+      );
+      expect([...result]).toEqual(
+        rows.map((row, index) => [
+          row.id,
+          Math.floor(index / 200) === failedChunk
+            ? { outcome: "throttled" }
+            : { outcome: "absent", credentialFingerprint: "one" },
+        ]),
+      );
+      expect(session.findServersByIDFilter).toHaveBeenCalledTimes(2);
+      expect(session.findServers).not.toHaveBeenCalled();
+      expect(session.findServer).not.toHaveBeenCalled();
+      expect(budget.remaining).toBe(253);
+    },
+  );
+  it("discards a chunk's earlier companion evidence after a connection failure", async () => {
+    const rows = Array.from({ length: 250 }, (_, n) => lease(n + 1));
+    rows[1]!.providerKeyCleanupOwned = true;
+    const { providerKeyForLease } = await import("../src/provider-key");
+    rows[1]!.providerKey = providerKeyForLease(rows[1]!.id);
+    useSession(
+      mockSession({
+        sshKeyAbsent: async () => {
+          throw new Error("Response closed due to connection limit");
+        },
+      }),
+    );
+    const result = await observeAWSRetained(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      rows,
+      new RetainedLookupBudget(256),
+    );
+    expect([...result.values()]).toEqual(
+      rows.map((_, index) =>
+        index < 200
+          ? { outcome: "throttled" }
+          : { outcome: "absent", credentialFingerprint: "one" },
+      ),
+    );
+  });
+  it.each([
+    new AWSLeaseAuthorityError("fetch failed"),
+    new AWSQueryError(
+      "DescribeInstances",
+      403,
+      "UnauthorizedOperation",
+      "Response closed due to connection limit",
+    ),
+    new Error("unexpected failure"),
+  ])("does not classify authority or unknown failures as transient: %s", async (error) => {
+    const rows = Array.from({ length: 250 }, (_, n) => lease(n + 1));
+    useSession(
+      mockSession({
+        findServersByIDFilter: vi
+          .fn<AWSLeaseOperation["findServersByIDFilter"]>()
+          .mockResolvedValueOnce(new Map())
+          .mockRejectedValueOnce(error),
+      }),
+    );
+    const result = await observeAWSRetained(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      rows,
+      new RetainedLookupBudget(256),
+    );
+    expect([...result.values()]).toEqual(rows.map(() => ({ outcome: "lookup_error" })));
+  });
+  it("discards earlier chunks after an AWS authorization failure", async () => {
+    const rows = Array.from({ length: 250 }, (_, n) => lease(n + 1));
+    const session = mockSession({
+      findServersByIDFilter: vi
+        .fn<AWSLeaseOperation["findServersByIDFilter"]>()
+        .mockResolvedValueOnce(new Map())
+        .mockRejectedValueOnce(
+          new AWSQueryError("DescribeInstances", 403, "UnauthorizedOperation", "denied"),
+        ),
+    });
+    useSession(session);
+    const result = await observeAWSRetained(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      rows,
+      new RetainedLookupBudget(256),
+    );
+    expect([...result]).toEqual(rows.map((row) => [row.id, { outcome: "lookup_error" }]));
+    expect(session.findServersByIDFilter).toHaveBeenCalledTimes(2);
+    expect(session.findServer).not.toHaveBeenCalled();
+  });
   it("batches exact IDs and confirms terminated, never shutting-down", async () => {
     const row = lease(1, { slug: "test" });
     const server = { ...machine(row), status: "terminated" };
     const session = mockSession({
-      findServers: vi.fn<AWSLeaseOperation["findServers"]>(
+      findServersByIDFilter: vi.fn<AWSLeaseOperation["findServersByIDFilter"]>(
         async () => new Map([[row.cloudID, server]]),
       ),
     });
@@ -413,7 +758,7 @@ describe("AWS retained exact observation", () => {
         )
       ).get(row.id)?.outcome,
     ).toBe("absent");
-    expect(session.findServers).toHaveBeenCalledWith([row.cloudID]);
+    expect(session.findServersByIDFilter).toHaveBeenCalledWith([row.cloudID]);
     server.status = "shutting-down";
     expect(
       (
@@ -424,22 +769,6 @@ describe("AWS retained exact observation", () => {
         )
       ).get(row.id)?.outcome,
     ).toBe("present");
-  });
-  it("uses bounded individual exact reads only on the batch NotFound code", async () => {
-    const session = mockSession({
-      findServers: async () => {
-        throw new AWSQueryError("DescribeInstances", 400, "InvalidInstanceID.NotFound", "missing");
-      },
-    });
-    useSession(session);
-    const rows = [lease(1), lease(2), lease(3)];
-    const result = await observeAWSRetained(
-      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
-      rows,
-      new RetainedLookupBudget(4),
-    );
-    expect(session.findServer).toHaveBeenCalledTimes(2);
-    expect(result.get(lease(3).id)?.outcome).toBe("lookup_budget");
   });
   it("requires original account and identical credential context", async () => {
     const session = mockSession();
@@ -453,7 +782,7 @@ describe("AWS retained exact observation", () => {
         )
       ).get(lease().id)?.outcome,
     ).toBe("scope_mismatch");
-    expect(session.findServers).not.toHaveBeenCalled();
+    expect(session.findServersByIDFilter).not.toHaveBeenCalled();
   });
   it("preserves the provider's companion obligations", async () => {
     const row = lease(1, { providerKeyCleanupOwned: true, providerKey: `crabbox-${lease().id}` });
@@ -484,7 +813,7 @@ describe("AWS retained exact observation", () => {
     error.retryAfter = "1800";
     useSession(
       mockSession({
-        findServers: async () => {
+        findServersByIDFilter: async () => {
           throw error;
         },
       }),
@@ -503,7 +832,7 @@ describe("AWS retained exact observation", () => {
 
 describe("AWS exact-ID batch transport", () => {
   afterEach(() => vi.unstubAllGlobals());
-  function transport(payload: string) {
+  function transport(payload: string | ((params: URLSearchParams) => Response)) {
     const calls: URLSearchParams[] = [];
     vi.stubGlobal(
       "fetch",
@@ -515,13 +844,124 @@ describe("AWS exact-ID batch transport", () => {
           return new Response(
             "<GetCallerIdentityResponse><GetCallerIdentityResult><Account>123456789012</Account><Arn>arn:aws:iam::123456789012:user/test</Arn><UserId>test</UserId></GetCallerIdentityResult></GetCallerIdentityResponse>",
           );
-        return new Response(payload);
+        return typeof payload === "string" ? new Response(payload) : payload(params);
       }),
     );
     return calls;
   }
   const env = { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env;
-  it("sends only exact instance IDs in the recorded region and accepts an empty exact response", async () => {
+  it("preserves completed chunks when the bounded request signal times out", async () => {
+    const rows = Array.from({ length: 250 }, (_, n) => lease(n + 1));
+    const controller = new AbortController();
+    const budget = new RetainedLookupBudget(256);
+    Object.defineProperty(budget, "signal", { value: controller.signal });
+    const calls = transport((params) => {
+      if (params.get("Filter.1.Value.1") === rows[200]!.cloudID)
+        controller.abort(new DOMException("deadline", "TimeoutError"));
+      return new Response(
+        "<DescribeInstancesResponse><requestId>test</requestId><reservationSet/></DescribeInstancesResponse>",
+      );
+    });
+    const result = await observeAWSRetained(env, rows, budget);
+    expect([...result.values()].map((row) => row.outcome)).toEqual(
+      rows.map((_, index) => (index < 200 ? "absent" : "throttled")),
+    );
+    expect(calls).toHaveLength(3);
+  });
+  it("keeps the next chunk when a filter response body hits the Workers connection limit", async () => {
+    const rows = Array.from({ length: 250 }, (_, n) => lease(n + 1));
+    const calls = transport((params) =>
+      params.get("Filter.1.Value.1") === rows[0]!.cloudID
+        ? new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.error(new Error("Response closed due to connection limit"));
+              },
+            }),
+          )
+        : new Response(
+            "<DescribeInstancesResponse><requestId>test</requestId><reservationSet/></DescribeInstancesResponse>",
+          ),
+    );
+    const result = await observeAWSRetained(env, rows, new RetainedLookupBudget(256));
+    expect([...result.values()].map((row) => row.outcome)).toEqual(
+      rows.map((_, index) => (index < 200 ? "throttled" : "absent")),
+    );
+    expect(calls).toHaveLength(3);
+  });
+  it("observes mixed present and absent IDs without individual reads", async () => {
+    const rows = [lease(1), lease(2)];
+    const calls = transport(
+      `<DescribeInstancesResponse><requestId>test</requestId><reservationSet><item><ownerId>123456789012</ownerId><instancesSet><item><instanceId>${rows[0]!.cloudID}</instanceId><instanceState><name>running</name></instanceState></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`,
+    );
+    const result = await observeAWSRetained(env, rows, new RetainedLookupBudget(5));
+    expect(result.get(rows[0]!.id)).toMatchObject({
+      outcome: "present",
+      server: { cloudID: rows[0]!.cloudID },
+    });
+    expect(result.get(rows[1]!.id)).toMatchObject({
+      outcome: "absent",
+      credentialFingerprint: expect.any(String),
+    });
+    expect(calls).toHaveLength(2);
+  });
+  it("rejects pagination without publishing missing IDs as absent", async () => {
+    const calls = transport(
+      "<DescribeInstancesResponse><requestId>test</requestId><reservationSet/><nextToken>more</nextToken></DescribeInstancesResponse>",
+    );
+    const result = await observeAWSRetained(env, [lease(1), lease(2)], new RetainedLookupBudget(5));
+    expect([...result.values()]).toEqual([
+      { outcome: "lookup_error" },
+      { outcome: "lookup_error" },
+    ]);
+    expect(calls).toHaveLength(2);
+  });
+  it("rejects duplicate returned IDs", async () => {
+    const instance = `<item><instanceId>${lease().cloudID}</instanceId><instanceState><name>running</name></instanceState></item>`;
+    transport(
+      `<DescribeInstancesResponse><requestId>test</requestId><reservationSet><item><ownerId>123456789012</ownerId><instancesSet>${instance}${instance}</instancesSet></item></reservationSet></DescribeInstancesResponse>`,
+    );
+    const result = await observeAWSRetained(env, [lease()], new RetainedLookupBudget(5));
+    expect(result.get(lease().id)).toEqual({ outcome: "lookup_error" });
+  });
+  it("keeps the original exact batch and individual read transport for other callers", async () => {
+    const calls = transport(
+      "<DescribeInstancesResponse><requestId>test</requestId><reservationSet/></DescribeInstancesResponse>",
+    );
+    await new EC2SpotClient(env, "eu-west-1").withLeaseOperation(async (session) => {
+      expect(await session.findServers([lease().cloudID])).toEqual(new Map());
+      expect(await session.findServer(lease().cloudID)).toBeUndefined();
+    });
+    expect(calls).toHaveLength(3);
+    for (const request of calls.slice(1)) {
+      expect(request.get("InstanceId.1")).toBe(lease().cloudID);
+      expect(request.has("Filter.1.Name")).toBe(false);
+    }
+  });
+  it.each([200, 250, 256])("chunks %s unique IDs within the transport limit", async (size) => {
+    const calls = transport(
+      "<DescribeInstancesResponse><requestId>test</requestId><reservationSet/></DescribeInstancesResponse>",
+    );
+    const rows = Array.from({ length: size }, (_, n) => lease(n + 1));
+    rows.push(lease(size + 1, { cloudID: rows[0]!.cloudID }));
+    const budget = new RetainedLookupBudget(256);
+    const result = await observeAWSRetained(env, rows, budget);
+    expect([...result]).toEqual(
+      rows.map((row) => [row.id, { outcome: "absent", credentialFingerprint: expect.any(String) }]),
+    );
+    expect(calls[0]!.get("Action")).toBe("GetCallerIdentity");
+    const batches = calls.slice(1).map((params) => {
+      expect(params.get("Action")).toBe("DescribeInstances");
+      expect(params.get("Filter.1.Name")).toBe("instance-id");
+      expect([...params.keys()].some((key) => key.startsWith("InstanceId."))).toBe(false);
+      return [...params].filter(([key]) => key.startsWith("Filter.1.Value.")).map(([, id]) => id);
+    });
+    expect(batches.map((ids) => ids.length)).toEqual(size <= 200 ? [200] : [200, size - 200]);
+    expect(batches.every((ids) => ids.length <= awsExactInstanceBatchSize)).toBe(true);
+    expect(batches.flat()).toEqual(rows.slice(0, size).map((row) => row.cloudID));
+    expect(budget.remaining).toBe(256 - 1 - batches.length);
+  });
+  it("filters only exact instance IDs in the recorded region and accepts an empty response", async () => {
     const calls = transport(
       "<DescribeInstancesResponse><requestId>test</requestId><reservationSet/></DescribeInstancesResponse>",
     );
@@ -529,9 +969,11 @@ describe("AWS exact-ID batch transport", () => {
     const result = await observeAWSRetained(env, rows, new RetainedLookupBudget(10));
     expect([...result.values()].map((row) => row.outcome)).toEqual(["absent", "absent"]);
     const exact = calls[1]!;
-    expect(exact.get("InstanceId.1")).toBe(rows[0]!.cloudID);
-    expect(exact.get("InstanceId.2")).toBe(rows[1]!.cloudID);
-    expect([...exact.keys()].some((key) => key.startsWith("Filter"))).toBe(false);
+    expect(exact.get("Filter.1.Name")).toBe("instance-id");
+    expect(exact.get("Filter.1.Value.1")).toBe(rows[0]!.cloudID);
+    expect(exact.get("Filter.1.Value.2")).toBe(rows[1]!.cloudID);
+    expect([...exact.keys()].some((key) => key.startsWith("InstanceId."))).toBe(false);
+    expect(calls).toHaveLength(2);
   });
   it.each(["999999999999", "123456789012"])(
     "rejects unexpected or duplicate results (account %s)",
@@ -548,6 +990,104 @@ describe("AWS exact-ID batch transport", () => {
 });
 
 describe("retained reconciliation recovery guards", () => {
+  it.each([0, 1])("keeps other groups when regional group %s is throttled", async (failedGroup) => {
+    const rows = [
+      lease(1),
+      lease(2),
+      lease(3, { region: "us-east-1" }),
+      lease(4, { region: "us-east-1" }),
+    ];
+    const f = await fixture(rows);
+    delete f.hooks.observe;
+    const sessions = ["eu-west-1", "us-east-1"].map((region, index) =>
+      mockSession({
+        region,
+        findServersByIDFilter: async () => {
+          if (index === failedGroup) throw new Error("Response closed due to connection limit");
+          return new Map();
+        },
+      }),
+    );
+    const operation = vi
+      .spyOn(EC2SpotClient.prototype, "withLeaseOperation")
+      .mockImplementationOnce(async (work) => work(sessions[0]!))
+      .mockImplementationOnce(async (work) => work(sessions[1]!));
+    await f.run({ AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" });
+    expect(operation).toHaveBeenCalledTimes(2);
+    const state = await retainedReconcileStatus(f.storage, {} as Env);
+    expect(state.lastPass?.counters["aws"]).toEqual({ throttled: 2, absent: 2, first_absence: 2 });
+    expect(state.backoff["aws"]).toEqual({ failures: 1, until: epoch + 120_000 });
+    const observed = await Promise.all(rows.map((row) => f.read(row.id)));
+    expect(observed.map((row) => Boolean(row.retainedReconcileObservation))).toEqual(
+      rows.map((_, index) => Math.floor(index / 2) !== failedGroup),
+    );
+  });
+  it("honors the longest Retry-After while counting one failed observation pass", async () => {
+    const f = await fixture([lease(1), lease(2, { region: "us-east-1" })]);
+    let calls = 0;
+    f.hooks.observe = async (_env, rows) =>
+      new Map(
+        rows.map((row) => [
+          row.id,
+          {
+            outcome: "throttled",
+            retryAfter: String(++calls * 1800),
+          },
+        ]),
+      );
+    await f.run();
+    expect(calls).toBe(2);
+    expect((await retainedReconcileStatus(f.storage, {} as Env)).backoff["aws"]).toEqual({
+      failures: 1,
+      until: epoch + 3600_000,
+    });
+  });
+  it("stops later regional groups after authorization failure", async () => {
+    const f = await fixture([lease(1), lease(2, { region: "us-east-1" })]);
+    delete f.hooks.observe;
+    const session = mockSession({
+      findServersByIDFilter: async () => {
+        throw new AWSQueryError("DescribeInstances", 403, "UnauthorizedOperation", "denied");
+      },
+    });
+    const operation = vi
+      .spyOn(EC2SpotClient.prototype, "withLeaseOperation")
+      .mockImplementation(async (work) => work(session));
+    await f.run({ AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" });
+    expect(operation).toHaveBeenCalledOnce();
+    expect((await f.read(lease(1).id)).retainedReconcileObservation).toBeUndefined();
+    expect((await f.read(lease(2).id)).retainedReconcileObservation).toBeUndefined();
+  });
+  it.each([5, 64, 128, 201, 202, 256])(
+    "bounds selection and advances with lookup budget %s",
+    async (lookupBudget) => {
+      const rows = Array.from({ length: 250 }, (_, n) => lease(n + 1));
+      const f = await fixture(rows);
+      const session = mockSession();
+      useSession(session);
+      delete f.hooks.observe;
+      await f.run({
+        AWS_ACCESS_KEY_ID: "test",
+        AWS_SECRET_ACCESS_KEY: "secret",
+        CRABBOX_RETAINED_RECONCILE_LOOKUP_BUDGET: String(lookupBudget),
+      });
+      const selected = 200;
+      const state = await retainedReconcileStatus(f.storage, {} as Env);
+      expect(session.findServersByIDFilter).toHaveBeenCalledWith(
+        rows.slice(0, selected).map((row) => row.cloudID),
+      );
+      expect(session.findServer).not.toHaveBeenCalled();
+      expect(session.findServers).not.toHaveBeenCalled();
+      expect(state.scanned).toBe(selected);
+      expect(state.lastPass?.counters["aws"]).toEqual({
+        absent: selected,
+        first_absence: selected,
+      });
+      expect(state.backoff).toEqual({});
+      expect((await f.read(rows[selected - 1]!.id)).retainedReconcileObservation).toBeDefined();
+      expect((await f.read(rows[selected]!.id)).retainedReconcileObservation).toBeUndefined();
+    },
+  );
   it("reserves enough request budget to observe companion keys and advance the cursor", async () => {
     const { providerKeyForLease } = await import("../src/provider-key");
     const rows = Array.from({ length: 100 }, (_, n) => {
@@ -556,17 +1096,13 @@ describe("retained reconciliation recovery guards", () => {
       return row;
     });
     const f = await fixture(rows);
-    const session = mockSession({
-      findServers: async () => {
-        throw new AWSQueryError("DescribeInstances", 400, "InvalidInstanceID.NotFound", "missing");
-      },
-    });
+    const session = mockSession();
     useSession(session);
     delete f.hooks.observe;
     await f.run({ AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" });
     expect((await f.read(rows[0]!.id)).retainedReconcileObservation).toBeDefined();
     expect((await retainedReconcileStatus(f.storage, {} as Env)).cursor).toBe(
-      leaseCurrentKey(rows[30]!.id),
+      leaseCurrentKey(rows[61]!.id),
     );
   });
   it("rechecks live bindings after claiming deletion and immediately before mutation", async () => {
@@ -640,18 +1176,7 @@ describe("retained reconciliation review regressions", () => {
     });
     row.providerKey = providerKeyForLease(row.id);
     const f = await fixture([row]);
-    useSession(
-      mockSession({
-        findServers: async () => {
-          throw new AWSQueryError(
-            "DescribeInstances",
-            400,
-            "InvalidInstanceID.NotFound",
-            "missing",
-          );
-        },
-      }),
-    );
+    useSession(mockSession());
     delete f.hooks.observe;
     await f.run({
       AWS_ACCESS_KEY_ID: "test",

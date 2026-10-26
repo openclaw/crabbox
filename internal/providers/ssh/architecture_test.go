@@ -46,7 +46,8 @@ func staticArchitectureFixture(t *testing.T, target, mode, assertion string) (*s
 	cfg := core.BaseConfig()
 	cfg.Provider, cfg.TargetOS, cfg.WindowsMode = "ssh", target, mode
 	cfg.Static.Host, cfg.Static.ID = "build.example.test", "static_architecture"
-	cfg.Static.User, cfg.Static.Port = "builder", "2222"
+	cfg.Static.User = "builder"
+	cfg.SSHFallbackPorts = []string{"2207"}
 	if assertion != "" {
 		cfg.Architecture = assertion
 		core.MarkArchitectureExplicit(&cfg)

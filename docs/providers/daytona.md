@@ -114,7 +114,8 @@ reports `daytona-fallback` with `client_auth=crabbox`,
 ## Auth
 
 Crabbox reads the active Daytona CLI profile when no Daytona auth values are set
-in the environment or config:
+in the environment (auth values are environment-only; Crabbox ignores them in
+config files):
 
 ```sh
 daytona login

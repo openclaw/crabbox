@@ -176,3 +176,20 @@ func verifyTartVMIdentity(name, expectedRoot, expectedID string) error {
 	}
 	return nil
 }
+
+// Inventory absence alone cannot retire authority for an existing VM directory.
+func verifyTartVMAbsence(name, expectedRoot string) error {
+	root, err := tartStorageRoot()
+	if err != nil {
+		return err
+	}
+	if root != expectedRoot {
+		return fmt.Errorf("Tart instance %q storage binding changed", name)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "vms", name)); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return fmt.Errorf("Tart instance %q is absent from inventory but its storage still exists; claim retained", name)
+}

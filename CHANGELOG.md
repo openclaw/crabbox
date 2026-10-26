@@ -8,7 +8,127 @@
 
 ### Fixed
 
+- Docker Sandbox: honor cloud status waits and preserve artifact failure exit codes before cleanup. [PR 2863](https://github.com/openclaw/crabbox/pull/2863). Thanks @coygeek.
+- Parallels: an explicitly configured macOS guest user (including `crabbox`, or a generic `ssh.user` / `CRABBOX_SSH_USER`) is honored instead of being replaced by the host `USER`; the host-user fallback still applies when no guest user is configured. [PR 2958](https://github.com/openclaw/crabbox/pull/2958). Thanks @rustanacexd.
+- Parallels: Windows guest setup retries script staging after Parallels Tools loses a result, verifies the staged bootstrap by SHA-256, runs it exactly once, and confirms a lost final result through a run-specific receipt instead of failing or replaying it. [PR 2957](https://github.com/openclaw/crabbox/pull/2957). Thanks @rustanacexd.
+- CI: the serve relay test fixture forwards data only after both READY frames, matching the coordinator relay, which removes a concurrent large-transfer flake. [PR 2955](https://github.com/openclaw/crabbox/pull/2955).
+
+## 0.79.3 - 2026-10-24
+
+### Highlights
+
+- **Refresh managed developer tools with verified security updates.** Bun 1.4.4, uv 0.13.5, TruffleHog 3.99.4, Tailscale 1.104.2, and Git for Windows 2.56.0.windows.3 use verified checksums; existing managed Bun/uv slots can be refreshed during image rebakes. [PR 2944](https://github.com/openclaw/crabbox/pull/2944). Thanks @joshavant.
+- **Keep lease cleanup moving after local-container checkpoint failures.** Failures before checkpoint submission release their reservations, while ambiguous commits retain their safety holds. [PR 2952](https://github.com/openclaw/crabbox/pull/2952). Thanks @coygeek.
+
+### Fixed
+
+- Security: refresh managed developer toolchains to Bun 1.4.4, uv 0.13.5, TruffleHog 3.99.4, Tailscale 1.104.2, and Git for Windows 2.56.0.windows.3 with verified checksums, and let pin-only image rebakes replace the known previous Bun/uv slots instead of rejecting them as foreign. [PR 2944](https://github.com/openclaw/crabbox/pull/2944). Thanks @joshavant.
+- Local-container: release checkpoint reservations after pre-submission failures so lease cleanup can proceed, while retaining holds for ambiguous commits. [PR 2952](https://github.com/openclaw/crabbox/pull/2952). Thanks @coygeek.
+- AWS: distinguish recognized CloudTrail lookup errors during original root readback without exposing provider messages or weakening account, Region, or evidence checks. [PR 2942](https://github.com/openclaw/crabbox/pull/2942). Thanks @vincentkoc.
+- Init: nested module jobs detected on Windows use slash-separated repository paths in generated commands instead of backslashes. [PR 2946](https://github.com/openclaw/crabbox/pull/2946). Thanks @paulcam206.
+- Docs: Azure Dynamic Sessions name the real `azure.tenantId` / `azure.subscriptionId` keys and their environment variables instead of nonexistent `azure.tenant` / `azure.subscription` keys. [PR 2943](https://github.com/openclaw/crabbox/pull/2943). Thanks @KrasimirKralev.
+
+## 0.79.2 - 2026-10-22
+
+### Highlights
+
+- **Keep Windows values intact and prevent PowerShell injection.** Typographic single quotes stay inside string literals across commands, forwarded environment values, bootstrap, Hyper-V, and Windows Sandbox. [PR 2924](https://github.com/openclaw/crabbox/pull/2924). Thanks @parth-garg01.
+- **Connect only to the Static SSH port you selected.** An unavailable explicit port no longer falls back to port 22 on the same address, preventing a forwarded endpoint from reaching the wrong machine. [PR 2933](https://github.com/openclaw/crabbox/pull/2933). Thanks @valkyriweb.
+- **Refresh managed runtime trust and keep coordinator recovery on native TLS.** Updated runtime inputs remove compromised trust data, Linux rebakes preserve managed aliases, and native connection recovery retains the configured authentication, TLS, and proxy boundaries. [PR 2927](https://github.com/openclaw/crabbox/pull/2927), [PR 2939](https://github.com/openclaw/crabbox/pull/2939). Thanks @joshavant.
+
+### Upgrade notes
+
+- Static SSH configurations with an explicit port must make that endpoint available; scripts that relied on silent fallback to port 22 now fail instead. Omitted ports retain the existing fallback policy, and stored leases need no migration. [PR 2933](https://github.com/openclaw/crabbox/pull/2933). Thanks @valkyriweb.
+- Coordinator connections use native HTTP/TLS for every request and retry. Move curl-only CA, proxy, or connectivity workarounds to native OS/runtime trust and proxy configuration. [PR 2927](https://github.com/openclaw/crabbox/pull/2927). Thanks @joshavant.
+
+### Fixed
+
+- Security: refresh managed runtime trust inputs, preserve predecessor Node aliases during Linux rebakes, and keep coordinator retries on native TLS with Windows connection recovery. Curl-specific coordinator trust and connectivity workarounds must move to native configuration. [PR 2927](https://github.com/openclaw/crabbox/pull/2927). Thanks @joshavant.
+- Coordinator: bound capacity snapshots, use maintained lease indexes, and keep diagnostic reads off the lifecycle mutex so retained history cannot stall completion and heartbeats. Incomplete or oversized snapshots fail closed without reporting partial capacity. [PR 2932](https://github.com/openclaw/crabbox/pull/2932). Thanks @vincentkoc.
+- AWS: preserve the original root disk identity after instance loss, fail closed when historical evidence is unavailable, and prevent replacement disks from acquiring the original identity. [PR 2926](https://github.com/openclaw/crabbox/pull/2926). Thanks @roboclaw-bot, @Surendra-4 and @cropsgg.
+- Run: retain private original signed completion bytes before delivery and support exact-byte receipt recovery after coordinator failures, without reconstructing missing historical signatures. [PR 2925](https://github.com/openclaw/crabbox/pull/2925). Thanks @roboclaw-bot, @Surendra-4 and @cropsgg.
+- Coordinator client: recover idempotent reads from native HTTP idle-connection closes and socket/pipe drops within the existing retry budget, without retrying mutations. [PR 2939](https://github.com/openclaw/crabbox/pull/2939). Thanks @joshavant.
+- CI: give the real-PowerShell WSL bootstrap parsing test its own 60 s budget and a bounded pwsh probe, since cold pwsh starts on runners exceeded the 5 s default. [PR 2938](https://github.com/openclaw/crabbox/pull/2938).
+- CI: retry coordinator health verification for up to three minutes during edge propagation, preserving deployment consistency checks and reporting the last version ID and tag on failure. [PR 2937](https://github.com/openclaw/crabbox/pull/2937).
+- Windows: quote PowerShell values containing typographic single quotes (‘ ’ ‚ ‛), which PowerShell treats as string delimiters, across commands, forwarded environment values, bootstrap generators, Hyper-V and Windows Sandbox, so such values no longer break runs or execute as code. [PR 2924](https://github.com/openclaw/crabbox/pull/2924). Thanks @parth-garg01.
+- Static SSH: an explicitly configured SSH port is exclusive, so a port-forwarded host that is not ready yet no longer falls back to port 22 on the same address (for loopback, the operator's own machine); unset ports and provider fallbacks are unchanged, and reused leases keep the pinned port. [PR 2933](https://github.com/openclaw/crabbox/pull/2933). Thanks @valkyriweb.
+- Providers: consistently list `serve` under `self-hosted-virtualization`, generate the category index from metadata, and check README category membership. [PR 2936](https://github.com/openclaw/crabbox/pull/2936). Thanks @aitrawog.
+- Docs: Daytona API key, JWT token, and organization ID are environment-only; the docs no longer list them as config keys that Crabbox silently ignores. [PR 2931](https://github.com/openclaw/crabbox/pull/2931). Thanks @KrasimirKralev.
+- Tests: wait for settled predecessor state in upgrade proofs, create private Windows recovery fixtures, and give Apple VM validation enough time to finish. [PR 2934](https://github.com/openclaw/crabbox/pull/2934). Thanks @vincentkoc.
+
+## 0.79.1 - 2026-10-20
+
+### Highlights
+
+- **Patch certificate validation across Go builds.** Source, release binaries, container runners, and developer-image toolchains now select Go 1.27.3 to fix GO-2026-6809, retaining the Go 1.26 minimum.
+
+- Local Actions hydration: hydrate detached source mirrors from a verified published ancestor with only a local base ref, preserving selected-file exclusions during cold sync. [PR 2916](https://github.com/openclaw/crabbox/pull/2916). Thanks @shakkernerd.
+
+- Local Actions hydration: prepare cold unpublished detached sources from a verified published ancestor while preserving selected files, privacy filters, and repository identity checks. [PR 2914](https://github.com/openclaw/crabbox/pull/2914). Thanks @shakkernerd.
+
+### Fixed
+
+- smolvm: upload workspace archives and environment profiles through the files API instead of base64 in exec requests, so repositories over ~750 KiB compressed no longer fail with 413, and keep complete command output past 1 MiB (or report truncation). Narrowed API keys now need the `machine:files` scope. [PR 2915](https://github.com/openclaw/crabbox/pull/2915). Thanks @NickyHeC.
+- Security: build source, release binaries, container runners, and developer-image toolchains with Go 1.27.3 to fix reachable GO-2026-6809 certificate validation, retaining the Go 1.26 minimum.
+- Cloudflare Dynamic Workers: cancel stalled response reads at their deadline instead of blocking while closing the response body.
+- Run: verify forwarded environment file removal after cleanup failures, preserve success when only the staging directory remains, and distinguish present files from unconfirmed removal. [PR 2917](https://github.com/openclaw/crabbox/pull/2917). Thanks @mr3od.
+
+## 0.79.0 - 2026-10-19
+
+### Highlights
+
+- **Release owned resources with stronger replacement checks.** Tart validates recorded VM ownership, AWS matches immutable key-pair IDs, Azure checks snapshot identity, and Windows Sandbox stops only verified run-owned sessions. [PR 2902](https://github.com/openclaw/crabbox/pull/2902), [PR 2890](https://github.com/openclaw/crabbox/pull/2890), [PR 2905](https://github.com/openclaw/crabbox/pull/2905), [PR 2906](https://github.com/openclaw/crabbox/pull/2906). Thanks @goutamadwant and @coygeek.
+- **Keep credentials within their intended boundaries.** Browser login preserves broker provenance, non-admin control sessions revalidate continuing authorization, and persisted Windows configuration uses an owner-only DACL. [PR 2903](https://github.com/openclaw/crabbox/pull/2903), [PR 2907](https://github.com/openclaw/crabbox/pull/2907), [PR 2901](https://github.com/openclaw/crabbox/pull/2901). Thanks @coygeek.
+- **Run relay-backed serve leases faster and see each machine's contribution.** Reusing one relay connection per invocation cut measured end-to-end runtime by about 3.5×; usage, machine listings, and the portal report leases, runtime, and allocated CPU-hours per machine. [PR 2865](https://github.com/openclaw/crabbox/pull/2865), [PR 2864](https://github.com/openclaw/crabbox/pull/2864).
+- **Sync and run reliably over static SSH.** Fish login shells work again after the 0.72.0 regression, acknowledged renewals retry failed transports, and macOS work roots follow the final static login user. [PR 2874](https://github.com/openclaw/crabbox/pull/2874), [PR 2872](https://github.com/openclaw/crabbox/pull/2872), [PR 2871](https://github.com/openclaw/crabbox/pull/2871). Thanks @shunkakinoki and @holgergruenhagen.
+- **Restore prepared Azure Sandboxes and run Freestyle with its current API.** Fresh Azure leases can use pinned clean snapshots; Freestyle validates VM readiness and reports timed-out commands as failures. [PR 2850](https://github.com/openclaw/crabbox/pull/2850), [PR 2897](https://github.com/openclaw/crabbox/pull/2897), [PR 2896](https://github.com/openclaw/crabbox/pull/2896). Thanks @galiniliev and @coygeek.
+
+### Upgrade notes
+
+- Direct Azure checkpoints without a recorded snapshot `uniqueId`, or with a mismatched identity, become `detached` instead of deleting by name. Reconcile those snapshots manually; `--local-only` removes only the local record. [PR 2905](https://github.com/openclaw/crabbox/pull/2905). Thanks @coygeek.
+- Explicit Tart release refuses VMs whose recorded ownership, storage, or current claim does not match. Resolve the ownership mismatch before retrying; failed releases preserve recovery state. [PR 2902](https://github.com/openclaw/crabbox/pull/2902). Thanks @coygeek.
+- Non-admin control clients already connected without a verifiable authorization grant must reconnect once after the coordinator update. [PR 2907](https://github.com/openclaw/crabbox/pull/2907). Thanks @coygeek.
+- Windows Sandbox cleanup leaves unverifiable sessions running with a warning and preserves the host workspace for manual inspection. [PR 2906](https://github.com/openclaw/crabbox/pull/2906). Thanks @coygeek.
+
+### Changed
+
+- Serve: reuse invocation-owned relay SSH connections across readiness, sync, commands, and cleanup while preserving pinned host keys and independent workspace ownership. [PR 2865](https://github.com/openclaw/crabbox/pull/2865).
+
+### Added
+
+- Azure Sandbox: optionally restore fresh independently owned leases from pinned clean snapshots, verify source and lifecycle settings, and preserve safe recovery and exact-owned cleanup. [PR 2850](https://github.com/openclaw/crabbox/pull/2850). Thanks @galiniliev.
+- Serve: report per-machine lease counts, runtime, and allocated CPU-hours; machine listings and the portal use durable completion rollups starting at deployment without a history scan or backfill, while usage retains full recorded history. [PR 2864](https://github.com/openclaw/crabbox/pull/2864).
+- Coordinator: allow an explicit legacy AWS account attestation to reconcile pre-cutover retained records without enabling resource deletion. [PR 2861](https://github.com/openclaw/crabbox/pull/2861).
+
+### Fixed
+
+- CI: make Blacksmith's buffered artifact-timeout regression deterministic under scheduler pressure without changing production timeouts or workload results. [PR 2909](https://github.com/openclaw/crabbox/pull/2909).
+- Config: protect persisted Windows credentials with a verified current-user-only DACL before writing, without inheriting parent read grants. [PR 2901](https://github.com/openclaw/crabbox/pull/2901). Thanks @coygeek.
+- Freestyle: create and resume VMs through the current Freestyle API contract, validating readiness for stopped or paused creation responses. [PR 2897](https://github.com/openclaw/crabbox/pull/2897). Thanks @coygeek.
+- Coordinator: revoke non-admin control sessions after shared-token rotation or GitHub authorization withdrawal, including restored sessions, event delivery, and queued heartbeats. [PR 2907](https://github.com/openclaw/crabbox/pull/2907). Thanks @coygeek.
+- Freestyle: report commands whose exec response has no exit status (timeouts) as failures instead of success, keeping output and failure retention. [PR 2896](https://github.com/openclaw/crabbox/pull/2896). Thanks @coygeek.
+- Tests: preserve literal SSH username and transport coverage across OpenSSH parser versions, including clients that reject combined backslash/percent usernames. [PR 2904](https://github.com/openclaw/crabbox/pull/2904). Thanks @coygeek.
+- Windows Sandbox: stop only captured run-owned process identities during cleanup, preserve replacement sessions, and report unconfirmed ownership. [PR 2906](https://github.com/openclaw/crabbox/pull/2906). Thanks @coygeek.
+- AWS: release deletes the lease key pair only by its recorded immutable key-pair ID and skips replacement keys registered under the reused name, explaining every skip. [PR 2890](https://github.com/openclaw/crabbox/pull/2890). Thanks @goutamadwant and @coygeek.
+- Azure: bind direct checkpoint deletion to the captured snapshot identity and detach stale or legacy records for manual cleanup. [PR 2905](https://github.com/openclaw/crabbox/pull/2905). Thanks @coygeek.
+- Login: preserve configured broker provenance during browser authentication so repository-selected destinations cannot use inherited coordinator credentials. [PR 2903](https://github.com/openclaw/crabbox/pull/2903). Thanks @coygeek.
+- Tart: enforce recorded VM ownership and current claims during explicit release, preserve retry state on failure, and verify storage absence before pruning missing leases. [PR 2902](https://github.com/openclaw/crabbox/pull/2902). Thanks @coygeek.
+- Sync: preserve Darwin symlink permissions in local Git seed and overlay snapshots without changing symlink targets or weakening source validation. [PR 2900](https://github.com/openclaw/crabbox/pull/2900). Thanks @vincentkoc.
+- Sync: retain redacted attempt, stage, and failed-check diagnostics when local Git-seed snapshot preparation exhausts its retries, without changing acceptance or cleanup. [PR 2899](https://github.com/openclaw/crabbox/pull/2899). Thanks @vincentkoc.
+- CI: move macOS checks and release verification to macOS 27, preserving macOS 13 deployment gates and Intel verification through Rosetta. [PR 2881](https://github.com/openclaw/crabbox/pull/2881).
+- Docs: clarify command-specific `--provider` selection, doctor readiness failures, and `providers describe <name>` for catalog inspection. [PR 2873](https://github.com/openclaw/crabbox/pull/2873). Thanks @aitrawog.
+- Static SSH: derive the macOS work root from the final `--static-user` flag instead of the default or config user, while explicit work roots still win and the generic SSH user remains the fallback. [PR 2871](https://github.com/openclaw/crabbox/pull/2871). Thanks @holgergruenhagen.
+- Sync: stage rsync receivers through an explicit POSIX shell for Fish-login SSH hosts and identify receiver setup failures without weakening workspace ownership. [PR 2874](https://github.com/openclaw/crabbox/pull/2874). Thanks @shunkakinoki.
+- Run: retry workspace-owner `RENEWED` replies with transport errors within the existing same-token retry budget and confirmed deadline; only an error-free reply confirms ownership. [PR 2872](https://github.com/openclaw/crabbox/pull/2872). Thanks @shunkakinoki.
+- Coordinator: read run-log previews from the latest chunks without scanning the full retained log. [PR 2869](https://github.com/openclaw/crabbox/pull/2869). Thanks @vincentkoc.
+- CI: stop aggregate checks when a run is cancelled while preserving failed dependency results, and check coverage producers before toolchain setup. [PR 2868](https://github.com/openclaw/crabbox/pull/2868). Thanks @vincentkoc.
+- Security: update the Incus client and HTTP/2 dependencies to address reachable advisories, and use Go 1.27.2 for builds while retaining the Go 1.26 module minimum. [PR 2870](https://github.com/openclaw/crabbox/pull/2870).
+- Coordinator deployment: reject lease-policy overrides the runtime would ignore, while preserving acknowledged repair of invalid live policy values. [PR 2867](https://github.com/openclaw/crabbox/pull/2867). Thanks @vincentkoc.
+- Coordinator: reconcile retained AWS records with filtered batches of at most 200 unique instance IDs, avoiding missing-instance fallback storms and isolating transient chunk failures while preserving successful observations and bounded backoff. [PR 2866](https://github.com/openclaw/crabbox/pull/2866).
 - Sync: keep finalization fetches blob-filtered when completing shallow Git history, and explain live-child owner release refusals with safe lease recovery guidance. [PR 2854](https://github.com/openclaw/crabbox/pull/2854).
+
+- Tests: use small controller fixtures in archive tests while preserving companion and manifest validation. [PR 2876](https://github.com/openclaw/crabbox/pull/2876). Thanks @vincentkoc.
+- CI: use keyless OIDC intake for review dispatch. [PR 2892](https://github.com/openclaw/crabbox/pull/2892).
 
 ## 0.78.1 - 2026-10-15
 

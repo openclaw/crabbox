@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/openclaw/crabbox/internal/privatefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -22,7 +23,7 @@ func makePrivateDurableDirectories(path string) error {
 	if err := makePrivateDurableDirectories(filepath.Dir(path)); err != nil {
 		return err
 	}
-	security, _, err := privateWindowsSecurityAttributes(true)
+	security, _, err := privatefile.WindowsAttributes(true)
 	if err != nil {
 		return err
 	}

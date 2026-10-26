@@ -14,8 +14,8 @@
       "SHA256": "d8fbed7b27ebab86df6f780f6e86f723668f3715cee521ccaa4568812aef5f3e"
     },
     "gitForWindowsSetup": {
-      "URL": "https://github.com/git-for-windows/git/releases/download/v2.52.0.windows.1/Git-2.52.0-64-bit.exe",
-      "SHA256": "d8de7a3152266c8bb13577eab850ea1df6dccf8c2aa48be5b4a1c58b7190d62c"
+      "URL": "https://github.com/git-for-windows/git/releases/download/v2.56.0.windows.3/Git-2.56.0.3-64-bit.exe",
+      "SHA256": "dc6d3db061999136e139f31376c5582a9ed6f36a4ea12f15e54ad7fa2bfc0bf2"
     },
     "openSSHWin64Zip": {
       "URL": "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip",
@@ -26,13 +26,13 @@
       "SHA256": "8251e27ffff381a4af5f41dcb94d867de3e0d9774a9241908ab34555d99315ea"
     },
     "wslTruffleHog": {
-      "Version": "3.95.9",
-      "AMD64SHA256": "f6d1106b85107d79527ed7a5b98b592beadd8b770dc3c9e8c1ad99e1b2cf127e"
+      "Version": "3.99.4",
+      "AMD64SHA256": "5ae9b313342d1bfa96404064c0f59e77a2cbd1824d797ca7b11e6655aa8fd9d1"
     },
     "defaultTailscale": {
-      "Version": "1.98.4",
-      "AMD64SHA256": "e6c08a8ee7e63e69aaf1b62ecd12672b3883fbcd2a176bf6cfa42a15fdce0b6b",
-      "ARM64SHA256": "3cb068eb1368b6bb218d0ef0aa0a7a679a7156b7c979e2279cc2c2321b5f05c7",
+      "Version": "1.104.2",
+      "AMD64SHA256": "512f613ed7d04fc7282f7dc5bd76aa105aae28168fbb9357eb749ebcbc29f0ae",
+      "ARM64SHA256": "5776aaa901b5ef1916e66be5bb54b9f481cd399c9c28db123a8cab620efa237b",
       "KeyringSHA256": "3e03dacf222698c60b8e2f990b809ca1b3e104de127767864284e6c228f1fb39"
     },
     "defaultCodeServer": {

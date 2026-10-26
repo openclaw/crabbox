@@ -756,7 +756,7 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 	requireBlacksmithArtifactShell(t)
 	for _, kind := range []string{"workload-outlives-budget", "local-collection-stall", "remote-collection-timeout", "sync-stall", "startup-failure", "missing-timeout", "unsupported-timeout"} {
 		for _, code := range []int{0, 1, 23} {
-			t.Run(fmt.Sprintf("%s/%d", kind, code), func(t *testing.T) {
+			runTest := func(t *testing.T) {
 				isolateArtifactOwnership(t)
 				repo := t.TempDir()
 				t.Chdir(repo)
@@ -843,7 +843,7 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 				} else if kind == "remote-collection-timeout" {
 					var ee core.ExitError
 					if got != code || ended.IsZero() || !errors.As(err, &ee) || ee.Code != 7 || ee.Message != "collection exited 124" || len(artifacts) != 0 {
-						t.Fatalf("remote collection timeout lost workload result: code=%d ended=%v artifacts=%+v err=%v", got, ended, artifacts, err)
+						t.Fatalf("remote collection timeout result: code=%d ended=%v artifacts=%+v err=%v", got, ended, artifacts, err)
 					}
 					assertNoBlacksmithArtifactPublication(t, repo, "tbx_budget")
 				} else {
@@ -883,6 +883,16 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 				if time.Since(begin) > budget+3*time.Second {
 					t.Fatal("unbounded collection wait")
 				}
+			}
+			t.Run(fmt.Sprintf("%s/%d", kind, code), func(t *testing.T) {
+				if kind == "remote-collection-timeout" {
+					// Buffered receipt replay must finish before the local timer,
+					// independent of host scheduling and native launcher cleanup.
+					// The subprocess still exercises the real remote timeout.
+					synctest.Test(t, runTest)
+					return
+				}
+				runTest(t)
 			})
 		}
 	}

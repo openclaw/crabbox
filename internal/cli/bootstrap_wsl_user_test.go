@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestManagedWSLWorkerIdentity(t *testing.T) {
@@ -22,6 +24,9 @@ func TestManagedWSLWorkerIdentity(t *testing.T) {
 			script := cloudInit(cfg, "ssh-ed25519 test")
 			if test.target == targetWindows {
 				script = WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+			}
+			if test.mode == windowsModeWSL2 {
+				script = decodedWSLBootstrapPowerShell(t, cfg)
 			}
 			steps := []string{
 				"useradd --create-home --user-group --shell /bin/bash crabbox",
@@ -59,11 +64,88 @@ func TestManagedWSLWorkerIdentity(t *testing.T) {
 	}
 }
 
+// decodedWSLBootstrapPowerShell returns the WSL2 bootstrap with the embedded
+// Linux setup literal replaced by the text PowerShell writes to linux-setup.sh.
+func decodedWSLBootstrapPowerShell(t *testing.T, cfg Config) string {
+	t.Helper()
+	script := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+	prefix, linux, suffix, err := splitWSLSetupLiteral(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prefix + linux + suffix
+}
+
+// Decode the emitted literal independently of its builder, so the checks below
+// still catch missing, truncated, or incorrectly embedded Linux setup text.
+func splitWSLSetupLiteral(script string) (prefix, linux, suffix string, err error) {
+	const assignment = "$linuxSetup = "
+	start := strings.Index(script, assignment)
+	if start < 0 {
+		return "", "", "", fmt.Errorf("missing WSL Linux setup assignment")
+	}
+	start += len(assignment)
+	if start >= len(script) || script[start] != '\'' {
+		return "", "", "", fmt.Errorf("WSL Linux setup must be a single-quoted literal")
+	}
+	isQuote := func(r rune) bool { return r == '\'' || r >= '\u2018' && r <= '\u201b' }
+	var decoded strings.Builder
+	for i := start + 1; i < len(script); {
+		r, width := utf8.DecodeRuneInString(script[i:])
+		if r == utf8.RuneError && width == 1 {
+			return "", "", "", fmt.Errorf("invalid UTF-8 in WSL Linux setup literal")
+		}
+		i += width
+		if isQuote(r) {
+			next, size := utf8.DecodeRuneInString(script[i:])
+			if isQuote(next) {
+				decoded.WriteRune(r)
+				i += size
+				continue
+			}
+			if r != '\'' || !(strings.HasPrefix(script[i:], "\n") || strings.HasPrefix(script[i:], "\r\n")) {
+				return "", "", "", fmt.Errorf("unexpected terminator in WSL Linux setup literal")
+			}
+			return script[:start], decoded.String(), script[i:], nil
+		}
+		decoded.WriteRune(r)
+	}
+	return "", "", "", fmt.Errorf("unterminated WSL Linux setup literal")
+}
+
+func TestWSLSetupLiteralDecoder(t *testing.T) {
+	const prefix, suffix = "# bootstrap\n$linuxSetup = ", "\n# write and launch\n"
+	for i, value := range powerShellQuoteCases() {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			before, got, after, err := splitWSLSetupLiteral(prefix + psQuote(value) + suffix)
+			if err != nil || before != prefix || got != value || after != suffix {
+				t.Fatalf("decode literal: before=%q value=%q after=%q err=%v", before, got, after, err)
+			}
+		})
+	}
+	for _, source := range []string{
+		"# no assignment\n",
+		prefix + "$env:PATH\n",
+		prefix + "'unterminated",
+		prefix + "'trailing''",
+		prefix + "'smart’\n",
+		prefix + "'value'; throw 'injected'\n",
+		prefix + "'\xff'\n",
+	} {
+		if _, _, _, err := splitWSLSetupLiteral(source); err == nil {
+			t.Errorf("accepted malformed setup: %q", source)
+		}
+	}
+}
+
 func wslBootstrapHereDoc(t *testing.T, marker string) string {
 	t.Helper()
 	cfg := baseConfig()
 	cfg.TargetOS, cfg.WindowsMode = targetWindows, windowsModeWSL2
-	script := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+	_, script, _, err := splitWSLSetupLiteral(WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, body, ok := strings.Cut(script, "<<'"+marker+"'\n")
 	if !ok {
 		t.Fatalf("missing %s heredoc", marker)

@@ -117,6 +117,44 @@ Before stopping, an admin may extend the compute deadline with
 `crabbox admin extend-lifetime`; stopping cannot be undone by an extension, and
 the retained root disk is permanently deleted when its separate deadline passes.
 
+### Original root disk readback
+
+When AWS returns an explicit, unique EBS root mapping during acquisition, the
+coordinator persists an exact lease, instance, root volume, root device, account,
+and Region binding before handing the ready machine to the caller. Missing or
+ambiguous root mappings do not establish an original identity. A later acquisition
+observation cannot replace that binding. This records identity only: it does not enroll a
+lease in retention, preserve a volume on termination, or change cleanup deadlines.
+
+`crabbox admin lifetime-readback --id <lease-id> --json` uses that recorded
+identity even after the instance disappears. A current instance mapping cannot
+stand in for the original disk. Conflicting records, a replaced root, or an
+original volume attached to another instance are refused. A detached original
+volume can be reported as present; an explicit provider volume-not-found response
+is reported as absent. Permission failures are not absence evidence.
+
+For older owned leases without a recorded root, readback can consult CloudTrail
+using the coordinator's existing fixed AWS credentials in the original account
+and Region. This requires existing `cloudtrail:LookupEvents` permission; readback
+does not grant it or fall back to another identity. The lookup is scoped to the
+exact original instance and acquisition interval, with a 90-day history window,
+10-page limit, and 2 MiB response budget. Only one authenticated `RunInstances`
+event with matching ownership, instance, provider key, and an explicit unique
+root volume in the allocation response can establish the identity. The response
+includes the source event ID and time, not the raw provider event.
+
+Failed lookups report the HTTP status and, when recognized, a fixed AWS error
+code. Diagnostic bodies are limited to 4 KiB and one second; raw messages and
+unknown error strings are not exposed. HTTP 400 alone does not establish a
+permission failure, and a failed lookup never establishes resource absence.
+
+If allocation history omits the root volume, is unavailable, or is ambiguous,
+readback remains blocked pending authoritative original provider custody
+evidence. It does not adopt a replacement disk, backfill a guessed lease record,
+mount or copy private artifacts, or declare the original run finished. Disk
+identity and presence are not remote-child termination, credential cleanup,
+artifact custody, or task-score evidence; those protocols remain required.
+
 ### Fixed-ID replay
 
 `warmup --lease-id cbx_<12 lowercase hex>` makes direct AWS acquisition
@@ -474,7 +512,7 @@ readiness preflight, API, AWS-GO gate, and live canary are in
 | macOS | Non-root SSH commands, portable workspace ownership, and Node/npm baseline. Requires an available EC2 Mac Dedicated Host in the region; On-Demand only. Admin-authenticated broker requests can pin any host with `CRABBOX_HOST_ID` / `aws.macHostId` (`CRABBOX_AWS_MAC_HOST_ID` is a legacy alias); normal broker users can pin a host with an exact coordinator allocation record for that host, their current org, and the requested region. See the host ownership rules below. |
 
 Managed macOS commands use the image's SSH user (normally `ec2-user`) and its
-writable work root. Bootstrap installs Node 24.19.0, matching the Linux developer
+writable work root. Bootstrap installs Node 24.22.1, matching the Linux developer
 recipe's LTS baseline, when Node or npm is missing. Both Intel and Apple Silicon
 use checksum-pinned official `nodejs.org` archives, with versioned installations
 under `/usr/local/lib/crabbox` and command links in `/usr/local/bin`; Homebrew is
@@ -496,7 +534,7 @@ workspace ownership share one identity. Root is used only for distro setup;
 the Windows SSH transport account is unchanged. Existing leases need
 reprovisioning to receive this setup.
 
-Managed native Windows bootstrap installs checksum-pinned Node 24.19.0 and npm
+Managed native Windows bootstrap installs checksum-pinned Node 24.22.1 and npm
 in `C:\Program Files\nodejs` on the machine PATH when either is missing or
 broken, retaining healthy installations. Bootstrap restarts OpenSSH after the
 machine PATH updates, and client-side completion waits for stable readiness on
@@ -512,7 +550,7 @@ logging, and lifetime. Lease destruction terminates detached processes.
 Managed WSL2 bootstrap runs the Node-only entrypoint of
 `scripts/install-linux-developer-tools.sh`, bundled in the CLI/coordinator rather
 than downloaded at boot. It uses the same Node major policy and, on the managed
-amd64 distro, the same checksum-pinned Node 24.19.0 archive as Linux developer
+amd64 distro, the same checksum-pinned Node 24.22.1 archive as Linux developer
 images. Node and npm are on the default command PATH and required by readiness.
 Re-bootstrap verifies the cached archive and reinstalls the owned version slot.
 The installer logs the Node step's elapsed seconds during warmup.
@@ -563,6 +601,13 @@ cloud-final. Guests without the unit retain the existing bounded
 Brokered cleanup is owned by the Worker (lease expiry plus an AWS orphan
 sweep). Direct cleanup is best-effort via provider labels and
 `crabbox cleanup --provider aws`.
+
+Direct lease release deletes the SSH key registration only when its current
+immutable key-pair ID matches the ID retained in the local lease claim and the
+registration still has canonical Crabbox ownership tags. Deletion uses that ID,
+so reusing the key name cannot redirect cleanup to a replacement. A mismatched
+registration or a legacy claim without a retained key ID produces a skip message;
+the original instance is still terminated and the lease is released.
 
 AWS also supports the provider-neutral retained run handle. Add
 `--lease-output <file>` to a retained run to record the exact lease ID, slug,

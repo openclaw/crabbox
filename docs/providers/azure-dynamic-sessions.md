@@ -47,8 +47,10 @@ Crabbox resolves a bearer token in this order:
 
 1. `CRABBOX_AZURE_DYNAMIC_SESSIONS_TOKEN`, if set.
 2. Otherwise `az account get-access-token --resource https://dynamicsessions.io`.
-   If `azure.tenant`/`azure.subscription` (or their env/flags) are set, they are
-   passed as `--tenant`/`--subscription`.
+   If `azure.tenantId`/`azure.subscriptionId` (or `CRABBOX_AZURE_TENANT_ID`/
+   `AZURE_TENANT_ID` and `CRABBOX_AZURE_SUBSCRIPTION_ID`/`AZURE_SUBSCRIPTION_ID`)
+   are set, they are passed as `--tenant`/`--subscription`. There are no
+   command-line flags for these values.
 
 The endpoint must be `https://` on an `*.azurecontainerapps.io` host (a
 loopback `http://localhost` endpoint is allowed for local testing). Endpoints

@@ -29,6 +29,8 @@ type sandbox struct {
 	ID           string            `json:"id"`
 	State        string            `json:"state"`
 	Labels       map[string]string `json:"labels"`
+	SourcesRef   sourceReferences  `json:"sourcesRef"`
+	Lifecycle    snapshotLifecycle `json:"lifecycle"`
 	StateDetails struct {
 		StoppedReason string `json:"stoppedReason"`
 	} `json:"stateDetails"`
@@ -40,17 +42,23 @@ type execResult struct {
 	Stderr   string `json:"stderr"`
 }
 
+type diskReference struct {
+	ID       string `json:"id,omitempty"`
+	Name     string `json:"name,omitempty"`
+	IsPublic bool   `json:"isPublic,omitempty"`
+}
+type sourceReferences struct {
+	DiskImage *diskReference     `json:"diskImage,omitempty"`
+	Snapshot  *snapshotReference `json:"snapshot,omitempty"`
+}
+type snapshotReference struct {
+	ID string `json:"id"`
+}
 type createRequest struct {
-	SourcesRef struct {
-		DiskImage struct {
-			ID       string `json:"id,omitempty"`
-			Name     string `json:"name,omitempty"`
-			IsPublic bool   `json:"isPublic,omitempty"`
-		} `json:"diskImage"`
-	} `json:"sourcesRef"`
-	Resources map[string]string `json:"resources"`
-	Labels    map[string]string `json:"labels"`
-	Lifecycle map[string]any    `json:"lifecycle"`
+	SourcesRef sourceReferences  `json:"sourcesRef"`
+	Resources  map[string]string `json:"resources,omitempty"`
+	Labels     map[string]string `json:"labels"`
+	Lifecycle  map[string]any    `json:"lifecycle,omitempty"`
 }
 
 type apiError struct{ Status int }

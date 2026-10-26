@@ -191,8 +191,6 @@ Access terms:
 | [windows-sandbox](windows-sandbox.md) (`wsb`, `windows-sandbox-provider`) | built-in; `delegated-run` · local-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync` | `windows/normal`; Windows Sandbox | `local`; GPU: optional | Windows host; sandbox close | Disposable native Windows command execution | Requires Windows Sandbox and local host automation |
 | [xcp-ng](xcp-ng.md) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; XCP-ng VM clone | `self-hosted`; GPU: optional | Crabbox; VM delete | Self-hosted Linux VM pool over XAPI | Normal leases require prepared Linux templates |
 
-<!-- END GENERATED PROVIDER MATRIX -->
-
 ## Providers By Category
 
 The groups below match `crabbox providers --json` and the checked-in
@@ -212,8 +210,10 @@ but also supports coordinator-managed leases.
 | `local-runtime` | 2 | [apple-container](apple-container.md), [local-container](local-container.md) |
 | `local-sandbox` | 4 | [anthropic-sandbox-runtime](anthropic-sandbox-runtime.md), [docker-sandbox](docker-sandbox.md), [mxc](mxc.md), [windows-sandbox](windows-sandbox.md) |
 | `local-vm` | 7 | [apple-machine](apple-machine.md), [apple-vm](apple-vm.md), [hyperv](hyperv.md), [lume](lume.md), [multipass](multipass.md), [parallels](parallels.md), [tart](tart.md) |
-| `self-hosted-virtualization` | 5 | [firecracker](firecracker.md), [incus](incus.md), [kubevirt](kubevirt.md), [proxmox](proxmox.md), [xcp-ng](xcp-ng.md) |
+| `self-hosted-virtualization` | 6 | [firecracker](firecracker.md), [incus](incus.md), [kubevirt](kubevirt.md), [proxmox](proxmox.md), [serve](serve.md), [xcp-ng](xcp-ng.md) |
 | `service-control` | 4 | [cua](cua.md), [fastapi-cloud](fastapi-cloud.md), [railway](railway.md), [unikraft-cloud](unikraft-cloud.md) |
+
+<!-- END GENERATED PROVIDER MATRIX -->
 
 At this revision, target declarations cover Linux on 75 entries, macOS on 8,
 native Windows (`windows/normal`) on 9, and WSL2 (`windows/wsl2`) on 5. These

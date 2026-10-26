@@ -517,12 +517,18 @@ loopback-only listening, one-use tickets, and exclusive lease ownership remain
 required. This broad mode allows a workload to send data to arbitrary public
 services; use an allowlist when that broader authority is unnecessary.
 
-Per-command environment files under `.crabbox/env-<nonce>` have private
-permissions and receive a cancellation-independent cleanup attempt. A cleanup
-failure is a run failure, names the staging directory for manual removal, and
-never echoes remote output or environment values. If the workload also failed,
-its status, error kind, and exit code remain primary. An unreachable lease or lost workspace
-ownership can prevent removal; inspect and clean the named directory before
+Per-command forwarded environment files (`.crabbox/env-<nonce>/values.sh` on
+POSIX, `values.ps1` on native Windows) have private permissions and receive a
+cancellation-independent cleanup attempt with a 15-second budget. If it fails
+or times out, one verification probe gets its own 10-second budget. Confirmed
+absence of both file and directory is silent success. If only the directory
+remains, a warning names it and preserves a successful exit. Only a file that
+is still present or whose removal cannot be confirmed turns an otherwise
+successful run into exit 7. The diagnostic distinguishes those states and
+identifies the file to remove before host reuse, without echoing remote output
+or environment values. If the workload also failed, its status, error kind, and
+exit code remain primary. An unreachable lease or lost workspace ownership can
+prevent cleanup and verification; clean up with verified ownership before
 reuse, or release the lease.
 
 ## Development helper packs

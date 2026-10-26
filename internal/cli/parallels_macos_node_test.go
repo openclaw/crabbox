@@ -53,7 +53,7 @@ func TestParallelsMacOSNodeBaselineStanzaIsolatesInstaller(t *testing.T) {
 				write("sw_vers", "#!/bin/sh\necho ProductName:\tmacOS\n")
 			}
 			if tc.nodeOnPath {
-				write("node", "#!/bin/sh\ncase \"$1\" in\n  -p) echo "+quoteForShell(filepath.Join(tools, "node"))+" ;;\n  *) echo v24.19.0 ;;\nesac\n")
+				write("node", "#!/bin/sh\ncase \"$1\" in\n  -p) echo "+quoteForShell(filepath.Join(tools, "node"))+" ;;\n  *) echo v24.22.1 ;;\nesac\n")
 				write("npm", "#!/bin/sh\necho 11.17.0\n")
 			}
 			// With no runtime anywhere the stanza reaches the pinned installer,
@@ -170,7 +170,7 @@ func TestParallelsMacOSNodeBaselineStanzaPreservesUserManagedRuntime(t *testing.
 				body := "#!/bin/sh\necho stub\n"
 				if name == "node" {
 					// The stanza asks node where it really lives.
-					body = "#!/bin/sh\ncase \"$1\" in\n  -p) echo " + quoteForShell(filepath.Join(dir, name)) + " ;;\n  *) echo v24.19.0 ;;\nesac\n"
+					body = "#!/bin/sh\ncase \"$1\" in\n  -p) echo " + quoteForShell(filepath.Join(dir, name)) + " ;;\n  *) echo v24.22.1 ;;\nesac\n"
 				}
 				write(dir, name, body)
 			}
@@ -267,7 +267,7 @@ func TestParallelsMacOSNodeBaselineStanzaResolvesRuntimeManagerShims(t *testing.
 	write(mgr, "asdfmgr", "#!/bin/sh\nexit 0\n")
 
 	// The real binaries, reachable without the manager.
-	write(real, "node", "#!/bin/sh\ncase \"$1\" in\n  -p) echo "+quoteForShell(filepath.Join(real, "node"))+" ;;\n  *) echo v24.19.0 ;;\nesac\n")
+	write(real, "node", "#!/bin/sh\ncase \"$1\" in\n  -p) echo "+quoteForShell(filepath.Join(real, "node"))+" ;;\n  *) echo v24.22.1 ;;\nesac\n")
 	write(real, "npm", "#!/bin/sh\necho 11.17.0\n")
 	write(real, "npx", "#!/bin/sh\necho npx\n")
 

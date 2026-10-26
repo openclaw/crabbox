@@ -3,13 +3,17 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os/exec"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -146,93 +150,7 @@ func TestCoordinatorHeartbeatHonorsCallerDeadlineWithoutReplay(t *testing.T) {
 	}
 }
 
-func TestCoordinatorReadCurlFallbackSharesCallerDeadline(t *testing.T) {
-	clearConfigEnv(t)
-	// Keep the HTTP deadline independent of local git process startup.
-	t.Setenv("CRABBOX_OWNER", "alice@example.com")
-	if _, err := exec.LookPath("curl"); err != nil {
-		t.Skip("curl is unavailable")
-	}
-	t.Setenv("NO_PROXY", "127.0.0.1")
-	t.Setenv("no_proxy", "127.0.0.1")
-	var calls atomic.Int32
-	release := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		_, _ = io.WriteString(w, `{"lease":`)
-		w.(http.Flusher).Flush()
-		select {
-		case <-r.Context().Done():
-		case <-release:
-		}
-	}))
-	defer func() { close(release); server.Close() }()
-	client := &CoordinatorClient{BaseURL: server.URL, Client: &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if err := sleepContext(req.Context(), 100*time.Millisecond); err != nil {
-				return nil, err
-			}
-			return nil, io.ErrUnexpectedEOF
-		}),
-	}}
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-	started := time.Now()
-	_, err := client.GetLease(ctx, "cbx_budget")
-	if err == nil || !strings.Contains(err.Error(), "curl fallback failed") || ctx.Err() != context.DeadlineExceeded || calls.Load() != 1 || time.Since(started) > 5*time.Second {
-		t.Fatalf("fallback err=%v parent=%v requests=%d elapsed=%s", err, ctx.Err(), calls.Load(), time.Since(started))
-	}
-}
-
-func TestCoordinatorReadCurlFallbackAfterDialTimeout(t *testing.T) {
-	clearConfigEnv(t)
-	if _, err := exec.LookPath("curl"); err != nil {
-		t.Skip("curl is unavailable")
-	}
-	t.Setenv("CRABBOX_OWNER", "alice@example.com")
-	t.Setenv("NO_PROXY", "127.0.0.1")
-	t.Setenv("no_proxy", "127.0.0.1")
-	var nativeCalls, curlCalls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		curlCalls.Add(1)
-		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases/cbx_dial" ||
-			r.Header.Get("Authorization") != "Bearer synthetic-dial-token" {
-			t.Errorf("unexpected fallback request: %s %s", r.Method, r.URL.Path)
-			http.Error(w, "unexpected request", http.StatusBadRequest)
-			return
-		}
-		_, _ = io.WriteString(w, `{"lease":{"id":"cbx_dial","provider":"aws","state":"released"}}`)
-	}))
-	defer server.Close()
-	client := &CoordinatorClient{BaseURL: server.URL, Token: "synthetic-dial-token", Client: &http.Client{
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			nativeCalls.Add(1)
-			// Expire only the dialer's own budget, not the logical request.
-			dialer := net.Dialer{Deadline: time.Now().Add(-time.Second)}
-			conn, err := dialer.DialContext(req.Context(), "tcp", server.Listener.Addr().String())
-			if conn != nil {
-				_ = conn.Close()
-				t.Fatal("expired dial unexpectedly connected")
-			}
-			var dialErr *net.OpError
-			if !errors.As(err, &dialErr) || dialErr.Op != "dial" || !dialErr.Timeout() ||
-				!errors.Is(err, context.DeadlineExceeded) || req.Context().Err() != nil {
-				t.Fatalf("dial error=%v request=%v, want dial-local deadline with live request", err, req.Context().Err())
-			}
-			return nil, err
-		}),
-	}}
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	lease, err := client.GetLease(ctx, "cbx_dial")
-	if err != nil || lease.ID != "cbx_dial" || lease.Provider != "aws" || lease.State != "released" ||
-		nativeCalls.Load() != 1 || curlCalls.Load() != 1 || ctx.Err() != nil {
-		t.Fatalf("live-parent dial fallback: err=%v lease=%s/%s/%s native=%d curl=%d parent=%v",
-			err, lease.ID, lease.Provider, lease.State, nativeCalls.Load(), curlCalls.Load(), ctx.Err())
-	}
-}
-
-func TestCoordinatorReadCurlFallbackRejectsIneligibleRequests(t *testing.T) {
+func TestCoordinatorRequestReplayGuards(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("CRABBOX_OWNER", "alice@example.com")
 	t.Setenv("NO_PROXY", "127.0.0.1")
@@ -296,6 +214,120 @@ func TestCoordinatorReadCurlFallbackRejectsIneligibleRequests(t *testing.T) {
 				nativeCalls.Load() != wantCalls || curlCalls.Load() != 0 {
 				t.Fatalf("err=%v native=%d curl=%d, want original error, %d native calls and no fallback",
 					err, nativeCalls.Load(), curlCalls.Load(), wantCalls)
+			}
+		})
+	}
+}
+
+func TestCoordinatorReadDoesNotOverrideTLSVerificationWithCurl(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("NO_PROXY", "127.0.0.1")
+	t.Setenv("no_proxy", "127.0.0.1")
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+	certificate := server.Certificate()
+	ca := filepath.Join(t.TempDir(), "curl-only-ca.pem")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Curl would trust this server, but the native client's trust decision is authoritative.
+	t.Setenv("CURL_CA_BUNDLE", ca)
+	client := &CoordinatorClient{BaseURL: server.URL, Token: "synthetic-fixture-only", Client: &http.Client{}}
+	err := client.Health(t.Context())
+	var verification *tls.CertificateVerificationError
+	if !errors.As(err, &verification) || requests.Load() != 0 {
+		t.Fatalf("TLS rejection must not send an authenticated fallback: err=%v requests=%d", err, requests.Load())
+	}
+
+	// A private CA configured in the native verifier still works through the real request path.
+	roots := x509.NewCertPool()
+	roots.AddCert(certificate)
+	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}
+	defer transport.CloseIdleConnections()
+	client.Client = &http.Client{Transport: transport}
+	if err := client.Health(t.Context()); err != nil || requests.Load() != 1 {
+		t.Fatalf("native private CA request failed: err=%v requests=%d", err, requests.Load())
+	}
+}
+
+// Drop a real TCP connection before TLS, then serve subsequent native retries.
+type coordinatorDropFirstListener struct {
+	net.Listener
+	dropped atomic.Bool
+}
+
+func (l *coordinatorDropFirstListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if !l.dropped.Swap(true) {
+			_ = conn.Close()
+			continue
+		}
+		return conn, nil
+	}
+}
+
+func TestCoordinatorHTTPSReadNeverDowngradesAfterDroppedHandshake(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("NO_PROXY", "127.0.0.1")
+	t.Setenv("no_proxy", "127.0.0.1")
+	for _, nativeTrust := range []bool{false, true} {
+		name := "curl-only CA"
+		if nativeTrust {
+			name = "native trusted CA"
+		}
+		t.Run(name, func(t *testing.T) {
+			var nativeRequests, curlRequests atomic.Int32
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer synthetic-drop-token" {
+					t.Error("missing fixture authorization")
+				}
+				if strings.HasPrefix(r.UserAgent(), "curl/") {
+					curlRequests.Add(1)
+				} else {
+					nativeRequests.Add(1)
+				}
+				_, _ = io.WriteString(w, `{}`)
+			}))
+			listener := &coordinatorDropFirstListener{Listener: server.Listener}
+			server.Listener = listener
+			server.StartTLS()
+			defer server.Close()
+			ca := filepath.Join(t.TempDir(), "curl-only-ca.pem")
+			if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CURL_CA_BUNDLE", ca)
+			transport := &http.Transport{}
+			if nativeTrust {
+				roots := x509.NewCertPool()
+				roots.AddCert(server.Certificate())
+				transport.TLSClientConfig = &tls.Config{RootCAs: roots}
+			}
+			defer transport.CloseIdleConnections()
+			client := &CoordinatorClient{BaseURL: server.URL, Token: "synthetic-drop-token", Client: &http.Client{Transport: transport}}
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			err := client.Health(ctx)
+			if nativeTrust {
+				if err != nil || nativeRequests.Load() != 1 {
+					t.Errorf("native retry recovery: err=%v native=%d", err, nativeRequests.Load())
+				}
+			} else {
+				var verification *tls.CertificateVerificationError
+				if !errors.As(err, &verification) || nativeRequests.Load() != 0 {
+					t.Errorf("native rejection: err=%v native=%d", err, nativeRequests.Load())
+				}
+			}
+			if !listener.dropped.Load() || curlRequests.Load() != 0 || ctx.Err() != nil {
+				t.Fatalf("verifier switched or request expired: dropped=%t curl=%d context=%v", listener.dropped.Load(), curlRequests.Load(), ctx.Err())
 			}
 		})
 	}
@@ -412,5 +444,32 @@ func TestCoordinatorFinishRequestsKeepCallerBudgetWithoutReadRetries(t *testing.
 				}
 			})
 		})
+	}
+}
+
+func TestCoordinatorNativeHTTPReadRecoversAfterDroppedConnection(t *testing.T) {
+	clearConfigEnv(t)
+	var requests atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.UserAgent(), "Go-http-client/") {
+			t.Error("request switched away from native transport")
+			http.Error(w, "native transport required", http.StatusBadRequest)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer synthetic-http-drop" {
+			t.Error("missing authentication")
+		}
+		requests.Add(1)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	listener := &coordinatorDropFirstListener{Listener: server.Listener}
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+	client := &CoordinatorClient{BaseURL: server.URL, Token: "synthetic-http-drop", Client: server.Client()}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if err := client.Health(ctx); err != nil || !listener.dropped.Load() || requests.Load() != 1 || ctx.Err() != nil {
+		t.Fatalf("native HTTP recovery err=%v dropped=%t requests=%d context=%v", err, listener.dropped.Load(), requests.Load(), ctx.Err())
 	}
 }

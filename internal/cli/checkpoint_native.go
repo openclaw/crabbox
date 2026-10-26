@@ -15,6 +15,8 @@ type checkpointNativeCreateDriver interface {
 	Create(context.Context, NativeCheckpointCreateRequest) (CoordinatorImage, error)
 }
 
+var newAzureCheckpointClient = NewAzureClient
+
 type directAWSAMICheckpointDriver struct{}
 
 const nativeCheckpointAvailabilityPollInterval = 3 * time.Second
@@ -119,7 +121,7 @@ func (directAzureOSDiskCheckpointDriver) Create(ctx context.Context, req NativeC
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
-	client, err := NewAzureClient(ctx, req.Config)
+	client, err := newAzureCheckpointClient(ctx, req.Config)
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
@@ -458,17 +460,18 @@ func (a App) createNativeCheckpointRequest(ctx context.Context, req NativeCheckp
 
 func coordinatorImageFromNativeCheckpoint(image NativeCheckpointImage) CoordinatorImage {
 	return CoordinatorImage{
-		ID:           image.ID,
-		Name:         image.Name,
-		State:        image.State,
-		Provider:     image.Provider,
-		Kind:         image.Kind,
-		Region:       image.Region,
-		AccountID:    image.AccountID,
-		ResourceID:   image.ResourceID,
-		SnapshotIDs:  image.SnapshotIDs,
-		Architecture: image.Architecture,
-		Direct:       image.Direct,
+		ID:               image.ID,
+		Name:             image.Name,
+		State:            image.State,
+		Provider:         image.Provider,
+		Kind:             image.Kind,
+		Region:           image.Region,
+		AccountID:        image.AccountID,
+		ResourceID:       image.ResourceID,
+		ResourceUniqueID: image.ResourceUniqueID,
+		SnapshotIDs:      image.SnapshotIDs,
+		Architecture:     image.Architecture,
+		Direct:           image.Direct,
 	}
 }
 
@@ -704,6 +707,7 @@ func (record *checkpointRecord) applyNativeImage(image CoordinatorImage, noReboo
 	record.Native.AccountID = image.AccountID
 	record.Native.Project = image.Project
 	record.Native.Resource = image.ResourceID
+	record.Native.ResourceUniqueID = image.ResourceUniqueID
 	record.Native.Architecture = image.Architecture
 	record.Native.SnapshotIDs = image.SnapshotIDs
 	record.Native.Direct = image.Direct
@@ -715,15 +719,16 @@ func nativeCheckpointResourceRequest(record checkpointRecord) NativeCheckpointRe
 	return NativeCheckpointResourceRequest{
 		LoadConfig: loadConfig,
 		Image: NativeCheckpointImage{
-			ID:           record.Native.ImageID,
-			Name:         record.Native.Name,
-			State:        record.Native.State,
-			Provider:     record.nativeProvider(),
-			Kind:         record.Kind,
-			Region:       record.Native.Region,
-			ResourceID:   record.Native.Resource,
-			Architecture: record.Native.Architecture,
-			Direct:       record.Native.Direct,
+			ID:               record.Native.ImageID,
+			Name:             record.Native.Name,
+			State:            record.Native.State,
+			Provider:         record.nativeProvider(),
+			Kind:             record.Kind,
+			Region:           record.Native.Region,
+			ResourceID:       record.Native.Resource,
+			ResourceUniqueID: record.Native.ResourceUniqueID,
+			Architecture:     record.Native.Architecture,
+			Direct:           record.Native.Direct,
 		},
 		Metadata: record.Native.Metadata,
 		Capture:  record.Capture,
@@ -821,7 +826,7 @@ func directAzureCheckpointConfig(record checkpointRecord) (Config, bool) {
 }
 
 func verifyDirectAzureCheckpoint(ctx context.Context, audit checkpointAudit, cfg Config, providerID string) checkpointAudit {
-	client, err := NewAzureClient(ctx, cfg)
+	client, err := newAzureCheckpointClient(ctx, cfg)
 	if err != nil {
 		audit.ProviderState = "unknown"
 		audit.NextAction = "check_auth_or_provider"

@@ -71,6 +71,15 @@ You can also hydrate explicitly: `crabbox actions hydrate --id <id>` syncs the
 current checkout and then runs the hydrate workflow. Automatic hydration during
 `crabbox run` reuses the run's own sync rather than syncing twice.
 
+For an unpublished detached source, cold local hydration can use a verified
+published ancestor from the same origin as its Git baseline, then apply the full
+selected file manifest. This matches a previously hydrated workspace: working
+files are the selected source, while Git HEAD may be the published ancestor.
+The log reports both identities. Workloads that require the exact unpublished Git
+commit must establish and verify it separately before treating their results as
+proof of that commit. No private Git history is implicitly copied. See
+[Git seeding](sync.md#fingerprints-and-git-seeding) for eligibility and limits.
+
 When `--full-resync` starts from an existing readiness marker, Crabbox
 invalidates that marker before resetting the workspace. Runs with a command must
 be able to hydrate the canonical lease workspace locally after sync; unsupported

@@ -130,28 +130,29 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 func createNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest) (core.NativeCheckpointCreateResult, error) {
 	containerID := strings.TrimSpace(req.Server.CloudID)
 	if containerID == "" {
-		return core.NativeCheckpointCreateResult{}, core.Exit(2, "docker-commit checkpoint requires a running container")
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: core.Exit(2, "docker-commit checkpoint requires a running container")}
 	}
 	scope, err := checkpointScopeForServer(ctx, req.Config, req.Server)
 	if err != nil {
-		return core.NativeCheckpointCreateResult{}, err
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: err}
 	}
 	if !isDockerRuntime(scope.Runtime) {
-		return core.NativeCheckpointCreateResult{}, core.Exit(2, "docker-commit checkpoints require the Docker runtime; use --mode archive with %s", scope.Runtime)
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: core.Exit(2, "docker-commit checkpoints require the Docker runtime; use --mode archive with %s", scope.Runtime)}
 	}
 	metadata := checkpointMetadataForServer(scope, req.Config, req.Server)
 	canonicalWorkdir, err := checkpointCanonicalWorkdir(ctx, scope, containerID, req.Workdir)
 	if err != nil {
-		return core.NativeCheckpointCreateResult{}, err
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: err}
 	}
 	mounts, err := checkpointMounts(ctx, scope, containerID)
 	if err != nil {
-		return core.NativeCheckpointCreateResult{}, err
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: err}
 	}
 	if destination := checkpointMountIntersectingWorkdir(mounts, canonicalWorkdir); destination != "" {
-		return core.NativeCheckpointCreateResult{}, core.Exit(2, "docker-commit checkpoint cannot capture workdir %s because it intersects mounted volume %s; use --mode archive", req.Workdir, destination)
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: core.Exit(2, "docker-commit checkpoint cannot capture workdir %s because it intersects mounted volume %s; use --mode archive", req.Workdir, destination)}
 	}
 
+	// Once commit is attempted, a failed response cannot prove non-submission.
 	var commitStderr strings.Builder
 	commitCmd := checkpointCommand(
 		ctx,

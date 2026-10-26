@@ -321,6 +321,7 @@ func (b *cloudBackend) Run(ctx context.Context, req core.RunRequest) (core.RunRe
 			if err != nil {
 				return shared.DelegatedSandboxCommand{}, err
 			}
+			commandSucceeded := false
 			return shared.DelegatedSandboxCommand{Text: strings.Join(req.Command, " "), OutputScope: core.RunOutputProvider, Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
 				var code int
 				err := core.WithLeaseClaimUnchangedContext(ctx, claim.LeaseID, claim, func() error {
@@ -331,10 +332,15 @@ func (b *cloudBackend) Run(ctx context.Context, req core.RunRequest) (core.RunRe
 					code, e = c.runStreamed(ctx, args, stdout, stderr)
 					return e
 				})
-				if err == nil && code == 0 && core.HasDelegatedRunDownloadRequests(req) {
-					artifacts, err = core.MaterializeDelegatedRunDownloads(ctx, cloudRunDownloader{b, c, claim}, req, claim.LeaseID, b.rt.Stderr)
-				}
+				commandSucceeded = err == nil && code == 0
 				return code, err
+			}, Close: func(ctx context.Context) error {
+				if !commandSucceeded || !core.HasDelegatedRunDownloadRequests(req) {
+					return nil
+				}
+				var err error
+				artifacts, err = core.MaterializeDelegatedRunDownloads(ctx, cloudRunDownloader{b, c, claim}, req, claim.LeaseID, b.rt.Stderr)
+				return err
 			}}, nil
 		},
 		Retained: func(ctx context.Context) error {
@@ -421,18 +427,34 @@ func (b *cloudBackend) Status(ctx context.Context, req core.StatusRequest) (core
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	var record sandboxRecord
-	err = core.WithLeaseClaimUnchangedContext(ctx, claim.LeaseID, claim, func() error { var e error; record, e = b.live(ctx, c, claim); return e })
-	if err != nil {
-		return core.StatusView{}, err
+	waitTimeout := req.WaitTimeout
+	if waitTimeout <= 0 {
+		waitTimeout = 5 * time.Minute
 	}
-	view := statusFromRecord(claim.LeaseID, claim.Slug, record)
-	view.ServerID = record.ID
-	view.Labels = cloudServer(claim, record).Labels
-	if claim.Labels["docker_sandbox_delete_requested"] == "true" {
-		view.State, view.Ready = "deleting", false
+	deadline := core.ClockNow(b.rt.Clock).Add(waitTimeout)
+	for {
+		var record sandboxRecord
+		err = core.WithLeaseClaimUnchangedContext(ctx, claim.LeaseID, claim, func() error { var e error; record, e = b.live(ctx, c, claim); return e })
+		if err != nil {
+			return core.StatusView{}, err
+		}
+		view := statusFromRecord(claim.LeaseID, claim.Slug, record)
+		view.ServerID = record.ID
+		view.Labels = cloudServer(claim, record).Labels
+		if claim.Labels["docker_sandbox_delete_requested"] == "true" {
+			view.State, view.Ready = "deleting", false
+		}
+		if !req.Wait || view.Ready || dockerSandboxTerminalState(view.State) {
+			return view, nil
+		}
+		remaining := deadline.Sub(core.ClockNow(b.rt.Clock))
+		if remaining <= 0 {
+			return core.StatusView{}, core.Exit(5, "timed out waiting for Docker cloud sandbox %s to become ready", claim.CloudID)
+		}
+		if err := core.SleepContext(ctx, min(statusPollInterval, remaining)); err != nil {
+			return core.StatusView{}, err
+		}
 	}
-	return view, nil
 }
 
 func (b *cloudBackend) Stop(ctx context.Context, req core.StopRequest) error {
