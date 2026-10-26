@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Azure Sandbox: include client request and lifecycle-poll durations and counts in warmup timing reports, including failed attempts, without inferring server disk or boot timings. [PR 2959](https://github.com/openclaw/crabbox/pull/2959).
+
 ### Fixed
 
 - Parallels: Windows guest setup retries script staging after Parallels Tools loses a result, verifies the staged bootstrap by SHA-256, runs it exactly once, and confirms a lost final result through a run-specific receipt instead of failing or replaying it. [PR 2957](https://github.com/openclaw/crabbox/pull/2957). Thanks @rustanacexd.
@@ -89,8 +93,6 @@
 - Serve: reuse invocation-owned relay SSH connections across readiness, sync, commands, and cleanup while preserving pinned host keys and independent workspace ownership. [PR 2865](https://github.com/openclaw/crabbox/pull/2865).
 
 ### Added
-
-- Azure Sandbox: include client request and lifecycle-poll durations and counts in warmup timing reports, including failed attempts, without inferring server disk or boot timings.
 
 - Azure Sandbox: optionally restore fresh independently owned leases from pinned clean snapshots, verify source and lifecycle settings, and preserve safe recovery and exact-owned cleanup. [PR 2850](https://github.com/openclaw/crabbox/pull/2850). Thanks @galiniliev.
 - Serve: report per-machine lease counts, runtime, and allocated CPU-hours; machine listings and the portal use durable completion rollups starting at deployment without a history scan or backfill, while usage retains full recorded history. [PR 2864](https://github.com/openclaw/crabbox/pull/2864).
