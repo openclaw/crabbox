@@ -141,3 +141,43 @@ func TestRetainedPauseStillInterruptsActivity(t *testing.T) {
 		t.Fatal("pause was not submitted exactly once")
 	}
 }
+
+func TestExpiredAccessGuidanceKeepsRetentionAndEphemeralDistinct(t *testing.T) {
+	for _, retained := range []bool{false, true} {
+		name := "ephemeral"
+		if retained {
+			name = "retained"
+		}
+		t.Run(name, func(t *testing.T) {
+			b, req, f, _, _ := retainedFixture(t)
+			if !retained {
+				b.cfg.AzureSandbox.Retention = ""
+				b.cfg.AzureSandbox.OwnerBinding = ""
+			}
+			clock := &retentionClock{at: time.Now()}
+			b.rt.Clock = clock
+			transport := b.api.http.Transport
+			b.api.http.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+				response, err := transport.RoundTrip(r)
+				if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/sandboxes") {
+					clock.at = clock.at.Add(5 * time.Hour)
+				}
+				return response, err
+			})
+			_, err := b.acquire(t.Context(), req)
+			if err == nil {
+				t.Fatal("expired access preparation succeeded")
+			}
+			if retained {
+				if !strings.Contains(err.Error(), "explicit lifecycle recovery required") || strings.Contains(err.Error(), "release the lease") {
+					t.Fatalf("retained recovery was replaced by destructive advice: %v", err)
+				}
+			} else if !strings.Contains(err.Error(), "release the lease") {
+				t.Fatalf("ephemeral release advice changed: %v", err)
+			}
+			if f.creates != 1 || f.deletes != 0 || f.box == nil {
+				t.Fatal("diagnostic changed resource custody")
+			}
+		})
+	}
+}

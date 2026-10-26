@@ -179,8 +179,8 @@ func TestRetainedExpiryBlocksWorkButPreservesDiskAndCleanup(t *testing.T) {
 	if v.State != "compute-expired" || !v.Retention.StopPending || f.box == nil {
 		t.Fatalf("expiry discarded retained ownership: %+v", v)
 	}
-	if _, err := b.acquire(t.Context(), req); err == nil {
-		t.Fatal("acquire replay granted new window")
+	if _, err := b.acquire(t.Context(), req); err == nil || !strings.Contains(err.Error(), "explicit lifecycle recovery required") || !strings.Contains(err.Error(), "inspect the same lease") || !strings.Contains(err.Error(), "pause/resume") || strings.Contains(err.Error(), "release the lease") {
+		t.Fatalf("expired retained replay must preserve lifecycle recovery guidance: %v", err)
 	}
 	p := retentionRequest(t, b, claim.LeaseID, "expiry-pause")
 	if err := b.Pause(t.Context(), core.PauseRequest{ID: claim.LeaseID, Lifecycle: p}); err != nil {

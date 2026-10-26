@@ -230,12 +230,18 @@ func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (cor
 			return s, nil
 		},
 		PrepareAccess: func(ctx context.Context, tx *core.FixedTransaction, s sandbox) (core.LeaseTarget, error) {
-			deadline, err := time.Parse(time.RFC3339Nano, tx.Claim.FixedCreateIntent.Attempt["expires_at"])
+			var deadline time.Time
+			var err error
 			if retention != nil {
 				deadline, err = core.SessionDiskWindowDeadline(*tx.Claim, b.now())
-			}
-			if err != nil || !deadline.After(b.now()) {
-				return core.LeaseTarget{}, fmt.Errorf("ACA Sandbox allocation expired; release the lease")
+				if err != nil {
+					return core.LeaseTarget{}, fmt.Errorf("%w; inspect the same lease before explicit pause/resume recovery", err)
+				}
+			} else {
+				deadline, err = time.Parse(time.RFC3339Nano, tx.Claim.FixedCreateIntent.Attempt["expires_at"])
+				if err != nil || !deadline.After(b.now()) {
+					return core.LeaseTarget{}, fmt.Errorf("ACA Sandbox allocation expired; release the lease")
+				}
 			}
 			ctx, cancel := context.WithDeadline(ctx, deadline)
 			defer cancel()
