@@ -454,7 +454,7 @@ func (a App) runOneShard(runCtx context.Context, cancel context.CancelFunc, opts
 			mux.printf(a.Stderr, "shard %d/%d canceled\n", index, opts.Count)
 			return shardResult{Index: index, Slug: slug, Canceled: true, Err: err}
 		}
-		mux.printf(a.Stderr, "shard %d/%d failed error=%q\n", index, opts.Count, err.Error())
+		mux.printf(a.Stderr, "shard %d/%d failed error=%q\n", index, opts.Count, terminalSafeResultField(err.Error()))
 		if opts.FailFast {
 			cancel()
 		}
@@ -506,7 +506,7 @@ func (a App) printShardStatus(mux *shardOutputMux, opts shardOptions, result sha
 		return
 	}
 	if result.infraFailed() {
-		mux.printf(a.Stderr, "shard %d/%d failed error=%q\n", result.Index, opts.Count, result.Err.Error())
+		mux.printf(a.Stderr, "shard %d/%d failed error=%q\n", result.Index, opts.Count, terminalSafeResultField(result.Err.Error()))
 		return
 	}
 	if result.Results != nil {
@@ -597,7 +597,7 @@ func (a App) shardVerdict(opts shardOptions, results []shardResult, wall time.Du
 			if !result.infraFailed() || result.Err == nil {
 				continue
 			}
-			fmt.Fprintf(a.Stdout, "  [%d/%d] error=%s\n", result.Index, opts.Count, result.Err.Error())
+			fmt.Fprintf(a.Stdout, "  [%d/%d] error=%s\n", result.Index, opts.Count, terminalSafeResultField(result.Err.Error()))
 		}
 	}
 	if len(failedCases) > 0 {
@@ -702,7 +702,7 @@ func shardJSONResults(results []shardResult) []shardJSONResult {
 	for _, result := range results {
 		item := shardJSONResult{Index: result.Index, LeaseID: result.LeaseID, Slug: result.Slug, RunID: result.RunID, ExitCode: result.ExitCode, Canceled: result.Canceled, Results: result.Results}
 		if result.Err != nil {
-			item.Error = result.Err.Error()
+			item.Error = terminalSafeResultField(result.Err.Error())
 		}
 		out = append(out, item)
 	}

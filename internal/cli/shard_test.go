@@ -880,9 +880,48 @@ func TestConfigureShardRunOwnsLeaseCleanup(t *testing.T) {
 	}
 }
 
-// TestRunOneShardCarriesAuthorizedClaimOnly exercises the production release
-// order: run reports AuthorizedClaim, then release carries that snapshot and
-// fences provider delete. Concurrent same-owner reclaim / ABA must not delete.
+func TestShardProvisionFailureSummarySanitizesControlBytes(t *testing.T) {
+	// LocalCommandError-style stderr can include ESC/CSI; verdict output must not.
+	raw := "provision failed: \x1b[31mboom\x1b[0m\x00\x7f"
+	provisioner := &shardTestProvisioner{errs: map[int]error{1: errors.New(raw)}}
+	executor := newShardTestExecutor()
+	opts := shardTestOptions(1)
+	var stdout, stderr bytes.Buffer
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	err := app.shardRun(context.Background(), opts, &shardOutputMux{}, provisioner.provision, executor.run)
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("err=%v, want exit 7", err)
+	}
+	out := stdout.String() + stderr.String()
+	assertTerminalSafe(t, out)
+	want := terminalSafeResultField(raw)
+	if !strings.Contains(out, want) {
+		t.Fatalf("sanitized error missing from output want=%q\n%s", want, out)
+	}
+	if strings.Contains(out, "\x1b") || strings.Contains(out, "\x00") {
+		t.Fatalf("raw control bytes leaked into shard summary:\n%q", out)
+	}
+	opts.JSON = true
+	stdout.Reset()
+	stderr.Reset()
+	err = app.shardRun(context.Background(), opts, &shardOutputMux{}, provisioner.provision, executor.run)
+	if !AsExitError(err, &exitErr) || exitErr.Code != 7 {
+		t.Fatalf("json err=%v, want exit 7", err)
+	}
+	var report shardJSONReport
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &report); decodeErr != nil {
+		t.Fatalf("decode: %v\n%s", decodeErr, stdout.String())
+	}
+	if len(report.Shards) != 1 || report.Shards[0].Error != want {
+		t.Fatalf("json error=%q want %q report=%#v", report.Shards[0].Error, want, report)
+	}
+	assertTerminalSafe(t, report.Shards[0].Error)
+}
+
+// TestRunOneShardCarriesAuthorizedClaimOnly drives runOneShard with the real
+// production release bindings (checkpointForkReleaseBindings) and the outermost
+// fakeable provider delete seam (checkpointForkReleaseBackend.ReleaseLease).
 func TestRunOneShardCarriesAuthorizedClaimOnly(t *testing.T) {
 	cases := []struct {
 		name string
@@ -905,7 +944,6 @@ func TestRunOneShardCarriesAuthorizedClaimOnly(t *testing.T) {
 				if updated.ClaimedAt != acquired.ClaimedAt {
 					t.Fatalf("ClaimedAt=%q, want same-second %q", updated.ClaimedAt, acquired.ClaimedAt)
 				}
-				// Run already finished with acquired; concurrent reclaim replaced disk.
 				return acquired
 			},
 			wantRefuse: true,
@@ -1011,20 +1049,9 @@ func TestRunOneShardCarriesAuthorizedClaimOnly(t *testing.T) {
 			backend := &checkpointForkReleaseBackend{leaseID: leaseID}
 			var stderr bytes.Buffer
 			app := App{Stdout: io.Discard, Stderr: &stderr}
-			var releaseOnce sync.Once
-			carryReleaseClaim := func(claim leaseClaim) {
-				SetServerLeaseClaimSnapshot(&server, claim, true)
-			}
-			release := func(releaseCtx context.Context) {
-				releaseOnce.Do(func() {
-					rl := LeaseTarget{Server: server, LeaseID: leaseID}
-					if err := refreshAuthorizedForkReleaseClaim(&rl.Server, leaseID); err != nil {
-						fmt.Fprintf(&stderr, "warning: refusing release for lease %s: %v\n", leaseID, err)
-						return
-					}
-					_ = app.releaseBackendLeaseBestEffort(releaseCtx, backend, Config{Provider: "aws"}, rl)
-				})
-			}
+			cfg := Config{Provider: "aws"}
+			// Same constructor production provisionCheckpointForkWithoutClaim uses.
+			release, carryReleaseClaim := app.checkpointForkReleaseBindings(&server, SSHTarget{}, leaseID, nil, backend, cfg)
 			provision := func(context.Context, int, string) (checkpointForkProvision, error) {
 				return checkpointForkProvision{
 					Lease:             LeaseTarget{Server: server, LeaseID: leaseID},
