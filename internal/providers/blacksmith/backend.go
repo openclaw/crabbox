@@ -38,7 +38,7 @@ func ApplyBlacksmithProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any
 
 func NewBlacksmithBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = blacksmithTestboxProvider
-	return &blacksmithBackend{spec: spec, cfg: cfg, rt: rt}
+	return &blacksmithBackend{spec: spec, cfg: cfg, rt: rt, githubReadMinBudget: blacksmithGitHubReadMinBudget}
 }
 
 type blacksmithBackend struct {
@@ -47,6 +47,8 @@ type blacksmithBackend struct {
 	rt    core.Runtime
 	route *blacksmithRoute
 	claim *core.LeaseClaim
+	// Zero admits a GitHub run read with any remaining budget.
+	githubReadMinBudget time.Duration
 }
 
 var _ core.RunOptionsValidator = (*blacksmithBackend)(nil)

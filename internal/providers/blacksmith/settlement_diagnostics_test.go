@@ -191,6 +191,54 @@ func TestBlacksmithGitHubFailureDiagnostics(t *testing.T) {
 	}
 }
 
+func TestBlacksmithGitHubRunReadRequiresMinimumBudget(t *testing.T) {
+	const runURL = "https://github.com/example-org/my-app/actions/runs/123456789"
+	if got := NewBlacksmithBackend(Provider{}.Spec(), core.BaseConfig(), core.Runtime{}).(*blacksmithBackend).githubReadMinBudget; got != blacksmithGitHubReadMinBudget {
+		t.Fatalf("production minimum budget=%s", got)
+	}
+	for _, tc := range []struct {
+		name   string
+		budget time.Duration
+		reads  int
+	}{
+		{name: "exhausted", budget: 371 * time.Millisecond},
+		{name: "just-short", budget: blacksmithGitHubReadMinBudget - time.Millisecond},
+		{name: "sufficient", budget: blacksmithGitHubReadMinBudget, reads: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				reads := 0
+				backend := newTestBlacksmithBackend(core.BaseConfig(), settlementRunner(func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					reads++
+					return core.LocalCommandResult{Stdout: `{"id":123456789,"html_url":"` + runURL + `","status":"completed","conclusion":"cancelled"}`}, nil
+				}))
+				backend.githubReadMinBudget = blacksmithGitHubReadMinBudget
+				ctx, cancel := context.WithTimeout(t.Context(), tc.budget)
+				defer cancel()
+				conclusion, err := backend.githubRunConclusion(ctx, runURL)
+				if reads != tc.reads {
+					t.Fatalf("gh reads=%d want %d", reads, tc.reads)
+				}
+				if tc.reads == 1 {
+					if err != nil || conclusion != "cancelled" {
+						t.Fatalf("conclusion=%q err=%v", conclusion, err)
+					}
+					return
+				}
+				var displayed core.ExitError
+				if !core.AsExitError(err, &displayed) || displayed.Code != 5 || !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("skipped read error=%v", err)
+				}
+				for _, fact := range []string{"exact GitHub run read skipped", fmt.Sprintf("remaining_budget_ms=%d", tc.budget.Milliseconds()), "minimum_budget_ms=5000"} {
+					if !strings.Contains(displayed.Message, fact) {
+						t.Errorf("missing %s in %s", fact, displayed.Message)
+					}
+				}
+			})
+		})
+	}
+}
+
 func BenchmarkBlacksmithGitHubSettlementFailure(b *testing.B) {
 	failure := errors.New("private command diagnostic")
 	backend := newTestBlacksmithBackend(core.BaseConfig(), settlementRunner(func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error) {
