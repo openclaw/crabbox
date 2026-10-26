@@ -1,0 +1,37 @@
+{
+  "leaseID": "cbx_abcdef123456",
+  "revision": "56c38830f46316fd670133569fabc393",
+  "slug": "sandbox",
+  "provider": "azure-sandbox",
+  "cloudID": "unique-resource",
+  "cloudImmutableID": "unique-resource",
+  "providerScope": "azure-sandbox:westus3:subscription:workers:sandboxes",
+  "targetOS": "linux",
+  "repoRoot": "/example/repo",
+  "claimedAt": "2000-01-01T00:00:00Z",
+  "lastUsedAt": "2000-01-01T00:00:00Z",
+  "idleTimeoutSeconds": 900,
+  "labels": {
+    "crabbox_attempt": "631544f2d26711da3f13efd4364e229c",
+    "crabbox_fingerprint": "RDEP22ZPZYHG642PMJSESD2SKLM2HEUE62AY737J46SOHKPDIDWQ",
+    "crabbox_lease": "cbx_abcdef123456"
+  },
+  "fixedCreateIntent": {
+    "version": 1,
+    "fingerprint": "769f1e432f511d9826ccd41be039fd6349e86c554018b5d95f25e80ac68c9d6a",
+    "providerScope": "azure-sandbox:westus3:subscription:workers:sandboxes",
+    "slug": "sandbox",
+    "createdAt": "2000-01-01T00:00:00Z",
+    "state": "acquired",
+    "attempt": {
+      "expires_at": "2000-01-01T04:00:00Z",
+      "nonce": "631544f2d26711da3f13efd4364e229c",
+      "submission": "submitted"
+    },
+    "journal": {
+      "version": 1,
+      "phase": "acquired",
+      "revision": 6
+    }
+  }
+}
