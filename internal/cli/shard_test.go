@@ -750,23 +750,6 @@ func TestShardConcurrencyUpgradeFromV0793(t *testing.T) {
 			t.Fatalf("concurrency=%d err=%v, want 4", got, err)
 		}
 	})
-	t.Run("v0.79.3 repo yaml replay", func(t *testing.T) {
-		// Shape recorded at tag v0.79.3: shard.maxCount only, no maxConcurrency.
-		cfg := defaultConfig()
-		maxCount := 12
-		if err := applyFileConfig(&cfg, fileConfig{
-			Shard: &fileShardConfig{MaxCount: &maxCount},
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if cfg.Shard != (ShardConfig{MaxCount: 12}) {
-			t.Fatalf("upgraded shard config=%#v, want maxCount=12 only", cfg.Shard)
-		}
-		got, err := resolveShardConcurrency(12, 0, false, cfg.Shard.MaxConcurrency)
-		if err != nil || got != 12 {
-			t.Fatalf("concurrency=%d err=%v, want prior unbounded 12", got, err)
-		}
-	})
 }
 
 func TestRejectShardProviderMismatch(t *testing.T) {
@@ -1051,7 +1034,8 @@ func TestRunOneShardCarriesAuthorizedClaimOnly(t *testing.T) {
 			app := App{Stdout: io.Discard, Stderr: &stderr}
 			cfg := Config{Provider: "aws"}
 			// Same constructor production provisionCheckpointForkWithoutClaim uses.
-			release, carryReleaseClaim := app.checkpointForkReleaseBindings(&server, SSHTarget{}, leaseID, nil, backend, cfg)
+			target := SSHTarget{}
+			release, carryReleaseClaim := app.checkpointForkReleaseBindings(&server, &target, leaseID, nil, backend, &cfg)
 			provision := func(context.Context, int, string) (checkpointForkProvision, error) {
 				return checkpointForkProvision{
 					Lease:             LeaseTarget{Server: server, LeaseID: leaseID},

@@ -1648,16 +1648,18 @@ func authorizedForkReleaseClaimContinuation(expected, current leaseClaim) bool {
 
 // checkpointForkReleaseBindings builds the production release fence used by
 // provisionCheckpointForkWithoutClaim and shard cleanup after run --keep.
-// carryReleaseClaim installs an authorized post-run claim into *server; release
-// refreshes against that snapshot then calls the provider delete seam.
-func (a App) checkpointForkReleaseBindings(server *Server, target SSHTarget, leaseID string, coordinator *CoordinatorClient, sshBackend SSHLeaseBackend, cfg Config) (release func(context.Context), carryReleaseClaim func(leaseClaim)) {
+// carryReleaseClaim installs an authorized post-run claim into *server.
+// server, target, and cfg are read at release time so later claim updates,
+// resolveNetworkTarget (--network tailscale), and applyResolvedServerConfig
+// stay visible to shutdown/egress/Tailscale logout — matching the old closure.
+func (a App) checkpointForkReleaseBindings(server *Server, target *SSHTarget, leaseID string, coordinator *CoordinatorClient, sshBackend SSHLeaseBackend, cfg *Config) (release func(context.Context), carryReleaseClaim func(leaseClaim)) {
 	var releaseOnce sync.Once
 	carryReleaseClaim = func(claim leaseClaim) {
 		SetServerLeaseClaimSnapshot(server, claim, true)
 	}
 	release = func(releaseCtx context.Context) {
 		releaseOnce.Do(func() {
-			releaseLease := LeaseTarget{Server: *server, SSH: target, LeaseID: leaseID, Coordinator: coordinator}
+			releaseLease := LeaseTarget{Server: *server, SSH: *target, LeaseID: leaseID, Coordinator: coordinator}
 			// Exact generation fence: the carried snapshot (acquisition, or an
 			// authorized successor installed via carryReleaseClaim) must still
 			// match the persisted claim. Never adopt a different revision here.
@@ -1665,7 +1667,7 @@ func (a App) checkpointForkReleaseBindings(server *Server, target SSHTarget, lea
 				fmt.Fprintf(a.Stderr, "warning: refusing release for lease %s: %v\n", leaseID, err)
 				return
 			}
-			a.releaseBackendLeaseBestEffort(releaseCtx, sshBackend, cfg, releaseLease)
+			a.releaseBackendLeaseBestEffort(releaseCtx, sshBackend, *cfg, releaseLease)
 		})
 	}
 	return release, carryReleaseClaim
@@ -1717,7 +1719,7 @@ func (a App) provisionCheckpointForkWithoutClaim(ctx context.Context, cfg Config
 		onAcquired(lease)
 	}
 	server, target, leaseID := lease.Server, lease.SSH, lease.LeaseID
-	release, carryReleaseClaim := a.checkpointForkReleaseBindings(&server, target, leaseID, lease.Coordinator, sshBackend, cfg)
+	release, carryReleaseClaim := a.checkpointForkReleaseBindings(&server, &target, leaseID, lease.Coordinator, sshBackend, &cfg)
 	rollback := func() {
 		// Fixed acquisition can adopt prior work; preserve its known ID for replay.
 		if requestedLeaseID == "" {

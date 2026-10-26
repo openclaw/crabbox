@@ -230,6 +230,63 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 	}
 }
 
+// TestCheckpointForkReleaseBindingsReadsResolvedTarget ensures release-time
+// cleanup sees the post-resolveNetworkTarget SSH address (e.g. Tailscale), not
+// the public IP captured when bindings were constructed.
+func TestCheckpointForkReleaseBindingsReadsResolvedTarget(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_forkresolve01"
+	acquired := leaseClaim{
+		LeaseID: leaseID, Revision: "gen-1", Provider: "aws", ProviderScope: "us-east-1",
+		CloudID: "i-123", RepoRoot: t.TempDir(), Slug: "fork-resolve",
+		ClaimedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).Format(time.RFC3339),
+	}
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLeaseClaimAtomic(path, acquired); err != nil {
+		t.Fatal(err)
+	}
+	server := Server{Provider: "aws", CloudID: "i-123"}
+	SetServerLeaseClaimSnapshot(&server, acquired, true)
+	target := SSHTarget{User: "crabbox", Host: "203.0.113.10", Port: "22", TargetOS: targetLinux}
+	cfg := Config{Provider: "aws"}
+	backend := &recordingForkReleaseSSHBackend{checkpointForkReleaseBackend: checkpointForkReleaseBackend{leaseID: leaseID}}
+	app := App{Stdout: io.Discard, Stderr: io.Discard}
+	release, _ := app.checkpointForkReleaseBindings(&server, &target, leaseID, nil, backend, &cfg)
+	// Simulate resolveNetworkTarget for --network tailscale after bindings exist.
+	target = SSHTarget{User: "crabbox", Host: "100.64.1.2", Port: "22", TargetOS: targetLinux}
+	// cfg is also pointer-captured so applyResolvedServerConfig stays visible.
+	cfg.WorkRoot = "/mnt/work-resolved"
+	release(context.Background())
+	if backend.releaseCount != 1 {
+		t.Fatalf("provider deletes=%d, want 1", backend.releaseCount)
+	}
+	if backend.releaseSSH.Host != "100.64.1.2" {
+		t.Fatalf("cleanup SSH host=%q, want resolved Tailscale address 100.64.1.2 (not public 203.0.113.10)", backend.releaseSSH.Host)
+	}
+}
+
+type recordingForkReleaseSSHBackend struct {
+	checkpointForkReleaseBackend
+	releaseSSH SSHTarget
+}
+
+// Skip pre-release remote SSH hygiene so the test observes the resolved host
+// without waiting on unreachable Tailscale logout / egress timeouts.
+func (b *recordingForkReleaseSSHBackend) ReleaseLeaseConnectionCleanupSafe() bool {
+	return false
+}
+
+func (b *recordingForkReleaseSSHBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+	b.releaseSSH = req.Lease.SSH
+	return b.checkpointForkReleaseBackend.ReleaseLease(ctx, req)
+}
+
 func TestValidateCheckpointID(t *testing.T) {
 	if got, err := validateCheckpointID("chk_abc-123_DEF"); err != nil || got != "chk_abc-123_DEF" {
 		t.Fatalf("valid id got=%q err=%v", got, err)
