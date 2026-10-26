@@ -54,11 +54,11 @@ new_bin="$work_dir/crabbox-new"
   go build -trimpath -o "$new_bin" ./cmd/crabbox
 )
 
+old_src=""
 if [[ "${CRABBOX_SKIP_OLD_BUILD:-0}" != "1" ]]; then
   old_src="$work_dir/v0.79.3-src"
-  if [[ ! -d "$old_src" ]]; then
-    git -C "$repo_root" worktree add --detach "$old_src" v0.79.3
-  fi
+  git -C "$repo_root" worktree add --detach "$old_src" v0.79.3
+  trap 'git -C "$repo_root" worktree remove --force "$old_src" >/dev/null 2>&1 || true; if [[ "$cleanup_work" -eq 1 ]]; then rm -rf "$work_dir"; fi' EXIT
   old_bin="$work_dir/crabbox-v0793"
   (
     cd "$old_src"
