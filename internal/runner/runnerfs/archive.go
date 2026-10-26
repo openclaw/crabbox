@@ -636,13 +636,16 @@ func validatedCopyArchiveEntryPathForGOOS(goos, name, archiveRoot string) (strin
 	}
 	rel := strings.TrimPrefix(clean, archiveRoot)
 	rel = strings.TrimPrefix(rel, "/")
-	if goos == "windows" && !validWindowsCopyArchivePath(rel) {
+	if goos == "windows" && !ValidWindowsPathComponents(rel) {
 		return "", "", invalid("copy archive contains unsafe Windows path: %q", name)
 	}
 	return clean, rel, nil
 }
 
-func validWindowsCopyArchivePath(rel string) bool {
+// ValidWindowsPathComponents reports whether every slash-separated component
+// of rel is an ordinary Windows name: no stream separator, trailing dot or
+// space, or reserved device name.
+func ValidWindowsPathComponents(rel string) bool {
 	for _, component := range strings.Split(rel, "/") {
 		if component == "" {
 			continue
