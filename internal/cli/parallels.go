@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -717,30 +718,43 @@ try {
 			return err
 		}
 	}
-	// Ignore a longer previous upload's tail; every byte in this prefix was
-	// overwritten. Do not retry this invocation: the bootstrap may have run.
+	// A fresh receipt distinguishes this dispatch from an older successful run.
+	receipt := ps1 + ".result"
+	token := rand.Text()
+	// Ignore a longer previous upload's tail, but verify the entire decoded
+	// payload before executing it. Never replay this invocation after result loss.
 	run := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
 $raw = [IO.File]::ReadAllText(%s).Substring(0, %d)
 $bytes = [Convert]::FromBase64String($raw)
-$text = [Text.Encoding]::UTF8.GetString($bytes)
-[IO.File]::WriteAllText(%s, $text, [Text.UTF8Encoding]::new($false))
-& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File %s`, psQuote(b64), len(encoded), psQuote(ps1), psQuote(ps1))
-	return c.runWindowsPowerShell(ctx, vmID, run)
+$sha = [Security.Cryptography.SHA256]::Create()
+try { $hash = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
+if ($hash -ne %s) { throw 'Windows bootstrap upload SHA-256 mismatch' }
+[IO.File]::WriteAllBytes(%s, $bytes)
+& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File %s
+$code = $LASTEXITCODE
+[IO.File]::WriteAllText(%s, %s + ':' + $code, [Text.Encoding]::ASCII)
+exit $code`, psQuote(b64), len(encoded), psQuote(fmt.Sprintf("%x", sha256.Sum256([]byte(script)))), psQuote(ps1), psQuote(ps1), psQuote(receipt), psQuote(token))
+	result, err := c.runWindowsPowerShell(ctx, vmID, run)
+	if !parallelsWindowsToolsResultLost(result, err) {
+		return err
+	}
+	return c.waitWindowsPowerShellReceipt(ctx, vmID, receipt, token, err)
 }
 
 func (c *ParallelsClient) runWindowsPowerShellStaging(ctx context.Context, vmID, script string) error {
-	for {
+	const attempts = 3
+	for attempt := 1; ; attempt++ {
 		if ctx.Err() != nil {
 			return context.Cause(ctx)
 		}
-		err := c.runWindowsPowerShell(ctx, vmID, script)
-		if err == nil || !ParallelsGuestToolsUnavailable(err) {
+		result, err := c.runWindowsPowerShell(ctx, vmID, script)
+		if !parallelsWindowsToolsResultLost(result, err) || attempt == attempts {
 			return err
 		}
 		select {
 		case <-ctx.Done():
 			return context.Cause(ctx)
-		case <-time.After(ParallelsGuestExecProbeInterval):
+		case <-time.After(time.Duration(attempt) * ParallelsGuestExecProbeInterval):
 		}
 		if err := c.WaitForGuestExec(ctx, vmID, c.Cfg, c.Cfg.Parallels.StartupTimeout); err != nil {
 			return err
@@ -748,13 +762,52 @@ func (c *ParallelsClient) runWindowsPowerShellStaging(ctx context.Context, vmID,
 	}
 }
 
-func (c *ParallelsClient) runWindowsPowerShell(ctx context.Context, vmID, script string) error {
+// The retained result-loss signatures are exit 255 with one of these Tools
+// messages. Exit 255 alone (also used by SSH) is not retryable.
+func parallelsWindowsToolsResultLost(result LocalCommandResult, err error) bool {
+	if err == nil || result.ExitCode != 255 {
+		return false
+	}
+	message := strings.ToLower(result.Stderr + "\n" + result.Stdout)
+	return strings.Contains(message, "prljob_getresult: invalid argument") ||
+		strings.Contains(message, "prljob_getretcode: invalid argument")
+}
+
+func (c *ParallelsClient) waitWindowsPowerShellReceipt(ctx context.Context, vmID, path, token string, original error) error {
+	probe := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+try {
+  if (Test-Path -LiteralPath %s) { [IO.File]::ReadAllText(%s) }
+} catch [IO.IOException] { }`, psQuote(path), psQuote(path))
+	for ctx.Err() == nil {
+		probeCtx, cancel := context.WithTimeout(ctx, parallelsIPProbeTimeout)
+		result, err := c.runWindowsPowerShell(probeCtx, vmID, probe)
+		probeExpired := probeCtx.Err() != nil
+		cancel()
+		if err == nil && !probeExpired {
+			if value, found := strings.CutPrefix(strings.TrimSpace(result.Stdout), token+":"); found {
+				code, parseErr := strconv.Atoi(value)
+				if parseErr == nil && code == 0 {
+					return nil
+				}
+				if parseErr == nil {
+					return fmt.Errorf("Windows bootstrap completed with exit code %d after result loss: %w", code, original)
+				}
+			}
+		} else if !probeExpired && !parallelsWindowsToolsResultLost(result, err) {
+			return fmt.Errorf("Windows bootstrap outcome unknown: %w; receipt check: %w", original, err)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(ParallelsGuestExecProbeInterval):
+		}
+	}
+	return fmt.Errorf("Windows bootstrap outcome unknown: %w; receipt check: %w", original, context.Cause(ctx))
+}
+
+func (c *ParallelsClient) runWindowsPowerShell(ctx context.Context, vmID, script string) (LocalCommandResult, error) {
 	args := strings.Fields(PowershellCommand(script))
 	result, err := c.prlctl(ctx, nil, append([]string{"exec", vmID}, args...)...)
-	if err != nil {
-		return commandOutputError("parallels windows powershell", result, err)
-	}
-	return nil
+	return result, commandOutputError("parallels windows powershell", result, err)
 }
 
 func (c *ParallelsClient) EnsureGuestReady(ctx context.Context, vmID string, cfg Config) error {

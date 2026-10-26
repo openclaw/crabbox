@@ -52,8 +52,65 @@ func TestParallelsWindowsUploadNeverReplaysExecution(t *testing.T) {
 	cfg := BaseConfig()
 	cfg.TargetOS = targetWindows
 	err := NewParallelsClient(cfg, runner).runWindowsPowerShellFile(context.Background(), "vm-fixture", "fixture", "Write-Output 'fixture'")
-	if err == nil || runner.executions != 1 {
+	if err != nil || runner.executions != 1 || runner.receiptChecks != 1 {
 		t.Fatalf("err=%v executions=%d", err, runner.executions)
+	}
+}
+
+func TestParallelsWindowsUploadUnconfirmedExecution(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		runner := &windowsUploadRunner{t: t, executionFailure: true, hideReceipt: true}
+		cfg := BaseConfig()
+		cfg.TargetOS = targetWindows
+		cfg.Parallels.StartupTimeout = 7 * time.Second
+		start := time.Now()
+		err := NewParallelsClient(cfg, runner).runWindowsPowerShellFile(context.Background(), "vm-fixture", "fixture", "Write-Output 'fixture'")
+		if err == nil || !strings.Contains(err.Error(), "outcome unknown") || !strings.Contains(err.Error(), "PrlJob_GetResult") || !errors.Is(err, context.DeadlineExceeded) || runner.executions != 1 || time.Since(start) != 7*time.Second {
+			t.Fatalf("err=%v executions=%d elapsed=%s", err, runner.executions, time.Since(start))
+		}
+	})
+}
+
+func TestParallelsWindowsUploadIncompleteReceipt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		runner := &windowsUploadRunner{t: t, executionFailure: true, partialReceipt: true}
+		cfg := BaseConfig()
+		cfg.TargetOS = targetWindows
+		err := NewParallelsClient(cfg, runner).runWindowsPowerShellFile(context.Background(), "vm-fixture", "fixture", "Write-Output 'fixture'")
+		if err != nil || runner.executions != 1 || runner.receiptChecks != 2 {
+			t.Fatalf("err=%v executions=%d receipt checks=%d", err, runner.executions, runner.receiptChecks)
+		}
+	})
+}
+
+func TestParallelsWindowsUploadAttemptLimit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		runner := &windowsUploadRunner{t: t, failure: "PrlJob_GetResult: Invalid argument", alwaysFail: true}
+		cfg := BaseConfig()
+		cfg.TargetOS = targetWindows
+		err := NewParallelsClient(cfg, runner).runWindowsPowerShellFile(context.Background(), "vm-fixture", "fixture", "Write-Output 'fixture'")
+		if err == nil || !strings.Contains(err.Error(), runner.failure) || runner.writes != 3 || runner.executions != 0 {
+			t.Fatalf("err=%v writes=%d executions=%d", err, runner.writes, runner.executions)
+		}
+	})
+}
+
+func TestParallelsWindowsToolsResultLost(t *testing.T) {
+	for _, tc := range []struct {
+		message string
+		code    int
+		want    bool
+	}{
+		{"PrlJob_GetResult: Invalid argument", 255, true},
+		{"PrlJob_GetRetCode: Invalid argument", 255, true},
+		{"PrlJob_GetResult: Invalid argument", 1, false},
+		{"Access is denied", 255, false},
+		{"ssh: connection reset by peer", 255, false},
+		{"guest tools are not available", 255, false},
+	} {
+		if got := parallelsWindowsToolsResultLost(LocalCommandResult{ExitCode: tc.code, Stderr: tc.message}, errors.New("command failed")); got != tc.want {
+			t.Errorf("%+v: got %t", tc, got)
+		}
 	}
 }
 
@@ -84,12 +141,17 @@ type windowsUploadRunner struct {
 	failure          string
 	alwaysFail       bool
 	executionFailure bool
+	receipt          string
+	receiptChecks    int
+	hideReceipt      bool
+	partialReceipt   bool
 }
 
 var windowsUploadOffset = regexp.MustCompile(`\$file\.Position = (\d+)`)
 var windowsUploadBytes = regexp.MustCompile(`GetBytes\('([^']*)'\)`)
 var windowsUploadAppend = regexp.MustCompile(`-Value '([^']*)'`)
 var windowsUploadLength = regexp.MustCompile(`Substring\(0, (\d+)\)`)
+var windowsUploadReceipt = regexp.MustCompile(`WriteAllText\([^\n]+, '([^']+)' \+ ':' \+ \$code`)
 
 func (r *windowsUploadRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
 	r.t.Helper()
@@ -97,6 +159,16 @@ func (r *windowsUploadRunner) Run(_ context.Context, req LocalCommandRequest) (L
 		r.t.Fatalf("unexpected command: %s %v", req.Name, req.Args)
 	}
 	command := decodePowerShellCommand(r.t, strings.Join(req.Args[2:], " "))
+	if strings.Contains(command, "Test-Path -LiteralPath") && strings.Contains(command, ".ps1.result") {
+		r.receiptChecks++
+		if r.hideReceipt {
+			return LocalCommandResult{Stdout: "stale-token:0"}, nil
+		}
+		if r.partialReceipt && r.receiptChecks == 1 {
+			return LocalCommandResult{Stdout: strings.TrimSuffix(r.receipt, "0")}, nil
+		}
+		return LocalCommandResult{Stdout: r.receipt}, nil
+	}
 	if strings.Contains(command, `"ok" | Out-Null`) {
 		r.probes++
 		return LocalCommandResult{}, nil
@@ -153,6 +225,9 @@ func (r *windowsUploadRunner) Run(_ context.Context, req LocalCommandRequest) (L
 	}
 	if strings.Contains(command, "& powershell.exe") {
 		r.executions++
+		if match := windowsUploadReceipt.FindStringSubmatch(command); match != nil {
+			r.receipt = match[1] + ":0"
+		}
 		if r.executionFailure {
 			return LocalCommandResult{Stderr: "PrlJob_GetResult: Invalid argument", ExitCode: 255}, errors.New("exit status 255")
 		}

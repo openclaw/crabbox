@@ -27,6 +27,15 @@ after another successful guest-exec probe, within the startup deadline. Commands
 intended to be best-effort, such as starting SSH services, retain their existing
 handling.
 
+Windows bootstrap uploads retry only exit-255 Tools result failures containing
+`PrlJob_GetResult: Invalid argument` or `PrlJob_GetRetCode: Invalid argument`.
+Each staging command gets at most three attempts, with five- and ten-second
+backoff and a fresh guest-exec probe, within the shared startup deadline. Chunks
+overwrite fixed offsets and the decoded script's SHA-256 is checked before use.
+The bootstrap is dispatched once. If its result is lost, Crabbox checks a fresh
+completion receipt until the startup deadline; an unconfirmed result is reported
+as unknown, without replaying the bootstrap. Other errors fail immediately.
+
 **Targets:** Linux, macOS, and Windows (`--windows-mode normal` or
 `--windows-mode wsl2`).
 
