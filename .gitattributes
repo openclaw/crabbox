@@ -1,2 +1,5 @@
 # Embedded programs must also retain LF in Windows source builds.
 /internal/cli/scripts/* text eol=lf
+
+# Preserve authenticated public CA fixture bytes on native Windows checkouts.
+/testdata/emudhra/old-published-roots.pem text eol=lf

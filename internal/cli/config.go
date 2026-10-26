@@ -455,6 +455,9 @@ type ParallelsConfig struct {
 	Templates        map[string]ParallelsTemplateConfig
 	Hosts            []ParallelsHostConfig
 	SelectedHost     string
+	// Separate from explicitSSHUser: provider overrides must not become generic
+	// connection settings when switching to another provider.
+	UserExplicit bool
 	// MaxVMs caps concurrent Crabbox VMs on the direct host. A selected fleet
 	// entry's own MaxVMs always wins, and this is not a default for fleet
 	// entries that omit it.
@@ -1091,7 +1094,7 @@ func applyProviderConfigDefaultValues(cfg *Config) error {
 				return err
 			}
 		}
-		if cfg.Parallels.User != "" {
+		if cfg.Parallels.User != "" && (cfg.Parallels.UserExplicit || !IsSSHUserExplicit(cfg)) {
 			cfg.SSHUser = cfg.Parallels.User
 		}
 		if cfg.Parallels.WorkRoot != "" {
@@ -2903,6 +2906,9 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, "parallels", inputSource, true)
 		}
 		configInputFileString(cfg, "parallels", inputSource, &cfg.Parallels.User, file.Parallels.User)
+		if file.Parallels.User != "" {
+			cfg.Parallels.UserExplicit = true
+		}
 		// The macOS account password authenticates the local ARD viewer. A
 		// repository must not supply or replace it; use trusted user config or
 		// the environment, matching the Tart desktop credential boundary.
@@ -4318,6 +4324,9 @@ func applyEnv(cfg *Config) error {
 	cfg.Parallels.BootstrapKey = strings.TrimSpace(configInputEnvString(cfg, "parallels", cfg.Parallels.BootstrapKey, "CRABBOX_PARALLELS_BOOTSTRAP_KEY"))
 	cfg.Parallels.VMRoot = expandUserPath(configInputEnvString(cfg, "parallels", cfg.Parallels.VMRoot, "CRABBOX_PARALLELS_VM_ROOT"))
 	cfg.Parallels.User = configInputEnvString(cfg, "parallels", cfg.Parallels.User, "CRABBOX_PARALLELS_USER")
+	if _, ok := firstNonEmptyEnv("CRABBOX_PARALLELS_USER"); ok {
+		cfg.Parallels.UserExplicit = true
+	}
 	cfg.Parallels.Password = configInputEnvString(cfg, "parallels", cfg.Parallels.Password, "CRABBOX_PARALLELS_PASSWORD")
 	cfg.Parallels.WorkRoot = configInputEnvString(cfg, "parallels", cfg.Parallels.WorkRoot, "CRABBOX_PARALLELS_WORK_ROOT")
 	cfg.Parallels.MaxVMs = configInputEnvInt(cfg, "parallels", cfg.Parallels.MaxVMs, "CRABBOX_PARALLELS_MAX_VMS")
@@ -5290,6 +5299,7 @@ func ApplyParallelsTemplateConfig(cfg *Config, name string) error {
 	}
 	if template.User != "" {
 		cfg.Parallels.User = template.User
+		cfg.Parallels.UserExplicit = true
 		cfg.SSHUser = template.User
 	}
 	if template.WorkRoot != "" {

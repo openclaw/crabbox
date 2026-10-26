@@ -67,6 +67,9 @@ matching `run.preflightTools`. Detection is intentionally conservative:
 - `Cargo.toml` adds `cargo test` and excludes `target`;
 - a root `Makefile` (or `makefile`) with a `test` target adds `make test`.
 
+Nested commands use slash-separated repository paths for the remote POSIX shell,
+including when `init` runs on Windows. Local manifest reads use native filesystem paths.
+
 The generated job is plain repo-local YAML. Edit it when the real project check
 needs services, secrets, sharding, or a narrower command. If nothing matches,
 `init` prints a note and leaves the jobs section out — define jobs by hand.

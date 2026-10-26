@@ -94,6 +94,7 @@ try:
     run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(work / 'key')])
     (work / 'authorized_keys').write_bytes((work / 'key.pub').read_bytes())
     (work / 'Dockerfile').write_text('''FROM alpine:3.22
+RUN apk add --no-cache --upgrade ca-certificates-bundle=20261020-r0
 RUN apk add --no-cache openssh-server bash git rsync tar coreutils procps python3 util-linux && ssh-keygen -A && passwd -d root && mkdir -p /root/.ssh
 COPY authorized_keys /root/.ssh/authorized_keys
 RUN chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys

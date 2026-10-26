@@ -19,6 +19,7 @@ func prepareLocalGitSeedSnapshot(ctx context.Context, repo Repo, cfg Config, _ S
 }
 
 func prepareLocalGitSeedSnapshotWithHook(ctx context.Context, repo Repo, cfg Config, hook sourceSnapshotHook) (gitOverlaySnapshot, error) {
+	var failures []error
 	for attempt := 1; attempt <= gitOverlaySnapshotMaxAttempts; attempt++ {
 		snapshot, err := prepareLocalGitSeedSnapshotAttempt(withSyncDigests(ctx), repo, cfg, attempt, hook)
 		if err == nil {
@@ -27,18 +28,49 @@ func prepareLocalGitSeedSnapshotWithHook(ctx context.Context, repo Repo, cfg Con
 		if ctx.Err() != nil {
 			err = errors.Join(err, ctx.Err())
 		}
+		failures = append(failures, err)
 		cleanupErr := snapshot.cleanup()
 		if cleanupErr != nil {
-			return snapshot, errors.Join(err, cleanupErr)
+			// Keep the existing cleanup recovery path and retained capability;
+			// source drift details above contain labels, never source paths.
+			failures = append(failures, cleanupErr)
+			return snapshot, errors.Join(failures...)
 		}
 		if !errors.Is(err, errSourceSnapshotDrift) || ctx.Err() != nil {
-			return gitOverlaySnapshot{}, err
+			return gitOverlaySnapshot{}, errors.Join(failures...)
 		}
 	}
-	return gitOverlaySnapshot{}, errSourceSnapshotDrift
+	return gitOverlaySnapshot{}, errors.Join(failures...)
 }
 
+type localGitSnapshotFailure struct {
+	attempt      int
+	stage, check string
+	err          error
+}
+
+func (err *localGitSnapshotFailure) Error() string {
+	prefix := "local Git snapshot failed"
+	if errors.Is(err.err, errSourceSnapshotDrift) {
+		prefix = errSourceSnapshotDrift.Error()
+	}
+	return fmt.Sprintf("%s (attempt=%d stage=%s check=%s)", prefix, err.attempt, err.stage, err.check)
+}
+
+func (err *localGitSnapshotFailure) Unwrap() error { return err.err }
+
 func prepareLocalGitSeedSnapshotAttempt(ctx context.Context, repo Repo, cfg Config, attempt int, hook sourceSnapshotHook) (snapshot gitOverlaySnapshot, err error) {
+	stage, check := "prepare", "source_changed"
+	defer func() {
+		if errors.Is(err, errSourceSnapshotDrift) {
+			var detail *sourceSnapshotCheckError
+			if errors.As(err, &detail) {
+				check = detail.check
+			}
+			// Only fixed labels leave this boundary; retain raw causes for errors.Is.
+			err = &localGitSnapshotFailure{attempt, stage, check, err}
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return snapshot, err
 	}
@@ -75,6 +107,7 @@ func prepareLocalGitSeedSnapshotAttempt(ctx context.Context, repo Repo, cfg Conf
 	if hook != nil {
 		hook("snapshot_created", attempt, snapshot.Root)
 	}
+	stage = "copy"
 	if err := copySourceSnapshotOwned(ctx, repo.Root, &snapshot.sourceSnapshot, manifest.Files, attempt, hook); err != nil {
 		return snapshot, err
 	}
@@ -83,6 +116,7 @@ func prepareLocalGitSeedSnapshotAttempt(ctx context.Context, repo Repo, cfg Conf
 	}
 	frozenRepo := repo
 	frozenRepo.Root = snapshot.Root
+	stage = "snapshot_fingerprint"
 	snapshot.Fingerprint, err = localGitSeedSnapshotFingerprint(ctx, frozenRepo, cfg, manifest, excludes, snapshot.Checkout)
 	if err != nil {
 		return snapshot, err
@@ -90,9 +124,11 @@ func prepareLocalGitSeedSnapshotAttempt(ctx context.Context, repo Repo, cfg Conf
 	if hook != nil {
 		hook("snapshot_fingerprinted", attempt, snapshot.Root)
 	}
+	stage = "live_fingerprint"
 	live, err := localGitSeedSnapshotFingerprint(ctx, repo, cfg, manifest, excludes, snapshot.Checkout)
 	if err != nil {
 		if os.IsNotExist(err) {
+			check = "source_missing"
 			err = errors.Join(errSourceSnapshotDrift, err)
 		}
 		return snapshot, err
@@ -102,6 +138,7 @@ func prepareLocalGitSeedSnapshotAttempt(ctx context.Context, repo Repo, cfg Conf
 	}
 	// Verify path confinement again; unchanged file bytes do not establish that
 	// an ancestor still belongs to this checkout rather than a symlink target.
+	stage, check = "path_validation", "path_confinement"
 	for _, rel := range manifest.Files {
 		if err := ctx.Err(); err != nil {
 			return snapshot, err
@@ -112,10 +149,12 @@ func prepareLocalGitSeedSnapshotAttempt(ctx context.Context, repo Repo, cfg Conf
 	}
 	// Dirty mmap pages can change without advancing either timestamp. Acceptance
 	// requires current bytes, independently of the digests retained during copy.
+	stage, check = "acceptance_fingerprint", "source_changed"
 	acceptanceCtx := context.WithValue(ctx, syncDigestContextKey{}, (*syncDigestCache)(nil))
 	accepted, acceptedBytes, err := localGitSeedSnapshotFingerprintAndSize(acceptanceCtx, repo, cfg, manifest, excludes, snapshot.Checkout)
 	if err != nil {
 		if os.IsNotExist(err) {
+			check = "source_missing"
 			err = errors.Join(errSourceSnapshotDrift, err)
 		}
 		return snapshot, err
@@ -138,9 +177,25 @@ func prepareLocalGitSeedSnapshotAttempt(ctx context.Context, repo Repo, cfg Conf
 	if err != nil {
 		return snapshot, err
 	}
-	if !inputs.same(final) || !sameSyncExcludeRules(excludes, finalExcludes) ||
-		managed.source != finalManaged.source || managed.namespace != finalManaged.namespace ||
-		live != snapshot.Fingerprint || accepted != snapshot.Fingerprint || acceptedBytes != manifest.Bytes {
+	// Report the first failed existing comparison without sampling source again.
+	stage, check = "acceptance", inputs.mismatch(final)
+	if check == "" {
+		switch {
+		case !sameSyncExcludeRules(excludes, finalExcludes):
+			check = "exclusions"
+		case managed.source != finalManaged.source:
+			check = "managed_source"
+		case managed.namespace != finalManaged.namespace:
+			check = "managed_namespace"
+		case live != snapshot.Fingerprint:
+			check = "live_fingerprint"
+		case accepted != snapshot.Fingerprint:
+			check = "accepted_fingerprint"
+		case acceptedBytes != manifest.Bytes:
+			check = "accepted_bytes"
+		}
+	}
+	if check != "" {
 		return snapshot, errSourceSnapshotDrift
 	}
 	// Sparse state can hide paths outside the selected manifest as well. The

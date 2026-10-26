@@ -5,7 +5,7 @@ Read this when:
 - configuring the SmolVM (smol machines) image, workdir, CPU count, memory, or related options;
 - changing `internal/providers/smolvm`.
 
-SmolVM (smol machines) provides fast microVM sandboxes via the hosted smolfleet API (`api.smolmachines.com`). It is a **delegated-run** provider. Crabbox calls the smolfleet REST API directly for sandbox lifecycle (create/start, status, exec, list, delete) and performs archive sync + file writes via direct `/exec` calls (heredoc + base64 payload for the tar). No guest Python or other interpreters are required for Crabbox operations — only standard shell tools (`sh` + `base64` + `tar`). Smol machines own the sandbox state and process transport; Crabbox owns local config, repo claims, archive sync manifests and guardrails, slugs, timing summaries, and the normalized `list`/`status` output. There is no direct SSH target.
+SmolVM (smol machines) provides fast microVM sandboxes via the hosted smolfleet API (`api.smolmachines.com`). It is a **delegated-run** provider. Crabbox calls the smolfleet REST API directly for sandbox lifecycle (create/start, status, exec, list, delete) and uploads the sync archive and file writes as raw bytes through the files route, `PUT /v1/machines/{id}/files/{path}`, with `/exec` calls that stage and unpack them. No guest Python or other interpreters are required for Crabbox operations, only standard shell tools (`sh` + `mktemp` + `tar`). Smol machines own the sandbox state and process transport; Crabbox owns local config, repo claims, archive sync manifests and guardrails, slugs, timing summaries, and the normalized `list`/`status` output. There is no direct SSH target.
 
 ## When to use
 
@@ -15,7 +15,13 @@ SmolVM is Linux-only. Desktop, browser, code, and SSH-based run options are not 
 
 ## Setup
 
-Create a smol machines API key at https://smolmachines.com/console/keys. Keys are prefixed `smk_...`.
+Create a smol machines API key at https://smolmachines.com/console/keys. Keys are prefixed `smk_...`. Workspace sync and environment forwarding upload through the files route, so a key with narrowed scopes needs `machine:files` as well as `machine:exec`.
+
+When upgrading from exec-based uploads, replace a narrowed key that lacks
+`machine:files` with one granting that scope as well as its existing lifecycle
+scopes. A `403` naming `machine:files` means the key must be updated; retrying
+with the same key will not fix it. See the [official scope reference](https://smolmachines.com/auth.md)
+and [upload API schema](https://smolmachines.com/openapi.json).
 
 Export the key through the environment using one of the accepted variable names. Crabbox never accepts the key as a command-line flag.
 
@@ -116,8 +122,8 @@ workdir. Endpoint trust, credential forwarding, and lifecycle rules are unchange
 
 1. `warmup` / `run` without `--id` creates a microVM sandbox from the configured `--smolvm-image`. A syncing `run` first validates the complete archive candidate and builds its local snapshot; preparation failure does not allocate a machine.
 2. Before startup, Crabbox durably binds a local claim to the returned machine ID, name, creation timestamp, full API endpoint, normal `cbx_...` lease ID, and friendly slug.
-3. By default `run` archive-syncs the working tree using a direct API call to `/exec` (the tarball is base64-encoded and sent in a shell heredoc; the guest completes checked base64 decoding before extracting with `tar`).
-4. The user command executes inside the microVM. Because the smolfleet API does not stream live output, command output appears after the command completes.
+3. By default `run` archive-syncs the working tree: one `/exec` creates a private staging directory, the files route uploads the tarball into it, and a second `/exec` extracts it with `tar` once the upload has completed.
+4. The user command executes inside the microVM. Crabbox collects its output and prints it after the command completes.
 5. One-shot sandboxes are deleted after a `run` that did not pass `--keep`. `--keep` and `--keep-on-failure` retain the sandbox until `crabbox stop`.
 6. `run --lease-output <path>` writes the SmolVM lease ID, slug, reuse/retention state, and exact cleanup command for orchestration handoff.
 
@@ -180,7 +186,7 @@ The [hosted API](https://smolmachines.com/docs/cloud/api-reference) uses 404 bot
 ## Capabilities
 
 - SSH: no.
-- Crabbox sync: yes — archive sync via direct `/exec` (heredoc + base64 tar; pure shell on the guest, no Python).
+- Crabbox sync: yes, an archive uploaded through the files route and extracted by `/exec` (pure shell on the guest, no Python).
 - Provider sync: no separate SmolVM sync step.
 - Desktop / browser / code: no.
 - Actions hydration: no.
@@ -189,10 +195,11 @@ The [hosted API](https://smolmachines.com/docs/cloud/api-reference) uses 404 bot
 
 ## Notes
 
-- Defaults to the lightweight `alpine` image (provides `sh` + `base64` + `tar` for direct API-driven archive sync; user commands can `apk add` additional packages as needed).
+- Defaults to the lightweight `alpine` image (provides `sh` + `mktemp` + `tar` for direct API-driven archive sync; user commands can `apk add` additional packages as needed).
 - Network is open by default.
-- Archive sync and small file writes use direct calls to the smolfleet `/exec` API (heredoc payload).
-- Archive and small-file uploads share a checked byte-transfer path: an invocation-private directory holds a fully decoded file before extraction or publication. Decoder, write, extraction and temporary-cleanup failures return nonzero status; an earlier failure remains primary. Small files are published from a private same-filesystem staging file, so failed decoding does not truncate an existing destination. Archive extraction retains the incoming file-mode mask.
+- Archive sync and small file writes send their bytes through the files route, not inside the `/exec` command. The hosted API caps JSON request bodies, `/exec` included, at 1 MiB and a files-route upload at 100 MiB.
+- Archive and small-file uploads share a checked byte-transfer path: an invocation-private directory holds the complete uploaded file before extraction or publication. Upload, write, extraction and temporary-cleanup failures return nonzero status; an earlier failure remains primary. Small files are published from a private same-filesystem staging copy, so a failed upload does not truncate an existing destination. Archive extraction retains the incoming file-mode mask.
+- The hosted API caps each output stream's text at 1 MiB and also returns a complete base64 copy; Crabbox prints the complete copy, and marks the output when a response reports truncation without one. In that case, rerun with reduced verbosity or save output to a guest file.
 - Remote traps clean temporary upload files on ordinary completion and handled signals. They do not guarantee cleanup after SIGKILL or an ambiguous HTTP failure while the remote command may still run. This does not make workspace replacement transactional. Final environment profiles use the separate run-scoped owner described below.
 - No direct `crabbox ssh` / `crabbox vnc` (delegated execution model).
 - Supports `warmup`, `run`, `status`, `stop`, `list`, and `doctor`.
@@ -223,8 +230,8 @@ during the first exec.
 
 ## Limitations
 
-- Output from runs appears after the command completes (the smolfleet API provides no live stream for delegated exec).
-- Workspace sync is performed via a direct API call (`/exec` with base64 tar in a heredoc).
+- Output from runs appears after the command completes. The hosted API can stream exec output as Server-Sent Events (`"stream": true`); this provider does not use it yet.
+- Workspace sync uploads one archive per run, up to the hosted API's 100 MiB per-file limit.
 - Delegated-run restrictions apply (no SSH surface, no rsync, certain advanced sync/run flags are rejected).
 
 ## Gotchas
@@ -235,7 +242,8 @@ during the first exec.
 - Delegated run/sync options that need an SSH target or proof surface are rejected: `--script` / `--script-stdin`, `--fresh-pr`, `--full-resync`, `--env-helper`, `--capture-stdout` / `--capture-stderr`, `--capture-on-fail`, `--download`, `--artifact-glob`, `--emit-proof`, and `--stop-after`.
 - IDs can be a Crabbox slug, a `cbx_...` lease ID, or a raw SmolVM identifier/name; stop and reuse require an unambiguous exact local claim, not just a Crabbox-looking name.
 - Forwarded environment values use an independently named profile in the validated workdir. The shared profile owner retains cleanup responsibility after a failed upload; cleanup runs before one-shot teardown with a fresh bounded context, checking the original local claim and native machine identity. Changed ownership retains the remote file and warns rather than authorizing stale cleanup. The source check uses the existing POSIX shell and does not require Bash or change user-command errexit behavior.
-- The direct archive sync sends the (base64) tar inside the `/exec` command body. Very large repos may hit request size limits (the usual preflight checks still apply).
+- A compressed archive over 100 MiB is refused by the hosted API with `413` (the usual preflight checks still apply).
+- The provider speaks the hosted API. A loopback base URL is accepted, but the local `smolvm serve` API (v1.30.1) lives under `/api/v1/machines` and rejects this provider's create and exec request bodies, so local runs are not supported.
 
 ## Command interpretation
 

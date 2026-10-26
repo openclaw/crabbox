@@ -1,9 +1,11 @@
 import { sanitizeAWSRegion } from "./aws-region";
+import { validAWSRootDiskIdentity } from "./aws-root-disk";
 import { sha256Hex } from "./encoding";
+import { waitForProviderSignal } from "./provider-deadline";
 import { providerKeyForLease } from "./provider-key";
 import { providerLabelsOwnedByLease } from "./provider-labels";
 import { ProviderResourceUnresolvedError } from "./provider-provisioning";
-import type { LeaseRecord } from "./types";
+import type { AWSRootDiskIdentity, LeaseRecord } from "./types";
 
 export interface AWSLegacyCleanupAudit {
   leaseID: string;
@@ -25,6 +27,26 @@ export type AWSLegacyAllocationEvidence = Pick<
 const eventHistoryMs = 90 * 24 * 60 * 60_000;
 const maxLookupPages = 10;
 const maxLookupBytes = 2 * 1024 * 1024;
+const lookupErrorCodes = new Set([
+  "AccessDenied",
+  "AccessDeniedException",
+  "IncompleteSignature",
+  "InvalidAction",
+  "InvalidClientTokenId",
+  "InvalidEventCategoryException",
+  "InvalidLookupAttributesException",
+  "InvalidMaxResultsException",
+  "InvalidNextTokenException",
+  "InvalidSignatureException",
+  "InvalidTimeRangeException",
+  "MissingAuthenticationToken",
+  "OperationNotPermittedException",
+  "RequestExpired",
+  "Throttling",
+  "ThrottlingException",
+  "UnrecognizedClientException",
+  "UnsupportedOperationException",
+]);
 
 export function awsCleanupRecoveryAuditKey(leaseID: string): string {
   return `aws-cleanup-recovery-audit:${leaseID}`;
@@ -120,8 +142,53 @@ export async function lookupAWSLegacyAllocation(
   fetch: (input: string, init: RequestInit) => Promise<Response>,
 ): Promise<AWSLegacyAllocationEvidence> {
   requireAWSLegacyCleanupLease(lease);
+  return lookupAllocation(lease, account, fetch);
+}
+
+export interface AWSOriginalRootEvidence extends AWSLegacyAllocationEvidence {
+  disk: AWSRootDiskIdentity;
+}
+
+// Read-only recovery: no caller-supplied disk, tag search, live replacement, or
+// absence inference. Only the original, authenticated RunInstances response.
+export async function lookupAWSOriginalRootDisk(
+  lease: LeaseRecord,
+  account: string,
+  fetch: (input: string, init: RequestInit) => Promise<Response>,
+): Promise<AWSOriginalRootEvidence> {
+  if (
+    lease.provider !== "aws" ||
+    lease.lifecycle === "registered" ||
+    !/^cbx_[a-f0-9]{12}$/.test(lease.id) ||
+    !/^i-[a-f0-9]{8,17}$/.test(lease.cloudID) ||
+    !lease.region ||
+    sanitizeAWSRegion(lease.region) !== lease.region ||
+    lease.providerScope !== "aws:account:" + account ||
+    lease.providerKey !== providerKeyForLease(lease.id) ||
+    lease.providerKeyCleanupOwned !== true
+  ) {
+    throw new ProviderResourceUnresolvedError(
+      "original root recovery requires an exact owned lease and authenticated account scope",
+    );
+  }
+  const evidence = await lookupAllocation(lease, account, fetch, true);
+  if (!evidence.disk)
+    throw new ProviderResourceUnresolvedError(
+      "original root disk is absent from allocation evidence",
+    );
+  return { ...evidence, disk: evidence.disk };
+}
+
+async function lookupAllocation(
+  lease: LeaseRecord,
+  account: string,
+  fetch: (input: string, init: RequestInit) => Promise<Response>,
+  requireRootDisk = false,
+): Promise<AWSLegacyAllocationEvidence & { disk?: AWSRootDiskIdentity }> {
   const start = Math.floor(Date.parse(lease.createdAt) / 1000) * 1000;
-  const end = Date.parse(lease.releasedAt ?? lease.endedAt ?? "");
+  const end = Date.parse(
+    lease.releasedAt ?? lease.endedAt ?? (requireRootDisk ? new Date().toISOString() : ""),
+  );
   if (
     !/^\d{12}$/.test(account) ||
     !Number.isFinite(start) ||
@@ -140,7 +207,7 @@ export async function lookupAWSLegacyAllocation(
     EndTime: end / 1000,
     MaxResults: 50,
   };
-  const evidence = new Map<string, AWSLegacyAllocationEvidence>();
+  const evidence = new Map<string, AWSLegacyAllocationEvidence & { disk?: AWSRootDiskIdentity }>();
   const tokens = new Set<string>();
   let nextToken: string | undefined;
   let remainingBytes = maxLookupBytes;
@@ -160,11 +227,10 @@ export async function lookupAWSLegacyAllocation(
       );
     });
     if (!response.ok) {
-      // oxlint-disable-next-line eslint/no-await-in-loop -- Close the failed page before refusing this serial evidence lookup.
-      await response.body?.cancel();
-      // CloudTrail errors and event payloads can contain credentials or user data; never echo them.
+      // oxlint-disable-next-line eslint/no-await-in-loop -- Classify and close this failed page without another provider request.
+      const code = await lookupErrorCode(response);
       throw new ProviderResourceUnresolvedError(
-        `AWS CloudTrail LookupEvents failed (HTTP ${response.status}); verify existing read permission and original account evidence`,
+        `AWS CloudTrail LookupEvents failed (HTTP ${response.status}${code ? `, code ${code}` : ""}); verify existing read permission and original account evidence`,
       );
     }
     // oxlint-disable-next-line eslint/no-await-in-loop -- Each response is bounded before its next page is admitted.
@@ -175,7 +241,7 @@ export async function lookupAWSLegacyAllocation(
     for (const value of result["Events"]) {
       const summary = record(value);
       if (summary["EventName"] !== "RunInstances") continue;
-      const observed = allocationEvidence(summary, lease, account, start, end);
+      const observed = allocationEvidence(summary, lease, account, start, end, requireRootDisk);
       const previous = evidence.get(observed.eventID);
       if (previous && JSON.stringify(previous) !== JSON.stringify(observed)) invalidEvidence();
       evidence.set(observed.eventID, observed);
@@ -204,13 +270,38 @@ export async function lookupAWSLegacyAllocation(
   );
 }
 
+function knownLookupErrorCode(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length > 256) return undefined;
+  const code = value.split(":")[0]?.split("#").at(-1);
+  return code && lookupErrorCodes.has(code) ? code : undefined;
+}
+
+async function lookupErrorCode(response: Response): Promise<string | undefined> {
+  const signal = AbortSignal.timeout(1_000);
+  try {
+    const header = response.headers.get("x-amzn-errortype");
+    if (header) {
+      const cancellation = response.body?.cancel().catch(() => undefined);
+      await waitForProviderSignal(signal, async () => cancellation).catch(() => undefined);
+      return knownLookupErrorCode(header);
+    }
+    const { value } = await readLookupResponse(response, 4_096, signal);
+    const body = record(value);
+    // Emit only fixed enums, never raw messages, request IDs, events, or unknown strings.
+    return knownLookupErrorCode(body["code"] ?? body["__type"]);
+  } catch {
+    return undefined;
+  }
+}
+
 function allocationEvidence(
   summary: Record<string, unknown>,
   lease: LeaseRecord,
   account: string,
   start: number,
   end: number,
-): AWSLegacyAllocationEvidence {
+  requireRootDisk: boolean,
+): AWSLegacyAllocationEvidence & { disk?: AWSRootDiskIdentity } {
   if (typeof summary["CloudTrailEvent"] !== "string") invalidEvidence();
   let event: Record<string, unknown>;
   try {
@@ -267,7 +358,31 @@ function allocationEvidence(
     labels["provider_key"] !== lease.providerKey
   )
     invalidEvidence();
+  let disk: AWSRootDiskIdentity | undefined;
+  if (requireRootDisk) {
+    const instance = record(instances[0]);
+    const rootName = instance["rootDeviceName"];
+    const mappings = record(instance["blockDeviceMapping"])["items"];
+    const roots = Array.isArray(mappings)
+      ? mappings.map(record).filter((mapping) => mapping["deviceName"] === rootName)
+      : [];
+    const candidate = {
+      leaseID: lease.id,
+      instanceID: lease.cloudID,
+      region: lease.region,
+      providerScope: "aws:account:" + account,
+      deviceName: rootName,
+      volumeID: record(roots[0]?.["ebs"])["volumeId"],
+    };
+    if (roots.length !== 1 || !validAWSRootDiskIdentity(candidate)) {
+      throw new ProviderResourceUnresolvedError(
+        "original root disk is absent or ambiguous in the authenticated RunInstances response; original provider custody evidence is required",
+      );
+    }
+    disk = candidate;
+  }
   return {
+    ...(disk ? { disk } : {}),
     region: lease.region!,
     providerScope: `aws:account:${account}`,
     eventID: event["eventID"],
@@ -290,6 +405,7 @@ function invalidEvidence(): never {
 async function readLookupResponse(
   response: Response,
   limit: number,
+  signal?: AbortSignal,
 ): Promise<{ value: unknown; bytes: number }> {
   if (!response.body || limit <= 0) invalidEvidence();
   const reader = response.body.getReader();
@@ -298,14 +414,21 @@ async function readLookupResponse(
   try {
     while (true) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- Bound the streamed CloudTrail response before JSON parsing.
-      const chunk = await reader.read();
+      const chunk = await (signal
+        ? waitForProviderSignal(signal, () => reader.read())
+        : reader.read());
       if (chunk.done) break;
       bytes += chunk.value.byteLength;
       if (bytes > limit) invalidEvidence();
       chunks.push(chunk.value);
     }
   } finally {
-    await reader.cancel();
+    if (signal) {
+      const cancellation = reader.cancel().catch(() => undefined);
+      await waitForProviderSignal(signal, () => cancellation).catch(() => undefined);
+    } else {
+      await reader.cancel();
+    }
     reader.releaseLock();
   }
   const data = new Uint8Array(bytes);

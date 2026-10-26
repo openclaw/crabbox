@@ -7,6 +7,7 @@ import (
 	"os"
 	"unsafe"
 
+	"github.com/openclaw/crabbox/internal/privatefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -15,7 +16,7 @@ func openSelectedLeaseSSHWriteFile(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	security, user, err := privateWindowsSecurityAttributes(false)
+	security, user, err := privatefile.WindowsAttributes(false)
 	if err != nil {
 		return nil, err
 	}
@@ -27,7 +28,7 @@ func openSelectedLeaseSSHWriteFile(path string) (*os.File, error) {
 	}
 	// OPEN_ALWAYS does not truncate. Existing files must already be private;
 	// new files receive the protected current-user descriptor at creation.
-	if err := verifyPrivateWindowsHandle(handle, false, user); err != nil {
+	if err := privatefile.VerifyWindowsHandle(handle, false, user); err != nil {
 		_ = windows.CloseHandle(handle)
 		return nil, err
 	}
@@ -58,10 +59,10 @@ func verifySelectedLeaseSSHRoot(path string) error {
 		return err
 	}
 	defer windows.CloseHandle(handle)
-	if err := validatePrivateWindowsFileType(handle, true); err != nil {
+	if err := privatefile.ValidateWindowsFileType(handle, true); err != nil {
 		return err
 	}
-	user, err := currentWindowsUserSID()
+	user, err := privatefile.WindowsUserSID()
 	if err != nil {
 		return err
 	}
@@ -119,10 +120,10 @@ func verifySelectedLeaseSSHOwnership(path string, directory bool) error {
 		return err
 	}
 	defer windows.CloseHandle(handle)
-	if err := validatePrivateWindowsFileType(handle, directory); err != nil {
+	if err := privatefile.ValidateWindowsFileType(handle, directory); err != nil {
 		return err
 	}
-	user, err := currentWindowsUserSID()
+	user, err := privatefile.WindowsUserSID()
 	if err != nil {
 		return err
 	}

@@ -264,7 +264,7 @@ custom app, pass the app's own proxy flag pointing at the lease-local proxy
 address printed by `egress start`.
 
 `egress run` sends transport setup messages to stderr and preserves workload
-output and exit status. Bridge or cleanup failures also fail the command.
+output and exit status. Bridge or remote helper cleanup failures also fail the command.
 Cancellation allows up to 60 seconds for remote helper cleanup; wrappers should
 allow at least 75 seconds after SIGTERM before forcing termination. See
 [job lifecycle](../features/egress.md#session-lifecycle-and-cleanup).
@@ -272,8 +272,16 @@ allow at least 75 seconds after SIGTERM before forcing termination. See
 For upstream connection, authentication, TLS, or scoped cleanup errors, see
 [egress troubleshooting](../features/egress.md#troubleshooting).
 
-Per-command `.crabbox/env-<nonce>` staging files are removed on completion,
-failure, and cancellation. Cleanup uses a separate bounded context. A cleanup
-failure fails the run and identifies the directory to remove before lease reuse;
-a workload failure keeps its own exit code as primary. Cleanup diagnostics never
-include remote output or environment values.
+Per-command forwarded environment files (`.crabbox/env-<nonce>/values.sh` on
+POSIX, `values.ps1` on native Windows) are removed on completion, failure, and
+cancellation. Cleanup has a cancellation-independent 15-second budget. If it
+fails or times out, one verification probe gets its own 10-second budget.
+Confirmed absence of the file and directory is silent success; a remaining
+directory alone produces a warning naming it and preserves a successful exit.
+Only a file that is still present or whose removal cannot be confirmed turns
+an otherwise successful run into exit 7. The diagnostic distinguishes those
+states and identifies the file to remove before host reuse. A workload failure
+keeps its own status, error kind, and exit code as primary. Cleanup diagnostics
+never include remote output or environment values. Lost workspace ownership
+blocks cleanup and verification; clean up with verified ownership before reuse,
+or release the lease.

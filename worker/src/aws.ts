@@ -2,6 +2,8 @@ import { XMLParser, XMLValidator } from "fast-xml-parser";
 
 import {
   lookupAWSLegacyAllocation,
+  lookupAWSOriginalRootDisk,
+  type AWSOriginalRootEvidence,
   type AWSLegacyAllocationEvidence,
 } from "./aws-cleanup-recovery";
 import {
@@ -861,6 +863,31 @@ export class EC2SpotClient {
     }
     const cloudtrail = new FixedAWSFetchClient(this.credentialSnapshot, "cloudtrail", this.region);
     return lookupAWSLegacyAllocation(lease, account, (input, init) =>
+      cloudtrail.fetch(input, init),
+    );
+  }
+
+  async originalRootDiskEvidence(
+    lease: LeaseRecord,
+    account: string,
+  ): Promise<AWSOriginalRootEvidence> {
+    if (
+      !this.credentialSnapshot ||
+      this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT ||
+      this.region !== lease.region
+    ) {
+      throw new AWSLeaseAuthorityError(
+        "original root recovery requires a fixed direct-provider credential snapshot in the original Region",
+      );
+    }
+    const identity = await this.verifiedIdentity();
+    if (identity.account !== account) {
+      throw new AWSLeaseAuthorityError(
+        "original root recovery account does not match authenticated identity",
+      );
+    }
+    const cloudtrail = new FixedAWSFetchClient(this.credentialSnapshot, "cloudtrail", this.region);
+    return lookupAWSOriginalRootDisk(lease, account, (input, init) =>
       cloudtrail.fetch(input, init),
     );
   }
@@ -2325,17 +2352,27 @@ export class EC2SpotClient {
     leaseID: string,
     options: AWSQueryOptions,
   ): Promise<boolean> {
-    const match = /^i-[a-f0-9]+:(vol-[a-f0-9]+):\/dev\/[a-z0-9]+$/.exec(identity);
+    const match = /^(i-[a-f0-9]+):(vol-[a-f0-9]+):(\/dev\/[a-z0-9]+)$/.exec(identity);
     if (!match) throw new AWSLeaseAuthorityError("invalid retained AWS disk identity");
     try {
-      const result = await this.ec2("DescribeVolumes", { "VolumeId.1": match[1]! }, options);
+      const result = await this.ec2("DescribeVolumes", { "VolumeId.1": match[2]! }, options);
       const volumes = items(record(result["volumeSet"])["item"]).map(record);
       if (
         volumes.length !== 1 ||
-        asString(volumes[0]!["volumeId"]) !== match[1] ||
+        asString(volumes[0]!["volumeId"]) !== match[2] ||
         tagMap(volumes[0]!["tagSet"])["lease"] !== leaseID
       )
         throw new AWSLeaseAuthorityError("retained AWS root volume readback ownership mismatch");
+      const attachments = items(record(volumes[0]!["attachmentSet"])["item"]).map(record);
+      if (
+        attachments.length > 1 ||
+        attachments.some(
+          (attachment) =>
+            asString(attachment["instanceId"]) !== match[1] ||
+            asString(attachment["device"]) !== match[3],
+        )
+      )
+        throw new AWSLeaseAuthorityError("original AWS root volume attachment changed");
       return true;
     } catch (error) {
       if (error instanceof AWSQueryError && error.code === "InvalidVolume.NotFound") return false;
@@ -4121,9 +4158,10 @@ function instanceToMachine(input: unknown): ProviderMachine {
     ),
   ]).filter(Boolean);
   const rootDeviceName = asString(instance["rootDeviceName"]) || "/dev/sda1";
-  const rootMapping = items(record(instance["blockDeviceMapping"])["item"])
+  const rootMappings = items(record(instance["blockDeviceMapping"])["item"])
     .map(record)
-    .find((mapping) => asString(mapping["deviceName"]) === rootDeviceName);
+    .filter((mapping) => asString(mapping["deviceName"]) === rootDeviceName);
+  const rootMapping = rootMappings.length === 1 ? rootMappings[0] : undefined;
   const rootEBS = record(rootMapping?.["ebs"]);
   const tags = tagMap(instance["tagSet"]);
   const cloudID = asString(instance["instanceId"]);
@@ -4172,6 +4210,9 @@ function instanceToMachine(input: unknown): ProviderMachine {
       : {}),
     ...(asString(metadataOptions["instanceMetadataTags"])
       ? { awsMetadataInstanceTags: asString(metadataOptions["instanceMetadataTags"]) }
+      : {}),
+    ...(rootMapping && asString(instance["rootDeviceName"])
+      ? { awsRootDeviceName: asString(instance["rootDeviceName"]) }
       : {}),
     ...(asString(rootEBS["volumeId"]) ? { awsRootVolumeID: asString(rootEBS["volumeId"]) } : {}),
     ...(asString(rootEBS["deleteOnTermination"])

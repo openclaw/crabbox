@@ -27,6 +27,15 @@ after another successful guest-exec probe, within the startup deadline. Commands
 intended to be best-effort, such as starting SSH services, retain their existing
 handling.
 
+Windows bootstrap uploads retry only exit-255 Tools result failures containing
+`PrlJob_GetResult: Invalid argument` or `PrlJob_GetRetCode: Invalid argument`.
+Each staging command gets at most three attempts, with five- and ten-second
+backoff and a fresh guest-exec probe, within the shared startup deadline. Chunks
+overwrite fixed offsets and the decoded script's SHA-256 is checked before use.
+The bootstrap is dispatched once. If its result is lost, Crabbox checks a fresh
+completion receipt until the startup deadline; an unconfirmed result is reported
+as unknown, without replaying the bootstrap. Other errors fail immediately.
+
 **Targets:** Linux, macOS, and Windows (`--windows-mode normal` or
 `--windows-mode wsl2`).
 
@@ -184,6 +193,18 @@ For macOS templates, use a user with SSH login permission and a writable
 templates, configure OpenSSH Server and PowerShell. For Windows WSL2 templates,
 make sure `wsl.exe` works for the SSH user.
 
+Select the guest account with `--parallels-user`, the selected template's `user`,
+`CRABBOX_PARALLELS_USER`, or `parallels.user` in configuration, in that order of
+precedence. The default file search loads user configuration, `crabbox.yaml`,
+then `.crabbox.yaml`; later nonempty values win. Empty environment values leave
+the configured account unchanged. An unselected template does not select a user.
+These explicit selections preserve the exact account, including `crabbox`.
+If none supplies a user, Crabbox honors `ssh.user` or `CRABBOX_SSH_USER`; otherwise
+macOS guests fall back to the invoking process's `USER` environment variable.
+With no explicit user, Linux and Windows guests retain the default `crabbox`
+account. The guest account is separate from `parallels.hostUser`, which
+authenticates to a remote Mac host.
+
 macOS preparation checks for a local listener on the configured SSH port or an
 SSH fallback port, even when the template already has a readiness helper. This
 checks listener availability only; Crabbox still requires authenticated SSH
@@ -209,7 +230,7 @@ readiness probe does, in this order:
    itself is not present. If the preserved runtime still does not run there,
    preparation falls back to the pinned installer rather than leaving a
    readiness helper that fails.
-3. Neither: preparation installs Node 24.19.0, matching the Linux developer
+3. Neither: preparation installs Node 24.22.1, matching the Linux developer
    recipe's LTS baseline. Intel and Apple Silicon both use checksum-pinned
    official `nodejs.org` archives, with versioned installations under
    `/usr/local/lib/crabbox` and command links in `/usr/local/bin`. Homebrew is

@@ -207,7 +207,7 @@ func TestRunFunctionalPreflightContinuation(t *testing.T) {
 			}
 			var stdout, stderr bytes.Buffer
 			timingPath := filepath.Join(dir, "timing.jsonl")
-			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommandWithBenchmarkRecord(ctx, []string{"--record-local", "--timing-record", timingPath, "--provider", "ssh", "--static-host", "127.0.0.1", "--static-user", "runner", "--static-work-root", filepath.Join(dir, "remote"), "--no-sync", "--preflight", "--preflight-tools", "python3-venv,python3-venv", "--", "printf", "cbx-after-functional"}, benchmarkRecordContext{OnRecord: func() {
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommandWithBenchmarkRecord(ctx, []string{"--record-local", "--timing-record", timingPath, "--provider", "ssh", "--static-host", "127.0.0.1", "--static-port", openLoopbackSSHPort(t), "--static-user", "runner", "--static-work-root", filepath.Join(dir, "remote"), "--no-sync", "--preflight", "--preflight-tools", "python3-venv,python3-venv", "--", "printf", "cbx-after-functional"}, benchmarkRecordContext{OnRecord: func() {
 				if tc.lateCancel {
 					cancel(nil)
 				}
@@ -229,7 +229,7 @@ func TestRunFunctionalPreflightContinuation(t *testing.T) {
 				}
 			}
 			if tc.ownerStoredFailure {
-				if tc.envCleanup && !strings.Contains(err.Error(), "remote command environment cleanup failed") {
+				if tc.envCleanup && !strings.Contains(err.Error(), "could not confirm removal of forwarded environment file") {
 					t.Fatalf("missing additional cleanup diagnostic: %v", err)
 				}
 				if !errors.Is(err, ownerFailure) || ExitCodeForError(err, 1) != 7 {

@@ -15,7 +15,7 @@ test("Cloudflare image pins GitHub CLI artifacts for each supported architecture
 });
 
 test("Cloudflare image pins pnpm", () => {
-  assert.match(dockerfile, /^ARG PNPM_VERSION=12\.5\.1$/m);
+  assert.match(dockerfile, /^ARG PNPM_VERSION=12\.15\.0$/m);
   assert.match(dockerfile, /corepack prepare "pnpm@\$\{PNPM_VERSION\}" --activate/);
 });
 

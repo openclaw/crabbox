@@ -23,7 +23,7 @@ func TestManagedMacOSNodeBaseline(t *testing.T) {
 			t.Errorf("macOS SSH session setup missing %q", want)
 		}
 	}
-	for _, want := range []string{"node_version=24.19.0", "node_arch=x64", "node_arch=arm64", "https://nodejs.org/dist/", "shasum -a 256 -c -", "node --version >/dev/null", "npm --version >/dev/null"} {
+	for _, want := range []string{"node_version=24.22.1", "node_arch=x64", "node_arch=arm64", "https://nodejs.org/dist/", "shasum -a 256 -c -", "node --version >/dev/null", "npm --version >/dev/null"} {
 		if !strings.Contains(bootstrap, want) {
 			t.Errorf("macOS bootstrap missing %q", want)
 		}
@@ -37,7 +37,7 @@ func TestManagedMacOSNodeBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(linux), `pinned_node_version="24.19.0"`) {
+	if !strings.Contains(string(linux), `pinned_node_version="24.22.1"`) {
 		t.Fatal("update macOS Node pin with Linux baseline")
 	}
 }
@@ -131,7 +131,7 @@ func TestMacOSNodeInstaller(t *testing.T) {
 				}
 			}
 			if tc.brokenSlot {
-				bin := filepath.Join(local, "lib", "crabbox", "node-v24.19.0-darwin-x64", "bin")
+				bin := filepath.Join(local, "lib", "crabbox", "node-v24.22.1-darwin-x64", "bin")
 				if err := os.MkdirAll(bin, 0o755); err != nil {
 					t.Fatal(err)
 				}
@@ -150,7 +150,7 @@ func TestMacOSNodeInstaller(t *testing.T) {
 			var archive bytes.Buffer
 			gz := gzip.NewWriter(&archive)
 			tw := tar.NewWriter(gz)
-			for name, body := range map[string]string{"node": "#!/bin/sh\necho v24.19.0\n", "npm": "#!/bin/sh\nnode --version >/dev/null || exit 1\necho 11.17.0\n", "npx": "#!/bin/sh\nexit 0\n"} {
+			for name, body := range map[string]string{"node": "#!/bin/sh\necho v24.22.1\n", "npm": "#!/bin/sh\nnode --version >/dev/null || exit 1\necho 11.17.0\n", "npx": "#!/bin/sh\nexit 0\n"} {
 				if err := tw.WriteHeader(&tar.Header{Name: "node/bin/" + name, Mode: 0o755, Size: int64(len(body))}); err != nil {
 					t.Fatal(err)
 				}
@@ -183,7 +183,7 @@ func TestMacOSNodeInstaller(t *testing.T) {
 			script = strings.ReplaceAll(script, local+"/bin:/usr/bin:/bin:/usr/sbin:/sbin", local+"/bin:"+tools)
 			if !tc.badChecksum {
 				digest := fmt.Sprintf("%x", sha256.Sum256(archive.Bytes()))
-				for _, pin := range []string{"d1b5e999db158c62fe8f7267a4476b035d8bd93b1a605bac24a3f0dd166e3316", "8294b7aa9b03997481c06babf1e8b270c859358f27da57a11509afe537ac381d"} {
+				for _, pin := range []string{"d132557e7ee2b85af08b0c8c34338e65c6430f2238d01f727728ef42dc83b035", "89c682593d76cd44233fa53b1563264e7de9cbb189cad169135c5b4fadfbc0a7"} {
 					script = strings.ReplaceAll(script, pin, digest)
 				}
 			}
@@ -216,7 +216,7 @@ func TestMacOSNodeInstaller(t *testing.T) {
 			if tc.arch == "arm64" {
 				arch = "arm64"
 			}
-			if strings.Count(string(downloads), "https://nodejs.org/dist/v24.19.0/node-v24.19.0-darwin-"+arch+".tar.gz") != 1 {
+			if strings.Count(string(downloads), "https://nodejs.org/dist/v24.22.1/node-v24.22.1-darwin-"+arch+".tar.gz") != 1 {
 				t.Fatalf("wrong architecture or repeated download: %s", downloads)
 			}
 		})

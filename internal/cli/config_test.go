@@ -13053,7 +13053,7 @@ func TestConfigHelperBranches(t *testing.T) {
 }
 
 func TestWriteUserFileConfigAtomic(t *testing.T) {
-	t.Run("successful rewrite keeps mode 0600", func(t *testing.T) {
+	t.Run("successful rewrite keeps file private", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.yaml")
 		if err := os.WriteFile(path, []byte("profile: previous\nprovider: aws\n"), 0o644); err != nil {
 			t.Fatal(err)
@@ -13068,13 +13068,7 @@ func TestWriteUserFileConfigAtomic(t *testing.T) {
 		if file.Profile != "rewritten" || file.Provider != "aws" {
 			t.Fatalf("file config=%#v", file)
 		}
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := info.Mode().Perm(); got != 0o600 {
-			t.Fatalf("config mode=%04o want 0600", got)
-		}
+		assertConfigPrivate(t, path)
 	})
 
 	t.Run("rename failure preserves previous readable config", func(t *testing.T) {
@@ -13143,13 +13137,7 @@ func TestWriteUserFileConfigAtomic(t *testing.T) {
 		if file.Profile != "rewritten" || file.Provider != "aws" {
 			t.Fatalf("file config=%#v", file)
 		}
-		targetInfo, err := os.Stat(target)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := targetInfo.Mode().Perm(); got != 0o600 {
-			t.Fatalf("target config mode=%04o want 0600", got)
-		}
+		assertConfigPrivate(t, target)
 	})
 }
 

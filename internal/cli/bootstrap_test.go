@@ -768,7 +768,7 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 		"sshd_config",
 		"Port $port",
 		"crabbox-sshd-$port",
-		"Git-2.52.0-64-bit.exe",
+		"Git-2.56.0.3-64-bit.exe",
 		gitForWindowsSetupSHA256,
 		"tightvnc-2.8.85-gpl-setup-64bit.msi",
 		tightVNCMSISHA256,
@@ -841,7 +841,7 @@ func TestAWSUserDataWindowsCoreProfileSkipsDesktop(t *testing.T) {
 		"function Assert-CrabboxFileSHA256",
 		"OpenSSH-Win64.zip",
 		openSSHWin64ZipSHA256,
-		"Git-2.52.0-64-bit.exe",
+		"Git-2.56.0.3-64-bit.exe",
 		gitForWindowsSetupSHA256,
 		"$passwordPath = $windowsPasswordPath",
 		"$credentialPaths = @($passwordPath)",
@@ -885,7 +885,7 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 	cfg.TargetOS = targetWindows
 	cfg.WindowsMode = windowsModeWSL2
 	cfg.WorkRoot = `/work/crabbox`
-	got := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+	got := decodedWSLBootstrapPowerShell(t, cfg)
 	for _, want := range []string{
 		`$workRoot = 'C:\crabbox'`,
 		`C:\ProgramData\crabbox\windows.password`,
@@ -913,7 +913,7 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 		"WriteAllText($wslSetup",
 		"wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh",
 		"apt-get install -y --no-install-recommends ca-certificates curl git jq python3 rsync sudo",
-		"trufflehog_version='3.95.9'",
+		"trufflehog_version='3.99.4'",
 		"trufflehog_${trufflehog_version}_linux_amd64.tar.gz",
 		wslTruffleHogAMD64SHA256,
 		"sha256sum -c -",
@@ -966,9 +966,9 @@ func TestManagedWindowsWSL2BootstrapInstallsNodeBeforeReadiness(t *testing.T) {
 				}
 				return
 			}
-			setupStart := strings.Index(script, "$linuxSetup = @'")
+			setupStart := strings.Index(script, "$linuxSetup = ")
 			installIndex := strings.Index(script, install)
-			readyIndex := strings.Index(script, "cat >/usr/local/bin/crabbox-ready <<'READY'")
+			readyIndex := strings.Index(script, "cat >/usr/local/bin/crabbox-ready <<")
 			if setupStart < 0 || installIndex <= setupStart || readyIndex <= installIndex {
 				t.Fatal("WSL distro must install the shared Node baseline before readiness")
 			}

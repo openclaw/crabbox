@@ -487,6 +487,20 @@ deletions, and excludes. Missing runner Git and a refused or unavailable exact
 commit fetch fall back to plain file sync; commit or tree verification failures
 abort before transfer. With `sync.delete: false`, this optimization stays off so
 the seed cannot introduce excluded files that sync would then retain.
+When local Actions hydration is required and the detached commit is unavailable,
+Crabbox can seed a verified published ancestor shared with the configured or
+inferred `sync.baseRef`. The full manifest still applies the exact selected working
+files and exclusions. Remote Git HEAD honestly remains that published ancestor;
+Crabbox does not transfer private Git history or certify it as the selected commit.
+A local base ref is sufficient; origin-tracking refs are not required. The
+ancestor must have an eligible tree and be fetchable and verifiable from the same
+origin. Without a containing origin-tracking branch, `sync.delete: true` remains
+required. Seeding requires an empty cold workspace and does not adopt a populated
+raw directory or bypass repository and lease checks. When this operation publishes
+a fresh ancestor seed, pruning may remove all excluded files it just imported;
+the deletion policy for pre-existing workspace contents remains unchanged.
+`--no-hydrate` and ordinary file-only sync retain their existing behavior.
+
 These seeds do not enable branch-based coherence, reusable fingerprints, or Git
 overlay. Native Windows retains branch-only seeding because it transfers the
 complete archive. Submodules and filter-managed trees retain file sync when no

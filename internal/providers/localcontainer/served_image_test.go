@@ -306,7 +306,10 @@ func TestServedPrepare(t *testing.T) {
 					}
 					return core.LocalCommandResult{Stdout: output}, nil
 				}}
-				r := NewServedRuntime(core.Config{LocalContainer: core.LocalContainerConfig{Runtime: runtimeName, Image: "configured:stable"}}, core.Runtime{Exec: runner, Stderr: &warning})
+				cfg := core.Config{LocalContainer: core.LocalContainerConfig{Runtime: runtimeName, Image: "configured:stable"}}
+				// The mock chooses the runtime, not the host PATH.
+				core.MarkLocalContainerRuntimeExplicit(&cfg)
+				r := NewServedRuntime(cfg, core.Runtime{Exec: runner, Stderr: &warning})
 				r.preparedImageID = "stale-prepared"
 				r.baseImageID = "stale-base"
 				err := r.Prepare(ctx)

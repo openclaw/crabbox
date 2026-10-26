@@ -14,6 +14,7 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/openclaw/crabbox/internal/privatefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -98,7 +99,7 @@ func TestFailureBundleWindowsPreservesUnwritablePrivateDirectory(t *testing.T) {
 	if err := createPrivateRunOutputDir(dir); err != nil {
 		t.Fatal(err)
 	}
-	user, err := currentWindowsUserSID()
+	user, err := privatefile.WindowsUserSID()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +300,7 @@ func TestPrivateRunOutputWindowsDoesNotInheritPermissiveDACL(t *testing.T) {
 				} else if err := os.Mkdir(dir, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				user, err := currentWindowsUserSID()
+				user, err := privatefile.WindowsUserSID()
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -625,7 +626,7 @@ func makeWindowsTestParentPermissive(t *testing.T, path string) *windows.SID {
 
 func setWindowsPathPermissive(t *testing.T, path string, directory bool, testSID *windows.SID) error {
 	t.Helper()
-	user, err := currentWindowsUserSID()
+	user, err := privatefile.WindowsUserSID()
 	if err != nil {
 		return err
 	}

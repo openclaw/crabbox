@@ -426,6 +426,13 @@ supplied, a checkpoint must satisfy both; the optional `--kind native|archive`
 filter is also composed with them. Pair the final filter set with `--dry-run`
 first. Deleting a non-Crabbox Parallels snapshot requires `--yes`.
 
+Direct Azure OS-disk checkpoints bind deletion to the captured ARM resource ID
+and Azure `uniqueId`. Replaced snapshots and missing identities (including
+legacy records) are retained for manual cleanup and the checkpoint is marked
+detached; repeated deletion attempts make no provider requests. Use
+`checkpoint inspect` for the reason and `checkpoint delete <id> --local-only`
+after manual reconciliation. See [deletion safety and its concurrency limit](../commands/checkpoint.md#delete).
+
 For example, this user crontab previews the policy interactively first, then
 removes native checkpoints that have not been forked or restored for 30 days:
 

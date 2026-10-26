@@ -568,6 +568,14 @@ directly with inherited input/output streams, the remote working directory, and
 its actual exit status. Arguments to `--script` use the same transport to
 Windows PowerShell's `-File` entrypoint.
 
+Windows command arguments, forwarded environment values, and paths preserve
+typographic quotes (`‘ ’ ‚ ‛ “ ” „`) as literal data. The same quoting applies
+to Windows Sandbox, Hyper-V, and generated Windows bootstrap scripts. PowerShell
+recognizes smart quotes as delimiters, so Crabbox escapes all single-quote
+variants when generating literals; see Microsoft's
+[about_Quoting_Rules](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_quoting_rules)
+and [language specification §2.3.5.2](https://learn.microsoft.com/en-us/powershell/scripting/lang-spec/chapter-02#2352-string-literals).
+
 An explicitly selected interpreter still owns its syntax: `cmd /c` and `.cmd`/
 `.bat` launchers use cmd's expansion and quoting rules, and `powershell -Command`
 parses its command as PowerShell source. PowerShell scripts and cmdlets retain
@@ -581,7 +589,7 @@ for PowerShell expressions rather than nesting another `powershell -Command`.
 
 ### Native Windows background processes
 
-Managed native Windows leases install Node 24.19.0 and npm when either runtime
+Managed native Windows leases install Node 24.22.1 and npm when either runtime
 is missing or broken. The checksum-pinned x64 or ARM64 runtime lives in
 `C:\Program Files\nodejs` on the machine PATH; working existing installations
 are retained. Readiness requires both version commands to succeed.

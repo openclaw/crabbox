@@ -225,6 +225,11 @@ Crabbox lease ID and local slug:
   `sbx rm --force`. This is destructive cleanup, not Docker Sandbox pause, and
   it remains the manual cleanup path for clone-mode Docker Sandbox runs that
   Crabbox keeps after a successful one-shot command.
+- `tart` — requires the current local claim and its recorded storage directory
+  and VM ownership marker before stopping or deleting. Changed claims, replaced
+  VMs, and legacy claims without ownership evidence are retained with an error.
+  Missing VMs require fresh inventory and storage absence before claim removal;
+  local SSH keys are retained. See [Tart ownership](../providers/tart.md#release-and-cleanup-ownership).
 - `hostinger` — stops the VPS and retains its local claim and SSH key for later
   reuse. Hostinger still owns the subscription and may continue billing it.
 - `ssh` (static hosts) — attempts shared connection cleanup, then removes the
