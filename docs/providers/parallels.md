@@ -184,6 +184,18 @@ For macOS templates, use a user with SSH login permission and a writable
 templates, configure OpenSSH Server and PowerShell. For Windows WSL2 templates,
 make sure `wsl.exe` works for the SSH user.
 
+Select the guest account with `--parallels-user`, the selected template's `user`,
+`CRABBOX_PARALLELS_USER`, or `parallels.user` in configuration, in that order of
+precedence. The default file search loads user configuration, `crabbox.yaml`,
+then `.crabbox.yaml`; later nonempty values win. Empty environment values leave
+the configured account unchanged. An unselected template does not select a user.
+These explicit selections preserve the exact account, including `crabbox`.
+If none supplies a user, Crabbox honors `ssh.user` or `CRABBOX_SSH_USER`; otherwise
+macOS guests fall back to the invoking process's `USER` environment variable.
+With no explicit user, Linux and Windows guests retain the default `crabbox`
+account. The guest account is separate from `parallels.hostUser`, which
+authenticates to a remote Mac host.
+
 macOS preparation checks for a local listener on the configured SSH port or an
 SSH fallback port, even when the template already has a readiness helper. This
 checks listener availability only; Crabbox still requires authenticated SSH

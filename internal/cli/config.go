@@ -449,13 +449,15 @@ type ParallelsConfig struct {
 	BootstrapKey     string
 	VMRoot           string
 	User             string
-	UserExplicit     bool
 	Password         string
 	WorkRoot         string
 	StartupTimeout   time.Duration
 	Templates        map[string]ParallelsTemplateConfig
 	Hosts            []ParallelsHostConfig
 	SelectedHost     string
+	// Separate from explicitSSHUser: provider overrides must not become generic
+	// connection settings when switching to another provider.
+	UserExplicit bool
 	// MaxVMs caps concurrent Crabbox VMs on the direct host. A selected fleet
 	// entry's own MaxVMs always wins, and this is not a default for fleet
 	// entries that omit it.
@@ -1092,7 +1094,7 @@ func applyProviderConfigDefaultValues(cfg *Config) error {
 				return err
 			}
 		}
-		if cfg.Parallels.User != "" {
+		if cfg.Parallels.User != "" && (cfg.Parallels.UserExplicit || !IsSSHUserExplicit(cfg)) {
 			cfg.SSHUser = cfg.Parallels.User
 		}
 		if cfg.Parallels.WorkRoot != "" {

@@ -22,13 +22,13 @@ type leaseBackend struct {
 
 func NewBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = "parallels"
-	if cfg.Parallels.User != "" {
+	if cfg.Parallels.User != "" && (cfg.Parallels.UserExplicit || !core.IsSSHUserExplicit(&cfg)) {
 		cfg.SSHUser = cfg.Parallels.User
 	}
 	if cfg.Parallels.WorkRoot != "" {
 		cfg.WorkRoot = cfg.Parallels.WorkRoot
 	}
-	if cfg.TargetOS == core.TargetMacOS && !cfg.Parallels.UserExplicit && cfg.SSHUser == core.BaseConfig().SSHUser {
+	if cfg.TargetOS == core.TargetMacOS && !cfg.Parallels.UserExplicit && !core.IsSSHUserExplicit(&cfg) && cfg.SSHUser == core.BaseConfig().SSHUser {
 		cfg.SSHUser = os.Getenv("USER")
 	}
 	if cfg.SSHPort == "" {
