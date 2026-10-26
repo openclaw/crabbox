@@ -157,7 +157,8 @@ func TestWarmupProvisionTimingCredentialFailures(t *testing.T) {
 					case "canceled":
 						cancel()
 					case "timed-out":
-						time.Sleep(time.Second)
+						// Sleeping to the deadline can race its cancellation callback.
+						<-ctx.Done()
 					}
 					return azcore.AccessToken{}, errors.New("private-credential-diagnostic")
 				})
