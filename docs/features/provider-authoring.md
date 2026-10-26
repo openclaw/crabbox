@@ -869,6 +869,16 @@ persistent expiry timers, and observed boot-ID changes. Whole-instance reboot
 cannot preserve a replacement grant's sessions, so v1 has no in-place renewal.
 Unsupported adapters must leave this capability absent.
 
+### Retained session disk capability
+
+Disk preservation across activations is optional and distinct from ordinary
+pause/resume. Reuse fixed acquisition, `PausableBackend`, and the shared retention
+transaction owner rather than adding a second claim or lifecycle store. Advertise
+`session-disk-retention-v1` only when the adapter proves exact ownership,
+no-auto-delete policy, disk-preserving suspension, finite work admission and exact
+cleanup. Read the [retention and journal compatibility contract](../provider-backends.md#retained-session-disks)
+before implementing it; ordinary ephemeral providers keep their existing behavior.
+
 ### Local claim retention
 
 `ProviderSpec.ClaimExpiryBound` optionally declares a remotely enforced maximum
