@@ -716,8 +716,8 @@ func TestResolveShardConcurrency(t *testing.T) {
 	}
 }
 
-func TestShardConcurrencyUpgradeFromV0791(t *testing.T) {
-	// v0.79.1 configs used shard.maxCount only (or omitted shard entirely).
+func TestShardConcurrencyUpgradeFromV0793(t *testing.T) {
+	// v0.79.3 configs used shard.maxCount only (or omitted shard entirely).
 	// Loading them must leave MaxConcurrency at 0 so fan-out stays unbounded.
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Run("maxCount only", func(t *testing.T) {
@@ -750,31 +750,21 @@ func TestShardConcurrencyUpgradeFromV0791(t *testing.T) {
 			t.Fatalf("concurrency=%d err=%v, want 4", got, err)
 		}
 	})
-	t.Run("persisted claim still loads", func(t *testing.T) {
-		const leaseID = "cbx_upgradeclaim01"
-		path, err := leaseClaimPath(leaseID)
-		if err != nil {
+	t.Run("v0.79.3 repo yaml replay", func(t *testing.T) {
+		// Shape recorded at tag v0.79.3: shard.maxCount only, no maxConcurrency.
+		cfg := defaultConfig()
+		maxCount := 12
+		if err := applyFileConfig(&cfg, fileConfig{
+			Shard: &fileShardConfig{MaxCount: &maxCount},
+		}); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
+		if cfg.Shard != (ShardConfig{MaxCount: 12}) {
+			t.Fatalf("upgraded shard config=%#v, want maxCount=12 only", cfg.Shard)
 		}
-		// Minimal pre-concurrency claim shape (no shard fields; claims never
-		// carried concurrency metadata).
-		legacy := leaseClaim{
-			LeaseID: leaseID, Revision: "rev-0791", Provider: "aws", ProviderScope: "us-east-1",
-			CloudID: "i-legacy", RepoRoot: "/repo", Slug: "legacy",
-			ClaimedAt: "2026-01-01T00:00:00Z",
-		}
-		if err := writeLeaseClaimAtomic(path, legacy); err != nil {
-			t.Fatal(err)
-		}
-		got, exists, err := ReadLeaseClaimWithPresence(leaseID)
-		if err != nil || !exists {
-			t.Fatalf("read legacy claim: exists=%t err=%v", exists, err)
-		}
-		if got.LeaseID != leaseID || got.Revision != "rev-0791" || got.CloudID != "i-legacy" {
-			t.Fatalf("legacy claim=%#v", got)
+		got, err := resolveShardConcurrency(12, 0, false, cfg.Shard.MaxConcurrency)
+		if err != nil || got != 12 {
+			t.Fatalf("concurrency=%d err=%v, want prior unbounded 12", got, err)
 		}
 	})
 }

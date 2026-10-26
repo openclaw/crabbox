@@ -58,31 +58,35 @@ func TestProvisionCheckpointForkReleasesWithFreshContextWhenCanceled(t *testing.
 func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 	cases := []struct {
 		name        string
-		mutate      func(t *testing.T, leaseID string, acquired leaseClaim, path string)
+		mutate      func(t *testing.T, leaseID string, acquired leaseClaim, path string, server *Server)
 		wantDeletes int
 		wantRefusal bool
-		wantAdopted bool
+		wantCarried bool // authorized successor was carried into the snapshot
 	}{
 		{
 			name: "authorized same-owner update releases and deletes",
-			mutate: func(t *testing.T, leaseID string, acquired leaseClaim, _ string) {
+			mutate: func(t *testing.T, leaseID string, acquired leaseClaim, _ string, server *Server) {
 				t.Helper()
 				next := acquired
 				next.Labels = map[string]string{"run": "kept"}
-				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, next); err != nil {
+				updated, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, next)
+				if err != nil {
 					t.Fatal(err)
 				}
+				// Authorized run update carries the exact successor generation
+				// into cleanup (refresh never adopts a different revision).
+				SetServerLeaseClaimSnapshot(server, updated, true)
 			},
 			wantDeletes: 1,
-			wantAdopted: true,
+			wantCarried: true,
 		},
 		{
 			name: "claim reassigned to another repo refuses and never deletes",
-			mutate: func(t *testing.T, leaseID string, acquired leaseClaim, _ string) {
+			mutate: func(t *testing.T, leaseID string, acquired leaseClaim, _ string, _ *Server) {
 				t.Helper()
 				next := acquired
 				next.RepoRoot = filepath.Join(t.TempDir(), "hijacked")
-				next.ClaimedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano)
+				next.ClaimedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339)
 				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, next); err != nil {
 					t.Fatal(err)
 				}
@@ -91,11 +95,11 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 		},
 		{
 			name: "reassigned away and back with new generation refuses",
-			mutate: func(t *testing.T, leaseID string, acquired leaseClaim, _ string) {
+			mutate: func(t *testing.T, leaseID string, acquired leaseClaim, _ string, _ *Server) {
 				t.Helper()
 				foreign := acquired
 				foreign.RepoRoot = filepath.Join(t.TempDir(), "hijacked")
-				foreign.ClaimedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano)
+				foreign.ClaimedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339)
 				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, foreign); err != nil {
 					t.Fatal(err)
 				}
@@ -104,7 +108,7 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 					t.Fatal(err)
 				}
 				back := acquired
-				back.ClaimedAt = time.Now().UTC().Add(2 * time.Second).Format(time.RFC3339Nano)
+				back.ClaimedAt = time.Now().UTC().Add(2 * time.Second).Format(time.RFC3339)
 				back.Labels = map[string]string{"run": "aba"}
 				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, current, back); err != nil {
 					t.Fatal(err)
@@ -114,11 +118,11 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 		},
 		{
 			name: "revoked claim refuses and never deletes",
-			mutate: func(t *testing.T, leaseID string, acquired leaseClaim, _ string) {
+			mutate: func(t *testing.T, leaseID string, acquired leaseClaim, _ string, _ *Server) {
 				t.Helper()
 				revoked := acquired
 				revoked.CloudID = ""
-				revoked.ClaimedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339Nano)
+				revoked.ClaimedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339)
 				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, revoked); err != nil {
 					t.Fatal(err)
 				}
@@ -126,8 +130,30 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 			wantRefusal: true,
 		},
 		{
+			name: "same-second reclaim refuses and never deletes",
+			mutate: func(t *testing.T, leaseID string, acquired leaseClaim, _ string, _ *Server) {
+				t.Helper()
+				// Reclaim keeps the same whole-second ClaimedAt but mints a new
+				// revision. Stale cleanup must not adopt that replacement.
+				next := acquired
+				next.ClaimedAt = acquired.ClaimedAt
+				next.Labels = map[string]string{"run": "reclaimed"}
+				updated, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, acquired, next)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if updated.ClaimedAt != acquired.ClaimedAt {
+					t.Fatalf("ClaimedAt=%q, want same-second %q", updated.ClaimedAt, acquired.ClaimedAt)
+				}
+				if updated.Revision == acquired.Revision {
+					t.Fatal("reclaim kept acquisition revision")
+				}
+			},
+			wantRefusal: true,
+		},
+		{
 			name: "missing claim uses carried snapshot and releases",
-			mutate: func(t *testing.T, _ string, _ leaseClaim, path string) {
+			mutate: func(t *testing.T, _ string, _ leaseClaim, path string, _ *Server) {
 				t.Helper()
 				if err := os.Remove(path); err != nil {
 					t.Fatal(err)
@@ -144,7 +170,8 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 			acquired := leaseClaim{
 				LeaseID: leaseID, Revision: "gen-1", Provider: "aws", ProviderScope: "us-east-1",
 				CloudID: "i-123", RepoRoot: repoRoot, Slug: "fork-claim",
-				ClaimedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).Format(time.RFC3339Nano),
+				// Whole-second RFC3339, matching claimLeaseForRepo formatting.
+				ClaimedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).Format(time.RFC3339),
 			}
 			path, err := leaseClaimPath(leaseID)
 			if err != nil {
@@ -158,7 +185,7 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 			}
 			server := Server{Provider: "aws", CloudID: "i-123"}
 			SetServerLeaseClaimSnapshot(&server, acquired, true)
-			tc.mutate(t, leaseID, acquired, path)
+			tc.mutate(t, leaseID, acquired, path, &server)
 			backend := &checkpointForkReleaseBackend{leaseID: leaseID}
 			var stderr bytes.Buffer
 			app := App{Stdout: io.Discard, Stderr: &stderr}
@@ -179,7 +206,7 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 			}
 			got, exists, set := ServerLeaseClaimSnapshot(releaseLease.Server)
 			if tc.wantRefusal {
-				if !set || !exists || got.RepoRoot != repoRoot || got.ClaimedAt != acquired.ClaimedAt {
+				if !set || !exists || got.RepoRoot != repoRoot || got.Revision != acquired.Revision {
 					t.Fatalf("snapshot adopted foreign/revoked generation: %#v", got)
 				}
 				if !strings.Contains(stderr.String(), "refusing release") || !strings.Contains(stderr.String(), "ownership changed") {
@@ -190,13 +217,13 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 			if !set || !exists || got.RepoRoot != repoRoot {
 				t.Fatalf("snapshot=%#v", got)
 			}
-			if tc.wantAdopted {
-				if got.Labels["run"] != "kept" || got.Revision == acquired.Revision || got.ClaimedAt != acquired.ClaimedAt {
-					t.Fatalf("snapshot=%#v, want adopted same-lifecycle successor", got)
+			if tc.wantCarried {
+				if got.Labels["run"] != "kept" || got.Revision == acquired.Revision {
+					t.Fatalf("snapshot=%#v, want carried authorized successor", got)
 				}
 				return
 			}
-			if got.Revision != acquired.Revision || got.ClaimedAt != acquired.ClaimedAt || got.Labels["run"] != "" {
+			if got.Revision != acquired.Revision || got.Labels["run"] != "" {
 				t.Fatalf("snapshot=%#v, want unchanged carried acquisition claim", got)
 			}
 		})

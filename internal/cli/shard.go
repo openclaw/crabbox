@@ -360,6 +360,7 @@ func resolveShardConcurrency(count, concurrencyFlag int, concurrencySet bool, ma
 func (a App) forShard(mux *shardOutputMux, index, total int, quiet bool, outcome *shardRunOutcome) (App, func()) {
 	shardApp := a
 	shardApp.runOutcome = outcome
+	shardApp.shardOwnsLeaseCleanup = true
 	if quiet {
 		shardApp.Stdout = io.Discard
 		shardApp.Stderr = io.Discard
@@ -449,7 +450,12 @@ func (a App) runOneShard(runCtx context.Context, cancel context.CancelFunc, opts
 	leaseID := lease.Lease.LeaseID
 	leaseSlug := ServerSlug(lease.Lease.Server)
 	if !opts.Keep {
-		defer lease.Release(context.Background())
+		defer func() {
+			// Propagate the claim generation produced by run --keep into the
+			// release fence before exact-match refresh.
+			carryAuthorizedForkReleaseClaimFromDisk(lease)
+			lease.Release(context.Background())
+		}()
 	}
 	mux.printf(a.Stderr, "shard %d/%d provisioned lease=%s slug=%s\n", index, opts.Count, leaseID, blank(leaseSlug, "-"))
 	expanded := checkpointForkRunCommand(opts.Command, checkpointForkRunContext{Index: index, Total: opts.Count, LeaseID: leaseID, Slug: leaseSlug})

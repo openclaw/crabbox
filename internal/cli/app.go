@@ -17,6 +17,7 @@ type App struct {
 	synthesizedFlagInputs bool
 
 	runOutcome             *shardRunOutcome
+	shardOwnsLeaseCleanup  bool // set only by shard; not derived from --label
 	runEnvDenylist         []string
 	egressClientRuntime    bool
 	workspaceOwnerAcquirer func(context.Context, SSHTarget, string, io.Writer) (*workspaceOwner, error)

@@ -54,14 +54,15 @@ func TestRunLeaseRecoveryGuidance(t *testing.T) {
 	RegisterProvider(runRecoveryTestProvider{})
 	t.Cleanup(func() { delete(providerRegistry, runRecoveryTestProvider{}.Spec().Name) })
 	for _, tc := range []struct {
-		name         string
-		ownerFailure string
-		acquireErr   error
-		releaseErr   error
-		flags        []string
-		retained     bool
-		wantReason   string
-		wantReleases int
+		name                  string
+		ownerFailure          string
+		acquireErr            error
+		releaseErr            error
+		flags                 []string
+		retained              bool
+		shardOwnsLeaseCleanup bool
+		wantReason            string
+		wantReleases          int
 	}{
 		{name: "ambiguous child", ownerFailure: "ambiguous", wantReason: "workspace owner", wantReleases: 0},
 		{name: "child confirmation timeout", ownerFailure: "timeout", wantReason: "context deadline exceeded", wantReleases: 0},
@@ -70,6 +71,9 @@ func TestRunLeaseRecoveryGuidance(t *testing.T) {
 		{name: "release timeout", releaseErr: context.DeadlineExceeded, wantReason: "context deadline exceeded", wantReleases: 1},
 		{name: "provider retained lease", retained: true, wantReason: "provider did not confirm", wantReleases: 1},
 		{name: "kept", flags: []string{"--keep"}, wantReason: "--keep", wantReleases: 0},
+		// Label alone must not select the shard cleanup-owner message.
+		{name: "kept with shard-like label", flags: []string{"--keep", "--label", "shard smoke"}, wantReason: "--keep", wantReleases: 0},
+		{name: "shard owns cleanup flag", flags: []string{"--keep", "--label", "shard 1/2"}, shardOwnsLeaseCleanup: true, wantReason: "shard owns lease cleanup", wantReleases: 0},
 		{name: "reused", flags: []string{"--id", "cbx_env_profile_test"}, wantReason: "existing lease", wantReleases: 0},
 		{name: "stop policy", flags: []string{"--stop-after", "never"}, wantReason: "--stop-after never", wantReleases: 0},
 		{name: "successful one shot", wantReleases: 1},
@@ -84,7 +88,7 @@ func TestRunLeaseRecoveryGuidance(t *testing.T) {
 				releases := 0
 				runEnvProfileTestReleaseHook = func() error { releases++; return tc.releaseErr }
 				var stdout, stderr bytes.Buffer
-				app := App{Stdout: &stdout, Stderr: &stderr, workspaceOwnerAcquirer: func(ctx context.Context, target SSHTarget, leaseID string, _ io.Writer) (*workspaceOwner, error) {
+				app := App{Stdout: &stdout, Stderr: &stderr, shardOwnsLeaseCleanup: tc.shardOwnsLeaseCleanup, workspaceOwnerAcquirer: func(ctx context.Context, target SSHTarget, leaseID string, _ io.Writer) (*workspaceOwner, error) {
 					if tc.acquireErr != nil {
 						return nil, tc.acquireErr
 					}

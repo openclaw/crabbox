@@ -1095,7 +1095,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		case strings.TrimSpace(*stopAfter) != "":
 			reason = "automatic cleanup skipped by --stop-after " + *stopAfter
 		case *keep:
-			if strings.HasPrefix(strings.TrimSpace(runLabelValue), "shard ") {
+			if a.shardOwnsLeaseCleanup {
 				reason = "shard owns lease cleanup"
 			} else {
 				reason = "automatic cleanup disabled by --keep"

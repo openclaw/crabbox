@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -1481,6 +1482,10 @@ type checkpointForkProvision struct {
 	Lease   LeaseTarget
 	Workdir string
 	Release func(context.Context)
+	// carryReleaseClaim installs an authorized post-run claim snapshot into the
+	// release fence. Shard calls this after run --keep so cleanup fences on the
+	// exact generation the run lifecycle produced (PR #1437), not ClaimedAt.
+	carryReleaseClaim func(leaseClaim)
 }
 
 func (a App) provisionCheckpointFork(ctx context.Context, cfg Config, backend Backend, sshBackend SSHLeaseBackend, repo Repo, record checkpointRecord, paths checkpointPaths, keep, reclaim bool, requestedSlug, workdirOverride string, clear bool) (checkpointForkProvision, error) {
@@ -1603,15 +1608,16 @@ func (a App) provisionManagedCheckpointFork(ctx context.Context, cfg Config, bac
 	return provision, nil
 }
 
-// refreshAuthorizedForkReleaseClaim adopts a persisted claim only when it is a
-// legitimate continuation of the carried acquisition snapshot: same owner and
-// the same ClaimedAt acquisition lifecycle (revision may advance via authorized
-// same-owner updates such as run --keep). A replaced repository claim, a
-// revoked or reclaimed generation (ClaimedAt changed), or an ABA reassignment
-// back to the same owner fails closed without authorizing deletion. A missing
-// claim leaves the carried snapshot unchanged so the fenced release path can
-// decide (CleanupLeaseClaimIfUnchangedAfter with expectedExists=false still
-// authorizes provider delete from the carried acquisition).
+// refreshAuthorizedForkReleaseClaim confirms the persisted claim still exactly
+// matches the carried acquisition/run snapshot (owner + revision generation).
+// Authorized successors (for example run --keep) must be carried into the
+// snapshot before release via carryReleaseClaim; this refresh never adopts a
+// different revision. ClaimedAt is not used: it is whole-second RFC3339, so a
+// same-second reclaim could collide and let stale cleanup adopt a replacement
+// generation. A replaced, revoked, reclaimed, or ABA claim fails closed. A
+// missing claim leaves the carried snapshot unchanged so the fenced release
+// path can decide (CleanupLeaseClaimIfUnchangedAfter with expectedExists=false
+// still authorizes provider delete from the carried acquisition).
 func refreshAuthorizedForkReleaseClaim(server *Server, leaseID string) error {
 	if server == nil {
 		return nil
@@ -1630,26 +1636,36 @@ func refreshAuthorizedForkReleaseClaim(server *Server, leaseID string) error {
 	if !authorizedForkReleaseClaimContinuation(expected, current) {
 		return fmt.Errorf("%w: lease %s claim ownership changed after acquisition; refusing automatic release", ErrReleaseLeaseOwnershipChanged, leaseID)
 	}
-	SetServerLeaseClaimSnapshot(server, current, true)
 	return nil
 }
 
-// authorizedForkReleaseClaimContinuation reports whether current is the same
-// acquisition lifecycle as expected (PR #1437 generation continuity): owner
-// identity matches and ClaimedAt is unchanged. ClaimedAt advances on reclaim or
-// repository reassignment, so ABA "away and back" generations fail closed even
-// when owner fields look identical again.
+// authorizedForkReleaseClaimContinuation reports whether current is exactly the
+// carried claim generation (PR #1437). Owner identity and revision must both
+// match; ClaimedAt is ignored because it only has whole-second resolution.
 func authorizedForkReleaseClaimContinuation(expected, current leaseClaim) bool {
+	return reflect.DeepEqual(expected, current)
+}
+
+// carryAuthorizedForkReleaseClaimFromDisk installs the current persisted claim
+// into the release snapshot when it still has the same owner as the carried
+// acquisition. Call only after an authorized run lifecycle that may have minted
+// a successor revision (shard run --keep). Refresh then requires an exact match.
+func carryAuthorizedForkReleaseClaimFromDisk(lease checkpointForkProvision) {
+	if lease.carryReleaseClaim == nil {
+		return
+	}
+	expected, expectedExists, set := ServerLeaseClaimSnapshot(lease.Lease.Server)
+	if !set || !expectedExists {
+		return
+	}
+	current, exists, err := ReadLeaseClaimWithPresence(lease.Lease.LeaseID)
+	if err != nil || !exists {
+		return
+	}
 	if !sameActionsWorkspaceClaimOwner(expected, current) {
-		return false
+		return
 	}
-	expectedClaimedAt := strings.TrimSpace(expected.ClaimedAt)
-	currentClaimedAt := strings.TrimSpace(current.ClaimedAt)
-	if expectedClaimedAt == "" {
-		// Acquisition snapshots should record ClaimedAt; refuse opaque successors.
-		return currentClaimedAt == "" && expected.Revision == current.Revision
-	}
-	return currentClaimedAt == expectedClaimedAt
+	lease.carryReleaseClaim(current)
 }
 
 type managedCheckpointCacheConflict struct{ error }
@@ -1699,12 +1715,15 @@ func (a App) provisionCheckpointForkWithoutClaim(ctx context.Context, cfg Config
 	}
 	server, target, leaseID := lease.Server, lease.SSH, lease.LeaseID
 	var releaseOnce sync.Once
+	carryReleaseClaim := func(claim leaseClaim) {
+		SetServerLeaseClaimSnapshot(&server, claim, true)
+	}
 	release := func(releaseCtx context.Context) {
 		releaseOnce.Do(func() {
 			releaseLease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}
-			// run --keep (shard/fork fan-out) rewrites the claim after acquire.
-			// Refresh only same-owner successors so release can fence against the
-			// kept generation without adopting a reassigned repository claim.
+			// Exact generation fence: the carried snapshot (acquisition, or an
+			// authorized successor installed via carryReleaseClaim) must still
+			// match the persisted claim. Never adopt a different revision here.
 			if err := refreshAuthorizedForkReleaseClaim(&releaseLease.Server, leaseID); err != nil {
 				fmt.Fprintf(a.Stderr, "warning: refusing release for lease %s: %v\n", leaseID, err)
 				return
@@ -1733,9 +1752,10 @@ func (a App) provisionCheckpointForkWithoutClaim(ctx context.Context, cfg Config
 		}
 	}
 	forkLease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}
+	provision := checkpointForkProvision{Lease: forkLease, Release: release, carryReleaseClaim: carryReleaseClaim}
 	if isNativeCheckpointKind(record.Kind) {
 		if record.TargetOS == targetWindows {
-			return checkpointForkProvision{Lease: forkLease, Release: release}, nil
+			return provision, nil
 		}
 		workdir := nativeCheckpointForkWorkdir(cfg, leaseID, repo.Name, workdirOverride)
 		if err := validateCheckpointForkWorkdirs(ctx, backend, forkLease, record.Workdir, workdir); err != nil {
@@ -1746,7 +1766,8 @@ func (a App) provisionCheckpointForkWithoutClaim(ctx context.Context, cfg Config
 			rollback()
 			return checkpointForkProvision{}, err
 		}
-		return checkpointForkProvision{Lease: forkLease, Workdir: workdir, Release: release}, nil
+		provision.Workdir = workdir
+		return provision, nil
 	}
 	workdir := strings.TrimSpace(workdirOverride)
 	if workdir == "" {
@@ -1760,7 +1781,8 @@ func (a App) provisionCheckpointForkWithoutClaim(ctx context.Context, cfg Config
 		rollback()
 		return checkpointForkProvision{}, err
 	}
-	return checkpointForkProvision{Lease: forkLease, Workdir: workdir, Release: release}, nil
+	provision.Workdir = workdir
+	return provision, nil
 }
 
 func (a App) checkpointForkRecordOnce(ctx context.Context, cfg Config, backend Backend, sshBackend SSHLeaseBackend, repo Repo, store checkpointStore, record *checkpointRecord, paths checkpointPaths, keep, reclaim bool, requestedLeaseID, requestedSlug, workdirOverride string, clear bool, runOpts checkpointForkRunOptions) error {
