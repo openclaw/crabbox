@@ -28,7 +28,13 @@ func (b *backend) WarmupFixed(ctx context.Context, req core.FixedWarmupRequest) 
 	completionStarted := false
 	defer func() {
 		if resultErr != nil && req.TimingJSON && !completionStarted {
-			_ = core.WriteTimingJSON(b.rt.Stderr, core.TimingReport{Provider: providerName, TotalMs: now().Sub(started).Milliseconds(), ExitCode: 1, RunnerPhases: timing.phases(), CreationEvents: timing.events()})
+			cause := resultErr
+			if ctx.Err() != nil {
+				// Credential errors intentionally omit their private SDK cause.
+				cause = ctx.Err()
+			}
+			report := core.TimingReportWithRunResult(core.TimingReport{Provider: providerName, TotalMs: now().Sub(started).Milliseconds(), ExitCode: 1, RunnerPhases: timing.phases(), CreationEvents: timing.events()}, core.RunResult{}, cause)
+			_ = core.WriteTimingJSON(b.rt.Stderr, report)
 		}
 	}()
 	lease, err := b.acquire(ctx, req)
