@@ -139,8 +139,9 @@ Windows supports command execution and non-PTY shells; interactive Windows PTY
 allocation is not implemented. Linux `connect` supports a lease-account PTY,
 terminal resizing, and ordinary shell exit status.
 
-This adapter needs hardware qualification before rollout. Prior interactive
-MXC lifecycle evidence does not prove this complete relay/endpoint integration,
-GPU access, or network isolation. Windows network access is explicitly allowed;
+The recorded Windows ARM64 proof covers the complete relay/endpoint execution,
+authorization, revocation, and cleanup path. Qualify the intended Windows build
+and hardware before rollout; it does not establish GPU access or native amd64
+execution. Windows network access is explicitly allowed;
 no network-containment claim is made. Do not deploy based on cross-compilation
 alone. See [validation](../features/managed-host-validation.md) for exact proof.

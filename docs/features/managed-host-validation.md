@@ -2,7 +2,9 @@
 
 The managed `ssh-host` provider is distinct from direct `ssh`. Validate against
 an isolated coordinator and disposable target before enrolling shared capacity.
-Never point the smoke harness at an existing broker or host.
+Never point the Linux smoke harness at an existing broker or host. The Windows
+proof snapshot requires an explicitly designated native proof target and still
+uses its own disposable coordinator.
 
 ## Local Linux borrower proof
 
@@ -48,7 +50,10 @@ provision/start, the nested SSH endpoint, borrower sync/exec, key rotation,
 stop/deprovision, crash recovery, and the requested hardware capabilities.
 Windows PTY allocation is not implemented; non-PTY shell/exec is available.
 No successful Linux result or standalone MXC probe establishes those claims.
-Keep Windows deployment experimental until that complete scenario is proven.
+Qualify the intended Windows build and hardware before deployment; a passing
+ARM64 execution/authority proof does not qualify GPU access, other Windows
+builds, or native amd64 execution. The recorded native run below qualifies the
+managed execution lifecycle on its stated target.
 
 ## Review fixes
 
@@ -131,3 +136,63 @@ on the same PostgreSQL database, then read and refreshed that registration.
 Owner, organization, provider, host, work root, and creation identity were
 preserved. This tests stored-registration compatibility, not every historical
 record type or a production deployment. All disposable resources were removed.
+
+## Native Windows authority qualification — 2026-10-27
+
+CLI/agent source: `f39ff31885878ae7d8c391e81fbb9a8bab0c814d`.
+Coordinator pool-refresh source: `2aee0af76`; the prior authority controls are
+unchanged by this placement-only correction.
+The [sanitized Windows receipt](../diagnostics/managed-host-windows-proof.json)
+records final built-binary SHA-256 digests and observed authority/cleanup results.
+The [proof harness snapshot](../diagnostics/managed-host-windows-harness/README.md)
+contains the driver source and reproduction instructions.
+
+The macOS ARM64 CLI used a disposable loopback Node 24.22.1/PostgreSQL 17
+coordinator and a real Windows ARM64 build 28000.3231 target. The pinned MXC
+0.8.0 executor ran from a task-specific Interactive desktop agent; normal SSH
+was only the operator transport. No production broker or existing host-access
+configuration was changed.
+
+The native run found and fixed three defects that cross-builds missed:
+
+- MXC's `cmd.exe /c` wrapper broke quoted executable/argument paths. The
+  endpoint now uses the existing encoded PowerShell command and literal quoting.
+- The framed-input helper assumed OpenSSH's overlapped stdin handles, while
+  the managed endpoint provides synchronous pipes. It now selects a compatible
+  stream before reading any bytes, preserving the async OpenSSH path and exact
+  framing without replay.
+- A rotated pool session received a fresh workspace, but its pool entry retained
+  the previous account path. Provider installation now returns the replacement
+  work root, published with the revalidated active grant rather than before it.
+
+Both new native regression tests fail with only their production fix reverted
+and pass with the fix. Existing async tests also pass: partial/pending reads,
+binary payloads, frame boundaries, EOF, short input, write errors, cancellation,
+and preserving process-owned stdin. Both regressions are included in native
+Windows CI. The coordinator placement regression fails before its fix and
+passes afterward, including an idempotent acknowledgment replay; all 4,689
+coordinator tests pass (15 existing skips).
+
+The shipped CLI syncs and executes under the MXC borrower identity, distinct
+from the operator desktop session. A foreign relay identity and authenticated
+non-admin foreign borrower receive HTTP 403. A wrong key at the actual nested
+SSH endpoint is denied, and its proposed effect file is absent.
+
+An open non-PTY shell and a detached borrower writer remain alive after the
+exact MXC exec launcher is killed. Lease revocation then disconnects that shell,
+rejects new relay admission, and removes the exact account, workspace, endpoint,
+and every process in its session before the host is available again. A subsequent
+owner receives a new workspace and endpoint host key. An agent crash/restart
+settles persistent-session custody and fails the interrupted lease before reuse.
+
+Two Windows portable-pool generations passed identity generation, registration,
+borrow, sync/exec, scrub/return, and exact-session cleanup with fresh workspaces
+and rotated endpoint keys. Unattended expiry reached the persisted expired state
+and removed its exact session before reuse. All nine Windows checks passed;
+the task root, Interactive task, tunnel, containers/network, and ephemeral keys
+were removed, and existing SSH access was verified afterward.
+
+This is execution, authorization, and lifecycle qualification on the recorded
+native target—not Windows PTY support, GPU qualification, or network isolation.
+Windows networking remains explicitly allowed. Earlier Linux/upgrade evidence
+and the historical broad-local timeout remain separately scoped above.
