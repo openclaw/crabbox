@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunDetachedGitSeedPreservesManifestAuthority(t *testing.T) {
@@ -21,6 +22,13 @@ func TestRunDetachedGitSeedPreservesManifestAuthority(t *testing.T) {
 	if err != nil {
 		t.Skip("rsync unavailable")
 	}
+	// Retain the real hydration and ownership scripts without paying remote
+	// polling and runner-stop grace periods in this local fixture.
+	pollInterval, stopDelay := localActionsHydrationPollInterval, actionsHydrationStopSettleDelay
+	localActionsHydrationPollInterval, actionsHydrationStopSettleDelay = 10*time.Millisecond, time.Millisecond
+	t.Cleanup(func() {
+		localActionsHydrationPollInterval, actionsHydrationStopSettleDelay = pollInterval, stopDelay
+	})
 	for _, tc := range []struct {
 		name                                                            string
 		published, checksum, delete, missingGit, githubSSH, hydrate     bool

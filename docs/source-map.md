@@ -304,3 +304,11 @@ Provider docs:
 - Docs command-surface check, link check, site builder, and Pages deploy: `scripts/check-command-docs.mjs`, `scripts/check-docs-links.mjs`, `scripts/build-docs-site.mjs`, `.github/workflows/pages.yml`
 - Live provider smoke coverage: `scripts/live-smoke.sh`, plus provider-specific guarded smokes such as `scripts/live-blaxel-smoke.sh`, `scripts/live-cua-smoke.sh`, `scripts/live-digitalocean-smoke.sh`, `scripts/live-github-codespaces-smoke.sh`, `scripts/live-vultr-smoke.sh`, `scripts/live-vast-smoke.sh`, and `scripts/live-superserve-smoke.sh`
 - Live coordinator auth smoke coverage: `scripts/live-auth-smoke.sh`
+
+### Managed existing SSH hosts
+
+- `internal/providers/sshhost`: operator agent, Linux account/MXC session cleanup, isolated SSH endpoint, provider metadata.
+- `worker/src/ssh-host.ts`: transactional inventory and lease custody; uses the Fleet lifecycle.
+- `worker/src/ssh-host-provider.ts`: portable ready-pool access capability.
+- `worker/src/ssh-host-relay.ts`: generation-bound authorization over the existing SSH relay.
+- `scripts/live-managed-ssh-host-smoke.py`: disposable PostgreSQL/coordinator/host borrower proof.

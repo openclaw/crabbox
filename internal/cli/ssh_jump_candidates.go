@@ -132,13 +132,16 @@ func chooseJumpCandidate(ctx context.Context, candidates []SSHJumpCandidate, key
 
 func selectSSHJumpCandidate(target *SSHTarget, key ssh.PublicKey) error {
 	jump := target.SSHJump
+	if jump.RelayOnly && (!jump.Relay || len(jump.Candidates) != 0) {
+		return Exit(2, "relay-only jump must enable relay and omit direct candidates")
+	}
 	if len(jump.Candidates) <= 1 && !jump.Relay {
 		return nil
 	}
 	if len(jump.Candidates) > 4 {
 		return Exit(2, "too many SSH jump candidates")
 	}
-	if len(jump.Candidates) == 0 {
+	if len(jump.Candidates) == 0 && !jump.RelayOnly {
 		jump.Candidates = []SSHJumpCandidate{{Host: jump.Host, Port: jump.Port}}
 	}
 	seen := map[SSHJumpCandidate]bool{}

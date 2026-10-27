@@ -143,7 +143,11 @@ func validateTypedReadyPoolResponseIdentity(response CoordinatorReadyPoolRespons
 
 func readyPoolIdentityMatchesLease(identity CoordinatorReadyPoolIdentityV1, lease CoordinatorLease) error {
 	if lease.TargetOS != targetLinux {
-		return Exit(2, "typed ready pools currently require a native Linux lease")
+		provider, _ := ProviderFor(lease.Provider)
+		capability, ok := provider.(ProviderReadyPoolTargetCapability)
+		if !ok || !capability.SupportsReadyPoolTarget(lease.TargetOS) {
+			return Exit(2, "provider does not support this ready-pool target")
+		}
 	}
 	provider, err := ProviderFor(identity.Image.Provider)
 	if err != nil {
