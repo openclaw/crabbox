@@ -2059,8 +2059,9 @@ func PowershellCommand(script string) string {
 	return "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + encoded
 }
 
-// Win32-OpenSSH inherits an overlapped pipe. Use its asynchronous handle contract
-// so a pending SSH write can complete before the server closes stdin at EOF.
+// Win32-OpenSSH inherits an overlapped pipe; managed endpoints inherit a
+// synchronous pipe. Select the matching FileStream before reading any bytes.
+// Overlapped input must retain async reads so pending SSH writes can complete.
 func windowsPowerShellCopyExactInput(destination string, inputSize int64) string {
 	// An empty frame must not bind stdin, which may already be at EOF.
 	// Disable FileStream read-ahead so bytes after this frame remain on stdin.
@@ -2072,7 +2073,11 @@ if ($remaining -gt 0) {
 	$stdinHandle = [Microsoft.Win32.SafeHandles.SafeFileHandle]::new([Cbx.SshStdin]::GetStdHandle(-10), $false)
 	$stdin = $null
 	try {
-		$stdin = [IO.FileStream]::new($stdinHandle, [IO.FileAccess]::Read, 1, $true)
+		try { $stdin = [IO.FileStream]::new($stdinHandle, [IO.FileAccess]::Read, 1, $true) }
+		catch {
+			if ($_.Exception.InnerException -isnot [ArgumentException]) { throw }
+			$stdin = [IO.FileStream]::new($stdinHandle, [IO.FileAccess]::Read, 1, $false)
+		}
 		$buffer = New-Object byte[] 65536
 		while ($remaining -gt 0) {
 			$readSize = [int][Math]::Min([Int64]$buffer.Length, $remaining)

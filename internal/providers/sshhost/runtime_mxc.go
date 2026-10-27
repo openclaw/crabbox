@@ -5,7 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+// MXC wraps commandLine in cmd.exe /c. A quoted executable followed by a
+// quoted argument loses its outer quotes there; an encoded PowerShell command
+// preserves both literal paths across the CMD and PowerShell parsers.
+func mxcEndpointCommand(executable, state string) string {
+	return core.PowershellCommand("& " + core.PowerShellQuote(executable) + " host endpoint --endpoint-state " + core.PowerShellQuote(state) + "; exit $LASTEXITCODE")
+}
 
 type mxcPhaseError struct{ phase, code string }
 

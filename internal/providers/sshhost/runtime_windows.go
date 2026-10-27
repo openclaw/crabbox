@@ -142,7 +142,7 @@ func prepareRuntime(ctx context.Context, r *runtimeState, l hostAssignment, path
 	if err = save(); err != nil {
 		return err
 	}
-	args, err := mxcArgs(map[string]any{"phase": "exec", "sandboxId": r.SandboxID, "correlationVector": r.CorrelationVector, "process": map[string]string{"commandLine": `"` + target + `" host endpoint --endpoint-state "` + r.Endpoint + `"`}})
+	args, err := mxcArgs(map[string]any{"phase": "exec", "sandboxId": r.SandboxID, "correlationVector": r.CorrelationVector, "process": map[string]string{"commandLine": mxcEndpointCommand(target, r.Endpoint)}})
 	if err != nil {
 		return err
 	}
