@@ -281,6 +281,12 @@ enumerating sibling files. This also supports Unix socket and FIFO entries
 without opening them, while preserving object-identity and namespace checks.
 Crowded temporary directories do not block sync preparation.
 
+On Windows, managed-state path spelling compares handle-based file identities,
+including the volume and full file ID, so case aliases work when
+`XDG_STATE_HOME` is set. Inspection reads metadata without requiring file-content
+access, preserves symlink and junction identities, and rejects a path replaced
+between metadata observations.
+
 Native transports without subtree filtering require the selected managed
 namespace to be outside their shared source scope. This includes Blacksmith's
 native repository sync, Docker Sandbox's repository and extra workspaces, Apple
