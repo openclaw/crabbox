@@ -21,12 +21,13 @@ VNC forwarding. The guest does not need a public IP or Kubernetes `Service`.
 - `kubectl` and a compatible `virtctl`;
 - a KubeVirt release compatible with the Kubernetes minor version running in the
   target cluster;
-- permission to create, list, start, stop, and delete `VirtualMachine`
-  resources in the configured namespace;
+- permission to create, get, list, patch, and delete `VirtualMachine`
+  resources in the configured namespace, and get the namespace itself;
 - permission to get `VirtualMachineInstance` resources and read namespace
   events. Crabbox uses these while booting so KubeVirt scheduling or launcher
   failures are reported before the SSH wait starts;
-- a Linux guest image with OpenSSH, `git`, `rsync`, and `tar`.
+- a Linux guest image with OpenSSH, Bash, `setsid`, GNU coreutils, `git`,
+  `rsync`, and `tar`.
 
 ## Configuration
 
@@ -87,11 +88,21 @@ failure-retry commands preserve that inherited `KUBECONFIG` value as an
 environment assignment so cleanup uses the same cluster later, including
 multi-file kubeconfig lists.
 
-Claims written by older Crabbox builds without a scope are treated as legacy
-state. New slug allocation checks the live VMs in the current namespace before
-reusing a slug, so old claims attached to still-running VMs continue to prevent
-duplicates. Once the VM is deleted by `stop` or `cleanup`, Crabbox removes the
-legacy claim.
+New acquisitions, including `warmup --lease-id cbx_0123456789ab`, use a durable
+fixed-lease journal. Repeating the same ID and intent reuses its original VM.
+The intent includes the namespace UID, template digest, public key, work root,
+slug and lifetime policy. A conflicting intent or an ended ID fails closed.
+
+Crabbox records the API creation acknowledgment's VM UID before starting it.
+If creation loses its acknowledgment before that binding is durable, the claim
+remains unresolved: retry does not create another VM or adopt one by copied
+labels. Preserve the claim and reconcile it with the cluster operator.
+
+Older claims without an immutable UID remain available for inventory, but
+cannot authorize start, stop, annotation changes or deletion. They require
+operator reconciliation; Crabbox does not upgrade them from a name or label
+match. New terminal claims retain a tombstone so `cleanup` cannot make an ended
+ID reusable. Keep the local claim state across retries and client upgrades.
 
 ## VM template
 
@@ -177,8 +188,9 @@ refuses connections.
 
 ## Lifecycle
 
-1. Render and apply the configured manifest.
-2. Run `virtctl start`.
+1. Journal intent, then create the configured manifest without overwriting an
+   existing name. Durably bind the acknowledged VM UID.
+2. Start the VM with a JSON patch that tests the bound UID.
 3. Wait for the `VirtualMachineInstance` to exist and reach a state that can be
    SSH-probed. `Running` and `Ready` pass immediately; `Scheduled` also passes
    because some KubeVirt clusters can leave the VMI phase stale while the
@@ -187,11 +199,14 @@ refuses connections.
    If SSH never becomes ready, Crabbox includes the latest VMI phase,
    conditions, and recent KubeVirt events in the error.
 5. Use the standard Crabbox SSH lease flow.
-6. On release, delete the VM by default. Set `deleteOnRelease: false` to run
-   `virtctl stop` and retain its storage.
+6. On release, delete the VM with a Kubernetes UID precondition and confirm
+   that UID is absent before marking the lease terminal. Set
+   `deleteOnRelease: false` to patch `runStrategy: Halted` with a UID test and
+   retain its storage.
 
 `crabbox cleanup --provider kubevirt` evaluates the persisted lease annotations
-with Crabbox's normal TTL/idle policy and deletes eligible labeled VMs. Use
+with Crabbox's normal TTL/idle policy and deletes eligible VMs only under their
+original durable UID binding. Use
 `--dry-run` to inspect decisions.
 
 `crabbox status` and `crabbox inspect` are read-only. They report the VM's
@@ -206,6 +221,11 @@ crabbox run --provider kubevirt --id vm-smoke -- go test ./...
 crabbox vnc --provider kubevirt --id vm-smoke --open
 crabbox stop --provider kubevirt vm-smoke
 ```
+
+Linux streaming commands run under an owned process-group supervisor. On
+cancellation Crabbox uses a separate bounded SSH cleanup call, escalates from
+TERM to KILL, and requires group absence before workspace reuse. If cleanup
+cannot be proved, the command fails and retains its ownership evidence.
 
 For the repository live harness:
 

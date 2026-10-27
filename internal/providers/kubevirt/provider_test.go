@@ -520,45 +520,16 @@ func TestProxyCommandUsesVirtctlControlPlaneForwarding(t *testing.T) {
 	}
 }
 
-func TestCreateVMUsesKubectlApplyThenVirtctlStart(t *testing.T) {
+func TestLegacyUnboundKubeVirtMutationFailsClosed(t *testing.T) {
+	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	runner := &recordingRunner{}
 	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	if err := backend.createVM(context.Background(), "crabbox-test-deadbeef", "cbx_123", "test", cfg.KubeVirt.SSHPublicKey, false); err != nil {
-		t.Fatal(err)
+	if err := backend.startVM(t.Context(), "vm-unbound"); err == nil {
+		t.Fatal("unbound VM mutation accepted")
 	}
-	if len(runner.calls) != 2 {
-		t.Fatalf("calls=%#v", runner.calls)
-	}
-	if !strings.Contains(runner.calls[0], "kubectl-custom --kubeconfig /tmp/kube config --context test-context --namespace test-ns apply -f ") {
-		t.Fatalf("apply=%q", runner.calls[0])
-	}
-	if runner.calls[1] != "virtctl-custom --kubeconfig /tmp/kube config --context test-context --namespace test-ns start crabbox-test-deadbeef" {
-		t.Fatalf("start=%q", runner.calls[1])
-	}
-	if !strings.Contains(runner.manifest, "crabbox.dev/lease-id: cbx_123") {
-		t.Fatalf("manifest=%s", runner.manifest)
-	}
-}
-
-func TestCreateVMRollsBackWhenStartFails(t *testing.T) {
-	cfg := testConfig(t)
-	runner := &recordingRunner{failAt: 2}
-	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	if err := backend.createVM(context.Background(), "crabbox-test-deadbeef", "cbx_123", "test", cfg.KubeVirt.SSHPublicKey, false); err == nil {
-		t.Fatal("expected start failure")
-	}
-	if len(runner.calls) != 3 || !strings.Contains(runner.calls[2], "delete virtualmachine.kubevirt.io/crabbox-test-deadbeef") {
-		t.Fatalf("calls=%#v", runner.calls)
-	}
-}
-
-func TestStartVMIgnoresAlreadyRunningConflict(t *testing.T) {
-	cfg := testConfig(t)
-	runner := &recordingRunner{failAt: 1, failStderr: "VirtualMachine is already running"}
-	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	if err := backend.startVM(context.Background(), "vm-running"); err != nil {
-		t.Fatalf("startVM: %v", err)
+	if len(runner.calls) != 0 {
+		t.Fatalf("sent API mutation for unbound VM: %v", runner.calls)
 	}
 }
 
@@ -608,76 +579,21 @@ func TestWaitForVMIReadyForSSHReportsConditionsAndEvents(t *testing.T) {
 	}
 }
 
-func TestReleaseDeletesGeneratedKey(t *testing.T) {
-	isolateCrabboxState(t)
-	cfg := testConfig(t)
-	cfg.KubeVirt.SSHKey = ""
-	cfg.KubeVirt.SSHPublicKey = ""
-	keyPath, _, err := core.EnsureTestboxKey("cbx_release")
-	if err != nil {
-		t.Fatal(err)
+func TestReleaseRetainedVMPreservesClaim(t *testing.T) {
+	backend, runner, _, claim := boundLifecycle(t)
+	runner.allowPatch = true
+	backend.cfg.KubeVirt.DeleteOnRelease = false
+	core.MarkDeleteOnReleaseExplicit(&backend.cfg, providerName)
+	lease := core.LeaseTarget{LeaseID: claim.LeaseID, Server: backend.itemToServer(runner.vm(t))}
+	if outcome, err := backend.ReleaseLeaseWithOutcome(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || outcome.Terminal {
+		t.Fatalf("retain outcome=%+v err=%v", outcome, err)
 	}
-	runner := &recordingRunner{stdout: `{"metadata":{"name":"vm-release","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_release","crabbox.dev/slug":"release"}}}`}
-	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	lease := core.LeaseTarget{LeaseID: "cbx_release", Server: core.Server{Name: "vm-release", Labels: map[string]string{"release": "delete"}}}
-	if backend.RetainLeaseClaimAfterRelease(lease) {
-		t.Fatal("delete-on-release backend retained claim")
+	stored, err := core.ReadLeaseClaim(claim.LeaseID)
+	if err != nil || stored.CloudImmutableID != claim.CloudImmutableID || stored.Labels["state"] != "stopped" || stored.FixedCreateIntent == nil {
+		t.Fatalf("retained binding lost: %+v %v", stored, err)
 	}
-	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || !outcome.Terminal {
-		t.Fatalf("delete outcome=%+v err=%v", outcome, err)
-	}
-	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
-		t.Fatalf("generated key still exists: %v", err)
-	}
-}
-
-func TestReleaseRetainedVMPreservesClaimAndKey(t *testing.T) {
-	isolateCrabboxState(t)
-	cfg := testConfig(t)
-	cfg.KubeVirt.SSHKey = ""
-	cfg.KubeVirt.SSHPublicKey = ""
-	cfg.KubeVirt.DeleteOnRelease = false
-	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
-	keyPath, _, err := core.EnsureTestboxKey("cbx_retained")
-	if err != nil {
-		t.Fatal(err)
-	}
-	claimKubeVirtLease(t, cfg, "cbx_retained", "retained", t.TempDir(), cfg.IdleTimeout, false)
-	server := core.Server{
-		CloudID:  cfg.KubeVirt.Namespace + "/vm-retained",
-		Provider: providerName,
-		Name:     "vm-retained",
-		Labels:   map[string]string{"name": "vm-retained", "slug": "retained", "release": "delete", "state": "ready"},
-	}
-	if err := core.UpdateLeaseClaimEndpoint("cbx_retained", server, core.SSHTarget{Host: "vm-retained", Port: "22"}); err != nil {
-		t.Fatal(err)
-	}
-	runner := &recordingRunner{stdout: `{"metadata":{"name":"vm-retained","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_retained","crabbox.dev/slug":"retained"}}}`}
-	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	lease := core.LeaseTarget{LeaseID: "cbx_retained", Server: server}
-	if !backend.RetainLeaseClaimAfterRelease(lease) {
-		t.Fatal("explicit retain policy did not override stored delete policy")
-	}
-	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || outcome.Terminal {
-		t.Fatalf("stop outcome=%+v err=%v", outcome, err)
-	}
-	if _, err := os.Stat(keyPath); err != nil {
-		t.Fatalf("retained key missing: %v", err)
-	}
-	if claim, ok, err := core.ResolveLeaseClaimForProvider("retained", providerName); err != nil || !ok || claim.LeaseID != "cbx_retained" {
-		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
-	} else if claim.Labels["state"] != "stopped" || claim.Labels["release"] != "stop" || claim.SSHHost != "" || claim.SSHPort != 0 {
-		t.Fatalf("stopped claim=%#v", claim)
-	}
-	foundPatch := false
-	for _, call := range runner.calls {
-		if strings.Contains(call, " patch ") && strings.Contains(call, `crabbox.dev/release`) && strings.Contains(call, `stop`) {
-			foundPatch = true
-			break
-		}
-	}
-	if !foundPatch {
-		t.Fatalf("release policy annotation not persisted: calls=%#v", runner.calls)
+	if len(runner.deletes) != 0 {
+		t.Fatal("retained VM was deleted")
 	}
 }
 
@@ -1165,69 +1081,51 @@ func TestListParsesKubeVirtInventory(t *testing.T) {
 	}
 }
 
-func TestCleanupDeletesExpiredVMAndHonorsDryRun(t *testing.T) {
-	cfg := testConfig(t)
-	inventory := `{"items":[{"metadata":{"name":"vm-old","labels":{"crabbox.dev/lease-id":"cbx_old","crabbox.dev/slug":"old"},"annotations":{"crabbox.dev/keep":"false","crabbox.dev/state":"ready","crabbox.dev/expires_at":"1"}},"status":{"printableStatus":"Stopped"}}]}`
-	for _, dryRun := range []bool{true, false} {
-		t.Run(map[bool]string{true: "dry-run", false: "delete"}[dryRun], func(t *testing.T) {
-			item := `{"metadata":{"name":"vm-old","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_old","crabbox.dev/slug":"old"},"annotations":{"crabbox.dev/keep":"false","crabbox.dev/state":"ready","crabbox.dev/expires_at":"1"}},"status":{"printableStatus":"Stopped"}}`
-			runner := &recordingRunner{stdout: inventory, outputs: []string{inventory, item}}
-			var stdout strings.Builder
-			backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stdout: &stdout, Stderr: io.Discard, Exec: runner}}
-			if err := backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: dryRun}); err != nil {
-				t.Fatal(err)
-			}
-			if dryRun && len(runner.calls) != 1 {
-				t.Fatalf("dry-run calls=%#v", runner.calls)
-			}
-			if !dryRun && (len(runner.calls) != 3 || !strings.Contains(runner.calls[2], "delete virtualmachine.kubevirt.io/vm-old")) {
-				t.Fatalf("delete calls=%#v", runner.calls)
-			}
-		})
-	}
-}
-
-func TestCleanupDoesNotRemoveWrongScopeClaim(t *testing.T) {
-	isolateCrabboxState(t)
-	cfg := testConfig(t)
-	if err := core.ClaimLeaseForRepoProviderScope("cbx_old", "old", providerName, "kubeconfig:/other|context:test-context|namespace:test-ns", t.TempDir(), time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
-	inventory := `{"items":[{"metadata":{"name":"vm-old","labels":{"crabbox.dev/lease-id":"cbx_old","crabbox.dev/slug":"old"},"annotations":{"crabbox.dev/keep":"false","crabbox.dev/state":"ready","crabbox.dev/expires_at":"1"}},"status":{"printableStatus":"Stopped"}}]}`
-	item := `{"metadata":{"name":"vm-old","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_old","crabbox.dev/slug":"old"},"annotations":{"crabbox.dev/keep":"false","crabbox.dev/state":"ready","crabbox.dev/expires_at":"1"}},"status":{"printableStatus":"Stopped"}}`
-	runner := &recordingRunner{stdout: inventory, outputs: []string{inventory, item}}
-	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
-		t.Fatal(err)
-	}
-	claim, err := core.ReadLeaseClaim("cbx_old")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if claim.LeaseID == "" {
-		t.Fatal("wrong-scope claim was removed")
-	}
-}
-
-func TestCleanupRemovesLegacyUnscopedClaim(t *testing.T) {
+func TestCleanupPreservesUnboundLegacyVMAndClaim(t *testing.T) {
 	isolateCrabboxState(t)
 	cfg := testConfig(t)
 	if err := core.ClaimLeaseForRepoProvider("cbx_old", "old", providerName, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	inventory := `{"items":[{"metadata":{"name":"vm-old","labels":{"crabbox.dev/lease-id":"cbx_old","crabbox.dev/slug":"old"},"annotations":{"crabbox.dev/keep":"false","crabbox.dev/state":"ready","crabbox.dev/expires_at":"1"}},"status":{"printableStatus":"Stopped"}}]}`
-	item := `{"metadata":{"name":"vm-old","labels":{"app.kubernetes.io/managed-by":"crabbox","crabbox.dev/lease-id":"cbx_old","crabbox.dev/slug":"old"},"annotations":{"crabbox.dev/keep":"false","crabbox.dev/state":"ready","crabbox.dev/expires_at":"1"}},"status":{"printableStatus":"Stopped"}}`
-	runner := &recordingRunner{stdout: inventory, outputs: []string{inventory, item}}
+	inventory := `{"items":[{"metadata":{"name":"vm-old","uid":"unbound","labels":{"crabbox.dev/lease-id":"cbx_old","crabbox.dev/slug":"old"},"annotations":{"crabbox.dev/keep":"false","crabbox.dev/state":"ready","crabbox.dev/expires_at":"1"}},"status":{"printableStatus":"Stopped"}}]}`
+	runner := &recordingRunner{stdout: inventory}
 	backend := &leaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(t.Context(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
+	}
+	if err := backend.Cleanup(t.Context(), core.CleanupRequest{}); err == nil {
+		t.Fatal("cleanup deleted unbound VM")
 	}
 	claim, err := core.ReadLeaseClaim("cbx_old")
-	if err != nil {
+	if err != nil || claim.LeaseID == "" {
+		t.Fatalf("legacy claim lost: %v", err)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, " delete ") {
+			t.Fatal("cleanup sent unbound deletion")
+		}
+	}
+}
+
+func TestCleanupRetainsFixedTombstone(t *testing.T) {
+	backend, runner, req, _ := boundLifecycle(t)
+	runner.item["metadata"].(map[string]any)["annotations"].(map[string]any)[annotationBase+"keep"] = "false"
+	runner.item["metadata"].(map[string]any)["annotations"].(map[string]any)[annotationBase+"expires_at"] = "1"
+	if err := backend.Cleanup(t.Context(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
-	if claim.LeaseID != "" {
-		t.Fatalf("legacy claim remains: %#v", claim)
+	if len(runner.deletes) != 0 {
+		t.Fatal("dry-run deleted VM")
+	}
+	if err := backend.Cleanup(t.Context(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "released" {
+		t.Fatalf("cleanup lost tombstone: %+v %v", claim, err)
+	}
+	if _, err := backend.Acquire(t.Context(), req); err == nil || runner.creates != 1 {
+		t.Fatalf("cleanup allowed recreation: %v", err)
 	}
 }
 
