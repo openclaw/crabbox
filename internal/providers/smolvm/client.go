@@ -3,7 +3,6 @@ package smolvm
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
@@ -41,6 +41,8 @@ type client struct {
 }
 
 const smolvmControlTimeout = 60 * time.Second
+
+const uploadCleanupTimeout = 30 * time.Second
 
 type createRequest struct {
 	Name       string                 `json:"name,omitempty"`
@@ -77,6 +79,12 @@ type execResult struct {
 	// stdout/stderr fallbacks for variants that use output/error keys.
 	Output string `json:"output"`
 	Error  string `json:"error"`
+	// The hosted API caps stdout/stderr at 1 MiB and flags the cut; the
+	// base64 copies carry every byte.
+	StdoutB64       []byte `json:"stdoutB64"`
+	StderrB64       []byte `json:"stderrB64"`
+	StdoutTruncated bool   `json:"stdoutTruncated"`
+	StderrTruncated bool   `json:"stderrTruncated"`
 }
 
 // smolvmAPIError is the structured error returned for non-2xx responses from
@@ -283,6 +291,8 @@ func (c *client) Exec(ctx context.Context, machineID, command, folder string) (e
 	if result.ExitCode == 0 && result.ExitCodeSnake != 0 {
 		result.ExitCode = result.ExitCodeSnake
 	}
+	result.Stdout = exactOutput(result.Stdout, result.StdoutB64, result.StdoutTruncated, "stdout")
+	result.Stderr = exactOutput(result.Stderr, result.StderrB64, result.StderrTruncated, "stderr")
 	if result.Output == "" {
 		result.Output = result.Stdout
 	}
@@ -292,8 +302,20 @@ func (c *client) Exec(ctx context.Context, machineID, command, folder string) (e
 	return result, nil
 }
 
+// exactOutput prefers the byte-exact copy and marks capped text it cannot replace.
+func exactOutput(text string, exact []byte, truncated bool, stream string) string {
+	if exact != nil {
+		return string(exact)
+	}
+	if truncated {
+		return text + "\ncrabbox: the smolvm API truncated " + stream + " and sent no complete copy; rerun with reduced verbosity or save output to a guest file\n"
+	}
+	return text
+}
+
 func (c *client) ExecStream(ctx context.Context, machineID, command, folder string, stdout io.Writer) (int, error) {
-	// No native stream on this API; fall back to Exec and dump output at end.
+	// The hosted API can stream exec output as Server-Sent Events; this
+	// provider still collects it with Exec and writes it at the end.
 	result, err := c.Exec(ctx, machineID, command, folder)
 	if err != nil {
 		return 0, err
@@ -312,7 +334,12 @@ func (c *client) ExecStream(ctx context.Context, machineID, command, folder stri
 }
 
 func (c *client) InjectArchive(ctx context.Context, machineID, localPath, targetDir string) error {
-	data, err := os.ReadFile(localPath)
+	archive, err := os.Open(localPath)
+	if err != nil {
+		return err
+	}
+	defer archive.Close()
+	info, err := archive.Stat()
 	if err != nil {
 		return err
 	}
@@ -320,7 +347,7 @@ func (c *client) InjectArchive(ctx context.Context, machineID, localPath, target
 	if !strings.HasPrefix(absTarget, "/") {
 		absTarget = "/workspace"
 	}
-	return c.withDecodedFile(ctx, machineID, data, "", `"${TMPDIR:-/tmp}"`,
+	return c.withUploadedFile(ctx, machineID, archive, info.Size(), "", `"${TMPDIR:-/tmp}"`,
 		"tar -xzf \"$upload_dir/payload\" -C "+core.ShellQuote(absTarget), "archive extract")
 }
 
@@ -332,30 +359,89 @@ func (c *client) WriteFile(ctx context.Context, machineID, remotePath, content s
 	parent := core.ShellQuote(path.Dir(absPath))
 	// Stage beside the destination so publication stays on one filesystem.
 	prepare := "mkdir -p " + parent + "\n[ ! -d " + core.ShellQuote(absPath) + " ] || { echo 'file destination is a directory' >&2; exit 1; }\n"
-	return c.withDecodedFile(ctx, machineID, []byte(content), prepare, parent,
-		"mv -f \"$upload_dir/payload\" "+core.ShellQuote(absPath), "write")
+	// The copy makes the published file private and owned by the exec user,
+	// whichever owner and mode the files route gave the upload.
+	consume := "umask 077\ncat \"$upload_dir/payload\" > \"$upload_dir/file\"\nmv -f \"$upload_dir/file\" " + core.ShellQuote(absPath)
+	return c.withUploadedFile(ctx, machineID, strings.NewReader(content), int64(len(content)), prepare, parent, consume, "write")
 }
 
-// withDecodedFile owns only this exec's private staging directory. Its trap
-// cannot guarantee cleanup after SIGKILL or ambiguous remote HTTP completion.
-func (c *client) withDecodedFile(ctx context.Context, machineID string, data []byte, prepare, stagingParent, consume, operation string) error {
-	// Check decoding separately from consumption: POSIX pipelines only expose
-	// the last command's status, even when the decoder emitted partial data.
-	const eof = "CRABBOX_UPLOAD_B64_EOF"
-	script := "set -eu\nupload_umask=$(umask)\numask 077\n" + prepare +
-		"upload_dir=$(mktemp -d " + stagingParent + "/.crabbox-upload.XXXXXXXXXX)\n" +
-		`trap 'upload_status=$?; trap - 0; rm -rf -- "$upload_dir" || { echo "upload staging cleanup failed" >&2; [ "$upload_status" -ne 0 ] || upload_status=1; }; exit "$upload_status"' 0` + "\n" +
-		"trap 'exit 129' HUP\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\n" +
-		"base64 -d > \"$upload_dir/payload\" << '" + eof + "'\n" +
-		base64.StdEncoding.EncodeToString(data) + "\n" + eof + "\n" +
-		"umask \"$upload_umask\"\n" +
-		consume + "\n"
-	res, err := c.Exec(ctx, machineID, script, "")
+// withUploadedFile owns only this upload's private staging directory: one exec
+// creates it, the files route fills it, and a second exec consumes and removes
+// it. Cleanup is not guaranteed after SIGKILL or ambiguous remote HTTP completion.
+func (c *client) withUploadedFile(ctx context.Context, machineID string, data io.Reader, size int64, prepare, stagingParent, consume, operation string) error {
+	stage := "set -eu\numask 077\n" + prepare +
+		"upload_parent=$(cd " + stagingParent + " && pwd -P)\n" +
+		"mktemp -d \"${upload_parent%/}/.crabbox-upload.XXXXXXXXXX\"\n"
+	res, err := c.Exec(ctx, machineID, stage, "")
 	if err != nil {
-		return fmt.Errorf("smolvm direct %s exec: %w", operation, err)
+		return fmt.Errorf("smolvm direct %s staging: %w", operation, err)
 	}
 	if res.ExitCode != 0 {
 		return commandExitError("smolvm direct "+operation, res)
+	}
+	uploadDir := strings.TrimSuffix(res.Output, "\n")
+	if !validUploadDir(uploadDir) {
+		return fmt.Errorf("smolvm direct %s staging returned an invalid private upload directory", operation)
+	}
+	// The payload goes over the files route because /exec takes a JSON body
+	// capped at 1 MiB; the files route takes the raw bytes up to 100 MiB.
+	err = c.putFile(ctx, machineID, uploadDir+"/payload", data, size)
+	if err == nil {
+		res, err = c.Exec(ctx, machineID, "set -eu\nupload_dir="+core.ShellQuote(uploadDir)+"\n"+
+			`trap 'upload_status=$?; trap - 0; rm -rf -- "$upload_dir" || { echo "upload staging cleanup failed" >&2; [ "$upload_status" -ne 0 ] || upload_status=1; }; exit "$upload_status"' 0`+"\n"+
+			"trap 'exit 129' HUP\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\n"+consume+"\n", "")
+	}
+	if err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), uploadCleanupTimeout)
+		defer cancel()
+		if cleanup, cleanupErr := c.Exec(cleanupCtx, machineID, "rm -rf -- "+core.ShellQuote(uploadDir), ""); cleanupErr != nil || cleanup.ExitCode != 0 {
+			return fmt.Errorf("smolvm direct %s: %w (upload staging cleanup failed)", operation, err)
+		}
+		return fmt.Errorf("smolvm direct %s: %w", operation, err)
+	}
+	if res.ExitCode != 0 {
+		return commandExitError("smolvm direct "+operation, res)
+	}
+	return nil
+}
+
+func validUploadDir(dir string) bool {
+	// Never turn malformed remote output into an upload target or rm -rf path.
+	if !path.IsAbs(dir) || path.Clean(dir) != dir || strings.IndexFunc(dir, unicode.IsControl) >= 0 {
+		return false
+	}
+	suffix, ok := strings.CutPrefix(path.Base(dir), ".crabbox-upload.")
+	if !ok || len(suffix) != 10 {
+		return false
+	}
+	for _, char := range suffix {
+		if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *client) putFile(ctx context.Context, machineID, guestPath string, data io.Reader, size int64) error {
+	u := c.base + "/v1/machines/" + url.PathEscape(machineID) + "/files" + (&url.URL{Path: guestPath}).EscapedPath()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, data)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = size
+	c.addHeaders(req)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	httpClient := c.dataHTTP
+	if httpClient == nil {
+		httpClient = c.http
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return apiError(resp, c.apiKey)
 	}
 	return nil
 }

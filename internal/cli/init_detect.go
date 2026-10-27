@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -27,12 +28,12 @@ func detectInitProject(root string) initProjectDetection {
 		return d
 	}
 	for _, mod := range detectFiles(root, "go.mod") {
-		rel := filepath.Dir(mod)
+		rel := path.Dir(mod)
 		d.Commands = append(d.Commands, subshellCommand(rel, "go test ./..."))
 		d.PreflightTools = appendUniqueStrings(d.PreflightTools, "go")
 	}
 	for _, manifest := range detectFiles(root, "package.json") {
-		rel := filepath.Dir(manifest)
+		rel := path.Dir(manifest)
 		command, tools, excludes := detectPackageCommand(root, rel)
 		if command == "" {
 			continue
@@ -42,7 +43,7 @@ func detectInitProject(root string) initProjectDetection {
 		d.SyncExcludes = appendUniqueStrings(d.SyncExcludes, excludes...)
 	}
 	for _, manifest := range detectFiles(root, "Cargo.toml") {
-		rel := filepath.Dir(manifest)
+		rel := path.Dir(manifest)
 		d.Commands = append(d.Commands, subshellCommand(rel, "cargo test"))
 		d.PreflightTools = appendUniqueStrings(d.PreflightTools, "cargo")
 		d.SyncExcludes = appendUniqueStrings(d.SyncExcludes, "target")

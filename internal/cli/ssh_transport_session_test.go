@@ -65,35 +65,105 @@ func TestSSHTransportConfigParsesWithOpenSSH(t *testing.T) {
 		t.Skip("OpenSSH client is required")
 	}
 	t.Setenv("HOME", t.TempDir())
-	session, err := newSSHTransportSession(t.Context(), SSHTarget{
-		User:         `DOMAIN\alice%id`,
-		Host:         "ssh.example.test",
-		Port:         "2200",
-		ProxyCommand: `provider-proxy --route "blue box" %h %p`,
-	}, true)
-	if err != nil {
-		t.Fatal(err)
+	parseConfig := func(path string) (string, string, error) {
+		cmd := exec.CommandContext(t.Context(), ssh, "-G", "-F", path, sshTransportHostAlias)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		return stdout.String(), stderr.String(), err
 	}
-	t.Cleanup(func() { _ = session.Close() })
-	cmd := exec.Command(ssh, "-G", "-F", session.configPath, sshTransportHostAlias)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("ssh -G: %v: %s", err, stderr.String())
-	}
-	got := strings.ToLower(stdout.String())
-	for _, line := range []string{
-		"hostname ssh.example.test",
-		`user domain\alice%id`,
-		"port 2200",
-		`proxycommand provider-proxy --route "blue box" %h %p`,
-		"exitonforwardfailure yes",
-		"gatewayports no",
-	} {
-		if !strings.Contains(got, line) {
-			t.Fatalf("ssh -G missing %q:\n%s", line, stdout.String())
+	control := func(t *testing.T, user string) (string, string, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "control_config")
+		// Handwritten controls must not use Crabbox's serializer or capability probe.
+		config := fmt.Sprintf("Host %s\n  HostName ssh.example.test\n  User \"%s\"\n  IdentityFile none\n  IdentityAgent none\n", sshTransportHostAlias, user)
+		if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+			t.Fatal(err)
 		}
+		return parseConfig(path)
+	}
+	hasLine := func(output, line string) bool {
+		return strings.Contains("\n"+output, "\n"+line+"\n")
+	}
+	stdout, stderr, err := control(t, "alice%%id")
+	if err != nil {
+		t.Fatalf("OpenSSH percent control: %v: %s", err, stderr)
+	}
+	expandsPercent := hasLine(stdout, "user alice%id")
+	if !expandsPercent && !hasLine(stdout, "user alice%%id") {
+		t.Fatalf("unexpected OpenSSH percent control:\n%s", stdout)
+	}
+	t.Logf("OpenSSH User percent expansion: %t", expandsPercent)
+	invalidUsername := func(err error, stderr string) bool {
+		var exitErr *exec.ExitError
+		return errors.As(err, &exitErr) && exitErr.ExitCode() == 255 &&
+			strings.Contains(stderr, "remote username contains invalid characters")
+	}
+	for _, tc := range []struct {
+		name string
+		user string
+	}{
+		{name: "ordinary", user: "builder"},
+		{name: "backslash", user: `DOMAIN\alice`},
+		{name: "percent", user: "alice%id"},
+		{name: "combined", user: `DOMAIN\alice%id`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			controlUser := tc.user
+			if expandsPercent {
+				controlUser = strings.ReplaceAll(controlUser, "%", "%%")
+			}
+			controlOut, controlErrOut, controlErr := control(t, controlUser)
+			// Some expanding clients reject backslashes only after percent expansion.
+			rejected := tc.name == "combined" && expandsPercent && invalidUsername(controlErr, controlErrOut)
+			if controlErr != nil && !rejected {
+				t.Fatalf("OpenSSH username control: %v: %s", controlErr, controlErrOut)
+			}
+			if !rejected && !hasLine(controlOut, "user "+tc.user) {
+				t.Fatalf("OpenSSH control did not preserve user %q:\n%s", tc.user, controlOut)
+			}
+			session, err := newSSHTransportSession(t.Context(), SSHTarget{
+				User:         tc.user,
+				Host:         "ssh.example.test",
+				Port:         "2200",
+				ProxyCommand: `provider-proxy --route "blue box" %h %p`,
+			}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = session.Close() })
+			config, err := os.ReadFile(session.configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !hasLine(string(config), `  User "`+controlUser+`"`) {
+				t.Fatalf("private config did not preserve user %q:\n%s", tc.user, config)
+			}
+			stdout, stderr, err := parseConfig(session.configPath)
+			if rejected {
+				if !invalidUsername(err, stderr) {
+					t.Fatalf("ssh -G must match the control's username rejection: %v: %s", err, stderr)
+				}
+				t.Log("OpenSSH independently rejects the combined username after expansion")
+				return
+			}
+			if err != nil {
+				t.Fatalf("ssh -G: %v: %s", err, stderr)
+			}
+			for _, line := range []string{
+				"hostname ssh.example.test",
+				"user " + tc.user,
+				"port 2200",
+				`proxycommand provider-proxy --route "blue box" %h %p`,
+				"exitonforwardfailure yes",
+				"gatewayports no",
+			} {
+				if !hasLine(stdout, line) {
+					t.Fatalf("ssh -G missing %q:\n%s", line, stdout)
+				}
+			}
+		})
 	}
 }
 

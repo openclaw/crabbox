@@ -307,10 +307,11 @@ func (b *blacksmithBackend) withOwnedTestbox(ctx context.Context, claim core.Lea
 }
 
 type blacksmithReconciledStop struct {
-	result     core.LocalCommandResult
-	err        error
-	runURL     string
-	conclusion string
+	result          core.LocalCommandResult
+	err             error
+	runURL          string
+	conclusion      string
+	nativeCompleted bool
 }
 
 func (b *blacksmithBackend) printStopOutput(result core.LocalCommandResult) {
@@ -375,8 +376,12 @@ func (b *blacksmithBackend) terminateTestbox(ctx context.Context, claim core.Lea
 			if result.runURL == "" {
 				return nil, blacksmithSettlementError(claim.LeaseID, errors.New("native completion has no GitHub run association; retry after association becomes available"))
 			}
+			result.nativeCompleted = true
 			result.conclusion, err = b.githubRunConclusion(ctx, result.runURL)
 			if err != nil {
+				if errors.Is(err, errBlacksmithGitHubDeadline) {
+					return result, blacksmithSettlementError(claim.LeaseID, err)
+				}
 				return nil, blacksmithSettlementError(claim.LeaseID, err)
 			}
 			if result.conclusion != "" {

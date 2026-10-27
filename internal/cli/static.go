@@ -89,7 +89,8 @@ func staticLease(cfg Config) (Server, SSHTarget, string, error) {
 	}
 	server.PublicNet.IPv4.IP = cfg.Static.Host
 	server.ServerType.Name = staticServerType(cfg)
-	target := sshTargetForLease(cfg, cfg.Static.Host, firstNonEmpty(cfg.Static.User, cfg.SSHUser), firstNonEmpty(cfg.Static.Port, cfg.SSHPort))
+	target := sshTargetForLease(cfg, cfg.Static.Host, staticLoginUser(cfg), firstNonEmpty(cfg.Static.Port, cfg.SSHPort))
+	target.FallbackPorts = staticSSHFallbackPorts(cfg, target.FallbackPorts)
 	target.ReadyCheck = staticReadyCommand(target)
 	target.NoControlMaster = cfg.Static.NoControlMaster
 	return server, target, leaseID, nil
@@ -97,6 +98,12 @@ func staticLease(cfg Config) (Server, SSHTarget, string, error) {
 
 func StaticLease(cfg Config) (Server, SSHTarget, string, error) {
 	return staticLease(cfg)
+}
+
+// staticLoginUser is the user Static SSH connects as; the implicit macOS
+// work root is derived from it.
+func staticLoginUser(cfg Config) string {
+	return firstNonEmpty(cfg.Static.User, cfg.SSHUser)
 }
 
 func staticReadyCommand(target SSHTarget) string {
@@ -126,4 +133,13 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// staticSSHFallbackPorts keeps an explicitly selected endpoint exclusive.
+// Another port on the same host can reach a different machine through a forward.
+func staticSSHFallbackPorts(cfg Config, fallback []string) []string {
+	if strings.TrimSpace(cfg.Static.Port) != "" || IsSSHPortExplicit(&cfg) {
+		return []string{}
+	}
+	return fallback
 }

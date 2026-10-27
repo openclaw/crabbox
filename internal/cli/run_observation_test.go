@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestImageEvidenceLocalHistoryRoundTrip(t *testing.T) {
@@ -234,7 +235,7 @@ func TestRunObservationCoordinatorTerminalAcknowledgment(t *testing.T) {
 					t.Fatal("existing failure lifecycle changed")
 				}
 			} else {
-				err := recorder.Finish(t.Context(), SSHTarget{}, 1, 0, 0, "", false, nil, FailureClassification{}, &receipt)
+				err := recorder.Finish(t.Context(), SSHTarget{}, 1, 0, 100*time.Millisecond, "", false, nil, FailureClassification{}, &receipt)
 				if (err == nil) != (mode == "verified-receipt") {
 					t.Fatalf("Finish=%v", err)
 				}

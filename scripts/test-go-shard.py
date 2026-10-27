@@ -11,7 +11,7 @@ other tests exist:
 Adding, removing, or renaming an unlisted test therefore moves no other test;
 only edits to SLOW_TESTS move listed tests.
 
-Both lanes stream `go test -json` but print only what plain `go test` would:
+All lanes stream `go test -json` but print only what plain `go test` would:
 package output and the output of failed or unfinished tests. Each shard ends
 with the elapsed seconds of its listed tests and of unlisted tests at
 SLOW_SECONDS or more; the race shards' summaries calibrate SLOW_TESTS.
@@ -23,6 +23,8 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 # Rounded top-level seconds from the CI race shards' timing summaries; only
 # relative weights matter. List every test at SLOW_SECONDS or more: hashing
@@ -105,7 +107,10 @@ def select_tests(listing, shard, count):
     for name in sorted(SLOW_TESTS, key=lambda name: (-SLOW_TESTS[name], name)):
         owners[name] = loads.index(min(loads))
         loads[owners[name]] += SLOW_TESTS[name]
-    return [name for name in names if owners.get(name, hashed_shard(name, count)) == shard]
+    selected = [name for name in names if owners.get(name, hashed_shard(name, count)) == shard]
+    if not selected:
+        raise ValueError("test discovery selected an empty shard")
+    return selected
 
 
 def hashed_shard(name, count):
@@ -116,13 +121,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("shard", type=int)
     parser.add_argument("count", type=int)
-    parser.add_argument("--coverprofile", help="opt into atomic coverage instead of the race lane")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--normal", action="store_true", help="run normal tests without race or coverage instrumentation")
+    mode.add_argument("--coverprofile", help="opt into atomic coverage instead of the race lane")
     args = parser.parse_args()
     if args.count < 1 or not 0 <= args.shard < args.count:
         parser.error("shard must be in [0, count)")
     package = "./internal/cli"
     common = ["go", "test", "-race", "-count=1", "-timeout=10m", package]
-    if args.coverprofile:
+    if args.normal:
+        common = ["go", "test", "-count=1", "-timeout=20m", package]
+    elif args.coverprofile is not None:
+        if not args.coverprofile:
+            parser.error("coverprofile must not be empty")
         common = ["go", "test", "-count=1", "-timeout=20m", "-covermode=atomic", package]
     listing = subprocess.run(common + ["-list", "."], text=True, capture_output=True)
     if listing.returncode:
@@ -130,6 +141,18 @@ def main():
         sys.stderr.write(listing.stderr)
         return listing.returncode
     names = select_tests(listing.stdout, args.shard, args.count)
+    # Binary-contract tests share this build. Warm its cache before the package
+    # timeout starts, especially after a toolchain update invalidates the cache.
+    with tempfile.TemporaryDirectory(prefix="crabbox-shard-build-") as directory:
+        build = subprocess.run(
+            ["go", "build", "-trimpath", "-o", str(Path(directory) / "crabbox"), "./cmd/crabbox"],
+            text=True,
+            capture_output=True,
+        )
+        if build.returncode:
+            sys.stdout.write(build.stdout)
+            sys.stderr.write(build.stderr)
+            return build.returncode
     print(f"CLI shard {args.shard + 1}/{args.count}: {len(names)} tests", flush=True)
     command = common + ["-run", "^(" + "|".join(names) + ")$"]
     if args.coverprofile:

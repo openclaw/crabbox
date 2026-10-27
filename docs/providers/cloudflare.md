@@ -68,11 +68,11 @@ slow CLI does not count toward those limits.
 
 ## Runner toolchain and pnpm upgrades
 
-The bundled image pins Node 24.21.0, Go 1.26.8, GitHub CLI 2.101.0, and
-pnpm 12.5.1. These versions take effect when the runner image is deployed;
+The bundled image pins Node 24.22.1, Go 1.27.3, GitHub CLI 2.102.1, and
+pnpm 12.15.0. These versions take effect when the runner image is deployed;
 updating the local Crabbox CLI does not update an existing deployment.
 
-The pnpm default advances from 10.24.0 to 12.5.1. Projects without a
+The pnpm default advances from 10.24.0 to 12.15.0. Projects without a
 `packageManager` field in `package.json` inherit the new default. Corepack
 continues to honor explicit project pins: set `"packageManager": "pnpm@10.24.0"`
 before deployment if a project still requires pnpm 10.

@@ -17,7 +17,7 @@ func TestAdminRetainedReconcile(t *testing.T) {
 				if r.Method != http.MethodGet || r.URL.Path != "/v1/admin/retained-reconcile" || r.Header.Get("Authorization") != "Bearer fixture-admin" {
 					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 				}
-				_, _ = w.Write([]byte(`{"settings":{"mode":"on","delete":false,"budget":200,"lookupBudget":64,"graceSeconds":3600},"cycles":2,"scanned":400,"counters":{"aws":{"confirmed":20}},"backoff":{}}`))
+				_, _ = w.Write([]byte(`{"settings":{"mode":"on","delete":false,"budget":200,"lookupBudget":64,"graceSeconds":3600,"awsLegacyAccountConfigured":true},"cycles":2,"scanned":400,"counters":{"aws":{"confirmed":20,"legacy_scope_attested":25}},"backoff":{}}`))
 			}))
 			defer server.Close()
 			t.Setenv("CRABBOX_COORDINATOR", server.URL)
@@ -33,10 +33,10 @@ func TestAdminRetainedReconcile(t *testing.T) {
 			}
 			if jsonOutput {
 				var result CoordinatorRetainedReconcile
-				if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || (result.Counters["aws"]["confirmed"] != 20 || result.Settings.LookupBudget != 64 || result.Settings.GraceSeconds != 3600) {
+				if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || (result.Counters["aws"]["confirmed"] != 20 || result.Counters["aws"]["legacy_scope_attested"] != 25 || !result.Settings.AWSLegacyAccountConfigured || result.Settings.LookupBudget != 64 || result.Settings.GraceSeconds != 3600) {
 					t.Fatalf("invalid JSON: %s", stdout.String())
 				}
-			} else if !strings.Contains(stdout.String(), "aws confirmed=20") {
+			} else if !strings.Contains(stdout.String(), "aws confirmed=20") || !strings.Contains(stdout.String(), "aws legacy_scope_attested=25") || !strings.Contains(stdout.String(), "aws_legacy_account_configured=true") {
 				t.Fatal(stdout.String())
 			}
 		})

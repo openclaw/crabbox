@@ -156,6 +156,7 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	}
 	if core.FlagWasSet(fs, "parallels-user") {
 		cfg.Parallels.User = *v.User
+		cfg.Parallels.UserExplicit = true
 		core.RecordProviderFlagInputs(cfg, true, "parallels")
 		cfg.SSHUser = *v.User
 	}

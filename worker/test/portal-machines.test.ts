@@ -4,7 +4,12 @@ import { sha256Hex } from "../src/encoding";
 import { FleetCoordinator } from "../src/fleet";
 import { putLeaseRecord } from "../src/lease-record-store";
 import { requestOrg } from "../src/org-identity";
-import { ServeCoordinator, type ServeMachine } from "../src/serve";
+import {
+  ServeCoordinator,
+  serveUsageKey,
+  type ServeMachine,
+  type ServeUsageRollup,
+} from "../src/serve";
 import type { Env, LeaseRecord } from "../src/types";
 import { ProvisioningTestRuntime, ProvisioningTestStorage } from "./provisioning-fixtures";
 
@@ -62,12 +67,155 @@ function fixture(allowed = owner) {
     expect(response.status).toBe(200);
     return response.text();
   };
-  return { storage, serve, request, machine, ownerPrefix, seed, home };
+  return { storage, fleet, serve, request, machine, ownerPrefix, seed, home };
 }
 
 afterEach(() => vi.useRealTimers());
 
 describe("portal donated machines", () => {
+  it("reads monthly rollups and current allocations without scanning or backfilling lease history", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T02:00:00Z"));
+    const f = fixture("*");
+    await f.seed(f.machine());
+    await f.seed(
+      f.machine({ machineID: "22222222-2222-4222-8222-222222222222", name: "idle-builder" }),
+    );
+    await f.serve.create(f.request(), {
+      provider: "serve",
+      leaseID,
+      sshPublicKey: sshKey,
+      class: "standard",
+    });
+    const original = (await f.storage.get<LeaseRecord>(`lease:${leaseID}`))!;
+    const released: LeaseRecord = {
+      ...original,
+      state: "released",
+      createdAt: "2026-05-01T00:00:00Z",
+      endedAt: "2026-05-01T01:00:00Z",
+    };
+    await Promise.all(
+      Array.from({ length: 130 }, (_, n) =>
+        putLeaseRecord(f.storage, {
+          ...released,
+          id: `cbx_${(n + 100).toString(16).padStart(12, "0")}`,
+        }),
+      ),
+    );
+    await putLeaseRecord(f.storage, { ...original, createdAt: "2026-05-01T01:30:00Z" });
+    await putLeaseRecord(f.storage, {
+      ...released,
+      id: "cbx_000000000002",
+      owner: "bob@example.com",
+    });
+    await putLeaseRecord(f.storage, {
+      ...released,
+      id: "cbx_000000000003",
+      org: requestOrg(f.request(owner, "other-org"), {}),
+    });
+    await putLeaseRecord(f.storage, {
+      ...released,
+      id: "cbx_000000000004",
+      createdAt: "2026-04-30T23:00:00Z",
+    });
+    await f.storage.put(serveUsageKey(machineID, "2026-05"), {
+      owner,
+      org: original.org,
+      leases: 2,
+      runtimeSeconds: 7200,
+      cpuSeconds: 57600,
+      updatedAt: "2026-05-01T01:00:00Z",
+    } satisfies ServeUsageRollup);
+    await f.storage.put(serveUsageKey("22222222-2222-4222-8222-222222222222", "2026-05"), {
+      owner: "bob@example.com",
+      org: original.org,
+      leases: 99,
+      runtimeSeconds: 99,
+      cpuSeconds: 99,
+      updatedAt: "2026-05-01T01:00:00Z",
+    } satisfies ServeUsageRollup);
+    f.storage.listOptions.length = 0;
+    const reads: string[] = [];
+    f.storage.beforeGet = async (key) => {
+      reads.push(key);
+    };
+    const machines = await f.serve.listMachines(f.request());
+    expect(machines.find((m) => m.machineID === machineID)?.usage).toEqual({
+      month: "2026-05",
+      leases: 3,
+      activeLeases: 1,
+      runtimeSeconds: 9000,
+      cpuSeconds: 72000,
+    });
+    expect(machines.find((m) => m.name === "idle-builder")?.usage).toEqual({
+      month: "2026-05",
+      leases: 0,
+      activeLeases: 0,
+      runtimeSeconds: 0,
+      cpuSeconds: 0,
+    });
+    const pages = f.storage.listOptions.filter((o) => o?.prefix === "lease:");
+    expect(pages).toEqual([]);
+    expect(reads.filter((key) => key.startsWith("lease:"))).toEqual([`lease:${leaseID}`]);
+    expect(reads.filter((key) => key.startsWith("serve-usage:"))).toHaveLength(2);
+    const body = await f.home();
+    expect(body).toContain("served this month");
+    expect(body).toContain("3 served · 20.00 CPU-hours");
+    expect(body).toContain("150m 0s runtime · 2026-05 UTC");
+    expect(body).toContain("0 served · 0.00 CPU-hours");
+  });
+
+  it("labels only visible machine groups and keeps unavailable machine records attributable", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T02:00:00Z"));
+    const f = fixture("*");
+    await f.seed(f.machine());
+    await f.serve.create(f.request(), {
+      provider: "serve",
+      leaseID,
+      sshPublicKey: sshKey,
+      class: "standard",
+    });
+    const original = (await f.storage.get<LeaseRecord>(`lease:${leaseID}`))!;
+    await putLeaseRecord(f.storage, {
+      ...original,
+      id: "cbx_000000000002",
+      cloudID: "deleted-machine/cbx_000000000002",
+      serve: undefined,
+    });
+    await f.seed(
+      f.machine({
+        machineID: "22222222-2222-4222-8222-222222222222",
+        owner: "bob@example.com",
+        name: "private-builder",
+      }),
+    );
+    await putLeaseRecord(f.storage, {
+      ...original,
+      id: "cbx_000000000003",
+      owner: "bob@example.com",
+      serve: { ...original.serve!, machineID: "22222222-2222-4222-8222-222222222222" },
+    });
+    const reads: string[] = [];
+    f.storage.beforeGet = async (key) => {
+      reads.push(key);
+    };
+    const response = await f.fleet.fetch(
+      f.request(owner, "example-org", false, "/v1/usage?scope=all&owner=bob@example.com"),
+    );
+    expect(response.status).toBe(200);
+    const result = (await response.json()) as { usage: { byMachine: unknown[] } };
+    expect(result.usage.byMachine).toHaveLength(2);
+    expect(result.usage.byMachine).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: machineID, label: "linux-builder" }),
+        expect.objectContaining({ key: "deleted-machine", cpuSeconds: 0 }),
+      ]),
+    );
+    expect(JSON.stringify(result)).not.toContain("private-builder");
+    expect(reads).not.toContain("serve-machine:22222222-2222-4222-8222-222222222222");
+  });
+
   it("renders online, offline and draining capacity with allocated lease links", async () => {
     vi.useFakeTimers();
     const f = fixture();

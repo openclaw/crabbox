@@ -9,7 +9,7 @@ import (
 // ConfigShowSection preserves the established loaded-value display without defaults.
 func (Provider) ConfigShowSection(cfg core.Config) core.ProviderConfigShowSection {
 	c := cfg.LocalContainer
-	return core.ProviderConfigShowSection{
+	section := core.ProviderConfigShowSection{
 		JSONKey: "localContainer", TextLabel: "local_container", Providers: []string{"local-container"},
 		Fields: []core.ProviderConfigShowField{
 			{JSONName: "runtime", JSONValue: c.Runtime, TextName: "runtime", TextValue: c.Runtime},
@@ -22,4 +22,11 @@ func (Provider) ConfigShowSection(cfg core.Config) core.ProviderConfigShowSectio
 			{JSONName: "dockerSocket", JSONValue: c.DockerSocket, TextName: "docker_socket", TextValue: strconv.FormatBool(c.DockerSocket)},
 		},
 	}
+	if c.OCIRuntime != "" {
+		section.Fields = append(section.Fields, core.ProviderConfigShowField{
+			JSONName: "ociRuntime", JSONValue: c.OCIRuntime,
+			TextName: "oci_runtime", TextValue: c.OCIRuntime,
+		})
+	}
+	return section
 }

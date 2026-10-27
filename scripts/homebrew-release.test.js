@@ -420,15 +420,16 @@ if [[ "\${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
   }
 }
 
-test("Homebrew workflow runs full release verification on both native hosts", () => {
+test("Homebrew workflow runs full release verification for both architectures", () => {
   const workflow = fs.readFileSync(path.join(repoRoot, ".github/workflows/verify-homebrew.yml"), "utf8");
   const job = workflow.split("\n  verify:\n")[1];
   assert.ok(job);
   assert.match(job, /runs-on: \$\{\{ matrix\.runner \}\}/);
-  assert.match(job, /runner: macos-15\n\s+arch: arm64/);
-  assert.match(job, /runner: macos-15-intel\n\s+arch: x86_64/);
+  assert.match(job, /runner: xcode-27\n\s+arch: arm64/);
+  assert.match(job, /runner: xcode-27\n\s+arch: x86_64/);
   assert.doesNotMatch(job.split("    steps:")[0], /\bif:|exclude:/);
   assert.match(job, /scripts\/verify-homebrew-release\.sh/);
+  assert.match(job, /\/usr\/bin\/arch "-\$VERIFY_ARCH" \/bin\/bash scripts\/verify-homebrew-release\.sh/);
   assert.match(source, /CRABBOX_VERIFY_EXEC_ARCH="\$native_arch"\s*\\\n\s*CRABBOX_VERIFY_MODE=static[\s\S]*"\$ROOT\/scripts\/verify-release\.sh"/);
 });
 

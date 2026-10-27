@@ -24,6 +24,7 @@ export interface Env {
   CRABBOX_RETAINED_RECONCILE_BUDGET?: string;
   CRABBOX_RETAINED_RECONCILE_LOOKUP_BUDGET?: string;
   CRABBOX_RETAINED_RECONCILE_INTERVAL_SECONDS?: string;
+  CRABBOX_RETAINED_RECONCILE_AWS_LEGACY_ACCOUNT?: string;
 
   CRABBOX_LEASE_LIFETIME_MODE?: string;
   CRABBOX_BATCH_MAX_AGE_SECONDS?: string;
@@ -501,6 +502,16 @@ export interface HetznerCleanupEvidence {
 
 export type ProviderCleanupEvidence = HetznerCleanupEvidence;
 
+// Provider-observed acquisition identity, not process or artifact closure evidence.
+export interface AWSRootDiskIdentity {
+  leaseID: string;
+  instanceID: string;
+  volumeID: string;
+  deviceName: string;
+  region: string;
+  providerScope: string;
+}
+
 export interface LeaseRecord {
   leasePolicy?: import("./config").LeasePolicy;
   policyNotice?: string;
@@ -519,9 +530,10 @@ export interface LeaseRecord {
     firstAbsentAt: string;
     lastAbsentAt: string;
   };
-  cleanupConfirmedBy?: "retained-reconcile";
+  cleanupConfirmedBy?: "retained-reconcile" | "retained-reconcile-legacy-attested";
   serve?: import("./serve").ServeAssignment;
   serveIntent?: string;
+  serveUsageRecordedAt?: string;
   sshHostKeyFingerprint?: string;
   imageEvidence?: {
     configuredReference: string;
@@ -584,6 +596,7 @@ export interface LeaseRecord {
   awsSSMCommandID?: string;
   awsSSMCommandStatus?: string;
   awsSSMLogGroup?: string;
+  awsOriginalRootDisk?: AWSRootDiskIdentity;
   capacityHints?: CapacityHint[];
   serverID: number;
   providerResourceID?: string;
@@ -1358,6 +1371,7 @@ export interface ProviderMachine {
   awsMetadataHttpTokens?: string;
   awsMetadataHttpPutResponseHopLimit?: number;
   awsMetadataInstanceTags?: string;
+  awsRootDeviceName?: string;
   awsRootVolumeID?: string;
   awsRootDeleteOnTermination?: boolean;
   labels: Record<string, string>;

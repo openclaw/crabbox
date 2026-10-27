@@ -19,7 +19,7 @@ and Windows WSL2 when your subscription has credits or available quota. It
 follows the same ordered region fallback as AWS for brokered leases, while
 keeping Windows classes smaller than the large Linux-focused classes.
 
-Linux VMs install checksum-pinned TruffleHog 3.95.9 once during cloud-init.
+Linux VMs install checksum-pinned TruffleHog 3.99.4 once during cloud-init.
 Windows WSL2 VMs install the matching Linux binary once while the managed WSL
 distro is created.
 Azure uses Marketplace images rather than Crabbox-promoted developer images, so

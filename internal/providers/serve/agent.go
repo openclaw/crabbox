@@ -26,6 +26,7 @@ import (
 )
 
 type machine struct {
+	Usage          *machineUsage     `json:"usage,omitempty"`
 	Availability   *availability     `json:"availability,omitempty"`
 	Image          string            `json:"image"`
 	MachineID      string            `json:"machineID"`
@@ -47,6 +48,15 @@ type machine struct {
 	Online         bool              `json:"online,omitempty"`
 	Leases         []leaseView       `json:"leases"`
 }
+
+type machineUsage struct {
+	Month          string `json:"month"`
+	Leases         int    `json:"leases"`
+	ActiveLeases   int    `json:"activeLeases"`
+	RuntimeSeconds int64  `json:"runtimeSeconds"`
+	CPUSeconds     int64  `json:"cpuSeconds"`
+}
+
 type leaseView struct {
 	ID    string `json:"id"`
 	State string `json:"state"`
@@ -253,7 +263,11 @@ func (Provider) RunAgent(ctx context.Context, cfg core.Config, rt core.Runtime, 
 			return json.NewEncoder(rt.Stdout).Encode(result)
 		}
 		for _, m := range result.Machines {
-			fmt.Fprintf(rt.Stdout, "%s %s online=%t cpus=%d memoryMB=%d availability=%s\n", m.MachineID, m.Name, m.Online, m.CPUs, m.MemoryMB, availabilityText(m.Availability))
+			usage := ""
+			if m.Usage != nil {
+				usage = fmt.Sprintf(" month=%s served=%d runtime=%s cpu-hours=%.2f", m.Usage.Month, m.Usage.Leases, time.Duration(m.Usage.RuntimeSeconds)*time.Second, float64(m.Usage.CPUSeconds)/3600)
+			}
+			fmt.Fprintf(rt.Stdout, "%s %s online=%t cpus=%d memoryMB=%d availability=%s%s\n", m.MachineID, m.Name, m.Online, m.CPUs, m.MemoryMB, availabilityText(m.Availability), usage)
 		}
 		return nil
 	}

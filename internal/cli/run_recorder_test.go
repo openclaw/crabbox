@@ -216,7 +216,7 @@ func TestRunRecorderJoinsTelemetryBeforeTerminalOrReplacement(t *testing.T) {
 					defer close(completed)
 					switch action {
 					case "finish":
-						if err := rec.Finish(t.Context(), SSHTarget{}, 1, 0, 0, "", false, nil, FailureClassification{}, &receipt); err != nil {
+						if err := rec.Finish(t.Context(), SSHTarget{}, 1, 0, 100*time.Millisecond, "", false, nil, FailureClassification{}, &receipt); err != nil {
 							t.Errorf("Finish: %v", err)
 						}
 					case "failed":
@@ -1157,6 +1157,7 @@ func TestRunRecorderFinishAndReceiptShareOriginalDeadlineBeyondReadAttempt(t *te
 	t.Setenv("CRABBOX_OWNER", "alice@example.com")
 	for _, slowPhase := range []string{"finish", "receipt"} {
 		t.Run(slowPhase, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			synctest.Test(t, func(t *testing.T) {
 				start := time.Now()
 				var finishRequests, receiptRequests int
@@ -1171,7 +1172,7 @@ func TestRunRecorderFinishAndReceiptShareOriginalDeadlineBeyondReadAttempt(t *te
 					switch {
 					case req.Method == http.MethodPost && req.URL.Path == "/v1/runs/run_123/finish":
 						finishRequests++
-						phase, code, body = "finish", http.StatusServiceUnavailable, "finish unavailable"
+						phase, code, body = "finish", http.StatusOK, `{"run":{"id":"run_123"}}`
 					case req.Method == http.MethodGet && req.URL.Path == "/v1/runs/run_123/receipt":
 						receiptRequests++
 						phase, code = "receipt", http.StatusOK
@@ -1240,6 +1241,7 @@ func TestRunRecorderFinishRetriesIdenticalCommit(t *testing.T) {
 func runRecorderTestReceipt(t *testing.T) terminalRunReceipt {
 	t.Helper()
 	setAttestTestHome(t)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	startedAt := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
 	receipt, err := buildTerminalRunReceipt("", terminalRunReceiptInput{
 		Provider:          "aws",
@@ -1328,7 +1330,11 @@ func TestRunRecorderFinishRecoversCommittedReceiptAfterLostResponse(t *testing.T
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/run_123/finish":
 			finishRequests++
-			_, _ = w.Write([]byte(`{`))
+			if finishRequests == 1 {
+				_, _ = w.Write([]byte(`{`))
+			} else {
+				_, _ = w.Write([]byte(`{"run":{"id":"run_123"}}`))
+			}
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/runs/run_123/receipt":
 			receiptRequests++
 			_ = json.NewEncoder(w).Encode(map[string]any{"receipt": receipt})
@@ -1346,7 +1352,7 @@ func TestRunRecorderFinishRecoversCommittedReceiptAfterLostResponse(t *testing.T
 	if err := rec.Finish(context.Background(), SSHTarget{}, 1, 0, 100*time.Millisecond, "", false, nil, FailureClassification{}, &receipt); err != nil {
 		t.Fatalf("Finish: %v", err)
 	}
-	if finishRequests != 1 || receiptRequests != 1 || !rec.finished {
+	if finishRequests != 2 || receiptRequests != 2 || !rec.finished {
 		t.Fatalf("finish=%d receipt=%d finished=%v", finishRequests, receiptRequests, rec.finished)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/openclaw/crabbox/internal/privatefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -31,11 +32,11 @@ func TestReplayableSSHInputUsesPrivatePathBackedRegularFileAndResets(t *testing.
 	if !info.Mode().IsRegular() {
 		t.Fatalf("input mode=%v, want regular file", info.Mode())
 	}
-	user, err := currentWindowsUserSID()
+	user, err := privatefile.WindowsUserSID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyPrivateWindowsHandle(windows.Handle(input.reader.Fd()), false, user); err != nil {
+	if err := privatefile.VerifyWindowsHandle(windows.Handle(input.reader.Fd()), false, user); err != nil {
 		t.Fatalf("input spool is not current-user private: %v", err)
 	}
 	if _, err := input.reader.Write([]byte("x")); err == nil {

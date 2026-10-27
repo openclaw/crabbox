@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/openclaw/crabbox/internal/privatefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -128,7 +129,7 @@ func makeLeaseSSHTestConfigReadOnly(t *testing.T, path string) func() {
 	if err := securePrivateWindowsPath(path, true); err != nil {
 		t.Fatal(err)
 	}
-	user, err := currentWindowsUserSID()
+	user, err := privatefile.WindowsUserSID()
 	if err != nil {
 		t.Fatal(err)
 	}

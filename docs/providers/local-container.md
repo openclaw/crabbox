@@ -162,6 +162,7 @@ localContainer:
   network: bridge          # container network
   dockerSocket: false      # mount the host Docker-compatible socket into the lease
   noHostname: false        # omit the explicit container hostname when true
+  ociRuntime: ""           # engine runtime for run --runtime, e.g. io.containerd.kata.v2
 ```
 
 Defaults applied when unset: `runtime=docker`, a reviewed Ubuntu OCI index
@@ -250,6 +251,7 @@ Provider flags:
 --local-container-memory <size>
 --local-container-network <network>
 --local-container-docker-socket
+--local-container-oci-runtime <name>
 --local-container-volume host:container[:ro]   (repeatable)
 ```
 
@@ -283,6 +285,7 @@ CRABBOX_LOCAL_CONTAINER_MEMORY
 CRABBOX_LOCAL_CONTAINER_NETWORK
 CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET
 CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME
+CRABBOX_LOCAL_CONTAINER_OCI_RUNTIME
 ```
 
 File strings only replace earlier values when nonempty, and file CPU values
@@ -305,6 +308,45 @@ It does not change the runtime's namespace, network, or capability settings.
 The configured runtime must still support the loopback-published SSH port.
 Changing this setting for a fixed lease ID returns `lease_id_conflict`; omitted
 or `false` preserves the existing fixed-lease fingerprint.
+
+### OCI runtime
+
+Set `localContainer.ociRuntime`, `CRABBOX_LOCAL_CONTAINER_OCI_RUNTIME`, or
+`--local-container-oci-runtime` to run leases under a different OCI runtime
+than the engine default. Crabbox passes the value to the container engine as
+`run --runtime=<value>` and records it in the lease's `oci_runtime` label and
+`doctor` output; `config show` includes the value when set. Use a runtime name
+registered in the Docker daemon's `runtimes`
+configuration, such as `runsc` or `io.containerd.kata.v2`. Crabbox checks
+`docker info --format '{{json .Runtimes}}'` on the selected daemon before
+creation and during `doctor`; unknown names fail with registration guidance.
+Even containerd shims discoverable on the daemon's `PATH` must be registered.
+Names must match `[A-Za-z0-9][A-Za-z0-9_.-]*`: executable paths, whitespace,
+shell fragments, and leading dashes are rejected before any engine call.
+Empty keeps the engine default (normally `runc`), without a runtime argument,
+runtime label, or additional availability probe. The setting currently
+supports Docker only: Podman takes the runtime as its global
+`podman --runtime=<value>` option rather than a `run` option, and Crabbox does
+not pass that option yet, so it rejects this setting with Podman.
+
+Use this for hardware-virtualized leases with
+[Kata Containers](https://katacontainers.io/) or user-space kernel isolation
+with [gVisor](https://gvisor.dev/). Crabbox does not install or configure the
+runtime; the engine host must already support it. Kata needs a Linux host with
+KVM, so it does not run under Docker Desktop on macOS or Windows. Kata cannot
+pass a host Unix socket into its guest VM, so `dockerSocket` fails at container
+creation under Kata. A stronger runtime narrows the shared-kernel exposure of a
+lease; it does not change the [trust model](../security.md), and `dockerSocket`
+still grants the lease control of the host engine where the runtime supports it.
+Kata and gVisor improve isolation but are not substitutes for VM providers when
+running hostile workloads or separating mutually untrusted tenants.
+
+Changing `ociRuntime` for a fixed lease ID returns `lease_id_conflict`; empty
+preserves the existing fixed-lease fingerprint.
+
+Like other Local Container strings, precedence is flag, environment, repository
+config, user config, then default. Empty file and environment values preserve
+the previous value; an explicit `--local-container-oci-runtime=` clears it.
 
 Host bind mounts must be passed explicitly with `--local-container-volume`.
 Crabbox intentionally ignores `localContainer.volumes` from config files because
@@ -486,11 +528,24 @@ container ID leaves both the container and claim untouched.
   This native path is currently Docker-only; Podman and nerdctl keep using
   workspace archives. Crabbox rejects native checkpoints when the workspace is
   stored in a mounted volume because `docker commit` omits mounted data.
+  With an alternate OCI runtime, native checkpoints require that runtime to
+  support Docker's commit operation. A commit failure reports the selected
+  runtime and suggests `--mode archive`; no usable checkpoint is recorded.
+  Commit captures container filesystem changes, not the running VM, kernel,
+  or process state of Kata or gVisor. Use archive mode when commit is unsupported.
+
+  An ordinary capture that fails before `docker commit` (for example, because a
+  warmup-only lease has no synced workspace yet) removes its new checkpoint
+  reservation, allowing normal lease cleanup. An attempted commit without a
+  confirmed image identity still blocks cleanup; historical unresolved records
+  remain held for reconciliation.
 - `crabbox checkpoint fork <id>` launches a fresh lease from the committed
   image. Fork validates the checkpoint tag and Docker system ID, replays the
-  recorded Docker runtime and daemon scope, disables Docker socket passthrough,
-  relocates the saved workspace into the new lease path, and persists the scope
-  for later lease commands even when ambient Docker settings change. The source
+  recorded Docker runtime and daemon scope, replays the source lease's
+  `ociRuntime` unless `--local-container-oci-runtime` overrides it, disables
+  Docker socket passthrough, relocates the saved workspace into the new lease
+  path, and persists the scope for later lease commands even when ambient Docker
+  settings change. The source
   container user and work root are also replayed so relocation keeps ownership
   and path semantics intact. Fixed-ID ownership belongs to each new allocation:
   ordinary forks do not inherit the source's fixed intent, including when using

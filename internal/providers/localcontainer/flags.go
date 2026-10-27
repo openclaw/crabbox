@@ -48,6 +48,10 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		cfg.LocalContainer.Network = *v.Network
 		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
+	if visited.OCIRuntime {
+		cfg.LocalContainer.OCIRuntime = *v.OCIRuntime
+		core.RecordProviderFlagInputs(cfg, true, providerName)
+	}
 	if visited.DockerSocket {
 		cfg.LocalContainer.DockerSocket = *v.DockerSocket
 		core.RecordProviderFlagInputs(cfg, true, providerName)

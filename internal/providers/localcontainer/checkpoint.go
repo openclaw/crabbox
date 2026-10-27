@@ -25,6 +25,8 @@ const (
 	checkpointMetadataForkName = "fork_image_name"
 	checkpointMetadataUser     = "container_user"
 	checkpointMetadataWorkRoot = "container_work_root"
+	// Recorded only for leases created with an explicit OCI runtime.
+	checkpointMetadataOCIRuntime = "container_oci_runtime"
 )
 
 var checkpointScopeMetadataKeys = []string{
@@ -77,6 +79,7 @@ var checkpointLeaseLabelKeys = []string{
 	"last_touched_at",
 	"lease",
 	"market",
+	"oci_runtime",
 	"pond",
 	"profile",
 	"provider",
@@ -130,28 +133,29 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 func createNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest) (core.NativeCheckpointCreateResult, error) {
 	containerID := strings.TrimSpace(req.Server.CloudID)
 	if containerID == "" {
-		return core.NativeCheckpointCreateResult{}, core.Exit(2, "docker-commit checkpoint requires a running container")
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: core.Exit(2, "docker-commit checkpoint requires a running container")}
 	}
 	scope, err := checkpointScopeForServer(ctx, req.Config, req.Server)
 	if err != nil {
-		return core.NativeCheckpointCreateResult{}, err
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: err}
 	}
 	if !isDockerRuntime(scope.Runtime) {
-		return core.NativeCheckpointCreateResult{}, core.Exit(2, "docker-commit checkpoints require the Docker runtime; use --mode archive with %s", scope.Runtime)
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: core.Exit(2, "docker-commit checkpoints require the Docker runtime; use --mode archive with %s", scope.Runtime)}
 	}
 	metadata := checkpointMetadataForServer(scope, req.Config, req.Server)
 	canonicalWorkdir, err := checkpointCanonicalWorkdir(ctx, scope, containerID, req.Workdir)
 	if err != nil {
-		return core.NativeCheckpointCreateResult{}, err
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: err}
 	}
 	mounts, err := checkpointMounts(ctx, scope, containerID)
 	if err != nil {
-		return core.NativeCheckpointCreateResult{}, err
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: err}
 	}
 	if destination := checkpointMountIntersectingWorkdir(mounts, canonicalWorkdir); destination != "" {
-		return core.NativeCheckpointCreateResult{}, core.Exit(2, "docker-commit checkpoint cannot capture workdir %s because it intersects mounted volume %s; use --mode archive", req.Workdir, destination)
+		return core.NativeCheckpointCreateResult{}, core.NativeCheckpointNotSubmittedError{Cause: core.Exit(2, "docker-commit checkpoint cannot capture workdir %s because it intersects mounted volume %s; use --mode archive", req.Workdir, destination)}
 	}
 
+	// Once commit is attempted, a failed response cannot prove non-submission.
 	var commitStderr strings.Builder
 	commitCmd := checkpointCommand(
 		ctx,
@@ -164,6 +168,9 @@ func createNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreate
 	commitCmd.Stderr = &commitStderr
 	out, err := commitCmd.Output()
 	if err != nil {
+		if ociRuntime := strings.TrimSpace(req.Server.Labels["oci_runtime"]); ociRuntime != "" {
+			return core.NativeCheckpointCreateResult{}, core.Exit(7, "docker commit %s with OCI runtime %s: %v: %s; use --mode archive if this runtime does not support Docker commit", containerID, ociRuntime, err, trimCheckpointFailure(commitStderr.String()))
+		}
 		return core.NativeCheckpointCreateResult{}, core.Exit(7, "docker commit %s: %v: %s", containerID, err, trimCheckpointFailure(commitStderr.String()))
 	}
 	imageID, err := parseCheckpointImageID(string(out))
@@ -501,6 +508,9 @@ func checkpointMetadataForServer(scope checkpointScope, cfg core.Config, server 
 	metadata := checkpointScopeMetadata(scope)
 	metadata[checkpointMetadataUser] = firstCheckpointValue(server.Labels["ssh_user"], cfg.LocalContainer.User, cfg.SSHUser)
 	metadata[checkpointMetadataWorkRoot] = firstCheckpointValue(server.Labels["work_root"], cfg.LocalContainer.WorkRoot, cfg.WorkRoot)
+	if ociRuntime := strings.TrimSpace(server.Labels["oci_runtime"]); ociRuntime != "" {
+		metadata[checkpointMetadataOCIRuntime] = ociRuntime
+	}
 	return metadata
 }
 

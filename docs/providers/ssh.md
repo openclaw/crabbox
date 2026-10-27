@@ -37,6 +37,18 @@ crabbox run --provider static-ssh --target windows --static-host win-dev.local \
   -- pwsh -NoProfile -Command '$PSVersionTable'
 ```
 
+An explicit `static.port` / `--static-port` / `CRABBOX_STATIC_PORT`, or
+`ssh.port` / `--ssh-port` / `CRABBOX_SSH_PORT`, selects exactly one SSH port.
+Crabbox does not try fallback ports, even an explicit `ssh.fallbackPorts` list.
+This prevents an unavailable port-forward such as `127.0.0.1:2224` from
+redirecting work to a different sshd on port `22`.
+
+When neither port is configured, Static SSH retains the default `2222`, then
+`22` selection (or the configured fallback list), including on localhost.
+Set the port explicitly for forwarded endpoints. A static host uses SSH's
+trust-on-first-use checking; a key learned for one host/port does not pin a
+different port to the same machine.
+
 `warmup` for Static SSH does not provision a machine. It validates the
 configured target and returns it as a lease-like object so the rest of the
 warm-box workflow (`run`, `ssh`, `status`, tunnels) behaves the same as for
@@ -205,6 +217,8 @@ cannot infer whether a Windows host runs native PowerShell or WSL2 commands.
 On Linux, macOS, and WSL2 targets, Crabbox's workspace-owner protocol invokes
 `/bin/sh` explicitly and does not require the SSH account to use a POSIX login
 shell on POSIX hosts; zsh, Bash, and Fish login shells are supported there.
+Linux and macOS workspace sync stages its rsync receiver through the same
+explicit POSIX interpreter and reports the receiver path if staging fails.
 WSL staging supports Windows OpenSSH with `cmd.exe`, Windows PowerShell, or
 PowerShell (`pwsh`) as DefaultShell. Preparation binds the observed shell kind
 to the fresh route nonce; PowerShell executes the verified script directly to

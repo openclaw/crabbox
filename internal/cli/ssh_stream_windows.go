@@ -15,6 +15,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/openclaw/crabbox/internal/privatefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -378,7 +379,7 @@ func closeCommandThreadHandles(handles []windows.Handle) {
 }
 
 func commandStreamFileSecurity() (*windows.SecurityAttributes, error) {
-	attributes, _, err := privateWindowsSecurityAttributes(false)
+	attributes, _, err := privatefile.WindowsAttributes(false)
 	return attributes, err
 }
 
