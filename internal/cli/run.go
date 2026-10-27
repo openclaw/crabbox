@@ -2656,7 +2656,10 @@ retrySync:
 		freshActionsSeed := false
 		if !overlayDecision.Enabled && !plainManifestMode && coherence.seedEnabled() {
 			stepStart = time.Now()
-			if out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
+			stopSeedHeartbeat := startGitSeedHeartbeat(a.Stderr, stepStart, gitSeedHeartbeatInterval)
+			out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay)
+			stopSeedHeartbeat()
+			if err != nil {
 				if reason, fallback := gitSeedRuntimeFallbackResult(coherence, out, err); fallback {
 					if reason == "exact_commit_unavailable" && autoHydrateActions && !hydratedByActions && supportsLocalActionsHydrateTarget(targetWithConfigDefaults(target, cfg)) {
 						fresh, err := a.seedLocalActionsAncestor(ctx, cfg, repo, target, workdir)
