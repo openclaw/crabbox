@@ -6,6 +6,12 @@ import { AWSPoolAccess } from "./aws-pool-access";
 import { acquisitionRootDisk, sameAWSRootDisk, validAWSRootDiskIdentity } from "./aws-root-disk";
 import { AWSVPCCache } from "./aws-vpc-cache";
 import {
+  classifyDurableObjectFailure,
+  durableObjectFailureResponse,
+  isDurableObjectStorageFailure,
+  logDurableObjectFailure,
+} from "./durable-object-errors";
+import {
   coordinatorGCPFirewallCache,
   coordinatorGCPImageMinimumCache,
   coordinatorGCPTokenCache,
@@ -123,6 +129,7 @@ import {
   githubUserIsAdmin,
   isAdminRequest,
   requestWithAuthContext,
+  requestGitHubCredential,
   verifiedPortalTokenExpiresAtForRevocation,
   verifiedUserTokenExpiresAtForRevocation,
   type AuthContext,
@@ -1755,6 +1762,15 @@ export class FleetCoordinator {
           { error: "provider_request_timeout", message: coordinatorErrorMessage(this.env, error) },
           { status: 503, headers: { "retry-after": "5" } },
         );
+      }
+      // Storage failures caught inside the coordinator never reach the Worker boundary.
+      // Preserve the same retryable response there without replaying a possibly committed write.
+      const kind = isDurableObjectStorageFailure(error)
+        ? classifyDurableObjectFailure(error)
+        : "internal_error";
+      if (kind !== "internal_error") {
+        logDurableObjectFailure(error, request);
+        return runEventAppendFailureResponse(request) ?? durableObjectFailureResponse(kind);
       }
       return json({ error: coordinatorErrorMessage(this.env, error) }, { status: 500 });
     }
@@ -25409,7 +25425,7 @@ function pairingBrowserSession(
   if (!cookie || !token || !timingSafeEqual(cookie, token)) return undefined;
   const login = request.headers.get("x-crabbox-github-login")?.trim() ?? "";
   const tokenID = request.headers.get("x-crabbox-github-token-id")?.trim() ?? "";
-  const sealedCredential = request.headers.get("x-crabbox-github-sealed-credential")?.trim() ?? "";
+  const sealedCredential = requestGitHubCredential(request) ?? "";
   const expiresAt = request.headers.get("x-crabbox-token-expires-at")?.trim() ?? "";
   if (!login || !tokenID || !sealedCredential || Date.parse(expiresAt) <= Date.now()) {
     return undefined;
@@ -25593,7 +25609,7 @@ async function bridgeGrantForRequest(
   const token = bearerToken(request);
   const login = request.headers.get("x-crabbox-github-login")?.trim();
   const tokenID = request.headers.get("x-crabbox-github-token-id")?.trim();
-  const sealedCredential = request.headers.get("x-crabbox-github-sealed-credential")?.trim();
+  const sealedCredential = requestGitHubCredential(request);
   const expiresAt = request.headers.get("x-crabbox-token-expires-at")?.trim();
   if (
     !token ||

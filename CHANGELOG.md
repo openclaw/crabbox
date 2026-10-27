@@ -11,13 +11,14 @@
 
 ### Fixed
 
-- Sync: restore Windows sync with `XDG_STATE_HOME` by comparing handle-based file identities while retaining managed-state path replacement checks. [PR 2963](https://github.com/openclaw/crabbox/pull/2963). Thanks @paulcam206.
+- Coordinator: preserve retryable responses for transient Cloudflare storage failures without replaying operations, and prepare compatible readers for the staged internal grant-header migration. [PR 2847](https://github.com/openclaw/crabbox/pull/2847). Thanks @vincentkoc.
 - CI: shorten only the detached Git-seed fixture's hydration waits and balance slow seed and WSL settings tests across shards, preserving production delays and coverage. [PR 2969](https://github.com/openclaw/crabbox/pull/2969).
 - Blacksmith: reserve a separate bounded final verification phase after native stop consumes its reconciliation budget, without replaying the command or releasing unresolved claim/key custody. [PR 2967](https://github.com/openclaw/crabbox/pull/2967). Thanks @vincentkoc.
 - Blacksmith Testbox: clarify cleanup-only recovery with the exact stop command and observed run exit, preserving failed-run status and retained ownership without suggesting command replay. [PR #2966](https://github.com/openclaw/crabbox/pull/2966). Thanks @vincentkoc.
 - Local container: optionally run leases under a named OCI runtime registered with the Docker daemon (for example gVisor `runsc` or Kata), validated strictly and recorded in lease ownership; the default runtime is unchanged. [PR 2950](https://github.com/openclaw/crabbox/pull/2950). Thanks @coygeek.
 - CI: shard normal CLI tests while testing every root package and nested module once per normal lane, avoiding the redundant serial CLI suite timeout. [PR 2875](https://github.com/openclaw/crabbox/pull/2875). Thanks @vincentkoc.
 - Parallels: an explicitly configured macOS guest user (including `crabbox`, or a generic `ssh.user` / `CRABBOX_SSH_USER`) is honored instead of being replaced by the host `USER`; the host-user fallback still applies when no guest user is configured. [PR 2958](https://github.com/openclaw/crabbox/pull/2958). Thanks @rustanacexd.
+- Sync: restore Windows sync with `XDG_STATE_HOME` by comparing handle-based file identities while retaining managed-state path replacement checks. [PR 2963](https://github.com/openclaw/crabbox/pull/2963). Thanks @paulcam206.
 - Parallels: Windows guest setup retries script staging after Parallels Tools loses a result, verifies the staged bootstrap by SHA-256, runs it exactly once, and confirms a lost final result through a run-specific receipt instead of failing or replaying it. [PR 2957](https://github.com/openclaw/crabbox/pull/2957). Thanks @rustanacexd.
 - CI: the serve relay test fixture forwards data only after both READY frames, matching the coordinator relay, which removes a concurrent large-transfer flake. [PR 2955](https://github.com/openclaw/crabbox/pull/2955).
 

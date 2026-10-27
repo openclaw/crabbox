@@ -186,6 +186,17 @@ describe("coordinator device pairing", () => {
     vi.unstubAllGlobals();
   });
 
+  it.each(["x-crabbox-github-sealed-credential", "x-crabbox-github-credential-token"])(
+    "pairs through the deployed credential reader with %s",
+    async (header) => {
+      const fixture = await pairingFixture(undefined, undefined, undefined, undefined, header);
+      const grant = await issueGrant(fixture);
+      const response = await exchangeGrant(fixture, grant);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ token: expect.stringMatching(/^cbxd_/) });
+    },
+  );
+
   it("exchanges a browser grant for a distinct credential-free device principal", async () => {
     const fixture = await pairingFixture();
     await seedLease(fixture.runtime, lease("cbx_000000000001", owner));
@@ -796,6 +807,7 @@ async function pairingFixture(
   sessionOwner = owner,
   login = ownerLogin,
   authContextOverride?: AuthRequestContext,
+  grantHeader?: string,
 ): Promise<PairingFixture> {
   const env = {
     CRABBOX_PUBLIC_URL: origin,
@@ -835,7 +847,17 @@ async function pairingFixture(
     await routeCoordinatorRequest(
       new Request(`${destinationOrigin}${path}`, init),
       env,
-      async (prepared) => await fleet.fetch(prepared),
+      async (prepared) => {
+        if (!grantHeader) return await fleet.fetch(prepared);
+        const headers = new Headers(prepared.headers);
+        const grant =
+          headers.get("x-crabbox-github-sealed-credential") ??
+          headers.get("x-crabbox-github-credential-token");
+        headers.delete("x-crabbox-github-sealed-credential");
+        headers.delete("x-crabbox-github-credential-token");
+        if (grant) headers.set(grantHeader, grant);
+        return await fleet.fetch(new Request(prepared, { headers }));
+      },
       authContext,
     );
   const ownerRequest = async (
