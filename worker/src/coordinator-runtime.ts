@@ -11,6 +11,8 @@ export interface CoordinatorStorageView {
     prefix?: string;
     limit?: number;
     startAfter?: string;
+    end?: string;
+    reverse?: boolean;
     noCache?: boolean;
     allowConcurrency?: boolean;
   }): Promise<Map<string, T>>;
@@ -33,13 +35,27 @@ async function storageOperation<T>(operation: () => Promise<T>): Promise<T> {
   }
 }
 
-function trackedStorageView(storage: CoordinatorStorageView): CoordinatorStorageView {
-  return {
-    get: (...args) => storageOperation(() => storage.get(...args)),
-    put: (...args) => storageOperation(() => storage.put(...args)),
-    delete: (...args) => storageOperation(() => storage.delete(...args)),
-    list: (...args) => storageOperation(() => storage.list(...args)),
-  };
+function trackedStorageView<T extends CoordinatorStorageView>(storage: T): T {
+  const operations = new Set<PropertyKey>([
+    "get",
+    "put",
+    "delete",
+    "deleteAll",
+    "list",
+    "getAlarm",
+    "setAlarm",
+    "deleteAlarm",
+  ]);
+  return new Proxy(storage, {
+    get: (target, key) => {
+      const value: unknown = Reflect.get(target, key, target);
+      if (typeof value !== "function") return value;
+      if (operations.has(key)) {
+        return (...args: unknown[]) => storageOperation(() => Reflect.apply(value, target, args));
+      }
+      return value.bind(target);
+    },
+  });
 }
 
 export const provisioningDuePrefix = "provisioning-due:";
@@ -85,31 +101,39 @@ export interface ProvisioningRuntime {
 
 export type CoordinatorRequestQueue = "direct" | "lifecycle";
 
-export function controlMessageOwnsTransaction(message: unknown): boolean {
-  if (typeof message !== "string") {
-    return false;
-  }
-  try {
-    const input = JSON.parse(message) as { type?: unknown };
-    return input.type === "heartbeat";
-  } catch {
-    return false;
-  }
+export function coordinatorRequestPublishesRunEvents(request: Request): boolean {
+  const path = new URL(request.url).pathname.split("/").filter(Boolean);
+  const method = request.method.toUpperCase();
+  return (
+    path[0] === "v1" &&
+    path[1] === "runs" &&
+    ((method === "POST" && path.length === 2) ||
+      (method === "PUT" && path.length === 3) ||
+      (["POST", "PUT"].includes(method) &&
+        path.length === 4 &&
+        ["events", "finish", "admission-failure"].includes(path[3] ?? "")))
+  );
 }
 
 export function coordinatorRequestQueue(request: Request): CoordinatorRequestQueue {
   const url = new URL(request.url);
   const path = url.pathname.split("/").filter(Boolean);
   const method = request.method.toUpperCase();
+  // These routes commit with storage transactions; subscriber authorization may use GitHub.
+  if (coordinatorRequestPublishesRunEvents(request)) return "direct";
   if (path[0] === "v1" && path[1] === "serve") return "direct";
   if (method === "POST" && path.join("/") === "v1/admin/tailscale-preflight") {
     return "direct";
   }
   if (
     method === "GET" &&
-    ["v1/whoami", "v1/leases", "v1/admin/leases", "v1/admin/retained-reconcile"].includes(
-      path.join("/"),
-    )
+    [
+      "v1/whoami",
+      "v1/capacity",
+      "v1/leases",
+      "v1/admin/leases",
+      "v1/admin/retained-reconcile",
+    ].includes(path.join("/"))
   ) {
     return "direct";
   }
@@ -305,6 +329,9 @@ export interface CoordinatorRuntime {
   readonly storage: CoordinatorStorage;
   readonly ephemeralWebSocketMaxPayloadBytes: number;
   runExclusive<T>(callback: () => Promise<T>): Promise<T>;
+  readSnapshot?<T>(
+    callback: (storage: CoordinatorStorageView) => Promise<T>,
+  ): Promise<T | undefined>;
   createWebSocketUpgrade(options?: CoordinatorWebSocketUpgradeOptions): CoordinatorWebSocketUpgrade;
   getWebSockets(): Iterable<WebSocket>;
   socketAttachment<T>(socket: WebSocket): T | undefined;
@@ -329,17 +356,46 @@ export interface CoordinatorRuntime {
 
 export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
   readonly provisioning: ProvisioningRuntime = this;
-  readonly storage: CoordinatorStorage;
+  readonly storage: DurableObjectStorage;
   readonly ephemeralWebSocketMaxPayloadBytes = 32 * 1024 * 1024;
   private readonly attachments = new WeakMap<WebSocket, unknown>();
   private readonly exclusive = new AsyncMutex();
+  private storageRevision = 0;
+  private pendingStorageWrites = 0;
 
   constructor(private readonly state: DurableObjectState) {
-    this.storage = {
-      ...trackedStorageView(state.storage),
-      transaction: (callback) =>
-        this.storageTransaction((transaction) => callback(trackedStorageView(transaction))),
-    };
+    const mutations = new Set<PropertyKey>([
+      "put",
+      "delete",
+      "deleteAll",
+      "setAlarm",
+      "deleteAlarm",
+    ]);
+    this.storage = new Proxy(trackedStorageView(state.storage), {
+      get: (target, key) => {
+        const value: unknown = Reflect.get(target, key, target);
+        if (typeof value !== "function") return value;
+        if (key === "transaction") {
+          return (callback: (transaction: DurableObjectTransaction) => Promise<unknown>) =>
+            this.observeStorageWrite(() => this.storageTransaction(callback));
+        }
+        if (key === "transactionSync") {
+          return (...args: unknown[]) => {
+            this.storageRevision++;
+            try {
+              return Reflect.apply(value, target, args);
+            } finally {
+              this.storageRevision++;
+            }
+          };
+        }
+        if (mutations.has(key)) {
+          return (...args: unknown[]) =>
+            this.observeStorageWrite(() => Reflect.apply(value, target, args));
+        }
+        return value.bind(target);
+      },
+    });
   }
 
   private async storageTransaction<T>(
@@ -349,18 +405,41 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
     try {
       return await this.state.storage.transaction(async (transaction) => {
         try {
-          return await callback(transaction);
+          return await callback(trackedStorageView(transaction));
         } catch (error) {
           callbackFailures.add(error);
           throw error;
         }
       });
     } catch (error) {
-      // A rejected callback is application code, unless an actual storage call
-      // already recorded this same error. Only transaction/commit failures are new.
+      // Callback failures are application errors unless a native call already marked them.
       if (!callbackFailures.has(error)) recordDurableObjectStorageFailure(error);
       throw error;
     }
+  }
+
+  private async observeStorageWrite<T>(operation: () => Promise<T>): Promise<T> {
+    this.storageRevision++;
+    this.pendingStorageWrites++;
+    try {
+      return await operation();
+    } finally {
+      this.pendingStorageWrites--;
+      this.storageRevision++;
+    }
+  }
+
+  async readSnapshot<T>(
+    callback: (storage: CoordinatorStorageView) => Promise<T>,
+  ): Promise<T | undefined> {
+    // Native async transactions close the DO input gate for the whole callback.
+    // Concurrent diagnostic reads instead fail closed if any write overlaps.
+    if (this.pendingStorageWrites > 0) return undefined;
+    const revision = this.storageRevision;
+    const result = await callback(this.storage);
+    return this.pendingStorageWrites === 0 && revision === this.storageRevision
+      ? result
+      : undefined;
   }
 
   runExclusive<T>(callback: () => Promise<T>): Promise<T> {
@@ -404,7 +483,7 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
     }
     socket.accept();
     socket.addEventListener("message", (event) => {
-      void this.runSocketOperation(attachment, event.data, () => handlers.message(event.data));
+      void handlers.message(event.data);
     });
     socket.addEventListener("close", (event) => {
       handlers.close(event.code, event.reason);
@@ -432,7 +511,7 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
   }
 
   async getAlarm(): Promise<number | undefined> {
-    return (await storageOperation(() => this.state.storage.getAlarm())) ?? undefined;
+    return (await this.storage.getAlarm()) ?? undefined;
   }
 
   take<T>(key: string): Promise<T | undefined> {
@@ -448,19 +527,18 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
   async commitAndWake<T>(
     callback: (transaction: CoordinatorStorageView) => Promise<T>,
   ): Promise<T> {
-    return this.storageTransaction(async (transaction) => {
-      const storage = trackedStorageView(transaction);
-      const currentAlarm = await storageOperation(() => transaction.getAlarm());
-      if ((await storage.get(legacyAlarmKey)) === undefined) {
-        if (currentAlarm !== null) await storage.put(legacyAlarmKey, currentAlarm);
+    return this.storage.transaction(async (transaction) => {
+      const currentAlarm = await transaction.getAlarm();
+      if ((await transaction.get(legacyAlarmKey)) === undefined) {
+        if (currentAlarm !== null) await transaction.put(legacyAlarmKey, currentAlarm);
       }
-      const result = await callback(storage);
-      const wake = await mergedCoordinatorWake(storage);
+      const result = await callback(transaction);
+      const wake = await mergedCoordinatorWake(transaction);
       if (wake === undefined) {
-        if (currentAlarm !== null) await storageOperation(() => transaction.deleteAlarm());
+        if (currentAlarm !== null) await transaction.deleteAlarm();
       } else if (wake !== currentAlarm || wake <= Date.now()) {
         // A retained due timestamp may outlive its consumed job; only future wakes are reusable.
-        await storageOperation(() => transaction.setAlarm(wake));
+        await transaction.setAlarm(wake);
       }
       return result;
     });
@@ -484,23 +562,4 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
   clearAlarm(): Promise<void> {
     return this.commitAndWake(async (transaction) => setLegacyWake(transaction));
   }
-
-  private runSocketOperation<T>(
-    attachment: unknown,
-    message: unknown,
-    callback: () => Promise<T> | T,
-  ): Promise<T> {
-    const operation = async () => callback();
-    if (socketAttachmentKind(attachment) === "control" && !controlMessageOwnsTransaction(message)) {
-      return this.runExclusive(operation);
-    }
-    return operation();
-  }
-}
-
-function socketAttachmentKind(attachment: unknown): string | undefined {
-  if (!attachment || typeof attachment !== "object" || !("kind" in attachment)) {
-    return undefined;
-  }
-  return String(attachment.kind);
 }

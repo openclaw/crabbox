@@ -2,6 +2,8 @@ import { XMLParser, XMLValidator } from "fast-xml-parser";
 
 import {
   lookupAWSLegacyAllocation,
+  lookupAWSOriginalRootDisk,
+  type AWSOriginalRootEvidence,
   type AWSLegacyAllocationEvidence,
 } from "./aws-cleanup-recovery";
 import {
@@ -72,6 +74,7 @@ import type {
 const awsUbuntuOwner = "099720109477";
 const ec2Version = "2016-11-15";
 const awsDescribeInstancesMaxPages = 100;
+export const awsExactInstanceBatchSize = 200;
 const stsVersion = "2011-06-15";
 const awsSpotQuotaCode = "L-34B43A08";
 const awsOnDemandQuotaCode = "L-1216C47A";
@@ -369,6 +372,7 @@ interface AWSQueryOptions {
 export interface AWSLeaseOperation {
   credentialFingerprint(): Promise<string>;
   findServers(instanceIDs: string[]): Promise<Map<string, ProviderMachine>>;
+  findServersByIDFilter(instanceIDs: string[]): Promise<Map<string, ProviderMachine>>;
   sshKeyAbsent(name: string, leaseID: string): Promise<boolean>;
   readonly region: string;
   readonly client: EC2SpotClient;
@@ -863,6 +867,31 @@ export class EC2SpotClient {
     );
   }
 
+  async originalRootDiskEvidence(
+    lease: LeaseRecord,
+    account: string,
+  ): Promise<AWSOriginalRootEvidence> {
+    if (
+      !this.credentialSnapshot ||
+      this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT ||
+      this.region !== lease.region
+    ) {
+      throw new AWSLeaseAuthorityError(
+        "original root recovery requires a fixed direct-provider credential snapshot in the original Region",
+      );
+    }
+    const identity = await this.verifiedIdentity();
+    if (identity.account !== account) {
+      throw new AWSLeaseAuthorityError(
+        "original root recovery account does not match authenticated identity",
+      );
+    }
+    const cloudtrail = new FixedAWSFetchClient(this.credentialSnapshot, "cloudtrail", this.region);
+    return lookupAWSOriginalRootDisk(lease, account, (input, init) =>
+      cloudtrail.fetch(input, init),
+    );
+  }
+
   async withLeaseOperation<T>(
     operation: (session: AWSLeaseOperation) => Promise<T>,
     signal = this.requestSignal,
@@ -914,6 +943,8 @@ export class EC2SpotClient {
         );
       },
       findServers: (ids) => withAccount((account) => client.findServersWith(ids, query(account))),
+      findServersByIDFilter: (ids) =>
+        withAccount((account) => client.findServersWith(ids, query(account), true)),
       sshKeyAbsent: (name, leaseID) =>
         withAccount((account) => client.sshKeyAbsentWith(name, leaseID, query(account))),
       verifiedIdentity,
@@ -1888,10 +1919,20 @@ export class EC2SpotClient {
   private async findServersWith(
     ids: string[],
     options: AWSQueryOptions,
+    filterByID = false,
   ): Promise<Map<string, ProviderMachine>> {
-    if (!ids.length || ids.length > 200 || ids.some((id) => !/^i-[a-f0-9]{8,17}$/.test(id)))
+    if (
+      !ids.length ||
+      ids.length > awsExactInstanceBatchSize ||
+      ids.some((id) => !/^i-[a-f0-9]{8,17}$/.test(id))
+    )
       throw new AWSLeaseAuthorityError("invalid exact instance batch");
-    const params = Object.fromEntries(ids.map((id, index) => [`InstanceId.${index + 1}`, id]));
+    const params = filterByID
+      ? {
+          "Filter.1.Name": "instance-id",
+          ...Object.fromEntries(ids.map((id, index) => [`Filter.1.Value.${index + 1}`, id])),
+        }
+      : Object.fromEntries(ids.map((id, index) => [`InstanceId.${index + 1}`, id]));
     const described = await this.describeInstances(params, options);
     if (asString(described.root["nextToken"]))
       throw new AWSLeaseObservationError("unexpected pagination in exact instance batch");
@@ -2311,17 +2352,27 @@ export class EC2SpotClient {
     leaseID: string,
     options: AWSQueryOptions,
   ): Promise<boolean> {
-    const match = /^i-[a-f0-9]+:(vol-[a-f0-9]+):\/dev\/[a-z0-9]+$/.exec(identity);
+    const match = /^(i-[a-f0-9]+):(vol-[a-f0-9]+):(\/dev\/[a-z0-9]+)$/.exec(identity);
     if (!match) throw new AWSLeaseAuthorityError("invalid retained AWS disk identity");
     try {
-      const result = await this.ec2("DescribeVolumes", { "VolumeId.1": match[1]! }, options);
+      const result = await this.ec2("DescribeVolumes", { "VolumeId.1": match[2]! }, options);
       const volumes = items(record(result["volumeSet"])["item"]).map(record);
       if (
         volumes.length !== 1 ||
-        asString(volumes[0]!["volumeId"]) !== match[1] ||
+        asString(volumes[0]!["volumeId"]) !== match[2] ||
         tagMap(volumes[0]!["tagSet"])["lease"] !== leaseID
       )
         throw new AWSLeaseAuthorityError("retained AWS root volume readback ownership mismatch");
+      const attachments = items(record(volumes[0]!["attachmentSet"])["item"]).map(record);
+      if (
+        attachments.length > 1 ||
+        attachments.some(
+          (attachment) =>
+            asString(attachment["instanceId"]) !== match[1] ||
+            asString(attachment["device"]) !== match[3],
+        )
+      )
+        throw new AWSLeaseAuthorityError("original AWS root volume attachment changed");
       return true;
     } catch (error) {
       if (error instanceof AWSQueryError && error.code === "InvalidVolume.NotFound") return false;
@@ -4107,9 +4158,10 @@ function instanceToMachine(input: unknown): ProviderMachine {
     ),
   ]).filter(Boolean);
   const rootDeviceName = asString(instance["rootDeviceName"]) || "/dev/sda1";
-  const rootMapping = items(record(instance["blockDeviceMapping"])["item"])
+  const rootMappings = items(record(instance["blockDeviceMapping"])["item"])
     .map(record)
-    .find((mapping) => asString(mapping["deviceName"]) === rootDeviceName);
+    .filter((mapping) => asString(mapping["deviceName"]) === rootDeviceName);
+  const rootMapping = rootMappings.length === 1 ? rootMappings[0] : undefined;
   const rootEBS = record(rootMapping?.["ebs"]);
   const tags = tagMap(instance["tagSet"]);
   const cloudID = asString(instance["instanceId"]);
@@ -4158,6 +4210,9 @@ function instanceToMachine(input: unknown): ProviderMachine {
       : {}),
     ...(asString(metadataOptions["instanceMetadataTags"])
       ? { awsMetadataInstanceTags: asString(metadataOptions["instanceMetadataTags"]) }
+      : {}),
+    ...(rootMapping && asString(instance["rootDeviceName"])
+      ? { awsRootDeviceName: asString(instance["rootDeviceName"]) }
       : {}),
     ...(asString(rootEBS["volumeId"]) ? { awsRootVolumeID: asString(rootEBS["volumeId"]) } : {}),
     ...(asString(rootEBS["deleteOnTermination"])

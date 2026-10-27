@@ -34,6 +34,18 @@ function moduleFixture(t, findScript) {
     `#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\\t%s\\n' "$PWD" "$*" >>"$GO_TEST_LOG"
+case "$*" in
+  'list ./internal/cli')
+    printf '%s\\n' "\${GO_CLI_PACKAGE-example.test/fixture/internal/cli}"
+    exit "\${GO_CLI_LIST_EXIT:-0}"
+    ;;
+  'list ./...')
+    printf '%s\\n' "\${GO_ROOT_PACKAGES-example.test/fixture/internal/cli
+example.test/fixture/core
+example.test/fixture/internal/cli-extra}"
+    exit "\${GO_ROOT_LIST_EXIT:-0}"
+    ;;
+esac
 exit "\${GO_TEST_EXIT:-0}"
 `,
   );
@@ -42,14 +54,15 @@ exit "\${GO_TEST_EXIT:-0}"
     root,
     modules,
     calls: () => (fs.existsSync(goLog) ? fs.readFileSync(goLog, "utf8").trimEnd().split("\n") : []),
-    run: (exitCode = 0) => {
-      const result = spawnSync("bash", ["scripts/test-go-modules.sh"], {
+    run: (exitCode = 0, args = [], env = {}) => {
+      const result = spawnSync("bash", ["scripts/test-go-modules.sh", ...args], {
         cwd: root,
         env: {
           ...process.env,
           PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
           GO_TEST_LOG: goLog,
           GO_TEST_EXIT: String(exitCode),
+          ...env,
         },
         encoding: "utf8",
       });
@@ -114,4 +127,60 @@ test("ordinary module test failure propagates without running later modules", (t
   const result = fixture.run(23);
   assert.equal(result.status, 23, result.stdout + result.stderr);
   assert.deepEqual(fixture.calls(), [`${fs.realpathSync(fixture.root)}\ttest -timeout=20m ./...`]);
+});
+
+test("CI partition excludes only the exact root CLI package and preserves every nested module", (t) => {
+  const fixture = moduleFixture(t);
+  fs.mkdirSync(path.join(fixture.root, "nested module/internal/cli"), { recursive: true });
+  const result = fixture.run(0, ["--exclude-root-cli"]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const root = fs.realpathSync(fixture.root);
+  assert.deepEqual(fixture.calls().slice(0, 2), [
+    `${root}\tlist ./internal/cli`,
+    `${root}\tlist ./...`,
+  ]);
+  assert.deepEqual(fixture.calls().slice(2).sort(), [
+    `${root}\ttest -count=1 -timeout=20m example.test/fixture/core example.test/fixture/internal/cli-extra`,
+    ...fixture.modules.slice(1).map((module) => `${fs.realpathSync(path.join(root, module))}\ttest -timeout=20m ./...`),
+  ].sort());
+});
+
+for (const [name, env] of [
+  ["CLI discovery failure", { GO_CLI_LIST_EXIT: "9" }],
+  ["root discovery failure", { GO_ROOT_LIST_EXIT: "9" }],
+  ["empty CLI import", { GO_CLI_PACKAGE: "" }],
+  ["multiple CLI imports", { GO_CLI_PACKAGE: "first\nsecond" }],
+  ["missing root CLI", { GO_ROOT_PACKAGES: "example.test/fixture/core" }],
+  ["duplicate root CLI", { GO_ROOT_PACKAGES: "example.test/fixture/internal/cli\nexample.test/fixture/internal/cli\nexample.test/fixture/core" }],
+  ["empty non-CLI root", { GO_ROOT_PACKAGES: "example.test/fixture/internal/cli" }],
+]) {
+  test(`CI partition rejects ${name} before running tests`, (t) => {
+    const fixture = moduleFixture(t);
+    const result = fixture.run(0, ["--exclude-root-cli"], env);
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.equal(fixture.calls().some((call) => call.includes("\ttest ")), false);
+  });
+}
+
+test("CI partition rejects incomplete module discovery before Go discovery", (t) => {
+  const fixture = moduleFixture(t, `printf '%s\\0' "$1/go.mod"; exit 7\n`);
+  const result = fixture.run(0, ["--exclude-root-cli"]);
+  assert.notEqual(result.status, 0);
+  assert.deepEqual(fixture.calls(), []);
+});
+
+test("CI partition propagates ordinary test failure without running later modules", (t) => {
+  const fixture = moduleFixture(t, `printf '%s\\0' "$1/go.mod" "$1/nested module/go.mod"\n`);
+  const result = fixture.run(23, ["--exclude-root-cli"]);
+  assert.equal(result.status, 23, result.stdout + result.stderr);
+  assert.equal(fixture.calls().filter((call) => call.includes("\ttest ")).length, 1);
+});
+
+test("unknown or repeated partition arguments fail before execution", (t) => {
+  for (const args of [["--unknown"], ["--exclude-root-cli", "--exclude-root-cli"]]) {
+    const fixture = moduleFixture(t);
+    const result = fixture.run(0, args);
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    assert.deepEqual(fixture.calls(), []);
+  }
 });

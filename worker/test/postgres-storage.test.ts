@@ -19,7 +19,7 @@ import {
   resolveRejectedCheckpointProvisioning,
   reserveCheckpointCreate,
 } from "../src/checkpoints";
-import type { CoordinatorRuntime } from "../src/coordinator-runtime";
+import type { CoordinatorRuntime, CoordinatorStorageView } from "../src/coordinator-runtime";
 import { sha256Hex } from "../src/encoding";
 import {
   FleetCoordinator,
@@ -28,6 +28,7 @@ import {
   backfillCheckpointCreateAttempt,
 } from "../src/fleet";
 import { orgKeyForLabel } from "../src/org-identity";
+import { coordinatorStorageEntries } from "../src/storage-scan";
 import type {
   CoordinatorCheckpointRecord,
   CoordinatorCheckpointUseClaim,
@@ -138,6 +139,57 @@ describe("PostgresCoordinatorStorage", () => {
     );
     expect(String(pool.query.mock.calls[0]?.[0])).toContain("returning case");
     expect(value).toEqual({ ticket: "one-time" });
+  });
+
+  it.each([false, true])("keeps both bounds exclusive in SQL (reverse: %s)", async (reverse) => {
+    const pool = fakePool();
+    const storage = new PostgresCoordinatorStorage("postgres://unused", pool);
+    await storage.list({
+      prefix: "runlog:100%_x\\:",
+      startAfter: "runlog:100%_x\\:000001",
+      end: "runlog:100%_x\\:000009",
+      reverse,
+      limit: 2,
+    });
+    expect(pool.query).toHaveBeenCalledWith(expect.any(String), [
+      "runlog:100\\%\\_x\\\\:%",
+      "runlog:100%_x\\:000001",
+      "runlog:100%_x\\:000009",
+      2,
+    ]);
+    const sql = String(pool.query.mock.calls[0]?.[0]);
+    expect(sql).toContain("and key > $2");
+    expect(sql).toContain("and key < $3");
+    expect(sql).toContain(`order by key ${reverse ? "desc" : "asc"}`);
+    expect(sql).toContain("limit $4");
+  });
+
+  it.each([false, true])("scans reverse pages (transaction: %s)", async (transactional) => {
+    const storage = new PostgresCoordinatorStorage("postgres://unused", statefulFakePool());
+    const prefix = "runlog:100%_x\\:chunk:";
+    await Promise.all(
+      [0, 1, 3, 6, 9].map((index) =>
+        storage.put(`${prefix}${String(index).padStart(6, "0")}`, index),
+      ),
+    );
+    await storage.put("runlog:100aaax:chunk:000006", "unrelated");
+    const scan = async (view: CoordinatorStorageView) => {
+      const values: number[] = [];
+      for await (const [key, value] of coordinatorStorageEntries<number>(view, {
+        prefix,
+        startAfter: `${prefix}000000`,
+        end: `${prefix}000009`,
+        reverse: true,
+        limit: 2,
+      })) {
+        values.push(value);
+        await view.delete(key);
+      }
+      return values;
+    };
+    expect(await (transactional ? storage.transaction(scan) : scan(storage))).toEqual([6, 3, 1]);
+    expect([...(await storage.list({ prefix })).values()]).toEqual([0, 9]);
+    expect(await storage.get("runlog:100aaax:chunk:000006")).toBe("unrelated");
   });
 
   it("commits transaction-scoped storage work on one checked-out client", async () => {
@@ -1214,10 +1266,17 @@ function statefulFakePool(): Pool {
       if (sql.includes("where key like $1")) {
         const pattern = String(params[0]);
         const prefix = pattern.slice(0, -1).replaceAll(/\\([\\%_])/g, "$1");
-        const after = sql.includes("and key > $2") ? String(params[1]) : undefined;
+        const afterParameter = /and key > \$(\d+)/.exec(sql);
+        const endParameter = /and key < \$(\d+)/.exec(sql);
+        const after = afterParameter ? String(params[Number(afterParameter[1]) - 1]) : undefined;
+        const end = endParameter ? String(params[Number(endParameter[1]) - 1]) : undefined;
         let records = [...values.entries()]
           .toSorted(([left], [right]) => left.localeCompare(right))
-          .filter(([key]) => key.startsWith(prefix) && (!after || key > after));
+          .filter(
+            ([key]) =>
+              key.startsWith(prefix) && (!after || key > after) && (end === undefined || key < end),
+          );
+        if (sql.includes("order by key desc")) records.reverse();
         if (sql.includes("limit $")) records = records.slice(0, Number(params.at(-1)));
         return queryResult(records.map(([key, encoded_value]) => ({ key, encoded_value })));
       }

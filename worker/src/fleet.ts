@@ -3,6 +3,7 @@ import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 import { AsyncMutex, KeyedAsyncMutex } from "./async-mutex";
 import { awsCleanupCompletionBlocker } from "./aws-cleanup-completion";
 import { AWSPoolAccess } from "./aws-pool-access";
+import { acquisitionRootDisk, sameAWSRootDisk, validAWSRootDiskIdentity } from "./aws-root-disk";
 import { AWSVPCCache } from "./aws-vpc-cache";
 import {
   classifyDurableObjectFailure,
@@ -257,8 +258,8 @@ import {
 import {
   CloudflareCoordinatorRuntime,
   bufferCoordinatorRequestBody,
-  controlMessageOwnsTransaction,
   coordinatorRequestQueue,
+  coordinatorRequestPublishesRunEvents,
   legacyAlarmKey,
   setLegacyWake,
   type CoordinatorRuntime,
@@ -541,6 +542,7 @@ import {
 import {
   activeLeaseLimitBlocker,
   activeLeaseLimitsForOwner,
+  addLeaseToActiveLimitUsage,
   addLeaseToCostLimitUsage,
   costLimits,
   createCostLimitUsage,
@@ -1172,18 +1174,14 @@ type BridgeAttachment =
       org: string;
       desktopTimeoutMs?: number;
     }
-  | {
+  | (CachedBridgeGrant & {
       kind: "control";
       clientID: string;
       owner: string;
       org: string;
       admin?: boolean;
-      auth?: AuthContext["auth"];
-      login?: string;
-      adminTokenHash?: string;
-      adminGrantVersion?: string;
       subscriptions?: Record<string, number>;
-    };
+    });
 
 type ControlMessage =
   | { type: "subscribe_run"; runID?: string; after?: number; limit?: number }
@@ -1376,6 +1374,20 @@ export class FleetCoordinator {
     this.restoreBridgeWebSockets();
   }
 
+  async prepareBridgeRequest(request: Request): Promise<Response | undefined> {
+    // Capacity reads must not trigger restoration or unrelated maintenance.
+    if (request.method === "GET" && pathParts(request).join("/") === "v1/capacity") return;
+    await this.reconcileAdminGrantVersion(request);
+    if (await this.restoredBridgesReady()) return;
+    return json(
+      {
+        error: "bridge_state_unavailable",
+        message: "restored bridge lease state is temporarily unavailable",
+      },
+      { status: 503, headers: { "retry-after": "1" } },
+    );
+  }
+
   async fetch(request: Request): Promise<Response> {
     try {
       if (isDeviceTokenRequest(request) && !configuredFleetBearer(request, this.env)) {
@@ -1388,16 +1400,8 @@ export class FleetCoordinator {
       if (request.method === "GET" && pathParts(request).join("/") === "v1/capacity") {
         return await this.capacity(request);
       }
-      await this.reconcileAdminGrantVersion(request);
-      if (!(await this.restoredBridgesReady())) {
-        return json(
-          {
-            error: "bridge_state_unavailable",
-            message: "restored bridge lease state is temporarily unavailable",
-          },
-          { status: 503, headers: { "retry-after": "1" } },
-        );
-      }
+      const bridgeFailure = await this.prepareBridgeRequest(request);
+      if (bridgeFailure) return bridgeFailure;
       const parts = pathParts(request);
       const method = request.method.toUpperCase();
       if (parts[0] === "v1" && parts[1] === "serve")
@@ -2290,7 +2294,8 @@ export class FleetCoordinator {
             | "code-agent"
             | "code-viewer"
             | "egress-host"
-            | "egress-client";
+            | "egress-client"
+            | "control";
         }
       >;
     }> = [];
@@ -2305,7 +2310,8 @@ export class FleetCoordinator {
             | "code-agent"
             | "code-viewer"
             | "egress-host"
-            | "egress-client";
+            | "egress-client"
+            | "control";
         }
       >;
     }> = [];
@@ -2329,6 +2335,10 @@ export class FleetCoordinator {
       if ("admin" in attachment && !cachedAdminGrantIsCurrent(attachment, adminGrants)) {
         revokedAdmins.add(socket);
         continue;
+      }
+      if (attachment.kind === "control" && attachment.admin !== true) {
+        if (attachment.auth === "github") githubBridgesToCheck.push({ socket, attachment });
+        else if (attachment.auth === "bearer") sharedBridgesToCheck.push({ socket, attachment });
       }
       if (!("leaseID" in attachment)) {
         continue;
@@ -2884,16 +2894,22 @@ export class FleetCoordinator {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return json({ error: "websocket_required" }, { status: 426 });
     }
+    const admin = isAdminRequest(request);
+    const grant = admin
+      ? await adminGrantForRequest(request, true)
+      : await bridgeGrantForRequest(request, false, this.env.CRABBOX_SHARED_TOKEN);
+    if (!grant || !validControlGrant({ ...grant, admin })) {
+      return json({ error: "unauthorized" }, { status: 401 });
+    }
     const upgrade = this.state.createWebSocketUpgrade();
     const server = upgrade.socket;
-    const admin = isAdminRequest(request);
     const attachment: BridgeAttachment = {
       kind: "control",
       clientID: crypto.randomUUID(),
       owner: requestOwner(request),
       org: requestOrg(request, this.env),
       admin,
-      ...(await adminGrantForRequest(request, admin)),
+      ...grant,
       subscriptions: {},
     };
     this.controlSockets.set(attachment.clientID, server);
@@ -2954,15 +2970,21 @@ export class FleetCoordinator {
     input: Extract<ControlMessage, { type: "subscribe_run" }>,
   ): Promise<void> {
     const runID = typeof input.runID === "string" ? input.runID : "";
-    const run = runID ? await this.getRun(runID) : undefined;
-    const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;
-    if (!run || !this.runReadableToControl(run, attachment, lease)) {
+    const after = finiteControlNumber(input.after) ?? 0;
+    const limit = Math.min(finiteControlNumber(input.limit) ?? 100, 500);
+    const events = await this.state.runExclusive(async () => {
+      const run = runID ? await this.getRun(runID) : undefined;
+      const lease = run ? await this.ensureRunLeaseAttribution(run) : undefined;
+      if (!run || !this.runReadableToControl(run, attachment, lease)) return undefined;
+      return this.runEvents(runID, after, limit);
+    });
+    if (!events) {
       sendControl(socket, { type: "error", code: "not_found", message: "run not found" });
       return;
     }
-    const after = finiteControlNumber(input.after) ?? 0;
-    const limit = Math.min(finiteControlNumber(input.limit) ?? 100, 500);
-    const events = await this.runEvents(runID, after, limit);
+    if (!(await this.activeBridgeGrantIsCurrent(socket, attachment))) return;
+    if (socket.readyState !== WebSocket.OPEN || !this.bridgeSocketIsCurrent(socket, attachment))
+      return;
     const nextSeq = events.at(-1)?.seq ?? after;
     attachment.subscriptions = { ...attachment.subscriptions, [runID]: nextSeq };
     this.serializeBridgeAttachment(socket, attachment);
@@ -3002,34 +3024,92 @@ export class FleetCoordinator {
     if (input.telemetry !== undefined) {
       heartbeat.telemetry = input.telemetry;
     }
-    const result = await this.state.runExclusive<ControlHeartbeatResult>(async () => {
-      const lease = leaseID ? await this.resolveLeaseForControl(leaseID, attachment) : undefined;
-      if (!lease) {
-        return { leaseID, ok: false, error: "not_found" };
-      }
-      const providerError = mutationExpectedProviderErrorCode(input.expectedProvider, lease);
-      if (providerError) {
-        return { leaseID: lease.id, ok: false, error: providerError };
-      }
-      if (lease.workspaceID) {
-        return { leaseID: lease.id, ok: false, error: "workspace_managed_lease" };
-      }
-      if (lease.cleanupStartedAt) {
-        return { leaseID: lease.id, ok: false, error: "cleanup_in_progress" };
-      }
-      const heartbeatError = leaseHeartbeatStateError(lease);
-      if (heartbeatError) {
-        return { leaseID: lease.id, ok: false, error: heartbeatError };
-      }
-      const updated = await this.applyLeaseHeartbeatState(lease, heartbeat);
-      return {
-        leaseID: lease.id,
-        ok: true,
-        expiresAt: updated.expiresAt,
-        ...(updated.policyNotice ? { policyNotice: updated.policyNotice } : {}),
-      };
-    });
-    sendControl(socket, { type: "heartbeat", ...result });
+    while (socket.readyState === WebSocket.OPEN && this.bridgeSocketIsCurrent(socket, attachment)) {
+      const grantVersion = this.githubControlGrantVersion();
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each retry must revalidate outside the mutation lock.
+      if (!(await this.activeBridgeGrantIsCurrent(socket, attachment, true))) return;
+      // Network membership checks run before queuing. Retry outside the lifecycle
+      // lock if the grant ages out while this heartbeat waits for its turn.
+      // oxlint-disable-next-line eslint/no-await-in-loop -- serialize each freshly authorized mutation attempt.
+      const result = await this.state.runExclusive<ControlHeartbeatResult | "retry" | undefined>(
+        async () => {
+          if (
+            socket.readyState !== WebSocket.OPEN ||
+            !this.bridgeSocketIsCurrent(socket, attachment)
+          )
+            return;
+          if (attachment.auth === "github" && attachment.admin !== true) {
+            let reason: string | undefined;
+            if (
+              !attachment.githubGrant ||
+              Date.parse(attachment.githubGrant.expiresAt) <= Date.now()
+            )
+              reason = "user access revoked";
+            if (
+              attachment.portalSessionHash &&
+              (await this.portalSessionIsRevoked(attachment.portalSessionHash))
+            )
+              reason = "portal session ended";
+            if (reason) {
+              await this.closeRevokedUserBridge(socket, attachment, reason);
+              return;
+            }
+            if (
+              grantVersion !== this.githubControlGrantVersion() ||
+              Date.now() - (this.userGrantValidationTimes.get(socket) ?? 0) >=
+                userGrantRevalidationIntervalMs
+            )
+              return "retry";
+          } else if (!(await this.activeBridgeGrantIsCurrent(socket, attachment, true))) {
+            return;
+          }
+          const lease = leaseID
+            ? await this.resolveLeaseForControl(leaseID, attachment)
+            : undefined;
+          if (!lease) {
+            return { leaseID, ok: false, error: "not_found" };
+          }
+          const providerError = mutationExpectedProviderErrorCode(input.expectedProvider, lease);
+          if (providerError) {
+            return { leaseID: lease.id, ok: false, error: providerError };
+          }
+          if (lease.workspaceID) {
+            return { leaseID: lease.id, ok: false, error: "workspace_managed_lease" };
+          }
+          if (lease.cleanupStartedAt) {
+            return { leaseID: lease.id, ok: false, error: "cleanup_in_progress" };
+          }
+          const heartbeatError = leaseHeartbeatStateError(lease);
+          if (heartbeatError) {
+            return { leaseID: lease.id, ok: false, error: heartbeatError };
+          }
+          const updated = await this.applyLeaseHeartbeatState(lease, heartbeat);
+          return {
+            leaseID: lease.id,
+            ok: true,
+            expiresAt: updated.expiresAt,
+            ...(updated.policyNotice ? { policyNotice: updated.policyNotice } : {}),
+          };
+        },
+      );
+      if (result === "retry") continue;
+      if (result) sendControl(socket, { type: "heartbeat", ...result });
+      return;
+    }
+  }
+
+  private githubControlGrantVersion(): string {
+    return JSON.stringify([
+      this.env.CRABBOX_SESSION_SECRET,
+      this.env.CRABBOX_SHARED_TOKEN,
+      this.env.CRABBOX_DEFAULT_ORG,
+      this.env.CRABBOX_GITHUB_ALLOWED_ORG,
+      this.env.CRABBOX_GITHUB_ALLOWED_ORGS,
+      this.env.CRABBOX_GITHUB_ALLOWED_TEAM,
+      this.env.CRABBOX_GITHUB_ALLOWED_TEAMS,
+      this.env.CRABBOX_GITHUB_REVOKED_USERS,
+      this.env.CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS,
+    ]);
   }
 
   private serializeBridgeAttachment(socket: WebSocket, attachment: BridgeAttachment): void {
@@ -3147,6 +3227,7 @@ export class FleetCoordinator {
   private async activeBridgeGrantIsCurrent(
     socket: WebSocket,
     attachment: BridgeAttachment,
+    force = false,
   ): Promise<boolean> {
     if (attachment.kind === "webvnc-viewer" && webVNCViewerSessionAttachment(attachment)) {
       const now = Date.now();
@@ -3156,7 +3237,7 @@ export class FleetCoordinator {
         return false;
       }
       const lastValidatedAt = this.viewerSessionValidationTimes.get(socket) ?? 0;
-      if (now - lastValidatedAt >= userGrantRevalidationIntervalMs) {
+      if (force || now - lastValidatedAt >= userGrantRevalidationIntervalMs) {
         const failureReason = await this.webVNCPortalViewerAttachmentFailureReason(attachment);
         if (failureReason) {
           this.viewerSessionValidationTimes.delete(socket);
@@ -3173,13 +3254,13 @@ export class FleetCoordinator {
     ) {
       const now = Date.now();
       const lastValidatedAt = this.userGrantValidationTimes.get(socket) ?? 0;
-      if (now - lastValidatedAt >= userGrantRevalidationIntervalMs) {
+      if (force || now - lastValidatedAt >= userGrantRevalidationIntervalMs) {
         if (!(await this.sharedBridgeGrantIsCurrent(attachment))) {
           this.userGrantValidationTimes.delete(socket);
           await this.closeRevokedUserBridge(socket, attachment, "shared access revoked");
           return false;
         }
-        this.userGrantValidationTimes.set(socket, now);
+        this.userGrantValidationTimes.set(socket, Date.now());
       }
     }
     if (
@@ -3191,22 +3272,25 @@ export class FleetCoordinator {
     ) {
       const now = Date.now();
       const lastValidatedAt = this.userGrantValidationTimes.get(socket) ?? 0;
-      if (now - lastValidatedAt >= userGrantRevalidationIntervalMs) {
+      if (force || now - lastValidatedAt >= userGrantRevalidationIntervalMs) {
         const failureReason = await this.githubBridgeGrantFailureReason(attachment);
         if (failureReason) {
           this.userGrantValidationTimes.delete(socket);
           await this.closeRevokedUserBridge(socket, attachment, failureReason);
           return false;
         }
-        this.userGrantValidationTimes.set(socket, now);
+        this.userGrantValidationTimes.set(socket, Date.now());
       }
     }
     if (!("admin" in attachment) || attachment.admin !== true) {
-      return true;
+      return (
+        attachment.kind !== "control" ||
+        (socket.readyState === WebSocket.OPEN && this.bridgeSocketIsCurrent(socket, attachment))
+      );
     }
     const now = Date.now();
     const lastValidatedAt = this.adminGrantValidationTimes.get(socket) ?? 0;
-    if (now - lastValidatedAt < adminGrantRevalidationIntervalMs) {
+    if (!force && now - lastValidatedAt < adminGrantRevalidationIntervalMs) {
       return true;
     }
     if (cachedAdminGrantIsCurrent(attachment, await this.currentAdminGrantValidation())) {
@@ -3299,7 +3383,8 @@ export class FleetCoordinator {
           | "code-agent"
           | "code-viewer"
           | "egress-host"
-          | "egress-client";
+          | "egress-client"
+          | "control";
       }
     >,
     reason: string,
@@ -3900,7 +3985,11 @@ export class FleetCoordinator {
   ): Promise<boolean> {
     const provider = managedLeaseProvider(reservation);
     const claim = provider && validateProviderProvisioningCleanupClaim(suppliedClaim, provider);
-    if (!claim || claim.providerScope !== reservation.providerScope) {
+    if (
+      !claim ||
+      claim.providerScope !== reservation.providerScope ||
+      (claim.awsOriginalRootDisk && claim.awsOriginalRootDisk.leaseID !== reservation.id)
+    ) {
       throw new ProviderResourceUnresolvedError(
         "provider create returned an invalid allocation claim",
       );
@@ -3929,6 +4018,15 @@ export class FleetCoordinator {
           `provider resource ${claim.cloudID} cannot be bound to the original lease incarnation`,
         );
       }
+      if (
+        current.awsOriginalRootDisk &&
+        claim.awsOriginalRootDisk &&
+        !sameAWSRootDisk(current.awsOriginalRootDisk, claim.awsOriginalRootDisk)
+      ) {
+        throw new ProviderResourceUnresolvedError(
+          "original AWS root disk changed during acquisition",
+        );
+      }
       const attempt = current.createAttemptID ? await this.getCreateAttempt(current.id) : undefined;
       if (current.createAttemptID && (!attempt || !createAttemptMatchesLease(attempt, current))) {
         throw new ProviderResourceUnresolvedError(
@@ -3942,6 +4040,7 @@ export class FleetCoordinator {
       // Rechecks must not reopen terminal cleanup; expired provisioning still needs its failed transition.
       if (
         current.cloudID === claim.cloudID &&
+        (!claim.awsOriginalRootDisk || Boolean(current.awsOriginalRootDisk)) &&
         (!claim.providerResourceID || current.providerResourceID === claim.providerResourceID) &&
         (continueReadiness || current.state !== "provisioning")
       ) {
@@ -3950,6 +4049,7 @@ export class FleetCoordinator {
       const lease = structuredClone(current);
       const now = new Date();
       lease.cloudID = claim.cloudID;
+      if (claim.awsOriginalRootDisk) lease.awsOriginalRootDisk = { ...claim.awsOriginalRootDisk };
       lease.serverID = claim.serverID ?? 0;
       if (claim.providerResourceID) {
         lease.providerResourceID = claim.providerResourceID;
@@ -12840,6 +12940,13 @@ export class FleetCoordinator {
   }
 
   private async closeBridgesForPortalSession(portalSessionHash: string): Promise<void> {
+    for (const socket of this.controlSockets.values()) {
+      const attachment = this.bridgeAttachment(socket);
+      if (attachment?.kind === "control" && attachment.portalSessionHash === portalSessionHash) {
+        this.handleBridgeClose(socket, 1008, "portal session ended");
+        closeSocket(socket, 1008, "portal session ended");
+      }
+    }
     for (const [leaseID, viewers] of this.webVNCViewers) {
       for (const [id, viewer] of viewers) {
         const attachment = this.bridgeAttachment(viewer.socket);
@@ -15823,9 +15930,14 @@ export class FleetCoordinator {
     if (!telemetry) {
       return json({ error: "invalid_telemetry" }, { status: 400 });
     }
-    run.telemetry = appendRunTelemetrySample(run.telemetry, telemetry);
-    await this.putRun(run);
-    return json({ run: publicRunRecord(run) });
+    const updated = await this.state.storage.transaction(async (storage) => {
+      const current = await storage.get<RunRecord>(runKey(runID));
+      if (!current || !this.runWritableByRequest(current, request)) return undefined;
+      current.telemetry = appendRunTelemetrySample(current.telemetry, telemetry);
+      await storage.put(runKey(runID), current);
+      return current;
+    });
+    return updated ? json({ run: publicRunRecord(updated) }) : notFound();
   }
 
   private async finishRun(request: Request, runID: string): Promise<Response> {
@@ -16069,7 +16181,7 @@ export class FleetCoordinator {
     return json({ run: publicRunRecord(committed.run) });
   }
 
-  private async *runLogChunks(runID: string): AsyncGenerator<string> {
+  private async *runLogChunks(runID: string, reverse = false): AsyncGenerator<string> {
     const run = await this.getRun(runID);
     const terminalPrefix = run?.terminalLogPrefix?.startsWith(runTerminalLogRoot(runID))
       ? run.terminalLogPrefix
@@ -16079,6 +16191,7 @@ export class FleetCoordinator {
       prefix: terminalPrefix ? terminalRunLogChunkPrefix(terminalPrefix) : runLogChunkPrefix(runID),
       limit: 1,
       noCache: true,
+      ...(reverse ? { reverse } : {}),
     })) {
       found = true;
       yield chunk;
@@ -16128,7 +16241,11 @@ export class FleetCoordinator {
     const release = this.retainRunLogReader(runID);
     try {
       let tail = "";
-      for await (const chunk of this.runLogChunks(runID)) tail = tailString(tail + chunk, limit);
+      // Read newest chunks first; a portal tail must not scan the entire retained log.
+      for await (const chunk of this.runLogChunks(runID, true)) {
+        tail = tailString(chunk + tail, limit);
+        if (tail.length >= limit) break;
+      }
       return tail;
     } finally {
       release();
@@ -16414,11 +16531,22 @@ export class FleetCoordinator {
     const now = new Date();
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
-    const { costUsage } = await this.mergedLeaseAdmissionState(
-      { owner, org },
-      now,
-      await this.readProviderAccessRecords(now.getTime()),
-    );
+    const read = (storage: CoordinatorStorageView) =>
+      this.capacityUsage(storage, { owner, org }, now);
+    const costUsage = this.state.readSnapshot
+      ? await this.state.readSnapshot(read)
+      : await this.state.storage.transaction(read);
+    if (!costUsage) {
+      return json(
+        {
+          error: "capacity_unavailable",
+          message:
+            "capacity snapshot changed, exceeds its read bound, or lease indexing is incomplete",
+          retryable: true,
+        },
+        { status: 503, headers: { "retry-after": "2" } },
+      );
+    }
     const limits = costLimits(this.env);
     const activeLimits = activeLeaseLimitsForOwner(limits, owner);
     const blockedBy = activeLeaseLimitBlocker(costUsage, activeLimits);
@@ -16437,6 +16565,66 @@ export class FleetCoordinator {
       blockedBy,
     };
     return json(capacity);
+  }
+
+  private async capacityUsage(
+    storage: CoordinatorStorageView,
+    candidate: Pick<LeaseRecord, "owner" | "org">,
+    now: Date,
+  ): Promise<CostLimitUsage | undefined> {
+    // Capacity is a diagnostic, not budget admission. Bound its snapshot and never
+    // traverse retained history or compute spend while holding the lifecycle mutex.
+    const recordLimit = 4096;
+    let records = 0;
+    const state = await storage.get<LeaseMaintenanceState>(leaseMaintenanceIndex.stateKey, {
+      noCache: true,
+      allowConcurrency: true,
+    });
+    const indexed =
+      leaseMaintenanceIndexReady(state) &&
+      state?.generation === this.coordinatorGeneration &&
+      state.auditStartAfter === undefined;
+    const leases = new Map<string, LeaseRecord>();
+    if (indexed) {
+      for await (const [key] of coordinatorStorageEntries<number>(storage, {
+        prefix: leaseMaintenanceIndex.prefix,
+        limit: storageRecordScanBatchSize,
+        noCache: true,
+        allowConcurrency: true,
+      })) {
+        if (++records > recordLimit) return undefined;
+        const lease = await storage.get<LeaseRecord>(
+          leaseKey(key.slice(leaseMaintenanceIndex.prefix.length)),
+          { noCache: true, allowConcurrency: true },
+        );
+        if (lease) leases.set(lease.id, lease);
+      }
+    } else {
+      // Fresh/small stores remain usable before maintenance. Larger stores must
+      // finish their bounded background backfill/audit before reporting capacity.
+      const page = await storage.list<LeaseRecord>({
+        prefix: "lease:",
+        limit: storageRecordScanBatchSize + 1,
+        noCache: true,
+        allowConcurrency: true,
+      });
+      if (page.size > storageRecordScanBatchSize) return undefined;
+      records = page.size;
+      for (const lease of page.values()) leases.set(lease.id, lease);
+    }
+    for await (const [, lease] of coordinatorStorageEntries<LeaseRecord>(storage, {
+      prefix: providerAccessPrefix(),
+      limit: storageRecordScanBatchSize,
+      noCache: true,
+      allowConcurrency: true,
+    })) {
+      if (++records > recordLimit) return undefined;
+      this.applyCurrentLeasePolicy(lease);
+      if (isActiveProviderAccessRecord(lease, now.getTime())) leases.set(lease.id, lease);
+    }
+    const usage = createCostLimitUsage(candidate, now);
+    for (const lease of leases.values()) addLeaseToActiveLimitUsage(usage, lease);
+    return usage;
   }
 
   private async usage(request: Request): Promise<Response> {
@@ -16460,8 +16648,10 @@ export class FleetCoordinator {
       : requestOrg(request, this.env);
     const usage = createUsageSummary({ scope, owner, month, ...(org ? { org } : {}) }, new Date());
     await this.visitLeaseRecords((lease) => usage.add(lease));
+    const summary = usage.finish();
+    await new ServeCoordinator(this.state, this.env).labelUsageGroups(summary.byMachine, request);
     return json({
-      usage: usage.finish(),
+      usage: summary,
       limits: { ...costLimits(this.env), sharedCapacityOverrideOwners: undefined },
     });
   }
@@ -20831,8 +21021,7 @@ export class FleetCoordinator {
       leaseIDs.add(run.leaseID);
     }
     const ids = [...leaseIDs];
-    run.leaseIDs = ids;
-    run.leaseOwners = [];
+    const discovered: RunRecord = { ...run, leaseIDs: ids, leaseOwners: [] };
     let currentLease: LeaseRecord | undefined;
     for (const leaseID of ids) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- retain attribution, not every full backing lease.
@@ -20840,12 +21029,24 @@ export class FleetCoordinator {
       if (!lease) {
         continue;
       }
-      this.setRunLeaseAttribution(run, lease);
+      this.setRunLeaseAttribution(discovered, lease);
       if (leaseID === run.leaseID) {
         currentLease = lease;
       }
     }
-    await this.putRun(run);
+    const updated = await this.state.storage.transaction(async (storage) => {
+      const current = await storage.get<RunRecord>(runKey(run.id));
+      if (!current) return undefined;
+      if (current.leaseIDs !== undefined && current.leaseOwners !== undefined) return current;
+      const attributed = {
+        ...current,
+        leaseIDs: current.leaseIDs ?? discovered.leaseIDs,
+        leaseOwners: current.leaseOwners ?? discovered.leaseOwners,
+      };
+      await storage.put(runKey(run.id), attributed);
+      return attributed;
+    });
+    if (updated) Object.assign(run, updated);
     return currentLease;
   }
 
@@ -20941,10 +21142,6 @@ export class FleetCoordinator {
 
   private async getRun(runID: string): Promise<RunRecord | undefined> {
     return this.state.storage.get<RunRecord>(runKey(runID));
-  }
-
-  private async putRun(run: RunRecord): Promise<void> {
-    await this.state.storage.put(runKey(run.id), run);
   }
 
   private async putExternalRunner(runner: ExternalRunnerRecord): Promise<void> {
@@ -21049,6 +21246,8 @@ export class FleetCoordinator {
       if (!(await this.activeBridgeGrantIsCurrent(socket, attachment))) {
         continue;
       }
+      if (socket.readyState !== WebSocket.OPEN || !this.bridgeSocketIsCurrent(socket, attachment))
+        continue;
       try {
         attachment.subscriptions = { ...attachment.subscriptions, [run.id]: event.seq };
         this.serializeBridgeAttachment(socket, attachment);
@@ -21733,12 +21932,19 @@ export class FleetDurableObject extends FleetCoordinator implements DurableObjec
   }
 
   override async fetch(request: Request): Promise<Response> {
-    if (coordinatorRequestQueue(request) === "direct") {
+    const bridgeFailure = await this.prepareBridgeRequest(request);
+    if (bridgeFailure) return bridgeFailure;
+    const publishesEvents = coordinatorRequestPublishesRunEvents(request);
+    if (coordinatorRequestQueue(request) === "direct" && !publishesEvents) {
       return super.fetch(request);
     }
     const execute = async () => {
       try {
         const bufferedRequest = await bufferCoordinatorRequestBody(request);
+        if (publishesEvents) {
+          await this.runtime.runExclusive(async () => undefined);
+          return await super.fetch(bufferedRequest);
+        }
         return await this.runtime.runExclusive(() => super.fetch(bufferedRequest));
       } catch (error) {
         const failure = runEventAppendFailureResponse(request);
@@ -21753,14 +21959,6 @@ export class FleetDurableObject extends FleetCoordinator implements DurableObjec
 
   override alarm(): Promise<void> {
     return super.durableObjectAlarm();
-  }
-
-  override webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    const attachment = this.bridgeAttachment(socket);
-    if (attachment?.kind !== "control" || controlMessageOwnsTransaction(message)) {
-      return super.webSocketMessage(socket, message);
-    }
-    return this.runtime.runExclusive(() => super.webSocketMessage(socket, message));
   }
 }
 
@@ -26491,7 +26689,8 @@ function bridgeAttachment(value: unknown): BridgeAttachment | undefined {
       return typeof attachment.clientID === "string" &&
         typeof attachment.owner === "string" &&
         typeof attachment.org === "string" &&
-        (attachment.admin === true || isCurrentOrgKey(attachment.org))
+        (attachment.admin === true || isCurrentOrgKey(attachment.org)) &&
+        validControlGrant(attachment)
         ? {
             ...attachment,
             subscriptions:
@@ -26573,6 +26772,18 @@ function completeBridgePrincipal(value: {
   );
 }
 
+function validControlGrant(grant: CachedBridgeGrant & { admin?: boolean }): boolean {
+  if (grant.admin === true) return true;
+  if (grant.auth === "proxy") return true;
+  if (grant.auth === "bearer") return /^[a-f0-9]{64}$/.test(grant.sharedTokenHash ?? "");
+  return (
+    grant.auth === "github" &&
+    typeof grant.login === "string" &&
+    validPortalSessionHash(grant.portalSessionHash) &&
+    grant.githubGrant !== undefined
+  );
+}
+
 function revocableUserBridge(attachment: BridgeAttachment): attachment is Extract<
   BridgeAttachment,
   {
@@ -26582,7 +26793,8 @@ function revocableUserBridge(attachment: BridgeAttachment): attachment is Extrac
       | "code-agent"
       | "code-viewer"
       | "egress-host"
-      | "egress-client";
+      | "egress-client"
+      | "control";
   }
 > {
   return (
@@ -26591,7 +26803,8 @@ function revocableUserBridge(attachment: BridgeAttachment): attachment is Extrac
     attachment.kind === "webvnc-viewer" ||
     attachment.kind === "code-viewer" ||
     attachment.kind === "egress-host" ||
-    attachment.kind === "egress-client"
+    attachment.kind === "egress-client" ||
+    attachment.kind === "control"
   );
 }
 
@@ -27878,6 +28091,21 @@ function retainProvisioningCleanupClaim(
   error: string,
   failedAt: string,
 ): void {
+  if (claim.awsOriginalRootDisk) {
+    if (
+      claim.awsOriginalRootDisk.leaseID !== lease.id ||
+      (lease.awsOriginalRootDisk &&
+        !sameAWSRootDisk(lease.awsOriginalRootDisk, claim.awsOriginalRootDisk))
+    ) {
+      retainUnresolvedProviderResource(
+        lease,
+        "original AWS root disk conflicts with allocation claim",
+        failedAt,
+      );
+      return;
+    }
+    lease.awsOriginalRootDisk = { ...claim.awsOriginalRootDisk };
+  }
   const retainResource = lease.state === "released" && lease.releaseDeletesServer === false;
   lease.cloudID = claim.cloudID;
   lease.serverName = claim.cloudID;
@@ -28888,6 +29116,7 @@ export interface CloudProvider {
     instanceState: string;
     rootVolumeId: string;
     rootVolumePresent: boolean;
+    rootIdentityEvidence?: { eventID: string; eventTime: string };
   }>;
   releaseLease(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void>;
   deleteServer(id: string): Promise<void>;
@@ -31540,6 +31769,17 @@ export class AWSProvider implements CloudProvider {
             region,
             providerScope,
           };
+          const recordRootDisk = (observed: ProviderMachine) => {
+            const disk = acquisitionRootDisk(observed, leaseID, providerScope, region);
+            if (!disk) return;
+            if (claim.awsOriginalRootDisk && !sameAWSRootDisk(claim.awsOriginalRootDisk, disk)) {
+              throw new ProviderResourceUnresolvedError(
+                "original AWS root disk changed during acquisition",
+              );
+            }
+            claim.awsOriginalRootDisk = disk;
+          };
+          recordRootDisk(server);
           const onResourceCreated = provisioning.onResourceCreated;
           const publishResource = onResourceCreated
             ? async (readinessError?: unknown) => {
@@ -31571,6 +31811,8 @@ export class AWSProvider implements CloudProvider {
               config.awsPrivate,
               checkReadiness,
             );
+            recordRootDisk(readyServer);
+            await checkReadiness?.();
             if (config.capacityRequirements && readyServer.serverType !== serverType) {
               throw new Error(
                 "AWS resource requirement mismatch: ready instance type differs from the qualified request",
@@ -31772,6 +32014,7 @@ export class AWSProvider implements CloudProvider {
     instanceState: string;
     rootVolumeId: string;
     rootVolumePresent: boolean;
+    rootIdentityEvidence?: { eventID: string; eventTime: string };
   }> {
     return this.withLeaseOperation(async (session) => {
       if (!(await this.verifyLeaseOperationAuthority(lease, session)))
@@ -31784,17 +32027,56 @@ export class AWSProvider implements CloudProvider {
         () => session.findServer(lease.cloudID),
         "machine",
       );
-      const identity =
-        lease.lifetimePolicy?.retainedIdentity ??
-        lease.lifetimePolicy?.readiness?.identity ??
-        (server && server.status !== "terminated"
-          ? await session.retainedServerIdentity(lease.cloudID, lease.id)
-          : undefined);
-      if (!identity || !identity.startsWith(`${lease.cloudID}:`))
+      const disk = lease.awsOriginalRootDisk;
+      if (
+        disk &&
+        (!validAWSRootDiskIdentity(disk) ||
+          disk.leaseID !== lease.id ||
+          disk.instanceID !== lease.cloudID ||
+          disk.region !== lease.region ||
+          disk.providerScope !== lease.providerScope)
+      ) {
+        throw new ProviderResourceUnresolvedError(
+          "original AWS root disk binding does not match lease",
+        );
+      }
+      const recorded = [
+        disk ? [disk.instanceID, disk.volumeID, disk.deviceName].join(":") : undefined,
+        lease.lifetimePolicy?.retainedIdentity,
+        lease.lifetimePolicy?.readiness?.identity,
+      ].filter((value): value is string => value !== undefined);
+      let identity = recorded[0];
+      let rootIdentityEvidence: { eventID: string; eventTime: string } | undefined;
+      if (recorded.length === 0) {
+        const original = await session.client.originalRootDiskEvidence(
+          lease,
+          (await session.verifiedIdentity()).account,
+        );
+        identity = [
+          original.disk.instanceID,
+          original.disk.volumeID,
+          original.disk.deviceName,
+        ].join(":");
+        rootIdentityEvidence = { eventID: original.eventID, eventTime: original.eventTime };
+      }
+      if (!identity || !identity.startsWith(lease.cloudID + ":"))
         throw new ProviderResourceUnresolvedError(
           "lifetime readback requires the original root disk identity",
         );
+      if (recorded.some((value) => value !== identity))
+        throw new ProviderResourceUnresolvedError("original AWS root disk records conflict");
+      // A current mapping cannot establish the original identity. Resource
+      // presence does not prove remote process closure or artifact custody.
+      if (
+        server &&
+        server.status !== "terminated" &&
+        [server.cloudID, server.awsRootVolumeID, server.awsRootDeviceName].join(":") !== identity
+      )
+        throw new ProviderResourceUnresolvedError(
+          "current AWS root disk does not match original identity",
+        );
       return {
+        ...(rootIdentityEvidence ? { rootIdentityEvidence } : {}),
         instanceId: lease.cloudID,
         instanceState: server?.status ?? "terminated",
         rootVolumeId: identity.split(":")[1]!,

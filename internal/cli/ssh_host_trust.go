@@ -267,24 +267,36 @@ func prepareSSHJump(target *SSHTarget) error {
 	if err := selectSSHJumpCandidate(target, key); err != nil {
 		return err
 	}
+	proxy, err := sshJumpProxyCommand(target, "")
+	if err != nil {
+		return err
+	}
+	target.ProxyCommand = proxy
+	target.NoControlMaster = true
+	return nil
+}
+
+func sshJumpProxyCommand(target *SSHTarget, controlPath string) (string, error) {
+	jump := target.SSHJump
 	args := []string{"ssh", "-F", os.DevNull, "-i", target.Key, "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + sshConfigFileValue(target.KnownHostsFile), "-o", "GlobalKnownHostsFile=none", "-o", "KnownHostsCommand=none", "-o", "VerifyHostKeyDNS=no", "-o", "UpdateHostKeys=no", "-o", "HostKeyAlgorithms=ssh-ed25519", "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ConnectTimeout=" + relaySSHConnectTimeout("10", jump.useRelay), "-o", "ServerAliveInterval=15", "-p", strconv.Itoa(jump.Port), "-W", net.JoinHostPort(target.Host, target.Port), "crabbox@" + jump.Host}
+	if controlPath != "" {
+		args = append(args[:1], append([]string{"-S", controlPath}, args[1:]...)...)
+	}
 	if jump.useRelay {
 		proxy, err := prepareServeRelayProxy(target)
 		if err != nil {
-			return err
+			return "", err
 		}
 		args = append(args[:1], append([]string{"-o", "ProxyCommand=" + proxy}, args[1:]...)...)
 	}
 	if jump.HostKeyAlias != "" {
 		if _, err := authoritativeKnownHostToken(SSHTarget{HostKeyAlias: jump.HostKeyAlias}); err != nil {
-			return err
+			return "", err
 		}
 		args = append(args[:1], append([]string{"-o", "HostKeyAlias=" + jump.HostKeyAlias}, args[1:]...)...)
 	}
 	for i, arg := range args {
 		args[i] = ShellQuote(strings.ReplaceAll(arg, "%", "%%"))
 	}
-	target.ProxyCommand = strings.Join(args, " ")
-	target.NoControlMaster = true
-	return nil
+	return strings.Join(args, " "), nil
 }

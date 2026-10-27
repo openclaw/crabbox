@@ -184,6 +184,7 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		snapshotSettled = waitErr == nil || snap != nil && daytonaSnapshotFailed(snap.GetState())
 		return errors.Join(createErr, waitErr)
 	})
+	result.CaptureEstablished = err == nil
 	return result, err
 }
 

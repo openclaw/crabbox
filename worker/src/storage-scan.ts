@@ -6,22 +6,25 @@ export const storageRecordScanBatchSize = 128;
 // and early termination; a consumer that stops never fetches another page.
 export async function* coordinatorStorageEntries<T>(
   storage: Pick<CoordinatorStorageView, "list">,
-  options: { prefix: string; limit: number; noCache?: boolean; allowConcurrency?: boolean },
+  options: { prefix: string; limit: number } & NonNullable<
+    Parameters<CoordinatorStorageView["list"]>[0]
+  >,
 ): AsyncGenerator<[string, T]> {
-  let startAfter: string | undefined;
+  let cursor = options.reverse ? options.end : options.startAfter;
   for (;;) {
     // oxlint-disable-next-line eslint/no-await-in-loop -- each page follows the previous page's final key.
     const page = await storage.list<T>({
       ...options,
-      ...(startAfter ? { startAfter } : {}),
+      // Bounds retain their meaning in either direction: reverse pages lower the exclusive end.
+      ...(cursor === undefined ? {} : options.reverse ? { end: cursor } : { startAfter: cursor }),
     });
     if (page.size === 0) return;
     yield* page;
     const next = [...page.keys()].at(-1);
-    if (!next || next === startAfter) {
+    if (!next || next === cursor) {
       throw new Error(`${options.prefix} record scan did not advance`);
     }
-    startAfter = next;
+    cursor = next;
     if (page.size < options.limit) return;
   }
 }

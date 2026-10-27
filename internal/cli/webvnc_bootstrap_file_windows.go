@@ -8,17 +8,18 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/openclaw/crabbox/internal/privatefile"
 	"golang.org/x/sys/windows"
 )
 
 const webVNCPortalBootstrapTempAttempts = 32
 
 func createWebVNCPortalBootstrapFile() (string, string, *os.File, error) {
-	directorySecurity, userSID, err := privateWindowsSecurityAttributes(true)
+	directorySecurity, userSID, err := privatefile.WindowsAttributes(true)
 	if err != nil {
 		return "", "", nil, err
 	}
-	fileSecurity, _, err := privateWindowsSecurityAttributes(false)
+	fileSecurity, _, err := privatefile.WindowsAttributes(false)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -90,5 +91,5 @@ func validateWebVNCPortalBootstrapWindowsPath(path string, currentUser *windows.
 	if err != nil {
 		return err
 	}
-	return validateCurrentUserPrivateWindowsDescriptor(descriptor, currentUser)
+	return privatefile.ValidateWindowsDescriptor(descriptor, currentUser)
 }

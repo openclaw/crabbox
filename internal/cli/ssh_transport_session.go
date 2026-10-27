@@ -28,6 +28,13 @@ type sshTransportSession struct {
 }
 
 func newSSHTransportSession(ctx context.Context, target SSHTarget, localForward bool) (*sshTransportSession, error) {
+	if !localForward {
+		var err error
+		target, err = prepareServeRelayControl(ctx, target)
+		if err != nil {
+			return nil, err
+		}
+	}
 	dir, err := os.MkdirTemp("", "crabbox-ssh-transport-*")
 	if err != nil {
 		return nil, fmt.Errorf("create private SSH transport directory: %w", err)
@@ -995,10 +1002,14 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 			b.WriteString("  CheckHostIP no\n")
 		}
 	}
-	// A transport command owns one process tree. Never let a multiplexed master
-	// retain a copy or forward after that process exits.
+	// Only an explicitly owned foreground master may outlive a copy. Exported
+	// forwards keep their own transport and cannot borrow invocation state.
 	b.WriteString("  ControlMaster no\n")
-	b.WriteString("  ControlPath none\n")
+	if target.ownerControlPath != "" && !localForward {
+		writeSSHTransportLiteralConfigValue(&b, "ControlPath", target.ownerControlPath)
+	} else {
+		b.WriteString("  ControlPath none\n")
+	}
 	b.WriteString("  ControlPersist no\n")
 	for _, identityFile := range identityFiles {
 		writeSSHTransportLiteralConfigValue(&b, "IdentityFile", identityFile)

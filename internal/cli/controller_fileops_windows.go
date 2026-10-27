@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"unsafe"
 
+	"github.com/openclaw/crabbox/internal/privatefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -17,7 +18,7 @@ func replaceControllerFile(tmpPath, path string) error {
 }
 
 func openWindowsNamespaceFile(path string) (windows.Handle, error) {
-	openPath, err := artifactWindowsLongPath(path)
+	openPath, err := privatefile.WindowsPath(path)
 	if err != nil {
 		return windows.InvalidHandle, err
 	}
@@ -41,7 +42,7 @@ func renameWindowsFile(from, to string, flags uint32) (err error) {
 			return err
 		}
 	}
-	fullPath, err = artifactWindowsLongPath(fullPath)
+	fullPath, err = privatefile.WindowsPath(fullPath)
 	if err != nil {
 		return err
 	}

@@ -248,6 +248,18 @@ capabilities as any other provider that can checkpoint and fork workspace state;
 its Firecracker, Kubernetes, or image identifiers belong inside the adapter and
 checkpoint metadata.
 
+Native adapters retain their own create success and wait semantics. Set
+`NativeCheckpointCreateResult.CaptureEstablished` only where the existing
+provider contract establishes the exact capture (for example, Daytona's active
+snapshot or a draft image whose underlying snapshot is ready). Keep it false
+when the existing operation has only accepted a pending capture; this omits the
+assertion without rejecting normal success or introducing another wait.
+This internal attestation is not serialized into provider results; the CLI emits
+the single top-level `captureEstablished` field in its checkpoint record.
+Core does not reinterpret provider state names as capture barriers.
+An accepted request or allocated image ID alone is insufficient. Preserve accepted
+identity through errors and persist it before any observation or readiness wait.
+
 Run evidence and agent attachments follow the same rule. Declare
 `FeatureRunProof`, `FeatureRunArtifacts`, `FeatureRunDownloads`,
 `FeatureURLBridge`, `FeatureRunSession`, and `FeatureMCP` only when the provider
@@ -856,6 +868,16 @@ outages and guest reboot. AWS uses SSM, root-owned generation tombstones,
 persistent expiry timers, and observed boot-ID changes. Whole-instance reboot
 cannot preserve a replacement grant's sessions, so v1 has no in-place renewal.
 Unsupported adapters must leave this capability absent.
+
+### Retained session disk capability
+
+Disk preservation across activations is optional and distinct from ordinary
+pause/resume. Reuse fixed acquisition, `PausableBackend`, and the shared retention
+transaction owner rather than adding a second claim or lifecycle store. Advertise
+`session-disk-retention-v1` only when the adapter proves exact ownership,
+no-auto-delete policy, disk-preserving suspension, finite work admission and exact
+cleanup. Read the [retention and journal compatibility contract](../provider-backends.md#retained-session-disks)
+before implementing it; ordinary ephemeral providers keep their existing behavior.
 
 ### Local claim retention
 

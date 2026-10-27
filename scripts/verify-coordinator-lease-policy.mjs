@@ -2,6 +2,8 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
+import { isLeasePolicyOverrides } from "../worker/src/lease-policy-overrides.mjs";
+
 const bindingName = "CRABBOX_LEASE_POLICY_OVERRIDES";
 const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -66,9 +68,15 @@ export async function verifyCoordinatorLeasePolicy({
   if (!/^[a-f0-9]{32}$/.test(accountId ?? "") || !apiToken) {
     throw new Error("Set the Cloudflare account and API token before verification.");
   }
-  const desired = normalizeOverrides(
-    parseOverrides(desiredOverrides === undefined ? "{}" : desiredOverrides, "Source"),
-  );
+  const source = parseOverrides(desiredOverrides === undefined ? "{}" : desiredOverrides, "Source");
+  if (!isLeasePolicyOverrides(source)) {
+    throw new Error(
+      `Source lease policy is invalid; deployment stopped. Correct ${bindingName} in worker/wrangler.jsonc: ` +
+        "use only owners/orgs entries with defaultTTLSeconds, defaultIdleTimeoutSeconds, or maxTTLSeconds " +
+        "as integers from 1 to 86400, and extension/autoExtend values of allow or deny. Then retry.",
+    );
+  }
+  const desired = normalizeOverrides(source);
 
   let response;
   try {
@@ -106,6 +114,8 @@ export async function verifyCoordinatorLeasePolicy({
   ) {
     throw new Error("Live lease policy is not one readable plaintext binding; deployment stopped.");
   }
+  // Keep readable, shape-valid live values comparable so an acknowledged replacement
+  // can repair invalid semantics. Only the validated source is ever deployed.
   const live = normalizeOverrides(parseOverrides(bindings[0]?.text ?? "{}", "Live"));
   if (!isDeepStrictEqual(live, desired)) {
     const summary = differenceSummary(live, desired);

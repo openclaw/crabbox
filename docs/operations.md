@@ -317,6 +317,9 @@ environment API token fails the job.
 Each upload is tagged with the full commit SHA. After all deployment steps,
 verification requires one Cloudflare version receiving 100% of traffic and
 an uncached public `/v1/health` response with that version ID and SHA tag.
+Health verification polls every five seconds for up to three minutes to allow
+edge propagation. If it expires, the error includes the last reported version ID
+and tag. Each request still has a timeout of at most ten seconds.
 The deployment must remain unchanged across the check. A gradual rollout,
 stale route, unavailable API, or missing version metadata fails visibly.
 Verification only reads deployment metadata and health; it creates no lease.
@@ -335,8 +338,9 @@ Deploy in separate releases; Worker and Durable Object versions can overlap:
 1. **Stage A (reader compatibility):** read both names, prefer the legacy name,
    and keep writing only the legacy name. Strip caller-supplied new-name values.
    Verify the existing deployment proof shows Stage A at 100% and record its
-   version ID and source SHA before advancing. Existing logs remain unredacted
-   until Stage B.
+   version ID and source SHA before advancing. The health route verifies the
+   Worker version only; also verify an actual Fleet Durable Object invocation
+   runs Stage A before advancing. Existing logs remain unredacted until Stage B.
 2. **Stage B (redacted writer):** only after that receipt, write only the new name,
    strip legacy caller input, and keep both readers. Never ship both headers.
    Verify Stage B's version and an authenticated grant-bearing invocation shows
@@ -353,8 +357,9 @@ binding with the production value in `worker/wrangler.jsonc`. The guard takes no
 arguments and compares the complete documents, treating an absent binding, `{}`,
 and empty `owners`/`orgs` groups as equivalent. A difference stops deployment
 before upload and reports only the affected groups and keys, without policy
-values. Unreadable bindings, invalid document shapes, and Cloudflare API errors
-always stop deployment.
+values. Source policies must pass the same field, type, and range validation as
+the runtime. Unreadable bindings, invalid document shapes, and Cloudflare API
+errors always stop deployment.
 
 Production source declares no individual memberships or lease policy overrides;
 every owner uses the global lease defaults (30-minute TTL and idle timeout,
@@ -365,10 +370,12 @@ For an intentional one-time replacement of a known live override document,
 dispatch the **Deploy Coordinator** workflow (`coordinator-deploy.yml`) with
 `replace_live_lease_policy: true`. This sets
 `CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT=1` for the guard step only: it
-prints the same key summary and permits replacement, but still fails closed on
-unreadable or invalid bindings and API errors. Push-triggered deployments never
-acknowledge replacement. When removing existing overrides from source, the
-first push-triggered deployment therefore fails by design until a maintainer
+prints the same key summary and permits replacement, including repair of readable,
+shape-valid live policies with invalid fields or values. The source must still be
+valid; unreadable bindings, invalid document shapes, and API errors fail closed.
+Push-triggered deployments never acknowledge replacement. When removing
+existing overrides from source, the first push-triggered deployment therefore
+fails by design until a maintainer
 reviews the difference and dispatches that acknowledged replacement once.
 
 Worker source lives in `worker/`. Run the gate, then deploy:

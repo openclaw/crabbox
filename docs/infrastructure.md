@@ -63,7 +63,7 @@ https://crabbox-coordinator.example.workers.dev     # workers.dev fallback for h
 
 Point each CLI configuration directly at the final canonical or
 Access-protected origin it should authenticate to. Credentialed Go requests
-follow only same-origin redirects, and the curl fallback follows no redirects;
+follow only same-origin redirects and retain the native TLS verifier on retries;
 do not use a cross-origin redirecting alias as `CRABBOX_COORDINATOR`. Additional
 workers.dev or custom domains remain useful as independently verified health
 endpoints.
@@ -264,7 +264,7 @@ CRABBOX_TAILSCALE_CLIENT_SECRET
 CRABBOX_TAILSCALE_TAILNET=-              # or an explicit tailnet/org
 CRABBOX_TAILSCALE_TAGS=tag:crabbox      # requested-tag allowlist/default
 CRABBOX_TAILSCALE_INSTALL_MODE=package  # package (default) or pinned static archive
-CRABBOX_TAILSCALE_VERSION=1.98.4        # static archive version
+CRABBOX_TAILSCALE_VERSION=1.104.2        # static archive version
 CRABBOX_TAILSCALE_SHA256_AMD64=...      # amd64 archive checksum
 CRABBOX_TAILSCALE_SHA256_ARM64=...      # arm64 archive checksum
 ```

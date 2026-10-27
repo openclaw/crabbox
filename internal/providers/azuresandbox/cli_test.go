@@ -3,6 +3,7 @@ package azuresandbox
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -33,6 +34,7 @@ func TestSandboxCLIWorkerLifecycle(t *testing.T) {
 	f := &fixture{}
 	commands := 0
 	uploads := 0
+	failCommand := false
 	c := fixtureClient(t, func(r *http.Request) (*http.Response, error) {
 		if strings.HasSuffix(r.URL.Path, "/files") {
 			data, err := io.ReadAll(r.Body)
@@ -46,6 +48,9 @@ func TestSandboxCLIWorkerLifecycle(t *testing.T) {
 			return f.request(t, r)
 		}
 		commands++
+		if failCommand {
+			return nil, fmt.Errorf("private-worker-token: %w", io.ErrUnexpectedEOF)
+		}
 		var body map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
@@ -111,8 +116,22 @@ func TestSandboxCLIWorkerLifecycle(t *testing.T) {
 	}
 	t.Chdir(dir)
 	run("heartbeat", "--provider", providerName, "--id", lease, "--json")
+	failCommand = true
+	stdout.Reset()
+	stderr.Reset()
+	app.Stdin = strings.NewReader("echo private-worker-command")
+	err := app.Run(t.Context(), []string{"run", "--provider", providerName, "--id", lease, "--keep", "--no-sync", "--script-stdin"})
+	publicDiagnostic := fmt.Sprint(err) + stderr.String()
+	if err == nil || !strings.Contains(publicDiagnostic, "ACA Sandbox execute request failed: transport outcome unknown (category=connection-closed)") ||
+		strings.Contains(publicDiagnostic, "private-worker") || commands != 3 || f.deletes != 0 {
+		t.Fatalf("CLI lost safe uncertain transport diagnostic or custody: %v, calls=%d deletes=%d", err, commands, f.deletes)
+	}
+	run("inspect", "--provider", providerName, "--id", lease, "--json")
+	if err := json.Unmarshal(stdout.Bytes(), &state); err != nil || !state.Ready {
+		t.Fatal("uncertain command did not retain the usable lease")
+	}
 	run("stop", "--provider", providerName, "--id", lease)
-	if f.creates != 1 || f.deletes != 1 || commands != 2 || uploads != 1 {
+	if f.creates != 1 || f.deletes != 1 || commands != 3 || uploads != 1 {
 		t.Fatalf("unexpected effects: %+v commands=%d", f, commands)
 	}
 }

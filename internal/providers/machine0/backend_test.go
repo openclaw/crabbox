@@ -2227,7 +2227,7 @@ func TestCreateNativeCheckpointStopsSavesRestartsAndRefreshesClaimEndpoint(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Image.ID != "img-1@v1" || result.Metadata[metadataImageVersion] != "1" {
+	if result.Image.ID != "img-1@v1" || result.Metadata[metadataImageVersion] != "1" || !result.CaptureEstablished {
 		t.Fatalf("result=%#v", result)
 	}
 	if got, want := strings.Join(api.actions, ","), "prepare,stop,save,image:CREATING,image:READY,start"; got != want {

@@ -278,7 +278,7 @@ func TestCreateHetznerCheckpointWaitFalseRecordsBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Image.ID != "99" || result.Image.State != "creating" || result.Image.Region != "fsn1" || result.Image.Architecture != "x86" || !result.Image.Direct {
+	if result.Image.ID != "99" || result.Image.State != "creating" || result.Image.Region != "fsn1" || result.Image.Architecture != "x86" || !result.Image.Direct || result.CaptureEstablished {
 		t.Fatalf("image=%+v", result.Image)
 	}
 	wantMetadata := checkpointMetadata()
@@ -377,6 +377,9 @@ func TestCreateHetznerCheckpointWaitOutcomesRetainPartialResult(t *testing.T) {
 			}
 			if tc.wantError == "" && err != nil {
 				t.Fatal(err)
+			}
+			if result.CaptureEstablished != (name == "success") {
+				t.Fatalf("capture established=%v for %s", result.CaptureEstablished, name)
 			}
 			if tc.wantError != "" && (err == nil || !strings.Contains(err.Error(), tc.wantError)) {
 				t.Fatalf("err=%v, want %q", err, tc.wantError)

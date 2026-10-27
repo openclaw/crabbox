@@ -33,6 +33,10 @@ on:
         required: true
         default: true
         type: boolean
+      dry_run:
+        description: "Verify an existing published release without publishing changes"
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -62,8 +66,11 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
           VERIFIER_COMMIT: ${{ inputs.verifier_commit }}
           WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          VERIFY_DRAFT: ${{ inputs.draft }}
         run: |
           set -euo pipefail
+          [[ "$DRY_RUN" != true || "$VERIFY_DRAFT" == false ]]
           [[ "$RELEASE_TAG" =~ ^v[0-9]+[.][0-9]+[.][0-9]+$ ]]
           [[ "$VERIFIER_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$WORKFLOW_COMMIT" =~ ^[0-9a-f]{40}$ ]]
@@ -96,6 +103,7 @@ jobs:
       - name: Set up Go for Apple VM source verification
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
+          go-version: "1.27.3"
           go-version-file: go.mod
           cache: false
 
@@ -281,9 +289,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
+          - runner: xcode-27
             arch: arm64
-          - runner: macos-15-intel
+          - runner: xcode-27
             arch: x86_64
     steps:
       - name: Check out protected workflow tooling
@@ -292,15 +300,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.workflow_sha }}
+      - name: Set up macOS verification architecture
+        env:
+          VERIFY_ARCH: ${{ matrix.arch }}
+        run: bash scripts/setup-release-macos-architecture.sh "$VERIFY_ARCH"
       - name: Set up Go for build-info inspection
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
+          go-version: "1.27.3"
           go-version-file: go.mod
           cache: false
       - name: Set up Node for protected release tooling
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.22.1
       - name: Download immutable opaque input
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -336,7 +349,7 @@ jobs:
             CRABBOX_VERIFY_TOOLING_COMMIT="$WORKFLOW_COMMIT" \
             HOME="$RUNNER_TEMP/verify-home" LANG=C LC_ALL=C \
             PATH="$PATH" TMPDIR="$RUNNER_TEMP" \
-            scripts/verify-release.sh \
+            /usr/bin/arch "-$VERIFY_ARCH" /bin/bash scripts/verify-release.sh \
               "$RELEASE_TAG" "$RUNNER_TEMP/release-assets" \
               "$RELEASE_TAG_OBJECT" "$RELEASE_COMMIT" "$VERIFIER_COMMIT"
       - name: Freeze exact static proof before candidate execution
@@ -420,9 +433,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
+          - runner: xcode-27
             arch: arm64
-          - runner: macos-15-intel
+          - runner: xcode-27
             arch: x86_64
     steps:
       - name: Check out protected workflow tooling
@@ -431,15 +444,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.workflow_sha }}
+      - name: Set up macOS verification architecture
+        env:
+          VERIFY_ARCH: ${{ matrix.arch }}
+        run: bash scripts/setup-release-macos-architecture.sh "$VERIFY_ARCH"
       - name: Set up Go for build-info inspection
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
+          go-version: "1.27.3"
           go-version-file: go.mod
           cache: false
       - name: Set up Node for protected release tooling
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.22.1
       - name: Download immutable opaque input
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -475,6 +493,6 @@ jobs:
             CRABBOX_VERIFY_TOOLING_COMMIT="$WORKFLOW_COMMIT" \
             HOME="$RUNNER_TEMP/execute-home" LANG=C LC_ALL=C \
             PATH="$PATH" TMPDIR="$RUNNER_TEMP" \
-            scripts/verify-release.sh \
+            /usr/bin/arch "-$VERIFY_ARCH" /bin/bash scripts/verify-release.sh \
               "$RELEASE_TAG" "$RUNNER_TEMP/release-assets" \
               "$RELEASE_TAG_OBJECT" "$RELEASE_COMMIT" "$VERIFIER_COMMIT"

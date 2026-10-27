@@ -59,6 +59,7 @@ func printUsageSummary(out interface{ Write([]byte) (int, error) }, usage Coordi
 	printUsageGroups(out, "orgs", usage.ByOrg)
 	printUsageGroups(out, "providers", usage.ByProvider)
 	printUsageGroups(out, "server_types", usage.ByServerType)
+	printUsageGroups(out, "by machine", usage.ByMachine)
 }
 
 func printUsageGroups(out interface{ Write([]byte) (int, error) }, title string, groups []CoordinatorUsageGroup) {
@@ -67,8 +68,16 @@ func printUsageGroups(out interface{ Write([]byte) (int, error) }, title string,
 	}
 	fmt.Fprintf(out, "%s:\n", title)
 	for _, group := range groups {
+		name := group.Key
+		if group.Label != "" {
+			name = group.Label + " (" + group.Key + ")"
+		}
+		cpu := ""
+		if group.CPUSeconds != nil {
+			cpu = fmt.Sprintf(" cpu-hours=%.2f", float64(*group.CPUSeconds)/3600)
+		}
 		fmt.Fprintf(out, "  %-24s leases=%-3d active=%-3d runtime=%-9s estimated=$%-8.2f reserved=$%.2f%s\n",
-			group.Key, group.Leases, group.ActiveLeases, formatDurationSeconds(group.RuntimeSeconds), group.EstimatedUSD, group.ReservedUSD, formatCommittedUSD(group.CommittedUSD))
+			name, group.Leases, group.ActiveLeases, formatDurationSeconds(group.RuntimeSeconds), group.EstimatedUSD, group.ReservedUSD, formatCommittedUSD(group.CommittedUSD)+cpu)
 	}
 }
 

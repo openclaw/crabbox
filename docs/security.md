@@ -91,7 +91,11 @@ not grant browser authority.
 ### GitHub browser login
 
 `crabbox login --url <broker-url>` opens a GitHub OAuth flow and stores the
-returned signed user token in local config. Authorization during login is gated
+returned signed user token in local config. Config writes stage a private file
+before atomically replacing the destination: mode `0600` on Unix, or a protected
+current-user-only DACL on Windows, verified before any credentials are written.
+Existing parent directory permissions are preserved; Windows writes fail if the
+private descriptor cannot be established. Authorization during login is gated
 by coordinator config:
 
 - `CRABBOX_GITHUB_ALLOWED_ORG` / `CRABBOX_GITHUB_ALLOWED_ORGS` restrict login to
@@ -296,6 +300,14 @@ membership-cache window. Membership errors fail closed. New or restored legacy
 GitHub bridge tickets and attachments without a complete encrypted grant and
 portal-session binding fail before carrying traffic; plaintext GitHub
 credentials are never stored in bridge state.
+Non-admin control sessions use the same continuing credential checks on incoming
+messages, subscribed run events, and lease heartbeats. Shared-token controls
+retain only a token hash; GitHub controls retain the encrypted grant and the
+hash of the signed token that opened them. Direct GitHub API-user tokens do not
+require a Portal cookie; Portal-backed controls also end when that Portal
+session logs out. Restored controls without verifiable credential provenance
+must reconnect. GitHub checks retain the configured membership-cache window,
+and queued heartbeats recheck current authority before changing lease state.
 Shared-operator requests do **not** trust caller-supplied `X-Crabbox-Owner` /
 `X-Crabbox-Org` headers — pin that automation's identity with
 `CRABBOX_SHARED_OWNER` (and `CRABBOX_DEFAULT_ORG`), or prefer per-user signed
@@ -343,10 +355,15 @@ profile behavior.
 ### Credential destinations and diagnostics
 
 Credential-bearing coordinator requests follow redirects only when scheme,
-hostname, and effective port remain unchanged. The curl transport fallback
-does not follow redirects and disables ambient curl configuration before
-loading Crabbox's generated request config. Configure the CLI with the final
-canonical coordinator or Access-protected origin, not a redirecting alias.
+hostname, and effective port remain unchanged. All coordinator requests use the
+native HTTP transport, proxy configuration and TLS verifier, including retries
+after interrupted handshakes. There is no automatic external curl fallback.
+Configure legitimate private CAs in the OS trust store, or through Go's supported
+`SSL_CERT_FILE`/`SSL_CERT_DIR` inputs on platforms that support them. A curl-only
+`CURL_CA_BUNDLE` has no effect. Operators previously relying on curl-specific
+trust, proxy or connectivity behavior must repair the native configuration.
+Configure the CLI with the final canonical coordinator or Access-protected
+origin, not a redirecting alias.
 GitHub browser login follows the same destination rule by default: a callback
 origin that differs from the selected broker is rejected before browser open,
 polling, or config write. Operators who are deliberately migrating between

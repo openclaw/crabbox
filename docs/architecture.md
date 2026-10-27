@@ -426,9 +426,16 @@ overload returns HTTP 503 `coordinator_overloaded` with `retryable: true` and
 `Retry-After: 5`; runtime resets and known availability failures return HTTP 503
 `coordinator_unavailable` with `retryable: true` and `Retry-After: 2`. Unknown or
 application exceptions return HTTP 500 `coordinator_internal_error` without a
-retry hint. Responses never expose the underlying exception text.
+retry hint. The same classification applies to errors caught inside Fleet when
+an actual Cloudflare storage operation failed. Application and provider callback
+errors, and Node storage errors, keep their existing behavior. The storage adapter
+preserves error identity and does not replay operations, including a write whose
+commit acknowledgement was lost. Responses never expose the underlying exception
+text for classified transient failures.
 
-CLI reads retry HTTP 429/502/503/504 and raw Cloudflare HTTP 500 bodies
+CLI reads retry interrupted connections (including EOF, socket resets/aborts,
+closed sockets/pipes, and native HTTP idle-connection closes), timeouts,
+HTTP 429/502/503/504 and raw Cloudflare HTTP 500 bodies
 `error code: 1101`/`error code: 1102`, keeping their five-attempt, one-minute budget.
 Idempotent run admission retries transient failures up to four attempts within
 30 seconds, with a 10-second limit per attempt and the same body and captured

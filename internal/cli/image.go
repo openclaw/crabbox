@@ -469,10 +469,15 @@ func deleteHetznerCheckpointImage(ctx context.Context, store checkpointStore, li
 }
 
 func waitForImage(ctx context.Context, coord *CoordinatorClient, imageID string, ref CoordinatorImageRef, timeout time.Duration, stderr io.Writer) (CoordinatorImage, error) {
+	ctx, cancel := context.WithTimeoutCause(ctx, timeout, Exit(5, "timed out waiting for image %s", imageID))
+	defer cancel()
 	deadline := time.Now().Add(timeout)
 	var last CoordinatorImage
 	for {
 		image, err := coord.Image(ctx, imageID, ref)
+		if ctx.Err() != nil {
+			return CoordinatorImage{}, context.Cause(ctx)
+		}
 		if err != nil {
 			return CoordinatorImage{}, err
 		}
@@ -490,8 +495,8 @@ func waitForImage(ctx context.Context, coord *CoordinatorClient, imageID string,
 		_, _ = fmt.Fprintf(stderr, "waiting image=%s state=%s\n", imageID, blank(image.State, "pending"))
 		select {
 		case <-ctx.Done():
-			return CoordinatorImage{}, ctx.Err()
-		case <-time.After(15 * time.Second):
+			return CoordinatorImage{}, context.Cause(ctx)
+		case <-time.After(nativeCheckpointAvailabilityPollInterval):
 		}
 	}
 }

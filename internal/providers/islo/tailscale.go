@@ -19,13 +19,13 @@ import (
 
 // The version and architecture-specific digests move together in code review
 // because every opted-in sandbox executes these downloaded binaries.
-const defaultIsloTailscaleVersion = "1.98.4"
+const defaultIsloTailscaleVersion = "1.104.2"
 const isloTailscaleRecoveryPendingExitCode = 75
 const isloTailscaleHealthTimeout = 15 * time.Second
 
 const (
-	defaultIsloTailscaleAMD64SHA256 = "e6c08a8ee7e63e69aaf1b62ecd12672b3883fbcd2a176bf6cfa42a15fdce0b6b"
-	defaultIsloTailscaleARM64SHA256 = "3cb068eb1368b6bb218d0ef0aa0a7a679a7156b7c979e2279cc2c2321b5f05c7"
+	defaultIsloTailscaleAMD64SHA256 = "512f613ed7d04fc7282f7dc5bd76aa105aae28168fbb9357eb749ebcbc29f0ae"
+	defaultIsloTailscaleARM64SHA256 = "5776aaa901b5ef1916e66be5bb54b9f481cd399c9c28db123a8cab620efa237b"
 )
 
 // isloTailscaleIPRe extracts the explicit tailnet marker even when the Islo SSE

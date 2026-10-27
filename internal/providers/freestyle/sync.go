@@ -64,18 +64,20 @@ func (b *freestyleBackend) uploadArchive(ctx context.Context, client freestyleAP
 	if err != nil {
 		return fmt.Errorf("freestyle read archive: %w", err)
 	}
-	// An ambiguous late file-API write must not overwrite the fallback archive.
+	// An ambiguous late stdin write must not overwrite the fallback archive.
 	apiPath, remoteB64, decoded := remoteArchive+".api", remoteArchive+".exec.b64", remoteArchive+".exec"
 	defer b.cleanupFreestyleUpload(ctx, client, name, apiPath, remoteB64, decoded)
 	if err := client.WriteFile(ctx, name, apiPath, base64.StdEncoding.EncodeToString(data), "base64"); err == nil {
 		return b.execShell(ctx, client, name, "mv -f "+core.ShellQuote(apiPath)+" "+core.ShellQuote(remoteArchive))
 	} else {
-		fmt.Fprintf(b.rt.Stderr, "warning: freestyle file API upload failed; falling back to exec upload: %v\n", err)
+		fmt.Fprintf(b.rt.Stderr, "warning: freestyle stdin upload failed; falling back to exec command upload: %v\n", err)
 	}
 	if err := b.execShell(ctx, client, name, "rm -f "+core.ShellQuote(remoteB64)+" "+core.ShellQuote(decoded)); err != nil {
 		return err
 	}
-	const chunkSize = 48 * 1024
+	// Leave room below the 64 KiB command limit for base64 and shell syntax.
+	// A multiple of three avoids padding between concatenated encoded chunks.
+	const chunkSize = 32*1024 - 2
 	chunkCount := (len(data) + chunkSize - 1) / chunkSize
 	for i := 0; i < len(data); i += chunkSize {
 		end := min(i+chunkSize, len(data))

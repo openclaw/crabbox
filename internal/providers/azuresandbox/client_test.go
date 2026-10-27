@@ -2,12 +2,18 @@ package azuresandbox
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -125,6 +131,107 @@ func TestUnknownCreateAndCommandAreNeverRetried(t *testing.T) {
 	if _, err := c.Exec(context.Background(), "sandbox-id", "true", ""); err == nil {
 		t.Fatal("accepted missing exit status")
 	}
+}
+
+func TestSandboxTransportFailureIsSafeAndNeverRetried(t *testing.T) {
+	const private = "private-header-token-body-stderr"
+	for _, tc := range []struct {
+		name, category string
+		cause          error
+	}{
+		{"dns", "dns", &net.DNSError{Name: private, Err: private}},
+		{"certificate", "tls", &tls.CertificateVerificationError{Err: errors.New(private)}},
+		{"tls-record", "tls", tls.RecordHeaderError{Msg: private}},
+		{"timeout", "timeout", &net.OpError{Op: private, Net: private, Err: os.ErrDeadlineExceeded}},
+		{"reset", "connection-reset", fmt.Errorf("%s: %w", private, syscall.ECONNRESET)},
+		{"refused", "connection-refused", fmt.Errorf("%s: %w", private, syscall.ECONNREFUSED)},
+		{"eof", "connection-closed", fmt.Errorf("%s: %w", private, io.EOF)},
+		{"truncated", "connection-closed", io.ErrUnexpectedEOF},
+		{"broken-pipe", "connection-closed", syscall.EPIPE},
+		{"transport-deadline-with-live-context", "timeout", context.DeadlineExceeded},
+		{"transport-canceled-with-live-context", "other", context.Canceled},
+		{"unknown", "other", errors.New(private)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			c := fixtureClient(t, func(r *http.Request) (*http.Response, error) {
+				calls++
+				// Simulate a lost response after the command request was consumed.
+				body, err := io.ReadAll(r.Body)
+				if err != nil || !strings.Contains(string(body), private) {
+					t.Fatal("command was not submitted to the transport")
+				}
+				return nil, &url.Error{Op: private, URL: "https://user:password@private.example/" + private, Err: tc.cause}
+			})
+			result, err := c.Exec(context.Background(), "private-resource", private, "/private-workdir")
+			want := "ACA Sandbox execute request failed: transport outcome unknown (category=" + tc.category + ")"
+			if err == nil || err.Error() != want || calls != 1 || result.ExitCode != nil {
+				t.Fatalf("wrong transport projection: %v; calls=%d result=%+v", err, calls, result)
+			}
+			if errors.Is(err, tc.cause) || strings.Contains(fmt.Sprintf("%+v", err), private) {
+				t.Fatal("private transport cause escaped through the error chain")
+			}
+			var apiErr *apiError
+			if errors.As(err, &apiErr) || isMissing(err) {
+				t.Fatal("transport failure granted HTTP rejection or absence authority")
+			}
+		})
+	}
+	for _, operation := range []string{"create", "upload"} {
+		t.Run(operation, func(t *testing.T) {
+			calls := 0
+			c := fixtureClient(t, func(r *http.Request) (*http.Response, error) {
+				calls++
+				_, _ = io.Copy(io.Discard, r.Body)
+				return nil, io.EOF
+			})
+			var err error
+			if operation == "create" {
+				var created sandbox
+				created, err = c.Create(context.Background(), createRequest{Labels: map[string]string{"private": private}})
+				if created.ID != "" {
+					t.Fatal("invented resource identity after lost response")
+				}
+			} else {
+				err = c.Upload(context.Background(), "private-resource", "/private-destination", strings.NewReader(private))
+			}
+			want := "ACA Sandbox " + operation + " request failed: transport outcome unknown (category=connection-closed)"
+			if err == nil || err.Error() != want || calls != 1 {
+				t.Fatalf("wrong uncertain %s: %v, calls=%d", operation, err, calls)
+			}
+		})
+	}
+}
+
+func TestSandboxTransportContextAuthority(t *testing.T) {
+	t.Run("canceled-after-submission", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		calls := 0
+		c := fixtureClient(t, func(r *http.Request) (*http.Response, error) {
+			calls++
+			_, _ = io.Copy(io.Discard, r.Body)
+			cancel()
+			return nil, errors.New("private transport cancellation payload")
+		})
+		result, err := c.Exec(ctx, "sandbox-id", "private command", "")
+		if !errors.Is(err, context.Canceled) || calls != 1 || result.ExitCode != nil ||
+			err.Error() != "ACA Sandbox execute request failed: transport outcome unknown: context canceled" {
+			t.Fatalf("lost cancellation or unknown outcome: %v, calls=%d", err, calls)
+		}
+	})
+	t.Run("deadline", func(t *testing.T) {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Time{})
+		defer cancel()
+		c := fixtureClient(t, func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("private deadline payload")
+		})
+		_, err := c.Exec(ctx, "sandbox-id", "private command", "")
+		if !errors.Is(err, context.DeadlineExceeded) ||
+			err.Error() != "ACA Sandbox execute request failed: transport outcome unknown: context deadline exceeded" {
+			t.Fatalf("lost caller deadline: %v", err)
+		}
+	})
 }
 
 func TestInventoryPaginationStaysInGroup(t *testing.T) {

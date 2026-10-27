@@ -42,7 +42,10 @@ func (a App) input() io.Reader {
 	return os.Stdin
 }
 
-func (a App) Run(ctx context.Context, args []string) error {
+func (a App) Run(ctx context.Context, args []string) (err error) {
+	controls := &serveRelayControls{}
+	ctx = context.WithValue(ctx, serveRelayControlsKey{}, controls)
+	defer func() { err = errors.Join(err, controls.closeLease("")) }()
 	if len(args) == 0 {
 		a.printHelp()
 		return Exit(2, "missing command")

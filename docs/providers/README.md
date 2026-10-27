@@ -117,7 +117,7 @@ Access terms:
 | [aws-lambda-microvm](aws-lambda-microvm.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session`, `pause-resume` | `linux`; AWS Lambda Firecracker MicroVM | `cloud`; GPU: no | Crabbox and Lambda MicroVM API; MicroVM termination | Isolated stateful ARM64 command execution | Requires a compatible Crabbox runner image; launch Regions and lifetime are limited |
 | [azure](azure.md) | built-in; `ssh-lease` · brokerable-cloud | Crabbox-managed SSH; `crabbox-sync` · coordinator optional; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code`, `tailscale`, `fixed-lease-id` | `linux`, `windows/normal`, `windows/wsl2`; Azure Virtual Machine | `cloud`; GPU: optional | Crabbox or coordinator; VM and owned resource delete | Linux or Windows workloads in Azure | Shared resource and identity setup is substantial |
 | [azure-dynamic-sessions](azure-dynamic-sessions.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; Azure Container Apps Dynamic Session | `cloud`; GPU: no | Azure session pool; provider session expiry | Short delegated container sessions in Azure | No Crabbox-managed SSH lease |
-| [azure-sandbox](azure-sandbox.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `none` · direct only; features: `shell-script-run`, `run-session`, `fixed-lease-id` | `linux`; Azure Container Apps Sandbox | `cloud`; GPU: no | Crabbox fixed lease and ACA Sandbox API; exact owned Sandbox delete | Kept Linux shell workloads with explicit file uploads | Requires an existing Sandbox group; runs require --keep --no-sync; one 2-CPU/4-GiB shape |
+| [azure-sandbox](azure-sandbox.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `none` · direct only; features: `shell-script-run`, `run-session`, `pause-resume`, `session-disk-retention-v1`, `fixed-lease-id` | `linux`; Azure Container Apps Sandbox | `cloud`; GPU: no | Crabbox fixed lease and ACA Sandbox API; exact owned Sandbox delete | Kept Linux shell workloads with explicit file uploads | Requires an existing Sandbox group; runs require --keep --no-sync; one 2-CPU/4-GiB shape |
 | [blacksmith-testbox](blacksmith-testbox.md) (`blacksmith`) | built-in; `delegated-run` · ci-proof-runner | No SSH; `provider-owned` · direct only; features: `cache-volume`, `run-proof`, `run-session`, `run-artifacts`, `prepared-artifact-workspace` | `linux`; Blacksmith Testbox runner | `provider-managed`; GPU: no | Blacksmith; provider session cleanup | CI reproduction with proof and reusable sessions | Execution and artifacts follow the Testbox contract |
 | [blaxel](blaxel.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session` | `linux`; Blaxel managed Linux sandbox | `provider-managed`; GPU: unknown | Blaxel; owned sandbox delete | Managed delegated Linux sandbox execution | Requires Blaxel API credentials and workspace access |
 | [boxd](boxd.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; boxd KVM microVM (Ubuntu 24.04) | `provider-managed`; GPU: no | TLS gRPC API + exec bootstrap; machine destroy (claim-gated) | Experimental isolated Linux microVM SSH leases | 2026-09-01: isolated creation verified over the gRPC API; guest port 8000 is publicly proxied without authentication |
@@ -191,8 +191,6 @@ Access terms:
 | [windows-sandbox](windows-sandbox.md) (`wsb`, `windows-sandbox-provider`) | built-in; `delegated-run` · local-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync` | `windows/normal`; Windows Sandbox | `local`; GPU: optional | Windows host; sandbox close | Disposable native Windows command execution | Requires Windows Sandbox and local host automation |
 | [xcp-ng](xcp-ng.md) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; XCP-ng VM clone | `self-hosted`; GPU: optional | Crabbox; VM delete | Self-hosted Linux VM pool over XAPI | Normal leases require prepared Linux templates |
 
-<!-- END GENERATED PROVIDER MATRIX -->
-
 ## Providers By Category
 
 The groups below match `crabbox providers --json` and the checked-in
@@ -212,8 +210,10 @@ but also supports coordinator-managed leases.
 | `local-runtime` | 2 | [apple-container](apple-container.md), [local-container](local-container.md) |
 | `local-sandbox` | 4 | [anthropic-sandbox-runtime](anthropic-sandbox-runtime.md), [docker-sandbox](docker-sandbox.md), [mxc](mxc.md), [windows-sandbox](windows-sandbox.md) |
 | `local-vm` | 7 | [apple-machine](apple-machine.md), [apple-vm](apple-vm.md), [hyperv](hyperv.md), [lume](lume.md), [multipass](multipass.md), [parallels](parallels.md), [tart](tart.md) |
-| `self-hosted-virtualization` | 5 | [firecracker](firecracker.md), [incus](incus.md), [kubevirt](kubevirt.md), [proxmox](proxmox.md), [xcp-ng](xcp-ng.md) |
+| `self-hosted-virtualization` | 6 | [firecracker](firecracker.md), [incus](incus.md), [kubevirt](kubevirt.md), [proxmox](proxmox.md), [serve](serve.md), [xcp-ng](xcp-ng.md) |
 | `service-control` | 4 | [cua](cua.md), [fastapi-cloud](fastapi-cloud.md), [railway](railway.md), [unikraft-cloud](unikraft-cloud.md) |
+
+<!-- END GENERATED PROVIDER MATRIX -->
 
 At this revision, target declarations cover Linux on 75 entries, macOS on 8,
 native Windows (`windows/normal`) on 9, and WSL2 (`windows/wsl2`) on 5. These

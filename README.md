@@ -122,9 +122,14 @@ and skip coordinator login. Cloud capacity is billed by the provider; choose
 | `crabbox job run <name>` | Run a named workflow from repository configuration. |
 | `crabbox list` / `crabbox stop <box>` | List active boxes or release one. |
 
-Use `--script <file>` for longer scripts. Commands use your configured provider;
-pass `--provider <name>` to select one explicitly. See [Commands](docs/commands/README.md)
-and the [CLI reference](docs/cli.md) for details.
+Use `--script <file>` for longer scripts. The execution and lease commands above
+(`run`, `warmup`, `prewarm`, `connect`, `ssh`, `list`, and `stop`) and
+`doctor` accept `--provider <name>` to override your configured provider.
+Named jobs select their provider in repository configuration. `--provider`
+is a command-specific flag, not a global flag. The `providers` catalog
+does not accept `--provider`; use `crabbox providers describe aws` to inspect
+one provider. See [Commands](docs/commands/README.md) and the
+[CLI reference](docs/cli.md) for details.
 
 ## Any OS
 
@@ -303,6 +308,7 @@ Catalog category: `self-hosted-virtualization`.
 | [incus](docs/providers/incus.md) | Self-hosted Linux containers or VMs. |
 | [kubevirt](docs/providers/kubevirt.md) | Kubernetes-hosted Linux VM. |
 | [proxmox](docs/providers/proxmox.md) | Self-hosted Linux VM fleet. |
+| [serve](docs/providers/serve.md) | Owner-only donated container capacity through a coordinator. |
 | [xcp-ng](docs/providers/xcp-ng.md) | Self-hosted Linux VM pool over XAPI. |
 
 ### GPU clouds
@@ -335,7 +341,6 @@ Catalog category: `local-runtime`.
 | Provider | Best fit |
 | --- | --- |
 | [apple-container](docs/providers/apple-container.md) | Local Linux containers on Apple silicon. |
-| [serve](docs/providers/serve.md) | Owner-only donated container capacity through a coordinator. |
 | [local-container](docs/providers/local-container.md) | Local Linux tests through Docker or Podman; no cloud account needed. |
 
 ### CI proof runners
@@ -527,11 +532,12 @@ release installations do not compile replacement companions from source.
 For a CLI-only source install, pin a supported release (v0.44.0 or later):
 
 ```sh
-go install github.com/openclaw/crabbox/cmd/crabbox@v0.70.0
+GOTOOLCHAIN=go1.27.3 go install github.com/openclaw/crabbox/cmd/crabbox@v0.70.0
 ```
 
-The module requires Go 1.26 and prefers go1.26.5. Use Go 1.26.5 or newer, or
-leave automatic toolchain selection enabled. Avoid `@latest` while older,
+The module minimum remains Go 1.26. Use the explicit patched toolchain above
+for source installs: versioned `go install` ignores the target module's toolchain
+suggestion. Avoid `@latest` while older,
 incompatible release tags remain visible.
 
 `go install` omits companion executables and assets, including the Apple VM

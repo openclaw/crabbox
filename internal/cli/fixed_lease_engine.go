@@ -16,10 +16,11 @@ import (
 // attempt dialect. Native submission/deletion witnesses remain authoritative;
 // in particular, a legacy empty attempt is not proof of non-submission.
 type FixedLeaseJournal struct {
-	Version    int                   `json:"version"`
-	Phase      string                `json:"phase"`
-	Revision   uint64                `json:"revision"`
-	Submission *FixedKeyedSubmission `json:"submission,omitempty"`
+	Retention  *SessionDiskRetentionState `json:"retention,omitempty"`
+	Version    int                        `json:"version"`
+	Phase      string                     `json:"phase"`
+	Revision   uint64                     `json:"revision"`
+	Submission *FixedKeyedSubmission      `json:"submission,omitempty"`
 }
 
 // FixedCreateRejected certifies that a native request failed before allocation.
@@ -112,7 +113,7 @@ func newFixedTransaction(claim *LeaseClaim, fresh bool, persist func() error) (*
 	if err := validateFixedJournal(claim.FixedCreateIntent); err != nil {
 		return nil, err
 	}
-	return &FixedTransaction{Claim: claim, fresh: fresh, initial: *claim.FixedCreateIntent,
+	return &FixedTransaction{Claim: claim, fresh: fresh, initial: *CloneLeaseClaim(*claim).FixedCreateIntent,
 		initialUnallocated: claim.FixedCreateIntent.State == "prepared" && len(claim.FixedCreateIntent.Attempt) == 0 && claim.CloudID == "" && claim.CloudNumericID == 0 && claim.CloudImmutableID == "",
 		cloudID:            claim.CloudID, immutableID: claim.CloudImmutableID, leaseID: claim.LeaseID, provider: claim.Provider,
 		attempt: maps.Clone(claim.FixedCreateIntent.Attempt), failures: append([]string(nil), claim.FixedCreateIntent.FailedAttempts...), persist: persist}, nil
@@ -123,7 +124,7 @@ func validateFixedJournal(intent *FixedCreateIntent) error {
 		return Exit(4, "lease_id_conflict: missing fixed create intent")
 	}
 	if j := intent.Journal; j != nil {
-		if j.Version != 1 || j.Revision == 0 {
+		if (j.Version != 1 && j.Version != 2) || j.Revision == 0 {
 			return Exit(4, "lease_id_conflict: unsupported fixed lease journal")
 		}
 		if s := j.Submission; s != nil {
@@ -137,14 +138,14 @@ func validateFixedJournal(intent *FixedCreateIntent) error {
 			return Exit(4, "lease_id_conflict: invalid fixed lease journal phase %q", j.Phase)
 		}
 	}
-	return nil
+	return validateSessionDiskRetention(intent)
 }
 
 func (tx *FixedTransaction) Record(phase string) error {
 	i := tx.Claim.FixedCreateIntent
 	if tx.Claim.LeaseID != tx.leaseID || tx.Claim.Provider != tx.provider || tx.Claim.Slug != tx.initial.Slug || i == nil || i.Version != tx.initial.Version || i.Fingerprint != tx.initial.Fingerprint ||
 		i.ProviderScope != tx.initial.ProviderScope || i.CheckpointID != tx.initial.CheckpointID ||
-		i.Slug != tx.initial.Slug || i.CreatedAt != tx.initial.CreatedAt {
+		i.Slug != tx.initial.Slug || i.CreatedAt != tx.initial.CreatedAt || !reflect.DeepEqual(i.Retention, tx.initial.Retention) {
 		return Exit(4, "lease_id_conflict: fixed intent changed during transaction")
 	}
 	if err := validateFixedJournal(i); err != nil {
@@ -170,7 +171,13 @@ func (tx *FixedTransaction) Record(phase string) error {
 			revision++
 		}
 	}
-	i.Journal = &FixedLeaseJournal{Version: 1, Phase: phase, Revision: revision, Submission: submission}
+	version := 1
+	var retention *SessionDiskRetentionState
+	if i.Journal != nil {
+		version = i.Journal.Version
+		retention = i.Journal.Retention
+	}
+	i.Journal = &FixedLeaseJournal{Version: version, Phase: phase, Revision: revision, Submission: submission, Retention: retention}
 	if err := validateFixedJournal(i); err != nil {
 		return err
 	}
@@ -512,6 +519,12 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 			}
 			persistBinding = true
 		}
+		if retained := claim.FixedCreateIntent.Journal; retained != nil && retained.Retention != nil {
+			retained.Retention.DesiredState = "retired"
+			retained.Retention.ComputeWindow.State = "closed"
+			retained.Retention.Operation = nil
+			persistBinding = true
+		}
 		if kind.DeletionState != "" {
 			claim.FixedCreateIntent.State = kind.DeletionState
 		}
@@ -607,7 +620,18 @@ func terminalFixedJournal(intent *FixedCreateIntent) {
 	if intent.Journal != nil {
 		revision = intent.Journal.Revision + 1
 	}
-	intent.Journal = &FixedLeaseJournal{Version: 1, Phase: "released", Revision: revision}
+	version := 1
+	var retention *SessionDiskRetentionState
+	if intent.Journal != nil {
+		version = intent.Journal.Version
+		retention = intent.Journal.Retention
+	}
+	if retention != nil {
+		retention.DesiredState = "retired"
+		retention.ComputeWindow.State = "closed"
+		retention.Operation = nil
+	}
+	intent.Journal = &FixedLeaseJournal{Version: version, Phase: "released", Revision: revision, Retention: retention}
 }
 
 // InspectFixedCandidate applies the same read-only journal and cardinality

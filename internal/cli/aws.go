@@ -440,14 +440,6 @@ func colonHex(data []byte) string {
 	return strings.Join(parts, ":")
 }
 
-func (c *AWSClient) DeleteSSHKey(ctx context.Context, name string) error {
-	_, err := c.ec2.DeleteKeyPair(ctx, &ec2.DeleteKeyPairInput{KeyName: aws.String(name)})
-	if err != nil && strings.Contains(err.Error(), "InvalidKeyPair.NotFound") {
-		return nil
-	}
-	return err
-}
-
 type awsCleanupKeyOwnershipError struct{ err error }
 
 func (e *awsCleanupKeyOwnershipError) Error() string { return e.err.Error() }
@@ -910,6 +902,7 @@ func mapMarket(spot bool) string {
 func (c *AWSClient) waitForServerIP(ctx context.Context, id string) (Server, error) {
 	ctx, cancel := context.WithTimeoutCause(ctx, 10*time.Minute, Exit(5, "timed out waiting for AWS instance public IP"))
 	defer cancel()
+	interval := 250 * time.Millisecond
 	for {
 		server, err := c.getServerForAcquire(ctx, id)
 		if ctx.Err() != nil {
@@ -922,9 +915,10 @@ func (c *AWSClient) waitForServerIP(ctx context.Context, id string) (Server, err
 		if err == nil && server.PublicNet.IPv4.IP != "" {
 			return server, nil
 		}
-		if err := sleepContext(ctx, 5*time.Second); err != nil {
+		if err := sleepContext(ctx, interval); err != nil {
 			return Server{}, context.Cause(ctx)
 		}
+		interval = min(interval*2, 5*time.Second)
 	}
 }
 

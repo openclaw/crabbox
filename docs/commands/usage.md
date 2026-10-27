@@ -51,7 +51,7 @@ deployment controls their stable configured identity.
 
 ## Output
 
-Human output prints one total row, then any non-empty group breakdowns (owners, orgs, providers, server types), then the active limits:
+Human output prints one total row, then any non-empty group breakdowns (owners, orgs, providers, server types, and serve machines), then the active limits:
 
 ```text
 usage month=2026-05 scope=user user=github:12345 org=example-org
@@ -79,7 +79,8 @@ limits:
     "byOwner": [],
     "byOrg": [],
     "byProvider": [],
-    "byServerType": []
+    "byServerType": [],
+    "byMachine": []
   },
   "limits": {
     "maxActiveLeases": 0,
@@ -93,6 +94,19 @@ limits:
   }
 }
 ```
+
+Serve leases also appear in `byMachine`, keyed by stable machine ID, with an optional
+`label` containing the current display name when the machine record is available.
+Each group includes `leases`, `activeLeases`, `runtimeSeconds`, and `cpuSeconds`
+(runtime multiplied by each lease's assigned CPUs). Text output shows a `by machine`
+section with CPU-hours (`cpuSeconds / 3600`). Serve cost remains zero. These groups
+use the same visibility, scope, and creation-month filters as the rest of the report;
+runtime is not split across calendar months. Missing assignments fall back to the
+machine prefix of `cloudID`, or `unknown`; missing CPU assignments contribute zero
+CPU-seconds. Removed machines remain attributable by ID without a display label.
+This endpoint includes full recorded history. The owner-only `serve machines`
+and portal Machines summaries instead combine current allocations with durable
+monthly completion rollups that start at deployment, without historical backfill.
 
 ## Estimated, reserved, and committed cost
 

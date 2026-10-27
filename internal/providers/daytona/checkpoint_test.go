@@ -506,11 +506,14 @@ func TestDaytonaCheckpointCLILeavesStoppedSourceStopped(t *testing.T) {
 	if err := app.Run(t.Context(), []string{"checkpoint", "create", "--provider", "daytona", "--id", f.request.LeaseID, "--mode", "native", "--json", "--reclaim"}); err != nil {
 		t.Fatalf("create: %v %s", err, stderr.String())
 	}
-	var record struct{ ID, Kind string }
+	var record struct {
+		ID, Kind           string
+		CaptureEstablished bool `json:"captureEstablished"`
+	}
 	if err := json.Unmarshal(stdout.Bytes(), &record); err != nil {
 		t.Fatal(err)
 	}
-	if record.Kind != core.CheckpointKindDaytona || record.ID == "" || f.starts != 0 || f.stops != 0 {
+	if record.Kind != core.CheckpointKindDaytona || record.ID == "" || !record.CaptureEstablished || f.starts != 0 || f.stops != 0 {
 		t.Fatalf("record=%+v starts=%d stops=%d", record, f.starts, f.stops)
 	}
 	stdout.Reset()

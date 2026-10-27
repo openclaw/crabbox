@@ -241,8 +241,14 @@ the claim/key when the exact association or GitHub terminal result is unavailabl
 Retry the same stop after the association appears. An associated run is checked
 with the existing optional `gh` integration using existing access only; missing
 tools or access remain unresolved without automatic installation or login.
-Native stop is the only mutation. Crabbox never cancels GitHub runs directly or
-infers their identity from timing. A terminal GitHub conclusion of success or
+Claim-fenced stop may cancel only the exact associated GitHub run, after a fresh
+native identity and association check. Acquisition rollback cannot cancel it;
+Crabbox never infers run identity from timing. Reconciliation has a 30-second
+budget, followed by up to 10 seconds for exclusive claim admission and a fresh
+native/GitHub terminal verification. Both phases honor an earlier caller deadline
+or cancellation. If the reconciliation budget interrupts the GitHub read after
+authenticated native completion, final verification can still establish settlement;
+expiry alone never releases the claim/key. A terminal GitHub conclusion of success or
 failure establishes settlement as well as cancellation, without claiming that
 Crabbox caused that conclusion. See [stop settlement](../features/blacksmith-testbox.md#forwarded-commands)
 for the verification and retry contract.

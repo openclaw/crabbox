@@ -1,0 +1,24 @@
+{
+  "id": "unique-resource",
+  "state": "Running",
+  "labels": {
+    "crabbox_attempt": "631544f2d26711da3f13efd4364e229c",
+    "crabbox_fingerprint": "RDEP22ZPZYHG642PMJSESD2SKLM2HEUE62AY737J46SOHKPDIDWQ",
+    "crabbox_lease": "cbx_abcdef123456"
+  },
+  "sourcesRef": {},
+  "lifecycle": {
+    "autoSuspendPolicy": {
+      "enabled": false,
+      "interval": 0,
+      "mode": ""
+    },
+    "autoDeletePolicy": {
+      "enabled": false,
+      "deleteIntervalInSeconds": 0
+    }
+  },
+  "stateDetails": {
+    "stoppedReason": ""
+  }
+}

@@ -10,12 +10,16 @@ function records(count: number): ProvisioningTestStorage {
   return storage;
 }
 
-async function collect(storage: ProvisioningTestStorage): Promise<number[]> {
+async function collect(
+  storage: ProvisioningTestStorage,
+  options: Partial<Parameters<typeof coordinatorStorageEntries>[1]> = {},
+): Promise<number[]> {
   const values: number[] = [];
   for await (const [, value] of coordinatorStorageEntries<number>(storage, {
     prefix: "record:",
     limit: 2,
     noCache: true,
+    ...options,
   })) {
     values.push(value);
   }
@@ -104,5 +108,76 @@ describe("coordinator storage scans", () => {
     const failure = new Error("read failed");
     vi.spyOn(storage, "list").mockRejectedValue(failure);
     await expect(collect(storage)).rejects.toBe(failure);
+  });
+
+  it.each([false, true])("keeps exclusive bounds across pages (reverse: %s)", async (reverse) => {
+    const storage = records(8);
+    expect(await collect(storage, { reverse, startAfter: "record:1", end: "record:7" })).toEqual(
+      reverse ? [6, 5, 4, 3, 2] : [2, 3, 4, 5, 6],
+    );
+    expect(storage.listOptions).toEqual(
+      (reverse ? ["record:7", "record:5", "record:3"] : ["record:1", "record:3", "record:5"]).map(
+        (cursor) => ({
+          prefix: "record:",
+          limit: 2,
+          noCache: true,
+          reverse,
+          startAfter: reverse ? "record:1" : cursor,
+          end: reverse ? cursor : "record:7",
+        }),
+      ),
+    );
+  });
+
+  it.each([0, 4])("terminates reversed empty and exact pages (%i records)", async (count) => {
+    const storage = records(count);
+    expect(await collect(storage, { reverse: true })).toEqual(count ? [3, 2, 1, 0] : []);
+    expect(storage.listOptions).toHaveLength(count ? 3 : 1);
+  });
+
+  it("does not prefetch reverse pages when the consumer stops", async () => {
+    const storage = records(5);
+    const seen: number[] = [];
+    for await (const [, value] of coordinatorStorageEntries<number>(storage, {
+      prefix: "record:",
+      limit: 2,
+      reverse: true,
+    })) {
+      seen.push(value);
+      if (seen.length === 2) break;
+    }
+    expect(seen).toEqual([4, 3]);
+    expect(storage.listOptions).toEqual([{ prefix: "record:", limit: 2, reverse: true }]);
+  });
+
+  it("continues reverse pages after deleting each cursor key", async () => {
+    const storage = records(5);
+    const seen: number[] = [];
+    await storage.transaction(async (transaction) => {
+      for await (const [key, value] of coordinatorStorageEntries<number>(transaction, {
+        prefix: "record:",
+        limit: 2,
+        reverse: true,
+      })) {
+        seen.push(value);
+        await transaction.delete(key);
+      }
+    });
+    expect(seen).toEqual([4, 3, 2, 1, 0]);
+    expect([...storage.values]).toEqual([["unrelated:0", "untouched"]]);
+  });
+
+  it("rejects a reverse backing store that repeats a full page", async () => {
+    const storage = records(1);
+    const list = vi.spyOn(storage, "list").mockResolvedValue(
+      new Map([
+        ["record:1", 1],
+        ["record:0", 0],
+      ]),
+    );
+    await expect(collect(storage, { reverse: true })).rejects.toThrow(
+      "record: record scan did not advance",
+    );
+    expect(list).toHaveBeenCalledTimes(2);
   });
 });

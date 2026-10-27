@@ -107,6 +107,9 @@ func TestCheckpointCreateJSONPrintsCheckpointRecord(t *testing.T) {
 	if record["kind"] != checkpointKindRecipe || record["leaseId"] != backend.leaseID || record["provider"] != "aws" {
 		t.Fatalf("checkpoint record=%#v", record)
 	}
+	if _, ok := record["captureEstablished"]; ok {
+		t.Fatal("metadata-only recipe attests a capture")
+	}
 	if workdir, ok := record["workdir"].(string); !ok || !strings.Contains(workdir, backend.leaseID) {
 		t.Fatalf("checkpoint workdir=%#v", record["workdir"])
 	}

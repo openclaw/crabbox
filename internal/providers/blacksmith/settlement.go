@@ -19,6 +19,8 @@ var blacksmithActionsURL = regexp.MustCompile(`^https://github\.com/([A-Za-z0-9_
 
 const blacksmithStatusReadTimeout = 10 * time.Second
 
+var errBlacksmithGitHubDeadline = errors.New("GitHub command interrupted by deadline")
+
 // Status is observational: it needs no claim and never finalizes local custody.
 // A terminal run is useful evidence only while its native association is stable.
 func (b *blacksmithBackend) statusSettlement(ctx context.Context, identity blacksmithIdentity) map[string]any {
@@ -116,6 +118,11 @@ func (b *blacksmithBackend) githubCommand(ctx context.Context, args []string) (c
 	})
 	elapsed, contextAfter := time.Since(issued), ctx.Err()
 	err := blacksmithContextError(ctx, rawErr)
+	// Preserve the child watcher's fact before post-return context expiry is
+	// joined in: an ordinary denied request must never authorize recovery.
+	if errors.Is(rawErr, context.DeadlineExceeded) {
+		err = errors.Join(err, errBlacksmithGitHubDeadline)
+	}
 	if err == nil && result.ExitCode == 0 {
 		return result, nil, ""
 	}

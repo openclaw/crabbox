@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/openclaw/crabbox/internal/privatefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -96,11 +97,11 @@ func newReplayableSSHInputReaders(expectedSize int64, readers ...io.Reader) (*re
 		)
 	}
 	input := &replayableSSHInput{reader: reader, path: path}
-	user, err := currentWindowsUserSID()
+	user, err := privatefile.WindowsUserSID()
 	if err != nil {
 		return nil, errors.Join(err, input.close())
 	}
-	if err := verifyPrivateWindowsHandle(windows.Handle(reader.Fd()), false, user); err != nil {
+	if err := privatefile.VerifyWindowsHandle(windows.Handle(reader.Fd()), false, user); err != nil {
 		return nil, errors.Join(fmt.Errorf("verify SSH input spool privacy: %w", err), input.close())
 	}
 	return input, nil

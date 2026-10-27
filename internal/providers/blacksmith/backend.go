@@ -160,9 +160,7 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 			return nil
 		}
 		cleanupAttempted = true
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), blacksmithCleanupTimeout)
-		defer cancel()
-		if err := b.stopClaimedTestbox(cleanupCtx, leaseID, claim); err != nil {
+		if err := b.stopClaimedTestbox(context.Background(), leaseID, claim); err != nil {
 			shouldStop = false
 			fmt.Fprintf(b.rt.Stderr, "warning: blacksmith cleanup failed stage=cleanup lease=%s retry_likely=true: %v\n", leaseID, err)
 			return err
@@ -325,6 +323,12 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 		ActionsURL:     result.ActionsURL,
 		RunID:          blacksmithActionsRunID(result.ActionsURL),
 		CleanupCommand: fmt.Sprintf("crabbox stop --provider %s %s", blacksmithTestboxProvider, leaseID),
+	}
+	if cleanupErr != nil {
+		// Cleanup recovery must not replay the command. Its observed exit remains
+		// separate from workload confirmation and the final failed run outcome.
+		_, err := fmt.Fprintf(b.rt.Stderr, "blacksmith cleanup recovery observed_run_exit=%d workload_exit_confirmed=%t; retry cleanup only: %s\n", outcome.code, outcome.workloadObserved, result.Session.CleanupCommand)
+		appendFailure("cleanup recovery report", err, 1)
 	}
 	total = b.rt.Clock.Now().Sub(started)
 	result.Total = total
@@ -704,6 +708,8 @@ func (b *blacksmithBackend) Stop(ctx context.Context, req core.StopRequest) erro
 	return b.stopClaimedTestbox(ctx, claim.LeaseID, claim)
 }
 
+var errBlacksmithReconciliationDeadline = errors.New("Blacksmith cleanup reconciliation deadline")
+
 func (b *blacksmithBackend) stopClaimedTestbox(ctx context.Context, leaseID string, claim core.LeaseClaim) (stopErr error) {
 	defer func() { stopErr = blacksmithExitDiagnostics(stopErr) }()
 	_, _, err := blacksmithClaimBinding(claim)
@@ -713,31 +719,41 @@ func (b *blacksmithBackend) stopClaimedTestbox(ctx context.Context, leaseID stri
 	if claim.LeaseID != leaseID {
 		return core.Exit(2, "Blacksmith exact claim identifier mismatch")
 	}
-	ctx, cancel := context.WithTimeout(ctx, blacksmithCleanupTimeout)
+	reconciliationCtx, cancel := context.WithTimeoutCause(ctx, blacksmithCleanupTimeout, errBlacksmithReconciliationDeadline)
 	defer cancel()
 	var bound *blacksmithBackend
 	var reconciled *blacksmithReconciledStop
 	phase := "reconciliation-admission"
-	if err := core.WithLeaseClaimUnchangedShared(ctx, leaseID, claim, func() error {
+	reconciliationErr := core.WithLeaseClaimUnchangedShared(reconciliationCtx, leaseID, claim, func() error {
 		phase = "reconciliation"
 		var err error
-		bound, err = b.withRoute(ctx)
+		bound, err = b.withRoute(reconciliationCtx)
 		if err != nil {
 			return fmt.Errorf("Blacksmith cleanup phase=%s: %w", phase, err)
 		}
-		reconciled, err = bound.terminateTestbox(ctx, claim, true)
+		reconciled, err = bound.terminateTestbox(reconciliationCtx, claim, true)
 		return err
-	}); err != nil {
+	})
+	if reconciliationErr != nil {
 		if phase == "reconciliation-admission" {
-			return fmt.Errorf("Blacksmith cleanup phase=%s: %w", phase, err)
+			return fmt.Errorf("Blacksmith cleanup phase=%s: %w", phase, reconciliationErr)
 		}
-		return err
+		// Only an authenticated native completion whose GitHub read was actually
+		// interrupted by our phase budget may reach fresh final verification.
+		if reconciled == nil || !reconciled.nativeCompleted || !errors.Is(reconciliationErr, errBlacksmithGitHubDeadline) ||
+			context.Cause(reconciliationCtx) != errBlacksmithReconciliationDeadline || ctx.Err() != nil {
+			return reconciliationErr
+		}
 	}
 	// Release the shared fence before taking the exclusive one. A replacement
 	// published in between must survive: only the original snapshot authorizes
 	// finalization, and a stuck command must not make this wait unbounded.
 	// Callback entry distinguishes admission from verification. Failure before
 	// entry does not by itself establish lock contention.
+	// Reserve a full status-read budget after reconciliation's 30 seconds, still
+	// subordinate to the original caller. Only this fresh positive pair releases custody.
+	ctx, cancelFinalization := context.WithTimeout(ctx, blacksmithStatusReadTimeout)
+	defer cancelFinalization()
 	phase = "finalization-admission"
 	err = core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, leaseID, claim, true, func() error {
 		phase = "final-verification"
@@ -754,12 +770,16 @@ func (b *blacksmithBackend) stopClaimedTestbox(ctx context.Context, leaseID stri
 		return nil
 	})
 	if err != nil && reconciled != nil {
-		bound.printStopOutput(reconciled.result)
-		return errors.Join(reconciled.err, fmt.Errorf("Blacksmith cleanup phase=%s: %w", phase, err))
+		cause := reconciliationErr
+		if reconciliationErr == nil {
+			bound.printStopOutput(reconciled.result)
+			cause = reconciled.err
+		}
+		return errors.Join(cause, fmt.Errorf("Blacksmith cleanup phase=%s: %w", phase, err))
 	}
 	if reconciled != nil && reconciled.err != nil {
 		fmt.Fprintf(b.rt.Stderr, "blacksmith cleanup reconciled lease=%s state=completed: stop failed; native status and exact GitHub run confirmed completion conclusion=%s\n", leaseID, reconciled.conclusion)
-	} else if reconciled != nil {
+	} else if reconciled != nil && reconciliationErr == nil {
 		bound.printStopOutput(reconciled.result)
 	}
 	return err

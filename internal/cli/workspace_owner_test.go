@@ -156,6 +156,53 @@ func TestWorkspaceOwnerTransportContextDiagnostics(t *testing.T) {
 	}
 }
 
+func TestWorkspaceOwnerReleaseChildDiagnostic(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX exit-status fixture")
+	}
+	for _, code := range []int{0, 75, 255} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			var cause error
+			if code != 0 {
+				cause = exec.Command("/bin/sh", "-c", "exit "+strconv.Itoa(code)).Run()
+				if cause == nil {
+					t.Fatal("exit fixture succeeded")
+				}
+			}
+			calls := 0
+			owner := &workspaceOwner{
+				stop: make(chan struct{}), done: make(chan struct{}),
+				transport: workspaceOwnerTransportFunc(func(_ context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+					calls++
+					if req.Action != workspaceOwnerRelease {
+						t.Fatalf("unexpected action %s", req.Action)
+					}
+					return "CHILD", cause
+				}),
+			}
+			close(owner.done)
+			err := owner.Close(t.Context())
+			if err == nil || calls != 1 {
+				t.Fatalf("release did not fail closed once: calls=%d err=%v", calls, err)
+			}
+			if code == 255 {
+				if !strings.Contains(err.Error(), "ambiguous remote state") || strings.Contains(err.Error(), "owner retained") {
+					t.Fatalf("transport failure became a confirmed refusal: %v", err)
+				}
+				return
+			}
+			for _, want := range []string{"protocol state CHILD", "remote phase is still active", "owner retained", "stop_command", "fresh lease"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("missing %q in %v", want, err)
+				}
+			}
+			if cause != nil && !errors.Is(err, cause) {
+				t.Fatal("release diagnostic lost the original refusal")
+			}
+		})
+	}
+}
+
 func newFakeWorkspaceOwnerRemote() *fakeWorkspaceOwnerRemote {
 	return &fakeWorkspaceOwnerRemote{changed: make(chan struct{})}
 }

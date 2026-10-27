@@ -5,7 +5,13 @@ import { routeCoordinatorRequest } from "../src/coordinator-entry";
 import type { CoordinatorRuntime, ProvisioningRuntime } from "../src/coordinator-runtime";
 import { FleetCoordinator, FleetDurableObject } from "../src/fleet";
 import { completeLeaseProviderCleanup } from "../src/lease-cleanup";
-import { ServeCoordinator, serveSize, serveBodyLimit, type ServeMachine } from "../src/serve";
+import {
+  ServeCoordinator,
+  serveSize,
+  serveBodyLimit,
+  serveUsageKey,
+  type ServeMachine,
+} from "../src/serve";
 import type { Env, LeaseRecord } from "../src/types";
 import { ProvisioningTestStorage } from "./provisioning-fixtures";
 
@@ -116,6 +122,119 @@ async function seedMaintenance(f: ReturnType<typeof fixture>, count: number, lea
 }
 afterEach(() => vi.useRealTimers());
 describe.each([false, true])("serve shared lifecycle durable=%s", (durable) => {
+  it("keeps current-month usage stable as live work settles into the rollup", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T00:00:00Z"));
+    const f = fixture(durable);
+    await f.route("/v1/serve/heartbeat", machine());
+    const id = "cbx_000000000001";
+    await f.create(id);
+    await f.route(`/v1/serve/leases/${id}/ready`, { machineID: mid, sshHostKey: key });
+    vi.advanceTimersByTime(30_000);
+    const expected = {
+      month: "2026-05",
+      leases: 1,
+      activeLeases: 1,
+      runtimeSeconds: 30,
+      cpuSeconds: 240,
+    };
+    expect((await f.serve.listMachines(req("/")))[0]?.usage).toEqual(expected);
+    await f.serve.release(req("/", {}), (await f.storage.get<LeaseRecord>(`lease:${id}`))!);
+    vi.advanceTimersByTime(2000);
+    expected.activeLeases = 0;
+    expect((await f.serve.listMachines(req("/")))[0]?.usage).toEqual(expected);
+    await f.route("/v1/serve/heartbeat", machine());
+    expect((await f.serve.listMachines(req("/")))[0]?.usage).toEqual(expected);
+    // Even a stale owner-index allocation reference cannot count a settled lease twice.
+    const indexed = [...f.storage.values.keys()].find((storageKey) =>
+      storageKey.startsWith("serve-owner:"),
+    )!;
+    const saved = (await f.storage.get<ServeMachine>(indexed))!;
+    await f.storage.put(indexed, { ...saved, leases: [id] });
+    expect((await f.serve.listMachines(req("/")))[0]?.usage).toEqual(expected);
+  });
+
+  it("settles each allocation once after agent cleanup, in its creation month", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-31T23:59:30Z"));
+    const f = fixture(durable);
+    await f.route("/v1/serve/heartbeat", machine());
+    const ids = ["cbx_000000000001", "cbx_000000000002"];
+    for (const id of ids) {
+      expect(
+        (await f.create(id, undefined, { serverTypeExplicit: true, serverType: "cpu4" })).status,
+      ).toBe(202);
+      await f.route(`/v1/serve/leases/${id}/ready`, { machineID: mid, sshHostKey: key });
+    }
+    vi.advanceTimersByTime(30_000);
+    for (const id of ids) {
+      await f.serve.release(req("/", {}), (await f.storage.get<LeaseRecord>(`lease:${id}`))!);
+    }
+    const running = { ...machine(), leases: ids.map((id) => ({ id, state: "running" })) };
+    await f.route("/v1/serve/heartbeat", running);
+    expect(await f.storage.get(serveUsageKey(mid, "2026-05"))).toBeUndefined();
+    const pending = (await f.serve.listMachines(req("/")))[0]!;
+    expect(pending.usage).toMatchObject({ month: "2026-06", leases: 0, activeLeases: 0 });
+
+    vi.advanceTimersByTime(2000);
+    // A failure after writing the rollup must also roll back the usage and marker.
+    f.storage.failKey = `lease:${ids[0]}`;
+    await expect(f.route("/v1/serve/heartbeat", machine())).rejects.toThrow(
+      "injected storage failure",
+    );
+    expect(await f.storage.get(serveUsageKey(mid, "2026-05"))).toBeUndefined();
+    expect(await f.storage.get(`lease:${ids[0]}`)).not.toHaveProperty("serveUsageRecordedAt");
+    delete f.storage.failKey;
+    await f.route("/v1/serve/heartbeat", machine());
+    const settled = await f.storage.get(serveUsageKey(mid, "2026-05"));
+    expect(settled).toMatchObject({ leases: 2, runtimeSeconds: 60, cpuSeconds: 240 });
+    expect(await f.storage.get(serveUsageKey(mid, "2026-06"))).toBeUndefined();
+    for (const id of ids) {
+      expect(await f.storage.get(`lease:${id}`)).toMatchObject({
+        serveUsageRecordedAt: "2026-06-01T00:00:02.000Z",
+        endedAt: "2026-06-01T00:00:00.000Z",
+      });
+      await f.serve.release(req("/", {}), (await f.storage.get<LeaseRecord>(`lease:${id}`))!);
+    }
+    // Stale allocation references must not add already-recorded leases again.
+    const registered = (await f.storage.get<ServeMachine>(`serve-machine:${mid}`))!;
+    await f.storage.put(`serve-machine:${mid}`, { ...registered, leases: ids });
+    vi.advanceTimersByTime(2000);
+    await f.route("/v1/serve/heartbeat", machine());
+    expect(await f.storage.get(serveUsageKey(mid, "2026-05"))).toEqual(settled);
+  });
+
+  it.each(["failed", "expired", "lost", "disappeared"])(
+    "settles %s leases only when their containers are absent",
+    async (reason) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-05-01T00:00:00Z"));
+      const f = fixture(durable);
+      await f.route("/v1/serve/heartbeat", machine());
+      const id = "cbx_000000000001";
+      await f.create(id);
+      await f.route(`/v1/serve/leases/${id}/ready`, { machineID: mid, sshHostKey: key });
+      vi.advanceTimersByTime(reason === "lost" ? 90_001 : 30_000);
+      if (reason === "failed")
+        await f.route(`/v1/serve/leases/${id}/failed`, {
+          machineID: mid,
+          reason: "synthetic failure",
+        });
+      if (reason === "expired") {
+        const l = (await f.storage.get<LeaseRecord>(`lease:${id}`))!;
+        await f.storage.put(`lease:${id}`, { ...l, expiresAt: "2026-05-01T00:00:29Z" });
+      }
+      if (reason === "lost" || reason === "expired") await f.serve.maintain();
+      expect(await f.storage.get(serveUsageKey(mid, "2026-05"))).toBeUndefined();
+      await f.route("/v1/serve/heartbeat", machine());
+      expect(await f.storage.get(serveUsageKey(mid, "2026-05"))).toMatchObject({
+        leases: 1,
+        runtimeSeconds: reason === "lost" ? 90 : 30,
+        cpuSeconds: reason === "lost" ? 720 : 240,
+      });
+    },
+  );
+
   it("validates the front door and stores its fingerprint", async () => {
     const f = fixture(durable);
     for (const frontDoor of [

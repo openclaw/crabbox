@@ -15,6 +15,7 @@ type LocalContainerConfig struct {
 	Network      string `config:"network" env:"CRABBOX_LOCAL_CONTAINER_NETWORK" flag:"local-container-network" sources:"user,repo,env,flag" help:"container network for local-container leases" default:"bridge" fileIgnoreEmpty:"true" fileStorage:"value"`
 	DockerSocket bool   `config:"dockerSocket" env:"CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET" flag:"local-container-docker-socket" sources:"user,repo,env,flag" help:"mount the host Docker-compatible socket into local-container leases so docker commands use the host engine"`
 	NoHostname   bool   `config:"noHostname" env:"CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME" sources:"user,repo,env"`
+	OCIRuntime   string `config:"ociRuntime" env:"CRABBOX_LOCAL_CONTAINER_OCI_RUNTIME" flag:"local-container-oci-runtime" sources:"user,repo,env,flag" help:"OCI runtime for docker run --runtime, for example io.containerd.kata.v2 or runsc" fileIgnoreEmpty:"true" fileStorage:"value"`
 	// Host volumes remain an explicit CLI action, never file or environment input.
 	Volumes            []string          `flag:"local-container-volume" sources:"flag" help:"bind-mount a host path into the container; host:container[:ro]; repeatable" flagList:"append-raw"`
 	CheckpointMetadata map[string]string `sources:"runtime" yaml:"-" json:"-"`
