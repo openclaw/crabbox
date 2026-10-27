@@ -196,3 +196,10 @@ This is execution, authorization, and lifecycle qualification on the recorded
 native target—not Windows PTY support, GPU qualification, or network isolation.
 Windows networking remains explicitly allowed. Earlier Linux/upgrade evidence
 and the historical broad-local timeout remain separately scoped above.
+
+
+The subsequent CI build-only correction moved the byte-identical Windows
+launcher helper into the Windows-tagged source file. Linux-targeted deadcode
+v0.45.0 then returned no findings; the native Windows CMD regression passed
+again (0.36 seconds), and its temporary test root was removed. The qualified
+launcher command and lifecycle behavior did not change.

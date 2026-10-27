@@ -139,5 +139,12 @@
     "Created missing isolated macOS cache directory before pool borrowing",
     "Refreshed task-local port/tunnel after Docker assigned a new random loopback port on coordinator restart",
     "Supplied synthetic operator identity on administrative cleanup requests"
-  ]
+  ],
+  "postProofBuildCorrection": {
+    "change": "Move the byte-identical mxcEndpointCommand helper into runtime_windows.go so Linux deadcode excludes Windows-only code",
+    "linuxGate": "GOOS=linux GOARCH=amd64 deadcode v0.45.0 -test ./...: empty output, exit 0",
+    "nativeWindowsRegression": "TestMXCEndpointCommandThroughCMD: passed after relocation, 0.36 seconds",
+    "temporaryRegressionRootRemoved": true,
+    "runtimeBehaviorChanged": false
+  }
 }
