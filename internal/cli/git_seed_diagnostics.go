@@ -8,17 +8,19 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 const gitSeedDiagnosticLimit = 16 << 10
 
 // Remote output is untrusted, including helper output and URLs. Only fixed
 // labels leave this classifier; truncated captures are discarded before parsing.
-func warnRemoteGitSeedFailure(w io.Writer, output string, err error) {
-	reportRemoteGitSeedFailure(w, output, err, "continuing with file sync")
+// ctx is the context the seed ran under; it attributes interrupted exits.
+func warnRemoteGitSeedFailure(ctx context.Context, w io.Writer, output string, err error) {
+	reportRemoteGitSeedFailure(ctx, w, output, err, "continuing with file sync")
 }
 
-func reportRemoteGitSeedFailure(w io.Writer, output string, err error, disposition string) {
+func reportRemoteGitSeedFailure(ctx context.Context, w io.Writer, output string, err error, disposition string) {
 	var truncated *gitOriginDiagnosticsTruncatedError
 	if errors.As(err, &truncated) {
 		output = ""
@@ -72,15 +74,57 @@ func reportRemoteGitSeedFailure(w io.Writer, output string, err error, dispositi
 	case phase == "verify":
 		reason = "verification"
 	}
-	status := "unknown"
+	status := remoteGitSeedExitStatus(ctx, err)
+	fmt.Fprintf(w, "warning: remote git seed failed: phase=%s reason=%s exit=%s; %s; Git metadata was not seeded or verified\n", phase, reason, status, disposition)
+}
+
+// remoteGitSeedExitStatus maps a seed's local process outcome to a fixed label.
+// A numeric exit code is a completed remote result and is reported as-is. A
+// signalled or otherwise unknown outcome under a finished context is attributed
+// to that cancellation or deadline; other signals are reported by name.
+func remoteGitSeedExitStatus(ctx context.Context, err error) string {
+	if status := contextExitStatus(err); status != "" {
+		return status
+	}
 	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
+		return strconv.Itoa(exitErr.ExitCode())
+	}
+	// exec reports a context-killed ssh as an ordinary signal exit, so the
+	// context itself is the only evidence that Crabbox interrupted the seed.
+	if status := contextExitStatus(ctx.Err()); status != "" {
+		return status
+	}
+	if exitErr != nil {
+		if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			return "signal:" + signalLabel(ws.Signal())
+		}
+	}
+	return "unknown"
+}
+
+// contextExitStatus labels context cancellation and deadline errors, or
+// returns "" for any other error.
+func contextExitStatus(err error) string {
 	switch {
 	case errors.Is(err, context.Canceled):
-		status = "cancelled"
+		return "cancelled"
 	case errors.Is(err, context.DeadlineExceeded):
-		status = "deadline"
-	case errors.As(err, &exitErr) && exitErr.ExitCode() >= 0:
-		status = strconv.Itoa(exitErr.ExitCode())
+		return "deadline"
 	}
-	fmt.Fprintf(w, "warning: remote git seed failed: phase=%s reason=%s exit=%s; %s; Git metadata was not seeded or verified\n", phase, reason, status, disposition)
+	return ""
+}
+
+// signalLabel renders the platform's fixed signal description (for example
+// "killed") as a single lowercase token safe to embed in a diagnostic field.
+func signalLabel(sig syscall.Signal) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		if r >= 'A' && r <= 'Z' {
+			return r - 'A' + 'a'
+		}
+		return '-'
+	}, sig.String())
 }

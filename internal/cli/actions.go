@@ -734,7 +734,7 @@ func (a App) seedLocalActionsAncestor(ctx context.Context, cfg Config, repo Repo
 		if _, fallback := gitSeedRuntimeFallbackResult(plan, out, err); fallback {
 			return false, nil
 		}
-		reportRemoteGitSeedFailure(a.Stderr, out, err, "aborting before file sync")
+		reportRemoteGitSeedFailure(ctx, a.Stderr, out, err, "aborting before file sync")
 		return false, Exit(6, "local Actions ancestor seed failed: %v", err)
 	}
 	fmt.Fprintf(a.Stderr, "local Actions Git baseline=%s; selected source=%s uses full manifest sync\n", ancestor, repo.Head)
@@ -783,7 +783,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 				coherence = gitCoherencePlan{}
 				fmt.Fprintf(a.Stderr, "git origin fallback reason=%s; using plain manifest sync\n", reason)
 			} else {
-				reportRemoteGitSeedFailure(a.Stderr, out, err, "aborting before file sync")
+				reportRemoteGitSeedFailure(ctx, a.Stderr, out, err, "aborting before file sync")
 				return plainManifest, Exit(6, "remote git seed failed: %v", err)
 			}
 		}
