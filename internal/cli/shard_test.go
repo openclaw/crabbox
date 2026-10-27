@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -841,29 +842,6 @@ func TestShardHelpPrintsUsage(t *testing.T) {
 	}
 }
 
-func TestConfigureShardRunOwnsLeaseCleanup(t *testing.T) {
-	for _, tc := range []struct {
-		outerKeep bool
-		want      bool
-	}{
-		{outerKeep: false, want: true},
-		{outerKeep: true, want: false},
-	} {
-		t.Run(fmt.Sprintf("keep=%v", tc.outerKeep), func(t *testing.T) {
-			app := App{}
-			shardApp, flush := app.forShard(&shardOutputMux{}, 1, 1, false, &shardRunOutcome{})
-			defer flush()
-			if shardApp.shardOwnsLeaseCleanup {
-				t.Fatal("forShard must not set shardOwnsLeaseCleanup")
-			}
-			configureShardRunOwnsLeaseCleanup(&shardApp, tc.outerKeep)
-			if shardApp.shardOwnsLeaseCleanup != tc.want {
-				t.Fatalf("shardOwnsLeaseCleanup=%v, want %v", shardApp.shardOwnsLeaseCleanup, tc.want)
-			}
-		})
-	}
-}
-
 func TestShardProvisionFailureSummarySanitizesControlBytes(t *testing.T) {
 	// LocalCommandError-style stderr can include ESC/CSI; verdict output must not.
 	raw := "provision failed: \x1b[31mboom\x1b[0m\x00\x7f"
@@ -903,284 +881,165 @@ func TestShardProvisionFailureSummarySanitizesControlBytes(t *testing.T) {
 	assertTerminalSafe(t, report.Shards[0].Error)
 }
 
-const shardAuthorityProviderName = "shard-authority-test"
+const shardCarryProviderName = "shard-carry-test"
 
-type shardAuthorityTestProvider struct{}
+type shardCarryTestProvider struct{}
 
-func (shardAuthorityTestProvider) Spec() ProviderSpec {
+func (shardCarryTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
-		Name:        shardAuthorityProviderName,
+		Name:        shardCarryProviderName,
 		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetLinux}},
 		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
 		Coordinator: CoordinatorNever,
 	}
 }
-func (shardAuthorityTestProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
-func (shardAuthorityTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+func (shardCarryTestProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
+func (shardCarryTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
-func (p shardAuthorityTestProvider) Configure(Config, Runtime) (Backend, error) {
-	if shardAuthorityTestBackend == nil {
-		return nil, errors.New("shard authority test backend not installed")
+func (p shardCarryTestProvider) Configure(Config, Runtime) (Backend, error) {
+	if shardCarryTestBackend == nil {
+		return nil, errors.New("shard carry test backend not installed")
 	}
-	return shardAuthorityTestBackend, nil
+	return shardCarryTestBackend, nil
 }
 
-// shardAuthorityDeleteBackend fakes only the provider Delete call. Claim
-// ownership is fenced by production RemoveLeaseClaimIfUnchangedAfter (AWS-style)
-// after refreshAuthorizedForkReleaseClaim in checkpointForkReleaseBindings.
-type shardAuthorityDeleteBackend struct {
-	spec    ProviderSpec
-	lease   LeaseTarget
-	mu      sync.Mutex
-	deletes int
+// shardCarryBackend is a minimal SSH lease backend for proving runCommand hands
+// AuthorizedClaim back to runOneShard. Release-authority (allow + stale refuse)
+// is covered by TestShardCleanupHetznerReleaseAuthority against the real
+// Hetzner ReleaseLease path.
+type shardCarryBackend struct {
+	spec  ProviderSpec
+	lease LeaseTarget
 }
 
-var shardAuthorityTestBackend *shardAuthorityDeleteBackend
+var shardCarryTestBackend *shardCarryBackend
 
-func (b *shardAuthorityDeleteBackend) Spec() ProviderSpec { return b.spec }
-func (b *shardAuthorityDeleteBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
+func (b *shardCarryBackend) Spec() ProviderSpec { return b.spec }
+func (b *shardCarryBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
 	return b.lease, nil
 }
-func (b *shardAuthorityDeleteBackend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
+func (b *shardCarryBackend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
 	return b.lease, nil
 }
-func (b *shardAuthorityDeleteBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
+func (b *shardCarryBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
 	return nil, nil
 }
-func (b *shardAuthorityDeleteBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
+func (b *shardCarryBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
 	server := req.Lease.Server
 	server.Provider = b.spec.Name
 	return server, nil
 }
-func (b *shardAuthorityDeleteBackend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
-func (b *shardAuthorityDeleteBackend) ReleaseLease(_ context.Context, req ReleaseLeaseRequest) error {
-	snapshot, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
-	if !set || !exists {
-		return errors.New("release missing carried claim snapshot")
+func (b *shardCarryBackend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
+func (b *shardCarryBackend) ReleaseLease(context.Context, ReleaseLeaseRequest) error {
+	return nil
+}
+
+// TestRunOneShardCarriesAuthorizedClaimOnly drives real runOneShard → runCommand
+// and asserts the post-run AuthorizedClaim is handed to carryReleaseClaim.
+// Provider delete fencing lives in TestShardCleanupHetznerReleaseAuthority.
+func TestRunOneShardCarriesAuthorizedClaimOnly(t *testing.T) {
+	RegisterProvider(shardCarryTestProvider{})
+	t.Cleanup(func() { delete(providerRegistry, shardCarryProviderName) })
+
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
+	installRecordingSSH(t, dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+
+	repo, err := findRepo()
+	if err != nil {
+		t.Fatal(err)
 	}
-	deleteExact := func() error {
-		b.mu.Lock()
-		b.deletes++
-		b.mu.Unlock()
+	const leaseID = "cbx_shardcarry01"
+	cfg := baseConfig()
+	cfg.Provider = shardCarryProviderName
+	server := Server{
+		CloudID:  "i-shard-carry",
+		Provider: cfg.Provider,
+		Labels: map[string]string{
+			"lease":    leaseID,
+			"provider": cfg.Provider,
+			"slug":     "shard-carry",
+			"state":    "ready",
+		},
+	}
+	target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetLinux, SSHConfigProxy: true}
+	if err := ClaimLeaseTargetForRepoConfig(leaseID, "shard-carry", cfg, server, target, repo.Root, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	acquired, err := ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetServerLeaseClaimSnapshot(&server, acquired, true)
+	lease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+	backend := &shardCarryBackend{spec: shardCarryTestProvider{}.Spec(), lease: lease}
+	shardCarryTestBackend = backend
+	t.Cleanup(func() {
+		shardCarryTestBackend = nil
+		RemoveLeaseClaim(leaseID)
+	})
+
+	var stderr bytes.Buffer
+	var carried *leaseClaim
+	fakeOwner := func(ctx context.Context, target SSHTarget, id string, _ io.Writer) (*workspaceOwner, error) {
+		ownerCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		close(done)
+		return &workspaceOwner{
+			target: target, transport: runRecoveryOwnerTransport{},
+			key: workspaceOwnerKey(id), token: strings.Repeat("a", 64), ttl: time.Minute,
+			ctx: ownerCtx, cancel: cancel, stop: make(chan struct{}), done: done,
+		}, nil
+	}
+	app := App{Stdout: io.Discard, Stderr: &stderr, workspaceOwnerAcquirer: fakeOwner}
+	releaseCFG := cfg
+	release, carryReleaseClaim := app.checkpointForkReleaseBindings(&server, &target, leaseID, nil, backend, &releaseCFG)
+	provision := func(context.Context, int, string) (checkpointForkProvision, error) {
+		return checkpointForkProvision{
+			Lease: lease,
+			Release: func(ctx context.Context) {
+				release(ctx)
+			},
+			carryReleaseClaim: func(claim leaseClaim) {
+				cloned := claim
+				carried = &cloned
+				carryReleaseClaim(claim)
+			},
+		}, nil
+	}
+	execute := func(ctx context.Context, _ int, runArgs []string, outcome *shardRunOutcome) error {
+		shardApp := App{Stdout: io.Discard, Stderr: &stderr, runOutcome: outcome, workspaceOwnerAcquirer: fakeOwner}
+		args := append([]string{
+			"--provider", shardCarryProviderName,
+			"--no-sync", "--no-hydrate", "--timing-record", "off",
+		}, runArgs...)
+		if err := shardApp.runCommand(ctx, args); err != nil {
+			return err
+		}
+		if outcome.AuthorizedClaim == nil {
+			return errors.New("runCommand did not return AuthorizedClaim")
+		}
 		return nil
 	}
-	_, diskExists, err := ReadLeaseClaimWithPresence(req.Lease.LeaseID)
-	if err != nil {
-		return err
+	opts := shardTestOptions(1)
+	opts.Keep = false
+	opts.Command = []string{"true"}
+	result := app.runOneShard(context.Background(), func() {}, opts, &shardOutputMux{}, provision, execute, 1)
+	if !result.Recorded || result.ExitCode != 0 {
+		t.Fatalf("result=%#v stderr=%s", result, stderr.String())
 	}
-	// Missing claim: carried snapshot still authorizes delete via the real
-	// CleanupLeaseClaimIfUnchangedAfter fence (same as fork release docs).
-	if !diskExists {
-		return CleanupLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, leaseClaim{}, false, deleteExact)
+	if carried == nil || carried.LeaseID != leaseID {
+		t.Fatalf("carryReleaseClaim got %#v, want lease %s", carried, leaseID)
 	}
-	return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, snapshot, deleteExact)
-}
-func (b *shardAuthorityDeleteBackend) deleteCount() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.deletes
-}
-
-// TestRunOneShardCarriesAuthorizedClaimOnly drives the real runOneShard →
-// runCommand → checkpointForkReleaseBindings path. Only remote SSH I/O and the
-// innermost provider Delete are faked; claim writes use the real claim store and
-// ownership is validated before any delete.
-func TestRunOneShardCarriesAuthorizedClaimOnly(t *testing.T) {
-	RegisterProvider(shardAuthorityTestProvider{})
-	t.Cleanup(func() { delete(providerRegistry, shardAuthorityProviderName) })
-
-	cases := []struct {
-		name string
-		// afterRun mutates the claim store after real run --keep finished, as a
-		// concurrent reclaim would between run and shard release.
-		afterRun    func(t *testing.T, leaseID string, authorized leaseClaim)
-		wantDeletes int
-		wantRefuse  bool
-	}{
-		{
-			name:        "authorized update releases",
-			wantDeletes: 1,
-		},
-		{
-			name: "same-second reclaim refuses",
-			afterRun: func(t *testing.T, leaseID string, authorized leaseClaim) {
-				t.Helper()
-				next := authorized
-				next.Labels = cloneStringMap(authorized.Labels)
-				if next.Labels == nil {
-					next.Labels = map[string]string{}
-				}
-				next.Labels["run"] = "reclaimed"
-				updated, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, authorized, next)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if updated.ClaimedAt != authorized.ClaimedAt {
-					t.Fatalf("ClaimedAt=%q, want same-second %q", updated.ClaimedAt, authorized.ClaimedAt)
-				}
-			},
-			wantRefuse: true,
-		},
-		{
-			name: "away and back (ABA) refuses",
-			afterRun: func(t *testing.T, leaseID string, authorized leaseClaim) {
-				t.Helper()
-				foreign := authorized
-				foreign.RepoRoot = filepath.Join(t.TempDir(), "hijacked")
-				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, authorized, foreign); err != nil {
-					t.Fatal(err)
-				}
-				cur, err := ReadLeaseClaim(leaseID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				back := authorized
-				back.ClaimedAt = time.Now().UTC().Add(2 * time.Second).Format(time.RFC3339)
-				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, cur, back); err != nil {
-					t.Fatal(err)
-				}
-			},
-			wantRefuse: true,
-		},
-		{
-			name: "reassigned to another owner refuses",
-			afterRun: func(t *testing.T, leaseID string, authorized leaseClaim) {
-				t.Helper()
-				next := authorized
-				next.RepoRoot = filepath.Join(t.TempDir(), "hijacked")
-				next.ClaimedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339)
-				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, authorized, next); err != nil {
-					t.Fatal(err)
-				}
-			},
-			wantRefuse: true,
-		},
-		{
-			name: "revoked claim refuses",
-			afterRun: func(t *testing.T, leaseID string, authorized leaseClaim) {
-				t.Helper()
-				revoked := authorized
-				revoked.CloudID = ""
-				revoked.ClaimedAt = time.Now().UTC().Add(time.Second).Format(time.RFC3339)
-				if _, err := ReplaceLeaseClaimIfUnchangedDurableReturning(leaseID, authorized, revoked); err != nil {
-					t.Fatal(err)
-				}
-			},
-			wantRefuse: true,
-		},
-		{
-			name: "missing claim file releases",
-			afterRun: func(t *testing.T, leaseID string, _ leaseClaim) {
-				t.Helper()
-				path, err := leaseClaimPath(leaseID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Remove(path); err != nil {
-					t.Fatal(err)
-				}
-			},
-			wantDeletes: 1,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			clearConfigEnv(t)
-			dir := t.TempDir()
-			isolateRunTestUserDirs(t, dir)
-			installRecordingSSH(t, dir)
-			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
-			t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
-			t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
-
-			repo, err := findRepo()
-			if err != nil {
-				t.Fatal(err)
-			}
-			const leaseID = "cbx_shardcarry01"
-			cfg := baseConfig()
-			cfg.Provider = shardAuthorityProviderName
-			server := Server{
-				CloudID:  "i-shard-authority",
-				Provider: cfg.Provider,
-				Labels: map[string]string{
-					"lease":    leaseID,
-					"provider": cfg.Provider,
-					"slug":     "shard-authority",
-					"state":    "ready",
-				},
-			}
-			target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetLinux, SSHConfigProxy: true}
-			if err := ClaimLeaseTargetForRepoConfig(leaseID, "shard-authority", cfg, server, target, repo.Root, cfg.IdleTimeout, false); err != nil {
-				t.Fatal(err)
-			}
-			acquired, err := ReadLeaseClaim(leaseID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			SetServerLeaseClaimSnapshot(&server, acquired, true)
-			lease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
-			backend := &shardAuthorityDeleteBackend{spec: shardAuthorityTestProvider{}.Spec(), lease: lease}
-			shardAuthorityTestBackend = backend
-			t.Cleanup(func() {
-				shardAuthorityTestBackend = nil
-				RemoveLeaseClaim(leaseID)
-			})
-
-			var stderr bytes.Buffer
-			fakeOwner := func(ctx context.Context, target SSHTarget, id string, _ io.Writer) (*workspaceOwner, error) {
-				ownerCtx, cancel := context.WithCancel(ctx)
-				done := make(chan struct{})
-				close(done)
-				return &workspaceOwner{
-					target: target, transport: runRecoveryOwnerTransport{},
-					key: workspaceOwnerKey(id), token: strings.Repeat("a", 64), ttl: time.Minute,
-					ctx: ownerCtx, cancel: cancel, stop: make(chan struct{}), done: done,
-				}, nil
-			}
-			app := App{Stdout: io.Discard, Stderr: &stderr, workspaceOwnerAcquirer: fakeOwner}
-			releaseCFG := cfg
-			release, carryReleaseClaim := app.checkpointForkReleaseBindings(&server, &target, leaseID, nil, backend, &releaseCFG)
-			provision := func(context.Context, int, string) (checkpointForkProvision, error) {
-				return checkpointForkProvision{
-					Lease:             lease,
-					Release:           release,
-					carryReleaseClaim: carryReleaseClaim,
-				}, nil
-			}
-			execute := func(ctx context.Context, _ int, runArgs []string, outcome *shardRunOutcome) error {
-				shardApp := App{Stdout: io.Discard, Stderr: &stderr, runOutcome: outcome, workspaceOwnerAcquirer: fakeOwner}
-				args := append([]string{
-					"--provider", shardAuthorityProviderName,
-					"--no-sync", "--no-hydrate", "--timing-record", "off",
-				}, runArgs...)
-				if err := shardApp.runCommand(ctx, args); err != nil {
-					return err
-				}
-				if outcome.AuthorizedClaim == nil {
-					return errors.New("runCommand did not return AuthorizedClaim")
-				}
-				if tc.afterRun != nil {
-					tc.afterRun(t, leaseID, *outcome.AuthorizedClaim)
-				}
-				return nil
-			}
-			opts := shardTestOptions(1)
-			opts.Keep = false
-			opts.Command = []string{"true"}
-			result := app.runOneShard(context.Background(), func() {}, opts, &shardOutputMux{}, provision, execute, 1)
-			if !result.Recorded || result.ExitCode != 0 {
-				t.Fatalf("result=%#v stderr=%s", result, stderr.String())
-			}
-			if got := backend.deleteCount(); got != tc.wantDeletes {
-				t.Fatalf("provider deletes=%d, want %d stderr=%q", got, tc.wantDeletes, stderr.String())
-			}
-			if tc.wantRefuse && !strings.Contains(stderr.String(), "refusing release") {
-				t.Fatalf("stderr missing refusal:\n%s", stderr.String())
-			}
-		})
+	snapshot, exists, set := ServerLeaseClaimSnapshot(server)
+	if !set || !exists || !reflect.DeepEqual(snapshot, *carried) {
+		t.Fatalf("server snapshot set=%v exists=%v claim=%#v carried=%#v", set, exists, snapshot, carried)
 	}
 }
 

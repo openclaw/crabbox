@@ -1608,17 +1608,17 @@ func (a App) provisionManagedCheckpointFork(ctx context.Context, cfg Config, bac
 	return provision, nil
 }
 
-// refreshAuthorizedForkReleaseClaim confirms the persisted claim still exactly
+// RefreshAuthorizedForkReleaseClaim confirms the persisted claim still exactly
 // matches the carried acquisition/run snapshot (owner + revision generation).
 // Authorized successors (for example run --keep) must be carried into the
 // snapshot before release via carryReleaseClaim; this refresh never adopts a
 // different revision. ClaimedAt is not used: it is whole-second RFC3339, so a
 // same-second reclaim could collide and let stale cleanup adopt a replacement
 // generation. A replaced, revoked, reclaimed, or ABA claim fails closed. A
-// missing claim leaves the carried snapshot unchanged so the fenced release
-// path can decide (CleanupLeaseClaimIfUnchangedAfter with expectedExists=false
-// still authorizes provider delete from the carried acquisition).
-func refreshAuthorizedForkReleaseClaim(server *Server, leaseID string) error {
+// missing claim leaves the carried snapshot unchanged so the provider
+// ReleaseLease claim check decides (AWS/Hetzner refuse destructive release
+// without an exact local claim).
+func RefreshAuthorizedForkReleaseClaim(server *Server, leaseID string) error {
 	if server == nil {
 		return nil
 	}
@@ -1646,12 +1646,16 @@ func authorizedForkReleaseClaimContinuation(expected, current leaseClaim) bool {
 	return reflect.DeepEqual(expected, current)
 }
 
-// checkpointForkReleaseBindings builds the production release fence used by
+// CheckpointForkReleaseBindings builds the production release fence used by
 // provisionCheckpointForkWithoutClaim and shard cleanup after run --keep.
 // carryReleaseClaim installs an authorized post-run claim into *server.
 // server, target, and cfg are read at release time so later claim updates,
 // resolveNetworkTarget (--network tailscale), and applyResolvedServerConfig
 // stay visible to shutdown/egress/Tailscale logout — matching the old closure.
+func (a App) CheckpointForkReleaseBindings(server *Server, target *SSHTarget, leaseID string, coordinator *CoordinatorClient, sshBackend SSHLeaseBackend, cfg *Config) (release func(context.Context), carryReleaseClaim func(LeaseClaim)) {
+	return a.checkpointForkReleaseBindings(server, target, leaseID, coordinator, sshBackend, cfg)
+}
+
 func (a App) checkpointForkReleaseBindings(server *Server, target *SSHTarget, leaseID string, coordinator *CoordinatorClient, sshBackend SSHLeaseBackend, cfg *Config) (release func(context.Context), carryReleaseClaim func(leaseClaim)) {
 	var releaseOnce sync.Once
 	carryReleaseClaim = func(claim leaseClaim) {
@@ -1663,7 +1667,7 @@ func (a App) checkpointForkReleaseBindings(server *Server, target *SSHTarget, le
 			// Exact generation fence: the carried snapshot (acquisition, or an
 			// authorized successor installed via carryReleaseClaim) must still
 			// match the persisted claim. Never adopt a different revision here.
-			if err := refreshAuthorizedForkReleaseClaim(&releaseLease.Server, leaseID); err != nil {
+			if err := RefreshAuthorizedForkReleaseClaim(&releaseLease.Server, leaseID); err != nil {
 				fmt.Fprintf(a.Stderr, "warning: refusing release for lease %s: %v\n", leaseID, err)
 				return
 			}

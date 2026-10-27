@@ -193,7 +193,7 @@ func TestCheckpointForkReleaseClaimOwnership(t *testing.T) {
 			// Mirrors provisionCheckpointForkWithoutClaim's release gate, then the
 			// fenced provider delete path (RemoveLeaseClaimIfUnchangedAfter /
 			// CleanupLeaseClaimIfUnchangedAfter).
-			if err := refreshAuthorizedForkReleaseClaim(&releaseLease.Server, leaseID); err != nil {
+			if err := RefreshAuthorizedForkReleaseClaim(&releaseLease.Server, leaseID); err != nil {
 				fmt.Fprintf(&stderr, "warning: refusing release for lease %s: %v\n", leaseID, err)
 				if !errors.Is(err, ErrReleaseLeaseOwnershipChanged) {
 					t.Fatalf("err=%v, want ownership-changed sentinel", err)
