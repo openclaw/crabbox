@@ -56,7 +56,8 @@ export interface PoolAccessReservation {
 // delayed installs as well as existing sessions, even if install's reply was lost.
 export interface ProviderPoolAccess {
   enroll(lease: LeaseRecord): Promise<PoolAccessBinding>;
-  install(grant: PoolAccessGrant): Promise<void>;
+  // Session-backed providers may replace the workspace when rotating access.
+  install(grant: PoolAccessGrant): Promise<void | { workRoot: string }>;
   revoke(grant: PoolAccessGrant): Promise<{ destroyed: boolean }>;
 }
 
@@ -452,10 +453,11 @@ export class ReadyPoolAccess {
       await this.cleanup(outcome.leaseID);
       return this.result(outcome.leaseID, key);
     }
+    let placement: void | { workRoot: string };
     try {
       const provider = this.hooks.provider(outcome.binding);
       if (!provider) throw new Error("provider pool access unavailable");
-      await provider.install(outcome);
+      placement = await provider.install(outcome);
     } catch {
       await this.invalidateLease(outcome.leaseID, "access installation uncertain");
       return json(
@@ -487,6 +489,7 @@ export class ReadyPoolAccess {
       }
       current.state = "active";
       current.updatedAt = new Date().toISOString();
+      if (placement) entry.workRoot = placement.workRoot;
       await this.save(storage, current, entry);
       await this.hooks.counters(storage, entry, { grantsAcknowledged: 1 });
       return true;

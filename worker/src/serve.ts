@@ -9,6 +9,7 @@ import { requestOrg } from "./org-identity";
 import { publicLeaseRecord } from "./org-records";
 import { serveRelayBackend } from "./serve-relay";
 import { ServeRelayControl } from "./serve-relay-control";
+import { isHostRelayRequest } from "./ssh-host-relay";
 import type { Env, LeaseRecord, LeaseRequest, CreateAttemptRecord } from "./types";
 import { usageSummary, type UsageGroup } from "./usage";
 
@@ -297,7 +298,7 @@ export function serveSize(
   if (!cpus) throw new ServeError("invalid_serve_class");
   return { cpus, memoryMB: cpus * 2048 };
 }
-async function hostKeyFingerprint(key: string): Promise<string> {
+export async function hostKeyFingerprint(key: string): Promise<string> {
   try {
     const encoded = key.split(/\s+/)[1]!;
     const bytes = Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0));
@@ -427,7 +428,7 @@ export class ServeCoordinator {
   async route(r: Request, parts: string[]): Promise<Response> {
     try {
       const disabled = serveDisabledResponse(this.env, requestOwner(r));
-      if (disabled)
+      if (disabled && !(await isHostRelayRequest(this.runtime.storage, parts)))
         return parts[2] === "relay" || parts[4] === "relay"
           ? json({ error: "serve_relay_not_allowed" }, { status: 403 })
           : disabled;

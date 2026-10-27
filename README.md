@@ -358,6 +358,7 @@ Catalog category: `byo-ssh`.
 
 | Provider | Best fit |
 | --- | --- |
+| [ssh-host](docs/providers/ssh-host.md) | Coordinator-managed exclusive hosts with outbound SSH relay and confirmed cleanup. |
 | [ssh](docs/providers/ssh.md) | Your existing Linux, macOS, or Windows host; Crabbox never deletes the machine. |
 
 ### Service control
