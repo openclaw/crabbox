@@ -30,6 +30,7 @@ import (
 // SSHJump describes an authenticated SSH transport hop; the destination still
 // has its own end-to-end SSH host key and authentication.
 type SSHJump struct {
+	RelayOnly    bool `json:"relayOnly,omitempty"`
 	Relay        bool `json:"relay,omitempty"`
 	useRelay     bool
 	Candidates   []SSHJumpCandidate `json:"candidates,omitempty"`

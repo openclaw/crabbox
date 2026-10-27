@@ -1220,7 +1220,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if ownerQuiescent && readyPoolReturnNeedsHydrationStop(result) {
 			a.writeActionsHydrationStopBestEffort(context.WithoutCancel(ctx), target, borrowedPool.Entry.LeaseID)
 		}
-		returnErr := returnReadyPoolAfterWorkspaceOwner(ctx, &lifecycleOwner, func(returnCtx context.Context) error {
+		returnErr := returnReadyPoolAfterWorkspaceOwner(ctx, leaseID, &lifecycleOwner, func(returnCtx context.Context) error {
 			if runtimeErr := runtimeScope.finalizeLease(returnCtx, leaseID, false, nil); runtimeErr != nil {
 				return runtimeErr
 			}
@@ -3599,7 +3599,7 @@ afterSync:
 	return nil
 }
 
-func returnReadyPoolAfterWorkspaceOwner(ctx context.Context, owner **workspaceOwner, returnLease func(context.Context) error) error {
+func returnReadyPoolAfterWorkspaceOwner(ctx context.Context, leaseID string, owner **workspaceOwner, returnLease func(context.Context) error) error {
 	if owner != nil && *owner != nil {
 		current := *owner
 		*owner = nil
@@ -3611,6 +3611,11 @@ func returnReadyPoolAfterWorkspaceOwner(ctx context.Context, owner **workspaceOw
 	}
 	returnCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
+	// Revoke access only after the invocation has closed its pinned relay masters.
+	// Otherwise an orderly pool return is reported as an SSH exit-255 failure.
+	if err := closeServeRelayControls(returnCtx, leaseID); err != nil {
+		return fmt.Errorf("close relay before pool return: %w", err)
+	}
 	return returnLease(returnCtx)
 }
 

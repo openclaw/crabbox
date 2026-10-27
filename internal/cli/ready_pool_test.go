@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -64,7 +65,7 @@ func TestReadyPoolReturnReleasesWorkspaceOwnerBeforeCoordinator(t *testing.T) {
 				stop:      make(chan struct{}),
 				done:      done,
 			}
-			err := returnReadyPoolAfterWorkspaceOwner(context.Background(), &owner, func(context.Context) error {
+			err := returnReadyPoolAfterWorkspaceOwner(context.Background(), "cbx_000000000001", &owner, func(context.Context) error {
 				events = append(events, "coordinator."+disposition)
 				return nil
 			})
@@ -96,7 +97,7 @@ func TestReadyPoolReturnStopsWhenWorkspaceOwnerReleaseFails(t *testing.T) {
 		done:      done,
 	}
 	returned := false
-	err := returnReadyPoolAfterWorkspaceOwner(context.Background(), &owner, func(context.Context) error {
+	err := returnReadyPoolAfterWorkspaceOwner(context.Background(), "cbx_000000000001", &owner, func(context.Context) error {
 		returned = true
 		return nil
 	})
@@ -124,7 +125,7 @@ func TestReadyPoolReturnGetsFreshCoordinatorBudgetAfterOwnerRelease(t *testing.T
 	}
 	result := make(chan error, 1)
 	go func() {
-		result <- returnReadyPoolAfterWorkspaceOwner(context.Background(), &owner, func(ctx context.Context) error {
+		result <- returnReadyPoolAfterWorkspaceOwner(context.Background(), "cbx_000000000001", &owner, func(ctx context.Context) error {
 			events = append(events, "coordinator.return")
 			deadline, ok := ctx.Deadline()
 			if !ok || time.Until(deadline) <= 29*time.Second || time.Until(deadline) > 30*time.Second {
@@ -491,6 +492,35 @@ func TestRunReadyPoolEndpointPrecedesExplicitSSHPort(t *testing.T) {
 			}
 			if borrowed.Load() != 1 || returned.Load() != 1 {
 				t.Fatalf("borrow=%d return=%d, want one exact borrow and return", borrowed.Load(), returned.Load())
+			}
+		})
+	}
+}
+
+func TestReadyPoolReturnClosesRelayBeforeRevocation(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			closed := false
+			returned := false
+			controls := &serveRelayControls{entries: map[[32]byte]serveRelayControl{
+				{}: {leaseID: "cbx_000000000001", close: func() error {
+					closed = true
+					if fail {
+						return fmt.Errorf("close failed")
+					}
+					return nil
+				}},
+			}}
+			ctx := context.WithValue(t.Context(), serveRelayControlsKey{}, controls)
+			err := returnReadyPoolAfterWorkspaceOwner(ctx, "cbx_000000000001", nil, func(context.Context) error {
+				if !closed {
+					t.Fatal("revoked access before closing relay")
+				}
+				returned = true
+				return nil
+			})
+			if !closed || returned == fail || (err != nil) != fail {
+				t.Fatalf("closed=%v returned=%v err=%v", closed, returned, err)
 			}
 		})
 	}
