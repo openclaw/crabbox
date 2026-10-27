@@ -63,7 +63,7 @@ class HostPoolAccess implements ProviderPoolAccess {
           ? a.readyGeneration === generation && a.operation === "prepare"
           : a.cleanGeneration === generation && a.operation === "idle"
       )
-        return;
+        return l;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     throw new Error("host acknowledgement pending");
@@ -83,7 +83,8 @@ class HostPoolAccess implements ProviderPoolAccess {
   }
   async install(grant: PoolAccessGrant) {
     await this.command(grant.leaseID, grant.generation, "prepare", grant);
-    await this.wait(grant.leaseID, grant.generation, "ready");
+    const ready = await this.wait(grant.leaseID, grant.generation, "ready");
+    return { workRoot: ready.workRoot! };
   }
   async revoke(grant: PoolAccessGrant) {
     const l = await this.runtime.storage.get<LeaseRecord>(`lease:${grant.leaseID}`);

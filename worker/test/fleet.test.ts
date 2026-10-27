@@ -58913,7 +58913,7 @@ describe("portable bounded ready-pool access", () => {
           user: lease.sshUser,
         }),
       ),
-      install: vi.fn<() => Promise<void>>(async () => {}),
+      install: vi.fn<() => Promise<void | { workRoot: string }>>(async () => {}),
       revoke: vi.fn<() => Promise<{ destroyed: boolean }>>(async () => ({ destroyed: false })),
     };
     const provider = {
@@ -59018,6 +59018,29 @@ describe("portable bounded ready-pool access", () => {
     expect((await f.borrow()).status).toBe(409);
     expect([...(await f.storage.list({ prefix: "typed-ready-pool" }))]).toEqual([]);
     expect([...(await f.storage.list({ prefix: "ready-pool:" }))]).toEqual([]);
+  });
+
+  it("publishes the provider's rotated workspace only after access activation", async () => {
+    const f = await fixture();
+    const { body, receipt } = await f.issue();
+    const workRoot = "C:\\Users\\fresh-borrower\\Shared\\work";
+    expect(body.entry.workRoot).not.toBe(workRoot);
+    f.capability.install.mockImplementation(async () => {
+      f.storage.seed(`lease:${f.lease.id}`, { ...f.lease, workRoot });
+      return { workRoot };
+    });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- replay must observe the activated grant.
+      const response = await f.post("ack-access", receipt);
+      expect(response.status).toBe(200);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- inspect each replay's public placement.
+      expect(await response.json()).toMatchObject({
+        entry: { workRoot },
+        lease: { workRoot },
+        grant: { state: "active" },
+      });
+    }
+    expect(f.capability.install).toHaveBeenCalledTimes(1);
   });
 
   it("binds receipts to owner, lease, public key and current authorization", async () => {
