@@ -26,15 +26,18 @@ class TransactionView implements CoordinatorStorageView {
     this.values.delete(key);
   }
   async list<T>(
-    options: { prefix?: string; limit?: number; startAfter?: string } = {},
+    options: NonNullable<Parameters<CoordinatorStorageView["list"]>[0]> = {},
   ): Promise<Map<string, T>> {
     this.observeList?.(options);
     const entries = [...this.values]
       .toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .filter(
         ([key]) =>
-          key.startsWith(options.prefix ?? "") && (!options.startAfter || key > options.startAfter),
+          key.startsWith(options.prefix ?? "") &&
+          (!options.startAfter || key > options.startAfter) &&
+          (options.end === undefined || key < options.end),
       );
+    if (options.reverse) entries.reverse();
     return new Map(
       entries
         .slice(0, options.limit ?? entries.length)

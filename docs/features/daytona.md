@@ -53,14 +53,15 @@ configuration error.
 
 Each variable also has a `CRABBOX_`-prefixed form that takes precedence over the
 bare Daytona name (useful when other tooling already owns the unprefixed
-variable):
+variable). The API key, JWT token, and organization ID are read from the
+environment only; Crabbox ignores them in config files:
 
-| Crabbox-prefixed                  | Daytona name              | Config key               |
-| --------------------------------- | ------------------------- | ------------------------ |
-| `CRABBOX_DAYTONA_API_KEY`         | `DAYTONA_API_KEY`         | `daytona.apiKey`         |
-| `CRABBOX_DAYTONA_JWT_TOKEN`       | `DAYTONA_JWT_TOKEN`       | `daytona.jwtToken`       |
-| `CRABBOX_DAYTONA_ORGANIZATION_ID` | `DAYTONA_ORGANIZATION_ID` | `daytona.organizationId` |
-| `CRABBOX_DAYTONA_API_URL`         | `DAYTONA_API_URL`         | `daytona.apiUrl`         |
+| Crabbox-prefixed                  | Daytona name              | Config key       |
+| --------------------------------- | ------------------------- | ---------------- |
+| `CRABBOX_DAYTONA_API_KEY`         | `DAYTONA_API_KEY`         | environment only |
+| `CRABBOX_DAYTONA_JWT_TOKEN`       | `DAYTONA_JWT_TOKEN`       | environment only |
+| `CRABBOX_DAYTONA_ORGANIZATION_ID` | `DAYTONA_ORGANIZATION_ID` | environment only |
+| `CRABBOX_DAYTONA_API_URL`         | `DAYTONA_API_URL`         | `daytona.apiUrl` |
 
 The API URL defaults to `https://app.daytona.io/api`.
 

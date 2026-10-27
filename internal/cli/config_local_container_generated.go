@@ -16,6 +16,7 @@ type fileLocalContainerConfig struct {
 	Network      string `yaml:"network,omitempty"`
 	DockerSocket *bool  `yaml:"dockerSocket,omitempty"`
 	NoHostname   *bool  `yaml:"noHostname,omitempty"`
+	OCIRuntime   string `yaml:"ociRuntime,omitempty"`
 }
 
 const LocalContainerConfigDefaultRuntime string = "docker"
@@ -46,7 +47,7 @@ func (cfg *LocalContainerConfig) applyFile(file *fileLocalContainerConfig) (Loca
 
 func (cfg *LocalContainerConfig) applyEnv() (LocalContainerConfigApplied, error) {
 	var applied LocalContainerConfigApplied
-	err := applyConfigEnvironment(cfg, &applied, 0, 10)
+	err := applyConfigEnvironment(cfg, &applied, 0, 11)
 	return applied, err
 }
 
@@ -60,6 +61,7 @@ type LocalContainerConfigFlagValues struct {
 	Memory       *string
 	Network      *string
 	DockerSocket *bool
+	OCIRuntime   *string
 	Volumes      *[]string
 }
 
@@ -80,6 +82,7 @@ type LocalContainerConfigVisitedFlags struct {
 	Memory       bool
 	Network      bool
 	DockerSocket bool
+	OCIRuntime   bool
 	Volumes      bool
 }
 

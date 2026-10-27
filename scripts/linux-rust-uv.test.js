@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 
 const installer = new URL("./install-linux-developer-tools.sh", import.meta.url).pathname;
-const versions = { rust: "1.98.1", uv: "0.12.19" };
+const versions = { rust: "1.98.1", uv: "0.13.5" };
 const commands = { rust: ["rustc", "cargo", "rustdoc"], uv: ["uv", "uvx"] };
 
 test(
@@ -326,5 +326,21 @@ for (const tool of ["rust", "uv"]) {
       assert.deepEqual(fs.readdirSync(`${root}/bin`), []);
     }
     success(run(`node_major=22\ninstall_rust_uv_toolchain ${tool}`));
+  });
+}
+
+for (const state of ["present", "dangling"]) {
+  test(`uv rebakes released predecessor ${state} aliases without running old bytes`, (t) => {
+    const { root, run, destination } = fixture(t, "uv");
+    const previous = path.join(root, "tools", "uv", "0.12.19", "bin");
+    if (state === "present") {
+      fs.mkdirSync(previous, { recursive: true });
+      for (const name of commands.uv) executable(path.join(previous, name), 'touch "$HOME/old-uv-executed"; exit 79');
+    }
+    for (const name of commands.uv) fs.symlinkSync(path.join(previous, name), path.join(root, "bin", name));
+    success(run("install_rust_uv_toolchain uv\ninstall_rust_uv_toolchain uv\noffline_uv_probe"));
+    for (const name of commands.uv) assert.equal(fs.readlinkSync(path.join(root, "bin", name)), `${destination}/bin/${name}`);
+    assert.equal(fs.existsSync(path.join(root, "home", "old-uv-executed")), false);
+    if (state === "present") assert.match(fs.readFileSync(path.join(previous, "uv"), "utf8"), /exit 79/);
   });
 }

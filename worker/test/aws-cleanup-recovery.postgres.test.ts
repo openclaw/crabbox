@@ -7,6 +7,7 @@ import type { CoordinatorStorageView } from "../src/coordinator-runtime";
 import { AWSProvider, FleetCoordinator } from "../src/fleet";
 import { orgKeyForLabel } from "../src/org-identity";
 import { providerKeyForLease } from "../src/provider-key";
+import { coordinatorStorageEntries } from "../src/storage-scan";
 import type { Env, LeaseRecord } from "../src/types";
 
 // Deliberately ignore DATABASE_URL: this proof may only connect to its fixed CI fixture.
@@ -63,6 +64,42 @@ it("persists atomic AWS scope recovery across real PostgreSQL reopen beside a sc
     expect(existing.rows[0]?.existing).toBeNull();
     // Hold the job runner offline initially: a failed wake hint must not lose committed due work.
     await active.runtime.storage.initialize();
+    // Reuse the isolated real database to verify the shared log scanner's SQL contract.
+    const prefix = "runlog:postgres_tail%_\\:chunk:";
+    const entries = [0, 1, 3, 6, 9].map(
+      (index) => [`${prefix}${String(index).padStart(6, "0")}`, index] as const,
+    );
+    const unrelatedKey = "runlog:postgres_tailAAx:chunk:000006";
+    try {
+      await Promise.all(entries.map(([key, value]) => active!.runtime.storage.put(key, value)));
+      await active.runtime.storage.put(unrelatedKey, "unrelated");
+      const scan = async (storage: CoordinatorStorageView, reverse: boolean, remove = false) => {
+        const values: number[] = [];
+        for await (const [key, value] of coordinatorStorageEntries<number>(storage, {
+          prefix,
+          startAfter: `${prefix}000000`,
+          end: `${prefix}000009`,
+          reverse,
+          limit: 2,
+        })) {
+          values.push(value);
+          if (remove) await storage.delete(key);
+        }
+        return values;
+      };
+      expect(await scan(active.runtime.storage, false)).toEqual([1, 3, 6]);
+      expect(await scan(active.runtime.storage, true)).toEqual([6, 3, 1]);
+      const reversed = await active.runtime.storage.transaction((view) => scan(view, true, true));
+      expect(reversed).toEqual([6, 3, 1]);
+      expect([...(await active.runtime.storage.list({ prefix })).values()]).toEqual([0, 9]);
+      expect(await active.runtime.storage.get(unrelatedKey)).toBe("unrelated");
+    } finally {
+      await Promise.all(
+        [...entries.map(([key]) => key), unrelatedKey].map((key) =>
+          active!.runtime.storage.delete(key),
+        ),
+      );
+    }
     await active.runtime.storage.put(`lease:${legacy.id}`, legacy);
     await active.runtime.storage.put(`lease:${ordinary.id}`, ordinary);
     const before = await active.runtime.storage.get<LeaseRecord>(`lease:${legacy.id}`);

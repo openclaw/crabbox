@@ -8,23 +8,27 @@ import (
 )
 
 type WarmupCompletion struct {
-	Provider string
-	LeaseID  string
-	Slug     string
-	Workdir  string
-	Total    time.Duration
+	Provider       string
+	LeaseID        string
+	Slug           string
+	Workdir        string
+	Total          time.Duration
+	RunnerPhases   []core.RunnerPhase
+	CreationEvents []core.CreationEvent
 }
 
 func CompleteWarmup(rt core.Runtime, timingJSON bool, result WarmupCompletion) error {
 	fmt.Fprintf(rt.Stdout, "warmup complete total=%s\n", result.Total.Round(time.Millisecond))
 	if timingJSON {
 		return core.WriteTimingJSON(rt.Stderr, core.TimingReport{
-			Provider: result.Provider,
-			LeaseID:  result.LeaseID,
-			Slug:     result.Slug,
-			TotalMs:  result.Total.Milliseconds(),
-			ExitCode: 0,
-			Workdir:  result.Workdir,
+			Provider:       result.Provider,
+			LeaseID:        result.LeaseID,
+			Slug:           result.Slug,
+			TotalMs:        result.Total.Milliseconds(),
+			ExitCode:       0,
+			Workdir:        result.Workdir,
+			RunnerPhases:   result.RunnerPhases,
+			CreationEvents: result.CreationEvents,
 		})
 	}
 	return nil

@@ -266,6 +266,7 @@ func checkpointLabels(metadata map[string]string) map[string]string {
 
 func hetznerCheckpointResult(snapshot core.HetznerImage, location string, metadata map[string]string) core.NativeCheckpointCreateResult {
 	return core.NativeCheckpointCreateResult{
+		CaptureEstablished: strings.EqualFold(strings.TrimSpace(snapshot.Status), "available"),
 		Image: core.NativeCheckpointImage{
 			ID:           strconv.FormatInt(snapshot.ID, 10),
 			Name:         shared.FirstNonBlank(snapshot.Description, snapshot.Name),

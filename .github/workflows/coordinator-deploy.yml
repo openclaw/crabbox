@@ -1,15 +1,15 @@
 name: Deploy Coordinator
 
-# Deploys the crabbox-coordinator Worker whenever worker/** lands on main, so
-# production tracks main instead of drifting behind a manual `wrangler deploy`
-# (stale deploys are how a fixed-on-main OOM stayed broken in prod). Also
-# runnable on demand from the Actions tab.
+# Deploys the crabbox-coordinator Worker when runtime or deployment inputs land
+# on main, so production tracks main without redeploying for test-only changes.
+# Also runnable on demand from the Actions tab.
 on:
   push:
     branches:
       - main
     paths:
       - "worker/**"
+      - "!worker/test/**"
       - ".github/workflows/coordinator-deploy.yml"
       - "scripts/prepare-coordinator-deploy-secrets.mjs"
       - "scripts/verify-coordinator-deployment.mjs"
@@ -58,7 +58,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.22.1
           cache: npm
           cache-dependency-path: worker/package-lock.json
 

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -41,6 +42,13 @@ func builtCLITestBinary() (string, error) {
 }
 
 func runCLITests(m *testing.M) (code int) {
+	if os.Getenv("CRABBOX_TEST_SERVE_RELAY_PROXY") == "1" && len(os.Args) > 1 && os.Args[1] == "__serve-relay-proxy" {
+		if err := Run(context.Background(), os.Args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 	defer func() {
 		if cliTestBuild.dir != "" {
 			// Capture roots rebuild the adjacent .provider fixture after their

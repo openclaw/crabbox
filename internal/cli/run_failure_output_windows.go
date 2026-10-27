@@ -8,6 +8,7 @@ import (
 	"os"
 	"unsafe"
 
+	"github.com/openclaw/crabbox/internal/privatefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -69,7 +70,7 @@ func prepareWindowsFailureBundleDirectory(parent windows.Handle, name string, ha
 	if err := windows.SetSecurityInfo(security, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
 		return err
 	}
-	return verifyPrivateWindowsHandle(security, true, user)
+	return privatefile.VerifyWindowsHandle(security, true, user)
 }
 
 // All names are single components beneath a retained, non-reparse directory.
@@ -101,7 +102,7 @@ func (o *failureBundleOutput) directoryHandle() windows.Handle {
 }
 
 func (o *failureBundleOutput) createFile(name string) (*os.File, error) {
-	descriptor, _, err := privateWindowsSecurityDescriptor(false)
+	descriptor, _, err := privatefile.WindowsDescriptor(false)
 	if err != nil {
 		return nil, err
 	}
@@ -118,11 +119,11 @@ func (o *failureBundleOutput) createFile(name string) (*os.File, error) {
 }
 
 func (o *failureBundleOutput) secureFile() error {
-	user, err := currentWindowsUserSID()
+	user, err := privatefile.WindowsUserSID()
 	if err != nil {
 		return err
 	}
-	return verifyPrivateWindowsHandle(windows.Handle(o.file.Fd()), false, user)
+	return privatefile.VerifyWindowsHandle(windows.Handle(o.file.Fd()), false, user)
 }
 
 func (o *failureBundleOutput) validateDestination(name string) error {
@@ -134,7 +135,7 @@ func (o *failureBundleOutput) validateDestination(name string) error {
 		return err
 	}
 	defer windows.CloseHandle(handle)
-	if err := validatePrivateWindowsFileType(handle, false); err != nil {
+	if err := privatefile.ValidateWindowsFileType(handle, false); err != nil {
 		return fmt.Errorf("unsafe failure bundle destination %s: %w", name, err)
 	}
 	return nil

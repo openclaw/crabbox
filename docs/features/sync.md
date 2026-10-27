@@ -318,6 +318,13 @@ the original error. These labels add diagnostic context, not permission to
 continue or retry; arbitrary protocol output is not added to those transport
 error messages. An ambiguous inspection still fails closed.
 
+A release refusal with `protocol state CHILD` and exit 75 means the witnessed
+remote phase is still active; the owner is retained. Cancelling local SSH does
+not prove that its remote Git fetch or other phase stopped. Wait for that phase
+to finish before retrying. If it remains stuck, use the run's printed
+`stop_command` to release the lease and retry on a fresh lease. `--full-resync`
+still needs the same owner and cannot override a live child.
+
 POSIX and WSL2 children register themselves before executing the requested
 workload. Registration waits at most five seconds for the owner lock; it does
 not leave a background child waiting indefinitely for a start file. A failed
@@ -353,6 +360,13 @@ Once ownership is established, sync runs these steps:
    the full manifest.
 10. Finalize: git-hydrate the worktree against the configured base ref, run the
     mass-deletion sanity check, and record the new fingerprint.
+
+Finalization requests blob-filtered Git fetches, including when completing a
+shallow repository left by workflow setup or a previous command. On origins
+that support filtering, commit ancestry becomes available without downloading
+every historical version of every file. Git can fetch historical file contents
+when a later command explicitly requests them. Origins that ignore filtering
+can still transfer full historical contents.
 
 For a new or empty POSIX workspace with Git seeding disabled (`sync.gitSeed:
 false`) and no requested Git overlay, the manifest-writing command also checks
@@ -473,6 +487,20 @@ deletions, and excludes. Missing runner Git and a refused or unavailable exact
 commit fetch fall back to plain file sync; commit or tree verification failures
 abort before transfer. With `sync.delete: false`, this optimization stays off so
 the seed cannot introduce excluded files that sync would then retain.
+When local Actions hydration is required and the detached commit is unavailable,
+Crabbox can seed a verified published ancestor shared with the configured or
+inferred `sync.baseRef`. The full manifest still applies the exact selected working
+files and exclusions. Remote Git HEAD honestly remains that published ancestor;
+Crabbox does not transfer private Git history or certify it as the selected commit.
+A local base ref is sufficient; origin-tracking refs are not required. The
+ancestor must have an eligible tree and be fetchable and verifiable from the same
+origin. Without a containing origin-tracking branch, `sync.delete: true` remains
+required. Seeding requires an empty cold workspace and does not adopt a populated
+raw directory or bypass repository and lease checks. When this operation publishes
+a fresh ancestor seed, pruning may remove all excluded files it just imported;
+the deletion policy for pre-existing workspace contents remains unchanged.
+`--no-hydrate` and ordinary file-only sync retain their existing behavior.
+
 These seeds do not enable branch-based coherence, reusable fingerprints, or Git
 overlay. Native Windows retains branch-only seeding because it transfers the
 complete archive. Submodules and filter-managed trees retain file sync when no

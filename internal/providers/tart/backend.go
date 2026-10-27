@@ -306,46 +306,83 @@ func (b *backend) Doctor(ctx context.Context, req core.DoctorRequest) (core.Doct
 	return core.DoctorResult{Provider: providerName, Message: msg}, nil
 }
 
-func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("Tart release refused: %w", err)
+		}
+	}()
 	lease := req.Lease
 	if lease.LeaseID == "" {
 		lease.LeaseID = strings.TrimSpace(lease.Server.Labels["lease"])
 	}
-	if lease.LeaseID != "" && tartState(lease.Server.Status) == "missing" {
-		pruneLeaseState(lease.LeaseID)
-		return nil
-	}
 	name := strings.TrimSpace(shared.FirstNonBlank(lease.Server.CloudID, lease.Server.Labels["instance"]))
-	if name == "" && lease.LeaseID != "" {
+	_, _, snapshotSet := core.ServerLeaseClaimSnapshot(lease.Server)
+	if name == "" && lease.LeaseID != "" && !snapshotSet {
 		inst, _, claim, err := b.resolveInstance(ctx, lease.LeaseID)
 		if err != nil {
 			return err
 		}
 		name = inst.Name
-		if claim.LeaseID != "" {
-			lease.LeaseID = claim.LeaseID
-		}
-		if tartState(inst.State) == "missing" {
-			pruneLeaseState(lease.LeaseID)
-			return nil
-		}
+		lease = core.LeaseTarget{LeaseID: claim.LeaseID, Server: b.serverFromInstance(inst, claim, b.configForRun())}
 	}
 	if name == "" {
 		return core.Exit(2, "provider=%s release requires a tart instance name", providerName)
 	}
-	_ = b.stopVM(ctx, name)
-	if err := b.deleteVM(ctx, name); err != nil {
+	claim, err := shared.RequireClaimSnapshot(lease.Server, providerName)
+	if err != nil {
 		return err
 	}
-	if lease.LeaseID != "" {
-		pruneLeaseState(lease.LeaseID)
+	if lease.LeaseID != claim.LeaseID || lease.Server.Provider != providerName || lease.Server.ImmutableID != claim.CloudImmutableID || lease.Server.Labels["instance"] != name || lease.Server.Labels["tart_storage"] != claim.Labels["tart_storage"] {
+		return fmt.Errorf("target does not match its recorded ownership claim")
 	}
-	return nil
-}
-
-func pruneLeaseState(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
-	core.RemoveStoredTestboxKey(leaseID)
+	storage, err := tartStorageRoot()
+	if err != nil {
+		return err
+	}
+	binding, err := tartCleanupBinding(claim, name, storage)
+	if err != nil {
+		return err
+	}
+	claims, err := core.ListLeaseClaimsContext(ctx)
+	if err != nil {
+		return err
+	}
+	matches := 0
+	for _, current := range claims {
+		if current.Provider == providerName && instanceNameFromClaim(current) == name {
+			matches++
+		}
+	}
+	if matches != 1 {
+		return fmt.Errorf("instance %q requires one exact ownership claim, found %d", name, matches)
+	}
+	// Preserve the carried authority through fresh observations, deletion and
+	// claim retirement. Keys may already be reused by an unpublished acquisition.
+	return shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
+		instances, err := b.listInstances(ctx)
+		if err != nil {
+			return err
+		}
+		for _, inst := range instances {
+			if inst.Name != name {
+				continue
+			}
+			if err := verifyTartVMIdentity(name, storage, claim.CloudImmutableID); err != nil {
+				return err
+			}
+			if inst.Running || instanceRunning(inst.State) {
+				if err := b.stopVM(ctx, name); err != nil {
+					return err
+				}
+			}
+			if err := verifyTartVMIdentity(name, storage, claim.CloudImmutableID); err != nil {
+				return err
+			}
+			return b.deleteVM(ctx, name)
+		}
+		return verifyTartVMAbsence(name, storage)
+	})
 }
 
 func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {

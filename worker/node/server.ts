@@ -200,6 +200,8 @@ process.on("SIGINT", () => {
 });
 
 async function runFleetRequest(request: Request): Promise<Response> {
+  const bridgeFailure = await coordinator.prepareBridgeRequest(request);
+  if (bridgeFailure) return bridgeFailure;
   switch (fleetRequestQueue(request)) {
     case "direct":
       return coordinator.fetch(request);

@@ -2376,9 +2376,6 @@ func TestRunCommandRejectsUnsupportedDelegatedCaptureOptions(t *testing.T) {
 		args     []string
 		want     string
 	}{
-		{name: "daytona no runtime extension", provider: "daytona", args: []string{"--no-runtime-extension"}, want: "daytona delegates run execution; --no-runtime-extension is not supported"},
-		{name: "e2b no runtime extension", provider: "e2b", args: []string{"--no-runtime-extension"}, want: "e2b delegates run execution; --no-runtime-extension is not supported"},
-		{name: "blacksmith no runtime extension", provider: "blacksmith", args: []string{"--no-runtime-extension"}, want: "blacksmith-testbox delegates run execution; --no-runtime-extension is not supported"},
 		{name: "daytona capture stdout", provider: "daytona", args: []string{"--capture-stdout", "stdout.bin"}, want: "daytona delegates run execution; --capture-stdout is not supported"},
 		{name: "islo capture stdout", provider: "islo", args: []string{"--capture-stdout", "stdout.bin"}, want: "islo delegates run execution; --capture-stdout is not supported"},
 		{name: "e2b capture stdout", provider: "e2b", args: []string{"--capture-stdout", "stdout.bin"}, want: "e2b delegates run execution; --capture-stdout is not supported"},
@@ -3380,10 +3377,12 @@ func TestRunCommandInjectsReservedMetadataIntoStaticSSH(t *testing.T) {
 	isolateRunTestUserDirs(t, dir)
 	logPath := installRecordingSSH(t, dir)
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	sshPort := openLoopbackSSHPort(t)
 	var stdout, stderr bytes.Buffer
 	args := []string{
 		"--provider", "ssh",
 		"--static-host", "127.0.0.1",
+		"--static-port", sshPort,
 		"--static-user", "runner",
 		"--static-work-root", "/tmp/crabbox-static-test",
 		"--no-sync",
@@ -4983,7 +4982,7 @@ func runCommandSyncOnlyFinalization(t *testing.T, missingEvents bool) {
 	}
 }
 
-func TestRunCommandTerminalReceiptMarksCoordinatorFinishFailureLocally(t *testing.T) {
+func TestRunCommandTerminalReceiptPreservesOriginalAfterCoordinatorFinishFailure(t *testing.T) {
 	dir := t.TempDir()
 	isolateRunTestUserDirs(t, dir)
 	sshPath := filepath.Join(dir, "ssh")
@@ -5115,8 +5114,8 @@ func TestRunCommandTerminalReceiptMarksCoordinatorFinishFailureLocally(t *testin
 	if decodeErr != nil {
 		t.Fatalf("decode terminal receipt: %v", decodeErr)
 	}
-	if localReceipt.ExitCode != 7 {
-		t.Fatalf("local receipt exit=%d, want coordinator failure exit 7", localReceipt.ExitCode)
+	if localReceipt.ExitCode != 0 {
+		t.Fatalf("local receipt exit=%d, want original task exit 0", localReceipt.ExitCode)
 	}
 
 	mu.Lock()
@@ -5138,8 +5137,8 @@ func TestRunCommandTerminalReceiptMarksCoordinatorFinishFailureLocally(t *testin
 			t.Fatalf("finish attempt %d used a different receipt from local persistence:\nlocal=%+v\nremote=%+v", i+1, finishLocalReceipts[i], receipt)
 		}
 	}
-	if localReceipt == finishReceipts[0] {
-		t.Fatal("local failure receipt must differ from the ambiguous remote execution receipt")
+	if localReceipt != finishReceipts[0] {
+		t.Fatal("transport failure must not reconstruct or re-sign the original receipt")
 	}
 	if len(unexpectedCalls) != 0 {
 		t.Fatalf("unexpected coordinator calls: %v", unexpectedCalls)
@@ -5858,7 +5857,7 @@ esac
 			}
 			writeReplacementListConfig(t, "crabbox.yaml", fmt.Sprintf("env:\n  allow: [CI, NODE_OPTIONS, BUILD_FLAVOR]\nresults:\n  junit: [old-report.xml]\n  auto: %t\nrun:\n  preflightTools: [cmake]\n", tc.auto))
 			writeReplacementListConfig(t, ".crabbox.yaml", "env:\n  allow: []\nresults:\n  junit: []\nrun:\n  preflightTools: []\n")
-			args := []string{"--provider", "ssh", "--static-host", "127.0.0.1", "--static-user", "runner", "--static-work-root", filepath.Join(dir, "remote"), "--no-sync", "--preflight"}
+			args := []string{"--provider", "ssh", "--static-host", "127.0.0.1", "--static-port", openLoopbackSSHPort(t), "--static-user", "runner", "--static-work-root", filepath.Join(dir, "remote"), "--no-sync", "--preflight"}
 			if runtime.GOOS == "darwin" {
 				args = append(args, "--target", "macos")
 			}

@@ -85,13 +85,21 @@ func TestPrepareAndVerifyRuntime(t *testing.T) {
 	}
 }
 
+func controllerFixture(t *testing.T) string {
+	t.Helper()
+	controller := filepath.Join(t.TempDir(), "controller")
+	// Controllers bind regular file bytes; executable metadata is validated only
+	// for companions. Avoid compressing the full test binary in every archive.
+	if err := os.WriteFile(controller, []byte("finalized controller fixture"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return controller
+}
+
 func runtimeFixture(t *testing.T) (string, string) {
 	t.Helper()
 	directory := t.TempDir()
-	controller, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
+	controller := controllerFixture(t)
 	for _, arch := range []string{"amd64", "arm64"} {
 		buildPackFixture(t, filepath.Join(directory, "linux-"+arch), "linux", arch)
 	}
@@ -100,10 +108,7 @@ func runtimeFixture(t *testing.T) (string, string) {
 
 func TestFilesystemReleaseArchiveLayouts(t *testing.T) {
 	pack := t.TempDir()
-	controller, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
+	controller := controllerFixture(t)
 	buildID, err := sourceID(t.Context(), "../..")
 	if err != nil {
 		t.Fatal(err)

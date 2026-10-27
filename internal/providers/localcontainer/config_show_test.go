@@ -271,7 +271,7 @@ func TestLocalContainerBindingPureForkFlagMapper(t *testing.T) {
 			if err := (Provider{}).ApplyNativeCheckpointForkFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, want) {
 				t.Fatal("foreign mapper value")
 			}
-			if err := fs.Parse([]string{"--local-container-runtime=ignored", "--local-container-image=ignored", "--local-container-work-root=ignored", "--local-container-cpus=-2", "--local-container-memory=memory", "--local-container-network=network"}); err != nil {
+			if err := fs.Parse([]string{"--local-container-runtime=ignored", "--local-container-image=ignored", "--local-container-work-root=ignored", "--local-container-cpus=-2", "--local-container-memory=memory", "--local-container-network=network", "--local-container-oci-runtime=override"}); err != nil {
 				t.Fatal(err)
 			}
 			list := append([]string(nil), prior...)
@@ -284,6 +284,7 @@ func TestLocalContainerBindingPureForkFlagMapper(t *testing.T) {
 			want.LocalContainer.CPUs = -2
 			want.LocalContainer.Memory = "memory"
 			want.LocalContainer.Network = "network"
+			want.LocalContainer.OCIRuntime = "override"
 			if len(list) > 0 {
 				want.LocalContainer.Volumes = list
 			}
@@ -297,5 +298,33 @@ func TestLocalContainerBindingPureForkFlagMapper(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestOCIRuntimeFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "unvisited keeps loaded value", want: "runsc"},
+		{name: "flag replaces loaded value", args: []string{"--local-container-oci-runtime=io.containerd.kata.v2"}, want: "io.containerd.kata.v2"},
+		{name: "empty flag restores engine default", args: []string{"--local-container-oci-runtime="}, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: "unselected-config-test", LocalContainer: core.LocalContainerConfig{OCIRuntime: "runsc"}}
+			fs := flag.NewFlagSet(tc.name, flag.ContinueOnError)
+			provider := Provider{}
+			values := provider.RegisterFlags(fs, core.Config{})
+			if err := fs.Parse(tc.args); err != nil {
+				t.Fatal(err)
+			}
+			if err := provider.ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.LocalContainer.OCIRuntime != tc.want {
+				t.Fatalf("OCIRuntime=%q, want %q", cfg.LocalContainer.OCIRuntime, tc.want)
+			}
+		})
 	}
 }

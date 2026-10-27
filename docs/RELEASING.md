@@ -149,7 +149,7 @@ Historical final provenance verifies its producer configuration against the
 `.goreleaser.yaml` and literal toolchain versions in `scripts/release-config.sh`
 at the originally pinned verifier commit, not the newer tooling checkout. The
 policy reader never executes historical shell code. New candidate production
-uses the current protected configuration, including Go 1.26.5. Missing historical Git objects fail verification; this lookup
+uses the current protected configuration, including Go 1.27.3. Missing historical Git objects fail verification; this lookup
 does not lazily fetch them or consult replacement objects.
 
 The protected `scripts/runtime-artifacts` tool stages exact archive inventories
@@ -687,12 +687,14 @@ set `CRABBOX_VERIFY_FOREIGN_ONLINE_NOTARIZATION=1` when invoking
 `scripts/verify-macos-binary.sh` to force the foreign online check (default `0`).
 
 A fresh macOS host can transiently fail its first online notarization lookup.
-The verifier retries the identical strict check at most twice, after 5 and 15
-seconds, only for exit 3 with an attributed notarization-daemon error code 3 and
-complete diagnostics without a conflicting classified failure. Each failed
-attempt and the final verdict remain visible. Signature, identity, designated
-requirement, revoked-hash, missing-ticket, other daemon errors, unknown failures,
-and interrupted checks are never retried; rejected binaries are never executed.
+The verifier runs the identical strict check at most four times, with retry
+delays of 5, 15, and 45 seconds, only for exit 3 with complete diagnostics and
+zero omitted events. At least one classified event must be attributed to the
+codesign PID, and every classified event must be a notarization-daemon error;
+any daemon code within that category is eligible. Each failed attempt and the
+final verdict remain visible. Signature, identity, designated requirement,
+revoked-hash, missing-ticket, unknown failures, and interrupted checks are never
+retried; rejected binaries are never executed.
 
 Dispatch the protected-default verifier with the tag, tag-object ID, source
 commit, numeric draft ID, and protected workflow commit. Both native static and
@@ -758,8 +760,10 @@ Publication establishes eligibility. Dispatch the ordinary tap update using the
 TAG-only four-target handoff above, without waiting for either public native
 or Go smoke. The updater maintains all four URL/hash routes; retry only this
 step after an update failure. An already-current update succeeds. After the tap
-finishes, run the independent installed-Homebrew smoke on both native macOS
-architectures. Neither smoke failure requires rebuilding or republishing.
+finishes, run the independent installed-Homebrew smoke for both macOS
+architectures. Hosted verification uses `xcode-27` Apple Silicon runners; the
+Intel row runs through Rosetta with the Intel Homebrew prefix at `/usr/local`.
+Neither smoke failure requires rebuilding or republishing.
 
 ### 5. Independent public channel smokes
 
@@ -769,6 +773,13 @@ using the same opaque `release-input` transport; public mode emits no
 `verified-assets-*` approval artifacts. Draft mode still freezes exactly
 `release-input`, `verified-assets-arm64`, and `verified-assets-x86_64` for the
 publisher, with unchanged proof schemas.
+
+For a release-pipeline dry run on merged `main`, dispatch the same verifier with
+`dry_run=true` and `draft=false`, supplying the current published release's
+existing identity inputs. The guard rejects dry runs against drafts. This
+repeats static verification and isolated execution for ARM and Intel on macOS
+27 without creating, modifying, or publishing a release. The macOS 13 deployment
+gates remain enforced; Intel execution uses an explicit Rosetta shell.
 
 Run the public Go installation procedure independently with fresh proxy-only
 state. It proves the actual published tag is remotely resolvable, unlike the

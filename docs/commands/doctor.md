@@ -9,6 +9,13 @@ empty, and skips provider credential readiness with a warning. Run it before
 your first `crabbox run`, after rotating tokens or
 editing config, and as a sanity check in agent boot sequences or CI smoke jobs.
 
+Use `--provider <name>` to check a specific provider instead of the configured
+selection. Doctor validates the name and reports `source=flag selected=true`;
+unknown names fail with exit `2`. A valid selection can still exit `1` when
+readiness checks fail, such as missing AWS credentials or running Firecracker
+on a non-Linux host. For static provider metadata, use
+[`crabbox providers describe <name>`](providers.md#providers-describe).
+
 ```sh
 crabbox doctor
 crabbox doctor --provider aws
@@ -260,8 +267,8 @@ Exit codes:
 
 - `0` — no failures (skips and warnings do not change this).
 - `1` — at least one check failed.
-- `2` — `--from-run` without a coordinator, or profile doctor on a native
-  Windows target.
+- `2` — invalid flags or provider names, `--from-run` without a coordinator,
+  or profile doctor on a native Windows target.
 - `7` — the remote SSH probe failed.
 
 ## Flags

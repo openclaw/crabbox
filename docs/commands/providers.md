@@ -5,6 +5,13 @@ in. It is a static report: it reads each registered provider's declared spec and
 offline backend capabilities. It does not contact any cloud, check credentials,
 or query quota. Use [`doctor`](doctor.md) when you need live readiness checks.
 
+`providers` does not accept `--provider` and does not select an execution
+provider. Use `crabbox providers describe <name>` to inspect one provider, or
+the catalog filters below to narrow the matrix. For example,
+`crabbox providers describe aws` shows AWS metadata, while
+`crabbox doctor --provider aws` checks AWS readiness. Passing
+`crabbox providers --provider aws` fails with exit `2`.
+
 ```sh
 crabbox providers
 crabbox providers --json

@@ -77,17 +77,18 @@ type ActionsWorkspaceBinding struct {
 // caller-supplied lease identity. Provider adapters own the opaque attempt
 // fields and their interpretation; the claim layer only persists and locks it.
 type FixedCreateIntent struct {
-	Version        int               `json:"version"`
-	Fingerprint    string            `json:"fingerprint"`
-	ProviderScope  string            `json:"providerScope"`
-	CheckpointID   string            `json:"checkpointId,omitempty"`
-	Slug           string            `json:"slug"`
-	CreatedAt      string            `json:"createdAt"`
-	State          string            `json:"state"`
-	Attempt        map[string]string `json:"attempt,omitempty"`
-	FailedAttempts []string          `json:"failedAttempts,omitempty"`
-	// Journal is additive: the original fields remain the downgrade-safe
-	// ownership record. A legacy record without a journal grants no new authority.
+	Retention      *SessionDiskRetentionPolicy `json:"retention,omitempty"`
+	Version        int                         `json:"version"`
+	Fingerprint    string                      `json:"fingerprint"`
+	ProviderScope  string                      `json:"providerScope"`
+	CheckpointID   string                      `json:"checkpointId,omitempty"`
+	Slug           string                      `json:"slug"`
+	CreatedAt      string                      `json:"createdAt"`
+	State          string                      `json:"state"`
+	Attempt        map[string]string           `json:"attempt,omitempty"`
+	FailedAttempts []string                    `json:"failedAttempts,omitempty"`
+	// Version 1 journals preserve legacy ownership. Retained policy requires
+	// version 2 so older readers refuse the claim before provider effects.
 	Journal *FixedLeaseJournal `json:"journal,omitempty"`
 }
 
@@ -970,6 +971,11 @@ func cloneLeaseClaim(claim leaseClaim) leaseClaim {
 	claim.CacheVolumes = append([]string(nil), claim.CacheVolumes...)
 	if claim.FixedCreateIntent != nil {
 		intent := *claim.FixedCreateIntent
+		if intent.Retention != nil {
+			policy := *intent.Retention
+			intent.Retention = &policy
+		}
+		intent.Journal = cloneFixedJournal(intent.Journal)
 		intent.Attempt = cloneStringMap(intent.Attempt)
 		intent.FailedAttempts = append([]string(nil), intent.FailedAttempts...)
 		claim.FixedCreateIntent = &intent
@@ -2153,7 +2159,7 @@ func decodeLeaseClaim(path string, data []byte) (leaseClaim, error) {
 			err:  Exit(2, "parse claim %s: %v", path, err),
 		}
 	}
-	if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.Journal != nil {
+	if claim.FixedCreateIntent != nil && (claim.FixedCreateIntent.Journal != nil || claim.FixedCreateIntent.Retention != nil) {
 		if err := validateFixedJournal(claim.FixedCreateIntent); err != nil {
 			return leaseClaim{}, &leaseClaimFileError{code: "invalid_fixed_journal", err: err}
 		}

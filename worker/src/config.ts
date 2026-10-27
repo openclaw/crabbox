@@ -1,5 +1,10 @@
 import { requireAWSRegion } from "./aws-region";
 import { hasImageRequirements, normalizeImageRequirements } from "./image-capabilities";
+import {
+  isLeasePolicyOverrides,
+  type LeasePolicy,
+  type PolicyOverrides,
+} from "./lease-policy-overrides.mjs";
 import { MISSING_ORG_KEY, orgLabelFromKey } from "./org-identity";
 import { normalizeOSImage, osImageSpec } from "./os-image";
 import type {
@@ -12,6 +17,8 @@ import type {
   TargetOS,
   WindowsMode,
 } from "./types";
+
+export type { LeasePolicy } from "./lease-policy-overrides.mjs";
 
 export const awsMacOSInstanceTypeCandidates = [
   "mac2.metal",
@@ -1452,57 +1459,11 @@ export function awsInstanceTypeIsARM64(instanceType: string): boolean {
   return /^[cmr][0-9]+g[dn]?$/.test(family);
 }
 
-export interface LeasePolicy {
-  defaultTTLSeconds: number;
-  defaultIdleTimeoutSeconds: number;
-  maxTTLSeconds: number;
-  extension: "allow" | "deny";
-  autoExtend: "allow" | "deny";
-  runtimeExtension?: boolean;
-}
-
-type PolicyOverrides = {
-  orgs?: Record<string, Partial<LeasePolicy>>;
-  owners?: Record<string, Partial<LeasePolicy>>;
-};
-const durationPolicyFields = [
-  "defaultTTLSeconds",
-  "defaultIdleTimeoutSeconds",
-  "maxTTLSeconds",
-] as const;
-const switchPolicyFields = ["extension", "autoExtend"] as const;
-
 function parsedPolicyOverrides(env: Partial<Env>): PolicyOverrides | undefined {
   if (!env.CRABBOX_LEASE_POLICY_OVERRIDES) return {};
   try {
     const value: unknown = JSON.parse(env.CRABBOX_LEASE_POLICY_OVERRIDES);
-    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-    for (const [group, entries] of Object.entries(value)) {
-      if (
-        !["orgs", "owners"].includes(group) ||
-        !entries ||
-        typeof entries !== "object" ||
-        Array.isArray(entries)
-      )
-        return undefined;
-      for (const entry of Object.values(entries)) {
-        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return undefined;
-        for (const [key, field] of Object.entries(entry)) {
-          if (durationPolicyFields.some((name) => name === key)) {
-            if (
-              !Number.isInteger(field) ||
-              typeof field !== "number" ||
-              field < 1 ||
-              field > 86_400
-            )
-              return undefined;
-          } else if (switchPolicyFields.some((name) => name === key)) {
-            if (field !== "allow" && field !== "deny") return undefined;
-          } else return undefined;
-        }
-      }
-    }
-    return value as PolicyOverrides;
+    return isLeasePolicyOverrides(value) ? value : undefined;
   } catch {
     return undefined;
   }

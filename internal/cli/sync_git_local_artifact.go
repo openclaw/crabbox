@@ -99,11 +99,26 @@ func (w *boundedGitSeedWriter) Write(p []byte) (int, error) {
 }
 
 func runLocalGitSeedCommand(ctx context.Context, cmd *exec.Cmd, writer *boundedGitSeedWriter) error {
-	cmd.Stdout = writer
-	commandErr := cmd.Run()
-	// Wait settles the process and output copier before reading the writer error.
-	// A secondary SIGPIPE must not replace the refusal that closed its pipe.
-	return errors.Join(writer.err, commandErr, ctx.Err())
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		_ = out.Close()
+		return errors.Join(err, ctx.Err())
+	}
+	_, copyErr := io.Copy(writer, out)
+	if copyErr != nil {
+		// Git may keep computing after its output is refused. Kill before Wait
+		// so refusal cannot leave a child running until the overall deadline.
+		_ = cmd.Process.Kill()
+	}
+	_ = out.Close()
+	commandErr := cmd.Wait()
+	if writer.err != nil {
+		copyErr = writer.err
+	}
+	return errors.Join(copyErr, commandErr, ctx.Err())
 }
 
 func localGitSeedCommand(ctx context.Context, root string, source bool, args ...string) *exec.Cmd {
@@ -209,8 +224,12 @@ func localGitSeedEnumerationOutput(ctx context.Context, cmd *exec.Cmd, format st
 	// Enumeration has one fixed-width record per object. Bound the wire as well
 	// as raw records (including duplicates), without buffering the full closure.
 	writer := &boundedGitSeedWriter{dst: records, remaining: int64(localGitSeedMaxObjects * (width + 1))}
-	err := runLocalGitSeedCommand(ctx, cmd, writer)
-	return errors.Join(records.finish(), err)
+	if err := runLocalGitSeedCommand(ctx, cmd, writer); err != nil {
+		// Retain the consumer diagnosis without inferring truncated framing
+		// from a stream interrupted by an earlier process or I/O failure.
+		return errors.Join(records.err, err)
+	}
+	return records.finish()
 }
 
 func localGitSeedInit(root, format string) error {
@@ -240,6 +259,7 @@ type localGitSeedObject struct {
 type localGitSeedReader struct {
 	cmd       *exec.Cmd
 	in        io.WriteCloser
+	pipe      io.ReadCloser
 	out       *bufio.Reader
 	format    string
 	inspected int64
@@ -258,15 +278,18 @@ func newLocalGitSeedReader(ctx context.Context, root, format string) (*localGitS
 	}
 	if err := cmd.Start(); err != nil {
 		_ = in.Close()
+		_ = out.Close()
 		return nil, err
 	}
-	return &localGitSeedReader{cmd: cmd, in: in, out: bufio.NewReaderSize(out, 65536), format: format}, nil
+	return &localGitSeedReader{cmd: cmd, in: in, pipe: out, out: bufio.NewReaderSize(out, 65536), format: format}, nil
 }
 func (r *localGitSeedReader) close() {
 	if r.cmd == nil {
 		return
 	}
+	_ = r.cmd.Process.Kill()
 	_ = r.in.Close()
+	_ = r.pipe.Close()
 	_ = r.cmd.Wait()
 	r.cmd = nil
 }

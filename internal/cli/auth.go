@@ -57,7 +57,7 @@ func (a App) login(ctx context.Context, args []string) error {
 	if *tokenStdin {
 		return a.loginWithToken(ctx, *brokerURL, *provider, brokerMode, *jsonOut)
 	}
-	return a.loginWithGitHub(ctx, *brokerURL, *provider, brokerMode, *noBrowser, *jsonOut)
+	return a.loginWithGitHub(ctx, cfg, *provider, *noBrowser, *jsonOut)
 }
 
 func (a App) loginWithToken(ctx context.Context, brokerURL, provider string, brokerMode BrokerMode, jsonOut bool) error {
@@ -83,7 +83,12 @@ func (a App) loginWithToken(ctx context.Context, brokerURL, provider string, bro
 	return a.finishLogin(ctx, coord, path, cfg, jsonOut)
 }
 
-func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, brokerMode BrokerMode, noBrowser, jsonOut bool) error {
+func (a App) loginWithGitHub(ctx context.Context, cfg Config, provider string, noBrowser, jsonOut bool) error {
+	client, cfg, err := coordinatorClientConfigForLogin(cfg, provider)
+	if err != nil {
+		return err
+	}
+	brokerURL, brokerMode := cfg.Coordinator, cfg.BrokerMode
 	loopback, err := startGitHubLoginLoopback()
 	if err != nil {
 		return Exit(3, "start local GitHub login callback: %v", err)
@@ -95,10 +100,6 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 		return err
 	}
 	pollSecretHash := sha256Hex(pollSecret)
-	client, cfg, err := coordinatorClientConfigForLogin(brokerURL, provider)
-	if err != nil {
-		return err
-	}
 	start, err := client.StartGitHubLogin(ctx, pollSecretHash, provider, loopback.URL())
 	if err != nil {
 		return err
@@ -116,7 +117,8 @@ func (a App) loginWithGitHub(ctx context.Context, brokerURL, provider string, br
 			)
 		}
 		brokerURL = canonicalBrokerURL
-		client, cfg, err = coordinatorClientConfigForLogin(brokerURL, provider)
+		cfg.Coordinator = brokerURL
+		client, cfg, err = coordinatorClientConfigForLogin(cfg, provider)
 		if err != nil {
 			return err
 		}
@@ -301,13 +303,9 @@ func (a App) finishLogin(ctx context.Context, coord *CoordinatorClient, path str
 	return nil
 }
 
-func coordinatorClientForLogin(brokerURL, provider string) (*CoordinatorClient, error) {
-	coord, _, err := coordinatorClientConfigForLogin(brokerURL, provider)
-	return coord, err
-}
-
-func coordinatorClientConfigForLogin(brokerURL, provider string) (*CoordinatorClient, Config, error) {
-	cfg, err := loadConfigWithOverrides(brokerURL, provider)
+func coordinatorClientConfigForLogin(cfg Config, provider string) (*CoordinatorClient, Config, error) {
+	// Resolve the provider without treating the configured broker as a URL flag.
+	cfg, err := resolveLoadedConfig(cfg, "", provider)
 	if err != nil {
 		return nil, Config{}, err
 	}

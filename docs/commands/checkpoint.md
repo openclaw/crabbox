@@ -106,7 +106,7 @@ crabbox checkpoint create --id swift-crab --workdir /work/cbx_123/my-app
 
 # Return the complete checkpoint record for orchestration
 crabbox checkpoint create --id swift-crab --mode native --json
-# {"id":"chk_abc123","kind":"aws-ebs-snapshot","leaseId":"cbx_abcdef123456","workdir":"/work/cbx_abcdef123456/my-app","native":{"imageId":"snap-0123456789abcdef0","state":"available"}}
+# {"captureEstablished":true,"id":"chk_abc123","kind":"aws-ebs-snapshot","leaseId":"cbx_abcdef123456","workdir":"/work/cbx_abcdef123456/my-app","native":{"imageId":"snap-0123456789abcdef0","state":"available"}}
 ```
 
 **Flags**
@@ -140,7 +140,35 @@ crabbox checkpoint create --id swift-crab --mode native --json
 --discard-failed            Explicitly discard a verified failed capture and retire.
 ```
 
-On success, `--json` prints the checkpoint record. A native checkpoint operation
+On success, `--json` prints the checkpoint record. The optional top-level field
+`"captureEstablished": true` attests that the provider's capture contract has
+established the point-in-time
+capture of every included volume (or the completed archive's contents) is fixed:
+the source may keep running and writing without changing that capture. It does
+not mean the image is available to fork, nor certify application consistency or
+capture of memory, mounted external storage, or writes after the capture point.
+
+`--wait=false` skips waiting for native availability. Direct AWS AMIs still wait
+for evidence that capture is established, polling about once per second for the
+accepted image's exact backing snapshots, matching every source EBS device and
+requiring each snapshot to be `pending` or `completed`. `--wait-timeout` and
+cancellation bound this barrier. Permission errors, terminal failures, and
+timeouts report capture as uncertain and retain the accepted image identity;
+inspect that checkpoint rather than submitting a replacement. Other provider
+paths retain their existing success and wait semantics. They attest capture at
+their own established completion boundary, or omit the field if their existing
+contract supplies no evidence yet; an accepted pending image alone is insufficient.
+Native availability polling uses about three seconds; uncertain coordinator
+capture recovery retains its existing fifteen-second cadence.
+
+`--wait` results also include `captureEstablished: true` once capture is attested.
+Metadata-only recipes, retirement admission receipts, unresolved retirement
+phases, and failures omit the field; absence is never evidence that capture is
+established. A retirement record may attest capture after verified image
+readiness, while `capture.phase` remains the authority for source retirement.
+Historical records may omit the field.
+
+A native checkpoint operation
 that can prove it never attempted image submission may instead return this failure
 object, with a nonzero exit status, after the exact local reservation is removed
 and its absence is verified:
@@ -348,11 +376,12 @@ native records with missing image references are also held: a blank reference
 does not prove that submission never happened. Inspect and reconcile the
 original provider operation before removing any ownership evidence.
 
-An ordinary Machine0 capture that returns an error before attempting image
-submission removes its uncommitted reservation, so the source can still be
-released normally. A process interruption or attempted submission without a
-returned image identity remains unresolved; this does not unlock historical
-blank records.
+An ordinary Machine0 or local-container capture that returns an error before
+attempting image submission removes its uncommitted reservation, so the source
+can still be released normally. For local-container, this includes a missing
+workspace or a rejected workspace mount before `docker commit`. A process
+interruption or attempted submission without a returned image identity remains
+unresolved; this does not unlock historical blank records.
 
 For an ordinary Machine0 record without an image identity, `abandon` can dispose
 of the exact source while retaining the unresolved image obligation. It does not
@@ -693,6 +722,25 @@ deregistering the AMI. If deletion is interrupted or a snapshot cannot be
 removed, retry the same checkpoint deletion to finish its recorded cleanup.
 An unavailable backing mapping or failed discovery retains the checkpoint;
 it does not count as completed cleanup.
+
+Direct Azure OS-disk deletion requires the ARM resource ID and Azure `uniqueId`
+saved when the snapshot was captured. Crabbox reads the current snapshot before
+deleting it and compares both values. A replacement at the same name, missing
+identity, or contradictory response stops deletion and retains the local record
+with `native.state=detached` and a `native.detachedReason`. Later delete attempts
+report that reason without contacting Azure. Inspection exposes the reason;
+`inspect --verify` reports `provider_state=detached` and `next_action=manual_cleanup`.
+An inspection or deletion API error retains the record for retry; confirmed
+absence of an identity-bound snapshot completes deletion without a DELETE.
+
+Legacy direct Azure records have no capture-time `uniqueId`; Crabbox never
+adopts the current snapshot's identity into them or deletes their snapshot by
+name. Inspect and clean up the resource manually in Azure, then use
+`crabbox checkpoint delete <id> --local-only` to remove the retained record.
+The pinned Compute API `2026-03-02` has no documented conditional snapshot
+DELETE (`If-Match`), so the identity check detects replacements already present
+at inspection but cannot prevent concurrent external replacement between GET
+and DELETE. Coordinate external snapshot changes with checkpoint deletion.
 
 Coordinator-managed checkpoints delete through the checkpoint endpoint, never
 the generic image endpoint. Active use claims, promoted-image catalog pins,

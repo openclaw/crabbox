@@ -357,6 +357,7 @@ func (a App) advanceCheckpointCapture(ctx context.Context, cfg Config, repo Repo
 	}
 	switch audit.NextAction {
 	case "fork_or_delete":
+		record.CaptureEstablished = true
 		capture.Phase = "retiring"
 	case "delete":
 		capture.Phase = "failed"

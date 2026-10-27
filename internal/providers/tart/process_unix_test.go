@@ -124,10 +124,21 @@ func (p processPeer) send(t *testing.T, a processAction) {
 func (p processPeer) exited(t *testing.T) {
 	t.Helper()
 	_ = p.SetReadDeadline(time.Now().Add(5 * time.Second))
-	var b [1]byte
-	if _, err := p.Read(b[:]); !processConnectionClosed(err) {
+	// Decode past a JSON message's trailing newline even if TCP split it off.
+	var unexpected any
+	if err := json.NewDecoder(p.Conn).Decode(&unexpected); !processConnectionClosed(err) {
 		t.Fatalf("child did not close its control descriptor: %v", err)
 	}
+}
+
+func TestProcessPeerExitAcceptsTrailingJSONWhitespace(t *testing.T) {
+	reader, writer := net.Pipe()
+	t.Cleanup(func() { _ = reader.Close() })
+	go func() {
+		defer writer.Close()
+		_, _ = io.WriteString(writer, "\n")
+	}()
+	processPeer{Conn: reader}.exited(t)
 }
 
 func processConnectionClosed(err error) bool {
@@ -225,8 +236,8 @@ func newProcessFixture(t *testing.T, blockStage string) *processFixture {
 				// Its control fd must already be closed before this command.
 				if run := runs[hello.Args[2]]; run != nil {
 					_ = run.SetReadDeadline(time.Now().Add(5 * time.Second))
-					var data [1]byte
-					if _, err := run.Read(data[:]); !processConnectionClosed(err) {
+					var unexpected any
+					if err := json.NewDecoder(run).Decode(&unexpected); !processConnectionClosed(err) {
 						f.mu.Lock()
 						f.err = fmt.Errorf("VM child still alive at stop: %v", err)
 						f.mu.Unlock()

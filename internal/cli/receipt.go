@@ -12,6 +12,8 @@ func (a App) receipt(ctx context.Context, args []string) error {
 	fs := newFlagSet("receipt", a.Stderr)
 	runIDValue, args := popLeadingRunID(args)
 	runID := fs.String("id", runIDValue, "run id")
+	recoverPath := fs.String("recover", "", "submit an original pending signed finish file without rerunning work")
+	expectedFinish := fs.String("expected-finish-sha256", "", "required sha256 of the original finish request for recovery")
 	expectedSigner := fs.String("expected-signer", "", "required sha256 signer fingerprint")
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -29,31 +31,53 @@ func (a App) receipt(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	run, err := coord.Run(ctx, *runID)
+	var receipt terminalRunReceipt
+	if *recoverPath != "" {
+		receipt, err = recoverPendingRunFinish(ctx, coord, *runID, *recoverPath, *expectedSigner, *expectedFinish)
+	} else {
+		if *expectedFinish != "" {
+			return Exit(2, "--expected-finish-sha256 requires --recover")
+		}
+		receipt, err = readVerifiedTerminalReceipt(ctx, coord, *runID, *expectedSigner)
+	}
 	if err != nil {
 		return err
+	}
+	encoder := json.NewEncoder(a.Stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(receipt); err != nil {
+		return fmt.Errorf("encode receipt: %w", err)
+	}
+	return nil
+}
+
+func readVerifiedTerminalReceipt(ctx context.Context, coord *CoordinatorClient, runID, expectedSigner string) (terminalRunReceipt, error) {
+	var empty terminalRunReceipt
+	run, err := coord.Run(ctx, runID)
+	if err != nil {
+		return empty, err
 	}
 	if run.ExitCode == nil || strings.TrimSpace(run.EndedAt) == "" {
-		return Exit(4, "run %s has no committed terminal evidence", *runID)
+		return empty, Exit(4, "run %s has no committed terminal evidence", runID)
 	}
-	receipt, err := coord.RunReceipt(ctx, *runID)
+	receipt, err := coord.RunReceipt(ctx, runID)
 	if err != nil {
 		if isCoordinatorNotFoundError(err) {
-			return Exit(4, "run %s has no committed terminal receipt; execution remains ambiguous", *runID)
+			return empty, Exit(4, "run %s has no committed terminal receipt; execution remains ambiguous", runID)
 		}
-		return err
+		return empty, err
 	}
-	logText, err := coord.RunLogs(ctx, *runID)
+	logText, err := coord.RunLogs(ctx, runID)
 	if err != nil {
-		return err
+		return empty, err
 	}
 	startedAt, err := time.Parse(time.RFC3339Nano, run.StartedAt)
 	if err != nil {
-		return Exit(2, "run %s has invalid startedAt", *runID)
+		return empty, Exit(2, "run %s has invalid startedAt", runID)
 	}
 	endedAt, err := time.Parse(time.RFC3339Nano, run.EndedAt)
 	if err != nil {
-		return Exit(2, "run %s has invalid endedAt", *runID)
+		return empty, Exit(2, "run %s has invalid endedAt", runID)
 	}
 	retainedDigest := sha256Digest([]byte(logText))
 	fullDigest := retainedDigest
@@ -75,15 +99,10 @@ func (a App) receipt(ctx context.Context, args []string) error {
 		RetainedLogSHA256: retainedDigest,
 		LogTruncated:      run.LogTruncated,
 	}); err != nil {
-		return Exit(1, "receipt verification failed for %s: %v", *runID, err)
+		return empty, Exit(1, "receipt verification failed for %s: %v", runID, err)
 	}
-	if signer := strings.TrimSpace(*expectedSigner); signer != "" && receipt.Signer != signer {
-		return Exit(1, "receipt signer mismatch for %s: got %s want %s", *runID, receipt.Signer, signer)
+	if signer := strings.TrimSpace(expectedSigner); signer != "" && receipt.Signer != signer {
+		return empty, Exit(1, "receipt signer mismatch for %s: got %s want %s", runID, receipt.Signer, signer)
 	}
-	encoder := json.NewEncoder(a.Stdout)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(receipt); err != nil {
-		return fmt.Errorf("encode receipt: %w", err)
-	}
-	return nil
+	return receipt, nil
 }

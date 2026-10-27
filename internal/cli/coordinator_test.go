@@ -4,15 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -64,19 +61,6 @@ func TestCoordinatorLeasePreservesSelectedImageRevision(t *testing.T) {
 				t.Fatalf("optional image revision changed on encoding: %s", encoded)
 			}
 		})
-	}
-}
-
-func TestSplitCurlResponseParsesTrailingStatus(t *testing.T) {
-	body, status, err := splitCurlResponse([]byte("{\"ok\":true}\n200"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status != 200 {
-		t.Fatalf("status = %d, want 200", status)
-	}
-	if string(body) != `{"ok":true}` {
-		t.Fatalf("body = %q", body)
 	}
 }
 
@@ -278,48 +262,6 @@ func TestCoordinatorRunReceiptRejectsMalformedAndOversizedEvidence(t *testing.T)
 	}
 }
 
-func TestCurlConfigKeepsBearerTokenInConfig(t *testing.T) {
-	client := CoordinatorClient{
-		BaseURL: "https://example.test",
-		Token:   "secret-token",
-		Access: AccessConfig{
-			ClientID:     "access-client",
-			ClientSecret: "access-secret",
-			Token:        "access-jwt",
-		},
-	}
-	config, cleanup, err := client.curlConfig(context.Background(), "POST", "/v1/leases", []byte(`{"leaseID":"cbx"}`), true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
-
-	for _, want := range []string{
-		`url = "https://example.test/v1/leases"`,
-		`request = "POST"`,
-		`header = "Authorization: Bearer secret-token"`,
-		`header = "CF-Access-Client-Id: access-client"`,
-		`header = "CF-Access-Client-Secret: access-secret"`,
-		`header = "cf-access-token: access-jwt"`,
-		`header = "Content-Type: application/json"`,
-		`data-binary = "@`,
-	} {
-		if !strings.Contains(config, want) {
-			t.Fatalf("config missing %q:\n%s", want, config)
-		}
-	}
-	for _, line := range strings.Split(config, "\n") {
-		if strings.TrimSpace(line) == "location" {
-			t.Fatalf("credentialed curl config follows redirects:\n%s", config)
-		}
-	}
-	bodyPath := curlConfigValueForTest(t, config, "data-binary")
-	bodyPath = strings.TrimPrefix(bodyPath, "@")
-	if _, err := os.Stat(bodyPath); err != nil {
-		t.Fatalf("body file missing: %v", err)
-	}
-}
-
 func TestCoordinatorRejectsCrossOriginRedirect(t *testing.T) {
 	var redirected atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -384,54 +326,6 @@ func TestCoordinatorHTTPAllowsSameOriginRedirect(t *testing.T) {
 	}
 	if response["ok"] != true {
 		t.Fatalf("response=%v", response)
-	}
-}
-
-func TestCoordinatorCurlFallbackDoesNotFollowRedirect(t *testing.T) {
-	if _, err := exec.LookPath("curl"); err != nil {
-		t.Skip("curl is unavailable")
-	}
-	curlHome := t.TempDir()
-	if err := os.WriteFile(filepath.Join(curlHome, ".curlrc"), []byte("location\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CURL_HOME", curlHome)
-	t.Setenv("HOME", curlHome)
-	var redirected atomic.Int32
-	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		redirected.Add(1)
-	}))
-	defer target.Close()
-
-	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer broker-token" {
-			t.Errorf("Authorization=%q", got)
-		}
-		if got := r.Header.Get("CF-Access-Client-Secret"); got != "access-secret" {
-			t.Errorf("CF-Access-Client-Secret=%q", got)
-		}
-		http.Redirect(w, r, target.URL, http.StatusFound)
-	}))
-	defer source.Close()
-
-	client := CoordinatorClient{
-		BaseURL: source.URL,
-		Token:   "broker-token",
-		Access: AccessConfig{
-			ClientID:     "access-client",
-			ClientSecret: "access-secret",
-			Token:        "access-jwt",
-		},
-		Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-			return nil, errors.New("forced transport failure")
-		})},
-	}
-	err := client.Health(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "forced transport failure") || !strings.Contains(err.Error(), "curl fallback failed: coordinator GET /v1/health: http 302") {
-		t.Fatalf("error=%v, want transport and curl HTTP 302 errors", err)
-	}
-	if got := redirected.Load(); got != 0 {
-		t.Fatalf("redirect target received %d requests", got)
 	}
 }
 
@@ -516,25 +410,7 @@ func TestCoordinatorChildrenScrubExternalDesktopPassword(t *testing.T) {
 	if token, err := client.authorizationToken(context.Background()); err != nil || token != "scrubbed-token" {
 		t.Fatalf("token=%q err=%v", token, err)
 	}
-	if runtime.GOOS == "windows" {
-		return
-	}
-	dir := t.TempDir()
-	curlPath := filepath.Join(dir, "curl")
-	curlScript := "#!/bin/sh\nif [ \"${TEST_ARD_PASSWORD+x}\" = x ] || [ \"$CRABBOX_TEST_KEEP\" != preserved ]; then exit 89; fi\ncat >/dev/null\nprintf '{\"ok\":true}\\n200'\n"
-	if err := os.WriteFile(curlPath, []byte(curlScript), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	client.TokenCommand = nil
-	client.Token = "static-token"
-	var response map[string]any
-	if err := client.doCurl(context.Background(), http.MethodGet, "/v1/health", nil, false, &response); err != nil {
-		t.Fatal(err)
-	}
-	if response["ok"] != true {
-		t.Fatalf("curl response=%v", response)
-	}
+
 }
 
 func TestCoordinatorOwnerGitScrubsExternalDesktopPassword(t *testing.T) {
@@ -1432,41 +1308,6 @@ func TestCoordinatorLeaseWatchCancelsWhenLeaseReleased(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("lease watcher did not cancel after release")
-	}
-}
-
-func TestCoordinatorCurlFallbackEligibility(t *testing.T) {
-	dialErr := &net.OpError{Op: "dial", Net: "tcp", Err: context.DeadlineExceeded}
-	for _, test := range []struct {
-		name      string
-		err       error
-		wrapped   bool
-		fallback  bool
-		transport bool
-	}{
-		{"unexpected EOF", io.ErrUnexpectedEOF, true, true, true},
-		{"dial deadline", dialErr, true, true, false},
-		{"unwrapped dial deadline", dialErr, false, false, false},
-		{"request deadline", context.DeadlineExceeded, true, false, false},
-		{"read deadline", &net.OpError{Op: "read", Net: "tcp", Err: context.DeadlineExceeded}, true, false, false},
-		{"cancellation", context.Canceled, true, false, false},
-		{"dial cancellation", &net.OpError{Op: "dial", Net: "tcp", Err: context.Canceled}, true, false, false},
-		{"no error", nil, false, false, false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			err := test.err
-			if test.wrapped {
-				err = &url.Error{Op: "Get", URL: "https://broker.example.test/v1/leases", Err: err}
-			}
-			for _, method := range []string{http.MethodGet, http.MethodHead} {
-				if got := shouldUseCoordinatorCurlFallback(t.Context(), method, false, err); got != test.fallback {
-					t.Errorf("%s fallback=%t, want %t", method, got, test.fallback)
-				}
-			}
-			if got := isCoordinatorTransportError(err); got != test.transport {
-				t.Errorf("shared transport classification=%t, want unchanged %t", got, test.transport)
-			}
-		})
 	}
 }
 
@@ -2772,22 +2613,6 @@ func TestLeaseStatusRequiresSSHReadiness(t *testing.T) {
 	if state.Ready {
 		t.Fatalf("Ready=true, want false when ssh readiness probe fails")
 	}
-}
-
-func curlConfigValueForTest(t *testing.T, config, key string) string {
-	t.Helper()
-	prefix := key + " = "
-	for _, line := range strings.Split(config, "\n") {
-		if strings.HasPrefix(line, prefix) {
-			var value string
-			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, prefix)), &value); err != nil {
-				t.Fatal(err)
-			}
-			return value
-		}
-	}
-	t.Fatalf("config key %q missing:\n%s", key, config)
-	return ""
 }
 
 func TestCoordinatorAWSStockImageInput(t *testing.T) {

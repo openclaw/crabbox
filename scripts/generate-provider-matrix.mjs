@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const metadataPath = path.join(root, "docs", "providers", "provider-metadata.json");
+const rootReadmePath = path.join(root, "README.md");
 const readmePath = path.join(root, "docs", "providers", "README.md");
 const lifecycleGuidePath = path.join(root, "docs", "features", "provider-live-smoke.md");
 const benchmarkCategoriesPath = path.join(root, "internal", "cli", "provider_categories_generated.go");
@@ -37,15 +38,18 @@ const allowed = {
   gpu: new Set(["yes", "optional", "no", "unknown"])
 };
 
-try {
-  main();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    main();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
 }
 
 function main() {
   const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+  validateReadmeCategories(fs.readFileSync(rootReadmePath, "utf8"), metadata);
   const benchmarkCategories = formatGoSource(renderBenchmarkCategories(metadata));
   if (check) {
     if (!fs.existsSync(benchmarkCategoriesPath) || fs.readFileSync(benchmarkCategoriesPath, "utf8") !== benchmarkCategories) {
@@ -198,8 +202,61 @@ function render(providers, metadata) {
     );
   }
 
-  lines.push("", endMarker);
+  lines.push("", renderProviderCategories(metadata), "", endMarker);
   return lines.join("\n");
+}
+
+export function renderProviderCategories(metadata) {
+  const groups = new Map();
+  for (const [name, profile] of Object.entries(metadata)) {
+    if (!groups.has(profile.category)) groups.set(profile.category, []);
+    groups.get(profile.category).push(name);
+  }
+  const lines = [
+    "## Providers By Category",
+    "",
+    "The groups below match `crabbox providers --json` and the checked-in",
+    "`provider-metadata.json`. Categories describe use and hosting, while the separate",
+    "`coordinator` field describes routing: Daytona is categorized as `direct-cloud`",
+    "but also supports coordinator-managed leases.",
+    "",
+    "| Category | Entries | Providers |",
+    "| --- | --- | --- |"
+  ];
+  for (const category of [...groups.keys()].sort()) {
+    const names = groups.get(category).sort();
+    const links = names.map((name) => `[${escapeCell(name)}](${escapeLink(metadata[name].docs)})`);
+    lines.push(`| ${code(category)} | ${names.length} | ${links.join(", ")} |`);
+  }
+  return lines.join("\n");
+}
+
+export function validateReadmeCategories(readme, metadata) {
+  const start = readme.indexOf("<!-- BEGIN README PROVIDER LIST -->");
+  const end = readme.indexOf("<!-- END README PROVIDER LIST -->");
+  if (start < 0 || end < start) fail("missing provider list markers in README.md");
+  const sections = readme.slice(start, end).split(/^### /m).slice(1);
+  const seen = new Set();
+  const categories = new Set(Object.values(metadata).map((profile) => profile.category));
+  const seenCategories = new Set();
+  for (const section of sections) {
+    const category = section.match(/^Catalog category: `([^`]+)`/m)?.[1];
+    if (!categories.has(category)) fail(`README.md has an unknown or missing catalog category: ${category}`);
+    if (seenCategories.has(category)) fail(`README.md repeats catalog category ${category}`);
+    seenCategories.add(category);
+    for (const [, name, href] of section.matchAll(/^\| \[([^\]]+)\]\(([^)]+)\) \|/gm)) {
+      const profile = metadata[name];
+      if (!profile) fail(`README.md lists unknown provider ${name}`);
+      if (seen.has(name)) fail(`README.md lists provider ${name} more than once`);
+      seen.add(name);
+      if (profile.category !== category) {
+        fail(`README.md lists ${name} under ${category}; metadata category is ${profile.category}`);
+      }
+      if (href !== `docs/providers/${profile.docs}`) fail(`README.md has an incorrect docs link for ${name}`);
+    }
+  }
+  const missing = Object.keys(metadata).filter((name) => !seen.has(name));
+  if (missing.length) fail(`README.md provider list is missing: ${missing.join(", ")}`);
 }
 
 function replaceGenerated(input, generated, startMarker, endMarker, targetPath) {

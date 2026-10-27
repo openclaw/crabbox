@@ -611,17 +611,18 @@ type NativeCheckpointSourcePolicyProvider interface {
 }
 
 type NativeCheckpointImage struct {
-	ID           string
-	Name         string
-	State        string
-	Provider     string
-	Kind         string
-	Region       string
-	AccountID    string
-	ResourceID   string
-	SnapshotIDs  []string
-	Architecture string
-	Direct       bool
+	ID               string
+	Name             string
+	State            string
+	Provider         string
+	Kind             string
+	Region           string
+	AccountID        string
+	ResourceID       string
+	ResourceUniqueID string
+	SnapshotIDs      []string
+	Architecture     string
+	Direct           bool
 }
 
 type NativeCheckpointCreateRequest struct {
@@ -662,8 +663,11 @@ type NativeCheckpointCapture struct {
 }
 
 type NativeCheckpointCreateResult struct {
-	Image    NativeCheckpointImage
-	Metadata map[string]string
+	// CaptureEstablished attests a fixed capture under the provider's own
+	// contract. False preserves success semantics and omits the JSON assertion.
+	CaptureEstablished bool `json:"-"`
+	Image              NativeCheckpointImage
+	Metadata           map[string]string
 }
 
 // NativeCheckpointNotSubmittedError attests that this invocation never attempted
@@ -918,10 +922,11 @@ const (
 	// FeatureFixedLeaseID advertises caller-supplied idempotent lease IDs.
 	FeatureFixedLeaseID Feature = "fixed-lease-id"
 	// FeatureFixedCurrentRepoStop requires RepositoryScopedStopBackend for fixed IDs.
-	FeatureFixedCurrentRepoStop Feature = "fixed-current-repo-stop"
-	FeaturePauseResume          Feature = "pause-resume"
-	FeatureLeaseHeartbeat       Feature = "lease-heartbeat"
-	FeatureMCP                  Feature = "mcp-attachments"
+	FeatureFixedCurrentRepoStop   Feature = "fixed-current-repo-stop"
+	FeaturePauseResume            Feature = "pause-resume"
+	FeatureSessionDiskRetentionV1 Feature = "session-disk-retention-v1"
+	FeatureLeaseHeartbeat         Feature = "lease-heartbeat"
+	FeatureMCP                    Feature = "mcp-attachments"
 )
 
 const FeaturePreparedArtifactWorkspace Feature = "prepared-artifact-workspace"
@@ -1439,7 +1444,6 @@ type RunRequest struct {
 	RunID                 string
 	Options               LeaseOptions
 	Keep                  bool
-	NoRuntimeExtension    bool
 	Reclaim               bool
 	NoSync                bool
 	NoHydrate             bool
@@ -1510,13 +1514,15 @@ type RepositoryScopedStopBackend interface {
 }
 
 type PauseRequest struct {
-	Options LeaseOptions
-	ID      string
+	Lifecycle RetentionLifecycleRequest
+	Options   LeaseOptions
+	ID        string
 }
 
 type ResumeRequest struct {
-	Options LeaseOptions
-	ID      string
+	Lifecycle RetentionLifecycleRequest
+	Options   LeaseOptions
+	ID        string
 }
 
 type CleanupRequest struct {

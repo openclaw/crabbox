@@ -1,3 +1,4 @@
+import { isAdminRequest } from "./auth";
 import { clampLeaseDurations, resolveLeasePolicy } from "./config";
 import type { CoordinatorRuntime, CoordinatorStorageView } from "./coordinator-runtime";
 import { sha256Hex } from "./encoding";
@@ -9,6 +10,7 @@ import { publicLeaseRecord } from "./org-records";
 import { serveRelayBackend } from "./serve-relay";
 import { ServeRelayControl } from "./serve-relay-control";
 import type { Env, LeaseRecord, LeaseRequest, CreateAttemptRecord } from "./types";
+import { usageSummary, type UsageGroup } from "./usage";
 
 export const serveBodyLimit = 32 * 1024;
 const machinePrefix = "serve-machine:";
@@ -23,6 +25,16 @@ const maintenanceMachineBatch = 16;
 const maintenanceLeaseReadBudget = 256;
 const maintenanceResumeMS = 15_000;
 const maintenanceCursorKey = "serve-maintenance-cursor";
+export const serveUsageKey = (machineID: string, month: string): string =>
+  `serve-usage:${machineID}:${month}`;
+export interface ServeUsageRollup {
+  owner: string;
+  org: string;
+  leases: number;
+  runtimeSeconds: number;
+  cpuSeconds: number;
+  updatedAt: string;
+}
 interface MaintenanceCursor {
   after: string;
   next?: number;
@@ -40,7 +52,16 @@ export interface ServeAddressCandidate {
   address: string;
   kind: "tailnet" | "lan" | "explicit";
 }
+export interface ServeAvailability {
+  state: "available" | "busy" | "unknown";
+  reasons: string[];
+  hostCPU: number | null;
+  memoryPressure: "normal" | "warn" | "critical" | "unknown";
+  userIdleSeconds: number | null;
+  power: "ac" | "battery" | "unknown";
+}
 export interface ServeMachine {
+  availability?: ServeAvailability;
   machineID: string;
   owner: string;
   org: string;
@@ -70,10 +91,19 @@ export interface ServeMachine {
   leases: string[];
 }
 export interface ServeMachineView extends Omit<ServeMachine, "leases"> {
+  usage?: {
+    month: string;
+    leases: number;
+    activeLeases: number;
+    runtimeSeconds: number;
+    cpuSeconds: number;
+  };
   leases?: undefined;
   online: boolean;
   freeCPUs: number;
   allocatedLeases: number;
+  allocatedCPUs: number;
+  allocatedMemoryMB: number;
   allocatedLeaseRefs: Pick<LeaseRecord, "id" | "slug" | "state">[];
 }
 interface Heartbeat extends Omit<ServeMachine, "owner" | "org" | "lastHeartbeat" | "leases"> {
@@ -98,6 +128,24 @@ function validText(v: unknown, max = 128): v is string {
 }
 function integer(v: unknown, max: number): v is number {
   return Number.isSafeInteger(v) && Number(v) > 0 && Number(v) <= max;
+}
+function validAvailability(value: unknown): boolean {
+  if (value === undefined) return true; // Released agents retain their placement behavior.
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as ServeAvailability;
+  return (
+    ["available", "busy", "unknown"].includes(v.state) &&
+    Array.isArray(v.reasons) &&
+    v.reasons.length <= 8 &&
+    v.reasons.every((reason) => validText(reason, 128)) &&
+    (v.hostCPU === null || (Number.isFinite(v.hostCPU) && v.hostCPU >= 0 && v.hostCPU <= 1)) &&
+    ["normal", "warn", "critical", "unknown"].includes(v.memoryPressure) &&
+    (v.userIdleSeconds === null ||
+      (Number.isFinite(v.userIdleSeconds) &&
+        v.userIdleSeconds >= 0 &&
+        v.userIdleSeconds <= Number.MAX_SAFE_INTEGER)) &&
+    ["ac", "battery", "unknown"].includes(v.power)
+  );
 }
 function validLeaseKey(v: unknown): v is string {
   if (!validText(v, 4096)) return false;
@@ -200,6 +248,7 @@ function heartbeatInput(v: Heartbeat): boolean {
     integer(v.cpus, 4096) &&
     integer(v.memoryMB, 16 * 1024 * 1024) &&
     integer(v.maxLeases, maxLeases) &&
+    validAvailability(v.availability) &&
     (v.frontDoor?.candidates !== undefined || validAddress(v.address)) &&
     v.frontDoor &&
     integer(v.frontDoor.port, 65535) &&
@@ -312,12 +361,68 @@ export class ServeCoordinator {
   }
   async listMachines(r: Request): Promise<ServeMachineView[]> {
     if (!serveEnabled(this.env, requestOwner(r))) return [];
-    const machines = await this.machines(this.runtime.storage, r);
-    return Promise.all(
-      [...machines.values()]
-        .filter((m) => this.owned(m, r))
-        .map((m) => this.view(this.runtime.storage, m)),
-    );
+    const now = new Date();
+    const month = now.toISOString().slice(0, 7);
+    // Read one snapshot so cleanup cannot move a lease into the rollup between reads.
+    return this.runtime.storage.transaction(async (s) => {
+      const machines = await this.machines(s, r);
+      return Promise.all(
+        [...machines.values()]
+          .filter((m) => this.owned(m, r))
+          .map(async (m) => {
+            const [records, stored] = await Promise.all([
+              this.records(s, m),
+              s.get<ServeUsageRollup>(serveUsageKey(m.machineID, month)),
+            ]);
+            const settled = stored?.owner === m.owner && stored.org === m.org ? stored : undefined;
+            const pending = usageSummary(
+              records.filter((l) => !l.serveUsageRecordedAt),
+              { scope: "user", owner: m.owner, org: m.org, month },
+              now,
+            ).byMachine[0];
+            return {
+              ...(await this.view(s, m, records)),
+              usage: {
+                month,
+                leases: (settled?.leases ?? 0) + (pending?.leases ?? 0),
+                activeLeases: pending?.activeLeases ?? 0,
+                runtimeSeconds: (settled?.runtimeSeconds ?? 0) + (pending?.runtimeSeconds ?? 0),
+                cpuSeconds: (settled?.cpuSeconds ?? 0) + (pending?.cpuSeconds ?? 0),
+              },
+            };
+          }),
+      );
+    });
+  }
+  async labelUsageGroups(groups: UsageGroup[], r: Request): Promise<void> {
+    for (const group of groups) {
+      if (group.key === "unknown") continue;
+      // oxlint-disable-next-line eslint/no-await-in-loop -- bound name hydration to one point read at a time, after usage filtering.
+      const machine = await this.runtime.storage.get<ServeMachine>(machinePrefix + group.key);
+      if (machine?.name && (isAdminRequest(r) || this.owned(machine, r))) {
+        group.label = machine.name;
+      }
+    }
+  }
+  private async recordUsage(s: CoordinatorStorageView, l: LeaseRecord, now: number): Promise<void> {
+    if (live(l) || l.serveUsageRecordedAt || !leaseProviderCleanupConfirmed(l)) return;
+    const month = l.createdAt.slice(0, 7);
+    const group = usageSummary([l], { scope: "all", month }, new Date(now)).byMachine[0];
+    if (!group) return;
+    const key = serveUsageKey(group.key, month);
+    const stored = await s.get<ServeUsageRollup>(key);
+    const previous = stored?.owner === l.owner && stored.org === l.org ? stored : undefined;
+    const updatedAt = new Date(now).toISOString();
+    await s.put(key, {
+      owner: l.owner,
+      org: l.org,
+      leases: (previous?.leases ?? 0) + group.leases,
+      runtimeSeconds: (previous?.runtimeSeconds ?? 0) + group.runtimeSeconds,
+      cpuSeconds: (previous?.cpuSeconds ?? 0) + (group.cpuSeconds ?? 0),
+      updatedAt,
+    } satisfies ServeUsageRollup);
+    // The caller persists this marker with the rollup in the heartbeat transaction.
+    l.serveUsageRecordedAt = updatedAt;
   }
   async route(r: Request, parts: string[]): Promise<Response> {
     try {
@@ -368,13 +473,16 @@ export class ServeCoordinator {
     const held = leases.filter((l) => !leaseProviderCleanupConfirmed(l));
     const cpus = held.reduce((n, l) => n + l.serve!.cpus, 0);
     const memory = held.reduce((n, l) => n + l.serve!.memoryMB, 0);
+    const available = m.availability === undefined || m.availability.state === "available";
     return {
       ...m,
       leases: undefined,
       online: Date.now() - m.lastHeartbeat < onlineMS,
-      freeCPUs: Math.max(0, m.cpus - cpus),
-      freeMemoryMB: Math.max(0, m.memoryMB - memory),
+      freeCPUs: available ? Math.max(0, m.cpus - cpus) : 0,
+      freeMemoryMB: available ? Math.max(0, m.memoryMB - memory) : 0,
       allocatedLeases: held.length,
+      allocatedCPUs: cpus,
+      allocatedMemoryMB: memory,
       allocatedLeaseRefs: held
         .filter((l) => l.owner === m.owner && l.org === m.org)
         .map(({ id, slug, state }) => ({ id, state, ...(slug === undefined ? {} : { slug }) })),
@@ -415,30 +523,31 @@ export class ServeCoordinator {
       const seen = new Set(input.leases.map((l) => l.id));
       const assignments: ReturnType<ServeCoordinator["assignment"]>[] = [];
       const stop = new Set<string>();
-      await Promise.all(
-        records.map(async (l) => {
-          const before = JSON.stringify(l);
-          this.expire(l, old ?? m, now);
-          if (live(l) && l.state === "active") {
-            l.sshJump = jumpForMachine(m, this.env);
-          }
-          if (!live(l) && !seen.has(l.id) && !leaseProviderCleanupConfirmed(l)) {
+      // oxlint-disable eslint/no-await-in-loop -- serialize rollup increments for leases on the same machine and month.
+      for (const l of records) {
+        const before = JSON.stringify(l);
+        this.expire(l, old ?? m, now);
+        if (live(l) && l.state === "active") {
+          l.sshJump = jumpForMachine(m, this.env);
+        }
+        if (!live(l) && !seen.has(l.id) && !leaseProviderCleanupConfirmed(l)) {
+          delete l.cleanupStartedAt;
+          completeLeaseProviderCleanup(l, new Date(now).toISOString());
+        }
+        if (live(l)) {
+          if (l.state === "active" && !seen.has(l.id)) {
+            l.state = "failed";
+            l.failureError = "served container disappeared";
             delete l.cleanupStartedAt;
             completeLeaseProviderCleanup(l, new Date(now).toISOString());
           }
-          if (live(l)) {
-            if (l.state === "active" && !seen.has(l.id)) {
-              l.state = "failed";
-              l.failureError = "served container disappeared";
-              delete l.cleanupStartedAt;
-              completeLeaseProviderCleanup(l, new Date(now).toISOString());
-            }
-          } else if (seen.has(l.id)) stop.add(l.id);
-          if (live(l)) assignments.push(this.assignment(l));
-          if (!live(l)) await new ServeRelayControl(this.env).closeLease(l);
-          if (JSON.stringify(l) !== before) await putLeaseRecord(s, l);
-        }),
-      );
+        } else if (seen.has(l.id)) stop.add(l.id);
+        if (live(l)) assignments.push(this.assignment(l));
+        if (!live(l)) await new ServeRelayControl(this.env).closeLease(l);
+        await this.recordUsage(s, l, now);
+        if (JSON.stringify(l) !== before) await putLeaseRecord(s, l);
+      }
+      // oxlint-enable eslint/no-await-in-loop
       for (const id of seen) if (!records.some((l) => l.id === id && live(l))) stop.add(id);
       // Terminal rows are kept in normal history; the machine only retains live allocations.
       m.leases = records.filter((l) => !leaseProviderCleanupConfirmed(l)).map((l) => l.id);
@@ -629,6 +738,7 @@ export class ServeCoordinator {
           .filter(
             ({ m, view, size }) =>
               view.online &&
+              (m.availability === undefined || m.availability.state === "available") &&
               !m.draining &&
               view.allocatedLeases < Math.min(m.maxLeases, maxLeases) &&
               view.freeCPUs >= size.cpus &&
@@ -743,7 +853,7 @@ export class ServeCoordinator {
       current.state = "released";
       current.releaseDeletesServer = true;
       current.updatedAt = new Date().toISOString();
-      current.endedAt = current.updatedAt;
+      current.endedAt ??= current.cleanupCompletedAt ?? current.updatedAt;
       if (!leaseProviderCleanupConfirmed(current)) current.cleanupStartedAt ??= current.updatedAt;
       await new ServeRelayControl(this.env).closeLease(current);
       await putLeaseRecord(s, current);

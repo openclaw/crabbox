@@ -48,8 +48,19 @@ the existing brokered SSH-lease path.
 The [browser portal](../features/portal.md#index-portal) shows your donated
 machines below the fleet, with online/offline and draining status, heartbeat age,
 capacity, allocated lease links, runtime/agent versions, and SSH front doors.
+It also shows served leases, runtime, and allocated CPU-hours for leases created
+in the current UTC month, matching `crabbox serve machines`. These summaries combine
+current allocations with durable monthly rollups recorded once on agent-confirmed
+cleanup. Rollups start at deployment with no historical backfill; cross-month leases
+remain attributed to their creation month. Listings read only each machine's rollup
+and current allocations, never the full lease history.
 The section appears only for enabled owners with machines; even admins see only
 their own machines in the current organization.
+
+[`crabbox usage`](../commands/usage.md) also groups serve leases by stable machine
+ID with the display name when available, including full recorded history. It uses the selected reporting month and
+normal usage authorization. CPU-hours are runtime times assigned CPUs, not actual
+CPU utilization; serve leases continue to carry zero estimated cost.
 
 ## Trust and limits
 
@@ -70,6 +81,9 @@ public lease keys, deadlines, and status, outside the repository.
 Every container gets a hard CPU limit, memory limit, and low CPU shares. The
 agent and coordinator enforce the offered CPU, memory, and `--max-leases` caps.
 CPU shares reduce contention but do not reserve idle CPU for the host.
+Availability sampling starts after the first reconciliation and image-preparation
+kickoff, and reuses reconciliation's container inventory. Busy or unknown
+availability does not delay image preparation or existing lease deadlines.
 The agent starts only its configured local-container image; a different image
 in an assignment fails with `serve_image_mismatch`.
 Containers have no host Docker socket, privileged mode, host network, or host
@@ -107,6 +121,85 @@ the fallback provider; other errors do not trigger fallback. The actual provider
 is retained for run reporting and cleanup. Fixed-ID acquisition does not switch
 providers. `CRABBOX_SERVE_MACHINE` and `CRABBOX_SERVE_FALLBACK` provide environment
 overrides.
+
+## Availability
+
+By default, a machine accepts new leases only while the owner is not using it.
+The agent samples host signals approximately every ten seconds, independently
+of heartbeats and deadline enforcement. Busy or unknown machines advertise zero
+free capacity; existing leases continue at their existing low CPU priority.
+Availability never kills a running lease.
+
+| Policy | Desktop/server default | Laptop default (battery detected) |
+| --- | --- | --- |
+| `--max-host-cpu` | `0.5` | `0.5` |
+| `--require-user-idle` | `0` (disabled) | `10m` |
+| `--require-ac-power` | Ignored | `true` |
+| `--max-memory-pressure` | `critical` | `critical` |
+
+CPU is a time-weighted 60-second average of total host utilization minus this
+agent's owned, labeled containers' runtime CPU usage, normalized by host logical
+cores and clamped at zero. On macOS the agent uses
+Mach host CPU counter deltas (or interval `top` samples in builds without cgo), the kernel memory-pressure
+level, IOHIDSystem console idle time, and `pmset` power information. On Linux it
+uses `/proc/stat`, `MemAvailable` (warning below 10%, critical below 5%), and
+sysfs power information. Linux console idle time is unknown: enabling an idle
+requirement there conservatively prevents availability. Unsupported or failed
+required measurements are unknown, never treated as idle. Unknown form factor
+uses laptop defaults.
+
+If the agent cannot read its container inventory or CPU stats, it uses raw host
+CPU without subtracting container usage. This conservatively overestimates load;
+`serve container CPU unknown` is an informational reason, not an unknown host
+measurement. Host signals are sampled concurrently with independent 45-second
+deadlines. A slow or failed signal does not consume another signal's deadline,
+and sampling never blocks heartbeats. Samples start at least ten seconds apart;
+reads that take longer begin the next sample immediately after completion.
+Readings and gaps older than one minute are treated as unknown; the longer
+budget allows CPU sampling to complete on heavily loaded hosts without treating
+those bounded reads as stale.
+
+CPU above the threshold, memory pressure at or above the selected level, or
+battery power must persist for at least 60 seconds before becoming busy.
+Recent console activity makes the machine busy immediately. All required
+conditions must be clear for five minutes before availability returns, including
+at startup after the first complete CPU window. Unknown measurements immediately
+prevent new placement. `--availability always` explicitly disables gating.
+
+Configuration uses `serve.availability.mode`, `maxHostCPU`, `requireUserIdle`,
+`requireACPower`, and `maxMemoryPressure`. Flags override environment variables,
+which override configuration and detected defaults. The corresponding environment
+variables are `CRABBOX_SERVE_AVAILABILITY`, `CRABBOX_SERVE_MAX_HOST_CPU`,
+`CRABBOX_SERVE_REQUIRE_USER_IDLE`, `CRABBOX_SERVE_REQUIRE_AC_POWER`, and
+`CRABBOX_SERVE_MAX_MEMORY_PRESSURE`.
+
+```yaml
+serve:
+  availability:
+    mode: auto
+    maxHostCPU: 0.5
+    requireUserIdle: 10m
+    requireACPower: true
+    maxMemoryPressure: critical
+```
+
+`crabbox serve status` and `crabbox serve machines` show availability and reasons.
+The portal shows the same state, CPU, console idle time, and power source; its
+machine tile counts online, non-draining available machines. Legacy agents
+without availability data retain their previous placement behavior. Capacity
+errors include owner-visible machine states and reasons.
+
+For a read-only local measurement, run `crabbox serve status --probe --json`.
+It samples for seven minutes by default to include the startup and recovery windows,
+without registering, changing services, starting containers, or writing state.
+`--probe-duration 1m` through `1h` changes the observation period; a short probe
+may correctly report unknown while warming up. Use the agent's `--state-dir`
+and `--runtime` to subtract its own containers.
+
+Set `CRABBOX_SERVE_AVAILABILITY_DEBUG=1` on the agent or probe to log bounded
+per-signal outcomes and elapsed times to stderr, including errors and timeouts.
+These diagnostics omit command arguments, output, and error text; JSON probe
+results remain on stdout.
 
 ## Prepared container images
 
@@ -189,8 +282,8 @@ in 1–65535. The agent binds each advertised IPv4 address separately on that
 same port, never a wildcard address. If some binds fail, it logs the failures
 and advertises only the addresses that bound; no bound addresses is fatal.
 The agent re-detects candidates on each heartbeat and rebinds when addresses
-change, including DHCP and Wi-Fi changes. Capacity is controlled solely by
-`--max-leases` and the CPU/memory offer.
+change, including DHCP and Wi-Fi changes. Capacity is controlled by availability,
+`--max-leases`, and the CPU/memory offer.
 
 Automatic LAN candidates come from up, non-loopback, broadcast-capable
 interfaces in `10/8`, `172.16/12`, or `192.168/16`. Tunnel and runtime bridge
@@ -235,7 +328,21 @@ invocation to retry.
 
 Relay adds coordinator latency. Each direction allows one acknowledged 32 KiB
 frame at a time, bounding buffering with backpressure at the cost of throughput
-on high-latency links. A fresh invocation always retries direct candidates, even
+on high-latency links. On macOS and Linux clients, foreground commands reuse one
+relay-backed front-door SSH connection for the invocation. Readiness, sync, and
+workload commands also reuse their inner SSH connection; workspace ownership
+uses a separate inner connection over that same relay so renewals and release
+remain independent of the workload. Both host keys remain pinned, and the front
+door still restricts every forwarding channel to the authenticated lease.
+
+Control sockets live in private, owner-only directories unique to the invocation
+and lease identity. Their foreground masters are joined and the directories
+removed before release or when the invocation exits, including cancellation and
+`--keep`. They are never shared between invocations or coordinator logins.
+Exported background forwards retain their independent transport lifetime.
+Windows clients retain the non-multiplexed relay transport.
+
+A fresh invocation always retries direct candidates, even
 if its previous route was relay, so returning to the LAN restores direct access.
 The relay runs on both Cloudflare (one dedicated Durable Object per session) and
 Node/PostgreSQL. Fleet handles admission and lifecycle, never the data frames.

@@ -53,11 +53,11 @@ tag from [GitHub Releases](https://github.com/openclaw/crabbox/releases); this
 channel is supported starting with v0.44.0. For example:
 
 ```sh
-go install github.com/openclaw/crabbox/cmd/crabbox@v0.70.0
+GOTOOLCHAIN=go1.27.3 go install github.com/openclaw/crabbox/cmd/crabbox@v0.70.0
 ```
 
-The module requires Go 1.26 and declares go1.26.5 as its preferred toolchain;
-use Go 1.26.5 or newer, or leave automatic toolchain selection enabled. This
+The module minimum remains Go 1.26. Use the explicit patched toolchain above:
+versioned `go install` ignores the target module's toolchain suggestion. This
 command compiles the Go CLI locally. It does not install release companion
 executables or assets, including `crabbox-apple-vm-helper` and the runtime pack, and it is not the
 signed/notarized prebuilt distribution. Use Homebrew or a release archive for

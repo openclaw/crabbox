@@ -30,6 +30,8 @@ type runRecorder struct {
 	command            []string
 	label              string
 	runID              string
+	runOwner           string
+	runOrg             string
 	requestedRunID     string
 	createLeaseID      string
 	createConfig       *Config
@@ -60,6 +62,8 @@ type runRecorder struct {
 	telemetrySamples   []*LeaseTelemetry
 	telemetryCancel    func()
 	telemetryDone      chan struct{}
+
+	pendingFinishCleanupErr error
 }
 
 func newRunRecorder(ctx context.Context, coord *CoordinatorClient, cfg Config, command []string, label string, stderr io.Writer, createAfterLease bool, requestedRunID string) *runRecorder {
@@ -98,7 +102,8 @@ func (r *runRecorder) createRun(ctx context.Context, leaseID string, cfg Config)
 	if r.createConfig == nil {
 		r.createLeaseID = leaseID
 		r.createConfig = &Config{Provider: cfg.Provider, TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode, Class: cfg.Class, ServerType: cfg.ServerType}
-		// Keep terminal bookkeeping on the initiating route and authentication.
+		// Keep admission replay and terminal bookkeeping on the initiating route
+		// and credential source. Renewable credentials are refreshed at finish.
 		r.createCoordinator = &CoordinatorClient{
 			BaseURL: r.coord.BaseURL, Token: r.coord.Token, Access: r.coord.Access,
 			TokenCommand:     append([]string(nil), r.coord.TokenCommand...),
@@ -271,6 +276,7 @@ func (r *runRecorder) StartTelemetrySampler(ctx context.Context, target SSHTarge
 
 func (r *runRecorder) attachRun(run CoordinatorRun) {
 	r.runID = run.ID
+	r.runOwner, r.runOrg = run.Owner, run.Org
 	r.leaseID, r.leaseSlug, r.leaseProvider = run.LeaseID, run.Slug, run.Provider
 	r.startedAt, _ = time.Parse(time.RFC3339Nano, run.StartedAt)
 	r.attachedAt = time.Now()
@@ -303,11 +309,33 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 	telemetry := runTelemetrySummary(r.telemetryStart, r.telemetryEnd, r.telemetrySnapshot())
 	ctx, cancel := context.WithTimeout(context.Background(), runRecorderFinishTimeout)
 	defer cancel()
-	var lastErr error
+	data, encodeErr := encodeRunFinish(exitCode, sync, command, log, truncated, results, telemetry, classification, receipt)
+	if encodeErr != nil {
+		return Exit(7, "encode terminal finish for %s: %v", r.runID, encodeErr)
+	}
+	coord := r.coord
+	if r.createCoordinator != nil {
+		coord = r.createCoordinator
+	}
+	var pendingPath string
+	if receipt != nil {
+		pendingPath, encodeErr = retainPendingRunFinish(pendingRunFinish{
+			SchemaVersion: 1, Coordinator: strings.TrimRight(coord.BaseURL, "/"),
+			RunID: r.runID, Owner: r.runOwner, Org: r.runOrg,
+			Body: data, BodySHA256: sha256Digest(data),
+		})
+		if encodeErr != nil {
+			return Exit(7, "retain original terminal finish for %s before submission: %v", r.runID, encodeErr)
+		}
+	}
+	// Retain the signed original before refreshing: an unavailable helper or
+	// changed identity must not discard the only recoverable finish bytes.
+	coord, authErr := r.finishCoordinator(ctx, coord)
+	lastErr := authErr
 	attempts := 0
-	for attempt := 1; attempt <= runRecorderFinishAttempts && ctx.Err() == nil; attempt++ {
+	for attempt := 1; authErr == nil && attempt <= runRecorderFinishAttempts && ctx.Err() == nil; attempt++ {
 		attempts = attempt
-		_, finishErr := r.coord.FinishRun(ctx, r.runID, exitCode, sync, command, log, truncated, results, telemetry, classification, receipt)
+		_, finishErr := coord.finishRunBytes(ctx, r.runID, data)
 		if finishErr == nil && receipt == nil {
 			r.finished = true
 			r.terminalConfirmed = true
@@ -319,17 +347,25 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 		}
 		retryErr := finishErr
 		if receipt != nil {
-			committed, receiptErr := r.coord.RunReceipt(ctx, r.runID)
+			committed, receiptErr := coord.RunReceipt(ctx, r.runID)
 			if receiptErr == nil {
-				if committed == *receipt {
+				if committed == *receipt && finishErr == nil {
+					// The caller owns terminal output ordering. Cleanup is diagnostic:
+					// it cannot change the confirmed original task result.
+					r.pendingFinishCleanupErr = removePendingRunFinish(pendingPath)
 					r.finished = true
 					r.terminalConfirmed = true
 					return nil
 				}
-				lastErr = fmt.Errorf("stored terminal receipt differs from the signed finish payload")
-				break
+				if committed != *receipt {
+					lastErr = errors.Join(lastErr, fmt.Errorf("stored terminal receipt differs from the signed finish payload"))
+					break
+				}
+				// The receipt does not bind results/telemetry. Require a successful
+				// idempotent POST of the full original before accepting a lost response.
+			} else {
+				lastErr = errors.Join(lastErr, fmt.Errorf("verify persisted terminal receipt: %w", receiptErr))
 			}
-			lastErr = errors.Join(lastErr, fmt.Errorf("verify persisted terminal receipt: %w", receiptErr))
 			// Preserve both diagnostics without letting a secondary read error
 			// change whether the original finish request can be retried.
 			if retryErr == nil {
@@ -347,7 +383,51 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 		}
 	}
 	lastErr = errors.Join(lastErr, ctx.Err())
+	if pendingPath != "" {
+		// Keep recovery pins with the failure instead of appending progress text
+		// after the caller has emitted its final machine-readable timing report.
+		return Exit(7, "run history terminal commit failed for %s after %d attempts: %v; recover with `crabbox receipt %s`; pending signed finish: run=%q file=%q signer=%s finish-sha256=%s; use receipt --recover with these original pins", r.runID, attempts, lastErr, r.runID, r.runID, pendingPath, receipt.Signer, sha256Digest(data))
+	}
 	return Exit(7, "run history terminal commit failed for %s after %d attempts: %v; recover with `crabbox receipt %s`", r.runID, attempts, lastErr, r.runID)
+}
+
+// finishCoordinator renews only renewable credentials. Static admission headers
+// have no refresh source and retain their original binding. Never select a later
+// r.coord or mutate createCoordinator: admission retries must still use the
+// original credentials, while all finish requests share one fresh authority.
+func (r *runRecorder) finishCoordinator(ctx context.Context, original *CoordinatorClient) (*CoordinatorClient, error) {
+	if r.createCoordinator == nil || len(original.TokenCommand) == 0 {
+		return original, nil
+	}
+	if r.runOwner == "" || r.runOrg == "" {
+		return nil, errors.New("cannot refresh terminal credentials without the admitted run owner and organization")
+	}
+	headers := make(http.Header)
+	// resolveRequestHeaders intentionally bypasses the admission snapshot once.
+	if err := original.resolveRequestHeaders(ctx, headers); err != nil {
+		return nil, fmt.Errorf("refresh terminal credentials: %w", err)
+	}
+	r.diagnosticSecrets = append(r.diagnosticSecrets, strings.TrimPrefix(headers.Get("Authorization"), "Bearer "), headers.Get("CF-Access-Client-Secret"), headers.Get("cf-access-token"))
+	bound := &CoordinatorClient{
+		BaseURL: original.BaseURL, Client: original.Client,
+		readRetryWriter: original.readRetryWriter,
+		admissionAuth:   &coordinatorAdmissionAuth{captured: true, headers: headers},
+	}
+	who, err := bound.Whoami(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("verify refreshed terminal identity: %w", err)
+	}
+	if who.Owner != r.runOwner || who.Org != r.runOrg {
+		return nil, errors.New("refreshed terminal owner or organization mismatch")
+	}
+	run, err := bound.Run(ctx, r.runID)
+	if err != nil {
+		return nil, fmt.Errorf("verify admitted terminal run: %w", err)
+	}
+	if run.ID != r.runID || run.Owner != r.runOwner || run.Org != r.runOrg {
+		return nil, errors.New("admitted run owner or organization mismatch")
+	}
+	return bound, nil
 }
 
 func runRecorderFinishRetryable(err error) bool {

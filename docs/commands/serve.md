@@ -9,6 +9,7 @@ crabbox serve --cpus 24 --memory 48g
 crabbox serve --runtime podman --cpus 8 --memory 16g --advertise-address 100.64.1.2
 crabbox serve machines --json
 crabbox serve status --json
+crabbox serve status --probe --json
 crabbox serve cache prune
 crabbox serve install --cpus 24 --memory 48g
 crabbox serve uninstall
@@ -28,6 +29,13 @@ crabbox serve uninstall
 | `--state-dir` | Private machine identity/status directory |
 | `--no-cache-volumes` | Disable managed cache volumes |
 | `--drain-on-exit` | Remove containers on orderly agent shutdown |
+| `--availability` | `auto` (default) or `always` to disable availability gating |
+| `--max-host-cpu` | Maximum non-serve host CPU fraction, default `0.5` |
+| `--require-user-idle` | Minimum console idle duration, default `0` on desktops or `10m` on laptops |
+| `--require-ac-power` | Require AC on laptops, default `true`; ignored on desktops |
+| `--max-memory-pressure` | Busy at `warn` or `critical`, default `critical` |
+| `--probe` | Read-only local availability sampling (`status` only); no coordinator needed |
+| `--probe-duration` | Probe observation period, `1m`–`1h`, default `7m` |
 
 `CRABBOX_SERVE_MEMORY` supplies the memory default. `serve.advertiseAddresses`
 or comma-separated `CRABBOX_SERVE_ADVERTISE_ADDRESSES` configures explicit
@@ -51,8 +59,28 @@ for details, fallback behavior, and image evidence.
 Each poll starts at least `--poll-interval` after the prior poll start and heartbeat response.
 
 `status` checks coordinator access and reads the local machine UUID, last successful coordinator contact,
-active assignments, caps, and draining state. `machines` queries owner-visible
-coordinator inventory. Both support `--json`.
+active assignments, caps, draining state, and availability with reasons. `machines` queries owner-visible
+coordinator inventory. Both support `--json`. See [availability](../providers/serve.md#availability) for
+signals, configuration, laptop defaults, and hysteresis.
+
+`machines` also shows each machine's served lease count, runtime, and CPU-hours for
+leases created in the current UTC month. Completed usage is recorded once when
+the agent confirms container cleanup; live and pending-cleanup allocations are
+added from the machine's current lease list. JSON exposes
+these as `usage.month`, `usage.leases`, `usage.activeLeases`, `usage.runtimeSeconds`,
+and `usage.cpuSeconds`. CPU-hours are runtime multiplied by each lease's assigned
+CPUs, divided by 3600; they measure allocated capacity, not sampled CPU utilization.
+Only your machines and usage in the current organization are shown, even for admins.
+The portal Machines section shows the same totals. Completed-usage rollups start
+at deployment, with no historical backfill. A lease that crosses a month boundary
+is attributed to its creation month, including its entire recorded runtime.
+Use [usage](usage.md) with `--month YYYY-MM` for full recorded history, another month,
+or historical machine IDs. Machine listings use point reads, not a history scan.
+
+Use `CRABBOX_SERVE_AVAILABILITY_DEBUG=1 crabbox serve status --probe --json`
+to diagnose individual signal failures and timeouts on stderr. See
+[availability diagnostics](../providers/serve.md#availability) for sampling
+deadlines and conservative raw-host-CPU fallback behavior.
 
 `install` writes and loads a per-user LaunchAgent on macOS or a systemd user
 unit on Linux, preserving the supplied flags. It uses the current executable

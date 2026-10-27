@@ -254,7 +254,6 @@ type runFlagValues struct {
 	LeaseID                *string
 	Keep                   *bool
 	KeepOnFailure          *bool
-	NoRuntimeExtension     *bool
 	NoSync                 *bool
 	SyncOnly               *bool
 	NoHydrate              *bool
@@ -312,7 +311,6 @@ func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlag
 		LeaseID:                fs.String("id", "", "existing lease or server id"),
 		Keep:                   fs.Bool("keep", false, "keep server after command"),
 		KeepOnFailure:          fs.Bool("keep-on-failure", false, "keep a newly acquired lease when the remote command exits non-zero (does not retain failed acquisitions)"),
-		NoRuntimeExtension:     fs.Bool("no-runtime-extension", false, "keep custody heartbeats without requesting lease extensions while the command runs"),
 		NoSync:                 fs.Bool("no-sync", false, "skip local file transfer (unsupported by Blacksmith Testbox)"),
 		SyncOnly:               fs.Bool("sync-only", false, "sync and exit"),
 		NoHydrate:              fs.Bool("no-hydrate", false, "skip configured Actions hydration"),
@@ -410,7 +408,6 @@ func runRequestFromFlags(cfg Config, flags runFlagValues, command []string) RunR
 		Options:               leaseOptionsFromConfig(cfg),
 		Keep:                  *flags.Keep,
 		KeepOnFailure:         *flags.KeepOnFailure,
-		NoRuntimeExtension:    *flags.NoRuntimeExtension,
 		Reclaim:               *flags.Reclaim,
 		NoSync:                *flags.NoSync,
 		NoHydrate:             *flags.NoHydrate,
@@ -609,6 +606,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				fmt.Fprintf(a.Stderr, "benchmark timing record appended path=%s observations=1\n", timingRecordPath)
 			}
 		}
+		timingJSONWritten := false
 		if hasReport && *timingJSON {
 			if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil {
 				timingErr := Exit(7, "write timing JSON: %v", writeErr)
@@ -617,10 +615,24 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				if prepareTerminalRun != nil {
 					prepareTerminalRun()
 				}
+			} else {
+				timingJSONWritten = true
 			}
 		}
 		if finalizeTerminalRun != nil {
 			finalizeTerminalRun()
+		}
+		if cleanupErr := recorder.pendingFinishCleanupErr; cleanupErr != nil {
+			fmt.Fprintf(a.Stderr, "terminal committed; pending finish cleanup failed: %s\n", recorder.redactDiagnostic(cleanupErr.Error()))
+			if timingJSONWritten {
+				// The first timing write must precede terminal commit so a sink
+				// failure remains part of the original receipt. A late cleanup
+				// warning needs the same frozen report again as the final line,
+				// not another observation, signature, or terminal submission.
+				if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil {
+					err = errors.Join(err, Exit(7, "write final timing JSON after pending finish cleanup diagnostic: %v", writeErr))
+				}
+			}
 		}
 		recorder.Failed(runFailure)
 		if observation != nil {
@@ -1844,9 +1856,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if heartbeatCoord != nil {
 			var err error
-			stopHeartbeat, err = startCoordinatorHeartbeat(ctx, heartbeatCoord, leaseID, cfg.Provider, cfg.IdleTimeout, updateIdleTimeout, leaseTelemetryCollectorForTarget(target), a.Stderr, func() bool {
-				return runReq.runtimeExtensionRequested(commandExecuting.Load())
-			})
+			stopHeartbeat, err = startCoordinatorHeartbeat(ctx, heartbeatCoord, leaseID, cfg.Provider, cfg.IdleTimeout, updateIdleTimeout, leaseTelemetryCollectorForTarget(target), a.Stderr, commandExecuting.Load)
 			return err
 		}
 		return nil
@@ -2643,10 +2653,18 @@ retrySync:
 			fmt.Fprintf(a.Stderr, "git origin fallback reason=%s; using plain manifest sync\n", reason)
 		}
 		seedSucceeded := false
+		freshActionsSeed := false
 		if !overlayDecision.Enabled && !plainManifestMode && coherence.seedEnabled() {
 			stepStart = time.Now()
 			if out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
 				if reason, fallback := gitSeedRuntimeFallbackResult(coherence, out, err); fallback {
+					if reason == "exact_commit_unavailable" && autoHydrateActions && !hydratedByActions && supportsLocalActionsHydrateTarget(targetWithConfigDefaults(target, cfg)) {
+						fresh, err := a.seedLocalActionsAncestor(ctx, cfg, repo, target, workdir)
+						if err != nil {
+							return recordFailure(err)
+						}
+						freshActionsSeed = fresh
+					}
 					usePlainManifestForOrigin(reason)
 				} else if coherence.Branch == "" || exitCode(err) == gitSeedUnsafeWorkspaceExitCode {
 					reportRemoteGitSeedFailure(a.Stderr, out, err, "aborting before file sync")
@@ -2771,7 +2789,9 @@ retrySync:
 				pruneCommand = remotePruneGitOverlaySyncManifest(workdir, finalizeToken, allowRemoteSyncMassDeletions(cfg, hydratedByActions))
 			} else if plainManifestMode || localGitSeed {
 				// Local metadata does not make prior raw paths safe to follow through symlink ancestors.
-				pruneCommand = remotePruneSyncManifestForTargetMode(target, workdir, finalizeToken, true, allowRemoteSyncMassDeletions(cfg, hydratedByActions))
+				// A fresh ancestor seed contains only files imported by this sync;
+				// the selected manifest must prune excluded baseline files at any count.
+				pruneCommand = remotePruneSyncManifestForTargetMode(target, workdir, finalizeToken, true, freshActionsSeed || allowRemoteSyncMassDeletions(cfg, hydratedByActions))
 			}
 			if _, err := runIdempotentSSHCombinedOutput(ctx, target, pruneCommand, idempotentSSHRetryDelay); err != nil {
 				return recordFailure(Exit(6, "remote sync prune failed: %v", err))
@@ -2819,7 +2839,7 @@ retrySync:
 		}
 		stepStart = time.Now()
 		out, finalizeErr, reason, fallback := runRemoteFinalizeSync(ctx, target, workdir, remoteSyncFinalizeOptions{
-			AllowMassDeletions: allowRemoteSyncMassDeletions(cfg, hydratedByActions),
+			AllowMassDeletions: freshActionsSeed || allowRemoteSyncMassDeletions(cfg, hydratedByActions),
 			HydrateGit:         hydrateGit && !overlayDecision.Enabled && !plainManifestMode,
 			GitOverlay:         overlayDecision.Enabled,
 			PlainManifest:      plainManifestMode,
@@ -3269,7 +3289,6 @@ afterSync:
 		if preparedTerminalReceiptFile == nil {
 			return
 		}
-		localReceiptPersisted := attestPath == ""
 		if attestPath != "" {
 			artifact, writeErr := persistPreparedRunReceipt(*preparedTerminalReceiptFile)
 			if writeErr != nil {
@@ -3280,33 +3299,14 @@ afterSync:
 					return
 				}
 			} else {
-				localReceiptPersisted = true
 				fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
 			}
 		}
 		if finishErr := recorder.Finish(ctx, target, preparedTerminalReceipt.ExitCode, timings.sync, timings.command, terminalLog.Log, terminalLog.Truncated, results, classification, &preparedTerminalReceipt); finishErr != nil {
 			err = errors.Join(err, finishErr)
 			recordRunFailure(&runFailure, finishErr)
-			if localReceiptPersisted && attestPath != "" && preparedTerminalReceipt.ExitCode == 0 {
-				// The coordinator commit is now ambiguous. Preserve the exact receipt
-				// sent remotely, but make the local CLI failure impossible to miss.
-				failedReceipt, receiptErr := buildTerminalReceipt(ExitCodeForError(finishErr, 7))
-				if receiptErr != nil {
-					err = errors.Join(err, receiptErr)
-					recordRunFailure(&runFailure, receiptErr)
-				} else {
-					failedPrepared, prepareErr := prepareTerminalRunReceipt(attestPath, failedReceipt)
-					if prepareErr != nil {
-						err = errors.Join(err, prepareErr)
-						recordRunFailure(&runFailure, prepareErr)
-					} else if artifact, writeErr := persistPreparedRunReceipt(failedPrepared); writeErr != nil {
-						err = errors.Join(err, writeErr)
-						recordRunFailure(&runFailure, writeErr)
-					} else {
-						fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
-					}
-				}
-			}
+			// A transport failure is not a different task result. Keep --attest and
+			// the pending outbox's original signature; report CLI failure separately.
 			if a.runOutcome != nil {
 				a.runOutcome.Recorded = false
 			}
@@ -3973,9 +3973,6 @@ func delegatedRunNeedsLocalWorkspaceSync(spec ProviderSpec, req RunRequest) bool
 }
 
 func validateDelegatedRunRouting(spec ProviderSpec, req RunRequest, readyPool string, hasArtifactSchemas, profileDoctor bool) error {
-	if req.NoRuntimeExtension {
-		return Exit(2, "%s delegates run execution; --no-runtime-extension is not supported", spec.Name)
-	}
 	if strings.TrimSpace(readyPool) != "" {
 		return Exit(2, "--pool requires a brokered SSH lease provider")
 	}
@@ -4609,6 +4606,9 @@ func releaseCoordinatorLeaseMutation(
 	leaseID, expectedProvider string,
 	release func(context.Context) (CoordinatorLease, error),
 ) (CoordinatorLease, error) {
+	if err := closeServeRelayControls(ctx, leaseID); err != nil {
+		return CoordinatorLease{}, err
+	}
 	var lastLease CoordinatorLease
 	var lastErr error
 	for attempt := 1; attempt <= 5; attempt++ {
@@ -4923,10 +4923,6 @@ func (a App) releaseBackendLease(ctx context.Context, backend SSHLeaseBackend, c
 	return outcome, nil
 }
 
-func (req RunRequest) runtimeExtensionRequested(commandExecuting bool) bool {
-	return commandExecuting && !req.NoRuntimeExtension
-}
-
 func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, leaseID, expectedProvider string, idleTimeout time.Duration, updateIdleTimeout *time.Duration, telemetryCollector leaseTelemetryCollector, stderr io.Writer, running ...func() bool) (func(), error) {
 	expectedProvider, err := canonicalProviderName(expectedProvider)
 	if err != nil {
@@ -5212,6 +5208,9 @@ func (a App) stop(ctx context.Context, args []string) (stopErr error) {
 	setIDFromFirstArg(fs, id)
 	if strings.TrimSpace(*id) == "" || fs.NArg() > 1 || (idFlagSet && fs.NArg() > 0) {
 		return Exit(2, "usage: crabbox stop --id <lease-or-server-id>")
+	}
+	if err := refuseControllerRetainedLease(*id); err != nil {
+		return err
 	}
 	if *forceRecovery {
 		if !flagWasSet(fs, "provider") {

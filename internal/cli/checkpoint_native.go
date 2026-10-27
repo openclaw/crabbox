@@ -15,7 +15,11 @@ type checkpointNativeCreateDriver interface {
 	Create(context.Context, NativeCheckpointCreateRequest) (CoordinatorImage, error)
 }
 
+var newAzureCheckpointClient = NewAzureClient
+
 type directAWSAMICheckpointDriver struct{}
+
+const nativeCheckpointAvailabilityPollInterval = 3 * time.Second
 
 func (directAWSAMICheckpointDriver) Create(ctx context.Context, req NativeCheckpointCreateRequest) (_ CoordinatorImage, err error) {
 	requestStarted := false
@@ -34,6 +38,13 @@ func (directAWSAMICheckpointDriver) Create(ctx context.Context, req NativeCheckp
 	}
 	if _, err := client.ValidateImageCheckpointSource(ctx, req.Server.CloudID); err != nil {
 		return CoordinatorImage{}, err
+	}
+	var devices map[string]string
+	if !req.Wait && req.Capture == nil {
+		devices, err = client.imageCheckpointSourceDevices(ctx, req.Server.CloudID)
+		if err != nil {
+			return CoordinatorImage{}, err
+		}
 	}
 	if !isWindowsNativeTarget(req.Target) {
 		if err := PrepareNativeImageSource(ctx, req.Target); err != nil {
@@ -62,7 +73,15 @@ func (directAWSAMICheckpointDriver) Create(ctx context.Context, req NativeCheckp
 		if err != nil {
 			return image, err
 		}
+		waited.captureEstablished = true
 		return waited, nil
+	}
+	if req.Capture == nil {
+		captured, err := client.waitForImageCapture(ctx, image, devices, req.WaitTimeout)
+		if err != nil {
+			return captured, err
+		}
+		return captured, nil
 	}
 	return image, nil
 }
@@ -102,7 +121,7 @@ func (directAzureOSDiskCheckpointDriver) Create(ctx context.Context, req NativeC
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
-	client, err := NewAzureClient(ctx, req.Config)
+	client, err := newAzureCheckpointClient(ctx, req.Config)
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
@@ -115,7 +134,9 @@ func (directAzureOSDiskCheckpointDriver) Create(ctx context.Context, req NativeC
 	if err != nil {
 		return CoordinatorImage{}, err
 	}
-	return coordinatorImageFromNativeCheckpoint(snapshot), nil
+	image := coordinatorImageFromNativeCheckpoint(snapshot)
+	image.captureEstablished = true
+	return image, nil
 }
 
 type coordinatorCheckpointDriver struct{}
@@ -230,9 +251,28 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req NativeCheckpo
 		if err != nil {
 			return image, err
 		}
+		waited.captureEstablished = true
 		return waited, nil
 	}
+	image.captureEstablished = coordinatorCaptureEstablished(image)
 	return image, nil
+}
+
+func nativeImageAvailable(state string) bool {
+	switch strings.ToLower(state) {
+	case "available", "ready", "succeeded", "completed":
+		return true
+	}
+	return false
+}
+
+func coordinatorCaptureEstablished(image CoordinatorImage) bool {
+	if nativeImageAvailable(image.State) {
+		return true
+	}
+	// AWS create responses have already passed the coordinator's exact backing
+	// snapshot ownership observation. Upload may still be pending.
+	return image.Provider == "aws" && image.State == "pending" && (len(image.SnapshotIDs) > 0 || len(image.Snapshots) > 0)
 }
 
 func waitForCheckpointImage(ctx context.Context, coord *CoordinatorClient, checkpointID, imageID string, timeout time.Duration, stderr io.Writer) (result CoordinatorImage, err error) {
@@ -250,6 +290,7 @@ func waitForCheckpointImage(ctx context.Context, coord *CoordinatorClient, check
 		}
 	}()
 	for {
+		interval := 15 * time.Second // Keep uncertain capture recovery polling unchanged.
 		checkpoint, err := coord.Checkpoint(waitCtx, checkpointID)
 		if err != nil {
 			return CoordinatorImage{}, err
@@ -264,6 +305,7 @@ func waitForCheckpointImage(ctx context.Context, coord *CoordinatorClient, check
 				return CoordinatorImage{}, Exit(5, "checkpoint %s failed: %s", checkpointID, blank(checkpoint.LastError, "provider capture failed"))
 			}
 		case "ready":
+			interval = nativeCheckpointAvailabilityPollInterval
 			if checkpoint.Image == nil || checkpoint.Image.ID == "" || (imageID != "" && checkpoint.Image.ID != imageID) {
 				return CoordinatorImage{}, Exit(5, "checkpoint %s provider image identity changed or is missing", checkpointID)
 			}
@@ -278,6 +320,7 @@ func waitForCheckpointImage(ctx context.Context, coord *CoordinatorClient, check
 				state = image.State
 				switch strings.ToLower(state) {
 				case "available", "ready", "succeeded", "completed":
+					image.captureEstablished = true
 					return image, nil
 				case "failed", "invalid":
 					return CoordinatorImage{}, Exit(5, "image %s failed", imageID)
@@ -290,7 +333,7 @@ func waitForCheckpointImage(ctx context.Context, coord *CoordinatorClient, check
 		select {
 		case <-waitCtx.Done():
 			return CoordinatorImage{}, waitCtx.Err()
-		case <-time.After(15 * time.Second):
+		case <-time.After(interval):
 		}
 	}
 }
@@ -336,14 +379,15 @@ func (d directParallelsCheckpointDriver) Create(ctx context.Context, req NativeC
 		return CoordinatorImage{}, Exit(5, "Parallels snapshot %q state=%s is not forkable; expected poweroff", snapshot.Name, blank(snapshot.State, "unknown"))
 	}
 	return CoordinatorImage{
-		ID:         snapshot.ID,
-		Name:       snapshot.Name,
-		State:      snapshot.State,
-		Provider:   "parallels",
-		Kind:       checkpointKindParallels,
-		ResourceID: req.Server.CloudID,
-		Region:     parallelsHostRefForConfig(cfg),
-		Direct:     true,
+		captureEstablished: true,
+		ID:                 snapshot.ID,
+		Name:               snapshot.Name,
+		State:              snapshot.State,
+		Provider:           "parallels",
+		Kind:               checkpointKindParallels,
+		ResourceID:         req.Server.CloudID,
+		Region:             parallelsHostRefForConfig(cfg),
+		Direct:             true,
 	}, nil
 }
 
@@ -381,7 +425,9 @@ func nativeCheckpointCreateDriver(cfg Config, server Server, target SSHTarget, s
 func (a App) createNativeCheckpointRequest(ctx context.Context, req NativeCheckpointCreateRequest) (CoordinatorImage, map[string]string, error) {
 	if provider, ok := nativeCheckpointLifecycleProvider(req.Config, req.Server); ok {
 		result, err := provider.CreateNativeCheckpoint(ctx, req)
-		return coordinatorImageFromNativeCheckpoint(result.Image), result.Metadata, err
+		image := coordinatorImageFromNativeCheckpoint(result.Image)
+		image.captureEstablished = err == nil && result.CaptureEstablished
+		return image, result.Metadata, err
 	}
 	driver, ok := nativeCheckpointCreateDriver(req.Config, req.Server, req.Target, req.Strategy)
 	if !ok {
@@ -414,17 +460,18 @@ func (a App) createNativeCheckpointRequest(ctx context.Context, req NativeCheckp
 
 func coordinatorImageFromNativeCheckpoint(image NativeCheckpointImage) CoordinatorImage {
 	return CoordinatorImage{
-		ID:           image.ID,
-		Name:         image.Name,
-		State:        image.State,
-		Provider:     image.Provider,
-		Kind:         image.Kind,
-		Region:       image.Region,
-		AccountID:    image.AccountID,
-		ResourceID:   image.ResourceID,
-		SnapshotIDs:  image.SnapshotIDs,
-		Architecture: image.Architecture,
-		Direct:       image.Direct,
+		ID:               image.ID,
+		Name:             image.Name,
+		State:            image.State,
+		Provider:         image.Provider,
+		Kind:             image.Kind,
+		Region:           image.Region,
+		AccountID:        image.AccountID,
+		ResourceID:       image.ResourceID,
+		ResourceUniqueID: image.ResourceUniqueID,
+		SnapshotIDs:      image.SnapshotIDs,
+		Architecture:     image.Architecture,
+		Direct:           image.Direct,
 	}
 }
 
@@ -439,10 +486,15 @@ func nativeCheckpointLifecycleProvider(cfg Config, server Server) (NativeCheckpo
 }
 
 func waitForDirectAWSImage(ctx context.Context, client *AWSClient, imageID, accountID string, timeout time.Duration, stderr io.Writer) (CoordinatorImage, error) {
+	ctx, cancel := context.WithTimeoutCause(ctx, timeout, Exit(5, "timed out waiting for image %s", imageID))
+	defer cancel()
 	deadline := time.Now().Add(timeout)
 	var last CoordinatorImage
 	for {
 		image, err := client.GetImageCheckpoint(ctx, imageID)
+		if ctx.Err() != nil {
+			return CoordinatorImage{}, context.Cause(ctx)
+		}
 		if err != nil {
 			return CoordinatorImage{}, err
 		}
@@ -463,8 +515,8 @@ func waitForDirectAWSImage(ctx context.Context, client *AWSClient, imageID, acco
 		_, _ = fmt.Fprintf(stderr, "waiting image=%s state=%s\n", imageID, blank(image.State, "pending"))
 		select {
 		case <-ctx.Done():
-			return CoordinatorImage{}, ctx.Err()
-		case <-time.After(15 * time.Second):
+			return CoordinatorImage{}, context.Cause(ctx)
+		case <-time.After(nativeCheckpointAvailabilityPollInterval):
 		}
 	}
 }
@@ -655,6 +707,7 @@ func (record *checkpointRecord) applyNativeImage(image CoordinatorImage, noReboo
 	record.Native.AccountID = image.AccountID
 	record.Native.Project = image.Project
 	record.Native.Resource = image.ResourceID
+	record.Native.ResourceUniqueID = image.ResourceUniqueID
 	record.Native.Architecture = image.Architecture
 	record.Native.SnapshotIDs = image.SnapshotIDs
 	record.Native.Direct = image.Direct
@@ -666,15 +719,16 @@ func nativeCheckpointResourceRequest(record checkpointRecord) NativeCheckpointRe
 	return NativeCheckpointResourceRequest{
 		LoadConfig: loadConfig,
 		Image: NativeCheckpointImage{
-			ID:           record.Native.ImageID,
-			Name:         record.Native.Name,
-			State:        record.Native.State,
-			Provider:     record.nativeProvider(),
-			Kind:         record.Kind,
-			Region:       record.Native.Region,
-			ResourceID:   record.Native.Resource,
-			Architecture: record.Native.Architecture,
-			Direct:       record.Native.Direct,
+			ID:               record.Native.ImageID,
+			Name:             record.Native.Name,
+			State:            record.Native.State,
+			Provider:         record.nativeProvider(),
+			Kind:             record.Kind,
+			Region:           record.Native.Region,
+			ResourceID:       record.Native.Resource,
+			ResourceUniqueID: record.Native.ResourceUniqueID,
+			Architecture:     record.Native.Architecture,
+			Direct:           record.Native.Direct,
 		},
 		Metadata: record.Native.Metadata,
 		Capture:  record.Capture,
@@ -772,7 +826,7 @@ func directAzureCheckpointConfig(record checkpointRecord) (Config, bool) {
 }
 
 func verifyDirectAzureCheckpoint(ctx context.Context, audit checkpointAudit, cfg Config, providerID string) checkpointAudit {
-	client, err := NewAzureClient(ctx, cfg)
+	client, err := newAzureCheckpointClient(ctx, cfg)
 	if err != nil {
 		audit.ProviderState = "unknown"
 		audit.NextAction = "check_auth_or_provider"

@@ -24,6 +24,7 @@ func TestBlacksmithPrimaryCommandFailureSurvivesCleanup(t *testing.T) {
 		status core.RunStatus
 		kind   core.RunErrorKind
 	}{
+		{"command", 7, nil, core.RunStatusFailed, core.RunErrorCommandExit},
 		{"transport", 255, errors.New("connection lost token=synthetic-private-token"), core.RunStatusFailed, core.RunErrorProvider},
 		{"cancellation", -1, context.Canceled, core.RunStatusCanceled, core.RunErrorCanceled},
 		{"cleanup-only", 0, nil, core.RunStatusFailed, core.RunErrorProvider},
@@ -71,8 +72,16 @@ func TestBlacksmithPrimaryCommandFailureSurvivesCleanup(t *testing.T) {
 			if result.Session == nil || !result.Session.Kept {
 				t.Fatal("unconfirmed cleanup lost retained session")
 			}
+			wantStop := "crabbox stop --provider blacksmith-testbox " + id
+			wantRecovery := fmt.Sprintf("blacksmith cleanup recovery observed_run_exit=%d workload_exit_confirmed=false; retry cleanup only: %s\n", tc.code, wantStop)
+			if result.Session.CleanupCommand != wantStop || !strings.Contains(stderr.String(), wantRecovery) {
+				t.Errorf("cleanup recovery lost observed exit or exact stop: session=%+v stderr=%s", result.Session, stderr.String())
+			}
+			if strings.Contains(stderr.String(), "crabbox run ") {
+				t.Errorf("cleanup recovery advertised command replay: %s", stderr.String())
+			}
 			wantStage := "build"
-			if tc.cause == nil {
+			if tc.code == 0 {
 				wantStage = "cleanup"
 			}
 			checkTiming := func(data []byte) {
@@ -83,6 +92,9 @@ func TestBlacksmithPrimaryCommandFailureSurvivesCleanup(t *testing.T) {
 				}
 				if report.ExitCode != wantCode || report.RunStatus != tc.status || report.ErrorKind != tc.kind || report.BlockedStage != wantStage {
 					t.Errorf("wrong timing: %+v", report)
+				}
+				if tc.code == 0 && report.RetryLikely != "true" {
+					t.Errorf("cleanup retry classification changed: %+v", report)
 				}
 			}
 			for _, line := range strings.Split(stderr.String(), "\n") {
