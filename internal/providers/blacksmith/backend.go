@@ -326,6 +326,12 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 		RunID:          blacksmithActionsRunID(result.ActionsURL),
 		CleanupCommand: fmt.Sprintf("crabbox stop --provider %s %s", blacksmithTestboxProvider, leaseID),
 	}
+	if cleanupErr != nil {
+		// Cleanup recovery must not replay the command. Its observed exit remains
+		// separate from workload confirmation and the final failed run outcome.
+		_, err := fmt.Fprintf(b.rt.Stderr, "blacksmith cleanup recovery observed_run_exit=%d workload_exit_confirmed=%t; retry cleanup only: %s\n", outcome.code, outcome.workloadObserved, result.Session.CleanupCommand)
+		appendFailure("cleanup recovery report", err, 1)
+	}
 	total = b.rt.Clock.Now().Sub(started)
 	result.Total = total
 	code = result.ExitCode

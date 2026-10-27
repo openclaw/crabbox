@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Blacksmith Testbox: clarify cleanup-only recovery with the exact stop command and observed run exit, preserving failed-run status and retained ownership without suggesting command replay.
 - Local container: optionally run leases under a named OCI runtime registered with the Docker daemon (for example gVisor `runsc` or Kata), validated strictly and recorded in lease ownership; the default runtime is unchanged. [PR 2950](https://github.com/openclaw/crabbox/pull/2950). Thanks @coygeek.
 - CI: shard normal CLI tests while testing every root package and nested module once per normal lane, avoiding the redundant serial CLI suite timeout. [PR 2875](https://github.com/openclaw/crabbox/pull/2875). Thanks @vincentkoc.
 - Parallels: an explicitly configured macOS guest user (including `crabbox`, or a generic `ssh.user` / `CRABBOX_SSH_USER`) is honored instead of being replaced by the host `USER`; the host-user fallback still applies when no guest user is configured. [PR 2958](https://github.com/openclaw/crabbox/pull/2958). Thanks @rustanacexd.
