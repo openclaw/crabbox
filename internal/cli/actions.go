@@ -2468,6 +2468,8 @@ func readActionsHydrationState(ctx context.Context, target SSHTarget, leaseID st
 	return normalizeActionsHydrationStateForTarget(target, parseActionsHydrationState(out)), nil
 }
 
+var localActionsHydrationPollInterval = 5 * time.Second
+
 func waitForLocalActionsHydration(ctx context.Context, target SSHTarget, leaseID, expectedJob, pid string, timeout time.Duration, stderr io.Writer) (actionsHydrationState, error) {
 	if timeout <= 0 {
 		timeout = 20 * time.Minute
@@ -2498,7 +2500,7 @@ func waitForLocalActionsHydration(ctx context.Context, target SSHTarget, leaseID
 			return actionsHydrationState{}, Exit(5, "timed out waiting for local Actions hydration marker for %s", leaseID)
 		}
 		fmt.Fprintf(stderr, "waiting for local Actions hydration marker id=%s...\n", leaseID)
-		if err := sleepContext(ctx, 5*time.Second); err != nil {
+		if err := sleepContext(ctx, localActionsHydrationPollInterval); err != nil {
 			return actionsHydrationState{}, err
 		}
 	}
