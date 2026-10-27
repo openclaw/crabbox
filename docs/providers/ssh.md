@@ -96,6 +96,37 @@ using an existing tailnet address or MagicDNS name does not set that metadata
 or trigger logout by itself. The metadata gate is not a live node-ownership
 check.
 
+### Sharing a static host
+
+A static host has one lease per `static.id`. Without an explicit id, the lease
+id is derived from `static.host` (`static_<host slug>`), so every checkout that
+targets the same host string shares one lease, and a second repository checkout
+is refused while the first holds the claim. The remote workdir is
+`<workRoot>/<lease id>/<repo>`, so the lease id also selects the remote
+checkout.
+
+To run several checkouts against one host at the same time, give each a distinct
+`static.id` or `CRABBOX_STATIC_ID`. A distinct id isolates both the local claim
+and the remote workdir:
+
+```sh
+CRABBOX_STATIC_ID=buildbox-slot-1 crabbox run --provider ssh \
+  --static-host buildbox.local -- pnpm test
+```
+
+Do not use `--reclaim` to share a host. It adopts the other checkout's lease and
+its `<workRoot>/<lease id>` directory; checkouts of the same repository then
+share one remote workdir.
+
+Each new id starts with an empty workdir. With Git seeding enabled (the default),
+its first run pays a full Git seed, which can take minutes for a large
+repository. Later runs with the same id reuse the
+seeded workdir. Prefer a stable id per checkout or per concurrency slot over a
+fresh id per run.
+
+Releasing a static lease does not remove its workdir. Like other static-host
+housekeeping, delete the `<workRoot>/<id>` directories of ids you no longer use.
+
 ### Power hooks
 
 A dedicated lab host can be powered on for work and stopped after its last
@@ -149,7 +180,8 @@ lease runs start before SSH readiness; overlapping leases with distinct
 `static.id` values share that start. Releasing either lease first leaves the
 host on. Only the final release runs stop. Same-ID acquisitions and prepared
 reuse (`run --id`) are refused while custody exists, so use a distinct
-`CRABBOX_STATIC_ID` per concurrent run. Keep the same hook contract for every
+`CRABBOX_STATIC_ID` per concurrent run (see
+[Sharing a static host](#sharing-a-static-host)). Keep the same hook contract for every
 lease. A kept run remains referenced until explicitly stopped. `status`, `list`,
 and `doctor` do not start the host.
 
@@ -418,8 +450,9 @@ workspace descendant containment or require `setsid` on macOS.
 | `user` | SSH user. Falls back to `ssh.user`, then `$USER`. |
 | `port` | SSH port. Falls back to `ssh.port`; the base default is `2222` with a `22` fallback. |
 | `workRoot` | Remote checkout/work directory. |
-| `id` | Optional stable lease id (default derived from `host`). |
+| `id` | Optional stable lease id (default `static_<host slug>`). Selects the local claim and the remote workdir `<workRoot>/<id>/<repo>`; use a distinct id per concurrent checkout. See [Sharing a static host](#sharing-a-static-host). |
 | `name` | Optional friendly slug (default derived from `host`). |
+| `noControlMaster` | Disable SSH multiplexing, including workspace owner calls (default `false`). Use it for SSH servers that close multiplexed sessions without sending `exit-status`. Also `CRABBOX_STATIC_NO_CONTROL_MASTER` or `--static-no-control-master`. |
 | `startCommand` | Optional local argv run before the SSH readiness wait. See [Power hooks](#power-hooks). |
 | `stopCommand` | Optional local argv run before final custody retirement; failures remain retryable. |
 | `power.dedicated` | Required `true` for hooks; one controller exclusively owns the whole host. |
@@ -428,6 +461,17 @@ workspace descendant containment or require `setsid` on macOS.
 The SSH private key comes from the shared `ssh.key` field (or `CRABBOX_SSH_KEY`).
 There is no per-host key field; the static provider connects with your existing
 key, not a key Crabbox generates.
+
+Set `static.noControlMaster: true` for a direct connection per command. This
+also skips the workspace owner's foreground master; sync, copy, interactive
+connections, and VNC/port-forward transports cannot reuse a master. Direct
+connections explicitly set `ControlMaster=no`, `ControlPath=none`, and
+`ControlPersist=no` so local SSH configuration cannot re-enable multiplexing.
+The default keeps existing multiplexing behavior. Flags override environment
+variables, which override config; `--static-no-control-master=false` restores
+the default even when config or environment enables the opt-out. Generated
+recovery commands preserve either value. Existing configs and stored leases
+need no migration; reused leases use the current transport setting.
 
 A repository-defined `static.host` cannot silently inherit a key or ambient SSH
 authentication from user config, the environment, an SSH agent, or local SSH
@@ -449,6 +493,7 @@ appears in trusted user config, or the command is set with
 --static-user
 --static-port
 --static-work-root
+--static-no-control-master
 --static-start-command '["/usr/local/bin/host-power","up"]'
 --static-stop-command '["/usr/local/bin/host-power","down"]'
 ```
@@ -465,6 +510,7 @@ CRABBOX_STATIC_PORT
 CRABBOX_STATIC_WORK_ROOT
 CRABBOX_STATIC_ID
 CRABBOX_STATIC_NAME
+CRABBOX_STATIC_NO_CONTROL_MASTER
 CRABBOX_STATIC_START_COMMAND
 CRABBOX_STATIC_STOP_COMMAND
 CRABBOX_SSH_USER

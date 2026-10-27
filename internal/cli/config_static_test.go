@@ -262,3 +262,59 @@ func TestStaticPowerRouteTrustedOverrides(t *testing.T) {
 		})
 	}
 }
+
+func TestStaticNoControlMasterReachesLeaseTarget(t *testing.T) {
+	enabled := true
+	disabled := false
+	for _, tc := range []struct {
+		name  string
+		file  *fileConfig
+		env   string
+		flags []string
+		want  bool
+	}{
+		{name: "default multiplexes"},
+		{name: "repository config", file: &fileConfig{Static: &fileStaticSection{fileStaticConfig: fileStaticConfig{NoControlMaster: &enabled}}}, want: true},
+		{name: "environment", env: "1", want: true},
+		{name: "environment overrides config", file: &fileConfig{Static: &fileStaticSection{fileStaticConfig: fileStaticConfig{NoControlMaster: &enabled}}}, env: "0"},
+		{name: "flag", flags: []string{"--static-no-control-master"}, want: true},
+		{name: "flag overrides environment", env: "1", flags: []string{"--static-no-control-master=false"}},
+		{name: "flag overrides config", file: &fileConfig{Static: &fileStaticSection{fileStaticConfig: fileStaticConfig{NoControlMaster: &enabled}}}, flags: []string{"--static-no-control-master=false"}},
+		{name: "flag enables over false config", file: &fileConfig{Static: &fileStaticSection{fileStaticConfig: fileStaticConfig{NoControlMaster: &disabled}}}, flags: []string{"--static-no-control-master"}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.Provider = staticProvider
+			cfg.Static.Host = "buildbox.example.test"
+			if tc.file != nil {
+				if err := applyFileConfigWithTrust(&cfg, *tc.file, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.env != "" {
+				t.Setenv("CRABBOX_STATIC_NO_CONTROL_MASTER", tc.env)
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if tc.flags != nil {
+				fs := newFlagSet("test", io.Discard)
+				values := registerTargetFlags(fs, cfg)
+				if err := fs.Parse(tc.flags); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyTargetFlagOverrides(&cfg, fs, values); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, target, _, err := staticLease(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if target.NoControlMaster != tc.want {
+				t.Fatalf("NoControlMaster=%v want %v", target.NoControlMaster, tc.want)
+			}
+		})
+	}
+}

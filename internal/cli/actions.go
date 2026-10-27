@@ -727,7 +727,9 @@ func (a App) seedLocalActionsAncestor(ctx context.Context, cfg Config, repo Repo
 	if blocked || !plan.seedEnabled() || plan.Tree == "" {
 		return false, nil
 	}
+	stopSeedHeartbeat := startGitSeedHeartbeat(a.Stderr, time.Now(), gitSeedHeartbeatInterval)
 	out, published, err := runIdempotentSSHGitOriginAttemptWithPublication(ctx, target, remoteGitSeed(workdir, plan), idempotentSSHRetryDelay)
+	stopSeedHeartbeat()
 	if err != nil {
 		if _, fallback := gitSeedRuntimeFallbackResult(plan, out, err); fallback {
 			return false, nil
@@ -767,7 +769,10 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 		coherence = gitCoherencePlan{}
 	}
 	if !plainManifest && coherence.seedEnabled() {
-		if out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
+		stopSeedHeartbeat := startGitSeedHeartbeat(a.Stderr, time.Now(), gitSeedHeartbeatInterval)
+		out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay)
+		stopSeedHeartbeat()
+		if err != nil {
 			if reason, fallback := gitSeedRuntimeFallbackResult(coherence, out, err); fallback {
 				if reason == "exact_commit_unavailable" {
 					if _, err := a.seedLocalActionsAncestor(ctx, cfg, repo, target, workdir); err != nil {

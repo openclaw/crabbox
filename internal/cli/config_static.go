@@ -18,6 +18,9 @@ type StaticConfig struct {
 	User     string `config:"user" env:"CRABBOX_STATIC_USER" flag:"static-user" help:"static SSH user" sources:"user,repo,env,flag" fileIgnoreEmpty:"true" fileStorage:"value"`
 	Port     string `config:"port" env:"CRABBOX_STATIC_PORT" flag:"static-port" help:"static SSH port" sources:"user,repo,env,flag" fileIgnoreEmpty:"true" fileStorage:"value"`
 	WorkRoot string `config:"workRoot" env:"CRABBOX_STATIC_WORK_ROOT" flag:"static-work-root" help:"static target work root" sources:"user,repo,env,flag" fileIgnoreEmpty:"true" fileStorage:"value"`
+	// Some SSH servers close a multiplexed session before sending exit-status,
+	// so a command that succeeded exits 255 and fails workspace ownership closed.
+	NoControlMaster bool `config:"noControlMaster" env:"CRABBOX_STATIC_NO_CONTROL_MASTER" flag:"static-no-control-master" help:"open a separate SSH connection per static target command instead of multiplexing" sources:"user,repo,env,flag"`
 	// StartCommand and StopCommand are local argv arrays. Their JSON env and
 	// flag encodings are outside configgen's scalar/list codecs.
 	StartCommand         []string          `sources:"runtime"`

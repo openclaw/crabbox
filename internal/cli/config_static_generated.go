@@ -7,12 +7,13 @@ import (
 )
 
 type fileStaticConfig struct {
-	ID       string `yaml:"id,omitempty"`
-	Name     string `yaml:"name,omitempty"`
-	Host     string `yaml:"host,omitempty"`
-	User     string `yaml:"user,omitempty"`
-	Port     string `yaml:"port,omitempty"`
-	WorkRoot string `yaml:"workRoot,omitempty"`
+	ID              string `yaml:"id,omitempty"`
+	Name            string `yaml:"name,omitempty"`
+	Host            string `yaml:"host,omitempty"`
+	User            string `yaml:"user,omitempty"`
+	Port            string `yaml:"port,omitempty"`
+	WorkRoot        string `yaml:"workRoot,omitempty"`
+	NoControlMaster *bool  `yaml:"noControlMaster,omitempty"`
 }
 
 func defaultStaticConfig() StaticConfig {
@@ -33,16 +34,17 @@ func (cfg *StaticConfig) applyFile(file *fileStaticConfig) (StaticConfigApplied,
 
 func (cfg *StaticConfig) applyEnv() (StaticConfigApplied, error) {
 	var applied StaticConfigApplied
-	err := applyConfigEnvironment(cfg, &applied, 0, 6)
+	err := applyConfigEnvironment(cfg, &applied, 0, 7)
 	return applied, err
 }
 
 // StaticConfigFlagValues holds parsed values; only visited flags are applied.
 type StaticConfigFlagValues struct {
-	Host     *string
-	User     *string
-	Port     *string
-	WorkRoot *string
+	Host            *string
+	User            *string
+	Port            *string
+	WorkRoot        *string
+	NoControlMaster *bool
 }
 
 // RegisterStaticConfigFlags registers mechanical bindings without selecting a provider.

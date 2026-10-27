@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"strconv"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -19,6 +20,7 @@ func (Provider) CommandRouting(cfg core.Config, request core.CommandRoutingReque
 			args = append(args, field.flag, field.value)
 		}
 	}
+	args = append(args, "--static-no-control-master="+strconv.FormatBool(cfg.Static.NoControlMaster))
 	return core.CommandRouting{Args: args}
 }
 
