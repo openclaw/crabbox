@@ -94,3 +94,67 @@ func TestGitSeedHeartbeatDisabledForNonpositiveInterval(t *testing.T) {
 		t.Fatalf("disabled heartbeat output = %q, want empty", got)
 	}
 }
+
+func TestProgressHeartbeatDonePreferredOverReadyTick(t *testing.T) {
+	ticks := make(chan time.Time, 1)
+	ticks <- time.Now()
+	done := make(chan struct{})
+	close(done)
+	var out bytes.Buffer
+	// Both cases are ready; repeat so a random select choice cannot hide a print.
+	for range 100 {
+		writeProgressHeartbeats(&out, time.Now(), ticks, done, "seeding remote Git metadata", "")
+	}
+	if got := out.String(); got != "" {
+		t.Fatalf("heartbeat printed after stop: %q", got)
+	}
+}
+
+// blockingHeartbeatWriter holds the first write until released and records any later write.
+type blockingHeartbeatWriter struct {
+	entered chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	writes  int
+}
+
+func (w *blockingHeartbeatWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	w.writes++
+	first := w.writes == 1
+	w.mu.Unlock()
+	if first {
+		close(w.entered)
+		<-w.release
+	}
+	return len(data), nil
+}
+
+func (w *blockingHeartbeatWriter) count() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writes
+}
+
+func TestProgressHeartbeatStopWaitsForInFlightLine(t *testing.T) {
+	w := &blockingHeartbeatWriter{entered: make(chan struct{}), release: make(chan struct{})}
+	stop := startGitSeedHeartbeat(w, time.Now(), time.Millisecond)
+	<-w.entered
+	stopped := make(chan struct{})
+	go func() {
+		stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("stop returned while a heartbeat line was still being written")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(w.release)
+	<-stopped
+	after := w.count()
+	time.Sleep(20 * time.Millisecond)
+	if got := w.count(); got != after || got != 1 {
+		t.Fatalf("heartbeat writes = %d after stop (stop saw %d), want exactly 1", got, after)
+	}
+}

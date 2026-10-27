@@ -1799,30 +1799,50 @@ func startGitSeedHeartbeat(stderr io.Writer, start time.Time, interval time.Dura
 
 // startProgressHeartbeat prints "still <label> after <elapsed>..." every
 // interval, appending quietHint once the step has run for four minutes.
-// A nonpositive interval disables the heartbeat.
+// A nonpositive interval disables the heartbeat. The returned stop function
+// waits for the heartbeat goroutine to exit, so no progress line is printed
+// after it returns.
 func startProgressHeartbeat(stderr io.Writer, start time.Time, interval time.Duration, label, quietHint string) func() {
 	if interval <= 0 {
 		return func() {}
 	}
+	ticker := time.NewTicker(interval)
 	done := make(chan struct{})
+	exited := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(interval)
+		defer close(exited)
 		defer ticker.Stop()
-		for {
+		writeProgressHeartbeats(stderr, start, ticker.C, done, label, quietHint)
+	}()
+	return func() {
+		close(done)
+		<-exited
+	}
+}
+
+// writeProgressHeartbeats prints one progress line per tick until done is
+// closed. A closed done wins over a tick that is ready at the same time.
+func writeProgressHeartbeats(stderr io.Writer, start time.Time, ticks <-chan time.Time, done <-chan struct{}, label, quietHint string) {
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticks:
+			// select picks randomly among ready cases; recheck done so a
+			// stop that raced with this tick suppresses the line.
 			select {
 			case <-done:
 				return
-			case <-ticker.C:
-				elapsed := time.Since(start).Round(time.Second)
-				hint := ""
-				if elapsed >= 4*time.Minute {
-					hint = quietHint
-				}
-				fmt.Fprintf(stderr, "still %s after %s...%s\n", label, elapsed, hint)
+			default:
 			}
+			elapsed := time.Since(start).Round(time.Second)
+			hint := ""
+			if elapsed >= 4*time.Minute {
+				hint = quietHint
+			}
+			fmt.Fprintf(stderr, "still %s after %s...%s\n", label, elapsed, hint)
 		}
-	}()
-	return func() { close(done) }
+	}
 }
 
 func ensureTrailingSlash(path string) string {
