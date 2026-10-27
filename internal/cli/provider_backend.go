@@ -28,6 +28,11 @@ type ProviderRouter interface {
 	RouteConfig(cfg *Config, fs *flag.FlagSet, values any) error
 }
 
+// ProviderCoordinatorRequest owns provider-specific non-secret admission metadata.
+type ProviderCoordinatorRequest interface {
+	CoordinatorRequestFields(Config) map[string]any
+}
+
 type ProviderConfigValidator interface {
 	ValidateConfig(cfg Config) error
 }
@@ -122,6 +127,10 @@ type ProviderReadyPoolImageIdentityRequest struct {
 
 // ProviderReadyPoolImageIdentityCapability owns provider-specific validation
 // of immutable image evidence returned with a typed ready-pool lease.
+type ProviderReadyPoolTargetCapability interface {
+	SupportsReadyPoolTarget(string) bool
+}
+
 type ProviderReadyPoolImageIdentityCapability interface {
 	ReadyPoolImageIdentityMatchesLease(ProviderReadyPoolImageIdentityRequest) bool
 }

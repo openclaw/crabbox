@@ -18,6 +18,8 @@ import (
 )
 
 type Config struct {
+	ManagedHost                   string
+	HostCapabilities              []string
 	DirectLeases                  string
 	DirectLeaseAllow              []string
 	guestLeaseExpiry              *GuestLeaseExpiryFields

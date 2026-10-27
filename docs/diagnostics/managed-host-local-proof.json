@@ -1,0 +1,47 @@
+{
+  "authority": {
+    "allowedExecution": "borrower-sync-proof / managed-host-exec-ok / interactive-ok",
+    "foreignIdentityRelayHTTP": 403,
+    "revokedNewRelayHTTP": 403,
+    "retainedConnection": "retained-ready before revoke; disconnected after revoke; no post-revocation output",
+    "foreignNonAdminRelayHTTP": 403
+  },
+  "checks": [
+    "isolated coordinator health",
+    "latest-stable PostgreSQL registration survives upgrade and refresh with identity preserved",
+    "unauthorized principal denied",
+    "borrower CLI sync and execution over outbound SSH relay",
+    "shipped CLI connect opens an isolated interactive PTY shell",
+    "revocation disconnects a retained shell and rejects a new relay",
+    "return confirms account/process/workspace cleanup before availability",
+    "portable pool enrollment, two borrower generations, sync/run/return and cleanup-before-reuse",
+    "eight simultaneous borrowers have one winner; same-intent retry and coordinator restart preserve custody",
+    "authenticated non-admin foreign borrower cannot mint a host execution relay",
+    "failed cleanup quarantines host and refuses reallocation without deleting a foreign account",
+    "unattended lease expires and account/workspace are removed before reuse",
+    "host agent crash and graceful restart settle retained accounts and fail interrupted leases before reuse",
+    "drain blocks placement; clean inventory removal leaves physical target running"
+  ],
+  "scope": "isolated local Docker coordinator and Linux host; synthetic principals",
+  "status": "passed",
+  "runtimeSource": "88d03564a2411a89ea0ce6d05b34de155f0af5fb",
+  "artifacts": {
+    "bin/crabbox": "c577f2c2a62992af0740bcce5a6c1ea0d757d4f7555a0830011f1b9c7d4de56a",
+    "bin/crabbox-host-linux": "3ec8f2e7a794bb03467220a6a4243d5fb2e797a4ea20b76ea4d2f48a6abdda04",
+    "worker/dist-node/server.mjs": "dadb846de92d02598e25e01a414085aadf7ab243aa02c9ed5b1642531bab0639"
+  },
+  "regressions": {
+    "before": "b8ba94923b3fb5c459703ccb9a16f19eae0e4c37",
+    "shellBefore": "shell request and PTY request rejected",
+    "windowsPoolIdentityBefore": "HTTP 409 instead of 200",
+    "after": "both focused regression suites passed"
+  },
+  "upgrade": {
+    "scope": "persisted direct-SSH registration; PostgreSQL reused across stable/head server replacement",
+    "loaded": true,
+    "refreshed": true,
+    "fromVersion": "v0.79.3",
+    "fromCommit": "bbaae2ece3df9eaaba93ec1ddbd67aa5f2296f9b",
+    "serverSHA256": "2b5e2f0853775cf7ad1f1d319335d35ab7b528b21682b02de43af0a0eda7ae9f"
+  }
+}

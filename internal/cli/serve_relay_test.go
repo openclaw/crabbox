@@ -207,3 +207,27 @@ func TestServeRelaySSHTimeoutRoutes(t *testing.T) {
 		assertSSHOption(t, session.commandPrefixWithOptions(tc.requested, "1"), "ConnectTimeout", tc.want)
 	}
 }
+
+func TestRelayOnlyJumpRequiresNoDirectCandidate(t *testing.T) {
+	isolateTestUserDirs(t)
+	_, private, _ := ed25519.GenerateKey(rand.Reader)
+	signer, _ := ssh.NewSignerFromKey(private)
+	key := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	cfg := Config{Coordinator: "http://127.0.0.1:1"}
+	target := SSHTarget{Host: "cbx_001122334455", Port: "22", Key: filepath.Join(t.TempDir(), "key"), SSHHostKey: key, relayConfig: &cfg, SSHJump: &SSHJump{Host: "127.0.0.1", Port: 1, HostKey: key, Relay: true, RelayOnly: true}}
+	if err := prepareLeaseSSHTrust(&target, target.Host); err != nil {
+		t.Fatal(err)
+	}
+	if !target.SSHJump.useRelay || !strings.Contains(target.ProxyCommand, "__serve-relay-proxy") {
+		t.Fatal("relay-only route not selected")
+	}
+	target.SSHJump.Candidates = []SSHJumpCandidate{{Host: "192.0.2.1", Port: 22}}
+	if err := selectSSHJumpCandidate(&target, signer.PublicKey()); err == nil {
+		t.Fatal("ambiguous direct candidate accepted")
+	}
+	target.SSHJump.Candidates = nil
+	target.SSHJump.Relay = false
+	if err := selectSSHJumpCandidate(&target, signer.PublicKey()); err == nil {
+		t.Fatal("relay-only without relay accepted")
+	}
+}

@@ -240,6 +240,7 @@ export function requestWithAuthContext(request: Request, auth: AuthContext): Req
   headers.delete("cf-access-jwt-assertion");
   headers.delete("x-crabbox-internal");
   headers.delete("x-crabbox-proxy-secret");
+  headers.delete("x-crabbox-github-credential-token");
   headers.set("x-crabbox-auth", auth.auth);
   headers.set("x-crabbox-admin", auth.admin ? "true" : "false");
   headers.set("x-crabbox-owner", auth.owner);
@@ -269,6 +270,16 @@ export function requestWithAuthContext(request: Request, auth: AuthContext): Req
   return new Request(request, { headers });
 }
 
+// Reader-first migration: old Workers may forward an untrusted new-name header.
+// Prefer their authoritative legacy value until all writers use the redacted name.
+export function requestGitHubCredential(request: Request): string | undefined {
+  return (
+    request.headers.get("x-crabbox-github-sealed-credential")?.trim() ||
+    request.headers.get("x-crabbox-github-credential-token")?.trim() ||
+    undefined
+  );
+}
+
 export async function requestWithAdminGrantVersion(
   request: Request,
   env: Pick<Env, "CRABBOX_ADMIN_TOKEN" | "CRABBOX_GITHUB_ADMIN_OWNERS">,
@@ -285,6 +296,7 @@ export function requestWithoutTrustedHeaders(request: Request): Request {
     !request.headers.has("x-crabbox-admin-grant-version") &&
     !request.headers.has("x-crabbox-github-token-id") &&
     !request.headers.has("x-crabbox-github-sealed-credential") &&
+    !request.headers.has("x-crabbox-github-credential-token") &&
     !request.headers.has("x-crabbox-portal-session")
   ) {
     return request;
@@ -295,6 +307,7 @@ export function requestWithoutTrustedHeaders(request: Request): Request {
   headers.delete("x-crabbox-admin-grant-version");
   headers.delete("x-crabbox-github-token-id");
   headers.delete("x-crabbox-github-sealed-credential");
+  headers.delete("x-crabbox-github-credential-token");
   headers.delete("x-crabbox-portal-session");
   return new Request(request, { headers });
 }

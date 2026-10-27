@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	_ "embed"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,7 +95,7 @@ func TestWindowsNativeStdinProgramContract(t *testing.T) {
 			t.Fatalf("native reader missing %q", want)
 		}
 	}
-	for _, forbidden := range []string{"OpenStandardInput", "$stdin.Read(", "catch", "Start-Sleep", "ReadToEnd", "CopyTo"} {
+	for _, forbidden := range []string{"OpenStandardInput", "$stdin.Read(", "Start-Sleep", "ReadToEnd", "CopyTo"} {
 		if strings.Contains(program, forbidden) {
 			t.Fatalf("native reader contains %q", forbidden)
 		}
@@ -109,6 +111,40 @@ func TestWindowsNativeStdinProgramContract(t *testing.T) {
 	// without installing Go or making a managed-run success claim.
 	if dir := os.Getenv("CRABBOX_NATIVE_STDIN_PROOF_DIR"); dir != "" {
 		writeWindowsNativeStdinFixture(t, dir, true)
+	}
+}
+
+func TestWindowsNativeStdinSynchronousPipe(t *testing.T) {
+	powerShell := windowsNativeStdinPowerShell(t)
+	for _, size := range []int{0, 4991, 65537} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			payload := make([]byte, size)
+			for i := range payload {
+				payload[i] = byte(i % 251)
+			}
+			script := `$ErrorActionPreference = 'Stop'
+$destination = [IO.MemoryStream]::new()
+` + windowsPowerShellCopyExactInput("$destination", int64(size)) + `
+if ([Console]::OpenStandardInput().ReadByte() -ne 42) { throw 'frame consumed following byte or closed stdin' }
+$hash = [Security.Cryptography.SHA256]::Create()
+try { Write-Output ([BitConverter]::ToString($hash.ComputeHash($destination.ToArray()))).Replace('-', '').ToLowerInvariant() }
+finally { $hash.Dispose(); $destination.Dispose() }
+`
+			path := filepath.Join(t.TempDir(), "reader.ps1")
+			if err := os.WriteFile(path, []byte(script), 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, powerShell, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", path)
+			// exec.Cmd creates the same synchronous stdin pipe as the managed endpoint.
+			cmd.Stdin = bytes.NewReader(append(append([]byte(nil), payload...), 42))
+			cmd.WaitDelay = time.Second
+			out, err := cmd.CombinedOutput()
+			if want := fmt.Sprintf("%x", sha256.Sum256(payload)); err != nil || strings.TrimSpace(string(out)) != want {
+				t.Fatalf("synchronous input: %v output=%q want=%s", err, out, want)
+			}
+		})
 	}
 }
 

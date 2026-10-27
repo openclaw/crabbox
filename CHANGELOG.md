@@ -5,11 +5,17 @@
 ### Added
 
 - Static SSH: add `static.noControlMaster`, `CRABBOX_STATIC_NO_CONTROL_MASTER`, and `--static-no-control-master` to opt out of SSH multiplexing, preserving explicit overrides in recovery commands. [PR 2855](https://github.com/openclaw/crabbox/pull/2855). Thanks @shunkakinoki.
+- Managed SSH hosts: enroll exclusive operator-owned capacity behind outbound, pinned SSH relays; isolate borrower accounts, rotate portable-pool access, and require cleanup receipts before reuse. Windows MXC remains experimental pending hardware qualification. [PR 2964](https://github.com/openclaw/crabbox/pull/2964). Thanks @RomneyDa.
+
 - Azure Sandbox: include client request and lifecycle-poll durations and counts in warmup timing reports, including failed attempts, without inferring server disk or boot timings. [PR 2959](https://github.com/openclaw/crabbox/pull/2959).
 - Azure Sandbox: retain session-owned disks through explicit pause/resume with finite per-activation work admission, durable exact-ownership recovery, and explicit deletion. [PR 2960](https://github.com/openclaw/crabbox/pull/2960).
 
 ### Fixed
 
+- Local Git seeding: stream large object enumerations without the 16 MiB control-output ceiling and preserve the original limit or output failure. [PR 2841](https://github.com/openclaw/crabbox/pull/2841). Thanks @vincentkoc.
+
+- Coordinator: preserve retryable responses for transient Cloudflare storage failures without replaying operations, and prepare compatible readers for the staged internal grant-header migration. [PR 2847](https://github.com/openclaw/crabbox/pull/2847). Thanks @vincentkoc.
+- CI: shorten only the detached Git-seed fixture's hydration waits and balance slow seed and WSL settings tests across shards, preserving production delays and coverage. [PR 2969](https://github.com/openclaw/crabbox/pull/2969).
 - Blacksmith: reserve a separate bounded final verification phase after native stop consumes its reconciliation budget, without replaying the command or releasing unresolved claim/key custody. [PR 2967](https://github.com/openclaw/crabbox/pull/2967). Thanks @vincentkoc.
 - Blacksmith Testbox: clarify cleanup-only recovery with the exact stop command and observed run exit, preserving failed-run status and retained ownership without suggesting command replay. [PR #2966](https://github.com/openclaw/crabbox/pull/2966). Thanks @vincentkoc.
 - Local container: optionally run leases under a named OCI runtime registered with the Docker daemon (for example gVisor `runsc` or Kata), validated strictly and recorded in lease ownership; the default runtime is unchanged. [PR 2950](https://github.com/openclaw/crabbox/pull/2950). Thanks @coygeek.

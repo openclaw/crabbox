@@ -5,6 +5,7 @@ import { putLeaseRecord } from "./lease-record-store";
 import { requestOrg } from "./org-identity";
 import type { ServeMachine } from "./serve";
 import { serveRelayBackend, serveRelayID, type ServeRelayDescriptor } from "./serve-relay";
+import { mintHostRelay, authorizeHostRelay } from "./ssh-host-relay";
 import { timingSafeEqual } from "./timing-safe";
 import type { Env, LeaseRecord } from "./types";
 
@@ -49,6 +50,7 @@ export class ServeRelayControl {
       org = requestOrg(r, this.env),
       now = Date.now();
     const l = await s.get<LeaseRecord>(`lease:${leaseID}`);
+    if (l?.provider === "ssh-host") return mintHostRelay(s, this.env, r, l);
     if (
       !activeRelayLease(l, now) ||
       l.owner !== owner ||
@@ -123,6 +125,8 @@ export class ServeRelayControl {
       r.headers.get("upgrade")?.toLowerCase() !== "websocket"
     )
       return notAllowed();
+    const hostAdmission = await authorizeHostRelay(s, this.env, r, id, role);
+    if (hostAdmission) return hostAdmission;
     const owner = requestOwner(r),
       org = requestOrg(r, this.env);
     const rows = await this.rows(s, owner, org),

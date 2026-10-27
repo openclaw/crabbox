@@ -860,6 +860,169 @@ class FakeCoordinatorRuntime implements CoordinatorRuntime {
   }
 }
 
+describe("coordinator storage failure responses", () => {
+  it.each([
+    [new Error("Network connection lost"), "coordinator_unavailable", "2"],
+    [
+      new Error("Internal error in Durable Object storage caused object to be reset."),
+      "coordinator_unavailable",
+      "2",
+    ],
+    [
+      Object.assign(new Error("storage temporarily unavailable"), { retryable: true }),
+      "coordinator_unavailable",
+      "2",
+    ],
+    [
+      Object.assign(new Error("storage overloaded"), { overloaded: true }),
+      "coordinator_overloaded",
+      "5",
+    ],
+  ])(
+    "classifies a caught lease-read failure without replay: %s",
+    async (error, code, retryAfter) => {
+      const storage = new MemoryStorage();
+      const read = vi.fn<(key: string) => Promise<void>>(async (key) => {
+        if (key === "lease:cbx_000000000001") throw error;
+      });
+      storage.beforeGet = read;
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const response = await testFleet(storage).fetch(
+          request("GET", "/v1/leases/cbx_000000000001"),
+        );
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({ error: code, retryable: true });
+        expect(response.headers.get("retry-after")).toBe(retryAfter);
+        expect(response.headers.get("cache-control")).toBe("no-store");
+        expect(read.mock.calls.filter(([key]) => key === "lease:cbx_000000000001")).toHaveLength(1);
+        expect(logged).toHaveBeenCalledTimes(1);
+      } finally {
+        logged.mockRestore();
+      }
+    },
+  );
+
+  it.each(["POST", "PUT"])(
+    "preserves the %s run-event retry contract without replay",
+    async (method) => {
+      const storage = new MemoryStorage();
+      const runID = "run_" + "a".repeat(32);
+      const read = vi.fn<(key: string) => Promise<void>>(async (key) => {
+        if (key === `run:${runID}`) throw new Error("Network connection lost");
+      });
+      storage.beforeGet = read;
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const response = await testFleet(storage).fetch(
+          request(method, `/v1/runs/${runID}/events`, { body: { id: "b".repeat(32) } }),
+        );
+        expect(response.status).toBe(503);
+        expect(await response.json()).toEqual({ error: "run_event_append_unavailable" });
+        expect(read.mock.calls.filter(([key]) => key === `run:${runID}`)).toHaveLength(1);
+      } finally {
+        logged.mockRestore();
+      }
+    },
+  );
+
+  it("returns a retryable heartbeat failure without replaying a committed lease write", async () => {
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      id: "cbx_000000000001",
+      owner: "alice@example.com",
+      org: "example-org",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const error = Object.assign(new Error("commit acknowledgement lost"), { retryable: true });
+    const committed = vi.fn<(keys: Set<string>) => Promise<void>>(async (keys) => {
+      if (keys.has(`lease:${lease.id}`)) throw error;
+    });
+    storage.afterCommit = committed;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await testFleet(storage).fetch(
+        request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+          headers: { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" },
+          body: {},
+        }),
+      );
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        error: "coordinator_unavailable",
+        retryable: true,
+      });
+      expect(committed.mock.calls.filter(([keys]) => keys.has(`lease:${lease.id}`))).toHaveLength(
+        1,
+      );
+      expect(storage.value(`lease:${lease.id}`)).toMatchObject({ id: lease.id, state: "active" });
+      expect(storage.value(leaseMaintenanceKey(lease.id))).toBe(1);
+      expect(storage.value(leaseCurrentKey(lease.id))).toBe(1);
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it("does not classify unmarked Node errors as Cloudflare storage failures", async () => {
+    const storage = new MemoryStorage();
+    storage.beforeGet = async (key) => {
+      if (key === "lease:cbx_000000000001") throw new Error("Network connection lost");
+    };
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await testCoordinator(storage).fetch(
+        request("GET", "/v1/leases/cbx_000000000001"),
+      );
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: "Network connection lost" });
+      expect(logged).not.toHaveBeenCalled();
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it("keeps provider retryability flags out of storage error classification", async () => {
+    const error = Object.assign(new Error("provider temporarily unavailable"), {
+      retryable: true,
+      overloaded: true,
+    });
+    const fleet = testFleet(new MemoryStorage(), {
+      hetzner: {
+        ...fakeProvider(async () => {
+          throw error;
+        }),
+        provisioningFailureEvidence: () => ({ resourceMayExist: true, retryable: true }),
+      },
+    });
+    const response = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        body: {
+          leaseID: "cbx_abcdef123456",
+          provider: "hetzner",
+          target: "linux",
+          sshPublicKey: "ssh-ed25519 provider-failure",
+        },
+      }),
+    );
+    const body = await response.json();
+    expect(response.status).toBe(500);
+    expect(response.headers.get("retry-after")).toBeNull();
+    expect(body).toEqual({ error: "provider temporarily unavailable" });
+  });
+
+  it("keeps unexpected application failures as 500", async () => {
+    const storage = new MemoryStorage();
+    storage.beforeGet = async (key) => {
+      if (key === "lease:cbx_000000000001") throw new Error("synthetic application error");
+    };
+    const response = await testFleet(storage).fetch(request("GET", "/v1/leases/cbx_000000000001"));
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "synthetic application error" });
+    expect(response.headers.get("retry-after")).toBeNull();
+  });
+});
+
 describe("terminal budget settlement", () => {
   it("preserves the last observation when maintenance completes legacy failed cleanup", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -19460,6 +19623,53 @@ describe("fleet lease identity and idle", () => {
     );
     expect(cleanReturn.status).toBe(200);
   });
+
+  it.each(["linux", "windows"] as const)(
+    "generates managed %s pool identities through the provider target contract",
+    async (target) => {
+      const storage = new MemoryStorage();
+      const fleet = testCoordinator(storage);
+      const lease: LeaseRecord = {
+        ...typedReadyPoolLease(),
+        provider: "ssh-host",
+        target,
+        region: "example-org",
+        sshHostAllocation: {
+          hostID: "11111111-1111-4111-8111-111111111111",
+          operator: "operator@example.com",
+          intent: "synthetic-test-intent",
+          generation: 1,
+          accessGeneration: 0,
+          operation: "prepare",
+          template: "tools-v1",
+          publicKey: "synthetic",
+          accessDeadline: new Date(Date.now() + 60000).toISOString(),
+        },
+      };
+      storage.seed(`lease:${lease.id}`, lease);
+      const generated = await fleet.fetch(
+        request("POST", "/v1/ready-pools/builders/identity", {
+          headers: typedReadyPoolHeaders(),
+          body: { leaseID: lease.id, ...typedReadyPoolMetadata(), cacheCompatibility: "tools-v1" },
+        }),
+      );
+      expect(generated.status).toBe(200);
+      expect(await generated.json()).toMatchObject({
+        identity: {
+          image: { provider: "ssh-host", scope: "example-org", id: "tools-v1" },
+          architecture: "amd64",
+        },
+      });
+      storage.seed(`lease:${lease.id}`, { ...lease, target: "macos" });
+      const unsupported = await fleet.fetch(
+        request("POST", "/v1/ready-pools/builders/identity", {
+          headers: typedReadyPoolHeaders(),
+          body: { leaseID: lease.id, cacheCompatibility: "tools-v1" },
+        }),
+      );
+      expect(unsupported.status).toBe(409);
+    },
+  );
 
   it("generates provider-owned typed identities and rejects unsupported or incomplete evidence", async () => {
     const storage = new MemoryStorage();
@@ -41007,107 +41217,110 @@ describe("fleet lease identity and idle", () => {
     expect(relay.codeAgents.has(leaseID)).toBe(false);
   });
 
-  it("revalidates non-admin GitHub grants when agent bridge tickets are consumed", async () => {
-    const storage = new MemoryStorage();
-    const env = {
-      CRABBOX_SESSION_SECRET: "session-secret",
-      CRABBOX_DEFAULT_ORG: "example-org",
-    } as Env;
-    const token = await issueUserToken(env, {
-      owner: "alice@example.com",
-      ownerSource: "github-verified-email",
-      org: "example-org",
-      login: "alice",
-      githubAccessToken: "github-access-token",
-    });
-    const payload = decodeUserTokenPayload(token);
-    const portalSessionHash = await sha256Hex(token);
-    const leaseID = "cbx_000000000001";
-    storage.seed(
-      `lease:${leaseID}`,
-      testLease({
-        id: leaseID,
-        slug: "blue-lobster",
+  it.each(["x-crabbox-github-sealed-credential", "x-crabbox-github-credential-token"])(
+    "revalidates non-admin GitHub grants with %s when agent bridge tickets are consumed",
+    async (credentialHeader) => {
+      const storage = new MemoryStorage();
+      const env = {
+        CRABBOX_SESSION_SECRET: "session-secret",
+        CRABBOX_DEFAULT_ORG: "example-org",
+      } as Env;
+      const token = await issueUserToken(env, {
         owner: "alice@example.com",
+        ownerSource: "github-verified-email",
         org: "example-org",
-        desktop: true,
-        code: true,
-        state: "active",
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      }),
-    );
-    const fleet = testFleet(storage, {}, env);
-    const headers = {
-      authorization: `Bearer ${token}`,
-      "x-crabbox-auth": "github",
-      "x-crabbox-owner": "alice@example.com",
-      "x-crabbox-org": "example-org",
-      "x-crabbox-github-login": "alice",
-      "x-crabbox-github-token-id": payload.jti,
-      "x-crabbox-github-sealed-credential": payload.githubCredential,
-      "x-crabbox-token-expires-at": new Date(payload.exp * 1000).toISOString(),
-    };
-    const cases = [
-      {
-        createPath: `/v1/leases/${leaseID}/webvnc/ticket`,
-        consumePath: `/v1/leases/${leaseID}/webvnc/agent`,
-        storagePrefix: "webvnc-ticket",
-        body: {},
-      },
-      {
-        createPath: `/v1/leases/${leaseID}/code/ticket`,
-        consumePath: `/v1/leases/${leaseID}/code/agent`,
-        storagePrefix: "code-ticket",
-        body: {},
-      },
-      {
-        createPath: `/v1/leases/${leaseID}/egress/ticket`,
-        consumePath: `/v1/leases/${leaseID}/egress/host`,
-        storagePrefix: "egress-ticket",
-        body: { role: "host" },
-      },
-    ];
-    const tickets = await Promise.all(
-      cases.map(async (item): Promise<(typeof cases)[number] & { ticket: string }> => {
-        const response = await fleet.fetch(
-          request("POST", item.createPath, { headers, body: item.body }),
-        );
-        expect(response.status).toBe(200);
-        const result = (await response.json()) as { ticket?: string };
-        expect(result.ticket).toBeTypeOf("string");
-        const ticket = result.ticket ?? "";
-        expect(storage.value(`${item.storagePrefix}:${ticket}`)).toMatchObject({
-          auth: "github",
-          login: "alice",
-          portalSessionHash,
-          githubGrant: {
-            tokenID: payload.jti,
-            sealedCredential: payload.githubCredential,
-          },
-        });
-        return { ...item, ticket };
-      }),
-    );
+        login: "alice",
+        githubAccessToken: "github-access-token",
+      });
+      const payload = decodeUserTokenPayload(token);
+      const portalSessionHash = await sha256Hex(token);
+      const leaseID = "cbx_000000000001";
+      storage.seed(
+        `lease:${leaseID}`,
+        testLease({
+          id: leaseID,
+          slug: "blue-lobster",
+          owner: "alice@example.com",
+          org: "example-org",
+          desktop: true,
+          code: true,
+          state: "active",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        }),
+      );
+      const fleet = testFleet(storage, {}, env);
+      const headers = {
+        authorization: `Bearer ${token}`,
+        "x-crabbox-auth": "github",
+        "x-crabbox-owner": "alice@example.com",
+        "x-crabbox-org": "example-org",
+        "x-crabbox-github-login": "alice",
+        "x-crabbox-github-token-id": payload.jti,
+        [credentialHeader]: payload.githubCredential,
+        "x-crabbox-token-expires-at": new Date(payload.exp * 1000).toISOString(),
+      };
+      const cases = [
+        {
+          createPath: `/v1/leases/${leaseID}/webvnc/ticket`,
+          consumePath: `/v1/leases/${leaseID}/webvnc/agent`,
+          storagePrefix: "webvnc-ticket",
+          body: {},
+        },
+        {
+          createPath: `/v1/leases/${leaseID}/code/ticket`,
+          consumePath: `/v1/leases/${leaseID}/code/agent`,
+          storagePrefix: "code-ticket",
+          body: {},
+        },
+        {
+          createPath: `/v1/leases/${leaseID}/egress/ticket`,
+          consumePath: `/v1/leases/${leaseID}/egress/host`,
+          storagePrefix: "egress-ticket",
+          body: { role: "host" },
+        },
+      ];
+      const tickets = await Promise.all(
+        cases.map(async (item): Promise<(typeof cases)[number] & { ticket: string }> => {
+          const response = await fleet.fetch(
+            request("POST", item.createPath, { headers, body: item.body }),
+          );
+          expect(response.status).toBe(200);
+          const result = (await response.json()) as { ticket?: string };
+          expect(result.ticket).toBeTypeOf("string");
+          const ticket = result.ticket ?? "";
+          expect(storage.value(`${item.storagePrefix}:${ticket}`)).toMatchObject({
+            auth: "github",
+            login: "alice",
+            portalSessionHash,
+            githubGrant: {
+              tokenID: payload.jti,
+              sealedCredential: payload.githubCredential,
+            },
+          });
+          return { ...item, ticket };
+        }),
+      );
 
-    (fleet as unknown as { env: Env }).env.CRABBOX_GITHUB_REVOKED_USERS = "github:12345";
-    const githubFetch = vi.fn<() => Promise<Response>>(async () => {
-      throw new Error("emergency revocation must fail before GitHub API access");
-    });
-    vi.stubGlobal("fetch", githubFetch);
+      (fleet as unknown as { env: Env }).env.CRABBOX_GITHUB_REVOKED_USERS = "github:12345";
+      const githubFetch = vi.fn<() => Promise<Response>>(async () => {
+        throw new Error("emergency revocation must fail before GitHub API access");
+      });
+      vi.stubGlobal("fetch", githubFetch);
 
-    await Promise.all(
-      tickets.map(async (item) => {
-        const response = await fleet.fetch(
-          request("GET", item.consumePath, {
-            headers: { authorization: `Bearer ${item.ticket}`, upgrade: "websocket" },
-          }),
-        );
-        expect(response.status).toBe(401);
-        expect(storage.value(`${item.storagePrefix}:${item.ticket}`)).toBeUndefined();
-      }),
-    );
-    expect(githubFetch).not.toHaveBeenCalled();
-  });
+      await Promise.all(
+        tickets.map(async (item) => {
+          const response = await fleet.fetch(
+            request("GET", item.consumePath, {
+              headers: { authorization: `Bearer ${item.ticket}`, upgrade: "websocket" },
+            }),
+          );
+          expect(response.status).toBe(401);
+          expect(storage.value(`${item.storagePrefix}:${item.ticket}`)).toBeUndefined();
+        }),
+      );
+      expect(githubFetch).not.toHaveBeenCalled();
+    },
+  );
 
   it("binds shared-token bridge tickets to the credential active at creation", async () => {
     const storage = new MemoryStorage();
@@ -52981,7 +53194,8 @@ describe("fleet identity", () => {
 
     expect(response.status).toBe(200);
     expect(body).toContain("provider health");
-    expect(body).toContain("6 supported");
+    expect(body).toContain("7 supported");
+    expect(body).toContain("Managed SSH hosts");
     expect(body).toContain("users");
     expect(body).toContain('href="/portal/admin/users"');
     expect(body).not.toContain("all leases");
@@ -58865,7 +59079,7 @@ describe("portable bounded ready-pool access", () => {
           user: lease.sshUser,
         }),
       ),
-      install: vi.fn<() => Promise<void>>(async () => {}),
+      install: vi.fn<() => Promise<void | { workRoot: string }>>(async () => {}),
       revoke: vi.fn<() => Promise<{ destroyed: boolean }>>(async () => ({ destroyed: false })),
     };
     const provider = {
@@ -58970,6 +59184,29 @@ describe("portable bounded ready-pool access", () => {
     expect((await f.borrow()).status).toBe(409);
     expect([...(await f.storage.list({ prefix: "typed-ready-pool" }))]).toEqual([]);
     expect([...(await f.storage.list({ prefix: "ready-pool:" }))]).toEqual([]);
+  });
+
+  it("publishes the provider's rotated workspace only after access activation", async () => {
+    const f = await fixture();
+    const { body, receipt } = await f.issue();
+    const workRoot = "C:\\Users\\fresh-borrower\\Shared\\work";
+    expect(body.entry.workRoot).not.toBe(workRoot);
+    f.capability.install.mockImplementation(async () => {
+      f.storage.seed(`lease:${f.lease.id}`, { ...f.lease, workRoot });
+      return { workRoot };
+    });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- replay must observe the activated grant.
+      const response = await f.post("ack-access", receipt);
+      expect(response.status).toBe(200);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- inspect each replay's public placement.
+      expect(await response.json()).toMatchObject({
+        entry: { workRoot },
+        lease: { workRoot },
+        grant: { state: "active" },
+      });
+    }
+    expect(f.capability.install).toHaveBeenCalledTimes(1);
   });
 
   it("binds receipts to owner, lease, public key and current authorization", async () => {
@@ -59420,7 +59657,9 @@ describe("atomic legacy lease admission", () => {
     "retains uncertainty when %s commits but its authoritative reread fails",
     async (phase) => {
       const { storage, creates, fleet } = lostAcknowledgement(phase, true);
-      expect((await create(fleet())).status).toBe(500);
+      const response = await create(fleet());
+      expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBe("2");
       storage.beforeGet = undefined;
       const count = phase === "admission" ? 0 : 1;
       expect(creates).toHaveBeenCalledTimes(count);
@@ -59479,7 +59718,8 @@ describe("atomic legacy lease admission", () => {
       creates++;
     });
     const response = await create(testFleet(storage, { hetzner: provider }));
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("2");
     expect(writes).toBe(3);
     expect(creates).toBe(1);
     expect(storage.value<LeaseRecord>(leaseKey)).toMatchObject({
