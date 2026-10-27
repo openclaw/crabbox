@@ -265,6 +265,7 @@ func TestStaticPowerRouteTrustedOverrides(t *testing.T) {
 
 func TestStaticNoControlMasterReachesLeaseTarget(t *testing.T) {
 	enabled := true
+	disabled := false
 	for _, tc := range []struct {
 		name  string
 		file  *fileConfig
@@ -275,8 +276,11 @@ func TestStaticNoControlMasterReachesLeaseTarget(t *testing.T) {
 		{name: "default multiplexes"},
 		{name: "repository config", file: &fileConfig{Static: &fileStaticSection{fileStaticConfig: fileStaticConfig{NoControlMaster: &enabled}}}, want: true},
 		{name: "environment", env: "1", want: true},
+		{name: "environment overrides config", file: &fileConfig{Static: &fileStaticSection{fileStaticConfig: fileStaticConfig{NoControlMaster: &enabled}}}, env: "0"},
 		{name: "flag", flags: []string{"--static-no-control-master"}, want: true},
 		{name: "flag overrides environment", env: "1", flags: []string{"--static-no-control-master=false"}},
+		{name: "flag overrides config", file: &fileConfig{Static: &fileStaticSection{fileStaticConfig: fileStaticConfig{NoControlMaster: &enabled}}}, flags: []string{"--static-no-control-master=false"}},
+		{name: "flag enables over false config", file: &fileConfig{Static: &fileStaticSection{fileStaticConfig: fileStaticConfig{NoControlMaster: &disabled}}}, flags: []string{"--static-no-control-master"}, want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearConfigEnv(t)

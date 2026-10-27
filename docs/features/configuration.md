@@ -673,6 +673,14 @@ static:
 
 `static`, `static-ssh`, and `ssh` all select the bring-your-own-host backend.
 
+`static.noControlMaster` (default `false`) disables SSH multiplexing for static
+targets, including workspace owner calls. Set it to `true` for servers that do
+not reliably support multiplexed sessions. `CRABBOX_STATIC_NO_CONTROL_MASTER=1`
+overrides config, and `--static-no-control-master` overrides both. An explicit
+`--static-no-control-master=false` restores multiplexing even if config or the
+environment sets it to true; generated recovery commands retain that override.
+See [Static SSH](../providers/ssh.md#config-fields) for transport details.
+
 ### Local container
 
 ```yaml

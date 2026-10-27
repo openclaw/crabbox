@@ -420,7 +420,7 @@ workspace descendant containment or require `setsid` on macOS.
 | `workRoot` | Remote checkout/work directory. |
 | `id` | Optional stable lease id (default derived from `host`). |
 | `name` | Optional friendly slug (default derived from `host`). |
-| `noControlMaster` | Open a separate SSH connection per command, including workspace owner calls, instead of an SSH `ControlMaster`. Use it for SSH servers that close multiplexed sessions without sending `exit-status`. Also `CRABBOX_STATIC_NO_CONTROL_MASTER` or `--static-no-control-master`. |
+| `noControlMaster` | Disable SSH multiplexing, including workspace owner calls (default `false`). Use it for SSH servers that close multiplexed sessions without sending `exit-status`. Also `CRABBOX_STATIC_NO_CONTROL_MASTER` or `--static-no-control-master`. |
 | `startCommand` | Optional local argv run before the SSH readiness wait. See [Power hooks](#power-hooks). |
 | `stopCommand` | Optional local argv run before final custody retirement; failures remain retryable. |
 | `power.dedicated` | Required `true` for hooks; one controller exclusively owns the whole host. |
@@ -429,6 +429,17 @@ workspace descendant containment or require `setsid` on macOS.
 The SSH private key comes from the shared `ssh.key` field (or `CRABBOX_SSH_KEY`).
 There is no per-host key field; the static provider connects with your existing
 key, not a key Crabbox generates.
+
+Set `static.noControlMaster: true` for a direct connection per command. This
+also skips the workspace owner's foreground master; sync, copy, interactive
+connections, and VNC/port-forward transports cannot reuse a master. Direct
+connections explicitly set `ControlMaster=no`, `ControlPath=none`, and
+`ControlPersist=no` so local SSH configuration cannot re-enable multiplexing.
+The default keeps existing multiplexing behavior. Flags override environment
+variables, which override config; `--static-no-control-master=false` restores
+the default even when config or environment enables the opt-out. Generated
+recovery commands preserve either value. Existing configs and stored leases
+need no migration; reused leases use the current transport setting.
 
 A repository-defined `static.host` cannot silently inherit a key or ambient SSH
 authentication from user config, the environment, an SSH agent, or local SSH
@@ -450,6 +461,7 @@ appears in trusted user config, or the command is set with
 --static-user
 --static-port
 --static-work-root
+--static-no-control-master
 --static-start-command '["/usr/local/bin/host-power","up"]'
 --static-stop-command '["/usr/local/bin/host-power","down"]'
 ```
@@ -466,6 +478,7 @@ CRABBOX_STATIC_PORT
 CRABBOX_STATIC_WORK_ROOT
 CRABBOX_STATIC_ID
 CRABBOX_STATIC_NAME
+CRABBOX_STATIC_NO_CONTROL_MASTER
 CRABBOX_STATIC_START_COMMAND
 CRABBOX_STATIC_STOP_COMMAND
 CRABBOX_SSH_USER
