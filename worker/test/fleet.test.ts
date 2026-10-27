@@ -19461,6 +19461,53 @@ describe("fleet lease identity and idle", () => {
     expect(cleanReturn.status).toBe(200);
   });
 
+  it.each(["linux", "windows"] as const)(
+    "generates managed %s pool identities through the provider target contract",
+    async (target) => {
+      const storage = new MemoryStorage();
+      const fleet = testCoordinator(storage);
+      const lease: LeaseRecord = {
+        ...typedReadyPoolLease(),
+        provider: "ssh-host",
+        target,
+        region: "example-org",
+        sshHostAllocation: {
+          hostID: "11111111-1111-4111-8111-111111111111",
+          operator: "operator@example.com",
+          intent: "synthetic-test-intent",
+          generation: 1,
+          accessGeneration: 0,
+          operation: "prepare",
+          template: "tools-v1",
+          publicKey: "synthetic",
+          accessDeadline: new Date(Date.now() + 60000).toISOString(),
+        },
+      };
+      storage.seed(`lease:${lease.id}`, lease);
+      const generated = await fleet.fetch(
+        request("POST", "/v1/ready-pools/builders/identity", {
+          headers: typedReadyPoolHeaders(),
+          body: { leaseID: lease.id, ...typedReadyPoolMetadata(), cacheCompatibility: "tools-v1" },
+        }),
+      );
+      expect(generated.status).toBe(200);
+      expect(await generated.json()).toMatchObject({
+        identity: {
+          image: { provider: "ssh-host", scope: "example-org", id: "tools-v1" },
+          architecture: "amd64",
+        },
+      });
+      storage.seed(`lease:${lease.id}`, { ...lease, target: "macos" });
+      const unsupported = await fleet.fetch(
+        request("POST", "/v1/ready-pools/builders/identity", {
+          headers: typedReadyPoolHeaders(),
+          body: { leaseID: lease.id, cacheCompatibility: "tools-v1" },
+        }),
+      );
+      expect(unsupported.status).toBe(409);
+    },
+  );
+
   it("generates provider-owned typed identities and rejects unsupported or incomplete evidence", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage, {

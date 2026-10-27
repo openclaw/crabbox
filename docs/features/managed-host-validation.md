@@ -18,6 +18,8 @@ go build -trimpath -o bin/crabbox ./cmd/crabbox
 GOOS=linux GOARCH=arm64 go build -trimpath -o bin/crabbox-host-linux ./cmd/crabbox
 npm run build:node --prefix worker
 python3 scripts/live-managed-ssh-host-smoke.py --evidence /tmp/managed-host-proof
+# Optionally replace a built stable coordinator with the current one on the same DB:
+# add --upgrade-worker /path/to/stable-checkout/worker
 ```
 
 The script creates its own loopback-only coordinator, PostgreSQL database,
@@ -28,7 +30,9 @@ completed checks and failure diagnostics, and resources are removed in `finally`
 An interrupted process may need manual removal of its exact `cbx-host-proof-*`
 resources; do not remove unrelated containers.
 
-Coverage includes borrower sync/exec, unauthorized access, cleanup-before-reuse,
+Coverage includes borrower sync/exec, shipped-CLI interactive PTY access,
+authenticated foreign-borrower relay rejection, retained-shell termination after
+revocation, rejection of new revoked connections, and cleanup-before-reuse,
 two portable-pool generations with fresh home directories and rotated endpoint
 keys, private-group cleanup with `USERGROUPS_ENAB=no`, concurrent allocation, idempotent admission,
 coordinator restart, failed cleanup quarantine, expiry, host-agent restart,
@@ -42,6 +46,7 @@ Windows amd64/arm64 compilation checks API and build compatibility only. The
 MXC adapter requires separate interactive-desktop hardware qualification of
 provision/start, the nested SSH endpoint, borrower sync/exec, key rotation,
 stop/deprovision, crash recovery, and the requested hardware capabilities.
+Windows PTY allocation is not implemented; non-PTY shell/exec is available.
 No successful Linux result or standalone MXC probe establishes those claims.
 Keep Windows deployment experimental until that complete scenario is proven.
 

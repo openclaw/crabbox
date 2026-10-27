@@ -103,7 +103,7 @@ export function sshHostCloudProvider(runtime: CoordinatorRuntime, env: Env): Clo
     ...serveCloudProvider(),
     poolAccess: () => new HostPoolAccess(runtime),
     requiresPortablePoolAccess: true,
-    supportsReadyPoolTarget: (l) => Boolean(l.sshHostAllocation),
+    supportsReadyPoolTarget: (l) => l.target === "windows" && Boolean(l.sshHostAllocation),
     readyPoolImageIdentity: identity,
     supportsReadyPoolImageIdentity: (i) => i.provider === "ssh-host" && Boolean(i.scope && i.id),
     releaseLease: async (l) => {

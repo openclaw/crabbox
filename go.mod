@@ -19,6 +19,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.0
 	github.com/aws/smithy-go v1.28.2
 	github.com/containernetworking/cni v1.3.1
+	github.com/creack/pty v1.1.24
 	github.com/daytona/clients/api-client-go v0.216.1
 	github.com/daytona/clients/sdk-go v0.216.1
 	github.com/dlclark/regexp2 v1.12.0 // indirect

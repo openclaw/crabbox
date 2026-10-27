@@ -13680,7 +13680,7 @@ export class FleetCoordinator {
     const image = this.readyPoolLeaseImageIdentity(observed);
     if (
       !image ||
-      observed.target !== "linux" ||
+      !this.readyPoolTargetSupported(observed) ||
       !canonicalReadyPoolArchitecture(observed.architecture)
     ) {
       return json(
@@ -14811,16 +14811,22 @@ export class FleetCoordinator {
     );
   }
 
+  private readyPoolTargetSupported(lease: LeaseRecord): boolean {
+    return (
+      lease.target === "linux" ||
+      (lease.provider !== undefined &&
+        isCoordinatorProvider(lease.provider) &&
+        this.provider(lease.provider).supportsReadyPoolTarget?.(lease) === true)
+    );
+  }
+
   private readyPoolIdentityMatchesLease(
     identity: ReadyPoolIdentityV1,
     lease: LeaseRecord,
   ): boolean {
     const image = this.readyPoolLeaseImageIdentity(lease);
     return (
-      (lease.target === "linux" ||
-        (lease.provider !== undefined &&
-          isCoordinatorProvider(lease.provider) &&
-          this.provider(lease.provider).supportsReadyPoolTarget?.(lease) === true)) &&
+      this.readyPoolTargetSupported(lease) &&
       canonicalReadyPoolArchitecture(lease.architecture) &&
       identity.architecture === lease.architecture &&
       image !== undefined &&

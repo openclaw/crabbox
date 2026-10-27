@@ -9,12 +9,9 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -159,48 +156,7 @@ func runEndpoint(ctx context.Context, path string) error {
 				sessions.Add(1)
 				go func() {
 					defer sessions.Done()
-					defer stream.Close()
-					for req := range reqs {
-						if req.Type != "exec" {
-							req.Reply(false, nil)
-							continue
-						}
-						var input struct{ Command string }
-						if ssh.Unmarshal(req.Payload, &input) != nil || len(input.Command) > 1024*1024 {
-							req.Reply(false, nil)
-							return
-						}
-						req.Reply(true, nil)
-						var command *exec.Cmd
-						if runtime.GOOS == "windows" {
-							command = exec.CommandContext(ctx, "cmd.exe", "/d", "/s", "/c", input.Command)
-						} else {
-							command = exec.CommandContext(ctx, "/bin/sh", "-c", input.Command)
-						}
-						command.Dir = c.WorkRoot
-						// SSH clients may keep stdin open until they receive exit-status.
-						// Do not make exec.Wait depend on reading that EOF. Closing the
-						// channel below settles this copier after the process exits.
-						stdin, err := command.StdinPipe()
-						if err != nil {
-							return
-						}
-						defer stdin.Close()
-						go func() { _, _ = io.Copy(stdin, stream); _ = stdin.Close() }()
-						command.Stdout = stream
-						command.Stderr = stream.Stderr()
-						command.WaitDelay = 5 * time.Second
-						code := uint32(0)
-						if err := command.Run(); err != nil {
-							code = 1
-							var ee *exec.ExitError
-							if errors.As(err, &ee) && ee.ExitCode() > 0 {
-								code = uint32(ee.ExitCode())
-							}
-						}
-						stream.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{code}))
-						return
-					}
+					serveEndpointSession(ctx, c.WorkRoot, stream, reqs)
 				}()
 			}
 		}()

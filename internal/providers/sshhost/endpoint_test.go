@@ -1,6 +1,7 @@
 package sshhost
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"os"
@@ -14,6 +15,94 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 	"golang.org/x/crypto/ssh"
 )
+
+func TestEndpointInteractiveShellAndResize(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX PTY fixture")
+	}
+	hostPrivate, hostPublic, err := generateHostKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientPrivate, clientPublic, err := generateHostKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := freePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "endpoint.json")
+	config := endpointConfig{PrivateKey: hostPrivate, PublicKey: clientPublic, Port: port, WorkRoot: t.TempDir(), Deadline: time.Now().Add(time.Minute).UnixMilli()}
+	if err := writeJSON(path, config, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- runEndpoint(ctx, path) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("endpoint did not settle")
+		}
+	})
+	if err := waitEndpoint(ctx, &runtimeState{HostKey: hostPublic, Port: port}); err != nil {
+		t.Fatal(err)
+	}
+	signer, _ := ssh.ParsePrivateKey([]byte(clientPrivate))
+	hostKey, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(hostPublic))
+	client, err := ssh.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), &ssh.ClientConfig{User: "crabbox", Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.FixedHostKey(hostKey), Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	for _, terminal := range []bool{false, true} {
+		t.Run(strconv.FormatBool(terminal), func(t *testing.T) {
+			session, err := client.NewSession()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close()
+			input, err := session.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var output, stderr bytes.Buffer
+			session.Stdout, session.Stderr = &output, &stderr
+			if terminal {
+				if err := session.RequestPty("xterm", 24, 80, ssh.TerminalModes{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := session.Shell(); err != nil {
+				t.Fatal(err)
+			}
+			if terminal {
+				if err := session.WindowChange(43, 111); err != nil {
+					t.Fatal(err)
+				}
+				input.Write([]byte("stty size; test -t 0 && test -t 1 && printf 'pty-%s\\n' ok; exit 7\n"))
+			} else {
+				input.Write([]byte("printf 'shell-%s\\n' ok; exit 7\n"))
+				input.Close()
+			}
+			err = session.Wait()
+			if exit, ok := err.(*ssh.ExitError); !ok || exit.ExitStatus() != 7 {
+				t.Fatalf("exit=%v output=%q", err, output.String())
+			}
+			if terminal {
+				if !strings.Contains(output.String(), "43 111") || !strings.Contains(output.String(), "pty-ok") {
+					t.Fatalf("terminal proof=%q", output.String())
+				}
+			} else if output.String() != "shell-ok\n" {
+				t.Fatalf("shell output=%q", output.String())
+			}
+		})
+	}
+}
 
 func TestEndpointExecAuthenticationAndExpiry(t *testing.T) {
 	if runtime.GOOS == "windows" {

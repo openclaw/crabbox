@@ -135,6 +135,9 @@ polling. Ordinary SSH network logon is not an MXC activation bridge; failed
 activation never falls back to host execution. Commands and sync terminate at
 an SSH endpoint started **inside** the MXC isolation session. Deprovision receipts settle the exact session/account; typed `stale_id`
 receipts allow retries after a lost completion. Missing provision identity retains quarantine.
+Windows supports command execution and non-PTY shells; interactive Windows PTY
+allocation is not implemented. Linux `connect` supports a lease-account PTY,
+terminal resizing, and ordinary shell exit status.
 
 This adapter needs hardware qualification before rollout. Prior interactive
 MXC lifecycle evidence does not prove this complete relay/endpoint integration,
