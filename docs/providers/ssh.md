@@ -114,8 +114,9 @@ CRABBOX_STATIC_ID=buildbox-slot-1 crabbox run --provider ssh \
   --static-host buildbox.local -- pnpm test
 ```
 
-Do not use `--reclaim` to share a host. It adopts the other checkout's lease and,
-with it, the same remote workdir.
+Do not use `--reclaim` to share a host. It adopts the other checkout's lease and
+its `<workRoot>/<lease id>` directory; checkouts of the same repository then
+share one remote workdir.
 
 Each new id starts with an empty workdir. With Git seeding enabled (the default),
 its first run pays a full Git seed, which can take minutes for a large
