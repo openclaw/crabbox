@@ -2578,6 +2578,10 @@ type checkpointCommandReleaseBackend struct{ *checkpointForkReleaseBackend }
 
 func (*checkpointCommandReleaseBackend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
 
+func (*checkpointCommandReleaseBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
+	return req.Lease.Server, nil
+}
+
 func TestCheckpointForkCommandReleasesSuccessorClaim(t *testing.T) {
 	for _, failCommand := range []bool{false, true} {
 		t.Run(strconv.FormatBool(failCommand), func(t *testing.T) {
@@ -2593,11 +2597,7 @@ func TestCheckpointForkCommandReleasesSuccessorClaim(t *testing.T) {
 			if err := os.WriteFile("README.md", []byte("checkpoint command fixture\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			handler := ""
-			if failCommand {
-				handler = `case "$match" in *"checkpoint-command-smoke"*) exit 23 ;; esac`
-			}
-			installRecordingSSH(t, dir, handler)
+			installRecordingSSH(t, dir)
 			t.Setenv("PATH", dir+string(os.PathListSeparator)+originalPath)
 			writeExecutable(t, filepath.Join(dir, "rsync"), "#!/bin/sh\nexit 0\n")
 
@@ -2609,14 +2609,17 @@ func TestCheckpointForkCommandReleasesSuccessorClaim(t *testing.T) {
 			t.Cleanup(func() { testAWSBackendOverride = nil })
 			record := createCheckpointForkTestRecord(t, "chk_command_cleanup", "")
 			var stderr bytes.Buffer
-			app := App{Stdout: io.Discard, Stderr: &stderr}
-			err := app.checkpointFork(context.Background(), []string{record.ID, "--keep=false", "--", "echo", "checkpoint-command-smoke"})
-			wantExit := 0
-			if failCommand {
-				wantExit = 23
+			app := App{Stdout: io.Discard, Stderr: &stderr,
+				sshReadinessWaiter: func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return nil },
 			}
-			if code := ExitCodeForError(err, 1); code != wantExit {
-				t.Fatalf("exit=%d want=%d error=%v stderr=%s", code, wantExit, err, stderr.String())
+			if failCommand {
+				app.workspaceOwnerAcquirer = func(context.Context, SSHTarget, string, io.Writer) (*workspaceOwner, error) {
+					return nil, errors.New("synthetic command setup failure")
+				}
+			}
+			err := app.checkpointFork(context.Background(), []string{record.ID, "--keep=false", "--", "echo", "checkpoint-command-smoke"})
+			if failCommand && (err == nil || !strings.Contains(err.Error(), "synthetic command setup failure")) || !failCommand && err != nil {
+				t.Fatalf("failCommand=%v error=%v stderr=%s", failCommand, err, stderr.String())
 			}
 			if backend.releaseCount != 1 {
 				t.Fatalf("releases=%d want=1 stderr=%s", backend.releaseCount, stderr.String())
