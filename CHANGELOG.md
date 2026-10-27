@@ -2,16 +2,25 @@
 
 ## Unreleased
 
+## 0.80.0 - 2026-10-27
+
+### Highlights
+
+- **Share existing Linux and Windows machines through the coordinator.** Managed hosts use outbound relays, isolated borrower execution, rotating pool access, and cleanup-confirmed reuse. Native Windows ARM64 lifecycle and revocation are qualified; MXC remains experimental, and GPU execution and Windows PTYs are not claimed. [PR 2964](https://github.com/openclaw/crabbox/pull/2964). Thanks @RomneyDa.
+- **Pause and resume Azure Sandbox sessions without losing their owned disks.** Explicit recovery and deletion retain exact resource ownership and bounded work admission. [PR 2960](https://github.com/openclaw/crabbox/pull/2960).
+
 ### Added
 
 - Static SSH: add `static.noControlMaster`, `CRABBOX_STATIC_NO_CONTROL_MASTER`, and `--static-no-control-master` to opt out of SSH multiplexing, preserving explicit overrides in recovery commands. [PR 2855](https://github.com/openclaw/crabbox/pull/2855). Thanks @shunkakinoki.
 - Managed SSH hosts: enroll exclusive operator-owned capacity behind outbound, pinned SSH relays; isolate borrower accounts, rotate portable-pool access, and require cleanup receipts before reuse. Windows MXC remains experimental pending hardware qualification. [PR 2964](https://github.com/openclaw/crabbox/pull/2964). Thanks @RomneyDa.
+- Managed SSH hosts: enroll exclusive operator-owned capacity behind outbound, pinned SSH relays; isolate borrower accounts, rotate portable-pool access, and require cleanup receipts before reuse. Windows MXC remains experimental, with native ARM64 lifecycle qualification documented. [PR 2964](https://github.com/openclaw/crabbox/pull/2964). Thanks @RomneyDa.
 
 - Azure Sandbox: include client request and lifecycle-poll durations and counts in warmup timing reports, including failed attempts, without inferring server disk or boot timings. [PR 2959](https://github.com/openclaw/crabbox/pull/2959).
 - Azure Sandbox: retain session-owned disks through explicit pause/resume with finite per-activation work admission, durable exact-ownership recovery, and explicit deletion. [PR 2960](https://github.com/openclaw/crabbox/pull/2960).
 
 ### Fixed
 
+- SSH static provider: when another repository holds a static lease, the refusal now explains that a distinct `static.id` / `CRABBOX_STATIC_ID` shares the host safely, and warns that `--reclaim` takes over the other repository's lease and workdir. [PR 2972](https://github.com/openclaw/crabbox/pull/2972).
 - Local Git seeding: stream large object enumerations without the 16 MiB control-output ceiling and preserve the original limit or output failure. [PR 2841](https://github.com/openclaw/crabbox/pull/2841). Thanks @vincentkoc.
 
 - Coordinator: preserve retryable responses for transient Cloudflare storage failures without replaying operations, and prepare compatible readers for the staged internal grant-header migration. [PR 2847](https://github.com/openclaw/crabbox/pull/2847). Thanks @vincentkoc.
