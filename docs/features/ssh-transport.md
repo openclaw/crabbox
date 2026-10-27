@@ -11,6 +11,22 @@ selects the public, tailnet, or provider ProxyCommand route. File copy and local
 forwarding consume that resolved target instead of rebuilding provider-specific
 SSH rules.
 
+## Linux command cancellation
+
+Workspace-owned Linux streaming commands run under an isolated process-group
+supervisor. The guest needs Bash, `setsid` and GNU coreutils. Closing the SSH
+channel alone does not prove that command descendants have stopped.
+
+On cancellation, a separate bounded SSH call asks the original supervisor to
+terminate its guarded group. It sends TERM, waits the five-second grace, then
+sends KILL and verifies group absence. Failure retains the ownership evidence
+and prevents workspace reuse. The supervisor also watches its workspace owner
+identity and expiry. Control calls and source-transfer witnesses retain their
+existing transport.
+
+The same guarded cleanup runs after normal command completion, including the
+five-second TERM grace. Account for that cost when measuring short commands.
+
 ## File copy
 
 Workspace rsync uses the [sync compression policy](sync.md#rsync-compression).
