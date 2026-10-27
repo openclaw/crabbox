@@ -73,6 +73,7 @@ var benchmarkProviderCategories = map[string]string{
 	"smolvm":                     "delegated-sandbox",
 	"sprites":                    "direct-cloud",
 	"ssh":                        "byo-ssh",
+	"ssh-host":                   "byo-ssh",
 	"superserve":                 "delegated-sandbox",
 	"tart":                       "local-vm",
 	"tencentcloud":               "direct-cloud",

@@ -57,15 +57,68 @@ func (a *localGitSeedArtifact) cleanup() error {
 type boundedGitSeedWriter struct {
 	dst       io.Writer
 	remaining int64
+	written   int64
+	err       error
+}
+
+type localGitSeedWriteError struct {
+	reason                    string
+	written, limit, attempted int64
+	cause                     error
+}
+
+func (e *localGitSeedWriteError) Error() string {
+	return fmt.Sprintf("local Git seed %s (written=%d limit=%d write=%d)", e.reason, e.written, e.limit, e.attempted)
+}
+
+func (e *localGitSeedWriteError) Unwrap() error { return e.cause }
+
+func (w *boundedGitSeedWriter) fail(reason string, attempted int, cause error) error {
+	// Keep sink errors available to errors.Is without exposing paths or data.
+	w.err = &localGitSeedWriteError{reason, w.written, w.written + w.remaining, int64(attempted), cause}
+	return w.err
 }
 
 func (w *boundedGitSeedWriter) Write(p []byte) (int, error) {
+	if w.err != nil {
+		return 0, w.err
+	}
 	if int64(len(p)) > w.remaining {
-		return 0, fmt.Errorf("local Git seed byte limit exceeded")
+		return 0, w.fail("byte limit exceeded", len(p), nil)
 	}
 	n, err := w.dst.Write(p)
 	w.remaining -= int64(n)
-	return n, err
+	w.written += int64(n)
+	if err != nil {
+		return n, w.fail("output write failed", len(p), err)
+	}
+	if n != len(p) {
+		return n, w.fail("output short write", len(p), io.ErrShortWrite)
+	}
+	return n, nil
+}
+
+func runLocalGitSeedCommand(ctx context.Context, cmd *exec.Cmd, writer *boundedGitSeedWriter) error {
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		_ = out.Close()
+		return errors.Join(err, ctx.Err())
+	}
+	_, copyErr := io.Copy(writer, out)
+	if copyErr != nil {
+		// Git may keep computing after its output is refused. Kill before Wait
+		// so refusal cannot leave a child running until the overall deadline.
+		_ = cmd.Process.Kill()
+	}
+	_ = out.Close()
+	commandErr := cmd.Wait()
+	if writer.err != nil {
+		copyErr = writer.err
+	}
+	return errors.Join(copyErr, commandErr, ctx.Err())
 }
 
 func localGitSeedCommand(ctx context.Context, root string, source bool, args ...string) *exec.Cmd {
@@ -94,11 +147,8 @@ func localGitSeedOutput(ctx context.Context, root string, source bool, args ...s
 	defer cancel()
 	var out bytes.Buffer
 	cmd := localGitSeedCommand(ctx, root, source, args...)
-	cmd.Stdout = &boundedGitSeedWriter{&out, localGitSeedMaxMetadata}
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
+	writer := &boundedGitSeedWriter{dst: &out, remaining: localGitSeedMaxMetadata}
+	if err := runLocalGitSeedCommand(ctx, cmd, writer); err != nil {
 		return "", fmt.Errorf("local Git seed %s failed: %w", args[0], err)
 	}
 	return strings.TrimSpace(out.String()), nil
@@ -106,6 +156,80 @@ func localGitSeedOutput(ctx context.Context, root string, source bool, args ...s
 
 func localGitSeedSourceOutput(ctx context.Context, root string, args ...string) (string, error) {
 	return localGitSeedOutput(ctx, root, true, args...)
+}
+
+type localGitSeedEnumeration struct {
+	format     string
+	width      int
+	maxRecords int
+	records    int
+	partial    []byte
+	consume    func(string) error
+	err        error
+}
+
+func (w *localGitSeedEnumeration) Write(p []byte) (int, error) {
+	if w.err != nil {
+		return 0, w.err
+	}
+	written := 0
+	for len(p) > 0 {
+		end := bytes.IndexByte(p, '\n')
+		if end < 0 {
+			if len(w.partial)+len(p) > w.width {
+				w.err = fmt.Errorf("local Git seed enumeration object ID width exceeded")
+				return written, w.err
+			}
+			w.partial = append(w.partial, p...)
+			return written + len(p), nil
+		}
+		if len(w.partial)+end != w.width {
+			w.err = fmt.Errorf("local Git seed enumeration has invalid object ID width")
+			return written, w.err
+		}
+		w.partial = append(w.partial, p[:end]...)
+		oid := string(w.partial)
+		if !localGitSeedOID(oid, w.format) {
+			w.err = fmt.Errorf("local Git seed enumeration has invalid object ID encoding")
+			return written, w.err
+		}
+		if w.records >= w.maxRecords {
+			w.err = fmt.Errorf("local Git seed enumeration record limit exceeded (limit=%d)", w.maxRecords)
+			return written, w.err
+		}
+		w.records++
+		w.partial = w.partial[:0]
+		written += end + 1
+		if w.err = w.consume(oid); w.err != nil {
+			return written, w.err
+		}
+		p = p[end+1:]
+	}
+	return written, nil
+}
+
+func (w *localGitSeedEnumeration) finish() error {
+	if w.err == nil && len(w.partial) != 0 {
+		w.err = fmt.Errorf("local Git seed enumeration has an unterminated object ID")
+	}
+	return w.err
+}
+
+func localGitSeedEnumerationOutput(ctx context.Context, cmd *exec.Cmd, format string, consume func(string) error) error {
+	width := 40
+	if format == "sha256" {
+		width = 64
+	}
+	records := &localGitSeedEnumeration{format: format, width: width, maxRecords: localGitSeedMaxObjects, consume: consume}
+	// Enumeration has one fixed-width record per object. Bound the wire as well
+	// as raw records (including duplicates), without buffering the full closure.
+	writer := &boundedGitSeedWriter{dst: records, remaining: int64(localGitSeedMaxObjects * (width + 1))}
+	if err := runLocalGitSeedCommand(ctx, cmd, writer); err != nil {
+		// Retain the consumer diagnosis without inferring truncated framing
+		// from a stream interrupted by an earlier process or I/O failure.
+		return errors.Join(records.err, err)
+	}
+	return records.finish()
 }
 
 func localGitSeedInit(root, format string) error {
@@ -135,6 +259,7 @@ type localGitSeedObject struct {
 type localGitSeedReader struct {
 	cmd       *exec.Cmd
 	in        io.WriteCloser
+	pipe      io.ReadCloser
 	out       *bufio.Reader
 	format    string
 	inspected int64
@@ -153,15 +278,18 @@ func newLocalGitSeedReader(ctx context.Context, root, format string) (*localGitS
 	}
 	if err := cmd.Start(); err != nil {
 		_ = in.Close()
+		_ = out.Close()
 		return nil, err
 	}
-	return &localGitSeedReader{cmd: cmd, in: in, out: bufio.NewReaderSize(out, 65536), format: format}, nil
+	return &localGitSeedReader{cmd: cmd, in: in, pipe: out, out: bufio.NewReaderSize(out, 65536), format: format}, nil
 }
 func (r *localGitSeedReader) close() {
 	if r.cmd == nil {
 		return
 	}
+	_ = r.cmd.Process.Kill()
 	_ = r.in.Close()
+	_ = r.pipe.Close()
 	_ = r.cmd.Wait()
 	r.cmd = nil
 }
@@ -315,43 +443,45 @@ func prepareLocalGitSeedArtifact(ctx context.Context, root string, selection loc
 		walkArgs = append(walkArgs, selection.Base)
 	}
 	walkArgs = append(walkArgs, "--")
-	closure, err := localGitSeedOutput(ctx, readerRoot, false, walkArgs...)
-	if err != nil {
-		// Keep the full closure walk above; shallow markers alone do not imply
-		// that selected history is missing from the local object store.
-		if shallow, shallowErr := localGitSeedSourceOutput(ctx, root, "rev-parse", "--is-shallow-repository"); shallowErr == nil && shallow == "true" {
-			return artifact, fmt.Errorf("enumerate complete required local Git objects: source repository is shallow; run git fetch --unshallow, or set sync.gitSeed=false and sync.gitSeedSource=origin for file-only sync: %w", err)
-		}
-		return artifact, fmt.Errorf("enumerate complete required local Git objects: %w", err)
-	}
 	selected := make(map[string]localGitSeedObject)
 	commits := make(map[string]bool)
 	var objectBytes int64
-	for _, oid := range strings.Fields(closure) {
-		if !localGitSeedOID(oid, format) {
-			return artifact, fmt.Errorf("invalid local Git closure object ID")
-		}
+	walk := localGitSeedCommand(ctx, readerRoot, false, walkArgs...)
+	err = localGitSeedEnumerationOutput(ctx, walk, format, func(oid string) error {
 		if _, exists := selected[oid]; exists {
-			continue
+			return nil
 		}
 		if len(selected) >= localGitSeedMaxObjects {
-			return artifact, fmt.Errorf("local Git seed object count limit exceeded")
+			return fmt.Errorf("local Git seed object count limit exceeded")
 		}
 		obj, readErr := reader.request("info", oid)
 		if readErr != nil {
-			return artifact, readErr
+			return readErr
 		}
 		if obj.size > maxBytes-objectBytes {
-			return artifact, fmt.Errorf("local Git seed uncompressed object byte limit exceeded")
+			return fmt.Errorf("local Git seed uncompressed object byte limit exceeded")
 		}
 		if obj.kind != "commit" && obj.kind != "tree" && obj.kind != "blob" {
-			return artifact, fmt.Errorf("unexpected object type in local Git history")
+			return fmt.Errorf("unexpected object type in local Git history")
 		}
 		selected[oid] = obj
 		objectBytes += obj.size
 		if obj.kind == "commit" {
 			commits[oid] = true
 		}
+		return nil
+	})
+	if err != nil {
+		// Keep the full closure walk above; shallow markers alone do not imply
+		// missing history, and cannot explain a parser or consumer refusal.
+		var writeErr *localGitSeedWriteError
+		var commandErr *exec.ExitError
+		if errors.As(err, &commandErr) && !errors.As(err, &writeErr) && ctx.Err() == nil {
+			if shallow, shallowErr := localGitSeedSourceOutput(ctx, root, "rev-parse", "--is-shallow-repository"); shallowErr == nil && shallow == "true" {
+				return artifact, fmt.Errorf("enumerate complete required local Git objects: source repository is shallow; run git fetch --unshallow, or set sync.gitSeed=false and sync.gitSeedSource=origin for file-only sync: %w", err)
+			}
+		}
+		return artifact, fmt.Errorf("enumerate complete required local Git objects: %w", err)
 	}
 	if !commits[selection.Head] || (selection.Base != "" && !commits[selection.Base]) {
 		return artifact, fmt.Errorf("local Git seed HEAD/base must identify commits")
@@ -439,7 +569,7 @@ func prepareLocalGitSeedArtifact(ctx context.Context, root string, selection loc
 		return artifact, err
 	}
 	defer bundle.Close()
-	writer := &boundedGitSeedWriter{bundle, maxBytes}
+	writer := &boundedGitSeedWriter{dst: bundle, remaining: maxBytes}
 	var header strings.Builder
 	fmt.Fprintf(&header, "# v3 git bundle\n@object-format=%s\n", format)
 	for _, ref := range refs {
@@ -452,8 +582,7 @@ func prepareLocalGitSeedArtifact(ctx context.Context, root string, selection loc
 	packOffset := int64(header.Len())
 	pack := localGitSeedCommand(ctx, readerRoot, false, "pack-objects", "--stdout", "--no-reuse-delta", "--no-reuse-object", "--window=0", "--threads=1")
 	pack.Stdin = strings.NewReader(strings.Join(oids, "\n") + "\n")
-	pack.Stdout = writer
-	if err = pack.Run(); err != nil {
+	if err = runLocalGitSeedCommand(ctx, pack, writer); err != nil {
 		return artifact, fmt.Errorf("pack complete local Git objects: %w", err)
 	}
 	stat, err := bundle.Stat()

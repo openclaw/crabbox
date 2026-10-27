@@ -1213,5 +1213,19 @@
     "bestFit": "Trusted owner workloads on spare machine capacity",
     "caveat": "Brokered only; clients must reach the advertised SSH address; containers are not hostile-tenant isolation",
     "docs": "serve.md"
+  },
+  "ssh-host": {
+    "status": "built-in",
+    "category": "byo-ssh",
+    "substrate": "Exclusive existing Linux or Windows host",
+    "location": "byo",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "optional",
+    "lifecycle": "Coordinator and outbound host agent",
+    "cleanup": "Confirmed lease account/session teardown; never physical host deletion",
+    "bestFit": "Organization-shared existing test machines behind NAT",
+    "caveat": "Linux namespaces required; Windows MXC interactive-context integration needs hardware qualification; no network isolation",
+    "docs": "ssh-host.md"
   }
 }

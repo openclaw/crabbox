@@ -1,4 +1,5 @@
 import { AsyncMutex } from "./async-mutex";
+import { recordDurableObjectStorageFailure } from "./durable-object-errors";
 export interface CoordinatorStorageView {
   get<T>(
     key: string,
@@ -21,6 +22,40 @@ export interface CoordinatorStorage extends CoordinatorStorageView {
   // Implementations may retry callbacks after serialization conflicts; callbacks must contain
   // only storage reads/writes and must not perform external or otherwise non-idempotent effects.
   transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T>;
+}
+
+// Runtime flags are not unique to storage errors. Record provenance without wrapping
+// the error so admission retries and provider errors keep their original identity.
+async function storageOperation<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    recordDurableObjectStorageFailure(error);
+    throw error;
+  }
+}
+
+function trackedStorageView<T extends CoordinatorStorageView>(storage: T): T {
+  const operations = new Set<PropertyKey>([
+    "get",
+    "put",
+    "delete",
+    "deleteAll",
+    "list",
+    "getAlarm",
+    "setAlarm",
+    "deleteAlarm",
+  ]);
+  return new Proxy(storage, {
+    get: (target, key) => {
+      const value: unknown = Reflect.get(target, key, target);
+      if (typeof value !== "function") return value;
+      if (operations.has(key)) {
+        return (...args: unknown[]) => storageOperation(() => Reflect.apply(value, target, args));
+      }
+      return value.bind(target);
+    },
+  });
 }
 
 export const provisioningDuePrefix = "provisioning-due:";
@@ -86,7 +121,7 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   const method = request.method.toUpperCase();
   // These routes commit with storage transactions; subscriber authorization may use GitHub.
   if (coordinatorRequestPublishesRunEvents(request)) return "direct";
-  if (path[0] === "v1" && path[1] === "serve") return "direct";
+  if (path[0] === "v1" && (path[1] === "serve" || path[1] === "ssh-hosts")) return "direct";
   if (method === "POST" && path.join("/") === "v1/admin/tailscale-preflight") {
     return "direct";
   }
@@ -335,12 +370,15 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
       "deleteAll",
       "setAlarm",
       "deleteAlarm",
-      "transaction",
     ]);
-    this.storage = new Proxy(state.storage, {
+    this.storage = new Proxy(trackedStorageView(state.storage), {
       get: (target, key) => {
         const value: unknown = Reflect.get(target, key, target);
         if (typeof value !== "function") return value;
+        if (key === "transaction") {
+          return (callback: (transaction: DurableObjectTransaction) => Promise<unknown>) =>
+            this.observeStorageWrite(() => this.storageTransaction(callback));
+        }
         if (key === "transactionSync") {
           return (...args: unknown[]) => {
             this.storageRevision++;
@@ -358,6 +396,26 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
         return value.bind(target);
       },
     });
+  }
+
+  private async storageTransaction<T>(
+    callback: (transaction: DurableObjectTransaction) => Promise<T>,
+  ): Promise<T> {
+    const callbackFailures = new Set<unknown>();
+    try {
+      return await this.state.storage.transaction(async (transaction) => {
+        try {
+          return await callback(trackedStorageView(transaction));
+        } catch (error) {
+          callbackFailures.add(error);
+          throw error;
+        }
+      });
+    } catch (error) {
+      // Callback failures are application errors unless a native call already marked them.
+      if (!callbackFailures.has(error)) recordDurableObjectStorageFailure(error);
+      throw error;
+    }
   }
 
   private async observeStorageWrite<T>(operation: () => Promise<T>): Promise<T> {

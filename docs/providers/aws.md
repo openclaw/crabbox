@@ -622,7 +622,7 @@ terminal receipt.
 AWS supports provider-native checkpoints in addition to workspace archives:
 
 - Linux/macOS, image strategy or macOS target → AWS AMI
-  (`checkpoint --kind native`, kind `aws-ami`).
+  (`checkpoint create --mode native`, kind `aws-ami`).
 - Linux disk-snapshot strategy → EBS snapshot (`aws-ebs-snapshot`).
 - Native Windows targets do not support native checkpoints.
 

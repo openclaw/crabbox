@@ -97,7 +97,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 83 providers (47 SSH lease, 32 delegated run, 4 service control).
+Current built-in surface: 84 providers (48 SSH lease, 32 delegated run, 4 service control).
 
 Access terms:
 
@@ -177,6 +177,7 @@ Access terms:
 | [smolvm](smolvm.md) (`smol`, `smolmachines`, `smolfleet`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; Smol Machines microVM | `provider-managed`; GPU: no | smolfleet; microVM delete | Lightweight hosted microVM execution | Delegated execution through smolfleet |
 | [sprites](sprites.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync` | `linux`; Sprite microVM | `provider-managed`; GPU: no | Sprites; sprite delete | Fast Linux microVM over provider SSH proxy | SSH transport depends on sprite proxy |
 | [ssh](ssh.md) (`static`, `static-ssh`) | built-in; `ssh-lease` · byo-ssh | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `desktop`, `browser`, `code` | `linux`, `windows/normal`, `windows/wsl2`, `macos`; Existing SSH host | `byo`; GPU: optional | user; none | Bring-your-own persistent Linux, macOS, or Windows host | Crabbox does not provision or clean up the host |
+| [ssh-host](ssh-host.md) | built-in; `ssh-lease` · byo-ssh | Crabbox-managed SSH; `crabbox-sync` · coordinator required; features: `ssh`, `crabbox-sync`, `fixed-lease-id` | `linux`, `windows/normal`; Exclusive existing Linux or Windows host | `byo`; GPU: optional | Coordinator and outbound host agent; Confirmed lease account/session teardown; never physical host deletion | Organization-shared existing test machines behind NAT | Linux namespaces required; Windows MXC interactive-context integration needs hardware qualification; no network isolation |
 | [superserve](superserve.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session` | `linux`; Superserve hosted sandbox | `provider-managed`; GPU: unknown | Superserve; sandbox delete | Hosted delegated Linux sandbox | Requires both control-plane and data-plane access |
 | [tart](tart.md) (`local-tart`, `macos-vm`) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop` | `macos`; Tart Apple silicon VM | `local`; GPU: no | Crabbox; VM delete | Local macOS VM testing | Apple silicon host and prepared Tart image required |
 | [tencentcloud](tencentcloud.md) (`tencent`, `tencent-cvm`, `cvm`) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Tencent Cloud CVM instance | `cloud`; GPU: optional | Crabbox; instance termination | Linux SSH leases on Tencent Cloud CVM | Direct-only; requires CVM image, VPC/subnet/security-group planning, and Tencent Cloud API credentials |
@@ -201,7 +202,7 @@ but also supports coordinator-managed leases.
 | Category | Entries | Providers |
 | --- | --- | --- |
 | `brokerable-cloud` | 4 | [aws](aws.md), [azure](azure.md), [gcp](gcp.md), [hetzner](hetzner.md) |
-| `byo-ssh` | 1 | [ssh](ssh.md) |
+| `byo-ssh` | 2 | [ssh](ssh.md), [ssh-host](ssh-host.md) |
 | `ci-proof-runner` | 2 | [blacksmith-testbox](blacksmith-testbox.md), [semaphore](semaphore.md) |
 | `delegated-sandbox` | 25 | [agent-sandbox](agent-sandbox.md), [aws-lambda-microvm](aws-lambda-microvm.md), [azure-dynamic-sessions](azure-dynamic-sessions.md), [azure-sandbox](azure-sandbox.md), [blaxel](blaxel.md), [cloud-run-sandbox](cloud-run-sandbox.md), [cloudflare](cloudflare.md), [cloudflare-dynamic-workers](cloudflare-dynamic-workers.md), [cloudflare-sandbox](cloudflare-sandbox.md), [codesandbox](codesandbox.md), [crownest](crownest.md), [cubesandbox](cubesandbox.md), [e2b](e2b.md), [freestyle](freestyle.md), [islo](islo.md), [modal](modal.md), [nomad](nomad.md), [opencomputer](opencomputer.md), [opensandbox](opensandbox.md), [orgo](orgo.md), [smolvm](smolvm.md), [superserve](superserve.md), [tensorlake](tensorlake.md), [upstash-box](upstash-box.md), [vercel-sandbox](vercel-sandbox.md) |
 | `direct-cloud` | 22 | [ascii-box](ascii-box.md), [boxd](boxd.md), [coder](coder.md), [daytona](daytona.md), [digitalocean](digitalocean.md), [exe-dev](exe-dev.md), [github-codespaces](github-codespaces.md), [hostinger](hostinger.md), [linode](linode.md), [machine0](machine0.md), [morph](morph.md), [namespace-devbox](namespace-devbox.md), [namespace-instance](namespace-instance.md), [nebius](nebius.md), [ovh](ovh.md), [phala](phala.md), [scaleway](scaleway.md), [sealos-devbox](sealos-devbox.md), [sprites](sprites.md), [tencentcloud](tencentcloud.md), [tenki](tenki.md), [vultr](vultr.md) |

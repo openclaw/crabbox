@@ -1,0 +1,150 @@
+{
+  "scope": "Native Windows ARM64 build 28000; pinned MXC 0.8.0; isolated loopback Node/PostgreSQL coordinator; synthetic identities",
+  "checks": [
+    {
+      "name": "Shipped CLI sync and allowed execution in an MXC borrower session",
+      "status": "passed",
+      "operatorSession": 3,
+      "borrowerSession": 12
+    },
+    {
+      "name": "Foreign relay identity and wrong endpoint key denied without final execution",
+      "status": "passed"
+    },
+    {
+      "name": "Borrower authority persists after exact MXC exec launcher exits",
+      "status": "passed",
+      "launchersStopped": 1
+    },
+    {
+      "name": "Revocation terminates retained shell and detached process, removes exact account/workspace before reuse",
+      "status": "passed",
+      "endpointCount": 0,
+      "sessionProcessCount": 0,
+      "accountExists": false,
+      "homeExists": false
+    },
+    {
+      "name": "New owner gets fresh session and rotated endpoint key; authenticated non-admin foreign borrower denied",
+      "status": "passed"
+    },
+    {
+      "name": "Agent crash/restart cleans persistent MXC session and fails interrupted lease before reuse",
+      "status": "passed"
+    },
+    {
+      "name": "Windows portable pool identity, registration, two synced borrower generations and cleanup with rotated endpoint keys",
+      "status": "passed",
+      "generations": 2
+    },
+    {
+      "name": "Unattended Windows lease expiry terminates exact session and removes account/workspace before reuse",
+      "status": "passed"
+    },
+    {
+      "name": "Proof task, guest root, tunnel, coordinator/database containers and network removed; existing host access preserved",
+      "status": "passed"
+    }
+  ],
+  "authority": {
+    "foreignIdentityRelayHTTP": 403,
+    "wrongEndpointKey": {
+      "exit": 255,
+      "effectFileExists": false
+    },
+    "revokedNewRelayHTTP": 403,
+    "retainedConnection": "ready and executable after MXC launcher exit; disconnected after revoke; no post-revocation output",
+    "foreignNonAdminRelayHTTP": 403
+  },
+  "status": "passed",
+  "expiryReceipt": {
+    "state": "expired",
+    "createdAt": "2026-10-27T18:48:17.955Z",
+    "expiresAt": "2026-10-27T18:49:47.955Z",
+    "endedAt": "2026-10-27T18:49:48.932Z"
+  },
+  "sourceRevision": "f39ff31885878ae7d8c391e81fbb9a8bab0c814d",
+  "executables": {
+    "macosARM64CLI": "2890931b9bda16a8cc01d69f912da01d75104475c3d7271abe64385af75a50ff",
+    "windowsARM64Agent": "5125764dff8d6af91c9ccdf0ca78a83f2dae13fe97ba1b66390951bb673a6f72",
+    "nodeCoordinator": "8d22ec4411e97dfbccf03d0905dfce35bbf980eef59fb99caff418914f70efa2"
+  },
+  "windowsAgentRemoteDigestMatches": true,
+  "windowsBuild": "28000.3231",
+  "windowsArchitecture": "ARM64",
+  "mxcVersion": "0.8.0",
+  "mxcSHA256": "dde1c592270e9a659b01dccad70362da7b99fec114885fa4d625507aa775a503",
+  "nodeVersion": "24.22.1",
+  "postgresVersion": "17",
+  "goVersion": "1.27.3",
+  "nativeTests": {
+    "TestMXCEndpointCommandThroughCMD": "pass; pre-fix launcher fails through cmd.exe /c",
+    "TestWindowsNativeStdinSynchronousPipe": "pass 0/4991/65537 bytes with preserved trailer; pre-fix nonempty frames fail",
+    "TestWindowsNativeStdinRuntime": "pass all nine native cases",
+    "TestWindowsNativeStdinCancellation": "pass",
+    "TestWindowsSSHStdinReaderBehavior": "pass all four native cases",
+    "PortablePoolRotatedWorkspace": "pass including acknowledged replay; regression fails before refresh fix"
+  },
+  "builds": [
+    "macOS ARM64",
+    "Windows ARM64",
+    "Windows AMD64 (cross-build only)"
+  ],
+  "containerImages": {
+    "coordinator": "sha256:6449e19d8184d84062525b6a7524def03146c2cb04a7f08b076680d0e8e4240a",
+    "db": "sha256:858bb5e98eed02eb8cafbcdc007f9a65d1b613972028944a8ec2133ccaf80d27"
+  },
+  "mxcCompanionSHA256": "f8060c7d463479f6e64da7f1e082553113ca0a9c1c39347ae513eca4a0439dfd",
+  "coordinatorSourceRevision": "2aee0af769356003f10f7b45ba10100a1d3276da",
+  "coordinatorTests": {
+    "passed": 4689,
+    "skipped": 15
+  },
+  "recordedDate": "2026-10-27",
+  "cliAndAgentInputsUnchangedAtCoordinatorRevision": true,
+  "cleanupVerifiedExistingSSHAccess": true,
+  "harnessSHA256": {
+    "README.md": "4af9d7bb632eb3a03f53c4e1a270ae99f1ad84404e189aee8d1cbd50a3719826",
+    "cleanup.py": "e844b5e341edc85d23a1a4d483bf65a71950a03375d6f405ebd3ab2633fbf955",
+    "driver.py": "49b5a00a3a69b93a71eea0c150fc6348bf9b1849ad89e1891768d4efa132e049",
+    "pool.py": "c63c5bd9828467eca4a9a09826afdad0a094700fef33f4124d4008f89624658a",
+    "qualify.py": "cd3d0b28849c920855d1f2db0a5eff54675aa346633d62360dbd78ba9938fb4c"
+  },
+  "poolRunSeconds": [
+    {
+      "generation": 1,
+      "commandAndSync": 33.221,
+      "endToEnd": 36.581,
+      "exit": 0
+    },
+    {
+      "generation": 2,
+      "commandAndSync": 33.37,
+      "endToEnd": 36.753,
+      "exit": 0
+    }
+  ],
+  "qualificationLimits": [
+    "Native execution proven on Windows ARM64 build 28000.3231 only; Windows AMD64 cross-build only",
+    "Windows PTY allocation is unsupported; non-PTY shell/exec proved",
+    "No GPU or network-containment claim; Windows network access is allowed",
+    "No production coordinator, deployment, or release"
+  ],
+  "failedControls": [
+    "Pre-fix MXC command fails through CMD; encoded launcher passes",
+    "Pre-fix framed input fails on synchronous pipe; exact-byte fallback and existing overlapped tests pass",
+    "Pre-fix pool entry retains former session workspace; activation now publishes fresh provider path and passes two real generations"
+  ],
+  "fixtureRepairs": [
+    "Created missing isolated macOS cache directory before pool borrowing",
+    "Refreshed task-local port/tunnel after Docker assigned a new random loopback port on coordinator restart",
+    "Supplied synthetic operator identity on administrative cleanup requests"
+  ],
+  "postProofBuildCorrection": {
+    "change": "Move the byte-identical mxcEndpointCommand helper into runtime_windows.go so Linux deadcode excludes Windows-only code",
+    "linuxGate": "GOOS=linux GOARCH=amd64 deadcode v0.45.0 -test ./...: empty output, exit 0",
+    "nativeWindowsRegression": "TestMXCEndpointCommandThroughCMD: passed after relocation, 0.36 seconds",
+    "temporaryRegressionRootRemoved": true,
+    "runtimeBehaviorChanged": false
+  }
+}

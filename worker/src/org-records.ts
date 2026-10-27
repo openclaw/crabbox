@@ -53,6 +53,7 @@ export function publicLeaseRecord(record: LeaseRecord): PublicLeaseRecord {
   delete publicRecord.provisioningRequestSettledAt;
   delete publicRecord.provisioningRecoveryObservedAt;
   delete publicRecord.provisioningRecoveryMissingSince;
+  delete publicRecord.sshHostAllocation;
   delete publicRecord.fixedCreateIntentVersion;
   delete publicRecord.fixedCreateIntentHash;
   delete publicRecord.createAttemptID;
