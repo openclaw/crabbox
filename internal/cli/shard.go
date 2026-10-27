@@ -14,6 +14,7 @@ import (
 )
 
 const shardPartialLineLimit = 64 * 1024
+const maxShardConcurrency = 1024
 
 type shardRunOutcome struct {
 	Recorded bool
@@ -340,10 +341,16 @@ func rejectShardProviderMismatch(fs *flag.FlagSet, leaseFlags leaseCreateFlagVal
 }
 
 func resolveShardConcurrency(count, concurrencyFlag int, concurrencySet bool, maxConcurrency int) (int, error) {
+	if maxConcurrency < 0 || maxConcurrency > maxShardConcurrency {
+		return 0, Exit(2, "shard.maxConcurrency must be between 0 and %d", maxShardConcurrency)
+	}
 	concurrency := count
 	if concurrencySet {
 		if concurrencyFlag < 1 {
 			return 0, Exit(2, "--concurrency must be at least 1")
+		}
+		if concurrencyFlag > maxShardConcurrency {
+			return 0, Exit(2, "--concurrency must be at most %d", maxShardConcurrency)
 		}
 		concurrency = concurrencyFlag
 	}

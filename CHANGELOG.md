@@ -6,6 +6,10 @@
 - AWS: preserve the original root disk identity after instance loss, fail closed when historical evidence is unavailable, and prevent replacement disks from acquiring the original identity. [PR 2926](https://github.com/openclaw/crabbox/pull/2926). Thanks @Surendra-4 and @cropsgg.
 - Run: retain private original signed completion bytes before delivery and support exact-byte receipt recovery after coordinator failures, without reconstructing missing historical signatures. [PR 2925](https://github.com/openclaw/crabbox/pull/2925). Thanks @Surendra-4 and @cropsgg.
 
+### Added
+
+- Shard: cap simultaneous provisioning and execution with `--concurrency` or `shard.maxConcurrency`, preserving all-shards-at-once defaults and cancellation cleanup. [PR 2935](https://github.com/openclaw/crabbox/pull/2935). Thanks @zozo123.
+
 ### Fixed
 
 - Providers: consistently list `serve` under `self-hosted-virtualization`, generate the category index from metadata, and check README category membership. [PR 2936](https://github.com/openclaw/crabbox/pull/2936). Thanks @aitrawog.

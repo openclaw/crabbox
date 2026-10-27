@@ -5,7 +5,7 @@ runs the command on every fork through the normal [`crabbox run`](run.md)
 pipeline, and merges the collected JUnit results into one suite verdict. It is
 the parallel counterpart of [`checkpoint fork --count`](checkpoint.md): the
 same fork flow and `{{index}}`/`{{total}}`/`{{lease}}`/`{{slug}}` placeholders,
-but shards run with bounded concurrency and their
+but shards can run with bounded concurrency and their
 [test results](../features/test-results.md) fold into a single answer with one
 aggregate exit code.
 
@@ -135,6 +135,11 @@ each run `shard N/M` so runs stay readable in [`history`](history.md).
 - No automatic test splitting: the command template distributes work via
   `{{index}}`/`{{total}}`, exactly as the runner's own sharding flag expects.
 - `shard.maxCount` in repo config bounds `--count`.
+- Explicit `--concurrency` accepts 1–1024. Values above `--count` use
+  `--count` workers. `shard.maxConcurrency` accepts 0–1024; zero (the default)
+  disables the config cap. Negative or larger values are rejected.
+- Like `shard.maxCount`, `shard.maxConcurrency` is a config limit, with repo
+  config overriding user config. Neither has an environment-variable override.
 - `shard.maxConcurrency` bounds in-flight shards: when `--concurrency` is
   omitted it caps parallelism, and when the flag is set a higher value is
   rejected. Omitting both the flag and config key keeps the previous unbounded

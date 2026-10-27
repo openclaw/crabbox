@@ -244,8 +244,10 @@ func TestShardCancelReleasesWithBackgroundContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	app := App{Stdout: io.Discard, Stderr: io.Discard}
 	done := make(chan error, 1)
+	opts := shardTestOptions(4)
+	opts.Concurrency = 2
 	go func() {
-		done <- app.shardRun(ctx, shardTestOptions(2), &shardOutputMux{}, provisioner.provision, executor.run)
+		done <- app.shardRun(ctx, opts, &shardOutputMux{}, provisioner.provision, executor.run)
 	}()
 	for i := 0; i < 2; i++ {
 		select {
@@ -257,7 +259,7 @@ func TestShardCancelReleasesWithBackgroundContext(t *testing.T) {
 	cancel()
 	err := <-done
 	var exitErr ExitError
-	if !AsExitError(err, &exitErr) || exitErr.Code != 130 || exitErr.Message != "shard interrupted; 2 of 2 shards canceled" {
+	if !AsExitError(err, &exitErr) || exitErr.Code != 130 || exitErr.Message != "shard interrupted; 4 of 4 shards canceled" {
 		t.Fatalf("err=%v, want exit 130 interrupt", err)
 	}
 	provisioner.mu.Lock()
@@ -698,6 +700,12 @@ func TestResolveShardConcurrency(t *testing.T) {
 		{name: "flag within config", count: 8, flag: 2, flagSet: true, maxConcurrency: 4, want: 2},
 		{name: "flag exceeds config", count: 8, flag: 5, flagSet: true, maxConcurrency: 2, wantErr: "--concurrency 5 exceeds shard.maxConcurrency 2"},
 		{name: "zero flag", count: 4, flag: 0, flagSet: true, wantErr: "--concurrency must be at least 1"},
+		{name: "negative flag", count: 4, flag: -1, flagSet: true, wantErr: "--concurrency must be at least 1"},
+		{name: "excessive flag", count: 4, flag: 1025, flagSet: true, wantErr: "--concurrency must be at most 1024"},
+		{name: "maximum flag", count: 2048, flag: 1024, flagSet: true, want: 1024},
+		{name: "negative config", count: 4, maxConcurrency: -1, wantErr: "shard.maxConcurrency must be between 0 and 1024"},
+		{name: "excessive config", count: 4, maxConcurrency: 1025, wantErr: "shard.maxConcurrency must be between 0 and 1024"},
+		{name: "default count unchanged", count: 2048, want: 2048},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
