@@ -34,6 +34,8 @@ from pathlib import Path
 # missing, so renaming one must update this list.
 SLOW_SECONDS = 15
 SLOW_TESTS = {
+    # CI baseline 267s minus nine 20s fixture stop graces; poll savings add headroom.
+    "TestRunDetachedGitSeedPreservesManifestAuthority": 87,
     "TestCoordinatorStopAggregateGuestCleanupPreservesReleaseBudget": 64,
     "TestWSLStageInitialHandoffBudgets": 38,
     "TestWaitForSSHReadyRealSSHTimeoutDiagnostic": 32,
@@ -46,6 +48,7 @@ SLOW_TESTS = {
     "TestEgressOpenRemoteTimeoutLeaksPendingAndNeverClosesHostConn": 20,
     "TestLocalActionsHydrationLiteralPaths": 20,
     "TestRunDirectorySourceActionsWorkspaceRejected": 20,
+    "TestManagedWSLConfigPreservesOtherSettings": 17,
     "TestCoordinatorStopReleasesAfterUnreachableGuestCleanup": 16,
     "TestFixedAcquisitionSerializesCLIReplayAcrossProcesses": 16,
     "TestRunAdmissionFailureRetainsEffectiveAuthenticationAndRedactsWarning": 16,

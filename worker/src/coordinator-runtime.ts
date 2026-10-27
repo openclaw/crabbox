@@ -86,7 +86,7 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   const method = request.method.toUpperCase();
   // These routes commit with storage transactions; subscriber authorization may use GitHub.
   if (coordinatorRequestPublishesRunEvents(request)) return "direct";
-  if (path[0] === "v1" && path[1] === "serve") return "direct";
+  if (path[0] === "v1" && (path[1] === "serve" || path[1] === "ssh-hosts")) return "direct";
   if (method === "POST" && path.join("/") === "v1/admin/tailscale-preflight") {
     return "direct";
   }

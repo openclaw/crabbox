@@ -1264,6 +1264,11 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	if cfg.Provider == "aws" && cfg.AWSStockImage {
 		req["awsUseStockImage"] = true
 	}
+	if contributor, ok := provider.(ProviderCoordinatorRequest); ok {
+		for key, value := range contributor.CoordinatorRequestFields(cfg) {
+			req[key] = value
+		}
+	}
 	addCoordinatorAzureFields(req, cfg)
 	addCoordinatorGCPFields(req, cfg)
 	method := http.MethodPost

@@ -172,3 +172,12 @@ lease. `pool borrow --class` and `--type` additionally require exact stored size
 metadata. See the [design and proof requirements](../features/ready-pools.md)
 before enabling this experimental controller. Drain and verify all portable
 cleanup before disabling it or rolling back the coordinator.
+
+## Managed existing hosts
+
+[`ssh-host`](../providers/ssh-host.md) uses portable access for exclusive existing
+Linux and Windows capacity. Unlike AWS, its return boundary is confirmed lease
+account/session teardown, not a reboot. Host templates are operator-attested;
+borrower-written caches do not survive return. Ordinary typed and legacy pool
+registration are rejected for this provider. Windows needs separate MXC
+interactive-context hardware qualification.

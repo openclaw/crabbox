@@ -19461,6 +19461,53 @@ describe("fleet lease identity and idle", () => {
     expect(cleanReturn.status).toBe(200);
   });
 
+  it.each(["linux", "windows"] as const)(
+    "generates managed %s pool identities through the provider target contract",
+    async (target) => {
+      const storage = new MemoryStorage();
+      const fleet = testCoordinator(storage);
+      const lease: LeaseRecord = {
+        ...typedReadyPoolLease(),
+        provider: "ssh-host",
+        target,
+        region: "example-org",
+        sshHostAllocation: {
+          hostID: "11111111-1111-4111-8111-111111111111",
+          operator: "operator@example.com",
+          intent: "synthetic-test-intent",
+          generation: 1,
+          accessGeneration: 0,
+          operation: "prepare",
+          template: "tools-v1",
+          publicKey: "synthetic",
+          accessDeadline: new Date(Date.now() + 60000).toISOString(),
+        },
+      };
+      storage.seed(`lease:${lease.id}`, lease);
+      const generated = await fleet.fetch(
+        request("POST", "/v1/ready-pools/builders/identity", {
+          headers: typedReadyPoolHeaders(),
+          body: { leaseID: lease.id, ...typedReadyPoolMetadata(), cacheCompatibility: "tools-v1" },
+        }),
+      );
+      expect(generated.status).toBe(200);
+      expect(await generated.json()).toMatchObject({
+        identity: {
+          image: { provider: "ssh-host", scope: "example-org", id: "tools-v1" },
+          architecture: "amd64",
+        },
+      });
+      storage.seed(`lease:${lease.id}`, { ...lease, target: "macos" });
+      const unsupported = await fleet.fetch(
+        request("POST", "/v1/ready-pools/builders/identity", {
+          headers: typedReadyPoolHeaders(),
+          body: { leaseID: lease.id, cacheCompatibility: "tools-v1" },
+        }),
+      );
+      expect(unsupported.status).toBe(409);
+    },
+  );
+
   it("generates provider-owned typed identities and rejects unsupported or incomplete evidence", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage, {
@@ -52981,7 +53028,8 @@ describe("fleet identity", () => {
 
     expect(response.status).toBe(200);
     expect(body).toContain("provider health");
-    expect(body).toContain("6 supported");
+    expect(body).toContain("7 supported");
+    expect(body).toContain("Managed SSH hosts");
     expect(body).toContain("users");
     expect(body).toContain('href="/portal/admin/users"');
     expect(body).not.toContain("all leases");
@@ -58865,7 +58913,7 @@ describe("portable bounded ready-pool access", () => {
           user: lease.sshUser,
         }),
       ),
-      install: vi.fn<() => Promise<void>>(async () => {}),
+      install: vi.fn<() => Promise<void | { workRoot: string }>>(async () => {}),
       revoke: vi.fn<() => Promise<{ destroyed: boolean }>>(async () => ({ destroyed: false })),
     };
     const provider = {
@@ -58970,6 +59018,29 @@ describe("portable bounded ready-pool access", () => {
     expect((await f.borrow()).status).toBe(409);
     expect([...(await f.storage.list({ prefix: "typed-ready-pool" }))]).toEqual([]);
     expect([...(await f.storage.list({ prefix: "ready-pool:" }))]).toEqual([]);
+  });
+
+  it("publishes the provider's rotated workspace only after access activation", async () => {
+    const f = await fixture();
+    const { body, receipt } = await f.issue();
+    const workRoot = "C:\\Users\\fresh-borrower\\Shared\\work";
+    expect(body.entry.workRoot).not.toBe(workRoot);
+    f.capability.install.mockImplementation(async () => {
+      f.storage.seed(`lease:${f.lease.id}`, { ...f.lease, workRoot });
+      return { workRoot };
+    });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- replay must observe the activated grant.
+      const response = await f.post("ack-access", receipt);
+      expect(response.status).toBe(200);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- inspect each replay's public placement.
+      expect(await response.json()).toMatchObject({
+        entry: { workRoot },
+        lease: { workRoot },
+        grant: { state: "active" },
+      });
+    }
+    expect(f.capability.install).toHaveBeenCalledTimes(1);
   });
 
   it("binds receipts to owner, lease, public key and current authorization", async () => {

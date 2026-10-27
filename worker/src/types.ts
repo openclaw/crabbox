@@ -220,6 +220,8 @@ export interface CapacityRequirements {
 
 export interface LeaseRequest {
   serveMachine?: string;
+  sshHost?: string;
+  hostCapabilities?: string[];
   lifetimePolicy?: import("./lease-lifetime").LeaseLifetimeRequest;
   leaseID?: string;
   createAttemptID?: string;
@@ -383,6 +385,14 @@ export interface LeaseRegistrationRequest {
 export const coordinatorProviderRegistry = [
   {
     runtimeExtension: true,
+    provider: "ssh-host",
+    label: "Managed SSH hosts",
+    requiredSecrets: [],
+    adminAudit: false,
+    supportsCapacityMarket: false,
+  },
+  {
+    runtimeExtension: true,
     provider: "serve",
     label: "Served machines",
     requiredSecrets: [],
@@ -533,6 +543,7 @@ export interface LeaseRecord {
   cleanupConfirmedBy?: "retained-reconcile" | "retained-reconcile-legacy-attested";
   serve?: import("./serve").ServeAssignment;
   serveIntent?: string;
+  sshHostAllocation?: import("./ssh-host").HostAllocation;
   serveUsageRecordedAt?: string;
   sshHostKeyFingerprint?: string;
   imageEvidence?: {
@@ -611,6 +622,7 @@ export interface LeaseRecord {
   sshFallbackPorts?: string[];
   serveRelaySessions?: string[];
   sshJump?: {
+    relayOnly?: boolean;
     host: string;
     port: number;
     hostKey: string;
