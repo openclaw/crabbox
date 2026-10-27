@@ -23,6 +23,9 @@ func TestFileSnapshotPathInfoOpensContentDeniedFileForMetadata(t *testing.T) {
 		t.Fatalf("icacls deny: %v: %s", err, out)
 	}
 	t.Cleanup(func() { _ = exec.Command("icacls", path, "/remove:d", current.Username).Run() })
+	if _, err := os.ReadFile(path); !os.IsPermission(err) {
+		t.Fatalf("content read should fail with permission denied: %v", err)
+	}
 	info, err := fileSnapshotPathInfo(path)
 	if err != nil {
 		t.Fatalf("metadata-only inspection failed: %v", err)
