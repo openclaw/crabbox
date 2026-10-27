@@ -29,9 +29,10 @@ An interrupted process may need manual removal of its exact `cbx-host-proof-*`
 resources; do not remove unrelated containers.
 
 Coverage includes borrower sync/exec, unauthorized access, cleanup-before-reuse,
-two portable-pool generations, concurrent allocation, idempotent admission,
+two portable-pool generations with fresh home directories and rotated endpoint
+keys, private-group cleanup with `USERGROUPS_ENAB=no`, concurrent allocation, idempotent admission,
 coordinator restart, failed cleanup quarantine, expiry, host-agent restart,
-and draining/removal without stopping the physical host. A failed run is not
+both graceful and crash recovery, and draining/removal without stopping the physical host. A failed run is not
 proof of checks that follow its failure. Linux namespace restrictions and lack
 of network isolation are described in [managed SSH hosts](../providers/ssh-host.md).
 
@@ -43,3 +44,48 @@ provision/start, the nested SSH endpoint, borrower sync/exec, key rotation,
 stop/deprovision, crash recovery, and the requested hardware capabilities.
 No successful Linux result or standalone MXC probe establishes those claims.
 Keep Windows deployment experimental until that complete scenario is proven.
+
+## Review fixes
+
+Independent review identified three P2 lifecycle defects, addressed before RFR:
+
+- Startup now fails every retained assignment, including graceful shutdowns that
+  already removed the runtime, before admitting another generation.
+- Linux tracks the private group GID and removes only the same empty group before
+  confirming cleanup; it does not depend on `USERGROUPS_ENAB` defaults.
+- MXC retries exact-ID deprovision directly rather than replaying non-idempotent
+  stop. Its [pinned backend contract](https://github.com/microsoft/mxc/blob/v0.8.0/docs/isolation-session/state-aware-rust.md)
+  specifies that account deprovision terminates its session and returns typed
+  `stale_id` after removal. Only that deprovision receipt confirms prior absence.
+
+The local borrower test also caught relay control teardown after pool revocation.
+The CLI now closes its pinned control connections before returning pool access;
+a regression test checks ordering and refusal to return after a close failure.
+
+## Recorded local qualification — 2026-10-26
+
+Runtime implementation: `15ea299ce9aa10d7ea3b73d0a23ef2188f9dbbe4`.
+Native macOS client, Linux arm64 Docker target, Node 24.22.1 coordinator,
+PostgreSQL 17, synthetic operator/borrower identities. All ten scenario checks
+passed twice; the final run required both `crabbox stop` calls to succeed without
+an outer retry. Disposable resources were removed after each run.
+
+| Scenario | Result |
+| --- | --- |
+| Isolated coordinator health and unauthorized access rejection | Passed |
+| Borrower CLI sync and execution through outbound relay | Passed |
+| Account/process/workspace cleanup before reallocation | Passed |
+| Two portable-pool generations, fresh home, rotated endpoint keys | Passed |
+| Eight concurrent borrowers, one winner, idempotent retry | Passed |
+| Coordinator restart preserves exclusive custody | Passed |
+| Foreign-account mismatch quarantines; repair permits cleanup | Passed |
+| Unattended expiry removes account/workspace before reuse | Passed |
+| Agent crash and graceful restart fail interrupted leases safely | Passed |
+| Drain/removal deny placement and leave the physical host running | Passed |
+
+Additional checks: 4,686 coordinator tests passed (15 existing skips), focused
+Go race tests for agent/relay/pool lifecycle fixes passed, both coordinator
+typechecks and lint passed, Worker/Node builds passed, Windows amd64/arm64
+cross-builds passed, and documentation generation/checks passed. The public PR
+records the broader Go/CI results separately. No Windows hardware execution,
+real cloud allocation, production deployment, or release is claimed.

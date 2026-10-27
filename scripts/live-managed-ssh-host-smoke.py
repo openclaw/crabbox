@@ -130,7 +130,7 @@ def main():
             leases = api("/v1/leases")[1]["leases"]
             lease = next(l for l in leases if l.get("provider") == "ssh-host" and l["state"] == "active")
             assert "sshHostAllocation" not in lease
-            eventually(lambda: command([cli, "stop", "--provider", "ssh-host", "--id", lease["id"]], env=cli_env, cwd=repo, timeout=90) or True, seconds=100)
+            command([cli, "stop", "--provider", "ssh-host", "--id", lease["id"]], env=cli_env, cwd=repo, timeout=90)
             eventually(lambda: api("/v1/ssh-hosts")[1]["hosts"][0]["state"] == "available")
             users = command(["docker", "exec", target, "getent", "passwd"])
             assert "cbh" + lease["id"][4:] not in users
@@ -148,7 +148,7 @@ def main():
                 endpoint_keys.append(next(l for l in api("/v1/leases")[1]["leases"] if l["id"] == lease["id"])["sshHostKey"])
             assert len(set(endpoint_keys)) == 2, "endpoint identity did not rotate"
             evidence["checks"].append("portable pool enrollment, two borrower generations, sync/run/return and cleanup-before-reuse")
-            eventually(lambda: command([cli, "stop", "--provider", "ssh-host", "--id", lease["id"]], env=cli_env, cwd=repo, timeout=90) or True, seconds=100)
+            command([cli, "stop", "--provider", "ssh-host", "--id", lease["id"]], env=cli_env, cwd=repo, timeout=90)
             eventually(lambda: api("/v1/ssh-hosts")[1]["hosts"][0]["state"] == "available")
 
             # Use independently named synthetic principals against the real HTTP
@@ -205,9 +205,9 @@ def main():
                 eventually(lambda: api("/v1/ssh-hosts")[1]["hosts"][0]["state"] == "available")
                 assert next(l for l in api("/v1/leases", token=admin)[1]["leases"] if l["id"] == interrupted)["state"] == "failed"
             evidence["checks"].append("host agent crash and graceful restart settle retained accounts and fail interrupted leases before reuse")
-            status, _ = api("/v1/ssh-hosts/" + host, {"draining": True}, admin, "PATCH")
+            status, _ = api("/v1/ssh-hosts/" + host, {"draining": True}, admin, "PATCH", "operator@example.com")
             assert status == 200 and acquire(33)[0] == 409
-            status, _ = api("/v1/ssh-hosts/" + host, token=admin, method="DELETE")
+            status, _ = api("/v1/ssh-hosts/" + host, token=admin, method="DELETE", owner="operator@example.com")
             assert status == 200
             evidence["checks"].append("drain blocks placement; clean inventory removal leaves physical target running")
             assert command(["docker", "inspect", "--format", "{{.State.Running}}", target]) == "true"
