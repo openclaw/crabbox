@@ -2,9 +2,16 @@
 
 ## Unreleased
 
+## 0.80.0 - 2026-10-27
+
+### Highlights
+
+- **Share existing Linux and Windows machines through the coordinator.** Managed hosts use outbound relays, isolated borrower execution, rotating pool access, and cleanup-confirmed reuse. Native Windows ARM64 lifecycle and revocation are qualified; MXC remains experimental, and GPU execution and Windows PTYs are not claimed. [PR 2964](https://github.com/openclaw/crabbox/pull/2964). Thanks @RomneyDa.
+- **Pause and resume Azure Sandbox sessions without losing their owned disks.** Explicit recovery and deletion retain exact resource ownership and bounded work admission. [PR 2960](https://github.com/openclaw/crabbox/pull/2960).
+
 ### Added
 
-- Managed SSH hosts: enroll exclusive operator-owned capacity behind outbound, pinned SSH relays; isolate borrower accounts, rotate portable-pool access, and require cleanup receipts before reuse. Windows MXC remains experimental pending hardware qualification. [PR 2964](https://github.com/openclaw/crabbox/pull/2964). Thanks @RomneyDa.
+- Managed SSH hosts: enroll exclusive operator-owned capacity behind outbound, pinned SSH relays; isolate borrower accounts, rotate portable-pool access, and require cleanup receipts before reuse. Windows MXC remains experimental, with native ARM64 lifecycle qualification documented. [PR 2964](https://github.com/openclaw/crabbox/pull/2964). Thanks @RomneyDa.
 
 - Azure Sandbox: include client request and lifecycle-poll durations and counts in warmup timing reports, including failed attempts, without inferring server disk or boot timings. [PR 2959](https://github.com/openclaw/crabbox/pull/2959).
 - Azure Sandbox: retain session-owned disks through explicit pause/resume with finite per-activation work admission, durable exact-ownership recovery, and explicit deletion. [PR 2960](https://github.com/openclaw/crabbox/pull/2960).
