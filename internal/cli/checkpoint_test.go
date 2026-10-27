@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -2570,6 +2571,60 @@ func TestNativeCheckpointForkWorkdirHonorsOverride(t *testing.T) {
 	}
 	if got := nativeCheckpointForkWorkdir(cfg, "cbx_new", "my-app", ""); got != "/work/cbx_new/my-app" {
 		t.Fatalf("workdir=%q, want default lease workdir", got)
+	}
+}
+
+type checkpointCommandReleaseBackend struct{ *checkpointForkReleaseBackend }
+
+func (*checkpointCommandReleaseBackend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
+
+func TestCheckpointForkCommandReleasesSuccessorClaim(t *testing.T) {
+	for _, failCommand := range []bool{false, true} {
+		t.Run(strconv.FormatBool(failCommand), func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			originalPath := os.Getenv("PATH")
+			repoDir := filepath.Join(dir, "repo")
+			if out, err := exec.Command("git", "init", "-q", repoDir).CombinedOutput(); err != nil {
+				t.Fatalf("git init: %v: %s", err, out)
+			}
+			t.Chdir(repoDir)
+			if err := os.WriteFile("README.md", []byte("checkpoint command fixture\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			handler := ""
+			if failCommand {
+				handler = `case "$match" in *"checkpoint-command-smoke"*) exit 23 ;; esac`
+			}
+			installRecordingSSH(t, dir, handler)
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+originalPath)
+			writeExecutable(t, filepath.Join(dir, "rsync"), "#!/bin/sh\nexit 0\n")
+
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+			t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+			t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+			backend := &checkpointCommandReleaseBackend{&checkpointForkReleaseBackend{leaseID: "cbx_fork_command"}}
+			testAWSBackendOverride = backend
+			t.Cleanup(func() { testAWSBackendOverride = nil })
+			record := createCheckpointForkTestRecord(t, "chk_command_cleanup", "")
+			var stderr bytes.Buffer
+			app := App{Stdout: io.Discard, Stderr: &stderr}
+			err := app.checkpointFork(context.Background(), []string{record.ID, "--keep=false", "--", "echo", "checkpoint-command-smoke"})
+			wantExit := 0
+			if failCommand {
+				wantExit = 23
+			}
+			if code := ExitCodeForError(err, 1); code != wantExit {
+				t.Fatalf("exit=%d want=%d error=%v stderr=%s", code, wantExit, err, stderr.String())
+			}
+			if backend.releaseCount != 1 {
+				t.Fatalf("releases=%d want=1 stderr=%s", backend.releaseCount, stderr.String())
+			}
+			if _, exists, err := ReadLeaseClaimWithPresence(backend.leaseID); err != nil || exists {
+				t.Fatalf("claim retained exists=%v err=%v", exists, err)
+			}
+		})
 	}
 }
 

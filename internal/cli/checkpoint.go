@@ -1411,11 +1411,12 @@ func splitCheckpointForkRunArgs(args []string) ([]string, []string) {
 }
 
 type checkpointForkRunOptions struct {
-	Command []string
-	Index   int
-	Total   int
-	JSON    bool
-	Results *[]checkpointForkResult
+	Command           []string
+	Index             int
+	Total             int
+	JSON              bool
+	Results           *[]checkpointForkResult
+	carryReleaseClaim func(leaseClaim)
 }
 
 type checkpointForkResult struct {
@@ -1813,6 +1814,7 @@ func (a App) checkpointForkRecordOnce(ctx context.Context, cfg Config, backend B
 	if err != nil {
 		return err
 	}
+	runOpts.carryReleaseClaim = provision.carryReleaseClaim
 	defer func() {
 		if !keep {
 			provision.Release(context.Background())
@@ -1909,6 +1911,15 @@ func (a App) runCheckpointForkCommand(ctx context.Context, leaseID, slug string,
 	command := checkpointForkRunCommand(opts.Command, runCtx)
 	if len(command) == 0 {
 		return nil
+	}
+	if opts.carryReleaseClaim != nil {
+		var outcome shardRunOutcome
+		a.runOutcome = &outcome
+		defer func() {
+			if outcome.AuthorizedClaim != nil {
+				opts.carryReleaseClaim(*outcome.AuthorizedClaim)
+			}
+		}()
 	}
 	if !opts.JSON {
 		fmt.Fprintf(a.Stdout, "checkpoint fork command lease=%s slug=%s index=%d/%d command=%s\n", leaseID, blank(slug, "-"), opts.Index, opts.Total, runCommandDisplay(command, false))

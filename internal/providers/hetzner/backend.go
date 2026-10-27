@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -216,6 +217,8 @@ func (b *hetznerLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) 
 	return result, nil
 }
 
+func (b *hetznerLeaseBackend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
+
 func (b *hetznerLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	if req.CheckpointID != "" {
 		return core.Exit(2, "%s", hetznerRetirementUnsupported)
@@ -228,14 +231,25 @@ func (b *hetznerLeaseBackend) ReleaseLease(ctx context.Context, req core.Release
 		}
 	}
 	if err != nil {
-		if !b.matchesAcquiredLease(server, req.Lease.LeaseID) {
+		_, _, snapshotSet := core.ServerLeaseClaimSnapshot(server)
+		if snapshotSet || !b.matchesAcquiredLease(server, req.Lease.LeaseID) {
 			return err
 		}
 		client, clientErr := newHetznerClient()
 		if clientErr != nil {
 			return clientErr
 		}
-		serverGone, deleteErr := deleteServerWithClient(ctx, client, server, true, req.Lease.LeaseID)
+		// Rollback before claim publication is allowed only while the claim is
+		// still absent. A later claim must never become acquisition authority.
+		serverGone := false
+		deleteErr := core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, req.Lease.LeaseID, core.LeaseClaim{}, false, func() error {
+			if req.GuardedRemoteCleanup != nil {
+				req.GuardedRemoteCleanup(ctx, req.Lease)
+			}
+			var err error
+			serverGone, err = deleteServerWithClient(ctx, client, server, true, req.Lease.LeaseID)
+			return err
+		})
 		if serverGone {
 			b.acquired.Delete(req.Lease.LeaseID)
 		}
@@ -245,7 +259,11 @@ func (b *hetznerLeaseBackend) ReleaseLease(ctx context.Context, req core.Release
 	if err != nil {
 		return err
 	}
-	serverGone, err := deleteClaimedHetznerServer(ctx, client, server, claim)
+	serverGone, err := deleteClaimedHetznerServer(ctx, client, server, claim, func() {
+		if req.GuardedRemoteCleanup != nil {
+			req.GuardedRemoteCleanup(ctx, req.Lease)
+		}
+	})
 	if serverGone {
 		b.acquired.Delete(req.Lease.LeaseID)
 	}
@@ -315,7 +333,7 @@ func (b *hetznerLeaseBackend) Cleanup(ctx context.Context, req core.CleanupReque
 		if req.DryRun {
 			continue
 		}
-		if _, err := deleteClaimedHetznerServer(ctx, client, server, claim); err != nil {
+		if _, err := deleteClaimedHetznerServer(ctx, client, server, claim, nil); err != nil {
 			return err
 		}
 	}
@@ -340,14 +358,17 @@ func deleteServerForRelease(ctx context.Context, cfg core.Config, server core.Se
 	if err != nil {
 		return false, err
 	}
-	return deleteClaimedHetznerServer(ctx, client, server, claim)
+	return deleteClaimedHetznerServer(ctx, client, server, claim, nil)
 }
 
-func deleteClaimedHetznerServer(ctx context.Context, client hetznerClient, server core.Server, claim core.LeaseClaim) (bool, error) {
+func deleteClaimedHetznerServer(ctx context.Context, client hetznerClient, server core.Server, claim core.LeaseClaim, beforeDelete func()) (bool, error) {
 	serverGone := false
 	updated, err := core.UpdateLeaseClaimLabelsIfUnchangedAfter(claim.LeaseID, claim, claim.Labels, func() error {
 		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
 			return err
+		}
+		if beforeDelete != nil {
+			beforeDelete()
 		}
 		var deleteErr error
 		serverGone, deleteErr = deleteServerWithClient(ctx, client, server, true, claim.LeaseID)
@@ -452,6 +473,9 @@ func requireExactHetznerClaim(server core.Server, expectedLeaseID string) (core.
 	}
 	if !exists {
 		return core.LeaseClaim{}, core.Exit(2, "hetzner lease=%s has no exact local claim; refusing destructive operation", expectedLeaseID)
+	}
+	if expected, expectedExists, set := core.ServerLeaseClaimSnapshot(server); set && (!expectedExists || !reflect.DeepEqual(expected, claim)) {
+		return core.LeaseClaim{}, fmt.Errorf("%w: lease %s claim changed; refusing destructive operation", core.ErrReleaseLeaseOwnershipChanged, expectedLeaseID)
 	}
 	if err := validateHetznerServerOwnership(server, true); err != nil {
 		return core.LeaseClaim{}, err

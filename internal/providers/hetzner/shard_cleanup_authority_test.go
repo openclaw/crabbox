@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,6 +18,16 @@ import (
 // waiting on unreachable Tailscale/egress timeouts.
 type shardCleanupHetznerBackend struct {
 	*hetznerLeaseBackend
+	beforeRelease func()
+	cleanups      int
+}
+
+func (b *shardCleanupHetznerBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	if b.beforeRelease != nil {
+		b.beforeRelease()
+	}
+	req.GuardedRemoteCleanup = func(context.Context, core.LeaseTarget) { b.cleanups++ }
+	return b.hetznerLeaseBackend.ReleaseLease(ctx, req)
 }
 
 func (b *shardCleanupHetznerBackend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
@@ -126,49 +137,71 @@ func TestShardCleanupHetznerReleaseAuthority(t *testing.T) {
 		},
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			installHetznerClaimState(t)
-			client := &fakeHetznerClient{}
-			installHetznerTestHooks(t, client)
+	for _, phase := range []string{"before preflight", "after preflight", "before deletion"} {
+		for _, tc := range cases {
+			t.Run(phase+"/"+tc.name, func(t *testing.T) {
+				installHetznerClaimState(t)
+				client := &fakeHetznerClient{}
+				installHetznerTestHooks(t, client)
 
-			const leaseID = "cbx_a1b2c3d4e5f6"
-			server := crabboxHetznerServer(42, leaseID)
-			server.Labels["provider_key"] = core.ProviderKeyForLease(leaseID)
-			seedHetznerClaim(t, server)
-			authorized, err := core.ReadLeaseClaim(leaseID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			core.SetServerLeaseClaimSnapshot(&server, authorized, true)
+				const leaseID = "cbx_abcdef123456"
+				server := acquiredHetznerTestServer(42, leaseID)
+				client.createServer = server
+				client.servers = map[int64]core.Server{42: server}
+				server.Labels["provider_key"] = core.ProviderKeyForLease(leaseID)
+				seedHetznerClaim(t, server)
+				authorized, err := core.ReadLeaseClaim(leaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				core.SetServerLeaseClaimSnapshot(&server, authorized, true)
 
-			backend := &shardCleanupHetznerBackend{
-				hetznerLeaseBackend: NewHetznerLeaseBackend(core.ProviderSpec{Name: providerName}, core.Config{Provider: providerName}, core.Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend),
-			}
-			target := core.SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: core.TargetLinux}
-			cfg := core.Config{Provider: providerName}
-			var stderr bytes.Buffer
-			app := core.App{Stdout: io.Discard, Stderr: &stderr}
-			release, carry := app.CheckpointForkReleaseBindings(&server, &target, leaseID, nil, backend, &cfg)
-			carry(authorized)
-			if tc.afterCarry != nil {
-				tc.afterCarry(t, leaseID, authorized)
-			}
-			release(context.Background())
+				backend := &shardCleanupHetznerBackend{
+					hetznerLeaseBackend: NewHetznerLeaseBackend(core.ProviderSpec{Name: providerName}, core.Config{Provider: providerName}, core.Runtime{Stderr: io.Discard}).(*hetznerLeaseBackend),
+				}
+				acquired, err := backend.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "test"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !backend.matchesAcquiredLease(acquired.Server, leaseID) {
+					t.Fatal("missing acquisition state")
+				}
+				target := core.SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: core.TargetLinux}
+				cfg := core.Config{Provider: providerName}
+				var stderr bytes.Buffer
+				app := core.App{Stdout: io.Discard, Stderr: &stderr}
+				release, carry := app.CheckpointForkReleaseBindings(&server, &target, leaseID, nil, backend, &cfg)
+				carry(authorized)
+				if tc.afterCarry != nil {
+					mutate := func() { tc.afterCarry(t, leaseID, authorized) }
+					switch phase {
+					case "before preflight":
+						mutate()
+					case "after preflight":
+						backend.beforeRelease = mutate
+					case "before deletion":
+						newHetznerClient = func() (hetznerClient, error) { mutate(); return client, nil }
+					}
+				}
+				release(context.Background())
 
-			if got := len(client.deletedServers); got != tc.wantDeletes {
-				t.Fatalf("provider deletes=%d, want %d stderr=%q", got, tc.wantDeletes, stderr.String())
-			}
-			if tc.wantRefuse && !strings.Contains(stderr.String(), "refusing release") {
-				t.Fatalf("stderr missing refusal:\n%s", stderr.String())
-			}
-			if tc.wantReleaseErr != "" && !strings.Contains(stderr.String(), tc.wantReleaseErr) {
-				t.Fatalf("stderr missing %q:\n%s", tc.wantReleaseErr, stderr.String())
-			}
-			if tc.wantDeletes == 0 && len(client.deletedKeys) != 0 {
-				t.Fatalf("SSH key deletes=%v before claim check passed", client.deletedKeys)
-			}
-		})
+				if got := len(client.deletedServers); got != tc.wantDeletes {
+					t.Fatalf("provider deletes=%d, want %d stderr=%q", got, tc.wantDeletes, stderr.String())
+				}
+				if backend.cleanups != tc.wantDeletes {
+					t.Fatalf("remote cleanups=%d want=%d", backend.cleanups, tc.wantDeletes)
+				}
+				if tc.wantRefuse && !strings.Contains(stderr.String(), "refus") && !strings.Contains(stderr.String(), "claim changed") {
+					t.Fatalf("stderr missing refusal:\n%s", stderr.String())
+				}
+				if tc.wantReleaseErr != "" && !strings.Contains(stderr.String(), "release failed") {
+					t.Fatalf("stderr missing %q:\n%s", tc.wantReleaseErr, stderr.String())
+				}
+				if tc.wantDeletes == 0 && len(client.deletedKeys) != 0 {
+					t.Fatalf("SSH key deletes=%v before claim check passed", client.deletedKeys)
+				}
+			})
+		}
 	}
 }
 
