@@ -94,3 +94,40 @@ typechecks and lint passed, Worker/Node builds passed, Windows amd64/arm64
 cross-builds passed, and documentation generation/checks passed. The public PR
 records the broader Go/CI results separately. No Windows hardware execution,
 real cloud allocation, production deployment, or release is claimed.
+
+
+## Review follow-up qualification — 2026-10-27
+
+Runtime source: `88d03564a2411a89ea0ce6d05b34de155f0af5fb`.
+The [sanitized result artifact](../diagnostics/managed-host-local-proof.json)
+records executable SHA-256 digests, authorization receipts, and completed checks.
+No credentials, host addresses, or private endpoint URLs are published.
+
+The expanded disposable-host proof passed all 13 checks; a second run with
+latest-stable upgrade coverage passed all 14. In addition to the
+previous coverage, the shipped `crabbox connect` opened an isolated PTY shell;
+an authenticated non-admin foreign borrower received HTTP 403 on relay admission;
+revocation disconnected an already-open shell and refused new relay admission
+with HTTP 403. No post-revocation output was observed. Pool generations still
+received fresh homes and rotated endpoint identities. This is local Linux proof,
+not Windows hardware qualification or a claim of network containment.
+
+New regression tests fail on `b8ba9492` (shell and PTY requests rejected;
+Windows pool identity generation returns HTTP 409) and pass on the fixed source.
+The full coordinator suite passed 4,688 tests with 15 existing skips. Focused Go
+race checks, lint, formatting, both coordinator typechecks, Worker/Node builds,
+Windows amd64/arm64 builds, and docs checks passed.
+
+The earlier broad native Go race run timed out; it is **not** a passing result.
+The remaining checkpoint fork timeout was reproduced on unchanged PR base
+`075d454a` with a standard temporary directory and `umask 022`: the fixture waits
+for its synthetic Machine0 target on closed localhost port 22. The new CLI help
+flags required a baseline checksum update; the built-binary contract now passes.
+Fresh CI results are tracked on the PR rather than inferred from these local runs.
+
+The second run first wrote a direct-SSH registration using the exact `v0.79.3`
+coordinator and locked dependencies, replaced only the server with the new build
+on the same PostgreSQL database, then read and refreshed that registration.
+Owner, organization, provider, host, work root, and creation identity were
+preserved. This tests stored-registration compatibility, not every historical
+record type or a production deployment. All disposable resources were removed.
