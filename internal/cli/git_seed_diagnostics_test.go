@@ -138,7 +138,7 @@ func TestGitSeedDiagnosticReportsInterruptedExits(t *testing.T) {
 		{"deadline kills process", func(*testing.T) error {
 			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 			defer cancel()
-			return run(ctx, "sleep 30")
+			return run(ctx, "exec sleep 30")
 		}, expired, "deadline"},
 		{"remote exit code wins over cancellation", func(*testing.T) error { return run(context.Background(), "exit 128") }, cancelled, "128"},
 		{"wrapped context error", func(*testing.T) error { return context.Canceled }, context.Background, "cancelled"},
