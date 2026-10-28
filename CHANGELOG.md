@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Release builds: retire completed private compiler caches between targets so multi-platform production does not retain every target's cache until packaging.
+
 ## 0.80.0 - 2026-10-28
 
 ### Highlights

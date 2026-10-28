@@ -385,8 +385,136 @@ test("GoReleaser is credential-free build-only with exact binary archives", () =
   assert.match(build, /run_goreleaser\(\) \{[\s\S]*env -i "\$@"/);
   assert.match(build, /run_goreleaser "DEVELOPER_DIR=\$DEVELOPER_DIR"/);
   assert.match(build, /else\s+run_goreleaser\s+fi/);
-  assert.match(build, /chmod -R u\+w "\$path"[\s\S]*rm -rf "\$path"/);
+  assert.match(build, /find -P "\$path" -type d -exec chmod u\+w \{\} \+[\s\S]*rm -rf "\$path"/);
   assert.doesNotMatch(build, /gh release|HOMEBREW_TAP_GITHUB_TOKEN=.*\$\{/);
+});
+
+function releaseCacheFixture(check) {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-release-cache-")));
+  try {
+    const work = path.join(root, "crabbox-release-build.fixture");
+    const cache = path.join(work, "gocache");
+    const modules = path.join(work, "gomodcache");
+    const marker = path.join(work, ".gocache-owner");
+    const bin = path.join(root, "bin");
+    const calls = path.join(root, "calls");
+    const artifact = path.join(work, "controller");
+    for (const directory of [work, cache, modules, bin, path.join(cache, "aa")]) fs.mkdirSync(directory, { mode: 0o700 });
+    fs.writeFileSync(marker, `${cache}\n`, { mode: 0o600 });
+    fs.writeFileSync(path.join(cache, "aa", "compiled"), "completed build");
+    fs.writeFileSync(path.join(modules, "dependency"), "retain dependency", { mode: 0o444 });
+    fs.writeFileSync(artifact, "retain executable");
+    writeExecutable(path.join(bin, "go"), `#!${process.execPath}
+const fs = require("node:fs");
+const path = require("node:path");
+if (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(["clean", "-cache"])) process.exit(99);
+fs.appendFileSync(${JSON.stringify(calls)}, process.env.GOCACHE + "\\n");
+if (process.env.CACHE_CLEAN_EXIT) process.exit(Number(process.env.CACHE_CLEAN_EXIT));
+fs.rmSync(path.join(process.env.GOCACHE, "aa"), { recursive: true, force: true });
+`);
+    const run = (overrides = {}, command = ["/bin/bash", path.join(repoRoot, "scripts/clean-release-build-cache.sh")], cwd) => {
+      const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, GOCACHE: cache, CRABBOX_RELEASE_CACHE_OWNER: marker, ...overrides };
+      for (const key of Object.keys(env)) if (env[key] === undefined) delete env[key];
+      return spawnSync(command[0], command.slice(1), { env, cwd, encoding: "utf8" });
+    };
+    check({ root, work, cache, modules, marker, calls, artifact, run });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("completed release targets clear only their private compiler cache", () => {
+  releaseCacheFixture(({ cache, modules, calls, artifact, run }) => {
+    assert.equal(run().status, 0);
+    assert.equal(fs.existsSync(path.join(cache, "aa")), false);
+    assert.equal(fs.readFileSync(calls, "utf8"), `${cache}\n`);
+    assert.equal(fs.readFileSync(path.join(modules, "dependency"), "utf8"), "retain dependency");
+    assert.equal(fs.statSync(path.join(modules, "dependency")).mode & 0o777, 0o444);
+    assert.equal(fs.readFileSync(artifact, "utf8"), "retain executable");
+    assert.equal(fs.statSync(cache).isDirectory(), true);
+  });
+});
+
+test("marker-free snapshots do not need cleanup tools or touch ambient caches", () => {
+  releaseCacheFixture(({ cache, calls, run }) => {
+    const result = run({ CRABBOX_RELEASE_CACHE_OWNER: undefined, PATH: "/missing-tools" });
+    assert.equal(result.status, 0);
+    assert.equal(fs.existsSync(calls), false);
+    assert.equal(fs.readFileSync(path.join(cache, "aa", "compiled"), "utf8"), "completed build");
+  });
+});
+
+test("GoReleaser dispatch handles historical source without a cache helper", () => {
+  const hooks = [...read(".goreleaser.yaml").matchAll(/- cmd: >-\n((?: {12}.+\n)+)/g)];
+  assert.equal(hooks.length, 2);
+  releaseCacheFixture(({ root, cache, modules, artifact, run }) => {
+    for (const [, lines] of hooks) {
+      const command = lines.trim().split("\n").map((line) => line.trim()).join(" ");
+      const script = command.match(/^\/bin\/bash -c '(.*)'$/)?.[1];
+      assert.ok(script);
+      const dispatch = ["/bin/bash", "-c", script];
+      assert.equal(fs.existsSync(path.join(root, "scripts")), false);
+      assert.equal(run({ CRABBOX_RELEASE_CACHE_OWNER: undefined, CRABBOX_RELEASE_TOOLING_ROOT: "/missing-helper", PATH: "/missing-tools" }, dispatch, root).status, 0);
+      const invalid = run({ CRABBOX_RELEASE_CACHE_OWNER: "", CRABBOX_RELEASE_TOOLING_ROOT: repoRoot }, dispatch, root);
+      assert.notEqual(invalid.status, 0);
+      assert.match(invalid.stderr, /refused invalid private-cache ownership/);
+      assert.equal(run({ CRABBOX_RELEASE_TOOLING_ROOT: repoRoot }, dispatch, root).status, 0);
+    }
+    assert.equal(fs.existsSync(path.join(cache, "aa")), false);
+    assert.equal(fs.readFileSync(path.join(modules, "dependency"), "utf8"), "retain dependency");
+    assert.equal(fs.readFileSync(artifact, "utf8"), "retain executable");
+  });
+});
+
+test("release cache retirement refuses invalid ownership before invoking Go", () => {
+  const invalid = [
+    ({ run }) => run({ CRABBOX_RELEASE_CACHE_OWNER: "" }),
+    ({ run }) => run({ CRABBOX_RELEASE_CACHE_OWNER: "relative/.gocache-owner" }),
+    ({ marker, run }) => { fs.unlinkSync(marker); return run(); },
+    ({ marker, run }) => { fs.writeFileSync(marker, "/another/cache\n"); return run(); },
+    ({ marker, run }) => { fs.chmodSync(marker, 0o644); return run(); },
+    ({ work, run }) => { fs.chmodSync(work, 0o755); return run(); },
+    ({ modules, run }) => run({ GOCACHE: modules }),
+    ({ marker, run }) => { fs.renameSync(marker, `${marker}.real`); fs.symlinkSync(`${marker}.real`, marker); return run(); },
+    ({ root, work, run }) => { const link = path.join(root, "link"); fs.symlinkSync(work, link); return run({ CRABBOX_RELEASE_CACHE_OWNER: path.join(link, ".gocache-owner"), GOCACHE: path.join(link, "gocache") }); },
+    ({ cache, modules, run }) => { fs.rmSync(cache, { recursive: true }); fs.symlinkSync(modules, cache); return run(); },
+  ];
+  for (const attempt of invalid) releaseCacheFixture((fixture) => {
+    const result = attempt(fixture);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /refused invalid private-cache ownership/);
+    assert.equal(fs.existsSync(fixture.calls), false);
+    assert.equal(fs.readFileSync(path.join(fixture.modules, "dependency"), "utf8"), "retain dependency");
+    assert.equal(fs.readFileSync(fixture.artifact, "utf8"), "retain executable");
+  });
+});
+
+test("release cache cleanup failures preserve inputs and fail the target", () => {
+  releaseCacheFixture(({ cache, artifact, run }) => {
+    const result = run({ CACHE_CLEAN_EXIT: "7" });
+    assert.equal(result.status, 7);
+    assert.doesNotMatch(result.stdout, /Cleared completed/);
+    assert.equal(fs.readFileSync(path.join(cache, "aa", "compiled"), "utf8"), "completed build");
+    assert.equal(fs.readFileSync(artifact, "utf8"), "retain executable");
+  });
+});
+
+test("producer cache retirement follows completed runtime identity and protected target hooks", () => {
+  const producer = read("scripts/build-release-candidate.sh");
+  const identity = producer.indexOf('filesystem_build_id=$(cat "$WORK/runtime-build/filesystem-build-id")');
+  const retire = producer.indexOf('remove_tree "$WORK/runtime-build/gocache"');
+  const controllers = producer.indexOf("  run_goreleaser() {");
+  assert.ok(identity >= 0 && identity < retire && retire < controllers);
+  assert.match(producer, /remove_tree "\$WORK\/runtime-build\/gomodcache"/);
+  assert.match(producer, /umask 077; printf '%s\\n' "\$WORK\/gocache" >"\$cache_owner"/);
+  assert.match(producer, /CRABBOX_RELEASE_CACHE_OWNER="\$cache_owner"/);
+  assert.match(producer, /CRABBOX_RELEASE_TOOLING_ROOT="\$ROOT"/);
+  assert.match(producer, /--parallelism 1 --config "\$ROOT\/\.goreleaser.yaml"/);
+  const config = read(".goreleaser.yaml");
+  assert.equal((config.match(/\$\{CRABBOX_RELEASE_CACHE_OWNER\+x\}/g) ?? []).length, 2);
+  assert.equal((config.match(/\$\{CRABBOX_RELEASE_TOOLING_ROOT:\?\}/g) ?? []).length, 2);
+  assert.equal((config.match(/\/scripts\/clean-release-build-cache\.sh/g) ?? []).length, 2);
+  assert.doesNotMatch(config, /envOrDefault|\$SOURCE\/scripts\/clean-release-build-cache/);
 });
 
 function runSeedDownloadFixture(attempts, escapeToolFailure = false) {

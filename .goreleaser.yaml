@@ -21,6 +21,12 @@ builds:
     binary: crabbox
     env:
       - CGO_ENABLED=0
+    hooks:
+      post:
+        - cmd: >-
+            /bin/bash -c 'if [[ -n "${CRABBOX_RELEASE_CACHE_OWNER+x}" ]]; then
+            exec /bin/bash "${CRABBOX_RELEASE_TOOLING_ROOT:?}/scripts/clean-release-build-cache.sh";
+            fi'
     flags:
       - -trimpath
     mod_timestamp: "{{ .CommitTimestamp }}"
@@ -38,6 +44,12 @@ builds:
     binary: crabbox-apple-vm-helper
     env:
       - CGO_ENABLED=0
+    hooks:
+      post:
+        - cmd: >-
+            /bin/bash -c 'if [[ -n "${CRABBOX_RELEASE_CACHE_OWNER+x}" ]]; then
+            exec /bin/bash "${CRABBOX_RELEASE_TOOLING_ROOT:?}/scripts/clean-release-build-cache.sh";
+            fi'
     flags:
       - -trimpath
       - -tags=vmdembed

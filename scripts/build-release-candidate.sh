@@ -57,11 +57,12 @@ VERIFIER_COMMIT=$(git -C "$ROOT" rev-parse HEAD)
 }
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-release-build.XXXXXX")
+WORK=$(cd "$WORK" && pwd -P)
 stage=
 remove_tree() {
   local path=$1
   [[ -e "$path" ]] || return 0
-  chmod -R u+w "$path" 2>/dev/null || true
+  find -P "$path" -type d -exec chmod u+w {} +
   rm -rf "$path"
 }
 cleanup() {
@@ -69,6 +70,8 @@ cleanup() {
   [[ -z "$stage" ]] || remove_tree "$stage"
 }
 trap cleanup EXIT
+cache_owner="$WORK/.gocache-owner"
+(umask 077; printf '%s\n' "$WORK/gocache" >"$cache_owner")
 SOURCE="$WORK/source"
 BUILD_HOME="$WORK/home"
 BUILD_TMP="$WORK/tmp"
@@ -127,10 +130,19 @@ if git -C "$SOURCE" cat-file -e "$TAG_COMMIT:cmd/crabbox-runtime/main.go" 2>/dev
   fi
 fi
 
+# Runtime outputs and filesystem identity are complete. Their private compiler
+# and module caches must not overlap the controller build matrix below.
+if [[ "$runtime_pack" != false ]]; then
+  remove_tree "$WORK/runtime-build/gocache"
+  remove_tree "$WORK/runtime-build/gomodcache"
+fi
+
 (
   cd "$SOURCE"
   run_goreleaser() {
     env -i "$@" \
+      CRABBOX_RELEASE_CACHE_OWNER="$cache_owner" \
+      CRABBOX_RELEASE_TOOLING_ROOT="$ROOT" \
       GOCACHE="$WORK/gocache" \
       GOMODCACHE="$WORK/gomodcache" \
       GOPROXY=https://proxy.golang.org \
