@@ -112,6 +112,7 @@ function runMockedHomebrewPhase({
   helperMissing = false,
   helperOnIntel = false,
   helperByteMismatch = false,
+  trustFailure = false,
   fetchFailure = false,
   installedByteMismatch = false,
   macosVerifierFailure = false,
@@ -295,8 +296,17 @@ case "\${1:-}" in
   update)
     [ "\${2:-}" = --force ] || exit 81
     ;;
+  trust)
+    [ "$*" = "trust --formula openclaw/tap/crabbox" ] || exit 91
+    [ "$HOME" = "\${HOMEBREW_CACHE%/cache}/home" ] || exit 86
+    [ -d "$HOME" ] && [ -d "$HOMEBREW_CACHE" ] || exit 87
+    ${trustFailure ? "exit 75" : ""}
+    /bin/mkdir -m 700 "$HOME/.homebrew"
+    printf '%s\\n' openclaw/tap/crabbox >"$HOME/.homebrew/trusted-formula"
+    ;;
   info)
     [ "$*" = "info --json=v2 --formula openclaw/tap/crabbox" ] || exit 82
+    [ -f "$HOME/.homebrew/trusted-formula" ] || exit 92
     /bin/cat ${shellQuote(formulaPath)}
     ;;
   fetch)
@@ -829,6 +839,7 @@ test("mocked Homebrew phase proves fresh fetch, frozen bytes, trust, and final e
   assert.match(result.calls, /^verify-source:v1\.2\.3 /m);
   assert.match(result.calls, /^verify-release:v1\.2\.3 /m);
   assert.match(result.calls, /^brew:update --force$/m);
+  assert.match(result.calls, /^brew:trust --formula openclaw\/tap\/crabbox$/m);
   assert.match(result.calls, /^brew:fetch --force --formula openclaw\/tap\/crabbox$/m);
   assert.match(result.calls, /^brew:install openclaw\/tap\/crabbox$/m);
   assert.match(result.calls, /^verify-macos:org\.openclaw\.crabbox arm64 /m);
@@ -838,7 +849,19 @@ test("mocked Homebrew phase proves fresh fetch, frozen bytes, trust, and final e
   );
   assert.match(result.calls, /^brew:test openclaw\/tap\/crabbox$/m);
   assert.ok(result.calls.indexOf("brew:fetch") < result.calls.indexOf("brew:install"));
+  assert.ok(result.calls.indexOf("brew:tap") < result.calls.indexOf("brew:update"));
+  assert.ok(result.calls.indexOf("brew:update") < result.calls.indexOf("brew:trust"));
+  assert.ok(result.calls.indexOf("brew:trust") < result.calls.indexOf("brew:info"));
   assert.ok(result.calls.indexOf("verify-macos:") < result.calls.indexOf("brew:test"));
+});
+
+test("mocked Homebrew phase stops before formula loading when private trust fails", () => {
+  const result = runMockedHomebrewPhase({ trustFailure: true });
+  assert.equal(result.status, 75, result.stderr);
+  assert.match(result.calls, /^brew:trust --formula openclaw\/tap\/crabbox$/m);
+  assert.doesNotMatch(result.calls, /^brew:(?:info|fetch|install|reinstall|test) /m);
+  assert.doesNotMatch(result.calls, /^verify-macos:/m);
+  assert.doesNotMatch(result.stdout, /Verified Homebrew/);
 });
 
 test("mocked Homebrew phase rejects installed bytes that differ from the release", () => {

@@ -368,6 +368,9 @@ homebrew_phase() {
   local metadata_file="$work/formula.json"
   "$brew_bin" tap openclaw/tap
   "$brew_bin" update --force
+  # Authorize only this maintained formula in the credential-free run's HOME.
+  # Homebrew requires explicit trust before it can load non-official formulae.
+  "$brew_bin" trust --formula "$FORMULA"
   # Tap maintainers own executable formulae; metadata is not a Ruby sandbox.
   "$brew_bin" info --json=v2 --formula "$FORMULA" >"$metadata_file"
   verify_homebrew_formula "$node_bin" "$metadata_file" "$tag" "$archive_name" "$archive_sha"
