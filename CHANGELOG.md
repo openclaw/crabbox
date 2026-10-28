@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Release builds: retire completed private compiler caches between targets so multi-platform production does not retain every target's cache until packaging.
+- Release builds: retire completed private compiler caches between targets so multi-platform production does not retain every target's cache until packaging. [PR 2978](https://github.com/openclaw/crabbox/pull/2978). Thanks @vincentkoc.
 
 ## 0.80.0 - 2026-10-28
 
