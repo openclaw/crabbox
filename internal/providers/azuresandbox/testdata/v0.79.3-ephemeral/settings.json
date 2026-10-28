@@ -1,0 +1,9 @@
+{
+  "Subscription": "subscription",
+  "ResourceGroup": "workers",
+  "Group": "sandboxes",
+  "Region": "westus3",
+  "ClientID": "",
+  "Disk": "ubuntu",
+  "DiskID": ""
+}

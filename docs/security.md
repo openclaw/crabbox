@@ -355,10 +355,15 @@ profile behavior.
 ### Credential destinations and diagnostics
 
 Credential-bearing coordinator requests follow redirects only when scheme,
-hostname, and effective port remain unchanged. The curl transport fallback
-does not follow redirects and disables ambient curl configuration before
-loading Crabbox's generated request config. Configure the CLI with the final
-canonical coordinator or Access-protected origin, not a redirecting alias.
+hostname, and effective port remain unchanged. All coordinator requests use the
+native HTTP transport, proxy configuration and TLS verifier, including retries
+after interrupted handshakes. There is no automatic external curl fallback.
+Configure legitimate private CAs in the OS trust store, or through Go's supported
+`SSL_CERT_FILE`/`SSL_CERT_DIR` inputs on platforms that support them. A curl-only
+`CURL_CA_BUNDLE` has no effect. Operators previously relying on curl-specific
+trust, proxy or connectivity behavior must repair the native configuration.
+Configure the CLI with the final canonical coordinator or Access-protected
+origin, not a redirecting alias.
 GitHub browser login follows the same destination rule by default: a callback
 origin that differs from the selected broker is rejected before browser open,
 polling, or config write. Operators who are deliberately migrating between

@@ -25,11 +25,11 @@ func managedStateEntrySpelling(resolvedParent, name string, info os.FileInfo) (s
 			if !strings.EqualFold(entry.Name(), name) {
 				continue
 			}
-			entryInfo, err := entry.Info()
+			entryInfo, err := fileSnapshotPathInfo(filepath.Join(resolvedParent, entry.Name()))
 			if err != nil {
 				return "", err
 			}
-			if !os.SameFile(info, entryInfo) {
+			if !sameFileSnapshotIdentity(info, entryInfo) {
 				continue
 			}
 			if entry.Name() == name {

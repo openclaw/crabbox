@@ -5,6 +5,8 @@ package cli
 // AzureSandboxConfig routes to an existing ACA Sandbox group. Group creation,
 // worker identities and RBAC remain the infrastructure owner's responsibility.
 type AzureSandboxConfig struct {
+	Retention          string `json:",omitempty" config:"retention" env:"CRABBOX_AZURE_SANDBOX_RETENTION" flag:"azure-sandbox-retention" sources:"user,env,flag" help:"Opt-in session-disk retention until explicit release"`
+	OwnerBinding       string `json:",omitempty" config:"ownerBinding" env:"CRABBOX_AZURE_SANDBOX_OWNER_BINDING" flag:"azure-sandbox-owner-binding" sources:"user,env,flag" help:"Immutable opaque session/environment SHA256 binding"`
 	Subscription       string `config:"subscriptionId" env:"CRABBOX_AZURE_SANDBOX_SUBSCRIPTION_ID" flag:"azure-sandbox-subscription-id" sources:"user,env,flag" help:"ACA Sandbox subscription ID" fileIgnoreEmpty:"true" fileStorage:"value"`
 	ResourceGroup      string `config:"resourceGroup" env:"CRABBOX_AZURE_SANDBOX_RESOURCE_GROUP" flag:"azure-sandbox-resource-group" sources:"user,env,flag" help:"ACA Sandbox resource group" fileIgnoreEmpty:"true" fileStorage:"value"`
 	Group              string `config:"group" env:"CRABBOX_AZURE_SANDBOX_GROUP" flag:"azure-sandbox-group" sources:"user,env,flag" help:"Existing ACA Sandbox group" fileIgnoreEmpty:"true" fileStorage:"value"`

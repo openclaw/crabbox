@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,7 +14,290 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
+
+type localSeedTestWriter func([]byte) (int, error)
+
+func (f localSeedTestWriter) Write(p []byte) (int, error) { return f(p) }
+
+func TestBoundedGitSeedWriter(t *testing.T) {
+	t.Run("exact bound and sticky overflow", func(t *testing.T) {
+		var out bytes.Buffer
+		w := &boundedGitSeedWriter{dst: &out, remaining: 3}
+		if n, err := w.Write([]byte("abc")); n != 3 || err != nil {
+			t.Fatalf("exact bound: %d %v", n, err)
+		}
+		n, err := w.Write([]byte("d"))
+		var failure *localGitSeedWriteError
+		if n != 0 || !errors.As(err, &failure) || failure.written != 3 || failure.limit != 3 || failure.attempted != 1 {
+			t.Fatalf("overflow: %d %v", n, err)
+		}
+		if n, again := w.Write(nil); n != 0 || again != err || out.String() != "abc" {
+			t.Fatalf("first refusal lost: %d %v %q", n, again, out.String())
+		}
+	})
+	for _, short := range []bool{false, true} {
+		name := "sink error"
+		cause := errors.New("private sink detail")
+		if short {
+			name, cause = "short write", io.ErrShortWrite
+		}
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			w := &boundedGitSeedWriter{remaining: 3, dst: localSeedTestWriter(func([]byte) (int, error) {
+				calls++
+				if short {
+					return 1, nil
+				}
+				return 1, cause
+			})}
+			n, err := w.Write([]byte("abc"))
+			var failure *localGitSeedWriteError
+			if n != 1 || !errors.Is(err, cause) || !errors.As(err, &failure) || failure.written != 1 || failure.limit != 3 || failure.attempted != 3 {
+				t.Fatalf("write failure: %d %v", n, err)
+			}
+			if strings.Contains(err.Error(), "private sink detail") {
+				t.Fatal("sink detail exposed")
+			}
+			if _, again := w.Write([]byte("d")); again != err || calls != 1 {
+				t.Fatalf("write retried after refusal: %v calls=%d", again, calls)
+			}
+		})
+	}
+}
+
+func TestLocalGitSeedOutputHelper(t *testing.T) {
+	switch os.Getenv("CRABBOX_TEST_SEED_OUTPUT") {
+	case "overflow":
+		data := make([]byte, 32768)
+		for {
+			if _, err := os.Stdout.Write(data); err != nil {
+				os.Exit(17)
+			}
+		}
+	case "once":
+		_, _ = os.Stdout.Write([]byte("output"))
+		os.Exit(0)
+	case "refuse-then-wait":
+		_, _ = os.Stdout.Write([]byte("output"))
+		time.Sleep(time.Minute)
+		os.Exit(0)
+	case "wait":
+		time.Sleep(time.Minute)
+		os.Exit(0)
+	case "oid-flood":
+		data := []byte(strings.Repeat(strings.Repeat("a", 40)+"\n", 100))
+		for {
+			if _, err := os.Stdout.Write(data); err != nil {
+				os.Exit(17)
+			}
+		}
+	case "oid-once":
+		_, _ = os.Stdout.Write([]byte(strings.Repeat("a", 40) + "\n"))
+		os.Exit(0)
+	case "oid-partial":
+		_, _ = os.Stdout.Write([]byte(strings.Repeat("a", 40)))
+		os.Exit(0)
+	case "oid-partial-exit":
+		_, _ = os.Stdout.Write([]byte(strings.Repeat("a", 40)))
+		os.Exit(7)
+	case "exit":
+		os.Exit(7)
+	}
+}
+
+func TestLocalGitSeedOutputPreservesWriterAndProcessFailures(t *testing.T) {
+	for _, mode := range []string{"overflow", "once", "refuse-then-wait", "wait"} {
+		t.Run(mode, func(t *testing.T) {
+			timeout := 5 * time.Second
+			if mode == "wait" {
+				timeout = 100 * time.Millisecond
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLocalGitSeedOutputHelper$")
+			cmd.Env = append(os.Environ(), "CRABBOX_TEST_SEED_OUTPUT="+mode)
+			cmd.WaitDelay = time.Second
+			w := &boundedGitSeedWriter{dst: io.Discard, remaining: 1}
+			started := time.Now()
+			err := runLocalGitSeedCommand(ctx, cmd, w)
+			if err == nil || cmd.ProcessState == nil {
+				t.Fatalf("missing settled failure: %v", err)
+			}
+			if mode == "wait" {
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("deadline lost: %v", err)
+				}
+				return
+			}
+			var failure *localGitSeedWriteError
+			if !errors.As(err, &failure) || failure.limit != 1 {
+				t.Fatalf("writer refusal lost: %v", err)
+			}
+			if mode == "refuse-then-wait" && (time.Since(started) >= 3*time.Second || ctx.Err() != nil) {
+				t.Fatalf("refused child survived until deadline: %v", err)
+			}
+			if mode == "overflow" {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) {
+					t.Fatalf("secondary process failure lost: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestLocalGitSeedOutputIndependentGitFailure(t *testing.T) {
+	out, err := localGitSeedOutput(context.Background(), t.TempDir(), false, "not-a-git-subcommand")
+	var exit *exec.ExitError
+	var write *localGitSeedWriteError
+	if out != "" || !errors.As(err, &exit) || errors.As(err, &write) {
+		t.Fatalf("independent Git failure changed: %q %v", out, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if out, err := localGitSeedOutput(ctx, t.TempDir(), false, "version"); out != "" || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation lost: %q %v", out, err)
+	}
+}
+
+func TestLocalGitSeedOutputEnumerationFraming(t *testing.T) {
+	for _, format := range []string{"sha1", "sha256"} {
+		t.Run(format, func(t *testing.T) {
+			width := 40
+			if format == "sha256" {
+				width = 64
+			}
+			oid := strings.Repeat("a", width)
+			for _, split := range []bool{false, true} {
+				var got []string
+				records := &localGitSeedEnumeration{format: format, width: width, maxRecords: 2, consume: func(oid string) error {
+					got = append(got, oid)
+					return nil
+				}}
+				wire := &boundedGitSeedWriter{dst: records, remaining: int64(2 * (width + 1))}
+				data := []byte(oid + "\n" + oid + "\n")
+				chunks := [][]byte{data}
+				if split {
+					chunks = [][]byte{data[:3], data[3:width], data[width : width+2], data[width+2:]}
+				}
+				for _, chunk := range chunks {
+					if n, err := wire.Write(chunk); err != nil || n != len(chunk) {
+						t.Fatalf("framing: %d %v", n, err)
+					}
+				}
+				if err := records.finish(); err != nil || !reflect.DeepEqual(got, []string{oid, oid}) || records.records != 2 || len(records.partial) != 0 {
+					t.Fatalf("complete records: %v %v", got, err)
+				}
+				if _, err := wire.Write([]byte("a")); err == nil || !strings.Contains(err.Error(), "byte limit") {
+					t.Fatalf("one over wire bound: %v", err)
+				}
+				if _, err := records.Write([]byte(oid + "\n")); err == nil || !strings.Contains(err.Error(), "record limit") || records.records != 2 {
+					t.Fatalf("duplicate over record bound: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestLocalGitSeedOutputEnumerationBeyondMetadataCapture(t *testing.T) {
+	for _, format := range []string{"sha1", "sha256"} {
+		t.Run(format, func(t *testing.T) {
+			width := 40
+			if format == "sha256" {
+				width = 64
+			}
+			seen := 0
+			records := &localGitSeedEnumeration{format: format, width: width, maxRecords: localGitSeedMaxObjects, consume: func(string) error { seen++; return nil }}
+			wire := &boundedGitSeedWriter{dst: records, remaining: int64(localGitSeedMaxObjects * (width + 1))}
+			line := []byte(strings.Repeat("b", width) + "\n")
+			count := localGitSeedMaxMetadata/len(line) + 1
+			for range count {
+				if _, err := wire.Write(line); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := records.finish(); err != nil || seen != count || wire.written <= localGitSeedMaxMetadata || cap(records.partial) > 128 {
+				t.Fatalf("streaming bound: records=%d bytes=%d partial=%d error=%v", seen, wire.written, cap(records.partial), err)
+			}
+		})
+	}
+}
+
+func TestLocalGitSeedOutputEnumerationRejectsMalformedRecords(t *testing.T) {
+	for _, format := range []string{"sha1", "sha256"} {
+		width := 40
+		if format == "sha256" {
+			width = 64
+		}
+		for _, data := range []string{"\n", "short\n", strings.Repeat("a", width+1), strings.Repeat("g", width) + "\n", strings.Repeat("A", width) + "\n", strings.Repeat("a", width) + " \n", strings.Repeat("a", width), "a"} {
+			t.Run(format+"/"+strconv.Itoa(len(data))+"-"+strconv.Quote(data[:1]), func(t *testing.T) {
+				records := &localGitSeedEnumeration{format: format, width: width, maxRecords: 2, consume: func(string) error { t.Fatal("malformed record consumed"); return nil }}
+				_, writeErr := records.Write([]byte(data))
+				err := records.finish()
+				if err == nil || (writeErr != nil && err != writeErr) {
+					t.Fatalf("malformed/partial output accepted: %v %v", writeErr, err)
+				}
+				if _, again := records.Write([]byte(strings.Repeat("a", width) + "\n")); again != err {
+					t.Fatal("first framing failure lost")
+				}
+			})
+		}
+	}
+}
+
+func TestLocalGitSeedOutputEnumerationProcessCustody(t *testing.T) {
+	for _, mode := range []string{"oid-once", "oid-partial", "oid-partial-exit", "oid-flood", "exit", "wait"} {
+		t.Run(mode, func(t *testing.T) {
+			timeout := 5 * time.Second
+			if mode == "wait" {
+				timeout = 100 * time.Millisecond
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLocalGitSeedOutputHelper$")
+			cmd.Env = append(os.Environ(), "CRABBOX_TEST_SEED_OUTPUT="+mode)
+			cmd.WaitDelay = time.Second
+			readFailure := errors.New("local Git seed test reader refused")
+			seen := 0
+			err := localGitSeedEnumerationOutput(ctx, cmd, "sha1", func(string) error {
+				seen++
+				if mode == "oid-flood" {
+					return readFailure
+				}
+				return nil
+			})
+			if cmd.ProcessState == nil {
+				t.Fatal("child not settled")
+			}
+			switch mode {
+			case "oid-once":
+				if err != nil || seen != 1 {
+					t.Fatalf("valid enumeration: %d %v", seen, err)
+				}
+			case "oid-partial":
+				if err == nil || !strings.Contains(err.Error(), "unterminated") || seen != 0 {
+					t.Fatalf("partial enumeration accepted: %v", err)
+				}
+			case "oid-flood":
+				var exit *exec.ExitError
+				if !errors.Is(err, readFailure) || !errors.As(err, &exit) || seen != 1 {
+					t.Fatalf("reader/secondary process failure lost: %d %v", seen, err)
+				}
+			case "exit", "oid-partial-exit":
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || exit.ExitCode() != 7 || strings.Contains(err.Error(), "unterminated") {
+					t.Fatalf("Git failure lost: %v", err)
+				}
+			case "wait":
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("deadline lost: %v", err)
+				}
+			}
+		})
+	}
+}
 
 func localSeedTestGit(t *testing.T, root, input string, args ...string) string {
 	t.Helper()
@@ -223,6 +509,23 @@ func TestLocalGitSeedArtifactNamesShallowSourceCause(t *testing.T) {
 	}
 }
 
+func TestLocalGitSeedArtifactShallowMarkerDoesNotMislabelByteLimit(t *testing.T) {
+	root := localSeedTestRepo(t, "sha1")
+	parent, _, _ := localSeedTestCommit(t, root, "parent")
+	head, tree, _ := localSeedTestCommit(t, root, "child", parent)
+	localSeedTestGit(t, root, "", "update-ref", "refs/heads/main", head)
+	if err := os.WriteFile(filepath.Join(root, ".git", "shallow"), []byte(head+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := prepareLocalGitSeedArtifact(context.Background(), root, localGitSeedSelection{Head: head, Tree: tree}, 8)
+	if err == nil || !strings.Contains(err.Error(), "uncompressed object byte limit exceeded") {
+		t.Fatalf("missing byte-limit cause: %v", err)
+	}
+	if strings.Contains(err.Error(), "source repository is shallow") || strings.Contains(err.Error(), "unshallow") {
+		t.Fatalf("byte-limit refusal incorrectly advises fetching history: %v", err)
+	}
+}
+
 func TestLocalGitSeedArtifactBoundsAndExactSelection(t *testing.T) {
 	root := localSeedTestRepo(t, "sha1")
 	head, tree, _ := localSeedTestCommit(t, root, "fixture")
@@ -253,6 +556,51 @@ func TestLocalGitSeedArtifactBoundsAndExactSelection(t *testing.T) {
 	}
 }
 
+func TestLocalGitSeedArtifactPreservesBundleLimitCause(t *testing.T) {
+	root := localSeedTestRepo(t, "sha1")
+	head, tree, _ := localSeedTestCommit(t, root, "small")
+	selection := localGitSeedSelection{Head: head, Tree: tree}
+	artifact, err := prepareLocalGitSeedArtifact(t.Context(), root, selection, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := artifact.ObjectBytes
+	if artifact.PackedBytes <= limit {
+		t.Fatal("fixture must require more bundle bytes than raw object bytes")
+	}
+	if err := artifact.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	refused, err := prepareLocalGitSeedArtifact(t.Context(), root, selection, limit)
+	if err == nil {
+		_ = refused.cleanup()
+		t.Fatal("oversized bundle accepted")
+	}
+	if !strings.Contains(err.Error(), "pack complete local Git objects") || !strings.Contains(err.Error(), "byte limit exceeded") || refused.Root != "" {
+		t.Fatalf("bundle limit cause or cleanup lost: %v", err)
+	}
+}
+
+func TestLocalGitSeedReaderCloseSettlesPipesAndProcess(t *testing.T) {
+	root := localSeedTestRepo(t, "sha1")
+	reader, err := newLocalGitSeedReader(t.Context(), root, "sha1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, input, output := reader.cmd, reader.in, reader.pipe
+	reader.close()
+	reader.close()
+	if reader.cmd != nil || cmd.ProcessState == nil {
+		t.Fatal("reader process not settled")
+	}
+	if _, err := input.Write([]byte("info HEAD\n")); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("input pipe remains open: %v", err)
+	}
+	if _, err := output.Read(make([]byte, 1)); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("output pipe remains open: %v", err)
+	}
+}
+
 func TestLocalGitSeedArtifactGitlinksDoNotRequireSubmoduleObjects(t *testing.T) {
 	root := localSeedTestRepo(t, "sha1")
 	gitlink := strings.Repeat("1", 40)
@@ -271,10 +619,21 @@ func TestLocalGitSeedArtifactGitlinksDoNotRequireSubmoduleObjects(t *testing.T) 
 	if artifact.PackedBytes <= artifact.ObjectBytes {
 		t.Fatal("fixture must distinguish packed and raw bounds")
 	}
+	temp := t.TempDir()
+	t.Setenv("TMPDIR", temp)
+	t.Setenv("TMP", temp)
+	t.Setenv("TEMP", temp)
 	limited, err := prepareLocalGitSeedArtifact(context.Background(), root, localGitSeedSelection{Head: head, Tree: tree}, artifact.ObjectBytes)
 	if err == nil {
 		_ = limited.cleanup()
 		t.Fatal("packed bundle exceeded allowed bytes")
+	}
+	var failure *localGitSeedWriteError
+	if !errors.As(err, &failure) || failure.limit != artifact.ObjectBytes || !strings.Contains(err.Error(), "pack complete local Git objects") {
+		t.Fatalf("pack overflow refusal lost: %v", err)
+	}
+	if entries, readErr := os.ReadDir(temp); readErr != nil || len(entries) != 0 {
+		t.Fatalf("failed pack retained temporary state: %v %v", entries, readErr)
 	}
 }
 

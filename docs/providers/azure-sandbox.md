@@ -144,3 +144,82 @@ enrollment, repository preparation and accepted-input-to-usable time. A Running
 snapshot is not proof of a usable worker, and neither this option nor the
 platform contract promises a ten-second startup. Clean end-to-end live
 qualification remains required before selecting snapshots in production.
+
+## Session disk retention (opt-in)
+
+A native session lifecycle owner can select `--azure-sandbox-retention session-disk`
+and `--azure-sandbox-owner-binding <64 lowercase hex digest>` at kept, fixed-ID
+warmup. These are trusted user/environment/flag settings, not repository inputs.
+The digest binds one session/environment without storing session contents.
+`--ttl` remains finite and positive: it is the maximum authorized work window for
+each activation. The exact owned disk remains until explicit release. Disk idle
+suspend remains enabled and auto-delete is explicitly disabled, with independent
+readback required before work. Existing ephemeral claims keep their original
+finite allocation semantics; they cannot be converted into retained claims.
+
+The existing placement owner must settle admitted work and persist its lifecycle
+operation before calling `pause`. It must retain the exact lease, private runtime
+home and conversation binding through restart. Crabbox preserves the disk; it
+does not own session admission, native thread recovery or credential enrollment.
+There is no RAM/process continuation promise or private snapshot fallback.
+
+`inspect --json` and `status --json` add a `retention` receipt with schema
+`crabbox.session-disk.v1`. It includes immutable `mode`, `ownerBinding`,
+`computeWindowSeconds`; `identity` (`leaseId`, `attemptLeaseId`, `slug`,
+`resourceId`); opaque `claimRevision`; `desiredState`; `computeWindow`
+(`id`, `authorizedAt`, `expiresAt`, `state`); optional `operation`
+(`id`, `action`, `phase`, `expectedClaimRevision`); `policyVerified`,
+`observedState` and `stopPending`. Timestamps are UTC RFC3339. The top-level
+`expiresAt` is the work window deadline, never a disk deletion deadline.
+An unbound acquisition has no resource ID and grants no lifecycle authority.
+
+Both `pause` and `resume` require the canonical `--id`, `--operation-id`,
+`--owner-binding`, `--expected-claim-revision`, and the complete existing identity
+flag set: `--expected-provider-lease-id`, `--expected-provider-attempt-lease-id`,
+`--expected-provider-slug`, `--expected-provider-resource-id`. Values come from
+the persisted receipt. `--json` returns an independent status receipt on success.
+On failure, inspect the same lease; an unknown response does not authorize a
+replacement. A fresh exact readback of a stable opposite state permits bounded
+reassertion of that same desired-state operation on the same resource/window;
+transitional, unknown or mismatched state does not. An expired pending resume
+closes its window and settles Disk suspension instead of resuming.
+Replaying the current operation uses its original expected revision;
+a stale operation cannot regain authority after a successor.
+
+Pause durably closes the current window before stopping compute. Resume requires
+a confirmed suspended resource and a closed window, then records one new finite
+window before the provider effect. Its ID is the operation ID; retrying never
+moves its deadline. The original acquisition window ID is the canonical lease
+ID. A natural provider idle stop must be closed through pause before opening the
+next activation. Run, copy, heartbeat and observation cannot open a window or
+implicitly resume a retained disk. Expiry refuses work and exposes pending stop
+until the native lifecycle owner reconciles it; Gateway outages can delay actual
+stopping. This is finite authorized work plus provider idle suspension, not a
+Gateway-independent billed-compute limit.
+
+Creation is also bounded by the original work window: an expired preparation
+or retry cannot allocate a new retained disk. Replaying a completed resume is a
+read-only exact observation and does not cancel or wait for admitted activity.
+`status --wait` exits nonzero for suspended, compute-expired or deleted retained
+leases rather than waiting for readiness that requires an explicit lifecycle action.
+
+States are `running`, `suspended`, `transitioning`, `compute-expired`, `missing`,
+`unknown`, and terminal `deleted`. Missing, uncertain policy or mismatched
+ownership must not cause replacement or a fresh native conversation. Existing
+provider quotas remain authoritative. List marks session disks separately with
+`retention=session-disk retained_disk=true`; this is retained resource inventory,
+not a storage-byte or price estimate, and these resources are not clean reserves.
+
+`stop`/`release` remain destructive: they persist retirement, delete the exact
+owned resource and require independent missing readback. Cleanup remains available
+with expired windows or new retention disabled. Retained terminal receipts keep
+exact identity for retry. The claim journal uses version 2 so previous readers
+refuse the state before provider effects. Rollback requires a compatible cleanup
+reader and the native placement version fence; disabling opt-in never deletes
+existing retained data. The legacy Crabbox workspace controller refuses retained
+warmup rather than routing window expiry into destructive cleanup.
+
+Prepared clean snapshot initialization remains a separate image-owner contract.
+Retention does not relax its clean pre-enrollment attestation or capture session
+state into the clean catalog. A retained clone receives the no-auto-delete policy
+before session adoption; shared source images and snapshots are never deleted.

@@ -30,6 +30,7 @@ import (
 // SSHJump describes an authenticated SSH transport hop; the destination still
 // has its own end-to-end SSH host key and authentication.
 type SSHJump struct {
+	RelayOnly    bool `json:"relayOnly,omitempty"`
 	Relay        bool `json:"relay,omitempty"`
 	useRelay     bool
 	Candidates   []SSHJumpCandidate `json:"candidates,omitempty"`
@@ -1780,29 +1781,68 @@ try {
 exit $code`)
 }
 
+// gitSeedHeartbeatInterval spaces progress lines while a remote Git seed runs
+// with captured output.
+const gitSeedHeartbeatInterval = 15 * time.Second
+
+// startSyncHeartbeat prints periodic "still syncing" progress lines to stderr
+// until the returned stop function is called.
 func startSyncHeartbeat(stderr io.Writer, start time.Time, interval time.Duration) func() {
+	return startProgressHeartbeat(stderr, start, interval, "syncing", " watchdog=sync-quiet next_action=wait, or cancel and retry with --full-resync/fresh lease if no progress")
+}
+
+// startGitSeedHeartbeat prints periodic progress lines while a remote Git
+// seed runs, because the seed's own output is captured until it finishes.
+func startGitSeedHeartbeat(stderr io.Writer, start time.Time, interval time.Duration) func() {
+	return startProgressHeartbeat(stderr, start, interval, "seeding remote Git metadata", "")
+}
+
+// startProgressHeartbeat prints "still <label> after <elapsed>..." every
+// interval, appending quietHint once the step has run for four minutes.
+// A nonpositive interval disables the heartbeat. The returned stop function
+// waits for the heartbeat goroutine to exit, so no progress line is printed
+// after it returns.
+func startProgressHeartbeat(stderr io.Writer, start time.Time, interval time.Duration, label, quietHint string) func() {
 	if interval <= 0 {
 		return func() {}
 	}
+	ticker := time.NewTicker(interval)
 	done := make(chan struct{})
+	exited := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(interval)
+		defer close(exited)
 		defer ticker.Stop()
-		for {
+		writeProgressHeartbeats(stderr, start, ticker.C, done, label, quietHint)
+	}()
+	return func() {
+		close(done)
+		<-exited
+	}
+}
+
+// writeProgressHeartbeats prints one progress line per tick until done is
+// closed. A closed done wins over a tick that is ready at the same time.
+func writeProgressHeartbeats(stderr io.Writer, start time.Time, ticks <-chan time.Time, done <-chan struct{}, label, quietHint string) {
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticks:
+			// select picks randomly among ready cases; recheck done so a
+			// stop that raced with this tick suppresses the line.
 			select {
 			case <-done:
 				return
-			case <-ticker.C:
-				elapsed := time.Since(start).Round(time.Second)
-				if elapsed >= 4*time.Minute {
-					fmt.Fprintf(stderr, "still syncing after %s... watchdog=sync-quiet next_action=wait, or cancel and retry with --full-resync/fresh lease if no progress\n", elapsed)
-				} else {
-					fmt.Fprintf(stderr, "still syncing after %s...\n", elapsed)
-				}
+			default:
 			}
+			elapsed := time.Since(start).Round(time.Second)
+			hint := ""
+			if elapsed >= 4*time.Minute {
+				hint = quietHint
+			}
+			fmt.Fprintf(stderr, "still %s after %s...%s\n", label, elapsed, hint)
 		}
-	}()
-	return func() { close(done) }
+	}
 }
 
 func ensureTrailingSlash(path string) string {
@@ -2052,18 +2092,15 @@ func shellAbsolutePath(value string) string {
 	return shellQuote(value)
 }
 
-func psQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
-}
-
 func PowershellCommand(script string) string {
 	script = `$ProgressPreference = "SilentlyContinue"` + "\n" + script
 	encoded := base64.StdEncoding.EncodeToString(utf16LE([]byte(script)))
 	return "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + encoded
 }
 
-// Win32-OpenSSH inherits an overlapped pipe. Use its asynchronous handle contract
-// so a pending SSH write can complete before the server closes stdin at EOF.
+// Win32-OpenSSH inherits an overlapped pipe; managed endpoints inherit a
+// synchronous pipe. Select the matching FileStream before reading any bytes.
+// Overlapped input must retain async reads so pending SSH writes can complete.
 func windowsPowerShellCopyExactInput(destination string, inputSize int64) string {
 	// An empty frame must not bind stdin, which may already be at EOF.
 	// Disable FileStream read-ahead so bytes after this frame remain on stdin.
@@ -2075,7 +2112,11 @@ if ($remaining -gt 0) {
 	$stdinHandle = [Microsoft.Win32.SafeHandles.SafeFileHandle]::new([Cbx.SshStdin]::GetStdHandle(-10), $false)
 	$stdin = $null
 	try {
-		$stdin = [IO.FileStream]::new($stdinHandle, [IO.FileAccess]::Read, 1, $true)
+		try { $stdin = [IO.FileStream]::new($stdinHandle, [IO.FileAccess]::Read, 1, $true) }
+		catch {
+			if ($_.Exception.InnerException -isnot [ArgumentException]) { throw }
+			$stdin = [IO.FileStream]::new($stdinHandle, [IO.FileAccess]::Read, 1, $false)
+		}
 		$buffer = New-Object byte[] 65536
 		while ($remaining -gt 0) {
 			$readSize = [int][Math]::Min([Int64]$buffer.Length, $remaining)

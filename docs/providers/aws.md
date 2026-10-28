@@ -143,6 +143,11 @@ event with matching ownership, instance, provider key, and an explicit unique
 root volume in the allocation response can establish the identity. The response
 includes the source event ID and time, not the raw provider event.
 
+Failed lookups report the HTTP status and, when recognized, a fixed AWS error
+code. Diagnostic bodies are limited to 4 KiB and one second; raw messages and
+unknown error strings are not exposed. HTTP 400 alone does not establish a
+permission failure, and a failed lookup never establishes resource absence.
+
 If allocation history omits the root volume, is unavailable, or is ambiguous,
 readback remains blocked pending authoritative original provider custody
 evidence. It does not adopt a replacement disk, backfill a guessed lease record,
@@ -507,7 +512,7 @@ readiness preflight, API, AWS-GO gate, and live canary are in
 | macOS | Non-root SSH commands, portable workspace ownership, and Node/npm baseline. Requires an available EC2 Mac Dedicated Host in the region; On-Demand only. Admin-authenticated broker requests can pin any host with `CRABBOX_HOST_ID` / `aws.macHostId` (`CRABBOX_AWS_MAC_HOST_ID` is a legacy alias); normal broker users can pin a host with an exact coordinator allocation record for that host, their current org, and the requested region. See the host ownership rules below. |
 
 Managed macOS commands use the image's SSH user (normally `ec2-user`) and its
-writable work root. Bootstrap installs Node 24.19.0, matching the Linux developer
+writable work root. Bootstrap installs Node 24.22.1, matching the Linux developer
 recipe's LTS baseline, when Node or npm is missing. Both Intel and Apple Silicon
 use checksum-pinned official `nodejs.org` archives, with versioned installations
 under `/usr/local/lib/crabbox` and command links in `/usr/local/bin`; Homebrew is
@@ -529,7 +534,7 @@ workspace ownership share one identity. Root is used only for distro setup;
 the Windows SSH transport account is unchanged. Existing leases need
 reprovisioning to receive this setup.
 
-Managed native Windows bootstrap installs checksum-pinned Node 24.19.0 and npm
+Managed native Windows bootstrap installs checksum-pinned Node 24.22.1 and npm
 in `C:\Program Files\nodejs` on the machine PATH when either is missing or
 broken, retaining healthy installations. Bootstrap restarts OpenSSH after the
 machine PATH updates, and client-side completion waits for stable readiness on
@@ -545,7 +550,7 @@ logging, and lifetime. Lease destruction terminates detached processes.
 Managed WSL2 bootstrap runs the Node-only entrypoint of
 `scripts/install-linux-developer-tools.sh`, bundled in the CLI/coordinator rather
 than downloaded at boot. It uses the same Node major policy and, on the managed
-amd64 distro, the same checksum-pinned Node 24.19.0 archive as Linux developer
+amd64 distro, the same checksum-pinned Node 24.22.1 archive as Linux developer
 images. Node and npm are on the default command PATH and required by readiness.
 Re-bootstrap verifies the cached archive and reinstalls the owned version slot.
 The installer logs the Node step's elapsed seconds during warmup.
@@ -617,7 +622,7 @@ terminal receipt.
 AWS supports provider-native checkpoints in addition to workspace archives:
 
 - Linux/macOS, image strategy or macOS target → AWS AMI
-  (`checkpoint --kind native`, kind `aws-ami`).
+  (`checkpoint create --mode native`, kind `aws-ami`).
 - Linux disk-snapshot strategy → EBS snapshot (`aws-ebs-snapshot`).
 - Native Windows targets do not support native checkpoints.
 

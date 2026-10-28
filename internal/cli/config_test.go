@@ -605,7 +605,7 @@ func TestLocalContainerOrdinarySourceLayering(t *testing.T) {
 	settings := func(text string, cpus int, enabled bool) LocalContainerConfig {
 		return LocalContainerConfig{
 			Runtime: text, Image: text, User: text, WorkRoot: text,
-			CPUs: cpus, Memory: text, Network: text, DockerSocket: enabled, NoHostname: enabled,
+			CPUs: cpus, Memory: text, Network: text, DockerSocket: enabled, NoHostname: enabled, OCIRuntime: text,
 		}
 	}
 	for _, source := range []string{"file", "env"} {
@@ -645,13 +645,13 @@ func TestLocalContainerOrdinarySourceLayering(t *testing.T) {
 					}
 					if err := applyFileConfig(&cfg, fileConfig{LocalContainer: &fileLocalContainerConfig{
 						Runtime: tc.text, Image: tc.text, User: tc.text, WorkRoot: tc.text,
-						CPUs: cpu, Memory: tc.text, Network: tc.text, DockerSocket: boolean, NoHostname: boolean,
+						CPUs: cpu, Memory: tc.text, Network: tc.text, DockerSocket: boolean, NoHostname: boolean, OCIRuntime: tc.text,
 					}}); err != nil {
 						t.Fatal(err)
 					}
 				} else {
 					wantCPU = tc.envCPU
-					for _, key := range []string{"RUNTIME", "IMAGE", "USER", "WORK_ROOT", "MEMORY", "NETWORK"} {
+					for _, key := range []string{"RUNTIME", "IMAGE", "USER", "WORK_ROOT", "MEMORY", "NETWORK", "OCI_RUNTIME"} {
 						t.Setenv("CRABBOX_LOCAL_CONTAINER_"+key, tc.text)
 					}
 					t.Setenv("CRABBOX_LOCAL_CONTAINER_CPUS", tc.cpu)
@@ -740,6 +740,7 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_COORDINATOR_TOKEN_COMMAND",
 		"CRABBOX_STATIC_START_COMMAND",
 		"CRABBOX_STATIC_STOP_COMMAND",
+		"CRABBOX_STATIC_NO_CONTROL_MASTER",
 		"CRABBOX_WEBVNC_AGENT_BASE_URL",
 		"CRABBOX_COORDINATOR_ADMIN_TOKEN",
 		"CRABBOX_ADMIN_TOKEN",

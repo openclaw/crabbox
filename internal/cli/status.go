@@ -141,7 +141,17 @@ func (a App) status(ctx context.Context, args []string) error {
 }
 
 func statusWaitDone(state statusView) bool {
-	return state.Ready || statusTerminalState(state.State)
+	return state.Ready || statusWaitTerminalState(state)
+}
+
+func statusWaitTerminalState(state statusView) bool {
+	if state.Retention != nil {
+		switch strings.ToLower(strings.TrimSpace(state.State)) {
+		case "suspended", "compute-expired", "deleted":
+			return true
+		}
+	}
+	return statusTerminalState(state.State)
 }
 
 func statusLeaseExactClaim(ctx context.Context, backend Backend, lease LeaseTarget, fallbackProvider, providerScope string) (leaseClaim, bool, error) {
@@ -182,8 +192,11 @@ func statusLeaseExactClaim(ctx context.Context, backend Backend, lease LeaseTarg
 }
 
 func statusWaitTerminalError(id string, state statusView) error {
-	if state.Ready || !statusTerminalState(state.State) {
+	if state.Ready || !statusWaitTerminalState(state) {
 		return nil
+	}
+	if state.Retention != nil {
+		return Exit(5, "retained lease %s is %s and cannot become ready by waiting; inspect its lifecycle receipt", id, state.State)
 	}
 	return Exit(5, "lease %s reached terminal state %s before ready", id, state.State)
 }
@@ -297,20 +310,21 @@ func leaseStatusStateCanBeReady(lease LeaseTarget, state string) bool {
 }
 
 type StatusView struct {
-	LeasePolicy       *CoordinatorLeasePolicy `json:"leasePolicy,omitempty"`
-	RemainingLifetime string                  `json:"remainingLifetime,omitempty"`
-	MaxLifetime       string                  `json:"maxLifetime,omitempty"`
-	LifetimePolicy    *LeaseLifetimePolicy    `json:"lifetimePolicy,omitempty"`
-	ID                string                  `json:"id"`
-	Slug              string                  `json:"slug,omitempty"`
-	Provider          string                  `json:"provider"`
-	TargetOS          string                  `json:"target"`
-	WorkRoot          string                  `json:"workroot,omitempty"`
-	WindowsMode       string                  `json:"windowsMode,omitempty"`
-	State             string                  `json:"state"`
-	ServerID          string                  `json:"serverId"`
-	ServerType        string                  `json:"serverType"`
-	ImageEvidence     *ImageEvidence          `json:"imageEvidence,omitempty"`
+	Retention         *SessionDiskRetentionView `json:"retention,omitempty"`
+	LeasePolicy       *CoordinatorLeasePolicy   `json:"leasePolicy,omitempty"`
+	RemainingLifetime string                    `json:"remainingLifetime,omitempty"`
+	MaxLifetime       string                    `json:"maxLifetime,omitempty"`
+	LifetimePolicy    *LeaseLifetimePolicy      `json:"lifetimePolicy,omitempty"`
+	ID                string                    `json:"id"`
+	Slug              string                    `json:"slug,omitempty"`
+	Provider          string                    `json:"provider"`
+	TargetOS          string                    `json:"target"`
+	WorkRoot          string                    `json:"workroot,omitempty"`
+	WindowsMode       string                    `json:"windowsMode,omitempty"`
+	State             string                    `json:"state"`
+	ServerID          string                    `json:"serverId"`
+	ServerType        string                    `json:"serverType"`
+	ImageEvidence     *ImageEvidence            `json:"imageEvidence,omitempty"`
 	// ProviderResourceID optionally exposes an immutable provider resource ID.
 	// ServerID keeps each provider's existing identity semantics; for Islo it
 	// is the sandbox name rather than the immutable sandbox ID.
@@ -669,6 +683,10 @@ func formatSecondsDuration(seconds int) string {
 }
 
 func addStatusLifetime(state *StatusView, cfg Config) {
+	if state.Retention != nil {
+		state.MaxLifetime = (time.Duration(state.Retention.ComputeWindowSeconds) * time.Second).String()
+		return
+	}
 	if deadline, err := time.Parse(time.RFC3339, state.ExpiresAt); err == nil {
 		state.RemainingLifetime = max(time.Duration(0), time.Until(deadline)).Round(time.Second).String()
 	}

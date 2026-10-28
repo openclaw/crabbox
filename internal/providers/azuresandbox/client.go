@@ -26,14 +26,48 @@ const apiVersion = "2026-02-01-preview"
 const tokenScope = "https://dynamicsessions.io/.default"
 
 type sandbox struct {
-	ID           string            `json:"id"`
-	State        string            `json:"state"`
-	Labels       map[string]string `json:"labels"`
-	SourcesRef   sourceReferences  `json:"sourcesRef"`
-	Lifecycle    snapshotLifecycle `json:"lifecycle"`
-	StateDetails struct {
+	policyObserved bool
+	ID             string            `json:"id"`
+	State          string            `json:"state"`
+	Labels         map[string]string `json:"labels"`
+	SourcesRef     sourceReferences  `json:"sourcesRef"`
+	Lifecycle      snapshotLifecycle `json:"lifecycle"`
+	StateDetails   struct {
 		StoppedReason string `json:"stoppedReason"`
 	} `json:"stateDetails"`
+}
+
+// A missing enabled field is not evidence of disabled auto-delete.
+func (s *sandbox) UnmarshalJSON(data []byte) error {
+	type wire sandbox
+	var value wire
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*s = sandbox(value)
+	var raw struct {
+		Lifecycle struct {
+			AutoDeletePolicy json.RawMessage `json:"autoDeletePolicy"`
+			AutoDelete       json.RawMessage `json:"autoDelete"`
+		} `json:"lifecycle"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	policy := raw.Lifecycle.AutoDeletePolicy
+	if len(raw.Lifecycle.AutoDelete) > 0 {
+		policy = raw.Lifecycle.AutoDelete
+	}
+	var fields struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if len(policy) > 0 {
+		if err := json.Unmarshal(policy, &fields); err != nil {
+			return err
+		}
+		s.policyObserved = fields.Enabled != nil
+	}
+	return nil
 }
 
 type execResult struct {
@@ -101,7 +135,9 @@ func (c *client) request(ctx context.Context, operation, method, path string, qu
 		return fmt.Errorf("ACA Sandbox request is invalid")
 	}
 	// The SDK credential owns caching and renewal. Never cache a bearer in a lease.
+	finishCredential := measureSandboxProvisionStep(ctx, "credential")
 	token, err := c.credential.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{tokenScope}})
+	finishCredential()
 	if err != nil {
 		return fmt.Errorf("ACA Sandbox managed-identity authentication failed")
 	}
@@ -114,6 +150,8 @@ func (c *client) request(ctx context.Context, operation, method, path string, qu
 	}
 	// No automatic retry: create and command outcomes may be uncertain. The fixed
 	// lease journal reconciles creation before another mutation is considered.
+	finishRequest := measureSandboxProvisionStep(ctx, operation)
+	defer finishRequest()
 	response, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("ACA Sandbox %s request failed: %w", operation, ctxOrTransportError(ctx, err))
@@ -195,7 +233,7 @@ func (c *client) Get(ctx context.Context, id string) (sandbox, error) {
 	}
 	err = c.json(ctx, "inspect", http.MethodGet, path, nil, &result)
 	if err == nil && result.ID != id {
-		err = fmt.Errorf("ACA Sandbox identity changed")
+		err = sandboxOwnershipError("ACA Sandbox identity changed")
 	}
 	return result, err
 }
@@ -244,6 +282,14 @@ func (c *client) Delete(ctx context.Context, id string) error {
 		return err
 	}
 	return c.json(ctx, "delete", http.MethodDelete, path, nil, nil)
+}
+
+func (c *client) Pause(ctx context.Context, id string) error {
+	path, err := c.sandboxPath(id)
+	if err != nil {
+		return err
+	}
+	return c.json(ctx, "pause", http.MethodPost, path+"/stop", nil, nil)
 }
 
 func (c *client) Resume(ctx context.Context, id string) error {

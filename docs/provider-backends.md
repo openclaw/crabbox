@@ -368,6 +368,59 @@ type PausableBackend interface {
 Declare `FeaturePauseResume` when implementing this interface so
 `crabbox providers` exposes the capability.
 
+#### Retained session disks
+
+`FeatureSessionDiskRetentionV1` (`session-disk-retention-v1`) is a separate,
+opt-in contract layered on fixed acquisition and `PausableBackend`. Ordinary
+pause/resume implementations need not implement it. Azure Sandbox is the first
+adapter; see its [configuration and receipt fields](providers/azure-sandbox.md#session-disk-retention-opt-in).
+
+Core owns immutable `SessionDiskRetentionPolicy`, the versioned fixed claim,
+`RetentionLifecycleRequest`, and `SessionDiskRetentionView`. A policy binds
+`session-disk`, an opaque SHA-256 owner digest, and a positive finite
+`computeWindowSeconds` derived from acquisition TTL. It cannot convert an
+existing ephemeral claim or extend its allocation deadline. Core's
+`MutateFixedRetention` holds the durable claim lock, compares exact identity and
+revision, journals the operation before submission, and preserves its original
+window on replay. Pause closes the window; resume requires confirmed suspension
+and a closed window before admitting one new activation.
+
+Adapters own exact native ownership observation, lifecycle-policy readback,
+state normalization, Disk suspension/resumption, execution admission, and exact
+deletion proof. Before work or lifecycle effects, independently verify disabled
+auto-delete and the configured disk-preserving idle suspension policy. Missing,
+mismatched or unknown evidence grants neither replacement nor new admission.
+Do not route retained disks into clean reserve inventory. `stop` and release
+remain destructive and require independent absence proof; cleanup must work
+when acquisition opt-in is disabled or the work window has expired.
+
+The finite window bounds authorized work on each activation, not physical
+billing. Admission and activity cannot renew it. Expiry blocks work; the lifecycle
+owner must reconcile suspension, and provider idle suspension remains enabled.
+There is no independent watchdog or hard billing cutoff if that owner is down,
+and no RAM/process continuation guarantee. Disk retention lasts until explicit
+retirement, subject to the provider's platform guarantees and quotas.
+
+#### Journal compatibility and rollback
+
+Ephemeral claims continue using journal v1 (or their supported legacy envelope).
+Retained claims require journal v2, including after terminal deletion. New readers
+support both; pre-v2 readers reject v2 during claim decoding before provider
+effects. This refusal can also make inventory or other commands encountering
+that claim fail: it is an intentional downgrade incompatibility, not transparent
+backward compatibility. Never rewrite the version or remove retention fields to
+make an old reader accept a retained disk.
+
+Upgrade the lifecycle owner and Crabbox reader together before enabling retained
+acquisition. Disabling opt-in stops new retained acquisitions but does not migrate
+or delete existing claims. For rollback, keep a compatible reader and lifecycle
+owner available to inspect, suspend and explicitly retire each exact disk. Once
+deletion and absence are confirmed, terminal v2 receipts still require the
+compatible reader; retain them in its claim store rather than downgrading them.
+An older binary may use a separate claim store for new ephemeral work, but it
+must not take custody of retained resources. The legacy workspace controller is
+not a retained lifecycle owner and refuses retained acquisition/cleanup.
+
 Provider-owned lease heartbeats are optional, for providers with no
 Crabbox-managed SSH lease to touch:
 

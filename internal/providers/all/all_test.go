@@ -121,7 +121,7 @@ func TestManualBatchBCodespacesGenericTypeInput(t *testing.T) {
 }
 
 func TestProviderActionsRunnerRestrictions(t *testing.T) {
-	restricted := map[string]bool{"local-container": true, "apple-container": true, "multipass": true, "serve": true}
+	restricted := map[string]bool{"local-container": true, "apple-container": true, "multipass": true, "serve": true, "ssh-host": true}
 	for _, name := range core.RegisteredProviderNames() {
 		provider, err := core.ProviderFor(name)
 		if err != nil {
@@ -1447,6 +1447,8 @@ func offlineConformanceConfig(provider string) (core.Config, bool) {
 	cfg := core.BaseConfig()
 	cfg.Provider = provider
 	switch provider {
+	case "azure-sandbox":
+		return cfg, true
 	case "agent-sandbox":
 		cfg.AgentSandbox.Context = "agent-context"
 		cfg.AgentSandbox.WarmPool = "linux-pool"
@@ -1577,6 +1579,7 @@ func allBuiltInProviderNames() []string {
 		"smolvm",
 		"sprites",
 		"ssh",
+		"ssh-host",
 		"superserve",
 		"tart",
 		"tencentcloud",

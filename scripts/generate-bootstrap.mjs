@@ -120,7 +120,7 @@ export function validateCatalog(document) {
   }
   return document;
 }
-export const psQuote = (value) => `'${value.replaceAll("'", "''")}'`;
+export const psQuote = (value) => `'${value.replace(/['\u2018-\u201b]/gu, (quote) => quote + quote)}'`;
 // Bash ANSI-C escapes keep embedded READY here-documents safe for multiline values.
 export const shellQuote = (value) => `'${value.replaceAll("'", "'\\''").replaceAll("\n", () => "'$'\\n''").replaceAll("\r", () => "'$'\\r''")}'`;
 
@@ -221,7 +221,7 @@ function gofmt(source) {
   return result.stdout;
 }
 const functionName = (name) => "shared" + name[0].toUpperCase() + name.slice(1);
-const quoteFunction = (type) => type.startsWith("ps") ? "bootstrapPSQuote" : "bootstrapShellQuote";
+const quoteFunction = (type) => type.startsWith("ps") ? "psQuote" : "bootstrapShellQuote";
 function fragmentFunction(fragment, constants, language) {
   const go = language === "go";
   const params = Object.entries(fragment.parameters).map(([name, type]) => {
@@ -245,7 +245,6 @@ export function generateSources({ constants, catalog, fragments }) {
     ts += `// prettier-ignore\nexport const ${name} = ${JSON.stringify(value)};\n`;
   }
   go += `
-func bootstrapPSQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
 func bootstrapShellQuote(value string) string { return "'" + strings.NewReplacer("'", "'\\\\''", "\\n", "'$'\\\\n''", "\\r", "'$'\\\\r''").Replace(value) + "'" }
 func bootstrapQuoteWords(values []string, quote func(string) string, separator string) string {
   quoted := make([]string, len(values))
@@ -254,8 +253,8 @@ func bootstrapQuoteWords(values []string, quote func(string) string, separator s
 }
 `;
   ts += `
-function bootstrapPSQuote(value: string): string {
-  return "'" + value.replaceAll("'", "''") + "'";
+export function psQuote(value: string): string {
+  return "'" + value.replace(/['\\u2018-\\u201b]/gu, (quote) => quote + quote) + "'";
 }
 
 // prettier-ignore

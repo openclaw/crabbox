@@ -6,6 +6,12 @@ import { AWSPoolAccess } from "./aws-pool-access";
 import { acquisitionRootDisk, sameAWSRootDisk, validAWSRootDiskIdentity } from "./aws-root-disk";
 import { AWSVPCCache } from "./aws-vpc-cache";
 import {
+  classifyDurableObjectFailure,
+  durableObjectFailureResponse,
+  isDurableObjectStorageFailure,
+  logDurableObjectFailure,
+} from "./durable-object-errors";
+import {
   coordinatorGCPFirewallCache,
   coordinatorGCPImageMinimumCache,
   coordinatorGCPTokenCache,
@@ -52,7 +58,9 @@ import {
 } from "./retained-lease-reconcile";
 import { ServeCoordinator, serveEnabled, serveDisabledResponse } from "./serve";
 import { serveCloudProvider } from "./serve-provider";
+import { SSHHostCoordinator } from "./ssh-host";
 import { generateSSHHostKeyPair } from "./ssh-host-key";
+import { sshHostCloudProvider } from "./ssh-host-provider";
 type ReadyPoolMode = boolean | "portable";
 import { AzureResumableProvisioning } from "./azure-provisioning";
 import {
@@ -121,6 +129,7 @@ import {
   githubUserIsAdmin,
   isAdminRequest,
   requestWithAuthContext,
+  requestGitHubCredential,
   verifiedPortalTokenExpiresAtForRevocation,
   verifiedUserTokenExpiresAtForRevocation,
   type AuthContext,
@@ -1397,6 +1406,8 @@ export class FleetCoordinator {
       if (bridgeFailure) return bridgeFailure;
       const parts = pathParts(request);
       const method = request.method.toUpperCase();
+      if (parts[0] === "v1" && parts[1] === "ssh-hosts")
+        return await new SSHHostCoordinator(this.state, this.env).route(request, parts);
       if (parts[0] === "v1" && parts[1] === "serve")
         return await new ServeCoordinator(this.state, this.env).route(request, parts);
       const adminError = adminRouteError(request, method, parts);
@@ -1751,6 +1762,15 @@ export class FleetCoordinator {
           { error: "provider_request_timeout", message: coordinatorErrorMessage(this.env, error) },
           { status: 503, headers: { "retry-after": "5" } },
         );
+      }
+      // Storage failures caught inside the coordinator never reach the Worker boundary.
+      // Preserve the same retryable response there without replaying a possibly committed write.
+      const kind = isDurableObjectStorageFailure(error)
+        ? classifyDurableObjectFailure(error)
+        : "internal_error";
+      if (kind !== "internal_error") {
+        logDurableObjectFailure(error, request);
+        return runEventAppendFailureResponse(request) ?? durableObjectFailureResponse(kind);
       }
       return json({ error: coordinatorErrorMessage(this.env, error) }, { status: 500 });
     }
@@ -3851,7 +3871,7 @@ export class FleetCoordinator {
         await this.putCreateAttempt(attempt);
         return createAttemptBindingConflictResponse();
       }
-      if (lease.provider === "serve") {
+      if (lease.provider === "serve" || lease.provider === "ssh-host") {
         lease.state = "released";
         lease.releaseDeletesServer = true;
         lease.updatedAt = now;
@@ -4140,33 +4160,32 @@ export class FleetCoordinator {
         { error: "invalid_lifetime_policy", message: "lifetime canary requires AWS" },
         { status: 400 },
       );
-    if ((input.provider as string) === "serve") {
-      const result = await new ServeCoordinator(this.state, this.env).create(
-        request,
-        input,
-        fixedLeaseID,
-        async (lease, storage) => {
-          admissionFence.assertActive();
-          const admission = await this.mergedLeaseAdmissionState(
-            lease,
-            new Date(),
-            await this.providerAccessRecords(),
-            undefined,
-            storage,
-          );
-          lease.slug = allocateLeaseSlug(
-            input.slug || leaseSlugFromID(lease.id),
-            lease.id,
-            owner,
-            org,
-            admission.accessLeases,
-          );
-          const limit = enforceCostLimitUsage(admission.costUsage, lease, costLimits(this.env));
-          if (limit) return json({ error: "cost_limit_exceeded", message: limit }, { status: 429 });
-          admissionFence.beginCommit();
-          return undefined;
-        },
-      );
+    if (input.provider === "serve" || input.provider === "ssh-host") {
+      const agent =
+        input.provider === "ssh-host"
+          ? new SSHHostCoordinator(this.state, this.env)
+          : new ServeCoordinator(this.state, this.env);
+      const result = await agent.create(request, input, fixedLeaseID, async (lease, storage) => {
+        admissionFence.assertActive();
+        const admission = await this.mergedLeaseAdmissionState(
+          lease,
+          new Date(),
+          await this.providerAccessRecords(),
+          undefined,
+          storage,
+        );
+        lease.slug = allocateLeaseSlug(
+          input.slug || leaseSlugFromID(lease.id),
+          lease.id,
+          owner,
+          org,
+          admission.accessLeases,
+        );
+        const limit = enforceCostLimitUsage(admission.costUsage, lease, costLimits(this.env));
+        if (limit) return json({ error: "cost_limit_exceeded", message: limit }, { status: 429 });
+        admissionFence.beginCommit();
+        return undefined;
+      });
       if (result.ok)
         await this.state.runExclusive(() => this.armAlarmNoLaterThan(Date.now() + 15_000));
       return result;
@@ -9215,6 +9234,13 @@ export class FleetCoordinator {
   }
 
   private async providerReadiness(request: Request, provider: string): Promise<Response> {
+    if (provider === "ssh-host")
+      return json({
+        provider,
+        configured: true,
+        checks: [],
+        message: "Use host list for eligible managed capacity",
+      });
     if (provider === "serve")
       return (
         serveDisabledResponse(this.env, requestOwner(request)) ??
@@ -13670,7 +13696,7 @@ export class FleetCoordinator {
     const image = this.readyPoolLeaseImageIdentity(observed);
     if (
       !image ||
-      observed.target !== "linux" ||
+      !this.readyPoolTargetSupported(observed) ||
       !canonicalReadyPoolArchitecture(observed.architecture)
     ) {
       return json(
@@ -13745,6 +13771,13 @@ export class FleetCoordinator {
         { status: 400 },
       );
     }
+    const poolProvider = managedLeaseProvider(resolvedLease);
+    if (
+      poolProvider &&
+      typed !== "portable" &&
+      this.provider(poolProvider).requiresPortablePoolAccess
+    )
+      return json({ error: "portable_pool_access_required" }, { status: 409 });
     if (resolvedLease.provider === "daytona") {
       return json(
         {
@@ -14794,13 +14827,22 @@ export class FleetCoordinator {
     );
   }
 
+  private readyPoolTargetSupported(lease: LeaseRecord): boolean {
+    return (
+      lease.target === "linux" ||
+      (lease.provider !== undefined &&
+        isCoordinatorProvider(lease.provider) &&
+        this.provider(lease.provider).supportsReadyPoolTarget?.(lease) === true)
+    );
+  }
+
   private readyPoolIdentityMatchesLease(
     identity: ReadyPoolIdentityV1,
     lease: LeaseRecord,
   ): boolean {
     const image = this.readyPoolLeaseImageIdentity(lease);
     return (
-      lease.target === "linux" &&
+      this.readyPoolTargetSupported(lease) &&
       canonicalReadyPoolArchitecture(lease.architecture) &&
       identity.architecture === lease.architecture &&
       image !== undefined &&
@@ -17985,7 +18027,7 @@ export class FleetCoordinator {
     const candidates = await this.state.runExclusive(async () => {
       const due: LeaseRecord[] = [];
       await this.visitLeaseRecords(async (lease) => {
-        if (lease.provider === "serve") return;
+        if (lease.provider === "serve" || lease.provider === "ssh-host") return;
         if (due.length >= interruptedProvisioningRecoveryBatchSize) {
           return;
         }
@@ -18678,7 +18720,7 @@ export class FleetCoordinator {
       const claimed: Array<{ claim: string; lease: LeaseRecord }> = [];
       const bridgeOwners = await this.leaseBridgeOwners();
       await this.visitLeaseRecords(async (stored) => {
-        if (stored.provider === "serve") return;
+        if (stored.provider === "serve" || stored.provider === "ssh-host") return;
         const needsCleanup = leaseNeedsCleanup(stored, now);
         const closeBridges = !leaseIsLive(stored) && bridgeOwners.has(stored.id);
         // Most history has neither due provider work nor bridge state. Journal reads and
@@ -21258,6 +21300,7 @@ export class FleetCoordinator {
   }
 
   private provider(provider: Provider, region?: string, project?: string): CloudProvider {
+    if (provider === "ssh-host") return sshHostCloudProvider(this.state, this.env);
     if (provider === "serve") return serveCloudProvider();
     const testProvider = this.testProviders[provider];
     if (testProvider) {
@@ -25382,7 +25425,7 @@ function pairingBrowserSession(
   if (!cookie || !token || !timingSafeEqual(cookie, token)) return undefined;
   const login = request.headers.get("x-crabbox-github-login")?.trim() ?? "";
   const tokenID = request.headers.get("x-crabbox-github-token-id")?.trim() ?? "";
-  const sealedCredential = request.headers.get("x-crabbox-github-sealed-credential")?.trim() ?? "";
+  const sealedCredential = requestGitHubCredential(request) ?? "";
   const expiresAt = request.headers.get("x-crabbox-token-expires-at")?.trim() ?? "";
   if (!login || !tokenID || !sealedCredential || Date.parse(expiresAt) <= Date.now()) {
     return undefined;
@@ -25566,7 +25609,7 @@ async function bridgeGrantForRequest(
   const token = bearerToken(request);
   const login = request.headers.get("x-crabbox-github-login")?.trim();
   const tokenID = request.headers.get("x-crabbox-github-token-id")?.trim();
-  const sealedCredential = request.headers.get("x-crabbox-github-sealed-credential")?.trim();
+  const sealedCredential = requestGitHubCredential(request);
   const expiresAt = request.headers.get("x-crabbox-token-expires-at")?.trim();
   if (
     !token ||
@@ -29023,6 +29066,8 @@ export interface CloudProvider {
     context: ProviderProvisioningFailureContext,
   ): ProviderProvisioningFailureEvidence;
   poolAccess?(): ProviderPoolAccess;
+  requiresPortablePoolAccess?: boolean;
+  supportsReadyPoolTarget?(lease: LeaseRecord): boolean;
   resumableProvisioning?(): ProviderResumableProvisioning;
   readyPoolImageIdentity?(lease: LeaseRecord): ReadyPoolImageIdentity | undefined;
   observeReadyPoolImageIdentity?(lease: LeaseRecord): Promise<LeaseImageIdentity | undefined>;

@@ -190,6 +190,110 @@ describe("authenticated original root evidence", () => {
       ),
     ).rejects.toThrow(/original root disk|AWS CloudTrail|AWS scope recovery/);
   });
+  it.each([
+    ["AccessDeniedException", { __type: "AccessDeniedException" }],
+    ["InvalidTimeRangeException", { __type: "com.amazonaws.cloudtrail#InvalidTimeRangeException" }],
+    ["InvalidLookupAttributesException", { code: "InvalidLookupAttributesException" }],
+    ["ThrottlingException", { __type: "ThrottlingException" }],
+    ["UnrecognizedClientException", { __type: "UnrecognizedClientException" }],
+  ])("reports only the known provider error code %s", async (code, body) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+    const fetch = vi.fn<() => Promise<Response>>(async () =>
+      Response.json(
+        { ...body, message: "private provider message", credentials: "private" },
+        { status: 400 },
+      ),
+    );
+    const before = structuredClone(lease);
+    const error = await lookupAWSOriginalRootDisk(lease, account, fetch).catch(
+      (value: Error) => value,
+    );
+    expect(String(error)).toContain(`HTTP 400, code ${code}`);
+    expect(String(error)).not.toContain("private");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(lease).toEqual(before);
+  });
+  it.each([
+    JSON.stringify({ __type: "PrivateUnknownCode", message: "private" }),
+    JSON.stringify({ __type: { code: "AccessDeniedException" } }),
+    "malformed private response",
+    JSON.stringify({ __type: "AccessDeniedException", message: "x".repeat(4096) }),
+  ])("preserves the generic failure for untrusted diagnostic bodies", async (body) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+    const error = await lookupAWSOriginalRootDisk(
+      lease,
+      account,
+      async () => new Response(body, { status: 400 }),
+    ).catch((value: Error) => value);
+    expect(String(error)).toContain("HTTP 400)");
+    expect(String(error)).not.toContain("code ");
+    expect(String(error)).not.toContain("private");
+  });
+  it("uses the error-type header without reading or exposing the body", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+    const cancel = vi.fn<() => void>();
+    const body = new ReadableStream<Uint8Array>({ cancel });
+    const response = new Response(body, {
+      status: 400,
+      headers: { "x-amzn-errortype": "ThrottlingException:private-suffix" },
+    });
+    await expect(lookupAWSOriginalRootDisk(lease, account, async () => response)).rejects.toThrow(
+      "HTTP 400, code ThrottlingException",
+    );
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(body.locked).toBe(false);
+  });
+  it("does not replace an unknown header code with a recognized body code", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+    const response = Response.json(
+      { __type: "AccessDeniedException" },
+      { status: 400, headers: { "x-amzn-errortype": "private-unknown-code" } },
+    );
+    const result = await lookupAWSOriginalRootDisk(lease, account, async () => response).catch(
+      (value: Error) => value,
+    );
+    expect(String(result)).toContain("HTTP 400)");
+    expect(String(result)).not.toMatch(/private|AccessDeniedException/);
+    expect(response.body?.locked).toBe(false);
+  });
+  it("preserves the HTTP failure when the diagnostic body read fails", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new Error("private read failure"));
+      },
+    });
+    const result = await lookupAWSOriginalRootDisk(
+      lease,
+      account,
+      async () => new Response(body, { status: 400 }),
+    ).catch((value: Error) => value);
+    expect(String(result)).toContain("HTTP 400)");
+    expect(String(result)).not.toContain("private");
+    expect(body.locked).toBe(false);
+  });
+  it("bounds a stalled diagnostic read and cancellation without replacing the HTTP failure", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const timeout = new AbortController();
+    vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeout.signal);
+    const cancel = vi.fn<() => Promise<void>>(() => new Promise<void>(() => {}));
+    const body = new ReadableStream<Uint8Array>({ cancel });
+    const fetch = vi.fn<() => Promise<Response>>(async () => new Response(body, { status: 400 }));
+    const result = lookupAWSOriginalRootDisk(lease, account, fetch).catch((value: Error) => value);
+    await vi.advanceTimersByTimeAsync(1_000);
+    timeout.abort(new Error("private timeout diagnostic"));
+    expect(String(await result)).toContain("HTTP 400)");
+    expect(String(await result)).not.toContain("private");
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(body.locked).toBe(false);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
   it("uses the operation's fixed provider credentials and original Region for history", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(now);

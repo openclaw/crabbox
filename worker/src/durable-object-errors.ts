@@ -2,6 +2,16 @@ import { json } from "./http";
 
 type DurableObjectFailureKind = "overloaded" | "unavailable" | "internal_error";
 
+const storageFailures = new WeakSet<object>();
+
+export function recordDurableObjectStorageFailure(error: unknown): void {
+  if (error !== null && typeof error === "object") storageFailures.add(error);
+}
+
+export function isDurableObjectStorageFailure(error: unknown): boolean {
+  return error !== null && typeof error === "object" && storageFailures.has(error);
+}
+
 type ErrorDetails = {
   name?: unknown;
   message?: unknown;

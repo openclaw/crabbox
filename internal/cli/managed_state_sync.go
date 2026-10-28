@@ -31,7 +31,7 @@ func normalizeManagedTransferPath(path string, depth int) (string, error) {
 	if depth > 128 {
 		return "", fmt.Errorf("managed-state transfer path exceeds metadata depth limit")
 	}
-	info, err := os.Lstat(path)
+	info, err := fileSnapshotPathInfo(path)
 	if err != nil && !managedTransferPathAbsent(err) {
 		return "", err
 	}

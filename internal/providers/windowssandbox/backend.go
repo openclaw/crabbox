@@ -879,7 +879,7 @@ func cleanWindowsPath(value string) string {
 }
 
 func psSingleQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+	return core.PowerShellQuote(value)
 }
 
 func psBool(value bool) string {

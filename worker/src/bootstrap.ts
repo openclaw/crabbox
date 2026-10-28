@@ -1,4 +1,5 @@
 import {
+  psQuote,
   sharedLinuxSSHRestart,
   sharedLinuxBootstrapStart,
   sharedLinuxBootstrapActivate,
@@ -380,8 +381,18 @@ function windowsWSL2BootstrapPowerShell(config: LeaseConfig): string {
 	  wsl.exe --set-default $wslDistro | Out-Host
 	  if ($LASTEXITCODE -ne 0) { throw "wsl --set-default failed with exit $LASTEXITCODE" }
 	}
-	$linuxSetup = @'
-set -euo pipefail
+	$linuxSetup = ${psQuote(windowsWSL2LinuxSetup(workRoot))}
+	$linuxSetup = $linuxSetup.Replace(([string][char]13 + [string][char]10), ([string][char]10))
+	[IO.File]::WriteAllText($wslSetup, $linuxSetup, (New-Object Text.UTF8Encoding($false)))
+	wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh
+	if ($LASTEXITCODE -ne 0) { throw "WSL setup failed with exit $LASTEXITCODE" }
+	Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
+	Restart-Service sshd -Force
+	`;
+}
+
+function windowsWSL2LinuxSetup(workRoot: string): string {
+  return `set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 mkdir -p ${shellQuote(workRoot)} /var/cache/crabbox/pnpm /var/cache/crabbox/npm /var/lib/crabbox
 cat >/etc/apt/apt.conf.d/80-crabbox-retries <<'APT'
@@ -419,15 +430,7 @@ test -w ${shellQuote(workRoot)}
 READY
 chmod 0755 /usr/local/bin/crabbox-ready
 touch /var/lib/crabbox/bootstrapped
-crabbox-ready
-'@
-	$linuxSetup = $linuxSetup.Replace(([string][char]13 + [string][char]10), ([string][char]10))
-	[IO.File]::WriteAllText($wslSetup, $linuxSetup, (New-Object Text.UTF8Encoding($false)))
-	wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh
-	if ($LASTEXITCODE -ne 0) { throw "WSL setup failed with exit $LASTEXITCODE" }
-	Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
-	Restart-Service sshd -Force
-	`;
+crabbox-ready`;
 }
 
 export function azureWindowsBootstrapPowerShell(config: LeaseConfig): string {
@@ -928,10 +931,6 @@ function tailscaleBootstrap(config: LeaseConfig): string {
     fi
     chown ${shellQuote(`${sshUser}:${sshUser}`)} /var/lib/crabbox/tailscale-* || true
     chmod 0640 /var/lib/crabbox/tailscale-* || true`;
-}
-
-function psQuote(value: string): string {
-  return `'${value.replaceAll("'", "''")}'`;
 }
 
 function shellQuote(value: string): string {

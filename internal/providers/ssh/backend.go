@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -79,7 +80,7 @@ func (b *staticLeaseBackend) acquire(ctx context.Context, req core.AcquireReques
 			return core.LeaseTarget{}, err
 		}
 		if req.Repo.Root != "" {
-			if err := core.CheckLeaseClaimRepositoryOwner(leaseID, expected, req.Repo.Root, req.Reclaim); err != nil {
+			if err := checkStaticLeaseClaimOwner(leaseID, expected, req.Repo.Root, req.Reclaim); err != nil {
 				return core.LeaseTarget{}, err
 			}
 		}
@@ -155,7 +156,7 @@ func (b *staticLeaseBackend) Resolve(ctx context.Context, req core.ResolveReques
 			return core.LeaseTarget{}, err
 		}
 		if req.Repo.Root != "" {
-			if err := core.CheckLeaseClaimRepositoryOwner(lease.LeaseID, expected, req.Repo.Root, req.Reclaim); err != nil {
+			if err := checkStaticLeaseClaimOwner(lease.LeaseID, expected, req.Repo.Root, req.Reclaim); err != nil {
 				return core.LeaseTarget{}, err
 			}
 		}
@@ -488,7 +489,11 @@ func staticLeaseFromClaim(cfg core.Config, claim core.LeaseClaim) (core.Server, 
 		server.Labels["windows_mode"] = target.WindowsMode
 	}
 	if server.Labels["architecture_route"] == architectureEndpoint(target) && claim.SSHPort > 0 {
-		target.Port = strconv.Itoa(claim.SSHPort)
+		port := strconv.Itoa(claim.SSHPort)
+		// Historical readiness must not override the current port selection.
+		if port == target.Port || slices.Contains(target.FallbackPorts, port) || target.FallbackPorts == nil && port == "22" {
+			target.Port = port
+		}
 	}
 	if claim.Labels["static_power_token"] != "" {
 		configurePoweredTarget(&target)

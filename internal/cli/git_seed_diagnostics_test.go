@@ -46,7 +46,7 @@ func TestGitSeedFailurePhaseAndPreservation(t *testing.T) {
 				t.Fatalf("missing %s failure diagnostic: err=%v output=%q", phase, err, out)
 			}
 			var warning bytes.Buffer
-			warnRemoteGitSeedFailure(&warning, string(out), err)
+			warnRemoteGitSeedFailure(context.Background(), &warning, string(out), err)
 			if !strings.Contains(warning.String(), "phase="+phase) || strings.Contains(warning.String(), root) || strings.Contains(warning.String(), plan.RemoteURL) {
 				t.Fatalf("unsafe or incorrect warning: %q", warning.String())
 			}
@@ -80,7 +80,7 @@ func TestGitSeedDiagnosticLabelsAndPrivacy(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
-			warnRemoteGitSeedFailure(&out, "crabbox-git-seed phase=clone\n"+tc.output, errors.New("private transport error"))
+			warnRemoteGitSeedFailure(context.Background(), &out, "crabbox-git-seed phase=clone\n"+tc.output, errors.New("private transport error"))
 			want := "warning: remote git seed failed: phase=clone reason=" + tc.want + " exit=unknown; continuing with file sync; Git metadata was not seeded or verified\n"
 			if out.String() != want {
 				t.Fatalf("warning=%q want=%q", out.String(), want)
@@ -92,10 +92,67 @@ func TestGitSeedDiagnosticLabelsAndPrivacy(t *testing.T) {
 		{"crabbox-git-seed phase=clone\nSSL certificate problem\ncrabbox-git-seed phase=verify\n", "reason=verification"},
 	} {
 		var out bytes.Buffer
-		warnRemoteGitSeedFailure(&out, tc.output, context.Canceled)
+		warnRemoteGitSeedFailure(context.Background(), &out, tc.output, context.Canceled)
 		if !strings.Contains(out.String(), tc.want) || !strings.Contains(out.String(), "exit=cancelled") {
 			t.Fatalf("warning=%q", out.String())
 		}
+	}
+}
+
+func TestGitSeedDiagnosticReportsInterruptedExits(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signal fixture")
+	}
+	// Each case runs a real local process so the error has the exact shape
+	// exec reports for an ssh client killed by a signal or by its context.
+	run := func(ctx context.Context, script string) error {
+		return exec.CommandContext(ctx, "sh", "-c", script).Run()
+	}
+	cancelled := func() context.Context {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
+	expired := func() context.Context {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		t.Cleanup(cancel)
+		return ctx
+	}
+	for _, tc := range []struct {
+		name string
+		err  func(t *testing.T) error
+		ctx  func() context.Context
+		want string
+	}{
+		{"sigkill", func(*testing.T) error { return run(context.Background(), "kill -KILL $$") }, context.Background, "signal:killed"},
+		{"sigterm", func(*testing.T) error { return run(context.Background(), "kill -TERM $$") }, context.Background, "signal:terminated"},
+		{"context cancel kills process", func(t *testing.T) error {
+			ctx, cancel := context.WithCancel(context.Background())
+			cmd := exec.CommandContext(ctx, "sleep", "30")
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			cancel()
+			return cmd.Wait()
+		}, cancelled, "cancelled"},
+		{"deadline kills process", func(*testing.T) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			return run(ctx, "exec sleep 30")
+		}, expired, "deadline"},
+		{"remote exit code wins over cancellation", func(*testing.T) error { return run(context.Background(), "exit 128") }, cancelled, "128"},
+		{"wrapped context error", func(*testing.T) error { return context.Canceled }, context.Background, "cancelled"},
+		{"opaque transport error", func(*testing.T) error { return errors.New("private transport error") }, context.Background, "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.err(t)
+			var out bytes.Buffer
+			reportRemoteGitSeedFailure(tc.ctx(), &out, "crabbox-git-seed phase=clone\nprivate helper says secret", err, "aborting before file sync")
+			want := "warning: remote git seed failed: phase=clone reason=unknown exit=" + tc.want + "; aborting before file sync; Git metadata was not seeded or verified\n"
+			if out.String() != want {
+				t.Fatalf("err=%v warning=%q want=%q", err, out.String(), want)
+			}
+		})
 	}
 }
 
@@ -136,7 +193,7 @@ func TestGitSeedCaptureLimitPreservesExecutionAndRetry(t *testing.T) {
 			}
 			if tc.wantError {
 				var warning bytes.Buffer
-				warnRemoteGitSeedFailure(&warning, out, err)
+				warnRemoteGitSeedFailure(context.Background(), &warning, out, err)
 				if !strings.Contains(warning.String(), "phase=unknown reason=unknown") || strings.Contains(warning.String(), "secret") {
 					t.Fatalf("warning=%q", warning.String())
 				}
@@ -173,7 +230,7 @@ func TestGitOriginAttemptRetainsBoundedTruncatedDiagnosticsWithoutFallback(t *te
 		t.Fatalf("truncated output authorized fallback=%t reason=%q", fallback, reason)
 	}
 	var warning bytes.Buffer
-	reportRemoteGitSeedFailure(&warning, out, err, "aborting before file sync")
+	reportRemoteGitSeedFailure(context.Background(), &warning, out, err, "aborting before file sync")
 	want := "warning: remote git seed failed: phase=unknown reason=unknown exit=78; aborting before file sync; Git metadata was not seeded or verified\n"
 	if warning.String() != want {
 		t.Fatalf("warning=%q want=%q", warning.String(), want)

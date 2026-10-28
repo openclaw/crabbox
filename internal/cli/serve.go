@@ -35,3 +35,23 @@ func (c *CoordinatorClient) AgentRequest(ctx context.Context, method, path strin
 }
 
 func Version() string { return currentVersion() }
+
+type hostKongCmd struct {
+	Args []string `arg:"" optional:"" passthrough:""`
+}
+
+func (c *hostKongCmd) Run(ctx context.Context, app App) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	p, err := ProviderFor("ssh-host")
+	if err != nil {
+		return err
+	}
+	command, ok := p.(ProviderAgentCommander)
+	if !ok {
+		return Exit(2, "managed host agent unavailable")
+	}
+	return command.RunAgent(ctx, cfg, runtimeForApp(app), stripKongCommandPath(c.Args, "host"))
+}

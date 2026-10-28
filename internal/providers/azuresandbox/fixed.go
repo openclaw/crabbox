@@ -15,6 +15,13 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+var errSandboxOwnership = errors.New("ACA Sandbox exact ownership mismatch")
+
+type sandboxOwnershipError string
+
+func (e sandboxOwnershipError) Error() string { return string(e) }
+func (e sandboxOwnershipError) Unwrap() error { return errSandboxOwnership }
+
 var leaseKind = core.FixedLeaseKind{ClaimProvider: providerName, IntentVersion: 1, Label: "ACA Sandbox"}
 
 type backend struct {
@@ -71,7 +78,7 @@ func (b *backend) observe(ctx context.Context, tx *core.FixedTransaction, mode c
 	var out core.FixedObservation[sandbox]
 	claim := tx.Claim
 	if claim.ProviderScope != (Provider{}).ClaimScope(b.cfg) {
-		return out, fmt.Errorf("ACA Sandbox group differs from lease owner")
+		return out, sandboxOwnershipError("ACA Sandbox group differs from lease owner")
 	}
 	c, err := b.connect()
 	if err != nil {
@@ -105,12 +112,12 @@ func (b *backend) observe(ctx context.Context, tx *core.FixedTransaction, mode c
 	}
 	for _, s := range candidates {
 		if s.ID == "" || s.Labels["crabbox_lease"] != claim.LeaseID || s.Labels["crabbox_fingerprint"] != fingerprintLabel(claim.FixedCreateIntent.Fingerprint) || s.Labels["crabbox_attempt"] == "" || s.Labels["crabbox_attempt"] != claim.FixedCreateIntent.Attempt["nonce"] {
-			return out, fmt.Errorf("ACA Sandbox ownership does not match the exact lease attempt")
+			return out, sandboxOwnershipError("ACA Sandbox ownership does not match the exact lease attempt")
 		}
 		// A bad restore is unusable, but exact ownership still permits explicit cleanup.
 		if snapshotID := claim.FixedCreateIntent.Attempt["snapshot_id"]; snapshotID != "" && mode != core.FixedObserveDelete {
 			if s.SourcesRef.Snapshot == nil || s.SourcesRef.Snapshot.ID != snapshotID || s.SourcesRef.DiskImage == nil || s.SourcesRef.DiskImage.ID != claim.FixedCreateIntent.Attempt["source_disk_id"] {
-				return out, fmt.Errorf("ACA Sandbox restored source differs from its exact lease attempt")
+				return out, sandboxOwnershipError("ACA Sandbox restored source differs from its exact lease attempt")
 			}
 		}
 	}
@@ -123,6 +130,16 @@ func (b *backend) observe(ctx context.Context, tx *core.FixedTransaction, mode c
 }
 
 func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (core.LeaseTarget, error) {
+	retention, err := b.retentionPolicy()
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if retention != nil && core.ControllerOwnsLeaseLifecycle() {
+		return core.LeaseTarget{}, fmt.Errorf("controller does not support session disk retention; use the native retention lifecycle owner")
+	}
+	if retention != nil && req.Reclaim {
+		return core.LeaseTarget{}, fmt.Errorf("retained session disks cannot be reclaimed into another owner")
+	}
 	if b.cfg.AzureSandbox.DiskID != "" && b.cfg.AzureSandbox.Disk != "" && b.cfg.AzureSandbox.Disk != core.AzureSandboxConfigDefaultDisk {
 		return core.LeaseTarget{}, fmt.Errorf("ACA Sandbox private disk ID cannot be combined with a public disk override")
 	}
@@ -142,7 +159,7 @@ func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (cor
 	}
 	cfg := b.cfg.AzureSandbox
 	return core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
-		Kind: leaseKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root,
+		Now: b.now, Retention: retention, Kind: leaseKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root,
 		Reclaim: req.Reclaim, TargetOS: core.TargetLinux, TTL: b.cfg.TTL, IdleTimeout: b.cfg.IdleTimeout,
 	}, core.FixedLeaseOperations[sandbox]{
 		Admission: &core.FixedAdmission{PendingKey: "submission", PendingValue: "pending", SubmittedValue: "submitted"},
@@ -157,7 +174,7 @@ func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (cor
 			return core.FixedLeaseBinding{ProviderScope: (Provider{}).ClaimScope(b.cfg), Fingerprint: fingerprint, AllocateSlug: true, RequestedSlug: req.RequestedSlug}, err
 		},
 		Plan: func(_ context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
-			values := map[string]string{"submission": "pending", "expires_at": time.Now().Add(b.cfg.TTL).UTC().Format(time.RFC3339Nano)}
+			values := map[string]string{"submission": "pending", "expires_at": b.now().Add(b.cfg.TTL).UTC().Format(time.RFC3339Nano)}
 			if snapshot != nil {
 				values["snapshot_id"], values["source_disk_id"] = snapshot.SnapshotID, snapshot.SourceDiskID
 			}
@@ -165,12 +182,27 @@ func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (cor
 		},
 		ObserveExact: b.observe,
 		Submit: func(ctx context.Context, tx *core.FixedTransaction) (sandbox, error) {
+			if retention != nil {
+				deadline, err := core.SessionDiskWindowDeadline(*tx.Claim, b.now())
+				if err != nil {
+					return sandbox{}, err
+				}
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithDeadline(ctx, deadline)
+				defer cancel()
+			}
 			if err := b.verifySnapshotSource(ctx, snapshot); err != nil {
 				return sandbox{}, err
 			}
+			// Read-only prerequisites cannot authorize creation after the window.
+			if retention != nil {
+				if _, err := core.SessionDiskWindowDeadline(*tx.Claim, b.now()); err != nil {
+					return sandbox{}, err
+				}
+			}
 			body := createRequest{Resources: map[string]string{"cpu": "2000m", "memory": "4096Mi"}, Labels: maps.Clone(tx.Claim.Labels), Lifecycle: map[string]any{
 				"autoSuspendPolicy": map[string]any{"enabled": true, "interval": int(b.cfg.IdleTimeout.Seconds()), "mode": "Disk"},
-				"autoDeletePolicy":  map[string]any{"enabled": true, "deleteIntervalInSeconds": int(b.cfg.TTL.Seconds())},
+				"autoDeletePolicy":  map[string]any{"enabled": retention == nil, "deleteIntervalInSeconds": int(b.cfg.TTL.Seconds())},
 			}}
 			if snapshot != nil {
 				// CLI/server-qualified restore accepts fresh labels. Do not send
@@ -198,20 +230,46 @@ func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (cor
 			return s, nil
 		},
 		PrepareAccess: func(ctx context.Context, tx *core.FixedTransaction, s sandbox) (core.LeaseTarget, error) {
-			deadline, err := time.Parse(time.RFC3339Nano, tx.Claim.FixedCreateIntent.Attempt["expires_at"])
-			if err != nil || !deadline.After(time.Now()) {
-				return core.LeaseTarget{}, fmt.Errorf("ACA Sandbox allocation expired; release the lease")
+			var deadline time.Time
+			var err error
+			if retention != nil {
+				deadline, err = core.SessionDiskWindowDeadline(*tx.Claim, b.now())
+				if err != nil {
+					return core.LeaseTarget{}, fmt.Errorf("%w; inspect the same lease before explicit pause/resume recovery", err)
+				}
+			} else {
+				deadline, err = time.Parse(time.RFC3339Nano, tx.Claim.FixedCreateIntent.Attempt["expires_at"])
+				if err != nil || !deadline.After(b.now()) {
+					return core.LeaseTarget{}, fmt.Errorf("ACA Sandbox allocation expired; release the lease")
+				}
 			}
 			ctx, cancel := context.WithDeadline(ctx, deadline)
 			defer cancel()
+			// Readback and lifecycle policy precede any access preparation.
+			if snapshot != nil {
+				policy := snapshot.Lifecycle
+				if retention != nil {
+					policy.AutoDelete.Enabled = false
+				}
+				if err := b.configureSnapshotLifecycle(ctx, tx, s, policy); err != nil {
+					return core.LeaseTarget{}, err
+				}
+			}
+			if retention != nil {
+				if err := b.verifyRetentionPolicy(*tx.Claim, s); err != nil {
+					// A setter is reconciled by independent observation, never create reply.
+					observed, e := b.inspect(ctx, *tx.Claim)
+					if e != nil {
+						return core.LeaseTarget{}, e
+					}
+					if e = b.verifyRetentionPolicy(*tx.Claim, observed); e != nil {
+						return core.LeaseTarget{}, e
+					}
+				}
+			}
 			s, err = b.ensureRunning(ctx, *tx.Claim)
 			if err != nil {
 				return core.LeaseTarget{}, err
-			}
-			if snapshot != nil {
-				if err := b.configureSnapshotLifecycle(ctx, tx, s, snapshot.Lifecycle); err != nil {
-					return core.LeaseTarget{}, err
-				}
 			}
 			return core.LeaseTarget{LeaseID: tx.Claim.LeaseID, Server: core.Server{Provider: providerName, CloudID: s.ID, ImmutableID: s.ID, Labels: s.Labels, Status: s.State}}, nil
 		},

@@ -295,8 +295,22 @@ func windowsWSL2BootstrapPowerShell(cfg Config) string {
 	  wsl.exe --set-default $wslDistro | Out-Host
 	  if ($LASTEXITCODE -ne 0) { throw "wsl --set-default failed with exit $LASTEXITCODE" }
 	}
-	$linuxSetup = @'
-set -euo pipefail
+	$linuxSetup = ` + psQuote(windowsWSL2LinuxSetup(workRoot)) + `
+	$linuxSetup = $linuxSetup.Replace(([string][char]13 + [string][char]10), ([string][char]10))
+	[IO.File]::WriteAllText($wslSetup, $linuxSetup, (New-Object Text.UTF8Encoding($false)))
+	wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh
+	if ($LASTEXITCODE -ne 0) { throw "WSL setup failed with exit $LASTEXITCODE" }
+	wsl.exe --terminate $wslDistro | Out-Host
+	if ($LASTEXITCODE -ne 0) { throw "WSL restart failed with exit $LASTEXITCODE" }
+	wsl.exe -d $wslDistro --exec /usr/local/bin/crabbox-ready
+	if ($LASTEXITCODE -ne 0) { throw "WSL cold-start readiness failed with exit $LASTEXITCODE" }
+	Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
+	Restart-Service sshd -Force
+	`
+}
+
+func windowsWSL2LinuxSetup(workRoot string) string {
+	return `set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 mkdir -p /etc/cloud
 # Crabbox owns this distro's setup. WSL datasource discovery can block systemd
@@ -360,19 +374,7 @@ test -w ` + shellQuote(workRoot) + `
 READY
 chmod 0755 /usr/local/bin/crabbox-ready
 touch /var/lib/crabbox/bootstrapped
-sudo -H -u crabbox /usr/local/bin/crabbox-ready
-'@
-	$linuxSetup = $linuxSetup.Replace(([string][char]13 + [string][char]10), ([string][char]10))
-	[IO.File]::WriteAllText($wslSetup, $linuxSetup, (New-Object Text.UTF8Encoding($false)))
-	wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh
-	if ($LASTEXITCODE -ne 0) { throw "WSL setup failed with exit $LASTEXITCODE" }
-	wsl.exe --terminate $wslDistro | Out-Host
-	if ($LASTEXITCODE -ne 0) { throw "WSL restart failed with exit $LASTEXITCODE" }
-	wsl.exe -d $wslDistro --exec /usr/local/bin/crabbox-ready
-	if ($LASTEXITCODE -ne 0) { throw "WSL cold-start readiness failed with exit $LASTEXITCODE" }
-	Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
-	Restart-Service sshd -Force
-	`
+sudo -H -u crabbox /usr/local/bin/crabbox-ready`
 }
 
 // The lease owns distro lifetime: WSL's client-idle shutdown kills detached

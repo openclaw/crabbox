@@ -25,10 +25,10 @@ func syncWindowsNative(ctx context.Context, target SSHTarget, repo Repo, cfg Con
 				coherence = gitCoherencePlan{}
 				fmt.Fprintln(stderr, "git origin fallback reason=raw_workspace; using plain manifest sync")
 			} else if exitCode(err) == gitSeedUnsafeWorkspaceExitCode {
-				reportRemoteGitSeedFailure(stderr, out, err, "aborting before file sync")
+				reportRemoteGitSeedFailure(ctx, stderr, out, err, "aborting before file sync")
 				return Exit(6, "remote git seed failed: %v", err)
 			} else {
-				warnRemoteGitSeedFailure(stderr, out, err)
+				warnRemoteGitSeedFailure(ctx, stderr, out, err)
 			}
 		}
 	}

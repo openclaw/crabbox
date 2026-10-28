@@ -904,10 +904,44 @@ func TestCommandRoutingStaticAdapterOwnsResolvedTargetFallback(t *testing.T) {
 			t.Fatalf("missing %q: %s", want, output)
 		}
 	}
+	if !strings.Contains(output, "--static-no-control-master=false") {
+		t.Fatalf("false no-control-master not routed: %s", output)
+	}
+	cfg.Static.NoControlMaster = true
+	route = CommandRoutingFor(cfg, "lease", CommandRoutingRescue, target)
+	if !strings.Contains(strings.Join(route.Args, " "), "--static-no-control-master=true") {
+		t.Fatalf("no-control-master not routed: %v", route.Args)
+	}
 	target.AuthSecret = true
 	target.User = "synthetic-secret"
 	route = CommandRoutingFor(cfg, "lease", CommandRoutingRescue, target)
 	if strings.Contains(strings.Join(route.Args, " "), "synthetic-secret") {
 		t.Fatalf("resolved secret username leaked: %v", route.Args)
+	}
+}
+
+func TestCommandRoutingStaticNoControlMasterRoundTrip(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(strconv.FormatBool(enabled), func(t *testing.T) {
+			cfg := Config{Provider: "ssh", Static: StaticConfig{Host: "runner.example.test", NoControlMaster: enabled}}
+			for _, purpose := range []CommandRoutingPurpose{CommandRoutingRescue, CommandRoutingStop, CommandRoutingRetry} {
+				route := CommandRoutingFor(cfg, "static_runner", purpose)
+				// A retry reloads lower-precedence config before applying the route.
+				reloaded := StaticConfig{NoControlMaster: !enabled}
+				fs := flag.NewFlagSet("retry", flag.ContinueOnError)
+				fs.SetOutput(io.Discard)
+				fs.String("provider", "", "")
+				values := RegisterStaticConfigFlags(fs, reloaded)
+				if err := fs.Parse(route.Args); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := values.Apply(&reloaded, fs); err != nil {
+					t.Fatal(err)
+				}
+				if reloaded.NoControlMaster != enabled {
+					t.Fatalf("purpose=%v route=%q restored NoControlMaster=%t, want %t", purpose, route.Args, reloaded.NoControlMaster, enabled)
+				}
+			}
+		})
 	}
 }

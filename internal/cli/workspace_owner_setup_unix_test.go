@@ -425,7 +425,7 @@ func TestWorkspaceOwnerGitSeedPreservesOriginFailure(t *testing.T) {
 				}
 				if kind == "missing filesystem" {
 					var warning bytes.Buffer
-					reportRemoteGitSeedFailure(&warning, out, err, "aborting before file sync")
+					reportRemoteGitSeedFailure(context.Background(), &warning, out, err, "aborting before file sync")
 					if !strings.Contains(warning.String(), "phase=clone reason=repository/ref") {
 						t.Fatalf("seed phase and diagnostic reordered: %q", warning.String())
 					}

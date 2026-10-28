@@ -1,6 +1,7 @@
 import { sanitizeAWSRegion } from "./aws-region";
 import { validAWSRootDiskIdentity } from "./aws-root-disk";
 import { sha256Hex } from "./encoding";
+import { waitForProviderSignal } from "./provider-deadline";
 import { providerKeyForLease } from "./provider-key";
 import { providerLabelsOwnedByLease } from "./provider-labels";
 import { ProviderResourceUnresolvedError } from "./provider-provisioning";
@@ -26,6 +27,26 @@ export type AWSLegacyAllocationEvidence = Pick<
 const eventHistoryMs = 90 * 24 * 60 * 60_000;
 const maxLookupPages = 10;
 const maxLookupBytes = 2 * 1024 * 1024;
+const lookupErrorCodes = new Set([
+  "AccessDenied",
+  "AccessDeniedException",
+  "IncompleteSignature",
+  "InvalidAction",
+  "InvalidClientTokenId",
+  "InvalidEventCategoryException",
+  "InvalidLookupAttributesException",
+  "InvalidMaxResultsException",
+  "InvalidNextTokenException",
+  "InvalidSignatureException",
+  "InvalidTimeRangeException",
+  "MissingAuthenticationToken",
+  "OperationNotPermittedException",
+  "RequestExpired",
+  "Throttling",
+  "ThrottlingException",
+  "UnrecognizedClientException",
+  "UnsupportedOperationException",
+]);
 
 export function awsCleanupRecoveryAuditKey(leaseID: string): string {
   return `aws-cleanup-recovery-audit:${leaseID}`;
@@ -206,11 +227,10 @@ async function lookupAllocation(
       );
     });
     if (!response.ok) {
-      // oxlint-disable-next-line eslint/no-await-in-loop -- Close the failed page before refusing this serial evidence lookup.
-      await response.body?.cancel();
-      // CloudTrail errors and event payloads can contain credentials or user data; never echo them.
+      // oxlint-disable-next-line eslint/no-await-in-loop -- Classify and close this failed page without another provider request.
+      const code = await lookupErrorCode(response);
       throw new ProviderResourceUnresolvedError(
-        `AWS CloudTrail LookupEvents failed (HTTP ${response.status}); verify existing read permission and original account evidence`,
+        `AWS CloudTrail LookupEvents failed (HTTP ${response.status}${code ? `, code ${code}` : ""}); verify existing read permission and original account evidence`,
       );
     }
     // oxlint-disable-next-line eslint/no-await-in-loop -- Each response is bounded before its next page is admitted.
@@ -248,6 +268,30 @@ async function lookupAllocation(
   throw new ProviderResourceUnresolvedError(
     "AWS CloudTrail lookup exceeded the bounded evidence window; no scope was recovered",
   );
+}
+
+function knownLookupErrorCode(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length > 256) return undefined;
+  const code = value.split(":")[0]?.split("#").at(-1);
+  return code && lookupErrorCodes.has(code) ? code : undefined;
+}
+
+async function lookupErrorCode(response: Response): Promise<string | undefined> {
+  const signal = AbortSignal.timeout(1_000);
+  try {
+    const header = response.headers.get("x-amzn-errortype");
+    if (header) {
+      const cancellation = response.body?.cancel().catch(() => undefined);
+      await waitForProviderSignal(signal, async () => cancellation).catch(() => undefined);
+      return knownLookupErrorCode(header);
+    }
+    const { value } = await readLookupResponse(response, 4_096, signal);
+    const body = record(value);
+    // Emit only fixed enums, never raw messages, request IDs, events, or unknown strings.
+    return knownLookupErrorCode(body["code"] ?? body["__type"]);
+  } catch {
+    return undefined;
+  }
 }
 
 function allocationEvidence(
@@ -361,6 +405,7 @@ function invalidEvidence(): never {
 async function readLookupResponse(
   response: Response,
   limit: number,
+  signal?: AbortSignal,
 ): Promise<{ value: unknown; bytes: number }> {
   if (!response.body || limit <= 0) invalidEvidence();
   const reader = response.body.getReader();
@@ -369,14 +414,21 @@ async function readLookupResponse(
   try {
     while (true) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- Bound the streamed CloudTrail response before JSON parsing.
-      const chunk = await reader.read();
+      const chunk = await (signal
+        ? waitForProviderSignal(signal, () => reader.read())
+        : reader.read());
       if (chunk.done) break;
       bytes += chunk.value.byteLength;
       if (bytes > limit) invalidEvidence();
       chunks.push(chunk.value);
     }
   } finally {
-    await reader.cancel();
+    if (signal) {
+      const cancellation = reader.cancel().catch(() => undefined);
+      await waitForProviderSignal(signal, () => cancellation).catch(() => undefined);
+    } else {
+      await reader.cancel();
+    }
     reader.releaseLock();
   }
   const data = new Uint8Array(bytes);

@@ -242,7 +242,11 @@ async function authenticatedCoordinatorRequest(
     };
   }
   const serveRoute = new URL(request.url).pathname.startsWith("/v1/serve/");
-  const disabled = serveRoute ? serveDisabledResponse(env, auth.owner) : undefined;
+  const relayRoute = /^\/v1\/serve\/(?:relay\/[^/]+\/(?:agent|client)|leases\/[^/]+\/relay)$/.test(
+    new URL(request.url).pathname,
+  );
+  // Relay admission is bound to its provider and current principals in Fleet.
+  const disabled = serveRoute && !relayRoute ? serveDisabledResponse(env, auth.owner) : undefined;
   if (disabled)
     return {
       response: /\/v1\/serve\/(?:relay\/|leases\/[^/]+\/relay$)/.test(new URL(request.url).pathname)

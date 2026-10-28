@@ -33,9 +33,9 @@ func TestWindowsNativeBaselineBootstrap(t *testing.T) {
 					return
 				}
 				for _, want := range []string{
-					`$nodeVersion = "24.19.0"`, `$nodeArch = "x64"`, `$nodeArch = "arm64"`,
-					"57f71ab3652e797d84acddc79c81cc9ff1c6ddb2a1974cdb83f00fee9bff4c73",
-					"8502f4a50b458d4cc38ed8f2001556c2cd239d464920f74017926ccb1e1c157f",
+					`$nodeVersion = "24.22.1"`, `$nodeArch = "x64"`, `$nodeArch = "arm64"`,
+					"d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5",
+					"a0c807319fede24c4a0d8f84564c82a619bd313b16b10c007c383c2609e99171",
 					`if (Test-CrabboxNode) { return }`, `SetEnvironmentVariable("Path", $machinePath, "Machine")`,
 					`if ($LASTEXITCODE -ne 0)`, `CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_CONSOLE`,
 					`IntPtr.Zero, IntPtr.Zero, false`, `CloseHandle(process.thread)`, `CloseHandle(process.process)`,
@@ -85,7 +85,7 @@ func TestWindowsDevtoolsNodeBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`$DefaultNodeVersion = "24.19.0"`, "f0f66c2a80c08a30a5ab5179ee9ea9e45f9b46289436a8cc87ff833b852db351", "CRABBOX_WINDOWS_NODE_VERSION", "CRABBOX_WINDOWS_NODE_SHA256"} {
+	for _, want := range []string{`$DefaultNodeVersion = "24.22.1"`, "3bda4baf1ee709b33cf920dd633106ddb23951e322bff9c03ec9f64ab8981b01", "CRABBOX_WINDOWS_NODE_VERSION", "CRABBOX_WINDOWS_NODE_SHA256"} {
 		if !strings.Contains(string(script), want) {
 			t.Fatalf("missing devtools baseline %s", want)
 		}

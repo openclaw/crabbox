@@ -527,8 +527,8 @@ func (b *backend) createVM(ctx context.Context, cfg core.Config, name string) er
 	vhdPath := filepath.Join(vhdDir, name+".vhdx")
 
 	switchCheck := fmt.Sprintf(
-		`if (-not (Get-VMSwitch -Name '%s' -ErrorAction SilentlyContinue)) { throw 'Hyper-V switch not found: %s' }`,
-		escapePSString(cfg.HyperV.Switch), escapePSString(cfg.HyperV.Switch),
+		`if (-not (Get-VMSwitch -Name %s -ErrorAction SilentlyContinue)) { throw %s }`,
+		core.PowerShellQuote(cfg.HyperV.Switch), core.PowerShellQuote("Hyper-V switch not found: "+cfg.HyperV.Switch),
 	)
 	result, err := b.powershell(ctx, switchCheck)
 	if err != nil {
@@ -542,8 +542,8 @@ func (b *backend) createVM(ctx context.Context, cfg core.Config, name string) er
 	// size the template to size the lease. On release only this child disk is
 	// deleted; the template is left untouched.
 	diffScript := fmt.Sprintf(
-		`New-VHD -Path '%s' -ParentPath '%s' -Differencing -ErrorAction Stop | Out-Null`,
-		escapePSString(vhdPath), escapePSString(cfg.HyperV.Image),
+		`New-VHD -Path %s -ParentPath %s -Differencing -ErrorAction Stop | Out-Null`,
+		core.PowerShellQuote(vhdPath), core.PowerShellQuote(cfg.HyperV.Image),
 	)
 	result, err = b.powershell(ctx, diffScript)
 	if err != nil {
@@ -559,8 +559,8 @@ func (b *backend) createVM(ctx context.Context, cfg core.Config, name string) er
 	}
 
 	createScript := fmt.Sprintf(
-		`New-VM -Name '%s' -MemoryStartupBytes %d -Generation 2 -VHDPath '%s' -Path '%s'`,
-		escapePSString(name), memBytes, escapePSString(vhdPath), escapePSString(vmDir),
+		`New-VM -Name %s -MemoryStartupBytes %d -Generation 2 -VHDPath %s -Path %s`,
+		core.PowerShellQuote(name), memBytes, core.PowerShellQuote(vhdPath), core.PowerShellQuote(vmDir),
 	)
 	result, err = b.powershell(ctx, createScript)
 	if err != nil {
@@ -573,13 +573,13 @@ func (b *backend) createVM(ctx context.Context, cfg core.Config, name string) er
 	// in place of the base VHDX. That defeats removeVM's disk cleanup (it matches
 	// the base <name>.vhdx) and leaks a disk-sized file on release. Lease VMs are
 	// ephemeral and have no use for checkpoints.
-	cpuScript := fmt.Sprintf(`Set-VM -Name '%s' -ProcessorCount %d -AutomaticCheckpointsEnabled $false`, escapePSString(name), cfg.HyperV.CPUs)
+	cpuScript := fmt.Sprintf(`Set-VM -Name %s -ProcessorCount %d -AutomaticCheckpointsEnabled $false`, core.PowerShellQuote(name), cfg.HyperV.CPUs)
 	result, err = b.powershell(ctx, cpuScript)
 	if err != nil {
 		return shared.LocalCommandError("Set-VM", result, err)
 	}
 
-	startScript := fmt.Sprintf(`Start-VM -Name '%s'`, escapePSString(name))
+	startScript := fmt.Sprintf(`Start-VM -Name %s`, core.PowerShellQuote(name))
 	result, err = b.powershell(ctx, startScript)
 	if err != nil {
 		return shared.LocalCommandError("Start-VM", result, err)
@@ -590,8 +590,8 @@ func (b *backend) createVM(ctx context.Context, cfg core.Config, name string) er
 
 func (b *backend) connectVMNetwork(ctx context.Context, name, switchName string) error {
 	script := fmt.Sprintf(
-		`Connect-VMNetworkAdapter -VMName '%s' -SwitchName '%s'`,
-		escapePSString(name), escapePSString(switchName),
+		`Connect-VMNetworkAdapter -VMName %s -SwitchName %s`,
+		core.PowerShellQuote(name), core.PowerShellQuote(switchName),
 	)
 	result, err := b.powershell(ctx, script)
 	if err != nil {
@@ -617,7 +617,7 @@ func (b *backend) injectInitPassword(ctx context.Context, vhdPath, user string) 
 	hiveName := hypervInitHiveName(vhdPath)
 	script := fmt.Sprintf(
 		`$ErrorActionPreference = 'Stop'; `+
-			`$disk = Mount-VHD -Path '%s' -Passthru | Get-Disk; `+
+			`$disk = Mount-VHD -Path %s -Passthru | Get-Disk; `+
 			`try { `+
 			`if ($disk.IsOffline) { Set-Disk -Number $disk.Number -IsOffline $false }; `+
 			`$letters = ($disk | Get-Partition | Where-Object DriveLetter).DriveLetter; `+
@@ -628,13 +628,13 @@ func (b *backend) injectInitPassword(ctx context.Context, vhdPath, user string) 
 			`try { `+
 			`$runOnce = 'HKLM:\%s\Microsoft\Windows\CurrentVersion\RunOnce'; `+
 			`if (-not (Test-Path $runOnce)) { New-Item -Path $runOnce -Force | Out-Null }; `+
-			`New-ItemProperty -Path $runOnce -Name 'CrabboxInitPassword' -PropertyType String -Force -Value ('cmd /c net user "%s" "' + $env:_CRABBOX_GP + '" /y') | Out-Null `+
+			`New-ItemProperty -Path $runOnce -Name 'CrabboxInitPassword' -PropertyType String -Force -Value (%s + $env:_CRABBOX_GP + '" /y') | Out-Null `+
 			`} finally { `+
 			`[gc]::Collect(); [gc]::WaitForPendingFinalizers(); `+
 			`reg.exe unload HKLM\%s | Out-Null `+
 			`} `+
-			`} finally { Dismount-VHD -Path '%s' }`,
-		escapePSString(vhdPath), hiveName, hiveName, escapePSString(user), hiveName, escapePSString(vhdPath),
+			`} finally { Dismount-VHD -Path %s }`,
+		core.PowerShellQuote(vhdPath), hiveName, hiveName, core.PowerShellQuote(`cmd /c net user "`+user+`" "`), hiveName, core.PowerShellQuote(vhdPath),
 	)
 	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
 	result, err := b.powershellWithEnv(ctx, script, env)
@@ -660,9 +660,9 @@ func (b *backend) invokeGuestScript(ctx context.Context, script string, env []st
 // Direct readiness. Each probe is bounded because early boot calls can block.
 func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error {
 	script := fmt.Sprintf(
-		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
-			`Invoke-Command -VMName '%s' -Credential $cred -ScriptBlock { $true } -ErrorAction Stop | Out-Null`,
-		escapePSString(user), escapePSString(vmName),
+		`$cred = New-Object PSCredential(%s, (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
+			`Invoke-Command -VMName %s -Credential $cred -ScriptBlock { $true } -ErrorAction Stop | Out-Null`,
+		core.PowerShellQuote(user), core.PowerShellQuote(vmName),
 	)
 	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
 	// Include attempts and backoff in the overall boot budget.
@@ -711,9 +711,9 @@ func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error
 // _CRABBOX_GP, never the command line.
 func (b *backend) invokeInGuest(ctx context.Context, vmName, user, scriptBlock, label string) error {
 	script := fmt.Sprintf(
-		`$cred = New-Object PSCredential('%s', (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
-			`Invoke-Command -VMName '%s' -Credential $cred -ScriptBlock { %s }`,
-		escapePSString(user), escapePSString(vmName), scriptBlock,
+		`$cred = New-Object PSCredential(%s, (ConvertTo-SecureString $env:_CRABBOX_GP -AsPlainText -Force)); `+
+			`Invoke-Command -VMName %s -Credential $cred -ScriptBlock { %s }`,
+		core.PowerShellQuote(user), core.PowerShellQuote(vmName), scriptBlock,
 	)
 	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
 	var lastErr error
@@ -833,11 +833,11 @@ func sshAccessScript(user, publicKey string, activate bool) string {
 			`$sshDir = Join-Path $env:USERPROFILE '.ssh'; `+
 			`New-Item -ItemType Directory -Force -Path $sshDir | Out-Null; `+
 			`$akPath = Join-Path $sshDir 'authorized_keys'; `+
-			`Set-Content -Encoding ASCII -Path $akPath -Value '%s'; `+
+			`Set-Content -Encoding ASCII -Path $akPath -Value %s; `+
 			`$hostKeyDir = Join-Path $env:ProgramData 'ssh'; `+
 			`New-Item -ItemType Directory -Force -Path $hostKeyDir | Out-Null; `+
 			`$adminAK = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'; `+
-			`Set-Content -Encoding ASCII -Path $adminAK -Value '%s'; `+
+			`Set-Content -Encoding ASCII -Path $adminAK -Value %s; `+
 			`icacls.exe $adminAK /inheritance:r /grant '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null; `+
 			`if ($LASTEXITCODE -ne 0) { throw 'administrators_authorized_keys ACL update failed' }; `+
 			`$sshdConfig = Join-Path $env:ProgramData 'ssh\sshd_config'; `+
@@ -853,11 +853,11 @@ func sshAccessScript(user, publicKey string, activate bool) string {
 			`$globalLines += 'PasswordAuthentication no'; `+
 			`$globalLines += 'AuthenticationMethods publickey'; `+
 			`$globalLines += 'AuthorizedKeysFile .ssh/authorized_keys'; `+
-			`$globalLines += 'AllowUsers %s'; `+
+			`$globalLines += %s; `+
 			`$globalLines += 'Match Group administrators'; `+
 			`$globalLines += '       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys'; `+
 			`Set-Content -Encoding ASCII -Path $sshdConfig -Value ($globalLines -join [Environment]::NewLine); `,
-		escapePSString(publicKey), escapePSString(publicKey), escapePSString(strings.ToLower(user)),
+		core.PowerShellQuote(publicKey), core.PowerShellQuote(publicKey), core.PowerShellQuote("AllowUsers "+strings.ToLower(user)),
 	)
 	if !activate {
 		return script
@@ -928,8 +928,8 @@ func validHyperVSSHUser(user string) bool {
 func (b *backend) waitForIP(ctx context.Context, name string, timeout time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 	script := fmt.Sprintf(
-		`Get-VMNetworkAdapter -VMName '%s' | Select-Object -ExpandProperty IPAddresses | ConvertTo-Json`,
-		escapePSString(name),
+		`Get-VMNetworkAdapter -VMName %s | Select-Object -ExpandProperty IPAddresses | ConvertTo-Json`,
+		core.PowerShellQuote(name),
 	)
 	// The legacy observer always made its first read, even when the caller had
 	// already been canceled. Keep cancellation on the read and sleep operations
@@ -1059,10 +1059,10 @@ func (b *backend) removeVM(ctx context.Context, name string) error {
 	var vhdPaths []string
 	if vm.State != hypervMissingState {
 		vhdPaths = b.queryVHDPaths(ctx, name)
-		stopScript := fmt.Sprintf(`Stop-VM -Name '%s' -Force -Confirm:$false -ErrorAction SilentlyContinue`, escapePSString(name))
+		stopScript := fmt.Sprintf(`Stop-VM -Name %s -Force -Confirm:$false -ErrorAction SilentlyContinue`, core.PowerShellQuote(name))
 		b.powershell(ctx, stopScript) //nolint:errcheck
 
-		removeScript := fmt.Sprintf(`Remove-VM -Name '%s' -Force -Confirm:$false`, escapePSString(name))
+		removeScript := fmt.Sprintf(`Remove-VM -Name %s -Force -Confirm:$false`, core.PowerShellQuote(name))
 		result, removeErr := b.powershell(ctx, removeScript)
 		if removeErr != nil {
 			return shared.LocalCommandError("Remove-VM", result, removeErr)
@@ -1211,7 +1211,7 @@ func isVirtualDiskFile(path string) bool {
 }
 
 func (b *backend) queryVM(ctx context.Context, name string) (hypervVM, error) {
-	script := fmt.Sprintf(`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq '%s' } | Select-Object Name, State | ConvertTo-Json -Compress`, escapePSString(name))
+	script := fmt.Sprintf(`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq %s } | Select-Object Name, State | ConvertTo-Json -Compress`, core.PowerShellQuote(name))
 	result, err := b.powershell(ctx, script)
 	if err != nil {
 		return hypervVM{}, shared.LocalCommandError("Get-VM query", result, err)
@@ -1229,8 +1229,8 @@ func (b *backend) queryVM(ctx context.Context, name string) (hypervVM, error) {
 
 func (b *backend) queryLiveIP(ctx context.Context, name string) string {
 	script := fmt.Sprintf(
-		`Get-VMNetworkAdapter -VMName '%s' | Select-Object -ExpandProperty IPAddresses | ConvertTo-Json`,
-		escapePSString(name),
+		`Get-VMNetworkAdapter -VMName %s | Select-Object -ExpandProperty IPAddresses | ConvertTo-Json`,
+		core.PowerShellQuote(name),
 	)
 	result, err := b.powershell(ctx, script)
 	if err != nil {
@@ -1241,8 +1241,8 @@ func (b *backend) queryLiveIP(ctx context.Context, name string) string {
 
 func (b *backend) queryVHDPaths(ctx context.Context, name string) []string {
 	script := fmt.Sprintf(
-		`Get-VMHardDiskDrive -VMName '%s' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path`,
-		escapePSString(name),
+		`Get-VMHardDiskDrive -VMName %s -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path`,
+		core.PowerShellQuote(name),
 	)
 	result, err := b.powershell(ctx, script)
 	if err != nil {
@@ -1475,10 +1475,6 @@ func parseFirstIPv4(raw string) string {
 func isUsableIPv4(s string) bool {
 	addr, err := netip.ParseAddr(strings.TrimSpace(s))
 	return err == nil && addr.Is4() && addr.IsGlobalUnicast()
-}
-
-func escapePSString(s string) string {
-	return strings.ReplaceAll(s, "'", "''")
 }
 
 func firstLine(value string) string {

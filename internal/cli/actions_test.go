@@ -544,9 +544,9 @@ func TestGitHubActionsRunnerSeedsOnlyOwnedDefaultToolCache(t *testing.T) {
 				write(filepath.Join(archives, archiveName), buf.String(), 0o644)
 				return fmt.Sprintf("%x", sha256.Sum256(buf.Bytes()))
 			}
-			nodeDigest := pack("node", "24.19.0", "node-v24.19.0-linux-x64.tar.xz")
+			nodeDigest := pack("node", "24.22.1", "node-v24.22.1-linux-x64.tar.xz")
 			goDigest := pack("go", "1.27.3", "go1.27.3.linux-amd64.tar.gz")
-			nodeSlot := filepath.Join(image, "node", "24.19.0", "x64")
+			nodeSlot := filepath.Join(image, "node", "24.22.1", "x64")
 			goSlot := filepath.Join(image, "go", "1.27.3", "x64")
 			destGo := filepath.Join(cache, "go", "1.27.3", "x64")
 			workFolder := tc.workFolder
@@ -694,7 +694,7 @@ esac
 			script := strings.NewReplacer(
 				"/opt/hostedtoolcache", image,
 				"/opt/crabbox/toolchain-archives", archives,
-				"14b342e71204f811bde6153be8e04b62aef63c236fef92b55f9c83154b409647", nodeDigest,
+				"6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6", nodeDigest,
 				"65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40", goDigest,
 			).Replace(githubActionsRunnerInstallScript("2.337.0", true))
 			// The installer runs in its own shell and must not alter the caller's umask.
@@ -746,7 +746,7 @@ esac
 				tool, version string
 				present       bool
 			}{
-				{"node", "24.19.0", tc.wantNode}, {"go", "1.27.3", tc.wantGo},
+				{"node", "24.22.1", tc.wantNode}, {"go", "1.27.3", tc.wantGo},
 			} {
 				slot := filepath.Join(cache, expected.tool, expected.version, "x64")
 				_, err := os.Stat(slot + ".complete")

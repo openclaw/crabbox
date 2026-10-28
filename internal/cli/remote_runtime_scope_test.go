@@ -242,7 +242,7 @@ func TestNativeRuntimeScopePoolReturnRequiresCleanup(t *testing.T) {
 			t.Fatal(err)
 		}
 		var owner *workspaceOwner
-		err := returnReadyPoolAfterWorkspaceOwner(ctx, &owner, func(ctx context.Context) error {
+		err := returnReadyPoolAfterWorkspaceOwner(ctx, "cbx_000000000001", &owner, func(ctx context.Context) error {
 			if err := s.finalizeLease(ctx, "lease-a", false, nil); err != nil {
 				return err
 			}

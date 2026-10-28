@@ -9,13 +9,13 @@ import test from "node:test";
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const installer = path.join(repoRoot, "scripts/install-linux-developer-tools.sh");
 const publicArchives = process.env.CRABBOX_TEST_TOOLCHAIN_ARCHIVES;
-const nodeArchive = "node-v24.19.0-linux-x64.tar.xz";
+const nodeArchive = "node-v24.22.1-linux-x64.tar.xz";
 const goArchive = "go1.27.3.linux-amd64.tar.gz";
 const archiveNames = [
   nodeArchive,
   "pnpm-11.22.0.tgz",
-  "pnpm-12.3.4.tgz",
-  "exe.linux-x64-12.3.4.tgz",
+  "pnpm-12.15.0.tgz",
+  "exe.linux-x64-12.15.0.tgz",
 ];
 const bunArchives = process.env.CRABBOX_TEST_BUN_ARCHIVES;
 const bunVariants = ["linux-x64-baseline", "linux-x64"];
@@ -29,11 +29,14 @@ function fixture(t) {
     const commands = path.join(root, "commands");
     fs.mkdirSync(commands);
     // Darwin's bare mktemp -d ignores TMPDIR; model Linux placement inside the fixture.
-    writeTool(path.join(commands, "mktemp"), `
+    writeTool(
+      path.join(commands, "mktemp"),
+      `
 if [[ "$#" -eq 1 && "$1" == -d ]]; then
   exec /usr/bin/mktemp -d "\${TMPDIR%/}/tmp.XXXXXXXXXX"
 fi
-exec /usr/bin/mktemp "$@"`);
+exec /usr/bin/mktemp "$@"`,
+    );
     fixturePath = `${commands}${path.delimiter}${fixturePath}`;
   }
   const run = (body, env = {}) =>
@@ -62,7 +65,7 @@ function writeTool(file, body) {
 
 function bunFixture(
   t,
-  { version = "1.4.0", malformed = false, failCommand = "", optimizedExit = 0 } = {},
+  { version = "1.4.4", malformed = false, failCommand = "", optimizedExit = 0 } = {},
 ) {
   const result = fixture(t);
   const { root } = result;
@@ -84,7 +87,7 @@ case "$*" in
   *) exit 64 ;;
 esac`,
     );
-    const name = `bun-v1.4.0-${variant}.zip`;
+    const name = `bun-v1.4.4-${variant}.zip`;
     const archive = path.join(root, "archives", name);
     success(
       spawnSync(
@@ -119,7 +122,7 @@ curl() { echo unexpected-network >&2; return 89; }
   return {
     ...result,
     setup,
-    destination: path.join(root, "tools", "bun", "1.4.0", "linux-x64-baseline"),
+    destination: path.join(root, "tools", "bun", "1.4.4", "linux-x64-baseline"),
   };
 }
 
@@ -135,7 +138,7 @@ hash -p "$PWD/stale/bunx" bunx
 install_bun
 [[ "$(command -v bun)" == "$bun_bin_dir/bun" ]]
 [[ "$(command -v bunx)" == "$bun_bin_dir/bunx" ]]
-[[ "$(bun --version)" == "1.4.0" ]]
+[[ "$(bun --version)" == "1.4.4" ]]
 install_bun
 bun_optimized_supported() { return 1; }
 offline_bun_probe
@@ -192,6 +195,27 @@ for (const state of ["dangling", "incomplete"]) {
   });
 }
 
+for (const state of ["present", "dangling"]) {
+  test(`Bun rebakes released predecessor ${state} aliases without running old bytes`, (t) => {
+    const { root, run, setup, destination } = bunFixture(t);
+    const previous = path.join(root, "tools", "bun", "1.4.0", "linux-x64-baseline");
+    if (state === "present") {
+      fs.mkdirSync(previous, { recursive: true });
+      writeTool(path.join(previous, "bun"), 'touch "$HOME/old-bun-executed"; exit 79');
+      fs.symlinkSync("bun", path.join(previous, "bunx"));
+    }
+    for (const tool of ["bun", "bunx"]) {
+      fs.symlinkSync(path.join(previous, tool), path.join(root, "bin", tool));
+    }
+    success(run(`${setup}\ninstall_bun\ninstall_bun\n[[ "$(bun --version)" == "1.4.4" ]]`));
+    for (const tool of ["bun", "bunx"]) {
+      assert.equal(fs.readlinkSync(path.join(root, "bin", tool)), path.join(destination, tool));
+    }
+    assert.equal(fs.existsSync(path.join(root, "home", "old-bun-executed")), false);
+    if (state === "present") assert.match(fs.readFileSync(path.join(previous, "bun"), "utf8"), /exit 79/);
+  });
+}
+
 for (const tool of ["bun", "bunx"]) {
   for (const kind of [
     "regular",
@@ -224,7 +248,7 @@ for (const tool of ["bun", "bunx"]) {
           relative: path.relative(links, path.join(destination, tool)),
           newline: path.join(destination, tool) + "\n",
           "wrong-pin": path.join(root, "tools", "bun", "1.3.0", "linux-x64-baseline", tool),
-          "wrong-variant": path.join(root, "tools", "bun", "1.4.0", "linux-x64", tool),
+          "wrong-variant": path.join(root, "tools", "bun", "1.4.4", "linux-x64", tool),
         }[kind];
         fs.symlinkSync(target, conflict);
       }
@@ -253,7 +277,7 @@ for (const tool of ["bun", "bunx"]) {
 test("Bun refuses the unpublished regular executable and relative public bunx layout", (t) => {
   const { root, run, setup } = bunFixture(t);
   const links = path.join(root, "bin");
-  writeTool(path.join(links, "bun"), "echo 1.4.0");
+  writeTool(path.join(links, "bun"), "echo 1.4.4");
   fs.symlinkSync("bun", path.join(links, "bunx"));
   const before = fileState(links);
   const result = run(`${setup}\ninstall_bun`);
@@ -265,8 +289,8 @@ test("Bun refuses the unpublished regular executable and relative public bunx la
 for (const component of [
   "tools",
   "tools/bun",
-  "tools/bun/1.4.0",
-  "tools/bun/1.4.0/linux-x64-baseline",
+  "tools/bun/1.4.4",
+  "tools/bun/1.4.4/linux-x64-baseline",
 ]) {
   test(`Bun rejects a symlinked managed directory at ${component}`, (t) => {
     const { root, run, setup } = bunFixture(t);
@@ -291,15 +315,15 @@ for (const component of [
 
 test("Bun rejects present corrupt or malformed caches without downloading or replacing tools", (t) => {
   const { root, run, setup } = bunFixture(t);
-  const archive = path.join(root, "archives", "bun-v1.4.0-linux-x64-baseline.zip");
+  const archive = path.join(root, "archives", "bun-v1.4.4-linux-x64-baseline.zip");
   const original = fs.readFileSync(archive);
   for (const kind of ["tamper", "wrong-variant", "directory", "symlink"]) {
     fs.rmSync(archive, { recursive: true, force: true });
     if (kind === "tamper") fs.writeFileSync(archive, "corrupt");
     if (kind === "wrong-variant")
-      fs.copyFileSync(path.join(root, "archives", "bun-v1.4.0-linux-x64.zip"), archive);
+      fs.copyFileSync(path.join(root, "archives", "bun-v1.4.4-linux-x64.zip"), archive);
     if (kind === "directory") fs.mkdirSync(archive);
-    if (kind === "symlink") fs.symlinkSync("bun-v1.4.0-linux-x64.zip", archive);
+    if (kind === "symlink") fs.symlinkSync("bun-v1.4.4-linux-x64.zip", archive);
     const result = run(`${setup}\ninstall_bun`);
     assert.notEqual(result.status, 0, kind);
     assert.match(result.stderr, /checksum mismatch|malformed Bun archive/);
@@ -336,7 +360,7 @@ install_bun
   success(download);
   assert.deepEqual(
     fs.readdirSync(path.join(root, "archives")).sort(),
-    bunVariants.map((variant) => `bun-v1.4.0-${variant}.zip`).sort(),
+    bunVariants.map((variant) => `bun-v1.4.4-${variant}.zip`).sort(),
   );
 });
 
@@ -368,8 +392,8 @@ test("Bun producer preserves unsupported platform routes independently of Node o
   success(run(`${setup}\nnode_major=26\ninstall_bun`));
   for (const name of [
     "bun-v1.3.0-linux-x64.zip",
-    "bun-v1.4.0-darwin-x64.zip",
-    "bun-v1.4.0-linux-x64-musl.zip",
+    "bun-v1.4.4-darwin-x64.zip",
+    "bun-v1.4.4-linux-x64-musl.zip",
   ]) {
     const invalid = run(`stage_bun_archive "${name}" "$PWD/staging" 1`);
     assert.notEqual(invalid.status, 0);
@@ -549,7 +573,7 @@ function nodeArchiveFixture(t) {
   const context = fixture(t);
   const { root } = context;
   const bin = path.join(root, "payload", "node", "bin");
-  writeNodeToolchain(bin, "24.19.0");
+  writeNodeToolchain(bin, "24.22.1");
   const archive = path.join(root, "archives", nodeArchive);
   const pack = () => {
     success(
@@ -654,7 +678,7 @@ fixture_after_apt() { :; }
     ...context,
     shell,
     runRebake: (body) => context.run(shell + body, { FIXTURE_DIGEST: digest }),
-    destination: path.join(root, "tools", "node", "24.19.0", "x64"),
+    destination: path.join(root, "tools", "node", "24.22.1", "x64"),
   };
 }
 
@@ -987,13 +1011,13 @@ if seed_offline_pnpm 11.22.0 "$PWD/staging" "$PWD/home"; then exit 91; fi
 
 test("Node toolcache replaces a same-version poisoned tree and publishes completion only after functional checks", (t) => {
   const { root, run, bin, pack, shell } = nodeArchiveFixture(t);
-  const destination = path.join(root, "tools", "node", "24.19.0", "x64");
+  const destination = path.join(root, "tools", "node", "24.22.1", "x64");
   fs.mkdirSync(destination, { recursive: true });
   fs.writeFileSync(path.join(destination, "poison"), "same-version cache is not authenticated");
   fs.mkdirSync(path.join(destination, "bin"));
   writeTool(
     path.join(destination, "bin", "node"),
-    'touch "$HOME/poison-executed"; printf "v24.19.0\\n"',
+    'touch "$HOME/poison-executed"; printf "v24.22.1\\n"',
   );
   fs.writeFileSync(`${destination}.complete`, "");
   success(run(shell, { FIXTURE_DIGEST: pack() }));
@@ -1045,13 +1069,21 @@ function fileState(file) {
   return { mode: stat.mode, contents: fs.readFileSync(file).toString("base64") };
 }
 
-for (const state of ["fresh", "current", "dangling"]) {
+for (const state of ["fresh", "current", "dangling", "previous", "previous-dangling"]) {
   test(`default Node complete flow preserves public ownership and Yarn on ${state} repeat`, (t) => {
     const { root, run, setup, shell, pack } = nodeArchiveFixture(t);
     const digest = pack();
-    const destination = path.join(root, "tools", "node", "24.19.0", "x64");
+    const destination = path.join(root, "tools", "node", "24.22.1", "x64");
     const links = path.join(root, "links");
-    if (state !== "fresh") {
+    if (state.startsWith("previous")) {
+      const previous = path.join(root, "tools", "node", "24.19.0", "x64");
+      writeNodeToolchain(path.join(previous, "bin"), "24.19.0");
+      fs.mkdirSync(links, { recursive: true });
+      for (const tool of publicNodeTools) {
+        fs.symlinkSync(path.join(previous, "bin", tool), path.join(links, tool));
+      }
+      if (state === "previous-dangling") fs.rmSync(path.join(previous, "bin"), { recursive: true });
+    } else if (state !== "fresh") {
       success(run(shell, { FIXTURE_DIGEST: digest }));
       if (state === "dangling") fs.rmSync(path.join(destination, "bin"), { recursive: true });
     }
@@ -1066,7 +1098,7 @@ for (const state of ["fresh", "current", "dangling"]) {
 : >"$HOME/corepack.log"
 for pass in 1 2; do
   install_node_pnpm
-  [[ "$(node --version)" == v24.19.0 ]] || exit 91
+  [[ "$(node --version)" == v24.22.1 ]] || exit 91
   for tool in node npm npx corepack pnpm pnpx; do
     [[ "$(command -v "$tool")" == "$node_link_dir/$tool" ]] || exit 92
     "$tool" --version
@@ -1088,7 +1120,7 @@ done
     assert.equal(calls.length, 4, "each pass enables only private shims, then prepares pnpm");
     assert.equal(calls.filter((line) => line.includes("enable --install-directory")).length, 2);
     assert.equal(
-      calls.filter((line) => line === "24 prepare pnpm@11.1.0 --activate node=v24.19.0").length,
+      calls.filter((line) => line === "24 prepare pnpm@11.1.0 --activate node=v24.22.1").length,
       2,
     );
     assert.equal(fs.existsSync(`${destination}.complete`), true);
@@ -1096,6 +1128,28 @@ done
     assert.deepEqual(fs.readdirSync(links).sort(), [...publicNodeTools, "yarn", "yarnpkg"].sort());
   });
 }
+
+test("previous Node aliases and data survive a failed replacement before publication", (t) => {
+  const { root, run, bin, setup, pack } = nodeArchiveFixture(t);
+  const previous = path.join(root, "tools", "node", "24.19.0", "x64");
+  const links = path.join(root, "links");
+  writeNodeToolchain(path.join(previous, "bin"), "24.19.0");
+  fs.mkdirSync(links);
+  for (const tool of publicNodeTools) {
+    fs.symlinkSync(path.join(previous, "bin", tool), path.join(links, tool));
+  }
+  fs.writeFileSync(path.join(previous, "keep"), "existing image data");
+  const before = { links: fileState(links), previous: fileState(previous) };
+  writeTool(path.join(bin, "npm"), "exit 47");
+  const result = run(`${setup}${defaultNodePreparation}install_node_pnpm`, {
+    FIXTURE_DIGEST: pack(),
+  });
+  assert.equal(result.status, 47, result.stderr);
+  assert.deepEqual(fileState(links), before.links);
+  assert.deepEqual(fileState(previous), before.previous);
+  assert.equal(fs.existsSync(path.join(root, "tools", "node", "24.22.1", "x64.complete")), false);
+  assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
+});
 
 for (const entry of ["install_node_pnpm", "install_pinned_node"]) {
   for (const kind of [
@@ -1111,7 +1165,7 @@ for (const entry of ["install_node_pnpm", "install_pinned_node"]) {
       const { root, run, setup, shell, pack } = nodeArchiveFixture(t);
       const digest = pack();
       success(run(shell, { FIXTURE_DIGEST: digest }));
-      const destination = path.join(root, "tools", "node", "24.19.0", "x64");
+      const destination = path.join(root, "tools", "node", "24.22.1", "x64");
       const links = path.join(root, "links");
       const conflict = path.join(links, "pnpx");
       fs.unlinkSync(conflict);
@@ -1163,7 +1217,7 @@ test("default Node rechecks all aliases after preparation before replacing the i
   const { root, run, setup, shell, pack } = nodeArchiveFixture(t);
   const digest = pack();
   success(run(shell, { FIXTURE_DIGEST: digest }));
-  const destination = path.join(root, "tools", "node", "24.19.0", "x64");
+  const destination = path.join(root, "tools", "node", "24.22.1", "x64");
   const links = path.join(root, "links");
   fs.writeFileSync(path.join(destination, "keep"), "existing tree");
   fs.writeFileSync(`${destination}.complete`, "existing marker");
@@ -1189,12 +1243,21 @@ if install_node_pnpm; then exit 91; fi
   assert.deepEqual(fileState(`${destination}.complete`), marker);
 });
 
-for (const dangling of [false, true]) {
-  test(`Node-major rebake selects Node22 after a pinned install with ${dangling ? "dangling" : "live"} owned links`, (t) => {
-    const { root, runRebake, destination, archive } = nodeRebakeFixture(t);
-    const before = fs.readFileSync(archive);
-    const result = runRebake(`
-${dangling ? 'mv "$node_toolcache_root/node/24.19.0/x64/bin" "$node_toolcache_root/node/24.19.0/x64/saved-bin"' : ""}
+for (const previous of [false, true]) {
+  for (const dangling of [false, true]) {
+    test(`Node-major rebake selects Node22 after a ${previous ? "previous" : "current"} pinned install with ${dangling ? "dangling" : "live"} owned links`, (t) => {
+      const { root, runRebake, destination, archive } = nodeRebakeFixture(t);
+      const before = fs.readFileSync(archive);
+      const result = runRebake(`
+${
+  previous
+    ? `mv "$node_toolcache_root/node/24.22.1" "$node_toolcache_root/node/24.19.0"
+for tool in node npm npx corepack pnpm pnpx; do
+  ln -sfn "$node_toolcache_root/node/24.19.0/x64/bin/$tool" "$node_link_dir/$tool"
+done`
+    : ""
+}
+${dangling ? `mv "$node_toolcache_root/node/${previous ? "24.19.0" : "24.22.1"}/x64/bin" "$node_toolcache_root/node/${previous ? "24.19.0" : "24.22.1"}/x64/saved-bin"` : ""}
 install_node_pnpm
 printf 'selected=%s\\n' "$(node --version)"
 for tool in node npm npx corepack pnpm pnpx; do
@@ -1202,33 +1265,35 @@ for tool in node npm npx corepack pnpm pnpx; do
   "$tool" --version
 done
 `);
-    success(result);
-    assert.match(result.stdout, /selected=v22\.0\.0/);
-    assert.deepEqual(
-      new Set(fs.readFileSync(path.join(root, "apt-calls"), "utf8").trim().split(/\s+/)),
-      new Set([
-        "install",
-        "-y",
-        "--no-install-recommends",
-        "--allow-downgrades",
-        "nodejs:amd64=22.0.0-1nodesource1",
-      ]),
-    );
-    for (const tool of ["node", "npm", "npx", "corepack", "pnpm", "pnpx"]) {
-      assert.equal(fs.existsSync(path.join(root, "links", tool)), false);
-      assert.throws(() => fs.lstatSync(path.join(root, "links", tool)), { code: "ENOENT" });
-    }
-    assert.equal(
-      fs.readFileSync(path.join(root, "home", "corepack.log"), "utf8"),
-      "22 enable node=v22.0.0\n22 prepare pnpm@10.0.0 --activate node=v22.0.0\n",
-    );
-    assert.deepEqual(fs.readFileSync(archive), before);
-    assert.equal(fs.existsSync(`${destination}.complete`), true);
-    assert.equal(
-      fs.existsSync(path.join(destination, dangling ? "saved-bin" : "bin", "node")),
-      true,
-    );
-  });
+      success(result);
+      assert.match(result.stdout, /selected=v22\.0\.0/);
+      assert.deepEqual(
+        new Set(fs.readFileSync(path.join(root, "apt-calls"), "utf8").trim().split(/\s+/)),
+        new Set([
+          "install",
+          "-y",
+          "--no-install-recommends",
+          "--allow-downgrades",
+          "nodejs:amd64=22.0.0-1nodesource1",
+        ]),
+      );
+      for (const tool of ["node", "npm", "npx", "corepack", "pnpm", "pnpx"]) {
+        assert.equal(fs.existsSync(path.join(root, "links", tool)), false);
+        assert.throws(() => fs.lstatSync(path.join(root, "links", tool)), { code: "ENOENT" });
+      }
+      assert.equal(
+        fs.readFileSync(path.join(root, "home", "corepack.log"), "utf8"),
+        "22 enable node=v22.0.0\n22 prepare pnpm@10.0.0 --activate node=v22.0.0\n",
+      );
+      assert.deepEqual(fs.readFileSync(archive), before);
+      const retained = previous ? destination.replace("24.22.1", "24.19.0") : destination;
+      assert.equal(fs.existsSync(`${retained}.complete`), true);
+      assert.equal(
+        fs.existsSync(path.join(retained, dangling ? "saved-bin" : "bin", "node")),
+        true,
+      );
+    });
+  }
 }
 
 test("Node-major rebake preserves exact owned links when APT fails even in a conditional caller", (t) => {
@@ -1236,7 +1301,7 @@ test("Node-major rebake preserves exact owned links when APT fails even in a con
   const result = runRebake(`
 FIXTURE_APT_EXIT=43
 if install_node_pnpm; then exit 91; fi
-[[ "$(node --version)" == v24.19.0 ]]
+[[ "$(node --version)" == v24.22.1 ]]
 `);
   success(result);
   for (const tool of ["node", "npm", "npx", "corepack", "pnpm", "pnpx"]) {
@@ -1295,7 +1360,7 @@ for (const [name, setup, diagnostic, transaction] of [
   ],
   [
     "wrong package binary",
-    'fixture_after_apt() { cp "$node_toolcache_root/node/24.19.0/x64/bin/node" "$PWD/apt/bin/node"; }',
+    'fixture_after_apt() { cp "$node_toolcache_root/node/24.22.1/x64/bin/node" "$PWD/apt/bin/node"; }',
     /package-owned Node binary verification failed/,
     true,
   ],
@@ -1314,7 +1379,7 @@ cp -R "$node_link_dir" "$PWD/links-before"
 cp -R "$node_toolcache_root" "$PWD/tools-before"
 if install_node_pnpm; then exit 91; fi
 [[ "$(hash -t node)" == "$node_link_dir/node" ]]
-[[ "$(node --version)" == v24.19.0 ]]
+[[ "$(node --version)" == v24.22.1 ]]
 `);
     success(result);
     assert.match(result.stderr, diagnostic);
@@ -1392,19 +1457,19 @@ for (const [name, replacement, target, fails] of [
   ],
   [
     "relative owned-tree link",
-    'ln -s ../tools/node/24.19.0/x64/bin/node "$node_link_dir/node"',
-    "../tools/node/24.19.0/x64/bin/node",
+    'ln -s ../tools/node/24.22.1/x64/bin/node "$node_link_dir/node"',
+    "../tools/node/24.22.1/x64/bin/node",
     true,
   ],
   [
     "different-name owned-tree link",
-    'ln -s "$node_toolcache_root/node/24.19.0/x64/bin/npm" "$node_link_dir/node"',
-    "tools/node/24.19.0/x64/bin/npm",
+    'ln -s "$node_toolcache_root/node/24.22.1/x64/bin/npm" "$node_link_dir/node"',
+    "tools/node/24.22.1/x64/bin/npm",
     true,
   ],
   [
     "operator wrong-major shadow",
-    'cp "$node_toolcache_root/node/24.19.0/x64/bin/node" "$node_link_dir/node"',
+    'cp "$node_toolcache_root/node/24.22.1/x64/bin/node" "$node_link_dir/node"',
     null,
     true,
   ],
@@ -1450,9 +1515,9 @@ rm "$node_link_dir/npm" "$node_link_dir/npx" "$node_link_dir/pnpm" "$node_link_d
 cp "$PWD/apt-payload/bin/npm" "$node_link_dir/npm"
 mkdir "$node_link_dir/npx"
 printf 'operator directory\\n' >"$node_link_dir/npx/keep"
-ln -s ../tools/node/24.19.0/x64/bin/pnpm "$node_link_dir/pnpm"
-ln -s "$node_toolcache_root/node/24.19.0/x64/bin/pnpx"$'\\n' "$node_link_dir/pnpx"
-ln -s "$node_toolcache_root/node/24.19.0/x64/bin/node" "$node_link_dir/node-other"
+ln -s ../tools/node/24.22.1/x64/bin/pnpm "$node_link_dir/pnpm"
+ln -s "$node_toolcache_root/node/24.22.1/x64/bin/pnpx"$'\\n' "$node_link_dir/pnpx"
+ln -s "$node_toolcache_root/node/24.22.1/x64/bin/node" "$node_link_dir/node-other"
 install_node_pnpm
 [[ "$(node --version)" == v22.0.0 ]]
 `),
@@ -1464,7 +1529,7 @@ install_node_pnpm
     fs.readFileSync(path.join(root, "apt-payload", "bin", "npm")),
   );
   assert.equal(fs.readFileSync(path.join(links, "npx", "keep"), "utf8"), "operator directory\n");
-  assert.equal(fs.readlinkSync(path.join(links, "pnpm")), "../tools/node/24.19.0/x64/bin/pnpm");
+  assert.equal(fs.readlinkSync(path.join(links, "pnpm")), "../tools/node/24.22.1/x64/bin/pnpm");
   assert.equal(
     fs.readlinkSync(path.join(links, "pnpx")),
     path.join(destination, "bin", "pnpx") + "\n",
@@ -1478,7 +1543,7 @@ install_node_pnpm
 for (const [major, arch, pnpm, pinned] of [
   ["24", "amd64", "", true],
   ["24", "amd64", "11.22.0", true],
-  ["24", "amd64", "12.3.4", true],
+  ["24", "amd64", "12.15.0", true],
   ["22", "amd64", "10.0.0", false],
   ["24", "arm64", "11.22.0", false],
 ]) {
@@ -1526,32 +1591,32 @@ for archive in ${archiveNames.join(" ")}; do stage_toolchain_archive "$archive" 
 mkdir node
 tar --no-same-owner -xJf "$PWD/staging/${nodeArchive}" -C node --strip-components=1
 seed_offline_pnpm 11.22.0 "$PWD/staging" "$PWD/corepack"
-seed_offline_pnpm 12.3.4 "$PWD/staging" "$PWD/corepack"
+seed_offline_pnpm 12.15.0 "$PWD/staging" "$PWD/corepack"
 `,
       { PUBLIC_ARCHIVES: publicArchives },
     );
     success(staged);
-    const native = path.join(root, "corepack", "v1", "pnpm", "12.3.4", "pnpm-native");
+    const native = path.join(root, "corepack", "v1", "pnpm", "12.15.0", "pnpm-native");
     assert.equal(
       fs.readFileSync(native).subarray(0, 4).toString("hex"),
       "7f454c46",
       "pnpm 12 requires the separately verified Linux executable",
     );
     fs.copyFileSync(
-      path.join(publicArchives, "pnpm-12.3.4.tgz"),
-      path.join(root, "archives", "pnpm-12.3.4.tgz"),
+      path.join(publicArchives, "pnpm-12.15.0.tgz"),
+      path.join(root, "archives", "pnpm-12.15.0.tgz"),
     );
     fs.writeFileSync(
-      path.join(root, "archives", "exe.linux-x64-12.3.4.tgz"),
+      path.join(root, "archives", "exe.linux-x64-12.15.0.tgz"),
       "forged native payload",
     );
     const forgedNative = run(`
 public_toolchain_archive_dir="$PWD/archives"
-seed_offline_pnpm 12.3.4 "$PWD/staging" "$PWD/forged-corepack"
+seed_offline_pnpm 12.15.0 "$PWD/staging" "$PWD/forged-corepack"
 `);
     assert.notEqual(forgedNative.status, 0);
     assert.match(forgedNative.stderr, /checksum mismatch/);
-    const rejectedNative = path.join(root, "forged-corepack", "v1", "pnpm", "12.3.4");
+    const rejectedNative = path.join(root, "forged-corepack", "v1", "pnpm", "12.15.0");
     assert.equal(fs.existsSync(path.join(rejectedNative, ".corepack")), false);
     assert.equal(fs.existsSync(path.join(rejectedNative, "pnpm-native")), false);
     const corepack = path.join(
@@ -1691,12 +1756,12 @@ if cache_public_toolchain_archives good.tgz bad.tgz unattempted.tgz; then exit 9
   });
 }
 
-
 for (const boundary of ["parent", "leaf"]) {
   for (const kind of ["private", "symlink", "file"]) {
     test(`public archive permissions handle ${boundary} ${kind} without widening ancestors`, (t) => {
       const { root, run } = fixture(t);
-      const parent = path.join(root, "public"), archives = path.join(parent, "archives");
+      const parent = path.join(root, "public"),
+        archives = path.join(parent, "archives");
       fs.mkdirSync(archives, { recursive: true });
       const target = boundary === "parent" ? parent : archives;
       fs.chmodSync(target, 0o700);
@@ -1709,7 +1774,8 @@ for (const boundary of ["parent", "leaf"]) {
       const result = run(`public_toolchain_archive_dir="$PWD/public/archives"
 if prepare_public_toolchain_archive_dir; then exit 0; else exit "$?"; fi`);
       assert.equal(result.status, kind === "private" ? 0 : 1, result.stderr);
-      if (kind === "private") for (const dir of [parent, archives]) assert.equal(fs.statSync(dir).mode & 0o777, 0o755);
+      if (kind === "private")
+        for (const dir of [parent, archives]) assert.equal(fs.statSync(dir).mode & 0o777, 0o755);
       assert.equal(fs.statSync(root).mode, before);
       assert.deepEqual(fs.readdirSync(path.join(root, "home")), []);
     });
@@ -1723,8 +1789,11 @@ for (const [phase, injection, code] of [
 ]) {
   test(`conditional Go installation preserves ${phase} failure without completion`, (t) => {
     const { root, destination, runGo } = goArchiveFixture(t);
-    const result = runGo(`${defaultGoPreparation}${injection}
-if install_go_toolchain; then exit 91; else exit "$?"; fi`, { FIXTURE_GO_FAILURE: "47" });
+    const result = runGo(
+      `${defaultGoPreparation}${injection}
+if install_go_toolchain; then exit 91; else exit "$?"; fi`,
+      { FIXTURE_GO_FAILURE: "47" },
+    );
     assert.equal(result.status, code, result.stderr);
     assert.equal(fs.existsSync(`${destination}.complete`), false);
     assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
