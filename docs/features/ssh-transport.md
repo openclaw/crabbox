@@ -24,8 +24,10 @@ and prevents workspace reuse. The supervisor also watches its workspace owner
 identity and expiry. Control calls and source-transfer witnesses retain their
 existing transport.
 
-The same guarded cleanup runs after normal command completion, including the
-five-second TERM grace. Account for that cost when measuring short commands.
+After a verified command result, Linux command cleanup skips the TERM grace
+and immediately retires any remaining descendants. It still validates the
+guard identity before KILL and verifies group absence before releasing the
+workspace. Cancellation and owner loss retain the full five-second TERM grace.
 
 ## File copy
 

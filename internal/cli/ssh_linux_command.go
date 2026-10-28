@@ -27,7 +27,7 @@ func runOwnedLinuxSSHCommand(ctx context.Context, target SSHTarget, remote strin
 `
 	helper := composeGuardedControl(strings.NewReplacer(
 		"@FUNCTIONAL_PRELUDE@", "", "@FUNCTIONAL_CLEANUP@", "", "@FUNCTIONAL_CLEANUP_POLL@", "", "@FUNCTIONAL_SCRATCH@", "",
-	).Replace(wslLinuxTemplate), guardedWorkloadScript("", tick, ".1"), "bash")
+	).Replace(wslLinuxTemplate), guardedWorkloadScript("completion_grace_ms=0\n", tick, ".1"), "bash")
 	marker := workspaceOwnerSetupPrefix + nonce
 	command := owner.wrapPOSIXCommand(remote, false, marker)
 	bootstrap := "exec /bin/sh -c " + shellQuote(wslHelperBootstrap) + " cbx " + strconv.Itoa(len(helper)) + " 0 "
