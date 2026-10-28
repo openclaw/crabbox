@@ -1,12 +1,6 @@
 # Changelog
 
-## Unreleased
-
-### Fixed
-
-- Remote Git seeding: report interrupted seeds as `exit=cancelled`, `exit=deadline`, or `exit=signal:<name>` instead of `exit=unknown`. [PR 2973](https://github.com/openclaw/crabbox/pull/2973).
-
-## 0.80.0 - 2026-10-27
+## 0.80.0 - 2026-10-28
 
 ### Highlights
 
@@ -16,19 +10,15 @@
 ### Added
 
 - Static SSH: add `static.noControlMaster`, `CRABBOX_STATIC_NO_CONTROL_MASTER`, and `--static-no-control-master` to opt out of SSH multiplexing, preserving explicit overrides in recovery commands. [PR 2855](https://github.com/openclaw/crabbox/pull/2855). Thanks @shunkakinoki.
-- Managed SSH hosts: enroll exclusive operator-owned capacity behind outbound, pinned SSH relays; isolate borrower accounts, rotate portable-pool access, and require cleanup receipts before reuse. Windows MXC remains experimental pending hardware qualification. [PR 2964](https://github.com/openclaw/crabbox/pull/2964). Thanks @RomneyDa.
 - Managed SSH hosts: enroll exclusive operator-owned capacity behind outbound, pinned SSH relays; isolate borrower accounts, rotate portable-pool access, and require cleanup receipts before reuse. Windows MXC remains experimental, with native ARM64 lifecycle qualification documented. [PR 2964](https://github.com/openclaw/crabbox/pull/2964). Thanks @RomneyDa.
-
 - Sync: print `still seeding remote Git metadata after ...` progress lines while a remote Git seed runs, so long seeds of large repositories no longer look stalled. [PR 2974](https://github.com/openclaw/crabbox/pull/2974).
 - Azure Sandbox: include client request and lifecycle-poll durations and counts in warmup timing reports, including failed attempts, without inferring server disk or boot timings. [PR 2959](https://github.com/openclaw/crabbox/pull/2959).
 - Azure Sandbox: retain session-owned disks through explicit pause/resume with finite per-activation work admission, durable exact-ownership recovery, and explicit deletion. [PR 2960](https://github.com/openclaw/crabbox/pull/2960).
-
-### Added
-
 - Shard: cap simultaneous provisioning and execution with `--concurrency` or `shard.maxConcurrency`, preserving all-shards-at-once defaults and cancellation cleanup. [PR 2935](https://github.com/openclaw/crabbox/pull/2935). Thanks @zozo123.
 
 ### Fixed
 
+- Remote Git seeding: report interrupted seeds as `exit=cancelled`, `exit=deadline`, or `exit=signal:<name>` instead of `exit=unknown`. [PR 2973](https://github.com/openclaw/crabbox/pull/2973).
 - SSH static provider: when another repository holds a static lease, the refusal now explains that a distinct `static.id` / `CRABBOX_STATIC_ID` shares the host safely, and warns that `--reclaim` takes over the other repository's lease and workdir. [PR 2972](https://github.com/openclaw/crabbox/pull/2972).
 - Local Git seeding: stream large object enumerations without the 16 MiB control-output ceiling and preserve the original limit or output failure. [PR 2841](https://github.com/openclaw/crabbox/pull/2841). Thanks @vincentkoc.
 - Coordinator: preserve retryable responses for transient Cloudflare storage failures without replaying operations, and prepare compatible readers for the staged internal grant-header migration. [PR 2847](https://github.com/openclaw/crabbox/pull/2847). Thanks @vincentkoc.
