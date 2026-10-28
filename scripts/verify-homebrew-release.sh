@@ -109,7 +109,7 @@ assert_clean_homebrew_environment() {
     case "$name" in
       CRABBOX_HOMEBREW_CLEAN_CHILD | \
         CRABBOX_VERIFY_TOOLING_COMMIT | \
-        HOME | HOMEBREW_CACHE | HOMEBREW_NO_ANALYTICS | HOMEBREW_NO_AUTO_UPDATE | \
+        HOME | XDG_CONFIG_HOME | HOMEBREW_CACHE | HOMEBREW_NO_ANALYTICS | HOMEBREW_NO_AUTO_UPDATE | \
         HOMEBREW_NO_ENV_HINTS | HOMEBREW_NO_INSTALL_CLEANUP | \
         LC_ALL | LOGNAME | NONINTERACTIVE | PATH | PWD | SHLVL | TMPDIR | USER) ;;
       *)
@@ -346,6 +346,12 @@ homebrew_phase() {
     return 1
   }
 
+  [[ "${XDG_CONFIG_HOME:-}" == "$work/home/.config" &&
+    -d "$XDG_CONFIG_HOME" && ! -L "$XDG_CONFIG_HOME" ]] || {
+    echo "Homebrew verification must use a real work-local XDG config directory" >&2
+    return 1
+  }
+
   # Repeat the protected-record decision inside the credential-free child so
   # direct/private-phase invocation cannot bypass a newly blocked release.
   require_publishable_source "$tag" "$tag_object" "$source_commit" "$verifier_commit"
@@ -368,7 +374,7 @@ homebrew_phase() {
   local metadata_file="$work/formula.json"
   "$brew_bin" tap openclaw/tap
   "$brew_bin" update --force
-  # Authorize only this maintained formula in the credential-free run's HOME.
+  # Authorize only this maintained formula in the credential-free workspace.
   # Homebrew requires explicit trust before it can load non-official formulae.
   "$brew_bin" trust --formula "$FORMULA"
   # Tap maintainers own executable formulae; metadata is not a Ruby sandbox.
@@ -549,6 +555,9 @@ main() {
   homebrew_home="$work/home"
   homebrew_cache="$work/cache"
   mkdir -m 700 "$homebrew_home" "$homebrew_cache"
+  # Machine brew.env can redirect HOME-derived storage. Explicit XDG takes
+  # precedence and keeps formula authorization inside this cleanup tree.
+  mkdir -m 700 "$homebrew_home/.config"
   mkdir -m 700 "$work/public-preflight"
   freeze_public_release \
     "$tag" "$asset_dir" "$tag_object" "$source_commit" "$verifier_commit" \
@@ -576,6 +585,7 @@ main() {
   # shellcheck disable=SC2016 # Expanded by the credential-free child shell.
   /usr/bin/env -i \
     HOME="$homebrew_home" \
+    XDG_CONFIG_HOME="$homebrew_home/.config" \
     HOMEBREW_CACHE="$homebrew_cache" \
     USER="$user_name" \
     LOGNAME="$user_name" \

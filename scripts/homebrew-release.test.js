@@ -113,6 +113,7 @@ function runMockedHomebrewPhase({
   helperOnIntel = false,
   helperByteMismatch = false,
   trustFailure = false,
+  xdgConfig = "private",
   fetchFailure = false,
   installedByteMismatch = false,
   macosVerifierFailure = false,
@@ -132,6 +133,10 @@ function runMockedHomebrewPhase({
   const work = path.join(root, "work");
   const home = path.join(work, "home");
   const cache = path.join(work, "cache");
+  const config = path.join(home, ".config");
+  const externalConfig = path.join(root, "external-config");
+  const externalTrust = path.join(externalConfig, "homebrew", "trust.json");
+  const externalSentinel = '{"trustedformulae":["example/tap/existing"]}\n';
   const log = path.join(root, "calls.log");
   for (const directory of [
     assets,
@@ -142,9 +147,15 @@ function runMockedHomebrewPhase({
     work,
     home,
     cache,
+    externalConfig,
+    path.dirname(externalTrust),
   ]) {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   }
+
+  fs.writeFileSync(externalTrust, externalSentinel, { mode: 0o600 });
+  if (xdgConfig === "symlink") fs.symlinkSync(externalConfig, config);
+  else fs.mkdirSync(config, { mode: 0o700 });
 
   const credentialCanary = forbiddenCredentials.concat("UNRELATED_SECRET").map(
     (name) => `[ -z "\${${name}+x}" ] || exit 95`,
@@ -289,6 +300,13 @@ esac
     path.join(mockBin, "brew"),
     `#!/bin/sh
 ${credentialCanary}printf 'brew:%s\\n' "$*" >>${shellQuote(log)}
+# Model machine brew.env loading after the launcher has scrubbed caller state.
+HOMEBREW_XDG_CONFIG_HOME=${shellQuote(externalConfig)}
+if [ -n "\${XDG_CONFIG_HOME:-}" ]; then
+  user_config="$XDG_CONFIG_HOME/homebrew"
+else
+  user_config="$HOMEBREW_XDG_CONFIG_HOME/homebrew"
+fi
 case "\${1:-}" in
   tap)
     [ "$*" = "tap openclaw/tap" ] || exit 80
@@ -301,12 +319,12 @@ case "\${1:-}" in
     [ "$HOME" = "\${HOMEBREW_CACHE%/cache}/home" ] || exit 86
     [ -d "$HOME" ] && [ -d "$HOMEBREW_CACHE" ] || exit 87
     ${trustFailure ? "exit 75" : ""}
-    /bin/mkdir -m 700 "$HOME/.homebrew"
-    printf '%s\\n' openclaw/tap/crabbox >"$HOME/.homebrew/trusted-formula"
+    /bin/mkdir -m 700 "$user_config"
+    printf '%s\\n' openclaw/tap/crabbox >"$user_config/trusted-formula"
     ;;
   info)
     [ "$*" = "info --json=v2 --formula openclaw/tap/crabbox" ] || exit 82
-    [ -f "$HOME/.homebrew/trusted-formula" ] || exit 92
+    [ -f "$user_config/trusted-formula" ] || exit 92
     /bin/cat ${shellQuote(formulaPath)}
     ;;
   fetch)
@@ -383,6 +401,7 @@ if [[ "\${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
       [
         "-i",
         `HOME=${home}`,
+        ...(xdgConfig === "missing" ? [] : [`XDG_CONFIG_HOME=${xdgConfig === "outside" ? externalConfig : config}`]),
         `HOMEBREW_CACHE=${cache}`,
         "USER=crabbox-test",
         "LOGNAME=crabbox-test",
@@ -424,6 +443,9 @@ if [[ "\${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
     return {
       ...result,
       calls: fs.existsSync(log) ? fs.readFileSync(log, "utf8") : "",
+      externalTrustUnchanged: fs.readFileSync(externalTrust, "utf8") === externalSentinel &&
+        (fs.statSync(externalTrust).mode & 0o777) === 0o600 &&
+        fs.readdirSync(path.dirname(externalTrust)).join() === "trust.json",
     };
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -836,6 +858,7 @@ test("mocked Homebrew phase proves fresh fetch, frozen bytes, trust, and final e
   const result = runMockedHomebrewPhase();
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Verified Homebrew v1\.2\.3 on arm64/);
+  assert.equal(result.externalTrustUnchanged, true);
   assert.match(result.calls, /^verify-source:v1\.2\.3 /m);
   assert.match(result.calls, /^verify-release:v1\.2\.3 /m);
   assert.match(result.calls, /^brew:update --force$/m);
@@ -853,6 +876,16 @@ test("mocked Homebrew phase proves fresh fetch, frozen bytes, trust, and final e
   assert.ok(result.calls.indexOf("brew:update") < result.calls.indexOf("brew:trust"));
   assert.ok(result.calls.indexOf("brew:trust") < result.calls.indexOf("brew:info"));
   assert.ok(result.calls.indexOf("verify-macos:") < result.calls.indexOf("brew:test"));
+});
+
+test("mocked Homebrew phase rejects missing, outside, or linked XDG configuration before brew", () => {
+  for (const xdgConfig of ["missing", "outside", "symlink"]) {
+    const result = runMockedHomebrewPhase({ xdgConfig });
+    assert.notEqual(result.status, 0, xdgConfig);
+    assert.match(result.stderr, /real work-local XDG config directory/);
+    assert.doesNotMatch(result.calls, /^brew:/m);
+    assert.equal(result.externalTrustUnchanged, true);
+  }
 });
 
 test("mocked Homebrew phase stops before formula loading when private trust fails", () => {
