@@ -685,8 +685,10 @@ func (b *backend) createVM(ctx context.Context, cfg core.Config, name string) er
 	// makes Start-VM create a <name>_<guid>.avhdx differencing disk and attach it
 	// in place of the base VHDX. That defeats removeVM's disk cleanup (it matches
 	// the base <name>.vhdx) and leaks a disk-sized file on release. Lease VMs are
-	// ephemeral and have no use for checkpoints.
-	cpuScript := fmt.Sprintf(`Set-VM -Name %s -ProcessorCount %d -AutomaticCheckpointsEnabled $false`, core.PowerShellQuote(name), cfg.HyperV.CPUs)
+	// ephemeral and have no use for checkpoints. The default automatic stop action,
+	// Save, keeps a runtime-state file the size of each running VM's assigned memory
+	// on the VM's drive; TurnOff avoids it (explicit pause still uses Save-VM).
+	cpuScript := fmt.Sprintf(`Set-VM -Name %s -ProcessorCount %d -AutomaticCheckpointsEnabled $false -AutomaticStopAction TurnOff`, core.PowerShellQuote(name), cfg.HyperV.CPUs)
 	result, err = b.powershell(ctx, cpuScript)
 	if err != nil {
 		return shared.LocalCommandError("Set-VM", result, err)
