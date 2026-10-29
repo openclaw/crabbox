@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Parallels: a Windows warmup waits for the guest's routable address instead of the self-assigned `169.254.x.x` address it reports until DHCP answers, which had stalled the SSH bootstrap for its full timeout before replacing the lease. [PR 2981](https://github.com/openclaw/crabbox/pull/2981). Thanks @rustanacexd.
 - Homebrew release verification: authorize the maintained formula in each credential-free verification workspace before loading it, keeping trust local even with machine Homebrew configuration, preserving formula identity, archive, signature, and installation checks. [PR 2979](https://github.com/openclaw/crabbox/pull/2979). Thanks @vincentkoc.
 - Release builds: retire completed private compiler caches between targets so multi-platform production does not retain every target's cache until packaging. [PR 2978](https://github.com/openclaw/crabbox/pull/2978). Thanks @vincentkoc.
 
