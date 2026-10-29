@@ -40,7 +40,7 @@ var errParallelsDHCPLeaseMissing = errors.New("no Parallels DHCP lease for VM MA
 var errParallelsGuestToolsUnavailable = errors.New("Parallels guest tools unavailable")
 
 // errParallelsGuestLinkLocalOnly marks an IP wait that ended while Tools still
-// reported only a self-assigned 169.254.x.x address. The guest booted but its
+// reported only a self-assigned link-local address. The guest booted but its
 // DHCP request went unanswered, so a fresh clone can still succeed.
 var errParallelsGuestLinkLocalOnly = errors.New("Parallels guest has only a link-local address")
 
@@ -837,7 +837,7 @@ func (c *ParallelsClient) EnsureGuestReady(ctx context.Context, vmID string, cfg
 	return nil
 }
 
-func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time.Duration, purpose ParallelsIPWaitPurpose) (ParallelsVM, error) {
+func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time.Duration, purpose ParallelsIPWaitPurpose) (_ ParallelsVM, err error) {
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
 	}
@@ -852,6 +852,24 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 	var lastDHCPError error
 	var lastQueryError error
 	useDHCPFallback := c.Cfg.TargetOS == targetMacOS && strings.TrimSpace(c.Cfg.Parallels.BootstrapKey) != ""
+	// A wait that runs out of time while Tools report only a link-local address
+	// is retryable: the guest booted but DHCP never answered it, and a fresh
+	// clone can still succeed. Acquisition shares its startup deadline with this
+	// wait, so the timeout usually arrives as the parent's deadline.
+	defer func() {
+		if err == nil || last.LinkLocalIP == "" || errors.Is(err, errParallelsGuestToolsUnavailable) {
+			return
+		}
+		var exitErr ExitError
+		switch {
+		case ctx.Err() == nil && AsExitError(err, &exitErr):
+			err = fmt.Errorf("%w: %w", errParallelsGuestLinkLocalOnly, err)
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			hint := parallelsIPTimeoutHint(c.Cfg, last, true, useDHCPFallback, lastDHCPError, purpose)
+			err = fmt.Errorf("%w: %w: %w", errParallelsGuestLinkLocalOnly,
+				Exit(5, "timed out waiting for Parallels VM %s IP; last_state=%s; %s", id, blank(last.State, "-"), hint), err)
+		}
+	}()
 	waitError := func(reason string) error {
 		if parentDeadline, ok := ctx.Deadline(); ok && !time.Now().Before(parentDeadline) {
 			<-ctx.Done()
@@ -860,19 +878,13 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 			return context.Cause(ctx)
 		}
 		hint := parallelsIPTimeoutHint(c.Cfg, last, vmObserved, useDHCPFallback, lastDHCPError, purpose)
-		var err error
-		switch {
-		case lastQueryError != nil:
-			err = Exit(5, "%s Parallels VM %s IP; last_state=%s; VM query: %v; %s", reason, id, blank(last.State, "-"), lastQueryError, hint)
-		case lastDHCPError != nil:
-			err = Exit(5, "%s Parallels VM %s IP; last_state=%s; DHCP fallback: %v; %s", reason, id, blank(last.State, "-"), lastDHCPError, hint)
-		default:
-			err = Exit(5, "%s Parallels VM %s IP; last_state=%s; %s", reason, id, blank(last.State, "-"), hint)
+		if lastQueryError != nil {
+			return Exit(5, "%s Parallels VM %s IP; last_state=%s; VM query: %v; %s", reason, id, blank(last.State, "-"), lastQueryError, hint)
 		}
-		if vmObserved && last.LinkLocalIP != "" {
-			return fmt.Errorf("%w: %w", errParallelsGuestLinkLocalOnly, err)
+		if lastDHCPError != nil {
+			return Exit(5, "%s Parallels VM %s IP; last_state=%s; DHCP fallback: %v; %s", reason, id, blank(last.State, "-"), lastDHCPError, hint)
 		}
-		return err
+		return Exit(5, "%s Parallels VM %s IP; last_state=%s; %s", reason, id, blank(last.State, "-"), hint)
 	}
 	waitExpired := func() bool {
 		// The poll can wake before the deadline's cancellation callback runs.
@@ -1022,7 +1034,7 @@ func parallelsIPTimeoutHint(cfg Config, last ParallelsVM, vmObserved, dhcpFallba
 		}
 	}
 	if running && vmObserved && last.LinkLocalIP != "" {
-		parts = append(parts, "the guest booted and Parallels Tools run, so check the DHCP server of the guest's Parallels network (`prlsrvctl net info Shared` for the default network)")
+		parts = append(parts, "the guest booted and reports only a self-assigned address, so check the DHCP server of the guest's Parallels network (`prlsrvctl net info Shared` for the default network)")
 		return "hint: " + strings.Join(parts, "; ")
 	}
 	if running && purpose == ParallelsIPWaitAcquisition && mode == "linked" {
@@ -1855,8 +1867,8 @@ func firstJSONField(item map[string]any, keys ...string) string {
 
 // parallelsGuestIP picks the guest address from the inventory: the first
 // address in ip_configured, then the first IPv4 in Network.ipAddresses. It
-// skips IPv4 link-local addresses (169.254.0.0/16) and returns the first one
-// separately. A Windows guest assigns itself one until DHCP answers, and
+// skips link-local addresses (169.254.0.0/16 and fe80::/10) and returns the
+// first one separately. A Windows guest assigns itself one until DHCP answers, and
 // Parallels Tools reports it, but SSH never listens there.
 func parallelsGuestIP(item map[string]any) (ip, linkLocal string) {
 	candidates := strings.Fields(firstJSONField(item, "ip_configured"))
@@ -1874,7 +1886,7 @@ func parallelsGuestIP(item map[string]any) (ip, linkLocal string) {
 		if candidate == "" || candidate == "-" {
 			continue
 		}
-		if parsed := net.ParseIP(candidate); parsed != nil && parsed.To4() != nil && parsed.IsLinkLocalUnicast() {
+		if parsed := net.ParseIP(candidate); parsed != nil && parsed.IsLinkLocalUnicast() {
 			if linkLocal == "" {
 				linkLocal = candidate
 			}

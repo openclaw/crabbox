@@ -92,27 +92,56 @@ func TestParallelsWaitForIPLinkLocalTimeoutIsRetryable(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				runner := &parallelsIPProbeRunner{t: t, started: time.Now(), execReplies: []string{""}, linkLocal: tc.linkLocal}
-				_, err := NewParallelsClient(Config{TargetOS: targetWindows, SSHPort: "22"}, runner).WaitForIP(context.Background(), "vm1", 3*time.Minute, ParallelsIPWaitAcquisition)
-				if err == nil || ExitCodeForError(err, 1) != 5 || !strings.Contains(err.Error(), "timed out waiting for Parallels VM vm1 IP") {
-					t.Fatalf("want IP timeout with exit 5, got %v", err)
-				}
-				if got := isBootstrapWaitError(err); got != tc.linkLocal {
-					t.Fatalf("isBootstrapWaitError=%t, want %t: %v", got, tc.linkLocal, err)
-				}
-				for _, want := range tc.want {
-					if !strings.Contains(err.Error(), want) {
-						t.Errorf("missing %q: %v", want, err)
+				for _, shared := range []bool{false, true} {
+					runner := &parallelsIPProbeRunner{t: t, started: time.Now(), execReplies: []string{""}, linkLocal: tc.linkLocal}
+					cfg := Config{TargetOS: targetWindows, SSHPort: "22", Parallels: ParallelsConfig{StartupTimeout: 3 * time.Minute}}
+					// Acquisition passes WaitForIP a parent with the same
+					// deadline, so the timeout arrives as the parent's.
+					ctx, cancel := context.Background(), context.CancelFunc(func() {})
+					if shared {
+						ctx, cancel = ParallelsStartupContext(ctx, cfg)
 					}
-				}
-				for _, reject := range tc.reject {
-					if strings.Contains(err.Error(), reject) {
-						t.Errorf("unexpected %q: %v", reject, err)
+					_, err := NewParallelsClient(cfg, runner).WaitForIP(ctx, "vm1", cfg.Parallels.StartupTimeout, ParallelsIPWaitAcquisition)
+					cancel()
+					if !tc.linkLocal && shared {
+						if !errors.Is(err, context.DeadlineExceeded) || isBootstrapWaitError(err) {
+							t.Fatalf("shared deadline without link-local: want plain deadline, got %v", err)
+						}
+						continue
+					}
+					if err == nil || ExitCodeForError(err, 1) != 5 || !strings.Contains(err.Error(), "timed out waiting for Parallels VM vm1 IP") {
+						t.Fatalf("shared=%t: want IP timeout with exit 5, got %v", shared, err)
+					}
+					if got := isBootstrapWaitError(err); got != tc.linkLocal {
+						t.Fatalf("shared=%t: isBootstrapWaitError=%t, want %t: %v", shared, got, tc.linkLocal, err)
+					}
+					if shared && !errors.Is(err, context.DeadlineExceeded) {
+						t.Fatalf("shared deadline cause lost: %v", err)
+					}
+					for _, want := range tc.want {
+						if !strings.Contains(err.Error(), want) {
+							t.Errorf("shared=%t: missing %q: %v", shared, want, err)
+						}
+					}
+					for _, reject := range tc.reject {
+						if strings.Contains(err.Error(), reject) {
+							t.Errorf("shared=%t: unexpected %q: %v", shared, reject, err)
+						}
 					}
 				}
 			})
 		})
 	}
+}
+
+func TestParallelsWaitForIPToolsFailFastStaysFinalWithLinkLocal(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		runner := &parallelsIPProbeRunner{t: t, started: time.Now(), linkLocal: true}
+		_, err := NewParallelsClient(Config{TargetOS: targetWindows, SSHPort: "22"}, runner).WaitForIP(context.Background(), "vm1", 15*time.Minute, ParallelsIPWaitAcquisition)
+		if !errors.Is(err, errParallelsGuestToolsUnavailable) || errors.Is(err, errParallelsGuestLinkLocalOnly) || isBootstrapWaitError(err) {
+			t.Fatalf("Tools fail-fast must stay non-retryable: %v", err)
+		}
+	})
 }
 
 func TestParallelsGuestToolsUnavailableSessionError(t *testing.T) {

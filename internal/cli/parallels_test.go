@@ -36,7 +36,8 @@ func TestParseParallelsVMsSkipsLinkLocalIPv4(t *testing.T) {
 		{"ID":"configured","State":"running","ip_configured":"169.254.2.136","Network":{"ipAddresses":[{"type":"ipv4","ip":"169.254.2.136"},{"type":"ipv4","ip":"10.211.55.9"}]}},
 		{"ID":"pending","State":"running","ip_configured":"169.254.2.136"},
 		{"ID":"listed","State":"running","Network":{"ipAddresses":[{"type":"ipv4","ip":"169.254.7.1"}]}},
-		{"ID":"both","State":"running","ip_configured":"169.254.2.136 10.211.55.10"}
+		{"ID":"both","State":"running","ip_configured":"169.254.2.136 10.211.55.10"},
+		{"ID":"ipv6","State":"running","ip_configured":"169.254.2.136 fe80::1c7d:8cf9:9b6:8c2f"}
 	]`)
 	if err != nil {
 		t.Fatal(err)
@@ -46,10 +47,10 @@ func TestParseParallelsVMsSkipsLinkLocalIPv4(t *testing.T) {
 		ips = append(ips, vm.IP)
 		linkLocal = append(linkLocal, vm.LinkLocalIP)
 	}
-	if want := []string{"10.211.55.9", "", "", "10.211.55.10"}; !reflect.DeepEqual(ips, want) {
+	if want := []string{"10.211.55.9", "", "", "10.211.55.10", ""}; !reflect.DeepEqual(ips, want) {
 		t.Fatalf("IPs=%q, want %q", ips, want)
 	}
-	if want := []string{"", "169.254.2.136", "169.254.7.1", ""}; !reflect.DeepEqual(linkLocal, want) {
+	if want := []string{"", "169.254.2.136", "169.254.7.1", "", "169.254.2.136"}; !reflect.DeepEqual(linkLocal, want) {
 		t.Fatalf("link-local IPs=%q, want %q", linkLocal, want)
 	}
 }
