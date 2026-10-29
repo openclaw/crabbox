@@ -798,9 +798,19 @@ jobs:
         run: docker build -f worker/Dockerfile.node worker
 
   worker-postgres-recovery:
-    name: AWS recovery PostgreSQL integration
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: AWS recovery PostgreSQL integration
+            config: vitest.postgres.config.ts
+            cli: false
+          - name: Create retirement PostgreSQL integration
+            config: vitest.retire-postgres.config.ts
+            cli: true
     services:
       postgres:
         # Docker Official Image; PostgreSQL 17 satisfies the supported 13+ runtime contract.
@@ -830,8 +840,18 @@ jobs:
       - name: Install existing dependencies
         run: npm ci
         working-directory: worker
-      - name: Prove recovery rollback, reopen, and scoped-lease coexistence
-        run: npm exec -- vitest run --config vitest.postgres.config.ts
+      - name: Set up Go for CLI integration
+        if: matrix.cli
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          go-version-file: go.mod
+          cache: false
+      - name: Build CLI for integration
+        if: matrix.cli
+        run: go build -trimpath -o bin/crabbox ./cmd/crabbox
+      - name: Prove isolated PostgreSQL recovery
+        run: npm exec -- vitest run --config ${{ matrix.config }}
         working-directory: worker
 
   scripts:

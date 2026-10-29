@@ -21298,11 +21298,13 @@ export class FleetCoordinator {
     const attempt = await this.getCreateAttempt(reservation.id);
     if (
       !attempt ||
-      (attempt.state !== "pending" && !attempt.fixedCreate) ||
+      (attempt.state !== "pending" && attempt.state !== "canceled") ||
       !createAttemptMatchesLease(attempt, reservation)
     ) {
       return;
     }
+    // Reservation removal proves no dispatch occurred. Clear canceled bindings too,
+    // while retaining their cancellation state and non-recyclable retirement fence.
     const unbound = { ...attempt, updatedAt: new Date().toISOString() };
     if (reservation.state === "released") unbound.state = "canceled";
     delete unbound.canonicalLeaseID;
