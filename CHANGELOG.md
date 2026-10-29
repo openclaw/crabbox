@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Coordinator recovery: preview and retire an exact interrupted create request after its cancellation token is lost, preserving ownership, generation checks, and pending cleanup evidence. [PR 2980](https://github.com/openclaw/crabbox/pull/2980). Thanks @vincentkoc.
 - Homebrew release verification: authorize the maintained formula in each credential-free verification workspace before loading it, keeping trust local even with machine Homebrew configuration, preserving formula identity, archive, signature, and installation checks. [PR 2979](https://github.com/openclaw/crabbox/pull/2979). Thanks @vincentkoc.
 - Release builds: retire completed private compiler caches between targets so multi-platform production does not retain every target's cache until packaging. [PR 2978](https://github.com/openclaw/crabbox/pull/2978). Thanks @vincentkoc.
 

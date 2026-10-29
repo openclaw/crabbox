@@ -460,6 +460,7 @@ type imageDeleteKongCmd struct {
 }
 
 type adminKongCmd struct {
+	RetireCreate      adminRetireCreateKongCmd      `cmd:"" name:"retire-create" passthrough:"" help:"Preview or retire an exact create request after its cancellation token was lost."`
 	ExtendLifetime    adminExtendLifetimeKongCmd    `cmd:"" name:"extend-lifetime" passthrough:"" help:"Extend an enrolled lease deadline before stopping starts."`
 	RetainedReconcile adminRetainedReconcileKongCmd `cmd:"" name:"retained-reconcile" passthrough:"" help:"Inspect retained lease reconciliation progress."`
 	LifetimeReadback  adminLifetimeReadbackKongCmd  `cmd:"" name:"lifetime-readback" passthrough:"" help:"Read coordinator-observed instance and root volume state."`
@@ -476,6 +477,14 @@ type adminKongCmd struct {
 type adminLeasesKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
+type adminRetireCreateKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+
+func (c *adminRetireCreateKongCmd) Run(ctx context.Context, app App) error {
+	return app.adminRetireCreate(ctx, c.Args)
+}
+
 type adminExtendLifetimeKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
