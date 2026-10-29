@@ -199,10 +199,27 @@ it("retires lost-token creates through real auth, CLI, PostgreSQL and provider H
     expect((await request(retirementPath(first.requestedLeaseID), input)).status).toBe(409);
     await active!.runtime.storage.put("create-attempt:" + first.requestedLeaseID, first);
 
-    const unexpectedNetwork = vi.fn<typeof fetch>(() => {
-      throw new Error("unbound retirement or replay attempted network I/O");
+    const replayNetwork: { origin: string; action: string | null }[] = [];
+    vi.stubGlobal("fetch", async (resource: RequestInfo | URL, init?: RequestInit) => {
+      const wire = resource instanceof Request ? resource : new Request(resource, init);
+      const observed = {
+        origin: new URL(wire.url).origin,
+        action: new URLSearchParams(await wire.clone().text()).get("Action"),
+      };
+      replayNetwork.push(observed);
+      // Legacy tokenless admission prices before checking its ID fence. Serve
+      // that read only; any allocation/deletion is both denied and asserted below.
+      assert.deepEqual(observed, {
+        origin: "https://ec2." + region + ".amazonaws.com",
+        action: "DescribeSpotPriceHistory",
+      });
+      return new Response(
+        "<DescribeSpotPriceHistoryResponse><spotPriceHistorySet /></DescribeSpotPriceHistoryResponse>",
+        {
+          headers: { "content-type": "text/xml" },
+        },
+      );
     });
-    vi.stubGlobal("fetch", unexpectedNetwork);
     /* oxlint-disable eslint/no-await-in-loop -- each CLI retirement is followed by a fresh Pool and replay against its persisted fence. */
     for (const original of oldAttempts) {
       const id = original.requestedLeaseID;
@@ -245,7 +262,12 @@ it("retires lost-token creates through real auth, CLI, PostgreSQL and provider H
       expect(await physicalAttempt(pool, id)).toEqual(saved);
     }
     /* oxlint-enable eslint/no-await-in-loop */
-    expect(unexpectedNetwork).not.toHaveBeenCalled();
+    expect(replayNetwork).toEqual(
+      oldAttempts.map(() => ({
+        origin: "https://ec2." + region + ".amazonaws.com",
+        action: "DescribeSpotPriceHistory",
+      })),
+    );
     vi.unstubAllGlobals();
 
     // The actual AWS adapter/client perform signed HTTP against a synthetic loopback service.
