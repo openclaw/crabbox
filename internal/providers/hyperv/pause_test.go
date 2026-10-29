@@ -158,6 +158,62 @@ func TestResumeRejectsConcurrentClaimChange(t *testing.T) {
 	}
 }
 
+// A claim revoked or reassigned after Start-VM, while resume waits for the
+// guest address, must stop resume before its readiness SSH probe runs.
+func TestResumeSkipsReadinessSSHWhenClaimChangesAfterStart(t *testing.T) {
+	for _, mode := range []string{"revoke", "reassign"} {
+		t.Run(mode, func(t *testing.T) {
+			b, _, leaseID, name := pauseTestLease(t, hypervStateSaved, "192.0.2.10")
+			inner := hyperVStateResponder(name, hypervStateSaved, "192.0.2.10")
+			runner := &recordingRunner{}
+			swapped := false
+			runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+				if !swapped && len(req.Args) > 0 && strings.Contains(req.Args[len(req.Args)-1], "Get-VMNetworkAdapter") && len(matchingScripts(runner.calls, "Start-VM")) > 0 {
+					swapped = true
+					if mode == "revoke" {
+						core.RemoveLeaseClaim(leaseID)
+					} else {
+						claim, found, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+						if err != nil || !found {
+							t.Fatalf("resolve claim: found=%v err=%v", found, err)
+						}
+						server := b.serverFromInstance(hypervVM{Name: name, State: hypervStateRunning}, claim, b.configForRun())
+						if err := core.UpdateLeaseClaimEndpoint(leaseID, server, core.SSHTargetFromConfig(b.configForRun(), "192.0.2.77")); err != nil {
+							t.Fatalf("reassign claim: %v", err)
+						}
+					}
+				}
+				return inner(req)
+			}
+			b.rt.Exec = runner
+			probes := 0
+			b.sshReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
+				probes++
+				return nil
+			}
+
+			err := b.Resume(context.Background(), core.ResumeRequest{ID: leaseID})
+			if !swapped {
+				t.Fatal("claim was never changed after Start-VM")
+			}
+			if err == nil || !strings.Contains(err.Error(), "claim changed") {
+				t.Fatalf("Resume err=%v want claim conflict", err)
+			}
+			if probes != 0 {
+				t.Fatalf("readiness SSH ran %d time(s) after the claim changed", probes)
+			}
+			if got := matchingScripts(runner.calls, "Start-VM"); len(got) != 1 {
+				t.Fatalf("Start-VM calls=%d want 1", len(got))
+			}
+			for _, verb := range []string{"Save-VM", "Resume-VM", "Stop-VM", "Remove-VM"} {
+				if got := matchingScripts(runner.calls, verb); len(got) != 0 {
+					t.Fatalf("resume issued %s after the claim changed: %v", verb, got)
+				}
+			}
+		})
+	}
+}
+
 // A claim reassigned to another VM between the lease read and the host
 // effect must stop Pause/Resume before any Save/Start/Resume command runs.
 func TestPauseResumeFailClosedOnClaimReassignedBeforeEffect(t *testing.T) {
