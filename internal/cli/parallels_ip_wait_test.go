@@ -80,6 +80,41 @@ func TestParallelsWaitForIPToolsRecovery(t *testing.T) {
 	}
 }
 
+func TestParallelsWaitForIPLinkLocalTimeoutIsRetryable(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		linkLocal bool
+		want      []string
+		reject    []string
+	}{
+		{name: "link-local address", linkLocal: true, want: []string{"tools_ip=169.254.2.136 (link-local", "prlsrvctl net info Shared"}, reject: []string{"retry with parallels.cloneMode=full"}},
+		{name: "no address", want: []string{"tools_ip=none", "retry with parallels.cloneMode=full"}, reject: []string{"link-local"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				runner := &parallelsIPProbeRunner{t: t, started: time.Now(), execReplies: []string{""}, linkLocal: tc.linkLocal}
+				_, err := NewParallelsClient(Config{TargetOS: targetWindows, SSHPort: "22"}, runner).WaitForIP(context.Background(), "vm1", 3*time.Minute, ParallelsIPWaitAcquisition)
+				if err == nil || ExitCodeForError(err, 1) != 5 || !strings.Contains(err.Error(), "timed out waiting for Parallels VM vm1 IP") {
+					t.Fatalf("want IP timeout with exit 5, got %v", err)
+				}
+				if got := isBootstrapWaitError(err); got != tc.linkLocal {
+					t.Fatalf("isBootstrapWaitError=%t, want %t: %v", got, tc.linkLocal, err)
+				}
+				for _, want := range tc.want {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("missing %q: %v", want, err)
+					}
+				}
+				for _, reject := range tc.reject {
+					if strings.Contains(err.Error(), reject) {
+						t.Errorf("unexpected %q: %v", reject, err)
+					}
+				}
+			})
+		})
+	}
+}
+
 func TestParallelsGuestToolsUnavailableSessionError(t *testing.T) {
 	for _, message := range []string{parallelsSessionUnavailable, "PRL_ERR_VM_EXEC_GUEST_TOOL_NOT_AVAILABLE", "guest tools are not available", "guest tools not available", "PrlJob_GetResult: Invalid argument", "PrlJob_GetRetCode: Invalid argument"} {
 		if !ParallelsGuestToolsUnavailable(errors.New(message)) {

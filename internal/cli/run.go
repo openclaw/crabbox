@@ -4562,7 +4562,8 @@ func isBootstrapWaitError(err error) bool {
 	return AsExitError(err, &exitErr) &&
 		exitErr.Code == 5 &&
 		(strings.Contains(exitErr.Message, "timed out waiting for SSH") ||
-			strings.Contains(exitErr.Message, "timed out waiting for XCP-ng guest IPv4"))
+			strings.Contains(exitErr.Message, "timed out waiting for XCP-ng guest IPv4") ||
+			errors.Is(err, errParallelsGuestLinkLocalOnly))
 }
 
 func IsBootstrapWaitError(err error) bool {

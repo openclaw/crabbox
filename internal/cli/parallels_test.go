@@ -35,13 +35,22 @@ func TestParseParallelsVMsSkipsLinkLocalIPv4(t *testing.T) {
 	vms, err := parseParallelsVMs(`[
 		{"ID":"configured","State":"running","ip_configured":"169.254.2.136","Network":{"ipAddresses":[{"type":"ipv4","ip":"169.254.2.136"},{"type":"ipv4","ip":"10.211.55.9"}]}},
 		{"ID":"pending","State":"running","ip_configured":"169.254.2.136"},
-		{"ID":"listed","State":"running","Network":{"ipAddresses":[{"type":"ipv4","ip":"169.254.7.1"}]}}
+		{"ID":"listed","State":"running","Network":{"ipAddresses":[{"type":"ipv4","ip":"169.254.7.1"}]}},
+		{"ID":"both","State":"running","ip_configured":"169.254.2.136 10.211.55.10"}
 	]`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := []string{vms[0].IP, vms[1].IP, vms[2].IP}; !reflect.DeepEqual(got, []string{"10.211.55.9", "", ""}) {
-		t.Fatalf("IPs=%q, want the routable address and no link-local ones", got)
+	var ips, linkLocal []string
+	for _, vm := range vms {
+		ips = append(ips, vm.IP)
+		linkLocal = append(linkLocal, vm.LinkLocalIP)
+	}
+	if want := []string{"10.211.55.9", "", "", "10.211.55.10"}; !reflect.DeepEqual(ips, want) {
+		t.Fatalf("IPs=%q, want %q", ips, want)
+	}
+	if want := []string{"", "169.254.2.136", "169.254.7.1", ""}; !reflect.DeepEqual(linkLocal, want) {
+		t.Fatalf("link-local IPs=%q, want %q", linkLocal, want)
 	}
 }
 
