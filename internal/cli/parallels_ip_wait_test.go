@@ -48,10 +48,12 @@ func TestParallelsWaitForIPToolsRecovery(t *testing.T) {
 		dhcpAfter   time.Duration
 		sshAfter    time.Duration
 		execReplies []string
+		linkLocal   bool
 		wantProbes  int
 		wantSource  string
 	}{
 		{name: "IP during boot grace", ipAfter: 30 * time.Second, wantSource: "tools"},
+		{name: "link-local address until DHCP", ipAfter: 30 * time.Second, linkLocal: true, wantSource: "tools"},
 		{name: "Tools unavailable twice then IP", ipAfter: 140 * time.Second, wantProbes: 2, wantSource: "tools"},
 		{name: "exec flake then success", ipAfter: 180 * time.Second, execReplies: []string{"PrlJob_GetRetCode: Invalid argument", ""}, wantProbes: 4, wantSource: "tools"},
 		{name: "unavailable then successful probe resets count", ipAfter: 200 * time.Second, execReplies: []string{parallelsSessionUnavailable, parallelsSessionUnavailable, "", parallelsSessionUnavailable, parallelsSessionUnavailable, ""}, wantProbes: 6, wantSource: "tools"},
@@ -61,7 +63,7 @@ func TestParallelsWaitForIPToolsRecovery(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				runner := &parallelsIPProbeRunner{t: t, started: time.Now(), ipAfter: tc.ipAfter, dhcpAfter: tc.dhcpAfter, sshAfter: tc.sshAfter, execReplies: tc.execReplies}
+				runner := &parallelsIPProbeRunner{t: t, started: time.Now(), ipAfter: tc.ipAfter, dhcpAfter: tc.dhcpAfter, sshAfter: tc.sshAfter, execReplies: tc.execReplies, linkLocal: tc.linkLocal}
 				cfg := Config{TargetOS: targetMacOS, SSHPort: "22"}
 				if tc.dhcpAfter > 0 {
 					cfg.Parallels.BootstrapKey = "/Users/runner/.ssh/bootstrap"
@@ -169,6 +171,7 @@ type parallelsIPProbeRunner struct {
 	dhcpAfter   time.Duration
 	sshAfter    time.Duration
 	execReplies []string
+	linkLocal   bool
 	probes      []time.Duration
 	block       string
 }
@@ -197,6 +200,8 @@ func (r *parallelsIPProbeRunner) Run(ctx context.Context, req LocalCommandReques
 		ip := ""
 		if r.ipAfter > 0 && elapsed >= r.ipAfter {
 			ip = "10.211.55.8"
+		} else if r.linkLocal {
+			ip = "169.254.2.136"
 		}
 		return LocalCommandResult{Stdout: fmt.Sprintf(`[{"ID":"vm1","State":"running","GuestTools":{"state":"not_installed"},"ip_configured":%q,"Hardware":{"net0":{"enabled":true,"mac":"001C4233EEDD"}}}]`, ip)}, nil
 	case req.Name == "prlctl" && req.Args[0] == "exec":

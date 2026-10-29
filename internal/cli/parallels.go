@@ -1664,7 +1664,7 @@ func parseParallelsVMs(data string) ([]ParallelsVM, error) {
 			State:    firstJSONField(item, "State", "status"),
 			OS:       firstJSONField(item, "OS", "os"),
 			Home:     firstJSONField(item, "Home", "home"),
-			IP:       cleanParallelsIP(firstJSONField(item, "ip_configured")),
+			IP:       usableParallelsIP(firstJSONField(item, "ip_configured")),
 			Template: strings.EqualFold(firstJSONField(item, "Template"), "yes"),
 		}
 		if vm.IP == "" {
@@ -1850,10 +1850,24 @@ func firstParallelsNetworkIP(network map[string]any) string {
 			continue
 		}
 		if ip, ok := item["ip"].(string); ok {
-			return cleanParallelsIP(ip)
+			if ip = usableParallelsIP(ip); ip != "" {
+				return ip
+			}
 		}
 	}
 	return ""
+}
+
+// usableParallelsIP drops an IPv4 link-local address (169.254.0.0/16). A
+// Windows guest assigns itself one until DHCP answers, and Parallels Tools
+// reports it. SSH never listens there, so WaitForIP must keep polling for the
+// leased address instead of handing the link-local one to the SSH wait.
+func usableParallelsIP(value string) string {
+	ip := cleanParallelsIP(value)
+	if parsed := net.ParseIP(ip); parsed != nil && parsed.To4() != nil && parsed.IsLinkLocalUnicast() {
+		return ""
+	}
+	return ip
 }
 
 func cleanParallelsIP(value string) string {
