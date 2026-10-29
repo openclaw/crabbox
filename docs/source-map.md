@@ -78,6 +78,7 @@ Crabbox has three implementation surfaces:
 - Canonical lease IDs (`cbx_<12 hex>`) and per-lease SSH key paths: `internal/cli/lease.go`
 - Friendly slug generation, normalization, and collision handling: `internal/cli/slug.go`
 - Repo-local claim files and `--reclaim` checks: `internal/cli/claim.go`
+- Test-only claim-fence probe (`crabbox_claim_fence_probe` build tag): `internal/cli/claim_fence_probe.go`; default no-op: `internal/cli/claim_fence_probe_off.go`
 - Fixed-ID direct acquisition intent, cross-process locking, and durable EC2
   attempt checkpoints: `internal/cli/claim.go`, `internal/providers/aws/backend.go`
 - Direct-provider labels, safe label encoding, idle-touch labels, TTL cap math: `internal/cli/provider_labels.go`

@@ -742,11 +742,12 @@ func WithLeaseClaimUnchanged(leaseID string, expected leaseClaim, action func() 
 }
 
 func withLeaseClaimUnchangedContext(ctx context.Context, leaseID string, expected leaseClaim, shared bool, action func() error) error {
+	action, observe := claimFenceProbe(leaseID, action)
 	path, err := leaseClaimPath(leaseID)
 	if err != nil {
-		return err
+		return observe(err)
 	}
-	return withLeaseClaimLockContext(ctx, path, shared, func() error {
+	return observe(withLeaseClaimLockContext(ctx, path, shared, func() error {
 		claim, exists, err := readLeaseClaimPathWithPresence(path)
 		if err != nil {
 			return err
@@ -758,7 +759,7 @@ func withLeaseClaimUnchangedContext(ctx context.Context, leaseID string, expecte
 			return nil
 		}
 		return action()
-	})
+	}))
 }
 
 func UpdateLeaseClaimEndpointIfUnchangedAction(

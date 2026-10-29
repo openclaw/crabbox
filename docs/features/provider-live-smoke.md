@@ -146,6 +146,24 @@ Use environment injection or an approved credential store; do not put secret
 values on command lines, in repository config, fixtures, proof logs, or shell
 history.
 
+## Claim-fence probe builds
+
+Lifecycle effects that must stop when a lease claim changes run inside
+`WithLeaseClaimUnchangedContext`. To prove that boundary live without a timing
+race, build a probe binary; release builds never compile the probe:
+
+```sh
+go build -tags crabbox_claim_fence_probe -o bin/crabbox-probe ./cmd/crabbox
+CRABBOX_CLAIM_FENCE_PROBE='hyperv.(*backend).waitForResumedLease:reassign' bin/crabbox-probe resume --provider hyperv --id <lease>
+```
+
+`CRABBOX_CLAIM_FENCE_PROBE=<site>:<revoke|reassign|none>` removes or rebinds the
+claim once, when the named fence is entered and before the fence rereads the
+claim. `<site>` is a full caller such as `hyperv.(*backend).ReleaseLease` or its
+final method name. The probe logs each fence entry, swap, admission and outcome
+on stderr with a `claim-fence-probe:` prefix. Run it only against throwaway
+leases; reassigned claims point at the documentation address `192.0.2.77`.
+
 <!-- BEGIN GENERATED PROVIDER LIFECYCLE COVERAGE -->
 
 ## Source-derived coverage matrix
