@@ -17,6 +17,7 @@ type App struct {
 	synthesizedFlagInputs bool
 
 	runOutcome             *shardRunOutcome
+	runLeaseTarget         *runLeaseHandoff
 	shardOwnsLeaseCleanup  bool // set only by shard; not derived from --label
 	runEnvDenylist         []string
 	egressClientRuntime    bool

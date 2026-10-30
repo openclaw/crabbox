@@ -4,6 +4,7 @@
 
 ### Added
 
+- UTM: add an experimental local Apple Silicon provider for Linux template clones and fresh macOS guests, with lease-bound native checkpoints and in-place restore. [PR 2893](https://github.com/openclaw/crabbox/pull/2893). Thanks @coygeek.
 - Hyper-V: save and resume native Windows guests with exact-claim fencing, standard lifecycle JSON receipts, a shared Node/npm warm baseline, and bounded provisioning and host operations. [PR 2975](https://github.com/openclaw/crabbox/pull/2975). Thanks @paulcam206.
 
 ### Fixed

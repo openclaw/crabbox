@@ -135,7 +135,7 @@ func newWatchTestExecutor() *watchTestExecutor {
 	return &watchTestExecutor{started: make(chan struct{}, 64), errs: map[int]error{}}
 }
 
-func (e *watchTestExecutor) run(ctx context.Context, args []string) error {
+func (e *watchTestExecutor) run(ctx context.Context, args []string, _ func(LeaseTarget)) error {
 	e.mu.Lock()
 	e.calls = append(e.calls, append([]string{}, args...))
 	iteration := len(e.calls)
