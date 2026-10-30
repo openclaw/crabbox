@@ -12,10 +12,12 @@ func resetClaimFenceProbe(t *testing.T) {
 	t.Helper()
 	claimFenceProbeMu.Lock()
 	claimFenceProbeFired = false
+	claimFenceProbeSeen = 0
 	claimFenceProbeMu.Unlock()
 	t.Cleanup(func() {
 		claimFenceProbeMu.Lock()
 		claimFenceProbeFired = false
+		claimFenceProbeSeen = 0
 		claimFenceProbeMu.Unlock()
 	})
 }
@@ -89,5 +91,21 @@ func TestClaimFenceProbeFiresOnceAndOnlyAtTheNamedSite(t *testing.T) {
 	called := false
 	if err := WithLeaseClaimUnchanged(leaseID, reassigned, func() error { called = true; return nil }); err != nil || !called {
 		t.Fatalf("probe fired twice: err=%v called=%v", err, called)
+	}
+}
+
+func TestClaimFenceProbeOccurrenceTargetsALaterFence(t *testing.T) {
+	resetClaimFenceProbe(t)
+	leaseID := "cbx_fenceprobenth"
+	expected := claimFenceProbeTestLease(t, leaseID)
+	t.Setenv(claimFenceProbeEnv, "TestClaimFenceProbeOccurrenceTargetsALaterFence#2:revoke")
+	first := false
+	if err := WithLeaseClaimUnchanged(leaseID, expected, func() error { first = true; return nil }); err != nil || !first {
+		t.Fatalf("first fence was disturbed: err=%v called=%v", err, first)
+	}
+	second := false
+	err := WithLeaseClaimUnchanged(leaseID, expected, func() error { second = true; return nil })
+	if err == nil || !strings.Contains(err.Error(), "claim changed") || second {
+		t.Fatalf("second fence err=%v called=%v, want refused", err, second)
 	}
 }

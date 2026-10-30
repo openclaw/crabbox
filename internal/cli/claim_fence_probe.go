@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -26,6 +27,7 @@ const claimFenceProbeReassignedHost = "192.0.2.77"
 var (
 	claimFenceProbeMu    sync.Mutex
 	claimFenceProbeFired bool
+	claimFenceProbeSeen  int
 
 	claimFenceProbeClosureSuffix = regexp.MustCompile(`(\.func\d+(\.\d+)*)+$`)
 )
@@ -40,7 +42,7 @@ func claimFenceProbe(leaseID string, action func() error) (func() error, func(er
 	wantSite, mode, ok := strings.Cut(spec, ":")
 	if !ok {
 		claimFenceProbeLogf("ignored malformed %s", claimFenceProbeEnv)
-	} else if claimFenceProbeMatches(site, wantSite) && claimFenceProbeArm() {
+	} else if claimFenceProbeMatches(site, wantSite) && claimFenceProbeArm(wantSite) {
 		if err := claimFenceProbeSwap(leaseID, mode); err != nil {
 			claimFenceProbeLogf("swap-failed mode=%s site=%s lease=%s err=%q", mode, site, leaseID, err.Error())
 		} else {
@@ -75,10 +77,22 @@ func claimFenceProbeLogf(format string, args ...any) {
 
 func passClaimFenceResult(err error) error { return err }
 
-func claimFenceProbeArm() bool {
+// claimFenceProbeArm fires on the nth matching fence entry, where want may end in
+// "#n" (default 1), so a site with several fences can target a later one.
+func claimFenceProbeArm(want string) bool {
+	nth := 1
+	if _, suffix, ok := strings.Cut(want, "#"); ok {
+		if n, err := strconv.Atoi(suffix); err == nil && n > 0 {
+			nth = n
+		}
+	}
 	claimFenceProbeMu.Lock()
 	defer claimFenceProbeMu.Unlock()
 	if claimFenceProbeFired {
+		return false
+	}
+	claimFenceProbeSeen++
+	if claimFenceProbeSeen != nth {
 		return false
 	}
 	claimFenceProbeFired = true
@@ -105,7 +119,7 @@ func claimFenceProbeSite() string {
 }
 
 func claimFenceProbeMatches(site, want string) bool {
-	want = strings.TrimSpace(want)
+	want, _, _ = strings.Cut(strings.TrimSpace(want), "#")
 	if want == "" {
 		return false
 	}
