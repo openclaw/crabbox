@@ -154,6 +154,12 @@ match. Frozen reconciliation candidates and claims with deletion progress are
 not extended; replacements, foreign ownership, and unsafe attachments remain
 refused.
 
+If all four canonical resource lookups return an exact Azure not-found response,
+brokered cleanup completes without issuing deletes, even when the claim records
+previously observed resources. Any remaining resource still requires the full
+identity and ownership checks. Failed, ambiguous, or empty responses retain the
+claim for retry.
+
 ## Backend selection
 
 `azure.backend` (CLI `--azure-backend`, env `CRABBOX_AZURE_BACKEND`) selects the

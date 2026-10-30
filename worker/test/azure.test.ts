@@ -670,6 +670,144 @@ describe("Azure cleanup inspection", () => {
     };
   }
 
+  it.each([
+    { mode: "ordinary", members: "pip" },
+    { mode: "ordinary", members: "all" },
+    { mode: "orphan", members: "pip" },
+    { mode: "continuation", members: "pip" },
+    { mode: "continuation", members: "all" },
+    { mode: "new continuation", members: "pip" },
+    { mode: "new continuation", members: "all" },
+  ])(
+    "completes $mode cleanup when claimed $members resources are all absent",
+    async ({ mode, members }) => {
+      const f = fixture();
+      const continuation = mode.endsWith("continuation");
+      const newClaim = mode === "new continuation";
+      const stableResourceIdentity = JSON.stringify(
+        members === "pip"
+          ? f.baseline.filter((entry) => entry.kind === "publicIPAddresses")
+          : f.baseline,
+      );
+      const claim = {
+        ...f.claim,
+        stableResourceIdentity,
+        ...(newClaim ? { resourceIdentity: stableResourceIdentity } : {}),
+        ...(members === "all" && !newClaim
+          ? { disk: { resourceID: f.ids.disk, uniqueID: "disk-immutable-id" } }
+          : {}),
+      };
+      if (newClaim) f.records.delete(f.claimKey);
+      else f.records.set(f.claimKey, claim);
+      f.resources.clear();
+      const context = { resourceIdentity: stableResourceIdentity };
+      const transport = {
+        request: async (method: string, path: string) => {
+          const response = await f.fetcher(
+            `https://management.azure.com/subscriptions/sub${path}`,
+            { method },
+          );
+          return { status: response.status, resource: await response.json() };
+        },
+      };
+      const cleanup = () =>
+        continuation
+          ? f.client.advanceOwnedServerDeletion(f.lease, transport, context)
+          : f.client.deleteOwnedServer(f.lease, mode === "orphan" ? context : undefined);
+      const expectedResult = continuation ? true : undefined;
+      await expect(cleanup()).resolves.toBe(expectedResult);
+      expect(f.records.get(f.claimKey)).toEqual(
+        continuation
+          ? { ...claim, completed: true, deletedStableResourceIdentity: stableResourceIdentity }
+          : undefined,
+      );
+      await expect(cleanup()).resolves.toBe(expectedResult);
+      expect(
+        new Set(f.fetcher.mock.calls.map(([input]) => new URL(String(input)).pathname)),
+      ).toEqual(new Set(Object.values(f.ids)));
+    },
+  );
+
+  it.each([2, 4])(
+    "preserves %i detached deletion receipts when completing an absent set",
+    async (count) => {
+      const f = fixture();
+      const baseline = f.baseline.map((entry) => ({
+        ...entry,
+        topology:
+          entry.kind === "networkInterfaces"
+            ? { ...entry.topology, virtualMachineID: f.ids.vm.toLowerCase() }
+            : entry.kind === "disks"
+              ? { managedBy: f.ids.vm.toLowerCase(), managedByExtended: [f.ids.vm.toLowerCase()] }
+              : entry.topology,
+      }));
+      const receipts = baseline.slice(0, count).map((entry) => ({
+        ...entry,
+        topology:
+          entry.kind === "networkInterfaces"
+            ? { ...entry.topology, virtualMachineID: "" }
+            : entry.kind === "disks"
+              ? { managedBy: "", managedByExtended: [] }
+              : entry.topology,
+      }));
+      const stableResourceIdentity = JSON.stringify(baseline);
+      f.records.set(f.claimKey, {
+        ...f.claim,
+        stableResourceIdentity,
+        deletedStableResourceIdentity: JSON.stringify(receipts),
+        disk: { resourceID: f.ids.disk, uniqueID: "disk-immutable-id" },
+      });
+      f.resources.clear();
+      const transport = {
+        request: async (method: string, path: string) => {
+          const response = await f.fetcher(
+            `https://management.azure.com/subscriptions/sub${path}`,
+            { method },
+          );
+          return { status: response.status, resource: await response.json() };
+        },
+      };
+      const context = { resourceIdentity: stableResourceIdentity };
+
+      await expect(f.client.advanceOwnedServerDeletion(f.lease, transport, context)).resolves.toBe(
+        true,
+      );
+      expect(f.records.get(f.claimKey)).toMatchObject({
+        completed: true,
+        stableResourceIdentity,
+        deletedStableResourceIdentity: JSON.stringify([...receipts, ...baseline.slice(count)]),
+      });
+      await expect(f.client.advanceOwnedServerDeletion(f.lease, transport, context)).resolves.toBe(
+        true,
+      );
+    },
+  );
+
+  it.each(["503", "timeout", "wrong 404", "empty 200", "204", "null"])(
+    "retains an absent-resource cleanup claim after an uncertain lookup: %s",
+    async (outcome) => {
+      const f = fixture();
+      f.claim.stableResourceIdentity = JSON.stringify(f.baseline.slice(2, 3));
+      f.resources.clear();
+      const before = structuredClone(f.records);
+      f.client.fetcher = async (input, init) => {
+        const url = new URL(String(input));
+        if (url.pathname !== f.ids.pip) return f.fetcher(input, init);
+        expect(init?.method ?? "GET").toBe("GET");
+        if (outcome === "timeout") throw new Error("synthetic lookup timeout");
+        if (outcome === "503") return new Response("synthetic unavailable", { status: 503 });
+        if (outcome === "wrong 404") return new Response("ResourceGroupNotFound", { status: 404 });
+        if (outcome === "null") return Response.json(null);
+        return new Response(null, { status: outcome === "204" ? 204 : 200 });
+      };
+
+      await expect(f.client.deleteOwnedServer(f.lease)).rejects.toThrow(
+        /synthetic|http 404|resource response is empty/,
+      );
+      expect(f.records).toEqual(before);
+    },
+  );
+
   function recoveryFixture() {
     const records = new Map<string, unknown>();
     const putKeys: string[] = [];

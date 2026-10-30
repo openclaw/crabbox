@@ -1344,7 +1344,9 @@ export class AzureClient {
       const preparedClaim = this.ownedDeleteClaim(
         lease,
         inspection.diskResource,
-        transport ? inspection.resourceIdentity : context?.resourceIdentity,
+        transport && inspection.stableResourceIdentity !== "[]"
+          ? inspection.resourceIdentity
+          : context?.resourceIdentity,
         observedStableResourceIdentity ?? inspection.stableResourceIdentity,
       );
       claim = await this.persistOwnedDeleteClaimTransition(claimKey, lease, claim, preparedClaim);
@@ -1415,7 +1417,12 @@ export class AzureClient {
         expectedStableResourceIdentity: claim.stableResourceIdentity,
         allowResourceSetExpansion: true,
       });
-      if (inspection.stableResourceIdentity !== claim.stableResourceIdentity) {
+      if (
+        azureStableResourceIdentityCanExpand(
+          claim.stableResourceIdentity,
+          inspection.stableResourceIdentity,
+        )
+      ) {
         claim = await this.persistOwnedDeleteClaimTransition(
           claimKey,
           lease,
@@ -1604,11 +1611,26 @@ export class AzureClient {
   ): Promise<true> {
     if (retainEvidence) {
       // Completion survives a lost provisioning-result commit; it is not inferred from intent.
-      if (!claim.completed)
+      if (!claim.completed) {
+        const deleted = azureStableResourceIdentityEntries(
+          claim.deletedStableResourceIdentity ?? "[]",
+        );
+        const deletedKinds = new Set(deleted.map((entry) => entry.kind));
         await this.persistOwnedDeleteClaimTransition(claimKey, lease, claim, {
           ...claim,
+          ...(claim.stableResourceIdentity
+            ? {
+                deletedStableResourceIdentity: JSON.stringify([
+                  ...deleted,
+                  ...azureStableResourceIdentityEntries(claim.stableResourceIdentity).filter(
+                    (entry) => !deletedKinds.has(entry.kind),
+                  ),
+                ]),
+              }
+            : {}),
           completed: true,
         });
+      }
     } else await this.clearOwnedDeleteClaim(claimKey, lease, claim);
     return true;
   }
@@ -1850,6 +1872,19 @@ export class AzureClient {
         request,
       ),
     ]);
+
+    if (!vm && !nic && !pip && !initialDisk) {
+      // Only exact not-found responses become absent resources; no deletion remains to authorize.
+      return {
+        vm: false,
+        nic: false,
+        pip: false,
+        disk: false,
+        stableResourceIdentity: "[]",
+        resourceIdentity: "[]",
+        ephemeralOSDisk: false,
+      };
+    }
 
     if (vm) this.requireOwnedResource("VM", vm, vmResourcePath, lease);
     if (nic) this.requireOwnedResource("NIC", nic, nicResourcePath, lease);
@@ -2305,7 +2340,9 @@ export class AzureClient {
     request: AzureResourceRequest = this.arm.bind(this),
   ): Promise<T | undefined> {
     try {
-      return await request<T>("GET", path, apiVersion);
+      const resource = await request<T>("GET", path, apiVersion);
+      if (!resource) throw new Error(`Azure GET ${path}: resource response is empty`);
+      return resource;
     } catch (error) {
       if (azureResourceNotFound(error, kind, name)) return undefined;
       throw error;
