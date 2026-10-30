@@ -39,6 +39,11 @@ var errParallelsDHCPLeaseMissing = errors.New("no Parallels DHCP lease for VM MA
 
 var errParallelsGuestToolsUnavailable = errors.New("Parallels guest tools unavailable")
 
+// errParallelsGuestLinkLocalOnly marks an IP wait that ended while Tools still
+// reported only a self-assigned link-local address. The guest booted but its
+// DHCP request went unanswered, so a fresh clone can still succeed.
+var errParallelsGuestLinkLocalOnly = errors.New("Parallels guest has only a link-local address")
+
 // Acquisition owns clone mode and rollback; resolving an existing VM does not.
 type ParallelsIPWaitPurpose uint8
 
@@ -63,6 +68,7 @@ type ParallelsVM struct {
 	OS           string
 	Home         string
 	IP           string
+	LinkLocalIP  string
 	IPSource     string
 	MACs         []string
 	Template     bool
@@ -831,7 +837,7 @@ func (c *ParallelsClient) EnsureGuestReady(ctx context.Context, vmID string, cfg
 	return nil
 }
 
-func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time.Duration, purpose ParallelsIPWaitPurpose) (ParallelsVM, error) {
+func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time.Duration, purpose ParallelsIPWaitPurpose) (_ ParallelsVM, err error) {
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
 	}
@@ -846,6 +852,24 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 	var lastDHCPError error
 	var lastQueryError error
 	useDHCPFallback := c.Cfg.TargetOS == targetMacOS && strings.TrimSpace(c.Cfg.Parallels.BootstrapKey) != ""
+	// A wait that runs out of time while Tools report only a link-local address
+	// is retryable: the guest booted but DHCP never answered it, and a fresh
+	// clone can still succeed. Acquisition shares its startup deadline with this
+	// wait, so the timeout usually arrives as the parent's deadline.
+	defer func() {
+		if err == nil || !vmObserved || last.LinkLocalIP == "" || errors.Is(err, errParallelsGuestToolsUnavailable) {
+			return
+		}
+		var exitErr ExitError
+		switch {
+		case ctx.Err() == nil && AsExitError(err, &exitErr):
+			err = fmt.Errorf("%w: %w", errParallelsGuestLinkLocalOnly, err)
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			hint := parallelsIPTimeoutHint(c.Cfg, last, true, useDHCPFallback, lastDHCPError, purpose)
+			err = fmt.Errorf("%w: %w: %w", errParallelsGuestLinkLocalOnly,
+				Exit(5, "timed out waiting for Parallels VM %s IP; last_state=%s; %s", id, blank(last.State, "-"), hint), err)
+		}
+	}()
 	waitError := func(reason string) error {
 		if parentDeadline, ok := ctx.Deadline(); ok && !time.Now().Before(parentDeadline) {
 			<-ctx.Done()
@@ -988,6 +1012,9 @@ func parallelsIPTimeoutHint(cfg Config, last ParallelsVM, vmObserved, dhcpFallba
 	toolsIP := "unknown"
 	if vmObserved {
 		toolsIP = "none"
+		if last.LinkLocalIP != "" {
+			toolsIP = last.LinkLocalIP + " (link-local: the guest's DHCP request was not answered)"
+		}
 	}
 	parts := []string{"clone_mode=" + mode + " macs=" + macs + " tools_ip=" + toolsIP}
 	parts = append(parts, "--parallels-startup-timeout bounds the overall IP wait; increasing it does not disable Tools fail-fast")
@@ -1005,6 +1032,10 @@ func parallelsIPTimeoutHint(cfg Config, last ParallelsVM, vmObserved, dhcpFallba
 		} else {
 			parts = append(parts, "inspect the existing VM on the Parallels host with `prlctl capture <existing-vm-id> --file <png>`")
 		}
+	}
+	if running && vmObserved && last.LinkLocalIP != "" {
+		parts = append(parts, "the guest booted and reports only a self-assigned address, so check the DHCP server of the guest's Parallels network (`prlsrvctl net info Shared` for the default network)")
+		return "hint: " + strings.Join(parts, "; ")
 	}
 	if running && purpose == ParallelsIPWaitAcquisition && mode == "linked" {
 		parts = append(parts, "the template snapshot may not boot as a linked clone; retry with parallels.cloneMode=full (--parallels-clone-mode full) and clear parallels.sourceSnapshot and parallels.sourceSnapshotId with --parallels-source-snapshot= --parallels-source-snapshot-id= (full clones use the source VM's current state and cannot select a source snapshot)")
@@ -1664,14 +1695,9 @@ func parseParallelsVMs(data string) ([]ParallelsVM, error) {
 			State:    firstJSONField(item, "State", "status"),
 			OS:       firstJSONField(item, "OS", "os"),
 			Home:     firstJSONField(item, "Home", "home"),
-			IP:       cleanParallelsIP(firstJSONField(item, "ip_configured")),
 			Template: strings.EqualFold(firstJSONField(item, "Template"), "yes"),
 		}
-		if vm.IP == "" {
-			if network, ok := item["Network"].(map[string]any); ok {
-				vm.IP = firstParallelsNetworkIP(network)
-			}
-		}
+		vm.IP, vm.LinkLocalIP = parallelsGuestIP(item)
 		vm.MACs = parallelsNetworkMACs(item)
 		out = append(out, vm)
 	}
@@ -1839,32 +1865,34 @@ func firstJSONField(item map[string]any, keys ...string) string {
 	return ""
 }
 
-func firstParallelsNetworkIP(network map[string]any) string {
-	values, ok := network["ipAddresses"].([]any)
-	if !ok {
-		return ""
+// parallelsGuestIP picks the first non-link-local address in ip_configured,
+// then the first non-link-local IPv4 in Network.ipAddresses. If none is usable,
+// it retains the first link-local address for timeout diagnostics.
+func parallelsGuestIP(item map[string]any) (ip, linkLocal string) {
+	candidates := strings.Fields(firstJSONField(item, "ip_configured"))
+	if network, ok := item["Network"].(map[string]any); ok {
+		values, _ := network["ipAddresses"].([]any)
+		for _, value := range values {
+			if entry, ok := value.(map[string]any); ok && entry["type"] == "ipv4" {
+				if address, ok := entry["ip"].(string); ok {
+					candidates = append(candidates, strings.TrimSpace(address))
+				}
+			}
+		}
 	}
-	for _, value := range values {
-		item, ok := value.(map[string]any)
-		if !ok || item["type"] != "ipv4" {
+	for _, candidate := range candidates {
+		if candidate == "" || candidate == "-" {
 			continue
 		}
-		if ip, ok := item["ip"].(string); ok {
-			return cleanParallelsIP(ip)
+		if parsed := net.ParseIP(candidate); parsed != nil && parsed.IsLinkLocalUnicast() {
+			if linkLocal == "" {
+				linkLocal = candidate
+			}
+			continue
 		}
+		return candidate, ""
 	}
-	return ""
-}
-
-func cleanParallelsIP(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" || value == "-" {
-		return ""
-	}
-	if strings.Contains(value, " ") {
-		return strings.Fields(value)[0]
-	}
-	return value
+	return "", linkLocal
 }
 
 func parallelsHostMatchesTarget(host ParallelsHostConfig, target string) bool {

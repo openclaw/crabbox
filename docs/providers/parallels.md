@@ -131,6 +131,15 @@ snapshot-based linked forks remain available on supported Parallels versions.
 
 ### IP discovery failures
 
+IP discovery skips self-assigned link-local addresses (`169.254.0.0/16` and
+`fe80::/10`) and keeps polling within `--parallels-startup-timeout` for a usable
+address. This avoids spending the SSH bootstrap timeout on a temporary Windows
+address while DHCP is still pending. If only a link-local address remains at
+the deadline, the error names it and suggests checking the Parallels network's
+DHCP server. Generated-ID acquisition retries once with a fresh clone and
+returns exit code 5 if that attempt also times out. Caller cancellation and
+the Tools-unavailable fail-fast keep their existing behavior.
+
 A Tools-reported IP does not prove that guest execution is usable. Before key
 installation, Crabbox requires a successful guest-exec probe, retrying recognized
 Tools-not-ready errors (including `PrlJob_GetResult: Invalid argument` and

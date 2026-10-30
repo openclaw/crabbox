@@ -48,10 +48,12 @@ func TestParallelsWaitForIPToolsRecovery(t *testing.T) {
 		dhcpAfter   time.Duration
 		sshAfter    time.Duration
 		execReplies []string
+		linkLocal   bool
 		wantProbes  int
 		wantSource  string
 	}{
 		{name: "IP during boot grace", ipAfter: 30 * time.Second, wantSource: "tools"},
+		{name: "link-local address until DHCP", ipAfter: 30 * time.Second, linkLocal: true, wantSource: "tools"},
 		{name: "Tools unavailable twice then IP", ipAfter: 140 * time.Second, wantProbes: 2, wantSource: "tools"},
 		{name: "exec flake then success", ipAfter: 180 * time.Second, execReplies: []string{"PrlJob_GetRetCode: Invalid argument", ""}, wantProbes: 4, wantSource: "tools"},
 		{name: "unavailable then successful probe resets count", ipAfter: 200 * time.Second, execReplies: []string{parallelsSessionUnavailable, parallelsSessionUnavailable, "", parallelsSessionUnavailable, parallelsSessionUnavailable, ""}, wantProbes: 6, wantSource: "tools"},
@@ -61,7 +63,7 @@ func TestParallelsWaitForIPToolsRecovery(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				runner := &parallelsIPProbeRunner{t: t, started: time.Now(), ipAfter: tc.ipAfter, dhcpAfter: tc.dhcpAfter, sshAfter: tc.sshAfter, execReplies: tc.execReplies}
+				runner := &parallelsIPProbeRunner{t: t, started: time.Now(), ipAfter: tc.ipAfter, dhcpAfter: tc.dhcpAfter, sshAfter: tc.sshAfter, execReplies: tc.execReplies, linkLocal: tc.linkLocal}
 				cfg := Config{TargetOS: targetMacOS, SSHPort: "22"}
 				if tc.dhcpAfter > 0 {
 					cfg.Parallels.BootstrapKey = "/Users/runner/.ssh/bootstrap"
@@ -72,6 +74,121 @@ func TestParallelsWaitForIPToolsRecovery(t *testing.T) {
 				}
 				if len(runner.probes) != tc.wantProbes {
 					t.Fatalf("probes=%v, want %d", runner.probes, tc.wantProbes)
+				}
+			})
+		})
+	}
+}
+
+func TestParallelsWaitForIPLinkLocalTimeoutIsRetryable(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		linkLocal bool
+		want      []string
+		reject    []string
+	}{
+		{name: "link-local address", linkLocal: true, want: []string{"tools_ip=169.254.2.136 (link-local", "prlsrvctl net info Shared"}, reject: []string{"retry with parallels.cloneMode=full"}},
+		{name: "no address", want: []string{"tools_ip=none", "retry with parallels.cloneMode=full"}, reject: []string{"link-local"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				for _, shared := range []bool{false, true} {
+					runner := &parallelsIPProbeRunner{t: t, started: time.Now(), execReplies: []string{""}, linkLocal: tc.linkLocal}
+					cfg := Config{TargetOS: targetWindows, SSHPort: "22", Parallels: ParallelsConfig{StartupTimeout: 3 * time.Minute}}
+					// Acquisition passes WaitForIP a parent with the same
+					// deadline, so the timeout arrives as the parent's.
+					ctx, cancel := context.Background(), context.CancelFunc(func() {})
+					if shared {
+						ctx, cancel = ParallelsStartupContext(ctx, cfg)
+					}
+					_, err := NewParallelsClient(cfg, runner).WaitForIP(ctx, "vm1", cfg.Parallels.StartupTimeout, ParallelsIPWaitAcquisition)
+					cancel()
+					if elapsed := time.Since(runner.started); elapsed != cfg.Parallels.StartupTimeout {
+						t.Fatalf("shared=%t: elapsed=%s, want %s", shared, elapsed, cfg.Parallels.StartupTimeout)
+					}
+					if !tc.linkLocal && shared {
+						if !errors.Is(err, context.DeadlineExceeded) || isBootstrapWaitError(err) {
+							t.Fatalf("shared deadline without link-local: want plain deadline, got %v", err)
+						}
+						continue
+					}
+					if err == nil || ExitCodeForError(err, 1) != 5 || !strings.Contains(err.Error(), "timed out waiting for Parallels VM vm1 IP") {
+						t.Fatalf("shared=%t: want IP timeout with exit 5, got %v", shared, err)
+					}
+					if got := isBootstrapWaitError(err); got != tc.linkLocal {
+						t.Fatalf("shared=%t: isBootstrapWaitError=%t, want %t: %v", shared, got, tc.linkLocal, err)
+					}
+					if shared && !errors.Is(err, context.DeadlineExceeded) {
+						t.Fatalf("shared deadline cause lost: %v", err)
+					}
+					for _, want := range tc.want {
+						if !strings.Contains(err.Error(), want) {
+							t.Errorf("shared=%t: missing %q: %v", shared, want, err)
+						}
+					}
+					for _, reject := range tc.reject {
+						if strings.Contains(err.Error(), reject) {
+							t.Errorf("shared=%t: unexpected %q: %v", shared, reject, err)
+						}
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestParallelsWaitForIPToolsFailFastStaysFinalWithLinkLocal(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		runner := &parallelsIPProbeRunner{t: t, started: time.Now(), linkLocal: true}
+		_, err := NewParallelsClient(Config{TargetOS: targetWindows, SSHPort: "22"}, runner).WaitForIP(context.Background(), "vm1", 15*time.Minute, ParallelsIPWaitAcquisition)
+		if !errors.Is(err, errParallelsGuestToolsUnavailable) || errors.Is(err, errParallelsGuestLinkLocalOnly) || isBootstrapWaitError(err) {
+			t.Fatalf("Tools fail-fast must stay non-retryable: %v", err)
+		}
+	})
+}
+
+func TestParallelsWaitForIPLinkLocalRecovery(t *testing.T) {
+	for _, target := range []string{targetWindows, targetMacOS, targetLinux} {
+		t.Run(target, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				runner := &parallelsIPProbeRunner{t: t, started: time.Now(), linkLocal: true, ipAfter: 30 * time.Second}
+				vm, err := NewParallelsClient(Config{TargetOS: target}, runner).WaitForIP(context.Background(), "vm1", time.Minute, ParallelsIPWaitAcquisition)
+				if err != nil || vm.IP != "10.211.55.8" || vm.LinkLocalIP != "" || vm.IPSource != "tools" || time.Since(runner.started) != 30*time.Second {
+					t.Fatalf("vm=%+v err=%v elapsed=%s", vm, err, time.Since(runner.started))
+				}
+			})
+		})
+	}
+}
+
+func TestParallelsWaitForIPLinkLocalThenQueryFailure(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		t.Run(fmt.Sprintf("shared=%t", shared), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				runner := &parallelsDHCPRunner{vmQueries: []parallelsVMQueryResult{
+					{stdout: `[{"ID":"vm1","State":"running","ip_configured":"169.254.2.136"}]`},
+					{stderr: "synthetic inventory unavailable", err: errors.New("exit status 1")},
+				}}
+				started := time.Now()
+				ctx := context.Background()
+				if shared {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, 6*time.Second)
+					defer cancel()
+				}
+				_, err := NewParallelsClient(Config{TargetOS: targetWindows}, runner).WaitForIP(ctx, "vm1", 6*time.Second, ParallelsIPWaitAcquisition)
+				if err == nil || isBootstrapWaitError(err) || errors.Is(err, errParallelsGuestLinkLocalOnly) || strings.Contains(err.Error(), "169.254.2.136") {
+					t.Fatalf("stale link-local observation must not classify a query failure: %v", err)
+				}
+				if shared {
+					if !errors.Is(err, context.DeadlineExceeded) || ExitCodeForError(err, 1) != 1 {
+						t.Fatalf("want unchanged parent deadline error, got %v", err)
+					}
+				} else if ExitCodeForError(err, 1) != 5 || !strings.Contains(err.Error(), "tools_ip=unknown") || !strings.Contains(err.Error(), "synthetic inventory unavailable") {
+					t.Fatalf("want query failure and unknown current IP, got %v", err)
+				}
+				if time.Since(started) != 6*time.Second {
+					t.Fatalf("elapsed=%s, want 6s", time.Since(started))
 				}
 			})
 		})
@@ -129,36 +246,45 @@ func TestParallelsWaitForIPDeadlineBoundsCommands(t *testing.T) {
 }
 
 func TestParallelsWaitForIPPreservesCancellationDuringProbe(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		runner := &parallelsIPProbeRunner{t: t, started: time.Now(), block: "exec"}
-		ctx, cancel := context.WithCancelCause(context.Background())
-		defer cancel(nil)
-		cause := errors.New("caller canceled acquisition")
-		go func() {
-			time.Sleep(125 * time.Second)
-			cancel(cause)
-		}()
-		_, err := NewParallelsClient(Config{TargetOS: targetMacOS}, runner).WaitForIP(ctx, "vm1", 15*time.Minute, ParallelsIPWaitAcquisition)
-		if !errors.Is(err, cause) || time.Since(runner.started) != 125*time.Second || len(runner.probes) != 1 {
-			t.Fatalf("err=%v elapsed=%s probes=%v", err, time.Since(runner.started), runner.probes)
-		}
-	})
-}
-
-func TestParallelsWaitForIPPreservesParentDeadlineCause(t *testing.T) {
-	for _, timeout := range []time.Duration{15 * time.Minute, 170 * time.Second} {
-		t.Run(fmt.Sprintf("startup=%s", timeout), func(t *testing.T) {
+	for _, linkLocal := range []bool{false, true} {
+		t.Run(fmt.Sprintf("linkLocal=%t", linkLocal), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				runner := &parallelsIPProbeRunner{t: t, started: time.Now(), block: "exec"}
-				cause := errors.New("caller acquisition deadline")
-				ctx, cancel := context.WithDeadlineCause(context.Background(), runner.started.Add(170*time.Second), cause)
-				defer cancel()
-				_, err := NewParallelsClient(Config{TargetOS: targetMacOS}, runner).WaitForIP(ctx, "vm1", timeout, ParallelsIPWaitAcquisition)
-				if !errors.Is(err, cause) || time.Since(runner.started) != 170*time.Second || len(runner.probes) != 2 {
+				runner := &parallelsIPProbeRunner{t: t, started: time.Now(), block: "exec", linkLocal: linkLocal}
+				ctx, cancel := context.WithCancelCause(context.Background())
+				defer cancel(nil)
+				cause := errors.New("caller canceled acquisition")
+				go func() {
+					time.Sleep(125 * time.Second)
+					cancel(cause)
+				}()
+				_, err := NewParallelsClient(Config{TargetOS: targetMacOS}, runner).WaitForIP(ctx, "vm1", 15*time.Minute, ParallelsIPWaitAcquisition)
+				if !errors.Is(err, cause) || isBootstrapWaitError(err) || time.Since(runner.started) != 125*time.Second || len(runner.probes) != 1 {
 					t.Fatalf("err=%v elapsed=%s probes=%v", err, time.Since(runner.started), runner.probes)
 				}
 			})
 		})
+	}
+}
+
+func TestParallelsWaitForIPPreservesParentDeadlineCause(t *testing.T) {
+	for _, linkLocal := range []bool{false, true} {
+		for _, timeout := range []time.Duration{15 * time.Minute, 170 * time.Second} {
+			t.Run(fmt.Sprintf("startup=%s/linkLocal=%t", timeout, linkLocal), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					runner := &parallelsIPProbeRunner{t: t, started: time.Now(), block: "exec", linkLocal: linkLocal}
+					cause := errors.New("caller acquisition deadline")
+					ctx, cancel := context.WithDeadlineCause(context.Background(), runner.started.Add(170*time.Second), cause)
+					defer cancel()
+					_, err := NewParallelsClient(Config{TargetOS: targetMacOS}, runner).WaitForIP(ctx, "vm1", timeout, ParallelsIPWaitAcquisition)
+					if !errors.Is(err, cause) || time.Since(runner.started) != 170*time.Second || len(runner.probes) != 2 {
+						t.Fatalf("err=%v elapsed=%s probes=%v", err, time.Since(runner.started), runner.probes)
+					}
+					if isBootstrapWaitError(err) != linkLocal {
+						t.Fatalf("retryable=%t, want %t: %v", isBootstrapWaitError(err), linkLocal, err)
+					}
+				})
+			})
+		}
 	}
 }
 
@@ -169,6 +295,7 @@ type parallelsIPProbeRunner struct {
 	dhcpAfter   time.Duration
 	sshAfter    time.Duration
 	execReplies []string
+	linkLocal   bool
 	probes      []time.Duration
 	block       string
 }
@@ -197,6 +324,8 @@ func (r *parallelsIPProbeRunner) Run(ctx context.Context, req LocalCommandReques
 		ip := ""
 		if r.ipAfter > 0 && elapsed >= r.ipAfter {
 			ip = "10.211.55.8"
+		} else if r.linkLocal {
+			ip = "169.254.2.136"
 		}
 		return LocalCommandResult{Stdout: fmt.Sprintf(`[{"ID":"vm1","State":"running","GuestTools":{"state":"not_installed"},"ip_configured":%q,"Hardware":{"net0":{"enabled":true,"mac":"001C4233EEDD"}}}]`, ip)}, nil
 	case req.Name == "prlctl" && req.Args[0] == "exec":

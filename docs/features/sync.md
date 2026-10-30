@@ -106,10 +106,10 @@ are forwarded. Other SSH origins remain ineligible for remote origin seeding.
 
 Use `sync.source: directory` to sync an include-only working set from a directory
 without creating a repository. There is no automatic fallback when Git discovery
-fails. The source root is the effective current working directory, including when
-that directory is inside an outer Git checkout; `run --workdir` selects that
-current directory before loading configuration. A nonempty `sync.include`
-allowlist is required:
+fails. The source root is the directory you run `crabbox` from, including when
+that directory is inside an outer Git checkout. To sync a different directory,
+change into it before `crabbox run` or `crabbox sync-plan`; `run` has no
+`--workdir` flag. A nonempty `sync.include` allowlist is required:
 
 ```yaml
 sync:
