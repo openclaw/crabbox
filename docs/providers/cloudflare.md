@@ -270,6 +270,10 @@ account's Containers limits. For current instance and account limits, see
 
 ## Live smoke
 
+For a synthetic headless browser workload, see the
+[Playwright recipe](../features/cloudflare-playwright.md). Its download section
+requires the separate native artifact change and is marked with that prerequisite.
+
 With the runner URL and token configured, first exercise the deployed runner
 without uploading the checkout:
 
