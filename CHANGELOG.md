@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Blacksmith: finish bounded settlement verification when the native post-stop status read exhausts reconciliation's deadline, preserving fresh identity, exact GitHub completion, caller cancellation and claim fencing without replaying work or stop.
 - Azure: complete brokered cleanup when every claimed resource is definitively absent, retaining strict identity and ownership checks for any surviving resource.
 - Azure: clean up verified lease-owned companions that appear after an interrupted create records an empty or network-only cleanup claim, preserving original identities and deletion guards.
 - Parallels: wait for DHCP instead of probing SSH on a self-assigned link-local address, preserving the startup deadline and fresh-clone retry with an address-specific diagnostic. [PR 2981](https://github.com/openclaw/crabbox/pull/2981). Thanks @rustanacexd.

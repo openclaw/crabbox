@@ -709,6 +709,7 @@ func (b *blacksmithBackend) Stop(ctx context.Context, req core.StopRequest) erro
 }
 
 var errBlacksmithReconciliationDeadline = errors.New("Blacksmith cleanup reconciliation deadline")
+var errBlacksmithNativeStatusDeadline = errors.New("native status command interrupted by deadline")
 
 func (b *blacksmithBackend) stopClaimedTestbox(ctx context.Context, leaseID string, claim core.LeaseClaim) (stopErr error) {
 	defer func() { stopErr = blacksmithExitDiagnostics(stopErr) }()
@@ -738,9 +739,10 @@ func (b *blacksmithBackend) stopClaimedTestbox(ctx context.Context, leaseID stri
 		if phase == "reconciliation-admission" {
 			return fmt.Errorf("Blacksmith cleanup phase=%s: %w", phase, reconciliationErr)
 		}
-		// Only an authenticated native completion whose GitHub read was actually
-		// interrupted by our phase budget may reach fresh final verification.
-		if reconciled == nil || !reconciled.nativeCompleted || !errors.Is(reconciliationErr, errBlacksmithGitHubDeadline) ||
+		// An interrupted post-stop observation may use fresh verification, never
+		// stop output as completion. Ordinary errors and caller cancellation retain custody.
+		if reconciled == nil || !(reconciled.nativeCompleted && errors.Is(reconciliationErr, errBlacksmithGitHubDeadline) ||
+			reconciled.nativeStopReturned && errors.Is(reconciliationErr, errBlacksmithNativeStatusDeadline)) ||
 			context.Cause(reconciliationCtx) != errBlacksmithReconciliationDeadline || ctx.Err() != nil {
 			return reconciliationErr
 		}
@@ -1019,6 +1021,11 @@ func (b *blacksmithBackend) runCommandCaptureInDir(ctx context.Context, args []s
 	result, err = b.rt.Exec.Run(ctx, request)
 	if operation != "" && (err != nil || result.ExitCode != 0) {
 		diagnostic := blacksmithCommandDiagnostic(ctx, operation, issued, time.Since(issued), ctx.Err(), result, err)
+		// Preserve the child watcher's cause before inspectTestbox joins expiry;
+		// an ordinary status failure returned late must not authorize fresh verification.
+		if operation == "blacksmith testbox status" && errors.Is(err, context.DeadlineExceeded) {
+			err = errors.Join(err, errBlacksmithNativeStatusDeadline)
+		}
 		return result, blacksmithCommandError{ExitError: core.ExitError{Code: result.ExitCode, Message: diagnostic}, cause: err}
 	}
 	if err != nil {

@@ -307,11 +307,12 @@ func (b *blacksmithBackend) withOwnedTestbox(ctx context.Context, claim core.Lea
 }
 
 type blacksmithReconciledStop struct {
-	result          core.LocalCommandResult
-	err             error
-	runURL          string
-	conclusion      string
-	nativeCompleted bool
+	result             core.LocalCommandResult
+	err                error
+	runURL             string
+	conclusion         string
+	nativeCompleted    bool
+	nativeStopReturned bool
 }
 
 func (b *blacksmithBackend) printStopOutput(result core.LocalCommandResult) {
@@ -329,6 +330,11 @@ func (b *blacksmithBackend) terminateTestbox(ctx context.Context, claim core.Lea
 	// GitHub work settle. Preserve that error through every failed verification.
 	defer func() {
 		if err != nil {
+			// Retain the partial receipt only for an interrupted post-stop status
+			// child. It grants a fresh observation, never completion or release.
+			if result.nativeStopReturned && errors.Is(err, errBlacksmithNativeStatusDeadline) {
+				settled = result
+			}
 			err = fmt.Errorf("Blacksmith cleanup phase=reconciliation: %w", err)
 			b.printStopOutput(result.result)
 			if result.err != nil {
@@ -346,6 +352,7 @@ func (b *blacksmithBackend) terminateTestbox(ctx context.Context, claim core.Lea
 	}
 	stop := func() {
 		attempt, stopErr := b.runCommand(ctx, blacksmithStopArgs(b.cfg, claim.CloudID), nil, nil)
+		result.nativeStopReturned = true
 		result.result.Stdout += attempt.Stdout
 		result.result.Stderr += attempt.Stderr
 		if stopErr == nil && attempt.ExitCode != 0 {
