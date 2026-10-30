@@ -273,8 +273,10 @@ The new lease's claim is recorded before the import, and each of these steps,
 plus each SSH readiness probe, runs under it. If the claim is reassigned, fork
 stops and leaves the imported VM to its new owner; if the claim is revoked,
 fork stops and removes the import.
-Fork records exactly which disks `Import-VM` copied, so release later deletes
-only those.
+Fork records exactly which disks `Import-VM` copied, including the differencing
+parents it copies with each attached disk, so release and rollback delete only
+those, never the template a parent chain may lead to outside the fork's own
+directory.
 
 **Release and delete.** Releasing the source removes its VM and the Hyper-V
 checkpoints stored with it, so restore is no longer possible; the export stays,

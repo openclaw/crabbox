@@ -1134,9 +1134,14 @@ func (b *backend) importCheckpointVM(ctx context.Context, configPath, name strin
 	if start {
 		startScript = `Start-VM -VM $vm -ErrorAction Stop; `
 	}
+	// Import-VM -Copy copies each attached disk's whole differencing chain into the
+	// fork directory, but Get-VMHardDiskDrive lists only the child, so the fork
+	// records and removes every chain member inside that directory.
 	script := fmt.Sprintf(
 		`$ErrorActionPreference='Stop'; `+
 			`$vm=$null; `+
+			`$root=[IO.Path]::GetFullPath('%s').TrimEnd('\')+'\'; `+
+			`%s`+
 			`try { `+
 			`$vm=Import-VM -Path '%s' -Copy -GenerateNewId -VirtualMachinePath '%s' -SnapshotFilePath '%s' -VhdDestinationPath '%s' -ErrorAction Stop; `+
 			`Rename-VM -VM $vm -NewName '%s' -ErrorAction Stop; `+
@@ -1145,18 +1150,20 @@ func (b *backend) importCheckpointVM(ctx context.Context, configPath, name strin
 			`Get-VMNetworkAdapter -VM $vm | Disconnect-VMNetworkAdapter -ErrorAction Stop; `+
 			`Set-VM -VM $vm -AutomaticCheckpointsEnabled $false -CheckpointType ProductionOnly -ErrorAction Stop; `+
 			`%s`+
-			`[pscustomobject]@{ID=$vm.Id.Guid; Disks=@(Get-VMHardDiskDrive -VM $vm | ForEach-Object { $_.Path })} | ConvertTo-Json -Compress `+
+			`[pscustomobject]@{ID=$vm.Id.Guid; Disks=@(Get-VMHardDiskDrive -VM $vm | ForEach-Object { Get-CrabboxDiskChain $_.Path })} | ConvertTo-Json -Compress `+
 			`} catch { `+
-			`if ($vm) { $disks=@(Get-VMHardDiskDrive -VM $vm -ErrorAction SilentlyContinue | ForEach-Object { $_.Path }); Stop-VM -VM $vm -Force -Confirm:$false -ErrorAction SilentlyContinue; Remove-VM -VM $vm -Force -Confirm:$false -ErrorAction SilentlyContinue; `+
-			`$root=[IO.Path]::GetFullPath('%s').TrimEnd('\')+'\'; foreach ($d in $disks) { $full=[IO.Path]::GetFullPath($d); if ($full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { Remove-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue } } }; `+
-			`throw }`,
+			`$importError=$_; `+
+			`if ($vm) { $disks=@(Get-VMHardDiskDrive -VM $vm -ErrorAction SilentlyContinue | ForEach-Object { $p=$_.Path; try { Get-CrabboxDiskChain $p } catch { $p } }); Stop-VM -VM $vm -Force -Confirm:$false -ErrorAction SilentlyContinue; Remove-VM -VM $vm -Force -Confirm:$false -ErrorAction SilentlyContinue; `+
+			`foreach ($d in $disks) { $full=[IO.Path]::GetFullPath($d); if ($full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { Remove-Item -LiteralPath $full -Force -ErrorAction SilentlyContinue } } }; `+
+			`throw $importError }`,
+		escapePSString(vhdPath),
+		diskChainFunction(`[IO.Path]::GetFullPath($path).StartsWith($root,[StringComparison]::OrdinalIgnoreCase)`),
 		escapePSString(configPath),
 		escapePSString(vmPath),
 		escapePSString(snapshotPath),
 		escapePSString(vhdPath),
 		escapePSString(name),
 		startScript,
-		escapePSString(vhdPath),
 	)
 	result, err := b.powershellLong(ctx, script)
 	if err != nil {
@@ -1173,6 +1180,15 @@ func (b *backend) importCheckpointVM(ctx context.Context, configPath, name strin
 		return "", err
 	}
 	return output.ID, nil
+}
+
+// diskChainFunction defines Get-CrabboxDiskChain, which returns a disk and its
+// differencing parents while each satisfies ownedTest (a PowerShell condition on
+// $path), so cleanup never follows a parent into storage Crabbox does not own.
+func diskChainFunction(ownedTest string) string {
+	return `function Get-CrabboxDiskChain([string]$path) { $chain=@(); ` +
+		`while ($path -and (` + ownedTest + `) -and $chain -notcontains $path) { $chain+=$path; $path=(Get-VHD -Path $path -ErrorAction Stop).ParentPath }; ` +
+		`$chain }; `
 }
 
 // recordForkDisks persists the exact disks Import-VM copied for a fork so that
@@ -1302,7 +1318,8 @@ func (b *backend) removeImportedCheckpointRegistration(ctx context.Context, name
 			`if (-not $owned) { $owned=(Test-CrabboxOwnedPath $candidate.ConfigurationLocation) -or (Test-CrabboxOwnedPath $candidate.SnapshotFileLocation) }; `+
 			`if (-not $owned) { foreach ($disk in @(Get-VMHardDiskDrive -VM $candidate -ErrorAction Stop)) { if (Test-CrabboxOwnedPath $disk.Path) { $owned=$true; break } } }; `+
 			`$owned }) }; `+
-			`$disks=@(); foreach ($candidate in @(Get-CrabboxImportedVM)) { foreach ($disk in @(Get-VMHardDiskDrive -VM $candidate -ErrorAction Stop)) { if (Test-CrabboxOwnedPath $disk.Path) { $disks += $disk.Path } }; Stop-VM -VM $candidate -Force -Confirm:$false -ErrorAction SilentlyContinue; Remove-VM -VM $candidate -Force -Confirm:$false -ErrorAction Stop }; `+
+			diskChainFunction(`Test-CrabboxOwnedPath $path`)+
+			`$disks=@(); foreach ($candidate in @(Get-CrabboxImportedVM)) { foreach ($disk in @(Get-VMHardDiskDrive -VM $candidate -ErrorAction Stop)) { foreach ($p in @(Get-CrabboxDiskChain $disk.Path)) { if ($disks -notcontains $p) { $disks += $p } } }; Stop-VM -VM $candidate -Force -Confirm:$false -ErrorAction SilentlyContinue; Remove-VM -VM $candidate -Force -Confirm:$false -ErrorAction Stop }; `+
 			`foreach ($path in $disks) { if (Test-Path -LiteralPath $path -PathType Leaf) { Remove-Item -LiteralPath $path -Force -ErrorAction Stop } }; `+
 			`$remaining=@(Get-CrabboxImportedVM); `+
 			`if ($remaining.Count -ne 0) { throw "partial checkpoint import cleanup left $($remaining.Count) registered VM(s)" }`,

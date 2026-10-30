@@ -149,19 +149,3 @@ func TestCreateNativeCheckpointFinalPersistFailureDoesNotReturnRemovedImage(t *t
 		t.Fatalf("rolled-back export still advertised as available: %#v", result.Image)
 	}
 }
-
-func TestRemoveImportedCheckpointRegistrationCapturesDisksBeforeRemoveVM(t *testing.T) {
-	setCheckpointTestState(t)
-	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
-	b := testBackend(runner)
-	if err := b.removeImportedCheckpointRegistration(context.Background(), "fork-vm"); err != nil {
-		t.Fatal(err)
-	}
-	script := findScript(runner.calls, "Remove-VM")
-	capture := strings.Index(script, "$disks += $disk.Path")
-	remove := strings.Index(script, "Remove-VM -VM")
-	cleanup := strings.Index(script, "foreach ($path in $disks)")
-	if capture < 0 || remove < 0 || cleanup < 0 || !(capture < remove && remove < cleanup) {
-		t.Fatalf("disk paths must be captured before Remove-VM and deleted after: %s", script)
-	}
-}

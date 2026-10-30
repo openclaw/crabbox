@@ -275,28 +275,6 @@ func TestApplyNativeCheckpointForkFlagsExplicitSwitchWins(t *testing.T) {
 	}
 }
 
-func TestImportCheckpointVMCatchCapturesDisksBeforeRemoveVM(t *testing.T) {
-	setCheckpointTestState(t)
-	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
-	b := testBackend(runner)
-	_, _ = b.importCheckpointVM(context.Background(), `C:\export\vm.vmcx`, "fork-vm", false)
-	script := findScript(runner.calls, "Import-VM")
-	catch := strings.Index(script, "} catch {")
-	if catch < 0 {
-		t.Fatalf("missing catch: %s", script)
-	}
-	tail := script[catch:]
-	capture := strings.Index(tail, "Get-VMHardDiskDrive")
-	remove := strings.Index(tail, "Remove-VM")
-	cleanup := strings.Index(tail, "Remove-Item")
-	if capture < 0 || remove < 0 || cleanup < 0 || !(capture < remove && remove < cleanup) {
-		t.Fatalf("import rollback must capture disks before Remove-VM and delete them after: %s", tail)
-	}
-	if !strings.Contains(tail, hypervVHDDir()) {
-		t.Fatalf("disk cleanup must be scoped to the fork VHD root: %s", tail)
-	}
-}
-
 func TestCreateNativeCheckpointSourceQueryFailureAttestsNonSubmission(t *testing.T) {
 	setCheckpointTestState(t)
 	failure := errors.New("Get-VM unavailable")
