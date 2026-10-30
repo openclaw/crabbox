@@ -115,6 +115,14 @@ after its ownership marker matches. A cleanup failure after a successful
 publication reports that the verified file was published and names the
 retained staging directory.
 
+The copy holds the lease claim for its whole duration, including staging
+cleanup, using the same shared claim fence as `crabbox exec`. It starts only if
+the lease is still this repository's claim on the resolved resource. Otherwise
+it stops before any guest or local file effect: exit 4, or exit 2 with
+`claim changed; retry` when the claim changed while the fence was being taken.
+While it runs, claim changes such as another repository's `--reclaim`, `stop`,
+or an endpoint refresh wait for it to finish, within their own time limits.
+
 | Limit | Value |
 | --- | --- |
 | Whole command, including lease resolution, client checks, and transfer | 9 minutes |

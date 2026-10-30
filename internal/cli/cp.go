@@ -133,6 +133,15 @@ All flags:
 		_, destination := sandboxCopyPath(fs.Arg(0))
 		return recoverRemoteArchive(ctx, lease.SSH, destination, choice, a.Stdout, a.Stderr)
 	}
+	if isWindowsNativeTarget(lease.SSH) {
+		boundary, err := findRepositoryBoundary()
+		if err != nil {
+			return err
+		}
+		return copyWindowsSFTPUnderClaim(ctx, lease, boundary.root, func() error {
+			return copyOverResolvedSSH(ctx, lease.SSH, fs.Arg(0), fs.Arg(1), *followLink, a.Stdout, a.Stderr)
+		})
+	}
 	err = copyOverResolvedSSH(ctx, lease.SSH, fs.Arg(0), fs.Arg(1), *followLink, a.Stdout, a.Stderr)
 	return archiveRecoveryGuidance(err, *id)
 }

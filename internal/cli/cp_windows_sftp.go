@@ -41,6 +41,24 @@ type windowsSFTPTransport interface {
 	copy(context.Context, string, string, bool) error
 }
 
+// copyWindowsSFTPUnderClaim runs a native Windows copy, including its guest
+// staging cleanup, under the shared claim fence. The claim must still be this
+// repository's claim on the admitted resource, and claim writers (reclaim,
+// release, endpoint rewrites) wait until the copy finishes. The copy must not
+// write claims itself.
+func copyWindowsSFTPUnderClaim(ctx context.Context, lease LeaseTarget, repoRoot string, copy func() error) error {
+	claim, exists, err := ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil {
+		return err
+	}
+	if !exists || claim.LeaseID != lease.LeaseID || claim.RepoRoot != repoRoot ||
+		!resolvedLeaseClaimIdentityCompatible(claim, lease.Server) ||
+		(claim.Provider != "" && lease.Server.Provider != "" && canonicalClaimProvider(claim.Provider) != canonicalClaimProvider(lease.Server.Provider)) {
+		return Exit(4, "lease %s is no longer claimed by %s for the resolved resource; refusing Windows copy", lease.LeaseID, repoRoot)
+	}
+	return WithLeaseClaimUnchangedShared(ctx, lease.LeaseID, claim, copy)
+}
+
 func copyWindowsSFTP(parent context.Context, target SSHTarget, src, dst string, followLink bool, _, _ anyWriter) (err error) {
 	ctx, cancel := context.WithTimeout(parent, windowsSFTPTimeout)
 	defer cancel()
