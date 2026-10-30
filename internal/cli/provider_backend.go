@@ -622,6 +622,12 @@ type NativeCheckpointSourcePolicyProvider interface {
 	NativeCheckpointSourceStatusOnly(Config) bool
 }
 
+// NativeCheckpointJournalState marks an image that a provider persisted through
+// NativeCheckpointCreateRequest.Persist as its cleanup journal before mutating.
+// Core treats such a record as unresolved until the provider finalizes it or
+// `checkpoint delete` runs the provider's cleanup.
+const NativeCheckpointJournalState = "journaled"
+
 type NativeCheckpointImage struct {
 	ID               string
 	Name             string

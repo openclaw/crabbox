@@ -361,8 +361,8 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 				}
 			}
 			if err != nil {
-				// A provider that persisted a pending record and then verified its own
-				// rollback returns no image; the attestation resolves that record too.
+				// A provider may persist its cleanup journal and then fail before
+				// submitting anything; the attestation resolves that journal too.
 				if nativeCreateNotSubmitted(image, err, record) {
 					recordWritten = false
 					notSubmitted = true

@@ -353,9 +353,14 @@ func TestCreateNativeCheckpointProductionFailureDoesNotFallback(t *testing.T) {
 	if err == nil {
 		t.Fatal("CreateNativeCheckpoint succeeded after production checkpoint failure")
 	}
+	// Submission was attempted, so a verified rollback still keeps the journal for
+	// an explicit `checkpoint delete` instead of attesting non-submission.
 	var unsubmitted core.NativeCheckpointNotSubmittedError
-	if !errors.As(err, &unsubmitted) {
-		t.Fatalf("verified-clean export failure must resolve as not submitted so release is not blocked: %v", err)
+	if errors.As(err, &unsubmitted) {
+		t.Fatalf("a failure after submission must not attest non-submission: %v", err)
+	}
+	if !strings.Contains(err.Error(), "crabbox checkpoint delete") {
+		t.Fatalf("verified rollback did not tell the user how to discard the record: %v", err)
 	}
 	for _, call := range runner.calls {
 		if strings.Contains(commandScript(call), "CheckpointType Standard") {
@@ -628,6 +633,8 @@ func TestRestoreNativeCheckpointKeepsReclaimedLeaseAfterVMMutation(t *testing.T)
 		}
 	}
 	b := testBackend(runner)
+	b.checkpointSSHBudget = 50 * time.Millisecond
+	b.resumePollInterval = 0
 	b.sshReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 		return errors.New("ssh unavailable")
 	}
@@ -696,6 +703,8 @@ func TestRestoreNativeCheckpointHoldsClaimFenceAcrossVMEffects(t *testing.T) {
 		}
 	}
 	b = testBackend(runner)
+	b.checkpointSSHBudget = 50 * time.Millisecond
+	b.resumePollInterval = 0
 	b.sshReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 		return errors.New("ssh unavailable")
 	}

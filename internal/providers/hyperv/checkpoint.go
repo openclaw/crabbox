@@ -468,7 +468,7 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 		pending := core.NativeCheckpointCreateResult{
 			ArtifactDir: paths.artifactDir,
 			Image: core.NativeCheckpointImage{
-				ID: checkpointName, Name: checkpointName, State: "creating", Provider: providerName,
+				ID: checkpointName, Name: checkpointName, State: core.NativeCheckpointJournalState, Provider: providerName,
 				Kind: hypervCheckpointKind, Direct: true,
 			},
 			Metadata: map[string]string{
@@ -491,7 +491,7 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 		target = core.TargetWindows
 	}
 	if target != core.TargetWindows {
-		return result, core.Exit(2, "Hyper-V checkpoints require target=windows")
+		return result, core.NativeCheckpointNotSubmittedError{Cause: core.Exit(2, "Hyper-V checkpoints require target=windows")}
 	}
 	cfg := b.configForRun()
 	cfg.TargetOS = target
@@ -508,7 +508,7 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 	}
 	applyStoredLeaseKey(&cfg, req.LeaseID)
 	if err := os.Mkdir(paths.exportRoot, 0o700); err != nil {
-		return result, core.Exit(2, "create Hyper-V checkpoint export directory: %v", err)
+		return result, core.NativeCheckpointNotSubmittedError{Cause: core.Exit(2, "create Hyper-V checkpoint export directory: %v", err)}
 	}
 	committed := false
 	defer func() {
@@ -521,28 +521,19 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 			b.removeLiveCheckpoint(cleanupCtx, sourceName, source.ID, "", checkpointName),
 			removeCheckpointExport(paths),
 		)
-		if cleanupErr == nil && err != nil {
-			// Snapshot and export are verifiably gone, so no checkpoint was
-			// produced; report it as not submitted so the record resolves.
-			var unsubmitted core.NativeCheckpointNotSubmittedError
-			if !errors.As(err, &unsubmitted) {
-				err = core.NativeCheckpointNotSubmittedError{Cause: err}
-			}
-		}
 		if err != nil {
-			// The published result must not advertise the rolled-back export as usable.
-			if cleanupErr == nil {
-				result = core.NativeCheckpointCreateResult{}
-			} else if result.Image.ID != "" {
-				result.Image.State = "creating"
-			}
-		}
-		if cleanupErr != nil {
-			// Unverified rollback must not attest non-submission: the pending record
-			// is the delete identity for the leftovers.
+			// Checkpoint submission was attempted, so even a verified rollback must
+			// not attest non-submission. The journal stays for `checkpoint delete`,
+			// and the published result never advertises the export as usable.
 			var unsubmitted core.NativeCheckpointNotSubmittedError
 			if errors.As(err, &unsubmitted) {
 				err = unsubmitted.Cause
+			}
+			if cleanupErr == nil {
+				result = core.NativeCheckpointCreateResult{}
+				err = fmt.Errorf("%w; the Hyper-V checkpoint and export were removed, so run `crabbox checkpoint delete %s` to discard the record", err, shared.FirstNonBlank(req.CheckpointID, "<checkpoint-id>"))
+			} else if result.Image.ID != "" {
+				result.Image.State = core.NativeCheckpointJournalState
 			}
 		}
 		err = errors.Join(err, cleanupErr)
@@ -916,13 +907,16 @@ func (b *backend) restoreNativeCheckpoint(ctx context.Context, req core.NativeCh
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	// prepareLease authenticates to the guest and must not run on stale authority;
-	// holding the claim lock across guest readiness would starve heartbeats.
+	// SSH readiness authenticates to the guest, so each bounded probe runs under the
+	// reservation fence; heartbeats can still run between probes.
 	if err := verifyClaim(ctx); err != nil {
 		return core.LeaseTarget{}, err
 	}
-	lease, err = b.prepareLease(ctx, cfg, hypervVM{Name: sourceName, State: 2}, ip, claim, true)
+	lease, err = b.prepareLease(ctx, cfg, hypervVM{Name: sourceName, State: 2}, ip, claim, false)
 	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if err := b.waitForSSHReadyUnderClaim(ctx, sourceLease, reservedClaim, &lease, "hyperv checkpoint restore", core.BootstrapWaitTimeout(cfg)); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	if _, err := core.ClaimLeaseForRepoProviderScopePondEndpointIfUnchanged(sourceLease, claim.Slug, providerName, instanceScope(sourceName), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH, reservedClaim, true); err != nil {
@@ -1011,8 +1005,20 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		err = errors.Join(err, cleanupErr)
 	}()
 
-	importedID, err := b.importCheckpointVM(ctx, paths.config, name, target == core.TargetWindows)
-	if err != nil {
+	// Every ownership-sensitive host or guest effect below runs under the exact
+	// provisional claim, so a reclaim or revocation stops the fork before its
+	// next effect. Waits run outside the fence after a claim check.
+	fenced := func(action func() error) error {
+		return core.WithLeaseClaimUnchangedContext(ctx, leaseID, claim, action)
+	}
+	verifyClaim := func() error { return fenced(nil) }
+
+	var importedID string
+	if err := fenced(func() error {
+		var importErr error
+		importedID, importErr = b.importCheckpointVM(ctx, paths.config, name, target == core.TargetWindows)
+		return importErr
+	}); err != nil {
 		return lease, err
 	}
 	if strings.EqualFold(importedID, strings.TrimSpace(req.Record.Metadata[checkpointMetadataSourceVMID])) {
@@ -1024,33 +1030,46 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		}
 	}
 	hostname := forkGuestHostname(leaseID)
+	if err := verifyClaim(); err != nil {
+		return lease, err
+	}
 	if err := b.waitGuestReady(ctx, name, cfg.HyperV.User); err != nil {
 		return lease, fmt.Errorf("forked guest did not become reachable over PowerShell Direct: %w", err)
 	}
-	if err := b.rotateForkGuestIdentity(ctx, name, cfg.HyperV.User, publicKey, hostname); err != nil {
+	if err := fenced(func() error {
+		if err := b.rotateForkGuestIdentity(ctx, name, cfg.HyperV.User, publicKey, hostname); err != nil {
+			return err
+		}
+		return b.restartVM(ctx, name)
+	}); err != nil {
 		return lease, err
 	}
-	if err := b.restartVM(ctx, name); err != nil {
+	if err := verifyClaim(); err != nil {
 		return lease, err
 	}
 	if err := b.waitGuestReady(ctx, name, cfg.HyperV.User); err != nil {
 		return lease, fmt.Errorf("forked guest did not return after identity rotation: %w", err)
 	}
-	if err := b.rotateForkGuestSecrets(ctx, name, cfg.HyperV.User); err != nil {
-		return lease, err
-	}
-	if err := b.injectSSHKey(ctx, name, cfg.HyperV.User, publicKey); err != nil {
-		return lease, fmt.Errorf("reapply forked Hyper-V guest SSH identity after reboot: %w", err)
-	}
-	if err := b.connectVMNetwork(ctx, name, cfg.HyperV.Switch); err != nil {
+	if err := fenced(func() error {
+		if err := b.rotateForkGuestSecrets(ctx, name, cfg.HyperV.User); err != nil {
+			return err
+		}
+		if err := b.injectSSHKey(ctx, name, cfg.HyperV.User, publicKey); err != nil {
+			return fmt.Errorf("reapply forked Hyper-V guest SSH identity after reboot: %w", err)
+		}
+		return b.connectVMNetwork(ctx, name, cfg.HyperV.Switch)
+	}); err != nil {
 		return lease, err
 	}
 	ip, err := b.waitForIP(ctx, name, 5*time.Minute)
 	if err != nil {
 		return lease, err
 	}
-	lease, err = b.prepareLease(ctx, cfg, hypervVM{Name: name, State: 2}, ip, claim, true)
+	lease, err = b.prepareLease(ctx, cfg, hypervVM{Name: name, State: 2}, ip, claim, false)
 	if err != nil {
+		return lease, err
+	}
+	if err := b.waitForSSHReadyUnderClaim(ctx, leaseID, claim, &lease, "hyperv checkpoint fork", core.BootstrapWaitTimeout(cfg)); err != nil {
 		return lease, err
 	}
 	if err := persistLease(leaseID, slug, name, cfg, acquireReq, &lease); err != nil {
@@ -1058,6 +1077,45 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	}
 	committed = true
 	return lease, nil
+}
+
+// waitForSSHReadyUnderClaim probes SSH readiness in bounded attempts, each under
+// the exact claim fence: a revoked or reassigned claim stops the next guest
+// connection, while claim heartbeats can still run between attempts.
+func (b *backend) waitForSSHReadyUnderClaim(ctx context.Context, leaseID string, claim core.LeaseClaim, lease *core.LeaseTarget, phase string, timeout time.Duration) error {
+	if b.checkpointSSHBudget > 0 {
+		timeout = b.checkpointSSHBudget
+	}
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			if lastErr != nil {
+				return core.Exit(5, "%s: SSH did not become ready within %s: %v", phase, timeout, lastErr)
+			}
+			return core.Exit(5, "%s: SSH did not become ready within %s", phase, timeout)
+		}
+		probeTimeout := minDuration(b.resumeSSHProbeTimeout, remaining)
+		err := core.WithLeaseClaimUnchangedContext(ctx, leaseID, claim, func() error {
+			return b.sshReady(ctx, &lease.SSH, b.rt.Stderr, phase, probeTimeout)
+		})
+		if err == nil {
+			lease.Server.Status = "ready"
+			lease.Server.Labels["state"] = "ready"
+			return nil
+		}
+		if strings.Contains(err.Error(), "claim changed") {
+			return err
+		}
+		lastErr = err
+		if err := b.sleep(ctx, b.resumePollInterval); err != nil {
+			return err
+		}
+	}
 }
 
 func (b *backend) importCheckpointVM(ctx context.Context, configPath, name string, start bool) (string, error) {

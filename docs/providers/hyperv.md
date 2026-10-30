@@ -243,14 +243,20 @@ creates the checkpoint on the source VM and exports it with
 `Export-VMSnapshot` into `hyperv\` inside the checkpoint's local record
 directory (see [checkpoint](../commands/checkpoint.md)). The export is a full
 copy of the VM's disks, so the volume holding Crabbox state needs free space
-for it. If the export fails, Crabbox removes the new checkpoint; an interrupted
-create keeps its record so `checkpoint delete` can clean up.
+for it. If a step fails after the VM changed, Crabbox removes the new
+checkpoint and its partial export, but the command still fails and keeps the
+record as pending. A pending record blocks new checkpoints of that source and
+cannot be restored or forked; `crabbox checkpoint delete <id>` repeats the
+cleanup idempotently and discards it, which also reconciles a create that was
+interrupted.
 
 **Restore** applies the checkpoint to the original source VM in place. It
 requires the same lease, its exact local claim, and the same Hyper-V VM ID,
 and refuses any other lease. `Restore-VMSnapshot` leaves the VM off, because
 a production checkpoint holds no memory, so Crabbox then starts it, waits for
-DHCP and SSH, and refreshes the claim's endpoint. The source keeps its hostname
+DHCP and SSH, and refreshes the claim's endpoint. Each Hyper-V command and each
+bounded SSH readiness probe runs under the exact claim, so a reclaim or
+revocation stops restore before its next step. The source keeps its hostname
 and SSH identity. A restore that fails before reaching Hyper-V puts the
 previous claim back.
 
@@ -263,6 +269,10 @@ disk, regenerates the SSH host keys, and installs the new lease key before
 connecting the network. Those writes come after the restart because Hyper-V's
 `Restart-VM` is a hard reset that would discard writes still in the guest's
 cache.
+The new lease's claim is recorded before the import, and each of these steps,
+plus each SSH readiness probe, runs under it. If the claim is reassigned, fork
+stops and leaves the imported VM to its new owner; if the claim is revoked,
+fork stops and removes the import.
 Fork records exactly which disks `Import-VM` copied, so release later deletes
 only those.
 

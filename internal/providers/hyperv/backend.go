@@ -38,6 +38,7 @@ type backend struct {
 	resumeSSHProbeTimeout  time.Duration
 	resumeIPStableWindow   time.Duration
 	resumePollInterval     time.Duration
+	checkpointSSHBudget    time.Duration
 	acquireBudget          time.Duration
 	cleanupBudget          time.Duration
 	hostCommandTimeout     time.Duration
