@@ -857,7 +857,7 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 	// clone can still succeed. Acquisition shares its startup deadline with this
 	// wait, so the timeout usually arrives as the parent's deadline.
 	defer func() {
-		if err == nil || last.LinkLocalIP == "" || errors.Is(err, errParallelsGuestToolsUnavailable) {
+		if err == nil || !vmObserved || last.LinkLocalIP == "" || errors.Is(err, errParallelsGuestToolsUnavailable) {
 			return
 		}
 		var exitErr ExitError
@@ -1865,11 +1865,9 @@ func firstJSONField(item map[string]any, keys ...string) string {
 	return ""
 }
 
-// parallelsGuestIP picks the guest address from the inventory: the first
-// address in ip_configured, then the first IPv4 in Network.ipAddresses. It
-// skips link-local addresses (169.254.0.0/16 and fe80::/10) and returns the
-// first one separately. A Windows guest assigns itself one until DHCP answers, and
-// Parallels Tools reports it, but SSH never listens there.
+// parallelsGuestIP picks the first non-link-local address in ip_configured,
+// then the first non-link-local IPv4 in Network.ipAddresses. If none is usable,
+// it retains the first link-local address for timeout diagnostics.
 func parallelsGuestIP(item map[string]any) (ip, linkLocal string) {
 	candidates := strings.Fields(firstJSONField(item, "ip_configured"))
 	if network, ok := item["Network"].(map[string]any); ok {
