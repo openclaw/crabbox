@@ -93,6 +93,16 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 			labels[key] = value
 		}
 	}
+	if fixedProxmoxLeaseKind.IsFixedClaim(existing) && existing.Labels["tailscale"] == "true" {
+		if existing.Labels["tailscale_device_id"] == "" || labels["tailscale_device_id"] != existing.Labels["tailscale_device_id"] || labels["tailscale"] != "true" {
+			return core.Server{}, core.Exit(4, "lease_id_conflict: Proxmox endpoint refresh changed the bound device identity")
+		}
+		delete(labels, "tailscale_fqdn")
+		server.Labels = labels
+		if err := ValidateProxmoxTailnetAccess(core.Config{}, server); err != nil {
+			return core.Server{}, err
+		}
+	}
 	server.Labels = labels
 	return server, nil
 }

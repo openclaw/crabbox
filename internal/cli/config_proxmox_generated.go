@@ -7,20 +7,21 @@ import (
 )
 
 type fileProxmoxConfig struct {
-	APIURL            string `yaml:"apiUrl,omitempty"`
-	TokenID           string `yaml:"tokenId,omitempty"`
-	TokenSecret       string `yaml:"tokenSecret,omitempty"`
-	Node              string `yaml:"node,omitempty"`
-	TemplateID        int    `yaml:"templateId,omitempty"`
-	DesktopTemplateID *int   `yaml:"desktopTemplateId,omitempty"`
-	BrowserTemplateID *int   `yaml:"browserTemplateId,omitempty"`
-	Storage           string `yaml:"storage,omitempty"`
-	Pool              string `yaml:"pool,omitempty"`
-	Bridge            string `yaml:"bridge,omitempty"`
-	User              string `yaml:"user,omitempty"`
-	WorkRoot          string `yaml:"workRoot,omitempty"`
-	FullClone         *bool  `yaml:"fullClone,omitempty"`
-	InsecureTLS       *bool  `yaml:"insecureTLS,omitempty"`
+	TailscaleBroker   *string `yaml:"tailscaleBroker,omitempty"`
+	APIURL            string  `yaml:"apiUrl,omitempty"`
+	TokenID           string  `yaml:"tokenId,omitempty"`
+	TokenSecret       string  `yaml:"tokenSecret,omitempty"`
+	Node              string  `yaml:"node,omitempty"`
+	TemplateID        int     `yaml:"templateId,omitempty"`
+	DesktopTemplateID *int    `yaml:"desktopTemplateId,omitempty"`
+	BrowserTemplateID *int    `yaml:"browserTemplateId,omitempty"`
+	Storage           string  `yaml:"storage,omitempty"`
+	Pool              string  `yaml:"pool,omitempty"`
+	Bridge            string  `yaml:"bridge,omitempty"`
+	User              string  `yaml:"user,omitempty"`
+	WorkRoot          string  `yaml:"workRoot,omitempty"`
+	FullClone         *bool   `yaml:"fullClone,omitempty"`
+	InsecureTLS       *bool   `yaml:"insecureTLS,omitempty"`
 }
 
 const ProxmoxConfigDefaultUser string = "crabbox"
@@ -52,7 +53,7 @@ func (cfg *ProxmoxConfig) applyFile(file *fileProxmoxConfig, trusted bool) (Prox
 
 func (cfg *ProxmoxConfig) applyEnv() (ProxmoxConfigApplied, error) {
 	var applied ProxmoxConfigApplied
-	err := applyConfigEnvironment(cfg, &applied, 0, 14)
+	err := applyConfigEnvironment(cfg, &applied, 0, 15)
 	return applied, err
 }
 

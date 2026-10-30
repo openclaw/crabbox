@@ -716,3 +716,185 @@ retry and expect `lease_id_conflict`. Repeat through `crabbox adapter serve
 Finally, remove a required component in a separate test template and confirm the
 named readiness error and owned-clone cleanup. Preserve any unresolved claim
 until Proxmox inventory proves absence.
+
+## Native per-lease Tailnet enrollment
+
+Opt in with `--tailscale --network tailscale --lease-id cbx_<12 lowercase hex>`.
+This bounded path requires Linux, ordinary SSH on port 22, a strictly verified
+HTTPS Proxmox API, and a clean prepared template. It never falls back to LAN SSH,
+uses Tailscale SSH, or embeds a key in cloud-init. Non-fixed allocation, direct
+`tailscale.authKey`/auth-key environment values, exit nodes and insecure TLS are
+rejected before allocation. Existing direct-network behavior is unchanged.
+
+The template must already contain running QGA, cloud-init, OpenSSH, Python 3,
+`/usr/bin/tailscale`, a running but **unenrolled** tailscaled, and the reviewed
+[scripts/proxmox-enroll.py](../../scripts/proxmox-enroll.py) installed root-owned,
+not writable by the lease user, at `/usr/local/libexec/crabbox-enroll`. The helper
+rejects pre-enrolled state and sends its key to `tailscale up` through stdin,
+with Tailscale SSH and advertised route acceptance disabled. Normal Tailnet DNS
+acceptance stays enabled so private controller/MagicDNS HTTPS names can resolve.
+Successful enrollment requires a nonempty Tailscale `Self.ID`. The helper saves
+only non-secret individual fields for the common SSH metadata reader; its framing
+accepts both newline-terminated and unterminated files, including absent optional
+fields.
+No enrolled tailscaled state, device identity, reusable credential, machine ID
+or SSH host keys may be baked into a reusable template. The existing template
+builder does **not** install this Tailnet extension automatically.
+
+Example trusted user config (the broker path is ignored in repository config):
+
+```yaml
+proxmox:
+  tailscaleBroker: /usr/local/libexec/example-tailnet-broker
+network: tailscale
+tailscale:
+  enabled: true
+  tags: [tag:worker]
+  hostnameTemplate: cbx-{id}
+```
+
+Alternatively set `CRABBOX_PROXMOX_TAILSCALE_BROKER` in the controller's protected
+service environment. There is deliberately no executable/credential argv flag.
+Use the existing Tailscale flags/options for tags and hostname. Use a dedicated
+worker tag and issuer, with controller-to-worker TCP 22 permitted. No fleet key,
+coordinator allocation path or broad shared-team service is introduced.
+
+### Broker protocol v1
+
+The operator supplies a trusted local executable; this repository defines and
+mock-tests its contract, **not a production issuer deployment**. It is executed
+without arguments or a shell. One JSON request arrives on stdin; stdout is a
+private bounded JSON response (16 KiB), stderr is discarded. It inherits the
+controller's protected environment, where an operator wrapper may resolve issuer
+credentials. The process deadline is 30 seconds. Do not log stdin/stdout, HTTP
+bodies, keys or issuer credentials in that wrapper or its upstream transports.
+
+An acquisition request contains only non-secret identity and policy:
+
+```json
+{
+  "version": 1,
+  "operation": "acquire",
+  "endpoint": "https://pve.example.test:8006",
+  "node": "pve1",
+  "leaseId": "cbx_012345abcdef",
+  "vmid": "417",
+  "generation": "8be39656-32b0-4c47-b68c-0a9e1d3ef901",
+  "hostname": "cbx-cbx-012345abcdef",
+  "tags": ["tag:worker"]
+}
+```
+
+The response must contain `authKey` (one Tailscale enrollment key), `expiresAt`
+(RFC 3339, after now and no more than ten minutes ahead), `ephemeral:true`, and
+`reusable:false`. Never supply a reusable fleet key. The broker must validate
+endpoint/node, dedicated tag allowlist and hostname, and durably bind the issuance
+and its device-cleanup ownership to **all** of endpoint/node/leaseId/vmid/generation
+before returning a credential. Its issuer must be limited to the admitted worker
+tag. Repeated requests for a bound attempt must not mint independent identities;
+ambiguity, a changed generation or an unsupported request must fail closed.
+
+`release` sends the same identity and policy with `operation:"release"`. Return
+`{"released":true}` only after revoking any unused key and deleting/reconciling
+its enrolled device(s), including an acquisition whose response was lost or
+cancelled. The broker must fence in-flight issuance/enrollment, reconcile the
+unique lease hostname and dedicated tag without touching unrelated devices, and
+make retries idempotent. This requires actual device-cleanup permission in
+addition to `auth_keys`; an auth-key-only issuer is insufficient. If the chosen
+issuer cannot prove this bounded ownership/cleanup contract, do not enable the
+path. Ephemeral-node eventual expiry is not a cleanup acknowledgment.
+
+The CLI persists no key, broker response or issuer secret. Its fixed intent binds
+the network choice, tags, hostname template and broker path. Before clone or key
+issuance, admission requires 1–32 unique tags (`tag:` followed by a lowercase
+alphanumeric name with optional hyphens, at most 63 name characters) and the
+**final rendered** hostname (1–63 lowercase alphanumeric/hyphen characters,
+starting with an alphanumeric character). Templates are not truncated to fit;
+choose a shorter template or slug if rendering exceeds the helper's limit.
+A fresh pre-submission validation rejection retires its unsubmitted claim and
+lease key under the fixed transaction fence, allowing a corrected request to use
+the same canonical ID; it cannot retire an earlier or generation-bound attempt.
+The clone attempt also persists the trusted absolute broker path locally, not
+in the VM description. After binding VMID and vmgenid, it checks isolated exec permission and QGA readiness, rechecks the VM
+generation and exact claim-bound hostname/tags, acquires one key and invokes only
+the prepared helper through native
+`agent/exec` input-data. Native REST input-data is raw stdin; PVE performs QGA's
+base64 encoding. Acquire requests use the original claim-checked clone policy,
+not later mutable descriptions; hostname/tag drift fails before key issuance.
+Helper output and error bodies are never exposed as diagnostics. The root helper
+sets the checked metadata directory to `0755` and non-secret receipt files to
+`0644` explicitly, independent of QGA's umask, so the lease SSH user can read them;
+ownership checks and no-follow descriptor handling remain enforced.
+
+After successful helper exit, live QGA discovery selects only an IPv4 on exact
+`tailscale0` within `100.64.0.0/10`, deterministically if several are reported.
+SSH bootstrap must succeed using the lease key. Provision, fixed replay,
+resolve/inspect and run share that address policy and normal `TailscaleMetadata`;
+missing QGA/address never reuses a stale saved address or chooses an underlay IP.
+The provider pins that QGA-selected IP through common bootstrap/run/status route
+selection: persisted `tailscale_fqdn` and hostname values cannot replace it.
+
+Before acquisition returns, the CLI reads the prepared guest's enrollment receipt
+over the per-lease SSH connection, requires its IPv4 to match live QGA discovery,
+and durably binds its actual device ID to the canonical lease, cluster scope,
+VMID and vmgenid in the fixed claim. Fresh-process `inspect --json` exposes that
+receipt as `tailscale.deviceID`; it does not trust a device ID copied into mutable
+Proxmox descriptions. Fixed replay revalidates the receipt against the bound
+device without another clone or key issuance. A missing receipt, changed device
+or generation fails closed; a claim without a bound device cannot adopt a mutable
+label as proof. Metadata refresh implements the common persistence capability
+and may confirm, but not replace, this identity. For native Tailnet leases the
+receipt is a required access gate: common warmup, workspace-owner setup, sync and
+command callers propagate receipt read, validation and persistence failures before
+sending user commands or sync payloads. They do not restore cached metadata and
+continue, reallocate a VM or request another enrollment key. Other providers keep
+their existing optional, best-effort metadata refresh behavior.
+
+Inventory listing remains diagnostic: an incomplete or unverifiable Tailnet lease
+stays visible with `tailscale_state=unverified`, no reported device ID or access
+address, and an error for recovery; it does not hide healthy leases. This does not
+authorize resolve, replay, sync or command access. A local claim scan failure
+makes ownership unclassifiable and fails the list operation; it does not turn
+ordinary direct VMs into Tailnet leases or silently remove their public addresses.
+
+A public-network override cannot downgrade an already Tailnet-bound lease.
+Release does not require guest reachability. Failed/cancelled provisioning retains
+its fixed claim; stop the same canonical lease, not another allocation. VM
+absence is verified, then broker release must succeed before terminal settlement.
+A broker failure leaves the deleting claim retryable even when the VM is gone.
+Before deleting a VM (or settling an already absent VM), release checks the
+locally bound broker path, even when the invocation omits `--tailscale`. A changed
+or missing binding fails before deletion or broker invocation. Restoring the
+bound executable **and its original issuance ledger** permits ordinary release
+retry; changing the path to a new empty ledger is not cleanup.
+
+#### Broker migration and legacy recovery
+
+Do not switch issuance owners while leases remain active. Pause new allocations,
+retain the original broker and ledger at the bound path, release each owned
+lease through that broker, and verify its key/device cleanup acknowledgments
+before configuring a new broker for new leases. A compatible wrapper at the
+bound path must still reconcile the original ledger; a matching path alone
+cannot prove that an operator has preserved executable contents or ledger data.
+Never replace either in place with an unrelated issuer.
+
+Older experimental Tailnet claims whose attempts lack `tailscaleBroker` remain
+inspectable but cannot authorize CLI release, including when the VM is already
+absent. Do not infer their cleanup owner from current configuration, backfill the
+binding blindly, delete the claim, or mark it terminal. The operator must recover
+the original issuance owner from trusted allocation records, fence issuance and
+reconcile that owner's exact endpoint/node/lease/VMID/generation key and device
+ledger. Preserve the claim and evidence for a separately reviewed explicit
+migration/recovery; this change does not supply a legacy binding migration tool.
+
+### Additional permission decision
+
+An operator must explicitly approve `VM.GuestAgent.Unrestricted` on the isolated
+worker VM(s) (for example through the dedicated worker pool's runtime principal),
+not on unrelated VMs. It permits guest execution; `VM.GuestAgent.FileWrite` and
+`VM.GuestAgent.Audit` alone cannot enroll a guest. The CLI checks the exact
+`/vms/<vmid>` effective permission before requesting a key and never grants it.
+Keep this privilege, the issuer and device-cleanup authority out of CI. Existing
+clone/audit/config/start/delete/storage/network rights remain necessary. The
+operator still owns strict TLS, clean-template proof, dedicated tag/ACL/issuer
+approval and a real end-to-end allocation/cancellation/cleanup proof.

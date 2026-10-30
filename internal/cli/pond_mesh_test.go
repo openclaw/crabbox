@@ -994,7 +994,7 @@ func TestProviderCapabilitiesPrimary(t *testing.T) {
 		{"azure", TransportTailnet},
 		{"gcp", TransportTailnet},
 		{"aws", TransportTailnet},
-		{"proxmox", TransportSSH}, // legacy mapping was TransportTailnet — capability model corrects to SSH
+		{"proxmox", TransportTailnet}, // native fixed leases now advertise a dialable Tailnet plane
 		{"exe-dev", TransportSSH},
 		{"daytona", TransportSSH},
 		{"islo", TransportURL}, // outbound-only userspace Tailscale is not a dialable peer plane

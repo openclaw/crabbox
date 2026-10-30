@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,7 @@ var fixedProxmoxLeaseKind = core.FixedLeaseKind{
 func fixedProxmoxFingerprint(cfg core.Config, req core.AcquireRequest, providerScope, publicKey string) (string, error) {
 	return core.FixedIntentFingerprint("", core.FixedIntentFields{
 		{Name: "labels", Value: core.DirectLeaseLabels(cfg, req.RequestedLeaseID, core.NormalizeLeaseSlug(req.RequestedSlug), "proxmox", "", req.Keep, time.Unix(0, 0))},
+		{Name: "tailnet", Value: proxmoxTailnetIntent(cfg), OmitEmpty: true},
 		{Name: "sshPort", Value: cfg.SSHPort}, {Name: "providerScope", Value: providerScope},
 		{Name: "node", Value: strings.TrimSpace(cfg.Proxmox.Node)}, {Name: "templateId", Value: cfg.Proxmox.TemplateID},
 		{Name: "storage", Value: strings.TrimSpace(cfg.Proxmox.Storage), OmitEmpty: true},
@@ -66,6 +68,7 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		return core.LeaseTarget{}, err
 	}
 	var publicKey, fingerprint string
+	newlyCreated := false
 	acquired, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
 		Kind: fixedProxmoxLeaseKind, LeaseID: leaseID, CheckpointID: req.RequestedCheckpointID,
 		RepoRoot: req.Repo.Root, Reclaim: req.Reclaim, TargetOS: cfg.TargetOS,
@@ -134,13 +137,23 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		}
 		return result, nil
 	}, Plan: func(ctx context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
+		if err := ValidateProxmoxTailnetIdentity(cfg, leaseID, claim.Slug); err != nil {
+			// No native attempt exists yet. Let the engine retire only this
+			// provably unsubmitted claim and its key under the existing fence.
+			return core.FixedAttemptPlan{}, &core.FixedCreateRejected{Err: err}
+		}
 		vmid, err := reserveFixedProxmoxVMID(ctx, client, claim)
 		if err != nil {
 			return core.FixedAttemptPlan{}, fixedProxmoxAuthorizationRejection(err)
 		}
 		node := strings.TrimSpace(cfg.Proxmox.Node)
+		values := map[string]string{"vmid": strconv.Itoa(vmid), "node": node}
+		if cfg.Tailscale.Enabled {
+			// Local-only ownership record, committed before clone or issuance.
+			values["tailscaleBroker"] = cfg.Proxmox.TailscaleBroker
+		}
 		return core.FixedAttemptPlan{
-			Values:          map[string]string{"vmid": strconv.Itoa(vmid), "node": node},
+			Values:          values,
 			UniqueProviders: []string{"proxmox", core.FixedProxmoxClaimProvider}, UniqueLabel: "Proxmox",
 			Identity: core.FixedResourceBinding{CloudID: strconv.Itoa(vmid), NumericID: int64(vmid)},
 			Labels:   fixedProxmoxIdentityLabels(cfg, leaseID, claim.Slug, fingerprint, node),
@@ -168,6 +181,7 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 			}
 			return core.Server{}, fmt.Errorf("Proxmox clone outcome or identity is uncertain; claim retained for lease %s (VMID %d). Restore permissions and inspect the VM and clone task before recovery with crabbox stop --force --provider proxmox --id %s: %w", leaseID, vmid, leaseID, err)
 		}
+		newlyCreated = true
 		return server, nil
 	}, PrepareAccess: func(ctx context.Context, tx *core.FixedTransaction, server core.Server) (core.LeaseTarget, error) {
 		claim := tx.Claim
@@ -181,12 +195,37 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		if err := validateFixedProxmoxServer(server, *claim, attemptVMID, attemptNode); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		target := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
+		if err := ValidateProxmoxTailnetAccess(cfg, server); err != nil {
+			return core.LeaseTarget{}, err
+		}
+		target := proxmoxNetworkTarget(cfg, server)
 		if err := waitForSSHReadyFunc(ctx, &target, b.RT.Stderr, "bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		server.Labels = maps.Clone(server.Labels)
+		if server.Labels["tailscale"] == "true" {
+			if !newlyCreated && claim.Labels["tailscale_device_id"] == "" {
+				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Proxmox Tailnet replay has no bound device identity")
+			}
+			meta, err := readTailnetMetadata(ctx, target)
+			if err != nil {
+				return core.LeaseTarget{}, fmt.Errorf("read Proxmox enrollment identity: %w", err)
+			}
+			if err := validateTailnetMetadata(server, meta, claim.Labels["tailscale_device_id"]); err != nil {
+				return core.LeaseTarget{}, err
+			}
+			server.Labels["tailscale_device_id"] = meta.DeviceID
+			delete(server.Labels, "tailscale_fqdn")
+			// The receipt is committed under the fixed transaction's claim fence,
+			// tied to its canonical lease, cluster, VMID and vmgenid before return.
+			if err := tx.Bind(core.FixedResourceBinding{ImmutableID: server.ImmutableID, Labels: server.Labels}); err != nil {
+				return core.LeaseTarget{}, err
+			}
+		}
 		server.Labels["state"] = "ready"
+		if server.Labels["tailscale"] == "true" {
+			server.Labels["tailscale_state"] = "ready"
+		}
 		if err := client.SetLabelsOnNode(ctx, server.HostID, server.CloudID, server.Labels); err != nil {
 			return core.LeaseTarget{}, fmt.Errorf("persist Proxmox fixed lease labels: %w", err)
 		}
@@ -265,11 +304,17 @@ func reserveFixedProxmoxVMID(ctx context.Context, client proxmoxClient, claim co
 
 func fixedProxmoxIdentityLabels(cfg core.Config, leaseID, slug, fingerprint, node string) map[string]string {
 	labels := core.FixedIdentityLabels("proxmox", leaseID, slug, fingerprint, map[string]string{"node": node, "template_id": strconv.Itoa(cfg.Proxmox.TemplateID)})
+	if cfg.Tailscale.Enabled {
+		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, "proxmox")
+	}
 	requested := core.DirectLeaseLabels(cfg, leaseID, slug, "proxmox", "", false, time.Unix(0, 0))
 	for _, key := range []string{"desktop", "browser", "desktop_env"} {
 		if value, ok := requested[key]; ok {
 			labels[key] = value
 		}
+	}
+	for key, value := range ProxmoxTailnetIdentityLabels(cfg, leaseID, slug) {
+		labels[key] = value
 	}
 	return labels
 }
@@ -280,7 +325,14 @@ func fixedProxmoxAttempt(claim core.LeaseClaim) (int, string, error) {
 	if err := core.ValidateFixedClaim(claim, rules); err != nil {
 		return 0, "", err
 	}
-	attempt, err := core.ReadFixedAttempt[map[string]string](claim.FixedCreateIntent, core.FixedAttemptFormat{ExactKeys: 2, Required: []string{"node"}, PositiveIntegers: []string{"vmid"}})
+	exactKeys := 2
+	if _, bound := claim.FixedCreateIntent.Attempt["tailscaleBroker"]; bound {
+		exactKeys = 3
+		if claim.Labels["tailscale"] != "true" || !filepath.IsAbs(claim.FixedCreateIntent.Attempt["tailscaleBroker"]) {
+			return 0, "", core.Exit(4, "lease_id_conflict: invalid Proxmox Tailnet broker binding")
+		}
+	}
+	attempt, err := core.ReadFixedAttempt[map[string]string](claim.FixedCreateIntent, core.FixedAttemptFormat{ExactKeys: exactKeys, Required: []string{"node"}, PositiveIntegers: []string{"vmid"}})
 	if err != nil || attempt == nil {
 		return 0, "", err
 	}
@@ -305,7 +357,7 @@ func (b *leaseBackend) findFixedProxmoxServer(ctx context.Context, client proxmo
 
 func validateFixedProxmoxServer(server core.Server, claim core.LeaseClaim, vmid int, attemptNode string) error {
 	intent := claim.FixedCreateIntent
-	for _, key := range []string{"desktop", "browser", "desktop_env"} {
+	for _, key := range []string{"desktop", "browser", "desktop_env", "tailscale", "tailscale_tags", "tailscale_hostname"} {
 		if server.Labels[key] != claim.Labels[key] {
 			return core.Exit(4, "lease_id_conflict: Proxmox VM for lease %s changed its %s capability", claim.LeaseID, key)
 		}
@@ -390,6 +442,9 @@ func (b *leaseBackend) releaseFixed(ctx context.Context, req core.ReleaseLeaseRe
 		if present {
 			return core.Exit(4, "lease_id_conflict: fixed Proxmox VMID %d or requested name still exists; claim retained", vmid)
 		}
+		if expected.Labels["tailscale"] == "true" && expected.CloudImmutableID != "" {
+			return ReleaseProxmoxTailnet(ctx, b.Cfg, core.Server{Provider: "proxmox", CloudID: expected.CloudID, HostID: expected.Labels["node"], ImmutableID: expected.CloudImmutableID, Labels: expected.Labels})
+		}
 		return nil
 	}
 	checkpointID := req.CheckpointID
@@ -404,6 +459,9 @@ func (b *leaseBackend) releaseFixed(ctx context.Context, req core.ReleaseLeaseRe
 			if claim.FixedCreateIntent.State == "released" {
 				err := fixedProxmoxLeaseKind.ValidateTerminalClaim(*claim, core.LeaseClaim{}, leaseID, validateFixedProxmoxTerminalClaim)
 				return core.FixedObservation[core.Server]{AbsenceProven: err == nil}, err
+			}
+			if err := validateProxmoxCleanupBroker(*claim, b.Cfg); err != nil {
+				return result, err
 			}
 			if recoverPrepared && (claim.FixedCreateIntent.State != "prepared" || claim.CloudImmutableID != "") {
 				return result, core.Exit(4, "Proxmox forced absence recovery requires a prepared claim without a bound generation; inspect the VM and use ordinary stop")
@@ -545,4 +603,31 @@ func (b *leaseBackend) validateFixedCleanupCandidate(claim core.LeaseClaim, serv
 		return err
 	}
 	return validateFixedProxmoxServer(server, claim, vmid, node)
+}
+
+// Omit the extension entirely for legacy/direct intents, preserving their hash.
+func proxmoxTailnetIntent(cfg core.Config) any {
+	if !cfg.Tailscale.Enabled {
+		return nil
+	}
+	return struct {
+		Network          core.NetworkMode
+		Tags             []string
+		HostnameTemplate string
+		Broker           string
+	}{cfg.Network, cfg.Tailscale.Tags, cfg.Tailscale.HostnameTemplate, cfg.Proxmox.TailscaleBroker}
+}
+
+// Never delete a VM or settle an absent one using a different issuance ledger.
+// Legacy Tailnet attempts without this binding require operator reconciliation;
+// the current configuration alone is not evidence of the original broker.
+func validateProxmoxCleanupBroker(claim core.LeaseClaim, cfg core.Config) error {
+	if claim.Labels["tailscale"] != "true" {
+		return nil
+	}
+	broker := claim.FixedCreateIntent.Attempt["tailscaleBroker"]
+	if !filepath.IsAbs(broker) || broker != cfg.Proxmox.TailscaleBroker {
+		return core.Exit(4, "lease_id_conflict: Proxmox Tailnet cleanup broker is missing or changed; restore the bound broker and original issuance ledger before release (see docs/providers/proxmox.md)")
+	}
+	return nil
 }

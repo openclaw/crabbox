@@ -5,6 +5,7 @@ package cli
 // ProxmoxConfig owns mechanical bindings; provenance and generic connection
 // projections remain in their existing policy wrappers.
 type ProxmoxConfig struct {
+	TailscaleBroker   string `config:"tailscaleBroker" env:"CRABBOX_PROXMOX_TAILSCALE_BROKER" sources:"user,env"`
 	APIURL            string `config:"apiUrl" env:"CRABBOX_PROXMOX_API_URL" flag:"proxmox-api-url" sources:"user,repo,env,flag" help:"Proxmox VE API URL" fileIgnoreEmpty:"true" fileStorage:"value" reportApplied:"true"`
 	TokenID           string `config:"tokenId" env:"CRABBOX_PROXMOX_TOKEN_ID" sources:"user,repo,env" fileIgnoreEmpty:"true" fileStorage:"value" reportApplied:"true"`
 	TokenSecret       string `config:"tokenSecret" env:"CRABBOX_PROXMOX_TOKEN_SECRET" sources:"user,repo,env" fileIgnoreEmpty:"true" fileStorage:"value" reportApplied:"true"`
