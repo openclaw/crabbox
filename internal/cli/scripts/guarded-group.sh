@@ -20,7 +20,8 @@ cleanup_group() {
     # process identity and the published record before the final KILL.
     valid_guard || return 1
     kill -TERM -- "-$group" 2>/dev/null || return 1
-    local ticks=$(((grace_ms + 99) / 100))
+    local term_grace_ms=${1:-$grace_ms}
+    local ticks=$(((term_grace_ms + 99) / 100))
     while [ "$ticks" -gt 0 ]; do sleep .1; ticks=$((ticks - 1)); done
     valid_guard || return 1
     kill -KILL -- "-$group" 2>/dev/null || return 1

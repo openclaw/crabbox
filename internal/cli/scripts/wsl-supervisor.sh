@@ -22,10 +22,12 @@ remove_evidence() {
 }
 
 @FUNCTIONAL_PRELUDE@case $mode in
-run)
+run|run-finite)
     # setsid and ignored HUP preserve the supervisor after Windows loses its
     # launcher. It directly parents both members of the guarded pipeline.
-    exec setsid --wait bash -c "$CBX_HELPER" sh supervise "$directory" "$nonce" "$command_size" "$payload_size" "$idle_ms" "$grace_ms" "$caller_mask"
+    input_lifetime=stream
+    [ "$mode" != run-finite ] || input_lifetime=finite
+    exec setsid --wait bash -c "$CBX_HELPER" sh supervise "$directory" "$nonce" "$command_size" "$payload_size" "$idle_ms" "$grace_ms" "$caller_mask" "$input_lifetime"
     ;;
 @GUARDED_MEMBERS@
 watch)
@@ -78,7 +80,10 @@ if [ "$failed" = 1 ]; then remove_evidence || :; exit 74; fi
 head -c "$command_size" "$directory/frame" >"$directory/command" || exit 74
 dd if="$directory/frame" of="$directory/input" bs=65536 skip="$command_size" count="$payload_size" iflag=skip_bytes,count_bytes status=none || exit 74
 rm "$directory/frame"
-bash -c "$CBX_HELPER" sh watch "$directory" "$nonce" 0 0 0 0 "$caller_mask" </dev/null &
-watcher=$!
+watcher=
+if [ "${9:-stream}" != finite ]; then
+    bash -c "$CBX_HELPER" sh watch "$directory" "$nonce" 0 0 0 0 "$caller_mask" </dev/null &
+    watcher=$!
+fi
 exec 3<&-
 @GUARDED_WORKLOAD@

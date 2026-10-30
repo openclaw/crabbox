@@ -1300,7 +1300,11 @@ func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, st
 		}
 		err = errors.Join(err, writeErr)
 	}()
-	err = executeSSH(ctx, &target, remote, nil, 0, 0, "10", "3", stdout, stderr)
+	if target.TargetOS == targetLinux && workspaceOwnerFromContext(ctx) != nil {
+		err = runOwnedLinuxSSHCommand(ctx, target, remote, stdout, stderr)
+	} else {
+		err = executeSSH(ctx, &target, remote, nil, 0, 0, "10", "3", stdout, stderr)
+	}
 	var preparation sshPreparationError
 	if errors.As(err, &preparation) {
 		return 7, err
