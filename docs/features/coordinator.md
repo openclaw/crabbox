@@ -494,6 +494,8 @@ Admin-scoped routes:
 ```text
 GET    /v1/pool
 GET    /v1/admin/leases
+GET    /v1/admin/leases/{id}/retire-create
+POST   /v1/admin/leases/{id}/retire-create
 GET    /v1/admin/lease-audit
 GET    /v1/admin/aws-identity
 GET    /v1/admin/providers/identity

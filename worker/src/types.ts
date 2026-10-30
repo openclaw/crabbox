@@ -328,6 +328,7 @@ export interface CreateAttemptRecord {
   checkpointUseClaimHash?: string;
   createdAt: string;
   updatedAt: string;
+  retirement?: { at: string; actor: string; reason: string; createdBefore: string };
 }
 
 export interface ImageCapabilities {

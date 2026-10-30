@@ -321,6 +321,8 @@ POST /v1/images/{id}/promote
 GET  /v1/images/{id}/fast-snapshot-restore
 POST /v1/artifacts/uploads
 GET  /v1/admin/leases
+GET  /v1/admin/leases/{id}/retire-create
+POST /v1/admin/leases/{id}/retire-create
 GET  /v1/admin/lease-audit
 POST /v1/admin/leases/{id-or-slug}/release | delete
 GET  /v1/admin/hosts

@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Parallels: a Windows warmup waits for the guest's routable address instead of the self-assigned `169.254.x.x` address it reports until DHCP answers, which had stalled the SSH bootstrap for its full timeout before replacing the lease. If DHCP never answers, the IP wait still gets one retry on a fresh clone, and its hint names the link-local address. [PR 2981](https://github.com/openclaw/crabbox/pull/2981). Thanks @rustanacexd.
+- Coordinator recovery: preview and retire an exact interrupted create request after its cancellation token is lost, preserving ownership, generation checks, and pending cleanup evidence. [PR 2980](https://github.com/openclaw/crabbox/pull/2980). Thanks @vincentkoc.
 - Homebrew release verification: authorize the maintained formula in each credential-free verification workspace before loading it, keeping trust local even with machine Homebrew configuration, preserving formula identity, archive, signature, and installation checks. [PR 2979](https://github.com/openclaw/crabbox/pull/2979). Thanks @vincentkoc.
 - Release builds: retire completed private compiler caches between targets so multi-platform production does not retain every target's cache until packaging. [PR 2978](https://github.com/openclaw/crabbox/pull/2978). Thanks @vincentkoc.
 

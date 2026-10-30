@@ -18,6 +18,7 @@ export default defineConfig({
       ...configDefaults.exclude,
       "test/aws-cleanup-recovery.postgres.test.ts",
       "test/original-finish.postgres.test.ts",
+      "test/admin-create-retirement.postgres.test.ts",
     ],
   },
 });

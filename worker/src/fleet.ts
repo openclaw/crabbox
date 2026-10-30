@@ -1379,6 +1379,7 @@ export class FleetCoordinator {
   async prepareBridgeRequest(request: Request): Promise<Response | undefined> {
     // Capacity reads must not trigger restoration or unrelated maintenance.
     if (request.method === "GET" && pathParts(request).join("/") === "v1/capacity") return;
+    if (isCreateRetirementPreview(request)) return;
     await this.reconcileAdminGrantVersion(request);
     if (await this.restoredBridgesReady()) return;
     return json(
@@ -1413,6 +1414,14 @@ export class FleetCoordinator {
       const adminError = adminRouteError(request, method, parts);
       if (adminError) {
         return adminError;
+      }
+      if (
+        parts.length === 5 &&
+        parts.slice(0, 3).join("/") === "v1/admin/leases" &&
+        parts[4] === "retire-create" &&
+        (method === "GET" || method === "POST")
+      ) {
+        return await this.adminRetireCreate(request, parts[3]!);
       }
       if (method === "GET" && parts.join("/") === "v1/health") {
         return json({ ok: true, fleet: fleetID });
@@ -15665,6 +15674,177 @@ export class FleetCoordinator {
     }
   }
 
+  private async createRetirementSnapshot(storage: CoordinatorStorageView, id: string) {
+    const [attempt, lease, reservation] = await Promise.all([
+      storage.get<CreateAttemptRecord>(createAttemptKey(id)),
+      storage.get<LeaseRecord>(leaseKey(id)),
+      storage.get(workspaceLeaseReservationKey(id)),
+    ]);
+    const validAttempt =
+      attempt &&
+      (attempt.version === 1 || attempt.version === 2) &&
+      attempt.requestedLeaseID === id &&
+      validCreateAttemptID(attempt.token) &&
+      ["pending", "canceled"].includes(attempt.state) &&
+      Boolean(attempt.owner && attempt.org) &&
+      Number.isFinite(Date.parse(attempt.createdAt));
+    const binding = reservation
+      ? "reserved"
+      : attempt?.checkpointID || attempt?.checkpointUseClaimHash || lease?.checkpointID
+        ? "conflict"
+        : lease
+          ? validAttempt && createAttemptMatchesLease(attempt, lease)
+            ? "bound"
+            : "conflict"
+          : !attempt
+            ? "absent"
+            : validAttempt &&
+                !attempt.canonicalLeaseID &&
+                !attempt.cloudID &&
+                !attempt.generation &&
+                !attempt.checkpointID &&
+                !attempt.checkpointUseClaimHash
+              ? "unbound"
+              : "conflict";
+    // Admission retains an attempt before provider dispatch. Once an unbound ID
+    // is durably fenced, neither an old request nor a replay can allocate it.
+    const fenced = Boolean(
+      attempt?.state === "canceled" &&
+      ((binding === "unbound" && attempt.version === 2) || binding === "bound"),
+    );
+    return {
+      attempt,
+      lease,
+      view: {
+        leaseId: id,
+        // Bind the preview to private generation facts without exposing their values.
+        revision: await sha256Hex(
+          JSON.stringify([id, attempt ?? null, lease ?? null, reservation ?? null]),
+        ),
+        binding,
+        attemptState: validAttempt ? attempt.state : attempt ? "invalid" : "absent",
+        ...(validAttempt
+          ? { owner: attempt.owner, org: attempt.org, createdAt: attempt.createdAt }
+          : {}),
+        fenced,
+        cleanup:
+          binding === "bound"
+            ? leaseProviderCleanupConfirmed(lease!)
+              ? "confirmed"
+              : "pending"
+            : binding === "unbound" && fenced
+              ? "not-allocated"
+              : "unproven",
+      },
+    };
+  }
+
+  private async adminRetireCreate(request: Request, id: string): Promise<Response> {
+    if (!validLeaseID(id)) return json({ error: "invalid_lease_id" }, { status: 400 });
+    if (request.method === "GET") {
+      return json(
+        await this.state.storage.transaction(
+          async (storage) => (await this.createRetirementSnapshot(storage, id)).view,
+        ),
+      );
+    }
+    const input = await readJson<{
+      revision?: string;
+      owner?: string;
+      org?: string;
+      createdBefore?: string;
+      reason?: string;
+    }>(request);
+    if (
+      !input ||
+      typeof input !== "object" ||
+      Array.isArray(input) ||
+      typeof input.revision !== "string" ||
+      !/^[a-f0-9]{64}$/.test(input.revision) ||
+      typeof input.owner !== "string" ||
+      !input.owner.trim() ||
+      input.owner.length > 200 ||
+      typeof input.org !== "string" ||
+      !input.org.trim() ||
+      input.org.length > 200 ||
+      typeof input.reason !== "string" ||
+      !input.reason.trim() ||
+      input.reason.length > 500 ||
+      typeof input.createdBefore !== "string" ||
+      !Number.isFinite(Date.parse(input.createdBefore)) ||
+      Date.parse(input.createdBefore) > Date.now()
+    )
+      return json({ error: "invalid_create_retirement" }, { status: 400 });
+    const now = new Date().toISOString();
+    const token = `cat_${crypto.randomUUID().replaceAll("-", "")}`;
+    const selected = await this.state.runExclusive(() =>
+      this.state.storage.transaction(async (storage) => {
+        const snapshot = await this.createRetirementSnapshot(storage, id);
+        const { attempt, lease, view } = snapshot;
+        if (
+          input.revision !== view.revision ||
+          view.binding === "reserved" ||
+          view.binding === "conflict" ||
+          (attempt &&
+            (attempt.owner !== input.owner ||
+              attempt.org !== input.org ||
+              !Number.isFinite(
+                Date.parse(attempt.retirement?.createdBefore ?? attempt.createdAt),
+              ) ||
+              Date.parse(attempt.retirement?.createdBefore ?? attempt.createdAt) >
+                Date.parse(input.createdBefore!)))
+        )
+          return json({ error: "create_retirement_conflict" }, { status: 409 });
+        const retired: CreateAttemptRecord = {
+          ...(attempt ?? {
+            requestedLeaseID: id,
+            token,
+            owner: input.owner!,
+            org: input.org!,
+            createdAt: now,
+          }),
+          // Version 1 tombstones can be recycled. Version 2 also fences delayed
+          // ordinary and legacy creates when a compatible coordinator is rolled back.
+          version: 2,
+          state: "canceled",
+          updatedAt: attempt?.retirement ? attempt.updatedAt : now,
+          retirement: attempt?.retirement ?? {
+            at: now,
+            actor: requestOwner(request),
+            reason: input.reason!,
+            createdBefore: input.createdBefore!,
+          },
+        };
+        await storage.put(createAttemptKey(id), retired);
+        return { attempt: retired, lease };
+      }),
+    );
+    if (selected instanceof Response) return selected;
+    if (selected.lease && !leaseProviderCleanupConfirmed(selected.lease)) {
+      try {
+        await this.releaseResolvedLease(selected.lease, {
+          deleteServer: true,
+          keep: false,
+          awaitProviderCleanup: true,
+          expectedLease: selected.lease,
+          expectedCreateAttempt: selected.attempt,
+        });
+      } catch (error) {
+        if (
+          error instanceof CreateAttemptConflictError ||
+          error instanceof LeaseReleaseResolutionConflictError
+        )
+          return json({ error: "create_retirement_conflict" }, { status: 409 });
+        if (!(error instanceof LeaseCleanupInProgressError)) throw error;
+      }
+    }
+    return json(
+      await this.state.storage.transaction(
+        async (storage) => (await this.createRetirementSnapshot(storage, id)).view,
+      ),
+    );
+  }
+
   private async adminLeaseRoute(
     request: Request,
     leaseID: string,
@@ -21118,11 +21298,13 @@ export class FleetCoordinator {
     const attempt = await this.getCreateAttempt(reservation.id);
     if (
       !attempt ||
-      (attempt.state !== "pending" && !attempt.fixedCreate) ||
+      (attempt.state !== "pending" && attempt.state !== "canceled") ||
       !createAttemptMatchesLease(attempt, reservation)
     ) {
       return;
     }
+    // Reservation removal proves no dispatch occurred. Clear canceled bindings too,
+    // while retaining their cancellation state and non-recyclable retirement fence.
     const unbound = { ...attempt, updatedAt: new Date().toISOString() };
     if (reservation.state === "released") unbound.state = "canceled";
     delete unbound.canonicalLeaseID;
@@ -26209,6 +26391,16 @@ function isCloudNotFoundError(message: string): boolean {
 
 function isAWSTerminalInstanceState(state: string): boolean {
   return state === "shutting-down" || state === "terminated";
+}
+
+function isCreateRetirementPreview(request: Request): boolean {
+  const parts = pathParts(request);
+  return (
+    request.method === "GET" &&
+    parts.length === 5 &&
+    parts.slice(0, 3).join("/") === "v1/admin/leases" &&
+    parts[4] === "retire-create"
+  );
 }
 
 function isAdminRoute(method: string, parts: string[]): boolean {
