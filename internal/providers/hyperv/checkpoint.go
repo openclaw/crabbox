@@ -1036,6 +1036,9 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	if err := b.waitGuestReady(ctx, name, cfg.HyperV.User); err != nil {
 		return lease, fmt.Errorf("forked guest did not return after identity rotation: %w", err)
 	}
+	if err := b.rotateForkGuestSecrets(ctx, name, cfg.HyperV.User); err != nil {
+		return lease, err
+	}
 	if err := b.injectSSHKey(ctx, name, cfg.HyperV.User, publicKey); err != nil {
 		return lease, fmt.Errorf("reapply forked Hyper-V guest SSH identity after reboot: %w", err)
 	}
@@ -1134,29 +1137,49 @@ func recordForkDisks(vhdPath string, disks []string) error {
 	return nil
 }
 
+// rotateForkGuestIdentity renames the guest before the identity reboot. Only
+// the rename needs that reboot; Restart-VM is a hard reset that discards
+// registry and file writes still in the guest's cache, so per-guest secrets
+// are rotated afterwards by rotateForkGuestSecrets.
 func (b *backend) rotateForkGuestIdentity(ctx context.Context, vmName, user, publicKey, hostname string) error {
 	identityScript := fmt.Sprintf(
 		`$ErrorActionPreference='Stop'; `+
-			`if ($env:COMPUTERNAME -ne '%s') { Rename-Computer -NewName '%s' -Force }; `+
-			`Set-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid -Value ([guid]::NewGuid().ToString()) -ErrorAction Stop; `+
-			`$vncPasswordPath='C:\ProgramData\crabbox\vnc.password'; `+
-			`$tightVNCServiceKey='HKLM:\Software\TightVNC\Server'; `+
-			`if ((Test-Path -LiteralPath $vncPasswordPath) -or (Test-Path -LiteralPath $tightVNCServiceKey)) { `+
-			`$bytes=New-Object byte[] 18; $rng=[Security.Cryptography.RandomNumberGenerator]::Create(); try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }; `+
-			`$vncPassword=[Convert]::ToBase64String($bytes); New-Item -ItemType Directory -Force -Path (Split-Path $vncPasswordPath) | Out-Null; `+
-			`Set-Content -NoNewline -Encoding ASCII -LiteralPath $vncPasswordPath -Value $vncPassword; `+
-			`$plain=New-Object byte[] 8; $passwordBytes=[Text.Encoding]::ASCII.GetBytes($vncPassword); [Array]::Copy($passwordBytes,$plain,[Math]::Min($plain.Length,$passwordBytes.Length)); `+
-			`$key=[byte[]](0xE8,0x4A,0xD6,0x60,0xC4,0x72,0x1A,0xE0); $des=[Security.Cryptography.DES]::Create(); `+
-			`try { $des.Mode=[Security.Cryptography.CipherMode]::ECB; $des.Padding=[Security.Cryptography.PaddingMode]::None; $des.Key=$key; $encryptor=$des.CreateEncryptor(); `+
-			`try { $encrypted=$encryptor.TransformFinalBlock($plain,0,$plain.Length) } finally { $encryptor.Dispose() } } finally { $des.Dispose() }; `+
-			`New-Item -Force -Path $tightVNCServiceKey | Out-Null; `+
-			`New-ItemProperty -Force -Path $tightVNCServiceKey -Name Password -PropertyType Binary -Value $encrypted | Out-Null; `+
-			`New-ItemProperty -Force -Path $tightVNCServiceKey -Name ControlPassword -PropertyType Binary -Value $encrypted | Out-Null }; `,
+			`if ($env:COMPUTERNAME -ne '%s') { Rename-Computer -NewName '%s' -Force }; `,
 		escapePSString(hostname),
 		escapePSString(hostname),
 	)
 	if err := b.invokeInGuest(ctx, vmName, user, identityScript+sshAccessScript(user, publicKey, true), "fork identity rotation"); err != nil {
 		return fmt.Errorf("rotate forked Hyper-V guest identity: %w", err)
+	}
+	return nil
+}
+
+// forkGuestSecretsScript gives a fork its own MachineGuid and, when present, VNC
+// password, and flushes both to disk before the fork is connected or stopped.
+const forkGuestSecretsScript = `$ErrorActionPreference='Stop'; ` +
+	`$crypto=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Microsoft\Cryptography',$true); ` +
+	`if ($null -eq $crypto) { throw 'Cryptography registry key is missing' }; ` +
+	`try { $crypto.SetValue('MachineGuid',[guid]::NewGuid().ToString(),[Microsoft.Win32.RegistryValueKind]::String); $crypto.Flush() } finally { $crypto.Dispose() }; ` +
+	`$vncPasswordPath='C:\ProgramData\crabbox\vnc.password'; ` +
+	`$tightVNC=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\TightVNC\Server',$true); ` +
+	`try { if ((Test-Path -LiteralPath $vncPasswordPath) -or $tightVNC) { ` +
+	`$bytes=New-Object byte[] 18; $rng=[Security.Cryptography.RandomNumberGenerator]::Create(); try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }; ` +
+	`$vncPassword=[Convert]::ToBase64String($bytes); New-Item -ItemType Directory -Force -Path (Split-Path $vncPasswordPath) | Out-Null; ` +
+	`$passwordBytes=[Text.Encoding]::ASCII.GetBytes($vncPassword); ` +
+	`$passwordFile=[IO.FileStream]::new($vncPasswordPath,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough); ` +
+	`try { $passwordFile.Write($passwordBytes,0,$passwordBytes.Length); $passwordFile.Flush($true) } finally { $passwordFile.Dispose() }; ` +
+	`$plain=New-Object byte[] 8; [Array]::Copy($passwordBytes,$plain,[Math]::Min($plain.Length,$passwordBytes.Length)); ` +
+	`$key=[byte[]](0xE8,0x4A,0xD6,0x60,0xC4,0x72,0x1A,0xE0); $des=[Security.Cryptography.DES]::Create(); ` +
+	`try { $des.Mode=[Security.Cryptography.CipherMode]::ECB; $des.Padding=[Security.Cryptography.PaddingMode]::None; $des.Key=$key; $encryptor=$des.CreateEncryptor(); ` +
+	`try { $encrypted=$encryptor.TransformFinalBlock($plain,0,$plain.Length) } finally { $encryptor.Dispose() } } finally { $des.Dispose() }; ` +
+	`if ($null -eq $tightVNC) { $tightVNC=[Microsoft.Win32.Registry]::LocalMachine.CreateSubKey('SOFTWARE\TightVNC\Server') }; ` +
+	`$tightVNC.SetValue('Password',$encrypted,[Microsoft.Win32.RegistryValueKind]::Binary); ` +
+	`$tightVNC.SetValue('ControlPassword',$encrypted,[Microsoft.Win32.RegistryValueKind]::Binary); $tightVNC.Flush() } } ` +
+	`finally { if ($tightVNC) { $tightVNC.Dispose() } }; `
+
+func (b *backend) rotateForkGuestSecrets(ctx context.Context, vmName, user string) error {
+	if err := b.invokeInGuest(ctx, vmName, user, forkGuestSecretsScript, "fork secret rotation"); err != nil {
+		return fmt.Errorf("rotate forked Hyper-V guest secrets: %w", err)
 	}
 	return nil
 }

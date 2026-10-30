@@ -833,10 +833,22 @@ func TestForkNativeCheckpointCreatesFreshIdentityAndConnectsNetworkLast(t *testi
 	}
 	rotationIndex := findCallIndex(runner.calls, "Rename-Computer")
 	restartIndex := findCallIndex(runner.calls, "Restart-VM")
+	secretsIndex := findCallIndex(runner.calls, "MachineGuid")
 	postRestartKeyIndex := findLastCallIndex(runner.calls, "ssh-keygen.exe")
 	connectIndex := findCallIndex(runner.calls, "Connect-VMNetworkAdapter")
 	if rotationIndex < 0 || restartIndex <= rotationIndex || postRestartKeyIndex <= restartIndex || connectIndex <= postRestartKeyIndex {
 		t.Fatalf("network was not connected after post-reboot SSH identity rotation: rotation=%d restart=%d key=%d connect=%d", rotationIndex, restartIndex, postRestartKeyIndex, connectIndex)
+	}
+	// Restart-VM is a hard reset that discards unflushed guest writes, so the
+	// per-guest secrets must be rewritten and flushed after it.
+	if secretsIndex <= restartIndex || connectIndex <= secretsIndex {
+		t.Fatalf("fork secrets were not rotated between the reset and network connect: restart=%d secrets=%d connect=%d", restartIndex, secretsIndex, connectIndex)
+	}
+	secretsScript := commandScript(runner.calls[secretsIndex])
+	for _, expected := range []string{"[guid]::NewGuid()", "$crypto.Flush()", "vnc.password", "[IO.FileOptions]::WriteThrough", "$tightVNC.Flush()"} {
+		if !strings.Contains(secretsScript, expected) {
+			t.Fatalf("fork secret rotation missing %s: %s", expected, secretsScript)
+		}
 	}
 	rotationScript := commandScript(runner.calls[rotationIndex])
 	keyPath, err := core.OptionalStoredTestboxKeyPath(lease.LeaseID)
@@ -851,7 +863,7 @@ func TestForkNativeCheckpointCreatesFreshIdentityAndConnectsNetworkLast(t *testi
 	if len(keyFields) < 2 {
 		t.Fatalf("fork public key=%q", publicKey)
 	}
-	for _, expected := range []string{keyFields[0] + " " + keyFields[1], "ssh_host_*", "vnc.password", "MachineGuid", "[guid]::NewGuid()"} {
+	for _, expected := range []string{keyFields[0] + " " + keyFields[1], "ssh_host_*"} {
 		if !strings.Contains(rotationScript, expected) {
 			t.Fatalf("identity rotation missing %s: %s", expected, rotationScript)
 		}

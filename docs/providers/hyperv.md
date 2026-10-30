@@ -257,9 +257,12 @@ previous claim back.
 **Fork** imports the export as a new lease with `Import-VM -Copy
 -GenerateNewId` and a dynamic MAC address, keeping the network adapter
 disconnected until the copy has a new identity. Over PowerShell Direct, Crabbox
-renames the guest to `cbx-<lease-id suffix>`, sets a new `MachineGuid`,
-regenerates the SSH host keys, installs the new lease key, and rotates a VNC
-password if one exists. It then restarts the guest and connects the network.
+renames the guest to `cbx-<lease-id suffix>` and restarts it. It then writes a
+new `MachineGuid` and, if one exists, a new VNC password, flushing both to
+disk, regenerates the SSH host keys, and installs the new lease key before
+connecting the network. Those writes come after the restart because Hyper-V's
+`Restart-VM` is a hard reset that would discard writes still in the guest's
+cache.
 Fork records exactly which disks `Import-VM` copied, so release later deletes
 only those.
 
