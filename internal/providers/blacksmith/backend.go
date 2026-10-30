@@ -462,11 +462,12 @@ func (b *blacksmithProofTailBuffer) Write(p []byte) (int, error) {
 func (b *blacksmithProofTailBuffer) Bytes() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	data := bytes.Clone(b.data.Bytes())
+	data := b.data.Bytes()
 	if !b.fullChunk && !b.data.Exceeded() {
-		return data
+		return bytes.Clone(data)
 	}
 	prefix := fmt.Appendf(nil, "[crabbox: proof stream kept last %d bytes]\n", blacksmithProofStreamCaptureBytes)
+	// Append copies the borrowed tail while the mutex still excludes writers.
 	return append(prefix, data...)
 }
 

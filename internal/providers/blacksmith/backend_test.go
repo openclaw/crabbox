@@ -1039,6 +1039,20 @@ func TestBlacksmithProofTailPreservesRawBytesURLAndSnapshots(t *testing.T) {
 	if len(snapshot) != len(expected) || string(snapshot[len(snapshot)-4:]) != "456\n" {
 		t.Fatal("later write changed the earlier snapshot")
 	}
+	if _, err := b.Write(bytes.Repeat([]byte{'x'}, blacksmithProofStreamCaptureBytes)); err != nil {
+		t.Fatal(err)
+	}
+	truncated := b.Bytes()
+	truncated[len(truncated)-1] = '!'
+	if bytes.Equal(truncated, b.Bytes()) {
+		t.Fatal("truncated snapshot aliases retained bytes")
+	}
+	if _, err := b.Write([]byte("later")); err != nil {
+		t.Fatal(err)
+	}
+	if truncated[len(truncated)-1] != '!' {
+		t.Fatal("later write changed the truncated snapshot")
+	}
 }
 
 func TestBlacksmithProofTailSerializesSmallWritesAndSnapshots(t *testing.T) {
