@@ -26,7 +26,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:                     "cloudflare",
 		Kind:                       core.ProviderKindDelegatedRun,
 		Targets:                    []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:                   core.FeatureSet{core.FeatureArchiveSync, core.FeatureCleanup, core.FeatureRunSession, core.FeatureCheckpoint, core.FeatureFork, core.FeatureSnapshot},
+		Features:                   core.FeatureSet{core.FeatureArchiveSync, core.FeatureCleanup, core.FeatureRunSession, core.FeatureCheckpoint, core.FeatureFork, core.FeatureSnapshot, core.FeatureRunArtifacts, core.FeatureRunDownloads},
 		Coordinator:                core.CoordinatorNever,
 		ClassDisposition:           core.ProviderClassDispositionMapped,
 	}

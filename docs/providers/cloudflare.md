@@ -29,6 +29,8 @@ ports; they run module source through the Cloudflare Workers runtime.
 - **Run sessions:** `run --keep --lease-output <path>` writes a reusable lease
   handle with an exact cleanup command.
 - **Sync:** archive upload/extract (gzipped tar), not rsync.
+- **Artifacts:** `--download`, `--artifact-glob`, and `--require-artifact` with
+  an artifact-capable runner; see [Artifact downloads](#artifact-downloads).
 - **Checkpoints:** native container filesystem snapshots through
   `crabbox checkpoint create` and `checkpoint fork`; see
   [Container snapshots](#container-snapshots).
@@ -36,8 +38,8 @@ ports; they run module source through the Cloudflare Workers runtime.
   CLI against its own Worker runner, independent of any `CRABBOX_COORDINATOR`
   broker.
 - **Not supported:** SSH, VNC, browser desktop, code-server, Actions hydration,
-  `--download`, `--fresh-pr`, `--artifact-glob`, `--require-artifact`, and
-  `--checksum` (sync is archive-based, so there is no per-file checksum step).
+  `--fresh-pr`, and `--checksum` (sync is archive-based, so there is no per-file
+  checksum step).
   The provider also does not advertise a [pond](../features/pond.md) transport,
   so `pond peers` reports Cloudflare members as `transport=none`.
 
@@ -65,6 +67,48 @@ exits, output keeps streaming until 300 ms pass without new bytes, for at most
 5 seconds of reading. Output is read only as fast as the CLI reads the
 response, with at most 256 KiB queued in the runner; time spent waiting for a
 slow CLI does not count toward those limits.
+
+## Artifact downloads
+
+Use the ordinary run flags to retrieve screenshots, test traces, or result files:
+
+```sh
+crabbox run --provider cloudflare \
+  --download reports/screen.png=./proof/screen.png \
+  --download reports/trace.zip=./proof/trace.zip \
+  --download reports/result.json=./proof/result.json \
+  --artifact-glob 'reports/**' --require-artifact 'reports/result.json' \
+  -- pnpm test:e2e
+```
+
+Downloads use literal paths relative to the claimed lease's workdir.
+Artifact and required patterns use the [shared artifact glob contract](../features/artifacts.md).
+The runner finalizes one archive, then returns binary bytes over the authenticated
+lease route, separately from command output. The CLI verifies its length,
+SHA-256, archive members, and required matches before publishing local files.
+`--artifact-glob` saves the archive in `.crabbox/runs/<run-id>/delegated-artifacts.tgz`.
+The archive also contains selected download and required files.
+
+Collection runs for fresh and reused leases after a completed command, including
+a command with a nonzero exit. A command failure keeps its exit code if collection
+or cleanup also fails. A successful command with missing required output or a
+failed transfer fails with artifact exit code 7. Empty optional glob matches
+produce an empty archive. Existing keep/reuse/cleanup options still apply.
+
+The protocol caps one archive at 256 regular files, 10 MiB compressed and 10 MiB
+of file contents, with at most 1 MiB of additional tar metadata/padding. Collection
+and transfer have a 35-second runner watchdog and a 45-second client deadline.
+Absolute/traversing paths, `.git`/`.crabbox` members, symlinks, hardlinks, duplicate
+members, and unselected files are rejected. Files are never extracted using
+runner-provided paths, and collector output is not printed as diagnostics.
+
+The deployed Worker must advertise `artifactProtocol: "CBX-CF-ARTIFACT-1"` on
+authenticated `/v1/readiness`. Update the runner from source containing this
+protocol before using these flags; updating only the CLI is insufficient.
+The CLI refuses an older or incompatible runner before allocating a lease or
+running the command when artifact flags are requested. Runs without artifact
+flags retain compatibility with older runners. No container-image change is
+required for the bundled image's existing Bash/tar/timeout tools.
 
 ## Runner toolchain and pnpm upgrades
 
@@ -437,7 +481,7 @@ Containers run with Internet access. Crabbox does not install
 
 - Only Linux delegated `run`, `warmup`, `status`, `stop`, `list`, `doctor`, and
   claim-scoped cleanup are supported.
-- SSH, VNC, browser desktop, code-server, Actions hydration, `--download`, and
+- SSH, VNC, browser desktop, code-server, Actions hydration, and
   `--fresh-pr` are not supported.
 - `--checksum` is not supported, because sync uses archive upload/extract rather
   than rsync.
