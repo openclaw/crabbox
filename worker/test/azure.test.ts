@@ -2528,6 +2528,151 @@ describe("azure provider", () => {
     expect(records.size).toBe(0);
   });
 
+  it.each([
+    { initial: "empty", change: "none", error: "" },
+    { initial: "pip", change: "none", error: "" },
+    { initial: "nic", change: "none", error: "" },
+    { initial: "pip", change: "replacement", error: "observed resource identity changed" },
+    { initial: "nic", change: "replacement", error: "observed resource identity changed" },
+    { initial: "pip", change: "foreign VM", error: "ownership does not match lease" },
+    { initial: "pip", change: "foreign disk", error: "ownership does not match lease" },
+    { initial: "pip", change: "data disk", error: "VM has unexpected data disks" },
+    { initial: "pip", change: "frozen", error: "observed resource identity changed" },
+    { initial: "vm", change: "unowned disk", error: "ownership does not match lease" },
+  ])(
+    "checks late provisioning companions after an interrupted $initial claim ($change)",
+    async ({ initial, change, error }) => {
+      const { records, storage } = memoryAzureDeleteClaimStorage();
+      const prefix = "/subscriptions/sub/resourceGroups/crabbox-leases/providers";
+      const vmID = `${prefix}/Microsoft.Compute/virtualMachines/crabbox-blue-lobster`;
+      const nicID = `${prefix}/Microsoft.Network/networkInterfaces/crabbox-blue-lobster-nic`;
+      const pipID = `${prefix}/Microsoft.Network/publicIPAddresses/crabbox-blue-lobster-pip`;
+      const diskID = `${prefix}/Microsoft.Compute/disks/crabbox-blue-lobster-osdisk`;
+      const resources = new Map<string, Record<string, unknown>>();
+      const add = (id: string, properties: Record<string, unknown>) =>
+        resources.set(id, {
+          id,
+          name: id.split("/").at(-1),
+          location: "eastus",
+          tags: ownedAzureTags(),
+          properties,
+        });
+      const finishProvisioning = () => {
+        add(pipID, {
+          resourceGuid: "pip-immutable-id",
+          ipConfiguration: { id: `${nicID}/ipConfigurations/ipconfig1` },
+        });
+        const nicProperties = ownedAzureNICProperties();
+        add(nicID, {
+          ...nicProperties,
+          virtualMachine: { id: vmID },
+          ipConfigurations: nicProperties.ipConfigurations.map((config) => ({
+            ...config,
+            id: `${nicID}/ipConfigurations/ipconfig1`,
+          })),
+        });
+        add(vmID, ownedAzureVMProperties());
+        add(diskID, { uniqueId: "disk-immutable-id" });
+        resources.get(diskID)!["managedBy"] = vmID;
+      };
+      if (initial !== "empty") add(pipID, { resourceGuid: "pip-immutable-id" });
+      if (initial === "nic") {
+        const properties = ownedAzureNICProperties();
+        add(nicID, {
+          ...properties,
+          ipConfigurations: properties.ipConfigurations.map((config) => ({
+            ...config,
+            id: `${nicID}/ipConfigurations/ipconfig1`,
+          })),
+        });
+        Object.assign(resources.get(pipID)!["properties"] as object, {
+          ipConfiguration: { id: `${nicID}/ipConfigurations/ipconfig1` },
+        });
+      }
+      if (initial === "vm") finishProvisioning();
+      let interrupt = true;
+      const put = storage.put;
+      storage.put = async (key, value) => {
+        await put(key, value);
+        if (interrupt && (value as { stableResourceIdentity?: string }).stableResourceIdentity) {
+          interrupt = false;
+          throw new Error("coordinator interrupted after cleanup claim commit");
+        }
+      };
+      const deletes: string[] = [];
+      const patches: string[] = [];
+      const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
+      seedAzureAuthCache(client);
+      client.fetcher = async (input, init) => {
+        const url = new URL(String(input));
+        if (init?.method === "DELETE") {
+          deletes.push(url.pathname);
+          resources.delete(url.pathname);
+          if (url.pathname === vmID) {
+            delete (resources.get(nicID)!["properties"] as Record<string, unknown>)[
+              "virtualMachine"
+            ];
+            delete resources.get(diskID)!["managedBy"];
+          }
+          if (url.pathname === nicID) {
+            delete (resources.get(pipID)!["properties"] as Record<string, unknown>)[
+              "ipConfiguration"
+            ];
+          }
+          return new Response(null, { status: 204 });
+        }
+        const resource = resources.get(url.pathname);
+        if (init?.method === "PATCH") {
+          patches.push(url.pathname);
+          Object.assign(resource!, JSON.parse(String(init.body)));
+        }
+        return resource ? Response.json(resource) : azureResourceNotFoundResponse(url);
+      };
+      await expect(client.deleteOwnedServer(ownedAzureLease())).rejects.toThrow(
+        "coordinator interrupted after cleanup claim commit",
+      );
+      expect(records.size).toBe(1);
+      expect(deletes).toEqual([]);
+      const originalClaim = [...records.values()][0] as { stableResourceIdentity: string };
+
+      // The already-dispatched provisioning finishes after the cleanup claim was saved.
+      finishProvisioning();
+
+      if (change === "replacement") {
+        const replaced = resources.get(initial === "nic" ? nicID : pipID)!;
+        (replaced["properties"] as Record<string, unknown>)["resourceGuid"] = "replacement-id";
+      }
+      if (change === "foreign VM" || change === "foreign disk") {
+        resources.get(change === "foreign VM" ? vmID : diskID)!["tags"] = ownedAzureTags({
+          lease: "cbx_111111111111",
+        });
+      }
+      if (change === "unowned disk") resources.get(diskID)!["tags"] = {};
+      if (change === "data disk") {
+        const vm = resources.get(vmID)!["properties"] as Record<string, unknown>;
+        (vm["storageProfile"] as Record<string, unknown>)["dataDisks"] = [
+          { managedDisk: { id: `${prefix}/Microsoft.Compute/disks/unexpected` } },
+        ];
+      }
+      const cleanup = client.deleteOwnedServer(
+        ownedAzureLease(),
+        change === "frozen"
+          ? { resourceIdentity: originalClaim.stableResourceIdentity }
+          : undefined,
+      );
+      const failure = await cleanup.then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+      const expectedFailure = expect.objectContaining({ message: expect.stringContaining(error) });
+      expect(failure).toEqual(error ? expectedFailure : undefined);
+      expect(deletes).toEqual(error ? [] : [vmID, nicID, pipID, diskID]);
+      expect(patches).toEqual([]);
+      expect(resources.size).toBe(error ? 4 : 0);
+      expect([...records.values()]).toEqual(error ? [originalClaim] : []);
+    },
+  );
+
   it("refuses a fresh Azure NIC without durable public IP deletion progress", async () => {
     const { records, storage } = memoryAzureDeleteClaimStorage();
     const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });

@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Azure: clean up verified lease-owned companions that appear after an interrupted create records an empty or network-only cleanup claim, preserving original identities and deletion guards.
 - Parallels: wait for DHCP instead of probing SSH on a self-assigned link-local address, preserving the startup deadline and fresh-clone retry with an address-specific diagnostic. [PR 2981](https://github.com/openclaw/crabbox/pull/2981). Thanks @rustanacexd.
 - Docs: directory sync documentation now says the source root is the directory Crabbox runs from and that `run` has no `--workdir` flag. [PR 2982](https://github.com/openclaw/crabbox/pull/2982). Thanks @KrasimirKralev.
 - Coordinator recovery: preview and retire an exact interrupted create request after its cancellation token is lost, preserving ownership, generation checks, and pending cleanup evidence. [PR 2980](https://github.com/openclaw/crabbox/pull/2980). Thanks @vincentkoc.

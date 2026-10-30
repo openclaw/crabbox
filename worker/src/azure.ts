@@ -1393,6 +1393,42 @@ export class AzureClient {
       }
       return false;
     }
+    if (
+      !context &&
+      !transport &&
+      claim.version === 2 &&
+      claim.stableResourceIdentity !== undefined &&
+      !azureStableResourceIdentityEntries(claim.stableResourceIdentity).some(
+        (entry) => entry.kind === "virtualMachines" || entry.kind === "disks",
+      ) &&
+      !claim.resourceIdentity &&
+      !claim.partialStableResourceIdentity &&
+      !claim.deletedStableResourceIdentity &&
+      !claim.completed
+    ) {
+      // An interrupted create can finish its companions after cleanup first observes it.
+      // Extend only an untouched claim; replacements and frozen candidates stay strict.
+      const inspection = await this.ownedDeleteResources(lease, {
+        request,
+        claim,
+        prepareClaim: true,
+        expectedStableResourceIdentity: claim.stableResourceIdentity,
+        allowResourceSetExpansion: true,
+      });
+      if (inspection.stableResourceIdentity !== claim.stableResourceIdentity) {
+        claim = await this.persistOwnedDeleteClaimTransition(
+          claimKey,
+          lease,
+          claim,
+          this.ownedDeleteClaim(
+            lease,
+            inspection.diskResource,
+            undefined,
+            inspection.stableResourceIdentity,
+          ),
+        );
+      }
+    }
     const canonicalVMID = this.resourceID(vmPath(this.resourceGroup, lease.cloudID));
     const canonicalNICID = this.resourceID(
       networkPath(this.resourceGroup, "networkInterfaces", `${lease.cloudID}-nic`),
@@ -1775,6 +1811,7 @@ export class AzureClient {
       prepareClaim?: boolean;
       expectedResourceIdentity?: string;
       expectedStableResourceIdentity?: string;
+      allowResourceSetExpansion?: boolean;
     } = {},
   ): Promise<AzureOwnedDeleteInspection> {
     const request = options.request ?? this.arm.bind(this);
@@ -1845,6 +1882,13 @@ export class AzureClient {
         options.expectedStableResourceIdentity,
         currentStableResourceIdentity,
         azureEffectiveCleanupProgress(options.claim),
+      ) &&
+      !(
+        options.allowResourceSetExpansion &&
+        azureStableResourceIdentityCanExpand(
+          options.expectedStableResourceIdentity,
+          currentStableResourceIdentity,
+        )
       )
     ) {
       throw new Error(
@@ -4450,6 +4494,21 @@ function azureStableResourceIdentityMatches(
   } catch {
     return false;
   }
+}
+
+function azureStableResourceIdentityCanExpand(expected: string, current: string): boolean {
+  const expectedEntries = azureStableResourceIdentityEntries(expected);
+  if (expectedEntries.some((entry) => entry.kind === "virtualMachines" || entry.kind === "disks"))
+    return false;
+  const expectedKinds = new Set(expectedEntries.map((entry) => entry.kind));
+  const added = azureStableResourceIdentityEntries(current).filter(
+    (entry) => !expectedKinds.has(entry.kind),
+  );
+  // Project the larger set back onto the original: only attachments to new members may differ.
+  // This is a comparison, never deletion evidence persisted to the claim.
+  return (
+    added.length > 0 && azureStableResourceIdentityMatches(current, expected, JSON.stringify(added))
+  );
 }
 
 function azureResourceIdentityMatches(
