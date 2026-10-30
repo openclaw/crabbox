@@ -119,6 +119,83 @@ func TestCreateNativeCheckpointExportsProductionMetadata(t *testing.T) {
 	}
 }
 
+// A claim writer (reclaim, release, endpoint rewrite) must wait while create
+// changes the source VM and exports the checkpoint.
+func TestCreateNativeCheckpointHoldsClaimFenceDuringHostEffects(t *testing.T) {
+	setCheckpointTestState(t)
+	artifactDir := t.TempDir()
+	writerBlocked := false
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+		script := commandScript(req)
+		switch {
+		case strings.Contains(script, "Select-Object Name,@{Name='ID'"):
+			return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: 2}), nil, true
+		case strings.Contains(script, "Export-VMSnapshot"):
+			claim, err := core.ReadLeaseClaim(testCheckpointLeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			writerBlocked = errors.Is(core.WithLeaseClaimUnchangedContext(waitCtx, testCheckpointLeaseID, claim, func() error { return nil }), context.DeadlineExceeded)
+			configPath := filepath.Join(artifactDir, "hyperv", "exported", "Virtual Machines", "checkpoint.vmcx")
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, []byte("vmcx"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return jsonResult(t, checkpointCreateOutput{SourceVMID: testCheckpointVMID, SnapshotID: testCheckpointSnapshot, SnapshotName: checkpointNameFromScript(script), ExportedConfig: configPath}), nil, true
+		default:
+			return core.LocalCommandResult{}, nil, false
+		}
+	}
+	b := testBackend(runner)
+	persistCheckpointSource(t, b)
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+
+	if _, err := (Provider{}).CreateNativeCheckpoint(context.Background(), core.NativeCheckpointCreateRequest{
+		Config:      b.cfg,
+		Runtime:     core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner},
+		Server:      checkpointSourceServer(b),
+		Target:      core.SSHTarget{TargetOS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
+		LeaseID:     testCheckpointLeaseID,
+		Name:        "fenced",
+		ArtifactDir: artifactDir,
+		Strategy:    "disk-snapshot",
+	}); err != nil {
+		t.Fatalf("CreateNativeCheckpoint: %v", err)
+	}
+	if !writerBlocked {
+		t.Fatal("a claim writer was admitted while create changed the source VM")
+	}
+}
+
+func TestRestoreNativeCheckpointRefusesALeaseOtherThanTheSource(t *testing.T) {
+	setCheckpointTestState(t)
+	paths, metadata := createCheckpointArtifact(t)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	persistCheckpointSource(t, b)
+
+	_, err := b.restoreNativeCheckpoint(context.Background(), core.NativeCheckpointRestoreRequest{
+		Config:  b.cfg,
+		Record:  checkpointForkRecord(paths, metadata),
+		LeaseID: "cbx_000000000other",
+		Repo:    core.Repo{Root: t.TempDir()},
+	})
+	var exit core.ExitError
+	if !core.AsExitError(err, &exit) || exit.Code != 4 || !strings.Contains(err.Error(), "original source lease") {
+		t.Fatalf("restore onto another lease err=%v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("restore onto another lease ran host commands: %d", len(runner.calls))
+	}
+}
+
 func TestCreateNativeCheckpointJournalFailurePreventsMutation(t *testing.T) {
 	setCheckpointTestState(t)
 	runner := &recordingRunner{respond: func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
