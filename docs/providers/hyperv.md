@@ -32,7 +32,7 @@ reject configuration on non-Windows hosts.
     password explicitly provided through `CRABBOX_HYPERV_GUEST_PASSWORD`
   - Network configured for DHCP on the Hyper-V virtual switch
   - Guest internet access to GitHub when OpenSSH or git must be installed on
-    first use
+    first use, and to nodejs.org when Node/npm must be installed
 - The Hyper-V and Windows storage PowerShell modules
 
 ### Host permissions and doctor
@@ -60,12 +60,14 @@ required rather than creating one. Its Hyper-V optional-feature query calls
 does not, so an unelevated `Hyper-V Administrators` shell reports that one check
 as failed while acquire, proof, and release still work.
 
-OpenSSH and git do **not** need to be pre-installed. On first acquire the
+OpenSSH, git, and Node/npm do **not** need to be pre-installed. On first acquire the
 provider installs the pinned, SHA-256-verified Win32-OpenSSH MSI used by the
 `Microsoft.OpenSSH.Preview` winget package and, if absent, portable MinGit
-(also pinned and SHA-256-verified). Both installs are no-ops when already
-present, so a template that pre-bakes inbox/FoD OpenSSH, the MSI version, or git
-skips the matching per-lease download. OpenSSH bootstrap does not depend on
+(also pinned and SHA-256-verified). The provider also runs the shared Windows
+Node/npm baseline, downloading a pinned, SHA-256-verified Node archive if a
+working Node/npm pair is absent. These installs are no-ops when already
+present and working, so a prepared template skips the matching per-lease
+download. OpenSSH bootstrap does not depend on
 Windows Update, WSUS, or a matching Features on Demand source. This keeps the
 template requirement to a plain Windows VHDX with a known admin password. ISO
 images are not supported — provide a fully installed VHDX.
@@ -205,7 +207,8 @@ During Windows `Acquire`, the provider:
    GitHub if `sshd` is absent, and keeps sshd stopped behind the quarantine rule
 7. Reapplies the final key-only config, validates `sshd_config`, regenerates
    per-lease SSH host keys, starts sshd, and removes the quarantine rule last
-8. Installs pinned MinGit when git is absent
+8. Installs pinned MinGit when git is absent, then ensures the shared Node/npm
+   baseline
 9. Waits for SSH readiness on the injected key, followed by repeated stable SSH probes
 
 PowerShell Direct calls use the guest administrator password. Readiness and
@@ -230,6 +233,12 @@ After either transition, Crabbox waits for DHCP and SSH readiness, then
 atomically refreshes the local lease claim with the current IP address. Pause
 and resume require an exact local claim for the VM; stopped or missing VMs are
 reported as errors.
+
+Resuming an already running VM skips the state transition but still checks
+readiness and refreshes the endpoint. `pause --json` and `resume --json` return
+the standard status receipt, with `state` set to `paused` or `ready` after a
+successful transition and readback. `labels.hyperv_state` retains Hyper-V's
+native state (`saved`, `paused`, or `running`).
 
 Set `CRABBOX_HYPERV_GUEST_PASSWORD` or `hyperv.guestPassword` in trusted user
 config to match the administrator password in your VHDX template. The provider
@@ -266,9 +275,26 @@ configuration differs. Fresh status reads retain that policy and the original
 lease TTL cap. A stale snapshot or incomplete acquisition is not renewed.
 Ownership remains bound to the recorded VM name and instance scope.
 
-Acquisition is bounded to 25 minutes by default, cleanup to 2 minutes, and ordinary host
-PowerShell commands to 45 seconds. Guest PowerShell Direct keeps its separate readiness and invocation
-budgets. Cancellation before key creation does not manufacture a retained
+The fixed operation budgets are:
+
+| Operation | Budget |
+| --- | --- |
+| Acquisition, including bootstrap and SSH readiness | 25 minutes overall |
+| Release or cleanup | 2 minutes overall |
+| Ordinary host PowerShell command, including `Save-VM` and `Resume-VM` | 45 seconds |
+| `Start-VM` | 5 minutes, then up to 45 seconds to reconcile a reported failure |
+| Initial authenticated PowerShell Direct readiness | 10 minutes overall, 45 seconds per probe |
+| Guest PowerShell Direct invocation | 10 minutes per attempt, at most 5 attempts within acquisition's overall budget |
+
+After starting or resuming a guest, DHCP and SSH readiness use the shared
+bootstrap wait budget: 20 minutes, or 45 minutes with desktop/browser enabled.
+Each SSH probe is limited to 10 seconds or the remaining wait budget. Host
+address queries retain their 45-second command limit; successful SSH readiness
+is followed by a five-second address-stability check. Caller cancellation and
+earlier enclosing deadlines still apply. These budgets do not change Hyper-V's
+existing host-shutdown default (`AutomaticStopAction=Save`).
+
+Cancellation before key creation does not manufacture a retained
 lease. An ambiguous creation retains ownership and reports the blocked cleanup
 instead of detaching a replacement VM's disk.
 
@@ -283,7 +309,7 @@ instead of detaching a replacement VM's disk.
 - VHD files are stored in `%USERPROFILE%\Hyper-V\Virtual Hard Disks\` by
   default. Only deterministically named provider-owned root
   disks are cleaned up; unrelated attached disks are preserved.
-- The Windows ready check verifies `git`, `tar`, and the work root.
+- The Windows ready check verifies `git`, `tar`, Node/npm, and the work root.
 - There is no `tart exec` or `prlctl exec` equivalent for Hyper-V; all guest
   interaction after bootstrap happens over SSH.
 
