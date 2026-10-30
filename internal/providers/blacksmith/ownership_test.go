@@ -434,12 +434,17 @@ func TestBlacksmithOneShotUncertainCleanupReportsRetention(t *testing.T) {
 			backend := newTestBlacksmithBackend(cfg, runner)
 			backend.rt.Stderr = &stderr
 			repo := t.TempDir()
+			t.Chdir(repo) // Failure bundles follow cwd, independently of Repo.Root.
 			result, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: repo}, Command: []string{"true"}, TimingJSON: true, EmitProof: filepath.Join(repo, "proof.md")})
 			if err == nil || result.Session == nil || !result.Session.Kept {
 				t.Fatalf("false cleanup success result=%+v err=%v", result, err)
 			}
 			if commandExit != 0 && result.ExitCode != commandExit {
 				t.Fatalf("command exit replaced: %d", result.ExitCode)
+			}
+			bundles, bundleErr := filepath.Glob(filepath.Join(repo, ".crabbox", "captures", "tbx_retained123-*.tar.gz"))
+			if bundleErr != nil || len(bundles) != 1 {
+				t.Fatalf("failure bundle escaped test workspace: bundles=%v err=%v", bundles, bundleErr)
 			}
 			stopCalls := 0
 			for _, args := range runner.calls {
@@ -605,6 +610,7 @@ func TestBlacksmithStopCancelsActiveRun(t *testing.T) {
 				isolateBlacksmithOwnership(t)
 				const id = "tbx_cancel123"
 				repo := t.TempDir()
+				t.Chdir(repo) // Failure bundles follow cwd, independently of Repo.Root.
 				testOwnedBlacksmithClaim(t, id, "jade-krill", repo)
 				key, _, err := core.EnsureTestboxKey(id)
 				if err != nil {
@@ -687,6 +693,10 @@ func TestBlacksmithStopCancelsActiveRun(t *testing.T) {
 				}
 				if err := <-admissionDone; err == nil {
 					t.Fatal("admitted run on terminated Testbox")
+				}
+				bundles, bundleErr := filepath.Glob(filepath.Join(repo, ".crabbox", "captures", id+"-*.tar.gz"))
+				if bundleErr != nil || len(bundles) != 1 {
+					t.Fatalf("failure bundle escaped test workspace: bundles=%v err=%v", bundles, bundleErr)
 				}
 			})
 		})
