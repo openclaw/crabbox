@@ -1081,7 +1081,7 @@ func GnomeDesktopThemeScript() string {
 
 func managedWindowsDesktopBootstrapPowerShell(user string) string {
 	return `param([string]$userPassword)
-` + windowsBootstrapUtilitiesPowerShell() + tightVNCReconcilePowerShell() + `
+` + windowsBootstrapUtilitiesPowerShell() + tightVNCReconcilePowerShell() + managedWindowsDesktopAutoLogonSecretPowerShell() + `
 $user = ` + psQuote(user) + `
 $base = "C:\ProgramData\crabbox"
 $setupCompletePath = Join-Path $base "desktop-setup-complete"
@@ -1108,7 +1108,7 @@ if ($vncPassword.Length -lt 12 -or $vncPassword -notmatch '[A-Z]' -or $vncPasswo
 $userSID = (Get-LocalUser -Name $user).SID.Value
 icacls.exe $vncPasswordPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
 $vncReconcilePendingPath = Join-Path $base "vnc-reconcile-pending"
-Invoke-CrabboxTightVNCReconcile -PasswordChanged $vncPasswordChanged -PendingPath $vncReconcilePendingPath -ServerPath "C:\Program Files\TightVNC\tvnserver.exe" -Remove { Remove-CrabboxPreinstalledTightVNC }` + windowsDesktopBootstrapPowerShell() + managedWindowsDesktopDisplayPowerShell() + managedWindowsDesktopAutoLogonSecretPowerShell()
+Invoke-CrabboxTightVNCReconcile -PasswordChanged $vncPasswordChanged -PendingPath $vncReconcilePendingPath -ServerPath "C:\Program Files\TightVNC\tvnserver.exe" -Remove { Remove-CrabboxPreinstalledTightVNC }` + windowsDesktopBootstrapPowerShell() + managedWindowsDesktopDisplayPowerShell()
 }
 
 // crabboxAutoLogonSecretSource stores the auto-logon password as the LSA secret
@@ -1162,23 +1162,25 @@ namespace Crabbox {
 }
 `
 
-// managedWindowsDesktopAutoLogonSecretPowerShell moves the auto-logon password
-// out of the Winlogon DefaultPassword registry value, which any local account
-// can read, into the LSA secret Winlogon also reads. It runs after the shared
-// recipe on every managed bootstrap pass, so the value the recipe writes before
-// its first reboot is moved on the pass that follows. AWS and Azure guests keep
-// the shared recipe's behavior.
+// managedWindowsDesktopAutoLogonSecretPowerShell defines the shared recipe's
+// Set-CrabboxAutoLogonPassword hook, which stores the auto-logon password as
+// the LSA secret Winlogon reads instead of the Winlogon DefaultPassword
+// registry value that any local account can read. The recipe calls it before
+// its first reboot. It also removes a registry value left by an older
+// bootstrap. AWS and Azure bootstraps do not define the hook.
 func managedWindowsDesktopAutoLogonSecretPowerShell() string {
 	return `
-if (-not ('Crabbox.AutoLogonSecret' -as [type])) {
-  Add-Type -TypeDefinition @'
+function Set-CrabboxAutoLogonPassword([string]$Password) {
+  if (-not ('Crabbox.AutoLogonSecret' -as [type])) {
+    Add-Type -TypeDefinition @'
 ` + crabboxAutoLogonSecretSource + `'@
-}
-$crabboxWinlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
-[Crabbox.AutoLogonSecret]::StoreDefaultPassword($userPassword)
-Remove-ItemProperty -LiteralPath $crabboxWinlogon -Name DefaultPassword -ErrorAction SilentlyContinue
-if ($null -ne (Get-ItemProperty -LiteralPath $crabboxWinlogon -Name DefaultPassword -ErrorAction SilentlyContinue)) {
-  throw "auto-logon password is still stored in the Winlogon registry"
+  }
+  $crabboxWinlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+  [Crabbox.AutoLogonSecret]::StoreDefaultPassword($Password)
+  Remove-ItemProperty -LiteralPath $crabboxWinlogon -Name DefaultPassword -ErrorAction SilentlyContinue
+  if ($null -ne (Get-ItemProperty -LiteralPath $crabboxWinlogon -Name DefaultPassword -ErrorAction SilentlyContinue)) {
+    throw "auto-logon password is still stored in the Winlogon registry"
+  }
 }
 `
 }

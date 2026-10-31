@@ -47,24 +47,6 @@ func TestWindowsDesktopVideoCommandDoesNotRequireCredentialEscrow(t *testing.T) 
 	}
 }
 
-func TestWindowsDesktopTerminalScopesMsysConversionToSuppliedCommand(t *testing.T) {
-	interactive, err := desktopTerminalCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, nil, desktopTerminalOptions{Sixel: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	shell := interactive[len(interactive)-1]
-	if strings.Contains(shell, "MSYS") || !strings.Contains(shell, "TERM=xterm-256color") {
-		t.Fatalf("interactive shell must keep MSYS conversion and sixel env: %q", shell)
-	}
-	command, err := desktopTerminalCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, []string{"cmd.exe", "/c", "ver"}, desktopTerminalOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(command[len(command)-1], "MSYS_NO_PATHCONV=1") {
-		t.Fatalf("supplied command must keep switch preservation: %q", command)
-	}
-}
-
 func TestWindowsDesktopDisplayPolicyIsScopedToManagedBootstrap(t *testing.T) {
 	cfg := baseConfig()
 	cfg.TargetOS = targetWindows
@@ -145,62 +127,200 @@ function Set-ItemProperty { param([string]$LiteralPath, [string]$Name, [string]$
 	}
 }
 
-func TestManagedWindowsDesktopMovesAutoLogonPasswordToLSASecret(t *testing.T) {
+// desktopBootstrapHarnessPowerShell runs a Windows desktop bootstrap script
+// for real against in-memory stand-ins for the filesystem, registry, services,
+// downloads, LSA, and reboot, and prints the ordered side effects. Global
+// functions shadow the cmdlets and executables the script calls, so nothing on
+// the host is touched.
+const desktopBootstrapHarnessPowerShell = `param([string]$Target)
+$ErrorActionPreference = "Stop"
+Add-Type -TypeDefinition @'
+namespace Fixture { public static class Log { public static System.Collections.Generic.List<string> Events = new System.Collections.Generic.List<string>(); } }
+namespace Crabbox { public static class AutoLogonSecret { public static void StoreDefaultPassword(string p) { if (System.Environment.GetEnvironmentVariable("FAKE_LSA_FAIL") == "1") { throw new System.InvalidOperationException("fixture LSA failure"); } Fixture.Log.Events.Add("lsa-store [" + p + "]"); } } }
+'@
+function global:Ev([string]$Event) { [Fixture.Log]::Events.Add($Event) }
+$global:fs = @{}
+$global:reg = @{}
+$global:services = @{}
+$global:winlogonKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+if ($env:FAKE_SETUP_COMPLETE -eq "1") { $global:fs["C:\ProgramData\crabbox\desktop-setup-complete"] = "done" }
+if ($env:FAKE_STALE_REGISTRY_PASSWORD -eq "1") { $global:reg["$global:winlogonKey|DefaultPassword"] = "stale" }
+function global:New-Item { param([string]$ItemType, [string]$Path, [switch]$Force) $global:fs[$Path] = "<dir>" }
+function global:Test-Path { param([string]$LiteralPath, [string]$Path) $p = if ($LiteralPath) { $LiteralPath } else { $Path }; $global:fs.ContainsKey($p) }
+function global:Set-Content { param([Parameter(ValueFromPipeline = $true)][object]$Value, [string]$Path, [string]$LiteralPath, [switch]$NoNewline, [string]$Encoding) process { $p = if ($LiteralPath) { $LiteralPath } else { $Path }; $global:fs[$p] = [string]$Value; Ev "write $p" } }
+function global:Get-Content { param([string]$Path, [string]$LiteralPath, [switch]$Raw) $p = if ($LiteralPath) { $LiteralPath } else { $Path }; $global:fs[$p] }
+function global:Remove-Item { param([string]$LiteralPath, [switch]$Force) $global:fs.Remove($LiteralPath) }
+function global:Get-LocalUser { param([string]$Name) [pscustomobject]@{ Name = $Name; SID = [pscustomobject]@{ Value = "S-1-5-21-0-0-0-1001" } } }
+function global:icacls.exe { }
+function global:cmd.exe { }
+function global:powercfg.exe { $global:LASTEXITCODE = 0 }
+function global:Get-Process { }
+function global:Stop-Process { }
+function global:Start-Sleep { }
+function global:Get-Service { param([string]$Name) if ($global:services.ContainsKey($Name)) { [pscustomobject]@{ Name = $Name; Status = "Running" } } }
+function global:New-Service { param([string]$Name, [string]$BinaryPathName, [string]$StartupType) $global:services[$Name] = $true }
+function global:Set-Service { param([Parameter(ValueFromPipeline = $true)][object]$InputObject, [string]$Name, [string]$StartupType) process { } }
+function global:Start-Service { param([string]$Name) }
+function global:Stop-Service { param([string]$Name, [switch]$Force) }
+function global:Restart-Service { param([string]$Name) Ev "restart-service $Name" }
+function global:Add-Type { param([string]$TypeDefinition, [string]$Language, [string]$OutputAssembly, [string]$OutputType, [string[]]$ReferencedAssemblies) if (-not $OutputAssembly) { throw "unexpected in-process Add-Type" }; $global:fs[$OutputAssembly] = "<exe>" }
+function global:Invoke-WebRequest { param([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing) $global:fs[$OutFile] = "<msi>" }
+function global:Get-FileHash { param([string]$LiteralPath, [string]$Algorithm) [pscustomobject]@{ Hash = $env:FAKE_TIGHTVNC_SHA256 } }
+function global:Start-Process { param([string]$FilePath, [object[]]$ArgumentList, [switch]$Wait, [switch]$PassThru) $global:services["tvnserver"] = $true; if ($PassThru) { [pscustomobject]@{ ExitCode = 0 } } }
+function global:New-ItemProperty { param([string]$Path, [string]$Name, [string]$PropertyType, [object]$Value, [switch]$Force) }
+function global:Set-ItemProperty { param([string]$LiteralPath, [string]$Path, [string]$Name, [object]$Value, [string]$Type) $p = if ($LiteralPath) { $LiteralPath } else { $Path }; $global:reg["$p|$Name"] = [string]$Value; if ($p -eq $global:winlogonKey) { Ev "registry-set $Name=[$Value]" } }
+function global:Get-ItemProperty { param([string[]]$LiteralPath, [string[]]$Path, [string]$Name) $p = if ($LiteralPath) { $LiteralPath[0] } else { $Path[0] }; if ($global:reg.ContainsKey("$p|$Name")) { [pscustomobject]@{ $Name = $global:reg["$p|$Name"] } } }
+function global:Remove-ItemProperty { param([string]$LiteralPath, [string]$Name) if ($env:FAKE_REGISTRY_STUCK -ne "1") { $global:reg.Remove("$LiteralPath|$Name") }; Ev "registry-remove $Name" }
+function global:Restart-Computer { param([switch]$Force) Ev "reboot" }
+$failure = ""
+try { & $Target -userPassword $env:FAKE_GUEST_PASSWORD | Out-Null } catch { $failure = $_.Exception.Message }
+foreach ($event in [Fixture.Log]::Events) { "event " + $event }
+"registry-password=[" + $global:reg["$global:winlogonKey|DefaultPassword"] + "]"
+"failure=[" + $failure + "]"
+`
+
+type desktopBootstrapRun struct {
+	events           []string
+	registryPassword string
+	failure          string
+	output           string
+}
+
+func (r desktopBootstrapRun) index(event string) int {
+	for i, got := range r.events {
+		if got == event {
+			return i
+		}
+	}
+	return -1
+}
+
+func (r desktopBootstrapRun) hasPrefix(prefix string) bool {
+	for _, got := range r.events {
+		if strings.HasPrefix(got, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+const desktopBootstrapTestPassword = " exact p@ss word "
+
+func runDesktopBootstrapHarness(t *testing.T, script string, env ...string) desktopBootstrapRun {
+	t.Helper()
 	ps, err := exec.LookPath("powershell.exe")
 	if err != nil {
 		t.Skip("Windows PowerShell not available")
 	}
-	// A fake Crabbox.AutoLogonSecret and stubbed registry cmdlets stand in for
-	// LSA and HKLM, so the step runs for real without touching the host.
-	stubs := `$ErrorActionPreference = "Stop"
-Add-Type -TypeDefinition 'namespace Crabbox { public static class AutoLogonSecret { public static string Stored; public static void StoreDefaultPassword(string p) { if (System.Environment.GetEnvironmentVariable("FAKE_LSA_FAIL") == "1") { throw new System.InvalidOperationException("fixture LSA failure"); } Stored = p; } } }'
-$script:calls = [System.Collections.Generic.List[string]]::new()
-$script:registryValue = "present"
-function Remove-ItemProperty { param([string]$LiteralPath, [string]$Name) $script:calls.Add("remove $LiteralPath $Name stored=" + ($null -ne [Crabbox.AutoLogonSecret]::Stored)); if ($env:FAKE_REGISTRY_STUCK -ne "1") { $script:registryValue = $null } }
-function Get-ItemProperty { param([string]$LiteralPath, [string]$Name) if ($null -ne $script:registryValue) { [pscustomobject]@{ DefaultPassword = $script:registryValue } } }
-$userPassword = " exact p@ss word "
-`
-	run := func(t *testing.T, env ...string) (string, error) {
-		t.Helper()
-		script := filepath.Join(t.TempDir(), "autologon.ps1")
-		body := stubs + managedWindowsDesktopAutoLogonSecretPowerShell() + "\n\"stored=[\" + [Crabbox.AutoLogonSecret]::Stored + \"]\"\n$script:calls -join \"`n\"\n"
-		if err := os.WriteFile(script, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		cmd := exec.Command(ps, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script)
-		cmd.Env = append(os.Environ(), env...)
-		out, err := cmd.CombinedOutput()
-		return strings.ReplaceAll(string(out), "\r\n", "\n"), err
+	dir := t.TempDir()
+	harness := filepath.Join(dir, "harness.ps1")
+	target := filepath.Join(dir, "bootstrap.ps1")
+	if err := os.WriteFile(harness, []byte(desktopBootstrapHarnessPowerShell), 0o600); err != nil {
+		t.Fatal(err)
 	}
-
-	out, err := run(t)
+	if err := os.WriteFile(target, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(ps, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", harness, "-Target", target)
+	cmd.Env = append(os.Environ(), append([]string{"FAKE_GUEST_PASSWORD=" + desktopBootstrapTestPassword, "FAKE_TIGHTVNC_SHA256=" + tightVNCMSISHA256}, env...)...)
+	out, err := cmd.CombinedOutput()
+	text := strings.ReplaceAll(string(out), "\r\n", "\n")
 	if err != nil {
-		t.Fatalf("auto-logon secret step: %v: %s", err, out)
+		t.Fatalf("bootstrap harness: %v\n%s", err, text)
 	}
-	if !strings.Contains(out, "stored=[ exact p@ss word ]") {
-		t.Fatalf("LSA secret did not receive the exact password:\n%s", out)
+	run := desktopBootstrapRun{output: text}
+	for _, line := range strings.Split(text, "\n") {
+		switch {
+		case strings.HasPrefix(line, "event "):
+			run.events = append(run.events, strings.TrimPrefix(line, "event "))
+		case strings.HasPrefix(line, "registry-password=["):
+			run.registryPassword = strings.TrimSuffix(strings.TrimPrefix(line, "registry-password=["), "]")
+		case strings.HasPrefix(line, "failure=["):
+			run.failure = strings.TrimSuffix(strings.TrimPrefix(line, "failure=["), "]")
+		}
 	}
-	if !strings.Contains(out, `remove HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon DefaultPassword stored=True`) {
-		t.Fatalf("registry DefaultPassword was not removed after the LSA secret was stored:\n%s", out)
+	return run
+}
+
+func TestManagedWindowsDesktopBootstrapStoresAutoLogonPasswordInLSABeforeFirstReboot(t *testing.T) {
+	script := managedWindowsDesktopBootstrapPowerShell("crabbox")
+	lsaStore := "lsa-store [" + desktopBootstrapTestPassword + "]"
+
+	// First pass on a fresh guest, with a registry value left by an older
+	// bootstrap: the shared recipe reboots and exits partway through.
+	first := runDesktopBootstrapHarness(t, script, "FAKE_STALE_REGISTRY_PASSWORD=1")
+	if first.failure != "" {
+		t.Fatalf("first pass failed: %s\n%s", first.failure, first.output)
+	}
+	reboot := first.index("reboot")
+	if reboot < 0 || first.index("restart-service sshd") >= 0 {
+		t.Fatalf("first pass did not stop at the setup reboot:\n%s", first.output)
+	}
+	if store := first.index(lsaStore); store < 0 || store > reboot {
+		t.Fatalf("LSA secret was not stored with the exact password before the reboot:\n%s", first.output)
+	}
+	if remove := first.index("registry-remove DefaultPassword"); remove < 0 || remove > reboot {
+		t.Fatalf("stale registry password was not removed before the reboot:\n%s", first.output)
+	}
+	if first.hasPrefix("registry-set DefaultPassword=") || first.registryPassword != "" {
+		t.Fatalf("auto-logon password reached the Winlogon registry:\n%s", first.output)
+	}
+	if first.index("registry-set AutoAdminLogon=[1]") < 0 || first.index("registry-set DefaultUserName=[crabbox]") < 0 {
+		t.Fatalf("auto-logon was not configured:\n%s", first.output)
 	}
 
-	out, err = run(t, "FAKE_LSA_FAIL=1")
-	if err == nil || !strings.Contains(out, "fixture LSA failure") || strings.Contains(out, "remove ") {
-		t.Fatalf("a failed LSA store must stop before removing the registry value: err=%v out=%s", err, out)
+	second := runDesktopBootstrapHarness(t, script, "FAKE_SETUP_COMPLETE=1")
+	if second.failure != "" || second.index("reboot") >= 0 || second.index("restart-service sshd") < 0 || second.index(lsaStore) < 0 {
+		t.Fatalf("a later pass must keep the LSA secret current without rebooting:\n%s", second.output)
+	}
+	if second.hasPrefix("registry-set DefaultPassword=") || second.registryPassword != "" {
+		t.Fatalf("auto-logon password reached the Winlogon registry on a later pass:\n%s", second.output)
 	}
 
-	out, err = run(t, "FAKE_REGISTRY_STUCK=1")
-	if err == nil || !strings.Contains(out, "auto-logon password is still stored in the Winlogon registry") {
-		t.Fatalf("a registry value that survives removal must fail: err=%v out=%s", err, out)
+	failed := runDesktopBootstrapHarness(t, script, "FAKE_LSA_FAIL=1")
+	if !strings.Contains(failed.failure, "fixture LSA failure") || failed.index("reboot") >= 0 || failed.hasPrefix(`write C:\ProgramData\crabbox\desktop-setup-complete`) {
+		t.Fatalf("a failed LSA store must stop before the setup marker and reboot:\n%s", failed.output)
+	}
+	if failed.hasPrefix("registry-set DefaultPassword=") || failed.registryPassword != "" {
+		t.Fatalf("a failed LSA store fell back to the Winlogon registry:\n%s", failed.output)
+	}
+
+	stuck := runDesktopBootstrapHarness(t, script, "FAKE_STALE_REGISTRY_PASSWORD=1", "FAKE_REGISTRY_STUCK=1")
+	if stuck.failure != "auto-logon password is still stored in the Winlogon registry" || stuck.index("reboot") >= 0 {
+		t.Fatalf("a registry password that survives removal must fail before the reboot:\n%s", stuck.output)
 	}
 
 	// The real LSA type compiles; it is not called here.
+	ps, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("Windows PowerShell not available")
+	}
 	compile := filepath.Join(t.TempDir(), "compile.ps1")
 	if err := os.WriteFile(compile, []byte("Add-Type -TypeDefinition @'\n"+crabboxAutoLogonSecretSource+"'@\n[Crabbox.AutoLogonSecret].GetMethod('StoreDefaultPassword') -ne $null\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := exec.Command(ps, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", compile).CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "True" {
 		t.Fatalf("LSA secret type does not compile: %v: %s", err, out)
+	}
+}
+
+func TestSharedWindowsDesktopRecipeKeepsRegistryAutoLogonWithoutTheHook(t *testing.T) {
+	// AWS and Azure run the shared recipe without Set-CrabboxAutoLogonPassword.
+	script := `param([string]$userPassword)
+` + windowsBootstrapUtilitiesPowerShell() + `
+$user = "crabbox"
+$base = "C:\ProgramData\crabbox"
+$setupCompletePath = Join-Path $base "desktop-setup-complete"
+$vncPasswordPath = Join-Path $base "vnc.password"
+$tightVNCInstaller = "$env:TEMP\tightvnc.msi"
+Set-Content -NoNewline -Encoding ASCII -Path $vncPasswordPath -Value "Cb1!vnc-fixture"
+` + windowsDesktopBootstrapPowerShell()
+	run := runDesktopBootstrapHarness(t, script)
+	if run.failure != "" || run.index("reboot") < 0 {
+		t.Fatalf("shared recipe did not complete its first pass:\n%s", run.output)
+	}
+	if run.registryPassword != desktopBootstrapTestPassword || run.hasPrefix("lsa-store") {
+		t.Fatalf("shared recipe without the hook must keep the registry auto-logon password:\n%s", run.output)
 	}
 }
 

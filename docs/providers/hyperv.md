@@ -143,11 +143,11 @@ when that happens the guest never finishes reading stdin and ssh aborts with
 Screenshot, video, and desktop input tasks run as the lease user through an
 Interactive-logon scheduled task in that user's active session, so Crabbox does
 not store the guest password in the guest for them. Desktop auto-logon needs the
-password: the shared Windows desktop recipe writes it to the Winlogon
-`DefaultPassword` registry value, which any local account can read, so each
-Hyper-V desktop setup pass moves it into the `DefaultPassword` LSA secret that
-Winlogon also reads and removes the registry value. The value written just before
-the expected setup reboot is moved on the setup pass that follows it.
+password. Hyper-V desktop setup stores it only as the `DefaultPassword` LSA
+secret that Winlogon reads, before the expected setup reboot, and never writes
+it to the Winlogon `DefaultPassword` registry value, which any local account can
+read; a registry value left by an older Crabbox is removed. If the LSA secret
+cannot be stored, setup fails before the reboot.
 
 ### Preparing a Windows template
 

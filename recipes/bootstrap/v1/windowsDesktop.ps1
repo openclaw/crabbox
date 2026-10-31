@@ -46,7 +46,14 @@ Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value "1" -Type String
 Set-ItemProperty -Path $winlogon -Name ForceAutoLogon -Value "1" -Type String
 Set-ItemProperty -Path $winlogon -Name DefaultDomainName -Value $env:COMPUTERNAME -Type String
 Set-ItemProperty -Path $winlogon -Name DefaultUserName -Value $user -Type String
-Set-ItemProperty -Path $winlogon -Name DefaultPassword -Value $userPassword -Type String
+# A bootstrap that keeps the auto-logon password out of the Winlogon registry,
+# which any local account can read, defines Set-CrabboxAutoLogonPassword before
+# this recipe so the password is stored that way before the first reboot.
+if (Get-Command -Name Set-CrabboxAutoLogonPassword -CommandType Function -ErrorAction SilentlyContinue) {
+  Set-CrabboxAutoLogonPassword $userPassword
+} else {
+  Set-ItemProperty -Path $winlogon -Name DefaultPassword -Value $userPassword -Type String
+}
 if (-not (Test-Path -LiteralPath $setupCompletePath)) {
   Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
   if (-not $crabboxSetupWasComplete) {
