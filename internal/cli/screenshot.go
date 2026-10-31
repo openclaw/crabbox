@@ -181,8 +181,7 @@ func screenshotRemoteCommand(target SSHTarget) string {
 		return `$ErrorActionPreference = "Stop"
 $base = "C:\ProgramData\crabbox"
 New-Item -ItemType Directory -Force -Path $base | Out-Null
-` + windowsScreenshotCredentialReadPowerShell(WindowsGuestCredentialPath) +
-			windowsInteractiveScheduledTaskPowerShell() + windowsScreenshotRemoteBody()
+` + windowsInteractiveScheduledTaskPowerShell() + windowsScreenshotRemoteBody()
 	}
 	if target.TargetOS == targetMacOS {
 		return `set -eu

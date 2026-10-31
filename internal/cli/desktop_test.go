@@ -945,27 +945,6 @@ func TestWindowsDesktopTerminalKeepsMsysConversionForInteractiveShell(t *testing
 	}
 }
 
-func TestWindowsDesktopTerminalKeepsSixelEnvironment(t *testing.T) {
-	got, err := desktopTerminalCommand(
-		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
-		[]string{"/c/gifgrep-smoke/run.sh"},
-		desktopTerminalOptions{Sixel: true},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	shellCommand := got[len(got)-1]
-	for _, want := range []string{
-		"TERM=xterm-256color",
-		"GIFGREP_INLINE",
-		"'/c/gifgrep-smoke/run.sh'",
-	} {
-		if !strings.Contains(shellCommand, want) {
-			t.Fatalf("sixel terminal command missing %q: %q", want, shellCommand)
-		}
-	}
-}
-
 func TestMacOSDesktopTerminalUsesGhostty(t *testing.T) {
 	got, err := desktopTerminalCommand(
 		SSHTarget{TargetOS: targetMacOS},

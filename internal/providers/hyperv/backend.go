@@ -339,10 +339,6 @@ func (b *backend) prepareWindowsGuestNetwork(ctx context.Context, cfg core.Confi
 		return fmt.Errorf("guest did not become reachable over PowerShell Direct: %w", err)
 	}
 	fmt.Fprintf(b.rt.Stderr, "hyperv windows bootstrap vm=%s stage=powershell-direct state=authenticated\n", vmName)
-	if err := b.persistWindowsGuestCredential(ctx, vmName, cfg.HyperV.User); err != nil {
-		return err
-	}
-	fmt.Fprintf(b.rt.Stderr, "hyperv windows bootstrap vm=%s stage=credential-escrow state=complete\n", vmName)
 	if err := b.stageSSHKey(ctx, vmName, cfg.HyperV.User, publicKey); err != nil {
 		return fmt.Errorf("pre-network SSH lockdown failed: %w", err)
 	}
