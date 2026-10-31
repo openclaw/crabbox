@@ -142,9 +142,12 @@ when that happens the guest never finishes reading stdin and ssh aborts with
 
 Screenshot, video, and desktop input tasks run as the lease user through an
 Interactive-logon scheduled task in that user's active session, so Crabbox does
-not store the guest password in the guest for them. Desktop auto-logon uses the
-shared Windows desktop recipe, which keeps the password in the Winlogon
-`DefaultPassword` value as AWS Windows desktops do.
+not store the guest password in the guest for them. Desktop auto-logon needs the
+password: the shared Windows desktop recipe writes it to the Winlogon
+`DefaultPassword` registry value, which any local account can read, so each
+Hyper-V desktop setup pass moves it into the `DefaultPassword` LSA secret that
+Winlogon also reads and removes the registry value. The value written just before
+the expected setup reboot is moved on the setup pass that follows it.
 
 ### Preparing a Windows template
 

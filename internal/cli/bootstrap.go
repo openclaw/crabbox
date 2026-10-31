@@ -1108,7 +1108,79 @@ if ($vncPassword.Length -lt 12 -or $vncPassword -notmatch '[A-Z]' -or $vncPasswo
 $userSID = (Get-LocalUser -Name $user).SID.Value
 icacls.exe $vncPasswordPath /inheritance:r /grant "*${userSID}:F" /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
 $vncReconcilePendingPath = Join-Path $base "vnc-reconcile-pending"
-Invoke-CrabboxTightVNCReconcile -PasswordChanged $vncPasswordChanged -PendingPath $vncReconcilePendingPath -ServerPath "C:\Program Files\TightVNC\tvnserver.exe" -Remove { Remove-CrabboxPreinstalledTightVNC }` + windowsDesktopBootstrapPowerShell() + managedWindowsDesktopDisplayPowerShell()
+Invoke-CrabboxTightVNCReconcile -PasswordChanged $vncPasswordChanged -PendingPath $vncReconcilePendingPath -ServerPath "C:\Program Files\TightVNC\tvnserver.exe" -Remove { Remove-CrabboxPreinstalledTightVNC }` + windowsDesktopBootstrapPowerShell() + managedWindowsDesktopDisplayPowerShell() + managedWindowsDesktopAutoLogonSecretPowerShell()
+}
+
+// crabboxAutoLogonSecretSource stores the auto-logon password as the LSA secret
+// that Winlogon reads when the registry has no DefaultPassword value.
+const crabboxAutoLogonSecretSource = `using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace Crabbox {
+    public static class AutoLogonSecret {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LsaUnicodeString { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LsaObjectAttributes { public int Length; public IntPtr RootDirectory; public IntPtr ObjectName; public int Attributes; public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService; }
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaOpenPolicy(IntPtr systemName, ref LsaObjectAttributes attributes, int access, out IntPtr policy);
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaStorePrivateData(IntPtr policy, ref LsaUnicodeString key, ref LsaUnicodeString data);
+        [DllImport("advapi32.dll")]
+        private static extern uint LsaClose(IntPtr policy);
+        [DllImport("advapi32.dll")]
+        private static extern int LsaNtStatusToWinError(uint status);
+        private const int PolicyCreateSecret = 0x20;
+
+        private static LsaUnicodeString Unicode(string value) {
+            LsaUnicodeString result = new LsaUnicodeString();
+            result.Buffer = Marshal.StringToHGlobalUni(value);
+            result.Length = (ushort)(value.Length * 2);
+            result.MaximumLength = (ushort)(result.Length + 2);
+            return result;
+        }
+
+        public static void StoreDefaultPassword(string password) {
+            LsaObjectAttributes attributes = new LsaObjectAttributes();
+            attributes.Length = Marshal.SizeOf(typeof(LsaObjectAttributes));
+            IntPtr policy;
+            uint status = LsaOpenPolicy(IntPtr.Zero, ref attributes, PolicyCreateSecret, out policy);
+            if (status != 0) throw new Win32Exception(LsaNtStatusToWinError(status));
+            LsaUnicodeString key = Unicode("DefaultPassword");
+            LsaUnicodeString data = Unicode(password);
+            try {
+                status = LsaStorePrivateData(policy, ref key, ref data);
+                if (status != 0) throw new Win32Exception(LsaNtStatusToWinError(status));
+            } finally {
+                Marshal.FreeHGlobal(key.Buffer);
+                Marshal.ZeroFreeGlobalAllocUnicode(data.Buffer);
+                LsaClose(policy);
+            }
+        }
+    }
+}
+`
+
+// managedWindowsDesktopAutoLogonSecretPowerShell moves the auto-logon password
+// out of the Winlogon DefaultPassword registry value, which any local account
+// can read, into the LSA secret Winlogon also reads. It runs after the shared
+// recipe on every managed bootstrap pass, so the value the recipe writes before
+// its first reboot is moved on the pass that follows. AWS and Azure guests keep
+// the shared recipe's behavior.
+func managedWindowsDesktopAutoLogonSecretPowerShell() string {
+	return `
+if (-not ('Crabbox.AutoLogonSecret' -as [type])) {
+  Add-Type -TypeDefinition @'
+` + crabboxAutoLogonSecretSource + `'@
+}
+$crabboxWinlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+[Crabbox.AutoLogonSecret]::StoreDefaultPassword($userPassword)
+Remove-ItemProperty -LiteralPath $crabboxWinlogon -Name DefaultPassword -ErrorAction SilentlyContinue
+if ($null -ne (Get-ItemProperty -LiteralPath $crabboxWinlogon -Name DefaultPassword -ErrorAction SilentlyContinue)) {
+  throw "auto-logon password is still stored in the Winlogon registry"
+}
+`
 }
 
 // managedWindowsDesktopDisplayPowerShell keeps a managed guest's virtual display

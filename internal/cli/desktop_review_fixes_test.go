@@ -145,6 +145,65 @@ function Set-ItemProperty { param([string]$LiteralPath, [string]$Name, [string]$
 	}
 }
 
+func TestManagedWindowsDesktopMovesAutoLogonPasswordToLSASecret(t *testing.T) {
+	ps, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("Windows PowerShell not available")
+	}
+	// A fake Crabbox.AutoLogonSecret and stubbed registry cmdlets stand in for
+	// LSA and HKLM, so the step runs for real without touching the host.
+	stubs := `$ErrorActionPreference = "Stop"
+Add-Type -TypeDefinition 'namespace Crabbox { public static class AutoLogonSecret { public static string Stored; public static void StoreDefaultPassword(string p) { if (System.Environment.GetEnvironmentVariable("FAKE_LSA_FAIL") == "1") { throw new System.InvalidOperationException("fixture LSA failure"); } Stored = p; } } }'
+$script:calls = [System.Collections.Generic.List[string]]::new()
+$script:registryValue = "present"
+function Remove-ItemProperty { param([string]$LiteralPath, [string]$Name) $script:calls.Add("remove $LiteralPath $Name stored=" + ($null -ne [Crabbox.AutoLogonSecret]::Stored)); if ($env:FAKE_REGISTRY_STUCK -ne "1") { $script:registryValue = $null } }
+function Get-ItemProperty { param([string]$LiteralPath, [string]$Name) if ($null -ne $script:registryValue) { [pscustomobject]@{ DefaultPassword = $script:registryValue } } }
+$userPassword = " exact p@ss word "
+`
+	run := func(t *testing.T, env ...string) (string, error) {
+		t.Helper()
+		script := filepath.Join(t.TempDir(), "autologon.ps1")
+		body := stubs + managedWindowsDesktopAutoLogonSecretPowerShell() + "\n\"stored=[\" + [Crabbox.AutoLogonSecret]::Stored + \"]\"\n$script:calls -join \"`n\"\n"
+		if err := os.WriteFile(script, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(ps, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script)
+		cmd.Env = append(os.Environ(), env...)
+		out, err := cmd.CombinedOutput()
+		return strings.ReplaceAll(string(out), "\r\n", "\n"), err
+	}
+
+	out, err := run(t)
+	if err != nil {
+		t.Fatalf("auto-logon secret step: %v: %s", err, out)
+	}
+	if !strings.Contains(out, "stored=[ exact p@ss word ]") {
+		t.Fatalf("LSA secret did not receive the exact password:\n%s", out)
+	}
+	if !strings.Contains(out, `remove HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon DefaultPassword stored=True`) {
+		t.Fatalf("registry DefaultPassword was not removed after the LSA secret was stored:\n%s", out)
+	}
+
+	out, err = run(t, "FAKE_LSA_FAIL=1")
+	if err == nil || !strings.Contains(out, "fixture LSA failure") || strings.Contains(out, "remove ") {
+		t.Fatalf("a failed LSA store must stop before removing the registry value: err=%v out=%s", err, out)
+	}
+
+	out, err = run(t, "FAKE_REGISTRY_STUCK=1")
+	if err == nil || !strings.Contains(out, "auto-logon password is still stored in the Winlogon registry") {
+		t.Fatalf("a registry value that survives removal must fail: err=%v out=%s", err, out)
+	}
+
+	// The real LSA type compiles; it is not called here.
+	compile := filepath.Join(t.TempDir(), "compile.ps1")
+	if err := os.WriteFile(compile, []byte("Add-Type -TypeDefinition @'\n"+crabboxAutoLogonSecretSource+"'@\n[Crabbox.AutoLogonSecret].GetMethod('StoreDefaultPassword') -ne $null\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(ps, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", compile).CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "True" {
+		t.Fatalf("LSA secret type does not compile: %v: %s", err, out)
+	}
+}
+
 func TestTightVNCReconcileRetriesAfterFailedRemoval(t *testing.T) {
 	ps, err := exec.LookPath("powershell.exe")
 	if err != nil {
