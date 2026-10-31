@@ -199,8 +199,9 @@ lease:
 & $crabboxPath stop --provider hyperv <lease>
 ```
 
-On Windows targets, desktop bootstrap disables the guest display and standby
-timeouts and the screensaver. A blanked virtual display freezes the framebuffer,
+On Hyper-V Windows targets, desktop bootstrap disables the guest display and
+standby timeouts and the screensaver; AWS and Azure guests keep their own power
+settings. A blanked virtual display freezes the framebuffer,
 so screenshots and VNC keep returning the last rendered frame and any window
 launched afterwards never appears in a capture. Because the terminal still
 starts and is recorded in metadata, the proof would otherwise report success
