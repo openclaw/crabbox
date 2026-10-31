@@ -17,6 +17,7 @@ is the default target when `--target` is omitted.
 | --- | --- |
 | SSH, Crabbox sync, cleanup | Yes |
 | Pause and resume | Yes |
+| Native checkpoint create, restore, fork, delete ([details](#checkpoints)) | Yes |
 
 Hyper-V must be enabled on the host (`Enable-WindowsOptionalFeature -Online
 -FeatureName Microsoft-Hyper-V-All`). The provider is Windows-only and will
@@ -219,6 +220,87 @@ Exhausting the PowerShell Direct boot-readiness budget reports a timeout while
 preserving the last probe's diagnostic and public exit code. Caller cancellation
 still takes precedence over that provider-owned budget.
 
+## Checkpoints
+
+`crabbox checkpoint` creates Hyper-V **production** checkpoints (native kind
+`hyperv-vhdx`). Default `--mode auto` and `--strategy disk-snapshot` select it;
+other strategies are refused. Crabbox sets the VM's checkpoint type to
+`ProductionOnly`, so Hyper-V never falls back to a standard checkpoint. A
+production checkpoint uses VSS inside the guest: it captures a consistent disk
+state, not memory or running processes.
+
+```powershell
+crabbox checkpoint create --provider hyperv --id my-lease --name warm-deps
+crabbox checkpoint restore chk_abc123 --provider hyperv --id my-lease
+crabbox checkpoint fork chk_abc123 --provider hyperv --keep
+crabbox checkpoint delete chk_abc123
+```
+
+**Create** requires an exact local claim on the source VM and holds the claim
+fence for the whole operation. Before any VM change it durably records the
+source VM ID, a unique snapshot name, and an owned export directory, then
+prepares the running guest over PowerShell Direct, so create needs the guest
+password (`CRABBOX_HYPERV_GUEST_PASSWORD` or `hyperv.guestPassword`):
+
+- It sets the guest's boot status policy to `IgnoreAllFailures` and turns
+  automatic recovery off, the settings Azure's
+  [VHD preparation](https://learn.microsoft.com/azure/virtual-machines/windows/prepare-for-upload-vhd-image)
+  uses for unattended VMs. A restored checkpoint boots as if Windows had shut
+  down unexpectedly, and Windows starts its recovery environment after two such
+  shutdowns within two minutes of boot completion. On the test host, a guest
+  checkpointed twice within two minutes of booting from a restore stopped at
+  the interactive Automatic Repair screen.
+- It flushes the registry hives. A production checkpoint quiesces the guest's
+  file system, but on the test host a SYSTEM-hive change made just before the
+  checkpoint, such as a machine `PATH` update, could be missing after restore.
+
+It then
+creates the checkpoint on the source VM and exports it with
+`Export-VMSnapshot` into `hyperv\` inside the checkpoint's local record
+directory (see [checkpoint](../commands/checkpoint.md)). The export is a full
+copy of the VM's disks, so the volume holding Crabbox state needs free space
+for it. If a step fails after the VM changed, Crabbox removes the new
+checkpoint and its partial export, but the command still fails and keeps the
+record as pending. A pending record blocks new checkpoints of that source and
+cannot be restored or forked; `crabbox checkpoint delete <id>` repeats the
+cleanup idempotently and discards it, which also reconciles a create that was
+interrupted.
+
+**Restore** applies the checkpoint to the original source VM in place. It
+requires the same lease, its exact local claim, and the same Hyper-V VM ID,
+and refuses any other lease. `Restore-VMSnapshot` leaves the VM off, because
+a production checkpoint holds no memory, so Crabbox then starts it, waits for
+DHCP and SSH, and refreshes the claim's endpoint. Each Hyper-V command and each
+bounded SSH readiness probe runs under the exact claim, so a reclaim or
+revocation stops restore before its next step. The source keeps its hostname
+and SSH identity. A restore that fails before reaching Hyper-V puts the
+previous claim back.
+
+**Fork** imports the export as a new lease with `Import-VM -Copy
+-GenerateNewId` and a dynamic MAC address, keeping the network adapter
+disconnected until the copy has a new identity. Over PowerShell Direct, Crabbox
+renames the guest to `cbx-<lease-id suffix>` and restarts it. It then writes a
+new `MachineGuid` and, if one exists, a new VNC password, flushing both to
+disk, regenerates the SSH host keys, and installs the new lease key before
+connecting the network. Those writes come after the restart because Hyper-V's
+`Restart-VM` is a hard reset that would discard writes still in the guest's
+cache.
+The new lease's claim is recorded before the import, and each of these steps,
+plus each PowerShell Direct and SSH readiness attempt, runs under it; the
+backoff between attempts does not. A disconnected network does not isolate the
+guest from PowerShell Direct, so the claim, not the network, gates every guest
+logon. If the claim is reassigned, fork stops and leaves the imported VM to its
+new owner; if the claim is revoked, fork stops and removes the import.
+Fork records exactly which disks `Import-VM` copied, including the differencing
+parents it copies with each attached disk, so release and rollback delete only
+those, never the template a parent chain may lead to outside the fork's own
+directory.
+
+**Release and delete.** Releasing the source removes its VM and the Hyper-V
+checkpoints stored with it, so restore is no longer possible; the export stays,
+and fork still works. `checkpoint delete` removes the checkpoint from the
+source VM if it still exists, then the export.
+
 ## Pause and resume
 
 `crabbox pause --provider hyperv <lease>` uses Hyper-V saved state so the VM
@@ -262,10 +344,10 @@ installation.
    unclaimed `crabbox-` prefixed candidates. A name prefix is inventory evidence,
    not ownership proof.
 4. **Release**: Requires an exact local claim, performs guarded remote cleanup,
-   stops/removes the VM, and deletes VM-owned root
-   storage.
+   stops/removes the VM, and deletes VM-owned root and internal checkpoint
+   storage. Exported checkpoint artifacts survive release.
 5. **Cleanup**: Deletes only exact-claimed VMs whose state or expiry makes them
-   eligible, preserves `keep=true` VMs, and prunes missing
+   eligible, preserves `keep=true` and restore-reserved VMs, and prunes missing
    local claims only after the provisioning grace period.
 
 Heartbeats require an exact instance-scoped claim for a completed acquisition.
@@ -273,7 +355,8 @@ They atomically persist the touch timestamp and an explicit `--idle-timeout`
 override; omitting the flag preserves the recorded timeout, even when current
 configuration differs. Fresh status reads retain that policy and the original
 lease TTL cap. A stale snapshot or incomplete acquisition is not renewed.
-Ownership remains bound to the recorded VM name and instance scope.
+Ownership remains bound to the recorded VM name and instance scope. Existing checkpoint forks retain their checkpoint-specific identity and storage
+safeguards.
 
 The fixed operation budgets are:
 
@@ -307,7 +390,7 @@ instead of detaching a replacement VM's disk.
   digits, `.`, `_`, or `-`. Domain/UPN names and SSH pattern characters are
   rejected so `AllowUsers` cannot broaden access.
 - VHD files are stored in `%USERPROFILE%\Hyper-V\Virtual Hard Disks\` by
-  default. Only deterministically named provider-owned root
+  default. Only deterministically named provider-owned root and checkpoint
   disks are cleaned up; unrelated attached disks are preserved.
 - The Windows ready check verifies `git`, `tar`, Node/npm, and the work root.
 - There is no `tart exec` or `prlctl exec` equivalent for Hyper-V; all guest
