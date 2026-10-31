@@ -507,6 +507,14 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 		cfg.WorkRoot = workRoot
 	}
 	applyStoredLeaseKey(&cfg, req.LeaseID)
+	// A production checkpoint quiesces the guest file system through VSS, but in
+	// live runs a SYSTEM-hive write made just before Checkpoint-VM (the machine
+	// PATH update of a guest Node install) was missing after restore, and under
+	// write load restored guests could not boot. Flushing the registry hives
+	// first makes every write that finished before create part of the checkpoint.
+	if err := b.flushGuestRegistry(ctx, sourceName, cfg.HyperV.User); err != nil {
+		return result, core.NativeCheckpointNotSubmittedError{Cause: err}
+	}
 	if err := os.Mkdir(paths.exportRoot, 0o700); err != nil {
 		return result, core.NativeCheckpointNotSubmittedError{Cause: core.Exit(2, "create Hyper-V checkpoint export directory: %v", err)}
 	}
@@ -1180,6 +1188,23 @@ func (b *backend) importCheckpointVM(ctx context.Context, configPath, name strin
 		return "", err
 	}
 	return output.ID, nil
+}
+
+// guestRegistryFlushScript writes the guest's HKLM and HKU registry hives to
+// disk. HKEY_LOCAL_MACHINE and HKEY_USERS are the sign-extended predefined
+// handles 0x80000002 and 0x80000003.
+const guestRegistryFlushScript = `$ErrorActionPreference='Stop'; ` +
+	`Add-Type -Namespace CrabboxCheckpoint -Name Registry -MemberDefinition '[DllImport("advapi32.dll")] public static extern int RegFlushKey(IntPtr hKey);'; ` +
+	`foreach ($hive in @(0x80000002, 0x80000003)) { $rc=[CrabboxCheckpoint.Registry]::RegFlushKey([IntPtr]::new([long]$hive)); if ($rc -ne 0) { throw ('RegFlushKey failed with ' + $rc) } }`
+
+func (b *backend) flushGuestRegistry(ctx context.Context, vmName, user string) error {
+	if strings.TrimSpace(b.guestPassword()) == "" {
+		return core.Exit(2, "provider=%s checkpoint create requires CRABBOX_HYPERV_GUEST_PASSWORD or trusted hyperv.guestPassword to flush the guest registry", providerName)
+	}
+	if err := b.invokeInGuest(ctx, vmName, user, guestRegistryFlushScript, "guest registry flush before checkpoint"); err != nil {
+		return fmt.Errorf("flush the guest registry before the production checkpoint: %w", err)
+	}
+	return nil
 }
 
 // diskChainFunction defines Get-CrabboxDiskChain, which returns a disk and its

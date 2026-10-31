@@ -238,7 +238,13 @@ crabbox checkpoint delete chk_abc123
 
 **Create** requires an exact local claim on the source VM and holds the claim
 fence for the whole operation. Before any VM change it durably records the
-source VM ID, a unique snapshot name, and an owned export directory. It then
+source VM ID, a unique snapshot name, and an owned export directory, then
+flushes the guest's registry hives over PowerShell Direct, so create needs the
+guest password (`CRABBOX_HYPERV_GUEST_PASSWORD` or `hyperv.guestPassword`). A
+production checkpoint quiesces the guest's file system, but on the test host a
+registry change made just before the checkpoint could be missing after restore,
+and under heavy disk writes the restored guest sometimes failed to boot; with
+the flush, every change that finished before create is captured. It then
 creates the checkpoint on the source VM and exports it with
 `Export-VMSnapshot` into `hyperv\` inside the checkpoint's local record
 directory (see [checkpoint](../commands/checkpoint.md)). The export is a full
