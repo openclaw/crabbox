@@ -846,7 +846,7 @@ See [Checkpoints](../features/checkpoints.md#lifecycle-and-expiry).
 | Daytona Linux (direct only) | Filesystem snapshot (`--no-reboot=false` for a running source) | Same filesystem snapshot |
 | Incus Linux containers (direct only, `--mode native`) | Private root-disk image | Same snapshot-to-image capture |
 | Parallels | VM snapshot | — |
-| Hyper-V Windows (direct only) | Production checkpoint, exported locally (`hyperv-vhdx`); also the `--mode auto` choice | not supported |
+| Hyper-V Windows (direct only) | Production checkpoint, exported locally (`hyperv-vhdx`); also the `--mode auto` choice; create needs the guest password ([details](../providers/hyperv.md#checkpoints)) | not supported |
 | Cloudflare containers | Container filesystem snapshot | not supported |
 
 Brokered native checkpoints (through a configured coordinator) cover AWS

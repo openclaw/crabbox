@@ -49,3 +49,21 @@ func TestGuestCheckpointPrepareScriptStopsWhenBcdeditFails(t *testing.T) {
 		t.Fatalf("preparation continued after bcdedit failed (err=%v): %s", err, output)
 	}
 }
+
+// The flush has no visible effect, so this run predefines the flush type with a
+// RegFlushKey that records the handles it receives and turns the script's own
+// declaration into a no-op. The script must flush exactly HKEY_LOCAL_MACHINE and
+// HKEY_USERS, as the sign-extended 64-bit handles the registry API expects.
+func TestGuestCheckpointPrepareScriptFlushesMachineAndUserHives(t *testing.T) {
+	powershell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("powershell.exe unavailable")
+	}
+	recorder := `Add-Type -TypeDefinition 'namespace CrabboxCheckpoint { public static class Registry { public static System.Collections.Generic.List<long> Flushed = new System.Collections.Generic.List<long>(); public static int RegFlushKey(System.IntPtr hKey) { Flushed.Add(hKey.ToInt64()); return 0; } } }'; ` +
+		`function Add-Type { }; function bcdedit { $global:LASTEXITCODE = 0 }; `
+	report := `; 'flushed=' + ([CrabboxCheckpoint.Registry]::Flushed -join ',')`
+	output, err := exec.Command(powershell, "-NoProfile", "-NonInteractive", "-Command", recorder+guestCheckpointPrepareScript+report).CombinedOutput()
+	if err != nil || strings.TrimSpace(string(output)) != "flushed=-2147483646,-2147483645" {
+		t.Fatalf("registry flush handles (err=%v): %q, want HKLM and HKU", err, output)
+	}
+}
