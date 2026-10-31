@@ -239,12 +239,22 @@ crabbox checkpoint delete chk_abc123
 **Create** requires an exact local claim on the source VM and holds the claim
 fence for the whole operation. Before any VM change it durably records the
 source VM ID, a unique snapshot name, and an owned export directory, then
-flushes the guest's registry hives over PowerShell Direct, so create needs the
-guest password (`CRABBOX_HYPERV_GUEST_PASSWORD` or `hyperv.guestPassword`). A
-production checkpoint quiesces the guest's file system, but on the test host a
-registry change made just before the checkpoint could be missing after restore,
-and under heavy disk writes the restored guest sometimes failed to boot; with
-the flush, every change that finished before create is captured. It then
+prepares the running guest over PowerShell Direct, so create needs the guest
+password (`CRABBOX_HYPERV_GUEST_PASSWORD` or `hyperv.guestPassword`):
+
+- It sets the guest's boot status policy to `IgnoreAllFailures` and turns
+  automatic recovery off, the settings Azure's
+  [VHD preparation](https://learn.microsoft.com/azure/virtual-machines/windows/prepare-for-upload-vhd-image)
+  uses for unattended VMs. A restored checkpoint boots as if Windows had shut
+  down unexpectedly, and Windows starts its recovery environment after two such
+  shutdowns within two minutes of boot completion. On the test host, a guest
+  checkpointed twice within two minutes of booting from a restore stopped at
+  the interactive Automatic Repair screen.
+- It flushes the registry hives. A production checkpoint quiesces the guest's
+  file system, but on the test host a SYSTEM-hive change made just before the
+  checkpoint, such as a machine `PATH` update, could be missing after restore.
+
+It then
 creates the checkpoint on the source VM and exports it with
 `Export-VMSnapshot` into `hyperv\` inside the checkpoint's local record
 directory (see [checkpoint](../commands/checkpoint.md)). The export is a full

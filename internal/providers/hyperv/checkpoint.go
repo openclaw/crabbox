@@ -509,10 +509,10 @@ func (b *backend) createNativeCheckpoint(ctx context.Context, req core.NativeChe
 	applyStoredLeaseKey(&cfg, req.LeaseID)
 	// A production checkpoint quiesces the guest file system through VSS, but in
 	// live runs a SYSTEM-hive write made just before Checkpoint-VM (the machine
-	// PATH update of a guest Node install) was missing after restore, and under
-	// write load restored guests could not boot. Flushing the registry hives
-	// first makes every write that finished before create part of the checkpoint.
-	if err := b.flushGuestRegistry(ctx, sourceName, cfg.HyperV.User); err != nil {
+	// PATH update of a guest Node install) was missing after restore, and a guest
+	// checkpointed twice within two minutes of booting from a restore started the
+	// recovery environment instead of Windows. The guest is prepared first.
+	if err := b.prepareGuestForCheckpoint(ctx, sourceName, cfg.HyperV.User); err != nil {
 		return result, core.NativeCheckpointNotSubmittedError{Cause: err}
 	}
 	if err := os.Mkdir(paths.exportRoot, 0o700); err != nil {
@@ -1190,19 +1190,25 @@ func (b *backend) importCheckpointVM(ctx context.Context, configPath, name strin
 	return output.ID, nil
 }
 
-// guestRegistryFlushScript writes the guest's HKLM and HKU registry hives to
-// disk. HKEY_LOCAL_MACHINE and HKEY_USERS are the sign-extended predefined
-// handles 0x80000002 and 0x80000003.
-const guestRegistryFlushScript = `$ErrorActionPreference='Stop'; ` +
+// guestCheckpointPrepareScript readies a running guest for a production
+// checkpoint. A restored checkpoint boots as if Windows had shut down
+// unexpectedly, and Windows starts its recovery environment after two such
+// shutdowns within two minutes of boot completion, which leaves a headless guest
+// at the interactive Automatic Repair screen. The script applies the boot
+// settings Azure's VHD preparation uses for unattended VMs, then writes the HKLM
+// and HKU registry hives to disk (HKEY_LOCAL_MACHINE and HKEY_USERS are the
+// sign-extended predefined handles 0x80000002 and 0x80000003).
+const guestCheckpointPrepareScript = `$ErrorActionPreference='Stop'; ` +
+	`foreach ($setting in @(@('bootstatuspolicy','IgnoreAllFailures'), @('recoveryenabled','Off'))) { $out = bcdedit /set '{default}' $setting[0] $setting[1] 2>&1; if ($LASTEXITCODE -ne 0) { throw ('bcdedit ' + $setting[0] + ' failed: ' + ($out -join ' ')) } }; ` +
 	`Add-Type -Namespace CrabboxCheckpoint -Name Registry -MemberDefinition '[DllImport("advapi32.dll")] public static extern int RegFlushKey(IntPtr hKey);'; ` +
 	`foreach ($hive in @(0x80000002, 0x80000003)) { $rc=[CrabboxCheckpoint.Registry]::RegFlushKey([IntPtr]::new([long]$hive)); if ($rc -ne 0) { throw ('RegFlushKey failed with ' + $rc) } }`
 
-func (b *backend) flushGuestRegistry(ctx context.Context, vmName, user string) error {
+func (b *backend) prepareGuestForCheckpoint(ctx context.Context, vmName, user string) error {
 	if strings.TrimSpace(b.guestPassword()) == "" {
-		return core.Exit(2, "provider=%s checkpoint create requires CRABBOX_HYPERV_GUEST_PASSWORD or trusted hyperv.guestPassword to flush the guest registry", providerName)
+		return core.Exit(2, "provider=%s checkpoint create requires CRABBOX_HYPERV_GUEST_PASSWORD or trusted hyperv.guestPassword to prepare the guest", providerName)
 	}
-	if err := b.invokeInGuest(ctx, vmName, user, guestRegistryFlushScript, "guest registry flush before checkpoint"); err != nil {
-		return fmt.Errorf("flush the guest registry before the production checkpoint: %w", err)
+	if err := b.invokeInGuest(ctx, vmName, user, guestCheckpointPrepareScript, "guest preparation before checkpoint"); err != nil {
+		return fmt.Errorf("prepare the guest for the production checkpoint: %w", err)
 	}
 	return nil
 }

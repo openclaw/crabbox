@@ -27,8 +27,9 @@ func registryFlushCreateRequest(t *testing.T, b *backend, runner *recordingRunne
 }
 
 // A production checkpoint must include registry writes that finished before
-// create, so the source guest's hives are flushed before Checkpoint-VM.
-func TestCreateNativeCheckpointFlushesGuestRegistryBeforeCheckpoint(t *testing.T) {
+// create and restore to a booting guest, so the source guest is prepared before
+// Checkpoint-VM.
+func TestCreateNativeCheckpointPreparesGuestBeforeCheckpoint(t *testing.T) {
 	setCheckpointTestState(t)
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
@@ -47,16 +48,16 @@ func TestCreateNativeCheckpointFlushesGuestRegistryBeforeCheckpoint(t *testing.T
 	flush := findCallIndex(runner.calls, "RegFlushKey")
 	checkpoint := findCallIndex(runner.calls, "Checkpoint-VM")
 	if flush < 0 || checkpoint < 0 || flush > checkpoint {
-		t.Fatalf("guest registry flush=%d must run before Checkpoint-VM=%d", flush, checkpoint)
+		t.Fatalf("guest preparation=%d must run before Checkpoint-VM=%d", flush, checkpoint)
 	}
 	if script := commandScript(runner.calls[flush]); !strings.Contains(script, "-VMName '"+testCheckpointVMName+"'") {
-		t.Fatalf("registry flush did not target the source VM: %s", script)
+		t.Fatalf("guest preparation did not target the source VM: %s", script)
 	}
 }
 
-// When the guest registry cannot be flushed, create stops before any VM change
+// When the guest cannot be prepared, create stops before any VM change
 // and attests that nothing was submitted.
-func TestCreateNativeCheckpointRegistryFlushFailureAttestsNonSubmission(t *testing.T) {
+func TestCreateNativeCheckpointGuestPreparationFailureAttestsNonSubmission(t *testing.T) {
 	setCheckpointTestState(t)
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
@@ -81,14 +82,14 @@ func TestCreateNativeCheckpointRegistryFlushFailureAttestsNonSubmission(t *testi
 	_, err := b.createNativeCheckpoint(context.Background(), req)
 	var unsubmitted core.NativeCheckpointNotSubmittedError
 	if !errors.As(err, &unsubmitted) {
-		t.Fatalf("flush failure err=%v, want non-submission", err)
+		t.Fatalf("preparation failure err=%v, want non-submission", err)
 	}
 	for _, verb := range []string{"Set-VM", "Checkpoint-VM", "Export-VMSnapshot"} {
 		if findCallIndex(runner.calls, verb) >= 0 {
-			t.Fatalf("create ran %s after the guest registry flush failed", verb)
+			t.Fatalf("create ran %s after guest preparation failed", verb)
 		}
 	}
 	if _, statErr := os.Stat(filepath.Join(req.ArtifactDir, "hyperv")); !os.IsNotExist(statErr) {
-		t.Fatalf("create left an export directory after the flush failed: %v", statErr)
+		t.Fatalf("create left an export directory after guest preparation failed: %v", statErr)
 	}
 }
