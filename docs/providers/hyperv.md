@@ -240,6 +240,16 @@ the standard status receipt, with `state` set to `paused` or `ready` after a
 successful transition and readback. `labels.hyperv_state` retains Hyper-V's
 native state (`saved`, `paused`, or `running`).
 
+Lease VMs are created with `AutomaticStopAction TurnOff`. Under Hyper-V's
+default, `Save`, each running VM keeps a runtime-state file on the VM drive as
+large as its currently assigned memory (all of `--hyperv-memory` while the guest
+boots) so that a host shutdown can save it; with `TurnOff` that file stays
+empty. A host shutdown or reboot therefore powers running leases off instead of
+saving their memory, and `crabbox resume` rejects a powered-off VM (exit 4);
+release it with `crabbox stop`. Use `crabbox pause` before planned host
+maintenance when guest memory must survive. Leases created by an older Crabbox
+keep the stop action they were created with.
+
 Set `CRABBOX_HYPERV_GUEST_PASSWORD` or `hyperv.guestPassword` in trusted user
 config to match the administrator password in your VHDX template. The provider
 requires an explicit value and disables SSH password authentication after key
@@ -291,8 +301,7 @@ bootstrap wait budget: 20 minutes, or 45 minutes with desktop/browser enabled.
 Each SSH probe is limited to 10 seconds or the remaining wait budget. Host
 address queries retain their 45-second command limit; successful SSH readiness
 is followed by a five-second address-stability check. Caller cancellation and
-earlier enclosing deadlines still apply. These budgets do not change Hyper-V's
-existing host-shutdown default (`AutomaticStopAction=Save`).
+earlier enclosing deadlines still apply.
 
 Cancellation before key creation does not manufacture a retained
 lease. An ambiguous creation retains ownership and reports the blocked cleanup
