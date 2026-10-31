@@ -90,6 +90,61 @@ func TestWindowsDesktopDisplayPolicyIsScopedToManagedBootstrap(t *testing.T) {
 	}
 }
 
+func TestManagedWindowsDesktopDisplayPolicyDisablesTimeoutsAndScreensaver(t *testing.T) {
+	ps, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		if ps, err = exec.LookPath("pwsh"); err != nil {
+			t.Skip("PowerShell not available")
+		}
+	}
+	// Stubs shadow powercfg.exe and the registry cmdlets, so the policy runs
+	// for real without touching the host's power plan or registry.
+	stubs := `$ErrorActionPreference = "Stop"
+$script:calls = [System.Collections.Generic.List[string]]::new()
+function powercfg.exe { $script:calls.Add("powercfg " + ($args -join " ")); $global:LASTEXITCODE = [int]$env:FAKE_POWERCFG_EXIT }
+function Test-Path { param([string]$LiteralPath) $true }
+function Set-ItemProperty { param([string]$LiteralPath, [string]$Name, [string]$Value, [string]$Type) $script:calls.Add("set $LiteralPath $Name=$Value") }
+`
+	run := func(t *testing.T, powercfgExit string) (string, error) {
+		t.Helper()
+		script := filepath.Join(t.TempDir(), "display.ps1")
+		body := stubs + managedWindowsDesktopDisplayPowerShell() + "\n$script:calls -join \"`n\"\n"
+		if err := os.WriteFile(script, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(ps, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script)
+		cmd.Env = append(os.Environ(), "FAKE_POWERCFG_EXIT="+powercfgExit)
+		out, err := cmd.CombinedOutput()
+		return strings.ReplaceAll(string(out), "\r\n", "\n"), err
+	}
+
+	out, err := run(t, "0")
+	if err != nil {
+		t.Fatalf("display policy: %v: %s", err, out)
+	}
+	for _, want := range []string{
+		"powercfg /change monitor-timeout-ac 0",
+		"powercfg /change monitor-timeout-dc 0",
+		"powercfg /change standby-timeout-ac 0",
+		"powercfg /change standby-timeout-dc 0",
+	} {
+		if !strings.Contains(out, want+"\n") {
+			t.Errorf("display policy did not run %q:\n%s", want, out)
+		}
+	}
+	for _, key := range []string{`HKCU:\Control Panel\Desktop`, `Registry::HKEY_USERS\.DEFAULT\Control Panel\Desktop`} {
+		for _, value := range []string{"ScreenSaveActive=0", "ScreenSaveTimeOut=0", "ScreenSaverIsSecure=0"} {
+			if !strings.Contains(out, "set "+key+" "+value) {
+				t.Errorf("display policy did not set %s %s:\n%s", key, value, out)
+			}
+		}
+	}
+
+	if out, err := run(t, "1"); err == nil || !strings.Contains(out, "failed to disable desktop power timeout monitor-timeout-ac") {
+		t.Fatalf("display policy accepted a failed powercfg: err=%v out=%s", err, out)
+	}
+}
+
 func TestTightVNCReconcileRetriesAfterFailedRemoval(t *testing.T) {
 	ps, err := exec.LookPath("powershell.exe")
 	if err != nil {

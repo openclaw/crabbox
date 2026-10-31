@@ -502,26 +502,57 @@ func TestBootstrapWindowsDesktopRetriesExpectedRebootWithinBounds(t *testing.T) 
 }
 
 func TestBootstrapWindowsDesktopBoundsAutoLogonReboots(t *testing.T) {
-	runner := &recordingRunner{}
-	b := testBackend(runner)
-	b.guestRetryBackoff = 0
-	b.waitWindowsDesktopSession = func(context.Context, string, string, time.Duration) error {
-		return errors.New("no active session")
+	countReboots := func(runner *recordingRunner) int {
+		reboots := 0
+		for _, call := range runner.calls {
+			args := strings.Join(call.Args, "\n")
+			if strings.Contains(args, "Restart-Computer -Force") && strings.Contains(args, "Start-Sleep -Seconds 120") {
+				reboots++
+			}
+		}
+		return reboots
 	}
 
-	if err := b.bootstrapWindowsDesktop(context.Background(), "crabbox-capability-1234", "crabbox"); err != nil {
-		t.Fatalf("bootstrapWindowsDesktop: %v", err)
-	}
-	reboots := 0
-	for _, call := range runner.calls {
-		args := strings.Join(call.Args, "\n")
-		if strings.Contains(args, "Restart-Computer -Force") && strings.Contains(args, "Start-Sleep -Seconds 120") {
-			reboots++
+	t.Run("session never appears", func(t *testing.T) {
+		runner := &recordingRunner{}
+		b := testBackend(runner)
+		b.guestRetryBackoff = 0
+		var waits []time.Duration
+		b.waitWindowsDesktopSession = func(_ context.Context, _, _ string, timeout time.Duration) error {
+			waits = append(waits, timeout)
+			return errors.New("no active session")
 		}
-	}
-	if reboots != windowsDesktopAutoLogonReboots {
-		t.Fatalf("explicit auto-logon reboots=%d want %d", reboots, windowsDesktopAutoLogonReboots)
-	}
+		if err := b.bootstrapWindowsDesktop(context.Background(), "crabbox-capability-1234", "crabbox"); err != nil {
+			t.Fatalf("bootstrapWindowsDesktop: %v", err)
+		}
+		// The documented contract is at most two explicit auto-logon reboots.
+		if reboots := countReboots(runner); reboots != 2 {
+			t.Fatalf("explicit auto-logon reboots=%d want 2", reboots)
+		}
+		if want := []time.Duration{30 * time.Second, time.Minute}; len(waits) != len(want) || waits[0] != want[0] || waits[1] != want[1] {
+			t.Fatalf("session waits=%v want %v", waits, want)
+		}
+	})
+
+	t.Run("session appears after the first reboot", func(t *testing.T) {
+		runner := &recordingRunner{}
+		b := testBackend(runner)
+		b.guestRetryBackoff = 0
+		checks := 0
+		b.waitWindowsDesktopSession = func(context.Context, string, string, time.Duration) error {
+			checks++
+			if checks == 1 {
+				return errors.New("no active session")
+			}
+			return nil
+		}
+		if err := b.bootstrapWindowsDesktop(context.Background(), "crabbox-capability-1234", "crabbox"); err != nil {
+			t.Fatalf("bootstrapWindowsDesktop: %v", err)
+		}
+		if reboots := countReboots(runner); reboots != 1 {
+			t.Fatalf("explicit auto-logon reboots=%d want 1", reboots)
+		}
+	})
 }
 
 func TestProbeWindowsBrowserAcceptsEdgeAndChrome(t *testing.T) {

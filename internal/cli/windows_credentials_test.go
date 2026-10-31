@@ -121,30 +121,35 @@ func TestWindowsCredentialReadersPreserveExactUTF8(t *testing.T) {
 	}
 }
 
-func TestWindowsCredentialReadersRejectZeroLength(t *testing.T) {
+func TestWindowsCredentialReadersRejectEmptyOrMalformed(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("PowerShell credential reader behavior")
 	}
-	readers := map[string]func(string) string{
-		"screenshot": windowsScreenshotCredentialReadPowerShell,
+	cases := map[string]struct {
+		content []byte
+		want    string
+	}{
+		"zero-length":   {content: nil, want: "credential file is empty"},
+		"invalid-utf-8": {content: []byte{0xC3, 0x28, 0xFF}, want: "credential file is not valid UTF-8"},
 	}
-	for name, reader := range readers {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
 			path := filepath.Join(root, "windows.password")
-			if err := os.WriteFile(path, nil, 0o600); err != nil {
+			if err := os.WriteFile(path, tc.content, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			scriptPath := filepath.Join(root, "read.ps1")
-			if err := os.WriteFile(scriptPath, []byte(reader(path)), 0o600); err != nil {
+			script := windowsScreenshotCredentialReadPowerShell(path) + "\n[Console]::Write('reached-end')\n"
+			if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			output, err := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath).CombinedOutput()
-			if err == nil {
-				t.Fatal("zero-length credential was accepted")
+			if err == nil || strings.Contains(string(output), "reached-end") {
+				t.Fatalf("%s credential was accepted: %s", name, strings.TrimSpace(string(output)))
 			}
-			if !strings.Contains(string(output), "credential file is empty") {
-				t.Fatalf("zero-length error=%s", strings.TrimSpace(string(output)))
+			if !strings.Contains(string(output), tc.want) {
+				t.Fatalf("%s error=%s, want %q", name, strings.TrimSpace(string(output)), tc.want)
 			}
 		})
 	}
