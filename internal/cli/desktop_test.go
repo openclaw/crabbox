@@ -860,14 +860,18 @@ func TestWindowsDesktopTerminalUsesMinttyWithSixelDefaults(t *testing.T) {
 		"Columns=84",
 		"Rows=26",
 		"Scrollbar=none",
-		"-h always",
 		"TERM=xterm-256color",
 		"GIFGREP_INLINE",
-		"'/c/gifgrep-smoke/run.sh'",
+		"('/c/gifgrep-smoke/run.sh'); exec /usr/bin/bash -l",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("terminal command missing %q: %v", want, got)
 		}
+	}
+	// Two Mintty windows held with -h always stall new console processes in
+	// the session, so the window stays open through a live login shell instead.
+	if strings.Contains(joined, "-h always") {
+		t.Fatalf("terminal command must not use Mintty's hold: %v", got)
 	}
 	for _, bad := range []string{"cmd.exe", "start"} {
 		if strings.Contains(joined, bad) {
@@ -886,11 +890,11 @@ func TestWindowsDesktopTerminalDisablesMsysArgumentConversion(t *testing.T) {
 		t.Fatal(err)
 	}
 	shellCommand := got[len(got)-1]
-	if !strings.HasPrefix(shellCommand, "export MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1; ") {
+	if !strings.HasPrefix(shellCommand, "(export MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1; ") {
 		t.Fatalf("windows terminal command must disable MSYS argument conversion before the command: %q", shellCommand)
 	}
-	if !strings.HasSuffix(shellCommand, `'cmd.exe' '/d' '/c' 'echo desktop-proof'`) {
-		t.Fatalf("windows terminal command must preserve the requested command: %q", shellCommand)
+	if !strings.HasSuffix(shellCommand, `'cmd.exe' '/d' '/c' 'echo desktop-proof'); exec /usr/bin/bash -l`) {
+		t.Fatalf("windows terminal command must preserve the requested command, then keep the window open with a login shell that does not inherit the conversion override: %q", shellCommand)
 	}
 }
 

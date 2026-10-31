@@ -166,8 +166,9 @@ Recording uses `--record-duration` (default 5s) and `--record-fps` (default 8),
 and requires a Linux or native Windows target as with `desktop terminal`.
 
 On native Windows, the proof terminal is Git for Windows `mintty.exe`, launched
-into the active interactive session for the lease user and held open so even a
-short command remains visible long enough to verify and capture. `metadata.json` records
+into the active interactive session for the lease user. After the command
+finishes, the window stays open with a login shell, so even a short command
+remains visible long enough to verify and capture. `metadata.json` records
 the verified terminal PID, session ID, and window title, and diagnostics include
 the active session plus Mintty process evidence. Screenshot and frame capture use
 short-lived interactive Scheduled Tasks inside

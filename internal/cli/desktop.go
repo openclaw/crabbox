@@ -660,19 +660,25 @@ func desktopTerminalCommand(target SSHTarget, command []string, opts desktopTerm
 		// Git for Windows runs the terminal command through the MSYS runtime,
 		// which rewrites arguments that look like POSIX paths. Without this,
 		// `cmd.exe /d /c ...` loses its switches and opens an interactive shell
-		// switches and opens an interactive shell instead of running the
-		// requested command. Other commands keep MSYS path conversion.
-		prefix := ""
+		// instead of running the requested command. Other commands keep MSYS
+		// path conversion.
+		pathConv := ""
 		if shellCommand != "" && windowsCommandNeedsNoPathConv(command[0]) {
-			prefix = "export MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1; "
+			pathConv = "export MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1; "
 		}
+		prefix := ""
 		if opts.Sixel {
-			prefix += "export TERM=xterm-256color GIFGREP_INLINE=${GIFGREP_INLINE:-sixel}; "
+			prefix = "export TERM=xterm-256color GIFGREP_INLINE=${GIFGREP_INLINE:-sixel}; "
 		}
-		if shellCommand == "" {
-			shellCommand = "exec /usr/bin/bash -l"
+		// A live login shell keeps the window open after the command finishes.
+		// Mintty's own hold (-h always) is not used: two held Mintty windows
+		// stall every new console process in the session, including the
+		// interactive tasks that capture screenshots and video.
+		shell := "exec /usr/bin/bash -l"
+		if shellCommand != "" {
+			shell = "(" + pathConv + shellCommand + "); " + shell
 		}
-		shellCommand = prefix + shellCommand
+		shellCommand = prefix + shell
 		return []string{
 			`C:\Program Files\Git\usr\bin\mintty.exe`,
 			"-t", opts.Title,
@@ -680,7 +686,6 @@ func desktopTerminalCommand(target SSHTarget, command []string, opts desktopTerm
 			"-o", fmt.Sprintf("Columns=%d", opts.Cols),
 			"-o", fmt.Sprintf("Rows=%d", opts.Rows),
 			"-o", "Scrollbar=none",
-			"-h", "always",
 			"/usr/bin/bash", "-lc", shellCommand,
 		}, nil
 	}
