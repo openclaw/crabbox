@@ -165,6 +165,48 @@ diagnostics, video, contact-sheet, or final `proof:` output is written:
 Recording uses `--record-duration` (default 5s) and `--record-fps` (default 8),
 and requires a Linux or native Windows target as with `desktop terminal`.
 
+On native Windows, the proof terminal is Git for Windows `mintty.exe`, launched
+into the active interactive session for the lease user. After the command
+finishes, the window stays open with a login shell, so even a short command
+remains visible long enough to verify and capture. `metadata.json` records
+the verified terminal PID, session ID, and window title, and diagnostics include
+the active session plus Mintty process evidence. Screenshot and frame capture use
+short-lived interactive Scheduled Tasks inside
+protected per-capture directories whose ACL contains only the lease user, Builtin
+Administrators, and LocalSystem. Both success and failure paths remove the task,
+script, frames, archive, and protected directory.
+
+Windows MP4 encoding runs on the Crabbox host, so `ffmpeg` must be on the host
+`PATH` and `ffmpeg -version` must succeed before running `desktop proof`.
+
+For Hyper-V Windows, use a fresh `--desktop` lease acquired by the same pinned
+Crabbox binary used for the proof. Acquisition waits for loopback VNC and a
+usable active desktop session for `--hyperv-user`; if auto-logon has not taken
+effect, it performs at most two explicit reboot retries before the final bounded
+readiness wait and verifies SSH remains stable after the reboot. Older retained
+leases are not upgraded in place. Run the provider flow as the invoking
+interactive user rather than as `LocalSystem`, then always release the proof
+lease:
+
+```powershell
+& $crabboxPath warmup --provider hyperv --target windows --desktop --keep `
+  --hyperv-image 'E:\vhd\windows-template.vhdx' `
+  --hyperv-user crabbox --hyperv-switch 'Default Switch'
+
+& $crabboxPath desktop proof --provider hyperv --id <lease> `
+  --output 'C:\proof\<lease>' -- cmd.exe /d /c "echo desktop-proof"
+
+& $crabboxPath stop --provider hyperv <lease>
+```
+
+On Hyper-V Windows targets, desktop bootstrap disables the guest display and
+standby timeouts and the screensaver; AWS and Azure guests keep their own power
+settings. A blanked virtual display freezes the framebuffer,
+so screenshots and VNC keep returning the last rendered frame and any window
+launched afterwards never appears in a capture. Because the terminal still
+starts and is recorded in metadata, the proof would otherwise report success
+while producing a stale image.
+
 Use `--publish-pr <n>` to publish the bundle through the same artifact backend
 as [`artifacts publish`](artifacts.md). The default storage is `auto`, so
 `CRABBOX_ARTIFACTS_STORAGE`/bucket/base-url env defaults still apply and a

@@ -30,20 +30,25 @@ type backend struct {
 	// blocked probe is killed and retried (proven not to corrupt the guest
 	// session), and guestInvokeTimeout bounds each real guest call so a wedged
 	// mid-session call cannot hang the provision forever. Overridable in tests.
-	guestReadyProbeTimeout time.Duration
-	guestReadyBudget       time.Duration
-	guestInvokeTimeout     time.Duration
-	guestRetryBackoff      time.Duration
-	sshReady               func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error
-	resumeSSHProbeTimeout  time.Duration
-	resumeIPStableWindow   time.Duration
-	resumePollInterval     time.Duration
-	acquireBudget          time.Duration
-	cleanupBudget          time.Duration
-	hostCommandTimeout     time.Duration
-	startVMTimeout         time.Duration
-	now                    func() time.Time
-	sleep                  func(context.Context, time.Duration) error
+	guestReadyProbeTimeout    time.Duration
+	guestReadyBudget          time.Duration
+	guestInvokeTimeout        time.Duration
+	guestRetryBackoff         time.Duration
+	sshReady                  func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error
+	resumeSSHProbeTimeout     time.Duration
+	resumeIPStableWindow      time.Duration
+	resumePollInterval        time.Duration
+	waitWindowsVNC            func(context.Context, *core.SSHTarget, io.Writer, time.Duration) error
+	waitWindowsDesktopSession func(context.Context, string, string, time.Duration) error
+	waitWindowsSSHStable      func(context.Context, *core.SSHTarget, io.Writer, time.Duration) error
+	ensureLeaseKey            func(core.Config, string) (string, string, error)
+	runSSHOutput              func(context.Context, core.SSHTarget, string) (string, error)
+	acquireBudget             time.Duration
+	cleanupBudget             time.Duration
+	hostCommandTimeout        time.Duration
+	startVMTimeout            time.Duration
+	now                       func() time.Time
+	sleep                     func(context.Context, time.Duration) error
 }
 
 var hypervHostOS = runtime.GOOS
@@ -78,6 +83,9 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 		resumeIPStableWindow:   5 * time.Second,
 		resumePollInterval:     time.Second,
 		sshReady:               core.WaitForSSHReady,
+		ensureLeaseKey:         core.EnsureTestboxKeyForConfig,
+		waitWindowsVNC:         core.WaitForManagedWindowsLoopbackVNC,
+		runSSHOutput:           core.RunSSHOutput,
 		acquireBudget:          25 * time.Minute,
 		cleanupBudget:          2 * time.Minute,
 		hostCommandTimeout:     45 * time.Second,
@@ -85,6 +93,8 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 		now:                    time.Now,
 		sleep:                  shared.SleepContext,
 	}
+	b.waitWindowsDesktopSession = b.waitForWindowsDesktopSession
+	b.waitWindowsSSHStable = b.waitForWindowsSSHStable
 	return b
 }
 
@@ -161,6 +171,7 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 		return core.LeaseTarget{}, core.Exit(2, "provider=%s requires a Windows host with Hyper-V enabled", providerName)
 	}
 	cfg := b.configForRun()
+	cfg = windowsCapabilityConfig(cfg, req.Options)
 	if cfg.HyperV.Image == "" {
 		return core.LeaseTarget{}, core.Exit(2, "provider=%s requires --hyperv-image (path to a Windows VHDX template with a known administrator password; the provider installs OpenSSH if missing)", providerName)
 	}
@@ -220,7 +231,7 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 	}()
 	cfg.SSHKey = keyPath
 	name := core.LeaseProviderName(leaseID, slug)
-	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", req.Keep, time.Now().UTC())
+	labels := provisionalWindowsCapabilityLabels(cfg, leaseID, slug, req.Keep, time.Now().UTC())
 	labels["instance"] = name
 	labels["image"] = cfg.HyperV.Image
 	labels["ssh_user"] = cfg.HyperV.User
@@ -280,7 +291,13 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 			return core.LeaseTarget{}, errors.Join(fmt.Errorf("post-boot SSH key injection failed: %w", retryErr), cleanupFailedLease())
 		}
 	}
-	if err := b.ensureGit(ctx, name, cfg.HyperV.User); err != nil {
+	if cfg.Desktop {
+		desktopIP, err := b.setUpWindowsDesktop(ctx, cfg, name)
+		if err != nil {
+			return core.LeaseTarget{}, errors.Join(err, cleanupFailedLease())
+		}
+		ip = desktopIP
+	} else if err := b.ensureGit(ctx, name, cfg.HyperV.User); err != nil {
 		return core.LeaseTarget{}, errors.Join(fmt.Errorf("guest git setup failed: %w", err), cleanupFailedLease())
 	}
 	// The shared native Windows ready check requires the Node/npm baseline, so
@@ -293,12 +310,27 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 	if err != nil {
 		return core.LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
+	if err := b.finalizeWindowsCapabilities(ctx, cfg, name, &lease); err != nil {
+		return core.LeaseTarget{}, errors.Join(err, cleanupFailedLease())
+	}
 	if err := persistLease(leaseID, slug, name, cfg, req, &lease); err != nil {
 		return core.LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, name)
 	return lease, nil
+}
+
+// setUpWindowsDesktop prepares the guest desktop. Bootstrap reboots the guest and
+// DHCP may hand out a new address, so the IP is rediscovered afterward.
+func (b *backend) setUpWindowsDesktop(ctx context.Context, cfg core.Config, name string) (string, error) {
+	if err := b.ensureWindowsDesktopTerminal(ctx, name, cfg.HyperV.User); err != nil {
+		return "", fmt.Errorf("guest desktop terminal setup failed: %w", err)
+	}
+	if err := b.bootstrapWindowsDesktop(ctx, name, cfg.HyperV.User); err != nil {
+		return "", err
+	}
+	return b.waitForIP(ctx, name, 5*time.Minute)
 }
 
 func (b *backend) prepareWindowsGuestNetwork(ctx context.Context, cfg core.Config, vmName, publicKey string) error {
@@ -842,11 +874,16 @@ func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error
 // Direct with bounded retries. The guest password is passed through
 // _CRABBOX_GP, never the command line.
 func (b *backend) invokeInGuest(ctx context.Context, vmName, user, scriptBlock, label string) error {
-	script := fmt.Sprintf(
-		`%sInvoke-Command -VMName '%s' -Credential $cred -ScriptBlock { %s }`,
-		powershellCredentialPrelude(user), escapePSString(vmName), scriptBlock,
-	)
-	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
+	return b.invokeInGuestRetrying(ctx, vmName, user, scriptBlock, label, false)
+}
+
+// invokeInGuestWithPassword also hands the guest password to the script block
+// as its first argument through the remoting argument list.
+func (b *backend) invokeInGuestWithPassword(ctx context.Context, vmName, user, scriptBlock, label string) error {
+	return b.invokeInGuestRetrying(ctx, vmName, user, scriptBlock, label, true)
+}
+
+func (b *backend) invokeInGuestRetrying(ctx context.Context, vmName, user, scriptBlock, label string, passGuestPassword bool) error {
 	var lastErr error
 	for attempt := 0; attempt < 5; attempt++ {
 		if attempt > 0 {
@@ -857,16 +894,41 @@ func (b *backend) invokeInGuest(ctx context.Context, vmName, user, scriptBlock, 
 			}
 			fmt.Fprintf(b.rt.Stderr, "retrying %s (%d/5)...\n", label, attempt+1)
 		}
-		result, err := b.invokeGuestScript(ctx, script, env, b.guestInvokeTimeout)
+		_, err := b.invokeInGuestCommandOnce(ctx, vmName, user, scriptBlock, label, passGuestPassword)
 		if err == nil {
 			return nil
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		lastErr = shared.LocalCommandError(label, result, err)
+		lastErr = err
 	}
 	return lastErr
+}
+
+func (b *backend) invokeInGuestWithPasswordOnce(ctx context.Context, vmName, user, scriptBlock, label string) (core.LocalCommandResult, error) {
+	return b.invokeInGuestCommandOnce(ctx, vmName, user, scriptBlock, label, true)
+}
+
+func (b *backend) invokeInGuestCommandOnce(ctx context.Context, vmName, user, scriptBlock, label string, passGuestPassword bool) (core.LocalCommandResult, error) {
+	return b.invokeInGuestCommandOnceWithTimeout(ctx, vmName, user, scriptBlock, label, passGuestPassword, b.guestInvokeTimeout)
+}
+
+func (b *backend) invokeInGuestCommandOnceWithTimeout(ctx context.Context, vmName, user, scriptBlock, label string, passGuestPassword bool, timeout time.Duration) (core.LocalCommandResult, error) {
+	argumentList := ""
+	if passGuestPassword {
+		argumentList = " -ArgumentList $env:_CRABBOX_GP"
+	}
+	script := fmt.Sprintf(
+		`%sInvoke-Command -VMName '%s' -Credential $cred%s -ScriptBlock { %s }`,
+		powershellCredentialPrelude(user), escapePSString(vmName), argumentList, scriptBlock,
+	)
+	env := append(os.Environ(), "_CRABBOX_GP="+b.guestPassword())
+	result, err := b.invokeGuestScript(ctx, script, env, timeout)
+	if err != nil {
+		return result, shared.LocalCommandError(label, result, err)
+	}
+	return result, nil
 }
 
 // Pinned Win32-OpenSSH payload used by Microsoft.OpenSSH.Preview. It runs as

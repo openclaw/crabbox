@@ -2138,7 +2138,48 @@ const windowsPowerShellPathRefresh = `$env:Path = [Environment]::GetEnvironmentV
 `
 
 func windowsPowerShellStdinScriptCommand(inputSize int) string {
-	return PowershellCommand(windowsPowerShellPathRefresh + `$ErrorActionPreference = "Stop"
+	return windowsPowerShellStdinScriptCommandMode(inputSize, false)
+}
+
+// windowsPowerShellRawStdoutStdinScriptCommand preserves the script's stdout bytes exactly.
+func windowsPowerShellRawStdoutStdinScriptCommand(inputSize int) string {
+	return windowsPowerShellStdinScriptCommandMode(inputSize, true)
+}
+
+// A nested native command's stdout is decoded to text by the outer PowerShell host,
+// which corrupts binary payloads; copy the child's raw stdout stream instead.
+const windowsPowerShellRawFileInvoker = `function Invoke-CrabboxRawPowerShellFile([string]$File) {
+	$psi = New-Object System.Diagnostics.ProcessStartInfo
+	$psi.FileName = 'powershell.exe'
+	$psi.Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $File + '"'
+	$psi.UseShellExecute = $false
+	$psi.RedirectStandardOutput = $true
+	$process = [System.Diagnostics.Process]::Start($psi)
+	$stdout = [Console]::OpenStandardOutput()
+	try {
+		$process.StandardOutput.BaseStream.CopyTo($stdout)
+		$stdout.Flush()
+	} finally {
+		$stdout.Dispose()
+	}
+	$process.WaitForExit()
+	return $process.ExitCode
+}
+`
+
+func windowsPowerShellFileInvocation(path string, rawStdout bool) string {
+	if rawStdout {
+		return "$code = Invoke-CrabboxRawPowerShellFile " + path + "\n"
+	}
+	return "& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " + path + "\n\t$code = $LASTEXITCODE\n"
+}
+
+func windowsPowerShellStdinScriptCommandMode(inputSize int, rawStdout bool) string {
+	prelude := ""
+	if rawStdout {
+		prelude = windowsPowerShellRawFileInvoker
+	}
+	return PowershellCommand(windowsPowerShellPathRefresh + prelude + `$ErrorActionPreference = "Stop"
 $path = Join-Path $env:TEMP ("crabbox-stdin-command-" + [Guid]::NewGuid().ToString("N") + ".ps1")
 try {
 	$scriptFile = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -2149,9 +2190,7 @@ try {
 	} finally {
 		$scriptFile.Dispose()
 	}
-	& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $path
-	$code = $LASTEXITCODE
-} finally {
+	` + windowsPowerShellFileInvocation("$path", rawStdout) + `} finally {
 	Remove-Item -Force -LiteralPath $path -ErrorAction SilentlyContinue
 }
 if ($null -eq $code) { $code = 0 }

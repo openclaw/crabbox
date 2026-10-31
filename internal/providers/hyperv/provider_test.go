@@ -140,11 +140,12 @@ func TestProviderSpecAndAliases(t *testing.T) {
 		t.Fatalf("Name=%q want %s", p.Spec().Name, providerName)
 	}
 	want := core.ProviderSpec{
-		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationLocalContext),
-		ClassDisposition: core.ProviderClassDispositionUnmapped,
-		Name:             providerName,
-		Family:           "local-vm",
-		Kind:             core.ProviderKindSSHLease,
+		Authentication:               core.DirectProviderAuthentication(core.ProviderAuthenticationLocalContext),
+		ClassDisposition:             core.ProviderClassDispositionUnmapped,
+		DesktopLoginPasswordSeparate: true,
+		Name:                         providerName,
+		Family:                       "local-vm",
+		Kind:                         core.ProviderKindSSHLease,
 		Targets: []core.TargetSpec{
 			{OS: core.TargetWindows, WindowsMode: core.WindowsModeNormal},
 		},
@@ -162,6 +163,8 @@ func TestProviderFeaturesAreWindowsOnly(t *testing.T) {
 	for _, feature := range []core.Feature{
 		core.FeatureSSH,
 		core.FeatureCrabboxSync,
+		core.FeatureDesktop,
+		core.FeatureBrowser,
 		core.FeatureCleanup,
 		core.FeaturePauseResume,
 	} {
