@@ -31,17 +31,22 @@ func changeCheckpointClaim(t *testing.T, b *backend, mode, leaseID string) strin
 }
 
 // A fork whose provisional claim is revoked or reassigned must stop before its
-// next host or guest effect, including the readiness SSH probes.
+// next host or guest effect, including each PowerShell Direct and SSH readiness
+// attempt. Claim changes between attempts happen in the backoff, outside the
+// fence, as a concurrent reclaim would.
 func TestForkNativeCheckpointStopsAtNextEffectWhenClaimChanges(t *testing.T) {
 	points := []struct {
-		name      string
-		ran       []string
-		refused   []string
-		sshProbes int
+		name          string
+		ran           []string
+		refused       []string
+		bootProbes    int
+		restartProbes int
+		sshProbes     int
 	}{
 		{name: "after-import", ran: []string{"Import-VM"}, refused: []string{"Rename-Computer", "ssh-keygen.exe", "Restart-VM", "MachineGuid", "Connect-VMNetworkAdapter"}},
-		{name: "after-restart", ran: []string{"Rename-Computer", "Restart-VM"}, refused: []string{"MachineGuid", "Connect-VMNetworkAdapter"}},
-		{name: "between-ssh-probes", ran: []string{"MachineGuid", "Connect-VMNetworkAdapter"}, sshProbes: 1},
+		{name: "between-boot-probes", ran: []string{"Import-VM"}, refused: []string{"Rename-Computer", "ssh-keygen.exe", "Restart-VM", "MachineGuid", "Connect-VMNetworkAdapter"}, bootProbes: 1},
+		{name: "between-restart-probes", ran: []string{"Rename-Computer", "Restart-VM"}, refused: []string{"MachineGuid", "Connect-VMNetworkAdapter"}, bootProbes: 1, restartProbes: 1},
+		{name: "between-ssh-probes", ran: []string{"MachineGuid", "Connect-VMNetworkAdapter"}, bootProbes: 1, restartProbes: 1, sshProbes: 1},
 	}
 	for _, point := range points {
 		for _, mode := range []string{"revoke", "reassign"} {
@@ -55,6 +60,7 @@ func TestForkNativeCheckpointStopsAtNextEffectWhenClaimChanges(t *testing.T) {
 				var b *backend
 				var forkLease string
 				var newOwner string
+				bootProbes, restartProbes := 0, 0
 				swapped := false
 				swap := func() {
 					if !swapped {
@@ -71,9 +77,18 @@ func TestForkNativeCheckpointStopsAtNextEffectWhenClaimChanges(t *testing.T) {
 					case strings.Contains(script, "Select-Object -ExpandProperty IPAddresses"):
 						return core.LocalCommandResult{Stdout: `["192.0.2.55"]`}, nil, true
 					case strings.Contains(script, "-ScriptBlock { $true }"):
-						// The PowerShell Direct readiness wait runs outside the fence.
-						if point.name == "after-restart" && findCallIndex(runner.calls, "Restart-VM") >= 0 {
-							swap()
+						// The first readiness attempt of the targeted wait fails, so
+						// the wait backs off and tries again.
+						if findCallIndex(runner.calls, "Restart-VM") < 0 {
+							bootProbes++
+							if point.name == "between-boot-probes" && bootProbes == 1 {
+								return core.LocalCommandResult{Stderr: "guest still booting"}, errors.New("exit 1"), true
+							}
+						} else {
+							restartProbes++
+							if point.name == "between-restart-probes" && restartProbes == 1 {
+								return core.LocalCommandResult{Stderr: "guest still restarting"}, errors.New("exit 1"), true
+							}
 						}
 						return core.LocalCommandResult{}, nil, true
 					case strings.Contains(script, "Invoke-Command"):
@@ -86,6 +101,7 @@ func TestForkNativeCheckpointStopsAtNextEffectWhenClaimChanges(t *testing.T) {
 				}
 				b = testBackend(runner)
 				b.checkpointSSHBudget = 5 * time.Second
+				b.guestReadyBudget = 5 * time.Second
 				probes := 0
 				b.sshReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 					probes++
@@ -95,7 +111,10 @@ func TestForkNativeCheckpointStopsAtNextEffectWhenClaimChanges(t *testing.T) {
 					return nil
 				}
 				b.sleep = func(context.Context, time.Duration) error {
-					if point.name == "between-ssh-probes" && probes > 0 {
+					switch {
+					case point.name == "between-boot-probes" && bootProbes > 0,
+						point.name == "between-restart-probes" && restartProbes > 0,
+						point.name == "between-ssh-probes" && probes > 0:
 						swap()
 					}
 					return nil
@@ -132,6 +151,9 @@ func TestForkNativeCheckpointStopsAtNextEffectWhenClaimChanges(t *testing.T) {
 				}
 				if probes != point.sshProbes {
 					t.Fatalf("readiness SSH probes=%d want %d", probes, point.sshProbes)
+				}
+				if bootProbes != point.bootProbes || restartProbes != point.restartProbes {
+					t.Fatalf("PowerShell Direct readiness attempts after import=%d after restart=%d, want %d and %d", bootProbes, restartProbes, point.bootProbes, point.restartProbes)
 				}
 				removed := findCallIndex(runner.calls, "Remove-VM -VM $candidate") >= 0
 				claim, exists, resolveErr := core.ResolveLeaseClaimForProvider(forkLease, providerName)
@@ -272,7 +294,7 @@ func TestForkNativeCheckpointHoldsClaimFenceDuringEffects(t *testing.T) {
 		defer cancel()
 		return errors.Is(core.WithLeaseClaimUnchangedContext(waitCtx, claims[0].LeaseID, claims[0], nil), context.DeadlineExceeded)
 	}
-	effects := []string{"Import-VM", "Rename-Computer", "Restart-VM", "MachineGuid", "Connect-VMNetworkAdapter"}
+	effects := []string{"Import-VM", "-ScriptBlock { $true }", "Rename-Computer", "Restart-VM", "MachineGuid", "Connect-VMNetworkAdapter"}
 	blocked := map[string]bool{}
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {

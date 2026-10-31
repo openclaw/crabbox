@@ -823,6 +823,14 @@ func (b *backend) invokeGuestScript(ctx context.Context, script string, env []st
 // waitGuestReady gates the first real guest call on authenticated PowerShell
 // Direct readiness. Each probe is bounded because early boot calls can block.
 func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error {
+	return b.waitGuestReadyGuarded(ctx, vmName, user, nil)
+}
+
+// waitGuestReadyGuarded runs each bounded readiness probe through guard when one
+// is set, so a caller can hold a claim fence around every authenticated attempt
+// while the backoff between attempts runs outside it. A guard error stops the
+// wait before the next attempt authenticates.
+func (b *backend) waitGuestReadyGuarded(ctx context.Context, vmName, user string, guard func(probe func() error) error) error {
 	script := fmt.Sprintf(
 		`%sInvoke-Command -VMName '%s' -Credential $cred -ScriptBlock { $true } -ErrorAction Stop | Out-Null`,
 		powershellCredentialPrelude(user), escapePSString(vmName),
@@ -834,18 +842,33 @@ func (b *backend) waitGuestReady(ctx context.Context, vmName, user string) error
 	// Preserve the legacy first probe on an already-canceled context; the probe
 	// and inter-attempt delay still observe the original budget context.
 	pollCtx := context.WithoutCancel(budgetCtx)
+	var guardErr error
 	result, err := shared.Poll(pollCtx, 0, b.guestRetryBackoff,
-		func(_ context.Context, delay time.Duration) error { return shared.SleepContext(budgetCtx, delay) },
+		func(_ context.Context, delay time.Duration) error { return b.sleep(budgetCtx, delay) },
 		func(context.Context) (struct{}, error) {
-			result, err := b.invokeGuestScript(budgetCtx, script, env, b.guestReadyProbeTimeout)
-			if err != nil {
-				return struct{}{}, shared.LocalCommandError("guest readiness probe", result, err)
+			probe := func() error {
+				result, err := b.invokeGuestScript(budgetCtx, script, env, b.guestReadyProbeTimeout)
+				if err != nil {
+					return shared.LocalCommandError("guest readiness probe", result, err)
+				}
+				return nil
 			}
-			return struct{}{}, nil
+			if guard == nil {
+				return struct{}{}, probe()
+			}
+			var probeErr error
+			if err := guard(func() error { probeErr = probe(); return nil }); err != nil {
+				guardErr = err
+				return struct{}{}, err
+			}
+			return struct{}{}, probeErr
 		},
 		func(_ context.Context, _ struct{}, fetchErr error) (bool, error) {
 			if fetchErr == nil {
 				return true, nil
+			}
+			if guardErr != nil {
+				return false, guardErr
 			}
 			if ctx.Err() != nil {
 				return false, ctx.Err()

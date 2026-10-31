@@ -162,9 +162,9 @@ claim once, when the named fence is entered and before the fence rereads the
 claim. `<site>` is a full caller such as `hyperv.(*backend).ReleaseLease` or its
 final method name; append `#<n>` to target the nth fence entered at that site,
 for example `ForkNativeCheckpoint#3:reassign`. The probe logs each fence entry,
-swap, admission and outcome on stderr with a `claim-fence-probe:` prefix. Run it
-only against throwaway leases; reassigned claims point at the documentation
-address `192.0.2.77`.
+swap, admission and outcome on stderr with a `claim-fence-probe:` prefix and a
+UTC `at=` time. Run it only against throwaway leases; reassigned claims point at
+the documentation address `192.0.2.77`.
 
 <!-- BEGIN GENERATED PROVIDER LIFECYCLE COVERAGE -->
 

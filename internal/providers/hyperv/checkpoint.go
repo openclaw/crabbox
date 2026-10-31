@@ -1013,13 +1013,13 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		err = errors.Join(err, cleanupErr)
 	}()
 
-	// Every ownership-sensitive host or guest effect below runs under the exact
+	// Every ownership-sensitive host or guest effect below, including each
+	// PowerShell Direct and SSH readiness attempt, runs under the exact
 	// provisional claim, so a reclaim or revocation stops the fork before its
-	// next effect. Waits run outside the fence after a claim check.
+	// next effect. Backoff between readiness attempts runs outside the fence.
 	fenced := func(action func() error) error {
 		return core.WithLeaseClaimUnchangedContext(ctx, leaseID, claim, action)
 	}
-	verifyClaim := func() error { return fenced(nil) }
 
 	var importedID string
 	if err := fenced(func() error {
@@ -1038,11 +1038,8 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		}
 	}
 	hostname := forkGuestHostname(leaseID)
-	if err := verifyClaim(); err != nil {
+	if err := b.waitForkGuestAfterImport(ctx, leaseID, claim, name, cfg.HyperV.User); err != nil {
 		return lease, err
-	}
-	if err := b.waitGuestReady(ctx, name, cfg.HyperV.User); err != nil {
-		return lease, fmt.Errorf("forked guest did not become reachable over PowerShell Direct: %w", err)
 	}
 	if err := fenced(func() error {
 		if err := b.rotateForkGuestIdentity(ctx, name, cfg.HyperV.User, publicKey, hostname); err != nil {
@@ -1052,11 +1049,8 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	}); err != nil {
 		return lease, err
 	}
-	if err := verifyClaim(); err != nil {
+	if err := b.waitForkGuestAfterRestart(ctx, leaseID, claim, name, cfg.HyperV.User); err != nil {
 		return lease, err
-	}
-	if err := b.waitGuestReady(ctx, name, cfg.HyperV.User); err != nil {
-		return lease, fmt.Errorf("forked guest did not return after identity rotation: %w", err)
 	}
 	if err := fenced(func() error {
 		if err := b.rotateForkGuestSecrets(ctx, name, cfg.HyperV.User); err != nil {
@@ -1085,6 +1079,29 @@ func (b *backend) ForkNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	}
 	committed = true
 	return lease, nil
+}
+
+// waitForkGuestAfterImport and waitForkGuestAfterRestart wait for the forked
+// guest's PowerShell Direct logon with every authenticated attempt under the
+// fork's provisional claim. A disconnected network does not isolate the guest
+// from PowerShell Direct, so a revoked or reassigned claim must stop the next
+// attempt. Separate names keep the two waits distinct in fence traces.
+func (b *backend) waitForkGuestAfterImport(ctx context.Context, leaseID string, claim core.LeaseClaim, name, user string) error {
+	if err := b.waitGuestReadyGuarded(ctx, name, user, func(probe func() error) error {
+		return core.WithLeaseClaimUnchangedContext(ctx, leaseID, claim, probe)
+	}); err != nil {
+		return fmt.Errorf("forked guest did not become reachable over PowerShell Direct: %w", err)
+	}
+	return nil
+}
+
+func (b *backend) waitForkGuestAfterRestart(ctx context.Context, leaseID string, claim core.LeaseClaim, name, user string) error {
+	if err := b.waitGuestReadyGuarded(ctx, name, user, func(probe func() error) error {
+		return core.WithLeaseClaimUnchangedContext(ctx, leaseID, claim, probe)
+	}); err != nil {
+		return fmt.Errorf("forked guest did not return after identity rotation: %w", err)
+	}
+	return nil
 }
 
 // waitForSSHReadyUnderClaim probes SSH readiness in bounded attempts, each under

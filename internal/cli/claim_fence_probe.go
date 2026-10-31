@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Test-only claim-fence probe for live authority proofs. Release builds do not
@@ -71,8 +72,10 @@ func claimFenceProbe(leaseID string, action func() error) (func() error, func(er
 	}
 }
 
+// claimFenceProbeLogf stamps each line with UTC time so a live proof can line up
+// fence decisions with guest-side events.
 func claimFenceProbeLogf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "claim-fence-probe: "+format+"\n", args...)
+	fmt.Fprintf(os.Stderr, "claim-fence-probe: at=%s "+format+"\n", append([]any{time.Now().UTC().Format(time.RFC3339Nano)}, args...)...)
 }
 
 func passClaimFenceResult(err error) error { return err }

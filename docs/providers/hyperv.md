@@ -286,9 +286,11 @@ connecting the network. Those writes come after the restart because Hyper-V's
 `Restart-VM` is a hard reset that would discard writes still in the guest's
 cache.
 The new lease's claim is recorded before the import, and each of these steps,
-plus each SSH readiness probe, runs under it. If the claim is reassigned, fork
-stops and leaves the imported VM to its new owner; if the claim is revoked,
-fork stops and removes the import.
+plus each PowerShell Direct and SSH readiness attempt, runs under it; the
+backoff between attempts does not. A disconnected network does not isolate the
+guest from PowerShell Direct, so the claim, not the network, gates every guest
+logon. If the claim is reassigned, fork stops and leaves the imported VM to its
+new owner; if the claim is revoked, fork stops and removes the import.
 Fork records exactly which disks `Import-VM` copied, including the differencing
 parents it copies with each attached disk, so release and rollback delete only
 those, never the template a parent chain may lead to outside the fork's own
