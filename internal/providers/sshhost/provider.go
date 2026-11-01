@@ -86,6 +86,9 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 	if err != nil {
 		return core.DoctorResult{}, err
 	}
+	if c == nil {
+		return core.DoctorResult{}, directError()
+	}
 	var out map[string]any
 	err = c.AgentRequest(ctx, "GET", "/v1/ssh-hosts", nil, &out)
 	return core.DoctorResult{Provider: "ssh-host", Message: "Coordinator reachable; host list reports eligible capacity"}, err

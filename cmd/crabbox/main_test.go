@@ -75,6 +75,50 @@ func TestDoctorCloudflareUsesRealProviderReadiness(t *testing.T) {
 	}
 }
 
+func TestDoctorSSHHostWithoutCoordinatorReturnsFailedJSON(t *testing.T) {
+	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("missing local doctor tool %s: %v", tool, err)
+		}
+	}
+	clearCrabboxDoctorEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(home, "missing.yaml"))
+
+	var stdout, stderr bytes.Buffer
+	err := (cli.App{Stdout: &stdout, Stderr: &stderr}).Run(
+		context.Background(),
+		[]string{"doctor", "--provider", "ssh-host", "--target", "windows", "--json"},
+	)
+	var exitErr cli.ExitError
+	if !cli.AsExitError(err, &exitErr) || exitErr.Code != 1 {
+		t.Fatalf("doctor error=%v, want exit 1; stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+	var output struct {
+		OK       bool   `json:"ok"`
+		Provider string `json:"provider"`
+		Checks   []struct {
+			Status  string            `json:"status"`
+			Check   string            `json:"check"`
+			Details map[string]string `json:"details"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatalf("doctor JSON invalid: %v\n%s", err, stdout.String())
+	}
+	if output.OK || output.Provider != "ssh-host" {
+		t.Fatalf("doctor output=%#v", output)
+	}
+	for _, check := range output.Checks {
+		if check.Check == "provider" && check.Status == "failed" && strings.Contains(check.Details["error"], "ssh-host requires a coordinator") {
+			return
+		}
+	}
+	t.Fatalf("doctor JSON missing coordinator prerequisite failure: %#v", output.Checks)
+}
+
 func clearCrabboxDoctorEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
