@@ -711,7 +711,11 @@ func boxExpiresAt(box boxData) string {
 }
 
 func boxReadyForSSH(box boxData) bool {
-	return statusReady(boxState(box)) && boxHost(box) != "" && boxSSHUser(box) != ""
+	if !statusReady(boxState(box)) || boxSSHUser(box) == "" {
+		return false
+	}
+	_, _, err := boxSSHConnection(box)
+	return err == nil
 }
 
 func boxStateFailed(status string) bool {

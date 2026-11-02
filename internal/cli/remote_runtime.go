@@ -41,10 +41,14 @@ func (r *remoteNativeRuntime) command(args ...string) string {
 	return remotePOSIXControlCommand("exec " + strings.Join(words, " "))
 }
 
-func (r *remoteNativeRuntime) runCommand(nonce string, commandBytes int, budget time.Duration) string {
-	return r.command("run", remoteruntime.Protocol, nonce, strconv.Itoa(commandBytes), "0",
+func (r *remoteNativeRuntime) runCommand(nonce string, commandBytes int, inputBytes int64, budget time.Duration, purpose, lifetime string) string {
+	milliseconds := budget / time.Millisecond
+	if budget%time.Millisecond != 0 {
+		milliseconds++
+	}
+	return r.command("run", remoteruntime.Protocol, nonce, strconv.Itoa(commandBytes), strconv.FormatInt(inputBytes, 10),
 		strconv.FormatInt(wslStageIdleTimeout.Milliseconds(), 10), strconv.FormatInt(wsl2SignalGrace.Milliseconds(), 10),
-		strconv.FormatInt(budget.Milliseconds(), 10), "preflight", "finite")
+		strconv.FormatInt(int64(milliseconds), 10), purpose, lifetime)
 }
 
 func (r *remoteNativeRuntime) close(ctx context.Context) error {

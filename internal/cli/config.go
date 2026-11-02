@@ -191,6 +191,7 @@ type Config struct {
 	Freestyle                     FreestyleConfig
 	Tenki                         TenkiConfig
 	Tensorlake                    TensorlakeConfig
+	WarpBuild                     WarpBuildConfig
 	Cua                           CuaConfig
 	OpenComputer                  OpenComputerConfig
 	CodeSandbox                   CodeSandboxConfig
@@ -1687,6 +1688,7 @@ func baseConfig() Config {
 		Freestyle:         defaultFreestyleConfig(),
 		Tenki:             defaultTenkiConfig(),
 		Tensorlake:        defaultTensorlakeConfig(),
+		WarpBuild:         defaultWarpBuildConfig(),
 		Cua:               defaultCuaConfig(),
 		OpenComputer:      defaultOpenComputerConfig(),
 		CodeSandbox:       defaultCodeSandboxConfig(),
@@ -1845,6 +1847,7 @@ type fileConfig struct {
 	Freestyle                *fileFreestyleConfig                `yaml:"freestyle,omitempty"`
 	Tenki                    *fileTenkiConfig                    `yaml:"tenki,omitempty"`
 	Tensorlake               *fileTensorlakeConfig               `yaml:"tensorlake,omitempty"`
+	WarpBuild                *fileWarpBuildConfig                `yaml:"warpbuild,omitempty"`
 	Cua                      *fileCuaConfig                      `yaml:"cua,omitempty"`
 	OpenComputer             *fileOpenComputerConfig             `yaml:"openComputer,omitempty"`
 	CodeSandbox              *fileCodeSandboxConfig              `yaml:"codeSandbox,omitempty"`
@@ -3414,6 +3417,13 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	}
 
 	{
+		applied, err := cfg.WarpBuild.applyFile(file.WarpBuild, trusted)
+		recordConfigInput(cfg, "warpbuild", inputSource, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
+	}
+	{
 		applied, err := cfg.Tensorlake.applyFile(file.Tensorlake)
 		recordConfigInput(cfg, "tensorlake", inputSource, applied.InputAccepted)
 		if applied.APIURL {
@@ -4706,6 +4716,13 @@ func applyEnv(cfg *Config) error {
 		return err
 	}
 
+	{
+		applied, err := cfg.WarpBuild.applyEnv()
+		recordConfigInput(cfg, "warpbuild", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
+	}
 	{
 		applied, err := cfg.Tensorlake.applyEnv()
 		recordConfigInput(cfg, "tensorlake", configInputEnvironment, applied.InputAccepted)

@@ -206,7 +206,7 @@ func runPOSIXPreflight(ctx context.Context, target SSHTarget, helper posixPrefli
 		if err != nil {
 			return result, err
 		}
-		remote = native.installed.runCommand(nonce, len(command), helper.nativeBudget)
+		remote = native.installed.runCommand(nonce, len(command), 0, helper.nativeBudget, "preflight", "finite")
 		// Installation is a separate size-bounded setup phase; preserve the
 		// ordinary workspace-preparation allowance after it finishes.
 		var cancelNativePrepare context.CancelFunc

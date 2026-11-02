@@ -111,6 +111,102 @@ func TestNativeCommandShortFrame(t *testing.T) {
 	}
 }
 
+func TestNativeCommandLostInputRejectsWorkerAdmission(t *testing.T) {
+	nonce := nativeNonce(t)
+	source := "printf must-not-start\n"
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+	if _, err := io.WriteString(writer, source); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// An impossible output descriptor makes attempted worker admission fail
+	// deterministically, even when the EOF watcher would beat worker output.
+	// The real guard and stage still run; only the worker uses this descriptor.
+	var limit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &limit); err != nil {
+		t.Fatal(err)
+	}
+	output := os.NewFile(uintptr(limit.Cur), "unavailable-worker-output")
+	if output == nil {
+		t.Fatal("cannot represent unavailable worker output")
+	}
+	defer output.Close()
+	var stat syscall.Stat_t
+	if err := syscall.Fstat(int(output.Fd()), &stat); !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("worker output must be unavailable: %v", err)
+	}
+	req := request{nonce: nonce, commandBytes: int64(len(source)), idle: time.Second, grace: 100 * time.Millisecond, preflight: true, watchInput: true}
+	code, err := run(t.Context(), req, reader, output, output)
+	if err != nil || code != failureCode {
+		t.Fatalf("lost lifetime attempted worker admission: code=%d error=%v", code, err)
+	}
+	record := nativeControl(t, nonce, "observe")
+	completion, err := ParseCompletion(record, nonce)
+	if err != nil || completion.State != "canceled" {
+		t.Fatalf("completion %+v: %v", completion, err)
+	}
+	if _, err := ParseCompletion(record, nativeNonce(t)); err == nil {
+		t.Fatal("accepted completion for another nonce")
+	}
+	nativeControl(t, nonce, "retire")
+	if _, err := os.Lstat(stagePath(nonce)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stage retained: %v", err)
+	}
+}
+
+func TestNativeCommandInputLifetimeAtEntry(t *testing.T) {
+	for _, state := range []string{"closed watched", "open watched", "closed finite"} {
+		t.Run(state, func(t *testing.T) {
+			nonce := nativeNonce(t)
+			source := "printf effect; exit 23\n"
+			command := nativeCommand(t, nonce, source, nil, 0, true, state != "closed finite")
+			reader, writer, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.Close()
+			defer writer.Close()
+			if _, err := io.WriteString(writer, source); err != nil {
+				t.Fatal(err)
+			}
+			// Both the complete frame and EOF precede the runtime process, not
+			// just its worker. An open pipe keeps the watched lifetime alive.
+			if state != "open watched" {
+				if err := writer.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			command.Stdin = reader
+			var diagnostic bytes.Buffer
+			command.Stderr = &diagnostic
+			output, err := command.Output()
+			code, wantOutput, wantState := 23, "effect", "worker-failed"
+			if state == "closed watched" {
+				code, wantOutput, wantState = failureCode, "", "canceled"
+			}
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != code || string(output) != wantOutput || diagnostic.Len() != 0 {
+				t.Fatalf("entry: %v, output=%q diagnostic=%q", err, output, diagnostic.String())
+			}
+			completion, err := ParseCompletion(nativeControl(t, nonce, "observe"), nonce)
+			if err != nil || completion.State != wantState || !completion.WorkerQuiesced || !completion.ScratchRemoved {
+				t.Fatalf("completion %+v: %v", completion, err)
+			}
+			nativeControl(t, nonce, "retire")
+			if _, err := os.Lstat(stagePath(nonce)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("stage retained: %v", err)
+			}
+		})
+	}
+}
+
 func TestNativeCommandCancellation(t *testing.T) {
 	for _, method := range []string{"disconnect", "signal", "hangup", "control"} {
 		t.Run(method, func(t *testing.T) {
