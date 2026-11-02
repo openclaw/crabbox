@@ -194,6 +194,9 @@ BOX_ORG
 The following describes ordinary, generated lease IDs. Fixed IDs use the shared
 engine described above and retain terminal records instead of removing claims.
 
+SSH uses the advertised endpoint, including when the sandbox has no public IP.
+Without an endpoint, Crabbox falls back to the reported IP on port 22.
+
 1. `crabbox warmup --provider boat` creates a sandbox through `box new --json`,
    verifies the original Box ID and creation timestamp (within ±5 seconds) through
    `box info`, stores

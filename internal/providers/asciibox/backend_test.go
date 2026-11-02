@@ -621,32 +621,38 @@ func TestClientRejectsSymlinkConfigFile(t *testing.T) {
 }
 
 func TestClientPollsPartialCreateOutput(t *testing.T) {
-	home := t.TempDir()
-	runner := &fakeCommandRunner{
-		configPath: home + "/Library/Application Support/ascii/box/config.json",
-		newStdout: strings.Join([]string{
-			`{"event":"created","id":"bx_2","ttlSeconds":1800}`,
-			`{"event":"state","id":"bx_2","state":"provisioning"}`,
-		}, "\n"),
-		newErr:        fmt.Errorf("exit status 1"),
-		infoResponses: []string{`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20","sshEndpoint":"198.51.100.20:19036","expiresAt":"2026-06-10T12:00:00Z"}}`},
-	}
-	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: home, runner: runner}
-	box, err := client.CreateBox(context.Background(), createRequest{TTL: 30 * time.Minute})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if box.ID != "bx_2" || boxHost(box) != "203.0.113.20" {
-		t.Fatalf("box=%#v", box)
-	}
-	if box.SSHEndpoint != "198.51.100.20:19036" {
-		t.Fatalf("ssh endpoint=%q", box.SSHEndpoint)
-	}
-	if got := boxExpiresAt(box); got != "2026-06-10T12:00:00Z" {
-		t.Fatalf("boxExpiresAt=%q, want info response expiration", got)
-	}
-	if !containsCommand(runner.commands, "box --no-update --json --org personal --api-url https://ascii.dev info bx_2") {
-		t.Fatalf("commands missing info poll: %v", runner.commands)
+	for _, ip := range []string{"203.0.113.20", ""} {
+		t.Run("public-ip="+ip, func(t *testing.T) {
+			home := t.TempDir()
+			runner := &fakeCommandRunner{
+				configPath: home + "/Library/Application Support/ascii/box/config.json",
+				newStdout: strings.Join([]string{
+					`{"event":"created","id":"bx_2","ttlSeconds":1800}`,
+					`{"event":"state","id":"bx_2","state":"provisioning"}`,
+				}, "\n"),
+				newErr:        fmt.Errorf("exit status 1"),
+				infoResponses: []string{fmt.Sprintf(`{"box":{"id":"bx_2","state":"ready","ip":%q,"sshEndpoint":"198.51.100.20:19036","expiresAt":"2026-06-10T12:00:00Z"}}`, ip)},
+			}
+			client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: home, runner: runner}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			box, err := client.CreateBox(ctx, createRequest{TTL: 30 * time.Minute})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if box.ID != "bx_2" || boxHost(box) != ip {
+				t.Fatalf("box=%#v", box)
+			}
+			if box.SSHEndpoint != "198.51.100.20:19036" {
+				t.Fatalf("ssh endpoint=%q", box.SSHEndpoint)
+			}
+			if got := boxExpiresAt(box); got != "2026-06-10T12:00:00Z" {
+				t.Fatalf("boxExpiresAt=%q, want info response expiration", got)
+			}
+			if !containsCommand(runner.commands, "box --no-update --json --org personal --api-url https://ascii.dev info bx_2") {
+				t.Fatalf("commands missing info poll: %v", runner.commands)
+			}
+		})
 	}
 }
 
@@ -744,6 +750,10 @@ func TestBoxSSHConnectionPrefersAdvertisedEndpoint(t *testing.T) {
 		{name: "no host at all is rejected", box: boxData{ID: "bx_1"}, wantErr: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			tt.box.State = "ready"
+			if got := boxReadyForSSH(tt.box); got == tt.wantErr {
+				t.Fatalf("boxReadyForSSH=%t, want %t", got, !tt.wantErr)
+			}
 			host, port, err := boxSSHConnection(tt.box)
 			if tt.wantErr {
 				if err == nil {
