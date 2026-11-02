@@ -30,12 +30,21 @@ func findSyncRepo(cfg Config, syncEnabled bool) (Repo, error) {
 	if err := validateSyncSource(cfg); err != nil {
 		return Repo{}, err
 	}
-	if !syncEnabled || effectiveSyncSource(cfg) != "directory" {
+	if effectiveSyncSource(cfg) != "directory" {
 		return findRepo()
 	}
 	root, err := os.Getwd()
 	if err != nil {
 		return Repo{}, err
+	}
+	if !syncEnabled {
+		repo, err := findRepo()
+		if err != nil {
+			return Repo{}, err
+		}
+		repo.Root = canonicalRepositoryPath(root)
+		repo.Name = filepath.Base(repo.Root)
+		return repo, nil
 	}
 	boundary, err := nearestRepositoryBoundary(root, "")
 	if err != nil {
