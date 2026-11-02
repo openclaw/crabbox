@@ -1907,9 +1907,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		return prepareErr
 	}
-	// WSL heartbeat collection is a no-op, so keep lease renewal running while
-	// size-bounded runtime setup runs outside short owner/readiness deadlines.
-	if runtimeScope.selected() && isWindowsWSL2Target(target) {
+	// Keep size-bounded runtime setup outside short owner/readiness deadlines.
+	if runtimeScope.selected() && nativeSupervisorTarget(target) {
 		target = bootstrapNetworkTarget(cfg, server, target)
 		if err := prepareRunRuntime(); err != nil {
 			return recordFailure(err)
@@ -2283,7 +2282,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if err := a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), &cfg, &server, target, identityRepo.Root, *reclaim, false, nil); err != nil {
 			return true, err
 		}
-		if runtimeScope.selected() && isWindowsWSL2Target(target) {
+		if runtimeScope.selected() && nativeSupervisorTarget(target) {
 			target = bootstrapNetworkTarget(cfg, server, target)
 			if err := prepareRunRuntime(); err != nil {
 				return true, err
