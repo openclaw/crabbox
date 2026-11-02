@@ -283,6 +283,7 @@ Catalog category: `delegated-sandbox`.
 | [tensorlake](docs/providers/tensorlake.md) | Hosted Firecracker-backed delegated execution. |
 | [upstash-box](docs/providers/upstash-box.md) | Hosted short-lived delegated sandbox. |
 | [vercel-sandbox](docs/providers/vercel-sandbox.md) | Hosted delegated Linux microVM execution. |
+| [warpbuild](docs/providers/warpbuild.md) | Standalone macOS sandboxes through the WarpBuild CLI. |
 
 ### Local virtual machines
 

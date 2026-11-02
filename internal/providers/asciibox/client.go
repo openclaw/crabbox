@@ -692,7 +692,8 @@ func (c *client) waitForBoxReady(ctx context.Context, box boxData) (boxData, err
 }
 
 func (c *client) env() []string {
-	return setEnv(setEnv(os.Environ(), "HOME", c.home), "BOX_API_KEY", c.apiKey)
+	env := setEnv(os.Environ(), "HOME", c.home)
+	return setEnv(setEnv(env, "BOX_API_KEY", c.apiKey), "BOAT_API_KEY", c.apiKey)
 }
 
 func (c *client) sshEnv() []string {
@@ -701,8 +702,11 @@ func (c *client) sshEnv() []string {
 
 func (c *client) formatError(result core.LocalCommandResult, err error) string {
 	message := strings.TrimSpace(result.Stderr)
-	if message == "" {
-		message = strings.TrimSpace(result.Stdout)
+	if stdout := strings.TrimSpace(result.Stdout); stdout != "" {
+		if message != "" {
+			message += "\n"
+		}
+		message += stdout
 	}
 	if message == "" && err != nil {
 		message = err.Error()

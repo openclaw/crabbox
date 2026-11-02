@@ -85,6 +85,7 @@ var benchmarkProviderCategories = map[string]string{
 	"vercel-sandbox":             "delegated-sandbox",
 	"vultr":                      "direct-cloud",
 	"wandb":                      "gpu-cloud",
+	"warpbuild":                  "delegated-sandbox",
 	"windows-sandbox":            "local-sandbox",
 	"xcp-ng":                     "self-hosted-virtualization",
 }

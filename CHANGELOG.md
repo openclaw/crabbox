@@ -4,10 +4,17 @@
 
 ### Added
 
+- WarpBuild: run and synchronize standalone macOS sandboxes, inspect owned leases, and pause, resume, or delete them through the native `wb` CLI. [PR 3004](https://github.com/openclaw/crabbox/pull/3004).
+
 - Hyper-V: save and resume native Windows guests with exact-claim fencing, standard lifecycle JSON receipts, a shared Node/npm warm baseline, and bounded provisioning and host operations. [PR 2975](https://github.com/openclaw/crabbox/pull/2975). Thanks @paulcam206.
 
 ### Fixed
 
+- Boat: accept a ready sandbox's SSH endpoint without requiring a public IP, preserving endpoint validation and IP fallback. [PR 3006](https://github.com/openclaw/crabbox/pull/3006). Thanks @vincentkoc.
+- Boat: retain native error output from both streams so alias warnings do not hide failures or block snapshot recovery, with existing credential redaction. [PR 3007](https://github.com/openclaw/crabbox/pull/3007). Thanks @vincentkoc.
+- Boat: keep native CLI operations on the selected Crabbox account when an ambient `BOAT_API_KEY` is present. [PR 3005](https://github.com/openclaw/crabbox/pull/3005). Thanks @vincentkoc.
+
+- Blacksmith: reuse settled command-output snapshots and prepared proof summaries during finalization, avoiding repeated bounded-tail copies while preserving failure reporting and independent evidence destinations. Thanks @vincentkoc.
 - Blacksmith: finish bounded settlement verification when the native post-stop status read exhausts reconciliation's deadline, preserving fresh identity, exact GitHub completion, caller cancellation and claim fencing without replaying work or stop. [PR 2985](https://github.com/openclaw/crabbox/pull/2985). Thanks @vincentkoc.
 - Azure: complete brokered cleanup when every claimed resource is definitively absent, retaining strict identity and ownership checks for any surviving resource.
 - Azure: clean up verified lease-owned companions that appear after an interrupted create records an empty or network-only cleanup claim, preserving original identities and deletion guards.

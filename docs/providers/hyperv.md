@@ -18,6 +18,7 @@ is the default target when `--target` is omitted.
 | SSH, Crabbox sync, cleanup | Yes |
 | Pause and resume | Yes |
 | Native checkpoint create, restore, fork, delete ([details](#checkpoints)) | Yes |
+| `crabbox cp` of one regular file over SFTP ([details](../commands/cp.md#native-windows-regular-files)) | Yes |
 
 Hyper-V must be enabled on the host (`Enable-WindowsOptionalFeature -Online
 -FeatureName Microsoft-Hyper-V-All`). The provider is Windows-only and will

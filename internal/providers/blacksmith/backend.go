@@ -275,6 +275,10 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 	}
 	// Close both streams before publishing evidence, even if one close fails.
 	appendFailure("failure capture close", errors.Join(stdoutCapture.Close(), stderrCapture.Close()), 2)
+	// The command streams have settled; freeze one proof snapshot for every
+	// reporting destination instead of repeatedly cloning the bounded tails.
+	stdoutData, stderrData := stdoutProof.Bytes(), stderrProof.Bytes()
+	proofOutput := string(stdoutData) + "\n" + string(stderrData)
 	code = result.ExitCode
 	finished := b.rt.Clock.Now()
 	if commandEnd.IsZero() {
@@ -284,13 +288,16 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 	commandPhases := core.FinishCommandPhaseTracker(phaseTracker, commandEnd)
 	total := finished.Sub(started)
 	actionsURL := shared.FirstNonBlank(stdoutProof.ActionsURL(), stderrProof.ActionsURL())
+	if actionsURL == "" {
+		actionsURL = firstBlacksmithActionsURL(proofOutput)
+	}
 	result = core.RunResult{
 		Provider:      blacksmithTestboxProvider,
 		LeaseID:       leaseID,
 		Slug:          slug,
 		CommandText:   blacksmithCommandString(req.Command, req.ShellMode),
-		LogExcerpt:    core.SelectProofLogExcerpt(strings.TrimSpace(string(stdoutProof.Bytes()) + "\n" + string(stderrProof.Bytes()))),
-		ActionsURL:    shared.FirstNonBlank(actionsURL, firstBlacksmithActionsURL(string(stdoutProof.Bytes())+"\n"+string(stderrProof.Bytes()))),
+		LogExcerpt:    core.SelectProofLogExcerpt(strings.TrimSpace(proofOutput)),
+		ActionsURL:    actionsURL,
 		ExitCode:      code,
 		Status:        result.Status,
 		ErrorKind:     result.ErrorKind,
@@ -337,7 +344,7 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 	if outcome.syncTimedOut {
 		report.BlockedStage, report.RetryLikely = "sync", "true"
 	} else if code != 0 {
-		classificationInput := string(stdoutProof.Bytes()) + "\n" + string(stderrProof.Bytes())
+		classificationInput := proofOutput
 		failurePhases := commandPhases
 		if artifactFailedSuccess {
 			classificationInput = artifactErr.Error()
@@ -363,16 +370,12 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 	if req.TimingJSON {
 		appendFailure("timing report", core.WriteTimingJSON(b.rt.Stderr, currentReport()), 1)
 	}
-	proof, proofErr := b.blacksmithProofResult(req, leaseID, slug, result.ExitCode, commandDuration, total, currentReport(), stdoutProof.Bytes(), stderrProof.Bytes(), actionsURL)
-	appendFailure("proof", proofErr, core.ExitCodeForError(proofErr, 1))
-	if proofErr == nil {
-		result.Provider = proof.Provider
-		result.LeaseID = proof.LeaseID
-		result.Slug = proof.Slug
-		result.CommandText = proof.CommandText
-		result.LogExcerpt = proof.LogExcerpt
-		result.ActionsURL = proof.ActionsURL
-		result.Artifacts = append(result.Artifacts, proof.Artifacts...)
+	if strings.TrimSpace(req.EmitProof) != "" {
+		artifacts, proofErr := persistBlacksmithRunArtifacts(req.Repo.Root, leaseID, result.ExitCode, commandDuration, total, currentReport(), stdoutData, stderrData, result)
+		appendFailure("proof", proofErr, core.ExitCodeForError(proofErr, 1))
+		if proofErr == nil {
+			result.Artifacts = append(result.Artifacts, artifacts...)
+		}
 	}
 	if result.ExitCode != 0 {
 		local, bytes, bundleErr := core.CaptureLocalFailureBundle(leaseID, core.FailureCaptureMetadata{
@@ -459,11 +462,12 @@ func (b *blacksmithProofTailBuffer) Write(p []byte) (int, error) {
 func (b *blacksmithProofTailBuffer) Bytes() []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	data := bytes.Clone(b.data.Bytes())
+	data := b.data.Bytes()
 	if !b.fullChunk && !b.data.Exceeded() {
-		return data
+		return bytes.Clone(data)
 	}
 	prefix := fmt.Appendf(nil, "[crabbox: proof stream kept last %d bytes]\n", blacksmithProofStreamCaptureBytes)
+	// Append copies the borrowed tail while the mutex still excludes writers.
 	return append(prefix, data...)
 }
 
@@ -471,27 +475,6 @@ func (b *blacksmithProofTailBuffer) ActionsURL() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.actionsURL
-}
-
-func (b *blacksmithBackend) blacksmithProofResult(req core.RunRequest, leaseID, slug string, exitCode int, commandDuration, total time.Duration, report core.TimingReport, stdoutData, stderrData []byte, actionsURL string) (core.RunResult, error) {
-	combined := strings.TrimSpace(string(stdoutData) + "\n" + string(stderrData))
-	result := core.RunResult{
-		Provider:    blacksmithTestboxProvider,
-		LeaseID:     leaseID,
-		Slug:        slug,
-		CommandText: blacksmithCommandString(req.Command, req.ShellMode),
-		LogExcerpt:  core.SelectProofLogExcerpt(combined),
-		ActionsURL:  shared.FirstNonBlank(actionsURL, firstBlacksmithActionsURL(combined)),
-	}
-	if strings.TrimSpace(req.EmitProof) == "" {
-		return result, nil
-	}
-	artifacts, err := persistBlacksmithRunArtifacts(req.Repo.Root, leaseID, exitCode, commandDuration, total, report, stdoutData, stderrData, result)
-	if err != nil {
-		return core.RunResult{}, err
-	}
-	result.Artifacts = artifacts
-	return result, nil
 }
 
 func firstBlacksmithActionsURL(text string) string {
