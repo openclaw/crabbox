@@ -702,8 +702,11 @@ func (c *client) sshEnv() []string {
 
 func (c *client) formatError(result core.LocalCommandResult, err error) string {
 	message := strings.TrimSpace(result.Stderr)
-	if message == "" {
-		message = strings.TrimSpace(result.Stdout)
+	if stdout := strings.TrimSpace(result.Stdout); stdout != "" {
+		if message != "" {
+			message += "\n"
+		}
+		message += stdout
 	}
 	if message == "" && err != nil {
 		message = err.Error()
