@@ -79,7 +79,7 @@ func newNativeRuntimeScopeForExecutable(controller, override string, discoveryEr
 		install:      prepareNativeRuntime,
 		remove:       func(ctx context.Context, runtime *remoteNativeRuntime) error { return runtime.close(ctx) },
 		ready: func(ctx context.Context, target *SSHTarget, stderr io.Writer) error {
-			probeCtx := context.WithValue(ctx, nativeRuntimeTransportProbeKey{}, true)
+			probeCtx := context.WithValue(contextWithoutNativeRuntimeAdmission(ctx), nativeRuntimeTransportProbeKey{}, true)
 			return waitForSSHReady(probeCtx, target, stderr, "native runtime transport", 2*time.Minute)
 		},
 		entries: make(map[nativeRuntimeInstallKey]*nativeRuntimeInstall),
@@ -192,7 +192,7 @@ func (s *nativeRuntimeScope) admit(ctx context.Context, target SSHTarget) (conte
 	if s.required.Capability != runtimeartifact.Supervisor {
 		return ctx, errors.New("supervisor admission requires its own capability scope")
 	}
-	if !s.selected() || !isWindowsWSL2Target(target) {
+	if !s.selected() || !nativeSupervisorTarget(target) {
 		return ctx, nil
 	}
 	if ctx.Value(nativeRuntimeScopeKey{}) != s {
@@ -204,17 +204,27 @@ func (s *nativeRuntimeScope) admit(ctx context.Context, target SSHTarget) (conte
 	return context.WithValue(ctx, nativeRuntimeAdmissionKey{}, &nativeRuntimeAdmission{lease: nativeRuntimeLease(ctx)}), nil
 }
 
+func nativeSupervisorTarget(target SSHTarget) bool {
+	return target.TargetOS == targetLinux || isWindowsWSL2Target(target)
+}
+
 func contextWithoutNativeRuntimeAdmission(ctx context.Context) context.Context {
 	return context.WithValue(ctx, nativeRuntimeAdmissionKey{}, (*nativeRuntimeAdmission)(nil))
 }
 
 func (s *nativeRuntimeScope) prepareCommandRuntime(ctx context.Context, target *SSHTarget, stderr io.Writer) (context.Context, error) {
-	if !s.selected() || !isWindowsWSL2Target(*target) {
+	if !s.selected() || !nativeSupervisorTarget(*target) {
 		return ctx, nil
 	}
 	if err := s.validateLocal(ctx, *target); err != nil {
 		return ctx, err
 	}
+	// Bind installation and command dispatch to the same invocation-owned relay.
+	preparedTarget, err := prepareServeRelayControl(ctx, *target)
+	if err != nil {
+		return ctx, err
+	}
+	*target = preparedTarget
 	// Resolve transport before reusing an installation: a previously
 	// admitted port may disappear while another advertised port stays healthy.
 	target.NoControlMaster = true
@@ -229,7 +239,7 @@ func (s *nativeRuntimeScope) prepareCommandRuntime(ctx context.Context, target *
 
 func admittedNativeRuntime(ctx context.Context, target SSHTarget) (*remoteNativeRuntime, error) {
 	admission, selected := ctx.Value(nativeRuntimeAdmissionKey{}).(*nativeRuntimeAdmission)
-	if !selected || admission == nil || !isWindowsWSL2Target(target) {
+	if !selected || admission == nil || !nativeSupervisorTarget(target) {
 		return nil, nil
 	}
 	lease := nativeRuntimeLease(ctx)

@@ -283,6 +283,11 @@ func stageWorkspaceOwnerWindowsWitness(ctx context.Context, target SSHTarget, ow
 
 func runWorkspaceOwnerBackgroundOutput(ctx context.Context, target SSHTarget, owner *workspaceOwner, remote string) (string, error) {
 	ctx = contextWithoutWorkspaceOwner(ctx)
+	if target.TargetOS == targetLinux {
+		// Intentional background helpers retain their existing owner/witness,
+		// not the foreground native command group.
+		ctx = contextWithoutNativeRuntimeAdmission(ctx)
+	}
 	if owner == nil {
 		return runSSHOutput(ctx, target, remote)
 	}

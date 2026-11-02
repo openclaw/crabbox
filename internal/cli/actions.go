@@ -671,7 +671,7 @@ func (a App) executeLocalActionsHydration(ctx context.Context, cfg Config, repo 
 	if owner != nil {
 		pid, err = runWorkspaceOwnerBackgroundOutput(startCtx, target, owner, remoteLocalActionsHydrateBackgroundPayload(plan.leaseID))
 	} else {
-		pid, err = runSSHOutput(startCtx, target, startRemote)
+		pid, err = runWorkspaceOwnerBackgroundOutput(startCtx, target, nil, startRemote)
 	}
 	if err != nil {
 		return actionsHydrationState{}, Exit(7, "start local Actions hydration on %s: %v", target.Host, err)
