@@ -69,15 +69,21 @@ func fixedBoxFixture(t *testing.T) (*backend, *fixedBoxAPI, core.AcquireRequest,
 
 func TestFixedBoxFreshReplayAndConflict(t *testing.T) {
 	b, f, req, _ := fixedBoxFixture(t)
+	f.box = testBox()
+	f.box.IP = ""
+	f.box.SSHEndpoint = "198.51.100.20:19036"
 	first, err := b.Acquire(t.Context(), req)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if first.SSH.Host != "198.51.100.20" || first.SSH.Port != "19036" {
+		t.Fatalf("fixed SSH target: %+v", first.SSH)
 	}
 	before, _ := core.ReadLeaseClaim(req.RequestedLeaseID)
 	if before.CloudID == "" || before.CloudID != first.Server.CloudID || before.ProviderScope != core.ProviderClaimScope(providerName, b.cfg) {
 		t.Fatalf("fixed acquisition lost heartbeat identity: %+v", before)
 	}
-	if view, err := b.Status(t.Context(), core.StatusRequest{ID: req.RequestedLeaseID}); err != nil || !view.Ready {
+	if view, err := b.Status(t.Context(), core.StatusRequest{ID: req.RequestedLeaseID}); err != nil || !view.Ready || view.HasHost || view.SSHHost != first.SSH.Host || view.SSHPort != first.SSH.Port {
 		t.Fatalf("fixed status: %+v %v", view, err)
 	}
 	after, _ := core.ReadLeaseClaim(req.RequestedLeaseID)
@@ -85,7 +91,7 @@ func TestFixedBoxFreshReplayAndConflict(t *testing.T) {
 		t.Fatal("status mutated fixed claim")
 	}
 	replay, err := b.Acquire(t.Context(), req)
-	if err != nil || first.Server.CloudID != replay.Server.CloudID || first.Server.ImmutableID == "" || first.Server.ImmutableID != replay.Server.ImmutableID || len(f.keys) != 1 {
+	if err != nil || first.Server.CloudID != replay.Server.CloudID || first.Server.ImmutableID == "" || first.Server.ImmutableID != replay.Server.ImmutableID || len(f.keys) != 1 || replay.SSH.Host != first.SSH.Host || replay.SSH.Port != first.SSH.Port {
 		t.Fatalf("replay allocated or changed identity: %+v, %v", replay, err)
 	}
 	for _, change := range []string{"ttl", "slug", "workdir", "scope", "generation", "id"} {
