@@ -50,6 +50,7 @@ const boxCommandOutputLimit = 8 << 20
 type createRequest struct {
 	TTL            time.Duration
 	IdempotencyKey string
+	Type           string
 }
 
 type boxIdentityError struct{ id string }
@@ -72,6 +73,7 @@ type boxData struct {
 	deletionOperationID string
 	ID                  string `json:"id"`
 	Name                string `json:"name,omitempty"`
+	Type                string `json:"type,omitempty"`
 	State               string `json:"state,omitempty"`
 	Status              string `json:"status,omitempty"`
 	MachineIP           string `json:"machineIp,omitempty"`
@@ -160,6 +162,9 @@ func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, err
 		return c.createKeyedBox(ctx, req)
 	}
 	args := []string{"new"}
+	if req.Type != "" && req.Type != "default" {
+		args = append(args, "--type", req.Type)
+	}
 	if req.TTL > 0 {
 		args = append(args, "--ttl", fmt.Sprintf("%d", int(req.TTL.Round(time.Second).Seconds())))
 	}
@@ -832,6 +837,9 @@ func decodeNewBox(output string) (boxData, error) {
 }
 
 func mergeBox(base, update boxData) boxData {
+	if update.Type != "" {
+		base.Type = update.Type
+	}
 	if base.claimCreatedAt == "" {
 		base.claimCreatedAt = core.Blank(boxCreationTime(base), boxCreationTime(update))
 	}

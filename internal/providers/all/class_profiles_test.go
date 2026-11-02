@@ -16,7 +16,7 @@ import (
 
 func TestProductionProviderClassCatalogCompleteness(t *testing.T) {
 	mappedProviders := map[string]struct{}{
-		"aws": {}, "azure": {}, "azure-sandbox": {}, "cloudflare": {}, "daytona": {}, "digitalocean": {}, "gcp": {}, "hetzner": {}, "linode": {},
+		"ascii-box": {}, "aws": {}, "azure": {}, "azure-sandbox": {}, "cloudflare": {}, "daytona": {}, "digitalocean": {}, "gcp": {}, "hetzner": {}, "linode": {},
 		"machine0": {}, "namespace-devbox": {}, "namespace-instance": {}, "ovh": {}, "phala": {}, "scaleway": {}, "tencentcloud": {}, "vultr": {},
 	}
 	counts := map[core.ProviderClassDisposition]int{}
@@ -74,8 +74,8 @@ func TestProductionProviderClassCatalogCompleteness(t *testing.T) {
 			}
 		}
 	}
-	if counts[core.ProviderClassDispositionMapped] != 17 || counts[core.ProviderClassDispositionUnmapped] != 68 || len(counts) != 2 {
-		t.Fatalf("class disposition counts=%v want mapped=17 unmapped=68", counts)
+	if counts[core.ProviderClassDispositionMapped] != 18 || counts[core.ProviderClassDispositionUnmapped] != 67 || len(counts) != 2 {
+		t.Fatalf("class disposition counts=%v want mapped=18 unmapped=67", counts)
 	}
 }
 

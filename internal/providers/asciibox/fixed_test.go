@@ -29,6 +29,7 @@ type fixedBoxAPI struct {
 
 func (f *fixedBoxAPI) CreateBox(ctx context.Context, req createRequest) (boxData, error) {
 	f.t.Helper()
+	f.createReq = req
 	f.keys = append(f.keys, req.IdempotencyKey)
 	claim, err := core.ReadLeaseClaim(f.leaseID)
 	if err != nil || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.Journal.Submission.Count != len(f.keys) || claim.FixedCreateIntent.Attempt["idempotency_key"] != req.IdempotencyKey || req.IdempotencyKey == "" || claim.ProviderScope == "" {
@@ -94,13 +95,37 @@ func TestFixedBoxFreshReplayAndConflict(t *testing.T) {
 	if err != nil || first.Server.CloudID != replay.Server.CloudID || first.Server.ImmutableID == "" || first.Server.ImmutableID != replay.Server.ImmutableID || len(f.keys) != 1 || replay.SSH.Host != first.SSH.Host || replay.SSH.Port != first.SSH.Port {
 		t.Fatalf("replay allocated or changed identity: %+v, %v", replay, err)
 	}
-	for _, change := range []string{"ttl", "slug", "workdir", "scope", "generation", "id"} {
+	if f.createReq.Type != "default" {
+		t.Fatalf("fixed create size=%q want default", f.createReq.Type)
+	}
+	legacy, err := core.FixedIntentFingerprint("ascii-box/v1\x00", struct {
+		Scope, Workdir, Slug, Pond string
+		TTL, Idle                  time.Duration
+		Keep                       bool
+	}{before.ProviderScope, b.cfg.AsciiBox.Workdir, req.RequestedSlug, core.NormalizePondName(b.cfg.Pond), b.cfg.TTL, b.cfg.IdleTimeout, req.Keep})
+	if err != nil || before.FixedCreateIntent.Fingerprint != legacy {
+		t.Fatalf("default sizing changed legacy intent: got=%s want=%s err=%v", before.FixedCreateIntent.Fingerprint, legacy, err)
+	}
+	configured := b.cfg
+	configured.Class = "fast"
+	core.MarkClassExplicit(&configured)
+	configured.ServerType, configured.ServerTypeExplicit = "default", true
+	other := NewBackend(Provider{}.Spec(), configured, b.rt).(*backend)
+	if replay, err := other.Acquire(t.Context(), req); err != nil || replay.Server.CloudID != first.Server.CloudID || len(f.keys) != 1 {
+		t.Fatalf("explicit default did not resume the old lease: %+v %v", replay, err)
+	}
+	for _, change := range []string{"ttl", "size", "class", "slug", "workdir", "scope", "generation", "id"} {
 		t.Run(change, func(t *testing.T) {
 			cfg, changed := b.cfg, req
 			original := f.box
 			switch change {
 			case "ttl":
 				changed.Options.TTL = time.Hour
+			case "size":
+				cfg.ServerType, cfg.ServerTypeExplicit = "large", true
+			case "class":
+				cfg.Class = "fast"
+				core.MarkClassExplicit(&cfg)
 			case "slug":
 				changed.RequestedSlug = "other"
 			case "workdir":
@@ -386,7 +411,7 @@ func TestFixedBoxStopCommandPreservesTombstone(t *testing.T) {
 	}
 	f.deleted = true
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte("provider: ascii-box\nasciiBox:\n  baseUrl: https://ascii.dev\n"), 0600); err != nil {
+	if err := os.WriteFile(configPath, []byte("provider: ascii-box\nclass: fast\nasciiBox:\n  baseUrl: https://ascii.dev\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("CRABBOX_CONFIG", configPath)

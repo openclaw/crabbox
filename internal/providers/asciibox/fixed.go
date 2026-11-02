@@ -35,11 +35,18 @@ func (b *backend) acquireFixed(ctx context.Context, cfg core.Config, client api,
 		Admission: &core.FixedAdmission{FreshOnly: true, KeyedRetry: &core.FixedKeyedRetry{AttemptKey: "idempotency_key", Window: asciiBoxIdempotencyWindow}},
 		DescribeIntent: func(_ context.Context, _ *core.LeaseClaim, _ bool) (core.FixedLeaseBinding, error) {
 			scope := (Provider{}).ClaimScope(cfg)
+			// Omitted sizing in existing claims meant the native default. Preserve
+			// that fingerprint while binding every nondefault type to its intent.
+			kind := cfg.ServerType
+			if kind == "default" {
+				kind = ""
+			}
 			fingerprint, err := core.FixedIntentFingerprint("ascii-box/v1\x00", struct {
 				Scope, Workdir, Slug, Pond string
 				TTL, Idle                  time.Duration
 				Keep                       bool
-			}{scope, cfg.WorkRoot, core.NormalizeLeaseSlug(req.RequestedSlug), core.NormalizePondName(cfg.Pond), ttl, cfg.IdleTimeout, req.Keep})
+				Type                       string `json:",omitempty"`
+			}{scope, cfg.WorkRoot, core.NormalizeLeaseSlug(req.RequestedSlug), core.NormalizePondName(cfg.Pond), ttl, cfg.IdleTimeout, req.Keep, kind})
 			return core.FixedLeaseBinding{ProviderScope: scope, Fingerprint: fingerprint, AllocateSlug: true, RequestedSlug: req.RequestedSlug}, err
 		},
 		Plan: func(_ context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
@@ -50,7 +57,7 @@ func (b *backend) acquireFixed(ctx context.Context, cfg core.Config, client api,
 		},
 		ObserveExact: fixedBoxObserver(cfg, client),
 		Submit: func(ctx context.Context, tx *core.FixedTransaction) (boxData, error) {
-			box, createErr := client.CreateBox(ctx, createRequest{TTL: ttl, IdempotencyKey: tx.Claim.FixedCreateIntent.Attempt["idempotency_key"]})
+			box, createErr := client.CreateBox(ctx, createRequest{TTL: ttl, Type: cfg.ServerType, IdempotencyKey: tx.Claim.FixedCreateIntent.Attempt["idempotency_key"]})
 			if concreteBoxID(box.createdID) && box.ID == box.createdID {
 				server := fixedBoxServer(cfg, box, *tx.Claim)
 				if err := tx.Observe(core.FixedResourceBinding{CloudID: box.ID, ImmutableID: server.ImmutableID, Labels: server.Labels}); err != nil {

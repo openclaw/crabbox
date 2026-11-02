@@ -83,6 +83,38 @@ Keep the same endpoint and organization selector when reusing or stopping a leas
 For fixed-ID API creation, use an organization **ID**, rather than its display
 name, in `BOX_ORG`; omit it or use `personal` for personal billing.
 
+## Machine sizes
+
+`--type` selects a native Boat size: `small` (2 vCPU / 4 GB), `default`
+(4 vCPU / 8 GB), `large` (8 vCPU / 16 GB), or `xlarge` (16 vCPU / 32 GB).
+All sizes run Linux on x86_64. `xlarge` requires Boat's $100 plan or higher;
+Boat enforces account eligibility at creation.
+
+```sh
+crabbox warmup --provider boat --type large
+crabbox run --provider boat --class fast -- pnpm test
+```
+
+Crabbox classes map to the same native sizes:
+
+| Crabbox class | Boat size |
+| --- | --- |
+| `tiny`, `small` | `small` |
+| `standard` | `default` |
+| `fast` | `large` |
+| `large`, `beast` | `xlarge` |
+
+An explicit native type takes precedence over a class. Omitted sizing preserves
+Boat's `default` size. Fixed lease IDs bind the selected size: changing it requires
+a new lease ID. Existing default-sized fixed leases retain their original intent.
+Status reports the observed native size when Boat returns it; an absent size
+remains unknown. See [Boat machine sizes](https://docs.boat.dev/machines).
+
+Earlier versions ignored classes set in configuration or `CRABBOX_DEFAULT_CLASS`
+for this provider. Those settings now select a size. To resume an existing
+default-sized fixed lease, pass `--type default`; use a new lease ID to apply a
+different size. `stop --id <lease-id>` remains available with the configured class.
+
 ## Fixed lease IDs
 
 ```sh
@@ -361,7 +393,6 @@ existing deletion-operation evidence remain separate from display metadata.
 
 ## Limitations
 
-- `--class`, `--type`, image, size, and keep-alive options are not exposed
-  because the currently integrated CLI lifecycle surface does not document them.
+- Image selection and keep-alive options are not exposed by this adapter.
 - Desktop/VNC/code features are not advertised through Crabbox for this provider.
   Use the official Boat/ASCII tools directly for interactive sessions.
