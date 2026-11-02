@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Boat: keep native CLI operations on the selected Crabbox account when an ambient `BOAT_API_KEY` is present. [PR 3005](https://github.com/openclaw/crabbox/pull/3005). Thanks @vincentkoc.
+
 - Blacksmith: reuse settled command-output snapshots and prepared proof summaries during finalization, avoiding repeated bounded-tail copies while preserving failure reporting and independent evidence destinations. Thanks @vincentkoc.
 - Blacksmith: finish bounded settlement verification when the native post-stop status read exhausts reconciliation's deadline, preserving fresh identity, exact GitHub completion, caller cancellation and claim fencing without replaying work or stop. [PR 2985](https://github.com/openclaw/crabbox/pull/2985). Thanks @vincentkoc.
 - Azure: complete brokered cleanup when every claimed resource is definitively absent, retaining strict identity and ownership checks for any surviving resource.

@@ -86,6 +86,8 @@ func TestProviderSpecAndAliases(t *testing.T) {
 
 func TestClientUsesOfficialAsciiBoxCLI(t *testing.T) {
 	t.Setenv("BOX_API_KEY", "stale_key")
+	t.Setenv("BOAT_API_KEY", "stale_boat_key")
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/synthetic-agent.sock")
 	home := t.TempDir()
 	runner := &fakeCommandRunner{configPath: home + "/Library/Application Support/ascii/box/config.json"}
 	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: home, runner: runner}
@@ -130,11 +132,13 @@ func TestClientUsesOfficialAsciiBoxCLI(t *testing.T) {
 		}
 	}
 	for _, env := range runner.env {
-		if !hasEnv(env, "BOX_API_KEY=box_key") {
-			t.Fatal("child environment missing the synthetic BOX_API_KEY")
-		}
-		if hasEnv(env, "BOX_API_KEY=stale_key") {
-			t.Fatal("child environment retained the synthetic stale BOX_API_KEY")
+		for _, key := range []string{"BOX_API_KEY", "BOAT_API_KEY"} {
+			if !hasEnv(env, key+"=box_key") {
+				t.Fatalf("child environment missing the selected %s", key)
+			}
+			if hasEnv(env, key+"=stale_key") || hasEnv(env, key+"=stale_boat_key") {
+				t.Fatalf("child environment retained a stale %s", key)
+			}
 		}
 		if !hasEnv(env, "HOME="+home) {
 			t.Fatal("child environment missing the isolated HOME")
@@ -142,6 +146,14 @@ func TestClientUsesOfficialAsciiBoxCLI(t *testing.T) {
 	}
 	if !hasEnv(runner.env[3], "SSH_AUTH_SOCK=") {
 		t.Fatal("SSH setup must disable agent identities")
+	}
+	configBytes, err := os.ReadFile(runner.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct{ Token string }
+	if err := json.Unmarshal(configBytes, &config); err != nil || config.Token != "box_key" {
+		t.Fatalf("CLI configuration does not use the selected credential: %v", err)
 	}
 }
 
