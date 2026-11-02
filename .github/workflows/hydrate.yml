@@ -62,25 +62,68 @@ jobs:
               exit 2
               ;;
           esac
-          mkdir -p "$HOME/.crabbox/actions"
-          state="$HOME/.crabbox/actions/${CRABBOX_ID}.env"
-          env_file="$HOME/.crabbox/actions/${CRABBOX_ID}.env.sh"
-          services_file="$HOME/.crabbox/actions/${CRABBOX_ID}.services"
+          state_dir="$HOME/.crabbox/actions"
+          windows_runner=
+          if [ "${RUNNER_OS:-}" = "Windows" ]; then
+            # Native Windows Crabbox reads the handoff from ProgramData, which
+            # the runner account and the SSH user share.
+            windows_runner=1
+            program_data="${PROGRAMDATA:-C:\\ProgramData}"
+            if command -v cygpath >/dev/null 2>&1; then
+              program_data="$(cygpath -u "$program_data")"
+            fi
+            state_dir="${program_data}/crabbox/actions"
+          fi
+          # Native Windows Crabbox imports the env file in PowerShell, which takes the
+          # text between the outer single quotes verbatim (apostrophes included) and
+          # needs Windows paths and a ;-separated PATH. A line break would start a
+          # new entry, so refuse one rather than split a value.
+          env_line() {
+            if [ -n "$windows_runner" ]; then
+              case "$2" in
+                *$'\n'*|*$'\r'*)
+                  echo "::error::$1 contains a line break"
+                  exit 2
+                  ;;
+              esac
+              printf "export %s='%s'\n" "$1" "$2"
+            else
+              printf 'export %s=%q\n' "$1" "$2"
+            fi
+          }
+          path_value() {
+            if [ -n "$windows_runner" ] && [ -n "$1" ] && command -v cygpath >/dev/null 2>&1; then
+              cygpath -w "$1"
+            else
+              printf '%s' "$1"
+            fi
+          }
+          path_list_value() {
+            if [ -n "$windows_runner" ] && [ -n "$1" ] && command -v cygpath >/dev/null 2>&1; then
+              cygpath -w -p "$1"
+            else
+              printf '%s' "$1"
+            fi
+          }
+          mkdir -p "$state_dir"
+          state="${state_dir}/${CRABBOX_ID}.env"
+          env_file="${state_dir}/${CRABBOX_ID}.env.sh"
+          services_file="${state_dir}/${CRABBOX_ID}.services"
           {
-            echo "export GITHUB_WORKSPACE=$(printf '%q' "$GITHUB_WORKSPACE")"
-            echo "export GITHUB_RUN_ID=$(printf '%q' "$GITHUB_RUN_ID")"
-            echo "export GITHUB_JOB=$(printf '%q' "$CRABBOX_JOB")"
-            echo "export RUNNER_TEMP=$(printf '%q' "$RUNNER_TEMP")"
-            echo "export RUNNER_TOOL_CACHE=$(printf '%q' "$RUNNER_TOOL_CACHE")"
-            echo "export PATH=$(printf '%q' "$PATH")"
+            env_line GITHUB_WORKSPACE "$(path_value "$GITHUB_WORKSPACE")"
+            env_line GITHUB_RUN_ID "$GITHUB_RUN_ID"
+            env_line GITHUB_JOB "$CRABBOX_JOB"
+            env_line RUNNER_TEMP "$(path_value "$RUNNER_TEMP")"
+            env_line RUNNER_TOOL_CACHE "$(path_value "$RUNNER_TOOL_CACHE")"
+            env_line PATH "$(path_list_value "$PATH")"
           } > "$env_file"
           {
             echo "WORKSPACE=${GITHUB_WORKSPACE}"
             echo "COMMIT=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
             echo "RUN_ID=${GITHUB_RUN_ID}"
             echo "JOB=${CRABBOX_JOB}"
-            echo "ENV_FILE=${env_file}"
-            echo "SERVICES_FILE=${services_file}"
+            echo "ENV_FILE=$(path_value "$env_file")"
+            echo "SERVICES_FILE=$(path_value "$services_file")"
             echo "READY_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } > "${state}.tmp"
           mv "${state}.tmp" "$state"

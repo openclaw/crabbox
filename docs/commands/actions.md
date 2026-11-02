@@ -198,9 +198,12 @@ runner temp/toolcache references. Unsupported or complex expressions fail with a
 suggestion to use `--github-runner`.
 
 After checkout and setup, the workflow writes the ready marker under
-`$HOME/.crabbox/actions/`. Map workflow inputs into step environment variables
-such as `CRABBOX_ID` and `CRABBOX_JOB`; do not interpolate them directly into
-shell source:
+`$HOME/.crabbox/actions/`. On native Windows runners, write the marker files under
+`%ProgramData%\crabbox\actions` instead (`/c/ProgramData/crabbox/actions` in Git
+Bash): native Windows Crabbox reads them there, a directory the runner account
+and the SSH user share. Map workflow inputs into step
+environment variables such as `CRABBOX_ID` and `CRABBOX_JOB`; do not interpolate
+them directly into shell source:
 
 ```sh
 case "$CRABBOX_ID" in
@@ -217,16 +220,30 @@ case "$CRABBOX_JOB" in
 esac
 job="$CRABBOX_JOB"
 [ -n "$job" ] || job=hydrate
-mkdir -p "$HOME/.crabbox/actions"
-state="$HOME/.crabbox/actions/${CRABBOX_ID}.env"
-env_file="$HOME/.crabbox/actions/${CRABBOX_ID}.env.sh"
-services_file="$HOME/.crabbox/actions/${CRABBOX_ID}.services"
+state_dir="$HOME/.crabbox/actions"
+if [ "${RUNNER_OS:-}" = "Windows" ]; then
+  program_data="${PROGRAMDATA:-C:\\ProgramData}"
+  if command -v cygpath >/dev/null 2>&1; then
+    program_data="$(cygpath -u "$program_data")"
+  fi
+  state_dir="${program_data}/crabbox/actions"
+fi
+mkdir -p "$state_dir"
+state="${state_dir}/${CRABBOX_ID}.env"
+env_file="${state_dir}/${CRABBOX_ID}.env.sh"
+services_file="${state_dir}/${CRABBOX_ID}.services"
+env_ref="$env_file"
+services_ref="$services_file"
+if [ "${RUNNER_OS:-}" = "Windows" ] && command -v cygpath >/dev/null 2>&1; then
+  env_ref="$(cygpath -w "$env_file")"
+  services_ref="$(cygpath -w "$services_file")"
+fi
 {
   echo "WORKSPACE=${GITHUB_WORKSPACE}"
   echo "RUN_ID=${GITHUB_RUN_ID}"
   echo "JOB=${job}"
-  echo "ENV_FILE=${env_file}"
-  echo "SERVICES_FILE=${services_file}"
+  echo "ENV_FILE=${env_ref}"
+  echo "SERVICES_FILE=${services_ref}"
   echo "READY_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "${state}.tmp"
 mv "${state}.tmp" "$state"
@@ -238,7 +255,9 @@ marker exists and `actions.workflow` is configured, `run` performs local
 hydration automatically after sync unless `--no-hydrate` or `--no-sync` is set.
 The env file should hold stable GitHub/runner context such as
 `GITHUB_WORKSPACE`, `GITHUB_RUN_ID`, `GITHUB_JOB`, `RUNNER_TEMP`, and
-`RUNNER_TOOL_CACHE` — never secrets or OIDC request tokens. Keep the workflow job
+`RUNNER_TOOL_CACHE` — never secrets or OIDC request tokens. On native Windows
+runners, write it with single-quoted Windows paths and a `;`-separated `PATH`; see
+[Actions hydration](../features/actions-hydration.md). Keep the workflow job
 alive (via `--keep-alive-minutes`) only when using `--github-runner` and service
 containers or job-scoped setup must stay running for the remote command loop.
 `crabbox stop <lease-id-or-slug>` writes the `.stop` marker before releasing the
