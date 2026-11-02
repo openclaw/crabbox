@@ -47,6 +47,25 @@ func interruptibleInput(input *os.File) (*os.File, error) {
 	return os.NewFile(uintptr(fd), "remote-runtime-input"), nil
 }
 
+func inputLifetimeLost(input *os.File) (bool, error) {
+	raw, err := input.SyscallConn()
+	if err != nil {
+		return false, err
+	}
+	var ready int
+	var pollErr error
+	err = raw.Control(func(fd uintptr) {
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		for {
+			ready, pollErr = unix.Poll(fds, 0)
+			if !errors.Is(pollErr, syscall.EINTR) {
+				break
+			}
+		}
+	})
+	return ready != 0, errors.Join(err, pollErr)
+}
+
 func (p *progressReader) Read(buffer []byte) (int, error) {
 	n, err := p.reader.Read(buffer)
 	if n > 0 {
@@ -145,7 +164,15 @@ func run(ctx context.Context, req request, stdin, stdout, stderr *os.File) (int,
 		// Only unconfirmed group cleanup retains the stage.
 		return failureCode, err
 	}
-	if canceled, err := s.canceled(ctx); canceled || err != nil {
+	canceled, err := s.canceled(ctx)
+	if !canceled && err == nil && req.watchInput {
+		// Frame reception is the only reader until this admission check. A
+		// delayed invocation can receive its whole frame after the writer has
+		// closed; do not start that workload before scheduling the EOF watcher.
+		// Readable data also ends the lifetime, just as the watcher below does.
+		canceled, err = inputLifetimeLost(stdin)
+	}
+	if canceled || err != nil {
 		if cleanupErr := g.close(); cleanupErr != nil {
 			return failureCode, errors.Join(err, cleanupErr)
 		}

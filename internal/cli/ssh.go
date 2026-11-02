@@ -768,11 +768,11 @@ func probeSSHTransport(ctx context.Context, target *SSHTarget, timeout time.Dura
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if scope, _ := ctx.Value(nativeRuntimeScopeKey{}).(*nativeRuntimeScope); scope != nil && scope.selected() && isWindowsWSL2Target(*target) {
+	if scope, _ := ctx.Value(nativeRuntimeScopeKey{}).(*nativeRuntimeScope); scope != nil && scope.selected() && nativeSupervisorTarget(*target) {
 		if err := scope.validateLocal(ctx, *target); err != nil {
 			return false
 		}
-		// Route selection precedes admission. Probe only SSH/WSL transport;
+		// Route selection precedes admission. Probe only raw transport;
 		// staging here would require an installation on the unselected route.
 		for _, port := range resolvedSSHPortCandidates(*target) {
 			if context.Cause(ctx) != nil {
@@ -780,7 +780,10 @@ func probeSSHTransport(ctx context.Context, target *SSHTarget, timeout time.Dura
 			}
 			probe := *target
 			probe.Port, probe.FallbackPorts, probe.NoControlMaster = port, []string{}, true
-			command := wsl2ProbeCommand("exit 0", "/usr/bin/env BASH_ENV=/dev/null ENV=/dev/null /bin/sh -c")
+			command := remotePOSIXControlCommand("exit 0")
+			if isWindowsWSL2Target(probe) {
+				command = wsl2ProbeCommand("exit 0", "/usr/bin/env BASH_ENV=/dev/null ENV=/dev/null /bin/sh -c")
+			}
 			err := runWSLReadinessTransport(ctx, probe, command, "2", "1")
 			if err == nil {
 				target.recordPreparedEndpoint(port)
@@ -932,10 +935,13 @@ func resolveSSHPortNoInput(ctx context.Context, target *SSHTarget, connectTimeou
 type sshTransportPreparation struct {
 	// retirementUnconfirmed records dispatch evidence independently of joined errors.
 	retirementUnconfirmed bool
+	dispatched            bool
 	command               string
 	setupMarker           string
 	direct                io.ReadSeeker
 	stage                 *wslStageSpool
+	native                *remoteNativeRuntime
+	nativeNonce           string
 	// replay borrows a finite input owner; its caller closes it after dispatch.
 	replay *replayableSSHInput
 }
@@ -1005,6 +1011,17 @@ func prepareSSHTransport(ctx context.Context, target SSHTarget, command string, 
 		}
 		return sshTransportPreparation{stage: spool}, err
 	}
+	// Finite owner metadata already has its own control lifetime. Do not turn
+	// renewals or cleanup into another supervised workload on Linux.
+	if target.TargetOS == targetLinux && !limit.control {
+		native, err := admittedNativeRuntime(ctx, target)
+		if err != nil {
+			return sshTransportPreparation{}, err
+		}
+		if native != nil {
+			return native.prepareCommand(command, input, size, limit)
+		}
+	}
 	return sshTransportPreparation{command: wrapRemoteForTarget(target, command), direct: input}, nil
 }
 
@@ -1014,6 +1031,9 @@ func (p *sshTransportPreparation) run(ctx context.Context, target *SSHTarget, co
 		return err
 	}
 	*target = preparedTarget
+	if p.native != nil {
+		return p.runNative(ctx, *target, connectTimeout, connectionAttempts, stdout, stderr)
+	}
 	if p.stage != nil {
 		p.retirementUnconfirmed = true
 		p.stage.setupMarker = p.setupMarker
@@ -1065,12 +1085,20 @@ func (p *sshTransportPreparation) runOnce(ctx context.Context, target SSHTarget,
 		return false, err
 	}
 	cmd.Stdin = input
+	if p.native != nil {
+		closeInput, inputErr := nativeCommandInput(cmd, input)
+		if inputErr != nil {
+			return false, inputErr
+		}
+		defer func() { err = errors.Join(err, closeInput()) }()
+	}
 	p.retirementUnconfirmed = true
 	defer func() {
 		// Inspect the command we own, never an arbitrary ExitError found in a
 		// joined error. OpenSSH reserves 255 for transport failure; a normal
 		// exit below that reports remote command completion. Cancellation and
 		// signaled termination cannot establish remote retirement.
+		p.dispatched = cmd.Process != nil
 		if cmd.Process == nil {
 			p.retirementUnconfirmed = false // local Start failed: no dispatch
 		} else if ctx.Err() == nil && cmd.ProcessState != nil && cmd.ProcessState.Exited() && cmd.ProcessState.ExitCode() >= 0 && cmd.ProcessState.ExitCode() < 255 {
@@ -1108,6 +1136,9 @@ func (p *sshTransportPreparation) close() error {
 	var err error
 	if p.stage != nil {
 		err = errors.Join(err, p.stage.close())
+	}
+	if p.native != nil {
+		err = errors.Join(err, p.replay.close())
 	}
 	return err
 }
