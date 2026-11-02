@@ -37,12 +37,16 @@ func findSyncRepo(cfg Config, syncEnabled bool) (Repo, error) {
 	if err != nil {
 		return Repo{}, err
 	}
+	root, err = canonicalCurrentDirectory(root)
+	if err != nil {
+		return Repo{}, err
+	}
 	if !syncEnabled {
 		repo, err := findRepo()
 		if err != nil {
 			return Repo{}, err
 		}
-		repo.Root = canonicalRepositoryPath(root)
+		repo.Root = root
 		repo.Name = filepath.Base(repo.Root)
 		return repo, nil
 	}
@@ -53,8 +57,23 @@ func findSyncRepo(cfg Config, syncEnabled bool) (Repo, error) {
 	if boundary.kind == repositoryBoundaryNativeJujutsu {
 		return Repo{}, Exit(6, "directory sync does not support native Jujutsu workspaces; use colocated Git or --no-sync")
 	}
-	root = canonicalRepositoryPath(root)
 	return Repo{Root: root, Name: filepath.Base(root)}, nil
+}
+
+func canonicalCurrentDirectory(root string) (string, error) {
+	resolved := canonicalRepositoryPath(root)
+	currentInfo, err := os.Stat(".")
+	if err != nil {
+		return "", fmt.Errorf("inspect current directory: %w", err)
+	}
+	resolvedInfo, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("inspect resolved current directory %s: %w", resolved, err)
+	}
+	if !os.SameFile(currentInfo, resolvedInfo) {
+		return "", errors.New("current directory changed while resolving directory source")
+	}
+	return resolved, nil
 }
 
 func validateDirectorySyncConfig(cfg Config) error {
