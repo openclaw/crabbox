@@ -1,7 +1,7 @@
 # checkpoint
 
-Save the state of a lease, then restore it onto another box or fork it into a
-fresh lease later. A checkpoint turns expensive one-time setup — installed
+Save the state of a lease, then restore it onto a supported existing lease or
+fork it into a fresh lease where the provider offers that capability. A checkpoint turns expensive one-time setup — installed
 dependencies, warmed caches, generated fixtures, a paused bug — into something
 you can reproduce on demand without repeating the work.
 
@@ -17,12 +17,14 @@ Subcommands: `create`, `abandon`, `list`, `inspect`, `policy`, `restore`, `fork`
 
 ## Two checkpoint kinds
 
-**Native (provider snapshot or image)** — captures the whole machine: packages,
-tools, caches, services. Stored in the provider account, so it incurs provider
-storage costs. Recorded as one of `aws-ami`, `aws-ebs-snapshot`,
+**Native (provider snapshot or image)** — captures the machine or container state
+covered by the provider, such as packages, tools, caches and services. Cloud
+resources may incur provider storage costs; local VM snapshots remain in their
+source VM bundles. Included disks, external storage and memory depend on the
+provider contract. Recorded as one of `aws-ami`, `aws-ebs-snapshot`,
 `azure-managed-image`, `azure-os-disk-snapshot`, `gcp-machine-image`,
 `gcp-disk-snapshot`, `hetzner-snapshot`, `machine0-image`,
-`parallels-snapshot`, `daytona-snapshot`, `incus-image`, or
+`parallels-snapshot`, `daytona-snapshot`, `incus-image`, `utm-snapshot`, or
 `cloudflare-container-snapshot`.
 
 **Archive (workspace tarball)** — captures only the contents of the remote
@@ -538,14 +540,19 @@ checkpoints; their lifecycle belongs exclusively to coordinator retention.
 
 ## restore
 
-Restore brings a checkpoint back onto a lease in place. This is for **archive
-checkpoints** (and Parallels VM snapshots) — a native image checkpoint cannot be
-restored in place; fork it instead.
+Restore brings an archive checkpoint or a supported provider-native snapshot
+back onto an existing lease in place. Parallels snapshots and UTM native
+checkpoints support this path. Native image checkpoints that offer forks instead
+create a new lease through `checkpoint fork`.
 
 ```sh
 # Archive checkpoint -> existing lease
 crabbox checkpoint restore chk_abc123 --id target-lease
 crabbox checkpoint restore chk_abc123 --id target-lease --clear=false
+
+# UTM native checkpoint, onto its original retained lease after guest shutdown
+crabbox checkpoint restore chk_abc123 --provider utm --id original-lease
+crabbox checkpoint restore chk_abc123 --provider utm --id original-lease --dry-run
 
 # Parallels VM snapshot, in place
 crabbox checkpoint restore --provider parallels --id "macOS Tahoe" --snapshot "macOS 26.3.1 LATEST"
@@ -558,21 +565,48 @@ crabbox checkpoint restore --provider parallels --parallels-template tahoe-lates
 --id <lease>      Required. Target lease id or slug (or Parallels VM with --snapshot).
 --provider <name> Provider hint.
 --snapshot <name> Parallels snapshot name or id to switch to in place.
---clear           Clear the target workdir before extracting (default true).
---workdir <path>  Custom restore workdir (default: the lease's workdir).
+--clear           Archive restore only: clear workdir before extracting
+                  (default true).
+--workdir <path>  Archive restore only: custom workdir (default: lease workdir).
 --dry-run         Print the restore target without changing anything.
---reclaim         Claim this lease for the current repo.
+--reclaim         Claim this lease for the current repo where supported;
+                  unavailable for UTM native restore.
 ```
 
 An archive restore uploads the tarball over SSH and extracts it into the
-workdir. Restoring a non-archive, non-Parallels native checkpoint is an error
-that points you at `checkpoint fork`.
+workdir. A provider-native in-place restore follows that provider's VM-state,
+identity and transport checks. Native images without in-place restoration direct
+you to `checkpoint fork` when their provider supports it.
+
+UTM restores only the checkpoint's **original retained lease**, already claimed
+by the current repository. The VM must be stopped before capture and restoration;
+shut down its guest gracefully and wait for UTM to report stopped. Crabbox does
+not interrupt a running VM, including when `--no-reboot=false` was supplied to
+capture. Restoring a disk-only checkpoint into a running QEMU guest is refused.
+Apple snapshots additionally require macOS 27 or later and an eligible managed
+Apple lease. A stopped suspended VM can include running state; inspection records
+UTM's actual captured state.
+
+UTM restore applies the exact native snapshot, starts or resumes that same VM,
+and reconnects through its verified SSH workload transport. It does not install
+credentials or sync the current source checkout. Supply a Crabbox checkpoint ID;
+`--snapshot` is the Parallels-only direct-snapshot route. Explicit `--clear`,
+`--workdir` and `--reclaim` are rejected for UTM native restoration, including in
+a dry run. `--dry-run` checks target and snapshot admission without changing VM
+state.
+
+UTM snapshot data lives inside the source VM's owned bundle. Releasing or cleaning
+up the lease destroys that data, so keep the lease until the checkpoints are no
+longer needed. UTM rejects `--retire-source` and does not offer checkpoint forks.
+See [UTM native checkpoints](../providers/utm.md#native-checkpoints) for included
+disks, excluded drives and host shares, pending receipts and deletion recovery.
 
 ## fork
 
-Create a fresh lease from a checkpoint. Works for both native and archive
-checkpoints, and accepts the shared lease-create flags (`--class`, `--provider`,
-`--slug`, `--type`, `--os`, etc.).
+Create a fresh lease from an archive checkpoint or a provider-native checkpoint
+whose provider offers forks. UTM snapshots restore only their original lease and
+cannot be forked. The command accepts the shared lease-create flags (`--class`,
+`--provider`, `--slug`, `--type`, `--os`, etc.).
 
 ```sh
 crabbox checkpoint fork chk_abc123 --class beast
@@ -840,6 +874,7 @@ See [Checkpoints](../features/checkpoints.md#lifecycle-and-expiry).
 | Daytona Linux (direct only) | Filesystem snapshot (`--no-reboot=false` for a running source) | Same filesystem snapshot |
 | Incus Linux containers (direct only, `--mode native`) | Private root-disk image | Same snapshot-to-image capture |
 | Parallels | VM snapshot | — |
+| UTM eligible QEMU / Apple leases (direct only) | Native snapshot of the stopped original lease; Apple requires macOS 27+ | — |
 | Cloudflare containers | Container filesystem snapshot | not supported |
 
 Brokered native checkpoints (through a configured coordinator) cover AWS

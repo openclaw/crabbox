@@ -19,9 +19,11 @@ func TestExecCheckAdmitsOnlySupportedClaimLifecycles(t *testing.T) {
 		target        string
 		brokered      bool
 		supported     bool
+		executionOnly bool
 		checkRejected bool
 	}{
 		{provider: "daytona", supported: true},
+		{provider: "utm", supported: true, executionOnly: true},
 		{provider: "daytona", brokered: true},
 		{provider: "daytona", target: "macos", checkRejected: true},
 		{provider: "aws"},
@@ -62,7 +64,7 @@ func TestExecCheckAdmitsOnlySupportedClaimLifecycles(t *testing.T) {
 				if err := json.Unmarshal(out.Bytes(), &result); err != nil {
 					t.Fatal(err)
 				}
-				if result.Provider != scenario.provider || result.Target != target || result.Execution != scenario.supported || result.CurrentRepoStop != scenario.supported {
+				if result.Provider != scenario.provider || result.Target != target || result.Execution != scenario.supported || result.CurrentRepoStop != (scenario.supported && !scenario.executionOnly) {
 					t.Fatalf("capabilities=%+v", result)
 				}
 			}

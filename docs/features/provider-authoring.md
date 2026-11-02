@@ -260,6 +260,19 @@ Core does not reinterpret provider state names as capture barriers.
 An accepted request or allocated image ID alone is insufficient. Preserve accepted
 identity through errors and persist it before any observation or readiness wait.
 
+Providers with lease-bound snapshots may implement the optional
+`NativeCheckpointRestoreProvider` independently of `NativeCheckpointForkProvider`.
+Core resolves an existing claimed lease without booting it, holds the checkpoint
+operation lock against deletion, and supplies the current claim snapshot. The
+adapter must fence that claim, check exact source/snapshot/backend/storage identity
+and eligible VM state before mutation, and reestablish verified workload transport
+before returning success. `DryRun` performs admission without VM mutation.
+`NativeCheckpointResourceRequest.CaptureEstablished` carries the owner's capture
+attestation; a pending identity alone permits cleanup, never restoration. Leave
+`NativeCheckpointCapability.RetireSource` false for a snapshot whose source
+release would destroy it, and explain its lifetime in `RetireUnsupported`.
+Do not advertise `FeatureFork` merely because in-place restore is supported.
+
 Run evidence and agent attachments follow the same rule. Declare
 `FeatureRunProof`, `FeatureRunArtifacts`, `FeatureRunDownloads`,
 `FeatureURLBridge`, `FeatureRunSession`, and `FeatureMCP` only when the provider

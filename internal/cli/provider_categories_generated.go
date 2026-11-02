@@ -81,6 +81,7 @@ var benchmarkProviderCategories = map[string]string{
 	"tensorlake":                 "delegated-sandbox",
 	"unikraft-cloud":             "service-control",
 	"upstash-box":                "delegated-sandbox",
+	"utm":                        "local-vm",
 	"vast":                       "gpu-cloud",
 	"vercel-sandbox":             "delegated-sandbox",
 	"vultr":                      "direct-cloud",

@@ -107,6 +107,7 @@ The recommendation command is workflow guidance, not a security certification.
   [Actions Hydration](features/actions-hydration.md),
   [Artifacts](features/artifacts.md), [Checkpoints](features/checkpoints.md),
   and [Interactive Desktop and VNC](features/interactive-desktop-vnc.md).
+- **macOS app workload:** [Build, package and boot-test UTM](../examples/macos-virtualization/README.md)
 - **Platform boundaries:** [Nested Execution](features/nested-execution.md)
   distinguishes WSL2, container engines, prepared KVM hosts, and local
   sandboxes.

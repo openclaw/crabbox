@@ -139,7 +139,7 @@ execution targets, not just operating systems that can install the CLI:
 | Target | Providers |
 | --- | --- |
 | Linux | Cloud VMs, local containers, self-hosted VMs, and delegated sandboxes; see the [complete list](#providers). |
-| macOS | [anthropic-sandbox-runtime](docs/providers/anthropic-sandbox-runtime.md), [aws](docs/providers/aws.md), [external](docs/providers/external.md), [lume](docs/providers/lume.md), [parallels](docs/providers/parallels.md), [ssh](docs/providers/ssh.md), [tart](docs/providers/tart.md). |
+| macOS | [anthropic-sandbox-runtime](docs/providers/anthropic-sandbox-runtime.md), [aws](docs/providers/aws.md), [external](docs/providers/external.md), [lume](docs/providers/lume.md), [parallels](docs/providers/parallels.md), [ssh](docs/providers/ssh.md), [tart](docs/providers/tart.md), [utm](docs/providers/utm.md). |
 | Native Windows | [aws](docs/providers/aws.md), [azure](docs/providers/azure.md), [external](docs/providers/external.md), [hyperv](docs/providers/hyperv.md), [mxc](docs/providers/mxc.md), [parallels](docs/providers/parallels.md), [ssh](docs/providers/ssh.md), [windows-sandbox](docs/providers/windows-sandbox.md). |
 | WSL2 | [aws](docs/providers/aws.md), [azure](docs/providers/azure.md), [external](docs/providers/external.md), [parallels](docs/providers/parallels.md), [ssh](docs/providers/ssh.md). |
 
@@ -297,6 +297,7 @@ Catalog category: `local-vm`.
 | [multipass](docs/providers/multipass.md) | Portable local Ubuntu VM. |
 | [parallels](docs/providers/parallels.md) | macOS, Linux, or Windows VM clones and snapshots from prepared sources. |
 | [tart](docs/providers/tart.md) | macOS VM testing on Apple silicon with prepared Tart images. |
+| [utm](docs/providers/utm.md) | Experimental local Linux ARM64 templates and fresh macOS guests with lease-bound native checkpoints. |
 
 ### Self-hosted virtualization
 

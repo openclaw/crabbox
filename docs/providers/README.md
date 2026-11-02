@@ -6,8 +6,8 @@ Read when:
 - debugging provider-specific provisioning, sync, or command execution;
 - changing provider registration, flags, config, or backend behavior.
 
-Crabbox's catalog contains **81 built-in providers plus the `external` plugin
-contract** (82 entries). The compiled target lists include Linux, macOS, native
+Crabbox's catalog contains **85 registered entries**, including the `external`
+plugin contract. The compiled target lists include Linux, macOS, native
 Windows, WSL2, and a Worker-module runtime. Support varies by provider: a catalog
 entry is not a promise of credentials, capacity, desktop access, or arbitrary
 shell execution. Start with `crabbox providers recommend`, then inspect the
@@ -97,7 +97,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 84 providers (48 SSH lease, 32 delegated run, 4 service control).
+Current built-in surface: 85 providers (49 SSH lease, 32 delegated run, 4 service control).
 
 Access terms:
 
@@ -185,6 +185,7 @@ Access terms:
 | [tensorlake](tensorlake.md) (`tl`, `tensorlake-sbx`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `provider-owned` · direct only; features: `run-session` | `linux`; Tensorlake Firecracker sandbox | `provider-managed`; GPU: unknown | Tensorlake; provider sandbox cleanup | Hosted Firecracker-backed delegated execution | Does not expose raw Firecracker provisioning |
 | [unikraft-cloud](unikraft-cloud.md) (`unikraftcloud`, `ukc`) | built-in; `service-control` · service-control | No SSH; `none` · direct only; features: `cleanup` | `linux`; Unikraft Cloud microVM service | `provider-managed`; GPU: unknown | Crabbox claim plus Unikraft Cloud instance; claimed instance stop and delete | Running a prebuilt OCI image as a cloud microVM service | No SSH, workspace sync, or arbitrary command execution; package the app as an OCI image first |
 | [upstash-box](upstash-box.md) (`upstash`, `box`, `upstashbox`) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `run-session` | `linux`; Upstash Box sandbox | `provider-managed`; GPU: no | Upstash; sandbox cleanup | Hosted short-lived delegated sandbox | No normal SSH access or coordinator routing |
+| [utm](utm.md) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `workspace-checkpoint`, `workspace-restore`, `claim-exec` | `linux`, `macos`; UTM QEMU or Apple VM | `local`; GPU: no | Crabbox; owned VM delete | Experimental local Linux ARM64 clones or fresh macOS guests with native snapshots | Experimental; requires a local Apple Silicon host, UTM Automation and bundle storage access; fresh macOS needs Apple silicon, macOS 27+, full Xcode and compatible IPSW; checkpoints stay inside the source lease |
 | [vast](vast.md) (`vast-ai`, `vastai`) | built-in; `ssh-lease` · gpu-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Vast.ai direct GPU instance | `provider-managed`; GPU: yes | Crabbox; destroy by default; optional stop or keep | Direct Linux GPU lease from the Vast.ai offer market | Direct-only and billable; capacity, quota, and offer availability vary |
 | [vercel-sandbox](vercel-sandbox.md) | built-in; `delegated-run` · delegated-sandbox | No SSH; `archive-sync` · direct only; features: `archive-sync`, `cleanup`, `run-session` | `linux`; Vercel Sandbox microVM | `provider-managed`; GPU: no | Vercel Sandbox; sandbox delete | Hosted delegated Linux microVM execution | Requires SDK bridge support and Vercel Sandbox auth |
 | [vultr](vultr.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `linux`; Vultr instance | `cloud`; GPU: optional | Crabbox; instance and key delete | Direct Linux VM on Vultr | Direct-only; firewall groups and VPCs must already exist |
@@ -210,7 +211,7 @@ but also supports coordinator-managed leases.
 | `gpu-cloud` | 5 | [lambda](lambda.md), [nvidia-brev](nvidia-brev.md), [runpod](runpod.md), [vast](vast.md), [wandb](wandb.md) |
 | `local-runtime` | 2 | [apple-container](apple-container.md), [local-container](local-container.md) |
 | `local-sandbox` | 4 | [anthropic-sandbox-runtime](anthropic-sandbox-runtime.md), [docker-sandbox](docker-sandbox.md), [mxc](mxc.md), [windows-sandbox](windows-sandbox.md) |
-| `local-vm` | 7 | [apple-machine](apple-machine.md), [apple-vm](apple-vm.md), [hyperv](hyperv.md), [lume](lume.md), [multipass](multipass.md), [parallels](parallels.md), [tart](tart.md) |
+| `local-vm` | 8 | [apple-machine](apple-machine.md), [apple-vm](apple-vm.md), [hyperv](hyperv.md), [lume](lume.md), [multipass](multipass.md), [parallels](parallels.md), [tart](tart.md), [utm](utm.md) |
 | `self-hosted-virtualization` | 6 | [firecracker](firecracker.md), [incus](incus.md), [kubevirt](kubevirt.md), [proxmox](proxmox.md), [serve](serve.md), [xcp-ng](xcp-ng.md) |
 | `service-control` | 4 | [cua](cua.md), [fastapi-cloud](fastapi-cloud.md), [railway](railway.md), [unikraft-cloud](unikraft-cloud.md) |
 

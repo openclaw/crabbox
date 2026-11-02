@@ -1192,13 +1192,6 @@ func TestWaitForSSHReadyRealSSHTimeoutDiagnostic(t *testing.T) {
 					}
 					target.FallbackPorts = []string{closedFallback}
 				}
-				var progress strings.Builder
-				err = waitForSSHReady(t.Context(), &target, &progress, "bootstrap", 8*time.Second)
-				if err == nil {
-					t.Fatal("failing readiness unexpectedly succeeded")
-				}
-				message := err.Error()
-				t.Logf("timeout: %s; progress: %s", message, progress.String())
 				wantAuth, wantProbe, wantPorts := "unknown", "transport", target.Port+":tcp"
 				if proxy {
 					wantPorts = "proxy"
@@ -1213,6 +1206,32 @@ func TestWaitForSSHReadyRealSSHTimeoutDiagnostic(t *testing.T) {
 						wantPorts = "proxy:ready"
 					}
 				}
+				var progress strings.Builder
+				guardCtx, guardCancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer guardCancel()
+				probeCtx, expireProbe := context.WithCancelCause(guardCtx)
+				defer expireProbe(nil)
+				// Expire the local deadline only after this complete port scan
+				// establishes the diagnostic under test. A wall-clock deadline can
+				// instead land in a later transport probe, which legitimately owns
+				// the active stage even after an earlier probe authenticated.
+				writer := writerFunc(func(p []byte) (int, error) {
+					n, err := progress.Write(p)
+					if strings.Contains(progress.String(), "ports="+wantPorts) {
+						expireProbe(context.DeadlineExceeded)
+					}
+					return n, err
+				})
+				start := time.Now()
+				err = waitForSSHReadyWithProbeContext(t.Context(), probeCtx, &target, writer, "bootstrap", start, start.Add(10*time.Second))
+				if guardCtx.Err() != nil || context.Cause(probeCtx) != context.DeadlineExceeded {
+					t.Fatalf("diagnostic observation did not expire the local probe: guard=%v cause=%v", guardCtx.Err(), context.Cause(probeCtx))
+				}
+				if err == nil {
+					t.Fatal("failing readiness unexpectedly succeeded")
+				}
+				message := err.Error()
+				t.Logf("timeout: %s; progress: %s", message, progress.String())
 				for _, want := range []string{"cause=deadline_exceeded", "authentication=" + wantAuth, "probe=" + wantProbe, "ports=" + wantPorts + ";"} {
 					if !strings.Contains(message, want) {
 						t.Errorf("timeout missing %q: %s", want, message)

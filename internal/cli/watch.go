@@ -17,7 +17,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-type watchRunExecutor func(ctx context.Context, runArgs []string) error
+type watchRunExecutor func(ctx context.Context, runArgs []string, observe func(LeaseTarget)) error
 
 var watchForbiddenRunFlags = map[string]bool{
 	"pool":                   true,
@@ -159,9 +159,7 @@ func (a App) watch(ctx context.Context, args []string) error {
 		RunArgs:        runArgs,
 		Command:        command,
 	}
-	return a.watchWithBackend(ctx, opts, repo, cfg, sshBackend, func(runCtx context.Context, iterationArgs []string) error {
-		return a.runCommand(runCtx, iterationArgs)
-	})
+	return a.watchWithBackend(ctx, opts, repo, cfg, sshBackend, a.runCommandWithLeaseObserver)
 }
 
 func watchBackendGate(backend Backend) (SSHLeaseBackend, error) {
@@ -191,7 +189,7 @@ func (a App) watchWithBackend(ctx context.Context, opts watchOptions, repo Repo,
 			return err
 		}
 		fmt.Fprintf(a.Stdout, "watch lease=%s slug=%s provider=%s idle_timeout=%s idle_exit=%s\n", lease.LeaseID, blank(ServerSlug(lease.Server), "-"), cfg.Provider, cfg.IdleTimeout, idleExit)
-		return a.watchLoop(ctx, opts, repo, cfg, lease.LeaseID, idleExit, execute)
+		return a.watchLoop(ctx, opts, repo, cfg, lease.LeaseID, idleExit, execute, nil)
 	}
 	idleExit, err := watchEffectiveIdleExit(opts, cfg.IdleTimeout)
 	if err != nil {
@@ -214,7 +212,31 @@ func (a App) watchWithBackend(ctx context.Context, opts watchOptions, repo Repo,
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "leased %s slug=%s provider=%s idle_timeout=%s idle_exit=%s\n", lease.LeaseID, blank(ServerSlug(lease.Server), "-"), cfg.Provider, cfg.IdleTimeout, idleExit)
-	return a.watchLoop(ctx, opts, repo, cfg, lease.LeaseID, idleExit, execute)
+	observe := func(updated LeaseTarget) {
+		if !watchLeaseTargetMatches(lease, updated) {
+			fmt.Fprintln(a.Stderr, "warning: watch ignored an iteration target outside its held lease identity")
+			return
+		}
+		lease = cloneRunLeaseTarget(updated)
+	}
+	return a.watchLoop(ctx, opts, repo, cfg, lease.LeaseID, idleExit, execute, observe)
+}
+
+// New authority must come from this watch's owned iteration, for the same
+// repository and resource. A current-store lookup is not an ownership handoff.
+func watchLeaseTargetMatches(held, updated LeaseTarget) bool {
+	if held.LeaseID != updated.LeaseID || held.Server.Provider != updated.Server.Provider ||
+		held.Server.CloudID != updated.Server.CloudID || held.Server.ID != updated.Server.ID ||
+		held.Server.ImmutableID != updated.Server.ImmutableID {
+		return false
+	}
+	before, beforeExists, beforeSet := ServerLeaseClaimSnapshot(held.Server)
+	after, afterExists, afterSet := ServerLeaseClaimSnapshot(updated.Server)
+	return beforeSet && beforeExists && afterSet && afterExists &&
+		before.LeaseID == after.LeaseID && before.Provider == after.Provider &&
+		before.ProviderScope == after.ProviderScope && before.CloudID == after.CloudID &&
+		before.CloudNumericID == after.CloudNumericID && before.CloudImmutableID == after.CloudImmutableID &&
+		before.RepoRoot == after.RepoRoot && before.Slug == after.Slug
 }
 
 func watchEffectiveIdleExit(opts watchOptions, idleTimeout time.Duration) (time.Duration, error) {
@@ -230,7 +252,7 @@ func watchEffectiveIdleExit(opts watchOptions, idleTimeout time.Duration) (time.
 	return opts.IdleExit, nil
 }
 
-func (a App) watchLoop(ctx context.Context, opts watchOptions, repo Repo, cfg Config, leaseID string, idleExit time.Duration, execute watchRunExecutor) error {
+func (a App) watchLoop(ctx context.Context, opts watchOptions, repo Repo, cfg Config, leaseID string, idleExit time.Duration, execute watchRunExecutor, observe func(LeaseTarget)) error {
 	session := &watchSession{
 		root:     repo.Root,
 		leaseID:  leaseID,
@@ -240,6 +262,7 @@ func (a App) watchLoop(ctx context.Context, opts watchOptions, repo Repo, cfg Co
 		idleExit: idleExit,
 		cfg:      cfg,
 		execute:  execute,
+		observe:  observe,
 		stderr:   a.Stderr,
 	}
 	return session.run(ctx)
@@ -254,6 +277,7 @@ type watchSession struct {
 	idleExit       time.Duration
 	cfg            Config
 	execute        watchRunExecutor
+	observe        func(LeaseTarget)
 	stderr         io.Writer
 	excludes       SyncExcludeRules
 	trackedRegular map[string]struct{}
@@ -329,7 +353,9 @@ func (s *watchSession) run(ctx context.Context) error {
 		}
 		running = true
 		go func() {
-			runDone <- s.execute(iterCtx, iterationArgs)
+			// The final target handoff completes before runDone publishes exit.
+			// Every loop exit joins this iteration before outer cleanup reads it.
+			runDone <- s.execute(iterCtx, iterationArgs, s.observe)
 		}()
 	}
 	awaitRun := func() {

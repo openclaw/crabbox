@@ -567,6 +567,7 @@ internal/providers/proxmox              # Proxmox VE SSH lease backend
 internal/providers/parallels            # Parallels macOS VM host SSH lease backend
 internal/providers/localcontainer       # local Docker container SSH backend
 internal/providers/multipass            # Canonical Multipass local Ubuntu VM SSH backend
+internal/providers/utm                  # Local UTM prepared Linux QEMU clone SSH backend
 internal/providers/ssh                  # static / BYO SSH backend
 internal/providers/daytona              # Daytona SSH lease + delegated SDK backend
 internal/providers/kubevirt             # generic KubeVirt SSH backend

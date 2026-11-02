@@ -1112,6 +1112,20 @@
     "auth": "API key via UPSTASH_BOX_API_KEY or CRABBOX_UPSTASH_BOX_API_KEY; delegated remote sandbox auth",
     "docs": "upstash-box.md"
   },
+  "utm": {
+    "status": "built-in",
+    "category": "local-vm",
+    "substrate": "UTM QEMU or Apple VM",
+    "location": "local",
+    "ssh": "crabbox-managed",
+    "sync": "crabbox-sync",
+    "gpu": "no",
+    "lifecycle": "Crabbox",
+    "cleanup": "owned VM delete",
+    "bestFit": "Experimental local Linux ARM64 clones or fresh macOS guests with native snapshots",
+    "caveat": "Experimental; requires a local Apple Silicon host, UTM Automation and bundle storage access; fresh macOS needs Apple silicon, macOS 27+, full Xcode and compatible IPSW; checkpoints stay inside the source lease",
+    "docs": "utm.md"
+  },
   "vast": {
     "status": "built-in",
     "category": "gpu-cloud",

@@ -38,6 +38,9 @@ do not prove credentials, connectivity, capacity, or an existing lease's state.
 
 Direct Daytona initially supports both capabilities for completed fixed-ID leases
 through its existing native activity renewal and fixed-lease release fence.
+UTM also supports claim-fenced execution on completed, owned Linux or macOS SSH leases.
+Its existing lease IDs are not caller-supplied fixed IDs, so `exec --check --provider utm` reports `execution:true` and `currentRepoStop:false`.
+
 Ordinary Daytona leases and incomplete fixed acquisitions are rejected before
 native access preparation; use `run` for ordinary leases. Other providers,
 including AWS and Machine0, and coordinator
@@ -77,8 +80,8 @@ not a local interactive terminal UI. A controlling-terminal stdin is rejected;
 redirect from `/dev/null` when the command needs no input.
 
 The transport supports Linux and macOS SSH targets whose provider implements
-execution-specific claim admission; initial support is Daytona fixed-ID Linux
-leases. Unsupported providers and Windows targets
+execution-specific claim admission; supported providers include Daytona fixed-ID Linux leases and completed UTM
+Linux leases. Unsupported providers and Windows targets
 are rejected; there is no raw-credential fallback. Provider-native proxy routes
 are retained through Crabbox's private SSH transport.
 
