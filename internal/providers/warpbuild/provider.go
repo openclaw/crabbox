@@ -2,6 +2,7 @@ package warpbuild
 
 import (
 	"flag"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -65,6 +66,7 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	if err := p.ValidateConfig(cfg); err != nil {
 		return nil, err
 	}
+	cfg.WarpBuild.Workdir = path.Clean(strings.TrimSpace(cfg.WarpBuild.Workdir))
 	return &backend{cfg: cfg, rt: rt}, nil
 }
 

@@ -47,6 +47,11 @@ Only Crabbox-owned local claims can be reused or deleted. Before an operation,
 the adapter compares the sandbox's immutable ID and creation time with the
 claim. A matching name alone does not establish ownership.
 
+The native CLI addresses effects by sandbox name, without an atomic immutable-ID
+condition. Do not delete and recreate an active Crabbox sandbox under the same
+name. Crabbox's identity read detects existing replacements, but cannot fence a
+replacement made afterward by another trusted operator in the WarpBuild account.
+
 ## Lifetime and limitations
 
 WarpBuild's documented native lifetime is seven days, including paused time.

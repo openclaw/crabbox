@@ -109,6 +109,31 @@ func TestRunPreservesCommandExitAndDeletesOwnedSandbox(t *testing.T) {
 	}
 }
 
+func TestConfiguredRunUsesNormalizedWorkdir(t *testing.T) {
+	native := &nativeFixture{}
+	b, _, _ := fixtureBackend(t, native)
+	b.cfg.WarpBuild.Workdir = " /Users/runner/project//build/../work "
+	configured, err := (Provider{}).Configure(b.cfg, b.rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = configured.(core.DelegatedRunBackend).Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir()}, NoSync: true, Command: []string{"task-command"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range native.calls {
+		if call.Args[len(call.Args)-1] != "task-command" {
+			continue
+		}
+		// wb's -c contract selects the directory used by the remote command.
+		if len(call.Args) < 6 || call.Args[4] != "-c" || call.Args[5] != "/Users/runner/project/work" {
+			t.Fatalf("command did not use the normalized workspace: %q", call.Args)
+		}
+		return
+	}
+	t.Fatal("workload did not reach wb")
+}
+
 func TestStopRejectsReplacementAndRetainsFailedDeletion(t *testing.T) {
 	for _, replacement := range []bool{false, true} {
 		t.Run(map[bool]string{false: "failed-delete", true: "replacement"}[replacement], func(t *testing.T) {
