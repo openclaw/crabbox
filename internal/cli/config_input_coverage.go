@@ -84,6 +84,7 @@ var canonicalConfigInputOwners = [...]configInputOwner{
 	"vercel-sandbox",
 	"vultr",
 	"wandb",
+	"warpbuild",
 	"windows-sandbox",
 	"xcp-ng",
 }
