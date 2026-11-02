@@ -157,12 +157,49 @@ func TestClientUsesOfficialAsciiBoxCLI(t *testing.T) {
 	}
 }
 
+func TestClientCheckPreservesBothErrorStreams(t *testing.T) {
+	home := t.TempDir()
+	const stdoutSecret = "box_stdoutFixture"
+	const stderrSecret = "boat_stderrFixture"
+	c := &client{
+		apiKey: "synthetic-key", apiURL: "https://ascii.dev", cliPath: "box", home: home,
+		runner: boxCommandRunnerFunc(func(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+			switch req.Args[len(req.Args)-1] {
+			case "status":
+				return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"config":{"path":%q}}`, filepath.Join(home, "config.json"))}, nil
+			case "limits":
+				return core.LocalCommandResult{
+					Stdout: `{"error":"quota exhausted","credential":"` + stdoutSecret + `"}`,
+					Stderr: "legacy alias warning: " + stderrSecret,
+				}, errors.New("exit status 1")
+			default:
+				t.Fatalf("unexpected command: %v", req.Args)
+				return core.LocalCommandResult{}, nil
+			}
+		}),
+	}
+	err := c.Check(t.Context())
+	if err == nil {
+		t.Fatal("Check succeeded after native failure")
+	}
+	for _, text := range []string{"quota exhausted", "legacy alias warning", "box_REDACTED", "boat_REDACTED"} {
+		if !strings.Contains(err.Error(), text) {
+			t.Errorf("error %q lost %q", err, text)
+		}
+	}
+	if strings.Contains(err.Error(), stdoutSecret) || strings.Contains(err.Error(), stderrSecret) {
+		t.Fatalf("error leaked a synthetic credential: %v", err)
+	}
+}
+
 func TestReleaseBoxRecoversFromRecentSnapshotGuard(t *testing.T) {
+	guard := snapshotGuardOutcome()
+	guard.result.Stderr = "Warning: the box command is deprecated; use boat."
 	runner := &releaseCommandRunner{
 		configPath: filepath.Join(t.TempDir(), "config.json"),
 		outcomes: map[string][]commandOutcome{
-			"stop":     {snapshotGuardOutcome()},
-			"delete":   {snapshotGuardOutcome(), deletionOutcome(testDeletionID, "bx_guard", "box", "pending")},
+			"stop":     {guard},
+			"delete":   {guard, deletionOutcome(testDeletionID, "bx_guard", "box", "pending")},
 			"deletion": {deletionOutcome(testDeletionID, "bx_guard", "box", "completed")},
 			"extend":   {{result: core.LocalCommandResult{Stdout: `{"id":"bx_guard","archiveAfter":"soon"}`}}},
 			"info": {
