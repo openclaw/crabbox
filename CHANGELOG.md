@@ -4,7 +4,7 @@
 
 ### Added
 
-- WarpBuild: run and synchronize standalone macOS sandboxes, inspect owned leases, and pause, resume, or delete them through the native `wb` CLI.
+- WarpBuild: run and synchronize standalone macOS sandboxes, inspect owned leases, and pause, resume, or delete them through the native `wb` CLI. [PR 3004](https://github.com/openclaw/crabbox/pull/3004).
 
 - Hyper-V: save and resume native Windows guests with exact-claim fencing, standard lifecycle JSON receipts, a shared Node/npm warm baseline, and bounded provisioning and host operations. [PR 2975](https://github.com/openclaw/crabbox/pull/2975). Thanks @paulcam206.
 
