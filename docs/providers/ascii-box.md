@@ -131,6 +131,13 @@ Crabbox stores the returned ID before readiness or SSH preparation. Identical
 replays look up that exact ID and verify its creation timestamp within the
 tolerance described below, plus its recorded scope. Changed intent, scope, or native identity produces `lease_id_conflict`.
 
+To reuse an owned fixed lease from a different checkout, pass `run --id <lease-id>
+--reclaim`. Crabbox verifies the same native Box before transferring local
+repository ownership; it retains the original create intent and lifecycle
+policy. Reclaim cannot move claims that have entered cleanup or whose recorded
+no-env policy is incompatible with the request. Status and stop do not transfer
+repository ownership.
+
 ### Native identity and timestamp tolerance
 
 Identity requires an exact Box `id` match and a valid API `createdAt` within
