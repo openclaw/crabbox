@@ -21,14 +21,6 @@ func RegisterAsciiBoxProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 }
 
 func ApplyAsciiBoxProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	if cfg.Provider == providerName || cfg.Provider == "ascii" || cfg.Provider == "asciibox" || cfg.Provider == "ascii-box" {
-		if core.FlagWasSet(fs, "class") {
-			return core.Exit(2, "--class is not supported for provider=%s", providerName)
-		}
-		if core.FlagWasSet(fs, "type") {
-			return core.Exit(2, "--type is not supported for provider=%s", providerName)
-		}
-	}
 	v, ok := values.(flagValues)
 	if !ok {
 		return nil

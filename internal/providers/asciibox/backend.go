@@ -39,6 +39,15 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if err := validateBoxType(cfg.ServerType); err != nil {
+		return core.LeaseTarget{}, err
+	}
+	if core.IsArchitectureExplicit(cfg) {
+		architecture, err := core.NormalizeArchitecture(cfg.Architecture)
+		if err != nil || architecture != core.ArchitectureAMD64 {
+			return core.LeaseTarget{}, core.Exit(2, "provider=ascii-box supports only amd64 machines")
+		}
+	}
 	client, err := newAPI(cfg, b.rt)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -57,7 +66,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	}
 	cfg.TTL = ttl
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s ttl=%s\n", providerName, leaseID, slug, core.Blank(ttl.String(), "-"))
-	box, createErr := client.CreateBox(ctx, createRequest{TTL: ttl})
+	box, createErr := client.CreateBox(ctx, createRequest{TTL: ttl, Type: cfg.ServerType})
 	if !concreteBoxID(box.createdID) || box.ID != box.createdID {
 		if createErr != nil {
 			return core.LeaseTarget{}, fmt.Errorf("ascii-box creation did not establish an original Box ID; retaining any resource: %w", createErr)
@@ -527,6 +536,7 @@ func (b *backend) configForRun() (core.Config, error) {
 		return core.Config{}, err
 	}
 	cfg.WorkRoot = cleaned
+	cfg.ServerType = (Provider{}).ServerTypeForConfig(cfg)
 	return cfg, nil
 }
 
@@ -569,6 +579,11 @@ func boxServerWithLabels(cfg core.Config, box boxData, leaseID, slug string, lab
 	labels["ascii_box_scope"] = (Provider{}).ClaimScope(cfg)
 	labels[boxCreationLabel] = boxCreationTime(box)
 	labels["box_name"] = box.Name
+	if box.Type != "" {
+		labels["box_type"] = box.Type
+	} else {
+		delete(labels, "box_type")
+	}
 	labels["box_state"] = boxState(box)
 	labels["state"] = boxState(box)
 	labels["ssh_user"] = boxSSHUser(box)
@@ -580,7 +595,7 @@ func boxServerWithLabels(cfg core.Config, box boxData, leaseID, slug string, lab
 		Status:   boxState(box),
 		Labels:   labels,
 	}
-	server.ServerType.Name = "ascii-box"
+	server.ServerType.Name = box.Type
 	server.PublicNet.IPv4.IP = boxHost(box)
 	return server
 }
