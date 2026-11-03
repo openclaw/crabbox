@@ -1027,6 +1027,7 @@ func copyLocalFileToTarget(ctx context.Context, target SSHTarget, localPath, rem
 	}
 	defer func() { err = errors.Join(err, session.Close()) }()
 	handle := pondMeshExecCommand(ctx, target, "scp", resolvedSCPUploadArgs(session, target, localPath, remotePath)...)
+	applyNativeSSHChildEnvironment(handle.cmd)
 	var output bytes.Buffer
 	handle.cmd.Stdout = &output
 	handle.cmd.Stderr = &output

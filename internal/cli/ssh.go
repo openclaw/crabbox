@@ -305,6 +305,7 @@ func sshCommandContext(ctx context.Context, target SSHTarget, args ...string) *e
 	// drain so cancellation cannot strand the caller in Cmd.Wait.
 	cmd.WaitDelay = sshCommandWaitDelay
 	applyTargetChildEnvironment(cmd, target)
+	applyNativeSSHChildEnvironment(cmd)
 	return cmd
 }
 

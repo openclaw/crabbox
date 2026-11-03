@@ -21,9 +21,8 @@ import (
 )
 
 const (
-	windowsSFTPTimeout          = 9 * time.Minute
-	windowsSFTPCleanup          = 30 * time.Second
-	windowsSFTPInheritedFDState = "c28fc6f98a2c44abbbd89d6a3037d0d9_POSIX_FD_STATE"
+	windowsSFTPTimeout = 9 * time.Minute
+	windowsSFTPCleanup = 30 * time.Second
 )
 
 type windowsSFTPMetadata struct {
@@ -461,15 +460,7 @@ func runWindowsSFTPProcess(ctx context.Context, target SSHTarget, name string, a
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	handle := pondMeshExecCommand(ctx, target, name, args...)
-	if runtime.GOOS == "windows" {
-		env := handle.cmd.Env
-		if env == nil {
-			env = os.Environ()
-		}
-		// Go supplies synchronous file/pipe handles. An inherited Win32
-		// OpenSSH socket-mode hint would make the child misread those handles.
-		handle.cmd.Env = append(childEnvironmentWithout(env, "OPENSSH_STDIO_MODE", windowsSFTPInheritedFDState), "OPENSSH_STDIO_MODE=nonsock_sync")
-	}
+	applyNativeSSHChildEnvironment(handle.cmd)
 	handle.cmd.WaitDelay = sshCommandWaitDelay
 	stdout := windowsSFTPOutput{overflow: cancel}
 	stderr := newSynchronizedBuffer(4096)
