@@ -2,31 +2,45 @@
 
 ## Unreleased
 
-### Changed
+## 0.81.0 - 2026-11-03
 
-- Batch main CodeQL security scans every six hours while retaining pull request and manual analysis and the Dependabot merge gate. [PR 3014](https://github.com/openclaw/crabbox/pull/3014). Thanks @vincentkoc.
+### Highlights
+
+- **Checkpoint and inspect native Hyper-V Windows guests.** Save, restore, and fork checkpoints with fresh identities, and capture interactive desktops, screenshots, videos, and desktop proof. [PR 2989](https://github.com/openclaw/crabbox/pull/2989), [PR 2990](https://github.com/openclaw/crabbox/pull/2990). Thanks @paulcam206, @RomneyDa and @Copilot.
+- **Run standalone macOS sandboxes on WarpBuild.** Synchronize commands and manage owned leases through the native `wb` CLI. [PR 3004](https://github.com/openclaw/crabbox/pull/3004). Thanks @vincentkoc.
+
+### Upgrade notes
+
+- New Hyper-V leases power off during host shutdown or reboot instead of saving their memory, avoiding memory-sized state files on the VM drive. Use `crabbox pause` before planned maintenance to preserve memory. `crabbox resume` rejects powered-off VMs with exit 4; release them with `crabbox stop`. Existing leases retain their original setting. [PR 2991](https://github.com/openclaw/crabbox/pull/2991). Thanks @paulcam206 and @RomneyDa.
 
 ### Added
 
 - Boat: opt into native account environment isolation with `asciiBox.noEnv` or `--ascii-box-no-env`, retaining creation policy across fixed leases and blocking incompatible execution reuse. [PR 3010](https://github.com/openclaw/crabbox/pull/3010). Thanks @vincentkoc.
 - Boat: select native machine sizes with `--type` or Crabbox classes for ordinary and fixed-ID leases, preserving existing default-sized lease recovery. [PR 3003](https://github.com/openclaw/crabbox/pull/3003). Thanks @vincentkoc.
-- WarpBuild: run and synchronize standalone macOS sandboxes, inspect owned leases, and pause, resume, or delete them through the native `wb` CLI. [PR 3004](https://github.com/openclaw/crabbox/pull/3004).
-
+- WarpBuild: run and synchronize standalone macOS sandboxes, inspect owned leases, and pause, resume, or delete them through the native `wb` CLI. [PR 3004](https://github.com/openclaw/crabbox/pull/3004). Thanks @vincentkoc.
 - Hyper-V: save and resume native Windows guests with exact-claim fencing, standard lifecycle JSON receipts, a shared Node/npm warm baseline, and bounded provisioning and host operations. [PR 2975](https://github.com/openclaw/crabbox/pull/2975). Thanks @paulcam206.
+- Windows copy: transfer one regular file to or from native Windows leases with `crabbox cp` over SFTP, private staging, size and SHA-256 checks, and atomic destination replacement under the exact lease claim. [PR 2988](https://github.com/openclaw/crabbox/pull/2988). Thanks @paulcam206 and @Copilot.
+- Hyper-V: create, restore, fork, and delete native Windows checkpoints; restore only the source lease, give forks fresh VM, network, and guest identities, and preserve exact claim fencing. [PR 2989](https://github.com/openclaw/crabbox/pull/2989). Thanks @paulcam206, @RomneyDa and @Copilot.
+- Hyper-V: add `--desktop`, probe-only `--browser`, and screenshot, video, and desktop-proof support for native Windows guests, capturing through the lease user's interactive session. [PR 2990](https://github.com/openclaw/crabbox/pull/2990). Thanks @paulcam206 and @RomneyDa.
+
+### Changed
+
+- Batch main CodeQL security scans every six hours while retaining pull request and manual analysis and the Dependabot merge gate. [PR 3014](https://github.com/openclaw/crabbox/pull/3014). Thanks @vincentkoc.
 
 ### Fixed
 
 - Sync: report bounded seeded-delta fallback reasons with `--debug` while preserving full-manifest fallback and keeping raw probe output private. [PR 3016](https://github.com/openclaw/crabbox/pull/3016). Thanks @vincentkoc.
+- Hyper-V: use `AutomaticStopAction=TurnOff` for new leases so running guests do not reserve memory-sized state files on the VM drive. [PR 2991](https://github.com/openclaw/crabbox/pull/2991). Thanks @paulcam206 and @RomneyDa.
+- Linux commands: complete release installations use the matching native runtime for foreground commands, prevent disconnected invocations from starting workloads, and require exact completion and retirement before confirming cancellation cleanup; unknown retirement retains its stage locator without automatic replay. [PR 3001](https://github.com/openclaw/crabbox/pull/3001). Thanks @roboclaw-bot and @galiniliev.
 - Boat: honor explicit fixed-lease reclaim across checkouts after native identity and execution-policy checks, preserving the create intent and cleanup ownership. [PR 3013](https://github.com/openclaw/crabbox/pull/3013). Thanks @vincentkoc.
 - Boat: accept a ready sandbox's SSH endpoint without requiring a public IP, preserving endpoint validation and IP fallback. [PR 3006](https://github.com/openclaw/crabbox/pull/3006). Thanks @vincentkoc.
 - Boat: retain native error output from both streams so alias warnings do not hide failures or block snapshot recovery, with existing credential redaction. [PR 3007](https://github.com/openclaw/crabbox/pull/3007). Thanks @vincentkoc.
 - Boat: keep native CLI operations on the selected Crabbox account when an ambient `BOAT_API_KEY` is present. [PR 3005](https://github.com/openclaw/crabbox/pull/3005). Thanks @vincentkoc.
-
 - Sync benchmarks: reject missing, duplicate or invalid phase results before reporting comparisons, preserve failed evidence as strict JSON, and require explicit expected phase names for custom Go regex selectors. [PR 3011](https://github.com/openclaw/crabbox/pull/3011). Thanks @vincentkoc.
-- Blacksmith: reuse settled command-output snapshots and prepared proof summaries during finalization, avoiding repeated bounded-tail copies while preserving failure reporting and independent evidence destinations. Thanks @vincentkoc.
+- Blacksmith: reuse settled command-output snapshots and prepared proof summaries during finalization, avoiding repeated bounded-tail copies while preserving failure reporting and independent evidence destinations. [PR 2987](https://github.com/openclaw/crabbox/pull/2987). Thanks @vincentkoc.
 - Blacksmith: finish bounded settlement verification when the native post-stop status read exhausts reconciliation's deadline, preserving fresh identity, exact GitHub completion, caller cancellation and claim fencing without replaying work or stop. [PR 2985](https://github.com/openclaw/crabbox/pull/2985). Thanks @vincentkoc.
-- Azure: complete brokered cleanup when every claimed resource is definitively absent, retaining strict identity and ownership checks for any surviving resource.
-- Azure: clean up verified lease-owned companions that appear after an interrupted create records an empty or network-only cleanup claim, preserving original identities and deletion guards.
+- Azure: complete brokered cleanup when every claimed resource is definitively absent, retaining strict identity and ownership checks for any surviving resource. [PR 2984](https://github.com/openclaw/crabbox/pull/2984). Thanks @steipete.
+- Azure: clean up verified lease-owned companions that appear after an interrupted create records an empty or network-only cleanup claim, preserving original identities and deletion guards. [PR 2983](https://github.com/openclaw/crabbox/pull/2983). Thanks @steipete.
 - Parallels: wait for DHCP instead of probing SSH on a self-assigned link-local address, preserving the startup deadline and fresh-clone retry with an address-specific diagnostic. [PR 2981](https://github.com/openclaw/crabbox/pull/2981). Thanks @rustanacexd.
 - Docs: directory sync documentation now says the source root is the directory Crabbox runs from and that `run` has no `--workdir` flag. [PR 2982](https://github.com/openclaw/crabbox/pull/2982). Thanks @KrasimirKralev.
 - Coordinator recovery: preview and retire an exact interrupted create request after its cancellation token is lost, preserving ownership, generation checks, and pending cleanup evidence. [PR 2980](https://github.com/openclaw/crabbox/pull/2980). Thanks @vincentkoc.
