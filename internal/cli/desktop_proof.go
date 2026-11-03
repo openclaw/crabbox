@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -38,19 +39,22 @@ type desktopPublishFlagValues struct {
 }
 
 type desktopProofMetadata struct {
-	CreatedAt      string   `json:"createdAt"`
-	Version        string   `json:"crabboxVersion"`
-	LeaseID        string   `json:"leaseId,omitempty"`
-	Slug           string   `json:"slug,omitempty"`
-	Provider       string   `json:"provider,omitempty"`
-	Network        string   `json:"network,omitempty"`
-	TargetOS       string   `json:"targetOS,omitempty"`
-	Command        []string `json:"command,omitempty"`
-	TerminalCols   int      `json:"terminalCols,omitempty"`
-	TerminalRows   int      `json:"terminalRows,omitempty"`
-	TerminalSixel  bool     `json:"terminalSixel,omitempty"`
-	RecordDuration string   `json:"recordDuration,omitempty"`
-	RecordFPS      float64  `json:"recordFps,omitempty"`
+	CreatedAt         string   `json:"createdAt"`
+	Version           string   `json:"crabboxVersion"`
+	LeaseID           string   `json:"leaseId,omitempty"`
+	Slug              string   `json:"slug,omitempty"`
+	Provider          string   `json:"provider,omitempty"`
+	Network           string   `json:"network,omitempty"`
+	TargetOS          string   `json:"targetOS,omitempty"`
+	Command           []string `json:"command,omitempty"`
+	TerminalCols      int      `json:"terminalCols,omitempty"`
+	TerminalRows      int      `json:"terminalRows,omitempty"`
+	TerminalSixel     bool     `json:"terminalSixel,omitempty"`
+	TerminalPID       int      `json:"terminalPid,omitempty"`
+	TerminalSessionID int      `json:"terminalSessionId,omitempty"`
+	TerminalTitle     string   `json:"terminalTitle,omitempty"`
+	RecordDuration    string   `json:"recordDuration,omitempty"`
+	RecordFPS         float64  `json:"recordFps,omitempty"`
 }
 
 func registerContactSheetFlags(fs *flag.FlagSet) contactSheetFlagValues {
@@ -214,7 +218,15 @@ func writeDesktopRecorderDiagnostics(ctx context.Context, target SSHTarget, outp
 		fmt.Fprintf(&b, "- vnc-loopback: failed (%v)\n", err)
 	}
 	b.WriteString("remote:\n")
-	out, err := runSSHOutput(ctx, target, desktopRecorderDiagnosticsRemoteCommand(target))
+	var out string
+	var err error
+	if isWindowsNativeTarget(target) {
+		var remote bytes.Buffer
+		err = runWindowsPowerShellScriptToWriter(ctx, target, desktopRecorderDiagnosticsRemoteCommand(target), &remote)
+		out = remote.String()
+	} else {
+		out, err = runSSHOutput(ctx, target, desktopRecorderDiagnosticsRemoteCommand(target))
+	}
 	if strings.TrimSpace(out) != "" {
 		b.WriteString(strings.TrimSpace(out))
 		b.WriteByte('\n')
@@ -230,10 +242,10 @@ func writeDesktopRecorderDiagnostics(ctx context.Context, target SSHTarget, outp
 
 func desktopRecorderDiagnosticsRemoteCommand(target SSHTarget) string {
 	if isWindowsNativeTarget(target) {
-		return PowershellCommand(`Write-Output "- target-os: windows"
+		return `Write-Output "- target-os: windows"
 foreach ($name in "schtasks.exe","powershell.exe") {
   $cmd = Get-Command $name -ErrorAction SilentlyContinue
-  if ($cmd) { Write-Output "- $name: $($cmd.Source)" } else { Write-Output "- ${name}: missing" }
+  if ($cmd) { Write-Output "- ${name}: $($cmd.Source)" } else { Write-Output "- ${name}: missing" }
 }
 $base = "C:\ProgramData\crabbox"
 Write-Output "- programdata-crabbox: $(Test-Path -LiteralPath $base)"
@@ -242,7 +254,13 @@ Write-Output "- windows-password-file: $(Test-Path -LiteralPath (Join-Path $base
 $service = Get-Service -Name tvnserver -ErrorAction SilentlyContinue
 if ($service) { Write-Output "- tvnserver: $($service.Status)" } else { Write-Output "- tvnserver: missing" }
 try { query user | ForEach-Object { Write-Output "- query-user: $_" } } catch { Write-Output "- query-user: failed $($_.Exception.Message)" }
-`)
+$mintty = Get-Process -Name mintty -ErrorAction SilentlyContinue
+if ($mintty) {
+  $mintty | ForEach-Object { Write-Output "- mintty: pid=$($_.Id) session=$($_.SessionId) title=$($_.MainWindowTitle)" }
+} else {
+  Write-Output "- mintty: missing"
+}
+`
 	}
 	return `set +e
 echo "- target-os: ${CRABBOX_TARGET_OS:-linux}"

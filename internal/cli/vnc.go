@@ -182,7 +182,11 @@ func writeVNCCredentials(w io.Writer, cfg Config, target SSHTarget, endpoint vnc
 		fmt.Fprintf(w, "password: %s\n", credentials.Password)
 		if endpoint.Managed && target.TargetOS == targetWindows {
 			fmt.Fprintf(w, "windows username: %s\n", credentials.Username)
-			fmt.Fprintf(w, "windows password: %s\n", credentials.Password)
+			if separateWindowsDesktopLogin(providerName) {
+				fmt.Fprintln(w, "windows password: the guest password supplied for this provider (not printed)")
+			} else {
+				fmt.Fprintf(w, "windows password: %s\n", credentials.Password)
+			}
 		}
 		if endpoint.Managed && target.TargetOS == targetMacOS {
 			fmt.Fprintf(w, "macos username: %s\n", credentials.Username)
@@ -618,4 +622,9 @@ func openURLCommand(url string) (string, []string) {
 	default:
 		return "", nil
 	}
+}
+
+func separateWindowsDesktopLogin(providerName string) bool {
+	provider, err := ProviderFor(providerName)
+	return err == nil && provider.Spec().DesktopLoginPasswordSeparate
 }

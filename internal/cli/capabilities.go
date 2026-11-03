@@ -320,6 +320,10 @@ Write-Output ("BROWSER=" + $path)
 Write-Output ("CHROME_BIN=" + $path)`
 }
 
+func WindowsBrowserProbePowerShell() string {
+	return windowsBrowserProbeScript()
+}
+
 func parseEnvLines(input string) map[string]string {
 	env := map[string]string{}
 	for _, line := range strings.Split(input, "\n") {
