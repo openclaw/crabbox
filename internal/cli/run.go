@@ -2720,11 +2720,13 @@ retrySync:
 		seededDelta := false
 		if seedSucceeded && !overlayDecision.Requested && cfg.Sync.Delete && !cfg.Sync.Checksum {
 			stepStart = time.Now()
-			if delta, files, size, ok := seededSyncTransfer(ctx, target, repo, manifest, coherence, workdir); ok {
+			if delta, files, size, reason := seededSyncTransfer(ctx, target, repo, manifest, coherence, workdir); reason == "" {
 				transferData, seededDelta = delta, true
 				timings.syncMode = "seeded-delta"
 				timings.syncTransferFiles, timings.syncTransferBytes = files, size
 				fmt.Fprintf(a.Stderr, "seeded sync delta: %d files, %s\n", files, humanBytes(size))
+			} else if *debugSync {
+				fmt.Fprintf(a.Stderr, "seeded sync fallback reason=%s; using full manifest\n", reason)
 			}
 			timings.syncSteps.gitSeed += time.Since(stepStart)
 		}
