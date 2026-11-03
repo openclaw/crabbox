@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Batch main CodeQL security scans every six hours while retaining pull request and manual analysis. [PR 3014](https://github.com/openclaw/crabbox/pull/3014). Thanks @vincentkoc.
+- Batch main CodeQL security scans every six hours while retaining pull request and manual analysis and the Dependabot merge gate. [PR 3014](https://github.com/openclaw/crabbox/pull/3014). Thanks @vincentkoc.
 
 ### Added
 
