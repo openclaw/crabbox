@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -641,38 +640,28 @@ func TestRestoreNativeCheckpointKeepsReclaimedLeaseAfterVMMutation(t *testing.T)
 func TestRestoreNativeCheckpointHoldsClaimFenceAcrossVMEffects(t *testing.T) {
 	setCheckpointTestState(t)
 	paths, metadata := createCheckpointArtifact(t)
-	var mu sync.Mutex
-	var events []string
-	record := func(event string) {
-		mu.Lock()
-		defer mu.Unlock()
-		events = append(events, event)
+	blocked := map[string]bool{}
+	// Reclaim may win between effects; each effect must exclude a claim writer.
+	checkFence := func(effect string) {
+		claim, err := core.ReadLeaseClaim(testCheckpointLeaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		blocked[effect] = errors.Is(core.WithLeaseClaimUnchangedContext(waitCtx, testCheckpointLeaseID, claim, nil), context.DeadlineExceeded)
 	}
-	var b *backend
-	reassigned := make(chan struct{})
-	var once sync.Once
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
 		script := commandScript(req)
 		switch {
 		case strings.Contains(script, "Select-Object Name,@{Name='ID'"):
-			// A concurrent actor tries to reassign the lease while restore effects run.
-			once.Do(func() {
-				go func() {
-					defer close(reassigned)
-					other := t.TempDir()
-					if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(testCheckpointLeaseID, "other", providerName, instanceScope(testCheckpointVMName), b.cfg.Pond, other, b.cfg.IdleTimeout, true, core.Server{}, core.SSHTarget{}); err == nil {
-						record("claim-reassigned")
-					}
-				}()
-			})
 			return jsonResult(t, checkpointVM{Name: testCheckpointVMName, ID: testCheckpointVMID, State: 3}), nil, true
 		case strings.Contains(script, "Restore-VMSnapshot"):
-			time.Sleep(200 * time.Millisecond)
-			record("snapshot-restored")
+			checkFence("restore")
 			return core.LocalCommandResult{}, nil, true
 		case strings.Contains(script, "Start-VM"):
-			record("vm-started")
+			checkFence("start")
 			return core.LocalCommandResult{}, nil, true
 		case strings.Contains(script, "Select-Object -ExpandProperty IPAddresses"):
 			return core.LocalCommandResult{Stdout: `["192.0.2.45"]`}, nil, true
@@ -680,7 +669,7 @@ func TestRestoreNativeCheckpointHoldsClaimFenceAcrossVMEffects(t *testing.T) {
 			return core.LocalCommandResult{}, nil, false
 		}
 	}
-	b = testBackend(runner)
+	b := testBackend(runner)
 	b.checkpointSSHBudget = 50 * time.Millisecond
 	b.resumePollInterval = 0
 	b.sshReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
@@ -688,29 +677,20 @@ func TestRestoreNativeCheckpointHoldsClaimFenceAcrossVMEffects(t *testing.T) {
 	}
 	persistCheckpointSource(t, b)
 
-	_, _ = b.restoreNativeCheckpoint(context.Background(), core.NativeCheckpointRestoreRequest{
+	_, err := b.restoreNativeCheckpoint(context.Background(), core.NativeCheckpointRestoreRequest{
 		Config:  b.cfg,
 		Record:  checkpointForkRecord(paths, metadata),
 		LeaseID: testCheckpointLeaseID,
 		Repo:    core.Repo{Root: t.TempDir()},
 		Reclaim: true,
 	})
-	<-reassigned
-	mu.Lock()
-	defer mu.Unlock()
-	pos := map[string]int{}
-	for i, event := range events {
-		pos[event] = i
+	if err == nil || !strings.Contains(err.Error(), "ssh unavailable") || core.ExitCodeForError(err, 0) != 5 {
+		t.Fatalf("restore err=%v, want SSH readiness failure (exit 5)", err)
 	}
-	for _, effect := range []string{"snapshot-restored", "vm-started"} {
-		if at, ok := pos[effect]; ok {
-			if re, ok := pos["claim-reassigned"]; ok && re < at {
-				t.Fatalf("claim was reassigned before %s completed: %v", effect, events)
-			}
+	for _, effect := range []string{"restore", "start"} {
+		if !blocked[effect] {
+			t.Fatalf("claim writer was not blocked during %s", effect)
 		}
-	}
-	if _, ok := pos["snapshot-restored"]; !ok {
-		t.Fatalf("restore did not run under its own authority: %v", events)
 	}
 }
 
