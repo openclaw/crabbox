@@ -430,7 +430,7 @@ const vncPasswordSSHMaxBytes = 64 << 10
 func runVNCPasswordSSH(ctx context.Context, target SSHTarget, remote string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, vncPasswordSSHWait)
 	defer cancel()
-	return runSSHOutputBoundedWithOptions(ctx, target, remote, vncPasswordSSHMaxBytes, vncPasswordSSHWait, "10", "3")
+	return runSSHOutputBoundedWithOptions(ctx, target, remote, vncPasswordSSHMaxBytes, sshCommandLimit{execution: vncPasswordSSHWait}, "10", "3")
 }
 
 // remoteVNCCredentialReadCommand builds a remote read operation, not a credential value.

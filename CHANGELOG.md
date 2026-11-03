@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- SSH: keep forwarded-environment cleanup within its bounded control lifetime after native commands, preserving workspace ownership and removal verification.
 - Sync: create private Git seeds with standard file modes so a group-writable remote shell does not force full-manifest transfers. [PR 3018](https://github.com/openclaw/crabbox/pull/3018). Thanks @vincentkoc.
 
 ## 0.81.0 - 2026-11-03
