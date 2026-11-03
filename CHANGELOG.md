@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- Sync: create private Git seeds with standard file modes so a group-writable remote shell does not force full-manifest transfers. [PR 3018](https://github.com/openclaw/crabbox/pull/3018). Thanks @vincentkoc.
+
 ## 0.81.0 - 2026-11-03
 
 ### Highlights
@@ -29,7 +33,6 @@
 
 ### Fixed
 
-- Sync: create private Git seeds with standard file modes so a group-writable remote shell does not force full-manifest transfers. [PR 3018](https://github.com/openclaw/crabbox/pull/3018). Thanks @vincentkoc.
 - Sync: report bounded seeded-delta fallback reasons with `--debug` while preserving full-manifest fallback and keeping raw probe output private. [PR 3016](https://github.com/openclaw/crabbox/pull/3016). Thanks @vincentkoc.
 - Hyper-V: use `AutomaticStopAction=TurnOff` for new leases so running guests do not reserve memory-sized state files on the VM drive. [PR 2991](https://github.com/openclaw/crabbox/pull/2991). Thanks @paulcam206 and @RomneyDa.
 - Linux commands: complete release installations use the matching native runtime for foreground commands, prevent disconnected invocations from starting workloads, and require exact completion and retirement before confirming cancellation cleanup; unknown retirement retains its stage locator without automatic replay. [PR 3001](https://github.com/openclaw/crabbox/pull/3001). Thanks @roboclaw-bot and @galiniliev.
