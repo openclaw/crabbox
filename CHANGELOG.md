@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Sync: report bounded seeded-delta fallback reasons with `--debug` while preserving full-manifest fallback and keeping raw probe output private. [PR 3016](https://github.com/openclaw/crabbox/pull/3016). Thanks @vincentkoc.
 - Boat: honor explicit fixed-lease reclaim across checkouts after native identity and execution-policy checks, preserving the create intent and cleanup ownership. [PR 3013](https://github.com/openclaw/crabbox/pull/3013). Thanks @vincentkoc.
 - Boat: accept a ready sandbox's SSH endpoint without requiring a public IP, preserving endpoint validation and IP fallback. [PR 3006](https://github.com/openclaw/crabbox/pull/3006). Thanks @vincentkoc.
 - Boat: retain native error output from both streams so alias warnings do not hide failures or block snapshot recovery, with existing credential redaction. [PR 3007](https://github.com/openclaw/crabbox/pull/3007). Thanks @vincentkoc.
