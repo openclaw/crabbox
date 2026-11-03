@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Batch main CodeQL security scans every six hours while retaining pull request and manual analysis and the Dependabot merge gate. [PR 3014](https://github.com/openclaw/crabbox/pull/3014). Thanks @vincentkoc.
+
 ### Added
 
 - Boat: opt into native account environment isolation with `asciiBox.noEnv` or `--ascii-box-no-env`, retaining creation policy across fixed leases and blocking incompatible execution reuse. [PR 3010](https://github.com/openclaw/crabbox/pull/3010). Thanks @vincentkoc.
