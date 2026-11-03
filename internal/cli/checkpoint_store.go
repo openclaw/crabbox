@@ -98,6 +98,7 @@ func (s checkpointStore) Reserve(record checkpointRecord) (checkpointRecord, che
 	if err != nil {
 		return checkpointRecord{}, checkpointPaths{}, err
 	}
+	record.artifactDir = paths.Dir
 	firstExistingDir, err := nearestExistingClaimDirectory(paths.Dir)
 	if err != nil {
 		return checkpointRecord{}, checkpointPaths{}, err
@@ -189,6 +190,7 @@ func (s checkpointStore) Read(id string) (checkpointRecord, checkpointPaths, err
 	if record.LastUsedAt == "" {
 		record.LastUsedAt = record.CreatedAt
 	}
+	record.artifactDir = paths.Dir
 	return record, paths, nil
 }
 
@@ -216,6 +218,16 @@ func (s checkpointStore) withRecord(id string, wait bool, action func(checkpoint
 }
 
 func (s checkpointStore) withLock(id string, wait bool, action func() error) error {
+	root, err := os.Stat(s.root)
+	if errors.Is(err, os.ErrNotExist) {
+		return checkpointNotFoundError{Exit(2, "checkpoint %s not found", id)}
+	}
+	if err != nil {
+		return Exit(2, "read checkpoint root: %v", err)
+	}
+	if !root.IsDir() {
+		return Exit(2, "checkpoint root %s is not a directory", s.root)
+	}
 	paths, err := s.Paths(id)
 	if err != nil {
 		return err

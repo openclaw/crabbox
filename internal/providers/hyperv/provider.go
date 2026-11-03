@@ -40,6 +40,9 @@ func providerFeatures() core.FeatureSet {
 		core.FeatureBrowser,
 		core.FeatureCleanup,
 		core.FeaturePauseResume,
+		core.FeatureCheckpoint,
+		core.FeatureFork,
+		core.FeatureRestore,
 	}
 }
 

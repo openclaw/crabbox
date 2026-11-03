@@ -167,6 +167,9 @@ func TestProviderFeaturesAreWindowsOnly(t *testing.T) {
 		core.FeatureBrowser,
 		core.FeatureCleanup,
 		core.FeaturePauseResume,
+		core.FeatureCheckpoint,
+		core.FeatureFork,
+		core.FeatureRestore,
 	} {
 		if !windows.Has(feature) {
 			t.Fatalf("feature %s missing from windows=%v", feature, windows)
@@ -1775,6 +1778,30 @@ func TestCreateVMDisablesAutomaticCheckpoints(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("createVM should disable automatic checkpoints on lease VMs")
+	}
+}
+
+// createVM must request TurnOff so a running lease VM does not keep a
+// runtime-state file the size of its assigned memory on the VM drive.
+func TestCreateVMRequestsTurnOffAutomaticStopAction(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	cfg.HyperV.Image = `C:\Images\windows.vhdx`
+
+	if err := b.createVM(context.Background(), cfg, "crabbox-blue-1234"); err != nil {
+		t.Fatalf("createVM: %v", err)
+	}
+	var found bool
+	for _, call := range runner.calls {
+		script := call.Args[len(call.Args)-1]
+		if strings.Contains(script, "Set-VM") && strings.Contains(script, "-AutomaticStopAction TurnOff") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("createVM did not issue Set-VM -AutomaticStopAction TurnOff")
 	}
 }
 
