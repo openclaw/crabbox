@@ -237,6 +237,35 @@ func (b *backend) resolveFixed(ctx context.Context, cfg core.Config, client api,
 		}
 		return result.Candidates[0], nil
 	}
+	if req.Reclaim && req.Repo.Root != "" && req.Repo.Root != claim.RepoRoot && !req.StatusOnly && !req.ReleaseOnly && !req.NoLocalStateMutations {
+		if err := core.CheckFixedAttemptActive(claim, "idempotency_key", "deletion_operation_id", "deletion_completed"); err != nil {
+			return core.LeaseTarget{}, err
+		}
+		intent := claim.FixedCreateIntent
+		if intent.State == fixedBoxKind.DeletionState || (intent.Journal != nil && intent.Journal.Phase == "deleting") {
+			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed lease has entered cleanup; retry stop")
+		}
+		// Deletion receipts bind the original repository and cannot be relocated.
+		for _, key := range []string{boxDeletionLabel, boxDeletionOperationLabel, boxDeletionOperationBindingLabel} {
+			if _, exists := claim.Labels[key]; exists {
+				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed lease has entered cleanup; retry stop")
+			}
+		}
+		if err := validateBoxNoEnv(cfg, claim); err != nil {
+			return core.LeaseTarget{}, err
+		}
+		var err error
+		claim, err = core.ReclaimFixedLease(ctx, claim, cfg, req.Repo.Root, true, func(ctx context.Context, claim core.LeaseClaim) (core.Server, error) {
+			box, err := observe(ctx, claim)
+			if err != nil {
+				return core.Server{}, err
+			}
+			return fixedBoxServer(cfg, box, claim), nil
+		})
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+	}
 	return core.ResolveFixedLeaseTarget(ctx, core.FixedResolveOptions{Kind: fixedBoxKind, Request: req, Expected: claim, Provider: providerName, ResourceName: claim.CloudID, TerminalState: "released", Now: b.now},
 		func(ctx context.Context, claim *core.LeaseClaim, persist func() error) (core.LeaseTarget, error) {
 			if err := core.CheckFixedAttemptActive(*claim, "idempotency_key", "deletion_operation_id", "deletion_completed"); err != nil {

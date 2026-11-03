@@ -195,9 +195,17 @@ func TestFixedBoxObservationsAndReusePreservePolicy(t *testing.T) {
 		t.Fatalf("fixed observations mutated the claim: %+v, %v", after, err)
 	}
 	clock.at = clock.at.Add(time.Minute)
-	lease, err = b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, Repo: req.Repo})
+	newRepo := core.Repo{Root: t.TempDir()}
+	if _, err := b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, Repo: newRepo}); err == nil || !strings.Contains(err.Error(), "belongs to another repository") {
+		t.Fatalf("cross-repository reuse without reclaim: %v", err)
+	}
+	lease, err = b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, Repo: newRepo, Reclaim: true})
 	if err != nil {
 		t.Fatal(err)
+	}
+	after, err = core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || after.RepoRoot != newRepo.Root || after.CloudID != original.CloudID || after.CloudImmutableID != original.CloudImmutableID || !reflect.DeepEqual(after.FixedCreateIntent, original.FixedCreateIntent) || len(f.keys) != 1 {
+		t.Fatalf("reclaim changed fixed identity or intent: %+v, %v", after, err)
 	}
 	for _, key := range []string{"created_at", "ttl_secs", "keep", "expires_at", "idle_timeout_secs"} {
 		if lease.Server.Labels[key] != original.Labels[key] {
@@ -212,6 +220,101 @@ func TestFixedBoxObservationsAndReusePreservePolicy(t *testing.T) {
 	after, err = core.ReadLeaseClaim(req.RequestedLeaseID)
 	if err != nil || after.IdleTimeoutSeconds != 600 || after.LastUsedAt != clock.at.Format(time.RFC3339) || after.Labels["ttl_secs"] != "1200" || after.Labels["keep"] != "false" || after.Labels["created_at"] != original.Labels["created_at"] {
 		t.Fatalf("fixed heartbeat lost recorded policy: %+v, %v", after, err)
+	}
+}
+
+func TestFixedBoxReclaimRejectsUnavailableClaims(t *testing.T) {
+	for _, reason := range []string{"no-env", "intent-deleting", "journal-deleting", "deletion-operation", "deletion-completed", "completed-receipt", "operation-receipt", "binding-receipt", "status", "read-only", "release", "no-local-state"} {
+		t.Run(reason, func(t *testing.T) {
+			b, f, req, _ := fixedBoxFixture(t)
+			if _, err := b.Acquire(t.Context(), req); err != nil {
+				t.Fatal(err)
+			}
+			reuse := core.ResolveRequest{ID: req.RequestedLeaseID, Repo: core.Repo{Root: t.TempDir()}, Reclaim: true}
+			wantError := "entered cleanup"
+			if err := core.WithDurableLeaseClaimLock(req.RequestedLeaseID, func(claim *core.LeaseClaim, _ bool, persist func() error) error {
+				switch reason {
+				case "no-env":
+					b.cfg.AsciiBox.NoEnv = true
+					wantError = "no-env"
+				case "intent-deleting":
+					claim.FixedCreateIntent.State = "deleting"
+				case "journal-deleting":
+					claim.FixedCreateIntent.Journal.Phase = "deleting"
+				case "deletion-operation":
+					claim.FixedCreateIntent.Attempt["deletion_operation_id"] = testDeletionID
+				case "deletion-completed":
+					claim.FixedCreateIntent.Attempt["deletion_completed"] = "true"
+				case "completed-receipt":
+					claim.Labels[boxDeletionLabel] = ""
+				case "operation-receipt":
+					claim.Labels[boxDeletionOperationLabel] = ""
+				case "binding-receipt":
+					claim.Labels[boxDeletionOperationBindingLabel] = ""
+				case "status":
+					reuse.StatusOnly = true
+				case "read-only":
+					reuse.StatusOnly, reuse.NoLocalStateMutations = true, true
+				case "release":
+					reuse.ReleaseOnly = true
+				case "no-local-state":
+					reuse.NoLocalStateMutations = true
+				}
+				return persist()
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if reuse.StatusOnly || reuse.ReleaseOnly || reuse.NoLocalStateMutations {
+				wantError = "belongs to another repository"
+			}
+			before, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.prepareIDs = nil
+			f.getHook = func(string) (boxData, error) {
+				t.Fatal("rejected reclaim reached native observation")
+				return boxData{}, nil
+			}
+			if _, err := b.Resolve(t.Context(), reuse); err == nil || !strings.Contains(err.Error(), wantError) {
+				t.Fatalf("reclaim was not rejected at %s: %v", reason, err)
+			}
+			after, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil || !reflect.DeepEqual(before, after) || len(f.prepareIDs) != 0 || len(f.keys) != 1 {
+				t.Fatalf("rejected reclaim changed ownership or reached SSH: %+v, %v", after, err)
+			}
+		})
+	}
+}
+
+func TestFixedBoxReclaimRejectsConcurrentReplacement(t *testing.T) {
+	b, f, req, _ := fixedBoxFixture(t)
+	if _, err := b.Acquire(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	var replacement core.LeaseClaim
+	f.getHook = func(string) (boxData, error) {
+		if err := core.WithDurableLeaseClaimLock(req.RequestedLeaseID, func(claim *core.LeaseClaim, _ bool, persist func() error) error {
+			claim.RepoRoot = t.TempDir()
+			return persist()
+		}); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		replacement, err = core.ReadLeaseClaim(req.RequestedLeaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f.box, nil
+	}
+	f.prepareIDs = nil
+	_, err := b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, Repo: core.Repo{Root: t.TempDir()}, Reclaim: true})
+	if err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("stale reclaim did not reject replaced claim: %v", err)
+	}
+	after, readErr := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if readErr != nil || !reflect.DeepEqual(replacement, after) || len(f.prepareIDs) != 0 || len(f.keys) != 1 {
+		t.Fatalf("stale reclaim changed replacement or reached SSH: %+v, %v", after, readErr)
 	}
 }
 
