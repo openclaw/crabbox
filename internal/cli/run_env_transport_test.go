@@ -569,9 +569,11 @@ func TestSSHCommandEnvCleanupVerificationNative(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("executes the real Linux command runtime")
 	}
-	binary, err := builtCLITestBinary()
-	if err != nil {
-		t.Fatal(err)
+	binary := filepath.Join(t.TempDir(), "crabbox-runtime")
+	build := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/crabbox-runtime")
+	build.Dir = filepath.Join("..", "..")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build command runtime: %v\n%s", err, output)
 	}
 	for _, lostAcknowledgement := range []bool{false, true} {
 		t.Run(fmt.Sprintf("lost-ack=%t", lostAcknowledgement), func(t *testing.T) {
