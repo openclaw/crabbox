@@ -66,7 +66,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	}
 	cfg.TTL = ttl
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s ttl=%s\n", providerName, leaseID, slug, core.Blank(ttl.String(), "-"))
-	box, createErr := client.CreateBox(ctx, createRequest{TTL: ttl, Type: cfg.ServerType})
+	box, createErr := client.CreateBox(ctx, createRequest{TTL: ttl, Type: cfg.ServerType, NoEnv: cfg.AsciiBox.NoEnv})
 	if !concreteBoxID(box.createdID) || box.ID != box.createdID {
 		if createErr != nil {
 			return core.LeaseTarget{}, fmt.Errorf("ascii-box creation did not establish an original Box ID; retaining any resource: %w", createErr)
@@ -223,6 +223,11 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		lease = core.LeaseTarget{Server: recordedBoxServer(cfg, box, claim), LeaseID: claim.LeaseID}
 		if req.ReleaseOnly {
 			return nil
+		}
+		if !req.StatusOnly && !req.ReleaseOnly {
+			if err := validateBoxNoEnv(cfg, claim); err != nil {
+				return err
+			}
 		}
 		if err := client.PrepareSSH(ctx, box.ID); err != nil {
 			return err
@@ -571,6 +576,7 @@ func recordedBoxServer(cfg core.Config, box boxData, claim core.LeaseClaim) core
 
 func seedBoxLeaseServer(cfg core.Config, box boxData, leaseID, slug string, keep bool, at time.Time) core.Server {
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, at)
+	labels[boxNoEnvLabel] = fmt.Sprint(cfg.AsciiBox.NoEnv)
 	return boxServerWithLabels(cfg, box, leaseID, slug, labels)
 }
 

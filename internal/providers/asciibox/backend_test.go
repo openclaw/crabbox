@@ -1028,7 +1028,9 @@ func TestAcquireClaimsBoxAndReturnsSSHTarget(t *testing.T) {
 	withFakeAPI(t, fake)
 	stubSSHWait(t)
 
-	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+	cfg := testConfig()
+	cfg.AsciiBox.NoEnv = true
+	backend := NewBackend(Provider{}.Spec(), cfg, testRuntime()).(*backend)
 	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{
 		Repo:          core.Repo{Name: "repo", Root: t.TempDir()},
 		Options:       core.LeaseOptions{TTL: 45 * time.Minute},
@@ -1047,7 +1049,7 @@ func TestAcquireClaimsBoxAndReturnsSSHTarget(t *testing.T) {
 	if !lease.SSH.NoControlMaster {
 		t.Fatalf("ascii-box SSH target should disable ControlMaster")
 	}
-	if fake.createReq.TTL != 45*time.Minute {
+	if !fake.createReq.NoEnv || fake.createReq.TTL != 45*time.Minute {
 		t.Fatalf("create req=%#v", fake.createReq)
 	}
 	if !reflect.DeepEqual(fake.prepareIDs, []string{"bx_1"}) {
@@ -1060,7 +1062,7 @@ func TestAcquireClaimsBoxAndReturnsSSHTarget(t *testing.T) {
 	if claim.Provider != providerName || claim.ProviderScope != (Provider{}).ClaimScope(testConfig()) || claim.Slug != "proof" {
 		t.Fatalf("claim=%#v", claim)
 	}
-	if claim.Labels["ttl_secs"] != "2700" || lease.Server.Labels["created_at"] != claim.Labels["created_at"] {
+	if claim.Labels[boxNoEnvLabel] != "true" || claim.Labels["ttl_secs"] != "2700" || lease.Server.Labels["created_at"] != claim.Labels["created_at"] {
 		t.Fatalf("acquisition policy was not seeded once from its request: claim=%v lease=%v", claim.Labels, lease.Server.Labels)
 	}
 }

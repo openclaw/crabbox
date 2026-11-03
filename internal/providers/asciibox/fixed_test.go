@@ -95,6 +95,9 @@ func TestFixedBoxFreshReplayAndConflict(t *testing.T) {
 	if err != nil || first.Server.CloudID != replay.Server.CloudID || first.Server.ImmutableID == "" || first.Server.ImmutableID != replay.Server.ImmutableID || len(f.keys) != 1 || replay.SSH.Host != first.SSH.Host || replay.SSH.Port != first.SSH.Port {
 		t.Fatalf("replay allocated or changed identity: %+v, %v", replay, err)
 	}
+	if f.createReq.NoEnv || before.Labels[boxNoEnvLabel] != "false" {
+		t.Fatalf("default creation changed environment policy: request=%+v labels=%v", f.createReq, before.Labels)
+	}
 	if f.createReq.Type != "default" {
 		t.Fatalf("fixed create size=%q want default", f.createReq.Type)
 	}
@@ -114,13 +117,15 @@ func TestFixedBoxFreshReplayAndConflict(t *testing.T) {
 	if replay, err := other.Acquire(t.Context(), req); err != nil || replay.Server.CloudID != first.Server.CloudID || len(f.keys) != 1 {
 		t.Fatalf("explicit default did not resume the old lease: %+v %v", replay, err)
 	}
-	for _, change := range []string{"ttl", "size", "class", "slug", "workdir", "scope", "generation", "id"} {
+	for _, change := range []string{"ttl", "size", "class", "no-env", "slug", "workdir", "scope", "generation", "id"} {
 		t.Run(change, func(t *testing.T) {
 			cfg, changed := b.cfg, req
 			original := f.box
 			switch change {
 			case "ttl":
 				changed.Options.TTL = time.Hour
+			case "no-env":
+				cfg.AsciiBox.NoEnv = true
 			case "size":
 				cfg.ServerType, cfg.ServerTypeExplicit = "large", true
 			case "class":

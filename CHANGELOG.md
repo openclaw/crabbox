@@ -4,6 +4,7 @@
 
 ### Added
 
+- Boat: opt into native account environment isolation with `asciiBox.noEnv` or `--ascii-box-no-env`, retaining creation policy across fixed leases and blocking incompatible execution reuse. [PR 3010](https://github.com/openclaw/crabbox/pull/3010). Thanks @vincentkoc.
 - Boat: select native machine sizes with `--type` or Crabbox classes for ordinary and fixed-ID leases, preserving existing default-sized lease recovery. [PR 3003](https://github.com/openclaw/crabbox/pull/3003). Thanks @vincentkoc.
 - WarpBuild: run and synchronize standalone macOS sandboxes, inspect owned leases, and pause, resume, or delete them through the native `wb` CLI. [PR 3004](https://github.com/openclaw/crabbox/pull/3004).
 

@@ -412,6 +412,7 @@ type ExternalDesktopConfig struct {
 }
 
 type AsciiBoxConfig struct {
+	NoEnv   bool
 	APIKey  string
 	BaseURL string
 	CLIPath string
@@ -2044,6 +2045,7 @@ type fileExternalConfig struct {
 }
 
 type fileAsciiBoxConfig struct {
+	NoEnv   *bool  `yaml:"noEnv,omitempty"`
 	BaseURL string `yaml:"baseUrl,omitempty"`
 	CLIPath string `yaml:"cliPath,omitempty"`
 	Workdir string `yaml:"workdir,omitempty"`
@@ -3534,6 +3536,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 	}
 	if file.AsciiBox != nil {
+		if file.AsciiBox.NoEnv != nil {
+			cfg.AsciiBox.NoEnv = *file.AsciiBox.NoEnv
+			recordConfigInput(cfg, "ascii-box", inputSource, true)
+		}
 		if file.AsciiBox.BaseURL != "" {
 			cfg.AsciiBox.BaseURL = file.AsciiBox.BaseURL
 			recordConfigInput(cfg, "ascii-box", inputSource, true)

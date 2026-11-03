@@ -46,7 +46,8 @@ func (b *backend) acquireFixed(ctx context.Context, cfg core.Config, client api,
 				TTL, Idle                  time.Duration
 				Keep                       bool
 				Type                       string `json:",omitempty"`
-			}{scope, cfg.WorkRoot, core.NormalizeLeaseSlug(req.RequestedSlug), core.NormalizePondName(cfg.Pond), ttl, cfg.IdleTimeout, req.Keep, kind})
+				NoEnv                      bool   `json:",omitempty"`
+			}{scope, cfg.WorkRoot, core.NormalizeLeaseSlug(req.RequestedSlug), core.NormalizePondName(cfg.Pond), ttl, cfg.IdleTimeout, req.Keep, kind, cfg.AsciiBox.NoEnv})
 			return core.FixedLeaseBinding{ProviderScope: scope, Fingerprint: fingerprint, AllocateSlug: true, RequestedSlug: req.RequestedSlug}, err
 		},
 		Plan: func(_ context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
@@ -57,9 +58,10 @@ func (b *backend) acquireFixed(ctx context.Context, cfg core.Config, client api,
 		},
 		ObserveExact: fixedBoxObserver(cfg, client),
 		Submit: func(ctx context.Context, tx *core.FixedTransaction) (boxData, error) {
-			box, createErr := client.CreateBox(ctx, createRequest{TTL: ttl, Type: cfg.ServerType, IdempotencyKey: tx.Claim.FixedCreateIntent.Attempt["idempotency_key"]})
+			box, createErr := client.CreateBox(ctx, createRequest{TTL: ttl, Type: cfg.ServerType, NoEnv: cfg.AsciiBox.NoEnv, IdempotencyKey: tx.Claim.FixedCreateIntent.Attempt["idempotency_key"]})
 			if concreteBoxID(box.createdID) && box.ID == box.createdID {
 				server := fixedBoxServer(cfg, box, *tx.Claim)
+				server.Labels[boxNoEnvLabel] = fmt.Sprint(cfg.AsciiBox.NoEnv)
 				if err := tx.Observe(core.FixedResourceBinding{CloudID: box.ID, ImmutableID: server.ImmutableID, Labels: server.Labels}); err != nil {
 					return boxData{}, err
 				}
@@ -195,6 +197,9 @@ func fixedBoxServer(cfg core.Config, box boxData, claim core.LeaseClaim) core.Se
 }
 
 func (b *backend) prepareFixedBox(ctx context.Context, cfg core.Config, client api, claim core.LeaseClaim, box boxData) (core.LeaseTarget, error) {
+	if err := validateBoxNoEnv(cfg, claim); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	ready, err := client.waitForBoxReady(ctx, box)
 	if err != nil {
 		return core.LeaseTarget{}, err
