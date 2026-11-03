@@ -48,6 +48,7 @@ type client struct {
 const boxCommandOutputLimit = 8 << 20
 
 type createRequest struct {
+	NoEnv          bool
 	TTL            time.Duration
 	IdempotencyKey string
 	Type           string
@@ -162,6 +163,9 @@ func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, err
 		return c.createKeyedBox(ctx, req)
 	}
 	args := []string{"new"}
+	if req.NoEnv {
+		args = append(args, "--no-env")
+	}
 	if req.Type != "" && req.Type != "default" {
 		args = append(args, "--type", req.Type)
 	}

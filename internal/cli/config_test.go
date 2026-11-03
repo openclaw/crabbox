@@ -5565,18 +5565,34 @@ anthropicSandboxRuntime:
 func TestAsciiBoxConfigDefaultsFileAndEnv(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := baseConfig()
+	if cfg.AsciiBox.NoEnv {
+		t.Fatal("noEnv must default to false")
+	}
+	noEnv := true
 	applyFileConfig(&cfg, fileConfig{
 		Provider: "ascii-box",
 		AsciiBox: &fileAsciiBoxConfig{
+			NoEnv:   &noEnv,
 			BaseURL: "https://box.example.test",
 			CLIPath: "/tmp/box",
 			Workdir: "/home/user/project",
 		},
 	})
-	if cfg.Provider != "ascii-box" || cfg.AsciiBox.BaseURL != "https://box.example.test" || cfg.AsciiBox.CLIPath != "/tmp/box" || cfg.AsciiBox.Workdir != "/home/user/project" {
+	if !cfg.AsciiBox.NoEnv || cfg.Provider != "ascii-box" || cfg.AsciiBox.BaseURL != "https://box.example.test" || cfg.AsciiBox.CLIPath != "/tmp/box" || cfg.AsciiBox.Workdir != "/home/user/project" {
 		t.Fatalf("file asciiBox config not applied: %#v", cfg.AsciiBox)
 	}
 
+	if got := configShowView(cfg)["asciiBox"].(map[string]any)["noEnv"]; got != true {
+		t.Fatalf("config show noEnv=%v, want true", got)
+	}
+	var shown bytes.Buffer
+	if err := writeConfigShowText(&shown, cfg); err != nil || !strings.Contains(shown.String(), "no_env=true") {
+		t.Fatalf("text config show lost noEnv: %v", err)
+	}
+	noEnv = false
+	if err := applyFileConfig(&cfg, fileConfig{AsciiBox: &fileAsciiBoxConfig{NoEnv: &noEnv}}); err != nil || cfg.AsciiBox.NoEnv {
+		t.Fatalf("explicit false did not override noEnv: %v", err)
+	}
 	t.Setenv("ASCII_BOX_API_KEY", "fallback-key")
 	t.Setenv("ASCII_BOX_BASE_URL", "https://fallback.example.test")
 	t.Setenv("CRABBOX_ASCII_BOX_API_KEY", "override-key")

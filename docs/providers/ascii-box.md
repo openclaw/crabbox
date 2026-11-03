@@ -199,6 +199,7 @@ target: linux
 asciiBox:
   baseUrl: https://ascii.dev
   cliPath: box
+  noEnv: false
   workdir: /home/user/crabbox
 ```
 
@@ -207,6 +208,7 @@ Provider flags (legacy compatibility names):
 ```text
 --ascii-box-base-url
 --ascii-box-cli
+--ascii-box-no-env
 --ascii-box-workdir
 ```
 
@@ -220,6 +222,25 @@ CRABBOX_ASCII_BOX_HOME
 CRABBOX_ASCII_BOX_WORKDIR
 BOX_ORG
 ```
+
+## Account environment isolation
+
+Set `asciiBox.noEnv: true` or pass `--ascii-box-no-env` to request Boat's native
+`--no-env` / API `noEnv` behavior when creating a sandbox. It withholds account
+environment secrets and credentials. The default is `false`; omitted and explicit
+false preserve existing creation requests. `--ascii-box-no-env=false` overrides a
+configured true value. See [Boat environment access](https://docs.boat.dev/environments/access).
+
+The creation policy is bound to fixed IDs and recorded in the existing local
+claim. Reuse for execution requires a matching policy; a no-env request cannot
+reuse a legacy claim with no recorded policy. Existing legacy claims remain
+usable with the default false setting. Use a new lease ID to change the policy.
+Status and owned cleanup remain available after a mismatch.
+
+This option does not remove secrets subsequently copied into the sandbox or
+prove that its current disk or snapshots are secretless. Build reusable snapshots
+from a clean sandbox, control what is synchronized, and do not treat no-env as a
+snapshot sanitization operation.
 
 ## Lifecycle
 
