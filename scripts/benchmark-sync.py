@@ -17,6 +17,13 @@ import fcntl
 import signal
 import statistics
 import hashlib
+import math
+import sys
+
+
+PHASE_NAMES = {"manifest", "fingerprint", "fingerprint-full", "snapshot-copy", "snapshot-local", "plan"}
+REQUIRED_COUNTERS = {"git/op", "inblock/op", "read-bytes/op", "hashes/op", "files", "candidate-bytes", "dirty-bytes"}
+FIXTURE_COUNTERS = ("files", "candidate-bytes", "dirty-bytes")
 
 
 def git(root, *args):
@@ -80,13 +87,83 @@ def phase_metrics(output):
         if not line.startswith("BenchmarkSyncEfficiency/"):
             continue
         fields = line.split()
-        if len(fields) < 4 or fields[3] != "ns/op":
+        if len(fields) == 1:  # Go may print a benchmark heading before its result.
             continue
-        name = fields[0].split("/")[1].rsplit("-", 1)[0]
-        phases[name] = {"seconds": float(fields[2]) / 1e9}
+        if len(fields) < 4 or fields[3] != "ns/op" or (len(fields) - 4) % 2:
+            raise ValueError("malformed benchmark result: " + line)
+        name = fields[0].removeprefix("BenchmarkSyncEfficiency/")
+        phase, separator, workers = name.rpartition("-")
+        if separator and workers.isdecimal():
+            name = phase
+        if name in phases:
+            raise ValueError("duplicate benchmark phase: " + name)
+        if int(fields[1]) <= 0:
+            raise ValueError("benchmark iteration count must be positive")
+        seconds = float(fields[2]) / 1e9
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError("benchmark time must be finite and positive: " + fields[2])
+        metrics = {"seconds": seconds}
         for i in range(4, len(fields) - 1, 2):
-            phases[name][fields[i + 1]] = float(fields[i])
+            unit = fields[i + 1]
+            if unit in metrics or unit == "ns/op":
+                raise ValueError("duplicate benchmark metric: " + unit)
+            value = float(fields[i])
+            if not math.isfinite(value) or value < 0:
+                raise ValueError("benchmark counter must be finite and nonnegative: " + unit)
+            metrics[unit] = value
+        missing = REQUIRED_COUNTERS - metrics.keys()
+        if missing:
+            raise ValueError("missing benchmark counters: " + ", ".join(sorted(missing)))
+        phases[name] = metrics
     return phases
+
+
+def expected_phase_names(selector, explicit):
+    if explicit:
+        if any(not name or name.strip() != name for name in explicit) or len(set(explicit)) != len(explicit):
+            raise ValueError("expected phases must be nonempty, unique names")
+        return set(explicit)
+    if selector == ".*":
+        return PHASE_NAMES.copy()
+    names = selector.split("|")
+    if all(name in PHASE_NAMES for name in names):
+        return set(names)
+    raise ValueError("custom Go phase regex requires one --expected-phase per expected result")
+
+
+def validate_phases(phases, expected, fixture_counts):
+    if set(phases) != expected:
+        missing, unexpected = expected - phases.keys(), phases.keys() - expected
+        raise ValueError("benchmark phase coverage mismatch; missing: " + ", ".join(sorted(missing)) +
+                         "; unexpected: " + ", ".join(sorted(unexpected)))
+    for name, metrics in phases.items():
+        counts = tuple(metrics[key] for key in FIXTURE_COUNTERS)
+        if fixture_counts is None:
+            fixture_counts = counts
+        elif counts != fixture_counts:
+            raise ValueError("fixture counters differ between phases or samples: " + name)
+    return fixture_counts
+
+
+def paired_summary(samples, expected):
+    summary = {}
+    for phase in sorted(expected):
+        a = [s["phases"][phase]["seconds"] for s in samples if s["label"] == "A"]
+        b = [s["phases"][phase]["seconds"] for s in samples if s["label"] == "B"]
+        if len(a) != 3 or len(b) != 3:
+            raise ValueError("paired summary requires three complete A/B pairs")
+        delta = [y - x for x, y in zip(a, b)]
+        percent = [100 * (y - x) / x for x, y in zip(a, b)]
+        if not all(math.isfinite(value) for value in delta + percent):
+            raise ValueError("paired comparison is not finite: " + phase)
+        summary[phase] = {"medianA": statistics.median(a), "medianB": statistics.median(b),
+                          "pairDeltaSeconds": delta, "pairDeltaPercent": percent}
+    return summary
+
+
+def write_benchmark_record(record, output):
+    if output:
+        output.write_text(json.dumps(record, indent=2, allow_nan=False) + "\n")
 
 
 def main():
@@ -100,13 +177,22 @@ def main():
     parser.add_argument("--timeout", type=float, default=480, help="hard per-sample seconds")
     parser.add_argument("--scenario-timeout", type=float, default=1800, help="hard aggregate sample budget in seconds")
     parser.add_argument("--phase", default="manifest|fingerprint|plan")
+    parser.add_argument("--expected-phase", action="append", default=[],
+                        help="repeat exact expected phase names for a custom Go --phase regex")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--crabbox", type=Path, help="also time a full run against an already prepared target")
     parser.add_argument("--config", type=Path, help="explicit trusted config for the SSH target")
     parser.add_argument("--run-arg", action="append", default=[], help="repeat with --run-arg=--flag or --run-arg=value")
     args = parser.parse_args()
-    if args.timeout <= 0 or args.scenario_timeout <= 0:
-        parser.error("timeouts must be positive")
+    if not all(math.isfinite(value) and value > 0 for value in [args.timeout, args.scenario_timeout]):
+        parser.error("timeouts must be finite and positive")
+    if (args.baseline_test_binary or args.expected_phase) and not args.test_binary:
+        parser.error("--baseline-test-binary and --expected-phase require --test-binary")
+    if args.test_binary:
+        try:
+            expected = expected_phase_names(args.phase, args.expected_phase)
+        except ValueError as exc:
+            parser.error(str(exc))
     root = args.root.resolve()
     if args.generate:
         generate(root, args.generate)
@@ -150,8 +236,10 @@ def main():
         if args.baseline_test_binary:
             sequence = [(label, binary) for _ in range(3) for label, binary in
                         [("A", args.baseline_test_binary), ("B", args.test_binary)]]
-        record = {"root": str(root), "changes": args.changes, "samples": [],
+        record = {"root": str(root), "changes": args.changes, "samples": [], "status": "running",
+                  "expectedPhases": sorted(expected), "validationErrors": [],
                   "scenarioTimeoutSeconds": args.scenario_timeout, "binaries": {}}
+        fixture_counts = None
         for label, binary in sequence:
             if label not in record["binaries"]:
                 with binary.open("rb") as executable:
@@ -162,30 +250,53 @@ def main():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 record["scenarioTimedOut"] = True
+                record["validationErrors"].append("scenario deadline exhausted before the next sample")
+                record["status"] = "failed"
                 break
             command = [str(binary.resolve()), "-test.run=^$", "-test.bench=^BenchmarkSyncEfficiency/(" + args.phase + ")$",
                        "-test.benchtime=1x", "-test.count=1", "-test.timeout=8m"]
             print(f"sample {index + 1}/{len(sequence)} {label}, timeout={min(args.timeout, remaining):.1f}s", flush=True)
             with tempfile.TemporaryDirectory(prefix="crabbox-bench-staging-") as staging:
                 env["TMPDIR"] = staging
-                result = run_bounded(command, min(args.timeout, remaining), env=env)
-            result.update({"label": label, "command": command, "phases": phase_metrics(result["stdout"])})
+                try:
+                    result = run_bounded(command, min(args.timeout, remaining), env=env)
+                except OSError as exc:
+                    result = {"returncode": None, "timedOut": False, "timeoutSeconds": min(args.timeout, remaining),
+                              "wallSeconds": None, "stdout": "", "stderr": "", "launchError": str(exc)}
+            result.update({"label": label, "command": command, "phases": {}})
+            errors = []
+            if result["returncode"] != 0 or result["timedOut"]:
+                errors.append("benchmark subprocess failed or timed out")
+            if "launchError" in result:
+                errors.append(result["launchError"])
+            try:
+                result["phases"] = phase_metrics(result["stdout"])
+                fixture_counts = validate_phases(result["phases"], expected, fixture_counts)
+            except ValueError as exc:
+                errors.append(str(exc))
+            result["validation"] = {"valid": not errors, "errors": errors}
             record["samples"].append(result)
-            print(f"sample {label} exit={result['returncode']} wall={result['wallSeconds']:.3f}s", flush=True)
-            if args.output:
-                args.output.write_text(json.dumps(record, indent=2) + "\n")
-        if args.baseline_test_binary and len(record["samples"]) == 6 and all(s["returncode"] == 0 for s in record["samples"]):
-            record["summary"] = {}
-            for phase in record["samples"][0]["phases"]:
-                a = [s["phases"][phase]["seconds"] for s in record["samples"] if s["label"] == "A"]
-                b = [s["phases"][phase]["seconds"] for s in record["samples"] if s["label"] == "B"]
-                record["summary"][phase] = {"medianA": statistics.median(a), "medianB": statistics.median(b),
-                                            "pairDeltaSeconds": [y - x for x, y in zip(a, b)],
-                                            "pairDeltaPercent": [100 * (y - x) / x for x, y in zip(a, b)]}
-            print(json.dumps(record["summary"]), flush=True)
-        if args.output:
-            args.output.write_text(json.dumps(record, indent=2) + "\n")
-        if any(s["returncode"] for s in record["samples"]) or record.get("scenarioTimedOut"):
+            elapsed = f"{result['wallSeconds']:.3f}s" if result["wallSeconds"] is not None else "not started"
+            print(f"sample {label} exit={result['returncode']} wall={elapsed}", flush=True)
+            if errors:
+                record["status"] = "failed"
+                record["validationErrors"].extend(errors)
+            write_benchmark_record(record, args.output)
+            if errors:
+                break
+        if record["status"] != "failed":
+            record["status"] = "complete"
+            if args.baseline_test_binary:
+                try:
+                    record["summary"] = paired_summary(record["samples"], expected)
+                except ValueError as exc:
+                    record["status"] = "failed"
+                    record["validationErrors"].append(str(exc))
+        write_benchmark_record(record, args.output)
+        if "summary" in record:
+            print(json.dumps(record["summary"], allow_nan=False), flush=True)
+        if record["status"] == "failed":
+            print("benchmark evidence rejected: " + "; ".join(record["validationErrors"]), file=sys.stderr)
             raise SystemExit(1)
     if args.crabbox:
         env = dict(os.environ)

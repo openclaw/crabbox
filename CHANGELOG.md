@@ -15,6 +15,7 @@
 - Boat: retain native error output from both streams so alias warnings do not hide failures or block snapshot recovery, with existing credential redaction. [PR 3007](https://github.com/openclaw/crabbox/pull/3007). Thanks @vincentkoc.
 - Boat: keep native CLI operations on the selected Crabbox account when an ambient `BOAT_API_KEY` is present. [PR 3005](https://github.com/openclaw/crabbox/pull/3005). Thanks @vincentkoc.
 
+- Sync benchmarks: reject missing, duplicate or invalid phase results before reporting comparisons, preserve failed evidence as strict JSON, and require explicit expected phase names for custom Go regex selectors. [PR 3011](https://github.com/openclaw/crabbox/pull/3011). Thanks @vincentkoc.
 - Blacksmith: reuse settled command-output snapshots and prepared proof summaries during finalization, avoiding repeated bounded-tail copies while preserving failure reporting and independent evidence destinations. Thanks @vincentkoc.
 - Blacksmith: finish bounded settlement verification when the native post-stop status read exhausts reconciliation's deadline, preserving fresh identity, exact GitHub completion, caller cancellation and claim fencing without replaying work or stop. [PR 2985](https://github.com/openclaw/crabbox/pull/2985). Thanks @vincentkoc.
 - Azure: complete brokered cleanup when every claimed resource is definitively absent, retaining strict identity and ownership checks for any surviving resource.
