@@ -2524,7 +2524,8 @@ if ! { ` + seed + `; } >/dev/null 2>"$transport_error"; then
   exit ` + strconv.Itoa(gitOriginRuntimeFallbackExitCode) + `
 fi
 printf 'crabbox-git-seed phase=checkout\n' >&2
-` + checkoutGit + ` -C "$tmp" checkout --quiet --detach ` + shellQuote(plan.Target) + `
+# Use Git baseline modes; the later sync preserves explicit local permissions.
+(umask 022; ` + checkoutGit + ` -C "$tmp" checkout --quiet --detach ` + shellQuote(plan.Target) + `)
 printf 'crabbox-git-seed phase=verify\n' >&2
 [ "$(git -C "$tmp" rev-parse --verify HEAD^{commit})" = ` + shellQuote(plan.Target) + ` ]
 cd "$tmp"

@@ -3509,6 +3509,7 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 		"local-hidden-fingerprint", "local-sparse-hidden-fingerprint", "local-config-hidden-fingerprint", "remote-hidden-fingerprint", "remote-skip-hidden-fingerprint", "remote-inspection-hidden-fingerprint",
 		"ordinary-private-fresh", "ordinary-private-reused", "ordinary-unavailable-fresh", "ordinary-unavailable-reused", "ordinary-disconnected-reused", "ordinary-server-failure-reused",
 		"ordinary-seeded-local-rejection", "ordinary-seeded-probe-exit", "ordinary-seeded-invalid-response", "ordinary-seeded-probe-exit-nodebug",
+		"ordinary-group-writable-seed",
 		"symlinked-workdir", "symlinked-git", "symlinked-git-config", "symlinked-git-objects", "linked-worktree",
 		"checkout-file-obstruction", "post-reset-cache", "post-reset-mass-deletion", "late-local-edit", "workload-cleanup", "rsync-failure", "rsync-cleanup-failure", "empty-overlay-finalize",
 	} {
@@ -3545,6 +3546,19 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 				}))
 				t.Cleanup(server.Close)
 				runGit(t, fixture.root, "remote", "set-url", "origin", server.URL+"/unavailable.git")
+			}
+			if mode == "ordinary-group-writable-seed" {
+				mustWriteTestFile(t, filepath.Join(fixture.root, ".gitattributes"), "*.txt text\n")
+				if err := os.Chmod(filepath.Join(fixture.root, "mode.sh"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				runGit(t, fixture.root, "add", ".gitattributes", "mode.sh")
+				runGit(t, fixture.root, "commit", "-qm", "attributes and executable")
+				runGit(t, fixture.root, "push", "-q", "origin", "main")
+				runGit(t, fixture.root, "fetch", "-q", "origin")
+				if err := os.Chmod(filepath.Join(fixture.root, "staged.txt"), 0o640); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if mode == "ordinary-seeded-local-rejection" {
 				runGit(t, fixture.root, "config", "core.trustctime", "false")
@@ -3777,6 +3791,7 @@ unset GIT_CONFIG_PARAMETERS
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0
 export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false GCM_INTERACTIVE=Never
 cmd="$1"
+if [ "$CRABBOX_FAKE_OVERLAY_MODE" = ordinary-group-writable-seed ]; then umask 002; fi
 printf '%%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
 # Replay the CI libcurl diagnostic only after a real coherence fetch failure.
 # Keep the remote command, cleanup, and exit status intact.
@@ -3943,7 +3958,7 @@ exit 99
 			if mode == "workload-cleanup" {
 				runArgs = []string{"--provider", providerName, "--no-hydrate", "--", "CRABBOX_SNAPSHOT_WORKLOAD_PROBE"}
 			}
-			if (strings.HasPrefix(mode, "ordinary-seeded-") && !strings.HasSuffix(mode, "-nodebug")) || mode == "ordinary-private-reused" {
+			if (strings.HasPrefix(mode, "ordinary-seeded-") && !strings.HasSuffix(mode, "-nodebug")) || mode == "ordinary-private-reused" || mode == "ordinary-group-writable-seed" {
 				runArgs = append(runArgs, "--debug")
 			}
 			runErr := app.runCommand(context.Background(), runArgs)
@@ -4319,6 +4334,19 @@ exit 99
 						if bytes.Contains(sshCommands, []byte(forbidden)) {
 							t.Fatalf("snapshot fallback ran forbidden Git path %q:\n%s", forbidden, sshCommands)
 						}
+					}
+				}
+			case "ordinary-group-writable-seed":
+				if strings.Contains(stderr.String(), "seeded sync fallback reason=") || !strings.Contains(stderr.String(), "seeded sync delta: 1 files") {
+					t.Fatalf("group-writable shell did not retain the clean seed: %s", stderr.String())
+				}
+				if transfer, err := os.ReadFile(rsyncLog); err != nil || !bytes.Equal(transfer, []byte("staged.txt\x00")) {
+					t.Fatalf("seeded permission delta=%q err=%v", transfer, err)
+				}
+				for rel, want := range map[string]os.FileMode{".": 0o700, ".gitattributes": 0o644, "clean.txt": 0o644, "mode.sh": 0o755, "staged.txt": 0o640} {
+					info, err := os.Stat(filepath.Join(workdir, rel))
+					if err != nil || info.Mode().Perm() != want {
+						t.Fatalf("seeded path %q: info=%v err=%v want mode=%o", rel, info, err, want)
 					}
 				}
 			case "ordinary-seeded-local-rejection", "ordinary-seeded-probe-exit", "ordinary-seeded-invalid-response", "ordinary-seeded-probe-exit-nodebug":
