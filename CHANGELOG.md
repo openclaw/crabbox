@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Sync: create private Git seeds with standard file modes so a group-writable remote shell does not force full-manifest transfers. Thanks @vincentkoc.
 - Sync: report bounded seeded-delta fallback reasons with `--debug` while preserving full-manifest fallback and keeping raw probe output private. [PR 3016](https://github.com/openclaw/crabbox/pull/3016). Thanks @vincentkoc.
 - Boat: honor explicit fixed-lease reclaim across checkouts after native identity and execution-policy checks, preserving the create intent and cleanup ownership. [PR 3013](https://github.com/openclaw/crabbox/pull/3013). Thanks @vincentkoc.
 - Boat: accept a ready sandbox's SSH endpoint without requiring a public IP, preserving endpoint validation and IP fallback. [PR 3006](https://github.com/openclaw/crabbox/pull/3006). Thanks @vincentkoc.
