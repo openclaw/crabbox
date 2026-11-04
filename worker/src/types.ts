@@ -12,6 +12,7 @@ export interface AWSCredentials {
 export type AWSCredentialProvider = () => Promise<AWSCredentials>;
 
 export interface Env {
+  CRABBOX_GUEST_NETWORK_POLICY_JSON?: string;
   CRABBOX_LEASE_DEFAULT_TTL_SECONDS?: string;
   CRABBOX_LEASE_DEFAULT_IDLE_TIMEOUT_SECONDS?: string;
   CRABBOX_LEASE_MAX_TTL_SECONDS?: string;
@@ -219,6 +220,8 @@ export interface CapacityRequirements {
 }
 
 export interface LeaseRequest {
+  untrustedWorkload?: true;
+  expectedGuestNetworkPolicy?: import("./guest-network").GuestNetworkPolicyIdentity;
   serveMachine?: string;
   sshHost?: string;
   hostCapabilities?: string[];
@@ -524,6 +527,10 @@ export interface AWSRootDiskIdentity {
 }
 
 export interface LeaseRecord {
+  untrustedWorkload?: true;
+  guestNetworkPolicy?: import("./guest-network").GuestNetworkPolicy;
+  guestNetworkBoundary?: import("./guest-network").GuestNetworkBoundary;
+  guestNetwork?: import("./guest-network").GuestNetworkReceipt;
   leasePolicy?: import("./config").LeasePolicy;
   policyNotice?: string;
   extensionHistory?: {
@@ -1359,6 +1366,8 @@ export interface HetznerSSHKey {
 }
 
 export interface ProviderMachine {
+  guestNetworkBoundary?: import("./guest-network").GuestNetworkBoundary;
+  guestNetwork?: import("./guest-network").GuestNetworkReceipt;
   creationEvents?: CreationEvent[];
   provider: Provider;
   id: number;

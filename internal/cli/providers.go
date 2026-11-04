@@ -12,23 +12,24 @@ import (
 
 type providerMatrixEntry struct {
 	providerStaticStatus
-	Provider      string               `json:"provider"`
-	Family        string               `json:"family"`
-	Aliases       []string             `json:"aliases,omitempty"`
-	Kind          ProviderKind         `json:"kind"`
-	Category      string               `json:"category,omitempty"`
-	Targets       []string             `json:"targets"`
-	Features      []Feature            `json:"features"`
-	Runtime       []string             `json:"runtime,omitempty"`
-	Reachability  []string             `json:"reachability,omitempty"`
-	Workspace     []string             `json:"workspace,omitempty"`
-	Evidence      []string             `json:"evidence,omitempty"`
-	Lifecycle     []string             `json:"lifecycle,omitempty"`
-	Coordinator   string               `json:"coordinator"`
-	BrokeredOnly  bool                 `json:"brokeredOnly,omitempty"`
-	Classes       []ClassSpec          `json:"classes,omitempty"`
-	ClassCatalog  ProviderClassCatalog `json:"classCatalog"`
-	SizeSelection ProviderSizeSelector `json:"sizeSelection,omitempty"`
+	Provider      string                            `json:"provider"`
+	Family        string                            `json:"family"`
+	Aliases       []string                          `json:"aliases,omitempty"`
+	Kind          ProviderKind                      `json:"kind"`
+	Category      string                            `json:"category,omitempty"`
+	Targets       []string                          `json:"targets"`
+	Features      []Feature                         `json:"features"`
+	GuestNetwork  *GuestNetworkCapabilityDescriptor `json:"guestNetwork,omitempty"`
+	Runtime       []string                          `json:"runtime,omitempty"`
+	Reachability  []string                          `json:"reachability,omitempty"`
+	Workspace     []string                          `json:"workspace,omitempty"`
+	Evidence      []string                          `json:"evidence,omitempty"`
+	Lifecycle     []string                          `json:"lifecycle,omitempty"`
+	Coordinator   string                            `json:"coordinator"`
+	BrokeredOnly  bool                              `json:"brokeredOnly,omitempty"`
+	Classes       []ClassSpec                       `json:"classes,omitempty"`
+	ClassCatalog  ProviderClassCatalog              `json:"classCatalog"`
+	SizeSelection ProviderSizeSelector              `json:"sizeSelection,omitempty"`
 }
 
 type providerRecommendationEntry struct {
@@ -271,6 +272,12 @@ func providerMatrixEntryForSpec(provider Provider, spec ProviderSpec) providerMa
 	}
 	if providerSupportsFixedLeaseID(provider) && !FeatureSet(entry.Features).Has(FeatureFixedLeaseID) {
 		entry.Features = append(entry.Features, FeatureFixedLeaseID)
+	}
+	if source, ok := provider.(ProviderBackendCapabilitySource); ok {
+		entry.GuestNetwork = guestNetworkDiscovery(source.BackendCapabilities())
+		if entry.GuestNetwork != nil {
+			entry.Features = append(entry.Features, FeatureGuestNetworkV1)
+		}
 	}
 	return entry
 }

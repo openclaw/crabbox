@@ -77,6 +77,8 @@ type ActionsWorkspaceBinding struct {
 // caller-supplied lease identity. Provider adapters own the opaque attempt
 // fields and their interpretation; the claim layer only persists and locks it.
 type FixedCreateIntent struct {
+	// Provider-owned cleanup handles persisted before companion resource submission.
+	Companions     map[string]string           `json:"companions,omitempty"`
 	Retention      *SessionDiskRetentionPolicy `json:"retention,omitempty"`
 	Version        int                         `json:"version"`
 	Fingerprint    string                      `json:"fingerprint"`
@@ -978,6 +980,7 @@ func cloneLeaseClaim(claim leaseClaim) leaseClaim {
 		}
 		intent.Journal = cloneFixedJournal(intent.Journal)
 		intent.Attempt = cloneStringMap(intent.Attempt)
+		intent.Companions = cloneStringMap(intent.Companions)
 		intent.FailedAttempts = append([]string(nil), intent.FailedAttempts...)
 		claim.FixedCreateIntent = &intent
 	}

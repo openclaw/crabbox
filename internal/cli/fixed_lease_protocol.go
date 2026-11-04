@@ -686,7 +686,7 @@ func FixedPristineRecord(claim LeaseClaim, kind FixedLeaseKind, scopePrefix stri
 	intent := claim.FixedCreateIntent
 	if !kind.IsFixedClaim(claim) || intent.Version != kind.IntentVersion || intent.State != "prepared" ||
 		!IsCanonicalLeaseID(claim.LeaseID) || intent.Slug == "" || claim.Slug != intent.Slug || claim.ProviderScope != intent.ProviderScope ||
-		len(intent.Attempt) != 0 || len(intent.FailedAttempts) != 0 || len(claim.Labels) != 0 ||
+		len(intent.Attempt) != 0 || len(intent.Companions) != 0 || len(intent.FailedAttempts) != 0 || len(claim.Labels) != 0 ||
 		claim.CloudID != "" || claim.CloudImmutableID != "" || claim.CloudNumericID != 0 || claim.SSHHost != "" || claim.SSHPort != 0 ||
 		claim.StaticHost != "" || claim.StaticUser != "" || claim.StaticPort != "" || claim.StaticWorkRoot != "" {
 		return false

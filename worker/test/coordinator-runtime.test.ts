@@ -715,6 +715,9 @@ describe("coordinator runtimes", () => {
       ["POST", "/v1/leases/cbx_abcdef123456/tailscale"],
       ["POST", "/v1/admin/tailscale-preflight"],
       ["GET", "/v1/admin/leases/cbx_abcdef123456/lifetime-readback"],
+      ["GET", "/v1/guest-network/capability?provider=aws"],
+      ["PUT", "/v1/guest-network/leases/cbx_abcdef123456"],
+      ["GET", "/v1/guest-network/leases/cbx_abcdef123456"],
       ["GET", "/v1/adapters/applied-alice"],
       ["POST", "/v1/adapters/applied-alice/proxy/v1/workspaces"],
     ]) {

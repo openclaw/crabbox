@@ -17,6 +17,18 @@ import {
   coordinatorGCPTokenCache,
 } from "./gcp-token-cache";
 import {
+  validateGuestNetworkCustodyUpdate,
+  serverGuestNetworkPolicy,
+  guestNetworkPolicyIdentity,
+  sameGuestNetworkPolicy,
+  validateGuestNetworkReceipt,
+  rejectGuestNetworkClientAuthority,
+  requireAWSGuestPolicy,
+  type GuestNetworkPolicy,
+  type GuestNetworkReceipt,
+  type GuestNetworkBoundary,
+} from "./guest-network";
+import {
   commitLeaseAdmission,
   leaseAdmissionDeadlineMs,
   LeaseAdmissionFence,
@@ -1560,6 +1572,23 @@ export class FleetCoordinator {
       }
       if (parts[0] === "v1" && parts[1] === "images" && parts[2]) {
         return await this.imageRoute(request, parts[2], parts[3]);
+      }
+      if (method === "GET" && parts.join("/") === "v1/guest-network/capability")
+        return await this.managedGuestNetworkCapability(request);
+      if (
+        parts[0] === "v1" &&
+        parts[1] === "guest-network" &&
+        parts[2] === "leases" &&
+        parts[3] &&
+        parts.length === 4
+      ) {
+        if (method === "GET") return await this.managedGuestNetworkInspect(request, parts[3]);
+        if (method === "PUT") {
+          const input = await readJson<LeaseRequest>(request.clone());
+          if (input.untrustedWorkload !== true || !input.expectedGuestNetworkPolicy)
+            return json({ error: "guest_network_precondition_required" }, { status: 400 });
+          return await this.createLease(request, undefined, undefined, undefined, parts[3]);
+        }
       }
       if (method === "GET" && parts.join("/") === "v1/leases") {
         return await this.listLeases(request);
@@ -4102,6 +4131,100 @@ export class FleetCoordinator {
     });
   }
 
+  private async managedGuestNetworkCapability(request: Request): Promise<Response> {
+    try {
+      const name = new URL(request.url).searchParams.get("provider") || "aws";
+      const provider = this.provider(name as Provider);
+      if (
+        provider.guestNetworkVersion?.() !== 1 ||
+        !provider.inspectGuestNetwork ||
+        !provider.validateGuestNetworkPolicy
+      )
+        return json({ error: "unsupported_guest_network_provider" }, { status: 400 });
+      const sealed = await serverGuestNetworkPolicy(this.env);
+      provider.validateGuestNetworkPolicy(sealed.policy);
+      return json({
+        version: 1,
+        provider: name,
+        allocationRoute: "managed-coordinator",
+        state: "implemented",
+        policy: sealed.identity,
+      });
+    } catch {
+      return json({ error: "guest_network_policy_unavailable" }, { status: 409 });
+    }
+  }
+
+  private async authoritativeGuestNetworkLease(
+    request: Request,
+    id: string,
+  ): Promise<LeaseRecord | Response> {
+    const lease = await this.getLease(id);
+    if (!lease || !this.leaseVisibleToRequest(lease, request, isAdminRequest(request)))
+      return notFound();
+    if (
+      !lease.untrustedWorkload ||
+      !lease.guestNetworkPolicy ||
+      !lease.guestNetworkBoundary ||
+      !lease.cloudID
+    )
+      return json({ error: "guest_network_boundary_unavailable" }, { status: 409 });
+    const sealed = await serverGuestNetworkPolicy(this.env);
+    if (
+      !sameGuestNetworkPolicy(
+        await guestNetworkPolicyIdentity(lease.guestNetworkPolicy),
+        sealed.identity,
+      )
+    )
+      return json({ error: "guest_network_policy_changed" }, { status: 409 });
+    const provider = this.provider(lease.provider as Provider, lease.region, lease.providerProject);
+    if (provider.guestNetworkVersion?.() !== 1 || !provider.inspectGuestNetwork)
+      return json({ error: "unsupported_guest_network_provider" }, { status: 400 });
+    const receipt = await provider.inspectGuestNetwork(lease);
+    validateGuestNetworkReceipt(receipt, sealed.identity, lease.id, lease.provider, lease.cloudID);
+    if (
+      !receipt.facts["sshHostKey"] ||
+      (lease.sshHostKey && receipt.facts["sshHostKey"] !== lease.sshHostKey)
+    )
+      return json({ error: "guest_network_transport_identity_mismatch" }, { status: 409 });
+    return { ...lease, guestNetwork: receipt };
+  }
+
+  private async managedGuestNetworkInspect(request: Request, id: string): Promise<Response> {
+    try {
+      const lease = await this.authoritativeGuestNetworkLease(request, id);
+      if (lease instanceof Response) return lease;
+      return json({
+        lease: this.publicLeaseRecord(lease, lease.guestNetwork),
+        policy: await guestNetworkPolicyIdentity(lease.guestNetworkPolicy!),
+      });
+    } catch {
+      return json({ error: "guest_network_inspection_failed" }, { status: 409 });
+    }
+  }
+
+  private async completeGuestNetworkResponse(
+    response: Response,
+    request: Request,
+  ): Promise<Response> {
+    if (response.status >= 300) return response;
+    const body = (await response.clone().json()) as { lease?: LeaseRecord };
+    if (!body.lease?.untrustedWorkload) return response;
+    try {
+      const lease = await this.authoritativeGuestNetworkLease(request, body.lease.id);
+      if (lease instanceof Response) return lease;
+      return json(
+        { ...body, lease: this.publicLeaseRecord(lease, lease.guestNetwork) },
+        { status: response.status },
+      );
+    } catch {
+      return json(
+        { error: "guest_network_allocation_inspection_failed", leaseID: body.lease.id },
+        { status: 409 },
+      );
+    }
+  }
+
   private async createLease(
     request: Request,
     reservationGuard?: () => Promise<Response | undefined>,
@@ -4124,7 +4247,10 @@ export class FleetCoordinator {
           checkpointAuthorization,
         ),
       );
-    return admissionFence ? create() : fence.run(create, this.admissionDeadlineMs);
+    const response = await (admissionFence
+      ? create()
+      : fence.run(create, this.admissionDeadlineMs));
+    return this.completeGuestNetworkResponse(response, request);
   }
 
   private async createLeaseObserved(
@@ -4149,6 +4275,38 @@ export class FleetCoordinator {
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
     const input = await readJson<LeaseRequest>(request);
+    let guestPolicy: GuestNetworkPolicy | undefined;
+    try {
+      rejectGuestNetworkClientAuthority(input);
+      if (input.untrustedWorkload) {
+        if (
+          workspaceID ||
+          checkpointAuthorization ||
+          input.awsProfile ||
+          input.tailscale ||
+          input.desktop ||
+          input.browser ||
+          input.code ||
+          input.exposedPorts?.length
+        )
+          throw new Error(
+            "guest create does not permit roles, overlay credentials, legacy feature bootstrap or checkpoint/workspace adoption",
+          );
+        const sealed = await serverGuestNetworkPolicy(this.env);
+        if (!sameGuestNetworkPolicy(input.expectedGuestNetworkPolicy, sealed.identity))
+          throw new Error("managed guest policy precondition mismatch");
+        guestPolicy = sealed.policy;
+        input.tailscale = false;
+      }
+    } catch (error) {
+      return json(
+        {
+          error: "invalid_guest_network_request",
+          message: error instanceof Error ? error.message : "invalid guest network request",
+        },
+        { status: 400 },
+      );
+    }
     if (input.lifetimePolicy !== undefined && !isAdminRequest(request)) {
       return json(
         { error: "forbidden", message: "lifetime canary requires admin authentication" },
@@ -4237,8 +4395,27 @@ export class FleetCoordinator {
       return json({ error: "invalid_create_attempt_id" }, { status: 400 });
     }
     const leaseID = fixedLeaseID ?? (validLeaseID(input.leaseID) ? input.leaseID : newLeaseID());
+    const guestExisting = await this.getLease(leaseID);
+    if (
+      guestExisting &&
+      (guestExisting.untrustedWorkload || input.untrustedWorkload) &&
+      !this.leaseVisibleToRequest(guestExisting, request, isAdminRequest(request))
+    )
+      return notFound();
+    if (
+      guestExisting &&
+      (Boolean(guestExisting.untrustedWorkload) !== Boolean(input.untrustedWorkload) ||
+        (guestPolicy &&
+          (!guestExisting.guestNetworkPolicy ||
+            !sameGuestNetworkPolicy(
+              await guestNetworkPolicyIdentity(guestExisting.guestNetworkPolicy),
+              await guestNetworkPolicyIdentity(guestPolicy),
+            ))))
+    )
+      return json({ error: "guest_network_binding_conflict" }, { status: 409 });
     if (fixedLeaseID && !checkpointAuthorization) {
       const replay = await this.replayDurableFixedRequest(request, input, fixedLeaseID, owner, org);
+
       if (replay) return replay;
     }
     if (ordinaryCreate && input.createAttemptID !== undefined) {
@@ -4277,9 +4454,28 @@ export class FleetCoordinator {
     const azureWindowsARM64Image = this.env.CRABBOX_AZURE_WINDOWS_ARM64_IMAGE?.trim();
     if (azureWindowsARM64Image) defaults.azureWindowsARM64Image = azureWindowsARM64Image;
     if (this.env.CRABBOX_AZURE_OS_DISK) defaults.azureOSDisk = this.env.CRABBOX_AZURE_OS_DISK;
+
     let config: LeaseConfig;
     try {
       config = leaseConfig(input, defaults);
+      if (guestPolicy) {
+        const guestProvider = this.provider(
+          config.provider,
+          providerRegionForConfig(config),
+          providerProjectForConfig(config),
+        );
+        if (
+          guestProvider.guestNetworkVersion?.() !== 1 ||
+          !guestProvider.inspectGuestNetwork ||
+          !guestProvider.validateGuestNetworkPolicy ||
+          !guestProvider.prepareGuestNetworkConfig
+        )
+          throw new Error(
+            "provider has no managed guest network enforcement/inspection implementation",
+          );
+        guestProvider.validateGuestNetworkPolicy(guestPolicy);
+        config = guestProvider.prepareGuestNetworkConfig(config, guestPolicy);
+      }
     } catch (error) {
       if (error instanceof InvalidCapacityRequirementsError) {
         return json(
@@ -4373,6 +4569,7 @@ export class FleetCoordinator {
         ),
         provider: config.provider,
       };
+
       const replay = await runAdmissionExclusive(async () => {
         return this.fixedLeaseReplayResponse(
           fixedLeaseID,
@@ -4382,6 +4579,7 @@ export class FleetCoordinator {
           checkpointAuthorization,
         );
       });
+
       if (replay) {
         return this.preferredCreateReplay(request, leaseID, replay);
       }
@@ -4397,6 +4595,7 @@ export class FleetCoordinator {
     if (deferredSlugError) {
       return json({ error: "invalid_slug", message: deferredSlugError.message }, { status: 400 });
     }
+
     const configProvider = this.provider(
       config.provider,
       providerRegionForConfig(config),
@@ -4552,7 +4751,7 @@ export class FleetCoordinator {
       providerProjectForConfig(config),
     );
     const injectsSSHHostKey = !workspaceCapability && provider.supportsSSHHostKeyInjection(config);
-    if (injectsSSHHostKey) {
+    if (injectsSSHHostKey && !guestPolicy) {
       config = measureCreationStepSync("admission.host_key", () =>
         withSSHHostKey(config, `crabbox-${leaseID}`),
       );
@@ -4682,6 +4881,9 @@ export class FleetCoordinator {
         : undefined;
       let record: LeaseRecord = {
         id: leaseID,
+        ...(guestPolicy
+          ? { untrustedWorkload: true as const, guestNetworkPolicy: structuredClone(guestPolicy) }
+          : {}),
         ...(capacityRequirements ? { capacityRequirements } : {}),
         slug,
         ...(checkpointAuthorization ? { checkpointID: checkpointAuthorization.checkpoint.id } : {}),
@@ -5004,6 +5206,7 @@ export class FleetCoordinator {
           },
         }
       : undefined;
+
     const provisioningStart = await runAdmissionExclusive(async () => {
       const current = await this.getLease(record.id);
       const currentAttempt = createAttempt
@@ -5056,8 +5259,41 @@ export class FleetCoordinator {
       );
     }
     record = provisioningStart.current;
+
     const dispatched = structuredClone(record);
     const provisioning: ProviderProvisioningContext = {
+      ...(guestPolicy
+        ? {
+            onGuestNetworkBoundary: async (boundary: GuestNetworkBoundary) => {
+              await this.state.runExclusive(async () => {
+                const current = await this.getLease(record.id);
+                if (
+                  !current ||
+                  !sameLeaseReleaseIdentity(current, dispatched) ||
+                  boundary.leaseId !== current.id ||
+                  boundary.policyDigest !==
+                    (await guestNetworkPolicyIdentity(guestPolicy!)).policyDigest
+                )
+                  throw new Error("managed guest cleanup custody changed");
+                const previous = current.guestNetworkBoundary;
+                validateGuestNetworkCustodyUpdate(previous, boundary);
+                if (
+                  previous &&
+                  !previous.cleanupConfirmed &&
+                  (previous.securityGroupName !== boundary.securityGroupName ||
+                    previous.region !== boundary.region ||
+                    (previous.securityGroupId &&
+                      previous.securityGroupId !== boundary.securityGroupId) ||
+                    (previous.bootstrapSha256 &&
+                      previous.bootstrapSha256 !== boundary.bootstrapSha256))
+                )
+                  throw new Error("managed guest boundary custody cannot be overwritten");
+                current.guestNetworkBoundary = structuredClone(boundary);
+                await this.putLease(current);
+              });
+            },
+          }
+        : {}),
       ...targetProvisioning,
       ...(dispatched.providerScope ? { providerScope: dispatched.providerScope } : {}),
       onProviderKeyCleanupPending: async (existingKey) => {
@@ -5262,6 +5498,32 @@ export class FleetCoordinator {
       record.providerResourceID = server.providerResourceID;
     } else {
       delete record.providerResourceID;
+    }
+    if (guestPolicy) {
+      try {
+        validateGuestNetworkReceipt(
+          server.guestNetwork,
+          await guestNetworkPolicyIdentity(guestPolicy),
+          record.id,
+          record.provider,
+          server.cloudID,
+        );
+        if (!server.guestNetworkBoundary || !server.guestNetwork?.facts["sshHostKey"])
+          throw new Error(
+            "managed guest provider did not return inspected boundary/transport identity",
+          );
+      } catch {
+        return this.abortProvisionedLeaseAfterStateChange(
+          record,
+          config,
+          server,
+          serverType,
+          false,
+        );
+      }
+      record.guestNetworkBoundary = server.guestNetworkBoundary;
+      record.guestNetwork = server.guestNetwork;
+      record.sshHostKey = server.guestNetwork.facts["sshHostKey"];
     }
     record.serverName = server.name;
     record.host = server.host;
@@ -20987,11 +21249,17 @@ export class FleetCoordinator {
     return this.leaseAccessRole(lease, request, admin) === "owner";
   }
 
-  private publicLeaseRecord(lease: LeaseRecord): LeaseRecord {
-    return publicLeaseRecord({
+  private publicLeaseRecord(lease: LeaseRecord, receipt?: GuestNetworkReceipt): LeaseRecord {
+    const visible = {
       ...this.applyCurrentLeasePolicy(lease),
       leasePolicy: this.currentLeasePolicy(lease),
-    });
+    };
+    delete visible.guestNetworkPolicy;
+    delete visible.guestNetworkBoundary;
+    delete visible.guestNetwork;
+    const projected = publicLeaseRecord(visible);
+    if (receipt) projected.guestNetwork = receipt;
+    return projected;
   }
 
   private leaseForRequest(lease: LeaseRecord, request: Request, admin: boolean): LeaseRecord {
@@ -29253,6 +29521,10 @@ interface ProviderProvisioningFailureEvidence {
 }
 
 export interface CloudProvider {
+  guestNetworkVersion?(): number;
+  validateGuestNetworkPolicy?(policy: import("./guest-network").GuestNetworkPolicy): void;
+  prepareGuestNetworkConfig?(config: LeaseConfig, policy: GuestNetworkPolicy): LeaseConfig;
+  inspectGuestNetwork?(lease: LeaseRecord): Promise<import("./guest-network").GuestNetworkReceipt>;
   // No I/O or state mutation.
   provisioningFailureEvidence?(
     context: ProviderProvisioningFailureContext,
@@ -29482,6 +29754,9 @@ interface ProviderLeaseCreateFinalization {
 }
 
 interface ProviderProvisioningContext {
+  onGuestNetworkBoundary?: (
+    boundary: import("./guest-network").GuestNetworkBoundary,
+  ) => Promise<void>;
   providerScope?: string;
   sshIngressReconcile?: "authoritative" | "additive";
   allowEmptySSHIngress?: boolean;
@@ -31079,6 +31354,61 @@ async function recordAWSMacHostAllocations(
 }
 
 export class AWSProvider implements CloudProvider {
+  guestNetworkVersion(): number {
+    return 1;
+  }
+  validateGuestNetworkPolicy(policy: import("./guest-network").GuestNetworkPolicy): void {
+    requireAWSGuestPolicy(policy, true);
+  }
+  prepareGuestNetworkConfig(config: LeaseConfig, policy: GuestNetworkPolicy): LeaseConfig {
+    this.validateGuestNetworkPolicy(policy);
+    if (
+      config.target !== "linux" ||
+      !["ubuntu:22.04", "ubuntu:24.04"].includes(config.os) ||
+      config.awsAMI ||
+      config.awsSnapshot ||
+      config.awsProfile ||
+      config.awsPrivate ||
+      config.awsRequireSSM ||
+      config.sshPort !== "22"
+    )
+      throw new Error(
+        "guest bootstrap requires an ordinary supported Ubuntu image and no role/private/SSM/custom-image path",
+      );
+    return {
+      ...config,
+      guestNetworkPolicy: policy,
+      awsUseStockImage: true,
+      sshHostPrivateKey: "",
+      sshHostPublicKey: "",
+      tailscale: false,
+      tailscaleAuthKey: "",
+      desktop: false,
+      code: false,
+      browser: false,
+      exposedPorts: [],
+    };
+  }
+  async inspectGuestNetwork(lease: LeaseRecord): Promise<GuestNetworkReceipt> {
+    const sealed = await serverGuestNetworkPolicy(this.env);
+    if (
+      !lease.guestNetworkPolicy ||
+      !lease.guestNetworkBoundary ||
+      !sameGuestNetworkPolicy(
+        await guestNetworkPolicyIdentity(lease.guestNetworkPolicy),
+        sealed.identity,
+      )
+    )
+      throw new Error("managed guest policy custody mismatch");
+    return this.withLeaseOperation(async (session) => {
+      await this.verifyLeaseOperationAuthority(lease, session);
+      return session.client.inspectGuestNetworkBoundary(
+        lease.guestNetworkBoundary!,
+        sealed.policy,
+        lease.cloudID,
+      );
+    });
+  }
   readonly recoveryIsAuthoritative = true;
   readonly supportsCleanupScopeRecovery = true;
 
@@ -31100,7 +31430,9 @@ export class AWSProvider implements CloudProvider {
   }: ProviderProvisioningFailureContext): ProviderProvisioningFailureEvidence {
     if (config.provider !== "aws") return {};
     return {
-      allocationUncertain: isAWSRunInstancesOutcomeUncertain(message),
+      allocationUncertain:
+        isAWSRunInstancesOutcomeUncertain(message) ||
+        Boolean(lease.guestNetworkBoundary && !lease.guestNetworkBoundary.cleanupConfirmed),
       ownedKeyCleanupPending: Boolean(
         lease.providerKeyCleanupPending && leaseUsesCanonicalProviderKey(lease),
       ),
@@ -31877,6 +32209,17 @@ export class AWSProvider implements CloudProvider {
     if (!provisioning || !providerScope || !recordedAccount) {
       throw new Error("AWS provisioning requires a persisted account scope");
     }
+    if (config.guestNetworkPolicy) {
+      const sealed = await serverGuestNetworkPolicy(this.env);
+      if (
+        !sameGuestNetworkPolicy(
+          await guestNetworkPolicyIdentity(config.guestNetworkPolicy),
+          sealed.identity,
+        )
+      )
+        throw new Error("managed operator policy custody mismatch");
+      config = { ...config, guestNetworkPolicy: sealed.policy };
+    }
     const totalStartedAt = Date.now();
     const history = new ProvisioningAttemptHistory();
     const ingressOptions =
@@ -31928,6 +32271,9 @@ export class AWSProvider implements CloudProvider {
               owner,
               {
                 ...ingressOptions,
+                ...(provisioning.onGuestNetworkBoundary
+                  ? { onGuestNetworkBoundary: provisioning.onGuestNetworkBoundary }
+                  : {}),
                 vpcCache: new AWSVPCCache(this.storage, authenticatedAccount, region),
                 onOwnedKeyCleanupRequired: async (existingKey: boolean) => {
                   await provisioning.onProviderKeyCleanupPending?.(existingKey);
@@ -32436,6 +32782,10 @@ export class AWSProvider implements CloudProvider {
         }
         await context?.assertCleanupOwner?.();
         await session.deleteSSHKey(lease.providerKey, lease.id);
+      }
+      if (lease.guestNetworkBoundary && !lease.guestNetworkBoundary.cleanupConfirmed) {
+        await context?.assertCleanupOwner?.();
+        await session.client.cleanupGuestNetworkBoundary(lease.guestNetworkBoundary);
       }
       const blocker = awsCleanupCompletionBlocker(lease, {
         instanceComplete: true,

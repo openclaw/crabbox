@@ -45,6 +45,14 @@ func (b *awsLeaseBackend) SupportsRequestedLeaseID() bool { return true }
 func (b *awsLeaseBackend) SupportsRequestedCheckpointID() bool { return true }
 
 func (b *awsLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	if b.Cfg.GuestNetworkPolicy != nil {
+		if req.RequestedLeaseID == "" {
+			return core.LeaseTarget{}, core.Exit(2, "untrusted workloads require a fixed lease ID")
+		}
+		if err := core.ValidateAWSGuestNetworkConfig(b.Cfg); err != nil {
+			return core.LeaseTarget{}, err
+		}
+	}
 	if strings.TrimSpace(req.RequestedLeaseID) != "" {
 		return b.acquireFixed(ctx, req)
 	}
@@ -152,7 +160,7 @@ var fixedAWSLeaseKind = core.FixedLeaseKind{
 	ClaimProvider:           core.FixedAWSClaimProvider,
 	IntentVersion:           fixedAWSCreateIntentVersion,
 	Label:                   "AWS",
-	AfterTerminal:           func(claim core.LeaseClaim) error { return cleanupAWSLeaseSSH(claim.LeaseID) },
+	AfterTerminal:           cleanupAWSFixedTerminal,
 	TerminalIdentityLabels: []string{
 		"crabbox", "created_by", "provider", "lease", "slug",
 		"aws_account_id", "aws_region", "fixed_intent_sha256", "provider_key", "aws_key_pair_id",
@@ -267,6 +275,14 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 		if pinned != nil {
 			return core.FixedObservation[core.Server]{}, core.Exit(4, "lease_id_conflict: fixed AWS lease %s has an unresolved launch attempt; retry after provider inventory converges", leaseID)
 		}
+		if tx.Claim.FixedCreateIntent.Companions[awsGuestCompanionKey] != "" {
+			if _, err := retireAWSGuestRejectedCompanion(tx); err != nil {
+				return core.FixedObservation[core.Server]{}, err
+			}
+		}
+		if tx.Claim.FixedCreateIntent.Companions[awsGuestCompanionKey] != "" {
+			return core.FixedObservation[core.Server]{}, core.Exit(4, "guest network pre-launch custody is unresolved; stop this fixed lease to settle owned cleanup before retry")
+		}
 		return core.FixedObservation[core.Server]{CanSubmit: true}, nil
 	},
 		Submit: func(ctx context.Context, tx *core.FixedTransaction) (core.Server, error) {
@@ -274,6 +290,11 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 			createdAt, _ := time.Parse(time.RFC3339Nano, intent.CreatedAt)
 			failed := tx.FailedAttemptSet()
 			control := &core.AWSFixedCreateControl{CreatedAt: createdAt, IntentFingerprint: fingerprint, AccountID: accountID, FailedTokens: failed}
+			if cfg.GuestNetworkPolicy != nil {
+				control.GuestNetworkCustody = func(boundary core.AWSGuestNetworkBoundary) error {
+					return persistAWSGuestCompanion(tx, cfg.AWSRegion, accountID, boundary)
+				}
+			}
 			control.BeforeAttempt = func(attempt core.AWSLaunchAttempt) error {
 				return core.WriteFixedAttempt(intent, "aws", attempt, tx.Admit)
 			}
@@ -328,19 +349,25 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 				return core.LeaseTarget{}, err
 			}
 			target := sshTargetForBootstrap(resolvedCfg, server.PublicNet.IPv4.IP, leaseID, intent.Slug)
-			if err := waitAWSAcquireReady(ctx, func(ctx context.Context) error {
-				return serverClient.CheckAcquireState(ctx, server.CloudID)
-			}, func(ctx context.Context) error {
-				return bootstrapAWSWindowsDesktop(ctx, resolvedCfg, &target, publicKey, b.RT.Stderr)
-			}); err != nil {
+			receipt, err := prepareAWSGuestAccess(ctx, serverClient, resolvedCfg, server, leaseID, func() error {
+				return waitAWSAcquireReady(ctx, func(ctx context.Context) error {
+					return serverClient.CheckAcquireState(ctx, server.CloudID)
+				}, func(ctx context.Context) error {
+					return bootstrapAWSWindowsDesktop(ctx, resolvedCfg, &target, publicKey, b.RT.Stderr)
+				})
+			})
+			if err != nil {
 				return core.LeaseTarget{}, err
 			}
 			server.Labels["state"] = "ready"
 			if err := serverClient.SetTags(ctx, server.CloudID, server.Labels); err != nil {
 				return core.LeaseTarget{}, fmt.Errorf("persist AWS fixed lease identity tags: %w", err)
 			}
+			if receipt != nil && receipt.BootstrapMode == core.GuestBootstrapPublicKeyV1 {
+				target.SSHHostKey = receipt.Facts["sshHostKey"]
+			}
 			claim.ProviderScope = providerScope
-			return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+			return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, GuestNetwork: receipt}, nil
 		}})
 	return core.CompleteFixedAcquisition(acquired, err, req)
 }
@@ -444,7 +471,7 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) 
 			}
 			leaseID := core.Blank(server.Labels["lease"], req.ID)
 			target := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-			return b.ResolvedLeaseTarget(server, target, leaseID, req.ReleaseOnly)
+			return b.resolvedAWSGuestTarget(ctx, cfg, server, target, leaseID, req.ReleaseOnly)
 		}
 		if lastErr != nil {
 			return core.LeaseTarget{}, lastErr
@@ -468,7 +495,7 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) 
 	} else if leaseID != "" {
 		cfg := awsConfigForServer(b.Cfg, server)
 		target := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-		return b.ResolvedLeaseTarget(server, target, leaseID, req.ReleaseOnly)
+		return b.resolvedAWSGuestTarget(ctx, cfg, server, target, leaseID, req.ReleaseOnly)
 	}
 	return core.LeaseTarget{}, core.Exit(4, "lease/server not found: %s", req.ID)
 }
@@ -840,6 +867,9 @@ func deleteAWSReleaseServerWithClient(ctx context.Context, client awsClient, ser
 	if err := client.DeleteServer(ctx, server.CloudID); err != nil {
 		return err
 	}
+	if err := cleanupAWSGuestBoundary(ctx, client, server); err != nil {
+		return err
+	}
 	keyName := core.ServerProviderKey(server)
 	if !core.ValidCrabboxProviderKey(keyName) {
 		fmt.Fprintf(stderr, "skip provider key name=%s reason=not a canonical Crabbox provider key\n", keyName)
@@ -1044,6 +1074,9 @@ func isAWSClaimProvider(provider string) bool {
 
 func deleteAWSCleanupServerWithClient(ctx context.Context, client awsClient, server core.Server, cleanupKeyID string) error {
 	if err := client.DeleteServer(ctx, server.CloudID); err != nil {
+		return err
+	}
+	if err := cleanupAWSGuestBoundary(ctx, client, server); err != nil {
 		return err
 	}
 	if cleanupKeyID != "" {

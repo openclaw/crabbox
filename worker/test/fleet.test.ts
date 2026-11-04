@@ -41,6 +41,7 @@ import {
   type CoordinatorStorageView,
   type CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
+import { sha256Hex as guestContractSHA256 } from "../src/encoding";
 import { sha256Hex } from "../src/encoding";
 import {
   EXTERNAL_RUNNER_FRESHNESS,
@@ -76,6 +77,7 @@ import {
   type WebVNCBuffer,
 } from "../src/fleet";
 import { GCPClient, gcpProviderLabelValue } from "../src/gcp";
+import * as guestContract from "../src/guest-network";
 import { HetznerClient, HetznerProvisioningError } from "../src/hetzner";
 import { errorMessage } from "../src/http";
 import { leaseProviderCleanupConfirmed } from "../src/lease-cleanup";
@@ -63408,4 +63410,226 @@ describe("control credential continuation", () => {
     expect(f.socket.closeCode).toBe(1008);
     expect(f.socket.closeReason).toBe("portal session ended");
   });
+});
+
+describe("managed guest network versioned server route", () => {
+  function key(fill = 1): string {
+    const bytes = new Uint8Array(51);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, 11);
+    bytes.set(new TextEncoder().encode("ssh-ed25519"), 4);
+    view.setUint32(15, 32);
+    bytes.fill(fill, 19);
+    return "ssh-ed25519 " + btoa(String.fromCharCode(...bytes));
+  }
+  const policy: guestContract.GuestNetworkPolicy = {
+    bootstrapMode: "ssh-public-key-v1",
+    version: 1,
+    id: "example-managed-policy",
+    revision: "1",
+    egress: [{ cidr: "93.184.216.34/32", ports: [443] }],
+    sshSources: ["198.51.100.7/32"],
+    platformExceptions: ["aws-platform-services-v1", "aws-roleless-imdsv2-public-bootstrap-v1"],
+  };
+  const id = "cbx_abc123abc123";
+  const headers = {
+    "content-type": "application/json",
+    "x-crabbox-owner": "alice@example.com",
+    "x-crabbox-org": "example-org",
+  };
+  async function setup() {
+    const storage = new MemoryStorage();
+    const events: string[] = [];
+    let created = 0;
+    let inspected = 0;
+    let corrupt = false;
+    const base = fakeProvider(undefined, {
+      provider: "aws",
+      cloudID: "i-11111111",
+      serverType: "c7i.2xlarge",
+      region: "eu-west-1",
+    });
+    const original = base.createServerWithFallback.bind(base);
+    let receipt: guestContract.GuestNetworkReceipt | undefined;
+    const provider = Object.assign(base, {
+      guestNetworkVersion: () => 1,
+      validateGuestNetworkPolicy: (p: guestContract.GuestNetworkPolicy) =>
+        guestContract.requireAWSGuestPolicy(p, true),
+      prepareGuestNetworkConfig: (config: LeaseConfig, p: guestContract.GuestNetworkPolicy) => ({
+        ...config,
+        guestNetworkPolicy: p,
+        awsUseStockImage: true,
+        tailscale: false,
+        tailscaleAuthKey: "",
+        sshHostPrivateKey: "",
+        sshHostPublicKey: "",
+        desktop: false,
+        browser: false,
+        code: false,
+        exposedPorts: [],
+      }),
+      createServerWithFallback: async (
+        config: LeaseConfig,
+        leaseID: string,
+        slug: string,
+        owner: string,
+        context?: Parameters<typeof base.createServerWithFallback>[4] & {
+          onGuestNetworkBoundary?: (b: guestContract.GuestNetworkBoundary) => Promise<void>;
+        },
+      ) => {
+        expect(config.guestNetworkPolicy).toEqual(policy);
+        expect(config.sshHostPrivateKey).toBe("");
+        expect(config.tailscaleAuthKey).toBe("");
+        const identity = await guestContract.guestNetworkPolicyIdentity(policy);
+        const boundary: guestContract.GuestNetworkBoundary = {
+          leaseId: leaseID,
+          subnetId: "subnet-11111111",
+          vpcId: "vpc-11111111",
+          securityGroupId: "",
+          securityGroupName: "fixture-owned-group",
+          policyDigest: identity.policyDigest,
+          region: "eu-west-1",
+          bootstrapMode: "ssh-public-key-v1",
+        };
+        await context?.onGuestNetworkBoundary?.(boundary);
+        events.push("custody");
+        boundary.securityGroupId = "sg-11111111";
+        boundary.bootstrapSha256 = await guestContractSHA256(
+          Uint8Array.from(
+            atob(
+              guestContract.guestPublicKeyUserData(
+                config.sshPublicKey,
+                config.sshUser,
+                config.workRoot,
+              ),
+            ),
+            (c) => c.charCodeAt(0),
+          ),
+        );
+        await context?.onGuestNetworkBoundary?.(boundary);
+        events.push("enforced-before-base-boot");
+        const result = await original(config, leaseID, slug, owner, context);
+        created++;
+        receipt = {
+          ...identity,
+          leaseId: leaseID,
+          provider: "aws",
+          resourceId: result.server.cloudID,
+          boundaryId: boundary.securityGroupId,
+          facts: {
+            imds: "roleless-v2",
+            instanceProfile: "none",
+            bootstrapMode: "ssh-public-key-v1",
+            bootstrapSha256: boundary.bootstrapSha256,
+            sshHostKey: key(2),
+          },
+        };
+        return {
+          ...result,
+          server: { ...result.server, guestNetwork: receipt, guestNetworkBoundary: boundary },
+        };
+      },
+      inspectGuestNetwork: async (lease: LeaseRecord) => {
+        inspected++;
+        events.push("provider-inspection");
+        expect(lease.guestNetworkPolicy).toEqual(policy);
+        return { ...receipt!, resourceId: corrupt ? "i-22222222" : lease.cloudID };
+      },
+    });
+    const fleet = testFleet(
+      storage,
+      { aws: provider },
+      { CRABBOX_GUEST_NETWORK_POLICY_JSON: JSON.stringify(policy) },
+    );
+    const capability = await fleet.fetch(
+      new Request("https://coordinator.test/v1/guest-network/capability?provider=aws", { headers }),
+    );
+    expect(capability.status).toBe(200);
+    const observed = (await capability.json()) as {
+      policy: guestContract.GuestNetworkPolicyIdentity;
+    };
+    const input = {
+      provider: "aws",
+      target: "linux",
+      os: "ubuntu:24.04",
+      sshPublicKey: key(),
+      untrustedWorkload: true,
+      expectedGuestNetworkPolicy: observed.policy,
+    };
+    return {
+      fleet,
+      storage,
+      events,
+      input,
+      created: () => created,
+      inspected: () => inspected,
+      corrupt: () => {
+        corrupt = true;
+      },
+    };
+  }
+  it("allocates with durable custody and returns fresh, allocation-bound receipts on create/replay/inspect", async () => {
+    const f = await setup();
+    const create = () =>
+      f.fleet.fetch(
+        new Request("https://coordinator.test/v1/guest-network/leases/" + id, {
+          method: "PUT",
+          headers,
+          body: JSON.stringify(f.input),
+        }),
+      );
+    const response = await create();
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { lease: LeaseRecord };
+    expect(body.lease.guestNetwork).toMatchObject({
+      leaseId: id,
+      provider: "aws",
+      resourceId: "i-11111111",
+      policyDigest: f.input.expectedGuestNetworkPolicy.policyDigest,
+    });
+    expect(body.lease).not.toHaveProperty("guestNetworkPolicy");
+    expect(body.lease).not.toHaveProperty("guestNetworkBoundary");
+    expect(f.events.indexOf("custody")).toBeLessThan(f.events.indexOf("enforced-before-base-boot"));
+    expect(f.inspected()).toBeGreaterThan(0);
+    const replay = await create();
+    expect(replay.status).toBeLessThan(300);
+    expect(f.created()).toBe(1);
+    const inspect = await f.fleet.fetch(
+      new Request("https://coordinator.test/v1/guest-network/leases/" + id, { headers }),
+    );
+    expect(inspect.status).toBe(200);
+    const inspected = (await inspect.json()) as { lease: LeaseRecord };
+    expect(inspected.lease.guestNetwork?.resourceId).toBe("i-11111111");
+    f.corrupt();
+    const mismatch = await f.fleet.fetch(
+      new Request("https://coordinator.test/v1/guest-network/leases/" + id, { headers }),
+    );
+    expect(mismatch.status).toBe(409);
+  });
+  it.each(["client rules", "client receipt", "policy mismatch", "instance role", "legacy overlay"])(
+    "rejects %s before allocating",
+    async (failure) => {
+      const f = await setup();
+      const input: Record<string, unknown> = { ...f.input };
+      if (failure === "client rules") input["guestNetworkPolicy"] = policy;
+      if (failure === "client receipt") input["guestNetworkReceipt"] = { version: 1 };
+      if (failure === "policy mismatch")
+        input["expectedGuestNetworkPolicy"] = {
+          ...f.input.expectedGuestNetworkPolicy,
+          policyDigest: "0".repeat(64),
+        };
+      if (failure === "instance role") input["awsProfile"] = "fixture-role";
+      if (failure === "legacy overlay") input["tailscale"] = true;
+      const response = await f.fleet.fetch(
+        new Request("https://coordinator.test/v1/guest-network/leases/" + id, {
+          method: "PUT",
+          headers,
+          body: JSON.stringify(input),
+        }),
+      );
+      expect(response.status).toBe(400);
+      expect(f.created()).toBe(0);
+      expect(f.events).toEqual([]);
+    },
+  );
 });

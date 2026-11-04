@@ -35,6 +35,9 @@ export const awsMacOSInstanceTypeCandidates = [
 export const workspaceProviderKeyPrefix = "crabbox-workspace-";
 
 export interface LeaseConfig {
+  // Populated only by the authenticated server from its operator policy.
+  guestNetworkPolicy?: import("./guest-network").GuestNetworkPolicy;
+  guestNetworkBoundary?: import("./guest-network").GuestNetworkBoundary;
   lifetimePolicy?: LeaseRequest["lifetimePolicy"];
   policyNotice?: string;
   leasePolicy?: LeasePolicy;

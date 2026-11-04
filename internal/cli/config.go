@@ -18,6 +18,11 @@ import (
 )
 
 type Config struct {
+	UntrustedWorkload    bool                        `json:"-" yaml:"-"`
+	GuestNetworkExpected *GuestNetworkPolicyIdentity `json:"-" yaml:"-"`
+	// Loaded only from the operator environment/file, never repository YAML.
+	GuestNetworkPolicy            *GuestNetworkPolicy `json:"-" yaml:"-"`
+	guestNetworkBoundary          *AWSGuestNetworkBoundary
 	ManagedHost                   string
 	HostCapabilities              []string
 	DirectLeases                  string
@@ -766,7 +771,14 @@ func loadConfigWithFlagOverrides(coordinator, provider string, fs *flag.FlagSet)
 			return Config{}, err
 		}
 	}
-	return resolveLoadedConfig(cfg, coordinator, provider)
+	resolved, err := resolveLoadedConfig(cfg, coordinator, provider)
+	if err != nil {
+		return Config{}, err
+	}
+	if resolved.UntrustedWorkload && resolved.GuestNetworkPolicy == nil && (strings.TrimSpace(resolved.Coordinator) == "" || resolved.BrokerMode == BrokerModeRegistered) {
+		return Config{}, errors.New("direct untrusted workloads require an absolute operator guest network policy file")
+	}
+	return resolved, nil
 }
 
 // loadConfigForFlags resolves selectors before provider defaults can validate
@@ -776,9 +788,31 @@ func loadConfigForFlags(fs *flag.FlagSet) (Config, error) {
 }
 
 func loadConfigInputs() (Config, error) {
+	guest, err := guestWorkloadRequested()
+	if err != nil {
+		return Config{}, err
+	}
+	var policy *GuestNetworkPolicy
+	if strings.TrimSpace(os.Getenv("CRABBOX_GUEST_NETWORK_POLICY_FILE")) != "" {
+		policy, err = loadOperatorGuestNetworkPolicy()
+		if err != nil {
+			return Config{}, err
+		}
+	}
 	cfg := baseConfig()
+	cfg.UntrustedWorkload = guest
+	cfg.GuestNetworkPolicy = policy
 	for _, path := range configPaths() {
 		trust := classifyConfigPath(path)
+		// Workload repositories cannot select local helpers, credentials, or policy.
+		if guest && !trust.trusted {
+			continue
+		}
+		if guest {
+			if err := validateGuestOperatorConfigSource(path); err != nil {
+				return Config{}, err
+			}
+		}
 		if err := applyConfigFile(&cfg, path, trust); err != nil {
 			return Config{}, err
 		}

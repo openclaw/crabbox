@@ -1,3 +1,5 @@
+import { AWSQueryError } from "./aws-query-error";
+export { AWSQueryError } from "./aws-query-error";
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 
 import {
@@ -13,6 +15,7 @@ import {
   type AWSFetchClient,
   type ResolvedAWSCredentials,
 } from "./aws-fetch-client";
+import { AWSGuestNetworkControl } from "./aws-guest-network";
 import {
   createAWSProvisioningDiagnostics,
   type AWSProvisioningDiagnostics,
@@ -39,6 +42,12 @@ import {
 } from "./config";
 import { creationEvent, observedRunning, measureCreationStep } from "./creation-events";
 import { sha256Hex } from "./encoding";
+import {
+  guestPublicKeyUserData,
+  requireAWSGuestPolicy,
+  type GuestNetworkBoundary,
+  type GuestNetworkReceipt,
+} from "./guest-network";
 import { hasImageRequirements } from "./image-capabilities";
 import { osImageSpec } from "./os-image";
 import {
@@ -136,18 +145,6 @@ const securityGroupVisibilityBackoffMs = [100, 200, 400, 800, 1_600, 3_200];
 const awsInstanceVisibilityBackoffMs = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
 // Leave room below Workers' six-connection limit for concurrent quota discovery.
 const awsIngressBatchSize = 4;
-
-export class AWSQueryError extends Error {
-  retryAfter?: string | undefined;
-  constructor(
-    readonly action: string,
-    readonly status: number,
-    readonly code: string,
-    detail: string,
-  ) {
-    super(`aws ${action}: http ${status}: ${detail}`);
-  }
-}
 
 class AWSImageNotFoundError extends Error {
   override name = "AWSImageNotFoundError";
@@ -362,6 +359,7 @@ function assertPrivateWorkspaceSecurityGroupShape(group: Record<string, unknown>
 }
 
 interface AWSQueryOptions {
+  singleAttempt?: true;
   exactResponseEnvelope?: boolean;
   capacityHandoff?: (() => Promise<boolean>) | undefined;
   client?: AWSFetchClient;
@@ -754,6 +752,7 @@ export type AWSIngressConfig = Pick<
 >;
 
 interface AWSIngressOptions {
+  onGuestNetworkBoundary?: (boundary: GuestNetworkBoundary) => Promise<void>;
   vpcCache?: AWSVPCCache;
   reconcile?: "authoritative" | "additive";
   allowEmpty?: boolean;
@@ -1424,6 +1423,47 @@ export class EC2SpotClient {
     await this.ensureSecurityGroup(config, options);
   }
 
+  private guestNetworkControl(): AWSGuestNetworkControl {
+    return new AWSGuestNetworkControl(
+      (action, params, options) => this.ec2(action, params, options),
+      this.region,
+    );
+  }
+
+  async inspectGuestNetworkBoundary(
+    boundary: GuestNetworkBoundary,
+    policy: import("./guest-network").GuestNetworkPolicy,
+    resourceId: string,
+  ): Promise<GuestNetworkReceipt> {
+    const receipt = await this.guestNetworkControl().inspect(boundary, policy, resourceId);
+    if (!receipt.facts["sshHostKey"]) throw new Error("guest provider transport pin is missing");
+    return receipt;
+  }
+
+  async cleanupGuestNetworkBoundary(boundary: GuestNetworkBoundary): Promise<void> {
+    await this.guestNetworkControl().cleanup(boundary);
+  }
+
+  private async waitGuestPublicHostKey(resourceId: string): Promise<string> {
+    for (let attempt = 0; attempt < 60; attempt++) {
+      try {
+        // Poll sequentially: console output may lag instance visibility.
+        // eslint-disable-next-line no-await-in-loop
+        return await this.guestNetworkControl().publicHostKey(resourceId);
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          error.message !== "guest public SSH host key not yet uniquely observed"
+        )
+          throw error;
+        if (attempt === 59) throw error;
+        // eslint-disable-next-line no-await-in-loop -- bounded sequential provider-read backoff
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+    throw new Error("guest SSH host key unavailable");
+  }
+
   async createServerWithFallback(
     config: LeaseConfig,
     leaseID: string,
@@ -1437,6 +1477,31 @@ export class EC2SpotClient {
     attempts?: ProvisioningAttempt[];
     imageID: string;
   }> {
+    if (config.guestNetworkPolicy) {
+      requireAWSGuestPolicy(config.guestNetworkPolicy, true);
+      guestPublicKeyUserData(config.sshPublicKey, config.sshUser, config.workRoot);
+      if (
+        config.target !== "linux" ||
+        !["ubuntu:22.04", "ubuntu:24.04"].includes(config.os) ||
+        config.awsAMI ||
+        config.awsSnapshot ||
+        config.awsProfile ||
+        config.awsPrivate ||
+        config.awsRequireSSM ||
+        config.sshPort !== "22"
+      )
+        throw new Error(
+          "guest public-key bootstrap requires ordinary supported Ubuntu, SSH port 22, no role/private/SSM/snapshot/custom-image path",
+        );
+      config = {
+        ...config,
+        awsUseStockImage: true,
+        sshHostPrivateKey: "",
+        sshHostPublicKey: "",
+        tailscale: false,
+        tailscaleAuthKey: "",
+      };
+    }
     const diagnostics = createAWSProvisioningDiagnostics(leaseID, this.region);
     options = { ...options, diagnostics };
     let succeeded = false;
@@ -1485,16 +1550,43 @@ export class EC2SpotClient {
       };
       // Quota reads do not own ingress. Join both preparations before launch or
       // transient-image cleanup so a failed branch cannot leave work running.
+      let guestBoundary: GuestNetworkBoundary | undefined;
+      if (config.guestNetworkPolicy) {
+        if (!options.onGuestNetworkBoundary)
+          throw new Error("managed guest network requires durable cleanup custody");
+        guestBoundary = await this.guestNetworkControl().prepare(
+          config.guestNetworkPolicy,
+          leaseID,
+          config.awsSubnetID,
+          options.onGuestNetworkBoundary,
+        );
+        const data = guestPublicKeyUserData(config.sshPublicKey, config.sshUser, config.workRoot);
+        guestBoundary.bootstrapSha256 = await sha256Hex(
+          Uint8Array.from(atob(data), (c) => c.charCodeAt(0)),
+        );
+        await options.onGuestNetworkBoundary(guestBoundary);
+        config = {
+          ...config,
+          awsSubnetID: guestBoundary.subnetId,
+          awsSGID: guestBoundary.securityGroupId,
+          awsSGName: guestBoundary.securityGroupName,
+          guestNetworkBoundary: guestBoundary,
+        };
+      }
       const [securityGroup, initialQuota] = await Promise.allSettled([
-        options.withIngress
-          ? options.withIngress(
-              (cidrs) =>
-                diagnostics.measure("security_group", () =>
-                  this.ensureSecurityGroup({ ...config, awsSSHCIDRs: cidrs }, options),
-                ),
-              diagnostics.record,
-            )
-          : diagnostics.measure("security_group", () => this.ensureSecurityGroup(config, options)),
+        guestBoundary
+          ? Promise.resolve(guestBoundary.securityGroupId)
+          : options.withIngress
+            ? options.withIngress(
+                (cidrs) =>
+                  diagnostics.measure("security_group", () =>
+                    this.ensureSecurityGroup({ ...config, awsSSHCIDRs: cidrs }, options),
+                  ),
+                diagnostics.record,
+              )
+            : diagnostics.measure("security_group", () =>
+                this.ensureSecurityGroup(config, options),
+              ),
         quotaForMarket(config.capacityMarket),
       ]);
       if (securityGroup.status === "rejected") throw securityGroup.reason;
@@ -1795,6 +1887,13 @@ export class EC2SpotClient {
             this.ec2("DeregisterImage", { ImageId: transientImageID }),
           )
           .catch(() => undefined);
+      }
+      if (!succeeded && config.guestNetworkBoundary && !this.requestSignal?.aborted) {
+        await this.guestNetworkControl().cleanup(config.guestNetworkBoundary);
+        await options.onGuestNetworkBoundary?.({
+          ...config.guestNetworkBoundary,
+          cleanupConfirmed: true,
+        });
       }
       diagnostics.finish(succeeded ? "success" : "failure");
     }
@@ -3171,6 +3270,9 @@ export class EC2SpotClient {
     };
     const labels = leaseProviderLabels(launchConfig, leaseID, slug, owner, "aws", now, {
       market: config.capacityMarket,
+      ...(config.guestNetworkBoundary
+        ? { guest_network_policy_sha256: config.guestNetworkBoundary.policyDigest }
+        : {}),
     });
     let rootGB = config.awsRootGB || positiveInt(this.env.CRABBOX_AWS_ROOT_GB);
     let rootDevice = "/dev/sda1";
@@ -3229,6 +3331,15 @@ export class EC2SpotClient {
         }),
       );
       applyAWSRunInstanceTargetOptions(params, config);
+      if (config.guestNetworkPolicy) {
+        delete params["IamInstanceProfile.Name"];
+        delete params["IamInstanceProfile.Arn"];
+        params["MetadataOptions.HttpEndpoint"] = "enabled";
+        params["MetadataOptions.HttpTokens"] = "required";
+        params["MetadataOptions.HttpPutResponseHopLimit"] = "1";
+        params["MetadataOptions.HttpProtocolIpv6"] = "disabled";
+        params["MetadataOptions.InstanceMetadataTags"] = "disabled";
+      }
       params["BlockDeviceMapping.1.DeviceName"] = rootDevice;
       if (config.target === "macos") {
         const hostID =
@@ -3264,6 +3375,32 @@ export class EC2SpotClient {
         throw new Error(`${awsRunInstancesOutcomeUncertain}: aws returned no instances`);
       }
       const machine = this.withRegion(instanceToMachine(instance));
+      if (config.guestNetworkPolicy) {
+        const boundary = config.guestNetworkBoundary;
+        if (!boundary) throw new Error("guest allocation network custody missing");
+        try {
+          await this.waitForServerVisibility(machine.cloudID);
+          machine.guestNetwork = await this.guestNetworkControl().inspect(
+            boundary,
+            config.guestNetworkPolicy,
+            machine.cloudID,
+          );
+          const hostKey = await this.waitGuestPublicHostKey(machine.cloudID);
+          await this.ec2("CreateTags", {
+            "ResourceId.1": machine.cloudID,
+            "Tag.1.Key": "guest_network_ssh_host_key",
+            "Tag.1.Value": hostKey,
+          });
+          machine.guestNetwork.facts["sshHostKey"] = hostKey;
+          machine.guestNetworkBoundary = boundary;
+        } catch (error) {
+          if (error instanceof Error && error.name === "AbortError") throw error;
+          if (await this.guestNetworkControl().ownsInstance(boundary, machine.cloudID))
+            await this.terminateServerAndWait(machine.cloudID);
+          await this.guestNetworkControl().cleanup(boundary);
+          throw error;
+        }
+      }
       if (!machine.cloudID.trim()) {
         throw new Error(`${awsRunInstancesOutcomeUncertain}: aws returned no instance id`);
       }
@@ -3877,6 +4014,7 @@ export class EC2SpotClient {
             }
           }
         : undefined,
+      options.singleAttempt,
     );
     const text = await response.text();
     if (!response.ok) {

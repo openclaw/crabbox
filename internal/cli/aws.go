@@ -68,15 +68,16 @@ type AWSLaunchAttempt struct {
 }
 
 type AWSFixedCreateControl struct {
-	CreatedAt         time.Time
-	IntentFingerprint string
-	AccountID         string
-	KeyPairID         string
-	PinnedAttempt     *AWSLaunchAttempt
-	FailedTokens      map[string]bool
-	TerminalRejection bool
-	BeforeAttempt     func(AWSLaunchAttempt) error
-	DefiniteFailure   func(AWSLaunchAttempt) error
+	CreatedAt           time.Time
+	IntentFingerprint   string
+	AccountID           string
+	KeyPairID           string
+	PinnedAttempt       *AWSLaunchAttempt
+	FailedTokens        map[string]bool
+	TerminalRejection   bool
+	BeforeAttempt       func(AWSLaunchAttempt) error
+	GuestNetworkCustody func(AWSGuestNetworkBoundary) error
+	DefiniteFailure     func(AWSLaunchAttempt) error
 }
 
 func newAWSClient(ctx context.Context, cfg Config) (*AWSClient, error) {
@@ -541,6 +542,14 @@ func shouldRetryAWSRegionAfterCreateError(err error, control *AWSFixedCreateCont
 }
 
 func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, logf func(string, ...any), control *AWSFixedCreateControl) (result Server, resolved Config, resultErr error) {
+	if err := ValidateAWSGuestNetworkConfig(cfg); err != nil {
+		return Server{}, cfg, err
+	}
+	if cfg.GuestNetworkPolicy != nil && cfg.GuestNetworkPolicy.BootstrapMode == GuestBootstrapPublicKeyV1 {
+		if _, err := GuestPublicKeyUserData(publicKey, cfg.SSHUser, cfg.WorkRoot); err != nil {
+			return Server{}, cfg, err
+		}
+	}
 	candidates, err := c.resourceQualifiedLaunchCandidates(ctx, cfg)
 	if err != nil {
 		return Server{}, cfg, err
@@ -595,9 +604,35 @@ func (c *AWSClient) createServerWithFallbackInRegion(ctx context.Context, cfg Co
 		}
 		staticImageID = imageID
 	}
-	securityGroupID, err := c.ensureSecurityGroup(ctx, cfg)
-	if err != nil {
-		return Server{}, cfg, err
+	var securityGroupID string
+	if cfg.GuestNetworkPolicy != nil {
+		if err := ValidateAWSGuestNetworkConfig(cfg); err != nil {
+			return Server{}, cfg, err
+		}
+		if control == nil || control.GuestNetworkCustody == nil {
+			return Server{}, cfg, errors.New("guest network allocation requires durable fixed-lease custody")
+		}
+		boundary, err := c.PrepareGuestNetworkWithCustody(ctx, leaseID, cfg.AWSSubnetID, *cfg.GuestNetworkPolicy, control.GuestNetworkCustody)
+		if err != nil {
+			return Server{}, cfg, err
+		}
+		cfg.guestNetworkBoundary = &boundary
+		securityGroupID = boundary.SecurityGroupID
+		defer func() {
+			// A submitted/uncertain fixed attempt owns recovery; do not erase its boundary.
+			if resultErr != nil && (control == nil || control.PinnedAttempt == nil) {
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := c.CleanupGuestNetwork(cleanupCtx, boundary); err != nil {
+					resultErr = errors.Join(resultErr, fmt.Errorf("cleanup guest network: %w", err))
+				}
+			}
+		}()
+	} else {
+		securityGroupID, err = c.ensureSecurityGroup(ctx, cfg)
+		if err != nil {
+			return Server{}, cfg, err
+		}
 	}
 	useSpot := cfg.Capacity.Market != "on-demand"
 	var marketFallbackCandidates []string
@@ -686,6 +721,11 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 	}
 	labels := DirectLeaseLabels(cfg, leaseID, slug, "aws", mapMarket(spot), keep, now)
 	labels["aws_region"] = cfg.AWSRegion
+	if cfg.guestNetworkBoundary != nil {
+		for key, value := range awsGuestBoundaryLabels(*cfg.guestNetworkBoundary) {
+			labels[key] = value
+		}
+	}
 	if control != nil {
 		labels["fixed_intent_sha256"] = control.IntentFingerprint
 		labels["aws_account_id"] = control.AccountID
@@ -693,9 +733,32 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 			labels["aws_key_pair_id"] = control.KeyPairID
 		}
 	}
-	userData, err := awsRunInstancesUserData(cfg, publicKey)
-	if err != nil {
-		return Server{}, err
+	var userData string
+	var err error
+	if cfg.GuestNetworkPolicy == nil {
+		userData, err = awsRunInstancesUserData(cfg, publicKey)
+		if err != nil {
+			return Server{}, err
+		}
+	} else if cfg.GuestNetworkPolicy.BootstrapMode == GuestBootstrapPublicKeyV1 {
+		userData, err = GuestPublicKeyUserData(publicKey, cfg.SSHUser, cfg.WorkRoot)
+		if err != nil {
+			return Server{}, err
+		}
+		if cfg.guestNetworkBoundary == nil || control == nil || control.GuestNetworkCustody == nil {
+			return Server{}, errors.New("public-key guest bootstrap custody missing")
+		}
+		cfg.guestNetworkBoundary.BootstrapMode = GuestBootstrapPublicKeyV1
+		cfg.guestNetworkBoundary.BootstrapSHA256, err = guestBootstrapHash(userData)
+		if err != nil {
+			return Server{}, err
+		}
+		if err := control.GuestNetworkCustody(*cfg.guestNetworkBoundary); err != nil {
+			return Server{}, err
+		}
+		for key, value := range awsGuestBoundaryLabels(*cfg.guestNetworkBoundary) {
+			labels[key] = value
+		}
 	}
 	rootGB := cfg.AWSRootGB
 	rootDevice := "/dev/sda1"
@@ -771,6 +834,9 @@ func (c *AWSClient) createServer(ctx context.Context, cfg Config, publicKey, lea
 	}
 	applyAWSRunInstanceTargetOptions(input, cfg)
 	applyAWSGuestExpiryOptions(input, cfg)
+	if err := applyAWSGuestNetworkLaunchOptions(input, cfg); err != nil {
+		return Server{}, err
+	}
 	if cfg.TargetOS == targetMacOS {
 		hostID := cfg.HostID
 		if hostID == "" {

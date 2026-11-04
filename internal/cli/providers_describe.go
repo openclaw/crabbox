@@ -37,13 +37,14 @@ type providerDescriptionIdentity struct {
 }
 
 type providerDescriptionCaps struct {
-	Features     []string `json:"features"`
-	Runtime      []string `json:"runtime"`
-	Reachability []string `json:"reachability"`
-	Workspace    []string `json:"workspace"`
-	Evidence     []string `json:"evidence"`
-	Lifecycle    []string `json:"lifecycle"`
-	Coordinator  string   `json:"coordinator"`
+	GuestNetwork *GuestNetworkCapabilityDescriptor `json:"guestNetwork,omitempty"`
+	Features     []string                          `json:"features"`
+	Runtime      []string                          `json:"runtime"`
+	Reachability []string                          `json:"reachability"`
+	Workspace    []string                          `json:"workspace"`
+	Evidence     []string                          `json:"evidence"`
+	Lifecycle    []string                          `json:"lifecycle"`
+	Coordinator  string                            `json:"coordinator"`
 }
 
 type providerDescriptionFlag struct {
@@ -200,6 +201,7 @@ func describeProvider(requestedName string) (providerDescription, error) {
 		Family:   normalizeProviderName(firstNonBlank(spec.Family, canonical)),
 		Targets:  normalizedSortedStrings(entry.Targets),
 		Capabilities: providerDescriptionCaps{
+			GuestNetwork: entry.GuestNetwork,
 			Features:     normalizedSortedStrings(featuresToStrings(entry.Features)),
 			Runtime:      normalizedSortedStrings(entry.Runtime),
 			Reachability: normalizedSortedStrings(entry.Reachability),

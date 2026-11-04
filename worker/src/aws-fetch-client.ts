@@ -45,7 +45,12 @@ export function resolvedAWSCredentials(credentials: AWSCredentials): ResolvedAWS
 type StopAWSResponseRetry = (response: Response) => Promise<boolean>;
 
 export interface AWSFetchClient {
-  fetch(input: string, init?: RequestInit, stopRetrying?: StopAWSResponseRetry): Promise<Response>;
+  fetch(
+    input: string,
+    init?: RequestInit,
+    stopRetrying?: StopAWSResponseRetry,
+    singleAttempt?: boolean,
+  ): Promise<Response>;
 }
 
 class ObservedAwsClient extends AwsClient {
@@ -102,6 +107,7 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
     input: string,
     init?: RequestInit,
     stopRetrying?: StopAWSResponseRetry,
+    singleAttempt = false,
   ): Promise<Response> {
     init?.signal?.throwIfAborted();
     const callerSignal = init?.signal;
@@ -147,7 +153,7 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
         observe
           ? client.sign(input, boundedInit)
           : waitForProviderSignal(signal, () => client.sign(input, boundedInit));
-      if (callerSignal) {
+      if (callerSignal || singleAttempt) {
         // Optional quotes own a single attempt, including signing and the body read.
         const request = await sign();
         return await providerFetch(request, undefined, signal);

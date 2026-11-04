@@ -983,7 +983,8 @@ const (
 	// and provider-owned idle activity that does not require exclusive claim writes.
 	FeatureClaimExec Feature = "claim-exec"
 	// FeatureFixedLeaseID advertises caller-supplied idempotent lease IDs.
-	FeatureFixedLeaseID Feature = "fixed-lease-id"
+	FeatureGuestNetworkV1 Feature = "guest-network-v1"
+	FeatureFixedLeaseID   Feature = "fixed-lease-id"
 	// FeatureFixedCurrentRepoStop requires RepositoryScopedStopBackend for fixed IDs.
 	FeatureFixedCurrentRepoStop   Feature = "fixed-current-repo-stop"
 	FeaturePauseResume            Feature = "pause-resume"
@@ -1759,11 +1760,13 @@ func ValidateRunSessionForSpec(spec ProviderSpec, result RunResult) error {
 }
 
 type LeaseTarget struct {
-	Server       Server
-	SSH          SSHTarget
-	LeaseID      string
-	Coordinator  *CoordinatorClient
-	runnerTiming *runnerProviderTiming
+	GuestNetworkExpected *GuestNetworkPolicyIdentity
+	GuestNetwork         *GuestNetworkReceipt
+	Server               Server
+	SSH                  SSHTarget
+	LeaseID              string
+	Coordinator          *CoordinatorClient
+	runnerTiming         *runnerProviderTiming
 	// Recorded by the validated provider lookup, never inferred from absent SSH.
 	providerRelease *leaseReleaseConfirmation
 }
@@ -2154,6 +2157,9 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 	}
 	backend, err := configureProviderBackend(provider, &cfg, rt)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateGuestNetworkBackend(cfg, backend, ShouldUseCoordinator(cfg, provider.Spec())); err != nil {
 		return nil, err
 	}
 	if ssh, ok := backend.(SSHLeaseBackend); ok && ShouldUseCoordinator(cfg, provider.Spec()) {

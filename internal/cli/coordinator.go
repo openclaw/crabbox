@@ -23,6 +23,9 @@ import (
 )
 
 type CoordinatorClient struct {
+	guestNetworkMu         sync.RWMutex
+	guestNetworkExpected   *GuestNetworkPolicyIdentity
+	guestNetworkProvider   string
 	portablePool           bool
 	BaseURL                string
 	Token                  string
@@ -96,6 +99,8 @@ type CoordinatorLeasePolicy struct {
 }
 
 type CoordinatorLease struct {
+	UntrustedWorkload            bool                           `json:"untrustedWorkload,omitempty"`
+	GuestNetwork                 *GuestNetworkReceipt           `json:"guestNetwork,omitempty"`
 	LeasePolicy                  *CoordinatorLeasePolicy        `json:"leasePolicy,omitempty"`
 	PolicyNotice                 string                         `json:"policyNotice,omitempty"`
 	ImageEvidence                *ImageEvidence                 `json:"imageEvidence,omitempty"`
@@ -1154,6 +1159,10 @@ func (c *CoordinatorClient) EnsureLease(ctx context.Context, cfg Config, publicK
 }
 
 func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicKey string, keep bool, leaseID, slug, createAttemptID string, fixed bool) (CoordinatorLease, error) {
+	guestPath, guestExpected, err := c.guestNetworkCreatePath(ctx, cfg, leaseID)
+	if err != nil {
+		return CoordinatorLease{}, err
+	}
 	var res struct {
 		Lease CoordinatorLease `json:"lease"`
 	}
@@ -1313,7 +1322,21 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 			path = "/v1/leases/" + url.PathEscape(leaseID) + "/from-checkpoint"
 		}
 	}
-	err = c.doWithHeaders(ctx, method, path, req, &res, http.Header{"Prefer": {"respond-async"}})
+	headers := http.Header{"Prefer": {"respond-async"}}
+	if guestPath != "" {
+		if checkpointBacked {
+			return CoordinatorLease{}, errors.New("guest network create does not support checkpoint adoption")
+		}
+		method, path = http.MethodPut, guestPath
+		req["untrustedWorkload"], req["expectedGuestNetworkPolicy"] = true, guestExpected
+		headers = nil
+	}
+	err = c.doWithHeaders(ctx, method, path, req, &res, headers)
+	if err == nil && guestExpected != nil {
+		if err = c.validateManagedGuestLease(res.Lease, leaseID); err != nil {
+			return CoordinatorLease{}, err
+		}
+	}
 	if err == nil && checkpointBacked && checkpointClaim.LeaseCreated != nil {
 		checkpointClaim.LeaseCreated()
 	}
@@ -1352,10 +1375,16 @@ func (c *CoordinatorClient) UpdateLeaseTailscaleForProvider(ctx context.Context,
 }
 
 func (c *CoordinatorClient) GetLease(ctx context.Context, id string) (CoordinatorLease, error) {
+	if c.guestNetworkExpectation() != nil {
+		return c.getManagedGuestLease(ctx, id)
+	}
 	return c.getLease(ctx, id, false)
 }
 
 func (c *CoordinatorClient) GetLeaseWithAuthoritativeProviderMetadata(ctx context.Context, id string) (CoordinatorLease, error) {
+	if c.guestNetworkExpectation() != nil {
+		return c.getManagedGuestLease(ctx, id)
+	}
 	return c.getLease(ctx, id, true)
 }
 

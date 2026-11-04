@@ -17,18 +17,19 @@ type FixedAWSCreateIntentRequest struct {
 }
 
 type fixedAWSCreateIntent struct {
-	Version       int                          `json:"version"`
-	AccountID     string                       `json:"accountID"`
-	RequestedSlug string                       `json:"requestedSlug"`
-	Provider      string                       `json:"provider" configFields:"Provider"`
-	Profile       string                       `json:"profile" configFields:"Profile"`
-	Machine       fixedAWSCreateIntentMachine  `json:"machine"`
-	Capabilities  fixedCreateIntentFeatures    `json:"capabilities"`
-	Networking    fixedAWSCreateIntentNetwork  `json:"networking"`
-	Capacity      fixedAWSCreateIntentCapacity `json:"capacity" configFields:"Capacity"`
-	Lifecycle     fixedCreateIntentLifecycle   `json:"lifecycle"`
-	Workload      fixedCreateIntentWorkload    `json:"workload"`
-	Cache         fixedCreateIntentCache       `json:"cache" configFields:"Cache"`
+	GuestNetworkPolicyDigest string                       `json:"guestNetworkPolicyDigest,omitempty" configFields:"GuestNetworkPolicy"`
+	Version                  int                          `json:"version"`
+	AccountID                string                       `json:"accountID"`
+	RequestedSlug            string                       `json:"requestedSlug"`
+	Provider                 string                       `json:"provider" configFields:"Provider"`
+	Profile                  string                       `json:"profile" configFields:"Profile"`
+	Machine                  fixedAWSCreateIntentMachine  `json:"machine"`
+	Capabilities             fixedCreateIntentFeatures    `json:"capabilities"`
+	Networking               fixedAWSCreateIntentNetwork  `json:"networking"`
+	Capacity                 fixedAWSCreateIntentCapacity `json:"capacity" configFields:"Capacity"`
+	Lifecycle                fixedCreateIntentLifecycle   `json:"lifecycle"`
+	Workload                 fixedCreateIntentWorkload    `json:"workload"`
+	Cache                    fixedCreateIntentCache       `json:"cache" configFields:"Cache"`
 }
 
 type fixedAWSCreateIntentMachine struct {
@@ -118,6 +119,13 @@ func fixedAWSCreateIntentForConfig(cfg Config, req FixedAWSCreateIntentRequest) 
 	if err != nil {
 		return fixedAWSCreateIntent{}, err
 	}
+	guestPolicyDigest := ""
+	if cfg.GuestNetworkPolicy != nil {
+		guestPolicyDigest, err = GuestNetworkPolicyDigest(*cfg.GuestNetworkPolicy)
+		if err != nil {
+			return fixedAWSCreateIntent{}, err
+		}
+	}
 	publicKeyHash := sha256.Sum256([]byte(strings.TrimSpace(req.SSHPublicKey)))
 	hostID := strings.TrimSpace(cfg.HostID)
 	if hostID == "" {
@@ -128,11 +136,12 @@ func fixedAWSCreateIntentForConfig(cfg Config, req FixedAWSCreateIntentRequest) 
 		sshCIDRs = fixedCanonicalStringSet(cfg.AWSSSHCIDRs)
 	}
 	return fixedAWSCreateIntent{
-		Version:       FixedAWSCreateIntentVersion,
-		AccountID:     strings.TrimSpace(req.AccountID),
-		RequestedSlug: NormalizeLeaseSlug(req.RequestedSlug),
-		Provider:      strings.TrimSpace(cfg.Provider),
-		Profile:       strings.TrimSpace(cfg.Profile),
+		GuestNetworkPolicyDigest: guestPolicyDigest,
+		Version:                  FixedAWSCreateIntentVersion,
+		AccountID:                strings.TrimSpace(req.AccountID),
+		RequestedSlug:            NormalizeLeaseSlug(req.RequestedSlug),
+		Provider:                 strings.TrimSpace(cfg.Provider),
+		Profile:                  strings.TrimSpace(cfg.Profile),
 		Machine: fixedAWSCreateIntentMachine{
 			TargetOS:           strings.TrimSpace(cfg.TargetOS),
 			Architecture:       effectiveArchitectureForConfig(cfg),

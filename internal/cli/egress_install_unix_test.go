@@ -43,7 +43,9 @@ func egressPackFixture(t *testing.T) string {
 		}
 		for _, arch := range []string{"amd64", "arm64"} {
 			name := "linux-" + arch
-			cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", filepath.Join(dir, name), "./cmd/crabbox-runtime")
+			// This generated module has no VCS identity. Do not inherit an enclosing
+			// test worktree's VCS stamping; the actual candidate build keeps it enabled.
+			cmd := exec.Command("go", "build", "-buildvcs=false", "-trimpath", "-ldflags=-s -w", "-o", filepath.Join(dir, name), "./cmd/crabbox-runtime")
 			cmd.Dir = source
 			cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+arch, "CGO_ENABLED=0", "GOTOOLCHAIN=local", "GOWORK=off", "GOFLAGS=", "GOPROXY=off", "GOSUMDB=off")
 			if out, err := cmd.CombinedOutput(); err != nil {

@@ -280,6 +280,7 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		ExpiresAt:        blank(LeaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]),
 		Labels:           server.Labels,
 		ProviderMetadata: inspectProviderMetadata(provider, server.ProviderMetadata),
+		GuestNetwork:     lease.GuestNetwork,
 		ImageEvidence:    CloneImageEvidence(server.ImageEvidence),
 		HasHost:          hasHost,
 		Ready:            ready,
@@ -310,6 +311,7 @@ func leaseStatusStateCanBeReady(lease LeaseTarget, state string) bool {
 }
 
 type StatusView struct {
+	GuestNetwork      *GuestNetworkReceipt      `json:"guestNetwork,omitempty"`
 	Retention         *SessionDiskRetentionView `json:"retention,omitempty"`
 	LeasePolicy       *CoordinatorLeasePolicy   `json:"leasePolicy,omitempty"`
 	RemainingLifetime string                    `json:"remainingLifetime,omitempty"`

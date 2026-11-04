@@ -674,11 +674,13 @@ it.each([false, true])(
 it.each([false, true])(
   "preserves a network failure without adding retries (response policy=%s)",
   async (responsePolicy) => {
-    let requests = 0;
-    const url = await localTransport((request) => {
-      requests += 1;
-      request.socket.destroy();
-    });
+    // A mediated transport can turn an abrupt local socket close into HTTP 502,
+    // exercising status retries rather than a rejected fetch. Inject the actual
+    // network-error contract at the fetch boundary, without changing retry policy.
+    const networkFailure = new TypeError("synthetic transport failure");
+    const fetchAttempt = vi.fn<typeof fetch>().mockRejectedValue(networkFailure);
+    vi.stubGlobal("fetch", fetchAttempt);
+    const url = "https://ec2.example.invalid/";
     const { diagnostics, finish } = observe();
     const client = new RefreshingAWSFetchClient(credentials, "ec2", "eu-west-1");
     await expect(
@@ -689,8 +691,8 @@ it.each([false, true])(
           responsePolicy ? async () => false : undefined,
         ),
       ),
-    ).rejects.toBeInstanceOf(TypeError);
-    expect(requests).toBe(1);
+    ).rejects.toBe(networkFailure);
+    expect(fetchAttempt).toHaveBeenCalledTimes(1);
     expect(finish("failure")).toMatchObject({
       requests: 1,
       credentialFailures: 0,
@@ -869,3 +871,24 @@ it("finishes signing timeout accounting before reporting the failed request", as
     requestFailures: 1,
   });
 });
+
+it.each([false, true])(
+  "does not retry a non-idempotent single attempt (fixed=%s)",
+  async (fixed) => {
+    const fetchAttempt = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response("synthetic transient response", { status: 500 }));
+    vi.stubGlobal("fetch", fetchAttempt);
+    const client = fixed
+      ? new FixedAWSFetchClient(resolvedAWSCredentials(await credentials()), "ec2", "eu-west-1")
+      : new RefreshingAWSFetchClient(credentials, "ec2", "eu-west-1");
+    const response = await client.fetch(
+      "https://ec2.example.invalid/",
+      { method: "POST", body: "Action=CreateSecurityGroup" },
+      undefined,
+      true,
+    );
+    expect(response.status).toBe(500);
+    expect(fetchAttempt).toHaveBeenCalledTimes(1);
+  },
+);

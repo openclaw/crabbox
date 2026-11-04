@@ -9,6 +9,7 @@ import (
 )
 
 type TimingReport struct {
+	GuestNetwork       *GuestNetworkReceipt     `json:"guestNetwork,omitempty"`
 	SSHRoute           string                   `json:"sshRoute,omitempty"`
 	CreationRejected   *CreationRejection       `json:"creationRejected,omitempty"`
 	CreationEvents     []CreationEvent          `json:"creationEvents,omitempty"`

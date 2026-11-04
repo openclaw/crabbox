@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,10 +15,14 @@ import (
 func (a App) configShow(args []string) error {
 	fs := newFlagSet("config show", a.Stderr)
 	jsonOut := fs.Bool("json", false, "print JSON")
+	guestServer := fs.Bool("guest-network-server", false, "observe the configured managed server guest policy contract; does not allocate")
 	providerOverride := fs.String("provider", "", "resolve config for this provider")
 	controllerIdentityOut := fs.Bool("controller-provider-identity", false, "internal: print the controller provider identity contract")
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if *guestServer && !*jsonOut {
+		return Exit(2, "--guest-network-server requires --json")
 	}
 	if *controllerIdentityOut && !*jsonOut {
 		return Exit(2, "--controller-provider-identity requires --json")
@@ -59,6 +64,39 @@ func (a App) configShow(args []string) error {
 			return err
 		}
 		view := configShowView(cfg)
+		if *guestServer {
+			if !guestNetworkRequested(cfg) {
+				return Exit(2, "--guest-network-server requires host-owned untrusted workload mode")
+			}
+			provider, err := ProviderFor(cfg.Provider)
+			if err != nil {
+				return err
+			}
+			if !ShouldUseCoordinator(cfg, provider.Spec()) {
+				return Exit(2, "--guest-network-server requires managed coordinator routing")
+			}
+			coord, _, err := newCoordinatorClient(cfg)
+			if err != nil {
+				return err
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), coordinatorReadBudget)
+			defer cancel()
+			if err := coord.prepareManagedGuestNetwork(ctx, cfg); err != nil {
+				return err
+			}
+			view["guestNetworkPolicy"] = coord.guestNetworkExpectation()
+			view["guestNetworkCapability"] = GuestNetworkRouteCapability{Version: GuestNetworkVersion, AllocationRoute: GuestNetworkRouteManagedCoordinator, State: "implemented"}
+		}
+		if capability := guestNetworkCapabilityForConfig(cfg); capability != nil && !*guestServer {
+			view["guestNetworkCapability"] = capability
+		}
+		if cfg.GuestNetworkPolicy != nil {
+			identity, err := guestNetworkPolicyIdentity(*cfg.GuestNetworkPolicy)
+			if err != nil {
+				return err
+			}
+			view["guestNetworkPolicy"] = identity
+		}
 		if providerSelectionIsActionable(cfg) {
 			view["provider"] = provider
 		} else {

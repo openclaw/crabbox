@@ -64,6 +64,12 @@ export function awsUserData(config: LeaseConfig): string {
 }
 
 export async function awsRunInstancesUserData(config: LeaseConfig): Promise<string> {
+  if (config.guestNetworkPolicy) {
+    const { guestPublicKeyBootstrap, guestPublicKeyUserData } = await import("./guest-network");
+    if (config.guestNetworkPolicy.bootstrapMode !== guestPublicKeyBootstrap)
+      throw new Error("unsupported managed guest bootstrap mode");
+    return guestPublicKeyUserData(config.sshPublicKey, config.sshUser, config.workRoot);
+  }
   const userData = awsUserData(config);
   const bytes =
     config.target === "linux" ? await gzip(userData) : new TextEncoder().encode(userData);

@@ -119,6 +119,18 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
   const url = new URL(request.url);
   const path = url.pathname.split("/").filter(Boolean);
   const method = request.method.toUpperCase();
+  // Guest allocation owns the same short admission/storage transactions as lease
+  // creation; never hold the outer lifecycle mutex over provider API operations.
+  if (
+    path[0] === "v1" &&
+    path[1] === "guest-network" &&
+    ((method === "GET" && path.join("/") === "v1/guest-network/capability") ||
+      ((method === "GET" || method === "PUT") &&
+        path[2] === "leases" &&
+        path[3] &&
+        path.length === 4))
+  )
+    return "direct";
   // These routes commit with storage transactions; subscriber authorization may use GitHub.
   if (coordinatorRequestPublishesRunEvents(request)) return "direct";
   if (path[0] === "v1" && (path[1] === "serve" || path[1] === "ssh-hosts")) return "direct";

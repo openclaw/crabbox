@@ -38,7 +38,7 @@ func (tx *FixedTransaction) CanSettleCreateRejection(kind FixedLeaseKind) bool {
 	intent := tx.Claim.FixedCreateIntent
 	return kind.IsFixedClaim(*tx.Claim) && tx.initialUnallocated &&
 		intent.State == "prepared" && tx.Claim.CloudImmutableID == "" &&
-		intent.Journal != nil && (intent.Journal.Phase == "prepared" || intent.Journal.Phase == "submitting")
+		len(intent.Companions) == 0 && intent.Journal != nil && (intent.Journal.Phase == "prepared" || intent.Journal.Phase == "submitting")
 }
 
 // Retire only this transaction's first, unallocated attempt under its claim
@@ -103,6 +103,7 @@ type FixedTransaction struct {
 	leaseID            string
 	provider           string
 	attempt            map[string]string
+	companions         map[string]string
 	failures           []string
 	persist            func() error
 	admission          *FixedAdmission
@@ -116,7 +117,7 @@ func newFixedTransaction(claim *LeaseClaim, fresh bool, persist func() error) (*
 	return &FixedTransaction{Claim: claim, fresh: fresh, initial: *CloneLeaseClaim(*claim).FixedCreateIntent,
 		initialUnallocated: claim.FixedCreateIntent.State == "prepared" && len(claim.FixedCreateIntent.Attempt) == 0 && claim.CloudID == "" && claim.CloudNumericID == 0 && claim.CloudImmutableID == "",
 		cloudID:            claim.CloudID, immutableID: claim.CloudImmutableID, leaseID: claim.LeaseID, provider: claim.Provider,
-		attempt: maps.Clone(claim.FixedCreateIntent.Attempt), failures: append([]string(nil), claim.FixedCreateIntent.FailedAttempts...), persist: persist}, nil
+		attempt: maps.Clone(claim.FixedCreateIntent.Attempt), companions: maps.Clone(claim.FixedCreateIntent.Companions), failures: append([]string(nil), claim.FixedCreateIntent.FailedAttempts...), persist: persist}, nil
 }
 
 func validateFixedJournal(intent *FixedCreateIntent) error {
@@ -167,7 +168,7 @@ func (tx *FixedTransaction) Record(phase string) error {
 	if i.Journal != nil {
 		submission = i.Journal.Submission
 		revision = i.Journal.Revision
-		if i.Journal.Phase != phase || !maps.Equal(i.Attempt, tx.attempt) || !reflect.DeepEqual(i.FailedAttempts, tx.failures) {
+		if i.Journal.Phase != phase || !maps.Equal(i.Attempt, tx.attempt) || !maps.Equal(i.Companions, tx.companions) || !reflect.DeepEqual(i.FailedAttempts, tx.failures) {
 			revision++
 		}
 	}
@@ -186,6 +187,7 @@ func (tx *FixedTransaction) Record(phase string) error {
 	}
 	tx.cloudID, tx.immutableID = tx.Claim.CloudID, tx.Claim.CloudImmutableID
 	tx.attempt, tx.failures = maps.Clone(i.Attempt), append([]string(nil), i.FailedAttempts...)
+	tx.companions = maps.Clone(i.Companions)
 	return nil
 }
 

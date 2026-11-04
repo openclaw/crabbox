@@ -137,6 +137,11 @@ func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease Coordina
 	if err := b.validateCoordinatorLeaseProviderIdentity(lease); err != nil {
 		return LeaseTarget{}, err
 	}
+	if !releaseOnly && guestNetworkRequested(cfg) {
+		if err := coord.validateManagedGuestLease(lease, lease.ID); err != nil {
+			return LeaseTarget{}, err
+		}
+	}
 	lease, err := selectCoordinatorLeaseSSHPort(lease, cfg)
 	if err != nil {
 		return LeaseTarget{}, err
@@ -158,10 +163,12 @@ func (b *coordinatorLeaseBackend) coordinatorLeaseTargetForConfig(lease Coordina
 		}
 	}
 	result := LeaseTarget{
-		Server:      server,
-		SSH:         target,
-		LeaseID:     leaseID,
-		Coordinator: coord,
+		Server:               server,
+		SSH:                  target,
+		LeaseID:              leaseID,
+		Coordinator:          coord,
+		GuestNetwork:         lease.GuestNetwork,
+		GuestNetworkExpected: coord.guestNetworkExpectation(),
 	}
 	if released {
 		result.providerRelease = &leaseReleaseConfirmation{backend: b, leaseID: leaseID}
@@ -216,6 +223,9 @@ func (b *coordinatorLeaseBackend) RebindResolvedLeaseTarget(target *LeaseTarget,
 }
 
 func (b *coordinatorLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+	if err := b.coord.prepareManagedGuestNetwork(ctx, b.cfg); err != nil {
+		return LeaseTarget{}, err
+	}
 	if validator, ok := b.direct.(CoordinatorAcquireValidator); ok {
 		if err := validator.ValidateCoordinatorAcquire(); err != nil {
 			return LeaseTarget{}, err
@@ -998,6 +1008,11 @@ func isCoordinatorStaleInstanceCleanedSignal(err error) bool {
 const coordinatorReleaseResolveTimeout = 10 * time.Second
 
 func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+	if !req.ReleaseOnly {
+		if err := b.coord.prepareManagedGuestNetwork(ctx, b.cfg); err != nil {
+			return LeaseTarget{}, err
+		}
+	}
 	cfg := b.cfg
 	prepare := req.Prepare && !req.ReleaseOnly && IsCanonicalLeaseID(req.ID)
 	// Include any existing admin-auth lookup in the same read budget.
@@ -1011,12 +1026,18 @@ func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveReques
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	coord := b.coord
-	lease, err := coord.GetLease(ctx, req.ID)
+	var lease CoordinatorLease
+	var err error
+	if req.ReleaseOnly {
+		lease, err = coord.GetLeaseForRelease(ctx, req.ID)
+	} else {
+		lease, err = coord.GetLease(ctx, req.ID)
+	}
 	if prepare && ctx.Err() != nil {
 		return LeaseTarget{}, errors.Join(err, ctx.Err())
 	}
 	if err != nil {
-		if b.cfg.CoordAdminToken != "" && (isCoordinatorNotFoundError(err) || isCoordinatorUnauthorized(err)) {
+		if !guestNetworkRequested(b.cfg) && b.cfg.CoordAdminToken != "" && (isCoordinatorNotFoundError(err) || isCoordinatorUnauthorized(err)) {
 			adminCoord, adminErr := b.adminCoordinatorClient()
 			if adminErr != nil {
 				return LeaseTarget{}, err
@@ -1049,6 +1070,9 @@ func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveReques
 }
 
 func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest) (statusView, error) {
+	if err := b.coord.prepareManagedGuestNetwork(ctx, b.cfg); err != nil {
+		return statusView{}, err
+	}
 	var lease CoordinatorLease
 	var err error
 	if req.AuthoritativeProviderMetadata {
@@ -1089,6 +1113,7 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		ready = ProbeSSHReady(ctx, &target, statusSSHReadinessTimeout(target))
 	}
 	return statusView{
+		GuestNetwork:                 lease.GuestNetwork,
 		LifetimePolicy:               lease.LifetimePolicy,
 		ID:                           lease.ID,
 		Slug:                         lease.Slug,
@@ -1357,7 +1382,7 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 	released, err := release(ctx)
 	observationCoord := b.coord
 	if err != nil {
-		if b.cfg.CoordAdminToken != "" && (isCoordinatorNotFoundError(err) || isCoordinatorUnauthorized(err)) {
+		if !guestNetworkRequested(b.cfg) && b.cfg.CoordAdminToken != "" && (isCoordinatorNotFoundError(err) || isCoordinatorUnauthorized(err)) {
 			adminCoord, adminErr := b.adminCoordinatorClient()
 			if adminErr != nil {
 				return false, err

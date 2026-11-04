@@ -79,6 +79,9 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	if err := applyLeaseCreateFlags(&cfg, fs, leaseFlags); err != nil {
 		return err
 	}
+	if guestNetworkRequested(cfg) && *actionsRunner {
+		return Exit(2, "guest workloads cannot provision Actions runner credentials")
+	}
 	repo, err := findRepo()
 	if err != nil {
 		return err
@@ -139,11 +142,19 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		}
 	}
 	providerName := backend.Spec().Name
+	if guestNetworkRequested(cfg) && strings.TrimSpace(*requestedLeaseID) == "" {
+		return Exit(2, "untrusted workloads require a fixed --lease-id")
+	}
 	var controllerOwnsCleanup atomic.Bool
 	lease, err := sshBackend.Acquire(ctx, AcquireRequest{
 		Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim,
 		RequestedLeaseID: strings.TrimSpace(*requestedLeaseID), RequestedSlug: requestedSlug,
 		OnAcquired: func(acquired LeaseTarget) error {
+			if guestNetworkRequested(cfg) {
+				if err := validateGuestLeaseTarget(cfg, acquired, strings.TrimSpace(*requestedLeaseID), providerName); err != nil {
+					return err
+				}
+			}
 			err := acknowledgeControllerAcquireIdentity(ctx, controllerAcquireIdentityFromLease(providerName, acquired))
 			if err == nil && controllerAcquireIdentityAcknowledgmentConfigured() {
 				controllerOwnsCleanup.Store(true)
@@ -223,6 +234,7 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		total := time.Since(started)
 		if err := writeTimingJSON(a.Stderr, timingReport{
 			CreationEvents: creationTimingEvents(lease.runnerTiming),
+			GuestNetwork:   lease.GuestNetwork,
 			Provider:       cfg.Provider,
 			LeaseID:        leaseID,
 			Slug:           ServerSlug(server),

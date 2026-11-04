@@ -28,6 +28,9 @@ export function publicLeaseRecord(record: LeaseRecord): PublicLeaseRecord {
     ...record,
     org: orgLabelForDisplay(record.org),
   };
+  delete publicRecord.guestNetworkPolicy;
+  delete publicRecord.guestNetworkBoundary;
+  delete publicRecord.guestNetwork;
   if (record.lifetimePolicy)
     publicRecord.lifetimePolicy = publicLifetimePolicy(record.lifetimePolicy);
   if (record.provisioningRecoveryObservedAt || record.provisioningRecoveryMissingSince) {
