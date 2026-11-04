@@ -38,3 +38,4 @@ internal/applevmhelper/embedded/
 .DS_Store
 **/.DS_Store
 .claude/
+/.openclaw/tmp/
