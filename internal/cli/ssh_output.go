@@ -19,7 +19,7 @@ var ErrSSHOutputLimit = errors.New("SSH output exceeded limit")
 // non-nil FallbackPorts pins a previously resolved endpoint, as in other helpers.
 // Neither remote stdout nor stderr is included in errors.
 func RunSSHOutputBounded(ctx context.Context, target SSHTarget, remote string, maxBytes int) (string, error) {
-	return runSSHOutputBoundedWithOptions(ctx, target, remote, maxBytes, 0, "10", "1")
+	return runSSHOutputBoundedWithOptions(ctx, target, remote, maxBytes, sshCommandLimit{}, "10", "1")
 }
 
 // RunSSHOutputBoundedWithExecutionTimeout lets the transport account for setup
@@ -28,10 +28,10 @@ func RunSSHOutputBoundedWithExecutionTimeout(ctx context.Context, target SSHTarg
 	if executionTimeout <= 0 {
 		return "", errors.New("SSH execution timeout must be positive")
 	}
-	return runSSHOutputBoundedWithOptions(ctx, target, remote, maxBytes, executionTimeout, "10", "1")
+	return runSSHOutputBoundedWithOptions(ctx, target, remote, maxBytes, sshCommandLimit{execution: executionTimeout}, "10", "1")
 }
 
-func runSSHOutputBoundedWithOptions(ctx context.Context, target SSHTarget, remote string, maxBytes int, waitTimeout time.Duration, connectTimeout, attempts string) (string, error) {
+func runSSHOutputBoundedWithOptions(ctx context.Context, target SSHTarget, remote string, maxBytes int, limit sshCommandLimit, connectTimeout, attempts string) (string, error) {
 	if maxBytes <= 0 {
 		return "", fmt.Errorf("SSH output limit must be positive")
 	}
@@ -40,7 +40,7 @@ func runSSHOutputBoundedWithOptions(ctx context.Context, target SSHTarget, remot
 	}
 	out := boundedSSHOutput{limit: maxBytes}
 	// The transport owner finishes deferred cleanup before any output escapes.
-	if err := executeSSH(ctx, &target, remote, nil, 0, waitTimeout, connectTimeout, attempts, &out, io.Discard); err != nil {
+	if _, err := executeSSHWithRetirement(ctx, &target, remote, nil, 0, limit, connectTimeout, attempts, &out, io.Discard); err != nil {
 		if ctx.Err() != nil {
 			// Cancellation must not hide failures reported by deferred cleanup.
 			return "", errors.Join(ctx.Err(), err)

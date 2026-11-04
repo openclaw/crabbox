@@ -1171,13 +1171,13 @@ func (e sshPreparationError) Unwrap() error { return e.error }
 // executeSSH owns workspace preparation; executePreparedSSH is the lower,
 // generic transport boundary and has no knowledge of workspace ownership.
 func executeSSH(ctx context.Context, target *SSHTarget, remote string, input io.ReadSeeker, size int64, limit time.Duration, connectTimeout, attempts string, stdout, stderr io.Writer) (err error) {
-	_, err = executeSSHWithRetirement(ctx, target, remote, input, size, limit, connectTimeout, attempts, stdout, stderr)
+	_, err = executeSSHWithRetirement(ctx, target, remote, input, size, sshCommandLimit{execution: limit}, connectTimeout, attempts, stdout, stderr)
 	return err
 }
 
 // executeSSHWithRetirement keeps remote lifetime evidence separate from local
 // diagnostics and spool errors. An owner cleanup failure remains conservative.
-func executeSSHWithRetirement(ctx context.Context, target *SSHTarget, remote string, input io.ReadSeeker, size int64, limit time.Duration, connectTimeout, attempts string, stdout, stderr io.Writer) (retirementUnconfirmed bool, err error) {
+func executeSSHWithRetirement(ctx context.Context, target *SSHTarget, remote string, input io.ReadSeeker, size int64, limit sshCommandLimit, connectTimeout, attempts string, stdout, stderr io.Writer) (retirementUnconfirmed bool, err error) {
 	var inputSize *int64
 	if input != nil {
 		inputSize = &size
@@ -1193,13 +1193,12 @@ func executeSSHWithRetirement(ctx context.Context, target *SSHTarget, remote str
 			err = errors.Join(err, cleanupErr)
 		}
 	}()
-	commandLimit := sshCommandLimit{execution: limit}
-	transport, err := prepareSSHTransport(ctx, *target, prepared.command, input, size, commandLimit)
+	transport, err := prepareSSHTransport(ctx, *target, prepared.command, input, size, limit)
 	if err != nil {
 		return false, sshPreparationError{err}
 	}
 	transport.setupMarker = prepared.setupMarker
-	err = transport.execute(ctx, target, commandLimit, connectTimeout, attempts, stdout, stderr)
+	err = transport.execute(ctx, target, limit, connectTimeout, attempts, stdout, stderr)
 	return transport.retirementUnconfirmed, err
 }
 
