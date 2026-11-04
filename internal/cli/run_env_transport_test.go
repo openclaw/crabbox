@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/runtimeartifact"
 )
 
 func TestSSHCommandEnvRejectsLostOwnerWithFreshContext(t *testing.T) {
@@ -560,6 +562,160 @@ exec "$CRABBOX_ENV_LOGIN_SHELL" -c "$cmd"
 				}
 			})
 		}
+	}
+}
+
+func TestSSHCommandEnvCleanupVerificationNative(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("executes the real Linux command runtime")
+	}
+	binary := filepath.Join(t.TempDir(), "crabbox-runtime")
+	build := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/crabbox-runtime")
+	build.Dir = filepath.Join("..", "..")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build command runtime: %v\n%s", err, output)
+	}
+	for _, lostAcknowledgement := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lost-ack=%t", lostAcknowledgement), func(t *testing.T) {
+			isolateTestUserDirs(t)
+			home, workdir, tools := t.TempDir(), t.TempDir(), t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("CRABBOX_ENV_WORKDIR", workdir)
+			t.Setenv("CRABBOX_ENV_EFFECTS", filepath.Join(tools, "effects"))
+			t.Setenv("CRABBOX_ENV_LOST_ACK", fmt.Sprint(lostAcknowledgement))
+			path := os.Getenv("PATH")
+			installRecordingSSH(t, tools, `
+before=0
+for file in "$CRABBOX_ENV_WORKDIR"/.crabbox/env-*/values.sh; do
+  if [ -f "$file" ]; then before=1; fi
+done
+output="$CRABBOX_ENV_EFFECTS.stdout.$$"
+trap '/bin/rm -f "$output"' EXIT
+/bin/sh -c "$cmd" > "$output"
+code=$?
+/bin/cat "$output"
+after=0
+for file in "$CRABBOX_ENV_WORKDIR"/.crabbox/env-*/values.sh; do
+  if [ -f "$file" ]; then after=1; fi
+done
+if [ "$before" = 1 ] && [ "$after" = 0 ]; then
+  printf 'removed\n' >> "$CRABBOX_ENV_EFFECTS"
+  if [ "$CRABBOX_ENV_LOST_ACK" = true ]; then exit 9; fi
+fi
+if [ "$(/bin/cat "$output")" = 'file=absent dir=absent' ]; then
+  printf 'probe\n' >> "$CRABBOX_ENV_EFFECTS"
+fi
+exit "$code"
+`)
+			t.Setenv("PATH", tools+string(os.PathListSeparator)+path)
+			target := SSHTarget{Host: "fixture.invalid", User: "fixture", Port: "22", TargetOS: targetLinux, NoControlMaster: true}
+			owner, err := acquireWorkspaceOwnerWithTransport(t.Context(), target, "cbx_env_cleanup", io.Discard, localPOSIXWorkspaceOwnerTransport{home: home}, workspaceOwnerWaitTimeout, workspaceOwnerTTL, workspaceOwnerRenewInterval)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ownerClosed := false
+			t.Cleanup(func() {
+				if ownerClosed {
+					return
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), workspaceOwnerCleanupTimeout)
+				defer cancel()
+				if err := owner.Close(ctx); err != nil {
+					t.Errorf("release workspace owner: %v", err)
+				}
+			})
+			runtimePath := filepath.Join(tools, "runtime")
+			nonceLog := filepath.Join(tools, "nonces")
+			launcher := filepath.Join(tools, "runtime-launcher")
+			writeExecutable(t, launcher, "#!/bin/sh\nif [ \"$1\" = __remote-control ] && [ \"$2\" = run ]; then printf '%s\\n' \"$4\" >> "+shellQuote(nonceLog)+"; fi\nexec "+shellQuote(binary)+" \"$@\"\n")
+			if err := os.Symlink(launcher, runtimePath); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				data, err := os.ReadFile(nonceLog)
+				if os.IsNotExist(err) {
+					return
+				}
+				if err != nil {
+					t.Errorf("read owned runtime nonces: %v", err)
+					return
+				}
+				for _, nonce := range strings.Fields(string(data)) {
+					if len(nonce) != 32 || strings.Trim(nonce, "0123456789abcdef") != "" {
+						t.Error("invalid owned runtime nonce")
+						continue
+					}
+					stage := "/tmp/crabbox-command-" + nonce
+					if _, statErr := os.Lstat(stage); os.IsNotExist(statErr) {
+						continue
+					}
+					if !t.Failed() {
+						t.Error("owned runtime stage was not retired")
+					}
+					ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+					cmd := exec.CommandContext(ctx, binary, "__remote-control", "control", "CBX-REMOTE-1", nonce, "cleanup", "10000")
+					cleanupErr := cmd.Run()
+					if cleanupErr == nil {
+						if _, statErr := os.Lstat(stage); statErr == nil {
+							cleanupErr = exec.CommandContext(ctx, binary, "__remote-control", "control", "CBX-REMOTE-1", nonce, "retire").Run()
+						}
+					}
+					cancel()
+					if cleanupErr != nil {
+						t.Errorf("settle owned runtime stage: %v", cleanupErr)
+					}
+					if _, statErr := os.Lstat(stage); !os.IsNotExist(statErr) {
+						t.Errorf("owned runtime stage remains: %v", statErr)
+					}
+				}
+			})
+			scope := testNativeRuntimeScope()
+			scope.manifest = "selected fixture"
+			scope.install = func(_ context.Context, selected SSHTarget, _ runtimeartifact.Source) (*remoteNativeRuntime, error) {
+				return &remoteNativeRuntime{target: selected, path: runtimePath}, nil
+			}
+			ctx := context.WithValue(runtimeLeaseContext(owner.Context(), "cbx_env_cleanup"), nativeRuntimeScopeKey{}, scope)
+			ctx, err = scope.admit(ctx, target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var diagnostics bytes.Buffer
+			prepared, err := stageSSHCommandEnv(ctx, target, workdir, map[string]string{"TEST_VALUE": "cleanup-private-value"}, &diagnostics)
+			if err != nil {
+				t.Fatalf("native environment upload: %v", err)
+			}
+			file := filepath.Join(workdir, prepared.File)
+			if data, err := os.ReadFile(file); err != nil || !bytes.Contains(data, []byte("cleanup-private-value")) {
+				t.Fatalf("environment upload missing: %v", err)
+			}
+			// Finite cleanup must retain workspace authority without depending on
+			// another foreground runtime invocation after the workload finishes.
+			if err := os.Remove(runtimePath); err != nil {
+				t.Fatal(err)
+			}
+			prepared.closeAfter(&err)
+			if err != nil || diagnostics.Len() != 0 {
+				t.Fatalf("environment cleanup: %v; diagnostics=%q", err, &diagnostics)
+			}
+			if _, err := os.Stat(filepath.Dir(file)); !os.IsNotExist(err) {
+				t.Fatalf("environment directory remains: %v", err)
+			}
+			effects, err := os.ReadFile(filepath.Join(tools, "effects"))
+			want := "removed\n"
+			if lostAcknowledgement {
+				want += "probe\n"
+			}
+			if err != nil || string(effects) != want {
+				t.Fatalf("cleanup effects=%q, want %q; error=%v", effects, want, err)
+			}
+			if err := owner.Close(t.Context()); err != nil {
+				t.Fatalf("workspace owner did not close: %v", err)
+			}
+			ownerClosed = true
+			if err := scope.finish(t.Context()); err != nil {
+				t.Fatalf("native command stage retained: %v", err)
+			}
+		})
 	}
 }
 
