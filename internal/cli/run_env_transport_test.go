@@ -674,7 +674,7 @@ exit "$code"
 			scope.install = func(_ context.Context, selected SSHTarget, _ runtimeartifact.Source) (*remoteNativeRuntime, error) {
 				return &remoteNativeRuntime{target: selected, path: runtimePath}, nil
 			}
-			ctx := context.WithValue(runtimeLeaseContext(owner.Context(), "cbx_env_cleanup"), nativeRuntimeScopeKey{}, scope)
+			ctx := context.WithValue(runtimeLeaseContext(contextWithWorkspaceOwner(owner.Context(), owner), "cbx_env_cleanup"), nativeRuntimeScopeKey{}, scope)
 			ctx, err = scope.admit(ctx, target)
 			if err != nil {
 				t.Fatal(err)

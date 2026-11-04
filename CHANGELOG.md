@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Actions on Linux: keep hydration metadata and environment handoff within bounded control commands while preserving workspace ownership.
 - SSH: keep forwarded-environment cleanup within its bounded control lifetime after native commands, preserving workspace ownership and removal verification. [PR 3021](https://github.com/openclaw/crabbox/pull/3021). Thanks @vincentkoc.
 - Sync: create private Git seeds with standard file modes so a group-writable remote shell does not force full-manifest transfers. [PR 3018](https://github.com/openclaw/crabbox/pull/3018). Thanks @vincentkoc.
 

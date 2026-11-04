@@ -2527,7 +2527,7 @@ func runActionsHydrationOutput(ctx context.Context, target SSHTarget, remote str
 func runActionsHydrationCommand(ctx context.Context, target SSHTarget, remote string, stdout io.Writer) error {
 	commandCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	err := executeSSH(commandCtx, &target, remote, nil, 0, 15*time.Second, "2", "1", stdout, io.Discard)
+	_, err := executeSSHWithRetirement(commandCtx, &target, remote, nil, 0, sshCommandLimit{execution: 15 * time.Second, control: target.TargetOS == targetLinux}, "2", "1", stdout, io.Discard)
 	if commandCtx.Err() == context.DeadlineExceeded {
 		return Exit(7, "Actions hydration SSH probe timed out after 30s")
 	}
