@@ -17,8 +17,8 @@ Hydration has two modes:
   workflow needs full GitHub Actions semantics — repository secrets, OIDC,
   service containers, or unsupported actions.
 
-The companion commands `actions register` and `actions dispatch` expose the
-runner-registration and workflow-dispatch steps directly.
+The companion commands `actions register`, `actions unregister`, and
+`actions dispatch` expose runner registration, exact deregistration, and workflow dispatch.
 
 ## Subcommands
 
@@ -29,8 +29,11 @@ hydrate  --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|w
          [--keep-alive-minutes 90] [--reclaim] [--timing-json] [-f key=value] [--field key=value]
 
 register --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|windows]
-         [--windows-mode normal|wsl2] [--repo owner/name] [--name <runner-name>]
+         [--windows-mode normal|wsl2] [--repo owner/name | --org organization]
+         [--runner-group <group-name>] [--name <runner-name>]
          [--labels <csv>] [--version latest] [--ephemeral=true] [--reclaim]
+
+unregister --id <lease-id-or-slug>
 
 dispatch [--repo owner/name] [--workflow <file|name|id>] [--ref <ref>] [-f key=value] [--field key=value]
 ```
@@ -71,21 +74,62 @@ run URL when the marker reports a run ID.
 ### register
 
 Registers an existing box as a GitHub Actions self-hosted runner. Crabbox
-obtains a repository registration token through `gh api`, installs the official
-`actions/runner` package, and starts it under systemd on Linux/WSL2 or a
+obtains a registration token through `gh api`, installs the official
+`actions/runner` package, records its exact GitHub identity in the existing lease
+claim, then starts it under systemd on Linux/WSL2 or an owned scheduled task or
 detached PowerShell process on native Windows. Supports Linux and Windows
 targets only. Registration metadata and the short-lived token travel over SSH
 stdin rather than the remote process command line.
 
 ```sh
 crabbox actions register --id blue-lobster
+crabbox actions register --id blue-lobster --org example-org --runner-group release-controls
 ```
+
+Repository registration remains the default. `--org` selects organization
+registration instead; it cannot be combined with an explicit `--repo`.
+`--runner-group` requires `--org` and selects an existing group. Crabbox does not
+create groups or change their repository/workflow access policy. The configured
+`gh` credential needs repository Administration write or organization Self-hosted
+runners write permission for the selected scope.
+
+Both ephemeral (default) and persistent (`--ephemeral=false`) registrations are
+supported. Registration does not change the provider's lease lifetime. A matching
+existing registration is reused. Changes to its name, group, labels, mode, or a
+specific installed version require unregistering it and waiting for its listener
+to stop. `latest` reuse keeps the installed runner; it does not force an upgrade.
+Consumed ephemeral registrations can be configured again on the same lease once
+GitHub confirms their absence and the owned listener is inactive. Unknown guest
+identity or listener state stops reconciliation instead of replacing a runner.
+Existing claims without a runner receipt are adopted only when the guest identity
+matches the requested lease registration and GitHub confirms its ownership or absence.
 
 Each runner gets the labels `crabbox`, the canonical lease label
 `crabbox-<lease-id>`, profile/class labels, the slug label when available, and
 any labels from `actions.runnerLabels` or `--labels`. Runner names use the
 friendly slug when available; workflow inputs and state-file paths keep using the
 canonical `cbx_...` ID.
+
+### unregister
+
+Removes only the exact runner ID and scope recorded in the local lease claim:
+
+```sh
+crabbox actions unregister --id blue-lobster
+crabbox stop --id blue-lobster
+```
+
+No SSH connection or running VM is required. GitHub determines active status;
+an already-absent runner is a successful result after scope access is verified.
+The historical receipt stays in the claim for repeat cleanup and later guest
+reconciliation. Errors preserve it too. Fixed-lease terminal claims retain this
+receipt after VM deletion; otherwise unregister before releasing the local claim.
+Unregister does not stop a running job or delete the VM. The caller still owns
+workload settlement and provider cleanup.
+
+Runner listeners start only after the receipt is durable. If that write fails,
+Crabbox attempts exact-ID deregistration and leaves the listener stopped. A
+failure of both operations reports the known scope and ID for operator recovery.
 
 ### dispatch
 

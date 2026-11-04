@@ -520,14 +520,18 @@ type adminDeleteKongCmd struct {
 }
 
 type actionsKongCmd struct {
-	Hydrate  actionsHydrateKongCmd  `cmd:"" passthrough:"" help:"Hydrate a lease from the configured repo workflow."`
-	Register actionsRegisterKongCmd `cmd:"" passthrough:"" help:"Register an existing Linux lease as a GitHub Actions runner."`
-	Dispatch actionsDispatchKongCmd `cmd:"" passthrough:"" help:"Dispatch the configured GitHub Actions workflow."`
+	Unregister actionsUnregisterKongCmd `cmd:"" passthrough:"" help:"Remove the exact GitHub Actions runner recorded in a local lease claim."`
+	Hydrate    actionsHydrateKongCmd    `cmd:"" passthrough:"" help:"Hydrate a lease from the configured repo workflow."`
+	Register   actionsRegisterKongCmd   `cmd:"" passthrough:"" help:"Register an existing lease as a GitHub Actions runner."`
+	Dispatch   actionsDispatchKongCmd   `cmd:"" passthrough:"" help:"Dispatch the configured GitHub Actions workflow."`
 }
 type actionsHydrateKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type actionsRegisterKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type actionsUnregisterKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type actionsDispatchKongCmd struct {
@@ -903,6 +907,9 @@ func (c *actionsHydrateKongCmd) Run(ctx context.Context, app App) error {
 }
 func (c *actionsRegisterKongCmd) Run(ctx context.Context, app App) error {
 	return app.actionsRegister(ctx, c.Args)
+}
+func (c *actionsUnregisterKongCmd) Run(ctx context.Context, app App) error {
+	return app.actionsUnregister(ctx, c.Args)
 }
 func (c *actionsDispatchKongCmd) Run(ctx context.Context, app App) error {
 	return app.actionsDispatch(ctx, c.Args)
