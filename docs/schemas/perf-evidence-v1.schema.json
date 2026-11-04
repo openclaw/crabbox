@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://crabbox.sh/schemas/perf-evidence-v1.schema.json",
+  "title": "Crabbox deterministic performance evidence v1",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "provider",
+    "workload",
+    "meter",
+    "results",
+    "exceeded"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "provider": {
+      "type": "string",
+      "minLength": 1
+    },
+    "leaseId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "runId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workload": {
+      "type": "object",
+      "required": [
+        "name",
+        "moduleSha256",
+        "toolchain",
+        "target",
+        "argv"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "moduleSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "toolchain": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target": {
+          "const": "wasip1/wasm"
+        },
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 128
+        }
+      },
+      "additionalProperties": true
+    },
+    "meter": {
+      "type": "object",
+      "required": [
+        "mechanism",
+        "engine",
+        "engineVersion",
+        "engineRevision",
+        "configuration",
+        "wasiConfiguration",
+        "comparisonKey",
+        "deterministic",
+        "initialFuel",
+        "remainingFuel"
+      ],
+      "properties": {
+        "mechanism": {
+          "const": "wasmtime-fuel"
+        },
+        "engine": {
+          "const": "wasmtime"
+        },
+        "engineVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "engineRevision": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "configuration": {
+          "const": "crabbox-wasmtime-fuel/v1"
+        },
+        "wasiConfiguration": {
+          "const": "crabbox-deterministic-wasi/v1"
+        },
+        "comparisonKey": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "deterministic": {
+          "type": "boolean"
+        },
+        "initialFuel": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "remainingFuel": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "additionalProperties": true
+    },
+    "results": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "metric",
+          "unit",
+          "measured",
+          "budget",
+          "exceeded"
+        ],
+        "properties": {
+          "metric": {
+            "const": "fuel"
+          },
+          "unit": {
+            "const": "fuel"
+          },
+          "measured": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "budget": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "exceeded": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "exceeded": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": true
+}
