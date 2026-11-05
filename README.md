@@ -237,7 +237,7 @@ access; discover them with `crabbox providers --feature url-bridge`.
 
 ## Providers
 
-**81 built-in providers plus the `external` plugin contract: 82 catalog entries.**
+**84 built-in providers plus the `external` plugin contract: 85 catalog entries.**
 The groups below follow the compiled catalog and link to each provider's setup
 and limitations. Some adapters delegate execution; service-control adapters do
 not run arbitrary commands. SSH, desktops, snapshots, and cleanup are not uniform.
