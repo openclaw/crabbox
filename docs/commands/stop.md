@@ -32,6 +32,17 @@ Guest shutdown hooks still run before the release request.
 
 ## Repeating a stop
 
+For coordinator cleanup marked `blocked`, automatic retries have stopped after
+a two-hour window of verified provider refusals. Inspect the named resource and
+its ownership and identity, delete it manually or restore the expected state,
+then run the same `crabbox stop` again. Stop requests one more attempt without
+resetting the refusal window; a continued refusal immediately blocks again.
+Verified absence completes cleanup and allows removal of local recovery files.
+A deferred candidate cleanup may also be blocked on an otherwise healthy lease;
+stop re-arms that candidate's cleanup alongside the normal lease release.
+Timeouts, HTTP 503 responses, authentication or inventory unavailability, and
+unknown errors remain retryable without this bound.
+
 An exact failed Azure lease can instead be retained with [hold](hold.md).
 Held claims refuse ordinary and forced stop, reuse, and automatic cleanup;
 the retained disk and companions require a separate salvage decision. After

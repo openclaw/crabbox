@@ -119,6 +119,7 @@ func (a App) status(ctx context.Context, args []string) error {
 			}
 			telemetry += lifetimePolicySummary(state.LifetimePolicy)
 			printStatusLifetime(a.Stdout, state)
+			printStatusCleanup(a.Stdout, state)
 			fmt.Fprintf(a.Stdout, "%s slug=%s provider=%s target=%s windows_mode=%s state=%s type=%s host=%s pond=%s network=%s%s ready=%t has_host=%t idle_for=%s idle_timeout=%s expires=%s%s\n", state.ID, blank(state.Slug, "-"), state.Provider, state.TargetOS, blank(state.WindowsMode, "-"), state.State, state.ServerType, state.Host, blank(state.Pond, "-"), state.Network, tailscale, state.Ready, state.HasHost, blank(state.IdleFor, "-"), blank(state.IdleTimeout, "-"), blank(state.ExpiresAt, "-"), telemetry)
 		}
 		if *wait {
@@ -328,40 +329,43 @@ type StatusView struct {
 	// ProviderResourceID optionally exposes an immutable provider resource ID.
 	// ServerID keeps each provider's existing identity semantics; for Islo it
 	// is the sandbox name rather than the immutable sandbox ID.
-	ProviderResourceID           string                   `json:"providerResourceId,omitempty"`
-	Host                         string                   `json:"host"`
-	Pond                         string                   `json:"pond,omitempty"`
-	Network                      NetworkMode              `json:"network"`
-	NetworkDiagnostics           *LeaseNetworkDiagnostics `json:"networkDiagnostics,omitempty"`
-	Tailscale                    *TailscaleMetadata       `json:"tailscale,omitempty"`
-	SSHHost                      string                   `json:"sshHost"`
-	SSHHostKey                   string                   `json:"sshHostKey,omitempty"`
-	ProviderAccessExpiresAt      string                   `json:"providerAccessExpiresAt,omitempty"`
-	SSHUser                      string                   `json:"sshUser"`
-	SSHPort                      string                   `json:"sshPort"`
-	SSHFallbackPorts             []string                 `json:"sshFallbackPorts,omitempty"`
-	SSHKey                       string                   `json:"sshKey"`
-	LastTouchedAt                string                   `json:"lastTouchedAt,omitempty"`
-	IdleFor                      string                   `json:"idleFor,omitempty"`
-	IdleTimeout                  string                   `json:"idleTimeout,omitempty"`
-	ExpiresAt                    string                   `json:"expiresAt,omitempty"`
-	CleanupStatus                string                   `json:"cleanupStatus,omitempty"`
-	ProviderCleanup              *ProviderCleanupEvidence `json:"providerCleanup,omitempty"`
-	CleanupStartedAt             string                   `json:"cleanupStartedAt,omitempty"`
-	CleanupCompletedAt           string                   `json:"cleanupCompletedAt,omitempty"`
-	CleanupError                 string                   `json:"cleanupError,omitempty"`
-	CleanupRetryAt               string                   `json:"cleanupRetryAt,omitempty"`
-	ReleaseDeletesServer         *bool                    `json:"releaseDeletesServer,omitempty"`
-	FailureError                 string                   `json:"failureError,omitempty"`
-	ProvisioningPhase            string                   `json:"provisioningPhase,omitempty"`
-	ProvisioningResourceMayExist *bool                    `json:"provisioningResourceMayExist,omitempty"`
-	ProvisioningFailureRetryable *bool                    `json:"provisioningFailureRetryable,omitempty"`
-	Labels                       map[string]string        `json:"labels,omitempty"`
-	ProviderMetadata             map[string]any           `json:"providerMetadata,omitempty"`
-	HasHost                      bool                     `json:"hasHost"`
-	Ready                        bool                     `json:"ready"`
-	Telemetry                    *LeaseTelemetry          `json:"telemetry,omitempty"`
-	TelemetryHistory             []*LeaseTelemetry        `json:"telemetryHistory,omitempty"`
+	ProviderResourceID           string                             `json:"providerResourceId,omitempty"`
+	Host                         string                             `json:"host"`
+	Pond                         string                             `json:"pond,omitempty"`
+	Network                      NetworkMode                        `json:"network"`
+	NetworkDiagnostics           *LeaseNetworkDiagnostics           `json:"networkDiagnostics,omitempty"`
+	Tailscale                    *TailscaleMetadata                 `json:"tailscale,omitempty"`
+	SSHHost                      string                             `json:"sshHost"`
+	SSHHostKey                   string                             `json:"sshHostKey,omitempty"`
+	ProviderAccessExpiresAt      string                             `json:"providerAccessExpiresAt,omitempty"`
+	SSHUser                      string                             `json:"sshUser"`
+	SSHPort                      string                             `json:"sshPort"`
+	SSHFallbackPorts             []string                           `json:"sshFallbackPorts,omitempty"`
+	SSHKey                       string                             `json:"sshKey"`
+	LastTouchedAt                string                             `json:"lastTouchedAt,omitempty"`
+	IdleFor                      string                             `json:"idleFor,omitempty"`
+	IdleTimeout                  string                             `json:"idleTimeout,omitempty"`
+	ExpiresAt                    string                             `json:"expiresAt,omitempty"`
+	CleanupStatus                string                             `json:"cleanupStatus,omitempty"`
+	ProviderCleanup              *ProviderCleanupEvidence           `json:"providerCleanup,omitempty"`
+	CleanupStartedAt             string                             `json:"cleanupStartedAt,omitempty"`
+	CleanupCompletedAt           string                             `json:"cleanupCompletedAt,omitempty"`
+	CleanupError                 string                             `json:"cleanupError,omitempty"`
+	CleanupRetryAt               string                             `json:"cleanupRetryAt,omitempty"`
+	CleanupRefusedSince          string                             `json:"cleanupRefusedSince,omitempty"`
+	CleanupBlockedAt             string                             `json:"cleanupBlockedAt,omitempty"`
+	DeferredCleanupBlocked       *CoordinatorDeferredCleanupBlocked `json:"deferredCleanupBlocked,omitempty"`
+	ReleaseDeletesServer         *bool                              `json:"releaseDeletesServer,omitempty"`
+	FailureError                 string                             `json:"failureError,omitempty"`
+	ProvisioningPhase            string                             `json:"provisioningPhase,omitempty"`
+	ProvisioningResourceMayExist *bool                              `json:"provisioningResourceMayExist,omitempty"`
+	ProvisioningFailureRetryable *bool                              `json:"provisioningFailureRetryable,omitempty"`
+	Labels                       map[string]string                  `json:"labels,omitempty"`
+	ProviderMetadata             map[string]any                     `json:"providerMetadata,omitempty"`
+	HasHost                      bool                               `json:"hasHost"`
+	Ready                        bool                               `json:"ready"`
+	Telemetry                    *LeaseTelemetry                    `json:"telemetry,omitempty"`
+	TelemetryHistory             []*LeaseTelemetry                  `json:"telemetryHistory,omitempty"`
 }
 
 type statusView = StatusView
@@ -708,4 +712,22 @@ func printStatusLifetime(out io.Writer, state StatusView) {
 		}
 		fmt.Fprintln(out)
 	}
+}
+
+func printStatusCleanup(out io.Writer, state StatusView) {
+	if state.CleanupStatus == "pending" || state.CleanupStartedAt != "" {
+		return
+	}
+	if state.CleanupStatus != "blocked" && cleanupBlockedSummary(state.CleanupBlockedAt, state.CleanupError, state.DeferredCleanupBlocked) == "" {
+		return
+	}
+	resource := blank(state.ServerID, state.ID)
+	if state.DeferredCleanupBlocked != nil {
+		resource = state.DeferredCleanupBlocked.Name
+	}
+	summary := cleanupBlockedSummary(state.CleanupBlockedAt, state.CleanupError, state.DeferredCleanupBlocked)
+	if summary == "" {
+		summary = "blocked"
+	}
+	fmt.Fprintf(out, "cleanup=%s; automatic retries stopped; inspect resource %s, delete or restore it, then run crabbox stop --provider %s --id %s again\n", summary, resource, state.Provider, state.ID)
 }

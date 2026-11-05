@@ -5,6 +5,7 @@ import { awsCleanupCompletionBlocker } from "./aws-cleanup-completion";
 import { AWSPoolAccess } from "./aws-pool-access";
 import { acquisitionRootDisk, sameAWSRootDisk, validAWSRootDiskIdentity } from "./aws-root-disk";
 import { AWSVPCCache } from "./aws-vpc-cache";
+import { coordinatorDiagnosticText, coordinatorErrorMessage } from "./coordinator-diagnostics";
 import {
   classifyDurableObjectFailure,
   durableObjectFailureResponse,
@@ -71,6 +72,8 @@ import {
   type HostScope,
 } from "./host-reservations";
 import {
+  leaseCleanupBlockedMessage,
+  leaseCleanupRefusalTerminalMs,
   clearLeaseCleanupCompletion,
   completeLeaseProviderCleanup,
   leaseHasConfirmedNoProviderResource,
@@ -420,6 +423,7 @@ import {
 import {
   ProviderProvisioningCleanupError,
   ProviderResourceUnresolvedError,
+  ProviderCleanupRefusedError,
   providerProvisioningCleanupClaim,
   providerProvisioningOutcomeUncertain,
   type ProviderProvisioningCleanupClaim,
@@ -535,12 +539,7 @@ import type {
   TailscaleMetadata,
   WindowsMode,
 } from "./types";
-import {
-  coordinatorProviderRegistry,
-  coordinatorProviders,
-  coordinatorProviderSpec,
-  isCoordinatorProvider,
-} from "./types";
+import { coordinatorProviders, coordinatorProviderSpec, isCoordinatorProvider } from "./types";
 import {
   activeLeaseLimitBlocker,
   activeLeaseLimitsForOwner,
@@ -676,34 +675,6 @@ const userGrantRevalidationIntervalMs = 1_000;
 
 export const imageRouteDeadlineMs = 120_000;
 export const macHostRouteDeadlineMs = 120_000;
-
-function coordinatorErrorMessage(env: Env, error: unknown): string {
-  return errorMessage(error, coordinatorDiagnosticSecrets(env));
-}
-
-function coordinatorDiagnosticText(env: Env, value: string): string {
-  return redactDiagnosticSecrets(value, coordinatorDiagnosticSecrets(env));
-}
-
-function coordinatorDiagnosticSecrets(env: Env): Array<string | undefined> {
-  return [
-    ...coordinatorProviderRegistry.flatMap((provider) =>
-      provider.requiredSecrets.map((name) => env[name]),
-    ),
-    env.AWS_SESSION_TOKEN,
-    env.CRABBOX_RUNTIME_ADAPTER_TOKEN,
-    env.CRABBOX_SHARED_TOKEN,
-    env.CRABBOX_ADMIN_TOKEN,
-    env.CRABBOX_SESSION_SECRET,
-    env.CRABBOX_GITHUB_CLIENT_SECRET,
-    env.CRABBOX_WORKSPACE_SSH_PRIVATE_KEY,
-    env.CRABBOX_TRUSTED_PROXY_SECRET,
-    env.CRABBOX_TAILSCALE_CLIENT_SECRET,
-    env.CRABBOX_ARTIFACTS_ACCESS_KEY_ID,
-    env.CRABBOX_ARTIFACTS_SECRET_ACCESS_KEY,
-    env.CRABBOX_ARTIFACTS_SESSION_TOKEN,
-  ];
-}
 
 interface CheckpointLeaseAuthorization {
   checkpoint: CoordinatorCheckpointRecord;
@@ -1000,6 +971,8 @@ interface LeaseCloudAudit {
   cleanupAttempts?: number;
   cleanupError?: string;
   cleanupRetryAt?: string;
+  cleanupBlockedAt?: string;
+  deferredCleanupBlocked?: LeaseRecord["deferredCleanupBlocked"];
   cloudStatus: "found" | "missing" | "error";
   cloudState?: string;
   cloudHost?: string;
@@ -1025,6 +998,7 @@ interface AzureDeferredCleanupRecord extends AzureDeferredCleanupRequest {
   retryAt: string;
   lastError?: string;
   terminalAt?: string;
+  refusedSince?: string;
 }
 
 class ProviderCleanupManualResolutionError extends Error {
@@ -15595,6 +15569,12 @@ export class FleetCoordinator {
     if (lease.cleanupRetryAt) {
       audit.cleanupRetryAt = lease.cleanupRetryAt;
     }
+    if (lease.cleanupBlockedAt) audit.cleanupBlockedAt = lease.cleanupBlockedAt;
+    if (lease.deferredCleanupBlocked)
+      audit.deferredCleanupBlocked = {
+        ...lease.deferredCleanupBlocked,
+        error: coordinatorDiagnosticText(this.env, lease.deferredCleanupBlocked.error),
+      };
     return audit;
   }
 
@@ -19597,7 +19577,13 @@ export class FleetCoordinator {
             if (!current || current.updatedAt !== record.updatedAt) {
               return;
             }
-            const terminal = error instanceof ProviderCleanupManualResolutionError;
+            if (error instanceof ProviderCleanupRefusedError) {
+              current.refusedSince ??= new Date(now).toISOString();
+            }
+            const terminal =
+              error instanceof ProviderCleanupManualResolutionError ||
+              (error instanceof ProviderCleanupRefusedError &&
+                now - Date.parse(current.refusedSince!) >= leaseCleanupRefusalTerminalMs);
             const nextRecord: AzureDeferredCleanupRecord = {
               ...current,
               attempts: current.attempts + 1,
@@ -19609,6 +19595,15 @@ export class FleetCoordinator {
             };
             if (terminal) {
               nextRecord.terminalAt = nextRecord.updatedAt;
+              const lease = await this.getLease(record.leaseID);
+              if (lease) {
+                lease.deferredCleanupBlocked = {
+                  name: record.name,
+                  error: nextRecord.lastError!,
+                  blockedAt: nextRecord.terminalAt,
+                };
+                await this.putLease(lease);
+              }
             }
             await this.state.storage.put(key, nextRecord);
             console.warn(
@@ -19622,10 +19617,40 @@ export class FleetCoordinator {
           if (await provisioningOwnsLease(this.state.storage, record.leaseID)) return;
           if (current?.updatedAt === record.updatedAt) {
             await this.state.storage.delete(key);
+            const lease = await this.getLease(record.leaseID);
+            if (lease?.deferredCleanupBlocked?.name === record.name) {
+              delete lease.deferredCleanupBlocked;
+              const remaining = await this.remainingDeferredCleanupBlock(lease.id, record.name);
+              if (remaining) lease.deferredCleanupBlocked = remaining;
+              await this.putLease(lease);
+            }
           }
         });
       },
     );
+  }
+
+  // One lease can hold several candidates; a finished one must not hide the others.
+  private async remainingDeferredCleanupBlock(
+    leaseID: string,
+    finishedName: string,
+  ): Promise<LeaseRecord["deferredCleanupBlocked"]> {
+    let remaining: LeaseRecord["deferredCleanupBlocked"];
+    await this.visitStorageRecords<AzureDeferredCleanupRecord>(
+      azureDeferredCleanupPrefix,
+      (record) => {
+        if (record.leaseID !== leaseID || record.name === finishedName) return;
+        if (!record.terminalAt && !record.refusedSince) return;
+        if (remaining && !remaining.retryingAt) return;
+        remaining = {
+          name: record.name,
+          error: record.lastError ?? "",
+          blockedAt: record.terminalAt ?? record.updatedAt,
+          ...(record.terminalAt ? {} : { retryingAt: record.retryAt }),
+        };
+      },
+    );
+    return remaining;
   }
 
   private async nextOrphanSweepAlarmTime(
@@ -21057,6 +21082,13 @@ export class FleetCoordinator {
       cleanupAttempts: lease.cleanupAttempts,
       cleanupFailedAt: lease.cleanupFailedAt,
       cleanupRetryAt: lease.cleanupRetryAt,
+      cleanupBlockedAt: lease.cleanupBlockedAt,
+      deferredCleanupBlocked: lease.deferredCleanupBlocked
+        ? {
+            ...lease.deferredCleanupBlocked,
+            error: coordinatorDiagnosticText(this.env, lease.deferredCleanupBlocked.error),
+          }
+        : undefined,
       cleanupError: lease.cleanupError
         ? coordinatorDiagnosticText(this.env, lease.cleanupError)
         : undefined,
@@ -21880,6 +21912,25 @@ export class FleetCoordinator {
     }
     if (current.portablePoolAccess)
       await this.poolAccess.invalidateLease(current.id, "lease released");
+    if (current.deferredCleanupBlocked)
+      await this.state.runExclusive(async () => {
+        const latest = await this.getLease(current.id);
+        if (!latest?.deferredCleanupBlocked) return;
+        const retryAt = new Date().toISOString();
+        await this.visitStorageRecords<AzureDeferredCleanupRecord>(
+          azureDeferredCleanupPrefix,
+          async (record, key) => {
+            if (record.leaseID !== latest.id || !record.terminalAt) return;
+            delete record.terminalAt;
+            record.retryAt = retryAt;
+            record.updatedAt = retryAt;
+            await this.state.storage.put(key, record);
+          },
+        );
+        latest.deferredCleanupBlocked.retryingAt = retryAt;
+        await this.putLease(latest);
+        await this.armAlarmNoLaterThan(Date.now());
+      });
     if (this.state.provisioning) {
       const released = await this.state.provisioning.commitAndWake(async (transaction) => {
         const latest = await this.getLeaseFrom(transaction, current.id);
@@ -28073,6 +28124,18 @@ function recordLeaseCleanupFailure(
   at: string,
 ): void {
   clearLeaseCleanupCompletion(lease);
+  if (error instanceof ProviderCleanupRefusedError) {
+    lease.cleanupRefusedSince ??= at;
+    if (Date.parse(at) - Date.parse(lease.cleanupRefusedSince) >= leaseCleanupRefusalTerminalMs) {
+      retainUnresolvedProviderResource(
+        lease,
+        leaseCleanupBlockedMessage(lease.cloudID || lease.id, message, lease.cleanupRefusedSince),
+        at,
+      );
+      lease.cleanupBlockedAt = at;
+      return;
+    }
+  }
   if (error instanceof ProviderResourceUnresolvedError) {
     retainUnresolvedProviderResource(lease, message, at);
   } else if (error instanceof ProviderCleanupManualResolutionError) {
@@ -28557,6 +28620,8 @@ function clearLeaseCleanupMetadata(lease: LeaseRecord): void {
   delete lease.cleanupError;
   delete lease.cleanupFailedAt;
   delete lease.cleanupRetryAt;
+  delete lease.cleanupRefusedSince;
+  delete lease.cleanupBlockedAt;
 }
 
 function clearProvisioningRecoveryMetadata(lease: LeaseRecord): void {
@@ -28653,7 +28718,11 @@ function finalizedReleasedLease(
     delete lease.provisioningRequestSettledAt;
     delete lease.provisioningRecoveryObservedAt;
     delete lease.provisioningRecoveryMissingSince;
+    const { cleanupRefusedSince } = lease;
     clearLeaseCleanupMetadata(lease);
+    // Re-arming clears blocked so a transient retry reports truthfully; the spent
+    // window survives, so a continued refusal returns straight to blocked.
+    if (deleteServer && cleanupRefusedSince) lease.cleanupRefusedSince = cleanupRefusedSince;
   } else {
     // Release records user intent, not cancellation of an already-dispatched
     // provider request. Keep its original recovery evidence and visible debt.
