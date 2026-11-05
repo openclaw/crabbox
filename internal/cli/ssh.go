@@ -359,11 +359,43 @@ func sshReadinessProfileForTarget(target SSHTarget) sshReadinessProfile {
 }
 
 func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+	scope, _ := ctx.Value(nativeRuntimeScopeKey{}).(*nativeRuntimeScope)
+	cache := scope != nil && scope.selected() && target.TargetOS == targetLinux
+	owner := workspaceOwnerFromContext(ctx)
+	key := func() nativeRuntimeReadinessKey {
+		return nativeRuntimeReadinessKey{nativeRuntimeInstallKey{nativeRuntimeLease(ctx), nativeRuntimeRouteKey(*target)}, owner}
+	}
+	if cache {
+		if err := scope.validateLocal(ctx, *target); err != nil {
+			return err
+		}
+		if owner != nil {
+			if err := owner.Err(); err != nil {
+				return err
+			}
+		}
+		scope.mu.Lock()
+		ready := scope.readiness[key()]
+		scope.mu.Unlock()
+		if ready {
+			target.recordPreparedEndpoint(target.Port)
+			return context.Cause(ctx)
+		}
+	}
 	start := time.Now()
 	deadline := time.Now().Add(timeout)
 	probeCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	return waitForSSHReadyWithProbeContext(ctx, probeCtx, target, stderr, phase, start, deadline)
+	err := waitForSSHReadyWithProbeContext(ctx, probeCtx, target, stderr, phase, start, deadline)
+	if cache && err == nil {
+		scope.mu.Lock()
+		if scope.readiness == nil {
+			scope.readiness = make(map[nativeRuntimeReadinessKey]bool)
+		}
+		scope.readiness[key()] = true
+		scope.mu.Unlock()
+	}
+	return err
 }
 
 func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHTarget, stderr io.Writer, phase string, start, deadline time.Time) error {

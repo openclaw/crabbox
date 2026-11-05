@@ -60,22 +60,28 @@ func groupHasLiveMembers(root string, group int) (bool, error) {
 }
 
 func (g *commandGroup) awaitTermGrace(group int) {
-	deadline := time.Now().Add(g.grace)
-	for {
+	waitTermGrace(g.grace, func() bool {
 		err := syscall.Kill(-group, 0)
 		if errors.Is(err, syscall.ESRCH) {
-			return
+			return false
 		}
 		if err == nil {
 			if live, err := groupHasLiveMembers("/proc", group); err == nil && !live {
-				return
+				return false
 			}
 		}
 		// EPERM and incomplete /proc visibility cannot prove workload exit.
-		remaining := time.Until(deadline)
+		return true
+	}, time.Now, time.Sleep)
+}
+
+func waitTermGrace(grace time.Duration, live func() bool, now func() time.Time, pause func(time.Duration)) {
+	deadline := now().Add(grace)
+	for live() {
+		remaining := deadline.Sub(now())
 		if remaining <= 0 {
 			return
 		}
-		time.Sleep(min(10*time.Millisecond, remaining))
+		pause(min(10*time.Millisecond, remaining))
 	}
 }
