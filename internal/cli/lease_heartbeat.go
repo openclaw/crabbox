@@ -142,6 +142,9 @@ func startDirectLeaseHeartbeatPaced(
 					fatalErr = Exit(4, "lease %s claim changed ownership before heartbeat", lease.LeaseID)
 				default:
 					lease.Server.Labels = withClaimLifetimePolicy(lease.Server.Labels, current.Labels, nil)
+					// Renew against the claim just validated; a provider that commits
+					// claim snapshots rejects a touch carrying an older one.
+					SetServerLeaseClaimSnapshot(&lease.Server, current, true)
 					preTouch = current
 				}
 			}

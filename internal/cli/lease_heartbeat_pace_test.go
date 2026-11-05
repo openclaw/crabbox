@@ -3,29 +3,37 @@ package cli
 import (
 	"context"
 	"io"
+	"reflect"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 )
 
-// claimLabelTouchBackend renews like a claim-backed provider: expiry policy comes
-// from the persisted claim labels, not from the request.
+// claimLabelTouchBackend renews like Hyper-V's claim-committing touch: the
+// carried claim snapshot must equal the persisted claim, and expiry policy
+// comes from the persisted claim, not from the request.
 type claimLabelTouchBackend struct {
 	mu       sync.Mutex
 	requests []time.Duration
+	rejected int
 }
 
 func (b *claimLabelTouchBackend) Spec() ProviderSpec { return ProviderSpec{Name: "heartbeat-test"} }
 
 func (b *claimLabelTouchBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
-	b.mu.Lock()
-	b.requests = append(b.requests, req.IdleTimeout)
-	b.mu.Unlock()
 	current, _, err := ReadLeaseClaimWithPresence(req.Lease.LeaseID)
 	if err != nil {
 		return Server{}, err
 	}
+	b.mu.Lock()
+	if snapshot, _, _ := ServerLeaseClaimSnapshot(req.Lease.Server); !reflect.DeepEqual(snapshot, current) {
+		b.rejected++
+		b.mu.Unlock()
+		return Server{}, Exit(2, "lease %s claim changed; retry", req.Lease.LeaseID)
+	}
+	b.requests = append(b.requests, req.IdleTimeout)
+	b.mu.Unlock()
 	labels := cloneStringMap(current.Labels)
 	if labels == nil {
 		labels = map[string]string{}
@@ -96,6 +104,9 @@ func TestDirectHeartbeatPacesRenewalsFromLeaseSavedIdleTimeout(t *testing.T) {
 	}
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
+	if backend.rejected != 0 {
+		t.Fatalf("heartbeat carried a stale claim snapshot into %d renewals after the extend", backend.rejected)
+	}
 	if want := []time.Duration{90 * time.Second, 30 * time.Second}; len(backend.requests) != len(want) || backend.requests[0] != want[0] || backend.requests[1] != want[1] {
 		t.Fatalf("touch idle timeouts = %v, want %v from the saved idle timeout", backend.requests, want)
 	}

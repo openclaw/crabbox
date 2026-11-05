@@ -216,10 +216,15 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 			}
 		}
 		// A lost SSH acknowledgement is not permission to register again. Recover
-		// the official local identity and verify its exact API object first.
-		guest, err := readActionsRunnerGuest(ctx, target, checkVersion)
+		// the official local identity and verify its exact API object first. This
+		// runs even when the operation was canceled mid-install (for example by the
+		// hydration heartbeat after a reassignment): configuration may already have
+		// created the GitHub runner, and only its guest identity can remove it.
+		reconcileCtx, cancelReconcile := context.WithTimeout(context.WithoutCancel(ctx), actionsRunnerReconcileTimeout)
+		defer cancelReconcile()
+		guest, err := readActionsRunnerGuest(reconcileCtx, target, checkVersion)
 		if err != nil {
-			return errors.Join(installErr, err)
+			return errors.Join(installErr, Exit(ExitCodeForError(err, 7), "read runner identity after setup; listener was not started; a runner named %s may remain registered at %s: %v", name, actionsRunnerURL(scope), err))
 		}
 		if guest.Settings == nil || *guest.Active || guest.Settings.URL != actionsRunnerURL(scope) || guest.Settings.Name != name || guest.Settings.Ephemeral != cfg.Actions.Ephemeral || group != "" && guest.Settings.Group != group {
 			return errors.Join(installErr, Exit(7, "runner configuration identity is unconfirmed; listener was not started; reconcile this lease before retrying"))
@@ -228,31 +233,35 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 			return errors.Join(installErr, Exit(7, "configured runner version is unconfirmed; listener was not started"))
 		}
 		binding := &ActionsRunnerBinding{Scope: scope, RunnerID: guest.Settings.ID, Name: name, Group: guest.Settings.Group, Ephemeral: cfg.Actions.Ephemeral, LeaseFingerprint: fingerprint}
-		present, err := githubActionsRunnerPresent(ctx, *binding, leaseID, labels, target.ChildEnvDenylist)
+		present, err := githubActionsRunnerPresent(reconcileCtx, *binding, leaseID, labels, target.ChildEnvDenylist)
 		if err != nil {
 			return errors.Join(installErr, err)
 		}
 		if !present {
 			return errors.Join(installErr, Exit(7, "configured runner %d is absent from GitHub; listener was not started", binding.RunnerID))
 		}
-		// Recheck the reservation before the receipt. Anything beyond a lease
-		// renewal while setup ran unlocked means this lease no longer authorizes
-		// the runner, so delete the exact configured ID instead of activating it.
+		// Recheck the reservation before the receipt. A canceled operation or
+		// anything beyond a lease renewal while setup ran unlocked means this
+		// lease no longer authorizes the runner, so delete the exact configured ID
+		// instead of activating it.
 		persisted := false
-		err = WithDurableLeaseClaimLockContext(ctx, leaseID, func(claim *leaseClaim, exists bool, persist func() error) error {
-			if !actionsRunnerReservationHolds(*reserved, *claim, exists, strictSnapshot) {
-				return Exit(2, "Actions runner lease claim changed during runner setup")
-			}
-			claim.ActionsRunner = binding
-			if err := persist(); err != nil {
+		err = context.Cause(ctx)
+		if ctx.Err() == nil {
+			err = WithDurableLeaseClaimLockContext(ctx, leaseID, func(claim *leaseClaim, exists bool, persist func() error) error {
+				if !actionsRunnerReservationHolds(*reserved, *claim, exists, strictSnapshot) {
+					return Exit(2, "Actions runner lease claim changed during runner setup")
+				}
+				claim.ActionsRunner = binding
+				if err := persist(); err != nil {
+					return err
+				}
+				persisted = true
+				updated = cloneLeaseClaim(*claim)
+				fmt.Fprintln(a.Stderr, "actions runner setup stage=service-start")
+				_, err := actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
 				return err
-			}
-			persisted = true
-			updated = cloneLeaseClaim(*claim)
-			fmt.Fprintln(a.Stderr, "actions runner setup stage=service-start")
-			_, err := actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
-			return err
-		})
+			})
+		}
 		if err != nil && !persisted {
 			rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
@@ -295,12 +304,21 @@ func withActionsRunnerRegistrationLock(ctx context.Context, leaseID string, acti
 
 // actionsRunnerReservationHolds reports whether the claim still authorizes the
 // registration reserved before the unlocked install: same workspace owner, no
-// competing runner receipt and, for strict callers, only lease-renewal changes.
+// competing runner receipt, not retiring and, for strict callers, only
+// lease-renewal changes.
 func actionsRunnerReservationHolds(reserved, current leaseClaim, exists, strictSnapshot bool) bool {
-	if !exists || !sameActionsWorkspaceClaimOwner(current, reserved) || !reflect.DeepEqual(current.ActionsRunner, reserved.ActionsRunner) {
+	if !exists || !sameActionsWorkspaceClaimOwner(current, reserved) || !reflect.DeepEqual(current.ActionsRunner, reserved.ActionsRunner) || actionsRunnerClaimRetiring(current) {
 		return false
 	}
 	return !strictSnapshot || reflect.DeepEqual(current, reserved) || actionsClaimLifecycleOnlyChange(reserved, current)
+}
+
+// actionsRunnerClaimRetiring reports a lifecycle state in which the lease must
+// not gain an active runner. Cleanup writers change only the state label, which
+// a heartbeat may also change, so check it explicitly.
+func actionsRunnerClaimRetiring(claim leaseClaim) bool {
+	state := strings.TrimSpace(claim.Labels["state"])
+	return strings.EqualFold(state, "cleanup") || claimEndpointInactiveState(state)
 }
 
 func githubActionsRunnerPresent(ctx context.Context, binding ActionsRunnerBinding, leaseID string, labels, denylist []string) (bool, error) {
@@ -519,6 +537,9 @@ const (
 	actionsRunnerStagePrefix     = "crabbox-runner-stage="
 	actionsRunnerDiagnosticLimit = 16 * 1024
 	maxActionsDiagnosticReserve  = 30 * time.Second
+	// actionsRunnerReconcileTimeout bounds the post-install identity read and
+	// GitHub check, which outlive cancellation of the registering operation.
+	actionsRunnerReconcileTimeout = 90 * time.Second
 )
 
 type actionsRunnerSetupResult struct {
