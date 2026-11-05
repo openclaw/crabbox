@@ -55,7 +55,8 @@ func (b *runpodLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireR
 	cfg := b.configForRun()
 	input := runpodDeployInput{ImageName: cfg.Runpod.Image, InstanceID: cfg.Runpod.InstanceID, CloudType: cfg.Runpod.CloudType, TemplateID: cfg.Runpod.TemplateID, ContainerDiskInGb: cfg.Runpod.DiskGB, Ports: "22/tcp"}
 	lease, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
-		Kind: fixedLeaseKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root, Reclaim: req.Reclaim,
+		LegacyRepoRoot: req.Repo.LegacyRoot,
+		Kind:           fixedLeaseKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root, Reclaim: req.Reclaim,
 		TargetOS: core.TargetLinux, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 	}, core.FixedLeaseOperations[runpodPod]{Admission: &core.FixedAdmission{},
 		DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {

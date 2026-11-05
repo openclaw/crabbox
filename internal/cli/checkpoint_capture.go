@@ -65,7 +65,7 @@ func (a App) checkpointRetire(ctx context.Context, cfg Config, repo Repo, leaseI
 		if err != nil {
 			return err
 		}
-		if record.Capture == nil || record.Capture.SourceDisposition != "retire" || record.LeaseID != leaseID || record.Provider != cfg.Provider || record.Repo.Root != repo.Root || record.Native.NoReboot != noReboot || record.Native.Strategy != checkpointCreateStrategy("native", strategy, record.Kind) || record.Capture.StrategyExplicit != !isAutoCheckpointStrategy(strategy) {
+		if record.Capture == nil || record.Capture.SourceDisposition != "retire" || record.LeaseID != leaseID || record.Provider != cfg.Provider || !ClaimRepositoryMatches(record.Repo.Root, repo.Root, repo.LegacyRoot) || record.Native.NoReboot != noReboot || record.Native.Strategy != checkpointCreateStrategy("native", strategy, record.Kind) || record.Capture.StrategyExplicit != !isAutoCheckpointStrategy(strategy) {
 			return Exit(2, "checkpoint %s capture identity or options conflict; retain the original operation", id)
 		}
 		switch record.Capture.Phase {
@@ -100,7 +100,7 @@ func (a App) prepareCheckpointCapture(ctx context.Context, cfg Config, repo Repo
 	if err != nil {
 		return checkpointRecord{}, claim, err
 	}
-	if !exists || claim.CloudID == "" || claim.Revision == "" || claim.RepoRoot != repo.Root || canonicalClaimProvider(claim.Provider) != cfg.Provider {
+	if !exists || claim.CloudID == "" || claim.Revision == "" || !ClaimRepositoryMatches(claim.RepoRoot, repo.Root, repo.LegacyRoot) || canonicalClaimProvider(claim.Provider) != cfg.Provider {
 		return checkpointRecord{}, claim, Exit(2, "checkpoint retirement requires an exact current source claim in this repository")
 	}
 	server, target, resolvedID, err := a.resolveLeaseTargetWithRequestConfig(ctx, &cfg, ResolveRequest{Repo: repo, ID: leaseID, ReleaseOnly: true, NoLocalStateMutations: true})
@@ -132,6 +132,8 @@ func (a App) prepareCheckpointCapture(ctx context.Context, cfg Config, repo Repo
 	if err != nil {
 		return checkpointRecord{}, claim, err
 	}
+	// Retirement pins the original claim snapshot, including a legacy literal root.
+	record.Repo.Root = claim.RepoRoot
 	record.ID, record.Kind = id, capability.Kind
 	record.Native.Strategy, record.Native.NoReboot = checkpointCreateStrategy("native", strategy, capability.Kind), noReboot
 	record.Capture = &NativeCheckpointCapture{SourceDisposition: "retire", Phase: "prepared", StrategyExplicit: !isAutoCheckpointStrategy(strategy), SourceID: claim.CloudID, SourceName: server.Name, SourceScope: claim.ProviderScope, SourceRevision: claim.Revision, SourceClaimedAt: claim.ClaimedAt}

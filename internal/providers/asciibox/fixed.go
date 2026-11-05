@@ -29,7 +29,8 @@ func (b *backend) acquireFixed(ctx context.Context, cfg core.Config, client api,
 	ttl = ttl.Round(time.Second)
 	cfg.TTL = ttl
 	lease, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
-		Kind: fixedBoxKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root, Reclaim: req.Reclaim,
+		LegacyRepoRoot: req.Repo.LegacyRoot,
+		Kind:           fixedBoxKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root, Reclaim: req.Reclaim,
 		TargetOS: targetLinux, TTL: ttl, IdleTimeout: cfg.IdleTimeout, Now: b.now,
 	}, core.FixedLeaseOperations[boxData]{
 		Admission: &core.FixedAdmission{FreshOnly: true, KeyedRetry: &core.FixedKeyedRetry{AttemptKey: "idempotency_key", Window: asciiBoxIdempotencyWindow}},

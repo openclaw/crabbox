@@ -96,9 +96,13 @@ the native machine's defaults.
   lease to obtain an ownership binding. Do not copy or regenerate ownership
   markers for replacement machines.
 - The storage root comes from `container system status --format json`, not the
-  calling shell's `CONTAINER_APP_ROOT`. Missing daemon storage evidence or an
-  unexpected bundle layout fails closed. Apple currently stores machine bundles
-  under `appRoot/plugin-state/machine-apiserver/machines`.
+  calling shell's `CONTAINER_APP_ROOT`. Crabbox reads `paths.appRoot` on current
+  versions and the top-level `appRoot` emitted by Apple Container 1.0. When
+  a `paths` object is present, its root takes precedence. The daemon must be running and
+  report an absolute root that resolves to an existing directory. Missing or
+  invalid daemon storage evidence or an unexpected bundle layout fails closed.
+  Apple currently stores machine bundles under
+  `appRoot/plugin-state/machine-apiserver/machines`.
 - Apple's native removal API does not offer an atomic expected-identity check.
   Crabbox fences its own claim changes and rejects observed replacements, but
   external tools must not replace machines concurrently with lifecycle commands.

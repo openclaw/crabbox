@@ -77,14 +77,15 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 	leaseID := strings.TrimSpace(req.RequestedLeaseID)
 	var fingerprint, publicKey string
 	acquired, err := core.AcquireFixedLease(core.FixedAcquireOptions{
-		Kind:        fixedAppleContainerLeaseKind,
-		LeaseID:     leaseID,
-		RepoRoot:    req.Repo.Root,
-		Reclaim:     req.Reclaim,
-		TargetOS:    cfg.TargetOS,
-		WindowsMode: cfg.WindowsMode,
-		TTL:         cfg.TTL,
-		IdleTimeout: cfg.IdleTimeout,
+		LegacyRepoRoot: req.Repo.LegacyRoot,
+		Kind:           fixedAppleContainerLeaseKind,
+		LeaseID:        leaseID,
+		RepoRoot:       req.Repo.Root,
+		Reclaim:        req.Reclaim,
+		TargetOS:       cfg.TargetOS,
+		WindowsMode:    cfg.WindowsMode,
+		TTL:            cfg.TTL,
+		IdleTimeout:    cfg.IdleTimeout,
 	}, func(ctx context.Context, _ *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		keyPath, key, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
 		if err != nil {

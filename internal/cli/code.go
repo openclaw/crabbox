@@ -94,7 +94,7 @@ func (a App) webCode(ctx context.Context, args []string) error {
 	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 		return err
 	}
-	repo, err := findRepo()
+	repo, err := findCommandRepo(&cfg)
 	if err != nil {
 		return err
 	}

@@ -159,7 +159,8 @@ func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (cor
 	}
 	cfg := b.cfg.AzureSandbox
 	return core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
-		Now: b.now, Retention: retention, Kind: leaseKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root,
+		LegacyRepoRoot: req.Repo.LegacyRoot,
+		Now:            b.now, Retention: retention, Kind: leaseKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root,
 		Reclaim: req.Reclaim, TargetOS: core.TargetLinux, TTL: b.cfg.TTL, IdleTimeout: b.cfg.IdleTimeout,
 	}, core.FixedLeaseOperations[sandbox]{
 		Admission: &core.FixedAdmission{PendingKey: "submission", PendingValue: "pending", SubmittedValue: "submitted"},

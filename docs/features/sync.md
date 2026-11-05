@@ -164,6 +164,14 @@ enumeration, or temporary Git metadata is needed. Existing provider-specific
 `--no-sync` restrictions still apply. Unrelated sync settings do not prevent
 `stop` from cleaning up an existing lease.
 
+Directory-source claims use the canonical current directory, so retained leases
+can be reused through equivalent path aliases, including with `run --no-sync`
+and `exec`. Older claims containing a logical path also remain usable when that
+path exactly matches the invoking command's original repository lookup. Crabbox
+never resolves a stored claim path to its current target to establish ownership;
+an older claim reached through another alias can still receive the usual
+claim-owner refusal. Missing or unresolvable invocation paths fail closed.
+
 ### Jujutsu workspaces
 
 Native, Git-backed Jujutsu workspaces are supported by `sync-plan` and ordinary

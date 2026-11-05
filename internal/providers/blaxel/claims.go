@@ -80,7 +80,7 @@ func newSandboxName(repo core.Repo) string {
 	return namePrefix + base + "-" + shared.RandomSuffix()
 }
 
-func resolveLeaseID(identifier, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL, workspace string) (string, string, string, error) {
+func resolveLeaseID(identifier, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL, workspace string, legacyRoot ...string) (string, string, string, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
 		return "", "", "", core.Exit(2, "provider=blaxel requires a Crabbox-created sandbox slug or lease id")
@@ -92,14 +92,14 @@ func resolveLeaseID(identifier, repoRoot string, reclaim bool, idleTimeout time.
 	if claim, err := core.ReadLeaseClaim(exactLeaseID); err != nil {
 		return "", "", "", err
 	} else if claim.LeaseID == exactLeaseID && claim.Provider == providerName {
-		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, baseURL, workspace)
+		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, baseURL, workspace, legacyRoot...)
 	}
 	claim, ok, err := resolveBlaxelLeaseClaim(identifier, baseURL, workspace)
 	if err != nil {
 		return "", "", "", err
 	}
 	if ok {
-		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, baseURL, workspace)
+		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, baseURL, workspace, legacyRoot...)
 	}
 	return "", "", "", core.Exit(4, "blaxel sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", identifier, leasePrefix)
 }
@@ -110,9 +110,10 @@ func resolveBlaxelLeaseClaim(identifier, baseURL, workspace string) (core.LeaseC
 	})
 }
 
-func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL, workspace string) (string, string, string, error) {
+func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL, workspace string, legacyRoot ...string) (string, string, string, error) {
 	leaseID, _, slug, err := shared.FinishScopedLease(claim, shared.ScopedLeaseFinishOptions{
-		Provider: providerName, LeasePrefix: leasePrefix, RepoRoot: repoRoot,
+		LegacyRoots: legacyRoot,
+		Provider:    providerName, LeasePrefix: leasePrefix, RepoRoot: repoRoot,
 		Reclaim: reclaim, IdleTimeout: idleTimeout,
 		ValidateClaim: func(claim core.LeaseClaim) error {
 			return validateBlaxelClaimScope(claim, baseURL, workspace)

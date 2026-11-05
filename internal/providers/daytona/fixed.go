@@ -85,7 +85,8 @@ func (b *daytonaLeaseBackend) acquireFixed(ctx context.Context, req core.Acquire
 	var scope, organization string
 	fresh := false
 	lease, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
-		Kind: fixedDaytonaLeaseKind, LeaseID: req.RequestedLeaseID, CheckpointID: req.RequestedCheckpointID,
+		LegacyRepoRoot: req.Repo.LegacyRoot,
+		Kind:           fixedDaytonaLeaseKind, LeaseID: req.RequestedLeaseID, CheckpointID: req.RequestedCheckpointID,
 		RepoRoot: req.Repo.Root, Reclaim: req.Reclaim, TargetOS: targetLinux, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout,
 	}, core.FixedLeaseOperations[*api.Sandbox]{Admission: &core.FixedAdmission{}, DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		// This distinct format never erases submitted attempts. Its pristine
@@ -326,7 +327,7 @@ func loadFixedDaytonaSandbox(ctx context.Context, client daytonaAPI, claim core.
 
 func (b *daytonaLeaseBackend) releaseFixed(ctx context.Context, expected core.LeaseClaim, checkpointID string, absenceOnly bool, repoRoot string) error {
 	var client fixedDaytonaDeletionAPI
-	policy := &core.FixedReleasePolicy{RepoRoot: repoRoot, CheckpointID: &checkpointID, SkipTerminalObservation: true}
+	policy := &core.FixedReleasePolicy{RepoRoot: repoRoot, LegacyRepoRoot: b.cfg.LegacyClaimRoot(), CheckpointID: &checkpointID, SkipTerminalObservation: true}
 	if !absenceOnly {
 		policy.PristineScopePrefix = "daytona:organization:v1:"
 	}
