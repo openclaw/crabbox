@@ -4,7 +4,7 @@
 
 ### Added
 
-- Actions: write a portable runner cleanup receipt during registration and use it to unregister the exact runner from a fresh machine without transferring lease or SSH state.
+- Actions: write a portable runner cleanup receipt during registration and use it to unregister the exact runner from a fresh machine without transferring lease or SSH state. [PR 3046](https://github.com/openclaw/crabbox/pull/3046). Thanks @vincentkoc.
 - Actions: register leases in an existing organization runner group, persist exact runner ownership before starting the listener, and deregister the recorded runner with `actions unregister` without requiring the VM to remain reachable.
 
 ### Fixed
