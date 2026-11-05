@@ -6,6 +6,10 @@
 
 - Actions: register leases in an existing organization runner group, persist exact runner ownership before starting the listener, and deregister the recorded runner with `actions unregister` without requiring the VM to remain reachable.
 
+### Fixed
+
+- Docs: list Git among the native Windows static SSH host requirements, matching what the readiness probe runs. [PR 3024](https://github.com/openclaw/crabbox/pull/3024). Thanks @KrasimirKralev.
+
 ## 0.81.1 - 2026-11-04
 
 ### Fixed
