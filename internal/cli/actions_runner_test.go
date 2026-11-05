@@ -957,3 +957,35 @@ func TestActionsOperationFailureKeepsRunnerReconciliationDetail(t *testing.T) {
 		t.Fatalf("uncanceled failure: %v", got)
 	}
 }
+
+func TestActionsRunnerGuestReconcileReadOutlastsSlowGuest(t *testing.T) {
+	identity := `{"settings":{"agentId":30,"agentName":"crabbox-lease","gitHubUrl":"https://github.com/example-org/my-app"},"active":false}`
+	// A guest busy after a first install misses two control deadlines, then answers.
+	calls := 0
+	guest, err := readActionsRunnerGuestUntil(t.Context(), time.Millisecond, func(context.Context) (string, error) {
+		calls++
+		if calls < 3 {
+			return "", context.DeadlineExceeded
+		}
+		return identity, nil
+	})
+	if err != nil || calls != 3 || guest.Settings == nil || guest.Settings.ID != 30 {
+		t.Fatalf("slow guest: calls=%d guest=%+v err=%v", calls, guest.Settings, err)
+	}
+	// An answer that is not a usable identity is final, never retried.
+	calls = 0
+	if _, err := readActionsRunnerGuestUntil(t.Context(), time.Millisecond, func(context.Context) (string, error) {
+		calls++
+		return `{"settings":null}`, nil
+	}); err == nil || !strings.Contains(err.Error(), "listener state is unknown") || calls != 1 {
+		t.Fatalf("invalid identity: calls=%d err=%v", calls, err)
+	}
+	// The budget still ends an unreachable guest with the transport error.
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := readActionsRunnerGuestUntil(ctx, 5*time.Millisecond, func(context.Context) (string, error) {
+		return "", errors.New("exit status 255")
+	}); err == nil || !strings.Contains(err.Error(), "inspect existing runner registration: exit status 255") || ExitCodeForError(err, 0) != 7 {
+		t.Fatalf("unreachable guest: %v", err)
+	}
+}

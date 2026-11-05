@@ -226,7 +226,14 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 		// created the GitHub runner, and only its guest identity can remove it.
 		reconcileCtx, cancelReconcile := context.WithTimeout(context.WithoutCancel(ctx), actionsRunnerReconcileTimeout)
 		defer cancelReconcile()
-		guest, err := readActionsRunnerGuest(reconcileCtx, target, checkVersion)
+		// A Windows guest that has just installed Git and configured the runner
+		// can miss one control call's deadline; keep asking within a budget that
+		// still leaves time for the GitHub check below.
+		readCtx, cancelRead := context.WithTimeout(reconcileCtx, actionsRunnerReconcileReadBudget)
+		guest, err := readActionsRunnerGuestUntil(readCtx, actionsRunnerReconcileRetryDelay, func(queryCtx context.Context) (string, error) {
+			return actionsRunnerControl(queryCtx, target, remoteReadActionsRunnerGuest(target, checkVersion))
+		})
+		cancelRead()
 		if err != nil {
 			return errors.Join(installErr, Exit(ExitCodeForError(err, 7), "read runner identity after setup; listener was not started; a runner named %s may remain registered at %s: %v", name, actionsRunnerURL(scope), err))
 		}
@@ -432,6 +439,29 @@ func readActionsRunnerGuest(ctx context.Context, target SSHTarget, checkVersion 
 	if err != nil {
 		return actionsRunnerGuest{}, Exit(7, "inspect existing runner registration: %v", err)
 	}
+	return parseActionsRunnerGuest(out)
+}
+
+// readActionsRunnerGuestUntil repeats the read-only guest query until it
+// answers or ctx ends. Only transport failures are retried; an answer that is
+// not a valid identity is returned as is.
+func readActionsRunnerGuestUntil(ctx context.Context, delay time.Duration, query func(context.Context) (string, error)) (actionsRunnerGuest, error) {
+	for {
+		out, err := query(ctx)
+		if err == nil {
+			return parseActionsRunnerGuest(out)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return actionsRunnerGuest{}, Exit(7, "inspect existing runner registration: %v", err)
+		case <-timer.C:
+		}
+	}
+}
+
+func parseActionsRunnerGuest(out string) (actionsRunnerGuest, error) {
 	var guest actionsRunnerGuest
 	if err := json.Unmarshal([]byte(out), &guest); err != nil {
 		return guest, Exit(7, "invalid guest runner identity")
@@ -543,7 +573,9 @@ const (
 	maxActionsDiagnosticReserve  = 30 * time.Second
 	// actionsRunnerReconcileTimeout bounds the post-install identity read and
 	// GitHub check, which outlive cancellation of the registering operation.
-	actionsRunnerReconcileTimeout = 90 * time.Second
+	actionsRunnerReconcileTimeout    = 2 * time.Minute
+	actionsRunnerReconcileReadBudget = 75 * time.Second
+	actionsRunnerReconcileRetryDelay = 3 * time.Second
 )
 
 type actionsRunnerSetupResult struct {
