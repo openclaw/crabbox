@@ -96,6 +96,25 @@ Use `crabbox status --provider azure --id <lease> --json` to inspect
 finish local claim and SSH-artifact cleanup. A released state alone is not
 confirmation that cleanup finished.
 
+### Same-name replacements and outstanding cleanup
+
+Adopting a same-name resource with a new immutable identity is an explicit
+non-goal of cleanup, even when it has the lease's exact ownership tags. Tags are
+writable by any principal with access to the resource group and are not
+provenance: cleanup cannot distinguish a retried create from another replacement.
+It refuses the changed identity and leaves the resource visible.
+
+Direct coordinator creates refuse to dispatch lease-resource writes when a
+delete claim or deferred cleanup record remains for the same name, matching the
+durable provisioning path. A create that passed this check immediately before a
+claim was written can still recreate a resource; cleanup continues to refuse that
+replacement.
+
+Inspect the lease with `crabbox status --provider azure --id <lease> --json`.
+Confirm the identity and ownership of the named resource, delete it in Azure,
+then repeat `crabbox stop --provider azure --id <lease>` so cleanup can confirm
+absence and finish.
+
 ## Commands
 
 ```sh
