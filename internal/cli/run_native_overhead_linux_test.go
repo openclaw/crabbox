@@ -139,7 +139,7 @@ exec /bin/sh -c "$remote"
 			}
 		}
 		if count > 20 {
-			t.Errorf("no-sync run used %d SSH calls; want at most 20", count)
+			t.Errorf("no-sync run used %d SSH calls; want at most 20\n%s", count, calls)
 		}
 	}
 	if counts[1] >= counts[0] {

@@ -1368,7 +1368,18 @@ func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, st
 	if errors.As(err, &preparation) {
 		return 7, err
 	}
-	return exitCode(err), err
+	code = exitCode(err)
+	// SSH stream results enter terminal receipts, which require a nonnegative
+	// status. Local provider commands still retain their raw process status.
+	if code < 0 {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+				code = 128 + int(status.Signal())
+			}
+		}
+	}
+	return code, err
 }
 
 func runSSHCommand(cmd *exec.Cmd, stdout, stderr io.Writer) error {
@@ -3405,9 +3416,6 @@ func exitCode(err error) int {
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
-			if status.Signaled() {
-				return 128 + int(status.Signal())
-			}
 			return status.ExitStatus()
 		}
 	}
