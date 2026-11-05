@@ -54,11 +54,15 @@ not receive this escrow during resolve or hydration and must be released and
 recreated before `--github-runner` hydration.
 
 Like GitHub-hosted Windows runners, a native Windows runner gets Git Bash for
-workflow steps with `shell: bash`. When `C:\Program Files\Git\bin\bash.exe` is
-missing (MinGit, which Crabbox installs when git is absent, has no Bash), runner
-setup installs the pinned, SHA-256-verified Git for Windows without changing the
-machine `PATH` and puts its `bin` directory first on the runner's `PATH`. This
-adds a download and about a minute to the first hydration on such a guest.
+workflow steps with `shell: bash`. Runner setup reuses an existing Git for
+Windows Bash: a machine or 32-bit install under Program Files, a per-user
+install under `%LOCALAPPDATA%\Programs\Git`, or the installation whose `git.exe`
+is on `PATH` (portable Git included). The WSL `bash.exe` launcher never counts.
+When none exists (MinGit, which Crabbox installs when git is absent, has no
+Bash), setup installs the pinned, SHA-256-verified Git for Windows without
+changing the machine `PATH`. Either way, that `bin` directory goes first on the
+runner's and the listener's `PATH`. Installing adds a download and about a
+minute to the first hydration on such a guest.
 Antivirus real-time scanning of the runner directory can make toolchain and
 dependency setup several times slower on Windows; budget `--wait-timeout` and
 the lease TTL for it, or apply the exclusions your template policy allows.

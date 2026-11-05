@@ -1021,14 +1021,46 @@ fi
 exit 0`
 }
 
+// windowsGitBashDiscoveryPowerShell defines Find-CrabboxGitBashBin, which
+// returns the bin directory of an existing Git for Windows with bash.exe: a
+// machine, 32-bit or per-user install, or the installation whose git.exe is on
+// PATH (portable Git included). MinGit has no bash.exe, and the WSL bash.exe
+// launcher in System32 is never a candidate.
+func windowsGitBashDiscoveryPowerShell() string {
+	return `function Find-CrabboxGitBashBin {
+  $roots = [System.Collections.Generic.List[string]]::new()
+  foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+    if ($base) { $roots.Add((Join-Path $base "Git")) }
+  }
+  if ($env:LOCALAPPDATA) { $roots.Add((Join-Path $env:LOCALAPPDATA "Programs\Git")) }
+  foreach ($git in @(Get-Command git.exe -CommandType Application -All -ErrorAction SilentlyContinue)) {
+    $dir = Split-Path -Parent $git.Source
+    $parent = Split-Path -Parent $dir
+    if ((Split-Path -Leaf $dir) -eq "bin" -and @("mingw64", "mingw32", "usr") -contains (Split-Path -Leaf $parent)) {
+      $roots.Add((Split-Path -Parent $parent))
+    } elseif (@("cmd", "bin") -contains (Split-Path -Leaf $dir)) {
+      $roots.Add($parent)
+    }
+  }
+  foreach ($root in $roots) {
+    $bin = Join-Path $root "bin"
+    if (Test-Path -LiteralPath (Join-Path $bin "bash.exe") -PathType Leaf) { return $bin }
+  }
+  return $null
+}
+`
+}
+
 // windowsRunnerGitBashPowerShell gives a native Windows runner the Git Bash that
 // GitHub-hosted Windows runners provide, so workflow steps with `shell: bash`
-// work. A guest without it (MinGit has no bash.exe) gets the pinned, verified
-// Git for Windows installer without a machine PATH change; the runner's own
-// PATH gains Git\bin before config.cmd records it.
+// work. An existing Git for Windows Bash is reused wherever it is installed; a
+// guest without one (MinGit has no bash.exe) gets the pinned, verified Git for
+// Windows installer without a machine PATH change. The runner's own PATH gains
+// that bin directory before config.cmd records it.
 func windowsRunnerGitBashPowerShell() string {
-	return `$crabboxGitBin = Join-Path $env:ProgramFiles "Git\bin"
-if (-not (Test-Path -LiteralPath (Join-Path $crabboxGitBin "bash.exe"))) {
+	return windowsGitBashDiscoveryPowerShell() + `$crabboxGitBin = Find-CrabboxGitBashBin
+if (-not $crabboxGitBin) {
+  $crabboxGitBin = Join-Path $env:ProgramFiles "Git\bin"
   Write-CrabboxRunnerStage "git-bash"
   $crabboxGitInstaller = Join-Path ([IO.Path]::GetTempPath()) ("crabbox-git-for-windows-" + [Guid]::NewGuid().ToString("N") + ".exe")
   try {

@@ -3489,6 +3489,18 @@ func (f *stringListFlag) Get() any {
 	return append([]string{}, (*f)...)
 }
 
+// windowsRunnerListenerRunScript is run-crabbox.ps1, which the listener task
+// runs: the Git Bash that setup used goes first on the listener's PATH.
+func windowsRunnerListenerRunScript() string {
+	return `$ErrorActionPreference = "Stop"
+Set-Location -LiteralPath $PSScriptRoot
+` + windowsGitBashDiscoveryPowerShell() + `$crabboxGitBin = Find-CrabboxGitBashBin
+if ($crabboxGitBin) { $env:Path = $crabboxGitBin + ";" + $env:Path }
+& .\run.cmd
+exit $LASTEXITCODE
+`
+}
+
 // Listener activation is separate from installation so the exact registration
 // identity is durable before this lease can accept a workflow job.
 func githubActionsRunnerStartScript(target SSHTarget) string {
@@ -3502,13 +3514,7 @@ $runnerDir = Join-Path $HOME "actions-runner"
 $env:RUNNER_NAME = (Get-Content -Raw -LiteralPath (Join-Path $runnerDir ".runner") | ConvertFrom-Json).agentName
 $runScript = Join-Path $runnerDir "run-crabbox.ps1"
 Set-Content -Encoding UTF8 -LiteralPath $runScript -Value @'
-$ErrorActionPreference = "Stop"
-Set-Location -LiteralPath $PSScriptRoot
-$crabboxGitBin = Join-Path $env:ProgramFiles "Git\bin"
-if (Test-Path -LiteralPath (Join-Path $crabboxGitBin "bash.exe")) { $env:Path = $crabboxGitBin + ";" + $env:Path }
-& .\run.cmd
-exit $LASTEXITCODE
-'@
+` + windowsRunnerListenerRunScript() + `'@
 $log = Join-Path $runnerDir "crabbox-runner.log"
 $err = Join-Path $runnerDir "crabbox-runner.err.log"
 $taskName = ("crabbox-actions-runner-" + ($env:RUNNER_NAME -replace "[^A-Za-z0-9_.-]", "-"))
