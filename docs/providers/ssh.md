@@ -520,6 +520,14 @@ CRABBOX_SSH_PORT
 
 ## Host Requirements
 
+On Linux (including WSL2), native command supervision gives surviving process
+group members up to five seconds to handle TERM before escalating to KILL.
+Cleanup returns promptly once only its identity guard remains; normal command
+completion does not spend the full grace. Background children still receive the
+grace, and children that ignore TERM are killed at its deadline. If process
+membership cannot be confirmed, cleanup keeps the full grace and still requires
+confirmed group absence before reporting completion.
+
 POSIX hosts (Linux, macOS, WSL2) need:
 
 - SSH access for the configured user;
