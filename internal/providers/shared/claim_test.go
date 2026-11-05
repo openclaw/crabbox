@@ -952,3 +952,52 @@ func TestScopedClaimAmbiguity(t *testing.T) {
 		t.Fatalf("provider filter: %+v %v %v", c, ok, err)
 	}
 }
+
+func TestFinishScopedLeaseDirectoryLegacyAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		legacyMatches bool
+		allowed       bool
+	}{
+		{"own-logical-path", true, true},
+		{"other-logical-path", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			physical := t.TempDir()
+			logical := filepath.Join(t.TempDir(), "alias")
+			if err := os.Symlink(physical, logical); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			const id = "fixture_directory"
+			if err := core.ClaimLeaseForRepoProviderScopePond(id, "directory", "example", "scope", "", logical, time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			before, err := core.ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			legacy := logical
+			if !tc.legacyMatches {
+				legacy = filepath.Join(t.TempDir(), "other-alias")
+			}
+			_, _, _, err = FinishScopedLease(before, ScopedLeaseFinishOptions{
+				Provider: "example", LeasePrefix: "fixture_", RepoRoot: physical, LegacyRoots: []string{legacy},
+				ValidateClaim: func(core.LeaseClaim) error { return nil },
+			})
+			if (err == nil) != tc.allowed {
+				t.Fatalf("allowed=%t err=%v", tc.allowed, err)
+			}
+			after, err := core.ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.allowed && after.RepoRoot != physical {
+				t.Fatal("admitted claim was not canonicalized")
+			}
+			if !tc.allowed && !reflect.DeepEqual(before, after) {
+				t.Fatal("refused claim changed")
+			}
+		})
+	}
+}

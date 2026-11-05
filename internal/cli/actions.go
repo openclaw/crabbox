@@ -107,7 +107,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	if effectiveGitSeedSource(cfg) == "local" {
 		return Exit(2, "Actions hydration owns Git metadata; set sync.gitSeedSource=origin for Actions hydration")
 	}
-	repo, err := findRepo()
+	repo, err := findCommandRepo(&cfg)
 	if err != nil {
 		return err
 	}
@@ -363,7 +363,7 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
-	repo, err := findRepo()
+	repo, err := findCommandRepo(&cfg)
 	if err != nil {
 		return err
 	}
@@ -410,7 +410,7 @@ func (a App) actionsDispatch(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	repo, err := findRepo()
+	repo, err := findCommandRepo(&cfg)
 	if err != nil {
 		return err
 	}

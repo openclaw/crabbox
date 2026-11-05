@@ -80,7 +80,7 @@ func (b *staticLeaseBackend) acquire(ctx context.Context, req core.AcquireReques
 			return core.LeaseTarget{}, err
 		}
 		if req.Repo.Root != "" {
-			if err := checkStaticLeaseClaimOwner(leaseID, expected, req.Repo.Root, req.Reclaim); err != nil {
+			if err := checkStaticLeaseClaimOwner(leaseID, expected, req.Repo.Root, req.Reclaim, req.Repo.LegacyRoot); err != nil {
 				return core.LeaseTarget{}, err
 			}
 		}
@@ -156,7 +156,7 @@ func (b *staticLeaseBackend) Resolve(ctx context.Context, req core.ResolveReques
 			return core.LeaseTarget{}, err
 		}
 		if req.Repo.Root != "" {
-			if err := checkStaticLeaseClaimOwner(lease.LeaseID, expected, req.Repo.Root, req.Reclaim); err != nil {
+			if err := checkStaticLeaseClaimOwner(lease.LeaseID, expected, req.Repo.Root, req.Reclaim, req.Repo.LegacyRoot); err != nil {
 				return core.LeaseTarget{}, err
 			}
 		}

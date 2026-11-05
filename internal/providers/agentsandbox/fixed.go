@@ -142,7 +142,8 @@ func (b *backend) WarmupFixed(ctx context.Context, req core.FixedWarmupRequest) 
 	started := core.ClockNow(b.rt.Clock)
 	var ready sandboxReadiness
 	claim, err := core.AcquireFixedIntent(core.FixedAcquireOptions{
-		Kind: fixedClaimKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root, Reclaim: req.Reclaim,
+		LegacyRepoRoot: req.Repo.LegacyRoot,
+		Kind:           fixedClaimKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root, Reclaim: req.Reclaim,
 		TargetOS: targetLinux, TTL: b.cfg.TTL, IdleTimeout: b.cfg.IdleTimeout, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 	}, func(_ context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		slug := claim.Slug
@@ -316,7 +317,7 @@ func (b *backend) releaseFixedLocked(ctx context.Context, client kubernetesClien
 		if err := validateFixedExpectation(*claim, expected); err != nil {
 			return err
 		}
-		if repo != "" && claim.RepoRoot != repo {
+		if repo != "" && !core.ClaimRepositoryMatches(claim.RepoRoot, repo, b.cfg.LegacyClaimRoot()) {
 			return core.Exit(4, "agent-sandbox fixed repository changed")
 		}
 		if err := authorizeClaimScope(b.cfg, *claim); err != nil {

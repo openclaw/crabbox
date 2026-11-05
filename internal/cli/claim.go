@@ -255,6 +255,7 @@ func claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout time.Duration
 func claimLeaseForRepoConfig(leaseID, slug string, cfg Config, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
+		legacyRepoRoot:  cfg.claimLegacyRoot,
 		idlePolicy:      claimIdlePolicyForConfig(cfg),
 		setCacheVolumes: true,
 		cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
@@ -264,6 +265,7 @@ func claimLeaseForRepoConfig(leaseID, slug string, cfg Config, repoRoot string, 
 func ClaimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
+		legacyRepoRoot:  cfg.claimLegacyRoot,
 		idlePolicy:      claimIdlePolicyForConfig(cfg),
 		setCacheVolumes: true,
 		cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
@@ -301,8 +303,8 @@ func ClaimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repo
 // ClaimLeaseForRepoProviderScopePond combines a provider scope (e.g. Docker
 // context for local-container claim isolation) with the pond label so both
 // features coexist in the same claim sidecar without one overwriting the other.
-func ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim)
+func ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, legacyRoot ...string) error {
+	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim, claimMetadata{legacyRepoRoot: singleLegacyRoot(legacyRoot)})
 }
 
 func ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
@@ -333,11 +335,12 @@ func ClaimLeaseForRepoProviderScopePondCacheVolumes(leaseID, slug, provider, pro
 	})
 }
 
-func ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget) error {
+func ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget, legacyRoot ...string) error {
 	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim, claimMetadata{
-		setEndpoint: true,
-		server:      server,
-		target:      target,
+		legacyRepoRoot: singleLegacyRoot(legacyRoot),
+		setEndpoint:    true,
+		server:         server,
+		target:         target,
 	})
 }
 
@@ -416,6 +419,7 @@ func claimLabelsWithIdleTimeout(labels map[string]string, idle time.Duration) ma
 }
 
 type claimMetadata struct {
+	legacyRepoRoot      string
 	context             context.Context
 	setCacheVolumes     bool
 	cacheVolumes        []string
@@ -436,18 +440,30 @@ type claimMetadata struct {
 	idlePolicy          claimIdlePolicy
 }
 
-func claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{})
-}
-
 // CheckLeaseClaimRepositoryOwner checks the publication owner policy without
 // changing the claim. Preparation without repository context should skip this
 // check; publication retains its own empty-root rules.
-func CheckLeaseClaimRepositoryOwner(leaseID string, existing leaseClaim, repoRoot string, reclaim bool) error {
-	if existing.LeaseID != "" && existing.RepoRoot != "" && existing.RepoRoot != repoRoot && !reclaim {
+func CheckLeaseClaimRepositoryOwner(leaseID string, existing leaseClaim, repoRoot string, reclaim bool, legacyRoot ...string) error {
+	if existing.LeaseID != "" && existing.RepoRoot != "" && !ClaimRepositoryMatches(existing.RepoRoot, repoRoot, legacyRoot...) && !reclaim {
 		return Exit(2, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", leaseID, existing.RepoRoot, repoRoot)
 	}
 	return nil
+}
+
+// ClaimRepositoryMatches compares only literal strings. A directory caller may
+// supply its released lookup result, but must never resolve the stored path.
+func ClaimRepositoryMatches(stored, root string, legacyRoot ...string) bool {
+	if stored == root {
+		return true
+	}
+	return len(legacyRoot) == 1 && legacyRoot[0] != "" && stored == legacyRoot[0]
+}
+
+func singleLegacyRoot(roots []string) string {
+	if len(roots) == 1 {
+		return roots[0]
+	}
+	return ""
 }
 
 func transformLeaseClaimForRepo(existing *leaseClaim, leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool, metadata claimMetadata, now string) error {
@@ -460,10 +476,10 @@ func transformLeaseClaimForRepo(existing *leaseClaim, leaseID, slug, provider, p
 		}
 		metadata.server = server
 	}
-	if err := CheckLeaseClaimRepositoryOwner(leaseID, *existing, repoRoot, reclaim); err != nil {
+	if err := CheckLeaseClaimRepositoryOwner(leaseID, *existing, repoRoot, reclaim, metadata.legacyRepoRoot); err != nil {
 		return err
 	}
-	if existing.ClaimedAt == "" || reclaim || existing.RepoRoot != repoRoot {
+	if existing.ClaimedAt == "" || reclaim || !ClaimRepositoryMatches(existing.RepoRoot, repoRoot, metadata.legacyRepoRoot) {
 		existing.CheckpointCapture = nil
 		existing.ClaimedAt = now
 	}
@@ -535,7 +551,11 @@ func transformLeaseClaimForRepo(existing *leaseClaim, leaseID, slug, provider, p
 	if normalizeIdle {
 		existing.Labels = claimLabelsWithIdleTimeout(existing.Labels, idleTimeout)
 	}
-	if reclaim || !sameActionsWorkspaceClaimOwner(original, *existing) {
+	owner := original
+	if ClaimRepositoryMatches(original.RepoRoot, repoRoot, metadata.legacyRepoRoot) {
+		owner.RepoRoot = repoRoot
+	}
+	if reclaim || !sameActionsWorkspaceClaimOwner(owner, *existing) {
 		existing.ActionsWorkspace = nil
 	}
 	return nil
@@ -657,6 +677,7 @@ func claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug string, cfg
 	}
 	var updated leaseClaim
 	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
+		legacyRepoRoot:  cfg.claimLegacyRoot,
 		idlePolicy:      options.idle,
 		context:         options.context,
 		setCacheVolumes: true,
@@ -677,6 +698,7 @@ func claimLeaseForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, repoRo
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	var updated leaseClaim
 	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
+		legacyRepoRoot:  cfg.claimLegacyRoot,
 		idlePolicy:      claimIdlePolicyForConfig(cfg),
 		setCacheVolumes: true,
 		cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),

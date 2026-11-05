@@ -45,18 +45,19 @@ type FixedLeaseBinding struct {
 }
 
 type FixedAcquireOptions struct {
-	Retention    *SessionDiskRetentionPolicy
-	Kind         FixedLeaseKind
-	LeaseID      string
-	CheckpointID string
-	RepoRoot     string
-	Reclaim      bool
-	TargetOS     string
-	WindowsMode  string
-	TTL          time.Duration
-	IdleTimeout  time.Duration
-	Now          func() time.Time
-	journal      bool
+	Retention      *SessionDiskRetentionPolicy
+	Kind           FixedLeaseKind
+	LeaseID        string
+	CheckpointID   string
+	RepoRoot       string
+	LegacyRepoRoot string
+	Reclaim        bool
+	TargetOS       string
+	WindowsMode    string
+	TTL            time.Duration
+	IdleTimeout    time.Duration
+	Now            func() time.Time
+	journal        bool
 }
 
 func AcquireFixedLease(
@@ -142,7 +143,7 @@ func AcquireFixedIntent(
 			if claim.Provider != opts.Kind.ClaimProvider {
 				return Exit(4, "lease_id_conflict: lease %s is bound to provider=%s", opts.LeaseID, claim.Provider)
 			}
-			if claim.RepoRoot != "" && claim.RepoRoot != opts.RepoRoot && !opts.Reclaim {
+			if claim.RepoRoot != "" && !ClaimRepositoryMatches(claim.RepoRoot, opts.RepoRoot, opts.LegacyRepoRoot) && !opts.Reclaim {
 				return Exit(4, "lease_id_conflict: lease %s is bound to another repository", opts.LeaseID)
 			}
 		} else {

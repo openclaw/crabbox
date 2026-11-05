@@ -83,7 +83,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 		},
 		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var err error
-			leaseID, sandboxID, slug, err = resolveLeaseID(req.ID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, client.BaseURL(), b.cfg.Blaxel.Workspace)
+			leaseID, sandboxID, slug, err = resolveLeaseID(req.ID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, client.BaseURL(), b.cfg.Blaxel.Workspace, req.Repo.LegacyRoot)
 			if err != nil {
 				return shared.DelegatedSandbox{}, err
 			}
