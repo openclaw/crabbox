@@ -611,7 +611,7 @@ if ($errors.Count -gt 0) {
 	}
 }
 
-func TestGitHubActionsRunnerConfigPowerShellIgnoresRemovalTimeout(t *testing.T) {
+func TestGitHubActionsRunnerConfigPowerShellTimeoutStopsProcessTreeAndRedactsLog(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows PowerShell is required")
 	}
@@ -639,14 +639,20 @@ function Get-CimInstance {
 }
 function Stop-Process { param($Id, [switch]$Force, $ErrorAction) $script:stopped += $Id }
 function Stop-Job { param($Job, $ErrorAction) $script:stoppedJob = $true }
-function Receive-Job { param($Job, $ErrorAction) "removal-started fixture-registration-value" }
+function Receive-Job { param($Job, $ErrorAction) "config-started fixture-registration-value" }
 function Remove-Job { param($Job, [switch]$Force, $ErrorAction) $script:removedJob = $true }
 ` + githubActionsRunnerConfigPowerShell() + `
-Invoke-CrabboxRunnerConfig -Arguments @("remove") -TimeoutSeconds 1 -LogName "remove.log" -IgnoreFailure
+$failure = $null
+try {
+  Invoke-CrabboxRunnerConfig -Arguments @("--unattended") -TimeoutSeconds 1 -LogName "crabbox-config.log"
+} catch {
+  $failure = $_.Exception.Message
+}
+if ($failure -notlike "config.cmd timed out after 1 seconds; log=*") { throw "timeout was not reported: $failure" }
 if (($script:stopped -join ",") -ne "12346,12345") { throw "process tree cleanup was incomplete" }
 if (-not $script:stoppedJob -or -not $script:removedJob) { throw "job cleanup was incomplete" }
 if (@(Get-ChildItem -LiteralPath $runnerDir -Filter "*.pid").Count -ne 0) { throw "process witness was not removed" }
-Write-Output "continued-after-timeout"
+Write-Output "timeout-reported"
 `
 	scriptPath := filepath.Join(runnerDir, "runner-config-test.ps1")
 	if err := os.WriteFile(scriptPath, []byte(testScript), 0o600); err != nil {
@@ -656,17 +662,17 @@ Write-Output "continued-after-timeout"
 	cmd.Env = append(os.Environ(), "CRABBOX_RUNNER_TEST_DIR="+runnerDir)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("removal timeout should be ignored: %v\n%s", err, output)
+		t.Fatalf("timed-out configuration was not cleaned up and reported: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "continued-after-timeout") {
-		t.Fatalf("script did not continue after removal timeout:\n%s", output)
+	if !strings.Contains(string(output), "timeout-reported") {
+		t.Fatalf("script did not report the configuration timeout:\n%s", output)
 	}
-	log, err := os.ReadFile(filepath.Join(runnerDir, "remove.log"))
+	log, err := os.ReadFile(filepath.Join(runnerDir, "crabbox-config.log"))
 	if err != nil {
-		t.Fatalf("read removal timeout log: %v", err)
+		t.Fatalf("read configuration timeout log: %v", err)
 	}
-	if !strings.Contains(string(log), "removal-started") || strings.Contains(string(log), "fixture-registration-value") {
-		t.Fatalf("removal timeout log lost command output: %q", log)
+	if !strings.Contains(string(log), "config-started") || strings.Contains(string(log), "fixture-registration-value") {
+		t.Fatalf("configuration timeout log lost output or kept the token: %q", log)
 	}
 }
 

@@ -3670,8 +3670,7 @@ function Invoke-CrabboxRunnerConfig {
   param(
     [string[]]$Arguments,
     [int]$TimeoutSeconds,
-    [string]$LogName,
-    [switch]$IgnoreFailure
+    [string]$LogName
   )
   $logPath = Join-Path $runnerDir $LogName
   $pidPath = Join-Path $runnerDir ("crabbox-config-" + [Guid]::NewGuid().ToString("N") + ".pid")
@@ -3701,17 +3700,9 @@ function Invoke-CrabboxRunnerConfig {
     }
     [System.IO.File]::WriteAllLines($logPath, [string[]]$lines, [System.Text.UTF8Encoding]::new($false))
     if ($timedOut) {
-      if ($IgnoreFailure) {
-        Write-Warning "previous runner removal timed out; continuing with replace; log=$logPath"
-        return
-      }
       throw "config.cmd timed out after $TimeoutSeconds seconds; log=$logPath"
     }
     if ($job.State -ne "Completed") {
-      if ($IgnoreFailure) {
-        Write-Warning "previous runner removal failed; continuing with replace; log=$logPath"
-        return
-      }
       throw "config.cmd failed; log=$logPath"
     }
   } finally {
