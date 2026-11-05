@@ -552,6 +552,7 @@ func TestRunGitHubRunnerHydrationDeadlineDuringRegistrationPreventsDispatch(t *t
 		"main",
 		"hydrate",
 		[]string{"crabbox_job=hydrate"},
+		time.Hour,
 		io.Discard,
 		githubRunnerHydrationHooks{
 			Register: func(stageCtx context.Context) error {
@@ -584,66 +585,119 @@ func TestRunGitHubRunnerHydrationDeadlineDuringRegistrationPreventsDispatch(t *t
 	}
 }
 
-func TestRunGitHubRunnerHydrationUsesSameDeadlineThroughMarkerWait(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	dispatched := 0
-	gotExpectedJob := ""
-	wantDeadline, _ := ctx.Deadline()
-	checkDeadline := func(stageCtx context.Context) {
-		t.Helper()
-		if got, ok := stageCtx.Deadline(); !ok || !got.Equal(wantDeadline) {
-			t.Fatalf("stage deadline=%s, present=%t; want %s", got, ok, wantDeadline)
+// hydrateWithClock drives the shared GitHub-runner orchestration, used by Linux,
+// WSL2, and native Windows targets alike, through the real marker-wait loop on
+// a fake clock. Setup takes setup; the marker appears markerAfter dispatch.
+func hydrateWithClock(t *testing.T, waitTimeout, setup, markerAfter time.Duration) (actionsHydrationState, []time.Time, time.Time, error) {
+	t.Helper()
+	start := time.Now()
+	clock := start
+	var setupDeadlines []time.Time
+	recordSetup := func(stageCtx context.Context) {
+		deadline, ok := stageCtx.Deadline()
+		if !ok {
+			t.Fatal("setup stage ran without a deadline")
 		}
+		setupDeadlines = append(setupDeadlines, deadline)
 	}
 	state, err := runGitHubRunnerHydration(
-		ctx,
+		context.Background(),
 		"hydrate.yml",
-		"feature",
+		"main",
 		"hydrate",
-		[]string{
-			"crabbox_id=cbx_test",
-			"crabbox_runner_label=runner",
-			"crabbox_keep_alive_minutes=90",
-			"crabbox_job=hydrate",
-		},
+		[]string{"crabbox_id=cbx_test", "crabbox_runner_label=runner", "crabbox_keep_alive_minutes=90", "crabbox_job=hydrate"},
+		waitTimeout,
 		io.Discard,
 		githubRunnerHydrationHooks{
+			Now: func() time.Time { return clock },
 			Register: func(stageCtx context.Context) error {
-				checkDeadline(stageCtx)
+				recordSetup(stageCtx)
+				clock = clock.Add(setup)
 				return nil
 			},
-			ClearState: func(stageCtx context.Context) error {
-				checkDeadline(stageCtx)
-				return nil
-			},
+			ClearState: func(stageCtx context.Context) error { recordSetup(stageCtx); return nil },
 			Inputs: func(stageCtx context.Context) (map[string]bool, bool, error) {
-				checkDeadline(stageCtx)
-				return map[string]bool{
-					"crabbox_id":                 true,
-					"crabbox_runner_label":       true,
-					"crabbox_keep_alive_minutes": true,
-					"crabbox_job":                true,
-				}, true, nil
+				recordSetup(stageCtx)
+				return map[string]bool{"crabbox_id": true, "crabbox_runner_label": true, "crabbox_keep_alive_minutes": true, "crabbox_job": true}, true, nil
 			},
-			Dispatch: func(stageCtx context.Context, _ []string) error {
-				checkDeadline(stageCtx)
-				dispatched++
-				return nil
-			},
+			Dispatch: func(stageCtx context.Context, _ []string) error { recordSetup(stageCtx); return nil },
 			Wait: func(stageCtx context.Context, expectedJob string) (actionsHydrationState, error) {
-				checkDeadline(stageCtx)
-				gotExpectedJob = expectedJob
-				return actionsHydrationState{Workspace: `C:\workspace`}, nil
+				markerAt := clock.Add(markerAfter)
+				deadline, ok := stageCtx.Deadline()
+				if !ok {
+					t.Fatal("marker wait ran without a deadline")
+				}
+				return waitForActionsHydrationWithPoll(stageCtx, "cbx_test", expectedJob, io.Discard,
+					func(context.Context) (actionsHydrationState, error) {
+						if clock.Before(markerAt) {
+							return actionsHydrationState{}, nil
+						}
+						return actionsHydrationState{Workspace: "/work/cbx_test/repo", Job: expectedJob}, nil
+					},
+					// Mirrors waitForActionsPoll: one 10s interval, or the deadline if it comes first.
+					func(context.Context) error {
+						if next := clock.Add(10 * time.Second); next.Before(deadline) {
+							clock = next
+							return nil
+						}
+						clock = deadline
+						return context.DeadlineExceeded
+					},
+				)
 			},
 		},
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	return state, setupDeadlines, start, err
+}
 
-	if state.Workspace != `C:\workspace` || dispatched != 1 || gotExpectedJob != "hydrate" {
-		t.Fatalf("state=%+v dispatched=%d expectedJob=%q", state, dispatched, gotExpectedJob)
+func TestRunGitHubRunnerHydrationSlowSetupKeepsFullMarkerWait(t *testing.T) {
+	const waitTimeout = 20 * time.Minute
+	// Eight minutes of setup plus a marker 15 minutes after dispatch succeeds
+	// when --wait-timeout bounds the marker wait, as it always has.
+	state, setupDeadlines, start, err := hydrateWithClock(t, waitTimeout, 8*time.Minute, 15*time.Minute)
+	if err != nil {
+		t.Fatalf("8m setup + 15m marker wait failed under a 20m --wait-timeout: %v", err)
+	}
+	if state.Workspace != "/work/cbx_test/repo" {
+		t.Fatalf("state=%+v", state)
+	}
+	if len(setupDeadlines) != 4 {
+		t.Fatalf("setup stages=%d want 4", len(setupDeadlines))
+	}
+	for _, deadline := range setupDeadlines {
+		if !deadline.Equal(start.Add(waitTimeout)) {
+			t.Fatalf("setup deadline=%s want %s: setup must stay bounded by one --wait-timeout", deadline, start.Add(waitTimeout))
+		}
+	}
+}
+
+func TestRunGitHubRunnerHydrationMarkerWaitStillTimesOut(t *testing.T) {
+	_, _, _, err := hydrateWithClock(t, 20*time.Minute, time.Minute, 21*time.Minute)
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting for GitHub Actions hydration marker") {
+		t.Fatalf("error=%v, want marker-wait timeout", err)
+	}
+}
+
+func TestRunGitHubRunnerHydrationSetupBoundedByWaitTimeout(t *testing.T) {
+	dispatched := false
+	_, err := runGitHubRunnerHydration(context.Background(), "hydrate.yml", "main", "hydrate", nil, time.Nanosecond, io.Discard, githubRunnerHydrationHooks{
+		Register: func(stageCtx context.Context) error {
+			<-stageCtx.Done()
+			return stageCtx.Err()
+		},
+		ClearState: func(context.Context) error { t.Fatal("clear ran after setup timeout"); return nil },
+		Inputs: func(context.Context) (map[string]bool, bool, error) {
+			t.Fatal("input inspection ran after setup timeout")
+			return nil, false, nil
+		},
+		Dispatch: func(context.Context, []string) error { dispatched = true; return nil },
+		Wait: func(context.Context, string) (actionsHydrationState, error) {
+			t.Fatal("marker wait ran after setup timeout")
+			return actionsHydrationState{}, nil
+		},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || dispatched {
+		t.Fatalf("error=%v dispatched=%t, want setup deadline before dispatch", err, dispatched)
 	}
 }
 
@@ -912,7 +966,7 @@ func TestRunGitHubRunnerHydrationCancellationBetweenStagesStopsFurtherWork(t *te
 					cancel()
 				}
 			}
-			_, err := runGitHubRunnerHydration(ctx, "hydrate.yml", "main", "hydrate", nil, io.Discard, githubRunnerHydrationHooks{
+			_, err := runGitHubRunnerHydration(ctx, "hydrate.yml", "main", "hydrate", nil, time.Hour, io.Discard, githubRunnerHydrationHooks{
 				Register:   func(context.Context) error { record("register"); return nil },
 				ClearState: func(context.Context) error { record("clear"); return nil },
 				Inputs: func(context.Context) (map[string]bool, bool, error) {

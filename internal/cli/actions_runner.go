@@ -628,15 +628,27 @@ type githubRunnerHydrationHooks struct {
 	Dispatch     func(context.Context, []string) error
 	OnDispatched func()
 	Wait         func(context.Context, string) (actionsHydrationState, error)
+	Now          func() time.Time
 }
 
+// runGitHubRunnerHydration bounds runner setup (registration through workflow
+// dispatch) by waitTimeout, then gives the marker wait its own waitTimeout from
+// dispatch, so a slow setup never shortens the marker-wait contract.
 func runGitHubRunnerHydration(
 	ctx context.Context,
 	workflow, ref, configuredJob string,
 	fields []string,
+	waitTimeout time.Duration,
 	stderr io.Writer,
 	hooks githubRunnerHydrationHooks,
 ) (actionsHydrationState, error) {
+	now := hooks.Now
+	if now == nil {
+		now = time.Now
+	}
+	parent := ctx
+	ctx, cancelSetup := context.WithDeadline(parent, now().Add(waitTimeout))
+	defer cancelSetup()
 	if err := hooks.Register(ctx); err != nil {
 		return actionsHydrationState{}, err
 	}
@@ -688,10 +700,13 @@ func runGitHubRunnerHydration(
 	if hooks.OnDispatched != nil {
 		hooks.OnDispatched()
 	}
-	if err := ctx.Err(); err != nil {
+	if err := parent.Err(); err != nil {
 		return actionsHydrationState{}, err
 	}
-	return hooks.Wait(ctx, expectedJob)
+	cancelSetup()
+	waitCtx, cancelWait := context.WithDeadline(parent, now().Add(waitTimeout))
+	defer cancelWait()
+	return hooks.Wait(waitCtx, expectedJob)
 }
 
 type actionsRunnerSetupProgress struct {

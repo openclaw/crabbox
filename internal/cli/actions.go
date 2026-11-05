@@ -70,7 +70,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	connectionFlags := registerActionsHydrateTargetFlags(fs, defaults)
 	leaseIDFlag := fs.String("id", "", "existing lease id or slug")
 	workflowFlags := registerActionsHydrateWorkflowFlags(fs)
-	waitTimeout := fs.Duration("wait-timeout", defaultActionsWaitTimeout, "total time allowed for Actions hydration")
+	waitTimeout := fs.Duration("wait-timeout", defaultActionsWaitTimeout, "time to wait for Actions hydration; GitHub-runner setup gets its own budget of the same length")
 	keepAliveMinutes := fs.Int("keep-alive-minutes", 90, "minutes for workflow to keep the job alive")
 	githubRunner := fs.Bool("github-runner", false, "hydrate by registering a GitHub self-hosted runner instead of local SSH execution")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
@@ -231,9 +231,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	hydrateCtx, cancelHydrate := context.WithTimeout(ctx, *waitTimeout)
-	defer cancelHydrate()
-	state, err := a.hydrateActionsWithGitHubRunner(hydrateCtx, cfg, repo, target, leaseID, slug, ghRepo, label, ref, fields, *waitTimeout, owner)
+	state, err := a.hydrateActionsWithGitHubRunner(ctx, cfg, repo, target, leaseID, slug, ghRepo, label, ref, fields, *waitTimeout, owner)
 	if err := actionsOperationFailure(ctx, err); err != nil {
 		return err
 	}
@@ -256,8 +254,6 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 }
 
 func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, repo Repo, target SSHTarget, leaseID, slug string, ghRepo GitHubRepo, label, ref string, fields []string, waitTimeout time.Duration, owner *workspaceOwner) (actionsHydrationState, error) {
-	ctx, cancel := context.WithTimeout(ctx, waitTimeout)
-	defer cancel()
 	claim, claimExists, err := prepareActionsWorkspaceClaim(ctx, leaseID, repo)
 	if err != nil {
 		return actionsHydrationState{}, err
@@ -278,7 +274,7 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 			cleanupCancel()
 		}
 	}
-	state, err := runGitHubRunnerHydration(ctx, cfg.Actions.Workflow, ref, cfg.Actions.Job, fields, a.Stderr, githubRunnerHydrationHooks{
+	state, err := runGitHubRunnerHydration(ctx, cfg.Actions.Workflow, ref, cfg.Actions.Job, fields, waitTimeout, a.Stderr, githubRunnerHydrationHooks{
 		Register: func(stageCtx context.Context) error {
 			updated, err := a.registerActionsRunner(stageCtx, cfg, target, leaseID, slug, "repos/"+ghRepo.Slug(), "", "", nil, claim, true, "")
 			if err != nil {
@@ -302,14 +298,9 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 				if err := runSSHQuiet(stageCtx, target, remotePrepareActionsHydrationMonitorForTarget(target, leaseID, owner)); err != nil {
 					return Exit(7, "prepare Actions hydration child witness on %s: %v", target.Host, err)
 				}
-				monitorTimeout := waitTimeout
-				if deadline, ok := stageCtx.Deadline(); ok {
-					monitorTimeout = time.Until(deadline)
-				}
-				if monitorTimeout <= 0 {
-					return context.DeadlineExceeded
-				}
-				monitor := remoteActionsHydrationMonitorForTarget(target, leaseID, monitorTimeout, owner)
+				// The witness must outlive the marker wait, which starts its own
+				// waitTimeout after dispatch.
+				monitor := remoteActionsHydrationMonitorForTarget(target, leaseID, waitTimeout, owner)
 				if _, err := runWorkspaceOwnerBackgroundOutput(stageCtx, target, owner, monitor); err != nil {
 					return Exit(7, "start Actions hydration child witness on %s: %v", target.Host, err)
 				}

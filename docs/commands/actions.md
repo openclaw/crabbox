@@ -63,17 +63,20 @@ Local hydration supports Linux and Windows WSL2 targets. With
 commands through `provider=ssh`, but Actions hydration still requires Linux,
 Windows WSL2, or native Windows with `--github-runner`.
 
-For GitHub-runner hydration, `--wait-timeout` is one total budget for runner
-installation and registration, GitHub online readiness, workflow dispatch, and
-the hydration marker. Crabbox prints secret-free setup stages such as
+For GitHub-runner hydration, `--wait-timeout` keeps its marker-wait meaning: the
+wait for the hydration marker gets the full budget, starting when the workflow
+is dispatched. Runner installation and registration, GitHub online readiness,
+and workflow dispatch are bounded separately by a setup budget of the same
+length, so a slow setup never shortens the marker wait. Crabbox prints
+secret-free setup stages such as
 `release-metadata`, `archive-download`, `checksum`, `extraction`, `git-bash`
 (native Windows guests without Git Bash), `configure`, and `service-start`. It
 does not dispatch the workflow until GitHub reports the exact registered runner
 (the ID recorded in the lease claim) as online. It warns first when the lease
-reaches its TTL before the budget ends; warm runner-hydration leases with a
+reaches its TTL before `--wait-timeout` ends; warm runner-hydration leases with a
 longer `--ttl`.
 
-If setup or online readiness consumes the budget, the command fails before
+If setup or online readiness consumes the setup budget, the command fails before
 workflow dispatch and reports the last completed stage or runner status. Guest
 configuration, service/Scheduled Task, and runner diagnostic logs are retained
 under the runner directory; bounded diagnostic tails are included when

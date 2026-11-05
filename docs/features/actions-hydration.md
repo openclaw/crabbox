@@ -131,9 +131,10 @@ GitHub-runner hydration uses a single bounded lifecycle:
    workflow, and waits for the new hydration marker.
 
 `--wait-timeout` defaults to 20 minutes and must be positive. For
-`--github-runner`, it is one total budget shared by all four steps rather than a
-marker-only timeout. `actions register` uses the same timeout contract for
-runner setup and online readiness.
+`--github-runner`, steps 2 and 3 plus dispatch share a setup budget of that
+length, and the marker wait in step 4 then gets its own full `--wait-timeout`
+from dispatch, as in earlier releases. `actions register` bounds runner setup and
+online readiness with the same timeout.
 
 Crabbox keeps the lease alive for the whole hydration, including while the
 runner installs, pacing renewals from the idle timeout saved on the lease rather
