@@ -13,6 +13,7 @@
     "SET_USECONTROLAUTHENTICATION=1", "VALUE_OF_USECONTROLAUTHENTICATION=1",
     "SET_CONTROLPASSWORD=1", "VALUE_OF_CONTROLPASSWORD=$vncPassword",
     "SET_ALLOWLOOPBACK=1", "VALUE_OF_ALLOWLOOPBACK=1",
+    "SET_LOOPBACKONLY=1", "VALUE_OF_LOOPBACKONLY=1",
     "SET_ACCEPTHTTPCONNECTIONS=1", "VALUE_OF_ACCEPTHTTPCONNECTIONS=0"
   ) -Wait
 }
@@ -21,8 +22,11 @@ cmd.exe /c "schtasks.exe /Delete /TN $startupTask /F 2>NUL" | Out-Null
 Remove-Item -Force -LiteralPath "C:\ProgramData\crabbox\start-user-vnc.ps1" -ErrorAction SilentlyContinue
 Remove-Item -Force -LiteralPath (Join-Path (Join-Path (Join-Path "C:\Users" $user) "AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup") "crabbox-user-vnc.cmd") -ErrorAction SilentlyContinue
 Get-Process tvnserver -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 } | Stop-Process -Force -ErrorAction SilentlyContinue
+$vncConfig = "HKLM:\SOFTWARE\TightVNC\Server"
+Set-ItemProperty -LiteralPath $vncConfig -Name AllowLoopback -Value 1 -Type DWord -ErrorAction Stop
+Set-ItemProperty -LiteralPath $vncConfig -Name LoopbackOnly -Value 1 -Type DWord -ErrorAction Stop
 Get-Service -Name tvnserver | Set-Service -StartupType Automatic
-Start-Service -Name tvnserver
+if ((Get-Service -Name tvnserver).Status -eq "Running") { Restart-Service -Name tvnserver -ErrorAction Stop } else { Start-Service -Name tvnserver -ErrorAction Stop }
 $winlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
 $oobe = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OOBE"
 if (-not (Test-Path -LiteralPath $oobe)) {
@@ -42,7 +46,14 @@ Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value "1" -Type String
 Set-ItemProperty -Path $winlogon -Name ForceAutoLogon -Value "1" -Type String
 Set-ItemProperty -Path $winlogon -Name DefaultDomainName -Value $env:COMPUTERNAME -Type String
 Set-ItemProperty -Path $winlogon -Name DefaultUserName -Value $user -Type String
-Set-ItemProperty -Path $winlogon -Name DefaultPassword -Value $userPassword -Type String
+# A bootstrap that keeps the auto-logon password out of the Winlogon registry,
+# which any local account can read, defines Set-CrabboxAutoLogonPassword before
+# this recipe so the password is stored that way before the first reboot.
+if (Get-Command -Name Set-CrabboxAutoLogonPassword -CommandType Function -ErrorAction SilentlyContinue) {
+  Set-CrabboxAutoLogonPassword $userPassword
+} else {
+  Set-ItemProperty -Path $winlogon -Name DefaultPassword -Value $userPassword -Type String
+}
 if (-not (Test-Path -LiteralPath $setupCompletePath)) {
   Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
   if (-not $crabboxSetupWasComplete) {

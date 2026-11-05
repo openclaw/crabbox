@@ -17,6 +17,9 @@ is the default target when `--target` is omitted.
 | --- | --- |
 | SSH, Crabbox sync, cleanup | Yes |
 | Pause and resume | Yes |
+| Desktop and browser | Yes, through PowerShell Direct |
+| Native checkpoint create, restore, fork, delete ([details](#checkpoints)) | Yes |
+| `crabbox cp` of one regular file over SFTP ([details](../commands/cp.md#native-windows-regular-files)) | Yes |
 
 Hyper-V must be enabled on the host (`Enable-WindowsOptionalFeature -Online
 -FeatureName Microsoft-Hyper-V-All`). The provider is Windows-only and will
@@ -45,7 +48,8 @@ otherwise use an elevated shell.
 Do not run the host-side Crabbox process as `LocalSystem`. Session 0 is only a
 convenience for **unattended** hosts, where failed early PowerShell Direct
 authentication can display credential UI that no one dismisses. It is unrelated
-to the guest. A `LocalSystem` host process resolves a different profile, so SSH
+to the guest interactive desktop that `--desktop` and `desktop proof` establish
+inside the VM. A `LocalSystem` host process resolves a different profile, so SSH
 known-hosts, Crabbox config, and `PATH` differ from the invoking user, per-user
 tools such as `ffmpeg` are missing, leftover state becomes `LocalSystem`-owned
 and needs elevation to remove, and elevation wrappers can corrupt captured
@@ -54,7 +58,7 @@ command output.
 `crabbox doctor --provider hyperv` is non-mutating. It checks that the host is
 Windows, queries the Hyper-V optional feature, inventories VMs, and reports the
 configured image path. It does not validate that the image exists or boots,
-that Windows credentials work, or that other guest prerequisites are satisfied. `--probe-ssh` reports that a running lease is
+that Windows credentials work, or that optional browser requirements are satisfied. `--probe-ssh` reports that a running lease is
 required rather than creating one. Its Hyper-V optional-feature query calls
 `Get-WindowsOptionalFeature`, which requires elevation even when provisioning
 does not, so an unelevated `Hyper-V Administrators` shell reports that one check
@@ -78,6 +82,74 @@ timeout shorter than that can terminate acquisition
 before readiness finishes. Bootstrap progress on stderr distinguishes waiting for authentication
 from completed SSH lockdown and network connection. A booted
 VM or a started network adapter alone does not prove guest authentication.
+
+## Desktop and browser capabilities
+
+`--desktop` installs the pinned, SHA-256-verified TightVNC server after the
+OpenSSH and git bootstrap completes. TightVNC is configured without a firewall
+exception and restricted to loopback; connect through Crabbox's SSH-backed VNC
+or WebVNC commands. The guest account password is passed to PowerShell Direct
+through the host process environment and a remoting argument, never on the
+host command line. TightVNC receives a separate generated password stored at
+`C:\ProgramData\crabbox\vnc.password`.
+
+The desktop setup enables auto-logon and performs one expected Windows reboot.
+Acquisition waits for bounded PowerShell Direct readiness, reruns the marked
+idempotent setup after reboot, then waits for SSH, loopback VNC, and an active
+interactive session for the configured `--hyperv-user` with a running Explorer
+shell. TightVNC service readiness alone is not desktop readiness. If auto-logon
+settings were applied to an already-marked template but no usable session
+appears, acquisition performs at most two explicit bounded reboot retries,
+reapplies the idempotent setup, waits again, and requires repeated stable SSH
+probes.
+`desktop=true` is recorded only after all checks succeed.
+
+`--browser` is probe-only. After final SSH readiness, Crabbox accepts an
+existing Microsoft Edge or Google Chrome installation. It does not install a
+browser, and acquisition fails with a capability error when neither browser is
+present. The `browser=true` label is recorded only after the probe succeeds.
+
+For native Windows screenshot, video, and `desktop proof`, use a **fresh**
+desktop lease acquired by the pinned Crabbox binary. Leases acquired without
+`--desktop` are not upgraded in place. Git for Windows supplies
+Mintty, and MP4 encoding requires local `ffmpeg` on the Hyper-V host:
+
+```powershell
+& $crabboxPath warmup --provider hyperv --target windows --desktop --keep `
+  --hyperv-image 'E:\vhd\windows-template.vhdx' `
+  --hyperv-user crabbox --hyperv-switch 'Default Switch'
+
+ffmpeg -version
+& $crabboxPath desktop proof --provider hyperv --id <lease> `
+  --output 'C:\proof\<lease>' -- cmd.exe /d /c "echo desktop-proof"
+
+& $crabboxPath stop --provider hyperv <lease>
+```
+
+Run this provider flow as the invoking interactive user, not as `LocalSystem`.
+The interactive session the proof requires is the guest session belonging to the
+SSH user, which the proof launcher targets; the host-side session is irrelevant.
+Screenshot and video capture use short-lived interactive tasks in per-capture
+directories protected for only the lease user, Builtin Administrators, and
+LocalSystem. Normal completion and failure paths delete the tasks, scripts,
+frames, archives, and protected directories; always stop the lease to remove the
+VM and differencing disk.
+
+Crabbox copies guest PowerShell scripts larger than 4 KB, such as screenshot
+and video capture setup, to a protected guest directory and runs them with a
+short argument-based command, because Windows OpenSSH intermittently
+wedges its per-connection event loop while forwarding a large stdin payload;
+when that happens the guest never finishes reading stdin and ssh aborts with
+`Timeout, server <host> not responding` even though the guest is healthy.
+
+Screenshot, video, and desktop input tasks run as the lease user through an
+Interactive-logon scheduled task in that user's active session, so Crabbox does
+not store the guest password in the guest for them. Desktop auto-logon needs the
+password. Hyper-V desktop setup stores it only as the `DefaultPassword` LSA
+secret that Winlogon reads, before the expected setup reboot, and never writes
+it to the Winlogon `DefaultPassword` registry value, which any local account can
+read; a registry value left by an older Crabbox is removed. If the LSA secret
+cannot be stored, setup fails before the reboot.
 
 ### Preparing a Windows template
 
@@ -207,9 +279,20 @@ During Windows `Acquire`, the provider:
    GitHub if `sshd` is absent, and keeps sshd stopped behind the quarantine rule
 7. Reapplies the final key-only config, validates `sshd_config`, regenerates
    per-lease SSH host keys, starts sshd, and removes the quarantine rule last
-8. Installs pinned MinGit when git is absent, then ensures the shared Node/npm
-   baseline
-9. Waits for SSH readiness on the injected key, followed by repeated stable SSH probes
+8. Installs full, pinned Git for Windows (including Mintty) for `--desktop`;
+   otherwise installs pinned MinGit when git is absent
+9. With `--desktop`, installs/configures loopback-only TightVNC, handles its
+   expected setup reboot through bounded PowerShell Direct retries, and reruns
+   the marked setup idempotently
+10. Ensures the shared Node/npm baseline
+11. Waits for SSH readiness on the injected key and, for `--desktop`, loopback
+    VNC plus an active Explorer-backed session for the configured guest user,
+    followed by repeated stable SSH probes.
+    When auto-logon settings have not taken effect, it performs at most two
+    explicit reboot retries and repeats the bounded readiness checks
+12. With `--browser`, probes for Edge or Chrome without installing either
+13. Records successful desktop/browser lease labels only after all requested
+    readiness checks pass
 
 PowerShell Direct calls use the guest administrator password. Readiness and
 later guest operations have bounded retries, preventing a stalled call from
@@ -218,6 +301,87 @@ hanging the lease.
 Exhausting the PowerShell Direct boot-readiness budget reports a timeout while
 preserving the last probe's diagnostic and public exit code. Caller cancellation
 still takes precedence over that provider-owned budget.
+
+## Checkpoints
+
+`crabbox checkpoint` creates Hyper-V **production** checkpoints (native kind
+`hyperv-vhdx`). Default `--mode auto` and `--strategy disk-snapshot` select it;
+other strategies are refused. Crabbox sets the VM's checkpoint type to
+`ProductionOnly`, so Hyper-V never falls back to a standard checkpoint. A
+production checkpoint uses VSS inside the guest: it captures a consistent disk
+state, not memory or running processes.
+
+```powershell
+crabbox checkpoint create --provider hyperv --id my-lease --name warm-deps
+crabbox checkpoint restore chk_abc123 --provider hyperv --id my-lease
+crabbox checkpoint fork chk_abc123 --provider hyperv --keep
+crabbox checkpoint delete chk_abc123
+```
+
+**Create** requires an exact local claim on the source VM and holds the claim
+fence for the whole operation. Before any VM change it durably records the
+source VM ID, a unique snapshot name, and an owned export directory, then
+prepares the running guest over PowerShell Direct, so create needs the guest
+password (`CRABBOX_HYPERV_GUEST_PASSWORD` or `hyperv.guestPassword`):
+
+- It sets the guest's boot status policy to `IgnoreAllFailures` and turns
+  automatic recovery off, the settings Azure's
+  [VHD preparation](https://learn.microsoft.com/azure/virtual-machines/windows/prepare-for-upload-vhd-image)
+  uses for unattended VMs. A restored checkpoint boots as if Windows had shut
+  down unexpectedly, and Windows starts its recovery environment after two such
+  shutdowns within two minutes of boot completion. On the test host, a guest
+  checkpointed twice within two minutes of booting from a restore stopped at
+  the interactive Automatic Repair screen.
+- It flushes the registry hives. A production checkpoint quiesces the guest's
+  file system, but on the test host a SYSTEM-hive change made just before the
+  checkpoint, such as a machine `PATH` update, could be missing after restore.
+
+It then
+creates the checkpoint on the source VM and exports it with
+`Export-VMSnapshot` into `hyperv\` inside the checkpoint's local record
+directory (see [checkpoint](../commands/checkpoint.md)). The export is a full
+copy of the VM's disks, so the volume holding Crabbox state needs free space
+for it. If a step fails after the VM changed, Crabbox removes the new
+checkpoint and its partial export, but the command still fails and keeps the
+record as pending. A pending record blocks new checkpoints of that source and
+cannot be restored or forked; `crabbox checkpoint delete <id>` repeats the
+cleanup idempotently and discards it, which also reconciles a create that was
+interrupted.
+
+**Restore** applies the checkpoint to the original source VM in place. It
+requires the same lease, its exact local claim, and the same Hyper-V VM ID,
+and refuses any other lease. `Restore-VMSnapshot` leaves the VM off, because
+a production checkpoint holds no memory, so Crabbox then starts it, waits for
+DHCP and SSH, and refreshes the claim's endpoint. Each Hyper-V command and each
+bounded SSH readiness probe runs under the exact claim, so a reclaim or
+revocation stops restore before its next step. The source keeps its hostname
+and SSH identity. A restore that fails before reaching Hyper-V puts the
+previous claim back.
+
+**Fork** imports the export as a new lease with `Import-VM -Copy
+-GenerateNewId` and a dynamic MAC address, keeping the network adapter
+disconnected until the copy has a new identity. Over PowerShell Direct, Crabbox
+renames the guest to `cbx-<lease-id suffix>` and restarts it. It then writes a
+new `MachineGuid` and, if one exists, a new VNC password, flushing both to
+disk, regenerates the SSH host keys, and installs the new lease key before
+connecting the network. Those writes come after the restart because Hyper-V's
+`Restart-VM` is a hard reset that would discard writes still in the guest's
+cache.
+The new lease's claim is recorded before the import, and each of these steps,
+plus each PowerShell Direct and SSH readiness attempt, runs under it; the
+backoff between attempts does not. A disconnected network does not isolate the
+guest from PowerShell Direct, so the claim, not the network, gates every guest
+logon. If the claim is reassigned, fork stops and leaves the imported VM to its
+new owner; if the claim is revoked, fork stops and removes the import.
+Fork records exactly which disks `Import-VM` copied, including the differencing
+parents it copies with each attached disk, so release and rollback delete only
+those, never the template a parent chain may lead to outside the fork's own
+directory.
+
+**Release and delete.** Releasing the source removes its VM and the Hyper-V
+checkpoints stored with it, so restore is no longer possible; the export stays,
+and fork still works. `checkpoint delete` removes the checkpoint from the
+source VM if it still exists, then the export.
 
 ## Pause and resume
 
@@ -239,6 +403,16 @@ readiness and refreshes the endpoint. `pause --json` and `resume --json` return
 the standard status receipt, with `state` set to `paused` or `ready` after a
 successful transition and readback. `labels.hyperv_state` retains Hyper-V's
 native state (`saved`, `paused`, or `running`).
+
+Lease VMs are created with `AutomaticStopAction TurnOff`. Under Hyper-V's
+default, `Save`, each running VM keeps a runtime-state file on the VM drive as
+large as its currently assigned memory (all of `--hyperv-memory` while the guest
+boots) so that a host shutdown can save it; with `TurnOff` that file stays
+empty. A host shutdown or reboot therefore powers running leases off instead of
+saving their memory, and `crabbox resume` rejects a powered-off VM (exit 4);
+release it with `crabbox stop`. Use `crabbox pause` before planned host
+maintenance when guest memory must survive. Leases created by an older Crabbox
+keep the stop action they were created with.
 
 Set `CRABBOX_HYPERV_GUEST_PASSWORD` or `hyperv.guestPassword` in trusted user
 config to match the administrator password in your VHDX template. The provider
@@ -262,10 +436,10 @@ installation.
    unclaimed `crabbox-` prefixed candidates. A name prefix is inventory evidence,
    not ownership proof.
 4. **Release**: Requires an exact local claim, performs guarded remote cleanup,
-   stops/removes the VM, and deletes VM-owned root
-   storage.
+   stops/removes the VM, and deletes VM-owned root and internal checkpoint
+   storage. Exported checkpoint artifacts survive release.
 5. **Cleanup**: Deletes only exact-claimed VMs whose state or expiry makes them
-   eligible, preserves `keep=true` VMs, and prunes missing
+   eligible, preserves `keep=true` and restore-reserved VMs, and prunes missing
    local claims only after the provisioning grace period.
 
 Heartbeats require an exact instance-scoped claim for a completed acquisition.
@@ -273,7 +447,8 @@ They atomically persist the touch timestamp and an explicit `--idle-timeout`
 override; omitting the flag preserves the recorded timeout, even when current
 configuration differs. Fresh status reads retain that policy and the original
 lease TTL cap. A stale snapshot or incomplete acquisition is not renewed.
-Ownership remains bound to the recorded VM name and instance scope.
+Ownership remains bound to the recorded VM name and instance scope. Existing checkpoint forks retain their checkpoint-specific identity and storage
+safeguards.
 
 The fixed operation budgets are:
 
@@ -285,14 +460,15 @@ The fixed operation budgets are:
 | `Start-VM` | 5 minutes, then up to 45 seconds to reconcile a reported failure |
 | Initial authenticated PowerShell Direct readiness | 10 minutes overall, 45 seconds per probe |
 | Guest PowerShell Direct invocation | 10 minutes per attempt, at most 5 attempts within acquisition's overall budget |
+| `--desktop` guest setup, including its expected reboot and at most two auto-logon reboot retries | Within acquisition's overall budget; each auto-logon session check waits 30 seconds, or 1 minute after a retry reboot |
+| `--desktop` readiness after SSH | Loopback VNC 5 minutes, then an active Explorer session 5 minutes, then stable SSH 45 seconds |
 
 After starting or resuming a guest, DHCP and SSH readiness use the shared
 bootstrap wait budget: 20 minutes, or 45 minutes with desktop/browser enabled.
 Each SSH probe is limited to 10 seconds or the remaining wait budget. Host
 address queries retain their 45-second command limit; successful SSH readiness
 is followed by a five-second address-stability check. Caller cancellation and
-earlier enclosing deadlines still apply. These budgets do not change Hyper-V's
-existing host-shutdown default (`AutomaticStopAction=Save`).
+earlier enclosing deadlines still apply.
 
 Cancellation before key creation does not manufacture a retained
 lease. An ambiguous creation retains ownership and reports the blocked cleanup
@@ -307,7 +483,7 @@ instead of detaching a replacement VM's disk.
   digits, `.`, `_`, or `-`. Domain/UPN names and SSH pattern characters are
   rejected so `AllowUsers` cannot broaden access.
 - VHD files are stored in `%USERPROFILE%\Hyper-V\Virtual Hard Disks\` by
-  default. Only deterministically named provider-owned root
+  default. Only deterministically named provider-owned root and checkpoint
   disks are cleaned up; unrelated attached disks are preserved.
 - The Windows ready check verifies `git`, `tar`, Node/npm, and the work root.
 - There is no `tart exec` or `prlctl exec` equivalent for Hyper-V; all guest

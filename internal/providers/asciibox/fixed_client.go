@@ -18,6 +18,14 @@ const asciiBoxIdempotencyWindow = 24 * time.Hour
 
 func (c *client) createKeyedBox(ctx context.Context, create createRequest) (boxData, error) {
 	body := map[string]any{}
+	if create.NoEnv {
+		body["noEnv"] = true
+	}
+	// Default-sized claims predate type selection. Their recovery requests must
+	// retain the original body as well as the same idempotency key.
+	if create.Type != "" && create.Type != "default" {
+		body["type"] = create.Type
+	}
 	if create.TTL > 0 {
 		body["ttlSeconds"] = int(create.TTL.Round(time.Second).Seconds())
 	}

@@ -26,7 +26,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
 		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync},
 		Coordinator:      core.CoordinatorNever,
-		ClassDisposition: core.ProviderClassDispositionUnmapped,
+		ClassDisposition: core.ProviderClassDispositionMapped,
 	}
 }
 

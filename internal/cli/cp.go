@@ -109,6 +109,14 @@ All flags:
 		}
 		return Exit(2, "provider=%s does not support cp; it has neither native copy nor an SSH lease transport", backend.Spec().Name)
 	}
+	// Native Windows SSH cp has one budget covering admission, probing, and
+	// transfer. Start it only after provider-native CopyBackend dispatch so
+	// other copy paths retain their existing timing.
+	if cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeNormal {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, windowsSFTPTimeout)
+		defer cancel()
+	}
 	lease, err := a.resolveSSHTransportLeaseTargetForRepo(ctx, &cfg, *id, true, false)
 	if err != nil {
 		return err
@@ -124,6 +132,15 @@ All flags:
 	if recovering {
 		_, destination := sandboxCopyPath(fs.Arg(0))
 		return recoverRemoteArchive(ctx, lease.SSH, destination, choice, a.Stdout, a.Stderr)
+	}
+	if isWindowsNativeTarget(lease.SSH) {
+		boundary, err := findRepositoryBoundary()
+		if err != nil {
+			return err
+		}
+		return copyWindowsSFTPUnderClaim(ctx, lease, boundary.root, func() error {
+			return copyOverResolvedSSH(ctx, lease.SSH, fs.Arg(0), fs.Arg(1), *followLink, a.Stdout, a.Stderr)
+		})
 	}
 	err = copyOverResolvedSSH(ctx, lease.SSH, fs.Arg(0), fs.Arg(1), *followLink, a.Stdout, a.Stderr)
 	return archiveRecoveryGuidance(err, *id)
@@ -148,7 +165,7 @@ func isSandboxCopyArg(value string) bool {
 
 func copyOverResolvedSSH(ctx context.Context, target SSHTarget, src, dst string, followLink bool, stdout, stderr anyWriter) (err error) {
 	if isWindowsNativeTarget(target) {
-		return Exit(2, "SSH cp over rsync is not available for native Windows targets; use a provider-native copy backend or a WSL2 target")
+		return copyWindowsSFTP(ctx, target, src, dst, followLink, stdout, stderr)
 	}
 	terminationCtx, stopTerminationSignals := pondMeshTerminationContext(ctx)
 	defer stopTerminationSignals()

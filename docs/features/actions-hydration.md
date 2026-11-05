@@ -225,9 +225,13 @@ The hydrate job runs on the dynamic runner label (GitHub-runner path):
 runs-on: [self-hosted, "${{ inputs.crabbox_runner_label }}"]
 ```
 
-After setup, write the readiness marker. Map workflow inputs into step
-environment variables such as `CRABBOX_ID` and `CRABBOX_JOB`; do not interpolate
-them directly into shell source:
+After setup, write the readiness marker under `$HOME/.crabbox/actions`.
+On native Windows runners, write the marker files under
+`%ProgramData%\crabbox\actions` instead (`/c/ProgramData/crabbox/actions` in Git
+Bash): native Windows Crabbox reads them there, a directory the runner account
+and the SSH user share. Map workflow inputs into step environment variables
+such as `CRABBOX_ID` and `CRABBOX_JOB`; do not interpolate them directly into
+shell source:
 
 ```sh
 case "$CRABBOX_ID" in
@@ -244,17 +248,31 @@ case "$CRABBOX_JOB" in
 esac
 job="$CRABBOX_JOB"
 [ -n "$job" ] || job=hydrate
-mkdir -p "$HOME/.crabbox/actions"
-state="$HOME/.crabbox/actions/${CRABBOX_ID}.env"
-env_file="$HOME/.crabbox/actions/${CRABBOX_ID}.env.sh"
-services_file="$HOME/.crabbox/actions/${CRABBOX_ID}.services"
+state_dir="$HOME/.crabbox/actions"
+if [ "${RUNNER_OS:-}" = "Windows" ]; then
+  program_data="${PROGRAMDATA:-C:\\ProgramData}"
+  if command -v cygpath >/dev/null 2>&1; then
+    program_data="$(cygpath -u "$program_data")"
+  fi
+  state_dir="${program_data}/crabbox/actions"
+fi
+mkdir -p "$state_dir"
+state="${state_dir}/${CRABBOX_ID}.env"
+env_file="${state_dir}/${CRABBOX_ID}.env.sh"
+services_file="${state_dir}/${CRABBOX_ID}.services"
+env_ref="$env_file"
+services_ref="$services_file"
+if [ "${RUNNER_OS:-}" = "Windows" ] && command -v cygpath >/dev/null 2>&1; then
+  env_ref="$(cygpath -w "$env_file")"
+  services_ref="$(cygpath -w "$services_file")"
+fi
 tmp="${state}.tmp"
 {
   echo "WORKSPACE=${GITHUB_WORKSPACE}"
   echo "RUN_ID=${GITHUB_RUN_ID}"
   echo "JOB=${job}"
-  echo "ENV_FILE=${env_file}"
-  echo "SERVICES_FILE=${services_file}"
+  echo "ENV_FILE=${env_ref}"
+  echo "SERVICES_FILE=${services_ref}"
   echo "READY_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "$tmp"
 mv "$tmp" "$state"
@@ -266,8 +284,17 @@ SSH commands need — `GITHUB_WORKSPACE`, `GITHUB_RUN_ID`, `GITHUB_JOB`,
 are step-scoped GitHub material and should stay inside the workflow unless the
 project intentionally persists its own short-lived credentials.
 
+On native Windows runners, Crabbox imports the env file in PowerShell before each
+command: write `export NAME='value'` lines with Windows paths (`cygpath -w`) and a
+`;`-separated `PATH` (`cygpath -w -p "$PATH"`), and write `ENV_FILE` and
+`SERVICES_FILE` in the marker as Windows paths. Crabbox takes the text between the
+outer quotes verbatim, so values may contain apostrophes but not line breaks. A
+Git Bash `PATH` such as `/usr/bin:/c/Windows/system32` would replace the
+command's `PATH` and leave no command resolvable. The repository's
+`.github/workflows/hydrate.yml` shows the complete step.
+
 The final step should keep the job alive while later commands run, exiting when
-`$HOME/.crabbox/actions/${CRABBOX_ID}.stop` appears or when its timeout expires.
+`${CRABBOX_ID}.stop` appears in the same directory as the marker or when its timeout expires.
 Map `CRABBOX_ID` and `CRABBOX_KEEP_ALIVE_MINUTES` through step environment:
 
 ```sh
@@ -279,7 +306,15 @@ case "$CRABBOX_ID" in
 esac
 minutes="$CRABBOX_KEEP_ALIVE_MINUTES"
 case "$minutes" in ''|*[!0-9]*) minutes=90 ;; esac
-stop="$HOME/.crabbox/actions/${CRABBOX_ID}.stop"
+state_dir="$HOME/.crabbox/actions"
+if [ "${RUNNER_OS:-}" = "Windows" ]; then
+  program_data="${PROGRAMDATA:-C:\\ProgramData}"
+  if command -v cygpath >/dev/null 2>&1; then
+    program_data="$(cygpath -u "$program_data")"
+  fi
+  state_dir="${program_data}/crabbox/actions"
+fi
+stop="${state_dir}/${CRABBOX_ID}.stop"
 deadline=$(( $(date +%s) + minutes * 60 ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
   [ -f "$stop" ] && exit 0

@@ -48,8 +48,10 @@ type client struct {
 const boxCommandOutputLimit = 8 << 20
 
 type createRequest struct {
+	NoEnv          bool
 	TTL            time.Duration
 	IdempotencyKey string
+	Type           string
 }
 
 type boxIdentityError struct{ id string }
@@ -72,6 +74,7 @@ type boxData struct {
 	deletionOperationID string
 	ID                  string `json:"id"`
 	Name                string `json:"name,omitempty"`
+	Type                string `json:"type,omitempty"`
 	State               string `json:"state,omitempty"`
 	Status              string `json:"status,omitempty"`
 	MachineIP           string `json:"machineIp,omitempty"`
@@ -160,6 +163,12 @@ func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, err
 		return c.createKeyedBox(ctx, req)
 	}
 	args := []string{"new"}
+	if req.NoEnv {
+		args = append(args, "--no-env")
+	}
+	if req.Type != "" && req.Type != "default" {
+		args = append(args, "--type", req.Type)
+	}
 	if req.TTL > 0 {
 		args = append(args, "--ttl", fmt.Sprintf("%d", int(req.TTL.Round(time.Second).Seconds())))
 	}
@@ -692,7 +701,8 @@ func (c *client) waitForBoxReady(ctx context.Context, box boxData) (boxData, err
 }
 
 func (c *client) env() []string {
-	return setEnv(setEnv(os.Environ(), "HOME", c.home), "BOX_API_KEY", c.apiKey)
+	env := setEnv(os.Environ(), "HOME", c.home)
+	return setEnv(setEnv(env, "BOX_API_KEY", c.apiKey), "BOAT_API_KEY", c.apiKey)
 }
 
 func (c *client) sshEnv() []string {
@@ -701,8 +711,11 @@ func (c *client) sshEnv() []string {
 
 func (c *client) formatError(result core.LocalCommandResult, err error) string {
 	message := strings.TrimSpace(result.Stderr)
-	if message == "" {
-		message = strings.TrimSpace(result.Stdout)
+	if stdout := strings.TrimSpace(result.Stdout); stdout != "" {
+		if message != "" {
+			message += "\n"
+		}
+		message += stdout
 	}
 	if message == "" && err != nil {
 		message = err.Error()
@@ -828,6 +841,9 @@ func decodeNewBox(output string) (boxData, error) {
 }
 
 func mergeBox(base, update boxData) boxData {
+	if update.Type != "" {
+		base.Type = update.Type
+	}
 	if base.claimCreatedAt == "" {
 		base.claimCreatedAt = core.Blank(boxCreationTime(base), boxCreationTime(update))
 	}

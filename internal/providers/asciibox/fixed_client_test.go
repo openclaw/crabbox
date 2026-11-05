@@ -26,6 +26,12 @@ func TestFixedBoxKeyedAPIWire(t *testing.T) {
 				if body["ttlSeconds"] != float64(3600) {
 					t.Errorf("wrong native TTL: %v", body)
 				}
+				if body["noEnv"] != true {
+					t.Errorf("noEnv missing from native request: %v", body)
+				}
+				if body["type"] != "large" {
+					t.Errorf("wrong native size: %v", body)
+				}
 				if org == "personal" && body["org"] != nil || org != "personal" && body["org"] != org {
 					t.Errorf("wrong org scope: %v", body)
 				}
@@ -34,7 +40,7 @@ func TestFixedBoxKeyedAPIWire(t *testing.T) {
 			}))
 			defer server.Close()
 			c := &client{apiURL: server.URL, apiKey: "synthetic-fixture", org: org, http: server.Client()}
-			box, err := c.CreateBox(t.Context(), createRequest{TTL: time.Hour, IdempotencyKey: "crabbox-fixture-key"})
+			box, err := c.CreateBox(t.Context(), createRequest{TTL: time.Hour, Type: "large", NoEnv: true, IdempotencyKey: "crabbox-fixture-key"})
 			if err != nil || box.ID != "bx_native" || box.createdID != box.ID || calls != 1 {
 				t.Fatalf("create: %+v %v calls=%d", box, err, calls)
 			}
@@ -70,5 +76,40 @@ func TestFixedBoxKeyedAPIRejectsUncertainResponses(t *testing.T) {
 				t.Fatalf("uncertain evidence accepted or resubmitted: %+v %v calls=%d", box, err, calls)
 			}
 		})
+	}
+}
+
+func TestFixedBoxDefaultSizeRetainsRetryBody(t *testing.T) {
+	var originalBody, originalKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if originalBody == "" {
+			originalBody, originalKey = string(body), r.Header.Get("Idempotency-Key")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		if string(body) != originalBody || r.Header.Get("Idempotency-Key") != originalKey {
+			t.Errorf("recovery changed the original idempotent request: %s -> %s", originalBody, body)
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		io.WriteString(w, `{"ok":true,"type":"box.created","box":{"id":"bx_native","createdAt":"2026-09-20T12:00:00Z","state":"provisioning"}}`)
+	}))
+	defer server.Close()
+	c := &client{apiURL: server.URL, apiKey: "synthetic-fixture", org: "personal", http: server.Client()}
+	request := createRequest{TTL: time.Hour, IdempotencyKey: "original-key"}
+	if _, err := c.CreateBox(t.Context(), request); err == nil {
+		t.Fatal("expected the pre-upgrade request to be uncertain")
+	}
+	if strings.Contains(originalBody, "noEnv") {
+		t.Fatalf("default request added noEnv: %s", originalBody)
+	}
+	request.Type = "default"
+	if _, err := c.CreateBox(t.Context(), request); err != nil {
+		t.Fatalf("default-sized recovery changed the request body: %v", err)
 	}
 }

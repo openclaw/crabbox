@@ -61,7 +61,11 @@ func TestLeaseClaimActionsWorkspaceAuthority(t *testing.T) {
 				CloudID: "resource-a", CloudNumericID: 1, CloudImmutableID: "immutable-a",
 				ActionsWorkspace: binding,
 			}
+			original.ActionsRunner = &ActionsRunnerBinding{Scope: "orgs/example-org", RunnerID: 7, Name: "fixture", LeaseFingerprint: actionsRunnerLeaseFingerprint(original)}
 			claim := cloneLeaseClaim(original)
+			if claim.ActionsRunner == original.ActionsRunner {
+				t.Fatal("claim clone aliases runner receipt")
+			}
 			if claim.ActionsWorkspace == original.ActionsWorkspace {
 				t.Fatal("claim clone aliases hydration authority")
 			}
@@ -114,6 +118,9 @@ func TestLeaseClaimActionsWorkspaceAuthority(t *testing.T) {
 			preserve := kind == "metadata" || kind == "same-resource"
 			if (claim.ActionsWorkspace != nil) != preserve {
 				t.Fatalf("authority retained=%t, want %t", claim.ActionsWorkspace != nil, preserve)
+			}
+			if !reflect.DeepEqual(claim.ActionsRunner, original.ActionsRunner) {
+				t.Fatal("claim update discarded runner cleanup custody")
 			}
 			if !reflect.DeepEqual(original.ActionsWorkspace, binding) {
 				t.Fatal("claim mutation changed the prior snapshot")
