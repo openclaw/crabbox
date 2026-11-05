@@ -19,8 +19,10 @@ if ! read_guard || [ "$guard" != "$owned_guard" ] || ! valid_guard; then
     wait 2>/dev/null || :
     exit 74
 fi
+completion_grace_ms=$grace_ms
 @WORKLOAD_INIT@if [ ! -e "$directory/.lost" ] && [ ! -e "$directory/.cancel" ]; then : >"$directory/.armed"; fi
 code=74
+completed=0
 while valid_guard; do
 @WORKLOAD_TICK@    [ -e "$directory/.lost" ] || [ -e "$directory/.cancel" ] && break
     if [ -e "$directory/.result" ]; then
@@ -29,7 +31,7 @@ while valid_guard; do
         } <"$directory/.result"; then
             case $result in
                 ''|*[!0-9]*) ;;
-                *) [ "${#result}" -le 3 ] && [ "$result" -le 255 ] && code=$result;;
+                *) if [ "${#result}" -le 3 ] && [ "$result" -le 255 ]; then code=$result; completed=1; fi;;
             esac
         fi
         break
@@ -39,5 +41,9 @@ while valid_guard; do
 done
 kill "$watcher" 2>/dev/null || :
 wait "$watcher" 2>/dev/null || :
-cleanup_group && remove_evidence || { echo 'WSL2 command cleanup failed: group absence unconfirmed' >&2; exit 74; }
+cleanup_grace_ms=$grace_ms
+if [ "$completed" = 1 ] && [ ! -e "$directory/.lost" ] && [ ! -e "$directory/.cancel" ]; then
+    cleanup_grace_ms=$completion_grace_ms
+fi
+cleanup_group "$cleanup_grace_ms" && remove_evidence || { echo 'WSL2 command cleanup failed: group absence unconfirmed' >&2; exit 74; }
 exit "$code"

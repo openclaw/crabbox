@@ -101,6 +101,7 @@ const FixedDaytonaClaimProvider = "daytona-fixed-v1"
 const FixedLocalContainerClaimProvider = "local-container-fixed-v1"
 const FixedParallelsClaimProvider = "parallels-fixed-v1"
 const FixedProxmoxClaimProvider = "proxmox-fixed-v1"
+const FixedKubeVirtClaimProvider = "kubevirt-fixed-v1"
 
 const maxLocalClaimInventoryFileBytes int64 = 1 * 1024 * 1024
 
@@ -1420,6 +1421,8 @@ func canonicalClaimProvider(provider string) string {
 		return "parallels"
 	case FixedProxmoxClaimProvider:
 		return "proxmox"
+	case FixedKubeVirtClaimProvider:
+		return "kubevirt"
 	case "exec-provider":
 		return "external"
 	}

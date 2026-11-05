@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -32,53 +33,19 @@ func (b *leaseBackend) RebindResolvedLeaseTarget(target *core.LeaseTarget, lease
 }
 
 func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
-	if err := validateAcquireConfig(b.cfg); err != nil {
-		return core.LeaseTarget{}, err
+	if req.RequestedLeaseID == "" {
+		req.RequestedLeaseID = core.NewLeaseID()
 	}
-	leaseID := core.NewLeaseID()
-	slug, err := b.allocateLeaseSlug(ctx, leaseID, req.RequestedSlug)
-	if err != nil {
-		return core.LeaseTarget{}, err
-	}
-	name := core.LeaseProviderName(leaseID, slug)
-	keyPath, publicKey, err := b.sshKey(leaseID)
-	if err != nil {
-		return core.LeaseTarget{}, err
-	}
-	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s name=%s namespace=%s keep=%v\n", providerName, leaseID, slug, name, b.cfg.KubeVirt.Namespace, req.Keep)
-	if err := b.createVM(ctx, name, leaseID, slug, publicKey, req.Keep); err != nil {
-		if !req.Keep {
-			b.removeGeneratedKey(leaseID)
-		}
-		return core.LeaseTarget{}, err
-	}
-	lease, err := b.prepareLease(ctx, name, leaseID, slug, keyPath, req.Keep, nil)
-	if err != nil {
-		if !req.Keep {
-			_ = b.deleteVM(context.Background(), name)
-			b.removeGeneratedKey(leaseID)
-		}
-		return core.LeaseTarget{}, err
-	}
-	if err := b.claimLeaseForRepo(leaseID, slug, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim); err != nil {
-		if !req.Keep {
-			_ = b.deleteVM(context.Background(), name)
-			b.removeGeneratedKey(leaseID)
-		}
-		return core.LeaseTarget{}, err
-	}
-	if err := core.UpdateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
-		if !req.Keep {
-			_ = b.deleteVM(context.Background(), name)
-			b.removeGeneratedKey(leaseID)
-			b.removeLeaseClaim(leaseID)
-		}
-		return core.LeaseTarget{}, err
-	}
-	return lease, nil
+	return b.acquireFixed(ctx, req)
 }
 
 func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (lease core.LeaseTarget, err error) {
+	if claim, found, err := b.resolveClaim(req.ID); err != nil {
+		return core.LeaseTarget{}, err
+	} else if found && kubeVirtFixedKind.IsFixedClaim(claim) {
+		return b.resolveFixed(ctx, req, claim)
+	}
+
 	name, leaseID, slug, keep, err := b.resolveIdentity(ctx, req.ID)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -185,6 +152,12 @@ func (b *leaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req core.Rel
 }
 
 func (b *leaseBackend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
+	if claim, found, err := b.resolveClaim(req.Lease.LeaseID); err != nil {
+		return err
+	} else if found && kubeVirtFixedKind.IsFixedClaim(claim) && kubeVirtDeleteOnRelease(req.Lease, b.cfg) {
+		return b.deleteFixed(ctx, req, claim, outcome)
+	}
+
 	name := strings.TrimSpace(req.Lease.Server.Name)
 	if name == "" {
 		name, _, _, _ = b.resolveName(req.Lease.LeaseID)
@@ -244,7 +217,7 @@ func (b *leaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 }
 
 func (b *leaseBackend) RetainLeaseClaimAfterRelease(lease core.LeaseTarget) bool {
-	return !kubeVirtDeleteOnRelease(lease, b.cfg)
+	return true
 }
 
 func (b *leaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
@@ -275,16 +248,17 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) err
 			continue
 		}
 		fmt.Fprintf(b.rt.Stdout, "delete vm id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
-		if _, _, _, _, err := b.validateVMIdentity(ctx, server.Name, server.Labels["lease"], server.Labels["slug"]); err != nil {
+		claim, found, err := b.resolveClaim(server.Labels["lease"])
+		if err != nil {
 			return err
 		}
-		if err := b.deleteVM(ctx, server.Name); err != nil {
+		if !found || !kubeVirtFixedKind.IsFixedClaim(claim) {
+			return core.Exit(4, "KubeVirt cleanup requires the original durable UID binding; refusing an unbound VM")
+		}
+		if err := b.deleteFixed(ctx, core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}}, claim, &core.ReleaseLeaseOutcome{}); err != nil {
 			return err
 		}
-		if leaseID := strings.TrimSpace(server.Labels["lease"]); leaseID != "" {
-			b.removeLeaseClaim(leaseID)
-			core.RemoveStoredTestboxKey(leaseID)
-		}
+
 	}
 	return nil
 }
@@ -292,6 +266,7 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) err
 func (b *leaseBackend) prepareLease(ctx context.Context, name, leaseID, slug, keyPath string, keep bool, persistedLabels map[string]string) (core.LeaseTarget, error) {
 	target := b.sshTarget(name, keyPath)
 	server := b.server(name, leaseID, slug, keep)
+	server.ImmutableID = persistedLabels["vm_uid"]
 	for key, value := range persistedLabels {
 		server.Labels[key] = value
 	}
@@ -311,68 +286,126 @@ func (b *leaseBackend) prepareLease(ctx context.Context, name, leaseID, slug, ke
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func (b *leaseBackend) createVM(ctx context.Context, name, leaseID, slug, publicKey string, keep bool) error {
-	if err := validateAcquireConfig(b.cfg); err != nil {
-		return err
-	}
-	leaseLabels := b.server(name, leaseID, slug, keep).Labels
-	manifest, err := renderManifest(b.cfg.KubeVirt.Template, name, b.cfg.KubeVirt.Namespace, leaseID, slug, publicKey, leaseLabels)
+func (b *leaseBackend) createVMOwned(ctx context.Context, name, leaseID, slug, publicKey string, labels map[string]string) (kubeVirtItem, error) {
+	manifest, err := renderManifest(b.cfg.KubeVirt.Template, name, b.cfg.KubeVirt.Namespace, leaseID, slug, publicKey, labels)
 	if err != nil {
-		return core.Exit(2, "%v", err)
+		return kubeVirtItem{}, err
 	}
-	tmp, err := os.CreateTemp("", "crabbox-kubevirt-*.yaml")
+	path, err := privateKubeVirtJSON(manifest)
 	if err != nil {
-		return fmt.Errorf("create KubeVirt manifest: %w", err)
+		return kubeVirtItem{}, err
 	}
-	path := tmp.Name()
 	defer os.Remove(path)
-	if _, err := tmp.Write(manifest); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write KubeVirt manifest: %w", err)
+	// Create is never apply: a conflicting name must not overwrite another VM.
+	out, err := b.runKubectl(ctx, nil, "create", "-f", path, "-o", "json")
+	if err != nil {
+		return kubeVirtItem{}, err
 	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close KubeVirt manifest: %w", err)
+	var item kubeVirtItem
+	if err := json.Unmarshal([]byte(out), &item); err != nil {
+		return item, err
 	}
-	if _, err := b.runKubectl(ctx, b.rt.Stdout, "apply", "-f", path); err != nil {
+	return item, nil
+}
+
+func privateKubeVirtJSON(data []byte) (string, error) {
+	f, err := os.CreateTemp("", "crabbox-kubevirt-*")
+	if err != nil {
+		return "", err
+	}
+	if _, err = f.Write(data); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", err
+	}
+	if err = f.Close(); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+func (b *leaseBackend) setRunStrategy(ctx context.Context, name, strategy string) error {
+	item, err := b.boundVM(ctx, name)
+	if err != nil {
 		return err
 	}
-	_, err = b.runVirtctl(ctx, b.rt.Stdout, "start", name)
-	if err != nil && !keep {
-		_ = b.deleteVM(context.Background(), name)
-	}
+	patch, _ := json.Marshal([]map[string]any{{"op": "test", "path": "/metadata/uid", "value": item.Metadata.UID}, {"op": "add", "path": "/spec/runStrategy", "value": strategy}})
+	_, err = b.runKubectl(ctx, nil, "patch", "virtualmachine.kubevirt.io/"+name, "--type=json", "-p", string(patch))
 	return err
 }
-
 func (b *leaseBackend) startVM(ctx context.Context, name string) error {
-	_, err := b.runVirtctl(ctx, b.rt.Stdout, "start", name)
-	if err != nil && strings.Contains(strings.ToLower(err.Error()), "already running") {
-		return nil
-	}
-	return err
+	return b.setRunStrategy(ctx, name, "Always")
 }
-
 func (b *leaseBackend) stopVM(ctx context.Context, name string) error {
-	_, err := b.runVirtctl(ctx, b.rt.Stdout, "stop", name)
-	return err
+	return b.setRunStrategy(ctx, name, "Halted")
 }
-
 func (b *leaseBackend) deleteVM(ctx context.Context, name string) error {
-	_, err := b.runKubectl(ctx, b.rt.Stdout, "delete", "virtualmachine.kubevirt.io/"+name, "--wait=true")
-	return err
-}
-
-func (b *leaseBackend) patchVMAnnotations(ctx context.Context, name string, labels map[string]string) error {
-	annotations := map[string]string{}
-	for key, value := range labels {
-		annotations[annotationBase+key] = value
-	}
-	patch, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{"annotations": annotations},
-	})
+	item, err := b.boundVM(ctx, name)
 	if err != nil {
-		return fmt.Errorf("encode KubeVirt annotation patch: %w", err)
+		return err
 	}
-	_, err = b.runKubectl(ctx, nil, "patch", "virtualmachine.kubevirt.io/"+name, "--type=merge", "-p", string(patch))
+	return b.deleteVMUID(ctx, name, item.Metadata.UID)
+}
+func (b *leaseBackend) deleteVMUID(ctx context.Context, name, uid string) error {
+	if uid == "" {
+		return core.Exit(4, "refusing KubeVirt deletion without a bound UID")
+	}
+	options, _ := json.Marshal(map[string]any{"apiVersion": "v1", "kind": "DeleteOptions", "preconditions": map[string]string{"uid": uid}, "propagationPolicy": "Foreground"})
+	file, err := privateKubeVirtJSON(options)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file)
+	uri := "/apis/kubevirt.io/v1/namespaces/" + url.PathEscape(b.cfg.KubeVirt.Namespace) + "/virtualmachines/" + url.PathEscape(name)
+	if _, err = b.runKubectl(ctx, nil, "delete", "--raw", uri, "-f", file); err != nil {
+		return err
+	}
+	// Keep the tombstone nonterminal until the original UID has disappeared.
+	until := time.Now().Add(time.Minute)
+	for {
+		out, err := b.runKubectl(ctx, nil, "get", "virtualmachines.kubevirt.io", "-o", "json")
+		if err != nil {
+			return err
+		}
+		var all kubeVirtList
+		if err = json.Unmarshal([]byte(out), &all); err != nil {
+			return err
+		}
+		present := false
+		for _, item := range all.Items {
+			if item.Metadata.UID == uid {
+				present = true
+			}
+		}
+		if !present {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+		if time.Now().After(until) {
+			return core.Exit(5, "KubeVirt deletion of UID %s is not confirmed", uid)
+		}
+	}
+}
+func (b *leaseBackend) patchVMAnnotations(ctx context.Context, name string, labels map[string]string) error {
+	item, err := b.boundVM(ctx, name)
+	if err != nil {
+		return err
+	}
+	patch := []map[string]any{{"op": "test", "path": "/metadata/uid", "value": item.Metadata.UID}}
+	if item.Metadata.Annotations == nil {
+		patch = append(patch, map[string]any{"op": "add", "path": "/metadata/annotations", "value": map[string]string{}})
+	}
+	for key, value := range labels {
+		key = strings.ReplaceAll(strings.ReplaceAll(annotationBase+key, "~", "~0"), "/", "~1")
+		patch = append(patch, map[string]any{"op": "add", "path": "/metadata/annotations/" + key, "value": value})
+	}
+	data, _ := json.Marshal(patch)
+	_, err = b.runKubectl(ctx, nil, "patch", "virtualmachine.kubevirt.io/"+name, "--type=json", "-p", string(data))
 	return err
 }
 
@@ -382,37 +415,36 @@ func (b *leaseBackend) listVMs(ctx context.Context) ([]kubeVirtItem, error) {
 		return nil, err
 	}
 	var list kubeVirtList
-	if err := json.Unmarshal([]byte(out), &list); err != nil {
+	if err = json.Unmarshal([]byte(out), &list); err != nil {
 		return nil, core.Exit(5, "KubeVirt inventory returned invalid JSON: %v", err)
 	}
 	return list.Items, nil
 }
-
 func (b *leaseBackend) getVM(ctx context.Context, name string) (kubeVirtItem, error) {
 	out, err := b.runKubectl(ctx, nil, "get", "virtualmachine.kubevirt.io/"+name, "-o", "json")
 	if err != nil {
 		return kubeVirtItem{}, err
 	}
 	var item kubeVirtItem
-	if err := json.Unmarshal([]byte(out), &item); err != nil {
-		return kubeVirtItem{}, core.Exit(5, "KubeVirt VM lookup returned invalid JSON: %v", err)
+	if err = json.Unmarshal([]byte(out), &item); err != nil {
+		return item, core.Exit(5, "KubeVirt VM lookup returned invalid JSON: %v", err)
 	}
 	return item, nil
 }
-
 func (b *leaseBackend) getVMI(ctx context.Context, name string) (kubeVirtVMI, error) {
 	out, err := b.runKubectl(ctx, nil, "get", "virtualmachineinstances.kubevirt.io/"+name, "-o", "json")
 	if err != nil {
 		return kubeVirtVMI{}, err
 	}
 	var item kubeVirtVMI
-	if err := json.Unmarshal([]byte(out), &item); err != nil {
-		return kubeVirtVMI{}, core.Exit(5, "KubeVirt VMI lookup returned invalid JSON: %v", err)
+	if err = json.Unmarshal([]byte(out), &item); err != nil {
+		return item, core.Exit(5, "KubeVirt VMI lookup returned invalid JSON: %v", err)
 	}
 	return item, nil
 }
 
 func (b *leaseBackend) waitForVMIReadyForSSH(ctx context.Context, name string, timeout time.Duration) (kubeVirtVMIStatus, error) {
+
 	start := time.Now()
 	deadline := start.Add(timeout)
 	var last kubeVirtVMIStatus
@@ -715,6 +747,7 @@ func (b *leaseBackend) itemToServer(item kubeVirtItem) core.Server {
 		leaseID = leaseIDFromName(name)
 	}
 	server := b.server(name, leaseID, slug, true)
+	server.ImmutableID = item.Metadata.UID
 	for key, value := range item.Metadata.Annotations {
 		if strings.HasPrefix(key, annotationBase) {
 			server.Labels[strings.TrimPrefix(key, annotationBase)] = value
@@ -818,6 +851,8 @@ type kubeVirtList struct {
 type kubeVirtItem struct {
 	Metadata struct {
 		Name              string            `json:"name"`
+		UID               string            `json:"uid"`
+		Namespace         string            `json:"namespace"`
 		CreationTimestamp string            `json:"creationTimestamp"`
 		Labels            map[string]string `json:"labels"`
 		Annotations       map[string]string `json:"annotations"`
@@ -1081,7 +1116,7 @@ func (b *leaseBackend) resolveClaim(identifier string) (core.LeaseClaim, bool, e
 }
 
 func (b *leaseBackend) claimMatchesScope(claim core.LeaseClaim, scope string) bool {
-	return claim.LeaseID != "" && claim.Provider == providerName && strings.TrimSpace(claim.ProviderScope) == scope
+	return claim.LeaseID != "" && (claim.Provider == providerName || claim.Provider == core.FixedKubeVirtClaimProvider) && strings.TrimSpace(claim.ProviderScope) == scope
 }
 
 func (b *leaseBackend) resolveName(identifier string) (string, string, string, error) {
@@ -1151,6 +1186,14 @@ func (b *leaseBackend) resolveStatusItem(ctx context.Context, identifier string)
 		item, err := b.getVM(ctx, name)
 		if err != nil {
 			return kubeVirtItem{}, "", "", "", err
+		}
+		if kubeVirtFixedKind.IsFixedClaim(claim) {
+			if claim.FixedCreateIntent.State == "released" {
+				return kubeVirtItem{}, "", "", "", core.Exit(4, "KubeVirt lease is terminal")
+			}
+			if err := b.validateFixedItem(ctx, claim, item); err != nil {
+				return kubeVirtItem{}, "", "", "", err
+			}
 		}
 		actualName, leaseID, actualSlug, _, err := identityFromItem(item, name)
 		if err != nil {
