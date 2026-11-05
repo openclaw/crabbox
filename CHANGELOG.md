@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Firecracker: use Linux's `nomodule` boot argument so module-capable guests cannot load kernel modules and init no longer receives `nomodules`. [PR 3032](https://github.com/openclaw/crabbox/pull/3032). Thanks @coygeek.
 - Apple Machine: read the daemon's nested storage root so Apple Container 1.6.1 can acquire machines, while retaining supported 1.0 status responses and ownership validation. [PR 3033](https://github.com/openclaw/crabbox/pull/3033). Thanks @coygeek.
 - Coordinator readiness: report missing coordinator configuration with actionable failed JSON instead of panicking in SSH-host doctor or host inventory commands. [PR 2998](https://github.com/openclaw/crabbox/pull/2998). Thanks @goutamadwant.
 - Sync: reuse directory-source leases through equivalent path aliases, preserve literal legacy claim admission, and keep execution ownership checks consistent. [PR 3002](https://github.com/openclaw/crabbox/pull/3002). Thanks @goutamadwant.
