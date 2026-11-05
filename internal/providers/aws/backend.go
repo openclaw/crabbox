@@ -169,15 +169,16 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 	var resolvedCfg core.Config
 	var accountID, providerScope, publicKey, fingerprint string
 	acquired, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
-		Kind:         fixedAWSLeaseKind,
-		LeaseID:      leaseID,
-		CheckpointID: req.RequestedCheckpointID,
-		RepoRoot:     req.Repo.Root,
-		Reclaim:      req.Reclaim,
-		TargetOS:     cfg.TargetOS,
-		WindowsMode:  cfg.WindowsMode,
-		TTL:          cfg.TTL,
-		IdleTimeout:  cfg.IdleTimeout,
+		LegacyRepoRoot: req.Repo.LegacyRoot,
+		Kind:           fixedAWSLeaseKind,
+		LeaseID:        leaseID,
+		CheckpointID:   req.RequestedCheckpointID,
+		RepoRoot:       req.Repo.Root,
+		Reclaim:        req.Reclaim,
+		TargetOS:       cfg.TargetOS,
+		WindowsMode:    cfg.WindowsMode,
+		TTL:            cfg.TTL,
+		IdleTimeout:    cfg.IdleTimeout,
 	}, core.FixedLeaseOperations[core.Server]{PlanDuringSubmit: true, Admission: &core.FixedAdmission{}, DeferredAdmission: true, DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		var err error
 		client, err = newAWSClient(ctx, cfg)

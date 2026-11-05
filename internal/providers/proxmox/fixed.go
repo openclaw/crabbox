@@ -67,7 +67,8 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 	}
 	var publicKey, fingerprint string
 	acquired, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
-		Kind: fixedProxmoxLeaseKind, LeaseID: leaseID, CheckpointID: req.RequestedCheckpointID,
+		LegacyRepoRoot: req.Repo.LegacyRoot,
+		Kind:           fixedProxmoxLeaseKind, LeaseID: leaseID, CheckpointID: req.RequestedCheckpointID,
 		RepoRoot: req.Repo.Root, Reclaim: req.Reclaim, TargetOS: cfg.TargetOS,
 		WindowsMode: cfg.WindowsMode, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout,
 	}, core.FixedLeaseOperations[core.Server]{Admission: &core.FixedAdmission{}, PlanReservationKey: "proxmox-vmid", DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {

@@ -29,7 +29,8 @@ func (b *backend) acquireDurable(ctx context.Context, req core.AcquireRequest) (
 	}
 	var publicKey string
 	lease, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
-		Kind: incusLeaseKind, LeaseID: leaseID, CheckpointID: req.RequestedCheckpointID, RepoRoot: req.Repo.Root,
+		LegacyRepoRoot: req.Repo.LegacyRoot,
+		Kind:           incusLeaseKind, LeaseID: leaseID, CheckpointID: req.RequestedCheckpointID, RepoRoot: req.Repo.Root,
 		Reclaim: req.Reclaim, TargetOS: cfg.TargetOS, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout,
 	}, core.FixedLeaseOperations[*api.Instance]{Admission: &core.FixedAdmission{RepeatSameIdentity: true}, DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		identity, err := client.Identity()

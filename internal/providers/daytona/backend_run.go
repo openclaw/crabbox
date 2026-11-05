@@ -390,7 +390,7 @@ func (b *daytonaLeaseBackend) resolveDaytonaToolboxSandbox(ctx context.Context, 
 	}
 	server := daytonaSandboxToServer(apiSandbox)
 	if original != nil {
-		if err := core.CheckLeaseClaimRepositoryOwner(leaseID, *original, repo.Root, false); err != nil {
+		if err := core.CheckLeaseClaimRepositoryOwner(leaseID, *original, repo.Root, false, repo.LegacyRoot); err != nil {
 			return nil, "", err
 		}
 		if err := core.AuthorizeCheckpointRelease(*original, ""); err != nil {
