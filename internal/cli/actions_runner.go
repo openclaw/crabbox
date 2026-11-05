@@ -107,6 +107,10 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 			if !exists || !sameActionsWorkspaceClaimOwner(*claim, expected) || strictSnapshot && !reflect.DeepEqual(*claim, expected) && !actionsClaimLifecycleOnlyChange(expected, *claim) {
 				return Exit(2, "Actions runner lease claim changed or is missing")
 			}
+			// Both activation paths below start a listener; a retiring lease must not gain one.
+			if actionsRunnerClaimRetiring(*claim) {
+				return Exit(2, "Actions runner lease is %s; refusing to activate a runner", strings.TrimSpace(claim.Labels["state"]))
+			}
 			fingerprint = actionsRunnerLeaseFingerprint(*claim)
 			binding := claim.ActionsRunner
 			guest, err := readActionsRunnerGuest(ctx, target, checkVersion)

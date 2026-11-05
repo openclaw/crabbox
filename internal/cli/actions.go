@@ -234,10 +234,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	hydrateCtx, cancelHydrate := context.WithTimeout(ctx, *waitTimeout)
 	defer cancelHydrate()
 	state, err := a.hydrateActionsWithGitHubRunner(hydrateCtx, cfg, repo, target, leaseID, slug, ghRepo, label, ref, fields, *waitTimeout, owner)
-	if cause := actionsOperationCause(ctx); cause != nil {
-		return cause
-	}
-	if err != nil {
+	if err := actionsOperationFailure(ctx, err); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "actions hydrated id=%s slug=%s workspace=%s run_id=%s\n", leaseID, blank(slug, "-"), state.Workspace, blank(state.RunID, "-"))

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -300,6 +301,21 @@ func actionsOperationCause(ctx context.Context) error {
 		return nil
 	}
 	return cause
+}
+
+// actionsOperationFailure reports why the operation was canceled together with
+// any operation error that is more than that cancellation, such as a runner
+// left to reconcile, so cleanup state is not hidden behind the cause.
+func actionsOperationFailure(ctx context.Context, err error) error {
+	cause := actionsOperationCause(ctx)
+	switch {
+	case cause == nil:
+		return err
+	case err == nil || err == context.Canceled || err == context.DeadlineExceeded || errors.Is(err, cause):
+		return cause
+	default:
+		return errors.Join(cause, err)
+	}
 }
 
 // withClaimLifetimePolicy carries lifetime labels that an extend published to the claim into the next touch.

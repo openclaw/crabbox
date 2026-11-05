@@ -908,3 +908,46 @@ func TestActionsRunnerReservationHoldsAcrossLeaseRenewalOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestActionsRunnerRegistrationRefusesLeaseRetiredAfterSnapshot(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	// Any guest contact would fail on a missing ssh, not with the refusal below.
+	t.Setenv("PATH", t.TempDir())
+	const leaseID = "cbx_retiring00001"
+	captured, err := ClaimLeaseForRepoProviderScopePondWithLabels(leaseID, "retiring", "hyperv", "instance:test", "", "/repo", 30*time.Minute, map[string]string{"state": "ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Cleanup changes only the state label after hydration captured its snapshot,
+	// which the renewal-only snapshot check accepts.
+	labels := cloneStringMap(captured.Labels)
+	labels["state"] = "cleanup"
+	if _, err := UpdateLeaseClaimLabelsAndLastUsedIfUnchanged(leaseID, captured, labels, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	app := App{Stdout: io.Discard, Stderr: &stderr}
+	target := SSHTarget{Host: "guest.invalid", User: "runner", Port: "22", TargetOS: targetLinux}
+	_, err = app.registerActionsRunner(t.Context(), Config{}, target, leaseID, "retiring", "repos/example-org/my-app", "", "", nil, captured, true)
+	if err == nil || !strings.Contains(err.Error(), "lease is cleanup; refusing to activate") {
+		t.Fatalf("registration on a retiring lease: %v\n%s", err, stderr.String())
+	}
+}
+
+func TestActionsOperationFailureKeepsRunnerReconciliationDetail(t *testing.T) {
+	cause := Exit(4, "lease cbx_x claim changed ownership during heartbeat")
+	canceled, cancel := context.WithCancelCause(context.Background())
+	cancel(cause)
+	left := Exit(7, "persist runner repos/example-org/my-app/41; listener was not started: HTTP 403")
+	got := actionsOperationFailure(canceled, left)
+	if got == nil || !strings.Contains(got.Error(), "changed ownership") || !strings.Contains(got.Error(), "/41; listener was not started: HTTP 403") || ExitCodeForError(got, 0) != 4 {
+		t.Fatalf("canceled hydration hid the runner left to reconcile: %v", got)
+	}
+	if got := actionsOperationFailure(canceled, context.Canceled); got == nil || got.Error() != cause.Error() {
+		t.Fatalf("bare cancellation: %v", got)
+	}
+	plain := errors.New("dispatch failed")
+	if got := actionsOperationFailure(context.Background(), plain); got != plain {
+		t.Fatalf("uncanceled failure: %v", got)
+	}
+}
