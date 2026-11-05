@@ -15,9 +15,9 @@ type brokenPipeHandler struct {
 	stop   func()
 }
 
-func newBrokenPipeHandler(cancel func()) *brokenPipeHandler {
+func newBrokenPipeHandler(cancel func(), outputs ...*os.File) *brokenPipeHandler {
 	h := &brokenPipeHandler{cancel: cancel}
-	h.stop = notifyBrokenPipe(h.fail)
+	h.stop = notifyBrokenPipe(h.fail, outputs...)
 	return h
 }
 

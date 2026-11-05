@@ -29,7 +29,7 @@ func run() int {
 	}()
 	ctx, cancel := context.WithCancel(interruptCtx)
 	defer cancel()
-	pipes := newBrokenPipeHandler(cancel)
+	pipes := newBrokenPipeHandler(cancel, os.Stdout, os.Stderr)
 	stdout, stderr := pipes.writer(os.Stdout), pipes.writer(os.Stderr)
 	args := os.Args[1:]
 	var err error
