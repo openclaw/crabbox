@@ -235,7 +235,7 @@ func TestRunUsesHomeMountedRepoAndEnv(t *testing.T) {
 	}
 	req := runner.requests[len(runner.requests)-1]
 	got := strings.Join(req.Args, " ")
-	if !strings.Contains(got, "machine run --name crabbox-123456789abc --cwd "+repo+" --env-file ") || !strings.HasSuffix(got, " go test ./...") {
+	if !strings.Contains(got, "machine run --name crabbox-123456789abc --cwd "+repo+" --env-file ") || !strings.HasSuffix(got, " 'go' 'test' './...'") {
 		t.Fatalf("args=%q", got)
 	}
 	if strings.Contains(got, "CI=1") || strings.Contains(got, "/opt/homebrew/bin") {

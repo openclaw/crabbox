@@ -130,14 +130,16 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (result core.Run
 		defer cleanup()
 		args = append(args, "--env-file", envFile)
 	}
-	command := req.Command
-	if req.ShellMode {
-		command = []string{"/bin/sh", "-lc", core.ShellScriptFromArgv(req.Command)}
-	}
-	if len(command) == 0 {
+	if len(req.Command) == 0 {
 		return result, core.Exit(2, "provider=%s requires a command", providerName)
 	}
-	args = append(args, command...)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+	if err != nil {
+		return result, core.Exit(2, "provider=%s: %v", providerName, err)
+	}
+	// Apple Container 1.0.0–1.6.1 joins these words in init's `<user shell> -c "$*"`.
+	// https://github.com/apple/container/blob/1.6.1/Sources/Plugins/MachineAPIServer/Resources/init#L27
+	args = append(args, intent.ShellCommand("/bin/sh", "-lc"))
 	commandStarted := time.Now()
 	req.Observation.Phase(core.RunPhaseCommand)
 	commandBackend := *b
@@ -373,7 +375,7 @@ func (b *backend) waitMachineReady(ctx context.Context, claim core.LeaseClaim) e
 			if _, err := b.verifyMachineIdentity(ctx, claim); err != nil {
 				return observation{}, err
 			}
-			_, err := b.control(ctx, []string{"machine", "run", "--name", claim.CloudID, ":"})
+			_, err := b.control(ctx, []string{"machine", "run", "--name", claim.CloudID, core.ShellQuote(":")})
 			return observation{err: err}, nil
 		},
 		func(_ context.Context, current observation, identityErr error) (bool, error) {
