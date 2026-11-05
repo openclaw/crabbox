@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/fat16"
 
 	"github.com/lima-vm/go-qcow2reader"
@@ -1189,6 +1190,11 @@ func createSeedImage(ctx context.Context, path, hostName, user, publicKey, workR
 func seedUserData(user, publicKey, workRoot string) string {
 	return strings.TrimSpace(fmt.Sprintf(`
 #cloud-config
+package_update: false
+package_upgrade: false
+bootcmd:
+  - |
+%s
 users:
   - default
   - name: %s
@@ -1220,7 +1226,7 @@ runcmd:
   - [chown, %s, %s]
   - [systemctl, daemon-reload]
   - [systemctl, enable, --now, crabbox-vsock-ssh-proxy.service]
-`, yamlString(user), yamlString(publicKey), indentBlock(vsockProxyPython), indentBlock(vsockProxyService), indentBlock(readyScript(workRoot)), yamlString(workRoot), yamlString(user+":"+user), yamlString(workRoot))) + "\n"
+`, indentBlock(core.LinuxAptQuiesce()), yamlString(user), yamlString(publicKey), indentBlock(vsockProxyPython), indentBlock(vsockProxyService), indentBlock(readyScript(workRoot)), yamlString(workRoot), yamlString(user+":"+user), yamlString(workRoot))) + "\n"
 }
 
 func yamlString(value string) string {

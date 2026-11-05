@@ -32,8 +32,20 @@
       "parameters": {}
     },
     {
+      "name": "linuxAptWait",
+      "file": "linuxAptWait.sh",
+      "literal": true,
+      "parameters": {}
+    },
+    {
       "name": "linuxBootstrapPrelude",
       "file": "linuxBootstrapPrelude.sh",
+      "parameters": {}
+    },
+    {
+      "name": "linuxAptQuiesce",
+      "file": "linuxAptQuiesce.sh",
+      "literal": true,
       "parameters": {}
     },
     {

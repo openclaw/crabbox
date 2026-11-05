@@ -1,3 +1,5 @@
+{{include:linuxAptQuiesce}}
+
 # bootcmd precedes write_files. Queue the unit without waiting for cloud-config,
 # which supplies the script, users, SSH keys, and APT configuration it needs.
 # Order after cloud-config without requiring its success, like cloud-final.

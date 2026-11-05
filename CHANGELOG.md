@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Linux bootstrap: quiesce scheduled APT updates on provisioned guests without interrupting active package transactions, preventing mid-lease SSH renewal failures. [PR 3049](https://github.com/openclaw/crabbox/pull/3049). Thanks @excelsier.
 - Actions: preserve exact runner cleanup ownership when registration is canceled after guest configuration, without starting the listener. [PR 3045](https://github.com/openclaw/crabbox/pull/3045). Thanks @vincentkoc.
 - Apple Machine: report workload exit codes without replaying output, bound native diagnostics, and show failed-creation recovery guidance in `run` and `warmup`. [PR 3044](https://github.com/openclaw/crabbox/pull/3044). Thanks @coygeek.
 - CLI: finish one-shot lease cleanup when stdout or stderr closes early, returning SIGPIPE-style exit 141 on Unix while preserving explicit retention. [PR 3040](https://github.com/openclaw/crabbox/pull/3040). Thanks @coygeek.

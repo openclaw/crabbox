@@ -32,6 +32,19 @@ cloud-init. The bootstrap deliberately does **not** run `apt upgrade`
 (`package_upgrade: false`), so a box comes up fast and predictable rather than
 chasing the latest package set.
 
+On provisioned Debian/Ubuntu cloud-init guests, early boot also disables and stops
+`apt-daily.timer` and `apt-daily-upgrade.timer` without waiting on systemd boot
+ordering, and masks `apt-daily.service` and `apt-daily-upgrade.service`. This
+guard runs on every boot, before bootstrap configures SSH. It leaves any active
+APT/dpkg transaction to finish and retains `unattended-upgrades.service` for
+shutdown coordination. After early boot, package setup waits for any inherited
+scheduled transaction before installing tools. Proxmox applies the same policy
+when it first configures the cloned guest over SSH. Explicit `apt-get update`,
+`apt-get install`, and the developer tools installer still work. These leases do
+not self-apply scheduled package updates:
+refresh the image or run updates explicitly. Static/operator-owned SSH hosts
+retain their own update policy.
+
 Bootstrap creates:
 
 - the `crabbox` SSH user, in the `sudo` group with passwordless sudo;
