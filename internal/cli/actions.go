@@ -247,7 +247,8 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 	if err != nil {
 		return actionsHydrationState{}, err
 	}
-	if err := a.registerGitHubActionsRunnerOwned(ctx, cfg, target, leaseID, slug, ghRepo, "", nil, owner); err != nil {
+	claim, err = a.registerActionsRunner(ctx, cfg, target, leaseID, slug, "repos/"+ghRepo.Slug(), "", "", nil, claim, true)
+	if err != nil {
 		return actionsHydrationState{}, err
 	}
 	plainManifest := classifyGitOrigin(repo.RemoteURL) != gitOriginRemoteAttemptSafe
@@ -342,6 +343,8 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	leaseIDFlag := fs.String("id", "", "existing lease id or slug")
 	workflowFlags := registerActionsRepositoryFlags(fs)
+	orgFlag := fs.String("org", "", "register with a GitHub organization instead of a repository")
+	groupFlag := fs.String("runner-group", "", "existing organization runner group")
 	nameFlag := fs.String("name", "", "runner name")
 	labelsFlag := fs.String("labels", "", "comma-separated extra runner labels")
 	versionFlag := fs.String("version", "", "actions/runner version or latest")
@@ -374,7 +377,7 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	extraLabels := splitCommaList(*labelsFlag)
-	ghRepo, err := resolveGitHubRepo(repo, cfg.Actions.Repo)
+	scope, err := actionsRunnerScope(repo, cfg.Actions.Repo, *orgFlag, *groupFlag, flagWasSet(fs, "repo"))
 	if err != nil {
 		return err
 	}
@@ -387,8 +390,13 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, slug, cfg, &server, target, repo.Root, *reclaim); err != nil {
 		return err
 	}
+	expected, exists, set := ServerLeaseClaimSnapshot(server)
+	if !set || !exists {
+		return Exit(2, "Actions runner target has no claimed resource snapshot")
+	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
-	return a.registerGitHubActionsRunner(ctx, cfg, target, leaseID, slug, ghRepo, *nameFlag, extraLabels)
+	_, err = a.registerActionsRunner(ctx, cfg, target, leaseID, slug, scope, *groupFlag, *nameFlag, extraLabels, expected, false)
+	return err
 }
 
 func (a App) actionsDispatch(ctx context.Context, args []string) error {
@@ -422,31 +430,16 @@ func (a App) actionsDispatch(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (a App) registerGitHubActionsRunner(ctx context.Context, cfg Config, target SSHTarget, leaseID, slug string, ghRepo GitHubRepo, nameOverride string, extraLabels []string) error {
-	return a.registerGitHubActionsRunnerOwned(ctx, cfg, target, leaseID, slug, ghRepo, nameOverride, extraLabels, nil)
-}
-
-func (a App) registerGitHubActionsRunnerOwned(ctx context.Context, cfg Config, target SSHTarget, leaseID, slug string, ghRepo GitHubRepo, nameOverride string, extraLabels []string, owner *workspaceOwner) error {
-	if !supportsGitHubActionsRunnerTarget(target) {
-		return Exit(2, "actions runner registration currently supports Linux and Windows targets only")
+func (a App) registerGitHubActionsRunner(ctx context.Context, cfg Config, server *Server, target SSHTarget, leaseID, slug string, ghRepo GitHubRepo, nameOverride string, extraLabels []string) error {
+	expected, exists, set := ServerLeaseClaimSnapshot(*server)
+	if !set || !exists {
+		return Exit(2, "Actions runner target has no claimed resource snapshot")
 	}
-	token, err := githubActionsRegistrationToken(ctx, ghRepo, target.ChildEnvDenylist)
-	if err != nil {
-		return err
+	updated, err := a.registerActionsRunner(ctx, cfg, target, leaseID, slug, "repos/"+ghRepo.Slug(), "", nameOverride, extraLabels, expected, false)
+	if updated.LeaseID != "" {
+		SetServerLeaseClaimSnapshot(server, updated, true)
 	}
-	name := nameOverride
-	if name == "" {
-		name = LeaseProviderName(leaseID, slug)
-	}
-	labels := githubActionsRunnerLabels(cfg, leaseID, slug, extraLabels)
-	script := githubActionsRunnerInstallScriptForTarget(cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, target)
-	remote := githubActionsRunnerInstallRemoteCommand(target)
-	input := githubActionsRunnerInstallInput(ghRepo.Slug(), name, strings.Join(labels, ","), token, script)
-	if err := runSSHInputQuiet(ctx, target, remote, input); err != nil {
-		return Exit(7, "register GitHub Actions runner on %s: %v", target.Host, err)
-	}
-	fmt.Fprintf(a.Stdout, "actions runner registered repo=%s name=%s labels=%s ephemeral=%t\n", ghRepo.Slug(), name, strings.Join(labels, ","), cfg.Actions.Ephemeral)
-	return nil
+	return err
 }
 
 func supportsLocalActionsHydrateTarget(target SSHTarget) bool {
@@ -671,7 +664,7 @@ func (a App) executeLocalActionsHydration(ctx context.Context, cfg Config, repo 
 	if owner != nil {
 		pid, err = runWorkspaceOwnerBackgroundOutput(startCtx, target, owner, remoteLocalActionsHydrateBackgroundPayload(plan.leaseID))
 	} else {
-		pid, err = runSSHOutput(startCtx, target, startRemote)
+		pid, err = runWorkspaceOwnerBackgroundOutput(startCtx, target, nil, startRemote)
 	}
 	if err != nil {
 		return actionsHydrationState{}, Exit(7, "start local Actions hydration on %s: %v", target.Host, err)
@@ -2527,7 +2520,7 @@ func runActionsHydrationOutput(ctx context.Context, target SSHTarget, remote str
 func runActionsHydrationCommand(ctx context.Context, target SSHTarget, remote string, stdout io.Writer) error {
 	commandCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	err := executeSSH(commandCtx, &target, remote, nil, 0, 15*time.Second, "2", "1", stdout, io.Discard)
+	_, err := executeSSHWithRetirement(commandCtx, &target, remote, nil, 0, sshCommandLimit{execution: 15 * time.Second, control: target.TargetOS == targetLinux}, "2", "1", stdout, io.Discard)
 	if commandCtx.Err() == context.DeadlineExceeded {
 		return Exit(7, "Actions hydration SSH probe timed out after 30s")
 	}
@@ -3227,6 +3220,7 @@ expected_sha="$(jq -er --arg name "$archive_name" '.assets[] | select(.name == $
 runner_dir="$HOME/actions-runner"
 mkdir -p "$runner_dir"
 cd "$runner_dir"
+if [ -e .runner ]; then echo "runner registration must be reconciled before configuration" >&2; exit 2; fi
 version_marker=".crabbox-runner-version-$version-$runner_arch-sha256-$expected_sha"
 if [ ! -x ./config.sh ] || [ ! -f "$version_marker" ]; then
   archive="$(mktemp "${TMPDIR:-/tmp}/crabbox-actions-runner.XXXXXX.tar.gz")"
@@ -3243,9 +3237,6 @@ if [ ! -x ./config.sh ] || [ ! -f "$version_marker" ]; then
   trap - EXIT
   touch "$version_marker"
 fi
-if [ -f .runner ]; then
-  ./config.sh remove --unattended --token "$RUNNER_TOKEN" || true
-fi
 if command -v apt-get >/dev/null 2>&1 && grep -qi microsoft /proc/version 2>/dev/null; then
   sudo rm -rf /var/lib/apt/lists/*
   sudo apt-get update >/tmp/crabbox-actions-runner-apt-update.log 2>&1
@@ -3253,35 +3244,11 @@ fi
 sudo ./bin/installdependencies.sh >/tmp/crabbox-actions-runner-deps.log 2>&1 || true
 sudo mkdir -p "$HOME/.cache/node/corepack/v1"
 sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache" 2>/dev/null || true
-./config.sh --unattended --replace %s --url "https://github.com/${RUNNER_REPO}" --token "$RUNNER_TOKEN" --name "$RUNNER_NAME" --labels "$RUNNER_LABELS"
+group_args=()
+if [ -n "${RUNNER_GROUP:-}" ]; then group_args=(--runnergroup "$RUNNER_GROUP"); fi
+./config.sh --unattended %s "${group_args[@]}" --url "https://github.com/${RUNNER_REPO}" --token "$RUNNER_TOKEN" --name "$RUNNER_NAME" --labels "$RUNNER_LABELS"
 %s
-cat >"$HOME/actions-runner/run-crabbox.sh" <<'RUNNER'
-#!/usr/bin/env bash
-set -euo pipefail
-if [ "$(id -u)" = 0 ]; then
-  export RUNNER_ALLOW_RUNASROOT=1
-fi
-cd "$HOME/actions-runner"
-exec ./run.sh
-RUNNER
-chmod +x "$HOME/actions-runner/run-crabbox.sh"
-sudo tee /etc/systemd/system/crabbox-actions-runner.service >/dev/null <<SERVICE
-[Unit]
-Description=Crabbox GitHub Actions runner
-After=network-online.target docker.service
-Wants=network-online.target
 
-[Service]
-User=$(id -un)
-WorkingDirectory=$HOME/actions-runner
-ExecStart=$HOME/actions-runner/run-crabbox.sh
-Restart=no
-
-[Install]
-WantedBy=multi-user.target
-SERVICE
-sudo systemctl daemon-reload
-sudo systemctl enable --now crabbox-actions-runner.service
 `, shellQuote(version), ephemeralArg, githubActionsRunnerToolCacheSeedScript())
 }
 
@@ -3383,6 +3350,7 @@ $expectedSha = $digestMatch.Groups["sha"].Value.ToLowerInvariant()
 $runnerDir = Join-Path $HOME "actions-runner"
 New-Item -ItemType Directory -Force -Path $runnerDir | Out-Null
 Set-Location -LiteralPath $runnerDir
+if (Test-Path -LiteralPath ".\.runner") { throw "runner registration must be reconciled before configuration" }
 $versionMarker = ".crabbox-runner-version-$version-$runnerArch-sha256-$expectedSha"
 if (-not (Test-Path -LiteralPath ".\config.cmd") -or -not (Test-Path -LiteralPath $versionMarker)) {
   $zip = Join-Path ([IO.Path]::GetTempPath()) ("crabbox-actions-runner-" + [Guid]::NewGuid().ToString("N") + ".zip")
@@ -3399,51 +3367,25 @@ if (-not (Test-Path -LiteralPath ".\config.cmd") -or -not (Test-Path -LiteralPat
     Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
   }
 }
-if (Test-Path -LiteralPath ".\.runner") {
-  & .\config.cmd remove --unattended --token $env:RUNNER_TOKEN
-  if ($LASTEXITCODE -ne 0) { Write-Warning "previous runner removal failed; continuing with replace"; $global:LASTEXITCODE = 0 }
-}
-$configArgs = @("--unattended", "--replace"%s, "--url", "https://github.com/$env:RUNNER_REPO", "--token", $env:RUNNER_TOKEN, "--name", $env:RUNNER_NAME, "--labels", $env:RUNNER_LABELS)
+$configArgs = @("--unattended"%s, "--url", "https://github.com/$env:RUNNER_REPO", "--token", $env:RUNNER_TOKEN, "--name", $env:RUNNER_NAME, "--labels", $env:RUNNER_LABELS)
+if ($env:RUNNER_GROUP) { $configArgs += @("--runnergroup", $env:RUNNER_GROUP) }
 & .\config.cmd @configArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-$runScript = Join-Path $runnerDir "run-crabbox.ps1"
-Set-Content -Encoding UTF8 -LiteralPath $runScript -Value @'
-$ErrorActionPreference = "Stop"
-Set-Location -LiteralPath $PSScriptRoot
-& .\run.cmd
-exit $LASTEXITCODE
-'@
-$log = Join-Path $runnerDir "crabbox-runner.log"
-$err = Join-Path $runnerDir "crabbox-runner.err.log"
-$taskName = ("crabbox-actions-runner-" + ($env:RUNNER_NAME -replace "[^A-Za-z0-9_.-]", "-"))
-$passwordPath = "C:\ProgramData\crabbox\windows.password"
-if (Test-Path -LiteralPath $passwordPath) {
-  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-  $argument = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $runScript + '"'
-  $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument
-  $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(5))
-  $password = (Get-Content -Raw -LiteralPath $passwordPath).Trim()
-  Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -User (whoami) -Password $password -RunLevel Highest -Force | Out-Null
-  Start-ScheduledTask -TaskName $taskName
-  Write-Output ("started runner task=" + $taskName)
-} else {
-  $process = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runScript) -WorkingDirectory $runnerDir -RedirectStandardOutput $log -RedirectStandardError $err -WindowStyle Hidden -PassThru
-  Write-Output ("started runner pid=" + $process.Id)
-}
+
 `, psQuote(version), ephemeralArg)
 }
 
-func githubActionsRegistrationToken(ctx context.Context, repo GitHubRepo, childEnvDenylist []string) (string, error) {
-	out, err := ghOutputWithChildEnvironment(ctx, "", childEnvDenylist, "api", "-X", "POST", "repos/"+repo.Slug()+"/actions/runners/registration-token", "--jq", ".token")
+func githubActionsRegistrationToken(ctx context.Context, scope string, childEnvDenylist []string) (string, error) {
+	out, err := ghOutputWithChildEnvironment(ctx, "", childEnvDenylist, "api", "-X", "POST", scope+"/actions/runners/registration-token", "--jq", ".token")
 	if err != nil {
 		if isGitHubRunnerRegistrationPermissionError(err) {
-			return "", Exit(3, "GitHub Actions runner registration for %s requires repository write access or fine-grained Self-hosted runners write permission. If this is a Blacksmith Testbox tbx_... id, skip actions hydrate and run with --provider blacksmith-testbox.", repo.Slug())
+			return "", Exit(3, "GitHub Actions runner registration for %s requires repository Administration write or organization Self-hosted runners write permission.", scope)
 		}
 		return "", err
 	}
 	token := strings.TrimSpace(out)
 	if token == "" {
-		return "", Exit(3, "GitHub returned an empty runner registration token for %s", repo.Slug())
+		return "", Exit(3, "GitHub returned an empty runner registration token for %s", scope)
 	}
 	return token, nil
 }
@@ -3534,4 +3476,67 @@ func (f *stringListFlag) Set(value string) error {
 
 func (f *stringListFlag) Get() any {
 	return append([]string{}, (*f)...)
+}
+
+// Listener activation is separate from installation so the exact registration
+// identity is durable before this lease can accept a workflow job.
+func githubActionsRunnerStartScript(target SSHTarget) string {
+	if isWindowsNativeTarget(target) {
+		return PowershellCommand(`$ErrorActionPreference = "Stop"
+$runnerDir = Join-Path $HOME "actions-runner"
+$env:RUNNER_NAME = (Get-Content -Raw -LiteralPath (Join-Path $runnerDir ".runner") | ConvertFrom-Json).agentName
+$runScript = Join-Path $runnerDir "run-crabbox.ps1"
+Set-Content -Encoding UTF8 -LiteralPath $runScript -Value @'
+$ErrorActionPreference = "Stop"
+Set-Location -LiteralPath $PSScriptRoot
+& .\run.cmd
+exit $LASTEXITCODE
+'@
+$log = Join-Path $runnerDir "crabbox-runner.log"
+$err = Join-Path $runnerDir "crabbox-runner.err.log"
+$taskName = ("crabbox-actions-runner-" + ($env:RUNNER_NAME -replace "[^A-Za-z0-9_.-]", "-"))
+$passwordPath = "C:\ProgramData\crabbox\windows.password"
+if (Test-Path -LiteralPath $passwordPath) {
+  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+  $argument = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $runScript + '"'
+  $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument
+  $password = (Get-Content -Raw -LiteralPath $passwordPath).Trim()
+  Register-ScheduledTask -TaskName $taskName -Action $action -User (whoami) -Password $password -RunLevel Highest -Force | Out-Null
+  Start-ScheduledTask -TaskName $taskName
+  Write-Output ("started runner task=" + $taskName)
+} else {
+  $process = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runScript) -WorkingDirectory $runnerDir -RedirectStandardOutput $log -RedirectStandardError $err -WindowStyle Hidden -PassThru
+  Write-Output ("started runner pid=" + $process.Id)
+}
+`)
+	}
+	return `set -eu
+cat >"$HOME/actions-runner/run-crabbox.sh" <<'RUNNER'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "$(id -u)" = 0 ]; then
+  export RUNNER_ALLOW_RUNASROOT=1
+fi
+cd "$HOME/actions-runner"
+exec ./run.sh
+RUNNER
+chmod +x "$HOME/actions-runner/run-crabbox.sh"
+sudo tee /etc/systemd/system/crabbox-actions-runner.service >/dev/null <<SERVICE
+[Unit]
+Description=Crabbox GitHub Actions runner
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+User=$(id -un)
+WorkingDirectory=$HOME/actions-runner
+ExecStart=$HOME/actions-runner/run-crabbox.sh
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+sudo systemctl daemon-reload
+sudo systemctl enable --now crabbox-actions-runner.service
+`
 }

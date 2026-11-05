@@ -647,3 +647,22 @@ func TestPOSIXRuntimeCapabilityTargets(t *testing.T) {
 		})
 	}
 }
+
+func TestNativeRuntimeLinuxAdmission(t *testing.T) {
+	s := testNativeRuntimeScope()
+	s.manifest = "selected fixture"
+	s.ready = func(context.Context, *SSHTarget, io.Writer) error { return nil }
+	ctx := context.WithValue(t.Context(), nativeRuntimeScopeKey{}, s)
+	target := SSHTarget{Host: "example.invalid", Port: "22", TargetOS: targetLinux}
+	ctx, err := s.prepareCommandRuntime(ctx, &target, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed, err := admittedNativeRuntime(ctx, target)
+	if err != nil || installed == nil {
+		t.Fatalf("Linux ordinary command did not admit its native supervisor: %v", err)
+	}
+	if err := s.finish(ctx); err != nil {
+		t.Fatal(err)
+	}
+}

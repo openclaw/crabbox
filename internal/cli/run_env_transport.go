@@ -43,14 +43,19 @@ func stageSSHCommandEnv(ctx context.Context, target SSHTarget, workdir string, e
 		input = formatPowerShellCommandEnv(private)
 	}
 	prepared.close = func() error {
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		// Finite secret-file cleanup retains the workspace witness but must not
+		// start another foreground workload with its own retirement lifecycle.
+		cleanupLimit := sshCommandLimit{execution: 15 * time.Second, control: true}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupLimit.execution)
 		defer cancel()
-		if err := runSSHQuiet(cleanupCtx, target, removeSSHCommandEnvCommand(target, workdir, prepared.File)); err != nil {
+		cleanupTarget := target
+		if _, err := executeSSHWithRetirement(cleanupCtx, &cleanupTarget, removeSSHCommandEnvCommand(target, workdir, prepared.File), nil, 0, cleanupLimit, "10", "3", io.Discard, io.Discard); err != nil {
 			// A failed acknowledgement or rmdir does not establish that the
 			// secret file survived. Probe once with an independent budget.
-			probeCtx, probeCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			probeLimit := sshCommandLimit{execution: 10 * time.Second, control: true}
+			probeCtx, probeCancel := context.WithTimeout(context.WithoutCancel(ctx), probeLimit.execution)
 			defer probeCancel()
-			state, probeErr := RunSSHOutputBounded(probeCtx, target, probeSSHCommandEnvCommand(target, workdir, prepared.File), 128)
+			state, probeErr := runSSHOutputBoundedWithOptions(probeCtx, target, probeSSHCommandEnvCommand(target, workdir, prepared.File), 128, probeLimit, "10", "1")
 			// Remote output can contain values (for example, shell tracing).
 			// Accept only the complete, known protocol; never echo probe output.
 			if probeErr == nil {

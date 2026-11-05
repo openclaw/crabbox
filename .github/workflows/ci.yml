@@ -116,6 +116,9 @@ jobs:
           mapfile -t packages < <(printf '%s\n' "$packages" | sed '\|^github.com/openclaw/crabbox/internal/cli$|d')
           go test -race -count=1 -timeout=10m "${packages[@]}"
 
+      - name: Test Hyper-V restore claim loss between effects
+        run: go test -race -count=1 -timeout=2m -tags=crabbox_claim_fence_probe ./internal/providers/hyperv -run '^TestRestoreNativeCheckpointStopsAtInterFenceClaimChanges$'
+
       - name: Require executed Linux supervision fixtures
         shell: bash
         run: |

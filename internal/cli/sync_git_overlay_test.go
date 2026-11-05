@@ -3508,6 +3508,8 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 		"success", "file-origin", "runtime-state", "classified-fallback", "snapshot-prepare-fallback", "private-origin", "origin-unavailable", "missing-origin", "local-ineligible", "local-fingerprint-reuse", "remote-fingerprint-reuse", "unsafe-metadata",
 		"local-hidden-fingerprint", "local-sparse-hidden-fingerprint", "local-config-hidden-fingerprint", "remote-hidden-fingerprint", "remote-skip-hidden-fingerprint", "remote-inspection-hidden-fingerprint",
 		"ordinary-private-fresh", "ordinary-private-reused", "ordinary-unavailable-fresh", "ordinary-unavailable-reused", "ordinary-disconnected-reused", "ordinary-server-failure-reused",
+		"ordinary-seeded-local-rejection", "ordinary-seeded-probe-exit", "ordinary-seeded-invalid-response", "ordinary-seeded-probe-exit-nodebug",
+		"ordinary-group-writable-seed",
 		"symlinked-workdir", "symlinked-git", "symlinked-git-config", "symlinked-git-objects", "linked-worktree",
 		"checkout-file-obstruction", "post-reset-cache", "post-reset-mass-deletion", "late-local-edit", "workload-cleanup", "rsync-failure", "rsync-cleanup-failure", "empty-overlay-finalize",
 	} {
@@ -3544,6 +3546,22 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 				}))
 				t.Cleanup(server.Close)
 				runGit(t, fixture.root, "remote", "set-url", "origin", server.URL+"/unavailable.git")
+			}
+			if mode == "ordinary-group-writable-seed" {
+				mustWriteTestFile(t, filepath.Join(fixture.root, ".gitattributes"), "*.txt text\n")
+				if err := os.Chmod(filepath.Join(fixture.root, "mode.sh"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				runGit(t, fixture.root, "add", ".gitattributes", "mode.sh")
+				runGit(t, fixture.root, "commit", "-qm", "attributes and executable")
+				runGit(t, fixture.root, "push", "-q", "origin", "main")
+				runGit(t, fixture.root, "fetch", "-q", "origin")
+				if err := os.Chmod(filepath.Join(fixture.root, "staged.txt"), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "ordinary-seeded-local-rejection" {
+				runGit(t, fixture.root, "config", "core.trustctime", "false")
 			}
 			if mode == "local-fingerprint-reuse" {
 				runGit(t, fixture.root, "config", "core.autocrlf", "true")
@@ -3773,6 +3791,7 @@ unset GIT_CONFIG_PARAMETERS
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_COUNT=0
 export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false GCM_INTERACTIVE=Never
 cmd="$1"
+if [ "$CRABBOX_FAKE_OVERLAY_MODE" = ordinary-group-writable-seed ]; then umask 002; fi
 printf '%%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
 # Replay the CI libcurl diagnostic only after a real coherence fetch failure.
 # Keep the remote command, cleanup, and exit status intact.
@@ -3794,6 +3813,14 @@ if [ "$CRABBOX_FAKE_OVERLAY_MODE" = ordinary-disconnected-reused ]; then
   esac
 fi
 case "$cmd" in
+  *CRABBOX_SEEDED_DELTA_V1*)
+    case "$CRABBOX_FAKE_OVERLAY_MODE" in
+      ordinary-seeded-probe-exit|ordinary-seeded-probe-exit-nodebug)
+        printf 'private-seeded-diagnostic\n' >&2; exit 42 ;;
+      ordinary-seeded-invalid-response)
+        printf 'private-seeded-response\n'; exit 0 ;;
+    esac
+    ;;
   *CRABBOX_SNAPSHOT_WORKLOAD_PROBE*)
     snapshot_root="$(cat "$CRABBOX_FAKE_RSYNC_SOURCE_LOG")"
     [ -n "$snapshot_root" ] && [ ! -e "$snapshot_root" ] || exit 86
@@ -3930,6 +3957,9 @@ exit 99
 			runArgs := []string{"--provider", providerName, "--no-hydrate", "--sync-only"}
 			if mode == "workload-cleanup" {
 				runArgs = []string{"--provider", providerName, "--no-hydrate", "--", "CRABBOX_SNAPSHOT_WORKLOAD_PROBE"}
+			}
+			if (strings.HasPrefix(mode, "ordinary-seeded-") && !strings.HasSuffix(mode, "-nodebug")) || mode == "ordinary-private-reused" || mode == "ordinary-group-writable-seed" {
+				runArgs = append(runArgs, "--debug")
 			}
 			runErr := app.runCommand(context.Background(), runArgs)
 			if mode == "ordinary-disconnected-reused" {
@@ -4142,6 +4172,9 @@ exit 99
 				transfer, err := os.ReadFile(rsyncLog)
 				seededReuse := ordinary && reused && (privateOrigin || unavailableOrigin)
 				if seededReuse {
+					if strings.Contains(stderr.String(), "seeded sync fallback reason=") {
+						t.Fatalf("successful delta reported fallback: %s", stderr.String())
+					}
 					// The cached exact tree is verified before the later origin fetch
 					// fails. Clean bytes need no transfer; metadata still falls back.
 					if !os.IsNotExist(err) || len(transfer) != 0 || !strings.Contains(stderr.String(), "seeded sync delta: 0 files") {
@@ -4302,6 +4335,45 @@ exit 99
 							t.Fatalf("snapshot fallback ran forbidden Git path %q:\n%s", forbidden, sshCommands)
 						}
 					}
+				}
+			case "ordinary-group-writable-seed":
+				if strings.Contains(stderr.String(), "seeded sync fallback reason=") || !strings.Contains(stderr.String(), "seeded sync delta: 1 files") {
+					t.Fatalf("group-writable shell did not retain the clean seed: %s", stderr.String())
+				}
+				if transfer, err := os.ReadFile(rsyncLog); err != nil || !bytes.Equal(transfer, []byte("staged.txt\x00")) {
+					t.Fatalf("seeded permission delta=%q err=%v", transfer, err)
+				}
+				for rel, want := range map[string]os.FileMode{".": 0o700, ".gitattributes": 0o644, "clean.txt": 0o644, "mode.sh": 0o755, "staged.txt": 0o640} {
+					info, err := os.Stat(filepath.Join(workdir, rel))
+					if err != nil || info.Mode().Perm() != want {
+						t.Fatalf("seeded path %q: info=%v err=%v want mode=%o", rel, info, err, want)
+					}
+				}
+			case "ordinary-seeded-local-rejection", "ordinary-seeded-probe-exit", "ordinary-seeded-invalid-response", "ordinary-seeded-probe-exit-nodebug":
+				manifest, _ := fixture.manifest(t)
+				transfer, err := os.ReadFile(rsyncLog)
+				if err != nil || !bytes.Equal(transfer, manifest.NUL()) {
+					t.Fatalf("seeded fallback changed full transfer: data=%q err=%v", transfer, err)
+				}
+				commands, err := os.ReadFile(sshLog)
+				if err != nil || bytes.Contains(commands, []byte(seededSyncDeltaMarker[:len(seededSyncDeltaMarker)-1])) != (mode != "ordinary-seeded-local-rejection") {
+					t.Fatalf("unexpected seeded probe admission: err=%v", err)
+				}
+				want := "seeded sync fallback reason="
+				switch mode {
+				case "ordinary-seeded-local-rejection":
+					want += "local_admission"
+				case "ordinary-seeded-probe-exit":
+					want += "remote_probe_exit_42"
+				case "ordinary-seeded-invalid-response":
+					want += "response_rejected"
+				}
+				count := strings.Count(stderr.String(), want)
+				if mode == "ordinary-seeded-probe-exit-nodebug" && count != 0 || mode != "ordinary-seeded-probe-exit-nodebug" && count != 1 {
+					t.Fatalf("seeded fallback diagnostic count=%d want=%q stderr=%s", count, want, stderr.String())
+				}
+				if strings.Contains(stderr.String(), "private-seeded-") {
+					t.Fatalf("seeded fallback leaked raw probe output: %s", stderr.String())
 				}
 			case "late-local-edit":
 				transfer, err := os.ReadFile(rsyncLog)

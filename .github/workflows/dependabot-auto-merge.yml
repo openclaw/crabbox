@@ -55,10 +55,11 @@ jobs:
             exit 0
           fi
 
+          # Managed default setup leaves another workflow named CodeQL; select the source file.
           for _ in {1..90}; do
             codeql_json="$(
               gh run list --repo "$REPOSITORY" \
-                --workflow CodeQL \
+                --workflow codeql.yml \
                 --commit "$HEAD_SHA" \
                 --limit 1 \
                 --json status,conclusion

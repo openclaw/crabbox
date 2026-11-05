@@ -15,6 +15,7 @@ import (
 )
 
 const boxCreationLabel = "ascii_box_created_at"
+const boxNoEnvLabel = "ascii_box_no_env"
 const boxDeletionLabel = "ascii_box_deletion_completed"
 const boxDeletionBindingDomain = "completed-native-operation/v1\x00"
 const boxDeletionOperationLabel = "ascii_box_deletion_operation"
@@ -31,6 +32,21 @@ func (Provider) ClaimScope(cfg core.Config) string {
 	}
 	encoded, _ := json.Marshal([]string{endpoint, asciiBoxOrg()})
 	return string(encoded)
+}
+
+// This is a creation receipt, not a claim that the current disk has no secrets.
+func validateBoxNoEnv(cfg core.Config, claim core.LeaseClaim) error {
+	switch claim.Labels[boxNoEnvLabel] {
+	case "", "false":
+		if !cfg.AsciiBox.NoEnv {
+			return nil
+		}
+	case "true":
+		if cfg.AsciiBox.NoEnv {
+			return nil
+		}
+	}
+	return core.Exit(2, "ascii-box lease %s has incompatible or unknown no-env creation policy; create a new lease (status and stop remain available)", claim.LeaseID)
 }
 
 func boxCreationTime(box boxData) string {
@@ -203,7 +219,7 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 		return core.Server{}, core.Exit(2, "refusing to retarget ascii-box lease %s", existing.LeaseID)
 	}
 	labels := shared.CloneLabels(server.Labels)
-	for _, key := range []string{"provider", "box_id", "ascii_box_scope", boxCreationLabel, boxDeletionLabel, boxDeletionOperationLabel, boxDeletionOperationBindingLabel} {
+	for _, key := range []string{"provider", "box_id", "ascii_box_scope", boxCreationLabel, boxNoEnvLabel, boxDeletionLabel, boxDeletionOperationLabel, boxDeletionOperationBindingLabel} {
 		original := existing.Labels[key]
 		if original != "" && labels[key] != "" && labels[key] != original {
 			return core.Server{}, core.Exit(2, "ascii-box lease %s changed %s", existing.LeaseID, key)

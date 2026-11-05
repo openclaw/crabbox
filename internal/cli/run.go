@@ -214,7 +214,7 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		if err != nil {
 			return err
 		}
-		if err := a.registerGitHubActionsRunner(ctx, cfg, target, leaseID, ServerSlug(server), ghRepo, "", nil); err != nil {
+		if err := a.registerGitHubActionsRunner(ctx, cfg, &server, target, leaseID, ServerSlug(server), ghRepo, "", nil); err != nil {
 			return err
 		}
 	}
@@ -1907,9 +1907,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		return prepareErr
 	}
-	// WSL heartbeat collection is a no-op, so keep lease renewal running while
-	// size-bounded runtime setup runs outside short owner/readiness deadlines.
-	if runtimeScope.selected() && isWindowsWSL2Target(target) {
+	// Keep size-bounded runtime setup outside short owner/readiness deadlines.
+	if runtimeScope.selected() && nativeSupervisorTarget(target) {
 		target = bootstrapNetworkTarget(cfg, server, target)
 		if err := prepareRunRuntime(); err != nil {
 			return recordFailure(err)
@@ -2283,7 +2282,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if err := a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), &cfg, &server, target, identityRepo.Root, *reclaim, false, nil); err != nil {
 			return true, err
 		}
-		if runtimeScope.selected() && isWindowsWSL2Target(target) {
+		if runtimeScope.selected() && nativeSupervisorTarget(target) {
 			target = bootstrapNetworkTarget(cfg, server, target)
 			if err := prepareRunRuntime(); err != nil {
 				return true, err
@@ -2721,11 +2720,13 @@ retrySync:
 		seededDelta := false
 		if seedSucceeded && !overlayDecision.Requested && cfg.Sync.Delete && !cfg.Sync.Checksum {
 			stepStart = time.Now()
-			if delta, files, size, ok := seededSyncTransfer(ctx, target, repo, manifest, coherence, workdir); ok {
+			if delta, files, size, reason := seededSyncTransfer(ctx, target, repo, manifest, coherence, workdir); reason == "" {
 				transferData, seededDelta = delta, true
 				timings.syncMode = "seeded-delta"
 				timings.syncTransferFiles, timings.syncTransferBytes = files, size
 				fmt.Fprintf(a.Stderr, "seeded sync delta: %d files, %s\n", files, humanBytes(size))
+			} else if *debugSync {
+				fmt.Fprintf(a.Stderr, "seeded sync fallback reason=%s; using full manifest\n", reason)
 			}
 			timings.syncSteps.gitSeed += time.Since(stepStart)
 		}

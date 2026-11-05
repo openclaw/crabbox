@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-27T19:00:00Z",
+  "provider": "example-provider",
+  "leaseId": "cbx_3f9a1c2d4e5b",
+  "runId": "run_20260727_001",
+  "workload": {
+    "name": "example-org/workflow-action-pin-tests/v1",
+    "moduleSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "toolchain": "go1.26.5",
+    "target": "wasip1/wasm",
+    "argv": [
+      "-test.run",
+      "^(TestCheckWorkflowNodeAcceptsImmutableUsesSyntaxes|TestCheckWorkflowNodeIgnoresUnrelatedUsesKeys)$",
+      "-test.count=1",
+      "-test.shuffle=off"
+    ]
+  },
+  "meter": {
+    "mechanism": "wasmtime-fuel",
+    "engine": "wasmtime",
+    "engineVersion": "39.0.0",
+    "engineRevision": "0123456789abcdef0123456789abcdef01234567",
+    "configuration": "crabbox-wasmtime-fuel/v1",
+    "wasiConfiguration": "crabbox-deterministic-wasi/v1",
+    "comparisonKey": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "deterministic": true,
+    "initialFuel": 9007199254740991,
+    "remainingFuel": 9007199248501288
+  },
+  "results": [
+    {
+      "metric": "fuel",
+      "unit": "fuel",
+      "measured": 6239703,
+      "budget": 1000000000,
+      "exceeded": false
+    }
+  ],
+  "exceeded": false
+}

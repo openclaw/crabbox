@@ -98,7 +98,7 @@ func runFilesystemCommand(ctx context.Context, target SSHTarget, command func(in
 	// Helpers do not have user workload stderr. Preserve the resolved transport's
 	// bounded diagnostic redaction instead of streaming authentication fields.
 	diagnostic := newSynchronizedTailBuffer(failureTailLines)
-	retirementUnconfirmed, err = executeSSHWithRetirement(ctx, &target, command(size), spool, size, 0, "2", "1", output, diagnostic)
+	retirementUnconfirmed, err = executeSSHWithRetirement(ctx, &target, command(size), spool, size, sshCommandLimit{}, "2", "1", output, diagnostic)
 	writeSSHTransportDiagnostic(stderr, target, diagnostic.String())
 	// Local spool errors above or during deferred close cannot make a command
 	// active remotely. Dispatch retirement is recorded by the transport owner.

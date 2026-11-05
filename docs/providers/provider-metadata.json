@@ -1227,5 +1227,20 @@
     "bestFit": "Organization-shared existing test machines behind NAT",
     "caveat": "Linux namespaces required; Windows MXC interactive-context integration needs hardware qualification; no network isolation",
     "docs": "ssh-host.md"
+  },
+  "warpbuild": {
+    "status": "built-in",
+    "category": "delegated-sandbox",
+    "substrate": "WarpBuild macOS sandbox",
+    "location": "provider-managed",
+    "ssh": "no",
+    "sync": "archive-sync",
+    "gpu": "unknown",
+    "lifecycle": "WarpBuild standalone sandbox",
+    "cleanup": "explicit sandbox deletion",
+    "bestFit": "Standalone macOS command execution and resumable workspaces",
+    "caveat": "Seven-day native lifetime; no configurable provider TTL or idle timeout; disconnect does not confirm command termination",
+    "auth": "CI-scoped API key via WB_TOKEN",
+    "docs": "warpbuild.md"
   }
 }
