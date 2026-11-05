@@ -1732,6 +1732,10 @@ if has_provider xcp-ng || has_provider xcpng; then
   "$root/scripts/xcpng-live-smoke.sh"
 fi
 
+if has_provider warpbuild; then
+  "$root/scripts/live-warpbuild-smoke.sh"
+fi
+
 if has_provider blacksmith-testbox; then
   blacksmith_smoke
 fi

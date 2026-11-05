@@ -17,8 +17,8 @@ Hydration has two modes:
   workflow needs full GitHub Actions semantics — repository secrets, OIDC,
   service containers, or unsupported actions.
 
-The companion commands `actions register` and `actions dispatch` expose the
-runner-registration and workflow-dispatch steps directly.
+The companion commands `actions register`, `actions unregister`, and
+`actions dispatch` expose runner registration, exact deregistration, and workflow dispatch.
 
 ## Subcommands
 
@@ -29,8 +29,11 @@ hydrate  --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|w
          [--keep-alive-minutes 90] [--reclaim] [--timing-json] [-f key=value] [--field key=value]
 
 register --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|windows]
-         [--windows-mode normal|wsl2] [--repo owner/name] [--name <runner-name>]
+         [--windows-mode normal|wsl2] [--repo owner/name | --org organization]
+         [--runner-group <group-name>] [--name <runner-name>]
          [--labels <csv>] [--version latest] [--ephemeral=true] [--reclaim]
+
+unregister --id <lease-id-or-slug>
 
 dispatch [--repo owner/name] [--workflow <file|name|id>] [--ref <ref>] [-f key=value] [--field key=value]
 ```
@@ -71,21 +74,62 @@ run URL when the marker reports a run ID.
 ### register
 
 Registers an existing box as a GitHub Actions self-hosted runner. Crabbox
-obtains a repository registration token through `gh api`, installs the official
-`actions/runner` package, and starts it under systemd on Linux/WSL2 or a
+obtains a registration token through `gh api`, installs the official
+`actions/runner` package, records its exact GitHub identity in the existing lease
+claim, then starts it under systemd on Linux/WSL2 or an owned scheduled task or
 detached PowerShell process on native Windows. Supports Linux and Windows
 targets only. Registration metadata and the short-lived token travel over SSH
 stdin rather than the remote process command line.
 
 ```sh
 crabbox actions register --id blue-lobster
+crabbox actions register --id blue-lobster --org example-org --runner-group release-controls
 ```
+
+Repository registration remains the default. `--org` selects organization
+registration instead; it cannot be combined with an explicit `--repo`.
+`--runner-group` requires `--org` and selects an existing group. Crabbox does not
+create groups or change their repository/workflow access policy. The configured
+`gh` credential needs repository Administration write or organization Self-hosted
+runners write permission for the selected scope.
+
+Both ephemeral (default) and persistent (`--ephemeral=false`) registrations are
+supported. Registration does not change the provider's lease lifetime. A matching
+existing registration is reused. Changes to its name, group, labels, mode, or a
+specific installed version require unregistering it and waiting for its listener
+to stop. `latest` reuse keeps the installed runner; it does not force an upgrade.
+Consumed ephemeral registrations can be configured again on the same lease once
+GitHub confirms their absence and the owned listener is inactive. Unknown guest
+identity or listener state stops reconciliation instead of replacing a runner.
+Existing claims without a runner receipt are adopted only when the guest identity
+matches the requested lease registration and GitHub confirms its ownership or absence.
 
 Each runner gets the labels `crabbox`, the canonical lease label
 `crabbox-<lease-id>`, profile/class labels, the slug label when available, and
 any labels from `actions.runnerLabels` or `--labels`. Runner names use the
 friendly slug when available; workflow inputs and state-file paths keep using the
 canonical `cbx_...` ID.
+
+### unregister
+
+Removes only the exact runner ID and scope recorded in the local lease claim:
+
+```sh
+crabbox actions unregister --id blue-lobster
+crabbox stop --id blue-lobster
+```
+
+No SSH connection or running VM is required. GitHub determines active status;
+an already-absent runner is a successful result after scope access is verified.
+The historical receipt stays in the claim for repeat cleanup and later guest
+reconciliation. Errors preserve it too. Fixed-lease terminal claims retain this
+receipt after VM deletion; otherwise unregister before releasing the local claim.
+Unregister does not stop a running job or delete the VM. The caller still owns
+workload settlement and provider cleanup.
+
+Runner listeners start only after the receipt is durable. If that write fails,
+Crabbox attempts exact-ID deregistration and leaves the listener stopped. A
+failure of both operations reports the known scope and ID for operator recovery.
 
 ### dispatch
 
@@ -198,9 +242,12 @@ runner temp/toolcache references. Unsupported or complex expressions fail with a
 suggestion to use `--github-runner`.
 
 After checkout and setup, the workflow writes the ready marker under
-`$HOME/.crabbox/actions/`. Map workflow inputs into step environment variables
-such as `CRABBOX_ID` and `CRABBOX_JOB`; do not interpolate them directly into
-shell source:
+`$HOME/.crabbox/actions/`. On native Windows runners, write the marker files under
+`%ProgramData%\crabbox\actions` instead (`/c/ProgramData/crabbox/actions` in Git
+Bash): native Windows Crabbox reads them there, a directory the runner account
+and the SSH user share. Map workflow inputs into step
+environment variables such as `CRABBOX_ID` and `CRABBOX_JOB`; do not interpolate
+them directly into shell source:
 
 ```sh
 case "$CRABBOX_ID" in
@@ -217,16 +264,30 @@ case "$CRABBOX_JOB" in
 esac
 job="$CRABBOX_JOB"
 [ -n "$job" ] || job=hydrate
-mkdir -p "$HOME/.crabbox/actions"
-state="$HOME/.crabbox/actions/${CRABBOX_ID}.env"
-env_file="$HOME/.crabbox/actions/${CRABBOX_ID}.env.sh"
-services_file="$HOME/.crabbox/actions/${CRABBOX_ID}.services"
+state_dir="$HOME/.crabbox/actions"
+if [ "${RUNNER_OS:-}" = "Windows" ]; then
+  program_data="${PROGRAMDATA:-C:\\ProgramData}"
+  if command -v cygpath >/dev/null 2>&1; then
+    program_data="$(cygpath -u "$program_data")"
+  fi
+  state_dir="${program_data}/crabbox/actions"
+fi
+mkdir -p "$state_dir"
+state="${state_dir}/${CRABBOX_ID}.env"
+env_file="${state_dir}/${CRABBOX_ID}.env.sh"
+services_file="${state_dir}/${CRABBOX_ID}.services"
+env_ref="$env_file"
+services_ref="$services_file"
+if [ "${RUNNER_OS:-}" = "Windows" ] && command -v cygpath >/dev/null 2>&1; then
+  env_ref="$(cygpath -w "$env_file")"
+  services_ref="$(cygpath -w "$services_file")"
+fi
 {
   echo "WORKSPACE=${GITHUB_WORKSPACE}"
   echo "RUN_ID=${GITHUB_RUN_ID}"
   echo "JOB=${job}"
-  echo "ENV_FILE=${env_file}"
-  echo "SERVICES_FILE=${services_file}"
+  echo "ENV_FILE=${env_ref}"
+  echo "SERVICES_FILE=${services_ref}"
   echo "READY_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "${state}.tmp"
 mv "${state}.tmp" "$state"
@@ -238,7 +299,9 @@ marker exists and `actions.workflow` is configured, `run` performs local
 hydration automatically after sync unless `--no-hydrate` or `--no-sync` is set.
 The env file should hold stable GitHub/runner context such as
 `GITHUB_WORKSPACE`, `GITHUB_RUN_ID`, `GITHUB_JOB`, `RUNNER_TEMP`, and
-`RUNNER_TOOL_CACHE` — never secrets or OIDC request tokens. Keep the workflow job
+`RUNNER_TOOL_CACHE` — never secrets or OIDC request tokens. On native Windows
+runners, write it with single-quoted Windows paths and a `;`-separated `PATH`; see
+[Actions hydration](../features/actions-hydration.md). Keep the workflow job
 alive (via `--keep-alive-minutes`) only when using `--github-runner` and service
 containers or job-scoped setup must stay running for the remote command loop.
 `crabbox stop <lease-id-or-slug>` writes the `.stop` marker before releasing the

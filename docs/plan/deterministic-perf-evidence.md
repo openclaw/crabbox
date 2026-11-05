@@ -168,51 +168,9 @@ lease and run identifiers, artifact digests, and explicit gate output. Runtime
 provenance is separate from provider identity, so an AWS, local-container, or
 other adapter can produce the same metric without changing the schema.
 
-Example:
-
-```json
-{
-  "schemaVersion": 1,
-  "generatedAt": "2026-07-27T19:00:00Z",
-  "provider": "example-provider",
-  "leaseId": "cbx_3f9a1c2d4e5b",
-  "runId": "run_20260727_001",
-  "workload": {
-    "name": "example-org/workflow-action-pin-tests/v1",
-    "moduleSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "toolchain": "go1.26.5",
-    "target": "wasip1/wasm",
-    "argv": [
-      "-test.run",
-      "^(TestCheckWorkflowNodeAcceptsImmutableUsesSyntaxes|TestCheckWorkflowNodeIgnoresUnrelatedUsesKeys)$",
-      "-test.count=1",
-      "-test.shuffle=off"
-    ]
-  },
-  "meter": {
-    "mechanism": "wasmtime-fuel",
-    "engine": "wasmtime",
-    "engineVersion": "39.0.0",
-    "engineRevision": "0123456789abcdef0123456789abcdef01234567",
-    "configuration": "crabbox-wasmtime-fuel/v1",
-    "wasiConfiguration": "crabbox-deterministic-wasi/v1",
-    "comparisonKey": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    "deterministic": true,
-    "initialFuel": 9007199254740991,
-    "remainingFuel": 9007199248501288
-  },
-  "results": [
-    {
-      "metric": "fuel",
-      "unit": "fuel",
-      "measured": 6239703,
-      "budget": 1000000000,
-      "exceeded": false
-    }
-  ],
-  "exceeded": false
-}
-```
+The illustrative fixture in `docs/schemas/examples/perf-evidence-v1.json`
+shows the v1 shape. Its counts and runtime identifiers are examples, not a
+measured or calibrated result.
 
 `comparisonKey` is the SHA-256 digest of RFC 8785 canonical JSON containing
 the workload name and argv, metric and unit, Wasmtime version and revision,
@@ -222,111 +180,12 @@ the module digest, measured value, or budget. The module digest is expected to
 change as the code under test changes; omitting it from the comparison key is
 what permits a pull request to be compared with its baseline.
 
-The v1 JSON Schema is:
-
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://crabbox.sh/schemas/perf-evidence-v1.schema.json",
-  "title": "Crabbox deterministic performance evidence v1",
-  "type": "object",
-  "required": [
-    "schemaVersion",
-    "generatedAt",
-    "provider",
-    "workload",
-    "meter",
-    "results",
-    "exceeded"
-  ],
-  "properties": {
-    "schemaVersion": { "const": 1 },
-    "generatedAt": { "type": "string", "format": "date-time" },
-    "provider": { "type": "string", "minLength": 1 },
-    "leaseId": { "type": "string", "minLength": 1 },
-    "runId": { "type": "string", "minLength": 1 },
-    "workload": {
-      "type": "object",
-      "required": ["name", "moduleSha256", "toolchain", "target", "argv"],
-      "properties": {
-        "name": { "type": "string", "minLength": 1 },
-        "moduleSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "toolchain": { "type": "string", "minLength": 1 },
-        "target": { "const": "wasip1/wasm" },
-        "argv": {
-          "type": "array",
-          "items": { "type": "string" },
-          "maxItems": 128
-        }
-      },
-      "additionalProperties": true
-    },
-    "meter": {
-      "type": "object",
-      "required": [
-        "mechanism",
-        "engine",
-        "engineVersion",
-        "engineRevision",
-        "configuration",
-        "wasiConfiguration",
-        "comparisonKey",
-        "deterministic",
-        "initialFuel",
-        "remainingFuel"
-      ],
-      "properties": {
-        "mechanism": { "const": "wasmtime-fuel" },
-        "engine": { "const": "wasmtime" },
-        "engineVersion": { "type": "string", "minLength": 1 },
-        "engineRevision": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
-        "configuration": { "const": "crabbox-wasmtime-fuel/v1" },
-        "wasiConfiguration": { "const": "crabbox-deterministic-wasi/v1" },
-        "comparisonKey": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
-        "deterministic": { "type": "boolean" },
-        "initialFuel": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "remainingFuel": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        }
-      },
-      "additionalProperties": true
-    },
-    "results": {
-      "type": "array",
-      "minItems": 1,
-      "maxItems": 1,
-      "items": {
-        "type": "object",
-        "required": ["metric", "unit", "measured", "budget", "exceeded"],
-        "properties": {
-          "metric": { "const": "fuel" },
-          "unit": { "const": "fuel" },
-          "measured": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 9007199254740991
-          },
-          "budget": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 9007199254740991
-          },
-          "exceeded": { "type": "boolean" }
-        },
-        "additionalProperties": true
-      }
-    },
-    "exceeded": { "type": "boolean" }
-  },
-  "additionalProperties": true
-}
-```
+The v1 JSON Schema in `docs/schemas/perf-evidence-v1.schema.json` is a docs-owned
+file consumed by the existing artifact-schema validator. It checks structural
+compatibility only; it does not implement the semantic gate below. The schema's
+`$id` is an identifier, not a promise that the docs site serves the file.
+The existing validator treats draft-2020-12 `format` as an annotation, so the
+`generatedAt` string's timestamp syntax also needs independent validation.
 
 Schema validation proves shape, not internal consistency. The gate must also
 verify all of these invariants:
@@ -431,7 +290,9 @@ provider-specific runtime setup.
 
 ### Phase 1: prove the contract
 
-1. Add the v1 schema as a docs-owned JSON file and test its example fixtures.
+1. The docs-owned v1 schema and illustrative fixture have structural tests
+   through the existing artifact validator. Runtime and semantic gate validation
+   remain unimplemented.
 2. Build the pinned subprocess helper for `linux/amd64` and `linux/arm64`, with
    the fixed WASI input surface and strict JSON output.
 3. Run the exact Crabbox workload above using existing artifact collection and

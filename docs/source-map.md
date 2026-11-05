@@ -154,6 +154,7 @@ Delegated-run providers (no SSH lease):
   `internal/providers/opencomputer`, `internal/providers/cloudrunsandbox`,
   `internal/providers/anthropicsandboxruntime`,
   `internal/providers/tensorlake`, `internal/providers/upstashbox`,
+  `internal/providers/warpbuild`,
   `internal/providers/blacksmith`, `internal/providers/wandb`
 - Superserve delegated lifecycle, archive sync, data-plane file upload, exec,
   and live smoke: `internal/providers/superserve`, `scripts/live-superserve-smoke.sh`

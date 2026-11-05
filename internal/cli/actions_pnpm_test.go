@@ -1,14 +1,100 @@
 package cli
 
 import (
+	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/openclaw/crabbox/internal/runtimeartifact"
+
 	"gopkg.in/yaml.v3"
 )
+
+func TestEnsureLocalActionsRunEnvUsesOwnedControl(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executes the POSIX workspace witness locally")
+	}
+	isolateTestUserDirs(t)
+	home, tools := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	path := os.Getenv("PATH")
+	installRecordingSSH(t, tools, `exec /bin/sh -c "$cmd"`)
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+path)
+	target := SSHTarget{Host: "fixture.invalid", User: "fixture", Port: "22", TargetOS: targetLinux, NoControlMaster: true}
+	owner, err := acquireWorkspaceOwnerWithTransport(t.Context(), target, "cbx_actions_handoff", io.Discard, localPOSIXWorkspaceOwnerTransport{home: home}, workspaceOwnerWaitTimeout, workspaceOwnerTTL, workspaceOwnerRenewInterval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerClosed := false
+	t.Cleanup(func() {
+		if !ownerClosed {
+			ctx, cancel := context.WithTimeout(context.Background(), workspaceOwnerCleanupTimeout)
+			defer cancel()
+			if err := owner.Close(ctx); err != nil {
+				t.Errorf("release workspace owner: %v", err)
+			}
+		}
+	})
+	runtimePath := filepath.Join(tools, "unavailable-runtime")
+	if _, err := os.Lstat(runtimePath); !os.IsNotExist(err) {
+		t.Fatalf("runtime fixture must be absent: %v", err)
+	}
+	scope := testNativeRuntimeScope()
+	scope.manifest = "selected fixture"
+	scope.install = func(_ context.Context, selected SSHTarget, _ runtimeartifact.Source) (*remoteNativeRuntime, error) {
+		return &remoteNativeRuntime{target: selected, path: runtimePath}, nil
+	}
+	ctx := context.WithValue(runtimeLeaseContext(contextWithWorkspaceOwner(owner.Context(), owner), "cbx_actions_handoff"), nativeRuntimeScopeKey{}, scope)
+	ctx, err = scope.admit(ctx, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range []string{"node", "pnpm"} {
+		bin := filepath.Join(tools, tool, "bin")
+		if err := os.MkdirAll(bin, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeExecutable(t, filepath.Join(bin, tool), "#!/bin/sh\nexit 0\n")
+	}
+	envFile := filepath.Join(home, "run-env.sh")
+	original := []byte("export RUNNER_TOOL_CACHE=" + shellQuote(tools) + "\nexport PATH=/usr/bin:/bin\n")
+	if err := os.WriteFile(envFile, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := actionsHydrationState{EnvFile: envFile}
+	if err := ensureLocalActionsRunEnv(ctx, target, "cbx_actions_handoff", state); err != nil {
+		t.Fatalf("finite Actions env handoff: %v", err)
+	}
+	for _, tool := range []string{"node", "pnpm"} {
+		cmd := exec.Command("bash", "--noprofile", "--norc", "-c", ". "+shellQuote(envFile)+"; command -v "+tool)
+		output, err := cmd.CombinedOutput()
+		if err != nil || strings.TrimSpace(string(output)) != filepath.Join(tools, tool, "bin", tool) {
+			t.Fatalf("fresh run %s=%q err=%v", tool, output, err)
+		}
+	}
+	if err := owner.Close(t.Context()); err != nil {
+		t.Fatalf("workspace owner did not close: %v", err)
+	}
+	ownerClosed = true
+	if err := os.WriteFile(envFile, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = ensureLocalActionsRunEnv(context.WithoutCancel(ctx), target, "cbx_actions_handoff", state)
+	if err == nil || !strings.Contains(err.Error(), "workspace owner") {
+		t.Fatalf("closed owner did not reject handoff: %v", err)
+	}
+	if data, err := os.ReadFile(envFile); err != nil || string(data) != string(original) {
+		t.Fatalf("closed owner changed environment: %v", err)
+	}
+	if err := scope.finish(t.Context()); err != nil {
+		t.Fatalf("native command stage retained: %v", err)
+	}
+}
 
 func TestLocalActionsHydrateScriptPnpmBeforeNode(t *testing.T) {
 	var workflow localHydrateWorkflow

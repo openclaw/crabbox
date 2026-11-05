@@ -181,12 +181,24 @@ func waitForManagedWindowsLoopbackVNC(ctx context.Context, target *SSHTarget, st
 	}
 }
 
+func WaitForManagedWindowsLoopbackVNC(ctx context.Context, target *SSHTarget, stderr io.Writer, timeout time.Duration) error {
+	return waitForManagedWindowsLoopbackVNC(ctx, target, stderr, timeout)
+}
+
 func BootstrapAWSWindowsDesktop(ctx context.Context, cfg Config, target *SSHTarget, publicKey string, stderr io.Writer) error {
 	return bootstrapAWSWindowsDesktop(ctx, cfg, target, publicKey, stderr)
 }
 
 func BootstrapManagedWindowsDesktop(ctx context.Context, cfg Config, target *SSHTarget, publicKey string, stderr io.Writer) error {
 	return bootstrapManagedWindowsDesktop(ctx, cfg, target, publicKey, stderr)
+}
+
+func ManagedWindowsDesktopBootstrapPowerShell(user string) string {
+	return managedWindowsDesktopBootstrapPowerShell(user)
+}
+
+func ManagedWindowsDesktopTerminalBootstrapPowerShell() string {
+	return managedWindowsDesktopTerminalBootstrapPowerShell()
 }
 
 func bootstrapManagedWindowsWSL2(ctx context.Context, cfg Config, target *SSHTarget, bootstrapTarget SSHTarget, publicKey string, stderr io.Writer) error {
