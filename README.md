@@ -46,10 +46,38 @@ your agent or harness decides what to run and what the result means.
 
 ## Quick start
 
+### 0. Install
+
+On macOS or Linux with Homebrew:
+
+```sh
+brew install openclaw/tap/crabbox
+crabbox --version
+```
+
+On Linux without Homebrew, extract a release archive and keep `crabbox-runtime/`
+beside the `crabbox` executable (use `arch=arm64` on ARM):
+
+```sh
+v=0.81.0 arch=amd64
+curl -fLO "https://github.com/openclaw/crabbox/releases/download/v$v/crabbox_${v}_linux_${arch}.tar.gz"
+curl -fLO "https://github.com/openclaw/crabbox/releases/download/v$v/checksums.txt"
+sha256sum -c checksums.txt --ignore-missing
+mkdir -p ~/.local/share/crabbox
+tar -xzf "crabbox_${v}_linux_${arch}.tar.gz" -C ~/.local/share/crabbox
+export PATH="$HOME/.local/share/crabbox:$PATH"
+crabbox --version
+```
+
+GNU tar may warn about `LIBARCHIVE.xattr.com.apple.provenance` headers; they are
+harmless. See [Install](#install) for Windows and other options.
+
 ### 1. Try a local box
 
-[Install Crabbox](#install), start Docker or Podman, and enter a **Git repository
-you trust**. No cloud account or coordinator login is needed:
+Start Docker or Podman and make sure `git`, `ssh`, `ssh-keygen`, and `rsync` are
+on your `PATH` (Debian/Ubuntu: `sudo apt-get install -y git openssh-client rsync`).
+Then enter a **Git repository you trust**. No cloud account or coordinator login
+is needed:
 
 ```sh
 crabbox doctor --provider local-container
@@ -57,8 +85,12 @@ crabbox run --provider local-container -- uname -a
 ```
 
 You should see Linux kernel information, followed by cleanup of the one-shot
-container. First startup includes an image pull and bootstrap. The default box
-has Crabbox's sync/run prerequisites; supply your project's runtime and dependencies.
+container. First startup includes an image pull and bootstrap. On images with
+`apt-get`, missing `sshd`, `git`, `rsync`, `curl`, `sudo`, or `python3` triggers
+installation of those tools and CA certificates, so the container needs internet access.
+For offline or locked-down engines, pass `--local-container-image` with an image
+that already has those tools. The box has Crabbox's sync/run prerequisites;
+supply your project's runtime and dependencies.
 
 ### 2. Run a project's tests
 
@@ -140,7 +172,7 @@ execution targets, not just operating systems that can install the CLI:
 | --- | --- |
 | Linux | Cloud VMs, local containers, self-hosted VMs, and delegated sandboxes; see the [complete list](#providers). |
 | macOS | [anthropic-sandbox-runtime](docs/providers/anthropic-sandbox-runtime.md), [aws](docs/providers/aws.md), [external](docs/providers/external.md), [lume](docs/providers/lume.md), [parallels](docs/providers/parallels.md), [ssh](docs/providers/ssh.md), [tart](docs/providers/tart.md). |
-| Native Windows | [aws](docs/providers/aws.md), [azure](docs/providers/azure.md), [external](docs/providers/external.md), [hyperv](docs/providers/hyperv.md), [mxc](docs/providers/mxc.md), [parallels](docs/providers/parallels.md), [ssh](docs/providers/ssh.md), [windows-sandbox](docs/providers/windows-sandbox.md). |
+| Native Windows | [aws](docs/providers/aws.md), [azure](docs/providers/azure.md), [external](docs/providers/external.md), [hyperv](docs/providers/hyperv.md), [mxc](docs/providers/mxc.md), [parallels](docs/providers/parallels.md), [ssh](docs/providers/ssh.md), [ssh-host](docs/providers/ssh-host.md), [windows-sandbox](docs/providers/windows-sandbox.md). |
 | WSL2 | [aws](docs/providers/aws.md), [azure](docs/providers/azure.md), [external](docs/providers/external.md), [parallels](docs/providers/parallels.md), [ssh](docs/providers/ssh.md). |
 
 The catalog reports supported targets; you still need the provider's credentials,
@@ -191,13 +223,14 @@ crabbox stop ui-box
 | [Coordinator portal](docs/features/portal.md) | Open `/portal` on your coordinator to inspect leases, run history, logs, events, and live WebVNC/Code views. Share access and hand desktop control between authorized viewers. |
 
 Desktop support includes managed Linux, AWS/Azure native Windows, EC2 Mac,
-prepared Tart/Parallels Macs, compatible External adapters, and local containers;
+prepared Tart/Parallels Macs, compatible `external` adapters, and local containers;
 static SSH desktops are explicitly host-managed. Check the
 [desktop support guide](docs/features/interactive-desktop-vnc.md) before choosing a target.
 
-Kept registered desktop leases can start the bridge automatically with
-`broker.autoWebVNC: true`. Registration adds portal access while the direct
-provider retains lifecycle ownership. [Tailscale](docs/features/tailscale.md)
+For kept desktop leases registered with a coordinator, Crabbox attempts to start the bridge automatically
+(`broker.autoWebVNC` defaults to `true`; set it to `false` to opt out).
+Registration adds portal access while the direct provider retains lifecycle
+ownership. [Tailscale](docs/features/tailscale.md)
 can supply the SSH network path; it does not expose VNC publicly.
 Provider `url-bridge` capabilities are separate app-preview routes, not desktop
 access; discover them with `crabbox providers --feature url-bridge`.
@@ -426,6 +459,8 @@ requirements in [Infrastructure](docs/infrastructure.md).
 | You need a fresh workspace sync | Add `--full-resync` to reset the remote workdir before syncing. |
 | You need the command's output files | Use `--download remote=local`, repeatable for several files. |
 | Output needs to go straight to a file | Use `--capture-stdout <path>` and `--capture-stderr <path>`. |
+| A local container exits before SSH is ready | Re-run with `--keep` and read `docker logs <container>` (or `podman logs <container>`). If the `apt-get` bootstrap failed, restore container network access or use `--local-container-image` with the tools preinstalled. Follow the printed cleanup command when finished. |
+| A local container has no published SSH port | Check the selected container network: Crabbox needs a published SSH port, which `host` networking does not provide. Use the default bridge or create a bridge network and pass `--local-container-network <name>` (or set `localContainer.network`). |
 
 Failed SSH-backed and Blacksmith delegated runs save local failure bundles by
 default. Follow the printed `failure-bundle local=…` path and review the contents
@@ -450,6 +485,11 @@ crabbox config show
 
 Review the generated configuration and setup before running it. Settings resolve
 from flags, environment, repository configuration, user configuration, then defaults.
+User configuration defaults to `~/.config/crabbox/config.yaml` on Linux,
+`~/Library/Application Support/crabbox/config.yaml` on macOS, and
+`%AppData%\crabbox\config.yaml` on Windows. Linux also honors `XDG_CONFIG_HOME`.
+A nonempty `CRABBOX_CONFIG` selects only that file, skipping both user and repository
+config files; environment variables and flags still apply.
 A repository's `.crabbox.yaml` can select its provider and image:
 
 ```yaml
@@ -508,7 +548,7 @@ review them before sharing. Read the [Security Policy](SECURITY.md) and
 
 ## Install
 
-Homebrew installs the complete release distribution:
+Homebrew (macOS or Linux) installs the complete release distribution:
 
 ```sh
 brew install openclaw/tap/crabbox
@@ -534,7 +574,7 @@ release installations do not compile replacement companions from source.
 For a CLI-only source install, pin a supported release (v0.44.0 or later):
 
 ```sh
-GOTOOLCHAIN=go1.27.3 go install github.com/openclaw/crabbox/cmd/crabbox@v0.70.0
+GOTOOLCHAIN=go1.27.3 go install github.com/openclaw/crabbox/cmd/crabbox@v0.81.0
 ```
 
 The module minimum remains Go 1.26. Use the explicit patched toolchain above
