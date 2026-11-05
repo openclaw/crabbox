@@ -80,7 +80,8 @@ func notifyBrokenPipe(fail func(), outputs ...*os.File) func() {
 		}
 	}()
 	return func() {
-		signal.Stop(ch)
+		// Leave Notify installed until exit. Restoring the default disposition
+		// would let any late stdio write kill the process instead of exiting 141.
 		close(stopped)
 		<-done
 	}

@@ -39,6 +39,8 @@ func TestBrokenPipeUnrelatedPipeDuringRun(t *testing.T) {
 		os.Args = []string{os.Args[0], "run", "--provider", "docker-sandbox", "--docker-sandbox-cli", filepath.Join(root, "sbx"), "--", "echo", "fixture"}
 		code := run()
 		<-done
+		// A late exit diagnostic must not replace the exit status with a signal.
+		_, _ = os.Stderr.Write([]byte("late-exit-diagnostic\n"))
 		os.Exit(code)
 	}
 
