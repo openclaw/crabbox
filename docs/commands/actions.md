@@ -130,6 +130,9 @@ workload settlement and provider cleanup.
 Runner listeners start only after the receipt is durable. If that write fails,
 Crabbox attempts exact-ID deregistration and leaves the listener stopped. A
 failure of both operations reports the known scope and ID for operator recovery.
+If registration is canceled after configuration, Crabbox spends up to 30 seconds
+recovering and verifying the exact identity for cleanup. A verified receipt is
+retained without starting the listener; `actions unregister` can then remove it.
 
 ### dispatch
 

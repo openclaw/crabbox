@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,6 +88,10 @@ if not (r/'api').exists(): print('HTTP 404: Not Found',file=sys.stderr); sys.exi
 if 'DELETE' in args:
  if os.environ.get('FIXTURE_DELETE_DENIED'): print('HTTP 403',file=sys.stderr); sys.exit(1)
  (r/'api').unlink(); sys.exit(0)
+if os.environ.get('FIXTURE_CANCEL_STAGE')=='verify':
+ import http.client
+ conn=http.client.HTTPConnection(os.environ['FIXTURE_CANCEL_ADDRESS'],timeout=5)
+ conn.request('GET','/'); conn.getresponse().read(); conn.close()
 print((r/'api').read_text())
 `)
 			write(filepath.Join(bin, "curl"), "#!/bin/sh\nprintf '{}'\n")
@@ -119,6 +125,10 @@ data=dict(agentId=ident,agentName=value('--name'),gitHubUrl=value('--url'),poolN
 Path('.runner').write_text(json.dumps(data)); Path('.credentials').write_text('{}')
 (r/'api').write_text(json.dumps(dict(id=ident,name=data['agentName'],labels=[dict(name=x,type='custom') for x in value('--labels').split(',')],busy=False)))
 with (r/'operations').open('a') as f: f.write('configured\n')
+if os.environ.get('FIXTURE_CANCEL_STAGE')=='configure':
+ import http.client
+ conn=http.client.HTTPConnection(os.environ['FIXTURE_CANCEL_ADDRESS'],timeout=5)
+ conn.request('GET','/'); conn.getresponse().read(); conn.close()
 if os.environ.get('FIXTURE_PERSIST_FAIL'):
  claim=Path(os.environ['FIXTURE_CLAIM']); claim.rename(str(claim)+'.saved'); claim.mkdir()
 `)
@@ -294,6 +304,46 @@ if os.environ.get('FIXTURE_PERSIST_FAIL'):
 			if err := os.Remove(filepath.Join(root, "active")); err != nil {
 				t.Fatal(err)
 			}
+			for _, stage := range []string{"configure", "verify"} {
+				ctx, cancel := context.WithCancel(t.Context())
+				called := make(chan struct{}, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					called <- struct{}{}
+					cancel()
+					w.WriteHeader(http.StatusNoContent)
+				}))
+				t.Setenv("FIXTURE_CANCEL_STAGE", stage)
+				t.Setenv("FIXTURE_CANCEL_ADDRESS", strings.TrimPrefix(server.URL, "http://"))
+				err := app.Run(ctx, args)
+				cancel()
+				server.Close()
+				t.Setenv("FIXTURE_CANCEL_STAGE", "")
+				select {
+				case <-called:
+				default:
+					t.Fatalf("%s fixture did not trigger cancellation: %v", stage, err)
+				}
+				canceled, readErr := ReadLeaseClaim(id)
+				var registration struct {
+					ID int64 `json:"id"`
+				}
+				api, apiErr := os.ReadFile(apiPath)
+				if apiErr != nil || json.Unmarshal(api, &registration) != nil || readErr != nil || canceled.ActionsRunner == nil || canceled.ActionsRunner.RunnerID != registration.ID {
+					t.Fatalf("cancel during %s lost cleanup receipt: claim=%+v read=%v api=%v", stage, canceled.ActionsRunner, readErr, apiErr)
+				}
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancel during %s returned %v", stage, err)
+				}
+				if _, err := os.Stat(filepath.Join(root, "active")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("cancel during %s started listener: %v", stage, err)
+				}
+				before, _ := os.ReadFile(filepath.Join(root, "operations"))
+				run("actions", "unregister", "--id", id)
+				after, _ := os.ReadFile(filepath.Join(root, "operations"))
+				if strings.Contains(string(after[len(before):]), "ssh\n") || strings.Count(string(after[len(before):]), "DELETE") != 1 {
+					t.Fatalf("canceled runner cleanup was not one exact API deletion: %s", after[len(before):])
+				}
+			}
 			t.Setenv("FIXTURE_PERSIST_FAIL", "1")
 			if org {
 				t.Setenv("FIXTURE_DELETE_DENIED", "1")
@@ -305,7 +355,7 @@ if os.environ.get('FIXTURE_PERSIST_FAIL'):
 				}
 			})
 			err = app.Run(t.Context(), args)
-			if err == nil || !strings.Contains(err.Error(), "persist runner ") || !strings.Contains(err.Error(), "/43") {
+			if err == nil || !strings.Contains(err.Error(), "persist runner ") || !strings.Contains(err.Error(), "/45") {
 				t.Fatalf("durable failure: %v", err)
 			}
 			if _, err := os.Stat(filepath.Join(root, "active")); !errors.Is(err, os.ErrNotExist) {
