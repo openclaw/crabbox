@@ -115,8 +115,9 @@ func (g *commandGroup) start(command string, input, stdout, stderr *os.File) err
 func (g *commandGroup) close() error {
 	group := g.guard.Process.Pid
 	termErr := syscall.Kill(-group, syscall.SIGTERM)
-	// Preserve the TERM grace separately from the post-KILL observation budget.
-	time.Sleep(g.grace)
+	// Only live workload members need TERM grace; the guard reserves the
+	// group identity until KILL. Keep the post-KILL budget separate.
+	g.awaitTermGrace(group)
 	killErr := syscall.Kill(-group, syscall.SIGKILL)
 	_ = g.lifetime.Close()
 	deadline := time.NewTimer(g.grace)

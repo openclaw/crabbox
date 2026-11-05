@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- SSH: return promptly after supervised Linux/WSL2 and POSIX fallback commands exit while preserving TERM grace and forced cleanup for surviving children. [PR 3041](https://github.com/openclaw/crabbox/pull/3041). Thanks @lazmo88.
 - Apple Machine: preserve command arguments and exit codes through the guest shell, keep preset values literal, and send machine-creation output to stderr so workload stdout stays unchanged. [PR 3039](https://github.com/openclaw/crabbox/pull/3039). Thanks @coygeek.
 - Docs: align provider catalog and target counts with the compiled CLI, distinguish built-in providers from `external`, and reject stale summaries in docs CI. [PR 3034](https://github.com/openclaw/crabbox/pull/3034). Thanks @coygeek.
 - Firecracker: use Linux's `nomodule` boot argument so module-capable guests cannot load kernel modules and init no longer receives `nomodules`. [PR 3032](https://github.com/openclaw/crabbox/pull/3032). Thanks @coygeek.
