@@ -1144,7 +1144,7 @@ func TestPersistLeaseFailureLeavesNoStaleClaim(t *testing.T) {
 func TestResolveStatusOnlyAllowsRetainedLeaseWithoutIP(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	name := "crabbox-retained-no-ip"
-	queryScript := fmt.Sprintf(`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq '%s' } | Select-Object Name, State | ConvertTo-Json -Compress`, name)
+	queryScript := fmt.Sprintf(`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq '%s' } | Select-Object Name, State, @{Name='Id';Expression={[string]$_.Id}} | ConvertTo-Json -Compress`, name)
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
 		queryScript: {Stdout: `{"Name":"crabbox-retained-no-ip","State":2}`},
 	}}
@@ -1193,7 +1193,7 @@ func TestQueryVMParsesSingle(t *testing.T) {
 	runner := &recordingRunner{
 		responses: map[string]core.LocalCommandResult{
 			commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
-				`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State | ConvertTo-Json -Compress`}): {
+				`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State, @{Name='Id';Expression={[string]$_.Id}} | ConvertTo-Json -Compress`}): {
 				Stdout: `{"Name":"crabbox-blue-1234","State":3}`,
 			},
 		},
@@ -1712,10 +1712,10 @@ func TestResolveInstancePropagatesQueryError(t *testing.T) {
 		errors:    map[string]error{},
 	}
 	runner.errors[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
-		`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State | ConvertTo-Json -Compress`})] =
+		`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State, @{Name='Id';Expression={[string]$_.Id}} | ConvertTo-Json -Compress`})] =
 		fmt.Errorf("powershell exec failed")
 	runner.responses[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
-		`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State | ConvertTo-Json -Compress`})] =
+		`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State, @{Name='Id';Expression={[string]$_.Id}} | ConvertTo-Json -Compress`})] =
 		core.LocalCommandResult{Stderr: "VM not found"}
 
 	b := testBackend(runner)
@@ -1738,7 +1738,7 @@ func TestRemoveVMQueriesActualVHDPaths(t *testing.T) {
 		responses: map[string]core.LocalCommandResult{},
 	}
 	runner.responses[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
-		`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State | ConvertTo-Json -Compress`})] =
+		`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State, @{Name='Id';Expression={[string]$_.Id}} | ConvertTo-Json -Compress`})] =
 		core.LocalCommandResult{Stdout: `{"Name":"crabbox-blue-1234","State":2}`}
 	runner.responses[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
 		`Get-VMHardDiskDrive -VMName 'crabbox-blue-1234' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path`})] =
@@ -1833,7 +1833,7 @@ func TestRemoveVMCleansBaseDiskAndDirDespiteCheckpoint(t *testing.T) {
 
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	runner.responses[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
-		`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State | ConvertTo-Json -Compress`})] =
+		`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State, @{Name='Id';Expression={[string]$_.Id}} | ConvertTo-Json -Compress`})] =
 		core.LocalCommandResult{Stdout: `{"Name":"crabbox-blue-1234","State":2}`}
 	// The attached disk reported by Hyper-V is the checkpoint .avhdx, not the base.
 	runner.responses[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
@@ -1874,7 +1874,7 @@ func TestRemoveVMPreservesDataDiskInsideVMDirectory(t *testing.T) {
 
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
 	runner.responses[commandKey([]string{"-NoProfile", "-NonInteractive", "-Command",
-		`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State | ConvertTo-Json -Compress`})] =
+		`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq 'crabbox-blue-1234' } | Select-Object Name, State, @{Name='Id';Expression={[string]$_.Id}} | ConvertTo-Json -Compress`})] =
 		core.LocalCommandResult{Stdout: `{"Name":"crabbox-blue-1234","State":2}`}
 	b := testBackend(runner)
 
@@ -2555,6 +2555,8 @@ func TestHyperVBindingFlagRegistration(t *testing.T) {
 	}
 }
 
+const lifecycleVMID = "3d6c1f0a-9e2b-4a7d-b5c8-1f2e3d4c5b6a"
+
 type lifecycleClock struct{ now time.Time }
 
 func (c lifecycleClock) Now() time.Time { return c.now }
@@ -2569,7 +2571,7 @@ func lifecycleFixture(t *testing.T, ttl ...time.Duration) (*backend, core.LeaseT
 			return core.LocalCommandResult{Stdout: `["192.0.2.10"]`}, nil, true
 		}
 		if strings.HasPrefix(script, "Get-VM ") {
-			return core.LocalCommandResult{Stdout: `{"Name":"crabbox-lifecycle-test","State":2}`}, nil, true
+			return core.LocalCommandResult{Stdout: `{"Name":"crabbox-lifecycle-test","State":2,"Id":"` + lifecycleVMID + `"}`}, nil, true
 		}
 		t.Errorf("unexpected lifecycle command: %s", script)
 		return core.LocalCommandResult{}, nil, true
@@ -2585,7 +2587,7 @@ func lifecycleFixture(t *testing.T, ttl ...time.Duration) (*backend, core.LeaseT
 	for k, v := range map[string]string{"instance": name, "state": "ready", "image": "original.vhdx", "ssh_user": "original", "work_root": `C:\original`, "ssh_port": sshPort} {
 		labels[k] = v
 	}
-	server := core.Server{Provider: providerName, CloudID: name, Name: name, Status: "ready", Labels: labels}
+	server := core.Server{Provider: providerName, CloudID: name, ImmutableID: lifecycleVMID, Name: name, Status: "ready", Labels: labels}
 	target := core.SSHTargetFromConfig(b.configForRun(), "192.0.2.10")
 	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(id, "lifecycle", providerName, instanceScope(name), "", t.TempDir(), b.cfg.IdleTimeout, false, server, target); err != nil {
 		t.Fatal(err)

@@ -761,20 +761,36 @@ func TestCIGoContractRejectsMutations(t *testing.T) {
 		{"unbounded package timeout", func(d *yaml.Node) {
 			ciGoField(ciGoSteps(ciGoJob(d, "go-test-core"))[5], "run").Value = "go test -race -timeout=0 ./..."
 		}},
-		{"remove Linux skip assertion", func(d *yaml.Node) {
+		{"remove Hyper-V inter-fence step", func(d *yaml.Node) {
+			steps := ciGoField(ciGoJob(d, "go-test-core"), "steps")
+			steps.Content = append(steps.Content[:6], steps.Content[7:]...)
+		}},
+		{"remove Hyper-V probe build tag", func(d *yaml.Node) {
 			run := ciGoField(ciGoSteps(ciGoJob(d, "go-test-core"))[6], "run")
+			run.Value = strings.Replace(run.Value, " -tags=crabbox_claim_fence_probe", "", 1)
+		}},
+		{"remove Hyper-V race detector", func(d *yaml.Node) {
+			run := ciGoField(ciGoSteps(ciGoJob(d, "go-test-core"))[6], "run")
+			run.Value = strings.Replace(run.Value, " -race", "", 1)
+		}},
+		{"disable Hyper-V inter-fence selector", func(d *yaml.Node) {
+			run := ciGoField(ciGoSteps(ciGoJob(d, "go-test-core"))[6], "run")
+			run.Value = strings.Replace(run.Value, "^TestRestoreNativeCheckpointStopsAtInterFenceClaimChanges$", "^TestMissingHyperVInterFence$", 1)
+		}},
+		{"remove Linux skip assertion", func(d *yaml.Node) {
+			run := ciGoField(ciGoSteps(ciGoJob(d, "go-test-core"))[7], "run")
 			run.Value = strings.Replace(run.Value, "assert not any", "# assert not any", 1)
 		}},
 		{"remove Linux required case", func(d *yaml.Node) {
-			run := ciGoField(ciGoSteps(ciGoJob(d, "go-test-core"))[6], "run")
+			run := ciGoField(ciGoSteps(ciGoJob(d, "go-test-core"))[7], "run")
 			run.Value = strings.Replace(run.Value, "    'TestWSL2ProductionCleanupKillsEntireStagingGroup',\n", "", 1)
 		}},
 		{"remove SSH skip assertion", func(d *yaml.Node) {
-			run := ciGoField(ciGoSteps(ciGoJob(d, "go-test-core"))[7], "run")
+			run := ciGoField(ciGoSteps(ciGoJob(d, "go-test-core"))[8], "run")
 			run.Value = strings.Replace(run.Value, "assert not any", "# assert not any", 1)
 		}},
 		{"remove SSH proxy cases", func(d *yaml.Node) {
-			run := ciGoField(ciGoSteps(ciGoJob(d, "go-test-core"))[7], "run")
+			run := ciGoField(ciGoSteps(ciGoJob(d, "go-test-core"))[8], "run")
 			run.Value = strings.Replace(run.Value, "for proxy in ('false', 'true')", "for proxy in ('false',)", 1)
 		}},
 		{"logging after predicate", func(d *yaml.Node) {
@@ -952,6 +968,7 @@ fi
 mapfile -t packages < <(printf '%s\n' "$packages" | sed '\|^github.com/openclaw/crabbox/internal/cli$|d')
 go test -race -count=1 -timeout=10m "${packages[@]}"
 `},
+	{"Test Hyper-V restore claim loss between effects", "", "go test -race -count=1 -timeout=2m -tags=crabbox_claim_fence_probe ./internal/providers/hyperv -run '^TestRestoreNativeCheckpointStopsAtInterFenceClaimChanges$'"},
 	{"Require executed Linux supervision fixtures", "bash", `go test ./internal/cli -run '^(TestWorkspaceOwnerWSL2Watchdog.*|TestWSL2(OrdinaryShortFrameWatchdogCleansState|MarkerPublicationFailureLeavesUnarmedDiagnosticState|GuardSurvivesPublishedMarkerBeforeArm|ProductionCleanup.*))$' -count=1 -json | tee "$RUNNER_TEMP/wsl-linux-tests.jsonl"
 python3 - "$RUNNER_TEMP/wsl-linux-tests.jsonl" <<'PY'
 import json, sys

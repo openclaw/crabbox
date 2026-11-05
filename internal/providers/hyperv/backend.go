@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -283,6 +284,11 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 		core.RemoveLeaseClaim(leaseID)
 		return core.RemoveStoredTestboxConnectionArtifactsContext(cleanupCtx, leaseID)
 	}
+	created, err := b.queryVM(ctx, name)
+	if err != nil {
+		return core.LeaseTarget{}, errors.Join(err, cleanupFailedLease())
+	}
+	vmID := created.ID
 
 	if err := b.prepareWindowsGuestNetwork(ctx, cfg, name, publicKey); err != nil {
 		return core.LeaseTarget{}, errors.Join(err, cleanupFailedLease())
@@ -317,7 +323,7 @@ func (b *backend) acquireWindows(ctx context.Context, req core.AcquireRequest) (
 	if err := b.ensureNode(ctx, name, cfg.HyperV.User); err != nil {
 		return core.LeaseTarget{}, errors.Join(fmt.Errorf("guest Node.js baseline setup failed: %w", err), cleanupFailedLease())
 	}
-	lease, err := b.prepareLease(ctx, cfg, hypervVM{Name: name, State: 2}, ip, claim, true)
+	lease, err := b.prepareLease(ctx, cfg, hypervVM{Name: name, State: 2, ID: vmID}, ip, claim, true)
 	if err != nil {
 		return core.LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
@@ -372,6 +378,21 @@ func persistLease(leaseID, slug, name string, cfg core.Config, req core.AcquireR
 	return err
 }
 
+// persistResolvedLease publishes a resolved lease's current endpoint for the
+// repository. It updates the endpoint of the same VM rather than replacing the
+// route, so per-lease state such as Actions workspace consent survives; the
+// shared claim transform still clears it on reclaim, an owner change, or a
+// changed resource identity. Resolve supplies the live Hyper-V Id, so a VM
+// recreated under the same name is a changed identity.
+func persistResolvedLease(leaseID, slug, name string, cfg core.Config, req core.ResolveRequest, lease *core.LeaseTarget) error {
+	expected, exists, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+	updated, err := core.ClaimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, instanceScope(name), lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, expected, exists)
+	if err == nil {
+		core.SetServerLeaseClaimSnapshot(&lease.Server, updated, true)
+	}
+	return err
+}
+
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
 	cfg := b.configForRun()
 	inst, claim, err := b.resolveInstance(ctx, req.ID)
@@ -406,6 +427,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if !owned && req.Repo.Root == "" {
 		return core.LeaseTarget{}, core.Exit(2, "hyperv --reclaim requires repository context before binding VM %q", inst.Name)
 	}
+	if !observing && req.Repo.Root != "" && inst.ID == "" {
+		return core.LeaseTarget{}, core.Exit(4, "hyperv VM %s did not report its Id; refusing to publish lease %s without verifying it is the same VM", inst.Name, claim.LeaseID)
+	}
 	ip := b.queryLiveIP(ctx, inst.Name)
 	if ip == "" {
 		ip = b.getIPFromClaim(claim)
@@ -419,7 +443,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	}
 	core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
 	if !observing && req.Repo.Root != "" {
-		if err := persistLease(claim.LeaseID, claim.Slug, inst.Name, cfg, core.AcquireRequest{Repo: req.Repo, Reclaim: req.Reclaim}, &lease); err != nil {
+		if err := persistResolvedLease(claim.LeaseID, claim.Slug, inst.Name, cfg, req, &lease); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -1554,8 +1578,14 @@ func isVirtualDiskFile(path string) bool {
 	}
 }
 
+var hypervVMIDPattern = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
+
+// queryVM reports the named VM's state and Hyper-V Id. The Id is the lease's
+// immutable identity: Acquire records it, and Resolve compares the live Id with
+// the claim so a same-name replacement VM cannot inherit per-VM authority such
+// as Actions workspace consent.
 func (b *backend) queryVM(ctx context.Context, name string) (hypervVM, error) {
-	script := fmt.Sprintf(`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq %s } | Select-Object Name, State | ConvertTo-Json -Compress`, core.PowerShellQuote(name))
+	script := fmt.Sprintf(`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq %s } | Select-Object Name, State, @{Name='Id';Expression={[string]$_.Id}} | ConvertTo-Json -Compress`, core.PowerShellQuote(name))
 	result, err := b.powershell(ctx, script)
 	if err != nil {
 		return hypervVM{}, shared.LocalCommandError("Get-VM query", result, err)
@@ -1567,6 +1597,9 @@ func (b *backend) queryVM(ctx context.Context, name string) (hypervVM, error) {
 	var vm hypervVM
 	if err := json.Unmarshal([]byte(stdout), &vm); err != nil {
 		return hypervVM{}, core.Exit(2, "parse hyperv VM %s: %v", name, err)
+	}
+	if vm.ID != "" && !hypervVMIDPattern.MatchString(vm.ID) {
+		return hypervVM{}, core.Exit(2, "hyperv VM %s reported an invalid Id", name)
 	}
 	return vm, nil
 }
