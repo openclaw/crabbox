@@ -484,7 +484,8 @@ func (b *backend) resolveVercelSandboxLeaseClaim(identifier string) (core.LeaseC
 
 func (b *backend) finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration) (string, string, string, error) {
 	return shared.FinishScopedLease(claim, shared.ScopedLeaseFinishOptions{
-		Provider: providerName, LeasePrefix: leasePrefix, RepoRoot: repoRoot,
+		LegacyRoots: []string{b.cfg.LegacyClaimRoot()},
+		Provider:    providerName, LeasePrefix: leasePrefix, RepoRoot: repoRoot,
 		Reclaim: reclaim, IdleTimeout: idleTimeout, ValidateClaim: b.validateClaimScope,
 	})
 }

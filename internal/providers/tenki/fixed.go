@@ -83,13 +83,14 @@ func (b *tenkiBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 	}
 	cfg := b.configForRun()
 	lease, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
-		Kind: tenkiFixedKind, LeaseID: leaseID, RepoRoot: req.Repo.Root,
+		LegacyRepoRoot: req.Repo.LegacyRoot,
+		Kind:           tenkiFixedKind, LeaseID: leaseID, RepoRoot: req.Repo.Root,
 		TargetOS: targetLinux, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout, Now: tenkiNow,
 	}, core.FixedLeaseOperations[tenkiSession]{Admission: &core.FixedAdmission{FreshOnly: true}, DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		if err := ctx.Err(); err != nil {
 			return core.FixedLeaseBinding{}, err
 		}
-		if exists && (claim.Provider != tenkiProvider || claim.FixedCreateIntent == nil || claim.RepoRoot != req.Repo.Root) {
+		if exists && (claim.Provider != tenkiProvider || claim.FixedCreateIntent == nil || !core.ClaimRepositoryMatches(claim.RepoRoot, req.Repo.Root, req.Repo.LegacyRoot)) {
 			return core.FixedLeaseBinding{}, core.Exit(4, "lease_id_conflict: fixed Tenki lease %s belongs to another provider, repository, or create mode", leaseID)
 		}
 		fingerprint, err := tenkiFixedFingerprint(cfg, req)

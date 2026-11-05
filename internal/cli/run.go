@@ -79,7 +79,7 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	if err := applyLeaseCreateFlags(&cfg, fs, leaseFlags); err != nil {
 		return err
 	}
-	repo, err := findRepo()
+	repo, err := findCommandRepo(&cfg)
 	if err != nil {
 		return err
 	}
@@ -838,6 +838,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if err != nil {
 		return err
 	}
+	cfg.claimLegacyRoot = repo.LegacyRoot
 	var jjSource jujutsuSource
 	if *applyLocalPatch {
 		boundary, err := nearestRepositoryBoundary(repo.Root, "")
@@ -5367,6 +5368,7 @@ func (a App) stop(ctx context.Context, args []string) (stopErr error) {
 			return Exit(4, "coordinator registration binding changed before confirmed-absence cleanup")
 		}
 	}
+	var currentRepoIdentity Repo
 	if *currentRepo {
 		capabilities, err := execCapabilitiesForConfig(cfg)
 		if err != nil {
@@ -5375,6 +5377,11 @@ func (a App) stop(ctx context.Context, args []string) (stopErr error) {
 		if !capabilities.CurrentRepoStop {
 			return Exit(2, "provider=%s does not support stop --current-repo", capabilities.Provider)
 		}
+		currentRepoIdentity, err = findExecRepo(cfg)
+		if err != nil {
+			return err
+		}
+		cfg.claimLegacyRoot = currentRepoIdentity.LegacyRoot
 	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
@@ -5388,11 +5395,7 @@ func (a App) stop(ctx context.Context, args []string) (stopErr error) {
 		if !ok {
 			return Exit(2, "provider=%s does not support stop --current-repo", backend.Spec().Name)
 		}
-		boundary, err := findRepositoryBoundary()
-		if err != nil {
-			return err
-		}
-		return scoped.StopForRepository(ctx, StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id}, boundary.root)
+		return scoped.StopForRepository(ctx, StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id}, currentRepoIdentity.Root)
 	}
 	if *confirmedAbsentLocalCleanup {
 		// Validate the immutable local identity before the network mutation, but

@@ -185,7 +185,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 			if err != nil {
 				return resolved, err
 			}
-			if err := authorizeOpenSandboxRepoClaim(claim, req.Repo.Root, req.Reclaim); err != nil {
+			if err := authorizeOpenSandboxRepoClaim(claim, req.Repo.Root, req.Reclaim, req.Repo.LegacyRoot); err != nil {
 				return resolved, err
 			}
 			slug = claim.Slug
@@ -216,7 +216,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			_, _, _, err = finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.BaseURL())
+			_, _, _, err = finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.BaseURL(), req.Repo.LegacyRoot)
 			return err
 		},
 		Setup: func(ctx context.Context) error {
@@ -715,8 +715,9 @@ func resolveOpenSandboxLeaseClaim(identifier, baseURL string) (core.LeaseClaim, 
 	})
 }
 
-func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL string) (string, string, string, error) {
+func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL string, legacyRoot ...string) (string, string, string, error) {
 	return shared.FinishScopedLease(claim, shared.ScopedLeaseFinishOptions{
+		LegacyRoots:   legacyRoot,
 		Provider:      providerName,
 		LeasePrefix:   leasePrefix,
 		RepoRoot:      repoRoot,
@@ -726,8 +727,8 @@ func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, i
 	})
 }
 
-func authorizeOpenSandboxRepoClaim(claim core.LeaseClaim, repoRoot string, reclaim bool) error {
-	if repoRoot == "" || claim.RepoRoot == "" || claim.RepoRoot == repoRoot || reclaim {
+func authorizeOpenSandboxRepoClaim(claim core.LeaseClaim, repoRoot string, reclaim bool, legacyRoot ...string) error {
+	if repoRoot == "" || claim.RepoRoot == "" || core.ClaimRepositoryMatches(claim.RepoRoot, repoRoot, legacyRoot...) || reclaim {
 		return nil
 	}
 	return core.Exit(2, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", claim.LeaseID, claim.RepoRoot, repoRoot)

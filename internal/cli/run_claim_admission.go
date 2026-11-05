@@ -29,7 +29,7 @@ func admitRunLeaseUnderClaim(ctx context.Context, backend SSHLoginBackend, req R
 			if canonicalClaimProvider(current.Provider) != canonicalClaimProvider(backend.Spec().Name) || (req.Options.ProviderScope != "" && current.ProviderScope != req.Options.ProviderScope) {
 				return Exit(2, "lease %s does not match the requested provider scope", req.ID)
 			}
-			if err := CheckLeaseClaimRepositoryOwner(req.ID, current, req.Repo.Root, false); err != nil {
+			if err := CheckLeaseClaimRepositoryOwner(req.ID, current, req.Repo.Root, false, req.Repo.LegacyRoot); err != nil {
 				return err
 			}
 			original = cloneLeaseClaim(current)
@@ -63,6 +63,7 @@ func admitRunLeaseUnderClaim(ctx context.Context, backend SSHLoginBackend, req R
 				idlePolicy = claimIdleReplaceExplicitly
 			}
 			return transformLeaseClaimForRepo(current, req.ID, ServerSlug(lease.Server), provider, providerClaimScope(provider, *cfg), cfg.Pond, details, req.Repo.Root, cfg.IdleTimeout, false, claimMetadata{
+				legacyRepoRoot:  req.Repo.LegacyRoot,
 				idlePolicy:      idlePolicy,
 				setCacheVolumes: true,
 				cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),

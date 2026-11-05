@@ -252,7 +252,7 @@ func (b *backend) stopExpected(ctx context.Context, req core.StopRequest, root s
 		defer release()
 	}
 	return core.DeleteFixedResource(ctx, kind, claim, core.FixedLeaseOperations[sandbox]{
-		Release:      &core.FixedReleasePolicy{RepoRoot: root, SkipTerminalObservation: true},
+		Release:      &core.FixedReleasePolicy{RepoRoot: root, LegacyRepoRoot: b.cfg.LegacyClaimRoot(), SkipTerminalObservation: true},
 		ObserveExact: b.observe,
 		DeleteExact: func(ctx context.Context, _ *core.FixedTransaction, s sandbox) error {
 			if err := c.Delete(ctx, s.ID); err != nil && !isMissing(err) {
@@ -285,7 +285,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 		return core.RunResult{}, err
 	}
 	req.ID = claim.LeaseID
-	if err := core.CheckLeaseClaimRepositoryOwner(claim.LeaseID, claim, req.Repo.Root, false); err != nil {
+	if err := core.CheckLeaseClaimRepositoryOwner(claim.LeaseID, claim, req.Repo.Root, false, req.Repo.LegacyRoot); err != nil {
 		return core.RunResult{}, err
 	}
 	deadline, err := b.executionDeadline(claim)
@@ -386,7 +386,7 @@ func (b *backend) Copy(ctx context.Context, req core.CopyRequest) error {
 	if req.RepoRoot == "" {
 		return fmt.Errorf("ACA Sandbox upload requires its repository owner")
 	}
-	if err := core.CheckLeaseClaimRepositoryOwner(claim.LeaseID, claim, req.RepoRoot, false); err != nil {
+	if err := core.CheckLeaseClaimRepositoryOwner(claim.LeaseID, claim, req.RepoRoot, false, b.cfg.LegacyClaimRoot()); err != nil {
 		return err
 	}
 	deadline, err := b.executionDeadline(claim)

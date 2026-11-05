@@ -42,16 +42,17 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest) (co
 	var replay bool
 	var retainedIntent *core.FixedCreateIntent
 	acquired, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
-		Kind:         fixedMachine0LeaseKind,
-		LeaseID:      leaseID,
-		CheckpointID: req.RequestedCheckpointID,
-		RepoRoot:     req.Repo.Root,
-		Reclaim:      req.Reclaim,
-		TargetOS:     cfg.TargetOS,
-		WindowsMode:  cfg.WindowsMode,
-		TTL:          cfg.TTL,
-		IdleTimeout:  cfg.IdleTimeout,
-		Now:          func() time.Time { return core.ClockNow(b.rt.Clock).UTC() },
+		LegacyRepoRoot: req.Repo.LegacyRoot,
+		Kind:           fixedMachine0LeaseKind,
+		LeaseID:        leaseID,
+		CheckpointID:   req.RequestedCheckpointID,
+		RepoRoot:       req.Repo.Root,
+		Reclaim:        req.Reclaim,
+		TargetOS:       cfg.TargetOS,
+		WindowsMode:    cfg.WindowsMode,
+		TTL:            cfg.TTL,
+		IdleTimeout:    cfg.IdleTimeout,
+		Now:            func() time.Time { return core.ClockNow(b.rt.Clock).UTC() },
 	}, core.FixedLeaseOperations[machine]{Admission: &core.FixedAdmission{FreshOnly: true}, DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		var err error
 		fingerprint, err = core.FixedMachine0CreateIntentFingerprint(cfg, core.FixedMachine0CreateIntentRequest{

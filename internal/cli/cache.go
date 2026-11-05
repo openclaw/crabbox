@@ -145,7 +145,7 @@ func (a App) cacheWarm(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
-	repo, err := findRepo()
+	repo, err := findCommandRepo(&cfg)
 	if err != nil {
 		return err
 	}
@@ -186,7 +186,7 @@ func (a App) cacheTarget(ctx context.Context, id string, reclaim bool) (SSHTarge
 	if err := autoRouteClaimLeaseProviderForIdentifier(&cfg, id); err != nil {
 		return SSHTarget{}, Config{}, "", err
 	}
-	repo, err := findRepo()
+	repo, err := findCommandRepo(&cfg)
 	if err != nil {
 		return SSHTarget{}, Config{}, "", err
 	}

@@ -1126,7 +1126,7 @@ func quoteSSHTransportConfigValue(value string) string {
 // resolveSSHTransportLeaseTargetForRepo resolves the same managed SSH target
 // as run/sync without invoking the legacy argv-rendered transport probe.
 func (a App) resolveSSHTransportLeaseTargetForRepo(ctx context.Context, cfg *Config, id string, printFallback, reclaim bool) (LeaseTarget, error) {
-	repo, err := findRepo()
+	repo, err := findCommandRepo(cfg)
 	if err != nil {
 		return LeaseTarget{}, err
 	}

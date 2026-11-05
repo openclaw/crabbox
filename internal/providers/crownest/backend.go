@@ -127,7 +127,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (result core.Run
 		if err != nil {
 			return core.RunResult{}, err
 		}
-		leaseID, sandboxID, slug, err = resolveLeaseID(leaseID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, scope)
+		leaseID, sandboxID, slug, err = resolveLeaseID(leaseID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, scope, req.Repo.LegacyRoot)
 		if err != nil {
 			return core.RunResult{}, err
 		}
@@ -687,7 +687,7 @@ func (b *backend) cleanupCreatedRun(ctx context.Context, api client, leaseID, sa
 	return nil
 }
 
-func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration, scope string) (string, string, string, error) {
+func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration, scope string, legacyRoot ...string) (string, string, string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return "", "", "", core.Exit(2, "provider=crownest requires a Crabbox-created sandbox slug or lease id")
@@ -697,7 +697,7 @@ func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration
 		exactLeaseID = leasePrefix + exactLeaseID
 	}
 	if claim, err := core.ReadLeaseClaim(exactLeaseID); err == nil && claim.LeaseID == exactLeaseID && claim.Provider == providerName {
-		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, scope)
+		return finishResolvedLease(claim, repoRoot, reclaim, idleTimeout, scope, legacyRoot...)
 	}
 	claims, err := listCrownestLeaseClaims()
 	if err != nil {
@@ -717,14 +717,15 @@ func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration
 		}
 	}
 	if matched.LeaseID != "" {
-		return finishResolvedLease(matched, repoRoot, reclaim, idleTimeout, scope)
+		return finishResolvedLease(matched, repoRoot, reclaim, idleTimeout, scope, legacyRoot...)
 	}
 	return "", "", "", core.Exit(4, "crownest sandbox %q is not claimed by Crabbox; use a Crabbox slug or %s<sandbox-id>", id, leasePrefix)
 }
 
-func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, scope string) (string, string, string, error) {
+func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, scope string, legacyRoot ...string) (string, string, string, error) {
 	return shared.FinishScopedLease(claim, shared.ScopedLeaseFinishOptions{
-		Provider: providerName, LeasePrefix: leasePrefix, RepoRoot: repoRoot,
+		LegacyRoots: legacyRoot,
+		Provider:    providerName, LeasePrefix: leasePrefix, RepoRoot: repoRoot,
 		Reclaim: reclaim, IdleTimeout: idleTimeout,
 		ValidateClaim: func(claim core.LeaseClaim) error {
 			if claim.ProviderScope != scope {

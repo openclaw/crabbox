@@ -37,7 +37,8 @@ func (b *Backend) acquireFixed(ctx context.Context, req core.AcquireRequest) (co
 	cfg.ServerType, cfg.Scaleway.Region, cfg.Scaleway.Zone = cfg.Scaleway.Type, client.Region(), client.Zone()
 	var publicKey string
 	lease, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
-		Kind: fixedLeaseKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root, Reclaim: req.Reclaim,
+		LegacyRepoRoot: req.Repo.LegacyRoot,
+		Kind:           fixedLeaseKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root, Reclaim: req.Reclaim,
 		TargetOS: core.TargetLinux, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout, Now: b.clockNow,
 	}, core.FixedLeaseOperations[*instance.Server]{
 		// A submitted request may still be in flight even when inventory is empty.
