@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- SSH: reuse verified Linux runtime artifacts across runs and readiness/metadata connections within a run while preserving watched workload lifetimes and confirmed retirement; report signal termination with a valid exit status. [PR 3053](https://github.com/openclaw/crabbox/pull/3053).
+
 ## 0.82.0 - 2026-11-05
 
 ### Highlights
@@ -33,7 +37,6 @@
 
 ### Fixed
 
-- SSH: reuse verified Linux runtime artifacts across runs and readiness/metadata connections within a run while preserving watched workload lifetimes and confirmed retirement; report signal termination with a valid exit status. [PR 3053](https://github.com/openclaw/crabbox/pull/3053).
 - Linux bootstrap: quiesce scheduled APT updates on provisioned guests without interrupting active package transactions, preventing mid-lease SSH renewal failures. [PR 3049](https://github.com/openclaw/crabbox/pull/3049). Thanks @excelsier.
 - Actions: preserve exact runner cleanup ownership when registration is canceled after guest configuration, without starting the listener. [PR 3045](https://github.com/openclaw/crabbox/pull/3045). Thanks @vincentkoc.
 - Apple Machine: report workload exit codes without replaying output, bound native diagnostics, and show failed-creation recovery guidance in `run` and `warmup`. [PR 3044](https://github.com/openclaw/crabbox/pull/3044). Thanks @coygeek.
