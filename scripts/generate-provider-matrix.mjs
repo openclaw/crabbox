@@ -49,7 +49,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
 
 function main() {
   const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
-  validateReadmeCategories(fs.readFileSync(rootReadmePath, "utf8"), metadata);
+  const rootReadme = fs.readFileSync(rootReadmePath, "utf8");
+  validateReadmeCategories(rootReadme, metadata);
   const benchmarkCategories = formatGoSource(renderBenchmarkCategories(metadata));
   if (check) {
     if (!fs.existsSync(benchmarkCategoriesPath) || fs.readFileSync(benchmarkCategoriesPath, "utf8") !== benchmarkCategories) {
@@ -63,6 +64,9 @@ function main() {
   validate(providers, metadata);
   const generated = render(providers, metadata);
   const readme = fs.readFileSync(readmePath, "utf8");
+  validateProviderCounts(rootReadme, providers, "README.md");
+  validateProviderCounts(readme, providers, "docs/providers/README.md");
+  validateProviderTargetCounts(readme, providers);
   const next = replaceGenerated(readme, generated, beginMarker, endMarker, readmePath);
   const lifecycleGuide = fs.readFileSync(lifecycleGuidePath, "utf8");
   const coverage = lifecycleCoverage(providers, metadata);
@@ -177,10 +181,10 @@ function render(providers, metadata) {
     "",
     "This table combines the live provider spec compiled into the CLI with curated",
     "selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mjs`.",
-    "`scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or",
-    "this generated table drift.",
+    "`scripts/check-docs.sh` fails when provider registration, metadata, docs paths,",
+    "stated counts, or this generated table drift.",
     "",
-    `Current built-in surface: ${providers.length} providers (${counts.get("ssh-lease") ?? 0} SSH lease, ${counts.get("delegated-run") ?? 0} delegated run, ${counts.get("service-control") ?? 0} service control).`,
+    `Current catalog: ${providers.length} entries, including \`external\` (${counts.get("ssh-lease") ?? 0} SSH lease, ${counts.get("delegated-run") ?? 0} delegated run, ${counts.get("service-control") ?? 0} service control).`,
     "",
     "Access terms:",
     "",
@@ -257,6 +261,28 @@ export function validateReadmeCategories(readme, metadata) {
   }
   const missing = Object.keys(metadata).filter((name) => !seen.has(name));
   if (missing.length) fail(`README.md provider list is missing: ${missing.join(", ")}`);
+}
+
+function validateProviderCounts(readme, providers, file) {
+  const summary = readme.match(/(\d+) built-in providers plus the `external` plugin\s+contract(?:\*\*)?(?::|\s*\()\s*(\d+) (?:catalog )?entries/);
+  if (!summary) fail(`${file} is missing the provider count summary`);
+  const externalCount = providers.filter((provider) => provider.provider === "external").length;
+  const builtInCount = providers.length - externalCount;
+  if (Number(summary[1]) !== builtInCount || Number(summary[2]) !== providers.length) {
+    fail(`${file} provider counts are stale: expected ${builtInCount} built-in providers plus ${externalCount} external entry (${providers.length} catalog entries)`);
+  }
+}
+
+function validateProviderTargetCounts(readme, providers) {
+  const summary = readme.match(/target declarations cover Linux on (\d+) entries, macOS on (\d+),\s+native Windows \(`windows\/normal`\) on (\d+), and WSL2 \(`windows\/wsl2`\) on (\d+)/);
+  if (!summary) fail("docs/providers/README.md is missing the provider target count summary");
+  const targets = ["linux", "macos", "windows/normal", "windows/wsl2"];
+  for (const [index, target] of targets.entries()) {
+    const count = providers.filter((provider) => provider.targets.includes(target)).length;
+    if (Number(summary[index + 1]) !== count) {
+      fail(`docs/providers/README.md target count is stale: expected ${count} entries for ${target}`);
+    }
+  }
 }
 
 function replaceGenerated(input, generated, startMarker, endMarker, targetPath) {

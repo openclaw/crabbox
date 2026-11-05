@@ -6,8 +6,8 @@ Read when:
 - debugging provider-specific provisioning, sync, or command execution;
 - changing provider registration, flags, config, or backend behavior.
 
-Crabbox's catalog contains **81 built-in providers plus the `external` plugin
-contract** (82 entries). The compiled target lists include Linux, macOS, native
+Crabbox's catalog contains **84 built-in providers plus the `external` plugin
+contract** (85 entries). The compiled target lists include Linux, macOS, native
 Windows, WSL2, and a Worker-module runtime. Support varies by provider: a catalog
 entry is not a promise of credentials, capacity, desktop access, or arbitrary
 shell execution. Start with `crabbox providers recommend`, then inspect the
@@ -94,10 +94,10 @@ coordinator credential boundary.
 
 This table combines the live provider spec compiled into the CLI with curated
 selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mjs`.
-`scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
-this generated table drift.
+`scripts/check-docs.sh` fails when provider registration, metadata, docs paths,
+stated counts, or this generated table drift.
 
-Current built-in surface: 85 providers (48 SSH lease, 33 delegated run, 4 service control).
+Current catalog: 85 entries, including `external` (48 SSH lease, 33 delegated run, 4 service control).
 
 Access terms:
 
@@ -217,8 +217,8 @@ but also supports coordinator-managed leases.
 
 <!-- END GENERATED PROVIDER MATRIX -->
 
-At this revision, target declarations cover Linux on 75 entries, macOS on 8,
-native Windows (`windows/normal`) on 9, and WSL2 (`windows/wsl2`) on 5. These
+At this revision, target declarations cover Linux on 78 entries, macOS on 9,
+native Windows (`windows/normal`) on 10, and WSL2 (`windows/wsl2`) on 5. These
 overlap; they are not separate provider totals. Use `--target` filters to see
 the current binary's list. `cloudflare-dynamic-workers` supplies `worker-runtime`
 instead of a Linux shell.
