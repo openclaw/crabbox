@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- CLI: finish one-shot lease cleanup when stdout or stderr closes early, returning SIGPIPE-style exit 141 on Unix while preserving explicit retention. [PR 3040](https://github.com/openclaw/crabbox/pull/3040). Thanks @coygeek.
 - Docs: align provider catalog and target counts with the compiled CLI, distinguish built-in providers from `external`, and reject stale summaries in docs CI. [PR 3034](https://github.com/openclaw/crabbox/pull/3034). Thanks @coygeek.
 - Firecracker: use Linux's `nomodule` boot argument so module-capable guests cannot load kernel modules and init no longer receives `nomodules`. [PR 3032](https://github.com/openclaw/crabbox/pull/3032). Thanks @coygeek.
 - Apple Machine: read the daemon's nested storage root so Apple Container 1.6.1 can acquire machines, while retaining supported 1.0 status responses and ownership validation. [PR 3033](https://github.com/openclaw/crabbox/pull/3033). Thanks @coygeek.
