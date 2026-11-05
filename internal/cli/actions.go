@@ -247,7 +247,7 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 	if err != nil {
 		return actionsHydrationState{}, err
 	}
-	claim, err = a.registerActionsRunner(ctx, cfg, target, leaseID, slug, "repos/"+ghRepo.Slug(), "", "", nil, claim, true)
+	claim, err = a.registerActionsRunner(ctx, cfg, target, leaseID, slug, "repos/"+ghRepo.Slug(), "", "", nil, claim, true, "")
 	if err != nil {
 		return actionsHydrationState{}, err
 	}
@@ -348,6 +348,7 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	nameFlag := fs.String("name", "", "runner name")
 	labelsFlag := fs.String("labels", "", "comma-separated extra runner labels")
 	versionFlag := fs.String("version", "", "actions/runner version or latest")
+	receiptPath := fs.String("receipt", "", "write a portable cleanup receipt before starting the runner")
 	ephemeralFlag := fs.Bool("ephemeral", true, "register runner as ephemeral")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	if err := parseFlags(fs, args); err != nil {
@@ -395,7 +396,7 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 		return Exit(2, "Actions runner target has no claimed resource snapshot")
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
-	_, err = a.registerActionsRunner(ctx, cfg, target, leaseID, slug, scope, *groupFlag, *nameFlag, extraLabels, expected, false)
+	_, err = a.registerActionsRunner(ctx, cfg, target, leaseID, slug, scope, *groupFlag, *nameFlag, extraLabels, expected, false, *receiptPath)
 	return err
 }
 
@@ -435,7 +436,7 @@ func (a App) registerGitHubActionsRunner(ctx context.Context, cfg Config, server
 	if !set || !exists {
 		return Exit(2, "Actions runner target has no claimed resource snapshot")
 	}
-	updated, err := a.registerActionsRunner(ctx, cfg, target, leaseID, slug, "repos/"+ghRepo.Slug(), "", nameOverride, extraLabels, expected, false)
+	updated, err := a.registerActionsRunner(ctx, cfg, target, leaseID, slug, "repos/"+ghRepo.Slug(), "", nameOverride, extraLabels, expected, false, "")
 	if updated.LeaseID != "" {
 		SetServerLeaseClaimSnapshot(server, updated, true)
 	}

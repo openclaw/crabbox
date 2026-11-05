@@ -76,7 +76,7 @@ func actionsRunnerLeaseFingerprint(claim leaseClaim) string {
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
-func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTarget, leaseID, slug, scope, group, name string, extraLabels []string, expected leaseClaim, strictSnapshot bool) (leaseClaim, error) {
+func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTarget, leaseID, slug, scope, group, name string, extraLabels []string, expected leaseClaim, strictSnapshot bool, receiptPath string) (leaseClaim, error) {
 	if !supportsGitHubActionsRunnerTarget(target) {
 		return leaseClaim{}, Exit(2, "actions runner registration currently supports Linux and Windows targets only")
 	}
@@ -131,6 +131,9 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 					return err
 				}
 				updated = cloneLeaseClaim(*claim)
+				if err := writeActionsRunnerReceipt(receiptPath, leaseID, *binding); err != nil {
+					return err
+				}
 				if !*guest.Active {
 					_, err := actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
 					return err
@@ -192,6 +195,9 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 			return errors.Join(ctx.Err(), Exit(7, "persist runner %s/%d; listener was not started: %v", binding.Scope, binding.RunnerID, err), rollbackErr)
 		}
 		updated = cloneLeaseClaim(*claim)
+		if err := writeActionsRunnerReceipt(receiptPath, leaseID, *binding); err != nil {
+			return errors.Join(ctx.Err(), err)
+		}
 		if err := ctx.Err(); err != nil {
 			return errors.Join(installErr, err)
 		}
@@ -280,11 +286,29 @@ func deleteGitHubActionsRunner(ctx context.Context, binding ActionsRunnerBinding
 func (a App) actionsUnregister(ctx context.Context, args []string) error {
 	fs := newFlagSet("actions unregister", a.Stderr)
 	id := fs.String("id", "", "lease id or slug with a recorded runner registration")
+	receiptPath := fs.String("receipt", "", "portable cleanup receipt written by actions register")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	if *id == "" {
-		return Exit(2, "actions unregister requires --id")
+	if (*id == "") == (*receiptPath == "") {
+		return Exit(2, "actions unregister requires either --id or --receipt")
+	}
+	if *receiptPath != "" {
+		receipt, err := readActionsRunnerReceipt(*receiptPath)
+		if err != nil {
+			return err
+		}
+		return WithDurableLeaseClaimLockContext(ctx, receipt.LeaseID, func(claim *leaseClaim, exists bool, _ func() error) error {
+			if exists && (claim.ActionsRunner == nil || receipt.Scope != claim.ActionsRunner.Scope || receipt.RunnerID != claim.ActionsRunner.RunnerID || receipt.Name != claim.ActionsRunner.Name) {
+				return Exit(2, "portable runner receipt conflicts with local cleanup ownership")
+			}
+			binding := ActionsRunnerBinding{Scope: receipt.Scope, RunnerID: receipt.RunnerID, Name: receipt.Name}
+			if err := deleteGitHubActionsRunner(ctx, binding, receipt.LeaseID, nil); err != nil {
+				return err
+			}
+			fmt.Fprintf(a.Stdout, "actions runner unregistered scope=%s id=%d\n", binding.Scope, binding.RunnerID)
+			return nil
+		})
 	}
 	claim, exists, err := ResolveLeaseClaimContext(ctx, *id)
 	if err != nil {
