@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Azure: refuse direct coordinator creates against outstanding cleanup for the same resource name, preserving strict immutable-identity checks during cleanup.
+- Azure: refuse direct coordinator creates against outstanding cleanup for the same resource name, preserving strict immutable-identity checks during cleanup. [PR 3050](https://github.com/openclaw/crabbox/pull/3050).
 - Actions: preserve exact runner cleanup ownership when registration is canceled after guest configuration, without starting the listener. [PR 3045](https://github.com/openclaw/crabbox/pull/3045). Thanks @vincentkoc.
 - Apple Machine: report workload exit codes without replaying output, bound native diagnostics, and show failed-creation recovery guidance in `run` and `warmup`. [PR 3044](https://github.com/openclaw/crabbox/pull/3044). Thanks @coygeek.
 - CLI: finish one-shot lease cleanup when stdout or stderr closes early, returning SIGPIPE-style exit 141 on Unix while preserving explicit retention. [PR 3040](https://github.com/openclaw/crabbox/pull/3040). Thanks @coygeek.
