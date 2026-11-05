@@ -70,6 +70,8 @@ func (p *sshTransportPreparation) runNative(ctx context.Context, target SSHTarge
 	if nativeRuntimeRouteKey(target) != nativeRuntimeRouteKey(p.native.target) {
 		return errors.New("native runtime command target changed")
 	}
+	// The controller alone holds the watched pipe's writer. A mux master only
+	// receives its reader, so controller exit still sends EOF on this channel.
 	_, runErr := p.runOnce(ctx, target, connectTimeout, attempts, stdout, stderr, false)
 	if !p.dispatched {
 		return errors.Join(runErr, context.Cause(ctx))
@@ -85,12 +87,13 @@ func (p *sshTransportPreparation) runNative(ctx context.Context, target SSHTarge
 		action = "cancel"
 	}
 	record := newSynchronizedBuffer(remoteruntime.CompletionLimit + 1)
-	cleanupErr := p.native.runMetadata(cleanupCtx, []string{"control", remoteruntime.Protocol, p.nativeNonce, action}, &record)
+	// Each control validates the nonce-bound completion itself. A single SSH
+	// exit acknowledges both operations; lost output or exit remains ambiguous.
+	settle := p.native.command("control", remoteruntime.Protocol, p.nativeNonce, action) + " && " +
+		p.native.command("control", remoteruntime.Protocol, p.nativeNonce, "retire")
+	cleanupErr := p.native.runPOSIX(cleanupCtx, settle, &record)
 	if cleanupErr == nil {
 		_, cleanupErr = remoteruntime.ParseCompletion(record.Bytes(), p.nativeNonce)
-	}
-	if cleanupErr == nil {
-		cleanupErr = p.native.runMetadata(cleanupCtx, []string{"control", remoteruntime.Protocol, p.nativeNonce, "retire"}, io.Discard)
 	}
 	if cleanupErr != nil {
 		// Absence is not settlement: an accepted SSH wrapper may not have
