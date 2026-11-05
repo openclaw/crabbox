@@ -6,6 +6,10 @@
 
 - Actions: register leases in an existing organization runner group, persist exact runner ownership before starting the listener, and deregister the recorded runner with `actions unregister` without requiring the VM to remain reachable.
 
+### Fixed
+
+- Docs: warmup and orchestrator retention notes now match direct cleanup, where `keep=true` does not exempt expired machines and the running or provisioning grace is one hour. [PR 2999](https://github.com/openclaw/crabbox/pull/2999). Thanks @KrasimirKralev.
+
 ## 0.81.1 - 2026-11-04
 
 ### Fixed
