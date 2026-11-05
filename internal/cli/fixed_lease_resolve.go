@@ -33,7 +33,7 @@ func ResolveFixedLeaseTarget(ctx context.Context, opts FixedResolveOptions,
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if req.Repo.Root != "" && claim.RepoRoot != req.Repo.Root {
+		if req.Repo.Root != "" && !ClaimRepositoryMatches(claim.RepoRoot, req.Repo.Root, req.Repo.LegacyRoot) {
 			return Exit(4, "lease_id_conflict: fixed lease %s belongs to another repository", claim.LeaseID)
 		}
 		if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == "released" {

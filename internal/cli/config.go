@@ -18,6 +18,7 @@ import (
 )
 
 type Config struct {
+	claimLegacyRoot               string
 	ManagedHost                   string
 	HostCapabilities              []string
 	DirectLeases                  string

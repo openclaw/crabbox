@@ -6,6 +6,10 @@
 
 - Actions: register leases in an existing organization runner group, persist exact runner ownership before starting the listener, and deregister the recorded runner with `actions unregister` without requiring the VM to remain reachable.
 
+### Fixed
+
+- Sync: reuse directory-source leases through equivalent path aliases, preserve literal legacy claim admission, and keep execution ownership checks consistent. [PR 3002](https://github.com/openclaw/crabbox/pull/3002). Thanks @goutamadwant.
+
 ## 0.81.1 - 2026-11-04
 
 ### Fixed

@@ -46,6 +46,7 @@ func findSyncRepo(cfg Config, syncEnabled bool) (Repo, error) {
 		if err != nil {
 			return Repo{}, err
 		}
+		repo.LegacyRoot = repo.Root
 		repo.Root = root
 		repo.Name = filepath.Base(repo.Root)
 		return repo, nil
@@ -61,7 +62,11 @@ func findSyncRepo(cfg Config, syncEnabled bool) (Repo, error) {
 }
 
 func canonicalCurrentDirectory(root string) (string, error) {
-	resolved := canonicalRepositoryPath(root)
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve current directory: %w", err)
+	}
+	resolved = filepath.Clean(resolved)
 	currentInfo, err := os.Stat(".")
 	if err != nil {
 		return "", fmt.Errorf("inspect current directory: %w", err)
@@ -75,6 +80,47 @@ func canonicalCurrentDirectory(root string) (string, error) {
 	}
 	return resolved, nil
 }
+
+// Root-only commands keep their original lookup as the sole legacy spelling.
+func findCommandRepo(cfg *Config) (Repo, error) {
+	repo, err := findRepo()
+	if err != nil || effectiveSyncSource(*cfg) != "directory" {
+		return repo, err
+	}
+	repo, err = canonicalDirectoryClaimRepo(repo)
+	if err == nil {
+		cfg.claimLegacyRoot = repo.LegacyRoot
+	}
+	return repo, err
+}
+
+func findExecRepo(cfg Config) (Repo, error) {
+	boundary, err := findRepositoryBoundary()
+	if err != nil {
+		return Repo{}, err
+	}
+	repo := Repo{Root: boundary.root}
+	if effectiveSyncSource(cfg) == "directory" {
+		return canonicalDirectoryClaimRepo(repo)
+	}
+	return repo, nil
+}
+
+func canonicalDirectoryClaimRepo(repo Repo) (Repo, error) {
+	root, err := os.Getwd()
+	if err != nil {
+		return Repo{}, err
+	}
+	root, err = canonicalCurrentDirectory(root)
+	if err != nil {
+		return Repo{}, err
+	}
+	repo.LegacyRoot, repo.Root = repo.Root, root
+	return repo, nil
+}
+
+// LegacyClaimRoot is transient invocation context, never claim-file metadata.
+func (cfg Config) LegacyClaimRoot() string { return cfg.claimLegacyRoot }
 
 func validateDirectorySyncConfig(cfg Config) error {
 	if len(syncIncludes(cfg)) == 0 {
