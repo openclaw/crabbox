@@ -6,6 +6,10 @@
 
 - Actions: register leases in an existing organization runner group, persist exact runner ownership before starting the listener, and deregister the recorded runner with `actions unregister` without requiring the VM to remain reachable.
 
+### Fixed
+
+- Apple Machine: read the daemon's nested storage root so Apple Container 1.6.1 can acquire machines, while retaining supported 1.0 status responses and ownership validation. [PR 3033](https://github.com/openclaw/crabbox/pull/3033). Thanks @coygeek.
+
 ## 0.81.1 - 2026-11-04
 
 ### Fixed
