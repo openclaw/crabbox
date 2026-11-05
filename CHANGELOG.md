@@ -6,6 +6,10 @@
 
 - Actions: register leases in an existing organization runner group, persist exact runner ownership before starting the listener, and deregister the recorded runner with `actions unregister` without requiring the VM to remain reachable.
 
+### Fixed
+
+- Docs: refresh installation examples and clarify local-container prerequisites, recovery, desktop bridge defaults, and configuration paths. [PR 2992](https://github.com/openclaw/crabbox/pull/2992). Thanks @zozo123.
+
 ## 0.81.1 - 2026-11-04
 
 ### Fixed
