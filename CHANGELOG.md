@@ -9,6 +9,7 @@
 ### Fixed
 
 - Apple Machine: report workload exit codes without replaying output, bound native diagnostics, and show failed-creation recovery guidance in `run` and `warmup`. [PR 3044](https://github.com/openclaw/crabbox/pull/3044). Thanks @coygeek.
+- CLI: finish one-shot lease cleanup when stdout or stderr closes early, returning SIGPIPE-style exit 141 on Unix while preserving explicit retention. [PR 3040](https://github.com/openclaw/crabbox/pull/3040). Thanks @coygeek.
 - SSH: return promptly after supervised Linux/WSL2 and POSIX fallback commands exit while preserving TERM grace and forced cleanup for surviving children. [PR 3041](https://github.com/openclaw/crabbox/pull/3041). Thanks @lazmo88.
 - Apple Machine: preserve command arguments and exit codes through the guest shell, keep preset values literal, and send machine-creation output to stderr so workload stdout stays unchanged. [PR 3039](https://github.com/openclaw/crabbox/pull/3039). Thanks @coygeek.
 - Docs: align provider catalog and target counts with the compiled CLI, distinguish built-in providers from `external`, and reject stale summaries in docs CI. [PR 3034](https://github.com/openclaw/crabbox/pull/3034). Thanks @coygeek.
