@@ -41,7 +41,9 @@ func (b *backend) createMachine(ctx context.Context, name string) error {
 		args = append(args, "--memory", memory)
 	}
 	args = append(args, core.Blank(strings.TrimSpace(b.cfg.AppleContainer.Image), "ubuntu:26.04"))
-	result, err := b.command(ctx, args, "")
+	createBackend := *b
+	createBackend.rt.Stdout = b.rt.Stderr
+	result, err := createBackend.command(ctx, args, "")
 	if err != nil {
 		return shared.ExitErrorWithCause(5, fmt.Sprintf("create Apple container machine: %s", failureDetail(result, err)), err)
 	}
