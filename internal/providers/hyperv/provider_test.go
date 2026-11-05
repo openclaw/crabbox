@@ -2087,6 +2087,7 @@ func TestWindowsBootstrapReportsAuthenticatedProgressOnlyAfterGuestProbe(t *test
 				}
 				for _, stage := range []string{
 					"stage=powershell-direct state=authenticated",
+					"stage=credential-escrow state=complete",
 					"stage=ssh-lockdown state=complete",
 					"stage=network-connect state=complete",
 				} {

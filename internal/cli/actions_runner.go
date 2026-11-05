@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -88,9 +90,15 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 	}
 	labels := githubActionsRunnerLabels(cfg, leaseID, slug, extraLabels)
 	checkVersion := cfg.Actions.RunnerVersion != "" && cfg.Actions.RunnerVersion != "latest"
+	// Reserve part of the caller's deadline so a stalled setup still reports
+	// guest diagnostics instead of a bare timeout.
+	bootstrapCtx, cancelBootstrap := actionsRunnerBootstrapContext(ctx)
+	defer cancelBootstrap()
 	var updated leaseClaim
 	err := WithDurableLeaseClaimLockContext(ctx, leaseID, func(claim *leaseClaim, exists bool, persist func() error) error {
-		if !exists || !sameActionsWorkspaceClaimOwner(*claim, expected) || strictSnapshot && !reflect.DeepEqual(*claim, expected) {
+		// A lease heartbeat may advance lifecycle labels and last use between the
+		// caller's snapshot and this lock; any other change fails the snapshot.
+		if !exists || !sameActionsWorkspaceClaimOwner(*claim, expected) || strictSnapshot && !reflect.DeepEqual(*claim, expected) && !actionsClaimLifecycleOnlyChange(expected, *claim) {
 			return Exit(2, "Actions runner lease claim changed or is missing")
 		}
 		fingerprint := actionsRunnerLeaseFingerprint(*claim)
@@ -132,6 +140,7 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 				}
 				updated = cloneLeaseClaim(*claim)
 				if !*guest.Active {
+					fmt.Fprintln(a.Stderr, "actions runner setup stage=service-start")
 					_, err := actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
 					return err
 				}
@@ -148,8 +157,12 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 		if _, err := actionsRunnerControl(ctx, target, remoteClearActionsRunnerSettings(target, previous)); err != nil {
 			return err
 		}
-		token, err := githubActionsRegistrationToken(ctx, scope, target.ChildEnvDenylist)
+		fmt.Fprintln(a.Stderr, "actions runner setup stage=registration-token")
+		token, err := githubActionsRegistrationToken(bootstrapCtx, scope, target.ChildEnvDenylist)
 		if err != nil {
+			if bootstrapCtx.Err() == context.DeadlineExceeded {
+				return Exit(5, "GitHub Actions runner setup timed out before registration token acquisition completed")
+			}
 			return err
 		}
 		script := githubActionsRunnerInstallScriptForTarget(cfg.Actions.RunnerVersion, cfg.Actions.Ephemeral, target)
@@ -159,8 +172,36 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 			script = "export RUNNER_GROUP=" + shellQuote(group) + "\n" + script
 		}
 		_, destination, _ := strings.Cut(scope, "/")
+		remote := githubActionsRunnerInstallRemoteCommand(target)
 		input := githubActionsRunnerInstallInput(destination, name, strings.Join(labels, ","), token, script)
-		installErr := runSSHInputQuiet(ctx, target, githubActionsRunnerInstallRemoteCommand(target), input)
+		// Windows OpenSSH intermittently wedges its per-connection event loop while
+		// forwarding a large stdin payload, stranding setup before its first stage.
+		// Copy the script instead; only the short credential lines use stdin.
+		cleanupScript := func() {}
+		if isWindowsNativeTarget(target) && windowsScriptNeedsFileTransport(script) {
+			remotePath, cleanup, err := uploadWindowsActionsRunnerScript(bootstrapCtx, target, script)
+			if err != nil {
+				return err
+			}
+			cleanupScript = cleanup
+			remote = githubActionsRunnerInstallRemoteCommandForUploadedScript(remotePath)
+			input = githubActionsRunnerCredentialInput(destination, name, strings.Join(labels, ","), token)
+		}
+		setup, installErr := runActionsRunnerSetup(bootstrapCtx, a.Stderr, func(stdout, stderr io.Writer) error {
+			return runSSHInput(bootstrapCtx, target, remote, strings.NewReader(input), stdout, stderr)
+		})
+		cleanupScript()
+		if installErr != nil {
+			diagnostics := redactActionsRunnerText(setup.Diagnostics, token)
+			if diagnostics == "" {
+				diagnostics = readGitHubActionsRunnerDiagnosticsBestEffort(ctx, target, token)
+			}
+			if bootstrapCtx.Err() == context.DeadlineExceeded {
+				installErr = Exit(5, "GitHub Actions runner setup timed out on %s during stage=%s: %s", target.Host, blank(setup.LastStage, "bootstrap"), blank(diagnostics, "no diagnostics available"))
+			} else {
+				installErr = Exit(7, "register GitHub Actions runner on %s failed during stage=%s: %v: %s", target.Host, blank(setup.LastStage, "bootstrap"), installErr, blank(diagnostics, "no diagnostics available"))
+			}
+		}
 		// A lost SSH acknowledgement is not permission to register again. Recover
 		// the official local identity and verify its exact API object first.
 		guest, err = readActionsRunnerGuest(ctx, target, checkVersion)
@@ -189,6 +230,7 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 			return errors.Join(Exit(7, "persist runner %s/%d; listener was not started: %v", binding.Scope, binding.RunnerID, err), rollbackErr)
 		}
 		updated = cloneLeaseClaim(*claim)
+		fmt.Fprintln(a.Stderr, "actions runner setup stage=service-start")
 		_, err = actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
 		return err
 	})
@@ -196,6 +238,17 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 		return updated, err
 	}
 	fmt.Fprintf(a.Stdout, "actions runner registered scope=%s id=%d name=%s labels=%s ephemeral=%t\n", scope, updated.ActionsRunner.RunnerID, name, strings.Join(labels, ","), cfg.Actions.Ephemeral)
+	// A configured runner whose listener never connects (for example one started
+	// under an SSH session that ended) would leave the dispatched job queued.
+	binding := *updated.ActionsRunner
+	onlineCtx, cancelOnline := boundedActionsRunnerOnlineContext(bootstrapCtx)
+	defer cancelOnline()
+	if err := waitForGitHubActionsRunnerOnline(onlineCtx, scope, binding.Name, 5*time.Second, func(lookupCtx context.Context) (githubActionsRunnerState, error) {
+		return githubActionsRunnerStateForBinding(lookupCtx, binding, target.ChildEnvDenylist)
+	}, a.Stderr); err != nil {
+		diagnostics := readGitHubActionsRunnerDiagnosticsBestEffort(ctx, target)
+		return updated, Exit(ExitCodeForError(err, 5), "%v; guest diagnostics: %s", err, blank(diagnostics, "no diagnostics available"))
+	}
 	return updated, nil
 }
 
@@ -412,4 +465,453 @@ case "$state" in
 esac
 rm -f -- "$runner_dir/.runner" "$runner_dir/.credentials" "$runner_dir/.credentials_rsaparams"
 `, shellQuote(fmt.Sprint(binding.RunnerID)))
+}
+
+const (
+	defaultActionsWaitTimeout    = 20 * time.Minute
+	actionsRunnerStagePrefix     = "crabbox-runner-stage="
+	actionsRunnerDiagnosticLimit = 16 * 1024
+	maxActionsDiagnosticReserve  = 30 * time.Second
+)
+
+type actionsRunnerSetupResult struct {
+	LastStage   string
+	Diagnostics string
+}
+
+type githubRunnerHydrationHooks struct {
+	Register     func(context.Context) error
+	ClearState   func(context.Context) error
+	Inputs       func(context.Context) (map[string]bool, bool, error)
+	Dispatch     func(context.Context, []string) error
+	OnDispatched func()
+	Wait         func(context.Context, string) (actionsHydrationState, error)
+}
+
+func runGitHubRunnerHydration(
+	ctx context.Context,
+	workflow, ref, configuredJob string,
+	fields []string,
+	stderr io.Writer,
+	hooks githubRunnerHydrationHooks,
+) (actionsHydrationState, error) {
+	if err := hooks.Register(ctx); err != nil {
+		return actionsHydrationState{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return actionsHydrationState{}, err
+	}
+	if err := hooks.ClearState(ctx); err != nil {
+		return actionsHydrationState{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return actionsHydrationState{}, err
+	}
+	if inputs, ok, err := hooks.Inputs(ctx); err != nil {
+		fmt.Fprintf(stderr, "warning: inspect workflow inputs failed: %v\n", err)
+	} else if ok {
+		filtered, dropped := filterWorkflowInputs(fields, inputs)
+		for _, field := range dropped {
+			fmt.Fprintf(stderr, "warning: workflow %s does not declare input %s; omitting it\n", workflow, fieldName(field))
+		}
+		fields = filtered
+		for _, required := range []string{"crabbox_id", "crabbox_runner_label", "crabbox_keep_alive_minutes"} {
+			if !inputs[required] {
+				return actionsHydrationState{}, Exit(2, "workflow %s at %s does not declare required hydrate input %s", workflow, ref, required)
+			}
+		}
+	}
+	expectedJob := configuredJob
+	if !workflowFieldsContain(fields, "crabbox_job") {
+		expectedJob = ""
+	}
+	if err := ctx.Err(); err != nil {
+		return actionsHydrationState{}, err
+	}
+	if err := hooks.Dispatch(ctx, fields); err != nil {
+		if expectedJob != "" && strings.Contains(err.Error(), "Unexpected input") {
+			if err := ctx.Err(); err != nil {
+				return actionsHydrationState{}, err
+			}
+			fields = dropWorkflowField(fields, "crabbox_job")
+			expectedJob = ""
+			fmt.Fprintln(stderr, "warning: retrying workflow dispatch without crabbox_job for compatibility")
+			if retryErr := hooks.Dispatch(ctx, fields); retryErr != nil {
+				return actionsHydrationState{}, retryErr
+			}
+		} else {
+			return actionsHydrationState{}, err
+		}
+	}
+	if hooks.OnDispatched != nil {
+		hooks.OnDispatched()
+	}
+	if err := ctx.Err(); err != nil {
+		return actionsHydrationState{}, err
+	}
+	return hooks.Wait(ctx, expectedJob)
+}
+
+type actionsRunnerSetupProgress struct {
+	mu          sync.Mutex
+	output      io.Writer
+	partial     string
+	lastStage   string
+	diagnostics string
+}
+
+func newActionsRunnerSetupProgress(output io.Writer) *actionsRunnerSetupProgress {
+	return &actionsRunnerSetupProgress{
+		output:    output,
+		lastStage: "bootstrap",
+	}
+}
+
+func (p *actionsRunnerSetupProgress) Write(data []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.partial += string(data)
+	for {
+		index := strings.IndexByte(p.partial, '\n')
+		if index < 0 {
+			break
+		}
+		p.consumeLineLocked(p.partial[:index])
+		p.partial = p.partial[index+1:]
+	}
+	if len(p.partial) > actionsRunnerDiagnosticLimit {
+		p.appendDiagnosticLocked(p.partial)
+		p.partial = ""
+	}
+	return len(data), nil
+}
+
+func (p *actionsRunnerSetupProgress) Flush() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.partial != "" {
+		p.consumeLineLocked(p.partial)
+		p.partial = ""
+	}
+}
+
+func (p *actionsRunnerSetupProgress) Result() actionsRunnerSetupResult {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return actionsRunnerSetupResult{
+		LastStage:   p.lastStage,
+		Diagnostics: strings.TrimSpace(p.diagnostics),
+	}
+}
+
+func (p *actionsRunnerSetupProgress) consumeLineLocked(line string) {
+	line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+	if line == "" {
+		return
+	}
+	if stage, ok := strings.CutPrefix(line, actionsRunnerStagePrefix); ok {
+		stage = sanitizeActionsRunnerStage(stage)
+		if stage == "" {
+			stage = "unknown"
+		}
+		p.lastStage = stage
+		fmt.Fprintf(p.output, "actions runner setup stage=%s\n", stage)
+		return
+	}
+	p.appendDiagnosticLocked(line + "\n")
+}
+
+func (p *actionsRunnerSetupProgress) appendDiagnosticLocked(value string) {
+	p.diagnostics += value
+	if len(p.diagnostics) > actionsRunnerDiagnosticLimit {
+		p.diagnostics = p.diagnostics[len(p.diagnostics)-actionsRunnerDiagnosticLimit:]
+	}
+}
+
+func sanitizeActionsRunnerStage(value string) string {
+	var stage strings.Builder
+	for _, r := range strings.TrimSpace(value) {
+		switch {
+		case r >= 'a' && r <= 'z':
+			stage.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			stage.WriteRune(r)
+		case r >= '0' && r <= '9':
+			stage.WriteRune(r)
+		case r == '-', r == '_', r == '.':
+			stage.WriteRune(r)
+		default:
+			stage.WriteByte('-')
+		}
+	}
+	return strings.Trim(stage.String(), "-")
+}
+
+func runActionsRunnerSetup(ctx context.Context, output io.Writer, run func(stdout, stderr io.Writer) error) (actionsRunnerSetupResult, error) {
+	progress := newActionsRunnerSetupProgress(output)
+	fmt.Fprintln(output, "actions runner setup stage=bootstrap")
+	err := run(progress, progress)
+	progress.Flush()
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	return progress.Result(), err
+}
+
+type githubActionsRunnerState struct {
+	Found  bool
+	Status string
+	Busy   bool
+}
+
+type githubActionsRunnerLookup func(context.Context) (githubActionsRunnerState, error)
+
+// githubActionsRunnerStateForBinding reads the exact recorded registration, so a
+// same-named runner in the scope cannot satisfy the online check.
+func githubActionsRunnerStateForBinding(ctx context.Context, binding ActionsRunnerBinding, childEnvDenylist []string) (githubActionsRunnerState, error) {
+	if binding.RunnerID <= 0 || !actionsRunnerScopePattern.MatchString(binding.Scope) {
+		return githubActionsRunnerState{}, Exit(2, "invalid Actions runner receipt")
+	}
+	out, err := ghOutputWithChildEnvironment(ctx, "", childEnvDenylist, "api", fmt.Sprintf("%s/actions/runners/%d", binding.Scope, binding.RunnerID))
+	if err != nil {
+		if strings.Contains(err.Error(), "HTTP 404") {
+			return githubActionsRunnerState{}, nil
+		}
+		return githubActionsRunnerState{}, err
+	}
+	var runner struct {
+		ID     int64  `json:"id"`
+		Name   string `json:"name"`
+		Status string `json:"status"`
+		Busy   bool   `json:"busy"`
+	}
+	if err := json.Unmarshal([]byte(out), &runner); err != nil {
+		return githubActionsRunnerState{}, Exit(3, "invalid GitHub runner response")
+	}
+	if runner.ID != binding.RunnerID || runner.Name != binding.Name {
+		return githubActionsRunnerState{}, nil
+	}
+	return githubActionsRunnerState{Found: true, Status: runner.Status, Busy: runner.Busy}, nil
+}
+
+func waitForGitHubActionsRunnerOnline(
+	ctx context.Context,
+	scope string,
+	name string,
+	interval time.Duration,
+	lookup githubActionsRunnerLookup,
+	stderr io.Writer,
+) error {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	return waitForGitHubActionsRunnerOnlineWithPoll(ctx, scope, name, lookup, stderr, func(ctx context.Context) error {
+		return waitForActionsPoll(ctx, interval)
+	})
+}
+
+func waitForActionsPoll(ctx context.Context, interval time.Duration) error {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func waitForGitHubActionsRunnerOnlineWithPoll(
+	ctx context.Context,
+	scope string,
+	name string,
+	lookup githubActionsRunnerLookup,
+	stderr io.Writer,
+	poll func(context.Context) error,
+) error {
+	var lastState githubActionsRunnerState
+	var lastErr error
+	for {
+		state, err := lookup(ctx)
+		if err == nil {
+			lastState = state
+			lastErr = nil
+			if ctx.Err() == nil && state.Found && strings.EqualFold(state.Status, "online") {
+				fmt.Fprintf(stderr, "actions runner online scope=%s name=%s busy=%t\n", scope, name, state.Busy)
+				return nil
+			}
+		} else {
+			lastErr = err
+		}
+
+		status := "missing"
+		if lastState.Found {
+			status = blank(lastState.Status, "unknown")
+		}
+		if lastErr != nil {
+			fmt.Fprintf(stderr, "waiting for actions runner online scope=%s name=%s error=%q\n", scope, name, lastErr.Error())
+		} else {
+			fmt.Fprintf(stderr, "waiting for actions runner online scope=%s name=%s status=%s busy=%t\n", scope, name, status, lastState.Busy)
+		}
+
+		pollErr := ctx.Err()
+		if pollErr == nil {
+			pollErr = poll(ctx)
+		}
+		if pollErr != nil {
+			if errors.Is(pollErr, context.DeadlineExceeded) {
+				if lastErr != nil {
+					return Exit(5, "timed out waiting for GitHub Actions runner %s in %s to become online: last lookup error: %v", name, scope, lastErr)
+				}
+				return Exit(5, "timed out waiting for GitHub Actions runner %s in %s to become online: last status=%s busy=%t", name, scope, status, lastState.Busy)
+			}
+			return pollErr
+		}
+	}
+}
+
+func actionsRunnerBootstrapContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return context.WithCancel(ctx)
+	}
+	reserve := remaining / 20
+	if reserve > maxActionsDiagnosticReserve {
+		reserve = maxActionsDiagnosticReserve
+	}
+	if reserve <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithDeadline(ctx, deadline.Add(-reserve))
+}
+
+func readGitHubActionsRunnerDiagnosticsBestEffort(ctx context.Context, target SSHTarget, secrets ...string) string {
+	if err := ctx.Err(); err != nil {
+		return fmt.Sprintf("diagnostics skipped: timeout budget exhausted: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	out, err := runSSHOutputWithRemoteWaitTimeout(ctx, target, remoteGitHubActionsRunnerDiagnostics(target), 15*time.Second, "2", "1")
+	if ctx.Err() != nil {
+		return fmt.Sprintf("diagnostics unavailable: %v", ctx.Err())
+	}
+	if err != nil {
+		return fmt.Sprintf("diagnostics unavailable: %v", err)
+	}
+	out = redactActionsRunnerText(out, secrets...)
+	if len(out) > actionsRunnerDiagnosticLimit {
+		out = out[len(out)-actionsRunnerDiagnosticLimit:]
+	}
+	return strings.TrimSpace(out)
+}
+
+func redactActionsRunnerText(value string, secrets ...string) string {
+	for _, secret := range secrets {
+		if secret != "" {
+			value = strings.ReplaceAll(value, secret, "[REDACTED]")
+		}
+	}
+	return value
+}
+
+func remoteGitHubActionsRunnerDiagnostics(target SSHTarget) string {
+	if isWindowsNativeTarget(target) {
+		return PowershellCommand(`$ErrorActionPreference = "Continue"
+$runnerDir = Join-Path $HOME "actions-runner"
+Get-ScheduledTask | Where-Object { $_.TaskName -like "crabbox-actions-runner-*" } | ForEach-Object {
+  Write-Output ("task=" + $_.TaskName + " state=" + $_.State)
+}
+Get-CimInstance Win32_Process | Where-Object { $_.Name -in @("Runner.Listener.exe", "Runner.Worker.exe") } | ForEach-Object {
+  Write-Output ("process=" + $_.Name + " pid=" + $_.ProcessId)
+}
+foreach ($path in @((Join-Path $runnerDir "crabbox-runner.err.log"), (Join-Path $runnerDir "crabbox-runner.log"), (Join-Path $runnerDir "crabbox-config.log"))) {
+  if (Test-Path -LiteralPath $path) {
+    Write-Output ("log=" + $path)
+    Get-Content -LiteralPath $path -Tail 40
+  }
+}
+Get-ChildItem -LiteralPath (Join-Path $runnerDir "_diag") -Filter "Runner_*.log" -ErrorAction SilentlyContinue |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1 |
+  ForEach-Object {
+    Write-Output ("log=" + $_.FullName)
+    Get-Content -LiteralPath $_.FullName -Tail 40
+  }
+exit 0
+`)
+	}
+	return `set +e
+runner_dir="$HOME/actions-runner"
+printf 'service='
+systemctl is-active crabbox-actions-runner.service 2>&1
+systemctl status crabbox-actions-runner.service --no-pager --lines=20 2>&1
+for path in "$runner_dir/crabbox-runner.err.log" "$runner_dir/crabbox-runner.log" "$runner_dir/crabbox-config.log"; do
+  if [ -f "$path" ]; then
+    echo "log=$path"
+    tail -n 40 "$path"
+  fi
+done
+latest="$(find "$runner_dir/_diag" -maxdepth 1 -type f -name 'Runner_*.log' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-)"
+if [ -n "$latest" ]; then
+  echo "log=$latest"
+  tail -n 40 "$latest"
+fi
+exit 0`
+}
+
+// windowsRunnerGitBashPowerShell gives a native Windows runner the Git Bash that
+// GitHub-hosted Windows runners provide, so workflow steps with `shell: bash`
+// work. A guest without it (MinGit has no bash.exe) gets the pinned, verified
+// Git for Windows installer without a machine PATH change; the runner's own
+// PATH gains Git\bin before config.cmd records it.
+func windowsRunnerGitBashPowerShell() string {
+	return `$crabboxGitBin = Join-Path $env:ProgramFiles "Git\bin"
+if (-not (Test-Path -LiteralPath (Join-Path $crabboxGitBin "bash.exe"))) {
+  Write-CrabboxRunnerStage "git-bash"
+  $crabboxGitInstaller = Join-Path ([IO.Path]::GetTempPath()) ("crabbox-git-for-windows-" + [Guid]::NewGuid().ToString("N") + ".exe")
+  try {
+    Invoke-WebRequest -Uri ` + psQuote(gitForWindowsSetupURL) + ` -OutFile $crabboxGitInstaller -UseBasicParsing -TimeoutSec 600
+    $crabboxGitSha = (Get-FileHash -LiteralPath $crabboxGitInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($crabboxGitSha -ne ` + psQuote(gitForWindowsSetupSHA256) + `) {
+      throw "Git for Windows installer checksum mismatch: actual=$crabboxGitSha"
+    }
+    $crabboxGitExit = Invoke-CrabboxSetupProgram -FilePath $crabboxGitInstaller -ArgumentList @("/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES", "/NOCANCEL", "/SP-", "/o:PathOption=BashOnly")
+    if ($crabboxGitExit -ne 0) {
+      throw ("Git for Windows installer exited " + $crabboxGitExit)
+    }
+  } finally {
+    Remove-Item -LiteralPath $crabboxGitInstaller -Force -ErrorAction SilentlyContinue
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $crabboxGitBin "bash.exe"))) {
+    throw "Git for Windows did not provide bash.exe"
+  }
+}
+$env:Path = $crabboxGitBin + ";" + $env:Path
+`
+}
+
+// actionsLeaseLifetimeWarning reports a lease whose recorded expiry falls before
+// the GitHub-runner hydration budget ends. Heartbeats renew idle time but not
+// the lease TTL, so such a lease can expire during or right after hydration.
+func actionsLeaseLifetimeWarning(leaseID string, server Server, now time.Time, wait time.Duration) string {
+	// Heartbeats keep moving expires_at with the idle deadline; only the TTL
+	// from creation is a hard limit.
+	created, ok := parseLeaseLabelTime(server.Labels["created_at"])
+	if !ok {
+		return ""
+	}
+	ttl, ok := LeaseLabelDuration(server.Labels["ttl_secs"])
+	if !ok {
+		return ""
+	}
+	remaining := created.Add(ttl).Sub(now)
+	if remaining >= wait {
+		return ""
+	}
+	return fmt.Sprintf("warning: lease %s reaches its TTL in %s, before the --wait-timeout of %s; it can expire during or right after GitHub-runner hydration. Warm runner-hydration leases with a longer --ttl.", leaseID, max(remaining, 0).Round(time.Second), wait)
 }
