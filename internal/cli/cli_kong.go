@@ -520,7 +520,7 @@ type adminDeleteKongCmd struct {
 }
 
 type actionsKongCmd struct {
-	Unregister actionsUnregisterKongCmd `cmd:"" passthrough:"" help:"Remove the exact GitHub Actions runner recorded in a local lease claim."`
+	Unregister actionsUnregisterKongCmd `cmd:"" passthrough:"" help:"Remove the exact GitHub Actions runner recorded in a lease claim or cleanup receipt."`
 	Hydrate    actionsHydrateKongCmd    `cmd:"" passthrough:"" help:"Hydrate a lease from the configured repo workflow."`
 	Register   actionsRegisterKongCmd   `cmd:"" passthrough:"" help:"Register an existing lease as a GitHub Actions runner."`
 	Dispatch   actionsDispatchKongCmd   `cmd:"" passthrough:"" help:"Dispatch the configured GitHub Actions workflow."`

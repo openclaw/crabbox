@@ -31,9 +31,9 @@ hydrate  --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|w
 register --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|windows]
          [--windows-mode normal|wsl2] [--repo owner/name | --org organization]
          [--runner-group <group-name>] [--name <runner-name>]
-         [--labels <csv>] [--version latest] [--ephemeral=true] [--reclaim]
+         [--labels <csv>] [--version latest] [--ephemeral=true] [--reclaim] [--receipt <file>]
 
-unregister --id <lease-id-or-slug>
+unregister --id <lease-id-or-slug> | --receipt <file>
 
 dispatch [--repo owner/name] [--workflow <file|name|id>] [--ref <ref>] [-f key=value] [--field key=value]
 ```
@@ -110,6 +110,13 @@ any labels from `actions.runnerLabels` or `--labels`. Runner names use the
 friendly slug when available; workflow inputs and state-file paths keep using the
 canonical `cbx_...` ID.
 
+Use `--receipt <file>` when another machine will remove the registration. Crabbox
+writes this file atomically before starting a newly configured listener. A write
+failure leaves that listener stopped and retains its local cleanup claim. The
+file contains only a version, canonical lease ID, GitHub scope, runner ID, and
+runner name. It contains no SSH access, tokens, local paths, or VM configuration.
+Keep it tied to the trusted provisioning run when transferring it between jobs.
+
 ### unregister
 
 Removes only the exact runner ID and scope recorded in the local lease claim:
@@ -118,6 +125,18 @@ Removes only the exact runner ID and scope recorded in the local lease claim:
 crabbox actions unregister --id blue-lobster
 crabbox stop --id blue-lobster
 ```
+
+On a fresh cleanup machine, use the receipt and a current GitHub credential with
+runner-management permission for its scope:
+
+```sh
+crabbox actions unregister --receipt runner-receipt.json
+```
+
+Crabbox verifies the exact ID, name, and canonical lease label with GitHub before
+deletion. A conflicting local runner claim stops cleanup. This mode does not
+import a lease, grant SSH access, or remove the VM; provider cleanup remains a
+separate operation. `--id` and `--receipt` cannot be combined.
 
 No SSH connection or running VM is required. GitHub determines active status;
 an already-absent runner is a successful result after scope access is verified.
