@@ -162,33 +162,39 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 		input := githubActionsRunnerInstallInput(destination, name, strings.Join(labels, ","), token, script)
 		installErr := runSSHInputQuiet(ctx, target, githubActionsRunnerInstallRemoteCommand(target), input)
 		// A lost SSH acknowledgement is not permission to register again. Recover
-		// the official local identity and verify its exact API object first.
-		guest, err = readActionsRunnerGuest(ctx, target, checkVersion)
+		// the official identity even after cancellation so cleanup retains custody.
+		// This context may settle registration, but must never start the listener.
+		settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		guest, err = readActionsRunnerGuest(settleCtx, target, checkVersion)
 		if err != nil {
-			return errors.Join(installErr, err)
+			return errors.Join(installErr, ctx.Err(), err)
 		}
 		if guest.Settings == nil || *guest.Active || guest.Settings.URL != actionsRunnerURL(scope) || guest.Settings.Name != name || guest.Settings.Ephemeral != cfg.Actions.Ephemeral || group != "" && guest.Settings.Group != group {
-			return errors.Join(installErr, Exit(7, "runner configuration identity is unconfirmed; listener was not started; reconcile this lease before retrying"))
+			return errors.Join(installErr, ctx.Err(), Exit(7, "runner configuration identity is unconfirmed; listener was not started; reconcile this lease before retrying"))
 		}
 		if checkVersion && guest.Version != cfg.Actions.RunnerVersion {
-			return errors.Join(installErr, Exit(7, "configured runner version is unconfirmed; listener was not started"))
+			return errors.Join(installErr, ctx.Err(), Exit(7, "configured runner version is unconfirmed; listener was not started"))
 		}
 		binding = &ActionsRunnerBinding{Scope: scope, RunnerID: guest.Settings.ID, Name: name, Group: guest.Settings.Group, Ephemeral: cfg.Actions.Ephemeral, LeaseFingerprint: fingerprint}
-		present, err := githubActionsRunnerPresent(ctx, *binding, leaseID, labels, target.ChildEnvDenylist)
+		present, err := githubActionsRunnerPresent(settleCtx, *binding, leaseID, labels, target.ChildEnvDenylist)
 		if err != nil {
-			return errors.Join(installErr, err)
+			return errors.Join(installErr, ctx.Err(), err)
 		}
 		if !present {
-			return errors.Join(installErr, Exit(7, "configured runner %d is absent from GitHub; listener was not started", binding.RunnerID))
+			return errors.Join(installErr, ctx.Err(), Exit(7, "configured runner %d is absent from GitHub; listener was not started", binding.RunnerID))
 		}
 		claim.ActionsRunner = binding
 		if err := persist(); err != nil {
 			rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
 			rollbackErr := deleteGitHubActionsRunner(rollbackCtx, *binding, leaseID, target.ChildEnvDenylist)
-			return errors.Join(Exit(7, "persist runner %s/%d; listener was not started: %v", binding.Scope, binding.RunnerID, err), rollbackErr)
+			return errors.Join(ctx.Err(), Exit(7, "persist runner %s/%d; listener was not started: %v", binding.Scope, binding.RunnerID, err), rollbackErr)
 		}
 		updated = cloneLeaseClaim(*claim)
+		if err := ctx.Err(); err != nil {
+			return errors.Join(installErr, err)
+		}
 		_, err = actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
 		return err
 	})

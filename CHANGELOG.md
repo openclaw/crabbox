@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Actions: preserve exact runner cleanup ownership when registration is canceled after guest configuration, without starting the listener.
 - Apple Machine: report workload exit codes without replaying output, bound native diagnostics, and show failed-creation recovery guidance in `run` and `warmup`. [PR 3044](https://github.com/openclaw/crabbox/pull/3044). Thanks @coygeek.
 - CLI: finish one-shot lease cleanup when stdout or stderr closes early, returning SIGPIPE-style exit 141 on Unix while preserving explicit retention. [PR 3040](https://github.com/openclaw/crabbox/pull/3040). Thanks @coygeek.
 - SSH: return promptly after supervised Linux/WSL2 and POSIX fallback commands exit while preserving TERM grace and forced cleanup for surviving children. [PR 3041](https://github.com/openclaw/crabbox/pull/3041). Thanks @lazmo88.
