@@ -9,8 +9,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func openArtifactReadOnly(path string) (*os.File, error) {
-	openPath, err := artifactWindowsLongPath(path)
+func openSharedReadOnly(path string) (*os.File, error) {
+	openPath, err := sharedWindowsLongPath(path)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
@@ -18,6 +18,8 @@ func openArtifactReadOnly(path string) (*os.File, error) {
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
+	// Published claims and artifacts can be replaced or removed during a read.
+	// SHARE_DELETE keeps the bound reader from blocking those writers.
 	handle, err := windows.CreateFile(
 		pathUTF16,
 		windows.GENERIC_READ,
@@ -33,7 +35,7 @@ func openArtifactReadOnly(path string) (*os.File, error) {
 	return os.NewFile(uintptr(handle), path), nil
 }
 
-func artifactWindowsLongPath(path string) (string, error) {
+func sharedWindowsLongPath(path string) (string, error) {
 	isSeparator := func(value byte) bool { return value == '\\' || value == '/' }
 	if len(path) >= 4 {
 		if strings.HasPrefix(path, `\??\`) ||

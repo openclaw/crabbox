@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -1658,13 +1659,9 @@ func readLeaseClaimWithPresence(leaseID string) (leaseClaim, bool, error) {
 		}
 		return leaseClaim{}, false, err
 	}
-	var claim leaseClaim
-	var exists bool
-	err = withLeaseClaimLock(path, func() error {
-		var readErr error
-		claim, exists, readErr = readLeaseClaimPathWithPresence(path)
-		return readErr
-	})
+	// Writers publish whole files by replacement. Observers read that snapshot;
+	// guarded actions still reread under the mutation lock before using it.
+	claim, exists, err := readLeaseClaimPathWithPresence(path)
 	if err != nil {
 		return leaseClaim{}, exists, err
 	}
@@ -1699,10 +1696,15 @@ func leaseClaimExists(leaseID string) (bool, error) {
 }
 
 func readLeaseClaimPathWithPresence(path string) (leaseClaim, bool, error) {
-	data, err := os.ReadFile(path)
+	file, err := openSharedReadOnly(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return leaseClaim{}, false, nil
 	}
+	if err != nil {
+		return leaseClaim{}, true, exit(2, "read claim %s: %v", path, err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
 	if err != nil {
 		return leaseClaim{}, true, exit(2, "read claim %s: %v", path, err)
 	}

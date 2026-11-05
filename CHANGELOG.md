@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Kept claim inspection, lease lookup, and new-lease naming responsive while another operation holds a claim mutation lock, without weakening mutation ownership guards.
 - Bounded device membership revalidation to one GitHub revalidation per token per minute while preserving immediate token revocation, fail-closed errors, and a distinct re-pairing response for expired OAuth grants.
 - Kept ready-pool reconciliation rollout-compatible with older CLIs and coordinators, preserved unexpired in-flight claims across policy changes, and required actual ready capacity for `pool ensure` success.
 

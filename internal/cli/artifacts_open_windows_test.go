@@ -10,12 +10,12 @@ import (
 	"testing"
 )
 
-func TestOpenArtifactReadOnlySharesDelete(t *testing.T) {
+func TestOpenSharedReadOnlySharesDelete(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "summary.md")
 	if err := os.WriteFile(path, []byte("bound-summary"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	file, err := openArtifactReadOnly(path)
+	file, err := openSharedReadOnly(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestOpenArtifactReadOnlySharesDelete(t *testing.T) {
 	}
 }
 
-func TestOpenArtifactReadOnlyLongPath(t *testing.T) {
+func TestOpenSharedReadOnlyLongPath(t *testing.T) {
 	dir := t.TempDir()
 	for len(dir) < 300 {
 		dir = filepath.Join(dir, strings.Repeat("nested", 8))
@@ -44,7 +44,7 @@ func TestOpenArtifactReadOnlyLongPath(t *testing.T) {
 	if err := os.WriteFile(path, []byte("long-path-summary"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	file, err := openArtifactReadOnly(path)
+	file, err := openSharedReadOnly(path)
 	if err != nil {
 		t.Fatal(err)
 	}

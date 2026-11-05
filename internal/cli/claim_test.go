@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +12,123 @@ import (
 	"testing"
 	"time"
 )
+
+func TestClaimObserversDoNotWaitForActiveOperation(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const heldID, newID = "cbx_observed", "cbx_000000000001"
+	slug := newLeaseSlug(newID)
+	if err := claimLeaseForRepoProvider(heldID, slug, "blacksmith-testbox", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := readLeaseClaim(heldID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, release, operationDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		operationDone <- withLeaseClaimUnchanged(heldID, expected, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	done := make(chan error, 1)
+	go func() {
+		if _, err := readLeaseClaim(heldID); err != nil {
+			done <- err
+			return
+		}
+		claims, err := listLeaseClaims()
+		if err != nil || len(claims) != 1 || !reflect.DeepEqual(claims[0], expected) {
+			done <- fmt.Errorf("list: claims=%#v err=%v", claims, err)
+			return
+		}
+		snapshot, err := snapshotLeaseClaims()
+		if err != nil || len(snapshot.claims) != 1 || len(snapshot.invalid) != 0 {
+			done <- fmt.Errorf("snapshot: %#v err=%v", snapshot, err)
+			return
+		}
+		claim, ok, err := resolveLeaseClaim(slug)
+		if err != nil || !ok || !reflect.DeepEqual(claim, expected) {
+			done <- fmt.Errorf("resolve: claim=%#v ok=%t err=%v", claim, ok, err)
+			return
+		}
+		for _, requested := range []string{"", slug} {
+			for _, direct := range []bool{false, true} {
+				allocate := allocateClaimLeaseSlug
+				if direct {
+					allocate = func(id, name string) (string, error) { return allocateDirectLeaseSlug(id, name, nil) }
+				}
+				got, err := allocate(newID, requested)
+				if err != nil || !strings.HasPrefix(got, slug+"-") {
+					done <- fmt.Errorf("allocate requested=%q direct=%t: slug=%q err=%v", requested, direct, got, err)
+					return
+				}
+			}
+		}
+		done <- nil
+	}()
+	joined := false
+	t.Cleanup(func() {
+		close(release)
+		if err := <-operationDone; err != nil {
+			t.Errorf("guarded operation: %v", err)
+		}
+		if !joined {
+			<-done
+		}
+	})
+	select {
+	case err := <-done:
+		joined = true
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("claim observers waited for an active operation")
+	}
+}
+
+func TestClaimPublishedReadSurvivesReplacementAndRemoval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "claim.json")
+	claim := leaseClaim{LeaseID: "cbx_snapshot", Revision: "before"}
+	if err := writeLeaseClaimAtomic(path, claim); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := openSharedReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	claim.Revision = "after"
+	if err := writeLeaseClaimAtomic(path, claim); err != nil {
+		t.Fatalf("replace claim with an open reader: %v", err)
+	}
+	current, exists, err := readLeaseClaimPathWithPresence(path)
+	if err != nil || !exists || !reflect.DeepEqual(current, claim) {
+		t.Fatalf("published claim=%#v exists=%t err=%v", current, exists, err)
+	}
+	currentReader, err := openSharedReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer currentReader.Close()
+	if err := removeControllerFile(path); err != nil {
+		t.Fatalf("remove claim with an open reader: %v", err)
+	}
+	if _, exists, err := readLeaseClaimPathWithPresence(path); err != nil || exists {
+		t.Fatalf("removed claim exists=%t err=%v", exists, err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil || string(data) != string(before) {
+		t.Fatalf("bound snapshot changed: data=%q err=%v", data, err)
+	}
+}
 
 func TestClaimEndpointReservationDeadlineStartsAfterClaimLockAcquired(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())

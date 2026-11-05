@@ -199,7 +199,7 @@ func listArtifactBundleRoot(root *os.Root, dir string) ([]artifactFile, error) {
 }
 
 func artifactDirectoryInfo(path string) (os.FileInfo, error) {
-	dir, err := openArtifactReadOnly(path)
+	dir, err := openSharedReadOnly(path)
 	if err != nil {
 		return nil, err
 	}
@@ -966,7 +966,7 @@ func bindArtifactSummaryFile(path string) (*artifactSummaryBinding, error) {
 	if err != nil {
 		return nil, exit(2, "read summary file: %v", err)
 	}
-	file, err := openArtifactReadOnly(absPath)
+	file, err := openSharedReadOnly(absPath)
 	if err != nil {
 		return nil, exit(2, "read summary file: %v", err)
 	}
@@ -979,7 +979,7 @@ func bindArtifactSummaryFile(path string) (*artifactSummaryBinding, error) {
 		_ = file.Close()
 		return nil, exit(2, "read summary file: not a regular file")
 	}
-	resolvedFile, err := openArtifactReadOnly(resolvedPath)
+	resolvedFile, err := openSharedReadOnly(resolvedPath)
 	if err != nil {
 		_ = file.Close()
 		return nil, exit(2, "read summary file: %v", err)

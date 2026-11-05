@@ -5,6 +5,10 @@ target OS, host, network, readiness, idle time, and expiry. By default it is a
 read-only snapshot. Add `--wait` to block until the box becomes ready (or
 reaches a terminal state).
 
+Local claim inspection reads the last complete published claim without waiting
+for an active operation's mutation lock. Mutations still acquire that lock and
+revalidate ownership before acting.
+
 ```sh
 crabbox status --id swift-crab
 crabbox status --id swift-crab --json

@@ -81,8 +81,8 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Test pond mesh cancellation
-        run: go test ./internal/cli/ -run PondMeshCancel -count=1 -v
+      - name: Test claim snapshots and pond mesh cancellation
+        run: go test ./internal/cli/ -run 'PondMeshCancel|ClaimObservers|ClaimPublishedRead|OpenSharedReadOnly|LeaseClaimConcurrentMutations' -count=1 -v
 
   connector-lifecycles:
     name: Connector Lifecycles
