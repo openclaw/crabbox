@@ -47,6 +47,15 @@ func TestProxmoxTemplateCapabilitiesTrustedConfig(t *testing.T) {
 func TestProxmoxBootstrapChecksPrecedeReady(t *testing.T) {
 	cfg := baseConfig()
 	script := proxmoxBootstrapScriptWithChecks(cfg, "verify-prepared-template-or-fail", "check-running-desktop-or-fail")
+	for _, want := range []string{
+		"systemctl disable --now --no-block apt-daily.timer apt-daily-upgrade.timer",
+		"systemctl mask apt-daily.service apt-daily-upgrade.service",
+	} {
+		index := strings.Index(script, want)
+		if index < 0 || index >= strings.Index(script, "retry apt-get") {
+			t.Fatalf("scheduled APT guard must precede explicit installs: %q", want)
+		}
+	}
 	if strings.Index(script, "verify-prepared-template-or-fail") > strings.Index(script, "cat >/usr/local/bin/crabbox-ready") {
 		t.Fatal("publishes readiness before template setup")
 	}
