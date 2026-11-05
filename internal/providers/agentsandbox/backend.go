@@ -226,7 +226,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (result core.Run
 				return core.RunResult{}, err
 			}
 		}
-		if err := authorizeAgentSandboxRepoClaim(claim, req.Repo.Root, req.Reclaim); err != nil {
+		if err := authorizeAgentSandboxRepoClaim(claim, req.Repo.Root, req.Reclaim, req.Repo.LegacyRoot); err != nil {
 			return core.RunResult{}, err
 		}
 		leaseID, slug, claimName = claim.LeaseID, claim.Slug, claimNameFromLocalClaim(claim)

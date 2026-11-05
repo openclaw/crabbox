@@ -192,7 +192,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	var lease core.LeaseTarget
 	err = core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
 		if !req.ReleaseOnly && req.Repo.Root != "" {
-			if err := core.CheckLeaseClaimRepositoryOwner(claim.LeaseID, claim, req.Repo.Root, req.Reclaim); err != nil {
+			if err := core.CheckLeaseClaimRepositoryOwner(claim.LeaseID, claim, req.Repo.Root, req.Reclaim, req.Repo.LegacyRoot); err != nil {
 				return err
 			}
 		}

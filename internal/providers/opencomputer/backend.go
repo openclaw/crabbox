@@ -125,7 +125,7 @@ func (b *openComputerBackend) Run(ctx context.Context, req core.RunRequest) (cor
 			if err != nil {
 				return shared.DelegatedSandbox{}, err
 			}
-			_, _, slug, err = finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.baseURL)
+			_, _, slug, err = finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.baseURL, req.Repo.LegacyRoot)
 			if err != nil {
 				return shared.DelegatedSandbox{}, err
 			}
@@ -372,8 +372,9 @@ func resolveOpenComputerLeaseClaim(identifier, baseURL string) (core.LeaseClaim,
 	})
 }
 
-func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL string) (string, string, string, error) {
+func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL string, legacyRoot ...string) (string, string, string, error) {
 	return shared.FinishScopedLease(claim, shared.ScopedLeaseFinishOptions{
+		LegacyRoots:   legacyRoot,
 		Provider:      providerName,
 		LeasePrefix:   leasePrefix,
 		RepoRoot:      repoRoot,
