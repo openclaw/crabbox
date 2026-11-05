@@ -52,6 +52,10 @@ func (k FixedLeaseKind) TerminalClaim(claim LeaseClaim, now time.Time) LeaseClai
 		RuntimeAdapterRegistrationID:        claim.RuntimeAdapterRegistrationID,
 		RuntimeAdapterPendingRegistrationID: claim.RuntimeAdapterPendingRegistrationID,
 	}
+	if claim.ActionsRunner != nil {
+		binding := *claim.ActionsRunner
+		terminal.ActionsRunner = &binding
+	}
 	if len(k.TerminalIdentityLabels) != 0 {
 		terminal.CloudID = claim.CloudID
 		terminal.CloudNumericID = claim.CloudNumericID
@@ -126,8 +130,9 @@ func (k FixedLeaseKind) ValidateTerminalClaim(claim, previous LeaseClaim, leaseI
 		}
 		if claim.CoordinatorRegistrationURL != previous.CoordinatorRegistrationURL ||
 			claim.RuntimeAdapterRegistrationID != previous.RuntimeAdapterRegistrationID ||
-			claim.RuntimeAdapterPendingRegistrationID != previous.RuntimeAdapterPendingRegistrationID {
-			return Exit(4, "lease_id_conflict: fixed %s lease %s terminal tombstone changed coordinator registration", k.Label, leaseID)
+			claim.RuntimeAdapterPendingRegistrationID != previous.RuntimeAdapterPendingRegistrationID ||
+			!reflect.DeepEqual(claim.ActionsRunner, previous.ActionsRunner) {
+			return Exit(4, "lease_id_conflict: fixed %s lease %s terminal tombstone changed registration", k.Label, leaseID)
 		}
 		if previous.LeaseID != leaseID ||
 			previousIntent.Version != intent.Version || !reflect.DeepEqual(previousIntent.Retention, intent.Retention) ||

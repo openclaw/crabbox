@@ -24,6 +24,7 @@ type leaseClaim struct {
 	LeaseID               string                    `json:"leaseID"`
 	Revision              string                    `json:"revision,omitempty"`
 	CheckpointCapture     *CheckpointCaptureBinding `json:"checkpointCapture,omitempty"`
+	ActionsRunner         *ActionsRunnerBinding     `json:"actionsRunner,omitempty"`
 	ActionsWorkspace      *ActionsWorkspaceBinding  `json:"actionsWorkspace,omitempty"`
 	Slug                  string                    `json:"slug,omitempty"`
 	Provider              string                    `json:"provider,omitempty"`
@@ -966,6 +967,10 @@ func cloneLeaseClaim(claim leaseClaim) leaseClaim {
 	if claim.ActionsWorkspace != nil {
 		binding := *claim.ActionsWorkspace
 		claim.ActionsWorkspace = &binding
+	}
+	if claim.ActionsRunner != nil {
+		binding := *claim.ActionsRunner
+		claim.ActionsRunner = &binding
 	}
 	claim.Labels = cloneStringMap(claim.Labels)
 	claim.TailscaleTags = append([]string(nil), claim.TailscaleTags...)

@@ -214,7 +214,7 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		if err != nil {
 			return err
 		}
-		if err := a.registerGitHubActionsRunner(ctx, cfg, target, leaseID, ServerSlug(server), ghRepo, "", nil); err != nil {
+		if err := a.registerGitHubActionsRunner(ctx, cfg, &server, target, leaseID, ServerSlug(server), ghRepo, "", nil); err != nil {
 			return err
 		}
 	}

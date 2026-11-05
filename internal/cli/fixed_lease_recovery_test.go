@@ -82,6 +82,13 @@ func TestFixedEngineAbsenceRecoveryUsesReleaseFence(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			isolateTestUserDirs(t)
 			claim := fixedCleanupClaim(t, "acquired")
+			registered := cloneLeaseClaim(claim)
+			registered.ActionsRunner = &ActionsRunnerBinding{Scope: "orgs/example-org", RunnerID: 7, Name: "fixture", LeaseFingerprint: actionsRunnerLeaseFingerprint(claim)}
+			var err error
+			claim, err = ReplaceLeaseClaimIfUnchangedDurableReturning(claim.LeaseID, claim, registered)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if scenario == "checkpoint" {
 				if err := WithDurableLeaseClaimLock(claim.LeaseID, func(c *LeaseClaim, _ bool, persist func() error) error {
 					c.CheckpointCapture = &CheckpointCaptureBinding{ID: "capture", Revision: "capture-revision"}
@@ -101,7 +108,7 @@ func TestFixedEngineAbsenceRecoveryUsesReleaseFence(t *testing.T) {
 			if scenario == "owner" {
 				policy.RepoRoot = "/another-owner"
 			}
-			err := DeleteFixedResource(t.Context(), fixedCleanupKind(), claim, FixedLeaseOperations[string]{
+			err = DeleteFixedResource(t.Context(), fixedCleanupKind(), claim, FixedLeaseOperations[string]{
 				Release: policy,
 				ObserveExact: func(context.Context, *FixedTransaction, FixedObserveMode) (FixedObservation[string], error) {
 					if scenario == "owner" || scenario == "checkpoint" || scenario == "stale" {
@@ -120,6 +127,9 @@ func TestFixedEngineAbsenceRecoveryUsesReleaseFence(t *testing.T) {
 			after, readErr := ReadLeaseClaim(claim.LeaseID)
 			if readErr != nil {
 				t.Fatal(readErr)
+			}
+			if !reflect.DeepEqual(after.ActionsRunner, current.ActionsRunner) {
+				t.Fatal("fixed cleanup lost runner deregistration receipt")
 			}
 			if scenario == "absent" {
 				if err != nil || !outcome.Terminal {
