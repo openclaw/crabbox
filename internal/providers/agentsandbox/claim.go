@@ -159,7 +159,7 @@ func claimLeaseForRepo(cfg core.Config, leaseID, slug string, repo core.Repo, re
 		err = core.ReplaceLeaseClaimIfUnchanged(leaseID, claim, updated)
 		return err
 	}
-	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(cfg), cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim)
+	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(cfg), cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim, repo.LegacyRoot)
 }
 
 func writeClaimLease(cfg core.Config, leaseID, slug string, repo core.Repo, reclaim bool, ready sandboxReadiness, claimName, expiresAt, recoveryNonce string) (core.LeaseClaim, error) {

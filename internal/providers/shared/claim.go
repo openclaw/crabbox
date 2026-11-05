@@ -50,6 +50,7 @@ type ScopedLeaseResolver struct {
 
 type ScopedLeaseFinishOptions struct {
 	Provider, LeasePrefix, RepoRoot string
+	LegacyRoots                     []string
 	Reclaim                         bool
 	IdleTimeout                     time.Duration
 	ValidateClaim                   func(core.LeaseClaim) error
@@ -247,7 +248,7 @@ func FinishScopedLease(claim core.LeaseClaim, opts ScopedLeaseFinishOptions) (st
 		if idleTimeout <= 0 {
 			idleTimeout = time.Duration(claim.IdleTimeoutSeconds) * time.Second
 		}
-		if err := core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, opts.Provider, claim.ProviderScope, claim.Pond, opts.RepoRoot, idleTimeout, opts.Reclaim); err != nil {
+		if err := core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, opts.Provider, claim.ProviderScope, claim.Pond, opts.RepoRoot, idleTimeout, opts.Reclaim, opts.LegacyRoots...); err != nil {
 			return "", "", "", err
 		}
 	}

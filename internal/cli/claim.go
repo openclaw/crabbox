@@ -303,8 +303,8 @@ func ClaimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repo
 // ClaimLeaseForRepoProviderScopePond combines a provider scope (e.g. Docker
 // context for local-container claim isolation) with the pond label so both
 // features coexist in the same claim sidecar without one overwriting the other.
-func ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim)
+func ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, legacyRoot ...string) error {
+	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim, claimMetadata{legacyRepoRoot: singleLegacyRoot(legacyRoot)})
 }
 
 func ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
@@ -438,10 +438,6 @@ type claimMetadata struct {
 	setLabels           bool
 	labels              map[string]string
 	idlePolicy          claimIdlePolicy
-}
-
-func claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{})
 }
 
 // CheckLeaseClaimRepositoryOwner checks the publication owner policy without
