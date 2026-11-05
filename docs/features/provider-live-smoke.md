@@ -160,9 +160,11 @@ CRABBOX_CLAIM_FENCE_PROBE='hyperv.(*backend).waitForResumedLease:reassign' bin/c
 `CRABBOX_CLAIM_FENCE_PROBE=<site>:<revoke|reassign|none>` removes or rebinds the
 claim once, when the named fence is entered and before the fence rereads the
 claim. `<site>` is a full caller such as `hyperv.(*backend).ReleaseLease` or its
-final method name. The probe logs each fence entry, swap, admission and outcome
-on stderr with a `claim-fence-probe:` prefix. Run it only against throwaway
-leases; reassigned claims point at the documentation address `192.0.2.77`.
+final method name; append `#<n>` to target the nth fence entered at that site,
+for example `ForkNativeCheckpoint#3:reassign`. The probe logs each fence entry,
+swap, admission and outcome on stderr with a `claim-fence-probe:` prefix and a
+UTC `at=` time. Run it only against throwaway leases; reassigned claims point at
+the documentation address `192.0.2.77`.
 
 <!-- BEGIN GENERATED PROVIDER LIFECYCLE COVERAGE -->
 
@@ -173,7 +175,7 @@ hermetic lifecycle tests, `scripts/live-smoke.sh`, dedicated live runners, and
 `//go:build smoke` tests. Regenerate it with
 `node scripts/generate-provider-matrix.mjs`; docs CI rejects drift.
 
-Current coverage: 84 providers; 11 with convention-named hermetic lifecycle tests, 61 with a live runner, 8 with tagged Go smoke tests, and 21 with none of those lifecycle surfaces.
+Current coverage: 85 providers; 11 with convention-named hermetic lifecycle tests, 62 with a live runner, 8 with tagged Go smoke tests, and 21 with none of those lifecycle surfaces.
 
 | Provider | Hermetic lifecycle | Live runner | Tagged Go smoke |
 | --- | --- | --- | --- |
@@ -259,6 +261,7 @@ Current coverage: 84 providers; 11 with convention-named hermetic lifecycle test
 | [vercel-sandbox](../providers/vercel-sandbox.md) | — | dedicated + matrix | — |
 | [vultr](../providers/vultr.md) | — | dedicated + matrix | — |
 | [wandb](../providers/wandb.md) | — | matrix | yes |
+| [warpbuild](../providers/warpbuild.md) | — | dedicated + matrix | — |
 | [windows-sandbox](../providers/windows-sandbox.md) | — | — | — |
 | [xcp-ng](../providers/xcp-ng.md) | — | dedicated + matrix | — |
 

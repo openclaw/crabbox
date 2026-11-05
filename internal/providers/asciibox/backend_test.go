@@ -86,6 +86,8 @@ func TestProviderSpecAndAliases(t *testing.T) {
 
 func TestClientUsesOfficialAsciiBoxCLI(t *testing.T) {
 	t.Setenv("BOX_API_KEY", "stale_key")
+	t.Setenv("BOAT_API_KEY", "stale_boat_key")
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/synthetic-agent.sock")
 	home := t.TempDir()
 	runner := &fakeCommandRunner{configPath: home + "/Library/Application Support/ascii/box/config.json"}
 	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: home, runner: runner}
@@ -130,11 +132,13 @@ func TestClientUsesOfficialAsciiBoxCLI(t *testing.T) {
 		}
 	}
 	for _, env := range runner.env {
-		if !hasEnv(env, "BOX_API_KEY=box_key") {
-			t.Fatal("child environment missing the synthetic BOX_API_KEY")
-		}
-		if hasEnv(env, "BOX_API_KEY=stale_key") {
-			t.Fatal("child environment retained the synthetic stale BOX_API_KEY")
+		for _, key := range []string{"BOX_API_KEY", "BOAT_API_KEY"} {
+			if !hasEnv(env, key+"=box_key") {
+				t.Fatalf("child environment missing the selected %s", key)
+			}
+			if hasEnv(env, key+"=stale_key") || hasEnv(env, key+"=stale_boat_key") {
+				t.Fatalf("child environment retained a stale %s", key)
+			}
 		}
 		if !hasEnv(env, "HOME="+home) {
 			t.Fatal("child environment missing the isolated HOME")
@@ -143,14 +147,59 @@ func TestClientUsesOfficialAsciiBoxCLI(t *testing.T) {
 	if !hasEnv(runner.env[3], "SSH_AUTH_SOCK=") {
 		t.Fatal("SSH setup must disable agent identities")
 	}
+	configBytes, err := os.ReadFile(runner.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct{ Token string }
+	if err := json.Unmarshal(configBytes, &config); err != nil || config.Token != "box_key" {
+		t.Fatalf("CLI configuration does not use the selected credential: %v", err)
+	}
+}
+
+func TestClientCheckPreservesBothErrorStreams(t *testing.T) {
+	home := t.TempDir()
+	const stdoutSecret = "box_stdoutFixture"
+	const stderrSecret = "boat_stderrFixture"
+	c := &client{
+		apiKey: "synthetic-key", apiURL: "https://ascii.dev", cliPath: "box", home: home,
+		runner: boxCommandRunnerFunc(func(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+			switch req.Args[len(req.Args)-1] {
+			case "status":
+				return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"config":{"path":%q}}`, filepath.Join(home, "config.json"))}, nil
+			case "limits":
+				return core.LocalCommandResult{
+					Stdout: `{"error":"quota exhausted","credential":"` + stdoutSecret + `"}`,
+					Stderr: "legacy alias warning: " + stderrSecret,
+				}, errors.New("exit status 1")
+			default:
+				t.Fatalf("unexpected command: %v", req.Args)
+				return core.LocalCommandResult{}, nil
+			}
+		}),
+	}
+	err := c.Check(t.Context())
+	if err == nil {
+		t.Fatal("Check succeeded after native failure")
+	}
+	for _, text := range []string{"quota exhausted", "legacy alias warning", "box_REDACTED", "boat_REDACTED"} {
+		if !strings.Contains(err.Error(), text) {
+			t.Errorf("error %q lost %q", err, text)
+		}
+	}
+	if strings.Contains(err.Error(), stdoutSecret) || strings.Contains(err.Error(), stderrSecret) {
+		t.Fatalf("error leaked a synthetic credential: %v", err)
+	}
 }
 
 func TestReleaseBoxRecoversFromRecentSnapshotGuard(t *testing.T) {
+	guard := snapshotGuardOutcome()
+	guard.result.Stderr = "Warning: the box command is deprecated; use boat."
 	runner := &releaseCommandRunner{
 		configPath: filepath.Join(t.TempDir(), "config.json"),
 		outcomes: map[string][]commandOutcome{
-			"stop":     {snapshotGuardOutcome()},
-			"delete":   {snapshotGuardOutcome(), deletionOutcome(testDeletionID, "bx_guard", "box", "pending")},
+			"stop":     {guard},
+			"delete":   {guard, deletionOutcome(testDeletionID, "bx_guard", "box", "pending")},
 			"deletion": {deletionOutcome(testDeletionID, "bx_guard", "box", "completed")},
 			"extend":   {{result: core.LocalCommandResult{Stdout: `{"id":"bx_guard","archiveAfter":"soon"}`}}},
 			"info": {
@@ -621,32 +670,38 @@ func TestClientRejectsSymlinkConfigFile(t *testing.T) {
 }
 
 func TestClientPollsPartialCreateOutput(t *testing.T) {
-	home := t.TempDir()
-	runner := &fakeCommandRunner{
-		configPath: home + "/Library/Application Support/ascii/box/config.json",
-		newStdout: strings.Join([]string{
-			`{"event":"created","id":"bx_2","ttlSeconds":1800}`,
-			`{"event":"state","id":"bx_2","state":"provisioning"}`,
-		}, "\n"),
-		newErr:        fmt.Errorf("exit status 1"),
-		infoResponses: []string{`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20","sshEndpoint":"198.51.100.20:19036","expiresAt":"2026-06-10T12:00:00Z"}}`},
-	}
-	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: home, runner: runner}
-	box, err := client.CreateBox(context.Background(), createRequest{TTL: 30 * time.Minute})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if box.ID != "bx_2" || boxHost(box) != "203.0.113.20" {
-		t.Fatalf("box=%#v", box)
-	}
-	if box.SSHEndpoint != "198.51.100.20:19036" {
-		t.Fatalf("ssh endpoint=%q", box.SSHEndpoint)
-	}
-	if got := boxExpiresAt(box); got != "2026-06-10T12:00:00Z" {
-		t.Fatalf("boxExpiresAt=%q, want info response expiration", got)
-	}
-	if !containsCommand(runner.commands, "box --no-update --json --org personal --api-url https://ascii.dev info bx_2") {
-		t.Fatalf("commands missing info poll: %v", runner.commands)
+	for _, ip := range []string{"203.0.113.20", ""} {
+		t.Run("public-ip="+ip, func(t *testing.T) {
+			home := t.TempDir()
+			runner := &fakeCommandRunner{
+				configPath: home + "/Library/Application Support/ascii/box/config.json",
+				newStdout: strings.Join([]string{
+					`{"event":"created","id":"bx_2","ttlSeconds":1800}`,
+					`{"event":"state","id":"bx_2","state":"provisioning"}`,
+				}, "\n"),
+				newErr:        fmt.Errorf("exit status 1"),
+				infoResponses: []string{fmt.Sprintf(`{"box":{"id":"bx_2","state":"ready","ip":%q,"sshEndpoint":"198.51.100.20:19036","expiresAt":"2026-06-10T12:00:00Z"}}`, ip)},
+			}
+			client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: home, runner: runner}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			box, err := client.CreateBox(ctx, createRequest{TTL: 30 * time.Minute})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if box.ID != "bx_2" || boxHost(box) != ip {
+				t.Fatalf("box=%#v", box)
+			}
+			if box.SSHEndpoint != "198.51.100.20:19036" {
+				t.Fatalf("ssh endpoint=%q", box.SSHEndpoint)
+			}
+			if got := boxExpiresAt(box); got != "2026-06-10T12:00:00Z" {
+				t.Fatalf("boxExpiresAt=%q, want info response expiration", got)
+			}
+			if !containsCommand(runner.commands, "box --no-update --json --org personal --api-url https://ascii.dev info bx_2") {
+				t.Fatalf("commands missing info poll: %v", runner.commands)
+			}
+		})
 	}
 }
 
@@ -744,6 +799,10 @@ func TestBoxSSHConnectionPrefersAdvertisedEndpoint(t *testing.T) {
 		{name: "no host at all is rejected", box: boxData{ID: "bx_1"}, wantErr: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			tt.box.State = "ready"
+			if got := boxReadyForSSH(tt.box); got == tt.wantErr {
+				t.Fatalf("boxReadyForSSH=%t, want %t", got, !tt.wantErr)
+			}
 			host, port, err := boxSSHConnection(tt.box)
 			if tt.wantErr {
 				if err == nil {
@@ -969,7 +1028,9 @@ func TestAcquireClaimsBoxAndReturnsSSHTarget(t *testing.T) {
 	withFakeAPI(t, fake)
 	stubSSHWait(t)
 
-	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+	cfg := testConfig()
+	cfg.AsciiBox.NoEnv = true
+	backend := NewBackend(Provider{}.Spec(), cfg, testRuntime()).(*backend)
 	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{
 		Repo:          core.Repo{Name: "repo", Root: t.TempDir()},
 		Options:       core.LeaseOptions{TTL: 45 * time.Minute},
@@ -988,7 +1049,7 @@ func TestAcquireClaimsBoxAndReturnsSSHTarget(t *testing.T) {
 	if !lease.SSH.NoControlMaster {
 		t.Fatalf("ascii-box SSH target should disable ControlMaster")
 	}
-	if fake.createReq.TTL != 45*time.Minute {
+	if !fake.createReq.NoEnv || fake.createReq.TTL != 45*time.Minute {
 		t.Fatalf("create req=%#v", fake.createReq)
 	}
 	if !reflect.DeepEqual(fake.prepareIDs, []string{"bx_1"}) {
@@ -1001,7 +1062,7 @@ func TestAcquireClaimsBoxAndReturnsSSHTarget(t *testing.T) {
 	if claim.Provider != providerName || claim.ProviderScope != (Provider{}).ClaimScope(testConfig()) || claim.Slug != "proof" {
 		t.Fatalf("claim=%#v", claim)
 	}
-	if claim.Labels["ttl_secs"] != "2700" || lease.Server.Labels["created_at"] != claim.Labels["created_at"] {
+	if claim.Labels[boxNoEnvLabel] != "true" || claim.Labels["ttl_secs"] != "2700" || lease.Server.Labels["created_at"] != claim.Labels["created_at"] {
 		t.Fatalf("acquisition policy was not seeded once from its request: claim=%v lease=%v", claim.Labels, lease.Server.Labels)
 	}
 }

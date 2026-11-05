@@ -3732,3 +3732,16 @@ func (r *checkpointParallelsRunner) called(name string) bool {
 	}
 	return false
 }
+
+func TestNativeCreateNotSubmittedResolvesVerifiedRollbackOnly(t *testing.T) {
+	unsub := NativeCheckpointNotSubmittedError{Cause: errors.New("rolled back")}
+	if !nativeCreateNotSubmitted(CoordinatorImage{}, unsub, checkpointRecord{}) {
+		t.Fatal("verified rollback must resolve the pending reservation")
+	}
+	if nativeCreateNotSubmitted(CoordinatorImage{ID: "img"}, unsub, checkpointRecord{}) {
+		t.Fatal("a returned image must keep the record")
+	}
+	if nativeCreateNotSubmitted(CoordinatorImage{}, errors.New("unverified cleanup"), checkpointRecord{}) {
+		t.Fatal("plain error must not attest non-submission")
+	}
+}

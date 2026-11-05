@@ -29,6 +29,7 @@ type fixedBoxAPI struct {
 
 func (f *fixedBoxAPI) CreateBox(ctx context.Context, req createRequest) (boxData, error) {
 	f.t.Helper()
+	f.createReq = req
 	f.keys = append(f.keys, req.IdempotencyKey)
 	claim, err := core.ReadLeaseClaim(f.leaseID)
 	if err != nil || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.Journal.Submission.Count != len(f.keys) || claim.FixedCreateIntent.Attempt["idempotency_key"] != req.IdempotencyKey || req.IdempotencyKey == "" || claim.ProviderScope == "" {
@@ -69,15 +70,21 @@ func fixedBoxFixture(t *testing.T) (*backend, *fixedBoxAPI, core.AcquireRequest,
 
 func TestFixedBoxFreshReplayAndConflict(t *testing.T) {
 	b, f, req, _ := fixedBoxFixture(t)
+	f.box = testBox()
+	f.box.IP = ""
+	f.box.SSHEndpoint = "198.51.100.20:19036"
 	first, err := b.Acquire(t.Context(), req)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if first.SSH.Host != "198.51.100.20" || first.SSH.Port != "19036" {
+		t.Fatalf("fixed SSH target: %+v", first.SSH)
 	}
 	before, _ := core.ReadLeaseClaim(req.RequestedLeaseID)
 	if before.CloudID == "" || before.CloudID != first.Server.CloudID || before.ProviderScope != core.ProviderClaimScope(providerName, b.cfg) {
 		t.Fatalf("fixed acquisition lost heartbeat identity: %+v", before)
 	}
-	if view, err := b.Status(t.Context(), core.StatusRequest{ID: req.RequestedLeaseID}); err != nil || !view.Ready {
+	if view, err := b.Status(t.Context(), core.StatusRequest{ID: req.RequestedLeaseID}); err != nil || !view.Ready || view.HasHost || view.SSHHost != first.SSH.Host || view.SSHPort != first.SSH.Port {
 		t.Fatalf("fixed status: %+v %v", view, err)
 	}
 	after, _ := core.ReadLeaseClaim(req.RequestedLeaseID)
@@ -85,16 +92,45 @@ func TestFixedBoxFreshReplayAndConflict(t *testing.T) {
 		t.Fatal("status mutated fixed claim")
 	}
 	replay, err := b.Acquire(t.Context(), req)
-	if err != nil || first.Server.CloudID != replay.Server.CloudID || first.Server.ImmutableID == "" || first.Server.ImmutableID != replay.Server.ImmutableID || len(f.keys) != 1 {
+	if err != nil || first.Server.CloudID != replay.Server.CloudID || first.Server.ImmutableID == "" || first.Server.ImmutableID != replay.Server.ImmutableID || len(f.keys) != 1 || replay.SSH.Host != first.SSH.Host || replay.SSH.Port != first.SSH.Port {
 		t.Fatalf("replay allocated or changed identity: %+v, %v", replay, err)
 	}
-	for _, change := range []string{"ttl", "slug", "workdir", "scope", "generation", "id"} {
+	if f.createReq.NoEnv || before.Labels[boxNoEnvLabel] != "false" {
+		t.Fatalf("default creation changed environment policy: request=%+v labels=%v", f.createReq, before.Labels)
+	}
+	if f.createReq.Type != "default" {
+		t.Fatalf("fixed create size=%q want default", f.createReq.Type)
+	}
+	legacy, err := core.FixedIntentFingerprint("ascii-box/v1\x00", struct {
+		Scope, Workdir, Slug, Pond string
+		TTL, Idle                  time.Duration
+		Keep                       bool
+	}{before.ProviderScope, b.cfg.AsciiBox.Workdir, req.RequestedSlug, core.NormalizePondName(b.cfg.Pond), b.cfg.TTL, b.cfg.IdleTimeout, req.Keep})
+	if err != nil || before.FixedCreateIntent.Fingerprint != legacy {
+		t.Fatalf("default sizing changed legacy intent: got=%s want=%s err=%v", before.FixedCreateIntent.Fingerprint, legacy, err)
+	}
+	configured := b.cfg
+	configured.Class = "fast"
+	core.MarkClassExplicit(&configured)
+	configured.ServerType, configured.ServerTypeExplicit = "default", true
+	other := NewBackend(Provider{}.Spec(), configured, b.rt).(*backend)
+	if replay, err := other.Acquire(t.Context(), req); err != nil || replay.Server.CloudID != first.Server.CloudID || len(f.keys) != 1 {
+		t.Fatalf("explicit default did not resume the old lease: %+v %v", replay, err)
+	}
+	for _, change := range []string{"ttl", "size", "class", "no-env", "slug", "workdir", "scope", "generation", "id"} {
 		t.Run(change, func(t *testing.T) {
 			cfg, changed := b.cfg, req
 			original := f.box
 			switch change {
 			case "ttl":
 				changed.Options.TTL = time.Hour
+			case "no-env":
+				cfg.AsciiBox.NoEnv = true
+			case "size":
+				cfg.ServerType, cfg.ServerTypeExplicit = "large", true
+			case "class":
+				cfg.Class = "fast"
+				core.MarkClassExplicit(&cfg)
 			case "slug":
 				changed.RequestedSlug = "other"
 			case "workdir":
@@ -159,9 +195,17 @@ func TestFixedBoxObservationsAndReusePreservePolicy(t *testing.T) {
 		t.Fatalf("fixed observations mutated the claim: %+v, %v", after, err)
 	}
 	clock.at = clock.at.Add(time.Minute)
-	lease, err = b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, Repo: req.Repo})
+	newRepo := core.Repo{Root: t.TempDir()}
+	if _, err := b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, Repo: newRepo}); err == nil || !strings.Contains(err.Error(), "belongs to another repository") {
+		t.Fatalf("cross-repository reuse without reclaim: %v", err)
+	}
+	lease, err = b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, Repo: newRepo, Reclaim: true})
 	if err != nil {
 		t.Fatal(err)
+	}
+	after, err = core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || after.RepoRoot != newRepo.Root || after.CloudID != original.CloudID || after.CloudImmutableID != original.CloudImmutableID || !reflect.DeepEqual(after.FixedCreateIntent, original.FixedCreateIntent) || len(f.keys) != 1 {
+		t.Fatalf("reclaim changed fixed identity or intent: %+v, %v", after, err)
 	}
 	for _, key := range []string{"created_at", "ttl_secs", "keep", "expires_at", "idle_timeout_secs"} {
 		if lease.Server.Labels[key] != original.Labels[key] {
@@ -176,6 +220,101 @@ func TestFixedBoxObservationsAndReusePreservePolicy(t *testing.T) {
 	after, err = core.ReadLeaseClaim(req.RequestedLeaseID)
 	if err != nil || after.IdleTimeoutSeconds != 600 || after.LastUsedAt != clock.at.Format(time.RFC3339) || after.Labels["ttl_secs"] != "1200" || after.Labels["keep"] != "false" || after.Labels["created_at"] != original.Labels["created_at"] {
 		t.Fatalf("fixed heartbeat lost recorded policy: %+v, %v", after, err)
+	}
+}
+
+func TestFixedBoxReclaimRejectsUnavailableClaims(t *testing.T) {
+	for _, reason := range []string{"no-env", "intent-deleting", "journal-deleting", "deletion-operation", "deletion-completed", "completed-receipt", "operation-receipt", "binding-receipt", "status", "read-only", "release", "no-local-state"} {
+		t.Run(reason, func(t *testing.T) {
+			b, f, req, _ := fixedBoxFixture(t)
+			if _, err := b.Acquire(t.Context(), req); err != nil {
+				t.Fatal(err)
+			}
+			reuse := core.ResolveRequest{ID: req.RequestedLeaseID, Repo: core.Repo{Root: t.TempDir()}, Reclaim: true}
+			wantError := "entered cleanup"
+			if err := core.WithDurableLeaseClaimLock(req.RequestedLeaseID, func(claim *core.LeaseClaim, _ bool, persist func() error) error {
+				switch reason {
+				case "no-env":
+					b.cfg.AsciiBox.NoEnv = true
+					wantError = "no-env"
+				case "intent-deleting":
+					claim.FixedCreateIntent.State = "deleting"
+				case "journal-deleting":
+					claim.FixedCreateIntent.Journal.Phase = "deleting"
+				case "deletion-operation":
+					claim.FixedCreateIntent.Attempt["deletion_operation_id"] = testDeletionID
+				case "deletion-completed":
+					claim.FixedCreateIntent.Attempt["deletion_completed"] = "true"
+				case "completed-receipt":
+					claim.Labels[boxDeletionLabel] = ""
+				case "operation-receipt":
+					claim.Labels[boxDeletionOperationLabel] = ""
+				case "binding-receipt":
+					claim.Labels[boxDeletionOperationBindingLabel] = ""
+				case "status":
+					reuse.StatusOnly = true
+				case "read-only":
+					reuse.StatusOnly, reuse.NoLocalStateMutations = true, true
+				case "release":
+					reuse.ReleaseOnly = true
+				case "no-local-state":
+					reuse.NoLocalStateMutations = true
+				}
+				return persist()
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if reuse.StatusOnly || reuse.ReleaseOnly || reuse.NoLocalStateMutations {
+				wantError = "belongs to another repository"
+			}
+			before, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.prepareIDs = nil
+			f.getHook = func(string) (boxData, error) {
+				t.Fatal("rejected reclaim reached native observation")
+				return boxData{}, nil
+			}
+			if _, err := b.Resolve(t.Context(), reuse); err == nil || !strings.Contains(err.Error(), wantError) {
+				t.Fatalf("reclaim was not rejected at %s: %v", reason, err)
+			}
+			after, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil || !reflect.DeepEqual(before, after) || len(f.prepareIDs) != 0 || len(f.keys) != 1 {
+				t.Fatalf("rejected reclaim changed ownership or reached SSH: %+v, %v", after, err)
+			}
+		})
+	}
+}
+
+func TestFixedBoxReclaimRejectsConcurrentReplacement(t *testing.T) {
+	b, f, req, _ := fixedBoxFixture(t)
+	if _, err := b.Acquire(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	var replacement core.LeaseClaim
+	f.getHook = func(string) (boxData, error) {
+		if err := core.WithDurableLeaseClaimLock(req.RequestedLeaseID, func(claim *core.LeaseClaim, _ bool, persist func() error) error {
+			claim.RepoRoot = t.TempDir()
+			return persist()
+		}); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		replacement, err = core.ReadLeaseClaim(req.RequestedLeaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f.box, nil
+	}
+	f.prepareIDs = nil
+	_, err := b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, Repo: core.Repo{Root: t.TempDir()}, Reclaim: true})
+	if err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("stale reclaim did not reject replaced claim: %v", err)
+	}
+	after, readErr := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if readErr != nil || !reflect.DeepEqual(replacement, after) || len(f.prepareIDs) != 0 || len(f.keys) != 1 {
+		t.Fatalf("stale reclaim changed replacement or reached SSH: %+v, %v", after, readErr)
 	}
 }
 
@@ -380,7 +519,7 @@ func TestFixedBoxStopCommandPreservesTombstone(t *testing.T) {
 	}
 	f.deleted = true
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte("provider: ascii-box\nasciiBox:\n  baseUrl: https://ascii.dev\n"), 0600); err != nil {
+	if err := os.WriteFile(configPath, []byte("provider: ascii-box\nclass: fast\nasciiBox:\n  baseUrl: https://ascii.dev\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("CRABBOX_CONFIG", configPath)

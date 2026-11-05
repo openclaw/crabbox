@@ -83,6 +83,7 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/vercelsandbox"
 	_ "github.com/openclaw/crabbox/internal/providers/vultr"
 	_ "github.com/openclaw/crabbox/internal/providers/wandb"
+	_ "github.com/openclaw/crabbox/internal/providers/warpbuild"
 	_ "github.com/openclaw/crabbox/internal/providers/windowssandbox"
 	_ "github.com/openclaw/crabbox/internal/providers/xcpng"
 )

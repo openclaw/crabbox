@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -605,39 +606,124 @@ func TestArtifactKindClassifiesProofSidecars(t *testing.T) {
 	}
 }
 
+func TestWindowsDesktopVideoTaskLimitCoversRequestedDuration(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows PowerShell behavior")
+	}
+	for _, tc := range []struct {
+		name     string
+		duration time.Duration
+		want     string
+	}{{"long", 30 * time.Minute, "35"}, {"short", 20 * time.Second, "5"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := windowsDesktopVideoRemoteBody("t", "s", "o", "z", tc.duration)
+			var limitLine string
+			for _, line := range strings.Split(body, "\n") {
+				if strings.HasPrefix(line, "$script:CrabboxInteractiveTaskLimitMinutes") {
+					limitLine = line
+				}
+			}
+			ps := `$ErrorActionPreference = "Stop"
+function Remove-ScheduledStub {}
+function Stop-ScheduledTask {}
+function Unregister-ScheduledTask {}
+function New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDirectory) }
+function New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) }
+function New-ScheduledTask { param($Action, $Principal, $Settings) }
+function Register-ScheduledTask { param($TaskName, $InputObject, [switch]$Force) }
+function New-ScheduledTaskSettingsSet { param($ExecutionTimeLimit, [switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries) [Console]::Out.WriteLine("limit=" + [int]$ExecutionTimeLimit.TotalMinutes) }
+` + windowsInteractiveScheduledTaskPowerShell() + "\n" + limitLine + "\nRegister-CrabboxInteractiveTask 't' 'powershell.exe' 'x'\n"
+			out, err := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", ps).CombinedOutput()
+			if err != nil {
+				t.Fatalf("%v: %s", err, out)
+			}
+			if !strings.Contains(string(out), "limit="+tc.want) {
+				t.Fatalf("want task limit %s minutes, got %q", tc.want, out)
+			}
+		})
+	}
+}
+
 func TestWindowsDesktopVideoRemoteCommandCapturesInteractiveFrames(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows PowerShell behavior")
+	}
+	for _, result := range []string{"success", "capture-error", "task-error", "timeout"} {
+		t.Run(result, func(t *testing.T) {
+			root := t.TempDir()
+			outDir, zipPath := filepath.Join(root, "frames"), filepath.Join(root, "frames.zip")
+			capture := filepath.Join(root, "capture.ps1")
+			receipt := filepath.Join(root, "removed")
+			prefix := `$ErrorActionPreference = "Stop"
+$result = ` + psQuote(result) + `
+$receipt = ` + psQuote(receipt) + `
+function Register-CrabboxInteractiveTask {
+  param($Name, $Executable, $Arguments)
+  if ($Name -ne "fixture-video" -or $Executable -ne "powershell.exe") { throw "wrong capture task" }
+  if (-not $Arguments.EndsWith('-File "' + $script + '"')) { throw "wrong capture script" }
+}
+function Start-CrabboxInteractiveTask {
+  param($Name)
+  if ($Name -ne "fixture-video") { throw "wrong started task" }
+  New-Item -ItemType Directory -Path $outDir | Out-Null
+  [IO.File]::WriteAllText($script, "fixture")
+  if ($result -eq "task-error") { throw "fixture task failure" }
+  if ($result -eq "capture-error") { [IO.File]::WriteAllText($captureError, "fixture capture failure"); return }
+  if ($result -eq "success") {
+    [IO.File]::WriteAllBytes($zip, [byte[]]@(0,255,13,10))
+    [IO.File]::WriteAllText($done, "done")
+  }
+}
+function Remove-CrabboxInteractiveTask {
+  param($Name)
+  [IO.File]::WriteAllText($receipt, $Name)
+}
+$script:dateCalls = 0
+function Get-Date {
+  $script:dateCalls++
+  $date = [datetime]::new(2000, 1, 1)
+  if ($result -eq "timeout" -and $script:dateCalls -gt 1) { return $date.AddSeconds(1000) }
+  return $date
+}
+function Start-Sleep { throw "fixture must not sleep" }
+`
+			scriptPath := filepath.Join(root, "run.ps1")
+			body := windowsDesktopVideoRemoteBody("fixture-video", capture, outDir, zipPath, 2*time.Second)
+			if err := os.WriteFile(scriptPath, []byte(prefix+body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			output, err := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath).CombinedOutput()
+			if result == "success" {
+				if err != nil || !bytes.Equal(output, []byte{0, 255, 13, 10}) {
+					t.Fatalf("capture bytes=%q error=%v", output, err)
+				}
+			} else {
+				want := map[string]string{
+					"capture-error": "fixture capture failure",
+					"task-error":    "fixture task failure",
+					"timeout":       "scheduled interactive video did not produce output",
+				}[result]
+				if err == nil || !strings.Contains(string(output), want) {
+					t.Fatalf("capture must fail with %q: %v: %s", want, err, output)
+				}
+			}
+			removed, err := os.ReadFile(receipt)
+			if err != nil || string(removed) != "fixture-video" {
+				t.Fatalf("capture task cleanup=%q error=%v", removed, err)
+			}
+			for _, path := range []string{outDir, zipPath, zipPath + ".done", zipPath + ".error", capture} {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("capture left %s: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
+func TestWindowsDesktopVideoFrameTiming(t *testing.T) {
 	frames, intervalMS := windowsDesktopVideoFrameTiming(2*time.Second, 4)
 	if frames != 8 || intervalMS != 250 {
 		t.Fatalf("frames=%d intervalMS=%d", frames, intervalMS)
-	}
-	script := windowsDesktopVideoCaptureScript(`C:\ProgramData\crabbox\cv-1-frames`, `C:\ProgramData\crabbox\cv-1.zip`, frames, intervalMS)
-	for _, want := range []string{
-		`$Frames = 8`,
-		`$IntervalMS = 250`,
-		"CopyFromScreen",
-		"frame-{0:D6}.jpg",
-		"Compress-Archive",
-		`$Zip + ".done"`,
-	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("windows video script missing %q:\n%s", want, script)
-		}
-	}
-
-	got := windowsDesktopVideoRemoteCommand(`C:\ProgramData\crabbox\cv-1.ps1`, `C:\ProgramData\crabbox\cv-1-frames`, `C:\ProgramData\crabbox\cv-1.zip`, 2*time.Second)
-	for _, want := range []string{
-		"CrabboxVideo-",
-		`$outDir = 'C:\ProgramData\crabbox\cv-1-frames'`,
-		`$zip = 'C:\ProgramData\crabbox\cv-1.zip'`,
-		`$done = $zip + ".done"`,
-		`$script = 'C:\ProgramData\crabbox\cv-1.ps1'`,
-		"-File $script",
-		"[Console]::OpenStandardOutput().Write",
-		"scheduled interactive video did not produce output",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("windows video command missing %q:\n%s", want, got)
-		}
 	}
 }
 
@@ -756,6 +842,9 @@ func TestSnapshotArtifactFilesRejectsSymlinkSwapAfterValidation(t *testing.T) {
 }
 
 func TestValidateArtifactBundleRootRejectsParentSwap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows denies renaming an open directory, preventing this parent-swap attack")
+	}
 	base := t.TempDir()
 	bundle := filepath.Join(base, "bundle")
 	replacement := filepath.Join(base, "replacement")
@@ -937,6 +1026,9 @@ func TestArtifactPublishSummaryRejectsExternalAliasToSwappedBundleFile(t *testin
 }
 
 func TestArtifactPublishSummaryRejectsSymlinkDotDotSwap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows symlink traversal semantics do not support this POSIX dot-dot swap")
+	}
 	bundle := t.TempDir()
 	nested := filepath.Join(bundle, "nested")
 	mustWriteFile(t, filepath.Join(bundle, "summary.md"), "safe-summary")
@@ -1589,6 +1681,10 @@ func TestWriteArtifactBundleCredentialFilesKeepOwnerOnlyMode(t *testing.T) {
 // restricted when it actually embeds a presigned URL. A public or local bundle keeps the
 // readable mode it has always had.
 func TestPublishedArtifactsSummaryModeFollowsURLKind(t *testing.T) {
+	mask, run := isolatedArtifactTestUmask(t)
+	if !run {
+		return
+	}
 	signed := "https://bucket.s3.amazonaws.com/proof.txt?X-Amz-Signature=deadbeef&X-Amz-Expires=900"
 	for _, item := range []struct {
 		name    string
@@ -1625,9 +1721,12 @@ func TestPublishedArtifactsSummaryModeFollowsURLKind(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			restricted := info.Mode().Perm()&0o077 == 0
-			if restricted != item.private {
-				t.Fatalf("summary mode=%#o restricted=%t, want restricted=%t", info.Mode().Perm(), restricted, item.private)
+			want := os.FileMode(0o644) &^ mask
+			if item.private {
+				want = 0o600
+			}
+			if got := info.Mode().Perm(); got != want {
+				t.Fatalf("summary mode=%#o, want %#o (signed=%t, umask=%#o)", got, want, item.private, mask)
 			}
 		})
 	}
@@ -1689,6 +1788,10 @@ func TestWriteSensitiveArtifactManifestKeepsOwnerOnlyMode(t *testing.T) {
 }
 
 func TestPublicAndLocalArtifactManifestPreserveSharedModes(t *testing.T) {
+	mask, run := isolatedArtifactTestUmask(t)
+	if !run {
+		return
+	}
 	for _, item := range []struct {
 		name     string
 		url      string
@@ -1739,8 +1842,12 @@ func TestPublicAndLocalArtifactManifestPreserveSharedModes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := info.Mode().Perm(); got != item.want {
-				t.Fatalf("manifest mode=%#o, want %#o", got, item.want)
+			want := item.want
+			if item.existing == 0 {
+				want &^= mask
+			}
+			if got := info.Mode().Perm(); got != want {
+				t.Fatalf("manifest mode=%#o, want %#o (umask=%#o)", got, want, mask)
 			}
 		})
 	}

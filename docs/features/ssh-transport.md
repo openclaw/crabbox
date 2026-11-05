@@ -133,6 +133,23 @@ password retrieval, remote setup/cleanup, and sync need their own transport
 boundary. Native VNC handoff stdout still intentionally contains the viewer
 credentials documented by that command.
 
+## Linux command lifetime
+
+With a complete release installation, ordinary Linux foreground commands use
+the verified native runtime shipped beside the CLI. Keep the `crabbox-runtime`
+directory with its matching controller; a CLI-only installation does not provide
+this native command path. Command input remains finite, while a separate watched
+connection lifetime prevents an already-disconnected invocation from starting
+its workload. Output and command exit status keep their existing meanings.
+
+Cancellation preserves the normal TERM grace, then joins owned process-group
+cleanup. Crabbox requires a completion record for that exact invocation and
+explicit retirement before reporting cleanup confirmed. Local SSH exit or an
+absent remote stage is not sufficient: a delayed accepted wrapper can still be
+pending. Unconfirmed retirement is reported with its retained stage locator; the
+runtime is preserved and the dispatched command is not automatically replayed.
+Owner metadata and intentionally detached helpers retain their existing owners.
+
 ## Native Windows command input
 
 Native Windows SSH carries workspace-owner requests, witness scripts, and

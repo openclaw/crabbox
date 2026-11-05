@@ -717,7 +717,10 @@ func (record *checkpointRecord) applyNativeImage(image CoordinatorImage, noReboo
 
 func nativeCheckpointResourceRequest(record checkpointRecord) NativeCheckpointResourceRequest {
 	return NativeCheckpointResourceRequest{
-		LoadConfig: loadConfig,
+		LoadConfig:  loadConfig,
+		Config:      Config{Provider: record.nativeProvider()},
+		Runtime:     RuntimeForProviderOperation(io.Discard),
+		ArtifactDir: record.artifactDir,
 		Image: NativeCheckpointImage{
 			ID:               record.Native.ImageID,
 			Name:             record.Native.Name,
@@ -755,6 +758,8 @@ func checkpointKindForProviderImage(image CoordinatorImage) string {
 		return checkpointKindDaytona
 	case checkpointKindCloudflare:
 		return checkpointKindCloudflare
+	case checkpointKindHyperV:
+		return checkpointKindHyperV
 	}
 	switch image.Provider {
 	case "azure":
@@ -778,7 +783,7 @@ func checkpointStrategyForKind(kind string) string {
 	switch kind {
 	case checkpointKindAWSAMI, checkpointKindAzure, checkpointKindGCP, checkpointKindMachine0, checkpointKindDockerCommit:
 		return checkpointStrategyImage
-	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindParallels, checkpointKindDaytona, checkpointKindIncus, checkpointKindCloudflare:
+	case checkpointKindAWSEBS, checkpointKindAzureOS, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindParallels, checkpointKindDaytona, checkpointKindIncus, checkpointKindCloudflare, checkpointKindHyperV:
 		return checkpointStrategyDiskSnapshot
 	default:
 		return ""
@@ -905,6 +910,7 @@ func nativeCoordinatorImageRef(record checkpointRecord) CoordinatorImageRef {
 
 func nativeCheckpointForkRecord(record checkpointRecord) NativeCheckpointForkRecord {
 	return NativeCheckpointForkRecord{
+		ArtifactDir:  record.artifactDir,
 		Kind:         record.Kind,
 		ImageID:      record.Native.ImageID,
 		Name:         record.Native.Name,

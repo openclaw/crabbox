@@ -780,6 +780,9 @@ func TestWindowsDesktopLaunchRemoteCommandUsesActiveInteractiveSession(t *testin
 		"CrabboxDesktopWindows",
 		"RelatedTo",
 		"AddSeconds(45)",
+		"@($script, $result, $env:USERNAME)",
+		"WTSQuerySessionInformation",
+		"ActiveSessionId(user)",
 		"SetForegroundWindow",
 		"GetForegroundWindow",
 		windowsDesktopWindowMarker,
@@ -859,16 +862,86 @@ func TestWindowsDesktopTerminalUsesMinttyWithSixelDefaults(t *testing.T) {
 		"Scrollbar=none",
 		"TERM=xterm-256color",
 		"GIFGREP_INLINE",
-		"'/c/gifgrep-smoke/run.sh'",
+		"('/c/gifgrep-smoke/run.sh'); exec /usr/bin/bash -l",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("terminal command missing %q: %v", want, got)
 		}
 	}
+	// Two Mintty windows held with -h always stall new console processes in
+	// the session, so the window stays open through a live login shell instead.
+	if strings.Contains(joined, "-h always") {
+		t.Fatalf("terminal command must not use Mintty's hold: %v", got)
+	}
 	for _, bad := range []string{"cmd.exe", "start"} {
 		if strings.Contains(joined, bad) {
 			t.Fatalf("terminal command should launch mintty directly, found %q: %v", bad, got)
 		}
+	}
+}
+
+func TestWindowsDesktopTerminalDisablesMsysArgumentConversion(t *testing.T) {
+	got, err := desktopTerminalCommand(
+		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+		[]string{"cmd.exe", "/d", "/c", "echo desktop-proof"},
+		desktopTerminalOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shellCommand := got[len(got)-1]
+	if !strings.HasPrefix(shellCommand, "(export MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1; ") {
+		t.Fatalf("windows terminal command must disable MSYS argument conversion before the command: %q", shellCommand)
+	}
+	if !strings.HasSuffix(shellCommand, `'cmd.exe' '/d' '/c' 'echo desktop-proof'); exec /usr/bin/bash -l`) {
+		t.Fatalf("windows terminal command must preserve the requested command, then keep the window open with a login shell that does not inherit the conversion override: %q", shellCommand)
+	}
+}
+
+func TestWindowsDesktopTerminalKeepsMsysConversionForNonCmdCommands(t *testing.T) {
+	for _, program := range []string{"node.exe", "/c/tools/run.sh", "bash"} {
+		got, err := desktopTerminalCommand(
+			SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+			[]string{program, "/c/crabbox/check.js"},
+			desktopTerminalOptions{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if shellCommand := got[len(got)-1]; strings.Contains(shellCommand, "MSYS") {
+			t.Fatalf("%s must keep MSYS path conversion: %q", program, shellCommand)
+		}
+	}
+	for _, program := range []string{`C:\Windows\System32\CMD.EXE`, "cmd"} {
+		got, err := desktopTerminalCommand(
+			SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+			[]string{program, "/d", "/c", "echo x"},
+			desktopTerminalOptions{},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(got[len(got)-1], "MSYS_NO_PATHCONV=1") {
+			t.Fatalf("%s must disable MSYS conversion: %v", program, got)
+		}
+	}
+}
+
+func TestWindowsDesktopTerminalKeepsMsysConversionForInteractiveShell(t *testing.T) {
+	got, err := desktopTerminalCommand(
+		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal},
+		nil,
+		desktopTerminalOptions{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shellCommand := got[len(got)-1]
+	if strings.Contains(shellCommand, "MSYS") {
+		t.Fatalf("interactive windows terminal must keep normal MSYS path conversion: %q", shellCommand)
+	}
+	if !strings.HasSuffix(shellCommand, "exec /usr/bin/bash -l") {
+		t.Fatalf("interactive windows terminal must still exec a login shell: %q", shellCommand)
 	}
 }
 
@@ -1043,10 +1116,13 @@ func TestDesktopVideoRemoteCommandRejectsWayland(t *testing.T) {
 
 func TestDesktopRecorderDiagnosticsCommandsCoverWindowsAndLinux(t *testing.T) {
 	win := desktopRecorderDiagnosticsRemoteCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
-	for _, want := range []string{"powershell.exe", "-EncodedCommand"} {
+	for _, want := range []string{`Write-Output "- target-os: windows"`, "windows-password-file", "query user", "mintty: pid="} {
 		if !strings.Contains(win, want) {
 			t.Fatalf("windows diagnostics missing %q:\n%s", want, win)
 		}
+	}
+	if strings.Contains(win, "-EncodedCommand") {
+		t.Fatalf("windows diagnostics must be an exact script payload, not a nested encoded command:\n%s", win)
 	}
 	linux := desktopRecorderDiagnosticsRemoteCommand(SSHTarget{TargetOS: targetLinux})
 	for _, want := range []string{"remote-ffmpeg", "xdpyinfo", "vnc-listener"} {

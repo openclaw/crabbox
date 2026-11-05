@@ -96,7 +96,13 @@ func (b claimRoutingStatusBackend) Resolve(_ context.Context, req ResolveRequest
 		SSH: SSHTarget{Host: "claim-routing.example.test", User: "runner", Port: "22", TargetOS: targetLinux},
 	}, nil
 }
-func (claimRoutingStatusBackend) Touch(_ context.Context, req TouchRequest) (Server, error) {
+
+type claimRoutingTouchHookKey struct{}
+
+func (claimRoutingStatusBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
+	if hook, ok := ctx.Value(claimRoutingTouchHookKey{}).(func(TouchRequest) (Server, error)); ok {
+		return hook(req)
+	}
 	return req.Lease.Server, nil
 }
 func (claimRoutingStatusBackend) ReleaseLease(context.Context, ReleaseLeaseRequest) error {

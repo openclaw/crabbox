@@ -55,6 +55,41 @@ Generation and scenario mutation are outside this budget. Snapshot staging is
 private to each sample and removed afterward. Avoid other local builds, tests
 and fixture generation during a measurement sequence.
 
+Successful subprocess exit alone is not valid benchmark evidence. Each sample
+must contain exactly one result for every expected phase, finite positive
+`ns/op`, and all seven counters described above, including `files`,
+`candidate-bytes`, and `dirty-bytes`. Counter values must be finite and
+nonnegative; zero I/O or hash counts are valid. The three fixture counters must
+agree across phases and samples. Check them against the independently prepared
+fixture manifest as well; agreement alone does not verify the fixture.
+
+The script infers expected phases for the six literal phase names, literal
+alternations such as the default `manifest|fingerprint|plan`, and `.*`. Go still
+interprets `--phase`; Python does not translate its regex syntax. For a custom
+Go regex, supply the exact expected names explicitly:
+
+```sh
+python3 scripts/benchmark-sync.py "$bench/medium" --changes 0 \
+  --baseline-test-binary "$bench/baseline.test" --test-binary "$bench/sync.test" \
+  --phase '(fingerprint-full|snapshot-local)' \
+  --expected-phase fingerprint-full --expected-phase snapshot-local \
+  --output "$bench/paired-digests.json"
+```
+
+Phase artifacts include `expectedPhases`, a scenario `status`, and per-sample
+`validation`. Invalid evidence stops sampling, retains raw output and completed
+samples in strict JSON, reports `status: failed`, and exits nonzero. It cannot
+produce a comparison summary. `status: complete` means the requested sample
+matrix passed admission; it is not a performance qualification or independent
+fixture-correctness result. Comparative summaries require all three A/B pairs.
+
+Run the admission regression tests without Go builds, Git fixture commits,
+network or leases:
+
+```sh
+python3 -B scripts/benchmark-sync.test.py Admission
+```
+
 ## Full runs over SSH
 
 To isolate remote manifest writing, run the production receiver against synthetic

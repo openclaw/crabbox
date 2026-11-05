@@ -4535,3 +4535,9 @@ func TestLocalContainerGeneratedConfigIsCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestWarpBuildGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_warpbuild.go", "../../internal/cli/config_warpbuild_generated.go", "WarpBuildConfig", "warpbuild", true); err != nil {
+		t.Fatal(err)
+	}
+}

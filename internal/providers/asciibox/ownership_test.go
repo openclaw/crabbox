@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -1003,7 +1004,7 @@ func TestCleanupTeardownUsesVerifiedTarget(t *testing.T) {
 func TestEndpointRefreshCannotRetargetOwnership(t *testing.T) {
 	_, f, claim, lease := ownedFixture(t)
 	original := lease.Server
-	for _, key := range []string{"provider", "box_id", "ascii_box_scope", boxCreationLabel} {
+	for _, key := range []string{"provider", "box_id", "ascii_box_scope", boxCreationLabel, boxNoEnvLabel} {
 		server := original
 		server.Labels = map[string]string{}
 		for k, v := range original.Labels {
@@ -1014,9 +1015,18 @@ func TestEndpointRefreshCannotRetargetOwnership(t *testing.T) {
 			t.Fatalf("accepted changed %s", key)
 		}
 	}
-	server := recordedBoxServer(testConfig(), f.box, claim)
+	legacy := claim
+	legacy.Labels = maps.Clone(claim.Labels)
+	delete(legacy.Labels, boxNoEnvLabel)
+	server := recordedBoxServer(testConfig(), f.box, legacy)
+	server.Labels[boxNoEnvLabel] = "true"
+	updated, err := (Provider{}).PrepareLeaseClaimEndpoint(legacy, providerName, claim.Slug, server, false)
+	if err != nil || updated.Labels[boxNoEnvLabel] != "" {
+		t.Fatalf("refresh invented no-env receipt: %v", err)
+	}
+	server = recordedBoxServer(testConfig(), f.box, claim)
 	delete(server.Labels, boxCreationLabel)
-	updated, err := (Provider{}).PrepareLeaseClaimEndpoint(claim, providerName, claim.Slug, server, false)
+	updated, err = (Provider{}).PrepareLeaseClaimEndpoint(claim, providerName, claim.Slug, server, false)
 	if err != nil || updated.Labels[boxCreationLabel] != claim.Labels[boxCreationLabel] {
 		t.Fatalf("refresh lost binding: %v", err)
 	}

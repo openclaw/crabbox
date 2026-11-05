@@ -19,21 +19,25 @@ var seededSyncTransformAttributes = []string{"crlf", "working-tree-encoding", "f
 // A seed is only a baseline, not proof that a reused worktree is still clean.
 // Repair remote tracked edits as well as local edits, including locally reverted
 // changes from a previous run. The full manifest still owns pruning/finalization.
-func seededSyncTransfer(ctx context.Context, target SSHTarget, repo Repo, manifest SyncManifest, plan gitCoherencePlan, workdir string) ([]byte, int, int64, bool) {
+func seededSyncTransfer(ctx context.Context, target SSHTarget, repo Repo, manifest SyncManifest, plan gitCoherencePlan, workdir string) ([]byte, int, int64, string) {
 	if !plan.seedEnabled() || plan.Tree == "" || isWindowsWSL2Target(target) || isWindowsNativeTarget(target) {
-		return nil, 0, 0, false
+		return nil, 0, 0, "unsupported"
 	}
 	var err error
 	manifest, err = seededSyncManifest(repo, manifest)
 	if err != nil {
-		return nil, 0, 0, false
+		return nil, 0, 0, "local_admission"
 	}
 	var output bytes.Buffer
 	err = executeSSH(ctx, &target, remoteSeededSyncChanges(workdir, plan), nil, 0, 0, "10", "3", &output, nil)
 	if err != nil {
-		return nil, 0, 0, false
+		return nil, 0, 0, "remote_probe_exit_" + remoteGitSeedExitStatus(ctx, err)
 	}
-	return seededSyncTransferFromChanges(repo.Root, manifest, output.Bytes())
+	data, files, size, ok := seededSyncTransferFromChanges(repo.Root, manifest, output.Bytes())
+	if !ok {
+		return nil, 0, 0, "response_rejected"
+	}
+	return data, files, size, ""
 }
 
 // With other transforms excluded, CRLF normalization only removes bytes. A

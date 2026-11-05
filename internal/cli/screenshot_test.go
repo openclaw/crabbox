@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -89,22 +91,67 @@ func TestScreenshotRemoteCommandUsesDesktopDisplayAndPNG(t *testing.T) {
 	}
 }
 
-func TestScreenshotRemoteCommandSupportsWindowsAndMacOS(t *testing.T) {
-	windows := screenshotRemoteCommand(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
-	for _, want := range []string{
-		"System.Windows.Forms",
-		"ImageFormat]::Png",
-		"& schtasks.exe @createArgs",
-		"/IT",
-		"windows.password",
-	} {
-		if !strings.Contains(windows, want) {
-			t.Fatalf("windows screenshot command missing %q:\n%s", want, windows)
-		}
+func TestWindowsScreenshotRemoteCommandStreamsAndCleansUp(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows PowerShell behavior")
 	}
-	mac := screenshotRemoteCommand(SSHTarget{TargetOS: targetMacOS})
-	if !strings.Contains(mac, "screencapture -x -t png -") {
-		t.Fatalf("mac screenshot command=%s", mac)
+	for _, result := range []string{"success", "register-error", "task-error", "timeout"} {
+		t.Run(result, func(t *testing.T) {
+			root := t.TempDir()
+			base, receipt := filepath.Join(root, "capture"), filepath.Join(root, "removed")
+			prefix := `$ErrorActionPreference = "Stop"
+$base = ` + psQuote(base) + `
+$receipt = ` + psQuote(receipt) + `
+$result = ` + psQuote(result) + `
+function Protect-CrabboxInteractiveDirectory {
+  param($Path)
+  [IO.Directory]::CreateDirectory($Path) | Out-Null
+}
+function Register-CrabboxInteractiveTask {
+  param($Name, $Executable, $Arguments)
+  if ($Executable -ne "powershell.exe" -or -not $Arguments.EndsWith('-File "' + $script + '"')) { throw "wrong capture command" }
+  if (-not [IO.File]::Exists($script)) { throw "capture script missing" }
+  if ($result -eq "register-error") { throw "fixture registration failure" }
+}
+function Start-CrabboxInteractiveTask {
+  param($Name)
+  if ($result -eq "task-error") { throw "fixture capture failure" }
+  if ($result -eq "success") { [IO.File]::WriteAllBytes($out, [byte[]]@(137,80,78,71,0,255,13,10)) }
+}
+function Remove-CrabboxInteractiveTask {
+  param($Name)
+  [IO.File]::WriteAllText($receipt, $Name)
+}
+function Start-Sleep {}
+`
+			script := filepath.Join(root, "run.ps1")
+			if err := os.WriteFile(script, []byte(prefix+windowsScreenshotRemoteBody()), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			output, err := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script).CombinedOutput()
+			if result == "success" {
+				if err != nil || !bytes.Equal(output, []byte{137, 80, 78, 71, 0, 255, 13, 10}) {
+					t.Fatalf("screenshot bytes=%q error=%v", output, err)
+				}
+			} else {
+				want := map[string]string{
+					"register-error": "fixture registration failure",
+					"task-error":     "fixture capture failure",
+					"timeout":        "scheduled interactive screenshot did not produce output",
+				}[result]
+				if err == nil || !strings.Contains(string(output), want) {
+					t.Fatalf("capture error=%v output=%s, want %q", err, output, want)
+				}
+			}
+			removed, err := os.ReadFile(receipt)
+			if err != nil || !strings.HasPrefix(string(removed), "CrabboxScreenshot-") {
+				t.Fatalf("task removal=%q error=%v", removed, err)
+			}
+			entries, err := os.ReadDir(base)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("capture directory not cleaned: %v %v", entries, err)
+			}
+		})
 	}
 }
 

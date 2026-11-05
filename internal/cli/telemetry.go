@@ -49,7 +49,8 @@ func collectLeaseTelemetry(ctx context.Context, target SSHTarget) (*LeaseTelemet
 	}
 	// Telemetry only observes the lease; sharing a command witness can replace
 	// an exited workload's identity before its owner finishes cleanup.
-	output, err := runSSHOutput(contextWithoutWorkspaceOwner(ctx), target, remoteLeaseTelemetryScript())
+	ctx = contextWithoutNativeRuntimeAdmission(contextWithoutWorkspaceOwner(ctx))
+	output, err := runSSHOutput(ctx, target, remoteLeaseTelemetryScript())
 	if err != nil {
 		return nil, err
 	}

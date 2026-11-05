@@ -305,6 +305,7 @@ func sshCommandContext(ctx context.Context, target SSHTarget, args ...string) *e
 	// drain so cancellation cannot strand the caller in Cmd.Wait.
 	cmd.WaitDelay = sshCommandWaitDelay
 	applyTargetChildEnvironment(cmd, target)
+	applyNativeSSHChildEnvironment(cmd)
 	return cmd
 }
 
@@ -768,11 +769,11 @@ func probeSSHTransport(ctx context.Context, target *SSHTarget, timeout time.Dura
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if scope, _ := ctx.Value(nativeRuntimeScopeKey{}).(*nativeRuntimeScope); scope != nil && scope.selected() && isWindowsWSL2Target(*target) {
+	if scope, _ := ctx.Value(nativeRuntimeScopeKey{}).(*nativeRuntimeScope); scope != nil && scope.selected() && nativeSupervisorTarget(*target) {
 		if err := scope.validateLocal(ctx, *target); err != nil {
 			return false
 		}
-		// Route selection precedes admission. Probe only SSH/WSL transport;
+		// Route selection precedes admission. Probe only raw transport;
 		// staging here would require an installation on the unselected route.
 		for _, port := range resolvedSSHPortCandidates(*target) {
 			if context.Cause(ctx) != nil {
@@ -780,7 +781,10 @@ func probeSSHTransport(ctx context.Context, target *SSHTarget, timeout time.Dura
 			}
 			probe := *target
 			probe.Port, probe.FallbackPorts, probe.NoControlMaster = port, []string{}, true
-			command := wsl2ProbeCommand("exit 0", "/usr/bin/env BASH_ENV=/dev/null ENV=/dev/null /bin/sh -c")
+			command := remotePOSIXControlCommand("exit 0")
+			if isWindowsWSL2Target(probe) {
+				command = wsl2ProbeCommand("exit 0", "/usr/bin/env BASH_ENV=/dev/null ENV=/dev/null /bin/sh -c")
+			}
 			err := runWSLReadinessTransport(ctx, probe, command, "2", "1")
 			if err == nil {
 				target.recordPreparedEndpoint(port)
@@ -932,10 +936,13 @@ func resolveSSHPortNoInput(ctx context.Context, target *SSHTarget, connectTimeou
 type sshTransportPreparation struct {
 	// retirementUnconfirmed records dispatch evidence independently of joined errors.
 	retirementUnconfirmed bool
+	dispatched            bool
 	command               string
 	setupMarker           string
 	direct                io.ReadSeeker
 	stage                 *wslStageSpool
+	native                *remoteNativeRuntime
+	nativeNonce           string
 	// replay borrows a finite input owner; its caller closes it after dispatch.
 	replay *replayableSSHInput
 }
@@ -1005,6 +1012,17 @@ func prepareSSHTransport(ctx context.Context, target SSHTarget, command string, 
 		}
 		return sshTransportPreparation{stage: spool}, err
 	}
+	// Finite owner metadata already has its own control lifetime. Do not turn
+	// renewals or cleanup into another supervised workload on Linux.
+	if target.TargetOS == targetLinux && !limit.control {
+		native, err := admittedNativeRuntime(ctx, target)
+		if err != nil {
+			return sshTransportPreparation{}, err
+		}
+		if native != nil {
+			return native.prepareCommand(command, input, size, limit)
+		}
+	}
 	return sshTransportPreparation{command: wrapRemoteForTarget(target, command), direct: input}, nil
 }
 
@@ -1014,6 +1032,9 @@ func (p *sshTransportPreparation) run(ctx context.Context, target *SSHTarget, co
 		return err
 	}
 	*target = preparedTarget
+	if p.native != nil {
+		return p.runNative(ctx, *target, connectTimeout, connectionAttempts, stdout, stderr)
+	}
 	if p.stage != nil {
 		p.retirementUnconfirmed = true
 		p.stage.setupMarker = p.setupMarker
@@ -1065,12 +1086,20 @@ func (p *sshTransportPreparation) runOnce(ctx context.Context, target SSHTarget,
 		return false, err
 	}
 	cmd.Stdin = input
+	if p.native != nil {
+		closeInput, inputErr := nativeCommandInput(cmd, input)
+		if inputErr != nil {
+			return false, inputErr
+		}
+		defer func() { err = errors.Join(err, closeInput()) }()
+	}
 	p.retirementUnconfirmed = true
 	defer func() {
 		// Inspect the command we own, never an arbitrary ExitError found in a
 		// joined error. OpenSSH reserves 255 for transport failure; a normal
 		// exit below that reports remote command completion. Cancellation and
 		// signaled termination cannot establish remote retirement.
+		p.dispatched = cmd.Process != nil
 		if cmd.Process == nil {
 			p.retirementUnconfirmed = false // local Start failed: no dispatch
 		} else if ctx.Err() == nil && cmd.ProcessState != nil && cmd.ProcessState.Exited() && cmd.ProcessState.ExitCode() >= 0 && cmd.ProcessState.ExitCode() < 255 {
@@ -1109,6 +1138,9 @@ func (p *sshTransportPreparation) close() error {
 	if p.stage != nil {
 		err = errors.Join(err, p.stage.close())
 	}
+	if p.native != nil {
+		err = errors.Join(err, p.replay.close())
+	}
 	return err
 }
 
@@ -1139,13 +1171,13 @@ func (e sshPreparationError) Unwrap() error { return e.error }
 // executeSSH owns workspace preparation; executePreparedSSH is the lower,
 // generic transport boundary and has no knowledge of workspace ownership.
 func executeSSH(ctx context.Context, target *SSHTarget, remote string, input io.ReadSeeker, size int64, limit time.Duration, connectTimeout, attempts string, stdout, stderr io.Writer) (err error) {
-	_, err = executeSSHWithRetirement(ctx, target, remote, input, size, limit, connectTimeout, attempts, stdout, stderr)
+	_, err = executeSSHWithRetirement(ctx, target, remote, input, size, sshCommandLimit{execution: limit}, connectTimeout, attempts, stdout, stderr)
 	return err
 }
 
 // executeSSHWithRetirement keeps remote lifetime evidence separate from local
 // diagnostics and spool errors. An owner cleanup failure remains conservative.
-func executeSSHWithRetirement(ctx context.Context, target *SSHTarget, remote string, input io.ReadSeeker, size int64, limit time.Duration, connectTimeout, attempts string, stdout, stderr io.Writer) (retirementUnconfirmed bool, err error) {
+func executeSSHWithRetirement(ctx context.Context, target *SSHTarget, remote string, input io.ReadSeeker, size int64, limit sshCommandLimit, connectTimeout, attempts string, stdout, stderr io.Writer) (retirementUnconfirmed bool, err error) {
 	var inputSize *int64
 	if input != nil {
 		inputSize = &size
@@ -1161,13 +1193,12 @@ func executeSSHWithRetirement(ctx context.Context, target *SSHTarget, remote str
 			err = errors.Join(err, cleanupErr)
 		}
 	}()
-	commandLimit := sshCommandLimit{execution: limit}
-	transport, err := prepareSSHTransport(ctx, *target, prepared.command, input, size, commandLimit)
+	transport, err := prepareSSHTransport(ctx, *target, prepared.command, input, size, limit)
 	if err != nil {
 		return false, sshPreparationError{err}
 	}
 	transport.setupMarker = prepared.setupMarker
-	err = transport.execute(ctx, target, commandLimit, connectTimeout, attempts, stdout, stderr)
+	err = transport.execute(ctx, target, limit, connectTimeout, attempts, stdout, stderr)
 	return transport.retirementUnconfirmed, err
 }
 
@@ -2138,7 +2169,48 @@ const windowsPowerShellPathRefresh = `$env:Path = [Environment]::GetEnvironmentV
 `
 
 func windowsPowerShellStdinScriptCommand(inputSize int) string {
-	return PowershellCommand(windowsPowerShellPathRefresh + `$ErrorActionPreference = "Stop"
+	return windowsPowerShellStdinScriptCommandMode(inputSize, false)
+}
+
+// windowsPowerShellRawStdoutStdinScriptCommand preserves the script's stdout bytes exactly.
+func windowsPowerShellRawStdoutStdinScriptCommand(inputSize int) string {
+	return windowsPowerShellStdinScriptCommandMode(inputSize, true)
+}
+
+// A nested native command's stdout is decoded to text by the outer PowerShell host,
+// which corrupts binary payloads; copy the child's raw stdout stream instead.
+const windowsPowerShellRawFileInvoker = `function Invoke-CrabboxRawPowerShellFile([string]$File) {
+	$psi = New-Object System.Diagnostics.ProcessStartInfo
+	$psi.FileName = 'powershell.exe'
+	$psi.Arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $File + '"'
+	$psi.UseShellExecute = $false
+	$psi.RedirectStandardOutput = $true
+	$process = [System.Diagnostics.Process]::Start($psi)
+	$stdout = [Console]::OpenStandardOutput()
+	try {
+		$process.StandardOutput.BaseStream.CopyTo($stdout)
+		$stdout.Flush()
+	} finally {
+		$stdout.Dispose()
+	}
+	$process.WaitForExit()
+	return $process.ExitCode
+}
+`
+
+func windowsPowerShellFileInvocation(path string, rawStdout bool) string {
+	if rawStdout {
+		return "$code = Invoke-CrabboxRawPowerShellFile " + path + "\n"
+	}
+	return "& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " + path + "\n\t$code = $LASTEXITCODE\n"
+}
+
+func windowsPowerShellStdinScriptCommandMode(inputSize int, rawStdout bool) string {
+	prelude := ""
+	if rawStdout {
+		prelude = windowsPowerShellRawFileInvoker
+	}
+	return PowershellCommand(windowsPowerShellPathRefresh + prelude + `$ErrorActionPreference = "Stop"
 $path = Join-Path $env:TEMP ("crabbox-stdin-command-" + [Guid]::NewGuid().ToString("N") + ".ps1")
 try {
 	$scriptFile = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -2149,9 +2221,7 @@ try {
 	} finally {
 		$scriptFile.Dispose()
 	}
-	& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $path
-	$code = $LASTEXITCODE
-} finally {
+	` + windowsPowerShellFileInvocation("$path", rawStdout) + `} finally {
 	Remove-Item -Force -LiteralPath $path -ErrorAction SilentlyContinue
 }
 if ($null -eq $code) { $code = 0 }
@@ -2453,7 +2523,8 @@ if ! { ` + seed + `; } >/dev/null 2>"$transport_error"; then
   exit ` + strconv.Itoa(gitOriginRuntimeFallbackExitCode) + `
 fi
 printf 'crabbox-git-seed phase=checkout\n' >&2
-` + checkoutGit + ` -C "$tmp" checkout --quiet --detach ` + shellQuote(plan.Target) + `
+# Use Git baseline modes; the later sync preserves explicit local permissions.
+(umask 022; ` + checkoutGit + ` -C "$tmp" checkout --quiet --detach ` + shellQuote(plan.Target) + `)
 printf 'crabbox-git-seed phase=verify\n' >&2
 [ "$(git -C "$tmp" rev-parse --verify HEAD^{commit})" = ` + shellQuote(plan.Target) + ` ]
 cd "$tmp"
