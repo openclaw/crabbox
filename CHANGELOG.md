@@ -6,6 +6,10 @@
 
 - Actions: register leases in an existing organization runner group, persist exact runner ownership before starting the listener, and deregister the recorded runner with `actions unregister` without requiring the VM to remain reachable.
 
+### Fixed
+
+- Firecracker: use Linux's `nomodule` boot argument so module-capable guests cannot load kernel modules and init no longer receives `nomodules`. [PR 3032](https://github.com/openclaw/crabbox/pull/3032). Thanks @coygeek.
+
 ## 0.81.1 - 2026-11-04
 
 ### Fixed
