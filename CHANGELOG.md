@@ -6,6 +6,10 @@
 
 - Actions: register leases in an existing organization runner group, persist exact runner ownership before starting the listener, and deregister the recorded runner with `actions unregister` without requiring the VM to remain reachable.
 
+### Fixed
+
+- Docs: align provider catalog and target counts with the compiled CLI, distinguish built-in providers from `external`, and reject stale summaries in docs CI. [PR 3034](https://github.com/openclaw/crabbox/pull/3034). Thanks @coygeek.
+
 ## 0.81.1 - 2026-11-04
 
 ### Fixed
