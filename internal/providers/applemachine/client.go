@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/prefixbuffer"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -20,13 +22,26 @@ type machine struct {
 }
 
 func (b *backend) command(ctx context.Context, args []string, dir string) (core.LocalCommandResult, error) {
-	return b.rt.Exec.Run(ctx, core.LocalCommandRequest{
-		Name:   core.Blank(strings.TrimSpace(b.cfg.AppleContainer.CLIPath), "container"),
-		Args:   args,
-		Dir:    dir,
-		Stdout: b.rt.Stdout,
-		Stderr: b.rt.Stderr,
+	// Keep native diagnostics without the runner's cancel-on-overflow capture:
+	// arbitrarily large workload streams must still reach their writers once.
+	const diagnosticLimit = 16 << 10
+	stdout, stderr := prefixbuffer.NewLimited(diagnosticLimit), prefixbuffer.NewLimited(diagnosticLimit)
+	stream := func(writer io.Writer, capture *prefixbuffer.Buffer) io.Writer {
+		if writer == nil {
+			writer = io.Discard
+		}
+		return io.MultiWriter(writer, capture)
+	}
+	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
+		Name:                 core.Blank(strings.TrimSpace(b.cfg.AppleContainer.CLIPath), "container"),
+		Args:                 args,
+		Dir:                  dir,
+		Stdout:               stream(b.rt.Stdout, &stdout),
+		Stderr:               stream(b.rt.Stderr, &stderr),
+		DisableOutputCapture: true,
 	})
+	result.Stdout, result.Stderr = stdout.String(), stderr.String()
+	return result, err
 }
 
 func (b *backend) createMachine(ctx context.Context, name string) error {

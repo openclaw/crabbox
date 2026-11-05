@@ -302,12 +302,14 @@ func TestNativeControlFailuresPreserveCauseAndPublicCode(t *testing.T) {
 						cause = context.DeadlineExceeded
 					}
 					b := testBackend(&recordingRunner{})
-					b.rt.Exec = claimContextRunner{run: func(callCtx context.Context, _ core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					b.rt.Exec = claimContextRunner{run: func(callCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 						if !deadline {
 							cancel()
 						}
 						<-callCtx.Done()
-						return core.LocalCommandResult{Stderr: "synthetic diagnostic"}, callCtx.Err()
+						result := core.LocalCommandResult{Stderr: "synthetic diagnostic"}
+						emitMachineOutput(req, result)
+						return result, callCtx.Err()
 					}}
 					var err error
 					wantCode := 5

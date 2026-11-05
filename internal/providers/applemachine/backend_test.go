@@ -432,7 +432,9 @@ func TestRunTerminalOutcomeAndRetention(t *testing.T) {
 								}
 							}
 						}
-						return core.LocalCommandResult{ExitCode: tc.code, Stderr: "synthetic workload diagnostic"}, tc.cause, true
+						native := core.LocalCommandResult{ExitCode: tc.code, Stderr: "synthetic workload diagnostic"}
+						emitMachineOutput(req, native)
+						return native, tc.cause, true
 					}
 				}
 				return core.LocalCommandResult{}, nil, false
@@ -500,8 +502,12 @@ func TestRunTerminalOutcomeAndRetention(t *testing.T) {
 			if tc.timing && (!errors.Is(err, writerCause) || !strings.Contains(public.Message, writerCause.Error())) {
 				t.Errorf("reporting cause or diagnostic lost: %v", err)
 			}
-			if tc.code == 23 && !strings.Contains(public.Message, "synthetic workload diagnostic") {
-				t.Errorf("primary diagnostic missing: %q", public.Message)
+			if tc.cause == commandCause && tc.code == 23 {
+				if !strings.Contains(public.Message, "apple-machine command exited 23") || strings.Contains(public.Message, "synthetic workload diagnostic") {
+					t.Errorf("workload exit diagnostic incorrect: %q", public.Message)
+				}
+			} else if tc.code == 23 && !strings.Contains(public.Message, "synthetic workload diagnostic") {
+				t.Errorf("native diagnostic missing: %q", public.Message)
 			}
 			wantRemove := !tc.reuse && !tc.keep && !(tc.keepFailure && (tc.cause != nil || tc.badEnv))
 			wantKept := !wantRemove || tc.cleanup
