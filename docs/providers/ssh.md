@@ -531,6 +531,8 @@ Windows native hosts need:
 
 - the OpenSSH server;
 - PowerShell;
+- `git` on the SSH account's `PATH` (the readiness probe runs `git --version`;
+  restart `sshd` after installing Git so new sessions see the updated `PATH`);
 - `tar` for archive sync;
 - VNC/browser tooling only if desktop flows are requested.
 
