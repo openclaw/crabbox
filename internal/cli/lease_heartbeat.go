@@ -22,7 +22,7 @@ func startActionsLeaseHeartbeat(
 			coord,
 			lease.LeaseID,
 			cfg.Provider,
-			cfg.IdleTimeout,
+			leaseSavedIdleTimeout(cfg.IdleTimeout, leaseClaim{}, lease.Server.Labels),
 			nil,
 			leaseTelemetryCollectorForTarget(lease.SSH),
 			stderr,
@@ -36,11 +36,38 @@ func startActionsLeaseHeartbeat(
 			expectedClaim,
 			cancelOperation,
 			blank(lease.Server.Labels["state"], "ready"),
-			cfg.IdleTimeout,
+			leaseSavedIdleTimeout(cfg.IdleTimeout, expectedClaim, lease.Server.Labels),
 			stderr,
 		), nil
 	}
 	return func() {}, nil
+}
+
+// leaseSavedIdleTimeout returns the idle timeout the lease itself carries.
+// Renewals extend expiry by that value, so pacing them from the caller's
+// config would let a lease warmed with a shorter idle timeout lapse between
+// heartbeats. A recorded claim value wins, as it does for claim-backed touches.
+func leaseSavedIdleTimeout(fallback time.Duration, claim leaseClaim, labels map[string]string) time.Duration {
+	if claim.IdleTimeoutSeconds > 0 {
+		return time.Duration(claim.IdleTimeoutSeconds) * time.Second
+	}
+	for _, candidate := range []map[string]string{claim.Labels, labels} {
+		if saved, ok := directLeaseIdleTimeout(candidate); ok && saved > 0 {
+			return saved
+		}
+	}
+	return fallback
+}
+
+func waitForHeartbeatTick(ctx context.Context, interval time.Duration) bool {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // guestExpiryHeartbeatBackend routes heartbeat touches through the shared touch
@@ -64,7 +91,7 @@ func startDirectLeaseHeartbeat(
 	idleTimeout time.Duration,
 	stderr io.Writer,
 ) func() {
-	return startDirectLeaseHeartbeatWithInterval(ctx, backend, lease, expectedClaim, cancelOperation, state, idleTimeout, heartbeatInterval(idleTimeout), stderr)
+	return startDirectLeaseHeartbeatPaced(ctx, backend, lease, expectedClaim, cancelOperation, state, idleTimeout, 0, waitForHeartbeatTick, stderr)
 }
 
 func startDirectLeaseHeartbeatWithInterval(
@@ -80,12 +107,27 @@ func startDirectLeaseHeartbeatWithInterval(
 	if interval <= 0 {
 		interval = time.Minute
 	}
+	return startDirectLeaseHeartbeatPaced(ctx, backend, lease, expectedClaim, cancelOperation, state, idleTimeout, interval, waitForHeartbeatTick, stderr)
+}
+
+// startDirectLeaseHeartbeatPaced renews the lease until stopped. A zero
+// interval re-derives the pace after every renewal from the idle timeout the
+// lease currently carries, so an extend that shortens it takes effect.
+func startDirectLeaseHeartbeatPaced(
+	ctx context.Context,
+	backend LeaseTouchBackend,
+	lease LeaseTarget,
+	expectedClaim leaseClaim,
+	cancelOperation context.CancelCauseFunc,
+	state string,
+	idleTimeout, interval time.Duration,
+	wait func(context.Context, time.Duration) bool,
+	stderr io.Writer,
+) func() {
 	rootCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
 		for {
 			var fatalErr, claimReadErr error
 			var preTouch leaseClaim
@@ -116,7 +158,7 @@ func startDirectLeaseHeartbeatWithInterval(
 				server, err = backend.Touch(callCtx, TouchRequest{
 					Lease:       lease,
 					State:       state,
-					IdleTimeout: idleTimeout,
+					IdleTimeout: leaseSavedIdleTimeout(idleTimeout, preTouch, lease.Server.Labels),
 				})
 				touchCancel()
 			}
@@ -177,9 +219,11 @@ func startDirectLeaseHeartbeatWithInterval(
 				}
 				return
 			}
-			select {
-			case <-ticker.C:
-			case <-rootCtx.Done():
+			next := interval
+			if next <= 0 {
+				next = heartbeatInterval(leaseSavedIdleTimeout(idleTimeout, expectedClaim, lease.Server.Labels))
+			}
+			if !wait(rootCtx, next) {
 				return
 			}
 		}

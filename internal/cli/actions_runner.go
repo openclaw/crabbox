@@ -95,66 +95,79 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 	bootstrapCtx, cancelBootstrap := actionsRunnerBootstrapContext(ctx)
 	defer cancelBootstrap()
 	var updated leaseClaim
-	err := WithDurableLeaseClaimLockContext(ctx, leaseID, func(claim *leaseClaim, exists bool, persist func() error) error {
-		// A lease heartbeat may advance lifecycle labels and last use between the
-		// caller's snapshot and this lock; any other change fails the snapshot.
-		if !exists || !sameActionsWorkspaceClaimOwner(*claim, expected) || strictSnapshot && !reflect.DeepEqual(*claim, expected) && !actionsClaimLifecycleOnlyChange(expected, *claim) {
-			return Exit(2, "Actions runner lease claim changed or is missing")
-		}
-		fingerprint := actionsRunnerLeaseFingerprint(*claim)
-		binding := claim.ActionsRunner
-		guest, err := readActionsRunnerGuest(ctx, target, checkVersion)
-		if err != nil {
-			return err
-		}
-		if guest.Settings != nil {
-			settings := guest.Settings
-			if binding == nil {
-				// Adopt shipped claims only through the exact remote configuration and
-				// the canonical lease label returned by GitHub, never a name sweep.
-				if settings.URL != actionsRunnerURL(scope) || settings.Name != name || settings.Ephemeral != cfg.Actions.Ephemeral || group != "" && settings.Group != group {
-					return Exit(2, "existing guest runner does not match the requested registration")
-				}
-				binding = &ActionsRunnerBinding{Scope: scope, RunnerID: settings.ID, Name: settings.Name, Group: settings.Group, Ephemeral: settings.Ephemeral, LeaseFingerprint: fingerprint}
-			} else if !actionsRunnerSettingsMatch(settings, binding) {
-				return Exit(2, "guest runner does not match the recorded registration; refusing replacement")
+	// Registrations serialize on their own per-lease lock. The claim lock is held
+	// only for claim checks, the receipt write and listener start, never across
+	// the guest install, so lease renewals keep committing while setup runs.
+	err := withActionsRunnerRegistrationLock(ctx, leaseID, func() error {
+		var reserved *leaseClaim
+		var fingerprint string
+		err := WithDurableLeaseClaimLockContext(ctx, leaseID, func(claim *leaseClaim, exists bool, persist func() error) error {
+			// A lease heartbeat may advance lifecycle labels and last use between the
+			// caller's snapshot and this lock; any other change fails the snapshot.
+			if !exists || !sameActionsWorkspaceClaimOwner(*claim, expected) || strictSnapshot && !reflect.DeepEqual(*claim, expected) && !actionsClaimLifecycleOnlyChange(expected, *claim) {
+				return Exit(2, "Actions runner lease claim changed or is missing")
 			}
-		} else if *guest.Active {
-			return Exit(2, "runner listener is active without an identifiable registration; reconcile it before registering")
-		}
-		if binding != nil {
-			present, err := githubActionsRunnerPresent(ctx, *binding, leaseID, labels, target.ChildEnvDenylist)
+			fingerprint = actionsRunnerLeaseFingerprint(*claim)
+			binding := claim.ActionsRunner
+			guest, err := readActionsRunnerGuest(ctx, target, checkVersion)
 			if err != nil {
 				return err
 			}
-			if present {
-				if checkVersion && guest.Version != cfg.Actions.RunnerVersion {
-					return Exit(2, "existing runner does not have requested version %s; unregister it before changing runner version", cfg.Actions.RunnerVersion)
+			if guest.Settings != nil {
+				settings := guest.Settings
+				if binding == nil {
+					// Adopt shipped claims only through the exact remote configuration and
+					// the canonical lease label returned by GitHub, never a name sweep.
+					if settings.URL != actionsRunnerURL(scope) || settings.Name != name || settings.Ephemeral != cfg.Actions.Ephemeral || group != "" && settings.Group != group {
+						return Exit(2, "existing guest runner does not match the requested registration")
+					}
+					binding = &ActionsRunnerBinding{Scope: scope, RunnerID: settings.ID, Name: settings.Name, Group: settings.Group, Ephemeral: settings.Ephemeral, LeaseFingerprint: fingerprint}
+				} else if !actionsRunnerSettingsMatch(settings, binding) {
+					return Exit(2, "guest runner does not match the recorded registration; refusing replacement")
 				}
-				if binding.LeaseFingerprint != fingerprint || guest.Settings == nil || binding.Scope != scope || binding.Name != name || binding.Ephemeral != cfg.Actions.Ephemeral || group != "" && binding.Group != group {
-					return Exit(2, "owned runner registration is still present; use actions unregister before changing its configuration")
-				}
-				claim.ActionsRunner = binding
-				if err := persist(); err != nil {
+			} else if *guest.Active {
+				return Exit(2, "runner listener is active without an identifiable registration; reconcile it before registering")
+			}
+			if binding != nil {
+				present, err := githubActionsRunnerPresent(ctx, *binding, leaseID, labels, target.ChildEnvDenylist)
+				if err != nil {
 					return err
 				}
-				updated = cloneLeaseClaim(*claim)
-				if !*guest.Active {
-					fmt.Fprintln(a.Stderr, "actions runner setup stage=service-start")
-					_, err := actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
-					return err
+				if present {
+					if checkVersion && guest.Version != cfg.Actions.RunnerVersion {
+						return Exit(2, "existing runner does not have requested version %s; unregister it before changing runner version", cfg.Actions.RunnerVersion)
+					}
+					if binding.LeaseFingerprint != fingerprint || guest.Settings == nil || binding.Scope != scope || binding.Name != name || binding.Ephemeral != cfg.Actions.Ephemeral || group != "" && binding.Group != group {
+						return Exit(2, "owned runner registration is still present; use actions unregister before changing its configuration")
+					}
+					claim.ActionsRunner = binding
+					if err := persist(); err != nil {
+						return err
+					}
+					updated = cloneLeaseClaim(*claim)
+					if !*guest.Active {
+						fmt.Fprintln(a.Stderr, "actions runner setup stage=service-start")
+						_, err := actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
+						return err
+					}
+					return nil
 				}
-				return nil
+				if *guest.Active {
+					return Exit(2, "owned runner listener is still active after registration removal; wait for it to stop before registering again")
+				}
 			}
-			if *guest.Active {
-				return Exit(2, "owned runner listener is still active after registration removal; wait for it to stop before registering again")
+			previous := ActionsRunnerBinding{Name: name}
+			if binding != nil {
+				previous = *binding
 			}
-		}
-		previous := ActionsRunnerBinding{Name: name}
-		if binding != nil {
-			previous = *binding
-		}
-		if _, err := actionsRunnerControl(ctx, target, remoteClearActionsRunnerSettings(target, previous)); err != nil {
+			if _, err := actionsRunnerControl(ctx, target, remoteClearActionsRunnerSettings(target, previous)); err != nil {
+				return err
+			}
+			snapshot := cloneLeaseClaim(*claim)
+			reserved = &snapshot
+			return nil
+		})
+		if err != nil || reserved == nil {
 			return err
 		}
 		fmt.Fprintln(a.Stderr, "actions runner setup stage=registration-token")
@@ -204,7 +217,7 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 		}
 		// A lost SSH acknowledgement is not permission to register again. Recover
 		// the official local identity and verify its exact API object first.
-		guest, err = readActionsRunnerGuest(ctx, target, checkVersion)
+		guest, err := readActionsRunnerGuest(ctx, target, checkVersion)
 		if err != nil {
 			return errors.Join(installErr, err)
 		}
@@ -214,7 +227,7 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 		if checkVersion && guest.Version != cfg.Actions.RunnerVersion {
 			return errors.Join(installErr, Exit(7, "configured runner version is unconfirmed; listener was not started"))
 		}
-		binding = &ActionsRunnerBinding{Scope: scope, RunnerID: guest.Settings.ID, Name: name, Group: guest.Settings.Group, Ephemeral: cfg.Actions.Ephemeral, LeaseFingerprint: fingerprint}
+		binding := &ActionsRunnerBinding{Scope: scope, RunnerID: guest.Settings.ID, Name: name, Group: guest.Settings.Group, Ephemeral: cfg.Actions.Ephemeral, LeaseFingerprint: fingerprint}
 		present, err := githubActionsRunnerPresent(ctx, *binding, leaseID, labels, target.ChildEnvDenylist)
 		if err != nil {
 			return errors.Join(installErr, err)
@@ -222,16 +235,30 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 		if !present {
 			return errors.Join(installErr, Exit(7, "configured runner %d is absent from GitHub; listener was not started", binding.RunnerID))
 		}
-		claim.ActionsRunner = binding
-		if err := persist(); err != nil {
+		// Recheck the reservation before the receipt. Anything beyond a lease
+		// renewal while setup ran unlocked means this lease no longer authorizes
+		// the runner, so delete the exact configured ID instead of activating it.
+		persisted := false
+		err = WithDurableLeaseClaimLockContext(ctx, leaseID, func(claim *leaseClaim, exists bool, persist func() error) error {
+			if !actionsRunnerReservationHolds(*reserved, *claim, exists, strictSnapshot) {
+				return Exit(2, "Actions runner lease claim changed during runner setup")
+			}
+			claim.ActionsRunner = binding
+			if err := persist(); err != nil {
+				return err
+			}
+			persisted = true
+			updated = cloneLeaseClaim(*claim)
+			fmt.Fprintln(a.Stderr, "actions runner setup stage=service-start")
+			_, err := actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
+			return err
+		})
+		if err != nil && !persisted {
 			rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
 			rollbackErr := deleteGitHubActionsRunner(rollbackCtx, *binding, leaseID, target.ChildEnvDenylist)
-			return errors.Join(Exit(7, "persist runner %s/%d; listener was not started: %v", binding.Scope, binding.RunnerID, err), rollbackErr)
+			return errors.Join(Exit(ExitCodeForError(err, 7), "persist runner %s/%d; listener was not started: %v", binding.Scope, binding.RunnerID, err), rollbackErr)
 		}
-		updated = cloneLeaseClaim(*claim)
-		fmt.Fprintln(a.Stderr, "actions runner setup stage=service-start")
-		_, err = actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
 		return err
 	})
 	if err != nil {
@@ -254,6 +281,26 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 
 func actionsRunnerSettingsMatch(settings *actionsRunnerSettings, binding *ActionsRunnerBinding) bool {
 	return settings.ID == binding.RunnerID && settings.Name == binding.Name && settings.URL == actionsRunnerURL(binding.Scope) && settings.Group == binding.Group && settings.Ephemeral == binding.Ephemeral
+}
+
+// withActionsRunnerRegistrationLock serializes registrations for one lease
+// without holding the claim lock that lease renewals need.
+func withActionsRunnerRegistrationLock(ctx context.Context, leaseID string, action func() error) error {
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		return err
+	}
+	return withLeaseClaimLockContext(ctx, path+".actions-runner", false, action)
+}
+
+// actionsRunnerReservationHolds reports whether the claim still authorizes the
+// registration reserved before the unlocked install: same workspace owner, no
+// competing runner receipt and, for strict callers, only lease-renewal changes.
+func actionsRunnerReservationHolds(reserved, current leaseClaim, exists, strictSnapshot bool) bool {
+	if !exists || !sameActionsWorkspaceClaimOwner(current, reserved) || !reflect.DeepEqual(current.ActionsRunner, reserved.ActionsRunner) {
+		return false
+	}
+	return !strictSnapshot || reflect.DeepEqual(current, reserved) || actionsClaimLifecycleOnlyChange(reserved, current)
 }
 
 func githubActionsRunnerPresent(ctx context.Context, binding ActionsRunnerBinding, leaseID string, labels, denylist []string) (bool, error) {

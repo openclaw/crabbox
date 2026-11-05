@@ -135,7 +135,9 @@ GitHub-runner hydration uses a single bounded lifecycle:
 marker-only timeout. `actions register` uses the same timeout contract for
 runner setup and online readiness.
 
-Keeping the lease alive renews its idle time, not its TTL (30 minutes by
+Crabbox keeps the lease alive for the whole hydration, including while the
+runner installs, pacing renewals from the idle timeout saved on the lease rather
+than the current config. Renewal extends idle time, not the TTL (30 minutes by
 default). Crabbox warns before registering a runner when the lease expires
 before `--wait-timeout` ends. On native Windows, runner download, toolchain
 setup, and dependency installs commonly take 15 to 25 minutes, so warm leases

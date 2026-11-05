@@ -122,6 +122,10 @@ Path('.runner').write_text(json.dumps(data)); Path('.credentials').write_text('{
 with (r/'operations').open('a') as f: f.write('configured\n')
 if os.environ.get('FIXTURE_PERSIST_FAIL'):
  claim=Path(os.environ['FIXTURE_CLAIM']); claim.rename(str(claim)+'.saved'); claim.mkdir()
+if os.environ.get('FIXTURE_CONFIG_GATE'):
+ gate=Path(os.environ['FIXTURE_CONFIG_GATE'])
+ with (gate/'entered').open('w') as f: f.write('configured\n')
+ with (gate/'resume').open() as f: f.read()
 `)
 			var out, stderr bytes.Buffer
 			app := App{Stdout: &out, Stderr: &stderr}
@@ -148,6 +152,83 @@ if os.environ.get('FIXTURE_PERSIST_FAIL'):
 			}
 			if _, err := os.Stat(filepath.Join(root, "operations")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("invalid scope reached transport: %v", err)
+			}
+			if !org {
+				// The guest install runs without the claim lock: a lease renewal
+				// commits mid-install, and a reassignment mid-install refuses the
+				// receipt, leaves the listener stopped and deletes the exact runner.
+				gate := filepath.Join(root, "gate")
+				if err := os.Mkdir(gate, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				for _, fifo := range []string{"entered", "resume"} {
+					if output, err := exec.Command("mkfifo", filepath.Join(gate, fifo)).CombinedOutput(); err != nil {
+						t.Fatalf("mkfifo: %v %s", err, output)
+					}
+				}
+				resume := func() {
+					// A read-write open never blocks and lets the waiting installer see EOF.
+					if f, err := os.OpenFile(filepath.Join(gate, "resume"), os.O_RDWR, 0); err == nil {
+						_ = f.Close()
+					}
+				}
+				t.Cleanup(resume)
+				t.Setenv("FIXTURE_CONFIG_GATE", gate)
+				entered := make(chan error, 1)
+				go func() {
+					_, err := os.ReadFile(filepath.Join(gate, "entered"))
+					entered <- err
+				}()
+				done := make(chan error, 1)
+				go func() { done <- app.Run(t.Context(), args) }()
+				select {
+				case err := <-entered:
+					if err != nil {
+						resume()
+						t.Fatal(err)
+					}
+				case err := <-done:
+					t.Fatalf("registration finished before configuring: %v\n%s", err, stderr.String())
+				case <-time.After(30 * time.Second):
+					resume()
+					t.Fatal("registration did not reach configuration")
+				}
+				renewCtx, cancelRenew := context.WithTimeout(t.Context(), 5*time.Second)
+				renewErr := WithDurableLeaseClaimLockContext(renewCtx, id, func(c *leaseClaim, _ bool, persist func() error) error {
+					c.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
+					return persist()
+				})
+				cancelRenew()
+				reclaimErr := ClaimLeaseForRepoProvider(id, "", claimRoutingUsableProvider, filepath.Join(repo, "other-owner"), time.Minute, true)
+				resume()
+				err := <-done
+				if renewErr != nil {
+					t.Fatalf("lease renewal blocked while the guest install ran: %v", renewErr)
+				}
+				if reclaimErr != nil {
+					t.Fatal(reclaimErr)
+				}
+				if err == nil || !strings.Contains(err.Error(), "claim changed during runner setup") || !strings.Contains(err.Error(), "listener was not started") {
+					t.Fatalf("registration activated after reassignment: %v", err)
+				}
+				if _, err := os.Stat(filepath.Join(root, "active")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("listener started for a reassigned lease: %v", err)
+				}
+				if _, err := os.Stat(filepath.Join(root, "api")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("configured runner was not deleted: %v", err)
+				}
+				if data, _ := os.ReadFile(filepath.Join(root, "operations")); strings.Count(string(data), "DELETE") != 1 {
+					t.Fatalf("rollback must delete the exact runner once: %s", data)
+				}
+				t.Setenv("FIXTURE_CONFIG_GATE", "")
+				if err := ClaimLeaseForRepoProvider(id, "", claimRoutingUsableProvider, repo, time.Minute, true); err != nil {
+					t.Fatal(err)
+				}
+				for _, path := range []string{filepath.Join(root, "operations"), filepath.Join(root, "next"), filepath.Join(guest, "actions-runner", ".runner"), filepath.Join(guest, "actions-runner", ".credentials")} {
+					if err := os.Remove(path); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			if !org {
 				for _, reclaim := range []bool{true, false} {
@@ -768,5 +849,45 @@ func TestBoundedActionsRunnerOnlineContextAddsDeadlineOnlyWhenMissing(t *testing
 	defer cancelChild()
 	if got, _ := child.Deadline(); !got.Equal(want) {
 		t.Fatalf("existing deadline replaced: %v != %v", got, want)
+	}
+}
+
+func TestActionsRunnerReservationHoldsAcrossLeaseRenewalOnly(t *testing.T) {
+	binding := &ActionsRunnerBinding{Scope: "repos/example-org/my-app", RunnerID: 7, Name: "old"}
+	reserved := leaseClaim{
+		LeaseID: "cbx_reserve000001", RepoRoot: "/repo", Provider: "hyperv", ProviderScope: "instance:test",
+		LastUsedAt: "2026-01-01T00:00:00Z", Revision: "r1", ActionsRunner: binding,
+		Labels: map[string]string{"state": "ready", "expires_at": "2026-01-01T00:30:00Z", "slug": "pace"},
+	}
+	change := func(edit func(*leaseClaim)) leaseClaim {
+		next := cloneLeaseClaim(reserved)
+		edit(&next)
+		return next
+	}
+	renewed := change(func(c *leaseClaim) {
+		c.LastUsedAt, c.Revision = "2026-01-01T00:05:00Z", "r2"
+		c.Labels["expires_at"], c.Labels["last_touched_at"] = "2026-01-01T00:35:00Z", "2026-01-01T00:05:00Z"
+	})
+	for _, tc := range []struct {
+		name    string
+		current leaseClaim
+		exists  bool
+		strict  bool
+		want    bool
+	}{
+		{"unchanged strict", reserved, true, true, true},
+		{"heartbeat renewal strict", renewed, true, true, true},
+		{"claim released", reserved, false, false, false},
+		{"reassigned workspace", change(func(c *leaseClaim) { c.RepoRoot = "/other" }), true, false, false},
+		{"replaced VM", change(func(c *leaseClaim) { c.CloudImmutableID = "vm-2" }), true, false, false},
+		{"competing receipt", change(func(c *leaseClaim) {
+			c.ActionsRunner = &ActionsRunnerBinding{Scope: binding.Scope, RunnerID: 8, Name: "other"}
+		}), true, false, false},
+		{"non-renewal label strict", change(func(c *leaseClaim) { c.Labels["slug"] = "renamed" }), true, true, false},
+		{"non-renewal label relaxed", change(func(c *leaseClaim) { c.Labels["slug"] = "renamed" }), true, false, true},
+	} {
+		if got := actionsRunnerReservationHolds(reserved, tc.current, tc.exists, tc.strict); got != tc.want {
+			t.Errorf("%s: holds = %t, want %t", tc.name, got, tc.want)
+		}
 	}
 }
