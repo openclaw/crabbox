@@ -4712,6 +4712,13 @@ func observeCoordinatorReleaseCompletion(
 			return released, nil
 		}
 		if coordinatorReleaseCleanupFailed(lease) {
+			if lease.CleanupStatus == "blocked" {
+				resource := blank(lease.CloudID, leaseID)
+				if lease.DeferredCleanupBlocked != nil {
+					resource = lease.DeferredCleanupBlocked.Name
+				}
+				return lease, Exit(5, "coordinator accepted release for %s, but automatic retries stopped; local claim and SSH artifacts were preserved; inspect resource %s, delete or restore it, then run crabbox stop --provider %s --id %s again; coordinator reported: %s", leaseID, resource, expectedProvider, leaseID, blank(lease.CleanupError, "-"))
+			}
 			state := "reported a cleanup failure or scheduled retry"
 			if lease.CleanupRetryAt != "" {
 				state += "; the coordinator will retry cleanup automatically"
@@ -4802,6 +4809,9 @@ func coordinatorProviderCleanupConfirmed(lease CoordinatorLease) bool {
 		lease.CleanupAttempts == 0 &&
 		lease.CleanupError == "" &&
 		lease.CleanupRetryAt == "" &&
+		lease.CleanupRefusedSince == "" &&
+		lease.CleanupBlockedAt == "" &&
+		lease.DeferredCleanupBlocked == nil &&
 		!lease.ProviderKeyCleanupPending &&
 		lease.ProviderKeyCleanupID == "" &&
 		lease.ProvisioningRequestStartedAt == "" &&

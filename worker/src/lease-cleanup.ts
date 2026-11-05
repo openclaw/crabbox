@@ -1,6 +1,16 @@
 import { lifetimeRuntimeMs } from "./lease-lifetime";
 import type { LeaseRecord } from "./types";
 
+// Outlives the longest in-flight create that could still change resources:
+// 25 minutes creating, 5 minutes deploy settling, and 30 minutes confirming absence.
+// A transient failure between refusals does not reset the streak; a coordinator
+// outage can shorten the observed number of attempts in this time-based window.
+export const leaseCleanupRefusalTerminalMs = 2 * 60 * 60 * 1000;
+
+export function leaseCleanupBlockedMessage(name: string, refusal: string, since: string): string {
+  return `${refusal}; cleanup refused since ${since}; automatic retries stopped; inspect resource ${name}, delete or restore it, then run crabbox stop again`;
+}
+
 export function clearLeaseCleanupCompletion(lease: LeaseRecord): void {
   delete lease.cleanupCompletedAt;
   delete lease.cleanupConfirmedBy;
@@ -21,6 +31,8 @@ export function completeLeaseProviderCleanup(lease: LeaseRecord, completedAt: st
     lease.lifetimePolicy.status = "complete";
     delete lease.lifetimePolicy.nextCheckAt;
   }
+  delete lease.cleanupRefusedSince;
+  delete lease.cleanupBlockedAt;
   lease.cleanupCompletedAt = completedAt;
   lease.provisioningResourceMayExist = false;
   delete lease.provisioningFailureRetryable;
@@ -40,6 +52,8 @@ export function leaseProviderCleanupConfirmed(record: LeaseRecord): boolean {
     !record.cleanupClaimExpiresAt &&
     !record.cleanupError &&
     !record.cleanupRetryAt &&
+    !record.cleanupRefusedSince &&
+    !record.cleanupBlockedAt &&
     !record.cleanupFailedAt &&
     !record.cleanupAttempts &&
     !record.provisioningRequestStartedAt &&

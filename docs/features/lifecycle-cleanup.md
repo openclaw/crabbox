@@ -34,7 +34,8 @@ undo a deletion request that already owns cleanup.
 Healthy queued cleanup reports `cleanupStatus: pending` through release and GET.
 Verified final cleanup writes `cleanupCompletedAt`, clears transient metadata and
 remote access fields, and reports `complete`; identity conflicts, missing
-successful-deletion proof and observed errors report `failed`. Retention reports
+successful-deletion proof and observed errors initially report `failed`. Persistent
+verified refusals become `blocked` as described above. Retention reports
 `retained`. These states preserve the existing client rule to keep local
 credentials until cleanup is verified complete.
 
@@ -315,6 +316,42 @@ is scheduled for the soonest of all active-lease expiry/retry times, so a failed
 delete is retried automatically. On success the cleanup metadata is cleared and
 the state becomes `expired`. You can inspect stuck cleanups with `crabbox admin
 lease-audit`.
+
+### Refused provider cleanup
+
+When a provider verifies current resources but refuses deletion because ownership,
+identity, scope, or attachment checks fail, the coordinator retries for at most
+two hours from the first refusal. This window outlives a 25-minute in-flight
+create, five-minute deployment settle, and 30-minute absence confirmation.
+At the next refusal at or after the bound, cleanup becomes `blocked`, with
+`cleanupBlockedAt` and an actionable error. Automatic cleanup stops; no refused
+resource is deleted.
+
+Inspect the named resource, delete it manually or restore its expected state,
+then run `crabbox stop` again. Stop re-arms cleanup and reports `pending` while
+that attempt runs. The original refusal time survives: a further refusal returns
+to `blocked` immediately, a transient failure reports `failed` and keeps retrying,
+and verified absence or successful cleanup clears the refusal metadata. Local
+claims and SSH recovery files remain until completion.
+
+The same bound applies to ordinary release, expiry and rollback, Azure deferred
+candidate cleanup, and canceled durable provisioning. Deferred cleanup records
+`deferredCleanupBlocked: { name, error, blockedAt, retryingAt? }` on the lease and
+does not change a healthy lease's lifecycle state or ordinary cleanup error. This
+is diagnostic evidence, never deletion authority. A lease can have several deferred
+candidates: stop re-arms all of them, `retryingAt` marks that re-armed attempt, and
+the diagnostic moves to another refused candidate when the named one finishes.
+Durable provisioning parks in `cleanup-blocked` without a due entry and retains
+ownership, fencing ordinary cleanup until stop retries it. Its recorded dispatch
+identity conflict (`identity_resolution_required`) is sticky: stop cannot clear it,
+so the error asks a coordinator operator to resolve it instead.
+
+HTTP 503 responses, timeouts, authentication or inventory unavailability, and
+unknown failures remain retryable indefinitely. A transient failure between
+refusals does not reset the window and cannot itself trigger blocking. A
+coordinator outage can reduce the number of observed attempts. Durable
+provisioning restarts the window only after a step that is not a refusal or a
+transient failure.
 
 ### Brokered native checkpoint retention
 

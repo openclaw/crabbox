@@ -129,7 +129,7 @@ coordinator inspection.
 
 Brokered JSON records also expose the coordinator's provider-cleanup state:
 
-- `cleanupStatus`: for released leases, `pending`, `failed`, `complete`, or
+- `cleanupStatus`: for released leases, `pending`, `failed`, `blocked`, `complete`, or
   `retained`. This is computed from the current lifecycle record, not persisted
   as a separate state or used as provider deletion authority.
 - `cleanupStartedAt`: cleanup has started but is not yet terminal.
@@ -139,6 +139,12 @@ Brokered JSON records also expose the coordinator's provider-cleanup state:
 - `cleanupError`: cleanup remains unconfirmed; this can include legacy diagnostics
   for pending creation as well as observed failures.
 - `cleanupRetryAt`: the coordinator scheduled another cleanup attempt.
+- `cleanupRefusedSince`: the first verified provider refusal in the current retry window.
+- `cleanupBlockedAt`: automatic cleanup stopped after two hours of persistent provider
+  refusals; inspect the named resource, delete or restore it, then run `crabbox stop` again.
+- `deferredCleanupBlocked`: `{ name, error, blockedAt, retryingAt? }` for a refused
+  deferred candidate cleanup. `retryingAt` means an explicit stop re-armed it. This
+  diagnostic can appear on a healthy active lease and is never deletion authority.
 - `releaseDeletesServer`: whether release is intended to delete the provider
   resource.
 
@@ -181,6 +187,11 @@ Missing provider identity is not completion by itself. New pre-dispatch
 reservations carry explicit no-resource evidence, and only their fenced
 lifecycle owner may turn that evidence into `cleanupCompletedAt`; historical
 records that omit it remain unconfirmed.
+
+`blocked` preserves local claims and SSH files. Text output shows the blocked
+state and recovery action. A current cleanup claim still reports `pending` while
+an explicit retry runs. Transient errors do not trigger the two-hour refusal
+bound; see [lifecycle cleanup](../features/lifecycle-cleanup.md#refused-provider-cleanup).
 
 These fields report the coordinator's lifecycle observation. They are not an
 independent provider inventory check. `complete` does not override remaining
