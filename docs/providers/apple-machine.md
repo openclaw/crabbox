@@ -71,6 +71,15 @@ the native machine's defaults.
 - Native machine-creation output goes to stderr. One-shot `run` stdout contains
   only workload bytes, and `warmup` stdout contains only Crabbox's lease summary
   and completion output.
+- Failed workloads stream stdout and stderr once, then report
+  `apple-machine command exited <code>`. Local history records that exit-status
+  diagnostic. Native or transport failures instead report a native diagnostic;
+  diagnostic capture retains at most 16 KiB per stream without limiting workload
+  output or canceling a noisy command.
+- If native creation fails, both `run` and `warmup` warn that creation may be
+  incomplete and print an inspection command naming the actual machine. An
+  unbound machine is not adopted or deleted automatically; inspect it before
+  any manual cleanup.
 - `run --lease-output <path>` writes the Apple Machine lease ID, slug,
   reuse/retention state, and exact cleanup command for orchestration handoff.
 - Automatic deletion failure after a successful command fails the run with exit

@@ -153,11 +153,11 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (result core.Run
 	}
 	outcome := shared.FinalizeDelegatedCommandOutcome(native.ExitCode, classificationErr)
 	result.ExitCode, result.Status, result.ErrorKind = outcome.ExitCode, outcome.Status, outcome.ErrorKind
+	if classificationErr == nil && result.ExitCode != 0 {
+		return result, shared.ExitErrorWithCause(result.ExitCode, fmt.Sprintf("apple-machine command exited %d", result.ExitCode), runErr)
+	}
 	if runErr != nil {
 		return result, shared.ExitErrorWithCause(result.ExitCode, fmt.Sprintf("apple-machine command failed: %s", failureDetail(native, runErr)), runErr)
-	}
-	if result.ExitCode != 0 {
-		return result, core.Exit(result.ExitCode, "apple-machine command exited %d", result.ExitCode)
 	}
 	return result, nil
 }
@@ -306,7 +306,8 @@ func (b *backend) createLease(ctx context.Context, repo core.Repo, reclaim bool,
 	}
 	name := machineName(leaseID)
 	if err := b.createMachine(ctx, name); err != nil {
-		return core.LeaseClaim{}, fmt.Errorf("%w; creation may be incomplete: inspect container machine inspect %s before manual cleanup", err, core.ShellQuote(name))
+		message := fmt.Sprintf("%s; creation may be incomplete: inspect container machine inspect %s before manual cleanup", err, core.ShellQuote(name))
+		return core.LeaseClaim{}, shared.ExitErrorWithCause(core.ExitCodeForError(err, 1), message, err)
 	}
 	retained := func(err error) (core.LeaseClaim, error) {
 		return core.LeaseClaim{}, fmt.Errorf("%w; retained machine=%s lease=%s: inspect container machine inspect %s before manual cleanup", err, name, leaseID, core.ShellQuote(name))
