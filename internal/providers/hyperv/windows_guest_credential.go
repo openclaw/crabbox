@@ -8,12 +8,16 @@ import (
 )
 
 func (b *backend) persistWindowsActionsRunnerCredential(ctx context.Context, vmName, user string) error {
-	return b.invokeInGuestWithPassword(
+	// The password reaches the script only through the remoting argument list
+	// (from the child environment, never argv); a failure reports the label and
+	// guest output, which the script never writes the password to.
+	return b.invokeInGuestRetrying(
 		ctx,
 		vmName,
 		user,
 		windowsActionsRunnerCredentialPowerShell(user, core.WindowsActionsRunnerCredentialPath),
 		"Windows Actions runner credential persistence",
+		true,
 	)
 }
 
