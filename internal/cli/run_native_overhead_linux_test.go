@@ -5,6 +5,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,37 +88,61 @@ func main() {
 	b.lease.SSH.Port = startTCPReadinessFixture(t)
 	log := filepath.Join(dir, "calls")
 	t.Setenv("NATIVE_CALLS", log)
+	t.Setenv("NATIVE_CACHE_ROOT", filepath.Join(dir, "runtime-cache"))
 	writeExecutable(t, filepath.Join(dir, "ssh"), `#!/bin/sh
 printf 'CALL %s\n' "$*" >> "$NATIVE_CALLS"
 for arg; do remote=$arg; done
 case "$remote" in *'/usr/local/bin/crabbox-ready'*) exit 0;; esac
+remote=$(printf %s "$remote" | sed "s#/tmp/crabbox-runtime-cache-#$NATIVE_CACHE_ROOT-#g")
 exec /bin/sh -c "$remote"
 `)
-	var stdout, stderr bytes.Buffer
-	started := time.Now()
-	err = (App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader("true\n")}).runCommand(t.Context(), []string{
-		"--provider", p.Spec().Name, "--id", b.lease.LeaseID, "--network", "public", "--tailscale=false", "--keep", "--no-sync", "--script-stdin",
-	})
-	elapsed := time.Since(started)
-	if err != nil {
-		t.Fatalf("run: %v\n%s\n%s", err, &stdout, &stderr)
-	}
-	calls, err := os.ReadFile(log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	count := strings.Count(string(calls), "CALL ")
-	t.Logf("no-sync run: %d SSH calls in %s", count, elapsed)
-	nonces := regexp.MustCompile(`CBX-REMOTE-1[^\n]*?([a-f0-9]{32})`).FindAllSubmatch(calls, -1)
-	if len(nonces) == 0 {
-		t.Fatal("run did not use the native supervisor")
-	}
-	for _, match := range nonces {
-		if _, err := os.Lstat("/tmp/crabbox-command-" + string(match[1])); !os.IsNotExist(err) {
-			t.Fatalf("successful settlement did not retire command stage %s: %v", match[1], err)
+	counts := make([]int, 3)
+	for run := range counts {
+		if run == 2 {
+			cached := filepath.Join(dir, fmt.Sprintf("runtime-cache-%d", os.Geteuid()), "artifact")
+			if err := os.Remove(cached); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cached, []byte("partial runtime"), 0500); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(log, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		started := time.Now()
+		err = (App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader("true\n")}).runCommand(t.Context(), []string{
+			"--provider", p.Spec().Name, "--id", b.lease.LeaseID, "--network", "public", "--tailscale=false", "--keep", "--no-sync", "--script-stdin",
+		})
+		elapsed := time.Since(started)
+		if err != nil {
+			t.Fatalf("run: %v\n%s\n%s", err, &stdout, &stderr)
+		}
+		calls, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := strings.Count(string(calls), "CALL ")
+		counts[run] = count
+		t.Logf("no-sync run %d: %d SSH calls in %s", run+1, count, elapsed)
+		if uploaded := strings.Contains(string(calls), "upload.part"); uploaded != (run != 1) {
+			t.Errorf("run %d runtime upload = %v", run+1, uploaded)
+		}
+		nonces := regexp.MustCompile(`CBX-REMOTE-1[^\n]*?([a-f0-9]{32})`).FindAllSubmatch(calls, -1)
+		if len(nonces) == 0 {
+			t.Fatal("run did not use the native supervisor")
+		}
+		for _, match := range nonces {
+			if _, err := os.Lstat("/tmp/crabbox-command-" + string(match[1])); !os.IsNotExist(err) {
+				t.Fatalf("successful settlement did not retire command stage %s: %v", match[1], err)
+			}
+		}
+		if count > 20 {
+			t.Errorf("no-sync run used %d SSH calls; want at most 20", count)
 		}
 	}
-	if count > 20 {
-		t.Errorf("no-sync run used %d SSH calls; want at most 20", count)
+	if counts[1] >= counts[0] {
+		t.Errorf("cache hit used %d calls; first run used %d", counts[1], counts[0])
 	}
 }

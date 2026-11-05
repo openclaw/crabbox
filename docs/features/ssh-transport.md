@@ -150,8 +150,21 @@ pending. Unconfirmed retirement is reported with its retained stage locator; the
 runtime is preserved and the dispatched command is not automatically replayed.
 Owner metadata and intentionally detached helpers retain their existing owners.
 
-Linux runtime installation and successful readiness checks are reused within
-one invocation for the same lease and transport identity. Readiness is checked
+Linux keeps one cached supervisor artifact per remote user in a private
+`/tmp/crabbox-runtime-cache-<uid>` directory. Later invocations pin the cached
+inode, check its ownership and SHA-256 against the local manifest, and complete
+the identity handshake before executing workloads. Cache hits skip compression,
+upload, and full readback. Missing, partial, or mismatched artifacts are reinstalled;
+an unsafe cache directory fails closed. Each invocation has its own private
+hard-link pin, so replacing the cached version cannot change an active run's
+cleanup executable. Successful finalization removes that pin, while the single
+cache slot remains until replacement or host/lease teardown. Retained and shared
+hosts therefore keep at most one cached artifact, plus pins for active or
+unconfirmed invocations. Hosts without a SHA-256 utility retain verified upload
+and readback on each invocation.
+
+Successful readiness checks are reused within one invocation for the same lease
+and transport identity. Readiness is checked
 again when the workspace owner changes; a new route or lease requires its own
 preparation. Metadata and workloads can use normal SSH multiplexing, while each
 supervised workload keeps its own watched input channel. Only the controller

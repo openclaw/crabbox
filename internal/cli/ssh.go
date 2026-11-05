@@ -3405,6 +3405,9 @@ func exitCode(err error) int {
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+			if status.Signaled() {
+				return 128 + int(status.Signal())
+			}
 			return status.ExitStatus()
 		}
 	}
