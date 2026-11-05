@@ -38,6 +38,8 @@ func TestBrokenPipeBinaryCleanup(t *testing.T) {
 	}{
 		{name: "stdout", stream: "stdout", wantExit: 141},
 		{name: "stderr", stream: "stderr", wantExit: 141},
+		{name: "quiet-stdout", stream: "stdout", mode: "quiet", wantExit: 141},
+		{name: "quiet-stderr", stream: "stderr", mode: "quiet", wantExit: 141},
 		{name: "both", stream: "stdout", closeStderr: true, wantExit: 141},
 		{name: "cleanup-failure", stream: "stdout", cleanupFailure: true, wantExit: 141},
 		{name: "keep", stream: "stdout", keepFlag: "--keep", wantExit: 141},
@@ -72,6 +74,7 @@ exec)
   case "$PIPE_MODE" in
     finish) printf 'workload-finished\n'; exit "$PIPE_EXIT" ;;
     hold) exec sleep 60 ;;
+    quiet) exec "$PIPE_HELPER_BINARY" -test.run '^TestBrokenPipeDelayedOutputHelper$' ;;
   esac
   sleep 0.2
   printf '%65536s' x
@@ -99,7 +102,7 @@ esac
 
 			cmd.Dir = repo
 			// Keep operator credentials/configuration and state out of the fixture.
-			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "XDG_CONFIG_HOME=" + filepath.Join(root, "config"), "XDG_STATE_HOME=" + filepath.Join(root, "state"), "CRABBOX_CONFIG=" + filepath.Join(root, "missing.yaml"), "PIPE_FIXTURE=" + root, "PIPE_STREAM=" + tc.stream, "PIPE_MODE=" + tc.mode, "PIPE_EXIT=" + strconv.Itoa(tc.wantExit), "PIPE_REMOVE_FAIL=" + strconv.FormatBool(tc.cleanupFailure)}
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "XDG_CONFIG_HOME=" + filepath.Join(root, "config"), "XDG_STATE_HOME=" + filepath.Join(root, "state"), "CRABBOX_CONFIG=" + filepath.Join(root, "missing.yaml"), "PIPE_FIXTURE=" + root, "PIPE_STREAM=" + tc.stream, "PIPE_MODE=" + tc.mode, "PIPE_HELPER_BINARY=" + os.Args[0], "PIPE_DELAY_OUTPUT_HELPER=1", "PIPE_EXIT=" + strconv.Itoa(tc.wantExit), "PIPE_REMOVE_FAIL=" + strconv.FormatBool(tc.cleanupFailure)}
 			if tc.reuse {
 				warmup := exec.CommandContext(ctx, binary, "warmup", "--provider", "docker-sandbox", "--docker-sandbox-cli", fixture, "--keep")
 				warmup.Dir, warmup.Env = cmd.Dir, cmd.Env
@@ -264,4 +267,15 @@ func TestBrokenPipeBinaryImmediateExit(t *testing.T) {
 			}
 		})
 	}
+}
+
+// This helper delays output in the same process so cancellation can reap it
+// without leaving a shell's separate sleep child holding the output pipe open.
+func TestBrokenPipeDelayedOutputHelper(t *testing.T) {
+	if os.Getenv("PIPE_DELAY_OUTPUT_HELPER") != "1" {
+		return
+	}
+	time.Sleep(30 * time.Second)
+	_, _ = io.WriteString(os.Stdout, "late-output\n")
+	os.Exit(0)
 }

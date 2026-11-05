@@ -11,8 +11,12 @@ lease cleanup finish before Crabbox exits with status **141** (`128 + SIGPIPE`).
 In a shell with pipeline status reporting, the expected result is `141 0` when
 `head` succeeds: the output was interrupted, so Crabbox does not report a
 successful complete run. Cleanup diagnostics use stderr when it remains open;
-a closed stderr cannot interrupt cleanup again. Windows reports broken output
-pipes as exit status 1.
+a closed stderr cannot interrupt cleanup again. Unix pipe/socket outputs are
+checked every 100 ms, so a disappearing consumer cancels even a quiet workload
+before its next write, including when a child inherits output directly. A SIGPIPE
+from an unrelated descriptor does not cancel a run with healthy stdout and stderr.
+Regular files, terminals, and `/dev/null` are not monitored as output pipes.
+Windows reports broken output pipes as exit status 1.
 
 Retention policies still apply: `--keep`, `--keep-on-failure`, and reused leases
 remain retained as documented. For a retained lease, cancellation alone does not
