@@ -92,7 +92,7 @@ func (b *backend) interruptActivity(ctx context.Context, claim core.LeaseClaim, 
 			if claim.RepoRoot == "" {
 				return core.Exit(4, "ACA Sandbox fixed lease %s has no current repository owner", claim.LeaseID)
 			}
-			if err := core.CheckLeaseClaimRepositoryOwner(claim.LeaseID, claim, repoRoot, false); err != nil {
+			if err := core.CheckLeaseClaimRepositoryOwner(claim.LeaseID, claim, repoRoot, false, b.cfg.LegacyClaimRoot()); err != nil {
 				return err
 			}
 		}

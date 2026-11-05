@@ -427,6 +427,7 @@ func (a App) resolveSSHLeaseWithRequestConfig(ctx context.Context, cfg *Config, 
 	if cfg == nil {
 		return LeaseTarget{}, Exit(2, "lease target config is required")
 	}
+	cfg.claimLegacyRoot = req.Repo.LegacyRoot
 	if err := autoRouteExternalLeaseForConfig(cfg, req.ID); err != nil {
 		return LeaseTarget{}, err
 	}

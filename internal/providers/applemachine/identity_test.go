@@ -359,7 +359,7 @@ func newMachineFixture(t *testing.T, runner *recordingRunner) *machineFixture {
 		}
 		args := req.Args
 		if strings.Join(args, " ") == "system status --format json" {
-			data, _ := json.Marshal(map[string]string{"status": "running", "appRoot": f.root})
+			data, _ := json.Marshal(map[string]any{"status": "running", "paths": map[string]string{"appRoot": f.root}})
 			return core.LocalCommandResult{Stdout: string(data)}, nil, true
 		}
 		if len(args) < 3 || args[0] != "machine" {
@@ -569,7 +569,7 @@ func TestDeleteRetainsClaimWhenRemovalOrInventoryIsUncertain(t *testing.T) {
 					}
 				}
 				if removed && key == "system status --format json" && kind == "root-switch" {
-					return core.LocalCommandResult{Stdout: `{"status":"running","appRoot":"/"}`}, nil, true
+					return core.LocalCommandResult{Stdout: `{"status":"running","paths":{"appRoot":"/"}}`}, nil, true
 				}
 				if removed && key == "machine list --format json" {
 					outputs := map[string]string{"empty": "", "null": "null", "invalid": "[", "duplicate": `[{"id":"other","status":"stopped"},{"id":"other","status":"stopped"}]`, "missing-id": `[{"status":"stopped"}]`, "missing-status": `[{"id":"other"}]`, "wrong-shape": "{}"}
@@ -822,11 +822,80 @@ func TestControlRejectsPartialOrInvalidInspection(t *testing.T) {
 	}
 }
 
+func TestStorageRootNativeStatusPaths(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := fmt.Sprintf(`{
+		"status": "running",
+		"client": {"appName": "container", "version": "1.6.1"},
+		"server": {"appName": "container-apiserver", "version": "1.6.1"},
+		"paths": {"appRoot": %q, "installRoot": "/usr/local"}
+	}`, root)
+	runner := &recordingRunner{fallback: core.LocalCommandResult{Stdout: output}}
+	got, err := testBackend(runner).storageRoot(t.Context())
+	if err != nil {
+		t.Fatalf("running native daemon with absolute paths.appRoot rejected: %v", err)
+	}
+	if got != root {
+		t.Fatalf("storage root = %q, want %q", got, root)
+	}
+}
+
 func TestStorageRootRequiresDaemonEvidence(t *testing.T) {
-	for _, output := range []string{"", "null", `{}`, `{"status":"stopped","appRoot":"/"}`, `{"status":"running","appRoot":"relative"}`, `{"status":"running"}`} {
+	for _, output := range []string{
+		"", "null", `{}`, `{"status":"running"}`,
+		`{"status":"stopped","appRoot":"/"}`,
+		`{"status":"running","appRoot":"relative"}`,
+		`{"status":"stopped","paths":{"appRoot":"/"}}`,
+		`{"status":"running","paths":{"appRoot":"relative"}}`,
+		`{"status":"running","paths":{}}`,
+		`{"status":"running","paths":null}`,
+		`{"status":"running","paths":{"appRoot":null}}`,
+		`{"status":"running","paths":{"appRoot":42}}`,
+		`{"status":"running","appRoot":"/","paths":{}}`,
+		`{"status":"running","appRoot":"/","paths":{"appRoot":"relative"}}`,
+	} {
 		runner := &recordingRunner{fallback: core.LocalCommandResult{Stdout: output}}
-		if _, err := testBackend(runner).storageRoot(t.Context()); err == nil {
-			t.Fatalf("accepted %q", output)
+		if got, err := testBackend(runner).storageRoot(t.Context()); err == nil || got != "" {
+			t.Fatalf("accepted %q: root=%q err=%v", output, got, err)
+		}
+	}
+}
+
+func TestStorageRootSupportsLegacyStatusAndPrefersPaths(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name   string
+		output string
+	}{
+		{"apple-container-1.0", fmt.Sprintf(`{"status":"running","appRoot":%q,"apiServerVersion":"1.0.0"}`, root)},
+		{"prefer-paths", fmt.Sprintf(`{"status":"running","appRoot":"/unused","paths":{"appRoot":%q}}`, root)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &recordingRunner{fallback: core.LocalCommandResult{Stdout: tt.output}}
+			got, err := testBackend(runner).storageRoot(t.Context())
+			if err != nil || got != root {
+				t.Fatalf("storage root = %q, err = %v, want %q", got, err, root)
+			}
+		})
+	}
+}
+
+func TestStorageRootRejectsUnusableDirectory(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{file, filepath.Join(t.TempDir(), "missing")} {
+		output := fmt.Sprintf(`{"status":"running","paths":{"appRoot":%q}}`, root)
+		runner := &recordingRunner{fallback: core.LocalCommandResult{Stdout: output}}
+		if got, err := testBackend(runner).storageRoot(t.Context()); err == nil || got != "" {
+			t.Fatalf("accepted unusable directory: root=%q err=%v", got, err)
 		}
 	}
 }

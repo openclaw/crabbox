@@ -47,7 +47,7 @@ func verifyRetainedActionsWorkspace(ctx context.Context, target SSHTarget, lease
 		_, err := verifyActionsWorkspaceOrigins(ctx, target, state, origins...)
 		return err
 	}
-	if exists && repo.Root != "" && claim.RepoRoot == repo.Root && claim.ActionsWorkspace != nil &&
+	if exists && repo.Root != "" && ClaimRepositoryMatches(claim.RepoRoot, repo.Root, repo.LegacyRoot) && claim.ActionsWorkspace != nil &&
 		claim.ActionsWorkspace.MarkerFingerprint == actionsWorkspaceMarkerFingerprint(state) {
 		// Flag-only hydration consent is local claim authority. Neither a remote
 		// marker nor --reclaim can grant it, and concurrent claim replacement revokes it.
@@ -62,7 +62,7 @@ func prepareActionsWorkspaceClaim(ctx context.Context, leaseID string, repo Repo
 	if err != nil || !exists {
 		return claim, exists, err
 	}
-	if repo.Root == "" || claim.RepoRoot != repo.Root {
+	if repo.Root == "" || !ClaimRepositoryMatches(claim.RepoRoot, repo.Root, repo.LegacyRoot) {
 		return leaseClaim{}, false, Exit(2, "Actions hydration lease claim no longer belongs to the invoking repository")
 	}
 	if claim.ActionsWorkspace != nil {
@@ -74,7 +74,7 @@ func prepareActionsWorkspaceClaim(ctx context.Context, leaseID string, repo Repo
 }
 
 func bindActionsWorkspaceClaim(ctx context.Context, target SSHTarget, repo Repo, selected GitHubRepo, state actionsHydrationState, claim leaseClaim, exists bool) error {
-	if exists && (repo.Root == "" || claim.RepoRoot != repo.Root) {
+	if exists && (repo.Root == "" || !ClaimRepositoryMatches(claim.RepoRoot, repo.Root, repo.LegacyRoot)) {
 		return Exit(2, "Actions hydration lease claim no longer belongs to the invoking repository")
 	}
 	origin, err := verifyActionsWorkspaceOrigins(ctx, target, state, repo.RemoteURL, "https://github.com/"+selected.Slug())

@@ -280,3 +280,22 @@ func TestExecCheckAndUnsupportedScopedStopStayOffline(t *testing.T) {
 		t.Fatal("offline capability admission initialized a backend")
 	}
 }
+
+func TestExecCommandDirectoryClaimThroughAlias(t *testing.T) {
+	b, dir := setupExecCommand(t)
+	if err := ClaimLeaseForRepoProvider(b.lease.LeaseID, "exec-fixture", b.spec.Name, canonicalRepositoryPath(dir), 0, true); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(dir, alias); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	t.Chdir(alias)
+	t.Setenv("PWD", alias)
+	t.Setenv("CRABBOX_SYNC_SOURCE", "directory")
+	var out, diagnostic bytes.Buffer
+	err := (App{Stdin: strings.NewReader(""), Stdout: &out, Stderr: &diagnostic}).Run(t.Context(), []string{"exec", "--id", b.lease.LeaseID, "--", "printf", "DIRECTORY_EXEC_OK"})
+	if err != nil || out.String() != "DIRECTORY_EXEC_OK" || b.resolveCalls != 1 {
+		t.Fatalf("err=%v stdout=%q stderr=%q resolves=%d", err, out.String(), diagnostic.String(), b.resolveCalls)
+	}
+}

@@ -90,7 +90,7 @@ func (a App) runEditorHandoff(ctx context.Context, editorName string, editor edi
 	if err := validateEditorTarget(editorName, editor, resolved.Config, resolved.Lease.SSH); err != nil {
 		return err
 	}
-	repo, err := findRepo()
+	repo, err := findCommandRepo(&resolved.Config)
 	if err != nil {
 		return err
 	}

@@ -215,6 +215,7 @@ type FixedReleasePolicy struct {
 	// deletion admission. Cleanup must skip a freshly reclaimed candidate.
 	Started                 *bool
 	RepoRoot                string
+	LegacyRepoRoot          string
 	CheckpointID            *string
 	PristineScopePrefix     string
 	SkipTerminalObservation bool
@@ -464,7 +465,7 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 				if claim.RepoRoot == "" {
 					return Exit(4, "%s fixed lease %s has no current repository owner", kind.Label, claim.LeaseID)
 				}
-				if err := CheckLeaseClaimRepositoryOwner(claim.LeaseID, *claim, policy.RepoRoot, false); err != nil {
+				if err := CheckLeaseClaimRepositoryOwner(claim.LeaseID, *claim, policy.RepoRoot, false, policy.LegacyRepoRoot); err != nil {
 					return err
 				}
 			}

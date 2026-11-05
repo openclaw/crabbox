@@ -918,7 +918,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 				core.SetServerLeaseClaimSnapshot(&lease.Server, updated, true)
 			}
 		} else {
-			claimErr = core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, b.claimScope(ctx), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH)
+			claimErr = core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, b.claimScope(ctx), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH, req.Repo.LegacyRoot)
 		}
 		if claimErr != nil {
 			return core.LeaseTarget{}, claimErr

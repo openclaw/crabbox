@@ -168,7 +168,7 @@ func (b *cloudflareBackend) ResolveCheckpointSource(ctx context.Context, req cor
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if req.Repo.Root != "" && claim.RepoRoot != req.Repo.Root {
+	if req.Repo.Root != "" && !core.ClaimRepositoryMatches(claim.RepoRoot, req.Repo.Root, req.Repo.LegacyRoot) {
 		return core.LeaseTarget{}, core.Exit(2, "%s lease %s is claimed by %s, not this repository", providerName, claim.LeaseID, core.Blank(claim.RepoRoot, "another repository"))
 	}
 	client, err := b.leaseClient(claim)
