@@ -6,6 +6,10 @@
 
 - Actions: register leases in an existing organization runner group, persist exact runner ownership before starting the listener, and deregister the recorded runner with `actions unregister` without requiring the VM to remain reachable.
 
+### Fixed
+
+- Coordinator readiness: report missing coordinator configuration with actionable failed JSON instead of panicking in SSH-host doctor or host inventory commands. [PR 2998](https://github.com/openclaw/crabbox/pull/2998). Thanks @goutamadwant.
+
 ## 0.81.1 - 2026-11-04
 
 ### Fixed

@@ -26,9 +26,16 @@ func (c *serveKongCmd) Run(ctx context.Context, app App) error {
 }
 
 // NewCoordinatorClient shares normal login, transport and redirect protections with agents.
+// Agents require a coordinator; only internal routing uses an optional client.
 func NewCoordinatorClient(cfg Config) (*CoordinatorClient, error) {
 	c, _, err := newCoordinatorClient(cfg)
-	return c, err
+	if err != nil {
+		return nil, err
+	}
+	if c == nil {
+		return nil, Exit(2, "coordinator is not configured; configure broker.url and log in with crabbox login --url <coordinator-url>")
+	}
+	return c, nil
 }
 func (c *CoordinatorClient) AgentRequest(ctx context.Context, method, path string, body, out any) error {
 	return c.do(ctx, method, path, body, out)
