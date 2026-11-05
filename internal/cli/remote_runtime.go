@@ -189,6 +189,25 @@ func preparePOSIXRuntime(ctx context.Context, target SSHTarget, artifacts runtim
 		return nil, errors.New("runtime source does not fulfill the requested capability identity")
 	}
 	runtime.identity = identity
+	nonce, err := randomHex(16)
+	if err != nil {
+		return nil, err
+	}
+	runtime.nonce, runtime.path = nonce, "/tmp/crabbox-runtime-"+nonce+"/crabbox"
+	cache := target.TargetOS == targetLinux && required.Capability == runtimeartifact.Supervisor
+	if cache {
+		remote = runtime // A failed probe may still have created a private pin.
+		hello := newSynchronizedBuffer(4097)
+		if err := runtime.runPOSIX(probeCtx, nativeRuntimeCacheProbeScript(runtime), &hello); err != nil {
+			return nil, fmt.Errorf("probe native runtime cache: %w", err)
+		}
+		if hello.String() != "CBX-CACHE-MISS\n" {
+			if err := validateNativeRuntimeIdentity(hello.Bytes(), arch); err != nil {
+				return nil, err
+			}
+			return runtime, nil
+		}
+	}
 	var payload io.ReadSeeker = artifact
 	transportSize, compressed := identity.Size, false
 	if capabilities[1] == "gzip" {
@@ -203,11 +222,6 @@ func preparePOSIXRuntime(ctx context.Context, target SSHTarget, artifacts runtim
 			payload, transportSize, compressed = packed, packed.Size(), true
 		}
 	}
-	nonce, err := randomHex(16)
-	if err != nil {
-		return nil, err
-	}
-	runtime.nonce, runtime.path = nonce, "/tmp/crabbox-runtime-"+nonce+"/crabbox"
 	// Artifact installation has its own size-dependent allowance. It does not
 	// consume the worker's execution clock or its separate cleanup reserve.
 	transferBudget := wslStageBudget(wslStageTimeout, wslStageIdleTimeout, transportSize)
@@ -241,7 +255,13 @@ func preparePOSIXRuntime(ctx context.Context, target SSHTarget, artifacts runtim
 		return runtime, nil
 	}
 	hello := newSynchronizedBuffer(4097)
-	if err := runtime.runMetadata(installCtx, []string{"identity"}, &hello); err != nil {
+	if cache {
+		handshake := runtime.command("identity") + " && " + remotePOSIXControlCommand(nativeRuntimeCachePublishScript(runtime))
+		err = runtime.runPOSIX(installCtx, handshake, &hello)
+	} else {
+		err = runtime.runMetadata(installCtx, []string{"identity"}, &hello)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("native runtime handshake: %w", err)
 	}
 	if err := validateNativeRuntimeIdentity(hello.Bytes(), arch); err != nil {
