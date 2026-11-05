@@ -15,13 +15,32 @@ group_exists() {
     # Only ESRCH proves absence. Permission failure must retain evidence too.
     [[ "$diagnostic" != *": (-$group) - No such process" ]]
 }
+group_has_workload() {
+    local processes pid pgid state extra guard_seen=0
+    # The guard ignores TERM and reserves the group identity. Ignore it and
+    # exited zombies, but retain the grace if the snapshot is unavailable.
+    processes=$(LC_ALL=C ps -e -o pid= -o pgid= -o stat= 2>/dev/null) || return 0
+    while read -r pid pgid state extra; do
+        case $pid:$pgid in *[!0-9:]*|:*|*:) return 0;; esac
+        [ -n "$state" ] && [ -z "$extra" ] || return 0
+        [ "$pgid" = "$group" ] || continue
+        if [ "$pid" = "$guard" ]; then guard_seen=1; continue; fi
+        case $state in Z*|X*) ;; *) return 0;; esac
+    done <<EOF
+$processes
+EOF
+    [ "$guard_seen" = 0 ]
+}
 cleanup_group() {
     # Keep the witness alive through TERM. Revalidate both its immutable
     # process identity and the published record before the final KILL.
     valid_guard || return 1
     kill -TERM -- "-$group" 2>/dev/null || return 1
     local ticks=$(((grace_ms + 99) / 100))
-    while [ "$ticks" -gt 0 ]; do sleep .1; ticks=$((ticks - 1)); done
+    while [ "$ticks" -gt 0 ] && group_exists && group_has_workload; do
+        sleep .1
+        ticks=$((ticks - 1))
+    done
     valid_guard || return 1
     kill -KILL -- "-$group" 2>/dev/null || return 1
     wait "$leader" 2>/dev/null || :

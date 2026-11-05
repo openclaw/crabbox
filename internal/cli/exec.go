@@ -60,7 +60,7 @@ func (a App) execCommand(ctx context.Context, args []string) error {
 	if !capabilities.Execution {
 		return Exit(2, "provider=%s target=%s does not support claim-fenced SSH execution", capabilities.Provider, capabilities.Target)
 	}
-	boundary, err := findRepositoryBoundary()
+	repo, err := findExecRepo(cfg)
 	if err != nil {
 		return err
 	}
@@ -89,7 +89,7 @@ func (a App) execCommand(ctx context.Context, args []string) error {
 			(options.ProviderScope != "" && claim.ProviderScope != options.ProviderScope) {
 			return Exit(2, "lease %s does not match the requested provider scope", *id)
 		}
-		if err := CheckLeaseClaimRepositoryOwner(*id, claim, boundary.root, false); err != nil {
+		if err := CheckLeaseClaimRepositoryOwner(*id, claim, repo.Root, false, repo.LegacyRoot); err != nil {
 			return err
 		}
 		if err := AuthorizeCheckpointRelease(claim, ""); err != nil {
@@ -98,7 +98,7 @@ func (a App) execCommand(ctx context.Context, args []string) error {
 		// This resolver contract cannot publish or reenter claim operations. The
 		// shared fence lets independent commands run but excludes claim writers.
 		lease, err := resolver.ResolveExecLeaseUnderClaim(ctx, ResolveRequest{
-			ID: *id, Repo: Repo{Root: boundary.root}, Options: options, Prepare: true,
+			ID: *id, Repo: repo, Options: options, Prepare: true,
 		}, claim)
 		if err != nil {
 			return err

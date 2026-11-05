@@ -6,6 +6,7 @@ import { awsUserData, windowsBootstrapPowerShell } from "../src/bootstrap";
 import {
   psQuote,
   sharedLinuxSSHRestart,
+  sharedLinuxBootstrapStart,
   googleLinuxSigningKeyFingerprint,
   defaultTailscaleVersion,
   defaultTailscaleAMD64SHA256,
@@ -110,6 +111,11 @@ describe("shared bootstrap composition fixtures", () => {
         );
       } else {
         fragments.push(
+          sharedLinuxBootstrapStart()
+            .trimEnd()
+            .split("\n")
+            .map((line) => `    ${line}`)
+            .join("\n"),
           sharedLinuxSSHRestart()
             .trimEnd()
             .split("\n")

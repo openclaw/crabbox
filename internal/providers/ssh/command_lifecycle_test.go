@@ -111,6 +111,22 @@ type staticCommandFixture struct {
 
 const staticCommandKey = "synthetic configured key fixture, not a credential\n"
 
+func TestStaticSSHAcquisitionLeavesAptPolicyUntouched(t *testing.T) {
+	f := newStaticCommandFixture(t, core.TargetLinux)
+	f.acquire(t)
+	commands := f.commands(t)
+	if len(commands) == 0 {
+		t.Fatal("expected SSH readiness probes")
+	}
+	for _, record := range commands {
+		for _, forbidden := range []string{"apt-daily", "systemctl mask", "cloud-init-per", "crabbox-bootstrap.service"} {
+			if strings.Contains(record.Command, forbidden) {
+				t.Fatalf("static acquisition ran managed bootstrap: %s", record.Command)
+			}
+		}
+	}
+}
+
 func newStaticCommandFixture(t *testing.T, targetOS string) staticCommandFixture {
 	t.Helper()
 	if runtime.GOOS == "windows" {

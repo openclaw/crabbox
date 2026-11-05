@@ -46,6 +46,37 @@ function expectRuntimeBeforeCore(script: string) {
   expect(script.split("\nEnsure-CrabboxWindowsRuntime\n")).toHaveLength(2);
 }
 
+describe("scheduled APT policy", () => {
+  it.each([false, true])("quiesces in bootcmd before readiness, private AWS=%s", (awsPrivate) => {
+    const script = cloudInit({ ...config, awsPrivate });
+    const block = script.split("\nbootcmd:\n  - |\n")[1]?.split(/\n(?=\S)/)[0];
+    const boot =
+      block
+        ?.split("\n")
+        .map((line) => line.slice(4))
+        .join("\n") + "\n";
+    expect(block).toBeDefined();
+    expect(boot).toBeDefined();
+    for (const command of [
+      "systemctl disable --now --no-block apt-daily.timer apt-daily-upgrade.timer",
+      "systemctl mask apt-daily.service apt-daily-upgrade.service",
+    ]) {
+      expect(boot).toContain(command);
+      const start = awsPrivate ? boot!.length : boot!.indexOf("cloud-init-per instance");
+      expect(boot!.indexOf(command)).toBeLessThan(start);
+    }
+    for (const shell of ["bash", "sh"]) {
+      const result = spawnSync(shell, ["-n"], { input: boot, encoding: "utf8" });
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
+    }
+    const wait = script.indexOf("systemctl show --property=ActiveState");
+    expect(wait).toBeGreaterThan(script.indexOf("\nwrite_files:\n"));
+    expect(wait).toBeLessThan(script.indexOf("retry apt-get"));
+    expect(script).not.toMatch(/systemctl mask[^\n]*unattended-upgrades/);
+  });
+});
+
 describe("native Windows runtime readiness", () => {
   for (const architecture of ["amd64", "arm64"] as const) {
     for (const desktop of [false, true]) {

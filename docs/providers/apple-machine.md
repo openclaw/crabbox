@@ -64,6 +64,22 @@ the native machine's defaults.
 
 - `warmup` maps to `container machine create`.
 - `run` maps to `container machine run` and preserves the host repository path.
+- Command arguments, including whitespace, shell metacharacters, and literal
+  preset values, retain their meaning through Apple's guest-shell transport.
+  Use `--shell` for shell source; the workload's exit status is propagated.
+  Custom images must provide a POSIX-compatible user shell.
+- Native machine-creation output goes to stderr. One-shot `run` stdout contains
+  only workload bytes, and `warmup` stdout contains only Crabbox's lease summary
+  and completion output.
+- Failed workloads stream stdout and stderr once, then report
+  `apple-machine command exited <code>`. Local history records that exit-status
+  diagnostic. Native or transport failures instead report a native diagnostic;
+  diagnostic capture retains at most 16 KiB per stream without limiting workload
+  output or canceling a noisy command.
+- If native creation fails, both `run` and `warmup` warn that creation may be
+  incomplete and print an inspection command naming the actual machine. An
+  unbound machine is not adopted or deleted automatically; inspect it before
+  any manual cleanup.
 - `run --lease-output <path>` writes the Apple Machine lease ID, slug,
   reuse/retention state, and exact cleanup command for orchestration handoff.
 - Automatic deletion failure after a successful command fails the run with exit
@@ -96,9 +112,13 @@ the native machine's defaults.
   lease to obtain an ownership binding. Do not copy or regenerate ownership
   markers for replacement machines.
 - The storage root comes from `container system status --format json`, not the
-  calling shell's `CONTAINER_APP_ROOT`. Missing daemon storage evidence or an
-  unexpected bundle layout fails closed. Apple currently stores machine bundles
-  under `appRoot/plugin-state/machine-apiserver/machines`.
+  calling shell's `CONTAINER_APP_ROOT`. Crabbox reads `paths.appRoot` on current
+  versions and the top-level `appRoot` emitted by Apple Container 1.0. When
+  a `paths` object is present, its root takes precedence. The daemon must be running and
+  report an absolute root that resolves to an existing directory. Missing or
+  invalid daemon storage evidence or an unexpected bundle layout fails closed.
+  Apple currently stores machine bundles under
+  `appRoot/plugin-state/machine-apiserver/machines`.
 - Apple's native removal API does not offer an atomic expected-identity check.
   Crabbox fences its own claim changes and rejects observed replacements, but
   external tools must not replace machines concurrently with lifecycle commands.

@@ -110,7 +110,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	if effectiveGitSeedSource(cfg) == "local" {
 		return Exit(2, "Actions hydration owns Git metadata; set sync.gitSeedSource=origin for Actions hydration")
 	}
-	repo, err := findRepo()
+	repo, err := findCommandRepo(&cfg)
 	if err != nil {
 		return err
 	}
@@ -280,7 +280,7 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 	}
 	state, err := runGitHubRunnerHydration(ctx, cfg.Actions.Workflow, ref, cfg.Actions.Job, fields, a.Stderr, githubRunnerHydrationHooks{
 		Register: func(stageCtx context.Context) error {
-			updated, err := a.registerActionsRunner(stageCtx, cfg, target, leaseID, slug, "repos/"+ghRepo.Slug(), "", "", nil, claim, true)
+			updated, err := a.registerActionsRunner(stageCtx, cfg, target, leaseID, slug, "repos/"+ghRepo.Slug(), "", "", nil, claim, true, "")
 			if err != nil {
 				return err
 			}
@@ -355,6 +355,7 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	nameFlag := fs.String("name", "", "runner name")
 	labelsFlag := fs.String("labels", "", "comma-separated extra runner labels")
 	versionFlag := fs.String("version", "", "actions/runner version or latest")
+	receiptPath := fs.String("receipt", "", "write a portable cleanup receipt before starting the runner")
 	ephemeralFlag := fs.Bool("ephemeral", true, "register runner as ephemeral")
 	waitTimeout := fs.Duration("wait-timeout", defaultActionsWaitTimeout, "total time allowed for runner registration")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
@@ -374,7 +375,7 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
-	repo, err := findRepo()
+	repo, err := findCommandRepo(&cfg)
 	if err != nil {
 		return err
 	}
@@ -408,7 +409,7 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
 	registerCtx, cancelRegister := context.WithTimeout(ctx, *waitTimeout)
 	defer cancelRegister()
-	_, err = a.registerActionsRunner(registerCtx, cfg, target, leaseID, slug, scope, *groupFlag, *nameFlag, extraLabels, expected, false)
+	_, err = a.registerActionsRunner(registerCtx, cfg, target, leaseID, slug, scope, *groupFlag, *nameFlag, extraLabels, expected, false, *receiptPath)
 	return err
 }
 
@@ -423,7 +424,7 @@ func (a App) actionsDispatch(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	repo, err := findRepo()
+	repo, err := findCommandRepo(&cfg)
 	if err != nil {
 		return err
 	}
@@ -448,7 +449,7 @@ func (a App) registerGitHubActionsRunner(ctx context.Context, cfg Config, server
 	if !set || !exists {
 		return Exit(2, "Actions runner target has no claimed resource snapshot")
 	}
-	updated, err := a.registerActionsRunner(ctx, cfg, target, leaseID, slug, "repos/"+ghRepo.Slug(), "", nameOverride, extraLabels, expected, false)
+	updated, err := a.registerActionsRunner(ctx, cfg, target, leaseID, slug, "repos/"+ghRepo.Slug(), "", nameOverride, extraLabels, expected, false, "")
 	if updated.LeaseID != "" {
 		SetServerLeaseClaimSnapshot(server, updated, true)
 	}

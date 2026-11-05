@@ -311,8 +311,11 @@ func actionsOperationFailure(ctx context.Context, err error) error {
 	switch {
 	case cause == nil:
 		return err
-	case err == nil || err == context.Canceled || err == context.DeadlineExceeded || errors.Is(err, cause):
+	case err == nil || err == context.Canceled || err == context.DeadlineExceeded:
 		return cause
+	case errors.Is(err, cause):
+		// Already reported with the cause; keep its cleanup detail.
+		return err
 	default:
 		return errors.Join(cause, err)
 	}

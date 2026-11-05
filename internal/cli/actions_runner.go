@@ -78,7 +78,7 @@ func actionsRunnerLeaseFingerprint(claim leaseClaim) string {
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
-func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTarget, leaseID, slug, scope, group, name string, extraLabels []string, expected leaseClaim, strictSnapshot bool) (leaseClaim, error) {
+func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTarget, leaseID, slug, scope, group, name string, extraLabels []string, expected leaseClaim, strictSnapshot bool, receiptPath string) (leaseClaim, error) {
 	if !supportsGitHubActionsRunnerTarget(target) {
 		return leaseClaim{}, Exit(2, "actions runner registration currently supports Linux and Windows targets only")
 	}
@@ -149,6 +149,9 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 						return err
 					}
 					updated = cloneLeaseClaim(*claim)
+					if err := writeActionsRunnerReceipt(receiptPath, leaseID, *binding); err != nil {
+						return err
+					}
 					if !*guest.Active {
 						fmt.Fprintln(a.Stderr, "actions runner setup stage=service-start")
 						_, err := actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
@@ -221,63 +224,80 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 		}
 		// A lost SSH acknowledgement is not permission to register again. Recover
 		// the official local identity and verify its exact API object first. This
-		// runs even when the operation was canceled mid-install (for example by the
-		// hydration heartbeat after a reassignment): configuration may already have
-		// created the GitHub runner, and only its guest identity can remove it.
+		// runs even after cancellation (for example by the hydration heartbeat after
+		// a reassignment): configuration may already have created the GitHub runner,
+		// and cleanup needs its exact identity. It never starts the listener.
 		reconcileCtx, cancelReconcile := context.WithTimeout(context.WithoutCancel(ctx), actionsRunnerReconcileTimeout)
 		defer cancelReconcile()
+		var canceled error
+		if ctx.Err() != nil {
+			canceled = context.Cause(ctx)
+		}
 		// A Windows guest that has just installed Git and configured the runner
 		// can miss one control call's deadline; keep asking within a budget that
-		// still leaves time for the GitHub check below.
+		// still leaves time for the GitHub check and the claim update below.
 		readCtx, cancelRead := context.WithTimeout(reconcileCtx, actionsRunnerReconcileReadBudget)
 		guest, err := readActionsRunnerGuestUntil(readCtx, actionsRunnerReconcileRetryDelay, func(queryCtx context.Context) (string, error) {
 			return actionsRunnerControl(queryCtx, target, remoteReadActionsRunnerGuest(target, checkVersion))
 		})
 		cancelRead()
+		if ctx.Err() != nil {
+			canceled = context.Cause(ctx)
+		}
 		if err != nil {
-			return errors.Join(installErr, Exit(ExitCodeForError(err, 7), "read runner identity after setup; listener was not started; a runner named %s may remain registered at %s: %v", name, actionsRunnerURL(scope), err))
+			return errors.Join(installErr, canceled, Exit(ExitCodeForError(err, 7), "read runner identity after setup; listener was not started; a runner named %s may remain registered at %s: %v", name, actionsRunnerURL(scope), err))
 		}
 		if guest.Settings == nil || *guest.Active || guest.Settings.URL != actionsRunnerURL(scope) || guest.Settings.Name != name || guest.Settings.Ephemeral != cfg.Actions.Ephemeral || group != "" && guest.Settings.Group != group {
-			return errors.Join(installErr, Exit(7, "runner configuration identity is unconfirmed; listener was not started; reconcile this lease before retrying"))
+			return errors.Join(installErr, canceled, Exit(7, "runner configuration identity is unconfirmed; listener was not started; reconcile this lease before retrying"))
 		}
 		if checkVersion && guest.Version != cfg.Actions.RunnerVersion {
-			return errors.Join(installErr, Exit(7, "configured runner version is unconfirmed; listener was not started"))
+			return errors.Join(installErr, canceled, Exit(7, "configured runner version is unconfirmed; listener was not started"))
 		}
 		binding := &ActionsRunnerBinding{Scope: scope, RunnerID: guest.Settings.ID, Name: name, Group: guest.Settings.Group, Ephemeral: cfg.Actions.Ephemeral, LeaseFingerprint: fingerprint}
 		present, err := githubActionsRunnerPresent(reconcileCtx, *binding, leaseID, labels, target.ChildEnvDenylist)
+		if ctx.Err() != nil {
+			canceled = context.Cause(ctx)
+		}
 		if err != nil {
-			return errors.Join(installErr, err)
+			return errors.Join(installErr, canceled, err)
 		}
 		if !present {
-			return errors.Join(installErr, Exit(7, "configured runner %d is absent from GitHub; listener was not started", binding.RunnerID))
+			return errors.Join(installErr, canceled, Exit(7, "configured runner %d is absent from GitHub; listener was not started", binding.RunnerID))
 		}
-		// Recheck the reservation before the receipt. A canceled operation or
-		// anything beyond a lease renewal while setup ran unlocked means this
-		// lease no longer authorizes the runner, so delete the exact configured ID
-		// instead of activating it.
+		// Recheck the reservation before recording the runner. If the lease still
+		// authorizes it, record the receipt so cleanup keeps custody, even when the
+		// operation was canceled; start the listener only when it was not. Anything
+		// beyond a lease renewal while setup ran unlocked means this lease no longer
+		// owns the runner, so delete the exact configured ID instead.
 		persisted := false
-		err = context.Cause(ctx)
-		if ctx.Err() == nil {
-			err = WithDurableLeaseClaimLockContext(ctx, leaseID, func(claim *leaseClaim, exists bool, persist func() error) error {
-				if !actionsRunnerReservationHolds(*reserved, *claim, exists, strictSnapshot) {
-					return Exit(2, "Actions runner lease claim changed during runner setup")
-				}
-				claim.ActionsRunner = binding
-				if err := persist(); err != nil {
-					return err
-				}
-				persisted = true
-				updated = cloneLeaseClaim(*claim)
-				fmt.Fprintln(a.Stderr, "actions runner setup stage=service-start")
-				_, err := actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
+		err = WithDurableLeaseClaimLockContext(reconcileCtx, leaseID, func(claim *leaseClaim, exists bool, persist func() error) error {
+			if !actionsRunnerReservationHolds(*reserved, *claim, exists, strictSnapshot) {
+				return Exit(2, "Actions runner lease claim changed during runner setup")
+			}
+			claim.ActionsRunner = binding
+			if err := persist(); err != nil {
 				return err
-			})
+			}
+			persisted = true
+			updated = cloneLeaseClaim(*claim)
+			if err := writeActionsRunnerReceipt(receiptPath, leaseID, *binding); err != nil {
+				return err
+			}
+			if ctx.Err() != nil {
+				return errors.Join(installErr, context.Cause(ctx))
+			}
+			fmt.Fprintln(a.Stderr, "actions runner setup stage=service-start")
+			_, err := actionsRunnerControl(ctx, target, githubActionsRunnerStartScript(target))
+			return err
+		})
+		if ctx.Err() != nil {
+			canceled = context.Cause(ctx)
 		}
 		if err != nil && !persisted {
 			rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
 			rollbackErr := deleteGitHubActionsRunner(rollbackCtx, *binding, leaseID, target.ChildEnvDenylist)
-			return errors.Join(Exit(ExitCodeForError(err, 7), "persist runner %s/%d; listener was not started: %v", binding.Scope, binding.RunnerID, err), rollbackErr)
+			return errors.Join(canceled, Exit(ExitCodeForError(err, 7), "persist runner %s/%d; listener was not started: %v", binding.Scope, binding.RunnerID, err), rollbackErr)
 		}
 		return err
 	})
@@ -403,11 +423,29 @@ func deleteGitHubActionsRunner(ctx context.Context, binding ActionsRunnerBinding
 func (a App) actionsUnregister(ctx context.Context, args []string) error {
 	fs := newFlagSet("actions unregister", a.Stderr)
 	id := fs.String("id", "", "lease id or slug with a recorded runner registration")
+	receiptPath := fs.String("receipt", "", "portable cleanup receipt written by actions register")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	if *id == "" {
-		return Exit(2, "actions unregister requires --id")
+	if (*id == "") == (*receiptPath == "") {
+		return Exit(2, "actions unregister requires either --id or --receipt")
+	}
+	if *receiptPath != "" {
+		receipt, err := readActionsRunnerReceipt(*receiptPath)
+		if err != nil {
+			return err
+		}
+		return WithDurableLeaseClaimLockContext(ctx, receipt.LeaseID, func(claim *leaseClaim, exists bool, _ func() error) error {
+			if exists && (claim.ActionsRunner == nil || receipt.Scope != claim.ActionsRunner.Scope || receipt.RunnerID != claim.ActionsRunner.RunnerID || receipt.Name != claim.ActionsRunner.Name) {
+				return Exit(2, "portable runner receipt conflicts with local cleanup ownership")
+			}
+			binding := ActionsRunnerBinding{Scope: receipt.Scope, RunnerID: receipt.RunnerID, Name: receipt.Name}
+			if err := deleteGitHubActionsRunner(ctx, binding, receipt.LeaseID, nil); err != nil {
+				return err
+			}
+			fmt.Fprintf(a.Stdout, "actions runner unregistered scope=%s id=%d\n", binding.Scope, binding.RunnerID)
+			return nil
+		})
 	}
 	claim, exists, err := ResolveLeaseClaimContext(ctx, *id)
 	if err != nil {

@@ -171,7 +171,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			if err != nil {
 				return handle(unlock), err
 			}
-			_, _, slug, err = finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.BaseURL())
+			_, _, slug, err = finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.BaseURL(), req.Repo.LegacyRoot)
 			return handle(unlock), err
 		},
 		AdmitReuse: activate,
@@ -487,8 +487,9 @@ func resolveSuperserveLeaseClaim(identifier, baseURL string) (core.LeaseClaim, b
 	})
 }
 
-func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL string) (string, string, string, error) {
+func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL string, legacyRoot ...string) (string, string, string, error) {
 	return shared.FinishScopedLease(claim, shared.ScopedLeaseFinishOptions{
+		LegacyRoots:   legacyRoot,
 		Provider:      providerName,
 		LeasePrefix:   leasePrefix,
 		RepoRoot:      repoRoot,

@@ -148,6 +148,18 @@ func CloudInitUserData(cfg Config, publicKey string) string {
 	return cloudInit(cfg, publicKey)
 }
 
+// LinuxAptQuiesce is an early boot guard for provisioned Linux guests only.
+// Provider-owned cloud-init renderers must not apply it to operator-owned hosts.
+func LinuxAptQuiesce() string {
+	return sharedLinuxAptQuiesce()
+}
+
+// LinuxAptWait lets active scheduled updates finish before explicit installs.
+// Call after bootcmd, where waiting on systemd boot ordering is safe.
+func LinuxAptWait() string {
+	return sharedLinuxAptWait()
+}
+
 func yamlInlineString(value string) string {
 	return strconv.Quote(value)
 }

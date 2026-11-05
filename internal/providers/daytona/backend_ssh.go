@@ -152,7 +152,7 @@ func (b *daytonaLeaseBackend) resolve(ctx context.Context, req core.ResolveReque
 		// Status/heartbeat resolves native identity without an execution repo.
 		// Only command/SSH resolution grants use of the repository workspace.
 		if !req.StatusOnly {
-			if err := core.CheckLeaseClaimRepositoryOwner(leaseID, *original, req.Repo.Root, false); err != nil {
+			if err := core.CheckLeaseClaimRepositoryOwner(leaseID, *original, req.Repo.Root, false, req.Repo.LegacyRoot); err != nil {
 				return core.LeaseTarget{}, err
 			}
 		}

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,6 +89,10 @@ if not (r/'api').exists(): print('HTTP 404: Not Found',file=sys.stderr); sys.exi
 if 'DELETE' in args:
  if os.environ.get('FIXTURE_DELETE_DENIED'): print('HTTP 403',file=sys.stderr); sys.exit(1)
  (r/'api').unlink(); sys.exit(0)
+if os.environ.get('FIXTURE_CANCEL_STAGE')=='verify':
+ import http.client
+ conn=http.client.HTTPConnection(os.environ['FIXTURE_CANCEL_ADDRESS'],timeout=5)
+ conn.request('GET','/'); conn.getresponse().read(); conn.close()
 print((r/'api').read_text())
 `)
 			write(filepath.Join(bin, "curl"), "#!/bin/sh\nprintf '{}'\n")
@@ -102,6 +108,8 @@ if args[0]=='show':
 elif args[0] in ('enable','start'):
  guest=json.loads((r/'guest/actions-runner/.runner').read_text()); claim=json.loads(Path(os.environ['FIXTURE_CLAIM']).read_text())
  assert claim['actionsRunner']['runnerID']==guest['agentId'], 'listener started before durable receipt'
+ receipt=json.loads((r/'runner-receipt.json').read_text())
+ assert receipt['runnerID']==guest['agentId'], 'listener started before portable receipt'
  (r/'active').touch()
  with (r/'operations').open('a') as f: f.write('started\n')
 `)
@@ -120,6 +128,10 @@ data=dict(agentId=ident,agentName=value('--name'),gitHubUrl=value('--url'),poolN
 Path('.runner').write_text(json.dumps(data)); Path('.credentials').write_text('{}')
 (r/'api').write_text(json.dumps(dict(id=ident,name=data['agentName'],labels=[dict(name=x,type='custom') for x in value('--labels').split(',')],status='online',busy=False)))
 with (r/'operations').open('a') as f: f.write('configured\n')
+if os.environ.get('FIXTURE_CANCEL_STAGE')=='configure':
+ import http.client
+ conn=http.client.HTTPConnection(os.environ['FIXTURE_CANCEL_ADDRESS'],timeout=5)
+ conn.request('GET','/'); conn.getresponse().read(); conn.close()
 if os.environ.get('FIXTURE_PERSIST_FAIL'):
  claim=Path(os.environ['FIXTURE_CLAIM']); claim.rename(str(claim)+'.saved'); claim.mkdir()
 if os.environ.get('FIXTURE_CONFIG_GATE'):
@@ -129,7 +141,8 @@ if os.environ.get('FIXTURE_CONFIG_GATE'):
 `)
 			var out, stderr bytes.Buffer
 			app := App{Stdout: &out, Stderr: &stderr}
-			args := []string{"actions", "register", "--id", id, "--version", "2.337.0"}
+			receiptPath := filepath.Join(root, "runner-receipt.json")
+			args := []string{"actions", "register", "--id", id, "--version", "2.337.0", "--receipt", receiptPath}
 			if org {
 				args = append(args, "--org", "example-org", "--runner-group", "release controls", "--ephemeral=false")
 			} else {
@@ -371,13 +384,33 @@ if os.environ.get('FIXTURE_CONFIG_GATE'):
 				t.Fatalf("changed resource reused registration: %v", err)
 			}
 			before, _ := os.ReadFile(filepath.Join(root, "operations"))
-			run("actions", "unregister", "--id", id)
+			receipt, err := os.ReadFile(receiptPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]any
+			if err := json.Unmarshal(receipt, &fields); err != nil || len(fields) != 5 || fields["version"] != float64(1) || fields["leaseID"] != id || fields["scope"] != scope || fields["runnerID"] != float64(42) || fields["name"] == "" {
+				t.Fatalf("portable receipt exposed unexpected fields: %s (%v)", receipt, err)
+			}
+			conflictPath := filepath.Join(root, "conflicting-receipt.json")
+			write(conflictPath, strings.Replace(string(receipt), `"runnerID":42`, `"runnerID":99`, 1))
+			if err := app.Run(t.Context(), []string{"actions", "unregister", "--receipt", conflictPath}); err == nil || !strings.Contains(err.Error(), "conflict") {
+				t.Fatalf("conflicting local custody accepted: %v", err)
+			}
+			originalState := os.Getenv("XDG_STATE_HOME")
+			t.Setenv("XDG_STATE_HOME", filepath.Join(root, "fresh-cleanup-state"))
+			run("actions", "unregister", "--receipt", receiptPath)
+			fresh, err := ReadLeaseClaim(id)
+			if err != nil || fresh.LeaseID != "" {
+				t.Fatalf("portable cleanup imported a lease claim: %+v %v", fresh, err)
+			}
 			t.Setenv("FIXTURE_READ_DENIED", "1")
-			if err := app.Run(t.Context(), []string{"actions", "unregister", "--id", id}); err == nil || !strings.Contains(err.Error(), "HTTP 403") {
+			if err := app.Run(t.Context(), []string{"actions", "unregister", "--receipt", receiptPath}); err == nil || !strings.Contains(err.Error(), "HTTP 403") {
 				t.Fatalf("masked scope denial treated as absence: %v", err)
 			}
 			t.Setenv("FIXTURE_READ_DENIED", "")
-			run("actions", "unregister", "--id", id)
+			run("actions", "unregister", "--receipt", receiptPath)
+			t.Setenv("XDG_STATE_HOME", originalState)
 			after, _ := os.ReadFile(filepath.Join(root, "operations"))
 			if strings.Contains(string(after[len(before):]), "ssh\n") || strings.Count(string(after[len(before):]), "DELETE") != 1 {
 				t.Fatalf("cleanup must use one exact API deletion: %s", after[len(before):])
@@ -389,6 +422,54 @@ if os.environ.get('FIXTURE_CONFIG_GATE'):
 			if err := os.Remove(filepath.Join(root, "active")); err != nil {
 				t.Fatal(err)
 			}
+			for _, stage := range []string{"configure", "verify"} {
+				ctx, cancel := context.WithCancel(t.Context())
+				called := make(chan struct{}, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					called <- struct{}{}
+					cancel()
+					w.WriteHeader(http.StatusNoContent)
+				}))
+				t.Setenv("FIXTURE_CANCEL_STAGE", stage)
+				t.Setenv("FIXTURE_CANCEL_ADDRESS", strings.TrimPrefix(server.URL, "http://"))
+				err := app.Run(ctx, args)
+				cancel()
+				server.Close()
+				t.Setenv("FIXTURE_CANCEL_STAGE", "")
+				select {
+				case <-called:
+				default:
+					t.Fatalf("%s fixture did not trigger cancellation: %v", stage, err)
+				}
+				canceled, readErr := ReadLeaseClaim(id)
+				var registration struct {
+					ID int64 `json:"id"`
+				}
+				api, apiErr := os.ReadFile(apiPath)
+				if apiErr != nil || json.Unmarshal(api, &registration) != nil || readErr != nil || canceled.ActionsRunner == nil || canceled.ActionsRunner.RunnerID != registration.ID {
+					t.Fatalf("cancel during %s lost cleanup receipt: claim=%+v read=%v api=%v", stage, canceled.ActionsRunner, readErr, apiErr)
+				}
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancel during %s returned %v", stage, err)
+				}
+				if _, err := os.Stat(filepath.Join(root, "active")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("cancel during %s started listener: %v", stage, err)
+				}
+				before, _ := os.ReadFile(filepath.Join(root, "operations"))
+				run("actions", "unregister", "--id", id)
+				after, _ := os.ReadFile(filepath.Join(root, "operations"))
+				if strings.Contains(string(after[len(before):]), "ssh\n") || strings.Count(string(after[len(before):]), "DELETE") != 1 {
+					t.Fatalf("canceled runner cleanup was not one exact API deletion: %s", after[len(before):])
+				}
+			}
+			unwritable := append(append([]string{}, args...), "--receipt", filepath.Join(root, "missing", "receipt.json"))
+			if err := app.Run(t.Context(), unwritable); err == nil || !strings.Contains(err.Error(), "write cleanup receipt") {
+				t.Fatalf("receipt publication failure: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(root, "active")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("listener started without portable receipt: %v", err)
+			}
+			run("actions", "unregister", "--id", id)
 			t.Setenv("FIXTURE_PERSIST_FAIL", "1")
 			if org {
 				t.Setenv("FIXTURE_DELETE_DENIED", "1")
@@ -400,7 +481,7 @@ if os.environ.get('FIXTURE_CONFIG_GATE'):
 				}
 			})
 			err = app.Run(t.Context(), args)
-			if err == nil || !strings.Contains(err.Error(), "persist runner ") || !strings.Contains(err.Error(), "/43") {
+			if err == nil || !strings.Contains(err.Error(), "persist runner ") || !strings.Contains(err.Error(), "/46") {
 				t.Fatalf("durable failure: %v", err)
 			}
 			if _, err := os.Stat(filepath.Join(root, "active")); !errors.Is(err, os.ErrNotExist) {
@@ -934,7 +1015,7 @@ func TestActionsRunnerRegistrationRefusesLeaseRetiredAfterSnapshot(t *testing.T)
 	var stderr bytes.Buffer
 	app := App{Stdout: io.Discard, Stderr: &stderr}
 	target := SSHTarget{Host: "guest.invalid", User: "runner", Port: "22", TargetOS: targetLinux}
-	_, err = app.registerActionsRunner(t.Context(), Config{}, target, leaseID, "retiring", "repos/example-org/my-app", "", "", nil, captured, true)
+	_, err = app.registerActionsRunner(t.Context(), Config{}, target, leaseID, "retiring", "repos/example-org/my-app", "", "", nil, captured, true, "")
 	if err == nil || !strings.Contains(err.Error(), "lease is cleanup; refusing to activate") {
 		t.Fatalf("registration on a retiring lease: %v\n%s", err, stderr.String())
 	}
@@ -951,6 +1032,11 @@ func TestActionsOperationFailureKeepsRunnerReconciliationDetail(t *testing.T) {
 	}
 	if got := actionsOperationFailure(canceled, context.Canceled); got == nil || got.Error() != cause.Error() {
 		t.Fatalf("bare cancellation: %v", got)
+	}
+	// Registration already joins the cause with what is left to reconcile.
+	reported := errors.Join(cause, left)
+	if got := actionsOperationFailure(canceled, reported); got == nil || !strings.Contains(got.Error(), "/41; listener was not started: HTTP 403") || ExitCodeForError(got, 0) != 4 {
+		t.Fatalf("cause-carrying failure lost its detail: %v", got)
 	}
 	plain := errors.New("dispatch failed")
 	if got := actionsOperationFailure(context.Background(), plain); got != plain {
@@ -987,5 +1073,40 @@ func TestActionsRunnerGuestReconcileReadOutlastsSlowGuest(t *testing.T) {
 		return "", errors.New("exit status 255")
 	}); err == nil || !strings.Contains(err.Error(), "inspect existing runner registration: exit status 255") || ExitCodeForError(err, 0) != 7 {
 		t.Fatalf("unreachable guest: %v", err)
+	}
+}
+
+func TestActionsUnregisterRejectsInvalidReceipt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX command fixture")
+	}
+	root := t.TempDir()
+	isolateRunTestUserDirs(t, root)
+	marker := filepath.Join(root, "called")
+	if err := os.WriteFile(filepath.Join(root, "gh"), []byte("#!/bin/sh\ntouch "+shellQuote(marker)+"\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	valid := `{"version":1,"leaseID":"cbx_1234abcd5678","scope":"orgs/example-org","runnerID":42,"name":"runner"}`
+	for _, invalid := range []string{
+		strings.Replace(valid, `"version":1`, `"version":2`, 1),
+		strings.Replace(valid, "cbx_1234abcd5678", "../escape", 1),
+		strings.Replace(valid, "orgs/example-org", "orgs/../escape", 1),
+		strings.Replace(valid, `"runnerID":42`, `"runnerID":0`, 1),
+		strings.Replace(valid, `"name":"runner"`, `"token":"private"`, 1),
+		valid + valid,
+		valid + strings.Repeat(" ", 8192),
+	} {
+		path := filepath.Join(root, "receipt.json")
+		if err := os.WriteFile(path, []byte(invalid), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := (App{Stdout: &out, Stderr: &out}).Run(t.Context(), []string{"actions", "unregister", "--receipt", path}); err == nil {
+			t.Fatalf("invalid receipt accepted: %q", invalid[:min(len(invalid), 128)])
+		}
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid receipt reached GitHub: %v", err)
 	}
 }

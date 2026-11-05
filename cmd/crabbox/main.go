@@ -17,28 +17,43 @@ import (
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	os.Exit(run())
+}
+
+func run() int {
+	interruptCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
-		<-ctx.Done()
+		<-interruptCtx.Done()
 		stop()
 	}()
+	ctx, cancel := context.WithCancel(interruptCtx)
+	defer cancel()
+	pipes := newBrokenPipeHandler(cancel, os.Stdout, os.Stderr)
+	stdout, stderr := pipes.writer(os.Stdout), pipes.writer(os.Stderr)
 	args := os.Args[1:]
 	var err error
 	if len(args) > 0 && args[0] == "__vercel-sandbox-bridge" {
-		err = vercelsandbox.RunBridgeCLI(ctx, os.Stdin, os.Stdout, os.Stderr)
+		err = vercelsandbox.RunBridgeCLI(ctx, os.Stdin, stdout, stderr)
 	} else {
-		err = cli.Run(ctx, args)
+		err = (cli.App{Stdin: os.Stdin, Stdout: stdout, Stderr: stderr}).Run(ctx, args)
 	}
 	if err != nil {
-		printError(os.Stderr, err)
-		printFixedAllocationResult(os.Stderr, err)
+		printError(stderr, err)
+		printFixedAllocationResult(stderr, err)
+	}
+	pipes.stop()
+	if pipes.broken.Load() {
+		return brokenPipeExitCode
+	}
+	if err != nil {
 		var exit cli.ExitError
 		if cli.AsExitError(err, &exit) {
-			os.Exit(exit.Code)
+			return exit.Code
 		}
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func printFixedAllocationResult(w io.Writer, err error) {

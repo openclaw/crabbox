@@ -633,7 +633,7 @@ func (a App) resolveNetworkLeaseTargetForRepo(ctx context.Context, cfg Config, i
 }
 
 func (a App) resolveNetworkLoginLeaseTargetForRepo(ctx context.Context, cfg *Config, id string, printFallback, reclaim, probeTransport bool) (LeaseTarget, error) {
-	repo, err := findRepo()
+	repo, err := findCommandRepo(cfg)
 	if err != nil {
 		return LeaseTarget{}, err
 	}
@@ -672,7 +672,7 @@ func (a App) resolveNetworkLoginLeaseTargetForRepo(ctx context.Context, cfg *Con
 }
 
 func (a App) resolveNetworkLeaseTargetForRepoWithConfig(ctx context.Context, cfg *Config, id string, printFallback, reclaim bool) (Server, SSHTarget, string, error) {
-	repo, err := findRepo()
+	repo, err := findCommandRepo(cfg)
 	if err != nil {
 		return Server{}, SSHTarget{}, "", err
 	}
@@ -752,11 +752,12 @@ func (a App) claimAndTouchLeaseTarget(ctx context.Context, cfg Config, server *S
 	if cause := context.Cause(ctx); cause != nil {
 		return cause
 	}
-	boundary, err := findRepositoryBoundary()
+	repo, err := findExecRepo(cfg)
 	if err != nil {
 		return err
 	}
-	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(*server), cfg, server, target, boundary.root, reclaim); err != nil {
+	cfg.claimLegacyRoot = repo.LegacyRoot
+	if err := a.claimResolvedLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(*server), cfg, server, target, repo.Root, reclaim); err != nil {
 		return err
 	}
 	*server = a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: *server, SSH: target, LeaseID: leaseID}, "")

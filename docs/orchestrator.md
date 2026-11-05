@@ -141,8 +141,8 @@ terminate only exact resources retained in coordinator lease state.
 
 Direct cleanup only deletes machines that are clearly safe:
 
-- `keep=true` is skipped, even after recorded expiry;
-- `running` and `provisioning` are skipped until past expiry plus 12 hours;
+- `keep=true` does not exempt a machine from expiry;
+- `running` and `provisioning` are skipped until past expiry plus 1 hour;
 - expired `ready`/`leased`/`active` machines are deleted once past expiry;
 - `failed`/`released`/`expired` machines are deleted;
 - a machine with no labels or no `expires_at` is left alone.

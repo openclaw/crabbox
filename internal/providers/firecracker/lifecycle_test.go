@@ -246,8 +246,9 @@ func TestAcquireResolveListAndReleaseLifecycle(t *testing.T) {
 	if got := test.factory.launch[0].CloudInitPath; got == "" {
 		t.Fatalf("cloud-init path missing in machine launch: %#v", test.factory.launch[0])
 	}
-	if got := test.factory.launch[0].KernelArgs; !strings.Contains(got, "root=/dev/vda") || !strings.Contains(got, " rw ") {
-		t.Fatalf("kernel args=%q want writable /dev/vda root", got)
+	const wantKernelArgs = "root=/dev/vda rw console=ttyS0 noapic reboot=k panic=1 pci=off nomodule"
+	if got := test.factory.launch[0].KernelArgs; got != wantKernelArgs {
+		t.Fatalf("kernel args=%q want %q", got, wantKernelArgs)
 	}
 	if info, err := os.Stat(test.factory.launch[0].RootFSPath); err != nil {
 		t.Fatalf("stat rootfs copy: %v", err)

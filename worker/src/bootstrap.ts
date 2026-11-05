@@ -2,6 +2,8 @@ import {
   psQuote,
   sharedLinuxSSHRestart,
   sharedLinuxBootstrapStart,
+  sharedLinuxAptQuiesce,
+  sharedLinuxAptWait,
   sharedLinuxBootstrapActivate,
   sharedLinuxBootstrapPrelude,
   sharedLinuxOptionalPackages,
@@ -186,6 +188,9 @@ function privateAWSCloudInit(config: LeaseConfig): string {
   return `#cloud-config
 package_update: false
 package_upgrade: false
+bootcmd:
+  - |
+${indentRuncmdScript(sharedLinuxAptQuiesce())}
 ssh_pwauth: false
 disable_root: true
 users:
@@ -214,6 +219,7 @@ runcmd:
   - |
     bash -euxo pipefail <<'BOOT'
     export DEBIAN_FRONTEND=noninteractive
+${indentRuncmdScript(sharedLinuxAptWait())}
     if grep -RIl 'http://' /etc/apt 2>/dev/null | grep -q .; then
       grep -RIl 'http://' /etc/apt | xargs -r sed -i 's|http://|https://|g'
     fi

@@ -164,7 +164,8 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 	var publicKey, snapshotID, sourceID, hostLabel, vmBase string
 
 	lease, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
-		Kind: parallelsFixedLeaseKind, LeaseID: leaseID, CheckpointID: req.RequestedCheckpointID,
+		LegacyRepoRoot: req.Repo.LegacyRoot,
+		Kind:           parallelsFixedLeaseKind, LeaseID: leaseID, CheckpointID: req.RequestedCheckpointID,
 		RepoRoot: req.Repo.Root, Reclaim: req.Reclaim, TargetOS: b.Cfg.TargetOS, WindowsMode: b.Cfg.WindowsMode,
 		TTL: b.Cfg.TTL, IdleTimeout: b.Cfg.IdleTimeout,
 	}, core.FixedLeaseOperations[core.ParallelsVM]{
