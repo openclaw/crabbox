@@ -2,10 +2,34 @@
 
 ## Unreleased
 
+## 0.82.0 - 2026-11-05
+
+### Highlights
+
+- **Keep long Linux runs stable through scheduled update windows.** Provisioned Debian/Ubuntu guests no longer self-apply scheduled APT updates that can interrupt SSH during a lease. [PR 3049](https://github.com/openclaw/crabbox/pull/3049). Thanks @excelsier.
+- **Finish SSH commands promptly and clean up early-closing pipes.** Supervised commands stop waiting through an unnecessary five-second TERM grace, and `crabbox run | head` finishes one-shot cleanup before returning exit 141 on Unix. [PR 3041](https://github.com/openclaw/crabbox/pull/3041), [PR 3040](https://github.com/openclaw/crabbox/pull/3040). Thanks @lazmo88 and @coygeek.
+- **Use Apple Machine with current Apple Container releases.** Native storage discovery works with the newer daemon layout, command arguments and exit codes stay intact, and creation diagnostics no longer pollute workload stdout. [PR 3033](https://github.com/openclaw/crabbox/pull/3033), [PR 3039](https://github.com/openclaw/crabbox/pull/3039), [PR 3044](https://github.com/openclaw/crabbox/pull/3044). Thanks @coygeek.
+- **Register organization runners and clean them up from a fresh machine.** Select an existing runner group, retain exact cleanup ownership through cancellation, and carry a portable receipt to unregister the runner elsewhere. [PR 3028](https://github.com/openclaw/crabbox/pull/3028), [PR 3045](https://github.com/openclaw/crabbox/pull/3045), [PR 3046](https://github.com/openclaw/crabbox/pull/3046). Thanks @vincentkoc.
+- **Receive the fixes from the tagged but unpublished 0.81.1.** This release also includes bounded Linux Actions hydration and SSH environment cleanup, plus private Git seeds that avoid unnecessary full-manifest transfers. [PR 3023](https://github.com/openclaw/crabbox/pull/3023), [PR 3021](https://github.com/openclaw/crabbox/pull/3021), [PR 3018](https://github.com/openclaw/crabbox/pull/3018). Thanks @vincentkoc.
+
+### Upgrade notes
+
+- Provisioned Debian/Ubuntu guests no longer run scheduled APT upgrades; refresh images or update packages explicitly. Static SSH hosts retain their own update policy. [PR 3049](https://github.com/openclaw/crabbox/pull/3049). Thanks @excelsier.
+- On Unix, `crabbox run` now exits 141 after cleanup when its output consumer closes early; account for that status in pipelines using `pipefail`. [PR 3040](https://github.com/openclaw/crabbox/pull/3040). Thanks @coygeek.
+- Firecracker guests with module-capable kernels can no longer load kernel modules. Use an image with required drivers built into its kernel. [PR 3032](https://github.com/openclaw/crabbox/pull/3032). Thanks @coygeek.
+
+### Changed
+
+- Docs: align provider catalog and target counts with the compiled CLI, distinguish built-in providers from `external`, and reject stale summaries in docs CI. [PR 3034](https://github.com/openclaw/crabbox/pull/3034). Thanks @coygeek.
+- Docs: warmup and orchestrator retention notes now match direct cleanup, where `keep=true` does not exempt expired machines and the running or provisioning grace is one hour. [PR 2999](https://github.com/openclaw/crabbox/pull/2999). Thanks @KrasimirKralev.
+- Docs: list Git among the native Windows static SSH host requirements, matching what the readiness probe runs. [PR 3024](https://github.com/openclaw/crabbox/pull/3024). Thanks @KrasimirKralev.
+- Docs: refresh installation examples and clarify local-container prerequisites, recovery, desktop bridge defaults, and configuration paths. [PR 2992](https://github.com/openclaw/crabbox/pull/2992). Thanks @zozo123.
+- Tests: cover Hyper-V claim loss between checkpoint restore effects and register the contract in CI. [PR 3026](https://github.com/openclaw/crabbox/pull/3026). Thanks @vincentkoc.
+
 ### Added
 
 - Actions: write a portable runner cleanup receipt during registration and use it to unregister the exact runner from a fresh machine without transferring lease or SSH state. [PR 3046](https://github.com/openclaw/crabbox/pull/3046). Thanks @vincentkoc.
-- Actions: register leases in an existing organization runner group, persist exact runner ownership before starting the listener, and deregister the recorded runner with `actions unregister` without requiring the VM to remain reachable.
+- Actions: register leases in an existing organization runner group, persist exact runner ownership before starting the listener, and deregister the recorded runner with `actions unregister` without requiring the VM to remain reachable. [PR 3028](https://github.com/openclaw/crabbox/pull/3028). Thanks @vincentkoc.
 
 ### Fixed
 
@@ -15,14 +39,12 @@
 - CLI: finish one-shot lease cleanup when stdout or stderr closes early, returning SIGPIPE-style exit 141 on Unix while preserving explicit retention. [PR 3040](https://github.com/openclaw/crabbox/pull/3040). Thanks @coygeek.
 - SSH: return promptly after supervised Linux/WSL2 and POSIX fallback commands exit while preserving TERM grace and forced cleanup for surviving children. [PR 3041](https://github.com/openclaw/crabbox/pull/3041). Thanks @lazmo88.
 - Apple Machine: preserve command arguments and exit codes through the guest shell, keep preset values literal, and send machine-creation output to stderr so workload stdout stays unchanged. [PR 3039](https://github.com/openclaw/crabbox/pull/3039). Thanks @coygeek.
-- Docs: align provider catalog and target counts with the compiled CLI, distinguish built-in providers from `external`, and reject stale summaries in docs CI. [PR 3034](https://github.com/openclaw/crabbox/pull/3034). Thanks @coygeek.
 - Firecracker: use Linux's `nomodule` boot argument so module-capable guests cannot load kernel modules and init no longer receives `nomodules`. [PR 3032](https://github.com/openclaw/crabbox/pull/3032). Thanks @coygeek.
 - Apple Machine: read the daemon's nested storage root so Apple Container 1.6.1 can acquire machines, while retaining supported 1.0 status responses and ownership validation. [PR 3033](https://github.com/openclaw/crabbox/pull/3033). Thanks @coygeek.
 - Coordinator readiness: report missing coordinator configuration with actionable failed JSON instead of panicking in SSH-host doctor or host inventory commands. [PR 2998](https://github.com/openclaw/crabbox/pull/2998). Thanks @goutamadwant.
 - Sync: reuse directory-source leases through equivalent path aliases, preserve literal legacy claim admission, and keep execution ownership checks consistent. [PR 3002](https://github.com/openclaw/crabbox/pull/3002). Thanks @goutamadwant.
-- Docs: warmup and orchestrator retention notes now match direct cleanup, where `keep=true` does not exempt expired machines and the running or provisioning grace is one hour. [PR 2999](https://github.com/openclaw/crabbox/pull/2999). Thanks @KrasimirKralev.
-- Docs: list Git among the native Windows static SSH host requirements, matching what the readiness probe runs. [PR 3024](https://github.com/openclaw/crabbox/pull/3024). Thanks @KrasimirKralev.
-- Docs: refresh installation examples and clarify local-container prerequisites, recovery, desktop bridge defaults, and configuration paths. [PR 2992](https://github.com/openclaw/crabbox/pull/2992). Thanks @zozo123.
+- Actions on Windows: write hydration markers and environment files under ProgramData with native PowerShell paths so registered runners can complete hydration. [PR 3009](https://github.com/openclaw/crabbox/pull/3009). Thanks @paulcam206.
+- Hyper-V: preserve Actions workspace consent when resolving the same VM, while revoking it when ownership or the VM identity changes. [PR 3008](https://github.com/openclaw/crabbox/pull/3008). Thanks @paulcam206.
 
 ## 0.81.1 - 2026-11-04
 
