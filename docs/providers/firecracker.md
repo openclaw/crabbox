@@ -105,6 +105,18 @@ contract:
 - The configured kernel accepts the default Crabbox command line, which mounts
   the first Firecracker drive as a writable `root=/dev/vda` root filesystem.
 
+The fixed guest kernel command line is:
+
+```text
+root=/dev/vda rw console=ttyS0 noapic reboot=k panic=1 pci=off nomodule
+```
+
+`nomodule` disables guest kernel module loading, including on kernels built with
+`CONFIG_MODULES=y`. Build required drivers and filesystem support into the kernel;
+guest images and workloads must not depend on loading modules at boot or later.
+This corrects the previous `nomodules` spelling, which Linux did not recognize
+and passed to init as an argument. Init no longer receives that stray argument.
+
 Current `doctor` checks do **not** validate guest-side tools or boot behavior.
 They validate the host-side contract and configured file paths before lifecycle
 commands attempt to start a microVM.

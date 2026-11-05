@@ -251,7 +251,7 @@ func (b *spritesBackend) validateResolvedClaim(claim core.LeaseClaim, sprite spr
 	if liveLease := spritesLeaseID(sprite); liveLease != "" && liveLease != claim.LeaseID {
 		return core.Exit(4, "sprite %q belongs to a different live lease %q", sprite.Name, liveLease)
 	}
-	if req.Repo.Root != "" && claim.RepoRoot != "" && req.Repo.Root != claim.RepoRoot && !req.Reclaim {
+	if req.Repo.Root != "" && claim.RepoRoot != "" && !core.ClaimRepositoryMatches(claim.RepoRoot, req.Repo.Root, req.Repo.LegacyRoot) && !req.Reclaim {
 		return core.Exit(4, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", claim.LeaseID, claim.RepoRoot, req.Repo.Root)
 	}
 	return nil

@@ -66,7 +66,7 @@ type backend struct{ cfg core.Config }
 
 func (*backend) Spec() core.ProviderSpec { return Provider{}.Spec() }
 func directError() error {
-	return fmt.Errorf("ssh-host requires a coordinator in brokered mode; use ssh for direct access")
+	return fmt.Errorf("ssh-host requires a coordinator in brokered mode; configure broker.url and log in, or use ssh for direct access")
 }
 func (*backend) Acquire(context.Context, core.AcquireRequest) (core.LeaseTarget, error) {
 	return core.LeaseTarget{}, directError()

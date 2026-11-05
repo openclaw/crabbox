@@ -8,8 +8,8 @@ const staticClaimCollisionHint = "hint: to share this static host concurrently, 
 
 // checkStaticLeaseClaimOwner applies the core repository owner policy and adds
 // static-host guidance to a refusal, preserving its exit code and message.
-func checkStaticLeaseClaimOwner(leaseID string, existing core.LeaseClaim, repoRoot string, reclaim bool) error {
-	err := core.CheckLeaseClaimRepositoryOwner(leaseID, existing, repoRoot, reclaim)
+func checkStaticLeaseClaimOwner(leaseID string, existing core.LeaseClaim, repoRoot string, reclaim bool, legacyRoot ...string) error {
+	err := core.CheckLeaseClaimRepositoryOwner(leaseID, existing, repoRoot, reclaim, legacyRoot...)
 	var exitErr core.ExitError
 	if err == nil || !core.AsExitError(err, &exitErr) {
 		return err

@@ -22,11 +22,13 @@ import (
 )
 
 type Repo struct {
-	Root      string
-	Name      string
-	RemoteURL string
-	Head      string
-	BaseRef   string
+	Root string
+	// LegacyRoot is the invocation's pre-canonicalization claim identity, never a stored alias resolved on read.
+	LegacyRoot string `json:"-" yaml:"-"`
+	Name       string
+	RemoteURL  string
+	Head       string
+	BaseRef    string
 }
 
 type repositoryBoundaryKind uint8

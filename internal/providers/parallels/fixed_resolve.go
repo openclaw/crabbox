@@ -51,7 +51,7 @@ func (b *leaseBackend) loadFixedVM(ctx context.Context, claim core.LeaseClaim) (
 }
 
 func (b *leaseBackend) resolveFixed(ctx context.Context, req core.ResolveRequest, claim core.LeaseClaim) (core.LeaseTarget, error) {
-	if req.Repo.Root != "" && claim.RepoRoot != "" && req.Repo.Root != claim.RepoRoot && !req.Reclaim {
+	if req.Repo.Root != "" && claim.RepoRoot != "" && !core.ClaimRepositoryMatches(claim.RepoRoot, req.Repo.Root, req.Repo.LegacyRoot) && !req.Reclaim {
 		return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Parallels lease %s is bound to another repository", claim.LeaseID)
 	}
 	cfg, _, vm, err := b.loadFixedVM(ctx, claim)

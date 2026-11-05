@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -72,6 +73,98 @@ func TestDoctorCloudflareUsesRealProviderReadiness(t *testing.T) {
 		!strings.Contains(text, "auth=ready") ||
 		!strings.Contains(text, "api=readiness") {
 		t.Fatalf("doctor output missing Cloudflare readiness result: %q", text)
+	}
+}
+
+func emptyCoordinatorConfig(t *testing.T) {
+	t.Helper()
+	clearCrabboxDoctorEnv(t)
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "CRABBOX_") {
+			t.Setenv(key, "")
+		}
+	}
+	fixture := t.TempDir()
+	home := filepath.Join(fixture, "home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(fixture, "config.yaml")
+	if err := os.WriteFile(config, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("CRABBOX_CONFIG", config)
+	t.Chdir(fixture)
+}
+
+func TestDoctorWithoutCoordinatorReturnsFailedJSON(t *testing.T) {
+	for _, tc := range []struct {
+		provider string
+		target   string
+	}{
+		{"ssh-host", "windows"},
+		{"ssh-host", "linux"},
+		{"serve", "linux"},
+	} {
+		t.Run(tc.provider+"/"+tc.target, func(t *testing.T) {
+			emptyCoordinatorConfig(t)
+			var stdout, stderr bytes.Buffer
+			err := (cli.App{Stdout: &stdout, Stderr: &stderr}).Run(
+				t.Context(),
+				[]string{"doctor", "--provider", tc.provider, "--target", tc.target, "--json"},
+			)
+			var exitErr cli.ExitError
+			if !cli.AsExitError(err, &exitErr) || exitErr.Code != 1 {
+				t.Fatalf("doctor error=%v, want exit 1; stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+			}
+			var output struct {
+				OK       bool   `json:"ok"`
+				Provider string `json:"provider"`
+				Checks   []struct {
+					Status  string            `json:"status"`
+					Check   string            `json:"check"`
+					Details map[string]string `json:"details"`
+				} `json:"checks"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+				t.Fatalf("doctor JSON invalid: %v\n%s", err, stdout.String())
+			}
+			if output.OK || output.Provider != tc.provider {
+				t.Fatalf("doctor output=%#v", output)
+			}
+			for _, check := range output.Checks {
+				if check.Check == "provider" && check.Status == "failed" &&
+					strings.Contains(check.Details["error"], "coordinator") &&
+					strings.Contains(check.Details["error"], "broker.url") &&
+					strings.Contains(check.Details["error"], "log in") {
+					return
+				}
+			}
+			t.Fatalf("doctor JSON missing coordinator prerequisite failure: %#v", output.Checks)
+		})
+	}
+}
+
+func TestHostWithoutCoordinator(t *testing.T) {
+	for _, action := range []string{"list", "enroll"} {
+		t.Run(action, func(t *testing.T) {
+			emptyCoordinatorConfig(t)
+			stateDir := filepath.Join(t.TempDir(), "host-state")
+			var stdout, stderr bytes.Buffer
+			err := (cli.App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(),
+				[]string{"host", action, "--state-dir", stateDir})
+			var exitErr cli.ExitError
+			if !cli.AsExitError(err, &exitErr) || exitErr.Code != 2 ||
+				!strings.Contains(err.Error(), "coordinator") || !strings.Contains(err.Error(), "broker.url") {
+				t.Fatalf("host %s error=%v, want coordinator configuration error; stdout=%q stderr=%q", action, err, stdout.String(), stderr.String())
+			}
+			if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
+				t.Fatalf("host %s touched agent state before checking coordinator: %v", action, err)
+			}
+		})
 	}
 }
 

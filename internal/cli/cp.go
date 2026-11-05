@@ -134,13 +134,13 @@ All flags:
 		return recoverRemoteArchive(ctx, lease.SSH, destination, choice, a.Stdout, a.Stderr)
 	}
 	if isWindowsNativeTarget(lease.SSH) {
-		boundary, err := findRepositoryBoundary()
+		repo, err := findExecRepo(cfg)
 		if err != nil {
 			return err
 		}
-		return copyWindowsSFTPUnderClaim(ctx, lease, boundary.root, func() error {
+		return copyWindowsSFTPUnderClaim(ctx, lease, repo.Root, func() error {
 			return copyOverResolvedSSH(ctx, lease.SSH, fs.Arg(0), fs.Arg(1), *followLink, a.Stdout, a.Stderr)
-		})
+		}, repo.LegacyRoot)
 	}
 	err = copyOverResolvedSSH(ctx, lease.SSH, fs.Arg(0), fs.Arg(1), *followLink, a.Stdout, a.Stderr)
 	return archiveRecoveryGuidance(err, *id)

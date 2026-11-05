@@ -151,7 +151,7 @@ func claimLeaseForRepo(cfg core.Config, leaseID, slug string, repo core.Repo, re
 		if claim.FixedCreateIntent.State != "acquired" || claim.FixedCreateIntent.Attempt["delete_pending"] != "" {
 			return core.Exit(4, "agent-sandbox fixed lease is not reusable")
 		}
-		if err := authorizeAgentSandboxRepoClaim(claim, repo.Root, reclaim); err != nil {
+		if err := authorizeAgentSandboxRepoClaim(claim, repo.Root, reclaim, repo.LegacyRoot); err != nil {
 			return err
 		}
 		updated := claim
@@ -159,7 +159,7 @@ func claimLeaseForRepo(cfg core.Config, leaseID, slug string, repo core.Repo, re
 		err = core.ReplaceLeaseClaimIfUnchanged(leaseID, claim, updated)
 		return err
 	}
-	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(cfg), cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim)
+	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(cfg), cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim, repo.LegacyRoot)
 }
 
 func writeClaimLease(cfg core.Config, leaseID, slug string, repo core.Repo, reclaim bool, ready sandboxReadiness, claimName, expiresAt, recoveryNonce string) (core.LeaseClaim, error) {
@@ -286,8 +286,8 @@ func authorizeClaimScope(cfg core.Config, claim core.LeaseClaim) error {
 	return nil
 }
 
-func authorizeAgentSandboxRepoClaim(claim core.LeaseClaim, repoRoot string, reclaim bool) error {
-	if repoRoot == "" || claim.RepoRoot == "" || claim.RepoRoot == repoRoot || reclaim {
+func authorizeAgentSandboxRepoClaim(claim core.LeaseClaim, repoRoot string, reclaim bool, legacyRoot ...string) error {
+	if repoRoot == "" || claim.RepoRoot == "" || core.ClaimRepositoryMatches(claim.RepoRoot, repoRoot, legacyRoot...) || reclaim {
 		return nil
 	}
 	return core.Exit(2, "lease %s is claimed by repo %s; use --reclaim to claim it for %s", claim.LeaseID, claim.RepoRoot, repoRoot)

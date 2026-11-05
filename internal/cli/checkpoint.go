@@ -172,7 +172,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 	if err := requireLeaseID(*id, "crabbox checkpoint create --id <lease-id-or-slug> [--name <name>] [--mode auto|native|archive]", cfg); err != nil {
 		return err
 	}
-	repo, err := findRepo()
+	repo, err := findCommandRepo(&cfg)
 	if err != nil {
 		return err
 	}
@@ -1148,7 +1148,7 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 				if err := applyNativeCheckpointForkConfigAndFlags(&cfg, fs, record, providerFlags); err != nil {
 					return err
 				}
-				repo, err := findRepo()
+				repo, err := findCommandRepo(&cfg)
 				if err != nil {
 					return err
 				}
@@ -1207,7 +1207,7 @@ func (a App) checkpointRestore(ctx context.Context, args []string) error {
 	if err := requireLeaseID(*id, "crabbox checkpoint restore <checkpoint-id> --id <lease-id-or-slug>", cfg); err != nil {
 		return err
 	}
-	repo, err := findRepo()
+	repo, err := findCommandRepo(&cfg)
 	if err != nil {
 		return err
 	}
@@ -1373,7 +1373,7 @@ func (a App) checkpointFork(ctx context.Context, args []string) (err error) {
 		}
 		return nil
 	}
-	repo, err := findRepo()
+	repo, err := findCommandRepo(&cfg)
 	if err != nil {
 		return err
 	}
@@ -2043,7 +2043,7 @@ func (a App) checkpointForkParallelsSnapshot(ctx context.Context, fs *flag.FlagS
 		}
 		return nil
 	}
-	repo, err := findRepo()
+	repo, err := findCommandRepo(&cfg)
 	if err != nil {
 		return err
 	}

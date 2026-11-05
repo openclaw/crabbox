@@ -24,11 +24,25 @@ func (b *backend) storageRoot(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read Apple container daemon storage: %w", err)
 	}
-	var health struct{ Status, AppRoot string }
-	if err := json.Unmarshal([]byte(result.Stdout), &health); err != nil || health.Status != "running" || !filepath.IsAbs(health.AppRoot) {
-		return "", fmt.Errorf("Apple container daemon did not report a running service with an absolute appRoot")
+	var health struct {
+		Status  string `json:"status"`
+		AppRoot string `json:"appRoot"`
+		Paths   *struct {
+			AppRoot string `json:"appRoot"`
+		} `json:"paths"`
 	}
-	root, err := filepath.EvalSymlinks(health.AppRoot)
+	if err := json.Unmarshal([]byte(result.Stdout), &health); err != nil {
+		return "", fmt.Errorf("decode Apple container daemon status: %w", err)
+	}
+	// Apple Container 1.0 emits appRoot at the top level; newer versions use paths.
+	appRoot := health.AppRoot
+	if health.Paths != nil {
+		appRoot = health.Paths.AppRoot
+	}
+	if health.Status != "running" || !filepath.IsAbs(appRoot) {
+		return "", fmt.Errorf("Apple container daemon did not report a running service with an absolute paths.appRoot (or legacy appRoot)")
+	}
+	root, err := filepath.EvalSymlinks(appRoot)
 	if err != nil {
 		return "", err
 	}

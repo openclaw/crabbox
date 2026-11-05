@@ -380,7 +380,7 @@ func (b *backend) resolve(ctx context.Context, req core.ResolveRequest, original
 	}
 	var item machine
 	if claimed && (claim.Provider == core.FixedMachine0ClaimProvider || claim.FixedCreateIntent != nil) {
-		if req.Repo.Root != "" && claim.RepoRoot != "" && req.Repo.Root != claim.RepoRoot && !req.Reclaim {
+		if req.Repo.Root != "" && claim.RepoRoot != "" && !core.ClaimRepositoryMatches(claim.RepoRoot, req.Repo.Root, req.Repo.LegacyRoot) && !req.Reclaim {
 			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed Machine0 lease %s is bound to another repository", claim.LeaseID)
 		}
 		item, err = b.resolveFixedMachine0(ctx, claim)

@@ -30,7 +30,7 @@ func (a App) checkpointAbandon(ctx context.Context, args []string) error {
 	if err := applyProviderFlags(&cfg, fs, providerFlags); err != nil {
 		return err
 	}
-	repo, err := findRepo()
+	repo, err := findCommandRepo(&cfg)
 	if err != nil {
 		return err
 	}
@@ -47,7 +47,7 @@ func (a App) checkpointAbandon(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if !isNativeCheckpointKind(record.Kind) || record.coordinatorManaged() || record.nativeDeleteID() != "" || record.Native.ImageID != "" || record.Native.Resource != "" || record.LeaseID != *leaseID || record.Provider != cfg.Provider || record.Repo.Root != repo.Root {
+		if !isNativeCheckpointKind(record.Kind) || record.coordinatorManaged() || record.nativeDeleteID() != "" || record.Native.ImageID != "" || record.Native.Resource != "" || record.LeaseID != *leaseID || record.Provider != cfg.Provider || !ClaimRepositoryMatches(record.Repo.Root, repo.Root, repo.LegacyRoot) {
 			return Exit(2, "checkpoint abandon requires an unresolved ordinary native record for this exact source lease, provider, and repository")
 		}
 		backend, err := loadBackend(cfg, runtimeForApp(operation))
@@ -103,7 +103,7 @@ func (a App) prepareCheckpointAbandonment(ctx context.Context, cfg Config, repo 
 	if err != nil {
 		return err
 	}
-	if !exists || claim.CloudID != expectedID || claim.Revision == "" || claim.RepoRoot != repo.Root || canonicalClaimProvider(claim.Provider) != cfg.Provider || claim.CheckpointCapture != nil {
+	if !exists || claim.CloudID != expectedID || claim.Revision == "" || !ClaimRepositoryMatches(claim.RepoRoot, repo.Root, repo.LegacyRoot) || canonicalClaimProvider(claim.Provider) != cfg.Provider || claim.CheckpointCapture != nil {
 		return Exit(2, "checkpoint abandonment requires the exact current unbound source claim in this repository")
 	}
 	expected := ProviderIdentityExpectation{LeaseID: record.LeaseID, ResourceID: expectedID}
