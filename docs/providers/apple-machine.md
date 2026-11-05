@@ -64,6 +64,13 @@ the native machine's defaults.
 
 - `warmup` maps to `container machine create`.
 - `run` maps to `container machine run` and preserves the host repository path.
+- Command arguments, including whitespace, shell metacharacters, and literal
+  preset values, retain their meaning through Apple's guest-shell transport.
+  Use `--shell` for shell source; the workload's exit status is propagated.
+  Custom images must provide a POSIX-compatible user shell.
+- Native machine-creation output goes to stderr. One-shot `run` stdout contains
+  only workload bytes, and `warmup` stdout contains only Crabbox's lease summary
+  and completion output.
 - `run --lease-output <path>` writes the Apple Machine lease ID, slug,
   reuse/retention state, and exact cleanup command for orchestration handoff.
 - Automatic deletion failure after a successful command fails the run with exit
