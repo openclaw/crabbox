@@ -80,6 +80,14 @@ func main() {
 		t.Fatal(err)
 	}
 	p, b, dir := setupSSHScriptRun(t)
+	// Keep the no-op baseline independent of the runner's forwarded environment.
+	// The final run exercises forwarding explicitly under the same call ceiling.
+	for _, name := range []string{"CI", "NODE_OPTIONS"} {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Setenv(runtimeArtifactsEnv, manifestPath)
 	b.lease.SSH.ReadyCheck = "true"
 	b.lease.SSH.AuthSecret = false
@@ -96,7 +104,7 @@ case "$remote" in *'/usr/local/bin/crabbox-ready'*) exit 0;; esac
 remote=$(printf %s "$remote" | sed "s#/tmp/crabbox-runtime-cache-#$NATIVE_CACHE_ROOT-#g")
 exec /bin/sh -c "$remote"
 `)
-	counts := make([]int, 3)
+	counts := make([]int, 4)
 	for run := range counts {
 		if run == 2 {
 			cached := filepath.Join(dir, fmt.Sprintf("runtime-cache-%d", os.Geteuid()), "artifact")
@@ -110,9 +118,14 @@ exec /bin/sh -c "$remote"
 		if err := os.WriteFile(log, nil, 0600); err != nil {
 			t.Fatal(err)
 		}
+		script := "true\n"
+		if run == 3 {
+			t.Setenv("CI", "true")
+			script = "test \"$CI\" = true\n"
+		}
 		var stdout, stderr bytes.Buffer
 		started := time.Now()
-		err = (App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader("true\n")}).runCommand(t.Context(), []string{
+		err = (App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader(script)}).runCommand(t.Context(), []string{
 			"--provider", p.Spec().Name, "--id", b.lease.LeaseID, "--network", "public", "--tailscale=false", "--keep", "--no-sync", "--script-stdin",
 		})
 		elapsed := time.Since(started)
@@ -126,7 +139,7 @@ exec /bin/sh -c "$remote"
 		count := strings.Count(string(calls), "CALL ")
 		counts[run] = count
 		t.Logf("no-sync run %d: %d SSH calls in %s", run+1, count, elapsed)
-		if uploaded := strings.Contains(string(calls), "upload.part"); uploaded != (run != 1) {
+		if uploaded := strings.Contains(string(calls), "upload.part"); uploaded != (run == 0 || run == 2) {
 			t.Errorf("run %d runtime upload = %v", run+1, uploaded)
 		}
 		nonces := regexp.MustCompile(`CBX-REMOTE-1[^\n]*?([a-f0-9]{32})`).FindAllSubmatch(calls, -1)
