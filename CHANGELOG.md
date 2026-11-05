@@ -9,6 +9,8 @@
 ### Fixed
 
 - Sync: reuse directory-source leases through equivalent path aliases, preserve literal legacy claim admission, and keep execution ownership checks consistent. [PR 3002](https://github.com/openclaw/crabbox/pull/3002). Thanks @goutamadwant.
+- Docs: warmup and orchestrator retention notes now match direct cleanup, where `keep=true` does not exempt expired machines and the running or provisioning grace is one hour. [PR 2999](https://github.com/openclaw/crabbox/pull/2999). Thanks @KrasimirKralev.
+- Docs: list Git among the native Windows static SSH host requirements, matching what the readiness probe runs. [PR 3024](https://github.com/openclaw/crabbox/pull/3024). Thanks @KrasimirKralev.
 
 ## 0.81.1 - 2026-11-04
 
