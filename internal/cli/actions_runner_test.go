@@ -18,6 +18,21 @@ import (
 	"time"
 )
 
+// provideFixtureTimeout puts a stand-in timeout on a POSIX fixture's PATH when
+// the host has no GNU timeout (stock macOS), so fixtures that run the runner
+// installer locally reach its later steps. Guests keep the real deadlines.
+func provideFixtureTimeout(t *testing.T, bin string) {
+	t.Helper()
+	if exec.Command("timeout", "--kill-after=1s", "10s", "true").Run() == nil {
+		return
+	}
+	shim := "#!/bin/sh\n# Fixture stand-in for GNU timeout: drop its options and duration, then run the command.\n" +
+		"while [ \"$#\" -gt 0 ]; do\n  case \"$1\" in\n    --*) shift ;;\n    *) break ;;\n  esac\ndone\nshift\nexec \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "timeout"), []byte(shim), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestActionsRunnerRegistrationLifecycle(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX guest fixture")
@@ -65,6 +80,7 @@ func TestActionsRunnerRegistrationLifecycle(t *testing.T) {
 			}
 			t.Setenv("FIXTURE_SCOPE", scope)
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			provideFixtureTimeout(t, bin)
 			write(filepath.Join(bin, "ssh"), `#!/bin/sh
 for arg do remote="$arg"; done
 printf 'ssh\n' >>"$FIXTURE_ROOT/operations"
