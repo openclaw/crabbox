@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"gopkg.in/yaml.v3"
 )
 
 func TestResolveSourceImageRequiresChecksumForRemoteImages(t *testing.T) {
@@ -942,6 +944,31 @@ func TestSeedUserDataQuotesYAMLAndReadinessPath(t *testing.T) {
 	}
 	if strings.Contains(data, `test -d "/work/$(`) {
 		t.Fatalf("readiness script uses expandable double quotes:\n%s", data)
+	}
+}
+
+func TestSeedUserDataQuiescesScheduledApt(t *testing.T) {
+	var doc struct {
+		Bootcmd []string `yaml:"bootcmd"`
+	}
+	if err := yaml.Unmarshal([]byte(seedUserData("alice", "ssh-ed25519 fixture", "/work")), &doc); err != nil {
+		t.Fatal(err)
+	}
+	boot := strings.Join(doc.Bootcmd, "\n")
+	for _, want := range []string{
+		"systemctl disable --now --no-block apt-daily.timer apt-daily-upgrade.timer",
+		"systemctl mask apt-daily.service apt-daily-upgrade.service",
+	} {
+		if !strings.Contains(boot, want) {
+			t.Fatalf("seed bootcmd missing %q", want)
+		}
+	}
+	for _, shell := range []string{"bash", "sh"} {
+		cmd := exec.Command(shell, "-n")
+		cmd.Stdin = strings.NewReader(boot)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s syntax: %v: %s", shell, err, out)
+		}
 	}
 }
 

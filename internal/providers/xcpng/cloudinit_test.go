@@ -4,12 +4,60 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/fat16"
 )
+
+func TestCloudInitQuiescesScheduledApt(t *testing.T) {
+	cloud, err := newCloudInitPayload(testConfig(), "cbx_lease", "blue", "ssh-ed25519 fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	iso, err := newLinuxAutoinstallPayload(testConfig(), "cbx_lease", "blue", "ssh-ed25519 fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type guest struct {
+		Bootcmd []string `yaml:"bootcmd"`
+	}
+	var cloudDoc guest
+	var isoDoc struct {
+		Autoinstall struct {
+			UserData guest `yaml:"user-data"`
+		} `yaml:"autoinstall"`
+	}
+	if err := yaml.Unmarshal([]byte(cloud.UserData), &cloudDoc); err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal([]byte(iso.UserData), &isoDoc); err != nil {
+		t.Fatal(err)
+	}
+	for name, doc := range map[string]guest{"cloud": cloudDoc, "iso": isoDoc.Autoinstall.UserData} {
+		boot := strings.Join(doc.Bootcmd, "\n")
+		for _, want := range []string{"systemctl disable --now --no-block apt-daily.timer apt-daily-upgrade.timer", "systemctl mask apt-daily.service apt-daily-upgrade.service"} {
+			if !strings.Contains(boot, want) {
+				t.Fatalf("%s bootcmd missing %q", name, want)
+			}
+		}
+		for _, shell := range []string{"bash", "sh"} {
+			if runtime.GOOS == "windows" {
+				continue
+			}
+			cmd := exec.Command(shell, "-n")
+			cmd.Stdin = strings.NewReader(boot)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%s %s syntax: %v: %s", name, shell, err, out)
+			}
+		}
+	}
+}
 
 func TestCloudInitPayloadIncludesSSHUserKeyAndBootstrap(t *testing.T) {
 	cfg := testConfig()

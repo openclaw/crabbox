@@ -1649,7 +1649,7 @@ func proxmoxBootstrapScript(cfg Config) string {
 }
 
 func proxmoxBootstrapScriptWithChecks(cfg Config, setup, checks string) string {
-	return fmt.Sprintf(`set -euo pipefail
+	return "set -euo pipefail\n" + sharedLinuxAptQuiesce() + sharedLinuxAptWait() + fmt.Sprintf(`
 export DEBIAN_FRONTEND=noninteractive
 mkdir -p %[1]s /var/cache/crabbox/pnpm /var/cache/crabbox/npm /var/lib/crabbox
 cat >/etc/apt/apt.conf.d/80-crabbox-retries <<'APT'
