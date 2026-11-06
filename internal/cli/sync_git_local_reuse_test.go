@@ -167,3 +167,42 @@ func TestLocalGitSeedProbeSourceFailsOpen(t *testing.T) {
 		})
 	}
 }
+
+func TestGitLocalReceiverCacheRestoreDoesNotShareMutableMetadata(t *testing.T) {
+	plan, data := reuseFixture(t)
+	first := t.TempDir()
+	requireLocalReceiver(t, remoteGitLocalSeed(first, plan), data)
+	second := t.TempDir()
+	requireLocalReceiver(t, remoteGitLocalSeedProbe(second, plan), nil)
+	entry := filepath.Join(plan.CacheRoot, plan.Digest+".git")
+	for _, name := range []string{"HEAD", "config", "crabbox-local-owner"} {
+		paths := []string{filepath.Join(first, ".git", name), filepath.Join(second, ".git", name), filepath.Join(entry, name)}
+		infos := make([]os.FileInfo, len(paths))
+		for i, path := range paths {
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			infos[i] = info
+		}
+		for i := range infos {
+			for j := i + 1; j < len(infos); j++ {
+				if os.SameFile(infos[i], infos[j]) {
+					t.Errorf("%s is shared between %s and %s", name, paths[i], paths[j])
+				}
+			}
+		}
+	}
+}
+
+func TestGitLocalReceiverProbeClearsHiddenIndexFlags(t *testing.T) {
+	plan, data := reuseFixture(t)
+	workdir := t.TempDir()
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	runGit(t, workdir, "update-index", "--skip-worktree", "accepted.txt")
+	runGit(t, workdir, "update-index", "--assume-unchanged", "excluded.txt")
+	requireLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil)
+	if flags := gitOutput(workdir, "ls-files", "-v"); strings.Contains(flags, "S ") || strings.Contains(flags, "h ") {
+		t.Fatalf("hidden index flags survived reuse:\n%s", flags)
+	}
+}

@@ -200,8 +200,19 @@ cache_entry="$cache_root/$expected_digest.git"
 cache_ready() {
   [ -d "$cache_root" ] && [ ! -L "$cache_root" ] && [ -O "$cache_root" ]
 }
+# Only object storage is hardlinked (immutable); HEAD, config, refs and markers
+# are copied so a workload writing in one workspace cannot alter a sibling or the cache.
 copy_metadata() {
-  cp -al "$1" "$2" 2>/dev/null || { rm -rf -- "$2"; cp -a "$1" "$2"; }
+  mkdir -- "$2" || return 1
+  for entry in "$1"/* "$1"/.[!.]*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name="${entry##*/}"
+    if [ "$name" = objects ] && [ ! -L "$entry" ]; then
+      cp -al "$entry" "$2/objects" 2>/dev/null || { rm -rf -- "$2/objects"; cp -a "$entry" "$2/objects" || return 1; }
+    else
+      cp -a "$entry" "$2/$name" || return 1
+    fi
+  done
 }
 store_cache() (
   umask 077
@@ -303,6 +314,8 @@ store_cache "$metadata" || true
 miss() { exit 1; }
 if [ -e "$metadata" ] || [ -L "$metadata" ]; then
   owned_metadata && verify_metadata || miss
+  # Rebuild the index as an import does: drops assume-unchanged/skip-worktree bits a workload may have set.
+  plain_git --git-dir="$metadata" read-tree "$expected_head" >/dev/null 2>&1 || miss
   # A new sync is starting: drop success markers and stale hydration state, as an import would.
   rm -f -- "$metadata/crabbox-local-complete" "$metadata/crabbox/sync-fingerprint" "$metadata/crabbox/git-hydrate-base" || fail
   store_cache "$metadata" || true
