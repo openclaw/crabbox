@@ -96,8 +96,9 @@ Registers an existing box as a GitHub Actions self-hosted runner. Crabbox
 obtains a registration token through `gh api`, installs the official
 `actions/runner` package, records its exact GitHub identity in the existing lease
 claim, then starts it under systemd on Linux/WSL2 or an owned scheduled task or
-detached PowerShell process on native Windows, and waits until GitHub reports the
-exact runner online. Supports Linux and Windows targets only. Registration
+detached PowerShell process on native Windows. On native Windows it also waits
+until GitHub reports the exact runner online. Supports Linux and Windows targets
+only. Registration
 metadata and the short-lived token travel over SSH stdin rather than the remote
 process command line.
 
