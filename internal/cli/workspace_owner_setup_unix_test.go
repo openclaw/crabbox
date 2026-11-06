@@ -29,6 +29,43 @@ func workspaceOwnerSetupFixture(t *testing.T) (string, *workspaceOwner) {
 	return home, owner
 }
 
+func TestWorkspaceOwnerCommandPreparation(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			home, owner := workspaceOwnerSetupFixture(t)
+			prepared := filepath.Join(home, "prepared")
+			workload := filepath.Join(home, "workload")
+			setup := "mkdir " + shellQuote(prepared)
+			if fail {
+				setup = "exit 19"
+			}
+			remote := "test -d " + shellQuote(prepared) + " && touch " + shellQuote(workload) + "; exit 23"
+			marker := workspaceOwnerSetupPrefix + strings.Repeat("a", 32)
+			script := remoteWorkspaceOwnerPOSIXWitnessScriptWithSetup(owner.key, owner.token, remote, marker, setup)
+			cmd, _ := boundedWorkspaceOwnerCommand(t, home, os.Getenv("PATH"), remoteWorkspaceOwnerPOSIXLauncher(owner.key, owner.token, script, marker))
+			out, err := cmd.CombinedOutput()
+			wantCode := 23
+			if fail {
+				wantCode = 74
+				if !strings.Contains(string(out), marker+" failed workspace") || strings.Contains(string(out), marker+" started") {
+					t.Fatalf("setup failure did not prevent workload handoff: %s", out)
+				}
+			}
+			if exitCode(err) != wantCode {
+				t.Fatalf("exit=%d want=%d output=%s", exitCode(err), wantCode, out)
+			}
+			_, statErr := os.Stat(workload)
+			if fail != os.IsNotExist(statErr) {
+				t.Fatalf("workload executed=%t after setup failure=%t", statErr == nil, fail)
+			}
+			req := workspaceOwnerRemoteRequest{Action: workspaceOwnerInspect, Key: owner.key, Token: owner.token}
+			if out, err := runPOSIXWorkspaceOwnerScript(t, home, remoteWorkspaceOwnerPOSIX(req)); err != nil || out != "OWNED" {
+				t.Fatalf("child not retired after setup/workload: %q %v", out, err)
+			}
+		})
+	}
+}
+
 // Override signal probes only inside the real locked protocol body. All kill
 // operations are denied, including termination; no AppArmor or privileges needed.
 func workspaceOwnerDenySignals(t *testing.T) string {

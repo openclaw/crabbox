@@ -16,6 +16,7 @@ type TimingReport struct {
 	LeaseID            string                   `json:"leaseId,omitempty"`
 	Slug               string                   `json:"slug,omitempty"`
 	RunnerTotalMs      int64                    `json:"runnerTotalMs,omitempty"`
+	TerminalPending    bool                     `json:"terminalPending,omitempty"`
 	RunnerPhases       []RunnerPhase            `json:"runnerPhases,omitempty"`
 	LeaseMs            int64                    `json:"leaseMs,omitempty"`
 	BootstrapMs        int64                    `json:"bootstrapMs,omitempty"`

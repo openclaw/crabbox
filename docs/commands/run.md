@@ -1125,6 +1125,20 @@ limited to `request`, `network_ready`, `bootstrap`, and `unattributed`.
 Malformed vectors are discarded and valid legacy startup scalars remain the
 fallback. Failed runs also
 include `blockedStage`, `resourceExhaustion`, and `retryLikely` when classifiable.
+
+For `run --id <lease> --no-sync`, the final `runnerTotalMs` also includes local
+preparation and terminal history confirmation. Its named phases partition wall
+time, including waits for concurrent telemetry, without double counting.
+`commandMs` measures command execution rather than its preceding preparation.
+Coordinator-backed runs first emit a checked snapshot with
+`terminalPending: true`, then emit the final timing snapshot after terminal
+recording; consumers should use the last JSON record. The checked write retains
+the guarantee that a timing-sink failure before terminal recording affects the
+signed outcome. A failure writing the final snapshot affects the CLI exit, but
+cannot change a terminal record that is already committed. The benchmark timing
+store retains the checked snapshot, marked pending, so a store failure can still
+affect the signed outcome.
+
 Optional `failureEvidence` contains the provider's classification, sanitized
 `hint`, and bounded string-valued `details`. Invalid optional presentation fields
 do not erase valid OOM classification. The same snapshot is copied into local

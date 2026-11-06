@@ -209,6 +209,8 @@ const (
 
 type workspaceOwnerCleanupRunner func(context.Context, SSHTarget, string) error
 
+type workspaceCommandSetupKey struct{}
+
 func prepareWorkspaceOwnerRemote(ctx context.Context, target SSHTarget, remote string, inputSize *int64) (workspaceOwnerRemotePreparation, error) {
 	owner := workspaceOwnerFromContext(ctx)
 	if owner == nil {
@@ -224,8 +226,9 @@ func prepareWorkspaceOwnerRemote(ctx context.Context, target SSHTarget, remote s
 			return workspaceOwnerRemotePreparation{}, fmt.Errorf("create workspace witness diagnostic marker: %w", err)
 		}
 		marker := workspaceOwnerSetupPrefix + nonce
+		setup, _ := ctx.Value(workspaceCommandSetupKey{}).(string)
 		return workspaceOwnerRemotePreparation{
-			command:     owner.wrapPOSIXCommand(remote, inputSize != nil, marker),
+			command:     remoteWorkspaceOwnerPOSIXLauncher(owner.key, owner.token, remoteWorkspaceOwnerPOSIXWitnessScriptWithSetup(owner.key, owner.token, remote, marker, setup, inputSize != nil), marker),
 			setupMarker: marker,
 		}, nil
 	}
@@ -1102,10 +1105,17 @@ func remoteWorkspaceOwnerPOSIXSetupDiagnostic(marker string) string {
 }
 
 func remoteWorkspaceOwnerPOSIXWitnessScript(key, token, remote, setupMarker string, preserveInput ...bool) string {
+	return remoteWorkspaceOwnerPOSIXWitnessScriptWithSetup(key, token, remote, setupMarker, "", preserveInput...)
+}
+
+func remoteWorkspaceOwnerPOSIXWitnessScriptWithSetup(key, token, remote, setupMarker, setup string, preserveInput ...bool) string {
 	diagnostic := remoteWorkspaceOwnerPOSIXSetupDiagnostic(setupMarker)
 	started := ""
 	if setupMarker != "" {
 		started = "printf '%s\\n' " + shellQuote(setupMarker+" started") + " >&2 || setup_failed handoff\n"
+	}
+	if setup != "" {
+		started = "/bin/sh -c " + shellQuote(setup) + " || setup_failed workspace\n" + started
 	}
 	inputSetup := ""
 	inputRedirect := ""

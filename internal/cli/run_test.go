@@ -4655,8 +4655,28 @@ func TestRunCommandReceiptPersistenceFailureFinishesWithRefreshedReceipt(t *test
 	gotFinishRetry := finishRetry
 	gotFinishReceipt := finishReceipt
 	mu.Unlock()
-	if !reflect.DeepEqual(gotEvents, []string{"timing", "finish"}) {
-		t.Fatalf("terminal events=%v, want timing then finish", gotEvents)
+	if !reflect.DeepEqual(gotEvents, []string{"timing", "finish", "timing"}) {
+		t.Fatalf("terminal events=%v, want checked timing, finish, final timing", gotEvents)
+	}
+	var reports []TimingReport
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		var report TimingReport
+		if json.Unmarshal([]byte(line), &report) == nil && report.RunnerTotalMs > 0 {
+			reports = append(reports, report)
+		}
+	}
+	if len(reports) != 2 || !reports[0].TerminalPending || reports[1].TerminalPending || reports[1].RunnerTotalMs < reports[0].RunnerTotalMs {
+		t.Fatalf("missing checked and final timing snapshots: %+v", reports)
+	}
+	var phaseTotal int64
+	for _, phase := range reports[1].RunnerPhases {
+		phaseTotal += phase.Ms
+		if phase.Name == "unattributed" {
+			t.Fatal("final snapshot left terminal work unattributed")
+		}
+	}
+	if phaseTotal != reports[1].RunnerTotalMs {
+		t.Fatalf("phase total=%d runner total=%d", phaseTotal, reports[1].RunnerTotalMs)
 	}
 	if gotFinishCalls != 1 || gotFinishCode != 2 || gotFinishReceipt.ExitCode != 2 {
 		t.Fatalf("finish calls=%d code=%d receipt exit=%d, want one failure finish", gotFinishCalls, gotFinishCode, gotFinishReceipt.ExitCode)
