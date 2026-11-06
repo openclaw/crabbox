@@ -344,7 +344,15 @@ fi
 if [ -e "$metadata" ] || [ -L "$metadata" ]; then
   previous="$stage/previous.git"
   mv -- "$metadata" "$previous" || miss
-  if ! mv -- "$fresh" "$metadata"; then mv -- "$previous" "$metadata" || fail; miss; fi
+  # An interrupt between the moves must retain the previous metadata (cleanup keeps the stage).
+  backup="$previous"
+  if ! mv -- "$fresh" "$metadata"; then
+    mv -- "$previous" "$metadata" || fail
+    backup=
+    miss
+  fi
+  if ! rm -rf -- "$previous"; then stage=; fail; fi
+  backup=
 else
   mv -- "$fresh" "$metadata" || miss
 fi

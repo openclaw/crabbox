@@ -244,3 +244,25 @@ func TestGitLocalReceiverProbeNeverCachesFromAWorkspace(t *testing.T) {
 		t.Fatalf("probe populated the cache from a workspace: %v", err)
 	}
 }
+
+func TestGitLocalReceiverProbeInterruptedSwapRetainsPreviousMetadata(t *testing.T) {
+	plan, data := reuseFixture(t)
+	workdir := t.TempDir()
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	mustWriteTestFile(t, filepath.Join(workdir, ".git/crabbox/sync-manifest"), "prior.txt\x00")
+	shims := t.TempDir()
+	// TERM the receiver exactly when it publishes the fresh copy, after the previous
+	// metadata has been moved aside.
+	mustWriteTestFile(t, filepath.Join(shims, "mv"), "#!/bin/sh\ncase \"$2\" in */git) kill -TERM $PPID; sleep 1; exit 1 ;; esac\nexec /bin/mv \"$@\"\n")
+	if err := os.Chmod(filepath.Join(shims, "mv"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	command := strings.Replace(remoteGitLocalSeedProbe(workdir, plan), "PATH=/usr/bin:/bin", "PATH="+shims+":/usr/bin:/bin", 1)
+	if out, err := runLocalReceiver(t, command, nil); err == nil {
+		t.Fatalf("interrupted probe succeeded: %s", out)
+	}
+	previous, err := filepath.Glob(filepath.Join(workdir, ".crabbox-local-git.*", "previous.git", "crabbox", "sync-manifest"))
+	if err != nil || len(previous) != 1 {
+		t.Fatalf("previous metadata and manifest not retained: %v %v", previous, err)
+	}
+}
