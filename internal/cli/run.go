@@ -643,11 +643,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		timeline.advance("local.finalize")
 		if cleanupErr := recorder.pendingFinishCleanupErr; cleanupErr != nil {
 			fmt.Fprintf(a.Stderr, "terminal committed; pending finish cleanup failed: %s\n", recorder.redactDiagnostic(cleanupErr.Error()))
-			if timingJSONWritten {
+			if timingJSONWritten && !report.TerminalPending {
 				// The first timing write must precede terminal commit so a sink
 				// failure remains part of the original receipt. A late cleanup
-				// warning needs the same frozen report again as the final line,
-				// not another observation, signature, or terminal submission.
+				// warning needs a final report. Reused no-sync runs emit their
+				// completed snapshot below; other routes repeat the frozen one.
 				if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil {
 					err = errors.Join(err, Exit(7, "write final timing JSON after pending finish cleanup diagnostic: %v", writeErr))
 				}

@@ -211,34 +211,31 @@ func TestRunCommandPendingFinishCleanupDiagnostic(t *testing.T) {
 				t.Fatalf("benchmark observation changed/duplicated: records=%v error=%v", records, recordErr)
 			}
 			if timingJSON {
-				wantWrites := 1
-				if failCleanup {
-					wantWrites = 2
-				}
+				wantWrites := 2
 				if stderr.writes != wantWrites {
 					t.Fatalf("timing writes=%d want=%d", stderr.writes, wantWrites)
 				}
 				lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
-				var timingLines []string
+				var timingReports []TimingReport
 				for _, line := range lines {
 					var candidate TimingReport
 					if json.Unmarshal([]byte(line), &candidate) == nil && candidate.Provider == lease.Provider {
-						timingLines = append(timingLines, line)
+						timingReports = append(timingReports, candidate)
 					}
 				}
-				for _, line := range timingLines {
-					if line != timingLines[0] {
-						t.Fatal("late diagnostic changed the frozen timing report")
-					}
+				if len(timingReports) == 0 || !timingReports[0].TerminalPending {
+					t.Fatal("missing checked timing snapshot before terminal commit")
 				}
 				if tc.rejectTimingAt == 0 {
 					var report TimingReport
 					if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
 						t.Fatalf("last stderr line is not timing JSON: %v\n%s", err, stderr.String())
 					}
-					if report.ExitCode != 0 || report.RunID != receipt.RunID {
+					if len(timingReports) != 2 || report.TerminalPending || report.RunnerTotalMs < timingReports[0].RunnerTotalMs || report.CommandMs != timingReports[0].CommandMs || report.ExitCode != 0 || report.RunID != receipt.RunID {
 						t.Fatalf("final timing changed committed result: %+v", report)
 					}
+				} else if len(timingReports) != 1 {
+					t.Fatalf("rejected final timing write left %d records", len(timingReports))
 				}
 			} else if stderr.writes != 0 {
 				t.Fatalf("text mode wrote %d timing records", stderr.writes)
