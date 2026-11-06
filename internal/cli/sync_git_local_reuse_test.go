@@ -437,3 +437,42 @@ func TestGitLocalReceiverUpgradeFromCachelessWorkspace(t *testing.T) {
 		t.Fatalf("cache not populated by the post-upgrade import: %q", out)
 	}
 }
+
+func TestGitLocalReceiverProbeDoesNotFollowPlantedManifestLink(t *testing.T) {
+	plan, data := reuseFixture(t)
+	workdir := t.TempDir()
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	mustWriteTestFile(t, filepath.Join(workdir, ".git/crabbox/sync-manifest"), "owned.txt\x00")
+	outside := filepath.Join(t.TempDir(), "victim")
+	mustWriteTestFile(t, outside, "untouched")
+	if err := os.MkdirAll(filepath.Join(workdir, ".crabbox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"sync-manifest.new", "sync-manifest.tmp"} {
+		if err := os.Symlink(outside, filepath.Join(workdir, ".crabbox", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	requireLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil)
+	if got, _ := os.ReadFile(outside); string(got) != "untouched" {
+		t.Fatalf("probe wrote through a planted link: %q", got)
+	}
+}
+
+func TestGitLocalReceiverFragmentCacheEntryIsReplacedByImport(t *testing.T) {
+	plan, data := reuseFixture(t)
+	workdir := t.TempDir()
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	entry := filepath.Join(plan.CacheRoot, plan.Digest+".git")
+	// An eviction interrupted after removing HEAD.
+	if err := os.Remove(filepath.Join(entry, "HEAD")); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil); err == nil || strings.Contains(string(out), "reused-") {
+		t.Fatalf("fragment entry reused: %q %v", out, err)
+	}
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	if out := requireLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil); strings.TrimSpace(string(out)) != "reused-cache" {
+		t.Fatalf("import did not repair the fragment entry: %q", out)
+	}
+}

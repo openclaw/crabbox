@@ -238,10 +238,19 @@ maintain_cache() {
     rm -rf -- "$nested" || true
   done
 }
+# A directory alone is not a usable entry: an interrupted eviction can leave a fragment.
+cache_entry_usable() {
+  [ -d "$cache_entry" ] && [ ! -L "$cache_entry" ] || return 1
+  [ -f "$cache_entry/HEAD" ] && [ -f "$cache_entry/config" ] && [ -f "$cache_entry/crabbox-local-owner" ] || return 1
+  [ -d "$cache_entry/objects" ] && [ -d "$cache_entry/refs" ] || return 1
+  [ "$(cat "$cache_entry/crabbox-local-artifact" 2>/dev/null)" = "$expected_digest" ]
+}
 store_cache() (
   umask 077
   maintain_cache
-  if [ -d "$cache_entry" ] && [ ! -L "$cache_entry" ]; then touch -- "$cache_entry"; return 0; fi
+  if cache_entry_usable; then touch -- "$cache_entry"; return 0; fi
+  # Replace a rejected fragment with the freshly verified metadata.
+  if [ -e "$cache_entry" ] || [ -L "$cache_entry" ]; then rm -rf -- "$cache_entry" || return 1; fi
   mkdir -p -- "$cache_root" && cache_ready || return 1
   maintain_cache
   tmp="$(mktemp -d "$cache_root/.tmp.XXXXXXXX")" || return 1
@@ -348,7 +357,7 @@ miss() { exit 1; }
 # index bits). Reuse always restores a pristine, re-verified copy of the import-time cache
 # entry, exactly the metadata a full import would have published.
 maintain_cache
-cache_ready && [ -d "$cache_entry" ] && [ ! -L "$cache_entry" ] || miss
+cache_ready && cache_entry_usable || miss
 manifest_dir="$workdir/.crabbox"
 if [ -e "$metadata" ] || [ -L "$metadata" ]; then
   owned_metadata || miss
@@ -376,8 +385,10 @@ if [ -e "$metadata" ] || [ -L "$metadata" ]; then
     [ ! -e "$raw_dir" ] || { [ -d "$raw_dir" ] && [ ! -L "$raw_dir" ]; } || miss
     mkdir -p -- "$raw_dir" || miss
     [ ! -e "$raw_dir/sync-manifest" ] || { [ -f "$raw_dir/sync-manifest" ] && [ ! -L "$raw_dir/sync-manifest" ]; } || miss
-    cp -- "$manifest" "$raw_dir/sync-manifest.new" || miss
-    mv -f -- "$raw_dir/sync-manifest.new" "$raw_dir/sync-manifest" || miss
+    # Exclusive temporary file: a pre-planted link at a fixed name would be followed by cp.
+    raw_tmp="$(mktemp "$raw_dir/sync-manifest.XXXXXXXX")" || miss
+    cp -- "$manifest" "$raw_tmp" || { rm -f -- "$raw_tmp"; miss; }
+    mv -f -- "$raw_tmp" "$raw_dir/sync-manifest" || { rm -f -- "$raw_tmp"; miss; }
   fi
   previous="$stage/previous.git"
   mv -- "$metadata" "$previous" || miss
@@ -391,7 +402,7 @@ if [ -e "$metadata" ] || [ -L "$metadata" ]; then
   if ! rm -rf -- "$previous"; then stage=; fail; fi
   backup=
   # The manifest is canonical inside .git again.
-  rm -f -- "$workdir/.crabbox/sync-manifest" "$workdir/.crabbox/sync-manifest.new" 2>/dev/null || true
+  rm -f -- "$workdir/.crabbox/sync-manifest" 2>/dev/null || true
   rmdir -- "$workdir/.crabbox" 2>/dev/null || true
 else
   mv -- "$fresh" "$metadata" || miss
