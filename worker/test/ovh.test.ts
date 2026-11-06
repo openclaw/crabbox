@@ -806,6 +806,45 @@ describe("OVH provisioning", () => {
     await expect(client.createServer(config(), leaseID)).rejects.toThrow(/status=ERROR/);
   });
 
+  it("does not publish an ERROR instance that already has an address", async () => {
+    const { client } = fakeOVH({
+      ...catalogRoutes,
+      ...keyRoutes,
+      [`POST ${p("/instance")}`]: () => json({ ...activeInstance, status: "ERROR" }),
+    });
+    await expect(client.createServer(config(), leaseID)).rejects.toMatchObject({
+      name: "ProviderProvisioningCleanupError",
+      cleanupClaim: { cloudID: instanceID },
+    });
+  });
+
+  it("does not publish a recovered ERROR instance that has an address", async () => {
+    const { client } = fakeOVH({
+      ...catalogRoutes,
+      ...keyRoutes,
+      [`POST ${p("/instance")}`]: () => new Response("oops", { status: 500 }),
+      [`GET ${p("/instance")}`]: () => json([{ ...activeInstance, status: "error" }]),
+    });
+    await expect(client.createServer(config(), leaseID)).rejects.toMatchObject({
+      name: "ProviderProvisioningCleanupError",
+      cleanupClaim: { cloudID: instanceID },
+    });
+  });
+
+  it("still reports the claim to the coordinator for a failed instance", async () => {
+    const onCreated = vi.fn<(claim: ProviderProvisioningCleanupClaim) => Promise<boolean>>(
+      async () => true,
+    );
+    const { client, operations } = fakeOVH({
+      ...catalogRoutes,
+      ...keyRoutes,
+      [`POST ${p("/instance")}`]: () => json({ ...activeInstance, status: "ERROR" }),
+    });
+    await client.createServer(config(), leaseID, onCreated).catch(() => undefined);
+    expect(onCreated).toHaveBeenCalledOnce();
+    expect(operations()).toContain("DELETE /sshkey/key-id");
+  });
+
   it("keeps waiting through transient reads", async () => {
     let reads = 0;
     const { client } = fakeOVH({

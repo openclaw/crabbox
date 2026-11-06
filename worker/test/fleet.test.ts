@@ -55861,6 +55861,32 @@ describe("OVH coordinator leases", () => {
     expect(cloud.instance).toBeUndefined();
   });
 
+  it("never activates a recovered ERROR instance and deletes it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    runPollsImmediately();
+    const cloud = fakeOVHCloud({
+      createInstance: () => {
+        // Accepted, then failed while keeping its address; the response is lost.
+        cloud.instance = { ...liveInstance, name: cloud.createdName, status: "ERROR" };
+        throw new TypeError("provider create response lost after acceptance");
+      },
+    });
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {}, env);
+    const response = await createLease(fleet);
+    expect(response.status).not.toBe(201);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      cloudID: instanceID,
+      provisioningResourceMayExist: true,
+    });
+    vi.setSystemTime(start + 10 * 60_000);
+    await fleet.alarm();
+    expect(cloud.instance).toBeUndefined();
+  });
+
   it("refuses to delete an instance whose identity changed and keeps cleanup open", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const start = Date.parse("2026-09-28T08:00:00Z");

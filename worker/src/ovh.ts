@@ -274,6 +274,7 @@ export class OVHClient {
       // The key only seeds the create call; cloud-init authorizes the lease's own public key.
       await this.removeKeyQuietly(key.id);
       if (continueReadiness === false) return server;
+      assertInstanceUsable(instance);
       if (server.host) return server;
       return { ...(await this.waitForPublicIPv4(instance.id, region)), serverType: flavor.name };
     } catch (error) {
@@ -434,8 +435,7 @@ export class OVHClient {
       try {
         // oxlint-disable-next-line eslint/no-await-in-loop -- polling must wait between OVH API reads.
         const instance = await this.getInstance(id);
-        const status = instance.status?.toUpperCase();
-        if (status === "ERROR") throw new OVHInstanceFailedError(id, status);
+        assertInstanceUsable(instance);
         const machine = this.toMachine(instance, region);
         if (machine.host) return machine;
         lastTransient = "";
@@ -927,6 +927,12 @@ function isPublicIPv4(value: string): boolean {
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168)
   );
+}
+
+// A failed instance can keep its address, so an address alone does not mean it is usable.
+function assertInstanceUsable(instance: OVHInstance): void {
+  const status = instance.status?.toUpperCase();
+  if (status === "ERROR") throw new OVHInstanceFailedError(instance.id, status);
 }
 
 function ovhInstanceDeleted(instance: OVHInstance): boolean {
