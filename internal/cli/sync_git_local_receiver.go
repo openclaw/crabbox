@@ -224,8 +224,14 @@ store_cache() (
   umask 077
   if [ -d "$cache_entry" ] && [ ! -L "$cache_entry" ]; then touch -- "$cache_entry"; return 0; fi
   mkdir -p -- "$cache_root" && cache_ready || return 1
+  # Drop staging left by an interrupted store of any earlier run.
+  find "$cache_root" -maxdepth 1 -name '.tmp.*' -mmin +60 -exec rm -rf -- {} + >/dev/null 2>&1 || true
   tmp="$(mktemp -d "$cache_root/.tmp.XXXXXXXX")" || return 1
+  # A subshell resets inherited signal traps: convert signals into an exit so the EXIT trap cleans up.
   trap 'rm -rf -- "$tmp"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   copy_metadata "$1" "$tmp/git" || return 1
   rm -rf -- "$tmp/git/index" "$tmp/git/crabbox" "$tmp/git/crabbox-local-complete" || return 1
   if [ ! -e "$cache_entry" ]; then mv -- "$tmp/git" "$cache_entry" || return 1; fi

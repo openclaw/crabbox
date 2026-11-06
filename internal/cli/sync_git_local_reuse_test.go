@@ -266,3 +266,26 @@ func TestGitLocalReceiverProbeInterruptedSwapRetainsPreviousMetadata(t *testing.
 		t.Fatalf("previous metadata and manifest not retained: %v %v", previous, err)
 	}
 }
+
+func TestGitLocalReceiverStoreSweepsStaleCacheStaging(t *testing.T) {
+	plan, data := reuseFixture(t)
+	stale := filepath.Join(plan.CacheRoot, ".tmp.interrupted")
+	fresh := filepath.Join(plan.CacheRoot, ".tmp.inflight")
+	for _, dir := range []string{stale, fresh} {
+		mustWriteTestFile(t, filepath.Join(dir, "git/HEAD"), "x")
+	}
+	old := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	requireLocalReceiver(t, remoteGitLocalSeed(t.TempDir(), plan), data)
+	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale staging survived: %v", err)
+	}
+	if _, err := os.Lstat(fresh); err != nil {
+		t.Errorf("a concurrent store's staging must not be touched: %v", err)
+	}
+	if entries, _ := filepath.Glob(filepath.Join(plan.CacheRoot, ".tmp.*")); len(entries) != 1 {
+		t.Errorf("own staging not cleaned: %v", entries)
+	}
+}
