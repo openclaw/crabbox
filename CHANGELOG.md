@@ -4,7 +4,7 @@
 
 ### Added
 
-- OVHcloud: create, verify, fork, and delete direct Linux leases as `ovh-snapshot` checkpoints, so new leases can boot from a prebaked project snapshot; `crabbox image delete --provider ovh` removes a snapshot claimed by exactly one local checkpoint record.
+- OVHcloud: create, verify, fork, and delete direct Linux leases as `ovh-snapshot` checkpoints, so new leases can boot from a prebaked project snapshot; `crabbox image delete --provider ovh` removes a snapshot claimed by exactly one local checkpoint record. [PR 3101](https://github.com/openclaw/crabbox/pull/3101).
 
 ### Fixed
 
