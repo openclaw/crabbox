@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { artifactMaxBytes, artifactProtocol } from "../src/cloudflare-artifacts";
+
 const { default: worker, CrabboxSandbox } = await import("../src/cloudflare-container-runner");
 
 class MemoryStorage {
@@ -86,6 +88,9 @@ class MockContainer {
   uploadGate: Promise<void> | undefined;
   readonly files = new Map<string, string>();
   readonly calls: ExecCall[] = [];
+  artifactBytes = new Uint8Array([0, 255, 137, 80, 78, 71, 0, 13, 10]);
+  artifactExitCode = 0;
+  artifactReadStream: ReadableStream<Uint8Array> | undefined;
 
   start(options?: ContainerStartupOptions): void {
     if (this.running) throw new Error("container is already running");
@@ -139,6 +144,14 @@ class MockContainer {
     if (cmd[0] === "rm") {
       this.files.delete(cmd[3] ?? "");
       return process(0);
+    }
+    if (cmd[3] === "crabbox-artifacts") {
+      if (!(options?.stdin instanceof ReadableStream)) throw new Error("missing artifact script");
+      this.files.set("artifact-script", await new Response(options.stdin).text());
+      return process(this.artifactExitCode);
+    }
+    if (cmd[3] === "crabbox-artifact-read") {
+      return process(0, this.artifactReadStream ?? new Blob([this.artifactBytes]).stream());
     }
     if (cmd[0] === "/bin/sh" && options?.stdin instanceof ReadableStream) {
       this.files.set(cmd[4] ?? "", await new Response(options.stdin).text());
@@ -333,6 +346,37 @@ async function activeExecutions(storage: MemoryStorage): Promise<number | undefi
 }
 
 describe("Cloudflare runner routing", () => {
+  it("requires authentication for artifact collection", async () => {
+    const capture: CapturedInternalRequest = { names: [], requests: [] };
+    const response = await worker.fetch(
+      new Request("https://runner.example/v1/sandboxes/cbx_test/artifacts", {
+        method: "POST",
+        body: "{}",
+      }),
+      envWithCapture(capture),
+    );
+    expect(response.status).toBe(401);
+    expect(capture.requests).toHaveLength(0);
+  });
+
+  it("forwards artifacts only to the selected existing lease", async () => {
+    const capture: CapturedInternalRequest = { names: [], requests: [] };
+    await worker.fetch(
+      new Request("https://runner.example/v1/sandboxes/cbx_test/artifacts", {
+        method: "POST",
+        headers: { Authorization: "Bearer runner-token" },
+        body: "{}",
+      }),
+      envWithCapture(capture),
+    );
+    expect(capture.names.every((name) => name === "cbx_test")).toBe(true);
+    expect(capture.requests.map((request) => new URL(request.url).pathname)).toEqual([
+      "/__crabbox/status",
+      "/__crabbox/artifacts",
+    ]);
+    expect(capture.requests[1]?.headers.get("Authorization")).toBeNull();
+  });
+
   it("exposes authenticated runner readiness without touching containers", async () => {
     const capture: CapturedInternalRequest = { names: [], requests: [] };
     const response = await worker.fetch(
@@ -347,6 +391,7 @@ describe("Cloudflare runner routing", () => {
       ok: true,
       runner: "cloudflare",
       instanceTypes: ["standard-1", "standard-2", "standard-3", "standard-4"],
+      artifactProtocol,
     });
     expect(capture.requests).toHaveLength(0);
   });
@@ -485,6 +530,125 @@ describe("Cloudflare runner routing", () => {
     expect(response.status).toBe(400);
     expect(capture.requests).toHaveLength(0);
     await expect(response.json()).resolves.toEqual({ error: "invalid json" });
+  });
+});
+
+describe("Cloudflare binary artifacts", () => {
+  afterEach(() => vi.useRealTimers());
+
+  function artifactRequest(body: Record<string, unknown> = {}, signal?: AbortSignal): Request {
+    return new Request("http://crabbox.internal/__crabbox/artifacts", {
+      method: "POST",
+      body: JSON.stringify({
+        protocol: artifactProtocol,
+        cwd: "/workspace/repo",
+        script: "collector fixture",
+        ...body,
+      }),
+      ...(signal ? { signal } : {}),
+    });
+  }
+
+  it("returns exact binary bytes and a digest while preserving a reusable lease", async () => {
+    const { sandbox, container, storage } = harness();
+    await createLease(sandbox);
+    const collect = async () => {
+      const response = await sandbox.fetch(artifactRequest());
+      expect(response.status).toBe(200);
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(container.artifactBytes);
+      expect(response.headers.get("Content-Length")).toBe(
+        String(container.artifactBytes.byteLength),
+      );
+      expect(response.headers.get("X-Crabbox-Artifact-Protocol")).toBe(artifactProtocol);
+      expect(response.headers.get("X-Crabbox-Artifact-Sha256")).toMatch(/^[0-9a-f]{64}$/);
+      expect(await activeExecutions(storage)).toBeUndefined();
+    };
+    await collect();
+    await collect();
+    expect(container.started).toHaveLength(1);
+    expect(container.destroyed).toBe(0);
+    const calls = container.calls.filter((call) => call.cmd[3] === "crabbox-artifacts");
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.options?.cwd).toBe("/workspace/repo");
+    expect(calls[0]?.cmd[4]).not.toBe(calls[1]?.cmd[4]);
+    expect(
+      container.calls.filter((call) => call.cmd[0] === "rm" && call.cmd[1] === "-rf"),
+    ).toHaveLength(2);
+  });
+
+  it("refuses unknown leases, wrong cwd, and incompatible protocols before native collection", async () => {
+    const { sandbox, container } = harness();
+    expect((await sandbox.fetch(artifactRequest())).status).toBe(410);
+    await createLease(sandbox);
+    expect((await sandbox.fetch(artifactRequest({ cwd: "/workspace/other" }))).status).toBe(400);
+    expect((await sandbox.fetch(artifactRequest({ protocol: "old" }))).status).toBe(400);
+    expect(container.calls.some((call) => call.cmd[3] === "crabbox-artifacts")).toBe(false);
+  });
+
+  it("reports missing required outputs without returning collector diagnostics", async () => {
+    const { sandbox, container, storage } = harness();
+    await createLease(sandbox);
+    container.artifactExitCode = 8;
+    const response = await sandbox.fetch(artifactRequest());
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({ error: "missing required artifact" });
+    expect(await activeExecutions(storage)).toBeUndefined();
+    expect(container.calls.some((call) => call.cmd[3] === "crabbox-artifact-read")).toBe(false);
+  });
+
+  it("withholds oversized transfers and cleans the request directory", async () => {
+    const { sandbox, container, storage } = harness();
+    await createLease(sandbox);
+    container.artifactReadStream = new Blob([new Uint8Array(artifactMaxBytes + 1)]).stream();
+    const response = await sandbox.fetch(artifactRequest());
+    expect(response.status).toBe(422);
+    expect(response.headers.get("X-Crabbox-Artifact-Sha256")).toBeNull();
+    expect(container.calls.at(-1)?.cmd.slice(0, 3)).toEqual(["rm", "-rf", "--"]);
+    expect(await activeExecutions(storage)).toBeUndefined();
+  });
+
+  it("cancels interrupted reads and does not publish their partial bytes", async () => {
+    const { sandbox, container, storage } = harness();
+    await createLease(sandbox);
+    let canceled = false;
+    container.artifactReadStream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array([0, 255]));
+      },
+      cancel() {
+        canceled = true;
+      },
+    });
+    const controller = new AbortController();
+    const pending = sandbox.fetch(artifactRequest({}, controller.signal));
+    await vi.waitFor(() =>
+      expect(container.calls.some((call) => call.cmd[3] === "crabbox-artifact-read")).toBe(true),
+    );
+    controller.abort();
+    const response = await pending;
+    expect(response.status).toBe(422);
+    expect(canceled).toBe(true);
+    expect(container.stoppedGroups).toContain("100");
+    expect(await activeExecutions(storage)).toBeUndefined();
+  });
+
+  it("bounds a stalled transfer with a watchdog", async () => {
+    vi.useFakeTimers();
+    const { sandbox, container, storage } = harness();
+    await createLease(sandbox);
+    container.artifactReadStream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1]));
+      },
+    });
+    const pending = sandbox.fetch(artifactRequest());
+    await vi.waitFor(() =>
+      expect(container.calls.some((call) => call.cmd[3] === "crabbox-artifact-read")).toBe(true),
+    );
+    await vi.advanceTimersByTimeAsync(35_001);
+    expect((await pending).status).toBe(422);
+    expect(container.stoppedGroups).toContain("100");
+    expect(await activeExecutions(storage)).toBeUndefined();
   });
 });
 

@@ -1,0 +1,12 @@
+{
+  "observed_at": "2026-10-15T21:04:14Z",
+  "scope": "Offline standard-library reproduction of a possible public-Git-identity collision in the published legacy key regular expression; not attribution of the live hold.",
+  "detector_source": "https://github.com/trufflesecurity/trufflehog/blob/v3.97.4/pkg/detectors/cloudflareglobalapikey/v1/cloudflareglobalapikey.go",
+  "prefix_source": "https://github.com/trufflesecurity/trufflehog/blob/v3.97.4/pkg/detectors/detectors.go#L300-L305",
+  "input_source": "Known public Crabbox base Git commit identity plus synthetic provider-labelled text; no original review prompt or finding accessed.",
+  "plain_key_regex_accepts_public_git_identity": true,
+  "html_decoded_key_regex_accepts_public_git_identity": true,
+  "native_scanner_run": false,
+  "detector_verification_or_credential_network_call": false,
+  "proof_of_actual_hold_attribution": false
+}

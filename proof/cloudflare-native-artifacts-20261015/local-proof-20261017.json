@@ -1,0 +1,101 @@
+{
+  "scope": "local macOS Chromium fixture and simulated transport; no Cloudflare deployment or live artifact transfer",
+  "browser_cases": [
+    {
+      "mode": "success",
+      "exitCode": 0,
+      "verification": {
+        "mode": "success",
+        "exitCode": 0,
+        "files": {
+          "screen.png": {
+            "bytes": 473295,
+            "sha256": "1527f97e8770f5970881417fb682c42891b2fb4fa3dc185823bbab7502615cfd"
+          },
+          "trace.zip": {
+            "bytes": 149614,
+            "sha256": "9de405a3a5e7df0520de77cf09c6b27f6d1bcb1888c61312ddd2358577c5b02d"
+          },
+          "result.json": {
+            "bytes": 507,
+            "sha256": "58830768da66c10c4df8376b472c740f4b4d5bba65b7498602b302dd80d23dc2"
+          }
+        }
+      },
+      "runtime": {
+        "mode": "success",
+        "exitCode": 0,
+        "browser": "149.0.7827.55",
+        "platform": "darwin",
+        "arch": "arm64",
+        "playwright": "1.61.1",
+        "packageLockSha256": "5a3be3fd6db0b52faab57b52b2a4e5b2403a63cab0ab815406e3a95def01948e",
+        "chromiumSha256": "b1b9e2dd063115031f08eadc10ed381ca0fa05b2284baff8f721d87f5f0f61b7",
+        "files": {
+          "screen.png": {
+            "bytes": 473295,
+            "sha256": "1527f97e8770f5970881417fb682c42891b2fb4fa3dc185823bbab7502615cfd"
+          },
+          "trace.zip": {
+            "bytes": 149614,
+            "sha256": "9de405a3a5e7df0520de77cf09c6b27f6d1bcb1888c61312ddd2358577c5b02d"
+          }
+        }
+      },
+      "scope": "local Chromium only; no Cloudflare transport"
+    },
+    {
+      "mode": "failure",
+      "exitCode": 23,
+      "verification": {
+        "mode": "failure",
+        "exitCode": 23,
+        "files": {
+          "screen.png": {
+            "bytes": 473295,
+            "sha256": "1527f97e8770f5970881417fb682c42891b2fb4fa3dc185823bbab7502615cfd"
+          },
+          "trace.zip": {
+            "bytes": 149208,
+            "sha256": "30d82c730c88ec002d4d14f72ec257a85ddf8d1896b6997306128b0e5e3ea13d"
+          },
+          "result.json": {
+            "bytes": 508,
+            "sha256": "2389ea292edf03b963db5a87785e96d90656397d482710033ebe82696f872a9f"
+          }
+        }
+      },
+      "runtime": {
+        "mode": "failure",
+        "exitCode": 23,
+        "browser": "149.0.7827.55",
+        "platform": "darwin",
+        "arch": "arm64",
+        "playwright": "1.61.1",
+        "packageLockSha256": "5a3be3fd6db0b52faab57b52b2a4e5b2403a63cab0ab815406e3a95def01948e",
+        "chromiumSha256": "b1b9e2dd063115031f08eadc10ed381ca0fa05b2284baff8f721d87f5f0f61b7",
+        "files": {
+          "screen.png": {
+            "bytes": 473295,
+            "sha256": "1527f97e8770f5970881417fb682c42891b2fb4fa3dc185823bbab7502615cfd"
+          },
+          "trace.zip": {
+            "bytes": 149208,
+            "sha256": "30d82c730c88ec002d4d14f72ec257a85ddf8d1896b6997306128b0e5e3ea13d"
+          }
+        }
+      },
+      "scope": "local Chromium only; no Cloudflare transport"
+    }
+  ],
+  "harness_tests": {
+    "passed": 7
+  },
+  "go_race_packages": [
+    "internal/cli",
+    "internal/providers/shared",
+    "internal/providers/cloudflare"
+  ],
+  "go_race_filter": "TestDelegatedArtifact|TestDelegatedSandbox|TestCloudflareArtifact",
+  "go_race_result": "passed"
+}

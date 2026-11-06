@@ -109,6 +109,12 @@ func validateDelegatedRunFilePath(flag, remote string) error {
 	return err
 }
 
+// NormalizeDelegatedRunFilePath admits a literal provider-relative download
+// path using the same validation as the run flags.
+func NormalizeDelegatedRunFilePath(flag, remote string) (string, error) {
+	return normalizeDelegatedRunFilePath(flag, remote)
+}
+
 func normalizeDelegatedRunFilePath(flag, remote string) (string, error) {
 	remote = strings.TrimSpace(remote)
 	if remote == "" {

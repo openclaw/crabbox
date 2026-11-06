@@ -80,8 +80,11 @@ type DelegatedSandboxLifecycle struct {
 	AdmitReuse func(context.Context) error
 	Setup      func(context.Context) error
 	Command    func(context.Context) (DelegatedSandboxCommand, error)
-	Retained   func(context.Context) error
-	Cleanup    func(context.Context) error
+	// Artifacts runs after an observed command exit (including nonzero exits),
+	// before sandbox cleanup. Transport failures do not authorize collection.
+	Artifacts func(context.Context) ([]core.RunArtifact, error)
+	Retained  func(context.Context) error
+	Cleanup   func(context.Context) error
 }
 
 // SandboxWorkspace separates local preparation from operations on an admitted
@@ -366,10 +369,21 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 	if err != nil {
 		return result, ExitErrorWithCause(result.ExitCode, fmt.Sprintf("%s run failed: %v", lifecycle.Provider, RedactErrorSecrets(err.Error())), err)
 	}
+	var commandErr error
 	if result.ExitCode != 0 {
-		return result, core.ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s run exited %d", lifecycle.Provider, result.ExitCode)}
+		commandErr = core.ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s run exited %d", lifecycle.Provider, result.ExitCode)}
 	}
-	return result, nil
+	if lifecycle.Artifacts != nil {
+		var artifactErr error
+		result.Artifacts, artifactErr = lifecycle.Artifacts(ctx)
+		artifactIsPrimary := commandErr == nil && artifactErr != nil
+		result, commandErr = AppendDelegatedRunFailure(result, commandErr, artifactErr, core.ExitCodeForError(artifactErr, 7))
+		if artifactIsPrimary {
+			outcome := core.FinalizeRunResult(core.RunResult{}, artifactErr)
+			result.Status, result.ErrorKind = outcome.Status, outcome.ErrorKind
+		}
+	}
+	return result, commandErr
 }
 
 // Keep the public exit contract and the cause without printing raw provider

@@ -1,0 +1,35 @@
+{
+  "artifact_id": 12004659007,
+  "workflow_run": 38803376754,
+  "scanner_source": "291ab8a0090a8f76c08e4d0e39ea4cf1fdcbe0c0",
+  "classification": "agent_input_scan",
+  "retryable": false,
+  "failure": {
+    "stage": "agent_input_scan",
+    "reason_code": "findings"
+  },
+  "source": {
+    "repository": "openclaw/crabbox",
+    "item_kind": "pull_request",
+    "item_number": 2860,
+    "sha": "8143ed2f94c9a54b6aa6405c5e406740cf666a94"
+  },
+  "workflow_exit": 79,
+  "scan": {
+    "kind": "unclassified_finding",
+    "reason": "finding_not_reviewed",
+    "findingCount": 1,
+    "findingIndex": 0,
+    "detectorType": 58,
+    "decoder": "HTML",
+    "verified": false,
+    "scannerLine": 463,
+    "material": {
+      "kind": "prompt",
+      "id": "prompt",
+      "references": []
+    }
+  },
+  "observed_at": "2026-10-15T21:03:40Z",
+  "read_scope": "Public policy/source first; only the bounded manifest member was read. No native scanner output, diagnostic text, raw matches or other artifact members were read or saved."
+}

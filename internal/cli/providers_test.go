@@ -1776,7 +1776,7 @@ func TestProvidersRecommendFiltersRequireUseCase(t *testing.T) {
 
 func TestProvidersRecommendFilteredNoMatch(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"recommend", "run-evidence", "--workspace", "checkpoint"})
+	err := (App{Stdout: &stdout, Stderr: &stderr}).providers(context.Background(), []string{"recommend", "run-evidence", "--workspace", "checkpoint", "--feature", "desktop"})
 	var exitErr ExitError
 	if !AsExitError(err, &exitErr) || exitErr.Code != 1 {
 		t.Fatalf("providers recommend filtered no-match error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())

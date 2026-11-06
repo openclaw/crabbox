@@ -1,0 +1,198 @@
+{
+  "observed_at": "2026-10-15T21:03:40Z",
+  "head": "01c38947bde5f36ca4e4c885a44e3bf9075c885d",
+  "checks": [
+    {
+      "name": "Release Check",
+      "status": "IN_PROGRESS",
+      "conclusion": "",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802395/job/116662753087"
+    },
+    {
+      "name": "Go CLI shard 0",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754127"
+    },
+    {
+      "name": "dispatch",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804798253/job/116662742215"
+    },
+    {
+      "name": "dispatch",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804830291/job/116662851758"
+    },
+    {
+      "name": "dispatch",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38805010696/job/116663482128"
+    },
+    {
+      "name": "docker-sandbox-trust-boundary",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802454/job/116662755561"
+    },
+    {
+      "name": "Render visual proof",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802384/job/116662753944"
+    },
+    {
+      "name": "Go CLI shard 1",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754441"
+    },
+    {
+      "name": "local-container",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802454/job/116662755277"
+    },
+    {
+      "name": "Go CLI shard 2",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754538"
+    },
+    {
+      "name": "firecracker-readiness",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802454/job/116662754785"
+    },
+    {
+      "name": "Go CLI shard 3",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754277"
+    },
+    {
+      "name": "ssh-localhost",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802454/job/116662755132"
+    },
+    {
+      "name": "apple-vm",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802454/job/116662755236"
+    },
+    {
+      "name": "Go core",
+      "status": "IN_PROGRESS",
+      "conclusion": "",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754484"
+    },
+    {
+      "name": "desktop-resize",
+      "status": "COMPLETED",
+      "conclusion": "SKIPPED",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802454/job/116662756713"
+    },
+    {
+      "name": "Go modules",
+      "status": "IN_PROGRESS",
+      "conclusion": "",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754353"
+    },
+    {
+      "name": "Go CLI coverage shard 0",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754487"
+    },
+    {
+      "name": "Go CLI coverage shard 1",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754349"
+    },
+    {
+      "name": "Go CLI coverage shard 2",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754428"
+    },
+    {
+      "name": "Go non-CLI coverage",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754665"
+    },
+    {
+      "name": "Direct Go install",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754453"
+    },
+    {
+      "name": "Windows PowerShell 5.1 architecture",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754471"
+    },
+    {
+      "name": "Native Windows contracts",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754494"
+    },
+    {
+      "name": "Connector Lifecycles",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754745"
+    },
+    {
+      "name": "Apple VM",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754469"
+    },
+    {
+      "name": "Worker",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754531"
+    },
+    {
+      "name": "AWS recovery PostgreSQL integration",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754799"
+    },
+    {
+      "name": "Scripts",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754524"
+    },
+    {
+      "name": "Docs",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116662754597"
+    },
+    {
+      "name": "Go coverage",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116666893735"
+    },
+    {
+      "name": "Windows Pond Mesh Cancellation",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.com/openclaw/crabbox/actions/runs/38804802380/job/116668689133"
+    }
+  ]
+}
