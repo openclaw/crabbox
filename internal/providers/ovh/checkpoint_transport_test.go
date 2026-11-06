@@ -3,6 +3,7 @@ package ovh
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -64,6 +65,8 @@ func (r *recordingOVH) serve(w http.ResponseWriter, req *http.Request) {
 			delete(r.snapshots, id)
 			reply(snapshot)
 		}
+	case req.Method == http.MethodDelete && strings.HasPrefix(req.URL.Path, base+"/sshkey/"):
+		w.WriteHeader(http.StatusNoContent)
 	case req.Method == http.MethodDelete && req.URL.Path == base+"/instance/"+r.instance.ID:
 		r.instance.Status = "DELETED"
 		w.WriteHeader(http.StatusNoContent)
@@ -71,6 +74,14 @@ func (r *recordingOVH) serve(w http.ResponseWriter, req *http.Request) {
 		r.t.Errorf("unexpected OVH request %s %s", req.Method, req.URL.Path)
 		http.NotFound(w, req)
 	}
+}
+
+// note records a guest-side or CLI-side effect in the same ordered trace as the
+// provider requests, so a test can show what happened before what.
+func (r *recordingOVH) note(event string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.log = append(r.log, "** "+event)
 }
 
 func (r *recordingOVH) mark() int {
@@ -231,4 +242,128 @@ func TestProductionTransportReleaseOfHeldSourceNeverDeletesInstance(t *testing.T
 	if got := mutating(f.ovh.since(mark)); len(got) != 0 {
 		t.Fatalf("held source was mutated: %v", got)
 	}
+}
+
+// traceSince returns the ordered effects since mark with the fixture project
+// name masked, for logging as a redacted production-path trace.
+func (f *transportFixture) traceSince(mark int) []string {
+	out := f.ovh.since(mark)
+	for i := range out {
+		out[i] = strings.ReplaceAll(out[i], "/cloud/project/project-test", "/cloud/project/<project>")
+	}
+	return out
+}
+
+func logTrace(t *testing.T, title string, trace []string) {
+	t.Helper()
+	t.Logf("TRACE %s", title)
+	for i, line := range trace {
+		t.Logf("TRACE   %d. %s", i+1, line)
+	}
+	if len(trace) == 0 {
+		t.Logf("TRACE   (no provider request and no guest effect)")
+	}
+}
+
+func indexOf(trace []string, want string) int {
+	for i, line := range trace {
+		if strings.Contains(line, want) {
+			return i
+		}
+	}
+	return -1
+}
+
+// A reclaimed claim generation is refused before guest preparation or the
+// snapshot POST; the authorized control shows the same path succeeding.
+func TestProductionPathTraceReclaimedGenerationVersusControl(t *testing.T) {
+	f := newTransportFixture(t)
+	prepareCheckpointSource = func(context.Context, core.SSHTarget) error {
+		f.ovh.note("guest: prepare source (cloud-init clean, sync)")
+		return nil
+	}
+	stale, _, err := core.ReadLeaseClaimWithPresence(f.lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	control := f.request()
+	core.SetServerLeaseClaimSnapshot(&control.Server, stale, true)
+	control.CheckpointID = "chk_control"
+	mark := f.ovh.mark()
+	if _, err := (Provider{}).CreateNativeCheckpoint(context.Background(), control); err != nil {
+		t.Fatal(err)
+	}
+	trace := f.traceSince(mark)
+	logTrace(t, "authorized control: current claim generation", trace)
+	prepared, posted := indexOf(trace, "** guest: prepare"), indexOf(trace, "POST /cloud/project/<project>/instance/inst-1/snapshot")
+	if prepared < 0 || posted < 0 || prepared > posted {
+		t.Fatalf("control must prepare the guest, then POST: %v", trace)
+	}
+
+	// Another checkout reclaims the lease after this request was admitted.
+	reclaimed := map[string]string{}
+	for k, v := range stale.Labels {
+		reclaimed[k] = v
+	}
+	reclaimed["state"] = "reclaimed-elsewhere"
+	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(f.lease.LeaseID, stale, reclaimed); err != nil {
+		t.Fatal(err)
+	}
+	refused := f.request()
+	core.SetServerLeaseClaimSnapshot(&refused.Server, stale, true)
+	refused.CheckpointID = "chk_reclaimed"
+	mark = f.ovh.mark()
+	_, err = (Provider{}).CreateNativeCheckpoint(context.Background(), refused)
+	trace = f.traceSince(mark)
+	logTrace(t, "reclaimed claim generation: refused ("+firstLine(err)+")", trace)
+	if err == nil || !errors.Is(err, core.ErrReleaseLeaseOwnershipChanged) {
+		t.Fatalf("err=%v", err)
+	}
+	if indexOf(trace, "** guest:") >= 0 || len(mutating(trace)) != 0 {
+		t.Fatalf("reclaimed generation reached the guest or a provider mutation: %v", trace)
+	}
+}
+
+// A held source is refused before remote logout or the instance DELETE; the
+// authorized control shows the cleanup running first and then the DELETE.
+func TestProductionPathTraceHeldSourceReleaseVersusControl(t *testing.T) {
+	release := func(t *testing.T, hold bool) ([]string, error) {
+		f := newTransportFixture(t)
+		if hold {
+			holdSource(t, f.lease.LeaseID)
+		}
+		mark := f.ovh.mark()
+		err := f.backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+			Lease: f.lease,
+			GuardedRemoteCleanup: func(context.Context, core.LeaseTarget) {
+				f.ovh.note("guest: remote connection cleanup (tailscale logout)")
+			},
+		})
+		return f.traceSince(mark), err
+	}
+
+	trace, err := release(t, false)
+	logTrace(t, "authorized control: no unresolved checkpoint", trace)
+	cleaned, deleted := indexOf(trace, "** guest: remote connection cleanup"), indexOf(trace, "DELETE /cloud/project/<project>/instance/inst-1")
+	if err != nil || cleaned < 0 || deleted < 0 || cleaned > deleted {
+		t.Fatalf("control must clean up, then DELETE: err=%v %v", err, trace)
+	}
+
+	trace, err = release(t, true)
+	logTrace(t, "held source: refused ("+firstLine(err)+")", trace)
+	if err == nil || !strings.Contains(err.Error(), "unresolved checkpoint") {
+		t.Fatalf("err=%v", err)
+	}
+	if indexOf(trace, "** guest:") >= 0 || len(mutating(trace)) != 0 {
+		t.Fatalf("held source saw remote cleanup or a provider mutation: %v", trace)
+	}
+}
+
+func firstLine(err error) string {
+	if err == nil {
+		return "no error"
+	}
+	line, _, _ := strings.Cut(err.Error(), "\n")
+	return line
 }
