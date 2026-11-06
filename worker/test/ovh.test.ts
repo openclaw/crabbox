@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { cloudInit } from "../src/bootstrap";
@@ -22,7 +20,6 @@ import {
 import { leaseProviderName } from "../src/slug";
 import type { Env, LeaseRecord } from "../src/types";
 
-const endpoint = "https://api.us.ovhcloud.com/1.0";
 const projectID = "0123456789abcdef0123456789abcdef";
 const instanceID = "11111111-1111-4111-8111-111111111111";
 const otherInstanceID = "22222222-2222-4222-8222-222222222222";
@@ -265,26 +262,17 @@ describe("OVH client configuration", () => {
 });
 
 describe("OVH request signing", () => {
-  it("matches the signature contract shared with the direct client", async () => {
+  it("signs method, URL, body, and timestamp to a fixed vector", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
     const { client, requests } = fakeOVH({
       [`POST ${p("/sshkey")}`]: () => json({ id: "key-id", name: keyName, publicKey }),
     });
     await client.createSSHKey(keyName, publicKey);
     const signed = requests.find((request) => request.method === "POST")!;
-    const timestamp = signed.headers.get("x-ovh-timestamp")!;
-    const expected = createHash("sha1")
-      .update(
-        [
-          baseEnv.OVH_APPLICATION_SECRET,
-          baseEnv.OVH_CONSUMER_KEY,
-          "POST",
-          `${endpoint}${p("/sshkey")}`,
-          signed.body,
-          timestamp,
-        ].join("+"),
-      )
-      .digest("hex");
-    expect(signed.headers.get("x-ovh-signature")).toBe(`$1$${expected}`);
+    expect(signed.headers.get("x-ovh-timestamp")).toBe("1800000000");
+    expect(signed.headers.get("x-ovh-signature")).toBe(
+      "$1$f8ee8626e47bcb89242584fc53488dff2956ba4d",
+    );
     expect(signed.headers.get("x-ovh-application")).toBe(baseEnv.OVH_APPLICATION_KEY);
     expect(signed.headers.get("x-ovh-consumer")).toBe(baseEnv.OVH_CONSUMER_KEY);
   });
