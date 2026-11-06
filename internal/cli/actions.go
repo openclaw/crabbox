@@ -3711,7 +3711,22 @@ function Invoke-CrabboxRunnerConfig {
 `
 }
 
+// windowsRunnerScriptStaging copies the large installer to the guest. The
+// installer runs as the lease's administrative account, so it is staged in a new
+// directory inside that account's own profile with a private ACL (the account,
+// Administrators and SYSTEM): no other guest account can create, replace or rename
+// it before it runs, whether or not shared roots such as C:\ProgramData\crabbox
+// already exist. Unlike windowsScriptTransport, the credentials stay on stdin.
+type windowsRunnerScriptStaging struct {
+	run  func(context.Context, SSHTarget, string, io.Reader, io.Writer, io.Writer) error
+	copy func(context.Context, SSHTarget, string, string) error
+}
+
 func uploadWindowsActionsRunnerScript(ctx context.Context, target SSHTarget, script string) (string, func(), error) {
+	return windowsRunnerScriptStaging{run: runSSHInput, copy: copyLocalFileToTarget}.upload(ctx, target, script)
+}
+
+func (staging windowsRunnerScriptStaging) upload(ctx context.Context, target SSHTarget, script string) (string, func(), error) {
 	localDir, err := os.MkdirTemp("", "crabbox-runner")
 	if err != nil {
 		return "", nil, Exit(2, "create temp runner script dir: %v", err)
@@ -3725,26 +3740,50 @@ func uploadWindowsActionsRunnerScript(ctx context.Context, target SSHTarget, scr
 		return "", nil, Exit(2, "write runner install script: %v", err)
 	}
 
-	token := strconv.FormatInt(time.Now().UnixNano(), 36)
-	remoteDir := `C:\ProgramData\crabbox`
-	remotePath := "C:/ProgramData/crabbox/install-runner-" + token + ".ps1"
-	remotePathPS := strings.ReplaceAll(remotePath, "/", `\`)
-
-	prepare := `powershell.exe -NoLogo -NoProfile -NonInteractive -Command "New-Item -ItemType Directory -Force -Path ` + psQuote(remoteDir) + ` | Out-Null"`
-	if err := runSSHInput(ctx, target, prepare, nil, io.Discard, io.Discard); err != nil {
-		return "", nil, err
+	suffix, err := randomHex(16)
+	if err != nil {
+		return "", nil, Exit(2, "create runner script directory name: %v", err)
 	}
-	if err := copyLocalFileToTarget(ctx, target, localScript, remotePath); err != nil {
-		return "", nil, err
+	dirName := windowsRunnerScriptDirPrefix + suffix
+	var prepared bytes.Buffer
+	if err := staging.run(ctx, target, PowershellCommand(windowsRunnerScriptStagingPowerShell(dirName)), nil, &prepared, io.Discard); err != nil {
+		return "", nil, fmt.Errorf("prepare private runner script directory: %w", err)
 	}
-
+	remoteDir := strings.TrimSpace(prepared.String())
+	if !strings.HasSuffix(remoteDir, `\`+dirName) {
+		return "", nil, Exit(7, "prepare private runner script directory: unexpected path %q", remoteDir)
+	}
 	cleanup := func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
-		remove := `powershell.exe -NoLogo -NoProfile -NonInteractive -Command "Remove-Item -Force -LiteralPath ` + psQuote(remotePathPS) + ` -ErrorAction SilentlyContinue"`
-		_ = runSSHInput(cleanupCtx, target, remove, nil, io.Discard, io.Discard)
+		remove := PowershellCommand(`Remove-Item -Recurse -Force -LiteralPath ` + psQuote(remoteDir) + ` -ErrorAction SilentlyContinue`)
+		_ = staging.run(cleanupCtx, target, remove, nil, io.Discard, io.Discard)
 	}
-	return remotePathPS, cleanup, nil
+	remotePath := remoteDir + `\install-runner.ps1`
+	if err := staging.copy(ctx, target, localScript, strings.ReplaceAll(remotePath, `\`, "/")); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return remotePath, cleanup, nil
+}
+
+const windowsRunnerScriptDirPrefix = ".crabbox-runner-"
+
+// windowsRunnerScriptStagingPowerShell creates dirName in the current user's
+// profile, failing if it already exists, applies the private ACL, and prints its
+// absolute path.
+func windowsRunnerScriptStagingPowerShell(dirName string) string {
+	return `$ErrorActionPreference = "Stop"
+` + windowsInteractiveScheduledTaskPowerShell() + `
+$userProfile = $env:USERPROFILE
+if (-not $userProfile -or -not (Test-Path -LiteralPath $userProfile -PathType Container)) {
+  throw "runner script staging needs the user profile directory"
+}
+$stagingDir = Join-Path $userProfile ` + psQuote(dirName) + `
+New-Item -ItemType Directory -Path $stagingDir | Out-Null
+Protect-CrabboxInteractiveDirectory $stagingDir
+[Console]::Out.Write($stagingDir)
+`
 }
 
 // windowsSetupProgramPowerShell runs a guest setup program, such as the Git for
