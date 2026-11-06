@@ -382,6 +382,34 @@ describe("OVH catalog pricing", () => {
     expect(ovhCatalogHourlyUSD(value, planCode, 1.08)).toBeUndefined();
   });
 
+  it("reads the catalog and flavor shapes OVH returns", async () => {
+    const { client } = fakeOVH({
+      [`GET ${p("/flavor")}`]: () =>
+        json([
+          {
+            ...flavor,
+            name: "d2-2",
+            planCodes: {
+              monthly: "d2-2.monthly.postpaid",
+              hourly: "d2-2.consumption",
+              license: null,
+            },
+          },
+        ]),
+      "GET /order/catalog/public/cloud": () =>
+        json({
+          locale: { currencyCode: "EUR" },
+          addons: [
+            {
+              planCode: "d2-2.consumption",
+              pricings: [{ price: 1_040_000, type: "consumption", capacities: ["consumption"] }],
+            },
+          ],
+        }),
+    });
+    await expect(client.hourlyPriceUSD("d2-2", "WAW1")).resolves.toBe(0.0112);
+  });
+
   it("prefers the flavor's plan code and reads the public catalog unsigned", async () => {
     const { client, requests } = fakeOVH({
       [`GET ${p("/flavor")}`]: () =>

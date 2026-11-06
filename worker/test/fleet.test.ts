@@ -55510,6 +55510,43 @@ describe("OVH coordinator leases", () => {
     expect(cloud.instance).toBeUndefined();
   });
 
+  it("refuses at a real catalog price before any OVH mutation", async () => {
+    // Observed live: EUR catalog, d2-2 at 0.0104/hour, which is $0.0112 at the default rate.
+    const cloud = fakeOVHCloud({
+      catalog: () =>
+        jsonResponse({
+          locale: { currencyCode: "EUR" },
+          addons: [
+            {
+              planCode: "d2-2.consumption",
+              pricings: [{ price: 1_040_000, type: "consumption", capacities: ["consumption"] }],
+            },
+          ],
+        }),
+    });
+    const fleet = testFleet(new MemoryStorage(), {}, { ...env, CRABBOX_MAX_MONTHLY_USD: "0.005" });
+    const response = await createLease(fleet, { serverType: "d2-2", serverTypeExplicit: true });
+    expect(response.status).toBe(429);
+    await expect(response.json()).resolves.toMatchObject({ error: "cost_limit_exceeded" });
+    expect(cloud.mutations()).toEqual([]);
+  });
+
+  it("admits consecutive leases that share a public key", async () => {
+    let created = 0;
+    const cloud = fakeOVHCloud({
+      createInstance: () => {
+        created += 1;
+        const id = `${created}1111111-1111-4111-8111-111111111111`;
+        return jsonResponse({ ...liveInstance, id, name: cloud.createdName });
+      },
+    });
+    const fleet = testFleet(new MemoryStorage(), {}, env);
+    const first = await createLease(fleet);
+    const second = await createLease(fleet, { leaseID: "cbx_abcdef654321", slug: "red-lobster" });
+    expect([first.status, second.status]).toEqual([201, 201]);
+    expect(cloud.keys).toEqual([]);
+  });
+
   it("counts an active OVH lease against the next admission", async () => {
     const cloud = fakeOVHCloud();
     const fleet = testFleet(new MemoryStorage(), {}, { ...env, CRABBOX_MAX_MONTHLY_USD: "0.08" });

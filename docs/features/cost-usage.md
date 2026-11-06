@@ -95,6 +95,10 @@ Three cost figures are reported per lease:
   retained machines that stop and resume; otherwise runtime uses the existing
   creation and end/release timestamps.
 
+Each lease's figures round to whole cents, so an amount below half a cent counts as
+$0 and cannot trip a budget. Flavors priced at a cent or two an hour reach that with
+short TTLs or runs: at $0.0112/hour, anything under about 27 minutes records $0.
+
 The read-only lease audit cannot reconstruct an earlier deletion time that was not
 persisted. Confirmed stop/resume intervals remain authoritative.
 
