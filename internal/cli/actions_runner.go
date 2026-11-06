@@ -1102,7 +1102,8 @@ func windowsGitBashDiscoveryPowerShell() string {
 // work. An existing Git for Windows Bash is reused wherever it is installed; a
 // guest without one (MinGit has no bash.exe) gets the pinned, verified Git for
 // Windows installer without a machine PATH change. The runner's own PATH gains
-// that bin directory before config.cmd records it.
+// that bin directory before config.cmd records it, and the directory is recorded
+// for the listener, whose start command must stay short.
 func windowsRunnerGitBashPowerShell() string {
 	return windowsGitBashDiscoveryPowerShell() + `$crabboxGitBin = Find-CrabboxGitBashBin
 if (-not $crabboxGitBin) {
@@ -1127,8 +1128,13 @@ if (-not $crabboxGitBin) {
   }
 }
 $env:Path = $crabboxGitBin + ";" + $env:Path
+[IO.File]::WriteAllText((Join-Path $runnerDir "` + windowsRunnerGitBinRecord + `"), $crabboxGitBin)
 `
 }
+
+// windowsRunnerGitBinRecord names the file in the runner directory that holds
+// the Git Bash bin directory runner setup chose.
+const windowsRunnerGitBinRecord = "crabbox-git-bin.txt"
 
 // actionsLeaseLifetimeWarning reports a lease whose recorded expiry falls before
 // the GitHub-runner hydration budget ends. Heartbeats renew idle time but not

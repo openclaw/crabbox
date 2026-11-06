@@ -3483,12 +3483,17 @@ func (f *stringListFlag) Get() any {
 }
 
 // windowsRunnerListenerRunScript is run-crabbox.ps1, which the listener task
-// runs: the Git Bash that setup used goes first on the listener's PATH.
+// runs: the Git Bash that setup recorded goes first on the listener's PATH. A
+// runner configured before that record existed keeps the Program Files check.
+// It travels inside the listener start command, which cmd.exe limits to 8191
+// characters, so discovery itself stays in setup.
 func windowsRunnerListenerRunScript() string {
 	return `$ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $PSScriptRoot
-` + windowsGitBashDiscoveryPowerShell() + `$crabboxGitBin = Find-CrabboxGitBashBin
-if ($crabboxGitBin) { $env:Path = $crabboxGitBin + ";" + $env:Path }
+$crabboxGitBin = Join-Path $env:ProgramFiles "Git\bin"
+$crabboxGitBinRecord = Join-Path $PSScriptRoot "` + windowsRunnerGitBinRecord + `"
+if (Test-Path -LiteralPath $crabboxGitBinRecord) { $crabboxGitBin = [IO.File]::ReadAllText($crabboxGitBinRecord).Trim() }
+if ($crabboxGitBin -and (Test-Path -LiteralPath (Join-Path $crabboxGitBin "bash.exe"))) { $env:Path = $crabboxGitBin + ";" + $env:Path }
 & .\run.cmd
 exit $LASTEXITCODE
 `
