@@ -224,7 +224,7 @@ Direct Linux leases can capture an OVH Public Cloud **instance snapshot** as an
 Ubuntu or Debian image plus the full managed bootstrap:
 
 ```sh
-crabbox warmup --provider ovh --id my-app
+crabbox warmup --provider ovh --slug my-app
 crabbox checkpoint create --provider ovh --id my-app --mode native
 crabbox checkpoint list --verify
 crabbox checkpoint fork <checkpoint-id>
