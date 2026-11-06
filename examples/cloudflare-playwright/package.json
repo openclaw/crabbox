@@ -1,0 +1,8 @@
+{
+  "name": "crabbox-cloudflare-playwright-example",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "dependencies": { "playwright": "1.61.1" }
+}
