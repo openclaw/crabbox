@@ -202,11 +202,24 @@ cache_ready() {
 }
 # Only object storage is hardlinked (immutable); HEAD, config, refs and markers
 # are copied so a workload writing in one workspace cannot alter a sibling or the cache.
+# A receiver-created .git holds only these names: workload-installed hooks, info
+# or logs are never cached, and a workspace reuse removes them.
+metadata_name_allowed() {
+  case "$1" in HEAD|config|objects|refs|packed-refs|index|crabbox|crabbox-local-owner|crabbox-local-artifact|crabbox-local-complete) return 0 ;; esac
+  return 1
+}
+prune_metadata() {
+  for entry in "$1"/* "$1"/.[!.]*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    metadata_name_allowed "${entry##*/}" || rm -rf -- "$entry" || return 1
+  done
+}
 copy_metadata() {
   mkdir -- "$2" || return 1
   for entry in "$1"/* "$1"/.[!.]*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
     name="${entry##*/}"
+    metadata_name_allowed "$name" || continue
     if [ "$name" = objects ] && [ ! -L "$entry" ]; then
       cp -al "$entry" "$2/objects" 2>/dev/null || { rm -rf -- "$2/objects"; cp -a "$entry" "$2/objects" || return 1; }
     else
@@ -314,6 +327,7 @@ store_cache "$metadata" || true
 miss() { exit 1; }
 if [ -e "$metadata" ] || [ -L "$metadata" ]; then
   owned_metadata && verify_metadata || miss
+  prune_metadata "$metadata" || fail
   # Rebuild the index as an import does: drops assume-unchanged/skip-worktree bits a workload may have set.
   plain_git --git-dir="$metadata" read-tree "$expected_head" >/dev/null 2>&1 || miss
   # A new sync is starting: drop success markers and stale hydration state, as an import would.

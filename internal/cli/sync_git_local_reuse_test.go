@@ -206,3 +206,27 @@ func TestGitLocalReceiverProbeClearsHiddenIndexFlags(t *testing.T) {
 		t.Fatalf("hidden index flags survived reuse:\n%s", flags)
 	}
 }
+
+func TestGitLocalReceiverReuseDropsWorkloadInstalledHooks(t *testing.T) {
+	plan, data := reuseFixture(t)
+	workdir := t.TempDir()
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	hook := filepath.Join(workdir, ".git/hooks/pre-commit")
+	mustWriteTestFile(t, hook, "#!/bin/sh\nexit 1\n")
+	mustWriteTestFile(t, filepath.Join(workdir, ".git/info/exclude"), "*\n")
+	// Evict the cache so a probe hit repopulates it from the modified workspace.
+	if err := os.RemoveAll(plan.CacheRoot); err != nil {
+		t.Fatal(err)
+	}
+	requireLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil)
+	for _, path := range []string{hook, filepath.Join(workdir, ".git/info")} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("workspace reuse kept %s: %v", path, err)
+		}
+	}
+	fresh := t.TempDir()
+	requireLocalReceiver(t, remoteGitLocalSeedProbe(fresh, plan), nil)
+	if _, err := os.Lstat(filepath.Join(fresh, ".git/hooks")); !os.IsNotExist(err) {
+		t.Fatalf("cache restore inherited a hooks directory: %v", err)
+	}
+}
