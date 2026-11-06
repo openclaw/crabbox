@@ -377,6 +377,7 @@ if [ -e "$manifest" ] || [ -L "$manifest" ]; then
   mkdir -- "$fresh/crabbox" || miss
   cp -- "$manifest" "$fresh/crabbox/sync-manifest" || miss
 fi
+staged_raw=
 if [ -e "$metadata" ] || [ -L "$metadata" ]; then
   # While .git is moved aside, a fallback import looks for the manifest at the raw
   # location: leave it there so a kill between the two renames cannot lose file ownership.
@@ -389,6 +390,7 @@ if [ -e "$metadata" ] || [ -L "$metadata" ]; then
     raw_tmp="$(mktemp "$raw_dir/sync-manifest.XXXXXXXX")" || miss
     cp -- "$manifest" "$raw_tmp" || { rm -f -- "$raw_tmp"; miss; }
     mv -f -- "$raw_tmp" "$raw_dir/sync-manifest" || { rm -f -- "$raw_tmp"; miss; }
+    staged_raw=1
   fi
   previous="$stage/previous.git"
   mv -- "$metadata" "$previous" || miss
@@ -401,9 +403,12 @@ if [ -e "$metadata" ] || [ -L "$metadata" ]; then
   fi
   if ! rm -rf -- "$previous"; then stage=; fail; fi
   backup=
-  # The manifest is canonical inside .git again.
-  rm -f -- "$workdir/.crabbox/sync-manifest" 2>/dev/null || true
-  rmdir -- "$workdir/.crabbox" 2>/dev/null || true
+  # The manifest is canonical inside .git again. Only undo what this probe staged, in the
+  # directory it validated: never follow a link planted at .crabbox.
+  if [ -n "$staged_raw" ] && [ -d "$workdir/.crabbox" ] && [ ! -L "$workdir/.crabbox" ]; then
+    rm -f -- "$workdir/.crabbox/sync-manifest" || true
+    rmdir -- "$workdir/.crabbox" 2>/dev/null || true
+  fi
 else
   mv -- "$fresh" "$metadata" || miss
 fi

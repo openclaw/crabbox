@@ -476,3 +476,20 @@ func TestGitLocalReceiverFragmentCacheEntryIsReplacedByImport(t *testing.T) {
 		t.Fatalf("import did not repair the fragment entry: %q", out)
 	}
 }
+
+func TestGitLocalReceiverProbeCleanupNeverFollowsRawDirectoryLink(t *testing.T) {
+	plan, data := reuseFixture(t)
+	workdir := t.TempDir()
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	// No Git-side manifest to stage, and .crabbox is a link to a directory outside the workspace.
+	outsideDir := t.TempDir()
+	victim := filepath.Join(outsideDir, "sync-manifest")
+	mustWriteTestFile(t, victim, "untouched")
+	if err := os.Symlink(outsideDir, filepath.Join(workdir, ".crabbox")); err != nil {
+		t.Fatal(err)
+	}
+	requireLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil)
+	if got, err := os.ReadFile(victim); err != nil || string(got) != "untouched" {
+		t.Fatalf("cleanup followed the .crabbox link: %q %v", got, err)
+	}
+}
