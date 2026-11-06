@@ -233,7 +233,10 @@ maintain_cache() {
   find "$cache_root" -maxdepth 1 -name '.tmp.*' -mmin +60 -exec rm -rf -- {} + >/dev/null 2>&1 || true
   # A store that lost a publication race is renamed inside the winner; a real entry
   # never has a "git" child, so such a tree is always garbage.
-  for nested in "$cache_root"/*.git/git; do
+  for subject in "$cache_root"/*.git; do
+    # Never traverse a linked subject: only real directories can hold a loser tree.
+    [ -d "$subject" ] && [ ! -L "$subject" ] || continue
+    nested="$subject/git"
     [ -e "$nested" ] || [ -L "$nested" ] || continue
     rm -rf -- "$nested" || true
   done

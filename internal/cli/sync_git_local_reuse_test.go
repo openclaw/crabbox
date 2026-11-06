@@ -493,3 +493,19 @@ func TestGitLocalReceiverProbeCleanupNeverFollowsRawDirectoryLink(t *testing.T) 
 		t.Fatalf("cleanup followed the .crabbox link: %q %v", got, err)
 	}
 }
+
+func TestGitLocalReceiverCacheUpkeepNeverTraversesLinkedSubjects(t *testing.T) {
+	plan, data := reuseFixture(t)
+	requireLocalReceiver(t, remoteGitLocalSeed(t.TempDir(), plan), data)
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "git", "keep")
+	mustWriteTestFile(t, victim, "untouched")
+	link := filepath.Join(plan.CacheRoot, strings.Repeat("e", 64)+".git")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	requireLocalReceiver(t, remoteGitLocalSeedProbe(t.TempDir(), plan), nil)
+	if got, err := os.ReadFile(victim); err != nil || string(got) != "untouched" {
+		t.Fatalf("upkeep deleted through a linked cache subject: %q %v", got, err)
+	}
+}
