@@ -153,16 +153,20 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		if !submissionStarted {
 			return core.NativeCheckpointCreateResult{}, err
 		}
-		// A lost or failed response may still have created the snapshot. The
-		// name is deterministic, so look once and journal what exists.
-		if listed, listErr := client.ListSnapshots(ctx, project, region); listErr == nil {
-			if matches := snapshotsNamed(listed, name); len(matches) == 1 && matches[0].ID != "" {
-				recovered := checkpointResult(matches[0], region, metadata)
-				if req.Persist != nil {
-					err = errors.Join(err, req.Persist(recovered))
-				}
-				return recovered, err
+		// A definitive client-error answer means OVH refused the request, so no
+		// snapshot exists and the source reservation can be dropped.
+		if isDeterminateCreateError(err) {
+			submissionStarted = false
+			return core.NativeCheckpointCreateResult{}, err
+		}
+		// A lost response may still have created the snapshot. The name is
+		// deterministic, so wait for it to be listed and journal what exists.
+		if recovered, recoverErr := discoverSnapshot(ctx, client, project, region, name); recoverErr == nil {
+			result := checkpointResult(recovered, region, metadata)
+			if req.Persist != nil {
+				err = errors.Join(err, req.Persist(result))
 			}
+			return result, err
 		}
 		return core.NativeCheckpointCreateResult{}, err
 	}
@@ -388,8 +392,9 @@ func loadAndValidateSnapshot(ctx context.Context, client snapshotClient, project
 	id := strings.TrimSpace(req.Image.ID)
 	if id == "" {
 		// The create response was lost before OVH named the snapshot. Never guess
-		// a delete target from the name alone; the operator removes it by hand.
-		return Image{}, core.Exit(2, "OVH checkpoint record has no snapshot ID (the create response was lost): find snapshot %q in region %s in the OVH console, delete it there, then run checkpoint delete --local-only", snapshotName(req.Metadata[checkpointMetadataCheckpoint]), core.Blank(req.Image.Region, "unknown"))
+		// a delete target from the name alone. Core holds such a record (and its
+		// source) as an unresolved capture, exactly as for other native providers.
+		return Image{}, core.Exit(2, "OVH checkpoint record has no snapshot ID (the create response was lost); it stays held as an unresolved capture. Look for snapshot %q in region %s in the OVH console; Crabbox will not delete a snapshot it cannot identify by id", snapshotName(req.Metadata[checkpointMetadataCheckpoint]), core.Blank(req.Image.Region, "unknown"))
 	}
 	snapshot, err := client.GetSnapshot(ctx, project, id)
 	if err != nil {

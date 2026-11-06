@@ -322,6 +322,22 @@ func TestCreateNativeCheckpointJournalsReturnedIDBeforeFollowUpRead(t *testing.T
 	}
 }
 
+func TestCreateNativeCheckpointDefinitiveRejectionDropsReservation(t *testing.T) {
+	f := newCheckpointFixture(t)
+	f.fake.createErr = &APIError{Status: 403}
+	_, err := (Provider{}).CreateNativeCheckpoint(context.Background(), f.request())
+	var notSubmitted core.NativeCheckpointNotSubmittedError
+	if err == nil || !errors.As(err, &notSubmitted) {
+		t.Fatalf("a 4xx refusal proves nothing was submitted: %T %v", err, err)
+	}
+	// A throttle or timeout is ambiguous and keeps custody.
+	f2 := newCheckpointFixture(t)
+	f2.fake.createErr = &APIError{Status: 429}
+	if _, err := (Provider{}).CreateNativeCheckpoint(context.Background(), f2.request()); err == nil || errors.As(err, &notSubmitted) {
+		t.Fatalf("429 is ambiguous: %v", err)
+	}
+}
+
 func TestCreateNativeCheckpointRecoversSnapshotAfterLostResponse(t *testing.T) {
 	f := newCheckpointFixture(t)
 	f.fake.lostResponse = true
@@ -647,7 +663,7 @@ func TestDeleteNativeCheckpointNeverGuessesTargetAfterLostResponse(t *testing.T)
 	res.Image.ID = ""
 	// A same-named snapshot exists, but a record without an id must not delete it.
 	err := (Provider{}).DeleteNativeCheckpoint(context.Background(), res)
-	if err == nil || !strings.Contains(err.Error(), "create response was lost") || !strings.Contains(err.Error(), "crabbox-chk_abc123") {
+	if err == nil || !strings.Contains(err.Error(), "create response was lost") || !strings.Contains(err.Error(), "crabbox-chk_abc123") || strings.Contains(err.Error(), "--local-only") {
 		t.Fatalf("err=%v", err)
 	}
 	if len(f.fake.deleted) != 0 {
