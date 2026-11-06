@@ -111,7 +111,8 @@ func TestGitLocalReceiverProbeRejectsTamperedCache(t *testing.T) {
 }
 
 func TestGitLocalReceiverProbeErrorOnForeignRepositoryFallsBack(t *testing.T) {
-	plan, _ := reuseFixture(t)
+	plan, data := reuseFixture(t)
+	requireLocalReceiver(t, remoteGitLocalSeed(t.TempDir(), plan), data) // warm the cache
 	workdir := t.TempDir()
 	runGit(t, workdir, "init", "-q")
 	if out, err := runLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil); err == nil || strings.Contains(string(out), "reused-") {
@@ -119,6 +120,9 @@ func TestGitLocalReceiverProbeErrorOnForeignRepositoryFallsBack(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workdir, ".git/HEAD")); err != nil {
 		t.Fatalf("foreign repository modified: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, ".git/crabbox-local-owner")); !os.IsNotExist(err) {
+		t.Fatalf("foreign repository was claimed: %v", err)
 	}
 }
 
@@ -265,6 +269,29 @@ func TestGitLocalReceiverProbeInterruptedSwapRetainsPreviousMetadata(t *testing.
 	if err != nil || len(previous) != 1 {
 		t.Fatalf("previous metadata and manifest not retained: %v %v", previous, err)
 	}
+	// .git is absent here: the canonical raw manifest must already be in place so the
+	// fallback import (a probe miss) carries file ownership forward.
+	if got, err := os.ReadFile(filepath.Join(workdir, ".crabbox/sync-manifest")); err != nil || string(got) != "prior.txt\x00" {
+		t.Fatalf("manifest not at the raw location during the swap window: %q %v", got, err)
+	}
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	if got, err := os.ReadFile(filepath.Join(workdir, ".git/crabbox/sync-manifest")); err != nil || string(got) != "prior.txt\x00" {
+		t.Fatalf("fallback import lost file ownership: %q %v", got, err)
+	}
+}
+
+func TestGitLocalReceiverProbeLeavesCanonicalManifestInsideGit(t *testing.T) {
+	plan, data := reuseFixture(t)
+	workdir := t.TempDir()
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	mustWriteTestFile(t, filepath.Join(workdir, ".git/crabbox/sync-manifest"), "owned.txt\x00")
+	requireLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil)
+	if got, err := os.ReadFile(filepath.Join(workdir, ".git/crabbox/sync-manifest")); err != nil || string(got) != "owned.txt\x00" {
+		t.Fatalf("manifest lost across a successful probe: %q %v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(workdir, ".crabbox")); !os.IsNotExist(err) {
+		t.Fatalf("temporary raw manifest location not cleaned: %v", err)
+	}
 }
 
 func TestGitLocalReceiverStoreSweepsStaleCacheStaging(t *testing.T) {
@@ -339,5 +366,74 @@ func TestGitLocalReceiverSweepRemovesNestedLoserTrees(t *testing.T) {
 	requireLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil)
 	if _, err := os.Lstat(filepath.Join(plan.CacheRoot, plan.Digest+".git", "git")); !os.IsNotExist(err) {
 		t.Fatalf("nested tree survived a cache touch: %v", err)
+	}
+}
+
+func TestGitLocalReceiverRetentionBoundRepairedOnCacheHits(t *testing.T) {
+	plan, data := reuseFixture(t)
+	workdir := t.TempDir()
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	// Simulate a store interrupted after publishing a fourth subject, before pruning.
+	for day, name := range []string{"a", "b", "c"} {
+		old := filepath.Join(plan.CacheRoot, strings.Repeat(name, 64)+".git")
+		if err := os.MkdirAll(old, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		past := time.Date(2020, 1, day+1, 0, 0, 0, 0, time.UTC)
+		if err := os.Chtimes(old, past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, run := range map[string]func(){
+		"probe":    func() { requireLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil) },
+		"reimport": func() { requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data) },
+	} {
+		entries, _ := filepath.Glob(filepath.Join(plan.CacheRoot, "*.git"))
+		if len(entries) != 4 {
+			t.Fatalf("%s: fixture must hold four subjects, got %v", name, entries)
+		}
+		run()
+		entries, _ = filepath.Glob(filepath.Join(plan.CacheRoot, "*.git"))
+		if len(entries) != 3 {
+			t.Fatalf("%s did not repair the retention bound: %v", name, entries)
+		}
+		if _, err := os.Stat(filepath.Join(plan.CacheRoot, plan.Digest+".git")); err != nil {
+			t.Fatalf("%s evicted the live subject: %v", name, err)
+		}
+		// Re-create the oldest fixture entry for the next iteration.
+		old := filepath.Join(plan.CacheRoot, strings.Repeat("a", 64)+".git")
+		if err := os.MkdirAll(old, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+		if err := os.Chtimes(old, past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestGitLocalReceiverUpgradeFromCachelessWorkspace(t *testing.T) {
+	plan, data := reuseFixture(t)
+	workdir := t.TempDir()
+	// A workspace written by a release without the host cache.
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	requireLocalReceiver(t, remoteGitLocalSeedFinalize(workdir, plan), nil)
+	mustWriteTestFile(t, filepath.Join(workdir, ".git/crabbox/sync-manifest"), "synced.txt\x00")
+	mustWriteTestFile(t, filepath.Join(workdir, "synced.txt"), "working data")
+	if err := os.RemoveAll(plan.CacheRoot); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil); err == nil || strings.Contains(string(out), "reused-") {
+		t.Fatalf("cacheless host must miss: %q %v", out, err)
+	}
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	if got, err := os.ReadFile(filepath.Join(workdir, ".git/crabbox/sync-manifest")); err != nil || string(got) != "synced.txt\x00" {
+		t.Fatalf("existing manifest lost on upgrade: %q %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(workdir, "synced.txt")); err != nil || string(got) != "working data" {
+		t.Fatalf("working data changed on upgrade: %q %v", got, err)
+	}
+	if out := requireLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil); strings.TrimSpace(string(out)) != "reused-cache" {
+		t.Fatalf("cache not populated by the post-upgrade import: %q", out)
 	}
 }

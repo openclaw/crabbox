@@ -220,10 +220,16 @@ copy_metadata() {
     fi
   done
 }
-# Drop staging left by an interrupted store of any earlier run. Runs on every
-# cache touch, hits included, so an orphan cannot outlive its hour of grace.
-sweep_cache_staging() {
+# Cache upkeep, run on every cache touch (store, reimport, probe): drop staging
+# left by an interrupted store, nested losers of a publication race, and
+# subjects beyond the retention bound.
+maintain_cache() {
   cache_ready || return 0
+  # Keep the three most recently used subjects, repairing the bound after an
+  # interrupted store as well as after a normal one.
+  ls -1t "$cache_root" | grep -E '^[0-9a-f]{64}[.]git$' | tail -n +4 | while IFS= read -r old; do
+    rm -rf -- "$cache_root/$old"
+  done
   find "$cache_root" -maxdepth 1 -name '.tmp.*' -mmin +60 -exec rm -rf -- {} + >/dev/null 2>&1 || true
   # A store that lost a publication race is renamed inside the winner; a real entry
   # never has a "git" child, so such a tree is always garbage.
@@ -234,10 +240,10 @@ sweep_cache_staging() {
 }
 store_cache() (
   umask 077
-  sweep_cache_staging
+  maintain_cache
   if [ -d "$cache_entry" ] && [ ! -L "$cache_entry" ]; then touch -- "$cache_entry"; return 0; fi
   mkdir -p -- "$cache_root" && cache_ready || return 1
-  sweep_cache_staging
+  maintain_cache
   tmp="$(mktemp -d "$cache_root/.tmp.XXXXXXXX")" || return 1
   # A subshell resets inherited signal traps: convert signals into an exit so the EXIT trap cleans up.
   trap 'rm -rf -- "$tmp"' EXIT
@@ -252,10 +258,7 @@ store_cache() (
     mv -- "$tmp/git" "$cache_entry" || return 1
     rm -rf -- "$cache_entry/git" || return 1
   fi
-  # Keep the three most recently used subjects.
-  ls -1t "$cache_root" | grep -E '^[0-9a-f]{64}[.]git$' | tail -n +4 | while IFS= read -r old; do
-    rm -rf -- "$cache_root/$old"
-  done
+  maintain_cache
   return 0
 )
 `
@@ -344,7 +347,7 @@ miss() { exit 1; }
 # Never trust a workspace .git a workload has touched (hooks, config values, ref locks,
 # index bits). Reuse always restores a pristine, re-verified copy of the import-time cache
 # entry, exactly the metadata a full import would have published.
-sweep_cache_staging
+maintain_cache
 cache_ready && [ -d "$cache_entry" ] && [ ! -L "$cache_entry" ] || miss
 manifest_dir="$workdir/.crabbox"
 if [ -e "$metadata" ] || [ -L "$metadata" ]; then
@@ -366,6 +369,16 @@ if [ -e "$manifest" ] || [ -L "$manifest" ]; then
   cp -- "$manifest" "$fresh/crabbox/sync-manifest" || miss
 fi
 if [ -e "$metadata" ] || [ -L "$metadata" ]; then
+  # While .git is moved aside, a fallback import looks for the manifest at the raw
+  # location: leave it there so a kill between the two renames cannot lose file ownership.
+  if [ -f "$manifest" ]; then
+    raw_dir="$workdir/.crabbox"
+    [ ! -e "$raw_dir" ] || { [ -d "$raw_dir" ] && [ ! -L "$raw_dir" ]; } || miss
+    mkdir -p -- "$raw_dir" || miss
+    [ ! -e "$raw_dir/sync-manifest" ] || { [ -f "$raw_dir/sync-manifest" ] && [ ! -L "$raw_dir/sync-manifest" ]; } || miss
+    cp -- "$manifest" "$raw_dir/sync-manifest.new" || miss
+    mv -f -- "$raw_dir/sync-manifest.new" "$raw_dir/sync-manifest" || miss
+  fi
   previous="$stage/previous.git"
   mv -- "$metadata" "$previous" || miss
   # An interrupt between the moves must retain the previous metadata (cleanup keeps the stage).
@@ -377,6 +390,9 @@ if [ -e "$metadata" ] || [ -L "$metadata" ]; then
   fi
   if ! rm -rf -- "$previous"; then stage=; fail; fi
   backup=
+  # The manifest is canonical inside .git again.
+  rm -f -- "$workdir/.crabbox/sync-manifest" "$workdir/.crabbox/sync-manifest.new" 2>/dev/null || true
+  rmdir -- "$workdir/.crabbox" 2>/dev/null || true
 else
   mv -- "$fresh" "$metadata" || miss
 fi
