@@ -640,3 +640,17 @@ func TestDoctorAcceptsCheckpointSnapshotImage(t *testing.T) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
+
+func TestDeleteNativeCheckpointNeverGuessesTargetAfterLostResponse(t *testing.T) {
+	f := newCheckpointFixture(t)
+	res := ownedResource(f)
+	res.Image.ID = ""
+	// A same-named snapshot exists, but a record without an id must not delete it.
+	err := (Provider{}).DeleteNativeCheckpoint(context.Background(), res)
+	if err == nil || !strings.Contains(err.Error(), "create response was lost") || !strings.Contains(err.Error(), "crabbox-chk_abc123") {
+		t.Fatalf("err=%v", err)
+	}
+	if len(f.fake.deleted) != 0 {
+		t.Fatalf("deleted by name: %v", f.fake.deleted)
+	}
+}

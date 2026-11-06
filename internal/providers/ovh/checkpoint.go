@@ -387,7 +387,9 @@ func waitForSnapshot(ctx context.Context, client snapshotClient, project string,
 func loadAndValidateSnapshot(ctx context.Context, client snapshotClient, project string, req core.NativeCheckpointResourceRequest) (Image, error) {
 	id := strings.TrimSpace(req.Image.ID)
 	if id == "" {
-		return Image{}, core.Exit(2, "OVH checkpoint record has no snapshot ID")
+		// The create response was lost before OVH named the snapshot. Never guess
+		// a delete target from the name alone; the operator removes it by hand.
+		return Image{}, core.Exit(2, "OVH checkpoint record has no snapshot ID (the create response was lost): find snapshot %q in region %s in the OVH console, delete it there, then run checkpoint delete --local-only", snapshotName(req.Metadata[checkpointMetadataCheckpoint]), core.Blank(req.Image.Region, "unknown"))
 	}
 	snapshot, err := client.GetSnapshot(ctx, project, id)
 	if err != nil {
