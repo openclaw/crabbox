@@ -265,6 +265,8 @@ already holds the installed baseline, the managed bootstrap verifies the baked
 readiness manifest and skips the baseline package transaction, as described in
 [Prebaked images](../features/prebaked-images.md).
 
+While a checkpoint of a lease is unresolved (for example OVH accepted the snapshot but the response was lost before its id was recorded), `stop` and `cleanup` refuse to delete that lease's instance until `crabbox checkpoint` reconciles the record; the delete also runs under the same claim fence as snapshot creation, so a release cannot remove the source mid-capture.
+
 `crabbox image delete <snapshot-id> --provider ovh` runs directly (no
 coordinator admin auth), rejects `--project`, and works only when exactly one
 local `ovh-snapshot` record claims that id. `checkpoint delete` removes the

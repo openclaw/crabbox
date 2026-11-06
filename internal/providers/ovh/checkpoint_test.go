@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -557,5 +560,83 @@ func TestResolveImageBootsFromCheckpointSnapshot(t *testing.T) {
 	broken.getErr = errors.New("api down")
 	if _, err := resolveImage(ctx, broken, "project-test", "GRA11", "snap-1"); err == nil || !strings.Contains(err.Error(), "api down") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+// holdSource journals an unresolved native checkpoint for the lease, as a lost
+// snapshot response would, directly in the local checkpoint store.
+func holdSource(t *testing.T, leaseID string) {
+	t.Helper()
+	dir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "checkpoints", "chk_held")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := fmt.Sprintf(`{"id":"chk_held","kind":%q,"provider":"ovh","leaseId":%q,"createdAt":%q,"native":{"provider":"ovh","direct":true}}`,
+		core.CheckpointKindOVH, leaseID, time.Now().UTC().Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(dir, "checkpoint.json"), []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReleaseAndCleanupRefuseSourceWithUnresolvedCheckpoint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}}, images: []Image{{ID: "image-id", Name: "Ubuntu 24.04"}}}
+	backend := testBackend(fake)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "held-lobster"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	holdSource(t, lease.LeaseID)
+
+	err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
+	if err == nil || !strings.Contains(err.Error(), "unresolved checkpoint chk_held") {
+		t.Fatalf("release err=%v", err)
+	}
+	if len(fake.deletedInstances) != 0 || len(fake.deletedKeys) != 0 {
+		t.Fatalf("release deleted a held source: instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || !exists {
+		t.Fatalf("claim exists=%t err=%v", exists, err)
+	}
+
+	// Cleanup skips the held lease instead of aborting or deleting it.
+	if err := markClaimReleased(lease.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	backend.RT.Stderr = &stderr
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.deletedInstances) != 0 || !strings.Contains(stderr.String(), "checkpoint hold") {
+		t.Fatalf("deleted=%v stderr=%q", fake.deletedInstances, stderr.String())
+	}
+}
+
+func TestDoctorAcceptsCheckpointSnapshotImage(t *testing.T) {
+	base := &fakeAPI{
+		regions: []Region{{Name: "GRA11"}},
+		flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}},
+		images:  []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
+	}
+	api := &fakeSnapshotAPI{fakeAPI: base, snapshots: []Image{{ID: "snap-1", Name: "crabbox-chk_abc123", Region: "GRA11", Status: "active"}}}
+	cfg := core.Config{OVH: core.OVHConfig{ProjectID: "project-test", Region: "GRA11", Image: "snap-1", Flavor: "b3-8"}}
+	backend := NewBackend(Provider{}.Spec(), cfg, core.Runtime{})
+	backend.clientFactory = func(core.Config, core.Runtime) (API, error) { return api, nil }
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil || result.Status == "failed" || !strings.Contains(result.Message, "inventory=ready") {
+		t.Fatalf("snapshot image must pass the doctor: %+v err=%v", result, err)
+	}
+	for _, check := range result.Checks {
+		if check.Status == "failed" {
+			t.Fatalf("snapshot image failed a doctor check: %+v", check)
+		}
+	}
+	// A snapshot that is not usable fails the image check, not the whole run.
+	api.snapshots[0].Status = "saving"
+	result, err = backend.Doctor(context.Background(), core.DoctorRequest{})
+	if err != nil || len(result.Checks) != 1 || result.Checks[0].Check != "image" || !strings.Contains(result.Checks[0].Message, "status=saving") {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }

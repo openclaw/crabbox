@@ -89,8 +89,12 @@ func (b *Backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 			return core.DoctorResult{}, err
 		}
 		if cfg.OVH.Image != "" {
-			if _, err := selectImage(images, cfg.OVH.Image); err != nil {
-				return doctorCheckFailure("image", err.Error()), nil
+			if _, err := selectImageOrSnapshot(ctx, client, cfg.OVH.ProjectID, cfg.OVH.Region, cfg.OVH.Image, images); err != nil {
+				var exit core.ExitError
+				if errors.As(err, &exit) {
+					return doctorCheckFailure("image", err.Error()), nil
+				}
+				return core.DoctorResult{}, err
 			}
 		}
 	}
@@ -621,6 +625,10 @@ func (b *Backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s reason=checkpoint hold: %v\n", server.DisplayID(), err)
+			continue
+		}
 		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", server.DisplayID(), server.Name)
 		if req.DryRun {
 			continue
@@ -687,10 +695,21 @@ func (b *Backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 			return core.Exit(2, "ovh cleanup claim disappeared during recovery for lease=%s", recovered.LeaseID)
 		}
 	}
-	if server.CloudID != "" {
+	// Snapshot creation holds this same claim fence, so a release cannot delete
+	// the source mid-capture, and an unresolved checkpoint blocks the delete.
+	if err := core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return err
+		}
+		if server.CloudID == "" {
+			return nil
+		}
 		if err := client.DeleteInstance(ctx, b.Cfg.OVH.ProjectID, server.CloudID); err != nil && !isOVHNotFound(err) {
 			return err
 		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	if claim.Labels[ovhSSHKeyOwnedLabel] == "true" {
 		keyID := strings.TrimSpace(claim.Labels[ovhSSHKeyIDLabel])
@@ -782,14 +801,33 @@ func resolveImage(ctx context.Context, client API, projectID, region, value stri
 	if err != nil {
 		return Image{}, err
 	}
-	image, err := selectImage(images, value)
+	image, err := selectImageOrSnapshot(ctx, client, projectID, region, value, images)
 	if err != nil {
-		if snapshot, ok, snapErr := resolveCheckpointSnapshot(ctx, client, projectID, region, value, images); ok || snapErr != nil {
-			return snapshot, snapErr
+		var exit core.ExitError
+		if errors.As(err, &exit) {
+			return Image{}, core.Exit(2, "%v for project=%s region=%s", err, projectID, region)
 		}
-		return Image{}, core.Exit(2, "%v for project=%s region=%s", err, projectID, region)
+		return Image{}, err
 	}
 	return image, nil
+}
+
+// selectImageOrSnapshot resolves a public image, then a Crabbox checkpoint
+// snapshot by exact id. A transport failure while probing snapshots is
+// returned as-is; every other failure is the ordinary selection error.
+func selectImageOrSnapshot(ctx context.Context, client API, projectID, region, value string, images []Image) (Image, error) {
+	image, err := selectImage(images, value)
+	if err == nil {
+		return image, nil
+	}
+	snapshot, ok, snapErr := resolveCheckpointSnapshot(ctx, client, projectID, region, value, images)
+	if snapErr != nil {
+		return Image{}, snapErr
+	}
+	if ok {
+		return snapshot, nil
+	}
+	return Image{}, err
 }
 
 // resolveCheckpointSnapshot lets a lease boot from a Crabbox checkpoint
