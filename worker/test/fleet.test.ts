@@ -134,6 +134,7 @@ import {
   runtimeAdapterRelayFrameLimit,
   runtimeAdapterRelayTimeoutMs,
 } from "../src/runtime-adapter-relay";
+import { leaseProviderName } from "../src/slug";
 import type {
   Env,
   ExternalRunnerRecord,
@@ -150,7 +151,12 @@ import type {
   RunEventRecord,
   RunRecord,
 } from "../src/types";
-import { addLeaseToCostLimitUsage, createCostLimitUsage, leaseCost } from "../src/usage";
+import {
+  addLeaseToCostLimitUsage,
+  createCostLimitUsage,
+  leaseCost,
+  type UsageGroup,
+} from "../src/usage";
 import { gcpBillingBody, gcpBillingError, gcpBillingMessage } from "./fixtures/gcp-billing-error";
 import { withProviderHTTP } from "./fixtures/provider-http";
 
@@ -53636,7 +53642,7 @@ describe("fleet identity", () => {
 
     expect(response.status).toBe(200);
     expect(body).toContain("provider health");
-    expect(body).toContain("7 supported");
+    expect(body).toContain("8 supported");
     expect(body).toContain("Managed SSH hosts");
     expect(body).toContain("users");
     expect(body).toContain('href="/portal/admin/users"');
@@ -55282,6 +55288,875 @@ describe("authoritative lease provider metadata", () => {
     );
     await expect(response.json()).resolves.not.toHaveProperty("lease.providerMetadata");
     expect(getServer).not.toHaveBeenCalled();
+  });
+});
+
+describe("OVH coordinator leases", () => {
+  const leaseID = "cbx_abcdef123456";
+  const projectID = "0123456789abcdef0123456789abcdef";
+  const instanceID = "11111111-1111-4111-8111-111111111111";
+  const slug = "blue-lobster";
+  const derivedName = leaseProviderName(leaseID, slug);
+  const keyName = "crabbox-cbx-abcdef123456";
+  const publicKey = "ssh-ed25519 AAAAsynthetic user@example.com";
+  const projectPath = `/1.0/cloud/project/${projectID}`;
+  const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+  const env: Partial<Env> = {
+    OVH_APPLICATION_KEY: "synthetic-app-key",
+    OVH_APPLICATION_SECRET: "synthetic-app-secret",
+    OVH_CONSUMER_KEY: "synthetic-consumer-key",
+    CRABBOX_OVH_PROJECT_ID: projectID,
+    CRABBOX_OVH_REGION: "BHS5",
+  };
+  const liveInstance = {
+    id: instanceID,
+    name: derivedName,
+    region: "BHS5",
+    status: "ACTIVE",
+    flavor: { name: "b3-8" },
+    ipAddresses: [{ ip: "203.0.113.20", version: 4, type: "public" }],
+  };
+
+  interface FakeOVHCloud {
+    calls: string[];
+    createdName: string;
+    instance: typeof liveInstance | undefined;
+    keys: Array<{ id: string; name: string; publicKey: string }>;
+    createInstance: () => Response | Promise<Response>;
+    onInstanceRead: () => void | Promise<void>;
+    deleteKey: () => Response;
+    catalog: () => Response;
+    mutations: () => string[];
+  }
+
+  // Models the OVH behavior the adapter depends on, including instances that exist after a
+  // lost response. Unrouted calls fail the test.
+  function fakeOVHCloud(overrides: Partial<FakeOVHCloud> = {}): FakeOVHCloud {
+    const cloud: FakeOVHCloud = {
+      calls: [],
+      createdName: "",
+      instance: undefined,
+      keys: [],
+      createInstance: () => {
+        cloud.instance = { ...liveInstance, name: cloud.createdName };
+        return jsonResponse(cloud.instance);
+      },
+      onInstanceRead: () => undefined,
+      deleteKey: () => new Response(null, { status: 200 }),
+      catalog: () =>
+        jsonResponse({
+          locale: { currencyCode: "USD" },
+          addons: [
+            { planCode: "b3-8.consumption", pricings: [{ price: 5_000_000, type: "consumption" }] },
+          ],
+        }),
+      mutations: () => cloud.calls.filter((call) => !call.startsWith("GET ")),
+      ...overrides,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input, init) => {
+        const providerRequest = new Request(input, init);
+        const url = new URL(providerRequest.url);
+        if (url.origin !== "https://api.us.ovhcloud.com") {
+          throw new Error(`unexpected provider origin: ${url.origin}`);
+        }
+        const path = url.pathname.replace(projectPath, "");
+        const operation = `${providerRequest.method} ${path}`;
+        if (path === "/1.0/auth/time") return jsonResponse(Math.floor(Date.now() / 1000));
+        cloud.calls.push(operation);
+        switch (operation) {
+          case "GET /flavor":
+            return jsonResponse([{ id: "flavor-id", name: "b3-8", osType: "linux" }]);
+          case "GET /image":
+            return jsonResponse([{ id: "image-id", name: "Ubuntu 24.04", status: "active" }]);
+          case "GET /region":
+            return jsonResponse(["BHS5"]);
+          case "GET /1.0/order/catalog/public/cloud":
+            return cloud.catalog();
+          case "GET /sshkey":
+            return jsonResponse(cloud.keys);
+          case "POST /sshkey": {
+            const key = { id: "key-id", name: keyName, publicKey };
+            cloud.keys = [key];
+            return jsonResponse(key);
+          }
+          case "DELETE /sshkey/key-id": {
+            const response = cloud.deleteKey();
+            if (response.ok) cloud.keys = [];
+            return response;
+          }
+          case "GET /sshkey/key-id":
+            return cloud.keys[0]
+              ? jsonResponse(cloud.keys[0])
+              : new Response("gone", { status: 404 });
+          case "POST /instance":
+            cloud.createdName = ((await providerRequest.json()) as { name: string }).name;
+            return await cloud.createInstance();
+          case "GET /instance":
+            return jsonResponse(cloud.instance ? [cloud.instance] : []);
+          case `GET /instance/${instanceID}`:
+            await cloud.onInstanceRead();
+            return cloud.instance
+              ? jsonResponse(cloud.instance)
+              : new Response("gone", { status: 404 });
+          case `DELETE /instance/${instanceID}`:
+            cloud.instance = undefined;
+            return new Response(null, { status: 200 });
+          default:
+            throw new Error(`unexpected OVH operation: ${operation}`);
+        }
+      }),
+    );
+    return cloud;
+  }
+
+  function createLease(fleet: FleetDurableObject, body: Record<string, unknown> = {}) {
+    return fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers,
+        body: {
+          leaseID,
+          slug,
+          provider: "ovh",
+          sshPublicKey: publicKey,
+          ttlSeconds: 3600,
+          idleTimeoutSeconds: 1800,
+          ...body,
+        },
+      }),
+    );
+  }
+
+  // Recovery reads pause between polls. Date stays controllable while timers run immediately.
+  function runPollsImmediately(): void {
+    const nativeSetTimeout = globalThis.setTimeout;
+    vi.stubGlobal("setTimeout", (handler: () => void, delay?: number) =>
+      nativeSetTimeout(handler, delay === 3_000 ? 0 : delay),
+    );
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("reports missing coordinator configuration without calling OVH", async () => {
+    const cloud = fakeOVHCloud();
+    const fleet = testFleet(new MemoryStorage(), {}, { ...env, CRABBOX_OVH_PROJECT_ID: "" });
+    const response = await createLease(fleet);
+    expect(response.status).toBe(424);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "provider_not_configured",
+      provider: "ovh",
+      missing: ["CRABBOX_OVH_PROJECT_ID"],
+    });
+    expect(cloud.calls).toEqual([]);
+  });
+
+  it("rejects an OS the configured image cannot satisfy as a client conflict", async () => {
+    const cloud = fakeOVHCloud();
+    const response = await createLease(testFleet(new MemoryStorage(), {}, env), {
+      os: "ubuntu:26.04",
+    });
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ error: "image_capability_mismatch" });
+    expect(cloud.mutations()).toEqual([]);
+  });
+
+  it("reserves TTL times the catalog price and records the lease identity", async () => {
+    const cloud = fakeOVHCloud();
+    const storage = new MemoryStorage();
+    const response = await createLease(testFleet(storage, {}, env), { ttlSeconds: 7200 });
+    expect(response.status).toBe(201);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "active",
+      provider: "ovh",
+      cloudID: instanceID,
+      serverName: cloud.createdName,
+      providerResourceID: cloud.createdName,
+      serverType: "b3-8",
+      region: "BHS5",
+      host: "203.0.113.20",
+      providerScope: `ovh:project:${projectID}`,
+      estimatedHourlyUSD: 0.05,
+      maxEstimatedUSD: 0.1,
+    });
+    expect(cloud.createdName).toMatch(new RegExp(`^${derivedName}-[a-f0-9]{12}$`));
+    expect(cloud.keys).toEqual([]);
+    expect(cloud.mutations()).toEqual(["POST /sshkey", "POST /instance", "DELETE /sshkey/key-id"]);
+  });
+
+  it("uses a configured rate over the catalog and the fallback when no quote exists", async () => {
+    fakeOVHCloud({ catalog: () => new Response("down", { status: 503 }) });
+    const fallback = new MemoryStorage();
+    await createLease(testFleet(fallback, {}, env));
+    expect(fallback.value<LeaseRecord>(`lease:${leaseID}`)?.estimatedHourlyUSD).toBe(0.5);
+
+    fakeOVHCloud();
+    const override = new MemoryStorage();
+    await createLease(
+      testFleet(override, {}, { ...env, CRABBOX_COST_RATES_JSON: '{"ovh:b3-8":0.25}' }),
+    );
+    expect(override.value<LeaseRecord>(`lease:${leaseID}`)?.estimatedHourlyUSD).toBe(0.25);
+  });
+
+  it("refuses a lease over budget before any OVH mutation", async () => {
+    const cloud = fakeOVHCloud();
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {}, { ...env, CRABBOX_MAX_MONTHLY_USD: "0.01" });
+    const response = await createLease(fleet);
+    expect(response.status).toBe(429);
+    await expect(response.json()).resolves.toMatchObject({ error: "cost_limit_exceeded" });
+    expect(cloud.mutations()).toEqual([]);
+    expect(cloud.instance).toBeUndefined();
+  });
+
+  it("refuses at a real catalog price before any OVH mutation", async () => {
+    // Observed live: EUR catalog, d2-2 at 0.0104/hour, which is $0.0112 at the default rate.
+    const cloud = fakeOVHCloud({
+      catalog: () =>
+        jsonResponse({
+          locale: { currencyCode: "EUR" },
+          addons: [
+            {
+              planCode: "d2-2.consumption",
+              pricings: [{ price: 1_040_000, type: "consumption", capacities: ["consumption"] }],
+            },
+          ],
+        }),
+    });
+    const fleet = testFleet(new MemoryStorage(), {}, { ...env, CRABBOX_MAX_MONTHLY_USD: "0.005" });
+    const response = await createLease(fleet, { serverType: "d2-2", serverTypeExplicit: true });
+    expect(response.status).toBe(429);
+    await expect(response.json()).resolves.toMatchObject({ error: "cost_limit_exceeded" });
+    expect(cloud.mutations()).toEqual([]);
+  });
+
+  it("admits consecutive leases that share a public key", async () => {
+    let created = 0;
+    const cloud = fakeOVHCloud({
+      createInstance: () => {
+        created += 1;
+        const id = `${created}1111111-1111-4111-8111-111111111111`;
+        return jsonResponse({ ...liveInstance, id, name: cloud.createdName });
+      },
+    });
+    const fleet = testFleet(new MemoryStorage(), {}, env);
+    const first = await createLease(fleet);
+    const second = await createLease(fleet, { leaseID: "cbx_abcdef654321", slug: "red-lobster" });
+    expect([first.status, second.status]).toEqual([201, 201]);
+    expect(cloud.keys).toEqual([]);
+  });
+
+  it("counts an active OVH lease against the next admission", async () => {
+    const cloud = fakeOVHCloud();
+    const fleet = testFleet(new MemoryStorage(), {}, { ...env, CRABBOX_MAX_MONTHLY_USD: "0.08" });
+    expect((await createLease(fleet)).status).toBe(201);
+    const creates = cloud.calls.filter((call) => call === "POST /instance");
+    const second = await createLease(fleet, { leaseID: "cbx_abcdef654321", slug: "red-lobster" });
+    expect(second.status).toBe(429);
+    expect(cloud.calls.filter((call) => call === "POST /instance")).toEqual(creates);
+  });
+
+  it("reports usage by provider and flavor", async () => {
+    fakeOVHCloud();
+    const fleet = testFleet(new MemoryStorage(), {}, env);
+    await createLease(fleet);
+    const usage = await fleet.fetch(request("GET", "/v1/usage", { headers }));
+    const body = (await usage.json()) as {
+      usage: { byProvider: UsageGroup[]; byServerType: UsageGroup[] };
+    };
+    expect(body.usage.byProvider).toEqual([
+      expect.objectContaining({ key: "ovh", activeLeases: 1, reservedUSD: 0.05 }),
+    ]);
+    expect(body.usage.byServerType).toEqual([expect.objectContaining({ key: "b3-8" })]);
+  });
+
+  it("keeps a heartbeating lease and reaps it at idle expiry", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    const cloud = fakeOVHCloud();
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {}, env);
+    expect((await createLease(fleet, { idleTimeoutSeconds: 600 })).status).toBe(201);
+
+    vi.setSystemTime(start + 5 * 60_000);
+    const heartbeat = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/heartbeat`, {
+        headers,
+        body: { expectedProvider: "ovh" },
+      }),
+    );
+    expect(heartbeat.status).toBe(200);
+
+    vi.setSystemTime(start + 11 * 60_000);
+    await fleet.alarm();
+    expect(cloud.instance).toBeDefined();
+
+    vi.setSystemTime(start + 16 * 60_000);
+    await fleet.alarm();
+    expect(cloud.instance).toBeUndefined();
+    expect(cloud.mutations()).toContain(`DELETE /instance/${instanceID}`);
+    const lease = storage.value<LeaseRecord>(`lease:${leaseID}`);
+    expect(lease?.state).toBe("expired");
+    expect(lease?.cleanupError).toBeUndefined();
+    expect(storage.alarm()).toBeUndefined();
+  });
+
+  it("reaps at TTL even while the lease stays busy", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    const cloud = fakeOVHCloud();
+    const fleet = testFleet(new MemoryStorage(), {}, env);
+    await createLease(fleet, { ttlSeconds: 1800, idleTimeoutSeconds: 1800 });
+    const heartbeat = () =>
+      fleet.fetch(request("POST", `/v1/leases/${leaseID}/heartbeat`, { headers, body: {} }));
+    vi.setSystemTime(start + 10 * 60_000);
+    await heartbeat();
+    vi.setSystemTime(start + 20 * 60_000);
+    await heartbeat();
+    vi.setSystemTime(start + 31 * 60_000);
+    await fleet.alarm();
+    expect(cloud.instance).toBeUndefined();
+  });
+
+  it("deletes the instance on release and settles committed cost", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    const cloud = fakeOVHCloud();
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {}, env);
+    await createLease(fleet, { ttlSeconds: 36_000, idleTimeoutSeconds: 36_000 });
+    vi.setSystemTime(start + 60 * 60_000);
+    const released = await fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+    );
+    expect(released.status).toBe(200);
+    // Release queues provider deletion, so a client timeout cannot lose it.
+    await fleet.alarm();
+    expect(cloud.instance).toBeUndefined();
+    const usage = await fleet.fetch(request("GET", "/v1/usage", { headers }));
+    const body = (await usage.json()) as { usage: UsageGroup };
+    expect(body.usage.reservedUSD).toBe(0.2);
+    expect(body.usage.committedUSD).toBe(0.05);
+  });
+
+  it("settles a rejected create with nothing left behind", async () => {
+    const cloud = fakeOVHCloud({
+      createInstance: () => new Response("quota exceeded", { status: 403 }),
+    });
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {}, env);
+    const response = await createLease(fleet);
+    expect(response.status).toBe(422);
+    expect(cloud.keys).toEqual([]);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      provisioningResourceMayExist: false,
+    });
+    expect(storage.alarm()).toBeUndefined();
+  });
+
+  it("settles a flavor rejection without requesting anything billable", async () => {
+    const cloud = fakeOVHCloud();
+    const storage = new MemoryStorage();
+    const response = await createLease(testFleet(storage, {}, env), {
+      serverType: "absent-flavor",
+      serverTypeExplicit: true,
+    });
+    expect(response.status).toBe(422);
+    expect(cloud.mutations()).toEqual([]);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      provisioningResourceMayExist: false,
+    });
+  });
+
+  it("retries an unremoved key after a rejected create until it is gone", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    let keyAPIHealthy = false;
+    const cloud = fakeOVHCloud({
+      createInstance: () => new Response("quota exceeded", { status: 403 }),
+      deleteKey: () =>
+        keyAPIHealthy ? new Response(null, { status: 200 }) : new Response("down", { status: 503 }),
+    });
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {}, env);
+    await createLease(fleet);
+    expect(cloud.keys).toHaveLength(1);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      providerKeyCleanupPending: true,
+      providerKeyCleanupID: "key-id",
+    });
+
+    keyAPIHealthy = true;
+    vi.setSystemTime(start + 10 * 60_000);
+    await fleet.alarm();
+    expect(cloud.keys).toEqual([]);
+    expect(
+      storage.value<LeaseRecord>(`lease:${leaseID}`)?.providerKeyCleanupPending,
+    ).toBeUndefined();
+  });
+
+  it("finds and deletes an instance created behind a lost response", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    runPollsImmediately();
+    const cloud = fakeOVHCloud({
+      createInstance: () => {
+        throw new TypeError("provider create response lost after acceptance");
+      },
+    });
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {}, { ...env, CF_VERSION_METADATA: { id: "before" } });
+    expect((await createLease(fleet)).status).toBe(500);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      provisioningResourceMayExist: true,
+      cloudID: "",
+    });
+
+    // Listing was still empty during the create; the instance surfaces afterward.
+    cloud.instance = { ...liveInstance, name: cloud.createdName };
+    const restarted = testFleet(storage, {}, { ...env, CF_VERSION_METADATA: { id: "after" } });
+    vi.setSystemTime(start + 6 * 60_000);
+    await restarted.alarm();
+    vi.setSystemTime(start + 12 * 60_000);
+    await restarted.alarm();
+    vi.setSystemTime(start + 60 * 60_000);
+    await restarted.alarm();
+    expect(cloud.instance).toBeUndefined();
+    expect(cloud.mutations()).toContain(`DELETE /instance/${instanceID}`);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cleanupError).toBeUndefined();
+  });
+
+  it("never adopts a same-named instance from another allocation", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    runPollsImmediately();
+    const cloud = fakeOVHCloud({
+      createInstance: () => new Response("bad gateway", { status: 502 }),
+    });
+    const storage = new MemoryStorage();
+    await createLease(testFleet(storage, {}, { ...env, CF_VERSION_METADATA: { id: "before" } }));
+    // An older instance holding the lease's derived name, as direct mode would create it.
+    cloud.instance = liveInstance;
+    const restarted = testFleet(storage, {}, { ...env, CF_VERSION_METADATA: { id: "after" } });
+    vi.setSystemTime(start + 6 * 60_000);
+    await restarted.alarm();
+    vi.setSystemTime(start + 12 * 60_000);
+    await restarted.alarm();
+    vi.setSystemTime(start + 60 * 60_000);
+    await restarted.alarm();
+    expect(cloud.instance).toBe(liveInstance);
+    expect(cloud.mutations()).not.toContain(`DELETE /instance/${instanceID}`);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      provisioningResourceMayExist: false,
+      cloudID: "",
+    });
+  });
+
+  it("keeps a billed instance recoverable when the create answers with no body", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    runPollsImmediately();
+    const cloud = fakeOVHCloud({ createInstance: () => new Response(null, { status: 200 }) });
+    const storage = new MemoryStorage();
+    await createLease(testFleet(storage, {}, { ...env, CF_VERSION_METADATA: { id: "before" } }));
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.provisioningResourceMayExist).toBe(true);
+
+    cloud.instance = { ...liveInstance, name: cloud.createdName };
+    const restarted = testFleet(storage, {}, { ...env, CF_VERSION_METADATA: { id: "after" } });
+    vi.setSystemTime(start + 6 * 60_000);
+    await restarted.alarm();
+    vi.setSystemTime(start + 12 * 60_000);
+    await restarted.alarm();
+    expect(cloud.instance).toBeUndefined();
+  });
+
+  it("replays a fixed create without a second instance", async () => {
+    const cloud = fakeOVHCloud();
+    const fleet = testFleet(new MemoryStorage(), {}, env);
+    const create = () =>
+      fleet.fetch(
+        request("PUT", `/v1/leases/${leaseID}`, {
+          headers,
+          body: {
+            leaseID,
+            slug,
+            provider: "ovh",
+            sshPublicKey: publicKey,
+            ttlSeconds: 3600,
+            idleTimeoutSeconds: 1800,
+          },
+        }),
+      );
+    const first = await create();
+    expect(first.status).toBeLessThan(300);
+    const second = await create();
+    expect(second.status).toBeLessThan(300);
+    expect(cloud.calls.filter((call) => call === "POST /instance")).toHaveLength(1);
+  });
+
+  it("settles a lost create only after the absence window", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    runPollsImmediately();
+    const cloud = fakeOVHCloud({
+      createInstance: () => new Response("bad gateway", { status: 502 }),
+    });
+    const storage = new MemoryStorage();
+    await createLease(
+      testFleet(storage, {}, { ...env, CF_VERSION_METADATA: { id: "before" } }),
+    ).catch(() => undefined);
+    const restarted = testFleet(storage, {}, { ...env, CF_VERSION_METADATA: { id: "after" } });
+    vi.setSystemTime(start + 6 * 60_000);
+    await restarted.alarm();
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.provisioningResourceMayExist).toBe(true);
+
+    // The window opens at the first read that finds nothing.
+    vi.setSystemTime(start + 12 * 60_000);
+    await restarted.alarm();
+    vi.setSystemTime(start + 45 * 60_000);
+    await restarted.alarm();
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      provisioningResourceMayExist: false,
+    });
+    expect(cloud.keys).toEqual([]);
+  });
+
+  it("deletes an instance that fails before getting a public address", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    const cloud = fakeOVHCloud({
+      createInstance: () => {
+        cloud.instance = {
+          ...liveInstance,
+          name: cloud.createdName,
+          ipAddresses: [],
+          status: "ERROR",
+        };
+        return jsonResponse(cloud.instance);
+      },
+    });
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {}, env);
+    await createLease(fleet).catch(() => undefined);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      cloudID: instanceID,
+      provisioningResourceMayExist: true,
+    });
+    vi.setSystemTime(start + 10 * 60_000);
+    await fleet.alarm();
+    expect(cloud.instance).toBeUndefined();
+  });
+
+  it("never activates a recovered ERROR instance and deletes it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    runPollsImmediately();
+    const cloud = fakeOVHCloud({
+      createInstance: () => {
+        // Accepted, then failed while keeping its address; the response is lost.
+        cloud.instance = { ...liveInstance, name: cloud.createdName, status: "ERROR" };
+        throw new TypeError("provider create response lost after acceptance");
+      },
+    });
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {}, env);
+    const response = await createLease(fleet);
+    expect(response.status).not.toBe(201);
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+      state: "failed",
+      cloudID: instanceID,
+      provisioningResourceMayExist: true,
+    });
+    vi.setSystemTime(start + 10 * 60_000);
+    await fleet.alarm();
+    expect(cloud.instance).toBeUndefined();
+  });
+
+  it("keeps the allocation identity when an instance is renamed during readiness", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    const cloud = fakeOVHCloud({
+      createInstance: () => {
+        cloud.instance = { ...liveInstance, name: cloud.createdName, ipAddresses: [] };
+        return jsonResponse(cloud.instance);
+      },
+      onInstanceRead: () => {
+        cloud.instance = { ...liveInstance, name: "crabbox-renamed" };
+      },
+    });
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {}, env);
+    const response = await createLease(fleet);
+    expect(response.status).not.toBe(201);
+    const lease = storage.value<LeaseRecord>(`lease:${leaseID}`);
+    expect(lease?.state).toBe("failed");
+    expect(lease?.providerResourceID).toBe(cloud.createdName);
+    vi.setSystemTime(start + 10 * 60_000);
+    await fleet.alarm();
+    expect(cloud.mutations()).not.toContain(`DELETE /instance/${instanceID}`);
+    expect(cloud.instance?.name).toBe("crabbox-renamed");
+  });
+
+  it.each([
+    [
+      "another owner in the org",
+      { "x-crabbox-owner": "bob@example.com", "x-crabbox-org": "example-org" },
+    ],
+    [
+      "another owner and org",
+      { "x-crabbox-owner": "bob@example.com", "x-crabbox-org": "other-org" },
+    ],
+  ])("refuses cleanup requested by %s, including after a restart", async (_name, intruder) => {
+    const cloud = fakeOVHCloud();
+    const storage = new MemoryStorage();
+    await createLease(testFleet(storage, {}, env));
+    const before = cloud.mutations().length;
+    const attempts: number[] = [];
+    for (const fleet of [testFleet(storage, {}, env), testFleet(storage, {}, env)]) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- each attempt follows a restart.
+      const released = await fleet.fetch(
+        request("POST", `/v1/leases/${leaseID}/release`, {
+          headers: intruder,
+          body: { delete: true, expectedProvider: "ovh" },
+        }),
+      );
+      attempts.push(released.status);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- the replay runs after each attempt.
+      await fleet.alarm();
+    }
+    console.info(
+      "managed-ovh-cross-owner",
+      JSON.stringify({ attempts, providerMutations: cloud.mutations().slice(before) }),
+    );
+    expect(attempts.every((status) => status === 403 || status === 404)).toBe(true);
+    expect(cloud.mutations()).toHaveLength(before);
+    expect(cloud.instance).toBeDefined();
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.state).toBe("active");
+  });
+
+  it.each([
+    [
+      "a newer cleanup claim",
+      (lease: LeaseRecord, at: string) => ({ ...lease, cleanupStartedAt: at }),
+      true,
+    ],
+    [
+      "a release that now retains the instance",
+      (lease: LeaseRecord, at: string) => {
+        const retained = { ...lease, state: "released" as const, releaseDeletesServer: false };
+        delete retained.cleanupStartedAt;
+        delete retained.cleanupClaimExpiresAt;
+        return { ...retained, keep: true, endedAt: at };
+      },
+      false,
+    ],
+  ])("makes no OVH mutation once superseded by %s", async (_name, supersede, deletedOnReplay) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    const cloud = fakeOVHCloud();
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {}, env);
+    await createLease(fleet, { ttlSeconds: 1800, idleTimeoutSeconds: 1800 });
+    const before = cloud.mutations().length;
+    let superseded = false;
+    cloud.onInstanceRead = async () => {
+      if (superseded) return;
+      superseded = true;
+      // Lands in durable state between the cleanup's read and its DELETE.
+      const stored = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+      await storage.put(
+        `lease:${leaseID}`,
+        supersede(stored, new Date(start + 32 * 60_000).toISOString()),
+      );
+    };
+    vi.setSystemTime(start + 31 * 60_000);
+    await fleet.alarm();
+    const duringClaim = cloud.mutations().slice(before);
+    expect(superseded).toBe(true);
+    expect(duringClaim).toEqual([]);
+    expect(cloud.instance).toBeDefined();
+
+    // A restart replays cleanup from durable state alone, after any claim has gone stale.
+    vi.setSystemTime(start + 90 * 60_000);
+    const restarted = testFleet(storage, {}, env);
+    await restarted.alarm();
+    vi.setSystemTime(start + 180 * 60_000);
+    await restarted.alarm();
+    const afterReplay = cloud.mutations().slice(before);
+    console.info(
+      "managed-ovh-superseded-cleanup",
+      JSON.stringify({ duringClaim, afterReplay, instanceExists: Boolean(cloud.instance) }),
+    );
+    expect(afterReplay.filter((call) => call.startsWith("DELETE /instance/"))).toHaveLength(
+      deletedOnReplay ? 1 : 0,
+    );
+    expect(Boolean(cloud.instance)).toBe(!deletedOnReplay);
+  });
+
+  it("leaves leases registered before OVH joined the coordinator untouched", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    const cloud = fakeOVHCloud();
+    const storage = new MemoryStorage();
+    const body = {
+      slug,
+      provider: "ovh",
+      target: "linux",
+      cloudID: instanceID,
+      serverName: derivedName,
+      host: "203.0.113.20",
+      sshUser: "crabbox",
+      sshPort: "2222",
+      ttlSeconds: 3600,
+      idleTimeoutSeconds: 1800,
+    };
+    // Written with no OVH settings, as a deployment on the previous version would hold it.
+    const previous = testFleet(storage);
+    const registered = await previous.fetch(
+      request("PUT", `/v1/leases/${leaseID}/registration`, { headers, body }),
+    );
+    expect(registered.status).toBeLessThan(300);
+
+    const upgraded = testFleet(storage, {}, env);
+    const refreshed = await upgraded.fetch(
+      request("PUT", `/v1/leases/${leaseID}/registration`, { headers, body }),
+    );
+    expect(refreshed.status).toBeLessThan(300);
+    const read = await upgraded.fetch(request("GET", `/v1/leases/${leaseID}`, { headers }));
+    await expect(read.json()).resolves.toMatchObject({
+      lease: { id: leaseID, provider: "ovh", lifecycle: "registered", estimatedHourlyUSD: 0 },
+    });
+    const usage = await upgraded.fetch(request("GET", "/v1/usage", { headers }));
+    const summary = (await usage.json()) as { usage: UsageGroup };
+    expect(summary.usage.reservedUSD).toBe(0);
+
+    vi.setSystemTime(start + 2 * 60 * 60_000);
+    await upgraded.alarm();
+    const released = await upgraded.fetch(
+      request("POST", `/v1/leases/${leaseID}/release`, { headers, body: { delete: true } }),
+    );
+    expect(released.status).toBeLessThan(500);
+    await upgraded.alarm();
+    console.info("managed-ovh-registered-compatibility", JSON.stringify({ calls: cloud.calls }));
+    expect(cloud.calls).toEqual([]);
+  });
+
+  it("refuses to delete an instance whose identity changed and keeps cleanup open", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    const cloud = fakeOVHCloud();
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {}, env);
+    await createLease(fleet, { ttlSeconds: 1800, idleTimeoutSeconds: 1800 });
+    cloud.instance = { ...liveInstance, name: "crabbox-someone-else" };
+
+    vi.setSystemTime(start + 31 * 60_000);
+    await fleet.alarm();
+    expect(cloud.mutations()).not.toContain(`DELETE /instance/${instanceID}`);
+    expect(cloud.instance).toBeDefined();
+    const lease = storage.value<LeaseRecord>(`lease:${leaseID}`);
+    expect(lease?.cleanupError).toContain("no longer matches");
+    expect(lease?.cleanupCompletedAt).toBeUndefined();
+  });
+
+  it("refuses cleanup after the coordinator moves to another project", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    const cloud = fakeOVHCloud();
+    const storage = new MemoryStorage();
+    await createLease(testFleet(storage, {}, env), { ttlSeconds: 1800, idleTimeoutSeconds: 1800 });
+    const moved = testFleet(storage, {}, { ...env, CRABBOX_OVH_PROJECT_ID: "another-project" });
+    vi.setSystemTime(start + 31 * 60_000);
+    await moved.alarm();
+    expect(cloud.instance).toBeDefined();
+    expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cleanupError).toContain(
+      "another OVH project",
+    );
+  });
+
+  it("refuses to settle when the credentials no longer see the project", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-09-28T08:00:00Z");
+    vi.setSystemTime(start);
+    const cloud = fakeOVHCloud();
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage, {}, env);
+    await createLease(fleet, { ttlSeconds: 1800, idleTimeoutSeconds: 1800 });
+    const billed = cloud.instance;
+    cloud.instance = undefined;
+    const fetchImpl = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(new Request(input, init).url);
+      return url.pathname.endsWith("/region")
+        ? new Response("no such project", { status: 404 })
+        : fetchImpl(input, init);
+    });
+    vi.setSystemTime(start + 31 * 60_000);
+    await fleet.alarm();
+    const lease = storage.value<LeaseRecord>(`lease:${leaseID}`);
+    expect(lease?.cleanupError).toContain("not visible");
+    expect(lease?.cleanupCompletedAt).toBeUndefined();
+    expect(billed).toBeDefined();
+  });
+
+  it("lists OVH inventory and reports read-only readiness", async () => {
+    const cloud = fakeOVHCloud();
+    const fleet = testFleet(new MemoryStorage(), {}, env);
+    await createLease(fleet);
+    const before = cloud.mutations().length;
+    const pool = await fleet.fetch(
+      request("GET", "/v1/pool?provider=ovh", {
+        headers: { ...headers, "x-crabbox-admin": "true" },
+      }),
+    );
+    await expect(pool.json()).resolves.toMatchObject({
+      machines: [{ provider: "ovh", cloudID: instanceID, region: "BHS5" }],
+    });
+    const readiness = await fleet.fetch(request("GET", "/v1/providers/ovh/readiness", { headers }));
+    await expect(readiness.json()).resolves.toMatchObject({
+      provider: "ovh",
+      configured: true,
+      checks: [{ status: "ok", check: "ovh-coordinator" }],
+    });
+    expect(cloud.mutations()).toHaveLength(before);
+  });
+
+  it("keeps OVH run history provider identity", async () => {
+    fakeOVHCloud();
+    const fleet = testFleet(new MemoryStorage(), {}, env);
+    await createLease(fleet);
+    const created = await fleet.fetch(
+      request("POST", "/v1/runs", {
+        headers,
+        body: { leaseID, provider: "ovh", serverType: "b3-8", command: ["true"] },
+      }),
+    );
+    expect(created.status).toBeLessThan(300);
+    const body = (await created.json()) as { run: { id: string; provider: string } };
+    expect(body.run.provider).toBe("ovh");
   });
 });
 

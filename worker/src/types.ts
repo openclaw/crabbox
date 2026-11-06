@@ -118,6 +118,14 @@ export interface Env {
   CRABBOX_DAYTONA_WORK_ROOT?: string;
   CRABBOX_DAYTONA_SSH_GATEWAY_HOST?: string;
   CRABBOX_DAYTONA_SSH_ACCESS_MINUTES?: string;
+  OVH_APPLICATION_KEY?: string;
+  OVH_APPLICATION_SECRET?: string;
+  OVH_CONSUMER_KEY?: string;
+  OVH_ENDPOINT?: string;
+  CRABBOX_OVH_PROJECT_ID?: string;
+  CRABBOX_OVH_REGION?: string;
+  CRABBOX_OVH_IMAGE?: string;
+  CRABBOX_OVH_FLAVOR?: string;
   CRABBOX_RUNTIME_ADAPTER_TOKEN?: string;
   CRABBOX_SHARED_TOKEN?: string;
   CRABBOX_SHARED_OWNER?: string;
@@ -273,6 +281,7 @@ export interface LeaseRequest {
   azureOSDisk?: string;
   gcpProject?: string;
   gcpZone?: string;
+  ovhRegion?: string;
   gcpImage?: string;
   gcpMachineImage?: string;
   gcpSnapshot?: string;
@@ -442,6 +451,20 @@ export const coordinatorProviderRegistry = [
     provider: "daytona",
     label: "Daytona",
     requiredSecrets: ["DAYTONA_CRABBOX_KEY"],
+    adminAudit: false,
+    supportsCapacityMarket: false,
+  },
+  {
+    runtimeExtension: true,
+    provider: "ovh",
+    label: "OVHcloud",
+    requiredSecrets: [
+      "OVH_APPLICATION_KEY",
+      "OVH_APPLICATION_SECRET",
+      "OVH_CONSUMER_KEY",
+      "CRABBOX_OVH_PROJECT_ID",
+      "CRABBOX_OVH_REGION",
+    ],
     adminAudit: false,
     supportsCapacityMarket: false,
   },
