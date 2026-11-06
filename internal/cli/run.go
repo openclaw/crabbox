@@ -17,6 +17,16 @@ import (
 
 var runBeforeCommandSSHReadyTimeout = 2 * time.Minute
 
+func canPrepareNoSyncWithCommand(target SSHTarget, owner *workspaceOwner, script *RunScriptSpec, cfg Config, preflight, doctor bool, env runEnvSelection, artifactChanges []string) bool {
+	for name := range env.Inline {
+		if !IsRunExecutionMetadataEnvName(name) {
+			return false
+		}
+	}
+	return owner != nil && target.TargetOS != targetWindows && script == nil && !preflight && !doctor &&
+		!cfg.Results.Auto && !cfg.Desktop && !cfg.Browser && len(env.Profile) == 0 && len(artifactChanges) == 0
+}
+
 func applyCapacityMarketFlag(cfg *Config, fs *flag.FlagSet, market string) error {
 	if !flagWasSet(fs, "market") {
 		return nil
@@ -442,6 +452,8 @@ func (a App) runCommand(ctx context.Context, args []string) error {
 }
 
 func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, benchmarkCtx benchmarkRecordContext) (err error) {
+	timeline := newRunTimeline(time.Now())
+	timelineEnabled := false
 	runtimeScope := newNativeRuntimeScope()
 	ctx = context.WithValue(ctx, nativeRuntimeScopeKey{}, runtimeScope)
 	ctx = contextWithoutNativeRuntimeAdmission(context.WithValue(ctx, nativeRuntimeLeaseKey{}, ""))
@@ -567,6 +579,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			}
 		}
 		cleanup.apply(&report)
+		if timelineEnabled {
+			report.RunnerTotalMs, report.RunnerPhases = timeline.snapshot(frozenAt)
+			report.TerminalPending = recorder.runID != "" && !recorder.terminalAttempted && !recorder.finished
+		}
 		if err != nil && report.ExitCode == 0 {
 			report.ExitCode = ExitCodeForError(err, 7)
 			report.RunStatus = ""
@@ -575,6 +591,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		return finalizeTimingReport(report), true
 	}
 	defer func() {
+		timeline.advance("local.finalize")
 		if finalizeFailureDigest != nil {
 			finalizeFailureDigest()
 		}
@@ -620,15 +637,17 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			}
 		}
 		if finalizeTerminalRun != nil {
+			timeline.advance("history.finish")
 			finalizeTerminalRun()
 		}
+		timeline.advance("local.finalize")
 		if cleanupErr := recorder.pendingFinishCleanupErr; cleanupErr != nil {
 			fmt.Fprintf(a.Stderr, "terminal committed; pending finish cleanup failed: %s\n", recorder.redactDiagnostic(cleanupErr.Error()))
-			if timingJSONWritten {
+			if timingJSONWritten && !report.TerminalPending {
 				// The first timing write must precede terminal commit so a sink
 				// failure remains part of the original receipt. A late cleanup
-				// warning needs the same frozen report again as the final line,
-				// not another observation, signature, or terminal submission.
+				// warning needs a final report. Reused no-sync runs emit their
+				// completed snapshot below; other routes repeat the frozen one.
 				if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil {
 					err = errors.Join(err, Exit(7, "write final timing JSON after pending finish cleanup diagnostic: %v", writeErr))
 				}
@@ -636,8 +655,20 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		recorder.Failed(runFailure)
 		if observation != nil {
-			localReport, localHasReport := snapshotFinalTimingReport(frozenAt)
+			observedAt := frozenAt
+			if timelineEnabled {
+				observedAt = time.Now()
+			}
+			localReport, localHasReport := snapshotFinalTimingReport(observedAt)
 			observation.finish(localReport, localHasReport, err, recorder)
+		}
+		if timingJSONWritten && report.TerminalPending {
+			// The first write must succeed before signing the terminal outcome.
+			// This final snapshot also includes durable history confirmation.
+			report, _ = snapshotFinalTimingReport(time.Now())
+			if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil {
+				err = errors.Join(err, Exit(7, "write final timing JSON: %v", writeErr))
+			}
 		}
 	}()
 	command := fs.Args()
@@ -1137,6 +1168,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if lifecycleOwner == nil && !runtimeScope.hasLease(leaseID) {
 			return
 		}
+		defer timeline.section("cleanup.workspace")()
 		cleanupStartedAt := time.Now()
 		observation.Phase(RunPhaseCleanup)
 		defer func() {
@@ -1417,6 +1449,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if !ok {
 		return Exit(2, "provider=%s does not support run", backend.Spec().Name)
 	}
+	timelineEnabled = *noSync && !*syncOnly && *leaseIDFlag != "" && *readyPool == ""
 	coord := backendCoordinator(backend)
 	var terminalReceiptKey ed25519.PrivateKey
 	if strings.TrimSpace(*attestOut) != "" || (coord != nil && !*syncOnly) {
@@ -1552,6 +1585,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	recordCommand := runScriptRecordCommand(script, command)
 	timingRecordCommand = recordCommand
+	timeline.advance("history.admit")
 	recorder = newRunRecorder(ctx, coord, cfg, recordCommand, runLabelValue, a.Stderr, strings.TrimSpace(*leaseIDFlag) != "", executionRunID)
 	if recorder.createErr != nil && !recorder.createPending && !*syncOnly {
 		return recordFailure(recorder.requireHandle())
@@ -1563,6 +1597,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	leaseStartedAt := endToEndStartedAt
 	var runnerProviderTiming *runnerProviderTiming
 	leasePhase := "provider.acquire"
+	timeline.advance(leasePhase)
 	claimAdmitted := false
 	// A newly acquired retained lease is not safe to keep until its requested
 	// cleanup handle has been written successfully.
@@ -1571,6 +1606,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if !releaseResolvedLease || (!releaseUnreportedLease && !shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, runFailure)) {
 			return
 		}
+		defer timeline.section("cleanup.lease")()
 		observation.Phase(RunPhaseCleanup)
 		cleanupStartedAt := time.Now()
 		defer func() {
@@ -1646,10 +1682,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}()
 	defer func() {
 		if recorder != nil && recorder.telemetryRequested {
+			defer timeline.section("telemetry.finish")()
 			recorder.CaptureTelemetryEnd(context.WithoutCancel(ctx), target)
 		}
 	}()
 	admitLease := func(lease *LeaseTarget) error {
+		defer timeline.section("history.admit")()
 		server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
 		ctx = context.WithValue(ctx, nativeRuntimeLeaseKey{}, leaseID)
 		observation.BindLease(leaseID, ServerSlug(server))
@@ -1749,6 +1787,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	if *leaseIDFlag != "" {
 		leasePhase = "provider.resolve"
+		timeline.advance(leasePhase)
 		observation.Phase(RunPhaseResolve)
 		var lease LeaseTarget
 		req := ResolveRequest{Repo: identityRepo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true}
@@ -1806,10 +1845,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if claimAdmitted {
 		// Registration publishes its own adapter/portal stages; it runs after the
 		// admission lock is released and retains the committed claim snapshot.
+		timeline.advance("lease.claim")
 		lease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
 		err = a.registerCoordinatorLeaseBestEffort(ctx, cfg, &lease)
 		server = lease.Server
 	} else {
+		timeline.advance("lease.claim")
 		err = a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), &cfg, &server, target, identityRepo.Root, *reclaim || borrowedPool != nil, *leaseIDFlag != "", runIdleTimeoutOverride)
 	}
 	if err != nil {
@@ -1901,6 +1942,23 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 	}
 	var runnerConnectDuration time.Duration
+	var ownerReadyRoute [32]byte
+	var telemetryReady chan struct{}
+	startInitialTelemetry := func(sampleCtx context.Context, sampleTarget SSHTarget) {
+		if telemetryReady != nil {
+			return
+		}
+		telemetryReady = make(chan struct{})
+		go func() {
+			recorder.CaptureTelemetryStart(sampleCtx, sampleTarget)
+			close(telemetryReady)
+		}()
+	}
+	defer func() {
+		if telemetryReady != nil {
+			<-telemetryReady
+		}
+	}()
 	prepareRunRuntime := func() error {
 		preparedCtx, prepareErr := runtimeScope.prepareCommandRuntime(ctx, &target, a.Stderr)
 		if prepareErr == nil {
@@ -1924,6 +1982,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return recordFailure(err)
 		}
 		connectStartedAt := time.Now()
+		timeline.advance("connect.ssh")
 		waitErr := a.waitForSSHReady(ctx, &target, "workspace owner", 2*time.Minute)
 		runnerConnectDuration += time.Since(connectStartedAt)
 		if waitErr != nil {
@@ -1944,6 +2003,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return recordFailure(err)
 		}
 		ownerParentCtx = ctx
+		if timelineEnabled {
+			startInitialTelemetry(ctx, target)
+		}
+		timeline.advance("workspace.acquire")
 		if a.workspaceOwnerAcquirer != nil {
 			lifecycleOwner, err = a.workspaceOwnerAcquirer(ctx, target, leaseID, a.Stderr)
 		} else {
@@ -1953,11 +2016,13 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return recordFailure(err)
 		}
 		ctx = contextWithWorkspaceOwner(lifecycleOwner.Context(), lifecycleOwner)
+		ownerReadyRoute = nativeRuntimeRouteKey(target)
 		return nil
 	}
 	if err := acquireLifecycleOwner(); err != nil {
 		return err
 	}
+	timeline.advance("workspace.prepare")
 
 	if cfg.Sync.BaseRef == "" {
 		cfg.Sync.BaseRef = repo.BaseRef
@@ -2326,6 +2391,7 @@ retrySync:
 		return recordFailure(Exit(2, "--full-resync would invalidate the adopted Actions workspace for %s, but this run cannot rehydrate it; configure actions.workflow and omit --no-hydrate, or use --sync-only", leaseID))
 	}
 	if !*noSync {
+		timeline.advance("workspace.sync")
 		syncStart := time.Now()
 		observation.Phase(RunPhaseSync)
 		if freshPR.Empty() {
@@ -2947,7 +3013,13 @@ afterSync:
 		return recordFailure(err)
 	}
 	bootstrapStartedAt := time.Now()
-	bootstrapErr := a.waitForSSHReady(ctx, &target, "before command", runBeforeCommandSSHReadyTimeout)
+	timeline.advance("connect.ssh")
+	var bootstrapErr error
+	// No intervening workload can invalidate the readiness just established
+	// for this owner. Changed routes and sync/hydration still need their probe.
+	if !(*noSync && lifecycleOwner != nil && ownerReadyRoute == nativeRuntimeRouteKey(target)) {
+		bootstrapErr = a.waitForSSHReady(ctx, &target, "before command", runBeforeCommandSSHReadyTimeout)
+	}
 	connectDuration := time.Since(bootstrapStartedAt)
 	timings.bootstrap += connectDuration
 	timings.connect += connectDuration
@@ -2962,6 +3034,7 @@ afterSync:
 		return recordFailure(bootstrapErr)
 	}
 	commandStart := time.Now()
+	timeline.advance("command.prepare")
 	if !portableBorrowStarted.IsZero() {
 		portableTimings.FirstCommandMs = min(time.Since(portableBorrowStarted).Milliseconds(), int64((30*time.Minute)/time.Millisecond))
 	}
@@ -2987,13 +3060,9 @@ afterSync:
 		exitNodeEgressChecked = true
 	}
 	// The baseline sample and workspace preparation are independent; join before execution.
-	telemetryReady := make(chan struct{})
-	go func(sampleCtx context.Context, sampleTarget SSHTarget) {
-		recorder.CaptureTelemetryStart(sampleCtx, sampleTarget)
-		close(telemetryReady)
-	}(ctx, target)
-	defer func() { <-telemetryReady }()
+	startInitialTelemetry(ctx, target)
 	scriptUploaded := false
+	commandSetup := ""
 	if *noSync {
 		mkdirCommand := remoteMkdir(workdir)
 		if isWindowsNativeTarget(target) {
@@ -3004,7 +3073,9 @@ afterSync:
 		if !isWindowsNativeTarget(target) {
 			mkdirCommand += " && " + remoteInvalidateSyncFingerprintForTarget(target, workdir, plainManifestMode)
 		}
-		if script != nil && !isWindowsNativeTarget(target) && !*preflight && !expansion.Profile.Doctor.Enabled && len(envSelection.Profile) == 0 {
+		if canPrepareNoSyncWithCommand(target, lifecycleOwner, script, cfg, *preflight, expansion.Profile.Doctor.Enabled, envSelection, requiredArtifactChanges) {
+			commandSetup = mkdirCommand
+		} else if script != nil && !isWindowsNativeTarget(target) && !*preflight && !expansion.Profile.Doctor.Enabled && len(envSelection.Profile) == 0 {
 			if err := uploadRunScriptAfter(ctx, target, workdir, script, mkdirCommand); err != nil {
 				return recordFailure(err)
 			}
@@ -3215,8 +3286,20 @@ afterSync:
 		beforeArtifacts[i].data = nil
 	}
 	commandExecuting.Store(true)
-	code, streamErr := runSSHStreamResult(ctx, commandTarget, remote, stdout, stderr)
+	timeline.advance("command")
+	commandStart = time.Now()
+	phaseTracker.currentStart = commandStart
+	commandCtx := ctx
+	if commandSetup != "" {
+		commandCtx = context.WithValue(ctx, workspaceCommandSetupKey{}, commandSetup)
+	}
+	code, streamErr := runSSHStreamResult(commandCtx, commandTarget, remote, stdout, stderr)
 	commandExecuting.Store(false)
+	timeline.advance("command.complete")
+	var setupErr *workspaceOwnerSetupError
+	if commandSetup != "" && errors.As(streamErr, &setupErr) && setupErr.phase == "workspace" {
+		return recordFailure(Exit(7, "%v", streamErr))
+	}
 	failureDownloadEligible := false
 	if witness != nil {
 		code, streamErr, failureDownloadEligible = witness.finish(ctx, code, streamErr)
@@ -3354,13 +3437,23 @@ afterSync:
 	stderrPhaseWriter.Flush()
 	timings.command = time.Since(commandStart)
 	timings.commandPhases = phaseTracker.Finish(time.Now())
+	if timelineEnabled && recorder.telemetryRequested {
+		telemetryEndReady := make(chan struct{})
+		go func(sampleTarget SSHTarget) {
+			recorder.CaptureTelemetryEnd(context.WithoutCancel(ctx), sampleTarget)
+			close(telemetryEndReady)
+		}(target)
+		defer func() { <-telemetryEndReady }()
+	}
 	// Later collection failures must not inherit a successful workload's phase.
 	if code != 0 {
 		commandFailurePhases = timings.commandPhases
 	}
+	timeline.advance("workspace.inspect")
 	if err := waitWorkspaceOwnerNoChild(ctx, lifecycleOwner, lifecycleOwner.callTimeout()); err != nil {
 		return recordFailure(Exit(7, "remote command child ownership remains active; refusing collection and cleanup: %v", err))
 	}
+	timeline.advance("artifacts")
 	artifactStartedAt := time.Now()
 	artifactTimingDone := false
 	finishArtifactTiming := func() {

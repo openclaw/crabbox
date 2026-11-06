@@ -16,6 +16,9 @@ type workspaceOwnerSetupError struct {
 }
 
 func (e *workspaceOwnerSetupError) Error() string {
+	if e.phase == "workspace" {
+		return "prepare remote workdir failed; workload was not started"
+	}
 	return fmt.Sprintf("remote workspace owner setup failed (%s); workload was not started; check remote process-observation permissions and workspace-owner state", e.phase)
 }
 
@@ -107,7 +110,7 @@ func (w *workspaceOwnerSetupWriter) Write(data []byte) (int, error) {
 			if line == w.marker+" started" {
 				w.started, matched = true, true
 			} else {
-				for _, phase := range []string{"staging", "input", "identity", "registration", "handoff"} {
+				for _, phase := range []string{"staging", "input", "identity", "registration", "handoff", "workspace"} {
 					if line == w.marker+" failed "+phase {
 						if w.failure == "" {
 							w.failure = phase

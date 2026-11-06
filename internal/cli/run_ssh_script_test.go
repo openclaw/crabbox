@@ -5,6 +5,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -159,6 +160,97 @@ exit "$code"
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return p, b, dir
+}
+
+type sshOnlyScriptTestBackend struct {
+	SSHLeaseBackend
+	SSHRunActivityBackend
+}
+
+func TestNoSyncOwnedCommandKeepsExitAndAvoidsSecondReadiness(t *testing.T) {
+	p, b, dir := setupSSHScriptRun(t)
+	p.backend = sshOnlyScriptTestBackend{b, b}
+	t.Setenv("CI", "")
+	t.Setenv("NODE_OPTIONS", "")
+	for _, name := range []string{"CI", "NODE_OPTIONS"} {
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), []string{
+		"--provider", p.Spec().Name, "--id", b.lease.LeaseID, "--no-sync", "--timing-json",
+		"--shell", "printf 'ordered-output'; exit 23",
+	})
+	if ExitCodeForError(err, 1) != 23 || stdout.String() != "ordered-output" {
+		t.Fatalf("exit=%v stdout=%q stderr=%s", err, &stdout, &stderr)
+	}
+	data, readErr := os.ReadFile(filepath.Join(dir, "ssh.log"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	count := 0
+	for _, call := range strings.Split(string(data), "\n") {
+		if strings.Contains(call, "/usr/local/bin/crabbox-ready") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("readiness calls=%d, want one", count)
+	}
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	var report TimingReport
+	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+		t.Fatal(err)
+	}
+	var total int64
+	for _, phase := range report.RunnerPhases {
+		if phase.Name == "unattributed" {
+			t.Fatalf("unattributed phase: %+v", report)
+		}
+		total += phase.Ms
+	}
+	if report.ExitCode != 23 || total != report.RunnerTotalMs {
+		t.Fatalf("invalid final timing: %+v", report)
+	}
+}
+
+func TestNoSyncOwnedPreparationFailureDoesNotStartCommand(t *testing.T) {
+	for _, reused := range []bool{true, false} {
+		t.Run(fmt.Sprint("reused=", reused), func(t *testing.T) {
+			p, b, dir := setupSSHScriptRun(t)
+			p.backend = sshOnlyScriptTestBackend{b, b}
+			releases := 0
+			previous := runEnvProfileTestReleaseHook
+			runEnvProfileTestReleaseHook = func() error { releases++; return nil }
+			t.Cleanup(func() { runEnvProfileTestReleaseHook = previous })
+			blocked := filepath.Join(dir, "blocked-work-root")
+			if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_WORK_ROOT", blocked)
+			marker := filepath.Join(dir, "workload-started")
+			args := []string{"--provider", p.Spec().Name, "--no-sync", "--timing-json", "--keep-on-failure", "--allow-env", "CRABBOX_UNUSED_FIXTURE"}
+			if reused {
+				args = append(args, "--id", b.lease.LeaseID)
+			}
+			args = append(args, "--", "touch", marker)
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), args)
+			if ExitCodeForError(err, 1) != 7 || !strings.Contains(err.Error(), "prepare remote workdir") || strings.Contains(err.Error(), "remote command exited") {
+				t.Fatalf("error=%v stdout=%q stderr=%s", err, &stdout, &stderr)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("workload ran after preparation failure: %v", err)
+			}
+			if reused && (releases != 0 || !strings.Contains(stderr.String(), "workspace owner released")) {
+				t.Fatalf("reused lease cleanup changed: releases=%d stderr=%s", releases, &stderr)
+			}
+			if !reused && releases != 1 {
+				t.Fatalf("setup failure retained a new lease with --keep-on-failure: releases=%d stderr=%s", releases, &stderr)
+			}
+		})
+	}
 }
 
 func TestHybridSSHScriptRun(t *testing.T) {

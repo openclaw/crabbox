@@ -13,6 +13,7 @@ const (
 	runEventOutputMaxBytes   = 64 * 1024
 	runEventOutputQueueSize  = 32
 	runEventOutputPostWait   = 2 * time.Second
+	runEventDrainTimeout     = 5 * time.Second
 	runEventAppendBudget     = 30 * time.Second
 	runEventAppendAttempts   = 3
 	runEventAppendRetry      = 250 * time.Millisecond
@@ -145,8 +146,10 @@ func (q *runEventPublisher) Bind(ctx context.Context, coord *CoordinatorClient, 
 }
 
 func (q *runEventPublisher) drainTimeout() time.Duration {
+	// Retry background diagnostics while the command runs, but do not let
+	// their request budget hold terminal recording open for thirty seconds.
 	if q != nil && q.idempotent {
-		return runEventAppendBudget
+		return runEventDrainTimeout
 	}
 	return runEventOutputPostWait
 }
