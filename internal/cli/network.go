@@ -205,6 +205,8 @@ func validTailscaleTag(value string) bool {
 	return true
 }
 
+const maxTailscaleHostnameLength = 63
+
 func RenderTailscaleHostname(template, leaseID, slug, provider string) string {
 	value := strings.TrimSpace(template)
 	if value == "" {
@@ -218,9 +220,19 @@ func RenderTailscaleHostname(template, leaseID, slug, provider string) string {
 	for key, replacement := range replacements {
 		value = strings.ReplaceAll(value, key, replacement)
 	}
-	value = NormalizeLeaseSlug(value)
+	value = tailscaleHostnameLabel(value)
 	if value == "" {
-		value = "crabbox-" + strings.ReplaceAll(leaseID, "_", "-")
+		value = tailscaleHostnameLabel("crabbox-" + strings.ReplaceAll(leaseID, "_", "-"))
+	}
+	return value
+}
+
+// Tailscale rejects a hostname longer than a DNS label or ending in a hyphen,
+// which only surfaces later as a failed enrollment on the lease.
+func tailscaleHostnameLabel(value string) string {
+	value = NormalizeLeaseSlug(value)
+	if len(value) > maxTailscaleHostnameLength {
+		value = strings.TrimRight(value[:maxTailscaleHostnameLength], "-")
 	}
 	return value
 }
