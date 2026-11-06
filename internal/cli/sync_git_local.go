@@ -140,7 +140,7 @@ func transferLocalGitSeed(ctx context.Context, target SSHTarget, workdir string,
 }
 
 // reuseLocalGitSeed asks the receiver to adopt verified metadata for the exact
-// artifact digest, from the workspace or the host cache. It fails open: any
+// artifact digest from the host cache. It fails open: any
 // probe error or miss returns false and the caller streams the bundle.
 func reuseLocalGitSeed(ctx context.Context, target SSHTarget, workdir string, seed preparedLocalGitSeed, stderr io.Writer) bool {
 	if isWindowsNativeTarget(target) {
@@ -161,7 +161,7 @@ func reuseLocalGitSeed(ctx context.Context, target SSHTarget, workdir string, se
 // clean exit; every other outcome is a miss and keeps the full transfer.
 func localGitSeedProbeSource(out string, err error) (string, bool) {
 	source, ok := strings.CutPrefix(out, "reused-")
-	if err != nil || !ok || (source != "workspace" && source != "cache") {
+	if err != nil || !ok || source != "cache" {
 		return "", false
 	}
 	return source, true

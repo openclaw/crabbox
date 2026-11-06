@@ -80,8 +80,8 @@ func remoteGitLocalSeedFinalize(workdir string, plan gitLocalSeedPlan) string {
 	return remoteGitLocalSeedCommand(workdir, plan, "finalize")
 }
 
-// remoteGitLocalSeedProbe reuses verified metadata for this exact artifact digest
-// from the workspace or from the host cache. It never receives the bundle: any
+// remoteGitLocalSeedProbe replaces the workspace metadata with a verified copy of
+// the import-time host cache entry for this exact artifact digest. It never receives the bundle: any
 // non-zero exit means the caller must stream the bundle as before.
 func remoteGitLocalSeedProbe(workdir string, plan gitLocalSeedPlan) string {
 	return remoteGitLocalSeedCommand(workdir, plan, "probe")
@@ -202,17 +202,10 @@ cache_ready() {
 }
 # Only object storage is hardlinked (immutable); HEAD, config, refs and markers
 # are copied so a workload writing in one workspace cannot alter a sibling or the cache.
-# A receiver-created .git holds only these names: workload-installed hooks, info
-# or logs are never cached, and a workspace reuse removes them.
+# A receiver-created .git holds only these names; anything else is never cached.
 metadata_name_allowed() {
   case "$1" in HEAD|config|objects|refs|packed-refs|index|crabbox|crabbox-local-owner|crabbox-local-artifact|crabbox-local-complete) return 0 ;; esac
   return 1
-}
-prune_metadata() {
-  for entry in "$1"/* "$1"/.[!.]*; do
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
-    metadata_name_allowed "${entry##*/}" || rm -rf -- "$entry" || return 1
-  done
 }
 copy_metadata() {
   mkdir -- "$2" || return 1
@@ -325,18 +318,16 @@ store_cache "$metadata" || true
 	} else if action == "probe" {
 		script += `phase=probe
 miss() { exit 1; }
-if [ -e "$metadata" ] || [ -L "$metadata" ]; then
-  owned_metadata && verify_metadata || miss
-  prune_metadata "$metadata" || fail
-  # Rebuild the index as an import does: drops assume-unchanged/skip-worktree bits a workload may have set.
-  plain_git --git-dir="$metadata" read-tree "$expected_head" >/dev/null 2>&1 || miss
-  # A new sync is starting: drop success markers and stale hydration state, as an import would.
-  rm -f -- "$metadata/crabbox-local-complete" "$metadata/crabbox/sync-fingerprint" "$metadata/crabbox/git-hydrate-base" || fail
-  store_cache "$metadata" || true
-  echo reused-workspace
-  exit 0
-fi
+# Never trust a workspace .git a workload has touched (hooks, config values, ref locks,
+# index bits). Reuse always restores a pristine, re-verified copy of the import-time cache
+# entry, exactly the metadata a full import would have published.
 cache_ready && [ -d "$cache_entry" ] && [ ! -L "$cache_entry" ] || miss
+manifest_dir="$workdir/.crabbox"
+if [ -e "$metadata" ] || [ -L "$metadata" ]; then
+  owned_metadata || miss
+  manifest_dir="$metadata/crabbox"
+fi
+manifest="$manifest_dir/sync-manifest"
 mkdir -p -- "$workdir" || fail
 stage="$(mktemp -d "$workdir/.crabbox-local-git.XXXXXXXX")" || miss
 fresh="$stage/git"
@@ -345,14 +336,18 @@ plain_git --git-dir="$fresh" read-tree "$expected_head" >/dev/null 2>&1 || miss
 metadata="$fresh"
 verify_metadata || miss
 metadata="$workdir/.git"
-manifest_dir="$workdir/.crabbox"
-manifest="$manifest_dir/sync-manifest"
 if [ -e "$manifest" ] || [ -L "$manifest" ]; then
   [ -d "$manifest_dir" ] && [ ! -L "$manifest_dir" ] && [ -f "$manifest" ] && [ ! -L "$manifest" ] || miss
   mkdir -- "$fresh/crabbox" || miss
   cp -- "$manifest" "$fresh/crabbox/sync-manifest" || miss
 fi
-mv -- "$fresh" "$metadata" || miss
+if [ -e "$metadata" ] || [ -L "$metadata" ]; then
+  previous="$stage/previous.git"
+  mv -- "$metadata" "$previous" || miss
+  if ! mv -- "$fresh" "$metadata"; then mv -- "$previous" "$metadata" || fail; miss; fi
+else
+  mv -- "$fresh" "$metadata" || miss
+fi
 touch -- "$cache_entry" 2>/dev/null || true
 echo reused-cache
 `

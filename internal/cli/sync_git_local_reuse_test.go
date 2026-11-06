@@ -35,7 +35,7 @@ func TestGitLocalReceiverProbeMissLeavesWorkspaceUntouched(t *testing.T) {
 	mustNotCreateGit(t, workdir)
 }
 
-func TestGitLocalReceiverProbeReusesVerifiedWorkspace(t *testing.T) {
+func TestGitLocalReceiverProbeReplacesWorkspaceFromCache(t *testing.T) {
 	plan, data := reuseFixture(t)
 	workdir := t.TempDir()
 	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
@@ -43,7 +43,7 @@ func TestGitLocalReceiverProbeReusesVerifiedWorkspace(t *testing.T) {
 	mustWriteTestFile(t, filepath.Join(workdir, ".git/crabbox/git-hydrate-base"), "stale")
 	mustWriteTestFile(t, filepath.Join(workdir, "accepted.txt"), "dirty edit after the first sync\n")
 	out := requireLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil)
-	if strings.TrimSpace(string(out)) != "reused-workspace" {
+	if strings.TrimSpace(string(out)) != "reused-cache" {
 		t.Fatalf("probe output: %q", out)
 	}
 	for _, name := range []string{"crabbox-local-complete", "crabbox/sync-fingerprint", "crabbox/git-hydrate-base"} {
@@ -152,7 +152,7 @@ func TestLocalGitSeedProbeSourceFailsOpen(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		{"workspace hit", "reused-workspace", nil, "workspace", true},
+		{"retired workspace source", "reused-workspace", nil, "", false},
 		{"cache hit", "reused-cache", nil, "cache", true},
 		{"miss", "", errors.New("exit status 1"), "", false},
 		{"error after acknowledgement", "reused-cache", errors.New("ssh: connection reset"), "", false},
@@ -195,38 +195,52 @@ func TestGitLocalReceiverCacheRestoreDoesNotShareMutableMetadata(t *testing.T) {
 	}
 }
 
-func TestGitLocalReceiverProbeClearsHiddenIndexFlags(t *testing.T) {
+func TestGitLocalReceiverReuseDiscardsEveryWorkloadMutation(t *testing.T) {
 	plan, data := reuseFixture(t)
 	workdir := t.TempDir()
 	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	git := filepath.Join(workdir, ".git")
+	mustWriteTestFile(t, filepath.Join(git, "hooks/pre-commit"), "#!/bin/sh\nexit 1\n")
+	mustWriteTestFile(t, filepath.Join(git, "info/exclude"), "*\n")
+	mustWriteTestFile(t, filepath.Join(git, "refs/heads/base.lock"), "stale")
+	runGit(t, workdir, "config", "core.filemode", "false")
 	runGit(t, workdir, "update-index", "--skip-worktree", "accepted.txt")
 	runGit(t, workdir, "update-index", "--assume-unchanged", "excluded.txt")
 	requireLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil)
+	for _, name := range []string{"hooks", "info", "refs/heads/base.lock"} {
+		if _, err := os.Lstat(filepath.Join(git, name)); !os.IsNotExist(err) {
+			t.Errorf("reuse kept workload entry %s: %v", name, err)
+		}
+	}
+	if got := gitOutput(workdir, "config", "core.filemode"); got != "true" {
+		t.Fatalf("core.filemode not reset: %q", got)
+	}
 	if flags := gitOutput(workdir, "ls-files", "-v"); strings.Contains(flags, "S ") || strings.Contains(flags, "h ") {
 		t.Fatalf("hidden index flags survived reuse:\n%s", flags)
 	}
-}
-
-func TestGitLocalReceiverReuseDropsWorkloadInstalledHooks(t *testing.T) {
-	plan, data := reuseFixture(t)
-	workdir := t.TempDir()
-	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
-	hook := filepath.Join(workdir, ".git/hooks/pre-commit")
-	mustWriteTestFile(t, hook, "#!/bin/sh\nexit 1\n")
-	mustWriteTestFile(t, filepath.Join(workdir, ".git/info/exclude"), "*\n")
-	// Evict the cache so a probe hit repopulates it from the modified workspace.
-	if err := os.RemoveAll(plan.CacheRoot); err != nil {
-		t.Fatal(err)
-	}
-	requireLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil)
-	for _, path := range []string{hook, filepath.Join(workdir, ".git/info")} {
-		if _, err := os.Lstat(path); !os.IsNotExist(err) {
-			t.Errorf("workspace reuse kept %s: %v", path, err)
-		}
-	}
+	runGit(t, workdir, "update-ref", "-d", "refs/heads/base")
+	// The cache itself stays pristine for the next consumer.
 	fresh := t.TempDir()
 	requireLocalReceiver(t, remoteGitLocalSeedProbe(fresh, plan), nil)
 	if _, err := os.Lstat(filepath.Join(fresh, ".git/hooks")); !os.IsNotExist(err) {
 		t.Fatalf("cache restore inherited a hooks directory: %v", err)
+	}
+	if got := gitOutput(fresh, "config", "core.filemode"); got != "true" {
+		t.Fatalf("cache restore filemode: %q", got)
+	}
+}
+
+func TestGitLocalReceiverProbeNeverCachesFromAWorkspace(t *testing.T) {
+	plan, data := reuseFixture(t)
+	workdir := t.TempDir()
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	if err := os.RemoveAll(plan.CacheRoot); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil); err == nil || strings.Contains(string(out), "reused-") {
+		t.Fatalf("evicted cache must miss, not trust the workspace: %q %v", out, err)
+	}
+	if _, err := os.Stat(plan.CacheRoot); !os.IsNotExist(err) {
+		t.Fatalf("probe populated the cache from a workspace: %v", err)
 	}
 }

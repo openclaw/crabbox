@@ -110,17 +110,16 @@ so any edit forces a new sync pass. Before this reuse step the pass also
 streamed the whole full-history bundle again, even though the bundle digest
 (the content address of `HEAD` and the selected refs) had not changed.
 
-Now the receiver is probed first. It adopts metadata that already matches the
-bundle digest and skips the transfer when either
-
-- the workspace `.git` is Crabbox-owned, carries the same digest and passes the
-  same verification as an import (object closure, refs, `HEAD`, index tree,
-  `fsck`), or
-- the host cache has an entry for that digest. After every import the host keeps
-  verified metadata, without index or sync state, in
-  `/var/tmp/crabbox-<uid>/git-seeds/<digest>.git`: private to the user, hardlinked
-  where the filesystem allows, and limited to the three most recently used
-  subjects. A new workspace or lease on the same persistent host restores from it.
+Now the receiver is probed first. After every import the host keeps a pristine
+copy of the verified metadata (objects, refs, `HEAD`, ownership markers; no index
+or sync state) in `/var/tmp/crabbox-<uid>/git-seeds/<digest>.git`. It is private
+to the user, hardlinks only the immutable object storage, and keeps the three
+most recently used subjects. When the digest is in that cache, the probe replaces
+the workspace `.git` with a freshly verified copy (object closure, refs, `HEAD`,
+index tree, `fsck`) and skips the transfer, for a rerun in the same workspace or
+for a new workspace or lease on the same persistent host. The workspace `.git`
+itself is never trusted or cached: hooks, config values, index flags, or ref
+locks left by an earlier workload are discarded, exactly as a full import would.
 
 Reuse fails open. A probe miss, verification failure, SSH error, or unknown
 output streams the bundle exactly as before. A fresh ephemeral VM has an empty

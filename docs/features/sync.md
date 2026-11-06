@@ -569,9 +569,9 @@ dirty, staged, untracked, renamed, executable, and symlink paths. Local staging
 state is not copied: remote modifications are compared against the selected HEAD.
 Edits made after snapshot acceptance wait for the next sync.
 
-Before streaming the bundle, the CLI asks the receiver to reuse verified metadata
-for the same bundle digest, from the workspace `.git` or from a per-user host
-cache under `/var/tmp/crabbox-<uid>/git-seeds` (three most recent subjects).
+Before streaming the bundle, the CLI asks the receiver to replace the workspace `.git`
+with a verified copy of the import-time per-user host cache entry for the same
+bundle digest (`/var/tmp/crabbox-<uid>/git-seeds`, three most recent subjects).
 Any miss or error falls back to the full transfer. See
 [performance](../performance.md#reusing-the-local-git-bundle).
 
