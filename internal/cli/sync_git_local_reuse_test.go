@@ -313,3 +313,31 @@ func TestGitLocalReceiverCacheHitPathsSweepStaleStaging(t *testing.T) {
 		t.Fatalf("probe left an aged orphan: %v", err)
 	}
 }
+
+func TestGitLocalReceiverConcurrentCachePublicationDoesNotNest(t *testing.T) {
+	plan, data := reuseFixture(t)
+	shims := t.TempDir()
+	// A rival store publishes the entry between the existence check and the rename.
+	mustWriteTestFile(t, filepath.Join(shims, "mv"), "#!/bin/sh\ncase \"$3\" in *git-seeds/*.git) mkdir -p \"$3\" ;; esac\nexec /bin/mv \"$@\"\n")
+	if err := os.Chmod(filepath.Join(shims, "mv"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	command := strings.Replace(remoteGitLocalSeed(t.TempDir(), plan), "PATH=/usr/bin:/bin", "PATH="+shims+":/usr/bin:/bin", 1)
+	requireLocalReceiver(t, command, data)
+	entry := filepath.Join(plan.CacheRoot, plan.Digest+".git")
+	if _, err := os.Lstat(filepath.Join(entry, "git")); !os.IsNotExist(err) {
+		t.Fatalf("losing store nested inside the winner: %v", err)
+	}
+}
+
+func TestGitLocalReceiverSweepRemovesNestedLoserTrees(t *testing.T) {
+	plan, data := reuseFixture(t)
+	workdir := t.TempDir()
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	nested := filepath.Join(plan.CacheRoot, plan.Digest+".git", "git", "objects")
+	mustWriteTestFile(t, filepath.Join(nested, "pack"), "history")
+	requireLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil)
+	if _, err := os.Lstat(filepath.Join(plan.CacheRoot, plan.Digest+".git", "git")); !os.IsNotExist(err) {
+		t.Fatalf("nested tree survived a cache touch: %v", err)
+	}
+}

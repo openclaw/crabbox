@@ -225,6 +225,12 @@ copy_metadata() {
 sweep_cache_staging() {
   cache_ready || return 0
   find "$cache_root" -maxdepth 1 -name '.tmp.*' -mmin +60 -exec rm -rf -- {} + >/dev/null 2>&1 || true
+  # A store that lost a publication race is renamed inside the winner; a real entry
+  # never has a "git" child, so such a tree is always garbage.
+  for nested in "$cache_root"/*.git/git; do
+    [ -e "$nested" ] || [ -L "$nested" ] || continue
+    rm -rf -- "$nested" || true
+  done
 }
 store_cache() (
   umask 077
@@ -240,7 +246,12 @@ store_cache() (
   trap 'exit 143' TERM
   copy_metadata "$1" "$tmp/git" || return 1
   rm -rf -- "$tmp/git/index" "$tmp/git/crabbox" "$tmp/git/crabbox-local-complete" || return 1
-  if [ ! -e "$cache_entry" ]; then mv -- "$tmp/git" "$cache_entry" || return 1; fi
+  # mv into an existing directory nests instead of failing, so a concurrent winner is
+  # detected afterwards: the loser's tree lands at "$cache_entry/git" and is discarded.
+  if [ ! -e "$cache_entry" ]; then
+    mv -- "$tmp/git" "$cache_entry" || return 1
+    rm -rf -- "$cache_entry/git" || return 1
+  fi
   # Keep the three most recently used subjects.
   ls -1t "$cache_root" | grep -E '^[0-9a-f]{64}[.]git$' | tail -n +4 | while IFS= read -r old; do
     rm -rf -- "$cache_root/$old"
