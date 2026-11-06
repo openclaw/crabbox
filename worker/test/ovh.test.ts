@@ -246,7 +246,7 @@ describe("OVH client configuration", () => {
     "http://eu.api.ovh.com/1.0",
     "https://ovh.example.com/1.0",
     "https://eu.api.ovh.com.example.com/1.0",
-    "https://user:pass@eu.api.ovh.com/1.0",
+    "https://user@eu.api.ovh.com/1.0",
     "https://eu.api.ovh.com/1.0?token=value",
   ])("refuses endpoint %s", (value) => {
     expect(() => ovhEndpoint(value)).toThrow("OVH_ENDPOINT");
