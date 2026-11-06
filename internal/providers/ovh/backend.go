@@ -138,6 +138,11 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if req.CheckpointSource != nil {
+		if err := validateForkSource(ctx, client, cfg.OVH.ProjectID, *req.CheckpointSource); err != nil {
+			return core.LeaseTarget{}, err
+		}
+	}
 	leaseID := core.NewLeaseID()
 	instances, err := client.ListInstances(ctx, cfg.OVH.ProjectID)
 	if err != nil {

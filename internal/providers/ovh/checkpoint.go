@@ -334,7 +334,13 @@ func locateSnapshot(ctx context.Context, client snapshotClient, project, region,
 func discoverSnapshot(ctx context.Context, client snapshotClient, project, region, name string) (Image, error) {
 	deadline := checkpointNow().Add(snapshotDiscoveryTimeout)
 	for {
-		snapshots, err := client.ListSnapshots(ctx, project, region)
+		remaining := deadline.Sub(checkpointNow())
+		if remaining <= 0 {
+			return Image{}, core.Exit(5, "OVH did not list snapshot %q after accepting it; find it in the project and delete it by hand", name)
+		}
+		listCtx, cancel := context.WithTimeout(ctx, remaining)
+		snapshots, err := client.ListSnapshots(listCtx, project, region)
+		cancel()
 		if err != nil {
 			return Image{}, err
 		}
@@ -360,9 +366,24 @@ func discoverSnapshot(ctx context.Context, client snapshotClient, project, regio
 func waitForSnapshot(ctx context.Context, client snapshotClient, project string, initial Image, timeout time.Duration, stderr io.Writer) (Image, error) {
 	last := initial
 	deadline := checkpointNow().Add(timeout)
+	timedOut := func() error {
+		return core.Exit(5, "timed out waiting for OVH snapshot %s; last state=%s", last.ID, core.Blank(last.Status, "unknown"))
+	}
 	for {
-		current, err := client.GetSnapshot(ctx, project, last.ID)
+		// Each read is bounded by what is left of the wait, so a slow API call
+		// cannot outlive --wait-timeout and a late answer is never accepted.
+		remaining := deadline.Sub(checkpointNow())
+		if remaining <= 0 {
+			return last, timedOut()
+		}
+		reqCtx, cancel := context.WithTimeout(ctx, remaining)
+		current, err := client.GetSnapshot(reqCtx, project, last.ID)
+		expired := reqCtx.Err() != nil && ctx.Err() == nil
+		cancel()
 		if err != nil {
+			if expired {
+				return last, timedOut()
+			}
 			return last, err
 		}
 		if current.Name == "" {
@@ -376,8 +397,8 @@ func waitForSnapshot(ctx context.Context, client snapshotClient, project string,
 		if snapshotFailed(state) {
 			return last, core.Exit(5, "OVH snapshot %s failed; last state=%s", last.ID, core.Blank(last.Status, "unknown"))
 		}
-		if timeout <= 0 || !checkpointNow().Before(deadline) {
-			return last, core.Exit(5, "timed out waiting for OVH snapshot %s; last state=%s", last.ID, core.Blank(last.Status, "unknown"))
+		if !checkpointNow().Before(deadline) {
+			return last, timedOut()
 		}
 		if stderr != nil {
 			fmt.Fprintf(stderr, "waiting image=%s state=%s\n", last.ID, core.Blank(last.Status, "saving"))
@@ -470,4 +491,38 @@ func validCheckpointID(value string) bool {
 		}
 	}
 	return true
+}
+
+// validateForkSource checks the checkpoint record against the live snapshot
+// before a fork allocates anything, so a renamed, moved, or foreign snapshot
+// is refused with the same predicate verify and delete use.
+func validateForkSource(ctx context.Context, client API, project string, record core.NativeCheckpointForkRecord) error {
+	lookup, ok := client.(snapshotClient)
+	if !ok {
+		return core.Exit(2, "ovh client cannot verify checkpoint snapshots")
+	}
+	if record.Kind != core.CheckpointKindOVH || !record.Direct {
+		return core.Exit(2, "provider=ovh does not support checkpoint kind=%s", record.Kind)
+	}
+	if record.Metadata[checkpointMetadataSourceProject] != project {
+		return core.Exit(2, "OVH checkpoint was captured in a different Public Cloud project; set ovh.projectId to the source project")
+	}
+	snapshot, err := lookup.GetSnapshot(ctx, project, strings.TrimSpace(record.ImageID))
+	if err != nil {
+		if isOVHNotFound(err) {
+			return core.Exit(2, "OVH snapshot %s was not found; refusing to fork", record.ImageID)
+		}
+		return err
+	}
+	resource := core.NativeCheckpointResourceRequest{
+		Image:    core.NativeCheckpointImage{ID: record.ImageID, Provider: providerName, Kind: record.Kind, Region: record.Region, Direct: record.Direct},
+		Metadata: record.Metadata,
+	}
+	if err := validateOwnedSnapshot(resource, snapshot); err != nil {
+		return err
+	}
+	if !snapshotAvailable(snapshot.Status) {
+		return core.Exit(2, "OVH snapshot %s is %s, not active; wait for it or verify the checkpoint", snapshot.ID, core.Blank(snapshot.Status, "in an unknown state"))
+	}
+	return nil
 }

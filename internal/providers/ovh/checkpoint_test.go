@@ -30,10 +30,14 @@ type fakeSnapshotAPI struct {
 	mismatch    bool
 	// lostResponse accepts the snapshot but reports a transport error.
 	lostResponse bool
-	duplicate    bool
-	getErr       error
-	deleteErr    error
-	listCalls    int
+	// getHook observes each GetSnapshot context; getBlocksUntilDone makes the
+	// call return the context error once the hook unblocks.
+	getHook            func(context.Context)
+	getBlocksUntilDone bool
+	duplicate          bool
+	getErr             error
+	deleteErr          error
+	listCalls          int
 }
 
 func (f *fakeSnapshotAPI) CreateInstanceSnapshot(_ context.Context, _, _, name string) (string, error) {
@@ -65,7 +69,13 @@ func (f *fakeSnapshotAPI) ListSnapshots(context.Context, string, string) ([]Imag
 	return append([]Image(nil), f.snapshots...), nil
 }
 
-func (f *fakeSnapshotAPI) GetSnapshot(_ context.Context, _, id string) (Image, error) {
+func (f *fakeSnapshotAPI) GetSnapshot(ctx context.Context, _, id string) (Image, error) {
+	if f.getHook != nil {
+		f.getHook(ctx)
+	}
+	if ctx.Err() != nil {
+		return Image{}, ctx.Err()
+	}
 	if f.getErr != nil {
 		return Image{}, f.getErr
 	}
@@ -668,5 +678,113 @@ func TestDeleteNativeCheckpointNeverGuessesTargetAfterLostResponse(t *testing.T)
 	}
 	if len(f.fake.deleted) != 0 {
 		t.Fatalf("deleted by name: %v", f.fake.deleted)
+	}
+}
+
+func TestAcquireForkValidatesSnapshotBindingBeforeAllocating(t *testing.T) {
+	record := func() *core.NativeCheckpointForkRecord {
+		return &core.NativeCheckpointForkRecord{
+			Kind: core.CheckpointKindOVH, ImageID: "snap-1", Region: "GRA11", Direct: true,
+			Metadata: map[string]string{
+				"checkpoint": "chk_abc123", "lease": "cbx_abcdef123456", "source_instance": "inst-9",
+				"source_project": "project-test", "source_region": "GRA11", "source_type": "instance",
+			},
+		}
+	}
+	active := Image{ID: "snap-1", Name: "crabbox-chk_abc123", Region: "GRA11", Status: "active"}
+	for name, tc := range map[string]struct {
+		snap   Image
+		mutate func(*core.NativeCheckpointForkRecord)
+		want   string
+	}{
+		"renamed snapshot":  {snap: Image{ID: "snap-1", Name: "crabbox-chk_other", Region: "GRA11", Status: "active"}, want: "mismatched name"},
+		"moved region":      {snap: Image{ID: "snap-1", Name: "crabbox-chk_abc123", Region: "BHS5", Status: "active"}, want: "in region=BHS5"},
+		"not active":        {snap: Image{ID: "snap-1", Name: "crabbox-chk_abc123", Region: "GRA11", Status: "saving"}, want: "status=saving"},
+		"other project":     {snap: active, mutate: func(r *core.NativeCheckpointForkRecord) { r.Metadata["source_project"] = "other" }, want: "different Public Cloud project"},
+		"record is not ovh": {snap: active, mutate: func(r *core.NativeCheckpointForkRecord) { r.Kind = core.CheckpointKindHetzner }, want: "does not support checkpoint kind"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			base := &fakeAPI{flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}}, images: []Image{{ID: "image-id", Name: "Ubuntu 24.04"}}}
+			api := &fakeSnapshotAPI{fakeAPI: base, snapshots: []Image{tc.snap}}
+			backend := testBackend(base)
+			backend.Cfg.OVH.Image = "snap-1"
+			backend.clientFactory = func(core.Config, core.Runtime) (API, error) { return api, nil }
+			rec := record()
+			if tc.mutate != nil {
+				tc.mutate(rec)
+			}
+			_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, CheckpointSource: rec})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v want %q", err, tc.want)
+			}
+			if len(base.createInstances) != 0 || len(base.sshKeys) != 0 {
+				t.Fatalf("allocated before validation: instances=%v keys=%v", base.createInstances, base.sshKeys)
+			}
+		})
+	}
+
+	// A record that matches the live snapshot provisions the child.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	base := &fakeAPI{flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}}, images: []Image{{ID: "image-id", Name: "Ubuntu 24.04"}}}
+	api := &fakeSnapshotAPI{fakeAPI: base, snapshots: []Image{active}}
+	backend := testBackend(base)
+	backend.Cfg.OVH.Image = "snap-1"
+	backend.clientFactory = func(core.Config, core.Runtime) (API, error) { return api, nil }
+	if _, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, CheckpointSource: record()}); err != nil {
+		t.Fatal(err)
+	}
+	if len(base.createInstances) != 1 || base.createInstances[0].ImageID != "snap-1" {
+		t.Fatalf("createInstances=%+v", base.createInstances)
+	}
+}
+
+func TestWaitForSnapshotBoundsEachReadByTheWaitTimeout(t *testing.T) {
+	f := newCheckpointFixture(t)
+	var deadlines []time.Duration
+	f.fake.getHook = func(ctx context.Context) {
+		// The post-create locate read runs on the caller context; only the
+		// readiness polling is bounded by the wait budget.
+		if d, ok := ctx.Deadline(); ok {
+			deadlines = append(deadlines, time.Until(d))
+		}
+	}
+	f.fake.states = []string{"saving", "saving", "active"}
+	req := f.request()
+	req.WaitTimeout = 10 * time.Minute
+	if _, err := (Provider{}).CreateNativeCheckpoint(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if len(deadlines) == 0 {
+		t.Fatal("no polling reads observed")
+	}
+	for _, d := range deadlines {
+		if d <= 0 || d > 10*time.Minute {
+			t.Fatalf("read deadline %v outside the wait budget", d)
+		}
+	}
+}
+
+func TestWaitForSnapshotTimesOutWhenReadOutlivesTheWait(t *testing.T) {
+	f := newCheckpointFixture(t)
+	reads := 0
+	f.fake.getHook = func(ctx context.Context) {
+		reads++
+		if reads > 1 { // the first read is the unbounded post-create locate
+			<-ctx.Done()
+		}
+	}
+	req := f.request()
+	req.WaitTimeout = 20 * time.Millisecond
+	// Real time governs the request context; the fixture clock only governs polling.
+	checkpointNow = time.Now
+	result, err := (Provider{}).CreateNativeCheckpoint(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting for OVH snapshot snap-1") {
+		t.Fatalf("err=%v", err)
+	}
+	if result.Image.ID != "snap-1" {
+		t.Fatalf("result=%+v", result)
 	}
 }
