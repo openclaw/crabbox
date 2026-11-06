@@ -303,11 +303,24 @@ func requireExactCheckpointSource(live Instance, carried core.Server, cfg core.C
 	if server.Labels[ovhProjectLabel] != strings.TrimSpace(cfg.OVH.ProjectID) {
 		return core.LeaseClaim{}, "", core.Exit(3, "ovh project mismatch for lease=%s", leaseID)
 	}
+	if tailscaleEnrolled(claim) {
+		return core.LeaseClaim{}, "", core.Exit(2, "OVH native checkpoints cannot capture a Tailscale-enrolled lease: the snapshot would carry the source's tailnet identity and a fork would contend for it; create the checkpoint from a lease without --tailscale")
+	}
 	region := strings.TrimSpace(live.Region)
 	if region == "" {
 		return core.LeaseClaim{}, "", core.Exit(2, "OVH source instance %s has no region", instanceID)
 	}
 	return claim, region, nil
+}
+
+// tailscaleEnrolled reports whether the lease joined, or was asked to join, a
+// tailnet. Guest preparation does not reset Tailscale state, so such a source
+// is refused rather than captured with its identity.
+func tailscaleEnrolled(claim core.LeaseClaim) bool {
+	return strings.EqualFold(strings.TrimSpace(claim.Labels["tailscale"]), "true") ||
+		strings.TrimSpace(claim.Labels["tailscale_state"]) != "" ||
+		strings.TrimSpace(claim.TailscaleIPv4) != "" ||
+		strings.TrimSpace(claim.TailscaleFQDN) != ""
 }
 
 func snapshotsNamed(snapshots []Image, name string) []Image {

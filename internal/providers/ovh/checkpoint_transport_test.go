@@ -367,3 +367,65 @@ func firstLine(err error) string {
 	line, _, _ := strings.Cut(err.Error(), "\n")
 	return line
 }
+
+// A Tailscale-enrolled source is refused before guest preparation or the
+// snapshot POST, because the snapshot would carry its tailnet identity.
+func TestProductionPathTraceTailscaleEnrolledSourceRefused(t *testing.T) {
+	f := newTransportFixture(t)
+	prepareCheckpointSource = func(context.Context, core.SSHTarget) error {
+		f.ovh.note("guest: prepare source (cloud-init clean, sync)")
+		return nil
+	}
+	claim, _, err := core.ReadLeaseClaimWithPresence(f.lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := map[string]string{}
+	for k, v := range claim.Labels {
+		labels[k] = v
+	}
+	labels["tailscale"] = "true"
+	labels["tailscale_state"] = "ready"
+	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(f.lease.LeaseID, claim, labels); err != nil {
+		t.Fatal(err)
+	}
+	enrolled, _, err := core.ReadLeaseClaimWithPresence(f.lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := f.request()
+	core.SetServerLeaseClaimSnapshot(&req.Server, enrolled, true)
+	mark := f.ovh.mark()
+	_, err = (Provider{}).CreateNativeCheckpoint(context.Background(), req)
+	trace := f.traceSince(mark)
+	logTrace(t, "tailscale-enrolled source: refused ("+firstLine(err)+")", trace)
+	var notSubmitted core.NativeCheckpointNotSubmittedError
+	if err == nil || !strings.Contains(err.Error(), "Tailscale-enrolled") || !errors.As(err, &notSubmitted) {
+		t.Fatalf("err=%v", err)
+	}
+	if indexOf(trace, "** guest:") >= 0 || len(mutating(trace)) != 0 {
+		t.Fatalf("enrolled source reached the guest or a provider mutation: %v", trace)
+	}
+}
+
+func TestTailscaleEnrolledDetectsEveryEnrolmentSignal(t *testing.T) {
+	for name, claim := range map[string]core.LeaseClaim{
+		"label":      {Labels: map[string]string{"tailscale": "true"}},
+		"state":      {Labels: map[string]string{"tailscale_state": "requested"}},
+		"ipv4":       {TailscaleIPv4: "100.64.0.1"},
+		"fqdn":       {TailscaleFQDN: "box.tail.example"},
+		"label-case": {Labels: map[string]string{"tailscale": "TRUE"}},
+	} {
+		if !tailscaleEnrolled(claim) {
+			t.Errorf("%s not detected", name)
+		}
+	}
+	for name, claim := range map[string]core.LeaseClaim{
+		"none":        {},
+		"label-false": {Labels: map[string]string{"tailscale": "false"}},
+	} {
+		if tailscaleEnrolled(claim) {
+			t.Errorf("%s falsely detected", name)
+		}
+	}
+}

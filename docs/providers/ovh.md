@@ -231,6 +231,8 @@ crabbox checkpoint fork <checkpoint-id>
 crabbox image delete <snapshot-id> --provider ovh --region BHS5
 ```
 
+A lease that joined, or was asked to join, a tailnet (`--tailscale`) cannot be captured: guest preparation does not reset Tailscale state, so the snapshot would carry the source's tailnet identity and a fork would contend for it. Crabbox refuses before touching the guest or OVH; create the checkpoint from a lease without `--tailscale`.
+
 `--strategy image` is rejected: the OVH primitive is an instance snapshot, so
 use `--strategy disk-snapshot`. Retiring the source with `--retire-source` is
 unsupported; keep the source lease and stop it normally.
