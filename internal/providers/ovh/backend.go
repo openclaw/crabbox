@@ -784,9 +784,47 @@ func resolveImage(ctx context.Context, client API, projectID, region, value stri
 	}
 	image, err := selectImage(images, value)
 	if err != nil {
+		if snapshot, ok, snapErr := resolveCheckpointSnapshot(ctx, client, projectID, region, value, images); ok || snapErr != nil {
+			return snapshot, snapErr
+		}
 		return Image{}, core.Exit(2, "%v for project=%s region=%s", err, projectID, region)
 	}
 	return image, nil
+}
+
+// resolveCheckpointSnapshot lets a lease boot from a Crabbox checkpoint
+// snapshot, which the public image list does not return. Only an exact,
+// active, Crabbox-named snapshot in the lease region qualifies.
+func resolveCheckpointSnapshot(ctx context.Context, client API, projectID, region, value string, images []Image) (Image, bool, error) {
+	lookup, ok := client.(snapshotClient)
+	if !ok || strings.TrimSpace(value) == "" {
+		return Image{}, false, nil
+	}
+	for _, image := range images {
+		if image.Matches(value) {
+			return Image{}, false, nil
+		}
+	}
+	snapshot, err := lookup.GetSnapshot(ctx, projectID, strings.TrimSpace(value))
+	if err != nil {
+		// A not-found or otherwise rejected id is just not a snapshot; keep the
+		// ordinary "image not returned" diagnostic instead of a raw API error.
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 {
+			return Image{}, false, nil
+		}
+		return Image{}, true, err
+	}
+	if snapshot.ID != strings.TrimSpace(value) || !strings.HasPrefix(snapshot.Name, snapshotNamePrefix+"chk_") {
+		return Image{}, false, nil
+	}
+	if !snapshotAvailable(snapshot.Status) {
+		return Image{}, true, core.Exit(2, "ovh snapshot %q has status=%s", snapshot.ID, core.Blank(snapshot.Status, "unknown"))
+	}
+	if snapshot.Region != "" && snapshot.Region != region {
+		return Image{}, true, core.Exit(2, "ovh snapshot %q is in region=%s, not %s", snapshot.ID, snapshot.Region, region)
+	}
+	return snapshot, true, nil
 }
 
 func selectFlavor(flavors []Flavor, value string) (Flavor, error) {

@@ -26,7 +26,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:           providerName,
 		Kind:             core.ProviderKindSSHLease,
 		Targets:          []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureTailscale},
+		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureTailscale, core.FeatureCheckpoint, core.FeatureFork, core.FeatureSnapshot},
 		Coordinator:      core.CoordinatorNever,
 		ClassDisposition: core.ProviderClassDispositionMapped,
 	}

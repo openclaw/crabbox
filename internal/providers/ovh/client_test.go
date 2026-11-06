@@ -616,3 +616,57 @@ func newTestClientWithHTTP(t *testing.T, endpoint string, httpClient *http.Clien
 	client.hasServerTime = true
 	return client
 }
+
+func TestClientSnapshotMethods(t *testing.T) {
+	var seen []string
+	var body map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.Path+"?"+r.URL.RawQuery)
+		switch r.Method + " " + r.URL.Path {
+		case "POST /cloud/project/project-test/instance/instance-id/snapshot":
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"snapshotId": "snap-1"})
+		case "GET /cloud/project/project-test/snapshot":
+			_ = json.NewEncoder(w).Encode([]Image{{ID: "snap-1", Name: "crabbox-chk_a", Status: "saving"}})
+		case "GET /cloud/project/project-test/snapshot/snap-1":
+			_ = json.NewEncoder(w).Encode(Image{ID: "snap-1", Name: "crabbox-chk_a", Status: "active"})
+		case "DELETE /cloud/project/project-test/snapshot/snap-1":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	ctx := context.Background()
+	createdID, err := client.CreateInstanceSnapshot(ctx, "project-test", "instance-id", "crabbox-chk_a")
+	if err != nil || createdID != "snap-1" {
+		t.Fatalf("id=%q err=%v", createdID, err)
+	}
+	if body["snapshotName"] != "crabbox-chk_a" {
+		t.Fatalf("body=%v", body)
+	}
+	listed, err := client.ListSnapshots(ctx, "project-test", "GRA11")
+	if err != nil || len(listed) != 1 || listed[0].ID != "snap-1" {
+		t.Fatalf("listed=%v err=%v", listed, err)
+	}
+	got, err := client.GetSnapshot(ctx, "project-test", "snap-1")
+	if err != nil || got.Status != "active" {
+		t.Fatalf("got=%v err=%v", got, err)
+	}
+	if err := client.DeleteSnapshot(ctx, "project-test", "snap-1"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"POST /cloud/project/project-test/instance/instance-id/snapshot?",
+		"GET /cloud/project/project-test/snapshot?region=GRA11",
+		"GET /cloud/project/project-test/snapshot/snap-1?",
+		"DELETE /cloud/project/project-test/snapshot/snap-1?",
+	}
+	if strings.Join(seen, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("seen=%v want=%v", seen, want)
+	}
+}

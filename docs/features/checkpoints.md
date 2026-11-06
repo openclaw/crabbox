@@ -112,6 +112,7 @@ Native checkpoints use one of two provider primitives, selected with
 | Azure Linux or native Windows (`windows.mode=normal`) | `azure-os-disk-snapshot` |
 | GCP | `gcp-disk-snapshot` |
 | Hetzner Linux (direct only) | `hetzner-snapshot` |
+| OVHcloud Linux (direct only) | `ovh-snapshot` |
 | Parallels | `parallels-snapshot` |
 | Incus Linux containers (direct, root disk only) | `incus-image` (private image published from a stateless disk snapshot) |
 | Cloudflare containers | `cloudflare-container-snapshot` (full container filesystem, captured while running) |
@@ -145,6 +146,13 @@ labels and exact local lease claim, resets cloud-init, and binds the snapshot to
 the checkpoint, lease, source server, location, and architecture. Brokered
 Hetzner leases continue to use workspace archives; the coordinator does not
 create Hetzner snapshots.
+
+**OVHcloud notes.** Direct OVH Linux leases support `--mode native` and create a
+Public Cloud instance snapshot named `crabbox-<checkpoint-id>`. `--strategy
+image` and source retirement are not supported. OVH snapshots have no labels, so
+the local record (checkpoint, lease, source instance, project, region) plus the
+exact name is the ownership proof; a snapshot without its record is never
+deleted. See [OVHcloud](../providers/ovh.md#native-checkpoints-and-prebaked-images).
 
 **`docker-commit`** — the `local-container` provider's native primitive (opt in
 with `--mode native`; `auto` keeps the workspace-archive default). `crabbox
