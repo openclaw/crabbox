@@ -31,7 +31,7 @@ hydrate  --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|w
 register --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|windows]
          [--windows-mode normal|wsl2] [--repo owner/name | --org organization]
          [--runner-group <group-name>] [--name <runner-name>]
-         [--labels <csv>] [--version latest] [--ephemeral=true] [--wait-timeout 20m]
+         [--labels <csv>] [--version latest] [--ephemeral=true]
          [--reclaim] [--receipt <file>]
 
 unregister --id <lease-id-or-slug> | --receipt <file>
@@ -63,20 +63,19 @@ Local hydration supports Linux and Windows WSL2 targets. With
 commands through `provider=ssh`, but Actions hydration still requires Linux,
 Windows WSL2, or native Windows with `--github-runner`.
 
-For GitHub-runner hydration, `--wait-timeout` keeps its marker-wait meaning: the
-wait for the hydration marker gets the full budget, starting when the workflow
-is dispatched. Runner installation and registration, GitHub online readiness,
-and workflow dispatch are bounded separately by a setup budget of the same
-length, so a slow setup never shortens the marker wait. Crabbox prints
-secret-free setup stages such as
-`release-metadata`, `archive-download`, `checksum`, `extraction`, `git-bash`
-(native Windows guests without Git Bash), `configure`, and `service-start`. It
-does not dispatch the workflow until GitHub reports the exact registered runner
-(the ID recorded in the lease claim) as online. It warns first when the lease
-reaches its TTL before `--wait-timeout` ends; warm runner-hydration leases with a
-longer `--ttl`.
+For GitHub-runner hydration, `--wait-timeout` bounds the wait for the hydration
+marker, starting when the workflow is dispatched. Crabbox prints secret-free
+setup stages such as `release-metadata`, `archive-download`, `checksum`,
+`extraction`, `git-bash` (native Windows guests without Git Bash), `configure`,
+and `service-start`.
 
-If setup or online readiness consumes the setup budget, the command fails before
+On native Windows, runner setup (installation, registration, GitHub online
+readiness, and workflow dispatch) is also bounded, by a separate budget of the
+same length, so a slow setup never shortens the marker wait. The workflow is not
+dispatched until GitHub reports the exact registered runner (the ID recorded in
+the lease claim) as online, and Crabbox warns first when the lease reaches its
+TTL before `--wait-timeout` ends; warm such leases with a longer `--ttl`. If
+setup or online readiness consumes that budget, the command fails before
 workflow dispatch and reports the last completed stage or runner status. Guest
 configuration, service/Scheduled Task, and runner diagnostic logs are retained
 under the runner directory; bounded diagnostic tails are included when
@@ -125,7 +124,8 @@ identity or listener state stops reconciliation instead of replacing a runner.
 Existing claims without a runner receipt are adopted only when the guest identity
 matches the requested lease registration and GitHub confirms its ownership or absence.
 
-`--wait-timeout` bounds setup and online readiness as one operation. Each runner
+On native Windows, `register` bounds setup and online readiness by 20 minutes.
+Each runner
 gets the labels `crabbox`, the canonical lease label `crabbox-<lease-id>`,
 profile/class labels, the slug label when available, and any labels from
 `actions.runnerLabels` or `--labels`. Runner names use the friendly slug when

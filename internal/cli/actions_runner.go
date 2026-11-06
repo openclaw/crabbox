@@ -227,7 +227,8 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 		// runs even after cancellation (for example by the hydration heartbeat after
 		// a reassignment): configuration may already have created the GitHub runner,
 		// and cleanup needs its exact identity. It never starts the listener.
-		reconcileCtx, cancelReconcile := context.WithTimeout(context.WithoutCancel(ctx), actionsRunnerReconcileTimeout)
+		reconcileTimeout, readBudget := actionsRunnerReconcileBudgets(target)
+		reconcileCtx, cancelReconcile := context.WithTimeout(context.WithoutCancel(ctx), reconcileTimeout)
 		defer cancelReconcile()
 		var canceled error
 		if ctx.Err() != nil {
@@ -236,10 +237,16 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 		// A Windows guest that has just installed Git and configured the runner
 		// can miss one control call's deadline; keep asking within a budget that
 		// still leaves time for the GitHub check and the claim update below.
-		readCtx, cancelRead := context.WithTimeout(reconcileCtx, actionsRunnerReconcileReadBudget)
-		guest, err := readActionsRunnerGuestUntil(readCtx, actionsRunnerReconcileRetryDelay, func(queryCtx context.Context) (string, error) {
-			return actionsRunnerControl(queryCtx, target, remoteReadActionsRunnerGuest(target, checkVersion))
-		})
+		// Linux and WSL2 keep a single read, as before.
+		readCtx, cancelRead := context.WithTimeout(reconcileCtx, readBudget)
+		var guest actionsRunnerGuest
+		if isWindowsNativeTarget(target) {
+			guest, err = readActionsRunnerGuestUntil(readCtx, actionsRunnerReconcileRetryDelay, func(queryCtx context.Context) (string, error) {
+				return actionsRunnerControl(queryCtx, target, remoteReadActionsRunnerGuest(target, checkVersion))
+			})
+		} else {
+			guest, err = readActionsRunnerGuest(readCtx, target, checkVersion)
+		}
 		cancelRead()
 		if ctx.Err() != nil {
 			canceled = context.Cause(ctx)
@@ -305,7 +312,10 @@ func (a App) registerActionsRunner(ctx context.Context, cfg Config, target SSHTa
 		return updated, err
 	}
 	fmt.Fprintf(a.Stdout, "actions runner registered scope=%s id=%d name=%s labels=%s ephemeral=%t\n", scope, updated.ActionsRunner.RunnerID, name, strings.Join(labels, ","), cfg.Actions.Ephemeral)
-	// A configured runner whose listener never connects (for example one started
+	if !isWindowsNativeTarget(target) {
+		return updated, nil
+	}
+	// A native Windows listener that never connects (for example one started
 	// under an SSH session that ended) would leave the dispatched job queued.
 	binding := *updated.ActionsRunner
 	onlineCtx, cancelOnline := boundedActionsRunnerOnlineContext(bootstrapCtx)
@@ -604,14 +614,38 @@ rm -f -- "$runner_dir/.runner" "$runner_dir/.credentials" "$runner_dir/.credenti
 `, shellQuote(fmt.Sprint(binding.RunnerID)))
 }
 
+// windowsRunnerSetupBudget is the setup deadline for GitHub-runner hydration:
+// --wait-timeout (or the default) on native Windows, none on Linux and WSL2.
+func windowsRunnerSetupBudget(target SSHTarget, waitTimeout time.Duration) time.Duration {
+	if !isWindowsNativeTarget(target) {
+		return 0
+	}
+	if waitTimeout <= 0 {
+		return defaultActionsWaitTimeout
+	}
+	return waitTimeout
+}
+
+// windowsRunnerSetupContext bounds native Windows runner setup by budget and
+// leaves Linux and WSL2 setup without an overall deadline, as before.
+func windowsRunnerSetupContext(ctx context.Context, target SSHTarget, budget time.Duration) (context.Context, context.CancelFunc) {
+	if budget = windowsRunnerSetupBudget(target, budget); budget > 0 {
+		return context.WithTimeout(ctx, budget)
+	}
+	return context.WithCancel(ctx)
+}
+
 const (
 	defaultActionsWaitTimeout    = 20 * time.Minute
 	actionsRunnerStagePrefix     = "crabbox-runner-stage="
 	actionsRunnerDiagnosticLimit = 16 * 1024
 	maxActionsDiagnosticReserve  = 30 * time.Second
-	// actionsRunnerReconcileTimeout bounds the post-install identity read and
-	// GitHub check, which outlive cancellation of the registering operation.
+	// actionsRunnerReconcileTimeout bounds the native Windows post-install
+	// identity read and GitHub check, which outlive cancellation of the
+	// registering operation. Linux and WSL2 keep a single read within
+	// actionsRunnerSettleTimeout.
 	actionsRunnerReconcileTimeout    = 2 * time.Minute
+	actionsRunnerSettleTimeout       = 30 * time.Second
 	actionsRunnerReconcileReadBudget = 75 * time.Second
 	actionsRunnerReconcileRetryDelay = 3 * time.Second
 )
@@ -631,14 +665,15 @@ type githubRunnerHydrationHooks struct {
 	Now          func() time.Time
 }
 
-// runGitHubRunnerHydration bounds runner setup (registration through workflow
-// dispatch) by waitTimeout, then gives the marker wait its own waitTimeout from
-// dispatch, so a slow setup never shortens the marker-wait contract.
+// runGitHubRunnerHydration gives the marker wait the full waitTimeout from
+// workflow dispatch, as it always had. A positive setupTimeout (native Windows
+// only) separately bounds setup, registration through dispatch, so a slow setup
+// never shortens the marker wait; Linux and WSL2 setup has no overall deadline.
 func runGitHubRunnerHydration(
 	ctx context.Context,
 	workflow, ref, configuredJob string,
 	fields []string,
-	waitTimeout time.Duration,
+	setupTimeout, waitTimeout time.Duration,
 	stderr io.Writer,
 	hooks githubRunnerHydrationHooks,
 ) (actionsHydrationState, error) {
@@ -647,7 +682,11 @@ func runGitHubRunnerHydration(
 		now = time.Now
 	}
 	parent := ctx
-	ctx, cancelSetup := context.WithDeadline(parent, now().Add(waitTimeout))
+	ctx, cancelSetup := context.WithCancel(parent)
+	if setupTimeout > 0 {
+		cancelSetup()
+		ctx, cancelSetup = context.WithDeadline(parent, now().Add(setupTimeout))
+	}
 	defer cancelSetup()
 	if err := hooks.Register(ctx); err != nil {
 		return actionsHydrationState{}, err
@@ -722,6 +761,13 @@ func newActionsRunnerSetupProgress(output io.Writer) *actionsRunnerSetupProgress
 		output:    output,
 		lastStage: "bootstrap",
 	}
+}
+
+func actionsRunnerReconcileBudgets(target SSHTarget) (total, read time.Duration) {
+	if isWindowsNativeTarget(target) {
+		return actionsRunnerReconcileTimeout, actionsRunnerReconcileReadBudget
+	}
+	return actionsRunnerSettleTimeout, actionsRunnerSettleTimeout
 }
 
 func (p *actionsRunnerSetupProgress) Write(data []byte) (int, error) {

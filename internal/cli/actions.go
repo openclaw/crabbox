@@ -70,7 +70,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	connectionFlags := registerActionsHydrateTargetFlags(fs, defaults)
 	leaseIDFlag := fs.String("id", "", "existing lease id or slug")
 	workflowFlags := registerActionsHydrateWorkflowFlags(fs)
-	waitTimeout := fs.Duration("wait-timeout", defaultActionsWaitTimeout, "time to wait for Actions hydration; GitHub-runner setup gets its own budget of the same length")
+	waitTimeout := fs.Duration("wait-timeout", defaultActionsWaitTimeout, "time to wait for Actions hydration")
 	keepAliveMinutes := fs.Int("keep-alive-minutes", 90, "minutes for workflow to keep the job alive")
 	githubRunner := fs.Bool("github-runner", false, "hydrate by registering a GitHub self-hosted runner instead of local SSH execution")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
@@ -78,9 +78,6 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	fieldFlags := registerActionsInputFields(fs)
 	if err := parseFlags(fs, args); err != nil {
 		return err
-	}
-	if *waitTimeout <= 0 {
-		return Exit(2, "actions hydrate --wait-timeout must be greater than zero")
 	}
 	if *leaseIDFlag == "" {
 		return Exit(2, "actions hydrate requires --id")
@@ -124,7 +121,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	}
 	applyResolvedServerConfig(&cfg, server)
 	target = targetWithConfigDefaults(target, cfg)
-	if *githubRunner {
+	if *githubRunner && isWindowsNativeTarget(target) {
 		if warning := actionsLeaseLifetimeWarning(leaseID, server, time.Now(), *waitTimeout); warning != "" {
 			fmt.Fprintln(a.Stderr, warning)
 		}
@@ -274,7 +271,7 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 			cleanupCancel()
 		}
 	}
-	state, err := runGitHubRunnerHydration(ctx, cfg.Actions.Workflow, ref, cfg.Actions.Job, fields, waitTimeout, a.Stderr, githubRunnerHydrationHooks{
+	state, err := runGitHubRunnerHydration(ctx, cfg.Actions.Workflow, ref, cfg.Actions.Job, fields, windowsRunnerSetupBudget(target, waitTimeout), waitTimeout, a.Stderr, githubRunnerHydrationHooks{
 		Register: func(stageCtx context.Context) error {
 			updated, err := a.registerActionsRunner(stageCtx, cfg, target, leaseID, slug, "repos/"+ghRepo.Slug(), "", "", nil, claim, true, "")
 			if err != nil {
@@ -348,13 +345,9 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	versionFlag := fs.String("version", "", "actions/runner version or latest")
 	receiptPath := fs.String("receipt", "", "write a portable cleanup receipt before starting the runner")
 	ephemeralFlag := fs.Bool("ephemeral", true, "register runner as ephemeral")
-	waitTimeout := fs.Duration("wait-timeout", defaultActionsWaitTimeout, "total time allowed for runner registration")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	if err := parseFlags(fs, args); err != nil {
 		return err
-	}
-	if *waitTimeout <= 0 {
-		return Exit(2, "actions register --wait-timeout must be greater than zero")
 	}
 	if *leaseIDFlag == "" {
 		return Exit(2, "actions register requires --id")
@@ -398,7 +391,7 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 		return Exit(2, "Actions runner target has no claimed resource snapshot")
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
-	registerCtx, cancelRegister := context.WithTimeout(ctx, *waitTimeout)
+	registerCtx, cancelRegister := windowsRunnerSetupContext(ctx, target, defaultActionsWaitTimeout)
 	defer cancelRegister()
 	_, err = a.registerActionsRunner(registerCtx, cfg, target, leaseID, slug, scope, *groupFlag, *nameFlag, extraLabels, expected, false, *receiptPath)
 	return err
@@ -3221,7 +3214,7 @@ if [ "$version" = latest ]; then
 else
   release_url="https://api.github.com/repos/actions/runner/releases/tags/v${version}"
 fi
-release_json="$(curl --connect-timeout 15 --max-time 60 -fsSL "$release_url")"
+release_json="$(curl -fsSL "$release_url")"
 resolved_version="$(jq -er '.tag_name | strings | sub("^v"; "")' <<<"$release_json")"
 if [ "$version" != latest ] && [ "$resolved_version" != "$version" ]; then
   echo "runner release metadata resolved unexpected version: wanted=$version got=$resolved_version" >&2
@@ -3239,7 +3232,7 @@ if [ ! -x ./config.sh ] || [ ! -f "$version_marker" ]; then
   archive="$(mktemp "${TMPDIR:-/tmp}/crabbox-actions-runner.XXXXXX.tar.gz")"
   trap 'rm -f "$archive"' EXIT
   runner_stage archive-download
-  curl --connect-timeout 15 --max-time 600 -fsSL -o "$archive" "https://github.com/actions/runner/releases/download/v${version}/${archive_name}"
+  curl -fsSL -o "$archive" "https://github.com/actions/runner/releases/download/v${version}/${archive_name}"
   runner_stage checksum
   actual_sha="$(sha256sum "$archive" | cut -d' ' -f1 | tr '[:upper:]' '[:lower:]')"
   if [ "$actual_sha" != "$expected_sha" ]; then
@@ -3256,14 +3249,14 @@ fi
 runner_stage configure
 if command -v apt-get >/dev/null 2>&1 && grep -qi microsoft /proc/version 2>/dev/null; then
   sudo rm -rf /var/lib/apt/lists/*
-  timeout --kill-after=10s 300s sh -c 'sudo apt-get update >/tmp/crabbox-actions-runner-apt-update.log 2>&1'
+  sudo apt-get update >/tmp/crabbox-actions-runner-apt-update.log 2>&1
 fi
-timeout --kill-after=10s 300s sudo ./bin/installdependencies.sh >/tmp/crabbox-actions-runner-deps.log 2>&1 || true
+sudo ./bin/installdependencies.sh >/tmp/crabbox-actions-runner-deps.log 2>&1 || true
 sudo mkdir -p "$HOME/.cache/node/corepack/v1"
 sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache" 2>/dev/null || true
 group_args=()
 if [ -n "${RUNNER_GROUP:-}" ]; then group_args=(--runnergroup "$RUNNER_GROUP"); fi
-timeout --kill-after=10s 180s ./config.sh --unattended %s "${group_args[@]}" --url "https://github.com/${RUNNER_REPO}" --token "$RUNNER_TOKEN" --name "$RUNNER_NAME" --labels "$RUNNER_LABELS" >"$runner_dir/crabbox-config.log" 2>&1
+./config.sh --unattended %s "${group_args[@]}" --url "https://github.com/${RUNNER_REPO}" --token "$RUNNER_TOKEN" --name "$RUNNER_NAME" --labels "$RUNNER_LABELS" >"$runner_dir/crabbox-config.log" 2>&1
 %s
 
 `, shellQuote(version), ephemeralArg, githubActionsRunnerToolCacheSeedScript())
@@ -3561,8 +3554,8 @@ Restart=no
 [Install]
 WantedBy=multi-user.target
 SERVICE
-timeout --kill-after=10s 60s sudo systemctl daemon-reload
-timeout --kill-after=10s 60s sudo systemctl enable --now crabbox-actions-runner.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now crabbox-actions-runner.service
 `
 }
 

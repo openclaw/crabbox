@@ -121,7 +121,7 @@ prepared setup.
 
 ## GitHub-runner lifecycle and timeout
 
-GitHub-runner hydration uses a single bounded lifecycle:
+GitHub-runner hydration follows this lifecycle:
 
 1. Crabbox claims the lease and keeps both coordinator-backed and direct SSH
    leases alive while hydration is active.
@@ -129,33 +129,34 @@ GitHub-runner hydration uses a single bounded lifecycle:
    runner while reporting secret-free stages: release metadata, archive
    download, checksum verification, extraction, configuration, and
    service/Scheduled Task startup.
-3. It polls the repository runners API for the exact generated runner name.
-   Workflow dispatch is blocked until GitHub reports that runner `online`.
+3. On native Windows, it polls the repository runners API for the exact
+   generated runner name, and workflow dispatch is blocked until GitHub reports
+   that runner `online`.
 4. It clears the old marker, validates supported workflow inputs, dispatches the
    workflow, and waits for the new hydration marker.
 
-`--wait-timeout` defaults to 20 minutes and must be positive. For
-`--github-runner`, steps 2 and 3 plus dispatch share a setup budget of that
-length, and the marker wait in step 4 then gets its own full `--wait-timeout`
-from dispatch, as in earlier releases. `actions register` bounds runner setup and
-online readiness with the same timeout.
+`--wait-timeout` defaults to 20 minutes and bounds the marker wait in step 4,
+starting at dispatch. On native Windows, steps 2 and 3 plus dispatch also share a
+separate setup budget of that length, and `actions register` bounds setup and
+online readiness by 20 minutes; Linux and WSL2 setup keeps its per-call
+deadlines only.
 
 Crabbox keeps the lease alive for the whole hydration, including while the
 runner installs, pacing renewals from the idle timeout saved on the lease rather
 than the current config. Renewal extends idle time, not the TTL (30 minutes by
-default). Crabbox warns before registering a runner when the lease expires
-before `--wait-timeout` ends. On native Windows, runner download, toolchain
+default). On native Windows, Crabbox warns before registering a runner when the
+lease expires before `--wait-timeout` ends. Runner download, toolchain
 setup, and dependency installs commonly take 15 to 25 minutes, so warm leases
 meant for GitHub-runner hydration with a longer TTL, for example
 `crabbox warmup --ttl 2h`, and raise `--wait-timeout` to match. Leases whose
 provider supports `crabbox extend` can be extended instead.
 
-A setup or online-readiness timeout occurs before workflow dispatch and reports
-the last setup stage or runner status. A post-dispatch timeout reports the last
-SSH marker-probe error when one is available. Crabbox retains bounded setup and
-runner diagnostics under `$HOME/actions-runner` (including `crabbox-config.log`
-and `_diag` logs); native Windows diagnostics also report Scheduled Task and
-runner-process state.
+A native Windows setup or online-readiness timeout occurs before workflow
+dispatch and reports the last setup stage or runner status. A post-dispatch
+timeout reports the last SSH marker-probe error when one is available. Crabbox
+retains bounded setup and runner diagnostics under `$HOME/actions-runner`
+(including `crabbox-config.log` and `_diag` logs); native Windows diagnostics also
+report Scheduled Task and runner-process state.
 
 Registration tokens and Windows guest passwords are never written to progress
 output. Diagnostic text is bounded and redacts the short-lived registration

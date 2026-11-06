@@ -18,21 +18,6 @@ import (
 	"time"
 )
 
-// provideFixtureTimeout puts a stand-in timeout on a POSIX fixture's PATH when
-// the host has no GNU timeout (stock macOS), so fixtures that run the runner
-// installer locally reach its later steps. Guests keep the real deadlines.
-func provideFixtureTimeout(t *testing.T, bin string) {
-	t.Helper()
-	if exec.Command("timeout", "--kill-after=1s", "10s", "true").Run() == nil {
-		return
-	}
-	shim := "#!/bin/sh\n# Fixture stand-in for GNU timeout: drop its options and duration, then run the command.\n" +
-		"while [ \"$#\" -gt 0 ]; do\n  case \"$1\" in\n    --*) shift ;;\n    *) break ;;\n  esac\ndone\nshift\nexec \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(bin, "timeout"), []byte(shim), 0o755); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestActionsRunnerRegistrationLifecycle(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX guest fixture")
@@ -80,7 +65,6 @@ func TestActionsRunnerRegistrationLifecycle(t *testing.T) {
 			}
 			t.Setenv("FIXTURE_SCOPE", scope)
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-			provideFixtureTimeout(t, bin)
 			write(filepath.Join(bin, "ssh"), `#!/bin/sh
 for arg do remote="$arg"; done
 printf 'ssh\n' >>"$FIXTURE_ROOT/operations"
@@ -569,6 +553,7 @@ func TestRunGitHubRunnerHydrationDeadlineDuringRegistrationPreventsDispatch(t *t
 		"hydrate",
 		[]string{"crabbox_job=hydrate"},
 		time.Hour,
+		time.Hour,
 		io.Discard,
 		githubRunnerHydrationHooks{
 			Register: func(stageCtx context.Context) error {
@@ -603,18 +588,17 @@ func TestRunGitHubRunnerHydrationDeadlineDuringRegistrationPreventsDispatch(t *t
 
 // hydrateWithClock drives the shared GitHub-runner orchestration, used by Linux,
 // WSL2, and native Windows targets alike, through the real marker-wait loop on
-// a fake clock. Setup takes setup; the marker appears markerAfter dispatch.
-func hydrateWithClock(t *testing.T, waitTimeout, setup, markerAfter time.Duration) (actionsHydrationState, []time.Time, time.Time, error) {
+// a fake clock. Setup takes setup; the marker appears markerAfter dispatch. A
+// setup deadline that passes on the fake clock fails setup like a real timer.
+func hydrateWithClock(t *testing.T, setupTimeout, waitTimeout, setup, markerAfter time.Duration) (actionsHydrationState, []time.Time, time.Time, error) {
 	t.Helper()
 	start := time.Now()
 	clock := start
 	var setupDeadlines []time.Time
 	recordSetup := func(stageCtx context.Context) {
-		deadline, ok := stageCtx.Deadline()
-		if !ok {
-			t.Fatal("setup stage ran without a deadline")
+		if deadline, ok := stageCtx.Deadline(); ok {
+			setupDeadlines = append(setupDeadlines, deadline)
 		}
-		setupDeadlines = append(setupDeadlines, deadline)
 	}
 	state, err := runGitHubRunnerHydration(
 		context.Background(),
@@ -622,6 +606,7 @@ func hydrateWithClock(t *testing.T, waitTimeout, setup, markerAfter time.Duratio
 		"main",
 		"hydrate",
 		[]string{"crabbox_id=cbx_test", "crabbox_runner_label=runner", "crabbox_keep_alive_minutes=90", "crabbox_job=hydrate"},
+		setupTimeout,
 		waitTimeout,
 		io.Discard,
 		githubRunnerHydrationHooks{
@@ -629,6 +614,9 @@ func hydrateWithClock(t *testing.T, waitTimeout, setup, markerAfter time.Duratio
 			Register: func(stageCtx context.Context) error {
 				recordSetup(stageCtx)
 				clock = clock.Add(setup)
+				if deadline, ok := stageCtx.Deadline(); ok && !clock.Before(deadline) {
+					return context.DeadlineExceeded
+				}
 				return nil
 			},
 			ClearState: func(stageCtx context.Context) error { recordSetup(stageCtx); return nil },
@@ -668,9 +656,11 @@ func hydrateWithClock(t *testing.T, waitTimeout, setup, markerAfter time.Duratio
 
 func TestRunGitHubRunnerHydrationSlowSetupKeepsFullMarkerWait(t *testing.T) {
 	const waitTimeout = 20 * time.Minute
-	// Eight minutes of setup plus a marker 15 minutes after dispatch succeeds
-	// when --wait-timeout bounds the marker wait, as it always has.
-	state, setupDeadlines, start, err := hydrateWithClock(t, waitTimeout, 8*time.Minute, 15*time.Minute)
+	// Native Windows: eight minutes of setup plus a marker 15 minutes after
+	// dispatch succeeds, because --wait-timeout bounds the marker wait from
+	// dispatch and setup has its own budget.
+	native := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	state, setupDeadlines, start, err := hydrateWithClock(t, windowsRunnerSetupBudget(native, waitTimeout), waitTimeout, 8*time.Minute, 15*time.Minute)
 	if err != nil {
 		t.Fatalf("8m setup + 15m marker wait failed under a 20m --wait-timeout: %v", err)
 	}
@@ -678,59 +668,72 @@ func TestRunGitHubRunnerHydrationSlowSetupKeepsFullMarkerWait(t *testing.T) {
 		t.Fatalf("state=%+v", state)
 	}
 	if len(setupDeadlines) != 4 {
-		t.Fatalf("setup stages=%d want 4", len(setupDeadlines))
+		t.Fatalf("bounded setup stages=%d want 4", len(setupDeadlines))
 	}
 	for _, deadline := range setupDeadlines {
 		if !deadline.Equal(start.Add(waitTimeout)) {
-			t.Fatalf("setup deadline=%s want %s: setup must stay bounded by one --wait-timeout", deadline, start.Add(waitTimeout))
+			t.Fatalf("setup deadline=%s want %s", deadline, start.Add(waitTimeout))
 		}
 	}
 }
 
+// Linux and WSL2 never had a setup deadline: a registration slower than
+// --wait-timeout still hydrates when the marker arrives within the budget.
+func TestRunGitHubRunnerHydrationLinuxSetupHasNoDeadline(t *testing.T) {
+	for name, target := range map[string]SSHTarget{
+		"linux": {TargetOS: targetLinux},
+		"wsl2":  {TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			const waitTimeout = 20 * time.Minute
+			_, setupDeadlines, _, err := hydrateWithClock(t, windowsRunnerSetupBudget(target, waitTimeout), waitTimeout, 25*time.Minute, 15*time.Minute)
+			if err != nil {
+				t.Fatalf("25m setup + 15m marker wait failed under a 20m --wait-timeout: %v", err)
+			}
+			if len(setupDeadlines) != 0 {
+				t.Fatalf("setup ran under deadlines %v", setupDeadlines)
+			}
+		})
+	}
+}
+
+func TestRunGitHubRunnerHydrationWindowsSetupBudgetStopsBeforeDispatch(t *testing.T) {
+	native := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}
+	_, _, _, err := hydrateWithClock(t, windowsRunnerSetupBudget(native, 20*time.Minute), 20*time.Minute, 21*time.Minute, time.Minute)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error=%v, want the setup deadline before dispatch", err)
+	}
+}
+
 func TestRunGitHubRunnerHydrationMarkerWaitStillTimesOut(t *testing.T) {
-	_, _, _, err := hydrateWithClock(t, 20*time.Minute, time.Minute, 21*time.Minute)
+	_, _, _, err := hydrateWithClock(t, 0, 20*time.Minute, time.Minute, 21*time.Minute)
 	if err == nil || !strings.Contains(err.Error(), "timed out waiting for GitHub Actions hydration marker") {
 		t.Fatalf("error=%v, want marker-wait timeout", err)
 	}
 }
 
-func TestRunGitHubRunnerHydrationSetupBoundedByWaitTimeout(t *testing.T) {
-	dispatched := false
-	_, err := runGitHubRunnerHydration(context.Background(), "hydrate.yml", "main", "hydrate", nil, time.Nanosecond, io.Discard, githubRunnerHydrationHooks{
-		Register: func(stageCtx context.Context) error {
-			<-stageCtx.Done()
-			return stageCtx.Err()
-		},
-		ClearState: func(context.Context) error { t.Fatal("clear ran after setup timeout"); return nil },
-		Inputs: func(context.Context) (map[string]bool, bool, error) {
-			t.Fatal("input inspection ran after setup timeout")
-			return nil, false, nil
-		},
-		Dispatch: func(context.Context, []string) error { dispatched = true; return nil },
-		Wait: func(context.Context, string) (actionsHydrationState, error) {
-			t.Fatal("marker wait ran after setup timeout")
-			return actionsHydrationState{}, nil
-		},
-	})
-	if !errors.Is(err, context.DeadlineExceeded) || dispatched {
-		t.Fatalf("error=%v dispatched=%t, want setup deadline before dispatch", err, dispatched)
-	}
-}
-
-func TestActionsCommandsRejectNonPositiveWaitTimeout(t *testing.T) {
-	app := App{Stdout: io.Discard, Stderr: io.Discard}
-	for name, run := range map[string]func() error{
-		"hydrate": func() error {
-			return app.actionsHydrate(context.Background(), []string{"--wait-timeout", "0"})
-		},
-		"register": func() error {
-			return app.actionsRegister(context.Background(), []string{"--wait-timeout", "0"})
-		},
+// Only native Windows hydration and registration get a setup budget.
+func TestWindowsRunnerSetupBudgetIsNativeWindowsOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target SSHTarget
+		wait   time.Duration
+		want   time.Duration
+	}{
+		{"linux", SSHTarget{TargetOS: targetLinux}, 20 * time.Minute, 0},
+		{"default target", SSHTarget{}, 20 * time.Minute, 0},
+		{"wsl2", SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, 20 * time.Minute, 0},
+		{"native windows", SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, 30 * time.Minute, 30 * time.Minute},
+		{"native windows without a budget", SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, 0, defaultActionsWaitTimeout},
 	} {
-		t.Run(name, func(t *testing.T) {
-			err := run()
-			if err == nil || !strings.Contains(err.Error(), "--wait-timeout must be greater than zero") {
-				t.Fatalf("error=%v", err)
+		t.Run(tc.name, func(t *testing.T) {
+			if got := windowsRunnerSetupBudget(tc.target, tc.wait); got != tc.want {
+				t.Fatalf("setup budget=%s want %s", got, tc.want)
+			}
+			ctx, cancel := windowsRunnerSetupContext(context.Background(), tc.target, tc.wait)
+			defer cancel()
+			if _, ok := ctx.Deadline(); ok != (tc.want > 0) {
+				t.Fatalf("setup context deadline present=%t, want %t", ok, tc.want > 0)
 			}
 		})
 	}
@@ -988,7 +991,7 @@ func TestRunGitHubRunnerHydrationCancellationBetweenStagesStopsFurtherWork(t *te
 					cancel()
 				}
 			}
-			_, err := runGitHubRunnerHydration(ctx, "hydrate.yml", "main", "hydrate", nil, time.Hour, io.Discard, githubRunnerHydrationHooks{
+			_, err := runGitHubRunnerHydration(ctx, "hydrate.yml", "main", "hydrate", nil, 0, time.Hour, io.Discard, githubRunnerHydrationHooks{
 				Register:   func(context.Context) error { record("register"); return nil },
 				ClearState: func(context.Context) error { record("clear"); return nil },
 				Inputs: func(context.Context) (map[string]bool, bool, error) {
