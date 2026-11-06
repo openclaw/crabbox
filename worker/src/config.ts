@@ -93,6 +93,9 @@ export interface LeaseConfig {
   azureOSDisk: AzureOSDiskMode;
   gcpProject: string;
   gcpZone: string;
+  // Present only on OVH configs: fixed-create intents hash the whole normalized config.
+  ovhRegion?: string;
+  ovhInstanceName?: string;
   gcpImage: string;
   gcpMachineImage: string;
   gcpSnapshot: string;
@@ -159,6 +162,9 @@ export interface LeaseConfigDefaults {
 }
 
 const maxRequestedPondNameLength = 41;
+// Every class uses one flavor, matching the CLI provider profile.
+const ovhDefaultFlavor = "b3-8";
+export const ovhDefaultOS = "ubuntu:24.04";
 const maxExposedPort = 65_535;
 const maxExposedPortsPerLease = 10;
 
@@ -171,7 +177,8 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     provider !== "aws" &&
     provider !== "azure" &&
     provider !== "gcp" &&
-    provider !== "daytona"
+    provider !== "daytona" &&
+    provider !== "ovh"
   ) {
     throw new Error(`unsupported provider: ${String(provider)}`);
   }
@@ -198,8 +205,8 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
   const target = normalizeTarget(input.target ?? input.targetOS ?? "linux");
   const requestedArchitecture = normalizeArchitecture(input.architecture);
   const architectureExplicit = Boolean(input.architecture?.trim());
-  const os = normalizeOSImage(input.os);
   const osExplicit = Boolean(input.os?.trim());
+  const os = normalizeOSImage(provider === "ovh" && !osExplicit ? ovhDefaultOS : input.os);
   const selectedOS = osImageSpec(os);
   if (selectedOS.provider && (provider !== selectedOS.provider || target !== selectedOS.target)) {
     throw new Error(
@@ -241,7 +248,8 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
       provider === "hetzner" ||
       provider === "azure" ||
       provider === "gcp" ||
-      provider === "daytona"
+      provider === "daytona" ||
+      provider === "ovh"
     ) {
       throw new Error(unsupportedManagedTargetMessage(provider, target));
     }
@@ -274,6 +282,9 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     throw new Error(
       "brokered provider=daytona currently supports SSH, sync, and run only; desktop/browser/code/tailscale are unavailable",
     );
+  }
+  if (provider === "ovh" && (input.desktop || input.browser || input.code)) {
+    throw new Error("provider=ovh does not support desktop, browser, or code leases");
   }
   if (provider === "daytona" && input.serverTypeExplicit) {
     throw new Error(
@@ -433,6 +444,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     azureOSDisk,
     gcpProject: input.gcpProject ?? "",
     gcpZone: input.gcpZone ?? "",
+    ...(provider === "ovh" ? { ovhRegion: input.ovhRegion?.trim() ?? "" } : {}),
     gcpImage: input.gcpImage ?? (osExplicit ? (linuxOSImage?.gcpImage ?? "") : ""),
     gcpMachineImage: input.gcpMachineImage ?? "",
     gcpSnapshot: input.gcpSnapshot ?? "",
@@ -897,6 +909,9 @@ export function serverTypeForProviderClass(provider: Provider, machineClass: str
   if (provider === "daytona") {
     return "snapshot";
   }
+  if (provider === "ovh") {
+    return ovhDefaultFlavor;
+  }
   if (provider === "aws") {
     return awsInstanceTypeCandidatesForClass(machineClass)[0] ?? machineClass;
   }
@@ -919,6 +934,9 @@ export function serverTypeForConfig(
 ): string {
   if (provider === "daytona") {
     return "snapshot";
+  }
+  if (provider === "ovh") {
+    return ovhDefaultFlavor;
   }
   if (provider === "aws") {
     return (

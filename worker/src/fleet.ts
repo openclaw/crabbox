@@ -360,6 +360,7 @@ import {
   portalLeaseRecord,
 } from "./org-records";
 import { defaultOSImage, normalizeLinuxOSImage, osImageSpec } from "./os-image";
+import { OVHClient, ovhProvisioningFailureEvidence } from "./ovh";
 import {
   coordinatorOriginStatus,
   deviceOwnerIndexKey,
@@ -9282,6 +9283,8 @@ export class FleetCoordinator {
       readiness.checks = await this.awsProviderCapacityChecks(url.searchParams);
     } else if (provider === "daytona" && readiness.configured && !this.testProviders.daytona) {
       readiness.checks = await new DaytonaProvider(this.env).readinessChecks();
+    } else if (provider === "ovh" && readiness.configured && !this.testProviders.ovh) {
+      readiness.checks = await new OVHClient(this.env).readinessChecks();
     }
     if (readiness.configured) {
       const adapter = this.provider(provider);
@@ -13524,13 +13527,16 @@ export class FleetCoordinator {
               ? await this.provider("gcp").listCrabboxServers()
               : provider === "daytona"
                 ? await this.provider("daytona").listCrabboxServers()
-                : [
-                    ...(await this.provider("hetzner").listCrabboxServers()),
-                    ...(await this.listProviderMachinesSafe("aws")),
-                    ...(await this.listProviderMachinesSafe("azure")),
-                    ...(await this.listProviderMachinesSafe("gcp")),
-                    ...(await this.listProviderMachinesSafe("daytona")),
-                  ];
+                : provider === "ovh"
+                  ? await this.provider("ovh").listCrabboxServers()
+                  : [
+                      ...(await this.provider("hetzner").listCrabboxServers()),
+                      ...(await this.listProviderMachinesSafe("aws")),
+                      ...(await this.listProviderMachinesSafe("azure")),
+                      ...(await this.listProviderMachinesSafe("gcp")),
+                      ...(await this.listProviderMachinesSafe("daytona")),
+                      ...(await this.listProviderMachinesSafe("ovh")),
+                    ];
     return json({ machines });
   }
 
@@ -21509,6 +21515,9 @@ export class FleetCoordinator {
     if (provider === "daytona") {
       return new DaytonaProvider(this.env);
     }
+    if (provider === "ovh") {
+      return new OVHProvider(this.env, region);
+    }
     return new HetznerProvider(this.env);
   }
 
@@ -26109,6 +26118,7 @@ function providerFromQuery(value: string | null): Provider | undefined {
 function providerRegionForConfig(config: LeaseConfig): string | undefined {
   if (config.provider === "gcp") return config.gcpZone;
   if (config.provider === "azure") return config.azureLocation;
+  if (config.provider === "ovh") return config.ovhRegion;
   return config.provider === "aws" ? config.awsRegion : undefined;
 }
 
@@ -27458,7 +27468,8 @@ function boundedRunEvent(
     input.provider === "hetzner" ||
     input.provider === "azure" ||
     input.provider === "gcp" ||
-    input.provider === "daytona"
+    input.provider === "daytona" ||
+    input.provider === "ovh"
   ) {
     event.provider = input.provider;
   }
@@ -31021,6 +31032,121 @@ export class DaytonaProvider implements CloudProvider {
 
   hourlyPriceUSD(): Promise<number | undefined> {
     return Promise.resolve(undefined);
+  }
+}
+
+export class OVHProvider implements CloudProvider {
+  readonly recoveryIsAuthoritative = true;
+  private clientValue?: OVHClient;
+
+  constructor(
+    private readonly env: Env,
+    private readonly region?: string,
+  ) {}
+
+  private get client(): OVHClient {
+    this.clientValue ??= new OVHClient(this.env);
+    return this.clientValue;
+  }
+
+  provisioningFailureEvidence({
+    error,
+  }: ProviderProvisioningFailureContext): ProviderProvisioningFailureEvidence {
+    return ovhProvisioningFailureEvidence(error);
+  }
+
+  listCrabboxServers(): Promise<ProviderMachine[]> {
+    return this.client.listCrabboxServers();
+  }
+
+  supportsSSHHostKeyInjection(config: ReturnType<typeof leaseConfig>): boolean {
+    return config.target === "linux";
+  }
+
+  getServer(id: string): Promise<ProviderMachine> {
+    return this.client.getServer(id);
+  }
+
+  recoverServer(lease: LeaseRecord): Promise<ProviderMachine | undefined> {
+    return this.client.recoverServer(lease);
+  }
+
+  prepareLeaseConfig(
+    config: ReturnType<typeof leaseConfig>,
+  ): Promise<ReturnType<typeof leaseConfig>> {
+    const unsupportedOS = this.client.unsupportedOS(config);
+    if (unsupportedOS) return Promise.reject(new ImageCapabilityMismatchError(unsupportedOS));
+    return Promise.resolve(this.client.prepareLeaseConfig(config));
+  }
+
+  prepareLeaseCreate(
+    config: LeaseConfig,
+    lease: LeaseRecord,
+  ): Promise<ProviderLeaseCreatePreparation> {
+    return Promise.resolve(this.client.prepareLeaseCreate(config, lease));
+  }
+
+  async createServerWithFallback(
+    config: ReturnType<typeof leaseConfig>,
+    leaseID: string,
+    _slug: string,
+    _owner: string,
+    provisioning?: ProviderProvisioningContext,
+  ): Promise<{ server: ProviderMachine; serverType: string }> {
+    const server = await this.client.createServer(config, leaseID, provisioning?.onResourceCreated);
+    return { server, serverType: server.serverType };
+  }
+
+  async releaseLease(lease: LeaseRecord, context?: ProviderReleaseContext): Promise<void> {
+    if (!context?.assertCleanupOwner) {
+      throw new Error("OVH cleanup requires a current cleanup owner");
+    }
+    await this.client.releaseLease(lease, context.assertCleanupOwner);
+  }
+
+  async deleteServer(id: string): Promise<void> {
+    throw new ProviderResourceUnresolvedError(
+      `OVH instance ${id} requires its lease identity for deletion`,
+    );
+  }
+
+  supportsNativeImages(): boolean {
+    return false;
+  }
+
+  nativeImagesUnsupportedMessage(): string {
+    return "native images are supported for AWS, Azure, and GCP leases";
+  }
+
+  defaultImageStrategy(): "image" | "disk-snapshot" {
+    return "disk-snapshot";
+  }
+
+  validateLeaseImageStrategy(): string | undefined {
+    return undefined;
+  }
+
+  createLeaseImage = unsupportedProviderImageLifecycle("ovh");
+  getImage = unsupportedProviderImageLifecycle("ovh");
+  deleteImage = unsupportedProviderImageLifecycle("ovh");
+  storedImageMetadata = noStoredImageMetadata;
+  decorateImage = passthroughProviderImage;
+  validateDeleteImage = allowProviderImageDelete;
+
+  deleteSSHKey(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  hourlyPriceUSD(
+    serverType: string,
+    config: ReturnType<typeof leaseConfig>,
+  ): Promise<number | undefined> {
+    const region = config.ovhRegion || this.region || "";
+    return cachedProviderPrice(
+      this.env,
+      ["ovh", serverType, region, this.env.OVH_ENDPOINT ?? "", this.env.CRABBOX_EUR_TO_USD ?? ""],
+      () => this.client.hourlyPriceUSD(serverType, region),
+    );
   }
 }
 

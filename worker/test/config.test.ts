@@ -1835,3 +1835,33 @@ describe("lease config", () => {
     expect(sshPorts(config)).toEqual(["2222"]);
   });
 });
+
+describe("OVH lease configuration", () => {
+  it.each(["hetzner", "aws", "azure", "gcp", "daytona"] as const)(
+    "keeps OVH fields out of %s configs, whose fixed-create intents hash the whole config",
+    (provider) => {
+      const config = leaseConfig({
+        provider,
+        sshPublicKey: "ssh-ed25519 test",
+        ovhRegion: "BHS5",
+      });
+      expect(config).not.toHaveProperty("ovhRegion");
+      expect(config).not.toHaveProperty("ovhInstanceName");
+    },
+  );
+
+  it.each(["desktop", "browser", "code"])("refuses %s, which OVH does not advertise", (feature) => {
+    expect(() =>
+      leaseConfig({ provider: "ovh", sshPublicKey: "ssh-ed25519 test", [feature]: true }),
+    ).toThrow("provider=ovh does not support");
+  });
+
+  it("keeps the requested region on OVH configs", () => {
+    const config = leaseConfig({
+      provider: "ovh",
+      sshPublicKey: "ssh-ed25519 test",
+      ovhRegion: " GRA11 ",
+    });
+    expect(config).toMatchObject({ ovhRegion: "GRA11", os: "ubuntu:24.04", serverType: "b3-8" });
+  });
+});
