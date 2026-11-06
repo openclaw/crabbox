@@ -31,7 +31,8 @@ hydrate  --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|w
 register --id <lease-id-or-slug> [--provider <provider>] [--target linux|macos|windows]
          [--windows-mode normal|wsl2] [--repo owner/name | --org organization]
          [--runner-group <group-name>] [--name <runner-name>]
-         [--labels <csv>] [--version latest] [--ephemeral=true] [--reclaim] [--receipt <file>]
+         [--labels <csv>] [--version latest] [--ephemeral=true]
+         [--reclaim] [--receipt <file>]
 
 unregister --id <lease-id-or-slug> | --receipt <file>
 
@@ -62,6 +63,24 @@ Local hydration supports Linux and Windows WSL2 targets. With
 commands through `provider=ssh`, but Actions hydration still requires Linux,
 Windows WSL2, or native Windows with `--github-runner`.
 
+For GitHub-runner hydration, `--wait-timeout` bounds the wait for the hydration
+marker, starting when the workflow is dispatched. Crabbox prints secret-free
+setup stages such as `release-metadata`, `archive-download`, `checksum`,
+`extraction`, `git-bash` (native Windows guests without Git Bash), `configure`,
+and `service-start`.
+
+On native Windows, runner setup (installation, registration, GitHub online
+readiness, and workflow dispatch) is also bounded, by a separate budget of the
+same length, so a slow setup never shortens the marker wait. The workflow is not
+dispatched until GitHub reports the exact registered runner (the ID recorded in
+the lease claim) as online, and Crabbox warns first when the lease reaches its
+TTL before `--wait-timeout` ends; warm such leases with a longer `--ttl`. If
+setup or online readiness consumes that budget, the command fails before
+workflow dispatch and reports the last completed stage or runner status. Guest
+configuration, service/Scheduled Task, and runner diagnostic logs are retained
+under the runner directory; bounded diagnostic tails are included when
+available. Registration tokens and Windows guest passwords remain redacted.
+
 Blacksmith Testbox IDs (`tbx_...`) and `--provider blacksmith-testbox` are
 skipped, because Blacksmith owns Testbox hydration. Run commands against those
 boxes directly with `crabbox run --provider blacksmith-testbox --id <tbx_id> -- ...`.
@@ -77,9 +96,11 @@ Registers an existing box as a GitHub Actions self-hosted runner. Crabbox
 obtains a registration token through `gh api`, installs the official
 `actions/runner` package, records its exact GitHub identity in the existing lease
 claim, then starts it under systemd on Linux/WSL2 or an owned scheduled task or
-detached PowerShell process on native Windows. Supports Linux and Windows
-targets only. Registration metadata and the short-lived token travel over SSH
-stdin rather than the remote process command line.
+detached PowerShell process on native Windows. On native Windows it also waits
+until GitHub reports the exact runner online. Supports Linux and Windows targets
+only. Registration
+metadata and the short-lived token travel over SSH stdin rather than the remote
+process command line.
 
 ```sh
 crabbox actions register --id blue-lobster
@@ -104,11 +125,13 @@ identity or listener state stops reconciliation instead of replacing a runner.
 Existing claims without a runner receipt are adopted only when the guest identity
 matches the requested lease registration and GitHub confirms its ownership or absence.
 
-Each runner gets the labels `crabbox`, the canonical lease label
-`crabbox-<lease-id>`, profile/class labels, the slug label when available, and
-any labels from `actions.runnerLabels` or `--labels`. Runner names use the
-friendly slug when available; workflow inputs and state-file paths keep using the
-canonical `cbx_...` ID.
+On native Windows, `register` bounds setup and online readiness by 20 minutes.
+Each runner
+gets the labels `crabbox`, the canonical lease label `crabbox-<lease-id>`,
+profile/class labels, the slug label when available, and any labels from
+`actions.runnerLabels` or `--labels`. Runner names use the friendly slug when
+available; workflow inputs and state-file paths keep using the canonical
+`cbx_...` ID.
 
 Use `--receipt <file>` when another machine will remove the registration. Crabbox
 writes this file atomically before starting a newly configured listener. A write
@@ -149,9 +172,14 @@ workload settlement and provider cleanup.
 Runner listeners start only after the receipt is durable. If that write fails,
 Crabbox attempts exact-ID deregistration and leaves the listener stopped. A
 failure of both operations reports the known scope and ID for operator recovery.
-If registration is canceled after configuration, Crabbox spends up to 30 seconds
-recovering and verifying the exact identity for cleanup. A verified receipt is
-retained without starting the listener; `actions unregister` can then remove it.
+The guest install runs without holding the lease claim, so lease renewals keep
+committing while it runs. Before recording the runner, Crabbox checks the claim
+again: if the lease changed hands or started retiring meanwhile, it deletes the
+exact configured runner instead of recording it.
+If registration is canceled after configuration, Crabbox spends up to two
+minutes recovering and verifying the exact identity for cleanup. While the lease
+still owns it, a verified receipt is retained without starting the listener;
+`actions unregister` can then remove it.
 
 ### dispatch
 
@@ -256,6 +284,14 @@ local run. Repo-local composite actions (`./path`) are supported.
 Job containers and service containers are not; `actions/checkout` options that
 change the repository, path, submodules, or LFS fail locally so you can rerun
 with `--github-runner` when you need full GitHub Actions semantics.
+
+For native Windows, the GitHub runner is started as the selected guest user by a
+Scheduled Task, not as LocalSystem, so it remains online after the SSH
+registration command returns. Fresh Hyper-V Windows acquisition creates the
+protected credential escrow used to register that task. The exact UTF-8
+password is not trimmed and is not persisted in Crabbox claims or logs. Existing
+retained Hyper-V Windows leases are intentionally not backfilled during
+`actions hydrate`; release and recreate them before using `--github-runner`.
 
 Local hydration resolves simple expressions in env, run steps, working
 directories, and supported action inputs: `${{ inputs.name }}`,
