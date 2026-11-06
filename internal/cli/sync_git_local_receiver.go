@@ -220,12 +220,18 @@ copy_metadata() {
     fi
   done
 }
+# Drop staging left by an interrupted store of any earlier run. Runs on every
+# cache touch, hits included, so an orphan cannot outlive its hour of grace.
+sweep_cache_staging() {
+  cache_ready || return 0
+  find "$cache_root" -maxdepth 1 -name '.tmp.*' -mmin +60 -exec rm -rf -- {} + >/dev/null 2>&1 || true
+}
 store_cache() (
   umask 077
+  sweep_cache_staging
   if [ -d "$cache_entry" ] && [ ! -L "$cache_entry" ]; then touch -- "$cache_entry"; return 0; fi
   mkdir -p -- "$cache_root" && cache_ready || return 1
-  # Drop staging left by an interrupted store of any earlier run.
-  find "$cache_root" -maxdepth 1 -name '.tmp.*' -mmin +60 -exec rm -rf -- {} + >/dev/null 2>&1 || true
+  sweep_cache_staging
   tmp="$(mktemp -d "$cache_root/.tmp.XXXXXXXX")" || return 1
   # A subshell resets inherited signal traps: convert signals into an exit so the EXIT trap cleans up.
   trap 'rm -rf -- "$tmp"' EXIT
@@ -327,6 +333,7 @@ miss() { exit 1; }
 # Never trust a workspace .git a workload has touched (hooks, config values, ref locks,
 # index bits). Reuse always restores a pristine, re-verified copy of the import-time cache
 # entry, exactly the metadata a full import would have published.
+sweep_cache_staging
 cache_ready && [ -d "$cache_entry" ] && [ ! -L "$cache_entry" ] || miss
 manifest_dir="$workdir/.crabbox"
 if [ -e "$metadata" ] || [ -L "$metadata" ]; then

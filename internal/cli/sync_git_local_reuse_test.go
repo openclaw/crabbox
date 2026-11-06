@@ -289,3 +289,27 @@ func TestGitLocalReceiverStoreSweepsStaleCacheStaging(t *testing.T) {
 		t.Errorf("own staging not cleaned: %v", entries)
 	}
 }
+
+func TestGitLocalReceiverCacheHitPathsSweepStaleStaging(t *testing.T) {
+	plan, data := reuseFixture(t)
+	workdir := t.TempDir()
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	orphan := filepath.Join(plan.CacheRoot, ".tmp.killed")
+	age := func() {
+		mustWriteTestFile(t, filepath.Join(orphan, "git/HEAD"), "x")
+		old := time.Now().Add(-3 * time.Hour)
+		if err := os.Chtimes(orphan, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	age()
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data) // reimport: entry already cached
+	if _, err := os.Lstat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("reimport left an aged orphan: %v", err)
+	}
+	age()
+	requireLocalReceiver(t, remoteGitLocalSeedProbe(workdir, plan), nil)
+	if _, err := os.Lstat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("probe left an aged orphan: %v", err)
+	}
+}
