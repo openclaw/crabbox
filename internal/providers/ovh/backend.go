@@ -468,8 +468,17 @@ func (b *Backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseV
 	return out, nil
 }
 
+// ReleaseLeaseConnectionCleanupSafe is false so the CLI defers remote
+// connection cleanup (for example a Tailscale logout) to GuardedRemoteCleanup,
+// which runs only after checkpoint-release authorization inside the claim fence.
+func (b *Backend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
+
 func (b *Backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
-	return b.deleteServer(ctx, b.Cfg, req.Lease.Server)
+	var beforeDelete func()
+	if req.GuardedRemoteCleanup != nil {
+		beforeDelete = func() { req.GuardedRemoteCleanup(ctx, req.Lease) }
+	}
+	return b.deleteServerGuarded(ctx, b.Cfg, req.Lease.Server, beforeDelete)
 }
 
 func (b *Backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
@@ -656,7 +665,13 @@ func (b *Backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	return nil
 }
 
-func (b *Backend) deleteServer(ctx context.Context, _ core.Config, server core.Server) error {
+func (b *Backend) deleteServer(ctx context.Context, cfg core.Config, server core.Server) error {
+	return b.deleteServerGuarded(ctx, cfg, server, nil)
+}
+
+// deleteServerGuarded runs beforeDelete only after checkpoint-release
+// authorization, inside the claim fence, immediately before the instance delete.
+func (b *Backend) deleteServerGuarded(ctx context.Context, _ core.Config, server core.Server, beforeDelete func()) error {
 	if err := validateOVHServerOwnership(server); err != nil {
 		return err
 	}
@@ -705,6 +720,11 @@ func (b *Backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 	if err := core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
 		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
 			return err
+		}
+		// Remote connection cleanup runs only once release is authorized, so a
+		// refused release leaves the held source's connections intact.
+		if beforeDelete != nil {
+			beforeDelete()
 		}
 		if server.CloudID == "" {
 			return nil

@@ -788,3 +788,75 @@ func TestWaitForSnapshotTimesOutWhenReadOutlivesTheWait(t *testing.T) {
 		t.Fatalf("result=%+v", result)
 	}
 }
+
+func TestReleaseRunsGuardedCleanupOnlyAfterAuthorization(t *testing.T) {
+	newBackend := func(t *testing.T) (*Backend, *fakeAPI, core.LeaseTarget) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		fake := &fakeAPI{flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}}, images: []Image{{ID: "image-id", Name: "Ubuntu 24.04"}}}
+		backend := testBackend(fake)
+		lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "cleanup-lobster"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return backend, fake, lease
+	}
+	if backend, _, _ := newBackend(t); backend.ReleaseLeaseConnectionCleanupSafe() {
+		t.Fatal("generic connection cleanup must be deferred to the guarded callback")
+	}
+
+	t.Run("held source never runs remote cleanup", func(t *testing.T) {
+		backend, fake, lease := newBackend(t)
+		holdSource(t, lease.LeaseID)
+		cleaned := 0
+		err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, GuardedRemoteCleanup: func(context.Context, core.LeaseTarget) { cleaned++ }})
+		if err == nil || cleaned != 0 || len(fake.deletedInstances) != 0 {
+			t.Fatalf("err=%v cleaned=%d deleted=%v", err, cleaned, fake.deletedInstances)
+		}
+	})
+
+	t.Run("authorized release cleans up before the delete", func(t *testing.T) {
+		backend, fake, lease := newBackend(t)
+		var order []string
+		fake.onDeleteInstance = func() { order = append(order, "delete") }
+		err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, GuardedRemoteCleanup: func(context.Context, core.LeaseTarget) { order = append(order, "cleanup") }})
+		if err != nil || strings.Join(order, ",") != "cleanup,delete" {
+			t.Fatalf("err=%v order=%v", err, order)
+		}
+	})
+}
+
+func TestCreateNativeCheckpointRefusesReclaimedSourceGeneration(t *testing.T) {
+	f := newCheckpointFixture(t)
+	stale, exists, err := core.ReadLeaseClaimWithPresence(f.lease.LeaseID)
+	if err != nil || !exists {
+		t.Fatalf("claim exists=%t err=%v", exists, err)
+	}
+	// Another checkout reclaims the lease after this request was admitted.
+	reclaimed := stale
+	reclaimed.Labels = map[string]string{}
+	for k, v := range stale.Labels {
+		reclaimed.Labels[k] = v
+	}
+	reclaimed.Labels["state"] = "reclaimed-elsewhere"
+	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(f.lease.LeaseID, stale, reclaimed.Labels); err != nil {
+		t.Fatal(err)
+	}
+	req := f.request()
+	core.SetServerLeaseClaimSnapshot(&req.Server, stale, true)
+	_, err = (Provider{}).CreateNativeCheckpoint(context.Background(), req)
+	if err == nil || !errors.Is(err, core.ErrReleaseLeaseOwnershipChanged) {
+		t.Fatalf("err=%v", err)
+	}
+	if len(f.fake.createdNames) != 0 || f.prepare != 0 {
+		t.Fatalf("stale generation reached the guest or OVH: names=%v prepare=%d", f.fake.createdNames, f.prepare)
+	}
+
+	// The current generation is accepted.
+	current, _, _ := core.ReadLeaseClaimWithPresence(f.lease.LeaseID)
+	req = f.request()
+	core.SetServerLeaseClaimSnapshot(&req.Server, current, true)
+	if _, err := (Provider{}).CreateNativeCheckpoint(context.Background(), req); err != nil {
+		t.Fatalf("current generation refused: %v", err)
+	}
+}

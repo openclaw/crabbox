@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"time"
 
@@ -120,7 +121,7 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	if err != nil {
 		return core.NativeCheckpointCreateResult{}, fmt.Errorf("re-read OVH checkpoint source instance %s: %w", instanceID, err)
 	}
-	claim, region, err := requireExactCheckpointSource(live, req.Config, req.LeaseID, instanceID)
+	claim, region, err := requireExactCheckpointSource(live, req.Server, req.Config, req.LeaseID, instanceID)
 	if err != nil {
 		return core.NativeCheckpointCreateResult{}, err
 	}
@@ -276,13 +277,18 @@ func resourceClient(req core.NativeCheckpointResourceRequest) (snapshotClient, s
 	return client, project, err
 }
 
-func requireExactCheckpointSource(live Instance, cfg core.Config, leaseID, instanceID string) (core.LeaseClaim, string, error) {
+func requireExactCheckpointSource(live Instance, carried core.Server, cfg core.Config, leaseID, instanceID string) (core.LeaseClaim, string, error) {
 	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
 		return core.LeaseClaim{}, "", fmt.Errorf("read ovh lease claim: %w", err)
 	}
 	if !exists {
 		return core.LeaseClaim{}, "", core.Exit(2, "ovh lease=%s has no exact local claim; refusing snapshot creation", leaseID)
+	}
+	// The claim generation admitted with the request must still be the one on
+	// disk; a lease reclaimed by another checkout is a different generation.
+	if expected, expectedExists, set := core.ServerLeaseClaimSnapshot(carried); set && (!expectedExists || !reflect.DeepEqual(expected, claim)) {
+		return core.LeaseClaim{}, "", fmt.Errorf("%w: lease %s claim changed; refusing snapshot creation", core.ErrReleaseLeaseOwnershipChanged, leaseID)
 	}
 	server := serverFromInstance(mergeInstanceLabels(live, claim.Labels), cfg)
 	if err := validateOVHServerOwnership(server); err != nil {
