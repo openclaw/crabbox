@@ -50,7 +50,7 @@ function Invoke-CrabboxSetupProgram {
 		}
 		temp := t.TempDir()
 		cmd := exec.Command(ps, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script)
-		cmd.Env = append(os.Environ(), "FAKE_PROGRAM_FILES="+programFiles, "TEMP="+temp, "TMP="+temp, "FAKE_INSTALLER_SHA="+sha, "FAKE_INSTALL_EXIT="+exit,
+		cmd.Env = windowsPowerShellTestEnv(t, "FAKE_PROGRAM_FILES="+programFiles, "TEMP="+temp, "TMP="+temp, "FAKE_INSTALLER_SHA="+sha, "FAKE_INSTALL_EXIT="+exit,
 			"FAKE_PROGRAM_FILES_X86="+t.TempDir(), "FAKE_LOCAL_APP_DATA="+t.TempDir(), "FAKE_PATH="+t.TempDir())
 		cmd.Env = append(cmd.Env, env...)
 		out, err := cmd.CombinedOutput()
@@ -194,7 +194,7 @@ exit $LASTEXITCODE
 			t.Fatal(err)
 		}
 		cmd := exec.Command(ps, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", wrapper)
-		cmd.Env = append(os.Environ(), "FAKE_PROGRAM_FILES="+t.TempDir(), "FAKE_PROGRAM_FILES_X86="+t.TempDir(), "FAKE_LOCAL_APP_DATA="+local, "FAKE_PATH="+path)
+		cmd.Env = windowsPowerShellTestEnv(t, "FAKE_PROGRAM_FILES="+t.TempDir(), "FAKE_PROGRAM_FILES_X86="+t.TempDir(), "FAKE_LOCAL_APP_DATA="+local, "FAKE_PATH="+path)
 		out, err := cmd.CombinedOutput()
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {

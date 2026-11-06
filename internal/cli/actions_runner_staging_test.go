@@ -30,7 +30,7 @@ func TestWindowsRunnerScriptStagingIsPrivateAndFresh(t *testing.T) {
 	runLocal := func(ctx context.Context, _ SSHTarget, remote string, input io.Reader, stdout, stderr io.Writer) error {
 		fields := strings.Fields(remote)
 		cmd := exec.CommandContext(ctx, fields[0], fields[1:]...)
-		cmd.Env = append(os.Environ(), "USERPROFILE="+profile)
+		cmd.Env = windowsPowerShellTestEnv(t, "USERPROFILE="+profile)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = input, stdout, stderr
 		return cmd.Run()
 	}
@@ -66,9 +66,7 @@ func TestWindowsRunnerScriptStagingIsPrivateAndFresh(t *testing.T) {
 $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
 [pscustomobject]@{ protected = $acl.AreAccessRulesProtected; inherited = @($rules | Where-Object IsInherited).Count; sids = @($rules | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique); user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } | ConvertTo-Json -Compress`
 	cmd := exec.Command(powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", aclScript)
-	// A PowerShell 7 PSModulePath inherited from the test host breaks Windows
-	// PowerShell's own Get-Acl module.
-	cmd.Env = append(withoutEnv(os.Environ(), "PSModulePath"), "STAGING_DIR="+dir)
+	cmd.Env = windowsPowerShellModuleTestEnv(t, "STAGING_DIR="+dir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("read staging ACL: %v\n%s", err, out)
@@ -103,6 +101,23 @@ $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentif
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("staging directory survived cleanup: %v", err)
 	}
+}
+
+// windowsPowerShellTestEnv is the environment for a Windows PowerShell child
+// of these tests. The test binary isolates user directories, so PowerShell would
+// otherwise write its module-analysis cache relative to the package directory.
+func windowsPowerShellTestEnv(t *testing.T, extra ...string) []string {
+	t.Helper()
+	env := append(os.Environ(), "PSModuleAnalysisCachePath="+filepath.Join(t.TempDir(), "ModuleAnalysisCache"))
+	return append(env, extra...)
+}
+
+// windowsPowerShellModuleTestEnv also drops a PowerShell 7 PSModulePath
+// inherited from the host, which breaks Windows PowerShell's own Get-Acl and
+// job cmdlets.
+func windowsPowerShellModuleTestEnv(t *testing.T, extra ...string) []string {
+	t.Helper()
+	return withoutEnv(windowsPowerShellTestEnv(t, extra...), "PSModulePath")
 }
 
 func withoutEnv(env []string, name string) []string {

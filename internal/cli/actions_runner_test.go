@@ -811,9 +811,7 @@ $childPid = if (Test-Path -LiteralPath $env:CHILD_PID_PATH) { [int](Get-Content 
 		t.Fatal(err)
 	}
 	cmd := exec.Command(powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath)
-	// A PowerShell 7 PSModulePath inherited from the test host breaks Windows
-	// PowerShell's job cmdlets.
-	cmd.Env = append(withoutEnv(os.Environ(), "PSModulePath"), "CRABBOX_RUNNER_TEST_DIR="+runnerDir, "CHILD_PID_PATH="+childPIDPath)
+	cmd.Env = windowsPowerShellModuleTestEnv(t, "CRABBOX_RUNNER_TEST_DIR="+runnerDir, "CHILD_PID_PATH="+childPIDPath)
 	out, err := cmd.CombinedOutput()
 	output := strings.ReplaceAll(string(out), "\r\n", "\n")
 	if err != nil {
