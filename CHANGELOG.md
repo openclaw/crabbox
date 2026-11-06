@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Sync: with `sync.gitSeedSource: local`, reuse verified Git metadata for an unchanged bundle digest from the workspace or a per-user host cache instead of streaming the full-history bundle again on dirty-edit reruns and new workspaces on the same host; probe misses and errors still send the bundle.
 - Run: reduce repeated no-sync SSH setup and telemetry waits, bound diagnostic event draining, and include terminal history confirmation in the final timing breakdown.
 - SSH: reuse verified Linux runtime artifacts across runs and readiness/metadata connections within a run while preserving watched workload lifetimes and confirmed retirement; report signal termination with a valid exit status. [PR 3053](https://github.com/openclaw/crabbox/pull/3053).
 

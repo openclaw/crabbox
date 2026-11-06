@@ -2654,8 +2654,10 @@ retrySync:
 		}
 		if localGitSeed {
 			stepStart = time.Now()
-			if err := transferLocalGitSeed(ctx, target, workdir, localSeed, cfg.Sync.Timeout, a.Stderr); err != nil {
-				return recordFailure(err)
+			if !reuseLocalGitSeed(ctx, target, workdir, localSeed, a.Stderr) {
+				if err := transferLocalGitSeed(ctx, target, workdir, localSeed, cfg.Sync.Timeout, a.Stderr); err != nil {
+					return recordFailure(err)
+				}
 			}
 			timings.syncSteps.gitSeed += time.Since(stepStart)
 		}

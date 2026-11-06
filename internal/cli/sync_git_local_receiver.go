@@ -16,6 +16,8 @@ type gitLocalSeedPlan struct {
 	Refs                             []localGitSeedRef
 	PackedBytes                      int64
 	Fingerprint                      string
+	// CacheRoot overrides the per-user host cache directory (tests only).
+	CacheRoot string
 }
 
 func (p gitLocalSeedPlan) valid() bool {
@@ -78,8 +80,22 @@ func remoteGitLocalSeedFinalize(workdir string, plan gitLocalSeedPlan) string {
 	return remoteGitLocalSeedCommand(workdir, plan, "finalize")
 }
 
+// remoteGitLocalSeedProbe reuses verified metadata for this exact artifact digest
+// from the workspace or from the host cache. It never receives the bundle: any
+// non-zero exit means the caller must stream the bundle as before.
+func remoteGitLocalSeedProbe(workdir string, plan gitLocalSeedPlan) string {
+	return remoteGitLocalSeedCommand(workdir, plan, "probe")
+}
+
 func remoteGitLocalSeedFingerprint(workdir string, plan gitLocalSeedPlan) string {
 	return remoteGitLocalSeedCommand(workdir, plan, "fingerprint")
+}
+
+func cacheRootAssignment(plan gitLocalSeedPlan) string {
+	if plan.CacheRoot != "" {
+		return shellPathQuote(plan.CacheRoot)
+	}
+	return `"/var/tmp/crabbox-$(id -u)/git-seeds"`
 }
 
 func remoteGitLocalSeedCommand(workdir string, plan gitLocalSeedPlan, action string) string {
@@ -176,6 +192,32 @@ $config_keys
 EOF
   plain_git --git-dir="$metadata" fsck --full --strict --no-reflogs >/dev/null 2>&1 || return 1
 }
+# Host cache keyed only by the bundle digest. Entries hold verified metadata
+# (objects, refs, ownership markers) without index or sync state, are private to
+# this user, and are re-verified by verify_metadata before any reuse.
+cache_root=` + cacheRootAssignment(plan) + `
+cache_entry="$cache_root/$expected_digest.git"
+cache_ready() {
+  [ -d "$cache_root" ] && [ ! -L "$cache_root" ] && [ -O "$cache_root" ]
+}
+copy_metadata() {
+  cp -al "$1" "$2" 2>/dev/null || { rm -rf -- "$2"; cp -a "$1" "$2"; }
+}
+store_cache() (
+  umask 077
+  if [ -d "$cache_entry" ] && [ ! -L "$cache_entry" ]; then touch -- "$cache_entry"; return 0; fi
+  mkdir -p -- "$cache_root" && cache_ready || return 1
+  tmp="$(mktemp -d "$cache_root/.tmp.XXXXXXXX")" || return 1
+  trap 'rm -rf -- "$tmp"' EXIT
+  copy_metadata "$1" "$tmp/git" || return 1
+  rm -rf -- "$tmp/git/index" "$tmp/git/crabbox" "$tmp/git/crabbox-local-complete" || return 1
+  if [ ! -e "$cache_entry" ]; then mv -- "$tmp/git" "$cache_entry" || return 1; fi
+  # Keep the three most recently used subjects.
+  ls -1t "$cache_root" | grep -E '^[0-9a-f]{64}[.]git$' | tail -n +4 | while IFS= read -r old; do
+    rm -rf -- "$cache_root/$old"
+  done
+  return 0
+)
 `
 	if action == "import" {
 		script += fmt.Sprintf(`phase=ownership
@@ -253,7 +295,40 @@ if [ -n "$backup" ]; then
   fi
   backup=
 fi
+phase=cache
+store_cache "$metadata" || true
 `, plan.PackedBytes)
+	} else if action == "probe" {
+		script += `phase=probe
+miss() { exit 1; }
+if [ -e "$metadata" ] || [ -L "$metadata" ]; then
+  owned_metadata && verify_metadata || miss
+  # A new sync is starting: drop success markers and stale hydration state, as an import would.
+  rm -f -- "$metadata/crabbox-local-complete" "$metadata/crabbox/sync-fingerprint" "$metadata/crabbox/git-hydrate-base" || fail
+  store_cache "$metadata" || true
+  echo reused-workspace
+  exit 0
+fi
+cache_ready && [ -d "$cache_entry" ] && [ ! -L "$cache_entry" ] || miss
+mkdir -p -- "$workdir" || fail
+stage="$(mktemp -d "$workdir/.crabbox-local-git.XXXXXXXX")" || miss
+fresh="$stage/git"
+copy_metadata "$cache_entry" "$fresh" || miss
+plain_git --git-dir="$fresh" read-tree "$expected_head" >/dev/null 2>&1 || miss
+metadata="$fresh"
+verify_metadata || miss
+metadata="$workdir/.git"
+manifest_dir="$workdir/.crabbox"
+manifest="$manifest_dir/sync-manifest"
+if [ -e "$manifest" ] || [ -L "$manifest" ]; then
+  [ -d "$manifest_dir" ] && [ ! -L "$manifest_dir" ] && [ -f "$manifest" ] && [ ! -L "$manifest" ] || miss
+  mkdir -- "$fresh/crabbox" || miss
+  cp -- "$manifest" "$fresh/crabbox/sync-manifest" || miss
+fi
+mv -- "$fresh" "$metadata" || miss
+touch -- "$cache_entry" 2>/dev/null || true
+echo reused-cache
+`
 	} else {
 		if action == "finalize" {
 			script += `owned_metadata || fail
