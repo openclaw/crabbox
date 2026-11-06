@@ -27,6 +27,7 @@ import {
   sshPorts,
   validCIDRs,
 } from "../src/config";
+import { fixedLeaseCreateIntentHash } from "../src/fleet";
 import { gcpProvisioningCandidatesForConfig } from "../src/gcp";
 import { hetznerProvisioningCandidatesForConfig } from "../src/hetzner";
 
@@ -1837,6 +1838,24 @@ describe("lease config", () => {
 });
 
 describe("OVH lease configuration", () => {
+  // Computed on the commit before OVH joined the coordinator. A persisted fixed-create
+  // intent replays only if this hash is stable, so a change here breaks live records.
+  it.each([
+    ["hetzner", "6af522de0efb149837518b76dc9e417f9c7543162bbad5feab6deee13d86549e"],
+    ["aws", "70b522d5dd59ecc316475c35c1e9c005c59fa76affdf93785166dc4b4abccd07"],
+    ["azure", "db9696ba9cce9c4e12817e6a6f4de2a1350c5d40eec73f33fe979551dba07fbe"],
+    ["gcp", "d92599476c1442738b93efa9fc6656ca948ce503e9ca16cbb0b98efcd4672864"],
+    ["daytona", "a85091c91b13c314510560c68391ad34bcb3b4967495187f7aae231edb3b7e29"],
+  ] as const)("keeps the persisted %s fixed-create intent hash", async (provider, hash) => {
+    const config = leaseConfig({
+      provider,
+      sshPublicKey: "ssh-ed25519 AAAAintent user@example.com",
+      ttlSeconds: 1800,
+      idleTimeoutSeconds: 600,
+    });
+    await expect(fixedLeaseCreateIntentHash(config, "blue-lobster")).resolves.toBe(hash);
+  });
+
   it.each(["hetzner", "aws", "azure", "gcp", "daytona"] as const)(
     "keeps OVH fields out of %s configs, whose fixed-create intents hash the whole config",
     (provider) => {

@@ -845,6 +845,19 @@ describe("OVH provisioning", () => {
     expect(operations()).toContain("DELETE /sshkey/key-id");
   });
 
+  it("refuses an instance renamed while waiting for its address", async () => {
+    const { client } = fakeOVH({
+      ...catalogRoutes,
+      ...keyRoutes,
+      [`POST ${p("/instance")}`]: () => json({ ...activeInstance, ipAddresses: [] }),
+      [`GET ${p(`/instance/${instanceID}`)}`]: () =>
+        json({ ...activeInstance, name: "crabbox-renamed" }),
+    });
+    await expect(client.createServer(config(), leaseID)).rejects.toBeInstanceOf(
+      ProviderResourceUnresolvedError,
+    );
+  });
+
   it("keeps waiting through transient reads", async () => {
     let reads = 0;
     const { client } = fakeOVH({

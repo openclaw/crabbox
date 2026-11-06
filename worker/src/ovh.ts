@@ -276,7 +276,8 @@ export class OVHClient {
       if (continueReadiness === false) return server;
       assertInstanceUsable(instance);
       if (server.host) return server;
-      return { ...(await this.waitForPublicIPv4(instance.id, region)), serverType: flavor.name };
+      const ready = await this.waitForPublicIPv4(instance.id, name, region);
+      return { ...ready, serverType: flavor.name };
     } catch (error) {
       if (error instanceof ProviderResourceUnresolvedError) throw error;
       // The coordinator owns rollback, so a recorded id cannot be orphaned by a restart.
@@ -428,13 +429,23 @@ export class OVHClient {
     );
   }
 
-  private async waitForPublicIPv4(id: string, region: string): Promise<ProviderMachine> {
+  private async waitForPublicIPv4(
+    id: string,
+    name: string,
+    region: string,
+  ): Promise<ProviderMachine> {
     const deadline = Date.now() + this.maxWaitMs;
     let lastTransient = "";
     while (Date.now() < deadline) {
       try {
         // oxlint-disable-next-line eslint/no-await-in-loop -- polling must wait between OVH API reads.
         const instance = await this.getInstance(id);
+        // Adopting a changed name would hand deletion authority to whatever it now is.
+        if (instance.name !== name) {
+          throw new ProviderResourceUnresolvedError(
+            `OVH instance ${id} changed name during readiness: expected ${name}, found ${instance.name}`,
+          );
+        }
         assertInstanceUsable(instance);
         const machine = this.toMachine(instance, region);
         if (machine.host) return machine;
@@ -956,6 +967,7 @@ function ovhCreateRejected(error: unknown): boolean {
 
 function ovhTransientError(error: unknown): boolean {
   if (error instanceof OVHInstanceFailedError) return false;
+  if (error instanceof ProviderResourceUnresolvedError) return false;
   if (!(error instanceof OVHHTTPError)) return true;
   return [404, 408, 409, 425, 429].includes(error.status) || error.status >= 500;
 }
