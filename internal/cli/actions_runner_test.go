@@ -762,6 +762,9 @@ if ($errors.Count -gt 0) {
 	}
 }
 
+// A wedged config.cmd must not outlive its deadline: the timeout stops the job
+// and every process it started (here a grandchild that would otherwise sleep
+// for ten minutes), reports the timeout, and keeps a log without the token.
 func TestGitHubActionsRunnerConfigPowerShellTimeoutStopsProcessTreeAndRedactsLog(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows PowerShell is required")
@@ -771,52 +774,55 @@ func TestGitHubActionsRunnerConfigPowerShellTimeoutStopsProcessTreeAndRedactsLog
 		t.Skip("Windows PowerShell is required")
 	}
 	runnerDir := actionsRunnerFixtureDirectory(t)
+	childPIDPath := filepath.Join(runnerDir, "child.pid")
+	t.Cleanup(func() {
+		// Never leave the sleeping grandchild behind, even when the test fails.
+		if data, err := os.ReadFile(childPIDPath); err == nil {
+			_ = exec.Command("taskkill", "/PID", strings.TrimSpace(string(data)), "/T", "/F").Run()
+		}
+	})
+	configCmd := "@echo off\r\necho config-started %RUNNER_TOKEN%\r\n" +
+		"powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"[IO.File]::WriteAllText($env:CHILD_PID_PATH, [string]$PID); Start-Sleep -Seconds 600\"\r\n"
+	if err := os.WriteFile(filepath.Join(runnerDir, "config.cmd"), []byte(configCmd), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	testScript := `$ErrorActionPreference = "Stop"
 $runnerDir = $env:CRABBOX_RUNNER_TEST_DIR
 Set-Location -LiteralPath $runnerDir
 $env:RUNNER_TOKEN = "fixture-registration-value"
-$script:stopped = @()
-$script:stoppedJob = $false
-$script:removedJob = $false
-function Start-Job {
-  param($ScriptBlock, $ArgumentList)
-  [IO.File]::WriteAllText($ArgumentList[2], "12345")
-  [PSCustomObject]@{ State = "Running" }
-}
-function Wait-Job { param($Job, $Timeout) return $null }
-function Get-CimInstance {
-  param($ClassName, $Filter, $ErrorAction)
-  if ($Filter -eq "ParentProcessId = 12345") { [PSCustomObject]@{ ProcessId = 12346 } }
-}
-function Stop-Process { param($Id, [switch]$Force, $ErrorAction) $script:stopped += $Id }
-function Stop-Job { param($Job, $ErrorAction) $script:stoppedJob = $true }
-function Receive-Job { param($Job, $ErrorAction) "config-started fixture-registration-value" }
-function Remove-Job { param($Job, [switch]$Force, $ErrorAction) $script:removedJob = $true }
 ` + githubActionsRunnerConfigPowerShell() + `
-$failure = $null
+$failure = ""
 try {
-  Invoke-CrabboxRunnerConfig -Arguments @("--unattended") -TimeoutSeconds 1 -LogName "crabbox-config.log"
+  Invoke-CrabboxRunnerConfig -Arguments @("--unattended") -TimeoutSeconds 20 -LogName "crabbox-config.log"
 } catch {
   $failure = $_.Exception.Message
 }
-if ($failure -notlike "config.cmd timed out after 1 seconds; log=*") { throw "timeout was not reported: $failure" }
-if (($script:stopped -join ",") -ne "12346,12345") { throw "process tree cleanup was incomplete" }
-if (-not $script:stoppedJob -or -not $script:removedJob) { throw "job cleanup was incomplete" }
-if (@(Get-ChildItem -LiteralPath $runnerDir -Filter "*.pid").Count -ne 0) { throw "process witness was not removed" }
-Write-Output "timeout-reported"
+"failure=$failure"
+$childPid = if (Test-Path -LiteralPath $env:CHILD_PID_PATH) { [int](Get-Content -Raw -LiteralPath $env:CHILD_PID_PATH) } else { 0 }
+"childStarted=$($childPid -ne 0)"
+"childAlive=$($childPid -ne 0 -and $null -ne (Get-Process -Id $childPid -ErrorAction SilentlyContinue))"
+"witnesses=$(@(Get-ChildItem -LiteralPath $runnerDir -Filter 'crabbox-config-*.pid').Count)"
 `
-	scriptPath := filepath.Join(runnerDir, "runner-config-test.ps1")
+	scriptPath := filepath.Join(runnerDir, "runner-config-timeout.ps1")
 	if err := os.WriteFile(scriptPath, []byte(testScript), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath)
-	cmd.Env = append(os.Environ(), "CRABBOX_RUNNER_TEST_DIR="+runnerDir)
-	output, err := cmd.CombinedOutput()
+	// A PowerShell 7 PSModulePath inherited from the test host breaks Windows
+	// PowerShell's job cmdlets.
+	cmd.Env = append(withoutEnv(os.Environ(), "PSModulePath"), "CRABBOX_RUNNER_TEST_DIR="+runnerDir, "CHILD_PID_PATH="+childPIDPath)
+	out, err := cmd.CombinedOutput()
+	output := strings.ReplaceAll(string(out), "\r\n", "\n")
 	if err != nil {
-		t.Fatalf("timed-out configuration was not cleaned up and reported: %v\n%s", err, output)
+		t.Fatalf("configuration timeout run failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "timeout-reported") {
-		t.Fatalf("script did not report the configuration timeout:\n%s", output)
+	if !strings.Contains(output, "childStarted=True\n") {
+		t.Fatalf("config.cmd did not start its child before the deadline:\n%s", output)
+	}
+	for _, want := range []string{"failure=config.cmd timed out after 20 seconds; log=", "childAlive=False\n", "witnesses=0\n"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("missing %q after the configuration timeout:\n%s", want, output)
+		}
 	}
 	log, err := os.ReadFile(filepath.Join(runnerDir, "crabbox-config.log"))
 	if err != nil {

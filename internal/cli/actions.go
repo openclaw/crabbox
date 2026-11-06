@@ -3692,7 +3692,12 @@ function Invoke-CrabboxRunnerConfig {
       Stop-Job -Job $job -ErrorAction SilentlyContinue
       $timedOut = $true
     }
-    $lines = @(Receive-Job -Job $job -ErrorAction Continue 2>&1 | ForEach-Object { [string]$_ })
+    try {
+      $lines = @(Receive-Job -Job $job -ErrorAction Continue 2>&1 | ForEach-Object { [string]$_ })
+    } catch {
+      # A job stopped mid-run can rethrow its failure; keep what it wrote.
+      $lines = @(@($job.ChildJobs | ForEach-Object { @($_.Output) + @($_.Error) }) | ForEach-Object { [string]$_ }) + @([string]$_.Exception.Message)
+    }
     if (-not [string]::IsNullOrEmpty($env:RUNNER_TOKEN)) {
       $lines = @($lines | ForEach-Object { $_.Replace($env:RUNNER_TOKEN, "[REDACTED]") })
     }
