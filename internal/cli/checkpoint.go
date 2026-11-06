@@ -36,6 +36,7 @@ const (
 	checkpointKindGCP          = "gcp-machine-image"
 	checkpointKindGCPDisk      = "gcp-disk-snapshot"
 	checkpointKindHetzner      = "hetzner-snapshot"
+	checkpointKindOVH          = "ovh-snapshot"
 	checkpointKindMachine0     = "machine0-image"
 	checkpointKindParallels    = "parallels-snapshot"
 	checkpointKindDockerCommit = "docker-commit"
@@ -324,7 +325,7 @@ func (a App) checkpointCreate(ctx context.Context, args []string) (err error) {
 		}()
 		switch createKind {
 		case checkpointKindRecipe:
-		case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindIncus, checkpointKindCloudflare, checkpointKindHyperV:
+		case checkpointKindAWSAMI, checkpointKindAWSEBS, checkpointKindAzure, checkpointKindAzureOS, checkpointKindGCP, checkpointKindGCPDisk, checkpointKindHetzner, checkpointKindOVH, checkpointKindMachine0, checkpointKindParallels, checkpointKindDockerCommit, checkpointKindDaytona, checkpointKindIncus, checkpointKindCloudflare, checkpointKindHyperV:
 			createStrategy := checkpointCreateStrategy(*mode, *strategy, createKind)
 			retention := checkpointRetentionFromDuration(retentionDuration)
 			createContext := withCheckpointCreateContext(ctx, record, retention, func(managed bool) error {
@@ -2995,7 +2996,7 @@ func nativeCheckpointForkWorkdir(cfg Config, leaseID, repoName, override string)
 }
 
 func isNativeCheckpointKind(kind string) bool {
-	return kind == checkpointKindAWSAMI || kind == checkpointKindAWSEBS || kind == checkpointKindAzure || kind == checkpointKindAzureOS || kind == checkpointKindGCP || kind == checkpointKindGCPDisk || kind == checkpointKindHetzner || kind == checkpointKindMachine0 || kind == checkpointKindParallels || kind == checkpointKindDockerCommit || kind == checkpointKindDaytona || kind == checkpointKindIncus || kind == checkpointKindCloudflare || kind == checkpointKindHyperV
+	return kind == checkpointKindAWSAMI || kind == checkpointKindAWSEBS || kind == checkpointKindAzure || kind == checkpointKindAzureOS || kind == checkpointKindGCP || kind == checkpointKindGCPDisk || kind == checkpointKindHetzner || kind == checkpointKindOVH || kind == checkpointKindMachine0 || kind == checkpointKindParallels || kind == checkpointKindDockerCommit || kind == checkpointKindDaytona || kind == checkpointKindIncus || kind == checkpointKindCloudflare || kind == checkpointKindHyperV
 }
 
 func checkpointProviderForKind(kind string) string {
@@ -3008,6 +3009,8 @@ func checkpointProviderForKind(kind string) string {
 		return "gcp"
 	case checkpointKindHetzner:
 		return "hetzner"
+	case checkpointKindOVH:
+		return "ovh"
 	case checkpointKindMachine0:
 		return "machine0"
 	case checkpointKindParallels:
@@ -3228,6 +3231,7 @@ const (
 	CheckpointKindGCP              = checkpointKindGCP
 	CheckpointKindGCPDisk          = checkpointKindGCPDisk
 	CheckpointKindHetzner          = checkpointKindHetzner
+	CheckpointKindOVH              = checkpointKindOVH
 	CheckpointKindMachine0         = checkpointKindMachine0
 	CheckpointKindParallels        = checkpointKindParallels
 	CheckpointKindDockerCommit     = checkpointKindDockerCommit

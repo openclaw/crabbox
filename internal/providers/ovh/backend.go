@@ -89,8 +89,12 @@ func (b *Backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 			return core.DoctorResult{}, err
 		}
 		if cfg.OVH.Image != "" {
-			if _, err := selectImage(images, cfg.OVH.Image); err != nil {
-				return doctorCheckFailure("image", err.Error()), nil
+			if _, err := selectImageOrSnapshot(ctx, client, cfg.OVH.ProjectID, cfg.OVH.Region, cfg.OVH.Image, images); err != nil {
+				var exit core.ExitError
+				if errors.As(err, &exit) {
+					return doctorCheckFailure("image", err.Error()), nil
+				}
+				return core.DoctorResult{}, err
 			}
 		}
 	}
@@ -133,6 +137,11 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	client, err := b.clientFactory(cfg, b.RT)
 	if err != nil {
 		return core.LeaseTarget{}, err
+	}
+	if req.CheckpointSource != nil {
+		if err := validateForkSource(ctx, client, cfg.OVH.ProjectID, *req.CheckpointSource); err != nil {
+			return core.LeaseTarget{}, err
+		}
 	}
 	leaseID := core.NewLeaseID()
 	instances, err := client.ListInstances(ctx, cfg.OVH.ProjectID)
@@ -459,8 +468,17 @@ func (b *Backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseV
 	return out, nil
 }
 
+// ReleaseLeaseConnectionCleanupSafe is false so the CLI defers remote
+// connection cleanup (for example a Tailscale logout) to GuardedRemoteCleanup,
+// which runs only after checkpoint-release authorization inside the claim fence.
+func (b *Backend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
+
 func (b *Backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
-	return b.deleteServer(ctx, b.Cfg, req.Lease.Server)
+	var beforeDelete func()
+	if req.GuardedRemoteCleanup != nil {
+		beforeDelete = func() { req.GuardedRemoteCleanup(ctx, req.Lease) }
+	}
+	return b.deleteServerGuarded(ctx, b.Cfg, req.Lease.Server, beforeDelete)
 }
 
 func (b *Backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
@@ -621,6 +639,10 @@ func (b *Backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			fmt.Fprintf(b.RT.Stderr, "skip server id=%s reason=checkpoint hold: %v\n", server.DisplayID(), err)
+			continue
+		}
 		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", server.DisplayID(), server.Name)
 		if req.DryRun {
 			continue
@@ -643,7 +665,13 @@ func (b *Backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	return nil
 }
 
-func (b *Backend) deleteServer(ctx context.Context, _ core.Config, server core.Server) error {
+func (b *Backend) deleteServer(ctx context.Context, cfg core.Config, server core.Server) error {
+	return b.deleteServerGuarded(ctx, cfg, server, nil)
+}
+
+// deleteServerGuarded runs beforeDelete only after checkpoint-release
+// authorization, inside the claim fence, immediately before the instance delete.
+func (b *Backend) deleteServerGuarded(ctx context.Context, _ core.Config, server core.Server, beforeDelete func()) error {
 	if err := validateOVHServerOwnership(server); err != nil {
 		return err
 	}
@@ -687,10 +715,26 @@ func (b *Backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 			return core.Exit(2, "ovh cleanup claim disappeared during recovery for lease=%s", recovered.LeaseID)
 		}
 	}
-	if server.CloudID != "" {
+	// Snapshot creation holds this same claim fence, so a release cannot delete
+	// the source mid-capture, and an unresolved checkpoint blocks the delete.
+	if err := core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
+		if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+			return err
+		}
+		// Remote connection cleanup runs only once release is authorized, so a
+		// refused release leaves the held source's connections intact.
+		if beforeDelete != nil {
+			beforeDelete()
+		}
+		if server.CloudID == "" {
+			return nil
+		}
 		if err := client.DeleteInstance(ctx, b.Cfg.OVH.ProjectID, server.CloudID); err != nil && !isOVHNotFound(err) {
 			return err
 		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	if claim.Labels[ovhSSHKeyOwnedLabel] == "true" {
 		keyID := strings.TrimSpace(claim.Labels[ovhSSHKeyIDLabel])
@@ -782,11 +826,68 @@ func resolveImage(ctx context.Context, client API, projectID, region, value stri
 	if err != nil {
 		return Image{}, err
 	}
-	image, err := selectImage(images, value)
+	image, err := selectImageOrSnapshot(ctx, client, projectID, region, value, images)
 	if err != nil {
-		return Image{}, core.Exit(2, "%v for project=%s region=%s", err, projectID, region)
+		var exit core.ExitError
+		if errors.As(err, &exit) {
+			return Image{}, core.Exit(2, "%v for project=%s region=%s", err, projectID, region)
+		}
+		return Image{}, err
 	}
 	return image, nil
+}
+
+// selectImageOrSnapshot resolves a public image, then a Crabbox checkpoint
+// snapshot by exact id. A transport failure while probing snapshots is
+// returned as-is; every other failure is the ordinary selection error.
+func selectImageOrSnapshot(ctx context.Context, client API, projectID, region, value string, images []Image) (Image, error) {
+	image, err := selectImage(images, value)
+	if err == nil {
+		return image, nil
+	}
+	snapshot, ok, snapErr := resolveCheckpointSnapshot(ctx, client, projectID, region, value, images)
+	if snapErr != nil {
+		return Image{}, snapErr
+	}
+	if ok {
+		return snapshot, nil
+	}
+	return Image{}, err
+}
+
+// resolveCheckpointSnapshot lets a lease boot from a Crabbox checkpoint
+// snapshot, which the public image list does not return. Only an exact,
+// active, Crabbox-named snapshot in the lease region qualifies.
+func resolveCheckpointSnapshot(ctx context.Context, client API, projectID, region, value string, images []Image) (Image, bool, error) {
+	lookup, ok := client.(snapshotClient)
+	if !ok || strings.TrimSpace(value) == "" {
+		return Image{}, false, nil
+	}
+	for _, image := range images {
+		if image.Matches(value) {
+			return Image{}, false, nil
+		}
+	}
+	snapshot, err := lookup.GetSnapshot(ctx, projectID, strings.TrimSpace(value))
+	if err != nil {
+		// A not-found or otherwise rejected id is just not a snapshot; keep the
+		// ordinary "image not returned" diagnostic instead of a raw API error.
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.Status >= 400 && apiErr.Status < 500 {
+			return Image{}, false, nil
+		}
+		return Image{}, true, err
+	}
+	if snapshot.ID != strings.TrimSpace(value) || !strings.HasPrefix(snapshot.Name, snapshotNamePrefix+"chk_") {
+		return Image{}, false, nil
+	}
+	if !snapshotAvailable(snapshot.Status) {
+		return Image{}, true, core.Exit(2, "ovh snapshot %q has status=%s", snapshot.ID, core.Blank(snapshot.Status, "unknown"))
+	}
+	if snapshot.Region != "" && snapshot.Region != region {
+		return Image{}, true, core.Exit(2, "ovh snapshot %q is in region=%s, not %s", snapshot.ID, snapshot.Region, region)
+	}
+	return snapshot, true, nil
 }
 
 func selectFlavor(flavors []Flavor, value string) (Flavor, error) {
