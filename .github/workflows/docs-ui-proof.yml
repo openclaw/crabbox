@@ -19,7 +19,8 @@ permissions:
 jobs:
   proof:
     name: Render visual proof
-    runs-on: ubuntu-latest
+    # Playwright 1.55.1 cannot install Chromium dependencies on ubuntu-latest (26.04).
+    runs-on: ubuntu-24.04
     timeout-minutes: 12
 
     steps:
