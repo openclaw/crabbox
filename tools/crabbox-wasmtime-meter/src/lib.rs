@@ -66,6 +66,9 @@ fn measure(bytes: &[u8], initial: u64) -> Result<Measurement> {
     let mut config = Config::new();
     config.consume_fuel(true).epoch_interruption(false);
     config.strategy(Strategy::Cranelift);
+    // Avoid Linux memfd-backed initialization under the fixture's file/syscall
+    // limits. Copy initial memory bytes instead; instantiation still counts.
+    config.memory_init_cow(false);
     // Threads are not compiled in. Use synchronous linking/calls below; Wasmtime
     // 50's deprecated async_support switch no longer changes execution behavior.
     // No cache configuration, async yielding, epoch deadline, or concurrent guest.

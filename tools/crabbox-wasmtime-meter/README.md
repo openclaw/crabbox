@@ -50,6 +50,9 @@ calls. Preview1 includes async support dependencies, but execution does not use
 async calls or fuel yielding. The deprecated Wasmtime 50 `async_support` switch
 does not configure execution. Threads, compilation caching and parallel
 compilation are not enabled.
+Copy-on-write memory initialization is explicitly disabled, so instantiation does
+not require a memfd-backed initialization image under the fixture's syscall and
+file-size limits. This setting is part of `crabbox-wasmtime-fuel/v1`.
 
 The guest receives fixed argv, an empty environment, closed stdin, no preopened
 directories, no network capability, a repeating 0..255 random stream, a fixed wall
