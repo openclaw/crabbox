@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Fuel evidence: add an optional source-built Wasmtime helper and native qualification through existing SSH artifacts, following [the phase-one design](https://github.com/openclaw/crabbox/pull/1196). Thanks @zozo123 and @steipete.
+
 ### Fixed
 
 - Run: reduce repeated no-sync SSH setup and telemetry waits, bound diagnostic event draining, and include terminal history confirmation in the final timing breakdown.
