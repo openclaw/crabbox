@@ -90,7 +90,8 @@ jobs:
               exit "$status"
 
           - name: ssh-localhost
-            runner: ubuntu-latest
+            # ubuntu-latest (26.04) resets the smoke's rapid localhost SSH connections.
+            runner: ubuntu-24.04
             build-cli: true
             smoke: CRABBOX_ARCH=amd64 CRABBOX_BIN="$PWD/bin/crabbox" scripts/live-ssh-localhost-smoke.sh
 
