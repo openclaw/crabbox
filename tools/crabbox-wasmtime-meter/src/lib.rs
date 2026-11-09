@@ -31,8 +31,16 @@ pub fn digest(bytes: &[u8]) -> String {
 }
 
 pub fn comparison_key(workload: &str) -> Result<String> {
-    ensure!(!workload.is_empty() && workload.len() <= 128, "invalid workload name");
-    ensure!(workload.bytes().all(|c| c.is_ascii_alphanumeric() || b"-._/".contains(&c)), "workload name must be an ASCII identifier");
+    ensure!(
+        !workload.is_empty() && workload.len() <= 128,
+        "invalid workload name"
+    );
+    ensure!(
+        workload
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-._/".contains(&c)),
+        "workload name must be an ASCII identifier"
+    );
     // Every key/value in this fixed projection is ASCII and contains no numbers.
     // serde_json's sorted map encoding is therefore RFC 8785 canonical JSON.
     let projection = json!({
@@ -41,18 +49,29 @@ pub fn comparison_key(workload: &str) -> Result<String> {
         "metric": "fuel", "target": "wasip1/wasm", "toolchain": TOOLCHAIN,
         "unit": "fuel", "wasiConfiguration": WASI_CONFIGURATION, "workload": workload
     });
-    Ok(format!("sha256:{}", digest(&serde_json::to_vec(&projection)?)))
+    Ok(format!(
+        "sha256:{}",
+        digest(&serde_json::to_vec(&projection)?)
+    ))
 }
 
 struct FixedWall;
 impl HostWallClock for FixedWall {
-    fn resolution(&self) -> Duration { Duration::from_nanos(1) }
-    fn now(&self) -> Duration { Duration::from_secs(1_700_000_000) }
+    fn resolution(&self) -> Duration {
+        Duration::from_nanos(1)
+    }
+    fn now(&self) -> Duration {
+        Duration::from_secs(1_700_000_000)
+    }
 }
 struct ScriptedMonotonic(AtomicU64);
 impl HostMonotonicClock for ScriptedMonotonic {
-    fn resolution(&self) -> u64 { 1 }
-    fn now(&self) -> u64 { self.0.fetch_add(1_000, Ordering::Relaxed) }
+    fn resolution(&self) -> u64 {
+        1
+    }
+    fn now(&self) -> u64 {
+        self.0.fetch_add(1_000, Ordering::Relaxed)
+    }
 }
 
 pub struct Measurement {
@@ -62,7 +81,10 @@ pub struct Measurement {
 }
 
 fn measure(bytes: &[u8], initial: u64) -> Result<Measurement> {
-    ensure!(bytes.starts_with(b"\0asm\x01\0\0\0"), "expected a binary WebAssembly module");
+    ensure!(
+        bytes.starts_with(b"\0asm\x01\0\0\0"),
+        "expected a binary WebAssembly module"
+    );
     let mut config = Config::new();
     config.consume_fuel(true).epoch_interruption(false);
     config.strategy(Strategy::Cranelift);
@@ -75,19 +97,29 @@ fn measure(bytes: &[u8], initial: u64) -> Result<Measurement> {
     let engine = Engine::new(&config)?;
     let module = Module::new(&engine, bytes)?;
     for import in module.imports() {
-        ensure!(import.module() == "wasi_snapshot_preview1", "unexpected import module");
-        ensure!(!import.name().starts_with("sock_"), "socket imports are outside this workload");
+        ensure!(
+            import.module() == "wasi_snapshot_preview1",
+            "unexpected import module"
+        );
+        ensure!(
+            !import.name().starts_with("sock_"),
+            "socket imports are outside this workload"
+        );
     }
     let stdout = MemoryOutputPipe::new(MAX_STDIO);
     let stderr = MemoryOutputPipe::new(MAX_STDIO);
     let mut wasi = WasiCtxBuilder::new();
     wasi.args(&ARGV)
-        .stdout(stdout.clone()).stderr(stderr.clone())
+        .stdout(stdout.clone())
+        .stderr(stderr.clone())
         .secure_random(Deterministic::new((0u8..=255).collect()))
         .insecure_random(Deterministic::new((0u8..=255).collect()))
         .insecure_random_seed(0)
-        .wall_clock(FixedWall).monotonic_clock(ScriptedMonotonic(AtomicU64::new(0)))
-        .allow_tcp(false).allow_udp(false).allow_ip_name_lookup(false);
+        .wall_clock(FixedWall)
+        .monotonic_clock(ScriptedMonotonic(AtomicU64::new(0)))
+        .allow_tcp(false)
+        .allow_udp(false)
+        .allow_ip_name_lookup(false);
     // Builder defaults give closed stdin, empty environment and no preopens.
     let mut store = Store::new(&engine, wasi.build_p1());
     let mut linker = Linker::new(&engine);
@@ -104,19 +136,41 @@ fn measure(bytes: &[u8], initial: u64) -> Result<Measurement> {
     }
     let remaining = store.get_fuel()?;
     ensure!(remaining <= initial, "invalid remaining fuel");
-    Ok(Measurement { remaining, stdout: stdout.contents().to_vec(), stderr: stderr.contents().to_vec() })
+    Ok(Measurement {
+        remaining,
+        stdout: stdout.contents().to_vec(),
+        stderr: stderr.contents().to_vec(),
+    })
 }
 
 pub fn evidence(bytes: &[u8], workload: &str, provider: &str, budget: u64) -> Result<Value> {
     evidence_with_ceiling(bytes, workload, provider, budget, INITIAL_FUEL)
 }
 
-fn evidence_with_ceiling(bytes: &[u8], workload: &str, provider: &str, budget: u64, initial: u64) -> Result<Value> {
-    ensure!(budget <= INITIAL_FUEL && initial <= INITIAL_FUEL, "fuel exceeds JSON safe integer range");
-    ensure!(!provider.is_empty() && provider.len() <= 64 && provider.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b)), "invalid provider identifier");
+fn evidence_with_ceiling(
+    bytes: &[u8],
+    workload: &str,
+    provider: &str,
+    budget: u64,
+    initial: u64,
+) -> Result<Value> {
+    ensure!(
+        budget <= INITIAL_FUEL && initial <= INITIAL_FUEL,
+        "fuel exceeds JSON safe integer range"
+    );
+    ensure!(
+        !provider.is_empty()
+            && provider.len() <= 64
+            && provider
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b)),
+        "invalid provider identifier"
+    );
     let comparison_key = comparison_key(workload)?;
     let measured = measure(bytes, initial)?;
-    let count = initial.checked_sub(measured.remaining).context("invalid fuel subtraction")?;
+    let count = initial
+        .checked_sub(measured.remaining)
+        .context("invalid fuel subtraction")?;
     let exceeded = count > budget;
     Ok(json!({
         "schemaVersion": 1, "generatedAt": OffsetDateTime::now_utc().format(&Rfc3339)?,
@@ -131,28 +185,75 @@ fn evidence_with_ceiling(bytes: &[u8], workload: &str, provider: &str, budget: u
     }))
 }
 
-pub fn run(module: &Path, expected: &str, output: &Path, workload: &str, provider: &str, budget: u64) -> Result<bool> {
-    run_with_ceiling(module, expected, output, workload, provider, budget, INITIAL_FUEL)
+pub fn run(
+    module: &Path,
+    expected: &str,
+    output: &Path,
+    workload: &str,
+    provider: &str,
+    budget: u64,
+) -> Result<bool> {
+    run_with_ceiling(
+        module,
+        expected,
+        output,
+        workload,
+        provider,
+        budget,
+        INITIAL_FUEL,
+    )
 }
 
-fn run_with_ceiling(module: &Path, expected: &str, output: &Path, workload: &str, provider: &str, budget: u64, initial: u64) -> Result<bool> {
+fn run_with_ceiling(
+    module: &Path,
+    expected: &str,
+    output: &Path,
+    workload: &str,
+    provider: &str,
+    budget: u64,
+    initial: u64,
+) -> Result<bool> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-    ensure!(expected.len() == 64 && expected.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)), "invalid expected module digest");
+    ensure!(
+        expected.len() == 64
+            && expected
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+        "invalid expected module digest"
+    );
     let parent = output.parent().context("output needs a parent directory")?;
     let metadata = fs::symlink_metadata(parent)?;
-    ensure!(metadata.is_dir() && metadata.uid() == unsafe { libc::geteuid() } && metadata.permissions().mode() & 0o077 == 0, "output parent must be a private owned directory");
-    ensure!(fs::symlink_metadata(output).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound), "output must be absent before invocation");
-    let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(module)?;
+    ensure!(
+        metadata.is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.permissions().mode() & 0o077 == 0,
+        "output parent must be a private owned directory"
+    );
+    ensure!(
+        fs::symlink_metadata(output).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
+        "output must be absent before invocation"
+    );
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(module)?;
     ensure!(file.metadata()?.is_file(), "module must be a regular file");
     let mut bytes = Vec::new();
     file.take(MAX_MODULE + 1).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() as u64 <= MAX_MODULE, "module size limit exceeded");
+    ensure!(
+        bytes.len() as u64 <= MAX_MODULE,
+        "module size limit exceeded"
+    );
     ensure!(digest(&bytes) == expected, "module provenance mismatch");
     let value = evidence_with_ceiling(&bytes, workload, provider, budget, initial)?;
     let encoded = serde_json::to_vec(&value)?;
     ensure!(encoded.len() <= 65_536, "evidence size limit exceeded");
     let temporary = parent.join(format!(".fuel-{}.tmp", std::process::id()));
-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
     let mut published = false;
     let publication = (|| -> Result<()> {
         file.write_all(&encoded)?;
@@ -168,41 +269,70 @@ fn run_with_ceiling(module: &Path, expected: &str, output: &Path, workload: &str
     })();
     if publication.is_err() {
         let _ = fs::remove_file(&temporary);
-        if published { let _ = fs::remove_file(output); }
+        if published {
+            let _ = fs::remove_file(output);
+        }
     }
     publication?;
-    Ok(value["exceeded"].as_bool().context("missing budget predicate")?)
+    Ok(value["exceeded"]
+        .as_bool()
+        .context("missing budget predicate")?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    fn module(body: &str) -> Vec<u8> { wat::parse_str(format!("(module (func (export \"_start\") {body}))")).unwrap() }
+    fn module(body: &str) -> Vec<u8> {
+        wat::parse_str(format!("(module (func (export \"_start\") {body}))")).unwrap()
+    }
     #[test]
     fn arithmetic_and_budget_equality() {
-        let a = evidence(&module("nop"), "example/workflow/v1", "fixture", INITIAL_FUEL).unwrap();
+        let a = evidence(
+            &module("nop"),
+            "example/workflow/v1",
+            "fixture",
+            INITIAL_FUEL,
+        )
+        .unwrap();
         let count = a["results"][0]["measured"].as_u64().unwrap();
         assert!(count > 0);
         let equal = evidence(&module("nop"), "example/workflow/v1", "fixture", count).unwrap();
         assert_eq!(equal["exceeded"], false);
         let lower = evidence(&module("nop"), "example/workflow/v1", "fixture", count - 1).unwrap();
         assert_eq!(lower["exceeded"], true);
-        assert_eq!(count, INITIAL_FUEL - equal["meter"]["remainingFuel"].as_u64().unwrap());
+        assert_eq!(
+            count,
+            INITIAL_FUEL - equal["meter"]["remainingFuel"].as_u64().unwrap()
+        );
         assert_eq!(a["meter"]["comparisonKey"], lower["meter"]["comparisonKey"]);
     }
     #[test]
     fn test_only_small_ceiling_uses_real_out_of_fuel_and_never_publishes() {
         let bytes = module("(loop br 0)");
         let error = measure(&bytes, 16).err().unwrap();
-        assert_eq!(error.downcast_ref::<wasmtime::Trap>(), Some(&wasmtime::Trap::OutOfFuel));
+        assert_eq!(
+            error.downcast_ref::<wasmtime::Trap>(),
+            Some(&wasmtime::Trap::OutOfFuel)
+        );
         let dir = std::env::temp_dir().join(format!("fuel-exhaustion-{}", std::process::id()));
         fs::create_dir(&dir).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         let source = dir.join("in.wasm");
         let output = dir.join("evidence.json");
         fs::write(&source, &bytes).unwrap();
-        assert!(run_with_ceiling(&source, &digest(&bytes), &output, "example/workflow/v1", "fixture", 1, 16).is_err());
+        assert!(
+            run_with_ceiling(
+                &source,
+                &digest(&bytes),
+                &output,
+                "example/workflow/v1",
+                "fixture",
+                1,
+                16
+            )
+            .is_err()
+        );
         assert!(!output.exists());
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
         fs::remove_dir_all(&dir).unwrap();
@@ -210,7 +340,10 @@ mod tests {
     #[test]
     fn traps_and_unknown_imports_are_measurement_failures() {
         assert!(evidence(&module("unreachable"), "example/workflow/v1", "fixture", 1).is_err());
-        let foreign = wat::parse_str("(module (import \"foreign\" \"call\" (func)) (func (export \"_start\")))").unwrap();
+        let foreign = wat::parse_str(
+            "(module (import \"foreign\" \"call\" (func)) (func (export \"_start\")))",
+        )
+        .unwrap();
         assert!(evidence(&foreign, "example/workflow/v1", "fixture", 1).is_err());
         assert!(comparison_key("workload\nforged").is_err());
     }
@@ -224,10 +357,30 @@ mod tests {
         let output = dir.join("evidence.json");
         let bytes = module("nop");
         fs::write(&source, &bytes).unwrap();
-        assert!(run(&source, &"0".repeat(64), &output, "example/workflow/v1", "fixture", 1).is_err());
+        assert!(
+            run(
+                &source,
+                &"0".repeat(64),
+                &output,
+                "example/workflow/v1",
+                "fixture",
+                1
+            )
+            .is_err()
+        );
         assert!(!output.exists());
         fs::write(&output, b"prior evidence").unwrap();
-        assert!(run(&source, &digest(&bytes), &output, "example/workflow/v1", "fixture", 1).is_err());
+        assert!(
+            run(
+                &source,
+                &digest(&bytes),
+                &output,
+                "example/workflow/v1",
+                "fixture",
+                1
+            )
+            .is_err()
+        );
         assert_eq!(fs::read(&output).unwrap(), b"prior evidence");
         fs::remove_dir_all(&dir).unwrap();
     }
