@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -54,6 +55,26 @@ def regular_bytes(path, limit):
     if len(value) > limit:
         raise RuntimeError('evidence exceeds limit')
     return value
+
+
+def waited_child_cpu():
+    try:
+        usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+        values = (usage.ru_utime, usage.ru_stime)
+        if all(type(value) in (int, float) and math.isfinite(value) and value >= 0 for value in values):
+            return values
+    except Exception:
+        pass
+    return None
+
+
+def waited_child_cpu_delta(before):
+    after = waited_child_cpu()
+    if before is not None and after is not None:
+        delta = tuple(end - start for start, end in zip(before, after))
+        if all(math.isfinite(value) and value >= 0 for value in delta):
+            return dict(user=delta[0], system=delta[1])
+    return None
 
 
 def main():
@@ -128,9 +149,11 @@ def invoke(directory, work, destination, controller, selection, expected, budget
         os.dup2(seeded, 42, inheritable=True)
         os.close(seeded)
     child = None
+    diagnostic = None
     streams = selectors.DefaultSelector()
     buffers = [bytearray(), bytearray()]
     try:
+        cpu_before = waited_child_cpu()
         child = subprocess.Popen(command, env={'UNEXPECTED': 'fixture'} if bad_environment else {}, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  pass_fds=(42,), start_new_session=True, preexec_fn=limits)
@@ -184,25 +207,39 @@ def invoke(directory, work, destination, controller, selection, expected, budget
                               guestStarted=b'meter: guest-started\n' in buffers[1],
                               childState='not-spawned' if child is None else 'live' if exit_code is None else 'exited',
                               exitCode=exit_code, stdoutBytes=len(buffers[0]), stderrBytes=len(buffers[1]),
-                              stderrTail=tail)
-            print('fixture failure: ' + json.dumps(diagnostic, sort_keys=True), file=sys.stderr, flush=True)
+                              stderrTail=tail, waitedChildCpuSeconds=None,
+                              cpuScope='waited child and descendants waited by their parents')
         except Exception:
             pass  # Diagnostics must not replace the original failure or skip reaping.
         raise
     finally:
         try:
-            os.close(42)
-        except OSError:
-            pass
-        streams.close()
-        if child is not None:
             try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
+                os.close(42)
+            except OSError:
                 pass
-            child.wait(timeout=5)
-        if meter_processes():
-            raise RuntimeError('meter process survived reaping')
+            streams.close()
+            if child is not None:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.wait(timeout=5)
+                if diagnostic is not None:
+                    # This invocation starts only this child. RUSAGE_CHILDREN also
+                    # includes descendants whose intermediate parents waited for them.
+                    try:
+                        diagnostic['waitedChildCpuSeconds'] = waited_child_cpu_delta(cpu_before)
+                    except Exception:
+                        pass  # Accounting must not interrupt the remaining cleanup.
+            if meter_processes():
+                raise RuntimeError('meter process survived reaping')
+        finally:
+            if diagnostic is not None:
+                try:
+                    print('fixture failure: ' + json.dumps(diagnostic, sort_keys=True), file=sys.stderr, flush=True)
+                except Exception:
+                    pass  # A broken sink must not replace the failure or interrupt cleanup.
 
 
 if __name__ == '__main__':

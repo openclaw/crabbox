@@ -13,15 +13,44 @@ import supervise
 
 
 class ConsumerContract(unittest.TestCase):
-    def test_deadline_reports_progress_and_reaps_without_replacing_failure(self):
+    def test_deadline_reports_waited_cpu_and_reaps_without_replacing_failure(self):
         stdout = b'child output'
-        for exit_code, guest_started, broken_diagnostics in [(None, True, False), (17, False, False), (None, True, True)]:
+        before = SimpleNamespace(ru_utime=100, ru_stime=20)
+        after = SimpleNamespace(ru_utime=104.5, ru_stime=21.25)
+        measured = dict(user=4.5, system=1.25)
+        cases = [
+            ('measured', None, True, False, before, after, measured),
+            ('already-exited', 17, False, False, before, after, measured),
+            ('broken-sink', None, True, True, before, after, measured),
+            ('zero', None, False, False, before, before, dict(user=0, system=0)),
+            ('before-error', None, False, False, OSError('unavailable'), after, None),
+            ('after-error', None, False, False, before, OSError('unavailable'), None),
+            ('missing-counter', None, False, False, before, SimpleNamespace(ru_utime=104.5), None),
+            ('decreasing-user', None, False, False, before, SimpleNamespace(ru_utime=99, ru_stime=21), None),
+            ('decreasing-system', None, False, False, before, SimpleNamespace(ru_utime=101, ru_stime=19), None),
+            ('negative-before', None, False, False, SimpleNamespace(ru_utime=-1, ru_stime=20), after, None),
+            ('nan-after', None, False, False, before, SimpleNamespace(ru_utime=float('nan'), ru_stime=21), None),
+            ('infinite-before', None, False, False, SimpleNamespace(ru_utime=100, ru_stime=float('inf')), after, None),
+        ]
+        for label, exit_code, guest_started, broken_diagnostics, cpu_before, cpu_after, expected_cpu in cases:
             stderr = (b'meter: guest-started\n' if guest_started else b'') + b'x' * 4096 + b'\xff tail\n'
+            events = []
+            samples = iter([cpu_before, cpu_after])
+
+            def usage(_who):
+                events.append('cpu-before' if not events else 'cpu-after')
+                sample = next(samples)
+                if isinstance(sample, Exception):
+                    raise sample
+                return sample
+
             child = mock.Mock(pid=12345)
             child.stdout.fileno.return_value = 100
             child.stderr.fileno.return_value = 101
             child.poll.return_value = exit_code
+            child.wait.side_effect = lambda **_kwargs: events.append('wait') or 0
             selector = mock.Mock()
+            selector.close.side_effect = lambda: events.append('streams-close')
             keys = {}
             selector.register.side_effect = lambda stream, _events, data: keys.update(
                 {data: SimpleNamespace(fileobj=stream, data=data)})
@@ -31,7 +60,7 @@ class ConsumerContract(unittest.TestCase):
             sink = mock.Mock() if broken_diagnostics else captured
             if broken_diagnostics:
                 sink.write.side_effect = OSError('diagnostic sink unavailable')
-            with self.subTest(exit_code=exit_code, guest_started=guest_started, broken=broken_diagnostics), \
+            with self.subTest(case=label), \
                     tempfile.TemporaryDirectory() as name:
                 directory = Path(name) / 'trial'
                 directory.mkdir()
@@ -39,20 +68,25 @@ class ConsumerContract(unittest.TestCase):
                         mock.patch.object(supervise.os, 'open', return_value=42), \
                         mock.patch.object(supervise.os, 'close'), \
                         mock.patch.object(supervise.os, 'read', side_effect=lambda fd, _size: {100: stdout, 101: stderr}[fd]), \
-                        mock.patch.object(supervise.os, 'killpg') as kill, \
-                        mock.patch.object(supervise.subprocess, 'Popen', return_value=child), \
+                        mock.patch.object(supervise.os, 'killpg', side_effect=lambda *_args: events.append('kill')) as kill, \
+                        mock.patch.object(supervise.subprocess, 'Popen', side_effect=lambda *_args, **_kwargs: events.append('spawn') or child) as spawn, \
+                        mock.patch.object(supervise.resource, 'getrusage', side_effect=usage) as accounting, \
                         mock.patch.object(supervise.selectors, 'DefaultSelector', return_value=selector), \
                         mock.patch.object(supervise, 'time', SimpleNamespace(monotonic=mock.Mock(side_effect=[0, 0, 120]))), \
-                        mock.patch.object(supervise, 'meter_processes', return_value=[]) as processes, \
+                        mock.patch.object(supervise, 'meter_processes', side_effect=lambda: events.append('processes') or []) as processes, \
                         contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(sink):
                     with self.assertRaisesRegex(RuntimeError, '^fixture child deadline exceeded$'):
                         supervise.invoke(directory, Path(name), Path(name) / 'unused.json', 1000,
                                          'probe-identity', '0' * 64, '1')
                 kill.assert_called_once_with(child.pid, supervise.signal.SIGKILL)
                 child.wait.assert_called_once_with(timeout=5)
+                spawn.assert_called_once()
+                self.assertEqual(accounting.call_args_list, [mock.call(supervise.resource.RUSAGE_CHILDREN)] * 2)
+                self.assertEqual(events, ['cpu-before', 'spawn', 'streams-close', 'kill', 'wait', 'cpu-after', 'processes'])
                 processes.assert_called_once_with()
                 selector.close.assert_called_once_with()
                 self.assertFalse((directory / 'out' / 'evidence.json').exists())
+                self.assertFalse((Path(name) / 'unused.json').exists())
                 if not broken_diagnostics:
                     diagnostic = json.loads(captured.getvalue().removeprefix('fixture failure: '))
                     self.assertEqual(diagnostic['phase'], 'child-supervision')
@@ -63,6 +97,49 @@ class ConsumerContract(unittest.TestCase):
                     self.assertEqual((diagnostic['stdoutBytes'], diagnostic['stderrBytes']), (len(stdout), len(stderr)))
                     self.assertLessEqual(len(diagnostic['stderrTail'].encode()), 2048)
                     self.assertTrue(diagnostic['stderrTail'].endswith('\ufffd tail\n'))
+                    self.assertEqual(diagnostic['waitedChildCpuSeconds'], expected_cpu)
+                    self.assertEqual(diagnostic['cpuScope'], 'waited child and descendants waited by their parents')
+
+    def test_success_has_no_cpu_diagnostic_even_when_accounting_is_unavailable(self):
+        child = mock.Mock(pid=12345)
+        child.stdout.fileno.return_value = 100
+        child.stderr.fileno.return_value = 101
+        child.wait.return_value = 0
+        selector = mock.Mock()
+        keys = {}
+        selector.register.side_effect = lambda stream, _events, data: keys.update(
+            {data: SimpleNamespace(fileobj=stream, data=data)})
+        selector.get_map.return_value = keys
+        selector.select.side_effect = lambda **_kwargs: [(key, 0) for key in keys.values()]
+        selector.unregister.side_effect = lambda stream: keys.pop(0 if stream is child.stdout else 1)
+        blocks = {100: iter([b'probe-ok:identity\n', b'']), 101: iter([b''])}
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name) / 'trial'
+            directory.mkdir()
+            with mock.patch.object(supervise.os, 'chown'), \
+                    mock.patch.object(supervise.os, 'open', return_value=42), \
+                    mock.patch.object(supervise.os, 'close'), \
+                    mock.patch.object(supervise.os, 'read', side_effect=lambda fd, _size: next(blocks[fd])), \
+                    mock.patch.object(supervise.os, 'killpg') as kill, \
+                    mock.patch.object(supervise.subprocess, 'Popen', return_value=child) as spawn, \
+                    mock.patch.object(supervise.resource, 'getrusage', side_effect=OSError('unavailable')) as accounting, \
+                    mock.patch.object(supervise.selectors, 'DefaultSelector', return_value=selector), \
+                    mock.patch.object(supervise, 'time', SimpleNamespace(monotonic=lambda: 0)), \
+                    mock.patch.object(supervise, 'meter_processes', return_value=[]) as processes, \
+                    contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                self.assertEqual(supervise.invoke(directory, Path(name), Path(name) / 'unused.json', 1000,
+                                                  'probe-identity', '0' * 64, '1'), 0)
+            self.assertEqual(stdout.getvalue(), 'fixture-child-started\nprobe-ok:identity\n')
+            self.assertEqual(stderr.getvalue(), '')
+            accounting.assert_called_once_with(supervise.resource.RUSAGE_CHILDREN)
+            spawn.assert_called_once()
+            self.assertEqual(child.wait.call_args_list, [mock.call(timeout=5)] * 2)
+            kill.assert_called_once_with(child.pid, supervise.signal.SIGKILL)
+            processes.assert_called_once_with()
+            selector.close.assert_called_once_with()
+            self.assertFalse((directory / 'out' / 'evidence.json').exists())
+            self.assertFalse((Path(name) / 'unused.json').exists())
 
     def evidence(self):
         meter = dict(mechanism='wasmtime-fuel', engine='wasmtime', engineVersion='50.0.1',
