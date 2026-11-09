@@ -176,11 +176,11 @@ def qualify(args):
     command(['git', 'add', 'inputs', 'schema.json'], cwd=project)
     command(['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
              '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'fixture inputs'], cwd=project)
-    for name in ('state', 'cache', 'config'):
+    for name in ('state', 'cache', 'config', 'docker-config'):
         (root / name).mkdir(mode=0o700)
     env = {key: os.environ[key] for key in ('PATH', 'TMPDIR', 'LANG') if key in os.environ}
     env.update(XDG_STATE_HOME=str(root / 'state'), XDG_CACHE_HOME=str(root / 'cache'),
-               XDG_CONFIG_HOME=str(root / 'config'))
+               XDG_CONFIG_HOME=str(root / 'config'), DOCKER_CONFIG=str(root / 'docker-config'))
     identity = ':'.join([manifest['source'], architecture, os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']])
     lease = 'cbx_' + sha(identity.encode())[:12]
     cli = Path(args.crabbox).resolve()
