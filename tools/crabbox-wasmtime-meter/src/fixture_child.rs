@@ -1,5 +1,6 @@
 //! Linux-only qualification fixture, never installed by the ordinary helper build.
 use anyhow::{Context, Result, ensure};
+use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
@@ -78,6 +79,7 @@ fn run() -> Result<()> {
         args.first().map(String::as_str) == Some("--"),
         "missing helper separator"
     );
+    let _ = std::io::stderr().write_all(b"fixture: helper-exec\n");
     let error = Command::new("/usr/local/bin/crabbox-wasmtime-meter")
         .args(&args[1..])
         .env_clear()

@@ -94,8 +94,14 @@ fn measure(bytes: &[u8], initial: u64) -> Result<Measurement> {
     // Threads are not compiled in. Use synchronous linking/calls below; Wasmtime
     // 50's deprecated async_support switch no longer changes execution behavior.
     // No cache configuration, async yielding, epoch deadline, or concurrent guest.
+    #[cfg(feature = "fixture")]
+    let _ = std::io::stderr().write_all(b"meter: engine-create\n");
     let engine = Engine::new(&config)?;
+    #[cfg(feature = "fixture")]
+    let _ = std::io::stderr().write_all(b"meter: module-compile\n");
     let module = Module::new(&engine, bytes)?;
+    #[cfg(feature = "fixture")]
+    let _ = std::io::stderr().write_all(b"meter: module-ready\n");
     for import in module.imports() {
         ensure!(
             import.module() == "wasi_snapshot_preview1",
@@ -126,7 +132,11 @@ fn measure(bytes: &[u8], initial: u64) -> Result<Measurement> {
     wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |ctx| ctx)?;
     store.set_fuel(initial)?;
     // Fuel starts before instantiation: start functions and Go initialization count.
+    #[cfg(feature = "fixture")]
+    let _ = std::io::stderr().write_all(b"meter: instantiate\n");
     let instance = linker.instantiate(&mut store, &module)?;
+    #[cfg(feature = "fixture")]
+    let _ = std::io::stderr().write_all(b"meter: instance-ready\n");
     let start = instance.get_typed_func::<(), ()>(&mut store, "_start")?;
     eprintln!("meter: guest-started");
     if let Err(error) = start.call(&mut store, ()) {
