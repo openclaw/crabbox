@@ -176,6 +176,19 @@ def invoke(directory, work, destination, controller, selection, expected, budget
             os.fsync(target.fileno())
             os.fchown(target.fileno(), controller, -1)
         return code
+    except Exception:
+        try:
+            exit_code = child.poll() if child is not None else None
+            tail = bytes(buffers[1]).decode(errors='replace').encode()[-2048:].decode(errors='ignore')
+            diagnostic = dict(phase='child-supervision', spawned=child is not None,
+                              guestStarted=b'meter: guest-started\n' in buffers[1],
+                              childState='not-spawned' if child is None else 'live' if exit_code is None else 'exited',
+                              exitCode=exit_code, stdoutBytes=len(buffers[0]), stderrBytes=len(buffers[1]),
+                              stderrTail=tail)
+            print('fixture failure: ' + json.dumps(diagnostic, sort_keys=True), file=sys.stderr, flush=True)
+        except Exception:
+            pass  # Diagnostics must not replace the original failure or skip reaping.
+        raise
     finally:
         try:
             os.close(42)

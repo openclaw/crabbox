@@ -5,11 +5,65 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 import qualify
+import supervise
 
 
 class ConsumerContract(unittest.TestCase):
+    def test_deadline_reports_progress_and_reaps_without_replacing_failure(self):
+        stdout = b'child output'
+        for exit_code, guest_started, broken_diagnostics in [(None, True, False), (17, False, False), (None, True, True)]:
+            stderr = (b'meter: guest-started\n' if guest_started else b'') + b'x' * 4096 + b'\xff tail\n'
+            child = mock.Mock(pid=12345)
+            child.stdout.fileno.return_value = 100
+            child.stderr.fileno.return_value = 101
+            child.poll.return_value = exit_code
+            selector = mock.Mock()
+            keys = {}
+            selector.register.side_effect = lambda stream, _events, data: keys.update(
+                {data: SimpleNamespace(fileobj=stream, data=data)})
+            selector.get_map.return_value = keys
+            selector.select.side_effect = lambda **_kwargs: [(key, 0) for key in keys.values()]
+            captured = io.StringIO()
+            sink = mock.Mock() if broken_diagnostics else captured
+            if broken_diagnostics:
+                sink.write.side_effect = OSError('diagnostic sink unavailable')
+            with self.subTest(exit_code=exit_code, guest_started=guest_started, broken=broken_diagnostics), \
+                    tempfile.TemporaryDirectory() as name:
+                directory = Path(name) / 'trial'
+                directory.mkdir()
+                with mock.patch.object(supervise.os, 'chown'), \
+                        mock.patch.object(supervise.os, 'open', return_value=42), \
+                        mock.patch.object(supervise.os, 'close'), \
+                        mock.patch.object(supervise.os, 'read', side_effect=lambda fd, _size: {100: stdout, 101: stderr}[fd]), \
+                        mock.patch.object(supervise.os, 'killpg') as kill, \
+                        mock.patch.object(supervise.subprocess, 'Popen', return_value=child), \
+                        mock.patch.object(supervise.selectors, 'DefaultSelector', return_value=selector), \
+                        mock.patch.object(supervise, 'time', SimpleNamespace(monotonic=mock.Mock(side_effect=[0, 0, 120]))), \
+                        mock.patch.object(supervise, 'meter_processes', return_value=[]) as processes, \
+                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(sink):
+                    with self.assertRaisesRegex(RuntimeError, '^fixture child deadline exceeded$'):
+                        supervise.invoke(directory, Path(name), Path(name) / 'unused.json', 1000,
+                                         'probe-identity', '0' * 64, '1')
+                kill.assert_called_once_with(child.pid, supervise.signal.SIGKILL)
+                child.wait.assert_called_once_with(timeout=5)
+                processes.assert_called_once_with()
+                selector.close.assert_called_once_with()
+                self.assertFalse((directory / 'out' / 'evidence.json').exists())
+                if not broken_diagnostics:
+                    diagnostic = json.loads(captured.getvalue().removeprefix('fixture failure: '))
+                    self.assertEqual(diagnostic['phase'], 'child-supervision')
+                    self.assertTrue(diagnostic['spawned'])
+                    self.assertEqual(diagnostic['guestStarted'], guest_started)
+                    self.assertEqual(diagnostic['childState'], 'live' if exit_code is None else 'exited')
+                    self.assertEqual(diagnostic['exitCode'], exit_code)
+                    self.assertEqual((diagnostic['stdoutBytes'], diagnostic['stderrBytes']), (len(stdout), len(stderr)))
+                    self.assertLessEqual(len(diagnostic['stderrTail'].encode()), 2048)
+                    self.assertTrue(diagnostic['stderrTail'].endswith('\ufffd tail\n'))
+
     def evidence(self):
         meter = dict(mechanism='wasmtime-fuel', engine='wasmtime', engineVersion='50.0.1',
                      engineRevision='c307ec81de02852d815e9849f7c89d955c03c30d',
