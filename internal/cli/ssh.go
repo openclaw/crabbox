@@ -422,6 +422,7 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 	authenticated := false
 	blocking := "unknown"
 	policy, checkpointWait := checkpointReadinessFromContext(ctx)
+	statusTarget := *target
 	retryDelay := 250 * time.Millisecond
 	check := func(probeErr error) error {
 		if stopped := sshReadinessProbeContextError(ctx, lastProbe); stopped != nil {
@@ -456,7 +457,7 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 			return err
 		}
 		if checkpointWait && target.ReadinessStatus != "" {
-			status, stage := observeReadinessStatus(probeCtx, *target)
+			status, stage := observeReadinessStatus(probeCtx, statusTarget)
 			if err := check(nil); err != nil {
 				return err
 			}
@@ -588,6 +589,10 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 				// stage rather than the probe that just succeeded.
 				authenticated = true
 				lastProbe = "readiness"
+				// Observe the route that just proved transport, without admitting
+				// the target as ready or changing the normal port selection.
+				statusTarget.Port = probe.Port
+				statusTarget.FallbackPorts = []string{}
 				probes = append(probes, port+":ready")
 				if canWaitForLinuxReadiness(probe) {
 					lastPorts = strings.Join(probes, ",")

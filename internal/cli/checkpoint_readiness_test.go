@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -307,4 +308,48 @@ esac
 		t.Fatal("guest wait did not run its bounded slice", err)
 	}
 	t.Log(err)
+}
+
+func TestCheckpointReadinessStatusFollowsAuthenticatedFallback(t *testing.T) {
+	target, dir := readinessWaitFixture(t, "timeout")
+	workingPort := target.Port
+	// Own and then close an ephemeral primary port, so TCP readiness must use
+	// the fixture's existing listener on the fallback port.
+	primary, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, target.Port, _ = net.SplitHostPort(primary.Addr().String())
+	if err := primary.Close(); err != nil {
+		t.Fatal(err)
+	}
+	target.FallbackPorts = []string{workingPort}
+	target.ReadinessStatus = "fixture-status"
+	t.Setenv("CRABBOX_WORKING_STATUS_PORT", workingPort)
+	script := `#!/bin/sh
+previous= port=
+for arg; do
+  if test "$previous" = -p; then port=$arg; fi
+  previous=$arg
+  remote=$arg
+done
+case "$remote" in
+ fixture-status)
+   if test "$port" != "$CRABBOX_WORKING_STATUS_PORT"; then exec sleep 30; fi
+   echo 'failed bootstrap'; exit 0;;
+ 'exit 0') exit 0;;
+ *) exit 124;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	configuredPort := target.Port
+	err = waitForSSHReady(checkpointWaitContext(t.Context(), 12*time.Second), &target, io.Discard, "bootstrap", time.Hour)
+	if err == nil || !strings.Contains(err.Error(), "state=bootstrap_failed") {
+		t.Fatalf("fallback observer: %v", err)
+	}
+	if target.Port != configuredPort {
+		t.Fatal("a status observation admitted the target's endpoint before readiness")
+	}
 }
