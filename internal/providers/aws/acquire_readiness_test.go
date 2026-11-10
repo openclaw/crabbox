@@ -3,6 +3,7 @@ package aws
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync/atomic"
 	"testing"
@@ -108,6 +109,50 @@ func TestAWSFixedCheckpointInterruptedBootstrapResumesSameInstance(t *testing.T)
 			}
 			if fake.createCalls != 1 || lease.Server.CloudID != claim.CloudID || lease.LeaseID != req.RequestedLeaseID || len(fake.deletedInstances) != 0 {
 				t.Fatalf("replaced lease: %+v creates=%d", lease, fake.createCalls)
+			}
+		})
+	}
+}
+
+func TestAWSAcquireReadinessPreservesStoppedWaitDiagnostic(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		parent, unrelated bool
+	}{
+		{name: "caller cancellation", parent: true},
+		{name: "lifecycle cancellation"},
+		{name: "lifecycle wins over unrelated wait error", unrelated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			cause := errors.New("authoritative stop")
+			var polls atomic.Int32
+			var diagnostic error
+			err := waitAWSAcquireReadyEvery(ctx, func(context.Context) error {
+				if polls.Add(1) >= 2 && !tc.parent {
+					return cause
+				}
+				return nil
+			}, func(ctx context.Context) error {
+				if tc.parent {
+					cancel(cause)
+				}
+				<-ctx.Done()
+				diagnostic = fmt.Errorf("checkpoint readiness stopped lease=cbx_012345abcdef; fixed identity retained: %w", context.Cause(ctx))
+				if tc.unrelated {
+					return errors.New("independent readiness failure")
+				}
+				return diagnostic
+			}, time.Millisecond)
+			if !errors.Is(err, cause) {
+				t.Fatalf("stop cause lost: %v", err)
+			}
+			if !tc.unrelated && err != diagnostic {
+				t.Fatalf("wait diagnostic lost: %v", err)
+			}
+			if tc.unrelated && err != cause {
+				t.Fatalf("live authority masked: %v", err)
 			}
 		})
 	}
