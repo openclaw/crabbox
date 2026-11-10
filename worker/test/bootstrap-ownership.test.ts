@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   lchownSync,
   lstatSync,
   mkdirSync,
@@ -67,6 +68,12 @@ function summary(output: string) {
   );
   expect(match).not.toBeNull();
   return match!.slice(1).map(Number);
+}
+
+function repairOnly(work: string, cache: string): string {
+  const script = ownershipScript(work, cache);
+  // Keep the real emitted repair, omitting the directory-creation prelude.
+  return script.slice(script.indexOf("# Resolve the original user:"));
 }
 
 describe("cloud-init ownership repair", () => {
@@ -242,6 +249,99 @@ describe("cloud-init ownership repair", () => {
         );
         expect(result.stdout).not.toContain("state=complete");
         expect(result.stdout).not.toContain("continued");
+      } finally {
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux" || process.getuid?.() !== 0)(
+    "retains completed repairs after a later root fails and safely retries",
+    () => {
+      const fixture = mkdtempSync(join(tmpdir(), "crabbox-ownership-retry-"));
+      try {
+        const work = join(fixture, "work");
+        const cache = join(fixture, "cache");
+        mkdirSync(work);
+        writeFileSync(join(work, "file"), "fixture\n");
+        for (const path of entries(work)) lchownSync(path, 12345, 23456);
+        const result = spawnSync(
+          "bash",
+          ["-euo", "pipefail", "-c", `${repairOnly(work, cache)}\necho continued`],
+          { encoding: "utf8" },
+        );
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain("FileNotFoundError");
+        expect(result.stdout).toMatch(
+          /^crabbox ownership-repair state=failed visited=2 mismatched=2 changed=2 elapsed_seconds=\d+\.\d{3}$/m,
+        );
+        expect(result.stdout).not.toContain("state=complete");
+        expect(result.stdout).not.toContain("continued");
+        const repaired = new Map(entries(work).map((path) => [path, metadata(path)]));
+        for (const old of repaired.values()) expect([old.uid, old.gid]).toEqual([0n, 0n]);
+        mkdirSync(cache);
+        writeFileSync(join(cache, "remaining"), "fixture\n");
+        lchownSync(join(cache, "remaining"), 12345, 23456);
+        expect(summary(run(repairOnly(work, cache)))).toEqual([4, 1, 1]);
+        for (const [path, old] of repaired) expect(metadata(path)).toEqual(old);
+        expect([
+          metadata(join(cache, "remaining")).uid,
+          metadata(join(cache, "remaining")).gid,
+        ]).toEqual([0n, 0n]);
+      } finally {
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it
+    .skipIf(process.platform !== "linux" || process.getuid?.() !== 0)
+    .each(["ownership update", "directory read"])(
+    "fails closed on denied %s and recovers on an authorized retry",
+    (operation) => {
+      const fixture = mkdtempSync(join(tmpdir(), "crabbox-ownership-permission-"));
+      try {
+        // A child without root privileges must reach our fixture, but cannot
+        // change another user's inode or read a root-only directory.
+        chmodSync(fixture, 0o755);
+        const work = join(fixture, "work");
+        const cache = join(fixture, "cache");
+        mkdirSync(work);
+        mkdirSync(cache);
+        const denied = join(work, "denied");
+        if (operation === "directory read") {
+          mkdirSync(denied, 0o700);
+          writeFileSync(join(denied, "file"), "fixture\n");
+          lchownSync(join(denied, "file"), 12345, 23456);
+        } else {
+          writeFileSync(denied, "fixture\n");
+          lchownSync(denied, 12345, 23456);
+        }
+        const before = new Map(entries(work).map((path) => [path, metadata(path)]));
+        const result = spawnSync(
+          "bash",
+          ["-euo", "pipefail", "-c", `${repairOnly(work, cache)}\necho continued`],
+          { encoding: "utf8", uid: 65534, gid: 65534 },
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain("PermissionError");
+        expect(result.stdout).toMatch(
+          new RegExp(
+            `^crabbox ownership-repair state=failed visited=2 mismatched=${operation === "ownership update" ? 1 : 0} changed=0 elapsed_seconds=\\d+\\.\\d{3}$`,
+            "m",
+          ),
+        );
+        expect(result.stdout).not.toContain("state=complete");
+        expect(result.stdout).not.toContain("continued");
+        for (const [path, old] of before) expect(metadata(path)).toEqual(old);
+        expect(summary(run(repairOnly(work, cache)))).toEqual([before.size + 1, 1, 1]);
+        for (const path of before.keys()) {
+          const after = metadata(path);
+          expect([after.uid, after.gid]).toEqual([0n, 0n]);
+        }
+        const retained = [...before].filter(([, old]) => old.uid === 0n && old.gid === 0n);
+        for (const [path, old] of retained) expect(metadata(path)).toEqual(old);
       } finally {
         rmSync(fixture, { recursive: true, force: true });
       }
