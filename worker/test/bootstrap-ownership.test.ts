@@ -187,11 +187,14 @@ describe("cloud-init ownership repair", () => {
         const before = new Map(paths.map((path) => [path, metadata(path)]));
         run(`ulimit -Sn 1024\n${ownershipScript(work, cache)}`);
         for (const path of paths) {
-          const old = before.get(path)!;
           const after = metadata(path);
           expect([after.uid, after.gid]).toEqual([0n, 0n]);
-          if (old.uid === 0n && old.gid === 0n) expect(after).toEqual(old);
         }
+        const correct = paths.filter((path) => {
+          const old = before.get(path)!;
+          return old.uid === 0n && old.gid === 0n;
+        });
+        for (const path of correct) expect(metadata(path)).toEqual(before.get(path));
       } finally {
         rmSync(fixture, { recursive: true, force: true });
       }
