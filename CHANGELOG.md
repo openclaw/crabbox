@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Boat: explicitly disable snapshots and select private or shared organization visibility at creation, with fresh metadata checks before SSH access and policy-preserving lease reuse. (https://github.com/openclaw/crabbox/pull/3117) Thanks @vincentkoc.
+
 ### Fixed
 
 - Run: reduce repeated no-sync SSH setup and telemetry waits, bound diagnostic event draining, and include terminal history confirmation in the final timing breakdown.
