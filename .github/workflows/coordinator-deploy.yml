@@ -109,9 +109,8 @@ jobs:
           CRABBOX_DAYTONA_SNAPSHOT: ${{ secrets.CRABBOX_DAYTONA_SNAPSHOT }}
           CRABBOX_ARTIFACTS_CREDENTIALS_JSON: ${{ secrets.CRABBOX_ARTIFACTS_CREDENTIALS_JSON }}
           CLEAR_DAYTONA_SNAPSHOT: ${{ inputs.clearDaytonaSnapshot }}
-          CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.replace_live_lease_policy == true && '1' || '0' }}
-          CRABBOX_LEASE_POLICY_REPLACEMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.lease_policy_replacement || '' }}
-          CRABBOX_EXPECTED_LIVE_LEASE_POLICY_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.lease_policy_expected_sha256 || '' }}
+          # The helper reads replacement inputs from GITHUB_EVENT_PATH. Never
+          # put policy JSON in step env/run text: Actions prints these first.
 
       - name: Verify deployed coordinator
         run: node scripts/verify-coordinator-deployment.mjs

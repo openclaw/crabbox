@@ -241,21 +241,25 @@ test("deployment uses the guarded transient-config owner and verifies its policy
   assert.doesNotMatch(workflow, /github:/);
 });
 
-test("lease policy replacement is dispatch-only, explicit, and not interpolated into shell", () => {
-  const acknowledgment =
-    "CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.replace_live_lease_policy == true && '1' || '0' }}";
-  assert.ok(workflow.includes(acknowledgment));
-  assert.equal(workflow.split("CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT").length, 2);
-  for (const name of ["lease_policy_replacement", "lease_policy_expected_sha256"]) {
+test("replacement policy stays out of Actions step metadata and is read from the event file", () => {
+  for (const name of [
+    "lease_policy_replacement",
+    "lease_policy_expected_sha256",
+    "replace_live_lease_policy",
+  ]) {
     assert.match(workflow, new RegExp(`^      ${name}:$`, "m"));
-    assert.ok(
-      workflow.includes(`github.event_name == 'workflow_dispatch' && inputs.${name} || ''`),
-    );
   }
-  const shell = workflow.match(
-    /- name: Deploy\n[^]*?        run: \|\n([^]*?)        working-directory: worker/,
-  )[1];
-  assert.doesNotMatch(shell, /\$\{\{.*inputs\./);
+  const step = workflow.match(/- name: Deploy\n([^]*?)- name: Verify deployed coordinator/)[1];
+  // The runner prints run text and declared env before invoking any masking code.
+  assert.doesNotMatch(
+    step,
+    /CRABBOX_LEASE_POLICY_REPLACEMENT|CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT|CRABBOX_EXPECTED_LIVE_LEASE_POLICY_SHA256/,
+  );
+  assert.doesNotMatch(
+    step,
+    /\$\{\{[^}]*inputs\.(?:lease_policy|replace_live_lease_policy)|toJSON\(inputs\)/,
+  );
+  assert.match(step, /GITHUB_EVENT_PATH/);
   assert.doesNotMatch(workflow, /keep-vars|keep_vars/);
 });
 

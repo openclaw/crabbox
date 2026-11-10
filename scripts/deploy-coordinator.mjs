@@ -15,10 +15,59 @@ import {
   verifyCoordinatorLeasePolicy,
 } from "./verify-coordinator-lease-policy.mjs";
 
-// Child logs can include the operator-owned document or secrets. Report only stage/status.
+// Actions prints declared step env before running the script. Read private policy
+// input from the runner-owned event file instead of interpolating it into env/run.
+export function policyReplacementOptions(env = process.env) {
+  if (env.GITHUB_ACTIONS !== "true") {
+    return {
+      acknowledgeReplacement: env.CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT === "1",
+      replacementOverrides: env.CRABBOX_LEASE_POLICY_REPLACEMENT,
+      expectedLivePolicySHA256: env.CRABBOX_EXPECTED_LIVE_LEASE_POLICY_SHA256,
+    };
+  }
+  if (env.GITHUB_EVENT_NAME !== "workflow_dispatch") return {};
+  let inputs;
+  try {
+    inputs = JSON.parse(fs.readFileSync(env.GITHUB_EVENT_PATH, "utf8")).inputs;
+  } catch {
+    throw new Error(
+      "Cannot read workflow dispatch policy inputs from GITHUB_EVENT_PATH; no deployment performed.",
+    );
+  }
+  if (
+    !inputs ||
+    typeof inputs !== "object" ||
+    Array.isArray(inputs) ||
+    ["lease_policy_replacement", "lease_policy_expected_sha256"].some(
+      (key) => inputs[key] !== undefined && typeof inputs[key] !== "string",
+    )
+  ) {
+    throw new Error(
+      "Workflow dispatch policy inputs have an invalid shape; no deployment performed.",
+    );
+  }
+  return {
+    acknowledgeReplacement:
+      inputs.replace_live_lease_policy === true || inputs.replace_live_lease_policy === "true",
+    replacementOverrides: inputs.lease_policy_replacement,
+    expectedLivePolicySHA256: inputs.lease_policy_expected_sha256,
+  };
+}
+
+// Child logs can include the operator-owned document or secrets. Preserve safe
+// stage/recovery diagnostics without replaying untrusted child output.
 async function runCommand(command, args, options) {
+  const { stage, ...spawnOptions } = options;
+  const recovery =
+    stage === "asset preparation"
+      ? "In a credential-free checkout, run npm ci --prefix worker and npm run predeploy --prefix worker; repair the reported pinned noVNC assets or dependencies."
+      : "Inspect the Cloudflare deployment and audit log, confirm the serving version/policy, and check Wrangler configuration and token permissions before retrying.";
+  const failure = (status) =>
+    new Error(
+      `Coordinator ${stage} ${status}. ${recovery} Raw child output withheld to protect runtime configuration.`,
+    );
   await new Promise((resolve, reject) => {
-    const child = spawn(command, args, { ...options, stdio: "ignore" });
+    const child = spawn(command, args, { ...spawnOptions, stdio: "ignore" });
     const interrupt = () => child.kill("SIGINT");
     const terminate = () => child.kill("SIGTERM");
     process.once("SIGINT", interrupt);
@@ -27,17 +76,9 @@ async function runCommand(command, args, options) {
       process.removeListener("SIGINT", interrupt);
       process.removeListener("SIGTERM", terminate);
     });
-    child.once("error", () =>
-      reject(new Error("Coordinator build/deploy command could not start.")),
-    );
+    child.once("error", () => reject(failure("could not start")));
     child.once("exit", (code) =>
-      code === 0
-        ? resolve()
-        : reject(
-            new Error(
-              "Coordinator build/deploy command failed; raw output withheld to protect runtime configuration.",
-            ),
-          ),
+      code === 0 ? resolve() : reject(failure(`failed (exit ${code ?? "signal"})`)),
     );
   });
 }
@@ -98,7 +139,11 @@ export async function deployCoordinator({
 
   // Complete local asset preparation before capturing live state.
   const childEnv = { ...env, CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: apiToken };
-  await run("npm", ["run", "predeploy"], { cwd: workerDirectory, env: childEnv });
+  await run("npm", ["run", "predeploy"], {
+    cwd: workerDirectory,
+    env: childEnv,
+    stage: "asset preparation",
+  });
   const options = { accountId, apiToken, fetchImpl };
   const baseline = await readCoordinatorPolicySnapshot(options);
   if (replacing && policyDigest(baseline.document) !== expectedLivePolicySHA256)
@@ -151,6 +196,7 @@ export async function deployCoordinator({
         {
           cwd: workerDirectory,
           env: { ...childEnv, WRANGLER_OUTPUT_FILE_PATH: outputPath },
+          stage: "Wrangler upload",
         },
       );
       let upload;
@@ -203,9 +249,7 @@ if (import.meta.main) {
       apiToken: process.env.CLOUDFLARE_API_TOKEN,
       sha: process.env.GITHUB_SHA,
       secretsFile: args[1],
-      acknowledgeReplacement: process.env.CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT === "1",
-      replacementOverrides: process.env.CRABBOX_LEASE_POLICY_REPLACEMENT,
-      expectedLivePolicySHA256: process.env.CRABBOX_EXPECTED_LIVE_LEASE_POLICY_SHA256,
+      ...policyReplacementOptions(),
     });
     if (process.env.GITHUB_OUTPUT)
       fs.appendFileSync(process.env.GITHUB_OUTPUT, `lease_policy_sha256=${proof.policySHA256}\n`);

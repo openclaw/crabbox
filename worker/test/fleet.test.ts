@@ -62466,6 +62466,37 @@ describe("coordinator lease lifetime policy", () => {
     expect(again.status).toBe(409);
     expect(await again.json()).toMatchObject({ error: "lease_extension_not_advancing" });
   });
+  it("loads an existing AWS record after a policy-only upgrade without rewriting TTL or activity", async () => {
+    const { fleet: before, storage, lease } = fixture({ provider: "aws", ttlSeconds: 14400 });
+    const previous = await before.fetch(request("GET", `/v1/leases/${lease.id}`, { headers }));
+    expect(await previous.json()).toMatchObject({
+      lease: { ttlSeconds: 14400, leasePolicy: { maxTTLSeconds: 14400 } },
+    });
+    const recorded = structuredClone(storage.value<LeaseRecord>(`lease:${lease.id}`));
+    const after = testFleet(
+      storage,
+      {},
+      {
+        CRABBOX_LEASE_POLICY_OVERRIDES: JSON.stringify({
+          owners: {
+            [lease.owner]: { maxTTLSeconds: 43200 },
+          },
+        }),
+      },
+    );
+    const current = await after.fetch(request("GET", `/v1/leases/${lease.id}`, { headers }));
+    expect(current.status).toBe(200);
+    expect(await current.json()).toMatchObject({
+      lease: {
+        ttlSeconds: 14400,
+        idleTimeoutSeconds: lease.idleTimeoutSeconds,
+        createdAt: lease.createdAt,
+        lastTouchedAt: lease.lastTouchedAt,
+        leasePolicy: { maxTTLSeconds: 43200, runtimeExtension: true },
+      },
+    });
+    expect(storage.value<LeaseRecord>(`lease:${lease.id}`)).toEqual(recorded);
+  });
   it("extends only the scoped owner to twelve hours without changing the idle clock", async () => {
     const { fleet, lease, storage } = fixture(
       { provider: "aws", ttlSeconds: 14400 },

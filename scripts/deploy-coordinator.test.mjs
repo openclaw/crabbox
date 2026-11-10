@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { deployCoordinator } from "./deploy-coordinator.mjs";
+import { deployCoordinator, policyReplacementOptions } from "./deploy-coordinator.mjs";
 import { bindingName, policyDigest } from "./verify-coordinator-lease-policy.mjs";
 
 const worker = path.resolve(import.meta.dirname, "../worker");
@@ -387,4 +387,99 @@ test("a generated configuration changed after the guard is never uploaded", asyn
   });
   await assert.rejects(f.run(), /configuration changed after preparation/);
   assert.equal(f.commands.length, 1);
+});
+
+test("dispatch reads the complete policy from the event file without a policy environment variable", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "coordinator-dispatch-test-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const event = path.join(dir, "event.json");
+  fs.writeFileSync(
+    event,
+    JSON.stringify({
+      inputs: {
+        replace_live_lease_policy: "true",
+        lease_policy_replacement: JSON.stringify(scoped),
+        lease_policy_expected_sha256: policyDigest({}),
+      },
+    }),
+    { mode: 0o600 },
+  );
+  const env = {
+    GITHUB_ACTIONS: "true",
+    GITHUB_EVENT_NAME: "workflow_dispatch",
+    GITHUB_EVENT_PATH: event,
+  };
+  assert.deepEqual(policyReplacementOptions(env), {
+    acknowledgeReplacement: true,
+    replacementOverrides: JSON.stringify(scoped),
+    expectedLivePolicySHA256: policyDigest({}),
+  });
+  assert.equal(
+    Object.values(env).some((value) => value.includes("github:")),
+    false,
+  );
+  assert.deepEqual(
+    policyReplacementOptions({
+      ...env,
+      GITHUB_EVENT_NAME: "push",
+      CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT: "1",
+      CRABBOX_LEASE_POLICY_REPLACEMENT: "{}",
+    }),
+    {},
+  );
+});
+
+for (const document of [
+  "synthetic-private-policy",
+  "null",
+  "{}",
+  '{"inputs":[]}',
+  '{"inputs":{"lease_policy_replacement":{}}}',
+]) {
+  test(`unreadable or invalid dispatch event fails without disclosing input: ${document}`, (t) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "coordinator-dispatch-test-"));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const event = path.join(dir, "event.json");
+    fs.writeFileSync(event, document);
+    assert.throws(
+      () =>
+        policyReplacementOptions({
+          GITHUB_ACTIONS: "true",
+          GITHUB_EVENT_NAME: "workflow_dispatch",
+          GITHUB_EVENT_PATH: event,
+        }),
+      (error) => {
+        assert.match(error.message, /no deployment performed/);
+        assert.doesNotMatch(error.message, /synthetic-private-policy/);
+        return true;
+      },
+    );
+  });
+}
+
+test("manual replacement environment remains supported outside Actions", () => {
+  assert.deepEqual(
+    policyReplacementOptions({
+      CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT: "1",
+      CRABBOX_LEASE_POLICY_REPLACEMENT: "{}",
+      CRABBOX_EXPECTED_LIVE_LEASE_POLICY_SHA256: policyDigest(scoped),
+    }),
+    {
+      acknowledgeReplacement: true,
+      replacementOverrides: "{}",
+      expectedLivePolicySHA256: policyDigest(scoped),
+    },
+  );
+});
+
+test("a real failed preparation command reports its stage and safe recovery without child output", async (t) => {
+  const f = fixture(t);
+  await assert.rejects(f.run({ run: undefined, env: { PATH: process.env.PATH } }), (error) => {
+    assert.match(error.message, /Coordinator asset preparation/);
+    assert.match(error.message, /credential-free checkout/);
+    assert.match(error.message, /npm run predeploy --prefix worker/);
+    assert.doesNotMatch(error.message, /synthetic-api-token|Missing script/);
+    return true;
+  });
+  assert.equal(f.calls.length, 0);
 });

@@ -375,7 +375,10 @@ A present empty string is invalid JSON, not permission to discard policy.
 Unreadable/duplicate/non-plaintext bindings, malformed documents, runtime-invalid
 values, and API errors stop an ordinary deployment before upload. Child output is
 withheld because Wrangler can print runtime configuration; failures identify the
-stage without printing policy values. Temporary configuration is removed on
+stage and safe recovery steps without printing policy values. For preparation
+failures, run the pinned dependency/asset validators in a credential-free checkout;
+for upload failures, inspect Cloudflare deployment/audit state, configuration and
+token permissions before retrying. Temporary configuration is removed on
 success, failure, and handled cancellation (a forced process/host kill cannot
 promise cleanup).
 
@@ -410,7 +413,15 @@ Coordinator** (`coordinator-deploy.yml`) with all three inputs:
 
 These inputs can be supplied via a private JSON file to `gh workflow run
 coordinator-deploy.yml --ref main --json`. Do not place individual exceptions in
-repository files, shell history, or logs. A stale digest stops the deploy;
+repository files, shell history, or logs. The helper reads replacement inputs
+directly from the runner's `GITHUB_EVENT_PATH` only for `workflow_dispatch`. It
+never interpolates policy JSON into the workflow's `env` or `run` fields: Actions
+prints those before executing the helper. Outside Actions, the manual helper
+still accepts `CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT`,
+`CRABBOX_LEASE_POLICY_REPLACEMENT` and `CRABBOX_EXPECTED_LIVE_LEASE_POLICY_SHA256`
+through the process environment; do not copy that manual route into step env.
+Workflow inputs are policy only, never credentials, and remain accessible to
+authorized dispatch/event administrators. A stale digest stops the deploy;
 readable, shape-valid but runtime-invalid live policies can be repaired through
 this explicit mechanism. Replacement must pass runtime validation. Unreadable
 bindings and invalid document shapes still fail closed and need separately
