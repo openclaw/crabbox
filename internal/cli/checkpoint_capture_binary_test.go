@@ -708,6 +708,7 @@ type checkpointCaptureFixtureState struct {
 	Starts            int               `json:"starts"`
 	Removes           int               `json:"removes"`
 	Version           int               `json:"version"`
+	ForkIP            string            `json:"forkIP,omitempty"`
 }
 
 type checkpointCaptureFixtureEvent struct {

@@ -22,30 +22,34 @@ func checkpointWaitContext(ctx context.Context, timeout time.Duration) context.C
 }
 
 func TestCheckpointReadinessControlAndSlowSuccess(t *testing.T) {
-	for _, treatment := range []bool{false, true} {
-		t.Run(map[bool]string{false: "control", true: "continued wait"}[treatment], func(t *testing.T) {
-			target, dir := readinessWaitFixture(t, "ready")
-			target.ReadinessStatus = "printf 'pending ownership-repair'"
-			// Use the actual guest-loop fixture; the guest polls outlast the control deadline.
-			if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte("#!/bin/sh\nfor remote; do :; done\nexec sh -c \"$remote\"\n"), 0755); err != nil {
-				t.Fatal(err)
+	for _, phase := range []string{"bootstrap", "machine0", "local container ssh"} {
+		t.Run(phase, func(t *testing.T) {
+			for _, treatment := range []bool{false, true} {
+				t.Run(map[bool]string{false: "control", true: "continued wait"}[treatment], func(t *testing.T) {
+					target, dir := readinessWaitFixture(t, "ready")
+					target.ReadinessStatus = "printf 'pending ownership-repair'"
+					// Use the actual guest-loop fixture; the guest polls outlast the control deadline.
+					if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte("#!/bin/sh\nfor remote; do :; done\nexec sh -c \"$remote\"\n"), 0755); err != nil {
+						t.Fatal(err)
+					}
+					ctx := t.Context()
+					if treatment {
+						ctx = checkpointWaitContext(ctx, 5*time.Second)
+					}
+					var out bytes.Buffer
+					err := waitForSSHReady(ctx, &target, &out, phase, 100*time.Millisecond)
+					if treatment && err != nil {
+						t.Fatal(err)
+					}
+					if !treatment && (err == nil || !strings.Contains(err.Error(), "timed out waiting for SSH")) {
+						t.Fatalf("control: %v", err)
+					}
+					if treatment && !strings.Contains(out.String(), "phase=ownership-repair") {
+						t.Fatalf("missing phase: %s", out.String())
+					}
+					t.Logf("treatment=%t error=%v progress=%s", treatment, err, out.String())
+				})
 			}
-			ctx := t.Context()
-			if treatment {
-				ctx = checkpointWaitContext(ctx, 5*time.Second)
-			}
-			var out bytes.Buffer
-			err := waitForSSHReady(ctx, &target, &out, "bootstrap", 100*time.Millisecond)
-			if treatment && err != nil {
-				t.Fatal(err)
-			}
-			if !treatment && (err == nil || !strings.Contains(err.Error(), "timed out waiting for SSH")) {
-				t.Fatalf("control: %v", err)
-			}
-			if treatment && !strings.Contains(out.String(), "phase=ownership-repair") {
-				t.Fatalf("missing phase: %s", out.String())
-			}
-			t.Logf("treatment=%t error=%v progress=%s", treatment, err, out.String())
 		})
 	}
 }

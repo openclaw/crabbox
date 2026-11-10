@@ -385,7 +385,7 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 			return context.Cause(ctx)
 		}
 	}
-	if policy, ok := checkpointReadinessFromContext(ctx); ok && phase == "bootstrap" {
+	if policy, ok := checkpointReadinessFromContext(ctx); ok {
 		timeout = policy.Timeout
 	}
 	start := time.Now()
