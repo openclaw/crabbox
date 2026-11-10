@@ -5,9 +5,12 @@
 ### Added
 
 - Fuel evidence: add an optional source-built Wasmtime helper and native qualification through existing SSH artifacts, with waited-child CPU diagnostics on fixture failure and a v2 compilation policy requiring fresh calibration, following [the phase-one design](https://github.com/openclaw/crabbox/pull/1196). Thanks @zozo123 and @steipete.
+- Boat: explicitly disable snapshots and select private or shared organization visibility at creation, with fresh metadata checks before SSH access and policy-preserving lease reuse. (https://github.com/openclaw/crabbox/pull/3117) Thanks @vincentkoc.
 
 ### Fixed
 
+- Linux bootstrap: preserve ctime and Git stat caches for correctly owned workspace and cache files while repairing mismatched ownership after snapshot restoration.
+- Coordinator: preserve validated operator-managed lease policy exceptions across ordinary deployments, with drift checks and deployed-policy verification.
 - Run: reduce repeated no-sync SSH setup and telemetry waits, bound diagnostic event draining, and include terminal history confirmation in the final timing breakdown.
 - SSH: reuse verified Linux runtime artifacts across runs and readiness/metadata connections within a run while preserving watched workload lifetimes and confirmed retirement; report signal termination with a valid exit status. [PR 3053](https://github.com/openclaw/crabbox/pull/3053).
 

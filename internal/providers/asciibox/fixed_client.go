@@ -18,6 +18,12 @@ const asciiBoxIdempotencyWindow = 24 * time.Hour
 
 func (c *client) createKeyedBox(ctx context.Context, create createRequest) (boxData, error) {
 	body := map[string]any{}
+	if create.NoSnapshots {
+		body["snapshots"] = false
+	}
+	if create.Visibility != "" {
+		body["visibility"] = create.Visibility
+	}
 	if create.NoEnv {
 		body["noEnv"] = true
 	}

@@ -48,6 +48,8 @@ type client struct {
 const boxCommandOutputLimit = 8 << 20
 
 type createRequest struct {
+	NoSnapshots    bool
+	Visibility     string
 	NoEnv          bool
 	TTL            time.Duration
 	IdempotencyKey string
@@ -72,6 +74,8 @@ type boxData struct {
 	allowIDOnlyRelease  bool
 	deletionCompleted   bool
 	deletionOperationID string
+	Snapshots           *bool  `json:"snapshots,omitempty"`
+	Visibility          string `json:"visibility,omitempty"`
 	ID                  string `json:"id"`
 	Name                string `json:"name,omitempty"`
 	Type                string `json:"type,omitempty"`
@@ -163,6 +167,12 @@ func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, err
 		return c.createKeyedBox(ctx, req)
 	}
 	args := []string{"new"}
+	if req.NoSnapshots {
+		args = append(args, "--no-snapshots")
+	}
+	if req.Visibility != "" {
+		args = append(args, "--visibility", req.Visibility)
+	}
 	if req.NoEnv {
 		args = append(args, "--no-env")
 	}
@@ -841,6 +851,9 @@ func decodeNewBox(output string) (boxData, error) {
 }
 
 func mergeBox(base, update boxData) boxData {
+	// Privacy must be confirmed by the latest metadata, not an earlier event.
+	base.Snapshots = update.Snapshots
+	base.Visibility = update.Visibility
 	if update.Type != "" {
 		base.Type = update.Type
 	}

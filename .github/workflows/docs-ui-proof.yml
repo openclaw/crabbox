@@ -19,7 +19,7 @@ permissions:
 jobs:
   proof:
     name: Render visual proof
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 12
 
     steps:

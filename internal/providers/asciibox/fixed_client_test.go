@@ -29,6 +29,9 @@ func TestFixedBoxKeyedAPIWire(t *testing.T) {
 				if body["noEnv"] != true {
 					t.Errorf("noEnv missing from native request: %v", body)
 				}
+				if body["snapshots"] != false || body["visibility"] != "private" {
+					t.Errorf("privacy controls missing from native request: %v", body)
+				}
 				if body["type"] != "large" {
 					t.Errorf("wrong native size: %v", body)
 				}
@@ -40,7 +43,7 @@ func TestFixedBoxKeyedAPIWire(t *testing.T) {
 			}))
 			defer server.Close()
 			c := &client{apiURL: server.URL, apiKey: "synthetic-fixture", org: org, http: server.Client()}
-			box, err := c.CreateBox(t.Context(), createRequest{TTL: time.Hour, Type: "large", NoEnv: true, IdempotencyKey: "crabbox-fixture-key"})
+			box, err := c.CreateBox(t.Context(), createRequest{TTL: time.Hour, Type: "large", NoEnv: true, NoSnapshots: true, Visibility: "private", IdempotencyKey: "crabbox-fixture-key"})
 			if err != nil || box.ID != "bx_native" || box.createdID != box.ID || calls != 1 {
 				t.Fatalf("create: %+v %v calls=%d", box, err, calls)
 			}
@@ -105,7 +108,7 @@ func TestFixedBoxDefaultSizeRetainsRetryBody(t *testing.T) {
 	if _, err := c.CreateBox(t.Context(), request); err == nil {
 		t.Fatal("expected the pre-upgrade request to be uncertain")
 	}
-	if strings.Contains(originalBody, "noEnv") {
+	if strings.Contains(originalBody, "noEnv") || strings.Contains(originalBody, "snapshots") || strings.Contains(originalBody, "visibility") {
 		t.Fatalf("default request added noEnv: %s", originalBody)
 	}
 	request.Type = "default"

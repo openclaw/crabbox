@@ -55,7 +55,30 @@ function fixture(t, overrides = {}) {
 function runDeploy(t, overrides = {}) {
   const f = fixture(t, overrides);
   const log = path.join(f.dir, "commands.jsonl");
-  for (const command of ["npm", "npx"]) {
+  fs.unlinkSync(path.join(f.bin, "node"));
+  fs.writeFileSync(
+    path.join(f.bin, "node"),
+    `#!${process.execPath}
+const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0]?.endsWith("/deploy-coordinator.mjs")) {
+  const event = { command: "node", args };
+  const index = args.indexOf("--secrets-file");
+  if (index !== -1) {
+    event.file = args[index + 1];
+    event.secrets = JSON.parse(fs.readFileSync(event.file, "utf8"));
+    event.mode = fs.statSync(event.file).mode & 0o777;
+  }
+  fs.appendFileSync(process.env.COMMAND_LOG, JSON.stringify(event) + "\\n");
+  process.exit(Number(process.env.DEPLOY_EXIT_CODE || 0));
+}
+const child = spawnSync(${JSON.stringify(process.execPath)}, args, { stdio: "inherit" });
+process.exit(child.status ?? 1);
+`,
+    { mode: 0o755 },
+  );
+  for (const command of ["npx"]) {
     fs.writeFileSync(
       path.join(f.bin, command),
       `#!/usr/bin/env node
@@ -133,12 +156,12 @@ function runPrepare(t, overrides = {}) {
 }
 
 function assertDeploy(event, secrets) {
-  assert.equal(event.command, "npm");
+  assert.equal(event.command, "node");
   assert.deepEqual(
     event.args,
     secrets
-      ? ["run", "deploy", "--", "--tag", sha, "--secrets-file", event.file]
-      : ["run", "deploy", "--", "--tag", sha],
+      ? ["../scripts/deploy-coordinator.mjs", "--secrets-file", event.file]
+      : ["../scripts/deploy-coordinator.mjs"],
   );
   assert.deepEqual(event.secrets, secrets);
 }
@@ -158,6 +181,7 @@ test("main deployment excludes coordinator tests while retaining deployment inpu
       '- "scripts/prepare-coordinator-deploy-secrets.mjs"',
       '- "scripts/verify-coordinator-deployment.mjs"',
       '- "scripts/verify-coordinator-lease-policy.mjs"',
+      '- "scripts/deploy-coordinator.mjs"',
     ],
   );
   assert.doesNotMatch(workflow, /paths-ignore:/);
@@ -206,31 +230,37 @@ test("main deployment verifies final serving identity after optional secret chan
   );
 });
 
-test("deployment checks live lease policy preservation before publishing", () => {
+test("deployment uses the guarded transient-config owner and verifies its policy digest afterward", () => {
+  assert.match(workflow, /node \.\.\/scripts\/deploy-coordinator\.mjs --secrets-file/);
+  assert.match(workflow, /id: deploy/);
   assert.match(
     workflow,
-    /- name: Verify lease policy preservation\n        run: node scripts\/verify-coordinator-lease-policy\.mjs\n[^]*?- name: Deploy\n/,
+    /CRABBOX_EXPECTED_LEASE_POLICY_SHA256: \$\{\{ steps\.deploy\.outputs\.lease_policy_sha256 \}\}/,
   );
-  assert.match(
-    workflow,
-    /- name: Verify lease policy preservation[^]*?CLOUDFLARE_API_TOKEN: \$\{\{ secrets\.CLOUDFLARE_API_TOKEN \}\}/,
-  );
-  assert.match(workflow, /      - "scripts\/verify-coordinator-lease-policy\.mjs"/);
+  assert.match(workflow, /      - "scripts\/deploy-coordinator\.mjs"/);
   assert.doesNotMatch(workflow, /github:/);
 });
 
-test("lease policy replacement acknowledgment is dispatch-only and scoped to the guard", () => {
-  assert.match(
-    workflow,
-    /workflow_dispatch:\n    inputs:\n      replace_live_lease_policy:\n        description: [^\n]+\n        required: false\n        default: false\n        type: boolean\n/,
+test("replacement policy stays out of Actions step metadata and is read from the event file", () => {
+  for (const name of [
+    "lease_policy_replacement",
+    "lease_policy_expected_sha256",
+    "replace_live_lease_policy",
+  ]) {
+    assert.match(workflow, new RegExp(`^      ${name}:$`, "m"));
+  }
+  const step = workflow.match(/- name: Deploy\n([^]*?)- name: Verify deployed coordinator/)[1];
+  // The runner prints run text and declared env before invoking any masking code.
+  assert.doesNotMatch(
+    step,
+    /CRABBOX_LEASE_POLICY_REPLACEMENT|CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT|CRABBOX_EXPECTED_LIVE_LEASE_POLICY_SHA256/,
   );
-  const acknowledgment =
-    "CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.replace_live_lease_policy == true && '1' || '0' }}";
-  assert.equal(workflow.split("CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT").length, 2);
-  const guard = workflow
-    .split("      - name: Verify lease policy preservation\n")[1]
-    .split("      - name: Deploy\n")[0];
-  assert.ok(guard.includes(acknowledgment));
+  assert.doesNotMatch(
+    step,
+    /\$\{\{[^}]*inputs\.(?:lease_policy|replace_live_lease_policy)|toJSON\(inputs\)/,
+  );
+  assert.match(step, /GITHUB_EVENT_PATH/);
+  assert.doesNotMatch(workflow, /keep-vars|keep_vars/);
 });
 
 test("coordinator deploy keeps optional credentials with the serialized environment owner", () => {

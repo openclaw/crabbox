@@ -10,6 +10,7 @@ artifacts/
 .clawpatch/
 node_modules/
 .wrangler/
+/worker/.crabbox-coordinator-deploy-*.json
 *.test
 coverage.out
 /crabbox
