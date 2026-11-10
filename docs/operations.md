@@ -352,33 +352,85 @@ Deploy in separate releases; Worker and Durable Object versions can overlap:
 Do not combine Stage A and Stage B into one deployment. A source commit or
 successful upload alone is not the Stage A convergence receipt.
 
-Before deployment, the workflow compares the live `CRABBOX_LEASE_POLICY_OVERRIDES`
-binding with the production value in `worker/wrangler.jsonc`. The guard takes no
-arguments and compares the complete documents, treating an absent binding, `{}`,
-and empty `owners`/`orgs` groups as equivalent. A difference stops deployment
-before upload and reports only the affected groups and keys, without policy
-values. Source policies must pass the same field, type, and range validation as
-the runtime. Unreadable bindings, invalid document shapes, and Cloudflare API
-errors always stop deployment.
+Git owns coordinator defaults and deployment settings in `worker/wrangler.jsonc`.
+The existing runtime binding `CRABBOX_LEASE_POLICY_OVERRIDES` owns operator-managed
+owner/org exceptions. Keep individual memberships and exceptions outside source
+control; do not add this binding to Wrangler source or enable `keep_vars`.
+Ordinary owners retain the global defaults (30-minute TTL and idle timeout,
+4-hour maximum) unless runtime policy gives them an exception.
 
-Production source declares no individual memberships or lease policy overrides;
-every owner uses the global lease defaults (30-minute TTL and idle timeout,
-4-hour maximum). Individual memberships and exceptions belong in runtime
-configuration managed outside the repository, not in source-controlled vars.
+Both the workflow and `npm run deploy --prefix worker` use
+`scripts/deploy-coordinator.mjs`. After asset preparation, it captures the complete
+live override document and the serving deployment/version, checks that settings
+and serving-version bindings agree, and validates the document with the runtime
+validator. It copies Git's raw configuration into a private temporary file beside
+the source (preserving relative paths), adds only the runtime-owned override
+binding, and runs the existing guard against that exact file. The guard rereads
+policy and deployment identity before upload. All unrelated override entries and
+fields survive; other vars and deployment settings still come from Git.
 
-For an intentional one-time replacement of a known live override document,
-dispatch the **Deploy Coordinator** workflow (`coordinator-deploy.yml`) with
-`replace_live_lease_policy: true`. This sets
-`CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT=1` for the guard step only: it
-prints the same key summary and permits replacement, including repair of readable,
-shape-valid live policies with invalid fields or values. The source must still be
-valid; unreadable bindings, invalid document shapes, and API errors fail closed.
-Push-triggered deployments never acknowledge replacement. When removing
-existing overrides from source, the first push-triggered deployment therefore
-fails by design until a maintainer
-reviews the difference and dispatches that acknowledged replacement once.
+Absent bindings, `{}`, and empty `owners`/`orgs` groups all mean no exceptions and
+are deployed without an override binding. Empty owner/org entries are preserved.
+A present empty string is invalid JSON, not permission to discard policy.
+Unreadable/duplicate/non-plaintext bindings, malformed documents, runtime-invalid
+values, and API errors stop an ordinary deployment before upload. Child output is
+withheld because Wrangler can print runtime configuration; failures identify the
+stage and safe recovery steps without printing policy values. For preparation
+failures, run the pinned dependency/asset validators in a credential-free checkout;
+for upload failures, inspect Cloudflare deployment/audit state, configuration and
+token permissions before retrying. Temporary configuration is removed on
+success, failure, and handled cancellation (a forced process/host kill cannot
+promise cleanup).
 
-Worker source lives in `worker/`. Run the gate, then deploy:
+After upload the helper checks Wrangler's exact uploaded version against the
+serving version and the complete policy digest. The workflow's final health proof
+checks that digest again after optional secret changes. A failed command or
+readback after upload can mean production changed: inspect it before retrying.
+There is no automatic rollback or retry.
+
+Cloudflare's reads and Wrangler upload are **not atomic**. The workflow concurrency
+group serializes its own runs, but not dashboard edits or other deploy tools. An
+external write between the final read and upload can be overwritten, even without
+a readback mismatch if our desired policy wins. Coordinate all writers during
+rollouts; drift checks and readback reduce risk but cannot eliminate that race.
+
+For intentional complete replacement/removal, first capture a fresh read-only
+baseline with the API token supplied through the environment:
+
+```sh
+node scripts/verify-coordinator-lease-policy.mjs --snapshot
+```
+
+It prints deployment/version IDs, the canonical policy SHA-256, and validity,
+without policy contents. Privately read and review the **complete** live document
+as well; the digest alone does not review its contents. Dispatch **Deploy
+Coordinator** (`coordinator-deploy.yml`) with all three inputs:
+
+- `replace_live_lease_policy: true` (explicit acknowledgment);
+- `lease_policy_replacement`: the complete reviewed JSON document (`{}` removes
+  all exceptions; omit just one entry/field to remove only that exception);
+- `lease_policy_expected_sha256`: the reviewed baseline digest from `--snapshot`.
+
+These inputs can be supplied via a private JSON file to `gh workflow run
+coordinator-deploy.yml --ref main --json`. Do not place individual exceptions in
+repository files, shell history, or logs. The helper reads replacement inputs
+directly from the runner's `GITHUB_EVENT_PATH` only for `workflow_dispatch`. It
+never interpolates policy JSON into the workflow's `env` or `run` fields: Actions
+prints those before executing the helper. Outside Actions, the manual helper
+still accepts `CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT`,
+`CRABBOX_LEASE_POLICY_REPLACEMENT` and `CRABBOX_EXPECTED_LIVE_LEASE_POLICY_SHA256`
+through the process environment; do not copy that manual route into step env.
+Workflow inputs are policy only, never credentials, and remain accessible to
+authorized dispatch/event administrators. A stale digest stops the deploy;
+readable, shape-valid but runtime-invalid live policies can be repaired through
+this explicit mechanism. Replacement must pass runtime validation. Unreadable
+bindings and invalid document shapes still fail closed and need separately
+reviewed operator repair. Push-triggered deployments never acknowledge
+replacement. Ordinary dispatches leave all three inputs unset.
+
+Run the gate, then use the guarded deployment entrypoint (the workflow is the
+preferred production path). Manual deployment needs `CLOUDFLARE_ACCOUNT_ID`,
+`CLOUDFLARE_API_TOKEN`, and the full deployed `GITHUB_SHA` in the environment:
 
 ```sh
 npm ci --prefix worker
@@ -387,8 +439,12 @@ npm run lint --prefix worker
 npm run check --prefix worker
 npm test --prefix worker
 npm run build --prefix worker
-npx wrangler deploy --config worker/wrangler.jsonc
+GITHUB_SHA="$(git rev-parse HEAD)" npm run deploy --prefix worker
 ```
+
+Raw `wrangler deploy` bypasses this policy-preservation procedure. Use it only for
+separately reviewed operations with an equivalent complete-config guard and
+readback; it is not the ordinary production deployment path.
 
 The repeatable deploy proof is:
 
@@ -396,7 +452,7 @@ The repeatable deploy proof is:
 scripts/deploy-worker-smoke.sh
 ```
 
-It runs Worker format, lint, typecheck, tests, dry-run build, deploy, and public health checks for the comma-separated deployment URLs in `CRABBOX_DEPLOY_SMOKE_URLS`. To include a short AWS lease smoke after deploy:
+It requires the same deployment environment above and runs Worker format, lint, typecheck, tests, dry-run build, guarded deploy, and public health checks for the comma-separated deployment URLs in `CRABBOX_DEPLOY_SMOKE_URLS`. To include a short AWS lease smoke after deploy:
 
 ```sh
 CRABBOX_DEPLOY_SMOKE_URLS="https://$BROKER_HOST/v1/health" \

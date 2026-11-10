@@ -14,13 +14,24 @@ on:
       - "scripts/prepare-coordinator-deploy-secrets.mjs"
       - "scripts/verify-coordinator-deployment.mjs"
       - "scripts/verify-coordinator-lease-policy.mjs"
+      - "scripts/deploy-coordinator.mjs"
   workflow_dispatch:
     inputs:
       replace_live_lease_policy:
-        description: Acknowledge replacing the complete live lease policy override document with source
+        description: Acknowledge the reviewed complete replacement document ({} removes exceptions)
         required: false
         default: false
         type: boolean
+      lease_policy_replacement:
+        description: Complete reviewed override JSON; required only for intentional replacement/removal
+        required: false
+        default: ""
+        type: string
+      lease_policy_expected_sha256:
+        description: Reviewed live policy SHA-256 from the read-only --snapshot guard command
+        required: false
+        default: ""
+        type: string
       clearDaytonaSnapshot:
         description: Clear the Worker snapshot binding after removing the coordinator environment secret
         required: false
@@ -66,16 +77,10 @@ jobs:
         run: npm ci
         working-directory: worker
 
-      - name: Verify lease policy preservation
-        run: node scripts/verify-coordinator-lease-policy.mjs
-        env:
-          CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT: ${{ github.event_name == 'workflow_dispatch' && inputs.replace_live_lease_policy == true && '1' || '0' }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: "91b59577e757131d68d55a471fe32aca"
-
       - name: Deploy
-        # `npm run deploy` runs the predeploy bundle (vendor-novnc) then
-        # `wrangler deploy`; a bundling failure fails the job before publishing.
+        id: deploy
+        # The helper guards the exact transient Wrangler config, checks drift,
+        # verifies the uploaded version and policy, and removes private files.
         run: |
           set -euo pipefail
 
@@ -85,9 +90,9 @@ jobs:
           node ../scripts/prepare-coordinator-deploy-secrets.mjs
 
           if [ -s "${SECRETS_FILE}" ]; then
-            npm run deploy -- --tag "${GITHUB_SHA}" --secrets-file "${SECRETS_FILE}"
+            node ../scripts/deploy-coordinator.mjs --secrets-file "${SECRETS_FILE}"
           else
-            npm run deploy -- --tag "${GITHUB_SHA}"
+            node ../scripts/deploy-coordinator.mjs
           fi
 
           if [ "${CLEAR_DAYTONA_SNAPSHOT}" = "true" ]; then
@@ -104,9 +109,12 @@ jobs:
           CRABBOX_DAYTONA_SNAPSHOT: ${{ secrets.CRABBOX_DAYTONA_SNAPSHOT }}
           CRABBOX_ARTIFACTS_CREDENTIALS_JSON: ${{ secrets.CRABBOX_ARTIFACTS_CREDENTIALS_JSON }}
           CLEAR_DAYTONA_SNAPSHOT: ${{ inputs.clearDaytonaSnapshot }}
+          # The helper reads replacement inputs from GITHUB_EVENT_PATH. Never
+          # put policy JSON in step env/run text: Actions prints these first.
 
       - name: Verify deployed coordinator
         run: node scripts/verify-coordinator-deployment.mjs
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: "91b59577e757131d68d55a471fe32aca"
+          CRABBOX_EXPECTED_LEASE_POLICY_SHA256: ${{ steps.deploy.outputs.lease_policy_sha256 }}
