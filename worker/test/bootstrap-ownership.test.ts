@@ -31,7 +31,11 @@ function ownershipScript(workRoot: string, cacheRoot: string): string {
     .split("\n")
     .map((line) => line.slice(6))
     .join("\n")
-    .replaceAll("/var/cache/crabbox", cacheRoot);
+    .replace(/'\/var\/cache\/crabbox'|\/var\/cache\/crabbox\/(?:pnpm|npm)/g, (path) => {
+      const target =
+        path === "'/var/cache/crabbox'" ? cacheRoot : path.replace("/var/cache/crabbox", cacheRoot);
+      return "'" + target.replaceAll("'", "'\\''") + "'";
+    });
 }
 
 function metadata(path: string) {
@@ -84,7 +88,7 @@ describe("cloud-init ownership repair", () => {
       const fixture = mkdtempSync(join(tmpdir(), "crabbox-ownership-"));
       try {
         const work = join(fixture, "work's tree");
-        const cache = join(fixture, "cache");
+        const cache = join(fixture, "cache's tree");
         const outside = join(fixture, "outside");
         for (const path of [work, join(work, "nested"), cache, outside]) mkdirSync(path);
         for (const path of [join(cache, "npm"), join(cache, "pnpm")]) mkdirSync(path);

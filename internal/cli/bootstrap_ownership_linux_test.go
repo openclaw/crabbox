@@ -56,7 +56,7 @@ func TestCloudInitOwnershipFilesystem(t *testing.T) {
 	for _, scenario := range []string{"correct", "incorrect", "mixed", "symlink roots"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := t.TempDir()
-			work, cache, outside := filepath.Join(root, "work's tree"), filepath.Join(root, "cache"), filepath.Join(root, "outside")
+			work, cache, outside := filepath.Join(root, "work's tree"), filepath.Join(root, "cache's tree"), filepath.Join(root, "outside")
 			must := func(err error) {
 				t.Helper()
 				if err != nil {

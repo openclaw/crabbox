@@ -32,7 +32,11 @@ func cloudInitOwnershipBlock(t *testing.T, cfg Config, cacheRoot string) string 
 		if end < 0 {
 			t.Fatal("missing ownership preparation boundary")
 		}
-		return strings.ReplaceAll(file.Content[start:start+end], shellQuote("/var/cache/crabbox"), shellQuote(cacheRoot))
+		return strings.NewReplacer(
+			shellQuote("/var/cache/crabbox"), shellQuote(cacheRoot),
+			"/var/cache/crabbox/pnpm", shellQuote(cacheRoot+"/pnpm"),
+			"/var/cache/crabbox/npm", shellQuote(cacheRoot+"/npm"),
+		).Replace(file.Content[start : start+end])
 	}
 	t.Fatal("missing bootstrap script")
 	return ""
