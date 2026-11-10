@@ -39,6 +39,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if cfg.AsciiBox.Visibility != "" && asciiBoxOrg() == "personal" {
+		return core.LeaseTarget{}, core.Exit(2, "ascii-box visibility requires an organization selected with BOX_ORG; omit visibility for personal sandboxes, which are already private")
+	}
 	if err := validateBoxType(cfg.ServerType); err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -66,7 +69,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	}
 	cfg.TTL = ttl
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s ttl=%s\n", providerName, leaseID, slug, core.Blank(ttl.String(), "-"))
-	box, createErr := client.CreateBox(ctx, createRequest{TTL: ttl, Type: cfg.ServerType, NoEnv: cfg.AsciiBox.NoEnv})
+	box, createErr := client.CreateBox(ctx, createRequest{TTL: ttl, Type: cfg.ServerType, NoEnv: cfg.AsciiBox.NoEnv, NoSnapshots: cfg.AsciiBox.NoSnapshots, Visibility: cfg.AsciiBox.Visibility})
 	if !concreteBoxID(box.createdID) || box.ID != box.createdID {
 		if createErr != nil {
 			return core.LeaseTarget{}, fmt.Errorf("ascii-box creation did not establish an original Box ID; retaining any resource: %w", createErr)
@@ -83,6 +86,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if fresh.ID != box.ID || boxCreationTime(fresh) == "" || boxCreationTime(box) != "" && !boxCreationTimeMatches(fresh, boxCreationTime(box)) {
 		return core.LeaseTarget{}, core.Exit(2, "ascii-box created %s but its creation identity is missing or changed; resource retained", box.ID)
 	}
+	if err := validateBoxPrivacy(cfg, fresh); err != nil {
+		return core.LeaseTarget{}, errors.Join(err, b.rollbackBox(ctx, client, leaseID, box, core.LeaseClaim{}, false))
+	}
 	box = mergeBox(box, fresh)
 	claim, err := publishBoxClaim(cfg, leaseID, slug, req.Repo.Root, box, req.Keep)
 	if err != nil {
@@ -95,6 +101,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 			return err
 		}
 		if err := validateBoxIdentity(current, box); err != nil {
+			return err
+		}
+		if err := validateBoxPrivacy(cfg, current); err != nil {
 			return err
 		}
 		if err := client.PrepareSSH(ctx, box.ID); err != nil {
@@ -225,7 +234,10 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 			return nil
 		}
 		if !req.StatusOnly && !req.ReleaseOnly {
-			if err := validateBoxNoEnv(cfg, claim); err != nil {
+			if err := validateBoxCreationPolicy(cfg, claim); err != nil {
+				return err
+			}
+			if err := validateBoxPrivacy(cfg, box); err != nil {
 				return err
 			}
 		}
@@ -541,6 +553,9 @@ func (b *backend) configForRun() (core.Config, error) {
 		return core.Config{}, err
 	}
 	cfg.WorkRoot = cleaned
+	if err := validateBoxVisibility(cfg.AsciiBox.Visibility); err != nil {
+		return core.Config{}, err
+	}
 	cfg.ServerType = (Provider{}).ServerTypeForConfig(cfg)
 	return cfg, nil
 }
@@ -577,6 +592,7 @@ func recordedBoxServer(cfg core.Config, box boxData, claim core.LeaseClaim) core
 func seedBoxLeaseServer(cfg core.Config, box boxData, leaseID, slug string, keep bool, at time.Time) core.Server {
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, at)
 	labels[boxNoEnvLabel] = fmt.Sprint(cfg.AsciiBox.NoEnv)
+	recordBoxPrivacyRequest(labels, cfg)
 	return boxServerWithLabels(cfg, box, leaseID, slug, labels)
 }
 

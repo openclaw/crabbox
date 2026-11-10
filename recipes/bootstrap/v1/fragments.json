@@ -60,6 +60,14 @@
       "parameters": {}
     },
     {
+      "name": "linuxOwnershipRepair",
+      "file": "linuxOwnershipRepair.sh",
+      "parameters": {
+        "user": "sh-string",
+        "roots": "sh-strings"
+      }
+    },
+    {
       "name": "linuxOptionalPackages",
       "file": "linuxOptionalPackages.sh",
       "literal": true,

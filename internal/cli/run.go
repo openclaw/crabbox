@@ -5213,6 +5213,13 @@ func coordinatorLeaseStillActive(ctx context.Context, coord *CoordinatorClient, 
 		}
 		return true
 	}
+	if _, fixedWait := checkpointReadinessFromContext(ctx); fixedWait {
+		server, _, _ := leaseToServerTarget(lease, Config{})
+		if err := CheckCheckpointReadinessLifetime(ctx, server); err != nil {
+			cancel(err)
+			return false
+		}
+	}
 	if lease.State != "" && lease.State != "active" {
 		cancel(Exit(5, "lease %s became %s while waiting for SSH; another process may have released it", leaseID, lease.State))
 		return false
