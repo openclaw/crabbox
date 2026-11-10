@@ -25,7 +25,7 @@ Use a fresh private output directory owned by the helper account:
 
 ```sh
 crabbox-wasmtime-meter --module workload.wasm --module-sha256 <verified-sha256> \
-  --output evidence/perf-evidence.json --workload example-org/workflow-action-pin-tests/v1 \
+  --output evidence/perf-evidence.json --workload example-org/workflow-action-pin-tests/v2 \
   --provider local-container --budget <reviewed-fuel-budget>
 ```
 
@@ -38,8 +38,9 @@ fuel; instantiation, Go initialization and the selected test harness are include
 The measurement ceiling is fixed at `2^53 - 1`. It is distinct from the performance
 budget. The engine's real `OutOfFuel` path is tested with a test-only small ceiling;
 qualification does not attempt to exhaust the production ceiling. The initial CI
-budget of one billion is a calibration ceiling, not a permanent regression budget.
-Review a measured count and any deliberate headroom before adopting a budget.
+budget of one billion is a temporary calibration ceiling, not a permanent
+regression budget or a budget transferred from v1. Review fresh v2 counts and any
+deliberate headroom before adopting a budget.
 
 ## Reproducibility and interpretation
 
@@ -52,7 +53,15 @@ does not configure execution. Threads, compilation caching and parallel
 compilation are not enabled.
 Copy-on-write memory initialization is explicitly disabled, so instantiation does
 not require a memfd-backed initialization image under the fixture's syscall and
-file-size limits. This setting is part of `crabbox-wasmtime-fuel/v1`.
+file-size limits. This setting is preserved in `crabbox-wasmtime-fuel/v2`.
+
+The v2 configuration explicitly selects Cranelift `OptLevel::None`; v1 used the
+default `Speed` optimization policy. This is an experimental compilation policy:
+skipping optimization may reduce compilation work and may make guest execution
+slower. It does not establish a compilation-time or CPU improvement. Engine,
+features, fuel ceiling and isolation limits remain unchanged. The selected
+workload is now `example-org/workflow-action-pin-tests/v2` and needs fresh
+qualification; successful v1 counts do not qualify it.
 
 The guest receives fixed argv, an empty environment, closed stdin, no preopened
 directories, no network capability, a repeating 0..255 random stream, a fixed wall
@@ -65,6 +74,12 @@ in `comparison_key`. Module digest, architecture, provider, timestamps, counts a
 budget are deliberately excluded. Module identity is checked separately. Engine,
 toolchain or input-contract changes require recalibration and key comparison.
 Fuel is not CPU time, native instruction count, throughput or host-call cost.
+
+The artifact remains `schemaVersion: 1`. Its schema accepts the named v1 and v2
+meter configurations, preserving legacy examples and evidence. The fixture's
+semantic gate accepts only the current v2 configuration, workload and derived
+comparison key. A structurally valid legacy artifact cannot substitute for v2
+qualification or calibration.
 
 ## Real consumer and isolation qualification
 

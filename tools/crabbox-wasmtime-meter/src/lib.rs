@@ -7,14 +7,14 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use wasmtime::{Config, Engine, Linker, Module, Store, Strategy};
+use wasmtime::{Config, Engine, Linker, Module, OptLevel, Store, Strategy};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{Deterministic, HostMonotonicClock, HostWallClock, I32Exit, WasiCtxBuilder};
 
 pub const INITIAL_FUEL: u64 = 9_007_199_254_740_991;
 pub const ENGINE_VERSION: &str = "50.0.1";
 pub const ENGINE_REVISION: &str = "c307ec81de02852d815e9849f7c89d955c03c30d";
-pub const CONFIGURATION: &str = "crabbox-wasmtime-fuel/v1";
+pub const CONFIGURATION: &str = "crabbox-wasmtime-fuel/v2";
 pub const WASI_CONFIGURATION: &str = "crabbox-deterministic-wasi/v1";
 pub const TOOLCHAIN: &str = "go1.27.3";
 pub const ARGV: [&str; 4] = [
@@ -88,6 +88,7 @@ fn measure(bytes: &[u8], initial: u64) -> Result<Measurement> {
     let mut config = Config::new();
     config.consume_fuel(true).epoch_interruption(false);
     config.strategy(Strategy::Cranelift);
+    config.cranelift_opt_level(OptLevel::None);
     // Avoid Linux memfd-backed initialization under the fixture's file/syscall
     // limits. Copy initial memory bytes instead; instantiation still counts.
     config.memory_init_cow(false);
@@ -316,6 +317,60 @@ mod tests {
             INITIAL_FUEL - equal["meter"]["remainingFuel"].as_u64().unwrap()
         );
         assert_eq!(a["meter"]["comparisonKey"], lower["meter"]["comparisonKey"]);
+    }
+    #[test]
+    fn v2_configuration_has_a_distinct_comparison_key() {
+        let value = evidence(
+            &module("nop"),
+            "example-org/workflow-action-pin-tests/v2",
+            "fixture",
+            INITIAL_FUEL,
+        )
+        .unwrap();
+        assert_eq!(value["meter"]["configuration"], "crabbox-wasmtime-fuel/v2");
+        assert_eq!(
+            value["meter"]["wasiConfiguration"],
+            "crabbox-deterministic-wasi/v1"
+        );
+        assert_eq!(
+            value["meter"]["comparisonKey"],
+            "sha256:158ee0686954ed1ad1e62deeb2d8b14b9ca8e133adb30d7c080ca82c1f174bb4"
+        );
+        assert_ne!(
+            value["meter"]["comparisonKey"],
+            "sha256:38b199dc30e8b9603f9a4d5ddfa74929ed781459a346bd41593a1451ec79e065"
+        );
+    }
+    #[test]
+    fn bounded_loop_fuel_is_repeatable_and_detects_more_work() {
+        let loop_module = |iterations| {
+            module(&format!(
+                "(local $left i32) i32.const {iterations} local.set $left
+                 (loop $again local.get $left i32.const 1 i32.sub
+                  local.tee $left br_if $again)"
+            ))
+        };
+        let baseline = loop_module(10);
+        let mutation = loop_module(20);
+        let ceiling = 1_000;
+        let consumed = |bytes: &[u8]| ceiling - measure(bytes, ceiling).unwrap().remaining;
+        let count = consumed(&baseline);
+        assert!(count > 0 && count < ceiling);
+        assert_eq!(consumed(&baseline), count);
+        assert!(consumed(&mutation) > count);
+    }
+    #[test]
+    fn wasi_exit_zero_completes_and_nonzero_is_a_guest_error() {
+        let exit_module = |code| {
+            wat::parse_str(format!(
+                "(module (import \"wasi_snapshot_preview1\" \"proc_exit\" (func $exit (param i32)))
+                 (func (export \"_start\") i32.const {code} call $exit))"
+            ))
+            .unwrap()
+        };
+        assert!(measure(&exit_module(0), 100).is_ok());
+        let error = measure(&exit_module(7), 100).err().unwrap();
+        assert_eq!(error.downcast_ref::<I32Exit>().unwrap().0, 7);
     }
     #[test]
     fn test_only_small_ceiling_uses_real_out_of_fuel_and_never_publishes() {

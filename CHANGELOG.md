@@ -4,7 +4,7 @@
 
 ### Added
 
-- Fuel evidence: add an optional source-built Wasmtime helper and native qualification through existing SSH artifacts, with waited-child CPU diagnostics on fixture failure, following [the phase-one design](https://github.com/openclaw/crabbox/pull/1196). Thanks @zozo123 and @steipete.
+- Fuel evidence: add an optional source-built Wasmtime helper and native qualification through existing SSH artifacts, with waited-child CPU diagnostics on fixture failure and a v2 compilation policy requiring fresh calibration, following [the phase-one design](https://github.com/openclaw/crabbox/pull/1196). Thanks @zozo123 and @steipete.
 
 ### Fixed
 

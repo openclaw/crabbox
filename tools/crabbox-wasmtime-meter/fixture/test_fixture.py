@@ -141,23 +141,44 @@ class ConsumerContract(unittest.TestCase):
             self.assertFalse((directory / 'out' / 'evidence.json').exists())
             self.assertFalse((Path(name) / 'unused.json').exists())
 
-    def evidence(self):
+    def evidence(self, *, configuration='crabbox-wasmtime-fuel/v2',
+                 workload='example-org/workflow-action-pin-tests/v2'):
         meter = dict(mechanism='wasmtime-fuel', engine='wasmtime', engineVersion='50.0.1',
                      engineRevision='c307ec81de02852d815e9849f7c89d955c03c30d',
-                     configuration='crabbox-wasmtime-fuel/v1', wasiConfiguration='crabbox-deterministic-wasi/v1',
+                     configuration=configuration, wasiConfiguration='crabbox-deterministic-wasi/v1',
                      deterministic=True, initialFuel=qualify.INITIAL, remainingFuel=qualify.INITIAL - 12)
         projection = dict(argv=qualify.ARGV, configuration=meter['configuration'], engine='wasmtime',
                           engineRevision=meter['engineRevision'], engineVersion=meter['engineVersion'],
                           metric='fuel', target='wasip1/wasm', toolchain='go1.27.3', unit='fuel',
-                          wasiConfiguration=meter['wasiConfiguration'], workload=qualify.WORKLOAD)
+                          wasiConfiguration=meter['wasiConfiguration'], workload=workload)
         meter['comparisonKey'] = 'sha256:' + qualify.sha(json.dumps(projection, sort_keys=True, separators=(',', ':')).encode())
         return dict(schemaVersion=1, generatedAt='2026-01-01T00:00:00Z', provider='local-container',
-                    workload=dict(name=qualify.WORKLOAD, moduleSha256='a' * 64, toolchain='go1.27.3', target='wasip1/wasm', argv=qualify.ARGV),
+                    workload=dict(name=workload, moduleSha256='a' * 64, toolchain='go1.27.3', target='wasip1/wasm', argv=qualify.ARGV),
                     meter=meter, results=[dict(metric='fuel', unit='fuel', measured=12, budget=12, exceeded=False)],
                     exceeded=False, guestOutput=dict(stdoutSha256=qualify.sha(b'PASS\n'), stderrSha256=qualify.sha(b'')))
 
     def check(self, value):
         return qualify.validate(json.dumps(value).encode(), 'a' * 64, 12)
+
+    def test_v2_identity_rejects_legacy_substitution(self):
+        value = self.evidence()
+        self.check(value)
+        current_key = 'sha256:158ee0686954ed1ad1e62deeb2d8b14b9ca8e133adb30d7c080ca82c1f174bb4'
+        legacy_key = 'sha256:38b199dc30e8b9603f9a4d5ddfa74929ed781459a346bd41593a1451ec79e065'
+        self.assertEqual(value['meter']['comparisonKey'], current_key)
+        self.assertNotEqual(current_key, legacy_key)
+        # Recomputed keys cannot make an old configuration or workload current.
+        for configuration, workload in [
+                ('crabbox-wasmtime-fuel/v1', 'example-org/workflow-action-pin-tests/v2'),
+                ('crabbox-wasmtime-fuel/v2', 'example-org/workflow-action-pin-tests/v1'),
+                ('crabbox-wasmtime-fuel/v1', 'example-org/workflow-action-pin-tests/v1')]:
+            old = self.evidence(configuration=configuration, workload=workload)
+            with self.subTest(configuration=configuration, workload=workload), self.assertRaises(AssertionError):
+                self.check(old)
+        self.assertEqual(old['meter']['comparisonKey'], legacy_key)
+        value['meter']['comparisonKey'] = legacy_key
+        with self.assertRaises(AssertionError):
+            self.check(value)
 
     def test_real_semantic_gate_rejects_inconsistent_evidence(self):
         mutations = [

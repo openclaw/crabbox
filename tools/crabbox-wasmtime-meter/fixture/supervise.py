@@ -139,7 +139,7 @@ def invoke(directory, work, destination, controller, selection, expected, budget
         module.chmod(0o444)
         helper_digest = '0' * 64 if selection == 'bad-helper-digest' else expected
         child_arguments = ['--', '--module', str(module), '--module-sha256', helper_digest,
-                           '--output', str(evidence), '--workload', 'example-org/workflow-action-pin-tests/v1',
+                           '--output', str(evidence), '--workload', 'example-org/workflow-action-pin-tests/v2',
                            '--provider', 'local-container', '--budget', budget]
     command = ['/usr/bin/setpriv', '--reuid=60001', '--regid=60001', '--clear-groups',
                '--inh-caps=-all', '--ambient-caps=-all', '--bounding-set=-all', '--no-new-privs',

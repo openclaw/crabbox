@@ -20,7 +20,9 @@ import time
 ROOT = Path(__file__).resolve().parents[3]
 HELPER = ROOT / 'tools/crabbox-wasmtime-meter'
 INITIAL = 9007199254740991
-WORKLOAD = 'example-org/workflow-action-pin-tests/v1'
+WORKLOAD = 'example-org/workflow-action-pin-tests/v2'
+# Temporary calibration ceiling; a v1 count does not establish a v2 budget.
+CALIBRATION_BUDGET = 1_000_000_000
 ARGV = ['workflow-action-pins.test',
         '-test.run=^(TestCheckWorkflowNodeAcceptsImmutableUsesSyntaxes|TestCheckWorkflowNodeIgnoresUnrelatedUsesKeys)$',
         '-test.count=1', '-test.shuffle=off']
@@ -65,7 +67,7 @@ def validate(data, module_digest, budget, *, oracle=True):
     assert meter['mechanism'] == 'wasmtime-fuel' and meter['engine'] == 'wasmtime'
     assert meter['engineVersion'] == '50.0.1'
     assert meter['engineRevision'] == 'c307ec81de02852d815e9849f7c89d955c03c30d'
-    assert meter['configuration'] == 'crabbox-wasmtime-fuel/v1'
+    assert meter['configuration'] == 'crabbox-wasmtime-fuel/v2'
     assert meter['wasiConfiguration'] == 'crabbox-deterministic-wasi/v1'
     assert meter['deterministic'] is True and type(meter['initialFuel']) is int and meter['initialFuel'] == INITIAL
     assert type(meter['remainingFuel']) is int and 0 <= meter['remainingFuel'] <= INITIAL
@@ -211,7 +213,7 @@ def qualify(args):
         assert image['Architecture'] == architecture
         report['imageId'] = image['Id']
         report['helperSha256'] = command(['docker', 'exec', container, 'sha256sum', '/usr/local/bin/crabbox-wasmtime-meter']).split()[0]
-        def trial(name, selection, budget=1_000_000_000, expected=0, digest_override=None):
+        def trial(name, selection, budget=CALIBRATION_BUDGET, expected=0, digest_override=None):
             success, failure = output / f'{name}.success.json', output / f'{name}.failure.json'
             remote = f'.artifacts/{name}.json'
             flags = [] if selection.startswith('probe-') or expected not in (0, 3) else [
