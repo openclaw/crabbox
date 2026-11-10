@@ -59,9 +59,11 @@ func cloudInitWithExtras(cfg Config, publicKey, additionalConfig, additionalBoot
 	core := `    #!/bin/bash
     exec > >(tee -a /var/log/cloud-init-output.log) 2>&1
 ` + indentCloudInitRuncmd(sharedLinuxBootstrapPrelude()) + indentCloudInitRuncmd(sharedLinuxSSHRestart()) + indentCloudInitRuncmd(linuxMinimalReadinessBootstrap) + "\n" + fmt.Sprintf(`    mkdir -p %[1]s /var/cache/crabbox/pnpm /var/cache/crabbox/npm
-    chown -R %[2]s:%[2]s %[1]s /var/cache/crabbox
+    # Resolve names to numeric ownership in find; leave matching inodes (and Git stat caches) intact.
+    # Match chown -R's physical traversal; execdir and -h also avoid following substituted symlinks.
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin find -P %[1]s /var/cache/crabbox \( ! -user %[2]s -o ! -group %[2]s \) -execdir chown -h -- %[3]s {} +
     install -d /var/lib/crabbox
-`, shellWorkRoot, shellSSHUser) + indentCloudInitRuncmd(sharedLinuxSSHRestart()) + cloudInitEarlyBootstrap(cfg) + "\n"
+`, shellWorkRoot, shellSSHUser, shellQuote(cfg.SSHUser+":"+cfg.SSHUser)) + indentCloudInitRuncmd(sharedLinuxSSHRestart()) + cloudInitEarlyBootstrap(cfg) + "\n"
 	final := "    systemctl start crabbox-bootstrap.service\n"
 	workspaceAfter := "crabbox-bootstrap.service cloud-config.service"
 	core += indentCloudInitRuncmd(sharedLinuxBootstrapActivate())
