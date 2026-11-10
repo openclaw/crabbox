@@ -904,6 +904,9 @@ jobs:
           CRABBOX_TEST_RUST_UV_DOWNLOAD: "1"
         run: node --test --test-name-pattern='^reviewed Linux Rust and uv archives' scripts/linux-rust-uv.test.js
 
+      - name: Install pinned coordinator deployment tooling
+        run: npm ci --prefix worker --ignore-scripts
+
       - name: Test
         run: node --test scripts/*.test.js scripts/*.test.mjs
 

