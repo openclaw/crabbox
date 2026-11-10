@@ -171,14 +171,25 @@ Overrides use `defaultTTLSeconds`, `defaultIdleTimeoutSeconds`, `maxTTLSeconds`,
 {"orgs":{"example-org":{"maxTTLSeconds":7200}},"owners":{"alice@example.com":{"autoExtend":"deny"}}}
 ```
 
-Production source declares no lease policy overrides, so every owner uses the
-global defaults. The deploy guard compares the complete live override document
-with source, treating absent bindings and empty groups as equivalent. Differences
-require an explicit one-time replacement acknowledgment. Source must pass runtime
-validation, including during acknowledged repair of shape-valid but invalid live
-policies. Unreadable bindings, invalid document shapes, and API errors always stop
-deployment. See
-[Operations](../operations.md#cloudflare-worker) for the dispatch procedure.
+Git owns global defaults; operator-managed owner/org exceptions live only in the
+runtime binding. Ordinary deployments capture and validate the complete live
+document, insert it into a private temporary Wrangler configuration, and run the
+existing guard against that same configuration before upload. They check for
+policy/deployment drift and verify the deployed document afterward. Absent
+bindings, `{}`, and empty groups are equivalent; a present empty string is invalid.
+Intentional replacement/removal requires a reviewed complete document, explicit
+acknowledgment, and the reviewed live-policy digest. Cloudflare reads and upload
+are not atomic; coordinate external writers. See
+[Operations](../operations.md#cloudflare-worker) for the procedure and race limits.
+
+Raising only `maxTTLSeconds` permits a longer total lifetime without changing
+the initial TTL or idle timeout. Creation must request the desired TTL; an
+existing active lease needs an authorized advancing extension or the existing
+command auto-extension mechanism. Total lifetime still starts at `createdAt`,
+so provisioning and recovery time count. A larger request cannot bypass the
+current policy ceiling: if clamping leaves TTL unchanged, extension returns
+`lease_extension_not_advancing`. Raising the ceiling does not revive expired
+leases, refresh activity, or automatically enlarge stored TTL.
 
 Create requests are clamped rather than rejected, including older clients asking
 for 24h TTL and 5h idle. Denied extension clamps create TTL to the effective
