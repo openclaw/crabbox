@@ -314,10 +314,15 @@ func TestAWSReadinessStatusUsesExistingBootOwners(t *testing.T) {
 		t.Skip("POSIX guest observer")
 	}
 	for _, tc := range []struct {
-		name, failed, pid, expected, activating string
-		workspace, bootstrapped                 bool
+		name, failed, pid, expected, activating, process string
+		workspace, bootstrapped                          bool
 	}{
-		{name: "slow ownership repair", pid: "123", expected: "pending ownership-repair"},
+		{name: "labelled ownership repair", pid: "123", process: "python3 -I - crabbox-ownership-repair-v1 crabbox /work/my-app /var/cache/crabbox", expected: "pending ownership-repair"},
+		{name: "legacy Python ownership repair", pid: "123", process: "python3 -I - crabbox /work/my app /var/cache/crabbox", expected: "pending ownership-repair"},
+		{name: "legacy chown ownership repair", pid: "123", process: "chown", expected: "pending ownership-repair"},
+		{name: "unrelated Python", pid: "123", process: "python3 -I - unrelated-task", expected: "pending bootstrap"},
+		{name: "unrelated cache root", pid: "123", process: "python3 -I - crabbox /work/my-app /var/cache/other", expected: "pending bootstrap"},
+		{name: "invalid main pid", pid: "invalid", process: "chown", expected: "pending bootstrap"},
 		{name: "bootstrap pending", pid: "0", expected: "pending bootstrap"},
 		{name: "cloud config pending", activating: "cloud-config.service", expected: "pending cloud-config"},
 		{name: "cloud final pending", activating: "cloud-final.service", bootstrapped: true, expected: "pending cloud-final"},
@@ -331,7 +336,7 @@ func TestAWSReadinessStatusUsesExistingBootOwners(t *testing.T) {
 			dir := t.TempDir()
 			for name, script := range map[string]string{
 				"systemctl": "#!/bin/sh\ncase \"$1\" in is-failed) [ \"$3\" = \"$FIXTURE_FAILED\" ];; show) if [ \"$2\" = --property=ActiveState ]; then [ \"$4\" = \"$FIXTURE_ACTIVATING\" ] && echo activating; else printf '%s\\n' \"$FIXTURE_PID\"; fi;; cat) exit 0;; *) exit 1;; esac\n",
-				"pgrep":     "#!/bin/sh\n[ \"$1 $2 $3 $4\" = '-P 123 -x chown' ]\n",
+				"pgrep":     "#!/bin/sh\n[ \"$1 $2\" = '-P 123' ] || exit 1\ncase \"$3\" in -x) [ \"$FIXTURE_PROCESS\" = \"$4\" ];; -f) printf '%s\\n' \"$FIXTURE_PROCESS\" | LC_ALL=C grep -Eq \"$4\";; *) exit 1;; esac\n",
 			} {
 				if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0755); err != nil {
 					t.Fatal(err)
@@ -348,7 +353,7 @@ func TestAWSReadinessStatusUsesExistingBootOwners(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, "sh", "-c", script)
-			cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "FIXTURE_FAILED="+tc.failed, "FIXTURE_PID="+tc.pid, "FIXTURE_ACTIVATING="+tc.activating)
+			cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "FIXTURE_FAILED="+tc.failed, "FIXTURE_PID="+tc.pid, "FIXTURE_ACTIVATING="+tc.activating, "FIXTURE_PROCESS="+tc.process)
 			out, err := cmd.CombinedOutput()
 			if err != nil || strings.TrimSpace(string(out)) != tc.expected {
 				t.Fatalf("observer=%q error=%v want %q", out, err, tc.expected)

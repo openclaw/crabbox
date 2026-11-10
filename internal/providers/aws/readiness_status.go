@@ -18,7 +18,11 @@ if ! test -f /var/lib/crabbox/bootstrapped; then
   if test "$(systemctl show --property=ActiveState --value cloud-config.service)" = activating; then echo 'pending cloud-config'; exit 0; fi
   pid=$(systemctl show --property=MainPID --value crabbox-bootstrap.service)
   case "$pid" in ''|0|*[!0-9]*) ;; *)
-    if pgrep -P "$pid" -x chown >/dev/null; then echo 'pending ownership-repair'; exit 0; fi;;
+    # New recipes label the existing Python child. Retain observations of older
+    # unlabelled Python recipes (fixed cache root) and recursive chown recipes.
+    if pgrep -P "$pid" -f '^python3 -I - crabbox-ownership-repair-v1 ' >/dev/null ||
+       pgrep -P "$pid" -f '^python3 -I - [^ ]+ .+ /var/cache/crabbox$' >/dev/null ||
+       pgrep -P "$pid" -x chown >/dev/null; then echo 'pending ownership-repair'; exit 0; fi;;
   esac
 fi
 if test ! -f /var/lib/crabbox/bootstrapped; then echo 'pending bootstrap'

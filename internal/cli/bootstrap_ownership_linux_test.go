@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -38,15 +40,17 @@ func ownershipEntries(t *testing.T, root string) map[string]ownershipMetadata {
 	return result
 }
 
-func runOwnershipBlock(t *testing.T, work, cache string) {
+func runOwnershipBlock(t *testing.T, work, cache string) string {
 	t.Helper()
 	cfg := baseConfig()
 	cfg.SSHUser, cfg.WorkRoot, cfg.AWSSnapshot = "root", work, "snap-fixture"
 	script := cloudInitOwnershipBlock(t, cfg, cache)
 	cmd := exec.Command("bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", script)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("ownership block: %v: %s", err, out)
 	}
+	return string(out)
 }
 
 func TestCloudInitOwnershipFilesystem(t *testing.T) {
@@ -99,7 +103,15 @@ func TestCloudInitOwnershipFilesystem(t *testing.T) {
 				paths[path] = ownershipStat(t, path)
 			}
 			external := ownershipEntries(t, outside)
-			runOwnershipBlock(t, work, cache)
+			mismatches := 0
+			for _, before := range paths {
+				if before.uid != 0 || before.gid != 0 {
+					mismatches++
+				}
+			}
+			if out := runOwnershipBlock(t, work, cache); !strings.Contains(out, fmt.Sprintf("state=complete visited=%d mismatched=%d changed=%d elapsed_seconds=", len(paths), mismatches, mismatches)) {
+				t.Fatalf("incorrect ownership summary: %s", out)
+			}
 			retained, repaired := 0, 0
 			for path, before := range paths {
 				after := ownershipStat(t, path)
@@ -119,7 +131,9 @@ func TestCloudInitOwnershipFilesystem(t *testing.T) {
 				}
 				paths[path] = after
 			}
-			runOwnershipBlock(t, work, cache)
+			if out := runOwnershipBlock(t, work, cache); !strings.Contains(out, fmt.Sprintf("state=complete visited=%d mismatched=0 changed=0 elapsed_seconds=", len(paths))) {
+				t.Fatalf("incorrect repeat summary: %s", out)
+			}
 			for path, before := range paths {
 				if after := ownershipStat(t, path); before != after {
 					t.Errorf("%s: repeat execution changed metadata", path)

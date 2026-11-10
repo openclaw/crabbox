@@ -58,14 +58,25 @@ function run(script: string) {
   });
   expect(result.stderr).toBe("");
   expect(result.status).toBe(0);
+  return result.stdout;
+}
+
+function summary(output: string) {
+  const match = output.match(
+    /^crabbox ownership-repair state=complete visited=(\d+) mismatched=(\d+) changed=(\d+) elapsed_seconds=\d+\.\d{3}$/m,
+  );
+  expect(match).not.toBeNull();
+  return match!.slice(1).map(Number);
 }
 
 describe("cloud-init ownership repair", () => {
   it("emits a physical, descriptor-anchored numeric ownership repair", () => {
     const script = ownershipScript("/work/fixture's tree", "/tmp/cache");
-    expect(script).toContain("python3 -I - 'root' '/work/fixture'\\''s tree'");
-    expect(script).toContain("uid = pwd.getpwnam(sys.argv[1]).pw_uid");
-    expect(script).toContain("gid = grp.getgrnam(sys.argv[1]).gr_gid");
+    expect(script).toContain(
+      "python3 -I - crabbox-ownership-repair-v1 'root' '/work/fixture'\\''s tree'",
+    );
+    expect(script).toContain("uid = pwd.getpwnam(sys.argv[2]).pw_uid");
+    expect(script).toContain("gid = grp.getgrnam(sys.argv[2]).gr_gid");
     expect(script).toContain("if info.st_uid != uid or info.st_gid != gid:");
     expect(script).toContain(
       "os.chown(name, uid, gid, dir_fd=directory_fd, follow_symlinks=False)",
@@ -114,7 +125,15 @@ describe("cloud-init ownership repair", () => {
         }
         const before = new Map(paths.map((path) => [path, metadata(path)]));
         const external = new Map(entries(outside).map((path) => [path, metadata(path)]));
-        run(ownershipScript(work, cache));
+        const mismatches = paths.filter((path) => {
+          const old = before.get(path)!;
+          return old.uid !== 0n || old.gid !== 0n;
+        }).length;
+        expect(summary(run(ownershipScript(work, cache)))).toEqual([
+          paths.length,
+          mismatches,
+          mismatches,
+        ]);
         for (const path of paths) {
           const after = metadata(path);
           expect({ path, uid: after.uid, gid: after.gid }).toEqual({ path, uid: 0n, gid: 0n });
@@ -131,7 +150,7 @@ describe("cloud-init ownership repair", () => {
         for (const [path, old] of external)
           expect({ path, ...metadata(path) }).toEqual({ path, ...old });
         const repaired = new Map(paths.map((path) => [path, metadata(path)]));
-        run(ownershipScript(work, cache));
+        expect(summary(run(ownershipScript(work, cache)))).toEqual([paths.length, 0, 0]);
         for (const [path, old] of repaired)
           expect({ path, ...metadata(path) }).toEqual({ path, ...old });
       } finally {
@@ -199,6 +218,30 @@ describe("cloud-init ownership repair", () => {
           return old.uid === 0n && old.gid === 0n;
         });
         for (const path of correct) expect(metadata(path)).toEqual(before.get(path));
+      } finally {
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "reports a failed walk without swallowing its error or continuing bootstrap",
+    () => {
+      const fixture = mkdtempSync(join(tmpdir(), "crabbox-ownership-failure-"));
+      try {
+        const script = ownershipScript(join(fixture, "missing"), join(fixture, "cache"));
+        // Omit directory creation to exercise a real stat failure in the emitted walk.
+        const repair = script.slice(script.indexOf("# Resolve the original user:"));
+        const result = spawnSync("bash", ["-euo", "pipefail", "-c", `${repair}\necho continued`], {
+          encoding: "utf8",
+        });
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain("FileNotFoundError");
+        expect(result.stdout).toMatch(
+          /^crabbox ownership-repair state=failed visited=0 mismatched=0 changed=0 elapsed_seconds=\d+\.\d{3}$/m,
+        );
+        expect(result.stdout).not.toContain("state=complete");
+        expect(result.stdout).not.toContain("continued");
       } finally {
         rmSync(fixture, { recursive: true, force: true });
       }
