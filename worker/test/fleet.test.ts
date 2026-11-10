@@ -13373,7 +13373,7 @@ describe("fleet lease identity and idle", () => {
       }
       if (action === "DescribeInstances")
         return ec2XMLResponse(
-          "<DescribeInstancesResponse><requestId>req-capacity</requestId><reservationSet><item><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>c7a.4xlarge</instanceType><ipAddress>192.0.2.20</ipAddress><instanceState><name>running</name></instanceState></item></instancesSet></item></reservationSet></DescribeInstancesResponse>",
+          "<DescribeInstancesResponse><requestId>req-capacity</requestId><reservationSet><item><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>c7a.4xlarge</instanceType><ipAddress>192.0.2.20</ipAddress><instanceState><name>running</name></instanceState><rootDeviceName>/dev/sda1</rootDeviceName><blockDeviceMapping><item><deviceName>/dev/sda1</deviceName><ebs><volumeId>vol-0123456789abcdef0</volumeId></ebs></item></blockDeviceMapping></item></instancesSet></item></reservationSet></DescribeInstancesResponse>",
         );
       return undefined;
     });
@@ -29095,7 +29095,7 @@ describe("fleet lease identity and idle", () => {
           }
           if (operation === "DescribeInstances") {
             return ec2XMLResponse(
-              `<DescribeInstancesResponse><requestId>req-readiness</requestId><reservationSet><item><instancesSet><item><instanceId>i-allocation</instanceId>${paused && betweenPolls ? "" : "<ipAddress>192.0.2.20</ipAddress>"}<instanceState><name>running</name></instanceState></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`,
+              `<DescribeInstancesResponse><requestId>req-readiness</requestId><reservationSet><item><instancesSet><item><instanceId>i-allocation</instanceId>${paused && betweenPolls ? "" : "<ipAddress>192.0.2.20</ipAddress>"}<instanceState><name>running</name></instanceState><rootDeviceName>/dev/sda1</rootDeviceName><blockDeviceMapping><item><deviceName>/dev/sda1</deviceName><ebs><volumeId>vol-0123456789abcdef0</volumeId></ebs></item></blockDeviceMapping></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`,
             );
           }
           if (operation === "DescribeInstanceInformation") {
@@ -29219,7 +29219,7 @@ describe("fleet lease identity and idle", () => {
           );
         }
         return ec2XMLResponse(
-          `<DescribeInstancesResponse><requestId>req-allocation</requestId><reservationSet><item><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>t3.small</instanceType><ipAddress>192.0.2.20</ipAddress><instanceState><name>running</name></instanceState><tagSet>${Object.entries(
+          `<DescribeInstancesResponse><requestId>req-allocation</requestId><reservationSet><item><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>t3.small</instanceType><ipAddress>192.0.2.20</ipAddress><instanceState><name>running</name></instanceState><rootDeviceName>/dev/sda1</rootDeviceName><blockDeviceMapping><item><deviceName>/dev/sda1</deviceName><ebs><volumeId>vol-0123456789abcdef0</volumeId></ebs></item></blockDeviceMapping><tagSet>${Object.entries(
             {
               crabbox: "true",
               created_by: "crabbox",
@@ -57819,7 +57819,7 @@ function awsIngressTestFleet(
       }
       if (action === "DescribeInstances") {
         return ec2XMLResponse(
-          "<DescribeInstancesResponse><requestId>req-default</requestId><reservationSet><item><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>t3.small</instanceType><ipAddress>192.0.2.20</ipAddress><instanceState><name>running</name></instanceState></item></instancesSet></item></reservationSet></DescribeInstancesResponse>",
+          "<DescribeInstancesResponse><requestId>req-default</requestId><reservationSet><item><instancesSet><item><instanceId>i-new-instance</instanceId><instanceType>t3.small</instanceType><ipAddress>192.0.2.20</ipAddress><instanceState><name>running</name></instanceState><rootDeviceName>/dev/sda1</rootDeviceName><blockDeviceMapping><item><deviceName>/dev/sda1</deviceName><ebs><volumeId>vol-0123456789abcdef0</volumeId></ebs></item></blockDeviceMapping></item></instancesSet></item></reservationSet></DescribeInstancesResponse>",
         );
       }
       if (

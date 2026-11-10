@@ -2024,7 +2024,7 @@ export class EC2SpotClient {
       await checkReadiness?.();
       if (Date.now() >= deadline) break;
       const address = server?.host || (allowPrivateAddress ? server?.privateHost : "");
-      if (server && address) {
+      if (server && address && server.awsRootVolumeID && server.awsRootDeviceName) {
         return { ...server, host: address, creationEvents: observedRunning(server.status) };
       }
       // Request-layer retries and throttle errors remain authoritative.
@@ -2032,7 +2032,9 @@ export class EC2SpotClient {
       interval = Math.min(interval * 2, 5_000);
     }
     /* oxlint-enable eslint/no-await-in-loop */
-    throw new Error(`timed out waiting for AWS instance network address: ${instanceID}`);
+    throw new Error(
+      `timed out waiting for AWS instance network address and original root disk: ${instanceID}`,
+    );
   }
 
   async waitForSSMOnline(instanceID: string, checkReadiness?: AWSReadinessCheck): Promise<void> {
