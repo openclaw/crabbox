@@ -90,7 +90,8 @@ jobs:
               exit "$status"
 
           - name: ssh-localhost
-            runner: ubuntu-latest
+            # ubuntu-latest (26.04) resets the smoke's rapid localhost SSH connections.
+            runner: ubuntu-24.04
             build-cli: true
             smoke: CRABBOX_ARCH=amd64 CRABBOX_BIN="$PWD/bin/crabbox" scripts/live-ssh-localhost-smoke.sh
 
@@ -201,7 +202,8 @@ jobs:
 
   desktop-resize:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.desktop-resize-only }}
-    runs-on: ubuntu-latest
+    # Playwright 1.55.1 cannot install Chromium dependencies on ubuntu-latest (26.04).
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - name: Bound provisioning and cleanup time
