@@ -1,6 +1,7 @@
 import {
   psQuote,
   sharedLinuxSSHRestart,
+  sharedLinuxOwnershipRepair,
   sharedLinuxBootstrapStart,
   sharedLinuxAptQuiesce,
   sharedLinuxAptWait,
@@ -99,10 +100,7 @@ export function cloudInit(
     exec > >(tee -a /var/log/cloud-init-output.log) 2>&1
 ${indentRuncmdScript(sharedLinuxBootstrapPrelude())}${sshRestart}${indentRuncmdScript(linuxMinimalReadinessBootstrap)}
     mkdir -p ${shellQuote(config.workRoot)} /var/cache/crabbox/pnpm /var/cache/crabbox/npm
-    # Resolve names to numeric ownership in find; leave matching inodes (and Git stat caches) intact.
-    # Match chown -R's physical traversal; execdir and -h also avoid following substituted symlinks.
-    PATH=/usr/sbin:/usr/bin:/sbin:/bin find -P ${shellQuote(config.workRoot)} /var/cache/crabbox \\( ! -user ${shellQuote(config.sshUser)} -o ! -group ${shellQuote(config.sshUser)} \\) -execdir chown -h -- ${shellQuote(`${config.sshUser}:${config.sshUser}`)} {} +
-    install -d /var/lib/crabbox
+${indentRuncmdScript(sharedLinuxOwnershipRepair(config.sshUser, [config.workRoot, "/var/cache/crabbox"]))}    install -d /var/lib/crabbox
 ${sshRestart}`;
   let final = "    systemctl start crabbox-bootstrap.service\n";
   let workspaceAfter = "crabbox-bootstrap.service cloud-config.service";

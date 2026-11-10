@@ -32,7 +32,7 @@ func cloudInitOwnershipBlock(t *testing.T, cfg Config, cacheRoot string) string 
 		if end < 0 {
 			t.Fatal("missing ownership preparation boundary")
 		}
-		return strings.ReplaceAll(file.Content[start:start+end], "/var/cache/crabbox", shellQuote(cacheRoot))
+		return strings.ReplaceAll(file.Content[start:start+end], shellQuote("/var/cache/crabbox"), shellQuote(cacheRoot))
 	}
 	t.Fatal("missing bootstrap script")
 	return ""
@@ -50,9 +50,12 @@ func TestCloudInitFiltersNumericOwnership(t *testing.T) {
 			}
 			script := cloudInitOwnershipBlock(t, cfg, "/tmp/cache")
 			for _, want := range []string{
-				"PATH=/usr/sbin:/usr/bin:/sbin:/bin find -P '/work/fixture'\\''s tree' '/tmp/cache'",
-				`\( ! -user 'crabbox' -o ! -group 'crabbox' \)`,
-				"-execdir chown -h -- 'crabbox:crabbox' {} +",
+				"PATH=/usr/sbin:/usr/bin:/sbin:/bin python3 -I - 'crabbox' '/work/fixture'\\''s tree' '/tmp/cache'",
+				"uid = pwd.getpwnam(sys.argv[1]).pw_uid",
+				"gid = grp.getgrnam(sys.argv[1]).gr_gid",
+				"if info.st_uid != uid or info.st_gid != gid:",
+				"os.chown(name, uid, gid, dir_fd=directory_fd, follow_symlinks=False)",
+				"os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd",
 			} {
 				if !strings.Contains(script, want) {
 					t.Errorf("missing %q in emitted ownership block:\n%s", want, script)

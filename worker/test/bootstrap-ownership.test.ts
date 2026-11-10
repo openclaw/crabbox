@@ -57,12 +57,17 @@ function run(script: string) {
 }
 
 describe("cloud-init ownership repair", () => {
-  it("emits a physical, per-entry ownership filter with safe batched chown", () => {
+  it("emits a physical, descriptor-anchored numeric ownership repair", () => {
     const script = ownershipScript("/work/fixture's tree", "/tmp/cache");
-    expect(script).toContain("find -P '/work/fixture'\\''s tree'");
-    expect(script).toContain("\\( ! -user 'root' -o ! -group 'root' \\)");
-    expect(script).toContain("-execdir chown -h -- 'root:root' {} +");
-    expect(script).toContain("PATH=/usr/sbin:/usr/bin:/sbin:/bin find");
+    expect(script).toContain("python3 -I - 'root' '/work/fixture'\\''s tree'");
+    expect(script).toContain("uid = pwd.getpwnam(sys.argv[1]).pw_uid");
+    expect(script).toContain("gid = grp.getgrnam(sys.argv[1]).gr_gid");
+    expect(script).toContain("if info.st_uid != uid or info.st_gid != gid:");
+    expect(script).toContain(
+      "os.chown(name, uid, gid, dir_fd=directory_fd, follow_symlinks=False)",
+    );
+    expect(script).toContain("os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd");
+    expect(script).toContain("PATH=/usr/sbin:/usr/bin:/sbin:/bin python3 -I");
     expect(script).not.toMatch(/^chown -R/m);
     const result = spawnSync("bash", ["-n"], { input: script, encoding: "utf8" });
     expect(result.stderr).toBe("");
