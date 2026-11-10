@@ -248,7 +248,15 @@ func TestBlacksmithArtifactRunShellAndTerminalExit(t *testing.T) {
 
 func TestBlacksmithArtifactRunBoundsNonRecursiveEnumeration(t *testing.T) {
 	requireBlacksmithArtifactShell(t)
-	for _, command := range []string{"find", "tar", "tee"} {
+	find, err := exec.LookPath("find")
+	if err != nil {
+		t.Fatal(err)
+	}
+	find, err = filepath.Abs(find)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"tar", "tee"} {
 		if _, err := exec.LookPath(command); err != nil {
 			t.Fatal(err)
 		}
@@ -271,6 +279,10 @@ func TestBlacksmithArtifactRunBoundsNonRecursiveEnumeration(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			isolateArtifactOwnership(t)
+			// Reproduce Bash's remote-shell startup heuristic, which can skip
+			// BASH_ENV. Enumeration observation must not depend on startup files.
+			t.Setenv("SSH_CLIENT", "192.0.2.1 1234 22")
+			t.Setenv("SHLVL", "0")
 			repo := t.TempDir()
 			t.Chdir(repo)
 			root := testPreparedBlacksmithArtifactRoot(t, repo)
@@ -285,16 +297,17 @@ func TestBlacksmithArtifactRunBoundsNonRecursiveEnumeration(t *testing.T) {
 				testWriteBlacksmithFile(t, root, name, name+"\n")
 			}
 			traceDir := t.TempDir()
-			startup := filepath.Join(traceDir, "bash-env")
 			// Observe the real find output separately for every enumeration;
 			// neither the supervisor, collector nor protocol is substituted.
-			testWriteBlacksmithFile(t, traceDir, "bash-env", `find() {
-  local trace
-  trace=$(mktemp `+core.ShellQuote(filepath.Join(traceDir, "find.XXXXXX"))+`)
-  printf '%s\0' "$@" > "$trace.argv"
-  command find "$@" | tee "$trace.paths"
-}
-`)
+			bin := t.TempDir()
+			observer := "#!/bin/bash\nset -euo pipefail\n" +
+				"trace=$(mktemp " + core.ShellQuote(filepath.Join(traceDir, "find.XXXXXX")) + ")\n" +
+				"printf '%s\\0' \"$@\" > \"$trace.argv\"\n" +
+				core.ShellQuote(find) + " \"$@\" | tee \"$trace.paths\"\n"
+			if err := os.WriteFile(filepath.Join(bin, "find"), []byte(observer), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 			const id = "tbx_globdepth"
 			prepareBlacksmithGuestKey(t, id)
 			testOwnedBlacksmithClaim(t, id, "fixture-run", repo)
@@ -302,7 +315,6 @@ func TestBlacksmithArtifactRunBoundsNonRecursiveEnumeration(t *testing.T) {
 			runs := 0
 			runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				runs++
-				req.Env = append(req.Env, "BASH_ENV="+startup)
 				req.Stdout = io.MultiWriter(req.Stdout, &nativeOutput)
 				return runSyntheticBlacksmithCommand(t, t.Context(), req)
 			}}
