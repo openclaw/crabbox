@@ -4,7 +4,7 @@
 
 ### Added
 
-- Boat: explicitly disable snapshots and select private or shared organization visibility at creation, with fresh metadata checks before SSH access and policy-preserving lease reuse.
+- Boat: explicitly disable snapshots and select private or shared organization visibility at creation, with fresh metadata checks before SSH access and policy-preserving lease reuse. (https://github.com/openclaw/crabbox/pull/3117) Thanks @vincentkoc.
 
 ### Fixed
 
