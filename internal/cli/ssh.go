@@ -59,16 +59,19 @@ type SSHTarget struct {
 	TargetOS                string
 	WindowsMode             string
 	ReadyCheck              string
-	AuthSecret              bool
-	NoControlMaster         bool
-	ownerControlPath        string // Private foreground master with an explicit local lifetime owner.
-	DisableHostKeyChecking  bool
-	NetworkKind             NetworkMode
-	SSHConfigProxy          bool
-	SSHConfigFile           string // Provider-owned IdentitiesOnly route; bypass ambient SSH config.
-	SSHConfigData           []byte `json:"-"` // Captured provider config; keep resolution and transport on the same bytes.
-	ProxyCommand            string
-	ChildEnvDenylist        []string
+	// ReadinessStatus is an optional provider-owned, observational command.
+	// It may report pending/failed phases; it can never establish readiness.
+	ReadinessStatus        string
+	AuthSecret             bool
+	NoControlMaster        bool
+	ownerControlPath       string // Private foreground master with an explicit local lifetime owner.
+	DisableHostKeyChecking bool
+	NetworkKind            NetworkMode
+	SSHConfigProxy         bool
+	SSHConfigFile          string // Provider-owned IdentitiesOnly route; bypass ambient SSH config.
+	SSHConfigData          []byte `json:"-"` // Captured provider config; keep resolution and transport on the same bytes.
+	ProxyCommand           string
+	ChildEnvDenylist       []string
 	// Transport-only overrides can contain credentials; never serialize them.
 	ChildEnv          map[string]string `json:"-"`
 	DiagnosticSecrets []string          `json:"-"` // Provider credentials echoed by local authentication hooks.
@@ -382,11 +385,22 @@ func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, p
 			return context.Cause(ctx)
 		}
 	}
+	if policy, ok := checkpointReadinessFromContext(ctx); ok && phase == "bootstrap" {
+		timeout = policy.Timeout
+	}
 	start := time.Now()
-	deadline := time.Now().Add(timeout)
+	deadline := start.Add(timeout)
+	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) {
+		deadline = parentDeadline
+	}
 	probeCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	err := waitForSSHReadyWithProbeContext(ctx, probeCtx, target, stderr, phase, start, deadline)
+	if err != nil && context.Cause(ctx) != nil {
+		if policy, ok := checkpointReadinessFromContext(ctx); ok {
+			return fmt.Errorf("checkpoint readiness stopped lease=%s checkpoint=%s elapsed=%s wait_deadline=%s%s; fixed identity retained, replay the same fork with --lease-id %s: %w", policy.LeaseID, policy.CheckpointID, time.Since(start).Round(time.Second), deadline.UTC().Format(time.RFC3339), policy.lifetimeSummary(), policy.LeaseID, err)
+		}
+	}
 	if cache && err == nil {
 		scope.mu.Lock()
 		if scope.readiness == nil {
@@ -406,6 +420,8 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 	// reachability and authentication. Recording that keeps a readiness-only
 	// failure from being reported as an unknown-authentication timeout.
 	authenticated := false
+	blocking := "unknown"
+	policy, checkpointWait := checkpointReadinessFromContext(ctx)
 	retryDelay := 250 * time.Millisecond
 	check := func(probeErr error) error {
 		if stopped := sshReadinessProbeContextError(ctx, lastProbe); stopped != nil {
@@ -424,6 +440,13 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 			if authenticated {
 				authentication = "ok"
 			}
+			if checkpointWait {
+				state := "transport_failure"
+				if lastProbe == "readiness" && authenticated {
+					state = "pending"
+				}
+				return policy.failure(state, blocking, time.Since(start), deadline)
+			}
 			return Exit(5, "timed out waiting for SSH on %s during %s probe=%s cause=deadline_exceeded authentication=%s%s; %s", target.Host, phase, lastProbe, authentication, ports, sshWaitNextAction(phase))
 		}
 		return nil
@@ -431,6 +454,19 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 	for {
 		if err := check(nil); err != nil {
 			return err
+		}
+		if checkpointWait && target.ReadinessStatus != "" {
+			status, stage := observeReadinessStatus(probeCtx, *target)
+			if err := check(nil); err != nil {
+				return err
+			}
+			if status != "" {
+				blocking = stage
+				if status == "failed" {
+					return policy.failure("bootstrap_failed", blocking, time.Since(start), deadline)
+				}
+				fmt.Fprintf(stderr, "provisioning lease=%s state=pending phase=%s elapsed=%s wait_deadline=%s%s\n", policy.LeaseID, blocking, time.Since(start).Round(time.Second), deadline.UTC().Format(time.RFC3339), policy.lifetimeSummary())
+			}
 		}
 		if isWindowsWSL2Target(*target) {
 			lastProbe = "transport"

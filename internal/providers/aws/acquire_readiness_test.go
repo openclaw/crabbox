@@ -77,3 +77,38 @@ func TestAWSAcquireTerminalBootstrapRollsBack(t *testing.T) {
 		})
 	}
 }
+
+func TestAWSFixedCheckpointInterruptedBootstrapResumesSameInstance(t *testing.T) {
+	for _, cancellation := range []bool{false, true} {
+		t.Run(map[bool]string{false: "timeout", true: "cancellation"}[cancellation], func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			fake := &fakeAWSClient{}
+			t.Cleanup(installFixedAWSTestClient(t, fake))
+			backend := NewAWSLeaseBackend(core.ProviderSpec{}, fixedAWSTestConfig(), core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+			req := core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true, RequestedLeaseID: "cbx_abcdef123456", RequestedCheckpointID: "chk_resume", RequestedSlug: "resume-test"}
+			interrupted := error(core.Exit(5, "checkpoint readiness state=pending"))
+			if cancellation {
+				interrupted = context.Canceled
+			}
+			bootstrapAWSWindowsDesktop = func(context.Context, core.Config, *core.SSHTarget, string, io.Writer) error { return interrupted }
+			if _, err := backend.Acquire(t.Context(), req); !errors.Is(err, interrupted) {
+				t.Fatalf("initial wait: %v", err)
+			}
+			if fake.createCalls != 1 || len(fake.deletedInstances) != 0 || len(fake.tagged) != 0 {
+				t.Fatalf("unready allocation: creates=%d deletes=%v tags=%v", fake.createCalls, fake.deletedInstances, fake.tagged)
+			}
+			claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil || claim.CloudID == "" || claim.FixedCreateIntent.CheckpointID != req.RequestedCheckpointID {
+				t.Fatalf("identity lost: %+v %v", claim, err)
+			}
+			bootstrapAWSWindowsDesktop = func(context.Context, core.Config, *core.SSHTarget, string, io.Writer) error { return nil }
+			lease, err := backend.Acquire(t.Context(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fake.createCalls != 1 || lease.Server.CloudID != claim.CloudID || lease.LeaseID != req.RequestedLeaseID || len(fake.deletedInstances) != 0 {
+				t.Fatalf("replaced lease: %+v creates=%d", lease, fake.createCalls)
+			}
+		})
+	}
+}
