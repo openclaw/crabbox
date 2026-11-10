@@ -118,6 +118,7 @@ func runCheckpointCaptureReviewContract(t *testing.T, repo, binary string) {
 
 	for _, action := range []string{"delete", "delete-local", "prune"} {
 		t.Run("ordinary writer serializes "+action, func(t *testing.T) {
+			requireCheckpointCaptureReadinessListener(t)
 			f := newCheckpointCaptureFixture(t, repo, binary)
 			s := f.state()
 			s.StartRunning = true
