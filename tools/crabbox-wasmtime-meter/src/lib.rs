@@ -364,13 +364,21 @@ mod tests {
         let exit_module = |code| {
             wat::parse_str(format!(
                 "(module (import \"wasi_snapshot_preview1\" \"proc_exit\" (func $exit (param i32)))
+                 (memory (export \"memory\") 1)
                  (func (export \"_start\") i32.const {code} call $exit))"
             ))
             .unwrap()
         };
-        assert!(measure(&exit_module(0), 100).is_ok());
-        let error = measure(&exit_module(7), 100).err().unwrap();
-        assert_eq!(error.downcast_ref::<I32Exit>().unwrap().0, 7);
+        if let Err(error) = measure(&exit_module(0), 100) {
+            panic!("proc_exit(0) failed: {error:#}");
+        }
+        let error = measure(&exit_module(7), 100)
+            .err()
+            .expect("proc_exit(7) unexpectedly completed");
+        assert!(
+            matches!(error.downcast_ref::<I32Exit>(), Some(I32Exit(7))),
+            "expected I32Exit(7), got: {error:#}"
+        );
     }
     #[test]
     fn test_only_small_ceiling_uses_real_out_of_fuel_and_never_publishes() {

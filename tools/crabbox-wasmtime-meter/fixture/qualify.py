@@ -106,7 +106,8 @@ def probe_module(body, *, exit_code=None):
         return header + section(1, b'\x01\x60\x00\x00') + section(3, b'\x01\x00') + section(7, b'\x01\x06_start\x00\x00') + section(10, bytes([1, len(body) + 2, 0]) + body + b'\x0b')
     imports = b'\x01\x16wasi_snapshot_preview1\x09proc_exit\x00\x00'
     return (header + section(1, b'\x02\x60\x01\x7f\x00\x60\x00\x00') + section(2, imports)
-            + section(3, b'\x01\x01') + section(7, b'\x01\x06_start\x00\x01')
+            + section(3, b'\x01\x01') + section(5, b'\x01\x00\x01')
+            + section(7, b'\x02\x06_start\x00\x01\x06memory\x02\x00')
             + section(10, b'\x01\x06\x00\x41' + bytes([exit_code]) + b'\x10\x00\x0b'))
 
 
