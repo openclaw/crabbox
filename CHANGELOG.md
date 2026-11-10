@@ -4,6 +4,7 @@
 
 ### Added
 
+- Fuel evidence: add an optional source-built Wasmtime helper and native qualification through existing SSH artifacts, with waited-child CPU diagnostics on fixture failure and a v2 compilation policy requiring fresh calibration, following [the phase-one design](https://github.com/openclaw/crabbox/pull/1196). Thanks @zozo123 and @steipete.
 - Boat: explicitly disable snapshots and select private or shared organization visibility at creation, with fresh metadata checks before SSH access and policy-preserving lease reuse. (https://github.com/openclaw/crabbox/pull/3117) Thanks @vincentkoc.
 
 ### Fixed

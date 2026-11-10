@@ -32,7 +32,9 @@ func TestPerfEvidenceV1SchemaContract(t *testing.T) {
 		remove bool
 		valid  bool
 	}{
-		{name: "illustrative fixture", valid: true},
+		{name: "legacy v1 illustrative fixture", valid: true},
+		{name: "current v2 meter configuration", target: "meter", field: "configuration", value: "crabbox-wasmtime-fuel/v2", valid: true},
+		{name: "unknown meter configuration", target: "meter", field: "configuration", value: "crabbox-wasmtime-fuel/v3"},
 		{name: "lease ID is optional", field: "leaseId", remove: true, valid: true},
 		{name: "run ID is optional", field: "runId", remove: true, valid: true},
 		{name: "root extension", field: "future", value: true, valid: true},

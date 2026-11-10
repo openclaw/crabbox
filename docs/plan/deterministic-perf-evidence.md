@@ -72,8 +72,10 @@ The exact guest invocation is:
   -test.shuffle=off
 ```
 
-Once the phase-one helper and schema file exist, the end-to-end Crabbox proof
-should have this shape on any SSH-backed disposable provider:
+The original phase-one design sketch below illustrates the SSH artifact route.
+For the current pinned build and verified-module invocation, use the
+[source-built helper instructions](../../tools/crabbox-wasmtime-meter/README.md).
+The sketch's v1 workload is retained as historical context:
 
 ```sh
 crabbox run \
@@ -104,6 +106,19 @@ implementation PR must record at least 20 runs on both `linux/amd64` and
 set to the observed count, or to a documented higher integer when the team
 intentionally reserves headroom. No statistical tolerance is needed for a
 deterministic counter.
+
+The source-built helper now selects `crabbox-wasmtime-fuel/v2` and workload
+`example-org/workflow-action-pin-tests/v2`. It explicitly uses Cranelift
+`OptLevel::None`, whereas v1 used the default `Speed` policy. Skipping
+optimization may reduce compilation work while making guest execution slower;
+neither outcome is established by the policy change. The engine, locked
+dependencies, fixed WASI inputs, fuel ceiling and isolation limits stay the
+same. Compilation remains outside the fuel count.
+
+V2 requires fresh 20-run results on each architecture, exact cross-host equality,
+mutation sensitivity and budget-equality/budget-minus-one checks. The temporary
+billion-fuel calibration ceiling is not a v1 regression budget carried forward.
+Neither historical v1 counts nor an expected unchanged fuel charge qualifies v2.
 
 Changing the selected tests, Go toolchain, target, WASI inputs, meter
 configuration, or workload arguments creates a new workload revision and a new
@@ -212,11 +227,19 @@ fuel unit, allowing multiple results, or changing gate semantics requires a new
 schema version.
 
 The strings `fuel`, `wasmtime-fuel`, `wasmtime`,
-`crabbox-wasmtime-fuel/v1`, and `crabbox-deterministic-wasi/v1` are stable
+`crabbox-wasmtime-fuel/v1`, `crabbox-wasmtime-fuel/v2`, and
+`crabbox-deterministic-wasi/v1` are stable
 identifiers, not display labels. A Wasmtime or toolchain upgrade changes the
 comparison key and requires fresh calibration, even when the JSON schema stays
 at v1. Provider-specific metadata may be added as optional fields, but CI must
 not need it to evaluate the gate.
+
+Schema version 1 accepts exactly the two named meter configurations above, so
+the legacy illustrative fixture and evidence remain structurally valid. The
+current helper emits v2; its fixture rejects legacy configuration, workload or
+comparison-key substitution. Both configuration and workload revision remain in
+the canonical comparison projection, producing a distinct key for v2. Schema
+acceptance alone does not authenticate that key or a runtime measurement.
 
 The full schema-versioned artifact is the independently validated input to CI
 and gate decisions. Timing JSON may later include a compact, optional `fuel`
@@ -290,9 +313,9 @@ provider-specific runtime setup.
 
 ### Phase 1: prove the contract
 
-1. The docs-owned v1 schema and illustrative fixture have structural tests
-   through the existing artifact validator. Runtime and semantic gate validation
-   remain unimplemented.
+1. The docs-owned v1 schema and legacy illustrative fixture have structural tests
+   through the existing artifact validator. The source-built helper fixture adds
+   semantic validation; runtime qualification must pass for each configuration.
 2. Build the pinned subprocess helper for `linux/amd64` and `linux/arm64`, with
    the fixed WASI input surface and strict JSON output.
 3. Run the exact Crabbox workload above using existing artifact collection and
@@ -351,7 +374,7 @@ determinism from the fuel implementation.
    should repo-owned schemas and required artifacts remain the only public
    surface until a second workload exists?
 4. Is exact equality across 20 runs on two architectures sufficient to approve
-   `crabbox-wasmtime-fuel/v1`, or should the proof also cover two different
+   `crabbox-wasmtime-fuel/v2`, or should the proof also cover two different
    Linux kernel and CPU generations?
 5. Should a Wasmtime upgrade require a new meter configuration identifier, or
    is a changed comparison key plus recalibration sufficient while the helper's
