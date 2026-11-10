@@ -167,4 +167,34 @@ describe("cloud-init ownership repair", () => {
       }
     },
   );
+
+  it.skipIf(process.platform !== "linux" || process.getuid?.() !== 0).each(["correct", "mixed"])(
+    "repairs deep %s trees under the service soft descriptor limit",
+    (scenario) => {
+      const fixture = mkdtempSync(join(tmpdir(), "crabbox-ownership-deep-"));
+      try {
+        const work = join(fixture, "work");
+        const cache = join(fixture, "cache");
+        for (const path of [work, cache, join(cache, "npm"), join(cache, "pnpm")]) mkdirSync(path);
+        let leaf = work;
+        for (let depth = 0; depth < 600; depth++) {
+          leaf = join(leaf, "d");
+          mkdirSync(leaf);
+        }
+        writeFileSync(join(leaf, "file"), "deep fixture\n");
+        if (scenario === "mixed") lchownSync(join(leaf, "file"), 12345, 23456);
+        const paths = [...entries(work), ...entries(cache)];
+        const before = new Map(paths.map((path) => [path, metadata(path)]));
+        run(`ulimit -Sn 1024\n${ownershipScript(work, cache)}`);
+        for (const path of paths) {
+          const old = before.get(path)!;
+          const after = metadata(path);
+          expect([after.uid, after.gid]).toEqual([0n, 0n]);
+          if (old.uid === 0n && old.gid === 0n) expect(after).toEqual(old);
+        }
+      } finally {
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
 });
