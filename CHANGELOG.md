@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- CI: pin localhost SSH and desktop browser proof to supported Ubuntu runners. [PR 3107](https://github.com/openclaw/crabbox/pull/3107). Thanks @saariuslystoned.
 - Linux bootstrap: preserve ctime and Git stat caches for correctly owned workspace and cache files while repairing mismatched ownership after snapshot restoration.
 - Coordinator: preserve validated operator-managed lease policy exceptions across ordinary deployments, with drift checks and deployed-policy verification.
 - Run: reduce repeated no-sync SSH setup and telemetry waits, bound diagnostic event draining, and include terminal history confirmation in the final timing breakdown.
