@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Checkpoints: give fixed native Linux forks a bounded, resumable readiness wait with AWS bootstrap phase diagnostics and live lifetime checks. [PR 3122](https://github.com/openclaw/crabbox/pull/3122). Thanks @joshavant.
 - CI: pin localhost SSH and desktop browser proof to supported Ubuntu runners. [PR 3107](https://github.com/openclaw/crabbox/pull/3107). Thanks @saariuslystoned.
 - Linux bootstrap: preserve ctime and Git stat caches for correctly owned workspace and cache files while repairing mismatched ownership after snapshot restoration.
 - Coordinator: preserve validated operator-managed lease policy exceptions across ordinary deployments, with drift checks and deployed-policy verification.

@@ -79,6 +79,7 @@ func (Provider) ConfigureSSHTarget(target *core.SSHTarget, readyCommand string) 
 	if target.TargetOS == core.TargetLinux {
 		// The tmpfs marker proves this boot completed bootstrap, including any
 		// optional cloud-final setup. Older guests retain their cloud-init gate.
+		target.ReadinessStatus = awsLinuxReadinessStatus
 		target.ReadyCheck = "if systemctl cat crabbox-workspace-ready.service >/dev/null 2>&1; then test -f /run/crabbox/workspace-ready; else timeout 20m cloud-init status --wait >/tmp/crabbox-cloud-init.log 2>&1; fi && " + readyCommand
 	}
 }
