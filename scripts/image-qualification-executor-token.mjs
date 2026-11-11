@@ -136,7 +136,14 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
       executorEnvironment(process.env, token),
     );
   } catch {
-    console.error("qualification executor authentication failed");
+    console.error(
+      [
+        "qualification executor authentication failed",
+        "Check executor-identity.json for the current admitted run and ensure both protected environments contain its same original encoded credential.",
+        "If the original credential cannot be restored or the run has expired, let the finalizer/reaper settle this run, then start a newly authorized run with a fresh credential.",
+        "Do not replace an enrolled token, extend expiry, or reuse another run's credential.",
+      ].join("\n"),
+    );
     process.exitCode = 1;
   }
 }

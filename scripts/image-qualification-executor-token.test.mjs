@@ -262,16 +262,23 @@ test("runner-style literal masking covers step header and decoded token before c
   assert.doesNotMatch(rendered.join("\n") + result.stderr, new RegExp(`${encoded}|${token}`));
 });
 
-test("launcher refuses bad credential without child execution or ordinary secret diagnostics", (t) => {
+test("launcher rejects credentials with safe settlement guidance and no secret diagnostics", (t) => {
   const file = launcher(t, "echo must-not-execute\nexit 0\n");
   const { env, envelope } = fixture();
-  for (const credential of [
-    "not json",
-    encode({ ...envelope, runId: "43" }),
-    encode({ ...envelope, token: "bad" }),
+  const expired = new Date(Date.now() - 60_000).toISOString();
+  for (const overrides of [
+    { QUALIFICATION_EXECUTOR_CREDENTIAL: undefined },
+    { QUALIFICATION_EXECUTOR_CREDENTIAL: "not json" },
+    { QUALIFICATION_EXECUTOR_CREDENTIAL: encode({ ...envelope, runId: "43" }) },
+    { QUALIFICATION_EXECUTOR_CREDENTIAL: encode({ ...envelope, token: "bad" }) },
+    { QUALIFICATION_EXECUTOR_CREDENTIAL: encode({ ...envelope, token: "7".repeat(64) }) },
+    {
+      QUALIFICATION_EXPIRES_AT: expired,
+      QUALIFICATION_EXECUTOR_CREDENTIAL: encode({ ...envelope, expiresAt: expired }),
+    },
   ]) {
     const result = spawnSync(process.execPath, [file], {
-      env: { PATH: process.env.PATH, ...env, QUALIFICATION_EXECUTOR_CREDENTIAL: credential },
+      env: { PATH: process.env.PATH, ...env, ...overrides },
       encoding: "utf8",
       timeout: 10_000,
     });
@@ -280,7 +287,24 @@ test("launcher refuses bad credential without child execution or ordinary secret
       ordinary(result.stdout) + result.stderr,
       new RegExp(`${token}|must-not-execute|not json`),
     );
-    assert.equal(result.stderr, "qualification executor authentication failed\n");
+    assert.match(result.stderr, /^qualification executor authentication failed\n/);
+    assert.match(result.stderr, /executor-identity\.json for the current admitted run/);
+    assert.match(
+      result.stderr,
+      /both protected environments contain its same original encoded credential/,
+    );
+    assert.match(
+      result.stderr,
+      /finalizer\/reaper settle this run, then start a newly authorized run/,
+    );
+    assert.match(
+      result.stderr,
+      /Do not replace an enrolled token, extend expiry, or reuse another run's credential/,
+    );
+    assert.doesNotMatch(result.stderr, /[0-9a-f]{64}/);
+    for (const value of Object.values(overrides)) {
+      if (typeof value === "string") assert.equal(result.stderr.includes(value), false);
+    }
   }
 });
 
