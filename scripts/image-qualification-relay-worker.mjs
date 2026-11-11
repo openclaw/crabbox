@@ -177,6 +177,16 @@ function routeFor(request, env) {
       maxBody: 9 * 1024 * 1024,
     },
   ];
+  if (env.QUALIFICATION_MODE === "first-walk")
+    rules.push(
+      { method: "POST", pattern: /^\/v1\/checkpoints$/, maxBody: 16 * 1024 },
+      { method: "GET", pattern: /^\/v1\/checkpoints\/chk_[A-Za-z0-9_-]{1,128}$/, maxBody: 0 },
+      {
+        method: "POST",
+        pattern: /^\/v1\/checkpoints\/chk_[A-Za-z0-9_-]{1,128}\/(?:use|first-walk)$/,
+        maxBody: 4096,
+      },
+    );
   const rule = rules.find(
     (candidate) => candidate.method === request.method && candidate.pattern.test(pathname),
   );

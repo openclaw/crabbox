@@ -14,6 +14,12 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
   ({ canonical, digest } = await import("./image-qualification-control.mjs"));
 }
 
+import {
+  fixtureAdmission,
+  namespaceId,
+  controllerContent,
+} from "./fixtures/qualification-isolation.mjs";
+
 const root = path.resolve(import.meta.dirname, "..");
 const control = path.join(root, "scripts/image-qualification-control.mjs");
 const candidateSha = "a".repeat(40);
@@ -39,6 +45,7 @@ const capsulePaths = [
 
 function installAPI(file) {
   const state = JSON.parse(fs.readFileSync(file, "utf8"));
+  const isolation = fixtureAdmission("0".repeat(32));
   Date.now = () => state.now;
   process.on("exit", () => fs.writeFileSync(file, JSON.stringify(state)));
   const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
@@ -90,7 +97,9 @@ function installAPI(file) {
         return json({ ...state.identity, cleanupState: "claimed" });
       }
       if (route === "/discover") {
-        return json({ run: state.identity ? { ...state.identity, cleanupState: "claimed" } : null });
+        return json({
+          run: state.identity ? { ...state.identity, cleanupState: "claimed" } : null,
+        });
       }
       if (route === "/begin-finalization") {
         state.finalizing = true;
@@ -123,15 +132,30 @@ function installAPI(file) {
     }
     assert.equal(url.hostname, "api.cloudflare.com", "real network access is forbidden");
     const cfRoute = route.replace(/^\/client\/v4\/accounts\/0{32}/, "");
+    if (cfRoute.startsWith("/workers/scripts/crabbox-aws-qualification-authority/")) {
+      if (cfRoute.endsWith("/settings")) return api({ bindings: isolation.bindings });
+      if (cfRoute.endsWith("/deployments"))
+        return api({
+          deployments: [{ versions: [{ version_id: workerVersion, percentage: 100 }] }],
+        });
+      if (cfRoute.endsWith("/subdomain")) return api({ enabled: false, previews_enabled: false });
+      if (cfRoute.endsWith("/schedules")) return api({ schedules: [] });
+    }
     const match = cfRoute.match(/^\/workers\/scripts\/([^/]+)(.*)$/);
     if (match) {
       const [, name, suffix] = match;
       if (!suffix && method === "PUT") {
         const metadata = JSON.parse(await init.body.get("metadata").text());
+        for (const binding of metadata.bindings)
+          if (binding.name === "FLEET") binding.namespace_id ??= namespaceId(name);
         state.workers[name] = {
           metadata,
           subdomain: state.workers[name]?.subdomain ?? { enabled: true, previews_enabled: false },
         };
+        if (state.tombstoneLoss && metadata.main_module === "tombstone.mjs") {
+          state.tombstoneLoss = false;
+          throw new Error("tombstone upload response lost");
+        }
         if (state.uploadDelay) state.now += state.uploadDelay;
         return api({ deployment_id: workerVersion });
       }
@@ -139,25 +163,34 @@ function installAPI(file) {
         delete state.workers[name];
         return api({});
       }
-      if (suffix === "/settings") return state.workers[name] ? api(state.workers[name].metadata) : api(null, 404);
-      if (suffix === "/versions") return api({ items: [{ id: workerVersion }] });
+      if (suffix === "/settings")
+        return state.workers[name] ? api(state.workers[name].metadata) : api(null, 404);
+      if (suffix === "/deployments")
+        return api({
+          deployments: [{ versions: [{ version_id: workerVersion, percentage: 100 }] }],
+        });
+      if (suffix === "/content/v2")
+        return controllerContent(
+          fs.readFileSync(path.join(root, "scripts/image-qualification-controller-worker.mjs")),
+        );
       if (suffix === "/subdomain") {
         if (method === "POST") state.workers[name].subdomain = JSON.parse(init.body);
         return api(state.workers[name].subdomain);
       }
-      if (suffix === "/schedules") return api([]);
+      if (suffix === "/schedules") return api({ schedules: [] });
     }
     if (cfRoute === "/workers/subdomain") return api({ subdomain: "example" });
     if (cfRoute === "/workers/durable_objects/namespaces") {
-      return api(
-        Object.entries(state.workers)
+      return api([
+        ...isolation.record.authority.namespaces,
+        ...Object.entries(state.workers)
           .filter(([, worker]) =>
             worker.metadata.bindings.some((binding) => binding.name === "FLEET"),
           )
-          .map(([script]) => ({ script, class: "FleetDurableObject" })),
-      );
+          .map(([script]) => ({ id: namespaceId(script), script, class: "FleetDurableObject" })),
+      ]);
     }
-    if (cfRoute.endsWith("/routes") || cfRoute === "/workers/domains/records") return api([]);
+    if (cfRoute.endsWith("/routes") || cfRoute === "/workers/domains") return api([]);
     throw new Error(`unexpected Cloudflare fixture route: ${cfRoute}`);
   };
 }
@@ -185,7 +218,10 @@ function fixture(t, mode = "retained") {
     return {
       path: name,
       mode: "100644",
-      blob: crypto.createHash("sha1").update(`blob ${Buffer.byteLength(data)}\0${data}`).digest("hex"),
+      blob: crypto
+        .createHash("sha1")
+        .update(`blob ${Buffer.byteLength(data)}\0${data}`)
+        .digest("hex"),
       bytes: Buffer.byteLength(data),
       sha256: digest(data),
     };
@@ -209,9 +245,16 @@ function fixture(t, mode = "retained") {
       bakedInputsIdentical: true,
     });
   }
+  if (mode === "first-walk") {
+    write(
+      "candidate/recipes/bootstrap/v1/linuxOwnershipRepair.sh",
+      fs.readFileSync(path.join(root, "scripts/fixtures/first-walk-reviewed-recipe.sh"), "utf8"),
+    );
+  }
   write("bin/crabbox", "not executable");
   write("worker/index.js", "throw new Error('candidate must not execute');");
-  const files = fs.readdirSync(artifact, { recursive: true })
+  const files = fs
+    .readdirSync(artifact, { recursive: true })
     .filter((name) => fs.statSync(path.join(artifact, name)).isFile())
     .map((name) => ({
       path: name.split(path.sep).join("/"),
@@ -250,18 +293,21 @@ function fixture(t, mode = "retained") {
     QUALIFICATION_AUTHORITY_VERSION: "v1",
     QUALIFICATION_EXPECTED_POLICY_HASH: policyHash,
     CLOUDFLARE_ACCOUNT_ID: "0".repeat(32),
+    ...fixtureAdmission("0".repeat(32)).env,
     QUALIFICATION_AWS_REGION: "eu-west-1",
     QUALIFICATION_SUBNET_ID: "subnet-00000000000000000",
     QUALIFICATION_SECURITY_GROUP_ID: "sg-00000000000000000",
     QUALIFICATION_BASE_AMI_ID: "ami-00000000000000001",
     QUALIFICATION_ROOT_GB: "20",
     QUALIFICATION_HANDOFF_TEST_STATE: stateFile,
-    ...(mode === "retained" ? {
-      QUALIFICATION_RETAINED_IMAGE_ID: "ami-00000000000000002",
-      QUALIFICATION_RETAINED_SNAPSHOT_ID: "snap-00000000000000000",
-      QUALIFICATION_RETAINED_SOURCE_SHA: "3".repeat(40),
-      QUALIFICATION_RETAINED_CAPSULE_SHA256: capsuleSha256,
-    } : {}),
+    ...(mode === "retained"
+      ? {
+          QUALIFICATION_RETAINED_IMAGE_ID: "ami-00000000000000002",
+          QUALIFICATION_RETAINED_SNAPSHOT_ID: "snap-00000000000000000",
+          QUALIFICATION_RETAINED_SOURCE_SHA: "3".repeat(40),
+          QUALIFICATION_RETAINED_CAPSULE_SHA256: capsuleSha256,
+        }
+      : {}),
   };
   function invoke(command, overrides = {}) {
     const output = path.join(directory, `${command}.outputs`);
@@ -271,10 +317,12 @@ function fixture(t, mode = "retained") {
       timeout: 10_000,
       env: {
         ...env,
-        ...(command !== "admit" ? {
-          CLOUDFLARE_API_TOKEN: "synthetic-cloudflare-token",
-          QUALIFICATION_CONTROLLER_TOKEN: "synthetic-controller-token",
-        } : {}),
+        ...(command !== "admit"
+          ? {
+              CLOUDFLARE_API_TOKEN: "synthetic-cloudflare-token",
+              QUALIFICATION_CONTROLLER_TOKEN: "synthetic-controller-token",
+            }
+          : {}),
         QUALIFICATION_HANDOFF_SHA256: outputs.handoff_sha256 ?? "",
         GITHUB_OUTPUT: output,
         GITHUB_STEP_SUMMARY: path.join(directory, "summary"),
@@ -290,43 +338,78 @@ function fixture(t, mode = "retained") {
     return child;
   }
   const prepared = () => JSON.parse(fs.readFileSync(path.join(handoffDir, "handoff.json"), "utf8"));
-  const armEnv = () => Object.fromEntries([
-    ["RUN_ID", "run_id"], ["CANDIDATE_SHA", "candidate_sha"],
-    ["CANDIDATE_WORKER", "candidate_worker"], ["CANDIDATE_VERSION", "candidate_version"],
-    ["RELAY_WORKER", "relay_worker"], ["RELAY_VERSION", "relay_version"],
-    ["RELAY_BINDING_DIGEST", "relay_binding_digest"], ["DEPLOYMENT_HASH", "deployment_hash"],
-    ["MANIFEST_SHA", "manifest_sha"], ["BINDING_DIGEST", "binding_digest"],
-    ["AUTHORITY_SHA", "authority_sha"], ["AUTHORITY_VERSION", "authority_version"],
-    ["POLICY_HASH", "policy_hash"], ["ENROLLED_AT", "enrolled_at"],
-    ["EXPIRES_AT", "expires_at"], ["EXECUTION_MANIFEST_DIGEST", "execution_manifest_digest"],
-  ].map(([key, output]) => [`QUALIFICATION_EXPECTED_${key}`, outputs[output]]));
+  const armEnv = () =>
+    Object.fromEntries(
+      [
+        ["RUN_ID", "run_id"],
+        ["CANDIDATE_SHA", "candidate_sha"],
+        ["CANDIDATE_WORKER", "candidate_worker"],
+        ["CANDIDATE_VERSION", "candidate_version"],
+        ["RELAY_WORKER", "relay_worker"],
+        ["RELAY_VERSION", "relay_version"],
+        ["RELAY_BINDING_DIGEST", "relay_binding_digest"],
+        ["DEPLOYMENT_HASH", "deployment_hash"],
+        ["MANIFEST_SHA", "manifest_sha"],
+        ["BINDING_DIGEST", "binding_digest"],
+        ["AUTHORITY_SHA", "authority_sha"],
+        ["AUTHORITY_VERSION", "authority_version"],
+        ["POLICY_HASH", "policy_hash"],
+        ["ENROLLED_AT", "enrolled_at"],
+        ["EXPIRES_AT", "expires_at"],
+        ["EXECUTION_MANIFEST_DIGEST", "execution_manifest_digest"],
+      ].map(([key, output]) => [`QUALIFICATION_EXPECTED_${key}`, outputs[output]]),
+    );
   return { invoke, state, update, prepared, env, outputs, armEnv, handoffDir, directory };
 }
 
 if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
   installAPI(process.env.QUALIFICATION_HANDOFF_TEST_STATE);
 } else {
-  for (const mode of ["retained", "mint"]) {
+  for (const mode of ["retained", "mint", "first-walk"]) {
     test(`${mode} CLI publishes one immutable handoff before deployment and preserves it through arm`, (t) => {
       const f = fixture(t, mode);
       const admitted = f.invoke("admit");
       assert.equal(admitted.status, 0, admitted.stderr);
-      assert.ok(fs.existsSync(path.join(f.handoffDir, "handoff.json")), "admission must export identity before any credential-dependent claim");
+      assert.ok(
+        fs.existsSync(path.join(f.handoffDir, "handoff.json")),
+        "admission must export identity before any credential-dependent claim",
+      );
       const handoff = f.prepared();
-      assert.equal(f.state().events.some((event) => /cloudflare|workers\.dev/.test(event)), false);
+      assert.equal(
+        f.state().events.some((event) => /cloudflare|workers\.dev/.test(event)),
+        false,
+      );
       assert.equal(handoff.owner, "image-qualification-42-1@example.invalid");
-      assert.equal(Date.parse(handoff.expiresAt) - Date.parse(handoff.startsAt), (mode === "retained" ? 38 : 120) * 60_000);
+      assert.equal(
+        Date.parse(handoff.expiresAt) - Date.parse(handoff.startsAt),
+        (mode === "retained" ? 38 : 120) * 60_000,
+      );
+      if (mode === "first-walk")
+        assert.equal(
+          Date.parse(handoff.expiresAt) - Date.parse(handoff.workExpiresAt),
+          20 * 60_000,
+        );
       const projection = path.join(f.handoffDir, "iam-inputs.json");
       assert.equal(fs.existsSync(projection), mode === "retained");
       if (mode === "retained") {
         assert.deepEqual(JSON.parse(fs.readFileSync(projection, "utf8")), {
-          authority_owner: handoff.owner, run_id: handoff.runId, source_sha: candidateSha,
-          starts_at: handoff.startsAt, creation_expires_at: handoff.workExpiresAt,
+          authority_owner: handoff.owner,
+          run_id: handoff.runId,
+          source_sha: candidateSha,
+          starts_at: handoff.startsAt,
+          creation_expires_at: handoff.workExpiresAt,
           cleanup_expires_at: handoff.expiresAt,
         });
       }
-      const publicText = fs.readFileSync(path.join(f.handoffDir, "handoff.json"), "utf8") + fs.readFileSync(path.join(f.directory, "summary"), "utf8");
-      for (const privateValue of [f.env.CLOUDFLARE_ACCOUNT_ID, f.env.QUALIFICATION_SUBNET_ID, f.env.QUALIFICATION_SECURITY_GROUP_ID, f.env.QUALIFICATION_BASE_AMI_ID]) {
+      const publicText =
+        fs.readFileSync(path.join(f.handoffDir, "handoff.json"), "utf8") +
+        fs.readFileSync(path.join(f.directory, "summary"), "utf8");
+      for (const privateValue of [
+        f.env.CLOUDFLARE_ACCOUNT_ID,
+        f.env.QUALIFICATION_SUBNET_ID,
+        f.env.QUALIFICATION_SECURITY_GROUP_ID,
+        f.env.QUALIFICATION_BASE_AMI_ID,
+      ]) {
         assert.equal(publicText.includes(privateValue), false);
       }
       assert.notEqual(f.invoke("admit").status, 0, "preparation cannot replace its output");
@@ -342,7 +425,8 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     });
   }
 
-  const providerEvents = (f) => f.state().events.filter((event) => /cloudflare|workers\.dev/.test(event));
+  const providerEvents = (f) =>
+    f.state().events.filter((event) => /cloudflare|workers\.dev/.test(event));
   for (const [name, overrides] of [
     ["rerun", { GITHUB_RUN_ATTEMPT: "2" }],
     ["other run", { GITHUB_RUN_ID: "43" }],
@@ -352,7 +436,10 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     ["other Cloudflare account", { CLOUDFLARE_ACCOUNT_ID: "9".repeat(32) }],
     ["other authority", { QUALIFICATION_AUTHORITY_SHA: "9".repeat(40) }],
     ["other capsule", { QUALIFICATION_RETAINED_CAPSULE_SHA256: "9".repeat(64) }],
-    ["wrong artifact digest", { QUALIFICATION_HANDOFF_ARTIFACT_DIGEST: `sha256:${"9".repeat(64)}` }],
+    [
+      "wrong artifact digest",
+      { QUALIFICATION_HANDOFF_ARTIFACT_DIGEST: `sha256:${"9".repeat(64)}` },
+    ],
   ]) {
     test(`deployment refuses ${name} before provider effects`, (t) => {
       const f = fixture(t);
@@ -384,7 +471,9 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
   }
 
   for (const metadata of [
-    { name: "other-handoff" }, { expired: true }, { workflow_run: { id: 43, head_sha: workflowSha } },
+    { name: "other-handoff" },
+    { expired: true },
+    { workflow_run: { id: 43, head_sha: workflowSha } },
     { workflow_run: { id: 42, head_sha: candidateSha } },
   ]) {
     test(`deployment rejects substituted handoff artifact ${JSON.stringify(metadata)}`, (t) => {
@@ -426,7 +515,10 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     assert.match(f.invoke("deploy").stderr, /work window is not active/);
     assert.equal(f.state().identity, undefined);
     assert.ok(providerEvents(f).length > 0);
-    assert.equal(f.state().events.some((event) => event.endsWith("/claim")), false);
+    assert.equal(
+      f.state().events.some((event) => event.endsWith("/claim")),
+      false,
+    );
   });
 
   for (const mode of ["retained", "mint"]) {
@@ -442,7 +534,10 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       const result = f.invoke("arm", f.armEnv());
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, /work window is not active/);
-      assert.equal(fs.existsSync(path.join(f.directory, "arm-proof", "execution-manifest.json")), false);
+      assert.equal(
+        fs.existsSync(path.join(f.directory, "arm-proof", "execution-manifest.json")),
+        false,
+      );
       f.update({ now: Date.parse(handoff.expiresAt) + 60_000, armDelay: 0 });
       const cleanup = f.invoke("reap");
       assert.equal(cleanup.status, 0, cleanup.stderr);
@@ -451,4 +546,43 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       assert.equal(f.state().identity, undefined);
     });
   }
+}
+
+if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
+  for (const name of [
+    "crabbox-image-qualification-42-1",
+    "crabbox-image-qualification-relay-42-1",
+    "crabbox-image-qualification-controller",
+  ])
+    test(`preexisting ${name} cannot be overwritten`, (t) => {
+      const f = fixture(t, "first-walk");
+      assert.equal(f.invoke("admit").status, 0);
+      f.update({ workers: { [name]: { metadata: { bindings: [] } } } });
+      const result = f.invoke("deploy");
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /name collision/);
+      assert.deepEqual(
+        f.state().events.filter((event) => /^(PUT|POST|DELETE) api.cloudflare/.test(event)),
+        [],
+      );
+    });
+}
+
+if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
+  test("lost tombstone response retains exact recovery identity without replaying the migration", (t) => {
+    const f = fixture(t, "first-walk");
+    assert.equal(f.invoke("admit").status, 0);
+    const deployed = f.invoke("deploy");
+    assert.equal(deployed.status, 0, deployed.stderr);
+    f.update({ tombstoneLoss: true });
+    const first = f.invoke("reap");
+    assert.equal(first.status, 1);
+    assert.match(first.stderr, /tombstone upload response lost/);
+    const partial = f.state().workers["crabbox-image-qualification-42-1"].metadata;
+    assert.equal(partial.main_module, "tombstone.mjs");
+    assert.equal(partial.bindings[0].props.deploymentHash, f.outputs.deployment_hash);
+    const recovered = f.invoke("reap");
+    assert.equal(recovered.status, 0, recovered.stderr);
+    assert.deepEqual(f.state().workers, {});
+  });
 }

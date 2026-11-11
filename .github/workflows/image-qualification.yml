@@ -12,10 +12,10 @@ on:
         required: true
         type: string
       mode:
-        description: Mint a disposable image or qualify a borrowed retained image
+        description: Mint/retained image qualification or one-copy synthetic first-walk
         type: choice
         default: mint
-        options: [mint, retained]
+        options: [mint, retained, first-walk]
       retained_image_id:
         description: Retained mode only, exact borrowed AMI
         type: string
@@ -132,6 +132,10 @@ jobs:
             node harness/scripts/image-qualification-control.mjs retained-capsule \
               retained candidate "$ARTIFACT/retained-capsule.json"
           fi
+          if [[ "$QUALIFICATION_MODE" == first-walk ]]; then
+            node harness/scripts/image-qualification-control.mjs first-walk-recipe \
+              candidate "$ARTIFACT"
+          fi
           (
             cd candidate
             GOTOOLCHAIN=local GOWORK=off CGO_ENABLED=0 GOFLAGS=-mod=readonly \
@@ -142,6 +146,9 @@ jobs:
             ./node_modules/.bin/wrangler deploy --dry-run \
               --outdir "$ARTIFACT/worker" --config wrangler.jsonc
           )
+          # The deployer uploads executable modules only; omit unused debug maps
+          # before sealing so the combined CLI/Worker stays within the 128 MiB cap.
+          find "$ARTIFACT/worker" -type f -name '*.map' -delete
           cp candidate/scripts/mint-aws-devtools-image.sh \
             candidate/scripts/devtools-image-smoke-linux.sh \
             candidate/scripts/install-linux-developer-tools.sh \
@@ -190,6 +197,8 @@ jobs:
           QUALIFICATION_CANDIDATE_ARTIFACT_ID: ${{ needs.build-candidate.outputs.candidate_artifact_id }}
           QUALIFICATION_CANDIDATE_RUN_ID: ${{ needs.build-candidate.outputs.candidate_run_id }}
           QUALIFICATION_HANDOFF_DIR: ${{ runner.temp }}/image-qualification-handoff
+          QUALIFICATION_ISOLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_JSON }}
+          QUALIFICATION_ISOLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_SHA256 }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           QUALIFICATION_AUTHORITY_SHA: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_SHA }}
           QUALIFICATION_AUTHORITY_VERSION: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_VERSION }}
@@ -259,6 +268,8 @@ jobs:
         id: deploy
         env:
           GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_ISOLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_JSON }}
+          QUALIFICATION_ISOLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_SHA256 }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           QUALIFICATION_CONTROLLER_TOKEN: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_CONTROLLER_TOKEN }}
@@ -311,6 +322,8 @@ jobs:
         id: arm
         env:
           GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_ISOLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_JSON }}
+          QUALIFICATION_ISOLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_SHA256 }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           QUALIFICATION_CONTROLLER_TOKEN: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_CONTROLLER_TOKEN }}
@@ -359,7 +372,7 @@ jobs:
     name: Execute candidate without cloud credentials
     needs: [authorize, build-candidate, deploy-enroll, arm]
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.mode == 'retained' && 38 || 80 }}
+    timeout-minutes: ${{ inputs.mode == 'first-walk' && 100 || inputs.mode == 'retained' && 38 || 80 }}
     steps:
       - name: Check out protected executor
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -419,6 +432,8 @@ jobs:
       - name: Revalidate identity and finalize idempotently
         env:
           GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_ISOLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_JSON }}
+          QUALIFICATION_ISOLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_SHA256 }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           QUALIFICATION_CONTROLLER_TOKEN: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_CONTROLLER_TOKEN }}
