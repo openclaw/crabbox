@@ -427,8 +427,8 @@ production coordinator on main; changes under `docs/` or `skills/` automatically
 publish Pages. Review the complete current workflow filters before any future
 merge. Do not change production deployment controls to make the split work.
 The existing qualification reaper definition consumes protected main tooling;
-the split preserves mint/retained and reaper behavior and does not dispatch a
-qualification. Confirm an enabled independent recovery route before live
+all modes and the reaper require the same admitted isolation record and do not
+dispatch a qualification on merge. Confirm an enabled independent recovery route before live
 admission; source merge does not enable a disabled workflow. No merge or deployment is authorized by this preparation.
 
 At dispatch, `candidate_sha` must equal the open candidate PR's exact head. The
@@ -458,6 +458,54 @@ branch changes, repeat identity verification before admission. A branch
 workflow dispatch, raw Worker upload, locally rebuilt binary or closed PR cannot
 substitute for this contract. Source merge, authority deployment and credential
 custody, and one finite synthetic run each require their own authorization.
+
+## Shared-account isolation admission
+
+Resource-level isolation may use shared accounts. Before cloud-writing jobs can
+operate, the protected `image-qualification` environment must carry a reviewed
+`CRABBOX_IMAGE_QUALIFICATION_ISOLATION_JSON` record and its canonical SHA256 in
+`CRABBOX_IMAGE_QUALIFICATION_ISOLATION_SHA256`. Candidate inputs cannot select
+this record. Missing admission, drift, or overlap fails before mutation.
+
+The record binds the Cloudflare account, fixed private qualification authority,
+its single active Cloudflare version, source revision, logical version, policy
+hash, full public binding digest, and exact run/registry namespace IDs with their
+owning script and class. It also binds the AWS account, qualification role ARN,
+Region, subnet, security group, base AMI and root-volume bound. Explicit production
+Worker, namespace, role, subnet and security-group exclusion inventories must be
+disjoint. Operators must verify and admit actual live identities; credential
+availability or discovery alone does not admit a deployment configuration.
+
+Protected tooling reads all namespace inventory pages and checks each bound
+namespace ID against its owning script and class. The authority is private and
+may have no service or production broker binding. Candidates have only their
+own Fleet namespace, the fixed qualification transport, ephemeral run tokens,
+and the reviewed bounded settings. Relays target only their run-derived
+candidate. Their names and the controller name must be absent before creation;
+existing or uncertain names cannot be adopted. Cloudflare creation is a
+read-then-write operation, not an atomic exclusion of independent account
+administrators; coordinate administrative writers during admitted operations.
+
+Created resources carry admission and binding ownership markers. The reaper
+requires the same protected admission record, validates the controller's source
+and authority entrypoint before enabling or invoking it, and rejects changed
+versions, unowned resources, external namespaces, extra broker bindings and
+mismatched run-derived names. Recovery preserves the transport identity through
+candidate tombstoning, so a lost deletion response can be retried without
+replaying its namespace migration. Unmarked legacy resources require operator
+review rather than automatic adoption. The scheduled workflow remains subject
+to its separately managed enabled/disabled state.
+
+Build and execution runners receive no cloud administration credentials.
+First-walk CLI children receive a narrow environment and a private HOME,
+configuration directory and working directory, with only the qualification relay
+and ephemeral executor token. The trusted authority retains signing credentials;
+its policy and ownership ledger constrain candidate requests and cleanup to the
+admitted resource identities and run-owned IDs. Qualification credential custody,
+private authority deployment, infrastructure admission and one finite synthetic
+execution remain separate approval steps. Production bootstrap changes remain
+in the unmerged candidate, whose eventual merge also triggers coordinator and
+documentation publication workflows.
 
 ## Replay and teardown
 
@@ -491,9 +539,12 @@ base AMI and security group. Lifecycle deletes remove current ledger ownership
 instead of accumulating stale IDs; terminating instances remain active until a
 single-ID read confirms `terminated` or absent. Before and after teardown, bounded
 eventual-consistency inventory scans find resources that appeared after an
-ambiguous response. The authority revalidates the configured STS account before
-every mutation, so a replacement credential is accepted only when it resolves
-to the enrolled account and fixed Region policy. This is an immediate identity
+ambiguous response. The authority revalidates both the configured STS account and the exact
+qualification assumed-role principal before every mutation, reconciliation and
+cleanup. The required `CRABBOX_AWS_QUALIFICATION_ROLE_ARN` participates in the
+enrolled policy hash. A production role in the same account is rejected. A
+replacement credential must resolve to the enrolled role, account and fixed
+Region policy. This is an immediate identity
 check around each protected qualification operation, not a promise that the
 qualification signer retains one immutable credential object. Separately,
 managed public AWS release through `AWSProvider.releaseLease` waits for
