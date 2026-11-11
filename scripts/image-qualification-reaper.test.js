@@ -115,9 +115,9 @@ function installAPI(file) {
       if (route.endsWith("/deployments"))
         return api({ deployments: [{ versions: [{ version_id: version, percentage: 100 }] }] });
       if (route.endsWith("/subdomain")) return api({ enabled: false, previews_enabled: false });
-      if (route.endsWith("/schedules")) return api([]);
+      if (route.endsWith("/schedules")) return api({ schedules: [] });
     }
-    if (route.endsWith("/routes") || route === "/workers/domains/records") return api([]);
+    if (route.endsWith("/routes") || route === "/workers/domains") return api([]);
     if (route === "/workers/durable_objects/namespaces")
       return api(isolation.record.authority.namespaces);
     if (route === "/workers/scripts") {

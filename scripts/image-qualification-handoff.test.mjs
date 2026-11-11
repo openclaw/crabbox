@@ -139,7 +139,7 @@ function installAPI(file) {
           deployments: [{ versions: [{ version_id: workerVersion, percentage: 100 }] }],
         });
       if (cfRoute.endsWith("/subdomain")) return api({ enabled: false, previews_enabled: false });
-      if (cfRoute.endsWith("/schedules")) return api([]);
+      if (cfRoute.endsWith("/schedules")) return api({ schedules: [] });
     }
     const match = cfRoute.match(/^\/workers\/scripts\/([^/]+)(.*)$/);
     if (match) {
@@ -152,6 +152,10 @@ function installAPI(file) {
           metadata,
           subdomain: state.workers[name]?.subdomain ?? { enabled: true, previews_enabled: false },
         };
+        if (state.tombstoneLoss && metadata.main_module === "tombstone.mjs") {
+          state.tombstoneLoss = false;
+          throw new Error("tombstone upload response lost");
+        }
         if (state.uploadDelay) state.now += state.uploadDelay;
         return api({ deployment_id: workerVersion });
       }
@@ -173,7 +177,7 @@ function installAPI(file) {
         if (method === "POST") state.workers[name].subdomain = JSON.parse(init.body);
         return api(state.workers[name].subdomain);
       }
-      if (suffix === "/schedules") return api([]);
+      if (suffix === "/schedules") return api({ schedules: [] });
     }
     if (cfRoute === "/workers/subdomain") return api({ subdomain: "example" });
     if (cfRoute === "/workers/durable_objects/namespaces") {
@@ -186,7 +190,7 @@ function installAPI(file) {
           .map(([script]) => ({ id: namespaceId(script), script, class: "FleetDurableObject" })),
       ]);
     }
-    if (cfRoute.endsWith("/routes") || cfRoute === "/workers/domains/records") return api([]);
+    if (cfRoute.endsWith("/routes") || cfRoute === "/workers/domains") return api([]);
     throw new Error(`unexpected Cloudflare fixture route: ${cfRoute}`);
   };
 }
@@ -562,4 +566,23 @@ if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
         [],
       );
     });
+}
+
+if (!process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
+  test("lost tombstone response retains exact recovery identity without replaying the migration", (t) => {
+    const f = fixture(t, "first-walk");
+    assert.equal(f.invoke("admit").status, 0);
+    const deployed = f.invoke("deploy");
+    assert.equal(deployed.status, 0, deployed.stderr);
+    f.update({ tombstoneLoss: true });
+    const first = f.invoke("reap");
+    assert.equal(first.status, 1);
+    assert.match(first.stderr, /tombstone upload response lost/);
+    const partial = f.state().workers["crabbox-image-qualification-42-1"].metadata;
+    assert.equal(partial.main_module, "tombstone.mjs");
+    assert.equal(partial.bindings[0].props.deploymentHash, f.outputs.deployment_hash);
+    const recovered = f.invoke("reap");
+    assert.equal(recovered.status, 0, recovered.stderr);
+    assert.deepEqual(f.state().workers, {});
+  });
 }

@@ -184,13 +184,13 @@ export async function verifyAuthority(cf) {
       `/workers/services/${authorityName}/environments/production/routes?show_zonename=true`,
     ),
     cf.request(`/workers/scripts/${authorityName}/schedules`),
-    cf.list(`/workers/domains/records?service=${authorityName}`),
+    cf.list(`/workers/domains?service=${authorityName}`),
   ]);
   if (
     subdomain?.enabled !== false ||
     subdomain?.previews_enabled !== false ||
     !same(routes, []) ||
-    !same(schedules, []) ||
+    !same(schedules?.schedules, []) ||
     domains.length !== 0 ||
     (await cf.latestVersion(authorityName)) !== admission.authority.version
   )
@@ -223,7 +223,10 @@ export function ownershipTags(cf, worker, bindings) {
 }
 
 export function assertOwnedSettings(cf, worker, settings) {
-  if (!settings || !same(settings.tags, ownershipTags(cf, worker, settings.bindings)))
+  if (
+    !settings ||
+    !same([...(settings.tags ?? [])].sort(), ownershipTags(cf, worker, settings.bindings).sort())
+  )
     fail(`unowned or changed Worker ${worker}`);
   const bindings = settings.bindings;
   if (worker === controllerName) {
@@ -242,7 +245,6 @@ export function assertOwnedSettings(cf, worker, settings) {
     const candidate = /^crabbox-(image-qualification-[0-9]+-[0-9]+)$/.exec(worker);
     const relay = /^crabbox-image-qualification-relay-([0-9]+-[0-9]+)$/.exec(worker);
     if (!candidate && !relay) fail("unexpected Worker name");
-    if (candidate && bindings.length === 0) return;
     const services = bindings.filter((b) => b.type === "service");
     const service = services[0];
     if (

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Cloudflare } from "./image-qualification-control.mjs";
 import {
   bindingShape,
   canonical,
@@ -54,6 +55,7 @@ function fixture() {
       assert.equal(init.method, undefined, "isolation admission must be read only");
       if (route.endsWith("/settings")) return state.workers[route.split("/")[3]];
       if (route.endsWith("/subdomain")) return { enabled: false, previews_enabled: false };
+      if (route.endsWith("/schedules")) return { schedules: [] };
       return [];
     },
   };
@@ -261,3 +263,54 @@ test("binding digest retains every non-secret resource coordinate", () => {
     { name: "TOKEN", type: "secret_text" },
   ]);
 });
+
+test("Cloudflare script inventory reads the unpaginated endpoint once for large shared accounts", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  const calls = [];
+  const workers = Array.from({ length: 125 }, (_, index) => ({ id: `unrelated-${index}` }));
+  globalThis.fetch = async (url) => {
+    calls.push(url);
+    assert.equal(new URL(url).search, "");
+    return new Response(JSON.stringify({ success: true, result: workers }));
+  };
+  const cf = new Cloudflare("a".repeat(32), "synthetic");
+  assert.deepEqual(await cf.list("/workers/scripts"), workers);
+  assert.equal(calls.length, 1);
+});
+
+test("Cloudflare namespace inventory follows result_info through the final page", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  const pages = [];
+  globalThis.fetch = async (value) => {
+    const page = Number(new URL(value).searchParams.get("page"));
+    pages.push(page);
+    return new Response(
+      JSON.stringify({
+        success: true,
+        result: [{ id: String(page) }],
+        result_info: { page, per_page: 100, total_pages: 2 },
+      }),
+    );
+  };
+  const cf = new Cloudflare("a".repeat(32), "synthetic");
+  assert.deepEqual(await cf.list("/workers/durable_objects/namespaces"), [
+    { id: "1" },
+    { id: "2" },
+  ]);
+  assert.deepEqual(pages, [1, 2]);
+});
+
+for (const schedules of [[], {}, { schedules: [{ cron: "* * * * *" }] }])
+  test(`authority schedule shape fails closed: ${JSON.stringify(schedules)}`, async () => {
+    const f = fixture();
+    const request = f.cf.request;
+    f.cf.request = async (route, ...args) =>
+      route.endsWith("/schedules") ? schedules : request(route, ...args);
+    await assert.rejects(verifyAuthority(f.cf), /authority is public/);
+  });

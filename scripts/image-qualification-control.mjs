@@ -852,7 +852,7 @@ export function verifyPublisherContract(source) {
   }
 }
 
-class Cloudflare {
+export class Cloudflare {
   constructor(accountId, token) {
     this.accountId = accountId;
     this.token = token;
@@ -882,6 +882,11 @@ class Cloudflare {
   }
 
   async list(pathname) {
+    if (pathname === "/workers/scripts") {
+      const scripts = await this.request(pathname);
+      if (!Array.isArray(scripts)) throw new Error("Cloudflare script inventory was not an array");
+      return scripts;
+    }
     const items = [];
     for (let page = 1; page <= 1000; page++) {
       const result = await this.request(
@@ -1479,13 +1484,14 @@ async function assertWorkerIsolation(cf, worker, durableObjectCount, workersDev)
   const [routes, schedules, domains, namespaceCount, subdomain] = await Promise.all([
     cf.request(`/workers/services/${worker}/environments/production/routes?show_zonename=true`),
     cf.request(`/workers/scripts/${worker}/schedules`),
-    cf.list(`/workers/domains/records?service=${worker}`),
+    cf.list(`/workers/domains?service=${worker}`),
     namespaceResidue(cf, worker),
     cf.request(`/workers/scripts/${worker}/subdomain`),
   ]);
   if (
     (routes ?? []).length !== 0 ||
-    (schedules ?? []).length !== 0 ||
+    !Array.isArray(schedules?.schedules) ||
+    schedules.schedules.length !== 0 ||
     (domains ?? []).length !== 0 ||
     namespaceCount !== durableObjectCount ||
     subdomain?.enabled !== workersDev ||
@@ -1829,7 +1835,8 @@ async function namespaceResidue(cf, worker) {
 
 async function deleteCandidate(cf, worker) {
   if (!workerNamePattern.test(worker)) throw new Error("refusing to delete an unexpected Worker");
-  if (!(await verifyOwned(cf, worker, { allowAbsent: true }))) return;
+  const existing = await verifyOwned(cf, worker, { allowAbsent: true });
+  if (!existing) return;
   const tombstone = path.join(
     process.env.RUNNER_TEMP ?? "/tmp",
     `qualification-tombstone-${process.pid}.mjs`,
@@ -1840,18 +1847,21 @@ async function deleteCandidate(cf, worker) {
     { mode: 0o600 },
   );
   try {
-    await cf.upload(worker, tombstone, {
-      main_module: "tombstone.mjs",
-      compatibility_date: "2026-09-03",
-      bindings: [],
-      migrations: [
-        {
-          old_tag: "qualification-v1",
-          new_tag: "qualification-delete",
-          deleted_classes: ["FleetDurableObject"],
-        },
-      ],
-    });
+    if (existing.bindings.some((binding) => binding.type === "durable_object_namespace"))
+      await cf.upload(worker, tombstone, {
+        main_module: "tombstone.mjs",
+        compatibility_date: "2026-09-03",
+        bindings: existing.bindings.filter(
+          (binding) => binding.name === "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
+        ),
+        migrations: [
+          {
+            old_tag: "qualification-v1",
+            new_tag: "qualification-delete",
+            deleted_classes: ["FleetDurableObject"],
+          },
+        ],
+      });
     await cf.deleteScript(worker);
   } finally {
     fs.rmSync(tombstone, { force: true });
@@ -1955,7 +1965,7 @@ async function discoveryControllerVersion(cf, metadata, expectedVersion) {
   const settings = await cf.settings(controllerName);
   if (
     (expectedVersion !== undefined && version !== expectedVersion) ||
-    canonical(settings.tags) !== canonical(metadata.tags) ||
+    canonical([...(settings.tags ?? [])].sort()) !== canonical([...metadata.tags].sort()) ||
     canonical(publicBindingShape(settings.bindings ?? [])) !==
       canonical(publicBindingShape(metadata.bindings)) ||
     (await cf.latestVersion(controllerName)) !== version
