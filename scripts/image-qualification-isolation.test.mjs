@@ -314,3 +314,20 @@ for (const schedules of [[], {}, { schedules: [{ cron: "* * * * *" }] }])
       route.endsWith("/schedules") ? schedules : request(route, ...args);
     await assert.rejects(verifyAuthority(f.cf), /authority is public/);
   });
+
+test("explicitly verified empty production inventories are supported, unverified or missing inventories fail closed", () => {
+  const f = fixture();
+  for (const key of ["workers", "namespaceIds", "roleArns", "subnetIds", "securityGroupIds"])
+    f.record.production[key] = [];
+  const env = () => ({
+    CLOUDFLARE_ACCOUNT_ID: f.record.accountId,
+    QUALIFICATION_ISOLATION_JSON: JSON.stringify(f.record),
+    QUALIFICATION_ISOLATION_SHA256: digest(canonical(f.record)),
+  });
+  assert.doesNotThrow(() => readAdmission(env()));
+  f.record.production.inventoryVerified = false;
+  assert.throws(() => readAdmission(env()), /inventory not verified/);
+  f.record.production.inventoryVerified = true;
+  delete f.record.production.workers;
+  assert.throws(() => readAdmission(env()), /inventory missing/);
+});

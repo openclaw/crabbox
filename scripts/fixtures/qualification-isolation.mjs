@@ -55,6 +55,7 @@ export function fixtureAdmission(accountId = "a".repeat(32), rootGB = 20) {
     authority,
     aws,
     production: {
+      inventoryVerified: true,
       workers: ["production-coordinator"],
       namespaceIds: ["9".repeat(32)],
       roleArns: ["arn:aws:iam::123456789012:role/Production"],

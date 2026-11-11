@@ -70,10 +70,10 @@ export function readAdmission(env = process.env) {
     new Set(authority.namespaces.map((n) => n.id)).size !== 2
   )
     fail("authority namespace ownership invalid");
+  if (production?.inventoryVerified !== true) fail("production exclusion inventory not verified");
   for (const key of ["workers", "namespaceIds", "roleArns", "subnetIds", "securityGroupIds"]) {
     if (
       !Array.isArray(production?.[key]) ||
-      production[key].length === 0 ||
       production[key].some((value) => typeof value !== "string" || !value)
     )
       fail("production exclusion inventory missing");
