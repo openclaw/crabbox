@@ -50,6 +50,7 @@ const env = {
   CRABBOX_ENV_ALLOW: "CI",
 };
 const scope = ["--provider", "aws", "--target", "linux", "--region", region];
+const logs = new Map();
 const sha = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
 function remaining() {
   const n = workCutoff - Date.now();
@@ -75,6 +76,7 @@ async function cli(name, args, input) {
   const output = path.join(raw, name + ".log");
   const fd = fs.openSync(output, "wx", 0o600);
   try {
+    logs.set(path.basename(output), fs.fstatSync(fd));
     await new Promise((resolve, reject) => {
       const child = spawn(binary, args, {
         env,
@@ -220,16 +222,33 @@ try {
   // No raw cloud mutation or independent delete. On any failure/cancellation the
   // existing controller fence/reaper settles the exact run, including source and
   // partial volumes. Preserve failed raw output in the protected artifact.
-  for (const name of fs.readdirSync(raw)) {
-    const text = fs
-      .readFileSync(path.join(raw, name), "utf8")
-      .replaceAll(token, "[executor-token]")
-      .replace(/https?:\/\/[^\s"<>]+/g, "[url]")
-      .replace(/\b(?:ami|i|vol|snap|key)-[0-9a-f]{8,}\b/g, "[aws-resource]")
-      .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[ip]");
-    fs.writeFileSync(path.join(proof, name), text, { mode: 0o600 });
+  try {
+    // HOME also contains CLI configuration and SSH keys. Export only logs we
+    // created, and reject replacement files before reading any contents.
+    for (const [name, expected] of logs) {
+      const fd = fs.openSync(
+        path.join(raw, name),
+        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+      );
+      try {
+        const actual = fs.fstatSync(fd);
+        if (!actual.isFile() || actual.dev !== expected.dev || actual.ino !== expected.ino)
+          throw new Error("first-walk log was replaced");
+        const text = fs
+          .readFileSync(fd, "utf8")
+          .replaceAll(token, "[executor-token]")
+          .replace(/https?:\/\/[^\s"<>]+/g, "[url]")
+          .replace(/\b(?:ami|i|vol|snap|key)-[0-9a-f]{8,}\b/g, "[aws-resource]")
+          .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[ip]");
+        fs.writeFileSync(path.join(proof, name), text, { mode: 0o600 });
+      } finally {
+        fs.closeSync(fd);
+      }
+    }
+  } finally {
+    // Evidence failures must not bypass destruction of private executor state.
+    fs.rmSync(raw, { recursive: true, force: true });
   }
-  fs.rmSync(raw, { recursive: true, force: true });
   const checksums = fs
     .readdirSync(proof)
     .filter((name) => name !== "checksums.sha256")
