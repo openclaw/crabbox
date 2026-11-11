@@ -6,6 +6,13 @@ import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import test from "node:test";
 
+import {
+  fixtureAdmission,
+  ownedSettings,
+  namespaceId,
+  controllerContent,
+} from "./fixtures/qualification-isolation.mjs";
+const isolation = fixtureAdmission();
 const controller = "crabbox-image-qualification-controller";
 const candidate = "crabbox-image-qualification-42-1";
 const staleCandidate = "crabbox-image-qualification-41-1";
@@ -36,7 +43,7 @@ function initialState(options = {}) {
     candidate: options.candidate ?? false,
     staleCandidate: options.staleCandidate ?? false,
     controller: options.controller
-      ? { bindings: bindings(deploymentHash), version, tags: [] }
+      ? { ...ownedSettings(isolation.admission, controller, bindings(deploymentHash)), version }
       : null,
     run: options.active
       ? {
@@ -95,7 +102,24 @@ function installAPI(file) {
     assert.equal(url.hostname, "api.cloudflare.com", "no real network access");
     assert.equal(init.headers.authorization, "Bearer synthetic-cloudflare-token");
     if (route === "/workers/subdomain") return api({ subdomain: "example" });
-    if (route === "/workers/durable_objects/namespaces") return api([]);
+    if (route.startsWith(`/workers/scripts/${authority}/`)) {
+      if (route.endsWith("/settings"))
+        return api({
+          bindings: options.authorityRedirect
+            ? [
+                ...isolation.bindings,
+                { name: "BROKER", type: "service", service: "production-coordinator" },
+              ]
+            : isolation.bindings,
+        });
+      if (route.endsWith("/deployments"))
+        return api({ deployments: [{ versions: [{ version_id: version, percentage: 100 }] }] });
+      if (route.endsWith("/subdomain")) return api({ enabled: false, previews_enabled: false });
+      if (route.endsWith("/schedules")) return api([]);
+    }
+    if (route.endsWith("/routes") || route === "/workers/domains/records") return api([]);
+    if (route === "/workers/durable_objects/namespaces")
+      return api(isolation.record.authority.namespaces);
     if (route === "/workers/scripts") {
       scriptLists += 1;
       if (options.idleCleanupFailure && scriptLists > 1) return api(null, 503);
@@ -105,29 +129,37 @@ function installAPI(file) {
       ]);
     }
     if (route === `/workers/scripts/${staleCandidate}/settings`) {
-      return api({
-        bindings: [
+      return api(
+        ownedSettings(isolation.admission, staleCandidate, [
           {
             name: "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
             type: "service",
             service: authority,
-            props: { candidateWorker: staleCandidate, deploymentHash: "c".repeat(64) },
+            props: {
+              runId: "image-qualification-41-1",
+              candidateWorker: staleCandidate,
+              deploymentHash: "c".repeat(64),
+            },
           },
-        ],
-      });
+        ]),
+      );
     }
     if (route === `/workers/scripts/${candidate}/settings`) {
       return state.candidate
-        ? api({
-            bindings: [
+        ? api(
+            ownedSettings(isolation.admission, candidate, [
               {
                 name: "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
                 type: "service",
                 service: authority,
-                props: { candidateWorker: candidate, deploymentHash },
+                props: {
+                  runId: "image-qualification-42-1",
+                  candidateWorker: candidate,
+                  deploymentHash,
+                },
               },
-            ],
-          })
+            ]),
+          )
         : missing();
     }
     if (route === `/workers/scripts/${candidate}`) {
@@ -150,11 +182,23 @@ function installAPI(file) {
           tags: [],
         };
       }
+      if (state.controller && options.controllerRedirect)
+        state.controller.bindings = [
+          { name: "AUTHORITY", type: "service", service: "production-coordinator" },
+        ];
       return state.controller ? api(state.controller) : missing();
     }
-    if (route === `/workers/scripts/${controller}/versions`) {
+    if (route === `/workers/scripts/${controller}/content/v2`)
+      return controllerContent(
+        fs.readFileSync(
+          path.join(import.meta.dirname, "image-qualification-controller-worker.mjs"),
+        ),
+      );
+    if (route === `/workers/scripts/${controller}/deployments`) {
       if (options.versionStatus) return api(null, options.versionStatus);
-      return api({ items: [{ id: state.controller.version }] });
+      return api({
+        deployments: [{ versions: [{ version_id: state.controller.version, percentage: 100 }] }],
+      });
     }
     if (route === `/workers/scripts/${controller}/subdomain`) {
       if (!state.controller) return missing();
@@ -206,6 +250,8 @@ if (process.env.QUALIFICATION_TEST_STATE) {
           HOME: directory,
           RUNNER_TEMP: directory,
           CLOUDFLARE_ACCOUNT_ID: "a".repeat(32),
+          ...isolation.env,
+          ...(options?.missingAdmission ? { QUALIFICATION_ISOLATION_JSON: "" } : {}),
           CLOUDFLARE_API_TOKEN: "synthetic-cloudflare-token",
           QUALIFICATION_CONTROLLER_TOKEN: token,
           QUALIFICATION_PROOF_DIR: proofDirectory,
@@ -391,7 +437,7 @@ if (process.env.QUALIFICATION_TEST_STATE) {
     })();
     assert.equal(result.status, 1);
     assert.equal(result.result.result, "failed");
-    assert.match(result.result.failure, /upload response lost.*ownership.*refusing to replace/);
+    assert.match(result.result.failure, /upload response lost.*unowned.*refusing to replace/);
     assert.ok(result.state.controller);
     assert.ok(result.state.run);
     assert.equal(result.state.candidate, true);
@@ -443,5 +489,34 @@ if (process.env.QUALIFICATION_TEST_STATE) {
     assert.equal(result.status, 1);
     assert.match(result.result.failure, /deletion was not observable/);
     assert.ok(result.state.controller);
+  });
+  for (const options of [
+    { authorityRedirect: true },
+    { missingAdmission: true },
+    { controller: true, controllerRedirect: true },
+  ]) {
+    test(`reaper cannot redirect cloud operations: ${JSON.stringify(options)}`, (t) => {
+      const result = fixture(t, options)();
+      assert.equal(result.status, 1);
+      assert.deepEqual(
+        result.state.events.filter((event) => !event.startsWith("GET ")),
+        [],
+      );
+    });
+  }
+  test("registry cannot substitute another run's candidate", (t) => {
+    const result = fixture(t, {
+      controller: true,
+      discovery: {
+        run: {
+          runId: "image-qualification-42-1",
+          candidateWorker: staleCandidate,
+          deploymentHash,
+        },
+      },
+    })();
+    assert.equal(result.status, 1);
+    assert.deepEqual(calls(result.state), ["POST /discover"]);
+    assert.equal(deletes(result.state).length, 0);
   });
 }

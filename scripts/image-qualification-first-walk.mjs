@@ -35,12 +35,15 @@ const workCutoff = Date.parse(required("QUALIFICATION_EXPIRES_AT")) - 20 * 60_00
 if (!Number.isFinite(workCutoff) || Date.now() >= workCutoff)
   throw new Error("first-walk work window expired");
 fs.mkdirSync(proof, { recursive: true, mode: 0o700 });
-const raw = fs.mkdtempSync(path.join(os.tmpdir(), "first-walk-executor-"));
+const raw = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "first-walk-executor-")));
 const binary = path.join(artifact, "bin/crabbox");
 // upload/download-artifact preserves bytes, but not executable permissions.
 fs.chmodSync(binary, 0o700);
 const env = {
-  ...process.env,
+  PATH: process.env.PATH,
+  HOME: raw,
+  XDG_CONFIG_HOME: path.join(raw, "config"),
+  CI: "true",
   CRABBOX_COORDINATOR: relay,
   CRABBOX_COORDINATOR_TOKEN: token,
   CRABBOX_COORDINATOR_ADMIN_TOKEN: token,
@@ -75,6 +78,7 @@ async function cli(name, args, input) {
     await new Promise((resolve, reject) => {
       const child = spawn(binary, args, {
         env,
+        cwd: raw,
         stdio: [input ? "pipe" : "ignore", fd, fd],
         timeout: remaining(),
         killSignal: "SIGTERM",

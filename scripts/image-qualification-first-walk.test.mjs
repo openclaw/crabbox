@@ -94,7 +94,7 @@ for (const badResult of [false, true])
       fs.writeFileSync(path.join(recipeDir, "linuxOwnershipRepair.sh"), recipe);
       fs.mkdirSync(path.join(dir, "bin"));
       const commandFile = path.join(dir, "commands");
-      const binary = `#!${process.execPath}\nimport fs from 'node:fs';\nlet input=''; for await (const chunk of process.stdin) input+=chunk;\nfs.appendFileSync(${JSON.stringify(commandFile)},JSON.stringify({args:process.argv.slice(2),input})+'\\n');\nconsole.log(input.includes('systemd-run') ? 'CRABBOX_FIRST_WALK_RESULT='+${JSON.stringify(JSON.stringify(result))} : 'stock-ready');\n`;
+      const binary = `#!${process.execPath}\nimport fs from 'node:fs';\nlet input=''; for await (const chunk of process.stdin) input+=chunk;\nfs.appendFileSync(${JSON.stringify(commandFile)},JSON.stringify({args:process.argv.slice(2),input,env:process.env,cwd:process.cwd()})+'\\n');\nconsole.log(input.includes('systemd-run') ? 'CRABBOX_FIRST_WALK_RESULT='+${JSON.stringify(JSON.stringify(result))} : 'stock-ready');\n`;
       // Artifact downloads restore ordinary files without executable permissions.
       fs.writeFileSync(path.join(dir, "bin/crabbox"), binary, { mode: 0o644 });
       fs.chmodSync(path.join(dir, "bin/crabbox"), 0o644);
@@ -102,6 +102,10 @@ for (const badResult of [false, true])
       const env = {
         PATH: process.env.PATH,
         HOME: dir,
+        AWS_PROFILE: "production",
+        AWS_WEB_IDENTITY_TOKEN_FILE: "/synthetic/production-token",
+        CRABBOX_BROKER_URL: "https://production.invalid",
+        GH_TOKEN: "synthetic-inherited-token",
         GITHUB_RUN_ID: "123",
         GITHUB_RUN_ATTEMPT: "1",
         QUALIFICATION_RELAY_URL: `http://127.0.0.1:${server.address().port}`,
@@ -126,6 +130,19 @@ for (const badResult of [false, true])
       );
       assert.equal(fs.statSync(path.join(dir, "bin/crabbox")).mode & 0o777, 0o700);
       commands.push(...fs.readFileSync(commandFile, "utf8").trim().split("\n").map(JSON.parse));
+      for (const command of commands) {
+        for (const key of [
+          "AWS_PROFILE",
+          "AWS_WEB_IDENTITY_TOKEN_FILE",
+          "CRABBOX_BROKER_URL",
+          "GH_TOKEN",
+        ])
+          assert.equal(command.env[key], undefined);
+        assert.equal(command.env.CRABBOX_COORDINATOR, env.QUALIFICATION_RELAY_URL);
+        assert.notEqual(command.env.HOME, dir);
+        assert.equal(command.cwd, command.env.HOME);
+        assert.equal(command.env.XDG_CONFIG_HOME, path.join(command.cwd, "config"));
+      }
       assert.equal(commands.filter((c) => c.args[0] === "warmup").length, 2);
       assert.equal(commands.filter((c) => c.args[0] === "stop").length, 1);
       const walkCommands = commands.filter((c) => c.input.includes("systemd-run"));
