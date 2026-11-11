@@ -4,6 +4,10 @@
 
 - Run: normalize fresh and replacement SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity, and preserve child-environment filtering after replacement. https://github.com/openclaw/crabbox/pull/3131 Thanks @vincentkoc.
 
+### Added
+
+- Image qualification: add an opt-in synthetic first ownership walk with one authority-owned snapshot copy, protected checkpoint claims, and independent cleanup.
+
 ### Fixed
 
 - Linux bootstrap: report AWS checkpoint ownership-repair phases for Python recipes and log visited entries, ownership mismatches, successful changes, and elapsed time without another filesystem walk.

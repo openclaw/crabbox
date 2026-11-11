@@ -1065,6 +1065,8 @@ export interface CoordinatorCheckpointUseClaim {
   createdAt: string;
   expiresAt: string;
   state: "available" | "provisioning";
+  // An existing use claim, held until the bound qualification owner proves settlement.
+  qualification?: { runID: string; deploymentHash: string };
   attemptID?: string;
   leaseID?: string;
 }

@@ -2,6 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CheckpointError,
+  holdCheckpointQualificationUse,
+  settleCheckpointQualificationUse,
+  finishCheckpointUse,
+  acquireCheckpointUse,
   abortCheckpointProvisioningForLease,
   expireCheckpointClaims,
   backfillFailedCheckpointCreateRecovery,
@@ -6196,6 +6200,130 @@ describe("coordinator-managed checkpoints", () => {
     );
     expect(promoted.status).toBe(200);
     expect(await storage.get(checkpointKey(pending.id))).toMatchObject({ pinCount: 1 });
+  });
+
+  it("holds qualification use through readiness, expiry, cancellation and uncertain cleanup until exact run settlement", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T12:00:00.000Z"));
+    const { coordinator, storage } = await checkpointFixture();
+    const id = "chk_first_walk_pin";
+    await createCheckpoint(coordinator, id);
+    const principal = { owner: "alice@example.com", org };
+    const { token } = await acquireCheckpointUse(storage, id, principal);
+    const binding = { runID: "qualification-one", deploymentHash: "a".repeat(64) };
+    await holdCheckpointQualificationUse(storage, id, token, principal, binding);
+    vi.setSystemTime(Date.now() + 3 * 60 * 60_000);
+    await expireCheckpointClaims(storage, id);
+    // Deletion and the old completion/abort endpoint must not consume this pin.
+    await expect(claimCheckpointDeletion(storage, id, principal, "manual")).rejects.toThrow(
+      "active use",
+    );
+    await expect(finishCheckpointUse(storage, id, token, principal, false)).rejects.toThrow(
+      "settlement",
+    );
+    await expect(finishCheckpointUse(storage, id, token, principal, true)).rejects.toThrow(
+      "settlement",
+    );
+    await expect(
+      holdCheckpointQualificationUse(storage, id, token, principal, { ...binding, runID: "other" }),
+    ).rejects.toThrow("another lifecycle");
+    await expect(
+      settleCheckpointQualificationUse(storage, id, token, principal, {
+        ...binding,
+        finalized: false,
+      }),
+    ).rejects.toThrow("not settled");
+    await expect(
+      settleCheckpointQualificationUse(storage, id, token, principal, {
+        ...binding,
+        deploymentHash: "b".repeat(64),
+        finalized: true,
+      }),
+    ).rejects.toThrow("binding mismatch");
+    expect(await storage.get(checkpointKey(id))).toMatchObject({ activeUseCount: 1 });
+    // A failed prepare-before-RPC has no request; final run fencing/zero inventory
+    // still proves that it can no longer create a copy and safely releases it.
+    await settleCheckpointQualificationUse(storage, id, token, principal, {
+      ...binding,
+      finalized: true,
+    });
+    await settleCheckpointQualificationUse(storage, id, token, principal, {
+      ...binding,
+      finalized: true,
+    });
+    expect(await storage.get(checkpointKey(id))).toMatchObject({ activeUseCount: 0 });
+    await expect(claimCheckpointDeletion(storage, id, principal, "manual")).resolves.toBeDefined();
+  });
+
+  it("persists qualification pin before attachment RPC and settles only after bound authority finalization", async () => {
+    const f = await checkpointFixture();
+    const id = "chk_first_walk_route";
+    await createCheckpoint(f.coordinator, id);
+    const acquired = await acquireCheckpointUse(f.storage, id, { owner: "alice@example.com", org });
+    let finalized = false;
+    const prepare = vi.fn<() => Promise<never>>(async () => {
+      const claims = [
+        ...(
+          await f.storage.list<CoordinatorCheckpointUseClaim>({ prefix: `checkpoint-use:${id}:` })
+        ).values(),
+      ];
+      expect(claims[0]?.qualification).toEqual({
+        runID: "run-one",
+        deploymentHash: "a".repeat(64),
+      });
+      throw new Error("uncertain attach response");
+    });
+    f.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT = {
+      execute: vi.fn<NonNullable<Env["CRABBOX_AWS_QUALIFICATION_TRANSPORT"]>["execute"]>(),
+      prepareFirstWalk: prepare,
+      firstWalkStatus: async () => ({
+        runID: "run-one",
+        deploymentHash: "a".repeat(64),
+        finalized,
+      }),
+    };
+    const response = await f.coordinator.fetch(
+      checkpointRequest(
+        "POST",
+        `/v1/checkpoints/${id}/first-walk`,
+        {
+          action: "prepare",
+          claim: acquired.token,
+          leaseID,
+          readinessReceiptSha256: "b".repeat(64),
+        },
+        { admin: true },
+      ),
+    );
+    expect(response.status).toBeGreaterThanOrEqual(500);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    const settle = () =>
+      f.coordinator.fetch(
+        checkpointRequest(
+          "POST",
+          `/v1/checkpoints/${id}/first-walk`,
+          { action: "settle", claim: acquired.token },
+          { admin: true },
+        ),
+      );
+    expect((await settle()).status).toBe(409);
+    finalized = true;
+    expect((await settle()).status).toBe(200);
+    expect(await f.storage.get(checkpointKey(id))).toMatchObject({ activeUseCount: 0 });
+  });
+
+  it("does not expose first-walk mutation or settlement outside the qualification binding", async () => {
+    const { coordinator } = await checkpointFixture();
+    await createCheckpoint(coordinator, "chk_no_first_walk");
+    const result = await coordinator.fetch(
+      checkpointRequest(
+        "POST",
+        "/v1/checkpoints/chk_no_first_walk/first-walk",
+        { action: "prepare", claim: "fake" },
+        { admin: true },
+      ),
+    );
+    expect(result.status).toBe(404);
   });
 
   it("reclaims expired independent fork claims without advancing last use", async () => {

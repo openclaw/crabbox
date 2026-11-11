@@ -259,7 +259,7 @@ async function nextCheckpointDeadline(
         noCache: true,
       },
     ))
-      retain(claim.expiresAt);
+      if (!claim.qualification) retain(claim.expiresAt);
     if (
       record.retention.mode === "expire-unused" &&
       record.pinCount === 0 &&
@@ -1150,7 +1150,8 @@ async function expireAvailableCheckpointClaims(
     transaction,
     { prefix: `checkpoint-use:${checkpoint.id}:`, limit: batchSize },
   )) {
-    if (claim.state === "provisioning" || Date.parse(claim.expiresAt) > now) continue;
+    if (claim.qualification || claim.state === "provisioning" || Date.parse(claim.expiresAt) > now)
+      continue;
     await transaction.delete(key);
     current = await writeCheckpointTransition(
       transaction,
@@ -1182,7 +1183,9 @@ async function validatedUseClaim(
     claim.generation !== checkpoint.generation ||
     claim.owner !== principal.owner ||
     !sameOrgIdentityKey(claim.org, principal.org) ||
-    (claim.state !== "provisioning" && Date.parse(claim.expiresAt) <= Date.now())
+    (!claim.qualification &&
+      claim.state !== "provisioning" &&
+      Date.parse(claim.expiresAt) <= Date.now())
   ) {
     throw new CheckpointError(
       "checkpoint_claim_invalid",
@@ -1272,6 +1275,8 @@ export async function bindCheckpointUseProvisioningInTransaction(
       "create attempt is not bound to the exact checkpoint claim",
     );
   }
+  if (claim.qualification)
+    throw new CheckpointError("checkpoint_in_use", "checkpoint claim belongs to qualification");
   if (claim.state === "provisioning") {
     throw new CheckpointError(
       "checkpoint_in_use",
@@ -1445,6 +1450,91 @@ export async function resolveRejectedCheckpointProvisioning(
   });
 }
 
+// These helpers do not accept caller assertions as settlement authority. The
+// qualification-only route obtains binding/proof from its immutable service binding.
+export async function holdCheckpointQualificationUse(
+  storage: CoordinatorStorage,
+  checkpointID: string,
+  token: string,
+  principal: CheckpointPrincipal,
+  binding: { runID: string; deploymentHash: string },
+): Promise<void> {
+  const tokenHash = await sha256Hex(token);
+  await storage.transaction(async (transaction) => {
+    const { checkpoint, claim } = await validatedUseClaim(
+      transaction,
+      checkpointID,
+      tokenHash,
+      principal,
+    );
+    if (
+      claim.state !== "available" ||
+      (claim.qualification && JSON.stringify(claim.qualification) !== JSON.stringify(binding))
+    )
+      throw new CheckpointError("checkpoint_in_use", "checkpoint claim owns another lifecycle");
+    if (claim.qualification) return;
+    await transaction.put(checkpointUseKey(checkpointID, tokenHash), {
+      ...claim,
+      qualification: binding,
+    });
+    await writeCheckpointTransition(
+      transaction,
+      checkpoint,
+      checkpoint,
+      "checkpoint.use.qualification-held",
+      principal.owner,
+    );
+  });
+}
+
+export async function settleCheckpointQualificationUse(
+  storage: CoordinatorStorage,
+  checkpointID: string,
+  token: string,
+  principal: CheckpointPrincipal,
+  proof: {
+    runID: string;
+    deploymentHash: string;
+    finalized: boolean;
+    request?: { checkpointID: string; claimHash: string };
+  },
+): Promise<void> {
+  const tokenHash = await sha256Hex(token);
+  await storage.transaction(async (transaction) => {
+    const checkpoint = requireVisible(
+      await transaction.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID)),
+      principal,
+    );
+    const claim = await transaction.get<CoordinatorCheckpointUseClaim>(
+      checkpointUseKey(checkpointID, tokenHash),
+    );
+    // A run with no dispatched first-walk intent can also settle a prepare-before-RPC crash.
+    if (!proof.finalized)
+      throw new CheckpointError("checkpoint_in_use", "qualification has not settled this claim");
+    if (!claim) return;
+    if (
+      !claim.qualification ||
+      claim.generation !== checkpoint.generation ||
+      claim.owner !== principal.owner ||
+      !sameOrgIdentityKey(claim.org, principal.org) ||
+      claim.qualification.runID !== proof.runID ||
+      claim.qualification.deploymentHash !== proof.deploymentHash
+    )
+      throw new CheckpointError(
+        "checkpoint_claim_invalid",
+        "qualification settlement binding mismatch",
+      );
+    await transaction.delete(checkpointUseKey(checkpointID, tokenHash));
+    await writeCheckpointTransition(
+      transaction,
+      checkpoint,
+      { ...checkpoint, activeUseCount: Math.max(0, checkpoint.activeUseCount - 1) },
+      "checkpoint.use.qualification-settled",
+      principal.owner,
+    );
+  });
+}
+
 export async function renewCheckpointUse(
   storage: CoordinatorStorage,
   checkpointID: string,
@@ -1564,6 +1654,8 @@ export async function finishCheckpointUse(
       tokenHash,
       principal,
     );
+    if (claim.qualification)
+      throw new CheckpointError("checkpoint_in_use", "qualification settlement proof is required");
     if (complete && claim.state !== "provisioning") {
       throw new CheckpointError(
         "checkpoint_claim_invalid",
@@ -1681,7 +1773,11 @@ export async function claimCheckpointDeletion(
         noCache: true,
       },
     )) {
-      if (claim.state === "provisioning" || Date.parse(claim.expiresAt) > now) {
+      if (
+        claim.qualification ||
+        claim.state === "provisioning" ||
+        Date.parse(claim.expiresAt) > now
+      ) {
         throw new CheckpointError("checkpoint_in_use", "checkpoint has an active use claim");
       }
       // A rejected deletion rolls back these expired-claim removals with the transaction.
@@ -2247,6 +2343,7 @@ export async function expireCheckpointClaims(
       },
     )) {
       const expired = Date.parse(claim.expiresAt) <= now;
+      if (claim.qualification) continue;
       if (claim.state === "provisioning") {
         const attempt = claim.leaseID
           ? await transaction.get<CreateAttemptRecord>(`create-attempt:${claim.leaseID}`)

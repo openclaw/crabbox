@@ -3,6 +3,14 @@ import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { XMLParser } from "fast-xml-parser";
 
 import {
+  cleanupFirstWalk,
+  firstWalkKey,
+  firstWalkStatus,
+  prepareFirstWalk,
+  type FirstWalkOwner,
+  type FirstWalkState,
+} from "./aws-first-walk";
+import {
   awsQualificationAttestationVersion,
   awsQualificationCleanupReserveMs,
   awsQualificationInstanceTypes,
@@ -19,6 +27,10 @@ import {
   type AWSQualificationResponse,
   type AWSQualificationRunIdentity,
   type AWSQualificationService,
+} from "./aws-qualification-contract";
+import type {
+  AWSQualificationFirstWalkRequest,
+  AWSQualificationFirstWalkStatus,
 } from "./aws-qualification-contract";
 import { requireAWSRegion } from "./aws-region";
 import { sha256Hex } from "./encoding";
@@ -214,6 +226,21 @@ export class AWSQualificationTransport extends WorkerEntrypoint<
   async execute(request: AWSQualificationRequest): Promise<AWSQualificationResponse> {
     await qualificationRegistry(this.env).assertActive(this.ctx.props);
     return await qualificationRun(this.env, this.ctx.props.runId).execute(this.ctx.props, request);
+  }
+
+  async prepareFirstWalk(
+    request: AWSQualificationFirstWalkRequest,
+  ): Promise<AWSQualificationFirstWalkStatus> {
+    await qualificationRegistry(this.env).assertActive(this.ctx.props);
+    return await qualificationRun(this.env, this.ctx.props.runId).prepareFirstWalk(
+      this.ctx.props,
+      request,
+    );
+  }
+
+  // Settlement reads survive the work fence; they never authorize new mutations.
+  async firstWalkStatus(): Promise<AWSQualificationFirstWalkStatus> {
+    return await qualificationRun(this.env, this.ctx.props.runId).firstWalkStatus(this.ctx.props);
   }
 }
 
@@ -463,7 +490,12 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         [ledgerKey]: emptyLedger(),
       });
       await this.ctx.storage.setAlarm(
-        expiresAt - (identity.retainedImage ? awsQualificationCleanupReserveMs : 0),
+        expiresAt -
+          (identity.firstWalk
+            ? 20 * 60_000
+            : identity.retainedImage
+              ? awsQualificationCleanupReserveMs
+              : 0),
       );
       // Keep persisted ownership and its alarm if storage crossed the cutoff.
       // A refused registry claim must not orphan a run that already owns cleanup.
@@ -476,6 +508,131 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     request: AWSQualificationRequest,
   ): Promise<AWSQualificationResponse> {
     return await this.serialized(() => this.executeSerialized(identity, request));
+  }
+
+  async firstWalkStatus(
+    identity: AWSQualificationRunIdentity,
+  ): Promise<AWSQualificationFirstWalkStatus> {
+    return await this.serialized(async () => {
+      const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
+      if (
+        !run ||
+        !run.identity.firstWalk ||
+        canonicalJSON(identity) !== canonicalJSON(run.identity)
+      )
+        throw new Error("first-walk binding is not enrolled");
+      return firstWalkStatus(
+        identity,
+        await this.ctx.storage.get<FirstWalkState>(firstWalkKey),
+        Boolean(run.finalizedAt),
+      );
+    });
+  }
+
+  async prepareFirstWalk(
+    identity: AWSQualificationRunIdentity,
+    input: AWSQualificationFirstWalkRequest,
+  ): Promise<AWSQualificationFirstWalkStatus> {
+    return await this.serialized(async () => {
+      const run = await this.requireActiveRun(identity, "FirstWalk");
+      if (!identity.firstWalk) throw new Error("first-walk is not enabled");
+      if (
+        !isPlainRecord(input) ||
+        Object.keys(input).toSorted().join(",") !==
+          "checkpointID,claimHash,instanceID,readinessReceiptSha256,snapshotID" ||
+        !/^chk_[A-Za-z0-9_-]{1,128}$/.test(input.checkpointID) ||
+        !/^[a-f0-9]{64}$/.test(input.claimHash) ||
+        !/^[a-f0-9]{64}$/.test(input.readinessReceiptSha256) ||
+        !/^i-[a-f0-9]+$/.test(input.instanceID) ||
+        !/^snap-[a-f0-9]+$/.test(input.snapshotID)
+      )
+        throw new Error("first-walk request is malformed");
+      const ledger = await this.ledger();
+      if (
+        !ledger.instanceIds.includes(input.instanceID) ||
+        !(
+          ledger.snapshotIds.includes(input.snapshotID) ||
+          identity.retainedImage?.snapshotId === input.snapshotID
+        )
+      )
+        throw new Error("first-walk source or instance is outside the run ledger");
+      const pinned = await this.ctx.storage.get<FirstWalkState>(firstWalkKey);
+      // Canonicalize the request before persistence and immutable retry comparison.
+      const request = {
+        checkpointID: input.checkpointID,
+        claimHash: input.claimHash,
+        instanceID: input.instanceID,
+        snapshotID: input.snapshotID,
+        readinessReceiptSha256: input.readinessReceiptSha256,
+      };
+      if (pinned && canonicalJSON(pinned.request) !== canonicalJSON(request))
+        throw new Error("first-walk request is immutable");
+      const state = await prepareFirstWalk(this.firstWalkOwner(run, false), request);
+      if (state.volumeID) {
+        ledger.volumeIds = [...new Set([...ledger.volumeIds, state.volumeID])];
+        await this.ctx.storage.put(ledgerKey, ledger);
+      }
+      return firstWalkStatus(identity, state, false);
+    });
+  }
+
+  private firstWalkOwner(run: AWSQualificationRunState, cleanup: boolean): FirstWalkOwner {
+    return {
+      identity: run.identity,
+      accountID: run.policy.accountId,
+      read: () => this.ctx.storage.get<FirstWalkState>(firstWalkKey),
+      write: (state) => this.ctx.storage.put(firstWalkKey, state),
+      query: async (action, parameters, mutating = false) => {
+        // One existing signer/cleanup owner. No URL, credentials or raw volume API
+        // is exposed to the candidate. Check live account on every dispatch.
+        await this.ensureAccount(run.policy);
+        if (!cleanup) await this.requireActiveRun(run.identity, "FirstWalk");
+        else if (mutating && action !== "DeleteVolume")
+          throw new Error("first-walk cleanup action denied");
+        let cleanupSequence: number | undefined;
+        let evidence: AWSQualificationOperationEvidence | undefined;
+        const key = `${evidencePrefix}${await sha256Hex(`first-walk:${action}:${canonicalJSON(parameters)}`)}`;
+        if (cleanup && mutating)
+          cleanupSequence = await this.beginCleanupEvidence(action, parameters);
+        if (!cleanup && mutating) {
+          const current = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
+          if (!current || current.operationCount >= maxCandidateOperations)
+            throw new Error("first-walk operation limit reached");
+          Object.assign(run, current);
+          run.operationCount += 1;
+          evidence = (await this.ctx.storage.get<AWSQualificationOperationEvidence>(key)) ?? {
+            version: awsQualificationAttestationVersion,
+            opDigest: key.slice(evidencePrefix.length),
+            requestDigest: await sha256Hex(canonicalJSON(parameters)),
+            action,
+            requestedAt: new Date().toISOString(),
+            signerDispatches: [],
+          };
+          evidence = await this.beginSignerDispatch(run, key, evidence);
+          this.assertCandidateDispatchWindow(run, "FirstWalk");
+        }
+        let response: AWSQualificationResponse;
+        try {
+          response = await boundedResponse(
+            await this.signer.execute("ec2", action, run.policy.region, parameters),
+          );
+          if (evidence) await this.finishSignerDispatch(run, key, evidence, response);
+          if (cleanupSequence !== undefined)
+            await this.finishCleanupEvidence(
+              cleanupSequence,
+              response.status < 300 ? "accepted" : "rejected",
+              response.status,
+            );
+        } catch (error) {
+          if (cleanupSequence !== undefined)
+            await this.finishCleanupEvidence(cleanupSequence, "error");
+          throw error;
+        }
+        if (response.status < 200 || response.status >= 300)
+          throw new Error(`first-walk ${action} http ${response.status}: ${response.body}`);
+        return response.body;
+      },
+    };
   }
 
   async finalize(controller?: AWSQualificationControllerProps): Promise<AWSQualificationLedger> {
@@ -505,6 +662,15 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         await this.ctx.storage.get<AWSQualificationFinalReceipt>(finalReceiptKey);
       return {
         version: awsQualificationAttestationVersion,
+        ...(run.identity.firstWalk
+          ? {
+              firstWalk: firstWalkStatus(
+                run.identity,
+                await this.ctx.storage.get<FirstWalkState>(firstWalkKey),
+                Boolean(run.finalizedAt),
+              ),
+            }
+          : {}),
         runId: run.identity.runId,
         candidateSha: run.identity.candidateSha,
         candidateWorker: run.identity.candidateWorker,
@@ -606,6 +772,13 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     }
 
     const ledger = await this.ledger();
+    const firstWalk = await this.ctx.storage.get<FirstWalkState>(firstWalkKey);
+    if (
+      firstWalk &&
+      (normalizedRequest.action === "DeleteSnapshot" ||
+        normalizedRequest.action === "DeregisterImage")
+    )
+      throw new Error("first-walk source remains pinned until run finalization");
     const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
     try {
       if (!priorIntent) {
@@ -1084,7 +1257,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     run: AWSQualificationRunState,
     intentKey: string,
   ): Promise<void> {
-    if (run.identity.retainedImage) {
+    if (run.identity.retainedImage || run.identity.firstWalk) {
       const intent = await this.ctx.storage.get<AWSQualificationIntent>(intentKey);
       this.assertCandidateDispatchWindow(run, intent?.request.action ?? "");
     }
@@ -1099,8 +1272,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     const expiresAt = Date.parse(run.identity.expiresAt);
     if (now >= expiresAt) throw new Error("AWS qualification run expired before signer dispatch");
     if (
-      run.identity.retainedImage &&
-      now >= expiresAt - awsQualificationCleanupReserveMs &&
+      (run.identity.retainedImage || run.identity.firstWalk) &&
+      now >=
+        expiresAt - (run.identity.firstWalk ? 20 * 60_000 : awsQualificationCleanupReserveMs) &&
       !retainedCleanupReads.has(action) &&
       !["TerminateInstances", "DeleteKeyPair"].includes(action)
     ) {
@@ -1168,6 +1342,38 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       "pre-cleanup",
     );
     await this.ctx.storage.put(ledgerKey, recoveredLedger);
+    if (run.identity.firstWalk) {
+      const firstWalk = await this.ctx.storage.get<FirstWalkState>(firstWalkKey);
+      if (firstWalk?.volumeID)
+        recoveredLedger.volumeIds = [
+          ...new Set([...recoveredLedger.volumeIds, firstWalk.volumeID]),
+        ];
+      for (const instanceId of ownedWithRetired(
+        recoveredLedger.instanceIds,
+        recoveredLedger.retiredInstanceIds,
+      )) {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- stop all guest writers before data-volume deletion.
+        await this.cleanup(
+          run,
+          policy,
+          "TerminateInstances",
+          { "InstanceId.1": instanceId },
+          failures,
+        );
+      }
+      try {
+        const ids = await cleanupFirstWalk(this.firstWalkOwner(run, true));
+        recoveredLedger.volumeIds = [...new Set([...recoveredLedger.volumeIds, ...ids])];
+        await this.ctx.storage.put(ledgerKey, recoveredLedger);
+      } catch {
+        failures.push("first-walk volume cleanup pending");
+      }
+      if (failures.length) {
+        await this.completeFinalReceipt(recoveredLedger, failures);
+        await this.ctx.storage.setAlarm(Date.now() + cleanupRetryMs);
+        throw new Error("first-walk cleanup incomplete; source pin retained");
+      }
+    }
     for (const imageId of ownedWithRetired(
       recoveredLedger.imageIds,
       recoveredLedger.retiredImageIds,
@@ -1547,6 +1753,18 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       for (const result of [instances, images, snapshots, volumes, keys]) {
         if (result.status >= 300) throw new Error(`inventory http ${result.status}`);
       }
+      if (run.identity.firstWalk) {
+        for (const [result, action] of [
+          [instances, "DescribeInstances"],
+          [images, "DescribeImages"],
+          [snapshots, "DescribeSnapshots"],
+          [volumes, "DescribeVolumes"],
+          [keys, "DescribeKeyPairs"],
+        ] as const) {
+          if (awsXMLRoot(result.body, action)["nextToken"])
+            throw new Error("first-walk inventory is paginated");
+        }
+      }
       ledger.instanceIds = reservationsFromXML(instances.body, run.policy.accountId)
         .flatMap((reservation) => items(record(reservation["instancesSet"])["item"]).map(record))
         .filter((instance) => asString(record(instance["instanceState"])["name"]) !== "terminated")
@@ -1581,6 +1799,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         ledger.instanceIds.length > maxActiveInstances ||
         ledger.imageIds.length > maxActiveImages ||
         ledger.snapshotIds.length > maxActiveSnapshots ||
+        (run.identity.firstWalk && ledger.volumeIds.length > 2) ||
         ledger.keyPairIds.length > 1
       ) {
         failures.push("run-tag inventory exceeds qualification resource bounds");
@@ -1662,7 +1881,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       ledger.retiredInstanceIds = ledger.retiredInstanceIds.filter((id) => id !== instanceId);
       for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
         const volumeId = asString(record(mapping["ebs"])["volumeId"]);
-        if (volumeId) ledger.volumeIds = [volumeId];
+        if (volumeId) ledger.volumeIds = [...new Set([...ledger.volumeIds, volumeId])];
       }
     }
     await this.ctx.storage.put(ledgerKey, ledger);
@@ -2236,9 +2455,11 @@ function authorizedRunInstances(
   }
   const imageId = input["ImageId"] ?? "";
   if (
-    identity.retainedImage
-      ? imageId !== identity.retainedImage.imageId
-      : imageId !== policy.baseAmiId && !ledger.imageIds.includes(imageId)
+    identity.firstWalk
+      ? imageId !== policy.baseAmiId
+      : identity.retainedImage
+        ? imageId !== identity.retainedImage.imageId
+        : imageId !== policy.baseAmiId && !ledger.imageIds.includes(imageId)
   ) {
     throw new Error("AWS qualification image is outside the run ledger");
   }
@@ -2262,7 +2483,7 @@ function authorizedRunInstances(
   );
   const rootGB = Number(input["BlockDeviceMapping.1.Ebs.VolumeSize"]);
   if (
-    identity.retainedImage
+    identity.retainedImage && !identity.firstWalk
       ? rootGB !== awsQualificationRetainedRootGB
       : !Number.isInteger(rootGB) || rootGB < 8 || rootGB > policy.rootGB
   ) {
@@ -2283,11 +2504,14 @@ function authorizedRunInstances(
     MaxCount: "1",
     MinCount: "1",
     UserData: userData,
-    "BlockDeviceMapping.1.DeviceName": retainedRootDeviceName ?? "/dev/sda1",
+    "BlockDeviceMapping.1.DeviceName": identity.firstWalk
+      ? "/dev/sda1"
+      : (retainedRootDeviceName ?? "/dev/sda1"),
     "BlockDeviceMapping.1.Ebs.DeleteOnTermination": "true",
     "BlockDeviceMapping.1.Ebs.Encrypted": "true",
     "BlockDeviceMapping.1.Ebs.VolumeSize": String(rootGB),
     "BlockDeviceMapping.1.Ebs.VolumeType": "gp3",
+    ...(identity.firstWalk ? { "CreditSpecification.CpuCredits": "standard" } : {}),
     "MetadataOptions.HttpEndpoint": "enabled",
     "MetadataOptions.HttpPutResponseHopLimit": "1",
     "MetadataOptions.HttpTokens": "required",
@@ -2445,7 +2669,7 @@ function updateLedgerFromResponse(
         }
         for (const mapping of items(record(instance["blockDeviceMapping"])["item"]).map(record)) {
           const volumeId = asString(record(mapping["ebs"])["volumeId"]);
-          if (volumeId) ledger.volumeIds = [volumeId];
+          if (volumeId) ledger.volumeIds = [...new Set([...ledger.volumeIds, volumeId])];
         }
       }
     }
@@ -2545,6 +2769,8 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
   if (!Number.isFinite(Date.parse(identity.expiresAt))) {
     throw new Error("AWS qualification expiry is malformed");
   }
+  if (identity.firstWalk !== undefined && identity.firstWalk !== true)
+    throw new Error("first-walk mode is malformed");
   if (identity.retainedImage !== undefined) {
     const retained = identity.retainedImage;
     if (
@@ -2563,11 +2789,17 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
 function validateRunWindow(identity: AWSQualificationRunIdentity): void {
   const expiresAt = Date.parse(identity.expiresAt);
   const now = Date.now();
-  const maximum = identity.retainedImage ? awsQualificationRetainedRunMs : awsQualificationMaxRunMs;
+  const maximum =
+    identity.retainedImage && !identity.firstWalk
+      ? awsQualificationRetainedRunMs
+      : awsQualificationMaxRunMs;
   if (expiresAt <= now || expiresAt > now + maximum) {
     throw new Error(`AWS qualification expiry must be in the next ${maximum / 60_000} minutes`);
   }
-  if (identity.retainedImage && now >= expiresAt - awsQualificationCleanupReserveMs) {
+  if (
+    (identity.retainedImage || identity.firstWalk) &&
+    now >= expiresAt - (identity.firstWalk ? 20 * 60_000 : awsQualificationCleanupReserveMs)
+  ) {
     throw new Error("AWS qualification retained work window expired");
   }
 }
@@ -3053,7 +3285,7 @@ function assertLifecycleCapacity(
     if (ledger.instanceIds.length >= maxActiveInstances || pendingActions.has("RunInstances")) {
       throw new Error("AWS qualification allows one active instance");
     }
-    if (ledger.launchCount >= (identity.retainedImage ? 1 : maxLaunches)) {
+    if (ledger.launchCount >= (identity.firstWalk ? 2 : identity.retainedImage ? 1 : maxLaunches)) {
       throw new Error("AWS qualification launch budget is exhausted");
     }
   }

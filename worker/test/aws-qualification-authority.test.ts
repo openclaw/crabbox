@@ -2363,6 +2363,228 @@ describe("AWS qualification candidate transport", () => {
   });
 });
 
+describe("first-walk integration with the existing authority", () => {
+  it("keeps finalization pending on incomplete inventory and recovers without losing exact copy identity", async () => {
+    const f = firstWalkAuthorityFixture();
+    await f.run.enroll(controller, f.identity);
+    await importKey(f, f.identity);
+    await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
+    await f.attach();
+    f.paginate(true);
+    await expect(f.run.finalize(controller)).rejects.toThrow("incomplete");
+    expect((await f.run.firstWalkStatus(f.identity)).finalized).toBe(false);
+    f.paginate(false);
+    await f.run.finalize(controller);
+    expect((await f.run.firstWalkStatus(f.identity)).finalized).toBe(true);
+  });
+  it("denies raw volume APIs and the typed operation without the opt-in binding", async () => {
+    const f = authorityFixture();
+    await f.run.enroll(controller, identity);
+    await expect(f.run.execute(identity, request("CreateVolume", {}, "ec2"))).rejects.toThrow(
+      "not allowed",
+    );
+    await expect(f.run.prepareFirstWalk(identity, firstWalkRequest())).rejects.toThrow(
+      "not enabled",
+    );
+  });
+  it("bounds stock launch selection and keeps borrowed snapshot reads separate from copy deletion", async () => {
+    const f = firstWalkAuthorityFixture();
+    await f.run.enroll(controller, f.identity);
+    await importKey(f, f.identity);
+    await expect(
+      f.run.execute(
+        f.identity,
+        request(
+          "RunInstances",
+          { ...runInstancesParams(), ImageId: f.identity.retainedImage!.imageId },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("outside the run ledger");
+    await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
+    await f.attach();
+    const proof = await f.run.firstWalkStatus(f.identity);
+    expect(proof).toMatchObject({ finalized: false, volumeID: "vol-33333333", phase: "attached" });
+    expect(await f.storage.get("ledger")).toMatchObject({
+      volumeIds: expect.arrayContaining(["vol-55555555", "vol-33333333"]),
+    });
+    await f.run.finalize(controller);
+    expect(await f.run.firstWalkStatus(f.identity)).toMatchObject({ finalized: true });
+    expect(
+      f.signer.calls
+        .filter((c) => c.action === "DeleteVolume")
+        .map((c) => c.parameters["VolumeId"]),
+    ).toEqual(["vol-33333333"]);
+    expect(
+      f.signer.calls.some((c) => c.action === "DeleteSnapshot" || c.action === "DetachVolume"),
+    ).toBe(false);
+  });
+  it.each(["CreateVolume", "AttachVolume", "DeleteVolume"])(
+    "retains ownership and pins across an uncertain %s response and restart",
+    async (fault) => {
+      const f = firstWalkAuthorityFixture();
+      await f.run.enroll(controller, f.identity);
+      await importKey(f, f.identity);
+      await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
+      f.fault(fault);
+      for (let i = 0; i < 4; i++) {
+        try {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- each retry depends on the previous persisted outcome.
+          await f.run.prepareFirstWalk(f.identity, firstWalkRequest());
+        } catch {
+          /* durable retry */
+        }
+      }
+      let cleanupError: unknown;
+      try {
+        await f.run.finalize(controller);
+      } catch (error) {
+        cleanupError = error;
+      }
+      expect(Boolean(cleanupError)).toBe(fault === "DeleteVolume");
+      // Reconstruct the Durable Object; no in-memory volume ownership may be required.
+      const restarted = new AWSQualificationRun(
+        { storage: f.storage } as never,
+        f.env as never,
+        f.signer,
+      );
+      await restarted.finalize(controller);
+      expect(await restarted.firstWalkStatus(f.identity)).toMatchObject({ finalized: true });
+      expect(f.signer.calls.filter((c) => c.action === "CreateVolume")).toHaveLength(1);
+      expect(f.signer.calls.filter((c) => c.action === "AttachVolume")).toHaveLength(1);
+      await expect(restarted.prepareFirstWalk(f.identity, firstWalkRequest())).rejects.toThrow(
+        "finalized",
+      );
+    },
+  );
+  it("a controller cancellation fences attachment and finalizes an unattached partial copy", async () => {
+    const f = firstWalkAuthorityFixture();
+    await f.run.enroll(controller, f.identity);
+    await importKey(f, f.identity);
+    await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
+    f.fault("CreateVolume");
+    await expect(f.run.prepareFirstWalk(f.identity, firstWalkRequest())).rejects.toThrow("lost");
+    await f.run.beginFinalization(controller);
+    await expect(f.run.prepareFirstWalk(f.identity, firstWalkRequest())).rejects.toThrow(
+      "finalizing",
+    );
+    await f.run.finalize(controller);
+    expect(await f.run.firstWalkStatus(f.identity)).toMatchObject({ finalized: true });
+    expect(f.signer.calls.some((c) => c.action === "AttachVolume")).toBe(false);
+  });
+});
+
+function firstWalkRequest() {
+  return {
+    checkpointID: "chk_capture",
+    claimHash: "a".repeat(64),
+    instanceID: "i-11111111",
+    snapshotID: "snap-22222222",
+    readinessReceiptSha256: "b".repeat(64),
+  };
+}
+function firstWalkAuthorityFixture() {
+  useImmediateTimeouts();
+  const f = authorityFixture();
+  const runIdentity = {
+    ...retainedIdentity(),
+    firstWalk: true as const,
+    expiresAt: new Date(Date.now() + 120 * 60_000).toISOString(),
+  };
+  f.signer.ownerId = f.signer.accountId;
+  const original = f.signer.execute.bind(f.signer);
+  let volume = false,
+    attached = false,
+    dot = false,
+    fault: string | undefined;
+  let paginated = false;
+  vi.spyOn(f.signer, "execute").mockImplementation(async (service, action, region, parameters) => {
+    if (
+      ["CreateVolume", "AttachVolume", "ModifyInstanceAttribute", "DeleteVolume"].includes(action)
+    ) {
+      f.signer.calls.push({ service, action, region, parameters: structuredClone(parameters) });
+      if (action === "CreateVolume") volume = true;
+      if (action === "AttachVolume") attached = true;
+      if (action === "ModifyInstanceAttribute") dot = true;
+      if (action === "DeleteVolume") volume = false;
+      if (fault === action) {
+        fault = undefined;
+        throw new Error("lost response after effect");
+      }
+      return xml(
+        `<${action}Response>${action === "CreateVolume" ? "<volumeId>vol-33333333</volumeId>" : ""}</${action}Response>`,
+      );
+    }
+    const response = await original(service, action, region, parameters);
+    let body = (await response.text())
+      .replaceAll("i-owned", "i-11111111")
+      .replaceAll("vol-owned", "vol-55555555");
+    if (action === "TerminateInstances") attached = false;
+    if (action === "DescribeInstances")
+      body = body
+        .replaceAll(
+          "<instanceType>",
+          `<placement><availabilityZone>us-east-1a</availabilityZone></placement><instanceType>`,
+        )
+        .replaceAll(
+          "</blockDeviceMapping>",
+          `${attached ? `<item><deviceName>/dev/sdf</deviceName><ebs><volumeId>vol-33333333</volumeId><deleteOnTermination>${dot}</deleteOnTermination></ebs></item>` : ""}</blockDeviceMapping>`,
+        );
+    if (action === "DescribeVolumes") {
+      if (parameters["VolumeId.1"] === "vol-33333333" && !volume)
+        return awsError("InvalidVolume.NotFound");
+      const dataOnly = parameters["VolumeId.1"] === "vol-33333333" || parameters["Filter.2.Name"];
+      if (dataOnly)
+        body = "<DescribeVolumesResponse><volumeSet></volumeSet></DescribeVolumesResponse>";
+      if (volume && parameters["VolumeId.1"] !== "vol-55555555") {
+        const labels = {
+          crabbox_qualification_run: runIdentity.runId,
+          crabbox_qualification_owner: runIdentity.owner,
+          crabbox_qualification_sha: runIdentity.candidateSha,
+          crabbox_qualification_expiry: runIdentity.expiresAt,
+          crabbox_qualification_op: "first-walk-data",
+        };
+        body = body.replace(
+          "</volumeSet>",
+          `<item><volumeId>vol-33333333</volumeId><snapshotId>snap-22222222</snapshotId><availabilityZone>us-east-1a</availabilityZone><size>400</size><volumeType>gp3</volumeType><iops>3000</iops><throughput>125</throughput><encrypted>true</encrypted><status>${attached ? "in-use" : "available"}</status><tagSet>${Object.entries(
+            labels,
+          )
+            .map(([key, value]) => `<item><key>${key}</key><value>${value}</value></item>`)
+            .join(
+              "",
+            )}</tagSet><attachmentSet>${attached ? "<item><instanceId>i-11111111</instanceId><device>/dev/sdf</device><status>attached</status></item>" : ""}</attachmentSet></item></volumeSet>`,
+        );
+      }
+      if (paginated && !parameters["VolumeId.1"] && !parameters["Filter.2.Name"])
+        body = body.replace(
+          "</DescribeVolumesResponse>",
+          "<nextToken>more</nextToken></DescribeVolumesResponse>",
+        );
+    }
+    return new Response(body, { status: response.status });
+  });
+  return {
+    ...f,
+    identity: runIdentity,
+    paginate: (value: boolean) => {
+      paginated = value;
+    },
+    fault: (action: string) => {
+      fault = action;
+    },
+    attach: async () => {
+      for (let i = 0; i < 4; i++) {
+        try {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- each retry depends on the previous persisted outcome.
+          await f.run.prepareFirstWalk(runIdentity, firstWalkRequest());
+        } catch (error) {
+          if (!/dispatched|readback/.test(String(error))) throw error;
+        }
+      }
+    },
+  };
+}
+
 function authorityFixture(
   options: {
     borrowedInventory?: boolean;

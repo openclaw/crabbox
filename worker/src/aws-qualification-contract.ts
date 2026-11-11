@@ -24,6 +24,8 @@ export interface AWSQualificationRunIdentity {
   deploymentHash: string;
   expiresAt: string;
   retainedImage?: AWSQualificationRetainedImage;
+  // Opt-in one-copy first-walk qualification. Normal image qualification is unchanged.
+  firstWalk?: true;
 }
 
 export interface AWSQualificationControllerProps {
@@ -43,8 +45,30 @@ export interface AWSQualificationResponse {
   body: string;
 }
 
+export interface AWSQualificationFirstWalkRequest {
+  checkpointID: string;
+  claimHash: string;
+  instanceID: string;
+  snapshotID: string;
+  readinessReceiptSha256: string;
+}
+
+export interface AWSQualificationFirstWalkStatus {
+  runID: string;
+  deploymentHash: string;
+  finalized: boolean;
+  request?: AWSQualificationFirstWalkRequest;
+  phase?: "prepared" | "creating" | "created" | "attaching" | "attached";
+  volumeID?: string;
+  device?: string;
+}
+
 export interface AWSQualificationTransportBinding {
   execute(request: AWSQualificationRequest): Promise<AWSQualificationResponse>;
+  prepareFirstWalk?(
+    request: AWSQualificationFirstWalkRequest,
+  ): Promise<AWSQualificationFirstWalkStatus>;
+  firstWalkStatus?(): Promise<AWSQualificationFirstWalkStatus>;
 }
 
 export type AWSQualificationCleanupState = "claimed" | "finalizing" | "finalized";
@@ -133,6 +157,7 @@ export interface AWSQualificationFinalReceipt {
 
 export interface AWSQualificationAttestation {
   version: 1;
+  firstWalk?: AWSQualificationFirstWalkStatus;
   runId: string;
   candidateSha: string;
   candidateWorker: string;
