@@ -6,6 +6,9 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
+const encodeExecutorCredential = (value) =>
+  Buffer.from(JSON.stringify(value)).toString("base64url");
+
 // Do not import the CLI before the child's fetch interceptor is installed:
 // its entrypoint deliberately runs when argv names the control script.
 let canonical;
@@ -145,6 +148,10 @@ function installAPI(file) {
     if (match) {
       const [, name, suffix] = match;
       if (!suffix && method === "PUT") {
+        if (state.echoExecutorToken)
+          throw new Error(
+            `upload failed: ${JSON.parse(Buffer.from(process.env.QUALIFICATION_EXECUTOR_CREDENTIAL, "base64url").toString("utf8")).token}`,
+          );
         const metadata = JSON.parse(await init.body.get("metadata").text());
         for (const binding of metadata.bindings)
           if (binding.name === "FLEET") binding.namespace_id ??= namespaceId(name);
@@ -273,6 +280,10 @@ function fixture(t, mode = "retained") {
     RUNNER_TEMP: directory,
     GH_TOKEN: "synthetic-github-token",
     GITHUB_REPOSITORY: "example/repo",
+    GITHUB_REPOSITORY_ID: "123",
+    GITHUB_EVENT_NAME: "workflow_dispatch",
+    GITHUB_REF: "refs/heads/main",
+    GITHUB_SHA: workflowSha,
     GITHUB_RUN_ID: "42",
     GITHUB_RUN_ATTEMPT: "1",
     GITHUB_WORKFLOW_REF: "example/repo/.github/workflows/image-qualification.yml@refs/heads/main",
@@ -321,6 +332,16 @@ function fixture(t, mode = "retained") {
           ? {
               CLOUDFLARE_API_TOKEN: "synthetic-cloudflare-token",
               QUALIFICATION_CONTROLLER_TOKEN: "synthetic-controller-token",
+            }
+          : {}),
+        ...(command === "deploy" && fs.existsSync(path.join(handoffDir, "executor-identity.json"))
+          ? {
+              QUALIFICATION_EXECUTOR_CREDENTIAL: encodeExecutorCredential({
+                ...JSON.parse(
+                  fs.readFileSync(path.join(handoffDir, "executor-identity.json"), "utf8"),
+                ),
+                token: "6".repeat(64),
+              }),
             }
           : {}),
         QUALIFICATION_HANDOFF_SHA256: outputs.handoff_sha256 ?? "",
@@ -419,6 +440,18 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       assert.equal(f.state().identity.expiresAt, handoff.expiresAt);
       assert.equal(f.state().identity.owner, handoff.owner);
       assert.equal(f.outputs.expires_at, handoff.expiresAt);
+      assert.equal(f.outputs.executor_token_sha256, digest("6".repeat(64)));
+      assert.equal(f.outputs.executor_token, undefined);
+      const proof = fs.readFileSync(
+        path.join(f.directory, "deploy-proof", "deployment.json"),
+        "utf8",
+      );
+      assert.equal(JSON.parse(proof).executorTokenSha256, digest("6".repeat(64)));
+      assert.equal(proof.includes("6".repeat(64)), false);
+      assert.equal(
+        fs.readFileSync(path.join(f.directory, "deploy.outputs"), "utf8").includes("6".repeat(64)),
+        false,
+      );
       const armed = f.invoke("arm", f.armEnv());
       assert.equal(armed.status, 0, armed.stderr);
       assert.deepEqual(f.prepared(), handoff);
@@ -427,6 +460,85 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
 
   const providerEvents = (f) =>
     f.state().events.filter((event) => /cloudflare|workers\.dev/.test(event));
+  for (const field of [
+    "repositoryId",
+    "workflowSha",
+    "candidateSha",
+    "runId",
+    "runAttempt",
+    "handoffSha256",
+    "expiresAt",
+  ]) {
+    test(`deployment rejects manual credential ${field} mismatch before provider effects`, (t) => {
+      const f = fixture(t);
+      assert.equal(f.invoke("admit").status, 0);
+      const identity = JSON.parse(
+        fs.readFileSync(path.join(f.handoffDir, "executor-identity.json"), "utf8"),
+      );
+      assert.equal(Object.hasOwn(identity, "token"), false);
+      const credential = encodeExecutorCredential({
+        ...identity,
+        [field]: "wrong",
+        token: "6".repeat(64),
+      });
+      const result = f.invoke("deploy", { QUALIFICATION_EXECUTOR_CREDENTIAL: credential });
+      assert.notEqual(result.status, 0);
+      assert.equal(result.stderr.includes("6".repeat(64)), false);
+      assert.deepEqual(providerEvents(f), []);
+    });
+  }
+  test("missing manual credential stops deployment before provider effects", (t) => {
+    const f = fixture(t);
+    assert.equal(f.invoke("admit").status, 0);
+    assert.notEqual(f.invoke("deploy", { QUALIFICATION_EXECUTOR_CREDENTIAL: "" }).status, 0);
+    assert.deepEqual(providerEvents(f), []);
+  });
+  test("provider error cannot echo the supplied token into ordinary diagnostics", (t) => {
+    const f = fixture(t);
+    assert.equal(f.invoke("admit").status, 0);
+    f.update({ echoExecutorToken: true });
+    const result = f.invoke("deploy");
+    assert.notEqual(result.status, 0);
+    assert.equal(result.stderr.includes("6".repeat(64)), false);
+    assert.match(result.stderr, /upload failed: \[executor-token\]/);
+    assert.equal(f.state().identity, undefined);
+    assert.deepEqual(f.state().workers, {});
+  });
+  test("executor credential mismatch after enrollment does not obstruct independent recovery", (t) => {
+    const f = fixture(t, "first-walk");
+    assert.equal(f.invoke("admit").status, 0);
+    assert.equal(f.invoke("deploy").status, 0);
+    const identity = JSON.parse(
+      fs.readFileSync(path.join(f.handoffDir, "executor-identity.json"), "utf8"),
+    );
+    const child = spawnSync(
+      process.execPath,
+      [path.join(root, "scripts/image-qualification-executor-token.mjs")],
+      {
+        encoding: "utf8",
+        timeout: 10_000,
+        env: {
+          ...f.env,
+          QUALIFICATION_HANDOFF_SHA256: f.outputs.handoff_sha256,
+          QUALIFICATION_EXPIRES_AT: f.outputs.expires_at,
+          QUALIFICATION_RELAY_URL: f.outputs.relay_url,
+          QUALIFICATION_EXECUTOR_TOKEN_SHA256: f.outputs.executor_token_sha256,
+          QUALIFICATION_EXECUTOR_CREDENTIAL: encodeExecutorCredential({
+            ...identity,
+            token: "7".repeat(64),
+          }),
+        },
+      },
+    );
+    assert.equal(child.status, 1);
+    assert.match(child.stderr, /authentication failed/);
+    f.update({ now: Date.parse(f.prepared().expiresAt) + 60_000 });
+    const cleanup = f.invoke("reap");
+    assert.equal(cleanup.status, 0, cleanup.stderr);
+    assert.equal(f.state().finalized, true);
+    assert.deepEqual(f.state().workers, {});
+    assert.equal(f.state().identity, undefined);
+  });
   for (const [name, overrides] of [
     ["rerun", { GITHUB_RUN_ATTEMPT: "2" }],
     ["other run", { GITHUB_RUN_ID: "43" }],

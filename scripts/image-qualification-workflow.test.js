@@ -92,7 +92,7 @@ test("workflow isolates candidate execution from protected credentials", () => {
   assert.match(workflow, /image-qualification-control\.mjs arm/);
   assert.match(
     workflow,
-    /execute:[\s\S]*needs: \[authorize, build-candidate, deploy-enroll, arm\]/,
+    /execute:[\s\S]*needs: \[authorize, build-candidate, admit, deploy-enroll, arm\]/,
   );
   const executeJob = workflow.slice(
     workflow.indexOf("  execute:"),
@@ -103,7 +103,20 @@ test("workflow isolates candidate execution from protected credentials", () => {
     /CLOUDFLARE_API_TOKEN|AWS_ACCESS_KEY_ID|QUALIFICATION_CONTROLLER_TOKEN/,
   );
   assert.match(executeJob, /QUALIFICATION_RELAY_URL/);
-  assert.match(executeJob, /QUALIFICATION_EXECUTOR_TOKEN/);
+  assert.match(executeJob, /environment: image-qualification-executor/);
+  assert.match(
+    executeJob,
+    /QUALIFICATION_EXECUTOR_CREDENTIAL: \$\{\{ secrets\.CRABBOX_IMAGE_QUALIFICATION_EXECUTOR_CREDENTIAL \}\}/,
+  );
+  assert.match(executeJob, /image-qualification-executor-token\.mjs/);
+  assert.match(executeJob, /node-version: 24\.22\.1/);
+  assert.doesNotMatch(workflow, /id-token: write|outputs\.executor_token \}\}|executor_token:/);
+  assert.doesNotMatch(control, /appendOutput\("executor_token"/);
+  assert.doesNotMatch(relaySource, /EXECUTOR_OIDC|executor-token|well-known\/jwks/);
+  assert.deepEqual(
+    [...executeJob.matchAll(/secrets\.([A-Z_]+)/g)].map((m) => m[1]),
+    ["CRABBOX_IMAGE_QUALIFICATION_EXECUTOR_CREDENTIAL"],
+  );
   assert.doesNotMatch(executeJob, /QUALIFICATION_ADMIN_TOKEN|QUALIFICATION_SHARED_TOKEN/);
   assert.doesNotMatch(executeJob, /QUALIFICATION_EXPECTED_CANDIDATE_VERSION/);
   const protectedJobs = workflow.slice(workflow.indexOf("  deploy-enroll:"));
@@ -123,9 +136,8 @@ test("candidate downloads extract the artifact at the canonical path", () => {
 
   assert.equal(candidateDownloads.length, 3);
   assert.equal(
-    downloadSteps.filter(([, inputs]) =>
-      inputs.includes("needs.admit.outputs.handoff_artifact_id"),
-    ).length,
+    downloadSteps.filter(([, inputs]) => inputs.includes("needs.admit.outputs.handoff_artifact_id"))
+      .length,
     2,
   );
   for (const [, inputs] of candidateDownloads) {
@@ -151,24 +163,38 @@ test("finalization skips protected approval when deployment never started", () =
 });
 
 test("protected preparation exports immutable identity before the separate deployment approval", () => {
-  const admitJob = workflow.slice(workflow.indexOf("  admit:"), workflow.indexOf("  deploy-enroll:"));
+  const admitJob = workflow.slice(
+    workflow.indexOf("  admit:"),
+    workflow.indexOf("  deploy-enroll:"),
+  );
   assert.match(admitJob, /environment: image-qualification/);
   assert.match(admitJob, /QUALIFICATION_HANDOFF_DIR:/);
   assert.match(admitJob, /CLOUDFLARE_ACCOUNT_ID: \$\{\{ vars\.CLOUDFLARE_ACCOUNT_ID \}\}/);
   assert.match(admitJob, /QUALIFICATION_SUBNET_ID: \$\{\{ vars\./);
   assert.match(admitJob, /QUALIFICATION_SECURITY_GROUP_ID: \$\{\{ vars\./);
   assert.match(admitJob, /QUALIFICATION_AUTHORITY_SHA: \$\{\{ vars\./);
-  assert.doesNotMatch(admitJob, /secrets\.|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN/);
+  assert.doesNotMatch(
+    admitJob,
+    /secrets\.|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN/,
+  );
   assert.match(admitJob, /image-qualification-handoff-\$\{\{ github\.run_id \}\}-1/);
   assert.match(admitJob, /overwrite: false/);
   assert.match(admitJob, /handoff_sha256: \$\{\{ steps\.admit\.outputs\.handoff_sha256 \}\}/);
-  assert.ok(admitJob.indexOf("image-qualification-control.mjs admit") < admitJob.indexOf("id: handoff"));
-  const deployJob = workflow.slice(workflow.indexOf("  deploy-enroll:"), workflow.indexOf("  arm:"));
+  assert.ok(
+    admitJob.indexOf("image-qualification-control.mjs admit") < admitJob.indexOf("id: handoff"),
+  );
+  const deployJob = workflow.slice(
+    workflow.indexOf("  deploy-enroll:"),
+    workflow.indexOf("  arm:"),
+  );
   const armJob = workflow.slice(workflow.indexOf("  arm:"), workflow.indexOf("  execute:"));
   for (const job of [deployJob, armJob]) {
     assert.match(job, /environment: image-qualification/);
     assert.match(job, /artifact-ids: \$\{\{ needs\.admit\.outputs\.handoff_artifact_id \}\}/);
-    assert.match(job, /QUALIFICATION_HANDOFF_SHA256: \$\{\{ needs\.admit\.outputs\.handoff_sha256 \}\}/);
+    assert.match(
+      job,
+      /QUALIFICATION_HANDOFF_SHA256: \$\{\{ needs\.admit\.outputs\.handoff_sha256 \}\}/,
+    );
     assert.match(job, /QUALIFICATION_HANDOFF_ARTIFACT_DIGEST:/);
   }
 });
@@ -195,7 +221,10 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
   assert.match(control, /maxMinutes: retainedImage \? 38 : 120/);
   assert.match(control, /maxMonthlyUSD: 10/);
   assert.match(control, /maxConcurrentInstances: 1/);
-  assert.match(control, /maxLaunches: process\.env\.QUALIFICATION_MODE === "first-walk" \? 2 : retainedImage \? 1 : 3/);
+  assert.match(
+    control,
+    /maxLaunches: process\.env\.QUALIFICATION_MODE === "first-walk" \? 2 : retainedImage \? 1 : 3/,
+  );
   assert.match(control, /fastSnapshotRestore: false/);
   assert.match(control, /CRABBOX_AWS_QUALIFICATION_TRANSPORT/);
   assert.match(control, /AWSQualificationController/);
