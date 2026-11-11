@@ -227,6 +227,83 @@ authorize paid execution.
 
 ## Enrollment and binding
 
+### Single-copy first ownership walk
+
+`mode=first-walk` is an opt-in **synthetic qualification**, not a bootstrap
+optimization or a representative checkpoint import API. It reuses this controller,
+authority, registry, Fleet, relay, alarm and protected finalizer. Normal image
+qualification and bootstrap rendering are unchanged. A client update alone cannot
+enable it: both the private candidate and the qualification authority must include
+the typed first-walk transport, and the protected executor must include its runner.
+
+The credentialless executor boots one stock `t3.small`, writes a small mixed-owner
+fixture under its saved work root and `/var/cache/crabbox`, and verifies those roots
+share one filesystem. It creates one managed image checkpoint and releases the
+source guest before booting a second stock guest. Only after successful stock
+readiness does it hold an existing checkpoint-use claim and ask the authority to
+create and attach one encrypted gp3 copy in the target's AZ. Restored data is never
+present during boot. Launching the captured image as root is denied in this mode.
+
+The existing run object persists the exact request before dispatch. Create intent
+has one deterministic client token; uncertain create/attach responses reconcile by
+reads and never authorize a replacement. The authority checks exact snapshot,
+account, instance, AZ, volume, attachment and ownership tags. It sets and reads back
+DeleteOnTermination. No raw CreateVolume, AttachVolume or DeleteVolume capability
+is exposed to the candidate. The initial scope is one data copy, at most 400 GiB,
+3000 IOPS and 125 MiB/s; no FSR, initialization request or force detach is admitted.
+The synthetic source is limited by the existing 20 GiB stock-root policy.
+
+The claim remains bound to the immutable qualification run/deployment through
+attachment, execution, failures and cleanup, even past ordinary claim expiry.
+Provisioning, abort, completion and checkpoint deletion cannot consume that claim.
+Only an authority `finalized` readback can explicitly release it; a crash before
+the first RPC is handled by the same proof. The private namespace is deleted only
+after authority finalization. It may then discard its synthetic checkpoint and
+held claim records; it is not an external source registry. Importing a checkpoint
+from another Fleet is not supported by this mode.
+
+The guest resolves **the exact copy volume ID** through its unique NVMe serial,
+requires partition 1, rejects a mounted copy or active automounter, and mounts it
+explicitly in a private mount namespace. It never chooses UUID/label or scans the
+tree before the routine. An exclusive stock-root marker prohibits warm replay.
+It runs the unchanged serial diagnostic recipe once for both roots, with a
+45-minute walk bound inside a one-hour transient unit (2 GiB, 32 tasks, 65536 FDs).
+Afterward one verification pass checks ownership and records fanout/depth. The
+result retains elapsed time, counters, wait4 CPU and block I/O, last sampled
+`/proc/PID/io`, diskstats and mount/replay observations. Sampled proc I/O may omit
+the final interval; wait4 totals are complete. Mount/ancestor metadata reads and
+`noatime` are recorded limitations, as is omission of original root-boot contention.
+
+At most two sequential stock launches and one active instance are permitted.
+Admission starts a 120-minute absolute clock with work fenced at minute 100,
+reserving 20 minutes for cleanup. Source capture, approvals and deployment all
+consume that clock. An expired window cannot be extended or replaced in the same
+run. The authority terminates writers first, explicitly deletes any surviving
+unattached copy, inventories root **and** data volumes and verifies exact absence.
+Uncertain/failed cleanup, unexpected volume identity, pagination or incomplete
+inventory retain the finalization fence and retry alarm. Originals borrowed under
+the existing retained-source contract are never deletion-owned. Synthetic images
+and snapshots are run-owned and deleted only by ordinary finalization.
+
+Before live qualification, the infrastructure owner must deploy the reviewed
+authority through the existing private-Worker credential-custody route and approve
+the protected workflow. The current workflow does **not** establish that custody.
+Its sandbox role additionally needs scoped `ec2:CreateVolume`, `ec2:AttachVolume`,
+`ec2:ModifyInstanceAttribute` (only the DeleteOnTermination operation at the
+authority), and `ec2:DeleteVolume`; retain the regional, creation-tag and existing
+resource-tag constraints above. Scope attachment to this run's instance and copy,
+snapshot reads to the admitted source, and KMS use/grants to the selected source
+and destination keys. Do not grant PassRole, DetachVolume or FSR. IAM alone cannot
+express every request-field constraint; the reviewed authority enforces the fixed
+size, performance and attachment policy. Credentials go only to the authority,
+never the candidate, relay, executor or artifacts.
+
+Passing synthetic tests proves this bounded lifecycle, not an improvement in a
+historical restore. Representative use additionally requires the capture owner to
+admit one exact preserved snapshot containing both roots and hold its authoritative
+use pin until final zero residue. Cross-owner capture admission/custody is an
+explicit remaining dependency; this synthetic workflow must not bypass it.
+
 The protected workflow separates preparation from deployment. After the candidate
 bundle is built, approve **Prepare protected qualification handoff** to start the
 absolute clock. This job admits the bundle without AWS, Cloudflare API, or
@@ -334,6 +411,53 @@ bounded rings with total and truncation counters; saturation drops the oldest
 proof records without blocking teardown. The attestation never returns raw
 tokens, keys, user data, URLs, account IDs, network addresses, or AWS resource
 IDs.
+
+## First-walk source admission
+
+First-walk requires a tooling prerequisite on the protected default branch and
+an open same-repository candidate PR. The prerequisite changes only the
+qualification workflow, protected scripts and inert test fixtures. Keep the
+ownership instrumentation, reporting fix, generated bootstrap consumers,
+Linux qualification tests, Worker capability and documentation in the unmerged
+candidate, with the reporting fix separately identifiable.
+
+The prerequisite must avoid every production coordinator and Pages push path.
+Changes under `worker/` (except `worker/test/`) automatically deploy the
+production coordinator on main; changes under `docs/` or `skills/` automatically
+publish Pages. Review the complete current workflow filters before any future
+merge. Do not change production deployment controls to make the split work.
+The existing qualification reaper definition consumes protected main tooling;
+the split preserves mint/retained and reaper behavior and does not dispatch a
+qualification. Confirm an enabled independent recovery route before live
+admission; source merge does not enable a disabled workflow. No merge or deployment is authorized by this preparation.
+
+At dispatch, `candidate_sha` must equal the open candidate PR's exact head. The
+protected workflow SHA must equal both the current default-branch SHA and the
+PR's base SHA; select `first-walk` from that default-branch workflow. Candidate
+build inputs must match protected Go modules, Worker dependencies and Wrangler
+configuration. Candidate Worker source is data for the protected build.
+
+The diagnostic ownership recipe remains in the candidate. Protected build
+staging reads it as bounded regular-file data without executing it, rejects
+symlink ancestors, and requires the reviewed SHA256
+`eb26f129e9a7cb77ef2197688fcfb3b05356be86b889473e9808287cf016bbf4`.
+The immutable candidate manifest seals it at
+`candidate/recipes/bootstrap/v1/linuxOwnershipRepair.sh`. Protected admission
+verifies that artifact, and the credentialless executor checks the same pin
+before relay or guest activity. The executor and guest helper come from the
+protected checkout; the recipe executes only in the synthetic guest. Protected
+finalization requires the same recipe pin and protected runner digest. The
+copy under `scripts/fixtures/` is inert test data, never the live recipe source.
+A future diagnostic recipe change requires review and a new protected pin.
+
+Keep the candidate PR open through execution and finalization. After the
+prerequisite is eventually merged with separate authorization, reconcile the
+candidate onto the actual new main SHA, refresh all source/build identities,
+and obtain any required review. If the PR head, protected workflow, or default
+branch changes, repeat identity verification before admission. A branch
+workflow dispatch, raw Worker upload, locally rebuilt binary or closed PR cannot
+substitute for this contract. Source merge, authority deployment and credential
+custody, and one finite synthetic run each require their own authorization.
 
 ## Replay and teardown
 
