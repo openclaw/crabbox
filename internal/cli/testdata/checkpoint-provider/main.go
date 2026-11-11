@@ -45,6 +45,7 @@ type checkpointCaptureFixtureState struct {
 	Starts            int               `json:"starts"`
 	Removes           int               `json:"removes"`
 	Version           int               `json:"version"`
+	ForkIP            string            `json:"forkIP,omitempty"`
 }
 
 type checkpointCaptureFixtureEvent struct {
@@ -225,6 +226,9 @@ func main() {
 			fail("create requires retained ready image version 1: %v", args)
 		}
 		state.Machine = map[string]any{"id": "fixture-fork-immutable-id", "name": args[1], "status": "RUNNING", "ip": "127.0.0.1", "size": args[3], "region": args[5], "image": args[7], "imageVersion": version, "defaultSSHUsername": "ubuntu"}
+		if state.ForkIP != "" {
+			state.Machine["ip"] = state.ForkIP
+		}
 		state.Creates++
 		persist()
 		event("created")

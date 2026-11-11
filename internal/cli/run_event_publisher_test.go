@@ -400,3 +400,34 @@ func TestRunRecorderIdempotentDrainPreservesEventOrder(t *testing.T) {
 		}
 	})
 }
+
+func TestRunRecorderStalledDiagnosticDrainBounded(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		joined := false
+		var diagnostics strings.Builder
+		client := &CoordinatorClient{BaseURL: "https://example.test", Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if strings.HasSuffix(req.URL.Path, "/events") {
+				close(started)
+				<-req.Context().Done()
+				joined = true
+				return nil, req.Context().Err()
+			}
+			if !joined {
+				t.Error("terminal record overtook diagnostic cancellation")
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"run":{"id":"run_123"}}`)), Header: make(http.Header), Request: req}, nil
+		})}}
+		rec := &runRecorder{coord: client, stderr: &diagnostics}
+		rec.attachRun(CoordinatorRun{ID: "run_123", EventAppendIdempotent: true})
+		rec.Event("command.finished", "finished", "")
+		<-started
+		start := time.Now()
+		if err := rec.Finish(t.Context(), SSHTarget{}, 0, 0, 0, "", false, nil, FailureClassification{}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if time.Since(start) != runEventDrainTimeout || !rec.terminalConfirmed || !strings.Contains(diagnostics.String(), "drain deadline") {
+			t.Fatalf("elapsed=%s confirmed=%t diagnostics=%s", time.Since(start), rec.terminalConfirmed, &diagnostics)
+		}
+	})
+}

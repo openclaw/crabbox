@@ -41,6 +41,11 @@ type nativeRuntimeInstall struct {
 	retain  error
 }
 
+type nativeRuntimeReadinessKey struct {
+	install nativeRuntimeInstallKey
+	owner   *workspaceOwner
+}
+
 // The run lifecycle, not an individual command, owns an installed runtime.
 // Lease disposition must be recorded before access can be returned or revoked.
 type nativeRuntimeScope struct {
@@ -59,6 +64,7 @@ type nativeRuntimeScope struct {
 	entries         map[nativeRuntimeInstallKey]*nativeRuntimeInstall
 	leases          map[string]bool
 	legacyBashReady map[nativeRuntimeInstallKey]bool
+	readiness       map[nativeRuntimeReadinessKey]bool
 }
 
 func newNativeRuntimeScope() *nativeRuntimeScope {
@@ -225,9 +231,17 @@ func (s *nativeRuntimeScope) prepareCommandRuntime(ctx context.Context, target *
 		return ctx, err
 	}
 	*target = preparedTarget
+	if target.TargetOS == targetLinux {
+		// An installed route already passed readiness in this invocation.
+		if _, err := s.prepared(ctx, *target); err == nil {
+			return s.admit(ctx, *target)
+		}
+	} else {
+		// Preserve the WSL transport's existing connection lifetime.
+		target.NoControlMaster = true
+	}
 	// Resolve transport before reusing an installation: a previously
 	// admitted port may disappear while another advertised port stays healthy.
-	target.NoControlMaster = true
 	if err := s.ready(ctx, target, stderr); err != nil {
 		return ctx, err
 	}

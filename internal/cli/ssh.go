@@ -64,16 +64,19 @@ type SSHTarget struct {
 	TargetOS                string
 	WindowsMode             string
 	ReadyCheck              string
-	AuthSecret              bool
-	NoControlMaster         bool
-	ownerControlPath        string // Private foreground master with an explicit local lifetime owner.
-	DisableHostKeyChecking  bool
-	NetworkKind             NetworkMode
-	SSHConfigProxy          bool
-	SSHConfigFile           string // Provider-owned IdentitiesOnly route; bypass ambient SSH config.
-	SSHConfigData           []byte `json:"-"` // Captured provider config; keep resolution and transport on the same bytes.
-	ProxyCommand            string
-	ChildEnvDenylist        []string
+	// ReadinessStatus is an optional provider-owned, observational command.
+	// It may report pending/failed phases; it can never establish readiness.
+	ReadinessStatus        string
+	AuthSecret             bool
+	NoControlMaster        bool
+	ownerControlPath       string // Private foreground master with an explicit local lifetime owner.
+	DisableHostKeyChecking bool
+	NetworkKind            NetworkMode
+	SSHConfigProxy         bool
+	SSHConfigFile          string // Provider-owned IdentitiesOnly route; bypass ambient SSH config.
+	SSHConfigData          []byte `json:"-"` // Captured provider config; keep resolution and transport on the same bytes.
+	ProxyCommand           string
+	ChildEnvDenylist       []string
 	// Transport-only overrides can contain credentials; never serialize them.
 	ChildEnv               map[string]string          `json:"-"`
 	DiagnosticSecrets      []string                   `json:"-"` // Provider credentials echoed by local authentication hooks.
@@ -365,11 +368,54 @@ func sshReadinessProfileForTarget(target SSHTarget) sshReadinessProfile {
 }
 
 func waitForSSHReady(ctx context.Context, target *SSHTarget, stderr io.Writer, phase string, timeout time.Duration) error {
+	scope, _ := ctx.Value(nativeRuntimeScopeKey{}).(*nativeRuntimeScope)
+	cache := scope != nil && scope.selected() && target.TargetOS == targetLinux
+	owner := workspaceOwnerFromContext(ctx)
+	key := func() nativeRuntimeReadinessKey {
+		return nativeRuntimeReadinessKey{nativeRuntimeInstallKey{nativeRuntimeLease(ctx), nativeRuntimeRouteKey(*target)}, owner}
+	}
+	if cache {
+		if err := scope.validateLocal(ctx, *target); err != nil {
+			return err
+		}
+		if owner != nil {
+			if err := owner.Err(); err != nil {
+				return err
+			}
+		}
+		scope.mu.Lock()
+		ready := scope.readiness[key()]
+		scope.mu.Unlock()
+		if ready {
+			target.recordPreparedEndpoint(target.Port)
+			return context.Cause(ctx)
+		}
+	}
+	if policy, ok := checkpointReadinessFromContext(ctx); ok {
+		timeout = policy.Timeout
+	}
 	start := time.Now()
-	deadline := time.Now().Add(timeout)
+	deadline := start.Add(timeout)
+	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) {
+		deadline = parentDeadline
+	}
 	probeCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	return waitForSSHReadyWithProbeContext(ctx, probeCtx, target, stderr, phase, start, deadline)
+	err := waitForSSHReadyWithProbeContext(ctx, probeCtx, target, stderr, phase, start, deadline)
+	if err != nil && context.Cause(ctx) != nil {
+		if policy, ok := checkpointReadinessFromContext(ctx); ok {
+			return fmt.Errorf("checkpoint readiness stopped lease=%s checkpoint=%s elapsed=%s wait_deadline=%s%s; fixed identity retained, replay the same fork with --lease-id %s: %w", policy.LeaseID, policy.CheckpointID, time.Since(start).Round(time.Second), deadline.UTC().Format(time.RFC3339), policy.lifetimeSummary(), policy.LeaseID, err)
+		}
+	}
+	if cache && err == nil {
+		scope.mu.Lock()
+		if scope.readiness == nil {
+			scope.readiness = make(map[nativeRuntimeReadinessKey]bool)
+		}
+		scope.readiness[key()] = true
+		scope.mu.Unlock()
+	}
+	return err
 }
 
 func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHTarget, stderr io.Writer, phase string, start, deadline time.Time) error {
@@ -380,6 +426,9 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 	// reachability and authentication. Recording that keeps a readiness-only
 	// failure from being reported as an unknown-authentication timeout.
 	authenticated := false
+	blocking := "unknown"
+	policy, checkpointWait := checkpointReadinessFromContext(ctx)
+	statusTarget := *target
 	retryDelay := 250 * time.Millisecond
 	check := func(probeErr error) error {
 		if stopped := sshReadinessProbeContextError(ctx, lastProbe); stopped != nil {
@@ -398,6 +447,13 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 			if authenticated {
 				authentication = "ok"
 			}
+			if checkpointWait {
+				state := "transport_failure"
+				if lastProbe == "readiness" && authenticated {
+					state = "pending"
+				}
+				return policy.failure(state, blocking, time.Since(start), deadline)
+			}
 			return Exit(5, "timed out waiting for SSH on %s during %s probe=%s cause=deadline_exceeded authentication=%s%s; %s", target.Host, phase, lastProbe, authentication, ports, sshWaitNextAction(phase))
 		}
 		return nil
@@ -405,6 +461,19 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 	for {
 		if err := check(nil); err != nil {
 			return err
+		}
+		if checkpointWait && target.ReadinessStatus != "" {
+			status, stage := observeReadinessStatus(probeCtx, statusTarget)
+			if err := check(nil); err != nil {
+				return err
+			}
+			if status != "" {
+				blocking = stage
+				if status == "failed" {
+					return policy.failure("bootstrap_failed", blocking, time.Since(start), deadline)
+				}
+				fmt.Fprintf(stderr, "provisioning lease=%s state=pending phase=%s elapsed=%s wait_deadline=%s%s\n", policy.LeaseID, blocking, time.Since(start).Round(time.Second), deadline.UTC().Format(time.RFC3339), policy.lifetimeSummary())
+			}
 		}
 		if isWindowsWSL2Target(*target) {
 			lastProbe = "transport"
@@ -526,6 +595,10 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 				// stage rather than the probe that just succeeded.
 				authenticated = true
 				lastProbe = "readiness"
+				// Observe the route that just proved transport, without admitting
+				// the target as ready or changing the normal port selection.
+				statusTarget.Port = probe.Port
+				statusTarget.FallbackPorts = []string{}
 				probes = append(probes, port+":ready")
 				if canWaitForLinuxReadiness(probe) {
 					lastPorts = strings.Join(probes, ",")
@@ -1342,7 +1415,18 @@ func runSSHStreamResult(ctx context.Context, target SSHTarget, remote string, st
 	if errors.As(err, &preparation) {
 		return 7, err
 	}
-	return exitCode(err), err
+	code = exitCode(err)
+	// SSH stream results enter terminal receipts, which require a nonnegative
+	// status. Local provider commands still retain their raw process status.
+	if code < 0 {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+				code = 128 + int(status.Signal())
+			}
+		}
+	}
+	return code, err
 }
 
 func runSSHCommand(cmd *exec.Cmd, stdout, stderr io.Writer) error {

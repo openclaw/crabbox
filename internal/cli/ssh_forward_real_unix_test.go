@@ -1237,6 +1237,10 @@ type realSSHExecObservation struct {
 // Only these fixture-owned shell builtins may execute. Never run the incoming
 // command string, even after matching it, or inherit the runner's environment.
 func (s *forwardSSHServer) enableReadinessSessions(t *testing.T, root string, transportSucceeds bool) (*sync.Mutex, *[]realSSHExecObservation) {
+	return s.enableReadinessSessionsWithHold(t, root, transportSucceeds, nil)
+}
+
+func (s *forwardSSHServer) enableReadinessSessionsWithHold(t *testing.T, root string, transportSucceeds bool, holdProbe func(string) bool) (*sync.Mutex, *[]realSSHExecObservation) {
 	t.Helper()
 	var mu sync.Mutex
 	var observed []realSSHExecObservation
@@ -1255,10 +1259,13 @@ func (s *forwardSSHServer) enableReadinessSessions(t *testing.T, root string, tr
 				_ = request.Reply(false, nil)
 				continue
 			}
+			mu.Lock()
+			hold := holdProbe != nil && holdProbe(payload.Command)
+			mu.Unlock()
 			var fixedCommand string
 			switch payload.Command {
 			case "exit 0":
-				if transportSucceeds {
+				if transportSucceeds || hold {
 					fixedCommand = "exit 0"
 				}
 			case realSSHFailingReadiness:
@@ -1271,6 +1278,13 @@ func (s *forwardSSHServer) enableReadinessSessions(t *testing.T, root string, tr
 				return
 			}
 			if err := request.Reply(true, nil); err != nil {
+				return
+			}
+			if hold {
+				// Keep this accepted probe active until the real client times out
+				// and closes it. Fixture teardown also closes and joins sessions.
+				for range requests {
+				}
 				return
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
@@ -1337,7 +1351,27 @@ func TestWaitForSSHReadyRealSSHTimeoutDiagnostic(t *testing.T) {
 				t.Logf("client: %s", strings.TrimSpace(string(version)))
 				const user = "synthetic-readiness"
 				server := newForwardSSHServer(t, user)
-				mu, observed := server.enableReadinessSessions(t, root, transportSucceeds)
+				blockedCommand := realSSHFailingReadiness
+				if !transportSucceeds {
+					blockedCommand = "exit 0"
+				}
+				blocked := make(chan string, 1)
+				attempts := 0
+				mu, observed := server.enableReadinessSessionsWithHold(t, root, transportSucceeds, func(command string) bool {
+					if command != blockedCommand {
+						return false
+					}
+					attempts++
+					if attempts == 1 {
+						// Complete one cycle to retain real readiness, transport,
+						// and closed-fallback evidence before fixing the active stage.
+						return false
+					}
+					if attempts == 2 {
+						blocked <- command
+					}
+					return true
+				})
 				close(server.release)
 				knownHosts := filepath.Join(root, "known_hosts")
 				pins := fmt.Sprintf("[127.0.0.1]:%d %s\n", server.port(), server.hostKey)
@@ -1376,6 +1410,14 @@ func TestWaitForSSHReadyRealSSHTimeoutDiagnostic(t *testing.T) {
 				err = waitForSSHReady(t.Context(), &target, &progress, "bootstrap", 8*time.Second)
 				if err == nil {
 					t.Fatal("failing readiness unexpectedly succeeded")
+				}
+				select {
+				case command := <-blocked:
+					if command != blockedCommand {
+						t.Fatalf("active probe=%q want=%q", command, blockedCommand)
+					}
+				default:
+					t.Fatal("deadline expired before the intended active probe was reached")
 				}
 				message := err.Error()
 				t.Logf("timeout: %s; progress: %s", message, progress.String())

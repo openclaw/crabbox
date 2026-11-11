@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +27,37 @@ const captureFixtureEnv = "CRABBOX_CAPTURE_BINARY_FIXTURE"
 const captureFixtureLease = "cbx_abcdef012345"
 const captureFixtureCheckpoint = "chk_abcdef0123456789"
 const captureFixtureSource = "fixture-source-immutable-id"
+
+var captureFixtureReadinessMu sync.Mutex
+
+// Machine0 fixes its public SSH endpoint at port 22. The fake ssh executable
+// owns command outcomes, but the real readiness path first requires TCP accept.
+// Serialize just the scenarios that need that endpoint, and never borrow an
+// unrelated local SSH service when the address is unavailable.
+func requireCheckpointCaptureReadinessListener(t *testing.T) {
+	t.Helper()
+	captureFixtureReadinessMu.Lock()
+	t.Cleanup(captureFixtureReadinessMu.Unlock)
+	listener, err := net.Listen("tcp", "127.0.0.1:22")
+	if err != nil {
+		if errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EADDRINUSE) {
+			t.Skipf("Machine0 fixture needs its own loopback port 22: %v", err)
+		}
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = listener.Close(); <-done })
+}
 
 // These tests cross the actual CLI, native subprocess, claim, and checkpoint
 // boundaries. Cooperative context cancellation alone misses the lost record
@@ -124,6 +156,7 @@ func runCheckpointCaptureContract(t *testing.T, repo, binary string) {
 		boundary := strings.TrimSuffix(scenario, "-cleanup-failure")
 		t.Run("ordinary failure before submission releases reservation after "+scenario, func(t *testing.T) {
 			t.Parallel()
+			requireCheckpointCaptureReadinessListener(t)
 			f := newCheckpointCaptureFixture(t, repo, binary)
 			s := f.state()
 			s.Pause, s.StartRunning = boundary, true
@@ -626,6 +659,7 @@ func runCheckpointCaptureContract(t *testing.T, repo, binary string) {
 	}
 	t.Run("fixed Machine0 fork replay reads detail version", func(t *testing.T) {
 		t.Parallel()
+		requireCheckpointCaptureReadinessListener(t)
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		s := f.state()
 		s.Ready = true
@@ -675,6 +709,7 @@ type checkpointCaptureFixtureState struct {
 	Starts            int               `json:"starts"`
 	Removes           int               `json:"removes"`
 	Version           int               `json:"version"`
+	ForkIP            string            `json:"forkIP,omitempty"`
 }
 
 type checkpointCaptureFixtureEvent struct {

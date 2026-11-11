@@ -39,7 +39,7 @@ function assertInvalidSourceGuidance(message) {
   assert.match(message, /Source lease policy is invalid; deployment stopped/);
   for (const text of [
     bindingName,
-    "worker/wrangler.jsonc",
+    "reviewed deployment configuration",
     "owners",
     "orgs",
     "defaultTTLSeconds",
@@ -232,19 +232,17 @@ for (const policy of [
   { owners: { alice: { runtimeExtension: true } } },
   { unknown: {} },
 ]) {
-  test(
-    `rejects runtime-invalid source before fetching, even when acknowledged: ${JSON.stringify(policy)}`,
-    async () => {
-      for (const acknowledgeReplacement of [false, true]) {
-        const f = fixture(settings(plaintext(policy)), policy);
-        await assert.rejects(f.run({ acknowledgeReplacement }), (error) => {
-          assertInvalidSourceGuidance(error.message);
-          return true;
-        });
-        assert.equal(f.calls.length, 0);
-      }
-    },
-  );
+  test(`rejects runtime-invalid source before fetching, even when acknowledged: ${JSON.stringify(policy)}`, async () => {
+    for (const acknowledgeReplacement of [false, true]) {
+      const f = fixture(settings(plaintext(policy)), policy);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- verify both acknowledgment modes independently.
+      await assert.rejects(f.run({ acknowledgeReplacement }), (error) => {
+        assertInvalidSourceGuidance(error.message);
+        return true;
+      });
+      assert.equal(f.calls.length, 0);
+    }
+  });
 }
 
 test("CLI rejects arguments before reading settings", () => {
@@ -299,15 +297,19 @@ exports.unstable_readConfig = ({ config }) => JSON.parse(fs.readFileSync(config,
 `,
   );
   for (const acknowledgeReplacement of ["0", "1"]) {
-    const result = spawnSync(process.execPath, [join(scripts, "verify-coordinator-lease-policy.mjs")], {
-      encoding: "utf8",
-      timeout: 5000,
-      env: {
-        CLOUDFLARE_ACCOUNT_ID: config.accountId,
-        CLOUDFLARE_API_TOKEN: config.apiToken,
-        CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT: acknowledgeReplacement,
+    const result = spawnSync(
+      process.execPath,
+      [join(scripts, "verify-coordinator-lease-policy.mjs")],
+      {
+        encoding: "utf8",
+        timeout: 5000,
+        env: {
+          CLOUDFLARE_ACCOUNT_ID: config.accountId,
+          CLOUDFLARE_API_TOKEN: config.apiToken,
+          CRABBOX_ACKNOWLEDGE_LEASE_POLICY_REPLACEMENT: acknowledgeReplacement,
+        },
       },
-    });
+    );
     assert.ifError(result.error);
     assert.equal(result.status, 1);
     assert.equal(result.stdout, "");

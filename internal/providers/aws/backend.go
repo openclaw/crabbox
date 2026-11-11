@@ -339,7 +339,11 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 				return core.LeaseTarget{}, err
 			}
 			target := sshTargetForBootstrap(resolvedCfg, server, leaseID, intent.Slug)
+			ctx = core.WithCheckpointReadinessLifetime(ctx, server)
 			if err := waitAWSAcquireReady(ctx, func(ctx context.Context) error {
+				if err := core.CheckCheckpointReadinessLifetime(ctx, server); err != nil {
+					return err
+				}
 				return serverClient.CheckAcquireState(ctx, server.CloudID)
 			}, func(ctx context.Context) error {
 				return bootstrapAWSWindowsDesktop(ctx, resolvedCfg, &target, publicKey, b.RT.Stderr)

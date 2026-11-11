@@ -25,6 +25,8 @@ type captureContainerState struct {
 	Removes   int
 	Calls     [][]string
 	Failure   string
+	ForkHost  string
+	Creates   int
 }
 
 func TestLocalContainerCheckpointFailureCleanup(t *testing.T) {

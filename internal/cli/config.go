@@ -419,11 +419,13 @@ type ExternalDesktopConfig struct {
 }
 
 type AsciiBoxConfig struct {
-	NoEnv   bool
-	APIKey  string
-	BaseURL string
-	CLIPath string
-	Workdir string
+	NoSnapshots bool
+	Visibility  string
+	NoEnv       bool
+	APIKey      string
+	BaseURL     string
+	CLIPath     string
+	Workdir     string
 }
 
 const DefaultCloudflareDynamicWorkersCompatibilityDate = "2026-06-12"
@@ -2054,10 +2056,12 @@ type fileExternalConfig struct {
 }
 
 type fileAsciiBoxConfig struct {
-	NoEnv   *bool  `yaml:"noEnv,omitempty"`
-	BaseURL string `yaml:"baseUrl,omitempty"`
-	CLIPath string `yaml:"cliPath,omitempty"`
-	Workdir string `yaml:"workdir,omitempty"`
+	NoSnapshots *bool   `yaml:"noSnapshots,omitempty"`
+	Visibility  *string `yaml:"visibility,omitempty"`
+	NoEnv       *bool   `yaml:"noEnv,omitempty"`
+	BaseURL     string  `yaml:"baseUrl,omitempty"`
+	CLIPath     string  `yaml:"cliPath,omitempty"`
+	Workdir     string  `yaml:"workdir,omitempty"`
 }
 
 type fileCloudflareDynamicWorkersConfig struct {
@@ -3546,6 +3550,14 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 	}
 	if file.AsciiBox != nil {
+		if file.AsciiBox.NoSnapshots != nil {
+			cfg.AsciiBox.NoSnapshots = *file.AsciiBox.NoSnapshots
+			recordConfigInput(cfg, "ascii-box", inputSource, true)
+		}
+		if file.AsciiBox.Visibility != nil {
+			cfg.AsciiBox.Visibility = *file.AsciiBox.Visibility
+			recordConfigInput(cfg, "ascii-box", inputSource, true)
+		}
 		if file.AsciiBox.NoEnv != nil {
 			cfg.AsciiBox.NoEnv = *file.AsciiBox.NoEnv
 			recordConfigInput(cfg, "ascii-box", inputSource, true)
