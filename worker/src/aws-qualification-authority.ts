@@ -139,6 +139,7 @@ interface AWSQualificationAuthorityEnv {
   AWS_SECRET_ACCESS_KEY?: string;
   AWS_SESSION_TOKEN?: string;
   CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID?: string;
+  CRABBOX_AWS_QUALIFICATION_ROLE_ARN?: string;
   CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA?: string;
   CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION?: string;
   CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID?: string;
@@ -152,6 +153,7 @@ interface AWSQualificationAuthorityEnv {
 
 interface AWSQualificationPolicy {
   accountId: string;
+  roleArn: string;
   baseAmiId: string;
   region: string;
   rootGB: number;
@@ -1094,6 +1096,16 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     );
     if (asString(identity["Account"]) !== policy.accountId) {
       throw new Error("AWS qualification authority is authenticated to the wrong account");
+    }
+    // IAM role names are unique within an account, including across IAM paths.
+    // STS assumed-role ARNs contain that name, without the IAM path.
+    const expectedPrefix = `arn:aws:sts::${policy.accountId}:assumed-role/${policy.roleArn.split("/").at(-1)}/`;
+    const principal = asString(identity["Arn"]);
+    if (
+      !principal.startsWith(expectedPrefix) ||
+      !/^[A-Za-z0-9+=,.@_-]{2,64}$/.test(principal.slice(expectedPrefix.length))
+    ) {
+      throw new Error("AWS qualification authority is authenticated to the wrong role");
     }
   }
 
@@ -2903,11 +2915,18 @@ async function qualificationClientToken(runId: string, opId: string): Promise<st
 function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPolicy {
   const accountId = env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID?.trim() ?? "";
   const baseAmiId = env.CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID?.trim() ?? "";
+  const roleArn = env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN?.trim() ?? "";
   const region = requireAWSRegion(env.CRABBOX_AWS_QUALIFICATION_REGION ?? "");
   const securityGroupId = env.CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID?.trim() ?? "";
   const subnetId = env.CRABBOX_AWS_QUALIFICATION_SUBNET_ID?.trim() ?? "";
   const rootGB = Number(env.CRABBOX_AWS_QUALIFICATION_ROOT_GB ?? maxRootGB);
   if (!/^\d{12}$/.test(accountId)) throw new Error("AWS qualification account id is malformed");
+  if (
+    !new RegExp(`^arn:aws:iam::${accountId}:role/[A-Za-z0-9+=,.@_/-]+$`).test(roleArn) ||
+    roleArn.endsWith("/")
+  ) {
+    throw new Error("AWS qualification role ARN is malformed");
+  }
   if (!/^ami-[a-z0-9]+$/.test(baseAmiId))
     throw new Error("AWS qualification base AMI is malformed");
   if (!/^sg-[a-z0-9]+$/.test(securityGroupId)) {
@@ -2919,7 +2938,7 @@ function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPol
   if (!Number.isInteger(rootGB) || rootGB < 8 || rootGB > maxRootGB) {
     throw new Error("AWS qualification root volume limit must be 8 through 20 GiB");
   }
-  return { accountId, baseAmiId, region, rootGB, securityGroupId, subnetId };
+  return { accountId, roleArn, baseAmiId, region, rootGB, securityGroupId, subnetId };
 }
 
 function authorityCredentials(env: AWSQualificationAuthorityEnv): AWSCredentials {

@@ -591,6 +591,7 @@ describe("AWS qualification authority", () => {
   it("preserves lexical AWS account IDs when verifying retained resources", async () => {
     const fixture = authorityFixture();
     fixture.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID = "001234567890";
+    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "arn:aws:iam::001234567890:role/Qualification";
     fixture.signer.accountId = "001234567890";
     await expect(fixture.run.enroll(controller, retainedIdentity())).resolves.toBeUndefined();
   });
@@ -2011,6 +2012,43 @@ describe("AWS qualification authority", () => {
     expect(fixture.signer.calls.filter((call) => call.action === "DeleteSnapshot").length).toBe(2);
   });
 
+  it.each([
+    "arn:aws:sts::123456789012:assumed-role/Production/qualification-test",
+    "arn:aws:iam::123456789012:user/Qualification",
+    "arn:aws:sts::123456789012:assumed-role/QualificationExtra/qualification-test",
+    "arn:aws:sts::999999999999:assumed-role/Qualification/qualification-test",
+    "",
+  ])(
+    "fences same-account or malformed principals before provisioning and cleanup: %s",
+    async (principal) => {
+      const fixture = authorityFixture();
+      await fixture.run.enroll(controller, identity);
+      await importKey(fixture);
+      fixture.signer.principalArn = principal;
+      const before = fixture.signer.calls.length;
+      await expect(
+        fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2")),
+      ).rejects.toThrow("wrong role");
+      await expect(fixture.run.finalize(controller)).rejects.toThrow("wrong role");
+      expect(
+        fixture.signer.calls.slice(before).every(({ action }) => action === "GetCallerIdentity"),
+      ).toBe(true);
+      expect((await fixture.run.attest(controller)).finalized).toBe(false);
+    },
+  );
+
+  it("requires a role ARN and binds role changes into the enrolled policy", async () => {
+    const fixture = authorityFixture();
+    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "";
+    await expect(fixture.run.enroll(controller, identity)).rejects.toThrow("role ARN is malformed");
+    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "arn:aws:iam::123456789012:role/Qualification";
+    await fixture.run.enroll(controller, identity);
+    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "arn:aws:iam::123456789012:role/Production";
+    await expect(fixture.run.execute(identity, request("GetCallerIdentity"))).rejects.toThrow(
+      "policy changed",
+    );
+  });
+
   it("revalidates the expected STS account before every mutation", async () => {
     const fixture = authorityFixture();
     await fixture.run.enroll(controller, identity);
@@ -2026,6 +2064,7 @@ describe("AWS qualification authority", () => {
   it("preserves leading-zero account and reservation owner identities", async () => {
     const fixture = authorityFixture();
     fixture.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID = "001234567890";
+    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "arn:aws:iam::001234567890:role/Qualification";
     fixture.signer.accountId = "001234567890";
     fixture.signer.ownerId = "001234567890";
     await fixture.run.enroll(controller, identity);
@@ -2606,6 +2645,8 @@ function authorityFixture(
   const signer = new FakeSigner(options);
   const env = {
     CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID: "123456789012",
+    CRABBOX_AWS_QUALIFICATION_ROLE_ARN:
+      "arn:aws:iam::123456789012:role/qualification/Qualification",
     CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA: "b".repeat(40),
     CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION: "qualification-v1",
     CRABBOX_AWS_QUALIFICATION_BASE_AMI_ID: "ami-base",
@@ -2781,6 +2822,7 @@ class FakeSigner {
     parameters: Record<string, unknown>;
   }> = [];
   accountId = "123456789012";
+  principalArn: string | undefined;
   ownerId: string | undefined;
   advanceNextIdentityByMs = 0;
   instanceDescribeNotFound = false;
@@ -2840,7 +2882,7 @@ class FakeSigner {
         vi.setSystemTime(new Date(Date.now() + advanceBy));
       }
       return xml(
-        `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>${this.accountId}</Account></GetCallerIdentityResult></GetCallerIdentityResponse>`,
+        `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>${this.accountId}</Account><Arn>${this.principalArn ?? `arn:aws:sts::${this.accountId}:assumed-role/Qualification/qualification-test`}</Arn></GetCallerIdentityResult></GetCallerIdentityResponse>`,
       );
     }
     if (action === "DescribeKeyPairs") {
