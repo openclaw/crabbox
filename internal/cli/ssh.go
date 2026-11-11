@@ -41,6 +41,11 @@ type SSHJump struct {
 	Fingerprint  string             `json:"fingerprint,omitempty"`
 }
 
+type SSHReadinessErrorPattern struct {
+	Fragment string
+	Message  string
+}
+
 type SSHTarget struct {
 	relayConfig             *Config
 	relayCoordinator        *CoordinatorClient
@@ -70,8 +75,9 @@ type SSHTarget struct {
 	ProxyCommand            string
 	ChildEnvDenylist        []string
 	// Transport-only overrides can contain credentials; never serialize them.
-	ChildEnv          map[string]string `json:"-"`
-	DiagnosticSecrets []string          `json:"-"` // Provider credentials echoed by local authentication hooks.
+	ChildEnv               map[string]string          `json:"-"`
+	DiagnosticSecrets      []string                   `json:"-"` // Provider credentials echoed by local authentication hooks.
+	ReadinessErrorPatterns []SSHReadinessErrorPattern `json:"-"` // Provider-owned sanitized terminal diagnostics.
 	// Refresh provider-owned credential files before a new transport starts.
 	PrepareConnection func(context.Context) error `json:"-"`
 }
@@ -705,13 +711,13 @@ func probeWSL2SSHReady(ctx context.Context, target *SSHTarget, profile sshReadin
 		if stopped := sshReadinessProbeContextError(ctx, "transport"); stopped != nil {
 			return stopped
 		}
-		var diagnostic sshReadinessDiagnostic
-		var diagnosticOutput io.Writer = &diagnostic
+		diagnostic := newSSHReadinessDiagnostic(probe)
+		var diagnosticOutput io.Writer = diagnostic
 		if stderr != nil {
-			diagnosticOutput = io.MultiWriter(&diagnostic, stderr)
+			diagnosticOutput = io.MultiWriter(diagnostic, stderr)
 		}
 		sftpErr := probeWSLSFTPSubsystem(ctx, probe, profile.connectTimeout, profile.connectionAttempts, diagnosticOutput)
-		if err := sshReadinessProbeError(ctx, sftpErr, diagnostic.hostKeyRejected()); err != nil {
+		if err := sshReadinessProbeError(ctx, sftpErr, diagnostic); err != nil {
 			if stopped := sshReadinessProbeContextError(ctx, "transport"); stopped != nil {
 				return stopped
 			}

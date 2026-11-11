@@ -388,6 +388,7 @@ the fallback policy are applied during provisioning.
 
 ```yaml
 aws:
+  sshTransport: direct
   region: eu-west-1
   ami: ami-0123456789abcdef0
   securityGroupId: sg-0abcdef0123456789

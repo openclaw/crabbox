@@ -692,8 +692,10 @@ type NativeCheckpointCreateResult struct {
 	Metadata           map[string]string
 }
 
-// NativeCheckpointNotSubmittedError attests that this invocation never attempted
-// image submission. An empty result or a failed request cannot establish this.
+// NativeCheckpointNotSubmittedError attests that the provider did not accept an
+// image creation request. This includes failures before submission and definitive
+// provider rejection. Empty results, ambiguous failures, and unknown provider
+// responses cannot establish this.
 type NativeCheckpointNotSubmittedError struct{ Cause error }
 
 func (e NativeCheckpointNotSubmittedError) Error() string { return e.Cause.Error() }

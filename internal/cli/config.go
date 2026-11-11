@@ -17,6 +17,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	AWSSSHTransportDirect = "direct"
+	AWSSSHTransportSSM    = "ssm"
+)
+
 type Config struct {
 	claimLegacyRoot               string
 	ManagedHost                   string
@@ -80,6 +85,7 @@ type Config struct {
 	Image                         string
 	imageExplicit                 bool
 	AWSRegion                     string
+	AWSSSHTransport               string
 	AWSStockImage                 bool
 	AWSAMI                        string
 	AWSSnapshot                   string
@@ -1611,6 +1617,7 @@ func baseConfig() Config {
 		Location:                "fsn1",
 		Image:                   hetznerImage,
 		AWSRegion:               "eu-west-1",
+		AWSSSHTransport:         AWSSSHTransportDirect,
 		AWSRootGB:               0,
 		AWSLambdaMicroVM:        defaultAWSLambdaMicroVMConfig(),
 		Azure:                   initialAzureConfig(azureImage),
@@ -1928,6 +1935,7 @@ type fileHetznerConfig struct {
 
 type fileAWSConfig struct {
 	Region          string   `yaml:"region,omitempty"`
+	SSHTransport    string   `yaml:"sshTransport,omitempty"`
 	AMI             string   `yaml:"ami,omitempty"`
 	StockImage      *bool    `yaml:"stockImage,omitempty"`
 	SecurityGroupID string   `yaml:"securityGroupId,omitempty"`
@@ -2810,6 +2818,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.AWSStockImage = *file.AWS.StockImage
 			recordConfigInput(cfg, "aws", inputSource, true)
 		}
+		configInputFileString(cfg, "aws", inputSource, &cfg.AWSSSHTransport, file.AWS.SSHTransport)
 		configInputFileString(cfg, "aws", inputSource, &cfg.AWSAMI, file.AWS.AMI)
 		configInputFileString(cfg, "aws", inputSource, &cfg.AWSSGID, file.AWS.SecurityGroupID)
 		configInputFileString(cfg, "aws", inputSource, &cfg.AWSSubnetID, file.AWS.SubnetID)

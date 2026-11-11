@@ -242,7 +242,7 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 	}
 	target = resolved.Target
 	state := blank(server.Labels["state"], server.Status)
-	ready := hasHost && leaseStatusStateCanBeReady(lease, state) && ProbeSSHReady(ctx, &target, statusSSHReadinessTimeout(target))
+	ready := strings.TrimSpace(target.Host) != "" && leaseStatusStateCanBeReady(lease, state) && ProbeSSHReady(ctx, &target, statusSSHReadinessTimeout(target))
 	meta := serverTailscaleMetadata(server)
 	var tailscale *TailscaleMetadata
 	if meta.Enabled {
