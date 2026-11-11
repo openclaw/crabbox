@@ -234,7 +234,7 @@ jobs:
       relay_version: ${{ steps.deploy.outputs.relay_version }}
       relay_binding_digest: ${{ steps.deploy.outputs.relay_binding_digest }}
       relay_url: ${{ steps.deploy.outputs.relay_url }}
-      executor_token: ${{ steps.deploy.outputs.executor_token }}
+      executor_token_sha256: ${{ steps.deploy.outputs.executor_token_sha256 }}
       deployment_hash: ${{ steps.deploy.outputs.deployment_hash }}
       manifest_sha: ${{ steps.deploy.outputs.manifest_sha }}
       binding_digest: ${{ steps.deploy.outputs.binding_digest }}
@@ -267,6 +267,7 @@ jobs:
       - name: Revalidate, deploy, read back, and enroll
         id: deploy
         env:
+          QUALIFICATION_EXECUTOR_CREDENTIAL: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_EXECUTOR_CREDENTIAL }}
           GH_TOKEN: ${{ github.token }}
           QUALIFICATION_ISOLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_JSON }}
           QUALIFICATION_ISOLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_SHA256 }}
@@ -370,7 +371,12 @@ jobs:
 
   execute:
     name: Execute candidate without cloud credentials
-    needs: [authorize, build-candidate, deploy-enroll, arm]
+    needs: [authorize, build-candidate, admit, deploy-enroll, arm]
+    # This separate protected environment contains only the exact-run credential.
+    environment: image-qualification-executor
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.mode == 'first-walk' && 100 || inputs.mode == 'retained' && 38 || 80 }}
     steps:
@@ -380,6 +386,11 @@ jobs:
           ref: ${{ github.workflow_sha }}
           path: harness
           persist-credentials: false
+      - name: Set up protected executor runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.22.1
+          package-manager-cache: false
       - name: Download exact candidate
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -389,7 +400,9 @@ jobs:
       - name: Run publisher rollback qualification
         env:
           QUALIFICATION_RELAY_URL: ${{ needs.deploy-enroll.outputs.relay_url }}
-          QUALIFICATION_EXECUTOR_TOKEN: ${{ needs.deploy-enroll.outputs.executor_token }}
+          QUALIFICATION_EXECUTOR_CREDENTIAL: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_EXECUTOR_CREDENTIAL }}
+          QUALIFICATION_EXECUTOR_TOKEN_SHA256: ${{ needs.deploy-enroll.outputs.executor_token_sha256 }}
+          QUALIFICATION_HANDOFF_SHA256: ${{ needs.admit.outputs.handoff_sha256 }}
           QUALIFICATION_AWS_REGION: ${{ needs.deploy-enroll.outputs.region }}
           QUALIFICATION_BASE_AMI_ID: ${{ needs.deploy-enroll.outputs.base_ami_id }}
           QUALIFICATION_EXPIRES_AT: ${{ needs.deploy-enroll.outputs.expires_at }}
@@ -397,7 +410,7 @@ jobs:
           QUALIFICATION_PROOF_DIR: ${{ runner.temp }}/image-qualification-execute-proof
         run: |
           set +e
-          harness/scripts/image-qualification-execute.sh
+          node harness/scripts/image-qualification-executor-token.mjs
           status=$?
           set -e
           [[ "$status" -eq 137 ]]
