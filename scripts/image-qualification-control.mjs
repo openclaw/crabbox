@@ -19,6 +19,42 @@ const retainedCleanupMs = 8 * 60 * 1000;
 const controllerName = "crabbox-image-qualification-controller";
 const authorityName = "crabbox-aws-qualification-authority";
 const qualificationWorkflowPath = ".github/workflows/image-qualification.yml";
+// Reviewed diagnostic recipe, carried as sealed candidate data rather than
+// installed in the production coordinator by the tooling prerequisite.
+export const firstWalkRecipeSha256 =
+  "eb26f129e9a7cb77ef2197688fcfb3b05356be86b889473e9808287cf016bbf4";
+const firstWalkRecipePath = "recipes/bootstrap/v1/linuxOwnershipRepair.sh";
+
+export function readFirstWalkRecipe(directory) {
+  let file = directory;
+  for (const segment of firstWalkRecipePath.split("/")) {
+    file = path.join(file, segment);
+    const stat = fs.lstatSync(file);
+    if (
+      stat.isSymbolicLink() ||
+      (file !== path.join(directory, firstWalkRecipePath) && !stat.isDirectory())
+    ) {
+      throw new Error("first-walk recipe path must not contain links or non-directories");
+    }
+  }
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.size > 16 * 1024) {
+    throw new Error("first-walk recipe is not a bounded regular file");
+  }
+  const recipe = fs.readFileSync(file);
+  if (digest(recipe) !== firstWalkRecipeSha256) {
+    throw new Error("first-walk recipe does not match the protected reviewed digest");
+  }
+  return recipe;
+}
+
+export function stageFirstWalkRecipe(candidateDir, artifactDir) {
+  const recipe = readFirstWalkRecipe(candidateDir);
+  const destination = path.join(artifactDir, "candidate", firstWalkRecipePath);
+  fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(destination, recipe, { mode: 0o600, flag: "wx" });
+}
+
 const controllerSource = path.join(root, "scripts/image-qualification-controller-worker.mjs");
 const relaySource = path.join(root, "scripts/image-qualification-relay-worker.mjs");
 const imageCapsulePaths = [
@@ -111,7 +147,7 @@ export function retainedImageFromEnv() {
     "QUALIFICATION_RETAINED_SOURCE_SHA",
     "QUALIFICATION_RETAINED_CAPSULE_SHA256",
   ];
-  if (mode === "mint") {
+  if (mode === "mint" || mode === "first-walk") {
     if (names.some((name) => process.env[name])) {
       throw new Error("mint mode cannot accept retained-image inputs");
     }
@@ -602,6 +638,15 @@ export function createManifest(candidateDir, artifactDir, candidateSha, workflow
   if (actualSha !== candidateSha) throw new Error("candidate checkout SHA mismatch");
   verifyBuildReceipt(candidateDir, artifactDir, candidateSha, workflowSha);
   verifyRetainedCapsule(artifactDir, candidateSha);
+  if (process.env.QUALIFICATION_MODE === "first-walk") {
+    if (
+      !readFirstWalkRecipe(candidateDir).equals(
+        readFirstWalkRecipe(path.join(artifactDir, "candidate")),
+      )
+    ) {
+      throw new Error("sealed first-walk recipe differs from candidate source");
+    }
+  }
   const files = filesUnder(artifactDir)
     .filter((file) => path.basename(file) !== "manifest.json")
     .map((file) => ({
@@ -675,6 +720,9 @@ export function verifyManifest(artifactDir, expectedCandidate, expectedWorkflow)
   if (actual.some((file) => !expected.has(file)))
     throw new Error("candidate artifact has extra files");
   verifyRetainedCapsule(artifactDir, expectedCandidate);
+  if (process.env.QUALIFICATION_MODE === "first-walk") {
+    readFirstWalkRecipe(path.join(artifactDir, "candidate"));
+  }
   if (retainedImageFromEnv()) {
     const installer = path.join(artifactDir, "candidate/scripts/install-linux-developer-tools.sh");
     if (fs.statSync(installer).size > 256 * 1024) {
@@ -905,8 +953,9 @@ function qualificationConfig() {
     maxMinutes: retainedImage ? 38 : 120,
     maxMonthlyUSD: 10,
     maxConcurrentInstances: 1,
-    maxLaunches: retainedImage ? 1 : 3,
+    maxLaunches: process.env.QUALIFICATION_MODE === "first-walk" ? 2 : retainedImage ? 1 : 3,
     fastSnapshotRestore: false,
+    ...(process.env.QUALIFICATION_MODE === "first-walk" ? { firstWalk: true } : {}),
     ...(retainedImage ? { retainedImage } : {}),
   };
 }
@@ -940,11 +989,12 @@ function qualificationHandoff(identityCheck, manifestSha256, startsAt) {
         config,
       }),
     ),
-    mode: config.retainedImage ? "retained" : "mint",
+    mode: config.firstWalk ? "first-walk" : config.retainedImage ? "retained" : "mint",
     ...(config.retainedImage ? { retainedCapsuleSha256: config.retainedImage.capsuleSha256 } : {}),
     startsAt,
     workExpiresAt: new Date(
-      Date.parse(expiresAt) - (config.retainedImage ? retainedCleanupMs : 0),
+      Date.parse(expiresAt) -
+        (config.firstWalk ? 20 * 60_000 : config.retainedImage ? retainedCleanupMs : 0),
     ).toISOString(),
     expiresAt,
   };
@@ -969,7 +1019,8 @@ function publishHandoff(identityCheck, manifest) {
     "CLOUDFLARE_API_TOKEN",
     "QUALIFICATION_CONTROLLER_TOKEN",
   ]) {
-    if (Object.hasOwn(process.env, name)) throw new Error(`${name} must be absent from preparation`);
+    if (Object.hasOwn(process.env, name))
+      throw new Error(`${name} must be absent from preparation`);
   }
   const handoff = qualificationHandoff(
     identityCheck,
@@ -1031,12 +1082,15 @@ async function verifyHandoff(identityCheck, manifestSha256) {
     throw new Error("qualification handoff identity changed");
   }
   const artifactId = required("QUALIFICATION_HANDOFF_ARTIFACT_ID", /^[1-9][0-9]*$/);
-  const artifact = await github(`/repos/${identityCheck.repository}/actions/artifacts/${artifactId}`);
+  const artifact = await github(
+    `/repos/${identityCheck.repository}/actions/artifacts/${artifactId}`,
+  );
   if (
     String(artifact.id) !== artifactId ||
     artifact.name !== `image-qualification-handoff-${identityCheck.runId}-1` ||
     artifact.expired !== false ||
-    artifact.digest !== normalizeArtifactDigest(required("QUALIFICATION_HANDOFF_ARTIFACT_DIGEST")) ||
+    artifact.digest !==
+      normalizeArtifactDigest(required("QUALIFICATION_HANDOFF_ARTIFACT_DIGEST")) ||
     String(artifact.workflow_run?.id) !== identityCheck.runId ||
     artifact.workflow_run?.head_sha !== identityCheck.workflowSha
   ) {
@@ -1137,8 +1191,14 @@ function relayMetadata(
       { name: "QUALIFICATION_OWNER", type: "plain_text", text: owner },
       { name: "QUALIFICATION_ORG", type: "plain_text", text: "image-qualification" },
       { name: "QUALIFICATION_EXPIRES_AT", type: "plain_text", text: expiresAt },
-      ...(config.retainedImage
-        ? [{ name: "QUALIFICATION_MODE", type: "plain_text", text: "retained" }]
+      ...(config.firstWalk || config.retainedImage
+        ? [
+            {
+              name: "QUALIFICATION_MODE",
+              type: "plain_text",
+              text: config.firstWalk ? "first-walk" : "retained",
+            },
+          ]
         : []),
       { name: "CANDIDATE", type: "service", service: candidateWorker },
     ],
@@ -1180,6 +1240,7 @@ function executionManifest(identity) {
     enrolledAt: identity.enrolledAt,
     expiresAt: identity.expiresAt,
     ...(identity.retainedImage ? { retainedImage: identity.retainedImage } : {}),
+    ...(identity.firstWalk ? { firstWalk: true } : {}),
   };
 }
 
@@ -1209,6 +1270,7 @@ function qualificationExpectedFromEnv({ optional = false } = {}) {
     expiresAt: required("QUALIFICATION_EXPECTED_EXPIRES_AT"),
     executionManifestDigest: required("QUALIFICATION_EXPECTED_EXECUTION_MANIFEST_DIGEST", sha64),
     ...(retainedImage ? { retainedImage } : {}),
+    ...(process.env.QUALIFICATION_MODE === "first-walk" ? { firstWalk: true } : {}),
   };
 }
 
@@ -1286,6 +1348,7 @@ async function verifyExecutionDeployment(cf, expected) {
     transport?.props?.candidateWorker !== expected.candidateWorker ||
     transport?.props?.deploymentHash !== expected.deploymentHash ||
     transport?.props?.expiresAt !== expected.expiresAt ||
+    Boolean(transport?.props?.firstWalk) !== Boolean(expected.firstWalk) ||
     canonical(transport?.props?.retainedImage ?? null) !==
       canonical(expected.retainedImage ?? null) ||
     relayExpiry?.text !== expected.expiresAt ||
@@ -1400,6 +1463,7 @@ async function deploy() {
     candidateWorker,
     expiresAt,
     ...(config.retainedImage ? { retainedImage: config.retainedImage } : {}),
+    ...(config.firstWalk ? { firstWalk: true } : {}),
   };
   const adminToken = crypto.randomBytes(32).toString("hex");
   const sharedToken = crypto.randomBytes(32).toString("hex");
@@ -1639,7 +1703,8 @@ async function arm() {
     "authorityVersion",
     "policyHash",
   ]) {
-    if (expected[field] !== handoff[field]) throw new Error("deployment differs from prepared handoff");
+    if (expected[field] !== handoff[field])
+      throw new Error("deployment differs from prepared handoff");
   }
   const cf = cloudflareFromEnv();
   await verifyExecutionDeployment(cf, expected);
@@ -2009,6 +2074,7 @@ async function cleanupRun({
           firstAttestation,
           readExecutionProof(),
           expected?.retainedImage,
+          expected?.firstWalk,
         );
       } catch (error) {
         recordQualificationFailure(error);
@@ -2077,6 +2143,11 @@ function readExecutionProof() {
       throw new Error("execution proof checksum mismatch");
     }
   }
+  if (process.env.QUALIFICATION_MODE === "first-walk")
+    return {
+      ...readJSON(path.join(directory, "first-walk.json")),
+      result: readJSON(path.join(directory, "first-walk-result.json")),
+    };
   return {
     spoof: readJSON(path.join(directory, "spoofed-admin.json")),
     fsr: readJSON(path.join(directory, "fsr-denial.json")),
@@ -2087,7 +2158,49 @@ function readExecutionProof() {
   };
 }
 
-export function verifyQualificationEvidence(attestation, proof, retainedImage) {
+export function verifyQualificationEvidence(attestation, proof, retainedImage, firstWalk = false) {
+  if (firstWalk) {
+    const operations = attestation?.operations ?? [];
+    const receipt = attestation?.finalReceipt;
+    const walk = proof?.firstWalk;
+    const result = proof?.result;
+    const accepted = (action) =>
+      operations.filter(
+        (op) =>
+          op.action === action &&
+          op.signerDispatches?.some((dispatch) => dispatch.outcome === "accepted"),
+      );
+    if (
+      !attestation?.finalized ||
+      !receipt?.completedAt ||
+      receipt.failureCodes?.length !== 0 ||
+      !receipt.finalCounts ||
+      Object.values(receipt.finalCounts).some(Number) ||
+      walk?.completed !== true ||
+      walk.launchCount !== 2 ||
+      walk.exit !== 0 ||
+      walk.recipeSha256 !== firstWalkRecipeSha256 ||
+      walk.runnerSha256 !==
+        digest(fs.readFileSync(path.join(root, "scripts/qualification-first-walk-guest.py"))) ||
+      walk.resultSha256 !== digest(JSON.stringify(result)) ||
+      result?.completed !== true ||
+      result.unmounted !== true ||
+      result.ownership?.exit !== 0 ||
+      result.verification?.mismatched !== 0 ||
+      result.recipeSha256 !== walk.recipeSha256 ||
+      !result.ownership.summary?.includes("state=complete") ||
+      attestation.firstWalk?.finalized !== true ||
+      attestation.firstWalk.phase !== "attached" ||
+      result.volumeID !== attestation.firstWalk.volumeID ||
+      walk.readinessReceiptSha256 !== attestation.firstWalk.request?.readinessReceiptSha256 ||
+      accepted("RunInstances").length !== 2 ||
+      accepted("CreateImage").length !== 1 ||
+      accepted("CreateVolume").length !== 1 ||
+      accepted("AttachVolume").length !== 1
+    )
+      throw new Error("attestation does not prove one-copy first-walk settlement");
+    return;
+  }
   const operations = attestation?.operations ?? [];
   const millisecondTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
   const probeStarted = proof?.spoof?.startedAt ?? "";
@@ -2289,6 +2402,13 @@ async function main() {
       required("QUALIFICATION_CANDIDATE_SHA", sha40),
       required("QUALIFICATION_WORKFLOW_SHA", sha40),
     );
+    return;
+  }
+  if (command === "first-walk-recipe") {
+    if (args.length !== 2 || process.env.QUALIFICATION_MODE !== "first-walk") {
+      throw new Error("first-walk-recipe requires first-walk mode and two arguments");
+    }
+    stageFirstWalkRecipe(path.resolve(args[0]), path.resolve(args[1]));
     return;
   }
   if (command === "prepare-build") {

@@ -40,6 +40,10 @@ test("workflow isolates candidate execution from protected credentials", () => {
   assert.match(buildJob, /\.\/node_modules\/\.bin\/wrangler deploy --dry-run/);
   assert.match(buildJob, /image-qualification-control\.mjs manifest/);
   assert.match(buildJob, /build-inputs\.json/);
+  assert.match(
+    buildJob,
+    /if \[\[ "\$QUALIFICATION_MODE" == first-walk \]\]; then\n            node harness\/scripts\/image-qualification-control\.mjs first-walk-recipe \\\n              candidate "\$ARTIFACT"\n          fi/,
+  );
   const setupGo = buildJob.slice(
     buildJob.indexOf("      - name: Set up Go"),
     buildJob.indexOf("      - name: Set up Node"),
@@ -60,8 +64,10 @@ test("workflow isolates candidate execution from protected credentials", () => {
   assert.doesNotMatch(workflow, /seal-candidate|image-qualification-candidate-raw/);
   const buildOrder = [
     "image-qualification-control.mjs prepare-build",
+    "image-qualification-control.mjs first-walk-recipe",
     "go build -trimpath -ldflags='-s -w'",
     "./node_modules/.bin/wrangler deploy --dry-run",
+    'find "$ARTIFACT/worker"',
     "image-qualification-control.mjs manifest",
     "Upload immutable candidate bundle",
   ].map((marker) => buildJob.indexOf(marker));
@@ -189,7 +195,7 @@ test("control tool fixes the reviewed policy and recovery boundary", () => {
   assert.match(control, /maxMinutes: retainedImage \? 38 : 120/);
   assert.match(control, /maxMonthlyUSD: 10/);
   assert.match(control, /maxConcurrentInstances: 1/);
-  assert.match(control, /maxLaunches: retainedImage \? 1 : 3/);
+  assert.match(control, /maxLaunches: process\.env\.QUALIFICATION_MODE === "first-walk" \? 2 : retainedImage \? 1 : 3/);
   assert.match(control, /fastSnapshotRestore: false/);
   assert.match(control, /CRABBOX_AWS_QUALIFICATION_TRANSPORT/);
   assert.match(control, /AWSQualificationController/);
@@ -301,12 +307,42 @@ test("protected build prep binds source, rejects substitution, and seals exact b
     fs.mkdirSync(path.join(artifact, "bin"), { recursive: true });
     fs.mkdirSync(path.join(artifact, "worker"), { recursive: true });
     fs.writeFileSync(path.join(artifact, "bin", "crabbox"), "candidate-cli");
-    fs.truncateSync(path.join(artifact, "bin", "crabbox"), 65 * 1024 * 1024);
+    fs.truncateSync(path.join(artifact, "bin", "crabbox"), 123 * 1024 * 1024);
     fs.writeFileSync(path.join(artifact, "worker", "index.js"), "export default {};");
+    fs.truncateSync(path.join(artifact, "worker", "index.js"), 3 * 1024 * 1024);
+    fs.writeFileSync(path.join(artifact, "worker", "index.js.map"), "debug-map");
+    fs.truncateSync(path.join(artifact, "worker", "index.js.map"), 6 * 1024 * 1024);
+    fs.mkdirSync(path.join(artifact, "worker", "nested debug"));
+    fs.writeFileSync(path.join(artifact, "worker", "nested debug", "extra.js.map"), "map");
+    fs.writeFileSync(path.join(artifact, "worker", "module.wasm"), "wasm-fixture");
+    const executableBefore = module.digest(
+      fs.readFileSync(path.join(artifact, "worker", "index.js")),
+    );
+    assert.throws(
+      () => module.createManifest(candidate, artifact, candidateSha, workflowSha),
+      /candidate artifact exceeds the file or byte limit/,
+    );
+    // Run the producer's actual pruning command, not a mirrored implementation.
+    const prune = workflow.match(/^          (find "\$ARTIFACT\/worker"[^\n]+)$/m)?.[1];
+    assert.ok(prune);
+    execFileSync("bash", ["-c", prune], { env: { ...process.env, ARTIFACT: artifact } });
+    assert.equal(fs.existsSync(path.join(artifact, "worker", "index.js.map")), false);
+    assert.equal(
+      fs.existsSync(path.join(artifact, "worker", "nested debug", "extra.js.map")),
+      false,
+    );
+    assert.equal(
+      module.digest(fs.readFileSync(path.join(artifact, "worker", "index.js"))),
+      executableBefore,
+    );
+    assert.equal(
+      fs.readFileSync(path.join(artifact, "worker", "module.wasm"), "utf8"),
+      "wasm-fixture",
+    );
     const manifest = module.createManifest(candidate, artifact, candidateSha, workflowSha);
     assert.equal(
       manifest.files.find((entry) => entry.path === "bin/crabbox")?.bytes,
-      65 * 1024 * 1024,
+      123 * 1024 * 1024,
     );
     assert.equal(
       module.verifyManifest(artifact, candidateSha, workflowSha).manifestSha256,
@@ -315,6 +351,47 @@ test("protected build prep binds source, rejects substitution, and seals exact b
     fs.writeFileSync(path.join(artifact, "unexpected"), "nope");
     assert.throws(() => module.verifyManifest(artifact, candidateSha, workflowSha), /extra files/);
     fs.rmSync(path.join(artifact, "unexpected"));
+    const priorMode = process.env.QUALIFICATION_MODE;
+    try {
+      process.env.QUALIFICATION_MODE = "first-walk";
+      assert.throws(() => module.verifyManifest(artifact, candidateSha, workflowSha), /ENOENT/);
+      const recipeDir = path.join(candidate, "recipes/bootstrap/v1");
+      fs.mkdirSync(recipeDir, { recursive: true });
+      fs.copyFileSync(
+        path.join(root, "scripts/fixtures/first-walk-reviewed-recipe.sh"),
+        path.join(recipeDir, "linuxOwnershipRepair.sh"),
+      );
+      module.stageFirstWalkRecipe(candidate, artifact);
+      const sealed = module.createManifest(candidate, artifact, candidateSha, workflowSha);
+      assert.equal(
+        sealed.files.find(
+          (f) => f.path === "candidate/recipes/bootstrap/v1/linuxOwnershipRepair.sh",
+        ).sha256,
+        module.firstWalkRecipeSha256,
+      );
+      assert.equal(
+        module.verifyManifest(artifact, candidateSha, workflowSha).manifestSha256,
+        sealed.manifestSha256,
+      );
+      assert.throws(
+        () => module.verifyManifest(artifact, "f".repeat(40), workflowSha),
+        /identity mismatch/,
+      );
+      const staged = path.join(artifact, "candidate/recipes/bootstrap/v1/linuxOwnershipRepair.sh");
+      fs.appendFileSync(staged, "tampered");
+      assert.throws(
+        () => module.verifyManifest(artifact, candidateSha, workflowSha),
+        /digest mismatch/,
+      );
+      assert.throws(
+        () => module.createManifest(candidate, artifact, candidateSha, workflowSha),
+        /protected reviewed digest/,
+      );
+      fs.copyFileSync(path.join(recipeDir, "linuxOwnershipRepair.sh"), staged);
+    } finally {
+      if (priorMode === undefined) delete process.env.QUALIFICATION_MODE;
+      else process.env.QUALIFICATION_MODE = priorMode;
+    }
     fs.truncateSync(path.join(artifact, "worker", "index.js"), 64 * 1024 * 1024);
     assert.throws(
       () => module.createManifest(candidate, artifact, candidateSha, workflowSha),

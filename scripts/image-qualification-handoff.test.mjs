@@ -209,6 +209,12 @@ function fixture(t, mode = "retained") {
       bakedInputsIdentical: true,
     });
   }
+  if (mode === "first-walk") {
+    write(
+      "candidate/recipes/bootstrap/v1/linuxOwnershipRepair.sh",
+      fs.readFileSync(path.join(root, "scripts/fixtures/first-walk-reviewed-recipe.sh"), "utf8"),
+    );
+  }
   write("bin/crabbox", "not executable");
   write("worker/index.js", "throw new Error('candidate must not execute');");
   const files = fs.readdirSync(artifact, { recursive: true })
@@ -306,7 +312,7 @@ function fixture(t, mode = "retained") {
 if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
   installAPI(process.env.QUALIFICATION_HANDOFF_TEST_STATE);
 } else {
-  for (const mode of ["retained", "mint"]) {
+  for (const mode of ["retained", "mint", "first-walk"]) {
     test(`${mode} CLI publishes one immutable handoff before deployment and preserves it through arm`, (t) => {
       const f = fixture(t, mode);
       const admitted = f.invoke("admit");
@@ -316,6 +322,7 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       assert.equal(f.state().events.some((event) => /cloudflare|workers\.dev/.test(event)), false);
       assert.equal(handoff.owner, "image-qualification-42-1@example.invalid");
       assert.equal(Date.parse(handoff.expiresAt) - Date.parse(handoff.startsAt), (mode === "retained" ? 38 : 120) * 60_000);
+      if (mode === "first-walk") assert.equal(Date.parse(handoff.expiresAt) - Date.parse(handoff.workExpiresAt), 20 * 60_000);
       const projection = path.join(f.handoffDir, "iam-inputs.json");
       assert.equal(fs.existsSync(projection), mode === "retained");
       if (mode === "retained") {
