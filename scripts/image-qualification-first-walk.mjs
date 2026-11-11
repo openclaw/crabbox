@@ -37,6 +37,8 @@ if (!Number.isFinite(workCutoff) || Date.now() >= workCutoff)
 fs.mkdirSync(proof, { recursive: true, mode: 0o700 });
 const raw = fs.mkdtempSync(path.join(os.tmpdir(), "first-walk-executor-"));
 const binary = path.join(artifact, "bin/crabbox");
+// upload/download-artifact preserves bytes, but not executable permissions.
+fs.chmodSync(binary, 0o700);
 const env = {
   ...process.env,
   CRABBOX_COORDINATOR: relay,

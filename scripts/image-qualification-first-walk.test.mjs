@@ -95,7 +95,9 @@ for (const badResult of [false, true])
       fs.mkdirSync(path.join(dir, "bin"));
       const commandFile = path.join(dir, "commands");
       const binary = `#!${process.execPath}\nimport fs from 'node:fs';\nlet input=''; for await (const chunk of process.stdin) input+=chunk;\nfs.appendFileSync(${JSON.stringify(commandFile)},JSON.stringify({args:process.argv.slice(2),input})+'\\n');\nconsole.log(input.includes('systemd-run') ? 'CRABBOX_FIRST_WALK_RESULT='+${JSON.stringify(JSON.stringify(result))} : 'stock-ready');\n`;
-      fs.writeFileSync(path.join(dir, "bin/crabbox"), binary, { mode: 0o700 });
+      // Artifact downloads restore ordinary files without executable permissions.
+      fs.writeFileSync(path.join(dir, "bin/crabbox"), binary, { mode: 0o644 });
+      fs.chmodSync(path.join(dir, "bin/crabbox"), 0o644);
       const proof = path.join(dir, "proof");
       const env = {
         PATH: process.env.PATH,
@@ -122,6 +124,7 @@ for (const badResult of [false, true])
         outcome,
         badResult ? { code: 1, signal: null } : { code: null, signal: "SIGKILL" },
       );
+      assert.equal(fs.statSync(path.join(dir, "bin/crabbox")).mode & 0o777, 0o700);
       commands.push(...fs.readFileSync(commandFile, "utf8").trim().split("\n").map(JSON.parse));
       assert.equal(commands.filter((c) => c.args[0] === "warmup").length, 2);
       assert.equal(commands.filter((c) => c.args[0] === "stop").length, 1);
