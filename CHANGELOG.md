@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Run: normalize newly acquired SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity. Thanks @vincentkoc.
+- Run: normalize newly acquired SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity. https://github.com/openclaw/crabbox/pull/3131 Thanks @vincentkoc.
 
 ## 0.83.0 - 2026-11-10
 
