@@ -2313,7 +2313,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return true, err
 		}
 		applyResolvedServerConfig(&cfg, server)
-		removeEnvironmentKeys(runReq.Env, target.ChildEnvDenylist...)
+		applyResolvedLeaseConfig(&cfg, server, &target)
+		envSelection.remove(target.ChildEnvDenylist...)
 		if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 			return true, err
 		}
