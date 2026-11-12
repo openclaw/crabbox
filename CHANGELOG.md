@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Run: normalize fresh and replacement SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity, and preserve child-environment filtering after replacement. https://github.com/openclaw/crabbox/pull/3131 Thanks @vincentkoc.
+
 ## 0.83.0 - 2026-11-10
 
 ### Added

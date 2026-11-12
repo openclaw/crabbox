@@ -2876,6 +2876,8 @@ profiles:
 				}
 			},
 			mutateLease: func(lease *LeaseTarget) {
+				lease.Server.Labels["target"] = targetWindows
+				lease.Server.Labels["windows_mode"] = windowsModeNormal
 				lease.SSH.TargetOS = targetWindows
 				lease.SSH.WindowsMode = windowsModeNormal
 			},

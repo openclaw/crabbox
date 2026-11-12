@@ -1692,6 +1692,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		ctx = context.WithValue(ctx, nativeRuntimeLeaseKey{}, leaseID)
 		observation.BindLease(leaseID, ServerSlug(server))
 		applyResolvedServerConfig(&cfg, server)
+		applyResolvedLeaseConfig(&cfg, server, &target)
 		envSelection.remove(target.ChildEnvDenylist...)
 		if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
 			cfg.WorkRoot = strings.TrimSpace(borrowedPool.Entry.WorkRoot)
@@ -2312,7 +2313,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return true, err
 		}
 		applyResolvedServerConfig(&cfg, server)
-		removeEnvironmentKeys(runReq.Env, target.ChildEnvDenylist...)
+		applyResolvedLeaseConfig(&cfg, server, &target)
+		envSelection.remove(target.ChildEnvDenylist...)
 		if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
 			return true, err
 		}
