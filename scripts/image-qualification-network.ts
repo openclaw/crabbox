@@ -1,5 +1,6 @@
 // Shared by protected Node tooling (Node 24 type stripping) and the private
-// qualification authority. No candidate inputs or production runtime imports.
+// qualification authority. Keep outside worker/src: the build replaces that
+// directory with candidate source data before running protected tooling again.
 export type QualificationNetwork =
   | { mode: "exclusive" }
   | {

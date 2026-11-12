@@ -4,7 +4,7 @@ import {
   qualificationAclShape,
   qualificationEgress,
   qualificationGroupShape,
-} from "../../worker/src/aws-qualification-network.ts";
+} from "../image-qualification-network.ts";
 
 export async function fixtureNetwork(
   scope = {

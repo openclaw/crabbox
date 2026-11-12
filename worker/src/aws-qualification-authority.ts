@@ -3,6 +3,12 @@ import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { XMLParser } from "fast-xml-parser";
 
 import {
+  parseQualificationNetwork,
+  verifyQualificationGuest,
+  verifyQualificationNetwork,
+  type QualificationNetwork,
+} from "../../scripts/image-qualification-network";
+import {
   cleanupFirstWalk,
   firstWalkKey,
   firstWalkStatus,
@@ -32,12 +38,6 @@ import type {
   AWSQualificationFirstWalkRequest,
   AWSQualificationFirstWalkStatus,
 } from "./aws-qualification-contract";
-import {
-  parseQualificationNetwork,
-  verifyQualificationGuest,
-  verifyQualificationNetwork,
-  type QualificationNetwork,
-} from "./aws-qualification-network";
 import { requireAWSRegion } from "./aws-region";
 import { sha256Hex } from "./encoding";
 import type { AWSCredentials } from "./types";

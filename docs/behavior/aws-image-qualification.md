@@ -509,7 +509,7 @@ The group may allow IPv4 SSH on TCP22 only. Egress must cover exactly IPv4 outsi
 the local VPC CIDR on separate TCP80 and TCP443 permissions, with no IPv6, group
 references, prefix lists or additional groups. Security groups are allow-only:
 remove broad rules rather than adding a narrower rule alongside them. The
-`qualificationEgress` helper in `worker/src/aws-qualification-network.ts` generates
+`qualificationEgress` helper in `scripts/image-qualification-network.ts` generates
 the positive CIDR complement, capped at 60 single-CIDR/single-port allowances.
 A `/16` needs 16 CIDRs on each port, or 32 rules. Verify the effective quota and
 actual installed rules before dispatch; source preparation does not install them.
@@ -520,6 +520,11 @@ the two hashes. They bind security coordinates, sort unordered sets, and exclude
 tags, descriptions and request IDs. Do not hash differently shaped CLI JSON and
 assume it is interchangeable. The protected Node tooling imports this module with
 Node 24's type stripping; keep it with the protected checkout, never candidate code.
+The helper lives outside `worker/src`, which the build overlays with candidate
+source. It is an immutable protected build input: a candidate changing it is
+rejected before overlay, and subsequent protected commands import only the
+protected copy. Shared admission therefore needs these tooling changes on the
+protected workflow revision before qualification; a runtime PR alone is insufficient.
 
 The authority checks the network at enrollment and before forward mutations,
 including first-walk copy/attachment operations. Successful launch and instance

@@ -1,7 +1,7 @@
 // Protected qualification admission. This record is operator-reviewed configuration,
 // never candidate input. Account administrators remain trusted custodians.
 import crypto from "node:crypto";
-import { parseQualificationNetwork } from "../worker/src/aws-qualification-network.ts";
+import { parseQualificationNetwork } from "./image-qualification-network.ts";
 
 export const authorityName = "crabbox-aws-qualification-authority";
 export const controllerName = "crabbox-image-qualification-controller";

@@ -8,7 +8,7 @@ import {
   verifyQualificationGuest,
   networkDigest,
   qualificationGroupShape,
-} from "../worker/src/aws-qualification-network.ts";
+} from "./image-qualification-network.ts";
 
 test("IPv4 complement deletes every local destination without widening ports", () => {
   const ipv4 = (n) =>
