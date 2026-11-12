@@ -16,6 +16,18 @@ const adapter = read("scripts/image-qualification-crabbox-adapter.sh");
 const relaySource = read("scripts/image-qualification-relay-worker.mjs");
 const controllerSource = read("scripts/image-qualification-controller-worker.mjs");
 
+test("every protected control job pins Node24 before importing the TypeScript helper", () => {
+  for (const source of [workflow, reaper]) {
+    for (const block of source.split(/(?=^  [a-z][a-z-]*:\n)/m)) {
+      if (!block.includes("scripts/image-qualification-control.mjs")) continue;
+      const setup = block.indexOf("uses: actions/setup-node@");
+      const command = block.indexOf("scripts/image-qualification-control.mjs");
+      assert.ok(setup >= 0 && setup < command);
+      assert.match(block.slice(setup, command), /node-version: 24\.22\.1/);
+    }
+  }
+});
+
 test("workflow isolates candidate execution from protected credentials", () => {
   assert.equal(
     fs.existsSync(path.join(root, ".github/workflows/image-qualification-candidate.yml")),
@@ -288,7 +300,11 @@ test("protected build prep binds source, rejects substitution, and seals exact b
   const module = await import(
     `${pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))}?test=${Date.now()}`
   );
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-qualification-manifest-"));
+  // Resolve macOS temporary-directory aliases so the subprocess's argv path
+  // matches its module URL and actually enters the CLI.
+  const temp = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-qualification-manifest-")),
+  );
   try {
     const harness = path.join(temp, "harness");
     const candidate = path.join(temp, "candidate");
@@ -296,6 +312,14 @@ test("protected build prep binds source, rejects substitution, and seals exact b
     const initialize = (directory, source) => {
       fs.mkdirSync(path.join(directory, "worker", "src"), { recursive: true });
       fs.mkdirSync(path.join(directory, "worker", "test"), { recursive: true });
+      fs.mkdirSync(path.join(directory, "scripts"), { recursive: true });
+      for (const file of [
+        "image-qualification-control.mjs",
+        "image-qualification-isolation.mjs",
+        "image-qualification-executor-token.mjs",
+        "image-qualification-network.ts",
+      ])
+        fs.copyFileSync(path.join(root, "scripts", file), path.join(directory, "scripts", file));
       fs.writeFileSync(path.join(directory, "go.mod"), "module example.invalid/qualification\n");
       fs.writeFileSync(path.join(directory, "go.sum"), "");
       fs.writeFileSync(path.join(directory, "worker", "package.json"), "{}\n");
@@ -303,6 +327,12 @@ test("protected build prep binds source, rejects substitution, and seals exact b
       fs.writeFileSync(path.join(directory, "worker", "wrangler.jsonc"), "{}\n");
       fs.writeFileSync(path.join(directory, "worker", "tsconfig.json"), "{}\n");
       fs.writeFileSync(path.join(directory, "worker", "src", "index.ts"), source);
+      // A candidate may add this formerly imported Worker source. A later
+      // protected command must not import it after the source overlay.
+      fs.writeFileSync(
+        path.join(directory, "worker", "src", "aws-qualification-network.ts"),
+        'throw new Error("candidate network module executed");\n',
+      );
       fs.writeFileSync(path.join(directory, "worker", "test", "index.test.ts"), "test\n");
       execFileSync("git", ["init", "-q"], { cwd: directory });
       execFileSync("git", ["config", "user.name", "Qualification Test"], { cwd: directory });
@@ -369,14 +399,35 @@ test("protected build prep binds source, rejects substitution, and seals exact b
       "wasm-fixture",
     );
     const manifest = module.createManifest(candidate, artifact, candidateSha, workflowSha);
+    // Exercise the actual post-overlay command in a fresh process; the parent
+    // process's pre-overlay module cache must not hide candidate execution.
+    // Require that process to create the manifest rather than reuse our copy.
+    fs.rmSync(path.join(artifact, "manifest.json"));
+    execFileSync(
+      process.execPath,
+      [
+        path.join(harness, "scripts/image-qualification-control.mjs"),
+        "manifest",
+        candidate,
+        artifact,
+      ],
+      {
+        env: {
+          ...process.env,
+          QUALIFICATION_CANDIDATE_SHA: candidateSha,
+          QUALIFICATION_WORKFLOW_SHA: workflowSha,
+        },
+      },
+    );
     assert.equal(
       manifest.files.find((entry) => entry.path === "bin/crabbox")?.bytes,
       123 * 1024 * 1024,
     );
-    assert.equal(
-      module.verifyManifest(artifact, candidateSha, workflowSha).manifestSha256,
-      manifest.manifestSha256,
-    );
+    const regenerated = module.verifyManifest(artifact, candidateSha, workflowSha);
+    // Each generation includes its own timestamp and therefore its own digest.
+    // verifyManifest checks that digest; compare the stable build contents here.
+    assert.deepEqual(regenerated.files, manifest.files);
+    assert.equal(regenerated.mainModule, manifest.mainModule);
     fs.writeFileSync(path.join(artifact, "unexpected"), "nope");
     assert.throws(() => module.verifyManifest(artifact, candidateSha, workflowSha), /extra files/);
     fs.rmSync(path.join(artifact, "unexpected"));
@@ -427,6 +478,22 @@ test("protected build prep binds source, rejects substitution, and seals exact b
       /candidate artifact exceeds the file or byte limit/,
     );
 
+    const protectedNetwork = path.join(candidate, "scripts/image-qualification-network.ts");
+    const networkSource = fs.readFileSync(protectedNetwork);
+    fs.appendFileSync(protectedNetwork, '\nthrow new Error("substituted protected helper");\n');
+    execFileSync("git", ["add", "scripts/image-qualification-network.ts"], { cwd: candidate });
+    execFileSync("git", ["commit", "-qm", "candidate helper substitution"], { cwd: candidate });
+    candidateSha = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: candidate,
+      encoding: "utf8",
+    }).trim();
+    assert.throws(
+      () =>
+        module.prepareCandidateBuild(harness, candidate, receiptFile, candidateSha, workflowSha),
+      /candidate changed protected build inputs/,
+    );
+    fs.writeFileSync(protectedNetwork, networkSource);
+    execFileSync("git", ["add", "scripts/image-qualification-network.ts"], { cwd: candidate });
     fs.writeFileSync(
       path.join(candidate, "worker", "package.json"),
       '{"scripts":{"build":"write-substituted-artifact"}}\n',

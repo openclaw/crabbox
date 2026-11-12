@@ -1,6 +1,7 @@
 // Protected qualification admission. This record is operator-reviewed configuration,
 // never candidate input. Account administrators remain trusted custodians.
 import crypto from "node:crypto";
+import { parseQualificationNetwork } from "./image-qualification-network.ts";
 
 export const authorityName = "crabbox-aws-qualification-authority";
 export const controllerName = "crabbox-image-qualification-controller";
@@ -40,7 +41,7 @@ export function readAdmission(env = process.env) {
   if (sha256 !== env.QUALIFICATION_ISOLATION_SHA256) fail("admission digest mismatch");
   const { authority, aws, production } = record;
   if (
-    record.version !== 1 ||
+    ![1, 2].includes(record.version) ||
     !hex.test(record.accountId ?? "") ||
     record.accountId !== env.CLOUDFLARE_ACCOUNT_ID ||
     authority?.name !== authorityName ||
@@ -70,7 +71,22 @@ export function readAdmission(env = process.env) {
     new Set(authority.namespaces.map((n) => n.id)).size !== 2
   )
     fail("authority namespace ownership invalid");
-  if (production?.inventoryVerified !== true) fail("production exclusion inventory not verified");
+  const network = record.version === 2 ? parseQualificationNetwork(aws.network) : undefined;
+  if (record.version === 1 && aws.network !== undefined) fail("network mode requires version 2");
+  if (network?.mode === "shared-subnet") {
+    const observation = production?.observation;
+    if (
+      production?.inventoryVerified !== false ||
+      observation?.verified !== true ||
+      observation.scope !== "qualification-identities-and-network" ||
+      !/^[0-9a-f]{64}$/.test(observation.receiptSha256 ?? "") ||
+      typeof observation.observedAt !== "string" ||
+      !Number.isFinite(Date.parse(observation.observedAt)) ||
+      Date.parse(observation.observedAt) > Date.now()
+    )
+      fail("shared-subnet observation not verified");
+  } else if (production?.inventoryVerified !== true)
+    fail("production exclusion inventory not verified");
   for (const key of ["workers", "namespaceIds", "roleArns", "subnetIds", "securityGroupIds"]) {
     if (
       !Array.isArray(production?.[key]) ||
@@ -87,7 +103,7 @@ export function readAdmission(env = process.env) {
     ) ||
     authority.namespaces.some((n) => production.namespaceIds.includes(n.id)) ||
     production.roleArns.includes(aws.roleArn) ||
-    production.subnetIds.includes(aws.subnetId) ||
+    (network?.mode !== "shared-subnet" && production.subnetIds.includes(aws.subnetId)) ||
     production.securityGroupIds.includes(aws.securityGroupId)
   )
     fail("qualification and production identities overlap");
@@ -102,6 +118,11 @@ export function readAdmission(env = process.env) {
     QUALIFICATION_ROOT_GB: String(aws.rootGB),
   }))
     if (env[key] !== undefined && env[key] !== value) fail(`${key} differs from admission`);
+  if (
+    env.QUALIFICATION_NETWORK_JSON !== undefined &&
+    env.QUALIFICATION_NETWORK_JSON !== (network ? canonical(network) : "")
+  )
+    fail("network differs from admission");
   if (typeof authority.logicalVersion !== "string" || !authority.logicalVersion)
     fail("authority logical version missing");
   return { ...record, sha256 };
@@ -178,6 +199,11 @@ export async function verifyAuthority(cf) {
   }))
     if (values[`CRABBOX_AWS_QUALIFICATION_${key}`] !== value)
       fail(`authority ${key} differs from admission`);
+  if (
+    (values.CRABBOX_AWS_QUALIFICATION_NETWORK_JSON ?? "") !==
+    (admission.aws.network ? canonical(admission.aws.network) : "")
+  )
+    fail("authority network differs from admission");
   const [subdomain, routes, schedules, domains] = await Promise.all([
     cf.request(`/workers/scripts/${authorityName}/subdomain`),
     cf.request(
