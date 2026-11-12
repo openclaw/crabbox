@@ -1692,6 +1692,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		ctx = context.WithValue(ctx, nativeRuntimeLeaseKey{}, leaseID)
 		observation.BindLease(leaseID, ServerSlug(server))
 		applyResolvedServerConfig(&cfg, server)
+		applyResolvedLeaseConfig(&cfg, server, &target)
 		envSelection.remove(target.ChildEnvDenylist...)
 		if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
 			cfg.WorkRoot = strings.TrimSpace(borrowedPool.Entry.WorkRoot)
