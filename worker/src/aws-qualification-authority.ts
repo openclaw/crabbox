@@ -178,6 +178,8 @@ interface AWSQualificationRunState {
   authorityVersion: string;
   policy: AWSQualificationPolicy;
   policyHash: string;
+  // Cleanup-only upgrade binding; never rewrite the legacy policy or its hash.
+  legacyCleanupRoleArn?: string;
   retainedRootDeviceName?: string;
   finalizationSource?: "automatic" | "controller";
   finalizingAt?: string;
@@ -1133,6 +1135,57 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
   }
 
   private async ensureAccount(policy: AWSQualificationPolicy): Promise<void> {
+    const roleArn =
+      policy.roleArn === undefined
+        ? (await this.requireLegacyCleanupRun(policy)).legacyCleanupRoleArn
+        : policy.roleArn;
+    await this.verifyAccountRole(policy, roleArn);
+  }
+
+  private async requireLegacyCleanupRun(
+    policy: AWSQualificationPolicy,
+  ): Promise<AWSQualificationRunState> {
+    const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
+    if (
+      !run?.finalizingAt ||
+      run.finalizedAt ||
+      Object.keys(policy).toSorted().join(",") !==
+        "accountId,baseAmiId,region,rootGB,securityGroupId,subnetId" ||
+      canonicalJSON(run.policy) !== canonicalJSON(policy) ||
+      run.policyHash !== (await qualificationPolicyHash(policy))
+    ) {
+      throw new Error("AWS qualification legacy policy requires verified cleanup transition");
+    }
+    return run;
+  }
+
+  private async bindLegacyCleanupRole(run: AWSQualificationRunState): Promise<void> {
+    if (run.policy.roleArn !== undefined) return;
+    await this.requireLegacyCleanupRun(run.policy);
+    if (run.legacyCleanupRoleArn !== undefined) return;
+    const { roleArn, network: _network, ...legacyPolicy } = authorityPolicy(this.env);
+    if (canonicalJSON(legacyPolicy) !== canonicalJSON(run.policy)) {
+      throw new Error("AWS qualification legacy cleanup policy does not match configuration");
+    }
+    // The old schema had no role binding. Accept an operator-configured role only
+    // after verifying the unchanged resource policy and its live STS principal.
+    // Persist it on this same owner before cleanup; retries may not select another.
+    await this.verifyAccountRole(run.policy, roleArn);
+    run.legacyCleanupRoleArn = roleArn;
+    await this.ctx.storage.put(stateKey, run);
+  }
+
+  private async verifyAccountRole(
+    policy: AWSQualificationPolicy,
+    roleArn: string | undefined,
+  ): Promise<void> {
+    if (
+      !roleArn ||
+      !new RegExp(`^arn:aws:iam::${policy.accountId}:role/[A-Za-z0-9+=,.@_/-]+$`).test(roleArn) ||
+      roleArn.endsWith("/")
+    ) {
+      throw new Error("AWS qualification role ARN is malformed");
+    }
     const response = await this.signer.execute("sts", "GetCallerIdentity", policy.region, {});
     const result = await boundedResponse(response);
     if (result.status < 200 || result.status >= 300) {
@@ -1146,7 +1199,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     }
     // IAM role names are unique within an account, including across IAM paths.
     // STS assumed-role ARNs contain that name, without the IAM path.
-    const expectedPrefix = `arn:aws:sts::${policy.accountId}:assumed-role/${policy.roleArn.split("/").at(-1)}/`;
+    const expectedPrefix = `arn:aws:sts::${policy.accountId}:assumed-role/${roleArn.split("/").at(-1)}/`;
     const principal = asString(identity["Arn"]);
     if (
       !principal.startsWith(expectedPrefix) ||
@@ -1383,6 +1436,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     const failures: string[] = [];
     await this.beginFinalReceipt(ledger);
     try {
+      await this.bindLegacyCleanupRole(run);
       await this.ensureAccount(policy);
       await this.recordVerificationEvidence("GetCallerIdentity", "accepted");
     } catch (error) {

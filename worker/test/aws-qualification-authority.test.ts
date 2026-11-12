@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 import { XMLBuilder, XMLParser } from "fast-xml-parser";
@@ -2051,6 +2052,193 @@ describe("AWS qualification authority", () => {
     );
   });
 
+  it("settles a legacy persisted policy through the controller without rewriting enrollment", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityHTTPFixture(identity);
+    await fixture.controller.claim(identity);
+    await importKey(fixture);
+    await fixture.candidate.execute(request("RunInstances", runInstancesParams(), "ec2"));
+    const before = await persistLegacyPolicy(fixture);
+    fixture.env.CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA = "f".repeat(40);
+    const network = await fixtureNetwork();
+    Object.assign(fixture.env, {
+      CRABBOX_AWS_QUALIFICATION_NETWORK_JSON: JSON.stringify(network.network),
+    });
+    fixture.reopen();
+    await expect(fixture.candidate.execute(request("GetCallerIdentity"))).rejects.toThrow(
+      "policy changed",
+    );
+
+    await fixture.controller.finalize(identity.runId);
+    expect(await fixture.storage.get("run")).toMatchObject({
+      policy: before["policy"],
+      policyHash: before["policyHash"],
+      authoritySha: before["authoritySha"],
+      legacyCleanupRoleArn: fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN,
+      finalizationSource: "controller",
+      finalizedAt: expect.any(String),
+    });
+    expect((await fixture.controller.attest(identity.runId)).finalReceipt).toMatchObject({
+      failureCodes: [],
+      finalCounts: { images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 },
+    });
+    expect(fixture.signer.calls.filter(({ action }) => action === "RunInstances")).toHaveLength(1);
+    expect(fixture.signer.calls.some(({ action }) => action === "TerminateInstances")).toBe(true);
+    await fixture.controller.retire(identity.runId);
+    expect(await fixture.controller.discover()).toBeUndefined();
+  });
+
+  it("pins a legacy cleanup role across failed cleanup, restart and alarm retry", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityHTTPFixture(identity);
+    await fixture.controller.claim(identity);
+    await importKey(fixture);
+    await persistLegacyPolicy(fixture);
+    const execute = fixture.signer.execute.bind(fixture.signer);
+    const fail = vi.spyOn(fixture.signer, "execute").mockImplementation(async (...args) => {
+      if (args[1] === "DeleteKeyPair") throw new Error("cleanup transport unavailable");
+      return await execute(...args);
+    });
+    await expect(fixture.controller.finalize(identity.runId)).rejects.toThrow("cleanup incomplete");
+    expect(await fixture.storage.get("run")).toMatchObject({
+      legacyCleanupRoleArn: fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN,
+    });
+    expect(fixture.storage.alarm).toEqual(expect.any(Number));
+    fail.mockRestore();
+    fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "arn:aws:iam::123456789012:role/Production";
+    fixture.signer.principalArn = "arn:aws:sts::123456789012:assumed-role/Production/test";
+    fixture.reopen();
+    const before = fixture.signer.calls.length;
+    await expect(fixture.run.alarm()).rejects.toThrow("wrong role");
+    expect(fixture.signer.calls.slice(before).map(({ action }) => action)).toEqual([
+      "GetCallerIdentity",
+    ]);
+    await expect(fixture.run.execute(identity, request("GetCallerIdentity"))).rejects.toThrow(
+      "finalizing",
+    );
+    fixture.signer.principalArn = undefined;
+    fixture.reopen();
+    await fixture.run.alarm();
+    expect((await fixture.controller.attest(identity.runId)).finalized).toBe(true);
+    await fixture.controller.finalize(identity.runId);
+    await fixture.controller.retire(identity.runId);
+    expect(await fixture.controller.discover()).toBeUndefined();
+  });
+
+  it("recovers a legacy pending image on the automatic cleanup path after restart", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityFixture({ loseAfterEffect: "CreateImage" });
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    await fixture.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
+    await expect(
+      fixture.run.execute(
+        identity,
+        request(
+          "CreateImage",
+          {
+            InstanceId: "i-owned",
+            Name: "qualification-image",
+            NoReboot: "true",
+          },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("lost response");
+    const before = await persistLegacyPolicy(fixture);
+    const reopened = new AWSQualificationRun(
+      { storage: fixture.storage } as never,
+      fixture.env as never,
+      fixture.signer,
+    );
+    await reopened.alarm();
+    expect(await fixture.storage.get("run")).toMatchObject({
+      policy: before["policy"],
+      policyHash: before["policyHash"],
+      finalizationSource: "automatic",
+      finalizedAt: expect.any(String),
+    });
+    expect((await reopened.attest(controller)).finalReceipt).toMatchObject({
+      failureCodes: [],
+      finalCounts: { images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 },
+    });
+    expect(fixture.signer.calls.filter(({ action }) => action === "CreateImage")).toHaveLength(1);
+    for (const action of [
+      "DeregisterImage",
+      "DeleteSnapshot",
+      "TerminateInstances",
+      "DeleteKeyPair",
+    ]) {
+      expect(fixture.signer.calls.some((call) => call.action === action)).toBe(true);
+    }
+  });
+
+  it("retains a legacy role pin after an uncertain storage response without dispatching cleanup", async () => {
+    useImmediateTimeouts();
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    await persistLegacyPolicy(fixture);
+    const put = fixture.storage.put.bind(fixture.storage);
+    let lost = false;
+    vi.spyOn(fixture.storage, "put").mockImplementation(async (key, value) => {
+      await put(key, value);
+      if (!lost && key === "run" && (value as Record<string, unknown>)["legacyCleanupRoleArn"]) {
+        lost = true;
+        throw new Error("lost pin response");
+      }
+    });
+    const before = fixture.signer.calls.length;
+    await expect(fixture.run.finalize(controller)).rejects.toThrow("lost pin response");
+    expect(fixture.signer.calls.slice(before).map(({ action }) => action)).toEqual([
+      "GetCallerIdentity",
+    ]);
+    expect(await fixture.storage.get("run")).toHaveProperty("legacyCleanupRoleArn");
+    const reopened = new AWSQualificationRun(
+      { storage: fixture.storage } as never,
+      fixture.env as never,
+      fixture.signer,
+    );
+    await reopened.alarm();
+    expect((await reopened.attest(controller)).finalized).toBe(true);
+  });
+
+  it.each([
+    "policy drift",
+    "hash mismatch",
+    "unknown schema",
+    "wrong role",
+    "wrong account",
+    "missing role",
+  ])("refuses an unverified legacy cleanup transition: %s", async (reason) => {
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    await importKey(fixture);
+    const stored = await persistLegacyPolicy(fixture);
+    if (reason === "policy drift") fixture.env.CRABBOX_AWS_QUALIFICATION_SUBNET_ID = "subnet-other";
+    if (reason === "hash mismatch") stored["policyHash"] = "0".repeat(64);
+    if (reason === "unknown schema") {
+      (stored["policy"] as Record<string, unknown>)["network"] = null;
+      stored["policyHash"] = legacyPolicyHash(stored["policy"] as Record<string, unknown>);
+    }
+    if (reason === "wrong role")
+      fixture.signer.principalArn = "arn:aws:sts::123456789012:assumed-role/Production/test";
+    if (reason === "wrong account") fixture.signer.accountId = "999999999999";
+    if (reason === "missing role") fixture.env.CRABBOX_AWS_QUALIFICATION_ROLE_ARN = "";
+    await fixture.storage.put("run", stored);
+    const before = fixture.signer.calls.length;
+    await expect(fixture.run.finalize(controller)).rejects.toThrow(/AWS qualification/);
+    expect(
+      fixture.signer.calls.slice(before).every(({ action }) => action === "GetCallerIdentity"),
+    ).toBe(true);
+    expect(await fixture.storage.get("run")).not.toHaveProperty("legacyCleanupRoleArn");
+    expect((await fixture.run.attest(controller)).finalized).toBe(false);
+    expect(fixture.storage.alarm).toEqual(expect.any(Number));
+    await expect(fixture.run.execute(identity, request("GetCallerIdentity"))).rejects.toThrow(
+      "finalizing",
+    );
+  });
+
   it("revalidates the expected STS account before every mutation", async () => {
     const fixture = authorityFixture();
     await fixture.run.enroll(controller, identity);
@@ -2769,6 +2957,25 @@ function firstWalkAuthorityFixture() {
       }
     },
   };
+}
+
+function legacyPolicyHash(policy: Record<string, unknown>): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify(
+        Object.fromEntries(Object.entries(policy).toSorted(([a], [b]) => a.localeCompare(b))),
+      ),
+    )
+    .digest("hex");
+}
+
+async function persistLegacyPolicy(fixture: ReturnType<typeof authorityFixture>) {
+  const stored = (await fixture.storage.get<Record<string, unknown>>("run"))!;
+  const policy = stored["policy"] as Record<string, unknown>;
+  delete policy["roleArn"];
+  stored["policyHash"] = legacyPolicyHash(policy);
+  await fixture.storage.put("run", stored);
+  return stored;
 }
 
 function authorityFixture(

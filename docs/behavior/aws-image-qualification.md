@@ -73,6 +73,7 @@ Configure these authority variables:
 
 ```text
 CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID
+CRABBOX_AWS_QUALIFICATION_ROLE_ARN
 CRABBOX_AWS_QUALIFICATION_AUTHORITY_SHA
 CRABBOX_AWS_QUALIFICATION_AUTHORITY_VERSION
 CRABBOX_AWS_QUALIFICATION_REGION
@@ -629,6 +630,19 @@ cleanup and retries incomplete teardown. Protected teardown fences candidate
 mutations, deletes the public relay, deletes the private candidate Worker and
 its Fleet Durable Object namespace, verifies their absence, repeats authority
 finalization idempotently, and retires the registry record.
+
+Authority upgrades can settle unfinished runs whose persisted policy predates
+the required role ARN. These runs cannot resume candidate work. Cleanup first
+persists the finalization fence, verifies the exact six-field legacy policy and
+its original hash, and requires the configured account, Region, base AMI, root
+size, subnet and security group to match. It then verifies the explicitly
+configured role with STS and pins that role on the existing run before any EC2
+cleanup. Every later cleanup or reconciliation call rechecks the pinned role;
+restarts and changed configuration cannot substitute another role. The original
+policy, hash and enrollment identity remain unchanged. A mismatch leaves the
+run fenced with its cleanup alarm pending; restore the matching configuration
+and pinned-role credentials before retrying. This transition grants no new
+resource ownership or permission to resume the old run.
 
 Cloud setup, enrollment, candidate deployment, and paid execution remain
 explicit maintainer actions. Merging this seam creates no Worker, secret,
