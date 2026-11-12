@@ -153,19 +153,28 @@ console.log(input.includes('systemd-run') ? 'CRABBOX_FIRST_WALK_RESULT='+${JSON.
         QUALIFICATION_AWS_REGION: "us-east-1",
         QUALIFICATION_EXPIRES_AT: new Date(Date.now() + 120 * 60_000).toISOString(),
       };
+      let stderr = "";
       const outcome = await new Promise((resolve, reject) => {
         const child = spawn(
           process.execPath,
           [path.join(root, "scripts/image-qualification-first-walk.mjs")],
-          { env, stdio: "ignore", timeout: 15_000, killSignal: "SIGKILL" },
+          { env, stdio: ["ignore", "ignore", "pipe"], timeout: 15_000, killSignal: "SIGKILL" },
         );
+        child.stderr.on("data", (chunk) => (stderr += chunk));
         child.on("error", reject);
-        child.on("exit", (code, signal) => resolve({ code, signal }));
+        child.on("close", (code, signal) => resolve({ code, signal }));
       });
       assert.deepEqual(
         outcome,
         badResult || evidenceFault ? { code: 1, signal: null } : { code: null, signal: "SIGKILL" },
       );
+      if (["directory", "fifo", "replacement"].includes(evidenceFault))
+        assert.match(
+          stderr,
+          /first-walk log was replaced; let the independent finalizer settle the run and investigate the changed log before any separately authorized retry/,
+        );
+      assert.equal(stderr.includes(privateMarker), false);
+      assert.equal(stderr.includes(env.QUALIFICATION_EXECUTOR_TOKEN), false);
       assert.equal(fs.statSync(path.join(dir, "bin/crabbox")).mode & 0o777, 0o700);
       commands.push(...fs.readFileSync(commandFile, "utf8").trim().split("\n").map(JSON.parse));
       for (const command of commands) {

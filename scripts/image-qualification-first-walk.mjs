@@ -233,7 +233,9 @@ try {
       try {
         const actual = fs.fstatSync(fd);
         if (!actual.isFile() || actual.dev !== expected.dev || actual.ino !== expected.ino)
-          throw new Error("first-walk log was replaced");
+          throw new Error(
+            "first-walk log was replaced; let the independent finalizer settle the run and investigate the changed log before any separately authorized retry",
+          );
         const text = fs
           .readFileSync(fd, "utf8")
           .replaceAll(token, "[executor-token]")
