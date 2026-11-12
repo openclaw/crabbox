@@ -472,9 +472,70 @@ its single active Cloudflare version, source revision, logical version, policy
 hash, full public binding digest, and exact run/registry namespace IDs with their
 owning script and class. It also binds the AWS account, qualification role ARN,
 Region, subnet, security group, base AMI and root-volume bound. Explicit production
-Worker, namespace, role, subnet and security-group exclusion inventories must be
-disjoint. Operators must verify and admit actual live identities; credential
+Worker, namespace, role and security-group exclusion inventories must be
+disjoint. Exclusive-subnet admission also requires disjoint subnet identities.
+Operators must verify and admit actual live identities; credential
 availability or discovery alone does not admit a deployment configuration.
+
+### Explicit shared-subnet admission
+
+Version 1 records retain their exclusive-subnet behavior. Version 2 requires an
+explicit `aws.network` object: `{ "mode": "exclusive" }` keeps those exclusions,
+or `mode: "shared-subnet"` selects bounded network verification. Shared mode does
+not assert a complete exclusive production inventory: `production.inventoryVerified`
+must be `false`, and `production.observation` must contain `verified: true`,
+`scope: "qualification-identities-and-network"`, an `observedAt` timestamp and
+the reviewed observation's `receiptSha256`. All existing identity arrays remain
+required; only subnet overlap is allowed. These are protected operator assertions,
+not permissions for candidates to choose or edit network policy.
+
+A shared network object binds `vpcId`, `vpcCidr`, `subnetCidr`, `routeTableId`,
+`internetGatewayId`, `networkAclId`, `securityGroupSha256` and `aclSha256`. Set the
+private authority's nonsecret `CRABBOX_AWS_QUALIFICATION_NETWORK_JSON` binding to
+the canonical JSON of that exact object. The protected admission digest, authority
+binding digest and enrolled authority policy hash all cover it. An omitted binding
+retains the old policy hash and behavior; it cannot satisfy a shared record.
+
+The supported shared topology is deliberately narrow: one IPv4 VPC CIDR, one
+main route table with only its local route and an internet-gateway default route,
+one exact available subnet without IPv6 assignment, and the bound ACL and dedicated
+group. Additional tables, associations, local CIDRs, private routes, truncated
+inventories, denied reads and malformed responses stop admission. No shared route
+or ACL is changed. The authority needs regional `DescribeSubnets`,
+`DescribeRouteTables`, `DescribeNetworkAcls` and `DescribeSecurityGroups` reads;
+unavailable permissions are a deployment dependency, never a reason to skip a check.
+
+The group may allow IPv4 SSH on TCP22 only. Egress must cover exactly IPv4 outside
+the local VPC CIDR on separate TCP80 and TCP443 permissions, with no IPv6, group
+references, prefix lists or additional groups. Security groups are allow-only:
+remove broad rules rather than adding a narrower rule alongside them. The
+`qualificationEgress` helper in `worker/src/aws-qualification-network.ts` generates
+the positive CIDR complement, capped at 60 single-CIDR/single-port allowances.
+A `/16` needs 16 CIDRs on each port, or 32 rules. Verify the effective quota and
+actual installed rules before dispatch; source preparation does not install them.
+
+Use that same module's `qualificationGroupShape`, `qualificationAclShape` and
+`networkDigest` on the authority's parsed EC2 Query response records to calculate
+the two hashes. They bind security coordinates, sort unordered sets, and exclude
+tags, descriptions and request IDs. Do not hash differently shaped CLI JSON and
+assume it is interchangeable. The protected Node tooling imports this module with
+Node 24's type stripping; keep it with the protected checkout, never candidate code.
+
+The authority checks the network at enrollment and before forward mutations,
+including first-walk copy/attachment operations. Successful launch and instance
+discovery responses, including cached replays, require an exact guest readback:
+account, VPC, subnet, one interface, the dedicated group only, no IPv6 or IAM
+profile, and the required IMDS settings. Effects enter the existing durable ledger
+before a post-launch refusal. Cleanup, cancellation and finalization do not depend
+on the shared network checks passing; ordinary ownership and account checks remain.
+
+This permits shared-subnet use by trusted maintainers running reviewed synthetic
+code without guest cloud credentials. It does not isolate the guest from public
+HTTP/HTTPS endpoints, AWS DNS or platform services. Other private destinations have
+no admitted forwarding route; network drift requires reassessment. Reads and
+dispatch are not atomic with independent administrator changes: coordinate those
+writers during the bounded run. No claim of permanent future subnet non-use is
+required, and a different subnet in the same VPC is not itself isolation.
 
 Protected tooling reads all namespace inventory pages and checks each bound
 namespace ID against its owning script and class. The authority is private and

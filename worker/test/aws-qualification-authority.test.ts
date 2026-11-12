@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 
+import { XMLBuilder, XMLParser } from "fast-xml-parser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { fixtureNetwork } from "../../scripts/fixtures/qualification-network.mjs";
 import { EC2SpotClient } from "../src/aws";
 import {
   AWSQualificationController,
@@ -2512,6 +2514,151 @@ describe("first-walk integration with the existing authority", () => {
     expect(f.signer.calls.some((c) => c.action === "AttachVolume")).toBe(false);
   });
 });
+
+describe("shared-subnet authority admission and settlement", () => {
+  it("checks network before enrollment and refuses missing permissions without allocation", async () => {
+    const f = authorityFixture();
+    const net = await sharedNetwork(f);
+    net.roots.DescribeRouteTables.nextToken = "more";
+    await expect(f.run.enroll(controller, identity)).rejects.toThrow("network admission");
+    expect(await f.storage.get("run")).toBeUndefined();
+    expect(f.signer.calls.some((c) => c.action === "RunInstances")).toBe(false);
+    delete net.roots.DescribeRouteTables.nextToken;
+    net.deny = "DescribeNetworkAcls";
+    await expect(f.run.enroll(controller, identity)).rejects.toThrow(
+      "DescribeNetworkAcls http 403",
+    );
+  });
+  it("checks launch/readback and denies later forward work after network drift, while cleanup succeeds", async () => {
+    useImmediateTimeouts();
+    const f = authorityFixture();
+    const net = await sharedNetwork(f);
+    await f.run.enroll(controller, identity);
+    await importKey(f);
+    await f.run.execute(identity, request("RunInstances", runInstancesParams(), "ec2"));
+    await f.run.execute(
+      identity,
+      request("DescribeInstances", { "InstanceId.1": "i-owned" }, "ec2"),
+    );
+    net.table.routeSet.item.push({
+      destinationCidrBlock: "10.0.0.0/8",
+      gatewayId: "pcx-11111111",
+      state: "active",
+    });
+    await expect(
+      f.run.execute(
+        identity,
+        request("CreateImage", { InstanceId: "i-owned", Name: "crabbox-image" }, "ec2"),
+      ),
+    ).rejects.toThrow("network admission");
+    expect(f.signer.calls.some((c) => c.action === "CreateImage")).toBe(false);
+    const before = f.signer.calls.filter((c) => c.action === "DescribeRouteTables").length;
+    await f.run.beginFinalization(controller);
+    await f.run.finalize(controller);
+    expect((await f.run.attest(controller)).finalized).toBe(true);
+    expect(f.signer.calls.filter((c) => c.action === "DescribeRouteTables")).toHaveLength(before);
+  });
+  it("keeps launch ownership when guest verification fails, rechecks receipt replays and settles after restart", async () => {
+    useImmediateTimeouts();
+    const f = authorityFixture();
+    const net = await sharedNetwork(f);
+    await f.run.enroll(controller, identity);
+    await importKey(f);
+    net.guest.iamInstanceProfile = { arn: "arn:aws:iam::123456789012:instance-profile/Unexpected" };
+    const launch = request("RunInstances", runInstancesParams(), "ec2");
+    await expect(f.run.execute(identity, launch)).rejects.toThrow("network admission");
+    expect(await f.storage.get("ledger")).toMatchObject({
+      instanceIds: ["i-owned"],
+      volumeIds: ["vol-owned"],
+    });
+    await expect(f.run.execute(identity, launch)).rejects.toThrow("network admission");
+    expect(f.signer.calls.filter((c) => c.action === "RunInstances")).toHaveLength(1);
+    net.deny = "DescribeRouteTables";
+    const reopened = new AWSQualificationRun(
+      { storage: f.storage } as never,
+      f.env as never,
+      f.signer,
+    );
+    await reopened.finalize(controller);
+    expect((await reopened.attest(controller)).finalized).toBe(true);
+  });
+  it("checks an uncertain generic launch replay without changing its idempotency token", async () => {
+    useImmediateTimeouts();
+    const f = authorityFixture({ loseAfterEffect: "RunInstances" });
+    const net = await sharedNetwork(f);
+    await f.run.enroll(controller, identity);
+    await importKey(f);
+    const launch = request("RunInstances", runInstancesParams(), "ec2");
+    await expect(f.run.execute(identity, launch)).rejects.toThrow("lost response");
+    net.guest.groupSet.item.push({ groupId: "sg-99999999" });
+    await expect(f.run.execute(identity, launch)).rejects.toThrow("network admission");
+    const launches = f.signer.calls.filter((c) => c.action === "RunInstances");
+    expect(launches).toHaveLength(2);
+    expect(launches[0]!.parameters["ClientToken"]).toBe(launches[1]!.parameters["ClientToken"]);
+    await f.run.finalize(controller);
+    expect((await f.run.attest(controller)).finalized).toBe(true);
+  });
+  it("checks the attachment recipient before creating a copy and cleans up despite later route denial", async () => {
+    const f = firstWalkAuthorityFixture();
+    const net = await sharedNetwork(f);
+    await f.run.enroll(controller, f.identity);
+    await importKey(f, f.identity);
+    await f.run.execute(f.identity, request("RunInstances", runInstancesParams(), "ec2"));
+    net.guest.networkInterfaceSet.item[0].groupSet.item.push({ groupId: "sg-99999999" });
+    await expect(f.attach()).rejects.toThrow("network admission");
+    expect(f.signer.calls.some((c) => c.action === "CreateVolume")).toBe(false);
+    net.guest.networkInterfaceSet.item[0].groupSet.item.pop();
+    await f.attach();
+    net.deny = "DescribeRouteTables";
+    await f.run.beginFinalization(controller);
+    await f.run.finalize(controller);
+    expect((await f.run.firstWalkStatus(f.identity)).finalized).toBe(true);
+    expect(
+      f.signer.calls
+        .filter((c) => c.action === "DeleteVolume")
+        .map((c) => c.parameters["VolumeId"]),
+    ).toEqual(["vol-33333333"]);
+    expect(f.signer.calls.some((c) => c.action === "DeleteSnapshot")).toBe(false);
+  });
+});
+
+async function sharedNetwork(f: ReturnType<typeof authorityFixture>) {
+  const net = await fixtureNetwork({
+    accountId: f.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID,
+    subnetId: f.env.CRABBOX_AWS_QUALIFICATION_SUBNET_ID,
+    securityGroupId: f.env.CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID,
+  });
+  Object.assign(f.env, { CRABBOX_AWS_QUALIFICATION_NETWORK_JSON: JSON.stringify(net.network) });
+  f.signer.ownerId = f.env.CRABBOX_AWS_QUALIFICATION_ACCOUNT_ID;
+  const original = f.signer.execute.bind(f.signer);
+  const builder = new XMLBuilder();
+  const parser = new XMLParser();
+  const state = { ...net, deny: "" };
+  f.signer.execute = async (service, action, region, parameters) => {
+    if (action in net.roots) {
+      f.signer.calls.push({ service, action, region, parameters: structuredClone(parameters) });
+      if (state.deny === action) return new Response("<Response/>", { status: 403 });
+      return xml(builder.build({ [`${action}Response`]: net.roots[action] }));
+    }
+    const response = await original(service, action, region, parameters);
+    if (action !== "DescribeInstances" || response.status >= 300) return response;
+    const doc = parser.parse(await response.text());
+    const reservations = doc.DescribeInstancesResponse.reservationSet?.item;
+    for (const reservation of reservations
+      ? Array.isArray(reservations)
+        ? reservations
+        : [reservations]
+      : []) {
+      const entries = reservation.instancesSet?.item;
+      for (const instance of entries ? (Array.isArray(entries) ? entries : [entries]) : []) {
+        const { instanceId, instanceState } = instance;
+        Object.assign(instance, structuredClone(net.guest), { instanceId, instanceState });
+      }
+    }
+    return xml(builder.build(doc));
+  };
+  return state;
+}
 
 function firstWalkRequest() {
   return {

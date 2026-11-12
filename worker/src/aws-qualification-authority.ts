@@ -32,6 +32,12 @@ import type {
   AWSQualificationFirstWalkRequest,
   AWSQualificationFirstWalkStatus,
 } from "./aws-qualification-contract";
+import {
+  parseQualificationNetwork,
+  verifyQualificationGuest,
+  verifyQualificationNetwork,
+  type QualificationNetwork,
+} from "./aws-qualification-network";
 import { requireAWSRegion } from "./aws-region";
 import { sha256Hex } from "./encoding";
 import type { AWSCredentials } from "./types";
@@ -73,7 +79,7 @@ const parser = new XMLParser({
   // AWS account IDs are decimal-looking identifiers. Undefined preserves their lexical form.
   tagValueProcessor: (_tagName, _value, jPath) =>
     jPath === "GetCallerIdentityResponse.GetCallerIdentityResult.Account" ||
-    jPath === "DescribeInstancesResponse.reservationSet.item.ownerId" ||
+    _tagName === "ownerId" ||
     jPath === "DescribeImagesResponse.imagesSet.item.imageOwnerId" ||
     jPath === "DescribeSnapshotsResponse.snapshotSet.item.ownerId"
       ? undefined
@@ -147,6 +153,7 @@ interface AWSQualificationAuthorityEnv {
   CRABBOX_AWS_QUALIFICATION_ROOT_GB?: string;
   CRABBOX_AWS_QUALIFICATION_SECURITY_GROUP_ID?: string;
   CRABBOX_AWS_QUALIFICATION_SUBNET_ID?: string;
+  CRABBOX_AWS_QUALIFICATION_NETWORK_JSON?: string;
   AWS_QUALIFICATION_RUNS: DurableObjectNamespace<AWSQualificationRun>;
   AWS_QUALIFICATION_REGISTRY: DurableObjectNamespace<AWSQualificationRegistry>;
 }
@@ -159,6 +166,7 @@ interface AWSQualificationPolicy {
   rootGB: number;
   securityGroupId: string;
   subnetId: string;
+  network?: QualificationNetwork;
 }
 
 interface AWSQualificationRunState {
@@ -475,6 +483,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         return;
       }
       const policyHash = await qualificationPolicyHash(policy);
+      await this.verifySharedNetwork(policy);
       const retainedRootDeviceName = await this.verifyRetainedImage(identity, policy);
       validateRunWindow(identity);
       await this.ctx.storage.put({
@@ -509,7 +518,26 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     identity: AWSQualificationRunIdentity,
     request: AWSQualificationRequest,
   ): Promise<AWSQualificationResponse> {
-    return await this.serialized(() => this.executeSerialized(identity, request));
+    return await this.serialized(async () => {
+      const result = await this.executeSerialized(identity, request);
+      // Apply this to replays and reconciled launches as well. The ledger and
+      // receipt already own any effect before a failed guest check can throw.
+      if (
+        result.status >= 200 &&
+        result.status < 300 &&
+        ["RunInstances", "DescribeInstances"].includes(request.action)
+      ) {
+        const run = await this.ctx.storage.get<AWSQualificationRunState>(stateKey);
+        if (run && !run.finalizingAt && !run.finalizedAt) {
+          const ledger = await this.ledger();
+          await this.verifySharedNetwork(
+            run.policy,
+            ledger.instanceIds.filter((id) => !ledger.terminatingInstanceIds.includes(id)),
+          );
+        }
+      }
+      return result;
+    });
   }
 
   async firstWalkStatus(
@@ -558,6 +586,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         )
       )
         throw new Error("first-walk source or instance is outside the run ledger");
+      await this.verifySharedNetwork(run.policy, [input.instanceID]);
       const pinned = await this.ctx.storage.get<FirstWalkState>(firstWalkKey);
       // Canonicalize the request before persistence and immutable retry comparison.
       const request = {
@@ -591,6 +620,13 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
         if (!cleanup) await this.requireActiveRun(run.identity, "FirstWalk");
         else if (mutating && action !== "DeleteVolume")
           throw new Error("first-walk cleanup action denied");
+        if (!cleanup && mutating) {
+          const ledger = await this.ledger();
+          await this.verifySharedNetwork(
+            run.policy,
+            ledger.instanceIds.filter((id) => !ledger.terminatingInstanceIds.includes(id)),
+          );
+        }
         let cleanupSequence: number | undefined;
         let evidence: AWSQualificationOperationEvidence | undefined;
         const key = `${evidencePrefix}${await sha256Hex(`first-walk:${action}:${canonicalJSON(parameters)}`)}`;
@@ -820,6 +856,17 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     try {
       if (normalizedRequest.service !== "sts") {
         await this.ensureAccount(policy);
+      }
+      if (
+        authorized.mutating &&
+        !["TerminateInstances", "DeleteKeyPair", "DeregisterImage", "DeleteSnapshot"].includes(
+          normalizedRequest.action,
+        )
+      ) {
+        await this.verifySharedNetwork(
+          policy,
+          ledger.instanceIds.filter((id) => !ledger.terminatingInstanceIds.includes(id)),
+        );
       }
     } catch (error) {
       await this.ctx.storage.put(evidenceKey, {
@@ -2011,6 +2058,42 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     );
   }
 
+  private async verifySharedNetwork(
+    policy: AWSQualificationPolicy,
+    instanceIds: string[] = [],
+  ): Promise<void> {
+    if (policy.network?.mode !== "shared-subnet") return;
+    await this.ensureAccount(policy);
+    const query = async (action: string, parameters: Record<string, string>) => {
+      const result = await boundedResponse(
+        await this.signer.execute("ec2", action, policy.region, parameters),
+      );
+      if (result.status < 200 || result.status >= 300)
+        throw new Error(`AWS qualification network ${action} http ${result.status}`);
+      return awsXMLRoot(result.body, action);
+    };
+    await verifyQualificationNetwork(policy.network, policy, query);
+    if (instanceIds.length > maxActiveInstances)
+      throw new Error("AWS qualification guest inventory exceeds policy");
+    const instanceId = instanceIds[0];
+    if (instanceId) {
+      const root = await query("DescribeInstances", { "InstanceId.1": instanceId });
+      const reservations = items(record(root["reservationSet"])["item"]).map(record);
+      const instances = reservations.flatMap((r) =>
+        items(record(r["instancesSet"])["item"]).map(record),
+      );
+      if (
+        asString(root["nextToken"]) ||
+        reservations.length !== 1 ||
+        asString(reservations[0]!["ownerId"]) !== policy.accountId ||
+        instances.length !== 1 ||
+        asString(instances[0]!["instanceId"]) !== instanceId
+      )
+        throw new Error("AWS qualification guest identity differs from admission");
+      verifyQualificationGuest(policy.network, policy, instances[0]!);
+    }
+  }
+
   private async retireUnresolvedIntents(): Promise<void> {
     const pending = await this.ctx.storage.list<AWSQualificationIntent>({ prefix: intentPrefix });
     await Promise.all([...pending].map(([key]) => this.ctx.storage.delete(key)));
@@ -2938,7 +3021,19 @@ function authorityPolicy(env: AWSQualificationAuthorityEnv): AWSQualificationPol
   if (!Number.isInteger(rootGB) || rootGB < 8 || rootGB > maxRootGB) {
     throw new Error("AWS qualification root volume limit must be 8 through 20 GiB");
   }
-  return { accountId, roleArn, baseAmiId, region, rootGB, securityGroupId, subnetId };
+  const networkJSON = env.CRABBOX_AWS_QUALIFICATION_NETWORK_JSON;
+  const network =
+    networkJSON === undefined ? undefined : parseQualificationNetwork(JSON.parse(networkJSON));
+  return {
+    accountId,
+    roleArn,
+    baseAmiId,
+    region,
+    rootGB,
+    securityGroupId,
+    subnetId,
+    ...(network ? { network } : {}),
+  };
 }
 
 function authorityCredentials(env: AWSQualificationAuthorityEnv): AWSCredentials {

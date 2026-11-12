@@ -6,6 +6,7 @@
 
 ### Added
 
+- Image qualification: support explicit shared-subnet admission with authority-verified restricted egress and guest attachment, preserving cleanup after network drift.
 - Image qualification: add an opt-in synthetic first ownership walk with one authority-owned snapshot copy, protected checkpoint claims, and independent cleanup.
 
 ### Fixed
