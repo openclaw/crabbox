@@ -300,7 +300,11 @@ test("protected build prep binds source, rejects substitution, and seals exact b
   const module = await import(
     `${pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))}?test=${Date.now()}`
   );
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-qualification-manifest-"));
+  // Resolve macOS temporary-directory aliases so the subprocess's argv path
+  // matches its module URL and actually enters the CLI.
+  const temp = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-qualification-manifest-")),
+  );
   try {
     const harness = path.join(temp, "harness");
     const candidate = path.join(temp, "candidate");
@@ -397,6 +401,8 @@ test("protected build prep binds source, rejects substitution, and seals exact b
     const manifest = module.createManifest(candidate, artifact, candidateSha, workflowSha);
     // Exercise the actual post-overlay command in a fresh process; the parent
     // process's pre-overlay module cache must not hide candidate execution.
+    // Require that process to create the manifest rather than reuse our copy.
+    fs.rmSync(path.join(artifact, "manifest.json"));
     execFileSync(
       process.execPath,
       [
@@ -417,10 +423,11 @@ test("protected build prep binds source, rejects substitution, and seals exact b
       manifest.files.find((entry) => entry.path === "bin/crabbox")?.bytes,
       123 * 1024 * 1024,
     );
-    assert.equal(
-      module.verifyManifest(artifact, candidateSha, workflowSha).manifestSha256,
-      manifest.manifestSha256,
-    );
+    const regenerated = module.verifyManifest(artifact, candidateSha, workflowSha);
+    // Each generation includes its own timestamp and therefore its own digest.
+    // verifyManifest checks that digest; compare the stable build contents here.
+    assert.deepEqual(regenerated.files, manifest.files);
+    assert.equal(regenerated.mainModule, manifest.mainModule);
     fs.writeFileSync(path.join(artifact, "unexpected"), "nope");
     assert.throws(() => module.verifyManifest(artifact, candidateSha, workflowSha), /extra files/);
     fs.rmSync(path.join(artifact, "unexpected"));
