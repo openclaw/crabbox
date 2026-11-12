@@ -61,9 +61,19 @@ if (args[0] === 'systemd-run') {
   assert.equal(fs.existsSync(calls[1].at(-1)), false);
 }
 
-for (const badResult of [false, true])
-  test(`credentialless executor ${badResult ? "rejects failed first walk without replay" : "captures exactly once and dies for independent cleanup"}`, async () => {
+for (const { label, badResult = false, evidenceFault } of [
+  { label: "captures exactly once and dies for independent cleanup" },
+  { label: "rejects failed first walk without replay", badResult: true },
+  { label: "rejects a log replaced by a key symlink", evidenceFault: "symlink" },
+  { label: "rejects a log replaced by a directory", evidenceFault: "directory" },
+  { label: "rejects a log replaced by a FIFO without blocking", evidenceFault: "fifo" },
+  { label: "removes private state after a missing log", evidenceFault: "missing" },
+  { label: "rejects a log replaced by another regular file", evidenceFault: "replacement" },
+  { label: "removes private state after an evidence write failure", evidenceFault: "write" },
+])
+  test(`credentialless executor ${label}`, async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "first-walk-contract-"));
+    const commandFile = path.join(dir, "commands");
     const calls = [],
       commands = [];
     const result = {
@@ -93,8 +103,36 @@ for (const badResult of [false, true])
       fs.mkdirSync(recipeDir, { recursive: true });
       fs.writeFileSync(path.join(recipeDir, "linuxOwnershipRepair.sh"), recipe);
       fs.mkdirSync(path.join(dir, "bin"));
-      const commandFile = path.join(dir, "commands");
-      const binary = `#!${process.execPath}\nimport fs from 'node:fs';\nlet input=''; for await (const chunk of process.stdin) input+=chunk;\nfs.appendFileSync(${JSON.stringify(commandFile)},JSON.stringify({args:process.argv.slice(2),input,env:process.env,cwd:process.cwd()})+'\\n');\nconsole.log(input.includes('systemd-run') ? 'CRABBOX_FIRST_WALK_RESULT='+${JSON.stringify(JSON.stringify(result))} : 'stock-ready');\n`;
+      const privateMarker = "INERT_PRIVATE_KEY_DO_NOT_EXPORT";
+      const unexpectedMarker = "UNREGISTERED_FILE_DO_NOT_EXPORT";
+      const binary = `#!${process.execPath}
+import fs from 'node:fs';
+import path from 'node:path';
+import {spawnSync} from 'node:child_process';
+let input=''; for await (const chunk of process.stdin) input+=chunk;
+fs.appendFileSync(${JSON.stringify(commandFile)},JSON.stringify({args:process.argv.slice(2),input,env:process.env,cwd:process.cwd()})+'\\n');
+const keyDir=path.join(process.env.XDG_CONFIG_HOME,'crabbox/testboxes/cbx_fixture');
+fs.mkdirSync(keyDir,{recursive:true});
+const key=path.join(keyDir,'id_ed25519');
+fs.writeFileSync(key,${JSON.stringify(privateMarker)},{mode:0o600});
+fs.writeFileSync('unexpected.log',${JSON.stringify(unexpectedMarker)});
+if(input.includes('systemd-run')) {
+  const fault=${JSON.stringify(evidenceFault ?? "")};
+  const name='source-stock-ready.log';
+  if(fault==='write') fs.mkdirSync(path.join(${JSON.stringify(path.join(dir, "proof"))},name));
+  else if(fault) {
+    // Allocate replacement before removing the original so inode reuse cannot
+    // turn the regular-file substitution into a flaky identity test.
+    if(fault==='replacement') fs.writeFileSync('replacement',${JSON.stringify(privateMarker)});
+    fs.unlinkSync(name);
+    if(fault==='symlink') fs.symlinkSync(key,name);
+    if(fault==='directory') fs.mkdirSync(name);
+    if(fault==='fifo' && spawnSync('mkfifo',[name]).status!==0) throw new Error('mkfifo failed');
+    if(fault==='replacement') fs.renameSync('replacement',name);
+  }
+}
+console.log(input.includes('systemd-run') ? 'CRABBOX_FIRST_WALK_RESULT='+${JSON.stringify(JSON.stringify(result))} : 'stock-ready');
+`;
       // Artifact downloads restore ordinary files without executable permissions.
       fs.writeFileSync(path.join(dir, "bin/crabbox"), binary, { mode: 0o644 });
       fs.chmodSync(path.join(dir, "bin/crabbox"), 0o644);
@@ -115,19 +153,28 @@ for (const badResult of [false, true])
         QUALIFICATION_AWS_REGION: "us-east-1",
         QUALIFICATION_EXPIRES_AT: new Date(Date.now() + 120 * 60_000).toISOString(),
       };
+      let stderr = "";
       const outcome = await new Promise((resolve, reject) => {
         const child = spawn(
           process.execPath,
           [path.join(root, "scripts/image-qualification-first-walk.mjs")],
-          { env, stdio: "ignore" },
+          { env, stdio: ["ignore", "ignore", "pipe"], timeout: 15_000, killSignal: "SIGKILL" },
         );
+        child.stderr.on("data", (chunk) => (stderr += chunk));
         child.on("error", reject);
-        child.on("exit", (code, signal) => resolve({ code, signal }));
+        child.on("close", (code, signal) => resolve({ code, signal }));
       });
       assert.deepEqual(
         outcome,
-        badResult ? { code: 1, signal: null } : { code: null, signal: "SIGKILL" },
+        badResult || evidenceFault ? { code: 1, signal: null } : { code: null, signal: "SIGKILL" },
       );
+      if (["directory", "fifo", "replacement"].includes(evidenceFault))
+        assert.match(
+          stderr,
+          /first-walk log was replaced; let the independent finalizer settle the run and investigate the changed log before any separately authorized retry/,
+        );
+      assert.equal(stderr.includes(privateMarker), false);
+      assert.equal(stderr.includes(env.QUALIFICATION_EXECUTOR_TOKEN), false);
       assert.equal(fs.statSync(path.join(dir, "bin/crabbox")).mode & 0o777, 0o700);
       commands.push(...fs.readFileSync(commandFile, "utf8").trim().split("\n").map(JSON.parse));
       for (const command of commands) {
@@ -142,6 +189,7 @@ for (const badResult of [false, true])
         assert.notEqual(command.env.HOME, dir);
         assert.equal(command.cwd, command.env.HOME);
         assert.equal(command.env.XDG_CONFIG_HOME, path.join(command.cwd, "config"));
+        assert.equal(fs.existsSync(command.cwd), false, "private scratch must be removed");
       }
       assert.equal(commands.filter((c) => c.args[0] === "warmup").length, 2);
       assert.equal(commands.filter((c) => c.args[0] === "stop").length, 1);
@@ -158,8 +206,19 @@ for (const badResult of [false, true])
       const prepare = calls.find((c) => c.url.endsWith("/first-walk"));
       assert.equal(prepare.body.claim, "fixture-claim");
       assert.match(prepare.body.readinessReceiptSha256, /^[a-f0-9]{64}$/);
-      assert.ok(fs.existsSync(path.join(proof, "checksums.sha256")));
-      if (!badResult) {
+      assert.equal(fs.existsSync(path.join(proof, "checksums.sha256")), !evidenceFault);
+      assert.equal(fs.existsSync(path.join(proof, "config")), false);
+      assert.equal(fs.existsSync(path.join(proof, "unexpected.log")), false);
+      for (const name of fs.readdirSync(proof)) {
+        const file = path.join(proof, name);
+        if (fs.lstatSync(file).isFile()) {
+          const text = fs.readFileSync(file, "utf8");
+          assert.equal(text.includes(privateMarker), false);
+          assert.equal(text.includes(unexpectedMarker), false);
+          assert.equal(text.includes(env.QUALIFICATION_EXECUTOR_TOKEN), false);
+        }
+      }
+      if (!badResult && !evidenceFault) {
         await checkGuestCleanup(walkCommands[0].input, dir);
         const proofObject = JSON.parse(fs.readFileSync(path.join(proof, "first-walk.json")));
         const attestation = {
@@ -214,6 +273,15 @@ for (const badResult of [false, true])
     } finally {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
+      // Preserve failing assertions without leaking the deliberately broken
+      // executor's private fixtures when this regression runs against old code.
+      if (fs.existsSync(commandFile)) {
+        const rows = fs.readFileSync(commandFile, "utf8").trim().split("\n").map(JSON.parse);
+        for (const cwd of new Set(rows.map((row) => row.cwd))) {
+          assert.match(path.basename(cwd), /^first-walk-executor-/);
+          fs.rmSync(cwd, { recursive: true, force: true });
+        }
+      }
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
