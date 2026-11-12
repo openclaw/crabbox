@@ -460,7 +460,7 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) 
 			}
 			leaseID := core.Blank(server.Labels["lease"], req.ID)
 			target := awsSSHTarget(cfg, server, server.PublicNet.IPv4.IP)
-			return b.ResolvedLeaseTarget(server, target, leaseID, req.ReleaseOnly)
+			return b.ResolvedLeaseTarget(server, target, leaseID, req.ReleaseOnly && !req.CheckpointAccess)
 		}
 		if lastErr != nil {
 			return core.LeaseTarget{}, lastErr
@@ -484,7 +484,7 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) 
 	} else if leaseID != "" {
 		cfg := awsConfigForServer(b.Cfg, server)
 		target := awsSSHTarget(cfg, server, server.PublicNet.IPv4.IP)
-		return b.ResolvedLeaseTarget(server, target, leaseID, req.ReleaseOnly)
+		return b.ResolvedLeaseTarget(server, target, leaseID, req.ReleaseOnly && !req.CheckpointAccess)
 	}
 	return core.LeaseTarget{}, core.Exit(4, "lease/server not found: %s", req.ID)
 }

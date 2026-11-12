@@ -287,7 +287,7 @@ func (a App) advanceCheckpointCapture(ctx context.Context, cfg Config, repo Repo
 	if err != nil {
 		return err
 	}
-	server, target, _, err := a.resolveLeaseTargetWithRequestConfig(ctx, &cfg, ResolveRequest{Repo: repo, ID: record.LeaseID, NoLocalStateMutations: true})
+	server, target, _, err := a.resolveLeaseTargetWithRequestConfig(ctx, &cfg, ResolveRequest{Repo: repo, ID: record.LeaseID, ReleaseOnly: true, CheckpointAccess: true, NoLocalStateMutations: true})
 	if err != nil {
 		return err
 	}

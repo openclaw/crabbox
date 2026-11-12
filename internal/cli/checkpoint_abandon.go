@@ -83,7 +83,7 @@ func (a App) checkpointAbandon(ctx context.Context, args []string) error {
 			if record.Native.Metadata[checkpointPreSubmitEvidenceMetadata] != digest {
 				return Exit(2, "checkpoint pre-submit recovery evidence conflicts with its retained audit")
 			}
-			if err := operation.restoreCheckpointAbandonSourceScope(store, &record, repo); err != nil {
+			if err := operation.restoreCheckpointAbandonSourceScope(store, &record, repo, backend); err != nil {
 				return err
 			}
 		}
@@ -200,7 +200,7 @@ func (a App) adoptPreSubmitCheckpointAbandonment(ctx context.Context, cfg Config
 			return Exit(2, "checkpoint pre-submit recovery evidence conflicts with its retained audit")
 		}
 		record.Native.Metadata[checkpointPreSubmitEvidenceMetadata] = digest
-		if err := setCheckpointAbandonSourceScope(record, claim); err != nil {
+		if err := setCheckpointAbandonSourceScope(record, &claim, backend); err != nil {
 			return err
 		}
 		capture.SourceDisposition = "abandon"
@@ -221,8 +221,8 @@ func checkpointPreSubmitEvidenceDigest(path string) (string, error) {
 	return fmt.Sprintf("%x", sha256.Sum256(evidence)), nil
 }
 
-func (a App) restoreCheckpointAbandonSourceScope(store checkpointStore, record *checkpointRecord, repo Repo) error {
-	if record.Provider != "aws" {
+func (a App) restoreCheckpointAbandonSourceScope(store checkpointStore, record *checkpointRecord, repo Repo, backend any) error {
+	if _, ok := backend.(NativeCheckpointAbandonScopeProvider); !ok {
 		return nil
 	}
 	claim, exists, err := ReadLeaseClaimWithPresence(record.LeaseID)
@@ -230,31 +230,46 @@ func (a App) restoreCheckpointAbandonSourceScope(store checkpointStore, record *
 		return err
 	}
 	capture := record.Capture
-	if !exists || capture == nil || capture.SourceDisposition != "abandon" ||
-		claim.CloudID != capture.SourceID || claim.ProviderScope != capture.SourceScope || claim.ClaimedAt != capture.SourceClaimedAt ||
-		!ClaimRepositoryMatches(claim.RepoRoot, repo.Root, repo.LegacyRoot) || canonicalClaimProvider(claim.Provider) != record.Provider ||
-		claim.FixedCreateIntent == nil || claim.FixedCreateIntent.Fingerprint != capture.SourceIntent {
+	if capture == nil || capture.SourceDisposition != "abandon" {
 		return Exit(2, "checkpoint abandonment cleanup scope no longer matches its exact source receipt")
 	}
+	if !exists {
+		if capture.SourceIntent != "" {
+			return Exit(2, "checkpoint abandonment cleanup scope no longer matches its exact source receipt")
+		}
+		// Do not reconstruct missing ordinary authority. The provider validates
+		// retained coordinates; retirement still proves exact absence and fences
+		// the absent claim before publishing the terminal journal.
+		return setCheckpointAbandonSourceScope(record, nil, backend)
+	}
+	if claim.CloudID != capture.SourceID || claim.ProviderScope != capture.SourceScope || claim.ClaimedAt != capture.SourceClaimedAt ||
+		!ClaimRepositoryMatches(claim.RepoRoot, repo.Root, repo.LegacyRoot) || canonicalClaimProvider(claim.Provider) != record.Provider ||
+		(capture.SourceIntent != "" && (claim.FixedCreateIntent == nil || claim.FixedCreateIntent.Fingerprint != capture.SourceIntent)) ||
+		(capture.SourceIntent == "" && claim.FixedCreateIntent != nil) {
+		return Exit(2, "checkpoint abandonment cleanup scope no longer matches its exact source receipt")
+	}
+	if claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "released" {
+		if err := ValidateCheckpointCaptureClaim(claim, record.ID, capture); err != nil {
+			return err
+		}
+	}
 	return WithLeaseClaimUnchanged(record.LeaseID, claim, func() error {
-		if err := setCheckpointAbandonSourceScope(record, claim); err != nil {
+		if err := setCheckpointAbandonSourceScope(record, &claim, backend); err != nil {
 			return err
 		}
 		return store.Write(*record)
 	})
 }
 
-func setCheckpointAbandonSourceScope(record *checkpointRecord, claim leaseClaim) error {
-	if record.Provider != "aws" {
+func setCheckpointAbandonSourceScope(record *checkpointRecord, claim *leaseClaim, backend any) error {
+	attester, ok := backend.(NativeCheckpointAbandonScopeProvider)
+	if !ok {
 		return nil
 	}
-	account, region := strings.TrimSpace(claim.Labels["aws_account_id"]), strings.TrimSpace(claim.Labels["aws_region"])
-	if len(account) != 12 || strings.Trim(account, "0123456789") != "" || region == "" || record.Capture.SourceScope != "account:"+account {
-		return Exit(2, "AWS checkpoint abandonment source account or region is invalid; retain operation")
+	scope, err := attester.NativeCheckpointAbandonScope(claim, *record.Capture, NativeCheckpointImage{AccountID: record.Native.AccountID, Region: record.Native.Region})
+	if err != nil {
+		return err
 	}
-	if record.Native.AccountID != "" && record.Native.AccountID != account || record.Native.Region != "" && record.Native.Region != region {
-		return Exit(2, "AWS checkpoint abandonment cleanup scope conflicts with its retained source receipt")
-	}
-	record.Native.AccountID, record.Native.Region = account, region
+	record.Native.AccountID, record.Native.Region = scope.AccountID, scope.Region
 	return nil
 }

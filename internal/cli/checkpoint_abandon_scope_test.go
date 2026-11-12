@@ -10,11 +10,9 @@ import (
 	"testing"
 )
 
-func TestRestoreAWSCheckpointAbandonSourceScope(t *testing.T) {
+func TestRestoreCheckpointAbandonSourceScope(t *testing.T) {
 	const account, region = "111111111111", "us-west-2"
 	const receiptError = "cleanup scope no longer matches its exact source receipt"
-	const scopeError = "source account or region is invalid"
-	const conflictError = "cleanup scope conflicts with its retained source receipt"
 	for _, tc := range []struct {
 		name         string
 		mutate       func(*checkpointRecord, *leaseClaim)
@@ -22,27 +20,19 @@ func TestRestoreAWSCheckpointAbandonSourceScope(t *testing.T) {
 		wantError    string
 	}{
 		{name: "matching terminal receipt restores missing scope"},
+		{name: "ordinary removed claim preserves attested scope", missingClaim: true, mutate: func(r *checkpointRecord, c *leaseClaim) {
+			r.Capture.SourceIntent = ""
+			c.FixedCreateIntent = nil
+			r.Native.AccountID, r.Native.Region = account, region
+		}},
 		{name: "matching existing scope is idempotent", mutate: func(r *checkpointRecord, _ *leaseClaim) {
 			r.Native.AccountID, r.Native.Region = account, region
 		}},
-		{name: "native account conflict", wantError: conflictError, mutate: func(r *checkpointRecord, _ *leaseClaim) {
-			r.Native.AccountID = "222222222222"
-		}},
-		{name: "native region conflict", wantError: conflictError, mutate: func(r *checkpointRecord, _ *leaseClaim) {
-			r.Native.Region = "eu-west-1"
-		}},
-		{name: "account label disagrees with scope", wantError: scopeError, mutate: func(_ *checkpointRecord, c *leaseClaim) {
-			c.Labels["aws_account_id"] = "222222222222"
-		}},
+
 		{name: "claim scope changed", wantError: receiptError, mutate: func(_ *checkpointRecord, c *leaseClaim) {
 			c.ProviderScope = "account:222222222222"
 		}},
-		{name: "invalid account", wantError: scopeError, mutate: func(_ *checkpointRecord, c *leaseClaim) {
-			c.Labels["aws_account_id"] = "invalid-id12"
-		}},
-		{name: "missing region", wantError: scopeError, mutate: func(_ *checkpointRecord, c *leaseClaim) {
-			delete(c.Labels, "aws_region")
-		}},
+
 		{name: "fixed intent changed", wantError: receiptError, mutate: func(_ *checkpointRecord, c *leaseClaim) {
 			c.FixedCreateIntent.Fingerprint = "replacement-intent"
 		}},
@@ -128,7 +118,7 @@ func TestRestoreAWSCheckpointAbandonSourceScope(t *testing.T) {
 			want.artifactDir = paths.Dir
 			want.Native.AccountID, want.Native.Region = account, region
 			err = store.WithLock(record.ID, func() error {
-				return (App{}).restoreCheckpointAbandonSourceScope(store, &record, repo)
+				return (App{}).restoreCheckpointAbandonSourceScope(store, &record, repo, fixtureAbandonScope{})
 			})
 			if tc.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
@@ -162,4 +152,13 @@ func TestRestoreAWSCheckpointAbandonSourceScope(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Scope interpretation is adapter-owned; these cases test only shared journal
+// preservation and receipt fencing. AWS policy is covered in its package.
+type fixtureAbandonScope struct{}
+
+func (fixtureAbandonScope) NativeCheckpointAbandonScope(_ *LeaseClaim, _ NativeCheckpointCapture, scope NativeCheckpointImage) (NativeCheckpointImage, error) {
+	scope.AccountID, scope.Region = "111111111111", "us-west-2"
+	return scope, nil
 }

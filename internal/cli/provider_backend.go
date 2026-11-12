@@ -722,6 +722,14 @@ type NativeCheckpointResourceRequest struct {
 	Capture     *NativeCheckpointCapture
 }
 
+// NativeCheckpointAbandonScopeProvider attests provider cleanup coordinates for
+// retained pre-submit recovery. The shared owner fences the claim and journal;
+// providers interpret their own labels and scope. A nil claim is only allowed
+// for ordinary replay with previously attested coordinates.
+type NativeCheckpointAbandonScopeProvider interface {
+	NativeCheckpointAbandonScope(*LeaseClaim, NativeCheckpointCapture, NativeCheckpointImage) (NativeCheckpointImage, error)
+}
+
 // NativeCheckpointAbandonProvider binds positive source-cleanup evidence without
 // asserting that the original image was submitted, absent, or safe to discard.
 type NativeCheckpointAbandonProvider interface {
@@ -1356,9 +1364,12 @@ type ResolveRequest struct {
 	ID          string
 	Reclaim     bool
 	ReleaseOnly bool
-	StatusOnly  bool
-	ReadyProbe  bool
-	Prepare     bool
+	// CheckpointAccess requests access material for an already claim-bound
+	// capture, without admitting ordinary activity or mutating local state.
+	CheckpointAccess bool
+	StatusOnly       bool
+	ReadyProbe       bool
+	Prepare          bool
 	// IncludeDiagnostics opts explicit presentation callers into optional observations.
 	// It is not a provider protocol field or authority to modify lease state.
 	IncludeDiagnostics bool `json:"-"`
