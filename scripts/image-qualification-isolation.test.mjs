@@ -13,6 +13,7 @@ import {
   controllerName,
 } from "./image-qualification-isolation.mjs";
 import { fixtureAdmission, ownedSettings, version } from "./fixtures/qualification-isolation.mjs";
+import { fixtureNetwork } from "./fixtures/qualification-network.mjs";
 
 function fixture() {
   const f = fixtureAdmission();
@@ -330,4 +331,95 @@ test("explicitly verified empty production inventories are supported, unverified
   f.record.production.inventoryVerified = true;
   delete f.record.production.workers;
   assert.throws(() => readAdmission(env()), /inventory missing/);
+});
+
+async function sharedFixture() {
+  const f = fixture();
+  const { network } = await fixtureNetwork(f.record.aws);
+  f.record.version = 2;
+  f.record.aws.network = network;
+  f.record.production.inventoryVerified = false;
+  f.record.production.observation = {
+    verified: true,
+    scope: "qualification-identities-and-network",
+    observedAt: "2026-01-01T00:00:00Z",
+    receiptSha256: "e".repeat(64),
+  };
+  f.bindings.push({
+    name: "CRABBOX_AWS_QUALIFICATION_NETWORK_JSON",
+    type: "plain_text",
+    text: canonical(network),
+  });
+  f.record.authority.bindingDigest = digest(canonical(bindingShape(f.bindings)));
+  const env = () => ({
+    CLOUDFLARE_ACCOUNT_ID: f.record.accountId,
+    QUALIFICATION_ISOLATION_JSON: JSON.stringify(f.record),
+    QUALIFICATION_ISOLATION_SHA256: digest(canonical(f.record)),
+  });
+  f.cf.admission = readAdmission(env());
+  return { ...f, admission: f.cf.admission, env };
+}
+
+test("versioned shared subnet admits an observed overlap without claiming a verified exclusive inventory", async () => {
+  const f = await sharedFixture();
+  f.record.production.subnetIds.push(f.record.aws.subnetId);
+  assert.equal(readAdmission(f.env()).production.inventoryVerified, false);
+  await verifyAuthority(f.cf);
+});
+
+for (const [name, change] of [
+  ["unverified observation", (f) => (f.record.production.observation.verified = false)],
+  ["missing receipt", (f) => delete f.record.production.observation.receiptSha256],
+  ["wrong observation scope", (f) => (f.record.production.observation.scope = "all-production")],
+  [
+    "future observation",
+    (f) => (f.record.production.observation.observedAt = "2999-01-01T00:00:00Z"),
+  ],
+  ["exclusive inventory assertion", (f) => (f.record.production.inventoryVerified = true)],
+  ["missing production identities", (f) => delete f.record.production.roleArns],
+  ["qualification role overlap", (f) => f.record.production.roleArns.push(f.record.aws.roleArn)],
+  [
+    "qualification group overlap",
+    (f) => f.record.production.securityGroupIds.push(f.record.aws.securityGroupId),
+  ],
+  ["qualification Worker overlap", (f) => f.record.production.workers.push(authorityName)],
+  [
+    "qualification namespace overlap",
+    (f) => f.record.production.namespaceIds.push(f.record.authority.namespaces[0].id),
+  ],
+  ["missing network", (f) => delete f.record.aws.network],
+  ["implicit version downgrade", (f) => (f.record.version = 1)],
+])
+  test(`shared admission rejects ${name}`, async () => {
+    const f = await sharedFixture();
+    change(f);
+    assert.throws(() => readAdmission(f.env()));
+  });
+
+test("explicit exclusive mode keeps verified inventory and subnet collision checks", () => {
+  const f = fixture();
+  f.record.version = 2;
+  f.record.aws.network = { mode: "exclusive" };
+  const env = () => ({
+    CLOUDFLARE_ACCOUNT_ID: f.record.accountId,
+    QUALIFICATION_ISOLATION_JSON: JSON.stringify(f.record),
+    QUALIFICATION_ISOLATION_SHA256: digest(canonical(f.record)),
+  });
+  assert.doesNotThrow(() => readAdmission(env()));
+  f.record.production.subnetIds.push(f.record.aws.subnetId);
+  assert.throws(() => readAdmission(env()), /overlap/);
+});
+
+test("network policy must match both protected input and the actual authority binding", async () => {
+  const f = await sharedFixture();
+  assert.throws(
+    () =>
+      readAdmission({ ...f.env(), QUALIFICATION_NETWORK_JSON: canonical({ mode: "exclusive" }) }),
+    /network differs/,
+  );
+  const binding = f.bindings.find((b) => b.name === "CRABBOX_AWS_QUALIFICATION_NETWORK_JSON");
+  binding.text = canonical({ mode: "exclusive" });
+  f.record.authority.bindingDigest = digest(canonical(bindingShape(f.bindings)));
+  f.cf.admission = readAdmission(f.env());
+  await assert.rejects(verifyAuthority(f.cf), /authority network differs/);
 });

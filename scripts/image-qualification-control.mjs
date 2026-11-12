@@ -597,7 +597,7 @@ export function prepareCandidateBuild(
   }
   // Candidate source remains data: every executable build control comes from
   // the protected checkout, so a PR cannot smuggle a build hook into the bundle.
-  const fixedFiles = ["go.mod", "go.sum"];
+  const fixedFiles = ["go.mod", "go.sum", "scripts/image-qualification-network.ts"];
   const harnessWorkerInputs = trackedWorkerBuildInputs(harnessDir);
   const candidateWorkerInputs = trackedWorkerBuildInputs(candidateDir);
   if (canonical(harnessWorkerInputs) !== canonical(candidateWorkerInputs)) {
