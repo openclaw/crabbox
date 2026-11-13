@@ -12,6 +12,7 @@ import {
   readFirstWalkRecipe,
   stageFirstWalkRecipe,
   verifyQualificationEvidence,
+  verifyFirstWalkPreparation,
 } from "./image-qualification-control.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -20,6 +21,48 @@ const digest = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex"
 const recipe = fs.readFileSync(path.join(root, "scripts/fixtures/first-walk-reviewed-recipe.sh"));
 assert.equal(digest(recipe), firstWalkRecipeSha256);
 const runner = fs.readFileSync(path.join(root, "scripts/qualification-first-walk-guest.py"));
+
+const prepared = {
+  completed: true,
+  profile: "fixed-node-monorepo-v1",
+  sourceCommit: "8436c62514241a0afdef84bc2abb658dbdf57d40",
+  sourceArchiveSha256: "ebaaa5f50f6b3ba54f825eaed7c602838e0a5eea936aee9b5212085591084dda",
+  lockSha256: "0c50a34a1f4f78e7fa5da6340878f54da7f6b9f36a0c04c3f67c61ab8fbb7d06",
+  nodeSha256: "6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6",
+  pnpmSha256: "bcbd17511de1718a262be1acc42066559bbce8fcfb1adb584d1f5e8ad70fe218",
+  scriptsDisabled: true,
+  hooksDisabled: true,
+  sameFilesystem: true,
+  cachePopulated: true,
+  inventory: { entries: 200_000, allocatedBytes: 6 * 1024 ** 3 },
+  elapsedSeconds: 60,
+};
+
+test("preparation proof requires the fixed identities, both roots, no hooks and bounded work", () => {
+  assert.doesNotThrow(() => verifyFirstWalkPreparation(prepared));
+  for (const field of Object.keys(prepared)) {
+    const changed = { ...prepared };
+    delete changed[field];
+    if (field === "meaning") continue;
+    assert.throws(() => verifyFirstWalkPreparation(changed));
+  }
+  for (const changed of [
+    { ...prepared, sourceCommit: "a".repeat(40) },
+    { ...prepared, cachePopulated: false },
+    { ...prepared, hooksDisabled: false },
+    { ...prepared, sameFilesystem: false },
+    { ...prepared, elapsedSeconds: 901 },
+    ...[0, 600001, NaN].map((entries) => ({
+      ...prepared,
+      inventory: { ...prepared.inventory, entries },
+    })),
+    ...[-1, 12 * 1024 ** 3 + 1, Infinity].map((allocatedBytes) => ({
+      ...prepared,
+      inventory: { ...prepared.inventory, allocatedBytes },
+    })),
+  ])
+    assert.throws(() => verifyFirstWalkPreparation(changed));
+});
 
 test("first-walk refuses a queue-consumed executor reserve before any allocation", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "first-walk-reserve-"));
@@ -99,9 +142,10 @@ if (args[0] === 'systemd-run') {
   assert.equal(fs.existsSync(calls[1].at(-1)), false);
 }
 
-for (const { label, badResult = false, evidenceFault } of [
+for (const { label, badResult = false, badPreparation = false, evidenceFault } of [
   { label: "captures exactly once and dies for independent cleanup" },
   { label: "rejects failed first walk without replay", badResult: true },
+  { label: "rejects incomplete preparation before capture", badPreparation: true },
   { label: "rejects a log replaced by a key symlink", evidenceFault: "symlink" },
   { label: "rejects a log replaced by a directory", evidenceFault: "directory" },
   { label: "rejects a log replaced by a FIFO without blocking", evidenceFault: "fifo" },
@@ -154,7 +198,7 @@ fs.mkdirSync(keyDir,{recursive:true});
 const key=path.join(keyDir,'id_ed25519');
 fs.writeFileSync(key,${JSON.stringify(privateMarker)},{mode:0o600});
 fs.writeFileSync('unexpected.log',${JSON.stringify(unexpectedMarker)});
-if(input.includes('systemd-run')) {
+if(input.includes('--volume')) {
   const fault=${JSON.stringify(evidenceFault ?? "")};
   const name='source-stock-ready.log';
   if(fault==='write') fs.mkdirSync(path.join(${JSON.stringify(path.join(dir, "proof"))},name));
@@ -169,7 +213,7 @@ if(input.includes('systemd-run')) {
     if(fault==='replacement') fs.renameSync('replacement',name);
   }
 }
-console.log(input.includes('systemd-run') ? 'CRABBOX_FIRST_WALK_RESULT='+${JSON.stringify(JSON.stringify(result))} : 'stock-ready');
+console.log(input.includes('--work-root') ? 'CRABBOX_WORKLOAD_PREPARED='+${JSON.stringify(JSON.stringify({ ...prepared, cachePopulated: !badPreparation }))} : input.includes('--volume') ? 'CRABBOX_FIRST_WALK_RESULT='+${JSON.stringify(JSON.stringify(result))} : 'stock-ready');
 `;
       // Artifact downloads restore ordinary files without executable permissions.
       fs.writeFileSync(path.join(dir, "bin/crabbox"), binary, { mode: 0o644 });
@@ -204,7 +248,9 @@ console.log(input.includes('systemd-run') ? 'CRABBOX_FIRST_WALK_RESULT='+${JSON.
       });
       assert.deepEqual(
         outcome,
-        badResult || evidenceFault ? { code: 1, signal: null } : { code: null, signal: "SIGKILL" },
+        badResult || badPreparation || evidenceFault
+          ? { code: 1, signal: null }
+          : { code: null, signal: "SIGKILL" },
       );
       if (["directory", "fifo", "replacement"].includes(evidenceFault))
         assert.match(
@@ -229,9 +275,23 @@ console.log(input.includes('systemd-run') ? 'CRABBOX_FIRST_WALK_RESULT='+${JSON.
         assert.equal(command.env.XDG_CONFIG_HOME, path.join(command.cwd, "config"));
         assert.equal(fs.existsSync(command.cwd), false, "private scratch must be removed");
       }
+      if (badPreparation) {
+        assert.equal(commands.filter((c) => c.args[0] === "warmup").length, 1);
+        assert.equal(
+          calls.some((c) => c.method === "POST"),
+          false,
+          "preparation failure cannot capture or attach",
+        );
+        return;
+      }
+      const population = commands.filter((c) => c.input.includes("--work-root"));
+      assert.equal(population.length, 1);
+      assert.match(population[0].input, /--uid=crabbox --gid=crabbox/);
+      assert.match(population[0].input, /RuntimeMaxSec=900/);
+      assert.match(population[0].input, /KillMode=control-group/);
       assert.equal(commands.filter((c) => c.args[0] === "warmup").length, 2);
       assert.equal(commands.filter((c) => c.args[0] === "stop").length, 1);
-      const walkCommands = commands.filter((c) => c.input.includes("systemd-run"));
+      const walkCommands = commands.filter((c) => c.input.includes("--volume"));
       assert.equal(walkCommands.length, 1);
       assert.ok(walkCommands[0].input.includes(digest(recipe)));
       assert.ok(
@@ -286,6 +346,17 @@ console.log(input.includes('systemd-run') ? 'CRABBOX_FIRST_WALK_RESULT='+${JSON.
         );
         for (const altered of [
           { ...completeProof, result: { ...result, unmounted: false } },
+          {
+            ...completeProof,
+            firstWalk: { ...proofObject.firstWalk, workloadSha256: "a".repeat(64) },
+          },
+          {
+            ...completeProof,
+            firstWalk: {
+              ...proofObject.firstWalk,
+              sourcePreparation: { ...prepared, cachePopulated: false },
+            },
+          },
           {
             ...completeProof,
             firstWalk: { ...proofObject.firstWalk, recipeSha256: "a".repeat(64) },
