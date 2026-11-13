@@ -2614,12 +2614,7 @@ describe("AWS qualification candidate transport", () => {
 });
 
 describe("first-walk integration with the existing authority", () => {
-  it.each([
-    { firstWalk: true, minutes: 150, accepted: true },
-    { firstWalk: true, minutes: 151, accepted: false },
-    { firstWalk: false, minutes: 120, accepted: true },
-    { firstWalk: false, minutes: 121, accepted: false },
-  ])("keeps the expanded clock opt-in: %j", async ({ firstWalk, minutes, accepted }) => {
+  function clockClaim(firstWalk: boolean, minutes: number) {
     const f = firstWalkAuthorityFixture();
     const candidate = {
       ...f.identity,
@@ -2633,9 +2628,21 @@ describe("first-walk integration with the existing authority", () => {
       { storage: new MemoryStorage() } as never,
       {} as never,
     );
-    const claim = registry.claim(controller, candidate);
-    if (accepted) await expect(claim).resolves.toBeDefined();
-    else await expect(claim).rejects.toThrow("expiry");
+    return registry.claim(controller, candidate);
+  }
+
+  it.each([
+    { firstWalk: true, minutes: 150 },
+    { firstWalk: false, minutes: 120 },
+  ])("accepts only the mode's maximum window: %j", async ({ firstWalk, minutes }) => {
+    await expect(clockClaim(firstWalk, minutes)).resolves.toBeDefined();
+  });
+
+  it.each([
+    { firstWalk: true, minutes: 151 },
+    { firstWalk: false, minutes: 121 },
+  ])("rejects a window above the mode's maximum: %j", async ({ firstWalk, minutes }) => {
+    await expect(clockClaim(firstWalk, minutes)).rejects.toThrow("expiry");
   });
 
   it("keeps finalization pending on incomplete inventory and recovers without losing exact copy identity", async () => {
