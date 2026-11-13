@@ -868,18 +868,28 @@ export class Cloudflare {
   async request(
     pathname,
     init = {},
-    { allow404 = false, envelope = false, probeContentIdentity = false } = {},
+    {
+      allow404 = false,
+      envelope = false,
+      probeContentIdentity = false,
+      contentIdentityBytes,
+      boundedBytes,
+    } = {},
   ) {
     const response = await fetch(`${this.base}${pathname}`, {
       ...init,
       headers: { authorization: `Bearer ${this.token}`, ...(init.headers ?? {}) },
     });
     if (allow404 && response.status === 404) return undefined;
-    if (probeContentIdentity && response.ok) {
+    if ((probeContentIdentity || contentIdentityBytes) && response.ok) {
       const probe = await import("./image-qualification-binding-probe.mjs");
-      return await probe.probeContentIdentity(response);
+      return await probe.probeContentIdentity(response, contentIdentityBytes);
     }
-    const text = await response.text();
+    const text = boundedBytes
+      ? await (
+          await import("./image-qualification-binding-probe.mjs")
+        ).readProbeResponse(response, boundedBytes)
+      : await response.text();
     let parsed;
     try {
       parsed = text ? JSON.parse(text) : {};
@@ -2493,6 +2503,10 @@ async function main() {
   if (["binding-probe-plan", "binding-probe-run", "binding-probe-recover"].includes(command)) {
     const { bindingProbeCommand } = await import("./image-qualification-binding-probe.mjs");
     return await bindingProbeCommand(command, args, Cloudflare);
+  }
+  if (["idle-controller-run", "idle-controller-recover"].includes(command)) {
+    const { idleControllerCommand } = await import("./image-qualification-idle-controller.mjs");
+    return await idleControllerCommand(command, args, Cloudflare);
   }
   if (command === "retained-capsule") {
     createRetainedCapsule(path.resolve(args[0]), path.resolve(args[1]), path.resolve(args[2]));
