@@ -89,6 +89,8 @@ var checkpointLeaseLabelKeys = []string{
 	"server_type",
 	"slug",
 	"ssh_port",
+	sshTransportLabel,
+	sshNetworkLabel,
 	"ssh_user",
 	"state",
 	"tailscale",

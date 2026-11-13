@@ -160,6 +160,7 @@ localContainer:
   cpus: 0                  # CPU limit; 0 leaves the runtime default
   memory: ""               # memory limit, e.g. 8g
   network: bridge          # container network
+  sshTransport: published  # published port, or internal on a colocated Linux Docker host
   dockerSocket: false      # mount the host Docker-compatible socket into the lease
   noHostname: false        # omit the explicit container hostname when true
   ociRuntime: ""           # engine runtime for run --runtime, e.g. io.containerd.kata.v2
@@ -250,6 +251,7 @@ Provider flags:
 --local-container-cpus <n>
 --local-container-memory <size>
 --local-container-network <network>
+--local-container-ssh-transport <published|internal>
 --local-container-docker-socket
 --local-container-oci-runtime <name>
 --local-container-volume host:container[:ro]   (repeatable)
@@ -283,6 +285,7 @@ CRABBOX_LOCAL_CONTAINER_WORK_ROOT
 CRABBOX_LOCAL_CONTAINER_CPUS
 CRABBOX_LOCAL_CONTAINER_MEMORY
 CRABBOX_LOCAL_CONTAINER_NETWORK
+CRABBOX_LOCAL_CONTAINER_SSH_TRANSPORT
 CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET
 CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME
 CRABBOX_LOCAL_CONTAINER_OCI_RUNTIME
@@ -305,9 +308,48 @@ Set `localContainer.noHostname: true` or
 hostname, such as when it shares the host UTS namespace. By default Crabbox
 passes `--hostname` with the container name; this opt-in only omits that argument.
 It does not change the runtime's namespace, network, or capability settings.
-The configured runtime must still support the loopback-published SSH port.
+The configured runtime must still support the selected SSH transport.
 Changing this setting for a fixed lease ID returns `lease_id_conflict`; omitted
 or `false` preserves the existing fixed-lease fingerprint.
+
+### Internal-network SSH
+
+On a colocated Linux Docker host, `sshTransport: internal` connects directly to
+the container's IPv4 address and publishes no ports. This supports internal-only
+bridges, where Docker does not establish a published-port mapping. The default
+`published` transport and existing fixed-lease fingerprints remain unchanged.
+
+Create an internal bridge and select an image that already contains the SSH
+bootstrap dependencies; package downloads cannot use an external default route:
+
+```sh
+docker network create --internal private-runners
+crabbox warmup --provider local-container \
+  --local-container-image example.invalid/prepared-runner:stable \
+  --local-container-network private-runners \
+  --local-container-ssh-transport internal --keep
+```
+
+This opt-in requires Docker over a local Unix socket, one internal IPv4 bridge,
+and its gateway interface in the controller's own network namespace. Remote
+Docker daemons, Docker Desktop VM sockets, Podman and bridges with the `isolated`
+gateway mode do not satisfy that contract. IPv6-only transport is not supported.
+Use an image that is already present on the daemon or fetch it as the operator
+before creating the lease.
+
+The network's immutable ID is included in the fixed creation intent and stored
+on the container. Creation uses that ID, not a mutable network name. Before an
+SSH operation, Crabbox checks the current daemon, local bridge, sole network
+attachment, exact container membership, endpoint ID and IPv4 address. Published
+ports, an added network, or a replaced network are refused without falling back
+to another transport. A refused connection does not prevent releasing the exact
+owned lease through `stop`; the release path does not require working SSH.
+
+An internal bridge controls routing, not all host access: containers can reach
+services exposed on that bridge by its host and other members. Keep the Docker
+socket and host credentials outside leases and admit the controller/VM boundary
+separately, following the [security model](../security.md). The mode does not
+turn a cooperative local container into a hostile-code security boundary.
 
 ### OCI runtime
 

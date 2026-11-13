@@ -86,7 +86,8 @@ type inspectState struct {
 }
 
 type inspectNetworking struct {
-	Ports map[string][]inspectPort `json:"Ports"`
+	Ports    map[string][]inspectPort            `json:"Ports"`
+	Networks map[string]inspectNetworkAttachment `json:"Networks"`
 }
 
 type inspectPort struct {
@@ -238,6 +239,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		cfg.LocalContainer.CheckpointMetadata = shared.CloneLabels(metadata)
 		b.cfg.LocalContainer.CheckpointMetadata = shared.CloneLabels(metadata)
+	}
+	if err := b.configureSSHTransport(ctx, &cfg); err != nil {
+		return core.LeaseTarget{}, err
 	}
 	if strings.TrimSpace(req.RequestedLeaseID) != "" {
 		// Reject unavailable runtimes before reserving a durable fixed-ID intent.
@@ -1873,6 +1877,10 @@ func (b *backend) createContainerWithOptions(ctx context.Context, cfg core.Confi
 	// Checkpoint images may carry an older allocation's fixed-ID authority.
 	// Always override it, including for ordinary allocations with no intent.
 	labels["fixed_intent_sha256"] = fixedFingerprint
+	// Override transport labels inherited from a checkpoint image, including
+	// when the new allocation returns to the default published transport.
+	labels[sshTransportLabel] = cfg.LocalContainer.SSHTransport
+	labels[sshNetworkLabel] = cfg.LocalContainer.SSHNetworkID
 	if core.IsArchitectureExplicit(cfg) {
 		labels["architecture"] = cfg.Architecture
 	}
@@ -1921,12 +1929,14 @@ func (b *backend) createContainerWithOptions(ctx context.Context, cfg core.Confi
 	if err != nil {
 		return "", "", err
 	}
+	networkArgs, err := localContainerSSHNetworkArgs(cfg)
+	if err != nil {
+		return "", "", err
+	}
 	args := []string{
 		"run", "-d",
 		"--name", name,
 		"--user", "root",
-		"--network", cfg.LocalContainer.Network,
-		"-p", "127.0.0.1::" + sshPort,
 		"-e", "CRABBOX_AUTHORIZED_KEY=" + publicKey,
 		"-e", "CRABBOX_SSH_USER=" + cfg.LocalContainer.User,
 		"-e", "CRABBOX_WORK_ROOT=" + containerWorkRoot,
@@ -1936,6 +1946,7 @@ func (b *backend) createContainerWithOptions(ctx context.Context, cfg core.Confi
 		"-e", "CRABBOX_BROWSER=" + boolEnv(cfg.Browser),
 		"-e", "CRABBOX_DOCKER_SOCKET=" + boolEnv(cfg.LocalContainer.DockerSocket),
 	}
+	args = append(args, networkArgs...)
 	for i, volume := range cfg.Cache.Volumes {
 		args = append(args, "-e", fmt.Sprintf("CRABBOX_CACHE_VOLUME_PATH_%d=%s", i, strings.TrimSpace(volume.Path)))
 	}
@@ -2239,6 +2250,11 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, container i
 	host, port, err := containerSSHHostPort(container)
 	if err != nil {
 		return core.LeaseTarget{}, err
+	}
+	if mode, _ := localContainerSSHTransport(container.Config.Labels[sshTransportLabel]); mode == internalSSHTransport {
+		if err := b.validateInternalSSHContainer(ctx, cfg, container); err != nil {
+			return core.LeaseTarget{}, err
+		}
 	}
 	keyPath, err := core.OptionalStoredTestboxKeyPath(leaseID)
 	if err == nil {
@@ -2794,6 +2810,13 @@ func isPendingLocalContainerClaim(claim core.LeaseClaim) bool {
 }
 
 func containerSSHHostPort(container inspectContainer) (string, string, error) {
+	mode, err := localContainerSSHTransport(container.Config.Labels[sshTransportLabel])
+	if err != nil {
+		return "", "", err
+	}
+	if mode == internalSSHTransport {
+		return internalContainerSSHHostPort(container)
+	}
 	ports := container.NetworkSettings.Ports[sshPort+"/tcp"]
 	if len(ports) == 0 {
 		return "", "", core.Exit(4, "container %s has no published SSH port", shortID(container.ID))

@@ -28,5 +28,11 @@ func (Provider) ConfigShowSection(cfg core.Config) core.ProviderConfigShowSectio
 			TextName: "oci_runtime", TextValue: c.OCIRuntime,
 		})
 	}
+	if c.SSHTransport != "" {
+		section.Fields = append(section.Fields, core.ProviderConfigShowField{
+			JSONName: "sshTransport", JSONValue: c.SSHTransport,
+			TextName: "ssh_transport", TextValue: c.SSHTransport,
+		})
+	}
 	return section
 }
