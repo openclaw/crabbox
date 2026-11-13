@@ -276,9 +276,9 @@ the final interval; wait4 totals are complete. Mount/ancestor metadata reads and
 `noatime` are recorded limitations, as is omission of original root-boot contention.
 
 At most two sequential stock launches and one active instance are permitted.
-Admission starts a 120-minute absolute clock with work fenced at minute 100,
-reserving 20 minutes for cleanup. Source capture, approvals and deployment all
-consume that clock. An expired window cannot be extended or replaced in the same
+First-walk admission starts a 150-minute absolute clock with work fenced at
+minute 130, reserving 20 minutes for cleanup. Source capture, approvals and
+deployment all consume that clock. An expired window cannot be extended or replaced in the same
 run. The authority terminates writers first, explicitly deletes any surviving
 unattached copy, inventories root **and** data volumes and verifies exact absence.
 Uncertain/failed cleanup, unexpected volume identity, pagination or incomplete
