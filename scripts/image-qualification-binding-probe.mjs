@@ -386,6 +386,11 @@ export async function bindingProbe(
   };
   const cleanup = async () => {
     cleaning = true;
+    // A new recovery attempt must not inherit success if any fresh inspection
+    // fails. Commit pending state before beginning those management reads.
+    ledger.settled = false;
+    for (const role of roles) if (ledger.intents[role]) ledger.intents[role].settled = false;
+    await persist();
     const failures = [];
     for (const role of [...roles].reverse()) {
       if (!ledger.intents[role]) continue;
@@ -418,9 +423,9 @@ export async function bindingProbe(
         ledger.cleanupFailureAt[role] = ledger.lastAction;
       }
     }
-    ledger.settled = roles.every(
-      (role) => !ledger.intents[role] || ledger.intents[role].settled === true,
-    );
+    ledger.settled =
+      failures.length === 0 &&
+      roles.every((role) => !ledger.intents[role] || ledger.intents[role].settled === true);
     ledger.cleanupFailures = failures;
     ledger.completedAt = new Date(now()).toISOString();
     ledger.withinOriginalBound = now() <= Date.parse(plan.deadline);
@@ -660,7 +665,10 @@ export async function bindingProbeCommand(command, args, Cloudflare, env = proce
 }
 
 export function readRegular(file) {
-  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const fd = fs.openSync(
+    file,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+  );
   try {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.size > 1024 * 1024) fail("invalid journal/plan file");

@@ -85,6 +85,8 @@ references disappear. Settings 404 plus complete inventory verifies deletion.
 An uncertain upload that was never observed owned remains UNKNOWN even if absent;
 it cannot be marked settled or retried. A lost DELETE response can settle only
 after identity was proven and subsequent absence independently observed.
+Every recovery first journals pending settlement; a fresh failed check overrides
+any earlier success.
 
 After interruption, use the same frozen plan/source, existing credential custody
 and durable journal. Recovery only inspects and ordinarily deletes exact owned

@@ -227,7 +227,7 @@ for (const role of ["receiver", "caller"])
     const f = await fixture({ lostUploadAbsent: role });
     await f.run();
     assert.equal(f.ledger.settled, false);
-    assert.equal(f.ledger.intents[role].settled, undefined);
+    assert.notEqual(f.ledger.intents[role].settled, true);
     const puts = f.cf.state.calls.filter((c) => c.method === "PUT").length;
     await f.recover();
     assert.equal(f.ledger.settled, false);
@@ -464,4 +464,17 @@ test("late recovery records a missed original deadline without forward work", as
   assert.equal(f.ledger.withinOriginalBound, false);
   assert.equal(f.p.deadline, new Date(start + 20 * 60000).toISOString());
   assert.ok(!f.cf.state.calls.slice(before).some((c) => c.method === "PUT" || c.method === "POST"));
+});
+
+test("failed recovery recheck overrides all prior settlement flags", async () => {
+  const f = await fixture();
+  await f.run();
+  assert.equal(f.ledger.settled, true);
+  f.cf.state.options.before = (c) => {
+    if (c.pathname === "/workers/scripts")
+      throw new Error("inventory denied after prior settlement");
+  };
+  await f.recover();
+  assert.equal(f.ledger.settled, false);
+  assert.deepEqual(f.ledger.cleanupFailures, ["caller", "receiver"]);
 });
