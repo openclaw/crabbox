@@ -8,6 +8,15 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import {
+  transportMarkers,
+  transportProfile,
+  transportBindingShape,
+  proveCandidateTransport,
+  settleCandidateTransport,
+} from "./image-qualification-transport.mjs";
+import { withQualificationJournal } from "./image-qualification-journal.mjs";
+
+import {
   executorCredentialIdentity,
   readExecutorCredential,
 } from "./image-qualification-executor-token.mjs";
@@ -1205,7 +1214,14 @@ async function verifyHandoff(identityCheck, manifestSha256) {
   return handoff;
 }
 
-function candidateBindings(identity, adminToken, sharedToken, config) {
+function transportV2Enabled() {
+  const profile = process.env.QUALIFICATION_TRANSPORT_PROFILE;
+  if (profile !== undefined && profile !== "" && profile !== "candidate-transport-v2")
+    throw new Error("unknown transport profile");
+  return profile === "candidate-transport-v2";
+}
+
+function candidateBindings(identity, adminToken, sharedToken, config, stage = false) {
   const vars = {
     CRABBOX_DEFAULT_ORG: "image-qualification",
     CRABBOX_GITHUB_ALLOWED_ORG: "example-org.invalid",
@@ -1236,12 +1252,17 @@ function candidateBindings(identity, adminToken, sharedToken, config) {
     ...Object.entries(vars).map(([name, text]) => ({ name, type: "plain_text", text })),
     { name: "CRABBOX_ADMIN_TOKEN", type: "secret_text", text: adminToken },
     { name: "CRABBOX_SHARED_TOKEN", type: "secret_text", text: sharedToken },
-    {
-      name: "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
-      type: "service",
-      service: authorityName,
-      props: identity,
-    },
+    ...(transportV2Enabled() && stage
+      ? []
+      : [
+          {
+            name: "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
+            type: "service",
+            service: authorityName,
+            props: identity,
+          },
+        ]),
+    ...(transportV2Enabled() ? transportMarkers(stage ? "stage-v2" : "final-v2", identity) : []),
     { name: "FLEET", type: "durable_object_namespace", class_name: "FleetDurableObject" },
     { name: "CF_VERSION_METADATA", type: "version_metadata" },
   ];
@@ -1259,11 +1280,12 @@ function candidateMetadata(mainModule, bindings, createNamespace = false) {
   };
 }
 
-function controllerMetadata(deploymentHash, token) {
+function controllerMetadata(deploymentHash, token, v2 = transportV2Enabled()) {
   return {
     main_module: "controller.mjs",
     compatibility_date: "2026-09-03",
     bindings: [
+      ...(v2 ? transportMarkers("controller-v2", { deploymentHash }) : []),
       { name: "CONTROLLER_TOKEN", type: "secret_text", text: token },
       {
         name: "AUTHORITY",
@@ -1289,6 +1311,9 @@ function relayMetadata(
     main_module: "relay.mjs",
     compatibility_date: "2026-09-03",
     bindings: [
+      ...(transportV2Enabled()
+        ? transportMarkers("relay-v2", { candidateWorker, deploymentHash: "0".repeat(64) })
+        : []),
       { name: "EXECUTOR_TOKEN", type: "secret_text", text: executorToken },
       { name: "CANDIDATE_ADMIN_TOKEN", type: "secret_text", text: adminToken },
       { name: "CANDIDATE_SHARED_TOKEN", type: "secret_text", text: sharedToken },
@@ -1310,7 +1335,7 @@ function relayMetadata(
   };
 }
 
-const publicBindingShape = bindingShape;
+const publicBindingShape = (bindings) => bindingShape(transportBindingShape(bindings));
 
 function executionManifest(identity) {
   // The final version cannot be embedded in its own Worker bindings. Bind it
@@ -1428,24 +1453,46 @@ async function verifyExecutionDeployment(cf, expected) {
   }
   const bindings = publicBindingShape(settings.bindings ?? []);
   const relayBindings = publicBindingShape(relaySettings.bindings ?? []);
+  const profile = transportProfile(settings.bindings ?? []);
   const transport = bindings.find(
     (binding) =>
       binding.name === "CRABBOX_AWS_QUALIFICATION_TRANSPORT" &&
       binding.type === "service" &&
       binding.service === authorityName,
   );
+  const transportProps = profile?.profile === "final-v2" ? profile.identity : transport?.props;
+  if (profile?.profile === "final-v2") {
+    await cf.verifyController();
+    const controllerURL = await cf.enableSubdomain(controllerName);
+    const reply = await controllerCall(
+      cf,
+      controllerURL,
+      required("QUALIFICATION_CONTROLLER_TOKEN"),
+      "transport-discover",
+    );
+    const proof = reply?.probe;
+    if (
+      !proof ||
+      proof.protocol !== 1 ||
+      proof.state !== "verified" ||
+      canonical(proof.identity) !== canonical(profile.identity) ||
+      proof.candidateVersion !== candidateVersion ||
+      proof.authorityVersion !== cf.admission.authority.version
+    )
+      throw new Error("execution lacks canonical candidate transport proof");
+  }
   const relayExpiry = relayBindings.find(
     (binding) => binding.name === "QUALIFICATION_EXPIRES_AT" && binding.type === "plain_text",
   );
   if (
     digest(canonical(bindings)) !== expected.bindingDigest ||
-    transport?.props?.runId !== expected.runId ||
-    transport?.props?.candidateSha !== expected.candidateSha ||
-    transport?.props?.candidateWorker !== expected.candidateWorker ||
-    transport?.props?.deploymentHash !== expected.deploymentHash ||
-    transport?.props?.expiresAt !== expected.expiresAt ||
-    Boolean(transport?.props?.firstWalk) !== Boolean(expected.firstWalk) ||
-    canonical(transport?.props?.retainedImage ?? null) !==
+    transportProps?.runId !== expected.runId ||
+    transportProps?.candidateSha !== expected.candidateSha ||
+    transportProps?.candidateWorker !== expected.candidateWorker ||
+    transportProps?.deploymentHash !== expected.deploymentHash ||
+    transportProps?.expiresAt !== expected.expiresAt ||
+    Boolean(transportProps?.firstWalk) !== Boolean(expected.firstWalk) ||
+    canonical(transportProps?.retainedImage ?? null) !==
       canonical(expected.retainedImage ?? null) ||
     relayExpiry?.text !== expected.expiresAt ||
     digest(canonical(relayBindings)) !== expected.relayBindingDigest ||
@@ -1579,7 +1626,13 @@ async function deploy() {
   executorTokenForRedaction = executorToken;
   const controllerToken = required("QUALIFICATION_CONTROLLER_TOKEN");
   const placeholderIdentity = { ...baseIdentity, deploymentHash: "0".repeat(64) };
-  const stagingBindings = candidateBindings(placeholderIdentity, adminToken, sharedToken, config);
+  const stagingBindings = candidateBindings(
+    placeholderIdentity,
+    adminToken,
+    sharedToken,
+    config,
+    true,
+  );
   const mainFile = path.join(artifactDir, manifest.mainModule);
   const extraModules = manifest.files
     .filter(
@@ -1720,6 +1773,67 @@ async function deploy() {
   ]);
   await verifyCandidateIdentity({ artifact: true });
   assertHandoffWindow(handoff);
+  if (transportV2Enabled()) {
+    const request = {
+      identity,
+      candidateVersion,
+      authorityVersion: cf.admission.authority.version,
+      challenge: crypto.randomBytes(32).toString("hex"),
+      expiresAt: new Date(Math.min(Date.now() + 10 * 60_000, Date.parse(expiresAt))).toISOString(),
+    };
+    const proofDirectory = path.join(
+      path.resolve(required("QUALIFICATION_PROOF_DIR")),
+      "transport-custody",
+    );
+    const verifyFences = async () => {
+      await verifyAuthority(cf);
+      await cf.verifyController();
+      for (const [worker, version, namespaceCount, publicURL] of [
+        [candidateWorker, candidateVersion, 1, false],
+        [relayWorker, relayVersion, 0, true],
+      ]) {
+        await verifyOwned(cf, worker);
+        await assertWorkerIsolation(cf, worker, namespaceCount, publicURL);
+        if ((await cf.latestVersion(worker)) !== version)
+          throw new Error("transport proof deployment drift");
+      }
+    };
+    await withQualificationJournal(
+      proofDirectory,
+      {
+        stateName: "transport-state.json",
+        lockName: "transport-state.lock",
+        create: true,
+        initial: () => ({ request, phase: "prepared" }),
+      },
+      async (state, save) => {
+        if (canonical(state.request) !== canonical(request))
+          throw new Error("transport intent already exists; recovery required");
+        await proveCandidateTransport({
+          request,
+          save,
+          controller: (action, input) =>
+            controllerCall(cf, controllerURL, controllerToken, action, input),
+          verifyFences,
+          invokeCandidate: async (challenge) => {
+            const response = await fetch(`${relayURL}/v1/qualification/transport-probe`, {
+              method: "POST",
+              headers: {
+                authorization: `Bearer ${executorToken}`,
+                "content-type": "application/json",
+              },
+              body: JSON.stringify({ challenge }),
+              signal: AbortSignal.timeout(10_000),
+              redirect: "error",
+            });
+            // Never inspect or accept a candidate-supplied identity, status or body.
+            await response.body?.cancel();
+          },
+        });
+      },
+    );
+    await verifyFences();
+  }
   const record = await controllerCall(cf, controllerURL, controllerToken, "claim", { identity });
   if (record.runId !== runId || record.cleanupState !== "claimed")
     throw new Error("authority claim readback mismatch");
@@ -1897,8 +2011,12 @@ async function deleteCandidate(cf, worker) {
       await cf.upload(worker, tombstone, {
         main_module: "tombstone.mjs",
         compatibility_date: "2026-09-03",
-        bindings: existing.bindings.filter(
-          (binding) => binding.name === "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
+        bindings: existing.bindings.filter((binding) =>
+          [
+            "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
+            "QUALIFICATION_TRANSPORT_PROFILE",
+            "QUALIFICATION_TRANSPORT_IDENTITY",
+          ].includes(binding.name),
         ),
         migrations: [
           {
@@ -1950,7 +2068,10 @@ async function qualificationCandidates(cf) {
         binding.props?.candidateWorker === worker &&
         sha64.test(binding.props?.deploymentHash ?? ""),
     );
-    if (transport) candidates.push({ worker, deploymentHash: transport.props.deploymentHash });
+    const profile = transportProfile(settings.bindings ?? []);
+    if (profile)
+      candidates.push({ worker, deploymentHash: profile.identity.deploymentHash, v2: true });
+    else if (transport) candidates.push({ worker, deploymentHash: transport.props.deploymentHash });
   }
   return candidates;
 }
@@ -2021,10 +2142,15 @@ async function discoveryControllerVersion(cf, metadata, expectedVersion) {
   return version;
 }
 
-async function discoverWithOwnedController(cf, deploymentHash, token, { idleOnly = false } = {}) {
+async function discoverWithOwnedController(
+  cf,
+  deploymentHash,
+  token,
+  { idleOnly = false, probeOnly = false, v2 = transportV2Enabled() } = {},
+) {
   const metadata = {
-    ...controllerMetadata(deploymentHash, token),
-    tags: ownershipTags(cf, controllerName, controllerMetadata(deploymentHash, token).bindings),
+    ...controllerMetadata(deploymentHash, token, v2),
+    tags: ownershipTags(cf, controllerName, controllerMetadata(deploymentHash, token, v2).bindings),
   };
   await requireControllerAbsent(cf);
   let version;
@@ -2038,12 +2164,19 @@ async function discoverWithOwnedController(cf, deploymentHash, token, { idleOnly
     version = await discoveryControllerVersion(cf, metadata);
     controllerURL = await cf.enableSubdomain(controllerName);
     await discoveryControllerVersion(cf, metadata, version);
-    discovered = await controllerCall(cf, controllerURL, token, "discover");
-    const run = discoveredRun(discovered);
+    if (probeOnly) {
+      discovered = await controllerCall(cf, controllerURL, token, "transport-discover");
+      if (!discovered || Object.keys(discovered).join(",") !== "probe")
+        throw new Error("invalid probe discovery");
+    } else {
+      if (v2 && !idleOnly) await recoverTransportProbe(cf, controllerURL, token);
+      discovered = await controllerCall(cf, controllerURL, token, "discover");
+    }
+    const run = probeOnly ? null : discoveredRun(discovered);
     if (idleOnly && run !== null) {
       throw new Error("idle discovery found an active authority registry run");
     }
-    retainForFinalization = !idleOnly;
+    retainForFinalization = !idleOnly && !probeOnly;
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
   } finally {
@@ -2068,6 +2201,37 @@ async function discoverWithOwnedController(cf, deploymentHash, token, { idleOnly
   return { controllerURL, discovered };
 }
 
+async function recoverTransportProbe(cf, controllerURL, token) {
+  const reply = await controllerCall(cf, controllerURL, token, "transport-discover");
+  if (!reply || Object.keys(reply).join(",") !== "probe")
+    throw new Error("invalid transport discovery");
+  if (reply.probe === null) return;
+  const { protocol, state, observedAt, ...request } = reply.probe;
+  if (protocol !== 1 || !["pending", "observed", "verified", "cancelled"].includes(state))
+    throw new Error("invalid canonical transport probe");
+  // A retained tombstone is historical custody, not this controller's mutation
+  // target. It must not block cleanup of a later pre-probe partial deployment.
+  if (["verified", "cancelled"].includes(state)) return;
+  const settings = await verifyOwned(cf, controllerName);
+  const owner = transportProfile(settings.bindings ?? [])?.identity.deploymentHash;
+  if (owner !== request.identity.deploymentHash) {
+    // No candidate/registry mutation and no force: replace only our exact trusted
+    // caller, then let the existing recovery path settle the canonical owner.
+    await cf.verifyController();
+    await cf.disableSubdomain(controllerName);
+    await assertWorkerIsolation(cf, controllerName, 0, false);
+    await cf.deleteScript(controllerName);
+    await requireControllerAbsent(cf);
+    await discoverWithOwnedController(cf, request.identity.deploymentHash, token, { v2: true });
+    return;
+  }
+  await settleCandidateTransport({
+    request,
+    controller: (action, input) => controllerCall(cf, controllerURL, token, action, input),
+    save: async () => {}, // canonical settlement survives loss of local artifacts
+  });
+}
+
 async function cleanupRun({
   reaper = false,
   requireProof = false,
@@ -2088,6 +2252,8 @@ async function cleanupRun({
     if (settings !== undefined) {
       await cf.verifyController();
       controllerURL = await cf.enableSubdomain(controllerName);
+      if (transportProfile(settings.bindings ?? [])?.profile === "controller-v2")
+        await recoverTransportProbe(cf, controllerURL, token);
       discovered = await controllerCall(cf, controllerURL, token, "discover");
     } else {
       if (!reaper) throw new Error("qualification controller is unavailable");
@@ -2098,6 +2264,7 @@ async function cleanupRun({
             cf,
             candidate.deploymentHash,
             token,
+            { v2: Boolean(candidate.v2) },
           ));
           break;
         } catch (error) {
@@ -2111,7 +2278,26 @@ async function cleanupRun({
           if (candidate === candidates.at(-1)) throw error;
         }
       }
-      if (candidates.length === 0) {
+      if (candidates.length === 0 && transportV2Enabled()) {
+        // The canonical registry outlives lost candidate/relay/local artifacts.
+        // Discover without mutation, delete that temporary caller, then bind only
+        // to the exact owner returned by the trusted authority for settlement.
+        const observation = await discoverWithOwnedController(
+          cf,
+          digest("crabbox/image-qualification/transport-discovery/v2"),
+          token,
+          { probeOnly: true, v2: true },
+        );
+        if (observation.discovered.probe !== null) {
+          ({ controllerURL, discovered } = await discoverWithOwnedController(
+            cf,
+            observation.discovered.probe.identity.deploymentHash,
+            token,
+            { v2: true },
+          ));
+        }
+      }
+      if (candidates.length === 0 && !discovered) {
         // A shape-valid controller can discover only an empty registry. Never
         // use this domain-separated hash to finalize an active run.
         ({ discovered } = await discoverWithOwnedController(
