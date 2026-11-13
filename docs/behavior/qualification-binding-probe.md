@@ -89,7 +89,8 @@ Every recovery first journals pending settlement; a fresh failed check overrides
 any earlier success.
 
 After interruption, use the same frozen plan/source, existing credential custody
-and durable journal. Recovery only inspects and ordinarily deletes exact owned
+and existing durable journal. A missing journal or mistyped path refuses recovery;
+it cannot initialize empty custody evidence or certify settlement. Recovery only inspects and ordinarily deletes exact owned
 fixtures; it cannot create, invoke, replace or adopt another version:
 
 ```sh

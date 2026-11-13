@@ -548,8 +548,8 @@ export async function bindingProbe(
 // Local journal custody is independent of the measured provider field. There
 // is no automatic stale-lock reclamation: two reclaimers could otherwise race
 // and remove a new live lock. A crash requires operator-confirmed local custody.
-export async function withBindingProbeJournal(directory, plan, run) {
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+export async function withBindingProbeJournal(directory, plan, run, { create = false } = {}) {
+  if (create) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (
     fs.realpathSync(directory) !== path.resolve(directory) ||
     fs.statSync(directory).mode & 0o077 ||
@@ -568,6 +568,7 @@ export async function withBindingProbeJournal(directory, plan, run) {
       ledger = readRegular(file);
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
+      if (!create) fail("recovery requires its existing durable journal");
       ledger = { planHash: digest(canonical(plan)), intents: {} };
     }
     const save = async (value) => {
@@ -643,15 +644,19 @@ export async function bindingProbeCommand(command, args, Cloudflare, env = proce
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   try {
-    const ledger = await withBindingProbeJournal(args[1], plan, (value, save) =>
-      bindingProbe(cf, plan, value, {
-        mode: command === "binding-probe-run" ? "run" : "recover",
-        // An ephemeral invocation key is never persisted or printed. Recovery
-        // uses management identity only; it cannot invoke or create the fixture.
-        token: randomBytes(32).toString("hex"),
-        save,
-        signal: cancellation.signal,
-      }),
+    const ledger = await withBindingProbeJournal(
+      args[1],
+      plan,
+      (value, save) =>
+        bindingProbe(cf, plan, value, {
+          mode: command === "binding-probe-run" ? "run" : "recover",
+          // An ephemeral invocation key is never persisted or printed. Recovery
+          // uses management identity only; it cannot invoke or create the fixture.
+          token: randomBytes(32).toString("hex"),
+          save,
+          signal: cancellation.signal,
+        }),
+      { create: command === "binding-probe-run" },
     );
     if (
       !ledger.settled ||

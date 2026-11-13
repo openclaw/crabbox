@@ -370,19 +370,24 @@ test("journal is private, durable, exclusive and rejects symlink custody", async
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
   const dir = path.join(base, "journal");
   const p = plan();
-  await withBindingProbeJournal(dir, p, async (ledger, save) => {
-    ledger.marker = "committed";
-    await save(ledger);
-    assert.equal(
-      JSON.parse(fs.readFileSync(path.join(dir, "binding-probe.json"))).marker,
-      "committed",
-    );
-    assert.equal(fs.statSync(path.join(dir, "binding-probe.json")).mode & 0o777, 0o600);
-    await assert.rejects(
-      withBindingProbeJournal(dir, p, () => {}),
-      /EEXIST/,
-    );
-  });
+  await withBindingProbeJournal(
+    dir,
+    p,
+    async (ledger, save) => {
+      ledger.marker = "committed";
+      await save(ledger);
+      assert.equal(
+        JSON.parse(fs.readFileSync(path.join(dir, "binding-probe.json"))).marker,
+        "committed",
+      );
+      assert.equal(fs.statSync(path.join(dir, "binding-probe.json")).mode & 0o777, 0o600);
+      await assert.rejects(
+        withBindingProbeJournal(dir, p, () => {}),
+        /EEXIST/,
+      );
+    },
+    { create: true },
+  );
   await withBindingProbeJournal(dir, p, async (ledger) => assert.equal(ledger.marker, "committed"));
   const link = path.join(base, "link");
   fs.symlinkSync(dir, link);
@@ -477,4 +482,20 @@ test("failed recovery recheck overrides all prior settlement flags", async () =>
   await f.recover();
   assert.equal(f.ledger.settled, false);
   assert.deepEqual(f.ledger.cleanupFailures, ["caller", "receiver"]);
+});
+
+test("missing recovery journal refuses before any management or settlement callback", async (t) => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "binding-probe-missing-")));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  let invoked = false;
+  await assert.rejects(
+    withBindingProbeJournal(dir, plan(), async () => {
+      invoked = true;
+      return { settled: true };
+    }),
+    /existing durable journal/,
+  );
+  assert.equal(invoked, false);
+  assert.equal(fs.existsSync(path.join(dir, "binding-probe.json")), false);
+  assert.equal(fs.existsSync(path.join(dir, "binding-probe.lock")), false);
 });
