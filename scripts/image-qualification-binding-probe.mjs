@@ -3,7 +3,6 @@
 // ownership: missing props never become acceptable for privileged bindings.
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -45,8 +44,10 @@ export async function readProbeResponse(response, maximum = 8192) {
   return (await responseBytes(response, maximum)).toString("utf8");
 }
 
-export async function probeContentIdentity(response) {
-  const body = await responseBytes(response, 64 * 1024);
+export async function probeContentIdentity(response, maximum = 64 * 1024) {
+  if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > 1024 * 1024)
+    fail("invalid content bound");
+  const body = await responseBytes(response, maximum);
   const form = await new Response(body, {
     headers: { "content-type": response.headers.get("content-type") },
   }).formData();
@@ -561,53 +562,17 @@ export async function bindingProbe(
 // is no automatic stale-lock reclamation: two reclaimers could otherwise race
 // and remove a new live lock. A crash requires operator-confirmed local custody.
 export async function withBindingProbeJournal(directory, plan, run, { create = false } = {}) {
-  if (create) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  if (
-    fs.realpathSync(directory) !== path.resolve(directory) ||
-    fs.statSync(directory).mode & 0o077 ||
-    fs.statSync(directory).uid !== process.getuid()
-  )
-    fail("journal directory must be private and contain no symlinks");
-  const lock = path.join(directory, "binding-probe.lock");
-  const fd = fs.openSync(lock, "wx", 0o600);
-  fs.writeFileSync(fd, JSON.stringify({ host: os.hostname(), pid: process.pid }));
-  fs.fsyncSync(fd);
-  fs.closeSync(fd);
-  const file = path.join(directory, "binding-probe.json");
-  try {
-    let ledger;
-    try {
-      ledger = readRegular(file);
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-      if (!create) fail("recovery requires its existing durable journal");
-      ledger = { planHash: digest(canonical(plan)), intents: {} };
-    }
-    const save = async (value) => {
-      const temporary = `${file}.${randomBytes(8).toString("hex")}.candidate`;
-      const out = fs.openSync(temporary, "wx", 0o600);
-      try {
-        try {
-          fs.writeFileSync(out, `${JSON.stringify(value, null, 2)}\n`);
-          fs.fsyncSync(out);
-        } finally {
-          fs.closeSync(out);
-        }
-        fs.renameSync(temporary, file);
-        const dir = fs.openSync(directory, "r");
-        try {
-          fs.fsyncSync(dir);
-        } finally {
-          fs.closeSync(dir);
-        }
-      } finally {
-        if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
-      }
-    };
-    return await run(ledger, save);
-  } finally {
-    fs.unlinkSync(lock);
-  }
+  const { withQualificationJournal } = await import("./image-qualification-journal.mjs");
+  return await withQualificationJournal(
+    directory,
+    {
+      stateName: "binding-probe.json",
+      lockName: "binding-probe.lock",
+      create,
+      initial: () => ({ planHash: digest(canonical(plan)), intents: {} }),
+    },
+    run,
+  );
 }
 
 // These opt-in commands use the existing qualification Cloudflare transport and

@@ -392,3 +392,119 @@ finalization idempotently, and retires the registry record.
 Cloud setup, enrollment, candidate deployment, and paid execution remain
 explicit maintainer actions. Merging this seam creates no Worker, secret,
 Durable Object namespace, AWS resource, or spend.
+
+## Idle controller identity and recovery
+
+The opt-in `idle-controller-run` and `idle-controller-recover` commands in
+`scripts/image-qualification-control.mjs` use a separate `idle-controller/v1`
+profile. Existing candidate, relay and generic reaper verification remains strict.
+These commands do not admit AWS operations or first-walk execution. They require
+an explicitly admitted protected tooling commit and a separately reviewed private
+authority serving `AWSQualificationController.bindingIdentity` with the
+`CF_VERSION_METADATA` version-metadata binding. Updating a local CLI alone does
+not install that RPC. Do not merge a private runtime candidate as a shortcut to
+production deployment.
+
+The authority RPC returns its actual bound controller props, a fresh public
+challenge, a fixed protocol/role and its executing version without accessing any
+Durable Object, registry, credential or signer. The trusted controller adds its
+executing version. The helper checks both versions and the entire reply, with
+management/version fences before discovery. It may defer only the known service
+binding's props representation; supplied-but-different props, extra capabilities,
+foreign environments and mismatched source/author/version all fail closed. An
+explicit default environment is accepted only when witnessed on the exact target.
+Requested binding identity and visible binding identity use separate digests and
+new tags. No legacy tag is converted and no expected props are copied into readback.
+
+An idle-created controller is limited to `/binding-identity` and `/discover`.
+Discovery requires the result `{ "run": null }`; active or unknown results stop
+forward work. The helper still attempts ordinary cleanup of its newly owned caller.
+Candidate self-report is not an authority attestation; full candidate transport
+qualification remains blocked where its strict management readback cannot verify
+props.
+
+### Retained custody and frozen admission
+
+Use the existing qualification owner and a retained operator filesystem, never an
+ephemeral runner with only a post-run artifact. The operator and fallback must have
+access to the exact private recovery directory and reviewed source. Before running,
+record that custody and the finite cycle in the owner's durable inventory. Place
+an immutable, exclusively created, user-owned 0600 `idle-controller-plan.json` in
+a user-owned 0700 directory with no symlink ancestry. The helper independently reads
+it in a fresh credential-free process. This does not protect against media loss,
+hostile same-user rollback or concurrent trusted administrative changes.
+
+The frozen plan includes `profile`, random 24-hex `attemptId`, exact 40-hex
+`sourceSha`, `sources` from `idleSourceIdentity()`, independently evidenced token
+and uploader IDs, original complete inventory digest, full authority settings
+digest, exact single-module authority content identity, current full `isolation`
+admission, witnessed `defaultEnvironment` (initially `production` only), exact
+controller `props`, `custodyReceiptSha256`, owner and fallback. `uploadExposure`
+explicitly admits the possible initial public/preview boolean pairs; it is not
+inferred after upload. Private normalization and temporary authenticated public
+controller exposure must be separately accepted. The controller name is fixed;
+any existing controller is a collision, never a replacement or adoption target.
+
+`startsAt`, `forwardStopsAt` and `deadline` bind a 20-minute cycle with the final
+10 minutes reserved for settlement. `maxRequests` is 800 across the retained
+attempt; half is reserved for cleanup. Each management/runtime request is bounded
+by 15 seconds and the applicable deadline, and its budget is journaled before
+dispatch. The credential must match the frozen token ID and outlive the full cycle
+by five minutes. These limits do not create a provider billing cap or authorize
+spending. No cloud plan is generated or admitted automatically.
+
+With current separately authorized credentials delivered through the existing
+custody route, set `QUALIFICATION_IDLE_SOURCE_SHA`,
+`QUALIFICATION_IDLE_PLAN_SHA256` (canonical plan digest), `CLOUDFLARE_ACCOUNT_ID`
+and `CLOUDFLARE_API_TOKEN`. Never put token values on argv or in the plan/journal.
+Then use exactly one of:
+
+```sh
+node scripts/image-qualification-control.mjs idle-controller-run /private/recovery-directory
+node scripts/image-qualification-control.mjs idle-controller-recover /private/recovery-directory
+```
+
+The state and lock names are `idle-controller-state.json` and
+`idle-controller.lock`. Durable create/exposure/delete intents precede mutations.
+Identity/discovery results are not restart grants. A fresh process is cleanup-only:
+it cannot upload, normalize exposure, call the identity RPC, discover or finalize
+a run. It re-proves creation ownership of this attempt's exact first/single
+controller version and performs at most one ordinary DELETE per recovery
+invocation. It never uses force, retries PUT, adopts a new version or deletes the
+authority/candidate/relay/namespaces. No incoming references, target-owned namespace,
+domain, route or schedule is allowed. Source/module/version/capability drift stops
+cleanup rather than weakening proof.
+
+An unobserved uncertain upload plus absence stays UNKNOWN. A previously proven
+owned caller followed by a lost DELETE response can settle only after fresh exact
+404, complete inventory absence/reference checks and unchanged authority/namespace
+proof. Failed fresh verification clears inherited settlement success. Missing,
+corrupt or mismatched original custody is not recreated. The lock is not reclaimed
+automatically: the operator must establish that the old executor and in-flight
+requests have stopped before ordinary local lock removal. Keep the receipt, source
+and cleanup credentials while state is unknown. Recovery cannot extend the frozen
+window; an expired window requires explicit new bounded recovery authority through
+the existing owner. Existing authority cleanup deadlines are unaffected.
+
+### Local source qualification
+
+Use the Node version in `.node-version`. In the private runtime checkout, run
+`npm ci --prefix worker`, `npm test --prefix worker -- aws-qualification-authority.test.ts`,
+`npm run check --prefix worker` and
+`npm run build:aws-qualification-authority --prefix worker` (dry-run only).
+In the tooling checkout, run:
+
+```sh
+npm ci --prefix worker
+node --test scripts/image-qualification*.test.*
+node scripts/image-qualification-idle-local.mjs /absolute/runtime/worker/dist-aws-qualification-authority/aws-qualification-authority.js
+```
+
+The last command executes the exact controller and runtime bundle in local workerd,
+with outbound traffic denied and registry/credential bindings absent. It tests
+real service props, version metadata and negative routing/schema cases. The Node
+suite additionally injects lost responses, cancellation, drift and actual process
+death at write-ahead boundaries. These are source/local-runtime proofs, not live
+Cloudflare upload/readback/recovery qualification and not bootstrap speed evidence.
+A substantive patch still needs fresh independent review and separate private
+rollout admission before any live cycle.
