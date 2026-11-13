@@ -992,8 +992,10 @@ export class Cloudflare {
   }
 
   async deleteScript(name) {
+    // References to the recovery controller must block its deletion.
+    const query = name === controllerName ? "" : "?force=true";
     await this.request(
-      `/workers/scripts/${name}?force=true`,
+      `/workers/scripts/${name}${query}`,
       { method: "DELETE" },
       { allow404: true },
     );
