@@ -242,7 +242,10 @@ test("reaper is protected, serialized, and artifact-independent", () => {
 
 test("control tool fixes the reviewed policy and recovery boundary", () => {
   assert.match(control, /instanceTypes: \["t3\.small", "t3a\.small"\]/);
-  assert.match(control, /maxMinutes: retainedImage \? 38 : 120/);
+  assert.match(
+    control,
+    /maxMinutes: process\.env\.QUALIFICATION_MODE === "first-walk" \? 150 : retainedImage \? 38 : 120/,
+  );
   assert.match(control, /maxMonthlyUSD: 10/);
   assert.match(control, /maxConcurrentInstances: 1/);
   assert.match(

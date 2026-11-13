@@ -4,7 +4,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 import relay from "./image-qualification-relay-worker.mjs";
 import {
@@ -20,6 +20,44 @@ const digest = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex"
 const recipe = fs.readFileSync(path.join(root, "scripts/fixtures/first-walk-reviewed-recipe.sh"));
 assert.equal(digest(recipe), firstWalkRecipeSha256);
 const runner = fs.readFileSync(path.join(root, "scripts/qualification-first-walk-guest.py"));
+
+test("first-walk refuses a queue-consumed executor reserve before any allocation", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "first-walk-reserve-"));
+  try {
+    const target = path.join(directory, "candidate/recipes/bootstrap/v1/linuxOwnershipRepair.sh");
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, recipe);
+    let stderr = "";
+    const code = await new Promise((resolve, reject) => {
+      const child = spawn(
+        process.execPath,
+        [path.join(root, "scripts/image-qualification-first-walk.mjs")],
+        {
+          env: {
+            PATH: process.env.PATH,
+            QUALIFICATION_RELAY_URL: "https://must-not-contact.invalid",
+            QUALIFICATION_EXECUTOR_TOKEN: "fixture-token",
+            QUALIFICATION_PROOF_DIR: path.join(directory, "proof"),
+            QUALIFICATION_ARTIFACT_DIR: directory,
+            QUALIFICATION_AWS_REGION: "us-east-1",
+            // Positive remaining work time, but less than the full executor reserve.
+            QUALIFICATION_EXPIRES_AT: new Date(Date.now() + 119 * 60_000).toISOString(),
+          },
+          stdio: ["ignore", "ignore", "pipe"],
+          timeout: 5000,
+        },
+      );
+      child.stderr.on("data", (part) => (stderr += part));
+      child.on("error", reject);
+      child.on("close", resolve);
+    });
+    assert.equal(code, 1);
+    assert.match(stderr, /full 100-minute executor reserve before allocation/);
+    assert.equal(fs.existsSync(path.join(directory, "proof")), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 // Execute the emitted shell with a privilege-boundary model: systemd's output
 // is unreadable to ordinary cleanup, while the modeled sudo cleanup can remove
@@ -151,7 +189,7 @@ console.log(input.includes('systemd-run') ? 'CRABBOX_FIRST_WALK_RESULT='+${JSON.
         QUALIFICATION_PROOF_DIR: proof,
         QUALIFICATION_ARTIFACT_DIR: dir,
         QUALIFICATION_AWS_REGION: "us-east-1",
-        QUALIFICATION_EXPIRES_AT: new Date(Date.now() + 120 * 60_000).toISOString(),
+        QUALIFICATION_EXPIRES_AT: new Date(Date.now() + 150 * 60_000).toISOString(),
       };
       let stderr = "";
       const outcome = await new Promise((resolve, reject) => {
@@ -351,5 +389,44 @@ test("first-walk staging rejects missing, substituted, oversized and linked cand
     );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("first-walk shell reserves cleanup and caps execution despite early admission", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "first-walk-shell-"));
+  try {
+    fs.writeFileSync(
+      path.join(directory, "timeout"),
+      `#!${process.execPath}\nconsole.log(JSON.stringify(process.argv.slice(2)));\n`,
+      { mode: 0o700 },
+    );
+    for (const minutes of [119, 121, 149, 152]) {
+      const child = spawnSync("bash", [path.join(root, "scripts/image-qualification-execute.sh")], {
+        env: {
+          PATH: `${directory}:${process.env.PATH}`,
+          QUALIFICATION_MODE: "first-walk",
+          QUALIFICATION_RELAY_URL: "https://must-not-contact.invalid",
+          QUALIFICATION_EXECUTOR_TOKEN: "fixture-token",
+          QUALIFICATION_BASE_AMI_ID: "ami-00000000",
+          QUALIFICATION_AWS_REGION: "us-east-1",
+          QUALIFICATION_ARTIFACT_DIR: directory,
+          QUALIFICATION_PROOF_DIR: directory,
+          QUALIFICATION_EXPIRES_AT: new Date(Date.now() + minutes * 60_000).toISOString(),
+        },
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      if (minutes === 119 || minutes === 152) {
+        assert.notEqual(child.status, 0);
+        assert.equal(child.stdout, "");
+      } else {
+        assert.equal(child.status, 0, child.stderr);
+        const args = JSON.parse(child.stdout);
+        assert.deepEqual(args.slice(0, 3), ["--signal=TERM", "--kill-after=1200", "6000"]);
+        assert.match(args.at(-1), /image-qualification-first-walk\.mjs$/);
+      }
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });

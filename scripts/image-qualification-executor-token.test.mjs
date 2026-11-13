@@ -356,3 +356,24 @@ test("matched credential still authorizes only existing relay operations and exp
   );
   assert.equal(calls, 1);
 });
+
+test("only first-walk admits the longer handoff while preserving exact expiry", () => {
+  const { env } = fixture();
+  const expiry = Date.parse(env.QUALIFICATION_EXPIRES_AT);
+  for (const [mode, minutes] of [
+    [undefined, 120],
+    ["mint", 120],
+    ["retained", 120],
+    ["first-walk", 150],
+  ]) {
+    const candidate = { ...env, QUALIFICATION_MODE: mode };
+    assert.equal(
+      readExecutorCredential(candidate, { now: expiry - minutes * 60_000, mask() {} }).token,
+      token,
+    );
+    assert.throws(() =>
+      readExecutorCredential(candidate, { now: expiry - minutes * 60_000 - 1, mask() {} }),
+    );
+    assert.throws(() => readExecutorCredential(candidate, { now: expiry, mask() {} }));
+  }
+});

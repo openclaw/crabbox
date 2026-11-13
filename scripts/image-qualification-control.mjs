@@ -39,6 +39,7 @@ const runIdPattern = /^image-qualification-[0-9]+-[0-9]+$/;
 const workerNamePattern = /^crabbox-image-qualification-[0-9]+-[0-9]+$/;
 const relayNamePattern = /^crabbox-image-qualification-relay-[0-9]+-[0-9]+$/;
 const maxRunMs = 120 * 60 * 1000;
+const firstWalkRunMs = 150 * 60 * 1000;
 const retainedRunMs = 38 * 60 * 1000;
 const retainedCleanupMs = 8 * 60 * 1000;
 const controllerName = "crabbox-image-qualification-controller";
@@ -1048,7 +1049,7 @@ function qualificationConfig() {
     baseAmiId: required("QUALIFICATION_BASE_AMI_ID", /^ami-[0-9a-f]+$/),
     rootGB,
     instanceTypes: ["t3.small", "t3a.small"],
-    maxMinutes: retainedImage ? 38 : 120,
+    maxMinutes: process.env.QUALIFICATION_MODE === "first-walk" ? 150 : retainedImage ? 38 : 120,
     maxMonthlyUSD: 10,
     maxConcurrentInstances: 1,
     maxLaunches: process.env.QUALIFICATION_MODE === "first-walk" ? 2 : retainedImage ? 1 : 3,
@@ -1062,7 +1063,8 @@ function qualificationHandoff(identityCheck, manifestSha256, startsAt) {
   const config = qualificationConfig();
   const runId = `image-qualification-${identityCheck.runId}-${required("GITHUB_RUN_ATTEMPT")}`;
   const expiresAt = new Date(
-    Date.parse(startsAt) + (config.retainedImage ? retainedRunMs : maxRunMs),
+    Date.parse(startsAt) +
+      (config.firstWalk ? firstWalkRunMs : config.retainedImage ? retainedRunMs : maxRunMs),
   ).toISOString();
   return {
     version: 1,

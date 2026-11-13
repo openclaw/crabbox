@@ -34,6 +34,9 @@ const region = required("QUALIFICATION_AWS_REGION");
 const workCutoff = Date.parse(required("QUALIFICATION_EXPIRES_AT")) - 20 * 60_000;
 if (!Number.isFinite(workCutoff) || Date.now() >= workCutoff)
   throw new Error("first-walk work window expired");
+// Deployment, arming and queue delays must not consume the executor reserve.
+if (workCutoff - Date.now() < 100 * 60_000)
+  throw new Error("first-walk requires the full 100-minute executor reserve before allocation");
 fs.mkdirSync(proof, { recursive: true, mode: 0o700 });
 const raw = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "first-walk-executor-")));
 const binary = path.join(artifact, "bin/crabbox");

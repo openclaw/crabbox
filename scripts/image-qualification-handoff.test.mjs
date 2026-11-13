@@ -473,7 +473,7 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       assert.equal(handoff.owner, "image-qualification-42-1@example.invalid");
       assert.equal(
         Date.parse(handoff.expiresAt) - Date.parse(handoff.startsAt),
-        (mode === "retained" ? 38 : 120) * 60_000,
+        (mode === "first-walk" ? 150 : mode === "retained" ? 38 : 120) * 60_000,
       );
       if (mode === "first-walk")
         assert.equal(
