@@ -2614,6 +2614,30 @@ describe("AWS qualification candidate transport", () => {
 });
 
 describe("first-walk integration with the existing authority", () => {
+  it.each([
+    { firstWalk: true, minutes: 150, accepted: true },
+    { firstWalk: true, minutes: 151, accepted: false },
+    { firstWalk: false, minutes: 120, accepted: true },
+    { firstWalk: false, minutes: 121, accepted: false },
+  ])("keeps the expanded clock opt-in: %j", async ({ firstWalk, minutes, accepted }) => {
+    const f = firstWalkAuthorityFixture();
+    const candidate = {
+      ...f.identity,
+      expiresAt: new Date(Date.now() + minutes * 60_000).toISOString(),
+    };
+    if (!firstWalk) {
+      delete candidate.firstWalk;
+      delete candidate.retainedImage;
+    }
+    const registry = new AWSQualificationRegistry(
+      { storage: new MemoryStorage() } as never,
+      {} as never,
+    );
+    const claim = registry.claim(controller, candidate);
+    if (accepted) await expect(claim).resolves.toBeDefined();
+    else await expect(claim).rejects.toThrow("expiry");
+  });
+
   it("keeps finalization pending on incomplete inventory and recovers without losing exact copy identity", async () => {
     const f = firstWalkAuthorityFixture();
     await f.run.enroll(controller, f.identity);

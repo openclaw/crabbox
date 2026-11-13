@@ -20,6 +20,7 @@ import {
   awsQualificationAttestationVersion,
   awsQualificationCleanupReserveMs,
   awsQualificationInstanceTypes,
+  awsQualificationFirstWalkRunMs,
   awsQualificationMaxRunMs,
   awsQualificationRetainedRootGB,
   awsQualificationRetainedRunMs,
@@ -3220,8 +3221,9 @@ function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
 function validateRunWindow(identity: AWSQualificationRunIdentity): void {
   const expiresAt = Date.parse(identity.expiresAt);
   const now = Date.now();
-  const maximum =
-    identity.retainedImage && !identity.firstWalk
+  const maximum = identity.firstWalk
+    ? awsQualificationFirstWalkRunMs
+    : identity.retainedImage
       ? awsQualificationRetainedRunMs
       : awsQualificationMaxRunMs;
   if (expiresAt <= now || expiresAt > now + maximum) {

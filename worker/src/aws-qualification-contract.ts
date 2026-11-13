@@ -1,4 +1,6 @@
 export const awsQualificationMaxRunMs = 120 * 60 * 1000;
+// Includes protected deployment/arming without borrowing executor or cleanup time.
+export const awsQualificationFirstWalkRunMs = 150 * 60 * 1000;
 export const awsQualificationRetainedRunMs = 38 * 60 * 1000;
 export const awsQualificationCleanupReserveMs = 8 * 60 * 1000;
 export const awsQualificationRetainedRootGB = 400;
