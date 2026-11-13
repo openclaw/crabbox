@@ -20,6 +20,7 @@ const plan = () =>
   prepareBindingProbe({
     accountId: "a".repeat(32),
     tokenId: "b".repeat(32),
+    authorId: "d".repeat(32),
     sourceSha: "c".repeat(40),
     id: "123456abcdef",
     startsAt: new Date(start).toISOString(),
@@ -123,7 +124,7 @@ class MockCloudflare extends Cloudflare {
       return {
         id: w.version,
         number: 1,
-        metadata: { author_id: this.plan.tokenId, created_on: w.created },
+        metadata: { author_id: s.options.authorId ?? "d".repeat(32), created_on: w.created },
         resources: { bindings: bindings() },
       };
     if (pathname.endsWith("/versions")) return { items: [{ id: w.version }] };
@@ -176,6 +177,9 @@ test("same-version omitted props observation settles both stateless Workers with
   assert.equal(f.ledger.observation.runtimePropsMatch, true);
   assert.equal(f.ledger.observation.complete, true);
   assert.equal(f.ledger.settled, true);
+  assert.notEqual(f.p.authorId, f.p.tokenId);
+  for (const role of ["caller", "receiver"])
+    assert.equal(f.ledger.observation[role].authorId, f.p.authorId);
   assert.deepEqual(Object.keys(f.cf.state.workers), []);
   assert.equal(f.cf.state.invocations, 1);
   assert.deepEqual(
@@ -190,6 +194,44 @@ test("same-version omitted props observation settles both stateless Workers with
   assert.ok(
     !f.cf.state.calls.some((c) => /authority|qualification-controller|aws/.test(c.pathname)),
   );
+});
+
+test("missing or malformed expected author refuses before any management request", async () => {
+  for (const authorId of [undefined, "", "not-an-author-id"]) {
+    const f = await fixture();
+    f.p.authorId = authorId;
+    await assert.rejects(f.run(), /changed frozen plan/);
+    assert.equal(f.cf.state.calls.length, 0);
+  }
+});
+
+test("token identity cannot substitute for an unexpected version author during run or recovery", async () => {
+  const f = await fixture();
+  f.cf.state.options.authorId = f.p.tokenId;
+  await f.run();
+  assert.equal(f.ledger.failed, true);
+  assert.equal(f.ledger.settled, false);
+  assert.equal(f.cf.state.invocations, 0);
+  assert.equal(f.cf.state.calls.filter((c) => c.method === "DELETE").length, 0);
+  const before = f.cf.state.calls.length;
+  await f.recover();
+  assert.equal(f.ledger.settled, false);
+  assert.ok(f.cf.state.calls.slice(before).every((c) => c.method === "GET"));
+  assert.equal(Object.keys(f.cf.state.workers).length, 1);
+  f.p.authorId = f.p.tokenId;
+  const beforeTamper = f.cf.state.calls.length;
+  await assert.rejects(f.recover(), /journal does not match plan/);
+  assert.equal(f.cf.state.calls.length, beforeTamper);
+});
+
+test("admission can independently pin equal token and author IDs for an evidenced route", async () => {
+  const f = await fixture();
+  f.p.authorId = f.p.tokenId;
+  f.ledger.planHash = digest(canonical(f.p));
+  f.cf.state.options.authorId = f.p.authorId;
+  await f.run();
+  assert.equal(f.ledger.failed, undefined);
+  assert.equal(f.ledger.settled, true);
 });
 
 for (const options of [

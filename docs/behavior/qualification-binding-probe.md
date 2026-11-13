@@ -31,8 +31,20 @@ Prepare a public plan without loading the API token:
 export QUALIFICATION_BINDING_PROBE_SOURCE_SHA=<reviewed-adopted-commit>
 export CLOUDFLARE_ACCOUNT_ID=<admitted-account-id>
 node scripts/image-qualification-control.mjs binding-probe-plan \
-  /private/evidence/plan.json <expected-token-id> <12-hex-random-nonce> <UTC-start-time>
+  /private/evidence/plan.json <expected-token-id> <expected-author-id> \
+  <12-hex-random-nonce> <UTC-start-time>
 ```
+
+Pin the expected 32-hex version author ID independently of the API token ID.
+Cloudflare's [version metadata](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/versions/methods/get/)
+describes `author_id` as the creating user's identifier;
+[token verification](https://developers.cloudflare.com/api/resources/accounts/subresources/tokens/methods/verify/)
+identifies the API token. Admission must retain management evidence attributing
+the expected author to the same admitted credential route before uploading the
+fixture, such as an already owned immutable version's creation receipt. The IDs
+may equal on an evidenced account-token route, but do not infer that equality
+from token verification, learn the author from the new fixture, or allocate a
+resource to discover it. Without that attribution, do not admit the cycle.
 
 Freeze the resulting plan, module hashes, exact names, custody, invocation exposure,
 resource bound and fallback operator before admitting execution. Use a private

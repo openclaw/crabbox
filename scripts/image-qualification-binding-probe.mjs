@@ -60,12 +60,13 @@ export async function probeContentIdentity(response) {
   };
 }
 
-export function prepareBindingProbe({ accountId, tokenId, sourceSha, id, startsAt }) {
+export function prepareBindingProbe({ accountId, tokenId, authorId, sourceSha, id, startsAt }) {
   const start = Date.parse(startsAt);
   const plan = {
     version: 1,
     accountId,
     tokenId,
+    authorId,
     sourceSha,
     id,
     startsAt,
@@ -93,6 +94,7 @@ function validatePlan(plan) {
     plan.version !== 1 ||
     !/^[0-9a-f]{32}$/.test(plan.accountId ?? "") ||
     !/^[0-9a-f]{32}$/.test(plan.tokenId ?? "") ||
+    !/^[0-9a-f]{32}$/.test(plan.authorId ?? "") ||
     !/^[0-9a-f]{40}$/.test(plan.sourceSha ?? "") ||
     !/^[0-9a-f]{12}$/.test(plan.id ?? "") ||
     !Number.isFinite(Date.parse(plan.startsAt)) ||
@@ -329,7 +331,9 @@ export async function bindingProbe(
       ) ||
       version.id !== versionId ||
       version.number !== 1 ||
-      version.metadata?.author_id !== plan.tokenId ||
+      // The version author and the API token are separate provider identities.
+      // Admission pins the expected author independently before any upload.
+      version.metadata?.author_id !== plan.authorId ||
       Date.parse(version.metadata?.created_on) < Date.parse(ledger.intents[role].at) ||
       Date.parse(version.metadata?.created_on) >= Date.parse(plan.forwardStopsAt) ||
       !Number.isFinite(Date.parse(version.metadata?.created_on)) ||
@@ -386,6 +390,7 @@ export async function bindingProbe(
     return {
       settings: { bindings: bindingShape(settings.bindings) },
       versionId,
+      authorId: version.metadata.author_id,
       versionBindings: bindingShape(version.resources.bindings),
       environment,
     };
@@ -618,13 +623,15 @@ export async function bindingProbeCommand(command, args, Cloudflare, env = proce
   if (dirty || env.QUALIFICATION_BINDING_PROBE_SOURCE_SHA !== sha)
     fail("requires clean explicitly admitted source");
   if (command === "binding-probe-plan") {
-    if (args.length !== 4) fail("plan requires output, token ID, nonce and UTC start time");
+    if (args.length !== 5)
+      fail("plan requires output, token ID, expected author ID, nonce and UTC start time");
     const plan = prepareBindingProbe({
       accountId: env.CLOUDFLARE_ACCOUNT_ID,
       sourceSha: sha,
       tokenId: args[1],
-      id: args[2],
-      startsAt: args[3],
+      authorId: args[2],
+      id: args[3],
+      startsAt: args[4],
     });
     const fd = fs.openSync(args[0], "wx", 0o600);
     try {
