@@ -2207,6 +2207,24 @@ async function recoverTransportProbe(cf, controllerURL, token) {
     throw new Error("invalid transport discovery");
   if (reply.probe === null) return;
   const { protocol, state, observedAt, ...request } = reply.probe;
+  if (protocol !== 1 || !["pending", "observed", "verified", "cancelled"].includes(state))
+    throw new Error("invalid canonical transport probe");
+  // A retained tombstone is historical custody, not this controller's mutation
+  // target. It must not block cleanup of a later pre-probe partial deployment.
+  if (["verified", "cancelled"].includes(state)) return;
+  const settings = await verifyOwned(cf, controllerName);
+  const owner = transportProfile(settings.bindings ?? [])?.identity.deploymentHash;
+  if (owner !== request.identity.deploymentHash) {
+    // No candidate/registry mutation and no force: replace only our exact trusted
+    // caller, then let the existing recovery path settle the canonical owner.
+    await cf.verifyController();
+    await cf.disableSubdomain(controllerName);
+    await assertWorkerIsolation(cf, controllerName, 0, false);
+    await cf.deleteScript(controllerName);
+    await requireControllerAbsent(cf);
+    await discoverWithOwnedController(cf, request.identity.deploymentHash, token, { v2: true });
+    return;
+  }
   await settleCandidateTransport({
     request,
     controller: (action, input) => controllerCall(cf, controllerURL, token, action, input),

@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { Miniflare } from "../worker/node_modules/miniflare/dist/src/index.js";
 import {
   proveCandidateTransport,
@@ -194,14 +194,45 @@ async function crashRecovery(stage) {
     }
     await exited;
   }
-  const result = spawnSync(
+  const recovery = spawn(
     process.execPath,
     [fileURLToPath(import.meta.url), authority, candidate, "--recover", dir],
-    { encoding: "utf8", timeout: 20000, env: { PATH: process.env.PATH } },
+    { detached: true, stdio: ["ignore", "pipe", "pipe"], env: { PATH: process.env.PATH } },
   );
-  assert.equal(result.error, undefined);
-  assert.equal(result.status, 0, result.stderr);
-  const receipt = JSON.parse(result.stdout.trim().split("\n").at(-1));
+  let stdout = "",
+    stderr = "";
+  recovery.stdout.on("data", (value) => {
+    stdout += value;
+  });
+  recovery.stderr.on("data", (value) => {
+    stderr += value;
+  });
+  const recovered = new Promise((resolve, reject) => {
+    recovery.once("error", reject);
+    recovery.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+  let timer;
+  try {
+    const result = await Promise.race([
+      recovered,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Error("local recovery timeout")), 20000);
+      }),
+    ]);
+    assert.equal(result.code, 0, stderr);
+  } finally {
+    clearTimeout(timer);
+    // Kill the complete detached group even after direct-child exit: a failed
+    // runtime shutdown must not leave workerd descendants behind.
+    if (recovery.pid)
+      try {
+        process.kill(-recovery.pid, "SIGKILL");
+      } catch (error) {
+        if (error.code !== "ESRCH") throw error;
+      }
+    await recovered;
+  }
+  const receipt = JSON.parse(stdout.trim().split("\n").at(-1));
   assert.equal(receipt.state, stage === "verified" ? "verified" : "cancelled");
   assert.equal(receipt.outboundCalls, 0);
   checks++;

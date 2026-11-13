@@ -316,6 +316,8 @@ test("protected build prep binds source, rejects substitution, and seals exact b
       for (const file of [
         "image-qualification-control.mjs",
         "image-qualification-isolation.mjs",
+        "image-qualification-transport.mjs",
+        "image-qualification-journal.mjs",
         "image-qualification-executor-token.mjs",
         "image-qualification-network.ts",
       ])

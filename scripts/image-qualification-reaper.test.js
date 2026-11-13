@@ -38,8 +38,10 @@ function bindings(hash) {
 }
 
 function initialState(options = {}) {
-  const intended = bindings(deploymentHash);
-  if (options.v2) intended.push(...transportMarkers("controller-v2", { deploymentHash }));
+  const controllerHash = options.controllerHash ?? deploymentHash;
+  const intended = bindings(controllerHash);
+  if (options.v2)
+    intended.push(...transportMarkers("controller-v2", { deploymentHash: controllerHash }));
   const currentController = {
     ...ownedSettings(isolation.admission, controller, intended),
     version,
@@ -58,7 +60,7 @@ function initialState(options = {}) {
           owner: "maintainer",
           candidateSha: "a".repeat(40),
           candidateWorker: candidate,
-          deploymentHash,
+          deploymentHash: options.probeHash ?? deploymentHash,
           expiresAt: "2099-01-01T00:00:00.000Z",
         },
         candidateVersion: version,
@@ -190,22 +192,31 @@ function installAPI(file) {
       );
     }
     if (route === `/workers/scripts/${candidate}/settings`) {
-      return state.candidate
-        ? api(
-            ownedSettings(isolation.admission, candidate, [
+      const identity = {
+        runId: "image-qualification-42-1",
+        candidateWorker: candidate,
+        deploymentHash: options.controllerHash ?? deploymentHash,
+      };
+      const intended = [
+        ...(options.v2 && options.stage
+          ? []
+          : [
               {
                 name: "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
                 type: "service",
                 service: authority,
-                props: {
-                  runId: "image-qualification-42-1",
-                  candidateWorker: candidate,
-                  deploymentHash,
-                },
+                props: identity,
               },
             ]),
-          )
-        : missing();
+        ...(options.v2 ? transportMarkers(options.stage ? "stage-v2" : "final-v2", identity) : []),
+      ];
+      const settings = ownedSettings(isolation.admission, candidate, intended);
+      if (options.v2 && !options.stage) {
+        const binding = settings.bindings.find((b) => b.type === "service");
+        delete binding.props;
+        binding.environment = "production";
+      }
+      return state.candidate ? api(settings) : missing();
     }
     if (route === `/workers/scripts/${candidate}`) {
       if (method === "PUT") return api({});
@@ -245,6 +256,7 @@ function installAPI(file) {
         deployments: [{ versions: [{ version_id: state.controller.version, percentage: 100 }] }],
       });
     }
+    if (route === `/workers/scripts/${controller}/schedules`) return api({ schedules: [] });
     if (route === `/workers/scripts/${controller}/subdomain`) {
       if (!state.controller) return missing();
       if (options.enableFailure && method === "POST") return api(null, 503);
@@ -335,6 +347,29 @@ if (process.env.QUALIFICATION_TEST_STATE) {
         assert.ok(!result.state.events.some((event) => /claim|enroll|transport-open/.test(event)));
         assert.ok(result.state.events.includes("POST /transport-discover"));
       });
+  }
+
+  for (const probe of ["pending", "observed", "verified", "cancelled"]) {
+    for (const stage of [true, false])
+      for (const controllerPresent of [true, false])
+        test(`earlier ${probe} probe cannot strand later partial deployment; controller=${controllerPresent}; stage=${stage}`, (t) => {
+          const result = fixture(t, {
+            v2: true,
+            probe,
+            probeHash: "c".repeat(64),
+            controllerHash: "0".repeat(64),
+            controller: controllerPresent,
+            stage,
+            candidate: true,
+          })();
+          assert.equal(result.status, 0, result.stderr);
+          assert.equal(result.state.controller, null);
+          assert.equal(result.state.candidate, false);
+          assert.equal(result.state.probe.state, probe === "verified" ? "verified" : "cancelled");
+          assert.ok(
+            !result.state.events.some((event) => /claim|enroll|transport-open/.test(event)),
+          );
+        });
   }
 
   test("a second reap is idle after successful finalization removed the controller", (t) => {
