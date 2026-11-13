@@ -4,7 +4,6 @@
   "main": "src/aws-qualification-authority.ts",
   "compatibility_date": "2026-09-03",
   "compatibility_flags": ["nodejs_compat"],
-  "version_metadata": { "binding": "CF_VERSION_METADATA" },
   "workers_dev": false,
   "preview_urls": false,
   "durable_objects": {
