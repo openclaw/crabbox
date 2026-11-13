@@ -1,6 +1,7 @@
 // Protected qualification admission. This record is operator-reviewed configuration,
 // never candidate input. Account administrators remain trusted custodians.
 import crypto from "node:crypto";
+import { transportProfile, transportBindingShape } from "./image-qualification-transport.mjs";
 import { parseQualificationNetwork } from "./image-qualification-network.ts";
 
 export const authorityName = "crabbox-aws-qualification-authority";
@@ -233,12 +234,14 @@ export async function requireAbsent(cf, worker) {
 }
 
 export function ownershipTags(cf, worker, bindings) {
+  const profile = transportProfile(bindings);
   return [
+    ...(profile ? [`qualification-transport-v2:${profile.profile}`] : []),
     `qualification-isolation-v1:${cf.admission.sha256}`,
     `qualification-worker:${worker}`,
     `qualification-bindings:${digest(
       canonical(
-        bindingShape(bindings).map((binding) => {
+        bindingShape(transportBindingShape(bindings)).map((binding) => {
           if (binding.type !== "durable_object_namespace") return binding;
           const { namespace_id, script_name, ...shape } = binding;
           return shape;
@@ -254,17 +257,20 @@ export function assertOwnedSettings(cf, worker, settings) {
     !same([...(settings.tags ?? [])].sort(), ownershipTags(cf, worker, settings.bindings).sort())
   )
     fail(`unowned or changed Worker ${worker}`);
-  const bindings = settings.bindings;
+  const rawBindings = settings.bindings;
+  const profile = transportProfile(rawBindings);
+  const bindings = transportBindingShape(rawBindings);
   if (worker === controllerName) {
     const authority = bindings.find((b) => b.name === "AUTHORITY");
     if (
-      bindings.length !== 2 ||
+      bindings.length !== (profile ? 4 : 2) ||
+      (profile && profile.profile !== "controller-v2") ||
       !bindings.some((b) => b.name === "CONTROLLER_TOKEN" && b.type === "secret_text") ||
       authority?.type !== "service" ||
       authority.service !== authorityName ||
       authority.entrypoint !== "AWSQualificationController" ||
       authority.environment !== undefined ||
-      !/^[0-9a-f]{64}$/.test(authority.props?.deploymentHash ?? "")
+      !/^[0-9a-f]{64}$/.test((profile?.identity ?? authority.props)?.deploymentHash ?? "")
     )
       fail("controller authority redirect");
   } else {
@@ -274,17 +280,21 @@ export function assertOwnedSettings(cf, worker, settings) {
     const services = bindings.filter((b) => b.type === "service");
     const service = services[0];
     if (
-      services.length !== 1 ||
-      service.environment !== undefined ||
-      service.entrypoint !== undefined ||
-      (candidate
-        ? service.name !== "CRABBOX_AWS_QUALIFICATION_TRANSPORT" ||
-          service.service !== authorityName ||
-          service.props?.runId !== candidate[1] ||
-          service.props?.candidateWorker !== worker ||
-          !/^[0-9a-f]{64}$/.test(service.props?.deploymentHash ?? "")
-        : service.name !== "CANDIDATE" ||
-          service.service !== `crabbox-image-qualification-${relay[1]}`) ||
+      services.length !== (profile?.profile === "stage-v2" ? 0 : 1) ||
+      (profile &&
+        !(candidate ? ["stage-v2", "final-v2"] : ["relay-v2"]).includes(profile.profile)) ||
+      service?.environment !== undefined ||
+      service?.entrypoint !== undefined ||
+      (profile?.profile === "stage-v2"
+        ? false
+        : candidate
+          ? service.name !== "CRABBOX_AWS_QUALIFICATION_TRANSPORT" ||
+            service.service !== authorityName ||
+            (profile?.identity ?? service.props)?.runId !== candidate[1] ||
+            (profile?.identity ?? service.props)?.candidateWorker !== worker ||
+            !/^[0-9a-f]{64}$/.test((profile?.identity ?? service.props)?.deploymentHash ?? "")
+          : service.name !== "CANDIDATE" ||
+            service.service !== `crabbox-image-qualification-${relay[1]}`) ||
       bindings.some(
         (b) =>
           ![

@@ -112,6 +112,17 @@ export default {
           response.headers.set("Cache-Control", "no-store");
           return response;
         }
+        case "/transport-open":
+          return json(await bounded(env.AUTHORITY.openTransportProbe(input)));
+        case "/transport-discover":
+          if (Object.keys(input).length) throw new Error("invalid discovery");
+          return json({ probe: (await bounded(env.AUTHORITY.discoverTransportProbe())) ?? null });
+        case "/transport-settle":
+          if (Object.keys(input).sort().join(",") !== "challenge,verified")
+            throw new Error("invalid settlement");
+          return json(
+            await bounded(env.AUTHORITY.settleTransportProbe(input.challenge, input.verified)),
+          );
         case "/claim":
           return json(await env.AUTHORITY.claim(input.identity));
         case "/begin-finalization":

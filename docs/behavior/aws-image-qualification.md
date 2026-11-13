@@ -508,3 +508,70 @@ death at write-ahead boundaries. These are source/local-runtime proofs, not live
 Cloudflare upload/readback/recovery qualification and not bootstrap speed evidence.
 A substantive patch still needs fresh independent review and separate private
 rollout admission before any live cycle.
+
+## Candidate transport proof (opt-in v2 source contract)
+
+`QUALIFICATION_TRANSPORT_PROFILE=candidate-transport-v2` selects a separate ownership
+profile. Inert and staging candidate versions have no qualification service binding.
+The final version carries the intended complete run identity in a nonsecret intent
+binding. Requested props and observed visible coordinates remain distinct. Only this
+profile normalizes the observed missing service props and explicit `production`
+default environment. Supplied different props, extra capabilities, mixed tags,
+foreign namespaces, module/uploader/version drift and legacy mismatches still fail.
+The intent coordinate alone proves no runtime binding.
+
+Before enrollment, the trusted controller opens a random 256-bit challenge in the
+existing `AWSQualificationRegistry`. One slot stores the complete intended identity,
+fixed candidate version, pinned executing authority version, and at most ten-minute
+expiry. It performs no signer, network, run or AWS operation. The authenticated relay
+permits only `POST /v1/qualification/transport-probe` with one bounded nonce. Normal
+coordinator admin authentication applies before the candidate forwards that nonce;
+the actual authority transport reads its own `ctx.props` and executing version.
+Caller-supplied identity/version is never accepted. The protected controller reads
+this canonical observation directly; the candidate's HTTP status, body and headers
+are ignored as evidence. Management fences bracket proof and are checked again
+before claim. Execution admission also requires the retained canonical verified slot.
+
+Pending, observed, expired or uncertain probes block legacy and new claims and
+legacy idle discovery. Registry serialization covers the entire enrollment hop,
+including external verification, so admission cannot race a probe check followed by
+enrollment. Explicit successful settlement precedes enrollment. Cancellation settles
+the exact slot without granting proof; that identity cannot then claim. A settled
+slot retains its replay tombstone until expiry, blocks another probe during that
+window, and can then be replaced; there is no per-attempt key growth or new alarm.
+Expiry alone never establishes cleanup. The challenge and nonsecret intent are
+persisted in protected local custody before open. An uncertain response must be
+reconciled without candidate redispatch or a new challenge.
+
+Use the same protected v2 source/profile for the existing `reap` command before
+admitting a v2 run. It can discover the canonical slot without local artifacts or
+a surviving candidate/controller, then bind a recovery controller to its exact
+owner for settlement. Probe settlement precedes ordinary run/resource cleanup.
+Creation tags remain independently usable for owned Worker/namespace cleanup even
+when proof fails. Denied reads, unknown ownership and unresolved responses retain
+custody; they do not authorize replacement or deletion. Keep pinned source,
+credentials, original recovery directory and independent recovery access until all
+resources and registry state settle. Do not downgrade the authority beneath an
+unsettled probe or run: older source does not understand this fence.
+
+This is a source capability, not hosted admission. Existing protected workflow
+configuration does not automatically enable it. A hosted run needs separately
+reviewed exact-source/artifact admission, authority and protected tooling updates,
+credential instructions and v2 recovery configuration before dispatch. No production
+rollout, AWS execution or representative checkpoint improvement follows from local
+qualification. `node scripts/image-qualification-transport-local.mjs` exercises the
+exact dry-built authority/candidate plus raw controller/relay in local workerd, with
+all Worker outbound denied, persistent registry restart and process-group death at
+pending/observed/verified boundaries. Version metadata there is a controlled fixture;
+it is not a live provider deployment proof.
+
+The protected `image-qualification` environment variable
+`CRABBOX_IMAGE_QUALIFICATION_TRANSPORT_PROFILE` selects this profile for admission,
+deployment, arm, finalization and the independent reaper. Set it to
+`candidate-transport-v2` only after the exact authority and v2 recovery tooling have
+been admitted. An absent or empty value retains strict legacy behavior; every
+other value is rejected before provider deployment. Keep the setting unchanged
+until all probes, runs and cleanup settle. Installing the tooling alone neither
+enables v2 nor updates the authority. The ordinary deploy command proceeds from
+transport proof into enrollment and AWS verification; it is not a transport-only
+hosted smoke.
