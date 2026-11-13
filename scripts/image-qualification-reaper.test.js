@@ -40,6 +40,7 @@ function initialState(options = {}) {
   return {
     options,
     events: [],
+    deleteURLs: [],
     candidate: options.candidate ?? false,
     staleCandidate: options.staleCandidate ?? false,
     controller: options.controller
@@ -69,6 +70,7 @@ function installAPI(file) {
     const method = init.method ?? "GET";
     const route = url.pathname.replace(/^\/client\/v4\/accounts\/a{32}/, "");
     events.push(`${method} ${route}`);
+    if (method === "DELETE") state.deleteURLs.push(`${route}${url.search}`);
     if (url.hostname === `${controller}.example.workers.dev`) {
       assert.equal(init.headers.authorization, `Bearer ${token}`);
       assert.equal(method, "POST");
@@ -224,6 +226,8 @@ function installAPI(file) {
         return api({ id: controller });
       }
       assert.equal(method, "DELETE");
+      if (options.controllerReferenced && url.searchParams.get("force") !== "true")
+        return api(null, 409);
       if (options.deleteFailure) return api(null, 503);
       if (!options.deleteResidue) state.controller = null;
       return new Response(null, { status: 204 });
@@ -297,11 +301,42 @@ if (process.env.QUALIFICATION_TEST_STATE) {
     assert.equal(result.state.controller, null);
     assert.equal(uploads(result.state).length, 1);
     assert.equal(deletes(result.state).length, 1);
+    assert.deepEqual(result.state.deleteURLs, [`/workers/scripts/${controller}`]);
     assert.deepEqual(calls(result.state), ["POST /discover"]);
     assert.ok(
       result.state.events.indexOf(`GET /workers/scripts/${controller}/settings`) <
         result.state.events.indexOf(`PUT /workers/scripts/${controller}`),
     );
+  });
+
+  test("idle recovery deletes an existing controller without forcing dependencies", (t) => {
+    const result = fixture(t, { controller: true })();
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.result.result, "idle");
+    assert.equal(result.state.controller, null);
+    assert.equal(uploads(result.state).length, 0);
+    assert.deepEqual(result.state.deleteURLs, [`/workers/scripts/${controller}`]);
+  });
+
+  test("a referenced controller remains recoverable without a forced retry", (t) => {
+    const reap = fixture(t, { controllerReferenced: true });
+    const first = reap();
+    assert.equal(first.status, 1);
+    assert.equal(first.result.result, "failed");
+    assert.match(first.result.failure, /cleanup:.*409/);
+    assert.ok(first.state.controller);
+    assert.equal(uploads(first.state).length, 1);
+    assert.deepEqual(first.state.deleteURLs, [`/workers/scripts/${controller}`]);
+
+    const second = reap();
+    assert.equal(second.status, 1);
+    assert.match(second.result.failure, /idle cleanup:.*409/);
+    assert.deepEqual(second.state.controller, first.state.controller);
+    assert.equal(uploads(second.state).length, 1);
+    assert.deepEqual(second.state.deleteURLs, [
+      `/workers/scripts/${controller}`,
+      `/workers/scripts/${controller}`,
+    ]);
   });
 
   test("a candidate binding still recovers an active run", (t) => {
@@ -310,6 +345,8 @@ if (process.env.QUALIFICATION_TEST_STATE) {
     assert.equal(result.result.result, "finalized");
     assert.equal(result.state.run, null);
     assert.equal(result.state.candidate, false);
+    assert.ok(result.state.deleteURLs.includes(`/workers/scripts/${candidate}?force=true`));
+    assert.ok(result.state.deleteURLs.includes(`/workers/scripts/${controller}`));
     assert.deepEqual(calls(result.state), [
       "POST /discover",
       "POST /begin-finalization",
@@ -410,6 +447,7 @@ if (process.env.QUALIFICATION_TEST_STATE) {
       assert.equal(result.state.controller, null);
       assert.equal(uploads(result.state).length, 1);
       assert.deepEqual(calls(result.state), []);
+      assert.ok(result.state.deleteURLs.every((url) => url === `/workers/scripts/${controller}`));
     });
   }
 
