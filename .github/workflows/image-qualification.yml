@@ -401,7 +401,7 @@ jobs:
       contents: read
       actions: read
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.mode == 'first-walk' && 100 || inputs.mode == 'retained' && 38 || 80 }}
+    timeout-minutes: ${{ inputs.mode == 'first-walk' && 130 || inputs.mode == 'retained' && 38 || 80 }}
     steps:
       - name: Check out protected executor
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

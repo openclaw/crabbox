@@ -39,6 +39,7 @@ const runIdPattern = /^image-qualification-[0-9]+-[0-9]+$/;
 const workerNamePattern = /^crabbox-image-qualification-[0-9]+-[0-9]+$/;
 const relayNamePattern = /^crabbox-image-qualification-relay-[0-9]+-[0-9]+$/;
 const maxRunMs = 120 * 60 * 1000;
+const firstWalkRunMs = 150 * 60 * 1000;
 const retainedRunMs = 38 * 60 * 1000;
 const retainedCleanupMs = 8 * 60 * 1000;
 const controllerName = "crabbox-image-qualification-controller";
@@ -1048,7 +1049,7 @@ function qualificationConfig() {
     baseAmiId: required("QUALIFICATION_BASE_AMI_ID", /^ami-[0-9a-f]+$/),
     rootGB,
     instanceTypes: ["t3.small", "t3a.small"],
-    maxMinutes: retainedImage ? 38 : 120,
+    maxMinutes: process.env.QUALIFICATION_MODE === "first-walk" ? 150 : retainedImage ? 38 : 120,
     maxMonthlyUSD: 10,
     maxConcurrentInstances: 1,
     maxLaunches: process.env.QUALIFICATION_MODE === "first-walk" ? 2 : retainedImage ? 1 : 3,
@@ -1062,7 +1063,8 @@ function qualificationHandoff(identityCheck, manifestSha256, startsAt) {
   const config = qualificationConfig();
   const runId = `image-qualification-${identityCheck.runId}-${required("GITHUB_RUN_ATTEMPT")}`;
   const expiresAt = new Date(
-    Date.parse(startsAt) + (config.retainedImage ? retainedRunMs : maxRunMs),
+    Date.parse(startsAt) +
+      (config.firstWalk ? firstWalkRunMs : config.retainedImage ? retainedRunMs : maxRunMs),
   ).toISOString();
   return {
     version: 1,
@@ -2480,12 +2482,42 @@ function readExecutionProof() {
   };
 }
 
+// A fixed public data profile, prepared before capture with no repository hooks.
+// These identities also bind the sealed operational request to the exact workload.
+export function verifyFirstWalkPreparation(prepared) {
+  if (
+    prepared?.completed !== true ||
+    prepared.profile !== "fixed-node-monorepo-v1" ||
+    prepared.sourceCommit !== "8436c62514241a0afdef84bc2abb658dbdf57d40" ||
+    prepared.sourceArchiveSha256 !==
+      "ebaaa5f50f6b3ba54f825eaed7c602838e0a5eea936aee9b5212085591084dda" ||
+    prepared.lockSha256 !== "0c50a34a1f4f78e7fa5da6340878f54da7f6b9f36a0c04c3f67c61ab8fbb7d06" ||
+    prepared.nodeSha256 !== "6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6" ||
+    prepared.pnpmSha256 !== "bcbd17511de1718a262be1acc42066559bbce8fcfb1adb584d1f5e8ad70fe218" ||
+    prepared.scriptsDisabled !== true ||
+    prepared.hooksDisabled !== true ||
+    prepared.sameFilesystem !== true ||
+    prepared.cachePopulated !== true ||
+    !Number.isSafeInteger(prepared.inventory?.entries) ||
+    prepared.inventory.entries <= 0 ||
+    prepared.inventory.entries > 600_000 ||
+    !Number.isSafeInteger(prepared.inventory?.allocatedBytes) ||
+    prepared.inventory.allocatedBytes < 0 ||
+    prepared.inventory.allocatedBytes > 12 * 1024 ** 3 ||
+    !Number.isFinite(prepared.elapsedSeconds) ||
+    prepared.elapsedSeconds < 0 ||
+    prepared.elapsedSeconds > 900
+  )
+    throw new Error("fixed source preparation did not qualify");
+}
+
 export function verifyQualificationEvidence(attestation, proof, retainedImage, firstWalk = false) {
   if (firstWalk) {
     const operations = attestation?.operations ?? [];
     const receipt = attestation?.finalReceipt;
     const walk = proof?.firstWalk;
     const result = proof?.result;
+    verifyFirstWalkPreparation(walk?.sourcePreparation);
     const accepted = (action) =>
       operations.filter(
         (op) =>
@@ -2504,6 +2536,8 @@ export function verifyQualificationEvidence(attestation, proof, retainedImage, f
       walk.recipeSha256 !== firstWalkRecipeSha256 ||
       walk.runnerSha256 !==
         digest(fs.readFileSync(path.join(root, "scripts/qualification-first-walk-guest.py"))) ||
+      walk.workloadSha256 !==
+        digest(fs.readFileSync(path.join(root, "scripts/qualification-first-walk-workload.py"))) ||
       walk.resultSha256 !== digest(JSON.stringify(result)) ||
       result?.completed !== true ||
       result.unmounted !== true ||
