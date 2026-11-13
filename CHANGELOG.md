@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Qualification: verify runtime binding identity for idle controllers and retain cleanup-only recovery receipts when management metadata omits binding props. https://github.com/openclaw/crabbox/pull/3136 Thanks @joshavant.
 - Run: normalize fresh and replacement SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity, and preserve child-environment filtering after replacement. https://github.com/openclaw/crabbox/pull/3131 Thanks @vincentkoc.
 
 ### Added
