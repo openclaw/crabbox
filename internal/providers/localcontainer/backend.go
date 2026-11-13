@@ -2247,13 +2247,17 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, container i
 		cfg.LocalContainer.WorkRoot = root
 		cfg.WorkRoot = root
 	}
+	mode, _ := localContainerSSHTransport(container.Config.Labels[sshTransportLabel])
 	host, port, err := containerSSHHostPort(container)
 	if err != nil {
+		if mode == internalSSHTransport {
+			return core.LeaseTarget{}, internalSSHRecoveryError(err, leaseID)
+		}
 		return core.LeaseTarget{}, err
 	}
-	if mode, _ := localContainerSSHTransport(container.Config.Labels[sshTransportLabel]); mode == internalSSHTransport {
+	if mode == internalSSHTransport {
 		if err := b.validateInternalSSHContainer(ctx, cfg, container); err != nil {
-			return core.LeaseTarget{}, err
+			return core.LeaseTarget{}, internalSSHRecoveryError(err, leaseID)
 		}
 	}
 	keyPath, err := core.OptionalStoredTestboxKeyPath(leaseID)

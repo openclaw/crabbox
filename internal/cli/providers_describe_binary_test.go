@@ -248,7 +248,7 @@ func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 	wantLocal := []string{
 		"local-container-cpus", "local-container-docker-socket", "local-container-image",
 		"local-container-memory", "local-container-network", "local-container-oci-runtime",
-		"local-container-runtime", "local-container-user", "local-container-volume",
+		"local-container-runtime", "local-container-ssh-transport", "local-container-user", "local-container-volume",
 		"local-container-work-root",
 	}
 	if got := sortedDescriptionFlagNames(local.ProviderFlags); !reflect.DeepEqual(got, wantLocal) {
@@ -298,8 +298,8 @@ func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 		t.Fatalf("run --help exit=%d stdout=%q stderr=%q", helpCode, helpStdout, helpStderr)
 	}
 	digest := sha256.Sum256(helpStderr)
-	const baselineSHA256 = "fccc8ab5b57d6e144565a003322ab5ddbeea26eeb12135f16eb82a2d9fc1ecdc"
-	const baselineBytes = 66378
+	const baselineSHA256 = "2f4e1a8c33288cd3e18db0ead5229f013e015745598f50114fa055493f072b15"
+	const baselineBytes = 66502
 	if got := hex.EncodeToString(digest[:]); got != baselineSHA256 || len(helpStderr) != baselineBytes {
 		t.Fatalf("run --help changed: sha256=%s bytes=%d, want sha256=%s bytes=%d", got, len(helpStderr), baselineSHA256, baselineBytes)
 	}

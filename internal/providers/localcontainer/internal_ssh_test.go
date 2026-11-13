@@ -242,3 +242,63 @@ func TestInternalSSHFixedIdentity(t *testing.T) {
 		t.Fatal("network identity not bound")
 	}
 }
+
+// Checkpoint metadata can select this provider after another provider handled
+// ordinary flags. The final mapper must retain only explicitly visited overrides.
+func TestInternalSSHForkTransportOverride(t *testing.T) {
+	for _, tc := range []struct{ name, prior, override, want string }{
+		{"internal after provider selection", "published", "internal", "internal"},
+		{"published override", "internal", "published", "published"},
+		{"unvisited retains config", "internal", "", "internal"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: "hetzner", LocalContainer: core.LocalContainerConfig{SSHTransport: tc.prior}}
+			fs := flag.NewFlagSet("checkpoint fork", flag.ContinueOnError)
+			values := registerFlags(fs, cfg)
+			args := []string{"--local-container-network=private-runners"}
+			if tc.override != "" {
+				args = append(args, "--local-container-ssh-transport="+tc.override)
+			}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			cfg.Provider = providerName
+			if err := (Provider{}).ApplyNativeCheckpointForkFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.LocalContainer.SSHTransport != tc.want || cfg.LocalContainer.Network != "private-runners" {
+				t.Fatalf("final provider overrides: transport=%q network=%q; want %q and private-runners", cfg.LocalContainer.SSHTransport, cfg.LocalContainer.Network, tc.want)
+			}
+		})
+	}
+}
+
+func TestInternalSSHRefusalIncludesExactLeaseRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*inspectContainer)
+		reason string
+	}{
+		{"network", func(c *inspectContainer) { c.NetworkSettings.Networks["extra"] = inspectNetworkAttachment{} }, "exactly its bound network"},
+		{"ports", func(c *inspectContainer) {
+			c.NetworkSettings.Ports["2222/tcp"] = []inspectPort{{HostIP: "127.0.0.1", HostPort: "12345"}}
+		}, "published ports"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := internalSSHFixture(t)
+			tc.mutate(&c)
+			b := testBackend(&recordingRunner{})
+			_, err := b.prepareLease(t.Context(), b.configForRun(), c, "cbx_fixture", "fixture", false)
+			if err == nil || !strings.Contains(err.Error(), tc.reason) || !strings.Contains(err.Error(), "crabbox stop --provider local-container --id 'cbx_fixture'") {
+				t.Fatalf("missing refusal/recovery: %v", err)
+			}
+			if !isExitCode(err, 2) {
+				t.Fatalf("lost refusal exit code: %v", err)
+			}
+			var diagnostic core.ExitError
+			if !core.AsExitError(err, &diagnostic) || !strings.Contains(diagnostic.Message, "crabbox stop --provider local-container --id 'cbx_fixture'") {
+				t.Fatalf("CLI exit diagnostic omits recovery: %#v", diagnostic)
+			}
+		})
+	}
+}

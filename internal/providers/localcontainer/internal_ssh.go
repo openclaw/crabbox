@@ -3,6 +3,7 @@ package localcontainer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -238,4 +239,13 @@ func (b *backend) validateInternalSSHContainer(ctx context.Context, cfg core.Con
 		return err
 	}
 	return validateInternalMembership(container, network)
+}
+
+// Exact-lease release does not require SSH admission, so it remains available
+// when a retained container no longer satisfies the transport boundary.
+func internalSSHRecoveryError(err error, leaseID string) error {
+	// The CLI renders the selected ExitError message, not an outer fmt wrapper.
+	// Keep the original cause for Is/As while making the recovery visible there.
+	diagnostic := core.Exit(core.ExitCodeForError(err, 1), "%s; release this lease with: crabbox stop --provider %s --id %s", err, providerName, core.ShellQuote(leaseID))
+	return errors.Join(diagnostic, err)
 }
