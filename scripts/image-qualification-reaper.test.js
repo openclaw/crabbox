@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import test from "node:test";
+import { transportMarkers, transportProfile } from "./image-qualification-transport.mjs";
 
 import {
   fixtureAdmission,
@@ -37,15 +38,46 @@ function bindings(hash) {
 }
 
 function initialState(options = {}) {
+  const intended = bindings(deploymentHash);
+  if (options.v2) intended.push(...transportMarkers("controller-v2", { deploymentHash }));
+  const currentController = {
+    ...ownedSettings(isolation.admission, controller, intended),
+    version,
+  };
+  if (options.v2) {
+    const binding = currentController.bindings.find((b) => b.name === "AUTHORITY");
+    delete binding.props;
+    binding.environment = "production";
+  }
+  const probe = options.probe
+    ? {
+        protocol: 1,
+        challenge: "c".repeat(64),
+        identity: {
+          runId: "image-qualification-42-1",
+          owner: "maintainer",
+          candidateSha: "a".repeat(40),
+          candidateWorker: candidate,
+          deploymentHash,
+          expiresAt: "2099-01-01T00:00:00.000Z",
+        },
+        candidateVersion: version,
+        authorityVersion: version,
+        expiresAt: "2099-01-01T00:00:00.000Z",
+        state: options.probe,
+        ...(["observed", "verified"].includes(options.probe)
+          ? { observedAt: "2026-11-13T00:00:00.000Z" }
+          : {}),
+      }
+    : null;
   return {
     options,
+    probe,
     events: [],
     deleteURLs: [],
     candidate: options.candidate ?? false,
     staleCandidate: options.staleCandidate ?? false,
-    controller: options.controller
-      ? { ...ownedSettings(isolation.admission, controller, bindings(deploymentHash)), version }
-      : null,
+    controller: options.controller ? currentController : null,
     run: options.active
       ? {
           runId: "image-qualification-42-1",
@@ -77,12 +109,23 @@ function installAPI(file) {
       if (options.discoveryStatus) return json({ error: "forbidden" }, options.discoveryStatus);
       if (Object.hasOwn(options, "discovery")) return json(options.discovery);
       assert.ok(state.controller);
-      const hash = state.controller.bindings.find((item) => item.name === "AUTHORITY").props
-        .deploymentHash;
+      const hash =
+        transportProfile(state.controller.bindings)?.identity.deploymentHash ??
+        state.controller.bindings.find((item) => item.name === "AUTHORITY").props.deploymentHash;
+      if (route === "/transport-discover") return json({ probe: state.probe });
+      if (route === "/transport-settle") {
+        const input = JSON.parse(init.body);
+        assert.equal(hash, state.probe.identity.deploymentHash);
+        assert.equal(input.challenge, state.probe.challenge);
+        state.probe.state = input.verified ? "verified" : "cancelled";
+        return json(state.probe);
+      }
       if (state.run && hash !== state.run.deploymentHash) {
         return json({ error: "controller_error" }, 409);
       }
       if (route === "/discover") {
+        if (state.probe && !["verified", "cancelled"].includes(state.probe.state))
+          return json({ error: "unsettled" }, 409);
         const result = { run: state.run };
         if (options.changeAfterDiscovery) state.controller.version = changedVersion;
         if (options.changeBindingsAfterDiscovery)
@@ -213,7 +256,9 @@ function installAPI(file) {
         if (options.uploadFailure === "before") throw new Error("upload response lost");
         const metadata = JSON.parse(await init.body.get("metadata").text());
         state.controller = {
-          bindings: metadata.bindings.map(({ text, ...binding }) => binding),
+          bindings: metadata.bindings.map(({ text, ...binding }) =>
+            binding.type === "plain_text" ? { ...binding, text } : binding,
+          ),
           version,
           tags: metadata.tags ?? [],
         };
@@ -260,6 +305,7 @@ if (process.env.QUALIFICATION_TEST_STATE) {
           QUALIFICATION_CONTROLLER_TOKEN: token,
           QUALIFICATION_PROOF_DIR: proofDirectory,
           QUALIFICATION_TEST_STATE: stateFile,
+          ...(options?.v2 ? { QUALIFICATION_TRANSPORT_PROFILE: "candidate-transport-v2" } : {}),
         },
       });
       assert.equal(child.error, undefined);
@@ -278,6 +324,18 @@ if (process.env.QUALIFICATION_TEST_STATE) {
   const deletes = (state) =>
     state.events.filter((event) => event === `DELETE /workers/scripts/${controller}`);
   const calls = (state) => state.events.filter((event) => /^POST \/(?!workers)/.test(event));
+
+  for (const probe of ["pending", "observed", "verified", "cancelled"]) {
+    for (const hasController of [true, false])
+      test(`fresh reaper settles canonical ${probe} probe with controller=${hasController}, without candidate/local artifacts`, (t) => {
+        const result = fixture(t, { v2: true, probe, controller: hasController })();
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(result.state.controller, null);
+        assert.equal(result.state.probe.state, probe === "verified" ? "verified" : "cancelled");
+        assert.ok(!result.state.events.some((event) => /claim|enroll|transport-open/.test(event)));
+        assert.ok(result.state.events.includes("POST /transport-discover"));
+      });
+  }
 
   test("a second reap is idle after successful finalization removed the controller", (t) => {
     const reap = fixture(t, { active: true, controller: true, candidate: true });

@@ -41,6 +41,23 @@ export interface AWSQualificationBindingIdentity {
   authorityVersion: string;
 }
 
+// One subordinate pre-enrollment slot; never an AWS/run owner.
+export interface AWSQualificationTransportProbe {
+  protocol: 1;
+  challenge: string;
+  identity: AWSQualificationRunIdentity;
+  candidateVersion: string;
+  authorityVersion: string;
+  expiresAt: string;
+  state: "pending" | "observed" | "verified" | "cancelled";
+  observedAt?: string;
+}
+
+export type AWSQualificationTransportProbeRequest = Omit<
+  AWSQualificationTransportProbe,
+  "protocol" | "state" | "observedAt"
+>;
+
 export interface AWSQualificationRequest {
   opId: string;
   region: string;
@@ -73,6 +90,7 @@ export interface AWSQualificationFirstWalkStatus {
 }
 
 export interface AWSQualificationTransportBinding {
+  observeBinding?(challenge: string): Promise<void>;
   execute(request: AWSQualificationRequest): Promise<AWSQualificationResponse>;
   prepareFirstWalk?(
     request: AWSQualificationFirstWalkRequest,

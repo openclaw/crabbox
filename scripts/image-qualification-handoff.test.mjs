@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { transportProfile } from "./image-qualification-transport.mjs";
 
 const encodeExecutorCredential = (value) =>
   Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -94,7 +95,27 @@ function installAPI(file) {
       throw new Error(`unexpected GitHub fixture route: ${route}`);
     }
     if (url.hostname.endsWith(".example.workers.dev")) {
+      if (route === "/transport-open") {
+        state.probe = { protocol: 1, ...JSON.parse(init.body), state: "pending" };
+        return json(state.probe);
+      }
+      if (route === "/transport-discover") return json({ probe: state.probe ?? null });
+      if (route === "/transport-settle") {
+        const input = JSON.parse(init.body);
+        assert.equal(input.challenge, state.probe.challenge);
+        state.probe.state = input.verified ? "verified" : "cancelled";
+        return json(state.probe);
+      }
+      if (route === "/v1/qualification/transport-probe") {
+        assert.equal(JSON.parse(init.body).challenge, state.probe.challenge);
+        if (!state.forgeProbe) {
+          state.probe.state = "observed";
+          state.probe.observedAt = new Date(state.now).toISOString();
+        }
+        return json({ identity: state.probe.identity, challenge: state.probe.challenge });
+      }
       if (route === "/claim") {
+        if (state.probe) assert.equal(state.probe.state, "verified");
         state.identity = JSON.parse(init.body).identity;
         state.enrolledAt = new Date(state.now).toISOString();
         return json({ ...state.identity, cleanupState: "claimed" });
@@ -155,6 +176,15 @@ function installAPI(file) {
         const metadata = JSON.parse(await init.body.get("metadata").text());
         for (const binding of metadata.bindings)
           if (binding.name === "FLEET") binding.namespace_id ??= namespaceId(name);
+        const profile = transportProfile(metadata.bindings);
+        if (profile) {
+          state.profileHistory ??= [];
+          state.profileHistory.push({
+            name,
+            profile: profile.profile,
+            services: metadata.bindings.filter((b) => b.type === "service").length,
+          });
+        }
         state.workers[name] = {
           metadata,
           subdomain: state.workers[name]?.subdomain ?? { enabled: true, previews_enabled: false },
@@ -170,8 +200,18 @@ function installAPI(file) {
         delete state.workers[name];
         return api({});
       }
-      if (suffix === "/settings")
-        return state.workers[name] ? api(state.workers[name].metadata) : api(null, 404);
+      if (suffix === "/settings") {
+        if (!state.workers[name]) return api(null, 404);
+        const metadata = structuredClone(state.workers[name].metadata);
+        if (transportProfile(metadata.bindings))
+          for (const binding of metadata.bindings) {
+            if (binding.type === "service") {
+              delete binding.props;
+              binding.environment = "production";
+            }
+          }
+        return api(metadata);
+      }
       if (suffix === "/deployments")
         return api({
           deployments: [{ versions: [{ version_id: workerVersion, percentage: 100 }] }],
@@ -186,6 +226,8 @@ function installAPI(file) {
       }
       if (suffix === "/schedules") return api({ schedules: [] });
     }
+    if (cfRoute === "/workers/scripts")
+      return api(Object.keys(state.workers).map((id) => ({ id })));
     if (cfRoute === "/workers/subdomain") return api({ subdomain: "example" });
     if (cfRoute === "/workers/durable_objects/namespaces") {
       return api([
@@ -203,7 +245,9 @@ function installAPI(file) {
 }
 
 function fixture(t, mode = "retained") {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-handoff-test-"));
+  const directory = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-handoff-test-")),
+  );
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const artifact = path.join(directory, "candidate");
   const handoffDir = path.join(directory, "handoff");
@@ -386,6 +430,32 @@ function fixture(t, mode = "retained") {
 if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
   installAPI(process.env.QUALIFICATION_HANDOFF_TEST_STATE);
 } else {
+  for (const forgeProbe of [false, true])
+    test(`v2 CLI canonical proof and recovery with omitted props; forgedReply=${forgeProbe}`, (t) => {
+      const f = fixture(t, "first-walk");
+      f.env.QUALIFICATION_TRANSPORT_PROFILE = "candidate-transport-v2";
+      f.update({ forgeProbe });
+      assert.equal(f.invoke("admit").status, 0);
+      const deployed = f.invoke("deploy");
+      assert.equal(deployed.status, forgeProbe ? 1 : 0, deployed.stderr);
+      const state = f.state();
+      assert.ok(
+        state.profileHistory.filter((p) => p.profile === "stage-v2").every((p) => p.services === 0),
+      );
+      assert.equal(state.profileHistory.find((p) => p.profile === "final-v2").services, 1);
+      const claim = state.events.findIndex((event) => event.endsWith("/claim"));
+      if (forgeProbe) assert.equal(claim, -1);
+      else {
+        assert.ok(state.events.findIndex((event) => event.endsWith("/transport-settle")) < claim);
+        const armed = f.invoke("arm", f.armEnv());
+        assert.equal(armed.status, 0, armed.stderr);
+      }
+      const cleanup = f.invoke("reap");
+      assert.equal(cleanup.status, 0, cleanup.stderr);
+      assert.equal(f.state().probe.state, forgeProbe ? "cancelled" : "verified");
+      assert.deepEqual(f.state().workers, {});
+    });
+
   for (const mode of ["retained", "mint", "first-walk"]) {
     test(`${mode} CLI publishes one immutable handoff before deployment and preserves it through arm`, (t) => {
       const f = fixture(t, mode);

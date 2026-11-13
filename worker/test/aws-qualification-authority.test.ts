@@ -110,12 +110,27 @@ describe("AWS qualification authority deployment", () => {
         () => {
           assertActive: typeof assertActive;
           claim: typeof claim;
+          enrollAndClaim: (
+            props: AWSQualificationControllerProps,
+            value: AWSQualificationRunIdentity,
+          ) => Promise<unknown>;
           discover: typeof discover;
           markFinalizing: typeof markFinalizing;
           markFinalized: typeof markFinalized;
           retire: typeof retire;
         }
-      >(() => ({ assertActive, claim, discover, markFinalizing, markFinalized, retire })),
+      >(() => ({
+        assertActive,
+        claim,
+        discover,
+        markFinalizing,
+        markFinalized,
+        retire,
+        enrollAndClaim: async (props, value) => {
+          await enroll(props, value);
+          return await claim(props, value);
+        },
+      })),
     };
     const env = {
       AWS_QUALIFICATION_RUNS: namespace,
@@ -547,17 +562,23 @@ describe("AWS qualification authority", () => {
           if (typeof key === "object" && Object.hasOwn(key, "run")) expireWork();
         });
       } else if (delay === "registry transport") {
-        const claim = fixture.registry.claim.bind(fixture.registry);
-        vi.spyOn(fixture.registry, "claim").mockImplementation(async (...args) => {
+        const enroll = fixture.run.enroll.bind(fixture.run);
+        vi.spyOn(fixture.run, "enroll").mockImplementation(async (...args) => {
+          await enroll(...args);
           expireWork();
-          return await claim(...args);
         });
       } else {
         const get = fixture.registryStorage.get.bind(fixture.registryStorage);
+        let activeReads = 0;
         vi.spyOn(fixture.registryStorage, "get").mockImplementation(
           async <T>(key: string): Promise<T | undefined> => {
             const value = await get<T>(key);
-            if (key === (delay === "retirement read" ? "retired" : "active")) expireWork();
+            if (key === "active") activeReads++;
+            if (
+              (delay === "retirement read" && key === "retired") ||
+              (delay === "active registry read" && key === "active" && activeReads === 2)
+            )
+              expireWork();
             return value;
           },
         );
@@ -3056,8 +3077,11 @@ function authorityHTTPFixture(runIdentity: AWSQualificationRunIdentity) {
   vi.stubGlobal("fetch", fetch);
   let run = new AWSQualificationRun({ storage: fixture.storage } as never, env as never);
   const registryStorage = new MemoryStorage();
-  const registry = new AWSQualificationRegistry({ storage: registryStorage } as never, {} as never);
   const namespace = { idFromName: (name: string) => name, get: () => run };
+  const registry = new AWSQualificationRegistry(
+    { storage: registryStorage } as never,
+    { AWS_QUALIFICATION_RUNS: namespace } as never,
+  );
   const bindings = {
     AWS_QUALIFICATION_RUNS: namespace,
     AWS_QUALIFICATION_REGISTRY: { idFromName: (name: string) => name, get: () => registry },

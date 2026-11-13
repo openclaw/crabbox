@@ -34,6 +34,8 @@ import {
   type AWSQualificationResponse,
   type AWSQualificationRunIdentity,
   type AWSQualificationService,
+  type AWSQualificationTransportProbe,
+  type AWSQualificationTransportProbeRequest,
 } from "./aws-qualification-contract";
 import type {
   AWSQualificationFirstWalkRequest,
@@ -237,6 +239,23 @@ export class AWSQualificationTransport extends WorkerEntrypoint<
   AWSQualificationAuthorityEnv,
   AWSQualificationRunIdentity
 > {
+  // The candidate supplies only a nonce. Props and executing version come from
+  // this actual capability invocation, never from the HTTP relay or its reply.
+  async observeBinding(challenge: string): Promise<void> {
+    if (
+      arguments.length !== 1 ||
+      typeof challenge !== "string" ||
+      !/^[0-9a-f]{64}$/.test(challenge)
+    )
+      throw new Error("invalid transport probe arguments");
+    validateExactTransportIdentity(this.ctx.props);
+    await qualificationRegistry(this.env).observeTransport(
+      this.ctx.props,
+      challenge,
+      this.env.CF_VERSION_METADATA?.id,
+    );
+  }
+
   async execute(request: AWSQualificationRequest): Promise<AWSQualificationResponse> {
     await qualificationRegistry(this.env).assertActive(this.ctx.props);
     return await qualificationRun(this.env, this.ctx.props.runId).execute(this.ctx.props, request);
@@ -315,14 +334,34 @@ export class AWSQualificationController extends WorkerEntrypoint<
   }
 
   async claim(identity: AWSQualificationRunIdentity): Promise<AWSQualificationRegistryRecord> {
-    // Persist the per-run cleanup owner before making this run globally active. Candidate
-    // dispatch also checks the registry, so a losing concurrent claim cannot use its run state.
-    await qualificationRun(this.env, identity.runId).enroll(this.ctx.props, identity);
-    return await qualificationRegistry(this.env).claim(this.ctx.props, identity);
+    // The registry serializes probe admission against the entire enrollment hop,
+    // including AWS verification. Checking only after enrollment is too late.
+    return await qualificationRegistry(this.env).enrollAndClaim(this.ctx.props, identity);
   }
 
   async discover(): Promise<AWSQualificationRegistryRecord | undefined> {
     return await qualificationRegistry(this.env).discover(this.ctx.props);
+  }
+
+  async openTransportProbe(
+    request: AWSQualificationTransportProbeRequest,
+  ): Promise<AWSQualificationTransportProbe> {
+    return await qualificationRegistry(this.env).openTransportProbe(this.ctx.props, request);
+  }
+
+  async discoverTransportProbe(): Promise<AWSQualificationTransportProbe | undefined> {
+    return await qualificationRegistry(this.env).discoverTransportProbe(this.ctx.props);
+  }
+
+  async settleTransportProbe(
+    challenge: string,
+    verified: boolean,
+  ): Promise<AWSQualificationTransportProbe> {
+    return await qualificationRegistry(this.env).settleTransportProbe(
+      this.ctx.props,
+      challenge,
+      verified,
+    );
   }
 
   async retire(runId: string): Promise<void> {
@@ -333,6 +372,157 @@ export class AWSQualificationController extends WorkerEntrypoint<
 }
 
 export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuthorityEnv> {
+  private serial = Promise.resolve();
+  private pending = 0;
+
+  private async serialized<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.pending >= maxPendingIntents) throw new Error("qualification registry queue is full");
+    this.pending++;
+    const result = this.serial.then(operation);
+    this.serial = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    try {
+      return await result;
+    } finally {
+      this.pending--;
+    }
+  }
+
+  private async noTransportProbe(identity?: AWSQualificationRunIdentity): Promise<void> {
+    const probe = await this.ctx.storage.get<AWSQualificationTransportProbe>("transport-probe");
+    if (
+      probe?.state === "cancelled" &&
+      identity &&
+      canonicalJSON(probe.identity) === canonicalJSON(identity)
+    )
+      throw new Error("AWS qualification transport probe was cancelled");
+    if (probe && !["verified", "cancelled"].includes(probe.state)) {
+      // Expiry denies work; it is deliberately not cleanup or permission to claim.
+      throw new Error("AWS qualification transport probe is unsettled");
+    }
+  }
+
+  async openTransportProbe(
+    controller: AWSQualificationControllerProps,
+    request: AWSQualificationTransportProbeRequest,
+  ): Promise<AWSQualificationTransportProbe> {
+    return await this.serialized(async () => {
+      validateTransportProbe(request);
+      validateController(controller, request.identity.deploymentHash);
+      if (request.authorityVersion !== this.env.CF_VERSION_METADATA?.id)
+        throw new Error("transport probe authority version differs");
+      if (await this.ctx.storage.get(registryStateKey))
+        throw new Error("qualification run is active");
+      const current = await this.ctx.storage.get<AWSQualificationTransportProbe>("transport-probe");
+      if (current) {
+        const { protocol: _protocol, state: _state, observedAt: _at, ...original } = current;
+        if (canonicalJSON(original) === canonicalJSON(request)) {
+          if (["verified", "cancelled"].includes(current.state))
+            throw new Error("transport probe is settled");
+          return current; // reconcile an uncertain open; never reset an observation
+        }
+        if (
+          !["verified", "cancelled"].includes(current.state) ||
+          Date.now() < Date.parse(current.expiresAt)
+        )
+          throw new Error("transport probe slot or replay tombstone is occupied");
+      }
+      const probe: AWSQualificationTransportProbe = {
+        protocol: 1,
+        ...structuredClone(request),
+        state: "pending",
+      };
+      await this.ctx.storage.put("transport-probe", probe);
+      return probe;
+    });
+  }
+
+  async observeTransport(
+    identity: AWSQualificationRunIdentity,
+    challenge: string,
+    authorityVersion: string | undefined,
+  ): Promise<void> {
+    return await this.serialized(async () => {
+      validateExactTransportIdentity(identity);
+      if (typeof challenge !== "string" || !/^[0-9a-f]{64}$/.test(challenge))
+        throw new Error("invalid transport challenge");
+      const probe = await this.ctx.storage.get<AWSQualificationTransportProbe>("transport-probe");
+      if (
+        !probe ||
+        probe.state !== "pending" ||
+        probe.challenge !== challenge ||
+        Date.now() >= Date.parse(probe.expiresAt) ||
+        probe.authorityVersion !== authorityVersion ||
+        authorityVersion !== this.env.CF_VERSION_METADATA?.id ||
+        canonicalJSON(probe.identity) !== canonicalJSON(identity)
+      )
+        throw new Error("transport probe observation does not match");
+      await this.ctx.storage.put("transport-probe", {
+        ...probe,
+        state: "observed",
+        observedAt: new Date().toISOString(),
+      });
+    });
+  }
+
+  async discoverTransportProbe(
+    controller: AWSQualificationControllerProps,
+  ): Promise<AWSQualificationTransportProbe | undefined> {
+    validateControllerShape(controller);
+    // Trusted discovery reveals custody, but a mismatched controller cannot mutate it.
+    return await this.ctx.storage.get<AWSQualificationTransportProbe>("transport-probe");
+  }
+
+  async settleTransportProbe(
+    controller: AWSQualificationControllerProps,
+    challenge: string,
+    verified: boolean,
+  ): Promise<AWSQualificationTransportProbe> {
+    return await this.serialized(async () => {
+      const probe = await this.ctx.storage.get<AWSQualificationTransportProbe>("transport-probe");
+      if (!probe || probe.challenge !== challenge || typeof verified !== "boolean")
+        throw new Error("transport probe settlement mismatch");
+      validateController(controller, probe.identity.deploymentHash);
+      const state = verified ? "verified" : "cancelled";
+      if (["verified", "cancelled"].includes(probe.state)) {
+        if (probe.state !== state) throw new Error("transport probe settlement changed");
+        return probe;
+      }
+      if (
+        verified &&
+        (probe.state !== "observed" ||
+          Date.now() >= Date.parse(probe.expiresAt) ||
+          probe.authorityVersion !== this.env.CF_VERSION_METADATA?.id)
+      )
+        throw new Error("transport probe was not observed live");
+      const settled = { ...probe, state } as AWSQualificationTransportProbe;
+      await this.ctx.storage.put("transport-probe", settled);
+      return settled;
+    });
+  }
+
+  async enrollAndClaim(
+    controller: AWSQualificationControllerProps,
+    identity: AWSQualificationRunIdentity,
+  ): Promise<AWSQualificationRegistryRecord> {
+    return await this.serialized(async () => {
+      await this.noTransportProbe(identity);
+      validateController(controller, identity.deploymentHash);
+      validateRunIdentity(identity);
+      validateRunWindow(identity);
+      const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
+      if (
+        active &&
+        canonicalJSON(registryIdentity(active)) !== canonicalJSON(registryIdentity(identity))
+      )
+        throw new Error("AWS qualification registry already has an active run");
+      await qualificationRun(this.env, identity.runId).enroll(controller, identity);
+      return await this.claimSerialized(controller, identity);
+    });
+  }
+
   async assertActive(identity: AWSQualificationRunIdentity): Promise<void> {
     validateRunIdentity(identity);
     const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
@@ -348,6 +538,7 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
   async discover(
     controller: AWSQualificationControllerProps,
   ): Promise<AWSQualificationRegistryRecord | undefined> {
+    await this.noTransportProbe();
     const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
     if (active) validateController(controller, active.deploymentHash);
     else validateControllerShape(controller);
@@ -358,6 +549,14 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
     controller: AWSQualificationControllerProps,
     identity: AWSQualificationRunIdentity,
   ): Promise<AWSQualificationRegistryRecord> {
+    return await this.serialized(() => this.claimSerialized(controller, identity));
+  }
+
+  private async claimSerialized(
+    controller: AWSQualificationControllerProps,
+    identity: AWSQualificationRunIdentity,
+  ): Promise<AWSQualificationRegistryRecord> {
+    await this.noTransportProbe(identity);
     validateController(controller, identity.deploymentHash);
     validateRunIdentity(identity);
     validateRunWindow(identity);
@@ -2927,6 +3126,59 @@ function updateLedgerFromResponse(
       }
     }
   }
+}
+
+function validateExactTransportIdentity(identity: AWSQualificationRunIdentity): void {
+  if (
+    !isPlainRecord(identity) ||
+    !["runId", "owner", "candidateSha", "candidateWorker", "deploymentHash", "expiresAt"].every(
+      (key) => typeof identity[key] === "string",
+    ) ||
+    Object.keys(identity).some(
+      (key) =>
+        ![
+          "runId",
+          "owner",
+          "candidateSha",
+          "candidateWorker",
+          "deploymentHash",
+          "expiresAt",
+          "firstWalk",
+          "retainedImage",
+        ].includes(key),
+    )
+  )
+    throw new Error("transport identity contains unknown fields");
+  validateRunIdentity(identity);
+  if (JSON.stringify(identity).length > 2048) throw new Error("transport identity exceeds bound");
+}
+
+function validateTransportProbe(request: AWSQualificationTransportProbeRequest): void {
+  if (
+    !isPlainRecord(request) ||
+    Object.keys(request).toSorted().join(",") !==
+      "authorityVersion,candidateVersion,challenge,expiresAt,identity" ||
+    typeof request.challenge !== "string" ||
+    !/^[0-9a-f]{64}$/.test(request.challenge) ||
+    ![request.authorityVersion, request.candidateVersion].every(
+      (version) =>
+        typeof version === "string" &&
+        /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(version),
+    )
+  )
+    throw new Error("invalid transport probe request");
+  validateExactTransportIdentity(request.identity);
+  validateRunWindow(request.identity);
+  const expiresAt = Date.parse(request.expiresAt);
+  if (
+    typeof request.expiresAt !== "string" ||
+    request.expiresAt.length !== 24 ||
+    !Number.isFinite(expiresAt) ||
+    expiresAt <= Date.now() ||
+    expiresAt > Date.now() + 10 * 60_000 ||
+    expiresAt > Date.parse(request.identity.expiresAt)
+  )
+    throw new Error("invalid transport probe expiry");
 }
 
 function validateRunIdentity(identity: AWSQualificationRunIdentity): void {
