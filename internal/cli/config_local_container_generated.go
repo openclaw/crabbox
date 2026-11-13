@@ -14,6 +14,7 @@ type fileLocalContainerConfig struct {
 	CPUs         int    `yaml:"cpus,omitempty"`
 	Memory       string `yaml:"memory,omitempty"`
 	Network      string `yaml:"network,omitempty"`
+	SSHTransport string `yaml:"sshTransport,omitempty"`
 	DockerSocket *bool  `yaml:"dockerSocket,omitempty"`
 	NoHostname   *bool  `yaml:"noHostname,omitempty"`
 	OCIRuntime   string `yaml:"ociRuntime,omitempty"`
@@ -47,7 +48,7 @@ func (cfg *LocalContainerConfig) applyFile(file *fileLocalContainerConfig) (Loca
 
 func (cfg *LocalContainerConfig) applyEnv() (LocalContainerConfigApplied, error) {
 	var applied LocalContainerConfigApplied
-	err := applyConfigEnvironment(cfg, &applied, 0, 11)
+	err := applyConfigEnvironment(cfg, &applied, 0, 12)
 	return applied, err
 }
 
@@ -60,6 +61,7 @@ type LocalContainerConfigFlagValues struct {
 	CPUs         *int
 	Memory       *string
 	Network      *string
+	SSHTransport *string
 	DockerSocket *bool
 	OCIRuntime   *string
 	Volumes      *[]string
@@ -81,6 +83,7 @@ type LocalContainerConfigVisitedFlags struct {
 	CPUs         bool
 	Memory       bool
 	Network      bool
+	SSHTransport bool
 	DockerSocket bool
 	OCIRuntime   bool
 	Volumes      bool

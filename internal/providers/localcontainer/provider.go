@@ -195,6 +195,9 @@ func (Provider) ApplyNativeCheckpointForkFlags(cfg *core.Config, fs *flag.FlagSe
 	if core.FlagWasSet(fs, "local-container-network") {
 		cfg.LocalContainer.Network = *v.Network
 	}
+	if core.FlagWasSet(fs, "local-container-ssh-transport") {
+		cfg.LocalContainer.SSHTransport = *v.SSHTransport
+	}
 	if core.FlagWasSet(fs, "local-container-oci-runtime") {
 		cfg.LocalContainer.OCIRuntime = *v.OCIRuntime
 	}

@@ -13,12 +13,14 @@ type LocalContainerConfig struct {
 	CPUs         int    `config:"cpus" env:"CRABBOX_LOCAL_CONTAINER_CPUS" flag:"local-container-cpus" sources:"user,repo,env,flag" help:"CPU limit for local-container leases; 0 leaves runtime default" nonnegative:"true" fileInt:"positive" fileStorage:"value" envInt:"fallback"`
 	Memory       string `config:"memory" env:"CRABBOX_LOCAL_CONTAINER_MEMORY" flag:"local-container-memory" sources:"user,repo,env,flag" help:"memory limit for local-container leases, for example 8g" fileIgnoreEmpty:"true" fileStorage:"value"`
 	Network      string `config:"network" env:"CRABBOX_LOCAL_CONTAINER_NETWORK" flag:"local-container-network" sources:"user,repo,env,flag" help:"container network for local-container leases" default:"bridge" fileIgnoreEmpty:"true" fileStorage:"value"`
+	SSHTransport string `config:"sshTransport" env:"CRABBOX_LOCAL_CONTAINER_SSH_TRANSPORT" flag:"local-container-ssh-transport" sources:"user,repo,env,flag" help:"SSH transport: published (default) or internal (colocated Linux Docker bridge)" fileIgnoreEmpty:"true" fileStorage:"value"`
 	DockerSocket bool   `config:"dockerSocket" env:"CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET" flag:"local-container-docker-socket" sources:"user,repo,env,flag" help:"mount the host Docker-compatible socket into local-container leases so docker commands use the host engine"`
 	NoHostname   bool   `config:"noHostname" env:"CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME" sources:"user,repo,env"`
 	OCIRuntime   string `config:"ociRuntime" env:"CRABBOX_LOCAL_CONTAINER_OCI_RUNTIME" flag:"local-container-oci-runtime" sources:"user,repo,env,flag" help:"OCI runtime for docker run --runtime, for example io.containerd.kata.v2 or runsc" fileIgnoreEmpty:"true" fileStorage:"value"`
 	// Host volumes remain an explicit CLI action, never file or environment input.
 	Volumes            []string          `flag:"local-container-volume" sources:"flag" help:"bind-mount a host path into the container; host:container[:ro]; repeatable" flagList:"append-raw"`
 	CheckpointMetadata map[string]string `sources:"runtime" yaml:"-" json:"-"`
+	SSHNetworkID       string            `sources:"runtime" yaml:"-" json:"-"`
 }
 
 func initialLocalContainerConfig(resolvedImage string) LocalContainerConfig {

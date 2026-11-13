@@ -44,6 +44,10 @@ func fixedLocalContainerFingerprint(cfg core.Config, req core.AcquireRequest, pu
 	if core.IsArchitectureExplicit(cfg) {
 		architecture = cfg.Architecture
 	}
+	transport, err := localContainerSSHTransport(cfg.LocalContainer.SSHTransport)
+	if err != nil {
+		return "", err
+	}
 	intent := core.FixedIntentFields{
 		{Name: "runtime", Value: strings.TrimSpace(cfg.LocalContainer.Runtime)},
 		{Name: "runtimeScope", Value: checkpointScopeFromMetadata(cfg.LocalContainer.CheckpointMetadata, cfg.LocalContainer.Runtime)},
@@ -54,6 +58,8 @@ func fixedLocalContainerFingerprint(cfg core.Config, req core.AcquireRequest, pu
 		{Name: "cpus", Value: cfg.LocalContainer.CPUs},
 		{Name: "memory", Value: strings.TrimSpace(cfg.LocalContainer.Memory)},
 		{Name: "network", Value: strings.TrimSpace(cfg.LocalContainer.Network)},
+		{Name: "sshTransport", Value: transport, OmitEmpty: true},
+		{Name: "sshNetworkID", Value: cfg.LocalContainer.SSHNetworkID, OmitEmpty: true},
 		{Name: "dockerSocket", Value: cfg.LocalContainer.DockerSocket},
 		{Name: "noHostname", Value: cfg.LocalContainer.NoHostname, OmitEmpty: true},
 		{Name: "ociRuntime", Value: ociRuntime, OmitEmpty: true},
