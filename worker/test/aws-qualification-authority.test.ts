@@ -3532,3 +3532,60 @@ function awsServerError(): Response {
 function xml(body: string): Response {
   return new Response(body, { status: 200, headers: { "content-type": "text/xml" } });
 }
+
+describe("pure controller binding identity", () => {
+  const version = "11111111-2222-4333-8444-555555555555";
+  const challenge = "c".repeat(64);
+  function pure(props: unknown = controller, metadata: unknown = { id: version }) {
+    // Accessing any other environment capability fails the test, including DO
+    // stubs, credentials, the signer or an expired logical authority identity.
+    const env = new Proxy(
+      { CF_VERSION_METADATA: metadata },
+      {
+        get(target, key) {
+          if (key === "CF_VERSION_METADATA") return target.CF_VERSION_METADATA;
+          throw new Error(`unexpected environment access: ${String(key)}`);
+        },
+      },
+    );
+    return new AWSQualificationController(env as never, props as never);
+  }
+  it("returns cloned actual props and executing version without state or network", async () => {
+    const network = vi.fn<() => never>(() => {
+      throw new Error("network forbidden");
+    });
+    vi.stubGlobal("fetch", network);
+    const props = { deploymentHash: "b".repeat(64) };
+    const reply = await pure(props).bindingIdentity(challenge);
+    expect(reply).toEqual({
+      protocol: 1,
+      role: "controller",
+      challenge,
+      props,
+      authorityVersion: version,
+    });
+    reply.props.deploymentHash = "a".repeat(64);
+    expect(props.deploymentHash).toBe("b".repeat(64));
+    expect(network).not.toHaveBeenCalled();
+  });
+  it.each([null, {}, { deploymentHash: "bad" }, { deploymentHash: "a".repeat(64), extra: true }])(
+    "rejects incomplete or extra bound props %j without state",
+    async (props) => {
+      await expect(pure(props).bindingIdentity(challenge)).rejects.toThrow("binding identity");
+    },
+  );
+  it.each(["", "a".repeat(65), "G".repeat(64), {}, null])(
+    "rejects malformed challenge %j",
+    async (value) => {
+      await expect(pure().bindingIdentity(value as never)).rejects.toThrow("binding identity");
+    },
+  );
+  it.each([{}, { id: "stale" }, { id: "" }])(
+    "rejects absent/invalid executing version %j",
+    async (value) => {
+      await expect(pure(controller, value).bindingIdentity(challenge)).rejects.toThrow(
+        "binding identity",
+      );
+    },
+  );
+});

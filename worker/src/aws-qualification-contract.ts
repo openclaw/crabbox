@@ -32,6 +32,15 @@ export interface AWSQualificationControllerProps {
   deploymentHash: string;
 }
 
+// Pure controller identity, not authorization to access a run or AWS.
+export interface AWSQualificationBindingIdentity {
+  protocol: 1;
+  role: "controller";
+  challenge: string;
+  props: AWSQualificationControllerProps;
+  authorityVersion: string;
+}
+
 export interface AWSQualificationRequest {
   opId: string;
   region: string;

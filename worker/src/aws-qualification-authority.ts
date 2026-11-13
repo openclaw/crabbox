@@ -24,6 +24,7 @@ import {
   awsQualificationRetainedRootGB,
   awsQualificationRetainedRunMs,
   type AWSQualificationAttestation,
+  type AWSQualificationBindingIdentity,
   type AWSQualificationControllerProps,
   type AWSQualificationFinalReceipt,
   type AWSQualificationOperationEvidence,
@@ -141,6 +142,7 @@ const preservedTagKeys = new Set([
 ]);
 
 interface AWSQualificationAuthorityEnv {
+  CF_VERSION_METADATA?: { id: string };
   AWS_ACCESS_KEY_ID?: string;
   AWS_SECRET_ACCESS_KEY?: string;
   AWS_SESSION_TOKEN?: string;
@@ -262,6 +264,34 @@ export class AWSQualificationController extends WorkerEntrypoint<
   AWSQualificationAuthorityEnv,
   AWSQualificationControllerProps
 > {
+  // Intentionally independent of registry, run, signer and logical expiry. The
+  // reply describes this invocation's bound props; it grants no operation.
+  async bindingIdentity(challenge: string): Promise<AWSQualificationBindingIdentity> {
+    const props = this.ctx.props;
+    const authorityVersion = this.env.CF_VERSION_METADATA?.id;
+    if (
+      arguments.length !== 1 ||
+      typeof challenge !== "string" ||
+      !/^[0-9a-f]{64}$/.test(challenge) ||
+      !props ||
+      Object.keys(props).length !== 1 ||
+      !Object.hasOwn(props, "deploymentHash") ||
+      typeof props.deploymentHash !== "string" ||
+      !/^[0-9a-f]{64}$/.test(props.deploymentHash) ||
+      typeof authorityVersion !== "string" ||
+      !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(authorityVersion)
+    ) {
+      throw new Error("AWS qualification binding identity is invalid");
+    }
+    return {
+      protocol: 1,
+      role: "controller",
+      challenge,
+      props: structuredClone(props),
+      authorityVersion,
+    };
+  }
+
   async enroll(identity: AWSQualificationRunIdentity): Promise<void> {
     await this.claim(identity);
   }
