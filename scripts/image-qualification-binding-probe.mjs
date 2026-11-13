@@ -237,6 +237,12 @@ export async function bindingProbe(
   const persist = async () => {
     await save(ledger);
   };
+  const resetSettlement = async () => {
+    ledger.settled = false;
+    for (const role of roles) if (ledger.intents[role]) ledger.intents[role].settled = false;
+    ledger.settlementAttemptAt = new Date(now()).toISOString();
+    await persist();
+  };
   const settingsRoute = (role) => `/workers/scripts/${plan.workers[role].name}/settings`;
   const scriptRoute = (role) => `/workers/scripts/${plan.workers[role].name}`;
   const list = async (route) => {
@@ -388,9 +394,7 @@ export async function bindingProbe(
     cleaning = true;
     // A new recovery attempt must not inherit success if any fresh inspection
     // fails. Commit pending state before beginning those management reads.
-    ledger.settled = false;
-    for (const role of roles) if (ledger.intents[role]) ledger.intents[role].settled = false;
-    await persist();
+    if (mode !== "recover") await resetSettlement();
     const failures = [];
     for (const role of [...roles].reverse()) {
       if (!ledger.intents[role]) continue;
@@ -431,6 +435,9 @@ export async function bindingProbe(
     ledger.withinOriginalBound = now() <= Date.parse(plan.deadline);
     await persist();
   };
+  // Reset even when the first request is denied, times out or returns an
+  // unusable credential. Matching local custody is established above.
+  if (mode === "recover") await resetSettlement();
   const credential = await api.request("/tokens/verify");
   if (
     credential?.id !== plan.tokenId ||

@@ -499,3 +499,22 @@ test("missing recovery journal refuses before any management or settlement callb
   assert.equal(fs.existsSync(path.join(dir, "binding-probe.json")), false);
   assert.equal(fs.existsSync(path.join(dir, "binding-probe.lock")), false);
 });
+
+for (const reason of ["denied", "inactive", "expiry"])
+  test(`recovery records pending verification before ${reason} credential failure`, async () => {
+    const f = await fixture();
+    await f.run();
+    assert.equal(f.ledger.settled, true);
+    if (reason === "denied")
+      f.cf.state.options.before = (c) => {
+        if (c.pathname === "/tokens/verify") throw new Error("credential denied");
+      };
+    if (reason === "inactive") f.cf.state.options.credential = { status: "disabled" };
+    if (reason === "expiry")
+      f.cf.state.options.credential = { expires_on: new Date(start).toISOString() };
+    await assert.rejects(f.recover());
+    assert.equal(f.ledger.settled, false);
+    assert.equal(f.cf.state.saved.at(-1).settled, false);
+    for (const role of ["caller", "receiver"])
+      assert.equal(f.cf.state.saved.at(-1).intents[role].settled, false);
+  });
