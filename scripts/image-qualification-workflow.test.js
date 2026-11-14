@@ -341,6 +341,7 @@ test("protected build prep binds source, rejects substitution, and seals exact b
         "image-qualification-journal.mjs",
         "image-qualification-executor-token.mjs",
         "image-qualification-network.ts",
+        "image-qualification-package.mjs",
       ])
         fs.copyFileSync(path.join(root, "scripts", file), path.join(directory, "scripts", file));
       fs.writeFileSync(path.join(directory, "go.mod"), "module example.invalid/qualification\n");
@@ -457,40 +458,35 @@ test("protected build prep binds source, rejects substitution, and seals exact b
     const priorMode = process.env.QUALIFICATION_MODE;
     try {
       process.env.QUALIFICATION_MODE = "first-walk";
-      assert.throws(() => module.verifyManifest(artifact, candidateSha, workflowSha), /ENOENT/);
-      const recipeDir = path.join(candidate, "recipes/bootstrap/v1");
-      fs.mkdirSync(recipeDir, { recursive: true });
-      fs.copyFileSync(
-        path.join(root, "scripts/fixtures/first-walk-reviewed-recipe.sh"),
-        path.join(recipeDir, "linuxOwnershipRepair.sh"),
+      // This parent import resolves its real protected package, not the temporary
+      // harness. Also check the actual copied module in a fresh first-walk process.
+      fs.cpSync(path.join(root, "qualification"), path.join(harness, "qualification"), {
+        recursive: true,
+      });
+      const rejected = spawnSync(
+        process.execPath,
+        [
+          path.join(harness, "scripts/image-qualification-control.mjs"),
+          "manifest",
+          candidate,
+          artifact,
+        ],
+        {
+          env: {
+            ...process.env,
+            QUALIFICATION_CANDIDATE_SHA: candidateSha,
+            QUALIFICATION_WORKFLOW_SHA: workflowSha,
+          },
+          encoding: "utf8",
+        },
       );
-      module.stageFirstWalkRecipe(candidate, artifact);
-      const sealed = module.createManifest(candidate, artifact, candidateSha, workflowSha);
-      assert.equal(
-        sealed.files.find(
-          (f) => f.path === "candidate/recipes/bootstrap/v1/linuxOwnershipRepair.sh",
-        ).sha256,
-        module.firstWalkRecipeSha256,
-      );
-      assert.equal(
-        module.verifyManifest(artifact, candidateSha, workflowSha).manifestSha256,
-        sealed.manifestSha256,
-      );
-      assert.throws(
-        () => module.verifyManifest(artifact, "f".repeat(40), workflowSha),
-        /identity mismatch/,
-      );
-      const staged = path.join(artifact, "candidate/recipes/bootstrap/v1/linuxOwnershipRepair.sh");
-      fs.appendFileSync(staged, "tampered");
+      assert.equal(rejected.status, 1);
+      assert.match(rejected.stderr, /candidate build-input receipt mismatch/);
+      // Legacy build receipts cannot admit private diagnostic artifacts.
       assert.throws(
         () => module.verifyManifest(artifact, candidateSha, workflowSha),
-        /digest mismatch/,
+        /identity mismatch/,
       );
-      assert.throws(
-        () => module.createManifest(candidate, artifact, candidateSha, workflowSha),
-        /protected reviewed digest/,
-      );
-      fs.copyFileSync(path.join(recipeDir, "linuxOwnershipRepair.sh"), staged);
     } finally {
       if (priorMode === undefined) delete process.env.QUALIFICATION_MODE;
       else process.env.QUALIFICATION_MODE = priorMode;

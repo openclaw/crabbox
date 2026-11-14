@@ -12,7 +12,7 @@ const (
 // provider runtime defaulting remain separate policy owners.
 type RunpodConfig struct {
 	APIKey     string `env:"CRABBOX_RUNPOD_API_KEY" envAlias:"RUNPOD_API_KEY" sources:"env" reportApplied:"true"`
-	APIURL     string `config:"apiUrl" env:"CRABBOX_RUNPOD_API_URL" envAlias:"RUNPOD_API_URL" flag:"runpod-url" sources:"user,repo,env,flag" help:"RunPod REST API URL" default:"https://rest.runpod.io/v1" fileIgnoreEmpty:"true" reportApplied:"true" fileStorage:"value"`
+	APIURL     string `config:"apiUrl" env:"CRABBOX_RUNPOD_API_URL" envAlias:"RUNPOD_API_URL" flag:"runpod-url" sources:"user,repo,env,flag" help:"RunPod REST API URL" default:"https://api.runpod.io/v2" fileIgnoreEmpty:"true" reportApplied:"true" fileStorage:"value"`
 	CloudType  string `config:"cloudType" env:"CRABBOX_RUNPOD_CLOUD_TYPE" envAlias:"RUNPOD_CLOUD_TYPE" flag:"runpod-cloud-type" sources:"user,repo,env,flag" help:"RunPod cloud type: SECURE or COMMUNITY" default:"SECURE" fileIgnoreEmpty:"true" fileStorage:"value"`
 	InstanceID string `config:"instanceId" env:"CRABBOX_RUNPOD_INSTANCE_ID" envAlias:"RUNPOD_INSTANCE_ID" flag:"runpod-instance-id" sources:"user,repo,env,flag" help:"RunPod GPU type ID or CPU flavor ID" default:"NVIDIA L4,NVIDIA RTX 4000 Ada Generation,NVIDIA RTX A4000,NVIDIA GeForce RTX 3090,NVIDIA GeForce RTX 4090,NVIDIA RTX A5000,NVIDIA RTX A4500" fileIgnoreEmpty:"true" fileStorage:"value"`
 	Image      string `config:"image" env:"CRABBOX_RUNPOD_IMAGE" envAlias:"RUNPOD_IMAGE" flag:"runpod-image" sources:"user,repo,env,flag" help:"Docker image to deploy on the pod" default:"runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04" fileIgnoreEmpty:"true" fileStorage:"value"`

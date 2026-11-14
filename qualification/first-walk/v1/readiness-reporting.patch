@@ -1,0 +1,160 @@
+diff --git a/internal/providers/aws/provider_test.go b/internal/providers/aws/provider_test.go
+index b61c0b7663084690bcdff3e6242103aac1ced1be..582fb217cfd67431e0af2005a9d86b9114f0a90d 100644
+--- a/internal/providers/aws/provider_test.go
++++ b/internal/providers/aws/provider_test.go
+@@ -314,10 +314,15 @@ func TestAWSReadinessStatusUsesExistingBootOwners(t *testing.T) {
+ 		t.Skip("POSIX guest observer")
+ 	}
+ 	for _, tc := range []struct {
+-		name, failed, pid, expected, activating string
+-		workspace, bootstrapped                 bool
++		name, failed, pid, expected, activating, process string
++		workspace, bootstrapped                          bool
+ 	}{
+-		{name: "slow ownership repair", pid: "123", expected: "pending ownership-repair"},
++		{name: "labelled ownership repair", pid: "123", process: "python3 -I - crabbox-ownership-repair-v1 crabbox /work/my-app /var/cache/crabbox", expected: "pending ownership-repair"},
++		{name: "legacy Python ownership repair", pid: "123", process: "python3 -I - crabbox /work/my app /var/cache/crabbox", expected: "pending ownership-repair"},
++		{name: "legacy chown ownership repair", pid: "123", process: "chown", expected: "pending ownership-repair"},
++		{name: "unrelated Python", pid: "123", process: "python3 -I - unrelated-task", expected: "pending bootstrap"},
++		{name: "unrelated cache root", pid: "123", process: "python3 -I - crabbox /work/my-app /var/cache/other", expected: "pending bootstrap"},
++		{name: "invalid main pid", pid: "invalid", process: "chown", expected: "pending bootstrap"},
+ 		{name: "bootstrap pending", pid: "0", expected: "pending bootstrap"},
+ 		{name: "cloud config pending", activating: "cloud-config.service", expected: "pending cloud-config"},
+ 		{name: "cloud final pending", activating: "cloud-final.service", bootstrapped: true, expected: "pending cloud-final"},
+@@ -331,7 +336,7 @@ func TestAWSReadinessStatusUsesExistingBootOwners(t *testing.T) {
+ 			dir := t.TempDir()
+ 			for name, script := range map[string]string{
+ 				"systemctl": "#!/bin/sh\ncase \"$1\" in is-failed) [ \"$3\" = \"$FIXTURE_FAILED\" ];; show) if [ \"$2\" = --property=ActiveState ]; then [ \"$4\" = \"$FIXTURE_ACTIVATING\" ] && echo activating; else printf '%s\\n' \"$FIXTURE_PID\"; fi;; cat) exit 0;; *) exit 1;; esac\n",
+-				"pgrep":     "#!/bin/sh\n[ \"$1 $2 $3 $4\" = '-P 123 -x chown' ]\n",
++				"pgrep":     "#!/bin/sh\n[ \"$1 $2\" = '-P 123' ] || exit 1\ncase \"$3\" in -x) [ \"$FIXTURE_PROCESS\" = \"$4\" ];; -f) printf '%s\\n' \"$FIXTURE_PROCESS\" | LC_ALL=C grep -Eq \"$4\";; *) exit 1;; esac\n",
+ 			} {
+ 				if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0755); err != nil {
+ 					t.Fatal(err)
+@@ -348,7 +353,7 @@ func TestAWSReadinessStatusUsesExistingBootOwners(t *testing.T) {
+ 			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+ 			defer cancel()
+ 			cmd := exec.CommandContext(ctx, "sh", "-c", script)
+-			cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "FIXTURE_FAILED="+tc.failed, "FIXTURE_PID="+tc.pid, "FIXTURE_ACTIVATING="+tc.activating)
++			cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "FIXTURE_FAILED="+tc.failed, "FIXTURE_PID="+tc.pid, "FIXTURE_ACTIVATING="+tc.activating, "FIXTURE_PROCESS="+tc.process)
+ 			out, err := cmd.CombinedOutput()
+ 			if err != nil || strings.TrimSpace(string(out)) != tc.expected {
+ 				t.Fatalf("observer=%q error=%v want %q", out, err, tc.expected)
+diff --git a/internal/providers/aws/readiness_status.go b/internal/providers/aws/readiness_status.go
+index 596b10ce40d8a813204a55fd0904e312f3d6baee..7783c23e5f9ccaba4011f609c2b60cc4be12f829 100644
+--- a/internal/providers/aws/readiness_status.go
++++ b/internal/providers/aws/readiness_status.go
+@@ -18,7 +18,11 @@ if ! test -f /var/lib/crabbox/bootstrapped; then
+   if test "$(systemctl show --property=ActiveState --value cloud-config.service)" = activating; then echo 'pending cloud-config'; exit 0; fi
+   pid=$(systemctl show --property=MainPID --value crabbox-bootstrap.service)
+   case "$pid" in ''|0|*[!0-9]*) ;; *)
+-    if pgrep -P "$pid" -x chown >/dev/null; then echo 'pending ownership-repair'; exit 0; fi;;
++    # New recipes label the existing Python child. Retain observations of older
++    # unlabelled Python recipes (fixed cache root) and recursive chown recipes.
++    if pgrep -P "$pid" -f '^python3 -I - crabbox-ownership-repair-v1 ' >/dev/null ||
++       pgrep -P "$pid" -f '^python3 -I - [^ ]+ .+ /var/cache/crabbox$' >/dev/null ||
++       pgrep -P "$pid" -x chown >/dev/null; then echo 'pending ownership-repair'; exit 0; fi;;
+   esac
+ fi
+ if test ! -f /var/lib/crabbox/bootstrapped; then echo 'pending bootstrap'
+diff --git a/internal/providers/aws/readiness_status_linux_test.go b/internal/providers/aws/readiness_status_linux_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..52ee4121f8b63817f018a7c97e94c4a7c2ce680e
+--- /dev/null
++++ b/internal/providers/aws/readiness_status_linux_test.go
+@@ -0,0 +1,96 @@
++package aws
++
++import (
++	"bufio"
++	"context"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	core "github.com/openclaw/crabbox/internal/cli"
++)
++
++// Use the emitted argv and real Linux pgrep. Only the Python body is replaced
++// with a pipe wait, so this cannot depend on tree size or scheduler timing.
++func TestAWSReadinessStatusRecognizesEmittedOwnershipChild(t *testing.T) {
++	generated := core.CloudInitUserData(core.Config{TargetOS: "linux", SSHUser: "root", WorkRoot: "/work/my app", SSHPort: "2222"}, "fixture")
++	invocation := ""
++	for _, line := range strings.Split(generated, "\n") {
++		if strings.HasPrefix(strings.TrimSpace(line), "PATH=/usr/sbin:/usr/bin:/sbin:/bin python3 ") {
++			invocation = strings.TrimSpace(line)
++			break
++		}
++	}
++	if invocation == "" {
++		t.Fatal("missing emitted ownership child")
++	}
++	for _, tc := range []struct {
++		name, command, expected string
++		otherParent             bool
++	}{
++		{name: "current recipe", command: invocation, expected: "pending ownership-repair"},
++		{name: "legacy Python recipe", command: strings.Replace(invocation, "crabbox-ownership-repair-v1 ", "", 1), expected: "pending ownership-repair"},
++		{name: "unrelated Python", command: "python3 -I - unrelated-task <<'CRABBOX_OWNERSHIP'", expected: "pending bootstrap"},
++		{name: "different bootstrap parent", command: invocation, otherParent: true, expected: "pending bootstrap"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
++			defer cancel()
++			gateRead, gateWrite, err := os.Pipe()
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer gateRead.Close()
++			defer gateWrite.Close()
++			// The final ':' keeps bash as the parent, like the real bootstrap.
++			child := exec.CommandContext(ctx, "bash", "--noprofile", "--norc", "-c", tc.command+"\nimport os\nprint('started', flush=True)\nos.read(3, 1)\nCRABBOX_OWNERSHIP\n:\n")
++			child.ExtraFiles = []*os.File{gateRead}
++			stdout, err := child.StdoutPipe()
++			if err != nil {
++				t.Fatal(err)
++			}
++			if err := child.Start(); err != nil {
++				t.Fatal(err)
++			}
++			defer func() {
++				gateWrite.Close()
++				if err := child.Wait(); err != nil {
++					t.Errorf("fixture child: %v", err)
++				}
++			}()
++			started := make(chan bool, 1)
++			go func() {
++				line, err := bufio.NewReader(stdout).ReadString('\n')
++				started <- err == nil && line == "started\n"
++			}()
++			select {
++			case ok := <-started:
++				if !ok {
++					t.Fatal("Python child did not start")
++				}
++			case <-ctx.Done():
++				t.Fatal("Python child start timed out")
++			}
++			dir := t.TempDir()
++			pid := child.Process.Pid
++			if tc.otherParent {
++				pid = os.Getpid() // Python is a grandchild, not this process's child.
++			}
++			systemctl := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in is-failed) exit 1;; show) if [ \"$2\" = --property=MainPID ]; then echo %d; else echo inactive; fi;; cat) exit 0;; *) exit 1;; esac\n", pid)
++			if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte(systemctl), 0755); err != nil {
++				t.Fatal(err)
++			}
++			script := strings.NewReplacer("/run/crabbox/workspace-ready", filepath.Join(dir, "workspace"), "/var/lib/crabbox/bootstrapped", filepath.Join(dir, "bootstrapped")).Replace(awsLinuxReadinessStatus)
++			observer := exec.CommandContext(ctx, "sh", "-c", script)
++			observer.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
++			out, err := observer.CombinedOutput()
++			if err != nil || strings.TrimSpace(string(out)) != tc.expected {
++				t.Fatalf("observer=%q error=%v want %q", out, err, tc.expected)
++			}
++		})
++	}
++}

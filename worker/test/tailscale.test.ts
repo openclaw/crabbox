@@ -33,6 +33,18 @@ describe("tailscale hostnames", () => {
       "crabbox-cbx-abcdef123456",
     );
   });
+
+  it.each([
+    { name: "63 characters kept", template: "a".repeat(63), want: "a".repeat(63) },
+    { name: "64 characters truncated", template: "a".repeat(64), want: "a".repeat(63) },
+    {
+      name: "truncation right after a hyphen",
+      template: `${"a".repeat(62)}-{slug}`,
+      want: "a".repeat(62),
+    },
+  ])("stays a valid DNS label: $name", ({ template, want }) => {
+    expect(renderTailscaleHostname(template, "cbx_abcdef123456", "db", "hetzner")).toBe(want);
+  });
 });
 
 describe("tailscale tag ownership errors", () => {
