@@ -395,6 +395,10 @@ class FleetDurableObject extends ProductionFleetDurableObject {
   private readonly initialized: Promise<unknown>;
   private readonly tasks: Set<Promise<unknown>>;
 
+  override startCapacityIndexRecovery(): void {
+    // Isolate request/maintenance accounting here; capacity.test.ts covers real startup recovery.
+  }
+
   constructor(...args: ConstructorParameters<typeof ProductionFleetDurableObject>) {
     const [state, env, ...rest] = args;
     // Lifecycle fixtures pin disk size; automatic sizing has provider request tests.

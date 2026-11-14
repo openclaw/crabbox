@@ -86,6 +86,7 @@ import {
 } from "./lease-list";
 import {
   leaseMaintenanceIndexReady,
+  maintainLeaseIndex,
   maintainLeaseIndexes,
   type LeaseMaintenanceState,
 } from "./lease-maintenance-index";
@@ -1271,6 +1272,8 @@ export class FleetCoordinator {
   private readonly providerMaintenanceLock = new AsyncMutex();
   private readonly webVNCCredentialHandoffs: WebVNCCredentialHandoffs;
   private readonly leaseProvisioning: LeaseProvisioningController;
+  private capacityIndexRecovery = Promise.resolve();
+  private capacityIndexRecoveryStarted = false;
   private maintenanceRun: Promise<void> | undefined;
   private alarmArmRevision = 0;
   private maintenanceAlarmStreak: { source: string; key: string; delayMs: number } | undefined;
@@ -1374,6 +1377,45 @@ export class FleetCoordinator {
     });
     this.webVNCCredentialHandoffs = new WebVNCCredentialHandoffs(state);
     this.restoreBridgeWebSockets();
+  }
+
+  startCapacityIndexRecovery(): void {
+    if (this.capacityIndexRecoveryStarted) return;
+    this.capacityIndexRecoveryStarted = true;
+    this.capacityIndexRecovery = this.recoverCapacityIndex().catch(() => {
+      console.error("capacity lease index recovery failed; scheduled maintenance will retry");
+    });
+    this.state.provisioning?.ownMaintenance(this.capacityIndexRecovery);
+  }
+
+  private async recoverCapacityIndex(): Promise<void> {
+    const storage = this.state.storage;
+    let state = await storage.get<LeaseMaintenanceState>(leaseMaintenanceIndex.stateKey, {
+      noCache: true,
+    });
+    if (!state) {
+      const leases = await storage.list({ prefix: "lease:", limit: 1, noCache: true });
+      if (leases.size === 0) return;
+    }
+    // Finish the restart audit here, outside request snapshots and the lifecycle
+    // mutex. Each pass is bounded; retained history must not impose a total cap.
+    while (
+      !leaseMaintenanceIndexReady(state) ||
+      state?.generation !== this.coordinatorGeneration ||
+      state.auditStartAfter !== undefined
+    ) {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- complete consecutive bounded audit passes before capacity reads.
+      await maintainLeaseIndex(
+        storage,
+        leaseMaintenanceIndex,
+        Date.now(),
+        this.coordinatorGeneration,
+      );
+      // oxlint-disable-next-line eslint/no-await-in-loop -- observe the completed pass before advancing recovery.
+      state = await storage.get<LeaseMaintenanceState>(leaseMaintenanceIndex.stateKey, {
+        noCache: true,
+      });
+    }
   }
 
   async prepareBridgeRequest(request: Request): Promise<Response | undefined> {
@@ -3506,6 +3548,7 @@ export class FleetCoordinator {
     forwardedAdminGrantVersion?: string,
     preserveForwardedVersion = false,
   ): Promise<void> {
+    await this.capacityIndexRecovery;
     const alarmArmRevision = this.alarmArmRevision;
     if (!(await this.restoredBridgesReady())) {
       throw new Error("restored bridge lease state is temporarily unavailable");
@@ -16734,6 +16777,7 @@ export class FleetCoordinator {
     if (new URL(request.url).searchParams.size > 0) {
       return json({ error: "capacity does not accept query parameters" }, { status: 400 });
     }
+    await this.capacityIndexRecovery;
     const now = new Date();
     const owner = requestOwner(request);
     const org = requestOrg(request, this.env);
@@ -22138,6 +22182,7 @@ export class FleetDurableObject extends FleetCoordinator implements DurableObjec
     const runtime = new CloudflareCoordinatorRuntime(state);
     super(runtime, env, testProviders, {}, coordinatorGeneration, admissionDeadlineMs);
     this.runtime = runtime;
+    this.startCapacityIndexRecovery();
   }
 
   override async fetch(request: Request): Promise<Response> {
