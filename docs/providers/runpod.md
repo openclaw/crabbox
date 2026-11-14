@@ -14,21 +14,22 @@ SSH, and from then on uses the usual sync/run/ssh/status/stop paths. RunPod is
 
 ## How leasing works
 
-A RunPod pod can expose a public IP and a NAT-mapped public port for each
-exposed private port. Crabbox deploys pods with `ports: ["22/tcp"]` and
-`supportPublicIp: true`, then polls until RunPod reports the public mapping for
-port 22. RunPod returns it as `publicIp` plus `portMappings["22"]`; older
-responses surface the same data through `runtime.ports[]`:
+Crabbox deploys pods with `ports: ["22/tcp"]`, `startSsh: true`, and its
+own `PUBLIC_KEY` environment value. It polls `GET /v2/pods/{id}` until
+`status` is `RUNNING` and `ssh.direct` contains a public host and port:
 
 ```json
 {
-  "ip": "203.0.113.7",
-  "privatePort": 22,
-  "publicPort": 41010,
-  "isIpPublic": true,
-  "type": "tcp"
+  "status": "RUNNING",
+  "ssh": {
+    "direct": {"host": "203.0.113.7", "port": 41010, "username": "root"}
+  }
 }
 ```
+
+List responses do not include the live direct SSH mapping. `PROVISIONING`
+and `STARTING` continue polling; `ERROR`, `EXITED`, and `TERMINATED` fail
+readiness immediately, even if a stale SSH mapping is present.
 
 Once the mapping is live, Crabbox hands the caller a normal `SSHTarget` pointed
 at `root@<publicIp>:<publicPort>` and uses its standard SSH transport. RunPod's
@@ -65,8 +66,10 @@ Preserve the local state directory and SSH key for recovery.
 Inspect/status, heartbeat, and stop resolve the durable claim and recheck the
 account and pod identity. Inspection does not prepare SSH or renew the claim.
 Stop retains a terminal receipt, so a released ID cannot create another pod.
-Fixed creation sends the configured GPU candidates in one native request;
-ordinary creation retains its existing sequential capacity fallback.
+Fixed creation submits only the first configured GPU candidate. REST v2 accepts
+one GPU type per create, so fixed creation never retries another candidate after
+an uncertain response. Ordinary creation tries candidates sequentially after a
+definite capacity rejection.
 
 ### Lifecycle
 
@@ -76,10 +79,11 @@ ordinary creation retains its existing sequential capacity fallback.
   name. Reusing an existing pod requires an exact local claim bound to its
   RunPod id and name; use `--reclaim` once to adopt an unclaimed or legacy pod
   explicitly.
-- **List** — enumerates the caller's pods via `GET /v1/pods` and filters to the
-  `crabbox-` prefix unless `--all` is set.
+- **List** — enumerates the caller's pods via `GET /v2/pods?limit=1000`, follows every
+  cursor page, and filters locally to the `crabbox-` prefix unless `--all` is
+  set. Missing or cyclic pagination fails the entire inventory read.
 - **Release** — requires the exact resource-bound local claim, fetches the pod
-  again to match its id and name, then calls `DELETE /v1/pods/{id}`. Raw ids,
+  again to match its id and name, then calls `DELETE /v2/pods/{id}`. Raw ids,
   names, and legacy claims alone cannot terminate a pod.
 - **Doctor** — runs read-only identity and pod-list checks; it never creates a
   pod, so it is safe to run on every CI invocation.
@@ -145,7 +149,7 @@ flag for it, so it cannot be passed on the command line.
 Confirm the same credential RunPod expects:
 
 ```sh
-curl https://rest.runpod.io/v1/pods \
+curl https://api.runpod.io/v2/pods \
   -H "Authorization: Bearer $RUNPOD_API_KEY"
 ```
 
@@ -156,9 +160,12 @@ or pod-create bodies can be replayed to another destination.
 Account identity uses GraphQL `myself { id }` at
 `https://api.runpod.io/graphql`, using the same Bearer authorization header as
 REST; credentials never enter the query string. Transport errors redact the key. Custom REST endpoints use
-`/graphql` under the configured base with a trailing `/v1` removed.
+`/graphql` under the configured base with a trailing `/v2` removed (custom
+fixture bases ending in `/v1` are also supported).
 Doctor and fixed leases require this identity query as well as REST pod access.
-RunPod currently documents GraphQL retirement in early 2027.
+The REST v1 retirement does not retire this GraphQL identity query; the
+[migration guide](https://docs.runpod.io/api-reference-v2/migrate-from-v1) explicitly
+retains GraphQL for account operations without a REST equivalent.
 
 ## Config
 
@@ -166,7 +173,7 @@ RunPod currently documents GraphQL retirement in early 2027.
 provider: runpod
 target: linux
 runpod:
-  apiUrl: https://rest.runpod.io/v1
+  apiUrl: https://api.runpod.io/v2
   cloudType: SECURE       # SECURE | COMMUNITY
   instanceId: NVIDIA L4,NVIDIA RTX 4000 Ada Generation,NVIDIA RTX A4000,NVIDIA GeForce RTX 3090,NVIDIA GeForce RTX 4090,NVIDIA RTX A5000,NVIDIA RTX A4500
   image: runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
@@ -179,9 +186,30 @@ runpod:
 The defaults pick secure-cloud GPU pods on the RunPod PyTorch image with a 20
 GB container disk, because that path reliably exposes the public TCP SSH
 mapping Crabbox needs for rsync. `instanceId` accepts a comma-separated GPU
-priority list — RunPod tries each in order. Override the GPU type, CPU flavor,
+priority list — Crabbox tries each in order for ordinary leases. For CPU pods,
+use a catalog flavor such as `cpu3c`, optionally followed by a vCPU count, such
+as `cpu3c-8`. A bare flavor requests 2 vCPUs; an explicit count must be a power
+of two and at least 2. Override the GPU type, CPU flavor,
 or image as needed, but verify that the shape you pick exposes public TCP SSH
 before relying on it.
+
+The API uses the nested REST v2 create schema: `image`, `disk`, `cloud`, and
+exactly one of `gpu: {id, count}` or `cpu: {id, vcpuCount}`. GPU pods retain
+v1's implicit 20 GB `/workspace` volume through an explicit
+`mounts.persistent`; CPU pods use only the container disk because v2 forbids
+host-local persistent mounts on CPU. Release terminates the pod and its
+host-local storage. API errors report the v2 problem title, detail, and
+validation errors with credentials redacted.
+
+Explicit API URL overrides still select the exact custom endpoint and must
+serve the v2 contract. The official `https://rest.runpod.io/v1` (and
+`https://api.runpod.io/v1`) override is rejected before any request with a
+migration message: v1 retires on **November 15, 2026**. Remove that override or
+set `https://api.runpod.io/v2`. Crabbox does not silently rewrite it, because
+fixed claims bind the endpoint into their account scope. Fixed claims created
+against v1 remain fenced after changing the endpoint; recover or terminate
+those pods in the RunPod console using their recorded exact pod IDs. Do not
+remove a claim to force another create while its original pod may still exist.
 
 Provider flags:
 

@@ -1,11 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.83.1 - 2026-11-14
 
 ### Fixed
 
 - Warmup: report the resolver-selected network consistently with status for static SSH hosts. [PR 3108](https://github.com/openclaw/crabbox/pull/3108). Thanks @saariuslystoned.
 
+- Tailscale: use coordinator default tags for lease API requests that omit tags while preserving explicit-tag validation. [PR 3110](https://github.com/openclaw/crabbox/pull/3110). Thanks @KrasimirKralev.
+
+- Tailscale: limit rendered hostnames to valid 63-character DNS labels in direct and coordinator provisioning. [PR 3099](https://github.com/openclaw/crabbox/pull/3099). Thanks @KrasimirKralev.
+
+- Azure Sandbox: select every resource tier from XS (0.25 vCPU / 0.5 GiB) to 3XL (16 vCPU / 32 GiB), including 5–320 GiB tier disk capacities, with `--type` names or tier aliases while preserving implicit defaults, safe lease replay and snapshot inheritance. https://github.com/openclaw/crabbox/pull/3143 Thanks @galiniliev.
 - Qualification: verify runtime binding identity for idle controllers and retain cleanup-only recovery receipts when management metadata omits binding props. https://github.com/openclaw/crabbox/pull/3136 Thanks @joshavant.
 - Run: normalize fresh and replacement SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity, and preserve child-environment filtering after replacement. https://github.com/openclaw/crabbox/pull/3131 Thanks @vincentkoc.
 
@@ -18,6 +23,7 @@
 
 ### Fixed
 
+- RunPod: migrate the provider and live-smoke cleanup to REST v2 before v1 retirement, with complete pagination, actual-state SSH readiness, and ownership-fenced termination. [PR 3147](https://github.com/openclaw/crabbox/pull/3147). Thanks @michaelmanly.
 - Checkpoints: give fixed native Linux forks a bounded, resumable readiness wait with AWS bootstrap phase diagnostics and live lifetime checks. [PR 3122](https://github.com/openclaw/crabbox/pull/3122). Thanks @joshavant.
 - CI: pin localhost SSH and desktop browser proof to supported Ubuntu runners. [PR 3107](https://github.com/openclaw/crabbox/pull/3107). Thanks @saariuslystoned.
 - Linux bootstrap: preserve ctime and Git stat caches for correctly owned workspace and cache files while repairing mismatched ownership after snapshot restoration.
