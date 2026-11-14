@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- RunPod: migrate the provider and live-smoke cleanup to REST v2 before v1 retirement, with complete pagination, actual-state SSH readiness, and ownership-fenced termination. [PR 3147](https://github.com/openclaw/crabbox/pull/3147). Thanks @michaelmanly.
 - Checkpoints: give fixed native Linux forks a bounded, resumable readiness wait with AWS bootstrap phase diagnostics and live lifetime checks. [PR 3122](https://github.com/openclaw/crabbox/pull/3122). Thanks @joshavant.
 - CI: pin localhost SSH and desktop browser proof to supported Ubuntu runners. [PR 3107](https://github.com/openclaw/crabbox/pull/3107). Thanks @saariuslystoned.
 - Linux bootstrap: preserve ctime and Git stat caches for correctly owned workspace and cache files while repairing mismatched ownership after snapshot restoration.
