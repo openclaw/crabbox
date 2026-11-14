@@ -166,6 +166,25 @@ describe("NodeCoordinatorRuntime", () => {
     );
   });
 
+  it("starts storage recovery after initialization and before scheduling jobs", async () => {
+    const initialized = deferred<void>();
+    mocks.storage.initialize.mockImplementationOnce(() => initialized.promise);
+    const recovery = vi.fn<() => void>();
+    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+    try {
+      const startup = runtime.start(async () => {}, recovery);
+      expect(recovery).not.toHaveBeenCalled();
+      initialized.resolve();
+      await startup;
+      expect(recovery).toHaveBeenCalledTimes(1);
+      expect(recovery.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.boss.start.mock.invocationCallOrder[0]!,
+      );
+    } finally {
+      await runtime.stop();
+    }
+  });
+
   it("persists the scheduled alarm time across Node coordinator restarts", async () => {
     const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
     mocks.storage.get.mockResolvedValueOnce(1234);

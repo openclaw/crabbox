@@ -81,9 +81,10 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
     this.pingInterval.unref();
   }
 
-  async start(alarmHandler: () => Promise<void>): Promise<void> {
+  async start(alarmHandler: () => Promise<void>, afterStorageReady?: () => void): Promise<void> {
     this.alarmHandler = alarmHandler;
     await this.storage.initialize();
+    afterStorageReady?.();
     await this.scanProvisioning();
     this.provisioningScanner = setInterval(() => {
       void this.scanProvisioning();
