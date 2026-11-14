@@ -61,6 +61,14 @@ Event sequence numbers remain monotonic, but this is a bounded recent audit
 suffix, not full-history retention: creation and older fork/use events can age
 out on long-lived, high-churn checkpoints.
 
+For coordinator-managed AWS checkpoints, `ready` means the provider resource has
+been recorded; its image state can still be `pending` while AWS finishes the
+snapshot or AMI. Maintenance refreshes pending image states once per minute in
+batches of at most 32. Scheduled maintenance also enrolls older checkpoints in
+this reconciliation. Terminal image states stop background polling. Provider read
+failures retain the last known state and retry on a later pass. Explicit image verification
+also updates the stored state shown by `crabbox checkpoint list`.
+
 ## Two kinds
 
 Each checkpoint has a `kind`. Crabbox picks one automatically (`--mode auto`,
