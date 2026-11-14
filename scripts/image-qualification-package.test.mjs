@@ -170,16 +170,16 @@ test("private preparation rejects production edits, missing roots, hooks and pac
 });
 
 test("overlay result and complete source digest are verified rather than trusting an applied patch", () => {
-  for (const changed of ["afterSha256", "workerSourceSha256"]) {
+  for (const changed of ["afterSha256", "workerSourceSha256", "authorityConfigSha256"]) {
     const f = fixture();
     try {
       if (changed === "afterSha256") f.contract.files[0].afterSha256 = "0".repeat(64);
-      else f.contract.workerSourceSha256 = "0".repeat(64);
+      else f.contract[changed] = "0".repeat(64);
       for (const dir of [f.protectedRoot, f.candidate])
         write(dir, `${pkg}/manifest.json`, JSON.stringify(f.contract));
       assert.throws(
         () => prepareQualificationBuild(f.protectedRoot, f.candidate, f.baseline),
-        /overlay result mismatch|Worker source mismatch/,
+        /overlay result mismatch|Worker source mismatch|authority configuration mismatch/,
       );
     } finally {
       fs.rmSync(f.temp, { recursive: true, force: true });
@@ -212,6 +212,14 @@ test("private v2 manifests bind baseline, overlay, recipe, configuration and sou
     };
     write(artifact, "build-inputs.json", JSON.stringify(receipt));
     stageFirstWalkRecipe(f.candidate, artifact);
+    const authorityFile = path.join(artifact, "authority/aws-qualification-authority.js");
+    const authorityBytes = fs.readFileSync(authorityFile);
+    fs.unlinkSync(authorityFile);
+    assert.throws(
+      () => createManifest(f.candidate, artifact, candidateSha, workflowSha),
+      /private authority bundle is absent/,
+    );
+    fs.writeFileSync(authorityFile, authorityBytes);
     const sealed = createManifest(f.candidate, artifact, candidateSha, workflowSha);
     assert.equal(sealed.version, 2);
     assert.deepEqual(sealed.qualification, identity);
