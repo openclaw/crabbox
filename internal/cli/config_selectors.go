@@ -14,6 +14,16 @@ func applyConfigSelectorFlags(cfg *Config, fs *flag.FlagSet) error {
 		cfg.brokerProvider = ""
 	}
 	applyTargetSelectorFlags(cfg, fs, flagStringValue(fs, "target"), flagStringValue(fs, "windows-mode"))
+	// Resolve exit-node dependencies before loaded configuration is validated.
+	if flagWasSet(fs, "tailscale") {
+		cfg.Tailscale.Enabled = flagStringValue(fs, "tailscale") == "true"
+	}
+	if flagWasSet(fs, "tailscale-exit-node") {
+		cfg.Tailscale.ExitNode = flagStringValue(fs, "tailscale-exit-node")
+	}
+	if flagWasSet(fs, "tailscale-exit-node-allow-lan-access") {
+		cfg.Tailscale.ExitNodeAllowLANAccess = flagStringValue(fs, "tailscale-exit-node-allow-lan-access") == "true"
+	}
 	if flagWasSet(fs, "arch") {
 		cfg.Architecture = fs.Lookup("arch").Value.String()
 		cfg.architectureExplicit = true

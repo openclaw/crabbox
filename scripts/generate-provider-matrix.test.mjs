@@ -1,7 +1,21 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
-import { renderProviderCategories, validateReadmeCategories } from "./generate-provider-matrix.mjs";
+import { renderProviderCategories, renderTailscaleProviders, validateReadmeCategories } from "./generate-provider-matrix.mjs";
+
+test("Tailscale documentation follows compiled features and distinguishes egress", () => {
+  const output = renderTailscaleProviders([
+    { provider: "peer", features: ["tailscale"], reachability: ["tailnet-peer"] },
+    { provider: "egress", features: ["tailscale"], reachability: ["tailnet-egress"] },
+    { provider: "unsupported", features: [], reachability: [] },
+  ]);
+  assert.match(output, /support for 2 providers/);
+  assert.match(output, /^<!-- BEGIN GENERATED TAILSCALE PROVIDERS -->/);
+  assert.match(output, /<!-- END GENERATED TAILSCALE PROVIDERS -->$/);
+  assert.match(output, /Bidirectional.*\[peer\]/);
+  assert.match(output, /Egress-only.*\[egress\]/);
+  assert.doesNotMatch(output, /unsupported/);
+});
 
 const metadata = JSON.parse(fs.readFileSync(new URL("../docs/providers/provider-metadata.json", import.meta.url), "utf8"));
 const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
