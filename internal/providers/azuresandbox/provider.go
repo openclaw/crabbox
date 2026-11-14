@@ -60,15 +60,15 @@ func (Provider) ClassProfiles() []core.ProviderClassProfile {
 // Azure resource tiers: https://sandboxes.azure.com/docs/sandboxes/sandbox/#resource-tiers
 // Keep the original L shape as the Crabbox default, independently of Azure defaults.
 var sandboxMachines = []struct {
-	typ, tier, cpu, memory string
+	typ, tier, cpu, memory, disk string
 }{
-	{"0.25cpu-0.5gib", "XS", "250m", "512Mi"},
-	{"0.5cpu-1gib", "S", "500m", "1024Mi"},
-	{"1cpu-2gib", "M", "1000m", "2048Mi"},
-	{"2cpu-4gib", "L", "2000m", "4096Mi"},
-	{"4cpu-8gib", "XL", "4000m", "8192Mi"},
-	{"8cpu-16gib", "2XL", "8000m", "16384Mi"},
-	{"16cpu-32gib", "3XL", "16000m", "32768Mi"},
+	{"0.25cpu-0.5gib", "XS", "250m", "512Mi", "5Gi"},
+	{"0.5cpu-1gib", "S", "500m", "1024Mi", "10Gi"},
+	{"1cpu-2gib", "M", "1000m", "2048Mi", "20Gi"},
+	{"2cpu-4gib", "L", "2000m", "4096Mi", "40Gi"},
+	{"4cpu-8gib", "XL", "4000m", "8192Mi", "80Gi"},
+	{"8cpu-16gib", "2XL", "8000m", "16384Mi", "160Gi"},
+	{"16cpu-32gib", "3XL", "16000m", "32768Mi", "320Gi"},
 }
 
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
@@ -92,7 +92,13 @@ func machineForConfig(cfg core.Config) (map[string]string, error) {
 			if typ != "2cpu-4gib" && cfg.AzureSandbox.SnapshotID != "" {
 				return nil, fmt.Errorf("ACA Sandbox snapshot restore inherits captured compute size; --type %s requires a disk image", typ)
 			}
-			return map[string]string{"cpu": machine.cpu, "memory": machine.memory}, nil
+			resources := map[string]string{"cpu": machine.cpu, "memory": machine.memory}
+			// Explicit tiers include their documented disk capacity. Leave legacy
+			// implicit defaults and snapshot restores byte-for-byte unchanged.
+			if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" && cfg.AzureSandbox.SnapshotID == "" {
+				resources["disk"] = machine.disk
+			}
+			return resources, nil
 		}
 		choices = append(choices, machine.typ+" ("+machine.tier+")")
 	}

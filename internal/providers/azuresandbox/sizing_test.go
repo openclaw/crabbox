@@ -14,20 +14,20 @@ import (
 
 // Keep expected wire quantities independent of the production catalog.
 var machineSizingCases = []struct {
-	typ, tier, cpu, memory string
+	typ, tier, cpu, memory, disk string
 }{
-	{"0.25cpu-0.5gib", "XS", "250m", "512Mi"},
-	{"0.5cpu-1gib", "S", "500m", "1024Mi"},
-	{"1cpu-2gib", "M", "1000m", "2048Mi"},
-	{"2cpu-4gib", "L", "2000m", "4096Mi"},
-	{"4cpu-8gib", "XL", "4000m", "8192Mi"},
-	{"8cpu-16gib", "2XL", "8000m", "16384Mi"},
-	{"16cpu-32gib", "3XL", "16000m", "32768Mi"},
+	{"0.25cpu-0.5gib", "XS", "250m", "512Mi", "5Gi"},
+	{"0.5cpu-1gib", "S", "500m", "1024Mi", "10Gi"},
+	{"1cpu-2gib", "M", "1000m", "2048Mi", "20Gi"},
+	{"2cpu-4gib", "L", "2000m", "4096Mi", "40Gi"},
+	{"4cpu-8gib", "XL", "4000m", "8192Mi", "80Gi"},
+	{"8cpu-16gib", "2XL", "8000m", "16384Mi", "160Gi"},
+	{"16cpu-32gib", "3XL", "16000m", "32768Mi", "320Gi"},
 }
 
 func TestMachineSizingCLI(t *testing.T) {
 	type testCase struct {
-		name, typ, selector, cpu, memory string
+		name, typ, selector, cpu, memory, disk string
 	}
 	cases := []testCase{
 		{name: "default", cpu: "2000m", memory: "4096Mi"},
@@ -36,7 +36,7 @@ func TestMachineSizingCLI(t *testing.T) {
 	for _, machine := range machineSizingCases {
 		for _, typ := range []string{machine.typ, strings.ToLower(machine.tier)} {
 			for _, selector := range []string{"type", "config", "env"} {
-				cases = append(cases, testCase{name: typ + "/" + selector, typ: typ, selector: selector, cpu: machine.cpu, memory: machine.memory})
+				cases = append(cases, testCase{name: typ + "/" + selector, typ: typ, selector: selector, cpu: machine.cpu, memory: machine.memory, disk: machine.disk})
 			}
 		}
 	}
@@ -70,6 +70,9 @@ func TestMachineSizingCLI(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := map[string]string{"cpu": tc.cpu, "memory": tc.memory}
+			if tc.disk != "" {
+				want["disk"] = tc.disk
+			}
 			if f.creates != 1 || !reflect.DeepEqual(f.created.Resources, want) {
 				t.Fatalf("CLI create = %+v, count %d; want %v", f.created.Resources, f.creates, want)
 			}
@@ -78,8 +81,8 @@ func TestMachineSizingCLI(t *testing.T) {
 }
 
 func TestMachineSizingCreateReplayAndCleanup(t *testing.T) {
-	cases := append([]struct{ typ, tier, cpu, memory string }{
-		{"", "L", "2000m", "4096Mi"},
+	cases := append([]struct{ typ, tier, cpu, memory, disk string }{
+		{"", "L", "2000m", "4096Mi", ""},
 	}, machineSizingCases...)
 	for _, machine := range cases {
 		for _, source := range []string{"public", "private"} {
@@ -94,11 +97,17 @@ func TestMachineSizingCreateReplayAndCleanup(t *testing.T) {
 					t.Fatal("lost response accepted")
 				}
 				want := map[string]string{"cpu": machine.cpu, "memory": machine.memory}
+				if machine.disk != "" {
+					want["disk"] = machine.disk
+				}
 				if !reflect.DeepEqual(f.created.Resources, want) {
 					t.Fatalf("create resources = %v, want %v", f.created.Resources, want)
 				}
-				// Tier aliases must recover the same intent, not allocate again.
-				b.cfg.ServerType, b.cfg.ServerTypeExplicit = strings.ToLower(machine.tier), true
+				// Explicit tier aliases must recover the same intent, not allocate
+				// again. An implicit legacy default continues omitting disk size.
+				if machine.typ != "" {
+					b.cfg.ServerType = strings.ToLower(machine.tier)
+				}
 				if _, err := b.acquire(t.Context(), req); err != nil || f.creates != 1 {
 					t.Fatalf("alias replay: %v, creates %d", err, f.creates)
 				}
@@ -111,23 +120,23 @@ func TestMachineSizingCreateReplayAndCleanup(t *testing.T) {
 					TTL, Idle time.Duration
 					Slug      string
 				}{b.cfg.AzureSandbox, b.cfg.TTL, b.cfg.IdleTimeout, req.RequestedSlug}
-				if machine.cpu == "2000m" {
+				if machine.typ == "" {
 					// The pre-sizing schema must remain byte-for-byte compatible.
 					legacy, err := core.FixedIntentFingerprint("aca-sandbox-v1", intent)
 					if err != nil || claim.FixedCreateIntent.Fingerprint != legacy {
 						t.Fatalf("legacy fingerprint changed: %v", err)
 					}
-				} else if machine.typ == "4cpu-8gib" {
-					// Extending the catalog must also preserve the first XL schema.
+				} else {
+					// Every explicit CPU/memory/disk capacity belongs to the intent.
 					previous, err := core.FixedIntentFingerprint("aca-sandbox-v2", struct {
 						Intent    any
 						Resources map[string]string
 					}{intent, want})
 					if err != nil || claim.FixedCreateIntent.Fingerprint != previous {
-						t.Fatalf("XL fingerprint changed: %v", err)
+						t.Fatalf("explicit tier fingerprint changed: %v", err)
 					}
 				}
-				b.cfg.ServerType = "2cpu-4gib"
+				b.cfg.ServerType, b.cfg.ServerTypeExplicit = "2cpu-4gib", true
 				if machine.cpu == "2000m" {
 					b.cfg.ServerType = "4cpu-8gib"
 				}
@@ -142,6 +151,28 @@ func TestMachineSizingCreateReplayAndCleanup(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestMachineSizingRejectsLegacyDiskIntentChange(t *testing.T) {
+	f := &fixture{loseCreateResponse: true}
+	b, req := fixtureBackend(t, f)
+	if _, err := b.acquire(t.Context(), req); err == nil {
+		t.Fatal("lost response accepted")
+	}
+	b.cfg.ServerType, b.cfg.ServerTypeExplicit = "l", true
+	if _, err := b.acquire(t.Context(), req); err == nil || f.creates != 1 {
+		t.Fatal("explicit L disk sizing changed an existing implicit-default intent")
+	}
+	b.cfg.ServerType, b.cfg.ServerTypeExplicit = "", false
+	if _, err := b.acquire(t.Context(), req); err != nil || f.creates != 1 {
+		t.Fatalf("legacy replay: %v, creates %d", err, f.creates)
+	}
+	if f.created.Resources["disk"] != "" {
+		t.Fatal("legacy default gained a disk override")
+	}
+	if err := b.Stop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err != nil || f.deletes != 1 {
+		t.Fatalf("legacy cleanup: %v, deletes %d", err, f.deletes)
 	}
 }
 

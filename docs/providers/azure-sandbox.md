@@ -38,16 +38,18 @@ disk. The common class catalog maps every generic class (including the default
 For new disk-based Sandboxes, `--type` supports every documented
 [Azure resource tier](https://sandboxes.azure.com/docs/sandboxes/sandbox/#resource-tiers):
 
-| Azure tier / alias | Explicit type | vCPU | Memory |
-| --- | --- | ---: | ---: |
-| `xs` | `0.25cpu-0.5gib` | 0.25 | 0.5 GiB |
-| `s` | `0.5cpu-1gib` | 0.5 | 1 GiB |
-| `m` | `1cpu-2gib` | 1 | 2 GiB |
-| `l` | `2cpu-4gib` | 2 | 4 GiB |
-| `xl` | `4cpu-8gib` | 4 | 8 GiB |
-| `2xl` | `8cpu-16gib` | 8 | 16 GiB |
-| `3xl` | `16cpu-32gib` | 16 | 32 GiB |
+| Azure tier / alias | Explicit type | vCPU | Memory | Disk |
+| --- | --- | ---: | ---: | ---: |
+| `xs` | `0.25cpu-0.5gib` | 0.25 | 0.5 GiB | 5 GiB |
+| `s` | `0.5cpu-1gib` | 0.5 | 1 GiB | 10 GiB |
+| `m` | `1cpu-2gib` | 1 | 2 GiB | 20 GiB |
+| `l` | `2cpu-4gib` | 2 | 4 GiB | 40 GiB |
+| `xl` | `4cpu-8gib` | 4 | 8 GiB | 80 GiB |
+| `2xl` | `8cpu-16gib` | 8 | 16 GiB | 160 GiB |
+| `3xl` | `16cpu-32gib` | 16 | 32 GiB | 320 GiB |
 
+Explicit selections pin CPU, memory and disk capacity. Implicit defaults and
+generic classes preserve the original request without a disk-size override.
 Tier aliases and explicit types are case-insensitive. The generic `serverType`
 config key and `CRABBOX_SERVER_TYPE` environment variable accept either form,
 including fractional sizes. Unsupported types and CPU/memory combinations
@@ -60,13 +62,16 @@ crabbox warmup --provider azure-sandbox --type 4cpu-8gib \
 
 `--type xl` is equivalent to the example above; `--type xs` selects the
 smallest shape and `--type 3xl` the largest. The adapter sends CPU in millicores
-and memory in MiB, for example `250m` / `512Mi` for XS and `16000m` / `32768Mi`
-for 3XL, matching Azure's
+and memory in MiB, plus `resources.disk` in GiB: `250m` / `512Mi` / `5Gi` for
+XS and `16000m` / `32768Mi` / `320Gi` for 3XL, matching Azure's
 [create resource quantities](https://sandboxes.azure.com/docs/sandboxes/sandboxes/).
-Size is bound into the allocation intent; equivalent aliases replay the same
-lease, while changing size fails rather than resizing or allocating a
-replacement. Region availability, active-core quota and the selected image
-still require operator qualification.
+All three capacities are bound into the allocation intent; equivalent explicit
+aliases replay the same lease, while changing size fails rather than resizing
+or allocating a replacement. Switching a legacy implicit default to explicit
+`l` also changes the disk intent, even though CPU and memory match. Replay with
+the original selection, or stop the lease before creating a new allocation.
+Region availability, active-core quota and the selected image still require
+operator qualification.
 
 `--azure-sandbox-disk` selects a
 public disk name. `--azure-sandbox-disk-id` (or

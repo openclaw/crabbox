@@ -176,10 +176,10 @@ func (b *backend) acquire(ctx context.Context, req core.FixedWarmupRequest) (cor
 				TTL, Idle time.Duration
 				Slug      string
 			}{cfg, b.cfg.TTL, b.cfg.IdleTimeout, req.RequestedSlug}
-			// Preserve the original default-shape fingerprint byte-for-byte so
+			// Preserve the original implicit-default fingerprint byte-for-byte so
 			// existing leases and uncertain creates can still be replayed.
 			fingerprint, err := core.FixedIntentFingerprint("aca-sandbox-v1", intent)
-			if resources["cpu"] != "2000m" {
+			if resources["cpu"] != "2000m" || resources["disk"] != "" {
 				fingerprint, err = core.FixedIntentFingerprint("aca-sandbox-v2", struct {
 					Intent    any
 					Resources map[string]string
