@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { qualificationIdentity } from "./image-qualification-package.mjs";
 import { transportProfile } from "./image-qualification-transport.mjs";
 
 const encodeExecutorCredential = (value) =>
@@ -301,11 +302,13 @@ function fixture(t, mode = "retained") {
     };
   });
   const capsuleSha256 = digest(canonical(sourceFiles));
+  const qualification = mode === "first-walk" ? qualificationIdentity(root) : undefined;
   write("build-inputs.json", {
-    version: 1,
+    version: qualification ? 2 : 1,
+    ...(qualification ? { qualification } : {}),
     candidateSha,
     workflowSha,
-    workerSourceSha256: "1".repeat(64),
+    workerSourceSha256: qualification?.workerSourceSha256 ?? "1".repeat(64),
     protectedBuildInputsSha256: "2".repeat(64),
   });
   if (mode === "retained") {
@@ -321,6 +324,10 @@ function fixture(t, mode = "retained") {
   }
   if (mode === "first-walk") {
     write(
+      "authority/aws-qualification-authority.js",
+      "throw new Error('inert authority fixture');",
+    );
+    write(
       "candidate/recipes/bootstrap/v1/linuxOwnershipRepair.sh",
       fs.readFileSync(path.join(root, "scripts/fixtures/first-walk-reviewed-recipe.sh"), "utf8"),
     );
@@ -335,7 +342,14 @@ function fixture(t, mode = "retained") {
       bytes: fs.statSync(path.join(artifact, name)).size,
       sha256: digest(fs.readFileSync(path.join(artifact, name))),
     }));
-  const manifest = { version: 1, candidateSha, workflowSha, mainModule: "worker/index.js", files };
+  const manifest = {
+    version: qualification ? 2 : 1,
+    ...(qualification ? { qualification } : {}),
+    candidateSha,
+    workflowSha,
+    mainModule: "worker/index.js",
+    files,
+  };
   write("manifest.json", { ...manifest, manifestSha256: digest(canonical(manifest)) });
   const stateFile = path.join(directory, "state.json");
   fs.writeFileSync(stateFile, JSON.stringify({ now: Date.now(), events: [], workers: {} }));

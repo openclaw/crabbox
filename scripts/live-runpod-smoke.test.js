@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import http from "node:http";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 import { copySmokeRepo, writeExecutable, writeGoStub } from "./test-support/smoke-fixtures.mjs";
 
@@ -232,4 +233,81 @@ esac
     "doctor --provider runpod",
     "list --provider runpod --json",
   ]);
+});
+
+// Exercise only the extracted cleanup helper, with an inert token and loopback API.
+const cleanupPython = () => {
+  const script = fs.readFileSync(path.join(repoRoot, "scripts", "live-runpod-smoke.sh"), "utf8");
+  return script.match(/raw_runpod_delete_slug\(\) \{\n  CRABBOX_SMOKE_SLUG="\$slug" python3 -c '\n([\s\S]*?)\n'\n\}/)[1];
+};
+const pod = (id, name = "crabbox-fixture-run-abcd1234") => ({ id, name, status: "RUNNING" });
+const page = (pods, nextCursor = null) => ({ pods, pagination: { hasNextPage: nextCursor !== null, nextCursor } });
+async function cleanupFixture(handler, override) {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    requests.push(`${req.method} ${req.url}`);
+    assert.equal(req.headers.authorization, "Bearer inert-fixture-token");
+    handler(req, res);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const result = await new Promise((resolve, reject) => {
+      const child = spawn("python3", ["-c", cleanupPython()], {
+        env: { ...process.env, CRABBOX_SMOKE_SLUG: "fixture-run", RUNPOD_API_KEY: "inert-fixture-token", CRABBOX_RUNPOD_API_URL: override ?? `http://127.0.0.1:${server.address().port}/v2` },
+      });
+      let stdout = "", stderr = "";
+      child.stdout.on("data", (data) => { stdout += data; });
+      child.stderr.on("data", (data) => { stderr += data; });
+      child.on("error", reject);
+      child.on("exit", (code) => resolve({ code, stdout, stderr }));
+    });
+    return { ...result, requests };
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+test("RunPod v2 cleanup paginates before deleting and verifies every removal page", async () => {
+  let deleted = false;
+  const result = await cleanupFixture((req, res) => {
+    const url = new URL(req.url, "http://fixture");
+    if (req.method === "DELETE") { deleted = true; res.writeHead(204); res.end(); return; }
+    if (url.pathname === "/v2/pods/owned") { res.end(JSON.stringify(pod("owned"))); return; }
+    assert.equal(url.searchParams.get("limit"), "1000");
+    assert.equal(url.searchParams.size, url.searchParams.has("cursor") ? 2 : 1);
+    if (!url.searchParams.has("cursor")) { res.end(JSON.stringify(page([pod("manual", "manual-pod")], "next +/="))); return; }
+    assert.equal(url.searchParams.get("cursor"), "next +/=");
+    res.end(JSON.stringify(page(deleted ? [] : [pod("owned")])));
+  });
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(result.requests.map((r) => r.split(" ")[0]), ["GET", "GET", "GET", "DELETE", "GET", "GET"]);
+  assert.match(result.requests[3], /^DELETE \/v2\/pods\/owned$/);
+});
+
+for (const scenario of ["ambiguous later page", "missing id", "changed identity", "missing cursor", "repeated cursor", "missing pagination", "later page error", "empty unrelated inventory"]) {
+  test(`RunPod v2 cleanup refuses unsafe deletion: ${scenario}`, async () => {
+    const result = await cleanupFixture((req, res) => {
+      const url = new URL(req.url, "http://fixture");
+      if (url.pathname === "/v2/pods/owned") { res.end(JSON.stringify(pod("owned", "manual-renamed"))); return; }
+      if (scenario === "empty unrelated inventory") { res.end(JSON.stringify(page([pod("manual", "manual-pod")]))); return; }
+      if (scenario === "missing id") { res.end(JSON.stringify(page([{ name: pod("owned").name }]))); return; }
+      if (scenario === "changed identity") { res.end(JSON.stringify(page([pod("owned")]))); return; }
+      if (scenario === "missing pagination") { res.end(JSON.stringify({ pods: [pod("owned")] })); return; }
+      if (scenario === "missing cursor") { res.end(JSON.stringify({ pods: [pod("owned")], pagination: { hasNextPage: true } })); return; }
+      if (!url.searchParams.has("cursor") || scenario === "repeated cursor") { res.end(JSON.stringify(page([pod("owned")], "next"))); return; }
+      if (scenario === "later page error") { res.writeHead(403, { "Content-Type": "application/problem+json" }); res.end(JSON.stringify({ title: "Forbidden", detail: "cannot read inert-fixture-token", errors: ["missing scope"] })); return; }
+      res.end(JSON.stringify(page([pod("other")])));
+    });
+    assert.equal(result.requests.some((r) => r.startsWith("DELETE")), false);
+    assert.equal(result.code === 0, scenario === "empty unrelated inventory", result.stderr);
+    assert.doesNotMatch(result.stderr, /inert-fixture-token/);
+    if (scenario === "later page error") assert.match(result.stderr, /Forbidden.*missing scope/);
+  });
+}
+
+test("RunPod v2 cleanup rejects the retired explicit v1 URL before HTTP", async () => {
+  const result = await cleanupFixture(() => assert.fail("unexpected HTTP request"), "https://rest.runpod.io/v1/");
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /2026-11-15.*https:\/\/api\.runpod\.io\/v2/);
+  assert.deepEqual(result.requests, []);
 });
