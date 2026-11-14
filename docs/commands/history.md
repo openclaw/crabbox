@@ -38,6 +38,9 @@ run_a1b2c3d4 cbx_0a1b2c3d4e5f swift-crab succeeded phase=command.finished exit=0
 ```
 
 Missing values render as `-` (for example a still-running run has no exit code).
+Local rows show `status` and `error` separately from the recording lifecycle
+`state`. An acquisition failure before a run result exists has `status=failed`
+and `exit=-`; JSON omits the unavailable `exitCode` rather than reporting zero.
 The `resources=…` segment appears only when a coordinator-backed Linux run
 captured [telemetry](../features/history-logs.md). `--json` emits the full run
 records, including the start/end telemetry snapshots, JUnit result summaries, and

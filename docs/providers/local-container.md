@@ -480,8 +480,12 @@ reached `ready`; checking terminal status never rewrites recovery metadata.
 
 The failed command prints copyable, runtime-scoped `inspect` and `stop`
 commands, plus `run --reclaim --sync-only` when recovery remains possible.
-Terminal bootstrap failures also report the runtime state and, when the
-container is restartable and its runtime route can be reproduced safely, an
+Terminal bootstrap failures also report the runtime state, the container process
+exit code when available, and a best-effort excerpt of the last 100 bootstrap
+log lines before cleanup. Log collection has a two-second budget and an 8 KiB
+limit per output stream; unavailable or oversized logs do not prevent cleanup
+or replace the original readiness failure. When the container is restartable
+and its runtime route can be reproduced safely, Crabbox also prints an
 exact-container `docker start` or `podman start` command; restart that container
 before reclaiming it. A `dead` container cannot be restarted or reclaimed and
 must be cleaned up. Running pending claims stay visible as `provisioning`, while

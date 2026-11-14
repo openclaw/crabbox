@@ -2229,6 +2229,18 @@ func (f *fakeIsloSyncClient) liveSandbox(name string) *gosdk.SandboxResponse {
 	if f.createdBy != "" {
 		sandbox.CreatedBy = stringValue(f.createdBy)
 	}
+	if f.createdByEntity != "" {
+		raw, err := json.Marshal(map[string]string{
+			"id": sandbox.ID, "name": name, "status": "running",
+			"created_by": f.createdBy, "created_by_entity": f.createdByEntity,
+		})
+		if err != nil {
+			panic(err)
+		}
+		if err := json.Unmarshal(raw, sandbox); err != nil {
+			panic(err)
+		}
+	}
 	return sandbox
 }
 

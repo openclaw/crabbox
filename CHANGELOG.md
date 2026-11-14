@@ -5,6 +5,12 @@
 - Qualification: verify runtime binding identity for idle controllers and retain cleanup-only recovery receipts when management metadata omits binding props. https://github.com/openclaw/crabbox/pull/3136 Thanks @joshavant.
 - Run: normalize fresh and replacement SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity, and preserve child-environment filtering after replacement. https://github.com/openclaw/crabbox/pull/3131 Thanks @vincentkoc.
 
+### Fixed
+
+- Islo: preserve acquisition-bound sandbox identity and creator attribution through SSH refreshes so non-kept runs clean up normally and stop advisories remain visible. [PR 3152](https://github.com/openclaw/crabbox/pull/3152). Thanks @coygeek.
+- Local history: omit unavailable execution exit codes after acquisition failures and show failed run status separately from recording state. [PR 3152](https://github.com/openclaw/crabbox/pull/3152). Thanks @coygeek.
+- Local Container: surface bounded bootstrap logs and process exit status before cleaning up failed acquisitions. [PR 3152](https://github.com/openclaw/crabbox/pull/3152). Thanks @coygeek.
+
 ## 0.83.0 - 2026-11-10
 
 ### Added

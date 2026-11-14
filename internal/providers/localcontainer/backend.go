@@ -83,6 +83,7 @@ type inspectState struct {
 	Status    string `json:"Status"`
 	Running   bool   `json:"Running"`
 	OOMKilled bool   `json:"OOMKilled"`
+	ExitCode  *int   `json:"ExitCode"`
 }
 
 type inspectNetworking struct {
@@ -318,7 +319,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		return core.LeaseTarget{}, errors.Join(err, rollbackErr)
 	}
-	if err := validateObservedContainer(container, containerID, leaseID); err != nil {
+	if err := b.validateObservedContainer(ctx, container, containerID, leaseID); err != nil {
 		retained, reconcileErr := b.reconcileReadinessFailure(req.Keep, pendingClaim, lease, bootstrapDir, err)
 		if retained {
 			b.printPendingRecovery(leaseID, slug, pendingClaim, err)
@@ -498,7 +499,7 @@ func (b *backend) waitForContainerEndpoint(ctx context.Context, cfg core.Config,
 			if err != nil {
 				return core.LeaseTarget{}, err
 			}
-			if err := validateObservedContainer(container, containerID, leaseID); err != nil {
+			if err := b.validateObservedContainer(observeCtx, container, containerID, leaseID); err != nil {
 				observedContainerErr = err
 				return core.LeaseTarget{}, err
 			}
@@ -535,7 +536,7 @@ func (b *backend) waitForExactContainerSSHReady(ctx context.Context, lease *core
 		if err != nil {
 			return err
 		}
-		return validateObservedContainer(container, lease.Server.CloudID, lease.LeaseID)
+		return b.validateObservedContainer(observeCtx, container, lease.Server.CloudID, lease.LeaseID)
 	}
 	if err := inspectExact(ctx); err != nil {
 		return err
@@ -576,16 +577,21 @@ func (b *backend) waitForExactContainerSSHReady(ctx context.Context, lease *core
 	}
 }
 
-func validateObservedContainer(container inspectContainer, containerID, leaseID string) error {
+func (b *backend) validateObservedContainer(ctx context.Context, container inspectContainer, containerID, leaseID string) error {
 	if strings.TrimSpace(container.ID) != strings.TrimSpace(containerID) {
 		return fmt.Errorf("%w: %w", errContainerIdentityMismatch,
 			core.Exit(2, "local-container lease %s is bound to container %s; refusing readiness for container %s", leaseID, shortID(containerID), shortID(container.ID)))
 	}
 	if state := terminalContainerState(container.State.Status); state != "" {
-		return &terminalContainerError{
+		failure := &terminalContainerError{
 			err:   core.Exit(5, "local-container lease %s container %s reached terminal runtime state %s before SSH readiness", leaseID, shortID(containerID), state),
 			state: state,
 		}
+		if container.State.ExitCode != nil {
+			failure.err = fmt.Errorf("%w; process exit=%d", failure.err, *container.State.ExitCode)
+		}
+		b.captureBootstrapDiagnostics(ctx, containerID, failure)
+		return failure
 	}
 	return nil
 }
