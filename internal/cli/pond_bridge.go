@@ -95,7 +95,7 @@ type BridgePeerTarget struct {
 //
 // The PublishPeer flow is opt-in: it is only invoked when the user passes
 // `--share-port` to `crabbox pond peers`. ListPeerTargets is always cheap and
-// safe — it is what powers the doctor probe.
+// safe — it powers peer endpoint discovery.
 type BridgeProvider interface {
 	PublishPeer(ctx context.Context, leaseID string, port int, ttl time.Duration) (BridgePeerTarget, error)
 	ListPeerTargets(ctx context.Context, leaseID string) ([]BridgePeerTarget, error)

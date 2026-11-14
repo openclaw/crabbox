@@ -301,6 +301,9 @@ func TestPreparePondMeshSummaryRendersHostsAndEnv(t *testing.T) {
 			t.Fatalf("duplicate local port %d in forwards %#v", summary.Forwards[i].LocalPort, summary.Forwards)
 		}
 	}
+	if err := persistPondMeshSummary(summary); err != nil {
+		t.Fatal(err)
+	}
 	hostsBody, err := os.ReadFile(summary.HostsPath)
 	if err != nil {
 		t.Fatalf("read hosts: %v", err)
@@ -714,11 +717,11 @@ func TestCollectPondMembersResolvesByLeaseIDBeforeSlug(t *testing.T) {
 		{Name: "server-b", Labels: map[string]string{pondLabelKey: "alpha", "slug": "web", "lease": "cbx_web_b", pondExposedPortsLabelKey: "9090"}},
 	}
 	for _, leaseID := range []string{"cbx_web_a", "cbx_web_b"} {
-		if err := ClaimLeaseForRepoProvider(leaseID, leaseID, "hetzner", t.TempDir(), time.Hour, false); err != nil {
+		if err := ClaimLeaseForRepoProviderScopePond(leaseID, leaseID, "hetzner", "", "alpha", t.TempDir(), time.Hour, false); err != nil {
 			t.Fatal(err)
 		}
 	}
-	members, err := collectPondMembers(context.Background(), backend, Config{}, servers, "alpha")
+	members, err := collectPondMembers(context.Background(), backend, Config{}, servers, "alpha", true)
 	if err != nil {
 		t.Fatalf("collectPondMembers: %v", err)
 	}
@@ -754,10 +757,10 @@ func TestCollectPondMembersRefreshesRetainedStoppedClaim(t *testing.T) {
 			pondExposedPortsLabelKey: "8080",
 		},
 	}
-	if err := ClaimLeaseTargetForRepoConfig(leaseID, "web", Config{Provider: "hetzner"}, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+	if err := ClaimLeaseTargetForRepoConfig(leaseID, "web", Config{Provider: "hetzner", Pond: "alpha"}, server, SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
-	members, err := collectPondMembers(context.Background(), &pondMeshResolveRecordingBackend{}, Config{}, []Server{server}, "alpha")
+	members, err := collectPondMembers(context.Background(), &pondMeshResolveRecordingBackend{}, Config{}, []Server{server}, "alpha", true)
 	if err != nil {
 		t.Fatalf("collectPondMembers: %v", err)
 	}
@@ -784,7 +787,7 @@ func TestCollectPondMembersDoesNotRestoreStoppedClaim(t *testing.T) {
 		pondExposedPortsLabelKey: "8080",
 	}
 	server := Server{CloudID: "server-web", Provider: "hetzner", Name: "server-web", Labels: labels}
-	if err := ClaimLeaseTargetForRepoConfig(leaseID, "web", Config{Provider: "hetzner"}, server, SSHTarget{Host: "old.example", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
+	if err := ClaimLeaseTargetForRepoConfig(leaseID, "web", Config{Provider: "hetzner", Pond: "alpha"}, server, SSHTarget{Host: "old.example", Port: "22"}, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	var stopErr error
@@ -799,7 +802,7 @@ func TestCollectPondMembersDoesNotRestoreStoppedClaim(t *testing.T) {
 		stopped.Labels["state"] = "stopped"
 		_, stopErr = UpdateLeaseClaimEndpointIfUnchanged(leaseID, claim, stopped, SSHTarget{})
 	}}
-	_, err := collectPondMembers(context.Background(), backend, Config{}, []Server{server}, "alpha")
+	_, err := collectPondMembers(context.Background(), backend, Config{}, []Server{server}, "alpha", true)
 	if stopErr != nil {
 		t.Fatal(stopErr)
 	}
@@ -819,7 +822,12 @@ func TestCollectPondMembersDoesNotPreparePortlessMembers(t *testing.T) {
 		{Name: "client", Labels: map[string]string{pondLabelKey: "alpha", "slug": "client", "lease": "cbx_client"}},
 		{Name: "web", Labels: map[string]string{pondLabelKey: "alpha", "slug": "web", "lease": "cbx_web", pondExposedPortsLabelKey: "8080"}},
 	}
-	members, err := collectPondMembers(context.Background(), backend, Config{}, servers, "alpha")
+	for _, server := range servers {
+		if err := ClaimLeaseForRepoProviderScopePond(server.Labels["lease"], server.Labels["slug"], "hetzner", "", "alpha", t.TempDir(), time.Hour, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	members, err := collectPondMembers(context.Background(), backend, Config{}, servers, "alpha", true)
 	if err != nil {
 		t.Fatalf("collectPondMembers: %v", err)
 	}
@@ -947,7 +955,7 @@ func TestCollectPondMembersAcrossProvidersFiltersByCapability(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.ExeDev.ControlHost = "exe.example.test"
 	runner := &recordingCommandRunner{result: LocalCommandResult{Stdout: `{ "vms": [] }`}}
-	_, ineligible, err := collectPondMembersAcrossProviders(context.Background(), testRuntimeWithRunner(runner), cfg, "alpha", "")
+	_, ineligible, err := collectPondMembersAcrossProviders(context.Background(), testRuntimeWithRunner(runner), cfg, "alpha", "", true)
 	if err != nil {
 		t.Fatalf("collectPondMembersAcrossProviders: %v", err)
 	}
@@ -970,7 +978,7 @@ func TestCollectPondMembersAcrossProvidersHonorsProviderFilter(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.ExeDev.ControlHost = "exe.example.test"
 	runner := &recordingCommandRunner{result: LocalCommandResult{Stdout: `{ "vms": [] }`}}
-	_, ineligible, err := collectPondMembersAcrossProviders(context.Background(), testRuntimeWithRunner(runner), cfg, "alpha", "exe-dev")
+	_, ineligible, err := collectPondMembersAcrossProviders(context.Background(), testRuntimeWithRunner(runner), cfg, "alpha", "exe-dev", true)
 	if err != nil {
 		t.Fatalf("collectPondMembersAcrossProviders: %v", err)
 	}

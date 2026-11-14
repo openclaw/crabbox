@@ -3,6 +3,7 @@ package cli
 import (
 	"crypto/sha256"
 	"encoding/base32"
+	"sort"
 	"strings"
 )
 
@@ -173,17 +174,18 @@ func providerCapableOfTailscale(provider string) bool {
 	return caps.Tailscale || caps.TailscaleEgress
 }
 
-func pondClaimProviderSummary(pond string) (bool, bool) {
+func pondClaimProviderSummary(pond string) (bool, bool, []string) {
 	pond = NormalizePondName(pond)
 	if pond == "" {
-		return false, false
+		return false, false, nil
 	}
 	claims, err := ListLeaseClaims()
 	if err != nil {
-		return false, false
+		return false, false, nil
 	}
 	hasClaims := false
 	hasTailscale := false
+	tags := map[string]bool{}
 	for _, claim := range claims {
 		if NormalizePondName(claim.Pond) != pond {
 			continue
@@ -192,9 +194,24 @@ func pondClaimProviderSummary(pond string) (bool, bool) {
 		caps := providerCapabilities(canonicalClaimProvider(claim.Provider))
 		if (caps.Tailscale || caps.TailscaleEgress) && (!caps.URLBridge || claimHasTailscaleMetadata(claim)) {
 			hasTailscale = true
+			recorded := false
+			for _, tag := range claim.TailscaleTags {
+				if strings.HasPrefix(tag, pondTailscaleTagPrefix) {
+					tags[tag] = true
+					recorded = true
+				}
+			}
+			if !recorded {
+				tags[pondTailscaleTag(localCoordinatorOwner(), pond)] = true
+			}
 		}
 	}
-	return hasClaims, hasTailscale
+	out := make([]string, 0, len(tags))
+	for tag := range tags {
+		out = append(out, tag)
+	}
+	sort.Strings(out)
+	return hasClaims, hasTailscale, out
 }
 
 func claimHasTailscaleMetadata(claim leaseClaim) bool {

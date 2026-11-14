@@ -124,7 +124,7 @@ report `unsupported` rather than pretending to bridge.
 
 ### `pond connect` / `pond disconnect`
 
-`pond connect <name>` opens operator-side `ssh -L` forwards to every pond member
+`pond connect <name>` opens operator-side `ssh -L` forwards to locally claimed pond members
 that declared `--expose` ports, across all SSH-mesh-capable providers in the
 pond (not just one). `--provider P` narrows it to a single provider.
 
@@ -152,7 +152,11 @@ crabbox pond disconnect pr-42          # stop the daemonized forwards
 local daemon process command before stopping it, and that validator is not yet
 implemented for Windows operators. Use foreground `pond connect` on Windows.
 
-`--json` prints the forward table and exits without opening any tunnels.
+`--json` is read-only: it reports a complete matching running forward set on
+macOS/Linux, or an allocation preview when none matches, without writing files,
+preparing leases, or opening tunnels. Repeating `--export` for an unchanged
+running pond keeps its validated daemons and exported ports. Disconnect requires
+`ps`; inconclusive inspection returns an error and retains the daemon record.
 
 ### `pond release`
 
@@ -249,10 +253,13 @@ that address through the workload proxy environment.
 
 ## Tailscale ACL bootstrap
 
-Every Tailscale pond peer is advertised under the ACL tag
-`tag:cbx-pond-<owner>-<pond>`, so a single concrete policy row gates the whole
-pond. `<owner>` is derived from your local git email's local-part (sanitized,
-and hashed when it would overflow the tag length budget).
+Direct Tailscale pond peers use the ACL tag `tag:cbx-pond-<owner>-<pond>`.
+At creation, `<owner>` is derived from your local git email's local-part
+(sanitized and hashed when it would overflow the tag length budget).
+`doctor --pond` checks every distinct pond tag recorded on eligible local
+members, so changing the current email does not change their verdict. For
+members without a recorded pond tag, it uses the current owner's generated tag.
+A pond with members created under different owners can require multiple rows.
 
 Auto-generated pond tags are **direct-provider only**: they are added to the
 provider's Tailscale config when you use a direct (non-brokered) Tailscale-capable

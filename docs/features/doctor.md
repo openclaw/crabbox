@@ -213,6 +213,11 @@ local pond. The tag is `tag:cbx-pond-<owner>-<pond>`. The check passes only when
 that tag is declared under `tagOwners` and is allowed to reach itself through a
 `grants` row or a legacy `acls` row.
 
+It checks every distinct pond tag recorded by eligible local members. Members
+without a recorded pond tag use the current owner's generated tag; this fallback
+also applies in ponds containing both kinds of member. Changing your current
+email does not replace tags already recorded on members.
+
 It reads the live policy only when:
 
 - the pond has at least one locally claimed member (otherwise `skip`);

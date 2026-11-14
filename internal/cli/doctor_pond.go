@@ -41,7 +41,10 @@ func doctorPondSummary(ctx context.Context, cfg Config) (string, string, map[str
 	if tag == "" {
 		return "", "", nil
 	}
-	hasClaims, hasTailscaleProvider := pondClaimProviderSummary(pond)
+	hasClaims, hasTailscaleProvider, tags := pondClaimProviderSummary(pond)
+	if len(tags) > 0 {
+		tag = strings.Join(tags, ", ")
+	}
 	if !hasClaims {
 		return "skip", fmt.Sprintf("pond %q: no local lease claims found; create or claim a pond member before checking Tailscale policy", pond), map[string]string{"pond": pond, "tag": tag, "plane": "tailscale", "reason": "no_pond_claims"}
 	}
@@ -74,9 +77,16 @@ func doctorPondSummary(ctx context.Context, cfg Config) (string, string, map[str
 		}
 		return "failed", fmt.Sprintf("tailscale policy lookup failed: %v", err), map[string]string{"pond": pond, "tag": tag, "tailnet": tailnet, "error": err.Error()}
 	}
-	if pondACLRowPresent(body, tag) {
+	var missing []string
+	for _, memberTag := range tags {
+		if !pondACLRowPresent(body, memberTag) {
+			missing = append(missing, memberTag)
+		}
+	}
+	if len(missing) == 0 {
 		return "ok", fmt.Sprintf("pond %q: Tailscale plane auto-managed (%s)", pond, tag), map[string]string{"pond": pond, "tag": tag, "tailnet": tailnet, "mode": "auto-managed"}
 	}
+	tag = strings.Join(missing, ", ")
 	return "failed", fmt.Sprintf("pond %q: tailnet policy row missing for %s. Set TS_API_KEY plus %s=1 to auto-install, or apply the snippet from docs/features/pond.md", pond, tag, pondACLAutoBootstrapEnvVar), map[string]string{"pond": pond, "tag": tag, "tailnet": tailnet, "remedy": "see_docs_features_pond_md"}
 }
 
