@@ -114,7 +114,7 @@ the gap rather than mistaking it for "no shares published yet".
 crabbox pond connect <name> [--provider <name>] [--export] [--json]
 ```
 
-Reads pond members across every SSH-mesh-capable provider in the pond, computes
+Reads locally claimed pond members across every SSH-mesh-capable provider in the pond, computes
 a unified forward table, opens operator-side `ssh -L` forwards to each member's
 `--expose` ports, and writes a per-pond hosts file and env snippet under
 `~/.crabbox/pond/<name>/`.
@@ -129,7 +129,7 @@ in `pond peers`.
 | ------------------- | ---------------------------------------------------------------------------------------- |
 | `--provider <name>` | Restrict to a single provider (default: all SSH-mesh-capable members).                   |
 | `--export`          | Daemonize the forwards and print `export …` lines for `eval`, then exit.                 |
-| `--json`            | Print the forward table as JSON and exit without starting forwards.                      |
+| `--json`            | Read-only: print a matching running forward table, or a preview when none matches.      |
 
 Each forward gets a free loopback port in the **51820–52819** range, probed for
 availability against `127.0.0.1`.
@@ -157,7 +157,12 @@ With `--export`, the command starts one daemon process per member containing all
 of that member's forwards. The processes survive the CLI exit; Crabbox verifies
 none exit immediately (wrong key, host unreachable, …), records the PIDs in
 `~/.crabbox/pond/<name>/daemon.json`, prints the `export` lines to stdout, and
-exits. Daemon mode runs on macOS and Linux operator hosts only; on Windows, run
+exits. Repeating `--export` with the same members and exposed ports reuses the
+validated running daemons and keeps the exported ports unchanged. A changed
+forward set replaces the daemons and may allocate different ports. Unrelated
+listeners are never reused.
+
+Daemon mode runs on macOS and Linux operator hosts only; on Windows, run
 `pond connect` without `--export`.
 
 ```bash
@@ -169,6 +174,11 @@ crabbox pond disconnect alpha
 The exported variable name is `CRABBOX_POND_<PEER>_<PORT>`, where `<PEER>` is the
 peer's uppercased, shell-safe name. When two members would collide on a name,
 the provider (then a short lease-ID suffix) is appended to disambiguate.
+
+`--json` does not write hosts, env, or process state, and does not prepare leases
+or start tunnels. On macOS/Linux, when a complete matching daemon or foreground
+forward set is recorded and still running, it reports those ports. Otherwise,
+its output is an allocation preview, not a promise that those ports are listening.
 
 ### Rendered files
 
@@ -202,7 +212,9 @@ state file and validates each recorded process (command line must still be the
 matching `ssh -L` forward) before stopping it — it never scans unrelated SSH
 processes. It reports how many daemons it stopped, or that none were recorded.
 Because `--export` is macOS/Linux-only, `disconnect` is meaningful only on those
-operator hosts.
+operator hosts. Process inspection requires `ps`. If inspection or stopping a
+process fails, the command returns an error and keeps the record for a later
+retry; it does not assume the process has exited.
 
 ## `pond release`
 
@@ -228,33 +240,19 @@ intact, including a replacement claim published before the stop returned.
 
 ## `doctor --pond`
 
-[`crabbox doctor --pond <name>`](doctor.md) runs the Tailscale ACL check (when the
-pond includes tailnet-capable providers) and, in the same invocation, prints the
-cross-provider reachability matrix:
+[`crabbox doctor --pond <name>`](doctor.md) adds one `pond` policy check to the
+normal doctor output. It checks each distinct pond tag recorded by eligible
+local members, falling back to the current owner's generated tag for members
+without a recorded pond tag. With matching policy rows, for example:
 
 ```text
-pond "alpha": 4 members
-  transport breakdown: none=1 ssh=1 tailnet=1 url=1
-  reachability:
-    tailnet -> tailnet : OK
-    tailnet -> url     : OK (via outbound HTTPS)
-    tailnet -> ssh     : WARN (requires operator-side bridge — see SSH-mesh DRAFT PR)
-    tailnet -> none    : NO (destination has no published endpoint)
-    url     -> tailnet : NO (no public endpoint on tailnet members)
-    url     -> url     : OK
-    url     -> ssh     : WARN (requires operator-side bridge)
-    url     -> none    : NO (destination has no published endpoint)
-    ssh     -> tailnet : WARN (requires operator-side bridge)
-    ssh     -> url     : OK (via outbound HTTPS)
-    ssh     -> ssh     : WARN (requires operator-side bridge — peers do not share a mesh)
-    ssh     -> none    : NO (destination has no published endpoint)
-    none    -> *       : NO (source provider owns its own connectivity)
+ok      pond     pond "alpha": Tailscale plane auto-managed (tag:cbx-pond-alice-alpha)
 ```
 
-The matrix only emits rows and columns for transports actually present in the
-pond, and it is intentionally asymmetric: `tailnet -> url` works (the tailnet
-peer makes an outbound HTTPS request) while `url -> tailnet` does not (the
-URL-only peer has no route into the tailnet).
+The check skips when no eligible local members or API credentials are available,
+and fails when a required policy row is missing. It does not print a transport
+breakdown or reachability matrix. Use `crabbox pond peers --pond <name>` (optionally
+`--json`) to inspect each member's transport and published endpoint.
 
 ## Scope
 

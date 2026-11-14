@@ -49,7 +49,7 @@ func (b *railwayBackend) PublishPeer(ctx context.Context, leaseID string, port i
 }
 
 // ListPeerTargets implements core.BridgeProvider for Railway. The slice is
-// empty when the service has no live deployment, which keeps the doctor probe
+// empty when the service has no live deployment, which keeps peer discovery
 // honest instead of pretending a sleeping service is bridge-reachable.
 func (b *railwayBackend) ListPeerTargets(ctx context.Context, leaseID string) ([]core.BridgePeerTarget, error) {
 	url, _, err := b.bridgeDeploymentURL(ctx, leaseID)
