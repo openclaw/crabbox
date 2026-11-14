@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+
+- AWS: authorize Spot price history in coordinator IAM policies, show quote failures in human and JSON output, and prevent failed quotes from approving monthly spend. [PR 3151](https://github.com/openclaw/crabbox/pull/3151). Thanks @mkusaka.
 - Qualification: verify runtime binding identity for idle controllers and retain cleanup-only recovery receipts when management metadata omits binding props. https://github.com/openclaw/crabbox/pull/3136 Thanks @joshavant.
 - Run: normalize fresh and replacement SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity, and preserve child-environment filtering after replacement. https://github.com/openclaw/crabbox/pull/3131 Thanks @vincentkoc.
 
