@@ -162,7 +162,9 @@ func (b *digitalOceanLeaseBackend) acquireFixed(ctx context.Context, req core.Ac
 		server := serverFromDroplet(item, cfg)
 		server.ImmutableID = claim.CloudImmutableID
 		target := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-		if err := b.waitSSH(ctx, &target, "digitalocean bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
+		if err := core.WaitForDirectBootstrap(ctx, cfg, server, &target, core.BootstrapWaitTimeout(cfg), func(ctx context.Context, target *core.SSHTarget, timeout time.Duration) error {
+			return b.waitSSH(ctx, target, "digitalocean bootstrap", timeout)
+		}); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		labels := maps.Clone(server.Labels)

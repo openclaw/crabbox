@@ -23258,6 +23258,74 @@ describe("fleet lease identity and idle", () => {
     expect(revokedPage.status).toBe(404);
   });
 
+  it.each(["released", "expired", "failed", "active"] as const)(
+    "rejects late Tailscale metadata after confirmed cleanup in %s state",
+    async (state) => {
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage);
+      const lease = testLease({
+        id: "cbx_abcdef123456",
+        owner: "alice@example.com",
+        org: "example-org",
+        state,
+        host: "",
+        cleanupCompletedAt: new Date().toISOString(),
+        provisioningResourceMayExist: false,
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      const currentRequest = () =>
+        request("GET", "/v1/leases?view=current", {
+          headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+        });
+      const before = (await (await fleet.fetch(currentRequest())).json()) as {
+        leases: LeaseRecord[];
+      };
+      const response = await fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/tailscale`, {
+          headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+          body: { enabled: true, ipv4: "100.64.0.9", state: "failed" },
+        }),
+      );
+      expect(response.status).toBe(409);
+      expect((await storage.get<LeaseRecord>(`lease:${lease.id}`))?.tailscale).toBeUndefined();
+      const stored = await storage.get<LeaseRecord>(`lease:${lease.id}`);
+      expect(stored?.cleanupCompletedAt).toBe(lease.cleanupCompletedAt);
+      const after = (await (await fleet.fetch(currentRequest())).json()) as {
+        leases: LeaseRecord[];
+      };
+      expect(after.leases.map((entry) => entry.id)).toEqual(before.leases.map((entry) => entry.id));
+    },
+  );
+
+  it("fences Tailscale metadata against a replaced lease generation", async () => {
+    const storage = new MemoryStorage();
+    const fleet = testFleet(storage);
+    const lease = testLease({
+      id: "cbx_abcdef123456",
+      owner: "alice@example.com",
+      org: "example-org",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 3600000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const stale = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/tailscale`, {
+        headers,
+        body: { expectedCreatedAt: "2020-01-01T00:00:00.000Z", ipv4: "100.64.0.9" },
+      }),
+    );
+    expect(stale.status).toBe(409);
+    expect((await storage.get<LeaseRecord>(`lease:${lease.id}`))?.tailscale).toBeUndefined();
+    const current = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/tailscale`, {
+        headers,
+        body: { expectedCreatedAt: lease.createdAt, ipv4: "100.64.0.5" },
+      }),
+    );
+    expect(current.status).toBe(200);
+  });
+
   it("requires manage access for shared lease heartbeat and Tailscale metadata updates", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(storage);

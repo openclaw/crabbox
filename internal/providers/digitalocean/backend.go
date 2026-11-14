@@ -224,7 +224,9 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 	created = waited
 	server := serverFromDroplet(created, cfg)
 	ssh := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-	if err := b.waitSSH(ctx, &ssh, "digitalocean bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
+	if err := core.WaitForDirectBootstrap(ctx, cfg, server, &ssh, core.BootstrapWaitTimeout(cfg), func(ctx context.Context, target *core.SSHTarget, timeout time.Duration) error {
+		return b.waitSSH(ctx, target, "digitalocean bootstrap", timeout)
+	}); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	readyTags := leaseTags(cfg, leaseID, slug, "ready", req.Keep, now)

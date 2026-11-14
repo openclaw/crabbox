@@ -1336,6 +1336,10 @@ func (c *CoordinatorClient) UpdateLeaseTailscale(ctx context.Context, id string,
 }
 
 func (c *CoordinatorClient) UpdateLeaseTailscaleForProvider(ctx context.Context, id, expectedProvider string, meta TailscaleMetadata) (CoordinatorLease, error) {
+	return c.updateLeaseTailscaleForGeneration(ctx, id, expectedProvider, "", meta)
+}
+
+func (c *CoordinatorClient) updateLeaseTailscaleForGeneration(ctx context.Context, id, expectedProvider, expectedCreatedAt string, meta TailscaleMetadata) (CoordinatorLease, error) {
 	var res struct {
 		Lease CoordinatorLease `json:"lease"`
 	}
@@ -1345,8 +1349,9 @@ func (c *CoordinatorClient) UpdateLeaseTailscaleForProvider(ctx context.Context,
 	}
 	body := struct {
 		TailscaleMetadata
-		ExpectedProvider string `json:"expectedProvider,omitempty"`
-	}{TailscaleMetadata: meta, ExpectedProvider: expectedProvider}
+		ExpectedProvider  string `json:"expectedProvider,omitempty"`
+		ExpectedCreatedAt string `json:"expectedCreatedAt,omitempty"`
+	}{TailscaleMetadata: meta, ExpectedProvider: expectedProvider, ExpectedCreatedAt: expectedCreatedAt}
 	err = c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/tailscale", body, &res)
 	return res.Lease, err
 }
@@ -2943,14 +2948,15 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 		provider = strings.TrimSpace(cfg.Provider)
 	}
 	server := Server{
-		LifetimePolicy: lease.LifetimePolicy,
-		ImageEvidence:  CloneImageEvidence(lease.ImageEvidence),
-		Provider:       provider,
-		CloudID:        lease.CloudID,
-		HostID:         hostID,
-		ID:             lease.ServerID,
-		Name:           lease.ServerName,
-		Status:         lease.State,
+		coordinatorCreatedAt: lease.CreatedAt,
+		LifetimePolicy:       lease.LifetimePolicy,
+		ImageEvidence:        CloneImageEvidence(lease.ImageEvidence),
+		Provider:             provider,
+		CloudID:              lease.CloudID,
+		HostID:               hostID,
+		ID:                   lease.ServerID,
+		Name:                 lease.ServerName,
+		Status:               lease.State,
 		Labels: map[string]string{
 			"lease":             lease.ID,
 			"slug":              lease.Slug,

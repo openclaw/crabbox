@@ -404,7 +404,9 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 			return core.WaitForSSHReady(ctx, target, b.rt.Stderr, phase, timeout)
 		}
 	}
-	if err := b.waitSSH(ctx, &ssh, "scaleway bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
+	if err := core.WaitForDirectBootstrap(ctx, cfg, server, &ssh, core.BootstrapWaitTimeout(cfg), func(ctx context.Context, target *core.SSHTarget, timeout time.Duration) error {
+		return b.waitSSH(ctx, target, "scaleway bootstrap", timeout)
+	}); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	readyLabels := labelsFromTags(leaseTags(cfg, leaseID, slug, "ready", req.Keep, now))
