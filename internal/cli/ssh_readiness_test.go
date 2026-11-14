@@ -119,7 +119,7 @@ func TestSSHReadinessProbeError(t *testing.T) {
 			}
 			var diagnostic sshReadinessDiagnostic
 			_, _ = io.WriteString(&diagnostic, test.diagnostic)
-			err := sshReadinessProbeError(ctx, cause, diagnostic.hostKeyRejected())
+			err := sshReadinessProbeError(ctx, cause, &diagnostic)
 			if errors.Is(err, errSSHHostKeyVerification) != test.permanent || !errors.Is(err, cause) {
 				t.Fatalf("incorrect classification or lost cause: %v", err)
 			}

@@ -287,7 +287,7 @@ func (a App) advanceCheckpointCapture(ctx context.Context, cfg Config, repo Repo
 	if err != nil {
 		return err
 	}
-	server, target, _, err := a.resolveLeaseTargetWithRequestConfig(ctx, &cfg, ResolveRequest{Repo: repo, ID: record.LeaseID, ReleaseOnly: true, NoLocalStateMutations: true})
+	server, target, _, err := a.resolveLeaseTargetWithRequestConfig(ctx, &cfg, ResolveRequest{Repo: repo, ID: record.LeaseID, ReleaseOnly: true, CheckpointAccess: true, NoLocalStateMutations: true})
 	if err != nil {
 		return err
 	}
@@ -322,6 +322,7 @@ func (a App) advanceCheckpointCapture(ctx context.Context, cfg Config, repo Repo
 		// Generic providers get at-most-once submission. A lost identity remains
 		// held; only adapters with an attested reconciliation path may recover it.
 		capture.Phase = "submitting"
+		capture.Error = ""
 		if err := store.Write(*record); err != nil {
 			return err
 		}
@@ -339,6 +340,9 @@ func (a App) advanceCheckpointCapture(ctx context.Context, cfg Config, repo Repo
 			record.Native.Strategy = strategy
 			record.Native.Metadata = metadata
 			capture.Phase = "pending"
+		} else if nativeCreateNotSubmitted(image, createErr, *record) {
+			capture.Phase = "prepared"
+			capture.Error = "native checkpoint request was not submitted: " + trimFailureDetail(RedactDiagnosticSecrets(createErr.Error()))
 		}
 		if err := store.Write(*record); err != nil {
 			return err

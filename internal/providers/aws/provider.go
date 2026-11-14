@@ -71,7 +71,14 @@ func (Provider) Spec() core.ProviderSpec {
 	}
 }
 func (Provider) RegisterFlags(*flag.FlagSet, core.Config) any { return core.NoProviderFlags() }
-func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
+func (Provider) ApplyFlags(cfg *core.Config, _ *flag.FlagSet, _ any) error {
+	cfg.AWSSSHTransport = strings.ToLower(strings.TrimSpace(cfg.AWSSSHTransport))
+	if cfg.AWSSSHTransport == "" {
+		cfg.AWSSSHTransport = core.AWSSSHTransportDirect
+	}
+	if cfg.AWSSSHTransport != core.AWSSSHTransportDirect && cfg.AWSSSHTransport != core.AWSSSHTransportSSM {
+		return core.Exit(2, "aws sshTransport must be direct or ssm")
+	}
 	return nil
 }
 

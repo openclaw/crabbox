@@ -335,6 +335,24 @@ boundary. Invalid modes fail before lease resolution and emit no receipt. See th
 [checkpoint command reference](../commands/checkpoint.md#create) for both exact
 receipt shapes; neither an absent receipt nor error text proves non-submission.
 
+### Source-only recovery (`abandon`)
+
+Machine0 can abandon the exact source of an ordinary unresolved native capture.
+Direct AWS also supports recovery of an existing retirement stuck in `submitting`
+without an image identity, using `--pre-submit-error-file`. This is not a general
+unlock for ordinary AWS blank-image records. The CLI requires the original
+bounded preparation diagnostic and exact source claim, repository, checkpoint
+binding, account/region, and provider ownership validation; see the
+[abandon command reference](../commands/checkpoint.md#abandon) for admission and
+replay requirements.
+
+The retained SHA-256 hashes operator-supplied evidence; it is **not cryptographic
+proof that image submission never happened**. Verified source release leaves the
+original image obligation durably unresolved. Preserve the checkpoint and source
+receipts for reconciliation: do not blindly retry image creation, delete an
+uncertain image, fork it, or remove the local record. This recovery does not add a
+general client-crash recovery guarantee.
+
 ### list and inspect
 
 `list` prints local checkpoint records; `inspect <id>` prints one record's

@@ -13,6 +13,56 @@ import (
 
 func runCheckpointAbandonContract(t *testing.T, repo, binary string) {
 	t.Parallel()
+	t.Run("adopt exact pre-submit retirement preserves unknown image obligation", func(t *testing.T) {
+		f := newCheckpointAbandonFixture(t, repo, binary)
+		evidence := preparePreSubmitRetirementFixture(t, f)
+		args := append(checkpointAbandonArgs(captureFixtureCheckpoint), "--pre-submit-error-file", evidence)
+		result := f.run(args...)
+		if result.err != nil {
+			t.Fatalf("exact pre-submit retirement was not abandoned: %v\n%s\n%s", result.err, result.stdout, result.stderr)
+		}
+		record := f.record(captureFixtureCheckpoint)
+		if record.Capture == nil || record.Capture.SourceDisposition != "abandon" || record.Capture.Phase != "retiring" || record.Native.ImageID != "" || record.Native.Metadata[checkpointPreSubmitEvidenceMetadata] == "" {
+			t.Fatalf("pre-submit recovery lost its retained audit: %+v", record)
+		}
+		finishCheckpointAbandonmentWithArgs(t, f, args)
+		record = f.record(captureFixtureCheckpoint)
+		if record.Capture.Phase != "abandoned" || !strings.Contains(record.Capture.Error, "original image submission remains unresolved") {
+			t.Fatalf("pre-submit recovery erased uncertainty: %+v", record)
+		}
+		requireAbandonedCheckpointHeld(t, f, captureFixtureCheckpoint)
+	})
+
+	t.Run("pre-submit recovery rejects wrong owner identity and ambiguous evidence", func(t *testing.T) {
+		for _, mutation := range []string{"wrong-source", "wrong-claim", "ambiguous-evidence"} {
+			t.Run(mutation, func(t *testing.T) {
+				f := newCheckpointAbandonFixture(t, repo, binary)
+				evidence := preparePreSubmitRetirementFixture(t, f)
+				args := append(checkpointAbandonArgs(captureFixtureCheckpoint), "--pre-submit-error-file", evidence)
+				switch mutation {
+				case "wrong-source":
+					args[len(args)-4] = "replacement-resource"
+				case "wrong-claim":
+					claim := f.claim()
+					claim.Revision = "replacement-generation"
+					f.writeJSON(filepath.Join(f.root, "state", "crabbox", "claims", captureFixtureLease+".json"), claim)
+				case "ambiguous-evidence":
+					if err := os.WriteFile(evidence, []byte("CreateImage response timed out\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				claimBefore, _ := json.Marshal(f.claim())
+				recordBefore, _ := json.Marshal(f.record(captureFixtureCheckpoint))
+				result := f.run(args...)
+				claimAfter, _ := json.Marshal(f.claim())
+				recordAfter, _ := json.Marshal(f.record(captureFixtureCheckpoint))
+				if result.err == nil || !bytes.Equal(claimBefore, claimAfter) || !bytes.Equal(recordBefore, recordAfter) {
+					t.Fatalf("refused recovery changed ownership: err=%v claimChanged=%t recordChanged=%t stderr=%s", result.err, !bytes.Equal(claimBefore, claimAfter), !bytes.Equal(recordBefore, recordAfter), result.stderr)
+				}
+			})
+		}
+	})
+
 	t.Run("abandon legacy source preserves unknown image obligation", func(t *testing.T) {
 		f := newCheckpointAbandonFixture(t, repo, binary)
 		finishCheckpointAbandonment(t, f, captureFixtureCheckpoint)
@@ -326,4 +376,40 @@ func beforeState(t *testing.T, value checkpointCaptureFixtureState) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func preparePreSubmitRetirementFixture(t *testing.T, f *checkpointCaptureFixture) string {
+	t.Helper()
+	claim := f.claim()
+	record := f.record(captureFixtureCheckpoint)
+	record.Native.Strategy = checkpointStrategyImage
+	record.Native.Metadata = map[string]string{"machine0_account_id": "fixture-account", "machine0_source_cleanup_account_id": "fixture-account"}
+	record.Capture = &NativeCheckpointCapture{
+		SourceDisposition: "retire", Phase: "submitting", SourceID: claim.CloudID,
+		SourceName: claim.Labels["machine0_name"], SourceScope: claim.ProviderScope,
+		SourceRevision: claim.Revision, SourceClaimedAt: claim.ClaimedAt,
+		SourceIntent: claim.FixedCreateIntent.Fingerprint,
+	}
+	writeAbandonCheckpointRecord(t, f, record)
+	claim.CheckpointCapture = &CheckpointCaptureBinding{ID: record.ID, Revision: record.Capture.SourceRevision, BoundRevision: claim.Revision}
+	f.writeJSON(filepath.Join(f.root, "state", "crabbox", "claims", captureFixtureLease+".json"), claim)
+	evidence := filepath.Join(f.root, "prepare-error.txt")
+	if err := os.WriteFile(evidence, []byte("prepare native checkpoint source: exit status 255: fixture permission denied\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return evidence
+}
+
+func finishCheckpointAbandonmentWithArgs(t *testing.T, f *checkpointCaptureFixture, args []string) {
+	t.Helper()
+	for attempt := 0; attempt < 3; attempt++ {
+		result := f.run(args...)
+		if result.err != nil {
+			t.Fatalf("exact source cannot finish abandonment: %v\n%s\n%s", result.err, result.stdout, result.stderr)
+		}
+		if record := f.record(captureFixtureCheckpoint); record.Capture != nil && record.Capture.Phase == "abandoned" {
+			return
+		}
+	}
+	t.Fatal("source removal did not settle within bounded abandonment replay")
 }

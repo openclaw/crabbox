@@ -3,6 +3,8 @@ package aws
 import (
 	"context"
 	"errors"
+	"github.com/openclaw/crabbox/internal/testutil"
+	"strings"
 	"testing"
 
 	"github.com/aws/smithy-go"
@@ -41,6 +43,37 @@ func TestCheckpointSourceAbsenceUsesExactAccountRegionAndID(t *testing.T) {
 			}
 			if tc.account == "" && (len(fake.getIDs) != 1 || fake.getIDs[0] != "i-fixture") {
 				t.Fatalf("reads=%v", fake.getIDs)
+			}
+		})
+	}
+}
+
+func TestCheckpointAccessRebindsAWSStoredKey(t *testing.T) {
+	for _, transport := range []string{"direct", "ssm"} {
+		t.Run(transport, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			const leaseID = "cbx_abcdef123456"
+			cfg := core.Config{Provider: "aws", AWSRegion: "us-west-2", AWSSSHTransport: transport}
+			key, _, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			server := awsTestServer("i-0123456789abcdef0", leaseID, "capture", "us-west-2")
+			server.Labels["aws_ssh_transport"] = transport
+			fake := &fakeAWSClient{servers: []core.Server{server}}
+			old := newAWSClient
+			newAWSClient = func(context.Context, core.Config) (awsClient, error) { return fake, nil }
+			t.Cleanup(func() { newAWSClient = old })
+			b := NewAWSLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{}).(*awsLeaseBackend)
+			lease, err := b.Resolve(t.Context(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true, CheckpointAccess: true, NoLocalStateMutations: true})
+			if err != nil || lease.SSH.Key != key {
+				t.Fatalf("key=%s want=%s err=%v", lease.SSH.Key, key, err)
+			}
+			if transport == "ssm" && !strings.Contains(lease.SSH.ProxyCommand, "AWS-StartSSHSession") {
+				t.Fatalf("lost SSM preparation transport: %+v", lease.SSH)
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+				t.Fatalf("resolution mutated local claim: exists=%v err=%v", exists, err)
 			}
 		})
 	}

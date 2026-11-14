@@ -178,7 +178,7 @@ esac
 }
 
 func runCheckpointAWSNonSubmissionContract(t *testing.T, repo, binary string) {
-	for _, scenario := range []string{"source", "preparation", "account-before-submit", "submission", "retained-preparation", "retained-account-before-submit"} {
+	for _, scenario := range []string{"source", "preparation", "account-before-submit", "submission", "submission-rejected", "retained-preparation", "retained-account-before-submit", "retained-submission", "retained-submission-rejected"} {
 		t.Run(scenario, func(t *testing.T) {
 			retained := strings.HasPrefix(scenario, "retained-")
 			phase := strings.TrimPrefix(scenario, "retained-")
@@ -216,7 +216,11 @@ func runCheckpointAWSNonSubmissionContract(t *testing.T, repo, binary string) {
 					fmt.Fprint(w, `</tagSet></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`)
 				case "CreateImage":
 					creates++
-					writeEC2Error(w, "InvalidParameterValue", "fixture image request uncertain", http.StatusBadRequest)
+					if phase == "submission-rejected" {
+						writeEC2Error(w, "UnauthorizedOperation", "fixture image request rejected", http.StatusForbidden)
+					} else {
+						writeEC2Error(w, "InvalidParameterValue", "fixture image request uncertain", http.StatusBadRequest)
+					}
 				default:
 					t.Errorf("unexpected AWS request: %s", action)
 					http.Error(w, "unexpected request", 400)
@@ -259,11 +263,16 @@ esac
 			createCount := creates
 			mu.Unlock()
 			if retained {
-				if createCount != 0 || len(records) != 1 || len(result.stdout) != 0 {
-					t.Fatalf("retained source failure erased uncertainty: creates=%d records=%v stdout=%s", createCount, records, result.stdout)
+				if len(records) != 1 || len(result.stdout) != 0 {
+					t.Fatalf("retained source failure lost its journal: creates=%d records=%v stdout=%s", createCount, records, result.stdout)
 				}
 				record := f.record(captureFixtureCheckpoint)
-				if record.Capture == nil || record.Capture.Phase != "submitting" || record.Native.ImageID != "" {
+				definiteNonSubmission := phase != "submission"
+				wantPhase := "submitting"
+				if definiteNonSubmission {
+					wantPhase = "prepared"
+				}
+				if record.Capture == nil || record.Capture.Phase != wantPhase || record.Native.ImageID != "" || definiteNonSubmission != strings.Contains(record.Capture.Error, "not submitted") {
 					t.Fatalf("wrong retained journal: %+v", record)
 				}
 				before, err := os.ReadFile(prepared)
@@ -272,17 +281,30 @@ esac
 				}
 				replay := f.run(args...)
 				after, err := os.ReadFile(prepared)
-				if err != nil || !bytes.Equal(before, after) {
-					t.Fatalf("replay retried source preparation: before=%q after=%q err=%v", before, after, err)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if phase == "preparation" && bytes.Equal(before, after) {
+					t.Fatalf("replay did not retry known preparation failure: before=%q after=%q", before, after)
+				}
+				if phase == "submission" && !bytes.Equal(before, after) {
+					t.Fatalf("ambiguous submission repeated preparation: before=%q after=%q", before, after)
 				}
 				record = f.record(captureFixtureCheckpoint)
-				if record.Capture.Phase != "submitting" || record.Native.ImageID != "" {
-					t.Fatalf("replay erased uncertain journal: %+v stderr=%s", record, replay.stderr)
+				if record.Capture.Phase != wantPhase || record.Native.ImageID != "" {
+					t.Fatalf("replay changed retained journal incorrectly: %+v stderr=%s", record, replay.stderr)
 				}
 				mu.Lock()
 				defer mu.Unlock()
-				if creates != 0 {
-					t.Fatalf("retained replay submitted %d images", creates)
+				wantCreates := 0
+				if phase == "submission" || phase == "submission-rejected" {
+					wantCreates = 1
+					if definiteNonSubmission {
+						wantCreates = 2
+					}
+				}
+				if creates != wantCreates {
+					t.Fatalf("retained replay submitted %d images, want %d", creates, wantCreates)
 				}
 				return
 			}
@@ -292,7 +314,7 @@ esac
 				}
 				return
 			}
-			if createCount != 0 {
+			if createCount != 0 && phase != "submission-rejected" {
 				t.Fatalf("pre-submit failure created %d images", createCount)
 			}
 			var outcome map[string]string

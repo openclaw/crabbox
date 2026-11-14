@@ -692,8 +692,10 @@ type NativeCheckpointCreateResult struct {
 	Metadata           map[string]string
 }
 
-// NativeCheckpointNotSubmittedError attests that this invocation never attempted
-// image submission. An empty result or a failed request cannot establish this.
+// NativeCheckpointNotSubmittedError attests that the provider did not accept an
+// image creation request. This includes failures before submission and definitive
+// provider rejection. Empty results, ambiguous failures, and unknown provider
+// responses cannot establish this.
 type NativeCheckpointNotSubmittedError struct{ Cause error }
 
 func (e NativeCheckpointNotSubmittedError) Error() string { return e.Cause.Error() }
@@ -718,6 +720,14 @@ type NativeCheckpointResourceRequest struct {
 	Image       NativeCheckpointImage
 	Metadata    map[string]string
 	Capture     *NativeCheckpointCapture
+}
+
+// NativeCheckpointAbandonScopeProvider attests provider cleanup coordinates for
+// retained pre-submit recovery. The shared owner fences the claim and journal;
+// providers interpret their own labels and scope. A nil claim is only allowed
+// for ordinary replay with previously attested coordinates.
+type NativeCheckpointAbandonScopeProvider interface {
+	NativeCheckpointAbandonScope(*LeaseClaim, NativeCheckpointCapture, NativeCheckpointImage) (NativeCheckpointImage, error)
 }
 
 // NativeCheckpointAbandonProvider binds positive source-cleanup evidence without
@@ -1354,9 +1364,12 @@ type ResolveRequest struct {
 	ID          string
 	Reclaim     bool
 	ReleaseOnly bool
-	StatusOnly  bool
-	ReadyProbe  bool
-	Prepare     bool
+	// CheckpointAccess requests access material for an already claim-bound
+	// capture, without admitting ordinary activity or mutating local state.
+	CheckpointAccess bool
+	StatusOnly       bool
+	ReadyProbe       bool
+	Prepare          bool
 	// IncludeDiagnostics opts explicit presentation callers into optional observations.
 	// It is not a provider protocol field or authority to modify lease state.
 	IncludeDiagnostics bool `json:"-"`
