@@ -308,6 +308,6 @@ for (const scenario of ["ambiguous later page", "missing id", "changed identity"
 test("RunPod v2 cleanup rejects the retired explicit v1 URL before HTTP", async () => {
   const result = await cleanupFixture(() => assert.fail("unexpected HTTP request"), "https://rest.runpod.io/v1/");
   assert.notEqual(result.code, 0);
-  assert.match(result.stderr, /2026-11-15.*https:\/\/api.runpod.io\/v2/);
+  assert.match(result.stderr, /2026-11-15.*https:\/\/api\.runpod\.io\/v2/);
   assert.deepEqual(result.requests, []);
 });
