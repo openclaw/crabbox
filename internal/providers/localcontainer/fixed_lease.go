@@ -227,7 +227,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		containerID := strings.TrimSpace(claim.CloudID)
 		if !container.State.Running {
 			notRunning := core.Exit(4, "lease_id_conflict: fixed local-container lease %s is bound to a non-running container", leaseID)
-			if observedErr := validateObservedContainer(container, containerID, leaseID); observedErr != nil {
+			if observedErr := b.validateObservedContainer(ctx, container, containerID, leaseID); observedErr != nil {
 				if recoveringUnboundAttempt {
 					return core.LeaseTarget{}, errors.Join(notRunning, observedErr)
 				}
