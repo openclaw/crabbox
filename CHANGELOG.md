@@ -2,6 +2,10 @@
 
 ## 0.83.1 - 2026-11-14
 
+### Fixed
+
+- Tailscale: limit rendered hostnames to valid 63-character DNS labels in direct and coordinator provisioning. [PR 3099](https://github.com/openclaw/crabbox/pull/3099). Thanks @KrasimirKralev.
+
 - Azure Sandbox: select every resource tier from XS (0.25 vCPU / 0.5 GiB) to 3XL (16 vCPU / 32 GiB), including 5–320 GiB tier disk capacities, with `--type` names or tier aliases while preserving implicit defaults, safe lease replay and snapshot inheritance. https://github.com/openclaw/crabbox/pull/3143 Thanks @galiniliev.
 - Qualification: verify runtime binding identity for idle controllers and retain cleanup-only recovery receipts when management metadata omits binding props. https://github.com/openclaw/crabbox/pull/3136 Thanks @joshavant.
 - Run: normalize fresh and replacement SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity, and preserve child-environment filtering after replacement. https://github.com/openclaw/crabbox/pull/3131 Thanks @vincentkoc.

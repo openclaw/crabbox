@@ -75,8 +75,9 @@ tailscale:
 managed Linux leases. `tailscale.network` is an alias that sets the top-level
 `network` mode used for target resolution on SSH-backed commands. Hostname templates
 support `{id}`, `{slug}`, and `{provider}`; the rendered value is sanitized to a DNS
-label. When `enabled` is set, `tags` must contain at least one valid `tag:` value and
-`hostnameTemplate` must be non-empty.
+label and cut to 63 characters without a trailing hyphen. When `enabled` is set,
+`tags` must contain at least one valid `tag:` value and `hostnameTemplate` must be
+non-empty.
 
 Environment overrides:
 
