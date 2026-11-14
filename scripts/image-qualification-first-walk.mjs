@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFirstWalkRecipe } from "./image-qualification-control.mjs";
+import { readFirstWalkRecipe, verifyFirstWalkPreparation } from "./image-qualification-control.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const required = (name) => {
@@ -30,10 +30,14 @@ const artifact = required("QUALIFICATION_ARTIFACT_DIR");
 // Reject missing or substituted recipe data before any guest or relay activity.
 const recipe = readFirstWalkRecipe(path.join(artifact, "candidate"));
 const runner = fs.readFileSync(path.join(root, "scripts/qualification-first-walk-guest.py"));
+const workload = fs.readFileSync(path.join(root, "scripts/qualification-first-walk-workload.py"));
 const region = required("QUALIFICATION_AWS_REGION");
 const workCutoff = Date.parse(required("QUALIFICATION_EXPIRES_AT")) - 20 * 60_000;
 if (!Number.isFinite(workCutoff) || Date.now() >= workCutoff)
   throw new Error("first-walk work window expired");
+// Deployment, arming and queue delays must not consume the executor reserve.
+if (workCutoff - Date.now() < 100 * 60_000)
+  throw new Error("first-walk requires the full 100-minute executor reserve before allocation");
 fs.mkdirSync(proof, { recursive: true, mode: 0o700 });
 const raw = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "first-walk-executor-")));
 const binary = path.join(artifact, "bin/crabbox");
@@ -131,11 +135,20 @@ try {
   const work = source.workRoot;
   if (typeof work !== "string" || !/^\/[a-zA-Z0-9/_-]+$/.test(work))
     throw new Error("saved work root not canonical");
-  await run(
+  const population = await run(
     "populate-source",
     sourceID,
-    `set -eu\nsudo python3 - <<'PY'\nimport os,pathlib,pwd,grp,subprocess\nuid=pwd.getpwnam('crabbox').pw_uid; gid=grp.getgrnam('crabbox').gr_gid\nroots=[pathlib.Path(${JSON.stringify(work)}),pathlib.Path('/var/cache/crabbox')]\nif len({subprocess.check_output(['findmnt','-n','-o','MAJ:MIN','-T',str(p)],text=True).strip() for p in roots})!=1: raise RuntimeError('capture requires one filesystem')\nfor root in roots:\n p=root/'first-walk-synthetic'; p.mkdir(exist_ok=False)\n for i in range(1000):\n  q=p/str(i); q.write_text('fixture\\n')\n  if i%2: os.chown(q,uid,gid)\n (p/'dangling').symlink_to('missing')\nos.sync()\nPY\n`,
+    `set -eu\nbase=$(mktemp -d /tmp/first-walk-source.XXXXXXXX)\ntrap 'sudo rm -rf -- "$base"' EXIT\nprintf '%s' '${workload.toString("base64")}' | base64 -d >"$base/prepare.py"\nsudo systemd-run --quiet --wait --pipe --unit=crabbox-first-walk-source-${suffix} --uid=crabbox --gid=crabbox --property=MemoryMax=2G --property=TasksMax=128 --property=CPUQuota=200% --property=RuntimeMaxSec=900 --property=TimeoutStopSec=30 --property=KillMode=control-group python3 "$base/prepare.py" --work-root '${work}'\n`,
   );
+  const populationLines = population
+    .split("\n")
+    .filter((line) => line.startsWith("CRABBOX_WORKLOAD_PREPARED="));
+  if (populationLines.length !== 1)
+    throw new Error("missing or ambiguous source preparation result");
+  const sourcePreparation = JSON.parse(
+    populationLines[0].slice("CRABBOX_WORKLOAD_PREPARED=".length),
+  );
+  verifyFirstWalkPreparation(sourcePreparation);
   const checkpointID = `chk_first_walk_${suffix}`;
   await api("POST", "/v1/checkpoints", {
     id: checkpointID,
@@ -207,6 +220,8 @@ try {
           exit: 0,
           recipeSha256: sha(recipe),
           runnerSha256: sha(runner),
+          workloadSha256: sha(workload),
+          sourcePreparation,
           resultSha256: sha(JSON.stringify(result)),
           sourceCaptureDigest: sha(JSON.stringify(capture)),
           readinessReceiptSha256: readiness,

@@ -473,7 +473,7 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       assert.equal(handoff.owner, "image-qualification-42-1@example.invalid");
       assert.equal(
         Date.parse(handoff.expiresAt) - Date.parse(handoff.startsAt),
-        (mode === "retained" ? 38 : 120) * 60_000,
+        (mode === "first-walk" ? 150 : mode === "retained" ? 38 : 120) * 60_000,
       );
       if (mode === "first-walk")
         assert.equal(
@@ -609,6 +609,30 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
     assert.deepEqual(f.state().workers, {});
     assert.equal(f.state().identity, undefined);
   });
+  test("empty workflow transport selector preserves legacy deployment", (t) => {
+    const f = fixture(t, "first-walk");
+    f.env.QUALIFICATION_TRANSPORT_PROFILE = "";
+    assert.equal(f.invoke("admit").status, 0);
+    const result = f.invoke("deploy");
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(f.state().identity);
+    assert.ok(!f.state().events.some((event) => /transport-open|transport-settle/.test(event)));
+    f.update({ now: Date.parse(f.prepared().expiresAt) + 60_000 });
+    const cleanup = f.invoke("reap");
+    assert.equal(cleanup.status, 0, cleanup.stderr);
+    assert.deepEqual(f.state().workers, {});
+  });
+
+  test("unknown workflow transport selector fails before provider effects", (t) => {
+    const f = fixture(t, "first-walk");
+    f.env.QUALIFICATION_TRANSPORT_PROFILE = "candidate-transport-v3";
+    assert.equal(f.invoke("admit").status, 0);
+    const result = f.invoke("deploy");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /unknown transport profile/);
+    assert.deepEqual(providerEvents(f), []);
+  });
+
   for (const [name, overrides] of [
     ["rerun", { GITHUB_RUN_ATTEMPT: "2" }],
     ["other run", { GITHUB_RUN_ID: "43" }],

@@ -819,3 +819,14 @@ exact dry-built authority/candidate plus raw controller/relay in local workerd, 
 all Worker outbound denied, persistent registry restart and process-group death at
 pending/observed/verified boundaries. Version metadata there is a controlled fixture;
 it is not a live provider deployment proof.
+
+The protected `image-qualification` environment variable
+`CRABBOX_IMAGE_QUALIFICATION_TRANSPORT_PROFILE` selects this profile for admission,
+deployment, arm, finalization and the independent reaper. Set it to
+`candidate-transport-v2` only after the exact authority and v2 recovery tooling have
+been admitted. An absent or empty value retains strict legacy behavior; every
+other value is rejected before provider deployment. Keep the setting unchanged
+until all probes, runs and cleanup settle. Installing the tooling alone neither
+enables v2 nor updates the authority. The ordinary deploy command proceeds from
+transport proof into enrollment and AWS verification; it is not a transport-only
+hosted smoke.

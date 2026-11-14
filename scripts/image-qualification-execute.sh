@@ -10,7 +10,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 : "${QUALIFICATION_PROOF_DIR:?missing proof directory}"
 
 if [[ "${QUALIFICATION_MODE:-mint}" == first-walk ]]; then
-  remaining=$(node -e 'const n=Math.floor((Date.parse(process.env.QUALIFICATION_EXPIRES_AT)-Date.now())/1000)-1200; if(!Number.isInteger(n)||n<=0||n>6000)process.exit(1); process.stdout.write(String(n))')
+  remaining=$(node -e 'const n=Math.floor((Date.parse(process.env.QUALIFICATION_EXPIRES_AT)-Date.now())/1000)-1200; if(!Number.isInteger(n)||n<6000||n>7800)process.exit(1); process.stdout.write("6000")')
   exec timeout --signal=TERM --kill-after=1200 "$remaining" node "$ROOT/scripts/image-qualification-first-walk.mjs"
 fi
 

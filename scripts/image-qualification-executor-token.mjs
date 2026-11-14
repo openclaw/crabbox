@@ -74,7 +74,8 @@ export function readExecutorCredential(
     Object.entries(expected).some(([key, value]) => supplied[key] !== value) ||
     !Number.isFinite(now) ||
     Date.parse(expected.expiresAt) <= now ||
-    Date.parse(expected.expiresAt) - now > 120 * 60_000
+    Date.parse(expected.expiresAt) - now >
+      (env.QUALIFICATION_MODE === "first-walk" ? 150 : 120) * 60_000
   )
     invalid();
   const tokenSha256 = crypto.createHash("sha256").update(supplied.token).digest("hex");

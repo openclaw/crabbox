@@ -28,6 +28,18 @@ test("every protected control job pins Node24 before importing the TypeScript he
   }
 });
 
+test("all protected control phases and the reaper receive the same opt-in transport profile", () => {
+  const selector =
+    "QUALIFICATION_TRANSPORT_PROFILE: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_TRANSPORT_PROFILE }}";
+  for (const name of ["admit", "deploy-enroll", "arm", "finalize"]) {
+    const block = workflow.split(new RegExp(`^  ${name}:`, "m"))[1]?.split(/^  [a-z][a-z-]*:/m)[0];
+    assert.ok(block, name);
+    assert.equal(block.split(selector).length - 1, 1, name);
+  }
+  assert.equal(reaper.split(selector).length - 1, 1);
+  assert.doesNotMatch(workflow + reaper, /QUALIFICATION_TRANSPORT_PROFILE: candidate-transport-v2/);
+});
+
 test("workflow isolates candidate execution from protected credentials", () => {
   assert.equal(
     fs.existsSync(path.join(root, ".github/workflows/image-qualification-candidate.yml")),
@@ -230,7 +242,10 @@ test("reaper is protected, serialized, and artifact-independent", () => {
 
 test("control tool fixes the reviewed policy and recovery boundary", () => {
   assert.match(control, /instanceTypes: \["t3\.small", "t3a\.small"\]/);
-  assert.match(control, /maxMinutes: retainedImage \? 38 : 120/);
+  assert.match(
+    control,
+    /maxMinutes: process\.env\.QUALIFICATION_MODE === "first-walk" \? 150 : retainedImage \? 38 : 120/,
+  );
   assert.match(control, /maxMonthlyUSD: 10/);
   assert.match(control, /maxConcurrentInstances: 1/);
   assert.match(
