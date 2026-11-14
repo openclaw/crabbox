@@ -57,6 +57,10 @@ to request an audited extension.
 
 ## Output
 
+The ready line reports the same selected network as `status`, including for
+static SSH hosts. Its `network` field is the resolved plane (`public` or
+`tailscale`), rather than the requested `auto` mode.
+
 On success warmup prints two lines on stdout — the lease summary and the ready
 SSH endpoint — followed by a total-duration line:
 

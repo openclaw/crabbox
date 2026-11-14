@@ -200,17 +200,17 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 			fmt.Fprintf(a.Stderr, "warning: tailscale metadata wait failed: %v\n", err)
 		}
 	}
-	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {
+	resolved, err := resolveNetworkTarget(ctx, cfg, server, target)
+	if err != nil {
 		a.releaseWarmupLeaseAfterFailure(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, retainOnFailure)
 		return err
-	} else {
-		target = resolved.Target
-		refreshRunLeaseClaimEndpoint(leaseID, &server, target)
-		if resolved.FallbackReason != "" {
-			fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
-		}
 	}
-	network := readyNetworkDisplay(cfg, server, target)
+	target = resolved.Target
+	refreshRunLeaseClaimEndpoint(leaseID, &server, target)
+	if resolved.FallbackReason != "" {
+		fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
+	}
+	network := resolved.Network
 	meta := serverTailscaleMetadata(server)
 	tailscaleSummary := ""
 	if meta.Enabled {
@@ -4586,19 +4586,6 @@ func applyResolvedServerConfig(cfg *Config, server Server) {
 			cfg.LocalContainer.DockerSocket = true
 		}
 	}
-}
-
-func readyNetworkDisplay(cfg Config, server Server, target SSHTarget) NetworkMode {
-	if target.NetworkKind != "" {
-		return target.NetworkKind
-	}
-	if cfg.Provider == "daytona" || server.Provider == "daytona" {
-		return NetworkPublic
-	}
-	if target.Host != server.PublicNet.IPv4.IP && target.Host != "" {
-		return NetworkTailscale
-	}
-	return NetworkPublic
 }
 
 func coordinatorFallbackSummary(lease CoordinatorLease) string {
