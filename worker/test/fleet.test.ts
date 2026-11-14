@@ -2782,6 +2782,118 @@ describe("runtime adapter relay", () => {
     ]);
   });
 
+  describe("WebVNC opening frames across coordinator reconstruction", () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    function bridgeFixture() {
+      const storage = new MemoryStorage();
+      const lease = testLease({
+        id: "cbx_000000000001",
+        provider: "external",
+        lifecycle: "registered",
+        state: "active",
+        desktop: true,
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      const agent = new FakeWebSocket({
+        kind: "webvnc-agent",
+        leaseID: lease.id,
+        id: "agent_restart",
+        capabilities: new Set<string>(),
+        auth: "proxy",
+        owner: lease.owner,
+        org: lease.org,
+        admin: false,
+      });
+      const serialize = agent.serializeAttachment.bind(agent);
+      vi.spyOn(agent, "serializeAttachment").mockImplementation((attachment) => {
+        serialize(structuredClone(attachment));
+      });
+      const sockets = [agent];
+      function reconstruct() {
+        const runtime = new FakeCoordinatorRuntime(storage);
+        vi.spyOn(runtime, "getWebSockets").mockImplementation(
+          () => sockets as unknown as WebSocket[],
+        );
+        const fleet = new FleetCoordinator(runtime, { CRABBOX_DEFAULT_ORG: "example-org" } as Env);
+        return { fleet, runtime };
+      }
+      async function attachViewer(fleet: FleetCoordinator, runtime: FakeCoordinatorRuntime) {
+        const response = await fleet.fetch(
+          request("GET", `/portal/leases/${lease.id}/vnc/viewer`, {
+            headers: {
+              upgrade: "websocket",
+              "x-crabbox-auth": "proxy",
+              "x-crabbox-owner": lease.owner,
+              "x-crabbox-org": "example-org",
+            },
+          }),
+        );
+        expect(response.status).toBe(200);
+        expect(runtime.createdSockets).toHaveLength(1);
+        const viewer = runtime.createdSockets[0]!;
+        sockets.push(viewer);
+        return viewer;
+      }
+      return { agent, reconstruct, attachViewer };
+    }
+
+    it.each([["RFB 003.008\n"], ["RFB ", "003.", "008\n"]])(
+      "delivers opening frames once after reconstruction: %j",
+      async (...chunks) => {
+        const { agent, reconstruct, attachViewer } = bridgeFixture();
+        let { fleet, runtime } = reconstruct();
+        for (const chunk of chunks) {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- Reconstruct between sequential greeting fragments.
+          await fleet.webSocketMessage(
+            agent as unknown as WebSocket,
+            new TextEncoder().encode(chunk).buffer,
+          );
+          ({ fleet, runtime } = reconstruct());
+        }
+        const sent = vi.spyOn(FakeWebSocket.prototype, "send");
+        const viewer = await attachViewer(fleet, runtime);
+        expect(viewer.closeCode).toBeUndefined();
+        expect(
+          sent.mock.calls
+            .filter((_, index) => sent.mock.contexts[index] === viewer)
+            .map(([frame]) =>
+              typeof frame === "string" ? frame : new TextDecoder().decode(frame),
+            ),
+        ).toEqual(chunks);
+        sent.mockClear();
+
+        ({ fleet } = reconstruct());
+        await fleet.webSocketMessage(agent as unknown as WebSocket, "next-frame");
+        expect(sent.mock.calls).toEqual([["next-frame"]]);
+        sent.mockRestore();
+        expect(agent.serializeAttachment).toHaveBeenCalledTimes(chunks.length + 1);
+      },
+    );
+
+    it.each(["attachment failure", "opening buffer overflow"])(
+      "resets the agent retryably on %s",
+      async (failure) => {
+        const { agent, reconstruct } = bridgeFixture();
+        const { fleet } = reconstruct();
+        if (failure === "attachment failure") {
+          vi.mocked(agent.serializeAttachment).mockImplementation(() => {
+            throw new Error("attachment exceeds provider limit");
+          });
+        }
+        await fleet.webSocketMessage(
+          agent as unknown as WebSocket,
+          failure === "attachment failure" ? "RFB 003.008\n" : "x".repeat(1024 * 1024 + 1),
+        );
+        expect(agent.closeCode).toBe(1000);
+        expect(agent.closeReason).toMatch(/^WebVNC bridge reset:/);
+      },
+    );
+  });
+
   it("restores unambiguous hibernated bridge sockets after validating lease state", async () => {
     const storage = new MemoryStorage();
     const list = vi.spyOn(storage, "list");
