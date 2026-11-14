@@ -17,6 +17,7 @@ import (
 )
 
 func main() {
+	// Process exit remains owned by the CLI entrypoint.
 	os.Exit(run())
 }
 
