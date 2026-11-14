@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+
+- Tailscale: persist direct cloud metadata with lossless GCP labels, protect Hetzner lifecycle updates from diagnostic errors, prefer tailnet readiness for exit nodes with public fallback, and reject stale coordinator metadata after cleanup. [PR 3150](https://github.com/openclaw/crabbox/pull/3150). Thanks @coygeek.
 - Qualification: verify runtime binding identity for idle controllers and retain cleanup-only recovery receipts when management metadata omits binding props. https://github.com/openclaw/crabbox/pull/3136 Thanks @joshavant.
 - Run: normalize fresh and replacement SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity, and preserve child-environment filtering after replacement. https://github.com/openclaw/crabbox/pull/3131 Thanks @vincentkoc.
 
