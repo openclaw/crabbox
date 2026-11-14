@@ -1036,6 +1036,7 @@ export interface CoordinatorCheckpointRecord {
   updatedAt: string;
   lastUsedAt: string;
   nextSweepAt?: string;
+  imageRefreshAt?: string;
   createClaim?: CoordinatorCheckpointCreateClaim;
   deleteClaim?: CoordinatorCheckpointDeleteClaim;
   deleteRequestedAt?: string;

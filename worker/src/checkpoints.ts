@@ -33,6 +33,12 @@ export const checkpointProviderAbsenceConfirmationIntervalMS = 5 * 60_000;
 const maxRetentionSeconds = 10 * 366 * 24 * 60 * 60;
 const maxAuditPruneBatch = 64;
 export const checkpointMaxCreateRecoveryAttempts = 8;
+export const checkpointImageRefreshIntervalMS = 60_000;
+export const checkpointImageBackfillKey = "checkpoint-image-backfill:v1";
+export interface CheckpointImageBackfill {
+  startAfter?: string;
+  complete: boolean;
+}
 
 export interface CheckpointLimits {
   checkpoints: number;
@@ -251,6 +257,7 @@ async function nextCheckpointDeadline(
     retain(record.retryAt);
     retain(record.deleteClaim?.expiresAt);
   } else if (record.state === "ready") {
+    retain(record.imageRefreshAt);
     for await (const [, claim] of coordinatorStorageEntries<CoordinatorCheckpointUseClaim>(
       transaction,
       {
@@ -500,6 +507,128 @@ export async function backfillFailedCheckpointCreateRecovery(
   });
 }
 
+export async function backfillCheckpointImageRefresh(
+  storage: CoordinatorStorage,
+  needsRefresh: (checkpoint: CoordinatorCheckpointRecord) => boolean,
+): Promise<void> {
+  await storage.transaction(async (transaction) => {
+    const progress = await transaction.get<CheckpointImageBackfill>(checkpointImageBackfillKey);
+    if (progress?.complete) return;
+    const records = await transaction.list<CoordinatorCheckpointRecord>({
+      prefix: "checkpoint:",
+      limit: storageRecordScanBatchSize,
+      ...(progress?.startAfter ? { startAfter: progress.startAfter } : {}),
+    });
+    for (const record of records.values()) {
+      if (
+        record.state !== "ready" ||
+        !record.image ||
+        record.imageRefreshAt ||
+        !needsRefresh(record)
+      )
+        continue;
+      // oxlint-disable-next-line eslint/no-await-in-loop -- migrate one bounded page atomically with its cursor.
+      await writeCheckpointTransition(
+        transaction,
+        record,
+        { ...record, imageRefreshAt: new Date().toISOString() },
+        "checkpoint.image.refresh.backfilled",
+        "system",
+      );
+    }
+    await transaction.put(checkpointImageBackfillKey, {
+      complete: records.size < storageRecordScanBatchSize,
+      ...(records.size === storageRecordScanBatchSize
+        ? { startAfter: [...records.keys()].at(-1)! }
+        : {}),
+    } satisfies CheckpointImageBackfill);
+  });
+}
+
+function matchesCheckpointImageObservation(
+  current: CoordinatorCheckpointRecord | undefined,
+  observed: CoordinatorCheckpointRecord,
+): current is CoordinatorCheckpointRecord & { image: CoordinatorCheckpointImage } {
+  return Boolean(
+    current?.state === "ready" &&
+    current.image &&
+    current.revision === observed.revision &&
+    current.generation === observed.generation &&
+    current.createdAt === observed.createdAt &&
+    current.provider === observed.provider &&
+    JSON.stringify(current.scope) === JSON.stringify(observed.scope) &&
+    JSON.stringify(current.image) === JSON.stringify(observed.image),
+  );
+}
+
+export async function recordCheckpointImageObservation(
+  storage: CoordinatorStorage,
+  observed: CoordinatorCheckpointRecord,
+  image: ProviderImage,
+  refreshImage: boolean,
+): Promise<CoordinatorCheckpointRecord> {
+  return storage.transaction(async (transaction) => {
+    const current = await transaction.get<CoordinatorCheckpointRecord>(checkpointKey(observed.id));
+    if (!matchesCheckpointImageObservation(current, observed)) {
+      throw new CheckpointError(
+        "checkpoint_observation_conflict",
+        "checkpoint changed while its provider image was being observed; retry verification",
+      );
+    }
+    if (
+      image.provider !== current.provider ||
+      image.id !== current.image.id ||
+      image.kind !== current.image.kind ||
+      image.resourceID !== current.image.resourceID ||
+      image.immutableID !== current.image.immutableID ||
+      image.region !== current.scope.region ||
+      (current.provider === "gcp" && image.project !== current.scope.project) ||
+      (current.provider === "aws" && image.accountID !== current.scope.accountID)
+    ) {
+      throw new CheckpointError(
+        "checkpoint_source_mismatch",
+        "provider resource no longer matches checkpoint ownership",
+      );
+    }
+    if (!refreshImage && !current.imageRefreshAt && current.image.state === image.state) {
+      return current;
+    }
+    const next = { ...current, image: { ...current.image, state: image.state } };
+    delete next.imageRefreshAt;
+    if (refreshImage) {
+      next.imageRefreshAt = new Date(Date.now() + checkpointImageRefreshIntervalMS).toISOString();
+    }
+    return writeCheckpointTransition(
+      transaction,
+      current,
+      next,
+      "checkpoint.image.observed",
+      "system",
+    );
+  });
+}
+
+export async function deferCheckpointImageRefresh(
+  storage: CoordinatorStorage,
+  observed: CoordinatorCheckpointRecord,
+): Promise<void> {
+  await storage.transaction(async (transaction) => {
+    const current = await transaction.get<CoordinatorCheckpointRecord>(checkpointKey(observed.id));
+    // A newer transition owns its own deadline; never resurrect deleted/replaced state.
+    if (!matchesCheckpointImageObservation(current, observed)) return;
+    await writeCheckpointTransition(
+      transaction,
+      current,
+      {
+        ...current,
+        imageRefreshAt: new Date(Date.now() + checkpointImageRefreshIntervalMS).toISOString(),
+      },
+      "checkpoint.image.refresh.deferred",
+      "system",
+    );
+  });
+}
+
 function validatedCheckpointImage(
   record: CoordinatorCheckpointRecord,
   image: ProviderImage,
@@ -600,9 +729,10 @@ export async function publishCreatedCheckpoint(
   checkpointID: string,
   ownershipToken: string,
   image: ProviderImage,
+  refreshImage: boolean,
 ): Promise<CoordinatorCheckpointRecord> {
   const tokenHash = await sha256Hex(ownershipToken);
-  return publishCheckpointWithHash(storage, checkpointID, tokenHash, image);
+  return publishCheckpointWithHash(storage, checkpointID, tokenHash, image, refreshImage);
 }
 
 export async function markCheckpointProviderMutationStarted(
@@ -653,6 +783,7 @@ export async function publishRecoveredCheckpoint(
   storage: CoordinatorStorage,
   checkpointID: string,
   image: ProviderImage,
+  refreshImage: boolean,
 ): Promise<CoordinatorCheckpointRecord> {
   const checkpoint = await storage.get<CoordinatorCheckpointRecord>(checkpointKey(checkpointID));
   if (!checkpoint?.createClaim?.tokenHash) {
@@ -661,7 +792,13 @@ export async function publishRecoveredCheckpoint(
       "checkpoint creation claim is unavailable",
     );
   }
-  return publishCheckpointWithHash(storage, checkpointID, checkpoint.createClaim.tokenHash, image);
+  return publishCheckpointWithHash(
+    storage,
+    checkpointID,
+    checkpoint.createClaim.tokenHash,
+    image,
+    refreshImage,
+  );
 }
 
 async function publishCheckpointWithHash(
@@ -669,6 +806,7 @@ async function publishCheckpointWithHash(
   checkpointID: string,
   tokenHash: string,
   image: ProviderImage,
+  refreshImage: boolean,
 ): Promise<CoordinatorCheckpointRecord> {
   return storage.transaction(async (transaction) => {
     const previous = requireVisible(
@@ -728,6 +866,9 @@ async function publishCheckpointWithHash(
     );
     await transaction.delete(intentKey);
     const next = { ...previous, state: "ready" as const, image: checkpointImage };
+    if (refreshImage) {
+      next.imageRefreshAt = new Date(Date.now() + checkpointImageRefreshIntervalMS).toISOString();
+    }
     delete next.createClaim;
     delete next.retryAt;
     delete next.lastError;
