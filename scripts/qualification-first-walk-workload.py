@@ -116,7 +116,7 @@ def extract(archive, destination, *, max_bytes=1024 ** 3, max_entries=MAX_ENTRIE
 
 def install_command(pnpm, store):
     return [str(pnpm), "install", "--frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile",
-            "--config.manage-package-manager-versions=false", "--registry=https://registry.npmjs.org",
+            "--pm-on-fail=ignore", "--registry=https://registry.npmjs.org",
             "--store-dir=" + str(store), "--network-concurrency=8", "--child-concurrency=2"]
 
 

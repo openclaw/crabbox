@@ -37,7 +37,7 @@ class WorkloadTests(unittest.TestCase):
             self.assertTrue(url.startswith('https://'))
             self.assertGreater(size, 0); self.assertEqual(len(digest), 64)
         command = w.install_command(Path('/tools/pnpm'), Path('/cache/store'))
-        for flag in ['--ignore-scripts', '--ignore-pnpmfile', '--frozen-lockfile', '--config.manage-package-manager-versions=false']:
+        for flag in ['--ignore-scripts', '--ignore-pnpmfile', '--frozen-lockfile', '--pm-on-fail=ignore']:
             self.assertIn(flag, command)
         self.assertNotIn('run', command)
 
@@ -110,7 +110,7 @@ class WorkloadTests(unittest.TestCase):
             w.extract(Path('/inputs/pnpm-native.tgz'),pnpm)
             project=p/'project';project.mkdir();home=p/'home';home.mkdir()
             script = """node -e "require('fs').writeFileSync('script-fired','yes')" """
-            (project/'package.json').write_text(json.dumps({'name':'inert-qualification-fixture','private':True,'scripts':{'preinstall': script}}))
+            (project/'package.json').write_text(json.dumps({'name':'inert-qualification-fixture','private':True,'packageManager':'pnpm@0.0.0','scripts':{'preinstall': script}}))
             (project/'.pnpmfile.cjs').write_text("require('fs').writeFileSync('hook-fired','yes'); module.exports={hooks:{}};\n")
             env={'PATH':str(node/'bin')+':/usr/bin:/bin','HOME':str(home),'CI':'true'}
             args=w.install_command(pnpm/'pnpm',p/'store')
@@ -119,6 +119,15 @@ class WorkloadTests(unittest.TestCase):
                 self.assertEqual(result.returncode,0,result.stderr)
                 self.assertFalse((project/'script-fired').exists())
                 self.assertFalse((project/'hook-fired').exists())
+            # A mismatched repository pin must not replace the verified executable.
+            # The strict control proves pnpm reads that same mismatch; no download
+            # or alternate package manager is needed for either observation.
+            strict=[a.replace('--pm-on-fail=ignore','--pm-on-fail=error') for a in args]
+            result=subprocess.run(strict,cwd=project,env=env,capture_output=True,text=True,timeout=20)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('0.0.0',result.stdout+result.stderr)
+            self.assertFalse((project/'script-fired').exists())
+            self.assertFalse((project/'hook-fired').exists())
             # The controls prove these same inert markers can actually execute.
             command=[a.replace('--ignore-scripts','--ignore-scripts=false').replace('--ignore-pnpmfile','--ignore-pnpmfile=false').replace('--frozen-lockfile','--no-frozen-lockfile') for a in args]
             result=subprocess.run(command,cwd=project,env=env,capture_output=True,text=True,timeout=20)
