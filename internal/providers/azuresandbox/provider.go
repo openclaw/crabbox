@@ -51,30 +51,50 @@ func (Provider) ClaimScope(cfg core.Config) string {
 }
 
 // Generic classes retain their original shape, including the default beast.
-// Larger disk-based allocations use the native --type selector.
+// Other disk-based sizes use the native --type selector.
 func (Provider) ClassProfiles() []core.ProviderClassProfile {
 	cpu := 2
 	return core.UniformLinuxAMD64ClassProfiles(core.ProviderClassMachine{Type: "2cpu-4gib", Architecture: core.ProviderClassArchitectureAMD64, VCPU: &cpu, Memory: &core.ProviderMemory{Value: 4, Unit: core.ProviderMemoryUnitGiB}})
 }
 
+// Azure resource tiers: https://sandboxes.azure.com/docs/sandboxes/sandbox/#resource-tiers
+// Keep the original L shape as the Crabbox default, independently of Azure defaults.
+var sandboxMachines = []struct {
+	typ, tier, cpu, memory string
+}{
+	{"0.25cpu-0.5gib", "XS", "250m", "512Mi"},
+	{"0.5cpu-1gib", "S", "500m", "1024Mi"},
+	{"1cpu-2gib", "M", "1000m", "2048Mi"},
+	{"2cpu-4gib", "L", "2000m", "4096Mi"},
+	{"4cpu-8gib", "XL", "4000m", "8192Mi"},
+	{"8cpu-16gib", "2XL", "8000m", "16384Mi"},
+	{"16cpu-32gib", "3XL", "16000m", "32768Mi"},
+}
+
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
-		return cfg.ServerType
+		typ := strings.TrimSpace(cfg.ServerType)
+		for _, machine := range sandboxMachines {
+			if strings.EqualFold(typ, machine.typ) || strings.EqualFold(typ, machine.tier) {
+				return machine.typ
+			}
+		}
+		return typ
 	}
 	return "2cpu-4gib"
 }
 
 func machineForConfig(cfg core.Config) (map[string]string, error) {
 	typ := (Provider{}).ServerTypeForConfig(cfg)
-	switch typ {
-	case "2cpu-4gib":
-		return map[string]string{"cpu": "2000m", "memory": "4096Mi"}, nil
-	case "4cpu-8gib":
-		if cfg.AzureSandbox.SnapshotID != "" {
-			return nil, fmt.Errorf("ACA Sandbox snapshot restore inherits captured compute size; --type 4cpu-8gib requires a disk image")
+	choices := make([]string, 0, len(sandboxMachines))
+	for _, machine := range sandboxMachines {
+		if typ == machine.typ {
+			if typ != "2cpu-4gib" && cfg.AzureSandbox.SnapshotID != "" {
+				return nil, fmt.Errorf("ACA Sandbox snapshot restore inherits captured compute size; --type %s requires a disk image", typ)
+			}
+			return map[string]string{"cpu": machine.cpu, "memory": machine.memory}, nil
 		}
-		return map[string]string{"cpu": "4000m", "memory": "8192Mi"}, nil
-	default:
-		return nil, fmt.Errorf("ACA Sandbox unsupported type %q; choose 2cpu-4gib or 4cpu-8gib", typ)
+		choices = append(choices, machine.typ+" ("+machine.tier+")")
 	}
+	return nil, fmt.Errorf("ACA Sandbox unsupported type %q; choose %s", typ, strings.Join(choices, ", "))
 }

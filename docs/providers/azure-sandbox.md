@@ -32,26 +32,41 @@ crabbox heartbeat --provider azure-sandbox --id cbx_012345abcdef --json
 crabbox stop --provider azure-sandbox --id cbx_012345abcdef
 ```
 
-The initial shape is 2 CPU / 4 GiB, using the public `ubuntu` disk by default.
-The common class catalog maps every generic class (including the default
-`beast`) to this shape. For a new disk-based Sandbox with 4 vCPU / 8 GiB, use
-`--type 4cpu-8gib`; `--type 2cpu-4gib` explicitly selects the original shape.
-The generic `serverType` config key and `CRABBOX_SERVER_TYPE` environment
-variable also accept these values. Other native types
-are rejected. For example:
+Crabbox defaults to 2 vCPU / 4 GiB (Azure tier L), using the public `ubuntu`
+disk. The common class catalog maps every generic class (including the default
+`beast`) to this shape; Azure's own default tier M does not change this default.
+For new disk-based Sandboxes, `--type` supports every documented
+[Azure resource tier](https://sandboxes.azure.com/docs/sandboxes/sandbox/#resource-tiers):
+
+| Azure tier / alias | Explicit type | vCPU | Memory |
+| --- | --- | ---: | ---: |
+| `xs` | `0.25cpu-0.5gib` | 0.25 | 0.5 GiB |
+| `s` | `0.5cpu-1gib` | 0.5 | 1 GiB |
+| `m` | `1cpu-2gib` | 1 | 2 GiB |
+| `l` | `2cpu-4gib` | 2 | 4 GiB |
+| `xl` | `4cpu-8gib` | 4 | 8 GiB |
+| `2xl` | `8cpu-16gib` | 8 | 16 GiB |
+| `3xl` | `16cpu-32gib` | 16 | 32 GiB |
+
+Tier aliases and explicit types are case-insensitive. The generic `serverType`
+config key and `CRABBOX_SERVER_TYPE` environment variable accept either form,
+including fractional sizes. Unsupported types and CPU/memory combinations
+are rejected before allocation. For example:
 
 ```sh
 crabbox warmup --provider azure-sandbox --type 4cpu-8gib \
   --ttl 4h --idle-timeout 15m --keep
 ```
 
-The adapter sends `resources.cpu=4000m` and `resources.memory=8192Mi` for
-the larger shape, matching Azure's documented
-[XL resource tier](https://sandboxes.azure.com/docs/sandboxes/sandbox/#resource-tiers)
-and [create resource quantities](https://sandboxes.azure.com/docs/sandboxes/sandboxes/).
-Size is bound into the allocation intent; changing size on an existing lease
-fails rather than resizing or allocating a replacement. Region availability,
-active-core quota and the selected image still require operator qualification.
+`--type xl` is equivalent to the example above; `--type xs` selects the
+smallest shape and `--type 3xl` the largest. The adapter sends CPU in millicores
+and memory in MiB, for example `250m` / `512Mi` for XS and `16000m` / `32768Mi`
+for 3XL, matching Azure's
+[create resource quantities](https://sandboxes.azure.com/docs/sandboxes/sandboxes/).
+Size is bound into the allocation intent; equivalent aliases replay the same
+lease, while changing size fails rather than resizing or allocating a
+replacement. Region availability, active-core quota and the selected image
+still require operator qualification.
 
 `--azure-sandbox-disk` selects a
 public disk name. `--azure-sandbox-disk-id` (or
@@ -96,10 +111,11 @@ behavior, token renewal and Gateway recovery before production activation.
 ## Prepared snapshot restore (opt-in)
 
 Snapshots capture compute size. Restore inherits that size and sends no
-resource overrides; `--type 4cpu-8gib` with snapshot selection is rejected.
-The default or `--type 2cpu-4gib` does not resize a restored snapshot. To use
-a larger restored Sandbox, the image owner must separately prepare and qualify
-a snapshot captured from a 4 vCPU / 8 GiB source. See Azure's
+resource overrides. Any non-default type or tier alias with snapshot selection
+is rejected, including smaller sizes. The default, `--type 2cpu-4gib` or
+`--type l` does not resize a restored snapshot or assert its captured size.
+To use another restored size, the image owner must separately prepare and
+qualify a snapshot captured from a source with that size. See Azure's
 [snapshot contract](https://sandboxes.azure.com/docs/sandboxes/snapshots/).
 
 Select an exact group-scoped snapshot with `--azure-sandbox-snapshot-id`, its
