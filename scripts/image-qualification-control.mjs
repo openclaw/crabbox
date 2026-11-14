@@ -1277,7 +1277,7 @@ function candidateMetadata(mainModule, bindings, createNamespace = false) {
     compatibility_flags: ["nodejs_compat"],
     bindings,
     ...(createNamespace
-      ? { migrations: [{ tag: "qualification-v1", new_sqlite_classes: ["FleetDurableObject"] }] }
+      ? { migrations: { new_tag: "qualification-v1", new_sqlite_classes: ["FleetDurableObject"] } }
       : {}),
   };
 }
@@ -2020,13 +2020,11 @@ async function deleteCandidate(cf, worker) {
             "QUALIFICATION_TRANSPORT_IDENTITY",
           ].includes(binding.name),
         ),
-        migrations: [
-          {
-            old_tag: "qualification-v1",
-            new_tag: "qualification-delete",
-            deleted_classes: ["FleetDurableObject"],
-          },
-        ],
+        migrations: {
+          old_tag: "qualification-v1",
+          new_tag: "qualification-delete",
+          deleted_classes: ["FleetDurableObject"],
+        },
       });
     await cf.deleteScript(worker);
   } finally {

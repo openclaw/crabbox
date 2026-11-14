@@ -184,6 +184,12 @@ test("finalization skips protected approval when deployment never started", () =
     finalizeJob,
     /^    if: \$\{\{ always\(\) && needs\.deploy-enroll\.result != 'skipped' \}\}$/m,
   );
+  // Failed uploads can leave no outputs at all. The admitted policy remains
+  // available to recovery without manufacturing a deployed run identity.
+  assert.match(
+    finalizeJob,
+    /QUALIFICATION_EXPECTED_POLICY_HASH: \$\{\{ needs\.deploy-enroll\.outputs\.policy_hash \|\| vars\.CRABBOX_IMAGE_QUALIFICATION_POLICY_HASH \}\}/,
+  );
 });
 
 test("protected preparation exports immutable identity before the separate deployment approval", () => {
