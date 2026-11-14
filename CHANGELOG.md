@@ -5,6 +5,10 @@
 - Qualification: verify runtime binding identity for idle controllers and retain cleanup-only recovery receipts when management metadata omits binding props. https://github.com/openclaw/crabbox/pull/3136 Thanks @joshavant.
 - Run: normalize fresh and replacement SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity, and preserve child-environment filtering after replacement. https://github.com/openclaw/crabbox/pull/3131 Thanks @vincentkoc.
 
+### Fixed
+
+- Tailscale: reject unsupported providers, ineffective exit-node settings, and malformed tags before provisioning; preserve direct lease tags and derive support docs from the provider catalog. [PR 3154](https://github.com/openclaw/crabbox/pull/3154). Thanks @coygeek.
+
 ## 0.83.0 - 2026-11-10
 
 ### Added
