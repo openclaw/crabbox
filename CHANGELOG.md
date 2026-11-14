@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Run: print recovery stop commands with the exact lease ID so shared static-host slots remain independently releasable. [PR 3106](https://github.com/openclaw/crabbox/pull/3106). Thanks @saariuslystoned.
+
 - Warmup: report the resolver-selected network consistently with status for static SSH hosts. [PR 3108](https://github.com/openclaw/crabbox/pull/3108). Thanks @saariuslystoned.
 
 - Tailscale: use coordinator default tags for lease API requests that omit tags while preserving explicit-tag validation. [PR 3110](https://github.com/openclaw/crabbox/pull/3110). Thanks @KrasimirKralev.

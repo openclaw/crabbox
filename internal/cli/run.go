@@ -3849,10 +3849,9 @@ func populateRunTimingMetadata(report *timingReport, cfg Config, repo Repo, serv
 	report.MachineType = server.ServerType.Name
 	report.RepoPath = repo.Root
 	report.Workdir = workdir
-	stopID := firstNonBlank(ServerSlug(server), leaseID)
-	if normalizeProviderName(cfg.Provider) == "external" {
-		stopID = leaseID
-	}
+	// A display slug can be shared by several leases (for example, static
+	// slots on one host). Recovery must select the exact lease we ran.
+	stopID := firstNonBlank(leaseID, ServerSlug(server))
 	report.StopCommand = runStopCommand(cfg, stopID)
 	report.IdleTimeout = cfg.IdleTimeout.String()
 	report.Artifacts = artifacts
