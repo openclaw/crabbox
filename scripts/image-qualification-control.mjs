@@ -15,6 +15,12 @@ import {
   settleCandidateTransport,
 } from "./image-qualification-transport.mjs";
 import { withQualificationJournal } from "./image-qualification-journal.mjs";
+import {
+  packageFile,
+  qualificationPackagePath,
+  qualificationIdentity,
+  prepareQualificationBuild,
+} from "./image-qualification-package.mjs";
 
 import {
   executorCredentialIdentity,
@@ -75,8 +81,19 @@ export function readFirstWalkRecipe(directory) {
   return recipe;
 }
 
+function readPackagedRecipe(directory) {
+  const recipe = packageFile(
+    directory,
+    `${qualificationPackagePath}/linuxOwnershipRepair.sh`,
+    16 * 1024,
+  );
+  if (digest(recipe) !== firstWalkRecipeSha256)
+    throw new Error("first-walk recipe does not match the protected reviewed digest");
+  return recipe;
+}
+
 export function stageFirstWalkRecipe(candidateDir, artifactDir) {
-  const recipe = readFirstWalkRecipe(candidateDir);
+  const recipe = readPackagedRecipe(candidateDir);
   const destination = path.join(artifactDir, "candidate", firstWalkRecipePath);
   fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
   fs.writeFileSync(destination, recipe, { mode: 0o600, flag: "wx" });
@@ -598,12 +615,27 @@ export function prepareCandidateBuild(
   receiptFile,
   candidateSha,
   workflowSha,
+  baselineDir,
 ) {
   if (!sha40.test(candidateSha) || !sha40.test(workflowSha)) {
     throw new Error("invalid protected build SHA");
   }
   if (checkoutSha(harnessDir) !== workflowSha || checkoutSha(candidateDir) !== candidateSha) {
     throw new Error("protected build checkout SHA mismatch");
+  }
+  if (process.env.QUALIFICATION_MODE === "first-walk") {
+    if (!baselineDir) throw new Error("first-walk build requires pinned baseline checkout");
+    const privateBuild = prepareQualificationBuild(harnessDir, candidateDir, baselineDir);
+    const receipt = {
+      version: 2,
+      candidateSha,
+      workflowSha,
+      workerSourceSha256: privateBuild.qualification.workerSourceSha256,
+      protectedBuildInputsSha256: privateBuild.productionInputsSha256,
+      qualification: privateBuild.qualification,
+    };
+    writeJSON(receiptFile, receipt);
+    return receipt;
   }
   // Candidate source remains data: every executable build control comes from
   // the protected checkout, so a PR cannot smuggle a build hook into the bundle.
@@ -645,12 +677,17 @@ export function prepareCandidateBuild(
 
 function verifyBuildReceipt(candidateDir, artifactDir, candidateSha, workflowSha) {
   const receipt = readJSON(path.join(artifactDir, "build-inputs.json"));
-  const { sourceRecords } = workerSourceRecords(candidateDir);
+  const privateBuild = process.env.QUALIFICATION_MODE === "first-walk";
+  const expected = privateBuild ? qualificationIdentity(root) : null;
+  const sourceSha = privateBuild
+    ? expected.workerSourceSha256
+    : digest(canonical(workerSourceRecords(candidateDir).sourceRecords));
   if (
-    receipt.version !== 1 ||
+    receipt.version !== (privateBuild ? 2 : 1) ||
+    (privateBuild && canonical(receipt.qualification) !== canonical(expected)) ||
     receipt.candidateSha !== candidateSha ||
     receipt.workflowSha !== workflowSha ||
-    receipt.workerSourceSha256 !== digest(canonical(sourceRecords)) ||
+    receipt.workerSourceSha256 !== sourceSha ||
     !sha64.test(receipt.protectedBuildInputsSha256)
   ) {
     throw new Error("candidate build-input receipt mismatch");
@@ -663,11 +700,11 @@ export function createManifest(candidateDir, artifactDir, candidateSha, workflow
     throw new Error("invalid manifest SHA");
   const actualSha = checkoutSha(candidateDir);
   if (actualSha !== candidateSha) throw new Error("candidate checkout SHA mismatch");
-  verifyBuildReceipt(candidateDir, artifactDir, candidateSha, workflowSha);
+  const buildReceipt = verifyBuildReceipt(candidateDir, artifactDir, candidateSha, workflowSha);
   verifyRetainedCapsule(artifactDir, candidateSha);
   if (process.env.QUALIFICATION_MODE === "first-walk") {
     if (
-      !readFirstWalkRecipe(candidateDir).equals(
+      !readPackagedRecipe(candidateDir).equals(
         readFirstWalkRecipe(path.join(artifactDir, "candidate")),
       )
     ) {
@@ -694,8 +731,14 @@ export function createManifest(candidateDir, artifactDir, candidateSha, workflow
     (file) => file.path.startsWith("worker/") && /\.(?:m?js)$/.test(file.path),
   );
   if (modules.length === 0) throw new Error("candidate Worker bundle is absent");
+  if (
+    buildReceipt.qualification &&
+    !files.some((file) => file.path === "authority/aws-qualification-authority.js")
+  )
+    throw new Error("private authority bundle is absent");
   const manifest = {
-    version: 1,
+    version: buildReceipt.version,
+    ...(buildReceipt.qualification ? { qualification: buildReceipt.qualification } : {}),
     candidateSha,
     workflowSha,
     createdAt: new Date().toISOString(),
@@ -710,15 +753,21 @@ export function createManifest(candidateDir, artifactDir, candidateSha, workflow
 export function verifyManifest(artifactDir, expectedCandidate, expectedWorkflow) {
   const manifest = readJSON(path.join(artifactDir, "manifest.json"));
   const receipt = readJSON(path.join(artifactDir, "build-inputs.json"));
+  const privateBuild = process.env.QUALIFICATION_MODE === "first-walk";
+  const expectedPackage = privateBuild ? qualificationIdentity(root) : null;
   const unsigned = { ...manifest };
   delete unsigned.manifestSha256;
   if (
-    manifest.version !== 1 ||
+    manifest.version !== (privateBuild ? 2 : 1) ||
+    (privateBuild &&
+      (canonical(manifest.qualification) !== canonical(expectedPackage) ||
+        canonical(receipt.qualification) !== canonical(expectedPackage) ||
+        receipt.workerSourceSha256 !== expectedPackage.workerSourceSha256)) ||
     manifest.candidateSha !== expectedCandidate ||
     manifest.workflowSha !== expectedWorkflow ||
     !sha64.test(manifest.manifestSha256) ||
     digest(canonical(unsigned)) !== manifest.manifestSha256 ||
-    receipt.version !== 1 ||
+    receipt.version !== (privateBuild ? 2 : 1) ||
     receipt.candidateSha !== expectedCandidate ||
     receipt.workflowSha !== expectedWorkflow ||
     !sha64.test(receipt.workerSourceSha256) ||
@@ -749,6 +798,8 @@ export function verifyManifest(artifactDir, expectedCandidate, expectedWorkflow)
   verifyRetainedCapsule(artifactDir, expectedCandidate);
   if (process.env.QUALIFICATION_MODE === "first-walk") {
     readFirstWalkRecipe(path.join(artifactDir, "candidate"));
+    if (!manifest.files.some((file) => file.path === "authority/aws-qualification-authority.js"))
+      throw new Error("private authority bundle is absent");
   }
   if (retainedImageFromEnv()) {
     const installer = path.join(artifactDir, "candidate/scripts/install-linux-developer-tools.sh");
@@ -1277,7 +1328,7 @@ function candidateMetadata(mainModule, bindings, createNamespace = false) {
     compatibility_flags: ["nodejs_compat"],
     bindings,
     ...(createNamespace
-      ? { migrations: [{ tag: "qualification-v1", new_sqlite_classes: ["FleetDurableObject"] }] }
+      ? { migrations: { new_tag: "qualification-v1", new_sqlite_classes: ["FleetDurableObject"] } }
       : {}),
   };
 }
@@ -2020,13 +2071,11 @@ async function deleteCandidate(cf, worker) {
             "QUALIFICATION_TRANSPORT_IDENTITY",
           ].includes(binding.name),
         ),
-        migrations: [
-          {
-            old_tag: "qualification-v1",
-            new_tag: "qualification-delete",
-            deleted_classes: ["FleetDurableObject"],
-          },
-        ],
+        migrations: {
+          old_tag: "qualification-v1",
+          new_tag: "qualification-delete",
+          deleted_classes: ["FleetDurableObject"],
+        },
       });
     await cf.deleteScript(worker);
   } finally {
@@ -2778,13 +2827,15 @@ async function main() {
     return;
   }
   if (command === "prepare-build") {
-    if (args.length !== 3) throw new Error("prepare-build requires three arguments");
+    if (args.length !== (process.env.QUALIFICATION_MODE === "first-walk" ? 4 : 3))
+      throw new Error("prepare-build requires source checkouts and receipt");
     prepareCandidateBuild(
       path.resolve(args[0]),
       path.resolve(args[1]),
       path.resolve(args[2]),
       required("QUALIFICATION_CANDIDATE_SHA", sha40),
       required("QUALIFICATION_WORKFLOW_SHA", sha40),
+      args[3],
     );
     return;
   }
