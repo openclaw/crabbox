@@ -130,6 +130,10 @@ type Backend struct {
 
 func (b *Backend) Spec() core.ProviderSpec { return b.spec }
 
+func (b *Backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
+	return core.UseStoredTestboxKey(&target.SSH, leaseID)
+}
+
 func (b *Backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	client, err := b.newClient(b.cfgForRun(), b.rt)
 	if err != nil {
@@ -801,7 +805,7 @@ func (b *Backend) targetFromServer(ctx context.Context, client Client, item *ins
 		}
 	}
 	if req.ReleaseOnly {
-		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
+		return core.LeaseTarget{Server: server, SSH: core.SSHTargetFromConfig(b.cfgForRun(), server.PublicNet.IPv4.IP), LeaseID: leaseID}, nil
 	}
 	ssh := core.SSHTargetFromConfig(b.cfgForRun(), server.PublicNet.IPv4.IP)
 	if err := core.UseStoredTestboxKey(&ssh, leaseID); err != nil {
@@ -852,7 +856,7 @@ func (b *Backend) releaseTargetFromClaim(ctx context.Context, client Client, id 
 			if server.Labels["lease"] != claim.LeaseID || server.Labels["slug"] != claim.Slug {
 				return core.LeaseTarget{}, core.Exit(2, "refusing to release Scaleway server %s from stale local claim", claim.CloudID)
 			}
-			return core.LeaseTarget{Server: server, LeaseID: claim.LeaseID}, nil
+			return core.LeaseTarget{Server: server, SSH: core.SSHTargetFromConfig(b.cfgForRun(), server.PublicNet.IPv4.IP), LeaseID: claim.LeaseID}, nil
 		}
 		if err != nil && !isScalewayNotFound(err) {
 			return core.LeaseTarget{}, err
@@ -863,11 +867,7 @@ func (b *Backend) releaseTargetFromClaim(ctx context.Context, client Client, id 
 		server.ID = parsed
 	}
 	server.PublicNet.IPv4.IP = claim.SSHHost
-	ssh := core.SSHTargetFromConfig(b.cfgForRun(), claim.SSHHost)
-	if claim.SSHPort > 0 {
-		ssh.Port = strconv.Itoa(claim.SSHPort)
-	}
-	return core.LeaseTarget{Server: server, LeaseID: claim.LeaseID, SSH: ssh}, nil
+	return core.LeaseTarget{Server: server, LeaseID: claim.LeaseID}, nil
 }
 
 func (b *Backend) deleteServer(ctx context.Context, client Client, server core.Server) error {

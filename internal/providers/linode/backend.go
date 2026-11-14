@@ -63,7 +63,7 @@ func newLinodeLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runt
 	acquireConfigErr := validateFoundationConfig(cfg)
 	applyLinodeDefaults(&cfg)
 	b := &linodeLeaseBackend{
-		DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt},
+		DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, StoredLeaseKeys: true},
 		acquireConfigErr: acquireConfigErr,
 	}
 	b.clientFactory = func(rt core.Runtime) (linodeAPI, error) { return newLinodeClient(rt) }
@@ -405,7 +405,7 @@ func (b *linodeLeaseBackend) releaseTargetFromClaim(ctx context.Context, client 
 		server := serverFromLinode(item, core.Config{})
 		server.Labels[linodeAccountLabel] = accountID
 		core.SetServerLeaseClaimSnapshot(&server, claim, true)
-		return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}, nil
+		return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server, SSH: core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)}, nil
 	} else if !isLinodeNotFound(err) {
 		return core.LeaseTarget{}, err
 	}
@@ -438,7 +438,7 @@ func (b *linodeLeaseBackend) reconcilePendingRecovery(ctx context.Context, clien
 				return core.LeaseTarget{}, false, fmt.Errorf("persist recovered linode instance: %w", err)
 			}
 			core.SetServerLeaseClaimSnapshot(&server, updated, true)
-			return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}, true, nil
+			return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server, SSH: core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)}, true, nil
 		case 0:
 		default:
 			return core.LeaseTarget{}, false, core.Exit(2, "linode ambiguous create recovery found multiple instances for lease=%s", claim.LeaseID)
@@ -510,7 +510,7 @@ func (b *linodeLeaseBackend) targetFromLinode(item linodeInstance, req core.Reso
 		}
 	}
 	if req.ReleaseOnly {
-		target := core.LeaseTarget{Server: server, LeaseID: leaseID}
+		target := core.LeaseTarget{Server: server, SSH: core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP), LeaseID: leaseID}
 		updatedClaim, err := b.persistPendingRecoveryServer(server, linodes, claim)
 		if err != nil {
 			return core.LeaseTarget{}, err

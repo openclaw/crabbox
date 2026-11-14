@@ -403,7 +403,7 @@ func (b *backend) targetFromClaimedServer(server core.Server, req core.ResolveRe
 	}
 	leaseID := server.Labels["lease"]
 	if req.ReleaseOnly {
-		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
+		return core.LeaseTarget{Server: server, SSH: core.SSHTargetFromConfig(b.cfg, server.PublicNet.IPv4.IP), LeaseID: leaseID}, nil
 	}
 	ssh := core.SSHTargetFromConfig(b.cfg, server.PublicNet.IPv4.IP)
 	if err := core.UseStoredTestboxKey(&ssh, leaseID); err != nil {

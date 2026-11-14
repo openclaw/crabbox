@@ -837,6 +837,11 @@ Acquisition and resolution share mechanics with provider-neutral contracts:
   and reuses stored-key rebinding for ordinary resolution. Release-only resolution
   skips stored-key lookup while preserving the configured endpoint. Adapters retain
   ownership of region selection, host selection, and resource validation.
+  Live release targets must retain the adapter-selected SSH endpoint without
+  requiring key preparation. Hostless absent-resource recovery targets remain
+  hostless. The release caller rebinds stored credentials only for optional guest
+  cleanup, after the provider's ownership gate; preparation failures warn and do
+  not prevent provider release.
 - `shared.ClaimBinding`, `shared.ValidateClaimBinding`,
   `shared.ResolveProviderClaimStrict`, and `shared.ErrStrictClaimMismatch`
   validate structural identity and exact provider/scope-bound claim lookup;
