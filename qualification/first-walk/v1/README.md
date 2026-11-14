@@ -5,7 +5,7 @@ and is outside the normal Go, Worker, Node.js and documentation build inputs.
 Already merged qualification tooling remains a separate final-closeout obligation.
 
 `manifest.json` pins accepted-main commit
-`c75e9323c8ecf36b8cb4b6da1a524a046e26538c` and its tree. `runtime.patch`
+`2ffcb1b97b92909020722fa61e4a5373ab1b8576` and its tree. `runtime.patch`
 preserves the prior diagnostic implementation, including snapshot-use protection
 through attachment, execution and complete cleanup, exact volume identity,
 uncertain-response recovery and cancellation. It does not replace the lifecycle.

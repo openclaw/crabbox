@@ -104,7 +104,7 @@ jobs:
         if: inputs.mode == 'first-walk'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: c75e9323c8ecf36b8cb4b6da1a524a046e26538c
+          ref: 2ffcb1b97b92909020722fa61e4a5373ab1b8576
           path: private-baseline
           persist-credentials: false
       - name: Set up Go
