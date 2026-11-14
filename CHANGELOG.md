@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Tailscale: use coordinator default tags for lease API requests that omit tags while preserving explicit-tag validation. [PR 3110](https://github.com/openclaw/crabbox/pull/3110). Thanks @KrasimirKralev.
+
 - Tailscale: limit rendered hostnames to valid 63-character DNS labels in direct and coordinator provisioning. [PR 3099](https://github.com/openclaw/crabbox/pull/3099). Thanks @KrasimirKralev.
 
 - Azure Sandbox: select every resource tier from XS (0.25 vCPU / 0.5 GiB) to 3XL (16 vCPU / 32 GiB), including 5–320 GiB tier disk capacities, with `--type` names or tier aliases while preserving implicit defaults, safe lease replay and snapshot inheritance. https://github.com/openclaw/crabbox/pull/3143 Thanks @galiniliev.

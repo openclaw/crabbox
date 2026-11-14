@@ -8710,7 +8710,7 @@ export class FleetCoordinator {
     }
     try {
       config.tailscaleTags = validateTailscaleTags(
-        input.tailscaleTags ?? config.tailscaleTags,
+        input.tailscaleTags ?? [],
         tailscaleDefaultTags(this.env),
       );
       config.tailscaleHostname = renderTailscaleHostname(

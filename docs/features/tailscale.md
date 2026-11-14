@@ -144,6 +144,11 @@ CRABBOX_TAILSCALE_SHA256_AMD64  pinned amd64 archive checksum
 CRABBOX_TAILSCALE_SHA256_ARM64  pinned arm64 archive checksum
 ```
 
+Lease API requests that omit `tailscaleTags` or send an empty list use every tag
+in `CRABBOX_TAILSCALE_TAGS`. Explicit non-empty lists must be a subset of those
+allowed tags. The CLI sends its configured tags explicitly; this API default does
+not override them.
+
 The OAuth client's tags and each requested lease tag must also satisfy Tailscale's
 ownership rules:
 
