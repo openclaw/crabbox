@@ -1,0 +1,14 @@
+{
+  "name": "crabbox-image-qualification-build",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "alias": {
+    "cpu-features": "./src/cpu-features.cjs",
+    "./agent.js": "./src/ssh2-agent.cjs",
+    "./crypto/build/Release/sshcrypto.node": "./src/ssh2-native.cjs",
+    "./crypto/poly1305.js": "./src/ssh2-poly1305.cjs"
+  }
+}
