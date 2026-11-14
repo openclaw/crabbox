@@ -2,9 +2,12 @@ package sprites
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -52,4 +55,33 @@ func (b *spritesBackend) runSprite(ctx context.Context, args []string, stdout, s
 		env = append(env, name+"="+overrides[name])
 	}
 	return b.rt.Exec.Run(ctx, core.LocalCommandRequest{Name: "sprite", Args: args, Env: env, Stdout: stdout, Stderr: stderr})
+}
+
+func effectiveSpriteHoldTimeout(requested, configured time.Duration) time.Duration {
+	if requested <= 0 {
+		requested = configured
+	}
+	if requested <= 0 {
+		requested = 30 * time.Minute
+	}
+	if requested < time.Minute {
+		return time.Minute
+	}
+	if requested > time.Hour {
+		return time.Hour
+	}
+	return requested.Truncate(time.Second)
+}
+
+func (b *spritesBackend) holdSpriteTask(ctx context.Context, name string, expire time.Duration) error {
+	seconds := int(effectiveSpriteHoldTimeout(expire, b.cfg.IdleTimeout).Seconds())
+	script := "curl -fsS --unix-socket /.sprite/api.sock -H 'Content-Type: application/json' -o /dev/null -X PUT http://sprite/v1/tasks/crabbox-lease -d '{\"expire\":" + strconv.Itoa(seconds) + "}'"
+	result, err := b.runSprite(ctx, []string{"exec", "-s", name, "--", "sh", "-c", script}, nil, b.rt.Stderr)
+	if err != nil {
+		return fmt.Errorf("sprites hold task failed (exit code %d): %w", result.ExitCode, err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("sprites hold task exited with code %d", result.ExitCode)
+	}
+	return nil
 }
