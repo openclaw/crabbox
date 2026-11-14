@@ -9,7 +9,7 @@ import {
 import type { ExternalRunnerRecord, LeaseRecord, ReadyPoolEntry, RunRecord } from "./types";
 
 export type PortalOrgKind = "missing" | "legacy" | "unsupported";
-type LeaseCleanupStatus = "pending" | "failed" | "complete" | "retained";
+type LeaseCleanupStatus = "pending" | "failed" | "blocked" | "complete" | "retained";
 export type PublicLeaseRecord = LeaseRecord & {
   cleanupStatus?: LeaseCleanupStatus;
   provisioningPhase?:
@@ -70,6 +70,12 @@ function releaseCleanupStatus(record: LeaseRecord): LeaseCleanupStatus {
     return Number.isFinite(Date.parse(record.cleanupStartedAt)) ? "pending" : "failed";
   }
   if (
+    record.cleanupBlockedAt ||
+    (record.deferredCleanupBlocked && !record.deferredCleanupBlocked.retryingAt)
+  ) {
+    return "blocked";
+  }
+  if (
     record.releaseDeletesServer === true &&
     Number.isFinite(Date.parse(record.provisioningRequestStartedAt ?? "")) &&
     !record.provisioningRequestSettledAt &&
@@ -97,7 +103,9 @@ function releaseCleanupStatus(record: LeaseRecord): LeaseCleanupStatus {
   ) {
     return "failed";
   }
-  return leaseProviderCleanupCompleted(record) ? "complete" : "failed";
+  if (!leaseProviderCleanupCompleted(record)) return "failed";
+  // A re-armed deferred candidate may still refuse, so its lease is not complete yet.
+  return record.deferredCleanupBlocked ? "pending" : "complete";
 }
 
 export function publicRunRecord(record: RunRecord): RunRecord {

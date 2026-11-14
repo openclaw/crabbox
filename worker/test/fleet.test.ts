@@ -107,6 +107,7 @@ import {
 } from "../src/lease-record-store";
 import { leaseIsLive } from "../src/lease-state";
 import { MISSING_ORG_KEY, isCurrentOrgKey, orgKeyForLabel } from "../src/org-identity";
+import { publicLeaseRecord } from "../src/org-records";
 import { portalCode, portalVNC, webVNCCredentialsFromHistoryState } from "../src/portal";
 import {
   providerRequestSignal,
@@ -119,6 +120,7 @@ import {
   ProviderProvisioningCleanupError,
   ProviderProvisioningOutcomeUncertainError,
   ProviderResourceUnresolvedError,
+  ProviderCleanupRefusedError,
   providerProvisioningCleanupClaim,
   validateProviderProvisioningCleanupClaim,
   type ProviderProvisioningCleanupClaim,
@@ -63588,4 +63590,362 @@ describe("control credential continuation", () => {
     expect(f.socket.closeCode).toBe(1008);
     expect(f.socket.closeReason).toBe("portal session ended");
   });
+});
+
+describe("bounded cleanup refusal", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+  const windowMs = 2 * 60 * 60 * 1000;
+  it("parks ordinary refusals and lets explicit stop make one new attempt", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-10-01T00:00:00Z");
+    vi.setSystemTime(start);
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      owner: "alice@example.com",
+      org: "example-org",
+      state: "released",
+      releaseDeletesServer: true,
+      cleanupError: "retry",
+      cleanupRetryAt: new Date(start).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    let refusal = true;
+    let attempts = 0;
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(undefined, {}, () => {
+        attempts++;
+        if (refusal) throw new ProviderCleanupRefusedError("resource identity changed");
+      }),
+    });
+    await fleet.alarm();
+    let current = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+    expect(current.cleanupRefusedSince).toBe(new Date(start).toISOString());
+    expect(current.cleanupRetryAt).toBeDefined();
+    expect(publicLeaseRecord(current).cleanupStatus).toBe("failed");
+    vi.setSystemTime(start + windowMs);
+    await fleet.alarm();
+    current = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+    expect(publicLeaseRecord(current).cleanupStatus).toBe("blocked");
+    expect(current.cleanupBlockedAt).toBe(new Date(start + windowMs).toISOString());
+    expect(current.cleanupError).toContain("automatic retries stopped");
+    expect(current.cleanupError).toContain(lease.cloudID);
+    expect(current.cleanupError).toContain("crabbox stop");
+    expect(leaseNeedsCleanup(current, Date.now())).toBe(false);
+    expect(current.cleanupRetryAt).toBeUndefined();
+    await fleet.alarm();
+    expect(attempts).toBe(2);
+    const stop = () =>
+      fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/release`, {
+          headers: { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" },
+          body: { delete: true },
+        }),
+      );
+    expect((await stop()).status).toBe(200);
+    expect(publicLeaseRecord(storage.value<LeaseRecord>(`lease:${lease.id}`)!).cleanupStatus).toBe(
+      "pending",
+    );
+    await fleet.alarm();
+    expect(attempts).toBe(3);
+    expect(publicLeaseRecord(storage.value<LeaseRecord>(`lease:${lease.id}`)!).cleanupStatus).toBe(
+      "blocked",
+    );
+    await fleet.alarm();
+    expect(attempts).toBe(3);
+    refusal = false;
+    await stop();
+    await fleet.alarm();
+    current = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+    expect(publicLeaseRecord(current).cleanupStatus).toBe("complete");
+    expect(current.cleanupBlockedAt).toBeUndefined();
+    expect(current.cleanupRefusedSince).toBeUndefined();
+  });
+
+  it.each([false, true])(
+    "keeps three hours of transient failures retrying (prior refusal=%s)",
+    async (priorRefusal) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const start = Date.parse("2026-10-01T00:00:00Z");
+      vi.setSystemTime(start);
+      const storage = new MemoryStorage();
+      const lease = testLease({
+        owner: "alice@example.com",
+        org: "example-org",
+        state: "released",
+        releaseDeletesServer: true,
+        cleanupError: "retry",
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      let attempts = 0;
+      let refused = priorRefusal;
+      const fleet = testFleet(storage, {
+        hetzner: fakeProvider(undefined, {}, () => {
+          attempts++;
+          if (refused) throw new ProviderCleanupRefusedError("resource identity changed");
+          throw new Error(attempts % 2 ? "HTTP 503" : "inventory timeout");
+        }),
+      });
+      await fleet.alarm();
+      refused = false;
+      for (const minutes of [30, 60, 120, 180]) {
+        vi.setSystemTime(start + minutes * 60_000);
+        // oxlint-disable-next-line eslint/no-await-in-loop -- advance the same lease's clock and persisted retry in order.
+        await fleet.alarm();
+        const current = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+        expect(current.cleanupBlockedAt).toBeUndefined();
+        expect(current.cleanupRefusedSince).toBe(
+          priorRefusal ? new Date(start).toISOString() : undefined,
+        );
+        expect(current.cleanupRetryAt).toBeDefined();
+        expect(publicLeaseRecord(current).cleanupStatus).toBe("failed");
+      }
+      if (priorRefusal) {
+        refused = true;
+        vi.setSystemTime(start + 186 * 60_000);
+        await fleet.alarm();
+      }
+      expect(
+        publicLeaseRecord(storage.value<LeaseRecord>(`lease:${lease.id}`)!).cleanupStatus,
+      ).toBe(priorRefusal ? "blocked" : "failed");
+    },
+  );
+
+  it("reports a transient retry after an explicit stop of blocked cleanup", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-10-01T00:00:00Z");
+    vi.setSystemTime(start);
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      owner: "alice@example.com",
+      org: "example-org",
+      state: "released",
+      releaseDeletesServer: true,
+      cleanupError: "retry",
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    let failure: Error = new ProviderCleanupRefusedError("resource identity changed");
+    const fleet = testFleet(storage, {
+      hetzner: fakeProvider(undefined, {}, () => {
+        throw failure;
+      }),
+    });
+    await fleet.alarm();
+    vi.setSystemTime(start + windowMs);
+    await fleet.alarm();
+    const current = () => storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+    expect(publicLeaseRecord(current()).cleanupStatus).toBe("blocked");
+    const stop = () =>
+      fleet.fetch(
+        request("POST", `/v1/leases/${lease.id}/release`, {
+          headers: { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" },
+          body: { delete: true },
+        }),
+      );
+    failure = new Error("HTTP 503");
+    await stop();
+    await fleet.alarm();
+    expect(current().cleanupBlockedAt).toBeUndefined();
+    expect(current().cleanupRefusedSince).toBe(new Date(start).toISOString());
+    expect(current().cleanupRetryAt).toBeDefined();
+    expect(publicLeaseRecord(current()).cleanupStatus).toBe("failed");
+    failure = new ProviderCleanupRefusedError("resource identity changed");
+    vi.setSystemTime(Date.parse(current().cleanupRetryAt!));
+    await fleet.alarm();
+    expect(publicLeaseRecord(current()).cleanupStatus).toBe("blocked");
+  });
+
+  it("keeps every blocked deferred candidate visible until each one finishes", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.parse("2026-10-01T00:00:00Z");
+    vi.setSystemTime(start);
+    const storage = new MemoryStorage();
+    const lease = testLease({
+      provider: "azure",
+      owner: "alice@example.com",
+      org: "example-org",
+      expiresAt: new Date(start + 24 * 60 * 60_000).toISOString(),
+    });
+    storage.seed(`lease:${lease.id}`, lease);
+    const names = ["first-candidate", "second-candidate"];
+    const keys = names.map((name) => `azure-cleanup:sub:group:eastus:${name}`);
+    names.forEach((name, index) =>
+      storage.seed(keys[index]!, {
+        name,
+        location: "eastus",
+        subscription: "sub",
+        resourceGroup: "group",
+        leaseID: lease.id,
+        slug: lease.slug,
+        owner: lease.owner,
+        createdAt: lease.createdAt,
+        attempts: 0,
+        updatedAt: new Date(start).toISOString(),
+        retryAt: new Date(start).toISOString(),
+      }),
+    );
+    const outcomes = new Map<string, Error | undefined>(
+      names.map((name) => [name, new ProviderCleanupRefusedError(`${name} identity changed`)]),
+    );
+    vi.spyOn(AzureClient.prototype, "deleteOwnedServer").mockImplementation(async (target) => {
+      const outcome = outcomes.get(target.cloudID);
+      if (outcome) throw outcome;
+    });
+    const fleet = testFleet(
+      storage,
+      { azure: fakeProvider(undefined, { provider: "azure" }) },
+      {
+        AZURE_TENANT_ID: "tenant",
+        AZURE_CLIENT_ID: "client",
+        AZURE_CLIENT_SECRET: "synthetic-secret",
+        AZURE_SUBSCRIPTION_ID: "sub",
+      },
+    );
+    const leaseRecord = () => storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+    const terminal = (key: string) => storage.value<{ terminalAt?: string }>(key)?.terminalAt;
+    await fleet.alarm();
+    vi.setSystemTime(start + windowMs);
+    await fleet.alarm();
+    expect(keys.map(terminal).every(Boolean)).toBe(true);
+    const named = leaseRecord().deferredCleanupBlocked!.name;
+    const other = names.find((name) => name !== named)!;
+
+    const response = await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/release`, {
+        headers: { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" },
+        body: { delete: true },
+      }),
+    );
+    expect(response.status).toBe(200);
+    expect(keys.map(terminal).some(Boolean)).toBe(false);
+    expect(leaseRecord().deferredCleanupBlocked?.retryingAt).toBeDefined();
+    expect(publicLeaseRecord(leaseRecord()).cleanupStatus).not.toBe("blocked");
+    expect(publicLeaseRecord(leaseRecord()).cleanupStatus).not.toBe("complete");
+
+    // The named candidate finishes while the other still refuses.
+    outcomes.set(named, undefined);
+    await fleet.alarm();
+    expect(storage.value(`azure-cleanup:sub:group:eastus:${named}`)).toBeUndefined();
+    expect(leaseRecord().deferredCleanupBlocked?.name).toBe(other);
+    expect(leaseRecord().deferredCleanupBlocked?.retryingAt).toBeUndefined();
+    expect(publicLeaseRecord(leaseRecord()).cleanupStatus).toBe("blocked");
+
+    outcomes.set(other, undefined);
+    await fleet.fetch(
+      request("POST", `/v1/leases/${lease.id}/release`, {
+        headers: { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" },
+        body: { delete: true },
+      }),
+    );
+    await fleet.alarm();
+    expect(storage.value(`azure-cleanup:sub:group:eastus:${other}`)).toBeUndefined();
+    expect(leaseRecord().deferredCleanupBlocked).toBeUndefined();
+    expect(publicLeaseRecord(leaseRecord()).cleanupStatus).not.toBe("blocked");
+  });
+
+  it.each(["refusal", "transient"])(
+    "bounds deferred %s without changing the healthy lease",
+    async (kind) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const start = Date.parse("2026-10-01T00:00:00Z");
+      vi.setSystemTime(start);
+      const storage = new MemoryStorage();
+      const lease = testLease({
+        provider: "azure",
+        owner: "alice@example.com",
+        org: "example-org",
+        expiresAt: new Date(start + 24 * 60 * 60_000).toISOString(),
+      });
+      storage.seed(`lease:${lease.id}`, lease);
+      const key = "azure-cleanup:sub:group:eastus:old-candidate";
+      storage.seed(key, {
+        name: "old-candidate",
+        location: "eastus",
+        subscription: "sub",
+        resourceGroup: "group",
+        leaseID: lease.id,
+        slug: lease.slug,
+        owner: lease.owner,
+        createdAt: lease.createdAt,
+        attempts: 0,
+        updatedAt: new Date(start).toISOString(),
+        retryAt: new Date(start).toISOString(),
+      });
+      const deletion = vi
+        .spyOn(AzureClient.prototype, "deleteOwnedServer")
+        .mockRejectedValue(
+          kind === "refusal"
+            ? new ProviderCleanupRefusedError("old-candidate identity changed")
+            : new Error("HTTP 503"),
+        );
+      const fleet = testFleet(
+        storage,
+        { azure: fakeProvider(undefined, { provider: "azure" }) },
+        {
+          AZURE_TENANT_ID: "tenant",
+          AZURE_CLIENT_ID: "client",
+          AZURE_CLIENT_SECRET: "synthetic-secret",
+          AZURE_SUBSCRIPTION_ID: "sub",
+        },
+      );
+      await fleet.alarm();
+      if (kind === "refusal") {
+        deletion.mockRejectedValue(new Error("inventory timeout"));
+        vi.setSystemTime(start + 60 * 60_000);
+        await fleet.alarm();
+        deletion.mockRejectedValue(
+          new ProviderCleanupRefusedError("old-candidate identity changed"),
+        );
+      }
+      expect(storage.value<{ refusedSince?: string }>(key)?.refusedSince).toBe(
+        kind === "refusal" ? new Date(start).toISOString() : undefined,
+      );
+      expect(storage.value<{ terminalAt?: string }>(key)?.terminalAt).toBeUndefined();
+      vi.setSystemTime(start + windowMs);
+      await fleet.alarm();
+      const record = storage.value<{ terminalAt?: string; refusedSince?: string }>(key)!;
+      const current = storage.value<LeaseRecord>(`lease:${lease.id}`)!;
+      expect(current.state).toBe("active");
+      expect(current.cleanupError).toBeUndefined();
+      expect(record.terminalAt).toBe(
+        kind === "refusal" ? new Date(start + windowMs).toISOString() : undefined,
+      );
+      expect(record.refusedSince).toBe(
+        kind === "refusal" ? new Date(start).toISOString() : undefined,
+      );
+      expect(current.deferredCleanupBlocked).toEqual(
+        kind === "refusal"
+          ? {
+              name: "old-candidate",
+              error: "old-candidate identity changed",
+              blockedAt: record.terminalAt,
+            }
+          : undefined,
+      );
+      if (kind === "transient") return;
+      await fleet.alarm();
+      expect(deletion).toHaveBeenCalledTimes(3);
+      const stop = () =>
+        fleet.fetch(
+          request("POST", `/v1/leases/${lease.id}/release`, {
+            headers: { "x-crabbox-owner": lease.owner, "x-crabbox-org": "example-org" },
+            body: { delete: true },
+          }),
+        );
+      await stop();
+      expect(storage.value<{ terminalAt?: string }>(key)?.terminalAt).toBeUndefined();
+      await fleet.alarm();
+      expect(deletion).toHaveBeenCalledTimes(4);
+      expect(storage.value<{ terminalAt?: string }>(key)?.terminalAt).toBeDefined();
+      deletion.mockResolvedValue(undefined);
+      await stop();
+      await fleet.alarm();
+      expect(storage.value(key)).toBeUndefined();
+      expect(
+        storage.value<LeaseRecord>(`lease:${lease.id}`)?.deferredCleanupBlocked,
+      ).toBeUndefined();
+    },
+  );
 });

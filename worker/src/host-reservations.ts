@@ -129,6 +129,8 @@ function hostReservationSummary(record: LeaseRecord) {
     cleanupCompletedAt: record.cleanupCompletedAt,
     cleanupStartedAt: record.cleanupStartedAt,
     cleanupRetryAt: record.cleanupRetryAt,
+    cleanupBlockedAt: record.cleanupBlockedAt,
+    deferredCleanupBlocked: record.deferredCleanupBlocked,
     cleanupFailedAt: record.cleanupFailedAt,
     providerKeyCleanupPending: record.providerKeyCleanupPending,
     provisioningRequestStartedAt: record.provisioningRequestStartedAt,

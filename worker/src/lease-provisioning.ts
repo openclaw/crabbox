@@ -1,11 +1,17 @@
+import { coordinatorErrorMessage } from "./coordinator-diagnostics";
 import {
   provisioningDuePrefix,
   type CoordinatorRuntime,
   type CoordinatorStorageView,
   type ProvisioningDueRecord,
 } from "./coordinator-runtime";
-import { completeLeaseProviderCleanup } from "./lease-cleanup";
+import {
+  leaseCleanupBlockedMessage,
+  leaseCleanupRefusalTerminalMs,
+  completeLeaseProviderCleanup,
+} from "./lease-cleanup";
 import { putLeaseRecord } from "./lease-record-store";
+import { ProviderCleanupRefusedError } from "./provider-provisioning";
 import type {
   FrozenProvisioningPlan,
   ProviderResumableProvisioning,
@@ -100,6 +106,7 @@ function validOperation(value: unknown): value is LeaseProvisioningOperation {
         "settling",
         "cleanup",
         "blocked",
+        "cleanup-blocked",
         "retained",
         "terminal",
       ].includes(operation.step.phase) &&
@@ -169,7 +176,11 @@ export async function putProvisioningOperation(
     ...operation,
     step: { ...operation.step, state: reference },
   });
-  if (operation.step.phase !== "terminal" && operation.step.phase !== "retained") {
+  if (
+    operation.step.phase !== "terminal" &&
+    operation.step.phase !== "retained" &&
+    operation.step.phase !== "cleanup-blocked"
+  ) {
     const due: ProvisioningDueRecord = {
       operationID: operation.leaseID,
       at: operation.step.nextWake,
@@ -222,6 +233,7 @@ export async function cancelProvisioningOperation(
   operation.retain = options.deleteServer === false && lease.releaseDeletesServer !== true;
   operation.canceledAt ??= at;
   if (operation.step.phase === "retained" && !operation.retain) operation.step.phase = "settling";
+  if (operation.step.phase === "cleanup-blocked") operation.step.phase = "blocked";
   operation.step.nextWake = operation.claim?.expiresAt ?? at;
   await putProvisioningOperation(transaction, operation, previous);
   const released: LeaseRecord = {
@@ -234,7 +246,13 @@ export async function cancelProvisioningOperation(
     ...(options.keep === undefined ? {} : { keep: options.keep }),
     provisioningResourceMayExist: true,
   };
-  updateCleanupMetadata(released, operation.step.phase, at);
+  updateCleanupMetadata(
+    released,
+    operation.step.phase,
+    at,
+    operation.step.blockedDetail,
+    operation.step.blockedSince,
+  );
   await putLeaseRecord(transaction, released);
   return released;
 }
@@ -286,6 +304,7 @@ export class LeaseProvisioningController {
           !operation ||
           operation.step.phase === "terminal" ||
           operation.step.phase === "retained" ||
+          operation.step.phase === "cleanup-blocked" ||
           provisioningDueKey(operation) !== key ||
           entry.at !== operation.step.nextWake
         ) {
@@ -311,6 +330,7 @@ export class LeaseProvisioningController {
         !validOperation(operation) ||
         operation.step.phase === "terminal" ||
         operation.step.phase === "retained" ||
+        operation.step.phase === "cleanup-blocked" ||
         operation.step.nextWake > now ||
         (operation.claim && operation.claim.expiresAt > now)
       )
@@ -421,11 +441,18 @@ export class LeaseProvisioningController {
         recovering: operation.step.delivery! > 1,
       });
       validateProvisioningRecord(result);
-    } catch {
+    } catch (error) {
+      const { blockedDetail: _blockedDetail, ...previousStep } = operation.step;
       result = {
-        ...operation.step,
+        ...previousStep,
         phase: "blocked",
-        blockedReason: "continuation_unavailable",
+        blockedReason:
+          error instanceof ProviderCleanupRefusedError
+            ? "cleanup_refused"
+            : "continuation_unavailable",
+        ...(error instanceof ProviderCleanupRefusedError
+          ? { blockedDetail: coordinatorErrorMessage(this.env, error) }
+          : {}),
         nextWake: Date.now() + retryDelay,
       };
     }
@@ -458,6 +485,19 @@ export class LeaseProvisioningController {
         if ((await transaction.get(key)) === current.operationID) await transaction.delete(key);
       }
       if (canceled) current.canceledAt ??= Date.now();
+      if (
+        result.phase === "blocked" &&
+        (result.blockedReason === "cleanup_refused" ||
+          result.blockedReason === "identity_resolution_required")
+      ) {
+        result.blockedSince = current.step.blockedSince ?? Date.now();
+        if (canceled && Date.now() - result.blockedSince >= leaseCleanupRefusalTerminalMs)
+          result.phase = "cleanup-blocked";
+      } else if (result.blockedReason !== "continuation_unavailable") {
+        // Transient failures keep the streak, matching ordinary and deferred cleanup.
+        delete result.blockedSince;
+        if (result.phase !== "blocked") delete result.blockedDetail;
+      }
       // Preserve returned identity evidence after cancellation. Only a later claim may publish.
       current.step = result;
       if (canceled && result.phase === "ready-to-publish") current.step.phase = "settling";
@@ -468,7 +508,15 @@ export class LeaseProvisioningController {
       current.revision += 1;
       delete current.claim;
       await putProvisioningOperation(transaction, current, previous);
-      if (canceled) updateCleanupMetadata(latest, current.step.phase, Date.now());
+      if (canceled)
+        updateCleanupMetadata(
+          latest,
+          current.step.phase,
+          Date.now(),
+          current.step.blockedDetail,
+          current.step.blockedSince,
+          plan?.resources[current.step.attempt]?.cloudID,
+        );
       if (result.phase === "terminal") {
         await transaction.delete(provisioningMaterialKey(current.operationID));
         latest.state = canceled ? "released" : "failed";
@@ -512,21 +560,39 @@ function updateCleanupMetadata(
   lease: LeaseRecord,
   phase: ProvisioningStep["phase"],
   at: number,
+  blockedDetail?: string,
+  blockedSince?: number,
+  resourceName?: string,
 ): void {
   if (phase === "terminal" || lease.releaseDeletesServer === false) {
+    delete lease.cleanupBlockedAt;
+    delete lease.cleanupRefusedSince;
     delete lease.cleanupStartedAt;
     delete lease.cleanupClaimExpiresAt;
     delete lease.cleanupError;
     delete lease.cleanupFailedAt;
     delete lease.cleanupRetryAt;
     delete lease.cleanupAttempts;
-  } else if (phase === "blocked") {
+  } else if (phase === "blocked" || phase === "cleanup-blocked") {
     delete lease.cleanupStartedAt;
     delete lease.cleanupClaimExpiresAt;
-    lease.cleanupError = "durable provisioning cleanup requires resolution";
+    delete lease.cleanupRetryAt;
+    lease.cleanupError = blockedDetail ?? "durable provisioning cleanup requires resolution";
+    if (phase === "cleanup-blocked") {
+      lease.cleanupBlockedAt = new Date(at).toISOString();
+      const resource = resourceName || lease.cloudID || lease.serverName || lease.id;
+      const since = new Date(blockedSince ?? at).toISOString();
+      // A recorded dispatch identity conflict is sticky, so stop cannot clear it.
+      lease.cleanupError = blockedDetail
+        ? leaseCleanupBlockedMessage(resource, blockedDetail, since)
+        : `durable provisioning recorded a resource identity conflict for ${resource} since ${since}; automatic retries stopped; crabbox stop cannot clear this conflict and the coordinator operator must resolve it`;
+    } else {
+      delete lease.cleanupBlockedAt;
+    }
     lease.cleanupFailedAt = new Date(at).toISOString();
     lease.cleanupAttempts = (lease.cleanupAttempts ?? 0) + 1;
   } else {
+    delete lease.cleanupBlockedAt;
     lease.cleanupStartedAt ??= new Date(at).toISOString();
     lease.cleanupClaimExpiresAt = new Date(at + claimDuration).toISOString();
     delete lease.cleanupError;
