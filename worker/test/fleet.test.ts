@@ -63525,3 +63525,111 @@ describe("control credential continuation", () => {
     expect(f.socket.closeReason).toBe("portal session ended");
   });
 });
+
+describe("AWS quote failure diagnostics", () => {
+  const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+  it.each([
+    {
+      error: "UnauthorizedOperation: ec2:DescribeSpotPriceHistory denied",
+      reason: "permission_denied",
+    },
+    { error: "upstream unavailable", reason: "quote_error" },
+  ])("persists and reports fallback after $reason", async ({ error, reason }) => {
+    const storage = new MemoryStorage();
+    const env = { AWS_ACCESS_KEY_ID: "fixture", AWS_SECRET_ACCESS_KEY: "fixture" } as Env;
+    const provider = fakeProvider(undefined, { provider: "aws", serverType: "c7a.2xlarge" });
+    provider.hourlyPriceUSD = (type, config) =>
+      new AWSProvider(env, "eu-west-1", storage).hourlyPriceUSD(type, config);
+    const quote = vi
+      .spyOn(EC2SpotClient.prototype, "hourlySpotPriceUSD")
+      .mockRejectedValue(new Error(error));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const fleet = testFleet(storage, { aws: provider }, env);
+      const create = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          headers,
+          body: {
+            provider: "aws",
+            serverType: "c7a.2xlarge",
+            ttlSeconds: 3600,
+            sshPublicKey: "ssh-ed25519 test",
+          },
+        }),
+      );
+      expect(create.status).toBe(201);
+      const body = (await create.json()) as {
+        lease: { id: string; pricingFallback: { reason: string }; estimatedHourlyUSD: number };
+      };
+      expect(body.lease).toMatchObject({ estimatedHourlyUSD: 3, pricingFallback: { reason } });
+      expect(storage.value<LeaseRecord>(`lease:${body.lease.id}`)).toMatchObject({
+        pricingFallback: { reason },
+      });
+      const usage = await fleet.fetch(request("GET", "/v1/usage", { headers }));
+      expect(await usage.json()).toMatchObject({
+        usage: {
+          pricingFallbacks: [{ provider: "aws", serverType: "c7a.2xlarge", reason, leases: 1 }],
+        },
+      });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('"event":"pricing_fallback"'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(reason));
+    } finally {
+      quote.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it.each([
+    "CRABBOX_MAX_MONTHLY_USD",
+    "CRABBOX_MAX_MONTHLY_USD_PER_OWNER",
+    "CRABBOX_MAX_MONTHLY_USD_PER_ORG",
+  ] as const)("fails closed for %s but honors an explicit rate", async (limit) => {
+    const storage = new MemoryStorage();
+    const env = {
+      AWS_ACCESS_KEY_ID: "fixture",
+      AWS_SECRET_ACCESS_KEY: "fixture",
+      [limit]: "100",
+    } as Env;
+    let creates = 0;
+    const provider = fakeProvider(
+      () => {
+        creates++;
+      },
+      { provider: "aws", serverType: "c7a.2xlarge" },
+    );
+    provider.hourlyPriceUSD = (type, config) =>
+      new AWSProvider(env, "eu-west-1", storage).hourlyPriceUSD(type, config);
+    const quote = vi
+      .spyOn(EC2SpotClient.prototype, "hourlySpotPriceUSD")
+      .mockRejectedValue(new Error("UnauthorizedOperation"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const fleet = testFleet(storage, { aws: provider }, env);
+      const body = {
+        provider: "aws",
+        serverType: "c7a.2xlarge",
+        ttlSeconds: 3600,
+        sshPublicKey: "ssh-ed25519 test",
+      };
+      const denied = await fleet.fetch(request("POST", "/v1/leases", { headers, body }));
+      expect(denied.status).toBe(429);
+      expect(await denied.json()).toMatchObject({
+        error: "cost_limit_exceeded",
+        message: expect.stringContaining("provider pricing permission denied"),
+      });
+      expect(creates).toBe(0);
+      env.CRABBOX_COST_RATES_JSON = '{"aws:c7a.2xlarge":0.5}';
+      // testFleet snapshots env, so use a new coordinator with the override.
+      const configured = testFleet(storage, { aws: provider }, env);
+      const allowed = await configured.fetch(request("POST", "/v1/leases", { headers, body }));
+      expect(allowed.status).toBe(201);
+      expect(((await allowed.json()) as { lease: unknown }).lease).toMatchObject({
+        estimatedHourlyUSD: 0.5,
+      });
+      expect(creates).toBe(1);
+    } finally {
+      quote.mockRestore();
+      warn.mockRestore();
+    }
+  });
+});

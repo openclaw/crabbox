@@ -170,6 +170,7 @@ The hourly rate is resolved in this order:
 Live pricing today:
 
 - **AWS:** `DescribeSpotPriceHistory` for the requested instance type and region.
+  The coordinator IAM policy must allow `ec2:DescribeSpotPriceHistory`.
 - **Hetzner:** Cloud API server-type prices for the requested location; hourly
   EUR prices are converted with `CRABBOX_EUR_TO_USD` (default `1.08`).
 
@@ -200,7 +201,10 @@ email can become the bearer-token owner.
 
 If a new lease would exceed any configured active-lease count or monthly
 committed-cost budget, the create call returns HTTP 429 `cost_limit_exceeded`
-and no machine is provisioned. See [Cost and usage](features/cost-usage.md).
+and no machine is provisioned. Failed quotes are recorded as fallback estimates
+in logs, lease JSON, and human/JSON usage output. Monthly budget decisions that
+depend on a failed quote are also rejected; an explicit rate override can supply
+the missing estimate. See [Cost and usage](features/cost-usage.md).
 
 ## Usage statistics
 

@@ -551,6 +551,7 @@ import {
   enforceCostLimitUsage,
   enforceBudgetLimitUsage,
   leaseCost,
+  quotedLeaseCost,
   leaseExtensionReservationUSD,
   requestOrg,
   createUsageSummary,
@@ -4557,9 +4558,11 @@ export class FleetCoordinator {
         withSSHHostKey(config, `crabbox-${leaseID}`),
       );
     }
-    const providerHourlyUSD = await measureCreationStep("admission.pricing", () =>
-      provider.hourlyPriceUSD(config.serverType, config),
-    ).catch(() => undefined);
+    const cost = await measureCreationStep("admission.pricing", () =>
+      quotedLeaseCost(this.env, config.provider, config.serverType, config.ttlSeconds, () =>
+        provider.hourlyPriceUSD(config.serverType, config),
+      ),
+    );
     admissionFence.assertActive();
     if (
       createAttempt &&
@@ -4567,13 +4570,6 @@ export class FleetCoordinator {
     ) {
       return createCanceledResponse();
     }
-    const cost = leaseCost(
-      this.env,
-      config.provider,
-      config.serverType,
-      config.ttlSeconds,
-      providerHourlyUSD,
-    );
     const continuation =
       !workspaceID && !checkpointAuthorization && !reservationGuard
         ? provider.resumableProvisioning?.()
@@ -4738,6 +4734,7 @@ export class FleetCoordinator {
         idleTimeoutSeconds: config.idleTimeoutSeconds,
         estimatedHourlyUSD: cost.hourlyUSD,
         maxEstimatedUSD: cost.maxUSD,
+        ...(cost.pricingFallback ? { pricingFallback: cost.pricingFallback } : {}),
         state: "provisioning",
         provisioningResourceMayExist: false,
         provisioningCoordinatorVersion: this.coordinatorGeneration,
@@ -5270,18 +5267,17 @@ export class FleetCoordinator {
       config = finalized.config;
       record = finalized.lease;
     }
-    const finalProviderHourlyUSD = await provider
-      .hourlyPriceUSD(serverType, config)
-      .catch(() => undefined);
-    const finalCost = leaseCost(
+    const finalCost = await quotedLeaseCost(
       this.env,
       config.provider,
       serverType,
       config.ttlSeconds,
-      finalProviderHourlyUSD,
+      () => provider.hourlyPriceUSD(serverType, config),
     );
     record.estimatedHourlyUSD = finalCost.hourlyUSD;
     record.maxEstimatedUSD = finalCost.maxUSD;
+    if (finalCost.pricingFallback) record.pricingFallback = finalCost.pricingFallback;
+    else delete record.pricingFallback;
     const finalization = await this.state.runExclusive(async () => {
       type Publication = { committed: false } | { committed: true; record: LeaseRecord };
       let published: LeaseRecord | undefined;
@@ -5509,6 +5505,7 @@ export class FleetCoordinator {
         idleTimeoutSeconds: config.idleTimeoutSeconds,
         estimatedHourlyUSD: cost.hourlyUSD,
         maxEstimatedUSD: cost.maxUSD,
+        ...(cost.pricingFallback ? { pricingFallback: cost.pricingFallback } : {}),
         state: "provisioning",
         provisioningResourceMayExist: false,
         createdAt: now.toISOString(),
@@ -6684,15 +6681,12 @@ export class FleetCoordinator {
         }
         return failed;
       }
-      const providerHourlyUSD = await provider
-        .hourlyPriceUSD(recoveredServer.serverType, recoveryConfig)
-        .catch(() => undefined);
-      const recoveredCost = leaseCost(
+      const recoveredCost = await quotedLeaseCost(
         this.env,
         workspace.provider,
         recoveredServer.serverType,
         lease.ttlSeconds,
-        providerHourlyUSD,
+        () => provider.hourlyPriceUSD(recoveredServer.serverType, recoveryConfig),
       );
       const recovered = await this.state.runExclusive(async () => {
         const currentWorkspace = await this.state.storage.get<WorkspaceRecord>(
@@ -6722,6 +6716,8 @@ export class FleetCoordinator {
         applyRecoveredServerIdentity(current, recoveredServer);
         current.estimatedHourlyUSD = recoveredCost.hourlyUSD;
         current.maxEstimatedUSD = recoveredCost.maxUSD;
+        if (recoveredCost.pricingFallback) current.pricingFallback = recoveredCost.pricingFallback;
+        else delete current.pricingFallback;
         if (
           workspaceCapability
             ? workspaceCapability.recoveredReady(recoveredServer)
@@ -21044,6 +21040,7 @@ export class FleetCoordinator {
       idleTimeoutSeconds: lease.idleTimeoutSeconds,
       estimatedHourlyUSD: lease.estimatedHourlyUSD,
       maxEstimatedUSD: lease.maxEstimatedUSD,
+      ...(lease.pricingFallback ? { pricingFallback: lease.pricingFallback } : {}),
       state: lease.state,
       createdAt: lease.createdAt,
       updatedAt: lease.updatedAt,

@@ -9,7 +9,7 @@ import { AWSProvider, HetznerProvider } from "../src/fleet";
 import { HetznerClient } from "../src/hetzner";
 import { cachedProviderPrice } from "../src/provider-pricing";
 import type { Env } from "../src/types";
-import { leaseCost } from "../src/usage";
+import { leaseCost, quotedLeaseCost } from "../src/usage";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -165,7 +165,9 @@ it.each([undefined, NaN, Infinity, -1, 0])(
       .fn<() => Promise<number | undefined>>()
       .mockResolvedValueOnce(value)
       .mockResolvedValue(0.2);
-    expect(await cachedProviderPrice(scope, ["fixture"], quote)).toBeUndefined();
+    await expect(cachedProviderPrice(scope, ["fixture"], quote)).rejects.toThrow(
+      "provider returned no valid price",
+    );
     expect(await cachedProviderPrice(scope, ["fixture"], quote)).toBe(0.2);
     expect(await cachedProviderPrice(scope, ["fixture"], quote)).toBe(0.2);
     expect(quote).toHaveBeenCalledTimes(2);
@@ -182,11 +184,11 @@ it("falls back on failed quotes, retries them, and never serves an expired quote
     .mockResolvedValueOnce(0.2)
     .mockRejectedValueOnce(new Error("unavailable"));
   const price = () => new HetznerProvider(env).hourlyPriceUSD("cx23", config);
-  expect(await price()).toBeUndefined();
+  await expect(price()).rejects.toThrow("unavailable");
   expect(await price()).toBe(0.2);
   expect(await price()).toBe(0.2);
   vi.setSystemTime(Date.now() + 300_000);
-  expect(await price()).toBeUndefined();
+  await expect(price()).rejects.toThrow("unavailable");
   expect(quote).toHaveBeenCalledTimes(3);
 });
 
@@ -199,9 +201,30 @@ it("bounds retained pricing entries and treats synchronous quote failures as una
   );
   await cachedProviderPrice(scope, ["oldest"], quote);
   expect(quote).toHaveBeenCalledTimes(258);
-  expect(
-    await cachedProviderPrice(scope, ["failure"], () => {
+  await expect(
+    cachedProviderPrice(scope, ["failure"], () => {
       throw new Error("unavailable");
     }),
-  ).toBeUndefined();
+  ).rejects.toThrow("unavailable");
+});
+
+it.each([
+  ["UnauthorizedOperation: sensitive body", "permission_denied"],
+  ["upstream error with sensitive URL", "quote_error"],
+])("records safe fallback reason for %s", async (message, reason) => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const quote = () => Promise.reject(new Error(message));
+  const cost = await quotedLeaseCost({}, "aws", "c7a.2xlarge", 3600, quote);
+  expect(cost).toMatchObject({ hourlyUSD: 3, maxUSD: 3, pricingFallback: { reason } });
+  expect(JSON.stringify(cost)).not.toContain("sensitive");
+  expect(warn).toHaveBeenCalledOnce();
+  const override = await quotedLeaseCost(
+    { CRABBOX_COST_RATES_JSON: '{"aws:c7a.2xlarge":0.5}' },
+    "aws",
+    "c7a.2xlarge",
+    3600,
+    quote,
+  );
+  expect(override).toEqual({ hourlyUSD: 0.5, maxUSD: 0.5 });
+  expect(warn).toHaveBeenCalledOnce();
 });

@@ -96,6 +96,7 @@ type CoordinatorLeasePolicy struct {
 }
 
 type CoordinatorLease struct {
+	PricingFallback              *CoordinatorPriceFallback      `json:"pricingFallback,omitempty"`
 	LeasePolicy                  *CoordinatorLeasePolicy        `json:"leasePolicy,omitempty"`
 	PolicyNotice                 string                         `json:"policyNotice,omitempty"`
 	ImageEvidence                *ImageEvidence                 `json:"imageEvidence,omitempty"`
@@ -941,21 +942,34 @@ type TestFailure struct {
 }
 
 type CoordinatorUsageSummary struct {
-	Month          string                  `json:"month"`
-	Scope          string                  `json:"scope"`
-	Owner          string                  `json:"owner,omitempty"`
-	Org            string                  `json:"org,omitempty"`
-	Leases         int                     `json:"leases"`
-	ActiveLeases   int                     `json:"activeLeases"`
-	RuntimeSeconds int64                   `json:"runtimeSeconds"`
-	EstimatedUSD   float64                 `json:"estimatedUSD"`
-	ReservedUSD    float64                 `json:"reservedUSD"`
-	CommittedUSD   *float64                `json:"committedUSD,omitempty"`
-	ByOwner        []CoordinatorUsageGroup `json:"byOwner"`
-	ByOrg          []CoordinatorUsageGroup `json:"byOrg"`
-	ByProvider     []CoordinatorUsageGroup `json:"byProvider"`
-	ByServerType   []CoordinatorUsageGroup `json:"byServerType"`
-	ByMachine      []CoordinatorUsageGroup `json:"byMachine"`
+	Month            string                       `json:"month"`
+	Scope            string                       `json:"scope"`
+	Owner            string                       `json:"owner,omitempty"`
+	Org              string                       `json:"org,omitempty"`
+	Leases           int                          `json:"leases"`
+	ActiveLeases     int                          `json:"activeLeases"`
+	RuntimeSeconds   int64                        `json:"runtimeSeconds"`
+	EstimatedUSD     float64                      `json:"estimatedUSD"`
+	ReservedUSD      float64                      `json:"reservedUSD"`
+	CommittedUSD     *float64                     `json:"committedUSD,omitempty"`
+	ByOwner          []CoordinatorUsageGroup      `json:"byOwner"`
+	ByOrg            []CoordinatorUsageGroup      `json:"byOrg"`
+	ByProvider       []CoordinatorUsageGroup      `json:"byProvider"`
+	ByServerType     []CoordinatorUsageGroup      `json:"byServerType"`
+	ByMachine        []CoordinatorUsageGroup      `json:"byMachine"`
+	PricingFallbacks []CoordinatorPricingFallback `json:"pricingFallbacks,omitempty"`
+}
+
+type CoordinatorPricingFallback struct {
+	CoordinatorPriceFallback
+	Provider   string `json:"provider"`
+	ServerType string `json:"serverType"`
+	Leases     int    `json:"leases"`
+}
+
+type CoordinatorPriceFallback struct {
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
 }
 
 type CoordinatorUsageGroup struct {

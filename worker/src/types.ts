@@ -1,5 +1,6 @@
 import type { AWSQualificationTransportBinding } from "./aws-qualification-contract";
 import type { LeaseLifetimePolicy } from "./lease-lifetime";
+import type { PricingFallback } from "./provider-pricing";
 import type { ServeRelayBackend } from "./serve-relay";
 
 export interface AWSCredentials {
@@ -640,6 +641,7 @@ export interface LeaseRecord {
   idleTimeoutSeconds?: number;
   estimatedHourlyUSD: number;
   maxEstimatedUSD: number;
+  pricingFallback?: PricingFallback;
   state: "provisioning" | "active" | "released" | "expired" | "failed";
   createdAt: string;
   updatedAt: string;
