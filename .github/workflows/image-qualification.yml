@@ -166,9 +166,9 @@ jobs:
           (
             if [[ "$QUALIFICATION_MODE" == first-walk ]]; then
               cd private-baseline/worker
-              ./node_modules/.bin/wrangler deploy --dry-run \
+              ./node_modules/.bin/wrangler deploy --dry-run --minify \
                 --outdir "$ARTIFACT/worker" --config wrangler.qualification.json
-              ./node_modules/.bin/wrangler deploy --dry-run \
+              ./node_modules/.bin/wrangler deploy --dry-run --minify \
                 --outdir "$ARTIFACT/authority" --config wrangler.aws-qualification-authority.jsonc
             else
               cd harness/worker

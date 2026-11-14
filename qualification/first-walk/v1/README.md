@@ -30,7 +30,8 @@ Only this separate checkout receives the overlay.
 The resulting version-2 build receipt and artifact manifest bind baseline commit
 and tree, package/overlay/recipe/configuration hashes, complete resulting Worker
 source identity and every output's size/hash. The sealed outputs include the
-private coordinator and private authority modules. The authority configuration
+private coordinator and private authority modules, minified by the pinned toolchain
+to retain the existing 128 MiB aggregate artifact cap. The authority configuration
 is pinned separately; it is the unchanged baseline
 `worker/wrangler.aws-qualification-authority.jsonc`. Credentialed consumers require the
 same package identity and reject legacy first-walk manifests. Mint and retained
@@ -73,7 +74,8 @@ node /absolute/protected/scripts/image-qualification-control.mjs prepare-build \
 ```
 
 Then follow the dispatch workflow's Go and Wrangler **dry-run** build, staging and
-manifest commands, including the authority dry-run with
+manifest commands, including `--minify` on both private Wrangler builds and
+the authority dry-run with
 `--config wrangler.aws-qualification-authority.jsonc` and output under
 `$ARTIFACT/authority`. This packages an authority module; it does not upload or
 activate it. Before a live cycle, management receipts must verify that the serving
