@@ -226,6 +226,10 @@ func RenderTailscaleHostname(template, leaseID, slug, provider string) string {
 }
 
 func resolveNetworkTarget(ctx context.Context, cfg Config, server Server, target SSHTarget) (resolvedNetworkTarget, error) {
+	if target.providerNetworkTarget != nil {
+		target = *target.providerNetworkTarget
+	}
+	target.NetworkKind = NetworkPublic
 	meta := serverTailscaleMetadata(server)
 	switch cfg.Network {
 	case NetworkPublic:
@@ -237,12 +241,15 @@ func resolveNetworkTarget(ctx context.Context, cfg Config, server Server, target
 				if !probeSSHTransport(ctx, &target, 6*time.Second) {
 					return resolvedNetworkTarget{}, Exit(5, "network=tailscale requested for static host %s but SSH is not reachable; is this client joined to the tailnet?", target.Host)
 				}
+				target.NetworkKind = NetworkTailscale
 				return resolvedNetworkTarget{Target: target, Network: NetworkTailscale}, nil
 			}
 			return resolvedNetworkTarget{}, Exit(5, "network=tailscale requested but lease %s has no tailnet address", blank(server.Labels["lease"], server.Name))
 		}
 		next := target
 		next.Host = host
+		next.NetworkKind = NetworkTailscale
+		next.providerNetworkTarget = &target
 		if !probeSSHTransport(ctx, &next, 6*time.Second) {
 			return resolvedNetworkTarget{}, Exit(5, "network=tailscale requested but %s is not reachable over SSH; is this client joined to the tailnet?", host)
 		}
@@ -254,8 +261,13 @@ func resolveNetworkTarget(ctx context.Context, cfg Config, server Server, target
 		}
 		next := target
 		next.Host = host
+		next.NetworkKind = NetworkTailscale
+		next.providerNetworkTarget = &target
 		if probeSSHTransport(ctx, &next, 5*time.Second) {
 			return resolvedNetworkTarget{Target: next, Network: NetworkTailscale}, nil
+		}
+		if target.Host == "" {
+			return resolvedNetworkTarget{}, Exit(5, "tailnet host %s is not reachable and lease %s has no provider SSH address for fallback", host, blank(server.Labels["lease"], server.Name))
 		}
 		return resolvedNetworkTarget{Target: target, Network: NetworkPublic, FallbackReason: "tailscale_unreachable"}, nil
 	}
@@ -270,6 +282,9 @@ func bootstrapNetworkTarget(cfg Config, server Server, target SSHTarget) SSHTarg
 		return target
 	}
 	next := target
+	if target.providerNetworkTarget == nil {
+		next.providerNetworkTarget = &target
+	}
 	next.Host = host
 	next.NetworkKind = NetworkTailscale
 	return next

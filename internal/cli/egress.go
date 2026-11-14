@@ -423,7 +423,7 @@ func (a App) egressStart(ctx context.Context, args []string, runMode bool) (err 
 	if !useCoordinator || !coord.hasConfiguredAuth() {
 		return Exit(2, "%s requires a configured coordinator login; run crabbox login --url <broker-url> first", name)
 	}
-	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
+	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, true)
 	if err != nil {
 		return err
 	}
@@ -633,7 +633,7 @@ func (a App) egressStop(ctx context.Context, args []string) error {
 	var target SSHTarget
 	resolved := false
 	if cfgErr == nil {
-		if _, resolvedTarget, resolvedLeaseID, resolveErr := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false); resolveErr == nil {
+		if _, resolvedTarget, resolvedLeaseID, resolveErr := a.resolveNetworkLeaseTarget(ctx, cfg, *id, true); resolveErr == nil {
 			target = resolvedTarget
 			leaseID = resolvedLeaseID
 			resolved = true

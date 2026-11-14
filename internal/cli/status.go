@@ -56,6 +56,7 @@ func (a App) status(ctx context.Context, args []string) error {
 		statusCtx, cancel = context.WithTimeout(ctx, *waitTimeout)
 	}
 	defer cancel()
+	fallbackPrinted := false
 	for {
 		var state statusView
 		var err error
@@ -93,6 +94,10 @@ func (a App) status(ctx context.Context, args []string) error {
 				return timeoutErr
 			}
 			return err
+		}
+		if state.NetworkFallbackReason != "" && !fallbackPrinted {
+			fmt.Fprintf(a.Stderr, "network fallback %s\n", state.NetworkFallbackReason)
+			fallbackPrinted = true
 		}
 		addStatusLifetime(&state, cfg)
 		if *jsonOut {
@@ -254,35 +259,36 @@ func statusViewFromLeaseTarget(ctx context.Context, cfg Config, lease LeaseTarge
 		serverID = server.DisplayID()
 	}
 	return statusView{
-		LifetimePolicy:   server.LifetimePolicy,
-		ID:               lease.LeaseID,
-		Slug:             ServerSlug(server),
-		Provider:         provider,
-		TargetOS:         blank(server.Labels["target"], cfg.TargetOS),
-		WorkRoot:         statusWorkRoot(cfg, server, target),
-		WindowsMode:      blank(server.Labels["windows_mode"], cfg.WindowsMode),
-		State:            state,
-		ServerID:         serverID,
-		ServerType:       server.ServerType.Name,
-		Host:             server.PublicNet.IPv4.IP,
-		Pond:             blank(server.Labels[pondLabelKey], cfg.Pond),
-		Network:          resolved.Network,
-		Tailscale:        tailscale,
-		SSHHost:          target.Host,
-		SSHHostKey:       target.SSHHostKey,
-		SSHUser:          redactedSSHUser(cfg, server, target),
-		SSHPort:          target.Port,
-		SSHFallbackPorts: target.FallbackPorts,
-		SSHKey:           target.Key,
-		LastTouchedAt:    blank(LeaseLabelTimeDisplay(server.Labels["last_touched_at"]), server.Labels["last_touched_at"]),
-		IdleFor:          idleForString(server.Labels["last_touched_at"], time.Now()),
-		IdleTimeout:      LeaseLabelDurationDisplay(server.Labels["idle_timeout_secs"], server.Labels["idle_timeout"]),
-		ExpiresAt:        blank(LeaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]),
-		Labels:           server.Labels,
-		ProviderMetadata: inspectProviderMetadata(provider, server.ProviderMetadata),
-		ImageEvidence:    CloneImageEvidence(server.ImageEvidence),
-		HasHost:          hasHost,
-		Ready:            ready,
+		LifetimePolicy:        server.LifetimePolicy,
+		ID:                    lease.LeaseID,
+		Slug:                  ServerSlug(server),
+		Provider:              provider,
+		TargetOS:              blank(server.Labels["target"], cfg.TargetOS),
+		WorkRoot:              statusWorkRoot(cfg, server, target),
+		WindowsMode:           blank(server.Labels["windows_mode"], cfg.WindowsMode),
+		State:                 state,
+		ServerID:              serverID,
+		ServerType:            server.ServerType.Name,
+		Host:                  server.PublicNet.IPv4.IP,
+		Pond:                  blank(server.Labels[pondLabelKey], cfg.Pond),
+		Network:               resolved.Network,
+		NetworkFallbackReason: resolved.FallbackReason,
+		Tailscale:             tailscale,
+		SSHHost:               target.Host,
+		SSHHostKey:            target.SSHHostKey,
+		SSHUser:               redactedSSHUser(cfg, server, target),
+		SSHPort:               target.Port,
+		SSHFallbackPorts:      target.FallbackPorts,
+		SSHKey:                target.Key,
+		LastTouchedAt:         blank(LeaseLabelTimeDisplay(server.Labels["last_touched_at"]), server.Labels["last_touched_at"]),
+		IdleFor:               idleForString(server.Labels["last_touched_at"], time.Now()),
+		IdleTimeout:           LeaseLabelDurationDisplay(server.Labels["idle_timeout_secs"], server.Labels["idle_timeout"]),
+		ExpiresAt:             blank(LeaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]),
+		Labels:                server.Labels,
+		ProviderMetadata:      inspectProviderMetadata(provider, server.ProviderMetadata),
+		ImageEvidence:         CloneImageEvidence(server.ImageEvidence),
+		HasHost:               hasHost,
+		Ready:                 ready,
 	}, nil
 }
 
@@ -310,21 +316,22 @@ func leaseStatusStateCanBeReady(lease LeaseTarget, state string) bool {
 }
 
 type StatusView struct {
-	Retention         *SessionDiskRetentionView `json:"retention,omitempty"`
-	LeasePolicy       *CoordinatorLeasePolicy   `json:"leasePolicy,omitempty"`
-	RemainingLifetime string                    `json:"remainingLifetime,omitempty"`
-	MaxLifetime       string                    `json:"maxLifetime,omitempty"`
-	LifetimePolicy    *LeaseLifetimePolicy      `json:"lifetimePolicy,omitempty"`
-	ID                string                    `json:"id"`
-	Slug              string                    `json:"slug,omitempty"`
-	Provider          string                    `json:"provider"`
-	TargetOS          string                    `json:"target"`
-	WorkRoot          string                    `json:"workroot,omitempty"`
-	WindowsMode       string                    `json:"windowsMode,omitempty"`
-	State             string                    `json:"state"`
-	ServerID          string                    `json:"serverId"`
-	ServerType        string                    `json:"serverType"`
-	ImageEvidence     *ImageEvidence            `json:"imageEvidence,omitempty"`
+	NetworkFallbackReason string                    `json:"-"`
+	Retention             *SessionDiskRetentionView `json:"retention,omitempty"`
+	LeasePolicy           *CoordinatorLeasePolicy   `json:"leasePolicy,omitempty"`
+	RemainingLifetime     string                    `json:"remainingLifetime,omitempty"`
+	MaxLifetime           string                    `json:"maxLifetime,omitempty"`
+	LifetimePolicy        *LeaseLifetimePolicy      `json:"lifetimePolicy,omitempty"`
+	ID                    string                    `json:"id"`
+	Slug                  string                    `json:"slug,omitempty"`
+	Provider              string                    `json:"provider"`
+	TargetOS              string                    `json:"target"`
+	WorkRoot              string                    `json:"workroot,omitempty"`
+	WindowsMode           string                    `json:"windowsMode,omitempty"`
+	State                 string                    `json:"state"`
+	ServerID              string                    `json:"serverId"`
+	ServerType            string                    `json:"serverType"`
+	ImageEvidence         *ImageEvidence            `json:"imageEvidence,omitempty"`
 	// ProviderResourceID optionally exposes an immutable provider resource ID.
 	// ServerID keeps each provider's existing identity semantics; for Islo it
 	// is the sandbox name rather than the immutable sandbox ID.

@@ -349,7 +349,7 @@ func (b *Backend) targetFromInstance(item instance, req core.ResolveRequest, acc
 		}
 	}
 	if req.ReleaseOnly {
-		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
+		return core.LeaseTarget{Server: server, SSH: core.SSHTargetFromConfig(cfgForRun(b.Cfg), server.PublicNet.IPv4.IP), LeaseID: leaseID}, nil
 	}
 	cfg := cfgForRun(b.Cfg)
 	ssh := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
