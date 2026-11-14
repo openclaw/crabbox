@@ -1,0 +1,108 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "path": "internal/cli/bootstrap_generated.go",
+      "beforeSha256": "04d00f15f985deccafd2ab6bf2d525786832e14072d60116c4d09ac29f842f19",
+      "afterSha256": "53d30e6bd63dd4c3a248856cacefcb45240d10cd50096ce8d98f2b574d95e0ba"
+    },
+    {
+      "path": "internal/cli/bootstrap_ownership_linux_test.go",
+      "beforeSha256": "63b98b76b84e56d197df3d078930cb931748618c0f5d0880f730658373ddc5f0",
+      "afterSha256": "86c4ba6e90653fd4408728c60a6404866b07803166db96e1a0c8fc289851e5da"
+    },
+    {
+      "path": "internal/cli/bootstrap_ownership_test.go",
+      "beforeSha256": "10d37fd1d41304e5211117cd9789a9ed8e921c9afeee6c9b859de6505eb47746",
+      "afterSha256": "5aecdb44ece6ea57b041a1b0b4d152fd0a914818ff05577db200d2ef0087d649"
+    },
+    {
+      "path": "internal/cli/bootstrap_test.go",
+      "beforeSha256": "25233701083e1d867e170f71a4abab8306d99d003355d2baaf78bf48f177cc98",
+      "afterSha256": "f2d4fd169f08fb6adce54f7b8b0fe1da45d377f54d41ebe9117d3772901ccdc7"
+    },
+    {
+      "path": "recipes/bootstrap/v1/linuxOwnershipRepair.sh",
+      "beforeSha256": "27feba431bfec40c6a1ae65b7362ed3bb01ed6543481c0feddacbc36966b5799",
+      "afterSha256": "eb26f129e9a7cb77ef2197688fcfb3b05356be86b889473e9808287cf016bbf4"
+    },
+    {
+      "path": "worker/src/aws-first-walk.ts",
+      "beforeSha256": null,
+      "afterSha256": "774111712fc49eea0e0d769af358df0ed3fc80e351abb71443b2c938efe40a0d"
+    },
+    {
+      "path": "worker/src/aws-qualification-authority.ts",
+      "beforeSha256": "f2fdb23770dc47c0168b14195ab69f80fba62924ccc9edd9b724d354f163c1de",
+      "afterSha256": "f44bb73efd6a5b223a6c4d33b3d530ed541035cfe2947a088879973ef5e90ee5"
+    },
+    {
+      "path": "worker/src/aws-qualification-contract.ts",
+      "beforeSha256": "51b712db3cb0fab331310370b6d71f508795156792c233b895394bc5efa7c763",
+      "afterSha256": "d7e814d1dd82254302bd8a031be9decaf62bb1aa794a08e3c24b874998f917b2"
+    },
+    {
+      "path": "worker/src/bootstrap.generated.ts",
+      "beforeSha256": "22791277ab9ce0966046b4c3df26c81f5496ff2252abf4280c5cad59763e1988",
+      "afterSha256": "6ecaeb4958373d3268863e628e719dd553d5885b5a72c7adf1ee2a908f2b206e"
+    },
+    {
+      "path": "worker/src/checkpoints.ts",
+      "beforeSha256": "30d53c3374ef3df6ac81ad858566bddc5d9d19cfaa5b7c22bd9a22f9f16f1559",
+      "afterSha256": "1f3a45dee0a7dc8f501319ffb98d8963f3ca51aacadd2df7908c11e61234e588"
+    },
+    {
+      "path": "worker/src/coordinator-entry.ts",
+      "beforeSha256": "dfe8a8bcde39b6c5a1adda9fac7856c102d549d2f742a2d27b7e4dd30d747b05",
+      "afterSha256": "8d0f835cafb0f26223fe02dc340fa97d55761b95939f85476015dba4d4ffe6d4"
+    },
+    {
+      "path": "worker/src/fleet.ts",
+      "beforeSha256": "2eb24480b064145a479526d293e786f77bbfeb265774fbc92b83dba2cb839a42",
+      "afterSha256": "25d867d31ddbd3259796977c9cab03f3ecf0824964038809f348fd8756b07187"
+    },
+    {
+      "path": "worker/src/qualification-transport-probe.ts",
+      "beforeSha256": null,
+      "afterSha256": "52db87b04a70e9b2aa67e5b23082ee12c82c6a0132292e224f486a7b91cd2e5a"
+    },
+    {
+      "path": "worker/src/types.ts",
+      "beforeSha256": "2a5c8304ca16bfd66446cb0b25945727f7c409ddff43c6d21931af94e32d5ef4",
+      "afterSha256": "911e4704a3a124ec7d4b5cb5286cfd45f59a095327d81c967c628eefa9778431"
+    },
+    {
+      "path": "worker/test/aws-first-walk.test.ts",
+      "beforeSha256": null,
+      "afterSha256": "2095fa709e20e332a7c9393cddfc976c06135e51f30bce5a9999eb6f10c5082d"
+    },
+    {
+      "path": "worker/test/aws-qualification-authority.test.ts",
+      "beforeSha256": "50c0c7f751f0c7cd9b4211655f515d3593826c332dda35be2bb807e75b49f31c",
+      "afterSha256": "a504c1cbfb159a37fe62d0cd51a4736e885f3029789243b814b8e86993ff8425"
+    },
+    {
+      "path": "worker/test/bootstrap-ownership.test.ts",
+      "beforeSha256": "2c4300864d873db950fadf718007a8bb97553f7a369e33e4f583d2afc2687288",
+      "afterSha256": "3f5abac11aa065bc477746799867fd6c3c9e78a358e09409e7e640e8c33e54db"
+    },
+    {
+      "path": "worker/test/checkpoints.test.ts",
+      "beforeSha256": "aacf63b349be33d6ec8c908e6da47ef0bf920ddd2b1c1a6c60caef98db889647",
+      "afterSha256": "3510be97f55cceab1d1d7dce3e45c44937701f7b5ed45b2aeec0741a41953a19"
+    },
+    {
+      "path": "worker/test/qualification-transport-probe.test.ts",
+      "beforeSha256": null,
+      "afterSha256": "df43f9cf27587620f6fd9fe70ea8d0480fa3757388320d111190f35c7380d99f"
+    }
+  ],
+  "baselineCommit": "c75e9323c8ecf36b8cb4b6da1a524a046e26538c",
+  "baselineTree": "32c4d4acd7eed1ce98383ac34d7eca1c1d2fcbe7",
+  "overlaySha256": "ae90bb74e894d2b6cbcf2ba1454701d3fb6aa371c7090e082d3754742c57a52c",
+  "preservedCandidate": "7033f4a72d1494ade990e7d7af913c829da5fe18",
+  "privateConfigSha256": "ce68fd010139528843b250d9d7acd1c6c55fb8a063c3cefa38c874dd4c1fc2bb",
+  "recipeSha256": "eb26f129e9a7cb77ef2197688fcfb3b05356be86b889473e9808287cf016bbf4",
+  "workerSourceSha256": "d690214fe0a88badf4bf511d9429e5394174c69a35add3cedf148762b20c9f37",
+  "authorityConfigSha256": "fdc03224a2c52aa95d1b3cfd2be70d7bd7db08afe9fd5f61ce63c22ec47b990d"
+}
