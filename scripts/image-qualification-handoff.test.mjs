@@ -464,7 +464,9 @@ if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
       assert.equal(Object.keys(f.state().workers).length, phase === "after" ? 1 : 0);
       const missingOutputs = Object.fromEntries(Object.keys(f.armEnv()).map((key) => [key, ""]));
       for (const policyHash of ["", "0".repeat(64)]) {
-        const before = f.state().events.filter((event) => /^[A-Z]+ api\.cloudflare\.com\//.test(event));
+        const before = f
+          .state()
+          .events.filter((event) => /^[A-Z]+ api\.cloudflare\.com\//.test(event));
         const refused = f.invoke("finalize", {
           ...missingOutputs,
           QUALIFICATION_EXPECTED_POLICY_HASH: policyHash,
