@@ -121,7 +121,7 @@ example `tag:crabbox`) access to `autogroup:internet` through exit nodes.
 When an exit node is selected, `network: auto` prefers the tailnet host for bootstrap
 because the provider/public SSH path can become asymmetric once the lease routes
 outbound traffic through the exit node. Before sync or the remote command, Crabbox
-verifies on the box that an exit node is selected in `tailscale prefs` and that the
+verifies on the box that an exit node is selected in `tailscale debug prefs` and that the
 node can reach the public internet. If that check fails, the run stops and reports the
 exit-node egress failure (`tailscale exit node … joined but remote internet egress
 failed`), which usually means the exit node is not approved, the policy does not grant
