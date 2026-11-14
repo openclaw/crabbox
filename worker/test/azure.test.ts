@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AzureClient,
   AzureProvisioningRejectedError,
+  azureAttemptNameSeed,
   azureCleanupRecoveryAuditKey,
   azureLinuxCloudInit,
   azureLabelsFromTags,
@@ -30,6 +31,7 @@ import {
   ProviderProvisioningCleanupError,
   providerProvisioningCleanupClaim,
 } from "../src/provider-provisioning";
+import { leaseProviderName } from "../src/slug";
 import type { Env, LeaseRecord, ProviderMachine } from "../src/types";
 
 const baseEnv: Env = {
@@ -327,6 +329,138 @@ function testLeaseConfig(overrides: Partial<LeaseConfig> = {}): LeaseConfig {
     ...overrides,
   };
 }
+
+describe("Azure create cleanup-debt fence", () => {
+  afterEach(() => vi.restoreAllMocks());
+  const lease = ownedAzureLease();
+  const name = leaseProviderName(azureAttemptNameSeed(lease.id, "eastus", "spot", 0), lease.slug!);
+  const claimKey = azureOwnedDeleteClaimKey(lease.providerScope!, name, lease.id);
+  const deferredKey = `azure-cleanup:sub:crabbox-leases:eastus:${name}`;
+
+  function fixture(withStorage = true) {
+    const store = memoryAzureDeleteClaimStorage();
+    const deferredCleanup = vi
+      .fn<(request: AzureDeferredCleanupRequest) => Promise<void>>()
+      .mockResolvedValue(undefined);
+    const client = new AzureClient(baseEnv, {
+      ...(withStorage ? { ownedDeleteClaimStorage: store.storage } : {}),
+      deferredCleanup,
+    });
+    seedAzureAuthCache(client);
+    const mutations: string[] = [];
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "PUT" || init?.method === "DELETE")
+        mutations.push(`${init.method} ${url.pathname}`);
+      if (url.pathname.includes("/virtualMachines/"))
+        return Response.json({
+          name: url.pathname.split("/").at(-1),
+          properties: { provisioningState: "Succeeded" },
+        });
+      if (url.pathname.includes("/publicIPAddresses/"))
+        return Response.json({ properties: { ipAddress: "192.0.2.10" } });
+      return Response.json({ value: [] });
+    };
+    vi.spyOn(AzureClient.prototype, "ensureSharedInfra").mockResolvedValue({
+      vnet: "vnet",
+      nsg: "nsg",
+    });
+    const rollback = vi.spyOn(AzureClient.prototype, "deleteOwnedServer");
+    const create = () =>
+      client.createServerWithFallback(
+        testLeaseConfig({ serverTypeExplicit: false }),
+        lease.id,
+        lease.slug!,
+        lease.owner,
+      );
+    return { ...store, client, create, mutations, deferredCleanup, rollback };
+  }
+
+  it.each([
+    ["delete claim", claimKey],
+    ["deferred cleanup record", deferredKey],
+  ])("refuses create with an outstanding %s without dispatch or fallback", async (_kind, key) => {
+    const f = fixture();
+    f.records.set(key, { cloudID: name });
+    const read = vi.spyOn(f.storage, "get");
+    const error = await f.create().catch((caught: unknown) => caught);
+    expect(providerProvisioningCleanupClaim(error)).toEqual({
+      provider: "azure",
+      cloudID: name,
+      region: "eastus",
+      providerScope: lease.providerScope,
+    });
+    expect(String(error)).toContain("outstanding cleanup");
+    expect(f.mutations).toEqual([]);
+    expect(f.rollback).not.toHaveBeenCalled();
+    expect(f.deferredCleanup).not.toHaveBeenCalled();
+    expect(f.putKeys).toEqual([]);
+    expect(
+      read.mock.calls.filter(([readKey]) => readKey.startsWith("provider%3Aazure%3Adelete-claim:")),
+    ).toEqual([[claimKey]]);
+    expect(read).toHaveBeenCalledWith(deferredKey);
+  });
+
+  it.each(["no debt", "completed cleanup", "no storage"])(
+    "allows create with %s",
+    async (scenario) => {
+      const f = fixture(scenario !== "no storage");
+      if (scenario === "completed cleanup") {
+        f.records.set(claimKey, {
+          version: 2,
+          provider: "azure",
+          leaseID: lease.id,
+          slug: lease.slug,
+          owner: lease.owner,
+          cloudID: name,
+          providerScope: lease.providerScope,
+          completed: true,
+          stableResourceIdentity: "[]",
+        });
+        // All canonical resources are absent; successful cleanup clears the claim.
+        const createFetcher = f.client.fetcher;
+        f.client.fetcher = async (input) => azureResourceNotFoundResponse(new URL(String(input)));
+        await f.client.deleteOwnedServer({ ...lease, cloudID: name });
+        f.client.fetcher = createFetcher;
+        f.rollback.mockClear();
+      }
+      expect(f.records.has(claimKey)).toBe(false);
+      expect((await f.create()).server.cloudID).toBe(name);
+      expect(f.mutations).toEqual([
+        `PUT ${lease.providerScope}/providers/Microsoft.Network/publicIPAddresses/${name}-pip`,
+        `PUT ${lease.providerScope}/providers/Microsoft.Network/networkInterfaces/${name}-nic`,
+        `PUT ${lease.providerScope}/providers/Microsoft.Compute/virtualMachines/${name}`,
+      ]);
+      expect(f.rollback).not.toHaveBeenCalled();
+      expect(f.deferredCleanup).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([claimKey, deferredKey])("fails closed when reading %s fails", async (key) => {
+    const f = fixture();
+    const get = f.storage.get;
+    const failure = new Error("cleanup storage read failed");
+    f.storage.get = async <T>(readKey: string) => {
+      if (readKey === key) throw failure;
+      return get<T>(readKey);
+    };
+    const error = await f.create().catch((caught: unknown) => caught);
+    expect(error).toMatchObject({
+      message: expect.stringContaining("cleanup storage read failed"),
+      cause: failure,
+    });
+    expect(providerProvisioningCleanupClaim(error)).toEqual({
+      provider: "azure",
+      cloudID: name,
+      region: "eastus",
+      providerScope: lease.providerScope,
+    });
+    expect(f.mutations).toEqual([]);
+    expect(f.rollback).not.toHaveBeenCalled();
+    expect(f.deferredCleanup).not.toHaveBeenCalled();
+    expect(f.putKeys).toEqual([]);
+  });
+});
 
 describe("Azure LRO polling protocols", () => {
   const scope = "/subscriptions/sub/resourceGroups/crabbox-leases";
@@ -2810,6 +2944,65 @@ describe("azure provider", () => {
       expect([...records.values()]).toEqual(error ? [originalClaim] : []);
     },
   );
+
+  it("refuses a same-name public IP replacement after recorded deletion progress, then completes when absent", async () => {
+    const { records, storage } = memoryAzureDeleteClaimStorage();
+    const client = new AzureClient(baseEnv, { ownedDeleteClaimStorage: storage });
+    seedAzureAuthCache(client);
+    const lease = ownedAzureLease();
+    const pipID = `${lease.providerScope}/providers/Microsoft.Network/publicIPAddresses/${lease.cloudID}-pip`;
+    let identity = "pip-immutable-id";
+    let present = true;
+    const deletes: string[] = [];
+    client.fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") {
+        deletes.push(url.pathname);
+        present = false;
+        return new Response(null, { status: 204 });
+      }
+      if (present && url.pathname === pipID)
+        return Response.json({
+          id: pipID,
+          name: `${lease.cloudID}-pip`,
+          location: "eastus",
+          tags: ownedAzureTags(),
+          properties: { resourceGuid: identity },
+        });
+      return azureResourceNotFoundResponse(url);
+    };
+    const put = storage.put;
+    storage.put = async (key, value) => {
+      await put(key, value);
+      if ((value as { deletedStableResourceIdentity?: string }).deletedStableResourceIdentity)
+        throw new Error("interrupted after public IP deletion progress");
+    };
+    await expect(client.deleteOwnedServer(lease)).rejects.toThrow(
+      "interrupted after public IP deletion progress",
+    );
+    expect(deletes).toEqual([pipID]);
+    const claim = records.get(
+      azureOwnedDeleteClaimKey(lease.providerScope!, lease.cloudID, lease.id),
+    );
+    expect(claim).toMatchObject({
+      deletedStableResourceIdentity: expect.stringContaining(identity),
+    });
+    storage.put = put;
+    deletes.length = 0;
+    present = true;
+    identity = "replacement-pip-immutable-id";
+    await expect(client.deleteOwnedServer(lease)).rejects.toThrow(
+      "observed resource identity changed",
+    );
+    expect(deletes).toEqual([]);
+    expect(
+      records.get(azureOwnedDeleteClaimKey(lease.providerScope!, lease.cloudID, lease.id)),
+    ).toEqual(claim);
+    present = false;
+    await expect(client.deleteOwnedServer(lease)).resolves.toBeUndefined();
+    expect(deletes).toEqual([]);
+    expect(records.size).toBe(0);
+  });
 
   it("refuses a fresh Azure NIC without durable public IP deletion progress", async () => {
     const { records, storage } = memoryAzureDeleteClaimStorage();

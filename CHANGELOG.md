@@ -64,6 +64,7 @@
 
 ### Fixed
 
+- Azure: refuse direct coordinator creates against outstanding cleanup for the same resource name, preserving strict immutable-identity checks during cleanup. [PR 3050](https://github.com/openclaw/crabbox/pull/3050).
 - Linux bootstrap: quiesce scheduled APT updates on provisioned guests without interrupting active package transactions, preventing mid-lease SSH renewal failures. [PR 3049](https://github.com/openclaw/crabbox/pull/3049). Thanks @excelsier.
 - Actions: preserve exact runner cleanup ownership when registration is canceled after guest configuration, without starting the listener. [PR 3045](https://github.com/openclaw/crabbox/pull/3045). Thanks @vincentkoc.
 - Apple Machine: report workload exit codes without replaying output, bound native diagnostics, and show failed-creation recovery guidance in `run` and `warmup`. [PR 3044](https://github.com/openclaw/crabbox/pull/3044). Thanks @coygeek.

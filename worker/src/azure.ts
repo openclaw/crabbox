@@ -120,6 +120,30 @@ export function azureOwnedDeleteClaimKey(
     .join(":");
 }
 
+export function azureDeferredCleanupKey(
+  request: Pick<
+    AzureDeferredCleanupRequest,
+    "subscription" | "resourceGroup" | "location" | "name"
+  >,
+): string {
+  return `azure-cleanup:${encodeURIComponent(request.subscription)}:${encodeURIComponent(request.resourceGroup)}:${encodeURIComponent(request.location)}:${encodeURIComponent(request.name)}`;
+}
+
+export async function azureHasOutstandingCleanup(
+  storage: Pick<AzureOwnedDeleteClaimStorage, "get"> | undefined,
+  request: Pick<
+    AzureDeferredCleanupRequest,
+    "subscription" | "resourceGroup" | "location" | "name" | "leaseID"
+  > & { providerScope: string },
+): Promise<boolean> {
+  if (!storage) return false;
+  const [deferred, deletion] = await Promise.all([
+    storage.get(azureDeferredCleanupKey(request)),
+    storage.get(azureOwnedDeleteClaimKey(request.providerScope, request.name, request.leaseID)),
+  ]);
+  return deferred !== undefined || deletion !== undefined;
+}
+
 export function azureCleanupRecoveryAuditKey(
   providerScope: string,
   cloudID: string,
@@ -2743,6 +2767,32 @@ export class AzureClient {
     nameSeed = leaseID,
   ): Promise<ProviderMachine> {
     const name = leaseProviderName(nameSeed, slug);
+    const providerScope = this.providerScope();
+    if (
+      await azureHasOutstandingCleanup(this.ownedDeleteClaimStorage, {
+        subscription: this.subscription,
+        resourceGroup: this.resourceGroup,
+        location,
+        name,
+        leaseID,
+        providerScope,
+      }).catch((error: unknown) => {
+        // Unknown cleanup debt must also stop market and region fallback.
+        throw new ProviderProvisioningCleanupError(
+          `Azure outstanding cleanup check failed for ${name}: ${errorMessage(error)}`,
+          { provider: "azure", cloudID: name, region: location, providerScope },
+          error,
+        );
+      })
+    ) {
+      throw new ProviderProvisioningCleanupError(
+        `Azure create refused: outstanding cleanup for ${name} in ${location} (${providerScope})`,
+        { provider: "azure", cloudID: name, region: location, providerScope },
+        undefined,
+      );
+    }
+    // A create admitted just before a claim is written can still recreate a resource.
+    // Cleanup refuses that replacement and leaves it visible for operator resolution.
     try {
       return await this.createVMUnchecked(config, location, leaseID, slug, owner, name, infra);
     } catch (error) {
