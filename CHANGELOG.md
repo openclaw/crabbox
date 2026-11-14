@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Qualification: verify runtime binding identity for idle controllers and retain cleanup-only recovery receipts when management metadata omits binding props. https://github.com/openclaw/crabbox/pull/3136 Thanks @joshavant.
+- Run: normalize fresh and replacement SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity, and preserve child-environment filtering after replacement. https://github.com/openclaw/crabbox/pull/3131 Thanks @vincentkoc.
+
+## 0.83.0 - 2026-11-10
+
 ### Added
 
 - Fuel evidence: add an optional source-built Wasmtime helper and native qualification through existing SSH artifacts, with waited-child CPU diagnostics on fixture failure and a v2 compilation policy requiring fresh calibration, following [the phase-one design](https://github.com/openclaw/crabbox/pull/1196). Thanks @zozo123 and @steipete.

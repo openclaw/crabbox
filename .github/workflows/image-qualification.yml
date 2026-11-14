@@ -12,10 +12,10 @@ on:
         required: true
         type: string
       mode:
-        description: Mint a disposable image or qualify a borrowed retained image
+        description: Mint/retained image qualification or one-copy synthetic first-walk
         type: choice
         default: mint
-        options: [mint, retained]
+        options: [mint, retained, first-walk]
       retained_image_id:
         description: Retained mode only, exact borrowed AMI
         type: string
@@ -62,6 +62,11 @@ jobs:
     outputs:
       candidate_sha: ${{ steps.authorize.outputs.candidate_sha }}
     steps:
+      - name: Set up protected Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.22.1
+          package-manager-cache: false
       - name: Check out protected tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -132,6 +137,10 @@ jobs:
             node harness/scripts/image-qualification-control.mjs retained-capsule \
               retained candidate "$ARTIFACT/retained-capsule.json"
           fi
+          if [[ "$QUALIFICATION_MODE" == first-walk ]]; then
+            node harness/scripts/image-qualification-control.mjs first-walk-recipe \
+              candidate "$ARTIFACT"
+          fi
           (
             cd candidate
             GOTOOLCHAIN=local GOWORK=off CGO_ENABLED=0 GOFLAGS=-mod=readonly \
@@ -142,6 +151,9 @@ jobs:
             ./node_modules/.bin/wrangler deploy --dry-run \
               --outdir "$ARTIFACT/worker" --config wrangler.jsonc
           )
+          # The deployer uploads executable modules only; omit unused debug maps
+          # before sealing so the combined CLI/Worker stays within the 128 MiB cap.
+          find "$ARTIFACT/worker" -type f -name '*.map' -delete
           cp candidate/scripts/mint-aws-devtools-image.sh \
             candidate/scripts/devtools-image-smoke-linux.sh \
             candidate/scripts/install-linux-developer-tools.sh \
@@ -170,6 +182,11 @@ jobs:
       handoff_artifact_id: ${{ steps.handoff.outputs.artifact-id }}
       handoff_artifact_digest: ${{ steps.handoff.outputs.artifact-digest }}
     steps:
+      - name: Set up protected Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.22.1
+          package-manager-cache: false
       - name: Check out protected admission tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -190,7 +207,10 @@ jobs:
           QUALIFICATION_CANDIDATE_ARTIFACT_ID: ${{ needs.build-candidate.outputs.candidate_artifact_id }}
           QUALIFICATION_CANDIDATE_RUN_ID: ${{ needs.build-candidate.outputs.candidate_run_id }}
           QUALIFICATION_HANDOFF_DIR: ${{ runner.temp }}/image-qualification-handoff
+          QUALIFICATION_ISOLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_JSON }}
+          QUALIFICATION_ISOLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_SHA256 }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          QUALIFICATION_TRANSPORT_PROFILE: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_TRANSPORT_PROFILE }}
           QUALIFICATION_AUTHORITY_SHA: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_SHA }}
           QUALIFICATION_AUTHORITY_VERSION: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_VERSION }}
           QUALIFICATION_EXPECTED_POLICY_HASH: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_POLICY_HASH }}
@@ -225,7 +245,7 @@ jobs:
       relay_version: ${{ steps.deploy.outputs.relay_version }}
       relay_binding_digest: ${{ steps.deploy.outputs.relay_binding_digest }}
       relay_url: ${{ steps.deploy.outputs.relay_url }}
-      executor_token: ${{ steps.deploy.outputs.executor_token }}
+      executor_token_sha256: ${{ steps.deploy.outputs.executor_token_sha256 }}
       deployment_hash: ${{ steps.deploy.outputs.deployment_hash }}
       manifest_sha: ${{ steps.deploy.outputs.manifest_sha }}
       binding_digest: ${{ steps.deploy.outputs.binding_digest }}
@@ -238,6 +258,11 @@ jobs:
       region: ${{ steps.deploy.outputs.region }}
       base_ami_id: ${{ steps.deploy.outputs.base_ami_id }}
     steps:
+      - name: Set up protected Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.22.1
+          package-manager-cache: false
       - name: Check out protected tooling only
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -258,8 +283,12 @@ jobs:
       - name: Revalidate, deploy, read back, and enroll
         id: deploy
         env:
+          QUALIFICATION_EXECUTOR_CREDENTIAL: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_EXECUTOR_CREDENTIAL }}
           GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_ISOLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_JSON }}
+          QUALIFICATION_ISOLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_SHA256 }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          QUALIFICATION_TRANSPORT_PROFILE: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_TRANSPORT_PROFILE }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           QUALIFICATION_CONTROLLER_TOKEN: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_CONTROLLER_TOKEN }}
           QUALIFICATION_AUTHORITY_SHA: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_SHA }}
@@ -296,6 +325,11 @@ jobs:
     timeout-minutes: 5
     environment: image-qualification
     steps:
+      - name: Set up protected Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.22.1
+          package-manager-cache: false
       - name: Check out protected tooling only
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -311,7 +345,10 @@ jobs:
         id: arm
         env:
           GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_ISOLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_JSON }}
+          QUALIFICATION_ISOLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_SHA256 }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          QUALIFICATION_TRANSPORT_PROFILE: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_TRANSPORT_PROFILE }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           QUALIFICATION_CONTROLLER_TOKEN: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_CONTROLLER_TOKEN }}
           QUALIFICATION_CANDIDATE_ARTIFACT_DIGEST: ${{ needs.build-candidate.outputs.candidate_artifact_digest }}
@@ -357,9 +394,14 @@ jobs:
 
   execute:
     name: Execute candidate without cloud credentials
-    needs: [authorize, build-candidate, deploy-enroll, arm]
+    needs: [authorize, build-candidate, admit, deploy-enroll, arm]
+    # This separate protected environment contains only the exact-run credential.
+    environment: image-qualification-executor
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.mode == 'retained' && 38 || 80 }}
+    timeout-minutes: ${{ inputs.mode == 'first-walk' && 130 || inputs.mode == 'retained' && 38 || 80 }}
     steps:
       - name: Check out protected executor
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -367,6 +409,11 @@ jobs:
           ref: ${{ github.workflow_sha }}
           path: harness
           persist-credentials: false
+      - name: Set up protected executor runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.22.1
+          package-manager-cache: false
       - name: Download exact candidate
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -376,7 +423,9 @@ jobs:
       - name: Run publisher rollback qualification
         env:
           QUALIFICATION_RELAY_URL: ${{ needs.deploy-enroll.outputs.relay_url }}
-          QUALIFICATION_EXECUTOR_TOKEN: ${{ needs.deploy-enroll.outputs.executor_token }}
+          QUALIFICATION_EXECUTOR_CREDENTIAL: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_EXECUTOR_CREDENTIAL }}
+          QUALIFICATION_EXECUTOR_TOKEN_SHA256: ${{ needs.deploy-enroll.outputs.executor_token_sha256 }}
+          QUALIFICATION_HANDOFF_SHA256: ${{ needs.admit.outputs.handoff_sha256 }}
           QUALIFICATION_AWS_REGION: ${{ needs.deploy-enroll.outputs.region }}
           QUALIFICATION_BASE_AMI_ID: ${{ needs.deploy-enroll.outputs.base_ami_id }}
           QUALIFICATION_EXPIRES_AT: ${{ needs.deploy-enroll.outputs.expires_at }}
@@ -384,7 +433,7 @@ jobs:
           QUALIFICATION_PROOF_DIR: ${{ runner.temp }}/image-qualification-execute-proof
         run: |
           set +e
-          harness/scripts/image-qualification-execute.sh
+          node harness/scripts/image-qualification-executor-token.mjs
           status=$?
           set -e
           [[ "$status" -eq 137 ]]
@@ -405,6 +454,11 @@ jobs:
     timeout-minutes: ${{ inputs.mode == 'retained' && 8 || 20 }}
     environment: image-qualification
     steps:
+      - name: Set up protected Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.22.1
+          package-manager-cache: false
       - name: Check out protected tooling only
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -419,7 +473,10 @@ jobs:
       - name: Revalidate identity and finalize idempotently
         env:
           GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_ISOLATION_JSON: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_JSON }}
+          QUALIFICATION_ISOLATION_SHA256: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ISOLATION_SHA256 }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          QUALIFICATION_TRANSPORT_PROFILE: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_TRANSPORT_PROFILE }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           QUALIFICATION_CONTROLLER_TOKEN: ${{ secrets.CRABBOX_IMAGE_QUALIFICATION_CONTROLLER_TOKEN }}
           QUALIFICATION_EXPECTED_RUN_ID: ${{ needs.deploy-enroll.outputs.run_id }}
@@ -434,7 +491,7 @@ jobs:
           QUALIFICATION_EXPECTED_BINDING_DIGEST: ${{ needs.deploy-enroll.outputs.binding_digest }}
           QUALIFICATION_EXPECTED_AUTHORITY_SHA: ${{ needs.deploy-enroll.outputs.authority_sha }}
           QUALIFICATION_EXPECTED_AUTHORITY_VERSION: ${{ needs.deploy-enroll.outputs.authority_version }}
-          QUALIFICATION_EXPECTED_POLICY_HASH: ${{ needs.deploy-enroll.outputs.policy_hash }}
+          QUALIFICATION_EXPECTED_POLICY_HASH: ${{ needs.deploy-enroll.outputs.policy_hash || vars.CRABBOX_IMAGE_QUALIFICATION_POLICY_HASH }}
           QUALIFICATION_EXPECTED_ENROLLED_AT: ${{ needs.deploy-enroll.outputs.enrolled_at }}
           QUALIFICATION_EXPECTED_EXPIRES_AT: ${{ needs.deploy-enroll.outputs.expires_at }}
           QUALIFICATION_EXPECTED_EXECUTION_MANIFEST_DIGEST: ${{ needs.deploy-enroll.outputs.execution_manifest_digest }}
