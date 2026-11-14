@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Egress: keep concurrent proxy connection IDs unique to prevent paired immediate and timed-out HTTP 502 responses. [PR 3116](https://github.com/openclaw/crabbox/pull/3116). Thanks @robojarvis.
+
 - Run: print recovery stop commands with the exact lease ID so shared static-host slots remain independently releasable. [PR 3106](https://github.com/openclaw/crabbox/pull/3106). Thanks @saariuslystoned.
 
 - Warmup: report the resolver-selected network consistently with status for static SSH hosts. [PR 3108](https://github.com/openclaw/crabbox/pull/3108). Thanks @saariuslystoned.

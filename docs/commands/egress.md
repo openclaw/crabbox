@@ -30,7 +30,8 @@ for manually managed sessions.
 Both sides connect outbound to the coordinator using one-use tickets. The
 coordinator pairs the two WebSockets and forwards multiplexed proxy frames; it
 never opens internet connections itself. Only the host agent dials real
-outbound TCP connections.
+outbound TCP connections. Applications can open multiple proxy connections
+concurrently, for example for parallel package downloads.
 
 Automatic setup sends the client ticket through SSH stdin, keeping it
 out of SSH, remote shell, and helper process arguments. A foreground helper
