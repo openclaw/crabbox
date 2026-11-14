@@ -174,6 +174,22 @@ function installAPI(file) {
             `upload failed: ${JSON.parse(Buffer.from(process.env.QUALIFICATION_EXECUTOR_CREDENTIAL, "base64url").toString("utf8")).token}`,
           );
         const metadata = JSON.parse(await init.body.get("metadata").text());
+        // Validate the wire format, rather than accepting Wrangler config here.
+        // The upload API takes one migration object; config uses an array.
+        if (metadata.main_module === "private-bootstrap.mjs") {
+          assert.deepEqual(metadata.migrations, {
+            new_tag: "qualification-v1",
+            new_sqlite_classes: ["FleetDurableObject"],
+          });
+        } else if (metadata.main_module === "tombstone.mjs") {
+          assert.deepEqual(metadata.migrations, {
+            old_tag: "qualification-v1",
+            new_tag: "qualification-delete",
+            deleted_classes: ["FleetDurableObject"],
+          });
+        } else {
+          assert.equal(metadata.migrations, undefined);
+        }
         for (const binding of metadata.bindings)
           if (binding.name === "FLEET") binding.namespace_id ??= namespaceId(name);
         const profile = transportProfile(metadata.bindings);
