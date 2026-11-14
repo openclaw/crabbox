@@ -59,6 +59,8 @@ export function readQualificationPackage(directory) {
     if (digest(packageFile(directory, `${qualificationPackagePath}/${file}`)) !== contract[field])
       throw new Error(`qualification package digest mismatch: ${file}`);
   }
+  if (!/^[a-f0-9]{64}$/.test(contract.authorityConfigSha256))
+    throw new Error("invalid private authority configuration digest");
   if (!/^[a-f0-9]{64}$/.test(contract.workerSourceSha256))
     throw new Error("invalid private source digest");
   const seen = new Set();
@@ -85,6 +87,7 @@ export function readQualificationPackage(directory) {
       overlaySha256: contract.overlaySha256,
       recipeSha256: contract.recipeSha256,
       privateConfigSha256: contract.privateConfigSha256,
+      authorityConfigSha256: contract.authorityConfigSha256,
       workerSourceSha256: contract.workerSourceSha256,
     },
   };
@@ -191,6 +194,11 @@ export function prepareQualificationBuild(protectedRoot, candidate, baseline) {
     )
       throw new Error("candidate changed protected qualification package");
   const productionInputsSha256 = assertProductionBaseline(candidate, baseline, contract);
+  if (
+    digest(packageFile(baseline, "worker/wrangler.aws-qualification-authority.jsonc")) !==
+    identity.authorityConfigSha256
+  )
+    throw new Error("private authority configuration mismatch");
   for (const file of contract.files) {
     const target = path.join(baseline, file.path);
     if (file.beforeSha256 === null) {

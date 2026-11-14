@@ -168,6 +168,8 @@ jobs:
               cd private-baseline/worker
               ./node_modules/.bin/wrangler deploy --dry-run \
                 --outdir "$ARTIFACT/worker" --config wrangler.qualification.json
+              ./node_modules/.bin/wrangler deploy --dry-run \
+                --outdir "$ARTIFACT/authority" --config wrangler.aws-qualification-authority.jsonc
             else
               cd harness/worker
               ./node_modules/.bin/wrangler deploy --dry-run \
@@ -176,7 +178,7 @@ jobs:
           )
           # The deployer uploads executable modules only; omit unused debug maps
           # before sealing so the combined CLI/Worker stays within the 128 MiB cap.
-          find "$ARTIFACT/worker" -type f -name '*.map' -delete
+          find "$ARTIFACT" -type f -name '*.map' -delete
           cp candidate/scripts/mint-aws-devtools-image.sh \
             candidate/scripts/devtools-image-smoke-linux.sh \
             candidate/scripts/install-linux-developer-tools.sh \

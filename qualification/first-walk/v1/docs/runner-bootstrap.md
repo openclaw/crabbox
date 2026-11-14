@@ -1,3 +1,8 @@
+> Qualification-only reference preserved from the prior diagnostic candidate.
+> Runtime commands below refer to the **separate patched private build checkout**.
+> Read [the package build boundary](../README.md) first. These extensions are not
+> installed by normal production builds, and this document authorizes no live work.
+
 # Runner Bootstrap
 
 Read this when:

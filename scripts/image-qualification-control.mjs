@@ -731,6 +731,11 @@ export function createManifest(candidateDir, artifactDir, candidateSha, workflow
     (file) => file.path.startsWith("worker/") && /\.(?:m?js)$/.test(file.path),
   );
   if (modules.length === 0) throw new Error("candidate Worker bundle is absent");
+  if (
+    buildReceipt.qualification &&
+    !files.some((file) => file.path === "authority/aws-qualification-authority.js")
+  )
+    throw new Error("private authority bundle is absent");
   const manifest = {
     version: buildReceipt.version,
     ...(buildReceipt.qualification ? { qualification: buildReceipt.qualification } : {}),
@@ -793,6 +798,8 @@ export function verifyManifest(artifactDir, expectedCandidate, expectedWorkflow)
   verifyRetainedCapsule(artifactDir, expectedCandidate);
   if (process.env.QUALIFICATION_MODE === "first-walk") {
     readFirstWalkRecipe(path.join(artifactDir, "candidate"));
+    if (!manifest.files.some((file) => file.path === "authority/aws-qualification-authority.js"))
+      throw new Error("private authority bundle is absent");
   }
   if (retainedImageFromEnv()) {
     const installer = path.join(artifactDir, "candidate/scripts/install-linux-developer-tools.sh");

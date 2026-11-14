@@ -103,5 +103,6 @@
   "preservedCandidate": "7033f4a72d1494ade990e7d7af913c829da5fe18",
   "privateConfigSha256": "ce68fd010139528843b250d9d7acd1c6c55fb8a063c3cefa38c874dd4c1fc2bb",
   "recipeSha256": "eb26f129e9a7cb77ef2197688fcfb3b05356be86b889473e9808287cf016bbf4",
-  "workerSourceSha256": "d690214fe0a88badf4bf511d9429e5394174c69a35add3cedf148762b20c9f37"
+  "workerSourceSha256": "d690214fe0a88badf4bf511d9429e5394174c69a35add3cedf148762b20c9f37",
+  "authorityConfigSha256": "fdc03224a2c52aa95d1b3cfd2be70d7bd7db08afe9fd5f61ce63c22ec47b990d"
 }

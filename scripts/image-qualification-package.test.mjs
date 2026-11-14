@@ -41,6 +41,7 @@ function fixture() {
   git(baseline, "config", "user.name", "Qualification Fixture");
   git(baseline, "config", "user.email", "qualification@example.invalid");
   write(baseline, "worker/src/index.ts", "export default {};\n");
+  write(baseline, "worker/wrangler.aws-qualification-authority.jsonc", "{}\n");
   write(baseline, "recipes/bootstrap/v1/linuxOwnershipRepair.sh", "original\n");
   git(baseline, "add", ".");
   git(baseline, "commit", "-qm", "baseline");
@@ -75,6 +76,7 @@ function fixture() {
     overlaySha256: hash(patch),
     recipeSha256: hash(recipe),
     privateConfigSha256: hash(config),
+    authorityConfigSha256: hash("{}\n"),
     workerSourceSha256: hash(canonical(records)),
     files,
   };
@@ -196,6 +198,7 @@ test("private v2 manifests bind baseline, overlay, recipe, configuration and sou
     fs.cpSync(path.join(root, pkg), path.join(f.candidate, pkg), { recursive: true });
     const artifact = path.join(f.temp, "artifact");
     write(artifact, "worker/index.js", "export default {};\n");
+    write(artifact, "authority/aws-qualification-authority.js", "export default {};\n");
     write(artifact, "bin/crabbox", "inert fixture\n");
     const candidateSha = git(f.candidate, "rev-parse", "HEAD");
     const workflowSha = git(f.protectedRoot, "rev-parse", "HEAD");
@@ -220,6 +223,7 @@ test("private v2 manifests bind baseline, overlay, recipe, configuration and sou
       "overlaySha256",
       "recipeSha256",
       "privateConfigSha256",
+      "authorityConfigSha256",
       "workerSourceSha256",
     ]) {
       const altered = structuredClone(sealed);

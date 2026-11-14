@@ -29,12 +29,20 @@ Only this separate checkout receives the overlay.
 
 The resulting version-2 build receipt and artifact manifest bind baseline commit
 and tree, package/overlay/recipe/configuration hashes, complete resulting Worker
-source identity and every output's size/hash. Credentialed consumers require the
+source identity and every output's size/hash. The sealed outputs include the
+private coordinator and private authority modules. The authority configuration
+is pinned separately; it is the unchanged baseline
+`worker/wrangler.aws-qualification-authority.jsonc`. Credentialed consumers require the
 same package identity and reject legacy first-walk manifests. Mint and retained
 qualification keep their version-1 contract. Old first-walk artifacts/handoffs
 cannot be reused: build fresh artifacts and a fresh handoff from adopted protected
 tooling. This package must reach protected main before that supported dispatch;
-this draft does not authorize adoption or execution.
+this draft does not authorize adoption or execution. After protected-tooling
+adoption a distinct open same-repository candidate PR is required by the existing
+dispatch owner; the merged tooling PR cannot also be that open candidate. Its
+package must equal the protected package, and production inputs must still equal
+the pinned baseline. Main advancing production inputs requires a reviewed baseline
+refresh, never a relaxed guard.
 
 Production configuration, source, generated bootstrap and CLI readiness reporting
 remain byte-identical to the declared baseline. There is no production import of
@@ -65,7 +73,14 @@ node /absolute/protected/scripts/image-qualification-control.mjs prepare-build \
 ```
 
 Then follow the dispatch workflow's Go and Wrangler **dry-run** build, staging and
-manifest commands. Never use the patched checkout as a production source tree.
+manifest commands, including the authority dry-run with
+`--config wrangler.aws-qualification-authority.jsonc` and output under
+`$ARTIFACT/authority`. This packages an authority module; it does not upload or
+activate it. Before a live cycle, management receipts must verify that the serving
+private authority matches the sealed module and protocol, or separately authorize
+its supported adoption with recovery protection. Preserve any active registry
+state; do not downgrade an active run. Never use the patched checkout as a
+production source tree.
 Run overlay Worker tests/typechecks and generated-recipe consistency checks there.
 The protected executor, authority, finalizer and independent reaper still own live
 resource settlement; build/test success is not live lifecycle proof.

@@ -458,6 +458,30 @@ test("protected build prep binds source, rejects substitution, and seals exact b
     const priorMode = process.env.QUALIFICATION_MODE;
     try {
       process.env.QUALIFICATION_MODE = "first-walk";
+      // This parent import resolves its real protected package, not the temporary
+      // harness. Also check the actual copied module in a fresh first-walk process.
+      fs.cpSync(path.join(root, "qualification"), path.join(harness, "qualification"), {
+        recursive: true,
+      });
+      const rejected = spawnSync(
+        process.execPath,
+        [
+          path.join(harness, "scripts/image-qualification-control.mjs"),
+          "manifest",
+          candidate,
+          artifact,
+        ],
+        {
+          env: {
+            ...process.env,
+            QUALIFICATION_CANDIDATE_SHA: candidateSha,
+            QUALIFICATION_WORKFLOW_SHA: workflowSha,
+          },
+          encoding: "utf8",
+        },
+      );
+      assert.equal(rejected.status, 1);
+      assert.match(rejected.stderr, /candidate build-input receipt mismatch/);
       // Legacy build receipts cannot admit private diagnostic artifacts.
       assert.throws(
         () => module.verifyManifest(artifact, candidateSha, workflowSha),

@@ -324,6 +324,10 @@ function fixture(t, mode = "retained") {
   }
   if (mode === "first-walk") {
     write(
+      "authority/aws-qualification-authority.js",
+      "throw new Error('inert authority fixture');",
+    );
+    write(
       "candidate/recipes/bootstrap/v1/linuxOwnershipRepair.sh",
       fs.readFileSync(path.join(root, "scripts/fixtures/first-walk-reviewed-recipe.sh"), "utf8"),
     );
