@@ -135,6 +135,28 @@ uses the existing fallback rates; admission, activation, and recovery retain the
 own lifecycle rules. The quote aborts its HTTP requests; already-running credential
 resolution or authority RPCs remain with their existing owners.
 
+AWS Spot pricing requires `ec2:DescribeSpotPriceHistory` in the coordinator's IAM
+policy. Reprint `crabbox admin providers policy --provider aws` to update an older
+policy. If a quote fails, the coordinator logs `pricing_fallback` with a safe
+reason (`permission_denied`, `timeout`, `quote_unavailable`, or `quote_error`)
+and the fallback hourly rate. The lease includes `pricingFallback`, and
+`crabbox usage` prints a warning for affected leases. Its JSON output includes
+`usage.pricingFallbacks`, grouped by provider, server type, and reason. Raw
+provider error bodies are not exposed. Successful explicit rate overrides take
+precedence and do not carry a fallback warning.
+
+With monthly spend limits disabled, a quote failure does not prevent a run.
+With a monthly limit enabled, admission or extension rejects a decision that
+depends on a failed quote, including recorded fallback cost already committed
+in that budget scope. A static fallback cannot prove that the limit is safe.
+Restore provider pricing or configure a verified `CRABBOX_COST_RATES_JSON` rate
+before retrying a failed candidate quote. Changing IAM or rate configuration
+does not reprice existing records; recorded fallbacks contributing committed
+cost require accounting review before approving additional spend in that scope.
+Intentional static estimates for providers or markets without
+a live quote retain their existing behavior. Historical leases created before
+fallback diagnostics were recorded are not relabeled or repriced automatically.
+
 ## Budget guardrails
 
 Budgets are enforced on lease creation. Exceeding any active-lease limit or monthly

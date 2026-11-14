@@ -219,6 +219,7 @@ func TestAdminAWSPolicyPrintsProviderPermissions(t *testing.T) {
 	for _, want := range []string{
 		`"ec2:RunInstances"`,
 		`"ec2:DescribeInstanceTypes"`,
+		`"ec2:DescribeSpotPriceHistory"`,
 		`"ec2:TerminateInstances"`,
 		`"ec2:CreateSecurityGroup"`,
 		`"ec2:CreateImage"`,
@@ -243,6 +244,7 @@ func TestAdminAWSPolicyCanIncludeMacHostPermissions(t *testing.T) {
 	for _, want := range []string{
 		`"ec2:RunInstances"`,
 		`"ec2:DescribeInstanceTypes"`,
+		`"ec2:DescribeSpotPriceHistory"`,
 		`"ec2:AllocateHosts"`,
 		`"ec2:ReleaseHosts"`,
 		`"ec2:CreateAction": "AllocateHosts"`,
@@ -262,7 +264,7 @@ func TestAdminAWSPolicyCanIncludeMacHostPermissions(t *testing.T) {
 	}
 }
 
-func TestAdminProviderPoliciesAllowInstanceMetadata(t *testing.T) {
+func TestAdminProviderPoliciesAllowInstanceMetadataAndSpotPricing(t *testing.T) {
 	for _, command := range []string{"aws-policy", "providers"} {
 		for _, option := range [][]string{nil, {"--mac-hosts"}, {"--host-lifecycle"}, {"--target", "macos"}} {
 			t.Run(command+"/"+strings.Join(option, "_"), func(t *testing.T) {
@@ -287,19 +289,24 @@ func TestAdminProviderPoliciesAllowInstanceMetadata(t *testing.T) {
 				if err := json.Unmarshal(stdout.Bytes(), &policy); err != nil {
 					t.Fatal(err)
 				}
+				allowed := map[string]bool{}
 				for _, statement := range policy.Statement {
 					if statement.Effect != "Allow" || statement.Resource != "*" {
 						continue
 					}
 					if actions, ok := statement.Action.([]any); ok {
 						for _, action := range actions {
-							if action == "ec2:DescribeInstanceTypes" {
-								return
+							if name, ok := action.(string); ok {
+								allowed[name] = true
 							}
 						}
 					}
 				}
-				t.Fatal("policy does not allow ec2:DescribeInstanceTypes on all resources")
+				for _, action := range []string{"ec2:DescribeInstanceTypes", "ec2:DescribeSpotPriceHistory"} {
+					if !allowed[action] {
+						t.Fatalf("policy does not allow %s on all resources", action)
+					}
+				}
 			})
 		}
 	}
