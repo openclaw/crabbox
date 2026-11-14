@@ -308,3 +308,51 @@ func TestPrepareLeaseClaimEndpointPreservesCleanupIdentity(t *testing.T) {
 		t.Fatalf("labels=%v, must not promote mutable cloud tags into cleanup authority", prepared.Labels)
 	}
 }
+
+func TestAWSReadinessStatusUsesExistingBootOwners(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX guest observer")
+	}
+	for _, tc := range []struct {
+		name, failed, pid, expected, activating string
+		workspace, bootstrapped                 bool
+	}{
+		{name: "slow ownership repair", pid: "123", expected: "pending ownership-repair"},
+		{name: "bootstrap pending", pid: "0", expected: "pending bootstrap"},
+		{name: "cloud config pending", activating: "cloud-config.service", expected: "pending cloud-config"},
+		{name: "cloud final pending", activating: "cloud-final.service", bootstrapped: true, expected: "pending cloud-final"},
+		{name: "bootstrap terminal", failed: "crabbox-bootstrap.service", expected: "failed bootstrap"},
+		{name: "cloud final terminal", failed: "cloud-final.service", expected: "failed cloud-final"},
+		{name: "workspace terminal", failed: "crabbox-workspace-ready.service", expected: "failed workspace-ready"},
+		{name: "stale bootstrap marker still needs current boot", bootstrapped: true, expected: "pending workspace-ready"},
+		{name: "marker never establishes readiness", workspace: true, expected: "pending readiness-check"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, script := range map[string]string{
+				"systemctl": "#!/bin/sh\ncase \"$1\" in is-failed) [ \"$3\" = \"$FIXTURE_FAILED\" ];; show) if [ \"$2\" = --property=ActiveState ]; then [ \"$4\" = \"$FIXTURE_ACTIVATING\" ] && echo activating; else printf '%s\\n' \"$FIXTURE_PID\"; fi;; cat) exit 0;; *) exit 1;; esac\n",
+				"pgrep":     "#!/bin/sh\n[ \"$1 $2 $3 $4\" = '-P 123 -x chown' ]\n",
+			} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for path, present := range map[string]bool{"workspace": tc.workspace, "bootstrapped": tc.bootstrapped} {
+				if present {
+					if err := os.WriteFile(filepath.Join(dir, path), nil, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			script := strings.NewReplacer("/run/crabbox/workspace-ready", filepath.Join(dir, "workspace"), "/var/lib/crabbox/bootstrapped", filepath.Join(dir, "bootstrapped")).Replace(awsLinuxReadinessStatus)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "sh", "-c", script)
+			cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "FIXTURE_FAILED="+tc.failed, "FIXTURE_PID="+tc.pid, "FIXTURE_ACTIVATING="+tc.activating)
+			out, err := cmd.CombinedOutput()
+			if err != nil || strings.TrimSpace(string(out)) != tc.expected {
+				t.Fatalf("observer=%q error=%v want %q", out, err, tc.expected)
+			}
+		})
+	}
+}

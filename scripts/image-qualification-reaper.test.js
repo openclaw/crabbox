@@ -5,7 +5,15 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import test from "node:test";
+import { transportMarkers, transportProfile } from "./image-qualification-transport.mjs";
 
+import {
+  fixtureAdmission,
+  ownedSettings,
+  namespaceId,
+  controllerContent,
+} from "./fixtures/qualification-isolation.mjs";
+const isolation = fixtureAdmission();
 const controller = "crabbox-image-qualification-controller";
 const candidate = "crabbox-image-qualification-42-1";
 const staleCandidate = "crabbox-image-qualification-41-1";
@@ -30,14 +38,48 @@ function bindings(hash) {
 }
 
 function initialState(options = {}) {
+  const controllerHash = options.controllerHash ?? deploymentHash;
+  const intended = bindings(controllerHash);
+  if (options.v2)
+    intended.push(...transportMarkers("controller-v2", { deploymentHash: controllerHash }));
+  const currentController = {
+    ...ownedSettings(isolation.admission, controller, intended),
+    version,
+  };
+  if (options.v2) {
+    const binding = currentController.bindings.find((b) => b.name === "AUTHORITY");
+    delete binding.props;
+    binding.environment = "production";
+  }
+  const probe = options.probe
+    ? {
+        protocol: 1,
+        challenge: "c".repeat(64),
+        identity: {
+          runId: "image-qualification-42-1",
+          owner: "maintainer",
+          candidateSha: "a".repeat(40),
+          candidateWorker: candidate,
+          deploymentHash: options.probeHash ?? deploymentHash,
+          expiresAt: "2099-01-01T00:00:00.000Z",
+        },
+        candidateVersion: version,
+        authorityVersion: version,
+        expiresAt: "2099-01-01T00:00:00.000Z",
+        state: options.probe,
+        ...(["observed", "verified"].includes(options.probe)
+          ? { observedAt: "2026-11-13T00:00:00.000Z" }
+          : {}),
+      }
+    : null;
   return {
     options,
+    probe,
     events: [],
+    deleteURLs: [],
     candidate: options.candidate ?? false,
     staleCandidate: options.staleCandidate ?? false,
-    controller: options.controller
-      ? { bindings: bindings(deploymentHash), version, tags: [] }
-      : null,
+    controller: options.controller ? currentController : null,
     run: options.active
       ? {
           runId: "image-qualification-42-1",
@@ -62,18 +104,30 @@ function installAPI(file) {
     const method = init.method ?? "GET";
     const route = url.pathname.replace(/^\/client\/v4\/accounts\/a{32}/, "");
     events.push(`${method} ${route}`);
+    if (method === "DELETE") state.deleteURLs.push(`${route}${url.search}`);
     if (url.hostname === `${controller}.example.workers.dev`) {
       assert.equal(init.headers.authorization, `Bearer ${token}`);
       assert.equal(method, "POST");
       if (options.discoveryStatus) return json({ error: "forbidden" }, options.discoveryStatus);
       if (Object.hasOwn(options, "discovery")) return json(options.discovery);
       assert.ok(state.controller);
-      const hash = state.controller.bindings.find((item) => item.name === "AUTHORITY").props
-        .deploymentHash;
+      const hash =
+        transportProfile(state.controller.bindings)?.identity.deploymentHash ??
+        state.controller.bindings.find((item) => item.name === "AUTHORITY").props.deploymentHash;
+      if (route === "/transport-discover") return json({ probe: state.probe });
+      if (route === "/transport-settle") {
+        const input = JSON.parse(init.body);
+        assert.equal(hash, state.probe.identity.deploymentHash);
+        assert.equal(input.challenge, state.probe.challenge);
+        state.probe.state = input.verified ? "verified" : "cancelled";
+        return json(state.probe);
+      }
       if (state.run && hash !== state.run.deploymentHash) {
         return json({ error: "controller_error" }, 409);
       }
       if (route === "/discover") {
+        if (state.probe && !["verified", "cancelled"].includes(state.probe.state))
+          return json({ error: "unsettled" }, 409);
         const result = { run: state.run };
         if (options.changeAfterDiscovery) state.controller.version = changedVersion;
         if (options.changeBindingsAfterDiscovery)
@@ -95,7 +149,24 @@ function installAPI(file) {
     assert.equal(url.hostname, "api.cloudflare.com", "no real network access");
     assert.equal(init.headers.authorization, "Bearer synthetic-cloudflare-token");
     if (route === "/workers/subdomain") return api({ subdomain: "example" });
-    if (route === "/workers/durable_objects/namespaces") return api([]);
+    if (route.startsWith(`/workers/scripts/${authority}/`)) {
+      if (route.endsWith("/settings"))
+        return api({
+          bindings: options.authorityRedirect
+            ? [
+                ...isolation.bindings,
+                { name: "BROKER", type: "service", service: "production-coordinator" },
+              ]
+            : isolation.bindings,
+        });
+      if (route.endsWith("/deployments"))
+        return api({ deployments: [{ versions: [{ version_id: version, percentage: 100 }] }] });
+      if (route.endsWith("/subdomain")) return api({ enabled: false, previews_enabled: false });
+      if (route.endsWith("/schedules")) return api({ schedules: [] });
+    }
+    if (route.endsWith("/routes") || route === "/workers/domains") return api([]);
+    if (route === "/workers/durable_objects/namespaces")
+      return api(isolation.record.authority.namespaces);
     if (route === "/workers/scripts") {
       scriptLists += 1;
       if (options.idleCleanupFailure && scriptLists > 1) return api(null, 503);
@@ -105,30 +176,47 @@ function installAPI(file) {
       ]);
     }
     if (route === `/workers/scripts/${staleCandidate}/settings`) {
-      return api({
-        bindings: [
+      return api(
+        ownedSettings(isolation.admission, staleCandidate, [
           {
             name: "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
             type: "service",
             service: authority,
-            props: { candidateWorker: staleCandidate, deploymentHash: "c".repeat(64) },
+            props: {
+              runId: "image-qualification-41-1",
+              candidateWorker: staleCandidate,
+              deploymentHash: "c".repeat(64),
+            },
           },
-        ],
-      });
+        ]),
+      );
     }
     if (route === `/workers/scripts/${candidate}/settings`) {
-      return state.candidate
-        ? api({
-            bindings: [
+      const identity = {
+        runId: "image-qualification-42-1",
+        candidateWorker: candidate,
+        deploymentHash: options.controllerHash ?? deploymentHash,
+      };
+      const intended = [
+        ...(options.v2 && options.stage
+          ? []
+          : [
               {
                 name: "CRABBOX_AWS_QUALIFICATION_TRANSPORT",
                 type: "service",
                 service: authority,
-                props: { candidateWorker: candidate, deploymentHash },
+                props: identity,
               },
-            ],
-          })
-        : missing();
+            ]),
+        ...(options.v2 ? transportMarkers(options.stage ? "stage-v2" : "final-v2", identity) : []),
+      ];
+      const settings = ownedSettings(isolation.admission, candidate, intended);
+      if (options.v2 && !options.stage) {
+        const binding = settings.bindings.find((b) => b.type === "service");
+        delete binding.props;
+        binding.environment = "production";
+      }
+      return state.candidate ? api(settings) : missing();
     }
     if (route === `/workers/scripts/${candidate}`) {
       if (method === "PUT") return api({});
@@ -150,12 +238,25 @@ function installAPI(file) {
           tags: [],
         };
       }
+      if (state.controller && options.controllerRedirect)
+        state.controller.bindings = [
+          { name: "AUTHORITY", type: "service", service: "production-coordinator" },
+        ];
       return state.controller ? api(state.controller) : missing();
     }
-    if (route === `/workers/scripts/${controller}/versions`) {
+    if (route === `/workers/scripts/${controller}/content/v2`)
+      return controllerContent(
+        fs.readFileSync(
+          path.join(import.meta.dirname, "image-qualification-controller-worker.mjs"),
+        ),
+      );
+    if (route === `/workers/scripts/${controller}/deployments`) {
       if (options.versionStatus) return api(null, options.versionStatus);
-      return api({ items: [{ id: state.controller.version }] });
+      return api({
+        deployments: [{ versions: [{ version_id: state.controller.version, percentage: 100 }] }],
+      });
     }
+    if (route === `/workers/scripts/${controller}/schedules`) return api({ schedules: [] });
     if (route === `/workers/scripts/${controller}/subdomain`) {
       if (!state.controller) return missing();
       if (options.enableFailure && method === "POST") return api(null, 503);
@@ -167,7 +268,9 @@ function installAPI(file) {
         if (options.uploadFailure === "before") throw new Error("upload response lost");
         const metadata = JSON.parse(await init.body.get("metadata").text());
         state.controller = {
-          bindings: metadata.bindings.map(({ text, ...binding }) => binding),
+          bindings: metadata.bindings.map(({ text, ...binding }) =>
+            binding.type === "plain_text" ? { ...binding, text } : binding,
+          ),
           version,
           tags: metadata.tags ?? [],
         };
@@ -180,6 +283,8 @@ function installAPI(file) {
         return api({ id: controller });
       }
       assert.equal(method, "DELETE");
+      if (options.controllerReferenced && url.searchParams.get("force") !== "true")
+        return api(null, 409);
       if (options.deleteFailure) return api(null, 503);
       if (!options.deleteResidue) state.controller = null;
       return new Response(null, { status: 204 });
@@ -206,10 +311,13 @@ if (process.env.QUALIFICATION_TEST_STATE) {
           HOME: directory,
           RUNNER_TEMP: directory,
           CLOUDFLARE_ACCOUNT_ID: "a".repeat(32),
+          ...isolation.env,
+          ...(options?.missingAdmission ? { QUALIFICATION_ISOLATION_JSON: "" } : {}),
           CLOUDFLARE_API_TOKEN: "synthetic-cloudflare-token",
           QUALIFICATION_CONTROLLER_TOKEN: token,
           QUALIFICATION_PROOF_DIR: proofDirectory,
           QUALIFICATION_TEST_STATE: stateFile,
+          ...(options?.v2 ? { QUALIFICATION_TRANSPORT_PROFILE: "candidate-transport-v2" } : {}),
         },
       });
       assert.equal(child.error, undefined);
@@ -228,6 +336,41 @@ if (process.env.QUALIFICATION_TEST_STATE) {
   const deletes = (state) =>
     state.events.filter((event) => event === `DELETE /workers/scripts/${controller}`);
   const calls = (state) => state.events.filter((event) => /^POST \/(?!workers)/.test(event));
+
+  for (const probe of ["pending", "observed", "verified", "cancelled"]) {
+    for (const hasController of [true, false])
+      test(`fresh reaper settles canonical ${probe} probe with controller=${hasController}, without candidate/local artifacts`, (t) => {
+        const result = fixture(t, { v2: true, probe, controller: hasController })();
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(result.state.controller, null);
+        assert.equal(result.state.probe.state, probe === "verified" ? "verified" : "cancelled");
+        assert.ok(!result.state.events.some((event) => /claim|enroll|transport-open/.test(event)));
+        assert.ok(result.state.events.includes("POST /transport-discover"));
+      });
+  }
+
+  for (const probe of ["pending", "observed", "verified", "cancelled"]) {
+    for (const stage of [true, false])
+      for (const controllerPresent of [true, false])
+        test(`earlier ${probe} probe cannot strand later partial deployment; controller=${controllerPresent}; stage=${stage}`, (t) => {
+          const result = fixture(t, {
+            v2: true,
+            probe,
+            probeHash: "c".repeat(64),
+            controllerHash: "0".repeat(64),
+            controller: controllerPresent,
+            stage,
+            candidate: true,
+          })();
+          assert.equal(result.status, 0, result.stderr);
+          assert.equal(result.state.controller, null);
+          assert.equal(result.state.candidate, false);
+          assert.equal(result.state.probe.state, probe === "verified" ? "verified" : "cancelled");
+          assert.ok(
+            !result.state.events.some((event) => /claim|enroll|transport-open/.test(event)),
+          );
+        });
+  }
 
   test("a second reap is idle after successful finalization removed the controller", (t) => {
     const reap = fixture(t, { active: true, controller: true, candidate: true });
@@ -251,11 +394,42 @@ if (process.env.QUALIFICATION_TEST_STATE) {
     assert.equal(result.state.controller, null);
     assert.equal(uploads(result.state).length, 1);
     assert.equal(deletes(result.state).length, 1);
+    assert.deepEqual(result.state.deleteURLs, [`/workers/scripts/${controller}`]);
     assert.deepEqual(calls(result.state), ["POST /discover"]);
     assert.ok(
       result.state.events.indexOf(`GET /workers/scripts/${controller}/settings`) <
         result.state.events.indexOf(`PUT /workers/scripts/${controller}`),
     );
+  });
+
+  test("idle recovery deletes an existing controller without forcing dependencies", (t) => {
+    const result = fixture(t, { controller: true })();
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.result.result, "idle");
+    assert.equal(result.state.controller, null);
+    assert.equal(uploads(result.state).length, 0);
+    assert.deepEqual(result.state.deleteURLs, [`/workers/scripts/${controller}`]);
+  });
+
+  test("a referenced controller remains recoverable without a forced retry", (t) => {
+    const reap = fixture(t, { controllerReferenced: true });
+    const first = reap();
+    assert.equal(first.status, 1);
+    assert.equal(first.result.result, "failed");
+    assert.match(first.result.failure, /cleanup:.*409/);
+    assert.ok(first.state.controller);
+    assert.equal(uploads(first.state).length, 1);
+    assert.deepEqual(first.state.deleteURLs, [`/workers/scripts/${controller}`]);
+
+    const second = reap();
+    assert.equal(second.status, 1);
+    assert.match(second.result.failure, /idle cleanup:.*409/);
+    assert.deepEqual(second.state.controller, first.state.controller);
+    assert.equal(uploads(second.state).length, 1);
+    assert.deepEqual(second.state.deleteURLs, [
+      `/workers/scripts/${controller}`,
+      `/workers/scripts/${controller}`,
+    ]);
   });
 
   test("a candidate binding still recovers an active run", (t) => {
@@ -264,6 +438,8 @@ if (process.env.QUALIFICATION_TEST_STATE) {
     assert.equal(result.result.result, "finalized");
     assert.equal(result.state.run, null);
     assert.equal(result.state.candidate, false);
+    assert.ok(result.state.deleteURLs.includes(`/workers/scripts/${candidate}?force=true`));
+    assert.ok(result.state.deleteURLs.includes(`/workers/scripts/${controller}`));
     assert.deepEqual(calls(result.state), [
       "POST /discover",
       "POST /begin-finalization",
@@ -364,6 +540,7 @@ if (process.env.QUALIFICATION_TEST_STATE) {
       assert.equal(result.state.controller, null);
       assert.equal(uploads(result.state).length, 1);
       assert.deepEqual(calls(result.state), []);
+      assert.ok(result.state.deleteURLs.every((url) => url === `/workers/scripts/${controller}`));
     });
   }
 
@@ -391,7 +568,7 @@ if (process.env.QUALIFICATION_TEST_STATE) {
     })();
     assert.equal(result.status, 1);
     assert.equal(result.result.result, "failed");
-    assert.match(result.result.failure, /upload response lost.*ownership.*refusing to replace/);
+    assert.match(result.result.failure, /upload response lost.*unowned.*refusing to replace/);
     assert.ok(result.state.controller);
     assert.ok(result.state.run);
     assert.equal(result.state.candidate, true);
@@ -443,5 +620,34 @@ if (process.env.QUALIFICATION_TEST_STATE) {
     assert.equal(result.status, 1);
     assert.match(result.result.failure, /deletion was not observable/);
     assert.ok(result.state.controller);
+  });
+  for (const options of [
+    { authorityRedirect: true },
+    { missingAdmission: true },
+    { controller: true, controllerRedirect: true },
+  ]) {
+    test(`reaper cannot redirect cloud operations: ${JSON.stringify(options)}`, (t) => {
+      const result = fixture(t, options)();
+      assert.equal(result.status, 1);
+      assert.deepEqual(
+        result.state.events.filter((event) => !event.startsWith("GET ")),
+        [],
+      );
+    });
+  }
+  test("registry cannot substitute another run's candidate", (t) => {
+    const result = fixture(t, {
+      controller: true,
+      discovery: {
+        run: {
+          runId: "image-qualification-42-1",
+          candidateWorker: staleCandidate,
+          deploymentHash,
+        },
+      },
+    })();
+    assert.equal(result.status, 1);
+    assert.deepEqual(calls(result.state), ["POST /discover"]);
+    assert.equal(deletes(result.state).length, 0);
   });
 }

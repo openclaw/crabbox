@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { verifyCoordinatorDeployment } from "./verify-coordinator-deployment.mjs";
+import { bindingName, policyDigest } from "./verify-coordinator-lease-policy.mjs";
 
 const sha = "a".repeat(40);
 const config = { accountId: "b".repeat(32), apiToken: "synthetic-api-token", sha };
@@ -13,6 +14,64 @@ const deployment = {
 };
 const api = (latest = deployment) => ({ success: true, result: { deployments: [latest] } });
 const health = { ok: true, service: "crabbox-coordinator", version: { id: versionId, tag: sha } };
+
+const scopedPolicy = {
+  owners: { "github:1000000001": { maxTTLSeconds: 43200 } },
+  orgs: { "example-org": { autoExtend: "deny" } },
+};
+const bindings = (policy) => [
+  { name: bindingName, type: "plain_text", text: JSON.stringify(policy) },
+];
+const policyReplies = (policy) => [
+  api(),
+  { success: true, result: { bindings: bindings(policy) } },
+  { success: true, result: { resources: { bindings: bindings(policy) } } },
+  api(),
+];
+
+test("final workflow verification checks the complete policy after optional secret changes", async () => {
+  const f = fixture([api(), health, ...policyReplies(scopedPolicy), api()]);
+  assert.deepEqual(await f.run({ expectedPolicySHA256: policyDigest(scopedPolicy) }), {
+    sha,
+    deploymentId: deployment.id,
+    versionId,
+  });
+  assert.equal(f.calls.length, 7);
+  for (const { url, options } of f.calls) {
+    assert.deepEqual(
+      options.headers,
+      new URL(url).origin === "https://api.cloudflare.com"
+        ? { authorization: `Bearer ${config.apiToken}` }
+        : {},
+    );
+    assert.equal(options.redirect, "error");
+  }
+});
+
+test("final verification detects a lost or changed policy even when the requested commit serves", async () => {
+  const f = fixture([api(), health, ...policyReplies({})]);
+  await assert.rejects(
+    f.run({ expectedPolicySHA256: policyDigest(scopedPolicy) }),
+    /lease policy or serving version changed/,
+  );
+});
+
+test("final verification rejects a deployment that changes during policy readback", async () => {
+  const changed = api({ ...deployment, id: "33333333-3333-4333-8333-333333333333" });
+  const replies = policyReplies(scopedPolicy);
+  replies[3] = changed;
+  const f = fixture([api(), health, ...replies]);
+  await assert.rejects(
+    f.run({ expectedPolicySHA256: policyDigest(scopedPolicy) }),
+    /deployment changed during policy capture/,
+  );
+});
+
+test("missing workflow policy output fails before network access", async () => {
+  const f = fixture([]);
+  await assert.rejects(f.run({ expectedPolicySHA256: "" }), /digest is missing or invalid/);
+  assert.equal(f.calls.length, 0);
+});
 
 function fixture(replies = [api(), health, api()]) {
   const calls = [];

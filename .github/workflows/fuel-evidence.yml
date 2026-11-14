@@ -1,0 +1,172 @@
+name: Fuel evidence qualification
+
+on:
+  pull_request:
+    paths:
+      - 'tools/crabbox-wasmtime-meter/**'
+      - '.github/workflows/fuel-evidence.yml'
+      - 'scripts/workflow_action_pins*.go'
+      - 'go.mod'
+      - 'go.sum'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuel-evidence-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  inputs:
+    name: Fuel workload inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Compile one baseline and its explicit workload mutation
+        run: |
+          python3 -B tools/crabbox-wasmtime-meter/fixture/qualify.py build-inputs "$RUNNER_TEMP/fuel-inputs"
+          git diff --exit-code
+          test "$(du -sb "$RUNNER_TEMP/fuel-inputs" | cut -f1)" -le 40000000
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuel-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fuel-inputs/
+          if-no-files-found: error
+          retention-days: 1
+
+  native:
+    name: Fuel native (${{ matrix.architecture }})
+    needs: inputs
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - architecture: amd64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: '1.97.0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Set isolated Cargo build directory
+        run: |
+          printf 'CARGO_TARGET_DIR=%s/fuel-target\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: fuel-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fuel-inputs
+      - name: Install the pinned validation toolchain
+        run: rustup toolchain install 1.97.0 --profile minimal --component rustfmt
+      - name: Verify source package provenance and effective features
+        working-directory: tools/crabbox-wasmtime-meter
+        run: |
+          test -z "${RUSTFLAGS:-}"
+          test -z "${CARGO_ENCODED_RUSTFLAGS:-}"
+          cargo metadata --locked --features fixture --format-version 1 > "$RUNNER_TEMP/fuel-metadata.json"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          metadata = json.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'fuel-metadata.json').read_text())
+          nodes = {node['id']: node for node in metadata['resolve']['nodes']}
+          engine = next(p for p in metadata['packages'] if p['name'] == 'wasmtime')
+          assert engine['version'] == '50.0.1'
+          vcs = json.loads(pathlib.Path(engine['manifest_path']).with_name('.cargo_vcs_info.json').read_text())
+          assert vcs['git']['sha1'] == 'c307ec81de02852d815e9849f7c89d955c03c30d'
+          features = nodes[engine['id']]['features']
+          assert not {'threads', 'parallel-compilation', 'cache'}.intersection(features)
+          packages = []
+          for package in metadata['packages']:
+              if package['id'] in nodes:
+                  assert package['license'] or package['license_file'], package['name']
+                  packages.append(dict(name=package['name'], version=package['version'], license=package['license'],
+                                       licenseFile=pathlib.Path(package['license_file']).name if package['license_file'] else None,
+                                       features=nodes[package['id']]['features']))
+          proof = dict(source=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                       rustc=subprocess.check_output(['rustc', '--version', '--verbose'], text=True),
+                       cargo=subprocess.check_output(['cargo', '--version'], text=True).strip(),
+                       lockSha256=hashlib.sha256(pathlib.Path('Cargo.lock').read_bytes()).hexdigest(),
+                       engineSource=vcs['git']['sha1'], engineFeatures=sorted(features), packages=packages)
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'fuel-build.json').write_text(json.dumps(proof, indent=2) + '\n')
+          PY
+      - name: Check formatting and internal engine/protocol contracts
+        working-directory: tools/crabbox-wasmtime-meter
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked --features fixture
+          python3 -B -m unittest discover -s fixture -p 'test_*.py' -v
+      - name: Build source-only helper and disposable fixture
+        run: |
+          cargo build --locked --release --features fixture --manifest-path tools/crabbox-wasmtime-meter/Cargo.toml
+          go build -trimpath -o "$RUNNER_TEMP/crabbox" ./cmd/crabbox
+          mkdir "$RUNNER_TEMP/fuel-image"
+          cp "$CARGO_TARGET_DIR/release/crabbox-wasmtime-meter" "$CARGO_TARGET_DIR/release/fixture-child" "$RUNNER_TEMP/fuel-image/"
+          cp tools/crabbox-wasmtime-meter/fixture/{Dockerfile,supervise.py} "$RUNNER_TEMP/fuel-image/"
+          docker build --iidfile "$RUNNER_TEMP/fuel-image-id" "$RUNNER_TEMP/fuel-image"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          proof_path = pathlib.Path(os.environ['RUNNER_TEMP'], 'fuel-build.json')
+          proof = json.loads(proof_path.read_text())
+          for name, file in [('helperSha256', 'crabbox-wasmtime-meter'), ('launcherSha256', 'fixture-child')]:
+              proof[name] = hashlib.sha256(pathlib.Path(os.environ['CARGO_TARGET_DIR'], 'release', file).read_bytes()).hexdigest()
+          proof['crabboxSha256'] = hashlib.sha256(pathlib.Path(os.environ['RUNNER_TEMP'], 'crabbox').read_bytes()).hexdigest()
+          proof_path.write_text(json.dumps(proof, indent=2) + '\n')
+          PY
+      - name: Qualify real SSH, artifacts, repeated fuel and isolation
+        env:
+          FUEL_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          python3 -B tools/crabbox-wasmtime-meter/fixture/qualify.py run \
+            --inputs "$RUNNER_TEMP/fuel-inputs" --output "$RUNNER_TEMP/fuel-proof" \
+            --architecture "$FUEL_ARCHITECTURE" --image "$(cat "$RUNNER_TEMP/fuel-image-id")" \
+            --crabbox "$RUNNER_TEMP/crabbox"
+      - name: Preserve compact proof and failures
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/fuel-proof"
+          if test -f "$RUNNER_TEMP/fuel-build.json"; then cp "$RUNNER_TEMP/fuel-build.json" "$RUNNER_TEMP/fuel-proof/build.json"; fi
+          test "$(du -sb "$RUNNER_TEMP/fuel-proof" | cut -f1)" -le 1048576
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: fuel-proof-${{ matrix.architecture }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fuel-proof/
+          if-no-files-found: error
+          retention-days: 7
+
+  compare:
+    name: Fuel cross-host equality
+    needs: native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: fuel-proof-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fuel-pair
+      - name: Require identical module bytes and all twenty counts on both hosts
+        run: |
+          python3 -B tools/crabbox-wasmtime-meter/fixture/qualify.py compare \
+            "$RUNNER_TEMP/fuel-pair/fuel-proof-amd64-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/qualification.json" \
+            "$RUNNER_TEMP/fuel-pair/fuel-proof-arm64-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/qualification.json"

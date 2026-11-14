@@ -4447,6 +4447,7 @@ func TestRunMissingOriginReplacementLeaseStaysPlainManifest(t *testing.T) {
 	}
 	remoteRoot := filepath.Join(testRoot, "remote")
 	replacementReady := filepath.Join(testRoot, "replacement-ready")
+	sshPort := startTCPReadinessFixture(t)
 	var leaseIDs [2]string
 	providerName := runReadyPoolPreflightTestProvider{}.Spec().Name
 	var (
@@ -4459,7 +4460,7 @@ func TestRunMissingOriginReplacementLeaseStaysPlainManifest(t *testing.T) {
 		lease := func(id, state string) CoordinatorLease {
 			return CoordinatorLease{
 				ID: id, Provider: providerName, TargetOS: targetLinux, State: state,
-				Host: "127.0.0.1", SSHUser: "crabbox", SSHPort: "22", WorkRoot: remoteRoot,
+				Host: "127.0.0.1", SSHUser: "crabbox", SSHPort: sshPort, WorkRoot: remoteRoot,
 			}
 		}
 		switch {
@@ -4589,7 +4590,7 @@ done <"$tmp"
 	t.Setenv("CRABBOX_FAKE_REPO_ROOT", fixture.root)
 	t.Setenv("CRABBOX_FAKE_TRANSFERRED", transferred)
 	t.Setenv("CRABBOX_FAKE_REPLACEMENT_READY", replacementReady)
-	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", sshPort)
 	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
 
 	var stdout, stderr bytes.Buffer

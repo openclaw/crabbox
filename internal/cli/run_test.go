@@ -2707,7 +2707,7 @@ exit 0
 				State:              "active",
 				Host:               "127.0.0.1",
 				SSHUser:            "crabbox",
-				SSHPort:            "22",
+				SSHPort:            startTCPReadinessFixture(t),
 				SSHHostKey:         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICFNHmH+uXzuQadD4Pg9JhPQvl5fkM4L9spUDQ/mI+pc",
 				WorkRoot:           "/work/crabbox",
 				IdleTimeoutSeconds: 1800,
@@ -2876,6 +2876,8 @@ profiles:
 				}
 			},
 			mutateLease: func(lease *LeaseTarget) {
+				lease.Server.Labels["target"] = targetWindows
+				lease.Server.Labels["windows_mode"] = windowsModeNormal
 				lease.SSH.TargetOS = targetWindows
 				lease.SSH.WindowsMode = windowsModeNormal
 			},
