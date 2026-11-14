@@ -85,7 +85,7 @@ tailnet peer mesh and the operator-side SSH mesh.
 
 | Transport | Producers                                                                                                  | Endpoint shape                |
 | --------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| `tailnet` | AWS / Hetzner / Azure / GCP (managed Linux with Tailscale)                                                 | tailnet IPv4 (or FQDN)        |
+| `tailnet` | [Bidirectional Tailscale providers](../features/tailscale.md#scope) (managed Linux with Tailscale; excludes egress-only providers) | tailnet IPv4 (or FQDN) |
 | `ssh`     | SSH leases without Tailscale enrollment, including AWS / Proxmox / static SSH / exe.dev / RunPod / Daytona / Sprites / Namespace / Semaphore | `ssh://<host>:<port>` |
 | `url`     | Islo / E2B / Railway                                                                                       | per-sandbox public HTTPS URL  |
 | `pending` | a tailnet- or SSH-capable provider whose claim has no endpoint recorded yet                                | empty (note explains)         |
@@ -99,7 +99,7 @@ the gap rather than mistaking it for "no shares published yet".
 
 | Provider                                                     | Transport | Notes                                                                                                       |
 | ------------------------------------------------------------ | --------- | ----------------------------------------------------------------------------------------------------------- |
-| AWS / Hetzner / Azure / GCP                                  | `tailnet` or `ssh` | Tailscale enrollment selects the tailnet IPv4 (or FQDN) from the claim; an address still pending stays `pending`. Without enrollment, uses the recorded SSH endpoint. |
+| [Bidirectional Tailscale providers](../features/tailscale.md#scope) | `tailnet` or `ssh` | Tailscale enrollment selects the tailnet IPv4 (or FQDN) from the claim; an address still pending stays `pending`. Without enrollment, uses the recorded SSH endpoint. |
 | Proxmox / static SSH                                         | `ssh`     | Endpoint = `ssh://<host>:<port>` from the claim. Empty host or port surfaces as `pending`.                  |
 | exe.dev / RunPod / Daytona / Sprites / Namespace / Semaphore | `ssh`     | Endpoint = `ssh://<host>:<port>` from the claim. Empty host or port surfaces as `pending`.                  |
 | Islo                                                         | `url`     | Uses the Islo shares API. Existing shares are reused, so the call is idempotent.                            |

@@ -56,7 +56,7 @@ func TestDirectLeaseLabelsIncludeNonSecretTailscaleMetadata(t *testing.T) {
 	if labels["tailscale"] != "true" || labels["tailscale_state"] != "requested" {
 		t.Fatalf("tailscale labels missing: %#v", labels)
 	}
-	if labels["tailscale_hostname"] != "crabbox-blue-lobster" || labels["tailscale_tags"] != "tag_crabbox" {
+	if labels["tailscale_hostname"] != "crabbox-blue-lobster" || strings.Join(serverTailscaleMetadata(Server{Labels: labels}).Tags, ",") != "tag:crabbox" {
 		t.Fatalf("tailscale metadata labels unexpected: %#v", labels)
 	}
 	if labels["tailscale_exit_node"] != "mac-studio.tailnet.ts.net" || labels["tailscale_exit_node_allow_lan_access"] != "true" {

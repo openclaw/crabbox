@@ -57,13 +57,16 @@ func DirectLeaseLabels(cfg Config, leaseID, slug, provider, market string, keep 
 		labels["tailscale"] = "true"
 		labels["tailscale_state"] = "requested"
 		labels["tailscale_hostname"] = cfg.Tailscale.Hostname
-		labels["tailscale_tags"] = strings.Join(cfg.Tailscale.Tags, ",")
 		if cfg.Tailscale.ExitNode != "" {
 			labels["tailscale_exit_node"] = cfg.Tailscale.ExitNode
 			labels["tailscale_exit_node_allow_lan_access"] = fmt.Sprint(cfg.Tailscale.ExitNodeAllowLANAccess)
 		}
 	}
-	return sanitizeProviderLabels(labels)
+	labels = sanitizeProviderLabels(labels)
+	if cfg.Tailscale.Enabled {
+		setTailscaleTagLabels(labels, cfg.Tailscale.Tags)
+	}
+	return labels
 }
 
 func TouchDirectLeaseLabels(labels map[string]string, cfg Config, state string, now time.Time) map[string]string {

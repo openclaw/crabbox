@@ -42,12 +42,15 @@ func validateRequestedCapabilities(cfg Config) error {
 		return err
 	}
 	spec := provider.Spec()
+	features := ProviderFeaturesForConfig(provider, cfg)
+	if cfg.Tailscale.Enabled && !features.Has(FeatureTailscale) {
+		return Exit(2, "--tailscale is not supported for provider=%s; choose a provider advertising the tailscale feature in crabbox providers --json", spec.Name)
+	}
 	if configured, ok := provider.(ProviderConfiguredFeatures); ok {
 		if err := configured.ValidateRequestedCapabilities(cfg); err != nil {
 			return err
 		}
 	}
-	features := ProviderFeaturesForConfig(provider, cfg)
 	if cfg.Desktop && !features.Has(FeatureDesktop) {
 		return Exit(2, "desktop/VNC is not supported for provider=%s", spec.Name)
 	}

@@ -27548,6 +27548,46 @@ describe("fleet lease identity and idle", () => {
     });
   });
 
+  it.each(["tag:bad!", "ci", "tag:foo_bar", "tag:1foo", "tag:-foo", ""])(
+    "rejects malformed explicit Tailscale tag %j before minting or provisioning",
+    async (tag) => {
+      const fetch = vi.fn<() => Promise<Response>>(async () =>
+        jsonResponse({ access_token: "oauth-fixture", key: "tskey-fixture" }),
+      );
+      vi.stubGlobal("fetch", fetch);
+      const created = vi.fn<(config: LeaseConfig) => void>();
+      const storage = new MemoryStorage();
+      const fleet = testFleet(
+        storage,
+        { hetzner: fakeProvider(created) },
+        {
+          CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+          CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
+          CRABBOX_TAILSCALE_TAGS: "tag:ci,tag:staging",
+        },
+      );
+      const response = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          body: {
+            leaseID: "cbx_abcdef123456",
+            provider: "hetzner",
+            tailscale: true,
+            tailscaleTags: ["tag:ci", tag],
+            sshPublicKey: "ssh-ed25519 test",
+          },
+        }),
+      );
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({
+        error: "invalid_tailscale_tags",
+        message: expect.stringContaining("invalid Tailscale tag"),
+      });
+      expect(fetch).not.toHaveBeenCalled();
+      expect(created).not.toHaveBeenCalled();
+      expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
+    },
+  );
+
   it("rejects brokered Tailscale tags outside the coordinator allowlist", async () => {
     const storage = new MemoryStorage();
     const fleet = testFleet(

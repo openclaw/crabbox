@@ -8737,7 +8737,11 @@ export class FleetCoordinator {
       });
     } catch (error) {
       const message = coordinatorErrorMessage(this.env, error);
-      if (message.includes("tags not allowed") || message.includes("requires at least one")) {
+      if (
+        message.includes("invalid Tailscale tag") ||
+        message.includes("tags not allowed") ||
+        message.includes("requires at least one")
+      ) {
         return json({ error: "invalid_tailscale_tags", message }, { status: 400 });
       }
       const tagOwnershipMessage = tailscaleTagOwnershipErrorMessage(error);
