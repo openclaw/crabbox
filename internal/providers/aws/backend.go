@@ -128,7 +128,9 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	if err := waitAWSAcquireReady(ctx, func(ctx context.Context) error {
 		return client.CheckAcquireState(ctx, server.CloudID)
 	}, func(ctx context.Context) error {
-		return bootstrapAWSWindowsDesktop(ctx, cfg, &target, publicKey, b.RT.Stderr)
+		return core.WaitForDirectBootstrap(ctx, cfg, server, &target, core.BootstrapWaitTimeout(cfg), func(ctx context.Context, target *core.SSHTarget, _ time.Duration) error {
+			return bootstrapAWSWindowsDesktop(ctx, cfg, target, publicKey, b.RT.Stderr)
+		})
 	}); err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -336,7 +338,9 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 				}
 				return serverClient.CheckAcquireState(ctx, server.CloudID)
 			}, func(ctx context.Context) error {
-				return bootstrapAWSWindowsDesktop(ctx, resolvedCfg, &target, publicKey, b.RT.Stderr)
+				return core.WaitForDirectBootstrap(ctx, resolvedCfg, server, &target, core.BootstrapWaitTimeout(resolvedCfg), func(ctx context.Context, target *core.SSHTarget, _ time.Duration) error {
+					return bootstrapAWSWindowsDesktop(ctx, resolvedCfg, target, publicKey, b.RT.Stderr)
+				})
 			}); err != nil {
 				return core.LeaseTarget{}, err
 			}

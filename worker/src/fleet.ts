@@ -8109,9 +8109,12 @@ export class FleetCoordinator {
       return this.heartbeatLease(request, leaseID);
     }
     if (method === "POST" && action === "tailscale") {
-      const input = await readJson<Partial<TailscaleMetadata> & { expectedProvider?: unknown }>(
-        request,
-      );
+      const input = await readJson<
+        Partial<TailscaleMetadata> & { expectedProvider?: unknown; expectedCreatedAt?: unknown }
+      >(request);
+      const observed = await this.resolveLease(leaseID, request, isAdminRequest(request));
+      if (!observed) return notFound();
+      const binding = this.cleanupRecoveryLeaseBinding(observed);
       return await this.state.runExclusive(async () => {
         const admin = isAdminRequest(request);
         const lease = await this.resolveLease(leaseID, request, admin);
@@ -8127,6 +8130,31 @@ export class FleetCoordinator {
         const providerError = mutationExpectedProviderError(input.expectedProvider, lease);
         if (providerError) {
           return providerError;
+        }
+        if (
+          this.cleanupRecoveryLeaseBinding(lease) !== binding ||
+          (input.expectedCreatedAt !== undefined && input.expectedCreatedAt !== lease.createdAt)
+        ) {
+          return json(
+            {
+              error: "lease_generation_changed",
+              message: "lease generation changed before metadata update",
+            },
+            { status: 409 },
+          );
+        }
+        if (
+          lease.state === "released" ||
+          lease.state === "expired" ||
+          leaseProviderCleanupConfirmed(lease)
+        ) {
+          return json(
+            {
+              error: "lease_ended",
+              message: "lease has ended or its provider cleanup is confirmed",
+            },
+            { status: 409 },
+          );
         }
         lease.tailscale = mergeTailscaleMetadata(lease.tailscale, input);
         lease.updatedAt = new Date().toISOString();

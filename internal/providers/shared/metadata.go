@@ -31,6 +31,12 @@ func ApplyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadat
 	} else {
 		delete(labels, "tailscale_error")
 	}
+	if meta.Version != "" {
+		labels["tailscale_version"] = meta.Version
+	}
+	if meta.DeviceID != "" {
+		labels["tailscale_device_id"] = meta.DeviceID
+	}
 	if meta.ExitNode != "" {
 		labels["tailscale_exit_node"] = meta.ExitNode
 	}

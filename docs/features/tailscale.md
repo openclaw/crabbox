@@ -102,6 +102,26 @@ because its snapshot-safe memory-only node identity must re-enroll after daemon
 loss. Brokered mode does not need a local key; the coordinator mints one per lease
 (see below).
 
+## Persisted metadata
+
+Direct warmup and run refresh the lease's Tailscale address and readiness state in
+provider metadata, so later CLI processes can resolve the same tailnet endpoint.
+Refreshes preserve lifecycle state and expiry. A failed metadata read remains a
+warning; on Hetzner, diagnostic labels are shortened to the provider's allowed
+syntax so they cannot block subsequent lifecycle writes. Hetzner drops an FQDN
+longer than its 63-character label limit and uses the recorded tailnet IPv4 instead.
+
+GCP stores address fields with a reversible, chunked label encoding. Each chunk
+fits GCP's 63-character limit, including for long MagicDNS names. Previously
+sanitized labels cannot be decoded unambiguously; run a metadata refresh (for
+example, a run over `--network public`) to replace them from the guest.
+
+The coordinator rejects metadata writes on released or expired leases and after
+confirmed provider cleanup. CLI refreshes also bind updates to the observed
+lease creation timestamp, preventing stale metadata from updating a replacement
+lease. Older API clients may omit this timestamp; their writes still receive the
+serialized cleanup and lifecycle checks.
+
 ## Exit nodes
 
 Exit-node egress is opt-in per lease. The lease routes its outbound internet through
@@ -223,6 +243,12 @@ Preflight the coordinator without leasing a machine:
 CRABBOX_TAILSCALE_ENABLED=0 scripts/live-tailscale-smoke.sh --json
 CRABBOX_LIVE=1 CRABBOX_COORDINATOR=https://broker.example.com CRABBOX_ADMIN_TOKEN=replace-me scripts/live-tailscale-smoke.sh --json
 ```
+
+For direct acquisition with an exit node and `network: auto`, readiness tries
+the tailnet hostname first. After 30 seconds it also allows the provider/public
+address to finish readiness, while continuing the tailnet wait within the same
+readiness deadline. Explicit `network: public` retains the
+public path, and automatic acquisition without an exit node is unchanged.
 
 ## SSH and VNC
 

@@ -197,7 +197,9 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	}
 	server := serverFromInstance(instance, cfg)
 	ssh := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-	if err := b.waitSSH(ctx, &ssh, "lambda bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
+	if err := core.WaitForDirectBootstrap(ctx, cfg, server, &ssh, core.BootstrapWaitTimeout(cfg), func(ctx context.Context, target *core.SSHTarget, timeout time.Duration) error {
+		return b.waitSSH(ctx, target, "lambda bootstrap", timeout)
+	}); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	server.Labels = lambdaLabelsWithKey(leaseTags(cfg, leaseID, slug, "ready", req.Keep, now), key)

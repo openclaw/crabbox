@@ -419,3 +419,40 @@ func runAWSLifecycleCommandFixture(t *testing.T, fake *fakeAWSClient, lease core
 		t.Fatalf("connect did not publish running then ready: %v", fake.tagLabels)
 	}
 }
+
+func TestTailscaleMetadataPersistsForFreshResolve(t *testing.T) {
+	for _, fixed := range []bool{false, true} {
+		t.Run(fmt.Sprint(fixed), func(t *testing.T) {
+			backend, fake, lease := awsHeartbeatFixture(t, fixed)
+			claim, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
+			writer, ok := any(backend).(core.TailscaleMetadataBackend)
+			if !ok {
+				t.Fatal("direct backend cannot persist metadata")
+			}
+			updated, err := writer.UpdateTailscaleMetadata(context.Background(), lease, core.TailscaleMetadata{Enabled: true, State: "ready", IPv4: "100.64.0.5", FQDN: "crabbox-blue.tail1234.ts.net.", Version: "1.104.2", DeviceID: "node123"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(fake.tagLabels) != 1 || fake.tagLabels[0]["tailscale_ipv4"] != "100.64.0.5" || updated.Labels["tailscale_version"] != "1.104.2" {
+				t.Fatalf("labels=%v", fake.tagLabels)
+			}
+			saved, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil || saved.TailscaleIPv4 != "100.64.0.5" {
+				t.Fatalf("claim=%+v err=%v", saved, err)
+			}
+			fake.servers = []core.Server{updated}
+			if fake.get != nil {
+				fake.get[updated.CloudID] = updated
+			}
+			fresh := NewAWSLeaseBackend(Provider{}.Spec(), backend.Cfg, core.Runtime{Stderr: io.Discard}).(core.SSHLeaseBackend)
+			resolved, err := fresh.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
+			if err != nil || resolved.Server.Labels["tailscale_ipv4"] != "100.64.0.5" {
+				t.Fatalf("resolved=%+v err=%v", resolved, err)
+			}
+		})
+	}
+}

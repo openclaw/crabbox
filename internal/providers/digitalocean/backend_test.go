@@ -3996,3 +3996,42 @@ func TestDigitalOceanConfigShowCompletePassiveSection(t *testing.T) {
 		}
 	}
 }
+
+func TestExitNodeAcquirePrefersTailnetWithPublicFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		network      core.NetworkMode
+		exit         string
+		tailnetFails bool
+		want         []string
+	}{
+		{"asymmetric public", core.NetworkAuto, "100.100.100.100", false, []string{"crabbox-blue"}},
+		{"off tailnet", core.NetworkAuto, "100.100.100.100", true, []string{"crabbox-blue", "203.0.113.10"}},
+		{"ordinary auto", core.NetworkAuto, "", false, []string{"203.0.113.10"}},
+		{"explicit public", core.NetworkPublic, "100.100.100.100", false, []string{"203.0.113.10"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newTestBackend(t, &fakeDigitalOceanAPI{})
+			b.Cfg.Network = tc.network
+			b.Cfg.Tailscale = core.TailscaleConfig{Enabled: true, AuthKey: "fixture", Tags: []string{"tag:crabbox"}, HostnameTemplate: "crabbox-{slug}", ExitNode: tc.exit}
+			var dialed []string
+			b.waitSSH = func(_ context.Context, target *core.SSHTarget, _ string, _ time.Duration) error {
+				dialed = append(dialed, target.Host)
+				if target.Host == "crabbox-blue" && tc.tailnetFails {
+					return errors.New("tailnet unavailable")
+				}
+				if target.Host == "203.0.113.10" && tc.name == "asymmetric public" {
+					return errors.New("asymmetric public route")
+				}
+				return nil
+			}
+			_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "blue"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(dialed, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("dialed %v want %v", dialed, tc.want)
+			}
+		})
+	}
+}
