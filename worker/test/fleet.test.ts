@@ -27582,6 +27582,70 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
   });
 
+  it.each([
+    {
+      name: "omitted",
+      tailscaleTags: undefined,
+      defaults: "tag:ci,tag:staging",
+      tags: ["tag:ci", "tag:staging"],
+    },
+    {
+      name: "omitted with built-in tag allowed",
+      tailscaleTags: undefined,
+      defaults: "tag:crabbox,tag:ci",
+      tags: ["tag:crabbox", "tag:ci"],
+    },
+    { name: "empty", tailscaleTags: [], tags: ["tag:ci", "tag:staging"] },
+    { name: "allowed", tailscaleTags: ["tag:ci"], tags: ["tag:ci"] },
+  ])(
+    "resolves $name brokered Tailscale tags against the coordinator defaults",
+    async ({ tailscaleTags, defaults, tags }) => {
+      const storage = new MemoryStorage();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url === "https://api.tailscale.com/api/v2/oauth/token") {
+            return jsonResponse({ access_token: "oauth-token" });
+          }
+          if (url === "https://api.tailscale.com/api/v2/tailnet/-/keys") {
+            return jsonResponse({ key: "tskey-oneoff" });
+          }
+          return jsonResponse({ message: `unexpected ${url}` }, 500);
+        }),
+      );
+      const fleet = testFleet(
+        storage,
+        { hetzner: fakeProvider() },
+        {
+          CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+          CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
+          CRABBOX_TAILSCALE_TAGS: defaults ?? "tag:ci,tag:staging",
+        },
+      );
+      const create = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          body: {
+            leaseID: "cbx_abcdef123456",
+            provider: "hetzner",
+            tailscale: true,
+            tailscaleTags,
+            sshPublicKey: "ssh-ed25519 test",
+          },
+        }),
+      );
+      expect(create.status).toBe(201);
+      const { lease } = (await create.json()) as { lease: LeaseRecord };
+      expect(lease.tailscale?.tags).toEqual(tags);
+      const keyCall = vi
+        .mocked(fetch)
+        .mock.calls.find(([input]) => String(input).endsWith("/tailnet/-/keys"));
+      expect(keyCall).toBeDefined();
+      const keyBody = JSON.parse(String(keyCall?.[1]?.body));
+      expect(keyBody.capabilities.devices.create.tags).toEqual(tags);
+    },
+  );
+
   it("returns Tailscale OAuth failures before provisioning and preserves the unbound create attempt", async () => {
     const storage = new MemoryStorage();
     const leaseID = "cbx_abcdef123456";

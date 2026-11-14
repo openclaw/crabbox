@@ -169,6 +169,28 @@ func TestRenderTailscaleHostname(t *testing.T) {
 	}
 }
 
+func TestRenderTailscaleHostnameStaysAValidDNSLabel(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		template string
+		leaseID  string
+		want     string
+	}{
+		{"63 characters kept", strings.Repeat("a", 63), "cbx_abcdef123456", strings.Repeat("a", 63)},
+		{"64 characters truncated", strings.Repeat("a", 64), "cbx_abcdef123456", strings.Repeat("a", 63)},
+		{"truncation right after a hyphen", strings.Repeat("a", 62) + "-{slug}", "cbx_abcdef123456", strings.Repeat("a", 62)},
+		{"empty render falls back to the lease id", "!!!", "cbx_abcdef123456", "crabbox-cbx-abcdef123456"},
+		{"empty render without a lease id", "!!!", "", "crabbox"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RenderTailscaleHostname(tc.template, tc.leaseID, "db", "hetzner")
+			if got != tc.want {
+				t.Fatalf("RenderTailscaleHostname=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCoordinatorTailscaleProviderMismatchRetainsPreviousServer(t *testing.T) {
 	previous := Server{CloudID: "i-original", Provider: "aws", Name: "original"}
 	updated, err := coordinatorTailscaleResponseServer(Config{Provider: "aws"}, previous, CoordinatorLease{

@@ -15,7 +15,7 @@ import (
 )
 
 // Polling configuration for waiting on a freshly deployed pod to expose its
-// public SSH port. RunPod typically reports publicIp/portMappings within tens
+// public SSH port. RunPod typically reports ssh.direct within tens
 // of seconds; cap at 10 minutes to stay under bootstrap timeouts while leaving
 // slack for cold scheduler regions.
 const (
@@ -460,7 +460,11 @@ func (b *runpodLeaseBackend) waitForPodSSH(ctx context.Context, client runpodAPI
 				return false, fetchErr
 			}
 			endpoint := pod.SSHEndpoint()
-			return endpoint.Host != "" && endpoint.Port != 0 && (endpoint.Public || strings.EqualFold(pod.DesiredStatus, "RUNNING")), nil
+			switch strings.ToUpper(pod.Status) {
+			case "ERROR", "EXITED", "TERMINATED":
+				return false, fmt.Errorf("runpod pod %s entered %s before SSH became ready", podID, pod.Status)
+			}
+			return endpoint.Host != "" && endpoint.Port != 0 && strings.EqualFold(pod.Status, "RUNNING"), nil
 		},
 		Diagnostic: func(stop shared.ReadinessStop) error {
 			if stop.BudgetExpired {
@@ -777,19 +781,13 @@ func (b *runpodLeaseBackend) listServersFromClient(ctx context.Context, client r
 func runpodServer(pod runpodPod, leaseID, slug string, cfg core.Config) core.Server {
 	labels := map[string]string{"crabbox": "true", "created_by": "crabbox", "provider": providerName, "lease": leaseID, "slug": core.NormalizeLeaseSlug(slug)}
 	labels["name"] = pod.Name
-	state := pod.DesiredStatus
+	state := pod.Status
 	if state == "" {
 		state = "unknown"
 	}
 	labels["state"] = strings.ToLower(state)
 	labels["work_root"] = cfg.WorkRoot
 	labels["pod_id"] = pod.ID
-	if pod.MachineID != "" {
-		labels["machine_id"] = pod.MachineID
-	}
-	if pod.Machine.PodHostID != "" {
-		labels["pod_host_id"] = pod.Machine.PodHostID
-	}
 	endpoint := pod.SSHEndpoint()
 	if endpoint.Host != "" {
 		labels["ssh_host"] = endpoint.Host
@@ -840,7 +838,7 @@ func projectRunpodClaim(server core.Server, claim core.LeaseClaim) core.Server {
 	}
 	recordedObsolete := false
 	switch strings.ToLower(labels["state"]) {
-	case "provisioning", "stopped", "failed", "exited", "dead", "terminated", "stopped_with_code":
+	case "provisioning", "starting", "error", "stopped", "failed", "exited", "dead", "terminated", "stopped_with_code":
 		recordedObsolete = true
 	}
 	observedRunning := server.Status == "running" || server.Status == "ready"

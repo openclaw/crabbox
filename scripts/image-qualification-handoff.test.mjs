@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { qualificationIdentity } from "./image-qualification-package.mjs";
 import { transportProfile } from "./image-qualification-transport.mjs";
 
 const encodeExecutorCredential = (value) =>
@@ -174,6 +175,27 @@ function installAPI(file) {
             `upload failed: ${JSON.parse(Buffer.from(process.env.QUALIFICATION_EXECUTOR_CREDENTIAL, "base64url").toString("utf8")).token}`,
           );
         const metadata = JSON.parse(await init.body.get("metadata").text());
+        // Validate the wire format, rather than accepting Wrangler config here.
+        // The upload API takes one migration object; config uses an array.
+        if (metadata.main_module === "private-bootstrap.mjs") {
+          assert.deepEqual(metadata.migrations, {
+            new_tag: "qualification-v1",
+            new_sqlite_classes: ["FleetDurableObject"],
+          });
+        } else if (metadata.main_module === "tombstone.mjs") {
+          assert.deepEqual(metadata.migrations, {
+            old_tag: "qualification-v1",
+            new_tag: "qualification-delete",
+            deleted_classes: ["FleetDurableObject"],
+          });
+        } else {
+          assert.equal(metadata.migrations, undefined);
+        }
+        if (
+          metadata.main_module === "private-bootstrap.mjs" &&
+          state.failPrivateUpload === "before"
+        )
+          throw new Error("private upload failed before create");
         for (const binding of metadata.bindings)
           if (binding.name === "FLEET") binding.namespace_id ??= namespaceId(name);
         const profile = transportProfile(metadata.bindings);
@@ -189,6 +211,8 @@ function installAPI(file) {
           metadata,
           subdomain: state.workers[name]?.subdomain ?? { enabled: true, previews_enabled: false },
         };
+        if (metadata.main_module === "private-bootstrap.mjs" && state.failPrivateUpload === "after")
+          throw new Error("private upload response lost after create");
         if (state.tombstoneLoss && metadata.main_module === "tombstone.mjs") {
           state.tombstoneLoss = false;
           throw new Error("tombstone upload response lost");
@@ -278,11 +302,13 @@ function fixture(t, mode = "retained") {
     };
   });
   const capsuleSha256 = digest(canonical(sourceFiles));
+  const qualification = mode === "first-walk" ? qualificationIdentity(root) : undefined;
   write("build-inputs.json", {
-    version: 1,
+    version: qualification ? 2 : 1,
+    ...(qualification ? { qualification } : {}),
     candidateSha,
     workflowSha,
-    workerSourceSha256: "1".repeat(64),
+    workerSourceSha256: qualification?.workerSourceSha256 ?? "1".repeat(64),
     protectedBuildInputsSha256: "2".repeat(64),
   });
   if (mode === "retained") {
@@ -298,6 +324,10 @@ function fixture(t, mode = "retained") {
   }
   if (mode === "first-walk") {
     write(
+      "authority/aws-qualification-authority.js",
+      "throw new Error('inert authority fixture');",
+    );
+    write(
       "candidate/recipes/bootstrap/v1/linuxOwnershipRepair.sh",
       fs.readFileSync(path.join(root, "scripts/fixtures/first-walk-reviewed-recipe.sh"), "utf8"),
     );
@@ -312,7 +342,14 @@ function fixture(t, mode = "retained") {
       bytes: fs.statSync(path.join(artifact, name)).size,
       sha256: digest(fs.readFileSync(path.join(artifact, name))),
     }));
-  const manifest = { version: 1, candidateSha, workflowSha, mainModule: "worker/index.js", files };
+  const manifest = {
+    version: qualification ? 2 : 1,
+    ...(qualification ? { qualification } : {}),
+    candidateSha,
+    workflowSha,
+    mainModule: "worker/index.js",
+    files,
+  };
   write("manifest.json", { ...manifest, manifestSha256: digest(canonical(manifest)) });
   const stateFile = path.join(directory, "state.json");
   fs.writeFileSync(stateFile, JSON.stringify({ now: Date.now(), events: [], workers: {} }));
@@ -430,6 +467,50 @@ function fixture(t, mode = "retained") {
 if (process.env.QUALIFICATION_HANDOFF_TEST_STATE) {
   installAPI(process.env.QUALIFICATION_HANDOFF_TEST_STATE);
 } else {
+  for (const phase of ["before", "after"])
+    test(`failed private upload ${phase} create settles with empty deploy outputs`, (t) => {
+      const f = fixture(t, "first-walk");
+      f.env.QUALIFICATION_TRANSPORT_PROFILE = "candidate-transport-v2";
+      assert.equal(f.invoke("admit").status, 0);
+      f.update({ failPrivateUpload: phase });
+      assert.equal(f.invoke("deploy").status, 1);
+      assert.equal(f.outputs.run_id, undefined);
+      assert.equal(Object.keys(f.state().workers).length, phase === "after" ? 1 : 0);
+      const missingOutputs = Object.fromEntries(Object.keys(f.armEnv()).map((key) => [key, ""]));
+      for (const policyHash of ["", "0".repeat(64)]) {
+        const before = f
+          .state()
+          .events.filter((event) => /^[A-Z]+ api\.cloudflare\.com\//.test(event));
+        const refused = f.invoke("finalize", {
+          ...missingOutputs,
+          QUALIFICATION_EXPECTED_POLICY_HASH: policyHash,
+        });
+        assert.equal(refused.status, 1);
+        assert.match(refused.stderr, /QUALIFICATION_EXPECTED_POLICY_HASH differs from admission/);
+        assert.deepEqual(
+          f.state().events.filter((event) => /^[A-Z]+ api\.cloudflare\.com\//.test(event)),
+          before,
+          "missing or mismatched policy must still fail before provider effects",
+        );
+      }
+      const result = f.invoke("finalize", {
+        ...missingOutputs,
+        // Mirrors the protected workflow's fallback when deploy has no output.
+        QUALIFICATION_EXPECTED_POLICY_HASH: f.env.QUALIFICATION_EXPECTED_POLICY_HASH,
+      });
+      assert.equal(result.status, 1, "failed qualification must not become successful");
+      const receipt = JSON.parse(
+        fs.readFileSync(path.join(f.directory, "finalize-proof/finalization.json"), "utf8"),
+      );
+      assert.equal(receipt.cleanup, "idle");
+      assert.deepEqual(f.state().workers, {});
+      assert.equal(f.state().identity, undefined);
+      assert.equal(
+        f.state().events.some((event) => event.endsWith("/claim")),
+        false,
+      );
+    });
+
   for (const forgeProbe of [false, true])
     test(`v2 CLI canonical proof and recovery with omitted props; forgedReply=${forgeProbe}`, (t) => {
       const f = fixture(t, "first-walk");
