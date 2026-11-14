@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Azure Sandbox: select 4 vCPU / 8 GiB for new disk-based Sandboxes with `--type 4cpu-8gib`, preserving small/default sizing and existing lease replay; snapshot restores retain captured compute size. https://github.com/openclaw/crabbox/pull/3143
+- Azure Sandbox: select 4 vCPU / 8 GiB for new disk-based Sandboxes with `--type 4cpu-8gib`, preserving small/default sizing and existing lease replay; snapshot restores retain captured compute size. https://github.com/openclaw/crabbox/pull/3143 Thanks @galiniliev.
 - Qualification: verify runtime binding identity for idle controllers and retain cleanup-only recovery receipts when management metadata omits binding props. https://github.com/openclaw/crabbox/pull/3136 Thanks @joshavant.
 - Run: normalize fresh and replacement SSH lease platforms before runtime preparation so Actions hydration retains the same execution identity, and preserve child-environment filtering after replacement. https://github.com/openclaw/crabbox/pull/3131 Thanks @vincentkoc.
 
