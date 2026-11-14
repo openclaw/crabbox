@@ -536,6 +536,10 @@ type ReleaseLeaseOutcome struct {
 	Terminal bool
 	// ForgottenLocally means verified absence removed only the local claim.
 	ForgottenLocally bool
+	// TeardownAccepted means the release owner accepted deletion of the leased
+	// resource and finishes it asynchronously. Guest files go with the resource,
+	// but the lease stays recoverable until teardown is confirmed.
+	TeardownAccepted bool
 }
 
 // ReleaseLeaseOutcomeBackend performs the same guarded operation as ReleaseLease
