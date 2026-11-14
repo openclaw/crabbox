@@ -33,7 +33,7 @@ import {
   type LeaseConfig,
 } from "../src/config";
 import { appendCreationSteps, withCreationSteps } from "../src/creation-events";
-import type { LeaseRecord } from "../src/types";
+import type { LeaseRecord, ProviderMachine } from "../src/types";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -1395,12 +1395,88 @@ describe("aws provider", () => {
         status: "running",
         serverType: "m7i.large",
         labels: {},
+        awsRootVolumeID: "vol-0123456789abcdef0",
+        awsRootDeviceName: "/dev/sda1",
       });
 
     const resultPromise = client.waitForServerIP("i-1");
     await vi.advanceTimersByTimeAsync(5_000);
     await expect(resultPromise).resolves.toMatchObject({ host: "203.0.113.10" });
     expect(findServer).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { privateAddress: false, missing: "awsRootVolumeID" },
+    { privateAddress: false, missing: "awsRootDeviceName" },
+    { privateAddress: true, missing: "awsRootVolumeID" },
+    { privateAddress: true, missing: "awsRootDeviceName" },
+  ] as const)(
+    "waits for $missing before handing off an addressed instance (private=$privateAddress)",
+    async ({ privateAddress, missing }) => {
+      vi.useFakeTimers();
+      const client = new EC2SpotClient(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+        "us-east-1",
+      );
+      const ready: ProviderMachine = {
+        id: "i-0123456789abcdef0",
+        cloudID: "i-0123456789abcdef0",
+        name: "blue-lobster",
+        provider: "aws",
+        host: privateAddress ? "" : "203.0.113.10",
+        privateHost: "10.0.2.15",
+        status: "running",
+        serverType: "m7i.large",
+        labels: {},
+        awsRootVolumeID: "vol-0123456789abcdef0",
+        awsRootDeviceName: "/dev/sda1",
+      };
+      const pending = { ...ready };
+      delete pending[missing];
+      const findServer = vi
+        .spyOn(client, "findServer")
+        .mockResolvedValueOnce(pending)
+        .mockResolvedValueOnce(ready);
+      const resolved = vi.fn<(value: ProviderMachine) => void>();
+      const result = client.waitForServerIP(ready.cloudID, privateAddress);
+      void result.then(resolved);
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(resolved).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(250);
+      await expect(result).resolves.toMatchObject({
+        host: privateAddress ? ready.privateHost : ready.host,
+        awsRootVolumeID: ready.awsRootVolumeID,
+        awsRootDeviceName: ready.awsRootDeviceName,
+      });
+      expect(findServer).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("bounds the wait when an addressed instance never exposes its original root disk", async () => {
+    vi.useFakeTimers();
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "us-east-1",
+    );
+    vi.spyOn(client, "findServer").mockResolvedValue({
+      id: "i-0123456789abcdef0",
+      cloudID: "i-0123456789abcdef0",
+      name: "blue-lobster",
+      provider: "aws",
+      host: "203.0.113.10",
+      status: "running",
+      serverType: "m7i.large",
+      labels: {},
+    });
+    const result = client.waitForServerIP("i-0123456789abcdef0").then(
+      () => "unexpected success",
+      (error: Error) => error.message,
+    );
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(await result).toBe(
+      "timed out waiting for AWS instance network address and original root disk: i-0123456789abcdef0",
+    );
   });
 
   it("keeps empty visibility reads bounded and fails closed", async () => {
