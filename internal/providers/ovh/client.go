@@ -329,6 +329,33 @@ func (c *Client) GetImage(ctx context.Context, projectID, imageID string) (Image
 	return out, err
 }
 
+// CreateInstanceSnapshot starts an asynchronous snapshot of an instance and
+// returns the snapshot id OVH reports, which may be empty.
+func (c *Client) CreateInstanceSnapshot(ctx context.Context, projectID, instanceID, name string) (string, error) {
+	body := map[string]string{"snapshotName": name}
+	var out struct {
+		SnapshotID string `json:"snapshotId"`
+	}
+	err := c.do(ctx, http.MethodPost, cloudPath(projectID, "instance", instanceID, "snapshot"), body, &out)
+	return strings.TrimSpace(out.SnapshotID), err
+}
+
+func (c *Client) ListSnapshots(ctx context.Context, projectID, region string) ([]Image, error) {
+	var out []Image
+	err := c.do(ctx, http.MethodGet, cloudPath(projectID, "snapshot")+queryRegion(region), nil, &out)
+	return out, err
+}
+
+func (c *Client) GetSnapshot(ctx context.Context, projectID, snapshotID string) (Image, error) {
+	var out Image
+	err := c.do(ctx, http.MethodGet, cloudPath(projectID, "snapshot", snapshotID), nil, &out)
+	return out, err
+}
+
+func (c *Client) DeleteSnapshot(ctx context.Context, projectID, snapshotID string) error {
+	return c.do(ctx, http.MethodDelete, cloudPath(projectID, "snapshot", snapshotID), nil, nil)
+}
+
 func (c *Client) ListSSHKeys(ctx context.Context, projectID string) ([]SSHKey, error) {
 	var out []SSHKey
 	err := c.do(ctx, http.MethodGet, cloudPath(projectID, "sshkey"), nil, &out)
